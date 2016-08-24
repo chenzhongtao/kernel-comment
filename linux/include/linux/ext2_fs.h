@@ -130,13 +130,20 @@ static inline struct ext2_sb_info *EXT2_SB(struct super_block *sb)
 /*
  * Structure of a blocks group descriptor
  */
+/**
+ * ext2组描述符
+ */
 struct ext2_group_desc
 {
+	/* 数据块和inode位图掩码 */
 	__le32	bg_block_bitmap;		/* Blocks bitmap block */
 	__le32	bg_inode_bitmap;		/* Inodes bitmap block */
 	__le32	bg_inode_table;		/* Inodes table block */
+	/* 组中空闲块的数目 */
 	__le16	bg_free_blocks_count;	/* Free blocks count */
+	/* 空闲inode数目 */
 	__le16	bg_free_inodes_count;	/* Free inodes count */
+	/* 目录数量 */
 	__le16	bg_used_dirs_count;	/* Directories count */
 	__le16	bg_pad;
 	__le32	bg_reserved[3];
@@ -215,16 +222,25 @@ struct ext2_group_desc
 /*
  * Structure of an inode on the disk
  */
+/**
+ * ext2文件系统的inode描述符
+ */
 struct ext2_inode {
+	/* 访问权限和文件类型 */
 	__le16	i_mode;		/* File mode */
 	__le16	i_uid;		/* Low 16 bits of Owner Uid */
+	/* 文件长度，以字节为单位 */
 	__le32	i_size;		/* Size in bytes */
+	/* 时间戳，从1970年1月1日以来的秒数 */
 	__le32	i_atime;	/* Access time */
 	__le32	i_ctime;	/* Creation time */
 	__le32	i_mtime;	/* Modification time */
 	__le32	i_dtime;	/* Deletion Time */
+	/* 组id的低半部 */
 	__le16	i_gid;		/* Low 16 bits of Group Id */
+	/* 硬连接到此inode的数目 */
 	__le16	i_links_count;	/* Links count */
+	/* 文件长度，以块为单位。这里总是假定块长度为512。不包含空洞。 */
 	__le32	i_blocks;	/* Blocks count */
 	__le32	i_flags;	/* File flags */
 	union {
@@ -238,10 +254,16 @@ struct ext2_inode {
 			__le32  m_i_reserved1;
 		} masix1;
 	} osd1;				/* OS dependent 1 */
+	/**
+	 * 文件数据块指针，前12元素用于直接寻址块，第13、14、15个数据块用于简单、二次、三次间接寻址。 
+	 * 如果是符号链接文件，并且链接的地址不超过60字节，则保存在此。
+	 */
 	__le32	i_block[EXT2_N_BLOCKS];/* Pointers to blocks */
 	__le32	i_generation;	/* File version (for NFS) */
+	/* 文件、目录的ACL */
 	__le32	i_file_acl;	/* File ACL */
 	__le32	i_dir_acl;	/* Directory ACL */
+	/* 暂未使用，用于新特性 */
 	__le32	i_faddr;	/* Fragment address */
 	union {
 		struct {
@@ -301,7 +323,9 @@ struct ext2_inode {
 /*
  * File system states
  */
+/* 分区被正确的卸载 */
 #define	EXT2_VALID_FS			0x0001	/* Unmounted cleanly */
+/* 分区被加载后，设置为此值，如果非正常关机，则表示异常 */
 #define	EXT2_ERROR_FS			0x0002	/* Errors detected */
 
 /*
@@ -346,30 +370,46 @@ struct ext2_inode {
 /*
  * Structure of the super block
  */
+/**
+ * ext2文件系统超级块
+ */
 struct ext2_super_block {
 	__le32	s_inodes_count;		/* Inodes count */
 	__le32	s_blocks_count;		/* Blocks count */
+	/* 为保留用户保留的块数量 */
 	__le32	s_r_blocks_count;	/* Reserved blocks count */
 	__le32	s_free_blocks_count;	/* Free blocks count */
 	__le32	s_free_inodes_count;	/* Free inodes count */
 	__le32	s_first_data_block;	/* First Data Block */
+	/* 2^s_log_block_size * 1024 = 块长度，一般为0，1，2，表示块长度为1024，2048，4096 */
 	__le32	s_log_block_size;	/* Block size */
 	__le32	s_log_frag_size;	/* Fragment size */
+	/* 每个块组中的块数 */
 	__le32	s_blocks_per_group;	/* # Blocks per group */
 	__le32	s_frags_per_group;	/* # Fragments per group */
+	/* 每个块组中的inode数量 */
 	__le32	s_inodes_per_group;	/* # Inodes per group */
 	__le32	s_mtime;		/* Mount time */
 	__le32	s_wtime;		/* Write time */
+	/* 自从上一次一致性检查以来，mount的次数 */
 	__le16	s_mnt_count;		/* Mount count */
+	/* mount超过此次数时，强制进行一致性检查 */
 	__le16	s_max_mnt_count;	/* Maximal mount count */
+	/* 魔法数，一般是0xEF53 */
 	__le16	s_magic;		/* Magic signature */
+	/* 文件系统的当前状态，用于一致性检查，如EXT2_VALID_FS */
 	__le16	s_state;		/* File system state */
 	__le16	s_errors;		/* Behaviour when detecting errors */
+	/* 版本修订号 */
 	__le16	s_minor_rev_level; 	/* minor revision level */
+	/* 上一次检查的日期，如果在该日期以后，时间已经经过了一定阀值，则强制进行一致性检查 */
 	__le32	s_lastcheck;		/* time of last check */
+	/* 强制进行一致性检查的时间间隔 */
 	__le32	s_checkinterval;	/* max. time between checks */
 	__le32	s_creator_os;		/* OS */
+	/* 版本修订号 */
 	__le32	s_rev_level;		/* Revision level */
+	/* 为该用户和组指定了一定数量的保留块 */
 	__le16	s_def_resuid;		/* Default uid for reserved blocks */
 	__le16	s_def_resgid;		/* Default gid for reserved blocks */
 	/*
@@ -388,8 +428,11 @@ struct ext2_super_block {
 	__le32	s_first_ino; 		/* First non-reserved inode */
 	__le16   s_inode_size; 		/* size of inode structure */
 	__le16	s_block_group_nr; 	/* block group # of this superblock */
+	/* 兼容特性 */
 	__le32	s_feature_compat; 	/* compatible feature set */
+	/* 不兼容特性 */
 	__le32	s_feature_incompat; 	/* incompatible feature set */
+	/* 只读兼容特性 */
 	__le32	s_feature_ro_compat; 	/* readonly-compatible feature set */
 	__u8	s_uuid[16];		/* 128-bit uuid for volume */
 	char	s_volume_name[16]; 	/* volume name */
@@ -528,11 +571,19 @@ struct ext2_dir_entry {
  * bigger than 255 chars, it's safe to reclaim the extra byte for the
  * file_type field.
  */
+/**
+ * ext2目录项
+ */
 struct ext2_dir_entry_2 {
+	/* 目录项编号 */
 	__le32	inode;			/* Inode number */
+	/* 目录项的长度，可加快目录项的删除速度 */
 	__le16	rec_len;		/* Directory entry length */
+	/* 名称长度 */
 	__u8	name_len;		/* Name length */
+	/* 文件类型 */
 	__u8	file_type;
+	/* 文件名 */
 	char	name[EXT2_NAME_LEN];	/* File name */
 };
 

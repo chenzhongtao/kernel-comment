@@ -68,10 +68,14 @@ struct ext3_sb_info {
 	struct ext3_reserve_window_node s_rsv_window_head;
 
 	/* Journaling */
+	/* 保存日志的inode节点 */
 	struct inode * s_journal_inode;
+	/* 日志结构 */
 	struct journal_s * s_journal;
 	struct list_head s_orphan;
+	/* 数据从内存写回到日志的频率 */
 	unsigned long s_commit_interval;
+	/* 保存日志的分区设备，与s_journal_inode互斥 */
 	struct block_device *journal_bdev;
 #ifdef CONFIG_JBD_DEBUG
 	struct timer_list turn_ro_timer;	/* For turning read-only (crash simulation) */

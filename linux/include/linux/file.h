@@ -27,9 +27,13 @@ struct embedded_fd_set {
 };
 
 struct fdtable {
+	/* 进程可以处理的文件对象和文件描述符的最大数量 */
 	unsigned int max_fds;
+	/* 打开的文件对象指针 */
 	struct file ** fd;      /* current fd array */
+	/* exec时需要关闭的文件句柄 */
 	fd_set *close_on_exec;
+	/* 已经打开的句柄位图 */
 	fd_set *open_fds;
 	struct rcu_head rcu;
 	struct fdtable *next;
@@ -43,15 +47,19 @@ struct files_struct {
    * read mostly part
    */
 	atomic_t count;
+  	/* 该指针通过rcu机制，加快多核对fdtab结构的访问 */
 	struct fdtable *fdt;
 	struct fdtable fdtab;
   /*
    * written part on a separate cache line in SMP
    */
 	spinlock_t file_lock ____cacheline_aligned_in_smp;
+  	/* 下一次可用的文件描述符，用于加快文件句柄分配 */
 	int next_fd;
+	/* 位图，表示在执行exec时，需要关闭的句柄。当扩充文件句柄时，需要弃用这个字段而另行分配 */
 	struct embedded_fd_set close_on_exec_init;
 	struct embedded_fd_set open_fds_init;
+	/* 指向打开的文件实例 */
 	struct file * fd_array[NR_OPEN_DEFAULT];
 };
 

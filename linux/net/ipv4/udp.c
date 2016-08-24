@@ -1213,6 +1213,9 @@ drop:
 	return 0;
 }
 
+/**
+ * UDP报文接收主函数
+ */
 int udp_rcv(struct sk_buff *skb)
 {
 	return __udp4_lib_rcv(skb, udp_hash, IPPROTO_UDP);

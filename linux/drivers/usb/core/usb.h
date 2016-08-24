@@ -95,6 +95,9 @@ extern struct device_type usb_device_type;
 extern struct device_type usb_if_device_type;
 extern struct usb_device_driver usb_generic_driver;
 
+/**
+ * 判断一个USB对象是USB设备还是USB接口。
+ */
 static inline int is_usb_device(const struct device *dev)
 {
 	return dev->type == &usb_device_type;

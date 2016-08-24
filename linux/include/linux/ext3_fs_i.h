@@ -104,7 +104,9 @@ struct ext3_inode_info {
 	struct rw_semaphore xattr_sem;
 #endif
 #ifdef CONFIG_EXT3_FS_POSIX_ACL
+	/* inode关联的acl表 */
 	struct posix_acl	*i_acl;
+	/* 默认ACL，可能是上级目录继承下来 */
 	struct posix_acl	*i_default_acl;
 #endif
 

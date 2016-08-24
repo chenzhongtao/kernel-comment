@@ -73,24 +73,38 @@ enum clock_event_nofitiers {
  * @mode:		operating mode assigned by the management code
  * @next_event:		local storage for the next event in oneshot mode
  */
+/**
+ * 时钟事件设备，它允许注册一个事件，在某个时间点发生。
+ */
 struct clock_event_device {
+	/* 设备的名称 */
 	const char		*name;
 	unsigned int		features;
+	/* 时间的最大、最小计量值 */
 	unsigned long		max_delta_ns;
 	unsigned long		min_delta_ns;
+	/* 用于时间值与ns之间的转换 */
 	unsigned long		mult;
 	int			shift;
+	/* 精度 */
 	int			rating;
+	/* 使用的IRQ中断号 */
 	int			irq;
+	/* 服务的CPU */
 	cpumask_t		cpumask;
 	int			(*set_next_event)(unsigned long evt,
 						  struct clock_event_device *);
+	/* 在周期性模式和单触发模式之间切换 */
 	void			(*set_mode)(enum clock_event_mode mode,
 					    struct clock_event_device *);
+	/* 将时钟事件传递到通用时间子系统 */
 	void			(*event_handler)(struct clock_event_device *);
+	/* 广播函数，某些体系结构在节能模式下时钟源可能不工作 */
 	void			(*broadcast)(cpumask_t mask);
+	/* 链接到全局链表 */
 	struct list_head	list;
 	enum clock_event_mode	mode;
+	/* 下一个事件 */
 	ktime_t			next_event;
 };
 

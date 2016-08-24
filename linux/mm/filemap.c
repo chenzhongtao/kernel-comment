@@ -372,6 +372,7 @@ EXPORT_SYMBOL(sync_page_range_nolock);
  * Walk the list of under-writeback pages of the given address space
  * and wait for all of them.
  */
+/* 等待所有未决的写操作完成 */
 int filemap_fdatawait(struct address_space *mapping)
 {
 	loff_t i_size = i_size_read(mapping->host);
@@ -449,6 +450,9 @@ int filemap_write_and_wait_range(struct address_space *mapping,
  * The other page state flags were set by rmqueue().
  *
  * This function does not add the page to the LRU.  The caller must do that.
+ */
+/**
+ * 将页面添加到页缓存中
  */
 int add_to_page_cache(struct page *page, struct address_space *mapping,
 		pgoff_t offset, gfp_t gfp_mask)
@@ -607,6 +611,9 @@ void fastcall __lock_page_nosync(struct page *page)
  *
  * Is there a pagecache struct page at the given (mapping, offset) tuple?
  * If yes, increment its refcount and return it; if no, return NULL.
+ */
+/**
+ * 在基树中查找页
  */
 struct page * find_get_page(struct address_space *mapping, pgoff_t offset)
 {
@@ -869,6 +876,9 @@ static void shrink_readahead_size_eio(struct file *filp,
  * Note the struct file* is only passed for the use of readpage.
  * It may be NULL.
  */
+/**
+ * 读取映射的文件内容
+ */
 void do_generic_mapping_read(struct address_space *mapping,
 			     struct file_ra_state *ra,
 			     struct file *filp,
@@ -890,6 +900,7 @@ void do_generic_mapping_read(struct address_space *mapping,
 	last_index = (*ppos + desc->count + PAGE_CACHE_SIZE-1) >> PAGE_CACHE_SHIFT;
 	offset = *ppos & ~PAGE_CACHE_MASK;
 
+	/* 循环，直到读取所有的页面 */
 	for (;;) {
 		struct page *page;
 		pgoff_t end_index;
@@ -898,21 +909,24 @@ void do_generic_mapping_read(struct address_space *mapping,
 
 		cond_resched();
 find_page:
+		/* 检查页是否在缓存中 */
 		page = find_get_page(mapping, index);
-		if (!page) {
+		if (!page) {/* 页不在缓存中 */
+			/* 同步预读 */
 			page_cache_sync_readahead(mapping,
 					ra, filp,
 					index, last_index - index);
+			/* 再次从缓存中读取页面 */
 			page = find_get_page(mapping, index);
-			if (unlikely(page == NULL))
-				goto no_cached_page;
+			if (unlikely(page == NULL))/* 如果缓存中仍然没有 */
+				goto no_cached_page;/* 直接读取页面 */
 		}
-		if (PageReadahead(page)) {
+		if (PageReadahead(page)) {/* 启动预读 */
 			page_cache_async_readahead(mapping,
 					ra, filp, page,
 					index, last_index - index);
 		}
-		if (!PageUptodate(page))
+		if (!PageUptodate(page))/* 缓存中的页面不是最新的 */
 			goto page_not_up_to_date;
 page_ok:
 		/*
@@ -978,6 +992,7 @@ page_ok:
 			continue;
 		goto out;
 
+/* 页面虽然在缓存中，但是不是最新的 */
 page_not_up_to_date:
 		/* Get exclusive access to the page ... */
 		lock_page(page);
@@ -990,13 +1005,14 @@ page_not_up_to_date:
 		}
 
 		/* Did somebody else fill it already? */
-		if (PageUptodate(page)) {
+		if (PageUptodate(page)) {/* 重新获取页面后，它已经由其他过程更新了 */
 			unlock_page(page);
 			goto page_ok;
 		}
 
 readpage:
 		/* Start the actual read. The read will unlock the page. */
+		/* 重新读取页面，通常是mpage_readpage */
 		error = mapping->a_ops->readpage(filp, page);
 
 		if (unlikely(error)) {
@@ -1039,11 +1055,12 @@ no_cached_page:
 		 * Ok, it wasn't cached, so we need to create a new
 		 * page..
 		 */
-		page = page_cache_alloc_cold(mapping);
+		page = page_cache_alloc_cold(mapping);/* 分配一个新的页面 */
 		if (!page) {
 			desc->error = -ENOMEM;
 			goto out;
 		}
+		/* 将页面添加到lru缓存中 */
 		error = add_to_page_cache_lru(page, mapping,
 						index, GFP_KERNEL);
 		if (error) {
@@ -1053,6 +1070,7 @@ no_cached_page:
 			desc->error = error;
 			goto out;
 		}
+		/* 读取页面内容 */
 		goto readpage;
 	}
 
@@ -1154,6 +1172,9 @@ EXPORT_SYMBOL(generic_segment_checks);
  * This is the "read()" routine for all filesystems
  * that can use the page cache directly.
  */
+/**
+ * 异步IO读取函数
+ */
 ssize_t
 generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 		unsigned long nr_segs, loff_t pos)
@@ -1165,12 +1186,13 @@ generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	loff_t *ppos = &iocb->ki_pos;
 
 	count = 0;
+	/* 确认参数有效 */
 	retval = generic_segment_checks(iov, &nr_segs, &count, VERIFY_WRITE);
 	if (retval)
 		return retval;
 
 	/* coalesce the iovecs and go direct-to-BIO for O_DIRECT */
-	if (filp->f_flags & O_DIRECT) {
+	if (filp->f_flags & O_DIRECT) {/* 直接读取，而不考虑页缓存 */
 		loff_t size;
 		struct address_space *mapping;
 		struct inode *inode;
@@ -1182,6 +1204,7 @@ generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 			goto out; /* skip atime */
 		size = i_size_read(inode);
 		if (pos < size) {
+			/* 直接IO */
 			retval = generic_file_direct_IO(READ, iocb,
 						iov, pos, nr_segs);
 			if (retval > 0)
@@ -1193,8 +1216,10 @@ generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 		}
 	}
 
+	/* 通过页缓存读取 */
 	retval = 0;
 	if (count) {
+		/* 遍历每个段，将数据读取到其中 */
 		for (seg = 0; seg < nr_segs; seg++) {
 			read_descriptor_t desc;
 
@@ -1204,6 +1229,7 @@ generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 			if (desc.count == 0)
 				continue;
 			desc.error = 0;
+			/* 读取IO */
 			do_generic_file_read(filp,ppos,&desc,file_read_actor);
 			retval += desc.written;
 			if (desc.error) {
@@ -1298,6 +1324,9 @@ static int fastcall page_cache_read(struct file * file, pgoff_t offset)
  * it in the page cache, and handles the special cases reasonably without
  * having a lot of duplicated code.
  */
+/**
+ * 文件映射缺页处理
+ */
 int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	int error;
@@ -1326,21 +1355,23 @@ retry_find:
 	/*
 	 * For sequential accesses, we use the generic readahead logic.
 	 */
-	if (VM_SequentialReadHint(vma)) {
+	if (VM_SequentialReadHint(vma)) {/* 判断页面访问是顺序访问还是随机访问 */
 		if (!page) {
+			/* 分配页面并预读页面内容 */
 			page_cache_sync_readahead(mapping, ra, file,
 							   vmf->pgoff, 1);
+			/* 检查页面是否在缓存中 */
 			page = find_lock_page(mapping, vmf->pgoff);
-			if (!page)
+			if (!page)/* 没有找到页面，说明预读没有读取到内容，直接读取页面 */
 				goto no_cached_page;
 		}
-		if (PageReadahead(page)) {
+		if (PageReadahead(page)) {/* 处理预读 */
 			page_cache_async_readahead(mapping, ra, file, page,
 							   vmf->pgoff, 1);
 		}
 	}
 
-	if (!page) {
+	if (!page) {/* 页面不在缓存中，并且不是顺序访问 */
 		unsigned long ra_pages;
 
 		ra->mmap_miss++;
@@ -1361,19 +1392,23 @@ retry_find:
 			count_vm_event(PGMAJFAULT);
 		}
 		did_readaround = 1;
+		/* 计算预读的页面数量 */
 		ra_pages = max_sane_readahead(file->f_ra.ra_pages);
 		if (ra_pages) {
 			pgoff_t start = 0;
 
 			if (vmf->pgoff > ra_pages / 2)
 				start = vmf->pgoff - ra_pages / 2;
+			/* 在页面缓存中分配页面并读入数据 */
 			do_page_cache_readahead(mapping, file, start, ra_pages);
 		}
+		/* 再次在页缓存中查找页面 */
 		page = find_lock_page(mapping, vmf->pgoff);
-		if (!page)
+		if (!page)/* 没有找到，读取页面内容 */
 			goto no_cached_page;
 	}
 
+	/* 运行到此，说明页面在缓存中 */
 	if (!did_readaround)
 		ra->mmap_miss--;
 
@@ -1381,7 +1416,7 @@ retry_find:
 	 * We have a locked page in the page cache, now we need to check
 	 * that it's up-to-date. If not, it is going to be due to an error.
 	 */
-	if (unlikely(!PageUptodate(page)))
+	if (unlikely(!PageUptodate(page)))/* 查看页面是否是最新的 */
 		goto page_not_uptodate;
 
 	/* Must recheck i_size under page lock */
@@ -1395,7 +1430,7 @@ retry_find:
 	/*
 	 * Found the page and have a reference on it.
 	 */
-	mark_page_accessed(page);
+	mark_page_accessed(page);/* 页面是最新的，标记其访问属性 */
 	ra->prev_pos = (loff_t)page->index << PAGE_CACHE_SHIFT;
 	vmf->page = page;
 	return ret | VM_FAULT_LOCKED;
@@ -1438,10 +1473,11 @@ page_not_uptodate:
 	 * and we need to check for errors.
 	 */
 	ClearPageError(page);
+	/* 读取页面内容到内存中 */
 	error = mapping->a_ops->readpage(file, page);
 	page_cache_release(page);
 
-	if (!error || error == AOP_TRUNCATED_PAGE)
+	if (!error || error == AOP_TRUNCATED_PAGE)/* 重新查找页面 */
 		goto retry_find;
 
 	/* Things didn't work out. Return zero to tell the mm layer so. */

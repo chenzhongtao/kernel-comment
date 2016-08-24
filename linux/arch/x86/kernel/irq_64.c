@@ -137,8 +137,12 @@ skip:
  * SMP cross-CPU interrupts have their own specific
  * handlers).
  */
+/**
+ * 一般的外设中断入口
+ */
 asmlinkage unsigned int do_IRQ(struct pt_regs *regs)
 {
+	/* 将寄存器指针保存到每CPU变量中，这样所有中断函数都可以访问原始的regs */
 	struct pt_regs *old_regs = set_irq_regs(regs);
 
 	/* high bit used in ret_from_ code  */
@@ -146,6 +150,7 @@ asmlinkage unsigned int do_IRQ(struct pt_regs *regs)
 	unsigned irq;
 
 	exit_idle();
+	/* 更新一些统计变量 */
 	irq_enter();
 	irq = __get_cpu_var(vector_irq)[vector];
 
@@ -154,8 +159,9 @@ asmlinkage unsigned int do_IRQ(struct pt_regs *regs)
 #endif
 
 	if (likely(irq < NR_IRQS))
+		/* 调用ISR处理中断 */
 		generic_handle_irq(irq);
-	else {
+	else {/* 非法的中断号 */
 		if (!disable_apic)
 			ack_APIC_irq();
 
@@ -164,8 +170,10 @@ asmlinkage unsigned int do_IRQ(struct pt_regs *regs)
 				__func__, smp_processor_id(), vector);
 	}
 
+	/* 统计变量，并处理软中断 */
 	irq_exit();
 
+	/* 恢复前一次中断的寄存器指针 */
 	set_irq_regs(old_regs);
 	return 1;
 }

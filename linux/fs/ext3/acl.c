@@ -155,6 +155,9 @@ ext3_iset_acl(struct inode *inode, struct posix_acl **i_acl,
  *
  * inode->i_mutex: don't care
  */
+/**
+ * 获得acl列表
+ */
 static struct posix_acl *
 ext3_get_acl(struct inode *inode, int type)
 {
@@ -164,11 +167,12 @@ ext3_get_acl(struct inode *inode, int type)
 	struct posix_acl *acl;
 	int retval;
 
-	if (!test_opt(inode->i_sb, POSIX_ACL))
+	if (!test_opt(inode->i_sb, POSIX_ACL))/* 不支持ACL */
 		return NULL;
 
 	switch(type) {
 		case ACL_TYPE_ACCESS:
+			/* 从inode的acl中获取 */
 			acl = ext3_iget_acl(inode, &ei->i_acl);
 			if (acl != EXT3_ACL_NOT_CACHED)
 				return acl;
@@ -176,6 +180,7 @@ ext3_get_acl(struct inode *inode, int type)
 			break;
 
 		case ACL_TYPE_DEFAULT:
+			/* 从默认ACL中获取 */
 			acl = ext3_iget_acl(inode, &ei->i_default_acl);
 			if (acl != EXT3_ACL_NOT_CACHED)
 				return acl;
@@ -185,14 +190,16 @@ ext3_get_acl(struct inode *inode, int type)
 		default:
 			return ERR_PTR(-EINVAL);
 	}
+	/* ACL还没有缓存在内存中，获取ACL长度 */
 	retval = ext3_xattr_get(inode, name_index, "", NULL, 0);
-	if (retval > 0) {
+	if (retval > 0) {/* 分配内存以保存ACL */
 		value = kmalloc(retval, GFP_KERNEL);
 		if (!value)
 			return ERR_PTR(-ENOMEM);
+		/* 读取磁盘上的ACL到内存中 */
 		retval = ext3_xattr_get(inode, name_index, "", value, retval);
 	}
-	if (retval > 0)
+	if (retval > 0)/* 转换ACL为内存格式 */
 		acl = ext3_acl_from_disk(value, retval);
 	else if (retval == -ENODATA || retval == -ENOSYS)
 		acl = NULL;
@@ -200,7 +207,7 @@ ext3_get_acl(struct inode *inode, int type)
 		acl = ERR_PTR(retval);
 	kfree(value);
 
-	if (!IS_ERR(acl)) {
+ 	if (!IS_ERR(acl)) {/* 将ACL数据缓存到inode中 */
 		switch(type) {
 			case ACL_TYPE_ACCESS:
 				ext3_iset_acl(inode, &ei->i_acl, acl);
@@ -310,41 +317,48 @@ ext3_permission(struct inode *inode, int mask, struct nameidata *nd)
  * dir->i_mutex: down
  * inode->i_mutex: up (access to inode is still exclusive)
  */
+/**
+ * 初始化新inode的ACL
+ */
 int
 ext3_init_acl(handle_t *handle, struct inode *inode, struct inode *dir)
 {
 	struct posix_acl *acl = NULL;
 	int error = 0;
 
-	if (!S_ISLNK(inode->i_mode)) {
-		if (test_opt(dir->i_sb, POSIX_ACL)) {
+	if (!S_ISLNK(inode->i_mode)) {/* 目录或文件 */
+		if (test_opt(dir->i_sb, POSIX_ACL)) {/* 系统支持ACL */
+			/* 继承上级目录的ACL */
 			acl = ext3_get_acl(dir, ACL_TYPE_DEFAULT);
 			if (IS_ERR(acl))
 				return PTR_ERR(acl);
 		}
-		if (!acl)
+		if (!acl)/* 没有继承的ACL，则应用进程的默认权限到节点 */
 			inode->i_mode &= ~current->fs->umask;
 	}
-	if (test_opt(inode->i_sb, POSIX_ACL) && acl) {
+	if (test_opt(inode->i_sb, POSIX_ACL) && acl) {/* 有继承的ACL */
 		struct posix_acl *clone;
 		mode_t mode;
 
-		if (S_ISDIR(inode->i_mode)) {
+		if (S_ISDIR(inode->i_mode)) {/* 目录 */
+			/* 设置默认的ACL */
 			error = ext3_set_acl(handle, inode,
 					     ACL_TYPE_DEFAULT, acl);
 			if (error)
 				goto cleanup;
 		}
+		/* 创建默认acl的内存副本 */
 		clone = posix_acl_clone(acl, GFP_KERNEL);
 		error = -ENOMEM;
 		if (!clone)
 			goto cleanup;
 
 		mode = inode->i_mode;
+		/* 从创建参数中指定的访问权限中，删除ACL不允许的权限 */
 		error = posix_acl_create_masq(clone, &mode);
-		if (error >= 0) {
+		if (error >= 0) {/* 修改节点权限 */
 			inode->i_mode = mode;
-			if (error > 0) {
+			if (error > 0) {/* 默认ACL还包含不能用mode参数表示的权限，创建ACL来表示它 */
 				/* This is an extended ACL */
 				error = ext3_set_acl(handle, inode,
 						     ACL_TYPE_ACCESS, clone);

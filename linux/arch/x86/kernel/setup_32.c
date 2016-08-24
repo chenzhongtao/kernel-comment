@@ -356,12 +356,15 @@ static unsigned long __init setup_memory(void)
 	return max_low_pfn;
 }
 
+/* 在IA32系统中注册内存区 */
 void __init zone_sizes_init(void)
 {
 	unsigned long max_zone_pfns[MAX_NR_ZONES];
 	memset(max_zone_pfns, 0, sizeof(max_zone_pfns));
+	/* 前16M作为DMA区域的边界，4096页 */
 	max_zone_pfns[ZONE_DMA] =
 		virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
+	/* 指定NORMAL、HIGHMEM区的边界 */
 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
 #ifdef CONFIG_HIGHMEM
 	max_zone_pfns[ZONE_HIGHMEM] = highend_pfn;
@@ -370,6 +373,7 @@ void __init zone_sizes_init(void)
 	add_active_range(0, 0, max_low_pfn);
 #endif
 
+	/* 根据活动内存区(用于初始化阶段)的信息，构建体系无关的数据结构 */
 	free_area_init_nodes(max_zone_pfns);
 }
 #else
@@ -426,8 +430,10 @@ void __init setup_bootmem_allocator(void)
 	/*
 	 * Initialize the boot-time allocator (with low memory only):
 	 */
+	/* 将页帧范围保存到活动内存区域中，并将所有的页标记为可用 */
 	bootmap_size = init_bootmem(min_low_pfn, max_low_pfn);
 
+	/* 根据BIOS提供的信息，将可用区域标记为可用 */
 	register_bootmem_low_pages(max_low_pfn);
 
 	/*
@@ -436,6 +442,7 @@ void __init setup_bootmem_allocator(void)
 	 * the (very unlikely) case of us accidentally initializing the
 	 * bootmem allocator with an invalid RAM area.
 	 */
+	/* 保存内核代码段区域 */
 	reserve_bootmem(__pa_symbol(_text), (PFN_PHYS(min_low_pfn) +
 			 bootmap_size + PAGE_SIZE-1) - __pa_symbol(_text));
 
@@ -443,6 +450,7 @@ void __init setup_bootmem_allocator(void)
 	 * reserve physical page 0 - it's a special BIOS page on many boxes,
 	 * enabling clean reboots, SMP operation, laptop functions.
 	 */
+	/* 保留第一个物理页 */
 	reserve_bootmem(0, PAGE_SIZE);
 
 	/* reserve EBDA region, it's a 4K region */
@@ -583,6 +591,7 @@ void __init setup_arch(char **cmdline_p)
 		efi_init();
 	else {
 		printk(KERN_INFO "BIOS-provided physical RAM map:\n");
+		/* 特定于机器的函数，创建一个列表，确定系统占据的内存区和空闲内存区。并打印出来 */
 		print_memory_map(memory_setup());
 	}
 
@@ -602,6 +611,7 @@ void __init setup_arch(char **cmdline_p)
 	bss_resource.start = virt_to_phys(&__bss_start);
 	bss_resource.end = virt_to_phys(&__bss_stop)-1;
 
+	/* 解析boot参数，如mem,highmem,memmap */
 	parse_early_param();
 
 	if (user_defined_memmap) {
@@ -612,6 +622,7 @@ void __init setup_arch(char **cmdline_p)
 	strlcpy(command_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = command_line;
 
+	/* 有连续内存和不连续内存两个版本，确定可用物理内存页的数量，初始化bootmem分配器，分配内存区 */
 	max_low_pfn = setup_memory();
 
 #ifdef CONFIG_VMI
@@ -635,9 +646,12 @@ void __init setup_arch(char **cmdline_p)
 #ifdef CONFIG_SMP
 	smp_alloc_memory(); /* AP processor realmode stacks in low memory*/
 #endif
+	/* 初始化内存页表并启动内存分页，并且支持PAE */
 	paging_init();
+	/* 初始化系统中所有节点的pgdat_t实例 */
 	remapped_pgdat_init();
 	sparse_init();
+	/* 初始化活动内存区 */
 	zone_sizes_init();
 
 	/*
@@ -680,6 +694,7 @@ void __init setup_arch(char **cmdline_p)
 		get_smp_config();
 #endif
 
+	/* 通过分析e820的信息，创建内存列表 */
 	e820_register_memory();
 	e820_mark_nosave_regions();
 

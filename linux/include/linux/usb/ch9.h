@@ -137,11 +137,32 @@
  * For most devices, interfaces don't coordinate with each other, so
  * such requests may be made at any time.
  */
+/**
+ * 这个结构完全对应于spec 里的Table 9-2，描述了主机通过控制传输发送给设备的请求（Device Requests）。
+ */
 struct usb_ctrlrequest {
+	/**
+	 * bit7表示了控制传输中DATA transaction 阶段的方向
+	 * bit5~6 表示request 的类型
+	 * bit0~4 表示了这个请求针对的是设备，接口，还是端点。
+	 */
 	__u8 bRequestType;
+	/**
+	 * 表示具体是哪个request
+	 */
 	__u8 bRequest;
+	/**
+	 * request 的参数，request 不同，wValue 就不同。
+	 */
 	__le16 wValue;
+	/**
+	 * request 的参数，bRequestType 指明request 针对的是设备上的某个接口或端点的时候，wIndex 就用来指明是哪个接口或端点。
+	 */
 	__le16 wIndex;
+	/**
+	 * 控制传输中DATA transaction 阶段的长度， 方向已经在bRequestType 那儿指明了。
+	 * 如果这个值为0，就表示没有DATA transaction 阶段，bRequestType 的方向位也就无效了。
+	 */
 	__le16 wLength;
 } __attribute__ ((packed));
 
@@ -160,11 +181,17 @@ struct usb_ctrlrequest {
  * Descriptor types ... USB 2.0 spec table 9.5
  */
 #define USB_DT_DEVICE			0x01
+/**
+ * 配置描述符类型。
+ */
 #define USB_DT_CONFIG			0x02
 #define USB_DT_STRING			0x03
 #define USB_DT_INTERFACE		0x04
 #define USB_DT_ENDPOINT			0x05
 #define USB_DT_DEVICE_QUALIFIER		0x06
+/**
+ * 当高速设备运行在低速模式下的配置。
+ */
 #define USB_DT_OTHER_SPEED_CONFIG	0x07
 #define USB_DT_INTERFACE_POWER		0x08
 /* these are from a minor usb 2.0 revision (ECN) */
@@ -192,8 +219,17 @@ struct usb_ctrlrequest {
 #define USB_DT_CS_ENDPOINT		(USB_TYPE_CLASS | USB_DT_ENDPOINT)
 
 /* All standard descriptors have these 2 fields at the beginning */
+/**
+ * 描述符头
+ */
 struct usb_descriptor_header {
+	/**
+	 * 描述符长度。
+	 */
 	__u8  bLength;
+	/**
+	 * 描述符类型。
+	 */
 	__u8  bDescriptorType;
 } __attribute__ ((packed));
 
@@ -202,20 +238,47 @@ struct usb_descriptor_header {
 
 /* USB_DT_DEVICE: Device descriptor */
 struct usb_device_descriptor {
+	/**
+	 * 设备描述符的长度。为18.
+	 */
 	__u8  bLength;
+	/**
+	 * 设备描述符的类型。为1.
+	 */
 	__u8  bDescriptorType;
 
+	/**
+	 * SUB spec的版本号。如果能够进行高速传输，则为0x200H。
+	 */
 	__le16 bcdUSB;
+	/**
+	 * 设备类别。
+	 */
 	__u8  bDeviceClass;
 	__u8  bDeviceSubClass;
 	__u8  bDeviceProtocol;
+	/**
+	 * 端点0一次可以处理的最大字节数。取值只能是8，16，32，64.
+	 */
 	__u8  bMaxPacketSize0;
+	/**
+	 * 厂商和产品的ID。
+	 */
 	__le16 idVendor;
 	__le16 idProduct;
+	/**
+	 * 设备的版本号。
+	 */
 	__le16 bcdDevice;
+	/**
+	 * 厂商、产品、序列号对应的字符串描述符的索引值。
+	 */
 	__u8  iManufacturer;
 	__u8  iProduct;
 	__u8  iSerialNumber;
+	/**
+	 * 设备当前速度模式下支持的配置数量。
+	 */
 	__u8  bNumConfigurations;
 } __attribute__ ((packed));
 
@@ -255,15 +318,43 @@ struct usb_device_descriptor {
  * devices with a USB_DT_DEVICE_QUALIFIER have any OTHER_SPEED_CONFIG
  * descriptors.
  */
+/**
+ * USB配置描述符。
+ */
 struct usb_config_descriptor {
+	/**
+	 * 描述符长度，值为9。
+	 */
 	__u8  bLength;
+	/**
+	 * 描述符类型，为USB_DT_CONFIG，值为2.也可以为USB_DT_OTHER_SPEED_CONFIG，值为7.
+	 */
 	__u8  bDescriptorType;
 
+	/**
+	 * 使用GET_DESCRIPTOR请求从设备里获得配置描述符信息时，返回的数据长度。
+	 */
 	__le16 wTotalLength;
+	/**
+	 * 这个配置包含的接口数目。
+	 */
 	__u8  bNumInterfaces;
+	/**
+	 * 对于有多个配置的设备来说，可以用这个值为参数，使用SET_CONFIGURATION请求来改变正在被使用的USB设置。
+	 * 该参数指明了要激活哪个配置。
+	 */
 	__u8  bConfigurationValue;
+	/**
+	 * 描述配置信息的字符串描述符的索引值。
+	 */
 	__u8  iConfiguration;
+	/**
+	 * 表示配置的特点。比如bit6表示self-powered，bit5表示这个配置支持远程唤醒。bit7必须为1.
+	 */
 	__u8  bmAttributes;
+	/**
+	 * 设备正常运行时，从总线那里分到的最大电流值，以2mA为单位。设备使用此字段向HUB表明自己需要的电流。
+	 */
 	__u8  bMaxPower;
 } __attribute__ ((packed));
 
@@ -292,31 +383,79 @@ struct usb_string_descriptor {
 /*-------------------------------------------------------------------------*/
 
 /* USB_DT_INTERFACE: Interface descriptor */
+/**
+ * 接口描述符。
+ */
 struct usb_interface_descriptor {
+	/**
+	 * 描述符长度，对接口描述符来说是9，这是协议规定的。
+	 */
 	__u8  bLength;
+	/**
+	 * 描述符的类型。对接口描述符来说，值为USB_DT_INTERFACE即4.
+	 */
 	__u8  bDescriptorType;
 
+	/**
+	 * 接口号。每个配置可以包含多个接口，这个值就是其索引号。
+	 */
 	__u8  bInterfaceNumber;
+	/**
+	 * 接口使用的是哪个可选设置。默认设置是0.
+	 */
 	__u8  bAlternateSetting;
+	/**
+	 * 接口拥有的端点数量。不包含端点0.
+	 */
 	__u8  bNumEndpoints;
+	/**
+	 * 接口所属的类别。
+	 */
 	__u8  bInterfaceClass;
 	__u8  bInterfaceSubClass;
 	__u8  bInterfaceProtocol;
+	/**
+	 * 接口对应的字符串描述符索引。
+	 */
 	__u8  iInterface;
-} __attribute__ ((packed));
+} __attribute__ ((packed));/* 注意是字节对齐的。 */
 
 #define USB_DT_INTERFACE_SIZE		9
 
 /*-------------------------------------------------------------------------*/
 
 /* USB_DT_ENDPOINT: Endpoint descriptor */
+/**
+ * 端点描述符。
+ */
 struct usb_endpoint_descriptor {
+	/**
+	 * 描述符的字节长度。
+	 */
 	__u8  bLength;
+	/**
+	 * 描述符类型，对端点来说就是USB_DT_ENDPOINT即5。
+	 */
 	__u8  bDescriptorType;
 
+	/**
+	 * 端点地址:
+	 * 		0-3位表示端点号。
+	 *		8位表示方向为输入还是输出。
+	 */
 	__u8  bEndpointAddress;
+	/**
+	 * 属性。
+	 *		0-1位表示传输方向，0－3分别表示控制传输、等时传输、批量传输和中断传输。
+	 */
 	__u8  bmAttributes;
+	/**
+	 * 一次能够处理的最大字节数。
+	 */
 	__le16 wMaxPacketSize;
+	/**
+	 * 希望主机轮询该端点的时间间隔。
+	 */
 	__u8  bInterval;
 
 	/* NOTE:  these two are _only_ in audio endpoints. */
@@ -346,6 +485,9 @@ struct usb_endpoint_descriptor {
 /*-------------------------------------------------------------------------*/
 
 /* USB_DT_DEVICE_QUALIFIER: Device Qualifier descriptor */
+/**
+ * 描述设备工作在全速、高速状态的描述符。
+ */
 struct usb_qualifier_descriptor {
 	__u8  bLength;
 	__u8  bDescriptorType;
@@ -561,14 +703,32 @@ enum usb_device_state {
 	USB_STATE_NOTATTACHED = 0,
 
 	/* chapter 9 and authentication (wireless) device states */
+	/**
+	 * 设备已经连接到USB接口上了。是HUB检测到设备时的初始状态。
+	 */
 	USB_STATE_ATTACHED,
+	/**
+	 * 加电状态。可以是外部电源，也可以来自HUB的电源。分别称为self-powered和bus-powered。
+	 */
 	USB_STATE_POWERED,			/* wired */
 	USB_STATE_UNAUTHENTICATED,		/* auth */
 	USB_STATE_RECONNECTING,			/* auth */
+	/**
+	 * 默认状态。在加电后，设备必须在收到一个复位信号并成功复位后，才能使用默认地址回应主机发过来的设备和配置描述符请求。
+	 */
 	USB_STATE_DEFAULT,			/* limited function */
+	/**
+	 * 已经为设备分配了地址。此时可以使用默认管道响应主机的请求。
+	 */
 	USB_STATE_ADDRESS,
+	/**
+	 * 已经被主机配置过了。此时主机可以使用设备提供的所有功能。
+	 */
 	USB_STATE_CONFIGURED,			/* most functions */
 
+	/**
+	 * 设备主机挂起状态。
+	 */
 	USB_STATE_SUSPENDED
 
 	/* NOTE:  there are actually four different SUSPENDED

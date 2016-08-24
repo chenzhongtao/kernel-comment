@@ -153,6 +153,9 @@ EXPORT_SYMBOL(profile_pc);
  * Time Stamp Counter value at the time of the timer interrupt, so that
  * we later on can estimate the time of day more exactly.
  */
+/**
+ * 时钟中断处理函数
+ */
 irqreturn_t timer_interrupt(int irq, void *dev_id)
 {
 	/* Keep nmi watchdog up to date */

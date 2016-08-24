@@ -734,6 +734,7 @@ static int bm_get_sb(struct file_system_type *fs_type,
 	return get_sb_single(fs_type, flags, data, bm_fill_super, mnt);
 }
 
+/* 类似于script_format，但是根据扩展名来确定解释执行的程序 */
 static struct linux_binfmt misc_format = {
 	.module = THIS_MODULE,
 	.load_binary = load_misc_binary,

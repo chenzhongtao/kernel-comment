@@ -103,12 +103,16 @@ void paging_init(void);
 #define _PAGE_BIT_UNUSED3	11
 #define _PAGE_BIT_NX		63
 
+/* 页是否存在于内存中，注意:页有可能被交换出去 */
 #define _PAGE_PRESENT	0x001
 #define _PAGE_RW	0x002
+/* 用户可以访问该页，否则只能在内核态访问 */
 #define _PAGE_USER	0x004
 #define _PAGE_PWT	0x008
 #define _PAGE_PCD	0x010
+/* 页面是否被访问过 */
 #define _PAGE_ACCESSED	0x020
+/* 页面是否为脏的 */
 #define _PAGE_DIRTY	0x040
 #define _PAGE_PSE	0x080	/* 4 MB (or 2MB) page, Pentium+, if present.. */
 #define _PAGE_GLOBAL	0x100	/* Global TLB entry PPro+ */
@@ -117,6 +121,7 @@ void paging_init(void);
 #define _PAGE_UNUSED3	0x800
 
 /* If _PAGE_PRESENT is clear, we use these: */
+/* 与_PAGE_DIRTY相同，当页不在内存中时，如果此位被设置，表示该页属于非线性文件映射 */
 #define _PAGE_FILE	0x040	/* nonlinear file mapping, saved PTE; unset:swap */
 #define _PAGE_PROTNONE	0x080	/* if the user mapped it with PROT_NONE;
 				   pte_present gives true */
@@ -201,6 +206,7 @@ extern unsigned long long __PAGE_KERNEL, __PAGE_KERNEL_EXEC;
 /* The boot page tables (all created as a single array) */
 extern unsigned long pg0[];
 
+/* 页面是否在内存中 */
 #define pte_present(x)	((x).pte_low & (_PAGE_PRESENT | _PAGE_PROTNONE))
 
 /* To avoid harmful races, pmd_none(x) should check only the lower when PAE */
@@ -215,14 +221,17 @@ extern unsigned long pg0[];
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
  */
+/* 页表项相关的页是否为脏页 */
 static inline int pte_dirty(pte_t pte)		{ return (pte).pte_low & _PAGE_DIRTY; }
 static inline int pte_young(pte_t pte)		{ return (pte).pte_low & _PAGE_ACCESSED; }
+/* 检查内核是否可以写入到该页 */
 static inline int pte_write(pte_t pte)		{ return (pte).pte_low & _PAGE_RW; }
 static inline int pte_huge(pte_t pte)		{ return (pte).pte_low & _PAGE_PSE; }
 
 /*
  * The following only works if pte_present() is not true.
  */
+/* 用于非线性映射，检查给定的页表项是否用于非线性映射 */
 static inline int pte_file(pte_t pte)		{ return (pte).pte_low & _PAGE_FILE; }
 
 static inline pte_t pte_mkclean(pte_t pte)	{ (pte).pte_low &= ~_PAGE_DIRTY; return pte; }
@@ -477,6 +486,9 @@ do {									\
 /*
  * The i386 doesn't have any external MMU info: the kernel page
  * tables contain all the necessary information.
+ */
+/**
+ * 在页失效后调用。在处理器的MMU中加入信息，使得虚拟地址由相应的PTE描述
  */
 #define update_mmu_cache(vma,address,pte) do { } while (0)
 

@@ -41,8 +41,10 @@ struct sysfs_elem_bin_attr {
 struct sysfs_dirent {
 	atomic_t		s_count;
 	atomic_t		s_active;
+	/* 通过这两个字段构成树 */
 	struct sysfs_dirent	*s_parent;
 	struct sysfs_dirent	*s_sibling;
+	/* 目录项的名称 */
 	const char		*s_name;
 
 	union {
@@ -52,9 +54,12 @@ struct sysfs_dirent {
 		struct sysfs_elem_bin_attr	s_bin_attr;
 	};
 
+	/* 设置数据项的类型和标志，类型如SYSFS_DIR */
 	unsigned int		s_flags;
 	ino_t			s_ino;
+	/* 目录的权限 */
 	umode_t			s_mode;
+	/* 目录项的属性，如果为NULL表示默认属性集合。 */
 	struct iattr		*s_iattr;
 };
 

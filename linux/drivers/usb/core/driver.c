@@ -151,6 +151,9 @@ static const struct usb_device_id *usb_match_dynamic_id(struct usb_interface *in
 
 
 /* called from driver core with dev locked */
+/**
+ * 当USB设备在PCI子系统被发现，回调此函数。
+ */
 static int usb_probe_device(struct device *dev)
 {
 	struct usb_device_driver *udriver = to_usb_device_driver(dev->driver);
@@ -159,6 +162,9 @@ static int usb_probe_device(struct device *dev)
 
 	dev_dbg(dev, "%s\n", __FUNCTION__);
 
+	/**
+	 * 健康检查，确保是USB设备驱动。
+	 */
 	if (!is_usb_device(dev))	/* Sanity check */
 		return error;
 
@@ -171,6 +177,9 @@ static int usb_probe_device(struct device *dev)
 	 */
 	udev->pm_usage_cnt = !(udriver->supports_autosuspend);
 
+	/**
+	 * 调用设备自己的探测函数generic_probe。
+	 */
 	error = udriver->probe(udev);
 	return error;
 }
@@ -416,25 +425,40 @@ int usb_match_one_id(struct usb_interface *interface,
 	struct usb_device *dev;
 
 	/* proc_connectinfo in devio.c may call us with id == NULL. */
+	/**
+	 * 设备的ID表为空，不匹配直接返回。
+	 */
 	if (id == NULL)
 		return 0;
 
+	/**
+	 * 获得接口的设置，设置里面包含接口描述符，用于匹配驱动。
+	 */
 	intf = interface->cur_altsetting;
+	/**
+	 * 获得接口所在的设备。
+	 */
 	dev = interface_to_usbdev(interface);
 
+	/**
+	 * 首先看接口所在的设备是否能与ID匹配。
+	 */
 	if (!usb_match_device(dev, id))
 		return 0;
 
 	/* The interface class, subclass, and protocol should never be
 	 * checked for a match if the device class is Vendor Specific,
 	 * unless the match record specifies the Vendor ID. */
-	if (dev->descriptor.bDeviceClass == USB_CLASS_VENDOR_SPEC &&
-			!(id->match_flags & USB_DEVICE_ID_MATCH_VENDOR) &&
-			(id->match_flags & (USB_DEVICE_ID_MATCH_INT_CLASS |
+	if (dev->descriptor.bDeviceClass == USB_CLASS_VENDOR_SPEC &&/* 设备不是标准类 */
+			!(id->match_flags & USB_DEVICE_ID_MATCH_VENDOR) && /* 不匹配USB_DEVICE_ID_MATCH_VENDOR */
+			(id->match_flags & (USB_DEVICE_ID_MATCH_INT_CLASS | /* 驱动需要检查类别 */
 				USB_DEVICE_ID_MATCH_INT_SUBCLASS |
 				USB_DEVICE_ID_MATCH_INT_PROTOCOL)))
 		return 0;
 
+	/**
+	 * 检查ID的类别是否与接口的类别一致。
+	 */
 	if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_CLASS) &&
 	    (id->bInterfaceClass != intf->desc.bInterfaceClass))
 		return 0;
@@ -447,6 +471,9 @@ int usb_match_one_id(struct usb_interface *interface,
 	    (id->bInterfaceProtocol != intf->desc.bInterfaceProtocol))
 		return 0;
 
+	/**
+	 * 完全匹配。
+	 */
 	return 1;
 }
 EXPORT_SYMBOL_GPL(usb_match_one_id);
@@ -522,10 +549,16 @@ EXPORT_SYMBOL_GPL(usb_match_one_id);
  * without vendor and product IDs; or specify a protocol without
  * its associated class and subclass.
  */
+/**
+ * 匹配USB设备和驱动。
+ */
 const struct usb_device_id *usb_match_id(struct usb_interface *interface,
 					 const struct usb_device_id *id)
 {
 	/* proc_connectinfo in devio.c may call us with id == NULL. */
+	/**
+	 * ID表为空，表示驱动不为任何设备服务。
+	 */
 	if (id == NULL)
 		return NULL;
 
@@ -534,6 +567,9 @@ const struct usb_device_id *usb_match_id(struct usb_interface *interface,
 	   id->driver_info is the way to create an entry that
 	   indicates that the driver want to examine every
 	   device and interface. */
+	/**
+	 * 轮询驱动ID表，看是否与当前设备匹配。
+	 */
 	for (; id->idVendor || id->bDeviceClass || id->bInterfaceClass ||
 	       id->driver_info; id++) {
 		if (usb_match_one_id(interface, id))
@@ -544,19 +580,30 @@ const struct usb_device_id *usb_match_id(struct usb_interface *interface,
 }
 EXPORT_SYMBOL_GPL_FUTURE(usb_match_id);
 
+/**
+ * 探测USB设备与驱动之间是否匹配。
+ * 当总线上有新设备或新的驱动添加时，就调用此函数。
+ * 能够匹配则返回0.
+ */
 static int usb_device_match(struct device *dev, struct device_driver *drv)
 {
 	/* devices and interfaces are handled separately */
+	/**
+	 * 设备是USB设备如连接USB键盘和扬声器的设备，其上连接发USB键盘是一个接口，扬声腔器是另一个接口(而不是USB接口，平时使用的USB设备是连接在USB接口上的)
+	 */
 	if (is_usb_device(dev)) {
 
 		/* interface drivers never match devices */
+		/**
+		 * 判断驱动是否为USB设备驱动。
+		 */
 		if (!is_usb_device_driver(drv))
 			return 0;
 
 		/* TODO: Add real matching code */
 		return 1;
 
-	} else {
+	} else {/* 不是USB设备，而是USB接口 */
 		struct usb_interface *intf;
 		struct usb_driver *usb_drv;
 		const struct usb_device_id *id;
@@ -568,10 +615,16 @@ static int usb_device_match(struct device *dev, struct device_driver *drv)
 		intf = to_usb_interface(dev);
 		usb_drv = to_usb_driver(drv);
 
+		/**
+		 * 在静态ID表中匹配。
+		 */
 		id = usb_match_id(intf, usb_drv->id_table);
 		if (id)
 			return 1;
 
+		/**
+		 * 在动态ID表中匹配。
+		 */
 		id = usb_match_dynamic_id(intf, usb_drv);
 		if (id)
 			return 1;
@@ -654,16 +707,28 @@ int usb_register_device_driver(struct usb_device_driver *new_udriver,
 {
 	int retval = 0;
 
+	/**
+	 * 系统启动的时候就禁止了USB子系统。
+	 */
 	if (usb_disabled())
 		return -ENODEV;
 
+	/**
+	 * 表明这是一个设备驱动而不是接口驱动。
+	 */
 	new_udriver->drvwrap.for_devices = 1;
+	/**
+	 * 设备模型用到的参数，PCI子系统可以据此加载USB设备的驱动了。
+	 */
 	new_udriver->drvwrap.driver.name = (char *) new_udriver->name;
 	new_udriver->drvwrap.driver.bus = &usb_bus_type;
 	new_udriver->drvwrap.driver.probe = usb_probe_device;
 	new_udriver->drvwrap.driver.remove = usb_unbind_device;
 	new_udriver->drvwrap.driver.owner = owner;
 
+	/**
+	 * 将设备驱动注册到设备模型中。
+	 */
 	retval = driver_register(&new_udriver->drvwrap.driver);
 
 	if (!retval) {
@@ -720,6 +785,9 @@ int usb_register_driver(struct usb_driver *new_driver, struct module *owner,
 	if (usb_disabled())
 		return -ENODEV;
 
+	/**
+	 * for_devices为0表示不是USB设备驱动，而是USB接口驱动。
+	 */
 	new_driver->drvwrap.for_devices = 0;
 	new_driver->drvwrap.driver.name = (char *) new_driver->name;
 	new_driver->drvwrap.driver.bus = &usb_bus_type;
@@ -730,6 +798,9 @@ int usb_register_driver(struct usb_driver *new_driver, struct module *owner,
 	spin_lock_init(&new_driver->dynids.lock);
 	INIT_LIST_HEAD(&new_driver->dynids.list);
 
+	/**
+	 * 注册驱动到驱动模型中。
+	 */
 	retval = driver_register(&new_driver->drvwrap.driver);
 
 	if (!retval) {
@@ -847,9 +918,12 @@ static int usb_suspend_interface(struct usb_interface *intf, pm_message_t msg)
 	driver = to_usb_driver(intf->dev.driver);
 
 	if (driver->suspend && driver->resume) {
+		/**
+		 * 调用驱动的挂起函数。
+		 */
 		status = driver->suspend(intf, msg);
 		if (status == 0)
-			mark_quiesced(intf);
+			mark_quiesced(intf);/* 设置活动标志，表示设备已经不可再使用 */
 		else if (!interface_to_usbdev(intf)->auto_pm)
 			dev_err(&intf->dev, "%s error %d\n",
 					"suspend", status);
@@ -1041,10 +1115,16 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 	struct usb_interface	*intf;
 	struct usb_device	*parent = udev->parent;
 
+	/**
+	 * 已经在挂起状态，退出。
+	 */
 	if (udev->state == USB_STATE_NOTATTACHED ||
 			udev->state == USB_STATE_SUSPENDED)
 		goto done;
 
+	/**
+	 * 根据设备自动唤醒标志和proc设置，得到是否允许远程唤醒设备。
+	 */
 	udev->do_remote_wakeup = device_may_wakeup(&udev->dev);
 
 	if (udev->auto_pm) {
@@ -1055,6 +1135,9 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 
 	/* Suspend all the interfaces and then udev itself */
 	if (udev->actconfig) {
+		/**
+		 * 首先挂起所有接口。
+		 */
 		for (; i < udev->actconfig->desc.bNumInterfaces; i++) {
 			intf = udev->actconfig->interface[i];
 			status = usb_suspend_interface(intf, msg);
@@ -1062,10 +1145,16 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 				break;
 		}
 	}
+	/**
+	 * 挂起了所有接口，再挂起设备本身。
+	 */
 	if (status == 0)
 		status = usb_suspend_device(udev, msg);
 
 	/* If the suspend failed, resume interfaces that did get suspended */
+	/**
+	 * 挂起设备失败，恢复已经挂起的接口。
+	 */
 	if (status != 0) {
 		while (--i >= 0) {
 			intf = udev->actconfig->interface[i];
@@ -1079,7 +1168,7 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 	/* If the suspend succeeded then prevent any more URB submissions,
 	 * flush any outstanding URBs, and propagate the suspend up the tree.
 	 */
-	} else {
+	} else {/* 既然设备已经挂起成功，就不用再处理自动挂起了。 */
 		cancel_delayed_work(&udev->autosuspend);
 		udev->can_submit = 0;
 		for (i = 0; i < 16; ++i) {
@@ -1478,6 +1567,9 @@ int usb_external_suspend_device(struct usb_device *udev, pm_message_t msg)
 	int	status;
 
 	usb_pm_lock(udev);
+	/**
+	 * 已经在挂起设备了，设置禁止挂起标志。
+	 */
 	udev->auto_pm = 0;
 	status = usb_suspend_both(udev, msg);
 	usb_pm_unlock(udev);
@@ -1512,10 +1604,16 @@ int usb_external_resume_device(struct usb_device *udev)
 	return status;
 }
 
+/**
+ * USB设备挂起函数。
+ */
 static int usb_suspend(struct device *dev, pm_message_t message)
 {
 	struct usb_device	*udev;
 
+	/**
+	 * 只有USB设备才支持PM。
+	 */
 	if (!is_usb_device(dev))	/* Ignore PM for interfaces */
 		return 0;
 	udev = to_usb_device(dev);

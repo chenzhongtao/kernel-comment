@@ -90,6 +90,9 @@ void dynamic_irq_cleanup(unsigned int irq)
  *	@irq:	irq number
  *	@chip:	pointer to irq chip description structure
  */
+/**
+ * 设置某个IRQ关联的控制芯片
+ */
 int set_irq_chip(unsigned int irq, struct irq_chip *chip)
 {
 	struct irq_desc *desc;
@@ -286,6 +289,9 @@ static inline void mask_ack_irq(struct irq_desc *desc, int irq)
  *	Note: The caller is expected to handle the ack, clear, mask and
  *	unmask issues if necessary.
  */
+/**
+ * 自行处理电流特性，或者不需要处理电流特性的简单中断。
+ */
 void fastcall
 handle_simple_irq(unsigned int irq, struct irq_desc *desc)
 {
@@ -375,6 +381,9 @@ out_unlock:
  *	for modern forms of interrupt handlers, which handle the flow
  *	details in hardware, transparently.
  */
+/**
+ * 此类中断只需要在ISR结束后调用eoi函数，比handle_edge_irq更简单。
+ */
 void fastcall
 handle_fasteoi_irq(unsigned int irq, struct irq_desc *desc)
 {
@@ -434,11 +443,16 @@ out:
  *	the handler was running. If all pending interrupts are handled, the
  *	loop is left.
  */
+/**
+ * 边沿触发的IRQ中断电流处理。大部分硬件采用此处理过程。
+ * 这种中断无须屏蔽，但是可能同时在两个CPU上触发。因此需要处理并发。
+ */
 void fastcall
 handle_edge_irq(unsigned int irq, struct irq_desc *desc)
 {
 	const unsigned int cpu = smp_processor_id();
 
+	/* 获得该中断对应的spinlock锁 */
 	spin_lock(&desc->lock);
 
 	desc->status &= ~(IRQ_REPLAY | IRQ_WAITING);
@@ -448,20 +462,22 @@ handle_edge_irq(unsigned int irq, struct irq_desc *desc)
 	 * we shouldn't process the IRQ. Mark it pending, handle
 	 * the necessary masking and go out
 	 */
-	if (unlikely((desc->status & (IRQ_INPROGRESS | IRQ_DISABLED)) ||
-		    !desc->action)) {
+	if (unlikely((desc->status & (IRQ_INPROGRESS | IRQ_DISABLED)) ||/* 其他核正在处理该中断，或者该中断已经被禁止了 */
+		    !desc->action)) {/* 没有提供中断处理程序，可能是生成的假中断 */
+		/* 设置挂起标志，等以后处理该中断 */
 		desc->status |= (IRQ_PENDING | IRQ_MASKED);
+		/* 向控制器发送应答消息 */
 		mask_ack_irq(desc, irq);
 		goto out_unlock;
 	}
 
-	kstat_cpu(cpu).irqs[irq]++;
+	kstat_cpu(cpu).irqs[irq]++;/* 计数 */
 
 	/* Start handling the irq */
-	desc->chip->ack(irq);
+	desc->chip->ack(irq);/* 开始处理中断，应答它 */
 
 	/* Mark the IRQ currently in progress.*/
-	desc->status |= IRQ_INPROGRESS;
+	desc->status |= IRQ_INPROGRESS;/* 设置处理标志，用于多核同步 */
 
 	do {
 		struct irqaction *action = desc->action;
@@ -486,13 +502,16 @@ handle_edge_irq(unsigned int irq, struct irq_desc *desc)
 
 		desc->status &= ~IRQ_PENDING;
 		spin_unlock(&desc->lock);
+		/* 调用ISR处理中断 */
 		action_ret = handle_IRQ_event(irq, action);
 		if (!noirqdebug)
 			note_interrupt(irq, desc, action_ret);
 		spin_lock(&desc->lock);
 
+	/* 如果在处理中断的过程中，其他核收到了中断，则由本核继续处理 */
 	} while ((desc->status & (IRQ_PENDING | IRQ_DISABLED)) == IRQ_PENDING);
 
+	/* 这里仍然由自旋锁保护，清除处理标志。这样其他核可以处理该中断了 */
 	desc->status &= ~IRQ_INPROGRESS;
 out_unlock:
 	spin_unlock(&desc->lock);
@@ -504,6 +523,9 @@ out_unlock:
  *	@desc:	the interrupt description structure for this irq
  *
  *	Per CPU interrupts on SMP machines without locking requirements
+ */
+/**
+ * 此类中断仅仅在一个CPU上运行，不需要考虑SMP同步。
  */
 void fastcall
 handle_percpu_irq(unsigned int irq, struct irq_desc *desc)

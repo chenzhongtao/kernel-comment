@@ -372,6 +372,9 @@ confused:
  *
  * This all causes the disk requests to be issued in the correct order.
  */
+/**
+ * 读取多页到页缓存中
+ */
 int
 mpage_readpages(struct address_space *mapping, struct list_head *pages,
 				unsigned nr_pages, get_block_t get_block)
@@ -383,13 +386,16 @@ mpage_readpages(struct address_space *mapping, struct list_head *pages,
 	unsigned long first_logical_block = 0;
 
 	clear_buffer_mapped(&map_bh);
+	/* 循环读取指定的页数 */
 	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+		/* 获得页面实例 */
 		struct page *page = list_entry(pages->prev, struct page, lru);
 
 		prefetchw(&page->flags);
-		list_del(&page->lru);
+		list_del(&page->lru);/* 从临时链表中摘除 */
 		if (!add_to_page_cache_lru(page, mapping,
-					page->index, GFP_KERNEL)) {
+					page->index, GFP_KERNEL)) {/* 添加页到地址空间的缓存中 */
+			/* 创建bio，从块层读取数据 */
 			bio = do_mpage_readpage(bio, page,
 					nr_pages - page_idx,
 					&last_block_in_bio, &map_bh,
@@ -399,7 +405,7 @@ mpage_readpages(struct address_space *mapping, struct list_head *pages,
 		page_cache_release(page);
 	}
 	BUG_ON(!list_empty(pages));
-	if (bio)
+	if (bio)/* 提交最后一个bio */
 		mpage_bio_submit(READ, bio);
 	return 0;
 }

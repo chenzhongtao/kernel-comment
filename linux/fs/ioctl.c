@@ -21,16 +21,17 @@ static long do_ioctl(struct file *filp, unsigned int cmd,
 {
 	int error = -ENOTTY;
 
-	if (!filp->f_op)
+	if (!filp->f_op)/* 文件没有指定f_op，也就没有实现其ioctl */
 		goto out;
 
-	if (filp->f_op->unlocked_ioctl) {
+	if (filp->f_op->unlocked_ioctl) {/* 该文件实现了unlocked_ioctl，这是新的驱动程序 */
+		/* 调用设备的ioctl方法，对块设备来说，是blkdev_ioctl */
 		error = filp->f_op->unlocked_ioctl(filp, cmd, arg);
 		if (error == -ENOIOCTLCMD)
 			error = -EINVAL;
 		goto out;
-	} else if (filp->f_op->ioctl) {
-		lock_kernel();
+	} else if (filp->f_op->ioctl) {/* 旧驱动，没有实现unlock版本 */
+		lock_kernel();/* 获取大内核锁以后再调用其ioctl回调 */
 		error = filp->f_op->ioctl(filp->f_path.dentry->d_inode,
 					  filp, cmd, arg);
 		unlock_kernel();
@@ -144,32 +145,39 @@ int vfs_ioctl(struct file *filp, unsigned int fd, unsigned int cmd, unsigned lon
 			else
 				error = -ENOTTY;
 			break;
-		default:
-			if (S_ISREG(filp->f_path.dentry->d_inode->i_mode))
+		default:/* 非标准的ioctl调用 */
+			if (S_ISREG(filp->f_path.dentry->d_inode->i_mode))/* 普通文件 */
 				error = file_ioctl(filp, cmd, arg);
-			else
+			else/* 非普通文件，调用特定的文件ioctl */
 				error = do_ioctl(filp, cmd, arg);
 			break;
 	}
 	return error;
 }
 
+/**
+ * ioctl系统调用
+ */
 asmlinkage long sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	struct file * filp;
 	int error = -EBADF;
 	int fput_needed;
 
+	/* 根据文件id得到文件描述描述符 */
 	filp = fget_light(fd, &fput_needed);
-	if (!filp)
+	if (!filp)/* 文件未打开，退出 */
 		goto out;
 
+	/* selinux检查是否有权限进行ioctl操作 */
 	error = security_file_ioctl(filp, cmd, arg);
 	if (error)
 		goto out_fput;
 
+	/* 进行ioctl调用 */
 	error = vfs_ioctl(filp, fd, cmd, arg);
  out_fput:
+ 	/* 递减文件描述符的引用 */
 	fput_light(filp, fput_needed);
  out:
 	return error;

@@ -264,6 +264,9 @@ static unsigned long calculate_numa_remap_pages(void)
 }
 
 extern void setup_bootmem_allocator(void);
+/**
+ * 初始化IA32架构的初始内存分配器
+ */
 unsigned long __init setup_memory(void)
 {
 	int nid;
@@ -276,6 +279,7 @@ unsigned long __init setup_memory(void)
 	 * this space and use it to adjust the boundary between ZONE_NORMAL
 	 * and ZONE_HIGHMEM.
 	 */
+	/* 确定内核可直接访问内存区域 */
 	find_max_pfn();
 	get_memcfg_numa();
 
@@ -339,6 +343,7 @@ unsigned long __init setup_memory(void)
 
 	memset(NODE_DATA(0), 0, sizeof(struct pglist_data));
 	NODE_DATA(0)->bdata = &node0_bdata;
+	/* 初始化boot内存分配器 */
 	setup_bootmem_allocator();
 	return max_low_pfn;
 }

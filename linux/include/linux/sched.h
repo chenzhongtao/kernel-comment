@@ -5,14 +5,17 @@
  * cloning flags:
  */
 #define CSIGNAL		0x000000ff	/* signal mask to be sent at exit */
+/* 在父子进程之间共享地址空间 */
 #define CLONE_VM	0x00000100	/* set if VM shared between processes */
 #define CLONE_FS	0x00000200	/* set if fs info shared between processes */
 #define CLONE_FILES	0x00000400	/* set if open files shared between processes */
 #define CLONE_SIGHAND	0x00000800	/* set if signal handlers and blocked signals shared */
 #define CLONE_PTRACE	0x00002000	/* set if we want to let tracing continue on the child too */
+/* 正在进行VFORK系统调用，在子进程释放其地址空间时，唤醒父进程 */
 #define CLONE_VFORK	0x00004000	/* set if the parent wants the child to wake it up on mm_release */
 #define CLONE_PARENT	0x00008000	/* set if we want to have the same parent as the cloner */
 #define CLONE_THREAD	0x00010000	/* Same thread group? */
+/* 父子进程使用独立的命名空间 */
 #define CLONE_NEWNS	0x00020000	/* New namespace group? */
 #define CLONE_SYSVSEM	0x00040000	/* share system V SEM_UNDO semantics */
 #define CLONE_SETTLS	0x00080000	/* create a new TLS for the child */
@@ -22,18 +25,27 @@
 #define CLONE_UNTRACED		0x00800000	/* set if the tracing process can't force CLONE_PTRACE on this clone */
 #define CLONE_CHILD_SETTID	0x01000000	/* set the TID in the child */
 #define CLONE_STOPPED		0x02000000	/* Start in stopped state */
+/* fork时创建新的UTS命名空间 */
 #define CLONE_NEWUTS		0x04000000	/* New utsname group? */
+/* fork时创建新的IPC命名空间 */
 #define CLONE_NEWIPC		0x08000000	/* New ipcs */
+/* fork时创建新的用户命名空间 */
 #define CLONE_NEWUSER		0x10000000	/* New user namespace */
+/* fork时创建新的PID命名空间 */
 #define CLONE_NEWPID		0x20000000	/* New pid namespace */
+/* fork时创建新的网络命名空间 */
 #define CLONE_NEWNET		0x40000000	/* New network namespace */
 
 /*
  * Scheduling policies
  */
+/* 普通调度策略 */
 #define SCHED_NORMAL		0
+/* FIFO实时进程 */
 #define SCHED_FIFO		1
+/* RR实时进程 */
 #define SCHED_RR		2
+/* SCHED_BATCH和SCHED_IDLE也由公平调度器处理，但是表示那些不是很重要的进程 */
 #define SCHED_BATCH		3
 /* SCHED_ISO: reserved but not implemented yet */
 #define SCHED_IDLE		5
@@ -167,13 +179,20 @@ print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
  * modifying one set can't modify the other one by
  * mistake.
  */
+/* 可运行状态 */
 #define TASK_RUNNING		0
+/* 等待事件状态，可被信号唤醒 */
 #define TASK_INTERRUPTIBLE	1
+/* 等待事件状态，不可被信号唤醒 */
 #define TASK_UNINTERRUPTIBLE	2
+/* 进程特意停止运行，如被调试器暂停 */
 #define TASK_STOPPED		4
+/* 不属于进程状态，表示进程正在被调试 */
 #define TASK_TRACED		8
 /* in tsk->exit_state */
+/* 退出状态exit_state，表示僵尸状态 */
 #define EXIT_ZOMBIE		16
+/* wait系统调用已经发出，而进程完全从系统移除之前的状态，当多个线程对同一个进程发出wait调用时有意义 */
 #define EXIT_DEAD		32
 /* in tsk->state again */
 #define TASK_DEAD		64
@@ -374,8 +393,11 @@ extern int get_dumpable(struct mm_struct *mm);
 	((1 << MMF_DUMP_ANON_PRIVATE) |	(1 << MMF_DUMP_ANON_SHARED))
 
 struct sighand_struct {
+	/* 共享该结构实例的进程数目，当clone时，进程可以指定父子进程共享同一个信号处理程序 */
 	atomic_t		count;
+	/* 用户设置的信号处理函数，如果没有设置，则为SIG_DFL。 */
 	struct k_sigaction	action[_NSIG];
+	/* 保护任务信号的锁 */
 	spinlock_t		siglock;
 	wait_queue_head_t	signalfd_wqh;
 };
@@ -427,10 +449,13 @@ struct signal_struct {
 	/* ITIMER_REAL timer for the process */
 	struct hrtimer real_timer;
 	struct task_struct *tsk;
+	/* real定时器的定时间隔，如果为0，则表示是一次性定时器 */
 	ktime_t it_real_incr;
 
 	/* ITIMER_PROF and ITIMER_VIRTUAL timers for the process */
+	/* ITIMER_PROF和ITIMER_VIRTUAL定时器还剩下多少时间 */
 	cputime_t it_prof_expires, it_virt_expires;
+	/* ITIMER_PROF和ITIMER_VIRTUAL定时器的定时间隔 */
 	cputime_t it_prof_incr, it_virt_incr;
 
 	/* job control IDs */
@@ -442,6 +467,10 @@ struct signal_struct {
 
 	union {
 		pid_t pgrp __deprecated;
+		/**
+		 * 进程所属进程组组长的pid，可通过setpgrq系统调用合并进程组 
+		 * 进程组简化了所属向组发送信号的操作。用管道连接的进程包含在同一进程组中。
+		 */
 		pid_t __pgrp;
 	};
 
@@ -449,6 +478,10 @@ struct signal_struct {
 
 	union {
 		pid_t session __deprecated;
+		/**
+		 * 进程会话ID。可通过setsid设置。
+		 * 几个进程组可以合并成一个会话。
+		 */
 		pid_t __session;
 	};
 
@@ -525,8 +558,13 @@ struct signal_struct {
 /*
  * Some day this will be a full-fledged user tracking system..
  */
+/**
+ * 命名空间中，某个用户的统计值。
+ * 如进程和打开文件计数。
+ */
 struct user_struct {
 	atomic_t __count;	/* reference count */
+	/* 该用户创建的进程数量 */
 	atomic_t processes;	/* How many processes does this user have? */
 	atomic_t files;		/* How many open files does this user have? */
 	atomic_t sigpending;	/* How many pending signals does this user have? */
@@ -821,19 +859,30 @@ struct uts_namespace;
 struct rq;
 struct sched_domain;
 
+/**
+ * 调度类结构
+ */
 struct sched_class {
+	/* 通过此字段将调度类链接到在一起。顺序是实时类、CFS类、IDLE类 */
 	const struct sched_class *next;
 
+	/* 向就绪队列中添加一个新进程。在进程从睡眠状态变为可运行状态时，调用此函数。 */
 	void (*enqueue_task) (struct rq *rq, struct task_struct *p, int wakeup);
+	/* 将进程从就绪队列中移除 */
 	void (*dequeue_task) (struct rq *rq, struct task_struct *p, int sleep);
+	/* 在进程想要自愿放弃对处理器的控制权时，调用此函数 */
 	void (*yield_task) (struct rq *rq);
 
+	/* 检查是否需要抢占当前进程，例如，当唤醒一个新进程时调用此函数 */
 	void (*check_preempt_curr) (struct rq *rq, struct task_struct *p);
 
+	/* 选择下一个将要运行的进程 */
 	struct task_struct * (*pick_next_task) (struct rq *rq);
+	/* 在进程被替换前调用，替换后仍然位于就绪队列中 */
 	void (*put_prev_task) (struct rq *rq, struct task_struct *p);
 
 #ifdef CONFIG_SMP
+	/* 从最忙的就绪队列中移动多个进程到当前CPU，移动的负载不能比max_load_move多 */
 	unsigned long (*load_balance) (struct rq *this_rq, int this_cpu,
 			struct rq *busiest, unsigned long max_load_move,
 			struct sched_domain *sd, enum cpu_idle_type idle,
@@ -844,12 +893,20 @@ struct sched_class {
 			      enum cpu_idle_type idle);
 #endif
 
+	/* 当前进程调度策略发生变化时，调用此函数将进程放入其他队列 */
 	void (*set_curr_task) (struct rq *rq);
+	/* 每次激活周期性调度器时，由周期性调度器调用 */
 	void (*task_tick) (struct rq *rq, struct task_struct *p);
+	/* 用于建立fork系统调用和调度器之间的关联。每次创建新进程时，调用此函数通知调度器 */
 	void (*task_new) (struct rq *rq, struct task_struct *p);
 };
 
+/* 权重 */
 struct load_weight {
+	/**
+	 * 进程权重，以及权重的倒数。 
+	 * 进程每降低一个nice值，则多获得10%的CPU时间。每升高一个nice值，则放弃10%的CPU时间。
+	 */
 	unsigned long weight, inv_weight;
 };
 
@@ -863,14 +920,24 @@ struct load_weight {
  *     4 se->sleep_start
  *     6 se->load.weight
  */
+/**
+ * 调度实体
+ */
 struct sched_entity {
+	/* 调度实体在队列中的权重 */
 	struct load_weight	load;		/* for load-balancing */
+	/* 用于将实体挂入红黑树 */
 	struct rb_node		run_node;
+	/* 是否正在队列中 */
 	unsigned int		on_rq;
 
+	/* 上次更新sum_exec_runtime的时间 */
 	u64			exec_start;
+	/* 记录进程运行的时间 */
 	u64			sum_exec_runtime;
+	/* 进程执行过程时，虚拟时钟上流逝的时间数量 */
 	u64			vruntime;
+	/* 上次进程撤销CPU时，进程运行的时间 */
 	u64			prev_sum_exec_runtime;
 
 #ifdef CONFIG_SCHEDSTATS
@@ -906,6 +973,7 @@ struct sched_entity {
 #endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	/* 为支持cgroups功能，通过此字段维护cgroups对象之间的层次关系。 */
 	struct sched_entity	*parent;
 	/* rq on which this entity is (to be) queued: */
 	struct cfs_rq		*cfs_rq;
@@ -915,6 +983,9 @@ struct sched_entity {
 };
 
 struct task_struct {
+	/**
+	 * 进程状态，如TASK_RUNNING
+	 */
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
 	void *stack;
 	atomic_t usage;
@@ -929,9 +1000,18 @@ struct task_struct {
 #endif
 #endif
 
+	/**
+	 * static_prio:进程的静态优先级，由启动时分配，nice和sched_setscheduler修改
+	 * prio和normal_prio是动态优先级。
+	 * normal_prio是由调度策略和静态优先级计算出来的优先级。
+	 * prio是运行时的动态优先级。某些情况下内核可能会暂时提升进程的优先级。如优先级继承。
+	 */
 	int prio, static_prio, normal_prio;
+	/* 对于RR实时进程，通过此字段将它加入到RR链表 */
 	struct list_head run_list;
+	/* 进程所属的调度器类 */
 	const struct sched_class *sched_class;
+	/* sched_entity代表一个调度实体，一个调度实体包含一组进程。这个功能用于cgroup */
 	struct sched_entity se;
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
@@ -954,8 +1034,11 @@ struct task_struct {
 	unsigned int btrace_seq;
 #endif
 
+	/* 进程的调度策略，如SCHED_NORMAL */
 	unsigned int policy;
+	/* 进程的CPU亲和性 */
 	cpumask_t cpus_allowed;
+	/* 对于RR进程来说，此字段表示进程可使用CPU的剩余时间段 */
 	unsigned int time_slice;
 
 #if defined(CONFIG_SCHEDSTATS) || defined(CONFIG_TASK_DELAY_ACCT)
@@ -970,6 +1053,7 @@ struct task_struct {
 	struct list_head ptrace_children;
 	struct list_head ptrace_list;
 
+	/* 分别代表用户态地址空间和实际使用的地址空间 */
 	struct mm_struct *mm, *active_mm;
 
 /* task state */
@@ -977,10 +1061,12 @@ struct task_struct {
 	int exit_state;
 	int exit_code, exit_signal;
 	int pdeath_signal;  /*  The signal sent when the parent dies  */
-	/* ??? */
+	/* 体系结构的一些特殊限制，如READ_IMPLIES_EXEC */
 	unsigned int personality;
 	unsigned did_exec:1;
+	/* 进程pid，全局命名空间中的pid */
 	pid_t pid;
+	/* 进程组ID，如果进程是领头进程，则tgid与pid相等 */
 	pid_t tgid;
 
 #ifdef CONFIG_CC_STACKPROTECTOR
@@ -998,18 +1084,25 @@ struct task_struct {
 	 * children/sibling forms the list of my children plus the
 	 * tasks I'm ptracing.
 	 */
+	/* 子进程链表头 */
 	struct list_head children;	/* list of my children */
+	/* 通过此字段链接到父进程的children链表 */
 	struct list_head sibling;	/* linkage in my parent's children list */
+	/* 线程组的领头进程结构 */
 	struct task_struct *group_leader;	/* threadgroup leader */
 
 	/* PID/PID hash table linkage. */
+	/* 将进程链接到全局pid_hash哈希表的结构 */
 	struct pid_link pids[PIDTYPE_MAX];
 	struct list_head thread_group;
 
+	/* vfork调用使用的完成变量，子进程在释放虚拟地址空间时，唤醒在这上面等待的父进程 */
 	struct completion *vfork_done;		/* for vfork() */
+	/* 用户态保存新进程pid的地址，用于NPTL库 */
 	int __user *set_child_tid;		/* CLONE_CHILD_SETTID */
 	int __user *clear_child_tid;		/* CLONE_CHILD_CLEARTID */
 
+	/* 进程的实时优先级，最高99，最低0 */
 	unsigned int rt_priority;
 	cputime_t utime, stime, utimescaled, stimescaled;
 	cputime_t gtime;
@@ -1030,6 +1123,7 @@ struct task_struct {
 	struct group_info *group_info;
 	kernel_cap_t   cap_effective, cap_inheritable, cap_permitted;
 	unsigned keep_capabilities:1;
+	/* 当前进程的用户 */
 	struct user_struct *user;
 #ifdef CONFIG_KEYS
 	struct key *request_key_auth;	/* assumed request_key authority */
@@ -1041,27 +1135,36 @@ struct task_struct {
 				       it with task_lock())
 				     - initialized normally by flush_old_exec */
 /* file system info */
+	/* 用于在查找文件系统中的文件时，防止无限循环 */
 	int link_count, total_link_count;
 #ifdef CONFIG_SYSVIPC
 /* ipc stuff */
+	/* 在进程异常退出时，用于撤销已经申请的sysv信号量，防止死锁 */
 	struct sysv_sem sysvsem;
 #endif
 /* CPU-specific state of this task */
 	struct thread_struct thread;
 /* filesystem information */
+	/* 进程文件系统相关信息，如当前目录 */
 	struct fs_struct *fs;
 /* open file information */
+	/* 当前进程的文件描述符 */
 	struct files_struct *files;
 /* namespaces */
+	/* 进程所属命名空间 */
 	struct nsproxy *nsproxy;
 /* signal handlers */
 	struct signal_struct *signal;
+	/* 用于管理用户设置的信号处理程序 */
 	struct sighand_struct *sighand;
 
+	/* 所有阻塞的信号，是一个位掩码 */
 	sigset_t blocked, real_blocked;
 	sigset_t saved_sigmask;		/* To be restored with TIF_RESTORE_SIGMASK */
+	/* 已经触发、有待处理的信号链表 */
 	struct sigpending pending;
 
+	/* 用户态信号处理栈地址及长度 */
 	unsigned long sas_ss_sp;
 	size_t sas_ss_size;
 	int (*notifier)(void *priv);
@@ -1117,9 +1220,11 @@ struct task_struct {
 #endif
 
 /* journalling filesystem info */
+	/* 当前进程的日志，用于JBD和ext3 */
 	void *journal_info;
 
 /* stacked block device info */
+	/* 处理bio请求时使用，防止generic_make_request和_generic_make_request之间递归调用 */
 	struct bio *bio_list, **bio_tail;
 
 /* VM state */
@@ -1221,6 +1326,9 @@ static inline void set_task_pgrp(struct task_struct *tsk, pid_t pgrp)
 	tsk->signal->__pgrp = pgrp;
 }
 
+/**
+ * 获取任务关联的PID
+ */
 static inline struct pid *task_pid(struct task_struct *task)
 {
 	return task->pids[PIDTYPE_PID].pid;
@@ -1231,6 +1339,9 @@ static inline struct pid *task_tgid(struct task_struct *task)
 	return task->group_leader->pids[PIDTYPE_PID].pid;
 }
 
+/**
+ * 获取进程组ID
+ */
 static inline struct pid *task_pgrp(struct task_struct *task)
 {
 	return task->group_leader->pids[PIDTYPE_PGID].pid;
@@ -1376,6 +1487,10 @@ static inline void put_task_struct(struct task_struct *t)
 #define PF_SWAPOFF	0x00080000	/* I am in swapoff */
 #define PF_LESS_THROTTLE 0x00100000	/* Throttle me less: I clean memory */
 #define PF_BORROWED_MM	0x00200000	/* I am a kthread doing use_mm */
+/**
+ * 内存不会为进程的栈和内存映射的起点选择固定位置。而是在每次新进程启动时随机改变这些值。
+ * 用于安全的目的。
+ */
 #define PF_RANDOMIZE	0x00400000	/* randomize virtual address space */
 #define PF_SWAPWRITE	0x00800000	/* Allowed to write to swap */
 #define PF_SPREAD_PAGE	0x01000000	/* Spread page cache over cpuset */

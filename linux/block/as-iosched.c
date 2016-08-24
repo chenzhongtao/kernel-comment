@@ -1438,6 +1438,9 @@ static struct elv_fs_entry as_attrs[] = {
 	__ATTR_NULL
 };
 
+/**
+ * Ô¤²âµ÷¶ÈÆ÷¡£
+ */
 static struct elevator_type iosched_as = {
 	.ops = {
 		.elevator_merge_fn = 		as_merge,

@@ -145,6 +145,9 @@ int update_persistent_clock(struct timespec now)
 	return set_rtc_mmss(now.tv_sec);
 }
 
+/**
+ * 时钟中断处理函数
+ */
 static irqreturn_t timer_event_interrupt(int irq, void *dev_id)
 {
 	add_pda(irq0_irqs, 1);

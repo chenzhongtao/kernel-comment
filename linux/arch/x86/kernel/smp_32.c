@@ -407,6 +407,9 @@ void flush_tlb_current_task(void)
 	preempt_enable();
 }
 
+/**
+ * 将某个进程的TLB从缓存中刷出
+ */
 void flush_tlb_mm (struct mm_struct * mm)
 {
 	cpumask_t cpu_mask;
@@ -459,6 +462,9 @@ static void do_flush_tlb_all(void* info)
 		leave_mm(cpu);
 }
 
+/**
+ * 将所有TLB从缓存中刷出
+ */
 void flush_tlb_all(void)
 {
 	on_each_cpu(do_flush_tlb_all, NULL, 1, 1);

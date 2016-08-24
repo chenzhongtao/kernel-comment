@@ -766,7 +766,7 @@ specific_send_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	assert_spin_locked(&t->sighand->siglock);
 
 	/* Short-circuit ignored signals.  */
-	if (sig_ignored(t, sig))
+	if (sig_ignored(t, sig))/* 需要忽略此信号，例如，没有设置此信号的处理函数，并且默认处理过程是忽略 */
 		goto out;
 
 	/* Support queueing exactly one non-rt signal, so that we
@@ -775,9 +775,10 @@ specific_send_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	if (LEGACY_QUEUE(&t->pending, sig))
 		goto out;
 
+	/* 产生一个sigqueue实例，并将其添加到进程的挂起链表 */
 	ret = send_signal(sig, info, t, &t->pending);
-	if (!ret && !sigismember(&t->blocked, sig))
-		signal_wake_up(t, sig == SIGKILL);
+	if (!ret && !sigismember(&t->blocked, sig))/* 信号发送成功，并且没有被阻塞 */
+		signal_wake_up(t, sig == SIGKILL);/* 唤醒进程 */
 out:
 	return ret;
 }
@@ -2209,6 +2210,7 @@ sys_rt_sigtimedwait(const sigset_t __user *uthese,
 	return ret;
 }
 
+/* 向进程组的所有进程发送一个信号 */
 asmlinkage long
 sys_kill(int pid, int sig)
 {
@@ -2237,8 +2239,10 @@ static int do_tkill(int tgid, int pid, int sig)
 	info.si_uid = current->uid;
 
 	read_lock(&tasklist_lock);
+	/* 查找pid进程的任务结构 */
 	p = find_task_by_vpid(pid);
-	if (p && (tgid <= 0 || task_tgid_vnr(p) == tgid)) {
+	if (p && (tgid <= 0 || task_tgid_vnr(p) == tgid)) {/* 目标进程存在，并且与进程属于同一组 */
+		/* 检查进程是否有权限发送该信号 */
 		error = check_kill_permission(sig, &info, p);
 		/*
 		 * The null signal is a permissions and process existence
@@ -2247,6 +2251,7 @@ static int do_tkill(int tgid, int pid, int sig)
 		if (!error && sig && p->sighand) {
 			spin_lock_irq(&p->sighand->siglock);
 			handle_stop_signal(sig, p);
+			/* 发送信号 */
 			error = specific_send_sig_info(sig, &info, p);
 			spin_unlock_irq(&p->sighand->siglock);
 		}
@@ -2278,11 +2283,14 @@ asmlinkage long sys_tgkill(int tgid, int pid, int sig)
 /*
  *  Send a signal to only one task, even if it's a CLONE_THREAD task.
  */
+/**
+ * 向单个进程发送信号
+ */
 asmlinkage long
 sys_tkill(int pid, int sig)
 {
 	/* This is only valid for single tasks */
-	if (pid <= 0)
+	if (pid <= 0)/* 表示向所有进程发送，本调用不支持 */
 		return -EINVAL;
 
 	return do_tkill(0, pid, sig);
@@ -2418,6 +2426,9 @@ out:
 
 #ifdef __ARCH_WANT_SYS_SIGPENDING
 
+/**
+ * 检查是否有待决信号
+ */
 asmlinkage long
 sys_sigpending(old_sigset_t __user *set)
 {
@@ -2430,6 +2441,9 @@ sys_sigpending(old_sigset_t __user *set)
 /* Some platforms have their own version with special arguments others
    support only sys_rt_sigprocmask.  */
 
+/**
+ * 修改阻塞信号的位掩码
+ */
 asmlinkage long
 sys_sigprocmask(int how, old_sigset_t __user *set, old_sigset_t __user *oset)
 {

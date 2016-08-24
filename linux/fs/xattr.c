@@ -31,10 +31,10 @@ xattr_permission(struct inode *inode, const char *name, int mask)
 	 * We can never set or remove an extended attribute on a read-only
 	 * filesystem  or on an immutable / append-only inode.
 	 */
-	if (mask & MAY_WRITE) {
-		if (IS_RDONLY(inode))
+	if (mask & MAY_WRITE) {/* 判断修改权限 */
+		if (IS_RDONLY(inode))/* 文件只读 */
 			return -EROFS;
-		if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
+		if (IS_IMMUTABLE(inode) || IS_APPEND(inode))/* 不允许修改 */
 			return -EPERM;
 	}
 
@@ -44,19 +44,19 @@ xattr_permission(struct inode *inode, const char *name, int mask)
 	 */
 	if (!strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN) ||
 	    !strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return 0;
+		return 0;/* 不允许用户修改安全属性 */
 
 	/*
 	 * The trusted.* namespace can only be accessed by a privileged user.
 	 */
 	if (!strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN))
-		return (capable(CAP_SYS_ADMIN) ? 0 : -EPERM);
+		return (capable(CAP_SYS_ADMIN) ? 0 : -EPERM);/* 不允许用户修改trusted属性 */
 
 	/* In user.* namespace, only regular files and directories can have
 	 * extended attributes. For sticky directories, only the owner and
 	 * privileged user can write attributes.
 	 */
-	if (!strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN)) {
+	if (!strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN)) {/* user*空间的属性，只允许修改目录和普通文件 */
 		if (!S_ISREG(inode->i_mode) && !S_ISDIR(inode->i_mode))
 			return -EPERM;
 		if (S_ISDIR(inode->i_mode) && (inode->i_mode & S_ISVTX) &&
@@ -64,6 +64,7 @@ xattr_permission(struct inode *inode, const char *name, int mask)
 			return -EPERM;
 	}
 
+	/* 通用权限检查过程 */
 	return permission(inode, mask, NULL);
 }
 
@@ -74,31 +75,38 @@ vfs_setxattr(struct dentry *dentry, char *name, void *value,
 	struct inode *inode = dentry->d_inode;
 	int error;
 
+	/* 检查用户是否有权限修改扩展属性 */
 	error = xattr_permission(inode, name, MAY_WRITE);
 	if (error)
 		return error;
 
+	/* 获取节点的锁 */
 	mutex_lock(&inode->i_mutex);
+	/* Selinux安全检查 */
 	error = security_inode_setxattr(dentry, name, value, size, flags);
 	if (error)
 		goto out;
 	error = -EOPNOTSUPP;
 	if (inode->i_op->setxattr) {
+		/* 文件系统指定了setxattr回调，则调用它来设置属性 */
 		error = inode->i_op->setxattr(dentry, name, value, size, flags);
-		if (!error) {
+		if (!error) {/* 同时通过fsnotify属性变化事件 */
 			fsnotify_xattr(dentry);
+			/* 通知安全模块 */
 			security_inode_post_setxattr(dentry, name, value,
 						     size, flags);
 		}
 	} else if (!strncmp(name, XATTR_SECURITY_PREFIX,
-				XATTR_SECURITY_PREFIX_LEN)) {
+				XATTR_SECURITY_PREFIX_LEN)) {/* 没有提供回调，但是是安全相关的属性 */
 		const char *suffix = name + XATTR_SECURITY_PREFIX_LEN;
+		/* 由安全模块处理属性 */
 		error = security_inode_setsecurity(inode, suffix, value,
 						   size, flags);
-		if (!error)
+		if (!error)/* 通知fsnotify */
 			fsnotify_xattr(dentry);
 	}
 out:
+	/* 释放锁 */
 	mutex_unlock(&inode->i_mutex);
 	return error;
 }
@@ -191,6 +199,9 @@ EXPORT_SYMBOL_GPL(vfs_removexattr);
 /*
  * Extended attribute SET operations
  */
+/**
+ * 设置扩展属性
+ */
 static long
 setxattr(struct dentry *d, char __user *name, void __user *value,
 	 size_t size, int flags)
@@ -202,24 +213,28 @@ setxattr(struct dentry *d, char __user *name, void __user *value,
 	if (flags & ~(XATTR_CREATE|XATTR_REPLACE))
 		return -EINVAL;
 
+	/* 从用户空间获取名称和值参数 */
 	error = strncpy_from_user(kname, name, sizeof(kname));
 	if (error == 0 || error == sizeof(kname))
 		error = -ERANGE;
 	if (error < 0)
 		return error;
 
-	if (size) {
+	if (size) {/* 检查参数有效性 */
 		if (size > XATTR_SIZE_MAX)
 			return -E2BIG;
+		/* 在内核中分配内存保存参数 */
 		kvalue = kmalloc(size, GFP_KERNEL);
 		if (!kvalue)
 			return -ENOMEM;
+		/* 从用户空间复制数据 */
 		if (copy_from_user(kvalue, value, size)) {
 			kfree(kvalue);
 			return -EFAULT;
 		}
 	}
 
+	/* 通过VFS层设置属性 */
 	error = vfs_setxattr(d, kname, kvalue, size, flags);
 	kfree(kvalue);
 	return error;
@@ -584,6 +599,9 @@ generic_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
 /*
  * Find the handler for the prefix and dispatch its set() operation.
  */
+/**
+ * 通用的设置扩展属性的过程
+ */
 int
 generic_setxattr(struct dentry *dentry, const char *name, const void *value, size_t size, int flags)
 {
@@ -592,9 +610,11 @@ generic_setxattr(struct dentry *dentry, const char *name, const void *value, siz
 
 	if (size == 0)
 		value = "";  /* empty EA, do not remove */
+	/* 在超级块描述符中查找属性所属空间的处理程序 */
 	handler = xattr_resolve_name(inode->i_sb->s_xattr, &name);
 	if (!handler)
 		return -EOPNOTSUPP;
+	/* 回调其set函数来处理属性 */
 	return handler->set(inode, name, value, size, flags);
 }
 

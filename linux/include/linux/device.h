@@ -49,13 +49,20 @@ extern int __must_check bus_create_file(struct bus_type *,
 					struct bus_attribute *);
 extern void bus_remove_file(struct bus_type *, struct bus_attribute *);
 
+/**
+ * 总线数据类型
+ */
 struct bus_type {
+	/* 总线的名称 */
 	const char		* name;
+	/* 所属模块 */
 	struct module		* owner;
 
+	/* 用于sysfs文件系统 */
 	struct kset		subsys;
 	struct kset		drivers;
 	struct kset		devices;
+	/* 链表表头，分别表示设备链表和驱动链表 */
 	struct klist		klist_devices;
 	struct klist		klist_drivers;
 
@@ -65,10 +72,14 @@ struct bus_type {
 	struct device_attribute	* dev_attrs;
 	struct driver_attribute	* drv_attrs;
 
+	/* 查找与给定设备匹配的驱动程序 */
 	int		(*match)(struct device * dev, struct device_driver * drv);
 	int		(*uevent)(struct device *dev, struct kobj_uevent_env *env);
+	/* 检测设备在系统中是否真实存在 */
 	int		(*probe)(struct device * dev);
+	/* 删除驱动与设备之间的关联 */
 	int		(*remove)(struct device * dev);
+	/* 用于电源管理 */
 	void		(*shutdown)(struct device * dev);
 
 	int (*suspend)(struct device * dev, pm_message_t state);
@@ -118,20 +129,31 @@ extern int bus_unregister_notifier(struct bus_type *bus,
 #define BUS_NOTIFY_UNBIND_DRIVER	0x00000004 /* driver about to be
 						      unbound */
 
+/**
+ * 设备驱动程序通用数据结构
+ */
 struct device_driver {
+	/* 驱动名称 */
 	const char		* name;
+	/* 所属总线 */
 	struct bus_type		* bus;
 
+	/* 用于sysfs文件系统的通用对象 */
 	struct kobject		kobj;
+	/* 本驱动管理的所有设备表头 */
 	struct klist		klist_devices;
+	/* 通过此字段链接到总线的驱动链表中 */
 	struct klist_node	knode_bus;
 
+	/* 所属模块 */
 	struct module		* owner;
 	const char 		* mod_name;	/* used for built-in modules */
 	struct module_kobject	* mkobj;
 
+	/* 探测函数，用来检测系统中是否存在 能够用该设备驱动程序处理的设备 */
 	int	(*probe)	(struct device * dev);
 	int	(*remove)	(struct device * dev);
+	/* 用于电源管理 */
 	void	(*shutdown)	(struct device * dev);
 	int	(*suspend)	(struct device * dev, pm_message_t state);
 	int	(*resume)	(struct device * dev);
@@ -397,14 +419,21 @@ extern int devres_release_group(struct device *dev, void *id);
 extern void *devm_kzalloc(struct device *dev, size_t size, gfp_t gfp);
 extern void devm_kfree(struct device *dev, void *p);
 
+/* 通用设备数据结构 */
 struct device {
+	/* klist链表表头，指向子设备 */
 	struct klist		klist_children;
+	/* 通过此字段链接到父设备的klist链表 */
 	struct klist_node	knode_parent;		/* node in sibling list */
+	/* 通过此字段链接到驱动程序的设备链表中 */
 	struct klist_node	knode_driver;
 	struct klist_node	knode_bus;
+	/* 父设备 */
 	struct device		*parent;
 
+	/* 用于sysfs文件系统 */
 	struct kobject kobj;
+	/* 按总线编号、插槽编号、功能号的方式组织的位置信息 */
 	char	bus_id[BUS_ID_SIZE];	/* position on parent bus */
 	struct device_type	*type;
 	unsigned		is_registered:1;
@@ -414,9 +443,12 @@ struct device {
 					 * its driver.
 					 */
 
+	/* 设备所在的总线 */
 	struct bus_type	* bus;		/* type of bus device is on */
+	/* 设备的驱动程序 */
 	struct device_driver *driver;	/* which driver has allocated this
 					   device */
+	/* 设备驱动程序的私有数据。通用代码不能修改它 */
 	void		*driver_data;	/* data private to the driver */
 	void		*platform_data;	/* Platform specific data, device
 					   core doesn't touch it */
@@ -448,6 +480,7 @@ struct device {
 	dev_t			devt;		/* dev_t, creates the sysfs "dev" */
 	struct attribute_group	**groups;	/* optional groups */
 
+	/* 析构函数 */
 	void	(*release)(struct device * dev);
 };
 

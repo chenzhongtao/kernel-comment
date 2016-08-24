@@ -51,15 +51,26 @@ typedef int (get_info_t)(char *, char **, off_t, int);
 typedef struct proc_dir_entry *(shadow_proc_t)(struct task_struct *task,
 						struct proc_dir_entry *pde);
 
+/**
+ * proc文件系统中的项
+ */
 struct proc_dir_entry {
+	/* inode编号 */
 	unsigned int low_ino;
+	/* 名称字段长度 */
 	unsigned short namelen;
+	/* proc项名称 */
 	const char *name;
+	/* 权限及文件类型 */
 	mode_t mode;
+	/* 子目录和符号链接计数 */
 	nlink_t nlink;
+	/* 文件所有者，一般为0 */
 	uid_t uid;
 	gid_t gid;
+	/* 文件长度，一般为0 */
 	loff_t size;
+	/* inode回调 */
 	const struct inode_operations *proc_iops;
 	/*
 	 * NULL ->proc_fops means "PDE is going away RSN" or
@@ -69,13 +80,23 @@ struct proc_dir_entry {
 	 * If you're allocating ->proc_fops dynamically, save a pointer
 	 * somewhere.
 	 */
+	/* 文件操作回调 */
 	const struct file_operations *proc_fops;
+	/* 指向返回数据的函数 */
 	get_info_t *get_info;
+	/* 所属模块 */
 	struct module *owner;
+	/**
+	 * parent父目录对象 
+	 * next下一个文件或目录，即兄弟节点
+	 * subdir第一个子目录或文件
+	 */
 	struct proc_dir_entry *next, *parent, *subdir;
 	void *data;
+	/* 读取，写入数据的函数 */
 	read_proc_t *read_proc;
 	write_proc_t *write_proc;
+	/* 使用计数 */
 	atomic_t count;		/* use count */
 	int pde_users;	/* number of callers into module in progress */
 	spinlock_t pde_unload_lock; /* proc_fops checks and pde_users bumps */
@@ -256,19 +277,26 @@ static inline void kclist_add(struct kcore_list *new, void *addr, size_t size)
 extern void kclist_add(struct kcore_list *, void *, size_t);
 #endif
 
+/* 这两个结构将proc和VFS联系起来 */
 union proc_op {
 	int (*proc_get_link)(struct inode *, struct dentry **, struct vfsmount **);
+	/* 获得进程的信息 */
 	int (*proc_read)(struct task_struct *task, char *page);
 };
 
 struct proc_inode {
+	/* 如果与进程关联，表示相关的的进程id */
 	struct pid *pid;
+	/* proc/pid/fd下的文件描述符 */
 	int fd;
 	union proc_op op;
+	/* proc对象实例 */
 	struct proc_dir_entry *pde;
+	/* vfs层inode实例 */
 	struct inode vfs_inode;
 };
 
+/* 通过vfs层的inode定位到proc_inode实例 */
 static inline struct proc_inode *PROC_I(const struct inode *inode)
 {
 	return container_of(inode, struct proc_inode, vfs_inode);

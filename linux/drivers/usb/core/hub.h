@@ -130,11 +130,20 @@ struct usb_hub_status {
 struct usb_hub_descriptor {
 	__u8  bDescLength;
 	__u8  bDescriptorType;
+	/**
+	 * HUB所支持的下行端口。
+	 */
 	__u8  bNbrPorts;
 	__le16 wHubCharacteristics;
 	__u8  bPwrOn2PwrGood;
+	/**
+	 * HUB控制器的最大电流需求。
+	 */
 	__u8  bHubContrCurrent;
 	    	/* add 1 bit for hub status change; round to bytes */
+	/**
+	 * 端口连接的设备是否是可以移除的。每个位代表一个端口。
+	 */
 	__u8  DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
 	__u8  PortPwrCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
 } __attribute__ ((packed));

@@ -48,20 +48,32 @@ static const size_t	pool_max [HCD_BUFFER_POOLS] = {
  *
  * Call hcd_buffer_destroy() to clean up after using those pools.
  */
+/**
+ * 创建HCD DMA缓冲池
+ */
 int hcd_buffer_create(struct usb_hcd *hcd)
 {
 	char		name[16];
 	int 		i, size;
 
+	/**
+	 * 主机控制器不支持DMA。
+	 */
 	if (!hcd->self.controller->dma_mask)
 		return 0;
 
+	/**
+	 * 创建4个DMA缓冲池
+	 */
 	for (i = 0; i < HCD_BUFFER_POOLS; i++) { 
 		if (!(size = pool_max [i]))
 			continue;
 		snprintf(name, sizeof name, "buffer-%d", size);
 		hcd->pool[i] = dma_pool_create(name, hcd->self.controller,
 				size, size, 0);
+		/**
+		 * 缓冲池创建失败，释放已经创建的缓冲区。
+		 */
 		if (!hcd->pool [i]) {
 			hcd_buffer_destroy(hcd);
 			return -ENOMEM;
@@ -77,6 +89,9 @@ int hcd_buffer_create(struct usb_hcd *hcd)
  * Context: !in_interrupt()
  *
  * This frees the buffer pools created by hcd_buffer_create().
+ */
+/**
+ * 释放HCD的DMA缓冲池。
  */
 void hcd_buffer_destroy(struct usb_hcd *hcd)
 {
@@ -95,7 +110,9 @@ void hcd_buffer_destroy(struct usb_hcd *hcd)
 /* sometimes alloc/free could use kmalloc with GFP_DMA, for
  * better sharing and to leverage mm/slab.c intelligence.
  */
-
+/**
+ * 从HCD DMA缓冲池中分配内存。
+ */
 void *hcd_buffer_alloc(
 	struct usb_bus 	*bus,
 	size_t			size,
@@ -107,15 +124,24 @@ void *hcd_buffer_alloc(
 	int 			i;
 
 	/* some USB hosts just use PIO */
+	/** 
+	 * HCD不支持DMA，则直接使用kmalloc分配内存并返回。
+	 */
 	if (!bus->controller->dma_mask) {
 		*dma = ~(dma_addr_t) 0;
 		return kmalloc(size, mem_flags);
 	}
 
+	/**
+	 * 从缓冲池中分配。
+	 */
 	for (i = 0; i < HCD_BUFFER_POOLS; i++) {
 		if (size <= pool_max [i])
 			return dma_pool_alloc(hcd->pool [i], mem_flags, dma);
 	}
+	/**
+	 * 缓冲池中的DMA缓存无法满足要求，直接调用dma_alloc_coherent分配DMA缓存。
+	 */
 	return dma_alloc_coherent(hcd->self.controller, size, dma, 0);
 }
 

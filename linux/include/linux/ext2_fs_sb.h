@@ -30,15 +30,22 @@ typedef unsigned long ext2_fsblk_t;
 
 #define E2FSBLK "%lu"
 
+/**
+ * ext2文件系统保留空间描述符
+ */
 struct ext2_reserve_window {
 	ext2_fsblk_t		_rsv_start;	/* First byte reserved */
 	ext2_fsblk_t		_rsv_end;	/* Last byte reserved or 0 */
 };
 
 struct ext2_reserve_window_node {
+	/* 通过此字段将节点添加到超级块的红黑树中 */
 	struct rb_node	 	rsv_node;
+	/* 预留窗口的长度，可通过ioctl设置 */
 	__u32			rsv_goal_size;
+	/* 命中数 */
 	__u32			rsv_alloc_hit;
+	/* 预留的起始、结束点 */
 	struct ext2_reserve_window	rsv_window;
 };
 
@@ -51,6 +58,7 @@ struct ext2_block_alloc_info {
 	 * most-recently-allocated block in this file.
 	 * We use this for detecting linearly ascending allocation requests.
 	 */
+	/* 上一次分配的逻辑块号 */
 	__u32			last_alloc_logical_block;
 	/*
 	 * Was i_next_alloc_goal in ext2_inode_info
@@ -68,6 +76,9 @@ struct ext2_block_alloc_info {
 /*
  * second extended-fs super-block data in memory
  */
+/**
+ * ext2文件系统超级块，在内存中的描述符
+ */
 struct ext2_sb_info {
 	unsigned long s_frag_size;	/* Size of a fragment in bytes */
 	unsigned long s_frags_per_block;/* Number of fragments per block */
@@ -79,15 +90,20 @@ struct ext2_sb_info {
 	unsigned long s_gdb_count;	/* Number of group descriptor blocks */
 	unsigned long s_desc_per_block;	/* Number of group descriptors per block */
 	unsigned long s_groups_count;	/* Number of groups in the fs */
+	/* 上一次计算的管理数据的块数和完全可用的块数 */
 	unsigned long s_overhead_last;  /* Last calculated overhead */
 	unsigned long s_blocks_last;    /* Last seen block count */
 	struct buffer_head * s_sbh;	/* Buffer containing the super block */
+	/* 磁盘块中的超级块原始数据指针 */
 	struct ext2_super_block * s_es;	/* Pointer to the super block in the buffer */
 	struct buffer_head ** s_group_desc;
+	/* 装载选项 */
 	unsigned long  s_mount_opt;
+	/* 从哪一个块中读取的超级块，因为ext2有多份超级块的拷贝 */
 	unsigned long s_sb_block;
 	uid_t s_resuid;
 	gid_t s_resgid;
+	/* 当前的装载状态 */
 	unsigned short s_mount_state;
 	unsigned short s_pad;
 	int s_addr_per_block_bits;
@@ -96,14 +112,18 @@ struct ext2_sb_info {
 	int s_first_ino;
 	spinlock_t s_next_gen_lock;
 	u32 s_next_generation;
+	/* 目录总数，装载时确定 */
 	unsigned long s_dir_count;
+	/* 一个数组，每个元素与一个块组对应，orlov分配器用于保持块组中文件和目录之间保持平衡 */
 	u8 *s_debts;
+	/* 空闲块、inode和目录数目的近似计数器 */
 	struct percpu_counter s_freeblocks_counter;
 	struct percpu_counter s_freeinodes_counter;
 	struct percpu_counter s_dirs_counter;
 	struct blockgroup_lock s_blockgroup_lock;
 	/* root of the per fs reservation window tree */
 	spinlock_t s_rsv_window_lock;
+	/* 红黑树，表示所有的预分配 */
 	struct rb_root s_rsv_window_root;
 	struct ext2_reserve_window_node s_rsv_window_head;
 };

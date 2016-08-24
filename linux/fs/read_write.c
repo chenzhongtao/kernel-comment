@@ -228,8 +228,12 @@ static void wait_on_retry_sync_kiocb(struct kiocb *iocb)
 	__set_current_state(TASK_RUNNING);
 }
 
+/**
+ * 同步读取文件系统中的数据，一般用作vfs的read回调
+ */
 ssize_t do_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos)
 {
+	/* 控制异步输入输出的参数 */
 	struct iovec iov = { .iov_base = buf, .iov_len = len };
 	struct kiocb kiocb;
 	ssize_t ret;
@@ -238,14 +242,17 @@ ssize_t do_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *pp
 	kiocb.ki_pos = *ppos;
 	kiocb.ki_left = len;
 
+	/* 反复重试，直到底层返回成功 */
 	for (;;) {
+		/* 调用文件系统的aio_read函数读取数据 */
 		ret = filp->f_op->aio_read(&kiocb, &iov, 1, kiocb.ki_pos);
 		if (ret != -EIOCBRETRY)
 			break;
+		/* 等待文件系统完成读取操作 */
 		wait_on_retry_sync_kiocb(&kiocb);
 	}
 
-	if (-EIOCBQUEUED == ret)
+	if (-EIOCBQUEUED == ret)/* 请求正在排除，等待处理 */
 		ret = wait_on_sync_kiocb(&kiocb);
 	*ppos = kiocb.ki_pos;
 	return ret;
@@ -259,21 +266,24 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
+	/* 底层文件系统没有实现read回调，异常 */
 	if (!file->f_op || (!file->f_op->read && !file->f_op->aio_read))
 		return -EINVAL;
-	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
+	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))/* 用户态缓冲区地址不正常 */
 		return -EFAULT;
 
+	/* 判断是否能够读取文件 */
 	ret = rw_verify_area(READ, file, pos, count);
 	if (ret >= 0) {
 		count = ret;
+		/* 权限检查 */
 		ret = security_file_permission (file, MAY_READ);
 		if (!ret) {
-			if (file->f_op->read)
+			if (file->f_op->read)/* 文件系统实现了read调用 */
 				ret = file->f_op->read(file, buf, count, pos);
-			else
+			else/* 同步读 */
 				ret = do_sync_read(file, buf, count, pos);
-			if (ret > 0) {
+			if (ret > 0) {/* 处理fsnotify */
 				fsnotify_access(file->f_path.dentry);
 				add_rchar(current, ret);
 			}
@@ -354,17 +364,25 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 	file->f_pos = pos;
 }
 
+/**
+ * read系统调用
+ */
 asmlinkage ssize_t sys_read(unsigned int fd, char __user * buf, size_t count)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
 	int fput_needed;
 
+	/* 根据文件句柄获得file实例 */
 	file = fget_light(fd, &fput_needed);
 	if (file) {
+		/* 获取文件当前位置 */
 		loff_t pos = file_pos_read(file);
+		/* 读取文件内容 */
 		ret = vfs_read(file, buf, count, &pos);
+		/* 设置文件位置 */
 		file_pos_write(file, pos);
+		/* 释放文件引用 */
 		fput_light(file, fput_needed);
 	}
 

@@ -60,13 +60,24 @@ enum kobject_action {
 	KOBJ_MAX
 };
 
+/**
+ * 一般性的内核对象，用于导出到sysfs文件系统中
+ * 必须嵌入到其他数据结构中
+ */
 struct kobject {
+	/* 对象的文本名称 */
 	const char		* k_name;
+	/* 用于简化引用计数的管理 */
 	struct kref		kref;
+	/* 如果对象属于一个kset，则利用此结构将它链接到kset中 */
 	struct list_head	entry;
+	/* 指向父结构本身 */
 	struct kobject		* parent;
+	/* 如果对象属于一个kset，则指向此结构 */
 	struct kset		* kset;
+	/* 包含此kobject对象的数据结构的详细信息，例如析构器函数 */
 	struct kobj_type	* ktype;
+	/* 通过此字段与sysfs关联起来 */
 	struct sysfs_dirent	* sd;
 };
 
@@ -99,6 +110,9 @@ extern struct kobject *kobject_add_dir(struct kobject *, const char *);
 
 extern char * kobject_get_path(struct kobject *, gfp_t);
 
+/**
+ * 用于描述内核对象的共同特性，主要是与sysfs文件系统接口
+ */
 struct kobj_type {
 	void (*release)(struct kobject *);
 	struct sysfs_ops	* sysfs_ops;
@@ -137,11 +151,20 @@ struct kset_uevent_ops {
  * can add new environment variables, or filter out the uevents if so
  * desired.
  */
+/**
+ * kobject集合
+ * 例如:所有字符设备集合，或者PCI设备集合
+ */
 struct kset {
+    /* set中各个对象公共用的kobj_type结构 */
 	struct kobj_type	*ktype;
+	/* 所有属于该kset的kobject对象链表头 */
 	struct list_head	list;
+	/* 保护结构的锁 */
 	spinlock_t		list_lock;
+	/* 用于管理集合自身的内核对象数据结构 */
 	struct kobject		kobj;
+	/* 提供了一些函数指针，用于将集合的状态信息传递给用户层。由驱动程序核心使用。 */
 	struct kset_uevent_ops	*uevent_ops;
 };
 

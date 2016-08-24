@@ -32,12 +32,14 @@
  * (to see the precise effective timeslice length of your workload,
  *  run vmstat and monitor the context-switches (cs) field)
  */
+/* 调度延迟，CFS进程在此调度周期内分配时间 */
 unsigned int sysctl_sched_latency = 20000000ULL;
 
 /*
  * Minimal preemption granularity for CPU-bound tasks:
  * (default: 4 msec * (1 + ilog(ncpus)), units: nanoseconds)
  */
+/* 最小运行周期，如果队列中可运行进程数量较多，则可能扩大调度延迟周期 */
 unsigned int sysctl_sched_min_granularity = 4000000ULL;
 
 /*
@@ -49,6 +51,7 @@ static unsigned int sched_nr_latency = 5;
  * After fork, child runs first. (default) If set to 0 then
  * parent will (try to) run first.
  */
+/* 新创建的进程是否应当在父进程之前运行 */
 const_debug unsigned int sysctl_sched_child_runs_first = 1;
 
 /*
@@ -135,6 +138,7 @@ static inline u64 min_vruntime(u64 min_vruntime, u64 vruntime)
 	return min_vruntime;
 }
 
+/* 进程在红黑树中排序的标准 */
 static inline s64 entity_key(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	return se->vruntime - cfs_rq->min_vruntime;
@@ -242,12 +246,13 @@ int sched_nr_latency_handler(struct ctl_table *table, int write,
  *
  * p = (nr <= nl) ? l : l*nr/nl
  */
+/* 确定CFS调度器的延迟周期长度，通常是sysctl_sched_latency */
 static u64 __sched_period(unsigned long nr_running)
 {
 	u64 period = sysctl_sched_latency;
 	unsigned long nr_latency = sched_nr_latency;
 
-	if (unlikely(nr_running > nr_latency)) {
+	if (unlikely(nr_running > nr_latency)) {/* 如果进程数量超过nr_latency，则同比例扩大延迟周期 */
 		period *= nr_running;
 		do_div(period, nr_latency);
 	}
@@ -261,10 +266,16 @@ static u64 __sched_period(unsigned long nr_running)
  *
  * s = p*w/rw
  */
+/**
+ * 将延迟周期内的时间分配到某个活动进程。
+ * 注:实际运行时间
+ */
 static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 计算延迟周期 */
 	u64 slice = __sched_period(cfs_rq->nr_running);
 
+	/* 根据进程在队列中的权重比例，确定分配给该进程的时间 */
 	slice *= se->load.weight;
 	do_div(slice, cfs_rq->load.weight);
 
@@ -286,6 +297,7 @@ static u64 __sched_vslice(unsigned long rq_weight, unsigned long nr_running)
 	return vslice;
 }
 
+/* 计算队列的虚拟调度延迟时间 */
 static u64 sched_vslice(struct cfs_rq *cfs_rq)
 {
 	return __sched_vslice(cfs_rq->load.weight, cfs_rq->nr_running);
@@ -310,36 +322,45 @@ __update_curr(struct cfs_rq *cfs_rq, struct sched_entity *curr,
 
 	schedstat_set(curr->exec_max, max((u64)delta_exec, curr->exec_max));
 
+	/* 更新进程的执行时间 */
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq, exec_clock, delta_exec);
+	/* 开始计算权重时间 */
 	delta_exec_weighted = delta_exec;
+	/* 对于nice==0的进程来说，虚拟权重时间与实际运行时间相等 */
 	if (unlikely(curr->load.weight != NICE_0_LOAD)) {
+		/* 对其他优先级来说，根据进程的负荷权重重新确定时间 */
 		delta_exec_weighted = calc_delta_fair(delta_exec_weighted,
 							&curr->load);
 	}
+	/* 递增进程虚拟运行时间 */
 	curr->vruntime += delta_exec_weighted;
 
 	/*
 	 * maintain cfs_rq->min_vruntime to be a monotonic increasing
 	 * value tracking the leftmost vruntime in the tree.
 	 */
-	if (first_fair(cfs_rq)) {
+	if (first_fair(cfs_rq)) {/* 有等待调度的进程 */
+		/* 取当前进程的虚拟运行时间和树中最小虚拟运行时间的最小值 */
 		vruntime = min_vruntime(curr->vruntime,
 				__pick_next_entity(cfs_rq)->vruntime);
 	} else
 		vruntime = curr->vruntime;
 
+	/* 确保min_vruntime是单调递增的 */
 	cfs_rq->min_vruntime =
 		max_vruntime(cfs_rq->min_vruntime, vruntime);
 }
 
+/* 更新CFS进程运行时间，在周期性调度器及其他地方调用 */
 static void update_curr(struct cfs_rq *cfs_rq)
 {
+	/* 获得当前任务和就绪队列时钟 */
 	struct sched_entity *curr = cfs_rq->curr;
 	u64 now = rq_of(cfs_rq)->clock;
 	unsigned long delta_exec;
 
-	if (unlikely(!curr))
+	if (unlikely(!curr))/* 没有CFS进程在运行，直接退出 */
 		return;
 
 	/*
@@ -347,8 +368,10 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	 * since the last time we changed load (this cannot
 	 * overflow on 32 bits):
 	 */
+	/* 计算当前时间和上一次更新负荷统计量的时间差 */
 	delta_exec = (unsigned long)(now - curr->exec_start);
 
+	/* 更新统计时间 */
 	__update_curr(cfs_rq, curr, delta_exec);
 	curr->exec_start = now;
 
@@ -484,11 +507,15 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+/**
+ * initial表示是否为新创建的进程。
+ */
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
 	u64 vruntime;
 
+	/* 将队列的min_vruntime作为基准虚拟时间，以保证所有进程在延迟周期内运行一次 */
 	vruntime = cfs_rq->min_vruntime;
 
 	if (sched_feat(TREE_AVG)) {
@@ -512,6 +539,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	if (!initial) {
 		/* sleeps upto a single latency don't count. */
 		if (sched_feat(NEW_FAIR_SLEEPERS) && entity_is_task(se))
+			/* 将基准时间减去延迟周期，以确保新创建的进程只有在当前延迟周期结束后再运行 */
 			vruntime -= sysctl_sched_latency;
 
 		/* ensure we never gain time by being placed backwards. */
@@ -527,16 +555,18 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int wakeup)
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
+	/* 更新当前进程的运行时间 */
 	update_curr(cfs_rq);
 
-	if (wakeup) {
+	if (wakeup) {/* 进程被唤醒，重新入队 */
+		/* 确定进程正确的虚拟运行时间 */
 		place_entity(cfs_rq, se, 0);
 		enqueue_sleeper(cfs_rq, se);
 	}
 
 	update_stats_enqueue(cfs_rq, se);
 	check_spread(cfs_rq, se);
-	if (se != cfs_rq->curr)
+	if (se != cfs_rq->curr)/* 根据进程的虚拟运行时间，将进程放置到红黑树中 */
 		__enqueue_entity(cfs_rq, se);
 	account_entity_enqueue(cfs_rq, se);
 }
@@ -571,14 +601,21 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int sleep)
 /*
  * Preempt the current task with a newly woken task if needed:
  */
+/**
+ * 处理CFS进程抢占，确保没有任何一个进程可以比延迟周期中确定的份额运行得更长
+ */
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	unsigned long ideal_runtime, delta_exec;
 
+	/* 计算进程的份额 */
 	ideal_runtime = sched_slice(cfs_rq, curr);
+	/* 计算已经运行的时间 */
 	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+	/* 进程运行的时间比期望的份额更长 */
 	if (delta_exec > ideal_runtime)
+		/* 发出重新调度请求 */
 		resched_task(rq_of(cfs_rq)->curr);
 }
 
@@ -586,17 +623,19 @@ static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	/* 'current' is not kept within the tree. */
-	if (se->on_rq) {
+	if (se->on_rq) {/* 进程在就绪队列中，不是当前运行进程 */
 		/*
 		 * Any task has to be enqueued before it get to execute on
 		 * a CPU. So account for the time it spent waiting on the
 		 * runqueue.
 		 */
 		update_stats_wait_end(cfs_rq, se);
+		/* 从就绪队列中移除，如果移除的进程是最左边的进程，还需要修改最左边节点 */
 		__dequeue_entity(cfs_rq, se);
 	}
 
 	update_stats_curr_start(cfs_rq, se);
+	/* 记录CFS队列中的当前进程 */
 	cfs_rq->curr = se;
 #ifdef CONFIG_SCHEDSTATS
 	/*
@@ -616,8 +655,10 @@ static struct sched_entity *pick_next_entity(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *se = NULL;
 
-	if (first_fair(cfs_rq)) {
+	if (first_fair(cfs_rq)) {/* 红黑树中有结点 */
+		/* 从红黑树中取出最左边结点的sched_entity */
 		se = __pick_next_entity(cfs_rq);
+		/* 将选择的进程标记为运行进程  */
 		set_next_entity(cfs_rq, se);
 	}
 
@@ -647,9 +688,12 @@ static void entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
+	/* 更新当前进程的运行时间 */
 	update_curr(cfs_rq);
 
+	/* 如果队列上可用进程数量不足两个，则不必进行切换 */
 	if (cfs_rq->nr_running > 1 || !sched_feat(WAKEUP_PREEMPT))
+		/* 否则，处理CFS进程抢占 */
 		check_preempt_tick(cfs_rq, curr);
 }
 
@@ -757,15 +801,21 @@ static inline struct sched_entity *parent_entity(struct sched_entity *se)
  * increased. Here we update the fair scheduling stats and
  * then put the task into the rbtree:
  */
+/**
+ * 将进程加入到CFS队列中
+ * wakeup表示是否第一次进入队列
+ */
 static void enqueue_task_fair(struct rq *rq, struct task_struct *p, int wakeup)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
 
+	/* 遍历调度实体的cgroups层次结构，将每一个层次中的对象都加入到队列中 */
 	for_each_sched_entity(se) {
-		if (se->on_rq)
+		if (se->on_rq)/* 调度实体已经在队列中，直接退出 */
 			break;
 		cfs_rq = cfs_rq_of(se);
+		/* 将进程添加到队列中 */
 		enqueue_entity(cfs_rq, se, wakeup);
 		wakeup = 1;
 	}
@@ -838,6 +888,9 @@ static void yield_task_fair(struct rq *rq)
 /*
  * Preempt the current task with a newly woken task if needed:
  */
+/**
+ * 当进程被try_to_wake_up和wake_up_new_task唤醒时，调用此函数检查是否可以抢占当前进程
+ */
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p)
 {
 	struct task_struct *curr = rq->curr;
@@ -845,9 +898,11 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p)
 	struct sched_entity *se = &curr->se, *pse = &p->se;
 	unsigned long gran;
 
+	/* 新唤醒的进程是实时进程 */
 	if (unlikely(rt_prio(p->prio))) {
 		update_rq_clock(rq);
 		update_curr(cfs_rq);
+		/* 实时进程总是抢占CFS进程 */
 		resched_task(curr);
 		return;
 	}
@@ -855,9 +910,11 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p)
 	 * Batch tasks do not preempt (their preemption is driven by
 	 * the tick):
 	 */
+	/* 新进程是BATCH进程，它不抢占其他进程 */
 	if (unlikely(p->policy == SCHED_BATCH))
 		return;
 
+	/* 没有配置唤醒抢占功能 */
 	if (!sched_feat(WAKEUP_PREEMPT))
 		return;
 
@@ -866,23 +923,33 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p)
 		pse = parent_entity(pse);
 	}
 
+	/* 计算最小运行时间，默认是4ms */
 	gran = sysctl_sched_wakeup_granularity;
+	/* 计算最小运行时间对应的虚拟时间 */
 	if (unlikely(se->load.weight != NICE_0_LOAD))
 		gran = calc_delta_fair(gran, &se->load);
 
+	/* 
+	 * 新进程的虚拟运行时间加上最小运行时间仍然小于当前进程的配额
+	 * 说明新进程优先级较高，抢占当前进程 
+	 */
 	if (pse->vruntime + gran < se->vruntime)
 		resched_task(curr);
 }
 
+/**
+ * 选择下一个将要运行的进程
+ */
 static struct task_struct *pick_next_task_fair(struct rq *rq)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
 
-	if (unlikely(!cfs_rq->nr_running))
+	if (unlikely(!cfs_rq->nr_running))/* 没有可运行的进程 */
 		return NULL;
 
 	do {
+		/* 选择红黑树最左边的进程 */
 		se = pick_next_entity(cfs_rq);
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
@@ -1042,6 +1109,7 @@ move_one_task_fair(struct rq *this_rq, int this_cpu, struct rq *busiest,
 /*
  * scheduler tick hitting a task of our scheduling class:
  */
+/* 处理CFS调度器的周期性调度 */
 static void task_tick_fair(struct rq *rq, struct task_struct *curr)
 {
 	struct cfs_rq *cfs_rq;
@@ -1049,6 +1117,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr)
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
+		/* 实际工作由entity_tick完成 */
 		entity_tick(cfs_rq, se);
 	}
 }
@@ -1062,6 +1131,9 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr)
  * monopolize the CPU. Note: the parent runqueue is locked,
  * the child is not running yet.
  */
+/**
+ * 创建新进程时，
+ */
 static void task_new_fair(struct rq *rq, struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq = task_cfs_rq(p);
@@ -1070,19 +1142,23 @@ static void task_new_fair(struct rq *rq, struct task_struct *p)
 
 	sched_info_queued(p);
 
+	/* 更新当前进程的运行时间 */
 	update_curr(cfs_rq);
+	/* 将新进程放置到红黑树中，initial参数表示是新创建的进程 */
 	place_entity(cfs_rq, se, 1);
 
 	/* 'curr' will be NULL if the child belongs to a different group */
-	if (sysctl_sched_child_runs_first && this_cpu == task_cpu(p) &&
-			curr && curr->vruntime < se->vruntime) {
+	if (sysctl_sched_child_runs_first && this_cpu == task_cpu(p) &&/* 子进程先运行，子进程与父进程在同一CPU上 */
+			curr && curr->vruntime < se->vruntime) {/* 当前进程的虚拟运行时间小于子进程的运行时间 */
 		/*
 		 * Upon rescheduling, sched_class::put_prev_task() will place
 		 * 'current' within the tree based on its new key value.
 		 */
+		/* 交换二者的运行时间，随后会将当前进程插入到红黑树合适的位置 */
 		swap(curr->vruntime, se->vruntime);
 	}
 
+	/* 将新进程加入到运行队列并重新调度 */
 	enqueue_task_fair(rq, p, 0);
 	resched_task(rq->curr);
 }

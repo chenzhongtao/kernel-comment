@@ -386,13 +386,17 @@ struct jbd2_revoke_table_s;
 /* Docbook can't yet cope with the bit fields, but will leave the documentation
  * in so it can be fixed later.
  */
-
+/**
+ * 日志句柄
+ */
 struct handle_s
 {
 	/* Which compound transaction is this update a part of? */
+	/* 当前句柄相关的事务 */
 	transaction_t		*h_transaction;
 
 	/* Number of remaining buffers we are allowed to dirty: */
+	/* 日志操作还有多少空闲缓冲区 */
 	int			h_buffer_credits;
 
 	/* Reference count on this handle */
@@ -445,9 +449,13 @@ struct handle_s
  *
  */
 
+/**
+ * 文件系统事务描述符
+ */
 struct transaction_s
 {
 	/* Pointer to the journal for this transaction. [no locking] */
+	/* 事务所属的日志 */
 	journal_t		*t_journal;
 
 	/* Sequence number for this transaction [no locking] */
@@ -459,12 +467,17 @@ struct transaction_s
 	 * FIXME: needs barriers
 	 * KLUDGE: [use j_state_lock]
 	 */
+	/* 事务状态 */
 	enum {
+		/* 可以向日志添加原子句柄 */
 		T_RUNNING,
 		T_LOCKED,
 		T_RUNDOWN,
+		/* 正在将事务写到磁盘 */
 		T_FLUSH,
+		/* 日志写入完毕，但是还需要处理元数据 */
 		T_COMMIT,
+		/* 所有日志项均已经安全的写到磁盘 */
 		T_FINISHED
 	}			t_state;
 
@@ -492,6 +505,7 @@ struct transaction_s
 	 * Doubly-linked circular list of all metadata buffers owned by this
 	 * transaction [j_list_lock]
 	 */
+	/* 该事务关联的缓冲区 */
 	struct journal_head	*t_buffers;
 
 	/*
@@ -565,11 +579,13 @@ struct transaction_s
 	 * When will the transaction expire (become due for commit), in jiffies?
 	 * [no locking]
 	 */
+	/* 超时时间，默认5秒内需要将日志写到物理设备 */
 	unsigned long		t_expires;
 
 	/*
 	 * How many handles used this transaction? [t_handle_lock]
 	 */
+	/* 与事务关联的句柄数量 */
 	int t_handle_count;
 
 };
@@ -891,6 +907,9 @@ extern void		__wait_on_journal (journal_t *);
  * journal structures from interrupts.
  */
 
+/**
+ * 获得当前进程的日志句柄
+ */
 static inline handle_t *journal_current_handle(void)
 {
 	return current->journal_info;

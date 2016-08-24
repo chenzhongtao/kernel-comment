@@ -415,19 +415,21 @@ static void __init pagetable_init (void)
 	unsigned long vaddr, end;
 	pgd_t *pgd_base = swapper_pg_dir;
 
+	/* 初始化swapper_pg_dir页表 */
 	paravirt_pagetable_setup_start(pgd_base);
 
 	/* Enable PSE if available */
-	if (cpu_has_pse)
+	if (cpu_has_pse)/* 开启pse，支持大页 */
 		set_in_cr4(X86_CR4_PSE);
 
 	/* Enable PGE if available */
-	if (cpu_has_pge) {
+	if (cpu_has_pge) {/* 开启PGE，支持巨页 */
 		set_in_cr4(X86_CR4_PGE);
-		__PAGE_KERNEL |= _PAGE_GLOBAL;
+		__PAGE_KERNEL |= _PAGE_GLOBAL;/* 内核所用页面均加上此标志，以提升性能 */
 		__PAGE_KERNEL_EXEC |= _PAGE_GLOBAL;
 	}
 
+	/* 设置前896M物理内存页的内核页表 */
 	kernel_physical_mapping_init(pgd_base);
 	remap_numa_kva();
 
@@ -435,6 +437,7 @@ static void __init pagetable_init (void)
 	 * Fixed mappings, only the page table structure has to be
 	 * created - mappings will be set by set_fixmap():
 	 */
+	/* 设置固定映射区间的页表和持久映射的页表 */
 	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
 	end = (FIXADDR_TOP + PMD_SIZE - 1) & PMD_MASK;
 	page_table_range_init(vaddr, end, pgd_base);
@@ -569,6 +572,7 @@ out:
  * This routines also unmaps the page at virtual kernel address 0, so
  * that we can trap those pesky NULL-reference errors in the kernel.
  */
+/* 初始化内存页表并启动内存分页，并且支持PAE */
 void __init paging_init(void)
 {
 #ifdef CONFIG_X86_PAE
@@ -577,8 +581,13 @@ void __init paging_init(void)
 		printk("NX (Execute Disable) protection: active\n");
 #endif
 
+	/**
+	 * 初始化系统页表，以swapper_pg_dir为基础 
+	 * 以及启用PSE、PGE扩展，这两个扩展几乎均被硬件所支持。
+	 */
 	pagetable_init();
 
+	/* 加载cr3寄存器使其指向页全局目录 */
 	load_cr3(swapper_pg_dir);
 
 #ifdef CONFIG_X86_PAE
@@ -589,8 +598,10 @@ void __init paging_init(void)
 	if (cpu_has_pae)
 		set_in_cr4(X86_CR4_PAE);
 #endif
+	/* 加载cr3后，强制刷新tlb，以避免缓存过期的TLB */
 	__flush_tlb_all();
 
+	/* 初始化全局变量kmap_pte，用于将高端内存的地址映射到内核虚拟地址空间中 */
 	kmap_init();
 }
 
@@ -837,6 +848,7 @@ void free_init_pages(char *what, unsigned long begin, unsigned long end)
 	printk(KERN_INFO "Freeing %s: %luk freed\n", what, (end - begin) >> 10);
 }
 
+/* 释放初始化代码段和初始化数据段到伙伴系统中 */
 void free_initmem(void)
 {
 	free_init_pages("unused kernel memory",

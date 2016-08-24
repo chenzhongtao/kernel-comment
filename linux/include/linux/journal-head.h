@@ -14,10 +14,14 @@ typedef unsigned int		tid_t;		/* Unique transaction ID */
 typedef struct transaction_s	transaction_t;	/* Compound transaction type */
 struct buffer_head;
 
+/**
+ * 日志缓冲区
+ */
 struct journal_head {
 	/*
 	 * Points back to our buffer_head. [jbd_lock_bh_journal_head()]
 	 */
+	/* 要操作的数据缓冲区 */
 	struct buffer_head *b_bh;
 
 	/*
@@ -58,6 +62,7 @@ struct journal_head {
 	 * transaction's data or metadata journaling list.
 	 * [j_list_lock] [jbd_lock_bh_state()]
 	 */
+	/* 日志所属的事务 */
 	transaction_t *b_transaction;
 
 	/*
@@ -72,6 +77,7 @@ struct journal_head {
 	 * Doubly-linked list of buffers on a transaction's data, metadata or
 	 * forget queue. [t_list_lock] [jbd_lock_bh_state()]
 	 */
+	/* 与某个日志相关的所有日志缓冲区 */
 	struct journal_head *b_tnext, *b_tprev;
 
 	/*

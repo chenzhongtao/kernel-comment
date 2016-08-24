@@ -14,9 +14,15 @@
 struct page;
 struct address_space;
 
+/**
+ * 页向量描述符
+ */
 struct pagevec {
+	/* pages数组中有效的指针数量 */
 	unsigned long nr;
+	/* 这些页是否属于冷页 */
 	unsigned long cold;
+	/* 页面数组 */
 	struct page *pages[PAGEVEC_SIZE];
 };
 
@@ -56,6 +62,9 @@ static inline unsigned pagevec_space(struct pagevec *pvec)
 /*
  * Add a page to a pagevec.  Returns the number of slots still available.
  */
+/**
+ * 将页添加到页向量中
+ */
 static inline unsigned pagevec_add(struct pagevec *pvec, struct page *page)
 {
 	pvec->pages[pvec->nr++] = page;
@@ -63,18 +72,29 @@ static inline unsigned pagevec_add(struct pagevec *pvec, struct page *page)
 }
 
 
+/**
+ * 批量释放页向量中的页 
+ */
 static inline void pagevec_release(struct pagevec *pvec)
 {
+	/* 包含有效页 */
 	if (pagevec_count(pvec))
+		/* 释放页，如果使用计数器为0，则返回到伙伴系统。如果页在LRU链表上，则从链表中移除。 */
 		__pagevec_release(pvec);
 }
 
+/**
+ * 与pagevec_release类似，但是不处理LRU。由调用者确保页面没有位于LRU链表中。
+ */
 static inline void pagevec_release_nonlru(struct pagevec *pvec)
 {
 	if (pagevec_count(pvec))
 		__pagevec_release_nonlru(pvec);
 }
 
+/**
+ * 将页面返还给伙伴系统，由调用者确认其引用计数为0，且未包含在任何LRU链表中。
+ */
 static inline void pagevec_free(struct pagevec *pvec)
 {
 	if (pagevec_count(pvec))

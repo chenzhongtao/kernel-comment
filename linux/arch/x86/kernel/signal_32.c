@@ -171,6 +171,9 @@ badframe:
 	return 1;
 }
 
+/**
+ * 当用户态信号处理函数处理完信号后，调用此系统调用回到内核态
+ */
 asmlinkage int sys_sigreturn(unsigned long __unused)
 {
 	struct pt_regs *regs = (struct pt_regs *) &__unused;
@@ -569,6 +572,9 @@ handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
  * want to handle. Thus you cannot kill init even with a SIGKILL even by
  * mistake.
  */
+/**
+ * 从内核态切换到用户态时，调用此函数处理信号。
+ */
 static void fastcall do_signal(struct pt_regs *regs)
 {
 	siginfo_t info;
@@ -592,8 +598,9 @@ static void fastcall do_signal(struct pt_regs *regs)
 	else
 		oldset = &current->blocked;
 
+	/* 得到信号信息，该信号需要由用户态处理 */
 	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
-	if (signr > 0) {
+	if (signr > 0) {/* 需要处理用户态信号 */
 		/* Re-enable any watchpoints before delivering the
 		 * signal to user space. The processor register will
 		 * have been cleared if the watchpoint triggered
@@ -603,6 +610,7 @@ static void fastcall do_signal(struct pt_regs *regs)
 			set_debugreg(current->thread.debugreg[7], 7);
 
 		/* Whee!  Actually deliver the signal.  */
+		/* 操作进程在用户态下的栈，这样用户态状态下会运行信号处理程序 */
 		if (handle_signal(signr, &info, &ka, oldset, regs) == 0) {
 			/* a signal was successfully delivered; the saved
 			 * sigmask will have been stored in the signal frame,

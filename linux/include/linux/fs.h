@@ -439,17 +439,28 @@ static inline size_t iov_iter_count(struct iov_iter *i)
 }
 
 
+/**
+ * 与某个文件映射相关的地址空间回调函数
+ */
 struct address_space_operations {
+	/* 回写一个页面到文件中，标准实现是block_write_full_page */
 	int (*writepage)(struct page *page, struct writeback_control *wbc);
+	/* 从文件中读取一页到物理内存中，标准函数是mpage_readpage */
 	int (*readpage)(struct file *, struct page *);
+	/* 将页面回写到设备，它拨出设备，以强制回写到设备，标准函数是block_sync_page */
 	void (*sync_page)(struct page *);
 
 	/* Write back some dirty pages from this mapping. */
 	int (*writepages)(struct address_space *, struct writeback_control *);
 
 	/* Set a page dirty.  Return true if this dirtied it */
+	/**
+	 * 表示一页的内容已经改变，即与块设备上的原始内容不再匹配
+	 * 一般不设置，自动调用__set_page_dirty_buffers，将页在缓冲区层次上标记为脏，同时在基树中置为脏
+	 */
 	int (*set_page_dirty)(struct page *page);
 
+	/* 从文件中读取一组页面到物理内存中 */
 	int (*readpages)(struct file *filp, struct address_space *mapping,
 			struct list_head *pages, unsigned nr_pages);
 
@@ -457,9 +468,11 @@ struct address_space_operations {
 	 * ext3 requires that a successful prepare_write() call be followed
 	 * by a commit_write() call - they must be balanced
 	 */
+	/* 为了日志文件系统，实现两阶段写，分别用于将事务存储到日志，以及执行实际的写操作。 */
 	int (*prepare_write)(struct file *, struct page *, unsigned, unsigned);
 	int (*commit_write)(struct file *, struct page *, unsigned, unsigned);
 
+	/* 代替prepare_write和commit_write，参见vfs.txt */
 	int (*write_begin)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned flags,
 				struct page **pagep, void **fsdata);
@@ -468,16 +481,23 @@ struct address_space_operations {
 				struct page *page, void *fsdata);
 
 	/* Unfortunately this kludge is needed for FIBMAP. Don't use it */
+	/* 将逻辑块映射到物理块号 */
 	sector_t (*bmap)(struct address_space *, sector_t);
+	/* 当要移除页时，并且有PG_private标志表示有缓冲区与页关联，那么会调用invalidatepage使之无效 */
 	void (*invalidatepage) (struct page *, unsigned long);
+	/* 用于日志文件系统，释放页 */
 	int (*releasepage) (struct page *, gfp_t);
+	/* 绕过块层，直接与块设备通信进行读写 */
 	ssize_t (*direct_IO)(int, struct kiocb *, const struct iovec *iov,
 			loff_t offset, unsigned long nr_segs);
+	/* 用于就地执行机制，当文件系统是RAM或者ROM文件系统时，不必使用缓存 */
 	struct page* (*get_xip_page)(struct address_space *, sector_t,
 			int);
 	/* migrate the contents of a page to the specified target */
+	/* 用于内存迁移过程 */
 	int (*migratepage) (struct address_space *,
 			struct page *, struct page *);
+	/* 在释放页之前，回写脏页的最后机会 */
 	int (*launder_page) (struct page *);
 };
 
@@ -494,22 +514,36 @@ int pagecache_write_end(struct file *, struct address_space *mapping,
 				struct page *page, void *fsdata);
 
 struct backing_dev_info;
+/**
+ * 优先查找树,inode相关的地址空间对象
+ */
 struct address_space {
+	/* 所属的inode对象，据此可找到相关的存储器 */
 	struct inode		*host;		/* owner: inode, block_device */
+	/* 基树的根，列出了地址空间中所有物理内存页 */
 	struct radix_tree_root	page_tree;	/* radix tree of all pages */
+	/* 保护基树的读写锁 */
 	rwlock_t		tree_lock;	/* and rwlock protecting it */
+	/* 共享映射计数 */
 	unsigned int		i_mmap_writable;/* count VM_SHARED mappings */
+	/* 私有和共享映射的优先查找树，可以据此查找映射到该地址空间的所有mm_struct */
 	struct prio_tree_root	i_mmap;		/* tree of private and shared mappings */
+	/* 非线性映射链表 */
 	struct list_head	i_mmap_nonlinear;/*list VM_NONLINEAR mappings */
 	spinlock_t		i_mmap_lock;	/* protect tree, count, list */
 	unsigned int		truncate_count;	/* Cover race condition with truncate */
+	/* 缓存的总页数 */
 	unsigned long		nrpages;	/* number of total pages */
 	pgoff_t			writeback_index;/* writeback starts here */
 	const struct address_space_operations *a_ops;	/* methods */
+	/* 映射页所在的GFP内存区，以及输入输出过程中的错误信息 */
 	unsigned long		flags;		/* error bits/gfp mask */
+	/* 地址空间关联的存储设备信息 */
 	struct backing_dev_info *backing_dev_info; /* device readahead, etc */
 	spinlock_t		private_lock;	/* for use by the address_space */
+	/* 包含文件系统元数据的buffer_head链表 */
 	struct list_head	private_list;	/* ditto */
+	/* 相关联的地址空间?? */
 	struct address_space	*assoc_mapping;	/* ditto */
 } __attribute__((aligned(sizeof(long))));
 	/*
@@ -518,10 +552,17 @@ struct address_space {
 	 * of struct page's "mapping" pointer be used for PAGE_MAPPING_ANON.
 	 */
 
+/**
+ * 裸的块设备
+ */
 struct block_device {
+	/* 块设备号 */
 	dev_t			bd_dev;  /* not a kdev_t - it's a search key */
+	/* bdev伪文件系统中，表示该设备的inode。可以用bdget获取。此字段会被删除。 */
 	struct inode *		bd_inode;	/* will die */
+	/* open打开的次数 */
 	int			bd_openers;
+	/* 同步对块设备的打开、关闭操作 */
 	struct mutex		bd_mutex;	/* open/close mutex */
 	struct semaphore	bd_mount_sem;
 	struct list_head	bd_inodes;
@@ -530,13 +571,19 @@ struct block_device {
 #ifdef CONFIG_SYSFS
 	struct list_head	bd_holder_list;
 #endif
+	/* 如果块设备是分区，那么bd_contains表示包含分区的磁盘 */
 	struct block_device *	bd_contains;
 	unsigned		bd_block_size;
+	/* 设备上的分区 */
 	struct hd_struct *	bd_part;
 	/* number of times partitions within this device have been opened. */
+	/* 引用设备分区的次数 */
 	unsigned		bd_part_count;
+	/* 如果为1，表示分区在内核中的信息无效，因为磁盘上的分区已经改变 */
 	int			bd_invalidated;
+	/* 表示设备上的硬盘对象 */
 	struct gendisk *	bd_disk;
+	/* 通过此字段将设备添加到链表中 */
 	struct list_head	bd_list;
 	struct backing_dev_info *bd_inode_backing_dev_info;
 	/*
@@ -545,6 +592,7 @@ struct block_device {
 	 * the same device multiple times, the owner must take special
 	 * care to not mess up bd_private for that case.
 	 */
+	/* 存储私有数据 */
 	unsigned long		bd_private;
 };
 
@@ -588,33 +636,58 @@ static inline int mapping_writably_mapped(struct address_space *mapping)
 #define i_size_ordered_init(inode) do { } while (0)
 #endif
 
+/**
+ * 文件inode结构
+ */
 struct inode {
+	/**
+	 * 通过此字段将inode添加到inode_hashtable哈希表中。 这样可以通过inode编号和超级块来快速定位inode。
+	 * 可用于NFS。
+	 */
 	struct hlist_node	i_hash;
+	/**
+	 * 通过此字段将inode添加到不同的链表中 
+	 * 存在于内存中，并未关联到任何文件。inode_unused链表中。
+	 * 存在于内存中，由进程使用。文件内容与设备上的信息相同。inode_in_use链表中。
+	 * 文件内容已经改变，即脏节点。保存于特定超级块的链表中。
+	 */
 	struct list_head	i_list;
+	/* 通过该字段将inode添加到超级块的链表中。超级块的链表头字段是s_inodes。 */
 	struct list_head	i_sb_list;
 	struct list_head	i_dentry;
+	/* inode编号 */
 	unsigned long		i_ino;
+	/* 使用计数器，访问该inode结构的进程数目。在fork时，不同进程会访问同一个inode。 */
 	atomic_t		i_count;
+	/* 计数器，硬连接数目，包含目录中的子文件和目录计数 */
 	unsigned int		i_nlink;
+	/* 与文件相关的uid和gid */
 	uid_t			i_uid;
 	gid_t			i_gid;
+	/* 当inode与设备关联时，表示所在设备的设备号 */
 	dev_t			i_rdev;
 	unsigned long		i_version;
+	/* 文件长度，以字节计算 */
 	loff_t			i_size;
 #ifdef __NEED_I_SIZE_ORDERED
 	seqcount_t		i_size_seqcount;
 #endif
+	/* 最后访问时间，修改时间，创建时间 */
 	struct timespec		i_atime;
 	struct timespec		i_mtime;
 	struct timespec		i_ctime;
 	unsigned int		i_blkbits;
+	/* 文件长度，以设备块为单位 */
 	blkcnt_t		i_blocks;
 	unsigned short          i_bytes;
+	/* 文件类型，面向块还是面向字符。文件访问权限。 */
 	umode_t			i_mode;
 	spinlock_t		i_lock;	/* i_blocks, i_bytes, maybe i_size */
 	struct mutex		i_mutex;
 	struct rw_semaphore	i_alloc_sem;
+	/* inode操作函数指针集合 */
 	const struct inode_operations	*i_op;
+	/* 文件操作函数指针集合 */
 	const struct file_operations	*i_fop;	/* former ->i_op->default_file_ops */
 	struct super_block	*i_sb;
 	struct file_lock	*i_flock;
@@ -623,7 +696,9 @@ struct inode {
 #ifdef CONFIG_QUOTA
 	struct dquot		*i_dquot[MAXQUOTAS];
 #endif
+	/* 通过该字段添加到设备的inode链表中。在chroot的环境中，一个设备可能被多个设备文件所引用。 */
 	struct list_head	i_devices;
+	/* 指向文件所在的设备结构 */
 	union {
 		struct pipe_inode_info	*i_pipe;
 		struct block_device	*i_bdev;
@@ -652,6 +727,7 @@ struct inode {
 #ifdef CONFIG_SECURITY
 	void			*i_security;
 #endif
+	/* 文件系统私有数据结构，如ext2_inode_info */
 	void			*i_private; /* fs or device private pointer */
 };
 
@@ -774,27 +850,40 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 		index <  ra->start + ra->size);
 }
 
+/**
+ * 文件描述符
+ */
 struct file {
 	/*
 	 * fu_list becomes invalid after file_free is called and queued via
 	 * fu_rcuhead for RCU freeing
 	 */
 	union {
+		/* 通过此字段链接到超级块的s_list链表中。表示该文件系统中所有打开的文件。用于重新mount文件系统时使用。 */
 		struct list_head	fu_list;
 		struct rcu_head 	fu_rcuhead;
 	} f_u;
+	/* 文件名和inode之间的关联，文件系统信息 */
 	struct path		f_path;
 #define f_dentry	f_path.dentry
 #define f_vfsmnt	f_path.mnt
+	/* 文件操作回调 */
 	const struct file_operations	*f_op;
 	atomic_t		f_count;
+	/* 打开文件时传递的特殊参数 */
 	unsigned int 		f_flags;
+	/* 打开文件的模式参数 */
 	mode_t			f_mode;
+	/* 当前操作位置 */
 	loff_t			f_pos;
+	/* 处理文件的进程，该进程会接收到SIGIO信号以实现异步IO */
 	struct fown_struct	f_owner;
+	/* uid,gid */
 	unsigned int		f_uid, f_gid;
+	/* 预读特征 */
 	struct file_ra_state	f_ra;
 
+	/* 用于检查file实例是否仍然与inode兼容。用于确保缓存一致性。 */
 	u64			f_version;
 #ifdef CONFIG_SECURITY
 	void			*f_security;
@@ -807,6 +896,7 @@ struct file {
 	struct list_head	f_ep_links;
 	spinlock_t		f_ep_lock;
 #endif /* #ifdef CONFIG_EPOLL */
+	/* 指向属于文件inode对象的address_space，但是可能会修改它 */
 	struct address_space	*f_mapping;
 };
 extern spinlock_t files_lock;
@@ -976,41 +1066,66 @@ extern spinlock_t sb_lock;
 
 #define sb_entry(list)	list_entry((list), struct super_block, s_list)
 #define S_BIAS (1<<30)
+/**
+ * 文件系统超级块
+ */
 struct super_block {
+	/* 通过此字段将超级块链接到全局链表中 */
 	struct list_head	s_list;		/* Keep this first */
+	/* 所属块设备号 */
 	dev_t			s_dev;		/* search index; _not_ kdev_t */
+	/* 块长度，以字节为单位，如1024 */
 	unsigned long		s_blocksize;
+	/* 块长度，2^s_blocksize_bits=s_blocksize */
 	unsigned char		s_blocksize_bits;
+	/* 超级块是否变脏 */
 	unsigned char		s_dirt;
+	/* 最大文件长度 */
 	unsigned long long	s_maxbytes;	/* Max file size */
+	/* 文件系统类型 */
 	struct file_system_type	*s_type;
+	/* 超级块回调函数指针 */
 	const struct super_operations	*s_op;
 	struct dquot_operations	*dq_op;
  	struct quotactl_ops	*s_qcop;
 	const struct export_operations *s_export_op;
 	unsigned long		s_flags;
 	unsigned long		s_magic;
+	/* 全局根目录的缓存项，管道和套接字的根目录不指向/。如果为NULL，表示内部伪文件系统 */
 	struct dentry		*s_root;
+	/* umount锁，防止在回写的过程中进行umount */
 	struct rw_semaphore	s_umount;
 	struct mutex		s_lock;
+	/* 引用次数 */
 	int			s_count;
+	/* 同步标志，避免多个地方同时对节点进行同步 */
 	int			s_syncing;
 	int			s_need_sync_fs;
 	atomic_t		s_active;
 #ifdef CONFIG_SECURITY
 	void                    *s_security;
 #endif
+	/**
+	 * 处理扩展属性的函数指针
+	 * 针对不同的处理空间，提供不同的处理程序
+	 */
 	struct xattr_handler	**s_xattr;
 
 	struct list_head	s_inodes;	/* all inodes */
+	/* 脏inode链表 */
 	struct list_head	s_dirty;	/* dirty inodes */
+	/* 等待回写的链表 */
 	struct list_head	s_io;		/* parked for writeback */
+	/* 为避免出现饥饿现象而引入，等待回写的链表 */
 	struct list_head	s_more_io;	/* parked for more writeback */
 	struct hlist_head	s_anon;		/* anonymous dentries for (nfs) exporting */
+	/* 在该文件系统上已经打开的所有文件 */
 	struct list_head	s_files;
 
+	/* 所属块设备 */
 	struct block_device	*s_bdev;
 	struct mtd_info		*s_mtd;
+	/* 通过此字段链接到同一文件系统的超级块链表中 */
 	struct list_head	s_instances;
 	struct quota_info	s_dquot;	/* Diskquota specific options */
 
@@ -1019,6 +1134,7 @@ struct super_block {
 
 	char s_id[32];				/* Informational name */
 
+	/* 文件系统私有数据指针,如ext2_sb_info */
 	void 			*s_fs_info;	/* Filesystem private info */
 
 	/*
@@ -1029,6 +1145,7 @@ struct super_block {
 
 	/* Granularity of c/m/atime in ns.
 	   Cannot be worse than a second */
+	/* 时间戳的最大粒度，以ns为单位 */
 	u32		   s_time_gran;
 
 	/*
@@ -1115,6 +1232,9 @@ int generic_osync_inode(struct inode *, struct address_space *, int);
  */
 typedef int (*filldir_t)(void *, const char *, int, loff_t, u64, unsigned);
 
+/**
+ * 特定于块设备的操作回调，vfs层不直接调用这些回调
+ */
 struct block_device_operations {
 	int (*open) (struct inode *, struct file *);
 	int (*release) (struct inode *, struct file *);
@@ -1122,7 +1242,9 @@ struct block_device_operations {
 	long (*unlocked_ioctl) (struct file *, unsigned, unsigned long);
 	long (*compat_ioctl) (struct file *, unsigned, unsigned long);
 	int (*direct_access) (struct block_device *, sector_t, unsigned long *);
+	/* 检查存储介质是否改变 */
 	int (*media_changed) (struct gendisk *);
+	/* 使新设备重新生效 */
 	int (*revalidate_disk) (struct gendisk *);
 	int (*getgeo)(struct block_device *, struct hd_geometry *);
 	struct module *owner;
@@ -1161,30 +1283,45 @@ typedef int (*read_actor_t)(read_descriptor_t *, struct page *, unsigned long, u
  * can be called without the big kernel lock held in all filesystems.
  */
 struct file_operations {
+	/* 所属模块 */
 	struct module *owner;
 	loff_t (*llseek) (struct file *, loff_t, int);
+	/* 读写文件数据到缓冲区中 */
 	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
 	ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
+	/* 异步读写文件数据 */
 	ssize_t (*aio_read) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
 	ssize_t (*aio_write) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+	/* 读取目录内容 */
 	int (*readdir) (struct file *, void *, filldir_t);
+	/* IO多路复用，用于poll和select */
 	unsigned int (*poll) (struct file *, struct poll_table_struct *);
+	/* 设备文件的ioctl回调 */
 	int (*ioctl) (struct inode *, struct file *, unsigned int, unsigned long);
 	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
 	long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
+	/* 将文件映射到vma时调用 */
 	int (*mmap) (struct file *, struct vm_area_struct *);
+	/* 打开文件，将文件与inode关联起来 */
 	int (*open) (struct inode *, struct file *);
+	/* 在关闭文件时，会调用此方法将数据写回到设备。 */
 	int (*flush) (struct file *, fl_owner_t id);
+	/* 当使用计数器达到0时，调用此函数清理不需要的内存和缓存 */
 	int (*release) (struct inode *, struct file *);
+	/* 将数据同步到设备 */
 	int (*fsync) (struct file *, struct dentry *, int datasync);
 	int (*aio_fsync) (struct kiocb *, int datasync);
+	/* 启用或者停用由信号控制的输入和输出 */
 	int (*fasync) (int, struct file *, int);
+	/* 文件锁定 */
 	int (*lock) (struct file *, int, struct file_lock *);
+	/* 在两个文件描述符之间快速的交换数据 */
 	ssize_t (*sendpage) (struct file *, struct page *, int, size_t, loff_t *, int);
 	unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
 	int (*check_flags)(int);
 	int (*dir_notify)(struct file *filp, unsigned long arg);
 	int (*flock) (struct file *, int, struct file_lock *);
+	/* 管道与文件之间传输数据。只用于splice2系统调用 */
 	ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
 	ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
 	int (*setlease)(struct file *, long, struct file_lock **);
@@ -1192,7 +1329,9 @@ struct file_operations {
 
 struct inode_operations {
 	int (*create) (struct inode *,struct dentry *,int, struct nameidata *);
+	/* 根据文件名称，查找其inode节点 */
 	struct dentry * (*lookup) (struct inode *,struct dentry *, struct nameidata *);
+	/* 创建、删除硬连接 */
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
 	int (*unlink) (struct inode *,struct dentry *);
 	int (*symlink) (struct inode *,struct dentry *,const char *);
@@ -1202,17 +1341,22 @@ struct inode_operations {
 	int (*rename) (struct inode *, struct dentry *,
 			struct inode *, struct dentry *);
 	int (*readlink) (struct dentry *, char __user *,int);
+	/* 根据符号链接查找目标文件的inode */
 	void * (*follow_link) (struct dentry *, struct nameidata *);
 	void (*put_link) (struct dentry *, struct nameidata *, void *);
+	/* 根据节点的i_size成员修改inode的长度 */
 	void (*truncate) (struct inode *);
 	int (*permission) (struct inode *, int, struct nameidata *);
 	int (*setattr) (struct dentry *, struct iattr *);
 	int (*getattr) (struct vfsmount *mnt, struct dentry *, struct kstat *);
+	/* 文件扩展属性操作 */
 	int (*setxattr) (struct dentry *, const char *,const void *,size_t,int);
 	ssize_t (*getxattr) (struct dentry *, const char *, void *, size_t);
 	ssize_t (*listxattr) (struct dentry *, char *, size_t);
 	int (*removexattr) (struct dentry *, const char *);
+	/* 在文件内穿孔，目前仅共享内存文件系统支持 */
 	void (*truncate_range)(struct inode *, loff_t, loff_t);
+	/* 为文件预分配空间 */
 	long (*fallocate)(struct inode *inode, int mode, loff_t offset,
 			  loff_t len);
 };
@@ -1235,27 +1379,44 @@ extern ssize_t vfs_writev(struct file *, const struct iovec __user *,
  * NOTE: write_inode, delete_inode, clear_inode, put_inode can be called
  * without the big kernel lock held in all filesystems.
  */
+/**
+ * 超级块回调函数指针
+ */
 struct super_operations {
    	struct inode *(*alloc_inode)(struct super_block *sb);
 	void (*destroy_inode)(struct inode *);
 
+	/* 根据inode->i_ino编号读取节点内容 */
 	void (*read_inode) (struct inode *);
-  
+
+  	/* 将节点标记为脏 */
    	void (*dirty_inode) (struct inode *);
 	int (*write_inode) (struct inode *, int);
+	/* 递减节点的使用计数 */
 	void (*put_inode) (struct inode *);
 	void (*drop_inode) (struct inode *);
+	/* 从内存和底层存储介质删除节点 */
 	void (*delete_inode) (struct inode *);
+	/* 递减对超级块的引用 */
 	void (*put_super) (struct super_block *);
+	/* 将超级块写入存储介质 */
 	void (*write_super) (struct super_block *);
+	/* 将文件系统数据与底层块设备数据同步 */
 	int (*sync_fs)(struct super_block *sb, int wait);
+	/* 将超级块写入存储介质 */
 	void (*write_super_lockfs) (struct super_block *);
+	/* 用于ext和reiserfs日志文件系统，确保与设备映射器代码的交互 */
 	void (*unlockfs) (struct super_block *);
+	/* 给出文件系统的统计信息 */
 	int (*statfs) (struct dentry *, struct kstatfs *);
+	/* 重新装载一个已经装载的文件系统 */
 	int (*remount_fs) (struct super_block *, int *, char *);
+	/* 当inode不再使用时，调用此函数释放相关内存页面 */
 	void (*clear_inode) (struct inode *);
+	/* 用于强制卸载网络文件系统和用户空间文件系统，在开始卸载前回调此方法。 */
 	void (*umount_begin) (struct vfsmount *, int);
 
+	/* 用于proc文件系统显示加载选项和状态信息 */
 	int (*show_options)(struct seq_file *, struct vfsmount *);
 	int (*show_stats)(struct seq_file *, struct vfsmount *);
 #ifdef CONFIG_QUOTA
@@ -1404,13 +1565,20 @@ static inline void file_accessed(struct file *file)
 int sync_inode(struct inode *inode, struct writeback_control *wbc);
 
 struct file_system_type {
+	/* 文件系统的名称 */
 	const char *name;
+	/* 文件系统标志，如只读加载 */
 	int fs_flags;
+	/* 从底层设备读取超级块的方法 */
 	int (*get_sb) (struct file_system_type *, int,
 		       const char *, void *, struct vfsmount *);
+	/* 在卸载文件系统时，清理超级块 */
 	void (*kill_sb) (struct super_block *);
+	/* 所属模块 */
 	struct module *owner;
+	/* 通过此字段将文件系统添加到全局单链表中 */
 	struct file_system_type * next;
+	/* 链表头，指向所有该文件系统的超级块 */
 	struct list_head fs_supers;
 
 	struct lock_class_key s_lock_key;

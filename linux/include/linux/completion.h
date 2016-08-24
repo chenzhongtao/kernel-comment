@@ -10,8 +10,13 @@
 
 #include <linux/wait.h>
 
+/**
+ * 完成量
+ */
 struct completion {
+	/* 事件是否完成，在开始等待前，事件即可能完成 */
 	unsigned int done;
+	/* 标准等待队列，等待进程在上面睡眠 */
 	wait_queue_head_t wait;
 };
 

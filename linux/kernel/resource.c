@@ -20,6 +20,7 @@
 #include <asm/io.h>
 
 
+/* IO资源树根节点 */
 struct resource ioport_resource = {
 	.name	= "PCI IO",
 	.start	= 0,
@@ -28,6 +29,7 @@ struct resource ioport_resource = {
 };
 EXPORT_SYMBOL(ioport_resource);
 
+/* IO内存资源树的根节点 */
 struct resource iomem_resource = {
 	.name	= "PCI mem",
 	.start	= 0,
@@ -146,29 +148,41 @@ __initcall(ioresources_init);
 #endif /* CONFIG_PROC_FS */
 
 /* Return the conflict entry if you can't request it */
+/**
+ * 请求分配一个资源区域
+ * root:父节点指针
+ * new:要分配资源的详细信息
+ */
 static struct resource * __request_resource(struct resource *root, struct resource *new)
 {
 	resource_size_t start = new->start;
 	resource_size_t end = new->end;
 	struct resource *tmp, **p;
 
-	if (end < start)
+	if (end < start)/* 参数不合法 */
 		return root;
 	if (start < root->start)
 		return root;
 	if (end > root->end)
 		return root;
+	/* 从父节点的第一个子节点开始扫描 */
 	p = &root->child;
-	for (;;) {
+	for (;;) {/* 扫描所有子节点 */
 		tmp = *p;
+		/**
+		 * 如果没有后续节点，说明空间可用
+		 * 如果下一个节点起始地址大于结束地址，说明空间也可用
+		 */
 		if (!tmp || tmp->start > end) {
+			/* 将新节点链接到链表中 */
 			new->sibling = tmp;
 			*p = new;
+			/* 设置新节点的父节点 */
 			new->parent = root;
 			return NULL;
 		}
-		p = &tmp->sibling;
-		if (tmp->end < start)
+		p = &tmp->sibling;/* 移到下一个节点 */
+		if (tmp->end < start)/* 交叉了，不能分配资源 */
 			continue;
 		return tmp;
 	}
@@ -215,6 +229,9 @@ EXPORT_SYMBOL(request_resource);
 /**
  * release_resource - release a previously reserved resource
  * @old: resource pointer
+ */
+/**
+ * 释放IO资源
  */
 int release_resource(struct resource *old)
 {

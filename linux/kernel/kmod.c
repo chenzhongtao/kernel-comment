@@ -62,6 +62,9 @@ char modprobe_path[KMOD_PATH_LEN] = "/sbin/modprobe";
  * If module auto-loading support is disabled then this function
  * becomes a no-operation.
  */
+/**
+ * 在内核中，请求加载模块
+ */
 int request_module(const char *fmt, ...)
 {
 	va_list args;
@@ -72,7 +75,7 @@ int request_module(const char *fmt, ...)
 	static char *envp[] = { "HOME=/",
 				"TERM=linux",
 				"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
-				NULL };
+				NULL };/* 为modeprob准备环境变量 */
 	static atomic_t kmod_concurrent = ATOMIC_INIT(0);
 #define MAX_KMOD_CONCURRENT 50	/* Completely arbitrary value - KAO */
 	static int kmod_loop_msg;
@@ -96,7 +99,7 @@ int request_module(const char *fmt, ...)
 	 * parent exits.  I think this is as good as it gets. --RR
 	 */
 	max_modprobes = min(max_threads/2, MAX_KMOD_CONCURRENT);
-	atomic_inc(&kmod_concurrent);
+	atomic_inc(&kmod_concurrent);/* kmod_concurrent是为了防止多次加载modprobe */
 	if (atomic_read(&kmod_concurrent) > max_modprobes) {
 		/* We may be blaming an innocent here, but unlikely */
 		if (kmod_loop_msg++ < 5)
@@ -107,6 +110,7 @@ int request_module(const char *fmt, ...)
 		return -ENOMEM;
 	}
 
+	/* modprobe_path默认值是/sbin/modprobe,可通过proc文件系统改变 */
 	ret = call_usermodehelper(modprobe_path, argv, envp, 1);
 	atomic_dec(&kmod_concurrent);
 	return ret;

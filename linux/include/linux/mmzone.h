@@ -34,10 +34,15 @@
  */
 #define PAGE_ALLOC_COSTLY_ORDER 3
 
+/* 不可移动的页，内核分配的页大多如此 */
 #define MIGRATE_UNMOVABLE     0
+/* 可回收页。如页缓存，其内容可从文件重新生成 */
 #define MIGRATE_RECLAIMABLE   1
+/* 可移动页。如分配给用户态进程的页面 */
 #define MIGRATE_MOVABLE       2
+/* 保留区域，如果向可移动区分配失败，紧急情况下可从这里分配 */
 #define MIGRATE_RESERVE       3
+/* 特殊的区域，用一跨越NUMA节点移动物理页面 */
 #define MIGRATE_ISOLATE       4 /* can't allocate from here */
 #define MIGRATE_TYPES         5
 
@@ -55,8 +60,13 @@ static inline int get_pageblock_migratetype(struct page *page)
 	return get_pageblock_flags_group(page, PB_migrate, PB_migrate_end);
 }
 
+/**
+ * 伙伴系统辅助结构，记录内存域中，某一阶的空闲内存
+ */
 struct free_area {
+	/* 空闲页链表 */
 	struct list_head	free_list[MIGRATE_TYPES];
+	/* 链表中的节点数目 */
 	unsigned long		nr_free;
 };
 
@@ -106,13 +116,19 @@ enum zone_stat_item {
 	NR_VM_ZONE_STAT_ITEMS };
 
 struct per_cpu_pages {
+	/* 列表中的页数 */
 	int count;		/* number of pages in the list */
+	/* 上限 */
 	int high;		/* high watermark, emptying needed */
+	/* 添加、删除页块的时候，每次操作的页数量 */
 	int batch;		/* chunk size for buddy add/remove */
+	/* 页面链表 */
 	struct list_head list;	/* the list of pages */
 };
 
+/* 每个内存域在某个CPU上的冷热页 */
 struct per_cpu_pageset {
+	/* 0:热页，1:冷页 */
 	struct per_cpu_pages pcp[2];	/* 0: hot.  1: cold */
 #ifdef CONFIG_NUMA
 	s8 expire;
@@ -149,6 +165,7 @@ enum zone_type {
 	 * i386, x86_64 and multiple other arches
 	 * 			<16M.
 	 */
+	/* DMA内存域，一般为16M，用于ISA */
 	ZONE_DMA,
 #endif
 #ifdef CONFIG_ZONE_DMA32
@@ -157,6 +174,7 @@ enum zone_type {
 	 * only able to do DMA to the lower 16M but also 32 bit devices that
 	 * can only do DMA areas below 4G.
 	 */
+	/* 在64位系统中，使用32位地址寻址、适合DMA的内存域 */
 	ZONE_DMA32,
 #endif
 	/*
@@ -164,6 +182,7 @@ enum zone_type {
 	 * performed on pages in ZONE_NORMAL if the DMA devices support
 	 * transfers to all addressable memory.
 	 */
+	/* 可直接映射到内核段的普通内存域 */
 	ZONE_NORMAL,
 #ifdef CONFIG_HIGHMEM
 	/*
@@ -174,8 +193,10 @@ enum zone_type {
 	 * table entries on i386) for each page that the kernel needs to
 	 * access.
 	 */
+	/* 内核不能直接映射的内存域 */
 	ZONE_HIGHMEM,
 #endif
+	/* 防止物理内存碎片，管理员可以设置可移动和不可移动内存域的大小 */
 	ZONE_MOVABLE,
 	MAX_NR_ZONES
 };
@@ -211,8 +232,15 @@ enum zone_type {
 #endif
 #undef __ZONE_COUNT
 
+/* 内存节点的内存域 */
 struct zone {
 	/* Fields commonly accessed by the page allocator */
+	/**
+	 * 水线相关字段
+	 * 如果内存数量大于pages_high，表示内存处于理想状态。
+	 * 如果低于pages_low，则开始回收内存
+	 * 如果低于pages_min，说明回收压力比较大。
+	 */
 	unsigned long		pages_min, pages_low, pages_high;
 	/*
 	 * We don't know if the memory that we're going to allocate will be freeable
@@ -222,6 +250,7 @@ struct zone {
 	 * on the higher zones). This array is recalculated at runtime if the
 	 * sysctl_lowmem_reserve_ratio sysctl changes.
 	 */
+	/* 为各个内存域保留的页。防止从高端内存分配时，占用过多低端内存的页。 */
 	unsigned long		lowmem_reserve[MAX_NR_ZONES];
 
 #ifdef CONFIG_NUMA
@@ -231,6 +260,7 @@ struct zone {
 	 */
 	unsigned long		min_unmapped_pages;
 	unsigned long		min_slab_pages;
+	/* 该内存域在各个CPU上的热页 */
 	struct per_cpu_pageset	*pageset[NR_CPUS];
 #else
 	struct per_cpu_pageset	pageset[NR_CPUS];
@@ -243,6 +273,7 @@ struct zone {
 	/* see spanned/present_pages for more description */
 	seqlock_t		span_seqlock;
 #endif
+	/* 该内存域在各个阶上面的可用内存页链表，用于实现伙伴系统 */
 	struct free_area	free_area[MAX_ORDER];
 
 #ifndef CONFIG_SPARSEMEM
@@ -254,18 +285,26 @@ struct zone {
 #endif /* CONFIG_SPARSEMEM */
 
 
+	/* 结构填充字段。加快结构成员的访问速度。 */
 	ZONE_PADDING(_pad1_)
 
 	/* Fields commonly accessed by the page reclaim scanner */
 	spinlock_t		lru_lock;	
+	/* 活动页链表 */
 	struct list_head	active_list;
+	/* 非活动页链表 */
 	struct list_head	inactive_list;
+	/* 在回收内存时需要扫描的活动页数量 */
 	unsigned long		nr_scan_active;
+	/* 在回收内存时需要扫描的非活动页数量 */
 	unsigned long		nr_scan_inactive;
+	/* 上次换出页时，扫描过的页数量 */
 	unsigned long		pages_scanned;	   /* since last reclaim */
+	/* 内存域标志，如ZONE_ALL_UNRECLAIMABLE */
 	unsigned long		flags;		   /* zone flags, see below */
 
 	/* Zone statistics */
+	/* 内存域统计信息，zone_page_state用于获得其中的信息 */
 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
 
 	/*
@@ -281,6 +320,7 @@ struct zone {
 	 * Access to both this field is quite racy even on uniprocessor.  But
 	 * it is expected to average out OK.
 	 */
+	/* 上一次扫描操作扫描该内存域的优先级，根据该值可以判断是否换出映射页 */
 	int prev_priority;
 
 
@@ -311,6 +351,7 @@ struct zone {
 	 * primary users of these fields, and in mm/page_alloc.c
 	 * free_area_init_core() performs the initialization of them.
 	 */
+	/* 用于实现等待队列，可用于等待某一页变为可用。 */
 	wait_queue_head_t	* wait_table;
 	unsigned long		wait_table_hash_nr_entries;
 	unsigned long		wait_table_bits;
@@ -318,8 +359,10 @@ struct zone {
 	/*
 	 * Discontig memory support fields.
 	 */
+	/* 该内存域所属的节点 */
 	struct pglist_data	*zone_pgdat;
 	/* zone_start_pfn == zone_start_paddr >> PAGE_SHIFT */
+	/* 该内存域第一个页帧号 */
 	unsigned long		zone_start_pfn;
 
 	/*
@@ -332,21 +375,28 @@ struct zone {
 	 * frequently read in proximity to zone->lock.  It's good to
 	 * give them a chance of being in the same cacheline.
 	 */
+	/* 包含空洞的内存页数量 */
 	unsigned long		spanned_pages;	/* total size, including holes */
+	/* 不包含空洞的内存页数量 */
 	unsigned long		present_pages;	/* amount of memory (excluding holes) */
 
 	/*
 	 * rarely used fields:
 	 */
+	/* 内存域名称 */
 	const char		*name;
 } ____cacheline_internodealigned_in_smp;
 
 typedef enum {
+	/* 由于所有页都在使用，因此在回收时，所有页都无法回收。 */
 	ZONE_ALL_UNRECLAIMABLE,		/* all pages pinned */
+	/* 防止多个CPU同时在该节点上进行回收 */
 	ZONE_RECLAIM_LOCKED,		/* prevents concurrent reclaim */
+	/* 该内存域正在处理OOM，防止并发进行OOM操作 */
 	ZONE_OOM_LOCKED,		/* zone is in OOM killer zonelist */
 } zone_flags_t;
 
+/* 测试和设置内存域的标志 */
 static inline void zone_set_flag(struct zone *zone, zone_flags_t flag)
 {
 	set_bit(flag, &zone->flags);
@@ -505,9 +555,13 @@ static inline int alloc_should_filter_zonelist(struct zonelist *zonelist)
 #endif /* CONFIG_NUMA */
 
 #ifdef CONFIG_ARCH_POPULATES_NODE_MAP
+/* 活动内存区 */
 struct node_active_region {
+	/* 起始页帧号 */
 	unsigned long start_pfn;
+	/* 结束页帧号 */
 	unsigned long end_pfn;
+	/* 所属NUMA ID */
 	int nid;
 };
 #endif /* CONFIG_ARCH_POPULATES_NODE_MAP */
@@ -529,13 +583,21 @@ extern struct page *mem_map;
  * per-zone basis.
  */
 struct bootmem_data;
+/**
+ * 内存节点。每个节点关联到系统中的一个处理器。
+ */
 typedef struct pglist_data {
+	/* 包含节点中各个内存域的数据结构 */
 	struct zone node_zones[MAX_NR_ZONES];
+	/* 备用节点及其内存域列表。当前节点没有可用空间时，在备用节点中分配内存。 */
 	struct zonelist node_zonelists[MAX_ZONELISTS];
+	/* 不同内存域的数量 */
 	int nr_zones;
 #ifdef CONFIG_FLAT_NODE_MEM_MAP
+	/* 所有内存页指针，用于描述节点的所有内存页 */
 	struct page *node_mem_map;
 #endif
+	/* 自举内存分配器 */
 	struct bootmem_data *bdata;
 #ifdef CONFIG_MEMORY_HOTPLUG
 	/*
@@ -547,12 +609,18 @@ typedef struct pglist_data {
 	 */
 	spinlock_t node_size_lock;
 #endif
+	/* 该节点第一个页帧的逻辑编号。页帧编号在系统范围内全局唯一。 */
 	unsigned long node_start_pfn;
+	/* 节点内所有可用的物理内存页数量 */
 	unsigned long node_present_pages; /* total number of physical pages */
+	/* 所有物理内存页数量，包含空洞 */
 	unsigned long node_spanned_pages; /* total size of physical page
 					     range, including holes */
+	/* 节点ID */
 	int node_id;
+	/* 等待将此节点上的页交换出去的任务队列 */
 	wait_queue_head_t kswapd_wait;
+	/* 该节点的交换守护进程 */
 	struct task_struct *kswapd;
 	int kswapd_max_order;
 } pg_data_t;
@@ -697,6 +765,7 @@ extern char numa_zonelist_order[];
 #ifndef CONFIG_NEED_MULTIPLE_NODES
 
 extern struct pglist_data contig_page_data;
+/* 获得某个NUMA节点的内存节点，对UMA来说，只有一个全局节点 */
 #define NODE_DATA(nid)		(&contig_page_data)
 #define NODE_MEM_MAP(nid)	mem_map
 #define MAX_NODES_SHIFT		1

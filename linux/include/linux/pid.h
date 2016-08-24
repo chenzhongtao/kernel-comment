@@ -46,18 +46,28 @@ enum pid_type
  * seen in particular namespace. Later the struct pid is found with
  * find_pid_ns() using the int nr and struct pid_namespace *ns.
  */
-
+/**
+ * 特定命名空间中可见的pid
+ */
 struct upid {
 	/* Try to keep pid_chain in the same cacheline as nr for find_pid */
+	/* ID号 */
 	int nr;
+	/* 所属命名空间 */
 	struct pid_namespace *ns;
+	/* 通过此字段链接到全局upid散列表中 */
 	struct hlist_node pid_chain;
 };
 
+/**
+ * 全局pid的表示
+ */
 struct pid
 {
+	/* 引用计数值 */
 	atomic_t count;
 	/* lists of tasks that use this pid */
+	/* 使用该id的所有进程链表 */
 	struct hlist_head tasks[PIDTYPE_MAX];
 	struct rcu_head rcu;
 	int level;
@@ -65,10 +75,14 @@ struct pid
 };
 
 extern struct pid init_struct_pid;
-
+/**
+ * 此结构将task_struct与pid散列表关联
+ */
 struct pid_link
 {
+	/* 用于散列表节点的结构 */
 	struct hlist_node node;
+	/* 进程所属pid实例 */
 	struct pid *pid;
 };
 
@@ -135,6 +149,9 @@ extern void zap_pid_ns_processes(struct pid_namespace *pid_ns);
  * see also task_xid_nr() etc in include/linux/sched.h
  */
 
+/**
+ * 返回init进程看到的全局PID
+ */
 static inline pid_t pid_nr(struct pid *pid)
 {
 	pid_t nr = 0;
@@ -145,6 +162,9 @@ static inline pid_t pid_nr(struct pid *pid)
 
 pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns);
 
+/**
+ * 返回id所属命名空间中的局部pid
+ */
 static inline pid_t pid_vnr(struct pid *pid)
 {
 	pid_t nr = 0;

@@ -2982,6 +2982,9 @@ int ext3_write_inode(struct inode *inode, int wait)
  *
  * Called with inode->sem down.
  */
+/**
+ * 修改文件属性
+ */
 int ext3_setattr(struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = dentry->d_inode;

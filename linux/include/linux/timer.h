@@ -7,13 +7,21 @@
 
 struct tvec_t_base_s;
 
+/**
+ * 低分辨率时钟
+ */
 struct timer_list {
+	/* 链表元素字段 */
 	struct list_head entry;
+	/* 到期时间，以jiffies为单位 */
 	unsigned long expires;
 
+	/* 超时回调 */
 	void (*function)(unsigned long);
+	/* 回调函数的参数 */
 	unsigned long data;
 
+	/* 此结构与CPU相关，其中的定时器以到期时间排序。 */
 	struct tvec_t_base_s *base;
 #ifdef CONFIG_TIMER_STATS
 	void *start_site;

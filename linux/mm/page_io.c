@@ -30,6 +30,7 @@ static struct bio *get_swap_bio(gfp_t gfp_flags, pgoff_t index,
 		swp_entry_t entry = { .val = index, };
 
 		sis = get_swap_info_struct(swp_type(entry));
+		/* 搜索区间链表，查找槽位与磁盘块之间的映射 */
 		bio->bi_sector = map_swap_page(sis, swp_offset(entry)) *
 					(PAGE_SIZE >> 9);
 		bio->bi_bdev = sis->bdev;
@@ -93,18 +94,23 @@ void end_swap_bio_read(struct bio *bio, int err)
  * We may have stale swap cache pages in memory: notice
  * them here and get rid of the unnecessary final write.
  */
+/**
+ * 将页面数据写入到交换区指定位置
+ */
 int swap_writepage(struct page *page, struct writeback_control *wbc)
 {
 	struct bio *bio;
 	int ret = 0, rw = WRITE;
 
+	/* 如果页面仅仅由交换缓存使用，则可以从内存中移除 */
 	if (remove_exclusive_swap_page(page)) {
 		unlock_page(page);
 		goto out;
 	}
+	/* 为交换页生成一个bio，并正确填充所需的参数 */
 	bio = get_swap_bio(GFP_NOIO, page_private(page), page,
-				end_swap_bio_write);
-	if (bio == NULL) {
+				end_swap_bio_write);/* end_swap_bio_write清除回写标志 */
+	if (bio == NULL) {/* 没内存了 */
 		set_page_dirty(page);
 		unlock_page(page);
 		ret = -ENOMEM;
@@ -113,8 +119,10 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 	if (wbc->sync_mode == WB_SYNC_ALL)
 		rw |= (1 << BIO_RW_SYNC);
 	count_vm_event(PSWPOUT);
+	/* 设置回写标志 */
 	set_page_writeback(page);
 	unlock_page(page);
+	/* 提交bio */
 	submit_bio(rw, bio);
 out:
 	return ret;
@@ -127,6 +135,7 @@ int swap_readpage(struct file *file, struct page *page)
 
 	BUG_ON(!PageLocked(page));
 	ClearPageUptodate(page);
+	/* 生成读请求BIO */
 	bio = get_swap_bio(GFP_KERNEL, page_private(page), page,
 				end_swap_bio_read);
 	if (bio == NULL) {
@@ -135,6 +144,7 @@ int swap_readpage(struct file *file, struct page *page)
 		goto out;
 	}
 	count_vm_event(PSWPIN);
+	/* 提交读请求 */
 	submit_bio(READ, bio);
 out:
 	return ret;

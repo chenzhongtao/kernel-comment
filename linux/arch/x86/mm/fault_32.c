@@ -293,6 +293,11 @@ int show_unhandled_signals = 1;
  *	bit 3 == 1 means use of reserved bit detected
  *	bit 4 == 1 means fault was an instruction fetch
  */
+/**
+ * 缺页异常处理程序
+ * regs:缺页时的寄存器现场
+ * error_code:0位-缺页或保护异常，1-读访问造成的异常，2-内核态，3-使用了保留位，4-取指异常
+ */
 fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 				      unsigned long error_code)
 {
@@ -309,6 +314,7 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 	trace_hardirqs_fixup();
 
 	/* get the address */
+	/* 缺页时的异常地址 */
         address = read_cr2();
 
 	tsk = current;
@@ -328,9 +334,12 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 	 * (error_code & 4) == 0, and that the fault was not a
 	 * protection error (error_code & 9) == 0.
 	 */
+	/* 超出了用户态地址范围，可能是内核态vmalloc区域的异常 */
 	if (unlikely(address >= TASK_SIZE)) {
-		if (!(error_code & 0x0000000d) && vmalloc_fault(address) >= 0)
+		/* vmalloc_fault将进程页表与内核的主页表中的信息进行同步 */
+		if (!(error_code & 0x0000000d) && vmalloc_fault(address) >= 0)/* 确保不是在内核态的保护性错误 */
 			return;
+		/* 通知kprobe处理 */
 		if (notify_page_fault(regs))
 			return;
 		/*
@@ -354,7 +363,7 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 	 * If we're in an interrupt, have no user context or are running in an
 	 * atomic region then we must not take the fault..
 	 */
-	if (in_atomic() || !mm)
+	if (in_atomic() || !mm)/* 在中断或原子状态下，或者是内核线程。此时不允许访问用户态内容，异常 */
 		goto bad_area_nosemaphore;
 
 	/* When running in the kernel we expect faults to occur only to
@@ -379,23 +388,26 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 		down_read(&mm->mmap_sem);
 	}
 
+	/* 不是中断上下文，也有自己的上下文，则查找进程的地址 */
 	vma = find_vma(mm, address);
-	if (!vma)
+	if (!vma)/* 错误地址 */
 		goto bad_area;
-	if (vma->vm_start <= address)
+	if (vma->vm_start <= address)/* 有效地址空间 */
 		goto good_area;
-	if (!(vma->vm_flags & VM_GROWSDOWN))
+	/* 异常地址之后有一个vma区域，但是异常地址没有包含在该区域内 */
+	if (!(vma->vm_flags & VM_GROWSDOWN))/* 判断该区域是否为向下扩展的堆栈 */
 		goto bad_area;
-	if (error_code & 4) {
+	if (error_code & 4) {/* 缺页异常，判断是否可以扩展堆栈 */
 		/*
 		 * Accessing the stack below %esp is always a bug.
 		 * The large cushion allows instructions like enter
 		 * and pusha to work.  ("enter $65535,$31" pushes
 		 * 32 pointers and then decrements %esp by 65535.)
 		 */
-		if (address + 65536 + 32 * sizeof(unsigned long) < regs->esp)
+		if (address + 65536 + 32 * sizeof(unsigned long) < regs->esp)/* 地址太小，不可能是访问堆栈造成的 */
 			goto bad_area;
 	}
+	/* 试图扩展堆栈 */
 	if (expand_stack(vma, address))
 		goto bad_area;
 /*
@@ -403,20 +415,23 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
  * we can handle it..
  */
 good_area:
+	/* 运行到这里，说明访问的地址区间是正常的 */
 	si_code = SEGV_ACCERR;
 	write = 0;
 	switch (error_code & 3) {
 		default:	/* 3: write, present */
 				/* fall through */
 		case 2:		/* write, not present */
-			if (!(vma->vm_flags & VM_WRITE))
+			/* 错误代码为2、3，说明是写造成的异常 */
+			if (!(vma->vm_flags & VM_WRITE))/* 相关区域不允许写 */
 				goto bad_area;
 			write++;
 			break;
 		case 1:		/* read, present */
+			/* 读引起的异常，并且相关的pte有效。可能是用户访问了保护页，异常 */
 			goto bad_area;
 		case 0:		/* read, not present */
-			if (!(vma->vm_flags & (VM_READ | VM_EXEC | VM_WRITE)))
+			if (!(vma->vm_flags & (VM_READ | VM_EXEC | VM_WRITE)))/* 判断vma是否允许读 */
 				goto bad_area;
 	}
 
@@ -425,16 +440,17 @@ good_area:
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
-	 */
-	fault = handle_mm_fault(mm, vma, address, write);
-	if (unlikely(fault & VM_FAULT_ERROR)) {
-		if (fault & VM_FAULT_OOM)
+	 */ 
+	/* 运行到这里，说明用户访问的区域是有效的，仅仅是内核还没有准备好页表 */
+	fault = handle_mm_fault(mm, vma, address, write);/* 处理缺页 */
+	if (unlikely(fault & VM_FAULT_ERROR)) {/* 由于特定的异常造成无法处理缺页 */
+		if (fault & VM_FAULT_OOM)/* 没有内存了 */
 			goto out_of_memory;
-		else if (fault & VM_FAULT_SIGBUS)
+		else if (fault & VM_FAULT_SIGBUS)/* 奇怪的错误，例如要访问的文件已经被收缩，向用户发送信号 */
 			goto do_sigbus;
 		BUG();
 	}
-	if (fault & VM_FAULT_MAJOR)
+	if (fault & VM_FAULT_MAJOR)/* 根据本次异常是从块设备中读取数据还是从内存中读取数据，来对异常缺页进行统计 */
 		tsk->maj_flt++;
 	else
 		tsk->min_flt++;
@@ -442,12 +458,12 @@ good_area:
 	/*
 	 * Did it hit the DOS screen memory VA from vm86 mode?
 	 */
-	if (regs->eflags & VM_MASK) {
+	if (regs->eflags & VM_MASK) {/* 这里是处理实模式程序，略过 */
 		unsigned long bit = (address - 0xA0000) >> PAGE_SHIFT;
 		if (bit < 32)
 			tsk->thread.screen_bitmap |= 1 << bit;
 	}
-	up_read(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);/* 释放mmap信号量 */
 	return;
 
 /*
@@ -459,11 +475,11 @@ bad_area:
 
 bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
-	if (error_code & 4) {
+	if (error_code & 4) {/* 异常来自于用户态 */
 		/*
 		 * It's possible to have interrupts off here.
 		 */
-		local_irq_enable();
+		local_irq_enable();/* 强制打开中断 */
 
 		/* 
 		 * Valid to do another page fault here because this one came 
@@ -473,7 +489,7 @@ bad_area_nosemaphore:
 			return;
 
 		if (show_unhandled_signals && unhandled_signal(tsk, SIGSEGV) &&
-		    printk_ratelimit()) {
+		    printk_ratelimit()) {/* 用户没有处理段错误，这里打印警告 */
 			printk("%s%s[%d]: segfault at %08lx eip %08lx "
 			    "esp %08lx error %lx\n",
 			    task_pid_nr(tsk) > 1 ? KERN_INFO : KERN_EMERG,
@@ -484,6 +500,7 @@ bad_area_nosemaphore:
 		/* Kernel addresses are always protection faults */
 		tsk->thread.error_code = error_code | (address >= TASK_SIZE);
 		tsk->thread.trap_no = 14;
+		/* 强制向进程发送段错误信号 */
 		force_sig_info_fault(SIGSEGV, si_code, address, tsk);
 		return;
 	}
@@ -504,8 +521,9 @@ bad_area_nosemaphore:
 	}
 #endif
 
-no_context:
+no_context:/* 运行到这里，说明是内核态产生了异常，没有进程上下文 */
 	/* Are we prepared to handle this kernel fault?  */
+	/* 异常发生在内核态，首先尝试用异常修复表修复 */
 	if (fixup_exception(regs))
 		return;
 
@@ -514,6 +532,7 @@ no_context:
 	 * had been triggered by is_prefetch fixup_exception would have 
 	 * handled it.
 	 */
+	/* 某些CPU会在预取时发生段错误，这实际上并不是错误 */
  	if (is_prefetch(regs, address, error_code))
  		return;
 
@@ -522,6 +541,7 @@ no_context:
  * terminate things with extreme prejudice.
  */
 
+	/* 运行到这里，说明真正错误了，打印一些错误信息，用于调试 */
 	bust_spinlocks(1);
 
 	if (oops_may_print()) {

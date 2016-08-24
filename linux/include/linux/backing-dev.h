@@ -35,9 +35,13 @@ enum bdi_stat_item {
 
 #define BDI_STAT_BATCH (8*(1+ilog2(nr_cpu_ids)))
 
+/* 地址空间关联的设备信息 */
 struct backing_dev_info {
+	/* 预读页的最大数目 */
 	unsigned long ra_pages;	/* max readahead in PAGE_CACHE_SIZE units */
+	/* 存储设备状态 */
 	unsigned long state;	/* Always use atomic bitops on this */
+	/* 设备的属性，如是否允许直接执行，是否支持回写 */
 	unsigned int capabilities; /* Device capabilities */
 	congested_fn *congested_fn; /* Function pointer if device is md/dm */
 	void *congested_data;	/* Pointer to aux data for congested func */

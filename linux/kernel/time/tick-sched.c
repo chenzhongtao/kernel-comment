@@ -49,24 +49,29 @@ static void tick_do_update_jiffies64(ktime_t now)
 	ktime_t delta;
 
 	/* Reevalute with xtime_lock held */
-	write_seqlock(&xtime_lock);
+	write_seqlock(&xtime_lock);/* 获得写顺序锁 */
 
+	/* 计算当前时间与上次更新jiffies的时间差值 */
 	delta = ktime_sub(now, last_jiffies_update);
-	if (delta.tv64 >= tick_period.tv64) {
+	if (delta.tv64 >= tick_period.tv64) {/* 本次时间与上次更新时间超过一个tick，需要更新jiffies */
 
+		/* 一般情况下，只会超过一个jiffies，而不是多个 */
 		delta = ktime_sub(delta, tick_period);
 		last_jiffies_update = ktime_add(last_jiffies_update,
 						tick_period);
 
 		/* Slow path for long timeouts */
-		if (unlikely(delta.tv64 >= tick_period.tv64)) {
+		if (unlikely(delta.tv64 >= tick_period.tv64)) {/* 超过一个tick */
 			s64 incr = ktime_to_ns(tick_period);
 
+			/* 计算超过了多少个tick */
 			ticks = ktime_divns(delta, incr);
 
+			/* 更新jiffies时间 */
 			last_jiffies_update = ktime_add_ns(last_jiffies_update,
 							   incr * ticks);
 		}
+		/* 更新jiffies计数 */
 		do_timer(++ticks);
 	}
 	write_sequnlock(&xtime_lock);
@@ -150,17 +155,22 @@ void tick_nohz_update_jiffies(void)
  * Called either from the idle loop or from irq_exit() when an idle period was
  * just interrupted by an interrupt which did not cause a reschedule.
  */
+/**
+ * 停用周期性时钟
+ */
 void tick_nohz_stop_sched_tick(void)
 {
 	unsigned long seq, last_jiffies, next_jiffies, delta_jiffies, flags;
 	struct tick_sched *ts;
 	ktime_t last_update, expires, now, delta;
+	/* 获取当前CPU的时钟设备 */
 	struct clock_event_device *dev = __get_cpu_var(tick_cpu_device).evtdev;
 	int cpu;
 
 	local_irq_save(flags);
 
 	cpu = smp_processor_id();
+	/* 获取当前CPU的动态时钟配置 */
 	ts = &per_cpu(tick_cpu_sched, cpu);
 
 	/*
@@ -170,15 +180,15 @@ void tick_nohz_stop_sched_tick(void)
 	 * this here the jiffies might be stale and do_timer() never
 	 * invoked.
 	 */
-	if (unlikely(!cpu_online(cpu))) {
-		if (cpu == tick_do_timer_cpu)
+	if (unlikely(!cpu_online(cpu))) {/* 当前CPU已经离线了 */
+		if (cpu == tick_do_timer_cpu)/* 如果当前CPU负责更新jiffies，则清除相关全局变量 */
 			tick_do_timer_cpu = -1;
 	}
 
 	if (unlikely(ts->nohz_mode == NOHZ_MODE_INACTIVE))
 		goto end;
 
-	if (need_resched())
+	if (need_resched())/* 有新任务需要运行，不能停止动态时钟 */
 		goto end;
 
 	cpu = smp_processor_id();
@@ -192,6 +202,7 @@ void tick_nohz_stop_sched_tick(void)
 		}
 	}
 
+	/* 更新动态时钟的统计信息 */
 	now = ktime_get();
 	/*
 	 * When called from irq_exit we need to account the idle sleep time
@@ -213,7 +224,9 @@ void tick_nohz_stop_sched_tick(void)
 	} while (read_seqretry(&xtime_lock, seq));
 
 	/* Get the next timer wheel timer */
+	/* 得到下一次定时器的到期时间 */
 	next_jiffies = get_next_timer_interrupt(last_jiffies);
+	/* 下一次定时器与最后一次时钟的间隔 */
 	delta_jiffies = next_jiffies - last_jiffies;
 
 	if (rcu_needs_cpu(cpu))
@@ -222,11 +235,11 @@ void tick_nohz_stop_sched_tick(void)
 	 * Do not stop the tick, if we are only one off
 	 * or if the cpu is required for rcu
 	 */
-	if (!ts->tick_stopped && delta_jiffies == 1)
+	if (!ts->tick_stopped && delta_jiffies == 1)/* 下一次定时器很快就会到来，没有必要停止动态时钟 */
 		goto out;
 
 	/* Schedule the tick, if we are at least one jiffie off */
-	if ((long)delta_jiffies >= 1) {
+	if ((long)delta_jiffies >= 1) {/* 下一个事件在一个jiffies以后 */
 
 		if (delta_jiffies > 1)
 			cpu_set(cpu, nohz_cpu_mask);
@@ -259,7 +272,7 @@ void tick_nohz_stop_sched_tick(void)
 		 * jiffies might be stale and do_timer() never
 		 * invoked.
 		 */
-		if (cpu == tick_do_timer_cpu)
+		if (cpu == tick_do_timer_cpu)/* 如果当前CPU负责更新时钟，则将其置为－1，其他CPU均可以设置时钟 */
 			tick_do_timer_cpu = -1;
 
 		ts->idle_sleeps++;
@@ -281,6 +294,7 @@ void tick_nohz_stop_sched_tick(void)
 		 * calculate the expiry time for the next timer wheel
 		 * timer
 		 */
+		/* 设置时钟，使其在预期的时候到来 */
 		expires = ktime_add_ns(last_update, tick_period.tv64 *
 				       delta_jiffies);
 		ts->idle_expires = expires;
@@ -326,6 +340,9 @@ ktime_t tick_nohz_get_sleep_length(void)
  * tick_nohz_restart_sched_tick - restart the idle tick from the idle task
  *
  * Restart the idle tick when the CPU is woken up from idle
+ */
+/**
+ * 重启动态时钟
  */
 void tick_nohz_restart_sched_tick(void)
 {
@@ -403,12 +420,16 @@ static int tick_nohz_reprogram(struct tick_sched *ts, ktime_t now)
 /*
  * The nohz low res interrupt handler
  */
+/**
+ * 在打开NOHZ时，时钟中断的处理函数
+ */
 static void tick_nohz_handler(struct clock_event_device *dev)
 {
+	/* 获得当前CPU的NOHZ定时器 */
 	struct tick_sched *ts = &__get_cpu_var(tick_cpu_sched);
 	struct pt_regs *regs = get_irq_regs();
 	int cpu = smp_processor_id();
-	ktime_t now = ktime_get();
+	ktime_t now = ktime_get();/* 取当前时间 */
 
 	dev->next_event.tv64 = KTIME_MAX;
 
@@ -423,7 +444,7 @@ static void tick_nohz_handler(struct clock_event_device *dev)
 		tick_do_timer_cpu = cpu;
 
 	/* Check, if the jiffies need an update */
-	if (tick_do_timer_cpu == cpu)
+	if (tick_do_timer_cpu == cpu)/* 当前CPU用于更新jiffies，更新其值 */
 		tick_do_update_jiffies64(now);
 
 	/*
@@ -439,15 +460,19 @@ static void tick_nohz_handler(struct clock_event_device *dev)
 		ts->idle_jiffies++;
 	}
 
+	/* 更新本CPU上的进程统计 */
 	update_process_times(user_mode(regs));
+	/* 本CPU上的profile处理 */
 	profile_tick(CPU_PROFILING);
 
 	/* Do not restart, when we are in the idle loop */
-	if (ts->tick_stopped)
+	if (ts->tick_stopped)/* 周期性定时器已经停用，退出 */
 		return;
 
+	/* 需要启用周期性定时器，对设备进行重新编程 */
 	while (tick_nohz_reprogram(ts, now)) {
 		now = ktime_get();
+		/* 下一个tick已经到期，这里重新更新jiffies */
 		tick_do_update_jiffies64(now);
 	}
 }
@@ -505,6 +530,9 @@ static inline void tick_nohz_switch_to_nohz(void) { }
  * We rearm the timer until we get disabled by the idle code
  * Called with interrupts disabled and timer->base->cpu_base->lock held.
  */
+/**
+ * 高分辨率时钟下的动态时钟处理函数
+ */
 static enum hrtimer_restart tick_sched_timer(struct hrtimer *timer)
 {
 	struct tick_sched *ts =
@@ -522,12 +550,12 @@ static enum hrtimer_restart tick_sched_timer(struct hrtimer *timer)
 	 * this duty, then the jiffies update is still serialized by
 	 * xtime_lock.
 	 */
-	if (unlikely(tick_do_timer_cpu == -1))
+	if (unlikely(tick_do_timer_cpu == -1))/* 如果所有CPU都放弃了主CPU的职责，则由当前CPU来承担此职责 */
 		tick_do_timer_cpu = cpu;
 #endif
 
 	/* Check, if the jiffies need an update */
-	if (tick_do_timer_cpu == cpu)
+	if (tick_do_timer_cpu == cpu)/* 更新全局时钟 */
 		tick_do_update_jiffies64(now);
 
 	/*

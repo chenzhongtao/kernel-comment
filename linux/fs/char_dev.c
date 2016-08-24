@@ -45,17 +45,30 @@ struct backing_dev_info directly_mappable_cdev_bdi = {
 		BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP),
 };
 
+/**
+ * 所有字符设备的全局散列表，以主设备号为散列关键字
+ */
 static struct kobj_map *cdev_map;
 
 static DEFINE_MUTEX(chrdevs_lock);
 
+/**
+ * 用于字符设备可用设备号管理，本结构是哈希桶中每一个元素的结构
+ */
 static struct char_device_struct {
+	/* 同一桶中下一元素 */
 	struct char_device_struct *next;
+	/* 主设备号，确定了它所属的桶索引 */
 	unsigned int major;
+	/* 最小从设备号 */
 	unsigned int baseminor;
+	/* 从设备号范围 */
 	int minorct;
+	/* 设备名称 */
 	char name[64];
+	/* 与设备相关的文件操作回调函数 */
 	struct file_operations *fops;
+	/* 字符设备对象 */
 	struct cdev *cdev;		/* will die */
 } *chrdevs[CHRDEV_MAJOR_HASH_SIZE];
 
@@ -194,6 +207,9 @@ __unregister_chrdev_region(unsigned major, unsigned baseminor, int minorct)
  *
  * Return value is zero on success, a negative error code on failure.
  */
+/**
+ * 注册字符设备号
+ */
 int register_chrdev_region(dev_t from, unsigned count, const char *name)
 {
 	struct char_device_struct *cd;
@@ -229,6 +245,9 @@ fail:
  * Allocates a range of char device numbers.  The major number will be
  * chosen dynamically, and returned (along with the first minor number)
  * in @dev.  Returns zero or a negative error code.
+ */
+/**
+ * 分配字符设备号范围
  */
 int alloc_chrdev_region(dev_t *dev, unsigned baseminor, unsigned count,
 			const char *name)
@@ -357,30 +376,36 @@ void cdev_put(struct cdev *p)
 /*
  * Called every time a character special file is opened
  */
+/**
+ * 打开字符设备时调用的方法
+ */
 int chrdev_open(struct inode * inode, struct file * filp)
 {
 	struct cdev *p;
 	struct cdev *new = NULL;
 	int ret = 0;
 
-	spin_lock(&cdev_lock);
+	spin_lock(&cdev_lock);/* 获取全局字符设备锁 */
 	p = inode->i_cdev;
-	if (!p) {
+	if (!p) {/* 该设备还没有被打开过 */
 		struct kobject *kobj;
 		int idx;
 		spin_unlock(&cdev_lock);
+		/* 根据设备号，在字符设备散列表中查找设备 */
 		kobj = kobj_lookup(cdev_map, inode->i_rdev, &idx);
-		if (!kobj)
+		if (!kobj)/* 失败，没有该设备 */
 			return -ENXIO;
 		new = container_of(kobj, struct cdev, kobj);
-		spin_lock(&cdev_lock);
+		spin_lock(&cdev_lock);/* 重新获取自旋锁 */
 		p = inode->i_cdev;
-		if (!p) {
+		if (!p) {/* 在释放锁的期间，没有其他人打开该设备 */
+			/* 初始化一些字段 */
 			inode->i_cdev = p = new;
 			inode->i_cindex = idx;
+			/* 将inode加入到该设备的inode链表中 */
 			list_add(&inode->i_devices, &p->list);
 			new = NULL;
-		} else if (!cdev_get(p))
+		} else if (!cdev_get(p))/* 其他人已经打开该设备了，但是获取引用失败 */
 			ret = -ENXIO;
 	} else if (!cdev_get(p))
 		ret = -ENXIO;
@@ -388,11 +413,13 @@ int chrdev_open(struct inode * inode, struct file * filp)
 	cdev_put(new);
 	if (ret)
 		return ret;
+	/* 复制文件操作回调 */
 	filp->f_op = fops_get(p->ops);
 	if (!filp->f_op) {
 		cdev_put(p);
 		return -ENXIO;
 	}
+	/* 调用驱动的open回调 */
 	if (filp->f_op->open) {
 		lock_kernel();
 		ret = filp->f_op->open(inode,filp);
@@ -453,6 +480,9 @@ static int exact_lock(dev_t dev, void *data)
  *
  * cdev_add() adds the device represented by @p to the system, making it
  * live immediately.  A negative error code is returned on failure.
+ */
+/**
+ * 将设备添加到字符设备数据库，以激活设备
  */
 int cdev_add(struct cdev *p, dev_t dev, unsigned count)
 {
@@ -524,6 +554,9 @@ struct cdev *cdev_alloc(void)
  *
  * Initializes @cdev, remembering @fops, making it ready to add to the
  * system with cdev_add().
+ */
+/**
+ * 初始化一个字符设备结构
  */
 void cdev_init(struct cdev *cdev, const struct file_operations *fops)
 {

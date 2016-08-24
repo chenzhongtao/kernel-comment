@@ -715,6 +715,9 @@ static unsigned long descriptor_loc(struct super_block *sb,
 	return (first_data_block + has_super + (bg * sbi->s_blocks_per_group));
 }
 
+/**
+ * 如果ext2超级块不在内存中，则回调此函数从磁盘中读取数据
+ */
 static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct buffer_head * bh;
@@ -745,6 +748,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	 * This is important for devices that have a hardware
 	 * sectorsize that is larger than the default.
 	 */
+	/* 根据设备的属性，预估一个块长度。一般为1024，如果块设备的块长度大于1024，则使用块设备的长度。 */
 	blocksize = sb_min_blocksize(sb, BLOCK_SIZE);
 	if (!blocksize) {
 		printk ("EXT2-fs: unable to set blocksize\n");
@@ -762,6 +766,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 		logic_sb_block = sb_block;
 	}
 
+	/* 读取超级块所在的数据块 */
 	if (!(bh = sb_bread(sb, logic_sb_block))) {
 		printk ("EXT2-fs: unable to read superblock\n");
 		goto failed_sbi;
@@ -770,14 +775,17 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	 * Note: s_es must be initialized as soon as possible because
 	 *       some ext2 macro-instructions depend on its value
 	 */
+	/* 磁盘上的超级块指针 */
 	es = (struct ext2_super_block *) (((char *)bh->b_data) + offset);
 	sbi->s_es = es;
 	sb->s_magic = le16_to_cpu(es->s_magic);
 
+	/* 检查物理设备上的魔法值，看是否真的是ext2文件分区 */
 	if (sb->s_magic != EXT2_SUPER_MAGIC)
 		goto cantfind_ext2;
 
 	/* Set defaults before we parse the mount options */
+	/* 从磁盘上读取默认的加载选项 */
 	def_mount_opts = le32_to_cpu(es->s_default_mount_opts);
 	if (def_mount_opts & EXT2_DEFM_DEBUG)
 		set_opt(sbi->s_mount_opt, DEBUG);
@@ -806,6 +814,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	
 	set_opt(sbi->s_mount_opt, RESERVATION);
 
+	/* 分析加载选项 */
 	if (!parse_options ((char *) data, sbi))
 		goto failed_mount;
 
@@ -852,8 +861,8 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 	/* If the blocksize doesn't match, re-read the thing.. */
-	if (sb->s_blocksize != blocksize) {
-		brelse(bh);
+	if (sb->s_blocksize != blocksize) {/* 实际的块长度与预估的长度不一致 */
+		brelse(bh);/* 释放原来的磁盘数据 */
 
 		if (!sb_set_blocksize(sb, blocksize)) {
 			printk(KERN_ERR "EXT2-fs: blocksize too small for device.\n");
@@ -862,7 +871,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 
 		logic_sb_block = (sb_block*BLOCK_SIZE) / blocksize;
 		offset = (sb_block*BLOCK_SIZE) % blocksize;
-		bh = sb_bread(sb, logic_sb_block);
+		bh = sb_bread(sb, logic_sb_block);/* 重新读取超级块 */
 		if(!bh) {
 			printk("EXT2-fs: Couldn't read superblock on "
 			       "2nd try.\n");
@@ -979,6 +988,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 			goto failed_mount_group_desc;
 		}
 	}
+	/* 读取组描述符，并检查其一致性 */
 	if (!ext2_check_descriptors (sb)) {
 		printk ("EXT2-fs: group descriptors corrupted!\n");
 		goto failed_mount2;
@@ -1002,6 +1012,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->s_rsv_window_head.rsv_goal_size = 0;
 	ext2_rsv_window_add(sb, &sbi->s_rsv_window_head);
 
+	/* 计算空闲块数目、空闲inode数目和目录数目，并据此初始化近似计数值 */
 	err = percpu_counter_init(&sbi->s_freeblocks_counter,
 				ext2_count_free_blocks(sb));
 	if (!err) {
@@ -1038,6 +1049,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	if (EXT2_HAS_COMPAT_FEATURE(sb, EXT3_FEATURE_COMPAT_HAS_JOURNAL))
 		ext2_warning(sb, __FUNCTION__,
 			"mounting ext3 filesystem as ext2");
+	/* 进行一些检查工作，并将超级块回写到磁盘，因为修改了装载计数和日期 */
 	ext2_setup_super (sb, es, sb->s_flags & MS_RDONLY);
 	return 0;
 
@@ -1261,6 +1273,9 @@ static int ext2_statfs (struct dentry * dentry, struct kstatfs * buf)
 	return 0;
 }
 
+/**
+ * 读取ext2文件系统超级块
+ */
 static int ext2_get_sb(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
 {

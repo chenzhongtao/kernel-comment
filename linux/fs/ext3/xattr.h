@@ -22,9 +22,13 @@
 #define	EXT3_XATTR_INDEX_LUSTRE			5
 #define EXT3_XATTR_INDEX_SECURITY	        6
 
+/**
+ * ext3扩展属性首部
+ */
 struct ext3_xattr_header {
 	__le32	h_magic;	/* magic number for identification */
 	__le32	h_refcount;	/* reference count */
+	/* 目前只能为1 */
 	__le32	h_blocks;	/* number of disk blocks used */
 	__le32	h_hash;		/* hash value of all attributes */
 	__u32	h_reserved[4];	/* zero right now */
@@ -34,12 +38,16 @@ struct ext3_xattr_ibody_header {
 	__le32	h_magic;	/* magic number for identification */
 };
 
+/* 扩展属性描述符 */
 struct ext3_xattr_entry {
+	/* 名称长度 */
 	__u8	e_name_len;	/* length of name */
 	__u8	e_name_index;	/* attribute name index */
+	/* 两个字段确定扩展属性值的位置 */
 	__le16	e_value_offs;	/* offset in disk block of value */
 	__le32	e_value_block;	/* disk block attribute is stored on (n/i) */
 	__le32	e_value_size;	/* size of attribute value */
+	/* 名称和值的哈希值 */
 	__le32	e_hash;		/* hash value of name and value */
 	char	e_name[0];	/* attribute name */
 };

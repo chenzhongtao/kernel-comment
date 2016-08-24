@@ -382,10 +382,17 @@ extern void kernel_thread_helper(void);
 /*
  * Create a kernel thread
  */
+/**
+ * 创建内核线程
+ *		fn:		内核线程入口函数
+ *		arg:	线程参数
+ *		flags:	CLONE标志
+ */
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	struct pt_regs regs;
 
+	/* 构建一个模拟的pt_regs参数 */
 	memset(&regs, 0, sizeof(regs));
 
 	regs.ebx = (unsigned long) fn;
@@ -400,6 +407,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	regs.eflags = X86_EFLAGS_IF | X86_EFLAGS_SF | X86_EFLAGS_PF | 0x2;
 
 	/* Ok, create the new process.. */
+	/* 创建线程 */
 	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
 }
 EXPORT_SYMBOL(kernel_thread);
@@ -772,6 +780,9 @@ struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct tas
 	return prev_p;
 }
 
+/**
+ * fork系统调用
+ */
 asmlinkage int sys_fork(struct pt_regs regs)
 {
 	return do_fork(SIGCHLD, regs.esp, &regs, 0, NULL, NULL);
@@ -810,21 +821,27 @@ asmlinkage int sys_vfork(struct pt_regs regs)
 /*
  * sys_execve() executes a new program.
  */
+/**
+ * 系统调用，执行一个新应用程序。
+ */
 asmlinkage int sys_execve(struct pt_regs regs)
 {
 	int error;
 	char * filename;
 
+	/* 从用户态获取要创建的进程文件名称 */
 	filename = getname((char __user *) regs.ebx);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
+	/* 装载进程文件 */
 	error = do_execve(filename,
 			(char __user * __user *) regs.ecx,
 			(char __user * __user *) regs.edx,
 			&regs);
-	if (error == 0) {
+	if (error == 0) {/* 新进程加载成功 */
 		task_lock(current);
+		/* 去除TRACE标志 */
 		current->ptrace &= ~PT_DTRACE;
 		task_unlock(current);
 		/* Make sure we don't return using sysenter.. */

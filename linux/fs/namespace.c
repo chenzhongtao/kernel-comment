@@ -166,7 +166,9 @@ static void detach_mnt(struct vfsmount *mnt, struct nameidata *old_nd)
 void mnt_set_mountpoint(struct vfsmount *mnt, struct dentry *dentry,
 			struct vfsmount *child_mnt)
 {
+	/* 添加父文件系统的引用计数并将其设置到装载点的父结构字段中 */
 	child_mnt->mnt_parent = mntget(mnt);
+	/* 设置装载点位置 */
 	child_mnt->mnt_mountpoint = dget(dentry);
 	dentry->d_mounted++;
 }
@@ -573,7 +575,7 @@ static int do_umount(struct vfsmount *mnt, int flags)
 	 */
 
 	lock_kernel();
-	if (sb->s_op->umount_begin)
+	if (sb->s_op->umount_begin)/* 在umount前，调用此回调进行预处理。 */
 		sb->s_op->umount_begin(mnt, flags);
 	unlock_kernel();
 
@@ -607,8 +609,9 @@ static int do_umount(struct vfsmount *mnt, int flags)
 	event++;
 
 	retval = -EBUSY;
+	/* 强制卸载或者没有谁需要该文件系统 */
 	if (flags & MNT_DETACH || !propagate_mount_busy(mnt, 2)) {
-		if (!list_empty(&mnt->mnt_list))
+		if (!list_empty(&mnt->mnt_list))/* 递减mount计数，并从内核链表中摘除 */
 			umount_tree(mnt, 1, &umount_list);
 		retval = 0;
 	}
@@ -616,6 +619,7 @@ static int do_umount(struct vfsmount *mnt, int flags)
 	if (retval)
 		security_sb_umount_busy(mnt);
 	up_write(&namespace_sem);
+	/* 恢复环境到mount前的状态 */
 	release_mounts(&umount_list);
 	return retval;
 }
@@ -628,16 +632,20 @@ static int do_umount(struct vfsmount *mnt, int flags)
  * unixes. Our API is identical to OSF/1 to avoid making a mess of AMD
  */
 
+/**
+ * umount系统调用
+ */
 asmlinkage long sys_umount(char __user * name, int flags)
 {
 	struct nameidata nd;
 	int retval;
 
+	/* 根据用户态参数，调用do_path_lookup查找装载点 */
 	retval = __user_walk(name, LOOKUP_FOLLOW, &nd);
 	if (retval)
 		goto out;
 	retval = -EINVAL;
-	if (nd.dentry != nd.mnt->mnt_root)
+	if (nd.dentry != nd.mnt->mnt_root)/* 不是装载点? */
 		goto dput_and_out;
 	if (!check_mnt(nd.mnt))
 		goto dput_and_out;
@@ -646,6 +654,7 @@ asmlinkage long sys_umount(char __user * name, int flags)
 	if (!capable(CAP_SYS_ADMIN))
 		goto dput_and_out;
 
+	/* 进行实际的umount操作 */
 	retval = do_umount(nd.mnt, flags);
 dput_and_out:
 	path_release_on_umount(&nd);
@@ -851,7 +860,9 @@ static int attach_recursive_mnt(struct vfsmount *source_mnt,
 		attach_mnt(source_mnt, nd);
 		touch_mnt_namespace(current->nsproxy->mnt_ns);
 	} else {
+		/* 将vfsmount与dentry关联起来 */
 		mnt_set_mountpoint(dest_mnt, dest_dentry, source_mnt);
+		/* 将装载点添加到全局散列表及父文件系统的链表中 */
 		commit_tree(source_mnt);
 	}
 
@@ -866,7 +877,7 @@ static int attach_recursive_mnt(struct vfsmount *source_mnt,
 static int graft_tree(struct vfsmount *mnt, struct nameidata *nd)
 {
 	int err;
-	if (mnt->mnt_sb->s_flags & MS_NOUSER)
+	if (mnt->mnt_sb->s_flags & MS_NOUSER)/* 如果是内核文件系统，如管道，则不能由用户态装载，退出 */
 		return -EINVAL;
 
 	if (S_ISDIR(nd->dentry->d_inode->i_mode) !=
@@ -884,7 +895,7 @@ static int graft_tree(struct vfsmount *mnt, struct nameidata *nd)
 
 	err = -ENOENT;
 	if (IS_ROOT(nd->dentry) || !d_unhashed(nd->dentry))
-		err = attach_recursive_mnt(mnt, nd, NULL);
+		err = attach_recursive_mnt(mnt, nd, NULL);/* 将文件系统添加到父文件系统的命名空间 */
 out_unlock:
 	mutex_unlock(&nd->dentry->d_inode->i_mutex);
 	if (!err)
@@ -1092,10 +1103,15 @@ static int do_new_mount(struct nameidata *nd, char *type, int flags,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
+	/**
+	 * 找到匹配的文件系统，如果没有匹配的文件系统，则加载相应的模块 
+	 * 调用特定文件系统的get_sb读取相关超级块
+	 */
 	mnt = do_kern_mount(type, flags, name, data);
 	if (IS_ERR(mnt))
 		return PTR_ERR(mnt);
 
+	/* 将文件系统加载到系统中 */
 	return do_add_mount(mnt, nd, mnt_flags, NULL);
 }
 
@@ -1119,14 +1135,15 @@ int do_add_mount(struct vfsmount *newmnt, struct nameidata *nd,
 	/* Refuse the same filesystem on the same mount point */
 	err = -EBUSY;
 	if (nd->mnt->mnt_sb == newmnt->mnt_sb &&
-	    nd->mnt->mnt_root == nd->dentry)
+	    nd->mnt->mnt_root == nd->dentry)/* 同一个装载点，不能多次将同一个文件系统装载到同一个目录 */
 		goto unlock;
 
 	err = -EINVAL;
-	if (S_ISLNK(newmnt->mnt_root->d_inode->i_mode))
+	if (S_ISLNK(newmnt->mnt_root->d_inode->i_mode))/* 不能装载到链接点上 */
 		goto unlock;
 
 	newmnt->mnt_flags = mnt_flags;
+	/* 装载文件系统 */
 	if ((err = graft_tree(newmnt, nd)))
 		goto unlock;
 
@@ -1442,16 +1459,16 @@ long do_mount(char *dev_name, char *dir_name, char *type_page,
 	if (retval)
 		goto dput_out;
 
-	if (flags & MS_REMOUNT)
+	if (flags & MS_REMOUNT)/* 重新加载文件系统 */
 		retval = do_remount(&nd, flags & ~MS_REMOUNT, mnt_flags,
 				    data_page);
-	else if (flags & MS_BIND)
+	else if (flags & MS_BIND)/* 通过loopback标志加载文件系统，如绑定iso文件 */
 		retval = do_loopback(&nd, dev_name, flags & MS_REC);
 	else if (flags & (MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE))
 		retval = do_change_type(&nd, flags);
-	else if (flags & MS_MOVE)
+	else if (flags & MS_MOVE)/* 移动一个已经装载的文件系统 */
 		retval = do_move_mount(&nd, dev_name);
-	else
+	else/* 普通加载操作 */
 		retval = do_new_mount(&nd, type_page, flags, mnt_flags,
 				      dev_name, data_page);
 dput_out:
@@ -1547,6 +1564,9 @@ struct mnt_namespace *copy_mnt_ns(unsigned long flags, struct mnt_namespace *ns,
 	return new_ns;
 }
 
+/**
+ * mount系统调用
+ */
 asmlinkage long sys_mount(char __user * dev_name, char __user * dir_name,
 			  char __user * type, unsigned long flags,
 			  void __user * data)
@@ -1557,6 +1577,7 @@ asmlinkage long sys_mount(char __user * dev_name, char __user * dir_name,
 	unsigned long dev_page;
 	char *dir_page;
 
+	/* 从用户态复制加载选项 */
 	retval = copy_mount_options(type, &type_page);
 	if (retval < 0)
 		return retval;
@@ -1574,10 +1595,12 @@ asmlinkage long sys_mount(char __user * dev_name, char __user * dir_name,
 	if (retval < 0)
 		goto out3;
 
+	/* 获取大内核锁 */
 	lock_kernel();
+	/* do_mount完成实际的加载 */
 	retval = do_mount((char *)dev_page, dir_page, (char *)type_page,
 			  flags, (void *)data_page);
-	unlock_kernel();
+	unlock_kernel();/* 释放大内核锁 */
 	free_page(data_page);
 
 out3:

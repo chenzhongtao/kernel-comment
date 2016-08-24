@@ -32,25 +32,32 @@ ext3_xattr_user_list(struct inode *inode, char *list, size_t list_size,
 	return total_len;
 }
 
+/* 获得ext3的user空间扩展属性 */
 static int
 ext3_xattr_user_get(struct inode *inode, const char *name,
 		    void *buffer, size_t size)
 {
+	/* buffer为null表示获得属性长度，但是name不能为空。 */
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
+	/* 确保装载时允许读写user空间 */
 	if (!test_opt(inode->i_sb, XATTR_USER))
 		return -EOPNOTSUPP;
+ 	/* 从inode或者block中获得属性 */
 	return ext3_xattr_get(inode, EXT3_XATTR_INDEX_USER, name, buffer, size);
 }
 
+/* 设置user空间的扩展属性 */
 static int
 ext3_xattr_user_set(struct inode *inode, const char *name,
 		    const void *value, size_t size, int flags)
 {
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
+	/* 加载时禁止了扩展属性功能 */
 	if (!test_opt(inode->i_sb, XATTR_USER))
 		return -EOPNOTSUPP;
+	/* 设置属性值 */
 	return ext3_xattr_set(inode, EXT3_XATTR_INDEX_USER, name,
 			      value, size, flags);
 }

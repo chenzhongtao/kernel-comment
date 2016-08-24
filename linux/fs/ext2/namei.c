@@ -205,6 +205,12 @@ static int ext2_link (struct dentry * old_dentry, struct inode * dir,
 	return ext2_add_nondir(dentry, inode);
 }
 
+/**
+ * 创建目录
+ *		dir:父目录
+ *		dentry:新目录的名称
+ *		mode:新目录的访问模式
+ */
 static int ext2_mkdir(struct inode * dir, struct dentry * dentry, int mode)
 {
 	struct inode * inode;
@@ -213,13 +219,16 @@ static int ext2_mkdir(struct inode * dir, struct dentry * dentry, int mode)
 	if (dir->i_nlink >= EXT2_LINK_MAX)
 		goto out;
 
+	/* 递增连接计数 */
 	inode_inc_link_count(dir);
 
+	/* 通过orlov分配器分配一个新的inode */
 	inode = ext2_new_inode (dir, S_IFDIR | mode);
 	err = PTR_ERR(inode);
 	if (IS_ERR(inode))
 		goto out_dir;
 
+	/* 设置inode的回调函数指针 */
 	inode->i_op = &ext2_dir_inode_operations;
 	inode->i_fop = &ext2_dir_operations;
 	if (test_opt(inode->i_sb, NOBH))
@@ -229,10 +238,12 @@ static int ext2_mkdir(struct inode * dir, struct dentry * dentry, int mode)
 
 	inode_inc_link_count(inode);
 
+	/* 在目录项中添加'.''和'..' */
 	err = ext2_make_empty(inode, dir);
 	if (err)
 		goto out_fail;
 
+	/* 将新目录的inode添加到父目录的inode数据中 */
 	err = ext2_add_link(dentry, inode);
 	if (err)
 		goto out_fail;
@@ -250,6 +261,11 @@ out_dir:
 	goto out;
 }
 
+/**
+ * 删除文件或目录
+ * 删除文件会直接调用此过程 
+ * 删除目录会间接调用此过程
+ */
 static int ext2_unlink(struct inode * dir, struct dentry *dentry)
 {
 	struct inode * inode = dentry->d_inode;
@@ -257,27 +273,35 @@ static int ext2_unlink(struct inode * dir, struct dentry *dentry)
 	struct page * page;
 	int err = -ENOENT;
 
+	/* 在目录表中查找目录项 */
 	de = ext2_find_entry (dir, dentry, &page);
 	if (!de)
 		goto out;
 
+	/* 从目录表中删除目录，它是通过修改目录结构的rec_len字段来实现的 */
 	err = ext2_delete_entry (de, page);
 	if (err)
 		goto out;
 
 	inode->i_ctime = dir->i_ctime;
+	/* 目录项已经被删除，指向该目录项的硬连接自然减小了1 */
 	inode_dec_link_count(inode);
 	err = 0;
 out:
 	return err;
 }
 
+/**
+ * 删除目录
+ */
 static int ext2_rmdir (struct inode * dir, struct dentry *dentry)
 {
 	struct inode * inode = dentry->d_inode;
 	int err = -ENOTEMPTY;
 
+	/* 被删除目录不能为空 */
 	if (ext2_empty_dir(inode)) {
+		/* 从父目录的inode数据区中，删除当前目录对应的项 */
 		err = ext2_unlink(dir, dentry);
 		if (!err) {
 			inode->i_size = 0;

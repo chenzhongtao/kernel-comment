@@ -20,6 +20,9 @@
 #include <linux/types.h>
 #include <asm/atomic.h>
 
+/**
+ * 引用计数对象 
+ */
 struct kref {
 	atomic_t refcount;
 };

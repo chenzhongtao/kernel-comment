@@ -25,19 +25,25 @@
 #ifndef __ASSEMBLY__
 
 struct thread_info {
+	/* 任务结构 */
 	struct task_struct	*task;		/* main task structure */
+	/* 执行域，一般用于64位机器上运行32位程序 */
 	struct exec_domain	*exec_domain;	/* execution domain */
+	/* 进程标志，如TIF_SIGPENDING */
 	unsigned long		flags;		/* low level flags */
 	unsigned long		status;		/* thread-synchronous flags */
+	/* 当前运行在哪个CPU上 */
 	__u32			cpu;		/* current CPU */
+	/* 抢占计数 */
 	int			preempt_count;	/* 0 => preemptable, <0 => BUG */
 
-
+	/* 可以使用的虚拟地址空间上限 */
 	mm_segment_t		addr_limit;	/* thread address space:
 					 	   0-0xBFFFFFFF for user-thead
 						   0-0xFFFFFFFF for kernel-thread
 						*/
 	void			*sysenter_return;
+	/* 用于信号机制，信号处理完毕后，重新执行系统的动作 */
 	struct restart_block    restart_block;
 
 	unsigned long           previous_esp;   /* ESP of the previous stack in case
@@ -124,7 +130,9 @@ static inline struct thread_info *current_thread_info(void)
  * - other flags in MSW
  */
 #define TIF_SYSCALL_TRACE	0	/* syscall trace active */
+/* 有未决信号 */
 #define TIF_SIGPENDING		1	/* signal pending */
+/* 有必要进行重新调度，例如:有新的高优先级进程就绪 */
 #define TIF_NEED_RESCHED	2	/* rescheduling necessary */
 #define TIF_SINGLESTEP		3	/* restore singlestep on return to user mode */
 #define TIF_IRET		4	/* return with iret */

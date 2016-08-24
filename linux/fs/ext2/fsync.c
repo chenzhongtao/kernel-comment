@@ -31,18 +31,23 @@
  *	even pass file to fsync ?
  */
 
+/**
+ * 在同步单个文件时，进行一些与文件系统相关的回写工作
+ */
 int ext2_sync_file(struct file *file, struct dentry *dentry, int datasync)
 {
 	struct inode *inode = dentry->d_inode;
 	int err;
 	int ret;
 
+	/* 将间接块或其他inode相关的缓冲区写回 */
 	ret = sync_mapping_buffers(inode->i_mapping);
 	if (!(inode->i_state & I_DIRTY))
 		return ret;
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
 		return ret;
 
+	/* 回写inode的管理数据 */
 	err = ext2_sync_inode(inode);
 	if (ret == 0)
 		ret = err;

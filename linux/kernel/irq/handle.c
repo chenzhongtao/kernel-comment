@@ -47,10 +47,14 @@ handle_bad_irq(unsigned int irq, struct irq_desc *desc)
  *
  * Controller mappings for all interrupt sources:
  */
+/**
+ * 全局IRQ处理函数
+ */
 struct irq_desc irq_desc[NR_IRQS] __cacheline_aligned_in_smp = {
 	[0 ... NR_IRQS-1] = {
 		.status = IRQ_DISABLED,
 		.chip = &no_irq_chip,
+		/* 默认不处理任何IRQ，初始化后由系统其他函数代替 */
 		.handle_irq = handle_bad_irq,
 		.depth = 1,
 		.lock = __SPIN_LOCK_UNLOCKED(irq_desc->lock),
@@ -126,6 +130,9 @@ irqreturn_t no_action(int cpl, void *dev_id)
  *
  * Handles the action chain of an irq event
  */
+/**
+ * 在中断处理函数中，调用此函数回调驱动的ISR
+ */
 irqreturn_t handle_IRQ_event(unsigned int irq, struct irqaction *action)
 {
 	irqreturn_t ret, retval = IRQ_NONE;
@@ -133,20 +140,23 @@ irqreturn_t handle_IRQ_event(unsigned int irq, struct irqaction *action)
 
 	handle_dynamic_tick(action);
 
-	if (!(action->flags & IRQF_DISABLED))
-		local_irq_enable_in_hardirq();
+	if (!(action->flags & IRQF_DISABLED))/* 第一个中断ISR不要求关中断运行 */
+		local_irq_enable_in_hardirq();/* 开中断 */
 
+	/* 遍历ISR链表 */
 	do {
+		/* 回调ISR处理函数 */
 		ret = action->handler(irq, action->dev_id);
-		if (ret == IRQ_HANDLED)
+		if (ret == IRQ_HANDLED)/* 该ISR响应了中断 */
 			status |= action->flags;
 		retval |= ret;
+		/* 下一个ISR */
 		action = action->next;
 	} while (action);
 
-	if (status & IRQF_SAMPLE_RANDOM)
+	if (status & IRQF_SAMPLE_RANDOM)/* 处理随机数种子 */
 		add_interrupt_randomness(irq);
-	local_irq_disable();
+	local_irq_disable();/* 回到上层函数，关闭中断 */
 
 	return retval;
 }

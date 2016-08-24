@@ -1757,39 +1757,46 @@ DEFINE_PER_CPU(struct netif_rx_stats, netdev_rx_stat) = { 0, };
  *
  */
 
+/**
+ * 传统方法处理报文的网络层代码
+ * 将接收到的报文放到特定CPU的等待队列中，并退出中断上下文
+ */
 int netif_rx(struct sk_buff *skb)
 {
 	struct softnet_data *queue;
 	unsigned long flags;
 
 	/* if netpoll wants it, pretend we never saw it */
-	if (netpoll_rx(skb))
+	if (netpoll_rx(skb))/* netpoll功能需要处理该报文，退出。该功能用于内核调试 */
 		return NET_RX_DROP;
 
-	if (!skb->tstamp.tv64)
+	if (!skb->tstamp.tv64)/* 记录报文时间戳 */
 		net_timestamp(skb);
 
 	/*
 	 * The code is rearranged so that the path is the most
 	 * short when CPU is congested, but is still operating.
 	 */
-	local_irq_save(flags);
+	local_irq_save(flags);/* 关闭中断 */
 	queue = &__get_cpu_var(softnet_data);
 
 	__get_cpu_var(netdev_rx_stat).total++;
+	/* 本地报文缓冲队列还可以保存数据 */
 	if (queue->input_pkt_queue.qlen <= netdev_max_backlog) {
-		if (queue->input_pkt_queue.qlen) {
+		if (queue->input_pkt_queue.qlen) {/* 缓冲队列中已经有数据了，不必触发软中断 */
 enqueue:
-			dev_hold(skb->dev);
+			dev_hold(skb->dev);/* 引用设备并将报文添加到队列中 */
 			__skb_queue_tail(&queue->input_pkt_queue, skb);
 			local_irq_restore(flags);
 			return NET_RX_SUCCESS;
 		}
 
+		/* 第一次将报文添加到队列中，触发软中断。软中断处理函数是net_rx_action */
 		napi_schedule(&queue->backlog);
 		goto enqueue;
 	}
 
+	/* 缓冲区已经满了，丢弃报文并释放报文 */
 	__get_cpu_var(netdev_rx_stat).dropped++;
 	local_irq_restore(flags);
 
@@ -2101,6 +2108,9 @@ out:
 	return ret;
 }
 
+/**
+ * 传统方法对报文的软中断处理
+ */
 static int process_backlog(struct napi_struct *napi, int quota)
 {
 	int work = 0;
@@ -2108,11 +2118,12 @@ static int process_backlog(struct napi_struct *napi, int quota)
 	unsigned long start_time = jiffies;
 
 	napi->weight = weight_p;
-	do {
+	do {/* 处理所有报文，直到超时或者达到配额 */
 		struct sk_buff *skb;
 		struct net_device *dev;
 
 		local_irq_disable();
+		/* 取出报文 */
 		skb = __skb_dequeue(&queue->input_pkt_queue);
 		if (!skb) {
 			__napi_complete(napi);
@@ -2124,6 +2135,7 @@ static int process_backlog(struct napi_struct *napi, int quota)
 
 		dev = skb->dev;
 
+		/* 将报文分发到协议栈 */
 		netif_receive_skb(skb);
 
 		dev_put(dev);
@@ -2150,6 +2162,9 @@ void fastcall __napi_schedule(struct napi_struct *n)
 EXPORT_SYMBOL(__napi_schedule);
 
 
+/**
+ * 处理报文的软中断
+ */
 static void net_rx_action(struct softirq_action *h)
 {
 	struct list_head *list = &__get_cpu_var(softnet_data).poll_list;
@@ -2159,6 +2174,7 @@ static void net_rx_action(struct softirq_action *h)
 
 	local_irq_disable();
 
+	/* 遍历本地队列中，所有需要处理的设备 */
 	while (!list_empty(list)) {
 		struct napi_struct *n;
 		int work, weight;
@@ -2170,7 +2186,7 @@ static void net_rx_action(struct softirq_action *h)
 		 * jiffies to pass before breaking out.  The test
 		 * used to be "jiffies - start_time > 1".
 		 */
-		if (unlikely(budget <= 0 || jiffies != start_time))
+		if (unlikely(budget <= 0 || jiffies != start_time))/* 超过处理配额了 */
 			goto softnet_break;
 
 		local_irq_enable();
@@ -2193,7 +2209,7 @@ static void net_rx_action(struct softirq_action *h)
 		 * accidently calling ->poll() when NAPI is not scheduled.
 		 */
 		work = 0;
-		if (test_bit(NAPI_STATE_SCHED, &n->state))
+		if (test_bit(NAPI_STATE_SCHED, &n->state))/* 调用设备的处理回调，对传统设备来是，是process_backlog */
 			work = n->poll(n, weight);
 
 		WARN_ON_ONCE(work > weight);

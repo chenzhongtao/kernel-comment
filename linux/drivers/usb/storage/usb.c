@@ -302,6 +302,9 @@ void fill_inquiry_response(struct us_data *us, unsigned char *data,
 	usb_stor_set_xfer_buf(data, data_len, us->srb);
 }
 
+/**
+ * USB守护进程。
+ */
 static int usb_stor_control_thread(void * __us)
 {
 	struct us_data *us = (struct us_data *)__us;
@@ -309,6 +312,10 @@ static int usb_stor_control_thread(void * __us)
 
 	for(;;) {
 		US_DEBUGP("*** thread sleeping.\n");
+		/**
+		 * 模块被卸载或者收到SCSI命令(queuecommand函数)时，会唤醒此信号量。
+		 * 如果收到信号，可能是关机了，需要退出循环。
+		 */
 		if(down_interruptible(&us->sema))
 			break;
 			
@@ -318,6 +325,9 @@ static int usb_stor_control_thread(void * __us)
 		mutex_lock(&(us->dev_mutex));
 
 		/* if the device has disconnected, we are free to exit */
+		/**
+		 * U盘已经被拨出。
+		 */
 		if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
 			US_DEBUGP("-- exiting\n");
 			mutex_unlock(&us->dev_mutex);
@@ -328,6 +338,9 @@ static int usb_stor_control_thread(void * __us)
 		scsi_lock(host);
 
 		/* has the command timed out *already* ? */
+		/**
+		 * 可能是command_abort设置了此标志。
+		 */
 		if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
 			us->srb->result = DID_ABORT << 16;
 			goto SkipForAbort;
@@ -338,6 +351,9 @@ static int usb_stor_control_thread(void * __us)
 		/* reject the command if the direction indicator 
 		 * is UNKNOWN
 		 */
+		/**
+		 * DMA_BIDIRECTIONAL表示两个方向都有可能，这是一种错误情况。
+		 */
 		if (us->srb->sc_data_direction == DMA_BIDIRECTIONAL) {
 			US_DEBUGP("UNKNOWN data direction\n");
 			us->srb->result = DID_ERROR << 16;
@@ -346,8 +362,8 @@ static int usb_stor_control_thread(void * __us)
 		/* reject if target != 0 or if LUN is higher than
 		 * the maximum known LUN
 		 */
-		else if (us->srb->device->id && 
-				!(us->flags & US_FL_SCM_MULT_TARG)) {
+		else if (us->srb->device->id && /* id!=0表示支持多个target */
+				!(us->flags & US_FL_SCM_MULT_TARG)) {/* 设备不支持多target */
 			US_DEBUGP("Bad target number (%d:%d)\n",
 				  us->srb->device->id, us->srb->device->lun);
 			us->srb->result = DID_BAD_TARGET << 16;
@@ -361,13 +377,16 @@ static int usb_stor_control_thread(void * __us)
 
 		/* Handle those devices which need us to fake 
 		 * their inquiry data */
-		else if ((us->srb->cmnd[0] == INQUIRY) &&
-			    (us->flags & US_FL_FIX_INQUIRY)) {
+		else if ((us->srb->cmnd[0] == INQUIRY) && /* 查询命令 */
+			    (us->flags & US_FL_FIX_INQUIRY)) {/* 不需要查询厂商名和产品名，可能是设备不支持 */
 			unsigned char data_ptr[36] = {
 			    0x00, 0x80, 0x02, 0x02,
 			    0x1F, 0x00, 0x00, 0x00};
 
 			US_DEBUGP("Faking INQUIRY command\n");
+			/**
+			 * 直接从常量数组中复制数据然后返回。
+			 */
 			fill_inquiry_response(us, data_ptr, 36);
 			us->srb->result = SAM_STAT_GOOD;
 		}
@@ -375,6 +394,10 @@ static int usb_stor_control_thread(void * __us)
 		/* we've got a command, let's do it! */
 		else {
 			US_DEBUG(usb_stor_show_command(us->srb));
+			/**
+			 * 一般情况下，会调用proto_handler真正处理SCSI命令。
+			 * 对U盘来说，这个函数是usb_stor_transparent_scsi_command。
+			 */
 			us->proto_handler(us->srb, us);
 		}
 
@@ -386,7 +409,7 @@ static int usb_stor_control_thread(void * __us)
 			;		/* nothing to do */
 
 		/* indicate that the command is done */
-		else if (us->srb->result != DID_ABORT << 16) {
+		else if (us->srb->result != DID_ABORT << 16) {/* 成功执行了命令，调用scsi_done通知SCSI核心层。 */
 			US_DEBUGP("scsi cmd done, result=0x%x\n", 
 				   us->srb->result);
 			us->srb->scsi_done(us->srb);
@@ -933,6 +956,9 @@ static int usb_stor_scan_thread(void * __us)
 
 
 /* Probe to see if we can drive a newly-connected USB device */
+/**
+ * USB设备探测函数。
+ */
 static int storage_probe(struct usb_interface *intf,
 			 const struct usb_device_id *id)
 {
@@ -950,7 +976,13 @@ static int storage_probe(struct usb_interface *intf,
 	 * Ask the SCSI layer to allocate a host structure, with extra
 	 * space at the end for our private us_data structure.
 	 */
+	/**
+	 * USB设备也是通过SCSI协议，因此通过SCSI核心分配一个通用结构，并且USB存储对象分配数据。
+	 */
 	host = scsi_host_alloc(&usb_stor_host_template, sizeof(*us));
+	/**
+	 * 内存分配失败，直接返回。
+	 */
 	if (!host) {
 		printk(KERN_WARNING USB_STORAGE
 			"Unable to allocate the scsi host\n");
@@ -970,6 +1002,9 @@ static int storage_probe(struct usb_interface *intf,
 	init_completion(&us->scanning_done);
 
 	/* Associate the us_data structure with the USB device */
+	/**
+	 * 为US成员设置初值。
+	 */
 	result = associate_dev(us, intf);
 	if (result)
 		goto BadDevice;
@@ -981,22 +1016,37 @@ static int storage_probe(struct usb_interface *intf,
 	 * of the match from the usb_device_id table, so we can find the
 	 * corresponding entry in the private table.
 	 */
+	/**
+	 * get_device_info主要是处理一些特殊设备。
+	 */
 	result = get_device_info(us, id);
 	if (result)
 		goto BadDevice;
 
 	/* Get the transport, protocol, and pipe settings */
+	/**
+	 * 对U盘来说，us 的transport_name 被赋值为”Bulk”,transport 被赋值为usb_stor_Bulk_transport,transport_reset 被赋值为usb_stor_Bulk_reset.
+	 */
 	result = get_transport(us);
 	if (result)
 		goto BadDevice;
+	/**
+	 * 对U盘来说，一是令us 的protocol_name 为"Transparent SCSI",另一个是令us 的proto_handler 为usb_stor_transparent_scsi_command.
+	 */
 	result = get_protocol(us);
 	if (result)
 		goto BadDevice;
+	/**
+	 * 判断每个端点的方向和类型。
+	 */
 	result = get_pipes(us);
 	if (result)
 		goto BadDevice;
 
 	/* Acquire all the other resources and add the host */
+	/**
+	 * 这是U盘初始化最重要的函数。主要是创建U盘守护线程。
+	 */
 	result = usb_stor_acquire_resources(us);
 	if (result)
 		goto BadDevice;
@@ -1041,7 +1091,9 @@ static void storage_disconnect(struct usb_interface *intf)
 /***********************************************************************
  * Initialization and registration
  ***********************************************************************/
-
+/**
+ * USB存储设备驱动。
+ */
 static struct usb_driver usb_storage_driver = {
 	.name =		"usb-storage",
 	.probe =	storage_probe,

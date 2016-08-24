@@ -154,6 +154,9 @@ int ext3_journal_dirty_data(handle_t *handle, struct buffer_head *bh);
 handle_t *ext3_journal_start_sb(struct super_block *sb, int nblocks);
 int __ext3_journal_stop(const char *where, handle_t *handle);
 
+/**
+ * 为inode启动一个日志
+ */
 static inline handle_t *ext3_journal_start(struct inode *inode, int nblocks)
 {
 	return ext3_journal_start_sb(inode->i_sb, nblocks);

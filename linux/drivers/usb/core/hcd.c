@@ -367,6 +367,9 @@ static int rh_call_control (struct usb_hcd *hcd, struct urb *urb)
 		return status;
 	urb->hcpriv = hcd;	/* Indicate it's queued */
 
+	/**
+	 * 控制传输专用缓冲区。
+	 */
 	cmd = (struct usb_ctrlrequest *) urb->setup_packet;
 	typeReq  = (cmd->bRequestType << 8) | cmd->bRequest;
 	wValue   = le16_to_cpu (cmd->wValue);
@@ -396,7 +399,9 @@ static int rh_call_control (struct usb_hcd *hcd, struct urb *urb)
 	 * to wake up the whole system.  So don't assume root hub and
 	 * controller capabilities are identical.
 	 */
-
+	/**
+	 * 设备请求并且是IN方向
+	 */
 	case DeviceRequest | USB_REQ_GET_STATUS:
 		tbuf [0] = (device_may_wakeup(&hcd->self.root_hub->dev)
 					<< USB_DEVICE_REMOTE_WAKEUP)
@@ -495,6 +500,10 @@ static int rh_call_control (struct usb_hcd *hcd, struct urb *urb)
 			len = sizeof (struct usb_hub_descriptor);
 			break;
 		}
+		/**
+		 * HUB特定类的请求需要调用主机控制器驱动程序的hub_control函数。
+		 * 对UHCI来说，为uhci_hub_control函数。
+		 */
 		status = hcd->driver->hub_control (hcd,
 			typeReq, wValue, wIndex,
 			tbuf, wLength);
@@ -538,6 +547,9 @@ error:
 	 * RT-friendly.
 	 */
 	spin_unlock(&hcd_root_hub_lock);
+	/**
+	 * 这里主要是进行收尾工作，调用complete通知调用者。
+	 */
 	usb_hcd_giveback_urb(hcd, urb, status);
 	spin_lock(&hcd_root_hub_lock);
 
@@ -567,6 +579,9 @@ void usb_hcd_poll_rh_status(struct usb_hcd *hcd)
 	if (!hcd->uses_new_polling && !hcd->status_urb)
 		return;
 
+	/**
+	 * 对UHCI来说，回调uhci_hub_status_data函数。
+	 */
 	length = hcd->driver->hub_status_data(hcd, buffer);
 	if (length > 0) {
 
@@ -594,9 +609,15 @@ void usb_hcd_poll_rh_status(struct usb_hcd *hcd)
 	 * exceed that limit if HZ is 100. The math is more clunky than
 	 * maybe expected, this is to make sure that all timers for USB devices
 	 * fire at the same time to give the CPU a break inbetween */
+	/**
+	 * uses_new_polling一般是1，poll_rh也已经设置过。
+	 */
 	if (hcd->uses_new_polling ? hcd->poll_rh :
 			(length == 0 && hcd->status_urb != NULL))
-		mod_timer (&hcd->rh_timer, (jiffies/(HZ/4) + 1) * (HZ/4));
+		/**
+		 * 定时器函数是rh_timer_func，再次回调本函数。
+		 */
+		mod_timer (&hcd->rh_timer, jiffies + msecs_to_jiffies(250));
 }
 EXPORT_SYMBOL_GPL(usb_hcd_poll_rh_status);
 
@@ -639,6 +660,9 @@ static int rh_queue_status (struct usb_hcd *hcd, struct urb *urb)
 	return retval;
 }
 
+/**
+ * ROOT HUB的URB请求入队。
+ */
 static int rh_urb_enqueue (struct usb_hcd *hcd, struct urb *urb)
 {
 	if (usb_endpoint_xfer_int(&urb->ep->desc))
@@ -747,10 +771,16 @@ static struct attribute_group usb_bus_attr_group = {
 
 static struct class *usb_host_class;
 
+/**
+ * 主机控制器初始化代码
+ */
 int usb_host_init(void)
 {
 	int retval = 0;
 
+	/**
+	 * 在/sys/class下面建立usb_host目录。
+	 */
 	usb_host_class = class_create(THIS_MODULE, "usb_host");
 	if (IS_ERR(usb_host_class))
 		retval = PTR_ERR(usb_host_class);
@@ -800,6 +830,9 @@ static int usb_register_bus(struct usb_bus *bus)
 	int busnum;
 
 	mutex_lock(&usb_bus_list_lock);
+	/**
+	 * 找到总线号。
+	 */
 	busnum = find_next_zero_bit (busmap.busmap, USB_MAXBUS, 1);
 	if (busnum >= USB_MAXBUS) {
 		printk (KERN_ERR "%s: too many buses\n", usbcore_name);
@@ -807,18 +840,30 @@ static int usb_register_bus(struct usb_bus *bus)
 	}
 	set_bit (busnum, busmap.busmap);
 	bus->busnum = busnum;
+	/**
+	 * 在/sys/class/usb下面创建usb_host文件。
+	 */
 	bus->class_dev = class_device_create(usb_host_class, NULL, MKDEV(0,0),
 					     bus->controller, "usb_host%d",
 					     busnum);
 	result = PTR_ERR(bus->class_dev);
 	if (IS_ERR(bus->class_dev))
 		goto error_create_class_dev;
+	/**
+	 * 将设备与sysfs文件系统中的文件关联起来。
+	 */
 	class_set_devdata(bus->class_dev, bus);
 
 	/* Add it to the local list of buses */
+	/**
+	 * 将总线加到总线链表中。
+	 */
 	list_add (&bus->bus_list, &usb_bus_list);
 	mutex_unlock(&usb_bus_list_lock);
 
+	/**
+	 * 这会导致增加/proc/bus/usb下面的文件。
+	 */
 	usb_notify_add_bus(bus);
 
 	dev_info (bus->controller, "new USB bus registered, assigned bus "
@@ -876,16 +921,28 @@ static int register_root_hub(struct usb_hcd *hcd)
 	const int devnum = 1;
 	int retval;
 
+	/**
+	 * Root HUB的设备号当头是1了。
+	 */
 	usb_dev->devnum = devnum;
 	usb_dev->bus->devnum_next = devnum + 1;
+	/**
+	 * 将devicemap清空并将第一个设备的位置占住。
+	 */
 	memset (&usb_dev->bus->devmap.devicemap, 0,
 			sizeof usb_dev->bus->devmap.devicemap);
 	set_bit (devnum, usb_dev->bus->devmap.devicemap);
+	/**
+	 * 设置设备状态为可用状态。
+	 */
 	usb_set_device_state(usb_dev, USB_STATE_ADDRESS);
 
 	mutex_lock(&usb_bus_list_lock);
 
 	usb_dev->ep0.desc.wMaxPacketSize = __constant_cpu_to_le16(64);
+	/**
+	 * 获得Root HUB的设备描述符。
+	 */
 	retval = usb_get_device_descriptor(usb_dev, USB_DT_DEVICE_SIZE);
 	if (retval != sizeof usb_dev->descriptor) {
 		mutex_unlock(&usb_bus_list_lock);
@@ -894,6 +951,9 @@ static int register_root_hub(struct usb_hcd *hcd)
 		return (retval < 0) ? retval : -EMSGSIZE;
 	}
 
+	/**
+	 * 将设备加入到设备模型中，并处理一些有问题的硬件。
+	 */
 	retval = usb_new_device (usb_dev);
 	if (retval) {
 		dev_err (parent_dev, "can't register root hub for %s, %d\n",
@@ -903,10 +963,16 @@ static int register_root_hub(struct usb_hcd *hcd)
 
 	if (retval == 0) {
 		spin_lock_irq (&hcd_root_hub_lock);
+		/**
+		 * 通知全世界，HCD的Root HUB有户口了。
+		 */
 		hcd->rh_registered = 1;
 		spin_unlock_irq (&hcd_root_hub_lock);
 
 		/* Did the HC die before the root hub was registered? */
+		/** 
+		 * 如果哪位仁兄将HCD驱动卸载了，这里处理一下。
+		 */
 		if (hcd->state == HC_STATE_HALT)
 			usb_hc_died (hcd);	/* This time clean up */
 	}
@@ -1159,6 +1225,7 @@ static void unmap_urb_for_dma(struct usb_hcd *hcd, struct urb *urb)
 
 /*-------------------------------------------------------------------------*/
 
+#if 0
 /* may be called in any context with a valid urb->dev usecount
  * caller surrenders "ownership" of urb
  * expects usb_submit_urb() to have sanity checked and conditioned all
@@ -1204,7 +1271,171 @@ int usb_hcd_submit_urb (struct urb *urb, gfp_t mem_flags)
 	}
 	return status;
 }
+#else
+/**
+ * 当URB通过验证后，向HCD实际的提交URB。
+ */
+int usb_hcd_submit_urb (struct urb *urb, gfp_t mem_flags)
+{
+	int			status;
+	/**
+	 * 获得URB对应设备的主机控制器。
+	 */
+	struct usb_hcd		*hcd = bus_to_hcd(urb->dev->bus);
+	struct usb_host_endpoint *ep;
+	unsigned long		flags;
 
+	/**
+	 * 健康检查。
+	 */
+	if (!hcd)
+		return -ENODEV;
+
+	/**
+	 * 调试用，USB监控。
+	 */
+	usbmon_urb_submit(&hcd->self, urb);
+
+	/*
+	 * Atomically queue the urb,  first to our records, then to the HCD.
+	 * Access to urb->status is controlled by urb->lock ... changes on
+	 * i/o completion (normal or fault) or unlinking.
+	 */
+
+	// FIXME:  verify that quiescing hc works right (RH cleans up)
+
+	/**
+	 * 这把全局锁用于保护HCD数据传输。
+	 */
+	spin_lock_irqsave (&hcd_data_lock, flags);
+	/**
+	 * 根据管道得到对应的端点。
+	 */
+	ep = (usb_pipein(urb->pipe) ? urb->dev->ep_in : urb->dev->ep_out)
+			[usb_pipeendpoint(urb->pipe)];
+	/**
+	 * 端点为空，说明硬件还没有初始化好，退出。
+	 */
+	if (unlikely (!ep))
+		status = -ENOENT;
+	/**
+	 * URB被终止了。
+	 */
+	else if (unlikely (urb->reject))
+		status = -EPERM;
+	else switch (hcd->state) {
+		/**
+		 * 主机控制器状态是OK的，将URB挂到链表中。
+		 */
+	case HC_STATE_RUNNING:
+	case HC_STATE_RESUMING:
+doit:
+		list_add_tail (&urb->urb_list, &ep->urb_list);
+		status = 0;
+		break;
+	case HC_STATE_SUSPENDED:
+		/* HC upstream links (register access, wakeup signaling) can work
+		 * even when the downstream links (and DMA etc) are quiesced; let
+		 * usbcore talk to the root hub.
+		 */
+		/**
+		 * 主机控制器被挂起，但是上行链路能够工作，并且这个URB是送往root hub的，则将它送到root hub的队列中。。
+		 */
+		if (hcd->self.controller->power.power_state.event == PM_EVENT_ON
+				&& urb->dev->parent == NULL)
+			goto doit;
+		/* FALL THROUGH */
+	default:
+		status = -ESHUTDOWN;
+		break;
+	}
+	spin_unlock_irqrestore (&hcd_data_lock, flags);
+
+	/**
+	 * 发送不能完成，返回。
+	 */
+	if (status) {
+		INIT_LIST_HEAD (&urb->urb_list);
+		usbmon_urb_submit_error(&hcd->self, urb, status);
+		return status;
+	}
+
+	/* increment urb's reference count as part of giving it to the HCD
+	 * (which now controls it).  HCD guarantees that it either returns
+	 * an error or calls giveback(), but not both.
+	 */
+	/**
+	 * 增加URB结构的引用计数，感觉这里存在一个BUG，似乎应该在进入本函数，将URB挂入链表前就将引用计数增加。
+	 */
+	urb = usb_get_urb (urb);
+	/**
+	 * 增加use_count计数，表示URB已经被HCD接受了。
+	 */
+	atomic_inc (&urb->use_count);
+
+	/**
+	 * URB是流向root hub的。这种情况很少。
+	 */
+	if (urb->dev == hcd->self.root_hub) {
+		/* NOTE:  requirement on hub callers (usbfs and the hub
+		 * driver, for now) that URBs' urb->transfer_buffer be
+		 * valid and usb_buffer_{sync,unmap}() not be needed, since
+		 * they could clobber root hub response data.
+		 */
+		status = rh_urb_enqueue (hcd, urb);
+		goto done;
+	}
+
+	/* lower level hcd code should use *_dma exclusively,
+	 * unless it uses pio or talks to another transport.
+	 */
+	/**
+	 * 主机控制器支持DMA。
+	 */
+	if (hcd->self.uses_dma) {
+		if (usb_pipecontrol (urb->pipe)/* 控制管道 */
+			&& !(urb->transfer_flags & URB_NO_SETUP_DMA_MAP))/* 但是没有指定URB_NO_SETUP_DMA_MAP标志 */
+			/**
+			 * 这种情况下，需要将缓冲区中的包进行DMA映射。
+			 */
+			urb->setup_dma = dma_map_single (
+					hcd->self.controller,
+					urb->setup_packet,
+					sizeof (struct usb_ctrlrequest),
+					DMA_TO_DEVICE);
+		if (urb->transfer_buffer_length != 0 /* 数据包 */
+			&& !(urb->transfer_flags & URB_NO_TRANSFER_DMA_MAP))/* 但是没有URB_NO_TRANSFER_DMA_MAP */
+			/**
+			 * 也需要进行DMA映射。
+			 */
+			urb->transfer_dma = dma_map_single (
+					hcd->self.controller,
+					urb->transfer_buffer,
+					urb->transfer_buffer_length,
+					usb_pipein (urb->pipe)
+					    ? DMA_FROM_DEVICE
+					    : DMA_TO_DEVICE);
+	}
+
+	/**
+	 * 将urb 扔给具体的主机控制器驱动程序，如uhci_urb_enqueue
+	 */
+	status = hcd->driver->urb_enqueue (hcd, ep, urb, mem_flags);
+done:
+	/**
+	 * 入队失败了。
+	 */
+	if (unlikely (status)) {
+		urb_unlink (urb);
+		atomic_dec (&urb->use_count);
+		if (urb->reject)
+			wake_up (&usb_kill_urb_queue);
+		usbmon_urb_submit_error(&hcd->self, urb, status);
+		usb_put_urb (urb);
+	}
+	return status;
+}
+#endif
 /*-------------------------------------------------------------------------*/
 
 /* this makes the hcd giveback() the urb more quickly, by kicking it
@@ -1554,6 +1785,9 @@ irqreturn_t usb_hcd_irq (int irq, void *__hcd)
 	if (unlikely(start == HC_STATE_HALT ||
 	    !test_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags)))
 		return IRQ_NONE;
+	/**
+	 * 对UHCI来说，回调函数是uhci_irq
+	 */
 	if (hcd->driver->irq (hcd) == IRQ_NONE)
 		return IRQ_NONE;
 
@@ -1585,8 +1819,14 @@ void usb_hc_died (struct usb_hcd *hcd)
 		hcd->poll_rh = 0;
 
 		/* make khubd clean up old urbs and devices */
+		/**
+		 * 将设备回退到解放前。
+		 */
 		usb_set_device_state (hcd->self.root_hub,
 				USB_STATE_NOTATTACHED);
+		/**
+		 * 触发hub_events去处理后事。
+		 */
 		usb_kick_khubd (hcd->self.root_hub);
 	}
 	spin_unlock_irqrestore (&hcd_root_hub_lock, flags);
@@ -1687,19 +1927,31 @@ int usb_add_hcd(struct usb_hcd *hcd,
 	 * bottom up so that hcds can customize the root hubs before khubd
 	 * starts talking to them.  (Note, bus id is assigned early too.)
 	 */
+	/**
+	 * 初始化DMA需要的内存池。
+	 */
 	if ((retval = hcd_buffer_create(hcd)) != 0) {
 		dev_dbg(hcd->self.controller, "pool alloc failed\n");
 		return retval;
 	}
 
+	/**
+	 * 注册主机控制器的USB总线。
+	 */
 	if ((retval = usb_register_bus(&hcd->self)) < 0)
 		goto err_register_bus;
 
+	/**
+	 * 为HCD分配一个控制结构。
+	 */
 	if ((rhdev = usb_alloc_dev(NULL, &hcd->self, 0)) == NULL) {
 		dev_err(hcd->self.controller, "unable to allocate root hub\n");
 		retval = -ENOMEM;
 		goto err_allocate_root_hub;
 	}
+	/**
+	 * EHCI支持USB2.0。
+	 */
 	rhdev->speed = (hcd->driver->flags & HCD_USB2) ? USB_SPEED_HIGH :
 			USB_SPEED_FULL;
 	hcd->self.root_hub = rhdev;
@@ -1708,10 +1960,16 @@ int usb_add_hcd(struct usb_hcd *hcd,
 	 * but drivers can override it in reset() if needed, along with
 	 * recording the overall controller's system wakeup capability.
 	 */
+	/**
+	 * 打开root hub设备的wakeup功能。
+	 */
 	device_init_wakeup(&rhdev->dev, 1);
 
 	/* "reset" is misnamed; its role is now one-time init. the controller
 	 * should already have been reset (and boot firmware kicked off etc).
+	 */
+	/**
+	 * 回调设备初始化函数。对uhci来说是uhci_init。
 	 */
 	if (hcd->driver->reset && (retval = hcd->driver->reset(hcd)) < 0) {
 		dev_err(hcd->self.controller, "can't setup\n");
@@ -1724,9 +1982,12 @@ int usb_add_hcd(struct usb_hcd *hcd,
 		dev_dbg(hcd->self.controller, "supports USB remote wakeup\n");
 
 	/* enable irqs just before we start the controller */
-	if (hcd->driver->irq) {
+	if (hcd->driver->irq) {/* 主机控制器需要中断，哪个控制器会没有呢? */
 		snprintf(hcd->irq_descr, sizeof(hcd->irq_descr), "%s:usb%d",
 				hcd->driver->description, hcd->self.busnum);
+		/**
+		 * 注册UHCI需要的中断处理函数。
+		 */
 		if ((retval = request_irq(irqnum, &usb_hcd_irq, irqflags,
 				hcd->irq_descr, hcd)) != 0) {
 			dev_err(hcd->self.controller,
@@ -1747,6 +2008,9 @@ int usb_add_hcd(struct usb_hcd *hcd,
 					(unsigned long long)hcd->rsrc_start);
 	}
 
+	/**
+	 * 回调设备的start函数，对UHCI来说，就是uhci_start函数。
+	 */
 	if ((retval = hcd->driver->start(hcd)) < 0) {
 		dev_err(hcd->self.controller, "startup error %d\n", retval);
 		goto err_hcd_driver_start;
@@ -1754,6 +2018,9 @@ int usb_add_hcd(struct usb_hcd *hcd,
 
 	/* starting here, usbcore will pay attention to this root hub */
 	rhdev->bus_mA = min(500u, hcd->power_budget);
+	/**
+	 * 主机控制器一般有一个Root HUB，注册它。
+	 */
 	if ((retval = register_root_hub(hcd)) != 0)
 		goto err_register_root_hub;
 

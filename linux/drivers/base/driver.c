@@ -150,6 +150,9 @@ void put_driver(struct device_driver * drv)
  *	since most of the things we have to do deal with the bus
  *	structures.
  */
+/**
+ * ×¢²áÇý¶¯
+ */
 int driver_register(struct device_driver * drv)
 {
 	if ((drv->bus->probe && drv->probe) ||

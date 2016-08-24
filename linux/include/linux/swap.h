@@ -53,19 +53,28 @@ static inline int current_is_kswapd(void)
  * For 2.5 we'll probably want to move the magic to just beyond the
  * bootbits...
  */
+/**
+ * 交换区头部，保存在交换区第一个槽位中。*/
 union swap_header {
 	struct {
+		/* 保留区域 */
 		char reserved[PAGE_SIZE - 10];
+		/* 魔法数，交换区版本号。目前只支持SWAPSPACE2。 */
 		char magic[10];			/* SWAP-SPACE or SWAPSPACE2 */
 	} magic;
 	struct {
+		/* 为启动装载程序预留的空间 */
 		char		bootbits[1024];	/* Space for disklabel etc. */
+		/* 版本号 */
 		__u32		version;
+		/* 最后一页的编号 */
 		__u32		last_page;
+		/* 不可用，坏块数目 */
 		__u32		nr_badpages;
 		unsigned char	sws_uuid[16];
 		unsigned char	sws_volume[16];
 		__u32		padding[117];
+		/* 坏块编号 */
 		__u32		badpages[1];
 	} info;
 };
@@ -73,6 +82,10 @@ union swap_header {
  /* A swap entry has to fit into a "unsigned long", as
   * the entry is hidden in the "index" field of the
   * swapper address space.
+  */
+ /**
+  * 交换项，包含交换区标识符和在交换区中的偏移量
+  * 可用swp_type和swp_offset提取其值。
   */
 typedef struct {
 	unsigned long val;
@@ -101,10 +114,17 @@ struct zone;
  *
  * We always assume that blocks are of size PAGE_SIZE.
  */
+/**
+ * 交换分区中，每一个连续区块
+ */
 struct swap_extent {
+	/* 通过此字段将其添加到分块链表中 */
 	struct list_head list;
+	/* 分块对应的槽位 */
 	pgoff_t start_page;
+	/* 分块中包含的页面数量 */
 	pgoff_t nr_pages;
+	/* 在设备中的块号 */
 	sector_t start_block;
 };
 
@@ -116,8 +136,11 @@ struct swap_extent {
 	((__swapoffset(magic.magic) - __swapoffset(info.badpages)) / sizeof(int))
 
 enum {
+	/* 正在使用用 */
 	SWP_USED	= (1 << 0),	/* is slot in swap_info[] used? */
+	/* 可写 */
 	SWP_WRITEOK	= (1 << 1),	/* ok to write to this swap?	*/
+	/* 可用 */
 	SWP_ACTIVE	= (SWP_USED | SWP_WRITEOK),
 					/* add others here before... */
 	SWP_SCANNING	= (1 << 8),	/* refcount in scan_swap_map */
@@ -131,22 +154,37 @@ enum {
 /*
  * The in-memory structure used to track swap areas.
  */
+/**
+ * 交换区信息
+ */
 struct swap_info_struct {
+	/* 交换区的状态标志。如SWP_USED */
 	unsigned int flags;
+	/* 交换区优先级 */
 	int prio;			/* swap priority */
+	/* 交换区文件，可能是交换设备上分区设备文件 */
 	struct file *swap_file;
+	/* 分区所在底层设备 */
 	struct block_device *bdev;
 	struct list_head extent_list;
+	/* 用于加快对分块的搜索 */
 	struct swap_extent *curr_swap_extent;
 	unsigned old_block_size;
+	/* 指向一个整形数组，其包含的项数与交换区槽位数相同。每一项是槽位的引用计数器 */
 	unsigned short * swap_map;
+	/* 用于加快搜索空闲槽位，低于lowest_bit及高于highest_bit的槽位是不可用的 */
 	unsigned int lowest_bit;
 	unsigned int highest_bit;
+	/* 可用簇的槽位 */
 	unsigned int cluster_next;
+	/* 可用簇的槽位数 */
 	unsigned int cluster_nr;
+	/* 可用槽位数 */
 	unsigned int pages;
+	/* 交换区总槽位数，包含损坏和用于管理的槽位数 */
 	unsigned int max;
 	unsigned int inuse_pages;
+	/* 下一个交换区的索引，以此形成一个优先级排序的链表 */
 	int next;			/* next entry on swap list */
 };
 

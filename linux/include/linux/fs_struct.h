@@ -7,8 +7,11 @@ struct vfsmount;
 struct fs_struct {
 	atomic_t count;
 	rwlock_t lock;
+	/* 新文件的权限，使用umask命令设置 */
 	int umask;
+	/* 进程根目录、当前目录。altroot用于仿真 */
 	struct dentry * root, * pwd, * altroot;
+	/* 所在的mount点 */
 	struct vfsmount * rootmnt, * pwdmnt, * altrootmnt;
 };
 

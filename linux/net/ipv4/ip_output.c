@@ -169,23 +169,26 @@ static inline int ip_finish_output2(struct sk_buff *skb)
 		IP_INC_STATS(IPSTATS_MIB_OUTBCASTPKTS);
 
 	/* Be paranoid, rather than too clever. */
+	/* 空余空间不足以容纳L2层头部 */
 	if (unlikely(skb_headroom(skb) < hh_len && dev->header_ops)) {
 		struct sk_buff *skb2;
 
+		/* 重新分配空间 */
 		skb2 = skb_realloc_headroom(skb, LL_RESERVED_SPACE(dev));
-		if (skb2 == NULL) {
+		if (skb2 == NULL) {/* 空间不足，释放现有报文并丢弃 */
 			kfree_skb(skb);
 			return -ENOMEM;
 		}
 		if (skb->sk)
 			skb_set_owner_w(skb2, skb->sk);
+		/* 释放原报文并发送新报文 */
 		kfree_skb(skb);
 		skb = skb2;
 	}
 
-	if (dst->hh)
+	if (dst->hh)/* 缓存了L2层报文头 */
 		return neigh_hh_output(dst->hh, skb);
-	else if (dst->neighbour)
+	else if (dst->neighbour)/* 没有缓存，则调用dev_queue_xmit发送，该函数会构建L2层头部 */
 		return dst->neighbour->output(skb);
 
 	if (net_ratelimit())
@@ -211,10 +214,11 @@ static int ip_finish_output(struct sk_buff *skb)
 		return dst_output(skb);
 	}
 #endif
+	/* 报文长度起来了MTU，并且不支持GSO */
 	if (skb->len > ip_skb_dst_mtu(skb) && !skb_is_gso(skb))
-		return ip_fragment(skb, ip_finish_output2);
-	else
-		return ip_finish_output2(skb);
+		return ip_fragment(skb, ip_finish_output2);/* 分片发送 */
+	else/* 不需要分片 */
+		return ip_finish_output2(skb);/* 直接发送报文 */
 }
 
 int ip_mc_output(struct sk_buff *skb)
@@ -290,6 +294,9 @@ int ip_output(struct sk_buff *skb)
 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
 }
 
+/**
+ * IP层发送主函数
+ */
 int ip_queue_xmit(struct sk_buff *skb, int ipfragok)
 {
 	struct sock *sk = skb->sk;
@@ -302,17 +309,18 @@ int ip_queue_xmit(struct sk_buff *skb, int ipfragok)
 	 * f.e. by something like SCTP.
 	 */
 	rt = (struct rtable *) skb->dst;
-	if (rt != NULL)
+	if (rt != NULL)/* 已经确定报文路由 */
 		goto packet_routed;
 
 	/* Make sure we can route this packet. */
+	/* 查找报文所属socket，如果该socket缓存了路由，则使用它 */
 	rt = (struct rtable *)__sk_dst_check(sk, 0);
-	if (rt == NULL) {
+	if (rt == NULL) {/* 还没有缓存路由，也就是第一次发送报文 */
 		__be32 daddr;
 
 		/* Use correct destination address if we have options. */
 		daddr = inet->daddr;
-		if(opt && opt->srr)
+		if(opt && opt->srr)/* 源站路由限制，强制路由到指定的链路 */
 			daddr = opt->faddr;
 
 		{
@@ -367,10 +375,11 @@ packet_routed:
 			     (skb_shinfo(skb)->gso_segs ?: 1) - 1);
 
 	/* Add an IP checksum. */
-	ip_send_check(iph);
+	ip_send_check(iph);/* 生成发送校验和 */
 
 	skb->priority = sk->sk_priority;
 
+	/* netfilter处理后传递给dst_output，由驱动发送报文。 */
 	return NF_HOOK(PF_INET, NF_IP_LOCAL_OUT, skb, NULL, rt->u.dst.dev,
 		       dst_output);
 
@@ -415,6 +424,9 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
  *	single device frame, and queue such a frame for sending.
  */
 
+/**
+ * 将IP报文分片
+ */
 int ip_fragment(struct sk_buff *skb, int (*output)(struct sk_buff*))
 {
 	struct iphdr *iph;

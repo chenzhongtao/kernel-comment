@@ -55,6 +55,9 @@
  *
  * Store this function in the HCD's struct pci_driver as probe().
  */
+/**
+ * HCD探测函数。
+ */
 int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct hc_driver	*driver;
@@ -67,11 +70,20 @@ int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 	if (!id || !(driver = (struct hc_driver *) id->driver_data))
 		return -EINVAL;
 
+	/**
+	 * 激活PCI设备上的IO资源和内存资源。
+	 */
 	if (pci_enable_device (dev) < 0)
 		return -ENODEV;
+	/**
+	 * PCI设备正常的工作电源状态。
+	 */
 	dev->current_state = PCI_D0;
 	dev->dev.power.power_state = PMSG_ON;
 	
+	/**
+	 * USB主机控制器设备必须有中断号。
+	 */
         if (!dev->irq) {
         	dev_err (&dev->dev,
 			"Found HC with no IRQ.  Check BIOS/PCI %s setup!\n",
@@ -80,6 +92,9 @@ int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 		goto err1;
         }
 
+	/**
+	 * 分配并初始化HCD结构。
+	 */
 	hcd = usb_create_hcd (driver, &dev->dev, pci_name(dev));
 	if (!hcd) {
 		retval = -ENOMEM;
@@ -105,6 +120,9 @@ int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 	} else { 				// UHCI
 		int	region;
 
+		/**
+		 * 访问PCI设备的IO基地址
+		 */
 		for (region = 0; region < PCI_ROM_RESOURCE; region++) {
 			if (!(pci_resource_flags (dev, region) &
 					IORESOURCE_IO))
@@ -112,10 +130,16 @@ int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 
 			hcd->rsrc_start = pci_resource_start (dev, region);
 			hcd->rsrc_len = pci_resource_len (dev, region);
+			/**
+			 * 申请IO空间。
+			 */
 			if (request_region (hcd->rsrc_start, hcd->rsrc_len,
 					driver->description))
-				break;
+				break;/* 一旦成功就退出循环，因为规范定义HCD只有一个基址寄存器 */
 		}
+		/**
+		 * 没有申请到任何一个IO范围，说明出现了错误。
+		 */
 		if (region == PCI_ROM_RESOURCE) {
 			dev_dbg (&dev->dev, "no i/o regions available\n");
 			retval = -EBUSY;
@@ -123,9 +147,15 @@ int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 		}
 	}
 
+	/**
+	 * HCD是作为master设备工作的。这样的设备可以不在主机CPU的干预下访问主机的地址空间。DMA就属于这种master设备。
+	 */
 	pci_set_master (dev);
 
-	retval = usb_add_hcd(hcd, dev->irq, IRQF_DISABLED | IRQF_SHARED);
+	/**
+	 * 初始化并注册HCD设备。
+	 */
+	retval = usb_add_hcd (hcd, dev->irq, IRQF_SHARED);
 	if (retval != 0)
 		goto err4;
 	return retval;

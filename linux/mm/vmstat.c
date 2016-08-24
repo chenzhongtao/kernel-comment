@@ -78,6 +78,7 @@ void vm_events_fold_cpu(int cpu)
  *
  * vm_stat contains the global counters
  */
+/* 系统内存页的状态,可用于pdflush线程 */
 atomic_long_t vm_stat[NR_VM_ZONE_STAT_ITEMS];
 EXPORT_SYMBOL(vm_stat);
 

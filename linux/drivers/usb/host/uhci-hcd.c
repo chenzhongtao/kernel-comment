@@ -134,6 +134,9 @@ static void finish_reset(struct uhci_hcd *uhci)
 	 * bits in the port status and control registers.
 	 * We have to clear them by hand.
 	 */
+	/**
+	 * 复位控制器后，再复位端口。
+	 */
 	for (port = 0; port < uhci->rh_numports; ++port)
 		outw(0, uhci->io_addr + USBPORTSC1 + (port * 2));
 
@@ -178,12 +181,21 @@ static void check_and_reset_hc(struct uhci_hcd *uhci)
 static void configure_hc(struct uhci_hcd *uhci)
 {
 	/* Set the frame length to the default: 1 ms exactly */
+	/**
+	 * 帧周期，通常为1ms。
+	 */
 	outb(USBSOF_DEFAULT, uhci->io_addr + USBSOF);
 
 	/* Store the frame list base address */
+	/**
+	 * Frame List在内存中的位置。bit11-bit0必须为全0，表示内存必须4K对齐。
+	 */
 	outl(uhci->frame_dma_handle, uhci->io_addr + USBFLBASEADD);
 
 	/* Set the current frame number */
+	/**
+	 * 帧数目。
+	 */
 	outw(uhci->frame_number & UHCI_MAX_SOF_NUMBER,
 			uhci->io_addr + USBFRNUM);
 
@@ -192,6 +204,9 @@ static void configure_hc(struct uhci_hcd *uhci)
 	mb();
 
 	/* Enable PIRQ */
+	/**
+	 * 允许设备产生中断。
+	 */
 	pci_write_config_word(to_pci_dev(uhci_dev(uhci)), USBLEGSUP,
 			USBLEGSUP_DEFAULT);
 }
@@ -329,7 +344,13 @@ static void start_rh(struct uhci_hcd *uhci)
 	/* Mark it configured and running with a 64-byte max packet.
 	 * All interrupts are enabled, even though RESUME won't do anything.
 	 */
+	/**
+	 * 通过CMD寄存器配置设备。
+	 */
 	outw(USBCMD_RS | USBCMD_CF | USBCMD_MAXP, uhci->io_addr + USBCMD);
+	/**
+	 * 打开四种中断开关。
+	 */
 	outw(USBINTR_TIMEOUT | USBINTR_RESUME | USBINTR_IOC | USBINTR_SP,
 			uhci->io_addr + USBINTR);
 	mb();
@@ -384,11 +405,20 @@ static irqreturn_t uhci_irq(struct usb_hcd *hcd)
 	 * interrupt cause.  Contrary to the UHCI specification, the
 	 * "HC Halted" status bit is persistent: it is RO, not R/WC.
 	 */
+	/**
+	 * 读取状态寄存器，确定产生中断的原因。
+	 */
 	status = inw(uhci->io_addr + USBSTS);
+	/**
+	 * 没有产生中断，直接退出。
+	 */
 	if (!(status & ~USBSTS_HCH))	/* shared interrupt, not mine */
 		return IRQ_NONE;
 	outw(status, uhci->io_addr + USBSTS);		/* Clear it */
 
+	/**
+	 * 三种中断标志位:IOC、错误、Resume Detect
+	 */
 	if (status & ~(USBSTS_USBINT | USBSTS_ERROR | USBSTS_RD)) {
 		if (status & USBSTS_HSE)
 			dev_err(uhci_dev(uhci), "host system error, "
@@ -495,10 +525,19 @@ static int uhci_init(struct usb_hcd *hcd)
 	 * a nonexistent register is addressed is to return all ones, so
 	 * we test for that also.
 	 */
+	/**
+	 * 最多有8个端口。
+	 */
 	for (port = 0; port < (io_size - USBPORTSC1) / 2; port++) {
 		unsigned int portstatus;
 
+		/**
+		 * 读取端口状态和控制寄存器。每个寄存器占用16位。
+		 */
 		portstatus = inw(uhci->io_addr + USBPORTSC1 + (port * 2));
+		/**
+		 * 第七位是保留位，永远为1，如果不为1，说明没有更多端口。
+		 */
 		if (!(portstatus & 0x0080) || portstatus == 0xffff)
 			break;
 	}
@@ -506,15 +545,24 @@ static int uhci_init(struct usb_hcd *hcd)
 		dev_info(uhci_dev(uhci), "detected %d ports\n", port);
 
 	/* Anything greater than 7 is weird so we'll ignore it. */
+	/**
+	 * 端口不能大于8个，如果大于8个，表示出错。但是规范规定最少有2个端口。
+	 */
 	if (port > UHCI_RH_MAXCHILD) {
 		dev_info(uhci_dev(uhci), "port count misdetected? "
 				"forcing to 2 ports\n");
 		port = 2;
 	}
+	/**
+	 * 记录端口数。
+	 */
 	uhci->rh_numports = port;
 
 	/* Kick BIOS off this hardware and reset if the controller
 	 * isn't already safely quiescent.
+	 */
+	/**
+	 * 复位一下控制器。比较复杂。
 	 */
 	check_and_reset_hc(uhci);
 	return 0;
@@ -552,6 +600,9 @@ static void uhci_shutdown(struct pci_dev *pdev)
  *    which contains no members, loops back to itself, and is present
  *    only when FSBR is on and there are no full-speed control or bulk QHs.
  */
+/**
+ * 复位UHCI后，调用的回调函数。
+ */
 static int uhci_start(struct usb_hcd *hcd)
 {
 	struct uhci_hcd *uhci = hcd_to_uhci(hcd);
@@ -568,6 +619,9 @@ static int uhci_start(struct usb_hcd *hcd)
 	init_waitqueue_head(&uhci->waitqh);
 
 	if (DEBUG_CONFIGURED) {
+		/**
+		 * 在/sys/kernel/debug/uhci下面建立文件
+		 */
 		dentry = debugfs_create_file(hcd->self.bus_name,
 				S_IFREG|S_IRUGO|S_IWUSR, uhci_debugfs_root,
 				uhci, &uhci_debug_operations);
@@ -580,6 +634,9 @@ static int uhci_start(struct usb_hcd *hcd)
 		uhci->dentry = dentry;
 	}
 
+	/**
+	 * 分配1024个一致性缓存用于DMA。
+	 */
 	uhci->frame = dma_alloc_coherent(uhci_dev(uhci),
 			UHCI_NUMFRAMES * sizeof(*uhci->frame),
 			&uhci->frame_dma_handle, 0);
@@ -590,6 +647,9 @@ static int uhci_start(struct usb_hcd *hcd)
 	}
 	memset(uhci->frame, 0, UHCI_NUMFRAMES * sizeof(*uhci->frame));
 
+	/**
+	 * frame_cpu是软件意义上的frame_list。
+	 */
 	uhci->frame_cpu = kcalloc(UHCI_NUMFRAMES, sizeof(*uhci->frame_cpu),
 			GFP_KERNEL);
 	if (!uhci->frame_cpu) {
@@ -598,6 +658,9 @@ static int uhci_start(struct usb_hcd *hcd)
 		goto err_alloc_frame_cpu;
 	}
 
+	/**
+	 * 为TD申请内存池。
+	 */
 	uhci->td_pool = dma_pool_create("uhci_td", uhci_dev(uhci),
 			sizeof(struct uhci_td), 16, 0);
 	if (!uhci->td_pool) {
@@ -605,6 +668,9 @@ static int uhci_start(struct usb_hcd *hcd)
 		goto err_create_td_pool;
 	}
 
+	/**
+	 * 为QH申请内存池。
+	 */
 	uhci->qh_pool = dma_pool_create("uhci_qh", uhci_dev(uhci),
 			sizeof(struct uhci_qh), 16, 0);
 	if (!uhci->qh_pool) {
@@ -618,6 +684,9 @@ static int uhci_start(struct usb_hcd *hcd)
 		goto err_alloc_term_td;
 	}
 
+	/**
+	 * 11个qh中，有8个用于等时传输。另外三个用于其他目的。
+	 */
 	for (i = 0; i < UHCI_NUM_SKELQH; i++) {
 		uhci->skelqh[i] = uhci_alloc_qh(uhci, NULL, NULL);
 		if (!uhci->skelqh[i]) {
@@ -629,12 +698,23 @@ static int uhci_start(struct usb_hcd *hcd)
 	/*
 	 * 8 Interrupt queues; link all higher int queues to int1 = async
 	 */
+	/**
+	 * 将8个中断传输队列链接到异步队列。
+	 */
 	for (i = SKEL_ISO + 1; i < SKEL_ASYNC; ++i)
 		uhci->skelqh[i]->link = LINK_TO_QH(uhci->skel_async_qh);
 	uhci->skel_async_qh->link = UHCI_PTR_TERM;
 	uhci->skel_term_qh->link = LINK_TO_QH(uhci->skel_term_qh);
 
 	/* This dummy TD is to work around a bug in Intel PIIX controllers */
+	/**
+	 * 注意TD TOKEN:bit32-21:	表示传输的最大字节数。
+	 *				bit20:		保留。
+	 *				bit19:		Toggle
+	 *				bit18-15:	端点号。
+	 *				bit14-8:	设备地址。
+	 *				bit7-0:		PID，即packet ID。
+	 */
 	uhci_fill_td(uhci->term_td, 0, uhci_explen(0) |
 			(0x7f << TD_TOKEN_DEVADDR_SHIFT) | USB_PID_IN, 0);
 	uhci->term_td->link = UHCI_PTR_TERM;
@@ -644,6 +724,9 @@ static int uhci_start(struct usb_hcd *hcd)
 	/*
 	 * Fill the frame list: make all entries point to the proper
 	 * interrupt queue.
+	 */
+	/**
+	 * 这里实际上是为1024个队列找到队列的等时传输端点。为二者建立映射关系。
 	 */
 	for (i = 0; i < UHCI_NUMFRAMES; i++) {
 
@@ -657,8 +740,14 @@ static int uhci_start(struct usb_hcd *hcd)
 	 */
 	mb();
 
+	/**
+	 * 配置硬件寄存器的值。
+	 */
 	configure_hc(uhci);
 	uhci->is_initialized = 1;
+	/**
+	 * 启用ROOT HUB。
+	 */
 	start_rh(uhci);
 	return 0;
 
@@ -912,6 +1001,9 @@ static struct pci_driver uhci_pci_driver = {
 #endif	/* PM */
 };
  
+/**
+ * UHCI主机控制器初始化函数
+ */
 static int __init uhci_hcd_init(void)
 {
 	int retval = -ENOMEM;
@@ -919,6 +1011,9 @@ static int __init uhci_hcd_init(void)
 	printk(KERN_INFO DRIVER_DESC " " DRIVER_VERSION "%s\n",
 			ignore_oc ? ", overcurrent ignored" : "");
 
+	/**
+	 * 内核参数禁止了USB。
+	 */
 	if (usb_disabled())
 		return -ENODEV;
 
@@ -926,16 +1021,25 @@ static int __init uhci_hcd_init(void)
 		errbuf = kmalloc(ERRBUF_LEN, GFP_KERNEL);
 		if (!errbuf)
 			goto errbuf_failed;
+		/**
+		 * 在/sys/kernel/debug下面创建uhci目录。
+		 */
 		uhci_debugfs_root = debugfs_create_dir("uhci", NULL);
 		if (!uhci_debugfs_root)
 			goto debug_failed;
 	}
 
+	/**
+	 * 创建存储缓冲区。
+	 */
 	uhci_up_cachep = kmem_cache_create("uhci_urb_priv",
 		sizeof(struct urb_priv), 0, 0, NULL);
 	if (!uhci_up_cachep)
 		goto up_failed;
 
+	/**
+	 * 注册控制器驱动。
+	 */
 	retval = pci_register_driver(&uhci_pci_driver);
 	if (retval)
 		goto init_failed;

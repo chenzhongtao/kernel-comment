@@ -384,6 +384,9 @@ struct uhci_hcd {
 
 	spinlock_t lock;
 
+	/**
+	 * Frame List在内存中的位置。
+	 */
 	dma_addr_t frame_dma_handle;	/* Hardware frame list */
 	__le32 *frame;
 	void **frame_cpu;		/* CPU's frame list */
@@ -416,6 +419,9 @@ struct uhci_hcd {
 
 	struct list_head idle_qh_list;		/* Where the idle QHs live */
 
+	/**
+	 * UHCI的端口数。
+	 */
 	int rh_numports;			/* Number of root-hub ports */
 
 	wait_queue_head_t waitqh;		/* endpoint_disable waiters */

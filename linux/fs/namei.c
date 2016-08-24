@@ -179,6 +179,9 @@ EXPORT_SYMBOL(putname);
  * for filesystem access without changing the "normal" uids which
  * are used for other things..
  */
+/**
+ * 通用的权限检查函数
+ */
 int generic_permission(struct inode *inode, int mask,
 		int (*check_acl)(struct inode *inode, int mask))
 {
@@ -187,6 +190,9 @@ int generic_permission(struct inode *inode, int mask,
 	if (current->fsuid == inode->i_uid)
 		mode >>= 6;
 	else {
+		/**
+		 * IS_POSIXACL检查装载时是否设置了标志MS_POSICACL
+		 */
 		if (IS_POSIXACL(inode) && (mode & S_IRWXG) && check_acl) {
 			int error = check_acl(inode, mask);
 			if (error == -EACCES)
@@ -233,35 +239,36 @@ int permission(struct inode *inode, int mask, struct nameidata *nd)
 	if (nd)
 		mnt = nd->mnt;
 
-	if (mask & MAY_WRITE) {
+	if (mask & MAY_WRITE) {/* 试图写访问 */
 		umode_t mode = inode->i_mode;
 
 		/*
 		 * Nobody gets write access to a read-only fs.
 		 */
-		if (IS_RDONLY(inode) &&
+		if (IS_RDONLY(inode) &&/* 文件只读 */
 		    (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
 			return -EROFS;
 
 		/*
 		 * Nobody gets write access to an immutable file.
 		 */
-		if (IS_IMMUTABLE(inode))
+		if (IS_IMMUTABLE(inode))/* 不可修改文件 */
 			return -EACCES;
 	}
 
-	if ((mask & MAY_EXEC) && S_ISREG(inode->i_mode)) {
+	if ((mask & MAY_EXEC) && S_ISREG(inode->i_mode)) {/* 试图执行文件 */
 		/*
 		 * MAY_EXEC on regular files is denied if the fs is mounted
 		 * with the "noexec" flag.
 		 */
-		if (mnt && (mnt->mnt_flags & MNT_NOEXEC))
+		if (mnt && (mnt->mnt_flags & MNT_NOEXEC))/* 文件系统装载时不允许执行 */
 			return -EACCES;
 	}
 
 	/* Ordinary permission routines do not understand MAY_APPEND. */
 	submask = mask & ~MAY_APPEND;
-	if (inode->i_op && inode->i_op->permission) {
+	if (inode->i_op && inode->i_op->permission) {/* inode指定了permission回调 */
+		/* 由文件系统来确定是否有权限访问 */
 		retval = inode->i_op->permission(inode, submask, nd);
 		if (!retval) {
 			/*
@@ -281,6 +288,7 @@ int permission(struct inode *inode, int mask, struct nameidata *nd)
 	if (retval)
 		return retval;
 
+	/* 由安全子系统来确定是否允许访问文件 */
 	return security_inode_permission(inode, mask, nd);
 }
 
@@ -294,6 +302,7 @@ int permission(struct inode *inode, int mask, struct nameidata *nd)
  * for filesystem access without changing the "normal" uids which
  * are used for other things.
  */
+/* 检查是否有权访问指定的inode */
 int vfs_permission(struct nameidata *nd, int mask)
 {
 	return permission(nd->dentry->d_inode, mask, nd);
@@ -482,6 +491,9 @@ ok:
  * make sure that nobody added the entry to the dcache in the meantime..
  * SMP-safe
  */
+/**
+ * 分配临时数据结构，并调用特定文件系统的lookup函数，以便在特定inode下搜索特定名称的文件
+ */
 static struct dentry * real_lookup(struct dentry * parent, struct qstr * name, struct nameidata *nd)
 {
 	struct dentry * result;
@@ -641,21 +653,28 @@ static __always_inline int __do_follow_link(struct path *path, struct nameidata 
  * Without that kind of total limit, nasty chains of consecutive
  * symlinks can cause almost arbitrarily long lookups. 
  */
+/**
+ * 在搜索文件时，处理链接文件
+ */
 static inline int do_follow_link(struct path *path, struct nameidata *nd)
 {
 	int err = -ELOOP;
+	/* 检查是否可能形成的过多的链接，这也许会形成死循环 */
 	if (current->link_count >= MAX_NESTED_LINKS)
 		goto loop;
 	if (current->total_link_count >= 40)
 		goto loop;
 	BUG_ON(nd->depth >= MAX_NESTED_LINKS);
 	cond_resched();
+	/* 安全检测 */
 	err = security_inode_follow_link(path->dentry, nd);
 	if (err)
 		goto loop;
+	/* 递增链接计数，避免形成死循环 */
 	current->link_count++;
 	current->total_link_count++;
 	nd->depth++;
+	/* 调用底层文件系统的链接文件处理过程 */
 	err = __do_follow_link(path, nd);
 	current->link_count--;
 	nd->depth--;
@@ -692,7 +711,9 @@ int follow_up(struct vfsmount **mnt, struct dentry **dentry)
 static int __follow_mount(struct path *path)
 {
 	int res = 0;
+	/* 当前文件被装载到一个文件系统 */
 	while (d_mountpoint(path->dentry)) {
+		/* lookup_mnt从散列表中获取文件系统的vfsmount实例 */
 		struct vfsmount *mounted = lookup_mnt(path->mnt, path->dentry);
 		if (!mounted)
 			break;
@@ -747,26 +768,29 @@ static __always_inline void follow_dotdot(struct nameidata *nd)
 
                 read_lock(&fs->lock);
 		if (nd->dentry == fs->root &&
-		    nd->mnt == fs->rootmnt) {
+		    nd->mnt == fs->rootmnt) {/* 已经是根目录了，不能再退回上一级 */
                         read_unlock(&fs->lock);
 			break;
 		}
                 read_unlock(&fs->lock);
 		spin_lock(&dcache_lock);
-		if (nd->dentry != nd->mnt->mnt_root) {
-			nd->dentry = dget(nd->dentry->d_parent);
+		if (nd->dentry != nd->mnt->mnt_root) {/* 当前目录不是装载点根目录 */
+			nd->dentry = dget(nd->dentry->d_parent);/* 移动到上级目录 */
 			spin_unlock(&dcache_lock);
-			dput(old);
+			dput(old);/* 递减对当前目录的引用 */
 			break;
 		}
 		spin_unlock(&dcache_lock);
+		/* 运行到这里，说明查找过程到达了装载点的根目录 */
 		spin_lock(&vfsmount_lock);
+		/* 修改装载点为父装载点 */
 		parent = nd->mnt->mnt_parent;
-		if (parent == nd->mnt) {
+		if (parent == nd->mnt) {/* 已经到达系统根目录了 */
 			spin_unlock(&vfsmount_lock);
 			break;
 		}
 		mntget(parent);
+		/* 移动到装载点 */
 		nd->dentry = dget(nd->mnt->mnt_mountpoint);
 		spin_unlock(&vfsmount_lock);
 		dput(old);
@@ -785,29 +809,35 @@ static int do_lookup(struct nameidata *nd, struct qstr *name,
 		     struct path *path)
 {
 	struct vfsmount *mnt = nd->mnt;
+	/* 在目录项缓存中查找文件是否存在 */
 	struct dentry *dentry = __d_lookup(nd->dentry, name);
 
-	if (!dentry)
+	if (!dentry)/* 没找到，读取inode数据进行真正的查找 */
 		goto need_lookup;
+	/* 如果文件系统有d_revalidate回调，则调用d_revalidate刷新目录项 */
 	if (dentry->d_op && dentry->d_op->d_revalidate)
 		goto need_revalidate;
 done:
+	/* 搜索到的文件目录项有效，返回 */
 	path->mnt = mnt;
 	path->dentry = dentry;
+	/* 处理装载点，因为分量可能已经装载到一个文件系统了 */
 	__follow_mount(path);
 	return 0;
 
 need_lookup:
+	/* 在目录项中搜索文件 */
 	dentry = real_lookup(nd->dentry, name, nd);
 	if (IS_ERR(dentry))
 		goto fail;
 	goto done;
 
 need_revalidate:
+	/* 检查缓存项是否有效 */
 	dentry = do_revalidate(dentry, nd);
-	if (!dentry)
+	if (!dentry)/* 无效，重新搜索 */
 		goto need_lookup;
-	if (IS_ERR(dentry))
+	if (IS_ERR(dentry))/* 异常，退出 */
 		goto fail;
 	goto done;
 
@@ -823,6 +853,9 @@ fail:
  * Returns 0 and nd will have valid dentry and mnt on success.
  * Returns error and drops reference to input namei data on failure.
  */
+/**
+ * 从指定的目录开始，查找特定名称的文件是否存在
+ */
 static fastcall int __link_path_walk(const char * name, struct nameidata *nd)
 {
 	struct path next;
@@ -830,31 +863,34 @@ static fastcall int __link_path_walk(const char * name, struct nameidata *nd)
 	int err;
 	unsigned int lookup_flags = nd->flags;
 	
-	while (*name=='/')
+	while (*name=='/')/* 省略最前面的'/' */
 		name++;
-	if (!*name)
+	if (!*name)/* 文件名为空，或者全部为'/'，直接返回 */
 		goto return_reval;
 
+	/* 获得起始点的inode */
 	inode = nd->dentry->d_inode;
 	if (nd->depth)
 		lookup_flags = LOOKUP_FOLLOW | (nd->flags & LOOKUP_CONTINUE);
 
 	/* At this point we know we have a real path component. */
-	for(;;) {
+	for(;;) {/* 遍历，查找每一个目录分量 */
 		unsigned long hash;
 		struct qstr this;
 		unsigned int c;
 
 		nd->flags |= LOOKUP_CONTINUE;
+		/* 进行常规的权限判断 */
 		err = exec_permission_lite(inode, nd);
-		if (err == -EAGAIN)
-			err = vfs_permission(nd, MAY_EXEC);
+		if (err == -EAGAIN)/* 文件系统定义了permission回调 */
+			err = vfs_permission(nd, MAY_EXEC);/* 调用默认的方法判断其exec权限 */
  		if (err)
 			break;
 
 		this.name = name;
 		c = *(const unsigned char *)name;
 
+		/* 计算目录分量的散列和 */
 		hash = init_name_hash();
 		do {
 			name++;
@@ -867,7 +903,7 @@ static fastcall int __link_path_walk(const char * name, struct nameidata *nd)
 		/* remove trailing slashes? */
 		if (!c)
 			goto last_component;
-		while (*++name == '/');
+		while (*++name == '/');/* 略过目录中的多个'/' */
 		if (!*name)
 			goto last_with_slashes;
 
@@ -876,59 +912,64 @@ static fastcall int __link_path_walk(const char * name, struct nameidata *nd)
 		 * to be able to know about the current root directory and
 		 * parent relationships.
 		 */
-		if (this.name[0] == '.') switch (this.len) {
-			default:
+		if (this.name[0] == '.') switch (this.len) {/* 当前目录分量为'.' */
+			default:/* 不是'.'和'..'，按一般文件进行处理 */
 				break;
 			case 2:	
-				if (this.name[1] != '.')
+				if (this.name[1] != '.')/* 目录分量为'..' */
 					break;
+				/* 移动到上级目录 */
 				follow_dotdot(nd);
 				inode = nd->dentry->d_inode;
 				/* fallthrough */
-			case 1:
+			case 1:/* 目录分量为'.'，直接跳过取下一个分量 */
 				continue;
 		}
+
+		/* 运行到此，说明路径分量是一个普通的文件 */
 		/*
 		 * See if the low-level filesystem might want
 		 * to use its own hash..
 		 */
-		if (nd->dentry->d_op && nd->dentry->d_op->d_hash) {
-			err = nd->dentry->d_op->d_hash(nd->dentry, &this);
+		if (nd->dentry->d_op && nd->dentry->d_op->d_hash) {/* 文件系统有自己的哈希算法 */
+			err = nd->dentry->d_op->d_hash(nd->dentry, &this);/* 重新计算目录分量的哈希值 */
 			if (err < 0)
 				break;
 		}
 		/* This does the actual lookups.. */
-		err = do_lookup(nd, &this, &next);
+		err = do_lookup(nd, &this, &next);/* 在文件系统中查找下级文件inode */
 		if (err)
 			break;
 
 		err = -ENOENT;
 		inode = next.dentry->d_inode;
-		if (!inode)
+		if (!inode)/* inode不存在，说明文件不存在 */
 			goto out_dput;
 		err = -ENOTDIR; 
 		if (!inode->i_op)
 			goto out_dput;
 
-		if (inode->i_op->follow_link) {
+		if (inode->i_op->follow_link) {/* 此文件为符号链接文件 */
+			/* 读取符号链接信息 */
 			err = do_follow_link(&next, nd);
 			if (err)
 				goto return_err;
 			err = -ENOENT;
 			inode = nd->dentry->d_inode;
-			if (!inode)
+			if (!inode)/* 链接的文件不存在 */
 				break;
 			err = -ENOTDIR; 
-			if (!inode->i_op)
+			if (!inode->i_op)/* 不是一个目录 */
 				break;
 		} else
-			path_to_nameidata(&next, nd);
+			path_to_nameidata(&next, nd);/* 转到下一个目录分量 */
 		err = -ENOTDIR; 
 		if (!inode->i_op->lookup)
 			break;
 		continue;
 		/* here ends the main loop */
 
+/* 运行到这里，说明已经处理到最后一个目录分量了 */
 last_with_slashes:
 		lookup_flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
 last_component:
@@ -936,7 +977,7 @@ last_component:
 		nd->flags &= lookup_flags | ~LOOKUP_CONTINUE;
 		if (lookup_flags & LOOKUP_PARENT)
 			goto lookup_parent;
-		if (this.name[0] == '.') switch (this.len) {
+		if (this.name[0] == '.') switch (this.len) {/* 判断最后一个分量是不是'.'，'..' */
 			default:
 				break;
 			case 2:	
@@ -1021,9 +1062,10 @@ static int fastcall link_path_walk(const char *name, struct nameidata *nd)
 	int result;
 
 	/* make sure the stuff we saved doesn't go away */
-	dget(save.dentry);
+	dget(save.dentry);/* 获得目录项和文件装载点的引用 */
 	mntget(save.mnt);
 
+	/* 遍历查找文件 */
 	result = __link_path_walk(name, nd);
 	if (result == -ESTALE) {
 		*nd = save;
@@ -1041,6 +1083,7 @@ static int fastcall link_path_walk(const char *name, struct nameidata *nd)
 
 static int fastcall path_walk(const char * name, struct nameidata *nd)
 {
+	/* 初始化查找次数，防止链接查找过程中形成死循环 */
 	current->total_link_count = 0;
 	return link_path_walk(name, nd);
 }
@@ -1128,9 +1171,10 @@ static int fastcall do_path_lookup(int dfd, const char *name,
 	nd->flags = flags;
 	nd->depth = 0;
 
-	if (*name=='/') {
+	if (*name=='/') {/* 从根目录开始查找 */
 		read_lock(&fs->lock);
 		if (fs->altroot && !(nd->flags & LOOKUP_NOALT)) {
+			/* 记录根目录的装载点和目录缓存，用于查找 */
 			nd->mnt = mntget(fs->altrootmnt);
 			nd->dentry = dget(fs->altroot);
 			read_unlock(&fs->lock);
@@ -1138,17 +1182,20 @@ static int fastcall do_path_lookup(int dfd, const char *name,
 				goto out; /* found in altroot */
 			read_lock(&fs->lock);
 		}
+		/* 从根目录开始查找，需要注意chroot的影响 */
 		nd->mnt = mntget(fs->rootmnt);
 		nd->dentry = dget(fs->root);
 		read_unlock(&fs->lock);
-	} else if (dfd == AT_FDCWD) {
+	} else if (dfd == AT_FDCWD) {/* 从当前目录开始查找 */
 		read_lock(&fs->lock);
+		/* 记录下当前目录及其装载点 */
 		nd->mnt = mntget(fs->pwdmnt);
 		nd->dentry = dget(fs->pwd);
 		read_unlock(&fs->lock);
-	} else {
+	} else {/* 从特定目录开始查找 */
 		struct dentry *dentry;
 
+		/* 获得目录对象 */
 		file = fget_light(dfd, &fput_needed);
 		retval = -EBADF;
 		if (!file)
@@ -1157,19 +1204,23 @@ static int fastcall do_path_lookup(int dfd, const char *name,
 		dentry = file->f_path.dentry;
 
 		retval = -ENOTDIR;
+		/* 指定的对象不是一个目录，参数不正确 */
 		if (!S_ISDIR(dentry->d_inode->i_mode))
 			goto fput_fail;
 
+		/* 该目录没有exec权限，也就不能搜索 */
 		retval = file_permission(file, MAY_EXEC);
 		if (retval)
 			goto fput_fail;
 
+		/* 记录下该目录所在装载点及其缓存项 */
 		nd->mnt = mntget(file->f_path.mnt);
 		nd->dentry = dget(dentry);
 
 		fput_light(file, fput_needed);
 	}
 
+	/* 从特定的目录开始搜索 */
 	retval = path_walk(name, nd);
 out:
 	if (unlikely(!retval && !audit_dummy_context() && nd->dentry &&
@@ -1183,6 +1234,7 @@ fput_fail:
 	goto out_fail;
 }
 
+/* 查找特定的inode */
 int fastcall path_lookup(const char *name, unsigned int flags,
 			struct nameidata *nd)
 {

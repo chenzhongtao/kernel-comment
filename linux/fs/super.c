@@ -399,16 +399,21 @@ void sync_supers(void)
 {
 	struct super_block *sb;
 
+	/* 获取超级块链表的自旋锁 */
 	spin_lock(&sb_lock);
 restart:
+	/* 遍历所有超级块 */
 	list_for_each_entry(sb, &super_blocks, s_list) {
-		if (sb->s_dirt) {
-			sb->s_count++;
+		if (sb->s_dirt) {/* 该超级块是脏的 */
+			sb->s_count++;/* 操作次数计数 */
 			spin_unlock(&sb_lock);
+			/* 防止umount文件系统 */
 			down_read(&sb->s_umount);
+			/* 回写超级块，这是通过调用文件系统的回调来完成的 */
 			write_super(sb);
 			up_read(&sb->s_umount);
 			spin_lock(&sb_lock);
+			/* 该文件系统已经被移除，说明全局链表已经有变化，重新开始 */
 			if (__put_super_and_need_restart(sb))
 				goto restart;
 		}
@@ -932,13 +937,15 @@ static struct vfsmount *fs_set_subtype(struct vfsmount *mnt, const char *fstype)
 struct vfsmount *
 do_kern_mount(const char *fstype, int flags, const char *name, void *data)
 {
+	/* 查找文件系统，必要时加载对应的模块 */
 	struct file_system_type *type = get_fs_type(fstype);
 	struct vfsmount *mnt;
 	if (!type)
 		return ERR_PTR(-ENODEV);
+	/* 读取文件系统超级块 */
 	mnt = vfs_kern_mount(type, flags, name, data);
 	if (!IS_ERR(mnt) && (type->fs_flags & FS_HAS_SUBTYPE) &&
-	    !mnt->mnt_sb->s_subtype)
+	    !mnt->mnt_sb->s_subtype)/* 处理子文件系统 */
 		mnt = fs_set_subtype(mnt, fstype);
 	put_filesystem(type);
 	return mnt;

@@ -7,8 +7,11 @@
 #include <linux/nsproxy.h>
 
 struct mnt_namespace {
+	/* 使用该命名空间的计数 */
 	atomic_t		count;
+	/* 该命名空间的根目录 */
 	struct vfsmount *	root;
+	/* 链表表头，指向该命名空间中所有文件系统的vfsmount实例 */
 	struct list_head	list;
 	wait_queue_head_t poll;
 	int event;

@@ -5,6 +5,7 @@
 #include <asm/system.h>
 #include <asm/atomic.h>
 
+/* 在单核上，原子变量类型 */
 typedef struct
 {
 	atomic_long_t a;

@@ -1180,6 +1180,9 @@ EXPORT_SYMBOL(iput);
  *	disk block relative to the disk start that holds that block of the 
  *	file.
  */
+/**
+ * 获得某个文件某个逻辑块的磁盘块号
+ */
 sector_t bmap(struct inode * inode, sector_t block)
 {
 	sector_t res = 0;
@@ -1427,6 +1430,9 @@ void __init inode_init(void)
 		INIT_HLIST_HEAD(&inode_hashtable[loop]);
 }
 
+/**
+ * 在打开设备文件时，由此函数为设备文件创建inode
+ */
 void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
 {
 	inode->i_mode = mode;

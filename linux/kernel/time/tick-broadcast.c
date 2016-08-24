@@ -175,6 +175,9 @@ static void tick_do_periodic_broadcast(void)
 /*
  * Event handler for periodic broadcast ticks
  */
+/**
+ * 在时钟设备睡眠后，由此函数发送广播事件，触发其他CPU上的时钟事件。
+ */
 static void tick_handle_periodic_broadcast(struct clock_event_device *dev)
 {
 	tick_do_periodic_broadcast();

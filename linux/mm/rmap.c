@@ -276,20 +276,23 @@ static int page_referenced_one(struct page *page,
 	spinlock_t *ptl;
 	int referenced = 0;
 
+	/* 计算页面在该地址空间内的虚拟地址 */
 	address = vma_address(page, vma);
 	if (address == -EFAULT)
 		goto out;
 
+	/* 检查该地址在地址空间中是否进行了映射 */
 	pte = page_check_address(page, mm, address, &ptl);
 	if (!pte)
 		goto out;
 
+	/* 检查并清除_PAGE_ACCESSED标志，如果有此标志，说明页面是活跃页面 */
 	if (ptep_clear_flush_young(vma, address, pte))
 		referenced++;
 
 	/* Pretend the page is referenced if the task has the
 	   swap token and is in the middle of a page fault. */
-	if (mm != current->mm && has_swap_token(mm) &&
+	if (mm != current->mm && has_swap_token(mm) &&/* 如果进程持有交换令牌，增加引用次数，减少被换出的机会 */
 			rwsem_is_locked(&mm->mmap_sem))
 		referenced++;
 
@@ -306,17 +309,21 @@ static int page_referenced_anon(struct page *page)
 	struct vm_area_struct *vma;
 	int referenced = 0;
 
+	/* 找到引用某个页面的匿名页链表 */
 	anon_vma = page_lock_anon_vma(page);
 	if (!anon_vma)
 		return referenced;
 
 	mapcount = page_mapcount(page);
+	/* 遍历匿名页链表 */
 	list_for_each_entry(vma, &anon_vma->head, anon_vma_node) {
+		/* 计算页面使用计数 */
 		referenced += page_referenced_one(page, vma, &mapcount);
-		if (!mapcount)
+		if (!mapcount)/* 已经搜索了mapcount次，退出 */
 			break;
 	}
 
+	/* 解除对匿名页链表的锁 */
 	page_unlock_anon_vma(anon_vma);
 	return referenced;
 }
@@ -331,6 +338,9 @@ static int page_referenced_anon(struct page *page)
  * of references it found.
  *
  * This function is only called from page_referenced for object-based pages.
+ */
+/**
+ * 检查某一个文件映射相关的页，在最近一段时间内的活跃计数。
  */
 static int page_referenced_file(struct page *page)
 {
@@ -364,14 +374,16 @@ static int page_referenced_file(struct page *page)
 	 */
 	mapcount = page_mapcount(page);
 
+	/* 在优先树中遍历包含该页的节点 */
 	vma_prio_tree_foreach(vma, &iter, &mapping->i_mmap, pgoff, pgoff) {
 		if ((vma->vm_flags & (VM_LOCKED|VM_MAYSHARE))
-				  == (VM_LOCKED|VM_MAYSHARE)) {
+				  == (VM_LOCKED|VM_MAYSHARE)) {/* 对于锁定的共享映射，奖励一次计数 */
 			referenced++;
 			break;
 		}
+		/* 查看页面在该地址空间内是否被访问过，如果是则加一次计数 */
 		referenced += page_referenced_one(page, vma, &mapcount);
-		if (!mapcount)
+		if (!mapcount)/* 统计完所有映射，退出 */
 			break;
 	}
 
@@ -387,6 +399,10 @@ static int page_referenced_file(struct page *page)
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
  */
+/**
+ * 测试某个页面是否被引用
+ * 统计最近活跃使用某个共享页的进程数目
+ */
 int page_referenced(struct page *page, int is_locked)
 {
 	int referenced = 0;
@@ -394,20 +410,22 @@ int page_referenced(struct page *page, int is_locked)
 	if (page_test_and_clear_young(page))
 		referenced++;
 
+	/* PG_referenced标志说明页面被访问过，清除此标志并将引用计数加1 */
 	if (TestClearPageReferenced(page))
 		referenced++;
 
-	if (page_mapped(page) && page->mapping) {
-		if (PageAnon(page))
+	if (page_mapped(page) && page->mapping) {/* 页面有多个使用者 */
+		if (PageAnon(page))/* 匿名页 */
+			/* 如果页所在进程持有交换令牌，会强制标记其PG_referenced标志，以防止被回收 */
 			referenced += page_referenced_anon(page);
-		else if (is_locked)
+		else if (is_locked)/* 其他地方已经锁定了 */
 			referenced += page_referenced_file(page);
-		else if (TestSetPageLocked(page))
-			referenced++;
-		else {
-			if (page->mapping)
+		else if (TestSetPageLocked(page))/* 其他地方锁定了该页 */
+			referenced++;/* 直接添加计数 */
+		else {/* 其他地方未锁定，此处锁定它 */
+			if (page->mapping)/* 文件映射页 */
 				referenced += page_referenced_file(page);
-			unlock_page(page);
+			unlock_page(page);/* 释放页面锁定 */
 		}
 	}
 	return referenced;
@@ -496,7 +514,9 @@ static void __page_set_anon_rmap(struct page *page,
 	struct anon_vma *anon_vma = vma->anon_vma;
 
 	BUG_ON(!anon_vma);
+	/* 加上PAGE_MAPPING_ANON表示匿名映射 */
 	anon_vma = (void *) anon_vma + PAGE_MAPPING_ANON;
+	/* mapping通过最后一位表示是否为匿名映射 */
 	page->mapping = (struct address_space *) anon_vma;
 
 	page->index = linear_page_index(vma, address);
@@ -545,6 +565,9 @@ static void __page_check_anon_rmap(struct page *page,
  *
  * The caller needs to hold the pte lock and the page must be locked.
  */
+/**
+ * 如果一个匿名页已经有引用计数，则调用本函数将页添加到反射映射数据结构中。
+ */
 void page_add_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address)
 {
@@ -566,11 +589,16 @@ void page_add_anon_rmap(struct page *page,
  * This means the inc-and-test can be bypassed.
  * Page does not have to be locked.
  */
+/**
+ * 将新的匿名页添加到反向映射数据结构中
+ */
 void page_add_new_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address)
 {
 	BUG_ON(address < vma->vm_start || address >= vma->vm_end);
+	/* 初始化_mapcount计数为0，表示第一个映射的匿名页 */
 	atomic_set(&page->_mapcount, 0); /* elevate count by 1 (starts at -1) */
+	/* 将vma添加到反向映射中 */
 	__page_set_anon_rmap(page, vma, address);
 }
 
@@ -579,6 +607,9 @@ void page_add_new_anon_rmap(struct page *page,
  * @page: the page to add the mapping to
  *
  * The caller needs to hold the pte lock.
+ */
+/**
+ * 为文件映射的页进行反向映射
  */
 void page_add_file_rmap(struct page *page)
 {

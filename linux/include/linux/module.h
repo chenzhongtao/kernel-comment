@@ -92,6 +92,7 @@ extern struct module __this_module;
 #define MODULE_INFO(tag, info) __MODULE_INFO(tag, tag, info)
 
 /* For userspace: you can also call me... */
+/* 生成模块别名。可以按此别名来加载模块 */
 #define MODULE_ALIAS(_alias) MODULE_INFO(alias, _alias)
 
 /*
@@ -135,6 +136,7 @@ extern struct module __this_module;
 #define MODULE_PARM_DESC(_parm, desc) \
 	__MODULE_INFO(parm, _parm, #_parm ":" desc)
 
+/* 生成设备数据库，表示该模块支持特定的设备 */
 #define MODULE_DEVICE_TABLE(type,name)		\
   MODULE_GENERIC_TABLE(type##_device,name)
 
@@ -224,8 +226,11 @@ struct module_ref
 
 enum module_state
 {
+	/* 正在正常运行过程中 */
 	MODULE_STATE_LIVE,
+	/* 正在装载过程中 */
 	MODULE_STATE_COMING,
+	/* 正在移除模块 */
 	MODULE_STATE_GOING,
 };
 
@@ -246,14 +251,20 @@ struct module_sect_attrs
 
 struct module_param_attrs;
 
+/**
+ * 在内核中已经加载的模块描述符
+ */
 struct module
 {
+	/* 模块当前状态 */
 	enum module_state state;
 
 	/* Member of list of modules */
+	/* 通过此字段将模块加到全局链表中 */
 	struct list_head list;
 
 	/* Unique handle for this module */
+	/* 模块名称，如vfat */
 	char name[MODULE_NAME_LEN];
 
 	/* Sysfs stuff. */
@@ -265,11 +276,15 @@ struct module
 	struct kobject *holders_dir;
 
 	/* Exported symbols */
+	/* 导出的符号数组 */
 	const struct kernel_symbol *syms;
+	/* 符号数组的大小 */
 	unsigned int num_syms;
+	/* 大小为num_syms，用于实现版本控制。表示导出符号的校验和。 */
 	const unsigned long *crcs;
 
 	/* GPL-only exported symbols. */
+	/* 这些导出的符号只能用于GPL协议的模块 */
 	const struct kernel_symbol *gpl_syms;
 	unsigned int num_gpl_syms;
 	const unsigned long *gpl_crcs;
@@ -289,19 +304,24 @@ struct module
 	const unsigned long *gpl_future_crcs;
 
 	/* Exception table */
+	/* 由模块定义的异常处理表 */
 	unsigned int num_exentries;
 	const struct exception_table_entry *extable;
 
 	/* Startup function. */
+	/* 模块初始化时调用的函数 */
 	int (*init)(void);
 
 	/* If this is non-NULL, vfree after init() returns */
+	/* 模块初始化函数及数据的地址，装载后将被丢弃。 */
 	void *module_init;
 
 	/* Here is the actual code + data, vfree'd on unload. */
+	/* 模块正常运行过程中需要的代码和数据地址 */
 	void *module_core;
 
 	/* Here are the sizes of the init and core sections */
+	/* 模块初始化及核心段的长度 */
 	unsigned long init_size, core_size;
 
 	/* The size of the executable code in each section.  */
@@ -311,8 +331,10 @@ struct module
 	void *unwind_info;
 
 	/* Arch-specific module values */
+	/* 特定体系结构的数据。在x86平台上为空 */
 	struct mod_arch_specific arch;
 
+	/* 该模块是否可能污染内核。例如，它不是GPL，或者是强制加载的。 */
 	unsigned int taints;	/* same bits as kernel:tainted */
 
 #ifdef CONFIG_GENERIC_BUG
@@ -322,22 +344,29 @@ struct module
 	unsigned num_bugs;
 #endif
 
+/* 允许卸载模块 */
 #ifdef CONFIG_MODULE_UNLOAD
 	/* Reference counts */
+	/* 引用计数 */
 	struct module_ref ref[NR_CPUS];
 
 	/* What modules depend on me? */
+	/* 依赖于此模块的其他模块 */
 	struct list_head modules_which_use_me;
 
 	/* Who is waiting for us to be unloaded */
+	/* 正在等待卸载此模块的进程 */
 	struct task_struct *waiter;
 
 	/* Destruction function. */
+	/* 模块退出时的函数 */
 	void (*exit)(void);
 #endif
 
+/* CONFIG_KALLSYMS表示在内核中导出所有符号的信息，而不仅仅是明确表示导出的函数。在oops时有用。 */
 #ifdef CONFIG_KALLSYMS
 	/* We keep the symbol and string tables for kallsyms. */
+	/* 模块符号信息，不仅仅是显式导出的符号 */
 	Elf_Sym *symtab;
 	unsigned long num_symtab;
 	char *strtab;
@@ -350,10 +379,12 @@ struct module
 #endif
 
 	/* Per-cpu data. */
+	/* 模块的每CPU数据 */
 	void *percpu;
 
 	/* The command line arguments (may be mangled).  People like
 	   keeping pointers to this stuff */
+	/* 装载模块时传递的参数 */
 	char *args;
 #ifdef CONFIG_MARKERS
 	struct marker *markers;

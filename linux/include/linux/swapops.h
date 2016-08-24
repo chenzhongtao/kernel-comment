@@ -46,6 +46,9 @@ static inline pgoff_t swp_offset(swp_entry_t entry)
  * Convert the arch-dependent pte representation of a swp_entry_t into an
  * arch-independent swp_entry_t.
  */
+/**
+ * 从pte表项中提取出交换项。
+ */
 static inline swp_entry_t pte_to_swp_entry(pte_t pte)
 {
 	swp_entry_t arch_entry;

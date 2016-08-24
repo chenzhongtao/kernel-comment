@@ -67,27 +67,43 @@
  * FLAGS_RESERVED which defines the width of the fields section
  * (see linux/mmzone.h).  New flags must _not_ overlap with this area.
  */
+/* 页面是否被锁定。当从磁盘读取数据进内存时，会锁定页面。 */
 #define PG_locked	 	 0	/* Page is locked. Don't touch. */
+/* 该页IO操作期间发生错误 */
 #define PG_error		 1
+/**
+ * 该标志与PG_active一起，控制使用该页的活跃程度，在页交换时有用 
+ * 内核每次访问了某页时设置此标志
+ */
 #define PG_referenced		 2
+/* 数据与磁盘一致，当成功从磁盘读取数据后设置此标志 */
 #define PG_uptodate		 3
 
+/* 页面已经被改写，但是还没有写回到磁盘 */
 #define PG_dirty	 	 4
+/* 页面位于两个链表中:活动链表或非活动链表 */
 #define PG_lru			 5
 #define PG_active		 6
+/* 页面属于slab分配器 */
 #define PG_slab			 7	/* slab debug (Suparna wants this) */
 
 #define PG_owner_priv_1		 8	/* Owner use. If pagecache, fs may use*/
 #define PG_arch_1		 9
 #define PG_reserved		10
+/* 页面private成员非空，必须设置此页。用于存储缓冲区或其他系统(如NFS) */
 #define PG_private		11	/* If pagecache, has fs-private data */
 
+/* 正在回写页面内容到磁盘 */
 #define PG_writeback		12	/* Page is under writeback */
+/* 该页属于组合页 */
 #define PG_compound		14	/* Part of a compound page */
+/* 页属性交换缓存，此时在private保存了swp_entry_t */
 #define PG_swapcache		15	/* Swap page: swp_entry_t in private */
 
 #define PG_mappedtodisk		16	/* Has blocks allocated on-disk */
+/* 在内存紧张时，内核决定回收此页 */
 #define PG_reclaim		17	/* To be reclaimed asap */
+/* 页空闲且包含在伙伴系统中 */
 #define PG_buddy		19	/* Page is free, on buddy lists */
 
 /* PG_readahead is only used for file reads; PG_reclaim is only for writes */

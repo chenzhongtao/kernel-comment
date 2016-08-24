@@ -23,12 +23,17 @@
  */
 static void do_sync(unsigned long wait)
 {
+	/* 唤醒pdflush，要求它刷新全部所有数据 */
 	wakeup_pdflush(0);
+	/* 同步inode元数据 */
 	sync_inodes(0);		/* All mappings, inodes and their blockdevs */
 	DQUOT_SYNC(NULL);
+	/* 同步超级块，将超级块回写到磁盘 */
 	sync_supers();		/* Write the superblocks */
+	/* 调用各文件系统的sys_fs方法，这样文件系统就有机会参与到sync调用中来 */
 	sync_filesystems(0);	/* Start syncing the filesystems */
 	sync_filesystems(wait);	/* Waitingly sync the filesystems */
+	/* 同步节点，并等待其完成 */
 	sync_inodes(wait);	/* Mappings, inodes and blockdevs, again. */
 	if (!wait)
 		printk("Emergency Sync complete\n");
@@ -36,6 +41,9 @@ static void do_sync(unsigned long wait)
 		laptop_sync_completion();
 }
 
+/**
+ * sync系统调用
+ */
 asmlinkage long sys_sync(void)
 {
 	do_sync(1);
@@ -87,6 +95,7 @@ long do_fsync(struct file *file, int datasync)
 		goto out;
 	}
 
+	/* 回写地址空间中的页面 */
 	ret = filemap_fdatawrite(mapping);
 
 	/*
@@ -94,10 +103,15 @@ long do_fsync(struct file *file, int datasync)
 	 * livelocks in fsync_buffers_list().
 	 */
 	mutex_lock(&mapping->host->i_mutex);
+	/**
+	 * 回调文件系统的fsync，做一些文件系统相关的同步处理
+	 * 一般都会调用通用的sync_file函数
+	 */
 	err = file->f_op->fsync(file, file->f_path.dentry, datasync);
 	if (!ret)
 		ret = err;
 	mutex_unlock(&mapping->host->i_mutex);
+	/* 等待filemap_fdatawrite操作完成 */
 	err = filemap_fdatawait(mapping);
 	if (!ret)
 		ret = err;
@@ -105,14 +119,20 @@ out:
 	return ret;
 }
 
+/**
+ * 同步单个文件
+ */
 static long __do_fsync(unsigned int fd, int datasync)
 {
 	struct file *file;
 	int ret = -EBADF;
 
+	/* 根据fd找到文件描述符 */
 	file = fget(fd);
 	if (file) {
+		/* 同步数据 */
 		ret = do_fsync(file, datasync);
+		/* 释放对文件的引用 */
 		fput(file);
 	}
 	return ret;

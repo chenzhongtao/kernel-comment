@@ -25,6 +25,7 @@ typedef struct { int counter; } atomic_t;
  * 
  * Atomically reads the value of @v.
  */ 
+/* 读取原子变量的值 */
 #define atomic_read(v)		((v)->counter)
 
 /**
@@ -34,6 +35,7 @@ typedef struct { int counter; } atomic_t;
  * 
  * Atomically sets the value of @v to @i.
  */ 
+/* 设置原子变量的值 */
 #define atomic_set(v,i)		(((v)->counter) = (i))
 
 /**
@@ -43,6 +45,7 @@ typedef struct { int counter; } atomic_t;
  * 
  * Atomically adds @i to @v.
  */
+/* 将i加到原子变量v，并返回添加的结果 */
 static __inline__ void atomic_add(int i, atomic_t *v)
 {
 	__asm__ __volatile__(
@@ -58,6 +61,7 @@ static __inline__ void atomic_add(int i, atomic_t *v)
  * 
  * Atomically subtracts @i from @v.
  */
+/* 将原子变量减去i，并返回结果 */
 static __inline__ void atomic_sub(int i, atomic_t *v)
 {
 	__asm__ __volatile__(
@@ -75,6 +79,7 @@ static __inline__ void atomic_sub(int i, atomic_t *v)
  * true if the result is zero, or false for all
  * other cases.
  */
+/* 原子的递减变量，如果结果为0则返回true */
 static __inline__ int atomic_sub_and_test(int i, atomic_t *v)
 {
 	unsigned char c;
@@ -92,6 +97,7 @@ static __inline__ int atomic_sub_and_test(int i, atomic_t *v)
  * 
  * Atomically increments @v by 1.
  */ 
+/* 将原子变量原子的递加1 */
 static __inline__ void atomic_inc(atomic_t *v)
 {
 	__asm__ __volatile__(
@@ -105,6 +111,7 @@ static __inline__ void atomic_inc(atomic_t *v)
  * 
  * Atomically decrements @v by 1.
  */ 
+/* 将原子变量原子的递减1 */
 static __inline__ void atomic_dec(atomic_t *v)
 {
 	__asm__ __volatile__(
@@ -120,6 +127,7 @@ static __inline__ void atomic_dec(atomic_t *v)
  * returns true if the result is 0, or false for all other
  * cases.
  */ 
+/* 将原子变量减1，如果结果为0，则返回true */
 static __inline__ int atomic_dec_and_test(atomic_t *v)
 {
 	unsigned char c;
@@ -139,6 +147,7 @@ static __inline__ int atomic_dec_and_test(atomic_t *v)
  * and returns true if the result is zero, or false for all
  * other cases.
  */ 
+/* 将原子变量增加1，如果结果为0，则返回true */
 static __inline__ int atomic_inc_and_test(atomic_t *v)
 {
 	unsigned char c;
@@ -159,6 +168,7 @@ static __inline__ int atomic_inc_and_test(atomic_t *v)
  * if the result is negative, or false when
  * result is greater than or equal to zero.
  */ 
+/* 递增原子变量，如果结果为负，则返回true */
 static __inline__ int atomic_add_negative(int i, atomic_t *v)
 {
 	unsigned char c;

@@ -33,6 +33,9 @@
 /* How many pages do we try to swap or page in/out together? */
 int page_cluster;
 
+/**
+ * 每CPU的缓存页向量，当达到PAGEVEC_SIZE个页面才添加到全局的活动、非活动LRU链表中
+ */
 static DEFINE_PER_CPU(struct pagevec, lru_add_pvecs) = { 0, };
 static DEFINE_PER_CPU(struct pagevec, lru_add_active_pvecs) = { 0, };
 static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs) = { 0, };
@@ -186,6 +189,9 @@ void fastcall activate_page(struct page *page)
  * inactive,referenced		->	active,unreferenced
  * active,unreferenced		->	active,referenced
  */
+/**
+ * 当访问了某页时，标记它为活动的。
+ */
 void fastcall mark_page_accessed(struct page *page)
 {
 	if (!PageActive(page) && PageReferenced(page) && PageLRU(page)) {
@@ -202,16 +208,25 @@ EXPORT_SYMBOL(mark_page_accessed);
  * lru_cache_add: add a page to the page lists
  * @page: the page to add
  */
+/**
+ * 向每CPU缓存页中添加页，如果达到PAGEVEC_SIZE个页，则添加到全局LRU链表。
+ */
 void fastcall lru_cache_add(struct page *page)
 {
+	/* 禁止抢占后获得当前CPU的页面缓存数组 */
 	struct pagevec *pvec = &get_cpu_var(lru_add_pvecs);
 
+	/* 增加页面引用计数 */
 	page_cache_get(page);
+	/* 将页面添加到缓存数组中，如果已经达到PAGEVEC_SIZE个页 */
 	if (!pagevec_add(pvec, page))
-		__pagevec_lru_add(pvec);
-	put_cpu_var(lru_add_pvecs);
+		__pagevec_lru_add(pvec);/* 将缓存的页面添加到LRU链表中 */
+	put_cpu_var(lru_add_pvecs);/* 打开抢占 */
 }
 
+/**
+ * 与lru_cache_add类似，不过处理的是活动页。
+ */
 void fastcall lru_cache_add_active(struct page *page)
 {
 	struct pagevec *pvec = &get_cpu_var(lru_add_active_pvecs);
@@ -250,6 +265,9 @@ static void drain_cpu_pagevecs(int cpu)
 	}
 }
 
+/**
+ * 将每CPU缓存中的页面向量添加到LRU链表中
+ */
 void lru_add_drain(void)
 {
 	drain_cpu_pagevecs(get_cpu());

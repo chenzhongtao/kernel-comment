@@ -102,10 +102,15 @@ extern void __set_fixmap (enum fixed_addresses idx,
 					unsigned long phys, pgprot_t flags);
 extern void reserve_top_address(unsigned long reserve);
 
+/* 将固定映射的虚拟地址与物理地址关联起来 */
 #define set_fixmap(idx, phys) \
 		__set_fixmap(idx, phys, PAGE_KERNEL)
 /*
  * Some hardware wants to get fixmapped without caching.
+ */
+/**
+ * 将固定映射的虚拟地址与物理地址关联起来
+ * 但是禁用缓存。
  */
 #define set_fixmap_nocache(idx, phys) \
 		__set_fixmap(idx, phys, PAGE_KERNEL_NOCACHE)
@@ -130,6 +135,9 @@ extern void __this_fixmap_does_not_exist(void);
  * directly without tranlation, we catch the bug with a NULL-deference
  * kernel oops. Illegal ranges of incoming indices are caught too.
  */
+/**
+ * 特定索引的固定映射对应的虚拟地址
+ */
 static __always_inline unsigned long fix_to_virt(const unsigned int idx)
 {
 	/*
@@ -141,9 +149,10 @@ static __always_inline unsigned long fix_to_virt(const unsigned int idx)
 	 * If it doesn't get removed, the linker will complain
 	 * loudly with a reasonably clear error message..
 	 */
-	if (idx >= __end_of_fixed_addresses)
-		__this_fixmap_does_not_exist();
+	if (idx >= __end_of_fixed_addresses)/* 这里由编译器进行检查 */
+		__this_fixmap_does_not_exist();/* 并没有真正定义，如果没有被优化，则编译器会报错 */
 
+		/* 同样由编译器在固定的映射表中找到对应的地址 */
         return __fix_to_virt(idx);
 }
 

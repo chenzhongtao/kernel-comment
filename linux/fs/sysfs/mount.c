@@ -39,6 +39,9 @@ struct sysfs_dirent sysfs_root = {
 	.s_ino		= 1,
 };
 
+/**
+ * sysfs的getsb回调。
+ */
 static int sysfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct inode *inode;
@@ -52,6 +55,7 @@ static int sysfs_fill_super(struct super_block *sb, void *data, int silent)
 	sysfs_sb = sb;
 
 	/* get root inode, initialize and unlock it */
+	/* 分配新的root inode实例 */
 	inode = sysfs_get_inode(&sysfs_root);
 	if (!inode) {
 		pr_debug("sysfs: could not get root inode\n");

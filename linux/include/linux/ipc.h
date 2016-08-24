@@ -85,24 +85,35 @@ struct ipc_kludge {
 #define IPCMNI 32768  /* <= MAX_INT limit for ipc arrays (including sysctl changes) */
 
 /* used by in-kernel data structures */
+/* 用户态ipc对象在内核中的表示 */
 struct kern_ipc_perm
 {
 	spinlock_t	lock;
 	int		deleted;
+	/* ipc对象在内核中的ID */
 	int		id;
+	/* 用户态标识ipc对象的魔数 */
 	key_t		key;
+	/* 所有者的uid和gid */
 	uid_t		uid;
 	gid_t		gid;
+	/* 产生该对象的uid和gid */
 	uid_t		cuid;
 	gid_t		cgid;
+	/* 位掩码，用于指定所有者、所有者组、其他用户的权限 */
 	mode_t		mode; 
+	/* 序号，分配ipc对象时使用 */
 	unsigned long	seq;
 	void		*security;
 };
 
 struct ipc_ids;
+/**
+ * ipc命名空间
+ */
 struct ipc_namespace {
 	struct kref	kref;
+	/* 信号量、消息队列、共享内存 */
 	struct ipc_ids	*ids[3];
 
 	int		sem_ctls[4];

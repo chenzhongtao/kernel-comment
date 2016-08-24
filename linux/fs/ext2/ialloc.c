@@ -265,6 +265,9 @@ static int find_group_dir(struct super_block *sb, struct inode *parent)
 #define INODE_COST 64
 #define BLOCK_COST 256
 
+/**
+ * 当目录没有位于根目录下时，根据orlov算法查找inode合适的块组
+ */
 static int find_group_orlov(struct super_block *sb, struct inode *parent)
 {
 	int parent_group = EXT2_I(parent)->i_block_group;
@@ -273,11 +276,16 @@ static int find_group_orlov(struct super_block *sb, struct inode *parent)
 	int ngroups = sbi->s_groups_count;
 	int inodes_per_group = EXT2_INODES_PER_GROUP(sb);
 	int freei;
-	int avefreei;
+	int avefreei;/* 各组中，平均的空闲inode数目 */
 	int free_blocks;
-	int avefreeb;
+	int avefreeb;/* 各组中，空闲块数目 */
 	int blocks_per_dir;
 	int ndirs;
+	/**
+	 * max_dirs表示一个块组中目录inode的上限 
+	 * min_inodes和min_blocks定义了创建目录前，空闲inode和空闲块的最小数目。
+	 * debt介于0-255之间。每个块组有一个debt值。创建目录加1，创建其他文件减1.
+	 */
 	int max_debt, max_dirs, min_blocks, min_inodes;
 	int group = -1, i;
 	struct ext2_group_desc *desc;
@@ -288,15 +296,16 @@ static int find_group_orlov(struct super_block *sb, struct inode *parent)
 	avefreeb = free_blocks / ngroups;
 	ndirs = percpu_counter_read_positive(&sbi->s_dirs_counter);
 
-	if ((parent == sb->s_root->d_inode) ||
-	    (EXT2_I(parent)->i_flags & EXT2_TOPDIR_FL)) {
+	if ((parent == sb->s_root->d_inode) ||/* 在根目录下创建子目录 */
+	    (EXT2_I(parent)->i_flags & EXT2_TOPDIR_FL)) {/* 不使用orlov算法分配inode */
 		struct ext2_group_desc *best_desc = NULL;
 		int best_ndir = inodes_per_group;
 		int best_group = -1;
 
+		/* 获得一个随机数 */
 		get_random_bytes(&group, sizeof(group));
 		parent_group = (unsigned)group % ngroups;
-		for (i = 0; i < ngroups; i++) {
+		for (i = 0; i < ngroups; i++) {/* 从随机选取的块组开始，查找满足要求的块组 */
 			group = (parent_group + i) % ngroups;
 			desc = ext2_get_group_desc (sb, group, NULL);
 			if (!desc || !desc->bg_free_inodes_count)
@@ -336,41 +345,48 @@ static int find_group_orlov(struct super_block *sb, struct inode *parent)
 	if (max_debt == 0)
 		max_debt = 1;
 
+	/* 从父目录所在的组开始遍历，尽量使inode与父目录位于同一个组中 */
 	for (i = 0; i < ngroups; i++) {
 		group = (parent_group + i) % ngroups;
 		desc = ext2_get_group_desc (sb, group, NULL);
-		if (!desc || !desc->bg_free_inodes_count)
+		if (!desc || !desc->bg_free_inodes_count)/* 没有空闲inode了 */
 			continue;
 		if (sbi->s_debts[group] >= max_debt)
 			continue;
+		/* 目录没有超过限制，则选中该组，否则跳到下一个组中 */
 		if (le16_to_cpu(desc->bg_used_dirs_count) >= max_dirs)
 			continue;
+		/* 空闲inode和空闲块如果也达到要求，才选中该组 */
 		if (le16_to_cpu(desc->bg_free_inodes_count) < min_inodes)
 			continue;
 		if (le16_to_cpu(desc->bg_free_blocks_count) < min_blocks)
 			continue;
-		goto found;
+		goto found;/* 该组尽可能与父目录位于同一个块组，返回该块组 */
 	}
 
+/* 没有满足需要的块组，使用备用算法查找 */
 fallback:
+	/* 从当前组开始遍历所有块组 */
 	for (i = 0; i < ngroups; i++) {
 		group = (parent_group + i) % ngroups;
 		desc = ext2_get_group_desc (sb, group, NULL);
-		if (!desc || !desc->bg_free_inodes_count)
+		if (!desc || !desc->bg_free_inodes_count)/* 该块组没有可用inode了 */
 			continue;
+		/* 该组空闲inode超过平均值 */
 		if (le16_to_cpu(desc->bg_free_inodes_count) >= avefreei)
 			goto found;
 	}
 
-	if (avefreei) {
+	if (avefreei) {/* 所有组的空闲inode都等于平均数 */
 		/*
 		 * The free-inodes counter is approximate, and for really small
 		 * filesystems the above test can fail to find any blockgroups
 		 */
-		avefreei = 0;
+		avefreei = 0;/* 将平均数修改为0，返回继续查找，应当查找到当前组。 */
 		goto fallback;
 	}
 
+	/* 所有组都没有空闲inode了，返回失败 */
 	return -1;
 
 found:
@@ -437,6 +453,7 @@ found:
 	return group;
 }
 
+/* 分配一个新的inode */
 struct inode *ext2_new_inode(struct inode *dir, int mode)
 {
 	struct super_block *sb;

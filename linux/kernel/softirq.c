@@ -205,6 +205,9 @@ EXPORT_SYMBOL(local_bh_enable_ip);
  */
 #define MAX_SOFTIRQ_RESTART 10
 
+/**
+ * 处理挂起的软中断
+ */
 asmlinkage void __do_softirq(void)
 {
 	struct softirq_action *h;
@@ -212,6 +215,7 @@ asmlinkage void __do_softirq(void)
 	int max_restart = MAX_SOFTIRQ_RESTART;
 	int cpu;
 
+	/* 获得挂起软中断标志 */
 	pending = local_softirq_pending();
 	account_system_vtime(current);
 
@@ -221,28 +225,29 @@ asmlinkage void __do_softirq(void)
 	cpu = smp_processor_id();
 restart:
 	/* Reset the pending bitmask before enabling irqs */
-	set_softirq_pending(0);
+	set_softirq_pending(0);/* 在开中断前，清除挂起软中断标志 */
 
-	local_irq_enable();
+	local_irq_enable();/* 在调用软中断回调前打开中断 */
 
 	h = softirq_vec;
 
+	/* 遍历所有挂起软中断标志 */
 	do {
 		if (pending & 1) {
-			h->action(h);
+			h->action(h);/* 在开中断的情况下，处理软中断 */
 			rcu_bh_qsctr_inc(cpu);
 		}
 		h++;
 		pending >>= 1;
 	} while (pending);
 
-	local_irq_disable();
+	local_irq_disable();/* 关中断后，再次判断是否有挂起的软中断 */
 
 	pending = local_softirq_pending();
-	if (pending && --max_restart)
+	if (pending && --max_restart)/* 重试次数不能超过指定次数 */
 		goto restart;
 
-	if (pending)
+	if (pending)/* 重复次数太多，唤醒softirqd守护线程处理软中断 */
 		wakeup_softirqd();
 
 	trace_softirq_exit();
@@ -382,31 +387,43 @@ void fastcall __tasklet_hi_schedule(struct tasklet_struct *t)
 
 EXPORT_SYMBOL(__tasklet_hi_schedule);
 
+/**
+ * tasklet软中断执行函数
+ */
 static void tasklet_action(struct softirq_action *a)
 {
 	struct tasklet_struct *list;
 
+	/* 关闭中断，因为在中断处理过程中，可能唤醒tasklet */
 	local_irq_disable();
+	/* 获得当前CPU的tasklet链表头，并清空链表 */
 	list = __get_cpu_var(tasklet_vec).list;
 	__get_cpu_var(tasklet_vec).list = NULL;
 	local_irq_enable();
 
+	/* 遍历当前CPU上的所有tasklet */
 	while (list) {
 		struct tasklet_struct *t = list;
 
 		list = list->next;
 
+		/* 该tasklet没有在其他CPU上执行，设置标志 */
 		if (tasklet_trylock(t)) {
-			if (!atomic_read(&t->count)) {
+			if (!atomic_read(&t->count)) {/* 没有被禁止 */
+				/* 这里进行安全检查，确保tasklet是被调度执行了。也清除TASKLET_STATE_SCHED标志 */
 				if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
 					BUG();
+				/* 回调tasklet执行函数 */
 				t->func(t->data);
+				/* 清除执行标志 */
 				tasklet_unlock(t);
 				continue;
 			}
+			/* 运行到这里，说明tasklet被禁止了。清除运行标志 */
 			tasklet_unlock(t);
 		}
 
+		/* 将任务放回本CPU的tasklet队列中 */
 		local_irq_disable();
 		t->next = __get_cpu_var(tasklet_vec).list;
 		__get_cpu_var(tasklet_vec).list = t;

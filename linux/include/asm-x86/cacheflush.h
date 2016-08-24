@@ -5,16 +5,21 @@
 #include <linux/mm.h>
 
 /* Caches aren't brain-dead on the intel. */
+/* 将整个高速缓存刷出 */
 #define flush_cache_all()			do { } while (0)
+/* 将某个地址空间的高速缓存刷出 */
 #define flush_cache_mm(mm)			do { } while (0)
 #define flush_cache_dup_mm(mm)			do { } while (0)
 #define flush_cache_range(vma, start, end)	do { } while (0)
 #define flush_cache_page(vma, vmaddr, pfn)	do { } while (0)
+/* 刷新数据缓存，防止页面别名 */
 #define flush_dcache_page(page)			do { } while (0)
 #define flush_dcache_mmap_lock(mapping)		do { } while (0)
 #define flush_dcache_mmap_unlock(mapping)	do { } while (0)
+/* 刷新指令缓存，自修改代码、模块均使用它 */
 #define flush_icache_range(start, end)		do { } while (0)
 #define flush_icache_page(vma,pg)		do { } while (0)
+/* 刷新用户态的指令缓存，用于ptrace */
 #define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
 #define flush_cache_vmap(start, end)		do { } while (0)
 #define flush_cache_vunmap(start, end)		do { } while (0)

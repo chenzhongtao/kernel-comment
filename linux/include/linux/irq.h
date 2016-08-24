@@ -46,14 +46,21 @@ typedef	void fastcall (*irq_flow_handler_t)(unsigned int irq,
 #define IRQ_TYPE_PROBE		0x00000010	/* Probing in progress */
 
 /* Internal flags */
+/* 中断正在被处理，禁止从其他核进入此中断 */
 #define IRQ_INPROGRESS		0x00000100	/* IRQ handler active - do not enter! */
+/* 被禁用的中断 */
 #define IRQ_DISABLED		0x00000200	/* IRQ disabled - do not enter! */
+/* 中断被CPU发现，但是没有被处理，这可能是由于其他核在处理此中断 */
 #define IRQ_PENDING		0x00000400	/* IRQ pending - replay on enable */
+/* 中断虽然已经被禁用，但是在禁用前，已经有一个中断未被确认，因此需要在打开中断后补回一次 */
 #define IRQ_REPLAY		0x00000800	/* IRQ has been replayed but not acked yet */
+/* 用于自动检测和配置中断，初始化阶段使用 */
 #define IRQ_AUTODETECT		0x00001000	/* IRQ is being autodetected */
 #define IRQ_WAITING		0x00002000	/* IRQ not yet seen - for autodetection */
+/* 用于区分中断是电平触发还是边沿触发 */
 #define IRQ_LEVEL		0x00004000	/* IRQ level triggered */
 #define IRQ_MASKED		0x00008000	/* IRQ masked - shouldn't be seen again */
+/* 每CPU的中断，有这个标志的中断，不必进行并发保护。因为该中断只能在某个CPU上发生。 */
 #define IRQ_PER_CPU		0x00010000	/* IRQ is per CPU */
 #define IRQ_NOPROBE		0x00020000	/* IRQ is not valid for probing */
 #define IRQ_NOREQUEST		0x00040000	/* IRQ cannot be requested */
@@ -95,22 +102,33 @@ struct msi_desc;
  * @release:		release function solely used by UML
  * @typename:		obsoleted by name, kept as migration helper
  */
+/**
+ * 中断控制器描述符
+ */
 struct irq_chip {
+	/* 控制器名称，如XTPIC或者IO-APIC */
 	const char	*name;
+	/* 第一次初始化某个IRQ，一般是将工作转给enable */
 	unsigned int	(*startup)(unsigned int irq);
 	void		(*shutdown)(unsigned int irq);
+	/* 打开一个中断，向IO内存或者IO端口中写入特定的值 */
 	void		(*enable)(unsigned int irq);
 	void		(*disable)(unsigned int irq);
 
+	/* 应答IRQ。如果芯片组没有应答要求，可以为空或NULL */
 	void		(*ack)(unsigned int irq);
 	void		(*mask)(unsigned int irq);
+	/* 应答并禁用一个IRQ */
 	void		(*mask_ack)(unsigned int irq);
 	void		(*unmask)(unsigned int irq);
 	void		(*eoi)(unsigned int irq);
 
+	/* 在电流层结束处理过程。如果在中断处理过程中禁用了中断，此处应将它打开 */
 	void		(*end)(unsigned int irq);
+	/* 设置中断在CPU上的亲和性 */
 	void		(*set_affinity)(unsigned int irq, cpumask_t dest);
 	int		(*retrigger)(unsigned int irq);
+	/* 设置中断的电流类型，在ARM、POWERPC等体系上使用 */
 	int		(*set_type)(unsigned int irq, unsigned int flow_type);
 	int		(*set_wake)(unsigned int irq, unsigned int on);
 
@@ -149,17 +167,27 @@ struct irq_chip {
  * @affinity_entry:	/proc/irq/smp_affinity procfs entry on SMP
  * @name:		flow handler name for /proc/interrupts output
  */
+/**
+ * 中断描述符
+ */
 struct irq_desc {
+	/* 处理中断电流特性的回调 */
 	irq_flow_handler_t	handle_irq;
+	/* 电流处理和芯片相关操作 */
 	struct irq_chip		*chip;
 	struct msi_desc		*msi_desc;
+	/* 传递给handle_irq的私有数据 */
 	void			*handler_data;
 	void			*chip_data;
+	/* 第一个irq指针，形成一个ISR处理链表 */
 	struct irqaction	*action;	/* IRQ action list */
+	/* IRQ状态，如IRQ_DISABLED */
 	unsigned int		status;		/* IRQ status */
 
+	/* 该中断被禁用的次数 */
 	unsigned int		depth;		/* nested irq disables */
 	unsigned int		wake_depth;	/* nested wake enables */
+	/* 这个值用于检测假中断 */
 	unsigned int		irq_count;	/* For detecting broken IRQs */
 	unsigned int		irqs_unhandled;
 	unsigned long		last_unhandled;	/* Aging timer for unhandled count */
@@ -174,6 +202,7 @@ struct irq_desc {
 #ifdef CONFIG_PROC_FS
 	struct proc_dir_entry	*dir;
 #endif
+	/* 电流层处理程序的名称，如edge或level */
 	const char		*name;
 } ____cacheline_internodealigned_in_smp;
 
@@ -302,6 +331,7 @@ static inline void generic_handle_irq(unsigned int irq)
 	struct irq_desc *desc = irq_desc + irq;
 
 #ifdef CONFIG_GENERIC_HARDIRQS_NO__DO_IRQ
+	/* 一般启用此宏，回调handle_irq函数，如handle_level_irq */
 	desc->handle_irq(irq, desc);
 #else
 	if (likely(desc->handle_irq))
@@ -348,6 +378,9 @@ static inline void __set_irq_handler_unlocked(int irq,
 
 /*
  * Set a highlevel flow handler for a given IRQ:
+ */
+/**
+ * 设置某个中断的电流处理程序
  */
 static inline void
 set_irq_handler(unsigned int irq, irq_flow_handler_t handle)

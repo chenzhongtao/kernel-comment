@@ -65,27 +65,39 @@ struct msginfo {
 #include <linux/list.h>
 
 /* one msg_msg structure for each message */
+/* 消息队列中的消息，每一个消息都用一个页来保存，页前部为此结构 */
 struct msg_msg {
+	/* 通过此字段将消息链接到链表中 */
 	struct list_head m_list; 
+	/* 消息类型 */
 	long  m_type;          
+	/* 消息正文长度，以字节计算 */
 	int m_ts;           /* message text size */
+	/* 如果消息超过一个内存页，则使用此指针指向下一页 */
 	struct msg_msgseg* next;
 	void *security;
 	/* the actual message follows immediately */
 };
 
 /* one msq_queue structure for each present queue on the system */
+/* 消息队列数据结构 */
 struct msg_queue {
 	struct kern_ipc_perm q_perm;
+	/* 上一次发送、接收、修改的时间 */
 	time_t q_stime;			/* last msgsnd time */
 	time_t q_rtime;			/* last msgrcv time */
 	time_t q_ctime;			/* last change time */
+	/* 队列中当前消息数量，以字节表示 */
 	unsigned long q_cbytes;		/* current number of bytes on queue */
+	/* 当前队列中的消息数量 */
 	unsigned long q_qnum;		/* number of messages in queue */
+	/* 队列中最大的消息数量 */
 	unsigned long q_qbytes;		/* max number of bytes on queue */
+	/* 最后一次发送和接收消息的进程id */
 	pid_t q_lspid;			/* pid of last msgsnd */
 	pid_t q_lrpid;			/* last receive pid */
 
+	/* 三个链表，表示正在睡眠的发送者、接收者和消息本身 */
 	struct list_head q_messages;
 	struct list_head q_receivers;
 	struct list_head q_senders;

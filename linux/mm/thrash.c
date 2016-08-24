@@ -23,9 +23,18 @@
 #include <linux/swap.h>
 
 static DEFINE_SPINLOCK(swap_token_lock);
+/**
+ * 当前持有交换令牌的进程
+ */
 struct mm_struct *swap_token_mm;
+/**
+ * 每次换页过程中，都会调用do_swap_page，它会对本变量加1.用于判断交换令牌的频繁程度。
+ */
 static unsigned int global_faults;
 
+/**
+ * 获取交换令牌
+ */
 void grab_swap_token(void)
 {
 	int current_interval;
@@ -38,13 +47,14 @@ void grab_swap_token(void)
 		return;
 
 	/* First come first served */
-	if (swap_token_mm == NULL) {
+	if (swap_token_mm == NULL) {/* 交换令牌未分配给任何进程 */
+		/* 修改令牌优先级 */
 		current->mm->token_priority = current->mm->token_priority + 2;
 		swap_token_mm = current->mm;
 		goto out;
 	}
 
-	if (current->mm != swap_token_mm) {
+	if (current->mm != swap_token_mm) {/* 其他进程获取了令牌 */
 		if (current_interval < current->mm->last_interval)
 			current->mm->token_priority++;
 		else {

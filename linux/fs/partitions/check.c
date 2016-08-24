@@ -368,10 +368,14 @@ void delete_partition(struct gendisk *disk, int part)
 	kobject_put(&p->kobj);
 }
 
+/**
+ * 向通用硬盘数据结构添加一个新的分区。
+ */
 void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len, int flags)
 {
 	struct hd_struct *p;
 
+	/* 分配一个分区结构 */
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return;
@@ -381,14 +385,17 @@ void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len,
 	p->partno = part;
 	p->policy = disk->policy;
 
+	/* 指定对象在sysfs中的名字 */
 	if (isdigit(disk->kobj.k_name[strlen(disk->kobj.k_name)-1]))
 		kobject_set_name(&p->kobj, "%sp%d",
 				 kobject_name(&disk->kobj), part);
 	else
 		kobject_set_name(&p->kobj, "%s%d",
 				 kobject_name(&disk->kobj),part);
+	/* 将分区父对象设置为磁盘对象 */
 	p->kobj.parent = &disk->kobj;
 	p->kobj.ktype = &ktype_part;
+	/* 添加分区到sysfs通用文件系统中 */
 	kobject_init(&p->kobj);
 	kobject_add(&p->kobj);
 	if (!disk->part_uevent_suppress)
@@ -403,6 +410,7 @@ void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len,
 		sysfs_create_file(&p->kobj, &addpartattr);
 	}
 	partition_sysfs_add_subdir(p);
+	/* 将分区添加到磁盘对象的分区中 */
 	disk->part[part-1] = p;
 }
 

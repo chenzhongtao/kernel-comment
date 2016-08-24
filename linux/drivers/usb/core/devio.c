@@ -85,6 +85,9 @@ MODULE_PARM_DESC (usbfs_snoop, "true to log all usbfs traffic");
 			dev_info( dev , format , ## arg);	\
 	} while (0)
 
+/**
+ * 为用户态程序控制USB设备而使用的主设备号。
+ */
 #define USB_DEVICE_DEV		MKDEV(USB_DEVICE_MAJOR, 0)
 
 
@@ -1660,6 +1663,9 @@ int __init usb_devio_init(void)
 		goto error_cdev;
 	}
 #ifdef CONFIG_USB_DEVICE_CLASS
+	/**
+	 * 在/sys/class目录下建立usb_device目录。
+	 */
 	usb_classdev_class = class_create(THIS_MODULE, "usb_device");
 	if (IS_ERR(usb_classdev_class)) {
 		err("unable to register usb_device class");

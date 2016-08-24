@@ -104,14 +104,20 @@ static struct file_system_type proc_fs_type = {
 	.kill_sb	= proc_kill_sb,
 };
 
+/**
+ * 初始化proc文件系统
+ */
 void __init proc_root_init(void)
 {
+	/* 创建一个proc_inode对象slab缓存 */
 	int err = proc_init_inodecache();
 	if (err)
 		return;
+	/* 注册文件系统 */
 	err = register_filesystem(&proc_fs_type);
 	if (err)
 		return;
+	/* 加载文件系统 */
 	proc_mnt = kern_mount_data(&proc_fs_type, &init_pid_ns);
 	err = PTR_ERR(proc_mnt);
 	if (IS_ERR(proc_mnt)) {
@@ -119,13 +125,16 @@ void __init proc_root_init(void)
 		return;
 	}
 
+	/* 创建proc目录中的一些子目录和文件项 */
 	proc_misc_init();
 
+	/* 创建与网络相关的proc文件 */
 	proc_net_init();
 
 #ifdef CONFIG_SYSVIPC
 	proc_mkdir("sysvipc", NULL);
 #endif
+	/* 调用proc_mkdir在proc目录下创建一个子目录 */
 	proc_root_fs = proc_mkdir("fs", NULL);
 	proc_root_driver = proc_mkdir("driver", NULL);
 	proc_mkdir("fs/nfsd", NULL); /* somewhere for the nfsd filesystem to be mounted */

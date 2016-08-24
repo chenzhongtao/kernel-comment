@@ -57,41 +57,58 @@ int tick_is_oneshot_available(void)
  */
 static void tick_periodic(int cpu)
 {
-	if (tick_do_timer_cpu == cpu) {
+	if (tick_do_timer_cpu == cpu) {/* 当前CPU负责全局时钟 */
+		/* 获得全局时钟顺序锁 */
 		write_seqlock(&xtime_lock);
 
 		/* Keep track of the next tick event */
+		/* 记录下次时钟周期的时间 */
 		tick_next_period = ktime_add(tick_next_period, tick_period);
 
+		/**
+		 * 更新全局jiffies和进程统计，墙上时间
+		 */
 		do_timer(1);
+		/* 释放顺序锁 */
 		write_sequnlock(&xtime_lock);
 	}
 
+	/* 更新当前CPU中进程的统计 */
 	update_process_times(user_mode(get_irq_regs()));
+	/* profile相关处理，用于性能剖析 */
 	profile_tick(CPU_PROFILING);
 }
 
 /*
  * Event handler for periodic ticks
  */
+/**
+ * 处理周期性tick的主函数
+ */
 void tick_handle_periodic(struct clock_event_device *dev)
 {
 	int cpu = smp_processor_id();
 	ktime_t next;
 
+	/* 处理周期事件 */
 	tick_periodic(cpu);
 
+	/* 不是oneshot模式，那么直接退出 */
 	if (dev->mode != CLOCK_EVT_MODE_ONESHOT)
 		return;
 	/*
 	 * Setup the next period for devices, which do not have
 	 * periodic mode:
 	 */
+	/* 编程设置下次周期性时钟 */
 	next = ktime_add(dev->next_event, tick_period);
 	for (;;) {
+		/* 如果失败，说明下一次时间已经过期 */
 		if (!clockevents_program_event(dev, next, ktime_get()))
 			return;
+		/* 补一次周期性事件 */
 		tick_periodic(cpu);
+		/* 设置下一次时钟 */
 		next = ktime_add(next, tick_period);
 	}
 }

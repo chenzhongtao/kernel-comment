@@ -182,6 +182,7 @@ static unsigned long __find_symbol(const char *name,
 
 	/* Core kernel first. */
 	*owner = NULL;
+	/* 遍历持久到内核中的所有符号 */
 	ks = lookup_symbol(name, __start___ksymtab, __stop___ksymtab);
 	if (ks) {
 		*crc = symversion(__start___kcrctab, (ks - __start___ksymtab));
@@ -233,7 +234,7 @@ static unsigned long __find_symbol(const char *name,
 	}
 
 	/* Now try modules. */
-	list_for_each_entry(mod, &modules, list) {
+	list_for_each_entry(mod, &modules, list) {/* 在所有模块导出符号表中搜索 */
 		*owner = mod;
 		ks = lookup_symbol(name, mod->syms, mod->syms + mod->num_syms);
 		if (ks) {
@@ -514,13 +515,19 @@ static void module_unload_init(struct module *mod)
 }
 
 /* modules using other modules */
+/* 模块依赖关系 */
 struct module_use
 {
+	/* 通过此字段，加入到模块的引用链表中 */
 	struct list_head list;
+	/* 引用的模块 */
 	struct module *module_which_uses;
 };
 
 /* Does a already use b? */
+/**
+ * 判断模块a是否依赖b
+ */
 static int already_uses(struct module *a, struct module *b)
 {
 	struct module_use *use;
@@ -536,24 +543,29 @@ static int already_uses(struct module *a, struct module *b)
 }
 
 /* Module a uses b */
+/**
+ * 建立模块a、b之间的依赖关系
+ */
 static int use_module(struct module *a, struct module *b)
 {
 	struct module_use *use;
 	int no_warn;
 
+	/* 如果已经依赖了b，则退出 */
 	if (b == NULL || already_uses(a, b)) return 1;
 
-	if (!strong_try_module_get(b))
+	if (!strong_try_module_get(b))/* 添加模块引用计数 */
 		return 0;
 
 	DEBUGP("Allocating new usage for %s.\n", a->name);
-	use = kmalloc(sizeof(*use), GFP_ATOMIC);
-	if (!use) {
+	use = kmalloc(sizeof(*use), GFP_ATOMIC);/* 分配链表数据结构 */
+	if (!use) {/* 分配失败，递减引用计数并退出 */
 		printk("%s: out of memory loading\n", a->name);
 		module_put(b);
 		return 0;
 	}
 
+	/* 将模块添加到引用链表中 */
 	use->module_which_uses = a;
 	list_add(&use->list, &b->modules_which_use_me);
 	no_warn = sysfs_create_link(b->holders_dir, &a->mkobj.kobj, a->name);
@@ -655,6 +667,9 @@ static void wait_for_zero_refcount(struct module *mod)
 	mutex_lock(&module_mutex);
 }
 
+/**
+ * 系统调用:从内核中移除一个模块。
+ */
 asmlinkage long
 sys_delete_module(const char __user *name_user, unsigned int flags)
 {
@@ -665,6 +680,7 @@ sys_delete_module(const char __user *name_user, unsigned int flags)
 	if (!capable(CAP_SYS_MODULE))
 		return -EPERM;
 
+	/* 从用户态复制模块名称 */
 	if (strncpy_from_user(name, name_user, MODULE_NAME_LEN-1) < 0)
 		return -EFAULT;
 	name[MODULE_NAME_LEN-1] = '\0';
@@ -672,20 +688,20 @@ sys_delete_module(const char __user *name_user, unsigned int flags)
 	if (mutex_lock_interruptible(&module_mutex) != 0)
 		return -EINTR;
 
-	mod = find_module(name);
+	mod = find_module(name);/* 根据模块名称，在内核中查找模块对象 */
 	if (!mod) {
 		ret = -ENOENT;
 		goto out;
 	}
 
-	if (!list_empty(&mod->modules_which_use_me)) {
+	if (!list_empty(&mod->modules_which_use_me)) {/* 其他模块还需要使用本模块 */
 		/* Other modules depend on us: get rid of them first. */
 		ret = -EWOULDBLOCK;
 		goto out;
 	}
 
 	/* Doing init or already dying? */
-	if (mod->state != MODULE_STATE_LIVE) {
+	if (mod->state != MODULE_STATE_LIVE) {/* 计数器还不为0 */
 		/* FIXME: if (force), slam module count and wake up
                    waiter --RR */
 		DEBUGP("%s already dying\n", mod->name);
@@ -694,7 +710,7 @@ sys_delete_module(const char __user *name_user, unsigned int flags)
 	}
 
 	/* If it has an init func, it must have an exit func to unload */
-	if (mod->init && !mod->exit) {
+	if (mod->init && !mod->exit) {/* 没有exit函数，需要强制卸载 */
 		forced = try_force_unload(flags);
 		if (!forced) {
 			/* This module can't be removed */
@@ -716,12 +732,12 @@ sys_delete_module(const char __user *name_user, unsigned int flags)
 		wait_for_zero_refcount(mod);
 
 	/* Final destruction now noone is using it. */
-	if (mod->exit != NULL) {
+	if (mod->exit != NULL) {/* 执行模块的exit回调函数 */
 		mutex_unlock(&module_mutex);
 		mod->exit();
 		mutex_lock(&module_mutex);
 	}
-	free_module(mod);
+	free_module(mod);/* 释放模块内存 */
 
  out:
 	mutex_unlock(&module_mutex);
@@ -950,6 +966,7 @@ static unsigned long resolve_symbol(Elf_Shdr *sechdrs,
 	unsigned long ret;
 	const unsigned long *crc;
 
+	/* __find_symbol完成实际的符号解析工作 */
 	ret = __find_symbol(name, &owner, &crc,
 			!(mod->taints & TAINT_PROPRIETARY_MODULE));
 	if (ret) {
@@ -1381,10 +1398,11 @@ static int simplify_symbols(Elf_Shdr *sechdrs,
 {
 	Elf_Sym *sym = (void *)sechdrs[symindex].sh_addr;
 	unsigned long secbase;
+	/* 符号数目 */
 	unsigned int i, n = sechdrs[symindex].sh_size / sizeof(Elf_Sym);
 	int ret = 0;
 
-	for (i = 1; i < n; i++) {
+	for (i = 1; i < n; i++) {/* 遍历所有需要处理的符号 */
 		switch (sym[i].st_shndx) {
 		case SHN_COMMON:
 			/* We compiled with -fno-common.  These are not
@@ -1395,22 +1413,22 @@ static int simplify_symbols(Elf_Shdr *sechdrs,
 			ret = -ENOEXEC;
 			break;
 
-		case SHN_ABS:
+		case SHN_ABS:/* 完全定义的符号，什么也不用做 */
 			/* Don't need to do anything */
 			DEBUGP("Absolute symbol: 0x%08lx\n",
 			       (long)sym[i].st_value);
 			break;
 
-		case SHN_UNDEF:
+		case SHN_UNDEF:/* 未定义的符号 */
 			sym[i].st_value
 			  = resolve_symbol(sechdrs, versindex,
-					   strtab + sym[i].st_name, mod);
+					   strtab + sym[i].st_name, mod);/* 返回给定符号的地址 */
 
 			/* Ok if resolved.  */
-			if (sym[i].st_value != 0)
+			if (sym[i].st_value != 0)/* 已经找到符号定义 */
 				break;
 			/* Ok if weak.  */
-			if (ELF_ST_BIND(sym[i].st_info) == STB_WEAK)
+			if (ELF_ST_BIND(sym[i].st_info) == STB_WEAK)/* 虽然无法解析该符号，但是它是弱符号 */
 				break;
 
 			printk(KERN_WARNING "%s: Unknown symbol %s\n",
@@ -1418,7 +1436,7 @@ static int simplify_symbols(Elf_Shdr *sechdrs,
 			ret = -ENOENT;
 			break;
 
-		default:
+		default:/* 其他符号，在模块符号表中查找 */
 			/* Divert to percpu allocation if a percpu var. */
 			if (sym[i].st_shndx == pcpuindex)
 				secbase = (unsigned long)mod->percpu;
@@ -1685,14 +1703,15 @@ static struct module *load_module(void __user *umod,
 
 	DEBUGP("load_module: umod=%p, len=%lu, uargs=%p\n",
 	       umod, len, uargs);
-	if (len < sizeof(*hdr))
+	if (len < sizeof(*hdr))/* 模块长度不正确 */
 		return ERR_PTR(-ENOEXEC);
 
 	/* Suck in entire file: we'll want most of it. */
 	/* vmalloc barfs on "unusual" numbers.  Check here */
+	/* 模块太大，或者不能在内核态分配内存 */
 	if (len > 64 * 1024 * 1024 || (hdr = vmalloc(len)) == NULL)
 		return ERR_PTR(-ENOMEM);
-	if (copy_from_user(hdr, umod, len) != 0) {
+	if (copy_from_user(hdr, umod, len) != 0) {/* 将模块二进制数据复制到内核 */
 		err = -EFAULT;
 		goto free_hdr;
 	}
@@ -1711,10 +1730,12 @@ static struct module *load_module(void __user *umod,
 		goto truncated;
 
 	/* Convenience variables */
-	sechdrs = (void *)hdr + hdr->e_shoff;
+	sechdrs = (void *)hdr + hdr->e_shoff;/* ELF段信息 */
+	/* 段名称在内存中的位置 */
 	secstrings = (void *)hdr + sechdrs[hdr->e_shstrndx].sh_offset;
 	sechdrs[0].sh_addr = 0;
 
+	/* e_shnum段数目，将璺地址改为段在映射中的绝对地址 */
 	for (i = 1; i < hdr->e_shnum; i++) {
 		if (sechdrs[i].sh_type != SHT_NOBITS
 		    && len < sechdrs[i].sh_offset + sechdrs[i].sh_size)
@@ -1722,12 +1743,14 @@ static struct module *load_module(void __user *umod,
 
 		/* Mark all sections sh_addr with their address in the
 		   temporary image. */
+		/* 修改段地址为绝对地址 */
 		sechdrs[i].sh_addr = (size_t)hdr + sechdrs[i].sh_offset;
 
 		/* Internal symbols and strings. */
-		if (sechdrs[i].sh_type == SHT_SYMTAB) {
+		if (sechdrs[i].sh_type == SHT_SYMTAB) {/* 该段是内部符号或者字符串 */
 			symindex = i;
 			strindex = sechdrs[i].sh_link;
+			/* 内部符号表的位置 */
 			strtab = (char *)hdr + sechdrs[strindex].sh_offset;
 		}
 #ifndef CONFIG_MODULE_UNLOAD
@@ -1737,6 +1760,7 @@ static struct module *load_module(void __user *umod,
 #endif
 	}
 
+	/* 查找this_module段，得到模块信息 */
 	modindex = find_sec(hdr, sechdrs, secstrings,
 			    ".gnu.linkonce.this_module");
 	if (!modindex) {
@@ -1744,7 +1768,7 @@ static struct module *load_module(void __user *umod,
 		err = -ENOEXEC;
 		goto free_hdr;
 	}
-	mod = (void *)sechdrs[modindex].sh_addr;
+	mod = (void *)sechdrs[modindex].sh_addr;/* mod指向module实例,提供了模块名称和初始化函数指针 */
 
 	if (symindex == 0) {
 		printk(KERN_WARNING "%s: module has no symbols (stripped?)\n",
@@ -1754,6 +1778,7 @@ static struct module *load_module(void __user *umod,
 	}
 
 	/* Optional sections */
+	/* 查找其他可选段 */
 	exportindex = find_sec(hdr, sechdrs, secstrings, "__ksymtab");
 	gplindex = find_sec(hdr, sechdrs, secstrings, "__ksymtab_gpl");
 	gplfutureindex = find_sec(hdr, sechdrs, secstrings, "__ksymtab_gpl_future");
@@ -1818,6 +1843,7 @@ static struct module *load_module(void __user *umod,
 	mod->state = MODULE_STATE_COMING;
 
 	/* Allow arches to frob section contents and sizes.  */
+	/* 读取特定体系结构的模块信息 */
 	err = module_frob_arch_sections(hdr, sechdrs, secstrings, mod);
 	if (err < 0)
 		goto free_mod;
@@ -1838,10 +1864,11 @@ static struct module *load_module(void __user *umod,
 	/* Determine total sizes, and put offsets in sh_entsize.  For now
 	   this is done generically; there doesn't appear to be any
 	   special cases for the architectures. */
+	/* 在内存中组织各段 */
 	layout_sections(mod, hdr, sechdrs, secstrings);
 
 	/* Do the allocs. */
-	ptr = module_alloc(mod->core_size);
+	ptr = module_alloc(mod->core_size);/* 分配并初始化核心段内存 */
 	if (!ptr) {
 		err = -ENOMEM;
 		goto free_percpu;
@@ -1849,7 +1876,7 @@ static struct module *load_module(void __user *umod,
 	memset(ptr, 0, mod->core_size);
 	mod->module_core = ptr;
 
-	ptr = module_alloc(mod->init_size);
+	ptr = module_alloc(mod->init_size);/* 分配并初始化初始段内存 */
 	if (!ptr && mod->init_size) {
 		err = -ENOMEM;
 		goto free_core;
@@ -1862,7 +1889,7 @@ static struct module *load_module(void __user *umod,
 	for (i = 0; i < hdr->e_shnum; i++) {
 		void *dest;
 
-		if (!(sechdrs[i].sh_flags & SHF_ALLOC))
+		if (!(sechdrs[i].sh_flags & SHF_ALLOC))/* 这样的段不必复制到内存中 */
 			continue;
 
 		if (sechdrs[i].sh_entsize & INIT_OFFSET_MASK)
@@ -1875,6 +1902,7 @@ static struct module *load_module(void __user *umod,
 			memcpy(dest, (void *)sechdrs[i].sh_addr,
 			       sechdrs[i].sh_size);
 		/* Update sh_addr to point to copy in image. */
+		/* 设置段地址为最终目标地址 */
 		sechdrs[i].sh_addr = (unsigned long)dest;
 		DEBUGP("\t0x%lx %s\n", sechdrs[i].sh_addr, secstrings + sechdrs[i].sh_name);
 	}
@@ -1890,9 +1918,9 @@ static struct module *load_module(void __user *umod,
 		goto cleanup;
 
 	/* Set up license info based on the info section */
-	set_license(mod, get_modinfo(sechdrs, infoindex, "license"));
+	set_license(mod, get_modinfo(sechdrs, infoindex, "license"));/* 检查模块的许可证 */
 
-	if (strcmp(mod->name, "ndiswrapper") == 0)
+	if (strcmp(mod->name, "ndiswrapper") == 0)/* 这两个模块会装载其他非GPL的模块，因此它是与GPL不兼容的 */
 		add_taint(TAINT_PROPRIETARY_MODULE);
 	if (strcmp(mod->name, "driverloader") == 0)
 		add_taint_module(mod, TAINT_PROPRIETARY_MODULE);
@@ -1901,12 +1929,14 @@ static struct module *load_module(void __user *umod,
 	setup_modinfo(mod, sechdrs, infoindex);
 
 	/* Fix up syms, so that st_value is a pointer to location. */
+	/* 解决模块符号的重定位和引用 */
 	err = simplify_symbols(sechdrs, symindex, strtab, versindex, pcpuindex,
 			       mod);
 	if (err < 0)
 		goto cleanup;
 
 	/* Set up EXPORTed & EXPORT_GPLed symbols (section 0 is 0 length) */
+	/* 设置模块信息 */
 	mod->num_syms = sechdrs[exportindex].sh_size / sizeof(*mod->syms);
 	mod->syms = (void *)sechdrs[exportindex].sh_addr;
 	if (crcindex)
@@ -1948,7 +1978,7 @@ static struct module *load_module(void __user *umod,
 					"__markers_strings");
 
 	/* Now do relocations. */
-	for (i = 1; i < hdr->e_shnum; i++) {
+	for (i = 1; i < hdr->e_shnum; i++) {/* 再次遍历所有段，进行重定位处理 */
 		const char *strtab = (char *)sechdrs[strindex].sh_addr;
 		unsigned int info = sechdrs[i].sh_info;
 
@@ -1957,12 +1987,12 @@ static struct module *load_module(void __user *umod,
 			continue;
 
 		/* Don't bother with non-allocated sections */
-		if (!(sechdrs[info].sh_flags & SHF_ALLOC))
+		if (!(sechdrs[info].sh_flags & SHF_ALLOC))/* 该段不需要加载到内存，也就不需要处理重定位 */
 			continue;
 
-		if (sechdrs[i].sh_type == SHT_REL)
+		if (sechdrs[i].sh_type == SHT_REL)/* 处理普通重定位 */
 			err = apply_relocate(sechdrs, strtab, symindex, i,mod);
-		else if (sechdrs[i].sh_type == SHT_RELA)
+		else if (sechdrs[i].sh_type == SHT_RELA)/* 处理重定位，需要加上固定的偏移 */
 			err = apply_relocate_add(sechdrs, strtab, symindex, i,
 						 mod);
 		if (err < 0)
@@ -1996,6 +2026,7 @@ static struct module *load_module(void __user *umod,
 		marker_update_probe_range(mod->markers,
 			mod->markers + mod->num_markers, NULL, NULL);
 #endif
+	/* 特定体系结构的处理，例如，替换一些汇编指令以加快速度 */
 	err = module_finalize(hdr, sechdrs, mod);
 	if (err < 0)
 		goto cleanup;
@@ -2029,10 +2060,11 @@ static struct module *load_module(void __user *umod,
 			 sechdrs[setupindex].sh_addr,
 			 sechdrs[setupindex].sh_size
 			 / sizeof(struct kernel_param),
-			 NULL);
+			 NULL);/* 解析参数 */
 	if (err < 0)
 		goto arch_cleanup;
 
+	/* 将模块添加到sysfs中 */
 	err = mod_sysfs_setup(mod,
 			      (struct kernel_param *)
 			      sechdrs[setupindex].sh_addr,
@@ -2049,7 +2081,7 @@ static struct module *load_module(void __user *umod,
 					    sechdrs[unwindex].sh_size);
 
 	/* Get rid of temporary copy */
-	vfree(hdr);
+	vfree(hdr);/* 释放临时内存 */
 
 	/* Done! */
 	return mod;
@@ -2088,6 +2120,10 @@ static int __link_module(void *_mod)
 }
 
 /* This is where the real work happens */
+/**
+ * 系统调用:将一个新模块插入到内核中。由用户态提供所需要的二进制数据。
+ * 符号重定位工作由内核完成。
+ */
 asmlinkage long
 sys_init_module(void __user *umod,
 		unsigned long len,
@@ -2105,7 +2141,7 @@ sys_init_module(void __user *umod,
 		return -EINTR;
 
 	/* Do all the hard work */
-	mod = load_module(umod, len, uargs);
+	mod = load_module(umod, len, uargs);/* 将模块加载到内核中 */
 	if (IS_ERR(mod)) {
 		mutex_unlock(&module_mutex);
 		return PTR_ERR(mod);
@@ -2122,7 +2158,7 @@ sys_init_module(void __user *umod,
 			MODULE_STATE_COMING, mod);
 
 	/* Start the module */
-	if (mod->init != NULL)
+	if (mod->init != NULL)/* 调用模块的初始化函数 */
 		ret = mod->init();
 	if (ret < 0) {
 		/* Init routine failed: abort.  Try to protect us from
@@ -2142,6 +2178,7 @@ sys_init_module(void __user *umod,
 	/* Drop initial reference. */
 	module_put(mod);
 	unwind_remove_table(mod->unwind_info, 1);
+	/* 释放模块初始化数据区域 */
 	module_free(mod, mod->module_init);
 	mod->module_init = NULL;
 	mod->init_size = 0;

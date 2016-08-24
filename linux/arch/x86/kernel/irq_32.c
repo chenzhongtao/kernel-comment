@@ -83,6 +83,7 @@ fastcall unsigned int do_IRQ(struct pt_regs *regs)
 		BUG();
 	}
 
+	/* 保存寄存器指针到每CPU变量中 */
 	old_regs = set_irq_regs(regs);
 	irq_enter();
 #ifdef CONFIG_DEBUG_STACKOVERFLOW
@@ -102,8 +103,9 @@ fastcall unsigned int do_IRQ(struct pt_regs *regs)
 
 #ifdef CONFIG_4KSTACKS
 
+	/* 获得进程栈 */
 	curctx = (union irq_ctx *) current_thread_info();
-	irqctx = hardirq_ctx[smp_processor_id()];
+	irqctx = hardirq_ctx[smp_processor_id()];/* 中断栈 */
 
 	/*
 	 * this is where we switch to the IRQ stack. However, if we are
@@ -111,7 +113,7 @@ fastcall unsigned int do_IRQ(struct pt_regs *regs)
 	 * handler) we can't do that and just have to keep using the
 	 * current stack (which is the irq stack already after all)
 	 */
-	if (curctx != irqctx) {
+	if (curctx != irqctx) {/* 当前栈不是中断栈 */
 		int arg1, arg2, ebx;
 
 		/* build the stack frame on the IRQ stack */
@@ -127,6 +129,7 @@ fastcall unsigned int do_IRQ(struct pt_regs *regs)
 			(irqctx->tinfo.preempt_count & ~SOFTIRQ_MASK) |
 			(curctx->tinfo.preempt_count & SOFTIRQ_MASK);
 
+		/* 切换中断栈，并调用中断处理函数,然后再切换回来 */
 		asm volatile(
 			"       xchgl  %%ebx,%%esp      \n"
 			"       call   *%%edi           \n"
@@ -192,6 +195,9 @@ void irq_ctx_exit(int cpu)
 
 extern asmlinkage void __do_softirq(void);
 
+/**
+ * 处理软中断
+ */
 asmlinkage void do_softirq(void)
 {
 	unsigned long flags;
@@ -199,12 +205,12 @@ asmlinkage void do_softirq(void)
 	union irq_ctx *irqctx;
 	u32 *isp;
 
-	if (in_interrupt())
+	if (in_interrupt())/* 当前处于中断或者软中断上下文，退出 */
 		return;
 
-	local_irq_save(flags);
+	local_irq_save(flags);/* 这里要判断位图了，需要关闭中断 */
 
-	if (local_softirq_pending()) {
+	if (local_softirq_pending()) {/* 有挂起的软中断 */
 		curctx = current_thread_info();
 		irqctx = softirq_ctx[smp_processor_id()];
 		irqctx->tinfo.task = curctx->task;
@@ -213,6 +219,7 @@ asmlinkage void do_softirq(void)
 		/* build the stack frame on the softirq stack */
 		isp = (u32*) ((char*)irqctx + sizeof(*irqctx));
 
+		/* 切换到软中断堆栈，并处理软中断 */
 		asm volatile(
 			"       xchgl   %%ebx,%%esp     \n"
 			"       call    __do_softirq    \n"

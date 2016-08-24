@@ -25,8 +25,11 @@
  * future use of radix_tree tags in the swap cache.
  */
 static const struct address_space_operations swap_aops = {
+	/* 将页从交换缓存中移除，传输到交换区 */
 	.writepage	= swap_writepage,
+	/* 将页同步到交换区，拔出对应的块设备队列。 */
 	.sync_page	= block_sync_page,
+	/* 为了节省内存，交换缓存并不使用缓冲区。而是直接在页标志中标记脏 */
 	.set_page_dirty	= __set_page_dirty_nobuffers,
 	.migratepage	= migrate_page,
 };
@@ -36,6 +39,9 @@ static struct backing_dev_info swap_backing_dev_info = {
 	.unplug_io_fn	= swap_unplug_io_fn,
 };
 
+/**
+ * 交换缓存描述符
+ */
 struct address_space swapper_space = {
 	.page_tree	= RADIX_TREE_INIT(GFP_ATOMIC|__GFP_NOWARN),
 	.tree_lock	= __RW_LOCK_UNLOCKED(swapper_space.tree_lock),
@@ -95,6 +101,11 @@ static int __add_to_swap_cache(struct page *page, swp_entry_t entry,
 	return error;
 }
 
+/**
+ * 将一页添加到交换缓存，而不对交换区进行操作
+ * 当从交换区读入由几个进程共享的页(根据交换区中的使用计数器确定)时，该页面同时保存交换区和交换缓存中
+ * 与add_to_swap不同之处在于，它不会为页面分配一个交换槽位。
+ */
 static int add_to_swap_cache(struct page *page, swp_entry_t entry)
 {
 	int error;
@@ -146,6 +157,9 @@ void __delete_from_swap_cache(struct page *page)
  * Allocate swap space for the page and add the page to the
  * swap cache.  Caller needs to hold the page lock. 
  */
+/**
+ * 当内核确定内存不足时，将页添加到交换缓存，并且在交换区中为该页分配一个槽位
+ */
 int add_to_swap(struct page * page, gfp_t gfp_mask)
 {
 	swp_entry_t entry;
@@ -154,8 +168,9 @@ int add_to_swap(struct page * page, gfp_t gfp_mask)
 	BUG_ON(!PageLocked(page));
 
 	for (;;) {
+		/* 查找一个空闲交换槽 */
 		entry = get_swap_page();
-		if (!entry.val)
+		if (!entry.val)/* 没有可用的空闲槽位 */
 			return 0;
 
 		/*
@@ -169,12 +184,14 @@ int add_to_swap(struct page * page, gfp_t gfp_mask)
 		/*
 		 * Add it to the swap cache and mark it dirty
 		 */
+		/* 将要换出的页移动到交换区 */
 		err = __add_to_swap_cache(page, entry,
 				gfp_mask|__GFP_NOMEMALLOC|__GFP_NOWARN);
 
 		switch (err) {
 		case 0:				/* Success */
 			SetPageUptodate(page);
+			/* 页还没有写到交换区，因此应当设置为脏，否则不会提交到块设备 */
 			SetPageDirty(page);
 			INC_CACHE_INFO(add_total);
 			return 1;
@@ -298,10 +315,16 @@ void free_pages_and_swap_cache(struct page **pages, int nr)
  * lock getting page table operations atomic even if we drop the page
  * lock before returning.
  */
+/**
+ * 检查某一页是否位于交换缓存中。
+ */
 struct page * lookup_swap_cache(swp_entry_t entry)
 {
 	struct page *page;
 
+	/**
+	 * 在swapper_space地址空间中搜索页面。
+	 */
 	page = find_get_page(&swapper_space, entry.val);
 
 	if (page)
@@ -317,6 +340,9 @@ struct page * lookup_swap_cache(swp_entry_t entry)
  * A failure return means that either the page allocation failed or that
  * the swap entry is no longer in use.
  */
+/**
+ * 为从交换区读入数据而进行一些准备工作，例如分配页面
+ */
 struct page *read_swap_cache_async(swp_entry_t entry,
 			struct vm_area_struct *vma, unsigned long addr)
 {
@@ -329,17 +355,19 @@ struct page *read_swap_cache_async(swp_entry_t entry,
 		 * called after lookup_swap_cache() failed, re-calling
 		 * that would confuse statistics.
 		 */
+		/* 首先在交换缓存中查找页 */
 		found_page = find_get_page(&swapper_space, entry.val);
-		if (found_page)
+		if (found_page)/* 在交换缓存中存在页，直接返回 */
 			break;
 
 		/*
 		 * Get a new page to read into from swap.
 		 */
-		if (!new_page) {
+		if (!new_page) {/* 还没有获取到新页 */
+			/* 分配一个新页 */
 			new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE,
 								vma, addr);
-			if (!new_page)
+			if (!new_page)/* 分配新页失败 */
 				break;		/* Out of memory */
 		}
 
@@ -353,12 +381,15 @@ struct page *read_swap_cache_async(swp_entry_t entry,
 		 * the just freed swap entry for an existing page.
 		 * May fail (-ENOMEM) if radix-tree node allocation failed.
 		 */
+		/* 将页添加到页缓存，并且自动锁定页 */
 		err = add_to_swap_cache(new_page, entry);
 		if (!err) {
 			/*
 			 * Initiate read into locked page and return.
 			 */
+			/* 将页添加到活动LRU链表 */
 			lru_cache_add_active(new_page);
+			/* 从交换区读取页到内存，但是不等待 */
 			swap_readpage(NULL, new_page);
 			return new_page;
 		}

@@ -221,6 +221,10 @@ EXPORT_SYMBOL_GPL(blkdev_driver_ioctl);
  * always keep this in sync with compat_blkdev_ioctl() and
  * compat_blkdev_locked_ioctl()
  */
+/**
+ * 块设备的ioctl，对公用命令，在此函数中处理。
+ * 否则调用设备自身的ioctl处理。
+ */
 int blkdev_ioctl(struct inode *inode, struct file *file, unsigned cmd,
 			unsigned long arg)
 {

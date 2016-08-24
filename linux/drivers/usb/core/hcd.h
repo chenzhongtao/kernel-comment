@@ -62,26 +62,46 @@
  */
 
 /*-------------------------------------------------------------------------*/
-
+/**
+ * USB主机控制器结构。
+ */
 struct usb_hcd {
 
 	/*
 	 * housekeeping
 	 */
+	/**
+	 * 主机控制器本身也会连接出一条USB总线。
+	 */
 	struct usb_bus		self;		/* hcd is-a bus */
+	/**
+	 * 引用计数。相关函数是hcd_release、usb_get_hcd、usb_put_hcd。
+	 */
 	struct kref		kref;		/* reference counter */
 
+	/**
+	 * 控制器产品描述符。
+	 */
 	const char		*product_desc;	/* product/vendor string */
+	/**
+	 * 驱动名称+总线编号这样的字符串。
+	 */
 	char			irq_descr[24];	/* driver + bus # */
 
 	struct timer_list	rh_timer;	/* drives root-hub polling */
 	struct urb		*status_urb;	/* the current status urb */
+	/**
+	 * 远程唤醒使用的工作任务。
+	 */
 #ifdef CONFIG_PM
 	struct work_struct	wakeup_work;	/* for remote wakeup */
 #endif
 
 	/*
 	 * hardware info/state
+	 */
+	/**
+	 * 描述主机控制器。比如具体控制器的回调函数。
 	 */
 	const struct hc_driver	*driver;	/* hw-specific hooks */
 
@@ -90,6 +110,9 @@ struct usb_hcd {
 #define HCD_FLAG_HW_ACCESSIBLE	0x00000001
 #define HCD_FLAG_SAW_IRQ	0x00000002
 
+	/**
+	 * 以下标志是用于Root HUB的。
+	 */
 	unsigned		rh_registered:1;/* is root hub registered? */
 
 	/* The next flag is a stopgap, to be removed when all the HCDs
@@ -97,16 +120,34 @@ struct usb_hcd {
 	unsigned		uses_new_polling:1;
 	unsigned		poll_rh:1;	/* poll for rh status? */
 	unsigned		poll_pending:1;	/* status has changed? */
+	/**
+	 * 无线HCD。
+	 */
 	unsigned		wireless:1;	/* Wireless USB HCD */
 	unsigned		authorized_default:1;
 
+	/**
+	 * 以下几个字段与PCI相关，irq是HCD用到的中断号。
+	 */
 	int			irq;		/* irq allocated */
+	/**
+	 * 设备IO内存。调用ioremap_nocache映射后的内存地址。
+	 */
 	void __iomem		*regs;		/* device memory/io */
+	/**
+	 * 从PCI表中读出的主机控制器的IO端口或内存的首地址和长度。
+	 */
 	u64			rsrc_start;	/* memory/io resource start */
 	u64			rsrc_len;	/* memory/io resource length */
+	/**
+	 * 能够提供的电流。
+	 */
 	unsigned		power_budget;	/* in mA, 0 = no limit */
 
 #define HCD_BUFFER_POOLS	4
+	/**
+	 * 4个DMA池。
+	 */
 	struct dma_pool		*pool [HCD_BUFFER_POOLS];
 
 	int			state;
@@ -156,13 +197,25 @@ struct hcd_timeout {	/* timeouts we allocate */
 
 
 struct hc_driver {
+	/**
+	 * 驱动器名称。
+	 */
 	const char	*description;	/* "ehci-hcd" etc */
+	/**
+	 * 与usc_hcd中的描述字符串是一样的。
+	 */
 	const char	*product_desc;	/* product/vendor string */
+	/**
+	 * 私有数据区的长度。
+	 */
 	size_t		hcd_priv_size;	/* size of private data */
 
 	/* irq handler */
 	irqreturn_t	(*irq) (struct usb_hcd *hcd);
 
+	/**
+	 * HCD的标志。如HCD_MEMORY。
+	 */
 	int	flags;
 #define	HCD_MEMORY	0x0001		/* HC regs use memory (else I/O) */
 #define	HCD_USB11	0x0010		/* USB 1.1 */
@@ -366,6 +419,7 @@ extern void usb_set_device_state(struct usb_device *udev,
 
 /* exported only within usbcore */
 
+/* 系统中所有usb总线的全局链表 */
 extern struct list_head usb_bus_list;
 extern struct mutex usb_bus_list_lock;
 extern wait_queue_head_t usb_kill_urb_queue;

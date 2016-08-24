@@ -121,6 +121,9 @@ static void create_kthread(struct kthread_create_info *create)
  *
  * Returns a task_struct or ERR_PTR(-ENOMEM).
  */
+/**
+ * 创建内核线程，一般不再直接使用kernel_thread。
+ */
 struct task_struct *kthread_create(int (*threadfn)(void *data),
 				   void *data,
 				   const char namefmt[],

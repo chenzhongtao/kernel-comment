@@ -623,25 +623,29 @@ void ipc_rcu_putref(void *ptr)
  *	Check user, group, other permissions for access
  *	to ipc resources. return 0 if allowed
  */
- 
+/* 检查是否有权限对ipc进行操作 */ 
 int ipcperms (struct kern_ipc_perm *ipcp, short flag)
 {	/* flag will most probably be 0 or S_...UGO from <linux/stat.h> */
 	int requested_mode, granted_mode, err;
 
 	if (unlikely((err = audit_ipc_obj(ipcp))))
 		return err;
+	/* 所请求的权限位 */
 	requested_mode = (flag >> 6) | (flag >> 3) | flag;
+	/* ipc允许的权限位 */
 	granted_mode = ipcp->mode;
+	/* 当前任务是信号的创建者、所有者 */
 	if (current->euid == ipcp->cuid || current->euid == ipcp->uid)
 		granted_mode >>= 6;
+	/* 当前任务与创建者属于同一组 */
 	else if (in_group_p(ipcp->cgid) || in_group_p(ipcp->gid))
 		granted_mode >>= 3;
 	/* is there some bit set in requested_mode but not in granted_mode? */
-	if ((requested_mode & ~granted_mode & 0007) && 
-	    !capable(CAP_IPC_OWNER))
+	if ((requested_mode & ~granted_mode & 0007) && /* 请求的权限不符 */
+	    !capable(CAP_IPC_OWNER))/* 没有特权 */
 		return -1;
 
-	return security_ipc_permission(ipcp, flag);
+	return security_ipc_permission(ipcp, flag);/* 由安全模块来确定是否有权限 */
 }
 
 /*

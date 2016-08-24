@@ -840,11 +840,18 @@ void update_process_times(int user_tick)
 	int cpu = smp_processor_id();
 
 	/* Note: this timer irq context must be accounted for as well. */
+	/**
+	 * 记录进程在用户态和内核态运行的CPU时间，即修改任务的utime和stime成员。
+	 * 如果进程运行时间超过Rlimit的限制，还会向它发送SIGXCPU信号。
+	 */
 	account_process_tick(p, user_tick);
+	/* 激活低分辨率时钟处理程序 */
 	run_local_timers();
-	if (rcu_pending(cpu))
+	if (rcu_pending(cpu))/* 处理rcu回调 */
 		rcu_check_callbacks(cpu, user_tick);
+	/* 调度器时钟处理 */
 	scheduler_tick();
+	/* 处理posix定时器 */
 	run_posix_cpu_timers(p);
 }
 
@@ -898,8 +905,8 @@ static void run_timer_softirq(struct softirq_action *h)
 
 	hrtimer_run_queues();
 
-	if (time_after_eq(jiffies, base->timer_jiffies))
-		__run_timers(base);
+	if (time_after_eq(jiffies, base->timer_jiffies))/* 有低分辨率定时器到期 */
+		__run_timers(base);/* 运行定时器 */
 }
 
 /*
@@ -907,7 +914,9 @@ static void run_timer_softirq(struct softirq_action *h)
  */
 void run_local_timers(void)
 {
+	/* 仅仅在中断上下文激活软中断，然后由run_timer_softirq执行 */
 	raise_softirq(TIMER_SOFTIRQ);
+	/* 处理softlockup，检查过长时间的调度延迟 */
 	softlockup_tick();
 }
 
@@ -917,7 +926,9 @@ void run_local_timers(void)
  */
 static inline void update_times(unsigned long ticks)
 {
+	/* 更新墙上时间，即系统启动后经过的时间 */
 	update_wall_time();
+	/* 更新负载，确定在1分钟、5分钟、15分钟内，有多少个就绪状态的进程在等待 */
 	calc_load(ticks);
 }
 
@@ -929,7 +940,9 @@ static inline void update_times(unsigned long ticks)
 
 void do_timer(unsigned long ticks)
 {
+	/* 更新jiffies */
 	jiffies_64 += ticks;
+	/* 更新进程统计 */
 	update_times(ticks);
 }
 

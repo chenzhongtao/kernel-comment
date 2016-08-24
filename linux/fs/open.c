@@ -824,8 +824,10 @@ static struct file *do_filp_open(int dfd, const char *filename, int flags,
 	if ((namei_flags+1) & O_ACCMODE)
 		namei_flags++;
 
+	/* 查找文件名对应的inode，并检查打开标志是否合法 */
 	error = open_namei(dfd, filename, namei_flags, mode, &nd);
 	if (!error)
+		/* 初始化预读结构，并将新创建的file实例添加到超级块的链表中，并调用底层文件系统的open方法 */
 		return nameidata_to_filp(&nd, flags);
 
 	return ERR_PTR(error);
@@ -1029,33 +1031,44 @@ EXPORT_SYMBOL(fd_install);
 
 long do_sys_open(int dfd, const char __user *filename, int flags, int mode)
 {
+	/* 从用户态读取文件名 */
 	char *tmp = getname(filename);
 	int fd = PTR_ERR(tmp);
 
 	if (!IS_ERR(tmp)) {
+		/* 查找一个可用的描述符 */
 		fd = get_unused_fd_flags(flags);
-		if (fd >= 0) {
+		if (fd >= 0) {/* 文件描述符有效 */
+			/* 查找文件的inode，并打开它 */
 			struct file *f = do_filp_open(dfd, tmp, flags, mode);
 			if (IS_ERR(f)) {
+				/* 失败后返还文件描述符 */
 				put_unused_fd(fd);
 				fd = PTR_ERR(f);
 			} else {
+				/* 用于fsnotify通知 */
 				fsnotify_open(f->f_path.dentry);
+				/* 将文件句柄与文件关联起来 */
 				fd_install(fd, f);
 			}
 		}
+		/* 释放文件名 */
 		putname(tmp);
 	}
 	return fd;
 }
 
+/**
+ * open系统调用
+ */
 asmlinkage long sys_open(const char __user *filename, int flags, int mode)
 {
 	long ret;
 
-	if (force_o_largefile())
+	if (force_o_largefile())/* 如果是64位系统，则强制启用大文件标志 */
 		flags |= O_LARGEFILE;
 
+	/* 打开文件 */
 	ret = do_sys_open(AT_FDCWD, filename, flags, mode);
 	/* avoid REGPARM breakage on x86: */
 	prevent_tail_call(ret);

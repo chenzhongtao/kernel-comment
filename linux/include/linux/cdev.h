@@ -10,11 +10,17 @@ struct file_operations;
 struct inode;
 struct module;
 
+/* 字符设备对象 */
 struct cdev {
+	/* 通过此结构将设备添加到通用设备文件系统(/sys/)中 */
 	struct kobject kobj;
+	/* 所属模块 */
 	struct module *owner;
+	/* 文件操作回调 */
 	const struct file_operations *ops;
+	/* 链表，包含所有表示该设备的inode */
 	struct list_head list;
+	/* 设备号 */
 	dev_t dev;
 	unsigned int count;
 };

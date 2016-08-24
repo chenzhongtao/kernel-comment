@@ -75,6 +75,7 @@ struct shm_info {
 };
 
 #ifdef __KERNEL__
+/* 共享内存内核数据结构 */
 struct shmid_kernel /* private to the kernel */
 {	
 	struct kern_ipc_perm	shm_perm;

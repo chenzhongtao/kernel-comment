@@ -17,15 +17,20 @@
 #ifdef CONFIG_BLOCK
 
 enum bh_state_bits {
+	/* 内存与块设备中的内容匹配 */
 	BH_Uptodate,	/* Contains valid data */
+	/* 缓冲区中的数据已经被修改 */
 	BH_Dirty,	/* Is dirty */
+	/* 缓冲区已经被锁定，防止多个线程并发处理缓冲区 */
 	BH_Lock,	/* Is locked */
 	BH_Req,		/* Has been submitted for I/O */
 	BH_Uptodate_Lock,/* Used by the first bh in a page, to serialise
 			  * IO completion of other buffers in the page
 			  */
 
+	/* 存在一个缓冲区内容到存储设备的映射 */
 	BH_Mapped,	/* Has a disk mapping */
+	/* 新创建的缓冲区 */
 	BH_New,		/* Disk mapping was newly created by get_block */
 	BH_Async_Read,	/* Is under end_buffer_async_read I/O */
 	BH_Async_Write,	/* Is under end_buffer_async_write I/O */
@@ -57,21 +62,35 @@ typedef void (bh_end_io_t)(struct buffer_head *bh, int uptodate);
  * a page (via a page_mapping) and for wrapping bio submission
  * for backward compatibility reasons (e.g. submit_bh).
  */
+/**
+ * 块缓冲头描述符
+ */
 struct buffer_head {
+	/* 块缓冲状态位图，如BH_Uptodate */
 	unsigned long b_state;		/* buffer state bitmap (see above) */
+	/* 指向下一个块缓冲，二者属于同一个页缓存 */
 	struct buffer_head *b_this_page;/* circular list of page's buffers */
+	/* 如果缓冲区属于页缓存，则指向缓存页。如果独立于页缓存，则为NULL */
 	struct page *b_page;		/* the page this bh is mapped to */
 
+	/* 对应的块号 */
 	sector_t b_blocknr;		/* start block number */
+	/* 块长 */
 	size_t b_size;			/* size of mapping */
+	/* 内存中的数据指针 */
 	char *b_data;			/* pointer to data within the page */
 
+	/* 后备设备 */
 	struct block_device *b_bdev;
+	/* 当IO操作完成时，由内核调用的回调函数 */
 	bh_end_io_t *b_end_io;		/* I/O completion */
+	/* 预留指针，用于b_end_io。一般用于日志文件系统。 */
  	void *b_private;		/* reserved for b_end_io */
 	struct list_head b_assoc_buffers; /* associated with another mapping */
+	/* 所属地址空间 */
 	struct address_space *b_assoc_map;	/* mapping this buffer is
 						   associated with */
+	/* 访问计数器 */
 	atomic_t b_count;		/* users using this buffer_head */
 };
 

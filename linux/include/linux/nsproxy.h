@@ -21,13 +21,25 @@ struct pid_namespace;
  * As soon as a single namespace is cloned or unshared, the
  * nsproxy is copied.
  */
+/**
+ * 命名空间结构
+ * 在fork时，可以指定CLONE_NEWUTS这样的参数来创建新的命名空间
+ * 默认全局命名空间是init_nsproxy
+ */
 struct nsproxy {
+	/* 引用计数 */
 	atomic_t count;
+	/* 运行内核的名称、版本、底层体系结构等 */
 	struct uts_namespace *uts_ns;
+	/* 与进程间通信有关的信息 */
 	struct ipc_namespace *ipc_ns;
+	/* 已经装载的文件系统信息 */
 	struct mnt_namespace *mnt_ns;
+	/* 进程ID相关的信息 */
 	struct pid_namespace *pid_ns;
+	/* 用于限制每个用户资源使用的信息 */
 	struct user_namespace *user_ns;
+	/* 与网络相关的命名空间信息，目前还不完善 */
 	struct net 	     *net_ns;
 };
 extern struct nsproxy init_nsproxy;

@@ -286,7 +286,7 @@ int setup_irq(unsigned int irq, struct irqaction *new)
 	 * so we have to be careful not to interfere with a
 	 * running system.
 	 */
-	if (new->flags & IRQF_SAMPLE_RANDOM) {
+	if (new->flags & IRQF_SAMPLE_RANDOM) {/* 将中断作为随机源 */
 		/*
 		 * This function might sleep, we want to call it first,
 		 * outside of the atomic block.
@@ -301,10 +301,10 @@ int setup_irq(unsigned int irq, struct irqaction *new)
 	/*
 	 * The following block of code has to be executed atomically
 	 */
-	spin_lock_irqsave(&desc->lock, flags);
+	spin_lock_irqsave(&desc->lock, flags);/* 获取中断自旋锁 */
 	p = &desc->action;
 	old = *p;
-	if (old) {
+	if (old) {/* 已经挂接了中断 */
 		/*
 		 * Can't share interrupts unless both agree to and are
 		 * the same type (level, edge, polarity). So both flag
@@ -314,7 +314,7 @@ int setup_irq(unsigned int irq, struct irqaction *new)
 		if (!((old->flags & new->flags) & IRQF_SHARED) ||
 		    ((old->flags ^ new->flags) & IRQF_TRIGGER_MASK)) {
 			old_name = old->name;
-			goto mismatch;
+			goto mismatch;/* 原中断不允许共享中断 */
 		}
 
 #if defined(CONFIG_IRQ_PER_CPU)
@@ -325,7 +325,7 @@ int setup_irq(unsigned int irq, struct irqaction *new)
 #endif
 
 		/* add new interrupt at end of irq queue */
-		do {
+		do {/* 挂接到链表末尾 */
 			p = &old->next;
 			old = *p;
 		} while (old);
@@ -338,7 +338,7 @@ int setup_irq(unsigned int irq, struct irqaction *new)
 	if (new->flags & IRQF_NOBALANCING)
 		desc->status |= IRQ_NO_BALANCING;
 
-	if (!shared) {
+	if (!shared) {/* 第一次挂接中断 */
 		irq_chip_set_defaults(desc->chip);
 
 #if defined(CONFIG_IRQ_PER_CPU)
@@ -366,10 +366,10 @@ int setup_irq(unsigned int irq, struct irqaction *new)
 		desc->status &= ~(IRQ_AUTODETECT | IRQ_WAITING |
 				  IRQ_INPROGRESS);
 
-		if (!(desc->status & IRQ_NOAUTOEN)) {
+		if (!(desc->status & IRQ_NOAUTOEN)) {/* 不是探测阶段 */
 			desc->depth = 0;
 			desc->status &= ~IRQ_DISABLED;
-			if (desc->chip->startup)
+			if (desc->chip->startup)/* 初始化中断 */
 				desc->chip->startup(irq);
 			else
 				desc->chip->enable(irq);
@@ -382,6 +382,7 @@ int setup_irq(unsigned int irq, struct irqaction *new)
 	desc->irqs_unhandled = 0;
 	spin_unlock_irqrestore(&desc->lock, flags);
 
+ 	/* 在proc中注册中断 */
 	new->irq = irq;
 	register_irq_proc(irq);
 	new->dir = NULL;
@@ -514,6 +515,9 @@ EXPORT_SYMBOL(free_irq);
  *	IRQF_SAMPLE_RANDOM	The interrupt can be used for entropy
  *
  */
+/**
+ * 注册ISR处理程序
+ */
 int request_irq(unsigned int irq, irq_handler_t handler,
 		unsigned long irqflags, const char *devname, void *dev_id)
 {
@@ -532,7 +536,7 @@ int request_irq(unsigned int irq, irq_handler_t handler,
 	 * which interrupt is which (messes up the interrupt freeing
 	 * logic etc).
 	 */
-	if ((irqflags & IRQF_SHARED) && !dev_id)
+	if ((irqflags & IRQF_SHARED) && !dev_id)/* 合法性检查 */
 		return -EINVAL;
 	if (irq >= NR_IRQS)
 		return -EINVAL;
@@ -541,6 +545,7 @@ int request_irq(unsigned int irq, irq_handler_t handler,
 	if (!handler)
 		return -EINVAL;
 
+	/* 分配irqaction描述符 */
 	action = kmalloc(sizeof(struct irqaction), GFP_ATOMIC);
 	if (!action)
 		return -ENOMEM;
@@ -570,6 +575,7 @@ int request_irq(unsigned int irq, irq_handler_t handler,
 	}
 #endif
 
+	/* 注册中断 */
 	retval = setup_irq(irq, action);
 	if (retval)
 		kfree(action);

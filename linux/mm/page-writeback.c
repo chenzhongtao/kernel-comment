@@ -66,21 +66,25 @@ static inline long sync_writeback_pages(void)
 /*
  * Start background writeback (via pdflush) at this percentage
  */
+/* 当脏页占后备存储器百分比超过此值，进行pdflush回写 */
 int dirty_background_ratio = 5;
 
 /*
  * The generator of dirty data starts writeback at this percentage
  */
+/* 当脏页相对于非高端内存域的比例超过此比例时，开始回写 */
 int vm_dirty_ratio = 10;
 
 /*
  * The interval between `kupdate'-style writebacks, in jiffies
  */
+/* 两次刷新操作之间的间隔，默认为5秒 */
 int dirty_writeback_interval = 5 * HZ;
 
 /*
  * The longest number of jiffies for which data is allowed to remain dirty
  */
+/* 页面保持为脏页的最大时间 */
 int dirty_expire_interval = 30 * HZ;
 
 /*
@@ -537,18 +541,24 @@ void throttle_vm_writeout(gfp_t gfp_mask)
  * writeback at least _min_pages, and keep writing until the amount of dirty
  * memory is less than the background threshold, or until we're all clean.
  */
+/**
+ * 同步回写，与wb_kupdate类似
+ */
 static void background_writeout(unsigned long _min_pages)
 {
 	long min_pages = _min_pages;
 	struct writeback_control wbc = {
 		.bdi		= NULL,
 		.sync_mode	= WB_SYNC_NONE,
+		/* 不要求在回写之前脏的时间 */
 		.older_than_this = NULL,
 		.nr_to_write	= 0,
 		.nonblocking	= 1,
 		.range_cyclic	= 1,
 	};
 
+	/* 与wb_kupdate不同，这里不同步超级块 */
+	
 	for ( ; ; ) {
 		long background_thresh;
 		long dirty_thresh;
@@ -570,6 +580,8 @@ static void background_writeout(unsigned long _min_pages)
 				break;
 		}
 	}
+
+	/* 这里也不设置定时器重启本过程 */
 }
 
 /*
@@ -606,6 +618,9 @@ static DEFINE_TIMER(laptop_mode_wb_timer, laptop_timer_fn, 0, 0);
  * older_than_this takes precedence over nr_to_write.  So we'll only write back
  * all dirty pages if they are all attached to "old" mappings.
  */
+/**
+ * 由pdflush函数回调的函数，周期性回写数据到磁盘中
+ */
 static void wb_kupdate(unsigned long arg)
 {
 	unsigned long oldest_jif;
@@ -622,28 +637,41 @@ static void wb_kupdate(unsigned long arg)
 		.range_cyclic	= 1,
 	};
 
+	/* 超级块是最重要的，因此首先对它进行同步 */
 	sync_supers();
 
 	oldest_jif = jiffies - dirty_expire_interval;
 	start_jif = jiffies;
 	next_jif = start_jif + dirty_writeback_interval;
+	/* 计算有多少页需要重新写回 */
 	nr_to_write = global_page_state(NR_FILE_DIRTY) +
 			global_page_state(NR_UNSTABLE_NFS) +
 			(inodes_stat.nr_inodes - inodes_stat.nr_unused);
+	/* 重复运行，直到系统中没有脏页为止。 */
 	while (nr_to_write > 0) {
+		/* 首先发起对页面的非阻塞式回写 */
 		wbc.encountered_congestion = 0;
 		wbc.nr_to_write = MAX_WRITEBACK_PAGES;
+		/**
+		 * 每次最多回写MAX_WRITEBACK_PAGES个页
+		 * 由于在回写时，需要锁定页，因此，每次写一部分页可以减少对inode的阻塞
+		 */
 		writeback_inodes(&wbc);
+		/* 回写后，将修改nr_to_write字段。此处再次判断回写页是否完成 */
 		if (wbc.nr_to_write > 0) {
+			/* 如果队列拥塞，则等待阻塞减轻后再试 */
 			if (wbc.encountered_congestion)
 				congestion_wait(WRITE, HZ/10);
-			else
+			else/* ?? */
 				break;	/* All the old data is written */
 		}
+		/* 减去本次成功写回的页数 */
 		nr_to_write -= MAX_WRITEBACK_PAGES - wbc.nr_to_write;
 	}
+	/* 保证下次回写时间必须在一秒以后 */
 	if (time_before(next_jif, jiffies + HZ))
 		next_jif = jiffies + HZ;
+	/* 定期回写，修改定时器 */
 	if (dirty_writeback_interval)
 		mod_timer(&wb_timer, next_jif);
 }
@@ -662,8 +690,10 @@ int dirty_writeback_centisecs_handler(ctl_table *table, int write,
 	return 0;
 }
 
+/* pdflush定时器，定期触发pdflush回写请求 */
 static void wb_timer_fn(unsigned long unused)
 {
+	/* 目前没有可用的pdflush，那么就重新触发定时器，直到触发成功为止 */
 	if (pdflush_operation(wb_kupdate, 0) < 0)
 		mod_timer(&wb_timer, jiffies + HZ); /* delay 1 second */
 }

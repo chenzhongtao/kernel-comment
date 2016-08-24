@@ -7,6 +7,7 @@
  * Update the current task's runtime statistics. Skip current tasks that
  * are not in our scheduling class.
  */
+/* 计算实时队列当前任务的运行时间，只需要计算实际运行时间即可 */
 static void update_curr_rt(struct rq *rq)
 {
 	struct task_struct *curr = rq->curr;
@@ -74,6 +75,7 @@ static void check_preempt_curr_rt(struct rq *rq, struct task_struct *p)
 		resched_task(rq->curr);
 }
 
+/* 在实时任务队列中选择一个进程运行 */
 static struct task_struct *pick_next_task_rt(struct rq *rq)
 {
 	struct rt_prio_array *array = &rq->rt.active;
@@ -81,13 +83,16 @@ static struct task_struct *pick_next_task_rt(struct rq *rq)
 	struct list_head *queue;
 	int idx;
 
+	/* 找到第一个优先级 */
 	idx = sched_find_first_bit(array->bitmap);
-	if (idx >= MAX_RT_PRIO)
+	if (idx >= MAX_RT_PRIO)/* 没有实时进程 */
 		return NULL;
 
+	/* 取队列中第一个进程 */
 	queue = array->queue + idx;
 	next = list_entry(queue->next, struct task_struct, run_list);
 
+	/* 记录进程开始执行时间 */
 	next->se.exec_start = rq->clock;
 
 	return next;
@@ -206,6 +211,7 @@ move_one_task_rt(struct rq *this_rq, int this_cpu, struct rq *busiest,
 }
 #endif
 
+/* 实时进程的周期性调度 */
 static void task_tick_rt(struct rq *rq, struct task_struct *p)
 {
 	update_curr_rt(rq);
@@ -214,19 +220,23 @@ static void task_tick_rt(struct rq *rq, struct task_struct *p)
 	 * RR tasks need a special form of timeslice management.
 	 * FIFO tasks have no timeslices.
 	 */
-	if (p->policy != SCHED_RR)
+	if (p->policy != SCHED_RR)/* 对FIFO来说，不参与周期性调度 */
 		return;
 
+	/* 递减RR进程的运行周期，如果还有时间片，则退出 */
 	if (--p->time_slice)
 		return;
 
+	/* RR时间片用完，重新初始化为100ms */
 	p->time_slice = DEF_TIMESLICE;
 
 	/*
 	 * Requeue to the end of queue if we are not the only element
 	 * on the queue:
 	 */
+	/* 进程不是唯一的实时进程 */
 	if (p->run_list.prev != p->run_list.next) {
+		/* 将进程插入到列队末尾，并设置重新调度标志 */
 		requeue_task_rt(rq, p);
 		set_tsk_need_resched(p);
 	}

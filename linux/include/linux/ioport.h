@@ -14,11 +14,18 @@
  * Resources are tree-like, allowing
  * nesting etc..
  */
+/**
+ * IO资源树结构
+ */
 struct resource {
+	/* IO资源范围 */
 	resource_size_t start;
 	resource_size_t end;
+	/* 资源名称，用于proc */
 	const char *name;
+	/* 资源标志及当前状态 */
 	unsigned long flags;
+	/* 父、兄、子资源，以此构成一棵树 */
 	struct resource *parent, *sibling, *child;
 };
 

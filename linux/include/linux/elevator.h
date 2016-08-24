@@ -30,29 +30,40 @@ typedef void (elevator_deactivate_req_fn) (struct request_queue *, struct reques
 typedef void *(elevator_init_fn) (struct request_queue *);
 typedef void (elevator_exit_fn) (elevator_t *);
 
+/**
+ * IO调度算法回调
+ */
 struct elevator_ops
 {
+	/* 检查一个新请求是否能够与现有请求合并 */
 	elevator_merge_fn *elevator_merge_fn;
+	/* 在请求合并后调用，执行一些清理工作 */
 	elevator_merged_fn *elevator_merged_fn;
+	/* 将两个请求合并为一个请求 */
 	elevator_merge_req_fn *elevator_merge_req_fn;
 	elevator_allow_merge_fn *elevator_allow_merge_fn;
 
 	elevator_dispatch_fn *elevator_dispatch_fn;
+	/* 向请求队列中添加请求 */
 	elevator_add_req_fn *elevator_add_req_fn;
 	elevator_activate_req_fn *elevator_activate_req_fn;
 	elevator_deactivate_req_fn *elevator_deactivate_req_fn;
 
+	/* 检查队列是否为空 */
 	elevator_queue_empty_fn *elevator_queue_empty_fn;
 	elevator_completed_req_fn *elevator_completed_req_fn;
 
+	/* 查找给定请求的前一个请求和后一个请求 */
 	elevator_request_list_fn *elevator_former_req_fn;
 	elevator_request_list_fn *elevator_latter_req_fn;
 
+	/* 在创建新请求和释放内存时调用，用于初始化数据结构和释放管理结构 */
 	elevator_set_req_fn *elevator_set_req_fn;
 	elevator_put_req_fn *elevator_put_req_fn;
 
 	elevator_may_queue_fn *elevator_may_queue_fn;
 
+	/* 构造函数和析构函数 */
 	elevator_init_fn *elevator_init_fn;
 	elevator_exit_fn *elevator_exit_fn;
 	void (*trim)(struct io_context *);
@@ -69,12 +80,20 @@ struct elv_fs_entry {
 /*
  * identifies an elevator type, such as AS or deadline
  */
+/**
+ * IO调度器类
+ */
 struct elevator_type
 {
+	/* 通过此字段将调度器链接到全局链表中 */
 	struct list_head list;
+	/* 调度器提供的回调函数 */
 	struct elevator_ops ops;
+	/* sysfs中的属性 */
 	struct elv_fs_entry *elevator_attrs;
+	/* 算法名称 */
 	char elevator_name[ELV_NAME_MAX];
+	/* 所属模块 */
 	struct module *elevator_owner;
 };
 

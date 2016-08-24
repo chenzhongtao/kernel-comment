@@ -115,11 +115,15 @@ struct nf_bridge_info {
 };
 #endif
 
+/**
+ * 报文缓冲区头部，实现了一个等待队列
+ */
 struct sk_buff_head {
 	/* These two members must be first. */
 	struct sk_buff	*next;
-	struct sk_buff	*prev;
+	struct sk_buff	*prev;/* 链表头 */
 
+	/* 等待队列的长度 */
 	__u32		qlen;
 	spinlock_t	lock;
 };
@@ -247,15 +251,23 @@ typedef unsigned char *sk_buff_data_t;
  *	@secmark: security marking
  */
 
+/**
+ * 套接字报文缓冲区
+ */
 struct sk_buff {
 	/* These two members must be first. */
+	/* 通过这两个字段将缓冲区加入到双链表中 */
 	struct sk_buff		*next;
 	struct sk_buff		*prev;
 
+	/* 处理该报文的socket */
 	struct sock		*sk;
+	/* 报文到达时间戳 */
 	ktime_t			tstamp;
+	/* 处理报文的网络设备，处理报文期间，设备可能会改变! */
 	struct net_device	*dev;
 
+	/* 处理报文的路由 */
 	struct  dst_entry	*dst;
 	struct	sec_path	*sp;
 
@@ -299,6 +311,7 @@ struct sk_buff {
 	struct nf_bridge_info	*nf_bridge;
 #endif
 
+	/* 输入设备的接口索引编号 */
 	int			iif;
 #ifdef CONFIG_NETDEVICES_MULTIQUEUE
 	__u16			queue_mapping;
@@ -320,12 +333,15 @@ struct sk_buff {
 
 	__u32			mark;
 
+	/* 传输层、网络层、MAC协议层的首部位置 */
 	sk_buff_data_t		transport_header;
 	sk_buff_data_t		network_header;
 	sk_buff_data_t		mac_header;
 	/* These elements must be at the end, see alloc_skb() for details.  */
+	/* 数据起始、结束指针 */
 	sk_buff_data_t		tail;
 	sk_buff_data_t		end;
+	/* 协议数据起始、结束位置 */
 	unsigned char		*head,
 				*data;
 	unsigned int		truesize;

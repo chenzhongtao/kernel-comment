@@ -9,8 +9,11 @@
 #define UIDHASH_BITS	(CONFIG_BASE_SMALL ? 3 : 8)
 #define UIDHASH_SZ	(1 << UIDHASH_BITS)
 
+/* 用户命名空间 */
 struct user_namespace {
+	/* 引用计数 */
 	struct kref		kref;
+	/* 哈希表，每个成员是user_struct结构，记录其资源消耗 */
 	struct hlist_head	uidhash_table[UIDHASH_SZ];
 	struct user_struct	*root_user;
 };

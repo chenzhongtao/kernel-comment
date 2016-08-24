@@ -35,9 +35,13 @@ struct semid_ds {
 #include <asm/sembuf.h>
 
 /* semop system calls takes an array of these. */
+/* 对信号量的操作 */
 struct sembuf {
+	/* 信号量在数组中的索引 */
 	unsigned short  sem_num;	/* semaphore index in array */
+	/* 要进行的操作 */
 	short		sem_op;		/* semaphore operation */
+	/* 操作标志 */
 	short		sem_flg;	/* operation flags */
 };
 
@@ -88,29 +92,45 @@ struct sem {
 };
 
 /* One sem_array data structure for each set of semaphores in the system. */
+/* 信号量集合 */
 struct sem_array {
+	/* 信号量访问权限，必须位于结构起始处 */
 	struct kern_ipc_perm	sem_perm;	/* permissions .. see ipc.h */
+	/* 上次访问信号量的时间 */
 	time_t			sem_otime;	/* last semop time */
+	/* 上次修改信号量的时间 */
 	time_t			sem_ctime;	/* last change time */
+	/* 指向数组中的第一个信号量 */
 	struct sem		*sem_base;	/* ptr to first semaphore in array */
+	/* 待决信号量操作链表。 */
 	struct sem_queue	*sem_pending;	/* pending operations to be processed */
+	/* 最后一个待决信号量 */
 	struct sem_queue	**sem_pending_last; /* last pending operation */
 	struct sem_undo		*undo;		/* undo requests on this array */
+	/* 数组中的信号量数目 */
 	unsigned long		sem_nsems;	/* no. of semaphores in array */
 };
 
 /* One queue for each sleeping process in the system. */
+/* ipc信号量队列 */
 struct sem_queue {
+	/* 通过这两个字段将等待任务加入队列中 */
 	struct sem_queue *	next;	 /* next entry in the queue */
 	struct sem_queue **	prev;	 /* previous entry in the queue, *(q->prev) == q */
+	/* 等待信号量的进程 */
 	struct task_struct*	sleeper; /* this process */
 	struct sem_undo *	undo;	 /* undo structure */
+	/* 等待进程的pid */
 	int    			pid;	 /* process id of requesting process */
 	int    			status;	 /* completion status of operation */
+	/* 操作的信号量数组 */
 	struct sem_array *	sma;	 /* semaphore array for operations */
+	/* 信号量内部id */
 	int			id;	 /* internal sem id */
+	/* 挂起的信号量操作数组 */
 	struct sembuf *		sops;	 /* array of pending operations */
 	int			nsops;	 /* number of operations */
+	/* 操作是否修改信号量数据结构 */
 	int			alter;   /* does the operation alter the array? */
 };
 

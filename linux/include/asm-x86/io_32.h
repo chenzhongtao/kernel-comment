@@ -117,6 +117,9 @@ extern void __iomem * __ioremap(unsigned long offset, unsigned long size, unsign
  * look at pci_iomap().
  */
 
+/**
+ * 将用于IO操作的一段地址映射到内核地址空间
+ */
 static inline void __iomem * ioremap(unsigned long offset, unsigned long size)
 {
 	return __ioremap(offset, size, 0);

@@ -17,6 +17,7 @@
 
 #include <linux/lockdep.h>
 
+/* 自旋锁数据结构 */
 typedef struct {
 	raw_spinlock_t raw_lock;
 #if defined(CONFIG_PREEMPT) && defined(CONFIG_SMP)

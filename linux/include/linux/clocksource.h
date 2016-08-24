@@ -53,13 +53,19 @@ struct clocksource;
  * @cycle_interval:	Used internally by timekeeping core, please ignore.
  * @xtime_interval:	Used internally by timekeeping core, please ignore.
  */
+/**
+ * 时钟源对象
+ */
 struct clocksource {
 	/*
 	 * First part of structure is read mostly
 	 */
-	char *name;
+	char *name;/* 可读的名字 */
+	/* 链表元素 */
 	struct list_head list;
+	/* 时间质量，1－99很差，100－99可用，300－399快速且准确 */
 	int rating;
+	/* 读当前时钟 */
 	cycle_t (*read)(void);
 	cycle_t mask;
 	u32 mult;

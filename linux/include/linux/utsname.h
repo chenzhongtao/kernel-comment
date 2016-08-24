@@ -21,11 +21,16 @@ struct old_utsname {
 	char machine[65];
 };
 
+/* UTS命名空间属性，可用uname获取这些属性，也可以在/proc/sys/kernel中看到 */
 struct new_utsname {
+	/* 系统名称 */
 	char sysname[65];
+	/* 节点名称 */
 	char nodename[65];
+	/* 发布版本 */
 	char release[65];
 	char version[65];
+	/* 机器名称 */
 	char machine[65];
 	char domainname[65];
 };
@@ -37,8 +42,13 @@ struct new_utsname {
 #include <linux/nsproxy.h>
 #include <asm/atomic.h>
 
+/**
+ * UTS命名空间
+ */
 struct uts_namespace {
+	/* 引用计数 */
 	struct kref kref;
+	/* UTS属性 */
 	struct new_utsname name;
 };
 extern struct uts_namespace init_uts_ns;

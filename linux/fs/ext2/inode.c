@@ -56,6 +56,9 @@ static inline int ext2_inode_is_fast_symlink(struct inode *inode)
 /*
  * Called at the last iput() if i_nlink is zero.
  */
+/**
+ * 当删除文件，并且inode引用计数被iput递减为0时，调用此函数销毁文件inode.
+ */
 void ext2_delete_inode (struct inode * inode)
 {
 	truncate_inode_pages(&inode->i_data, 0);
@@ -67,18 +70,24 @@ void ext2_delete_inode (struct inode * inode)
 	ext2_update_inode(inode, inode_needs_sync(inode));
 
 	inode->i_size = 0;
-	if (inode->i_blocks)
+	if (inode->i_blocks)/* 释放硬盘上与inode相关的数据块 */
 		ext2_truncate (inode);
-	ext2_free_inode (inode);
+	ext2_free_inode (inode);/* 释放inode占用的数据空间 */
 
 	return;
 no_delete:
 	clear_inode(inode);	/* We must guarantee clearing of inode... */
 }
 
+/**
+ * 如果ext2_get_branch检测到没有指向下一个层次间接块或者数据块，则返回此实例。
+ */
 typedef struct {
+	/* key在内存中的地址 */
 	__le32	*p;
+	/* 块号 */
 	__le32	key;
+	/* 在内存中保存块的数据 */
 	struct buffer_head *bh;
 } Indirect;
 
@@ -136,16 +145,16 @@ static int ext2_block_to_path(struct inode *inode,
 	int n = 0;
 	int final = 0;
 
-	if (i_block < 0) {
+	if (i_block < 0) {/* 块号必然从0开始，不可能小于0 */
 		ext2_warning (inode->i_sb, "ext2_block_to_path", "block < 0");
-	} else if (i_block < direct_blocks) {
-		offsets[n++] = i_block;
+	} else if (i_block < direct_blocks) {/* 块号小于直接块的数目，直接返回。 */
+		offsets[n++] = i_block;/* 直接记录块号到返回结果中 */
 		final = direct_blocks;
-	} else if ( (i_block -= direct_blocks) < indirect_blocks) {
-		offsets[n++] = EXT2_IND_BLOCK;
+	} else if ( (i_block -= direct_blocks) < indirect_blocks) {/* 一次间接块 */
+		offsets[n++] = EXT2_IND_BLOCK;/* 第一个偏移是第12项，一次间接块在索引中的位置 */
 		offsets[n++] = i_block;
 		final = ptrs;
-	} else if ((i_block -= indirect_blocks) < double_blocks) {
+	} else if ((i_block -= indirect_blocks) < double_blocks) {/* 二次间接块 */
 		offsets[n++] = EXT2_DIND_BLOCK;
 		offsets[n++] = i_block >> ptrs_bits;
 		offsets[n++] = i_block & (ptrs - 1);
@@ -292,6 +301,9 @@ static unsigned long ext2_find_near(struct inode *inode, Indirect *ind)
  *	Returns preferred place for a block (the goal).
  */
 
+/**
+ * 为文件块查找一个理想的位置，需要让文件块尽可能连续，尽可能接近。
+ */
 static inline int ext2_find_goal(struct inode *inode,
 				 long block,
 				 Indirect chain[4],
@@ -305,11 +317,12 @@ static inline int ext2_find_goal(struct inode *inode,
 	 * try the heuristic for sequential allocation,
 	 * failing that at least try to get decent locality.
 	 */
-	if (block_i && (block == block_i->last_alloc_logical_block + 1)
-		&& (block_i->last_alloc_physical_block != 0)) {
-		return block_i->last_alloc_physical_block + 1;
+	if (block_i && (block == block_i->last_alloc_logical_block + 1)/* 本次分配的逻辑块号与上一次的块号相邻，说明是连续分配 */
+		&& (block_i->last_alloc_physical_block != 0)) {/* 分配了物理块 */
+		return block_i->last_alloc_physical_block + 1;/* 理想的块是紧邻上次分配的物理块 */
 	}
 
+	/* 尽可能查找与间接块邻近的块 */
 	return ext2_find_near(inode, partial);
 }
 
@@ -382,9 +395,10 @@ static int ext2_alloc_blocks(struct inode *inode,
 	 */
 	target = blks + indirect_blks;
 
-	while (1) {
+	while (1) {/* 反复循环，直到分配到合适的块 */
 		count = target;
 		/* allocating blocks for indirect blocks and direct blocks */
+		/* ext2_new_blocks尽量分配足够的连续块 */
 		current_block = ext2_new_blocks(inode,goal,&count,err);
 		if (*err)
 			goto failed_out;
@@ -438,6 +452,9 @@ failed_out:
  *	as described above and return 0.
  */
 
+/**
+ * 为块分配间接块和数据块，并建立块的间接链。
+ */
 static int ext2_alloc_branch(struct inode *inode,
 			int indirect_blks, int *blks, ext2_fsblk_t goal,
 			int *offsets, Indirect *branch)
@@ -450,11 +467,13 @@ static int ext2_alloc_branch(struct inode *inode,
 	ext2_fsblk_t new_blocks[4];
 	ext2_fsblk_t current_block;
 
+	/* 分配所需要的块 */
 	num = ext2_alloc_blocks(inode, goal, indirect_blks,
 				*blks, new_blocks, &err);
 	if (err)
 		return err;
 
+	/* 建立块间的联系 */
 	branch[0].key = cpu_to_le32(new_blocks[0]);
 	/*
 	 * metadata blocks and data blocks are allocated.
@@ -591,15 +610,17 @@ static int ext2_get_blocks(struct inode *inode,
 	int count = 0;
 	ext2_fsblk_t first_block = 0;
 
+	/* 根据块在文件中的位置，找到数据的路径。因为ext2可能有三层间接块 */
 	depth = ext2_block_to_path(inode,iblock,offsets,&blocks_to_boundary);
 
-	if (depth == 0)
+	if (depth == 0)/* 块号不合法 */
 		return (err);
 reread:
+	/* 根据路径，读取目标块中的数据 */
 	partial = ext2_get_branch(inode, depth, offsets, chain, &err);
 
 	/* Simplest case - block found, no allocation needed */
-	if (!partial) {
+	if (!partial) {/* 块是存在的，不用新创建 */
 		first_block = le32_to_cpu(chain[depth - 1].key);
 		clear_buffer_new(bh_result); /* What's this do? */
 		count++;
@@ -627,18 +648,21 @@ reread:
 	}
 
 	/* Next simple case - plain lookup or failed read of indirect block */
-	if (!create || err == -EIO)
+	if (!create || err == -EIO)/* 块不存在，但是不允许创建新块，或者出现IO异常 */
 		goto cleanup;
 
+	/* 获得保护inode的锁 */
 	mutex_lock(&ei->truncate_mutex);
 
 	/*
 	 * Okay, we need to do block allocation.  Lazily initialize the block
 	 * allocation info here if necessary
 	*/
+	/* 需要分配新块，初始化预分配对象 */
 	if (S_ISREG(inode->i_mode) && (!ei->i_block_alloc_info))
 		ext2_init_block_alloc_info(inode);
 
+	/* 查找理想的位置 */
 	goal = ext2_find_goal(inode, iblock, chain, partial);
 
 	/* the number of blocks need to allocate for [d,t]indirect blocks */
@@ -647,11 +671,13 @@ reread:
 	 * Next look up the indirect map to count the totoal number of
 	 * direct blocks to allocate for this branch.
 	 */
+	/* 计算数据块和间接块的总数 */
 	count = ext2_blks_to_allocate(partial, indirect_blks,
 					maxblocks, blocks_to_boundary);
 	/*
 	 * XXX ???? Block out ext2_truncate while we alter the tree
 	 */
+	/* 分配所有的数据块和间接块 */
 	err = ext2_alloc_branch(inode, indirect_blks, &count, goal,
 				offsets + (partial - chain), partial);
 
@@ -672,6 +698,7 @@ reread:
 		}
 	}
 
+	/* 将最终的层次结构添加到现存的数据结构中 */
 	ext2_splice_branch(inode, iblock, partial, indirect_blks, count);
 	mutex_unlock(&ei->truncate_mutex);
 	set_buffer_new(bh_result);
@@ -696,6 +723,9 @@ changed:
 	goto reread;
 }
 
+/**
+ * 读取ext2文件块或者在磁盘中创建新块
+ */
 int ext2_get_block(struct inode *inode, sector_t iblock, struct buffer_head *bh_result, int create)
 {
 	unsigned max_blocks = bh_result->b_size >> inode->i_blkbits;
@@ -709,11 +739,17 @@ int ext2_get_block(struct inode *inode, sector_t iblock, struct buffer_head *bh_
 
 }
 
+/**
+ * 写文件页面。
+ */
 static int ext2_writepage(struct page *page, struct writeback_control *wbc)
 {
 	return block_write_full_page(page, ext2_get_block, wbc);
 }
 
+/**
+ * 地址空间操作，请页面数据
+ */
 static int ext2_readpage(struct file *file, struct page *page)
 {
 	return mpage_readpage(page, ext2_get_block);

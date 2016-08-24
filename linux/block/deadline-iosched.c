@@ -446,6 +446,10 @@ static struct elv_fs_entry deadline_attrs[] = {
 	__ATTR_NULL
 };
 
+/**
+ * DeadLine调度算法
+ * 尽可能保证最低的寻道时间，也确保每个请求有一个最低完成时间
+ */
 static struct elevator_type iosched_deadline = {
 	.ops = {
 		.elevator_merge_fn = 		deadline_merge,

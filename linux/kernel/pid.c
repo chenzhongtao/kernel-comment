@@ -38,6 +38,7 @@
 
 #define pid_hashfn(nr, ns)	\
 	hash_long((unsigned long)nr + (unsigned long)ns, pidhash_shift)
+/* 全局pid哈希表，桶数目介于16-4096之间，由系统可用内存决定 */
 static struct hlist_head *pid_hash;
 static int pidhash_shift;
 struct pid init_struct_pid = INIT_STRUCT_PID;
@@ -112,6 +113,9 @@ EXPORT_SYMBOL(is_container_init);
 
 static  __cacheline_aligned_in_smp DEFINE_SPINLOCK(pidmap_lock);
 
+/**
+ * 在命名空间中，释放一个可用的pid号
+ */
 static fastcall void free_pidmap(struct pid_namespace *pid_ns, int pid)
 {
 	struct pidmap *map = pid_ns->pidmap + pid / BITS_PER_PAGE;
@@ -121,6 +125,9 @@ static fastcall void free_pidmap(struct pid_namespace *pid_ns, int pid)
 	atomic_inc(&map->nr_free);
 }
 
+/**
+ * 在命名空间中，查找并分配一个可用的pid号
+ */
 static int alloc_pidmap(struct pid_namespace *pid_ns)
 {
 	int i, offset, max_scan, pid, last = pid_ns->last_pid;
@@ -287,6 +294,9 @@ out_free:
 	goto out;
 }
 
+/**
+ * 在命名空间中，查找nr对应的pid
+ */
 struct pid * fastcall find_pid_ns(int nr, struct pid_namespace *ns)
 {
 	struct hlist_node *elem;
@@ -317,13 +327,18 @@ EXPORT_SYMBOL_GPL(find_pid);
 /*
  * attach_pid() must be called with the tasklist_lock write-held.
  */
+/**
+ * 将进程与pid关联起来
+ */
 int fastcall attach_pid(struct task_struct *task, enum pid_type type,
 		struct pid *pid)
 {
 	struct pid_link *link;
 
+	/* 建立task_struct与pid的关联 */
 	link = &task->pids[type];
 	link->pid = pid;
+	/* 建立pid与task_struct的关联 */
 	hlist_add_head_rcu(&link->node, &pid->tasks[type]);
 
 	return 0;
@@ -380,12 +395,18 @@ struct task_struct *find_task_by_pid_type_ns(int type, int nr,
 
 EXPORT_SYMBOL(find_task_by_pid_type_ns);
 
+/**
+ * 通过全局pid查找任务
+ */
 struct task_struct *find_task_by_pid(pid_t nr)
 {
 	return find_task_by_pid_type_ns(PIDTYPE_PID, nr, &init_pid_ns);
 }
 EXPORT_SYMBOL(find_task_by_pid);
 
+/**
+ * 在当前进程的命名空间中，查找特定进程号的进程
+ */
 struct task_struct *find_task_by_vpid(pid_t vnr)
 {
 	return find_task_by_pid_type_ns(PIDTYPE_PID, vnr,
@@ -393,6 +414,9 @@ struct task_struct *find_task_by_vpid(pid_t vnr)
 }
 EXPORT_SYMBOL(find_task_by_vpid);
 
+/**
+ * 根据id在命名空间中查找进程
+ */
 struct task_struct *find_task_by_pid_ns(pid_t nr, struct pid_namespace *ns)
 {
 	return find_task_by_pid_type_ns(PIDTYPE_PID, nr, ns);
@@ -430,6 +454,9 @@ struct pid *find_get_pid(pid_t nr)
 	return pid;
 }
 
+/**
+ * 获得进程ID
+ */
 pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 {
 	struct upid *upid;
@@ -665,6 +692,9 @@ void zap_pid_ns_processes(struct pid_namespace *pid_ns)
  * The pid hash table is scaled according to the amount of memory in the
  * machine.  From a minimum of 16 slots up to 4096 slots at one gigabyte or
  * more.
+ */
+/**
+ * 初始化全局pid哈希表的容量
  */
 void __init pidhash_init(void)
 {

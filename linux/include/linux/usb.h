@@ -4,7 +4,14 @@
 #include <linux/mod_devicetable.h>
 #include <linux/usb/ch9.h>
 
+/**
+ * USB设备主设备号。可以在/proc/devices下面看到。
+ * 对于移动硬盘和摄像头这样的USB设备，主设备号不使用该值。
+ */
 #define USB_MAJOR			180
+/**
+ * 为用户态程序控制USB设备而使用的主设备号。
+ */
 #define USB_DEVICE_MAJOR		189
 
 
@@ -57,35 +64,81 @@ struct ep_device;
  * USB requests are always queued to a given endpoint, identified by a
  * descriptor within an active interface in a given USB configuration.
  */
+/**
+ * USB端点。它是USB数据传输的终点。
+ */
 struct usb_host_endpoint {
+	/**
+	 * 端点描述符。0号端点没有描述符。
+	 */
 	struct usb_endpoint_descriptor	desc;
+	/**
+	 * 端点要处理的URB队列。
+	 */
 	struct list_head		urb_list;
+	/**
+	 * 由主机控制器驱动使用的私有数据。
+	 */
 	void				*hcpriv;
+	/**
+	 * 由sysfs使用。
+	 */
 	struct ep_device 		*ep_dev;	/* For sysfs info */
 
+	/**
+	 * 端点的扩展描述符。
+	 */
 	unsigned char *extra;   /* Extra descriptors */
 	int extralen;
 	int enabled;
 };
 
 /* host-side wrapper for one interface setting's parsed descriptors */
+/**
+ * 接口设置。
+ */
 struct usb_host_interface {
+	/**
+	 * 接口描述符，是一个预定义的数据结构，保存了USB设备的各种属性及相关信息:如名称、生产地等。
+	 * 存放在USB设备的EEPROM中。
+	 */
 	struct usb_interface_descriptor	desc;
 
 	/* array of desc.bNumEndpoint endpoints associated with this
 	 * interface setting.  these will be in no particular order.
 	 */
+	/**
+	 * 接口使用的端点。
+	 */
 	struct usb_host_endpoint *endpoint;
 
+	/**
+	 * 从设备中取出的字符串描述符。可能为空。
+	 */
 	char *string;		/* iInterface string, if present */
+	/**
+	 * 厂商特别定义的描述符及其长度。
+	 */
 	unsigned char *extra;   /* Extra descriptors */
 	int extralen;
 };
 
 enum usb_interface_condition {
+	/**
+	 * 尚未绑定
+	 */
 	USB_INTERFACE_UNBOUND = 0,
+	/**
+	 * 正在绑定
+	 */
 	USB_INTERFACE_BINDING,
+	/**
+	 * 已经绑定
+	 */
 	USB_INTERFACE_BOUND,
+	/**
+	 * 正在解除绑定
+	 */
 	USB_INTERFACE_UNBINDING,
 };
 
@@ -141,28 +194,58 @@ enum usb_interface_condition {
  * stored in numerical order anyhow.  Use usb_altnum_to_altsetting() to
  * look up an alternate setting in the altsetting array based on its number.
  */
+/**
+ * USB接口，代表一个USB设备上的某个功能。
+ */
 struct usb_interface {
 	/* array of alternate settings for this interface,
 	 * stored in no particular order */
+	/**
+	 * 所有可选设置。比如手机可以作为摄像工具，也可以作为U盘，分别表示两种设置。
+	 */
 	struct usb_host_interface *altsetting;
 
+	/**
+	 * 当前使用的设置。
+	 */
 	struct usb_host_interface *cur_altsetting;	/* the currently
 					 * active alternate setting */
+	/**
+	 * 可选设置的数量。
+	 */
 	unsigned num_altsetting;	/* number of alternate settings */
 
-	/* If there is an interface association descriptor then it will list
-	 * the associated interfaces */
-	struct usb_interface_assoc_descriptor *intf_assoc;
-
+	/**
+	 * 设备的次设备号。
+	 * 当使用USB_MAJOR时才有效。
+	 */
 	int minor;			/* minor number this interface is
 					 * bound to */
+	/**
+	 * 接口和驱动的绑定状态。
+	 */
 	enum usb_interface_condition condition;		/* state of binding */
+	/**
+	 * 接口是否处于挂起状态。在指定时间内(3ms)没有发生总线传输，就会进入挂起状态。收到non-idle信号时就会被唤醒。
+	 */
 	unsigned is_active:1;		/* the interface is not suspended */
-	unsigned sysfs_files_created:1;	/* the sysfs attributes exist */
+	/**
+	 * 是否需要打开远程唤醒功能。允许扶起的设备给主机发信号，通知主机它将从挂起状态恢复，如果主机也被挂起，则会唤醒主机。
+	 */
 	unsigned needs_remote_wakeup:1;	/* driver requires remote wakeup */
 
+	/**
+	 * 设备模型中的设备对象。
+	 */
 	struct device dev;		/* interface specific device info */
+	/**
+	 * 只有使用USB_MAJOR时才使用。
+	 * 指向USB类设备。
+	 */
 	struct device *usb_dev;		/* pointer to the usb class's device, if any */
+	/**
+	 * 自动挂起计数。当为0时，允许自动挂起。
+	 */
 	int pm_usage_cnt;		/* usage counter for autosuspend */
 };
 #define	to_usb_interface(d) container_of(d, struct usb_interface, dev)
@@ -200,12 +283,18 @@ void usb_put_intf(struct usb_interface *intf);
  * structures at any time, permitting comparison of configurations and
  * providing support for the /proc/bus/usb/devices pseudo-file.
  */
+/**
+ * USB接口缓存。
+ */
 struct usb_interface_cache {
 	unsigned num_altsetting;	/* number of alternate settings */
 	struct kref ref;		/* reference counter */
 
 	/* variable-length array of alternate settings for this interface,
 	 * stored in no particular order */
+	/**
+	 * 可变数组，根据GET_DESCRIPTOR返回的每个接口可选设置的数目分配给intr_cache相应的空间。
+	 */
 	struct usb_host_interface altsetting[0];
 };
 #define	ref_to_usb_interface_cache(r) \
@@ -252,9 +341,18 @@ struct usb_interface_cache {
  * usb_reset_configuration() to reinitialize the current configuration and
  * all its interfaces.
  */
+/**
+ * USB主机配置
+ */
 struct usb_host_config {
+	/**
+	 * 配置描述符。
+	 */
 	struct usb_config_descriptor	desc;
 
+	/**
+	 * 配置描述符对应的字符串描述符信息。
+	 */
 	char *string;		/* iConfiguration string, if present */
 
 	/* List of any Interface Association Descriptors in this
@@ -263,12 +361,22 @@ struct usb_host_config {
 
 	/* the interfaces associated with this configuration,
 	 * stored in no particular order */
+	/**
+	 * 配置包含的接口。这个数组的顺序未必是按照配置里接口号的顺序。
+	 * 请参见usb_ifnum_to_if函数。
+	 */
 	struct usb_interface *interface[USB_MAXINTERFACES];
 
 	/* Interface information available even when this is not the
 	 * active configuration */
+	/**
+	 * USB接口缓存。
+	 */
 	struct usb_interface_cache *intf_cache[USB_MAXINTERFACES];
 
+	/**
+	 * 额外扩展的描述符。
+	 */
 	unsigned char *extra;   /* Extra descriptors */
 	int extralen;
 };
@@ -289,22 +397,51 @@ struct usb_devmap {
 /*
  * Allocated per bus (tree of devices) we have:
  */
+/**
+ * USB总线
+ */
 struct usb_bus {
+	/**
+	 * USB主机控制器本身是一个PCI设备，它本身也包含一条USB总线。
+	 * 因此在本结构的第一个成员，包含一个device结构，就可以将HCD纳入LINUX设备体系中了。
+	 */
 	struct device *controller;	/* host/master side hardware */
+	/**
+	 * 总线编号。最大值是USB_MAXBUS。
+	 */
 	int busnum;			/* Bus number (in order of reg) */
+	/**
+	 * 总线名称。就是主机控制器在PCI中的名称。
+	 */
 	char *bus_name;			/* stable id (PCI slot_name etc) */
+	/**
+	 * 是否支持DMA。
+	 */
 	u8 uses_dma;			/* Does the host controller use DMA? */
 	u8 otg_port;			/* 0, or number of OTG/HNP port */
 	unsigned is_b_host:1;		/* true during some HNP roleswitches */
 	unsigned b_hnp_enable:1;	/* OTG: did A-Host enable HNP? */
 
+	/**
+	 * devmap表中，下一个不为0的项。
+	 */
 	int devnum_next;		/* Next open device number in
 					 * round-robin allocation */
 
 	struct usb_devmap devmap;	/* device address allocation map */
+	/**
+	 * 根HUB，一般与USB主机控制器绑定在一起。
+	 */
 	struct usb_device *root_hub;	/* Root hub */
+	/**
+	 * 通过此指针将总线链接入usb_bus_list。
+	 */
 	struct list_head bus_list;	/* list of busses */
 
+	/**
+	 * 总线为中断传输和等时传输预留了多少带宽。高速传输可以预留80?的带完，低速传输可以达到90%。
+	 * 单位是ms，表示一帧或微帧内有多少ms可以留给中断、等时传输。
+	 */
 	int bandwidth_allocated;	/* on this bus: how much of the time
 					 * reserved for periodic (intr/iso)
 					 * requests is used, on average?
@@ -312,14 +449,26 @@ struct usb_bus {
 					 * Limits: Full/low speed reserve 90%,
 					 * while high speed reserves 80%.
 					 */
+	/**
+	 * 当前中断传输和等时传输的数量。
+	 */
 	int bandwidth_int_reqs;		/* number of Interrupt requests */
 	int bandwidth_isoc_reqs;	/* number of Isoc. requests */
 
 #ifdef CONFIG_USB_DEVICEFS
+	/**
+	 * 总线对应的usbfs，每条总线都对应于/proc/bus/usb下的一个目录。
+	 */
 	struct dentry *usbfs_dentry;	/* usbfs dentry entry for the bus */
 #endif
+	/**
+	 * 设备的类。即提供了什么功能，如不管SCSI磁盘还是ATA硬盘，都属于硬盘。
+	 */
 	struct class_device *class_dev;	/* class device for this bus */
 
+	/**
+	 * 用于监控USB总线上的底层通信流。
+	 */
 #if defined(CONFIG_USB_MON)
 	struct mon_bus *mon_bus;	/* non-null when associated */
 	int monitored;			/* non-zero when monitored */
@@ -354,49 +503,118 @@ struct usb_tt;
  *              devices are authorized. WUSB devices are not, until we
  *              authorize them from user space. FIXME -- complete doc
  */
+/**
+ * USB设备。
+ */
 struct usb_device {
+	/**
+	 * 设备地址，在USB总线上的编号。
+	 * 当设备插到总线上时，调用choose_address函数为它分配。
+	 */
 	int		devnum;		/* Address on USB bus */
+	/**
+	 * 如4-0.3:1.0这样的路径。
+	 */
 	char		devpath [16];	/* Use in messages: /port/port/... */
+	/**
+	 * 设备状态。
+	 */
 	enum usb_device_state	state;	/* configured, not attached, etc */
+	/**
+	 * 设备的速度。
+	 */
 	enum usb_device_speed	speed;	/* high/full/low (or error) */
 
+	/**
+	 * 高速HUB用来连接低速设备的端口。
+	 */
 	struct usb_tt	*tt; 		/* low/full speed dev, highspeed hub */
 	int		ttport;		/* device port on that tt hub */
 
+	/**
+	 * 当前每个端点发送或者接收的是DATA0还是DATA1包。
+	 */
 	unsigned int toggle[2];		/* one bit for each endpoint
 					 * ([0] = IN, [1] = OUT) */
 
+	/**
+	 * 父HUB，对root hub来说，值为NULL。
+	 */
 	struct usb_device *parent;	/* our hub, unless we're the root */
+	/**
+	 * 设备所在的总线。
+	 */
 	struct usb_bus *bus;		/* Bus we're part of */
+	/**
+	 * 端点0.
+	 */
 	struct usb_host_endpoint ep0;
 
+	/**
+	 * 通用的device结构，用于LINUX设备模型管理。
+	 */
 	struct device dev;		/* Generic device interface */
 
+	/**
+	 * 设备描述符。
+	 */
 	struct usb_device_descriptor descriptor;/* Descriptor */
+	/**
+	 * 设备的所有配置。
+	 */
 	struct usb_host_config *config;	/* All of the configs */
 
+	/**
+	 * 设备的当前配置。
+	 */
 	struct usb_host_config *actconfig;/* the active configuration */
+	/**
+	 * 设备对应的所有IN和OUT端点。
+	 */
 	struct usb_host_endpoint *ep_in[16];
 	struct usb_host_endpoint *ep_out[16];
 
+	/**
+	 * 所有配置描述符结果。不仅仅包含配置描述符，还包含接口描述符和端点描述符。
+	 */
 	char **rawdescriptors;		/* Raw descriptors for each config */
 
+	/**
+	 * 由主机控制器设置的。一般为500mA.
+	 */
 	unsigned short bus_mA;		/* Current available from the bus */
+	/**
+	 * 在HUB上的端口号。对root hub来说，其值为0.
+	 */
 	u8 portnum;			/* Parent port number (origin 1) */
+	/**
+	 * 在HUB树中的级别。root hub为0.
+	 */
 	u8 level;			/* Number of USB hub ancestors */
 
-	unsigned can_submit:1;		/* URBs may be submitted */
+	/**
+	 * 是否在挂起时断开连接。
+	 */
 	unsigned discon_suspended:1;	/* Disconnected while suspended */
+	/**
+	 * 字符串描述符的语言。
+	 */
 	unsigned have_langid:1;		/* whether string_langid is valid */
 	unsigned authorized:1;		/* Policy has determined we can use it */
 	unsigned wusb:1;		/* Device is Wireless USB */
 	int string_langid;		/* language ID for strings */
 
 	/* static strings from the device */
+	/**
+	 * 产口、厂商、序列号。
+	 */
 	char *product;			/* iProduct string, if present */
 	char *manufacturer;		/* iManufacturer string, if present */
 	char *serial;			/* iSerialNumber string, if present */
 
+	/**
+	 * 用于usbfs。
+	 */
 	struct list_head filelist;
 #ifdef CONFIG_USB_DEVICE_CLASS
 	struct device *usb_classdev;
@@ -411,8 +629,13 @@ struct usb_device {
 	 *
 	 * Each instance needs its own set of data structures.
 	 */
-
+	/**
+	 * HUB的端口数，不包含上行端口。
+	 */
 	int maxchild;			/* Number of ports if hub */
+	/**
+	 * HUB最多可以支持255个端口。不过一般最多10个。
+	 */
 	struct usb_device *children[USB_MAXCHILDREN];
 
 	int pm_usage_cnt;		/* usage counter for autosuspend */
@@ -846,11 +1069,17 @@ static inline int usb_endpoint_is_isoc_out(const struct usb_endpoint_descriptor 
 /* ----------------------------------------------------------------------- */
 
 /* Stuff for dynamic usb ids */
+/**
+ * 动态USB ID链表。
+ */
 struct usb_dynids {
 	spinlock_t lock;
 	struct list_head list;
 };
 
+/**
+ * 动态USB ID节点。
+ */
 struct usb_dynid {
 	struct list_head node;
 	struct usb_device_id id;
@@ -866,7 +1095,9 @@ extern ssize_t usb_store_new_id(struct usb_dynids *dynids,
  * @for_devices: Non-zero for device drivers, 0 for interface drivers.
  */
 struct usbdrv_wrap {
+	/* 通用驱动模型 */
 	struct device_driver driver;
+	/* 0表示接口驱动程序，其他表示设备驱动程序 */
 	int for_devices;
 };
 
@@ -925,28 +1156,61 @@ struct usbdrv_wrap {
  * them as necessary, and blocking until the unlinks complete).
  */
 struct usb_driver {
+	/**
+	 * USB驱动的名称。
+	 */
 	const char *name;
 
+	/**
+	 * 探测一个驱动是否支持某个设备。
+	 */
 	int (*probe) (struct usb_interface *intf,
 		      const struct usb_device_id *id);
 
+	/**
+	 * 当接口断开联接后就将调用。
+	 */
 	void (*disconnect) (struct usb_interface *intf);
 
+	/**
+	 * 与IOCTRL之间的接口。
+	 */
 	int (*ioctl) (struct usb_interface *intf, unsigned int code,
 			void *buf);
 
+	/**
+	 * 设备被挂起和唤醒时调用。
+	 */
 	int (*suspend) (struct usb_interface *intf, pm_message_t message);
 	int (*resume) (struct usb_interface *intf);
 	int (*reset_resume)(struct usb_interface *intf);
 
-	int (*pre_reset)(struct usb_interface *intf);
-	int (*post_reset)(struct usb_interface *intf);
+	/**
+	 * 设备将要复位或者复位完毕时调用。
+	 */
+	void (*pre_reset) (struct usb_interface *intf);
+	void (*post_reset) (struct usb_interface *intf);
 
+	/**
+	 * 驱动支持的所有设备ID。
+	 */
 	const struct usb_device_id *id_table;
 
+	/**
+	 * 驱动支持的动态ID。在/sys/bus/usb/drivers目录下的new_id文件中写入一个值即可以加入新的ID。
+	 */
 	struct usb_dynids dynids;
+	/**
+	 * 使用这个结构是为了驱动是设备驱动还是接口驱动。
+	 */
 	struct usbdrv_wrap drvwrap;
+	/**
+	 * 是否禁止动态ID。
+	 */
 	unsigned int no_dynamic_id:1;
+	/**
+	 * 是否支持autosuspend。
+	 */
 	unsigned int supports_autosuspend:1;
 };
 #define	to_usb_driver(d) container_of(d, struct usb_driver, drvwrap.driver)
@@ -969,6 +1233,9 @@ struct usb_driver {
  *	for devices bound to this driver.
  *
  * USB drivers must provide all the fields listed above except drvwrap.
+ */
+/**
+ * USB设备驱动(非接口驱动),目前只有usb_generic_driver这一个驱动。
  */
 struct usb_device_driver {
 	const char *name;
@@ -1008,6 +1275,9 @@ struct usb_class_driver {
  */
 extern int usb_register_driver(struct usb_driver *, struct module *,
 			       const char *);
+/**
+ * 注册一个USB驱动。
+ */
 static inline int usb_register(struct usb_driver *driver)
 {
 	return usb_register_driver(driver, THIS_MODULE, KBUILD_MODNAME);
@@ -1036,13 +1306,32 @@ extern int usb_disabled(void);
  *
  * Note: URB_DIR_IN/OUT is automatically set in usb_submit_urb().
  */
+/**
+ * 这个标记只对用来从IN 端点读取数据的urb 有效，意思就是说如果从一个IN 端点那里读取了一个比较短的数据包，就可以认为是错误的。
+ * 正常情况下，一个大包可以分成多个包，最后一个包小于正常包大小表示传输结束。如果设置了此标志，小于正常包大小则不是表示传输结束而是表示发生了错误。
+ */
 #define URB_SHORT_NOT_OK	0x0001	/* report short reads as errors */
+/**
+ * 用于等时传输，如果设置此标志，则不用设置开始传输的帧号，由HCD自行开始进行等时传输。
+ */
 #define URB_ISO_ASAP		0x0002	/* iso-only, urb->start_frame
 					 * ignored */
+/**
+ * 这两个标志都是有关DMA 的。通知HCD不要自己做DMA映射，驱动提供的URB里已经有DMA缓冲区地址了。
+ */
 #define URB_NO_TRANSFER_DMA_MAP	0x0004	/* urb->transfer_dma valid on submit */
 #define URB_NO_SETUP_DMA_MAP	0x0008	/* urb->setup_dma valid on submit */
+/**
+ * UHCI使用的标志。
+ */
 #define URB_NO_FSBR		0x0020	/* UHCI-specific */
+/**
+ * 这个标志表示批量的OUT 传输必须使用一个short packet 来结束。
+ */
 #define URB_ZERO_PACKET		0x0040	/* Finish bulk OUT with short packet */
+/**
+ * 用于告知HCD，在URB完成后，不要请求一个硬件中断。
+ */
 #define URB_NO_INTERRUPT	0x0080	/* HINT: no non-error interrupt
 					 * needed */
 #define URB_FREE_BUFFER		0x0100	/* Free transfer buffer with the URB */
@@ -1051,10 +1340,25 @@ extern int usb_disabled(void);
 #define URB_DIR_OUT		0
 #define URB_DIR_MASK		URB_DIR_IN
 
+/**
+ * 用于等时传输，每个包的描述表。
+ */
 struct usb_iso_packet_descriptor {
+	/**
+	 * 这个包在transfer_buffer里的偏移位置
+	 */
 	unsigned int offset;
+	/**
+	 * 预期的这次等时传输Data包里数据的长度
+	 */
 	unsigned int length;		/* expected length */
+	/**
+	 * 表示了各次等时传输实际传输的数据长度
+	 */
 	unsigned int actual_length;
+	/**
+	 * 记录了等时传输的状态。
+	 */
 	int status;
 };
 
@@ -1245,35 +1549,108 @@ typedef void (*usb_complete_t)(struct urb *);
 struct urb
 {
 	/* private: usb core and host controller only fields in the urb */
+	/** 
+	 * urb 的引用计数。
+	 */
 	struct kref kref;		/* reference count of the URB */
+	/**
+	 * 保护URB的自旋锁。
+	 */
+	spinlock_t lock;		/* lock for the URB */
+	/**
+	 * 与URB关联的主机控制器私有数据。
+	 */
 	void *hcpriv;			/* private data for host controller */
+	/**
+	 * 当USB CORE将URB移交给主机控制器时，将其值加1，主机控制器将URB交给USB CORE时，减1.
+	 * 当use_count值为0的时候，说明URB已经离开主机控制器了。usb_kill_urb就可以退出。
+	 */
 	atomic_t use_count;		/* concurrent submissions counter */
+	/**
+	 * 只有usb_kill_urb才能修改它。
+	 */
 	u8 reject;			/* submissions will fail */
 	int unlinked;			/* unlink error code */
 
 	/* public: documented fields in the urb that can be used by drivers */
+	/**
+	 * 将URB连接到每个端点的URB链表中。
+	 */
 	struct list_head urb_list;	/* list head for use by the urb's
 					 * current owner */
-	struct list_head anchor_list;	/* the URB may be anchored by the driver */
-	struct usb_anchor *anchor;
+	/**
+	 * URB关联的USB设备。
+	 */
 	struct usb_device *dev; 	/* (in) pointer to associated device */
-	struct usb_host_endpoint *ep;	/* (internal) pointer to endpoint struct */
+	/**
+	 * URB到达端点前经过的管道。
+	 * bit7表示管道的方向，bit8-14表示设备地址，bit15-18表示端点号。bit30-31表示管道的类型。
+	 */
 	unsigned int pipe;		/* (in) pipe information */
+	/**
+	 * urb 的当前状态。
+	 */
 	int status;			/* (return) non-ISO status */
+	/**
+	 * 一些标记，可用的值都在include/linux/usb.h 里有定义。如URB_SHORT_NOT_OK。
+	 */
 	unsigned int transfer_flags;	/* (in) URB_SHORT_NOT_OK | ...*/
+	/**
+	 * 主机与端点通信的缓冲区。
+	 * transfer_buffer 是使用kmalloc 分配的缓冲区.
+	 * transfer_dma 是使用usb_buffer_alloc 分配的dma 缓冲区
+	 */
 	void *transfer_buffer;		/* (in) associated data buffer */
+	/**
+	 * 如果urb 自带了transfer_dma，就要同时设置URB_NO_TRANSFER_DMA_MAP 来告诉HCD 一声，不用它再费心做DMA 映射了
+	 */
 	dma_addr_t transfer_dma;	/* (in) dma addr for transfer_buffer */
+	/**
+	 * transfer_buffer_length指的就是transfer_buffer 或transfer_dma 的长度。
+	 */
 	int transfer_buffer_length;	/* (in) data buffer length */
+	/**
+	 * urb 结束之后，会用这个字段告诉你实际上传输了多少数据。
+	 */
 	int actual_length;		/* (return) actual transfer length */
+	/**
+	 * 两个缓冲区，一个是kmalloc分配的，一个是用usb_buffer_alloc分配的，不过，这两个缓冲区是控制传输专用的
+	 */
 	unsigned char *setup_packet;	/* (in) setup packet (control only) */
+	/**
+	 * 如果你的urb设置了setup_dma，同样要设置URB_NO_SETUP_DMA_MAP标志来告诉HCD。
+	 */
 	dma_addr_t setup_dma;		/* (in) dma addr for setup_packet */
+	/**
+	 * 如果没有指定URB_ISO_ASAP 标志，就必须自己设置start_frame，指定等时传输在哪帧或微帧开始。
+	 * 如果指定了URB_ISO_ASAP，urb 结束时会使用这个值返回实际的开始帧号。
+	 */
 	int start_frame;		/* (modify) start frame (ISO) */
+	/**
+	 * iso_frame_desc变长数组的长度。
+	 */
 	int number_of_packets;		/* (in) number of ISO packets */
+	/**
+	 * 等时和中断传输专用。端点希望主机轮询自己的时间间隔。
+	 */
 	int interval;			/* (modify) transfer interval
 					 * (INT/ISO) */
+	/**
+	 * 对等时传输来说，记录了一次等时传输中，错误的次数。
+	 */
 	int error_count;		/* (return) number of ISO errors */
+	/**
+	 * 由驱动设置的，被结束处理函数使用。
+	 */
 	void *context;			/* (in) context for completion */
+	/**
+	 * 结束处理函数指针。
+	 */
 	usb_complete_t complete;	/* (in) completion routine */
+	/**
+	 * 表示了一个变长的struct usb_iso_packet_descriptor结构体数组
+	 * 用于等时传输。
+	 */
 	struct usb_iso_packet_descriptor iso_frame_desc[0];
 					/* (in) ISO ONLY */
 };
@@ -1293,6 +1670,9 @@ struct urb
  *
  * Initializes a control urb with the proper information needed to submit
  * it to a device.
+ */
+/**
+ * 初始化控制URB。
  */
 static inline void usb_fill_control_urb (struct urb *urb,
 					 struct usb_device *dev,
@@ -1324,6 +1704,9 @@ static inline void usb_fill_control_urb (struct urb *urb,
  *
  * Initializes a bulk urb with the proper information needed to submit it
  * to a device.
+ */
+/**
+ * 初始化批量传输URB。
  */
 static inline void usb_fill_bulk_urb (struct urb *urb,
 				      struct usb_device *dev,
@@ -1359,6 +1742,9 @@ static inline void usb_fill_bulk_urb (struct urb *urb,
  * the endpoint interval, and express polling intervals in microframes
  * (eight per millisecond) rather than in frames (one per millisecond).
  */
+/**
+ * 初始化中断URB。
+ */
 static inline void usb_fill_int_urb (struct urb *urb,
 				     struct usb_device *dev,
 				     unsigned int pipe,
@@ -1374,6 +1760,9 @@ static inline void usb_fill_int_urb (struct urb *urb,
 	urb->transfer_buffer_length = buffer_length;
 	urb->complete = complete_fn;
 	urb->context = context;
+	/**
+	 * 对高速USB来说，时间间隔的单位不一样，这里做一下转换。
+	 */
 	if (dev->speed == USB_SPEED_HIGH)
 		urb->interval = 1 << (interval - 1);
 	else
@@ -1603,12 +1992,21 @@ static inline unsigned int __create_pipe(struct usb_device *dev,
 
 /*-------------------------------------------------------------------------*/
 
+/**
+ * 获得端点的最大包长。
+ */
 static inline __u16
 usb_maxpacket(struct usb_device *udev, int pipe, int is_out)
 {
 	struct usb_host_endpoint	*ep;
+	/**
+	 * 端点号。
+	 */
 	unsigned			epnum = usb_pipeendpoint(pipe);
 
+	/**
+	 * 根据管道方向和端点号得到端点描述符。
+	 */
 	if (is_out) {
 		WARN_ON(usb_pipein(pipe));
 		ep = udev->ep_out[epnum];
@@ -1620,6 +2018,9 @@ usb_maxpacket(struct usb_device *udev, int pipe, int is_out)
 		return 0;
 
 	/* NOTE:  only 0x07ff bits are for packet size... */
+	/**
+	 * 返回端点的包长。
+	 */
 	return le16_to_cpu(ep->desc.wMaxPacketSize);
 }
 

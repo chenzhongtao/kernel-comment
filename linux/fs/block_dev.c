@@ -1129,6 +1129,7 @@ static int do_open(struct block_device *bdev, struct file *file, int for_part)
 
 	file->f_mapping = bdev->bd_inode->i_mapping;
 	lock_kernel();
+	/* 得到块设备相关联的disk对象 */
 	disk = get_gendisk(bdev->bd_dev, &part);
 	if (!disk) {
 		unlock_kernel();
@@ -1137,13 +1138,14 @@ static int do_open(struct block_device *bdev, struct file *file, int for_part)
 	}
 	owner = disk->fops->owner;
 
+	/* 获取设备的锁 */
 	mutex_lock_nested(&bdev->bd_mutex, for_part);
-	if (!bdev->bd_openers) {
+	if (!bdev->bd_openers) {/* 设备还没有被其他人打开 */
 		bdev->bd_disk = disk;
 		bdev->bd_contains = bdev;
-		if (!part) {
+		if (!part) {/* 打开的是主设备，而不是分区 */
 			struct backing_dev_info *bdi;
-			if (disk->fops->open) {
+			if (disk->fops->open) {/* 回调open函数 */
 				ret = disk->fops->open(bdev->bd_inode, file);
 				if (ret)
 					goto out_first;
@@ -1155,11 +1157,13 @@ static int do_open(struct block_device *bdev, struct file *file, int for_part)
 					bdi = &default_backing_dev_info;
 				bdev->bd_inode->i_data.backing_dev_info = bdi;
 			}
+			/* 还没有读取过分区信息，或者分区已经失效，重新扫描分区 */
 			if (bdev->bd_invalidated)
 				rescan_partitions(disk, bdev);
-		} else {
+		} else {/* 打开分区 */
 			struct hd_struct *p;
 			struct block_device *whole;
+			/* 找到分区对应的块设备 */
 			whole = bdget_disk(disk, 0);
 			ret = -ENOMEM;
 			if (!whole)
@@ -1168,6 +1172,7 @@ static int do_open(struct block_device *bdev, struct file *file, int for_part)
 			ret = __blkdev_get(whole, file->f_mode, file->f_flags, 1);
 			if (ret)
 				goto out_first;
+			/* 将块设备的包含对象设置为磁盘 */
 			bdev->bd_contains = whole;
 			p = disk->part[part - 1];
 			bdev->bd_inode->i_data.backing_dev_info =
@@ -1180,16 +1185,16 @@ static int do_open(struct block_device *bdev, struct file *file, int for_part)
 			bdev->bd_part = p;
 			bd_set_size(bdev, (loff_t) p->nr_sects << 9);
 		}
-	} else {
+	} else {/* 设备已经被打开 */
 		put_disk(disk);
 		module_put(owner);
 		if (bdev->bd_contains == bdev) {
-			if (bdev->bd_disk->fops->open) {
+			if (bdev->bd_disk->fops->open) {/* 回调设备的打开回调函数 */
 				ret = bdev->bd_disk->fops->open(bdev->bd_inode, file);
 				if (ret)
 					goto out;
 			}
-			if (bdev->bd_invalidated)
+			if (bdev->bd_invalidated)/* 分区已经被改变，重新搜索分区 */
 				rescan_partitions(bdev->bd_disk, bdev);
 		}
 	}
@@ -1241,6 +1246,9 @@ int blkdev_get(struct block_device *bdev, mode_t mode, unsigned flags)
 }
 EXPORT_SYMBOL(blkdev_get);
 
+/**
+ * 默认的打开块设备的方法
+ */
 static int blkdev_open(struct inode * inode, struct file * filp)
 {
 	struct block_device *bdev;
@@ -1254,10 +1262,12 @@ static int blkdev_open(struct inode * inode, struct file * filp)
 	 */
 	filp->f_flags |= O_LARGEFILE;
 
+	/* 找到与设备匹配的块设备实例 */
 	bdev = bd_acquire(inode);
 	if (bdev == NULL)
 		return -ENOMEM;
 
+	/* 打开设备 */
 	res = do_open(bdev, filp, 0);
 	if (res)
 		return res;
@@ -1265,6 +1275,7 @@ static int blkdev_open(struct inode * inode, struct file * filp)
 	if (!(filp->f_flags & O_EXCL) )
 		return 0;
 
+	/* 调用者要求独占设备，则将关联file设置设备的持有者 */
 	if (!(res = bd_claim(bdev, filp)))
 		return 0;
 

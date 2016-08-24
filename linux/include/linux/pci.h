@@ -132,15 +132,24 @@ struct pci_cap_saved_state {
 /*
  * The pci_dev structure is used to describe PCI devices.
  */
+/**
+ * PCI设备、功能卡、功能部件
+ */
 struct pci_dev {
+	/* 通过这两个字段将设备添加到全局、总线设备链表中 */
 	struct list_head global_list;	/* node in list of all PCI devices */
 	struct list_head bus_list;	/* node in per-bus list */
+	/* 指向设备所属的总线 */
 	struct pci_bus	*bus;		/* bus this device is on */
+	/* 如果是桥接器，则指向下级总线 */
 	struct pci_bus	*subordinate;	/* bus this device bridges to */
 
+	/* 驱动程序私有数据 */
 	void		*sysdata;	/* hook for sys-specific extension */
+	/* 在proc中的目录项 */
 	struct proc_dir_entry *procent;	/* device entry in /proc/bus/pci */
 
+	/* pci配置空间数据 */
 	unsigned int	devfn;		/* encoded device & function index */
 	unsigned short	vendor;
 	unsigned short	device;
@@ -153,6 +162,7 @@ struct pci_dev {
 	u8		rom_base_reg;	/* which config register controls the ROM */
 	u8		pin;  		/* which interrupt pin this device uses */
 
+	/* 管理该设备的驱动程序 */
 	struct pci_driver *driver;	/* which driver has allocated this device */
 	u64		dma_mask;	/* Mask of the bits of bus address this
 					   device implements.  Normally this is
@@ -165,6 +175,7 @@ struct pci_dev {
 					   and D3 being off. */
 
 	pci_channel_state_t error_state;	/* current connectivity state */
+	/* 通用设备模型 */
 	struct	device	dev;		/* Generic device interface */
 
 	/* device is compatible with these IDs */
@@ -177,7 +188,9 @@ struct pci_dev {
 	 * Instead of touching interrupt line and base address registers
 	 * directly, use the values stored here. They might be different!
 	 */
+	/* 设备使用的中断号 */
 	unsigned int	irq;
+	/* 驱动程序为IO申请的资源 */
 	struct resource resource[DEVICE_COUNT_RESOURCE]; /* I/O and memory regions + expansion ROMs */
 
 	/* These fields are used by common fixups */
@@ -255,24 +268,36 @@ static inline void pci_add_saved_cap(struct pci_dev *pci_dev,
 
 #define PCI_REGION_FLAG_MASK	0x0fU	/* These bits of resource flags tell us the PCI region flags */
 
+/* pci总线 */
 struct pci_bus {
+	/* 通过此字段链接到全局链表 */
 	struct list_head node;		/* node in list of buses */
+	/* 上级bus */
 	struct pci_bus	*parent;	/* parent bus this bridge is on */
+	/* 链表头，指向所有子bus */
 	struct list_head children;	/* list of child buses */
+	/* 链表头，指向总线里面的所有设备 */
 	struct list_head devices;	/* list of devices on this bus */
+	/* 总线桥接器设备 */
 	struct pci_dev	*self;		/* bridge device as seen by parent */
+	/* 总线在虚拟内存中占用的地址空间 */
 	struct resource	*resource[PCI_BUS_NUM_RESOURCES];
 					/* address space routed to this bus */
 
+	/* 访问配置空间的函数指针 */
 	struct pci_ops	*ops;		/* configuration access functions */
 	void		*sysdata;	/* hook for sys-specific extension */
+	/* 用于/proc/bus/pci目录输出总线信息 */
 	struct proc_dir_entry *procdir;	/* directory entry in /proc/bus/pci */
 
+	/* 总线编号 */
 	unsigned char	number;		/* bus number */
 	unsigned char	primary;	/* number of primary bridge */
 	unsigned char	secondary;	/* number of secondary bridge */
+	/* 下级总线的最大数量 */
 	unsigned char	subordinate;	/* max number of subordinate buses */
 
+	/* 总线名称，用于proc */
 	char		name[48];
 
 	unsigned short  bridge_ctl;	/* manage NO_ISA/FBB/et al behaviors */
@@ -373,10 +398,14 @@ struct pci_error_handlers
 /* ---------------------------------------------------------------- */
 
 struct module;
+/* PCI驱动 */
 struct pci_driver {
+	/* 链接进入全局驱动链表 */
 	struct list_head node;
+	/* 驱动名称 */
 	char *name;
 	const struct pci_device_id *id_table;	/* must be non-NULL for probe to be called */
+	/* 探测驱动程序是否支持某个设备 */
 	int  (*probe)  (struct pci_dev *dev, const struct pci_device_id *id);	/* New device inserted */
 	void (*remove) (struct pci_dev *dev);	/* Device removed (NULL if not a hot-plug capable driver) */
 	int  (*suspend) (struct pci_dev *dev, pm_message_t state);	/* Device suspended */
@@ -386,6 +415,7 @@ struct pci_driver {
 	void (*shutdown) (struct pci_dev *dev);
 
 	struct pci_error_handlers *err_handler;
+	/* 通用驱动模型 */
 	struct device_driver	driver;
 	struct pci_dynids dynids;
 };
@@ -442,6 +472,7 @@ extern struct bus_type pci_bus_type;
 /* Do NOT directly access these two variables, unless you are arch specific pci
  * code, or pci core code. */
 extern struct list_head pci_root_buses;	/* list of all known PCI buses */
+/* 所有的pci设备链表 */
 extern struct list_head pci_devices;	/* list of all devices */
 /* Some device drivers need know if pci is initiated */
 extern int no_pci_devices(void);

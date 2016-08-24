@@ -81,9 +81,12 @@ struct partition {
 	__le32 nr_sects;		/* nr of sectors in partition */
 } __attribute__((packed));
 
+/* 磁盘分区对象 */
 struct hd_struct {
+	/* 起始扇区和长度 */
 	sector_t start_sect;
 	sector_t nr_sects;
+	/* 通过此字段加入到通用驱动模型中 */
 	struct kobject kobj;
 	struct kobject *holder_dir;
 	unsigned ios[2], sectors[2];	/* READs and WRITEs */
@@ -109,22 +112,36 @@ struct disk_stats {
 	unsigned long io_ticks;
 	unsigned long time_in_queue;
 };
-	
+
+/**
+ * 磁盘分区数据结构
+ */
 struct gendisk {
+	/* 主设备号 */
 	int major;			/* major number of driver */
+	/* 次设备号范围 */
 	int first_minor;
 	int minors;                     /* maximum number of minors, =1 for
                                          * disks that can't be partitioned. */
+	/* 磁盘的名称 */
 	char disk_name[32];		/* name of major driver */
+	/* 磁盘上的分区数组 */
 	struct hd_struct **part;	/* [indexed by minor] */
+	/* 如果为正，则不向用户态发送分区热插拨事件 */
 	int part_uevent_suppress;
+	/* 设备回调函数 */
 	struct block_device_operations *fops;
+	/* 设备上的请求队列 */
 	struct request_queue *queue;
+	/* 私有数据 */
 	void *private_data;
+	/* 磁盘容量，以扇区为单位 */
 	sector_t capacity;
 
 	int flags;
+	/* 磁盘所属的设备 */
 	struct device *driverfs_dev;
+	/* 内嵌设备模型对象，通过此对象将设备加到sys文件系统中 */
 	struct kobject kobj;
 	struct kobject *holder_dir;
 	struct kobject *slave_dir;

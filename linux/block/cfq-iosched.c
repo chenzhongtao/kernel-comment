@@ -2251,6 +2251,9 @@ static struct elv_fs_entry cfq_attrs[] = {
 	__ATTR_NULL
 };
 
+/**
+ * 完全公平排队调度器。
+ */
 static struct elevator_type iosched_cfq = {
 	.ops = {
 		.elevator_merge_fn = 		cfq_merge,

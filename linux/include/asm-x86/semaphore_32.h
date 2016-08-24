@@ -41,9 +41,13 @@
 #include <linux/wait.h>
 #include <linux/rwsem.h>
 
+/* 信号量数据结构，用于保护那些较长或者需要睡眠的临界区 */
 struct semaphore {
+	/* 信号量计数，如果初始值为1则可以退化为互斥信号量 */
 	atomic_t count;
+	/* 等待获取信号量的进程数量。这些进程都处于睡眠状态，因此叫sleepers */
 	int sleepers;
+	/* 信号量等待队列 */
 	wait_queue_head_t wait;
 };
 

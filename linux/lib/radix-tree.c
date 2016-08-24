@@ -46,11 +46,15 @@
 #define RADIX_TREE_TAG_LONGS	\
 	((RADIX_TREE_MAP_SIZE + BITS_PER_LONG - 1) / BITS_PER_LONG)
 
+/* 基数的每一个节点 */
 struct radix_tree_node {
 	unsigned int	height;		/* Height from the bottom */
+	/* 该节点中已经使用的数组项的数目 */
 	unsigned int	count;
 	struct rcu_head	rcu_head;
+	/* 指向树的其他节点或者数据 */
 	void		*slots[RADIX_TREE_MAP_SIZE];
+	/* 标记，表示对应的节点及其子节点是否包含脏页和回写页 */
 	unsigned long	tags[RADIX_TREE_MAX_TAGS][RADIX_TREE_TAG_LONGS];
 };
 
@@ -449,6 +453,9 @@ EXPORT_SYMBOL(radix_tree_lookup);
  *
  *	Returns the address of the tagged item.   Setting a tag on a not-present
  *	item is a bug.
+ */
+/**
+ * 对特定的页设置设置脏和回写标记
  */
 void *radix_tree_tag_set(struct radix_tree_root *root,
 			unsigned long index, unsigned int tag)

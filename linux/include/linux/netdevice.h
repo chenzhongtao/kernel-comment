@@ -445,6 +445,9 @@ static inline void napi_synchronize(const struct napi_struct *n)
  *	moves out.
  */
 
+/**
+ * 网络设备描述符
+ */
 struct net_device
 {
 
@@ -453,6 +456,7 @@ struct net_device
 	 * (i.e. as seen by users in the "Space.c" file).  It is the name
 	 * the interface.
 	 */
+	/* 设备名称，如eth0 */
 	char			name[IFNAMSIZ];
 	/* device name hash chain */
 	struct hlist_node	name_hlist;
@@ -527,10 +531,12 @@ struct net_device
 	struct net_device	*next_sched;
 
 	/* Interface index. Unique device identifier	*/
+	/* 接口索引号 */
 	int			ifindex;
 	int			iflink;
 
 
+	/* 查询统计数据，如发送、接收、丢弃的数目 */
 	struct net_device_stats* (*get_stats)(struct net_device *dev);
 	struct net_device_stats	stats;
 
@@ -544,6 +550,7 @@ struct net_device
 	const struct ethtool_ops *ethtool_ops;
 
 	/* Hardware header description */
+	/* 处理硬件报文头部的指针 */
 	const struct header_ops *header_ops;
 
 	/*
@@ -561,7 +568,9 @@ struct net_device
 	unsigned char		operstate; /* RFC2863 operstate */
 	unsigned char		link_mode; /* mapping policy to operstate */
 
+	/* 设备的mtu值 */
 	unsigned		mtu;	/* interface MTU value		*/
+	/* 设备类型，如ARPHRD_ETHER */
 	unsigned short		type;	/* interface hardware type	*/
 	unsigned short		hard_header_len;	/* hardware hdr length	*/
 
@@ -571,6 +580,7 @@ struct net_device
 
 	/* Interface address info. */
 	unsigned char		perm_addr[MAX_ADDR_LEN]; /* permanent hw address */
+	/* 设备硬件地址长度 */
 	unsigned char		addr_len;	/* hardware address length	*/
 	unsigned short          dev_id;		/* for shared network cards */
 
@@ -584,7 +594,7 @@ struct net_device
 
 
 	/* Protocol specific pointers */
-	
+	/* 特定协议的数据指针 */
 	void 			*atalk_ptr;	/* AppleTalk link 	*/
 	void			*ip_ptr;	/* IPv4 specific data	*/  
 	void                    *dn_ptr;        /* DECnet specific data */
@@ -599,9 +609,11 @@ struct net_device
  */
 	unsigned long		last_rx;	/* Time of last Rx	*/
 	/* Interface address info used in eth_type_trans() */
+	/* 设备硬件地址，如MAC地址 */
 	unsigned char		dev_addr[MAX_ADDR_LEN];	/* hw address, (before bcast 
 							because most packets are unicast) */
 
+	/* 向站点发送消息的广播地址 */
 	unsigned char		broadcast[MAX_ADDR_LEN];	/* hw bcast add	*/
 
 /*
@@ -631,6 +643,7 @@ struct net_device
 	 */
 	int			xmit_lock_owner;
 	void			*priv;	/* pointer to private data	*/
+	/* 从等待队列中删除已经完成的分组并将它发送出去 */
 	int			(*hard_start_xmit) (struct sk_buff *skb,
 						    struct net_device *dev);
 	/* These may be needed for future network-power-down code. */
@@ -666,6 +679,7 @@ struct net_device
 	void			(*destructor)(struct net_device *dev);
 
 	/* Pointers to interface service routines.	*/
+	/* 初始化和终止设备的回调 */
 	int			(*open)(struct net_device *dev);
 	int			(*stop)(struct net_device *dev);
 #define HAVE_NETDEV_POLL
@@ -682,15 +696,18 @@ struct net_device
 #define HAVE_VALIDATE_ADDR
 	int			(*validate_addr)(struct net_device *dev);
 #define HAVE_PRIVATE_IOCTL
+	/* 处理特定于设备的ioctl回调 */
 	int			(*do_ioctl)(struct net_device *dev,
 					    struct ifreq *ifr, int cmd);
 #define HAVE_SET_CONFIG
 	int			(*set_config)(struct net_device *dev,
 					      struct ifmap *map);
 #define HAVE_CHANGE_MTU
+	/* 修改设备的mtu值 */
 	int			(*change_mtu)(struct net_device *dev, int new_mtu);
 
 #define HAVE_TX_TIMEOUT
+	/* 传输超时回调 */
 	void			(*tx_timeout) (struct net_device *dev);
 
 	void			(*vlan_rx_register)(struct net_device *dev,

@@ -740,6 +740,9 @@ asmlinkage long sys_fork(struct pt_regs *regs)
 	return do_fork(SIGCHLD, regs->rsp, regs, 0, NULL, NULL);
 }
 
+/**
+ * clone系统调用，一般用于创建线程
+ */
 asmlinkage long
 sys_clone(unsigned long clone_flags, unsigned long newsp,
 	  void __user *parent_tid, void __user *child_tid, struct pt_regs *regs)
@@ -758,6 +761,10 @@ sys_clone(unsigned long clone_flags, unsigned long newsp,
  * done by calling the "clone()" system call directly, you
  * do not have enough call-clobbered registers to hold all
  * the information you need.
+ */
+/**
+ * vfork系统调用，由于写时复制技术的存在，应该避免此调用。
+ * 在子进程退出或开始新程序之前，内核保证父进程处于阻塞状态。
  */
 asmlinkage long sys_vfork(struct pt_regs *regs)
 {

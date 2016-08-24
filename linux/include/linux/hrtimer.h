@@ -83,9 +83,13 @@ enum hrtimer_cb_mode {
  *
  * All state transitions are protected by cpu_base->lock.
  */
+/* 不活动的定时器 */
 #define HRTIMER_STATE_INACTIVE	0x00
+/* 在红黑树中排队，等待到期的定时器 */
 #define HRTIMER_STATE_ENQUEUED	0x01
+/* 正在执行的定时器 */
 #define HRTIMER_STATE_CALLBACK	0x02
+/* 正在回调链表上等待执行的定时器 */
 #define HRTIMER_STATE_PENDING	0x04
 
 /**
@@ -109,14 +113,24 @@ enum hrtimer_cb_mode {
  *
  * The hrtimer structure must be initialized by hrtimer_init()
  */
+/**
+ * 高精度定时器
+ */
 struct hrtimer {
+	/* 通过此字段添加到每CPU红黑树中 */
 	struct rb_node			node;
+	/* 到期时间 */
 	ktime_t				expires;
+	/* 回调函数 */
 	enum hrtimer_restart		(*function)(struct hrtimer *);
+	/* 所属定时器组 */
 	struct hrtimer_clock_base	*base;
+	/* 定时器状态，如HRTIMER_STATE_INACTIVE表示不活动的定时器 */
 	unsigned long			state;
 #ifdef CONFIG_HIGH_RES_TIMERS
+	/* 定时器执行模式，如HRTIMER_CB_SOFTIRQ表示在软中断上下文运行 */
 	enum hrtimer_cb_mode		cb_mode;
+	/* 通过此字段添加到链表中 */
 	struct list_head		cb_entry;
 #endif
 #ifdef CONFIG_TIMER_STATS
@@ -153,17 +167,30 @@ struct hrtimer_sleeper {
  * @offset:		offset of this clock to the monotonic base
  * @reprogram:		function to reprogram the timer event
  */
+/**
+ * 单调时钟和绝对时间定时器所用的红黑树
+ */
 struct hrtimer_clock_base {
+	/* 该时钟所属的各CPU时钟 */
 	struct hrtimer_cpu_base	*cpu_base;
+	/* 该时钟是单调时钟还是绝对时钟 */
 	clockid_t		index;
+	/* 所有活动的定时器，在该红黑树中 */
 	struct rb_root		active;
+	/* 每个到期的定时器 */
 	struct rb_node		*first;
+	/* 分辨率精度，单位是纳秒 */
 	ktime_t			resolution;
+	/* 读取高精度时间 */
 	ktime_t			(*get_time)(void);
+	/* 触发HRTIMER_SOFTIRQ软中断的时间 */
 	ktime_t			(*get_softirq_time)(void);
+	/* 软中断触发时间 */
 	ktime_t			softirq_time;
 #ifdef CONFIG_HIGH_RES_TIMERS
+	/* 由于修改时间而造成当前定时器与实际时间之间的偏差 */
 	ktime_t			offset;
+	/* 对给定定时器重新编程，修改其过期时间 */
 	int			(*reprogram)(struct hrtimer *t,
 					     struct hrtimer_clock_base *b,
 					     ktime_t n);
@@ -190,14 +217,23 @@ struct hrtimer_clock_base {
  *			in the softirq.
  * @nr_events:		Total number of timer interrupt events
  */
+/**
+ * 每CPU上的高精度时钟
+ */
 struct hrtimer_cpu_base {
+	/* 保护本结构的自旋锁 */
 	spinlock_t			lock;
 	struct lock_class_key		lock_key;
+	/* 单调时钟和绝对时钟 */
 	struct hrtimer_clock_base	clock_base[HRTIMER_MAX_CLOCK_BASES];
 #ifdef CONFIG_HIGH_RES_TIMERS
+	/* 下一次将要到期的事件时间 */
 	ktime_t				expires_next;
+	/* 是否启用了高精度时钟 */
 	int				hres_active;
+	/* 到期的定时器将从红黑树转移到本链表中 */
 	struct list_head		cb_pending;
+	/* 跟踪记录的时钟中断总数 */
 	unsigned long			nr_events;
 #endif
 };

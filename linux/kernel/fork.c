@@ -472,7 +472,7 @@ void mm_release(struct task_struct *tsk, struct mm_struct *mm)
 	 * the value intact in a core dump, and to save the unnecessary
 	 * trouble otherwise.  Userland only wants this done for a sys_exit.
 	 */
-	if (tsk->clear_child_tid
+	if (tsk->clear_child_tid/* 在释放地址空间时，要求向特定地址空间写入0 */
 	    && !(tsk->flags & PF_SIGNALED)
 	    && atomic_read(&mm->mm_users) > 1) {
 		u32 __user * tidptr = tsk->clear_child_tid;
@@ -483,6 +483,7 @@ void mm_release(struct task_struct *tsk, struct mm_struct *mm)
 		 * not set up a proper pointer then tough luck.
 		 */
 		put_user(0, tidptr);
+		/* 唤醒等待在该地址上的用户态信号量 */
 		sys_futex(tidptr, FUTEX_WAKE, 1, NULL, NULL, 0);
 	}
 }
@@ -970,6 +971,9 @@ static void rt_mutex_init_task(struct task_struct *p)
  * parts of the process environment (as per the clone
  * flags). The actual kick-off is left to the caller.
  */
+/**
+ * 创建进程或线程的主要过程
+ */
 static struct task_struct *copy_process(unsigned long clone_flags,
 					unsigned long stack_start,
 					struct pt_regs *regs,
@@ -981,12 +985,19 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	struct task_struct *p;
 	int cgroup_callbacks_done = 0;
 
+	/**
+	 * 合法性检查
+	 * 创新新的命名空间时，不能要求共享文件系统信息
+	 */
 	if ((clone_flags & (CLONE_NEWNS|CLONE_FS)) == (CLONE_NEWNS|CLONE_FS))
 		return ERR_PTR(-EINVAL);
 
 	/*
 	 * Thread groups must share signals as well, and detached threads
 	 * can only be started up within the thread group.
+	 */
+	/**
+	 * 创建线程时，必须指定CLONE_SIGHAND，以共享信号处理
 	 */
 	if ((clone_flags & CLONE_THREAD) && !(clone_flags & CLONE_SIGHAND))
 		return ERR_PTR(-EINVAL);
@@ -996,6 +1007,9 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	 * thread groups also imply shared VM. Blocking this case allows
 	 * for various simplifications in other code.
 	 */
+	/**
+	 * 要共享信号处理，则必须共享地址空间
+	 */
 	if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
 		return ERR_PTR(-EINVAL);
 
@@ -1004,6 +1018,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 		goto fork_out;
 
 	retval = -ENOMEM;
+	/* 复制父进程的任务结构，通常子进程的内核栈与父进程不同 */
 	p = dup_task_struct(current);
 	if (!p)
 		goto fork_out;
@@ -1015,8 +1030,10 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	DEBUG_LOCKS_WARN_ON(!p->softirqs_enabled);
 #endif
 	retval = -EAGAIN;
+	/* 用户创建的进程数量超过了限制的值 */
 	if (atomic_read(&p->user->processes) >=
 			p->signal->rlim[RLIMIT_NPROC].rlim_cur) {
+		/* 不是超级用户，也没有资源超分配的权限 */
 		if (!capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_RESOURCE) &&
 		    p->user != current->nsproxy->user_ns->root_user)
 			goto bad_fork_free;
@@ -1124,6 +1141,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 #endif
 
 	/* Perform scheduler related setup. Assign this task to a CPU. */
+	/* 调度器处理，主要是初始化一些统计字段，以及进行CPU之间的均衡 */
 	sched_fork(p, clone_flags);
 
 	if ((retval = security_task_alloc(p)))
@@ -1131,22 +1149,34 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	if ((retval = audit_alloc(p)))
 		goto bad_fork_cleanup_security;
 	/* copy all the process information */
+	/* 复制System V信号量信息 */
 	if ((retval = copy_semundo(clone_flags, p)))
 		goto bad_fork_cleanup_audit;
+	/* 如果CLONE_FILES置位，则使用父进程的文件描述符。否则创建新的FILES结构。 */
 	if ((retval = copy_files(clone_flags, p)))
 		goto bad_fork_cleanup_semundo;
+	/**
+	 * 如果CLONE_FS置位，则使用父进程的文件系统上下文。
+	 * 这个结构包括根目录、当前目录等信息。
+	 */
 	if ((retval = copy_fs(clone_flags, p)))
 		goto bad_fork_cleanup_files;
+	/* 复制信号处理程序 */
 	if ((retval = copy_sighand(clone_flags, p)))
 		goto bad_fork_cleanup_fs;
 	if ((retval = copy_signal(clone_flags, p)))
 		goto bad_fork_cleanup_sighand;
+	/* 处理进程地址空间，有可能处理COW */
 	if ((retval = copy_mm(clone_flags, p)))
 		goto bad_fork_cleanup_signal;
 	if ((retval = copy_keys(clone_flags, p)))
 		goto bad_fork_cleanup_mm;
+	/* 处理进程的地址空间，可能与父进程共享地址空间，也可能创建新的地址空间 */
 	if ((retval = copy_namespaces(clone_flags, p)))
 		goto bad_fork_cleanup_keys;
+	/**
+	 * 针对特定的体系结构，复制thread_info中的字段
+	 */
 	retval = copy_thread(0, clone_flags, stack_start, stack_size, p, regs);
 	if (retval)
 		goto bad_fork_cleanup_namespaces;
@@ -1164,15 +1194,18 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 		}
 	}
 
-	p->pid = pid_nr(pid);
+	/* 初始化任务结构中的字段 */
+	p->pid = pid_nr(pid);/* 计算任务的全局pid */
 	p->tgid = p->pid;
 	if (clone_flags & CLONE_THREAD)
 		p->tgid = current->tgid;
 
+	/* 对NPTL库来说，传递了CLONE_CHILD_SETTID标志，需要向用户态写入新进程的ID */
 	p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? child_tidptr : NULL;
 	/*
 	 * Clear TID on mm_release()?
 	 */
+	/* 要求在释放mm地址空间时，向特定地址写入0 */
 	p->clear_child_tid = (clone_flags & CLONE_CHILD_CLEARTID) ? child_tidptr: NULL;
 #ifdef CONFIG_FUTEX
 	p->robust_list = NULL;
@@ -1210,6 +1243,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	 * Ok, make it visible to the rest of the system.
 	 * We dont wake it up yet.
 	 */
+	/* 对进程来说，其领头线程就是自己 */
 	p->group_leader = p;
 	INIT_LIST_HEAD(&p->thread_group);
 	INIT_LIST_HEAD(&p->ptrace_children);
@@ -1242,6 +1276,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 		set_task_cpu(p, smp_processor_id());
 
 	/* CLONE_PARENT re-uses the old parent */
+	/* 对线程来说，其父进程是当前线程的父进程，而不是当前进程 */
 	if (clone_flags & (CLONE_PARENT|CLONE_THREAD))
 		p->real_parent = current->real_parent;
 	else
@@ -1267,6 +1302,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	}
 
 	if (clone_flags & CLONE_THREAD) {
+		/* 如果创建的是线程，那么新线程的领头线程是当前线程的领头线程 */
 		p->group_leader = current->group_leader;
 		list_add_tail_rcu(&p->thread_group, &p->group_leader->thread_group);
 
@@ -1287,15 +1323,17 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	}
 
 	if (likely(p->pid)) {
+		/* 将当前进程添加到父进程的链表中 */
 		add_parent(p);
 		if (unlikely(p->ptrace & PT_PTRACED))
 			__ptrace_link(p, current->parent);
 
-		if (thread_group_leader(p)) {
-			if (clone_flags & CLONE_NEWPID)
+		if (thread_group_leader(p)) {/* 当前进程是领头进程 */
+			if (clone_flags & CLONE_NEWPID)/* 将当前进程作为子进程的init进程 */
 				p->nsproxy->pid_ns->child_reaper = p;
 
 			p->signal->tty = current->signal->tty;
+			/* 将新进程添加到进程组和会话中 */
 			set_task_pgrp(p, task_pgrp_nr(current));
 			set_task_session(p, task_session_nr(current));
 			attach_pid(p, PIDTYPE_PGID, task_pgrp(current));
@@ -1400,6 +1438,14 @@ static int fork_traceflag(unsigned clone_flags)
  * It copies the process, and if successful kick-starts
  * it and waits for it to finish using the VM if required.
  */
+/**
+ * 创建进程或线程
+ * 		clone_flags:		创建标志。低位字节是进程退出时给父进程发送的信号。
+ *		stack_start:		用户栈的起始位置。
+ *		regs:				调用参数。
+ *		stack_size:			用户栈大小。
+ *		parent_tidptr，child_tidptr:		用户空间指针，指向父子进程的tid。NPTL库需要这两个参数。
+ */
 long do_fork(unsigned long clone_flags,
 	      unsigned long stack_start,
 	      struct pt_regs *regs,
@@ -1417,6 +1463,7 @@ long do_fork(unsigned long clone_flags,
 			clone_flags |= CLONE_PTRACE;
 	}
 
+	/* 生成新进程 */
 	p = copy_process(clone_flags, stack_start, regs, stack_size,
 			child_tidptr, NULL);
 	/*
@@ -1430,6 +1477,7 @@ long do_fork(unsigned long clone_flags,
 		 * this is enough to call pid_nr_ns here, but this if
 		 * improves optimisation of regular fork()
 		 */
+		/* 找到进程在父进程命名空间中的pid */
 		nr = (clone_flags & CLONE_NEWPID) ?
 			task_pid_nr_ns(p, current->nsproxy->pid_ns) :
 				task_pid_vnr(p);
@@ -1437,11 +1485,18 @@ long do_fork(unsigned long clone_flags,
 		if (clone_flags & CLONE_PARENT_SETTID)
 			put_user(nr, parent_tidptr);
 
+		/**
+		 * 如果是vfork系统调用，则初始化子进程的完成变量
+		 */
 		if (clone_flags & CLONE_VFORK) {
 			p->vfork_done = &vfork;
 			init_completion(&vfork);
 		}
 
+		/**
+		 * 如果使用ptrace监控新进程，或者要求暂时终止进程
+		 * 则向进程发送一个SIGSTOP信号
+		 */
 		if ((p->ptrace & PT_PTRACED) || (clone_flags & CLONE_STOPPED)) {
 			/*
 			 * We'll start up with an immediate SIGSTOP.
@@ -1450,8 +1505,8 @@ long do_fork(unsigned long clone_flags,
 			set_tsk_thread_flag(p, TIF_SIGPENDING);
 		}
 
-		if (!(clone_flags & CLONE_STOPPED))
-			wake_up_new_task(p, clone_flags);
+		if (!(clone_flags & CLONE_STOPPED))/* 不停止子进程 */
+			wake_up_new_task(p, clone_flags);/* 唤醒子进程，将其添加到调用队列 */
 		else
 			p->state = TASK_STOPPED;
 
@@ -1460,8 +1515,10 @@ long do_fork(unsigned long clone_flags,
 			ptrace_notify ((trace << 8) | SIGTRAP);
 		}
 
-		if (clone_flags & CLONE_VFORK) {
+		if (clone_flags & CLONE_VFORK) {/* vfork系统调用 */
 			freezer_do_not_count();
+
+			/* 等待子进程释放虚拟地址空间 */
 			wait_for_completion(&vfork);
 			freezer_count();
 			if (unlikely (current->ptrace & PT_TRACE_VFORK_DONE)) {
@@ -1637,6 +1694,9 @@ static int unshare_semundo(unsigned long unshare_flags, struct sem_undo_list **n
  * because they modify an inactive task_struct that is being
  * constructed. Here we are modifying the current, active,
  * task_struct.
+ */
+/**
+ * 将进程的某些部分与父进程分享，例如命名空间。
  */
 asmlinkage long sys_unshare(unsigned long unshare_flags)
 {

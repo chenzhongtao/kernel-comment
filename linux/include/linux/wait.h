@@ -29,11 +29,18 @@ typedef struct __wait_queue wait_queue_t;
 typedef int (*wait_queue_func_t)(wait_queue_t *wait, unsigned mode, int sync, void *key);
 int default_wake_function(wait_queue_t *wait, unsigned mode, int sync, void *key);
 
+/**
+ * 等待队列中的任务
+ */
 struct __wait_queue {
+	/* 等待标志，如WQ_FLAG_EXCLUSIVE */
 	unsigned int flags;
 #define WQ_FLAG_EXCLUSIVE	0x01
+	/* 私有数据，一般是等待任务 */
 	void *private;
+	/* 回调函数 */
 	wait_queue_func_t func;
+	/* 通过此字段将结构放到队列中 */
 	struct list_head task_list;
 };
 
@@ -47,8 +54,11 @@ struct wait_bit_queue {
 	wait_queue_t wait;
 };
 
+/* 等待队列描述符 */
 struct __wait_queue_head {
+	/* 保护等待队列的自旋锁 */
 	spinlock_t lock;
+	/* 等待队列头，其成员是__wait_queue */
 	struct list_head task_list;
 };
 typedef struct __wait_queue_head wait_queue_head_t;

@@ -38,23 +38,36 @@ static void usb_api_blocking_completion(struct urb *urb)
  * interruptible and therefore these drivers should implement their
  * own interruptible routines.
  */
+/**
+ * 等待URB完成。
+ */
 static int usb_start_wait_urb(struct urb *urb, int timeout, int *actual_length)
 { 
 	struct api_context ctx;
 	unsigned long expire;
 	int retval;
 
-	init_completion(&ctx.done);
-	urb->context = &ctx;
+	/**
+	 * 定义并初始化一个完成原语。当URB完成时，调用complete唤醒本线程。
+	 */
+	init_completion(&done); 	
+	urb->context = &done;
 	urb->actual_length = 0;
-	retval = usb_submit_urb(urb, GFP_NOIO);
-	if (unlikely(retval))
+	/**
+	 * 提交一个URB请求。
+	 */
+	status = usb_submit_urb(urb, GFP_NOIO);
+	if (unlikely(status))
 		goto out;
 
+	/**
+	 * 等待时间是以ms为单位的，转换成jiffies。
+	 */
 	expire = timeout ? msecs_to_jiffies(timeout) : MAX_SCHEDULE_TIMEOUT;
-	if (!wait_for_completion_timeout(&ctx.done, expire)) {
-		usb_kill_urb(urb);
-		retval = (ctx.status == -ENOENT ? -ETIMEDOUT : ctx.status);
+	/**
+	 * 等待URB执行结束。
+	 */
+	if (!wait_for_completion_timeout(&done, expire)) {
 
 		dev_dbg(&urb->dev->dev,
 			"%s timed out on ep%d%s len=%d/%d\n",
@@ -66,15 +79,24 @@ static int usb_start_wait_urb(struct urb *urb, int timeout, int *actual_length)
 	} else
 		retval = ctx.status;
 out:
+	/**
+	 * 向上层函数返回本次实际传递的数据长度。
+	 */
 	if (actual_length)
 		*actual_length = urb->actual_length;
 
+	/**
+	 * 释放URB。
+	 */
 	usb_free_urb(urb);
 	return retval;
 }
 
 /*-------------------------------------------------------------------*/
 // returns status (negative) or length (positive)
+/**
+ * 向USB设备发送控制消息。
+ */
 static int usb_internal_control_msg(struct usb_device *usb_dev,
 				    unsigned int pipe, 
 				    struct usb_ctrlrequest *cmd,
@@ -84,13 +106,22 @@ static int usb_internal_control_msg(struct usb_device *usb_dev,
 	int retv;
 	int length;
 
+	/**
+	 * usb_alloc_urb函数，创建一个urb，struct urb结构体只能使用它来创建
+	 */
 	urb = usb_alloc_urb(0, GFP_NOIO);
 	if (!urb)
 		return -ENOMEM;
   
+  	/**
+  	 * 初始化一个控制urb，urb被创建之后，使用之前必须要正确的初始化。
+  	 */
 	usb_fill_control_urb(urb, usb_dev, pipe, (unsigned char *)cmd, data,
 			     len, usb_api_blocking_completion, NULL);
 
+	/**
+	 * 将urb提交给咱们的usb core，以便分配给特定的主机控制器驱动进行处理，然后默默的等待处理结果，或者超时。
+	 */
 	retv = usb_start_wait_urb(urb, timeout, &length);
 	if (retv < 0)
 		return retv;
@@ -124,16 +155,28 @@ static int usb_internal_control_msg(struct usb_device *usb_dev,
  *      method can wait for it to complete.  Since you don't have a handle on
  *      the URB used, you can't cancel the request.
  */
+/**
+ * 创建一个控制urb，并把它发送给usb设备，然后等待它完成。
+ */
 int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request, __u8 requesttype,
 			 __u16 value, __u16 index, void *data, __u16 size, int timeout)
 {
+	/**
+	 * 为一个struct usb_ctrlrequest 结构体申请内存，这个结构体描述了主机通过控制传输发送给设备的请求
+	 */
 	struct usb_ctrlrequest *dr = kmalloc(sizeof(struct usb_ctrlrequest), GFP_NOIO);
 	int ret;
 	
 	if (!dr)
 		return -ENOMEM;
 
+	/**
+	 * 使用传递过来的参数填充请求包。
+	 */
 	dr->bRequestType= requesttype;
+	/**
+	 * 对于SET_ADDRESS 来说，bRequest 的值就是USB_REQ_SET_ADDRESS，标准请求之一.
+	 */
 	dr->bRequest = request;
 	dr->wValue = cpu_to_le16p(&value);
 	dr->wIndex = cpu_to_le16p(&index);
@@ -141,6 +184,9 @@ int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request, __u
 
 	//dbg("usb_control_msg");	
 
+	/**
+	 * 发送控制消息。
+	 */
 	ret = usb_internal_control_msg(dev, pipe, dr, data, size, timeout);
 
 	kfree(dr);
@@ -172,6 +218,9 @@ int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request, __u
  * driver uses this call, make sure your disconnect() method can wait for it to
  * complete.  Since you don't have a handle on the URB used, you can't cancel
  * the request.
+ */
+/**
+ * 创建并传输一个中断消息。
  */
 int usb_interrupt_msg(struct usb_device *usb_dev, unsigned int pipe,
 		      void *data, int len, int *actual_length, int timeout)
@@ -211,23 +260,38 @@ EXPORT_SYMBOL_GPL(usb_interrupt_msg);
  *	an interrupt URB (with the default interval) if the target is an
  *	interrupt endpoint.
  */
+/**
+ * 创建并提交一个批量消息。
+ */
 int usb_bulk_msg(struct usb_device *usb_dev, unsigned int pipe, 
 			void *data, int len, int *actual_length, int timeout)
 {
 	struct urb *urb;
 	struct usb_host_endpoint *ep;
 
+	/**
+	 * 根据管道类型和端点号，获得端点结构。
+	 */
 	ep = (usb_pipein(pipe) ? usb_dev->ep_in : usb_dev->ep_out)
 			[usb_pipeendpoint(pipe)];
 	if (!ep || len < 0)
 		return -EINVAL;
 
+	/**
+	 * 分配并初始化一个URB。
+	 */
 	urb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!urb)
 		return -ENOMEM;
 
+	/**
+	 * 根据端点描述符来确定是中断传输还是批量传输
+	 */
 	if ((ep->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) ==
 			USB_ENDPOINT_XFER_INT) {
+		/**
+		 * 如果是中断传输，需要修改管道类型。
+		 */
 		pipe = (pipe & ~(3 << 30)) | (PIPE_INTERRUPT << 30);
 		usb_fill_int_urb(urb, usb_dev, pipe, data, len,
 				usb_api_blocking_completion, NULL,
@@ -236,6 +300,9 @@ int usb_bulk_msg(struct usb_device *usb_dev, unsigned int pipe,
 		usb_fill_bulk_urb(urb, usb_dev, pipe, data, len,
 				usb_api_blocking_completion, NULL);
 
+	/**
+	 * 等待URB返回。
+	 */
 	return usb_start_wait_urb(urb, timeout, actual_length);
 }
 
@@ -629,6 +696,12 @@ void usb_sg_cancel (struct usb_sg_request *io)
  * Returns the number of bytes received on success, or else the status code
  * returned by the underlying usb_control_msg() call.
  */
+/**
+ * 获得设备描述符。
+ *		type:		要获得的描述符类型:设备描述符，配置描述符和字符串描述符
+ *		index:		对于配置描述符，可能有多个，这里指定描述符的序号。
+ *		buf,size:	用于存放返回结果。
+ */
 int usb_get_descriptor(struct usb_device *dev, unsigned char type, unsigned char index, void *buf, int size)
 {
 	int i;
@@ -636,14 +709,26 @@ int usb_get_descriptor(struct usb_device *dev, unsigned char type, unsigned char
 	
 	memset(buf,0,size);	// Make sure we parse really received data
 
+	/**
+	 * 某些设备实现上有问题，一次读取可能不成功，这里多试几次。
+	 */
 	for (i = 0; i < 3; ++i) {
 		/* retry on length 0 or error; some devices are flakey */
+		/**
+		 * 通过向设备发送一个USB_REQ_GET_DESCRIPTOR控制消息来获取设备描述符。
+		 */
 		result = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0),
 				USB_REQ_GET_DESCRIPTOR, USB_DIR_IN,
 				(type << 8) + index, 0, buf, size,
-				USB_CTRL_GET_TIMEOUT);
-		if (result <= 0 && result != -ETIMEDOUT)
+				USB_CTRL_GET_TIMEOUT);/* USB_CTRL_GET_TIMEOUT表示超时时间为5S */
+		/**
+		 * 控制消息发送不成功，需要重试。
+		 */
+		if (result == 0 || result == -EPIPE)
 			continue;
+		/**
+		 * 返回的描述符类型与请求的不一致。
+		 */
 		if (result > 1 && ((u8 *)buf)[1] != type) {
 			result = -EPROTO;
 			continue;
@@ -681,8 +766,14 @@ static int usb_get_string(struct usb_device *dev, unsigned short langid,
 	int i;
 	int result;
 
+	/**
+	 * 某些有问题的设备需要读取多次。
+	 */
 	for (i = 0; i < 3; ++i) {
 		/* retry on length 0 or stall; some devices are flakey */
+		/**
+		 * 向设备发送控制消息，读取其描述符。
+		 */
 		result = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0),
 			USB_REQ_GET_DESCRIPTOR, USB_DIR_IN,
 			(USB_DT_STRING << 8) + index, langid, buf, size,
@@ -697,6 +788,9 @@ static void usb_try_string_workarounds(unsigned char *buf, int *length)
 {
 	int newlength, oldlength = *length;
 
+	/**
+	 * 遍历处理unicode编码。得到字符数。
+	 */
 	for (newlength = 2; newlength + 1 < oldlength; newlength += 2)
 		if (!isprint(buf[newlength]) || buf[newlength + 1])
 			break;
@@ -707,6 +801,9 @@ static void usb_try_string_workarounds(unsigned char *buf, int *length)
 	}
 }
 
+/**
+ * 获取字符串描述符。
+ */
 static int usb_string_sub(struct usb_device *dev, unsigned int langid,
 		unsigned int index, unsigned char *buf)
 {
@@ -714,27 +811,45 @@ static int usb_string_sub(struct usb_device *dev, unsigned int langid,
 
 	/* Try to read the string descriptor by asking for the maximum
 	 * possible number of bytes */
+	/**
+	 * 设备在读取字符串描述符时会有问题。
+	 */
 	if (dev->quirks & USB_QUIRK_STRING_FETCH_255)
 		rc = -EIO;
 	else
+		/**
+		 * usb_get_string真正从设备读取字符串描述符。
+		 */
 		rc = usb_get_string(dev, langid, index, buf, 255);
 
 	/* If that failed try to read the descriptor length, then
 	 * ask for just that many bytes */
-	if (rc < 2) {
+	if (rc < 2) {/* 读取失败了 */
+		/**
+		 * 先读取描述符长度。
+		 */
 		rc = usb_get_string(dev, langid, index, buf, 2);
+		/**
+		 * 根据长度读取描述符。
+		 */
 		if (rc == 2)
 			rc = usb_get_string(dev, langid, index, buf, buf[0]);
 	}
 
-	if (rc >= 2) {
-		if (!buf[0] && !buf[1])
+	if (rc >= 2) {/* 除去长度和类型字段，还读到了字符串数据。 */
+		if (!buf[0] && !buf[1])/* 前两个字节中有一个是0，需要通过usb_try_string_workarounds计算有效的数据长度。 */
 			usb_try_string_workarounds(buf, &rc);
 
 		/* There might be extra junk at the end of the descriptor */
+		/**
+		 * 返回结果中有一些垃圾数据。
+		 */
 		if (buf[0] < rc)
 			rc = buf[0];
 
+		/**
+		 * unicode字符是两个字节对齐的，强制进行对齐处理。
+		 */
 		rc = rc - (rc & 1); /* force a multiple of two */
 	}
 
@@ -774,6 +889,9 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
 	int err;
 	unsigned int u, idx;
 
+	/**
+	 * 设备不能是挂起状态。
+	 */
 	if (dev->state == USB_STATE_SUSPENDED)
 		return -EHOSTUNREACH;
 	if (size <= 0 || !buf || !index)
@@ -784,19 +902,25 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
 		return -ENOMEM;
 
 	/* get langid for strings if it's not yet known */
-	if (!dev->have_langid) {
+	if (!dev->have_langid) {/* 设备没有指定语言ID。 */
+		/**
+		 * 索引号为0，是为了获得设备所支持的所有语言ID。
+		 */
 		err = usb_string_sub(dev, 0, 0, tbuf);
-		if (err < 0) {
+		if (err < 0) {/* 获取语言ID失败。 */
 			dev_err (&dev->dev,
 				"string descriptor 0 read error: %d\n",
 				err);
 			goto errout;
-		} else if (err < 4) {
+		} else if (err < 4) {/* 最小长度也应该是4，失败了。 */
 			dev_err (&dev->dev, "string descriptor 0 too short\n");
 			err = -EINVAL;
 			goto errout;
 		} else {
 			dev->have_langid = 1;
+			/**
+			 * 第三、四字节是可用ID。
+			 */
 			dev->string_langid = tbuf[2] | (tbuf[3]<< 8);
 				/* always use the first langid listed */
 			dev_dbg (&dev->dev, "default language 0x%04x\n",
@@ -804,11 +928,17 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
 		}
 	}
 	
+	/**
+	 * 使用语言ID去获取字符串描述符。
+	 */
 	err = usb_string_sub(dev, dev->string_langid, index, tbuf);
 	if (err < 0)
 		goto errout;
 
 	size--;		/* leave room for trailing NULL char in output buffer */
+	/**
+	 * 将unicode转换为ISO8859－1
+	 */
 	for (idx = 0, u = 2; u < err; u += 2) {
 		if (idx >= size)
 			break;
@@ -836,13 +966,22 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
  * Returns a pointer to a kmalloc'ed buffer containing the descriptor string,
  * or NULL if the index is 0 or the string could not be read.
  */
+/**
+ * 获得接口的字符串描述符。
+ */
 char *usb_cache_string(struct usb_device *udev, int index)
 {
 	char *buf;
 	char *smallbuf = NULL;
 	int len;
 
+	/**
+	 * 索引号不能为0，这是规范里面规定了的。
+	 */
 	if (index > 0 && (buf = kmalloc(256, GFP_KERNEL)) != NULL) {
+		/**
+		 * usb_string完成实际的工作。
+		 */
 		if ((len = usb_string(udev, index, buf, 256)) > 0) {
 			if ((smallbuf = kmalloc(++len, GFP_KERNEL)) == NULL)
 				return buf;
@@ -871,6 +1010,9 @@ char *usb_cache_string(struct usb_device *udev, int index)
  * Returns the number of bytes received on success, or else the status code
  * returned by the underlying usb_control_msg() call.
  */
+/**
+ * 获得设备的描述符。
+ */
 int usb_get_device_descriptor(struct usb_device *dev, unsigned int size)
 {
 	struct usb_device_descriptor *desc;
@@ -878,11 +1020,20 @@ int usb_get_device_descriptor(struct usb_device *dev, unsigned int size)
 
 	if (size > sizeof(*desc))
 		return -EINVAL;
+	/**
+	 * 准备一个设备描述符结构。
+	 */
 	desc = kmalloc(sizeof(*desc), GFP_NOIO);
 	if (!desc)
 		return -ENOMEM;
 
+	/**
+	 * 调用usb_get_descriptor()获得设备描述符
+	 */
 	ret = usb_get_descriptor(dev, USB_DT_DEVICE, 0, desc, size);
+	/**
+	 * 将获得的设备描述符复制到设备结构中。
+	 */
 	if (ret >= 0) 
 		memcpy(&dev->descriptor, desc, size);
 	kfree(desc);
@@ -998,6 +1149,9 @@ int usb_clear_halt(struct usb_device *dev, int pipe)
  * If the HCD hasn't registered a disable() function, this sets the
  * endpoint's maxpacket size to 0 to prevent further submissions.
  */
+/**
+ * 禁止端点。
+ */
 void usb_disable_endpoint(struct usb_device *dev, unsigned int epaddr)
 {
 	unsigned int epnum = epaddr & USB_ENDPOINT_NUMBER_MASK;
@@ -1006,6 +1160,9 @@ void usb_disable_endpoint(struct usb_device *dev, unsigned int epaddr)
 	if (!dev)
 		return;
 
+	/**
+	 * 根据端点的方向取得端点描述符。
+	 */
 	if (usb_endpoint_out(epaddr)) {
 		ep = dev->ep_out[epnum];
 		dev->ep_out[epnum] = NULL;
@@ -1013,11 +1170,11 @@ void usb_disable_endpoint(struct usb_device *dev, unsigned int epaddr)
 		ep = dev->ep_in[epnum];
 		dev->ep_in[epnum] = NULL;
 	}
-	if (ep) {
-		ep->enabled = 0;
-		usb_hcd_flush_endpoint(dev, ep);
-		usb_hcd_disable_endpoint(dev, ep);
-	}
+	/**
+	 * 禁止端点。
+	 */
+	if (ep && dev->bus)
+		usb_hcd_endpoint_disable(dev, ep);
 }
 
 /**
@@ -1048,12 +1205,18 @@ void usb_disable_interface(struct usb_device *dev, struct usb_interface *intf)
  * pending urbs) and usbcore state for the interfaces, so that usbcore
  * must usb_set_configuration() before any interfaces could be used.
  */
+/**
+ * 禁止USB设备，使其回到USB_STATE_ADDRESS状态。
+ */
 void usb_disable_device(struct usb_device *dev, int skip_ep0)
 {
 	int i;
 
 	dev_dbg(&dev->dev, "%s nuking %s URBs\n", __FUNCTION__,
 			skip_ep0 ? "non-ep0" : "all");
+	/**
+	 * 首先禁止掉所有端点。
+	 */
 	for (i = skip_ep0; i < 16; ++i) {
 		usb_disable_endpoint(dev, i);
 		usb_disable_endpoint(dev, i + USB_DIR_IN);
@@ -1063,7 +1226,13 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
 	/* getting rid of interfaces will disconnect
 	 * any drivers bound to them (a key side effect)
 	 */
+	/**
+	 * 设备当前激活了配置。
+	 */
 	if (dev->actconfig) {
+		/**
+		 * 将所有接口从设备模型中删除掉。
+		 */
 		for (i = 0; i < dev->actconfig->desc.bNumInterfaces; i++) {
 			struct usb_interface	*interface;
 
@@ -1080,11 +1249,17 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
 		/* Now that the interfaces are unbound, nobody should
 		 * try to access them.
 		 */
+		/**
+		 * 将活动配置的接口数组清空。
+		 */
 		for (i = 0; i < dev->actconfig->desc.bNumInterfaces; i++) {
 			put_device (&dev->actconfig->interface[i]->dev);
 			dev->actconfig->interface[i] = NULL;
 		}
 		dev->actconfig = NULL;
+		/**
+		 * 如果当前是配置状态，则回到USB_STATE_ADDRESS状态。
+		 */
 		if (dev->state == USB_STATE_CONFIGURED)
 			usb_set_device_state(dev, USB_STATE_ADDRESS);
 	}
@@ -1099,7 +1274,11 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
  * Resets the endpoint toggle, and sets dev->ep_{in,out} pointers.
  * For control endpoints, both the input and output sides are handled.
  */
-void usb_enable_endpoint(struct usb_device *dev, struct usb_host_endpoint *ep)
+/**
+ * 激活端点。
+ */
+static void
+usb_enable_endpoint(struct usb_device *dev, struct usb_host_endpoint *ep)
 {
 	int epnum = usb_endpoint_num(&ep->desc);
 	int is_out = usb_endpoint_dir_out(&ep->desc);
@@ -1123,12 +1302,18 @@ void usb_enable_endpoint(struct usb_device *dev, struct usb_host_endpoint *ep)
  *
  * Enables all the endpoints for the interface's current altsetting.
  */
+/**
+ * 激活接口设置。
+ */
 static void usb_enable_interface(struct usb_device *dev,
 				 struct usb_interface *intf)
 {
 	struct usb_host_interface *alt = intf->cur_altsetting;
 	int i;
 
+	/**
+	 * 轮询接口的每个端点并激活它。
+	 */
 	for (i = 0; i < alt->desc.bNumEndpoints; ++i)
 		usb_enable_endpoint(dev, &alt->endpoint[i]);
 }
@@ -1461,6 +1646,9 @@ static struct usb_interface_assoc_descriptor *find_iad(struct usb_device *dev,
  * in the new configuration has been probed by all relevant usb device
  * drivers currently known to the kernel.
  */
+/**
+ * 将配置设置为设备的当前配置。
+ */
 int usb_set_configuration(struct usb_device *dev, int configuration)
 {
 	int i, ret;
@@ -1468,9 +1656,16 @@ int usb_set_configuration(struct usb_device *dev, int configuration)
 	struct usb_interface **new_interfaces = NULL;
 	int n, nintf;
 
-	if (dev->authorized == 0 || configuration == -1)
+	/**
+	 * 如果没有找到合适的配置，choose_configuration会返回－1，则将配置号设置为0.这样SET_CONFIGURATION配置请求不会使设备进入配置状态。
+	 * 而是保持在Address状态。表示没有合适的配置。这里不直接返回，是因为有些奇怪的设备允许传配置0.
+	 */
+	if (configuration == -1)
 		configuration = 0;
 	else {
+		/**
+		 * 从配置数组里面找到对应的配置结构体。
+		 */
 		for (i = 0; i < dev->descriptor.bNumConfigurations; i++) {
 			if (dev->config[i].desc.bConfigurationValue ==
 					configuration) {
@@ -1479,6 +1674,9 @@ int usb_set_configuration(struct usb_device *dev, int configuration)
 			}
 		}
 	}
+	/**
+	 * 如果没有合适的配置，那么配置号就必须为0.
+	 */
 	if ((!cp && configuration != 0))
 		return -EINVAL;
 
@@ -1487,6 +1685,9 @@ int usb_set_configuration(struct usb_device *dev, int configuration)
 	 * we will accept it as a correctly configured state.
 	 * Use -1 if you really want to unconfigure the device.
 	 */
+	/**
+	 * 如果传了configuration为0，同时找到了对应的配置描述符，则打印警告。这种设备比较奇怪。
+	 */
 	if (cp && configuration == 0)
 		dev_warn(&dev->dev, "config 0 descriptor??\n");
 
@@ -1494,6 +1695,9 @@ int usb_set_configuration(struct usb_device *dev, int configuration)
 	 * so that if we run out then nothing will have changed. */
 	n = nintf = 0;
 	if (cp) {
+		/**
+		 * 根据配置的接口数目，为其分配指针数组。
+		 */
 		nintf = cp->desc.bNumInterfaces;
 		new_interfaces = kmalloc(nintf * sizeof(*new_interfaces),
 				GFP_KERNEL);
@@ -1502,6 +1706,9 @@ int usb_set_configuration(struct usb_device *dev, int configuration)
 			return -ENOMEM;
 		}
 
+		/**
+		 * 再为每一个接口分配内存。
+		 */
 		for (; n < nintf; ++n) {
 			new_interfaces[n] = kzalloc(
 					sizeof(struct usb_interface),
@@ -1517,6 +1724,9 @@ free_interfaces:
 			}
 		}
 
+		/**
+		 * 配置需要的电流较大，警告一下。
+		 */
 		i = dev->bus_mA - cp->desc.bMaxPower * 2;
 		if (i < 0)
 			dev_warn(&dev->dev, "new config #%d exceeds power "
@@ -1532,9 +1742,19 @@ free_interfaces:
 	/* if it's already configured, clear out old state first.
 	 * getting rid of old interfaces means unbinding their drivers.
 	 */
+	/**
+	 * 大多数情况下是从USB_STATE_ADDRESS状态进入配置状态的。如果不是，说明设备可能已经配置过了。
+	 * 调用usb_disable_device使其回到USB_STATE_ADDRESS状态。
+	 */
 	if (dev->state != USB_STATE_ADDRESS)
+		/**
+		 * 不用禁止掉端点0.在两种状态都需要用到它。
+		 */
 		usb_disable_device (dev, 1);	// Skip ep0
 
+	/**
+	 * 向设备发送USB_REQ_SET_CONFIGURATION消息，使其进入配置状态。
+	 */
 	if ((ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
 			USB_REQ_SET_CONFIGURATION, 0, configuration, 0,
 			NULL, 0, USB_CTRL_SET_TIMEOUT)) < 0) {
@@ -1545,16 +1765,31 @@ free_interfaces:
 		cp = NULL;
 	}
 
+	/**
+	 * 将激活的配置赋给actconfig
+	 */
 	dev->actconfig = cp;
+	/**
+	 * 配置为空，说明配置参数为－1，或者配置参数为0，但是配置数组里面第0项就是为空，或者说是设备进入配置状态失败。
+	 */
 	if (!cp) {
+		/**
+		 * 进入配置状态失败，返回到USB_STATE_ADDRESS状态，退出函数。
+		 */
 		usb_set_device_state(dev, USB_STATE_ADDRESS);
 		usb_autosuspend_device(dev);
 		goto free_interfaces;
 	}
+	/**
+	 * 设备已经正常进入配置状态。
+	 */
 	usb_set_device_state(dev, USB_STATE_CONFIGURED);
 
 	/* Initialize the new interface structures and the
 	 * hc/hcd/usbcore interface/endpoint state.
+	 */
+	/**
+	 * 对配置里面的所有接口进行处理。
 	 */
 	for (i = 0; i < nintf; ++i) {
 		struct usb_interface_cache *intfc;
@@ -1568,6 +1803,9 @@ free_interfaces:
 		intf->intf_assoc = find_iad(dev, cp, i);
 		kref_get(&intfc->ref);
 
+		/**
+		 * 获得接口的第1个设置。这个设置是接口的默认设置。
+		 */
 		alt = usb_altnum_to_altsetting(intf, 0);
 
 		/* No altsetting 0?  We'll assume the first altsetting.
@@ -1575,9 +1813,15 @@ free_interfaces:
 		 * so non-compliant that it doesn't have altsetting 0
 		 * then I wouldn't trust its reply anyway.
 		 */
+		/**
+		 * 没有第一个设置，用数组中的第一个设置。
+		 */
 		if (!alt)
 			alt = &intf->altsetting[0];
 
+		/**
+		 * 使用默认设置作为当前设置。
+		 */
 		intf->cur_altsetting = alt;
 		usb_enable_interface(dev, intf);
 		intf->dev.parent = &dev->dev;
@@ -1585,7 +1829,13 @@ free_interfaces:
 		intf->dev.bus = &usb_bus_type;
 		intf->dev.type = &usb_if_device_type;
 		intf->dev.dma_mask = dev->dev.dma_mask;
+		/**
+		 * 初始化接口的设备模型，准备加入到设备模型中去。
+		 */
 		device_initialize (&intf->dev);
+		/**
+		 * is_active 标志初始化为0，表示它还没有与任何驱动绑定。
+		 */
 		mark_quiesced(intf);
 		sprintf (&intf->dev.bus_id[0], "%d-%s:%d.%d",
 			 dev->bus->busnum, dev->devpath,
@@ -1593,6 +1843,9 @@ free_interfaces:
 	}
 	kfree(new_interfaces);
 
+	/**
+	 * 获得设备字符串描述符。
+	 */
 	if (cp->string == NULL)
 		cp->string = usb_cache_string(dev, cp->desc.iConfiguration);
 
@@ -1601,6 +1854,9 @@ free_interfaces:
 	 * routines may install different altsettings and may
 	 * claim() any interfaces not yet bound.  Many class drivers
 	 * need that: CDC, audio, video, etc.
+	 */
+	/**
+	 * 将所有接口与设备模型绑定起来，并为其查找驱动。
 	 */
 	for (i = 0; i < nintf; ++i) {
 		struct usb_interface *intf = cp->interface[i];

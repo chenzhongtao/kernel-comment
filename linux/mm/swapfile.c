@@ -44,6 +44,7 @@ static const char Unused_offset[] = "Unused swap offset entry ";
 
 struct swap_list_t swap_list = {-1, -1};
 
+/* 系统交换区信息 */
 static struct swap_info_struct swap_info[MAX_SWAPFILES];
 
 static DEFINE_MUTEX(swapon_mutex);
@@ -100,8 +101,9 @@ static inline unsigned long scan_swap_map(struct swap_info_struct *si)
 	 */
 
 	si->flags += SWP_SCANNING;
-	if (unlikely(!si->cluster_nr)) {
+	if (unlikely(!si->cluster_nr)) {/* 当前聚焦簇用完了，分配新的簇 */
 		si->cluster_nr = SWAPFILE_CLUSTER - 1;
+		/* 空闲页面不足一个簇 */
 		if (si->pages - si->inuse_pages < SWAPFILE_CLUSTER)
 			goto lowest;
 		spin_unlock(&swap_lock);
@@ -110,13 +112,14 @@ static inline unsigned long scan_swap_map(struct swap_info_struct *si)
 		last_in_cluster = offset + SWAPFILE_CLUSTER - 1;
 
 		/* Locate the first empty (unaligned) cluster */
+		/* 从当前位置开始，查找连续的簇 */
 		for (; last_in_cluster <= si->highest_bit; offset++) {
-			if (si->swap_map[offset])
+			if (si->swap_map[offset])/* 当前位置不可用，重新设置结束块号 */
 				last_in_cluster = offset + SWAPFILE_CLUSTER;
-			else if (offset == last_in_cluster) {
+			else if (offset == last_in_cluster) {/* 直到结束块号为止，都可用 */
 				spin_lock(&swap_lock);
 				si->cluster_next = offset-SWAPFILE_CLUSTER+1;
-				goto cluster;
+				goto cluster;/* 找到一个可用的簇 */
 			}
 			if (unlikely(--latency_ration < 0)) {
 				cond_resched();
@@ -127,6 +130,7 @@ static inline unsigned long scan_swap_map(struct swap_info_struct *si)
 		goto lowest;
 	}
 
+	/* 递减当前簇中可用页数量 */
 	si->cluster_nr--;
 cluster:
 	offset = si->cluster_next;
@@ -136,6 +140,7 @@ checks:	if (!(si->flags & SWP_WRITEOK))
 		goto no_page;
 	if (!si->highest_bit)
 		goto no_page;
+	/* 当前页计数为0，可用 */
 	if (!si->swap_map[offset]) {
 		if (offset == si->lowest_bit)
 			si->lowest_bit++;
@@ -153,16 +158,18 @@ checks:	if (!(si->flags & SWP_WRITEOK))
 	}
 
 	spin_unlock(&swap_lock);
+	/* 释放锁以后遍历查找可用槽位 */
 	while (++offset <= si->highest_bit) {
-		if (!si->swap_map[offset]) {
+		if (!si->swap_map[offset]) {/* 可用，但是此时没有加锁，因此加锁后再次检查 */
 			spin_lock(&swap_lock);
 			goto checks;
 		}
-		if (unlikely(--latency_ration < 0)) {
+		if (unlikely(--latency_ration < 0)) {/* 加入调度点 */
 			cond_resched();
 			latency_ration = LATENCY_LIMIT;
 		}
 	}
+	/* 遍历到高点，仍然没有找到合适的槽位，加锁后从低点开始查找 */
 	spin_lock(&swap_lock);
 	goto lowest;
 
@@ -171,6 +178,9 @@ no_page:
 	return 0;
 }
 
+/**
+ * 从交换区中分配一个可用的槽位
+ */
 swp_entry_t get_swap_page(void)
 {
 	struct swap_info_struct *si;
@@ -179,10 +189,13 @@ swp_entry_t get_swap_page(void)
 	int wrapped = 0;
 
 	spin_lock(&swap_lock);
-	if (nr_swap_pages <= 0)
+	if (nr_swap_pages <= 0)/* 没有交换区了 */
 		goto noswap;
 	nr_swap_pages--;
 
+	/**
+	 * 从当前交换区swap_list.next开始，遍历所有交换区
+	 */
 	for (type = swap_list.next; type >= 0 && wrapped < 2; type = next) {
 		si = swap_info + type;
 		next = si->next;
@@ -198,6 +211,7 @@ swp_entry_t get_swap_page(void)
 			continue;
 
 		swap_list.next = next;
+		/* 在交换区中扫描分配位图，找到空闲的槽位 */
 		offset = scan_swap_map(si);
 		if (offset) {
 			spin_unlock(&swap_lock);
@@ -1067,7 +1081,9 @@ static int setup_swap_extents(struct swap_info_struct *sis, sector_t *span)
 	int ret;
 
 	inode = sis->swap_file->f_mapping->host;
+	/* 块设备作为交换区 */
 	if (S_ISBLK(inode->i_mode)) {
+		/* 块设备是连续的，因此只有一个区块，添加后返回 */
 		ret = add_swap_extent(sis, 0, sis->max, 0);
 		*span = sis->pages;
 		goto done;
@@ -1083,30 +1099,34 @@ static int setup_swap_extents(struct swap_info_struct *sis, sector_t *span)
 	probe_block = 0;
 	page_no = 0;
 	last_block = i_size_read(inode) >> blkbits;
+	/* 循环处理文件中各个块 */
 	while ((probe_block + blocks_per_page) <= last_block &&
 			page_no < sis->max) {
 		unsigned block_in_page;
 		sector_t first_block;
 
+		/* 获得当前逻辑块对应的磁盘块号 */
 		first_block = bmap(inode, probe_block);
-		if (first_block == 0)
+		if (first_block == 0)/* ??会发生吗?? */
 			goto bad_bmap;
 
 		/*
 		 * It must be PAGE_SIZE aligned on-disk
 		 */
-		if (first_block & (blocks_per_page - 1)) {
+		if (first_block & (blocks_per_page - 1)) {/* 该块在磁盘上没有对齐到页边界 */
 			probe_block++;
 			goto reprobe;
 		}
 
+		/* 计算同一页中，其他几个逻辑块是否在磁盘上连续 */
 		for (block_in_page = 1; block_in_page < blocks_per_page;
 					block_in_page++) {
 			sector_t block;
 
 			block = bmap(inode, probe_block + block_in_page);
-			if (block == 0)
+			if (block == 0)/* 异常 */
 				goto bad_bmap;
+			/* 不连续，下一页 */
 			if (block != first_block + block_in_page) {
 				/* Discontiguity */
 				probe_block++;
@@ -1125,6 +1145,10 @@ static int setup_swap_extents(struct swap_info_struct *sis, sector_t *span)
 		/*
 		 * We found a PAGE_SIZE-length, PAGE_SIZE-aligned run of blocks
 		 */
+		/**
+		 * 将一个物理上连续的逻辑页添加到区块链表中
+		 * 如果与上一个页连续，则与前一个区块合并
+		 */
 		ret = add_swap_extent(sis, page_no, 1, first_block);
 		if (ret < 0)
 			goto out;
@@ -1134,6 +1158,7 @@ static int setup_swap_extents(struct swap_info_struct *sis, sector_t *span)
 reprobe:
 		continue;
 	}
+	/* 将可用页面数量保存到交换区描述符中 */
 	ret = nr_extents;
 	*span = 1 + highest_block - lowest_block;
 	if (page_no == 0)
@@ -1410,6 +1435,9 @@ __initcall(procswaps_init);
  *
  * The swapon system call
  */
+/**
+ * 启用交换分区
+ */
 asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 {
 	struct swap_info_struct * p;
@@ -1433,20 +1461,24 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 	struct inode *inode = NULL;
 	int did_down = 0;
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (!capable(CAP_SYS_ADMIN))/* 权限检查 */
 		return -EPERM;
+	/* 获取自旋锁，以保护对交换区数组的访问 */
 	spin_lock(&swap_lock);
 	p = swap_info;
+	/* 查找一个空闲项 */
 	for (type = 0 ; type < nr_swapfiles ; type++,p++)
 		if (!(p->flags & SWP_USED))
 			break;
 	error = -EPERM;
+	/* 没有空闲项了，退出 */
 	if (type >= MAX_SWAPFILES) {
 		spin_unlock(&swap_lock);
 		goto out;
 	}
-	if (type >= nr_swapfiles)
+	if (type >= nr_swapfiles)/* 这样的优化实在没有必要 */
 		nr_swapfiles = type+1;
+	/* 初始化数据项 */
 	INIT_LIST_HEAD(&p->extent_list);
 	p->flags = SWP_USED;
 	p->swap_file = NULL;
@@ -1470,6 +1502,7 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 		name = NULL;
 		goto bad_swap_2;
 	}
+	/* 打开交换文件或设备 */
 	swap_file = filp_open(name, O_RDWR|O_LARGEFILE, 0);
 	error = PTR_ERR(swap_file);
 	if (IS_ERR(swap_file)) {
@@ -1482,6 +1515,7 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 	inode = mapping->host;
 
 	error = -EBUSY;
+	/* 在已经打开的交换区中，查找是否已经打开了同一个设备 */
 	for (i = 0; i < nr_swapfiles; i++) {
 		struct swap_info_struct *q = &swap_info[i];
 
@@ -1492,8 +1526,10 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 	}
 
 	error = -EINVAL;
+	/* 打开设备是一个块设备 */
 	if (S_ISBLK(inode->i_mode)) {
 		bdev = I_BDEV(inode);
+		/* 获得块设备的引用计数 */
 		error = bd_claim(bdev, sys_swapon);
 		if (error < 0) {
 			bdev = NULL;
@@ -1505,7 +1541,7 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 		if (error < 0)
 			goto bad_swap;
 		p->bdev = bdev;
-	} else if (S_ISREG(inode->i_mode)) {
+	} else if (S_ISREG(inode->i_mode)) {/* 文件作为分区设备 */
 		p->bdev = inode->i_sb->s_bdev;
 		mutex_lock(&inode->i_mutex);
 		did_down = 1;
@@ -1522,30 +1558,33 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 	/*
 	 * Read the swap header.
 	 */
-	if (!mapping->a_ops->readpage) {
+	if (!mapping->a_ops->readpage) {/* 地址空间没有指定readpage函数，无法用于交换 */
 		error = -EINVAL;
 		goto bad_swap;
 	}
+	/* 读取第一页 */
 	page = read_mapping_page(mapping, 0, swap_file);
 	if (IS_ERR(page)) {
 		error = PTR_ERR(page);
 		goto bad_swap;
 	}
 	kmap(page);
+	/* 分析第一页的内容 */
 	swap_header = page_address(page);
 
+	/* 读取版本号 */
 	if (!memcmp("SWAP-SPACE",swap_header->magic.magic,10))
 		swap_header_version = 1;
 	else if (!memcmp("SWAPSPACE2",swap_header->magic.magic,10))
 		swap_header_version = 2;
-	else {
+	else {/* 不是交换分区 */
 		printk(KERN_ERR "Unable to find swap-space signature\n");
 		error = -EINVAL;
 		goto bad_swap;
 	}
 	
 	switch (swap_header_version) {
-	case 1:
+	case 1:/* 当前版本的内核已经不支持第一版分区了，它只能交换128M内存 */
 		printk(KERN_ERR "version 0 swap is no longer supported. "
 			"Use mkswap -v1 %s\n", name);
 		error = -EINVAL;
@@ -1622,6 +1661,7 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 		p->swap_map[0] = SWAP_MAP_BAD;
 		p->max = maxpages;
 		p->pages = nr_good_pages;
+		/* 初始化分块区间链表 */
 		nr_extents = setup_swap_extents(p, &span);
 		if (nr_extents < 0) {
 			error = nr_extents;
@@ -1648,6 +1688,7 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 
 	/* insert swap space into swap_list: */
 	prev = -1;
+	/* 根据优先级，将其插入到交换区链表中 */
 	for (i = swap_list.head; i >= 0; i = swap_info[i].next) {
 		if (p->prio >= swap_info[i].prio) {
 			break;

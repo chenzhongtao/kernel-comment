@@ -12,8 +12,10 @@
  */
 
 struct sigqueue {
+	/* 通过此字段将信号链接到待决链表 */
 	struct list_head list;
 	int flags;
+	/* 待决信号的详细信息 */
 	siginfo_t info;
 	struct user_struct *user;
 };
@@ -22,7 +24,9 @@ struct sigqueue {
 #define SIGQUEUE_PREALLOC	1
 
 struct sigpending {
+	/* 待决链表头指针，所有链表中的对象是sigqueue */
 	struct list_head list;
+	/* 待处理信号的位掩码 */
 	sigset_t signal;
 };
 

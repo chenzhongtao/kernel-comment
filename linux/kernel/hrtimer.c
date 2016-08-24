@@ -1036,6 +1036,9 @@ EXPORT_SYMBOL_GPL(hrtimer_get_res);
  * High resolution timer interrupt
  * Called with interrupts disabled
  */
+/**
+ * 高精度时钟中断处理程序
+ */
 void hrtimer_interrupt(struct clock_event_device *dev)
 {
 	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
@@ -1048,28 +1051,32 @@ void hrtimer_interrupt(struct clock_event_device *dev)
 	dev->next_event.tv64 = KTIME_MAX;
 
  retry:
-	now = ktime_get();
+	now = ktime_get();/* 获得当前高精度时间 */
 
 	expires_next.tv64 = KTIME_MAX;
 
 	base = cpu_base->clock_base;
 
+	/* 遍历本CPU两个红黑树:单调定时器和绝对时间定时器 */
 	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
 		ktime_t basenow;
 		struct rb_node *node;
 
-		spin_lock(&cpu_base->lock);
+		spin_lock(&cpu_base->lock);/* 获得红黑树锁 */
 
+		/* 修正偏移量 */
 		basenow = ktime_add(now, base->offset);
 
-		while ((node = base->first)) {
+		while ((node = base->first)) {/* 遍历红黑树所有节点 */
 			struct hrtimer *timer;
 
 			timer = rb_entry(node, struct hrtimer, node);
 
+			/* 当前节点未到期 */
 			if (basenow.tv64 < timer->expires.tv64) {
 				ktime_t expires;
 
+				/* 计算下次到期时间 */
 				expires = ktime_sub(timer->expires,
 						    base->offset);
 				if (expires.tv64 < expires_next.tv64)
@@ -1078,15 +1085,22 @@ void hrtimer_interrupt(struct clock_event_device *dev)
 			}
 
 			/* Move softirq callbacks to the pending list */
+			/**
+			 * 运行到这里，说明当前定时器已经到期
+			 * 首先判断该定时器是否应当在软中断中运行
+			 */
 			if (timer->cb_mode == HRTIMER_CB_SOFTIRQ) {
+				/* 从红黑树中移除 */
 				__remove_hrtimer(timer, base,
 						 HRTIMER_STATE_PENDING, 0);
+				/* 添加到待运行链表中 */
 				list_add_tail(&timer->cb_entry,
 					      &base->cpu_base->cb_pending);
-				raise = 1;
+				raise = 1;/* 表示需要触发软中断 */
 				continue;
 			}
 
+			/* 当前定时器需要在硬中断上下文中运行 */
 			__remove_hrtimer(timer, base,
 					 HRTIMER_STATE_CALLBACK, 0);
 			timer_stats_account_hrtimer(timer);
@@ -1097,26 +1111,30 @@ void hrtimer_interrupt(struct clock_event_device *dev)
 			 * the event hardware. This happens at the end
 			 * of this function anyway.
 			 */
+			/* 运行定时器，并且该定时器需要重启 */
 			if (timer->function(timer) != HRTIMER_NORESTART) {
 				BUG_ON(timer->state != HRTIMER_STATE_CALLBACK);
+				/* 将定时器重新添加到红黑树中 */
 				enqueue_hrtimer(timer, base, 0);
 			}
 			timer->state &= ~HRTIMER_STATE_CALLBACK;
 		}
-		spin_unlock(&cpu_base->lock);
+		spin_unlock(&cpu_base->lock);/* 释放自旋锁 */
 		base++;
 	}
 
 	cpu_base->expires_next = expires_next;
 
 	/* Reprogramming necessary ? */
+	/* 仍然还有定时器 */
 	if (expires_next.tv64 != KTIME_MAX) {
+		/* 对硬件进行重新编程，使其在下一个定时器到期时触发中断 */
 		if (tick_program_event(expires_next, 0))
-			goto retry;
+			goto retry;/* 如果编程失败，说明下一个定时器已经到期了，重启整个处理流程 */
 	}
 
 	/* Raise softirq ? */
-	if (raise)
+	if (raise)/* 如果需要触发软中断，则触发它，继续在软中断中处理高精度定时器 */
 		raise_softirq(HRTIMER_SOFTIRQ);
 }
 
@@ -1175,20 +1193,21 @@ static inline void run_hrtimer_queue(struct hrtimer_cpu_base *cpu_base,
 	struct rb_node *node;
 	struct hrtimer_clock_base *base = &cpu_base->clock_base[index];
 
-	if (!base->first)
+	if (!base->first)/* 如果没有到期定时器，则退出 */
 		return;
 
-	if (base->get_softirq_time)
+	if (base->get_softirq_time)/* 获得软中断时间，以此为基础进行定时器到期比较时间 */
 		base->softirq_time = base->get_softirq_time();
 
-	spin_lock_irq(&cpu_base->lock);
+	spin_lock_irq(&cpu_base->lock);/* 关中断并获得自旋锁 */
 
-	while ((node = base->first)) {
+	while ((node = base->first)) {/* 从第一个定时器开始遍历红黑树 */
 		struct hrtimer *timer;
 		enum hrtimer_restart (*fn)(struct hrtimer *);
 		int restart;
 
 		timer = rb_entry(node, struct hrtimer, node);
+		/* 当前节点未到期，退出 */
 		if (base->softirq_time.tv64 <= timer->expires.tv64)
 			break;
 
@@ -1197,16 +1216,18 @@ static inline void run_hrtimer_queue(struct hrtimer_cpu_base *cpu_base,
 #endif
 		timer_stats_account_hrtimer(timer);
 
+		/* 将节点从红黑树中删除 */
 		fn = timer->function;
 		__remove_hrtimer(timer, base, HRTIMER_STATE_CALLBACK, 0);
 		spin_unlock_irq(&cpu_base->lock);
 
+		/* 开中断后调用回调函数 */
 		restart = fn(timer);
 
 		spin_lock_irq(&cpu_base->lock);
 
 		timer->state &= ~HRTIMER_STATE_CALLBACK;
-		if (restart != HRTIMER_NORESTART) {
+		if (restart != HRTIMER_NORESTART) {/* 需要重启定时器，将它添加到红黑树中 */
 			BUG_ON(hrtimer_active(timer));
 			enqueue_hrtimer(timer, base, 0);
 		}
@@ -1221,11 +1242,15 @@ static inline void run_hrtimer_queue(struct hrtimer_cpu_base *cpu_base,
  * softirq context in case the hrtimer initialization failed or has
  * not been done yet.
  */
+/**
+ * 在没有高精度时钟时，由此函数在软中断上下文处理高精度定时器
+ */
 void hrtimer_run_queues(void)
 {
 	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
 	int i;
 
+	/* 如果没有活动定时器，直接退出 */
 	if (hrtimer_hres_active())
 		return;
 
@@ -1241,8 +1266,10 @@ void hrtimer_run_queues(void)
 		if (hrtimer_switch_to_hres())
 			return;
 
+	/* 获得软中断时间 */
 	hrtimer_get_softirq_time(cpu_base);
 
+	/* 处理两个红黑树上的到期定时器 */
 	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++)
 		run_hrtimer_queue(cpu_base, i);
 }

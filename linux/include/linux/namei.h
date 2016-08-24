@@ -14,9 +14,14 @@ struct open_intent {
 
 enum { MAX_NESTED_LINKS = 8 };
 
+/**
+ * 查找inode时使用的参数结构
+ */
 struct nameidata {
+	/* 查找结果，对应的缓存项和文件系统加载点 */
 	struct dentry	*dentry;
 	struct vfsmount *mnt;
+	/* 要查找的文件名称 */
 	struct qstr	last;
 	unsigned int	flags;
 	int		last_type;
@@ -30,7 +35,9 @@ struct nameidata {
 };
 
 struct path {
+	/* 目录所在的装载点 */
 	struct vfsmount *mnt;
+	/* 目录缓存项 */
 	struct dentry *dentry;
 };
 

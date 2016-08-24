@@ -40,6 +40,10 @@ void bdi_destroy(struct backing_dev_info *bdi)
 }
 EXPORT_SYMBOL(bdi_destroy);
 
+/**
+ * 拥塞等待队列
+ * 分别用于读和写
+ */
 static wait_queue_head_t congestion_wqh[2] = {
 		__WAIT_QUEUE_HEAD_INITIALIZER(congestion_wqh[0]),
 		__WAIT_QUEUE_HEAD_INITIALIZER(congestion_wqh[1])

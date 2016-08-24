@@ -329,15 +329,18 @@ int bprm_mm_init(struct linux_binprm *bprm)
 	int err;
 	struct mm_struct *mm = NULL;
 
+	/* ·ÖÅä½ø³ÌµØÖ·¿Õ¼ä¹ÜÀí½á¹¹ */
 	bprm->mm = mm = mm_alloc();
 	err = -ENOMEM;
 	if (!mm)
 		goto err;
 
+	/* ¶ÔµØÖ·¿Õ¼ä½øĞĞÌØ¶¨ÌåÏµµÄ³õÊ¼»¯ */
 	err = init_new_context(current, mm);
 	if (err)
 		goto err;
 
+	/* ½¨Á¢³õÊ¼µÄÕ» */
 	err = __bprm_mm_init(bprm);
 	if (err)
 		goto err;
@@ -1069,14 +1072,16 @@ int prepare_binprm(struct linux_binprm *bprm)
 	if (bprm->file->f_op == NULL)
 		return -EACCES;
 
+	/* ¸´ÖÆ¸¸½ø³ÌµÄuidºÍgid */
 	bprm->e_uid = current->euid;
 	bprm->e_gid = current->egid;
 
+	/* ¼ÓÔØµÄÎÄ¼şÏµÍ³Ã»ÓĞMNT_NOSUID±êÖ¾ */
 	if(!(bprm->file->f_path.mnt->mnt_flags & MNT_NOSUID)) {
 		/* Set-uid? */
-		if (mode & S_ISUID) {
+		if (mode & S_ISUID) {/* ÎÄ¼ş±êÖ¾Ö¸Ê¾°´ÌØ¶¨Éí·İÔËĞĞ´Ë³ÌĞò */
 			current->personality &= ~PER_CLEAR_ON_SETID;
-			bprm->e_uid = inode->i_uid;
+			bprm->e_uid = inode->i_uid;/* ĞŞ¸Ä´´½¨±êÖ¾ÖĞµÄuid */
 		}
 
 		/* Set-gid? */
@@ -1085,8 +1090,8 @@ int prepare_binprm(struct linux_binprm *bprm)
 		 * is a candidate for mandatory locking, not a setgid
 		 * executable.
 		 */
-		if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) {
-			current->personality &= ~PER_CLEAR_ON_SETID;
+		if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) {/* ´¦ÀíÎÄ¼şÖĞµÄgid±êÖ */
+			current->personality &= ~PER_CLEAR_ON_SETI
 			bprm->e_gid = inode->i_gid;
 		}
 	}
@@ -1288,6 +1293,13 @@ EXPORT_SYMBOL(search_binary_handler);
 /*
  * sys_execve() executes a new program.
  */
+/**
+ * Ö´ĞĞÒ»¸öĞÂ³ÌĞò
+ *	filename:	½ø³ÌÎÄ¼şÃû³Æ
+ *	argv:		ÓÃ»§Ì¬²ÎÊıÁĞ±í
+ *	envp:		ÓÃ»§Ì¬»·¾³±äÁ¿ÁĞ±í
+ *	regs:		pt_regs²ÎÊı
+ */
 int do_execve(char * filename,
 	char __user *__user *argv,
 	char __user *__user *envp,
@@ -1303,6 +1315,7 @@ int do_execve(char * filename,
 	if (!bprm)
 		goto out_ret;
 
+	/* ´ò¿ªÒªÖ´ĞĞµÄÎÄ¼ş£¬ÕÒµ½ÎÄ¼şµÄinode²¢Éú³ÉÎÄ¼şÃèÊö·û */
 	file = open_exec(filename);
 	retval = PTR_ERR(file);
 	if (IS_ERR(file))
@@ -1314,6 +1327,7 @@ int do_execve(char * filename,
 	bprm->filename = filename;
 	bprm->interp = filename;
 
+	/* ³õÊ¼»¯bprmµØÖ·¿Õ¼ä */
 	retval = bprm_mm_init(bprm);
 	if (retval)
 		goto out_file;
@@ -1330,6 +1344,7 @@ int do_execve(char * filename,
 	if (retval)
 		goto out;
 
+	/* Ìá¹©Ò»Ğ©¸¸½ø³ÌÏà¹ØµÄÖµ */
 	retval = prepare_binprm(bprm);
 	if (retval < 0)
 		goto out;
@@ -1349,6 +1364,7 @@ int do_execve(char * filename,
 		goto out;
 	bprm->argv_len = env_p - bprm->p;
 
+	/* ²éÕÒ¶ş½øÖÆ¸ñÊ½µÄ´¦Àí·½·¨£¬²¢½«ĞÂ³ÌĞòµÄÊı¾İ¼ÓÔØµ½¾ÉµÄµØÖ·¿Õ¼äÖĞ */
 	retval = search_binary_handler(bprm,regs);
 	if (retval >= 0) {
 		/* execve success */

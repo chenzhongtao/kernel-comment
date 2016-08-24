@@ -58,9 +58,15 @@ static inline int radix_tree_is_indirect_ptr(void *ptr)
 #define RADIX_TREE_MAX_TAGS 2
 
 /* root tags are stored in gfp_mask, shifted by __GFP_BITS_SHIFT */
+/**
+ * 基数根节点
+ */
 struct radix_tree_root {
+	/* 树的高度，可据此计算树中数据项的最大数目 */
 	unsigned int		height;
+	/* 从哪个区域分配内存 */
 	gfp_t			gfp_mask;
+	/* 树的第一个节点 */
 	struct radix_tree_node	*rnode;
 };
 

@@ -133,6 +133,7 @@ static inline void sg_inc_cpu_power(struct sched_group *sg, u32 val)
 }
 #endif
 
+/* 用于判断调度策略是否属性实时类 */
 static inline int rt_policy(int policy)
 {
 	if (unlikely(policy == SCHED_FIFO) || unlikely(policy == SCHED_RR))
@@ -140,6 +141,7 @@ static inline int rt_policy(int policy)
 	return 0;
 }
 
+/* 用于判断进程是否属性实时类 */
 static inline int task_has_rt_policy(struct task_struct *p)
 {
 	return rt_policy(p->policy);
@@ -228,19 +230,28 @@ static inline void set_task_cfs_rq(struct task_struct *p, unsigned int cpu) { }
 #endif	/* CONFIG_FAIR_GROUP_SCHED */
 
 /* CFS-related fields in a runqueue */
+/**
+ * CFS就绪队列，在CPU调度队列中嵌入了此队列
+ */
 struct cfs_rq {
+	/* 所有CFS进程的累积负荷值 */
 	struct load_weight load;
+	/* 队列上可运行进程的数目 */
 	unsigned long nr_running;
 
 	u64 exec_clock;
+	/* 记录队列上所有进程的最小虚拟运行时间，可能比红黑树最左边结点的vruntime值大 */
 	u64 min_vruntime;
 
+	/* 用于在按时间排序的红黑树中管理所有进程 */
 	struct rb_root tasks_timeline;
+	/* 红黑树最左边的结点，即最需要被调度的进程 */
 	struct rb_node *rb_leftmost;
 	struct rb_node *rb_load_balance_curr;
 	/* 'curr' points to currently running entity on this cfs_rq.
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
+	/* 当前执行进程的可调度实体 */
 	struct sched_entity *curr;
 
 	unsigned long nr_spread_over;
@@ -262,8 +273,11 @@ struct cfs_rq {
 };
 
 /* Real-Time classes' related field in a runqueue: */
+/* 实时进程调度队列 */
 struct rt_rq {
+	/* 处于激活状态的实时进程优先级位图及其链表 */
 	struct rt_prio_array active;
+	/* 用于多核负载均衡 */
 	int rt_load_balance_idx;
 	struct list_head *rt_load_balance_head, *rt_load_balance_curr;
 };
@@ -275,6 +289,9 @@ struct rt_rq {
  * (such as the load balancing or the thread migration code), lock
  * acquire operations must be ordered by ascending &runqueue.
  */
+/**
+ * 每CPU运行队列
+ */
 struct rq {
 	/* runqueue lock: */
 	spinlock_t lock;
@@ -283,18 +300,22 @@ struct rq {
 	 * nr_running and cpu_load should be in the same cacheline because
 	 * remote CPUs use both these fields when doing load calculation.
 	 */
+	/* 运行队列上可运行进程的数目， */
 	unsigned long nr_running;
 	#define CPU_LOAD_IDX_MAX 5
+	/* 此前的工作负荷 */
 	unsigned long cpu_load[CPU_LOAD_IDX_MAX];
 	unsigned char idle_at_tick;
 #ifdef CONFIG_NO_HZ
 	unsigned char in_nohz_recently;
 #endif
 	/* capture load from *all* tasks on this cpu: */
+	/* 就绪队列当前负荷。由当前队列上的进程数目和优先级决定。 */
 	struct load_weight load;
 	unsigned long nr_load_updates;
 	u64 nr_switches;
 
+	/* 嵌入的CFS和RT调度器的子就绪队列 */
 	struct cfs_rq cfs;
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this cpu: */
@@ -310,10 +331,12 @@ struct rq {
 	 */
 	unsigned long nr_uninterruptible;
 
+	/* 当前运行的进程和idle进程 */
 	struct task_struct *curr, *idle;
 	unsigned long next_balance;
 	struct mm_struct *prev_mm;
 
+	/* 就绪队列时钟。update_rq_clock中更新。 */
 	u64 clock, prev_clock_raw;
 	s64 clock_max_delta;
 
@@ -325,15 +348,19 @@ struct rq {
 	atomic_t nr_iowait;
 
 #ifdef CONFIG_SMP
+	/* 队列所在的调度域 */
 	struct sched_domain *sd;
 
 	/* For active balancing */
+	/* 是否进行主动均衡 */
 	int active_balance;
 	int push_cpu;
 	/* cpu of this runqueue: */
+	/* 运行队列所在的CPU */
 	int cpu;
 
 	struct task_struct *migration_thread;
+	/* 所有待处理的迁移请求 */
 	struct list_head migration_queue;
 #endif
 
@@ -362,9 +389,11 @@ struct rq {
 	struct lock_class_key rq_lock_key;
 };
 
+/* 每CPU变量，运行队列 */
 static DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 static DEFINE_MUTEX(sched_hotcpu_mutex);
 
+/* 检查是否需要抢占当前进程 */
 static inline void check_preempt_curr(struct rq *rq, struct task_struct *p)
 {
 	rq->curr->sched_class->check_preempt_curr(rq, p);
@@ -810,6 +839,7 @@ static inline void update_load_sub(struct load_weight *lw, unsigned long dec)
  * If a task goes up by ~10% and another task goes down by ~10% then
  * the relative distance between them is ~25%.)
  */
+/* 进程优先级与权重转换表 */
 static const int prio_to_weight[40] = {
  /* -20 */     88761,     71755,     56483,     46273,     36291,
  /* -15 */     29154,     23254,     18705,     14949,     11916,
@@ -918,9 +948,10 @@ static void dec_nr_running(struct task_struct *p, struct rq *rq)
 	dec_load(rq, p);
 }
 
+/* 设置进程的权重 */
 static void set_load_weight(struct task_struct *p)
 {
-	if (task_has_rt_policy(p)) {
+	if (task_has_rt_policy(p)) {/* 实时进程的权重是普通进程的2倍 */
 		p->se.load.weight = prio_to_weight[0] * 2;
 		p->se.load.inv_weight = prio_to_wmult[0] >> 1;
 		return;
@@ -929,16 +960,18 @@ static void set_load_weight(struct task_struct *p)
 	/*
 	 * SCHED_IDLE tasks get minimal weight:
 	 */
-	if (p->policy == SCHED_IDLE) {
+	if (p->policy == SCHED_IDLE) {/* IDLE进程权重非常小 */
 		p->se.load.weight = WEIGHT_IDLEPRIO;
 		p->se.load.inv_weight = WMULT_IDLEPRIO;
 		return;
 	}
 
+	/* 普通进程按转换表进行转换 */
 	p->se.load.weight = prio_to_weight[p->static_prio - MAX_RT_PRIO];
 	p->se.load.inv_weight = prio_to_wmult[p->static_prio - MAX_RT_PRIO];
 }
 
+/* 进程入队 */
 static void enqueue_task(struct rq *rq, struct task_struct *p, int wakeup)
 {
 	sched_info_queued(p);
@@ -946,6 +979,7 @@ static void enqueue_task(struct rq *rq, struct task_struct *p, int wakeup)
 	p->se.on_rq = 1;
 }
 
+/* 进程出队 */
 static void dequeue_task(struct rq *rq, struct task_struct *p, int sleep)
 {
 	p->sched_class->dequeue_task(rq, p, sleep);
@@ -985,6 +1019,9 @@ static inline int normal_prio(struct task_struct *p)
  * interactivity modifiers. Will be RT if the task got
  * RT-boosted. If not then it returns p->normal_prio.
  */
+/**
+ * 计算进程的优先级
+ */
 static int effective_prio(struct task_struct *p)
 {
 	p->normal_prio = normal_prio(p);
@@ -992,6 +1029,11 @@ static int effective_prio(struct task_struct *p)
 	 * If we are RT tasks or we were boosted to RT priority,
 	 * keep the priority unchanged. Otherwise, update priority
 	 * to the normal priority:
+	 */
+	/**
+	 * 如果是实时进程，或者已经提高到实时优先级，则保持优先级不变。
+	 * 否则返回普通优先级 
+	 * 进程可能由于优先级继承的原因，进程临时提升为实时优先级。
 	 */
 	if (!rt_prio(p->prio))
 		return p->normal_prio;
@@ -1710,13 +1752,18 @@ static void __sched_fork(struct task_struct *p)
 /*
  * fork()/clone()-time setup:
  */
+/**
+ * 在fork时的调度器处理过程
+ */
 void sched_fork(struct task_struct *p, int clone_flags)
 {
 	int cpu = get_cpu();
 
+	/* 初始化调度器相关字段 */
 	__sched_fork(p);
 
 #ifdef CONFIG_SMP
+	/* 负载平衡处理 */
 	cpu = sched_balance_self(cpu, SD_BALANCE_FORK);
 #endif
 	set_task_cpu(p, cpu);
@@ -1724,8 +1771,9 @@ void sched_fork(struct task_struct *p, int clone_flags)
 	/*
 	 * Make sure we do not leak PI boosting priority to the child:
 	 */
+	/* 复制进程的普通优先级，此处不能复制prio字段。因为prio可能受到优先级继承的影响。 */
 	p->prio = current->normal_prio;
-	if (!rt_prio(p->prio))
+	if (!rt_prio(p->prio))/* 如果进程不是实时优先级，则总是进行CFS调度 */
 		p->sched_class = &fair_sched_class;
 
 #if defined(CONFIG_SCHEDSTATS) || defined(CONFIG_TASK_DELAY_ACCT)
@@ -1749,6 +1797,7 @@ void sched_fork(struct task_struct *p, int clone_flags)
  * that must be done for every newly created context, then puts the task
  * on the runqueue and wakes it.
  */
+/* 唤醒一个新创建的进程，需要将进程加入到任务队列中 */
 void fastcall wake_up_new_task(struct task_struct *p, unsigned long clone_flags)
 {
 	unsigned long flags;
@@ -1908,6 +1957,9 @@ static void finish_task_switch(struct rq *rq, struct task_struct *prev)
  * schedule_tail - first thing a freshly forked thread must call.
  * @prev: the thread we just switched away from.
  */
+/**
+ * fork创建的新进程，首先执行此过程
+ */
 asmlinkage void schedule_tail(struct task_struct *prev)
 	__releases(rq->lock)
 {
@@ -1918,7 +1970,7 @@ asmlinkage void schedule_tail(struct task_struct *prev)
 	/* In this case, finish_task_switch does not reenable preemption */
 	preempt_enable();
 #endif
-	if (current->set_child_tid)
+	if (current->set_child_tid)/* NPTL库要求将当前进程的ID写入到用户态特定地址中 */
 		put_user(task_pid_vnr(current), current->set_child_tid);
 }
 
@@ -1926,12 +1978,16 @@ asmlinkage void schedule_tail(struct task_struct *prev)
  * context_switch - switch to the new MM and the new
  * thread's register state.
  */
+/**
+ * 任务上下文切换
+ */
 static inline void
 context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
 
+	/* 执行特定体系结构的任务切换准备工作，一般不需要做特定的任务 */
 	prepare_task_switch(rq, prev, next);
 	mm = next->mm;
 	oldmm = prev->active_mm;
@@ -1942,14 +1998,16 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 */
 	arch_enter_lazy_cpu_mode();
 
-	if (unlikely(!mm)) {
+	if (unlikely(!mm)) {/* 新进程是内核进程，不需要切换内存管理上下文 */
 		next->active_mm = oldmm;
 		atomic_inc(&oldmm->mm_count);
+		/* 通知底层结构不需要切换用户态虚拟地址空间。也不需要立即刷新tlb */
 		enter_lazy_tlb(oldmm, next);
-	} else
+	} else/* 需要切换内存上下文 */
 		switch_mm(oldmm, mm, next);
 
-	if (unlikely(!prev->mm)) {
+	if (unlikely(!prev->mm)) {/* 进程是内核进程 */
+		/* 断开与借用地址空间的联系 */
 		prev->active_mm = NULL;
 		rq->prev_mm = oldmm;
 	}
@@ -1964,14 +2022,17 @@ context_switch(struct rq *rq, struct task_struct *prev,
 #endif
 
 	/* Here we just switch the register state and the stack. */
+	/* 执行体系结构相关的寄存器内容和内核栈切换 */
 	switch_to(prev, next, prev);
 
+	/* 编译屏障 */
 	barrier();
 	/*
 	 * this_rq must be evaluated again because prev may have moved
 	 * CPUs since it called schedule(), thus the 'rq' on its stack
 	 * frame will be invalid.
 	 */
+	/* 进行一些清理工作，释放一些锁 */
 	finish_task_switch(this_rq(), prev);
 }
 
@@ -2182,12 +2243,16 @@ out:
  * sched_exec - execve() is a valuable balancing opportunity, because at
  * this point the task has the smallest effective memory and cache footprint.
  */
+/**
+ * 当执行exec调用时，调用此函数进行负载均衡
+ */
 void sched_exec(void)
 {
 	int new_cpu, this_cpu = get_cpu();
+	/* 选择一个最适合进程运行的目标CPU */
 	new_cpu = sched_balance_self(this_cpu, SD_BALANCE_EXEC);
 	put_cpu();
-	if (new_cpu != this_cpu)
+	if (new_cpu != this_cpu)/* 如果当前CPU并不是最适合的CPU，则向迁移进程发出一个迁移请求 */
 		sched_migrate_task(current, new_cpu);
 }
 
@@ -2737,6 +2802,9 @@ find_busiest_queue(struct sched_group *group, enum cpu_idle_type idle,
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
  */
+/**
+ * 在CPU之间进程负载均衡操作
+ */
 static int load_balance(int this_cpu, struct rq *this_rq,
 			struct sched_domain *sd, enum cpu_idle_type idle,
 			int *balance)
@@ -2772,6 +2840,7 @@ redo:
 		goto out_balanced;
 	}
 
+	/* 在组中找到最繁忙的队列 */
 	busiest = find_busiest_queue(group, idle, imbalance, &cpus);
 	if (!busiest) {
 		schedstat_inc(sd, lb_nobusyq[idle]);
@@ -2783,7 +2852,7 @@ redo:
 	schedstat_add(sd, lb_imbalance[idle], imbalance);
 
 	ld_moved = 0;
-	if (busiest->nr_running > 1) {
+	if (busiest->nr_running > 1) {/* 只有当该队列上有超过1个就绪任务时，才有必要进行均衡 */
 		/*
 		 * Attempt to move tasks. If find_busiest_group has found
 		 * an imbalance but busiest->nr_running <= 1, the group is
@@ -2792,6 +2861,7 @@ redo:
 		 */
 		local_irq_save(flags);
 		double_rq_lock(this_rq, busiest);
+		/* 从该队列迁移适当数目的进程到当前队列中，它会调用调度类的load_balance方法 */
 		ld_moved = move_tasks(this_rq, this_cpu, busiest,
 				      imbalance, sd, idle, &all_pinned);
 		double_rq_unlock(this_rq, busiest);
@@ -2829,13 +2899,13 @@ redo:
 				goto out_one_pinned;
 			}
 
-			if (!busiest->active_balance) {
+			if (!busiest->active_balance) {/* 需要远程队列主动进行均衡 */
 				busiest->active_balance = 1;
 				busiest->push_cpu = this_cpu;
 				active_balance = 1;
 			}
 			spin_unlock_irqrestore(&busiest->lock, flags);
-			if (active_balance)
+			if (active_balance)/* 唤醒远程队列上的迁移进程，要求其主动进行迁移 */
 				wake_up_process(busiest->migration_thread);
 
 			/*
@@ -3020,7 +3090,7 @@ static void active_load_balance(struct rq *busiest_rq, int busiest_cpu)
 	struct rq *target_rq;
 
 	/* Is there any task to move? */
-	if (busiest_rq->nr_running <= 1)
+	if (busiest_rq->nr_running <= 1)/* 进程已经被迁移走了，不需要再迁移 */
 		return;
 
 	target_rq = cpu_rq(target_cpu);
@@ -3473,6 +3543,11 @@ void account_steal_time(struct task_struct *p, cputime_t steal)
  * It also gets called by the fork code, when changing the parent's
  * timeslices.
  */
+/**
+ * 在定时器中定时调用的调度器。某些情况下会关闭。
+ *     管理调度相关的统计量。
+ *     激活周期性调度方法
+ */
 void scheduler_tick(void)
 {
 	int cpu = smp_processor_id();
@@ -3481,6 +3556,7 @@ void scheduler_tick(void)
 	u64 next_tick = rq->tick_timestamp + TICK_NSEC;
 
 	spin_lock(&rq->lock);
+	/* 更新队列的时钟 */
 	__update_rq_clock(rq);
 	/*
 	 * Let rq->clock advance by at least TICK_NSEC:
@@ -3488,13 +3564,16 @@ void scheduler_tick(void)
 	if (unlikely(rq->clock < next_tick))
 		rq->clock = next_tick;
 	rq->tick_timestamp = rq->clock;
+	/* 更新队列的cpu_load数组，记录历史负载数据 */
 	update_cpu_load(rq);
+	/* 调用底层调度器的定时器 */
 	if (curr != rq->idle) /* FIXME: needed? */
 		curr->sched_class->task_tick(rq, curr);
 	spin_unlock(&rq->lock);
 
 #ifdef CONFIG_SMP
 	rq->idle_at_tick = idle_cpu(cpu);
+	/* 触发SCHEDULE_SOFTIRQ软中断，在适当的时机执行run_rebalance_domains。 */
 	trigger_load_balance(rq, cpu);
 #endif
 }
@@ -3616,6 +3695,9 @@ pick_next_task(struct rq *rq, struct task_struct *prev)
 /*
  * schedule() is the main scheduler function.
  */
+/**
+ * 调度主函数
+ */
 asmlinkage void __sched schedule(void)
 {
 	struct task_struct *prev, *next;
@@ -3626,6 +3708,7 @@ asmlinkage void __sched schedule(void)
 need_resched:
 	preempt_disable();
 	cpu = smp_processor_id();
+	/* 取当前队列和任务 */
 	rq = cpu_rq(cpu);
 	rcu_qsctr_inc(cpu);
 	prev = rq->curr;
@@ -3640,33 +3723,42 @@ need_resched_nonpreemptible:
 	 * Do the rq-clock update outside the rq lock:
 	 */
 	local_irq_disable();
+	/* 更新队列运行时钟 */
 	__update_rq_clock(rq);
 	spin_lock(&rq->lock);
+	/* 清除进程的重新调度标志 */
 	clear_tsk_need_resched(prev);
 
+	/* 如果进程处于运行状态，或者此时任务是被抢占，则不需要处理出队操作 */
 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
+		/* 当前进程可以被信号中断，同时收到了信号 */
 		if (unlikely((prev->state & TASK_INTERRUPTIBLE) &&
 				unlikely(signal_pending(prev)))) {
-			prev->state = TASK_RUNNING;
+			prev->state = TASK_RUNNING;/* 将进程设置为可运行状态 */
 		} else {
+			/* 从运行队列中取出进程 */
 			deactivate_task(rq, prev, 1);
 		}
 		switch_count = &prev->nvcsw;
 	}
 
+	/* 当前核没有可运行进程，从其他核拉一些进程到当前核，进行负载平衡 */
 	if (unlikely(!rq->nr_running))
 		idle_balance(cpu, rq);
 
+	/* 告知调度器，当前进程将被替代。进行一些统计工作。 */
 	prev->sched_class->put_prev_task(rq, prev);
+	/* 选择下一个应该执行的进程 */
 	next = pick_next_task(rq, prev);
 
 	sched_info_switch(prev, next);
 
-	if (likely(prev != next)) {
+	if (likely(prev != next)) {/* 如果有可运行的进程，则需要切换到新进程 */
 		rq->nr_switches++;
 		rq->curr = next;
 		++*switch_count;
 
+		/* 特定体系结构的上下文切换过程 */
 		context_switch(rq, prev, next); /* unlocks the rq */
 	} else
 		spin_unlock_irq(&rq->lock);
@@ -3677,6 +3769,7 @@ need_resched_nonpreemptible:
 		goto need_resched_nonpreemptible;
 	}
 	preempt_enable_no_resched();
+	/* 检查是否有必要进行重新调度，如果需要，就重新选择进程调度 */
 	if (unlikely(test_thread_flag(TIF_NEED_RESCHED)))
 		goto need_resched;
 }
@@ -3699,10 +3792,12 @@ asmlinkage void __sched preempt_schedule(void)
 	 * If there is a non-zero preempt_count or interrupts are disabled,
 	 * we do not want to preempt the current task. Just return..
 	 */
+	/* 当前仍然禁止抢占，或者目前中断被禁止，此时不能进行抢占调度 */
 	if (likely(ti->preempt_count || irqs_disabled()))
 		return;
 
 	do {
+		/* 此标志表示正在处理抢占调度 */
 		add_preempt_count(PREEMPT_ACTIVE);
 
 		/*
@@ -3718,6 +3813,7 @@ asmlinkage void __sched preempt_schedule(void)
 #ifdef CONFIG_PREEMPT_BKL
 		task->lock_depth = saved_lock_depth;
 #endif
+		/* 再次调度回来后，递减标志 */
 		sub_preempt_count(PREEMPT_ACTIVE);
 
 		/*
@@ -3725,7 +3821,7 @@ asmlinkage void __sched preempt_schedule(void)
 		 * between schedule and now.
 		 */
 		barrier();
-	} while (unlikely(test_thread_flag(TIF_NEED_RESCHED)));
+	} while (unlikely(test_thread_flag(TIF_NEED_RESCHED)));/* 如果需要继续处理抢占，则再次处理 */
 }
 EXPORT_SYMBOL(preempt_schedule);
 
@@ -4013,6 +4109,9 @@ EXPORT_SYMBOL(sleep_on_timeout);
  * not touch ->normal_prio like __setscheduler().
  *
  * Used by the rt_mutex code to implement priority inheritance logic.
+ */
+/**
+ * 当新进程进入实时互斥量的等待队列时，通过此接口修改持有者的优先级
  */
 void rt_mutex_setprio(struct task_struct *p, int prio)
 {
@@ -4683,6 +4782,7 @@ static void __cond_resched(void)
 	} while (need_resched());
 }
 
+/* 有条件进行重新调度  */
 int __sched cond_resched(void)
 {
 	if (need_resched() && !(preempt_count() & PREEMPT_ACTIVE) &&
@@ -5147,6 +5247,11 @@ out:
  * thread migration by bumping thread off CPU then 'pushing' onto
  * another runqueue.
  */
+/**
+ * 迁移进程，主要负责:
+ *     完成调度器的迁移请求
+ *     实现主动均衡
+ */
 static int migration_thread(void *data)
 {
 	int cpu = (long)data;
@@ -5167,15 +5272,18 @@ static int migration_thread(void *data)
 			goto wait_to_die;
 		}
 
-		if (rq->active_balance) {
+		if (rq->active_balance) {/* 需要主动迁移 */
+			/* 主动均衡，其迁移策略比load_balance更激进。例如，不进行优先级比较 */
 			active_load_balance(rq, cpu);
+			/* 清除主动迁移标志 */
 			rq->active_balance = 0;
 		}
 
 		head = &rq->migration_queue;
 
-		if (list_empty(head)) {
+		if (list_empty(head)) {/* 没有来自调度器的待决迁移请求 */
 			spin_unlock_irq(&rq->lock);
+			/* 重新调度 */
 			schedule();
 			set_current_state(TASK_INTERRUPTIBLE);
 			continue;
@@ -5184,6 +5292,7 @@ static int migration_thread(void *data)
 		list_del_init(head->next);
 
 		spin_unlock(&rq->lock);
+		/* 直接迁移某个任务到目标CPU */
 		__migrate_task(req->task, cpu, req->dest_cpu);
 		local_irq_enable();
 

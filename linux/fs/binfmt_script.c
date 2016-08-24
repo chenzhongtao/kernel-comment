@@ -97,6 +97,7 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	return search_binary_handler(bprm,regs);
 }
 
+/* 解释执行#!机制的脚本 */
 static struct linux_binfmt script_format = {
 	.module		= THIS_MODULE,
 	.load_binary	= load_script,

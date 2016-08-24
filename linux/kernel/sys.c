@@ -1419,6 +1419,9 @@ asmlinkage long sys_setdomainname(char __user *name, int len)
 	return errno;
 }
 
+/**
+ * 检查进程的当前限制
+ */
 asmlinkage long sys_getrlimit(unsigned int resource, struct rlimit __user *rlim)
 {
 	if (resource >= RLIM_NLIMITS)
@@ -1456,6 +1459,10 @@ asmlinkage long sys_old_getrlimit(unsigned int resource, struct rlimit __user *r
 
 #endif
 
+/**
+ * 系统调用，设置进程的当前限制
+ * 限制值不能超过rlim_max的值
+ */
 asmlinkage long sys_setrlimit(unsigned int resource, struct rlimit __user *rlim)
 {
 	struct rlimit new_rlim, *old_rlim;

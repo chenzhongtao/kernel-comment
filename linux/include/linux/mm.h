@@ -71,17 +71,20 @@ extern unsigned int kobjsize(const void *objp);
 /*
  * vm_flags..
  */
+/* VMA区域的权限 */
 #define VM_READ		0x00000001	/* currently active flags */
 #define VM_WRITE	0x00000002
 #define VM_EXEC		0x00000004
 #define VM_SHARED	0x00000008
 
 /* mprotect() hardcodes VM_MAYREAD >> 4 == VM_READ, and so for r/w/x bits. */
+/* 用于确定是否可以设置对应的VM_*标志。由mprotect系统调用使用 */
 #define VM_MAYREAD	0x00000010	/* limits for mprotect() etc */
 #define VM_MAYWRITE	0x00000020
 #define VM_MAYEXEC	0x00000040
 #define VM_MAYSHARE	0x00000080
 
+/* 是否可以向上或向下扩展该区域 */
 #define VM_GROWSDOWN	0x00000100	/* general info on the segment */
 #define VM_GROWSUP	0x00000200
 #define VM_PFNMAP	0x00000400	/* Page-ranges managed without "struct page", just pure PFN */
@@ -92,13 +95,19 @@ extern unsigned int kobjsize(const void *objp);
 #define VM_IO           0x00004000	/* Memory mapped I/O or similar */
 
 					/* Used by sys_madvise() */
+/* 可能会从读到尾读取该区域，可针对此标志进行优化 */
 #define VM_SEQ_READ	0x00008000	/* App will access data sequentially */
+/* 该区域可能会被随机读取 */
 #define VM_RAND_READ	0x00010000	/* App will not benefit from clustered reads */
 
+/* 在fork时，不复制此区域 */
 #define VM_DONTCOPY	0x00020000      /* Do not copy this vma on fork */
+/* mremap调用不能扩展此区域 */
 #define VM_DONTEXPAND	0x00040000	/* Cannot expand with mremap() */
 #define VM_RESERVED	0x00080000	/* Count as reserved_vm like IO */
+/* 被用于overcommit计算。这样可以限制内存分配 */
 #define VM_ACCOUNT	0x00100000	/* Is a VM accounted object */
+/* 该区域基于巨页 */
 #define VM_HUGETLB	0x00400000	/* Huge TLB Page VM */
 #define VM_NONLINEAR	0x00800000	/* Is non-linear (remap_file_pages) */
 #define VM_MAPPED_COPY	0x01000000	/* T if mapped copy of data (nommu mmap) */
@@ -159,10 +168,16 @@ struct vm_fault {
  * unmapping it (needed to keep files on disk up-to-date etc), pointer
  * to the functions called when a no-page or a wp-page exception occurs. 
  */
+/**
+ * 操作VMA区域的标准方法
+ */
 struct vm_operations_struct {
+	/* 创建和删除VMA区域时的回调函数，通常为NULL */
 	void (*open)(struct vm_area_struct * area);
 	void (*close)(struct vm_area_struct * area);
+	/* 缺页异常时回调此方法 */
 	int (*fault)(struct vm_area_struct *vma, struct vm_fault *vmf);
+	/* 响应缺页异常的方法，为保持与旧版本兼容 */
 	struct page *(*nopage)(struct vm_area_struct *area,
 			unsigned long address, int *type);
 	unsigned long (*nopfn)(struct vm_area_struct *area,
@@ -170,6 +185,7 @@ struct vm_operations_struct {
 
 	/* notification that a previously read-only page is about to become
 	 * writable, if an error is returned it will cause a SIGBUS */
+	/* 如果是文件映射，调用此回调处理写时复制，使页面变为可写 */
 	int (*page_mkwrite)(struct vm_area_struct *vma, struct page *page);
 #ifdef CONFIG_NUMA
 	int (*set_policy)(struct vm_area_struct *vma, struct mempolicy *new);
@@ -780,12 +796,18 @@ extern int mprotect_fixup(struct vm_area_struct *vma,
  * Note that 'shrink' will be passed nr_to_scan == 0 when the VM is
  * querying the cache size, so a fastpath for that case is appropriate.
  */
+/**
+ * 内存收缩器
+ */
 struct shrinker {
+	/* 回调函数，使用它进行缓存回收，返回值表示还有多少对象仍然在缓存中 */
 	int (*shrink)(int nr_to_scan, gfp_t gfp_mask);
 	int seeks;	/* seeks to recreate an obj */
 
 	/* These are for internal use */
+	/* 通过此字段将收缩器挂接到链表中 */
 	struct list_head list;
+	/* 释放的对象数目 */
 	long nr;	/* objs pending delete */
 };
 #define DEFAULT_SEEKS 2 /* A good number if you don't know better. */
@@ -1072,10 +1094,15 @@ extern struct vm_area_struct * find_vma_prev(struct mm_struct * mm, unsigned lon
 
 /* Look up the first VMA which intersects the interval start_addr..end_addr-1,
    NULL if none.  Assume start_addr < end_addr. */
+/**
+ * 判断一个VMA区域是否位于某个有效区域内部
+ */   
 static inline struct vm_area_struct * find_vma_intersection(struct mm_struct * mm, unsigned long start_addr, unsigned long end_addr)
 {
+	/* 根据起始地址查找其位于哪一个区域内 */
 	struct vm_area_struct * vma = find_vma(mm,start_addr);
 
+	/* 如果这样的区域存在，并且结束地址小于该区域的结束地址，说明二者属于包含关系 */
 	if (vma && end_addr <= vma->vm_start)
 		vma = NULL;
 	return vma;

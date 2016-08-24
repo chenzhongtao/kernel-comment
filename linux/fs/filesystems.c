@@ -63,7 +63,10 @@ static struct file_system_type **find_filesystem(const char *name, unsigned len)
  *	structures and must not be freed until the file system has been
  *	unregistered.
  */
- 
+
+/**
+ * 注册文件系统。将文件系统保存到一个全局链表中。
+ */
 int register_filesystem(struct file_system_type * fs)
 {
 	int res = 0;
@@ -220,13 +223,16 @@ struct file_system_type *get_fs_type(const char *name)
 	const char *dot = strchr(name, '.');
 	unsigned len = dot ? dot - name : strlen(name);
 
+	/* 获取文件系统读锁 */
 	read_lock(&file_systems_lock);
+	/* 根据名称查找文件系统 */
 	fs = *(find_filesystem(name, len));
-	if (fs && !try_module_get(fs->owner))
+	if (fs && !try_module_get(fs->owner))/* 文件系统存在，但是模块正在卸载中 */
 		fs = NULL;
-	read_unlock(&file_systems_lock);
-	if (!fs && (request_module("%.*s", len, name) == 0)) {
-		read_lock(&file_systems_lock);
+	read_unlock(&file_systems_lock);/* 释放文件系统锁 */
+	/* 没有匹配的文件系统 */
+	if (!fs && (request_module("%.*s", len, name) == 0)) {/* 加载相应的模块 */
+		read_lock(&file_systems_lock);/* 再次获得文件系统锁并查找 */
 		fs = *(find_filesystem(name, len));
 		if (fs && !try_module_get(fs->owner))
 			fs = NULL;

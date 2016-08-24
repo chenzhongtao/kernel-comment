@@ -33,6 +33,11 @@ asmlinkage long sys_pipe(int __user *fildes)
 	return error;
 }
 
+/**
+ * 建立文件映射
+ * flags:映射标志，如MAP_FIXED
+ * prot:访问权限，如PROT_EXEC
+ */
 asmlinkage long sys_mmap(unsigned long addr, unsigned long len, unsigned long prot, unsigned long flags,
 	unsigned long fd, unsigned long off)
 {
@@ -46,16 +51,18 @@ asmlinkage long sys_mmap(unsigned long addr, unsigned long len, unsigned long pr
 	error = -EBADF;
 	file = NULL;
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	if (!(flags & MAP_ANONYMOUS)) {
+	if (!(flags & MAP_ANONYMOUS)) {/* 不是匿名映射，表示映射到文件 */
 		file = fget(fd);
-		if (!file)
+		if (!file)/* 文件句柄无效 */
 			goto out;
 	}
+	/* 获取mmap_sem信号量 */
 	down_write(&current->mm->mmap_sem);
+	/* do_mmap_pgoff完成实际的映射工作 */
 	error = do_mmap_pgoff(file, addr, len, prot, flags, off >> PAGE_SHIFT);
 	up_write(&current->mm->mmap_sem);
 
-	if (file)
+	if (file)/* 递减文件引用 */
 		fput(file);
 out:
 	return error;

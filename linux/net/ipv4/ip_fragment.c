@@ -586,15 +586,18 @@ int ip_defrag(struct sk_buff *skb, u32 user)
 	IP_INC_STATS_BH(IPSTATS_MIB_REASMREQDS);
 
 	/* Start by cleaning up the memory. */
+	/* 内存使用过多，可能是受到了攻击 */
 	if (atomic_read(&ip4_frags.mem) > ip4_frags_ctl.high_thresh)
 		ip_evictor();
 
 	/* Lookup (or create) queue header */
-	if ((qp = ip_find(ip_hdr(skb), user)) != NULL) {
+	/* ip_find在散列表中查找该分片的等待队列 */
+	if ((qp = ip_find(ip_hdr(skb), user)) != NULL) {.
 		int ret;
 
 		spin_lock(&qp->q.lock);
 
+		/* 将分片添加到队列中 */
 		ret = ip_frag_queue(qp, skb);
 
 		spin_unlock(&qp->q.lock);

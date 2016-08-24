@@ -253,6 +253,7 @@ extern struct lockdep_map rcu_lock_map;
  * exactly which pointers are protected by RCU.
  */
 
+/* 在获得rcu读锁的情况下，引用受rcu保护的指针 */
 #define rcu_dereference(p)     ({ \
 				typeof(p) _________p1 = ACCESS_ONCE(p); \
 				smp_read_barrier_depends(); \
@@ -271,7 +272,7 @@ extern struct lockdep_map rcu_lock_map;
  * call documents which pointers will be dereferenced by RCU read-side
  * code.
  */
-
+/* 公布一个新指针。首先应当将指针指向的数据结构设置好值，再调用此过程修改指针 */
 #define rcu_assign_pointer(p, v)	({ \
 						smp_wmb(); \
 						(p) = (v); \

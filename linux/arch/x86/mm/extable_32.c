@@ -25,9 +25,10 @@ int fixup_exception(struct pt_regs *regs)
 	}
 #endif
 
+	/* 根据异常发生时的指令地址，查找修复表 */
 	fixup = search_exception_tables(regs->eip);
-	if (fixup) {
-		regs->eip = fixup->fixup;
+	if (fixup) {/* 在修复表中存在修复地址 */
+		regs->eip = fixup->fixup;/* 修改返回地址，使其跳转到修复地址 */
 		return 1;
 	}
 

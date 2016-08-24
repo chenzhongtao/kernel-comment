@@ -71,10 +71,16 @@ typedef void (bio_destructor_t) (struct bio *);
  * main unit of I/O for the block layer and lower layers (ie drivers and
  * stacking drivers)
  */
+/**
+ * 可以由硬件一次性处理的磁盘请求。
+ */
 struct bio {
+	/* 传输开始的扇区号 */
 	sector_t		bi_sector;	/* device address in 512 byte
 						   sectors */
+	/* 同一个请求中，下一个bio请求 */
 	struct bio		*bi_next;	/* request queue link */
+	/* 请求所属的块设备 */
 	struct block_device	*bi_bdev;
 	unsigned long		bi_flags;	/* status, command, etc */
 	unsigned long		bi_rw;		/* bottom bits READ/WRITE,
@@ -87,13 +93,16 @@ struct bio {
 	/* Number of segments in this BIO after
 	 * physical address coalescing is performed.
 	 */
+	/* 传输中段的数目 */
 	unsigned short		bi_phys_segments;
 
 	/* Number of segments after physical and DMA remapping
 	 * hardware coalescing is performed.
 	 */
+	/* 传输中段的数目 */
 	unsigned short		bi_hw_segments;
 
+	/* 请求所涉及的数据长度，以字节为单位 */
 	unsigned int		bi_size;	/* residual I/O count */
 
 	/*
@@ -106,13 +115,17 @@ struct bio {
 
 	unsigned int		bi_max_vecs;	/* max bvl_vecs we can hold */
 
+	/* bio请求中的io向量 */
 	struct bio_vec		*bi_io_vec;	/* the actual vec list */
 
+	/* 请求完成时，由驱动调用此回调 */
 	bio_end_io_t		*bi_end_io;
 	atomic_t		bi_cnt;		/* pin count */
 
+	/* 用于驱动的私有信息 */
 	void			*bi_private;
 
+	/* 解析器，删除bio时使用 */
 	bio_destructor_t	*bi_destructor;	/* destructor */
 };
 

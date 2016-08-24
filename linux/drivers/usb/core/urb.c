@@ -59,10 +59,17 @@ void usb_init_urb(struct urb *urb)
  *
  * The driver must call usb_free_urb() when it is finished with the urb.
  */
+/**
+ * 创建URB的专用函数。
+ * 		iso_packets:		等时传输包的数目。
+ */
 struct urb *usb_alloc_urb(int iso_packets, gfp_t mem_flags)
 {
 	struct urb *urb;
 
+	/**
+	 * 根据等时传输包的数目，计算要分配的数据结构大小并分配内存。
+	 */
 	urb = kmalloc(sizeof(struct urb) +
 		iso_packets * sizeof(struct usb_iso_packet_descriptor),
 		mem_flags);
@@ -70,6 +77,9 @@ struct urb *usb_alloc_urb(int iso_packets, gfp_t mem_flags)
 		err("alloc_urb: kmalloc failed");
 		return NULL;
 	}
+	/**
+	 * 初始化引用计数，并进行其他一些初始化。
+	 */
 	usb_init_urb(urb);
 	return urb;
 }
@@ -84,9 +94,15 @@ struct urb *usb_alloc_urb(int iso_packets, gfp_t mem_flags)
  * Note: The transfer buffer associated with the urb is not freed, that must be
  * done elsewhere.
  */
+/**
+ * 释放URB的函数。
+ */
 void usb_free_urb(struct urb *urb)
 {
 	if (urb)
+		/**
+		 * 如果引用计数减为0，则调用urb_destroy释放它。
+		 */
 		kref_put(&urb->kref, urb_destroy);
 }
 
@@ -275,6 +291,9 @@ EXPORT_SYMBOL_GPL(usb_unanchor_urb);
  *      GFP_NOIO, unless b) or c) apply
  *
  */
+/**
+ * 向主机控制器提交URB。
+ */
 int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 {
 	int				xfertype, max;
@@ -282,14 +301,33 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	struct usb_host_endpoint	*ep;
 	int				is_out;
 
+	/**
+	 * 不能传输NULL对象。
+	 * hcpriv是留给主机控制器使用的，如果被占用，也是不允许的。
+	 * 如果不指定完成回调函数，也是不允许的。
+	 */
 	if (!urb || urb->hcpriv || !urb->complete)
 		return -EINVAL;
-	if (!(dev = urb->dev) || dev->state < USB_STATE_DEFAULT)
+	/**
+	 * 必须指定关联的USB设备，并且设备状态必须高于USB_STATE_DEFAULT
+	 * 设备也必须关联总线，设备号也必须大于0.
+	 * 设备号也不能为0，因为在设备没有进入USB_STATE_ADDRESS状态时，用设备0来响应主机的请求。
+	 * 当从USB_STATE_DEFAULT状态进入USB_STATE_ADDRESS时，需要将devnum设置为需要的设备号，当已经进入USB_STATE_ADDRESS时，devnum更不能为0了。
+	 */
+	if (!(dev = urb->dev) ||
+	    (dev->state < USB_STATE_DEFAULT) ||
+	    (!dev->bus) || (dev->devnum <= 0))
 		return -ENODEV;
+	/**
+	 * 这里判断设备的主机控制器是否处于电源活动状态。
+	 * 同时判断设备本身是否被挂起。
+	 */
+	if (dev->bus->controller->power.power_state.event != PM_EVENT_ON
+			|| dev->state == USB_STATE_SUSPENDED)
+		return -EHOSTUNREACH;
 
-	/* For now, get the endpoint from the pipe.  Eventually drivers
-	 * will be required to set urb->ep directly and we will eliminate
-	 * urb->pipe.
+	/**
+	 * 设置这个状态，表示URB的控制权已经在core和HCD中。
 	 */
 	ep = (usb_pipein(urb->pipe) ? dev->ep_in : dev->ep_out)
 			[usb_pipeendpoint(urb->pipe)];
@@ -298,15 +336,20 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 
 	urb->ep = ep;
 	urb->status = -EINPROGRESS;
+	/**
+	 * 初始化已经传输的长度为0，这样，当后面出错时，就可以向上层返回0.
+	 */
 	urb->actual_length = 0;
 
 	/* Lots of sanity checks, so HCDs can rely on clean data
 	 * and don't need to duplicate tests
 	 */
-	xfertype = usb_endpoint_type(&ep->desc);
-	if (xfertype == USB_ENDPOINT_XFER_CONTROL) {
-		struct usb_ctrlrequest *setup =
-				(struct usb_ctrlrequest *) urb->setup_packet;
+	/**
+	 * 获得管道的类型和方向。
+	 */
+	pipe = urb->pipe;
+	temp = usb_pipetype(pipe);
+	is_out = usb_pipeout(pipe);
 
 		if (!setup)
 			return -ENOEXEC;
@@ -320,11 +363,13 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	urb->transfer_flags = (urb->transfer_flags & ~URB_DIR_MASK) |
 			(is_out ? URB_DIR_OUT : URB_DIR_IN);
 
-	if (xfertype != USB_ENDPOINT_XFER_CONTROL &&
-			dev->state < USB_STATE_CONFIGURED)
-		return -ENODEV;
-
-	max = le16_to_cpu(ep->desc.wMaxPacketSize);
+	/**
+	 * 获得端点的最大包长。
+	 */
+	max = usb_maxpacket(dev, pipe, is_out);
+	/**
+	 * 如果包长小于等于0，说明该端点此时还没有初始化，返回错误。
+	 */
 	if (max <= 0) {
 		dev_dbg(&dev->dev,
 			"bogus endpoint ep%d%s in %s (bad maxpacket %d)\n",
@@ -337,28 +382,55 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	 * but drivers only control those sizes for ISO.
 	 * while we're checking, initialize return status.
 	 */
-	if (xfertype == USB_ENDPOINT_XFER_ISOC) {
+	/**
+	 * 对等时传输需要进行特殊处理。
+	 */
+	if (temp == PIPE_ISOCHRONOUS) {
 		int	n, len;
 
 		/* "high bandwidth" mode, 1-3 packets/uframe? */
+		/**
+		 * 高速端点。允许在每一帧中进行2到3次传输。
+		 */
 		if (dev->speed == USB_SPEED_HIGH) {
+			/**
+			 * 对这种端点来说，第12和13位表示了每个微帧可以额外传输的包。
+			 */
 			int	mult = 1 + ((max >> 11) & 0x03);
+			/**
+			 * 后面10位才是真正的包长。
+			 */
 			max &= 0x07ff;
 			max *= mult;
 		}
 
+		/**
+		 * 对等时传输来说，包个数小于等于0表示没有包需要传输。
+		 */
 		if (urb->number_of_packets <= 0)		    
 			return -EINVAL;
+		/**
+		 * 处理等时传输的每个包。
+		 */
 		for (n = 0; n < urb->number_of_packets; n++) {
 			len = urb->iso_frame_desc[n].length;
+			/**
+			 * 包长度小于0或者大于最大包长，退出。
+			 */
 			if (len < 0 || len > max) 
 				return -EMSGSIZE;
+			/**
+			 * 设置包描述符的初值。
+			 */
 			urb->iso_frame_desc[n].status = -EXDEV;
 			urb->iso_frame_desc[n].actual_length = 0;
 		}
 	}
 
 	/* the I/O buffer must be mapped/unmapped, except when length=0 */
+	/**
+	 * 缓冲区长度不能小于0。等于0是允许的。因为有时并不需要传输数据。
+	 */
 	if (urb->transfer_buffer_length < 0)
 		return -EMSGSIZE;
 
@@ -407,18 +479,30 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	 * supports different values... this uses EHCI/UHCI defaults (and
 	 * EHCI can use smaller non-default values).
 	 */
+	/**
+	 * 等时传输和中断传输是两种周期性的传输类型，需要对其处理一下interval。
+	 */
 	switch (xfertype) {
 	case USB_ENDPOINT_XFER_ISOC:
 	case USB_ENDPOINT_XFER_INT:
 		/* too small? */
+		/**
+		 * 间隔时间小于等于0，非法值。
+		 */
 		if (urb->interval <= 0)
 			return -EINVAL;
 		/* too big? */
+		/**
+		 * 根据设备的速度，计算周期的最大值。
+		 */
 		switch (dev->speed) {
 		case USB_SPEED_HIGH:	/* units are microframes */
 			// NOTE usb handles 2^15
 			if (urb->interval > (1024 * 8))
 				urb->interval = 1024 * 8;
+			/**
+			 * temp总是2的n次幂。
+			 */
 			max = 1024 * 8;
 			break;
 		case USB_SPEED_FULL:	/* units are frames/msec */
@@ -442,6 +526,9 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 		urb->interval = min(max, 1 << ilog2(urb->interval));
 	}
 
+	/**
+	 * 向HCD控制器提交URB。
+	 */
 	return usb_hcd_submit_urb(urb, mem_flags);
 }
 
@@ -504,6 +591,9 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
  * is quite likely that the status stage of the transfer will not take
  * place.
  */
+/**
+ * 异步的取消一个URB。
+ */
 int usb_unlink_urb(struct urb *urb)
 {
 	if (!urb)
@@ -535,21 +625,42 @@ int usb_unlink_urb(struct urb *urb)
  * half or a completion handler), or when holding a spinlock, or in other
  * situations where the caller can't schedule().
  */
+/**
+ * 同步等待urb被终止。
+ */
 void usb_kill_urb(struct urb *urb)
 {
-	static DEFINE_MUTEX(reject_mutex);
-
+	/**
+	 * 由于是同步等待，因此本函数可能会睡眠。
+	 */
 	might_sleep();
-	if (!(urb && urb->dev && urb->ep))
+	/**
+	 * 如果URB要到达的设备没有总线，则直接返回。
+	 */
+	if (!(urb && urb->dev && urb->dev->bus))
 		return;
 	mutex_lock(&reject_mutex);
+	/**
+	 * 增加reject字段的值后，表示HCD已经不再接受这个URB了。
+	 * 这样，如果其他地方试图将URB提交给主机控制器，那么会失败。
+	 */
 	++urb->reject;
 	mutex_unlock(&reject_mutex);
 
+	/**
+	 * 通知HCD驱动，要终止这个URB了。
+	 */
 	usb_hcd_unlink_urb(urb, -ENOENT);
+	/**
+	 * 等待驱动唤醒本线程。
+	 * HCD驱动在将URB交还给CORE时，会判断reject，如果大于0，则唤醒usb_kill_urb_queue上的队列。
+	 */
 	wait_event(usb_kill_urb_queue, atomic_read(&urb->use_count) == 0);
 
 	mutex_lock(&reject_mutex);
+	/**
+	 * 将reject递减回去。
+	 */
 	--urb->reject;
 	mutex_unlock(&reject_mutex);
 }

@@ -21,8 +21,11 @@ struct tick_device {
 };
 
 enum tick_nohz_mode {
+	/* 周期性时钟处于活动状态，NOHZ未生效 */
 	NOHZ_MODE_INACTIVE,
+	/* 动态tick运行于低精度模式 */
 	NOHZ_MODE_LOWRES,
+	/* 动态tick运行于高精度模式 */
 	NOHZ_MODE_HIGHRES,
 };
 
@@ -42,20 +45,31 @@ enum tick_nohz_mode {
  * @idle_sleeptime:	Sum of the time slept in idle with sched tick stopped
  * @sleep_length:	Duration of the current idle sleep
  */
+/* 动态时钟 */
 struct tick_sched {
+	/* 高精度模式下，调度周期性tick的定时器 */
 	struct hrtimer			sched_timer;
 	unsigned long			check_clocks;
+	/* 运行模式 */
 	enum tick_nohz_mode		nohz_mode;
+	/* 进入idle前，上一个时钟的到期时间 */
 	ktime_t				idle_tick;
+	/* 周期性时钟是否已经停用 */
 	int				tick_stopped;
+	/* 进入IDLE时的jiffies */
 	unsigned long			idle_jiffies;
+	/* 试图停用周期性时钟的次数 */
 	unsigned long			idle_calls;
+	/* 停用周期性时钟的次数 */
 	unsigned long			idle_sleeps;
 	ktime_t				idle_entrytime;
+	/* 上一次禁用周期时钟的准确时间 */
 	ktime_t				idle_sleeptime;
+	/* 禁用周期性时钟的长度 */
 	ktime_t				sleep_length;
 	unsigned long			last_jiffies;
 	unsigned long			next_jiffies;
+	/* 下一个到期时间 */
 	ktime_t				idle_expires;
 };
 

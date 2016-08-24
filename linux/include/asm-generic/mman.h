@@ -14,10 +14,14 @@
 #define PROT_GROWSDOWN	0x01000000	/* mprotect flag: extend change to start of growsdown vma */
 #define PROT_GROWSUP	0x02000000	/* mprotect flag: extend change to end of growsup vma */
 
+/* 在进程之间共享映射 */
 #define MAP_SHARED	0x01		/* Share changes */
+/* 私有映射，对映射区域的写入不影响文件数据 */
 #define MAP_PRIVATE	0x02		/* Changes are private */
 #define MAP_TYPE	0x0f		/* Mask for type of mapping */
+/* 只能映射到指定的地址 */
 #define MAP_FIXED	0x10		/* Interpret addr exactly */
+/* 匿名映射，不与任何文件相关联 */
 #define MAP_ANONYMOUS	0x20		/* don't use a file */
 
 #define MS_ASYNC	1		/* sync memory asynchronously */

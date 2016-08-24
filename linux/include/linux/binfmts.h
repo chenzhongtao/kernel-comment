@@ -63,16 +63,23 @@ struct linux_binprm{
  * This structure defines the functions that are used to load the binary formats that
  * linux accepts.
  */
+/* 二进制可执行文件结构 */
 struct linux_binfmt {
+	/* 通过此节点链接到全局formats链表中，表示所有支持的文件格式 */
 	struct list_head lh;
 	struct module *module;
+	/* 加载普通程序 */
 	int (*load_binary)(struct linux_binprm *, struct  pt_regs * regs);
+	/* 加载共享库 */
 	int (*load_shlib)(struct file *);
+	/* 在程序异常时输出内存转储 */
 	int (*core_dump)(long signr, struct pt_regs *regs, struct file *file, unsigned long limit);
+	/* 生成转储文件时，内存转储文件的下限，通常是一个页面 */
 	unsigned long min_coredump;	/* minimal dump size */
 	int hasvdso;
 };
 
+/* 注册一种新的二进制格式 */
 extern int register_binfmt(struct linux_binfmt *);
 extern void unregister_binfmt(struct linux_binfmt *);
 

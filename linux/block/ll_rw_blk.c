@@ -98,6 +98,9 @@ static inline int queue_congestion_off_threshold(struct request_queue *q)
 	return q->nr_congestion_off;
 }
 
+/**
+ * 计算队列的拥塞阀值
+ */
 static void blk_queue_congestion_threshold(struct request_queue *q)
 {
 	int nr;
@@ -1546,6 +1549,9 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
  * This is called with interrupts off and no requests on the queue and
  * with the queue lock held.
  */
+/**
+ * 插入磁盘请求队列
+ */
 void blk_plug_device(struct request_queue *q)
 {
 	WARN_ON(!irqs_disabled());
@@ -1557,9 +1563,9 @@ void blk_plug_device(struct request_queue *q)
 	if (blk_queue_stopped(q))
 		return;
 
-	if (!test_and_set_bit(QUEUE_FLAG_PLUGGED, &q->queue_flags)) {
-		mod_timer(&q->unplug_timer, jiffies + q->unplug_delay);
-		blk_add_trace_generic(q, NULL, 0, BLK_TA_PLUG);
+	if (!test_and_set_bit(QUEUE_FLAG_PLUGGED, &q->queue_flags)) {/* 还没插入 */
+		mod_timer(&q->unplug_timer, jiffies + q->unplug_delay);/* 修改定时器，在3毫秒后强制拨出请求队列，处理其中的请求 */
+		blk_add_trace_generic(q, NULL, 0, BLK_TA_PLUG);/* 设置插入标志 */
 	}
 }
 
@@ -1585,14 +1591,18 @@ EXPORT_SYMBOL(blk_remove_plug);
 /*
  * remove the plug and let it rip..
  */
+/**
+ * 触发请求队列的拨出操作，使队列中的请求得到处理
+ */
 void __generic_unplug_device(struct request_queue *q)
 {
 	if (unlikely(blk_queue_stopped(q)))
 		return;
 
-	if (!blk_remove_plug(q))
+	if (!blk_remove_plug(q))/* 清除队列的插入状态和拨出定时器 */
 		return;
 
+	/* 处理等待的请求 */
 	q->request_fn(q);
 }
 EXPORT_SYMBOL(__generic_unplug_device);
@@ -1905,6 +1915,9 @@ EXPORT_SYMBOL(blk_alloc_queue_node);
  *    when the block device is deactivated (such as at module unload).
  **/
 
+/**
+ * 产生一个标准的磁盘请求队列。
+ */
 struct request_queue *blk_init_queue(request_fn_proc *rfn, spinlock_t *lock)
 {
 	return blk_init_queue_node(rfn, lock, -1);
@@ -2963,6 +2976,7 @@ static void init_request_from_bio(struct request *req, struct bio *bio)
 	blk_rq_bio_prep(req->q, req, bio);
 }
 
+/* make_request_fn的默认实现 */
 static int __make_request(struct request_queue *q, struct bio *bio)
 {
 	struct request *req;
@@ -2988,12 +3002,13 @@ static int __make_request(struct request_queue *q, struct bio *bio)
 
 	spin_lock_irq(q->queue_lock);
 
-	if (unlikely(barrier) || elv_queue_empty(q))
+	if (unlikely(barrier) || elv_queue_empty(q))/* bio屏障不需要处理合并，当前列表如果为空，也不必合并 */
 		goto get_rq;
 
+	/* 请求io调度器合并bio请求 */
 	el_ret = elv_merge(q, &req, bio);
 	switch (el_ret) {
-		case ELEVATOR_BACK_MERGE:
+		case ELEVATOR_BACK_MERGE:/* 合并到现有请求之后 */
 			BUG_ON(!rq_mergeable(req));
 
 			if (!ll_back_merge_fn(q, req, bio))
@@ -3010,7 +3025,7 @@ static int __make_request(struct request_queue *q, struct bio *bio)
 				elv_merged_request(q, req, el_ret);
 			goto out;
 
-		case ELEVATOR_FRONT_MERGE:
+		case ELEVATOR_FRONT_MERGE:/* 合并到现有请求之前 */
 			BUG_ON(!rq_mergeable(req));
 
 			if (!ll_front_merge_fn(q, req, bio))
@@ -3038,17 +3053,18 @@ static int __make_request(struct request_queue *q, struct bio *bio)
 			goto out;
 
 		/* ELV_NO_MERGE: elevator says don't/can't merge. */
-		default:
+		default:/* 不能合并 */
 			;
 	}
 
+/* 运行到这里，说明不能合并请求 */
 get_rq:
 	/*
 	 * This sync check and mask will be re-done in init_request_from_bio(),
 	 * but we need to set it earlier to expose the sync flag to the
 	 * rq allocator and io schedulers.
 	 */
-	rw_flags = bio_data_dir(bio);
+	rw_flags = bio_data_dir(bio);/* 产生读写标志和同步标志 */
 	if (sync)
 		rw_flags |= REQ_RW_SYNC;
 
@@ -3056,7 +3072,7 @@ get_rq:
 	 * Grab a free request. This is might sleep but can not fail.
 	 * Returns with the queue unlocked.
 	 */
-	req = get_request_wait(q, rw_flags, bio);
+	req = get_request_wait(q, rw_flags, bio);/* 分配一个空闲请求实例 */
 
 	/*
 	 * After dropping the lock and possibly sleeping here, our request
@@ -3064,14 +3080,14 @@ get_rq:
 	 * We don't worry about that case for efficiency. It won't happen
 	 * often, and the elevators are able to handle it.
 	 */
-	init_request_from_bio(req, bio);
+	init_request_from_bio(req, bio);/* 根据bio初始化请求队列 */
 
 	spin_lock_irq(q->queue_lock);
-	if (elv_queue_empty(q))
-		blk_plug_device(q);
-	add_request(q, req);
+	if (elv_queue_empty(q))/* 队列目前为空 */
+		blk_plug_device(q);/* 插入队列，暂时延迟处理后续请求。这样会汇聚请求 */
+	add_request(q, req);/* 调用io调度器将请求添加到请求链表 */
 out:
-	if (sync)
+	if (sync)/* 需要同步处理，拨出队列，以强制进行同步。 */
 		__generic_unplug_device(q);
 
 	spin_unlock_irq(q->queue_lock);
@@ -3234,6 +3250,7 @@ static inline void __generic_make_request(struct bio *bio)
 	do {
 		char b[BDEVNAME_SIZE];
 
+		/* 获得bio所属的请求队列 */
 		q = bdev_get_queue(bio->bi_bdev);
 		if (!q) {
 			printk(KERN_ERR
@@ -3264,7 +3281,7 @@ end_io:
 		 * If this device has partitions, remap block n
 		 * of partition p to block n+start(p) of the disk.
 		 */
-		blk_partition_remap(bio);
+		blk_partition_remap(bio);/* 设备是分区的，将读写的位置映射到设备 */
 
 		if (old_sector != -1)
 			blk_add_trace_remap(q, bio, old_dev, bio->bi_sector,
@@ -3275,15 +3292,16 @@ end_io:
 		old_sector = bio->bi_sector;
 		old_dev = bio->bi_bdev->bd_dev;
 
-		if (bio_check_eod(bio, nr_sectors))
+		if (bio_check_eod(bio, nr_sectors))/* 检查是否超出了设备范围 */
 			goto end_io;
-		if (bio_empty_barrier(bio) && !q->prepare_flush_fn) {
+		if (bio_empty_barrier(bio) && !q->prepare_flush_fn) {/* 对于IO屏障来说，需要刷新请求，但是设备不支持 */
 			err = -EOPNOTSUPP;
 			goto end_io;
 		}
 
+		/* 将请求添加队列，默认是__make_request */
 		ret = q->make_request_fn(q, bio);
-	} while (ret);
+	} while (ret);/* make_request_fn可能要求将bio插入到另外的队列，这里重复运行，将bio插入到其他队列 */
 }
 
 /*
@@ -3299,8 +3317,9 @@ end_io:
  */
 void generic_make_request(struct bio *bio)
 {
-	if (current->bio_tail) {
+	if (current->bio_tail) {/* 当前进程正在处理bio请求 */
 		/* make_request is active */
+		/* 将当前请求挂接到进程当前bio链表的尾端 */
 		*(current->bio_tail) = bio;
 		bio->bi_next = NULL;
 		current->bio_tail = &bio->bi_next;
@@ -3334,6 +3353,7 @@ void generic_make_request(struct bio *bio)
 		__generic_make_request(bio);
 		bio = current->bio_list;
 	} while (bio);
+	/* 处理完毕，清空bio_tail变量。 */
 	current->bio_tail = NULL; /* deactivate */
 }
 
@@ -3349,24 +3369,29 @@ EXPORT_SYMBOL(generic_make_request);
  * interfaces, @bio must be presetup and ready for I/O.
  *
  */
+/**
+ * 提交一个bio请求
+ * 并将其挂接到请求队列中
+ */
 void submit_bio(int rw, struct bio *bio)
 {
 	int count = bio_sectors(bio);
 
+	/* 设置数据的传输方向 */
 	bio->bi_rw |= rw;
 
 	/*
 	 * If it's a regular read/write or a barrier with data attached,
 	 * go through the normal accounting stuff before submission.
 	 */
-	if (!bio_empty_barrier(bio)) {
+	if (!bio_empty_barrier(bio)) {/* 不是bio屏障 */
 
 		BIO_BUG_ON(!bio->bi_size);
 		BIO_BUG_ON(!bio->bi_io_vec);
 
-		if (rw & WRITE) {
+		if (rw & WRITE) {/* 对写请求计数 */
 			count_vm_events(PGPGOUT, count);
-		} else {
+		} else {/* 对读请求计数 */
 			task_io_account_read(bio->bi_size);
 			count_vm_events(PGPGIN, count);
 		}
@@ -3381,6 +3406,7 @@ void submit_bio(int rw, struct bio *bio)
 		}
 	}
 
+	/* 将请求挂接到请求队列中 */
 	generic_make_request(bio);
 }
 

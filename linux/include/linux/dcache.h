@@ -79,10 +79,15 @@ struct dcookie_struct;
 
 #define DNAME_INLINE_LEN_MIN 36
 
+/**
+ * 目录项缓存
+ */
 struct dentry {
 	atomic_t d_count;
+	/* 标志，如DCACHE_DISCONNECTED */
 	unsigned int d_flags;		/* protected by d_lock */
 	spinlock_t d_lock;		/* per dentry lock */
+	/* 该目录项缓存指向的inode，如果目录项缓存指向的文件不存在，则此字段为NULL */
 	struct inode *d_inode;		/* Where the name belongs to - NULL is
 					 * negative */
 	/*
@@ -90,7 +95,9 @@ struct dentry {
 	 * so they all fit in a cache line.
 	 */
 	struct hlist_node d_hash;	/* lookup hash list */
+	/* 指向父目录的缓存项，对根目录来说，此字段指向自身 */
 	struct dentry *d_parent;	/* parent directory */
+	/* 文件名称，不包含文件路径 */
 	struct qstr d_name;
 
 	struct list_head d_lru;		/* LRU list */
@@ -98,19 +105,27 @@ struct dentry {
 	 * d_child and d_rcu can share memory
 	 */
 	union {
+		/* 通过此字段链接到父目录项的d_subdirs链表中 */
 		struct list_head d_child;	/* child of parent list */
+		/* 通过此字段，将对象添加到rcu链表中 */
 	 	struct rcu_head d_rcu;
 	} d_u;
+	/* 该目录下的所有目录和文件缓存项 */
 	struct list_head d_subdirs;	/* our children */
+	/* 如果指向一个硬连接，那么通过此字段将指向同一个inode的不同dentry连接到一个链表中，链表头是inode->i_dentry */
 	struct list_head d_alias;	/* inode alias list */
 	unsigned long d_time;		/* used by d_revalidate */
+	/* 目录项回调函数，由底层文件系统实现。 */
 	struct dentry_operations *d_op;
+	/* 该缓存项所属的超级块 */
 	struct super_block *d_sb;	/* The root of the dentry tree */
 	void *d_fsdata;			/* fs-specific data */
 #ifdef CONFIG_PROFILING
 	struct dcookie_struct *d_cookie; /* cookie, if any */
 #endif
+	/* 此缓存项是否表示一个装载点，及其装载次数 */
 	int d_mounted;
+	/* 如果文件名比较短，则文件名保存在此字段中，以加速访问。 */
 	unsigned char d_iname[DNAME_INLINE_LEN_MIN];	/* small names */
 };
 
@@ -126,12 +141,21 @@ enum dentry_d_lock_class
 	DENTRY_D_LOCK_NESTED
 };
 
+/**
+ * 目录项缓存回调函数
+ */
 struct dentry_operations {
+	/* 检查内存中的dentry对象是否仍然能够反映当前文件的情况。对NFS来说，此回调很重要 */
 	int (*d_revalidate)(struct dentry *, struct nameidata *);
+	/* 计算inode的哈希值 */
 	int (*d_hash) (struct dentry *, struct qstr *);
+	/* 比较两个对象的文件名，默认是区分大小写的字符串比较 */
 	int (*d_compare) (struct dentry *, struct qstr *, struct qstr *);
+	/* 当dentry引用计数变为0之后，调用此函数释放资源 */
 	int (*d_delete)(struct dentry *);
+	/* 当dentry引用计数变为0之前，调用此函数释放资源 */
 	void (*d_release)(struct dentry *);
+	/* 当dentry不再使用时，释放相应的inode */
 	void (*d_iput)(struct dentry *, struct inode *);
 	char *(*d_dname)(struct dentry *, char *, int);
 };
@@ -160,6 +184,7 @@ d_iput:		no		no		no       yes
 					 * renamed" and has to be
 					 * deleted on the last dput()
 					 */
+/* 没有连接到超级块的dentry树 */					
 #define	DCACHE_DISCONNECTED 0x0004
      /* This dentry is possibly not currently connected to the dcache tree,
       * in which case its parent will either be itself, or will have this
@@ -173,6 +198,7 @@ d_iput:		no		no		no       yes
       */
 
 #define DCACHE_REFERENCED	0x0008  /* Recently used, don't discard. */
+/* dentry没有添加到哈希表中 */
 #define DCACHE_UNHASHED		0x0010	
 
 #define DCACHE_INOTIFY_PARENT_WATCHED	0x0020 /* Parent inode is watched */
@@ -204,6 +230,7 @@ static inline void __d_drop(struct dentry *dentry)
 	}
 }
 
+/* 将目录项缓存从哈希表中移除 */
 static inline void d_drop(struct dentry *dentry)
 {
 	spin_lock(&dcache_lock);
@@ -260,7 +287,8 @@ extern void d_rehash(struct dentry *);
  * This adds the entry to the hash queues and initializes @inode.
  * The entry was actually filled in earlier during d_alloc().
  */
- 
+
+/* 将缓存项与inode关联起来，同时将它添加到全局散列表中 */
 static inline void d_add(struct dentry *entry, struct inode *inode)
 {
 	d_instantiate(entry, inode);
@@ -316,7 +344,10 @@ extern char * d_path(struct dentry *, struct vfsmount *, char *, int);
  *	needs and they take necessary precautions) you should hold dcache_lock
  *	and call dget_locked() instead of dget().
  */
- 
+
+/**
+ * 添加目录项缓存结构的引用计数
+ */
 static inline struct dentry *dget(struct dentry *dentry)
 {
 	if (dentry) {

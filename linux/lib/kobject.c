@@ -127,6 +127,9 @@ EXPORT_SYMBOL_GPL(kobject_get_path);
  *	kobject_init - initialize object.
  *	@kobj:	object in question.
  */
+/**
+ * 初始化kobject
+ */
 void kobject_init(struct kobject * kobj)
 {
 	if (!kobj)
@@ -219,7 +222,9 @@ int kobject_add(struct kobject * kobj)
  *	kobject_register - initialize and add an object.
  *	@kobj:	object in question.
  */
-
+/**
+ * 在sysfs中注册对象
+ */
 int kobject_register(struct kobject * kobj)
 {
 	int error = -EINVAL;
@@ -437,7 +442,9 @@ void kobject_unregister(struct kobject * kobj)
  *	kobject_get - increment refcount for object.
  *	@kobj:	object.
  */
-
+/**
+ * 递增引用计数
+ */
 struct kobject * kobject_get(struct kobject * kobj)
 {
 	if (kobj)
@@ -449,7 +456,9 @@ struct kobject * kobject_get(struct kobject * kobj)
  *	kobject_cleanup - free kobject resources. 
  *	@kobj:	object.
  */
-
+/**
+ * 在不需要kobject对象时，释放分配的资源
+ */
 void kobject_cleanup(struct kobject * kobj)
 {
 	struct kobj_type * t = get_ktype(kobj);
@@ -480,6 +489,9 @@ static void kobject_release(struct kref *kref)
  *	@kobj:	object.
  *
  *	Decrement the refcount, and if 0, call kobject_cleanup().
+ */
+/**
+ * 递减引用计数
  */
 void kobject_put(struct kobject * kobj)
 {

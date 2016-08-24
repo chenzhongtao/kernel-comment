@@ -340,10 +340,13 @@ static inline void __nodes_remap(nodemask_t *dstp, const nodemask_t *srcp,
 /*
  * Bitmasks that are kept for all the nodes.
  */
+/* 内存节点状态位图 */
 enum node_states {
 	N_POSSIBLE,		/* The node could become online at some point */
 	N_ONLINE,		/* The node is online */
+	/* 没有高端内存，只有普通内存 */
 	N_NORMAL_MEMORY,	/* The node has regular memory */
+	/* 存在高端内存 */
 #ifdef CONFIG_HIGHMEM
 	N_HIGH_MEMORY,		/* The node has regular or high memory */
 #else
@@ -366,6 +369,7 @@ static inline int node_state(int node, enum node_states state)
 	return node_isset(node, node_states[state]);
 }
 
+/* 设置和清除内存节点的状态 */
 static inline void node_set_state(int node, enum node_states state)
 {
 	__node_set(node, &node_states[state]);
@@ -381,9 +385,11 @@ static inline int num_node_state(enum node_states state)
 	return nodes_weight(node_states[state]);
 }
 
+/* 遍历所有处于特定状态的节点 */
 #define for_each_node_state(__node, __state) \
 	for_each_node_mask((__node), node_states[__state])
 
+/* 遍历所有活动节点 */
 #define first_online_node	first_node(node_states[N_ONLINE])
 #define next_online_node(nid)	next_node((nid), node_states[N_ONLINE])
 

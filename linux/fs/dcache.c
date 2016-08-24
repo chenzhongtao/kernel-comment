@@ -171,6 +171,9 @@ static struct dentry *d_kill(struct dentry *dentry)
  * no dcache lock, please.
  */
 
+/**
+ * 递减目录项缓存的引用计数
+ */
 void dput(struct dentry *dentry)
 {
 	if (!dentry)
@@ -179,11 +182,13 @@ void dput(struct dentry *dentry)
 repeat:
 	if (atomic_read(&dentry->d_count) == 1)
 		might_sleep();
+	/* 递减引用计数，如果引用计数不为1，则直接退出 */
 	if (!atomic_dec_and_lock(&dentry->d_count, &dcache_lock))
 		return;
 
+	/* 获取目录项的锁 */
 	spin_lock(&dentry->d_lock);
-	if (atomic_read(&dentry->d_count)) {
+	if (atomic_read(&dentry->d_count)) {/* 再次读取引用计数? */
 		spin_unlock(&dentry->d_lock);
 		spin_unlock(&dcache_lock);
 		return;
@@ -192,14 +197,16 @@ repeat:
 	/*
 	 * AV: ->d_delete() is _NOT_ allowed to block now.
 	 */
-	if (dentry->d_op && dentry->d_op->d_delete) {
+	if (dentry->d_op && dentry->d_op->d_delete) {/* 回调文件系统的删除函数 */
 		if (dentry->d_op->d_delete(dentry))
 			goto unhash_it;
 	}
 	/* Unreachable? Get rid of it */
- 	if (d_unhashed(dentry))
+ 	if (d_unhashed(dentry))/* 不在任何哈希表中，退出 */
 		goto kill_it;
+	/* 目前没有在lru链表中 */
   	if (list_empty(&dentry->d_lru)) {
+		/* 添加到未用lru链表中 */
   		dentry->d_flags |= DCACHE_REFERENCED;
   		list_add(&dentry->d_lru, &dentry_unused);
   		dentry_stat.nr_unused++;
@@ -209,6 +216,7 @@ repeat:
 	return;
 
 unhash_it:
+	/* 将缓存对象从散列表中移除 */
 	__d_drop(dentry);
 kill_it:
 	/* If dentry was on d_lru list
@@ -428,7 +436,10 @@ static void prune_one_dentry(struct dentry * dentry)
  * This function may fail to free any resources if
  * all the dentries are in use.
  */
- 
+
+/**
+ * 在unmount或者收缩内存时，调用此函数释放LRU中过期的dentry.
+ */
 static void prune_dcache(int count, struct super_block *sb)
 {
 	spin_lock(&dcache_lock);
@@ -894,6 +905,7 @@ static struct shrinker dcache_shrinker = {
  * copied and the copy passed in may be reused after this call.
  */
  
+/* 分配一个新的目录项缓存，并初始化它的字段 */
 struct dentry *d_alloc(struct dentry * parent, const struct qstr *name)
 {
 	struct dentry *dentry;
@@ -976,13 +988,17 @@ struct dentry *d_alloc_name(struct dentry *parent, const char *name)
  * (or otherwise set) by the caller to indicate that it is now
  * in use by the dcache.
  */
- 
+
+/**
+ * 将dentry实例与inode关联起来。
+ */
 void d_instantiate(struct dentry *entry, struct inode * inode)
 {
 	BUG_ON(!list_empty(&entry->d_alias));
 	spin_lock(&dcache_lock);
-	if (inode)
+	if (inode)/* 将缓存项添加到inode节点的d_alias链表中 */
 		list_add(&entry->d_alias, &inode->i_dentry);
+	/* 设置缓存项的inode节点属性 */
 	entry->d_inode = inode;
 	fsnotify_d_instantiate(entry, inode);
 	spin_unlock(&dcache_lock);
@@ -1115,6 +1131,7 @@ static inline struct hlist_head *d_hash(struct dentry *parent,
  * the reference on the inode has not been released.
  */
 
+/* 分配一个目录项缓存，但是不指定它的父节点 */
 struct dentry * d_alloc_anon(struct inode *inode)
 {
 	static const struct qstr anonstring = { .name = "" };
@@ -1235,6 +1252,7 @@ struct dentry *d_splice_alias(struct inode *inode, struct dentry *dentry)
  * directory using the seqlockt_t rename_lock.
  */
 
+/* 在父目录缓存中，搜索特定名称的缓存项 */
 struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 {
 	struct dentry * dentry = NULL;
@@ -1395,7 +1413,10 @@ out:
  * Turn the dentry into a negative dentry if possible, otherwise
  * remove it from the hash queues so it can be deleted later
  */
- 
+
+/**
+ * 在确认dentry对象仍然包含在全局散列表中以后，调用__d_drop将其移除。
+ */
 void d_delete(struct dentry * dentry)
 {
 	int isdir = 0;

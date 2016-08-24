@@ -195,6 +195,9 @@ int ip_call_ra_chain(struct sk_buff *skb)
 	return 0;
 }
 
+/**
+ * 将报文分发到L4层处理函数
+ */
 static int ip_local_deliver_finish(struct sk_buff *skb)
 {
 	__skb_pull(skb, ip_hdrlen(skb));
@@ -257,17 +260,27 @@ static int ip_local_deliver_finish(struct sk_buff *skb)
 /*
  * 	Deliver IP Packets to the higher protocol layers.
  */
+/**
+ * 将ip报文发送到本地L4层
+ */
 int ip_local_deliver(struct sk_buff *skb)
 {
 	/*
 	 *	Reassemble IP fragments.
 	 */
 
+	/* 该IP报文是分片报文 */
 	if (ip_hdr(skb)->frag_off & htons(IP_MF | IP_OFFSET)) {
+		/* 重新将分片组合起来 */
 		if (ip_defrag(skb, IP_DEFRAG_LOCAL_DELIVER))
 			return 0;
 	}
 
+	/**
+	 * ip_local_deliver_finish根据报文L4协议的类型，将它转交给L4层处理
+	 * 如tcp_v4_rcv和udp_rcv
+	 * 同时调用netfilter进行安全性处理
+	 */
 	return NF_HOOK(PF_INET, NF_IP_LOCAL_IN, skb, skb->dev, NULL,
 		       ip_local_deliver_finish);
 }
@@ -334,9 +347,10 @@ static int ip_rcv_finish(struct sk_buff *skb)
 	 *	how the packet travels inside Linux networking.
 	 */
 	if (skb->dst == NULL) {
+		/* 选择路由 */
 		int err = ip_route_input(skb, iph->daddr, iph->saddr, iph->tos,
 					 skb->dev);
-		if (unlikely(err)) {
+		if (unlikely(err)) {/* 无法找到路由，则丢弃包 */
 			if (err == -EHOSTUNREACH)
 				IP_INC_STATS_BH(IPSTATS_MIB_INADDRERRORS);
 			else if (err == -ENETUNREACH)
@@ -356,6 +370,7 @@ static int ip_rcv_finish(struct sk_buff *skb)
 	}
 #endif
 
+	/* 存在IP选项，处理这些选项 */
 	if (iph->ihl > 5 && ip_rcv_options(skb))
 		goto drop;
 
@@ -375,11 +390,15 @@ drop:
 /*
  * 	Main IP Receive routine.
  */
+/**
+ * IP网络层主处理函数
+ */
 int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
 {
 	struct iphdr *iph;
 	u32 len;
-
+	
+	/* 检查命名空间，目前只支持默认空间 */
 	if (dev->nd_net != &init_net)
 		goto drop;
 
@@ -396,6 +415,7 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, 
 		goto out;
 	}
 
+	/* 检查报文长度是否达到报头长度 */
 	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 		goto inhdr_error;
 
@@ -412,19 +432,22 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, 
 	 *	4.	Doesn't have a bogus length
 	 */
 
+	/* 检查报文报头长度，IP协议版本 */
 	if (iph->ihl < 5 || iph->version != 4)
 		goto inhdr_error;
 
+	/* 检查报文长度是否与报头中指定的长度一致 */
 	if (!pskb_may_pull(skb, iph->ihl*4))
 		goto inhdr_error;
 
 	iph = ip_hdr(skb);
 
+	/* 检查IP校验和 */
 	if (unlikely(ip_fast_csum((u8 *)iph, iph->ihl)))
 		goto inhdr_error;
 
 	len = ntohs(iph->tot_len);
-	if (skb->len < len) {
+	if (skb->len < len) {/* 检查报文总长度 */
 		IP_INC_STATS_BH(IPSTATS_MIB_INTRUNCATEDPKTS);
 		goto drop;
 	} else if (len < (iph->ihl*4))
@@ -442,6 +465,9 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, 
 	/* Remove any debris in the socket control block */
 	memset(IPCB(skb), 0, sizeof(struct inet_skb_parm));
 
+	/**
+	 * 首先由netfilter检查，如果安全性通过，则调用ip_rcv_finish后续处理
+	 */
 	return NF_HOOK(PF_INET, NF_IP_PRE_ROUTING, skb, dev, NULL,
 		       ip_rcv_finish);
 

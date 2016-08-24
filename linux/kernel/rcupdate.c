@@ -121,6 +121,7 @@ static inline void force_quiescent_state(struct rcu_data *rdp,
  * sections are delimited by rcu_read_lock() and rcu_read_unlock(),
  * and may be nested.
  */
+/* 注册一个函数，在所有针对共享资源的读访问完成以后，调用回调函数。 */
 void fastcall call_rcu(struct rcu_head *head,
 				void (*func)(struct rcu_head *rcu))
 {
@@ -622,6 +623,7 @@ static void wakeme_after_rcu(struct rcu_head  *head)
  * If your read-side code is not protected by rcu_read_lock(), do -not-
  * use synchronize_rcu().
  */
+/* 等待所有的rcu读者经历一次静止状态，然后才能释放之前分配的，并且受rcu保护的数据结构 */
 void synchronize_rcu(void)
 {
 	struct rcu_synchronize rcu;

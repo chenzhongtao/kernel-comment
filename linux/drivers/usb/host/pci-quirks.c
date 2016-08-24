@@ -61,6 +61,9 @@ void uhci_reset_hc(struct pci_dev *pdev, unsigned long base)
 	/* Turn off PIRQ enable and SMI enable.  (This also turns off the
 	 * BIOS's USB Legacy Support.)  Turn off all the R/WC bits too.
 	 */
+	/**
+	 * 将UHCI_USBLEGSUP寄存器RWC位清0.
+	 */
 	pci_write_config_word(pdev, UHCI_USBLEGSUP, UHCI_USBLEGSUP_RWC);
 
 	/* Reset the HC - this will force us to get a
@@ -68,14 +71,23 @@ void uhci_reset_hc(struct pci_dev *pdev, unsigned long base)
 	 * ports due to the virtual disconnect that it
 	 * implies.
 	 */
+	/**
+	 * 向命令寄存器写入RESET命令。
+	 */
 	outw(UHCI_USBCMD_HCRESET, base + UHCI_USBCMD);
 	mb();
 	udelay(5);
+	/**
+	 * RESET应当被硬件清0，如果不为0，说明发生了一些预料外的事情。
+	 */
 	if (inw(base + UHCI_USBCMD) & UHCI_USBCMD_HCRESET)
 		dev_warn(&pdev->dev, "HCRESET not completed yet!\n");
 
 	/* Just to be safe, disable interrupt requests and
 	 * make sure the controller is stopped.
+	 */
+	/**
+	 * 向中断使能寄存器和命令寄存器中写入0，关掉中断请求，并且停止HC。
 	 */
 	outw(0, base + UHCI_USBINTR);
 	outw(0, base + UHCI_USBCMD);
@@ -104,13 +116,24 @@ int uhci_check_and_reset_hc(struct pci_dev *pdev, unsigned long base)
 	 * If any of these conditions are violated we do a complete reset.
 	 */
 	pci_read_config_word(pdev, UHCI_USBLEGSUP, &legsup);
+	/**
+	 * 这些位是一些打开、禁止开关。如果这些位为1，表示需要复位。因为设备启动后，这些位应该是0.
+	 */
 	if (legsup & ~(UHCI_USBLEGSUP_RO | UHCI_USBLEGSUP_RWC)) {
 		dev_dbg(&pdev->dev, "%s: legsup = 0x%04x\n",
 				__FUNCTION__, legsup);
 		goto reset_needed;
 	}
 
+	/**
+	 * 读取命令寄存器。
+	 */
 	cmd = inw(base + UHCI_USBCMD);
+	/**
+	 * RUN/STOP位如果为1，表示HC开始处理执行调度。不过目前还不能调度，因此需要复位。
+	 * EGSM即Enter Global Suspend Mode，如果此位不为0，也需要复位。
+	 * CF表示当前主机处于被配置状态，也需要复位。
+	 */
 	if ((cmd & UHCI_USBCMD_RUN) || !(cmd & UHCI_USBCMD_CONFIGURE) ||
 			!(cmd & UHCI_USBCMD_EGSM)) {
 		dev_dbg(&pdev->dev, "%s: cmd = 0x%04x\n",
@@ -118,7 +141,13 @@ int uhci_check_and_reset_hc(struct pci_dev *pdev, unsigned long base)
 		goto reset_needed;
 	}
 
+	/**
+	 * 读取中断使能寄存器。
+	 */
 	intr = inw(base + UHCI_USBINTR);
+	/**
+	 * 如果中断使能了，则也需要复位。
+	 */
 	if (intr & (~UHCI_USBINTR_RESUME)) {
 		dev_dbg(&pdev->dev, "%s: intr = 0x%04x\n",
 				__FUNCTION__, intr);

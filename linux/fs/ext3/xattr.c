@@ -195,13 +195,14 @@ ext3_xattr_find_entry(struct ext3_xattr_entry **pentry, int name_index,
 		return -EINVAL;
 	name_len = strlen(name);
 	entry = *pentry;
+	/* 遍历所有属性 */
 	for (; !IS_LAST_ENTRY(entry); entry = EXT3_XATTR_NEXT(entry)) {
 		cmp = name_index - entry->e_name_index;
-		if (!cmp)
+		if (!cmp)/* 类型匹配 */
 			cmp = name_len - entry->e_name_len;
-		if (!cmp)
+		if (!cmp)/* 长度匹配 */
 			cmp = memcmp(name, entry->e_name, name_len);
-		if (cmp <= 0 && (sorted || cmp == 0))
+		if (cmp <= 0 && (sorted || cmp == 0))/* 不匹配，退出 */
 			break;
 	}
 	*pentry = entry;
@@ -223,9 +224,11 @@ ext3_xattr_block_get(struct inode *inode, int name_index, const char *name,
 		  name_index, name, buffer, (long)buffer_size);
 
 	error = -ENODATA;
+	/* 该节点没有acl扩展属性块 */
 	if (!EXT3_I(inode)->i_file_acl)
 		goto cleanup;
 	ea_idebug(inode, "reading block %u", EXT3_I(inode)->i_file_acl);
+	/* 读取扩展属性块到内存中 */
 	bh = sb_bread(inode->i_sb, EXT3_I(inode)->i_file_acl);
 	if (!bh)
 		goto cleanup;
@@ -277,22 +280,26 @@ ext3_xattr_ibody_get(struct inode *inode, int name_index, const char *name,
 	error = ext3_get_inode_loc(inode, &iloc);
 	if (error)
 		return error;
+	/* 从inode中得到第一个属性描述符 */
 	raw_inode = ext3_raw_inode(&iloc);
 	header = IHDR(inode, raw_inode);
 	entry = IFIRST(header);
 	end = (void *)raw_inode + EXT3_SB(inode->i_sb)->s_inode_size;
+	/* 确保inode中确实有属性 */
 	error = ext3_xattr_check_names(entry, end);
 	if (error)
 		goto cleanup;
+	/* 遍历查找属性 */
 	error = ext3_xattr_find_entry(&entry, name_index, name,
 				      end - (void *)entry, 0);
 	if (error)
 		goto cleanup;
 	size = le32_to_cpu(entry->e_value_size);
-	if (buffer) {
+	if (buffer) {/* 调用者希望获得属性值，而不仅仅是属性长度 */
 		error = -ERANGE;
-		if (size > buffer_size)
+		if (size > buffer_size)/* 缓冲区不足，无法复制数据给用户 */
 			goto cleanup;
+		/* 复制属性值给调用者 */
 		memcpy(buffer, (void *)IFIRST(header) +
 		       le16_to_cpu(entry->e_value_offs), size);
 	}
@@ -319,12 +326,16 @@ ext3_xattr_get(struct inode *inode, int name_index, const char *name,
 {
 	int error;
 
+	/* 获取读信号量 */
 	down_read(&EXT3_I(inode)->xattr_sem);
+	/* 从inode中获得属性 */
 	error = ext3_xattr_ibody_get(inode, name_index, name, buffer,
 				     buffer_size);
 	if (error == -ENODATA)
+		/* 如果inode中没有属性，尝试从block中读取属性 */
 		error = ext3_xattr_block_get(inode, name_index, name, buffer,
 					     buffer_size);
+	/* 释放锁 */
 	up_read(&EXT3_I(inode)->xattr_sem);
 	return error;
 }
@@ -954,11 +965,14 @@ ext3_xattr_set_handle(handle_t *handle, struct inode *inode, int name_index,
 	};
 	int error;
 
+	/* 合法性检查 */
 	if (!name)
 		return -EINVAL;
 	if (strlen(name) > 255)
 		return -ERANGE;
+	/* 获取信号量 */
 	down_write(&EXT3_I(inode)->xattr_sem);
+	/* 查找inode的位置 */
 	error = ext3_get_inode_loc(inode, &is.iloc);
 	if (error)
 		goto cleanup;
@@ -969,34 +983,35 @@ ext3_xattr_set_handle(handle_t *handle, struct inode *inode, int name_index,
 		EXT3_I(inode)->i_state &= ~EXT3_STATE_NEW;
 	}
 
+	/* 在inode中查找属性的位置 */
 	error = ext3_xattr_ibody_find(inode, &i, &is);
 	if (error)
 		goto cleanup;
-	if (is.s.not_found)
+	if (is.s.not_found)/* 如果在inode中没有查找到属性，则在block中查找 */
 		error = ext3_xattr_block_find(inode, &i, &bs);
 	if (error)
 		goto cleanup;
-	if (is.s.not_found && bs.s.not_found) {
+	if (is.s.not_found && bs.s.not_found) {/* 属性不存在 */
 		error = -ENODATA;
-		if (flags & XATTR_REPLACE)
+		if (flags & XATTR_REPLACE)/* 调用者希望替换属性，失败 */
 			goto cleanup;
 		error = 0;
 		if (!value)
 			goto cleanup;
 	} else {
 		error = -EEXIST;
-		if (flags & XATTR_CREATE)
+		if (flags & XATTR_CREATE)/* 属性已经存在，但是调用者希望新建属性，失败 */
 			goto cleanup;
 	}
 	error = ext3_journal_get_write_access(handle, is.iloc.bh);
 	if (error)
 		goto cleanup;
-	if (!value) {
-		if (!is.s.not_found)
+	if (!value) {/* 没有给出属性值，表示删除属性 */
+		if (!is.s.not_found)/* 在inode或者block中删除属性 */
 			error = ext3_xattr_ibody_set(handle, inode, &i, &is);
 		else if (!bs.s.not_found)
 			error = ext3_xattr_block_set(handle, inode, &i, &bs);
-	} else {
+	} else {/* 创建或者修改属性值 */
 		error = ext3_xattr_ibody_set(handle, inode, &i, &is);
 		if (!error && !bs.s.not_found) {
 			i.value = NULL;
@@ -1013,8 +1028,10 @@ ext3_xattr_set_handle(handle_t *handle, struct inode *inode, int name_index,
 		}
 	}
 	if (!error) {
+		/* 更新超级块标志 */
 		ext3_xattr_update_super_block(handle, inode->i_sb);
 		inode->i_ctime = CURRENT_TIME_SEC;
+		/* 修改inode元数据，因为我们已经修改了属性 */
 		error = ext3_mark_iloc_dirty(handle, inode, &is.iloc);
 		/*
 		 * The bh is consumed by ext3_mark_iloc_dirty, even with
@@ -1048,14 +1065,17 @@ ext3_xattr_set(struct inode *inode, int name_index, const char *name,
 	int error, retries = 0;
 
 retry:
+	/* 启动日志 */
 	handle = ext3_journal_start(inode, EXT3_DATA_TRANS_BLOCKS(inode->i_sb));
-	if (IS_ERR(handle)) {
+	if (IS_ERR(handle)) {/* 日志出现问题，退出 */
 		error = PTR_ERR(handle);
 	} else {
 		int error2;
 
+		/* 修改属性 */
 		error = ext3_xattr_set_handle(handle, inode, name_index, name,
 					      value, value_len, flags);
+		/* 结束日志 */
 		error2 = ext3_journal_stop(handle);
 		if (error == -ENOSPC &&
 		    ext3_should_retry_alloc(inode->i_sb, &retries))

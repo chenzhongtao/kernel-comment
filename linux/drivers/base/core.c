@@ -741,6 +741,7 @@ int device_add(struct device *dev)
 
 	/* first, register with generic layer. */
 	kobject_set_name(&dev->kobj, "%s", dev->bus_id);
+	/* 初始化时已经将父子关系设置好，在此只需要将它添加到sysfs中 */
 	error = kobject_add(&dev->kobj);
 	if (error)
 		goto Error;
@@ -774,12 +775,14 @@ int device_add(struct device *dev)
 	if (error)
 		goto PMError;
 	device_pm_add(dev);
+	/* 在总线目录下指向设备，在设备目录下指向总线 */
 	error = bus_add_device(dev);
 	if (error)
 		goto BusError;
 	kobject_uevent(&dev->kobj, KOBJ_ADD);
+	/* 自动探测设备。添加驱动到链表 */
 	bus_attach_device(dev);
-	if (parent)
+	if (parent)/* 将设备添加到父节点的链表中 */
 		klist_add_tail(&dev->knode_parent, &parent->klist_children);
 
 	if (dev->class) {
@@ -853,8 +856,10 @@ int device_add(struct device *dev)
  *	before it is added to the hierarchy.
  */
 
+/* 将一个新设备添加到内核中 */
 int device_register(struct device *dev)
 {
+	/* 将新设备添加到设备子系统 */
 	device_initialize(dev);
 	return device_add(dev);
 }

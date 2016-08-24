@@ -39,8 +39,13 @@ struct	rusage {
 	long	ru_nivcsw;		/* involuntary " */
 };
 
+/**
+ * 资源限制结构，可用于许多不同的资源类型、
+ */
 struct rlimit {
+	/* 进程当前的资源限制，也称为软限制 */
 	unsigned long	rlim_cur;
+	/* 该限制的最大容许值，也称为硬限制 */
 	unsigned long	rlim_max;
 };
 

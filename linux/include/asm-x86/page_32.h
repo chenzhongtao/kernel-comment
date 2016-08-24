@@ -2,6 +2,7 @@
 #define _I386_PAGE_H
 
 /* PAGE_SHIFT determines the page size */
+/* 页内偏移在页表中占用的位数 */
 #define PAGE_SHIFT	12
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
@@ -16,6 +17,7 @@
 
 #include <asm/mmx.h>
 
+/* 每个体系结构都必须定义此函数，用于清0页面 */
 #define clear_page(page)	mmx_clear_page((void *)(page))
 #define copy_page(to,from)	mmx_copy_page(to,from)
 

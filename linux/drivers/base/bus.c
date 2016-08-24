@@ -634,6 +634,7 @@ int bus_add_driver(struct device_driver *drv)
 	if (!bus)
 		return -EINVAL;
 
+	/* 设置驱动名称后添加到通用数据结构中 */
 	pr_debug("bus %s: add driver %s\n", bus->name, drv->name);
 	error = kobject_set_name(&drv->kobj, "%s", drv->name);
 	if (error)
@@ -643,11 +644,14 @@ int bus_add_driver(struct device_driver *drv)
 	if (error)
 		goto out_put_bus;
 
+	/* 总线支持自动探测 */
 	if (drv->bus->drivers_autoprobe) {
+		/* 遍历总线上的所有设备，使用驱动的match函数检测某些设备是否可以使用本驱动进行管理 */
 		error = driver_attach(drv);
 		if (error)
 			goto out_unregister;
 	}
+	/* 将驱动添加到驱动程序链表中 */
 	klist_add_tail(&drv->knode_bus, &bus->klist_drivers);
 	module_add_driver(drv->owner, drv);
 
@@ -839,6 +843,9 @@ static BUS_ATTR(uevent, S_IWUSR, NULL, bus_uevent_store);
  *	Once we have that, we registered the bus with the kobject
  *	infrastructure, then register the children subsystems it has:
  *	the devices and drivers that belong to the bus.
+ */
+/**
+ * 注册总线类型
  */
 int bus_register(struct bus_type * bus)
 {

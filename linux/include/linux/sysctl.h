@@ -1034,23 +1034,37 @@ extern ctl_handler sysctl_ms_jiffies;
  */
 
 /* A sysctl table is an array of struct ctl_table: */
+/**
+ * sysctl描述符
+ */
 struct ctl_table 
 {
+	/* 用于sysctl系统调用，指定访问哪一个sysctl，在同一层次中，需要唯一。 */
 	int ctl_name;			/* Binary ID */
+	/* 在proc/sys下的文件名 */
 	const char *procname;		/* Text ID for /proc/sys, or zero */
+	/* 特定数据，通用层不使用 */
 	void *data;
+	/* 能接收和输出的数据的最大长度 */
 	int maxlen;
+	/* 访问权限 */
 	mode_t mode;
+	/* 指针数组，指向子节点 */
 	struct ctl_table *child;
+	/* 父节点 */
 	struct ctl_table *parent;	/* Automatically set */
+	/* 以易于理解的形式向用户输出数据 */
 	proc_handler *proc_handler;	/* Callback for text formatting */
+	/* 由内核调用此过程来操纵sysctl的值 */
 	ctl_handler *strategy;		/* Callback function for all r/w */
+	/* 通用代码不使用这两个值，通常由特定proc过程使用，定义数值的上下限 */
 	void *extra1;
 	void *extra2;
 };
 
 /* struct ctl_table_header is used to maintain dynamic lists of
    struct ctl_table trees. */
+/* 用于以链表的形式管理sysctl */
 struct ctl_table_header
 {
 	struct ctl_table *ctl_table;

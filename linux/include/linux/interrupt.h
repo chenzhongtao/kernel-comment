@@ -57,12 +57,20 @@
 
 typedef irqreturn_t (*irq_handler_t)(int, void *);
 
+/**
+ * 中断处理程序
+ */
 struct irqaction {
+	/* ISR处理程序 */
 	irq_handler_t handler;
+	/* 标志，如IRQF_SHARED */
 	unsigned long flags;
 	cpumask_t mask;
+	/* 设备名称，如e100 */
 	const char *name;
+	/* 设备对象，ISR的私有数据 */
 	void *dev_id;
+	/* 用于将共享IRQ的几个ISR链接起来 */
 	struct irqaction *next;
 	int irq;
 	struct proc_dir_entry *dir;
@@ -296,12 +304,20 @@ extern void FASTCALL(raise_softirq(unsigned int nr));
      he makes it with spinlocks.
  */
 
+/**
+ * tasklet描述符
+ */
 struct tasklet_struct
 {
+	/* 通过此字段形成一个tasklet链表 */
 	struct tasklet_struct *next;
+	/* 状态，如TASKLET_STATE_SCHED */
 	unsigned long state;
+	/* 大于0表示tasklet已经被禁用 */
 	atomic_t count;
+	/* tasklet回调函数 */
 	void (*func)(unsigned long);
+	/* tasklet参数 */
 	unsigned long data;
 };
 

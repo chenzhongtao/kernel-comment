@@ -31,15 +31,23 @@
 //#define ACL_ADD		(0x08)
 //#define ACL_DELETE		(0x10)
 
+/* acl描述符,表示某个用户对文件的权限 */
 struct posix_acl_entry {
+	/* 标记 */
 	short			e_tag;
+	/* 权限 */
 	unsigned short		e_perm;
+	/* 用户、组id */
 	unsigned int		e_id;
 };
 
+/* 某个inode的所有acl */
 struct posix_acl {
+	/* 引用计数 */
 	atomic_t		a_refcount;
+	/* acl项的数目 */
 	unsigned int		a_count;
+	/* acl项数组 */
 	struct posix_acl_entry	a_entries[0];
 };
 

@@ -177,6 +177,11 @@ static void __init free_bootmem_core(bootmem_data_t *bdata, unsigned long addr,
  *
  * NOTE:  This function is _not_ reentrant.
  */
+/**
+ * 在NUMA系统中，在指定节点分配初始化内存
+ * 也用于UMA系统
+ * 采用最先适配算法
+ */
 void * __init
 __alloc_bootmem_core(struct bootmem_data *bdata, unsigned long size,
 	      unsigned long align, unsigned long goal, unsigned long limit)
@@ -213,6 +218,7 @@ __alloc_bootmem_core(struct bootmem_data *bdata, unsigned long size,
 	 * We try to allocate bootmem pages above 'goal'
 	 * first, then we try to allocate lower pages.
 	 */
+	/* 从goal指定的位置开始，首先确定从活动区的哪个地方开始查找 */
 	if (goal && goal >= bdata->node_boot_start && PFN_DOWN(goal) < end_pfn) {
 		preferred = goal - bdata->node_boot_start;
 
@@ -404,11 +410,13 @@ void __init reserve_bootmem(unsigned long addr, unsigned long size)
 }
 #endif /* !CONFIG_HAVE_ARCH_BOOTMEM_NODE */
 
+/* 释放boot内存，只能释放整页 */
 void __init free_bootmem(unsigned long addr, unsigned long size)
 {
 	free_bootmem_core(NODE_DATA(0)->bdata, addr, size);
 }
 
+/* 将所有boom中未使用的页释放给伙伴系统 */
 unsigned long __init free_all_bootmem(void)
 {
 	return free_all_bootmem_core(NODE_DATA(0));
@@ -428,6 +436,12 @@ void * __init __alloc_bootmem_nopanic(unsigned long size, unsigned long align,
 	return NULL;
 }
 
+/**
+ * 在所有节点中分配boot内存
+ *     size:   所需分配的内存长度
+ *     align:  对齐方式
+ *     goal:   从何处开始分配,DMA内存从0开始，普通内存从MAX_DAM_ADDRESS开始
+ */
 void * __init __alloc_bootmem(unsigned long size, unsigned long align,
 			      unsigned long goal)
 {
@@ -443,16 +457,20 @@ void * __init __alloc_bootmem(unsigned long size, unsigned long align,
 	return NULL;
 }
 
-
+/**
+ * 在NUMA系统中，在指定节点分配初始化内存
+ */
 void * __init __alloc_bootmem_node(pg_data_t *pgdat, unsigned long size,
 				   unsigned long align, unsigned long goal)
 {
 	void *ptr;
 
+	/* 在指定节点中分配boot内存 */
 	ptr = __alloc_bootmem_core(pgdat->bdata, size, align, goal, 0);
 	if (ptr)
 		return ptr;
 
+	/* 在所有节点中分配 */
 	return __alloc_bootmem(size, align, goal);
 }
 

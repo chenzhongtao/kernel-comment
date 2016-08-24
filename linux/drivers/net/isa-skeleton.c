@@ -505,6 +505,10 @@ void net_tx(struct net_device *dev)
  * The typical workload of the driver:
  * Handle the network interface interrupts.
  */
+/**
+ * 传统方法接收报文
+ * 这是其中断处理程序
+ */
 static irqreturn_t net_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
@@ -521,9 +525,9 @@ static irqreturn_t net_interrupt(int irq, void *dev_id)
 		goto out;
 	handled = 1;
 
-	if (status & RX_INTR) {
+	if (status & RX_INTR) {/* 接收到新报文 */
 		/* Got a packet(s). */
-		net_rx(dev);
+		net_rx(dev);/* 接收新报文 */
 	}
 #if TX_RING
 	if (status & TX_INTR) {
@@ -568,8 +572,9 @@ net_rx(struct net_device *dev)
 
 			lp->stats.rx_bytes+=pkt_len;
 
+			/* 分配一个套接字缓冲区 */
 			skb = dev_alloc_skb(pkt_len);
-			if (skb == NULL) {
+			if (skb == NULL) {/* 分配失败，丢弃报文 */
 				printk(KERN_NOTICE "%s: Memory squeeze, dropping packet.\n",
 					   dev->name);
 				lp->stats.rx_dropped++;
@@ -578,11 +583,13 @@ net_rx(struct net_device *dev)
 			skb->dev = dev;
 
 			/* 'skb->data' points to the start of sk_buff data area. */
+			/* 将报文从设备传输到报文缓冲区 */
 			memcpy(skb_put(skb,pkt_len), (void*)dev->rmem_start,
 				   pkt_len);
 			/* or */
 			insw(ioaddr, skb->data, (pkt_len + 1) >> 1);
 
+			/* 将报文传输到网络层 */
 			netif_rx(skb);
 			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;

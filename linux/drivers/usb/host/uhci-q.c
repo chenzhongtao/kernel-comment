@@ -383,6 +383,9 @@ static void uhci_fixup_toggles(struct uhci_qh *qh, int skip_first)
 
 	/* Fixups for a short transfer start with the second URB in the
 	 * queue (the short URB is the first). */
+	/**
+	 * 第一个URB已经处理过了，这里从第二个URB处理。
+	 */
 	if (skip_first)
 		urbp = list_entry(qh->queue.next, struct urb_priv, node);
 
@@ -394,19 +397,28 @@ static void uhci_fixup_toggles(struct uhci_qh *qh, int skip_first)
 	/* Fix up the toggle for the URBs in the queue.  Normally this
 	 * loop won't run more than once: When an error or short transfer
 	 * occurs, the queue usually gets emptied. */
+	/**
+	 * 从第二个urb开始遍历QH队列。
+	 */
 	urbp = list_prepare_entry(urbp, &qh->queue, node);
 	list_for_each_entry_continue(urbp, &qh->queue, node) {
 
 		/* If the first TD has the right toggle value, we don't
 		 * need to change any toggles in this URB */
+		/**
+		 * 获得URB的第一个TD。
+		 */
 		td = list_entry(urbp->td_list.next, struct uhci_td, list);
-		if (toggle > 1 || uhci_toggle(td_token(td)) == toggle) {
+		if (toggle > 1 || uhci_toggle(td_token(td)) == toggle) {/* TD的toggle位与initial_toggle相等，表示TD是正确的 */
+			/**
+			 * 取最后一个TD。并将toggle取反。
+			 */
 			td = list_entry(urbp->td_list.prev, struct uhci_td,
 					list);
 			toggle = uhci_toggle(td_token(td)) ^ 1;
 
 		/* Otherwise all the toggles in the URB have to be switched */
-		} else {
+		} else {/* 整个TD的toggle位都反了，全部修改一次 */
 			list_for_each_entry(td, &urbp->td_list, list) {
 				td->token ^= __constant_cpu_to_le32(
 							TD_TOKEN_TOGGLE);
@@ -481,13 +493,25 @@ static void link_async(struct uhci_hcd *uhci, struct uhci_qh *qh)
 /*
  * Put a QH on the schedule in both hardware and software
  */
+/**
+ * 当向QH增加一个URB时，如果是第一个URB就激活硬件和软件。
+ */
 static void uhci_activate_qh(struct uhci_hcd *uhci, struct uhci_qh *qh)
 {
+	/**
+	 * 不应该为空，警告一下。
+	 */
 	WARN_ON(list_empty(&qh->queue));
 
 	/* Set the element pointer if it isn't set already.
 	 * This isn't needed for Isochronous queues, but it doesn't hurt. */
+	/**
+	 * qh_element获得qh的element指针。UHCI_PTR_TERM表示指针无效。
+	 */
 	if (qh_element(qh) == UHCI_PTR_TERM) {
+		/**
+		 * 将QH队列中第一个URB的第一个TD指向element
+		 */
 		struct urb_priv *urbp = list_entry(qh->queue.next,
 				struct urb_priv, node);
 		struct uhci_td *td = list_entry(urbp->td_list.next,
@@ -506,6 +530,9 @@ static void uhci_activate_qh(struct uhci_hcd *uhci, struct uhci_qh *qh)
 
 	/* Move the QH from its old list to the correct spot in the appropriate
 	 * skeleton's list */
+	/**
+	 * 将next_qh向后移一下。
+	 */
 	if (qh == uhci->next_qh)
 		uhci->next_qh = list_entry(qh->node.next, struct uhci_qh,
 				node);
@@ -516,7 +543,7 @@ static void uhci_activate_qh(struct uhci_hcd *uhci, struct uhci_qh *qh)
 	else if (qh->skel < SKEL_ASYNC)
 		link_interrupt(uhci, qh);
 	else
-		link_async(uhci, qh);
+		link_async(uhci, qh);/* 将控制传输的QH挂入到整个调度的队列中。 */
 }
 
 /*
@@ -615,8 +642,14 @@ static int uhci_highest_load(struct uhci_hcd *uhci, int phase, int period)
 {
 	int highest_load = uhci->load[phase];
 
+	/**
+	 * 32个帧内的负载。
+	 */
 	for (phase += period; phase < MAX_PHASE; phase += period)
 		highest_load = max_t(int, highest_load, uhci->load[phase]);
+	/**
+	 * 返回最大负载的帧。
+	 */
 	return highest_load;
 }
 
@@ -630,7 +663,7 @@ static int uhci_check_bandwidth(struct uhci_hcd *uhci, struct uhci_qh *qh)
 
 	/* Find the optimal phase (unless it is already set) and get
 	 * its load value. */
-	if (qh->phase >= 0)
+	if (qh->phase >= 0)/* 对中断传输来说，这个条件一般满足。 */
 		minimax_load = uhci_highest_load(uhci, qh->phase, qh->period);
 	else {
 		int phase, load;
@@ -648,6 +681,9 @@ static int uhci_check_bandwidth(struct uhci_hcd *uhci, struct uhci_qh *qh)
 	}
 
 	/* Maximum allowable periodic bandwidth is 90%, or 900 us per frame */
+	/**
+	 * 最大负载加上当前帧超过900US。
+	 */
 	if (minimax_load + qh->load > 900) {
 		dev_dbg(uhci_dev(uhci), "bandwidth allocation failed: "
 				"period %d, phase %d, %d + %d us\n",
@@ -816,7 +852,13 @@ static int uhci_submit_control(struct uhci_hcd *uhci, struct urb *urb,
 	 * Build the TD for the control request setup packet
 	 */
 	td = qh->dummy_td;
+	/**
+	 * 将本控制传输的TD加到URB链表中。
+	 */
 	uhci_add_td_to_urbp(td, urbp);
+	/**
+	 * 填充TD的内容。
+	 */
 	uhci_fill_td(td, status, destination | uhci_explen(8),
 			urb->setup_dma);
 	plink = &td->link;
@@ -839,6 +881,9 @@ static int uhci_submit_control(struct uhci_hcd *uhci, struct urb *urb,
 	/*
 	 * Build the DATA TDs
 	 */
+	/**
+	 * 前面是处理setup TD，现在构建DATA TD。
+	 */
 	while (len > 0) {
 		int pktsze = maxsze;
 
@@ -853,8 +898,14 @@ static int uhci_submit_control(struct uhci_hcd *uhci, struct urb *urb,
 		*plink = LINK_TO_TD(td);
 
 		/* Alternate Data0/1 (start with Data1) */
+		/**
+		 * 处理DATA0/1位。
+		 */
 		destination ^= TD_TOKEN_TOGGLE;
 	
+		/**
+		 * 将DATA TD加入到URB链表中。
+		 */
 		uhci_add_td_to_urbp(td, urbp);
 		uhci_fill_td(td, status, destination | uhci_explen(pktsze),
 				data);
@@ -866,6 +917,9 @@ static int uhci_submit_control(struct uhci_hcd *uhci, struct urb *urb,
 
 	/*
 	 * Build the final TD for control status 
+	 */
+	/**
+	 * 构建final TD
 	 */
 	td = uhci_alloc_td(uhci);
 	if (!td)
@@ -898,11 +952,17 @@ static int uhci_submit_control(struct uhci_hcd *uhci, struct urb *urb,
 	 * Also, some devices enumerate better without FSBR; the easiest way
 	 * to do that is to put URBs on the low-speed queue while the device
 	 * isn't in the CONFIGURED state. */
+	/**
+	 * 根据设备速度，决定应该将URB放到哪个队列中。
+	 */
 	if (urb->dev->speed == USB_SPEED_LOW ||
 			urb->dev->state != USB_STATE_CONFIGURED)
 		skel = SKEL_LS_CONTROL;
 	else {
 		skel = SKEL_FS_CONTROL;
+		/**
+		 * 对于全速设备，设置fsbr标志。
+		 */
 		uhci_add_fsbr(uhci, urb);
 	}
 	if (qh->state != QH_STATE_ACTIVE)
@@ -944,6 +1004,9 @@ static int uhci_submit_common(struct uhci_hcd *uhci, struct urb *urb,
 	status = uhci_maxerr(3);
 	if (urb->dev->speed == USB_SPEED_LOW)
 		status |= TD_CTRL_LS;
+	/**
+	 * 检测短包，如果发生短包就触发中断，处理toggle标志时需要使用。
+	 */
 	if (usb_pipein(urb->pipe))
 		status |= TD_CTRL_SPD;
 
@@ -957,6 +1020,9 @@ static int uhci_submit_common(struct uhci_hcd *uhci, struct urb *urb,
 
 		if (len <= pktsze) {		/* The last packet */
 			pktsze = len;
+			/**
+			 * 数据包已经处理完，不再需要监控短包处理toggle了。因此关闭SPD标志。
+			 */
 			if (!(urb->transfer_flags & URB_SHORT_NOT_OK))
 				status &= ~TD_CTRL_SPD;
 		}
@@ -987,9 +1053,9 @@ static int uhci_submit_common(struct uhci_hcd *uhci, struct urb *urb,
 	 * however, if transfer_length == 0, the zero packet was already
 	 * prepared above.
 	 */
-	if ((urb->transfer_flags & URB_ZERO_PACKET) &&
-			usb_pipeout(urb->pipe) && len == 0 &&
-			urb->transfer_buffer_length > 0) {
+	if ((urb->transfer_flags & URB_ZERO_PACKET) && /* 允许传送0包 */
+			usb_pipeout(urb->pipe) && len == 0 && /* 出包并且当前包为0 */
+			urb->transfer_buffer_length > 0) {/* 不是第一个包 */
 		td = uhci_alloc_td(uhci);
 		if (!td)
 			goto nomem;
@@ -1011,10 +1077,16 @@ static int uhci_submit_common(struct uhci_hcd *uhci, struct urb *urb,
 	 * fast side but not enough to justify delaying an interrupt
 	 * more than 2 or 3 URBs, so we will ignore the URB_NO_INTERRUPT
 	 * flag setting. */
+	/**
+	 * 对最后一个包来说，执行完后产生一个中断。
+	 */
 	td->status |= __constant_cpu_to_le32(TD_CTRL_IOC);
 
 	/*
 	 * Build the new dummy TD and activate the old one
+	 */
+	/**
+	 * dummy td用于表示一个队列结束
 	 */
 	td = uhci_alloc_td(uhci);
 	if (!td)
@@ -1036,6 +1108,9 @@ nomem:
 	return -ENOMEM;
 }
 
+/**
+ * 提交批量传输。
+ */
 static int uhci_submit_bulk(struct uhci_hcd *uhci, struct urb *urb,
 		struct uhci_qh *qh)
 {
@@ -1047,6 +1122,9 @@ static int uhci_submit_bulk(struct uhci_hcd *uhci, struct urb *urb,
 
 	if (qh->state != QH_STATE_ACTIVE)
 		qh->skel = SKEL_BULK;
+	/**
+	 * 批量传输和中断传输都只有一个阶段，而不象控制传输有多个阶段，因此直接调用uhci_submit_common
+	 */
 	ret = uhci_submit_common(uhci, urb, qh);
 	if (ret == 0)
 		uhci_add_fsbr(uhci, urb);
@@ -1062,29 +1140,43 @@ static int uhci_submit_interrupt(struct uhci_hcd *uhci, struct urb *urb,
 	 * Drivers can submit URBs of any length, but longer ones will need
 	 * multiple intervals to complete.
 	 */
-
+	/**
+	 * 为中断传输保留的带宽(时间)
+	 */
 	if (!qh->bandwidth_reserved) {
 		int exponent;
 
 		/* Figure out which power-of-two queue to use */
+		/**
+		 * UHCI是USB1.1规范，interval值为1到255毫秒之间，因此循环7次就行了。
+		 */
 		for (exponent = 7; exponent >= 0; --exponent) {
 			if ((1 << exponent) <= urb->interval)
 				break;
 		}
 		if (exponent < 0)
 			return -EINVAL;
+		/**
+		 * 周期数为2的N次方，并且小于设备要求的周期。
+		 */
 		qh->period = 1 << exponent;
 		qh->skel = SKEL_INDEX(exponent);
 
 		/* For now, interrupt phase is fixed by the layout
 		 * of the QH lists. */
 		qh->phase = (qh->period / 2) & (MAX_PHASE - 1);
+		/**
+		 * 对中断和等时URB来说，需要检查带宽是否足够。
+		 */
 		ret = uhci_check_bandwidth(uhci, qh);
 		if (ret)
 			return ret;
 	} else if (qh->period > urb->interval)
 		return -EINVAL;		/* Can't decrease the period */
 
+	/**
+	 * 带宽检查完毕，调用uhci_submit_common准备提交URB。
+	 */
 	ret = uhci_submit_common(uhci, urb, qh);
 	if (ret == 0) {
 		urb->interval = qh->period;
@@ -1105,13 +1197,16 @@ static int uhci_fixup_short_transfer(struct uhci_hcd *uhci,
 	int ret;
 
 	td = list_entry(urbp->td_list.prev, struct uhci_td, list);
-	if (qh->type == USB_ENDPOINT_XFER_CONTROL) {
+	if (qh->type == USB_ENDPOINT_XFER_CONTROL) {/* 控制传输。 */
 
 		/* When a control transfer is short, we have to restart
 		 * the queue at the status stage transaction, which is
 		 * the last TD. */
 		WARN_ON(list_empty(&urbp->td_list));
 		qh->element = LINK_TO_TD(td);
+		/**
+		 * tmp是最后一个元素，后面会从倒数第二个开始删除。因为最后一个td是状态阶段的td。
+		 */
 		tmp = td->list.prev;
 		ret = -EINPROGRESS;
 
@@ -1152,18 +1247,33 @@ static int uhci_result_common(struct uhci_hcd *uhci, struct urb *urb)
 	unsigned status;
 	int ret = 0;
 
+	/**
+	 * 遍历队列中的所有TD。
+	 */
 	list_for_each_entry_safe(td, tmp, &urbp->td_list, list) {
 		unsigned int ctrlstat;
 		int len;
 
 		ctrlstat = td_status(td);
+		/**
+		 * 获得TD状态。
+		 */
 		status = uhci_status_bits(ctrlstat);
+		/**
+		 * 当前TD还没有被发送。说明整个队列还在处理中。
+		 */
 		if (status & TD_CTRL_ACTIVE)
 			return -EINPROGRESS;
 
+		/**
+		 * 主机实际传送的字节数。
+		 */
 		len = uhci_actual_length(ctrlstat);
 		urb->actual_length += len;
 
+		/**
+		 * 正常情况下，status应该为0，不为0则打印调试信息。
+		 */
 		if (status) {
 			ret = uhci_map_status(status,
 					uhci_packetout(td_token(td)));
@@ -1181,8 +1291,7 @@ static int uhci_result_common(struct uhci_hcd *uhci, struct urb *urb)
 				}
 			}
 
-		/* Did we receive a short packet? */
-		} else if (len < uhci_expected_length(td_token(td))) {
+		} else if (len < uhci_expected_length(td_token(td))) {/* 实际传输的值小于期望的值。 */
 
 			/* For control transfers, go to the status TD if
 			 * this isn't already the last data TD */
@@ -1196,10 +1305,16 @@ static int uhci_result_common(struct uhci_hcd *uhci, struct urb *urb)
 				ret = -EREMOTEIO;
 
 			/* Fixup needed only if this isn't the URB's last TD */
+			/**
+			 * 最后一个包允许是小包，但是如果不是最后一个包，则也是一种错误情况。
+			 */
 			else if (&td->list != urbp->td_list.prev)
 				ret = 1;
 		}
 
+		/**
+		 * 包已经正常完成，可以销毁它了。
+		 */
 		uhci_remove_td_from_urbp(td);
 		if (qh->post_td)
 			uhci_free_td(uhci, qh->post_td);
@@ -1221,7 +1336,7 @@ err:
 				(ret == -EREMOTEIO);
 
 	} else		/* Short packet received */
-		ret = uhci_fixup_short_transfer(uhci, qh, urbp);
+		ret = uhci_fixup_short_transfer(uhci, qh, urbp);/* 处理短包错误。 */
 	return ret;
 }
 
@@ -1237,6 +1352,9 @@ static int uhci_submit_isochronous(struct uhci_hcd *uhci, struct urb *urb,
 	struct urb_priv *urbp = (struct urb_priv *) urb->hcpriv;
 
 	/* Values must not be too big (could overflow below) */
+	/**
+	 * 超载了。
+	 */
 	if (urb->interval >= UHCI_NUMFRAMES ||
 			urb->number_of_packets >= UHCI_NUMFRAMES)
 		return -EFBIG;
@@ -1244,13 +1362,19 @@ static int uhci_submit_isochronous(struct uhci_hcd *uhci, struct urb *urb,
 	/* Check the period and figure out the starting frame number */
 	if (!qh->bandwidth_reserved) {
 		qh->period = urb->interval;
-		if (urb->transfer_flags & URB_ISO_ASAP) {
+		if (urb->transfer_flags & URB_ISO_ASAP) {/* 自动指定帧号 */
+			/**
+			 * phase设置成－1，则uhci_check_bandwidth会选择出一个合适的phase。
+			 */
 			qh->phase = -1;		/* Find the best phase */
 			i = uhci_check_bandwidth(uhci, qh);
 			if (i)
 				return i;
 
 			/* Allow a little time to allocate the TDs */
+			/**
+			 * 获得UHCI主机控制器的帧计数器。并更新frame_number。
+			 */
 			uhci_get_current_frame_number(uhci);
 			frame = uhci->frame_number + 10;
 
@@ -1299,14 +1423,22 @@ static int uhci_submit_isochronous(struct uhci_hcd *uhci, struct urb *urb,
 	}
 
 	/* Make sure we won't have to go too far into the future */
+	/**
+	 * 本次传输的包不能太大。
+	 */
 	if (uhci_frame_before_eq(uhci->last_iso_frame + UHCI_NUMFRAMES,
 			urb->start_frame + urb->number_of_packets *
 				urb->interval))
 		return -EFBIG;
-
+	/**
+	 * TD_CTRL_IOS表示这是一个等时传输的描述符。
+	 */
 	status = TD_CTRL_ACTIVE | TD_CTRL_IOS;
 	destination = (urb->pipe & PIPE_DEVEP_MASK) | usb_packetid(urb->pipe);
 
+	/**
+	 * 构建等时传输的TD。
+	 */
 	for (i = 0; i < urb->number_of_packets; i++) {
 		td = uhci_alloc_td(uhci);
 		if (!td)
@@ -1379,6 +1511,9 @@ static int uhci_result_isochronous(struct uhci_hcd *uhci, struct urb *urb)
 	return 0;
 }
 
+/**
+ * UHCI的URB入队函数。
+ */
 static int uhci_urb_enqueue(struct usb_hcd *hcd,
 		struct urb *urb, gfp_t mem_flags)
 {
@@ -1395,12 +1530,18 @@ static int uhci_urb_enqueue(struct usb_hcd *hcd,
 		goto done_not_linked;
 
 	ret = -ENOMEM;
+	/**
+	 * 为URB分配UHCI私有数据结构。
+	 */
 	urbp = uhci_alloc_urb_priv(uhci, urb);
 	if (!urbp)
 		goto done;
 
-	if (urb->ep->hcpriv)
-		qh = urb->ep->hcpriv;
+	/**
+	 * 获得本次操作的QH。
+	 */
+	if (hep->hcpriv)
+		qh = (struct uhci_qh *) hep->hcpriv;
 	else {
 		qh = uhci_alloc_qh(uhci, urb->dev, urb->ep);
 		if (!qh)
@@ -1410,16 +1551,25 @@ static int uhci_urb_enqueue(struct usb_hcd *hcd,
 
 	switch (qh->type) {
 	case USB_ENDPOINT_XFER_CONTROL:
+		/**
+		 * 提交控制传输。
+		 */
 		ret = uhci_submit_control(uhci, urb, qh);
 		break;
 	case USB_ENDPOINT_XFER_BULK:
 		ret = uhci_submit_bulk(uhci, urb, qh);
 		break;
 	case USB_ENDPOINT_XFER_INT:
+		/**
+		 * 提交中断传输。
+		 */
 		ret = uhci_submit_interrupt(uhci, urb, qh);
 		break;
 	case USB_ENDPOINT_XFER_ISOC:
 		urb->error_count = 0;
+		/**
+		 * 提交等时传输。
+		 */
 		ret = uhci_submit_isochronous(uhci, urb, qh);
 		break;
 	}
@@ -1428,14 +1578,23 @@ static int uhci_urb_enqueue(struct usb_hcd *hcd,
 
 	/* Add this URB to the QH */
 	urbp->qh = qh;
+	/**
+	 * 将URB链接到QH队列中去。
+	 */
 	list_add_tail(&urbp->node, &qh->queue);
 
 	/* If the new URB is the first and only one on this QH then either
 	 * the QH is new and idle or else it's unlinked and waiting to
 	 * become idle, so we can activate it right away.  But only if the
 	 * queue isn't stopped. */
+	/**
+	 * 队列里面第一个URB是本控制包，并且队列没有被停止，就激活队列。
+	 */
 	if (qh->queue.next == &urbp->node && !qh->is_stopped) {
 		uhci_activate_qh(uhci, qh);
+		/**
+		 * 处理带宽回收。
+		 */
 		uhci_urbp_wants_fsbr(uhci, urbp);
 	}
 	goto done;
@@ -1518,6 +1677,9 @@ __acquires(uhci->lock)
 
 	/* Take the URB off the QH's queue.  If the queue is now empty,
 	 * this is a perfect time for a toggle fixup. */
+	/**
+	 * 将URB从QH中删除。
+	 */
 	list_del_init(&urbp->node);
 	if (list_empty(&qh->queue) && qh->needs_fixup) {
 		usb_settoggle(urb->dev, usb_pipeendpoint(urb->pipe),
@@ -1525,6 +1687,9 @@ __acquires(uhci->lock)
 		qh->needs_fixup = 0;
 	}
 
+	/**
+	 * 删除各个TD。把TD的内存释放，并释放URB。
+	 */
 	uhci_free_urb_priv(uhci, urbp);
 	usb_hcd_unlink_urb_from_ep(uhci_to_hcd(uhci), urb);
 
@@ -1534,7 +1699,10 @@ __acquires(uhci->lock)
 
 	/* If the queue is now empty, we can unlink the QH and give up its
 	 * reserved bandwidth. */
-	if (list_empty(&qh->queue)) {
+	if (list_empty(&qh->queue)) {/* QH已经空了 */
+		/**
+		 * 把QH撤销掉。
+		 */
 		uhci_unlink_qh(uhci, qh);
 		if (qh->bandwidth_reserved)
 			uhci_release_bandwidth(uhci, qh);
@@ -1558,7 +1726,7 @@ static void uhci_scan_qh(struct uhci_hcd *uhci, struct uhci_qh *qh)
 		urbp = list_entry(qh->queue.next, struct urb_priv, node);
 		urb = urbp->urb;
 
-		if (qh->type == USB_ENDPOINT_XFER_ISOC)
+		if (qh->type == USB_ENDPOINT_XFER_ISOC)/* 等时传输队列 */
 			status = uhci_result_isochronous(uhci, urb);
 		else
 			status = uhci_result_common(uhci, urb);
@@ -1667,12 +1835,12 @@ static int uhci_advance_check(struct uhci_hcd *uhci, struct uhci_qh *qh)
 		urbp = list_entry(qh->queue.next, struct urb_priv, node);
 		td = list_entry(urbp->td_list.next, struct uhci_td, list);
 		status = td_status(td);
-		if (!(status & TD_CTRL_ACTIVE)) {
+		if (!(status & TD_CTRL_ACTIVE)) {/* 入队列时，设置了TD_CTRL_ACTIVE标志，如果此标志不存在，说明硬件设置执行完发送。 */
 
 			/* We're okay, the queue has advanced */
 			qh->wait_expired = 0;
 			qh->advance_jiffies = jiffies;
-			goto done;
+			goto done;/* 这种情况返回1，正常执行完发送过程。 */
 		}
 		ret = 0;
 	}
@@ -1719,6 +1887,9 @@ static void uhci_scan_schedule(struct uhci_hcd *uhci)
 	struct uhci_qh *qh;
 
 	/* Don't allow re-entrant calls */
+	/**
+	 * 这里是为了避免递归，而不是避免并发。
+	 */
 	if (uhci->scan_in_progress) {
 		uhci->need_rescan = 1;
 		return;
@@ -1728,19 +1899,37 @@ rescan:
 	uhci->need_rescan = 0;
 	uhci->fsbr_is_wanted = 0;
 
+	/**
+	 * 清除TD_CTRL_IOC标志，表示在帧传输完成后，不向设备发送中断。因为此时在处理调度队列。
+	 */
 	uhci_clear_next_interrupt(uhci);
+	/**
+	 * 从控制寄存器中读取当前帧号。
+	 */
 	uhci_get_current_frame_number(uhci);
 	uhci->cur_iso_frame = uhci->frame_number;
 
 	/* Go through all the QH queues and process the URBs in each one */
+	/**
+	 * 遍历11个QH队列中的所有URB请求。
+	 */
 	for (i = 0; i < UHCI_NUM_SKELQH - 1; ++i) {
 		uhci->next_qh = list_entry(uhci->skelqh[i]->node.next,
 				struct uhci_qh, node);
+		/**
+		 * 遍历队列中链表的每一个节点。
+		 */
 		while ((qh = uhci->next_qh) != uhci->skelqh[i]) {
 			uhci->next_qh = list_entry(qh->node.next,
 					struct uhci_qh, node);
 
-			if (uhci_advance_check(uhci, qh)) {
+			/**
+			 * 检查TD是否执行完了。
+			 */
+			if (uhci_advance_check(uhci, qh)) {/* 正常发送完一个TD */
+				/**
+				 * 扫描QH，判断是否处理完QH。
+				 */
 				uhci_scan_qh(uhci, qh);
 				if (qh->state == QH_STATE_ACTIVE) {
 					uhci_urbp_wants_fsbr(uhci,
@@ -1761,6 +1950,9 @@ rescan:
 		mod_timer(&uhci->fsbr_timer, jiffies + FSBR_OFF_DELAY);
 	}
 
+	/**
+	 * 没有空闲的QH对象
+	 */
 	if (list_empty(&uhci->skel_unlink_qh->node))
 		uhci_clear_next_interrupt(uhci);
 	else

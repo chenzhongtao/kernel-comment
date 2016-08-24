@@ -71,6 +71,9 @@ static inline struct page *__page_cache_alloc(gfp_t gfp)
 }
 #endif
 
+/**
+ * 分配一个页面，作为页缓存
+ */
 static inline struct page *page_cache_alloc(struct address_space *x)
 {
 	return __page_cache_alloc(mapping_gfp_mask(x));
@@ -194,6 +197,9 @@ extern void FASTCALL(wait_on_page_bit(struct page *page, int bit_nr));
  * ie with increased "page->count" so that the page won't
  * go away during the wait..
  */
+/**
+ * 等待页面被成功锁定
+ */
 static inline void wait_on_page_locked(struct page *page)
 {
 	if (PageLocked(page))
@@ -202,6 +208,9 @@ static inline void wait_on_page_locked(struct page *page)
 
 /* 
  * Wait for a page to complete writeback
+ */
+/**
+ * 等待页面被成功回写
  */
 static inline void wait_on_page_writeback(struct page *page)
 {

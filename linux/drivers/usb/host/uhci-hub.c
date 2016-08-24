@@ -55,6 +55,9 @@ static int any_ports_active(struct uhci_hcd *uhci)
 static inline int get_hub_status_data(struct uhci_hcd *uhci, char *buf)
 {
 	int port;
+	/**
+	 * 这里我们只关心RWC状态改变位。
+	 */
 	int mask = RWC_BITS;
 
 	/* Some boards (both VIA and Intel apparently) report bogus
@@ -67,7 +70,14 @@ static inline int get_hub_status_data(struct uhci_hcd *uhci, char *buf)
 		mask &= ~USBPORTSC_OCC;
 
 	*buf = 0;
+	/**
+	 * 遍历Root HUB的各个端口。
+	 */
 	for (port = 0; port < uhci->rh_numports; ++port) {
+		/**
+		 * 读取端口状态。
+		 * 如果端口寄存器表明有内容，或者需要挂起该端口，都表明有事件需要处理，将buf相应位置1.
+		 */
 		if ((inw(uhci->io_addr + USBPORTSC1 + port * 2) & mask) ||
 				test_bit(port, &uhci->port_c_suspend))
 			*buf |= (1 << (port + 1));
@@ -194,8 +204,14 @@ static int uhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 		goto done;
 	uhci_check_ports(uhci);
 
+	/**
+	 * ROOT HUB是否有端口需要处理。
+	 */
 	status = get_hub_status_data(uhci, buf);
 
+	/**
+	 * 根据控制器状态进行处理。
+	 */
 	switch (uhci->rh_state) {
 	    case UHCI_RH_SUSPENDING:
 	    case UHCI_RH_SUSPENDED:
@@ -212,8 +228,14 @@ static int uhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 
 	    case UHCI_RH_RUNNING:
 		/* are any devices attached? */
+		/**
+		 * 有端口连接上设备了。
+		 */
 		if (!any_ports_active(uhci)) {
 			uhci->rh_state = UHCI_RH_RUNNING_NODEVS;
+			/**
+			 * 1秒后自动停止设备。
+			 */
 			uhci->auto_stop_time = jiffies + HZ;
 		}
 		break;
@@ -236,6 +258,9 @@ done:
 }
 
 /* size of returned buffer is part of USB spec */
+/**
+ * UHCI主机控制器控制请求。
+ */
 static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			u16 wIndex, char *buf, u16 wLength)
 {
@@ -246,6 +271,9 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	u16 wPortChange, wPortStatus;
 	unsigned long flags;
 
+	/**
+	 * HCD不可用。
+	 */
 	if (!test_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags) || uhci->dead)
 		return -ETIMEDOUT;
 
@@ -272,8 +300,14 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 		/* UHCI doesn't support C_RESET (always false) */
 		wPortChange = lstatus = 0;
+		/**
+		 * 端口连接有变化。
+		 */
 		if (status & USBPORTSC_CSC)
 			wPortChange |= USB_PORT_STAT_C_CONNECTION;
+		/**
+		 * 允许或者禁止了端口。
+		 */
 		if (status & USBPORTSC_PEC)
 			wPortChange |= USB_PORT_STAT_C_ENABLE;
 		if ((status & USBPORTSC_OCC) && !ignore_oc)
@@ -323,6 +357,9 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		if (port >= uhci->rh_numports)
 			goto err;
 
+		/**
+		 * 根据控制命令的类型设置端口特征。SET_RH_PORTSTAT是具体的设置宏。
+		 */
 		switch (wValue) {
 		case USB_PORT_FEAT_SUSPEND:
 			SET_RH_PORTSTAT(USBPORTSC_SUSP);
@@ -331,6 +368,9 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			SET_RH_PORTSTAT(USBPORTSC_PR);
 
 			/* Reset terminates Resume signalling */
+			/**
+			 * 既然复位了，就要停止suspend相关的操作。
+			 */
 			uhci_finish_suspend(uhci, port, port_addr);
 
 			/* USB v2.0 7.1.7.5 */

@@ -215,22 +215,32 @@ enum rq_flag_bits {
 /*
  * try to put the fields that are referenced together in the same cacheline
  */
+/**
+ * 块设备的请求结构
+ */
 struct request {
+	/* 通过此字段将请求链接到异步链表中 */
 	struct list_head queuelist;
+	/* 通过此字段将请求链接到完成链表中 */
 	struct list_head donelist;
 
+	/* 所属的请求队列 */
 	struct request_queue *q;
 
+	/* 一组通用的请求标志 */
 	unsigned int cmd_flags;
+	/* 请求类型 */
 	enum rq_cmd_type_bits cmd_type;
 
 	/* Maintain bio traversal state for part by part I/O submission.
 	 * hard_* are block layer internals, no driver should touch them!
 	 */
 
+	/* 所传输数据的位置:起始扇区，当前段中还需要传输的扇区数目，当前请求中还需要传输的扇区数目 */
 	sector_t sector;		/* next sector to submit */
 	sector_t hard_sector;		/* next sector to complete */
 	unsigned long nr_sectors;	/* no. of sectors left to submit */
+	/* 这几个变量与前三个变量通常相同，表示物理硬件上的数据位置。但是，如果逻辑扇区与物理扇区不同，这有差异。 */
 	unsigned long hard_nr_sectors;	/* no. of sectors left to complete */
 	/* no. of sectors left to submit in the current segment */
 	unsigned int current_nr_sectors;
@@ -238,7 +248,9 @@ struct request {
 	/* no. of sectors left to complete in the current segment */
 	unsigned int hard_cur_sectors;
 
+	/* 当前传输，但是还没有完成的bio请求 */
 	struct bio *bio;
+	/* 请求中最后一个bio */
 	struct bio *biotail;
 
 	struct hlist_node hash;	/* merge hash */
@@ -256,6 +268,7 @@ struct request {
 	 * two pointers are available for the IO schedulers, if they need
 	 * more they have to dynamically allocate it.
 	 */
+	/* 私有数据 */
 	void *elevator_private;
 	void *elevator_private2;
 
@@ -265,6 +278,7 @@ struct request {
 	/* Number of scatter-gather DMA addr+len pairs after
 	 * physical address coalescing is performed.
 	 */
+	/* 在使用SG时，请求中段的数目 */
 	unsigned short nr_phys_segments;
 
 	/* Number of scatter-gather addr+len pairs after
@@ -272,6 +286,7 @@ struct request {
 	 * This is the number of scatter-gather entries the driver
 	 * will actually have to deal with after DMA mapping is done.
 	 */
+	/* 在使用SG时，请求中段的数目，经过IO MMU重排 */
 	unsigned short nr_hw_segments;
 
 	unsigned short ioprio;
@@ -347,26 +362,43 @@ struct blk_queue_tag {
 	atomic_t refcnt;		/* map can be shared */
 };
 
+/**
+ * 磁盘请求队列
+ */
 struct request_queue
 {
 	/*
 	 * Together with queue_head for cacheline sharing
 	 */
+	/* 链表头，保存所有IO请求。每个请求是一个request结构 */
 	struct list_head	queue_head;
 	struct request		*last_merge;
+	/* 与队列相关联的IO重排算法 */
 	elevator_t		*elevator;
 
 	/*
 	 * the queue request freelist, one for reads and one for writes
 	 */
+	/* 用于读写请求的空闲链表 */
 	struct request_list	rq;
 
-	request_fn_proc		*request_fn;
+	/* 处理请求的回调函数指针 */
+	request_fn_proc		*request_fn;/* 将队列中的请求发送到设备 */
+	/**
+	 * 创建新请求。
+	 * 标准实现是向请求链表添加请求。如果有足够多的请求，就会调用request_fn。
+	 * 如果设备不使用队列，则可能重写该函数。
+	 */
 	make_request_fn		*make_request_fn;
+	/* 请求预备函数。用于在实际发送的请求前，预备请求处理。一般为NULL */
 	prep_rq_fn		*prep_rq_fn;
+	/* 拨出块设备时调用，已有的请求不会被执行，而是将其收集起来。可提高性能。 */
 	unplug_fn		*unplug_fn;
+	/* 用于确定是否可以向现存的请求增加更多的数据。 */
 	merge_bvec_fn		*merge_bvec_fn;
+	/* 在一次性的执行所有请求以前，调用此方法，利用此方法可以进行必要的清理。 */
 	prepare_flush_fn	*prepare_flush_fn;
+	/* 驱动在软件中断完成请求后，调用此函数通知驱动。 */
 	softirq_done_fn		*softirq_done_fn;
 
 	/*
@@ -378,6 +410,7 @@ struct request_queue
 	/*
 	 * Auto-unplugging state
 	 */
+	/* 用于实现一个定时器机制，在一定时间内自动拨出设备，实现批量处理IO请求 */
 	struct timer_list	unplug_timer;
 	int			unplug_thresh;	/* After this many requests */
 	unsigned long		unplug_delay;	/* After this many jiffies */
@@ -400,6 +433,7 @@ struct request_queue
 	/*
 	 * various queue flags, see QUEUE_* below
 	 */
+	/* 队列的内部状态 */
 	unsigned long		queue_flags;
 
 	/*
@@ -418,17 +452,21 @@ struct request_queue
 	/*
 	 * queue settings
 	 */
+	/* 队列中请求的最大数目，一般为128 */
 	unsigned long		nr_requests;	/* Max # of requests */
+	/* 请求数目达到拥塞的阀值，拥塞时，空闲request结构的数目必定小于该值 */
 	unsigned int		nr_congestion_on;
+	/* 当空闲请求超过此值，解除拥塞状态 */
 	unsigned int		nr_congestion_off;
 	unsigned int		nr_batching;
 
-	unsigned int		max_sectors;
+	/* 队列中描述所管理的块设备中，与硬件相关的一些设置 */
+	unsigned int		max_sectors;/* 单个请求中，最大能处理的扇区数目 */
 	unsigned int		max_hw_sectors;
-	unsigned short		max_phys_segments;
-	unsigned short		max_hw_segments;
-	unsigned short		hardsect_size;
-	unsigned int		max_segment_size;
+	unsigned short		max_phys_segments;/* S/G请求中，不连续段的最大数目 */
+	unsigned short		max_hw_segments;/* 与max_phys_segments类似，但是考虑了IO MMU所进行的重新映射 */
+	unsigned short		hardsect_size;/* 设备的物理扇区长度，通常是512 */
+	unsigned int		max_segment_size;/* 单个请求的最大段长度 */
 
 	unsigned long		seg_boundary_mask;
 	unsigned int		dma_alignment;

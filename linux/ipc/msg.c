@@ -44,20 +44,31 @@
 /*
  * one msg_receiver structure for each sleeping receiver:
  */
+/**
+ * 消息接收者
+ */
 struct msg_receiver {
+	/* 通过此字段链接入接收者链表 */
 	struct list_head	r_list;
+	/* 接收者任务 */
 	struct task_struct	*r_tsk;
 
 	int			r_mode;
+	/* 消息类型 */
 	long			r_msgtype;
+	/* 消息最大长度 */
 	long			r_maxsize;
 
+	/* 用于接收消息的缓冲区 */
 	struct msg_msg		*volatile r_msg;
 };
 
 /* one msg_sender for each sleeping sender */
+/* 消息发送者 */
 struct msg_sender {
+	/* 通过此字段将其链入链表中 */
 	struct list_head	list;
+	/* 发送任务 */
 	struct task_struct	*tsk;
 };
 

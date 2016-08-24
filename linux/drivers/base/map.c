@@ -16,16 +16,24 @@
 #include <linux/kobject.h>
 #include <linux/kobj_map.h>
 
+/* 设备散列表 */
 struct kobj_map {
 	struct probe {
+		/* 将所有散列元素链接在一个单链表中 */
 		struct probe *next;
+		/* 设备号 */
 		dev_t dev;
+		/* 从设备号的范围 */
 		unsigned long range;
+		/* 所属模块 */
 		struct module *owner;
+		/* 回调函数，返回与设备关联的kobject实例 */
 		kobj_probe_t *get;
 		int (*lock)(dev_t, void *);
+		/* 指向块设备或字符设备的实例 */
 		void *data;
 	} *probes[255];
+	/* 保护散列表的锁 */
 	struct mutex *lock;
 };
 

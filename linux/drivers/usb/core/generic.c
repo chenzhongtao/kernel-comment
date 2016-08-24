@@ -40,7 +40,10 @@ static int is_activesync(struct usb_interface_descriptor *desc)
 		&& desc->bInterfaceProtocol == 1;
 }
 
-int usb_choose_configuration(struct usb_device *udev)
+/**
+ * 为USB设备选择一个合适的配置。
+ */
+static int choose_configuration(struct usb_device *udev)
 {
 	int i;
 	int num_configs;
@@ -50,6 +53,9 @@ int usb_choose_configuration(struct usb_device *udev)
 	best = NULL;
 	c = udev->config;
 	num_configs = udev->descriptor.bNumConfigurations;
+	/**
+	 * 从所有配置有查找一个最合适的配置。
+	 */
 	for (i = 0; i < num_configs; (i++, c++)) {
 		struct usb_interface_descriptor	*desc = NULL;
 
@@ -97,6 +103,9 @@ int usb_choose_configuration(struct usb_device *udev)
 		 */
 
 		/* Rule out configs that draw too much bus current */
+		/**
+		 * 该配置要求的电流较高，超过了设备的电流。
+		 */
 		if (c->desc.bMaxPower * 2 > udev->bus_mA) {
 			insufficient_power++;
 			continue;
@@ -118,6 +127,9 @@ int usb_choose_configuration(struct usb_device *udev)
 		 * first interface is for a non-vendor-specific class.
 		 * Reason: Linux is more likely to have a class driver
 		 * than a vendor-specific driver. */
+		/**
+		 * 不是厂商标准。
+		 */
 		else if (udev->descriptor.bDeviceClass !=
 						USB_CLASS_VENDOR_SPEC &&
 				(!desc || desc->bInterfaceClass !=
@@ -128,6 +140,9 @@ int usb_choose_configuration(struct usb_device *udev)
 
 		/* If all the remaining configs are vendor-specific,
 		 * choose the first one. */
+		/**
+		 * 在厂商标准里面选择第一个。
+		 */
 		else if (!best)
 			best = c;
 	}
@@ -151,6 +166,9 @@ int usb_choose_configuration(struct usb_device *udev)
 	return i;
 }
 
+/**
+ * USB设备探测，从设备可能的众多配置中选择一个合适配置，从而让设备进入配置状态。
+ */
 static int generic_probe(struct usb_device *udev)
 {
 	int err, c;
@@ -161,10 +179,10 @@ static int generic_probe(struct usb_device *udev)
 	/* Choose and set the configuration.  This registers the interfaces
 	 * with the driver core and lets interface drivers bind to them.
 	 */
-	if (udev->authorized == 0)
-		dev_err(&udev->dev, "Device is not authorized for usage\n");
-	else {
-		c = usb_choose_configuration(udev);
+	/**
+	 * 为设备选择一个合适的配置。
+	 */
+	c = choose_configuration(udev);
 		if (c >= 0) {
 			err = usb_set_configuration(udev, c);
 			if (err) {

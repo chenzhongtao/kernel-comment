@@ -83,7 +83,9 @@ static int populate_range(struct mm_struct *mm, struct vm_area_struct *vma,
 {
 	int err;
 
+	/* 遍历所有的页，对每一页进行处理 */
 	do {
+		/* 修改当前页的pte项，使其指向非线性映射的区域 */
 		err = install_file_pte(mm, vma, addr, pgoff, vma->vm_page_prot);
 		if (err)
 			return err;
@@ -117,6 +119,10 @@ static int populate_range(struct mm_struct *mm, struct vm_area_struct *vma,
  * and the vma's default protection is used. Arbitrary protections
  * might be implemented in the future.
  */
+/**
+ * 对文件映射进行非线性映射。
+ * 将pgoff，size对应的文件内容映射到start处。
+ */
 asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
 	unsigned long prot, unsigned long pgoff, unsigned long flags)
 {
@@ -136,18 +142,20 @@ asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
 	size = size & PAGE_MASK;
 
 	/* Does the address range wrap, or is the span zero-sized? */
-	if (start + size <= start)
+	if (start + size <= start)/* 整形溢出 */
 		return err;
 
 	/* Can we represent this offset inside this architecture's pte's? */
 #if PTE_FILE_MAX_BITS < BITS_PER_LONG
+	/* 检查重新映射的范围是否合法 */
 	if (pgoff + (size >> PAGE_SHIFT) >= (1UL << PTE_FILE_MAX_BITS))
 		return err;
 #endif
 
 	/* We need down_write() to change vma->vm_flags. */
-	down_read(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);/* 获取mmap信号量 */
  retry:
+ 	/* 查找目标地址所在的区域 */
 	vma = find_vma(mm, start);
 
 	/*
@@ -156,27 +164,30 @@ asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
 	 * the single existing vma.  vm_private_data is used as a
 	 * swapout cursor in a VM_NONLINEAR vma.
 	 */
-	if (!vma || !(vma->vm_flags & VM_SHARED))
+	if (!vma || !(vma->vm_flags & VM_SHARED))/* 区域不存在或者不是共享映射 */
 		goto out;
 
+	/* ??? */
 	if (vma->vm_private_data && !(vma->vm_flags & VM_NONLINEAR))
 		goto out;
 
+	/* 不允许进行非线性映射 */
 	if (!(vma->vm_flags & VM_CAN_NONLINEAR))
 		goto out;
 
+	/* 只能映射区域的一部分为非线性映射 */
 	if (end <= start || start < vma->vm_start || end > vma->vm_end)
 		goto out;
 
 	/* Must set VM_NONLINEAR before any pages are populated. */
-	if (!(vma->vm_flags & VM_NONLINEAR)) {
+	if (!(vma->vm_flags & VM_NONLINEAR)) {/* 第一次进行非线性映射 */
 		/* Don't need a nonlinear mapping, exit success */
 		if (pgoff == linear_page_index(vma, start)) {
 			err = 0;
 			goto out;
 		}
 
-		if (!has_write_lock) {
+		if (!has_write_lock) {/* 获取mmap写锁 */
 			up_read(&mm->mmap_sem);
 			down_write(&mm->mmap_sem);
 			has_write_lock = 1;
@@ -204,19 +215,24 @@ asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
 		}
 		spin_lock(&mapping->i_mmap_lock);
 		flush_dcache_mmap_lock(mapping);
+		/* 设置非线性映射标志 */
 		vma->vm_flags |= VM_NONLINEAR;
+		/* 从优先树中移除vma */
 		vma_prio_tree_remove(vma, &mapping->i_mmap);
+		/* 加入到非线性映射中 */
 		vma_nonlinear_insert(vma, &mapping->i_mmap_nonlinear);
 		flush_dcache_mmap_unlock(mapping);
 		spin_unlock(&mapping->i_mmap_lock);
 	}
 
+	/* 修改页表项，将其指向新的区间 */
 	err = populate_range(mm, vma, start, size, pgoff);
-	if (!err && !(flags & MAP_NONBLOCK)) {
-		if (unlikely(has_write_lock)) {
+	if (!err && !(flags & MAP_NONBLOCK)) {/* 调用者允许阻塞 */
+		if (unlikely(has_write_lock)) {/* 如果是第一次映射成非线性映射，则前面获取了写锁，此处降级为读锁 */
 			downgrade_write(&mm->mmap_sem);
 			has_write_lock = 0;
 		}
+		/* 读入所有的页面 */
 		make_pages_present(start, start+size);
 	}
 

@@ -29,9 +29,12 @@ void msg_exit_ns(struct ipc_namespace *ns);
 void shm_exit_ns(struct ipc_namespace *ns);
 
 struct ipc_ids {
+	/* 命名空间中正在使用的ipc对象数目 */
 	int in_use;
+	/* 用于连续产生用户空间IPC ID */
 	unsigned short seq;
 	unsigned short seq_max;
+	/* 内核信号量，避免用户空间中的竞争。 */
 	struct rw_semaphore rw_mutex;
 	struct idr ipcs_idr;
 };

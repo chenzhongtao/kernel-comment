@@ -14,13 +14,20 @@ struct pidmap {
 
 #define PIDMAP_ENTRIES         ((PID_MAX_LIMIT + 8*PAGE_SIZE - 1)/PAGE_SIZE/8)
 
+/**
+ * PID命名空间
+ */
 struct pid_namespace {
+	/* 引用计数 */
 	struct kref kref;
 	struct pidmap pidmap[PIDMAP_ENTRIES];
 	int last_pid;
+	/* 该空间内的init进程，对其中的孤儿进程调用wait4 */
 	struct task_struct *child_reaper;
 	struct kmem_cache *pid_cachep;
+	/* 命名空间的深度。上层空间可以看到下层空间的pid，它也代表了一个进程有多少个pid */
 	int level;
+	/* 父命名空间 */
 	struct pid_namespace *parent;
 #ifdef CONFIG_PROC_FS
 	struct vfsmount *proc_mnt;

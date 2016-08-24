@@ -81,11 +81,19 @@ static unsigned long last_empty_jifs;
  * A structure for passing work to a pdflush thread.  Also for passing
  * state information between pdflush threads.  Protected by pdflush_lock.
  */
+/**
+ * pdflush线程待完成的工作描述符
+ */
 struct pdflush_work {
+	/* 完成该任务的pdflush线程 */
 	struct task_struct *who;	/* The thread */
+	/* 要完成的任务 */
 	void (*fn)(unsigned long);	/* A callback function */
+	/* 任务参数 */
 	unsigned long arg0;		/* An argument to the callback */
+	/* 通过此字段将任务链接到全局链表中 */
 	struct list_head list;		/* On pdflush_list, when idle */
+	/* 上一次进入睡眠的时间，可用于删除多余的线程 */
 	unsigned long when_i_went_to_sleep;
 };
 
@@ -103,12 +111,15 @@ static int __pdflush(struct pdflush_work *my_work)
 		struct pdflush_work *pdf;
 
 		set_current_state(TASK_INTERRUPTIBLE);
+		/* 将任务添加到全局链表中，等待唤醒 */
 		list_move(&my_work->list, &pdflush_list);
+		/* 记录睡眠时间 */
 		my_work->when_i_went_to_sleep = jiffies;
 		spin_unlock_irq(&pdflush_lock);
 		schedule();
 		try_to_freeze();
 		spin_lock_irq(&pdflush_lock);
+		/* 在获取锁以后，判断特殊的唤醒情况 */
 		if (!list_empty(&my_work->list)) {
 			/*
 			 * Someone woke us up, but without removing our control
@@ -118,24 +129,27 @@ static int __pdflush(struct pdflush_work *my_work)
 			my_work->fn = NULL;
 			continue;
 		}
+		/* 没有指定回调，显然是一种不合理的情况 */
 		if (my_work->fn == NULL) {
 			printk("pdflush: bogus wakeup\n");
 			continue;
 		}
 		spin_unlock_irq(&pdflush_lock);
 
+		/* 回调处理函数，回写磁盘数据 */
 		(*my_work->fn)(my_work->arg0);
 
 		/*
 		 * Thread creation: For how long have there been zero
 		 * available threads?
 		 */
-		if (jiffies - last_empty_jifs > 1 * HZ) {
+		if (jiffies - last_empty_jifs > 1 * HZ) {/* 运行时间超过了1秒，说明回写数量多，系统忙 */
 			/* unlocked list_empty() test is OK here */
-			if (list_empty(&pdflush_list)) {
+			if (list_empty(&pdflush_list)) {/* 所有pdflush进程都在运行 */
 				/* unlocked test is OK here */
+				/* 进程数量没有超过限制 */
 				if (nr_pdflush_threads < MAX_PDFLUSH_THREADS)
-					start_one_pdflush_thread();
+					start_one_pdflush_thread();/* 启动新线程 */
 			}
 		}
 
@@ -151,9 +165,12 @@ static int __pdflush(struct pdflush_work *my_work)
 		if (nr_pdflush_threads <= MIN_PDFLUSH_THREADS)
 			continue;
 		pdf = list_entry(pdflush_list.prev, struct pdflush_work, list);
+		/* 全局链表中，第一个进程睡眠超过1秒，系统空闲 */
 		if (jiffies - pdf->when_i_went_to_sleep > 1 * HZ) {
 			/* Limit exit rate */
+			/* 修改第一个线程的睡眠时间 */
 			pdf->when_i_went_to_sleep = jiffies;
+			/* 本线程退出 */
 			break;					/* exeunt */
 		}
 	}
@@ -168,6 +185,9 @@ static int __pdflush(struct pdflush_work *my_work)
  * performing unfortunate optimisations against the auto variables.  Because
  * these are visible to other tasks and CPUs.  (No problem has actually
  * been observed.  This is just paranoia).
+ */
+/**
+ * pdflush进程主函数
  */
 static int pdflush(void *dummy)
 {
@@ -198,6 +218,9 @@ static int pdflush(void *dummy)
  * Returns zero if it indeed managed to find a worker thread, and passed your
  * payload to it.
  */
+/**
+ * 向pdflush分派工作
+ */
 int pdflush_operation(void (*fn)(unsigned long), unsigned long arg0)
 {
 	unsigned long flags;
@@ -206,24 +229,29 @@ int pdflush_operation(void (*fn)(unsigned long), unsigned long arg0)
 	BUG_ON(fn == NULL);	/* Hard to diagnose if it's deferred */
 
 	spin_lock_irqsave(&pdflush_lock, flags);
-	if (list_empty(&pdflush_list)) {
+	if (list_empty(&pdflush_list)) {/* 没有可唤醒的线程，退出 */
 		spin_unlock_irqrestore(&pdflush_lock, flags);
 		ret = -1;
 	} else {
 		struct pdflush_work *pdf;
 
+		/* 将第一个线程从链表中移除 */
 		pdf = list_entry(pdflush_list.next, struct pdflush_work, list);
 		list_del_init(&pdf->list);
 		if (list_empty(&pdflush_list))
 			last_empty_jifs = jiffies;
 		pdf->fn = fn;
 		pdf->arg0 = arg0;
+		/* 唤醒该线程 */
 		wake_up_process(pdf->who);
 		spin_unlock_irqrestore(&pdflush_lock, flags);
 	}
 	return ret;
 }
 
+/**
+ * 创建运行一个pdflush线程。不同线程回写不同设备的页面。
+ */
 static void start_one_pdflush_thread(void)
 {
 	kthread_run(pdflush, NULL, "pdflush");

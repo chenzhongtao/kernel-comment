@@ -68,11 +68,14 @@ static inline int pte_exec_kernel(pte_t pte)
  * Bits 0, 6 and 7 are taken, split up the 29 bits of offset
  * into this range:
  */
+/* 页表项中，有多少个位可用于存储非线性映射的偏移量 */
 #define PTE_FILE_MAX_BITS	29
 
+/* 从pte中提取出非线性映射的页号 */
 #define pte_to_pgoff(pte) \
 	((((pte).pte_low >> 1) & 0x1f ) + (((pte).pte_low >> 8) << 5 ))
 
+/* 将文件偏移量编码为页号，用于非线性映射 */
 #define pgoff_to_pte(off) \
 	((pte_t) { (((off) & 0x1f) << 1) + (((off) >> 5) << 8) + _PAGE_FILE })
 

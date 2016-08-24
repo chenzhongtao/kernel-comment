@@ -27,14 +27,24 @@ extern unsigned long saved_max_pfn;
  * node_bootmem_map is a map pointer - the bits represent all physical 
  * memory pages (including holes) on the node.
  */
+/**
+ * boot内存管理器使用的结构
+ */
 typedef struct bootmem_data {
+	/* 第一个页帧号，一般为0 */
 	unsigned long node_boot_start;
+	/* 可以由内核直接映射的最后一个物理页，即NORMAL的最后一页 */
 	unsigned long node_low_pfn;
+	/* 用于存储分配位图的指针，位于内存映像之后，变量保存在_end中，链接期间自动插入到内核映像中 */
 	void *node_bootmem_map;
+	/* 上一次分配的页内偏移 */
 	unsigned long last_offset;
+	/* 上一次分配的页编号 */
 	unsigned long last_pos;
+	/* 上一次成功分配的位置，用于加快分配过程 */
 	unsigned long last_success;	/* Previous allocation point.  To speed
 					 * up searching */
+	/* 对于不连续内存来说，使用此字段将多个物理地址空间链接在一起 */
 	struct list_head list;
 } bootmem_data_t;
 
@@ -62,10 +72,13 @@ extern void *__alloc_bootmem_core(struct bootmem_data *bdata,
 
 #ifndef CONFIG_HAVE_ARCH_BOOTMEM_NODE
 extern void reserve_bootmem(unsigned long addr, unsigned long size);
+/* 分配初始化内存，按缓存行对齐 */
 #define alloc_bootmem(x) \
 	__alloc_bootmem(x, SMP_CACHE_BYTES, __pa(MAX_DMA_ADDRESS))
+/* 在DMA区域分配初始化内存 */
 #define alloc_bootmem_low(x) \
 	__alloc_bootmem_low(x, SMP_CACHE_BYTES, 0)
+/* 分配初始化内存，按页对齐 */
 #define alloc_bootmem_pages(x) \
 	__alloc_bootmem(x, PAGE_SIZE, __pa(MAX_DMA_ADDRESS))
 #define alloc_bootmem_low_pages(x) \

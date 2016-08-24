@@ -10,22 +10,28 @@
 
 struct proc_dir_entry;
 struct net_device;
+/* 网络命名空间 */
 struct net {
+	/* 使用计数器，辅助函数get_net,put_net */
 	atomic_t		count;		/* To decided when the network
 						 *  namespace should be freed.
 						 */
 	atomic_t		use_count;	/* To track references we
 						 * destroy on demand
 						 */
+	/* 通过此字段加入全局网络命名空间链表 */
 	struct list_head	list;		/* list of network namespaces */
 	struct work_struct	work;		/* work struct for freeing */
 
+	/* 该命名空间中的proc节点 */
 	struct proc_dir_entry 	*proc_net;
 	struct proc_dir_entry 	*proc_net_stat;
 	struct proc_dir_entry 	*proc_net_root;
 
+	/* 命名空间中的回环设备 */
 	struct net_device       *loopback_dev;          /* The loopback */
 
+	/* 该命名空间中的所有设备 */
 	struct list_head 	dev_base_head;
 	struct hlist_head 	*dev_name_head;
 	struct hlist_head	*dev_index_head;

@@ -52,6 +52,9 @@ static int ip_forward_finish(struct sk_buff *skb)
 	return dst_output(skb);
 }
 
+/**
+ * ip分组转发
+ */
 int ip_forward(struct sk_buff *skb)
 {
 	struct iphdr *iph;	/* Our header */
@@ -74,7 +77,7 @@ int ip_forward(struct sk_buff *skb)
 	 *	that reaches zero, we must reply an ICMP control message telling
 	 *	that the packet's lifetime expired.
 	 */
-	if (ip_hdr(skb)->ttl <= 1)
+	if (ip_hdr(skb)->ttl <= 1)/* 如果TTL小于等于1，说明不允许再传输到下一跳了 */
 		goto too_many_hops;
 
 	if (!xfrm4_route_forward(skb))
@@ -99,7 +102,7 @@ int ip_forward(struct sk_buff *skb)
 	iph = ip_hdr(skb);
 
 	/* Decrease ttl after skb cow done */
-	ip_decrease_ttl(iph);
+	ip_decrease_ttl(iph);/* 递减TTL并重新修改校验和 */
 
 	/*
 	 *	We now generate an ICMP HOST REDIRECT giving the route

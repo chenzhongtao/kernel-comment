@@ -28,8 +28,11 @@ static inline int task_is_pdflush(struct task_struct *task)
  * fs/fs-writeback.c
  */
 enum writeback_sync_modes {
+	/* 同提交同步请求，不等待同步完成 */
 	WB_SYNC_NONE,	/* Don't wait on anything */
+	/* 等待所有数据同步完毕 */
 	WB_SYNC_ALL,	/* Wait on every mapping */
+	/* 用于sync系统调用，类似于WB_SYNC_NONE。在同步时，并不将节点移动到s_io_more，而是将它放到脏链表中 */
 	WB_SYNC_HOLD,	/* Hold the inode on sb_dirty for sys_sync() */
 };
 
@@ -38,14 +41,22 @@ enum writeback_sync_modes {
  * always on the stack, and hence need no locking.  They are always initialised
  * in a manner such that unspecified fields are set to zero.
  */
+/**
+ * 用于控制脏页回写，以及返回回写结果的数据结构。
+ */
 struct writeback_control {
+	/* 回写设备信息，只回写该设备上的脏节点 */
 	struct backing_dev_info *bdi;	/* If !NULL, only write back this
 					   queue */
+	/* 同步模式 */
 	enum writeback_sync_modes sync_mode;
+	/* 如果脏的缓存数据，变脏时间超过此时间，将回写 */
 	unsigned long *older_than_this;	/* If !NULL, only write back inodes
 					   older than this */
+	/* 回写的数量，超过此数量将不再回写 */
 	long nr_to_write;		/* Write this many pages, and decrement
 					   this for each page written */
+	/* 未被回写的页数量 */
 	long pages_skipped;		/* Pages which were not written */
 
 	/*
@@ -56,11 +67,17 @@ struct writeback_control {
 	loff_t range_start;
 	loff_t range_end;
 
+	/* 因写队列在遇到拥塞时是否阻塞 */
 	unsigned nonblocking:1;		/* Don't get stuck on request queues */
+	/* 通知高层，回写期间发生了拥塞 */
 	unsigned encountered_congestion:1; /* An output: a queue is full */
+	/* 周期性回写，由pdflush发出 */
 	unsigned for_kupdate:1;		/* A kupdate writeback */
+	/* 由内存回收引起的回写 */
 	unsigned for_reclaim:1;		/* Invoked from the page allocator */
+	/* 由do_writepages引起的回写 */
 	unsigned for_writepages:1;	/* This is a writepages() call */
+	/* 是否只回写由range_start和range_end限定的范围。如果为1，表示可能多次遍历页。 */
 	unsigned range_cyclic:1;	/* range_start is cyclic */
 };
 

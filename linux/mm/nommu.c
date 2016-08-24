@@ -222,6 +222,9 @@ long vwrite(char *buf, char *addr, unsigned long count)
  *	For tight control over page level allocator and protection flags
  *	use __vmalloc() instead.
  */
+/**
+ * 非连续地址映射
+ */
 void *vmalloc(unsigned long size)
 {
        return __vmalloc(size, GFP_KERNEL | __GFP_HIGHMEM, PAGE_KERNEL);

@@ -130,6 +130,9 @@ void unregister_blkdev(unsigned int major, const char *name)
 
 EXPORT_SYMBOL(unregister_blkdev);
 
+/**
+ * 所有块设备的全局散列表
+ */
 static struct kobj_map *bdev_map;
 
 /*
@@ -175,11 +178,16 @@ static int exact_lock(dev_t dev, void *data)
  * This function registers the partitioning information in @disk
  * with the kernel.
  */
+/**
+ * 注册块设备，添加磁盘
+ */
 void add_disk(struct gendisk *disk)
 {
 	disk->flags |= GENHD_FL_UP;
+	/* 注册设备的设备号 */
 	blk_register_region(MKDEV(disk->major, disk->first_minor),
 			    disk->minors, NULL, exact_match, exact_lock, disk);
+	/* 引用块设备，并将其添加到通用文件系统中 */
 	register_disk(disk);
 	blk_register_queue(disk);
 }
@@ -694,6 +702,7 @@ void genhd_media_change_notify(struct gendisk *disk)
 }
 EXPORT_SYMBOL_GPL(genhd_media_change_notify);
 
+/* 分配一个磁盘设备 */
 struct gendisk *alloc_disk(int minors)
 {
 	return alloc_disk_node(minors, -1);

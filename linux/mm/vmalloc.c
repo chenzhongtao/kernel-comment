@@ -22,6 +22,8 @@
 
 
 DEFINE_RWLOCK(vmlist_lock);
+
+/* 所有非连续映射区域结构的链表头 */
 struct vm_struct *vmlist;
 
 static void *__vmalloc_node(unsigned long size, gfp_t gfp_mask, pgprot_t prot,
@@ -198,26 +200,36 @@ static struct vm_struct *__get_vm_area_node(unsigned long size, unsigned long fl
 	/*
 	 * We always allocate a guard page.
 	 */
+	/* 在vmalloc的子区域之间，插入一个空页，作为保护页，防止越界 */
 	size += PAGE_SIZE;
 
+	/* 获取保护非连续映射区虚拟地址链表的锁 */
 	write_lock(&vmlist_lock);
+	/* 遍历链表中的所有元素，找到合适的虚拟地址空间 */
 	for (p = &vmlist; (tmp = *p) != NULL ;p = &tmp->next) {
+		/* 当前区间起始地址小于起始地址 */
 		if ((unsigned long)tmp->addr < addr) {
+			/* 起始地址位于区间内部 */
 			if((unsigned long)tmp->addr + tmp->size >= addr)
+				/* 调整起始地址为当前区间以后 */
 				addr = ALIGN(tmp->size + 
 					     (unsigned long)tmp->addr, align);
 			continue;
 		}
+		/* 整形溢出了，说明没有合适的块，退出 */
 		if ((size + addr) < addr)
 			goto out;
+		/* 有满足要求的空间区间 */
 		if (size + addr <= (unsigned long)tmp->addr)
 			goto found;
+		/* 从当前区间后面开始继续查找 */
 		addr = ALIGN(tmp->size + (unsigned long)tmp->addr, align);
-		if (addr > end - size)
+		if (addr > end - size)/* 找完了，仍然没有合适的区间 */
 			goto out;
 	}
 
 found:
+	/* 返回找到的区间 */
 	area->next = *p;
 	*p = area;
 
@@ -227,11 +239,13 @@ found:
 	area->pages = NULL;
 	area->nr_pages = 0;
 	area->phys_addr = 0;
+	/* 释放写锁 */
 	write_unlock(&vmlist_lock);
 
 	return area;
 
 out:
+	/* 没有合适的区间，释放写锁并退出 */
 	write_unlock(&vmlist_lock);
 	kfree(area);
 	if (printk_ratelimit())
@@ -239,6 +253,9 @@ out:
 	return NULL;
 }
 
+/**
+ * 在start和end之间，分配一段可用的虚拟地址空间
+ */
 struct vm_struct *__get_vm_area(unsigned long size, unsigned long flags,
 				unsigned long start, unsigned long end)
 {
@@ -254,6 +271,9 @@ EXPORT_SYMBOL_GPL(__get_vm_area);
  *	Search an area of @size in the kernel virtual mapping area,
  *	and reserved it for out purposes.  Returns the area descriptor
  *	on success or %NULL on failure.
+ */
+/**
+ * 为vmalloc分配一段连续的虚拟地址空间
  */
 struct vm_struct *get_vm_area(unsigned long size, unsigned long flags)
 {
@@ -285,19 +305,23 @@ static struct vm_struct *__remove_vm_area(void *addr)
 {
 	struct vm_struct **p, *tmp;
 
+	/* 遍历虚拟地址空间 */
 	for (p = &vmlist ; (tmp = *p) != NULL ;p = &tmp->next) {
-		 if (tmp->addr == addr)
+		 if (tmp->addr == addr)/* 找到地址 */
 			 goto found;
 	}
-	return NULL;
+	return NULL;/* 没有找到地址，失败 */
 
 found:
+	/* 解除内存地址空间与物理页面之间的映射关系 */
 	unmap_vm_area(tmp);
+	/* 从链表中删除区间 */
 	*p = tmp->next;
 
 	/*
 	 * Remove the guard page.
 	 */
+	/* 修改区间长度，在映射时我们为其添加了一个保护页 */
 	tmp->size -= PAGE_SIZE;
 	return tmp;
 }
@@ -310,19 +334,31 @@ found:
  *	This function returns the found VM area, but using it is NOT safe
  *	on SMP machines, except for its size or flags.
  */
+/**
+ * 从vmalloc虚拟地址空间链表中删除一个区间
+ */
 struct vm_struct *remove_vm_area(void *addr)
 {
 	struct vm_struct *v;
+	/* 获取写锁 */
 	write_lock(&vmlist_lock);
+	/* 删除区间 */
 	v = __remove_vm_area(addr);
+	/* 释放写锁 */
 	write_unlock(&vmlist_lock);
 	return v;
 }
 
+/**
+ * 释放由vmalloc,vmap,ioremap分配的内存
+ * addr:	要释放的区域起始地址
+ * deallocate_pages: 是否将物理页面返还给伙伴系统
+ */
 static void __vunmap(void *addr, int deallocate_pages)
 {
 	struct vm_struct *area;
 
+	/* 合法性检查 */
 	if (!addr)
 		return;
 
@@ -332,8 +368,9 @@ static void __vunmap(void *addr, int deallocate_pages)
 		return;
 	}
 
+	/* 删除虚拟地址区域 */
 	area = remove_vm_area(addr);
-	if (unlikely(!area)) {
+	if (unlikely(!area)) {/* 要删除的区域不存在 */
 		printk(KERN_ERR "Trying to vfree() nonexistent vm area (%p)\n",
 				addr);
 		WARN_ON(1);
@@ -342,20 +379,23 @@ static void __vunmap(void *addr, int deallocate_pages)
 
 	debug_check_no_locks_freed(addr, area->size);
 
-	if (deallocate_pages) {
+	if (deallocate_pages) {/* 需要释放物理页面 */
 		int i;
 
+		/* 遍历所有物理页面并释放给伙伴系统 */
 		for (i = 0; i < area->nr_pages; i++) {
 			BUG_ON(!area->pages[i]);
 			__free_page(area->pages[i]);
 		}
 
+		/* 页面指针数组是通过vmalloc分配的 */
 		if (area->flags & VM_VPAGES)
-			vfree(area->pages);
+			vfree(area->pages);/* 将指针数组释放 */
 		else
-			kfree(area->pages);
+			kfree(area->pages);/* 指针数组是通过kmalloc分配的，释放回slab管理系统 */
 	}
 
+	/* 释放vm_struct结构 */
 	kfree(area);
 	return;
 }
@@ -369,6 +409,9 @@ static void __vunmap(void *addr, int deallocate_pages)
  *	NULL, no operation is performed.
  *
  *	Must not be called in interrupt context.
+ */
+/**
+ * 释放由vmalloc、vmalloc_32分配的内存
  */
 void vfree(void *addr)
 {
@@ -385,6 +428,9 @@ EXPORT_SYMBOL(vfree);
  *	which was created from the page array passed to vmap().
  *
  *	Must not be called in interrupt context.
+ */
+/**
+ * 释放由vmap和ioremap映射的内存
  */
 void vunmap(void *addr)
 {
@@ -403,18 +449,25 @@ EXPORT_SYMBOL(vunmap);
  *	Maps @count pages from @pages into contiguous kernel virtual
  *	space.
  */
+/**
+ * 与vmalloc类似，但是由调用者分配物理内存。
+ */
 void *vmap(struct page **pages, unsigned int count,
 		unsigned long flags, pgprot_t prot)
 {
 	struct vm_struct *area;
 
+	/* 参数明显不合法 */
 	if (count > num_physpages)
 		return NULL;
 
+	/* 分配虚拟地址空间 */
 	area = get_vm_area((count << PAGE_SHIFT), flags);
 	if (!area)
 		return NULL;
+	/* 将虚拟地址空间映射到物理地址 */
 	if (map_vm_area(area, prot, &pages)) {
+		/* 映射失败，解决已有的映射 */
 		vunmap(area->addr);
 		return NULL;
 	}
@@ -429,32 +482,40 @@ void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 	struct page **pages;
 	unsigned int nr_pages, array_size, i;
 
+	/* 计算所需要的物理页面数量，注意要剔除保护页 */
 	nr_pages = (area->size - PAGE_SIZE) >> PAGE_SHIFT;
+	/* 计算保存页面地址的数组长度 */
 	array_size = (nr_pages * sizeof(struct page *));
 
 	area->nr_pages = nr_pages;
 	/* Please note that the recursion is strictly bounded. */
-	if (array_size > PAGE_SIZE) {
+	if (array_size > PAGE_SIZE) {/* 地址空间太大，以至于需要多于一个页面保存页面指针 */
+		/* 通过vmalloc分配页面指针数组 */
 		pages = __vmalloc_node(array_size, gfp_mask | __GFP_ZERO,
 					PAGE_KERNEL, node);
 		area->flags |= VM_VPAGES;
 	} else {
+		/* 通过kmalloc分配数组指针 */
 		pages = kmalloc_node(array_size,
 				(gfp_mask & GFP_RECLAIM_MASK) | __GFP_ZERO,
 				node);
 	}
 	area->pages = pages;
-	if (!area->pages) {
+	if (!area->pages) {/* 分配数组失败 */
+		/* 释放虚拟地址空间 */
 		remove_vm_area(area->addr);
 		kfree(area);
 		return NULL;
 	}
 
+	/* 分配页面 */
 	for (i = 0; i < area->nr_pages; i++) {
+		/* 分配页面 */
 		if (node < 0)
 			area->pages[i] = alloc_page(gfp_mask);
 		else
 			area->pages[i] = alloc_pages_node(node, gfp_mask, 0);
+		/* 分配页面失败，记录下成功分配的页面数量，用于后续释放页面 */
 		if (unlikely(!area->pages[i])) {
 			/* Successfully allocated i pages, free them in __vunmap() */
 			area->nr_pages = i;
@@ -462,11 +523,13 @@ void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		}
 	}
 
+	/* 将虚拟地址与页面映射起来 */
 	if (map_vm_area(area, prot, &pages))
 		goto fail;
 	return area->addr;
 
 fail:
+	/* 没有分配到合适的页面，释放地址空间并返回NULL */
 	vfree(area->addr);
 	return NULL;
 }
@@ -493,13 +556,16 @@ static void *__vmalloc_node(unsigned long size, gfp_t gfp_mask, pgprot_t prot,
 	struct vm_struct *area;
 
 	size = PAGE_ALIGN(size);
+	/* 参数检查 */
 	if (!size || (size >> PAGE_SHIFT) > num_physpages)
 		return NULL;
 
+	/* 寻找一块可用的虚拟地址空间 */
 	area = get_vm_area_node(size, VM_ALLOC, node, gfp_mask);
 	if (!area)
 		return NULL;
 
+	/* 分配所需的内存页面，并将其映射到虚拟地址空间中 */
 	return __vmalloc_area_node(area, gfp_mask, prot, node);
 }
 
@@ -517,6 +583,9 @@ EXPORT_SYMBOL(__vmalloc);
  *
  *	For tight control over page level allocator and protection flags
  *	use __vmalloc() instead.
+ */
+/**
+ * 分配一段不连续的物理地址空间，并映射到一段虚拟地址空间中去
  */
 void *vmalloc(unsigned long size)
 {
@@ -600,6 +669,7 @@ void *vmalloc_exec(unsigned long size)
  *	Allocate enough 32bit PA addressable pages to cover @size from the
  *	page level allocator and map them into contiguous kernel virtual space.
  */
+/* 与vmalloc类似，但是物理地址可以保证是低于32位的 */
 void *vmalloc_32(unsigned long size)
 {
 	return __vmalloc(size, GFP_VMALLOC32, PAGE_KERNEL);

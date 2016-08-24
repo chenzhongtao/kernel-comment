@@ -263,6 +263,9 @@ static handle_t *new_handle(int nblocks)
  *
  * Return a pointer to a newly allocated handle, or NULL on failure
  */
+/**
+ * 开启一个日志
+ */
 handle_t *journal_start(journal_t *journal, int nblocks)
 {
 	handle_t *handle = journal_current_handle();
@@ -1116,6 +1119,9 @@ no_journal:
  * buffer: that only gets done when the old transaction finally
  * completes its commit.
  */
+/**
+ * 将修改的元数据写回到日志中。
+ */
 int journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 {
 	transaction_t *transaction = handle->h_transaction;
@@ -1327,6 +1333,9 @@ drop:
  * do so in unusual circumstances.  In particular, expect it to
  * return -EIO if a journal_abort has been executed since the
  * transaction began.
+ */
+/**
+ * 结束一个日志
  */
 int journal_stop(handle_t *handle)
 {

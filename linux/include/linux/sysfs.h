@@ -24,14 +24,22 @@ struct module;
  * The *owner field is no longer used, but leave around
  * until the tree gets cleaned up fully.
  */
+/**
+ * kobject属性，用于sysfs中的一个文件
+ */
 struct attribute {
+	/* 属性及文件名称 */
 	const char		*name;
+	/* 所属模块 */
 	struct module		*owner;
+	/* 访问权限 */
 	mode_t			mode;
 };
 
 struct attribute_group {
+	/* 属性组的名称 */
 	const char		*name;
+	/* 以NULL结束的属性数组 */
 	struct attribute	**attrs;
 };
 
@@ -71,6 +79,9 @@ struct bin_attribute {
 		    struct vm_area_struct *vma);
 };
 
+/**
+ * 读写sysfs属性的方法
+ */
 struct sysfs_ops {
 	ssize_t	(*show)(struct kobject *, struct attribute *,char *);
 	ssize_t	(*store)(struct kobject *,struct attribute *,const char *, size_t);

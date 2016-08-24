@@ -81,6 +81,9 @@ MODULE_PARM_DESC(autosuspend, "default autosuspend delay");
  * Don't call this function unless you are bound to one of the interfaces
  * on this device or you have locked the device!
  */
+/**
+ * 配置里面的接口数组没有按照接口号排序，要找到某个接口，使用本接口。
+ */
 struct usb_interface *usb_ifnum_to_if(const struct usb_device *dev,
 				      unsigned ifnum)
 {
@@ -269,6 +272,12 @@ static unsigned usb_bus_is_wusb(struct usb_bus *bus)
  *
  * This call may not be used in a non-sleeping context.
  */
+/**
+ * 分配一个USB设备结构。
+ *		parent:			设备连接的HUB
+ *		bus:			设备连接的总线。
+ *		port1:			设备连接的端口。
+ */
 struct usb_device *
 usb_alloc_dev(struct usb_device *parent, struct usb_bus *bus, unsigned port1)
 {
@@ -276,23 +285,47 @@ usb_alloc_dev(struct usb_device *parent, struct usb_bus *bus, unsigned port1)
 	struct usb_hcd *usb_hcd = container_of(bus, struct usb_hcd, self);
 	unsigned root_hub = 0;
 
+	/**
+	 * 为结构申请一块内存并清0。
+	 */
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	/**
+	 * 内存不足。
+	 */
 	if (!dev)
 		return NULL;
 
+	/**
+	 * 找到总线对应的主机控制器并引用它，如果失败也返回。
+	 */
 	if (!usb_get_hcd(bus_to_hcd(bus))) {
 		kfree(dev);
 		return NULL;
 	}
 
+	/**
+	 * 调用设备模型的初始化函数，初始化设备。
+	 */
 	device_initialize(&dev->dev);
+	/**
+	 * 初始化设备的总线类型为usb_bus_type
+	 */
 	dev->dev.bus = &usb_bus_type;
+	/**
+	 * 设置类型为usb_device_type，表示这是设备驱动。
+	 */
 	dev->dev.type = &usb_device_type;
+	/**
+	 * 根据主机控制器的DMA掩码设置设备的DMA掩码。
+	 */
 	dev->dev.dma_mask = bus->controller->dma_mask;
 	set_dev_node(&dev->dev, dev_to_node(bus->controller));
 	dev->state = USB_STATE_ATTACHED;
 	atomic_set(&dev->urbnum, 0);
 
+	/**
+	 * 初始化端点0.
+	 */
 	INIT_LIST_HEAD(&dev->ep0.urb_list);
 	dev->ep0.desc.bLength = USB_DT_ENDPOINT_SIZE;
 	dev->ep0.desc.bDescriptorType = USB_DT_ENDPOINT;
@@ -308,18 +341,29 @@ usb_alloc_dev(struct usb_device *parent, struct usb_bus *bus, unsigned port1)
 	 * as stable:  bus->busnum changes easily from modprobe order,
 	 * cardbus or pci hotplugging, and so on.
 	 */
+	/**
+	 * Root HUB没有parent
+	 */
 	if (unlikely(!parent)) {
+		/**
+		 * 将其devpath设置为0.
+		 */
 		dev->devpath[0] = '0';
 
+		/**
+		 * 父设备设置为主机控制器。
+		 */
 		dev->dev.parent = bus->controller;
 		sprintf(&dev->dev.bus_id[0], "usb%d", bus->busnum);
-		root_hub = 1;
-	} else {
+	} else {/* 不是Root HUB */
 		/* match any labeling on the hubs; it's one-based */
+		/**
+		 * 父设备是Root HUB。
+		 */
 		if (parent->devpath[0] == '0')
 			snprintf(dev->devpath, sizeof dev->devpath,
 				"%d", port1);
-		else
+		else/* 父设备不是Root HUB，则在其后加"."及端口号 */
 			snprintf(dev->devpath, sizeof dev->devpath,
 				"%s.%d", parent->devpath, port1);
 
@@ -333,10 +377,16 @@ usb_alloc_dev(struct usb_device *parent, struct usb_bus *bus, unsigned port1)
 	dev->portnum = port1;
 	dev->bus = bus;
 	dev->parent = parent;
+	/**
+	 * 初始化usbfs的队列。
+	 */
 	INIT_LIST_HEAD(&dev->filelist);
 
 #ifdef	CONFIG_PM
 	mutex_init(&dev->pm_mutex);
+	/**
+	 * 初始化处理自动挂起的工作队列。
+	 */
 	INIT_DELAYED_WORK(&dev->autosuspend, usb_autosuspend_work);
 	dev->autosuspend_delay = usb_autosuspend_delay * HZ;
 #endif
@@ -909,35 +959,62 @@ int usb_disabled(void)
 static int __init usb_init(void)
 {
 	int retval;
+	/**
+	 * 通过启动参数禁止了USB。
+	 */
 	if (nousb) {
 		pr_info("%s: USB support disabled\n", usbcore_name);
 		return 0;
 	}
 
+	/**
+	 * 电源管理支持。
+	 */
 	retval = ksuspend_usb_init();
 	if (retval)
 		goto out;
+	/**
+	 * 注册USB总线。
+	 */
 	retval = bus_register(&usb_bus_type);
 	if (retval) 
 		goto bus_register_failed;
+	/**
+	 * 初始化USB主机控制器。
+	 */
 	retval = usb_host_init();
 	if (retval)
 		goto host_init_failed;
+	/**
+	 * USB总线也是一个设备，必须单独注册，这里是作为串行设备进行注册的。
+	 */
 	retval = usb_major_init();
 	if (retval)
 		goto major_init_failed;
+	/**
+	 * usbfs的初始化。
+	 */
 	retval = usb_register(&usbfs_driver);
 	if (retval)
 		goto driver_register_failed;
+	/**
+	 * 这里会注册USB_DEVICE_MAJOR主设备号，供用户态驱动直接控制USB而使用。
+	 */
 	retval = usb_devio_init();
 	if (retval)
 		goto usb_devio_init_failed;
 	retval = usbfs_init();
 	if (retval)
 		goto fs_init_failed;
+	/**
+	 * USB HUB的初始化。
+	 */
 	retval = usb_hub_init();
 	if (retval)
 		goto hub_init_failed;
+	/**
+	 * 注册USB设备驱动，这里是整个USB设备，而不是某个设备接口的驱动。
+	 */
 	retval = usb_register_device_driver(&usb_generic_driver, THIS_MODULE);
 	if (!retval)
 		goto out;

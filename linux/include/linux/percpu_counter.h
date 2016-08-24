@@ -15,12 +15,17 @@
 
 #ifdef CONFIG_SMP
 
+/* 每CPU近似计数值 */
 struct percpu_counter {
+	/* 用于同步对count字段的读写操作 */
 	spinlock_t lock;
+	/* 精确计数值 */
 	s64 count;
 #ifdef CONFIG_HOTPLUG_CPU
+	/* 用于将本结构链接到全局链表中 */
 	struct list_head list;	/* All percpu_counters are on a list */
 #endif
+	/* 每CPU计数，当值没有超过阀值时，更新此计数。超过阀值时，才将计数更新到count字段 */
 	s32 *counters;
 };
 
@@ -37,6 +42,7 @@ void percpu_counter_set(struct percpu_counter *fbc, s64 amount);
 void __percpu_counter_add(struct percpu_counter *fbc, s64 amount, s32 batch);
 s64 __percpu_counter_sum(struct percpu_counter *fbc);
 
+/* 对近似计数值进行计数，增加一个值。如果每CPU值超过FBC_BATCH，将其更新到精确计数值中 */
 static inline void percpu_counter_add(struct percpu_counter *fbc, s64 amount)
 {
 	__percpu_counter_add(fbc, amount, FBC_BATCH);
@@ -53,6 +59,7 @@ static inline s64 percpu_counter_sum(struct percpu_counter *fbc)
 	return __percpu_counter_sum(fbc);
 }
 
+/* 读取计数器的当前值，不考虑每CPU计数值 */
 static inline s64 percpu_counter_read(struct percpu_counter *fbc)
 {
 	return fbc->count;
