@@ -6,7 +6,6 @@
  * Based on cyber_esp.c
  */
 
-#include <linux/config.h>
 
 #if defined(CONFIG_AMIGA) || defined(CONFIG_APUS)
 #define USE_BOTTOM_HALF
@@ -73,12 +72,12 @@ static void dma_advance_sg(Scsi_Cmnd *);
 static int  oktagon_notify_reboot(struct notifier_block *this, unsigned long code, void *x);
 
 #ifdef USE_BOTTOM_HALF
-static void dma_commit(void *opaque);
+static void dma_commit(struct work_struct *unused);
 
 long oktag_to_io(long *paddr, long *addr, long len);
 long oktag_from_io(long *addr, long *paddr, long len);
 
-static DECLARE_WORK(tq_fake_dma, dma_commit, NULL);
+static DECLARE_WORK(tq_fake_dma, dma_commit);
 
 #define DMA_MAXTRANSFER 0x8000
 
@@ -114,7 +113,7 @@ static volatile unsigned char cmd_buffer[16];
 				 */
 
 /***************************************************************** Detection */
-int oktagon_esp_detect(Scsi_Host_Template *tpnt)
+int oktagon_esp_detect(struct scsi_host_template *tpnt)
 {
 	struct NCR_ESP *esp;
 	struct zorro_dev *z = NULL;
@@ -134,7 +133,7 @@ int oktagon_esp_detect(Scsi_Host_Template *tpnt)
 		eregs = (struct ESP_regs *)(address + OKTAGON_ESP_ADDR);
 
 		/* This line was 5 lines lower */
-		esp = esp_allocate(tpnt, (void *)board+OKTAGON_ESP_ADDR);
+		esp = esp_allocate(tpnt, (void *)board + OKTAGON_ESP_ADDR, 0);
 
 		/* we have to shift the registers only one bit for oktagon */
 		esp->shift = 1;
@@ -198,7 +197,7 @@ int oktagon_esp_detect(Scsi_Host_Template *tpnt)
 		esp->esp_command_dvma = (__u32) cmd_buffer;
 
 		esp->irq = IRQ_AMIGA_PORTS;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
+		request_irq(IRQ_AMIGA_PORTS, esp_intr, IRQF_SHARED,
 			    "BSC Oktagon SCSI", esp->ehost);
 
 		/* Figure out our scsi ID on the bus */
@@ -267,7 +266,7 @@ oktagon_notify_reboot(struct notifier_block *this, unsigned long code, void *x)
  */
  
  
-static void dma_commit(void *opaque)
+static void dma_commit(struct work_struct *unused)
 {
     long wait,len2,pos;
     struct NCR_ESP *esp;
@@ -490,7 +489,7 @@ static void dma_led_on(struct NCR_ESP *esp)
 
 static int dma_ports_p(struct NCR_ESP *esp)
 {
-	return ((custom.intenar) & IF_PORTS);
+	return ((amiga_custom.intenar) & IF_PORTS);
 }
 
 static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
@@ -551,8 +550,7 @@ void dma_mmu_get_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 
 void dma_mmu_get_scsi_sgl(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
-        sp->SCp.ptr = page_address(sp->SCp.buffer->page)+
-		      sp->SCp.buffer->offset;
+        sp->SCp.ptr = sg_virt(sp->SCp.buffer);
 }
 
 void dma_mmu_release_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd *sp)
@@ -565,8 +563,7 @@ void dma_mmu_release_scsi_sgl(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 
 void dma_advance_sg(Scsi_Cmnd *sp)
 {
-	sp->SCp.ptr = page_address(sp->SCp.buffer->page)+
-		      sp->SCp.buffer->offset;
+	sp->SCp.ptr = sg_virt(sp->SCp.buffer);
 }
 
 
@@ -585,7 +582,7 @@ int oktagon_esp_release(struct Scsi_Host *instance)
 }
 
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "esp-oktagon",
 	.proc_info		= &esp_proc_info,
 	.name			= "BSC Oktagon SCSI",

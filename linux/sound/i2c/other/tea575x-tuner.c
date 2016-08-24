@@ -1,7 +1,7 @@
 /*
  *   ALSA driver for TEA5757/5759 Philips AM/FM radio tuner chips
  *
- *	Copyright (c) 2004 Jaroslav Kysela <perex@suse.cz>
+ *	Copyright (c) 2004 Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -28,7 +28,7 @@
 #include <sound/core.h>
 #include <sound/tea575x-tuner.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Routines for control of TEA5757/5759 Philips AM/FM radio tuner chips");
 MODULE_LICENSE("GPL");
 
@@ -58,7 +58,7 @@ MODULE_LICENSE("GPL");
  * lowlevel part
  */
 
-static void snd_tea575x_set_freq(tea575x_t *tea)
+static void snd_tea575x_set_freq(struct snd_tea575x *tea)
 {
 	unsigned long freq;
 
@@ -89,7 +89,7 @@ static int snd_tea575x_ioctl(struct inode *inode, struct file *file,
 			     unsigned int cmd, unsigned long data)
 {
 	struct video_device *dev = video_devdata(file);
-	tea575x_t *tea = video_get_drvdata(dev);
+	struct snd_tea575x *tea = video_get_drvdata(dev);
 	void __user *arg = (void __user *)data;
 	
 	switch(cmd) {
@@ -168,10 +168,14 @@ static int snd_tea575x_ioctl(struct inode *inode, struct file *file,
 	}
 }
 
+static void snd_tea575x_release(struct video_device *vfd)
+{
+}
+
 /*
  * initialize all the tea575x chips
  */
-void snd_tea575x_init(tea575x_t *tea)
+void snd_tea575x_init(struct snd_tea575x *tea)
 {
 	unsigned int val;
 
@@ -185,7 +189,7 @@ void snd_tea575x_init(tea575x_t *tea)
 	tea->vd.owner = tea->card->module;
 	strcpy(tea->vd.name, tea->tea5759 ? "TEA5759 radio" : "TEA5757 radio");
 	tea->vd.type = VID_TYPE_TUNER;
-	tea->vd.hardware = VID_HARDWARE_RTRACK;	/* FIXME: assign new number */
+	tea->vd.release = snd_tea575x_release;
 	video_set_drvdata(&tea->vd, tea);
 	tea->vd.fops = &tea->fops;
 	tea->fops.owner = tea->card->module;
@@ -204,7 +208,7 @@ void snd_tea575x_init(tea575x_t *tea)
 	snd_tea575x_set_freq(tea);
 }
 
-void snd_tea575x_exit(tea575x_t *tea)
+void snd_tea575x_exit(struct snd_tea575x *tea)
 {
 	if (tea->vd_registered) {
 		video_unregister_device(&tea->vd);

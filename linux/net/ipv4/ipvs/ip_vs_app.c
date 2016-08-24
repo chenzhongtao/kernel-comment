@@ -25,11 +25,15 @@
 #include <linux/skbuff.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/netfilter.h>
+#include <net/net_namespace.h>
 #include <net/protocol.h>
+#include <net/tcp.h>
 #include <asm/system.h>
 #include <linux/stat.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/mutex.h>
 
 #include <net/ip_vs.h>
 
@@ -39,7 +43,7 @@ EXPORT_SYMBOL(register_ip_vs_app_inc);
 
 /* ipvs application list head */
 static LIST_HEAD(ip_vs_app_list);
-static DECLARE_MUTEX(__ip_vs_app_mutex);
+static DEFINE_MUTEX(__ip_vs_app_mutex);
 
 
 /*
@@ -78,10 +82,9 @@ ip_vs_app_inc_new(struct ip_vs_app *app, __u16 proto, __u16 port)
 	if (!pp->unregister_app)
 		return -EOPNOTSUPP;
 
-	inc = kmalloc(sizeof(struct ip_vs_app), GFP_KERNEL);
+	inc = kmemdup(app, sizeof(*inc), GFP_KERNEL);
 	if (!inc)
 		return -ENOMEM;
-	memcpy(inc, app, sizeof(*inc));
 	INIT_LIST_HEAD(&inc->p_list);
 	INIT_LIST_HEAD(&inc->incs_list);
 	inc->app = app;
@@ -109,8 +112,7 @@ ip_vs_app_inc_new(struct ip_vs_app *app, __u16 proto, __u16 port)
 	return 0;
 
   out:
-	if (inc->timeout_table)
-		kfree(inc->timeout_table);
+	kfree(inc->timeout_table);
 	kfree(inc);
 	return ret;
 }
@@ -135,8 +137,7 @@ ip_vs_app_inc_release(struct ip_vs_app *inc)
 
 	list_del(&inc->a_list);
 
-	if (inc->timeout_table != NULL)
-		kfree(inc->timeout_table);
+	kfree(inc->timeout_table);
 	kfree(inc);
 }
 
@@ -174,11 +175,11 @@ register_ip_vs_app_inc(struct ip_vs_app *app, __u16 proto, __u16 port)
 {
 	int result;
 
-	down(&__ip_vs_app_mutex);
+	mutex_lock(&__ip_vs_app_mutex);
 
 	result = ip_vs_app_inc_new(app, proto, port);
 
-	up(&__ip_vs_app_mutex);
+	mutex_unlock(&__ip_vs_app_mutex);
 
 	return result;
 }
@@ -192,11 +193,11 @@ int register_ip_vs_app(struct ip_vs_app *app)
 	/* increase the module use count */
 	ip_vs_use_count_inc();
 
-	down(&__ip_vs_app_mutex);
+	mutex_lock(&__ip_vs_app_mutex);
 
 	list_add(&app->a_list, &ip_vs_app_list);
 
-	up(&__ip_vs_app_mutex);
+	mutex_unlock(&__ip_vs_app_mutex);
 
 	return 0;
 }
@@ -210,7 +211,7 @@ void unregister_ip_vs_app(struct ip_vs_app *app)
 {
 	struct ip_vs_app *inc, *nxt;
 
-	down(&__ip_vs_app_mutex);
+	mutex_lock(&__ip_vs_app_mutex);
 
 	list_for_each_entry_safe(inc, nxt, &app->incs_list, a_list) {
 		ip_vs_app_inc_release(inc);
@@ -218,39 +219,11 @@ void unregister_ip_vs_app(struct ip_vs_app *app)
 
 	list_del(&app->a_list);
 
-	up(&__ip_vs_app_mutex);
+	mutex_unlock(&__ip_vs_app_mutex);
 
 	/* decrease the module use count */
 	ip_vs_use_count_dec();
 }
-
-
-#if 0000
-/*
- *	Get reference to app by name (called from user context)
- */
-struct ip_vs_app *ip_vs_app_get_by_name(char *appname)
-{
-	struct ip_vs_app *app, *a = NULL;
-
-	down(&__ip_vs_app_mutex);
-
-	list_for_each_entry(ent, &ip_vs_app_list, a_list) {
-		if (strcmp(app->name, appname))
-			continue;
-
-		/* softirq may call ip_vs_app_get too, so the caller
-		   must disable softirq on the current CPU */
-		if (ip_vs_app_get(app))
-			a = app;
-		break;
-	}
-
-	up(&__ip_vs_app_mutex);
-
-	return a;
-}
-#endif
 
 
 /*
@@ -356,18 +329,18 @@ static inline void vs_seq_update(struct ip_vs_conn *cp, struct ip_vs_seq *vseq,
 	spin_unlock(&cp->lock);
 }
 
-static inline int app_tcp_pkt_out(struct ip_vs_conn *cp, struct sk_buff **pskb,
+static inline int app_tcp_pkt_out(struct ip_vs_conn *cp, struct sk_buff *skb,
 				  struct ip_vs_app *app)
 {
 	int diff;
-	unsigned int tcp_offset = (*pskb)->nh.iph->ihl*4;
+	const unsigned int tcp_offset = ip_hdrlen(skb);
 	struct tcphdr *th;
 	__u32 seq;
 
-	if (!ip_vs_make_skb_writable(pskb, tcp_offset + sizeof(*th)))
+	if (!skb_make_writable(skb, tcp_offset + sizeof(*th)))
 		return 0;
 
-	th = (struct tcphdr *)((*pskb)->nh.raw + tcp_offset);
+	th = (struct tcphdr *)(skb_network_header(skb) + tcp_offset);
 
 	/*
 	 *	Remember seq number in case this pkt gets resized
@@ -388,7 +361,7 @@ static inline int app_tcp_pkt_out(struct ip_vs_conn *cp, struct sk_buff **pskb,
 	if (app->pkt_out == NULL)
 		return 1;
 
-	if (!app->pkt_out(app, cp, pskb, &diff))
+	if (!app->pkt_out(app, cp, skb, &diff))
 		return 0;
 
 	/*
@@ -406,7 +379,7 @@ static inline int app_tcp_pkt_out(struct ip_vs_conn *cp, struct sk_buff **pskb,
  *	called by ipvs packet handler, assumes previously checked cp!=NULL
  *	returns false if it can't handle packet (oom)
  */
-int ip_vs_app_pkt_out(struct ip_vs_conn *cp, struct sk_buff **pskb)
+int ip_vs_app_pkt_out(struct ip_vs_conn *cp, struct sk_buff *skb)
 {
 	struct ip_vs_app *app;
 
@@ -419,7 +392,7 @@ int ip_vs_app_pkt_out(struct ip_vs_conn *cp, struct sk_buff **pskb)
 
 	/* TCP is complicated */
 	if (cp->protocol == IPPROTO_TCP)
-		return app_tcp_pkt_out(cp, pskb, app);
+		return app_tcp_pkt_out(cp, skb, app);
 
 	/*
 	 *	Call private output hook function
@@ -427,22 +400,22 @@ int ip_vs_app_pkt_out(struct ip_vs_conn *cp, struct sk_buff **pskb)
 	if (app->pkt_out == NULL)
 		return 1;
 
-	return app->pkt_out(app, cp, pskb, NULL);
+	return app->pkt_out(app, cp, skb, NULL);
 }
 
 
-static inline int app_tcp_pkt_in(struct ip_vs_conn *cp, struct sk_buff **pskb,
+static inline int app_tcp_pkt_in(struct ip_vs_conn *cp, struct sk_buff *skb,
 				 struct ip_vs_app *app)
 {
 	int diff;
-	unsigned int tcp_offset = (*pskb)->nh.iph->ihl*4;
+	const unsigned int tcp_offset = ip_hdrlen(skb);
 	struct tcphdr *th;
 	__u32 seq;
 
-	if (!ip_vs_make_skb_writable(pskb, tcp_offset + sizeof(*th)))
+	if (!skb_make_writable(skb, tcp_offset + sizeof(*th)))
 		return 0;
 
-	th = (struct tcphdr *)((*pskb)->nh.raw + tcp_offset);
+	th = (struct tcphdr *)(skb_network_header(skb) + tcp_offset);
 
 	/*
 	 *	Remember seq number in case this pkt gets resized
@@ -463,7 +436,7 @@ static inline int app_tcp_pkt_in(struct ip_vs_conn *cp, struct sk_buff **pskb,
 	if (app->pkt_in == NULL)
 		return 1;
 
-	if (!app->pkt_in(app, cp, pskb, &diff))
+	if (!app->pkt_in(app, cp, skb, &diff))
 		return 0;
 
 	/*
@@ -481,7 +454,7 @@ static inline int app_tcp_pkt_in(struct ip_vs_conn *cp, struct sk_buff **pskb,
  *	called by ipvs packet handler, assumes previously checked cp!=NULL.
  *	returns false if can't handle packet (oom).
  */
-int ip_vs_app_pkt_in(struct ip_vs_conn *cp, struct sk_buff **pskb)
+int ip_vs_app_pkt_in(struct ip_vs_conn *cp, struct sk_buff *skb)
 {
 	struct ip_vs_app *app;
 
@@ -494,7 +467,7 @@ int ip_vs_app_pkt_in(struct ip_vs_conn *cp, struct sk_buff **pskb)
 
 	/* TCP is complicated */
 	if (cp->protocol == IPPROTO_TCP)
-		return app_tcp_pkt_in(cp, pskb, app);
+		return app_tcp_pkt_in(cp, skb, app);
 
 	/*
 	 *	Call private input hook function
@@ -502,7 +475,7 @@ int ip_vs_app_pkt_in(struct ip_vs_conn *cp, struct sk_buff **pskb)
 	if (app->pkt_in == NULL)
 		return 1;
 
-	return app->pkt_in(app, cp, pskb, NULL);
+	return app->pkt_in(app, cp, skb, NULL);
 }
 
 
@@ -527,7 +500,7 @@ static struct ip_vs_app *ip_vs_app_idx(loff_t pos)
 
 static void *ip_vs_app_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	down(&__ip_vs_app_mutex);
+	mutex_lock(&__ip_vs_app_mutex);
 
 	return *pos ? ip_vs_app_idx(*pos - 1) : SEQ_START_TOKEN;
 }
@@ -559,7 +532,7 @@ static void *ip_vs_app_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 
 static void ip_vs_app_seq_stop(struct seq_file *seq, void *v)
 {
-	up(&__ip_vs_app_mutex);
+	mutex_unlock(&__ip_vs_app_mutex);
 }
 
 static int ip_vs_app_seq_show(struct seq_file *seq, void *v)
@@ -578,7 +551,7 @@ static int ip_vs_app_seq_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
-static struct seq_operations ip_vs_app_seq_ops = {
+static const struct seq_operations ip_vs_app_seq_ops = {
 	.start = ip_vs_app_seq_start,
 	.next  = ip_vs_app_seq_next,
 	.stop  = ip_vs_app_seq_stop,
@@ -590,7 +563,7 @@ static int ip_vs_app_open(struct inode *inode, struct file *file)
 	return seq_open(file, &ip_vs_app_seq_ops);
 }
 
-static struct file_operations ip_vs_app_fops = {
+static const struct file_operations ip_vs_app_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = ip_vs_app_open,
 	.read	 = seq_read,
@@ -603,10 +576,9 @@ static struct file_operations ip_vs_app_fops = {
 /*
  *	Replace a segment of data with a new segment
  */
-int ip_vs_skb_replace(struct sk_buff *skb, int pri,
+int ip_vs_skb_replace(struct sk_buff *skb, gfp_t pri,
 		      char *o_buf, int o_len, char *n_buf, int n_len)
 {
-	struct iphdr *iph;
 	int diff;
 	int o_offset;
 	int o_left;
@@ -632,12 +604,11 @@ int ip_vs_skb_replace(struct sk_buff *skb, int pri,
 		skb_put(skb, diff);
 		memmove(skb->data + o_offset + n_len,
 			skb->data + o_offset + o_len, o_left);
-		memcpy(skb->data + o_offset, n_buf, n_len);
+		skb_copy_to_linear_data_offset(skb, o_offset, n_buf, n_len);
 	}
 
 	/* must update the iph total length here */
-	iph = skb->nh.iph;
-	iph->tot_len = htons(skb->len);
+	ip_hdr(skb)->tot_len = htons(skb->len);
 
 	LeaveFunction(9);
 	return 0;
@@ -647,12 +618,12 @@ int ip_vs_skb_replace(struct sk_buff *skb, int pri,
 int ip_vs_app_init(void)
 {
 	/* we will replace it with proc_net_ipvs_create() soon */
-	proc_net_fops_create("ip_vs_app", 0, &ip_vs_app_fops);
+	proc_net_fops_create(&init_net, "ip_vs_app", 0, &ip_vs_app_fops);
 	return 0;
 }
 
 
 void ip_vs_app_cleanup(void)
 {
-	proc_net_remove("ip_vs_app");
+	proc_net_remove(&init_net, "ip_vs_app");
 }

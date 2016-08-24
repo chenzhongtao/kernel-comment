@@ -19,115 +19,73 @@ MODULE_DESCRIPTION("ip6tables filter table");
 
 #define FILTER_VALID_HOOKS ((1 << NF_IP6_LOCAL_IN) | (1 << NF_IP6_FORWARD) | (1 << NF_IP6_LOCAL_OUT))
 
-/* Standard entry. */
-struct ip6t_standard
-{
-	struct ip6t_entry entry;
-	struct ip6t_standard_target target;
-};
-
-struct ip6t_error_target
-{
-	struct ip6t_entry_target target;
-	char errorname[IP6T_FUNCTION_MAXNAMELEN];
-};
-
-struct ip6t_error
-{
-	struct ip6t_entry entry;
-	struct ip6t_error_target target;
-};
-
 static struct
 {
 	struct ip6t_replace repl;
 	struct ip6t_standard entries[3];
 	struct ip6t_error term;
-} initial_table __initdata
-= { { "filter", FILTER_VALID_HOOKS, 4,
-      sizeof(struct ip6t_standard) * 3 + sizeof(struct ip6t_error),
-      { [NF_IP6_LOCAL_IN] = 0,
-	[NF_IP6_FORWARD] = sizeof(struct ip6t_standard),
-	[NF_IP6_LOCAL_OUT] = sizeof(struct ip6t_standard) * 2 },
-      { [NF_IP6_LOCAL_IN] = 0,
-	[NF_IP6_FORWARD] = sizeof(struct ip6t_standard),
-	[NF_IP6_LOCAL_OUT] = sizeof(struct ip6t_standard) * 2 },
-      0, NULL, { } },
-    {
-	    /* LOCAL_IN */
-	    { { { { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ip6t_entry),
-		sizeof(struct ip6t_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IP6T_ALIGN(sizeof(struct ip6t_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* FORWARD */
-	    { { { { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ip6t_entry),
-		sizeof(struct ip6t_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IP6T_ALIGN(sizeof(struct ip6t_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* LOCAL_OUT */
-	    { { { { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ip6t_entry),
-		sizeof(struct ip6t_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IP6T_ALIGN(sizeof(struct ip6t_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } }
-    },
-    /* ERROR */
-    { { { { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, { { { 0 } } }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-	0,
-	sizeof(struct ip6t_entry),
-	sizeof(struct ip6t_error),
-	0, { 0, 0 }, { } },
-      { { { { IP6T_ALIGN(sizeof(struct ip6t_error_target)), IP6T_ERROR_TARGET } },
-	  { } },
-	"ERROR"
-      }
-    }
+} initial_table __initdata = {
+	.repl = {
+		.name = "filter",
+		.valid_hooks = FILTER_VALID_HOOKS,
+		.num_entries = 4,
+		.size = sizeof(struct ip6t_standard) * 3 + sizeof(struct ip6t_error),
+		.hook_entry = {
+			[NF_IP6_LOCAL_IN] = 0,
+			[NF_IP6_FORWARD] = sizeof(struct ip6t_standard),
+			[NF_IP6_LOCAL_OUT] = sizeof(struct ip6t_standard) * 2
+		},
+		.underflow = {
+			[NF_IP6_LOCAL_IN] = 0,
+			[NF_IP6_FORWARD] = sizeof(struct ip6t_standard),
+			[NF_IP6_LOCAL_OUT] = sizeof(struct ip6t_standard) * 2
+		},
+	},
+	.entries = {
+		IP6T_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_IN */
+		IP6T_STANDARD_INIT(NF_ACCEPT),	/* FORWARD */
+		IP6T_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_OUT */
+	},
+	.term = IP6T_ERROR_INIT,		/* ERROR */
 };
 
-static struct ip6t_table packet_filter = {
+static struct xt_table packet_filter = {
 	.name		= "filter",
 	.valid_hooks	= FILTER_VALID_HOOKS,
 	.lock		= RW_LOCK_UNLOCKED,
 	.me		= THIS_MODULE,
+	.af		= AF_INET6,
 };
 
 /* The work comes in here from netfilter.c. */
 static unsigned int
 ip6t_hook(unsigned int hook,
-	 struct sk_buff **pskb,
+	 struct sk_buff *skb,
 	 const struct net_device *in,
 	 const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	return ip6t_do_table(pskb, hook, in, out, &packet_filter, NULL);
+	return ip6t_do_table(skb, hook, in, out, &packet_filter);
 }
 
 static unsigned int
 ip6t_local_out_hook(unsigned int hook,
-		   struct sk_buff **pskb,
+		   struct sk_buff *skb,
 		   const struct net_device *in,
 		   const struct net_device *out,
 		   int (*okfn)(struct sk_buff *))
 {
 #if 0
 	/* root is playing with raw sockets. */
-	if ((*pskb)->len < sizeof(struct iphdr)
-	    || (*pskb)->nh.iph->ihl * 4 < sizeof(struct iphdr)) {
+	if (skb->len < sizeof(struct iphdr)
+	    || ip_hdrlen(skb) < sizeof(struct iphdr)) {
 		if (net_ratelimit())
 			printk("ip6t_hook: happy cracking.\n");
 		return NF_ACCEPT;
 	}
 #endif
 
-	return ip6t_do_table(pskb, hook, in, out, &packet_filter, NULL);
+	return ip6t_do_table(skb, hook, in, out, &packet_filter);
 }
 
 static struct nf_hook_ops ip6t_ops[] = {
@@ -158,7 +116,7 @@ static struct nf_hook_ops ip6t_ops[] = {
 static int forward = NF_ACCEPT;
 module_param(forward, bool, 0000);
 
-static int __init init(void)
+static int __init ip6table_filter_init(void)
 {
 	int ret;
 
@@ -176,39 +134,22 @@ static int __init init(void)
 		return ret;
 
 	/* Register hooks */
-	ret = nf_register_hook(&ip6t_ops[0]);
+	ret = nf_register_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
 	if (ret < 0)
 		goto cleanup_table;
 
-	ret = nf_register_hook(&ip6t_ops[1]);
-	if (ret < 0)
-		goto cleanup_hook0;
-
-	ret = nf_register_hook(&ip6t_ops[2]);
-	if (ret < 0)
-		goto cleanup_hook1;
-
 	return ret;
 
- cleanup_hook1:
-	nf_unregister_hook(&ip6t_ops[1]);
- cleanup_hook0:
-	nf_unregister_hook(&ip6t_ops[0]);
  cleanup_table:
 	ip6t_unregister_table(&packet_filter);
-
 	return ret;
 }
 
-static void __exit fini(void)
+static void __exit ip6table_filter_fini(void)
 {
-	unsigned int i;
-
-	for (i = 0; i < sizeof(ip6t_ops)/sizeof(struct nf_hook_ops); i++)
-		nf_unregister_hook(&ip6t_ops[i]);
-
+	nf_unregister_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
 	ip6t_unregister_table(&packet_filter);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ip6table_filter_init);
+module_exit(ip6table_filter_fini);

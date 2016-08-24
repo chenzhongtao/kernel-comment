@@ -1,6 +1,4 @@
 /*
- *  arch/ppc/platforms/setup.c
- *
  *  Copyright (C) 1995  Linus Torvalds
  *  Adapted from 'alpha' version by Gary Thomas
  *  Modified by Cort Dougan (cort@cs.nmt.edu)
@@ -13,7 +11,6 @@
  * bootup setup stuff..
  */
 
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/errno.h>
@@ -26,7 +23,7 @@
 #include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/major.h>
 #include <linux/interrupt.h>
 #include <linux/reboot.h>
@@ -61,11 +58,16 @@
 #include <asm/pci-bridge.h>
 #include <asm/todc.h>
 
-TODC_ALLOC();
+/* prep registers for L2 */
+#define CACHECRBA       0x80000823      /* Cache configuration register address */
+#define L2CACHE_MASK	0x03	/* Mask for 2 L2 Cache bits */
+#define L2CACHE_512KB	0x00	/* 512KB */
+#define L2CACHE_256KB	0x01	/* 256KB */
+#define L2CACHE_1MB	0x02	/* 1MB */
+#define L2CACHE_NONE	0x03	/* NONE */
+#define L2CACHE_PARITY  0x08    /* Mask for L2 Cache Parity Protected bit */
 
-unsigned char ucSystemType;
-unsigned char ucBoardRev;
-unsigned char ucBoardRevMaj, ucBoardRevMin;
+TODC_ALLOC();
 
 extern unsigned char prep_nvram_read_val(int addr);
 extern void prep_nvram_write_val(int addr,
@@ -88,9 +90,6 @@ extern void prep_tiger1_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi
 
 #define cached_21	(((char *)(ppc_cached_irq_mask))[3])
 #define cached_A1	(((char *)(ppc_cached_irq_mask))[2])
-
-/* for the mac fs */
-dev_t boot_dev;
 
 #ifdef CONFIG_SOUND_CS4232
 long ppc_cs4232_dma, ppc_cs4232_dma2;
@@ -173,7 +172,7 @@ prep_carolina_enable_l2(void)
 }
 
 /* cpuinfo code common to all IBM PReP */
-static void __prep
+static void
 prep_ibm_cpuinfo(struct seq_file *m)
 {
 	unsigned int equip_reg = inb(PREP_IBM_EQUIPMENT);
@@ -209,14 +208,14 @@ prep_ibm_cpuinfo(struct seq_file *m)
 	}
 }
 
-static int __prep
+static int
 prep_gen_cpuinfo(struct seq_file *m)
 {
 	prep_ibm_cpuinfo(m);
 	return 0;
 }
 
-static int __prep
+static int
 prep_sandalfoot_cpuinfo(struct seq_file *m)
 {
 	unsigned int equip_reg = inb(PREP_IBM_EQUIPMENT);
@@ -243,7 +242,7 @@ prep_sandalfoot_cpuinfo(struct seq_file *m)
 	return 0;
 }
 
-static int __prep
+static int
 prep_thinkpad_cpuinfo(struct seq_file *m)
 {
 	unsigned int equip_reg = inb(PREP_IBM_EQUIPMENT);
@@ -314,7 +313,7 @@ prep_thinkpad_cpuinfo(struct seq_file *m)
 	return 0;
 }
 
-static int __prep
+static int
 prep_carolina_cpuinfo(struct seq_file *m)
 {
 	unsigned int equip_reg = inb(PREP_IBM_EQUIPMENT);
@@ -350,7 +349,7 @@ prep_carolina_cpuinfo(struct seq_file *m)
 	return 0;
 }
 
-static int __prep
+static int
 prep_tiger1_cpuinfo(struct seq_file *m)
 {
 	unsigned int l2_reg = inb(PREP_IBM_L2INFO);
@@ -393,7 +392,7 @@ prep_tiger1_cpuinfo(struct seq_file *m)
 
 
 /* Used by all Motorola PReP */
-static int __prep
+static int
 prep_mot_cpuinfo(struct seq_file *m)
 {
 	unsigned int cachew = *((unsigned char *)CACHECRBA);
@@ -454,7 +453,7 @@ no_l2:
 	return 0;
 }
 
-static void __prep
+static void
 prep_restart(char *cmd)
 {
 #define PREP_SP92	0x92	/* Special Port 92 */
@@ -473,7 +472,7 @@ prep_restart(char *cmd)
 #undef PREP_SP92
 }
 
-static void __prep
+static void
 prep_halt(void)
 {
 	local_irq_disable(); /* no interrupts */
@@ -488,7 +487,7 @@ prep_halt(void)
 /* Carrera is the power manager in the Thinkpads. Unfortunately not much is
  * known about it, so we can't power down.
  */
-static void __prep
+static void
 prep_carrera_poweroff(void)
 {
 	prep_halt();
@@ -501,7 +500,7 @@ prep_carrera_poweroff(void)
  * somewhat in the IBM Carolina Technical Specification.
  * -Hollis
  */
-static void __prep
+static void
 utah_sig87c750_setbit(unsigned int bytenum, unsigned int bitnum, int value)
 {
 	/*
@@ -539,7 +538,7 @@ utah_sig87c750_setbit(unsigned int bytenum, unsigned int bitnum, int value)
 	udelay(100);				/* important: let controller recover */
 }
 
-static void __prep
+static void
 prep_sig750_poweroff(void)
 {
 	/* tweak the power manager found in most IBM PRePs (except Thinkpads) */
@@ -554,7 +553,7 @@ prep_sig750_poweroff(void)
 	/* not reached */
 }
 
-static int __prep
+static int
 prep_show_percpuinfo(struct seq_file *m, int i)
 {
 	/* PREP's without residual data will give incorrect values here */
@@ -591,7 +590,7 @@ static void __init prep_init_sound(void)
 	PPC_DEVICE *audiodevice = NULL;
 
 	/*
-	 * Get the needed resource informations from residual data.
+	 * Get the needed resource information from residual data.
 	 *
 	 */
 	if (have_residual_data)
@@ -630,9 +629,9 @@ static void __init prep_init_sound(void)
 	}
 
 	/*
-	 * Find a way to push these informations to the cs4232 driver
+	 * Find a way to push this information to the cs4232 driver
 	 * Give it out with printk, when not in cmd_line?
-	 * Append it to  cmd_line and saved_command_line?
+	 * Append it to cmd_line and boot_command_line?
 	 * Format is cs4232=io,irq,dma,dma2
 	 */
 }
@@ -690,8 +689,8 @@ prep_set_bat(void)
 	mb();
 
 	/* setup DBATs */
-	mtspr(DBAT2U, 0x80001ffe);
-	mtspr(DBAT2L, 0x8000002a);
+	mtspr(SPRN_DBAT2U, 0x80001ffe);
+	mtspr(SPRN_DBAT2L, 0x8000002a);
 
 	/* wait for updates */
 	mb();
@@ -700,12 +699,12 @@ prep_set_bat(void)
 /*
  * IBM 3-digit status LED
  */
-static unsigned int ibm_statusled_base __prepdata;
+static unsigned int ibm_statusled_base;
 
-static void __prep
+static void
 ibm_statusled_progress(char *s, unsigned short hex);
 
-static int __prep
+static int
 ibm_statusled_panic(struct notifier_block *dummy1, unsigned long dummy2,
 		    void * dummy3)
 {
@@ -713,13 +712,13 @@ ibm_statusled_panic(struct notifier_block *dummy1, unsigned long dummy2,
 	return NOTIFY_DONE;
 }
 
-static struct notifier_block ibm_statusled_block __prepdata = {
+static struct notifier_block ibm_statusled_block = {
 	ibm_statusled_panic,
 	NULL,
 	INT_MAX /* try to do it first */
 };
 
-static void __prep
+static void
 ibm_statusled_progress(char *s, unsigned short hex)
 {
 	static int notifier_installed;
@@ -733,7 +732,7 @@ ibm_statusled_progress(char *s, unsigned short hex)
 		hex = 0xfff;
 		if (!notifier_installed) {
 			++notifier_installed;
-			notifier_chain_register(&panic_notifier_list,
+			atomic_notifier_chain_register(&panic_notifier_list,
 						&ibm_statusled_block);
 		}
 	}
@@ -895,7 +894,7 @@ prep_setup_arch(void)
 		 if (bootargs != NULL) {
 			 strcpy(cmd_line, bootargs);
 			 /* again.. */
-			 strcpy(saved_command_line, cmd_line);
+			 strcpy(boot_command_line, cmd_line);
 		}
 	}
 
@@ -945,23 +944,9 @@ prep_calibrate_decr(void)
 		todc_calibrate_decr();
 }
 
-static unsigned int __prep
-prep_irq_canonicalize(u_int irq)
-{
-	if (irq == 2)
-	{
-		return 9;
-	}
-	else
-	{
-		return irq;
-	}
-}
-
 static void __init
 prep_init_IRQ(void)
 {
-	int i;
 	unsigned int pci_viddid, pci_did;
 
 	if (OpenPIC_Addr != NULL) {
@@ -970,11 +955,9 @@ prep_init_IRQ(void)
 		openpic_hookup_cascade(NUM_8259_INTERRUPTS, "82c59 cascade",
 				       i8259_irq);
 	}
-	for ( i = 0 ; i < NUM_8259_INTERRUPTS ; i++ )
-		irq_desc[i].handler = &i8259_pic;
 
 	if (have_residual_data) {
-		i8259_init(residual_isapic_addr());
+		i8259_init(residual_isapic_addr(), 0);
 		return;
 	}
 
@@ -985,18 +968,18 @@ prep_init_IRQ(void)
 	if (((pci_viddid & 0xffff) == PCI_VENDOR_ID_MOTOROLA)
 			&& ((pci_did == PCI_DEVICE_ID_MOTOROLA_RAVEN)
 				|| (pci_did == PCI_DEVICE_ID_MOTOROLA_HAWK)))
-		i8259_init(0);
+		i8259_init(0, 0);
 	else
 		/* PCI interrupt ack address given in section 6.1.8 of the
 		 * PReP specification. */
-		i8259_init(MPC10X_MAPA_PCI_INTACK_ADDR);
+		i8259_init(MPC10X_MAPA_PCI_INTACK_ADDR, 0);
 }
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
 /*
  * IDE stuff.
  */
-static int __prep
+static int
 prep_ide_default_irq(unsigned long base)
 {
 	switch (base) {
@@ -1010,7 +993,7 @@ prep_ide_default_irq(unsigned long base)
 	}
 }
 
-static unsigned long __prep
+static unsigned long
 prep_ide_default_io_base(int index)
 {
 	switch (index) {
@@ -1055,7 +1038,7 @@ smp_prep_setup_cpu(int cpu_nr)
 		do_openpic_setup_cpu();
 }
 
-static struct smp_ops_t prep_smp_ops __prepdata = {
+static struct smp_ops_t prep_smp_ops = {
 	smp_openpic_message_pass,
 	smp_prep_probe,
 	smp_prep_kick_cpu,
@@ -1080,15 +1063,13 @@ prep_map_io(void)
 static int __init
 prep_request_io(void)
 {
-	if (_machine == _MACH_prep) {
 #ifdef CONFIG_NVRAM
-		request_region(PREP_NVRAM_AS0, 0x8, "nvram");
+	request_region(PREP_NVRAM_AS0, 0x8, "nvram");
 #endif
-		request_region(0x00,0x20,"dma1");
-		request_region(0x40,0x20,"timer");
-		request_region(0x80,0x10,"dma page reg");
-		request_region(0xc0,0x20,"dma2");
-	}
+	request_region(0x00,0x20,"dma1");
+	request_region(0x40,0x20,"timer");
+	request_region(0x80,0x10,"dma page reg");
+	request_region(0xc0,0x20,"dma2");
 
 	return 0;
 }
@@ -1113,6 +1094,7 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ISA_DMA_THRESHOLD = 0x00ffffff;
 	DMA_MODE_READ = 0x44;
 	DMA_MODE_WRITE = 0x48;
+	ppc_do_canonicalize_irqs = 1;
 
 	/* figure out what kind of prep workstation we are */
 	if (have_residual_data) {
@@ -1139,10 +1121,11 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.setup_arch     = prep_setup_arch;
 	ppc_md.show_percpuinfo = prep_show_percpuinfo;
 	ppc_md.show_cpuinfo   = NULL; /* set in prep_setup_arch() */
-	ppc_md.irq_canonicalize = prep_irq_canonicalize;
 	ppc_md.init_IRQ       = prep_init_IRQ;
 	/* this gets changed later on if we have an OpenPIC -- Cort */
 	ppc_md.get_irq        = i8259_irq;
+
+	ppc_md.phys_mem_access_prot = pci_phys_mem_access_prot;
 
 	ppc_md.restart        = prep_restart;
 	ppc_md.power_off      = NULL; /* set in prep_setup_arch() */
@@ -1174,6 +1157,6 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 #endif
 
 #ifdef CONFIG_SMP
-	ppc_md.smp_ops		 = &prep_smp_ops;
+	smp_ops			 = &prep_smp_ops;
 #endif /* CONFIG_SMP */
 }

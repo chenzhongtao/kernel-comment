@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/4xx/walnut.c
- *
  * Architecture- / platform-specific boot-time initialization code for
  * IBM PowerPC 4xx based boards. Adapted from original
  * code by Gary Thomas, Cort Dougan <cort@fsmlabs.com>, and Dan Malek
@@ -13,7 +11,6 @@
  * is licensed "as is" without any warranty of any kind, whether express
  * or implied.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/threads.h>
@@ -90,7 +87,7 @@ walnut_setup_arch(void)
 
 	kb_cs = kb_data + 1;
 
-	fpga_status = ioremap(WALNUT_FPGA_BASE, 8);
+	fpga_status = ioremap(PPC40x_FPGA_BASE, 8);
 	if (!fpga_status) {
 		printk(KERN_CRIT
 		       "walnut_setup_arch() fpga_status ioremap failed\n");
@@ -203,7 +200,7 @@ bios_fixup(struct pci_controller *hose, struct pcil0_regs *pcip)
 		    hose->first_busno, PCI_SLOT(hose->first_busno),
 		    PCI_FUNC(hose->first_busno), bar, bar_response);
 	}
-	/* end work arround */
+	/* end work around */
 
 #ifdef DEBUG
 	printk("PCI bridge regs after fixup \n");

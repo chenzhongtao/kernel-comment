@@ -11,11 +11,9 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>	/* For EXPORT_SYMBOL */
 
 #include <linux/errno.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -24,7 +22,6 @@
 #include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/init.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/sysctl.h>
 
 #include <asm/uaccess.h>
@@ -101,7 +98,7 @@ static void pty_unthrottle(struct tty_struct * tty)
  *
  * FIXME: Our pty_write method is called with our ldisc lock held but
  * not our partners. We can't just take the other one blindly without
- * risking deadlocks.  There is also the small matter of TTY_DONT_FLIP
+ * risking deadlocks.
  */
 static int pty_write(struct tty_struct * tty, const unsigned char *buf, int count)
 {
@@ -111,7 +108,7 @@ static int pty_write(struct tty_struct * tty, const unsigned char *buf, int coun
 	if (!to || tty->stopped)
 		return 0;
 
-	c = to->ldisc.receive_room(to);
+	c = to->receive_room;
 	if (c > count)
 		c = count;
 	to->ldisc.receive_buf(to, buf, NULL, c);
@@ -126,7 +123,7 @@ static int pty_write_room(struct tty_struct *tty)
 	if (!to || tty->stopped)
 		return 0;
 
-	return to->ldisc.receive_room(to);
+	return to->receive_room;
 }
 
 /*
@@ -149,15 +146,14 @@ static int pty_write_room(struct tty_struct *tty)
 static int pty_chars_in_buffer(struct tty_struct *tty)
 {
 	struct tty_struct *to = tty->link;
-	ssize_t (*chars_in_buffer)(struct tty_struct *);
 	int count;
 
 	/* We should get the line discipline lock for "tty->link" */
-	if (!to || !(chars_in_buffer = to->ldisc.chars_in_buffer))
+	if (!to || !to->ldisc.chars_in_buffer)
 		return 0;
 
 	/* The ldisc must report 0 if no characters available to be read */
-	count = chars_in_buffer(to);
+	count = to->ldisc.chars_in_buffer(to);
 
 	if (tty->driver->subtype == PTY_TYPE_SLAVE) return count;
 
@@ -221,13 +217,13 @@ out:
 	return retval;
 }
 
-static void pty_set_termios(struct tty_struct *tty, struct termios *old_termios)
+static void pty_set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 {
         tty->termios->c_cflag &= ~(CSIZE | PARENB);
         tty->termios->c_cflag |= (CS8 | CREAD);
 }
 
-static struct tty_operations pty_ops = {
+static const struct tty_operations pty_ops = {
 	.open = pty_open,
 	.close = pty_close,
 	.write = pty_write,
@@ -252,21 +248,25 @@ static int pty_bsd_ioctl(struct tty_struct *tty, struct file *file,
 	return -ENOIOCTLCMD;
 }
 
+static int legacy_count = CONFIG_LEGACY_PTY_COUNT;
+module_param(legacy_count, int, 0);
+
 static void __init legacy_pty_init(void)
 {
+	if (legacy_count <= 0)
+		return;
 
-	pty_driver = alloc_tty_driver(NR_PTYS);
+	pty_driver = alloc_tty_driver(legacy_count);
 	if (!pty_driver)
 		panic("Couldn't allocate pty driver");
 
-	pty_slave_driver = alloc_tty_driver(NR_PTYS);
+	pty_slave_driver = alloc_tty_driver(legacy_count);
 	if (!pty_slave_driver)
 		panic("Couldn't allocate pty slave driver");
 
 	pty_driver->owner = THIS_MODULE;
 	pty_driver->driver_name = "pty_master";
 	pty_driver->name = "pty";
-	pty_driver->devfs_name = "pty/m";
 	pty_driver->major = PTY_MASTER_MAJOR;
 	pty_driver->minor_start = 0;
 	pty_driver->type = TTY_DRIVER_TYPE_PTY;
@@ -276,6 +276,8 @@ static void __init legacy_pty_init(void)
 	pty_driver->init_termios.c_oflag = 0;
 	pty_driver->init_termios.c_cflag = B38400 | CS8 | CREAD;
 	pty_driver->init_termios.c_lflag = 0;
+	pty_driver->init_termios.c_ispeed = 38400;
+	pty_driver->init_termios.c_ospeed = 38400;
 	pty_driver->flags = TTY_DRIVER_RESET_TERMIOS | TTY_DRIVER_REAL_RAW;
 	pty_driver->other = pty_slave_driver;
 	tty_set_operations(pty_driver, &pty_ops);
@@ -284,13 +286,14 @@ static void __init legacy_pty_init(void)
 	pty_slave_driver->owner = THIS_MODULE;
 	pty_slave_driver->driver_name = "pty_slave";
 	pty_slave_driver->name = "ttyp";
-	pty_slave_driver->devfs_name = "pty/s";
 	pty_slave_driver->major = PTY_SLAVE_MAJOR;
 	pty_slave_driver->minor_start = 0;
 	pty_slave_driver->type = TTY_DRIVER_TYPE_PTY;
 	pty_slave_driver->subtype = PTY_TYPE_SLAVE;
 	pty_slave_driver->init_termios = tty_std_termios;
 	pty_slave_driver->init_termios.c_cflag = B38400 | CS8 | CREAD;
+	pty_slave_driver->init_termios.c_ispeed = 38400;
+	pty_slave_driver->init_termios.c_ospeed = 38400;
 	pty_slave_driver->flags = TTY_DRIVER_RESET_TERMIOS |
 					TTY_DRIVER_REAL_RAW;
 	pty_slave_driver->other = pty_driver;
@@ -315,7 +318,7 @@ int pty_limit = NR_UNIX98_PTY_DEFAULT;
 static int pty_limit_min = 0;
 static int pty_limit_max = NR_UNIX98_PTY_MAX;
 
-ctl_table pty_table[] = {
+static struct ctl_table pty_table[] = {
 	{
 		.ctl_name	= PTY_MAX,
 		.procname	= "max",
@@ -337,6 +340,27 @@ ctl_table pty_table[] = {
 	}
 };
 
+static struct ctl_table pty_kern_table[] = {
+	{
+		.ctl_name	= KERN_PTY,
+		.procname	= "pty",
+		.mode		= 0555,
+		.child		= pty_table,
+	},
+	{}
+};
+
+static struct ctl_table pty_root_table[] = {
+	{
+		.ctl_name	= CTL_KERN,
+		.procname	= "kernel",
+		.mode		= 0555,
+		.child		= pty_kern_table,
+	},
+	{}
+};
+
+
 static int pty_unix98_ioctl(struct tty_struct *tty, struct file *file,
 			    unsigned int cmd, unsigned long arg)
 {
@@ -352,7 +376,6 @@ static int pty_unix98_ioctl(struct tty_struct *tty, struct file *file,
 
 static void __init unix98_pty_init(void)
 {
-	devfs_mk_dir("pts");
 	ptm_driver = alloc_tty_driver(NR_UNIX98_PTY_MAX);
 	if (!ptm_driver)
 		panic("Couldn't allocate Unix98 ptm driver");
@@ -372,8 +395,10 @@ static void __init unix98_pty_init(void)
 	ptm_driver->init_termios.c_oflag = 0;
 	ptm_driver->init_termios.c_cflag = B38400 | CS8 | CREAD;
 	ptm_driver->init_termios.c_lflag = 0;
+	ptm_driver->init_termios.c_ispeed = 38400;
+	ptm_driver->init_termios.c_ospeed = 38400;
 	ptm_driver->flags = TTY_DRIVER_RESET_TERMIOS | TTY_DRIVER_REAL_RAW |
-		TTY_DRIVER_NO_DEVFS | TTY_DRIVER_DEVPTS_MEM;
+		TTY_DRIVER_DYNAMIC_DEV | TTY_DRIVER_DEVPTS_MEM;
 	ptm_driver->other = pts_driver;
 	tty_set_operations(ptm_driver, &pty_ops);
 	ptm_driver->ioctl = pty_unix98_ioctl;
@@ -387,8 +412,10 @@ static void __init unix98_pty_init(void)
 	pts_driver->subtype = PTY_TYPE_SLAVE;
 	pts_driver->init_termios = tty_std_termios;
 	pts_driver->init_termios.c_cflag = B38400 | CS8 | CREAD;
+	pts_driver->init_termios.c_ispeed = 38400;
+	pts_driver->init_termios.c_ospeed = 38400;
 	pts_driver->flags = TTY_DRIVER_RESET_TERMIOS | TTY_DRIVER_REAL_RAW |
-		TTY_DRIVER_NO_DEVFS | TTY_DRIVER_DEVPTS_MEM;
+		TTY_DRIVER_DYNAMIC_DEV | TTY_DRIVER_DEVPTS_MEM;
 	pts_driver->other = ptm_driver;
 	tty_set_operations(pts_driver, &pty_ops);
 	
@@ -398,6 +425,7 @@ static void __init unix98_pty_init(void)
 		panic("Couldn't register Unix98 pts driver");
 
 	pty_table[1].data = &ptm_driver->refcount;
+	register_sysctl_table(pty_root_table);
 }
 #else
 static inline void unix98_pty_init(void) { }

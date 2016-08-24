@@ -1,5 +1,5 @@
 /*
- * arch/sh/oprofile/op_model_null.c
+ * arch/sh64/oprofile/op_model_null.c
  *
  * Copyright (C) 2003  Paul Mundt
  *
@@ -12,7 +12,7 @@
 #include <linux/init.h>
 #include <linux/errno.h>
 
-int __init oprofile_arch_init(struct oprofile_operations **ops)
+int __init oprofile_arch_init(struct oprofile_operations *ops)
 {
 	return -ENODEV;
 }

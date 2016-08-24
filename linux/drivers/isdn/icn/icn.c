@@ -12,6 +12,7 @@
 #include "icn.h"
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/sched.h>
 
 static int portbase = ICN_BASEADDR;
 static unsigned long membase = ICN_MEMADDR;
@@ -304,12 +305,12 @@ icn_pollbchan_send(int channel, icn_card * card)
 	isdn_ctrl cmd;
 
 	if (!(card->sndcount[channel] || card->xskb[channel] ||
-	      skb_queue_len(&card->spqueue[channel])))
+	      !skb_queue_empty(&card->spqueue[channel])))
 		return;
 	if (icn_trymaplock_channel(card, mch)) {
 		while (sbfree && 
 		       (card->sndcount[channel] ||
-			skb_queue_len(&card->spqueue[channel]) ||
+			!skb_queue_empty(&card->spqueue[channel]) ||
 			card->xskb[channel])) {
 			spin_lock_irqsave(&card->lock, flags);
 			if (card->xmit_lock[channel]) {
@@ -908,14 +909,13 @@ icn_loadproto(u_char __user * buffer, icn_card * card)
 	uint left = ICN_CODE_STAGE2;
 	uint cnt;
 	int timer;
-	int ret;
 	unsigned long flags;
 
 #ifdef BOOT_DEBUG
 	printk(KERN_DEBUG "icn_loadproto called\n");
 #endif
-	if ((ret = verify_area(VERIFY_READ, buffer, ICN_CODE_STAGE2)))
-		return ret;
+	if (!access_ok(VERIFY_READ, buffer, ICN_CODE_STAGE2))
+		return -EFAULT;
 	timer = 0;
 	spin_lock_irqsave(&dev.devlock, flags);
 	if (card->secondhalf) {
@@ -948,8 +948,7 @@ icn_loadproto(u_char __user * buffer, icn_card * card)
 				icn_maprelease_channel(card, 0);
 				return -EIO;
 			}
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(10);
+			schedule_timeout_interruptible(10);
 		}
 	}
 	writeb(0x20, &sbuf_n);
@@ -1012,7 +1011,8 @@ icn_readstatus(u_char __user *buf, int len, icn_card * card)
 	for (p = buf, count = 0; count < len; p++, count++) {
 		if (card->msg_buf_read == card->msg_buf_write)
 			return count;
-		put_user(*card->msg_buf_read++, p);
+		if (put_user(*card->msg_buf_read++, p))
+			return -EFAULT;
 		if (card->msg_buf_read > card->msg_buf_end)
 			card->msg_buf_read = card->msg_buf;
 	}
@@ -1520,12 +1520,11 @@ icn_initcard(int port, char *id)
 	icn_card *card;
 	int i;
 
-	if (!(card = (icn_card *) kmalloc(sizeof(icn_card), GFP_KERNEL))) {
+	if (!(card = kzalloc(sizeof(icn_card), GFP_KERNEL))) {
 		printk(KERN_WARNING
 		       "icn: (%s) Could not allocate card-struct.\n", id);
 		return (icn_card *) 0;
 	}
-	memset((char *) card, 0, sizeof(icn_card));
 	spin_lock_init(&card->lock);
 	card->port = port;
 	card->interface.owner = THIS_MODULE;
@@ -1651,7 +1650,7 @@ static void __exit icn_exit(void)
 {
 	isdn_ctrl cmd;
 	icn_card *card = cards;
-	icn_card *last;
+	icn_card *last, *tmpcard;
 	int i;
 	unsigned long flags;
 
@@ -1671,8 +1670,9 @@ static void __exit icn_exit(void)
 			for (i = 0; i < ICN_BCH; i++)
 				icn_free_queue(card, i);
 		}
-		card = card->next;
+		tmpcard = card->next;
 		spin_unlock_irqrestore(&card->lock, flags);
+		card = tmpcard;
 	}
 	card = cards;
 	cards = NULL;

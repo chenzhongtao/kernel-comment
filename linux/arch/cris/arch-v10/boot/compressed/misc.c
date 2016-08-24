@@ -8,7 +8,7 @@
  *
  * malloc by Hannu Savolainen 1993 and Matthias Urlichs 1994
  * puts by Nick Holloway 1993, better puts by Martin Mares 1995
- * adoptation for Linux/CRIS Axis Communications AB, 1999
+ * adaptation for Linux/CRIS Axis Communications AB, 1999
  * 
  */
 
@@ -20,7 +20,6 @@
 
 #define KERNEL_LOAD_ADR 0x40004000
 
-#include <linux/config.h>
 
 #include <linux/types.h>
 #include <asm/arch/svinto.h>

@@ -7,7 +7,6 @@
  *  Copyright (C) 2000 Anton Blanchard (anton@samba.org)
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -25,13 +24,13 @@
 #include <linux/bootmem.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
 #include <asm/vac-ops.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/vaddrs.h>
 #include <asm/pgalloc.h>	/* bug in asm-generic/tlb.h: check_pgt_cache */
 #include <asm/tlb.h>
+#include <asm/prom.h>
 
 DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
@@ -59,9 +58,6 @@ unsigned long highstart_pfn, highend_pfn;
 pte_t *kmap_pte;
 pgprot_t kmap_prot;
 
-EXPORT_SYMBOL(kmap_prot);
-EXPORT_SYMBOL(kmap_pte);
-
 #define kmap_get_fixmap_pte(vaddr) \
 	pte_offset_kernel(pmd_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr))
 
@@ -79,7 +75,7 @@ void show_mem(void)
 	printk("Free swap:       %6ldkB\n",
 	       nr_swap_pages << (PAGE_SHIFT-10));
 	printk("%ld pages of RAM\n", totalram_pages);
-	printk("%d free pages\n", nr_free_pages());
+	printk("%ld free pages\n", nr_free_pages());
 #if 0 /* undefined pgtable_cache_size, pgd_cache_size */
 	printk("%ld pages in page table cache\n",pgtable_cache_size);
 #ifndef CONFIG_SMP
@@ -312,6 +308,9 @@ extern void sun4c_paging_init(void);
 extern void srmmu_paging_init(void);
 extern void device_scan(void);
 
+pgprot_t PAGE_SHARED __read_mostly;
+EXPORT_SYMBOL(PAGE_SHARED);
+
 void __init paging_init(void)
 {
 	switch(sparc_cpu_model) {
@@ -353,6 +352,7 @@ void __init paging_init(void)
 	protection_map[14] = PAGE_SHARED;
 	protection_map[15] = PAGE_SHARED;
 	btfixup();
+	prom_build_devicetree();
 	device_scan();
 }
 
@@ -387,8 +387,7 @@ void map_high_region(unsigned long start_pfn, unsigned long end_pfn)
 		struct page *page = pfn_to_page(tmp);
 
 		ClearPageReserved(page);
-		set_bit(PG_highmem, &page->flags);
-		set_page_count(page, 1);
+		init_page_count(page);
 		__free_page(page);
 		totalhigh_pages++;
 	}
@@ -485,7 +484,7 @@ void free_initmem (void)
 		p = virt_to_page(addr);
 
 		ClearPageReserved(p);
-		set_page_count(p, 1);
+		init_page_count(p);
 		__free_page(p);
 		totalram_pages++;
 		num_physpages++;
@@ -502,7 +501,7 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 		struct page *p = virt_to_page(start);
 
 		ClearPageReserved(p);
-		set_page_count(p, 1);
+		init_page_count(p);
 		__free_page(p);
 		num_physpages++;
 	}

@@ -27,25 +27,26 @@
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
+#include <linux/time.h>
 #include <linux/init.h>
 #include <linux/string.h>
-#include <linux/smp_lock.h>
 #include <linux/backing-dev.h>
 #include <linux/ramfs.h>
-
+#include <linux/sched.h>
 #include <asm/uaccess.h>
+#include "internal.h"
 
 /* some random number */
 #define RAMFS_MAGIC	0x858458f6
 
-static struct super_operations ramfs_ops;
-static struct address_space_operations ramfs_aops;
-static struct inode_operations ramfs_file_inode_operations;
-static struct inode_operations ramfs_dir_inode_operations;
+static const struct super_operations ramfs_ops;
+static const struct inode_operations ramfs_dir_inode_operations;
 
 static struct backing_dev_info ramfs_backing_dev_info = {
 	.ra_pages	= 0,	/* No readahead */
-	.memory_backed	= 1,	/* Does not contribute to dirty memory */
+	.capabilities	= BDI_CAP_NO_ACCT_DIRTY | BDI_CAP_NO_WRITEBACK |
+			  BDI_CAP_MAP_DIRECT | BDI_CAP_MAP_COPY |
+			  BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP,
 };
 
 struct inode *ramfs_get_inode(struct super_block *sb, int mode, dev_t dev)
@@ -56,10 +57,10 @@ struct inode *ramfs_get_inode(struct super_block *sb, int mode, dev_t dev)
 		inode->i_mode = mode;
 		inode->i_uid = current->fsuid;
 		inode->i_gid = current->fsgid;
-		inode->i_blksize = PAGE_CACHE_SIZE;
 		inode->i_blocks = 0;
 		inode->i_mapping->a_ops = &ramfs_aops;
 		inode->i_mapping->backing_dev_info = &ramfs_backing_dev_info;
+		mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER);
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		switch (mode & S_IFMT) {
 		default:
@@ -74,7 +75,7 @@ struct inode *ramfs_get_inode(struct super_block *sb, int mode, dev_t dev)
 			inode->i_fop = &simple_dir_operations;
 
 			/* directory inodes start off with i_nlink == 2 (for "." entry) */
-			inode->i_nlink++;
+			inc_nlink(inode);
 			break;
 		case S_IFLNK:
 			inode->i_op = &page_symlink_inode_operations;
@@ -103,6 +104,7 @@ ramfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t dev)
 		d_instantiate(dentry, inode);
 		dget(dentry);	/* Extra count - pin the dentry in core */
 		error = 0;
+		dir->i_mtime = dir->i_ctime = CURRENT_TIME;
 	}
 	return error;
 }
@@ -111,7 +113,7 @@ static int ramfs_mkdir(struct inode * dir, struct dentry * dentry, int mode)
 {
 	int retval = ramfs_mknod(dir, dentry, mode | S_IFDIR, 0);
 	if (!retval)
-		dir->i_nlink++;
+		inc_nlink(dir);
 	return retval;
 }
 
@@ -134,32 +136,14 @@ static int ramfs_symlink(struct inode * dir, struct dentry *dentry, const char *
 				inode->i_gid = dir->i_gid;
 			d_instantiate(dentry, inode);
 			dget(dentry);
+			dir->i_mtime = dir->i_ctime = CURRENT_TIME;
 		} else
 			iput(inode);
 	}
 	return error;
 }
 
-static struct address_space_operations ramfs_aops = {
-	.readpage	= simple_readpage,
-	.prepare_write	= simple_prepare_write,
-	.commit_write	= simple_commit_write
-};
-
-struct file_operations ramfs_file_operations = {
-	.read		= generic_file_read,
-	.write		= generic_file_write,
-	.mmap		= generic_file_mmap,
-	.fsync		= simple_sync_file,
-	.sendfile	= generic_file_sendfile,
-	.llseek		= generic_file_llseek,
-};
-
-static struct inode_operations ramfs_file_inode_operations = {
-	.getattr	= simple_getattr,
-};
-
-static struct inode_operations ramfs_dir_inode_operations = {
+static const struct inode_operations ramfs_dir_inode_operations = {
 	.create		= ramfs_create,
 	.lookup		= simple_lookup,
 	.link		= simple_link,
@@ -171,7 +155,7 @@ static struct inode_operations ramfs_dir_inode_operations = {
 	.rename		= simple_rename,
 };
 
-static struct super_operations ramfs_ops = {
+static const struct super_operations ramfs_ops = {
 	.statfs		= simple_statfs,
 	.drop_inode	= generic_delete_inode,
 };
@@ -200,16 +184,17 @@ static int ramfs_fill_super(struct super_block * sb, void * data, int silent)
 	return 0;
 }
 
-struct super_block *ramfs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
+int ramfs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
 {
-	return get_sb_nodev(fs_type, flags, data, ramfs_fill_super);
+	return get_sb_nodev(fs_type, flags, data, ramfs_fill_super, mnt);
 }
 
-static struct super_block *rootfs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
+static int rootfs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
 {
-	return get_sb_nodev(fs_type, flags|MS_NOUSER, data, ramfs_fill_super);
+	return get_sb_nodev(fs_type, flags|MS_NOUSER, data, ramfs_fill_super,
+			    mnt);
 }
 
 static struct file_system_type ramfs_fs_type = {
@@ -238,7 +223,17 @@ module_exit(exit_ramfs_fs)
 
 int __init init_rootfs(void)
 {
-	return register_filesystem(&rootfs_fs_type);
+	int err;
+
+	err = bdi_init(&ramfs_backing_dev_info);
+	if (err)
+		return err;
+
+	err = register_filesystem(&rootfs_fs_type);
+	if (err)
+		bdi_destroy(&ramfs_backing_dev_info);
+
+	return err;
 }
 
 MODULE_LICENSE("GPL");

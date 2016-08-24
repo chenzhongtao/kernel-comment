@@ -1,107 +1,126 @@
 /*
  * linux/arch/sh/boards/renesas/rts7751r2d/irq.c
  *
+ * Copyright (C) 2007  Magnus Damm
  * Copyright (C) 2000  Kazumoto Kojima
  *
- * Renesas Technology Sales RTS7751R2D Support.
+ * Renesas Technology Sales RTS7751R2D Support, R2D-PLUS and R2D-1.
  *
  * Modified for RTS7751R2D by
  * Atom Create Engineering Co., Ltd. 2002.
  */
-
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/irq.h>
-#include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/rts7751r2d/rts7751r2d.h>
+#include <linux/interrupt.h>
+#include <linux/io.h>
+#include <asm/voyagergx.h>
+#include <asm/rts7751r2d.h>
 
-#if defined(CONFIG_RTS7751R2D_REV11)
-static int mask_pos[] = {11, 9, 8, 12, 10, 6, 5, 4, 7, 14, 13, 0, 0, 0, 0};
-#else
-static int mask_pos[] = {6, 11, 9, 8, 12, 10, 5, 4, 7, 14, 13, 0, 0, 0, 0};
-#endif
+#define R2D_NR_IRL 13
 
-extern int voyagergx_irq_demux(int irq);
-extern void setup_voyagergx_irq(void);
+enum {
+	UNUSED = 0,
 
-static void enable_rts7751r2d_irq(unsigned int irq);
-static void disable_rts7751r2d_irq(unsigned int irq);
+	/* board specific interrupt sources (R2D-1 and R2D-PLUS) */
+	EXT,              /* EXT_INT0-3 */
+	RTC_T, RTC_A,     /* Real Time Clock */
+	AX88796,          /* Ethernet controller (R2D-1 board) */
+	KEY,              /* Key input (R2D-PLUS board) */
+	SDCARD,           /* SD Card */
+	CF_CD, CF_IDE,    /* CF Card Detect + CF IDE */
+	SM501,            /* SM501 aka Voyager */
+	PCI_INTD_RTL8139, /* Ethernet controller */
+	PCI_INTC_PCI1520, /* Cardbus/PCMCIA bridge */
+	PCI_INTB_RTL8139, /* Ethernet controller with HUB (R2D-PLUS board) */
+	PCI_INTB_SLOT,    /* PCI Slot 3.3v (R2D-1 board) */
+	PCI_INTA_SLOT,    /* PCI Slot 3.3v */
+	TP,               /* Touch Panel */
+};
 
-/* shutdown is same as "disable" */
-#define shutdown_rts7751r2d_irq disable_rts7751r2d_irq
+#ifdef CONFIG_RTS7751R2D_1
 
-static void ack_rts7751r2d_irq(unsigned int irq);
-static void end_rts7751r2d_irq(unsigned int irq);
+/* Vectors for R2D-1 */
+static struct intc_vect vectors_r2d_1[] __initdata = {
+	INTC_IRQ(EXT, IRQ_EXT),
+	INTC_IRQ(RTC_T, IRQ_RTC_T), INTC_IRQ(RTC_A, IRQ_RTC_A),
+	INTC_IRQ(AX88796, IRQ_AX88796), INTC_IRQ(SDCARD, IRQ_SDCARD),
+	INTC_IRQ(CF_CD, IRQ_CF_CD), INTC_IRQ(CF_IDE, IRQ_CF_IDE), /* ng */
+	INTC_IRQ(SM501, IRQ_VOYAGER),
+	INTC_IRQ(PCI_INTD_RTL8139, IRQ_PCI_INTD),
+	INTC_IRQ(PCI_INTC_PCI1520, IRQ_PCI_INTC),
+	INTC_IRQ(PCI_INTB_SLOT, IRQ_PCI_INTB),
+	INTC_IRQ(PCI_INTA_SLOT, IRQ_PCI_INTA),
+	INTC_IRQ(TP, IRQ_TP),
+};
 
-static unsigned int startup_rts7751r2d_irq(unsigned int irq)
-{
-	enable_rts7751r2d_irq(irq);
-	return 0; /* never anything pending */
-}
+/* IRLMSK mask register layout for R2D-1 */
+static struct intc_mask_reg mask_registers_r2d_1[] __initdata = {
+	{ 0xa4000000, 0, 16, /* IRLMSK */
+	  { TP, PCI_INTA_SLOT, PCI_INTB_SLOT,
+	    PCI_INTC_PCI1520, PCI_INTD_RTL8139,
+	    SM501, CF_IDE, CF_CD, SDCARD, AX88796,
+	    RTC_A, RTC_T, 0, 0, 0, EXT } },
+};
 
-static void disable_rts7751r2d_irq(unsigned int irq)
-{
-	unsigned long flags;
-	unsigned short val;
-	unsigned short mask = 0xffff ^ (0x0001 << mask_pos[irq]);
+/* IRLn to IRQ table for R2D-1 */
+static unsigned char irl2irq_r2d_1[R2D_NR_IRL] __initdata = {
+	IRQ_PCI_INTD, IRQ_CF_IDE, IRQ_CF_CD, IRQ_PCI_INTC,
+	IRQ_VOYAGER, IRQ_AX88796, IRQ_RTC_A, IRQ_RTC_T,
+	IRQ_SDCARD, IRQ_PCI_INTA, IRQ_PCI_INTB, IRQ_EXT,
+	IRQ_TP,
+};
 
-	/* Set the priority in IPR to 0 */
-	local_irq_save(flags);
-	val = ctrl_inw(IRLCNTR1);
-	val &= mask;
-	ctrl_outw(val, IRLCNTR1);
-	local_irq_restore(flags);
-}
+static DECLARE_INTC_DESC(intc_desc_r2d_1, "r2d-1", vectors_r2d_1,
+			 NULL, NULL, mask_registers_r2d_1, NULL, NULL);
 
-static void enable_rts7751r2d_irq(unsigned int irq)
-{
-	unsigned long flags;
-	unsigned short val;
-	unsigned short value = (0x0001 << mask_pos[irq]);
+#endif /* CONFIG_RTS7751R2D_1 */
 
-	/* Set priority in IPR back to original value */
-	local_irq_save(flags);
-	val = ctrl_inw(IRLCNTR1);
-	val |= value;
-	ctrl_outw(val, IRLCNTR1);
-	local_irq_restore(flags);
-}
+#ifdef CONFIG_RTS7751R2D_PLUS
+
+/* Vectors for R2D-PLUS */
+static struct intc_vect vectors_r2d_plus[] __initdata = {
+	INTC_IRQ(EXT, IRQ_EXT),
+	INTC_IRQ(RTC_T, IRQ_RTC_T), INTC_IRQ(RTC_A, IRQ_RTC_A),
+	INTC_IRQ(KEY, IRQ_KEY), INTC_IRQ(SDCARD, IRQ_SDCARD),
+	INTC_IRQ(CF_CD, IRQ_CF_CD), INTC_IRQ(CF_IDE, IRQ_CF_IDE),
+	INTC_IRQ(SM501, IRQ_VOYAGER),
+	INTC_IRQ(PCI_INTD_RTL8139, IRQ_PCI_INTD),
+	INTC_IRQ(PCI_INTC_PCI1520, IRQ_PCI_INTC),
+	INTC_IRQ(PCI_INTB_RTL8139, IRQ_PCI_INTB),
+	INTC_IRQ(PCI_INTA_SLOT, IRQ_PCI_INTA),
+	INTC_IRQ(TP, IRQ_TP),
+};
+
+/* IRLMSK mask register layout for R2D-PLUS */
+static struct intc_mask_reg mask_registers_r2d_plus[] __initdata = {
+	{ 0xa4000000, 0, 16, /* IRLMSK */
+	  { TP, PCI_INTA_SLOT, PCI_INTB_RTL8139,
+	    PCI_INTC_PCI1520, PCI_INTD_RTL8139,
+	    SM501, CF_IDE, CF_CD, SDCARD, KEY,
+	    RTC_A, RTC_T, 0, 0, 0, EXT } },
+};
+
+/* IRLn to IRQ table for R2D-PLUS */
+static unsigned char irl2irq_r2d_plus[R2D_NR_IRL] __initdata = {
+	IRQ_PCI_INTD, IRQ_CF_IDE, IRQ_CF_CD, IRQ_PCI_INTC,
+	IRQ_VOYAGER, IRQ_KEY, IRQ_RTC_A, IRQ_RTC_T,
+	IRQ_SDCARD, IRQ_PCI_INTA, IRQ_PCI_INTB, IRQ_EXT,
+	IRQ_TP,
+};
+
+static DECLARE_INTC_DESC(intc_desc_r2d_plus, "r2d-plus", vectors_r2d_plus,
+			 NULL, NULL, mask_registers_r2d_plus, NULL, NULL);
+
+#endif /* CONFIG_RTS7751R2D_PLUS */
+
+static unsigned char irl2irq[R2D_NR_IRL];
 
 int rts7751r2d_irq_demux(int irq)
 {
-	int demux_irq;
+	if (irq >= R2D_NR_IRL || !irl2irq[irq])
+		return irq;
 
-	demux_irq = voyagergx_irq_demux(irq);
-	return demux_irq;
-}
-
-static void ack_rts7751r2d_irq(unsigned int irq)
-{
-	disable_rts7751r2d_irq(irq);
-}
-
-static void end_rts7751r2d_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		enable_rts7751r2d_irq(irq);
-}
-
-static struct hw_interrupt_type rts7751r2d_irq_type = {
-	"RTS7751R2D IRQ",
-	startup_rts7751r2d_irq,
-	shutdown_rts7751r2d_irq,
-	enable_rts7751r2d_irq,
-	disable_rts7751r2d_irq,
-	ack_rts7751r2d_irq,
-	end_rts7751r2d_irq,
-};
-
-static void make_rts7751r2d_irq(unsigned int irq)
-{
-	disable_irq_nosync(irq);
-	irq_desc[irq].handler = &rts7751r2d_irq_type;
-	disable_rts7751r2d_irq(irq);
+	return irl2irq[irq];
 }
 
 /*
@@ -109,27 +128,32 @@ static void make_rts7751r2d_irq(unsigned int irq)
  */
 void __init init_rts7751r2d_IRQ(void)
 {
-	int i;
+	struct intc_desc *d;
 
-	/* IRL0=KEY Input
-	 * IRL1=Ethernet
-	 * IRL2=CF Card
-	 * IRL3=CF Card Insert
-	 * IRL4=PCMCIA
-	 * IRL5=VOYAGER
-	 * IRL6=RTC Alarm
-	 * IRL7=RTC Timer
-	 * IRL8=SD Card
-	 * IRL9=PCI Slot #1
-	 * IRL10=PCI Slot #2
-	 * IRL11=Extention #0
-	 * IRL12=Extention #1
-	 * IRL13=Extention #2
-	 * IRL14=Extention #3
-	 */
+	switch (ctrl_inw(PA_VERREG) & 0xf0) {
+#ifdef CONFIG_RTS7751R2D_PLUS
+	case 0x10:
+		printk(KERN_INFO "Using R2D-PLUS interrupt controller.\n");
+		d = &intc_desc_r2d_plus;
+		memcpy(irl2irq, irl2irq_r2d_plus, R2D_NR_IRL);
+		break;
+#endif
+#ifdef CONFIG_RTS7751R2D_1
+	case 0x00: /* according to manual */
+	case 0x30: /* in reality */
+		printk(KERN_INFO "Using R2D-1 interrupt controller.\n");
+		d = &intc_desc_r2d_1;
+		memcpy(irl2irq, irl2irq_r2d_1, R2D_NR_IRL);
+		break;
+#endif
+	default:
+		printk(KERN_INFO "Unknown R2D interrupt controller 0x%04x\n",
+		       ctrl_inw(PA_VERREG));
+		return;
+	}
 
-	for (i=0; i<15; i++)
-		make_rts7751r2d_irq(i);
-
+	register_intc_controller(d);
+#ifdef CONFIG_MFD_SM501
 	setup_voyagergx_irq();
+#endif
 }

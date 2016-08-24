@@ -13,155 +13,147 @@
 #ifndef _S390_PGALLOC_H
 #define _S390_PGALLOC_H
 
-#include <linux/config.h>
-#include <asm/processor.h>
 #include <linux/threads.h>
 #include <linux/gfp.h>
 #include <linux/mm.h>
 
 #define check_pgt_cache()	do {} while (0)
 
-extern void diag10(unsigned long addr);
+unsigned long *crst_table_alloc(struct mm_struct *, int);
+void crst_table_free(unsigned long *);
 
-/*
- * Allocate and free page tables. The xxx_kernel() versions are
- * used to allocate a kernel page table - this turns on ASN bits
- * if any.
- */
+unsigned long *page_table_alloc(int);
+void page_table_free(unsigned long *);
+
+static inline void clear_table(unsigned long *s, unsigned long val, size_t n)
+{
+	*s = val;
+	n = (n / 256) - 1;
+	asm volatile(
+#ifdef CONFIG_64BIT
+		"	mvc	8(248,%0),0(%0)\n"
+#else
+		"	mvc	4(252,%0),0(%0)\n"
+#endif
+		"0:	mvc	256(256,%0),0(%0)\n"
+		"	la	%0,256(%0)\n"
+		"	brct	%1,0b\n"
+		: "+a" (s), "+d" (n));
+}
+
+static inline void crst_table_init(unsigned long *crst, unsigned long entry)
+{
+	clear_table(crst, entry, sizeof(unsigned long)*2048);
+	crst = get_shadow_table(crst);
+	if (crst)
+		clear_table(crst, entry, sizeof(unsigned long)*2048);
+}
+
+#ifndef __s390x__
+
+static inline unsigned long pgd_entry_type(struct mm_struct *mm)
+{
+	return _SEGMENT_ENTRY_EMPTY;
+}
+
+#define pud_alloc_one(mm,address)		({ BUG(); ((pud_t *)2); })
+#define pud_free(x)				do { } while (0)
+
+#define pmd_alloc_one(mm,address)		({ BUG(); ((pmd_t *)2); })
+#define pmd_free(x)				do { } while (0)
+
+#define pgd_populate(mm, pgd, pud)		BUG()
+#define pgd_populate_kernel(mm, pgd, pud)	BUG()
+
+#define pud_populate(mm, pud, pmd)		BUG()
+#define pud_populate_kernel(mm, pud, pmd)	BUG()
+
+#else /* __s390x__ */
+
+static inline unsigned long pgd_entry_type(struct mm_struct *mm)
+{
+	return _REGION3_ENTRY_EMPTY;
+}
+
+#define pud_alloc_one(mm,address)		({ BUG(); ((pud_t *)2); })
+#define pud_free(x)				do { } while (0)
+
+static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long vmaddr)
+{
+	unsigned long *crst = crst_table_alloc(mm, s390_noexec);
+	if (crst)
+		crst_table_init(crst, _SEGMENT_ENTRY_EMPTY);
+	return (pmd_t *) crst;
+}
+#define pmd_free(pmd) crst_table_free((unsigned long *) pmd)
+
+#define pgd_populate(mm, pgd, pud)		BUG()
+#define pgd_populate_kernel(mm, pgd, pud)	BUG()
+
+static inline void pud_populate_kernel(struct mm_struct *mm,
+				       pud_t *pud, pmd_t *pmd)
+{
+	pud_val(*pud) = _REGION3_ENTRY | __pa(pmd);
+}
+
+static inline void pud_populate(struct mm_struct *mm, pud_t *pud, pmd_t *pmd)
+{
+	pud_t *shadow_pud = get_shadow_table(pud);
+	pmd_t *shadow_pmd = get_shadow_table(pmd);
+
+	if (shadow_pud && shadow_pmd)
+		pud_populate_kernel(mm, shadow_pud, shadow_pmd);
+	pud_populate_kernel(mm, pud, pmd);
+}
+
+#endif /* __s390x__ */
 
 static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	pgd_t *pgd;
-	int i;
-
-#ifndef __s390x__
-	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL,1);
-        if (pgd != NULL)
-		for (i = 0; i < USER_PTRS_PER_PGD; i++)
-			pmd_clear(pmd_offset(pgd + i, i*PGDIR_SIZE));
-#else /* __s390x__ */
-	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL,2);
-        if (pgd != NULL)
-		for (i = 0; i < PTRS_PER_PGD; i++)
-			pgd_clear(pgd + i);
-#endif /* __s390x__ */
-	return pgd;
+	unsigned long *crst = crst_table_alloc(mm, s390_noexec);
+	if (crst)
+		crst_table_init(crst, pgd_entry_type(mm));
+	return (pgd_t *) crst;
 }
-
-static inline void pgd_free(pgd_t *pgd)
-{
-#ifndef __s390x__
-        free_pages((unsigned long) pgd, 1);
-#else /* __s390x__ */
-        free_pages((unsigned long) pgd, 2);
-#endif /* __s390x__ */
-}
-
-#ifndef __s390x__
-/*
- * page middle directory allocation/free routines.
- * We use pmd cache only on s390x, so these are dummy routines. This
- * code never triggers because the pgd will always be present.
- */
-#define pmd_alloc_one(mm,address)       ({ BUG(); ((pmd_t *)2); })
-#define pmd_free(x)                     do { } while (0)
-#define __pmd_free_tlb(tlb,x)		do { } while (0)
-#define pgd_populate(mm, pmd, pte)      BUG()
-#else /* __s390x__ */
-static inline pmd_t * pmd_alloc_one(struct mm_struct *mm, unsigned long vmaddr)
-{
-	pmd_t *pmd;
-        int i;
-
-	pmd = (pmd_t *) __get_free_pages(GFP_KERNEL, 2);
-	if (pmd != NULL) {
-		for (i=0; i < PTRS_PER_PMD; i++)
-			pmd_clear(pmd+i);
-	}
-	return pmd;
-}
-
-static inline void pmd_free (pmd_t *pmd)
-{
-	free_pages((unsigned long) pmd, 2);
-}
-
-#define __pmd_free_tlb(tlb,pmd)			\
-	do {					\
-		tlb_flush_mmu(tlb, 0, 0);	\
-		pmd_free(pmd);			\
-	 } while (0)
-
-static inline void pgd_populate(struct mm_struct *mm, pgd_t *pgd, pmd_t *pmd)
-{
-	pgd_val(*pgd) = _PGD_ENTRY | __pa(pmd);
-}
-
-#endif /* __s390x__ */
+#define pgd_free(pgd) crst_table_free((unsigned long *) pgd)
 
 static inline void 
 pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmd, pte_t *pte)
 {
 #ifndef __s390x__
-	pmd_val(pmd[0]) = _PAGE_TABLE + __pa(pte);
-	pmd_val(pmd[1]) = _PAGE_TABLE + __pa(pte+256);
-	pmd_val(pmd[2]) = _PAGE_TABLE + __pa(pte+512);
-	pmd_val(pmd[3]) = _PAGE_TABLE + __pa(pte+768);
+	pmd_val(pmd[0]) = _SEGMENT_ENTRY + __pa(pte);
+	pmd_val(pmd[1]) = _SEGMENT_ENTRY + __pa(pte+256);
+	pmd_val(pmd[2]) = _SEGMENT_ENTRY + __pa(pte+512);
+	pmd_val(pmd[3]) = _SEGMENT_ENTRY + __pa(pte+768);
 #else /* __s390x__ */
-	pmd_val(*pmd) = _PMD_ENTRY + __pa(pte);
-	pmd_val1(*pmd) = _PMD_ENTRY + __pa(pte+256);
+	pmd_val(*pmd) = _SEGMENT_ENTRY + __pa(pte);
+	pmd_val1(*pmd) = _SEGMENT_ENTRY + __pa(pte+256);
 #endif /* __s390x__ */
 }
 
 static inline void
 pmd_populate(struct mm_struct *mm, pmd_t *pmd, struct page *page)
 {
-	pmd_populate_kernel(mm, pmd, (pte_t *)((page-mem_map) << PAGE_SHIFT));
+	pte_t *pte = (pte_t *)page_to_phys(page);
+	pmd_t *shadow_pmd = get_shadow_table(pmd);
+	pte_t *shadow_pte = get_shadow_pte(pte);
+
+	pmd_populate_kernel(mm, pmd, pte);
+	if (shadow_pmd && shadow_pte)
+		pmd_populate_kernel(mm, shadow_pmd, shadow_pte);
 }
 
 /*
  * page table entry allocation/free routines.
  */
-static inline pte_t *
-pte_alloc_one_kernel(struct mm_struct *mm, unsigned long vmaddr)
-{
-	pte_t *pte;
-        int i;
+#define pte_alloc_one_kernel(mm, vmaddr) \
+	((pte_t *) page_table_alloc(s390_noexec))
+#define pte_alloc_one(mm, vmaddr) \
+	virt_to_page(page_table_alloc(s390_noexec))
 
-	pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
-	if (pte != NULL) {
-		for (i=0; i < PTRS_PER_PTE; i++)
-			pte_clear(pte+i);
-	}
-	return pte;
-}
-
-static inline struct page *
-pte_alloc_one(struct mm_struct *mm, unsigned long vmaddr)
-{
-	pte_t *pte = pte_alloc_one_kernel(mm, vmaddr);
-	if (pte)
-		return virt_to_page(pte);
-	return 0;
-}
-
-static inline void pte_free_kernel(pte_t *pte)
-{
-        free_page((unsigned long) pte);
-}
-
-static inline void pte_free(struct page *pte)
-{
-        __free_page(pte);
-}
-
-#define __pte_free_tlb(tlb,pte) tlb_remove_page(tlb,pte)
-
-/*
- * This establishes kernel virtual mappings (e.g., as a result of a
- * vmalloc call).  Since s390-esame uses a separate kernel page table,
- * there is nothing to do here... :)
- */
-#define set_pgdir(addr,entry) do { } while(0)
+#define pte_free_kernel(pte) \
+	page_table_free((unsigned long *) pte)
+#define pte_free(pte) \
+	page_table_free((unsigned long *) page_to_phys((struct page *) pte))
 
 #endif /* _S390_PGALLOC_H */

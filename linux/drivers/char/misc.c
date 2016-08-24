@@ -34,7 +34,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/config.h>
 
 #include <linux/fs.h>
 #include <linux/errno.h>
@@ -42,9 +41,9 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/slab.h>
+#include <linux/mutex.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/stat.h>
 #include <linux/init.h>
 #include <linux/device.h>
@@ -55,7 +54,7 @@
  * Head entry for the doubly linked miscdevice list
  */
 static LIST_HEAD(misc_list);
-static DECLARE_MUTEX(misc_sem);
+static DEFINE_MUTEX(misc_mtx);
 
 /*
  * Assigned numbers, used for dynamic minors
@@ -63,44 +62,28 @@ static DECLARE_MUTEX(misc_sem);
 #define DYNAMIC_MINORS 64 /* like dynamic majors */
 static unsigned char misc_minors[DYNAMIC_MINORS / 8];
 
-extern int rtc_DP8570A_init(void);
-extern int rtc_MK48T08_init(void);
 extern int pmu_device_init(void);
-extern int tosh_init(void);
-extern int i8k_init(void);
 
 #ifdef CONFIG_PROC_FS
 static void *misc_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	struct miscdevice *p;
-	loff_t off = 0;
-
-	down(&misc_sem);
-	list_for_each_entry(p, &misc_list, list) {
-		if (*pos == off++) 
-			return p;
-	}
-	return NULL;
+	mutex_lock(&misc_mtx);
+	return seq_list_start(&misc_list, *pos);
 }
 
 static void *misc_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
-	struct list_head *n = ((struct miscdevice *)v)->list.next;
-
-	++*pos;
-
-	return (n != &misc_list) ? list_entry(n, struct miscdevice, list)
-		 : NULL;
+	return seq_list_next(v, &misc_list, pos);
 }
 
 static void misc_seq_stop(struct seq_file *seq, void *v)
 {
-	up(&misc_sem);
+	mutex_unlock(&misc_mtx);
 }
 
 static int misc_seq_show(struct seq_file *seq, void *v)
 {
-	const struct miscdevice *p = v;
+	const struct miscdevice *p = list_entry(v, struct miscdevice, list);
 
 	seq_printf(seq, "%3i %s\n", p->minor, p->name ? p->name : "");
 	return 0;
@@ -119,7 +102,7 @@ static int misc_seq_open(struct inode *inode, struct file *file)
 	return seq_open(file, &misc_seq_ops);
 }
 
-static struct file_operations misc_proc_fops = {
+static const struct file_operations misc_proc_fops = {
 	.owner	 = THIS_MODULE,
 	.open    = misc_seq_open,
 	.read    = seq_read,
@@ -133,9 +116,9 @@ static int misc_open(struct inode * inode, struct file * file)
 	int minor = iminor(inode);
 	struct miscdevice *c;
 	int err = -ENODEV;
-	struct file_operations *old_fops, *new_fops = NULL;
+	const struct file_operations *old_fops, *new_fops = NULL;
 	
-	down(&misc_sem);
+	mutex_lock(&misc_mtx);
 	
 	list_for_each_entry(c, &misc_list, list) {
 		if (c->minor == minor) {
@@ -145,9 +128,9 @@ static int misc_open(struct inode * inode, struct file * file)
 	}
 		
 	if (!new_fops) {
-		up(&misc_sem);
+		mutex_unlock(&misc_mtx);
 		request_module("char-major-%d-%d", MISC_MAJOR, minor);
-		down(&misc_sem);
+		mutex_lock(&misc_mtx);
 
 		list_for_each_entry(c, &misc_list, list) {
 			if (c->minor == minor) {
@@ -171,18 +154,13 @@ static int misc_open(struct inode * inode, struct file * file)
 	}
 	fops_put(old_fops);
 fail:
-	up(&misc_sem);
+	mutex_unlock(&misc_mtx);
 	return err;
 }
 
-/* 
- * TODO for 2.7:
- *  - add a struct class_device to struct miscdevice and make all usages of
- *    them dynamic.
- */
-static struct class_simple *misc_class;
+static struct class *misc_class;
 
-static struct file_operations misc_fops = {
+static const struct file_operations misc_fops = {
 	.owner		= THIS_MODULE,
 	.open		= misc_open,
 };
@@ -208,12 +186,14 @@ int misc_register(struct miscdevice * misc)
 {
 	struct miscdevice *c;
 	dev_t dev;
-	int err;
+	int err = 0;
 
-	down(&misc_sem);
+	INIT_LIST_HEAD(&misc->list);
+
+	mutex_lock(&misc_mtx);
 	list_for_each_entry(c, &misc_list, list) {
 		if (c->minor == misc->minor) {
-			up(&misc_sem);
+			mutex_unlock(&misc_mtx);
 			return -EBUSY;
 		}
 	}
@@ -224,7 +204,7 @@ int misc_register(struct miscdevice * misc)
 			if ( (misc_minors[i>>3] & (1 << (i&7))) == 0)
 				break;
 		if (i<0) {
-			up(&misc_sem);
+			mutex_unlock(&misc_mtx);
 			return -EBUSY;
 		}
 		misc->minor = i;
@@ -232,23 +212,12 @@ int misc_register(struct miscdevice * misc)
 
 	if (misc->minor < DYNAMIC_MINORS)
 		misc_minors[misc->minor >> 3] |= 1 << (misc->minor & 7);
-	if (misc->devfs_name[0] == '\0') {
-		snprintf(misc->devfs_name, sizeof(misc->devfs_name),
-				"misc/%s", misc->name);
-	}
 	dev = MKDEV(MISC_MAJOR, misc->minor);
 
-	misc->class = class_simple_device_add(misc_class, dev,
-					      misc->dev, misc->name);
-	if (IS_ERR(misc->class)) {
-		err = PTR_ERR(misc->class);
-		goto out;
-	}
-
-	err = devfs_mk_cdev(dev, S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP, 
-			    misc->devfs_name);
-	if (err) {
-		class_simple_device_remove(dev);
+	misc->this_device = device_create(misc_class, misc->parent, dev,
+					  "%s", misc->name);
+	if (IS_ERR(misc->this_device)) {
+		err = PTR_ERR(misc->this_device);
 		goto out;
 	}
 
@@ -258,7 +227,7 @@ int misc_register(struct miscdevice * misc)
 	 */
 	list_add(&misc->list, &misc_list);
  out:
-	up(&misc_sem);
+	mutex_unlock(&misc_mtx);
 	return err;
 }
 
@@ -279,14 +248,13 @@ int misc_deregister(struct miscdevice * misc)
 	if (list_empty(&misc->list))
 		return -EINVAL;
 
-	down(&misc_sem);
+	mutex_lock(&misc_mtx);
 	list_del(&misc->list);
-	class_simple_device_remove(MKDEV(MISC_MAJOR, misc->minor));
-	devfs_remove(misc->devfs_name);
+	device_destroy(misc_class, MKDEV(MISC_MAJOR, misc->minor));
 	if (i < DYNAMIC_MINORS && i>0) {
 		misc_minors[i>>3] &= ~(1 << (misc->minor & 7));
 	}
-	up(&misc_sem);
+	mutex_unlock(&misc_mtx);
 	return 0;
 }
 
@@ -302,28 +270,14 @@ static int __init misc_init(void)
 	if (ent)
 		ent->proc_fops = &misc_proc_fops;
 #endif
-	misc_class = class_simple_create(THIS_MODULE, "misc");
+	misc_class = class_create(THIS_MODULE, "misc");
 	if (IS_ERR(misc_class))
 		return PTR_ERR(misc_class);
-#ifdef CONFIG_MVME16x
-	rtc_MK48T08_init();
-#endif
-#ifdef CONFIG_BVME6000
-	rtc_DP8570A_init();
-#endif
-#ifdef CONFIG_PMAC_PBOOK
-	pmu_device_init();
-#endif
-#ifdef CONFIG_TOSHIBA
-	tosh_init();
-#endif
-#ifdef CONFIG_I8K
-	i8k_init();
-#endif
+
 	if (register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
 		printk("unable to get major %d for misc devices\n",
 		       MISC_MAJOR);
-		class_simple_destroy(misc_class);
+		class_destroy(misc_class);
 		return -EIO;
 	}
 	return 0;

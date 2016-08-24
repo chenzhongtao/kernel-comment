@@ -1,33 +1,19 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2002,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef	__XFS_TRANS_H__
 #define	__XFS_TRANS_H__
@@ -53,13 +39,9 @@ typedef struct xfs_trans_header {
 /*
  * Log item types.
  */
-#define	XFS_LI_5_3_BUF		0x1234	/* v1 bufs, 1-block inode buffers */
-#define	XFS_LI_5_3_INODE	0x1235	/* 1-block inode buffers */
 #define	XFS_LI_EFI		0x1236
 #define	XFS_LI_EFD		0x1237
 #define	XFS_LI_IUNLINK		0x1238
-#define	XFS_LI_6_1_INODE	0x1239	/* 4K non-aligned inode bufs */
-#define	XFS_LI_6_1_BUF		0x123a	/* v1, 4K inode buffers */
 #define	XFS_LI_INODE		0x123b	/* aligned ino chunks, var-size ibufs */
 #define	XFS_LI_BUF		0x123c	/* v2 bufs, variable sized inode bufs */
 #define	XFS_LI_DQUOT		0x123d
@@ -112,6 +94,8 @@ typedef struct xfs_trans_header {
 #define	XFS_TRANS_GROWFSRT_ZERO		38
 #define	XFS_TRANS_GROWFSRT_FREE		39
 #define	XFS_TRANS_SWAPEXT		40
+#define	XFS_TRANS_SB_COUNT		41
+#define	XFS_TRANS_TYPE_MAX		41
 /* new transaction types need to be reflected in xfs_logprint(8) */
 
 
@@ -133,19 +117,6 @@ typedef struct xfs_ail_entry {
 	struct xfs_log_item	*ail_forw;	/* AIL forw pointer */
 	struct xfs_log_item	*ail_back;	/* AIL back pointer */
 } xfs_ail_entry_t;
-
-/*
- * This structure is passed as a parameter to xfs_trans_push_ail()
- * and is used to track the what LSN the waiting processes are
- * waiting to become unused.
- */
-typedef struct xfs_ail_ticket {
-	xfs_lsn_t		at_lsn;		/* lsn waitin for */
-	struct xfs_ail_ticket	*at_forw;	/* wait list ptr */
-	struct xfs_ail_ticket	*at_back;	/* wait list ptr */
-	sv_t			at_sema;	/* wait sema */
-} xfs_ail_ticket_t;
-
 
 typedef struct xfs_log_item {
 	xfs_ail_entry_t			li_ail;		/* AIL pointers */
@@ -175,7 +146,6 @@ typedef struct xfs_item_ops {
 	void (*iop_unlock)(xfs_log_item_t *);
 	xfs_lsn_t (*iop_committed)(xfs_log_item_t *, xfs_lsn_t);
 	void (*iop_push)(xfs_log_item_t *);
-	void (*iop_abort)(xfs_log_item_t *);
 	void (*iop_pushbuf)(xfs_log_item_t *);
 	void (*iop_committing)(xfs_log_item_t *, xfs_lsn_t);
 } xfs_item_ops_t;
@@ -189,7 +159,6 @@ typedef struct xfs_item_ops {
 #define IOP_UNLOCK(ip)		(*(ip)->li_ops->iop_unlock)(ip)
 #define IOP_COMMITTED(ip, lsn)	(*(ip)->li_ops->iop_committed)(ip, lsn)
 #define IOP_PUSH(ip)		(*(ip)->li_ops->iop_push)(ip)
-#define IOP_ABORT(ip)		(*(ip)->li_ops->iop_abort)(ip)
 #define IOP_PUSHBUF(ip)		(*(ip)->li_ops->iop_pushbuf)(ip)
 #define IOP_COMMITTING(ip, lsn) (*(ip)->li_ops->iop_committing)(ip, lsn)
 
@@ -246,68 +215,67 @@ typedef struct xfs_log_item_chunk {
  * lic_unused to the right value (0 matches all free).  The
  * lic_descs.lid_index values are set up as each desc is allocated.
  */
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_INIT)
-void xfs_lic_init(xfs_log_item_chunk_t *cp);
 #define	XFS_LIC_INIT(cp)	xfs_lic_init(cp)
-#else
-#define	XFS_LIC_INIT(cp)	((cp)->lic_free = XFS_LIC_FREEMASK)
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_INIT_SLOT)
-void xfs_lic_init_slot(xfs_log_item_chunk_t *cp, int slot);
+static inline void xfs_lic_init(xfs_log_item_chunk_t *cp)
+{
+	cp->lic_free = XFS_LIC_FREEMASK;
+}
+
 #define	XFS_LIC_INIT_SLOT(cp,slot)	xfs_lic_init_slot(cp, slot)
-#else
-#define	XFS_LIC_INIT_SLOT(cp,slot)	\
-	((cp)->lic_descs[slot].lid_index = (unsigned char)(slot))
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_VACANCY)
-int xfs_lic_vacancy(xfs_log_item_chunk_t *cp);
+static inline void xfs_lic_init_slot(xfs_log_item_chunk_t *cp, int slot)
+{
+	cp->lic_descs[slot].lid_index = (unsigned char)(slot);
+}
+
 #define	XFS_LIC_VACANCY(cp)		xfs_lic_vacancy(cp)
-#else
-#define	XFS_LIC_VACANCY(cp)		(((cp)->lic_free) & XFS_LIC_FREEMASK)
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_ALL_FREE)
-void xfs_lic_all_free(xfs_log_item_chunk_t *cp);
+static inline int xfs_lic_vacancy(xfs_log_item_chunk_t *cp)
+{
+	return cp->lic_free & XFS_LIC_FREEMASK;
+}
+
 #define	XFS_LIC_ALL_FREE(cp)		xfs_lic_all_free(cp)
-#else
-#define	XFS_LIC_ALL_FREE(cp)		((cp)->lic_free = XFS_LIC_FREEMASK)
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_ARE_ALL_FREE)
-int xfs_lic_are_all_free(xfs_log_item_chunk_t *cp);
+static inline void xfs_lic_all_free(xfs_log_item_chunk_t *cp)
+{
+	cp->lic_free = XFS_LIC_FREEMASK;
+}
+
 #define	XFS_LIC_ARE_ALL_FREE(cp)	xfs_lic_are_all_free(cp)
-#else
-#define	XFS_LIC_ARE_ALL_FREE(cp)	(((cp)->lic_free & XFS_LIC_FREEMASK) ==\
-					XFS_LIC_FREEMASK)
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_ISFREE)
-int xfs_lic_isfree(xfs_log_item_chunk_t *cp, int slot);
+static inline int xfs_lic_are_all_free(xfs_log_item_chunk_t *cp)
+{
+	return ((cp->lic_free & XFS_LIC_FREEMASK) == XFS_LIC_FREEMASK);
+}
+
 #define	XFS_LIC_ISFREE(cp,slot)	xfs_lic_isfree(cp,slot)
-#else
-#define	XFS_LIC_ISFREE(cp,slot)	((cp)->lic_free & (1 << (slot)))
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_CLAIM)
-void xfs_lic_claim(xfs_log_item_chunk_t *cp, int slot);
+static inline int xfs_lic_isfree(xfs_log_item_chunk_t *cp, int slot)
+{
+	return (cp->lic_free & (1 << slot));
+}
+
 #define	XFS_LIC_CLAIM(cp,slot)		xfs_lic_claim(cp,slot)
-#else
-#define	XFS_LIC_CLAIM(cp,slot)		((cp)->lic_free &= ~(1 << (slot)))
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_RELSE)
-void xfs_lic_relse(xfs_log_item_chunk_t *cp, int slot);
+static inline void xfs_lic_claim(xfs_log_item_chunk_t *cp, int slot)
+{
+	cp->lic_free &= ~(1 << slot);
+}
+
 #define	XFS_LIC_RELSE(cp,slot)		xfs_lic_relse(cp,slot)
-#else
-#define	XFS_LIC_RELSE(cp,slot)		((cp)->lic_free |= 1 << (slot))
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_SLOT)
-xfs_log_item_desc_t *xfs_lic_slot(xfs_log_item_chunk_t *cp, int slot);
+static inline void xfs_lic_relse(xfs_log_item_chunk_t *cp, int slot)
+{
+	cp->lic_free |= 1 << slot;
+}
+
 #define	XFS_LIC_SLOT(cp,slot)		xfs_lic_slot(cp,slot)
-#else
-#define	XFS_LIC_SLOT(cp,slot)		(&((cp)->lic_descs[slot]))
-#endif
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_DESC_TO_SLOT)
-int xfs_lic_desc_to_slot(xfs_log_item_desc_t *dp);
+static inline xfs_log_item_desc_t *
+xfs_lic_slot(xfs_log_item_chunk_t *cp, int slot)
+{
+	return &(cp->lic_descs[slot]);
+}
+
 #define	XFS_LIC_DESC_TO_SLOT(dp)	xfs_lic_desc_to_slot(dp)
-#else
-#define	XFS_LIC_DESC_TO_SLOT(dp)	((uint)((dp)->lid_index))
-#endif
+static inline int xfs_lic_desc_to_slot(xfs_log_item_desc_t *dp)
+{
+	return (uint)dp->lid_index;
+}
+
 /*
  * Calculate the address of a chunk given a descriptor pointer:
  * dp - dp->lid_index give the address of the start of the lic_descs array.
@@ -315,15 +283,14 @@ int xfs_lic_desc_to_slot(xfs_log_item_desc_t *dp);
  * All of this yields the address of the chunk, which is
  * cast to a chunk pointer.
  */
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_LIC_DESC_TO_CHUNK)
-xfs_log_item_chunk_t *xfs_lic_desc_to_chunk(xfs_log_item_desc_t *dp);
 #define	XFS_LIC_DESC_TO_CHUNK(dp)	xfs_lic_desc_to_chunk(dp)
-#else
-#define	XFS_LIC_DESC_TO_CHUNK(dp)	((xfs_log_item_chunk_t*) \
-					(((xfs_caddr_t)((dp) - (dp)->lid_index)) -\
-					(xfs_caddr_t)(((xfs_log_item_chunk_t*) \
-					0)->lic_descs)))
-#endif
+static inline xfs_log_item_chunk_t *
+xfs_lic_desc_to_chunk(xfs_log_item_desc_t *dp)
+{
+	return (xfs_log_item_chunk_t*) \
+		(((xfs_caddr_t)((dp) - (dp)->lid_index)) - \
+		(xfs_caddr_t)(((xfs_log_item_chunk_t*)0)->lic_descs));
+}
 
 #ifdef __KERNEL__
 /*
@@ -340,7 +307,7 @@ typedef struct xfs_log_busy_slot {
 #define XFS_LBC_NUM_SLOTS	31
 typedef struct xfs_log_busy_chunk {
 	struct xfs_log_busy_chunk	*lbc_next;
-	uint				lbc_free;	/* bitmask of free slots */
+	uint				lbc_free;	/* free slots bitmask */
 	ushort				lbc_unused;	/* first unused */
 	xfs_log_busy_slot_t		lbc_busy[XFS_LBC_NUM_SLOTS];
 } xfs_log_busy_chunk_t;
@@ -366,8 +333,6 @@ typedef void (*xfs_trans_callback_t)(struct xfs_trans *, void *);
 typedef struct xfs_trans {
 	unsigned int		t_magic;	/* magic number */
 	xfs_log_callback_t	t_logcb;	/* log callback struct */
-	struct xfs_trans	*t_forw;	/* async list pointers */
-	struct xfs_trans	*t_back;	/* async list pointers */
 	unsigned int		t_type;		/* transaction type */
 	unsigned int		t_log_res;	/* amt of log space resvd */
 	unsigned int		t_log_count;	/* count for perm log res */
@@ -382,33 +347,35 @@ typedef struct xfs_trans {
 	xfs_lsn_t		t_commit_lsn;	/* log seq num of end of
 						 * transaction. */
 	struct xfs_mount	*t_mountp;	/* ptr to fs mount struct */
-	struct xfs_dquot_acct   *t_dqinfo;	/* accting info for dquots */
+	struct xfs_dquot_acct   *t_dqinfo;	/* acctg info for dquots */
 	xfs_trans_callback_t	t_callback;	/* transaction callback */
 	void			*t_callarg;	/* callback arg */
 	unsigned int		t_flags;	/* misc flags */
-	long			t_icount_delta;	/* superblock icount change */
-	long			t_ifree_delta;	/* superblock ifree change */
-	long			t_fdblocks_delta; /* superblock fdblocks chg */
-	long			t_res_fdblocks_delta; /* on-disk only chg */
-	long			t_frextents_delta;/* superblock freextents chg*/
-	long			t_res_frextents_delta; /* on-disk only chg */
-	long			t_ag_freeblks_delta; /* debugging counter */
-	long			t_ag_flist_delta; /* debugging counter */
-	long			t_ag_btree_delta; /* debugging counter */
-	long			t_dblocks_delta;/* superblock dblocks change */
-	long			t_agcount_delta;/* superblock agcount change */
-	long			t_imaxpct_delta;/* superblock imaxpct change */
-	long			t_rextsize_delta;/* superblock rextsize chg */
-	long			t_rbmblocks_delta;/* superblock rbmblocks chg */
-	long			t_rblocks_delta;/* superblock rblocks change */
-	long			t_rextents_delta;/* superblocks rextents chg */
-	long			t_rextslog_delta;/* superblocks rextslog chg */
+	int64_t			t_icount_delta;	/* superblock icount change */
+	int64_t			t_ifree_delta;	/* superblock ifree change */
+	int64_t			t_fdblocks_delta; /* superblock fdblocks chg */
+	int64_t			t_res_fdblocks_delta; /* on-disk only chg */
+	int64_t			t_frextents_delta;/* superblock freextents chg*/
+	int64_t			t_res_frextents_delta; /* on-disk only chg */
+#ifdef DEBUG
+	int64_t			t_ag_freeblks_delta; /* debugging counter */
+	int64_t			t_ag_flist_delta; /* debugging counter */
+	int64_t			t_ag_btree_delta; /* debugging counter */
+#endif
+	int64_t			t_dblocks_delta;/* superblock dblocks change */
+	int64_t			t_agcount_delta;/* superblock agcount change */
+	int64_t			t_imaxpct_delta;/* superblock imaxpct change */
+	int64_t			t_rextsize_delta;/* superblock rextsize chg */
+	int64_t			t_rbmblocks_delta;/* superblock rbmblocks chg */
+	int64_t			t_rblocks_delta;/* superblock rblocks change */
+	int64_t			t_rextents_delta;/* superblocks rextents chg */
+	int64_t			t_rextslog_delta;/* superblocks rextslog chg */
 	unsigned int		t_items_free;	/* log item descs free */
 	xfs_log_item_chunk_t	t_items;	/* first log item desc chunk */
 	xfs_trans_header_t	t_header;	/* header for in-log trans */
 	unsigned int		t_busy_free;	/* busy descs free */
 	xfs_log_busy_chunk_t	t_busy;		/* busy/async free blocks */
-        xfs_pflags_t            t_pflags;       /* saved pflags state */
+	unsigned long		t_pflags;	/* saved process flags state */
 } xfs_trans_t;
 
 #endif	/* __KERNEL__ */
@@ -833,12 +800,9 @@ typedef struct xfs_trans {
 	((mp)->m_sb.sb_inodesize + \
 	 (mp)->m_sb.sb_sectsize * 2 + \
 	 (mp)->m_dirblksize + \
-	 (XFS_DIR_IS_V1(mp) ? 0 : \
-	    XFS_FSB_TO_B(mp, (XFS_DAENTER_BMAP1B(mp, XFS_DATA_FORK) + 1))) + \
+	 XFS_FSB_TO_B(mp, (XFS_DAENTER_BMAP1B(mp, XFS_DATA_FORK) + 1)) + \
 	 XFS_ALLOCFREE_LOG_RES(mp, 1) + \
-	 (128 * (4 + \
-		 (XFS_DIR_IS_V1(mp) ? 0 : \
-			 XFS_DAENTER_BMAP1B(mp, XFS_DATA_FORK) + 1) + \
+	 (128 * (4 + (XFS_DAENTER_BMAP1B(mp, XFS_DATA_FORK) + 1) + \
 		 XFS_ALLOCFREE_LOG_COUNT(mp, 1))))
 
 #define	XFS_ADDAFORK_LOG_RES(mp)	((mp)->m_reservations.tr_addafork)
@@ -969,9 +933,9 @@ typedef struct xfs_trans {
 #define	xfs_trans_set_sync(tp)		((tp)->t_flags |= XFS_TRANS_SYNC)
 
 #ifdef DEBUG
-#define	xfs_trans_agblocks_delta(tp, d)	((tp)->t_ag_freeblks_delta += (long)d)
-#define	xfs_trans_agflist_delta(tp, d)	((tp)->t_ag_flist_delta += (long)d)
-#define	xfs_trans_agbtree_delta(tp, d)	((tp)->t_ag_btree_delta += (long)d)
+#define	xfs_trans_agblocks_delta(tp, d)	((tp)->t_ag_freeblks_delta += (int64_t)d)
+#define	xfs_trans_agflist_delta(tp, d)	((tp)->t_ag_flist_delta += (int64_t)d)
+#define	xfs_trans_agbtree_delta(tp, d)	((tp)->t_ag_btree_delta += (int64_t)d)
 #else
 #define	xfs_trans_agblocks_delta(tp, d)
 #define	xfs_trans_agflist_delta(tp, d)
@@ -987,9 +951,7 @@ xfs_trans_t	*_xfs_trans_alloc(struct xfs_mount *, uint);
 xfs_trans_t	*xfs_trans_dup(xfs_trans_t *);
 int		xfs_trans_reserve(xfs_trans_t *, uint, uint, uint,
 				  uint, uint);
-void		xfs_trans_callback(xfs_trans_t *,
-				   void (*)(xfs_trans_t *, void *), void *);
-void		xfs_trans_mod_sb(xfs_trans_t *, uint, long);
+void		xfs_trans_mod_sb(xfs_trans_t *, uint, int64_t);
 struct xfs_buf	*xfs_trans_get_buf(xfs_trans_t *, struct xfs_buftarg *, xfs_daddr_t,
 				   int, uint);
 int		xfs_trans_read_buf(struct xfs_mount *, xfs_trans_t *,
@@ -1000,8 +962,8 @@ struct xfs_buf	*xfs_trans_getsb(xfs_trans_t *, struct xfs_mount *, int);
 void		xfs_trans_brelse(xfs_trans_t *, struct xfs_buf *);
 void		xfs_trans_bjoin(xfs_trans_t *, struct xfs_buf *);
 void		xfs_trans_bhold(xfs_trans_t *, struct xfs_buf *);
+void		xfs_trans_bhold_release(xfs_trans_t *, struct xfs_buf *);
 void		xfs_trans_binval(xfs_trans_t *, struct xfs_buf *);
-void		xfs_trans_inode_buf(xfs_trans_t *, struct xfs_buf *);
 void		xfs_trans_inode_buf(xfs_trans_t *, struct xfs_buf *);
 void		xfs_trans_stale_inode_buf(xfs_trans_t *, struct xfs_buf *);
 void		xfs_trans_dquot_buf(xfs_trans_t *, struct xfs_buf *, uint);
@@ -1010,7 +972,6 @@ int		xfs_trans_iget(struct xfs_mount *, xfs_trans_t *,
 			       xfs_ino_t , uint, uint, struct xfs_inode **);
 void		xfs_trans_ijoin(xfs_trans_t *, struct xfs_inode *, uint);
 void		xfs_trans_ihold(xfs_trans_t *, struct xfs_inode *);
-void		xfs_trans_ihold_release(xfs_trans_t *, struct xfs_inode *);
 void		xfs_trans_log_buf(xfs_trans_t *, struct xfs_buf *, uint, uint);
 void		xfs_trans_log_inode(xfs_trans_t *, struct xfs_inode *, uint);
 struct xfs_efi_log_item	*xfs_trans_get_efi(xfs_trans_t *, uint);
@@ -1026,7 +987,10 @@ void		xfs_trans_log_efd_extent(xfs_trans_t *,
 					 struct xfs_efd_log_item *,
 					 xfs_fsblock_t,
 					 xfs_extlen_t);
-int		xfs_trans_commit(xfs_trans_t *, uint flags, xfs_lsn_t *);
+int		_xfs_trans_commit(xfs_trans_t *,
+				  uint flags,
+				  int *);
+#define xfs_trans_commit(tp, flags)	_xfs_trans_commit(tp, flags, NULL)
 void		xfs_trans_cancel(xfs_trans_t *, int);
 void		xfs_trans_ail_init(struct xfs_mount *);
 xfs_lsn_t	xfs_trans_push_ail(struct xfs_mount *, xfs_lsn_t);

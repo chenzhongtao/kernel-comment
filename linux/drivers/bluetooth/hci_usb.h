@@ -31,9 +31,11 @@
 #define HCI_IGNORE		0x01
 #define HCI_RESET		0x02
 #define HCI_DIGIANSWER		0x04
-#define HCI_SNIFFER		0x08
-#define HCI_BROKEN_ISOC		0x10
+#define HCI_CSR			0x08
+#define HCI_SNIFFER		0x10
 #define HCI_BCM92035		0x20
+#define HCI_BROKEN_ISOC		0x40
+#define HCI_WRONG_SCO_MTU	0x80
 
 #define HCI_MAX_IFACE_NUM	3
 
@@ -100,9 +102,9 @@ struct hci_usb {
 	struct hci_dev		*hdev;
 
 	unsigned long		state;
-	
+
 	struct usb_device	*udev;
-	
+
 	struct usb_host_endpoint	*bulk_in_ep;
 	struct usb_host_endpoint	*bulk_out_ep;
 	struct usb_host_endpoint	*intr_in_ep;
@@ -114,7 +116,6 @@ struct hci_usb {
 	__u8			ctrl_req;
 
 	struct sk_buff_head	transmit_q[4];
-	struct sk_buff		*reassembly[4];		/* Reassembly buffers */
 
 	rwlock_t		completion_lock;
 

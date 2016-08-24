@@ -1,4 +1,4 @@
-/* Copyright (c) 2004 Coraid, Inc.  See COPYING for GPL terms. */
+/* Copyright (c) 2006 Coraid, Inc.  See COPYING for GPL terms. */
 /*
  * aoenet.c
  * Ethernet portion of AoE driver
@@ -7,6 +7,9 @@
 #include <linux/hdreg.h>
 #include <linux/blkdev.h>
 #include <linux/netdevice.h>
+#include <linux/moduleparam.h>
+#include <net/net_namespace.h>
+#include <asm/unaligned.h>
 #include "aoe.h"
 
 #define NECODES 5
@@ -26,6 +29,19 @@ enum {
 };
 
 static char aoe_iflist[IFLISTSZ];
+module_param_string(aoe_iflist, aoe_iflist, IFLISTSZ, 0600);
+MODULE_PARM_DESC(aoe_iflist, "aoe_iflist=\"dev1 [dev2 ...]\"\n");
+
+#ifndef MODULE
+static int __init aoe_iflist_setup(char *str)
+{
+	strncpy(aoe_iflist, str, IFLISTSZ);
+	aoe_iflist[IFLISTSZ - 1] = '\0';
+	return 1;
+}
+
+__setup("aoe_iflist=", aoe_iflist_setup);
+#endif
 
 int
 is_aoe_netif(struct net_device *ifp)
@@ -36,7 +52,8 @@ is_aoe_netif(struct net_device *ifp)
 	if (aoe_iflist[0] == '\0')
 		return 1;
 
-	for (p = aoe_iflist; *p; p = q + strspn(q, WHITESPACE)) {
+	p = aoe_iflist + strspn(aoe_iflist, WHITESPACE);
+	for (; *p; p = q + strspn(q, WHITESPACE)) {
 		q = p + strcspn(p, WHITESPACE);
 		if (q != p)
 			len = q - p;
@@ -59,7 +76,7 @@ set_aoe_iflist(const char __user *user_str, size_t size)
 		return -EINVAL;
 
 	if (copy_from_user(aoe_iflist, user_str, size)) {
-		printk(KERN_INFO "aoe: %s: copy from user failed\n", __FUNCTION__);
+		printk(KERN_INFO "aoe: copy from user failed\n");
 		return -EFAULT;
 	}
 	aoe_iflist[size] = 0x00;
@@ -69,24 +86,12 @@ set_aoe_iflist(const char __user *user_str, size_t size)
 u64
 mac_addr(char addr[6])
 {
-	u64 n = 0;
+	__be64 n = 0;
 	char *p = (char *) &n;
 
 	memcpy(p + 2, addr, 6);	/* (sizeof addr != 6) */
 
 	return __be64_to_cpu(n);
-}
-
-static struct sk_buff *
-skb_check(struct sk_buff *skb)
-{
-	if (skb_is_nonlinear(skb))
-	if ((skb = skb_share_check(skb, GFP_ATOMIC)))
-	if (skb_linearize(skb, GFP_ATOMIC) < 0) {
-		dev_kfree_skb(skb);
-		return NULL;
-	}
-	return skb;
 }
 
 void
@@ -105,23 +110,25 @@ aoenet_xmit(struct sk_buff *sl)
  * (1) len doesn't include the header by default.  I want this. 
  */
 static int
-aoenet_rcv(struct sk_buff *skb, struct net_device *ifp, struct packet_type *pt)
+aoenet_rcv(struct sk_buff *skb, struct net_device *ifp, struct packet_type *pt, struct net_device *orig_dev)
 {
 	struct aoe_hdr *h;
-	ulong n;
+	u32 n;
 
-	skb = skb_check(skb);
-	if (!skb)
-		return 0;
-
-	if (!is_aoe_netif(ifp))
+	if (ifp->nd_net != &init_net)
 		goto exit;
 
-	//skb->len += ETH_HLEN;	/* (1) */
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (skb == NULL)
+		return 0;
+	if (skb_linearize(skb))
+		goto exit;
+	if (!is_aoe_netif(ifp))
+		goto exit;
 	skb_push(skb, ETH_HLEN);	/* (1) */
 
-	h = (struct aoe_hdr *) skb->mac.raw;
-	n = __be32_to_cpu(*((u32 *) h->tag));
+	h = (struct aoe_hdr *) skb_mac_header(skb);
+	n = be32_to_cpu(get_unaligned(&h->tag));
 	if ((h->verfl & AOEFL_RSP) == 0 || (n & 1<<31))
 		goto exit;
 
@@ -130,9 +137,8 @@ aoenet_rcv(struct sk_buff *skb, struct net_device *ifp, struct packet_type *pt)
 		if (n > NECODES)
 			n = 0;
 		if (net_ratelimit())
-			printk(KERN_ERR "aoe: aoenet_rcv: error packet from %d.%d; "
-			       "ecode=%d '%s'\n",
-			       __be16_to_cpu(*((u16 *) h->major)), h->minor, 
+			printk(KERN_ERR "aoe: error packet from %d.%d; ecode=%d '%s'\n",
+			       be16_to_cpu(get_unaligned(&h->major)), h->minor,
 			       h->err, aoe_errlist[n]);
 		goto exit;
 	}
@@ -145,7 +151,7 @@ aoenet_rcv(struct sk_buff *skb, struct net_device *ifp, struct packet_type *pt)
 		aoecmd_cfg_rsp(skb);
 		break;
 	default:
-		printk(KERN_INFO "aoe: aoenet_rcv: unknown cmd %d\n", h->cmd);
+		printk(KERN_INFO "aoe: unknown cmd %d\n", h->cmd);
 	}
 exit:
 	dev_kfree_skb(skb);

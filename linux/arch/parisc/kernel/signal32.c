@@ -1,6 +1,8 @@
 /*    Signal support for 32-bit kernel builds
  *
  *    Copyright (C) 2001 Matthew Wilcox <willy at parisc-linux.org>
+ *    Copyright (C) 2006 Kyle McMartin <kyle at parisc-linux.org>
+ *
  *    Code was mostly borrowed from kernel/signal.c.
  *    See kernel/signal.c for additional Copyrights.
  *
@@ -20,19 +22,16 @@
  *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#include <linux/config.h>
 #include <linux/compat.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/unistd.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/syscalls.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 
-#include <asm/compat_signal.h>
 #include <asm/uaccess.h>
 
 #include "signal32.h"
@@ -65,7 +64,7 @@ sigset_64to32(compat_sigset_t *s32, sigset_t *s64)
 }
 
 static int
-put_sigset32(compat_sigset_t *up, sigset_t *set, size_t sz)
+put_sigset32(compat_sigset_t __user *up, sigset_t *set, size_t sz)
 {
 	compat_sigset_t s;
 
@@ -76,7 +75,7 @@ put_sigset32(compat_sigset_t *up, sigset_t *set, size_t sz)
 }
 
 static int
-get_sigset32(compat_sigset_t *up, sigset_t *set, size_t sz)
+get_sigset32(compat_sigset_t __user *up, sigset_t *set, size_t sz)
 {
 	compat_sigset_t s;
 	int r;
@@ -90,7 +89,7 @@ get_sigset32(compat_sigset_t *up, sigset_t *set, size_t sz)
 	return r;
 }
 
-int sys32_rt_sigprocmask(int how, compat_sigset_t *set, compat_sigset_t *oset,
+int sys32_rt_sigprocmask(int how, compat_sigset_t __user *set, compat_sigset_t __user *oset,
 				    unsigned int sigsetsize)
 {
 	sigset_t old_set, new_set;
@@ -99,8 +98,8 @@ int sys32_rt_sigprocmask(int how, compat_sigset_t *set, compat_sigset_t *oset,
 	if (set && get_sigset32(set, &new_set, sigsetsize))
 		return -EFAULT;
 	
-	KERNEL_SYSCALL(ret, sys_rt_sigprocmask, how, set ? &new_set : NULL,
-				 oset ? &old_set : NULL, sigsetsize);
+	KERNEL_SYSCALL(ret, sys_rt_sigprocmask, how, set ? (sigset_t __user *)&new_set : NULL,
+				 oset ? (sigset_t __user *)&old_set : NULL, sigsetsize);
 
 	if (!ret && oset && put_sigset32(oset, &old_set, sigsetsize))
 		return -EFAULT;
@@ -109,12 +108,12 @@ int sys32_rt_sigprocmask(int how, compat_sigset_t *set, compat_sigset_t *oset,
 }
 
 
-int sys32_rt_sigpending(compat_sigset_t *uset, unsigned int sigsetsize)
+int sys32_rt_sigpending(compat_sigset_t __user *uset, unsigned int sigsetsize)
 {
 	int ret;
 	sigset_t set;
 
-	KERNEL_SYSCALL(ret, sys_rt_sigpending, &set, sigsetsize);
+	KERNEL_SYSCALL(ret, sys_rt_sigpending, (sigset_t __user *)&set, sigsetsize);
 
 	if (!ret && put_sigset32(uset, &set, sigsetsize))
 		return -EFAULT;
@@ -123,7 +122,7 @@ int sys32_rt_sigpending(compat_sigset_t *uset, unsigned int sigsetsize)
 }
 
 long
-sys32_rt_sigaction(int sig, const struct sigaction32 *act, struct sigaction32 *oact,
+sys32_rt_sigaction(int sig, const struct sigaction32 __user *act, struct sigaction32 __user *oact,
                  size_t sigsetsize)
 {
 	struct k_sigaction32 new_sa32, old_sa32;
@@ -151,7 +150,7 @@ sys32_rt_sigaction(int sig, const struct sigaction32 *act, struct sigaction32 *o
 }
 
 int 
-do_sigaltstack32 (const compat_stack_t *uss32, compat_stack_t *uoss32, unsigned long sp)
+do_sigaltstack32 (const compat_stack_t __user *uss32, compat_stack_t __user *uoss32, unsigned long sp)
 {
 	compat_stack_t ss32, oss32;
 	stack_t ss, oss;
@@ -162,7 +161,7 @@ do_sigaltstack32 (const compat_stack_t *uss32, compat_stack_t *uoss32, unsigned 
 		if (copy_from_user(&ss32, uss32, sizeof ss32))
 			return -EFAULT;
 
-		ss.ss_sp = (void *)(unsigned long)ss32.ss_sp;
+		ss.ss_sp = (void __user *)(unsigned long)ss32.ss_sp;
 		ss.ss_flags = ss32.ss_flags;
 		ss.ss_size = ss32.ss_size;
 
@@ -172,7 +171,7 @@ do_sigaltstack32 (const compat_stack_t *uss32, compat_stack_t *uoss32, unsigned 
 	if (uoss32)
 		ossp = &oss;
 
-	KERNEL_SYSCALL(ret, do_sigaltstack, ssp, ossp, sp);
+	KERNEL_SYSCALL(ret, do_sigaltstack, (const stack_t __user *)ssp, (stack_t __user *)ossp, sp);
 
 	if (!ret && uoss32) {
 		oss32.ss_sp = (unsigned int)(unsigned long)oss.ss_sp;
@@ -186,7 +185,7 @@ do_sigaltstack32 (const compat_stack_t *uss32, compat_stack_t *uoss32, unsigned 
 }
 
 long
-restore_sigcontext32(struct compat_sigcontext *sc, struct compat_regfile * rf,
+restore_sigcontext32(struct compat_sigcontext __user *sc, struct compat_regfile __user * rf,
 		struct pt_regs *regs)
 {
 	long err = 0;
@@ -265,7 +264,7 @@ restore_sigcontext32(struct compat_sigcontext *sc, struct compat_regfile * rf,
  * truncate for a 32-bit userspace.
  */
 long
-setup_sigcontext32(struct compat_sigcontext *sc, struct compat_regfile * rf, 
+setup_sigcontext32(struct compat_sigcontext __user *sc, struct compat_regfile __user * rf, 
 		struct pt_regs *regs, int in_syscall)		 
 {
 	compat_int_t flags = 0;
@@ -399,3 +398,124 @@ setup_sigcontext32(struct compat_sigcontext *sc, struct compat_regfile * rf,
 
 	return err;
 }
+
+int
+copy_siginfo_from_user32 (siginfo_t *to, compat_siginfo_t __user *from)
+{
+	compat_uptr_t addr;
+	int err;
+
+	if (!access_ok(VERIFY_READ, from, sizeof(compat_siginfo_t)))
+		return -EFAULT;
+
+	err = __get_user(to->si_signo, &from->si_signo);
+	err |= __get_user(to->si_errno, &from->si_errno);
+	err |= __get_user(to->si_code, &from->si_code);
+
+	if (to->si_code < 0)
+		err |= __copy_from_user(&to->_sifields._pad, &from->_sifields._pad, SI_PAD_SIZE);
+	else {
+		switch (to->si_code >> 16) {
+		      case __SI_CHLD >> 16:
+			err |= __get_user(to->si_utime, &from->si_utime);
+			err |= __get_user(to->si_stime, &from->si_stime);
+			err |= __get_user(to->si_status, &from->si_status);
+		      default:
+			err |= __get_user(to->si_pid, &from->si_pid);
+			err |= __get_user(to->si_uid, &from->si_uid);
+			break;
+		      case __SI_FAULT >> 16:
+			err |= __get_user(addr, &from->si_addr);
+			to->si_addr = compat_ptr(addr);
+			break;
+		      case __SI_POLL >> 16:
+			err |= __get_user(to->si_band, &from->si_band);
+			err |= __get_user(to->si_fd, &from->si_fd);
+			break;
+		      case __SI_RT >> 16: /* This is not generated by the kernel as of now.  */
+		      case __SI_MESGQ >> 16:
+			err |= __get_user(to->si_pid, &from->si_pid);
+			err |= __get_user(to->si_uid, &from->si_uid);
+			err |= __get_user(to->si_int, &from->si_int);
+			break;
+		}
+	}
+	return err;
+}
+
+int
+copy_siginfo_to_user32 (compat_siginfo_t __user *to, siginfo_t *from)
+{
+	compat_uptr_t addr;
+	compat_int_t val;
+	int err;
+
+	if (!access_ok(VERIFY_WRITE, to, sizeof(compat_siginfo_t)))
+		return -EFAULT;
+
+	/* If you change siginfo_t structure, please be sure
+	   this code is fixed accordingly.
+	   It should never copy any pad contained in the structure
+	   to avoid security leaks, but must copy the generic
+	   3 ints plus the relevant union member.
+	   This routine must convert siginfo from 64bit to 32bit as well
+	   at the same time.  */
+	err = __put_user(from->si_signo, &to->si_signo);
+	err |= __put_user(from->si_errno, &to->si_errno);
+	err |= __put_user((short)from->si_code, &to->si_code);
+	if (from->si_code < 0)
+		err |= __copy_to_user(&to->_sifields._pad, &from->_sifields._pad, SI_PAD_SIZE);
+	else {
+		switch (from->si_code >> 16) {
+		case __SI_CHLD >> 16:
+			err |= __put_user(from->si_utime, &to->si_utime);
+			err |= __put_user(from->si_stime, &to->si_stime);
+			err |= __put_user(from->si_status, &to->si_status);
+		default:
+			err |= __put_user(from->si_pid, &to->si_pid);
+			err |= __put_user(from->si_uid, &to->si_uid);
+			break;
+		case __SI_FAULT >> 16:
+			addr = ptr_to_compat(from->si_addr);
+			err |= __put_user(addr, &to->si_addr);
+			break;
+		case __SI_POLL >> 16:
+			err |= __put_user(from->si_band, &to->si_band);
+			err |= __put_user(from->si_fd, &to->si_fd);
+			break;
+		case __SI_TIMER >> 16:
+			err |= __put_user(from->si_tid, &to->si_tid);
+			err |= __put_user(from->si_overrun, &to->si_overrun);
+			val = (compat_int_t)from->si_int;
+			err |= __put_user(val, &to->si_int);
+			break;
+		case __SI_RT >> 16:	/* Not generated by the kernel as of now.  */
+		case __SI_MESGQ >> 16:
+			err |= __put_user(from->si_uid, &to->si_uid);
+			err |= __put_user(from->si_pid, &to->si_pid);
+			val = (compat_int_t)from->si_int;
+			err |= __put_user(val, &to->si_int);
+			break;
+		}
+	}
+	return err;
+}
+
+asmlinkage long compat_sys_rt_sigqueueinfo(int pid, int sig,
+	struct compat_siginfo __user *uinfo)
+{
+	siginfo_t info;
+
+	if (copy_siginfo_from_user32(&info, uinfo))
+		return -EFAULT;
+
+	/* Not even root can pretend to send signals from the kernel.
+	   Nor can they impersonate a kill(), which adds source info.  */
+	if (info.si_code >= 0)
+		return -EPERM;
+	info.si_signo = sig;
+
+	/* POSIX.1b doesn't mention process groups.  */
+	return kill_proc_info(sig, &info, pid);
+}
+

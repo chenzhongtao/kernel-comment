@@ -32,7 +32,6 @@
  *		2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h> /* for CONFIG_DLCI_MAX */
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -60,9 +59,9 @@
 
 static const char* version = "SDLA driver v0.30, 12 Sep 1996, mike.mclagan@linux.org";
 
-static unsigned int valid_port[] __initdata = { 0x250, 0x270, 0x280, 0x300, 0x350, 0x360, 0x380, 0x390};
+static unsigned int valid_port[] = { 0x250, 0x270, 0x280, 0x300, 0x350, 0x360, 0x380, 0x390};
 
-static unsigned int valid_mem[]  __initdata = {
+static unsigned int valid_mem[] = {
 				    0xA0000, 0xA2000, 0xA4000, 0xA6000, 0xA8000, 0xAA000, 0xAC000, 0xAE000, 
                                     0xB0000, 0xB2000, 0xB4000, 0xB6000, 0xB8000, 0xBA000, 0xBC000, 0xBE000,
                                     0xC0000, 0xC2000, 0xC4000, 0xC6000, 0xC8000, 0xCA000, 0xCC000, 0xCE000,
@@ -182,7 +181,7 @@ static char sdla_byte(struct net_device *dev, int addr)
 	return(byte);
 }
 
-void sdla_stop(struct net_device *dev)
+static void sdla_stop(struct net_device *dev)
 {
 	struct frad_local *flp;
 
@@ -209,7 +208,7 @@ void sdla_stop(struct net_device *dev)
 	}
 }
 
-void sdla_start(struct net_device *dev)
+static void sdla_start(struct net_device *dev)
 {
 	struct frad_local *flp;
 
@@ -247,7 +246,7 @@ void sdla_start(struct net_device *dev)
  *
  ***************************************************/
 
-int sdla_z80_poll(struct net_device *dev, int z80_addr, int jiffs, char resp1, char resp2)
+static int sdla_z80_poll(struct net_device *dev, int z80_addr, int jiffs, char resp1, char resp2)
 {
 	unsigned long start, done, now;
 	char          resp, *temp;
@@ -329,9 +328,9 @@ static int sdla_cpuspeed(struct net_device *dev, struct ifreq *ifr)
 
 struct _dlci_stat 
 {
-	short dlci		__attribute__((packed));
-	char  flags		__attribute__((packed));
-};
+	short dlci;
+	char  flags;
+} __attribute__((packed));
 
 struct _frad_stat 
 {
@@ -505,7 +504,7 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 
 static int sdla_reconfig(struct net_device *dev);
 
-int sdla_activate(struct net_device *slave, struct net_device *master)
+static int sdla_activate(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int i;
@@ -527,7 +526,7 @@ int sdla_activate(struct net_device *slave, struct net_device *master)
 	return(0);
 }
 
-int sdla_deactivate(struct net_device *slave, struct net_device *master)
+static int sdla_deactivate(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int               i;
@@ -549,7 +548,7 @@ int sdla_deactivate(struct net_device *slave, struct net_device *master)
 	return(0);
 }
 
-int sdla_assoc(struct net_device *slave, struct net_device *master)
+static int sdla_assoc(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int               i;
@@ -585,7 +584,7 @@ int sdla_assoc(struct net_device *slave, struct net_device *master)
 	return(0);
 }
 
-int sdla_deassoc(struct net_device *slave, struct net_device *master)
+static int sdla_deassoc(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int               i;
@@ -613,7 +612,7 @@ int sdla_deassoc(struct net_device *slave, struct net_device *master)
 	return(0);
 }
 
-int sdla_dlci_conf(struct net_device *slave, struct net_device *master, int get)
+static int sdla_dlci_conf(struct net_device *slave, struct net_device *master, int get)
 {
 	struct frad_local *flp;
 	struct dlci_local *dlp;
@@ -868,7 +867,7 @@ static void sdla_receive(struct net_device *dev)
 	spin_unlock_irqrestore(&sdla_lock, flags);
 }
 
-static irqreturn_t sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t sdla_isr(int irq, void *dev_id)
 {
 	struct net_device     *dev;
 	struct frad_local *flp;
@@ -876,13 +875,7 @@ static irqreturn_t sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 
 	dev = dev_id;
 
-	if (dev == NULL)
-	{
-		printk(KERN_WARNING "sdla_isr(): irq %d for unknown device.\n", irq);
-		return IRQ_NONE;
-	}
-
-	flp = dev->priv;
+	flp = netdev_priv(dev);
 
 	if (!flp->initialized)
 	{
@@ -1203,10 +1196,9 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem __user *info, int r
 		
 	if (read)
 	{	
-		temp = kmalloc(mem.len, GFP_KERNEL);
+		temp = kzalloc(mem.len, GFP_KERNEL);
 		if (!temp)
 			return(-ENOMEM);
-		memset(temp, 0, mem.len);
 		sdla_read(dev, mem.addr, temp, mem.len);
 		if(copy_to_user(mem.data, temp, mem.len))
 		{
@@ -1324,7 +1316,7 @@ NOTE:  This is rather a useless action right now, as the
 	return(0);
 }
 
-int sdla_change_mtu(struct net_device *dev, int new_mtu)
+static int sdla_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct frad_local *flp;
 
@@ -1337,7 +1329,7 @@ int sdla_change_mtu(struct net_device *dev, int new_mtu)
 	return(-EOPNOTSUPP);
 }
 
-int sdla_set_config(struct net_device *dev, struct ifmap *map)
+static int sdla_set_config(struct net_device *dev, struct ifmap *map)
 {
 	struct frad_local *flp;
 	int               i;
@@ -1350,11 +1342,11 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 	if (flp->initialized)
 		return(-EINVAL);
 
-	for(i=0;i < sizeof(valid_port) / sizeof (int) ; i++)
+	for(i=0; i < ARRAY_SIZE(valid_port); i++)
 		if (valid_port[i] == map->base_addr)
 			break;   
 
-	if (i == sizeof(valid_port) / sizeof(int))
+	if (i == ARRAY_SIZE(valid_port))
 		return(-EINVAL);
 
 	if (!request_region(map->base_addr, SDLA_IO_EXTENTS, dev->name)){
@@ -1495,12 +1487,12 @@ got_type:
 		}
 	}
 
-	for(i=0;i < sizeof(valid_mem) / sizeof (int) ; i++)
+	for(i=0; i < ARRAY_SIZE(valid_mem); i++)
 		if (valid_mem[i] == map->mem_start)
 			break;   
 
 	err = -EINVAL;
-	if (i == sizeof(valid_mem) / sizeof(int))
+	if (i == ARRAY_SIZE(valid_mem))
 		goto fail2;
 
 	if (flp->type == SDLA_S502A && (map->mem_start & 0xF000) >> 12 == 0x0E)
@@ -1611,7 +1603,6 @@ static void setup_sdla(struct net_device *dev)
 
 	netdev_boot_setup_check(dev);
 
-	SET_MODULE_OWNER(dev);
 	dev->flags		= 0;
 	dev->type		= 0xFFFF;
 	dev->hard_header_len	= 0;

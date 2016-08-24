@@ -8,7 +8,6 @@
  */
 
 #include <linux/linkage.h>
-#include <linux/config.h>
 
 #if   defined(CONFIG_ALPHA_GENERIC)
 
@@ -86,15 +85,7 @@ static __inline__ int irq_canonicalize(int irq)
 	return ((irq == 2) ? 9 : irq);
 }
 
-extern void disable_irq(unsigned int);
-extern void disable_irq_nosync(unsigned int);
-extern void enable_irq(unsigned int);
-
 struct pt_regs;
 extern void (*perf_irq)(unsigned long, struct pt_regs *);
-
-struct irqaction;
-int handle_IRQ_event(unsigned int, struct pt_regs *, struct irqaction *);
-
 
 #endif /* _ALPHA_IRQ_H */

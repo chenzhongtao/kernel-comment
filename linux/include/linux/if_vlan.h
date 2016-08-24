@@ -23,8 +23,8 @@ struct vlan_collection;
 struct vlan_dev_info;
 struct hlist_node;
 
-#include <linux/proc_fs.h> /* for proc_dir_entry */
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 #define VLAN_HLEN	4		/* The additional bytes (on top of the Ethernet header)
 					 * that VLAN requires.
@@ -42,27 +42,27 @@ struct hlist_node;
 struct vlan_ethhdr {
    unsigned char	h_dest[ETH_ALEN];	   /* destination eth addr	*/
    unsigned char	h_source[ETH_ALEN];	   /* source ether addr	*/
-   unsigned short       h_vlan_proto;              /* Should always be 0x8100 */
-   unsigned short       h_vlan_TCI;                /* Encapsulates priority and VLAN ID */
-   unsigned short	h_vlan_encapsulated_proto; /* packet type ID field (or len) */
+   __be16               h_vlan_proto;              /* Should always be 0x8100 */
+   __be16               h_vlan_TCI;                /* Encapsulates priority and VLAN ID */
+   __be16		h_vlan_encapsulated_proto; /* packet type ID field (or len) */
 };
 
 #include <linux/skbuff.h>
 
 static inline struct vlan_ethhdr *vlan_eth_hdr(const struct sk_buff *skb)
 {
-	return (struct vlan_ethhdr *)skb->mac.raw;
+	return (struct vlan_ethhdr *)skb_mac_header(skb);
 }
 
 struct vlan_hdr {
-   unsigned short       h_vlan_TCI;                /* Encapsulates priority and VLAN ID */
-   unsigned short       h_vlan_encapsulated_proto; /* packet type ID field (or len) */
+   __be16               h_vlan_TCI;                /* Encapsulates priority and VLAN ID */
+   __be16               h_vlan_encapsulated_proto; /* packet type ID field (or len) */
 };
 
 #define VLAN_VID_MASK	0xfff
 
 /* found in socket.c */
-extern void vlan_ioctl_set(int (*hook)(void __user *));
+extern void vlan_ioctl_set(int (*hook)(struct net *, void __user *));
 
 #define VLAN_NAME "vlan"
 
@@ -70,17 +70,36 @@ extern void vlan_ioctl_set(int (*hook)(void __user *));
  * depends on completely exhausting the VLAN identifier space.  Thus
  * it gives constant time look-up, but in many cases it wastes memory.
  */
-#define VLAN_GROUP_ARRAY_LEN 4096
+#define VLAN_GROUP_ARRAY_LEN          4096
+#define VLAN_GROUP_ARRAY_SPLIT_PARTS  8
+#define VLAN_GROUP_ARRAY_PART_LEN     (VLAN_GROUP_ARRAY_LEN/VLAN_GROUP_ARRAY_SPLIT_PARTS)
 
 struct vlan_group {
 	int real_dev_ifindex; /* The ifindex of the ethernet(like) device the vlan is attached to. */
 	struct hlist_node	hlist;	/* linked list */
-	struct net_device *vlan_devices[VLAN_GROUP_ARRAY_LEN];
+	struct net_device **vlan_devices_arrays[VLAN_GROUP_ARRAY_SPLIT_PARTS];
 	struct rcu_head		rcu;
 };
 
+static inline struct net_device *vlan_group_get_device(struct vlan_group *vg, int vlan_id)
+{
+	struct net_device **array;
+	array = vg->vlan_devices_arrays[vlan_id / VLAN_GROUP_ARRAY_PART_LEN];
+	return array[vlan_id % VLAN_GROUP_ARRAY_PART_LEN];
+}
+
+static inline void vlan_group_set_device(struct vlan_group *vg, int vlan_id,
+					 struct net_device *dev)
+{
+	struct net_device **array;
+	if (!vg)
+		return;
+	array = vg->vlan_devices_arrays[vlan_id / VLAN_GROUP_ARRAY_PART_LEN];
+	array[vlan_id % VLAN_GROUP_ARRAY_PART_LEN] = dev;
+}
+
 struct vlan_priority_tci_mapping {
-	unsigned long priority;
+	u32 priority;
 	unsigned short vlan_qos; /* This should be shifted when first set, so we only do it
 				  * at provisioning time.
 				  * ((skb->priority << 13) & 0xE000)
@@ -93,7 +112,10 @@ struct vlan_dev_info {
 	/** This will be the mapping that correlates skb->priority to
 	 * 3 bits of VLAN QOS tags...
 	 */
-	unsigned long ingress_priority_map[8];
+	unsigned int nr_ingress_mappings;
+	u32 ingress_priority_map[8];
+
+	unsigned int nr_egress_mappings;
 	struct vlan_priority_tci_mapping *egress_priority_map[16]; /* hash table */
 
 	unsigned short vlan_id;        /*  The VLAN Identifier for this interface. */
@@ -105,14 +127,8 @@ struct vlan_dev_info {
                                         *   like DHCP that use packet-filtering and don't understand
                                         *   802.1Q
                                         */
-	struct dev_mc_list *old_mc_list;  /* old multi-cast list for the VLAN interface..
-                                           * we save this so we can tell what changes were
-                                           * made, in order to feed the right changes down
-                                           * to the real hardware...
-                                           */
-	int old_allmulti;               /* similar to above. */
-	int old_promiscuity;            /* similar to above. */
 	struct net_device *real_dev;    /* the underlying device/interface */
+	unsigned char real_dev_addr[ETH_ALEN];
 	struct proc_dir_entry *dent;    /* Holds the proc data */
 	unsigned long cnt_inc_headroom_on_tx; /* How many times did we have to grow the skb on TX. */
 	unsigned long cnt_encap_on_xmit;      /* How many times did we have to encapsulate the skb on TX. */
@@ -155,8 +171,12 @@ static inline int __vlan_hwaccel_rx(struct sk_buff *skb,
 {
 	struct net_device_stats *stats;
 
-	skb->real_dev = skb->dev;
-	skb->dev = grp->vlan_devices[vlan_tag & VLAN_VID_MASK];
+	if (skb_bond_should_drop(skb)) {
+		dev_kfree_skb_any(skb);
+		return NET_RX_DROP;
+	}
+
+	skb->dev = vlan_group_get_device(grp, vlan_tag & VLAN_VID_MASK);
 	if (skb->dev == NULL) {
 		dev_kfree_skb_any(skb);
 
@@ -186,7 +206,8 @@ static inline int __vlan_hwaccel_rx(struct sk_buff *skb,
 		 * This allows the VLAN to have a different MAC than the underlying
 		 * device, and still route correctly.
 		 */
-		if (!memcmp(eth_hdr(skb)->h_dest, skb->dev->dev_addr, ETH_ALEN))
+		if (!compare_ether_addr(eth_hdr(skb)->h_dest,
+				       	skb->dev->dev_addr))
 			skb->pkt_type = PACKET_HOST;
 		break;
 	};
@@ -251,8 +272,8 @@ static inline struct sk_buff *__vlan_put_tag(struct sk_buff *skb, unsigned short
 	veth->h_vlan_TCI = htons(tag);
 
 	skb->protocol = __constant_htons(ETH_P_8021Q);
-	skb->mac.raw -= VLAN_HLEN;
-	skb->nh.raw -= VLAN_HLEN;
+	skb->mac_header -= VLAN_HLEN;
+	skb->network_header -= VLAN_HLEN;
 
 	return skb;
 }
@@ -369,6 +390,10 @@ enum vlan_ioctl_cmds {
 	SET_VLAN_FLAG_CMD,
 	GET_VLAN_REALDEV_NAME_CMD, /* If this works, you know it's a VLAN device, btw */
 	GET_VLAN_VID_CMD /* Get the VID of this VLAN (specified by name) */
+};
+
+enum vlan_flags {
+	VLAN_FLAG_REORDER_HDR	= 0x1,
 };
 
 enum vlan_name_types {

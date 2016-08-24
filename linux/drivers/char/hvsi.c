@@ -39,7 +39,6 @@
 #include <linux/module.h>
 #include <linux/major.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/sysrq.h>
 #include <linux/tty.h>
@@ -69,7 +68,7 @@
 #define __ALIGNED__	__attribute__((__aligned__(sizeof(long))))
 
 struct hvsi_struct {
-	struct work_struct writer;
+	struct delayed_work writer;
 	struct work_struct handshaker;
 	wait_queue_head_t emptyq; /* woken when outbuf is emptied */
 	wait_queue_head_t stateq; /* woken when HVSI state changes */
@@ -197,7 +196,7 @@ static inline void print_state(struct hvsi_struct *hp)
 	};
 	const char *name = state_names[hp->state];
 
-	if (hp->state > (sizeof(state_names)/sizeof(char*)))
+	if (hp->state > ARRAY_SIZE(state_names))
 		name = "UNKNOWN";
 
 	pr_debug("hvsi%i: state = %s\n", hp->index, name);
@@ -291,15 +290,13 @@ static void dump_packet(uint8_t *packet)
 	dump_hex(packet, header->len);
 }
 
-/* can't use hvc_get_chars because that strips CRs */
 static int hvsi_read(struct hvsi_struct *hp, char *buf, int count)
 {
 	unsigned long got;
 
-	if (plpar_hcall(H_GET_TERM_CHAR, hp->vtermno, 0, 0, 0, &got,
-			(unsigned long *)buf, (unsigned long *)buf+1) == H_Success)
-		return got;
-	return 0;
+	got = hvc_get_chars(hp->vtermno, buf, count);
+
+	return got;
 }
 
 static void hvsi_recv_control(struct hvsi_struct *hp, uint8_t *packet,
@@ -313,7 +310,8 @@ static void hvsi_recv_control(struct hvsi_struct *hp, uint8_t *packet,
 				/* CD went away; no more connection */
 				pr_debug("hvsi%i: CD dropped\n", hp->index);
 				hp->mctrl &= TIOCM_CD;
-				if (!(hp->tty->flags & CLOCAL))
+				/* If userland hasn't done an open(2) yet, hp->tty is NULL. */
+				if (hp->tty && !(hp->tty->flags & CLOCAL))
 					*to_hangup = hp->tty;
 			}
 			break;
@@ -407,7 +405,7 @@ static void hvsi_insert_chars(struct hvsi_struct *hp, const char *buf, int len)
 			hp->sysrq = 1;
 			continue;
 		} else if (hp->sysrq) {
-			handle_sysrq(c, NULL, hp->tty);
+			handle_sysrq(c, hp->tty);
 			hp->sysrq = 0;
 			continue;
 		}
@@ -556,7 +554,7 @@ static void hvsi_send_overflow(struct hvsi_struct *hp)
  * must get all pending data because we only get an irq on empty->non-empty
  * transition
  */
-static irqreturn_t hvsi_interrupt(int irq, void *arg, struct pt_regs *regs)
+static irqreturn_t hvsi_interrupt(int irq, void *arg)
 {
 	struct hvsi_struct *hp = (struct hvsi_struct *)arg;
 	struct tty_struct *flip;
@@ -617,7 +615,7 @@ static int __init poll_for_state(struct hvsi_struct *hp, int state)
 	unsigned long end_jiffies = jiffies + HVSI_TIMEOUT;
 
 	for (;;) {
-		hvsi_interrupt(hp->virq, (void *)hp, NULL); /* get pending data */
+		hvsi_interrupt(hp->virq, (void *)hp); /* get pending data */
 
 		if (hp->state == state)
 			return 0;
@@ -631,27 +629,10 @@ static int __init poll_for_state(struct hvsi_struct *hp, int state)
 /* wait for irq handler to change our state */
 static int wait_for_state(struct hvsi_struct *hp, int state)
 {
-	unsigned long end_jiffies = jiffies + HVSI_TIMEOUT;
-	unsigned long timeout;
 	int ret = 0;
 
-	DECLARE_WAITQUEUE(myself, current);
-	set_current_state(TASK_INTERRUPTIBLE);
-	add_wait_queue(&hp->stateq, &myself);
-
-	for (;;) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		if (hp->state == state)
-			break;
-		timeout = end_jiffies - jiffies;
-		if (time_after(jiffies, end_jiffies)) {
-			ret = -EIO;
-			break;
-		}
-		schedule_timeout(timeout);
-	}
-	remove_wait_queue(&hp->stateq, &myself);
-	set_current_state(TASK_RUNNING);
+	if (!wait_event_timeout(hp->stateq, (hp->state == state), HVSI_TIMEOUT))
+		ret = -EIO;
 
 	return ret;
 }
@@ -762,9 +743,10 @@ static int hvsi_handshake(struct hvsi_struct *hp)
 	return 0;
 }
 
-static void hvsi_handshaker(void *arg)
+static void hvsi_handshaker(struct work_struct *work)
 {
-	struct hvsi_struct *hp = (struct hvsi_struct *)arg;
+	struct hvsi_struct *hp =
+		container_of(work, struct hvsi_struct, handshaker);
 
 	if (hvsi_handshake(hp) >= 0)
 		return;
@@ -868,24 +850,7 @@ static int hvsi_open(struct tty_struct *tty, struct file *filp)
 /* wait for hvsi_write_worker to empty hp->outbuf */
 static void hvsi_flush_output(struct hvsi_struct *hp)
 {
-	unsigned long end_jiffies = jiffies + HVSI_TIMEOUT;
-	unsigned long timeout;
-
-	DECLARE_WAITQUEUE(myself, current);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	add_wait_queue(&hp->emptyq, &myself);
-
-	for (;;) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		if (hp->n_outbuf <= 0)
-			break;
-		timeout = end_jiffies - jiffies;
-		if (time_after(jiffies, end_jiffies))
-			break;
-		schedule_timeout(timeout);
-	}
-	remove_wait_queue(&hp->emptyq, &myself);
-	set_current_state(TASK_RUNNING);
+	wait_event_timeout(hp->emptyq, (hp->n_outbuf <= 0), HVSI_TIMEOUT);
 
 	/* 'writer' could still be pending if it didn't see n_outbuf = 0 yet */
 	cancel_delayed_work(&hp->writer);
@@ -986,9 +951,10 @@ static void hvsi_push(struct hvsi_struct *hp)
 }
 
 /* hvsi_write_worker will keep rescheduling itself until outbuf is empty */
-static void hvsi_write_worker(void *arg)
+static void hvsi_write_worker(struct work_struct *work)
 {
-	struct hvsi_struct *hp = (struct hvsi_struct *)arg;
+	struct hvsi_struct *hp =
+		container_of(work, struct hvsi_struct, writer.work);
 	unsigned long flags;
 #ifdef DEBUG
 	static long start_j = 0;
@@ -1022,10 +988,7 @@ static void hvsi_write_worker(void *arg)
 		start_j = 0;
 #endif /* DEBUG */
 		wake_up_all(&hp->emptyq);
-		if (test_bit(TTY_DO_WRITE_WAKEUP, &hp->tty->flags)
-				&& hp->tty->ldisc.write_wakeup)
-			hp->tty->ldisc.write_wakeup(hp->tty);
-		wake_up_interruptible(&hp->tty->write_wait);
+		tty_wakeup(hp->tty);
 	}
 
 out:
@@ -1168,7 +1131,7 @@ static int hvsi_tiocmset(struct tty_struct *tty, struct file *file,
 }
 
 
-static struct tty_operations hvsi_ops = {
+static const struct tty_operations hvsi_ops = {
 	.open = hvsi_open,
 	.close = hvsi_close,
 	.write = hvsi_write,
@@ -1190,7 +1153,6 @@ static int __init hvsi_init(void)
 		return -ENOMEM;
 
 	hvsi_driver->owner = THIS_MODULE;
-	hvsi_driver->devfs_name = "hvsi/";
 	hvsi_driver->driver_name = "hvsi";
 	hvsi_driver->name = "hvsi";
 	hvsi_driver->major = HVSI_MAJOR;
@@ -1198,6 +1160,8 @@ static int __init hvsi_init(void)
 	hvsi_driver->type = TTY_DRIVER_TYPE_SYSTEM;
 	hvsi_driver->init_termios = tty_std_termios;
 	hvsi_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL;
+	hvsi_driver->init_termios.c_ispeed = 9600;
+	hvsi_driver->init_termios.c_ospeed = 9600;
 	hvsi_driver->flags = TTY_DRIVER_REAL_RAW;
 	tty_set_operations(hvsi_driver, &hvsi_ops);
 
@@ -1205,7 +1169,7 @@ static int __init hvsi_init(void)
 		struct hvsi_struct *hp = &hvsi_ports[i];
 		int ret = 1;
 
-		ret = request_irq(hp->virq, hvsi_interrupt, SA_INTERRUPT, "hvsi", hp);
+		ret = request_irq(hp->virq, hvsi_interrupt, IRQF_DISABLED, "hvsi", hp);
 		if (ret)
 			printk(KERN_ERR "HVSI: couldn't reserve irq 0x%x (error %i)\n",
 				hp->virq, ret);
@@ -1215,7 +1179,7 @@ static int __init hvsi_init(void)
 	if (tty_register_driver(hvsi_driver))
 		panic("Couldn't register hvsi console driver\n");
 
-	printk(KERN_INFO "HVSI: registered %i devices\n", hvsi_count);
+	printk(KERN_DEBUG "HVSI: registered %i devices\n", hvsi_count);
 
 	return 0;
 }
@@ -1313,11 +1277,10 @@ static int __init hvsi_console_init(void)
 			vty != NULL;
 			vty = of_find_compatible_node(vty, "serial", "hvterm-protocol")) {
 		struct hvsi_struct *hp;
-		uint32_t *vtermno;
-		uint32_t *irq;
+		const uint32_t *vtermno, *irq;
 
-		vtermno = (uint32_t *)get_property(vty, "reg", NULL);
-		irq = (uint32_t *)get_property(vty, "interrupts", NULL);
+		vtermno = of_get_property(vty, "reg", NULL);
+		irq = of_get_property(vty, "interrupts", NULL);
 		if (!vtermno || !irq)
 			continue;
 
@@ -1327,8 +1290,8 @@ static int __init hvsi_console_init(void)
 		}
 
 		hp = &hvsi_ports[hvsi_count];
-		INIT_WORK(&hp->writer, hvsi_write_worker, hp);
-		INIT_WORK(&hp->handshaker, hvsi_handshaker, hp);
+		INIT_DELAYED_WORK(&hp->writer, hvsi_write_worker);
+		INIT_WORK(&hp->handshaker, hvsi_handshaker);
 		init_waitqueue_head(&hp->emptyq);
 		init_waitqueue_head(&hp->stateq);
 		spin_lock_init(&hp->lock);
@@ -1336,13 +1299,12 @@ static int __init hvsi_console_init(void)
 		hp->inbuf_end = hp->inbuf;
 		hp->state = HVSI_CLOSED;
 		hp->vtermno = *vtermno;
-		hp->virq = virt_irq_create_mapping(irq[0]);
+		hp->virq = irq_create_mapping(NULL, irq[0]);
 		if (hp->virq == NO_IRQ) {
 			printk(KERN_ERR "%s: couldn't create irq mapping for 0x%x\n",
-				__FUNCTION__, hp->virq);
+				__FUNCTION__, irq[0]);
 			continue;
-		} else
-			hp->virq = irq_offset_up(hp->virq);
+		}
 
 		hvsi_count++;
 	}

@@ -1,4 +1,5 @@
 /*
+ *
  *	Video for Linux Two
  *	Backward Compatibility Layer
  *
@@ -10,23 +11,17 @@
  *	as published by the Free Software Foundation; either version
  *	2 of the License, or (at your option) any later version.
  *
- * Author:	Bill Dirks <bdirks@pacbell.net>
+ * Author:	Bill Dirks <bill@thedirks.org>
  *		et al.
  *
  */
 
-#ifndef __KERNEL__
-#define __KERNEL__
-#endif
-
-#include <linux/config.h>
 
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/smp_lock.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -34,6 +29,7 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/videodev.h>
+#include <media/v4l2-common.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -130,7 +126,7 @@ set_v4l_control(struct inode            *inode,
 
 /* ----------------------------------------------------------------- */
 
-static int palette2pixelformat[] = {
+const static unsigned int palette2pixelformat[] = {
 	[VIDEO_PALETTE_GREY]    = V4L2_PIX_FMT_GREY,
 	[VIDEO_PALETTE_RGB555]  = V4L2_PIX_FMT_RGB555,
 	[VIDEO_PALETTE_RGB565]  = V4L2_PIX_FMT_RGB565,
@@ -148,7 +144,7 @@ static int palette2pixelformat[] = {
 	[VIDEO_PALETTE_YUV422P] = V4L2_PIX_FMT_YUV422P,
 };
 
-static unsigned int
+static unsigned int __pure
 palette_to_pixelformat(unsigned int palette)
 {
 	if (palette < ARRAY_SIZE(palette2pixelformat))
@@ -157,8 +153,8 @@ palette_to_pixelformat(unsigned int palette)
 		return 0;
 }
 
-static unsigned int
-pixelformat_to_palette(int pixelformat)
+static unsigned int __attribute_const__
+pixelformat_to_palette(unsigned int pixelformat)
 {
 	int	palette = 0;
 	switch (pixelformat)
@@ -307,9 +303,8 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	{
 		struct video_capability *cap = arg;
 
-		cap2 = kmalloc(sizeof(*cap2),GFP_KERNEL);
+		cap2 = kzalloc(sizeof(*cap2),GFP_KERNEL);
 		memset(cap, 0, sizeof(*cap));
-		memset(cap2, 0, sizeof(*cap2));
 		memset(&fbuf2, 0, sizeof(fbuf2));
 
 		err = drv(inode, file, VIDIOC_QUERYCAP, cap2);
@@ -352,6 +347,9 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	{
 		struct video_buffer	*buffer = arg;
 
+		memset(buffer, 0, sizeof(*buffer));
+		memset(&fbuf2, 0, sizeof(fbuf2));
+
 		err = drv(inode, file, VIDIOC_G_FBUF, &fbuf2);
 		if (err < 0) {
 			dprintk("VIDIOCGFBUF / VIDIOC_G_FBUF: %d\n",err);
@@ -364,7 +362,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		switch (fbuf2.fmt.pixelformat) {
 		case V4L2_PIX_FMT_RGB332:
 			buffer->depth = 8;
-				break;
+			break;
 		case V4L2_PIX_FMT_RGB555:
 			buffer->depth = 15;
 			break;
@@ -380,9 +378,13 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		default:
 			buffer->depth = 0;
 		}
-		if (0 != fbuf2.fmt.bytesperline)
+		if (fbuf2.fmt.bytesperline) {
 			buffer->bytesperline = fbuf2.fmt.bytesperline;
-		else {
+			if (!buffer->depth && buffer->width)
+				buffer->depth   = ((fbuf2.fmt.bytesperline<<3)
+						  + (buffer->width-1) )
+						  /buffer->width;
+		} else {
 			buffer->bytesperline =
 				(buffer->width * buffer->depth + 7) & 7;
 			buffer->bytesperline >>= 3;
@@ -424,9 +426,8 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	{
 		struct video_window	*win = arg;
 
-		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
+		fmt2 = kzalloc(sizeof(*fmt2),GFP_KERNEL);
 		memset(win,0,sizeof(*win));
-		memset(fmt2,0,sizeof(*fmt2));
 
 		fmt2->type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
@@ -463,8 +464,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		struct video_window	*win = arg;
 		int err1,err2;
 
-		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
-		memset(fmt2,0,sizeof(*fmt2));
+		fmt2 = kzalloc(sizeof(*fmt2),GFP_KERNEL);
 		fmt2->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		drv(inode, file, VIDIOC_STREAMOFF, &fmt2->type);
 		err1 = drv(inode, file, VIDIOC_G_FMT, fmt2);
@@ -597,17 +597,17 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		pict->whiteness = get_v4l_control(inode, file,
 						  V4L2_CID_WHITENESS, drv);
 
-		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
-		memset(fmt2,0,sizeof(*fmt2));
+		fmt2 = kzalloc(sizeof(*fmt2),GFP_KERNEL);
 		fmt2->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
 		if (err < 0) {
 			dprintk("VIDIOCGPICT / VIDIOC_G_FMT: %d\n",err);
 			break;
 		}
-#if 0 /* FIXME */
-		pict->depth   = fmt2->fmt.pix.depth;
-#endif
+
+		pict->depth   = ((fmt2->fmt.pix.bytesperline<<3)
+				 + (fmt2->fmt.pix.width-1) )
+				 /fmt2->fmt.pix.width;
 		pict->palette = pixelformat_to_palette(
 			fmt2->fmt.pix.pixelformat);
 		break;
@@ -615,6 +615,9 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	case VIDIOCSPICT: /*  set tone controls & partial capture format  */
 	{
 		struct video_picture	*pict = arg;
+		int mem_err = 0, ovl_err = 0;
+
+		memset(&fbuf2, 0, sizeof(fbuf2));
 
 		set_v4l_control(inode, file,
 				V4L2_CID_BRIGHTNESS, pict->brightness, drv);
@@ -626,34 +629,59 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 				V4L2_CID_SATURATION, pict->colour, drv);
 		set_v4l_control(inode, file,
 				V4L2_CID_WHITENESS, pict->whiteness, drv);
+		/*
+		 * V4L1 uses this ioctl to set both memory capture and overlay
+		 * pixel format, while V4L2 has two different ioctls for this.
+		 * Some cards may not support one or the other, and may support
+		 * different pixel formats for memory vs overlay.
+		 */
 
-		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
-		memset(fmt2,0,sizeof(*fmt2));
+		fmt2 = kzalloc(sizeof(*fmt2),GFP_KERNEL);
 		fmt2->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
-		if (err < 0)
+		/* If VIDIOC_G_FMT failed, then the driver likely doesn't
+		   support memory capture.  Trying to set the memory capture
+		   parameters would be pointless.  */
+		if (err < 0) {
 			dprintk("VIDIOCSPICT / VIDIOC_G_FMT: %d\n",err);
-		if (fmt2->fmt.pix.pixelformat !=
-		    palette_to_pixelformat(pict->palette)) {
+			mem_err = -1000;  /* didn't even try */
+		} else if (fmt2->fmt.pix.pixelformat !=
+			 palette_to_pixelformat(pict->palette)) {
 			fmt2->fmt.pix.pixelformat = palette_to_pixelformat(
 				pict->palette);
-			err = drv(inode, file, VIDIOC_S_FMT, fmt2);
-			if (err < 0)
-				dprintk("VIDIOCSPICT / VIDIOC_S_FMT: %d\n",err);
+			mem_err = drv(inode, file, VIDIOC_S_FMT, fmt2);
+			if (mem_err < 0)
+				dprintk("VIDIOCSPICT / VIDIOC_S_FMT: %d\n",
+					mem_err);
 		}
 
 		err = drv(inode, file, VIDIOC_G_FBUF, &fbuf2);
-		if (err < 0)
+		/* If VIDIOC_G_FBUF failed, then the driver likely doesn't
+		   support overlay.  Trying to set the overlay parameters
+		   would be quite pointless.  */
+		if (err < 0) {
 			dprintk("VIDIOCSPICT / VIDIOC_G_FBUF: %d\n",err);
-		if (fbuf2.fmt.pixelformat !=
-		    palette_to_pixelformat(pict->palette)) {
+			ovl_err = -1000;  /* didn't even try */
+		} else if (fbuf2.fmt.pixelformat !=
+			 palette_to_pixelformat(pict->palette)) {
 			fbuf2.fmt.pixelformat = palette_to_pixelformat(
 				pict->palette);
-			err = drv(inode, file, VIDIOC_S_FBUF, &fbuf2);
-			if (err < 0)
-				dprintk("VIDIOCSPICT / VIDIOC_S_FBUF: %d\n",err);
-			err = 0; /* likely fails for non-root */
+			ovl_err = drv(inode, file, VIDIOC_S_FBUF, &fbuf2);
+			if (ovl_err < 0)
+				dprintk("VIDIOCSPICT / VIDIOC_S_FBUF: %d\n",
+					ovl_err);
 		}
+		if (ovl_err < 0 && mem_err < 0)
+			/* ioctl failed, couldn't set either parameter */
+			if (mem_err != -1000) {
+			    err = mem_err;
+			} else if (ovl_err == -EPERM) {
+			    err = 0;
+			} else {
+			    err = ovl_err;
+			}
+		else
+			err = 0;
 		break;
 	}
 	case VIDIOCGTUNER: /*  get tuner information  */
@@ -708,18 +736,22 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	}
 	case VIDIOCSTUNER: /*  select a tuner input  */
 	{
-#if 0 /* FIXME */
-		err = drv(inode, file, VIDIOC_S_INPUT, &i);
+		struct video_tuner	*tun = arg;
+		struct v4l2_tuner	t;
+		memset(&t,0,sizeof(t));
+
+		t.index=tun->tuner;
+
+		err = drv(inode, file, VIDIOC_S_INPUT, &t);
 		if (err < 0)
 			dprintk("VIDIOCSTUNER / VIDIOC_S_INPUT: %d\n",err);
-#else
-		err = 0;
-#endif
+
 		break;
 	}
 	case VIDIOCGFREQ: /*  get frequency  */
 	{
-		int *freq = arg;
+		unsigned long *freq = arg;
+		memset(&freq2,0,sizeof(freq2));
 
 		freq2.tuner = 0;
 		err = drv(inode, file, VIDIOC_G_FREQUENCY, &freq2);
@@ -731,9 +763,9 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	}
 	case VIDIOCSFREQ: /*  set frequency  */
 	{
-		int *freq = arg;
+		unsigned long *freq = arg;
+		memset(&freq2,0,sizeof(freq2));
 
-		freq2.tuner = 0;
 		drv(inode, file, VIDIOC_G_FREQUENCY, &freq2);
 		freq2.frequency = *freq;
 		err = drv(inode, file, VIDIOC_S_FREQUENCY, &freq2);
@@ -744,6 +776,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	case VIDIOCGAUDIO: /*  get audio properties/controls  */
 	{
 		struct video_audio	*aud = arg;
+		memset(&aud2,0,sizeof(aud2));
 
 		err = drv(inode, file, VIDIOC_G_AUDIO, &aud2);
 		if (err < 0) {
@@ -787,12 +820,15 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		    !(qctrl2.flags & V4L2_CTRL_FLAG_DISABLED))
 			aud->step = qctrl2.step;
 		aud->mode = 0;
+
+		memset(&tun2,0,sizeof(tun2));
 		err = drv(inode, file, VIDIOC_G_TUNER, &tun2);
 		if (err < 0) {
 			dprintk("VIDIOCGAUDIO / VIDIOC_G_TUNER: %d\n",err);
 			err = 0;
 			break;
 		}
+
 		if (tun2.rxsubchans & V4L2_TUNER_SUB_LANG2)
 			aud->mode = VIDEO_SOUND_LANG1 | VIDEO_SOUND_LANG2;
 		else if (tun2.rxsubchans & V4L2_TUNER_SUB_STEREO)
@@ -850,19 +886,12 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		err = 0;
 		break;
 	}
-#if 0
-	case VIDIOCGMBUF:
-		/* v4l2 drivers must implement that themself.  The
-		   mmap() differences can't be translated fully
-		   transparent, thus there is no point to try that */
-#endif
 	case VIDIOCMCAPTURE: /*  capture a frame  */
 	{
 		struct video_mmap	*mm = arg;
 
-		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
+		fmt2 = kzalloc(sizeof(*fmt2),GFP_KERNEL);
 		memset(&buf2,0,sizeof(buf2));
-		memset(fmt2,0,sizeof(*fmt2));
 
 		fmt2->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
@@ -908,6 +937,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	{
 		int			*i = arg;
 
+		memset(&buf2,0,sizeof(buf2));
 		buf2.index = *i;
 		buf2.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		err = drv(inode, file, VIDIOC_QUERYBUF, &buf2);
@@ -956,13 +986,16 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	{
 		struct vbi_format      *fmt = arg;
 
-		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
-		memset(fmt2, 0, sizeof(*fmt2));
+		fmt2 = kzalloc(sizeof(*fmt2),GFP_KERNEL);
 		fmt2->type = V4L2_BUF_TYPE_VBI_CAPTURE;
 
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
 		if (err < 0) {
 			dprintk("VIDIOCGVBIFMT / VIDIOC_G_FMT: %d\n", err);
+			break;
+		}
+		if (fmt2->fmt.vbi.sample_format != V4L2_PIX_FMT_GREY) {
+			err = -EINVAL;
 			break;
 		}
 		memset(fmt, 0, sizeof(*fmt));
@@ -974,14 +1007,18 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		fmt->start[1]         = fmt2->fmt.vbi.start[1];
 		fmt->count[1]         = fmt2->fmt.vbi.count[1];
 		fmt->flags            = fmt2->fmt.vbi.flags & 0x03;
-                break;
+		break;
 	}
 	case VIDIOCSVBIFMT:
 	{
 		struct vbi_format      *fmt = arg;
 
-		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
-		memset(fmt2, 0, sizeof(*fmt2));
+		if (VIDEO_PALETTE_RAW != fmt->sample_format) {
+			err = -EINVAL;
+			break;
+		}
+
+		fmt2 = kzalloc(sizeof(*fmt2),GFP_KERNEL);
 
 		fmt2->type = V4L2_BUF_TYPE_VBI_CAPTURE;
 		fmt2->fmt.vbi.samples_per_line = fmt->samples_per_line;
@@ -1000,7 +1037,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 
 		if (fmt2->fmt.vbi.samples_per_line != fmt->samples_per_line ||
 		    fmt2->fmt.vbi.sampling_rate    != fmt->sampling_rate    ||
-		    VIDEO_PALETTE_RAW              != fmt->sample_format    ||
+		    fmt2->fmt.vbi.sample_format    != V4L2_PIX_FMT_GREY     ||
 		    fmt2->fmt.vbi.start[0]         != fmt->start[0]         ||
 		    fmt2->fmt.vbi.count[0]         != fmt->count[0]         ||
 		    fmt2->fmt.vbi.start[1]         != fmt->start[1]         ||
@@ -1020,10 +1057,8 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		break;
 	}
 
-	if (cap2)
-		kfree(cap2);
-	if (fmt2)
-		kfree(fmt2);
+	kfree(cap2);
+	kfree(fmt2);
 	return err;
 }
 

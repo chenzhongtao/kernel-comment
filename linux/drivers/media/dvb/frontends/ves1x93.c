@@ -1,4 +1,4 @@
-/* 
+/*
     Driver for VES1893 and VES1993 QPSK Demodulators
 
     Copyright (C) 1999 Convergence Integrated Media GmbH <ralph@convergence.de>
@@ -21,7 +21,7 @@
     along with this program; if not, write to the Free Software
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
-*/    
+*/
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -35,14 +35,9 @@
 
 
 struct ves1x93_state {
-
 	struct i2c_adapter* i2c;
-
-	struct dvb_frontend_ops ops;
-
 	/* configuration settings */
 	const struct ves1x93_config* config;
-
 	struct dvb_frontend frontend;
 
 	/* previous uncorrected block counter */
@@ -69,7 +64,6 @@ static u8 init_1893_tab [] = {
 	0x00, 0x55, 0x00, 0x00, 0x7f, 0x00
 };
 
-
 static u8 init_1993_tab [] = {
 	0x00, 0x9c, 0x35, 0x80, 0x6a, 0x09, 0x72, 0x8c,
 	0x09, 0x6b, 0x00, 0x00, 0x4c, 0x08, 0x00, 0x00,
@@ -83,12 +77,11 @@ static u8 init_1993_tab [] = {
 
 static u8 init_1893_wtab[] =
 {
-        1,1,1,1,1,1,1,1, 1,1,0,0,1,1,0,0,
-        0,1,0,0,0,0,0,0, 1,0,1,1,0,0,0,1,
-        1,1,1,0,0,0,0,0, 0,0,1,1,0,0,0,0,
-        1,1,1,0,1,1
+	1,1,1,1,1,1,1,1, 1,1,0,0,1,1,0,0,
+	0,1,0,0,0,0,0,0, 1,0,1,1,0,0,0,1,
+	1,1,1,0,0,0,0,0, 0,0,1,1,0,0,0,0,
+	1,1,1,0,1,1
 };
-
 
 static u8 init_1993_wtab[] =
 {
@@ -100,7 +93,7 @@ static u8 init_1993_wtab[] =
 
 static int ves1x93_writereg (struct ves1x93_state* state, u8 reg, u8 data)
 {
-        u8 buf [] = { 0x00, reg, data };
+	u8 buf [] = { 0x00, reg, data };
 	struct i2c_msg msg = { .addr = state->config->demod_address, .flags = 0, .buf = buf, .len = 3 };
 	int err;
 
@@ -109,9 +102,8 @@ static int ves1x93_writereg (struct ves1x93_state* state, u8 reg, u8 data)
 		return -EREMOTEIO;
 	}
 
-        return 0;
+	return 0;
 }
-
 
 static u8 ves1x93_readreg (struct ves1x93_state* state, u8 reg)
 {
@@ -163,7 +155,6 @@ static int ves1x93_set_inversion (struct ves1x93_state* state, fe_spectral_inver
 	return ves1x93_writereg (state, 0x0c, (state->init_1x93_tab[0x0c] & 0x3f) | val);
 }
 
-
 static int ves1x93_set_fec (struct ves1x93_state* state, fe_code_rate_t fec)
 {
 	if (fec == FEC_AUTO)
@@ -174,18 +165,16 @@ static int ves1x93_set_fec (struct ves1x93_state* state, fe_code_rate_t fec)
 		return ves1x93_writereg (state, 0x0d, fec - FEC_1_2);
 }
 
-
 static fe_code_rate_t ves1x93_get_fec (struct ves1x93_state* state)
 {
 	return FEC_1_2 + ((ves1x93_readreg (state, 0x0d) >> 4) & 0x7);
 }
 
-
 static int ves1x93_set_symbolrate (struct ves1x93_state* state, u32 srate)
 {
 	u32 BDR;
-        u32 ratio;
-	u8  ADCONF, FCONF, FNR;
+	u32 ratio;
+	u8  ADCONF, FCONF, FNR, AGCR;
 	u32 BDRI;
 	u32 tmp;
 	u32 FIN;
@@ -213,15 +202,15 @@ static int ves1x93_set_symbolrate (struct ves1x93_state* state, u32 srate)
 
 	FNR = 0xff;
 
-	if (ratio < MUL/3)           FNR = 0;
+	if (ratio < MUL/3)	     FNR = 0;
 	if (ratio < (MUL*11)/50)     FNR = 1;
-	if (ratio < MUL/6)           FNR = 2;
-	if (ratio < MUL/9)           FNR = 3;
-	if (ratio < MUL/12)          FNR = 4;
+	if (ratio < MUL/6)	     FNR = 2;
+	if (ratio < MUL/9)	     FNR = 3;
+	if (ratio < MUL/12)	     FNR = 4;
 	if (ratio < (MUL*11)/200)    FNR = 5;
-	if (ratio < MUL/24)          FNR = 6;
+	if (ratio < MUL/24)	     FNR = 6;
 	if (ratio < (MUL*27)/1000)   FNR = 7;
-	if (ratio < MUL/48)          FNR = 8;
+	if (ratio < MUL/48)	     FNR = 8;
 	if (ratio < (MUL*137)/10000) FNR = 9;
 
 	if (FNR == 0xff) {
@@ -231,16 +220,16 @@ static int ves1x93_set_symbolrate (struct ves1x93_state* state, u32 srate)
 	} else {
 		ADCONF = 0x81;
 		FCONF  = 0x88 | (FNR >> 1) | ((FNR & 0x01) << 5);
-		/*FCONF  = 0x80 | ((FNR & 0x01) << 5) | (((FNR > 1) & 0x03) << 3) | ((FNR >> 1) & 0x07);*/
+		/*FCONF	 = 0x80 | ((FNR & 0x01) << 5) | (((FNR > 1) & 0x03) << 3) | ((FNR >> 1) & 0x07);*/
 	}
 
 	BDR = (( (ratio << (FNR >> 1)) >> 4) + 1) >> 1;
 	BDRI = ( ((FIN << 8) / ((srate << (FNR >> 1)) >> 2)) + 1) >> 1;
 
-        dprintk("FNR= %d\n", FNR);
-        dprintk("ratio= %08x\n", (unsigned int) ratio);
-        dprintk("BDR= %08x\n", (unsigned int) BDR);
-        dprintk("BDRI= %02x\n", (unsigned int) BDRI);
+	dprintk("FNR= %d\n", FNR);
+	dprintk("ratio= %08x\n", (unsigned int) ratio);
+	dprintk("BDR= %08x\n", (unsigned int) BDR);
+	dprintk("BDRI= %02x\n", (unsigned int) BDRI);
 
 	if (BDRI > 0xff)
 		BDRI = 0xff;
@@ -253,10 +242,16 @@ static int ves1x93_set_symbolrate (struct ves1x93_state* state, u32 srate)
 	ves1x93_writereg (state, 0x20, ADCONF);
 	ves1x93_writereg (state, 0x21, FCONF);
 
-	if (srate < 6000000) 
-		ves1x93_writereg (state, 0x05, state->init_1x93_tab[0x05] | 0x80);
+	AGCR = state->init_1x93_tab[0x05];
+	if (state->config->invert_pwm)
+		AGCR |= 0x20;
+
+	if (srate < 6000000)
+		AGCR |= 0x80;
 	else
-		ves1x93_writereg (state, 0x05, state->init_1x93_tab[0x05] & 0x7f);
+		AGCR &= ~0x80;
+
+	ves1x93_writereg (state, 0x05, AGCR);
 
 	/* ves1993 hates this, will lose lock */
 	if (state->demod_type != DEMOD_VES1993)
@@ -265,23 +260,9 @@ static int ves1x93_set_symbolrate (struct ves1x93_state* state, u32 srate)
 	return 0;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 static int ves1x93_init (struct dvb_frontend* fe)
 {
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+	struct ves1x93_state* state = fe->demodulator_priv;
 	int i;
 	int val;
 
@@ -296,18 +277,12 @@ static int ves1x93_init (struct dvb_frontend* fe)
 		}
 	}
 
-	if (state->config->pll_init) {
-		ves1x93_writereg(state, 0x00, 0x11);
-		state->config->pll_init(fe);
-		ves1x93_writereg(state, 0x00, 0x01);
-	}
-
 	return 0;
 }
 
 static int ves1x93_set_voltage (struct dvb_frontend* fe, fe_sec_voltage_t voltage)
 {
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+	struct ves1x93_state* state = fe->demodulator_priv;
 
 	switch (voltage) {
 	case SEC_VOLTAGE_13:
@@ -323,84 +298,83 @@ static int ves1x93_set_voltage (struct dvb_frontend* fe, fe_sec_voltage_t voltag
 
 static int ves1x93_read_status(struct dvb_frontend* fe, fe_status_t* status)
 {
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+	struct ves1x93_state* state = fe->demodulator_priv;
 
 	u8 sync = ves1x93_readreg (state, 0x0e);
 
-		/*
-		 * The ves1893 sometimes returns sync values that make no sense,
-		 * because, e.g., the SIGNAL bit is 0, while some of the higher
-		 * bits are 1 (and how can there be a CARRIER w/o a SIGNAL?).
-		 * Tests showed that the the VITERBI and SYNC bits are returned
-		 * reliably, while the SIGNAL and CARRIER bits ar sometimes wrong.
-		 * If such a case occurs, we read the value again, until we get a
-		 * valid value.
-		 */
-		int maxtry = 10; /* just for safety - let's not get stuck here */
-		while ((sync & 0x03) != 0x03 && (sync & 0x0c) && maxtry--) {
-			msleep(10);
+	/*
+	 * The ves1893 sometimes returns sync values that make no sense,
+	 * because, e.g., the SIGNAL bit is 0, while some of the higher
+	 * bits are 1 (and how can there be a CARRIER w/o a SIGNAL?).
+	 * Tests showed that the VITERBI and SYNC bits are returned
+	 * reliably, while the SIGNAL and CARRIER bits ar sometimes wrong.
+	 * If such a case occurs, we read the value again, until we get a
+	 * valid value.
+	 */
+	int maxtry = 10; /* just for safety - let's not get stuck here */
+	while ((sync & 0x03) != 0x03 && (sync & 0x0c) && maxtry--) {
+		msleep(10);
 		sync = ves1x93_readreg (state, 0x0e);
-		}
-
-		*status = 0;
-
-		if (sync & 1)
-			*status |= FE_HAS_SIGNAL;
-
-		if (sync & 2)
-			*status |= FE_HAS_CARRIER;
-
-		if (sync & 4)
-			*status |= FE_HAS_VITERBI;
-
-		if (sync & 8)
-			*status |= FE_HAS_SYNC;
-
-		if ((sync & 0x1f) == 0x1f)
-			*status |= FE_HAS_LOCK;
-
-	return 0;
 	}
 
+	*status = 0;
+
+	if (sync & 1)
+		*status |= FE_HAS_SIGNAL;
+
+	if (sync & 2)
+		*status |= FE_HAS_CARRIER;
+
+	if (sync & 4)
+		*status |= FE_HAS_VITERBI;
+
+	if (sync & 8)
+		*status |= FE_HAS_SYNC;
+
+	if ((sync & 0x1f) == 0x1f)
+		*status |= FE_HAS_LOCK;
+
+	return 0;
+}
 
 static int ves1x93_read_ber(struct dvb_frontend* fe, u32* ber)
-	{
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+{
+	struct ves1x93_state* state = fe->demodulator_priv;
 
 	*ber = ves1x93_readreg (state, 0x15);
 	*ber |= (ves1x93_readreg (state, 0x16) << 8);
 	*ber |= ((ves1x93_readreg (state, 0x17) & 0x0F) << 16);
-		*ber *= 10;
+	*ber *= 10;
 
 	return 0;
-	}
+}
 
 static int ves1x93_read_signal_strength(struct dvb_frontend* fe, u16* strength)
-	{
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+{
+	struct ves1x93_state* state = fe->demodulator_priv;
 
 	u8 signal = ~ves1x93_readreg (state, 0x0b);
 	*strength = (signal << 8) | signal;
 
 	return 0;
-	}
+}
 
 static int ves1x93_read_snr(struct dvb_frontend* fe, u16* snr)
-	{
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+{
+	struct ves1x93_state* state = fe->demodulator_priv;
 
 	u8 _snr = ~ves1x93_readreg (state, 0x1c);
 	*snr = (_snr << 8) | _snr;
 
 	return 0;
-	}
+}
 
 static int ves1x93_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
-	{
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+{
+	struct ves1x93_state* state = fe->demodulator_priv;
 
 	*ucblocks = ves1x93_readreg (state, 0x18) & 0x7f;
-		
+
 	if (*ucblocks == 0x7f)
 		*ucblocks = 0xffffffff;   /* counter overflow... */
 
@@ -408,40 +382,41 @@ static int ves1x93_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
 	ves1x93_writereg (state, 0x18, 0x80);  /* dto. */
 
 	return 0;
-	}
+}
 
 static int ves1x93_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters *p)
-        {
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+{
+	struct ves1x93_state* state = fe->demodulator_priv;
 
-	ves1x93_writereg(state, 0x00, 0x11);
-	state->config->pll_set(fe, p);
-	ves1x93_writereg(state, 0x00, 0x01);
+	if (fe->ops.tuner_ops.set_params) {
+		fe->ops.tuner_ops.set_params(fe, p);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
+	}
 	ves1x93_set_inversion (state, p->inversion);
 	ves1x93_set_fec (state, p->u.qpsk.fec_inner);
 	ves1x93_set_symbolrate (state, p->u.qpsk.symbol_rate);
-		state->inversion = p->inversion;
+	state->inversion = p->inversion;
 
 	return 0;
-        }
+}
 
 static int ves1x93_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters *p)
-	{
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
-		int afc;
+{
+	struct ves1x93_state* state = fe->demodulator_priv;
+	int afc;
 
 	afc = ((int)((char)(ves1x93_readreg (state, 0x0a) << 1)))/2;
-		afc = (afc * (int)(p->u.qpsk.symbol_rate/1000/8))/16;
+	afc = (afc * (int)(p->u.qpsk.symbol_rate/1000/8))/16;
 
-		p->frequency -= afc;
+	p->frequency -= afc;
 
-		/*
-		 * inversion indicator is only valid
-		 * if auto inversion was used
-		 */
-		if (state->inversion == INVERSION_AUTO)
+	/*
+	 * inversion indicator is only valid
+	 * if auto inversion was used
+	 */
+	if (state->inversion == INVERSION_AUTO)
 		p->inversion = (ves1x93_readreg (state, 0x0f) & 2) ?
-					INVERSION_OFF : INVERSION_ON;
+				INVERSION_OFF : INVERSION_ON;
 	p->u.qpsk.fec_inner = ves1x93_get_fec (state);
 	/*  XXX FIXME: timing offset !! */
 
@@ -450,16 +425,27 @@ static int ves1x93_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 
 static int ves1x93_sleep(struct dvb_frontend* fe)
 {
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+	struct ves1x93_state* state = fe->demodulator_priv;
 
 	return ves1x93_writereg (state, 0x00, 0x08);
 }
-        
+
 static void ves1x93_release(struct dvb_frontend* fe)
 {
-	struct ves1x93_state* state = (struct ves1x93_state*) fe->demodulator_priv;
+	struct ves1x93_state* state = fe->demodulator_priv;
 	kfree(state);
-} 
+}
+
+static int ves1x93_i2c_gate_ctrl(struct dvb_frontend* fe, int enable)
+{
+	struct ves1x93_state* state = fe->demodulator_priv;
+
+	if (enable) {
+		return ves1x93_writereg(state, 0x00, 0x11);
+	} else {
+		return ves1x93_writereg(state, 0x00, 0x01);
+	}
+}
 
 static struct dvb_frontend_ops ves1x93_ops;
 
@@ -470,13 +456,12 @@ struct dvb_frontend* ves1x93_attach(const struct ves1x93_config* config,
 	u8 identity;
 
 	/* allocate memory for the internal state */
-	state = (struct ves1x93_state*) kmalloc(sizeof(struct ves1x93_state), GFP_KERNEL);
+	state = kmalloc(sizeof(struct ves1x93_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */
 	state->config = config;
 	state->i2c = i2c;
-	memcpy(&state->ops, &ves1x93_ops, sizeof(struct dvb_frontend_ops));
 	state->inversion = INVERSION_OFF;
 
 	/* check if the demod is there + identify it */
@@ -511,14 +496,14 @@ struct dvb_frontend* ves1x93_attach(const struct ves1x93_config* config,
 	}
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &ves1x93_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
 
 error:
-	if (state) kfree(state);
+	kfree(state);
 	return NULL;
-	}
+}
 
 static struct dvb_frontend_ops ves1x93_ops = {
 
@@ -542,6 +527,7 @@ static struct dvb_frontend_ops ves1x93_ops = {
 
 	.init = ves1x93_init,
 	.sleep = ves1x93_sleep,
+	.i2c_gate_ctrl = ves1x93_i2c_gate_ctrl,
 
 	.set_frontend = ves1x93_set_frontend,
 	.get_frontend = ves1x93_get_frontend,

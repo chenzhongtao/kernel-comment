@@ -2,7 +2,6 @@
  *  ATI Frame Buffer Device Driver Core Definitions
  */
 
-#include <linux/config.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
     /*
@@ -50,6 +49,7 @@ struct pll_info {
 	int sclk, mclk, mclk_pm, xclk;
 	int ref_div;
 	int ref_clk;
+	int ecp_max;
 };
 
 typedef struct {
@@ -126,7 +126,7 @@ union aty_pll {
      */
 
 struct atyfb_par {
-	struct aty_cmap_regs __iomem *aty_cmap_regs;
+	u32 pseudo_palette[16];
 	struct { u8 red, green, blue; } palette[256];
 	const struct aty_dac_ops *dac_ops;
 	const struct aty_pll_ops *pll_ops;
@@ -150,6 +150,7 @@ struct atyfb_par {
 	int lock_blank;
 	unsigned long res_start;
 	unsigned long res_size;
+	struct pci_dev *pdev;
 #ifdef __sparc__
 	struct pci_mmap_map *mmap_map;
 	u8 mmaped;
@@ -185,6 +186,7 @@ struct atyfb_par {
 	int mtrr_aper;
 	int mtrr_reg;
 #endif
+	u32 mem_cntl;
 };
 
     /*
@@ -226,7 +228,7 @@ static inline u32 aty_ld_le32(int regindex, const struct atyfb_par *par)
 		regindex -= 0x800;
 
 #ifdef CONFIG_ATARI
-	return in_le32((volatile u32 *)(par->ati_regbase + regindex));
+	return in_le32(par->ati_regbase + regindex);
 #else
 	return readl(par->ati_regbase + regindex);
 #endif
@@ -239,7 +241,7 @@ static inline void aty_st_le32(int regindex, u32 val, const struct atyfb_par *pa
 		regindex -= 0x800;
 
 #ifdef CONFIG_ATARI
-	out_le32((volatile u32 *)(par->ati_regbase + regindex), val);
+	out_le32(par->ati_regbase + regindex, val);
 #else
 	writel(val, par->ati_regbase + regindex);
 #endif
@@ -252,7 +254,7 @@ static inline void aty_st_le16(int regindex, u16 val,
 	if (regindex >= 0x400)
 		regindex -= 0x800;
 #ifdef CONFIG_ATARI
-	out_le16((volatile u16 *)(par->ati_regbase + regindex), val);
+	out_le16(par->ati_regbase + regindex, val);
 #else
 	writel(val, par->ati_regbase + regindex);
 #endif
@@ -283,7 +285,8 @@ static inline void aty_st_8(int regindex, u8 val, const struct atyfb_par *par)
 #endif
 }
 
-#if defined(CONFIG_PM) || defined(CONFIG_PMAC_BACKLIGHT) || defined (CONFIG_FB_ATY_GENERIC_LCD)
+#if defined(CONFIG_PM) || defined(CONFIG_PMAC_BACKLIGHT) || \
+defined (CONFIG_FB_ATY_GENERIC_LCD) || defined (CONFIG_FB_ATY_BACKLIGHT)
 extern void aty_st_lcd(int index, u32 val, const struct atyfb_par *par);
 extern u32 aty_ld_lcd(int index, const struct atyfb_par *par);
 #endif
@@ -314,6 +317,7 @@ struct aty_pll_ops {
 	void (*set_pll)   (const struct fb_info * info, const union aty_pll * pll);
 	void (*get_pll)   (const struct fb_info *info, union aty_pll * pll);
 	int (*init_pll)   (const struct fb_info * info, union aty_pll * pll);
+	void (*resume_pll)(const struct fb_info *info, union aty_pll *pll);
 };
 
 extern const struct aty_pll_ops aty_pll_ati18818_1; /* ATI 18818 */
@@ -334,7 +338,6 @@ extern u8 aty_ld_pll_ct(int offset, const struct atyfb_par *par);
      */
 
 extern int aty_init_cursor(struct fb_info *info);
-extern int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor);
 
     /*
      *  Hardware acceleration
@@ -355,6 +358,9 @@ static inline void wait_for_idle(struct atyfb_par *par)
 
 extern void aty_reset_engine(const struct atyfb_par *par);
 extern void aty_init_engine(struct atyfb_par *par, struct fb_info *info);
-extern int  atyfb_xl_init(struct fb_info *info);
-extern void aty_st_pll_ct(int offset, u8 val, const struct atyfb_par *par);
 extern u8   aty_ld_pll_ct(int offset, const struct atyfb_par *par);
+
+void atyfb_copyarea(struct fb_info *info, const struct fb_copyarea *area);
+void atyfb_fillrect(struct fb_info *info, const struct fb_fillrect *rect);
+void atyfb_imageblit(struct fb_info *info, const struct fb_image *image);
+

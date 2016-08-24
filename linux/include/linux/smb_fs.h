@@ -10,8 +10,6 @@
 #define _LINUX_SMB_FS_H
 
 #include <linux/smb.h>
-#include <linux/smb_fs_i.h>
-#include <linux/smb_fs_sb.h>
 
 /*
  * ioctl commands
@@ -24,11 +22,14 @@
 
 
 #ifdef __KERNEL__
+#include <linux/smb_fs_i.h>
+#include <linux/smb_fs_sb.h>
 
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/vmalloc.h>
 #include <linux/smb_mount.h>
+#include <linux/jiffies.h>
 #include <asm/unaligned.h>
 
 static inline struct smb_sb_info *SMB_SB(struct super_block *sb)
@@ -43,67 +44,20 @@ static inline struct smb_inode_info *SMB_I(struct inode *inode)
 
 /* macro names are short for word, double-word, long value (?) */
 #define WVAL(buf,pos) \
-	(le16_to_cpu(get_unaligned((u16 *)((u8 *)(buf) + (pos)))))
+	(le16_to_cpu(get_unaligned((__le16 *)((u8 *)(buf) + (pos)))))
 #define DVAL(buf,pos) \
-	(le32_to_cpu(get_unaligned((u32 *)((u8 *)(buf) + (pos)))))
+	(le32_to_cpu(get_unaligned((__le32 *)((u8 *)(buf) + (pos)))))
 #define LVAL(buf,pos) \
-	(le64_to_cpu(get_unaligned((u64 *)((u8 *)(buf) + (pos)))))
+	(le64_to_cpu(get_unaligned((__le64 *)((u8 *)(buf) + (pos)))))
 #define WSET(buf,pos,val) \
-	put_unaligned(cpu_to_le16((u16)(val)), (u16 *)((u8 *)(buf) + (pos)))
+	put_unaligned(cpu_to_le16((u16)(val)), (__le16 *)((u8 *)(buf) + (pos)))
 #define DSET(buf,pos,val) \
-	put_unaligned(cpu_to_le32((u32)(val)), (u32 *)((u8 *)(buf) + (pos)))
+	put_unaligned(cpu_to_le32((u32)(val)), (__le32 *)((u8 *)(buf) + (pos)))
 #define LSET(buf,pos,val) \
-	put_unaligned(cpu_to_le64((u64)(val)), (u64 *)((u8 *)(buf) + (pos)))
+	put_unaligned(cpu_to_le64((u64)(val)), (__le64 *)((u8 *)(buf) + (pos)))
 
 /* where to find the base of the SMB packet proper */
 #define smb_base(buf) ((u8 *)(((u8 *)(buf))+4))
-
-#ifdef DEBUG_SMB_MALLOC
-
-#include <linux/slab.h>
-
-extern int smb_malloced;
-extern int smb_current_vmalloced;
-extern int smb_current_kmalloced;
-
-static inline void *
-smb_vmalloc(unsigned int size)
-{
-        smb_malloced += 1;
-        smb_current_vmalloced += 1;
-        return vmalloc(size);
-}
-
-static inline void
-smb_vfree(void *obj)
-{
-        smb_current_vmalloced -= 1;
-        vfree(obj);
-}
-
-static inline void *
-smb_kmalloc(size_t size, int flags)
-{
-	smb_malloced += 1;
-	smb_current_kmalloced += 1;
-	return kmalloc(size, flags);
-}
-
-static inline void
-smb_kfree(void *obj)
-{
-	smb_current_kmalloced -= 1;
-	kfree(obj);
-}
-
-#else /* DEBUG_SMB_MALLOC */
-
-#define smb_kmalloc(s,p)	kmalloc(s,p)
-#define smb_kfree(o)		kfree(o)
-#define smb_vmalloc(s)		vmalloc(s)
-#define smb_vfree(o)		vfree(o)
-
-#endif /* DEBUG_SMB_MALLOC */
 
 /*
  * Flags for the in-memory inode

@@ -8,7 +8,6 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/init.h>
@@ -23,6 +22,8 @@ static const signed char sine_data[] = {
 	0, -39, -75, -103, -121, -127, -121, -103, -75, -39
 };
 #define DATA_SIZE	(sizeof(sine_data)/sizeof(sine_data[0]))
+
+#define custom amiga_custom
 
     /*
      * The minimum period for audio may be modified by the frame buffer
@@ -63,7 +64,7 @@ void __init amiga_init_sound(void)
 }
 
 static void nosound( unsigned long ignored );
-static struct timer_list sound_timer = TIMER_INITIALIZER(nosound, 0, 0);
+static DEFINE_TIMER(sound_timer, nosound, 0, 0);
 
 void amiga_mksound( unsigned int hz, unsigned int ticks )
 {

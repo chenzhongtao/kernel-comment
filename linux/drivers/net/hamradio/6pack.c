@@ -3,7 +3,7 @@
  *		devices like TTY. It interfaces between a raw TTY and the
  *		kernel's AX.25 protocol layers.
  *
- * Authors:	Andreas Könsgen <ajk@iehk.rwth-aachen.de>
+ * Authors:	Andreas KÃ¶nsgen <ajk@iehk.rwth-aachen.de>
  *              Ralf Baechle DL5RB <ralf@linux-mips.org>
  *
  * Quite a lot of stuff "stolen" by Joerg Reuter from slip.c, written by
@@ -12,7 +12,6 @@
  *		Fred N. van Kempen, <waltje@uwalt.nl.mugnet.org>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -130,12 +129,11 @@ struct sixpack {
 
 #define AX25_6PACK_HEADER_LEN 0
 
-static void sp_start_tx_timer(struct sixpack *);
 static void sixpack_decode(struct sixpack *, unsigned char[], int);
 static int encode_sixpack(unsigned char *, unsigned char *, int, unsigned char);
 
 /*
- * perform the persistence/slottime algorithm for CSMA access. If the
+ * Perform the persistence/slottime algorithm for CSMA access. If the
  * persistence check was successful, write the data to the serial driver.
  * Note that in case of DAMA operation, the data is not sent here.
  */
@@ -143,7 +141,7 @@ static int encode_sixpack(unsigned char *, unsigned char *, int, unsigned char);
 static void sp_xmit_on_air(unsigned long channel)
 {
 	struct sixpack *sp = (struct sixpack *) channel;
-	int actual;
+	int actual, when = sp->slottime;
 	static unsigned char random;
 
 	random = random * 17 + 41;
@@ -159,20 +157,10 @@ static void sp_xmit_on_air(unsigned long channel)
 		sp->tty->driver->write(sp->tty, &sp->led_state, 1);
 		sp->status2 = 0;
 	} else
-		sp_start_tx_timer(sp);
+		mod_timer(&sp->tx_t, jiffies + ((when + 1) * HZ) / 100);
 }
 
 /* ----> 6pack timer interrupt handler and friends. <---- */
-static void sp_start_tx_timer(struct sixpack *sp)
-{
-	int when = sp->slottime;
-
-	del_timer(&sp->tx_t);
-	sp->tx_t.data = (unsigned long) sp;
-	sp->tx_t.function = sp_xmit_on_air;
-	sp->tx_t.expires = jiffies + ((when + 1) * HZ) / 100;
-	add_timer(&sp->tx_t);
-}
 
 /* Encapsulate one AX.25 frame and stuff into a TTY queue. */
 static void sp_encaps(struct sixpack *sp, unsigned char *icp, int len)
@@ -243,8 +231,7 @@ static void sp_encaps(struct sixpack *sp, unsigned char *icp, int len)
 		sp->xleft = count;
 		sp->xhead = sp->xbuff;
 		sp->status2 = count;
-		if (sp->duplex == 0)
-			sp_start_tx_timer(sp);
+		sp_xmit_on_air((unsigned long)sp);
 	}
 
 	return;
@@ -301,11 +288,12 @@ static int sp_close(struct net_device *dev)
 
 /* Return the frame type ID */
 static int sp_header(struct sk_buff *skb, struct net_device *dev,
-	unsigned short type, void *daddr, void *saddr, unsigned len)
+		     unsigned short type, const void *daddr,
+		     const void *saddr, unsigned len)
 {
 #ifdef CONFIG_INET
-	if (type != htons(ETH_P_AX25))
-		return ax25_encapsulate(skb, dev, type, daddr, saddr, len);
+	if (type != ETH_P_AX25)
+		return ax25_hard_header(skb, dev, type, daddr, saddr, len);
 #endif
 	return 0;
 }
@@ -320,15 +308,9 @@ static int sp_set_mac_address(struct net_device *dev, void *addr)
 {
 	struct sockaddr_ax25 *sa = addr;
 
-	if (sa->sax25_family != AF_AX25)
-		return -EINVAL;
-
-	if (!sa->sax25_ndigis)
-		return -EINVAL;
-
-	spin_lock_irq(&dev->xmit_lock);
+	netif_tx_lock_bh(dev);
 	memcpy(dev->dev_addr, &sa->sax25_call, AX25_ADDR_LEN);
-	spin_unlock_irq(&dev->xmit_lock);
+	netif_tx_unlock_bh(dev);
 
 	return 0;
 }
@@ -342,34 +324,33 @@ static int sp_rebuild_header(struct sk_buff *skb)
 #endif
 }
 
+static const struct header_ops sp_header_ops = {
+	.create		= sp_header,
+	.rebuild	= sp_rebuild_header,
+};
+
 static void sp_setup(struct net_device *dev)
 {
-	static char ax25_bcast[AX25_ADDR_LEN] =
-		{'Q'<<1,'S'<<1,'T'<<1,' '<<1,' '<<1,' '<<1,'0'<<1};
-	static char ax25_test[AX25_ADDR_LEN] =
-		{'L'<<1,'I'<<1,'N'<<1,'U'<<1,'X'<<1,' '<<1,'1'<<1};
-
 	/* Finish setting up the DEVICE info. */
 	dev->mtu		= SIXP_MTU;
 	dev->hard_start_xmit	= sp_xmit;
 	dev->open		= sp_open_dev;
 	dev->destructor		= free_netdev;
 	dev->stop		= sp_close;
-	dev->hard_header	= sp_header;
+
 	dev->get_stats	        = sp_get_stats;
 	dev->set_mac_address    = sp_set_mac_address;
 	dev->hard_header_len	= AX25_MAX_HEADER_LEN;
+	dev->header_ops 	= &sp_header_ops;
+
 	dev->addr_len		= AX25_ADDR_LEN;
 	dev->type		= ARPHRD_AX25;
 	dev->tx_queue_len	= 10;
-	dev->rebuild_header	= sp_rebuild_header;
 	dev->tx_timeout		= NULL;
 
 	/* Only activated in AX.25 mode */
-	memcpy(dev->broadcast, ax25_bcast, AX25_ADDR_LEN);
-	memcpy(dev->dev_addr, ax25_test, AX25_ADDR_LEN);
-
-	SET_MODULE_OWNER(dev);
+	memcpy(dev->broadcast, &ax25_bcast, AX25_ADDR_LEN);
+	memcpy(dev->dev_addr, &ax25_defaddr, AX25_ADDR_LEN);
 
 	dev->flags		= 0;
 }
@@ -394,13 +375,11 @@ static void sp_bump(struct sixpack *sp, char cmd)
 	if ((skb = dev_alloc_skb(count)) == NULL)
 		goto out_mem;
 
-	skb->dev = sp->dev;
 	ptr = skb_put(skb, count);
 	*ptr++ = cmd;	/* KISS command */
 
 	memcpy(ptr, sp->cooked_buf + 1, count);
-	skb->mac.raw = skb->data;
-	skb->protocol = htons(ETH_P_AX25);
+	skb->protocol = ax25_type_trans(skb, sp->dev);
 	netif_rx(skb);
 	sp->dev->last_rx = jiffies;
 	sp->stats.rx_packets++;
@@ -475,11 +454,6 @@ out:
 }
 
 /* ----------------------------------------------------------------------- */
-
-static int sixpack_receive_room(struct tty_struct *tty)
-{
-	return 65536;  /* We can handle an infinite amount of data. :-) */
-}
 
 /*
  * Handle the 'receiver data ready' interrupt.
@@ -682,12 +656,16 @@ static int sixpack_open(struct tty_struct *tty)
 	netif_start_queue(dev);
 
 	init_timer(&sp->tx_t);
+	sp->tx_t.function = sp_xmit_on_air;
+	sp->tx_t.data = (unsigned long) sp;
+
 	init_timer(&sp->resync_t);
 
 	spin_unlock_bh(&sp->lock);
 
 	/* Done.  We have linked the TTY line to a channel. */
 	tty->disc_data = sp;
+	tty->receive_room = 65536;
 
 	/* Now we're ready to register. */
 	if (register_netdev(dev))
@@ -756,12 +734,12 @@ static int sixpack_ioctl(struct tty_struct *tty, struct file *file,
 
 	switch(cmd) {
 	case SIOCGIFNAME:
-		err = copy_to_user((void *) arg, dev->name,
+		err = copy_to_user((void __user *) arg, dev->name,
 		                   strlen(dev->name) + 1) ? -EFAULT : 0;
 		break;
 
 	case SIOCGIFENCAP:
-		err = put_user(0, (int __user *)arg);
+		err = put_user(0, (int __user *) arg);
 		break;
 
 	case SIOCSIFENCAP:
@@ -784,26 +762,20 @@ static int sixpack_ioctl(struct tty_struct *tty, struct file *file,
 
 		if (copy_from_user(&addr,
 		                   (void __user *) arg, AX25_ADDR_LEN)) {
-			err = -EFAULT;
+				err = -EFAULT;
+				break;
+			}
+
+			netif_tx_lock_bh(dev);
+			memcpy(dev->dev_addr, &addr, AX25_ADDR_LEN);
+			netif_tx_unlock_bh(dev);
+
+			err = 0;
 			break;
 		}
 
-		spin_lock_irq(&dev->xmit_lock);
-		memcpy(dev->dev_addr, &addr, AX25_ADDR_LEN);
-		spin_unlock_irq(&dev->xmit_lock);
-
-		err = 0;
-		break;
-	}
-
-	/* Allow stty to read, but not set, the serial port */
-	case TCGETS:
-	case TCGETA:
-		err = n_tty_ioctl(tty, (struct file *) file, cmd, arg);
-		break;
-
 	default:
-		err = -ENOIOCTLCMD;
+		err = tty_mode_ioctl(tty, file, cmd, arg);
 	}
 
 	sp_put(sp);
@@ -819,7 +791,6 @@ static struct tty_ldisc sp_ldisc = {
 	.close		= sixpack_close,
 	.ioctl		= sixpack_ioctl,
 	.receive_buf	= sixpack_receive_buf,
-	.receive_room	= sixpack_receive_room,
 	.write_wakeup	= sixpack_write_wakeup,
 };
 
@@ -850,7 +821,7 @@ static void __exit sixpack_exit_driver(void)
 {
 	int ret;
 
-	if ((ret = tty_register_ldisc(N_6PACK, NULL)))
+	if ((ret = tty_unregister_ldisc(N_6PACK)))
 		printk(msg_unregfail, ret);
 }
 
@@ -937,7 +908,7 @@ static void decode_prio_command(struct sixpack *sp, unsigned char cmd)
 					printk(KERN_DEBUG "6pack: protocol violation\n");
 				else
 					sp->status = 0;
-				cmd &= !SIXP_RX_DCD_MASK;
+				cmd &= ~SIXP_RX_DCD_MASK;
 		}
 		sp->status = cmd & SIXP_PRIO_DATA_MASK;
 	} else { /* output watchdog char if idle */

@@ -7,14 +7,16 @@
  * sorry about the wall, puffin..
  */
 
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/unistd.h>
 #include <asm/errno.h>
+#include <asm/page.h>
 #include <asm/psw.h>
 #include <asm/thread_info.h>
-
 #include <asm/assembly.h>
 #include <asm/processor.h>
+
+#include <linux/linkage.h>
 
 	/* We fill the empty parts of the gateway page with
  	 * something that will kill the kernel or a
@@ -22,31 +24,12 @@
 	 */
 #define KILL_INSN	break	0,0
 
-#include <linux/config.h> /* for CONFIG_SMP */
-
-#ifdef __LP64__
-	.level          2.0w
-#else
-	.level		1.1
-#endif
-
-#ifndef __LP64__
-	.macro fixup_branch,lbl
-	b	    \lbl
-	.endm
-#else
-	.macro fixup_branch,lbl
-	ldil	    L%\lbl, %r1
-	ldo	    R%\lbl(%r1), %r1
-	bv,n        %r0(%r1)
-	.endm
-#endif
+	.level          LEVEL
 
 	.text
 
 	.import syscall_exit,code
 	.import syscall_exit_rfi,code
-	.export linux_gateway_page
 
 	/* Linux gateway page is aliased to virtual page 0 in the kernel
 	 * address space. Since it is a gateway page it cannot be
@@ -56,8 +39,8 @@
 	 * pointers.
 	 */
 
-	.align 4096
-linux_gateway_page:
+	.align PAGE_SIZE
+ENTRY(linux_gateway_page)
 
         /* ADDRESS 0x00 to 0xb0 = 176 bytes / 4 bytes per insn = 44 insns */
 	.rept 44
@@ -103,7 +86,7 @@ linux_gateway_entry:
 	mfsp    %sr7,%r1                        /* save user sr7 */
 	mtsp    %r1,%sr3                        /* and store it in sr3 */
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	/* for now we can *always* set the W bit on entry to the syscall
 	 * since we don't support wide userland processes.  We could
 	 * also save the current SM other than in r0 and restore it on
@@ -155,7 +138,7 @@ linux_gateway_entry:
 	STREG	%r19, TASK_PT_GR19(%r1)
 
 	LDREGM	-FRAME_SIZE(%r30), %r2		/* get users sp back */
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	extrd,u	%r2,63,1,%r19			/* W hidden in bottom bit */
 #if 0
 	xor	%r19,%r2,%r2			/* clear bottom bit */
@@ -165,7 +148,7 @@ linux_gateway_entry:
 #endif
 	STREG	%r2,  TASK_PT_GR30(%r1)		/* ... and save it */
 	
-	STREG	%r20, TASK_PT_GR20(%r1)
+	STREG	%r20, TASK_PT_GR20(%r1)		/* Syscall number */
 	STREG	%r21, TASK_PT_GR21(%r1)
 	STREG	%r22, TASK_PT_GR22(%r1)
 	STREG	%r23, TASK_PT_GR23(%r1)		/* 4th argument */
@@ -186,7 +169,7 @@ linux_gateway_entry:
 
 	loadgp
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	ldo	-16(%r30),%r29			/* Reference param save area */
 	copy	%r19,%r2			/* W bit back to r2 */
 #else
@@ -199,13 +182,13 @@ linux_gateway_entry:
 	/* Are we being ptraced? */
 	mfctl	%cr30, %r1
 	LDREG	TI_TASK(%r1),%r1
-	LDREG	TASK_PTRACE(%r1), %r1
+	ldw	TASK_PTRACE(%r1), %r1
 	bb,<,n	%r1,31,.Ltracesys
 	
 	/* Note!  We cannot use the syscall table that is mapped
 	nearby since the gateway page is mapped execute-only. */
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	ldil	L%sys_call_table, %r1
 	or,=	%r2,%r2,%r2
 	addil	L%(sys_call_table64-sys_call_table), %r1
@@ -216,7 +199,7 @@ linux_gateway_entry:
 	ldil	L%sys_call_table, %r1
 	ldo     R%sys_call_table(%r1), %r19
 #endif	
-	comiclr,>>=	__NR_Linux_syscalls, %r20, %r0
+	comiclr,>>	__NR_Linux_syscalls, %r20, %r0
 	b,n	.Lsyscall_nosys
 	
 	LDREGX  %r20(%r19), %r19
@@ -321,7 +304,7 @@ tracesys_next:
 	LDREG   TASK_PT_GR25(%r1), %r25
 	LDREG   TASK_PT_GR24(%r1), %r24
 	LDREG   TASK_PT_GR23(%r1), %r23
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	LDREG   TASK_PT_GR22(%r1), %r22
 	LDREG   TASK_PT_GR21(%r1), %r21
 	ldo	-16(%r30),%r29			/* Reference param save area */
@@ -350,7 +333,7 @@ tracesys_next:
 tracesys_exit:
 	ldo     -THREAD_SZ_ALGN-FRAME_SIZE(%r30),%r1      /* get task ptr */
 	LDREG	TI_TASK(%r1), %r1
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	ldo	-16(%r30),%r29			/* Reference param save area */
 #endif
 	bl	syscall_trace, %r2
@@ -371,7 +354,7 @@ tracesys_exit:
 tracesys_sigexit:
 	ldo     -THREAD_SZ_ALGN-FRAME_SIZE(%r30),%r1      /* get task ptr */
 	LDREG	0(%r1), %r1
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	ldo	-16(%r30),%r29			/* Reference param save area */
 #endif
 	bl	syscall_trace, %r2
@@ -404,7 +387,7 @@ lws_start:
 	gate	.+8, %r0
 	depi	3, 31, 2, %r31	/* Ensure we return to userspace */
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	/* FIXME: If we are a 64-bit kernel just
 	 *        turn this on unconditionally.
 	 */
@@ -440,7 +423,7 @@ lws_exit_nosys:
 	/* Fall through: Return to userspace */
 
 lws_exit:
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	/* decide whether to reset the wide mode bit
 	 *
 	 * For a syscall, the W bit is stored in the lowest bit
@@ -486,7 +469,7 @@ lws_exit:
 
 	/* ELF64 Process entry path */
 lws_compare_and_swap64:
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	b,n	lws_compare_and_swap
 #else
 	/* If we are not a 64-bit kernel, then we don't
@@ -497,7 +480,7 @@ lws_compare_and_swap64:
 
 	/* ELF32 Process entry path */
 lws_compare_and_swap32:
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	/* Clip all the input registers */
 	depdi	0, 31, 32, %r26
 	depdi	0, 31, 32, %r25
@@ -519,7 +502,7 @@ lws_compare_and_swap:
 	shlw	%r20, 4, %r20
 	add	%r20, %r28, %r20
 
-# ifdef ENABLE_LWS_DEBUG
+# if ENABLE_LWS_DEBUG
 	/*	
 		DEBUG, check for deadlock! 
 		If the thread register values are the same
@@ -528,6 +511,7 @@ lws_compare_and_swap:
 		We *must* giveup this call and fail.
 	*/
 	ldw	4(%sr2,%r20), %r28			/* Load thread register */
+	/* WARNING: If cr27 cycles to the same value we have problems */
 	mfctl	%cr27, %r21				/* Get current thread register */
 	cmpb,<>,n	%r21, %r28, cas_lock		/* Called recursive? */
 	b	lws_exit				/* Return error! */
@@ -541,7 +525,7 @@ cas_nocontend:
 # endif
 /* ENABLE_LWS_DEBUG */
 
-	ldcw	0(%sr2,%r20), %r28			/* Try to acquire the lock */
+	LDCW	0(%sr2,%r20), %r28			/* Try to acquire the lock */
 	cmpb,<>,n	%r0, %r28, cas_action		/* Did we get it? */
 cas_wouldblock:
 	ldo	2(%r0), %r28				/* 2nd case */
@@ -567,7 +551,7 @@ cas_wouldblock:
 		perspective
 	*/
 cas_action:
-#if defined CONFIG_SMP && defined ENABLE_LWS_DEBUG
+#if defined CONFIG_SMP && ENABLE_LWS_DEBUG
 	/* DEBUG */
 	mfctl	%cr27, %r1
 	stw	%r1, 4(%sr2,%r20)
@@ -579,7 +563,7 @@ cas_action:
 #ifdef CONFIG_SMP
 	/* Free lock */
 	stw	%r20, 0(%sr2,%r20)
-# ifdef ENABLE_LWS_DEBUG
+# if ENABLE_LWS_DEBUG
 	/* Clear thread register indicator */
 	stw	%r0, 4(%sr2,%r20)
 # endif
@@ -593,7 +577,7 @@ cas_action:
 #ifdef CONFIG_SMP
 	/* Free lock */
 	stw	%r20, 0(%sr2,%r20)
-# ifdef ENABLE_LWS_DEBUG
+# if ENABLE_LWS_DEBUG
 	stw	%r0, 4(%sr2,%r20)
 # endif
 #endif
@@ -608,71 +592,43 @@ cas_action:
 	   the other for the store. Either return -EFAULT.
 	   Each of the entries must be relocated. */
 	.section __ex_table,"aw"
-#ifdef __LP64__
-	/* Pad the address calculation */
-	.word	0,(2b - linux_gateway_page)
-	.word	0,(3b - linux_gateway_page)
-#else
-	.word	(2b - linux_gateway_page)
-	.word	(3b - linux_gateway_page)
-#endif
+	ASM_ULONG_INSN (1b - linux_gateway_page), (3b - linux_gateway_page)
+	ASM_ULONG_INSN (2b - linux_gateway_page), (3b - linux_gateway_page)
 	.previous
 
-	.section __ex_table,"aw"
-#ifdef __LP64__
-	/* Pad the address calculation */
-	.word	0,(1b - linux_gateway_page)
-	.word	0,(3b - linux_gateway_page)
-#else
-	.word	(1b - linux_gateway_page)
-	.word	(3b - linux_gateway_page)
-#endif
-	.previous
-
-end_compare_and_swap:
 
 	/* Make sure nothing else is placed on this page */
-	.align 4096
-	.export end_linux_gateway_page
-end_linux_gateway_page:
+	.align PAGE_SIZE
+END(linux_gateway_page)
+ENTRY(end_linux_gateway_page)
 
 	/* Relocate symbols assuming linux_gateway_page is mapped
 	   to virtual address 0x0 */
-#ifdef __LP64__
-	/* FIXME: The code will always be on the gateay page
-		  and thus it will be on the first 4k, the
-		  assembler seems to think that the final
-		  subtraction result is only a word in
-		  length, so we pad the value.
-	*/
-#define LWS_ENTRY(_name_) .word 0,(lws_##_name_ - linux_gateway_page)
-#else
-#define LWS_ENTRY(_name_) .word  (lws_##_name_ - linux_gateway_page)
-#endif
 
-	.align 4096
+#define LWS_ENTRY(_name_) ASM_ULONG_INSN (lws_##_name_ - linux_gateway_page)
+
+	.section .rodata,"a"
+
+	.align PAGE_SIZE
 	/* Light-weight-syscall table */
 	/* Start of lws table. */
-	.export lws_table
-.Llws_table:
-lws_table:
+ENTRY(lws_table)
 	LWS_ENTRY(compare_and_swap32)	/* 0 - ELF32 Atomic compare and swap */
 	LWS_ENTRY(compare_and_swap64)	/* 1 - ELF64 Atomic compare and swap */
+END(lws_table)
 	/* End of lws table */
 
-	.align 4096
-	.export sys_call_table
-.Lsys_call_table:
-sys_call_table:
+	.align PAGE_SIZE
+ENTRY(sys_call_table)
 #include "syscall_table.S"
+END(sys_call_table)
 
-#ifdef __LP64__
-	.align 4096
-	.export sys_call_table64
-.Lsys_call_table64:
-sys_call_table64:
+#ifdef CONFIG_64BIT
+	.align PAGE_SIZE
+ENTRY(sys_call_table64)
 #define SYSCALL_TABLE_64BIT
 #include "syscall_table.S"
+END(sys_call_table64)
 #endif
 
 #ifdef CONFIG_SMP
@@ -681,10 +637,8 @@ sys_call_table64:
 		will use this set of locks 
 	*/
 	.section .data
-	.align 4096
-	.export lws_lock_start
-.Llws_lock_start:
-lws_lock_start:
+	.align	PAGE_SIZE
+ENTRY(lws_lock_start)
 	/* lws locks */
 	.align 16
 	.rept 16
@@ -694,6 +648,7 @@ lws_lock_start:
 	.word 0
 	.word 0
 	.endr
+END(lws_lock_start)
 	.previous
 #endif
 /* CONFIG_SMP for lws_lock_start */

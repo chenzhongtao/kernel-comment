@@ -27,7 +27,6 @@
  * 2003-06-03	R. Scott Bailey <scott.bailey@eds.com>
  *	Tighten sanity in time_init from 1% (10,000 PPM) to 250 PPM
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
@@ -55,15 +54,10 @@
 #include "proto.h"
 #include "irq_impl.h"
 
-u64 jiffies_64 = INITIAL_JIFFIES;
-
-EXPORT_SYMBOL(jiffies_64);
-
-extern unsigned long wall_jiffies;	/* kernel/timer.c */
-
 static int set_rtc_mmss(unsigned long);
 
 DEFINE_SPINLOCK(rtc_lock);
+EXPORT_SYMBOL(rtc_lock);
 
 #define TICK_SIZE (tick_nsec / 1000)
 
@@ -97,21 +91,10 @@ static inline __u32 rpcc(void)
 }
 
 /*
- * Scheduler clock - returns current time in nanosec units.
- *
- * Copied from ARM code for expediency... ;-}
- */
-unsigned long long sched_clock(void)
-{
-        return (unsigned long long)jiffies * (1000000000 / HZ);
-}
-
-
-/*
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-irqreturn_t timer_interrupt(int irq, void *dev, struct pt_regs * regs)
+irqreturn_t timer_interrupt(int irq, void *dev)
 {
 	unsigned long delta;
 	__u32 now;
@@ -119,7 +102,7 @@ irqreturn_t timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 
 #ifndef CONFIG_SMP
 	/* Not SMP, do kernel PC profiling here.  */
-	profile_tick(CPU_PROFILING, regs);
+	profile_tick(CPU_PROFILING);
 #endif
 
 	write_seqlock(&xtime_lock);
@@ -137,9 +120,9 @@ irqreturn_t timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 	nticks = delta >> FIX_SHIFT;
 
 	while (nticks > 0) {
-		do_timer(regs);
+		do_timer(1);
 #ifndef CONFIG_SMP
-		update_process_times(user_mode(regs));
+		update_process_times(user_mode(get_irq_regs()));
 #endif
 		nticks--;
 	}
@@ -149,7 +132,7 @@ irqreturn_t timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
 	 * called as close as possible to 500 ms before the new second starts.
 	 */
-	if ((time_status & STA_UNSYNC) == 0
+	if (ntp_synced()
 	    && xtime.tv_sec > state.last_rtc_update + 660
 	    && xtime.tv_nsec >= 500000 - ((unsigned) TICK_SIZE) / 2
 	    && xtime.tv_nsec <= 500000 + ((unsigned) TICK_SIZE) / 2) {
@@ -161,7 +144,7 @@ irqreturn_t timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 	return IRQ_HANDLED;
 }
 
-void
+void __init
 common_init_rtc(void)
 {
 	unsigned char x;
@@ -238,7 +221,7 @@ validate_cc_value(unsigned long cc)
 	index = cpu->type & 0xffffffff;
 
 	/* If index out of bounds, no way to validate.  */
-	if (index >= sizeof(cpu_hz)/sizeof(cpu_hz[0]))
+	if (index >= ARRAY_SIZE(cpu_hz))
 		return cc;
 
 	/* If index contains no data, no way to validate.  */
@@ -318,10 +301,11 @@ time_init(void)
 	if (!est_cycle_freq)
 		est_cycle_freq = validate_cc_value(calibrate_cc_with_pit());
 
-	cc1 = rpcc_after_update_in_progress();
+	cc1 = rpcc();
 
 	/* Calibrate CPU clock -- attempt #2.  */
 	if (!est_cycle_freq) {
+		cc1 = rpcc_after_update_in_progress();
 		cc2 = rpcc_after_update_in_progress();
 		est_cycle_freq = validate_cc_value(cc2 - cc1);
 		cc1 = cc2;
@@ -417,7 +401,7 @@ void
 do_gettimeofday(struct timeval *tv)
 {
 	unsigned long flags;
-	unsigned long sec, usec, lost, seq;
+	unsigned long sec, usec, seq;
 	unsigned long delta_cycles, delta_usec, partial_tick;
 
 	do {
@@ -427,14 +411,13 @@ do_gettimeofday(struct timeval *tv)
 		sec = xtime.tv_sec;
 		usec = (xtime.tv_nsec / 1000);
 		partial_tick = state.partial_tick;
-		lost = jiffies - wall_jiffies;
 
 	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
 
 #ifdef CONFIG_SMP
 	/* Until and unless we figure out how to get cpu cycle counters
 	   in sync and keep them there, we can't use the rpcc tricks.  */
-	delta_usec = lost * (1000000 / HZ);
+	delta_usec = 0;
 #else
 	/*
 	 * usec = cycles * ticks_per_cycle * 2**48 * 1e6 / (2**48 * ticks)
@@ -450,8 +433,7 @@ do_gettimeofday(struct timeval *tv)
 	 */
 
 	delta_usec = (delta_cycles * state.scaled_ticks_per_cycle 
-		      + partial_tick
-		      + (lost << FIX_SHIFT)) * 15625;
+		      + partial_tick) * 15625;
 	delta_usec = ((delta_usec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
 #endif
 
@@ -484,12 +466,11 @@ do_settimeofday(struct timespec *tv)
 	   time.  Without this, a full-tick error is possible.  */
 
 #ifdef CONFIG_SMP
-	delta_nsec = (jiffies - wall_jiffies) * (NSEC_PER_SEC / HZ);
+	delta_nsec = 0;
 #else
 	delta_nsec = rpcc() - state.last_time;
 	delta_nsec = (delta_nsec * state.scaled_ticks_per_cycle 
-		      + state.partial_tick
-		      + ((jiffies - wall_jiffies) << FIX_SHIFT)) * 15625;
+		      + state.partial_tick) * 15625;
 	delta_nsec = ((delta_nsec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
 	delta_nsec *= 1000;
 #endif
@@ -502,10 +483,7 @@ do_settimeofday(struct timespec *tv)
 	set_normalized_timespec(&xtime, sec, nsec);
 	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
 
-	time_adjust = 0;		/* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
+	ntp_clear();
 
 	write_sequnlock_irq(&xtime_lock);
 	clock_was_set();

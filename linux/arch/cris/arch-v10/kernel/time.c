@@ -1,5 +1,4 @@
-/* $Id: time.c,v 1.5 2004/09/29 06:12:46 starvik Exp $
- *
+/*
  *  linux/arch/cris/arch-v10/kernel/time.c
  *
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
@@ -7,7 +6,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/timex.h>
 #include <linux/time.h>
 #include <linux/jiffies.h>
@@ -15,12 +13,14 @@
 #include <linux/swap.h>
 #include <linux/sched.h>
 #include <linux/init.h>
+#include <linux/vmstat.h>
 #include <asm/arch/svinto.h>
 #include <asm/types.h>
 #include <asm/signal.h>
 #include <asm/io.h>
 #include <asm/delay.h>
 #include <asm/rtc.h>
+#include <asm/irq_regs.h>
 
 /* define this if you need to use print_timestamp */
 /* it will make jiffies at 96 hz instead of 100 hz though */
@@ -39,7 +39,6 @@ unsigned long get_ns_in_jiffie(void)
 	unsigned long flags;
 
 	local_irq_save(flags);
-	local_irq_disable();
 	timer_count = *R_TIMER0_DATA;
 	presc_count = *R_TIM_PRESC_STATUS;  
 	/* presc_count might be wrapped */
@@ -203,8 +202,9 @@ static long last_rtc_update = 0;
 extern void cris_do_profile(struct pt_regs *regs);
 
 static inline irqreturn_t
-timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+timer_interrupt(int irq, void *dev_id)
 {
+	struct pt_regs *regs = get_irq_regs();
 	/* acknowledge the timer irq */
 
 #ifdef USE_CASCADE_TIMERS
@@ -223,12 +223,14 @@ timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 #endif
 
 	/* reset watchdog otherwise it resets us! */
-
 	reset_watchdog();
 	
+	/* Update statistics. */
+	update_process_times(user_mode(regs));
+
 	/* call the real timer interrupt handler */
 
-	do_timer(regs);
+	do_timer(1);
 	
         cris_do_profile(regs); /* Save profiling information */
 
@@ -240,7 +242,7 @@ timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	 * The division here is not time critical since it will run once in 
 	 * 11 minutes
 	 */
-	if ((time_status & STA_UNSYNC) == 0 &&
+	if (ntp_synced() &&
 	    xtime.tv_sec > last_rtc_update + 660 &&
 	    (xtime.tv_nsec / 1000) >= 500000 - (tick_nsec / 1000) / 2 &&
 	    (xtime.tv_nsec / 1000) <= 500000 + (tick_nsec / 1000) / 2) {
@@ -252,12 +254,16 @@ timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
         return IRQ_HANDLED;
 }
 
-/* timer is SA_SHIRQ so drivers can add stuff to the timer irq chain
- * it needs to be SA_INTERRUPT to make the jiffies update work properly
+/* timer is IRQF_SHARED so drivers can add stuff to the timer irq chain
+ * it needs to be IRQF_DISABLED to make the jiffies update work properly
  */
 
-static struct irqaction irq2  = { timer_interrupt, SA_SHIRQ | SA_INTERRUPT,
-				  CPU_MASK_NONE, "timer", NULL, NULL};
+static struct irqaction irq2  = {
+	.handler = timer_interrupt,
+	.flags = IRQF_SHARED | IRQF_DISABLED,
+	.mask = CPU_MASK_NONE,
+	.name = "timer",
+};
 
 void __init
 time_init(void)

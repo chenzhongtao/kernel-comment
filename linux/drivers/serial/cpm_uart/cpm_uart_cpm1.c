@@ -3,11 +3,13 @@
  *
  *  Driver for CPM (SCC/SMC) serial ports; CPM1 definitions
  *
- *  Maintainer: Kumar Gala (kumar.gala@freescale.com) (CPM2)
+ *  Maintainer: Kumar Gala (galak@kernel.crashing.org) (CPM2)
  *              Pantelis Antoniou (panto@intracom.gr) (CPM1)
- * 
+ *
  *  Copyright (C) 2004 Freescale Semiconductor, Inc.
  *            (C) 2004 Intracom, S.A.
+ *            (C) 2006 MontaVista Software, Inc.
+ * 		Vitaly Bordug <vbordug@ru.mvista.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,7 +27,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/tty.h>
 #include <linux/ioport.h>
@@ -39,6 +40,7 @@
 
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/fs_pd.h>
 
 #include <linux/serial_core.h>
 #include <linux/kernel.h>
@@ -47,9 +49,20 @@
 
 /**************************************************************/
 
-void cpm_line_cr_cmd(int line, int cmd)
+#ifdef CONFIG_PPC_CPM_NEW_BINDING
+void cpm_line_cr_cmd(struct uart_cpm_port *port, int cmd)
+{
+	u16 __iomem *cpcr = &cpmp->cp_cpcr;
+
+	out_be16(cpcr, port->command | (cmd << 8) | CPM_CR_FLG);
+	while (in_be16(cpcr) & CPM_CR_FLG)
+		;
+}
+#else
+void cpm_line_cr_cmd(struct uart_cpm_port *port, int cmd)
 {
 	ushort val;
+	int line = port - cpm_uart_ports;
 	volatile cpm8xx_t *cp = cpmp;
 
 	switch (line) {
@@ -81,25 +94,11 @@ void cpm_line_cr_cmd(int line, int cmd)
 
 void smc1_lineif(struct uart_cpm_port *pinfo)
 {
-	volatile cpm8xx_t *cp = cpmp;
-	unsigned int iobits = 0x000000c0;
-
-	if (!pinfo->is_portb) {
-		cp->cp_pbpar |= iobits;
-		cp->cp_pbdir &= ~iobits;
-		cp->cp_pbodr &= ~iobits;
-	} else {
-		((immap_t *)IMAP_ADDR)->im_ioport.iop_papar |= iobits;
-		((immap_t *)IMAP_ADDR)->im_ioport.iop_padir &= ~iobits;
-		((immap_t *)IMAP_ADDR)->im_ioport.iop_paodr &= ~iobits;
-	}
-
 	pinfo->brg = 1;
 }
 
 void smc2_lineif(struct uart_cpm_port *pinfo)
 {
-	/* XXX SMC2: insert port configuration here */
 	pinfo->brg = 2;
 }
 
@@ -126,9 +125,10 @@ void scc4_lineif(struct uart_cpm_port *pinfo)
 	/* XXX SCC4: insert port configuration here */
 	pinfo->brg = 4;
 }
+#endif
 
 /*
- * Allocate DP-Ram and memory buffers. We need to allocate a transmit and 
+ * Allocate DP-Ram and memory buffers. We need to allocate a transmit and
  * receive buffer descriptors from dual port ram, and a character
  * buffer area from host mem. If we are allocating for the console we need
  * to do it from bootmem
@@ -137,7 +137,7 @@ int cpm_uart_allocbuf(struct uart_cpm_port *pinfo, unsigned int is_con)
 {
 	int dpmemsz, memsz;
 	u8 *dp_mem;
-	uint dp_offset;
+	unsigned long dp_offset;
 	u8 *mem_addr;
 	dma_addr_t dma_addr = 0;
 
@@ -145,7 +145,7 @@ int cpm_uart_allocbuf(struct uart_cpm_port *pinfo, unsigned int is_con)
 
 	dpmemsz = sizeof(cbd_t) * (pinfo->rx_nrfifos + pinfo->tx_nrfifos);
 	dp_offset = cpm_dpalloc(dpmemsz, 8);
-	if (IS_DPERR(dp_offset)) {
+	if (IS_ERR_VALUE(dp_offset)) {
 		printk(KERN_ERR
 		       "cpm_uart_cpm1.c: could not allocate buffer descriptors\n");
 		return -ENOMEM;
@@ -155,8 +155,10 @@ int cpm_uart_allocbuf(struct uart_cpm_port *pinfo, unsigned int is_con)
 	memsz = L1_CACHE_ALIGN(pinfo->rx_nrfifos * pinfo->rx_fifosize) +
 	    L1_CACHE_ALIGN(pinfo->tx_nrfifos * pinfo->tx_fifosize);
 	if (is_con) {
-		mem_addr = (u8 *) m8xx_cpm_hostalloc(memsz);
-		dma_addr = 0;
+		/* was hostalloc but changed cause it blows away the */
+		/* large tlb mapping when pinning the kernel area    */
+		mem_addr = (u8 *) cpm_dpram_addr(cpm_dpalloc(memsz, 8));
+		dma_addr = (u32)cpm_dpram_phys(mem_addr);
 	} else
 		mem_addr = dma_alloc_coherent(NULL, memsz, &dma_addr,
 					      GFP_KERNEL);
@@ -169,14 +171,15 @@ int cpm_uart_allocbuf(struct uart_cpm_port *pinfo, unsigned int is_con)
 	}
 
 	pinfo->dp_addr = dp_offset;
-	pinfo->mem_addr = mem_addr;
-	pinfo->dma_addr = dma_addr;
+	pinfo->mem_addr = mem_addr;             /*  virtual address*/
+	pinfo->dma_addr = dma_addr;             /*  physical address*/
+	pinfo->mem_size = memsz;
 
 	pinfo->rx_buf = mem_addr;
 	pinfo->tx_buf = pinfo->rx_buf + L1_CACHE_ALIGN(pinfo->rx_nrfifos
 						       * pinfo->rx_fifosize);
 
-	pinfo->rx_bd_base = (volatile cbd_t *)dp_mem;
+	pinfo->rx_bd_base = (cbd_t __iomem __force *)dp_mem;
 	pinfo->tx_bd_base = pinfo->rx_bd_base + pinfo->rx_nrfifos;
 
 	return 0;
@@ -193,6 +196,7 @@ void cpm_uart_freebuf(struct uart_cpm_port *pinfo)
 	cpm_dpfree(pinfo->dp_addr);
 }
 
+#ifndef CONFIG_PPC_CPM_NEW_BINDING
 /* Setup any dynamic params in the uart desc */
 int cpm_uart_init_portdesc(void)
 {
@@ -215,7 +219,7 @@ int cpm_uart_init_portdesc(void)
 	    (unsigned long)&cpmp->cp_smc[0];
 	cpm_uart_ports[UART_SMC1].smcp->smc_smcm |= (SMCM_RX | SMCM_TX);
 	cpm_uart_ports[UART_SMC1].smcp->smc_smcmr &= ~(SMCMR_REN | SMCMR_TEN);
-	cpm_uart_ports[UART_SMC1].port.uartclk = (((bd_t *) __res)->bi_intfreq);
+	cpm_uart_ports[UART_SMC1].port.uartclk = uart_clock();
 	cpm_uart_port_map[cpm_uart_nr++] = UART_SMC1;
 #endif
 
@@ -227,7 +231,7 @@ int cpm_uart_init_portdesc(void)
 	    (unsigned long)&cpmp->cp_smc[1];
 	cpm_uart_ports[UART_SMC2].smcp->smc_smcm |= (SMCM_RX | SMCM_TX);
 	cpm_uart_ports[UART_SMC2].smcp->smc_smcmr &= ~(SMCMR_REN | SMCMR_TEN);
-	cpm_uart_ports[UART_SMC2].port.uartclk = (((bd_t *) __res)->bi_intfreq);
+	cpm_uart_ports[UART_SMC2].port.uartclk = uart_clock();
 	cpm_uart_port_map[cpm_uart_nr++] = UART_SMC2;
 #endif
 
@@ -241,7 +245,7 @@ int cpm_uart_init_portdesc(void)
 	    ~(UART_SCCM_TX | UART_SCCM_RX);
 	cpm_uart_ports[UART_SCC1].sccp->scc_gsmrl &=
 	    ~(SCC_GSMRL_ENR | SCC_GSMRL_ENT);
-	cpm_uart_ports[UART_SCC1].port.uartclk = (((bd_t *) __res)->bi_intfreq);
+	cpm_uart_ports[UART_SCC1].port.uartclk = uart_clock();
 	cpm_uart_port_map[cpm_uart_nr++] = UART_SCC1;
 #endif
 
@@ -255,7 +259,7 @@ int cpm_uart_init_portdesc(void)
 	    ~(UART_SCCM_TX | UART_SCCM_RX);
 	cpm_uart_ports[UART_SCC2].sccp->scc_gsmrl &=
 	    ~(SCC_GSMRL_ENR | SCC_GSMRL_ENT);
-	cpm_uart_ports[UART_SCC2].port.uartclk = (((bd_t *) __res)->bi_intfreq);
+	cpm_uart_ports[UART_SCC2].port.uartclk = uart_clock();
 	cpm_uart_port_map[cpm_uart_nr++] = UART_SCC2;
 #endif
 
@@ -269,7 +273,7 @@ int cpm_uart_init_portdesc(void)
 	    ~(UART_SCCM_TX | UART_SCCM_RX);
 	cpm_uart_ports[UART_SCC3].sccp->scc_gsmrl &=
 	    ~(SCC_GSMRL_ENR | SCC_GSMRL_ENT);
-	cpm_uart_ports[UART_SCC3].port.uartclk = (((bd_t *) __res)->bi_intfreq);
+	cpm_uart_ports[UART_SCC3].port.uartclk = uart_clock();
 	cpm_uart_port_map[cpm_uart_nr++] = UART_SCC3;
 #endif
 
@@ -283,8 +287,9 @@ int cpm_uart_init_portdesc(void)
 	    ~(UART_SCCM_TX | UART_SCCM_RX);
 	cpm_uart_ports[UART_SCC4].sccp->scc_gsmrl &=
 	    ~(SCC_GSMRL_ENR | SCC_GSMRL_ENT);
-	cpm_uart_ports[UART_SCC4].port.uartclk = (((bd_t *) __res)->bi_intfreq);
+	cpm_uart_ports[UART_SCC4].port.uartclk = uart_clock();
 	cpm_uart_port_map[cpm_uart_nr++] = UART_SCC4;
 #endif
 	return 0;
 }
+#endif

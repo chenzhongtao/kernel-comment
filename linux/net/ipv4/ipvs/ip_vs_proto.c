@@ -45,7 +45,7 @@ static struct ip_vs_protocol *ip_vs_proto_table[IP_VS_PROTO_TAB_SIZE];
 /*
  *	register an ipvs protocol
  */
-static int register_ip_vs_protocol(struct ip_vs_protocol *pp)
+static int __used register_ip_vs_protocol(struct ip_vs_protocol *pp)
 {
 	unsigned hash = IP_VS_PROTO_HASH(pp->protocol);
 
@@ -118,13 +118,7 @@ void ip_vs_protocol_timeout_change(int flags)
 int *
 ip_vs_create_timeout_table(int *table, int size)
 {
-	int *t;
-
-	t = kmalloc(size, GFP_ATOMIC);
-	if (t == NULL)
-		return NULL;
-	memcpy(t, table, size);
-	return t;
+	return kmemdup(table, size, GFP_ATOMIC);
 }
 
 
@@ -176,7 +170,7 @@ ip_vs_tcpudp_debug_packet(struct ip_vs_protocol *pp,
 			pp->name, NIPQUAD(ih->saddr),
 			NIPQUAD(ih->daddr));
 	else {
-		__u16 _ports[2], *pptr
+		__be16 _ports[2], *pptr
 ;
 		pptr = skb_header_pointer(skb, offset + ih->ihl*4,
 					  sizeof(_ports), _ports);
@@ -215,9 +209,6 @@ int ip_vs_protocol_init(void)
 #endif
 #ifdef CONFIG_IP_VS_PROTO_UDP
 	REGISTER_PROTOCOL(&ip_vs_protocol_udp);
-#endif
-#ifdef CONFIG_IP_VS_PROTO_ICMP
-	REGISTER_PROTOCOL(&ip_vs_protocol_icmp);
 #endif
 #ifdef CONFIG_IP_VS_PROTO_AH
 	REGISTER_PROTOCOL(&ip_vs_protocol_ah);

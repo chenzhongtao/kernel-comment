@@ -56,7 +56,6 @@
  * SA_FLAGS values:
  *
  * SA_ONSTACK indicates that a registered stack_t will be used.
- * SA_INTERRUPT is a no-op, but left due to historical reasons.
  * SA_RESTART flag to get restarting signals (which were the default long ago)
  * SA_NOCLDSTOP flag to turn off SIGCHLD when children stop.
  * SA_RESETHAND clears the handler when the signal is delivered.
@@ -76,7 +75,6 @@
 
 #define SA_NOMASK	SA_NODEFER
 #define SA_ONESHOT	SA_RESETHAND
-#define SA_INTERRUPT	0x20000000 /* dummy -- ignored */
 
 #define SA_RESTORER	0x04000000
 
@@ -114,27 +112,9 @@
 #define _NSIG_BPW	64
 #define _NSIG_WORDS	(_NSIG / _NSIG_BPW)
 
-/*
- * These values of sa_flags are used only by the kernel as part of the
- * irq handling routines.
- *
- * SA_INTERRUPT is also used by the irq handling routines.
- * SA_SHIRQ is for shared interrupt support on PCI and EISA.
- */
-#define SA_PROBE		SA_ONESHOT
-#define SA_SAMPLE_RANDOM	SA_RESTART
-#define SA_SHIRQ		0x04000000
-#define SA_PERCPU_IRQ		0x02000000
-
 #endif /* __KERNEL__ */
 
-#define SIG_BLOCK          0	/* for blocking signals */
-#define SIG_UNBLOCK        1	/* for unblocking signals */
-#define SIG_SETMASK        2	/* for setting the signal mask */
-
-#define SIG_DFL	((__sighandler_t)0)	/* default signal handling */
-#define SIG_IGN	((__sighandler_t)1)	/* ignore signal */
-#define SIG_ERR	((__sighandler_t)-1)	/* error return from signal */
+#include <asm-generic/signal.h>
 
 # ifndef __ASSEMBLY__
 
@@ -142,9 +122,6 @@
 
 /* Avoid too many header ordering problems.  */
 struct siginfo;
-
-/* Type of a signal handler.  */
-typedef void __user (*__sighandler_t)(int);
 
 typedef struct sigaltstack {
 	void __user *ss_sp;
@@ -176,8 +153,6 @@ struct k_sigaction {
 #  include <asm/sigcontext.h>
 
 #define ptrace_signal_deliver(regs, cookie) do { } while (0)
-
-void set_sigdelayed(pid_t pid, int signo, int code, void __user *addr);
 
 #endif /* __KERNEL__ */
 

@@ -24,7 +24,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -39,7 +38,6 @@
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/bootmem.h>
 #include <linux/highmem.h>
 
 #include <asm/pgalloc.h>
@@ -63,6 +61,7 @@ extern char etext[], _stext[];
  */
 unsigned int tlb_44x_index = 0;
 unsigned int tlb_44x_hwater = 62;
+int icache_44x_need_flush;
 
 /*
  * "Pins" a 256MB TLB entry in AS0 for kernel lowmem
@@ -105,7 +104,7 @@ unsigned long __init mmu_mapin_ram(void)
 
 	/* Determine number of entries necessary to cover lowmem */
 	pinned_tlbs = (unsigned int)
-		(_ALIGN(total_lowmem, PPC44x_PIN_SIZE) >> PPC44x_PIN_SHIFT);
+		(_ALIGN(total_lowmem, PPC_PIN_SIZE) >> PPC44x_PIN_SHIFT);
 
 	/* Write upper watermark to save location */
 	tlb_44x_hwater = PPC44x_LOW_SLOT - pinned_tlbs;
@@ -113,7 +112,7 @@ unsigned long __init mmu_mapin_ram(void)
 	/* If necessary, set additional pinned TLBs */
 	if (pinned_tlbs > 1)
 		for (i = (PPC44x_LOW_SLOT-(pinned_tlbs-1)); i < PPC44x_LOW_SLOT; i++) {
-			unsigned int phys_addr = (PPC44x_LOW_SLOT-i) * PPC44x_PIN_SIZE;
+			unsigned int phys_addr = (PPC44x_LOW_SLOT-i) * PPC_PIN_SIZE;
 			ppc44x_pin_tlb(i, phys_addr+PAGE_OFFSET, phys_addr);
 		}
 

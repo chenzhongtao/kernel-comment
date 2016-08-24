@@ -32,7 +32,7 @@ struct sadb_ext {
 struct sadb_sa {
 	uint16_t	sadb_sa_len;
 	uint16_t	sadb_sa_exttype;
-	uint32_t	sadb_sa_spi;
+	__be32		sadb_sa_spi;
 	uint8_t		sadb_sa_replay;
 	uint8_t		sadb_sa_state;
 	uint8_t		sadb_sa_auth;
@@ -104,7 +104,7 @@ struct sadb_prop {
 /* followed by:
 	struct sadb_comb sadb_combs[(sadb_prop_len +
 		sizeof(uint64_t) - sizeof(struct sadb_prop)) /
-		sizeof(strut sadb_comb)]; */
+		sizeof(struct sadb_comb)]; */
 
 struct sadb_comb {
 	uint8_t		sadb_comb_auth;
@@ -159,7 +159,7 @@ struct sadb_spirange {
 struct sadb_x_kmprivate {
 	uint16_t	sadb_x_kmprivate_len;
 	uint16_t	sadb_x_kmprivate_exttype;
-	u_int32_t	sadb_x_kmprivate_reserved;
+	uint32_t	sadb_x_kmprivate_reserved;
 } __attribute__((packed));
 /* sizeof(struct sadb_x_kmprivate) == 8 */
 
@@ -211,10 +211,20 @@ struct sadb_x_nat_t_type {
 struct sadb_x_nat_t_port {
 	uint16_t	sadb_x_nat_t_port_len;
 	uint16_t	sadb_x_nat_t_port_exttype;
-	uint16_t	sadb_x_nat_t_port_port;
+	__be16		sadb_x_nat_t_port_port;
 	uint16_t	sadb_x_nat_t_port_reserved;
 } __attribute__((packed));
 /* sizeof(struct sadb_x_nat_t_port) == 8 */
+
+/* Generic LSM security context */
+struct sadb_x_sec_ctx {
+	uint16_t	sadb_x_sec_len;
+	uint16_t	sadb_x_sec_exttype;
+	uint8_t		sadb_x_ctx_alg;  /* LSMs: e.g., selinux == 1 */
+	uint8_t		sadb_x_ctx_doi;
+	uint16_t	sadb_x_ctx_len;
+} __attribute__((packed));
+/* sizeof(struct sadb_sec_ctx) = 8 */
 
 /* Message types */
 #define SADB_RESERVED		0
@@ -241,10 +251,12 @@ struct sadb_x_nat_t_port {
 #define SADB_X_SPDEXPIRE	21
 #define SADB_X_SPDDELETE2	22
 #define SADB_X_NAT_T_NEW_MAPPING	23
-#define SADB_MAX		23
+#define SADB_X_MIGRATE		24
+#define SADB_MAX		24
 
 /* Security Association flags */
 #define SADB_SAFLAGS_PFS	1
+#define SADB_SAFLAGS_NOPMTUDISC	0x20000000
 #define SADB_SAFLAGS_DECAP_DSCP	0x40000000
 #define SADB_SAFLAGS_NOECN	0x80000000
 
@@ -274,6 +286,7 @@ struct sadb_x_nat_t_port {
 #define SADB_X_AALG_SHA2_384HMAC	6
 #define SADB_X_AALG_SHA2_512HMAC	7
 #define SADB_X_AALG_RIPEMD160HMAC	8
+#define SADB_X_AALG_AES_XCBC_MAC	9
 #define SADB_X_AALG_NULL		251	/* kame */
 #define SADB_AALG_MAX			251
 
@@ -285,6 +298,7 @@ struct sadb_x_nat_t_port {
 #define SADB_X_EALG_BLOWFISHCBC		7
 #define SADB_EALG_NULL			11
 #define SADB_X_EALG_AESCBC		12
+#define SADB_X_EALG_CAMELLIACBC		22
 #define SADB_EALG_MAX                   253 /* last EALG */
 /* private allocations should use 249-255 (RFC2407) */
 #define SADB_X_EALG_SERPENTCBC  252     /* draft-ietf-ipsec-ciph-aes-cbc-00 */
@@ -324,7 +338,8 @@ struct sadb_x_nat_t_port {
 #define SADB_X_EXT_NAT_T_SPORT		21
 #define SADB_X_EXT_NAT_T_DPORT		22
 #define SADB_X_EXT_NAT_T_OA		23
-#define SADB_EXT_MAX			23
+#define SADB_X_EXT_SEC_CTX		24
+#define SADB_EXT_MAX			24
 
 /* Identity Extension values */
 #define SADB_IDENTTYPE_RESERVED	0

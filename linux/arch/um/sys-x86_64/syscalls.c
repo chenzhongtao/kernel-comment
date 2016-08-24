@@ -1,164 +1,94 @@
 /*
+ * Copyright (C) 2003 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Copyright 2003 PathScale, Inc.
  *
  * Licensed under the GPL
  */
 
 #include "linux/linkage.h"
-#include "linux/slab.h"
-#include "linux/shm.h"
-#include "asm/uaccess.h"
-#define __FRAME_OFFSETS
-#include "asm/ptrace.h"
-#include "asm/unistd.h"
+#include "linux/personality.h"
+#include "linux/utsname.h"
 #include "asm/prctl.h" /* XXX This should get the constants from libc */
-#include "choose-mode.h"
+#include "asm/uaccess.h"
+#include "os.h"
 
-asmlinkage long wrap_sys_shmat(int shmid, char __user *shmaddr, int shmflg)
+asmlinkage long sys_uname64(struct new_utsname __user * name)
 {
-	unsigned long raddr;
+	int err;
 
-	return do_shmat(shmid, shmaddr, shmflg, &raddr) ?: (long) raddr;
+	down_read(&uts_sem);
+	err = copy_to_user(name, utsname(), sizeof (*name));
+	up_read(&uts_sem);
+
+	if (personality(current->personality) == PER_LINUX32)
+		err |= copy_to_user(&name->machine, "i686", 5);
+
+	return err ? -EFAULT : 0;
 }
 
-#ifdef CONFIG_MODE_TT
-extern int modify_ldt(int func, void *ptr, unsigned long bytecount);
-
-long sys_modify_ldt_tt(int func, void *ptr, unsigned long bytecount)
+long arch_prctl(struct task_struct *task, int code, unsigned long __user *addr)
 {
-	/* XXX This should check VERIFY_WRITE depending on func, check this
-	 * in i386 as well.
-	 */
-	if(verify_area(VERIFY_READ, ptr, bytecount))
-		return(-EFAULT);
-	return(modify_ldt(func, ptr, bytecount));
-}
-#endif
-
-#ifdef CONFIG_MODE_SKAS
-extern int userspace_pid;
-
-#ifndef __NR_mm_indirect
-#define __NR_mm_indirect 241
-#endif
-
-long sys_modify_ldt_skas(int func, void *ptr, unsigned long bytecount)
-{
-	unsigned long args[6];
-        void *buf;
-        int res, n;
-
-        buf = kmalloc(bytecount, GFP_KERNEL);
-        if(buf == NULL)
-                return(-ENOMEM);
-
-        res = 0;
-
-        switch(func){
-        case 1:
-        case 0x11:
-                res = copy_from_user(buf, ptr, bytecount);
-                break;
-        }
-
-        if(res != 0){
-                res = -EFAULT;
-                goto out;
-        }
-
-	args[0] = func;
-	args[1] = (unsigned long) buf;
-	args[2] = bytecount;
-	res = syscall(__NR_mm_indirect, &current->mm->context.u,
-		      __NR_modify_ldt, args);
-
-        if(res < 0)
-                goto out;
-
-        switch(func){
-        case 0:
-        case 2:
-                n = res;
-                res = copy_to_user(ptr, buf, n);
-                if(res != 0)
-                        res = -EFAULT;
-                else
-                        res = n;
-                break;
-        }
-
- out:
-        kfree(buf);
-        return(res);
-}
-#endif
-
-long sys_modify_ldt(int func, void *ptr, unsigned long bytecount)
-{
-        return(CHOOSE_MODE_PROC(sys_modify_ldt_tt, sys_modify_ldt_skas, func,
-                                ptr, bytecount));
-}
-
-#ifdef CONFIG_MODE_TT
-extern long arch_prctl(int code, unsigned long addr);
-
-static long arch_prctl_tt(int code, unsigned long addr)
-{
-	unsigned long tmp;
+	unsigned long *ptr = addr, tmp;
 	long ret;
+	int pid = task->mm->context.id.u.pid;
 
-	switch(code){
-	case ARCH_SET_GS:
+	/*
+	 * With ARCH_SET_FS (and ARCH_SET_GS is treated similarly to
+	 * be safe), we need to call arch_prctl on the host because
+	 * setting %fs may result in something else happening (like a
+	 * GDT or thread.fs being set instead).  So, we let the host
+	 * fiddle the registers and thread struct and restore the
+	 * registers afterwards.
+	 *
+	 * So, the saved registers are stored to the process (this
+	 * needed because a stub may have been the last thing to run),
+	 * arch_prctl is run on the host, then the registers are read
+	 * back.
+	 */
+	switch (code) {
 	case ARCH_SET_FS:
-		ret = arch_prctl(code, addr);
+	case ARCH_SET_GS:
+		restore_registers(pid, &current->thread.regs.regs);
 		break;
 	case ARCH_GET_FS:
 	case ARCH_GET_GS:
-		ret = arch_prctl(code, (unsigned long) &tmp);
-		if(!ret)
-			ret = put_user(tmp, &addr);
-		break;
-	default:
-		ret = -EINVAL;
-		break;
+		/*
+		 * With these two, we read to a local pointer and
+		 * put_user it to the userspace pointer that we were
+		 * given.  If addr isn't valid (because it hasn't been
+		 * faulted in or is just bogus), we want put_user to
+		 * fault it in (or return -EFAULT) instead of having
+		 * the host return -EFAULT.
+		 */
+		ptr = &tmp;
 	}
 
-	return(ret);
-}
-#endif
+	ret = os_arch_prctl(pid, code, ptr);
+	if (ret)
+		return ret;
 
-#ifdef CONFIG_MODE_SKAS
-
-static long arch_prctl_skas(int code, unsigned long addr)
-{
-	long ret = 0;
-
-	switch(code){
-	case ARCH_SET_GS:
-		current->thread.regs.regs.skas.regs[GS_BASE / sizeof(unsigned long)] = addr;
-		break;
+	switch (code) {
 	case ARCH_SET_FS:
-		current->thread.regs.regs.skas.regs[FS_BASE / sizeof(unsigned long)] = addr;
+		current->thread.arch.fs = (unsigned long) ptr;
+		save_registers(pid, &current->thread.regs.regs);
+		break;
+	case ARCH_SET_GS:
+		save_registers(pid, &current->thread.regs.regs);
 		break;
 	case ARCH_GET_FS:
-		ret = put_user(current->thread.regs.regs.skas.regs[GS / sizeof(unsigned long)], &addr);
-	        break;
+		ret = put_user(tmp, addr);
+		break;
 	case ARCH_GET_GS:
-		ret = put_user(current->thread.regs.regs.skas.regs[FS / sizeof(unsigned \
-long)], &addr);
-	        break;
-	default:
-		ret = -EINVAL;
+		ret = put_user(tmp, addr);
 		break;
 	}
 
-	return(ret);
+	return ret;
 }
-#endif
 
 long sys_arch_prctl(int code, unsigned long addr)
 {
-	return(CHOOSE_MODE_PROC(arch_prctl_tt, arch_prctl_skas, code, addr));
+	return arch_prctl(current, code, (unsigned long __user *) addr);
 }
 
 long sys_clone(unsigned long clone_flags, unsigned long newsp,
@@ -166,26 +96,19 @@ long sys_clone(unsigned long clone_flags, unsigned long newsp,
 {
 	long ret;
 
-	/* XXX: normal arch do here this pass, and also pass the regs to
-	 * do_fork, instead of NULL. Currently the arch-independent code
-	 * ignores these values, while the UML code (actually it's
-	 * copy_thread) does the right thing. But this should change,
-	 probably. */
-	/*if (!newsp)
-		newsp = UPT_SP(current->thread.regs);*/
+	if (!newsp)
+		newsp = UPT_SP(&current->thread.regs.regs);
 	current->thread.forking = 1;
-	ret = do_fork(clone_flags, newsp, NULL, 0, parent_tid, child_tid);
+	ret = do_fork(clone_flags, newsp, &current->thread.regs, 0, parent_tid,
+		      child_tid);
 	current->thread.forking = 0;
-	return(ret);
+	return ret;
 }
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+void arch_switch_to(struct task_struct *from, struct task_struct *to)
+{
+	if ((to->thread.arch.fs == 0) || (to->mm == NULL))
+		return;
+
+	arch_prctl(to, ARCH_SET_FS, (void __user *) to->thread.arch.fs);
+}

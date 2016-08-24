@@ -1,5 +1,8 @@
 /*
  * Copyright (c) 2004 Topspin Communications.  All rights reserved.
+ * Copyright (c) 2005 Intel Corporation. All rights reserved.
+ * Copyright (c) 2005 Sun Microsystems, Inc. All rights reserved.
+ * Copyright (c) 2005 Voltaire, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -32,10 +35,12 @@
  * $Id: cache.c 1349 2004-12-16 21:09:43Z roland $
  */
 
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
+
+#include <rdma/ib_cache.h>
 
 #include "core_priv.h"
 
@@ -57,12 +62,13 @@ struct ib_update_work {
 
 static inline int start_port(struct ib_device *device)
 {
-	return device->node_type == IB_NODE_SWITCH ? 0 : 1;
+	return (device->node_type == RDMA_NODE_IB_SWITCH) ? 0 : 1;
 }
 
 static inline int end_port(struct ib_device *device)
 {
-	return device->node_type == IB_NODE_SWITCH ? 0 : device->phys_port_cnt;
+	return (device->node_type == RDMA_NODE_IB_SWITCH) ?
+		0 : device->phys_port_cnt;
 }
 
 int ib_get_cached_gid(struct ib_device *device,
@@ -112,7 +118,7 @@ int ib_find_cached_gid(struct ib_device *device,
 		cache = device->cache.gid_cache[p];
 		for (i = 0; i < cache->table_len; ++i) {
 			if (!memcmp(gid, &cache->table[i], sizeof *gid)) {
-				*port_num = p;
+				*port_num = p + start_port(device);
 				if (index)
 					*index = i;
 				ret = 0;
@@ -186,6 +192,24 @@ int ib_find_cached_pkey(struct ib_device *device,
 }
 EXPORT_SYMBOL(ib_find_cached_pkey);
 
+int ib_get_cached_lmc(struct ib_device *device,
+		      u8                port_num,
+		      u8                *lmc)
+{
+	unsigned long flags;
+	int ret = 0;
+
+	if (port_num < start_port(device) || port_num > end_port(device))
+		return -EINVAL;
+
+	read_lock_irqsave(&device->cache.lock, flags);
+	*lmc = device->cache.lmc_cache[port_num - start_port(device)];
+	read_unlock_irqrestore(&device->cache.lock, flags);
+
+	return ret;
+}
+EXPORT_SYMBOL(ib_get_cached_lmc);
+
 static void ib_cache_update(struct ib_device *device,
 			    u8                port)
 {
@@ -246,6 +270,8 @@ static void ib_cache_update(struct ib_device *device,
 	device->cache.pkey_cache[port - start_port(device)] = pkey_cache;
 	device->cache.gid_cache [port - start_port(device)] = gid_cache;
 
+	device->cache.lmc_cache[port - start_port(device)] = tprops->lmc;
+
 	write_unlock_irq(&device->cache.lock);
 
 	kfree(old_pkey_cache);
@@ -259,9 +285,10 @@ err:
 	kfree(tprops);
 }
 
-static void ib_cache_task(void *work_ptr)
+static void ib_cache_task(struct work_struct *_work)
 {
-	struct ib_update_work *work = work_ptr;
+	struct ib_update_work *work =
+		container_of(_work, struct ib_update_work, work);
 
 	ib_cache_update(work->device, work->port_num);
 	kfree(work);
@@ -276,10 +303,11 @@ static void ib_cache_event(struct ib_event_handler *handler,
 	    event->event == IB_EVENT_PORT_ACTIVE ||
 	    event->event == IB_EVENT_LID_CHANGE  ||
 	    event->event == IB_EVENT_PKEY_CHANGE ||
-	    event->event == IB_EVENT_SM_CHANGE) {
+	    event->event == IB_EVENT_SM_CHANGE   ||
+	    event->event == IB_EVENT_CLIENT_REREGISTER) {
 		work = kmalloc(sizeof *work, GFP_ATOMIC);
 		if (work) {
-			INIT_WORK(&work->work, ib_cache_task, work);
+			INIT_WORK(&work->work, ib_cache_task);
 			work->device   = event->device;
 			work->port_num = event->element.port_num;
 			schedule_work(&work->work);
@@ -297,10 +325,16 @@ static void ib_cache_setup_one(struct ib_device *device)
 		kmalloc(sizeof *device->cache.pkey_cache *
 			(end_port(device) - start_port(device) + 1), GFP_KERNEL);
 	device->cache.gid_cache =
-		kmalloc(sizeof *device->cache.pkey_cache *
+		kmalloc(sizeof *device->cache.gid_cache *
 			(end_port(device) - start_port(device) + 1), GFP_KERNEL);
 
-	if (!device->cache.pkey_cache || !device->cache.gid_cache) {
+	device->cache.lmc_cache = kmalloc(sizeof *device->cache.lmc_cache *
+					  (end_port(device) -
+					   start_port(device) + 1),
+					  GFP_KERNEL);
+
+	if (!device->cache.pkey_cache || !device->cache.gid_cache ||
+	    !device->cache.lmc_cache) {
 		printk(KERN_WARNING "Couldn't allocate cache "
 		       "for %s\n", device->name);
 		goto err;
@@ -328,6 +362,7 @@ err_cache:
 err:
 	kfree(device->cache.pkey_cache);
 	kfree(device->cache.gid_cache);
+	kfree(device->cache.lmc_cache);
 }
 
 static void ib_cache_cleanup_one(struct ib_device *device)
@@ -344,6 +379,7 @@ static void ib_cache_cleanup_one(struct ib_device *device)
 
 	kfree(device->cache.pkey_cache);
 	kfree(device->cache.gid_cache);
+	kfree(device->cache.lmc_cache);
 }
 
 static struct ib_client cache_client = {

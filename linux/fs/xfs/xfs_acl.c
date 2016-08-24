@@ -1,64 +1,51 @@
 /*
- * Copyright (c) 2001-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2001-2002,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
-
+#include "xfs_fs.h"
+#include "xfs_types.h"
+#include "xfs_bit.h"
 #include "xfs_inum.h"
-#include "xfs_dir.h"
+#include "xfs_ag.h"
 #include "xfs_dir2.h"
-#include "xfs_alloc_btree.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_alloc_btree.h"
 #include "xfs_ialloc_btree.h"
-#include "xfs_btree.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
 #include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
 #include "xfs_dinode.h"
 #include "xfs_inode.h"
+#include "xfs_btree.h"
 #include "xfs_acl.h"
-#include "xfs_mac.h"
 #include "xfs_attr.h"
+#include "xfs_vnodeops.h"
 
+#include <linux/capability.h>
 #include <linux/posix_acl_xattr.h>
 
-STATIC int	xfs_acl_setmode(vnode_t *, xfs_acl_t *, int *);
+STATIC int	xfs_acl_setmode(bhv_vnode_t *, xfs_acl_t *, int *);
 STATIC void     xfs_acl_filter_mode(mode_t, xfs_acl_t *);
 STATIC void	xfs_acl_get_endian(xfs_acl_t *);
 STATIC int	xfs_acl_access(uid_t, gid_t, xfs_acl_t *, mode_t, cred_t *);
 STATIC int	xfs_acl_invalid(xfs_acl_t *);
 STATIC void	xfs_acl_sync_mode(mode_t, xfs_acl_t *);
-STATIC void	xfs_acl_get_attr(vnode_t *, xfs_acl_t *, int, int, int *);
-STATIC void	xfs_acl_set_attr(vnode_t *, xfs_acl_t *, int, int *);
-STATIC int	xfs_acl_allow_set(vnode_t *, int);
+STATIC void	xfs_acl_get_attr(bhv_vnode_t *, xfs_acl_t *, int, int, int *);
+STATIC void	xfs_acl_set_attr(bhv_vnode_t *, xfs_acl_t *, int, int *);
+STATIC int	xfs_acl_allow_set(bhv_vnode_t *, int);
 
 kmem_zone_t *xfs_acl_zone;
 
@@ -68,7 +55,7 @@ kmem_zone_t *xfs_acl_zone;
  */
 int
 xfs_acl_vhasacl_access(
-	vnode_t		*vp)
+	bhv_vnode_t	*vp)
 {
 	int		error;
 
@@ -81,11 +68,11 @@ xfs_acl_vhasacl_access(
  */
 int
 xfs_acl_vhasacl_default(
-	vnode_t		*vp)
+	bhv_vnode_t	*vp)
 {
 	int		error;
 
-	if (vp->v_type != VDIR)
+	if (!VN_ISDIR(vp))
 		return 0;
 	xfs_acl_get_attr(vp, NULL, _ACL_TYPE_DEFAULT, ATTR_KERNOVAL, &error);
 	return (error == 0);
@@ -155,7 +142,7 @@ posix_acl_xattr_to_xfs(
 }
 
 /*
- * Comparison function called from qsort().
+ * Comparison function called from xfs_sort().
  * Primary key is ae_tag, secondary key is ae_id.
  */
 STATIC int
@@ -189,8 +176,8 @@ posix_acl_xfs_to_xattr(
 		return -ERANGE;
 
 	/* Need to sort src XFS ACL by <ae_tag,ae_id> */
-	qsort(src->acl_entry, src->acl_cnt, sizeof(src->acl_entry[0]),
-		xfs_acl_entry_compare);
+	xfs_sort(src->acl_entry, src->acl_cnt, sizeof(src->acl_entry[0]),
+		 xfs_acl_entry_compare);
 
 	dest->a_version = cpu_to_le32(POSIX_ACL_XATTR_VERSION);
 	dest_entry = &dest->a_entries[0];
@@ -220,7 +207,7 @@ posix_acl_xfs_to_xattr(
 
 int
 xfs_acl_vget(
-	vnode_t		*vp,
+	bhv_vnode_t	*vp,
 	void		*acl,
 	size_t		size,
 	int		kind)
@@ -252,10 +239,10 @@ xfs_acl_vget(
 			goto out;
 		}
 		if (kind == _ACL_TYPE_ACCESS) {
-			vattr_t	va;
+			bhv_vattr_t	va;
 
 			va.va_mask = XFS_AT_MODE;
-			VOP_GETATTR(vp, &va, 0, sys_cred, error);
+			error = xfs_getattr(xfs_vtoi(vp), &va, 0);
 			if (error)
 				goto out;
 			xfs_acl_sync_mode(va.va_mode, xfs_acl);
@@ -271,7 +258,7 @@ out:
 
 int
 xfs_acl_vremove(
-	vnode_t		*vp,
+	bhv_vnode_t	*vp,
 	int		kind)
 {
 	int		error;
@@ -279,9 +266,10 @@ xfs_acl_vremove(
 	VN_HOLD(vp);
 	error = xfs_acl_allow_set(vp, kind);
 	if (!error) {
-		VOP_ATTR_REMOVE(vp, kind == _ACL_TYPE_DEFAULT?
-				SGI_ACL_DEFAULT: SGI_ACL_FILE,
-				ATTR_ROOT, sys_cred, error);
+		error = xfs_attr_remove(xfs_vtoi(vp),
+						kind == _ACL_TYPE_DEFAULT?
+						SGI_ACL_DEFAULT: SGI_ACL_FILE,
+						ATTR_ROOT);
 		if (error == ENOATTR)
 			error = 0;	/* 'scool */
 	}
@@ -291,7 +279,7 @@ xfs_acl_vremove(
 
 int
 xfs_acl_vset(
-	vnode_t			*vp,
+	bhv_vnode_t		*vp,
 	void			*acl,
 	size_t			size,
 	int			kind)
@@ -381,20 +369,21 @@ xfs_acl_iaccess(
 
 STATIC int
 xfs_acl_allow_set(
-	vnode_t		*vp,
+	bhv_vnode_t	*vp,
 	int		kind)
 {
-	vattr_t		va;
+	xfs_inode_t	*ip = xfs_vtoi(vp);
+	bhv_vattr_t	va;
 	int		error;
 
-	if (vp->v_inode.i_flags & (S_IMMUTABLE|S_APPEND))
+	if (vp->i_flags & (S_IMMUTABLE|S_APPEND))
 		return EPERM;
-	if (kind == _ACL_TYPE_DEFAULT && vp->v_type != VDIR)
+	if (kind == _ACL_TYPE_DEFAULT && !VN_ISDIR(vp))
 		return ENOTDIR;
-	if (vp->v_vfsp->vfs_flag & VFS_RDONLY)
+	if (vp->i_sb->s_flags & MS_RDONLY)
 		return EROFS;
 	va.va_mask = XFS_AT_UID;
-	VOP_GETATTR(vp, &va, 0, NULL, error);
+	error = xfs_getattr(ip, &va, 0);
 	if (error)
 		return error;
 	if (va.va_uid != current->fsuid && !capable(CAP_FOWNER))
@@ -403,64 +392,27 @@ xfs_acl_allow_set(
 }
 
 /*
- * Look for any effective exec access, to allow CAP_DAC_OVERRIDE for exec.
- * Ignore checking for exec in USER_OBJ when there is no mask, because
- * in this "minimal acl" case we don't have any actual acls, and we
- * won't even be here.
- */
-STATIC int
-xfs_acl_find_any_exec(
-	xfs_acl_t	*fap)
-{
-	int		i;
-	int		masked_aces = 0;
-	int		mask = 0;
-
-	for (i = 0; i < fap->acl_cnt; i++) {
-		if (fap->acl_entry[i].ae_perm & ACL_EXECUTE) {
-			if (fap->acl_entry[i].ae_tag & (ACL_USER_OBJ|ACL_OTHER))
-				return 1;
-
-			if (fap->acl_entry[i].ae_tag == ACL_MASK)
-				mask = fap->acl_entry[i].ae_perm;
-			else
-				masked_aces |= fap->acl_entry[i].ae_perm;
-
-			if ((mask & masked_aces) & ACL_EXECUTE)
-				return 1;
-		}
-	}
-
-	return 0;
-}
-
-/*
  * The access control process to determine the access permission:
  *	if uid == file owner id, use the file owner bits.
  *	if gid == file owner group id, use the file group bits.
- *	scan ACL for a maching user or group, and use matched entry
+ *	scan ACL for a matching user or group, and use matched entry
  *	permission. Use total permissions of all matching group entries,
  *	until all acl entries are exhausted. The final permission produced
  *	by matching acl entry or entries needs to be & with group permission.
  *	if not owner, owning group, or matching entry in ACL, use file
- *	other bits.  Don't allow CAP_DAC_OVERRIDE on exec access unless
- *	there is some effective exec access somewhere.
+ *	other bits.  
  */
 STATIC int
 xfs_acl_capability_check(
 	mode_t		mode,
-	cred_t		*cr,
-	xfs_acl_t	*fap)
+	cred_t		*cr)
 {
 	if ((mode & ACL_READ) && !capable_cred(cr, CAP_DAC_READ_SEARCH))
 		return EACCES;
 	if ((mode & ACL_WRITE) && !capable_cred(cr, CAP_DAC_OVERRIDE))
 		return EACCES;
-	if ((mode & ACL_EXECUTE) &&
-	    (!capable_cred(cr, CAP_DAC_OVERRIDE) ||
-	     !xfs_acl_find_any_exec(fap))) {
+	if ((mode & ACL_EXECUTE) && !capable_cred(cr, CAP_DAC_OVERRIDE))
 		return EACCES;
-	}
 
 	return 0;
 }
@@ -485,6 +437,7 @@ xfs_acl_access(
 	int		seen_userobj = 0;
 
 	matched.ae_tag = 0;	/* Invalid type */
+	matched.ae_perm = 0;
 	md >>= 6;	/* Normalize the bits for comparison */
 
 	for (i = 0; i < fap->acl_cnt; i++) {
@@ -567,7 +520,7 @@ xfs_acl_access(
 		break;
 	}
 
-	return xfs_acl_capability_check(md, cr, fap);
+	return xfs_acl_capability_check(md, cr);
 }
 
 /*
@@ -653,7 +606,7 @@ xfs_acl_get_endian(
  */
 STATIC void
 xfs_acl_get_attr(
-	vnode_t		*vp,
+	bhv_vnode_t	*vp,
 	xfs_acl_t	*aclp,
 	int		kind,
 	int		flags,
@@ -663,9 +616,10 @@ xfs_acl_get_attr(
 
 	ASSERT((flags & ATTR_KERNOVAL) ? (aclp == NULL) : 1);
 	flags |= ATTR_ROOT;
-	VOP_ATTR_GET(vp,
-		kind == _ACL_TYPE_ACCESS ? SGI_ACL_FILE : SGI_ACL_DEFAULT,
-		(char *)aclp, &len, flags, sys_cred, *error);
+	*error = xfs_attr_get(xfs_vtoi(vp),
+					kind == _ACL_TYPE_ACCESS ?
+					SGI_ACL_FILE : SGI_ACL_DEFAULT,
+					(char *)aclp, &len, flags, sys_cred);
 	if (*error || (flags & ATTR_KERNOVAL))
 		return;
 	xfs_acl_get_endian(aclp);
@@ -676,7 +630,7 @@ xfs_acl_get_attr(
  */
 STATIC void
 xfs_acl_set_attr(
-	vnode_t		*vp,
+	bhv_vnode_t	*vp,
 	xfs_acl_t	*aclp,
 	int		kind,
 	int		*error)
@@ -701,19 +655,20 @@ xfs_acl_set_attr(
 		INT_SET(newace->ae_perm, ARCH_CONVERT, ace->ae_perm);
 	}
 	INT_SET(newacl->acl_cnt, ARCH_CONVERT, aclp->acl_cnt);
-	VOP_ATTR_SET(vp,
-		kind == _ACL_TYPE_ACCESS ? SGI_ACL_FILE: SGI_ACL_DEFAULT,
-		(char *)newacl, len, ATTR_ROOT, sys_cred, *error);
+	*error = xfs_attr_set(xfs_vtoi(vp),
+				kind == _ACL_TYPE_ACCESS ?
+				SGI_ACL_FILE: SGI_ACL_DEFAULT,
+				(char *)newacl, len, ATTR_ROOT);
 	_ACL_FREE(newacl);
 }
 
 int
 xfs_acl_vtoacl(
-	vnode_t		*vp,
+	bhv_vnode_t	*vp,
 	xfs_acl_t	*access_acl,
 	xfs_acl_t	*default_acl)
 {
-	vattr_t		va;
+	bhv_vattr_t	va;
 	int		error = 0;
 
 	if (access_acl) {
@@ -725,7 +680,7 @@ xfs_acl_vtoacl(
 		if (!error) {
 			/* Got the ACL, need the mode... */
 			va.va_mask = XFS_AT_MODE;
-			VOP_GETATTR(vp, &va, 0, sys_cred, error);
+			error = xfs_getattr(xfs_vtoi(vp), &va, 0);
 		}
 
 		if (error)
@@ -748,8 +703,8 @@ xfs_acl_vtoacl(
  */
 int
 xfs_acl_inherit(
-	vnode_t		*vp,
-	vattr_t		*vap,
+	bhv_vnode_t	*vp,
+	mode_t		mode,
 	xfs_acl_t	*pdaclp)
 {
 	xfs_acl_t	*cacl;
@@ -777,7 +732,7 @@ xfs_acl_inherit(
 		return ENOMEM;
 
 	memcpy(cacl, pdaclp, sizeof(xfs_acl_t));
-	xfs_acl_filter_mode(vap->va_mode, cacl);
+	xfs_acl_filter_mode(mode, cacl);
 	xfs_acl_setmode(vp, cacl, &basicperms);
 
 	/*
@@ -787,7 +742,7 @@ xfs_acl_inherit(
 	 * If the new file is a directory, its default ACL is a copy of
 	 * the containing directory's default ACL.
 	 */
-	if (vp->v_type == VDIR)
+	if (VN_ISDIR(vp))
 		xfs_acl_set_attr(vp, pdaclp, _ACL_TYPE_DEFAULT, &error);
 	if (!error && !basicperms)
 		xfs_acl_set_attr(vp, cacl, _ACL_TYPE_ACCESS, &error);
@@ -804,11 +759,11 @@ xfs_acl_inherit(
  */
 STATIC int
 xfs_acl_setmode(
-	vnode_t		*vp,
+	bhv_vnode_t	*vp,
 	xfs_acl_t	*acl,
 	int		*basicperms)
 {
-	vattr_t		va;
+	bhv_vattr_t	va;
 	xfs_acl_entry_t	*ap;
 	xfs_acl_entry_t	*gap = NULL;
 	int		i, error, nomask = 1;
@@ -823,7 +778,7 @@ xfs_acl_setmode(
 	 * mode.  The m:: bits take precedence over the g:: bits.
 	 */
 	va.va_mask = XFS_AT_MODE;
-	VOP_GETATTR(vp, &va, 0, sys_cred, error);
+	error = xfs_getattr(xfs_vtoi(vp), &va, 0);
 	if (error)
 		return error;
 
@@ -857,8 +812,7 @@ xfs_acl_setmode(
 	if (gap && nomask)
 		va.va_mode |= gap->ae_perm << 3;
 
-	VOP_SETATTR(vp, &va, 0, sys_cred, error);
-	return error;
+	return xfs_setattr(xfs_vtoi(vp), &va, 0, sys_cred);
 }
 
 /*

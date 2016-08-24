@@ -13,23 +13,14 @@
  * 06/16/00	A. Mallick	added csd/ssd/tssd for ia32 support
  */
 
-#include <linux/config.h>
 
 #include <asm/intrinsics.h>
 #include <asm/kregs.h>
 #include <asm/ptrace.h>
 #include <asm/ustack.h>
 
-/* Our arch specific arch_init_sched_domain is in arch/ia64/kernel/domain.c */
-#define ARCH_HAS_SCHED_DOMAIN
-
+#define IA64_NUM_PHYS_STACK_REG	96
 #define IA64_NUM_DBG_REGS	8
-/*
- * Limits for PMC and PMD are set to less than maximum architected values
- * but should be sufficient for a while
- */
-#define IA64_NUM_PMC_REGS	32
-#define IA64_NUM_PMD_REGS	32
 
 #define DEFAULT_MAP_BASE	__IA64_UL_CONST(0x2000000000000000)
 #define DEFAULT_TASK_SIZE	__IA64_UL_CONST(0xa000000000000000)
@@ -43,14 +34,6 @@
 #define TASK_SIZE		(current->thread.task_size)
 
 /*
- * MM_VM_SIZE(mm) gives the maximum address (plus 1) which may contain a mapping for
- * address-space MM.  Note that with 32-bit tasks, this is still DEFAULT_TASK_SIZE,
- * because the kernel may have installed helper-mappings above TASK_SIZE.  For example,
- * for x86 emulation, the LDT and GDT are mapped above TASK_SIZE.
- */
-#define MM_VM_SIZE(mm)		DEFAULT_TASK_SIZE
-
-/*
  * This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
@@ -61,7 +44,8 @@
 #define IA64_THREAD_PM_VALID	(__IA64_UL(1) << 2)	/* performance registers valid? */
 #define IA64_THREAD_UAC_NOPRINT	(__IA64_UL(1) << 3)	/* don't log unaligned accesses */
 #define IA64_THREAD_UAC_SIGBUS	(__IA64_UL(1) << 4)	/* generate SIGBUS on unaligned acc. */
-							/* bit 5 is currently unused */
+#define IA64_THREAD_MIGRATION	(__IA64_UL(1) << 5)	/* require migration
+							   sync at ctx sw */
 #define IA64_THREAD_FPEMU_NOPRINT (__IA64_UL(1) << 6)	/* don't log any fpswa faults */
 #define IA64_THREAD_FPEMU_SIGFPE  (__IA64_UL(1) << 7)	/* send a SIGFPE for fpswa faults */
 
@@ -145,9 +129,6 @@ struct cpuinfo_ia64 {
 	__u64 nsec_per_cyc;	/* (1000000000<<IA64_NSEC_PER_CYC_SHIFT)/itc_freq */
 	__u64 unimpl_va_mask;	/* mask of unimplemented virtual address bits (from PAL) */
 	__u64 unimpl_pa_mask;	/* mask of unimplemented physical address bits (from PAL) */
-	__u64 *pgd_quick;
-	__u64 *pmd_quick;
-	__u64 pgtable_cache_sz;
 	__u64 itc_freq;		/* frequency of ITC counter */
 	__u64 proc_freq;	/* frequency of processor */
 	__u64 cyc_per_usec;	/* itc_freq/1000000 */
@@ -159,6 +140,13 @@ struct cpuinfo_ia64 {
 #ifdef CONFIG_SMP
 	__u64 loops_per_jiffy;
 	int cpu;
+	__u32 socket_id;	/* physical processor socket id */
+	__u16 core_id;		/* core id */
+	__u16 thread_id;	/* thread id */
+	__u16 num_log;		/* Total number of logical processors on
+				 * this socket that were successfully booted */
+	__u8  cores_per_socket;	/* Cores per processor socket */
+	__u8  threads_per_core;	/* Threads per core */
 #endif
 
 	/* CPUID-derived information: */
@@ -170,6 +158,7 @@ struct cpuinfo_ia64 {
 	__u8 family;
 	__u8 archrev;
 	char vendor[16];
+	char *model_name;
 
 #ifdef CONFIG_NUMA
 	struct ia64_node_data *node_data;
@@ -187,7 +176,6 @@ DECLARE_PER_CPU(struct cpuinfo_ia64, cpu_info);
 #define local_cpu_data		(&__ia64_per_cpu_var(cpu_info))
 #define cpu_data(cpu)		(&per_cpu(cpu_info, cpu))
 
-extern void identify_cpu (struct cpuinfo_ia64 *);
 extern void print_cpu_info (struct cpuinfo_ia64 *);
 
 typedef struct {
@@ -223,7 +211,7 @@ struct desc_struct {
 	unsigned int a, b;
 };
 
-#define desc_empty(desc)		(!((desc)->a + (desc)->b))
+#define desc_empty(desc)		(!((desc)->a | (desc)->b))
 #define desc_equal(desc1, desc2)	(((desc1)->a == (desc2)->a) && ((desc1)->b == (desc2)->b))
 
 #define GDT_ENTRY_TLS_ENTRIES	3
@@ -232,7 +220,7 @@ struct desc_struct {
 
 #define TLS_SIZE (GDT_ENTRY_TLS_ENTRIES * 8)
 
-struct partial_page_list;
+struct ia64_partial_page_list;
 #endif
 
 struct thread_struct {
@@ -254,7 +242,7 @@ struct thread_struct {
 	__u64 fdr;			/* IA32 fp except. data reg */
 	__u64 old_k1;			/* old value of ar.k1 */
 	__u64 old_iob;			/* old IOBase value */
-	struct partial_page_list *ppl;	/* partial page list for 4K page size issue */
+	struct ia64_partial_page_list *ppl; /* partial page list for 4K page size issue */
         /* cached TLS descriptors. */
 	struct desc_struct tls_array[GDT_ENTRY_TLS_ENTRIES];
 
@@ -270,13 +258,9 @@ struct thread_struct {
 # define INIT_THREAD_IA32
 #endif /* CONFIG_IA32_SUPPORT */
 #ifdef CONFIG_PERFMON
-	__u64 pmcs[IA64_NUM_PMC_REGS];
-	__u64 pmds[IA64_NUM_PMD_REGS];
 	void *pfm_context;		     /* pointer to detailed PMU context */
 	unsigned long pfm_needs_checking;    /* when >0, pending perfmon work on kernel exit */
-# define INIT_THREAD_PM		.pmcs =			{0UL, },  \
-				.pmds =			{0UL, },  \
-				.pfm_context =		NULL,     \
+# define INIT_THREAD_PM		.pfm_context =		NULL,     \
 				.pfm_needs_checking =	0UL,
 #else
 # define INIT_THREAD_PM
@@ -311,9 +295,9 @@ struct thread_struct {
 	regs->ar_bspstore = current->thread.rbs_bot;						\
 	regs->ar_fpsr = FPSR_DEFAULT;								\
 	regs->loadrs = 0;									\
-	regs->r8 = current->mm->dumpable;	/* set "don't zap registers" flag */		\
+	regs->r8 = get_dumpable(current->mm);	/* set "don't zap registers" flag */		\
 	regs->r12 = new_sp - 16;	/* allocate 16 byte scratch area */			\
-	if (unlikely(!current->mm->dumpable)) {							\
+	if (unlikely(!get_dumpable(current->mm))) {							\
 		/*										\
 		 * Zap scratch regs to avoid leaking bits between processes with different	\
 		 * uid/privileges.								\
@@ -359,7 +343,7 @@ extern unsigned long get_wchan (struct task_struct *p);
 /* Return instruction pointer of blocked task TSK.  */
 #define KSTK_EIP(tsk)					\
   ({							\
-	struct pt_regs *_regs = ia64_task_regs(tsk);	\
+	struct pt_regs *_regs = task_pt_regs(tsk);	\
 	_regs->cr_iip + ia64_psr(_regs)->ri;		\
   })
 
@@ -407,7 +391,10 @@ extern void ia64_setreg_unknown_kr (void);
  * task_struct at this point.
  */
 
-/* Return TRUE if task T owns the fph partition of the CPU we're running on. */
+/*
+ * Return TRUE if task T owns the fph partition of the CPU we're running on.
+ * Must be called from code that has preemption disabled.
+ */
 #define ia64_is_local_fpu_owner(t)								\
 ({												\
 	struct task_struct *__ia64_islfo_task = (t);						\
@@ -415,7 +402,10 @@ extern void ia64_setreg_unknown_kr (void);
 	 && __ia64_islfo_task == (struct task_struct *) ia64_get_kr(IA64_KR_FPU_OWNER));	\
 })
 
-/* Mark task T as owning the fph partition of the CPU we're running on. */
+/*
+ * Mark task T as owning the fph partition of the CPU we're running on.
+ * Must be called from code that has preemption disabled.
+ */
 #define ia64_set_local_fpu_owner(t) do {						\
 	struct task_struct *__ia64_slfo_task = (t);					\
 	__ia64_slfo_task->thread.last_fph_cpu = smp_processor_id();			\
@@ -559,6 +549,23 @@ ia64_eoi (void)
 }
 
 #define cpu_relax()	ia64_hint(ia64_hint_pause)
+
+static inline int
+ia64_get_irr(unsigned int vector)
+{
+	unsigned int reg = vector / 64;
+	unsigned int bit = vector % 64;
+	u64 irr;
+
+	switch (reg) {
+	case 0: irr = ia64_getreg(_IA64_REG_CR_IRR0); break;
+	case 1: irr = ia64_getreg(_IA64_REG_CR_IRR1); break;
+	case 2: irr = ia64_getreg(_IA64_REG_CR_IRR2); break;
+	case 3: irr = ia64_getreg(_IA64_REG_CR_IRR3); break;
+	}
+
+	return test_bit(bit, &irr);
+}
 
 static inline void
 ia64_set_lrr0 (unsigned long val)

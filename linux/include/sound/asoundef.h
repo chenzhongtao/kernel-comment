@@ -3,7 +3,7 @@
 
 /*
  *  Advanced Linux Sound Architecture - ALSA - Driver
- *  Copyright (c) 1994-2000 by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) 1994-2000 by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -185,7 +185,7 @@
 #define MIDI_CTL_LSB_GENERAL_PURPOSE4 	0x33
 #define MIDI_CTL_SUSTAIN              	0x40
 #define MIDI_CTL_PORTAMENTO           	0x41
-#define MIDI_CTL_SUSTENUTO            	0x42
+#define MIDI_CTL_SOSTENUTO            	0x42
 #define MIDI_CTL_SOFT_PEDAL           	0x43
 #define MIDI_CTL_LEGATO_FOOTSWITCH	0x44
 #define MIDI_CTL_HOLD2                	0x45

@@ -9,20 +9,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  *
- * Modifications:
- *     16-May-2003 BJD  Created initial version
- *     16-Aug-2003 BJD  Fixed header files and copyright, added URL
- *     05-Sep-2003 BJD  Moved to v2.6 kernel
- *     06-Jan-2003 BJD  Updates for <arch/map.h>
- *     18-Jan-2003 BJD  Added serial port configuration
- *     17-Feb-2003 BJD  Copied to mach-ipaq.c
- *     21-Aug-2004 BJD  Added struct s3c2410_board
- *     04-Sep-2004 BJD  Changed uart init, renamed ipaq_ -> h1940_
- *     18-Oct-2004 BJD  Updated new board structure name
- *     04-Nov-2004 BJD  Change for new serial clock
- *     04-Jan-2005 BJD  Updated uart init call
- *     10-Jan-2005 BJD  Removed include of s3c2410.h
- *     14-Jan-2005 BJD  Added clock init
 */
 
 #include <linux/kernel.h>
@@ -31,35 +17,48 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/sysdev.h>
+#include <linux/serial_core.h>
+#include <linux/platform_device.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 
 #include <asm/hardware.h>
-#include <asm/hardware/iomd.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
-//#include <asm/debug-ll.h>
-#include <asm/arch/regs-serial.h>
+#include <asm/plat-s3c/regs-serial.h>
+#include <asm/arch/regs-lcd.h>
+#include <asm/arch/regs-gpio.h>
+#include <asm/arch/regs-clock.h>
 
-#include <linux/serial_core.h>
+#include <asm/arch/h1940.h>
+#include <asm/arch/h1940-latch.h>
+#include <asm/arch/fb.h>
+#include <asm/plat-s3c24xx/udc.h>
 
-#include "clock.h"
-#include "devs.h"
-#include "cpu.h"
+#include <asm/plat-s3c24xx/clock.h>
+#include <asm/plat-s3c24xx/devs.h>
+#include <asm/plat-s3c24xx/cpu.h>
+#include <asm/plat-s3c24xx/pm.h>
 
 static struct map_desc h1940_iodesc[] __initdata = {
-	/* nothing here yet */
+	[0] = {
+		.virtual	= (unsigned long)H1940_LATCH,
+		.pfn		= __phys_to_pfn(H1940_PA_LATCH),
+		.length		= SZ_16K,
+		.type		= MT_DEVICE
+	},
 };
 
 #define UCON S3C2410_UCON_DEFAULT | S3C2410_UCON_UCLK
 #define ULCON S3C2410_LCON_CS8 | S3C2410_LCON_PNONE | S3C2410_LCON_STOPB
 #define UFCON S3C2410_UFCON_RXTRIG8 | S3C2410_UFCON_FIFOMODE
 
-static struct s3c2410_uartcfg h1940_uartcfgs[] = {
+static struct s3c2410_uartcfg h1940_uartcfgs[] __initdata = {
 	[0] = {
 		.hwport	     = 0,
 		.flags	     = 0,
@@ -85,8 +84,100 @@ static struct s3c2410_uartcfg h1940_uartcfgs[] = {
 	}
 };
 
+/* Board control latch control */
+
+static unsigned int latch_state = H1940_LATCH_DEFAULT;
+
+void h1940_latch_control(unsigned int clear, unsigned int set)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+
+	latch_state &= ~clear;
+	latch_state |= set;
+
+	__raw_writel(latch_state, H1940_LATCH);
+
+	local_irq_restore(flags);
+}
+
+EXPORT_SYMBOL_GPL(h1940_latch_control);
+
+static void h1940_udc_pullup(enum s3c2410_udc_cmd_e cmd)
+{
+	printk(KERN_DEBUG "udc: pullup(%d)\n",cmd);
+
+	switch (cmd)
+	{
+		case S3C2410_UDC_P_ENABLE :
+			h1940_latch_control(0, H1940_LATCH_USB_DP);
+			break;
+		case S3C2410_UDC_P_DISABLE :
+			h1940_latch_control(H1940_LATCH_USB_DP, 0);
+			break;
+		case S3C2410_UDC_P_RESET :
+			break;
+		default:
+			break;
+	}
+}
+
+static struct s3c2410_udc_mach_info h1940_udc_cfg __initdata = {
+	.udc_command		= h1940_udc_pullup,
+	.vbus_pin		= S3C2410_GPG5,
+	.vbus_pin_inverted	= 1,
+};
 
 
+/**
+ * Set lcd on or off
+ **/
+static struct s3c2410fb_display h1940_lcd __initdata = {
+	.lcdcon5=	S3C2410_LCDCON5_FRM565 | \
+			S3C2410_LCDCON5_INVVLINE | \
+			S3C2410_LCDCON5_HWSWP,
+
+	.type =		S3C2410_LCDCON1_TFT,
+	.width =	240,
+	.height =	320,
+	.pixclock =	260000,
+	.xres =		240,
+	.yres =		320,
+	.bpp =		16,
+	.left_margin =	20,
+	.right_margin =	8,
+	.hsync_len =	4,
+	.upper_margin =	8,
+	.lower_margin = 7,
+	.vsync_len =	1,
+};
+
+static struct s3c2410fb_mach_info h1940_fb_info __initdata = {
+	.displays = &h1940_lcd,
+	.num_displays = 1,
+	.default_display = 0,
+
+	.lpcsel=	0x02,
+	.gpccon=	0xaa940659,
+	.gpccon_mask=	0xffffffff,
+	.gpcup=		0x0000ffff,
+	.gpcup_mask=	0xffffffff,
+	.gpdcon=	0xaa84aaa0,
+	.gpdcon_mask=	0xffffffff,
+	.gpdup=		0x0000faff,
+	.gpdup_mask=	0xffffffff,
+};
+
+static struct platform_device s3c_device_leds = {
+	.name             = "h1940-leds",
+	.id               = -1,
+};
+
+static struct platform_device s3c_device_bluetooth = {
+	.name             = "h1940-bt",
+	.id               = -1,
+};
 
 static struct platform_device *h1940_devices[] __initdata = {
 	&s3c_device_usb,
@@ -94,32 +185,60 @@ static struct platform_device *h1940_devices[] __initdata = {
 	&s3c_device_wdt,
 	&s3c_device_i2c,
 	&s3c_device_iis,
+	&s3c_device_usbgadget,
+	&s3c_device_leds,
+	&s3c_device_bluetooth,
 };
 
-static struct s3c24xx_board h1940_board __initdata = {
-	.devices       = h1940_devices,
-	.devices_count = ARRAY_SIZE(h1940_devices)
-};
-
-void __init h1940_map_io(void)
+static void __init h1940_map_io(void)
 {
 	s3c24xx_init_io(h1940_iodesc, ARRAY_SIZE(h1940_iodesc));
 	s3c24xx_init_clocks(0);
 	s3c24xx_init_uarts(h1940_uartcfgs, ARRAY_SIZE(h1940_uartcfgs));
-	s3c24xx_set_board(&h1940_board);
+
+	/* setup PM */
+
+#ifdef CONFIG_PM_H1940
+	memcpy(phys_to_virt(H1940_SUSPEND_RESUMEAT), h1940_pm_return, 1024);
+#endif
+	s3c2410_pm_init();
 }
 
-void __init h1940_init_irq(void)
+static void __init h1940_init_irq(void)
 {
 	s3c24xx_init_irq();
+}
 
+static void __init h1940_init(void)
+{
+	u32 tmp;
+
+	s3c24xx_fb_set_platdata(&h1940_fb_info);
+ 	s3c24xx_udc_set_platdata(&h1940_udc_cfg);
+
+	/* Turn off suspend on both USB ports, and switch the
+	 * selectable USB port to USB device mode. */
+
+	s3c2410_modify_misccr(S3C2410_MISCCR_USBHOST |
+			      S3C2410_MISCCR_USBSUSPND0 |
+			      S3C2410_MISCCR_USBSUSPND1, 0x0);
+
+	tmp = (
+		 0x78 << S3C2410_PLLCON_MDIVSHIFT)
+	      | (0x02 << S3C2410_PLLCON_PDIVSHIFT)
+	      | (0x03 << S3C2410_PLLCON_SDIVSHIFT);
+	writel(tmp, S3C2410_UPLLCON);
+
+	platform_add_devices(h1940_devices, ARRAY_SIZE(h1940_devices));
 }
 
 MACHINE_START(H1940, "IPAQ-H1940")
-     MAINTAINER("Ben Dooks <ben@fluff.org>")
-     BOOT_MEM(S3C2410_SDRAM_PA, S3C2410_PA_UART, S3C2410_VA_UART)
-     BOOT_PARAMS(S3C2410_SDRAM_PA + 0x100)
-     MAPIO(h1940_map_io)
-     INITIRQ(h1940_init_irq)
+	/* Maintainer: Ben Dooks <ben@fluff.org> */
+	.phys_io	= S3C2410_PA_UART,
+	.io_pg_offst	= (((u32)S3C24XX_VA_UART) >> 18) & 0xfffc,
+	.boot_params	= S3C2410_SDRAM_PA + 0x100,
+	.map_io		= h1940_map_io,
+	.init_irq	= h1940_init_irq,
+	.init_machine	= h1940_init,
 	.timer		= &s3c24xx_timer,
 MACHINE_END

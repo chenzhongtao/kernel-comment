@@ -21,9 +21,10 @@
 #include <linux/utsname.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/ipc.h>
 
 #include <asm/uaccess.h>
-#include <asm/ipc.h>
+#include <asm/unistd.h>
 
 /* #define DEBUG_UNIMP_SYSCALL */
 
@@ -219,6 +220,21 @@ out:
 	return err;
 }
 
+int sparc_mmap_check(unsigned long addr, unsigned long len, unsigned long flags)
+{
+	if (ARCH_SUN4C_SUN4 &&
+	    (len > 0x20000000 ||
+	     ((flags & MAP_FIXED) &&
+	      addr < 0xe0000000 && addr + len > 0x20000000)))
+		return -EINVAL;
+
+	/* See asm-sparc/uaccess.h */
+	if (len > TASK_SIZE - PAGE_SIZE || addr + len > TASK_SIZE - PAGE_SIZE)
+		return -EINVAL;
+
+	return 0;
+}
+
 /* Linux version of mmap */
 static unsigned long do_mmap2(unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long fd,
@@ -233,25 +249,13 @@ static unsigned long do_mmap2(unsigned long addr, unsigned long len,
 			goto out;
 	}
 
-	retval = -EINVAL;
 	len = PAGE_ALIGN(len);
-	if (ARCH_SUN4C_SUN4 &&
-	    (len > 0x20000000 ||
-	     ((flags & MAP_FIXED) &&
-	      addr < 0xe0000000 && addr + len > 0x20000000)))
-		goto out_putf;
-
-	/* See asm-sparc/uaccess.h */
-	if (len > TASK_SIZE - PAGE_SIZE || addr + len > TASK_SIZE - PAGE_SIZE)
-		goto out_putf;
-
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
 	down_write(&current->mm->mmap_sem);
 	retval = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
 	up_write(&current->mm->mmap_sem);
 
-out_putf:
 	if (file)
 		fput(file);
 out:
@@ -353,7 +357,7 @@ c_sys_nis_syscall (struct pt_regs *regs)
 	if (count++ > 5)
 		return -ENOSYS;
 	printk ("%s[%d]: Unimplemented SPARC system call %d\n",
-		current->comm, current->pid, (int)regs->u_regs[1]);
+		current->comm, task_pid_nr(current), (int)regs->u_regs[1]);
 #ifdef DEBUG_UNIMP_SYSCALL	
 	show_regs (regs);
 #endif
@@ -399,7 +403,7 @@ sparc_sigaction (int sig, const struct old_sigaction __user *act,
 	if (act) {
 		unsigned long mask;
 
-		if (verify_area(VERIFY_READ, act, sizeof(*act)) ||
+		if (!access_ok(VERIFY_READ, act, sizeof(*act)) ||
 		    __get_user(new_ka.sa.sa_handler, &act->sa_handler) ||
 		    __get_user(new_ka.sa.sa_restorer, &act->sa_restorer))
 			return -EFAULT;
@@ -417,7 +421,7 @@ sparc_sigaction (int sig, const struct old_sigaction __user *act,
 		 * deadlock us if we held the signal lock on SMP.  So for
 		 * now I take the easy way out and do no locking.
 		 */
-		if (verify_area(VERIFY_WRITE, oact, sizeof(*oact)) ||
+		if (!access_ok(VERIFY_WRITE, oact, sizeof(*oact)) ||
 		    __put_user(old_ka.sa.sa_handler, &oact->sa_handler) ||
 		    __put_user(old_ka.sa.sa_restorer, &oact->sa_restorer))
 			return -EFAULT;
@@ -465,21 +469,45 @@ sys_rt_sigaction(int sig,
 
 asmlinkage int sys_getdomainname(char __user *name, int len)
 {
- 	int nlen;
- 	int err = -EFAULT;
+ 	int nlen, err;
  	
+	if (len < 0)
+		return -EINVAL;
+
  	down_read(&uts_sem);
  	
-	nlen = strlen(system_utsname.domainname) + 1;
+	nlen = strlen(utsname()->domainname) + 1;
+	err = -EINVAL;
+	if (nlen > len)
+		goto out;
 
-	if (nlen < len)
-		len = nlen;
-	if (len > __NEW_UTS_LEN)
-		goto done;
-	if (copy_to_user(name, system_utsname.domainname, len))
-		goto done;
-	err = 0;
-done:
+	err = -EFAULT;
+	if (!copy_to_user(name, utsname()->domainname, nlen))
+		err = 0;
+
+out:
 	up_read(&uts_sem);
 	return err;
+}
+
+/*
+ * Do a system call from kernel instead of calling sys_execve so we
+ * end up with proper pt_regs.
+ */
+int kernel_execve(const char *filename, char *const argv[], char *const envp[])
+{
+	long __res;
+	register long __g1 __asm__ ("g1") = __NR_execve;
+	register long __o0 __asm__ ("o0") = (long)(filename);
+	register long __o1 __asm__ ("o1") = (long)(argv);
+	register long __o2 __asm__ ("o2") = (long)(envp);
+	asm volatile ("t 0x10\n\t"
+		      "bcc 1f\n\t"
+		      "mov %%o0, %0\n\t"
+		      "sub %%g0, %%o0, %0\n\t"
+		      "1:\n\t"
+		      : "=r" (__res), "=&r" (__o0)
+		      : "1" (__o0), "r" (__o1), "r" (__o2), "r" (__g1)
+		      : "cc");
+	return __res;
 }

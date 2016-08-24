@@ -11,8 +11,8 @@
  */
 
 #include <linux/mm.h>
+#include <linux/if_tr.h>
 #include <linux/sysctl.h>
-#include <linux/config.h>
 
 #ifdef CONFIG_TR
 extern int sysctl_tr_rif_timeout;

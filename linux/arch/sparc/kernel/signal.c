@@ -7,7 +7,6 @@
  *  Copyright (C) 1997 Eddie C. Dost   (ecd@skynet.be)
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -18,7 +17,6 @@
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/binfmts.h>	/* do_coredum */
 #include <linux/bitops.h>
 
@@ -34,9 +32,6 @@
 extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 		   void *fpqueue, unsigned long *fpqdepth);
 extern void fpload(unsigned long *fpregs, unsigned long *fsr);
-
-asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
-			 unsigned long orig_o0, int restart_syscall);
 
 /* Signal frames: the original one (compatible with SunOS):
  *
@@ -95,98 +90,30 @@ struct rt_signal_frame {
 #define NF_ALIGNEDSZ  (((sizeof(struct new_signal_frame) + 7) & (~7)))
 #define RT_ALIGNEDSZ  (((sizeof(struct rt_signal_frame) + 7) & (~7)))
 
-/*
- * atomically swap in the new signal mask, and wait for a signal.
- * This is really tricky on the Sparc, watch out...
- */
-asmlinkage void _sigpause_common(old_sigset_t set, struct pt_regs *regs)
+static int _sigpause_common(old_sigset_t set)
 {
-	sigset_t saveset;
-
 	set &= _BLOCKABLE;
 	spin_lock_irq(&current->sighand->siglock);
-	saveset = current->blocked;
+	current->saved_sigmask = current->blocked;
 	siginitset(&current->blocked, set);
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	regs->pc = regs->npc;
-	regs->npc += 4;
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	set_thread_flag(TIF_RESTORE_SIGMASK);
 
-	/* Condition codes and return value where set here for sigpause,
-	 * and so got used by setup_frame, which again causes sigreturn()
-	 * to return -EINTR.
-	 */
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		/*
-		 * Return -EINTR and set condition code here,
-		 * so the interrupted system call actually returns
-		 * these.
-		 */
-		regs->psr |= PSR_C;
-		regs->u_regs[UREG_I0] = EINTR;
-		if (do_signal(&saveset, regs, 0, 0))
-			return;
-	}
+	return -ERESTARTNOHAND;
 }
 
-asmlinkage void do_sigpause(unsigned int set, struct pt_regs *regs)
+asmlinkage int sys_sigpause(unsigned int set)
 {
-	_sigpause_common(set, regs);
+	return _sigpause_common(set);
 }
 
-asmlinkage void do_sigsuspend (struct pt_regs *regs)
+asmlinkage int sys_sigsuspend(old_sigset_t set)
 {
-	_sigpause_common(regs->u_regs[UREG_I0], regs);
-}
-
-asmlinkage void do_rt_sigsuspend(sigset_t __user *uset, size_t sigsetsize,
-				 struct pt_regs *regs)
-{
-	sigset_t oldset, set;
-
-	/* XXX: Don't preclude handling different sized sigset_t's.  */
-	if (sigsetsize != sizeof(sigset_t)) {
-		regs->psr |= PSR_C;
-		regs->u_regs[UREG_I0] = EINVAL;
-		return;
-	}
-
-	if (copy_from_user(&set, uset, sizeof(set))) {
-		regs->psr |= PSR_C;
-		regs->u_regs[UREG_I0] = EFAULT;
-		return;
-	}
-
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	oldset = current->blocked;
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-
-	regs->pc = regs->npc;
-	regs->npc += 4;
-
-	/* Condition codes and return value where set here for sigpause,
-	 * and so got used by setup_frame, which again causes sigreturn()
-	 * to return -EINTR.
-	 */
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		/*
-		 * Return -EINTR and set condition code here,
-		 * so the interrupted system call actually returns
-		 * these.
-		 */
-		regs->psr |= PSR_C;
-		regs->u_regs[UREG_I0] = EINTR;
-		if (do_signal(&oldset, regs, 0, 0))
-			return;
-	}
+	return _sigpause_common(set);
 }
 
 static inline int
@@ -205,7 +132,7 @@ restore_fpu_state(struct pt_regs *regs, __siginfo_fpu_t __user *fpu)
 	set_used_math();
 	clear_tsk_thread_flag(current, TIF_USEDFPU);
 
-	if (verify_area(VERIFY_READ, fpu, sizeof(*fpu)))
+	if (!access_ok(VERIFY_READ, fpu, sizeof(*fpu)))
 		return -EFAULT;
 
 	err = __copy_from_user(&current->thread.float_regs[0], &fpu->si_float_regs[0],
@@ -231,7 +158,7 @@ static inline void do_new_sigreturn (struct pt_regs *regs)
 	sf = (struct new_signal_frame __user *) regs->u_regs[UREG_FP];
 
 	/* 1. Make sure we are not getting garbage from the user */
-	if (verify_area(VERIFY_READ, sf, sizeof(*sf)))
+	if (!access_ok(VERIFY_READ, sf, sizeof(*sf)))
 		goto segv_and_exit;
 
 	if (((unsigned long) sf) & 3)
@@ -297,7 +224,7 @@ asmlinkage void do_sigreturn(struct pt_regs *regs)
 	scptr = (struct sigcontext __user *) regs->u_regs[UREG_I0];
 
 	/* Check sanity of the user arg. */
-	if (verify_area(VERIFY_READ, scptr, sizeof(struct sigcontext)) ||
+	if (!access_ok(VERIFY_READ, scptr, sizeof(struct sigcontext)) ||
 	    (((unsigned long) scptr) & 3))
 		goto segv_and_exit;
 
@@ -356,7 +283,7 @@ asmlinkage void do_rt_sigreturn(struct pt_regs *regs)
 
 	synchronize_user_stack();
 	sf = (struct rt_signal_frame __user *) regs->u_regs[UREG_FP];
-	if (verify_area(VERIFY_READ, sf, sizeof(*sf)) ||
+	if (!access_ok(VERIFY_READ, sf, sizeof(*sf)) ||
 	    (((unsigned long) sf) & 0x03))
 		goto segv;
 
@@ -1034,13 +961,12 @@ handle_signal(unsigned long signr, struct k_sigaction *ka,
 		else
 			setup_frame(&ka->sa, regs, signr, oldset, info);
 	}
-	if (!(ka->sa.sa_flags & SA_NOMASK)) {
-		spin_lock_irq(&current->sighand->siglock);
-		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	spin_lock_irq(&current->sighand->siglock);
+	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	if (!(ka->sa.sa_flags & SA_NOMASK))
 		sigaddset(&current->blocked, signr);
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 }
 
 static inline void syscall_restart(unsigned long orig_i0, struct pt_regs *regs,
@@ -1068,13 +994,13 @@ static inline void syscall_restart(unsigned long orig_i0, struct pt_regs *regs,
  * want to handle. Thus you cannot kill init even with a SIGKILL even by
  * mistake.
  */
-asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
-			 unsigned long orig_i0, int restart_syscall)
+asmlinkage void do_signal(struct pt_regs * regs, unsigned long orig_i0, int restart_syscall)
 {
 	siginfo_t info;
 	struct sparc_deliver_cookie cookie;
 	struct k_sigaction ka;
 	int signr;
+	sigset_t *oldset;
 
 	/*
 	 * XXX Disable svr4 signal handling until solaris emulation works.
@@ -1090,7 +1016,9 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 	cookie.restart_syscall = restart_syscall;
 	cookie.orig_i0 = orig_i0;
 
-	if (!oldset)
+	if (test_thread_flag(TIF_RESTORE_SIGMASK))
+		oldset = &current->saved_sigmask;
+	else
 		oldset = &current->blocked;
 
 	signr = get_signal_to_deliver(&info, &ka, regs, &cookie);
@@ -1099,7 +1027,14 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 			syscall_restart(cookie.orig_i0, regs, &ka.sa);
 		handle_signal(signr, &ka, &info, oldset,
 			      regs, svr4_signal);
-		return 1;
+		/* a signal was successfully delivered; the saved
+		 * sigmask will have been stored in the signal frame,
+		 * and will be restored by sigreturn, so we can simply
+		 * clear the TIF_RESTORE_SIGMASK flag.
+		 */
+		if (test_thread_flag(TIF_RESTORE_SIGMASK))
+			clear_thread_flag(TIF_RESTORE_SIGMASK);
+		return;
 	}
 	if (cookie.restart_syscall &&
 	    (regs->u_regs[UREG_I0] == ERESTARTNOHAND ||
@@ -1116,7 +1051,14 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 		regs->pc -= 4;
 		regs->npc -= 4;
 	}
-	return 0;
+
+	/* if there's no signal to deliver, we just put the saved sigmask
+	 * back
+	 */
+	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
+		clear_thread_flag(TIF_RESTORE_SIGMASK);
+		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
+	}
 }
 
 asmlinkage int

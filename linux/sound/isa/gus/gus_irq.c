@@ -1,6 +1,6 @@
 /*
  *  Routine for IRQ handling from GF1/InterWave chip
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -30,9 +30,9 @@
 #define STAT_ADD(x)	while (0) { ; }
 #endif
 
-irqreturn_t snd_gus_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t snd_gus_interrupt(int irq, void *dev_id)
 {
-	snd_gus_card_t * gus = dev_id;
+	struct snd_gus_card * gus = dev_id;
 	unsigned char status;
 	int loop = 100;
 	int handled = 0;
@@ -45,16 +45,18 @@ __again:
 	// snd_printk("IRQ: status = 0x%x\n", status);
 	if (status & 0x02) {
 		STAT_ADD(gus->gf1.interrupt_stat_midi_in);
-		gus->gf1.interrupt_handler_midi_in(gus);
+		if (gus->gf1.interrupt_handler_midi_in)
+			gus->gf1.interrupt_handler_midi_in(gus);
 	}
 	if (status & 0x01) {
 		STAT_ADD(gus->gf1.interrupt_stat_midi_out);
-		gus->gf1.interrupt_handler_midi_out(gus);
+		if (gus->gf1.interrupt_handler_midi_out)
+			gus->gf1.interrupt_handler_midi_out(gus);
 	}
 	if (status & (0x20 | 0x40)) {
 		unsigned int already, _current_;
 		unsigned char voice_status, voice;
-		snd_gus_voice_t *pvoice;
+		struct snd_gus_voice *pvoice;
 
 		already = 0;
 		while (((voice_status = snd_gf1_i_read8(gus, SNDRV_GF1_GB_VOICES_IRQ)) & 0xc0) != 0xc0) {
@@ -85,20 +87,24 @@ __again:
 	}
 	if (status & 0x04) {
 		STAT_ADD(gus->gf1.interrupt_stat_timer1);
-		gus->gf1.interrupt_handler_timer1(gus);
+		if (gus->gf1.interrupt_handler_timer1)
+			gus->gf1.interrupt_handler_timer1(gus);
 	}
 	if (status & 0x08) {
 		STAT_ADD(gus->gf1.interrupt_stat_timer2);
-		gus->gf1.interrupt_handler_timer2(gus);
+		if (gus->gf1.interrupt_handler_timer2)
+			gus->gf1.interrupt_handler_timer2(gus);
 	}
 	if (status & 0x80) {
 		if (snd_gf1_i_look8(gus, SNDRV_GF1_GB_DRAM_DMA_CONTROL) & 0x40) {
 			STAT_ADD(gus->gf1.interrupt_stat_dma_write);
-			gus->gf1.interrupt_handler_dma_write(gus);
+			if (gus->gf1.interrupt_handler_dma_write)
+				gus->gf1.interrupt_handler_dma_write(gus);
 		}
 		if (snd_gf1_i_look8(gus, SNDRV_GF1_GB_REC_DMA_CONTROL) & 0x40) {
 			STAT_ADD(gus->gf1.interrupt_stat_dma_read);
-			gus->gf1.interrupt_handler_dma_read(gus);
+			if (gus->gf1.interrupt_handler_dma_read)
+				gus->gf1.interrupt_handler_dma_read(gus);
 		}
 	}
 	if (--loop > 0)
@@ -107,11 +113,11 @@ __again:
 }
 
 #ifdef CONFIG_SND_DEBUG
-static void snd_gus_irq_info_read(snd_info_entry_t *entry, 
-				  snd_info_buffer_t * buffer)
+static void snd_gus_irq_info_read(struct snd_info_entry *entry, 
+				  struct snd_info_buffer *buffer)
 {
-	snd_gus_card_t *gus;
-	snd_gus_voice_t *pvoice;
+	struct snd_gus_card *gus;
+	struct snd_gus_voice *pvoice;
 	int idx;
 
 	gus = entry->private_data;
@@ -131,12 +137,12 @@ static void snd_gus_irq_info_read(snd_info_entry_t *entry,
 	}
 }
 
-void snd_gus_irq_profile_init(snd_gus_card_t *gus)
+void snd_gus_irq_profile_init(struct snd_gus_card *gus)
 {
-	snd_info_entry_t *entry;
+	struct snd_info_entry *entry;
 
 	if (! snd_card_proc_new(gus->card, "gusirq", &entry))
-		snd_info_set_text_ops(entry, gus, 1024, snd_gus_irq_info_read);
+		snd_info_set_text_ops(entry, gus, snd_gus_irq_info_read);
 }
 
 #endif

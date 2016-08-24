@@ -20,10 +20,7 @@
 #ifdef __KERNEL__
 
 #include <asm/ptrace.h>
-#include <asm/procinfo.h>
 #include <asm/types.h>
-
-#define KERNEL_STACK_SIZE	PAGE_SIZE
 
 union debug_insn {
 	u32	arm;
@@ -51,6 +48,12 @@ struct thread_struct {
 
 #define INIT_THREAD  {	}
 
+#ifdef CONFIG_MMU
+#define nommu_start_thread(regs) do { } while (0)
+#else
+#define nommu_start_thread(regs) regs->ARM_r10 = current->mm->start_data
+#endif
+
 #define start_thread(regs,pc,sp)					\
 ({									\
 	unsigned long *stack = (unsigned long *)sp;			\
@@ -67,6 +70,7 @@ struct thread_struct {
 	regs->ARM_r2 = stack[2];	/* r2 (envp) */			\
 	regs->ARM_r1 = stack[1];	/* r1 (argv) */			\
 	regs->ARM_r0 = stack[0];	/* r0 (argc) */			\
+	nommu_start_thread(regs);					\
 })
 
 /* Forward declaration, a strange C thing */
@@ -87,8 +91,11 @@ unsigned long get_wchan(struct task_struct *p);
  */
 extern int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
 
-#define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1019])
-#define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1017])
+#define task_pt_regs(p) \
+	((struct pt_regs *)(THREAD_START_SP + task_stack_page(p)) - 1)
+
+#define KSTK_EIP(tsk)	task_pt_regs(tsk)->ARM_pc
+#define KSTK_ESP(tsk)	task_pt_regs(tsk)->ARM_sp
 
 /*
  * Prefetching support - only ARMv5.
@@ -96,14 +103,14 @@ extern int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
 #if __LINUX_ARM_ARCH__ >= 5
 
 #define ARCH_HAS_PREFETCH
-#define prefetch(ptr)				\
-	({					\
-		__asm__ __volatile__(		\
-		"pld\t%0"			\
-		:				\
-		: "o" (*(char *)(ptr))		\
-		: "cc");			\
-	})
+static inline void prefetch(const void *ptr)
+{
+	__asm__ __volatile__(
+		"pld\t%0"
+		:
+		: "o" (*(char *)ptr)
+		: "cc");
+}
 
 #define ARCH_HAS_PREFETCHW
 #define prefetchw(ptr)	prefetch(ptr)

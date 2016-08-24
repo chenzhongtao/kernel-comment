@@ -10,7 +10,7 @@
 
 NI_SYSCALL							/* 0 */
 SYSCALL(sys_exit,sys_exit,sys32_exit_wrapper)
-SYSCALL(sys_fork_glue,sys_fork_glue,sys_fork_glue)
+SYSCALL(sys_fork,sys_fork,sys_fork)
 SYSCALL(sys_read,sys_read,sys32_read_wrapper)
 SYSCALL(sys_write,sys_write,sys32_write_wrapper)
 SYSCALL(sys_open,sys_open,sys32_open_wrapper)			/* 5 */
@@ -19,7 +19,7 @@ SYSCALL(sys_restart_syscall,sys_restart_syscall,sys_restart_syscall)
 SYSCALL(sys_creat,sys_creat,sys32_creat_wrapper)
 SYSCALL(sys_link,sys_link,sys32_link_wrapper)
 SYSCALL(sys_unlink,sys_unlink,sys32_unlink_wrapper)		/* 10 */
-SYSCALL(sys_execve_glue,sys_execve_glue,sys32_execve_glue)
+SYSCALL(sys_execve,sys_execve,sys32_execve)
 SYSCALL(sys_chdir,sys_chdir,sys32_chdir_wrapper)
 SYSCALL(sys_time,sys_ni_syscall,sys32_time_wrapper)		/* old time syscall */
 SYSCALL(sys_mknod,sys_mknod,sys32_mknod_wrapper)
@@ -80,7 +80,7 @@ NI_SYSCALL							/* old sgetmask syscall*/
 NI_SYSCALL							/* old ssetmask syscall*/
 SYSCALL(sys_setreuid16,sys_ni_syscall,sys32_setreuid16_wrapper)	/* old setreuid16 syscall */
 SYSCALL(sys_setregid16,sys_ni_syscall,sys32_setregid16_wrapper)	/* old setregid16 syscall */
-SYSCALL(sys_sigsuspend_glue,sys_sigsuspend_glue,sys32_sigsuspend_glue)
+SYSCALL(sys_sigsuspend,sys_sigsuspend,sys_sigsuspend_wrapper)
 SYSCALL(sys_sigpending,sys_sigpending,compat_sys_sigpending_wrapper)
 SYSCALL(sys_sethostname,sys_sethostname,sys32_sethostname_wrapper)
 SYSCALL(sys_setrlimit,sys_setrlimit,compat_sys_setrlimit_wrapper)	/* 75 */
@@ -124,15 +124,15 @@ NI_SYSCALL							/* old "idle" system call */
 NI_SYSCALL							/* vm86old for i386 */
 SYSCALL(sys_wait4,sys_wait4,compat_sys_wait4_wrapper)
 SYSCALL(sys_swapoff,sys_swapoff,sys32_swapoff_wrapper)		/* 115 */
-SYSCALL(sys_sysinfo,sys_sysinfo,sys32_sysinfo_wrapper)
+SYSCALL(sys_sysinfo,sys_sysinfo,compat_sys_sysinfo_wrapper)
 SYSCALL(sys_ipc,sys_ipc,sys32_ipc_wrapper)
 SYSCALL(sys_fsync,sys_fsync,sys32_fsync_wrapper)
-SYSCALL(sys_sigreturn_glue,sys_sigreturn_glue,sys32_sigreturn_glue)
-SYSCALL(sys_clone_glue,sys_clone_glue,sys32_clone_glue)		/* 120 */
+SYSCALL(sys_sigreturn,sys_sigreturn,sys32_sigreturn)
+SYSCALL(sys_clone,sys_clone,sys32_clone)			/* 120 */
 SYSCALL(sys_setdomainname,sys_setdomainname,sys32_setdomainname_wrapper)
 SYSCALL(sys_newuname,s390x_newuname,sys32_newuname_wrapper)
 NI_SYSCALL							/* modify_ldt for i386 */
-SYSCALL(sys_adjtimex,sys_adjtimex,sys32_adjtimex_wrapper)
+SYSCALL(sys_adjtimex,sys_adjtimex,compat_sys_adjtimex_wrapper)
 SYSCALL(sys_mprotect,sys_mprotect,sys32_mprotect_wrapper)	/* 125 */
 SYSCALL(sys_sigprocmask,sys_sigprocmask,compat_sys_sigprocmask_wrapper)
 NI_SYSCALL							/* old "create module" */
@@ -181,24 +181,24 @@ SYSCALL(sys_nfsservctl,sys_nfsservctl,compat_sys_nfsservctl_wrapper)
 SYSCALL(sys_setresgid16,sys_ni_syscall,sys32_setresgid16_wrapper)	/* 170 old setresgid16 syscall */
 SYSCALL(sys_getresgid16,sys_ni_syscall,sys32_getresgid16_wrapper)	/* old getresgid16 syscall */
 SYSCALL(sys_prctl,sys_prctl,sys32_prctl_wrapper)
-SYSCALL(sys_rt_sigreturn_glue,sys_rt_sigreturn_glue,sys32_rt_sigreturn_glue)
+SYSCALL(sys_rt_sigreturn,sys_rt_sigreturn,sys32_rt_sigreturn)
 SYSCALL(sys_rt_sigaction,sys_rt_sigaction,sys32_rt_sigaction_wrapper)
 SYSCALL(sys_rt_sigprocmask,sys_rt_sigprocmask,sys32_rt_sigprocmask_wrapper)	/* 175 */
 SYSCALL(sys_rt_sigpending,sys_rt_sigpending,sys32_rt_sigpending_wrapper)
 SYSCALL(sys_rt_sigtimedwait,sys_rt_sigtimedwait,compat_sys_rt_sigtimedwait_wrapper)
 SYSCALL(sys_rt_sigqueueinfo,sys_rt_sigqueueinfo,sys32_rt_sigqueueinfo_wrapper)
-SYSCALL(sys_rt_sigsuspend_glue,sys_rt_sigsuspend_glue,sys32_rt_sigsuspend_glue)
+SYSCALL(sys_rt_sigsuspend,sys_rt_sigsuspend,compat_sys_rt_sigsuspend_wrapper)
 SYSCALL(sys_pread64,sys_pread64,sys32_pread64_wrapper)		/* 180 */
 SYSCALL(sys_pwrite64,sys_pwrite64,sys32_pwrite64_wrapper)
 SYSCALL(sys_chown16,sys_ni_syscall,sys32_chown16_wrapper)	/* old chown16 syscall */
 SYSCALL(sys_getcwd,sys_getcwd,sys32_getcwd_wrapper)
 SYSCALL(sys_capget,sys_capget,sys32_capget_wrapper)
 SYSCALL(sys_capset,sys_capset,sys32_capset_wrapper)		/* 185 */
-SYSCALL(sys_sigaltstack_glue,sys_sigaltstack_glue,sys32_sigaltstack_glue)
+SYSCALL(sys_sigaltstack,sys_sigaltstack,sys32_sigaltstack)
 SYSCALL(sys_sendfile,sys_sendfile64,sys32_sendfile_wrapper)
 NI_SYSCALL							/* streams1 */
 NI_SYSCALL							/* streams2 */
-SYSCALL(sys_vfork_glue,sys_vfork_glue,sys_vfork_glue)		/* 190 */
+SYSCALL(sys_vfork,sys_vfork,sys_vfork)				/* 190 */
 SYSCALL(sys_getrlimit,sys_getrlimit,compat_sys_getrlimit_wrapper)
 SYSCALL(sys_mmap2,sys_mmap2,sys32_mmap2_wrapper)
 SYSCALL(sys_truncate64,sys_ni_syscall,sys32_truncate64_wrapper)
@@ -275,7 +275,7 @@ NI_SYSCALL							/* reserved for vserver */
 SYSCALL(s390_fadvise64_64,sys_ni_syscall,sys32_fadvise64_64_wrapper)
 SYSCALL(sys_statfs64,sys_statfs64,compat_sys_statfs64_wrapper)
 SYSCALL(sys_fstatfs64,sys_fstatfs64,compat_sys_fstatfs64_wrapper)
-NI_SYSCALL							/* 267 new sys_remap_file_pages */
+SYSCALL(sys_remap_file_pages,sys_remap_file_pages,sys32_remap_file_pages_wrapper)
 NI_SYSCALL							/* 268 sys_mbind */
 NI_SYSCALL							/* 269 sys_get_mempolicy */
 NI_SYSCALL							/* 270 sys_set_mempolicy */
@@ -285,4 +285,45 @@ SYSCALL(sys_mq_timedsend,sys_mq_timedsend,compat_sys_mq_timedsend_wrapper)
 SYSCALL(sys_mq_timedreceive,sys_mq_timedreceive,compat_sys_mq_timedreceive_wrapper)
 SYSCALL(sys_mq_notify,sys_mq_notify,compat_sys_mq_notify_wrapper) /* 275 */
 SYSCALL(sys_mq_getsetattr,sys_mq_getsetattr,compat_sys_mq_getsetattr_wrapper)
-NI_SYSCALL							/* reserved for kexec */
+SYSCALL(sys_kexec_load,sys_kexec_load,compat_sys_kexec_load_wrapper)
+SYSCALL(sys_add_key,sys_add_key,compat_sys_add_key_wrapper)
+SYSCALL(sys_request_key,sys_request_key,compat_sys_request_key_wrapper)
+SYSCALL(sys_keyctl,sys_keyctl,compat_sys_keyctl)		/* 280 */
+SYSCALL(sys_waitid,sys_waitid,compat_sys_waitid_wrapper)
+SYSCALL(sys_ioprio_set,sys_ioprio_set,sys_ioprio_set_wrapper)
+SYSCALL(sys_ioprio_get,sys_ioprio_get,sys_ioprio_get_wrapper)
+SYSCALL(sys_inotify_init,sys_inotify_init,sys_inotify_init)
+SYSCALL(sys_inotify_add_watch,sys_inotify_add_watch,sys_inotify_add_watch_wrapper)	/* 285 */
+SYSCALL(sys_inotify_rm_watch,sys_inotify_rm_watch,sys_inotify_rm_watch_wrapper)
+NI_SYSCALL							/* 287 sys_migrate_pages */
+SYSCALL(sys_openat,sys_openat,compat_sys_openat_wrapper)
+SYSCALL(sys_mkdirat,sys_mkdirat,sys_mkdirat_wrapper)
+SYSCALL(sys_mknodat,sys_mknodat,sys_mknodat_wrapper)	/* 290 */
+SYSCALL(sys_fchownat,sys_fchownat,sys_fchownat_wrapper)
+SYSCALL(sys_futimesat,sys_futimesat,compat_sys_futimesat_wrapper)
+SYSCALL(sys_fstatat64,sys_newfstatat,sys32_fstatat64_wrapper)
+SYSCALL(sys_unlinkat,sys_unlinkat,sys_unlinkat_wrapper)
+SYSCALL(sys_renameat,sys_renameat,sys_renameat_wrapper)	/* 295 */
+SYSCALL(sys_linkat,sys_linkat,sys_linkat_wrapper)
+SYSCALL(sys_symlinkat,sys_symlinkat,sys_symlinkat_wrapper)
+SYSCALL(sys_readlinkat,sys_readlinkat,sys_readlinkat_wrapper)
+SYSCALL(sys_fchmodat,sys_fchmodat,sys_fchmodat_wrapper)
+SYSCALL(sys_faccessat,sys_faccessat,sys_faccessat_wrapper)	/* 300 */
+SYSCALL(sys_pselect6,sys_pselect6,compat_sys_pselect6_wrapper)
+SYSCALL(sys_ppoll,sys_ppoll,compat_sys_ppoll_wrapper)
+SYSCALL(sys_unshare,sys_unshare,sys_unshare_wrapper)
+SYSCALL(sys_set_robust_list,sys_set_robust_list,compat_sys_set_robust_list_wrapper)
+SYSCALL(sys_get_robust_list,sys_get_robust_list,compat_sys_get_robust_list_wrapper)
+SYSCALL(sys_splice,sys_splice,sys_splice_wrapper)
+SYSCALL(sys_sync_file_range,sys_sync_file_range,sys_sync_file_range_wrapper)
+SYSCALL(sys_tee,sys_tee,sys_tee_wrapper)
+SYSCALL(sys_vmsplice,sys_vmsplice,compat_sys_vmsplice_wrapper)
+NI_SYSCALL							/* 310 sys_move_pages */
+SYSCALL(sys_getcpu,sys_getcpu,sys_getcpu_wrapper)
+SYSCALL(sys_epoll_pwait,sys_epoll_pwait,compat_sys_epoll_pwait_wrapper)
+SYSCALL(sys_utimes,sys_utimes,compat_sys_utimes_wrapper)
+SYSCALL(s390_fallocate,sys_fallocate,sys_fallocate_wrapper)
+SYSCALL(sys_utimensat,sys_utimensat,compat_sys_utimensat_wrapper)	/* 315 */
+SYSCALL(sys_signalfd,sys_signalfd,compat_sys_signalfd_wrapper)
+SYSCALL(sys_timerfd,sys_timerfd,compat_sys_timerfd_wrapper)
+SYSCALL(sys_eventfd,sys_eventfd,sys_eventfd_wrapper)

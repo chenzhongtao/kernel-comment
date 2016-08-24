@@ -15,8 +15,8 @@ void __show_regs(struct pt_regs * regs)
 {
 	printk("\n");
 	print_modules();
-	printk("Pid: %d, comm: %.20s %s %s\n",
-	       current->pid, current->comm, print_tainted(), system_utsname.release);
+	printk("Pid: %d, comm: %.20s %s %s\n", task_pid_nr(current),
+		current->comm, print_tainted(), init_utsname()->release);
 	printk("RIP: %04lx:[<%016lx>] ", PT_REGS_CS(regs) & 0xffff,
 	       PT_REGS_RIP(regs));
 	printk("\nRSP: %016lx  EFLAGS: %08lx\n", PT_REGS_RSP(regs),
@@ -36,14 +36,5 @@ void __show_regs(struct pt_regs * regs)
 void show_regs(struct pt_regs *regs)
 {
 	__show_regs(regs);
-	show_trace((unsigned long *) &regs);
+	show_trace(current, (unsigned long *) &regs);
 }
-
-/* Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

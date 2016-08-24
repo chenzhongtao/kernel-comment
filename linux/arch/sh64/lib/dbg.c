@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <asm/mmu_context.h>
 
 typedef u64 regType_t;
@@ -136,6 +137,8 @@ void print_itlb(void)
 
 /* ======================================================================= */
 
+#ifdef CONFIG_POOR_MANS_STRACE
+
 #include "syscalltab.h"
 
 struct ring_node {
@@ -151,6 +154,17 @@ struct ring_node {
 static struct ring_node event_ring[16];
 static int event_ptr = 0;
 
+struct stored_syscall_data {
+	int pid;
+	int syscall_number;
+};
+
+#define N_STORED_SYSCALLS 16
+
+static struct stored_syscall_data stored_syscalls[N_STORED_SYSCALLS];
+static int syscall_next=0;
+static int syscall_next_print=0;
+
 void evt_debug(int evt, int ret_addr, int event, int tra, struct pt_regs *regs)
 {
 	int syscallno = tra & 0xff;
@@ -160,7 +174,7 @@ void evt_debug(int evt, int ret_addr, int event, int tra, struct pt_regs *regs)
 	struct ring_node *rr;
 
 	pid = current->pid;
-	stack_bottom = (unsigned long) current->thread_info;
+	stack_bottom = (unsigned long) task_stack_page(current);
 	asm volatile("ori r15, 0, %0" : "=r" (sp));
 	rr = event_ring + event_ptr;
 	rr->evt = evt;
@@ -187,15 +201,35 @@ void evt_debug(int evt, int ret_addr, int event, int tra, struct pt_regs *regs)
 	event_ptr = (event_ptr + 1) & 15;
 
 	if ((event == 2) && (evt == 0x160)) {
-		if (syscallno < NUM_SYSCALL_INFO_ENTRIES)
-			printk("Task %d: %s()\n",
-			       current->pid,
-			       syscall_info_table[syscallno].name);
+		if (syscallno < NUM_SYSCALL_INFO_ENTRIES) {
+			/* Store the syscall information to print later.  We
+			 * can't print this now - currently we're running with
+			 * SR.BL=1, so we can't take a tlbmiss (which could occur
+			 * in the console drivers under printk).
+			 *
+			 * Just overwrite old entries on ring overflow - this
+			 * is only for last-hope debugging. */
+			stored_syscalls[syscall_next].pid = current->pid;
+			stored_syscalls[syscall_next].syscall_number = syscallno;
+			syscall_next++;
+			syscall_next &= (N_STORED_SYSCALLS - 1);
+		}
+	}
+}
+
+static void drain_syscalls(void) {
+	while (syscall_next_print != syscall_next) {
+		printk("Task %d: %s()\n",
+			stored_syscalls[syscall_next_print].pid,
+			syscall_info_table[stored_syscalls[syscall_next_print].syscall_number].name);
+			syscall_next_print++;
+			syscall_next_print &= (N_STORED_SYSCALLS - 1);
 	}
 }
 
 void evt_debug2(unsigned int ret)
 {
+	drain_syscalls();
 	printk("Task %d: syscall returns %08x\n", current->pid, ret);
 }
 
@@ -230,6 +264,8 @@ void evt_debug_ret_from_exc(struct pt_regs *regs)
 	rr->pc = regs->pc;
 	event_ptr = (event_ptr + 1) & 15;
 }
+
+#endif /* CONFIG_POOR_MANS_STRACE */
 
 /* ======================================================================= */
 
@@ -348,7 +384,7 @@ void show_excp_regs(char *from, int trapnr, int signr, struct pt_regs *regs)
 /* ======================================================================= */
 
 /*
-** Depending on <base> scan the MMU, Data or Instrction side
+** Depending on <base> scan the MMU, Data or Instruction side
 ** looking for a valid mapping matching Eaddr & asid.
 ** Return -1 if not found or the TLB id entry otherwise.
 ** Note: it works only for 4k pages!

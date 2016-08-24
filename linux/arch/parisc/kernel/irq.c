@@ -5,6 +5,7 @@
  * Copyright (C) 1994, 1995, 1996, 1997, 1998 Ralf Baechle
  * Copyright (C) 1999 SuSE GmbH (Philipp Rumpf, prumpf@tux.org)
  * Copyright (C) 1999-2000 Grant Grundler
+ * Copyright (c) 2005 Matthew Wilcox
  *
  *    This program is free software; you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -21,38 +22,21 @@
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 #include <linux/bitops.h>
-#include <linux/config.h>
-#include <linux/eisa.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <linux/module.h>
-#include <linux/signal.h>
-#include <linux/types.h>
-#include <linux/ioport.h>
-#include <linux/timex.h>
-#include <linux/slab.h>
-#include <linux/random.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
-#include <linux/irq.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
+#include <linux/types.h>
+#include <asm/io.h>
 
-#include <asm/cache.h>
-#include <asm/pdc.h>
+#include <asm/smp.h>
 
-#undef DEBUG_IRQ
 #undef PARISC_IRQ_CR16_COUNTS
 
-extern irqreturn_t timer_interrupt(int, void *, struct pt_regs *);
-extern irqreturn_t ipi_interrupt(int, void *, struct pt_regs *);
-
-#ifdef DEBUG_IRQ
-#define DBG_IRQ(irq, x)	if ((irq) != TIMER_IRQ) printk x
-#else /* DEBUG_IRQ */
-#define DBG_IRQ(irq, x)	do { } while (0)
-#endif /* DEBUG_IRQ */
+extern irqreturn_t timer_interrupt(int, void *);
+extern irqreturn_t ipi_interrupt(int, void *);
 
 #define EIEM_MASK(irq)       (1UL<<(CPU_IRQ_MAX - irq))
 
@@ -61,26 +45,34 @@ extern irqreturn_t ipi_interrupt(int, void *, struct pt_regs *);
 */
 static volatile unsigned long cpu_eiem = 0;
 
-static void cpu_set_eiem(void *info)
-{
-	set_eiem((unsigned long) info);
-}
+/*
+** local ACK bitmap ... habitually set to 1, but reset to zero
+** between ->ack() and ->end() of the interrupt to prevent
+** re-interruption of a processing interrupt.
+*/
+static DEFINE_PER_CPU(unsigned long, local_ack_eiem) = ~0UL;
 
-static inline void cpu_disable_irq(unsigned int irq)
+static void cpu_disable_irq(unsigned int irq)
 {
 	unsigned long eirr_bit = EIEM_MASK(irq);
 
 	cpu_eiem &= ~eirr_bit;
-        on_each_cpu(cpu_set_eiem, (void *) cpu_eiem, 1, 1);
+	/* Do nothing on the other CPUs.  If they get this interrupt,
+	 * The & cpu_eiem in the do_cpu_irq_mask() ensures they won't
+	 * handle it, and the set_eiem() at the bottom will ensure it
+	 * then gets disabled */
 }
 
 static void cpu_enable_irq(unsigned int irq)
 {
 	unsigned long eirr_bit = EIEM_MASK(irq);
 
-	mtctl(eirr_bit, 23);	/* clear EIRR bit before unmasking */
 	cpu_eiem |= eirr_bit;
-        on_each_cpu(cpu_set_eiem, (void *) cpu_eiem, 1, 1);
+
+	/* This is just a simple NOP IPI.  But what it does is cause
+	 * all the other CPUs to do a set_eiem(cpu_eiem) at the end
+	 * of the interrupt handler */
+	smp_send_all_nop();
 }
 
 static unsigned int cpu_startup_irq(unsigned int irq)
@@ -92,15 +84,77 @@ static unsigned int cpu_startup_irq(unsigned int irq)
 void no_ack_irq(unsigned int irq) { }
 void no_end_irq(unsigned int irq) { }
 
+void cpu_ack_irq(unsigned int irq)
+{
+	unsigned long mask = EIEM_MASK(irq);
+	int cpu = smp_processor_id();
+
+	/* Clear in EIEM so we can no longer process */
+	per_cpu(local_ack_eiem, cpu) &= ~mask;
+
+	/* disable the interrupt */
+	set_eiem(cpu_eiem & per_cpu(local_ack_eiem, cpu));
+
+	/* and now ack it */
+	mtctl(mask, 23);
+}
+
+void cpu_end_irq(unsigned int irq)
+{
+	unsigned long mask = EIEM_MASK(irq);
+	int cpu = smp_processor_id();
+
+	/* set it in the eiems---it's no longer in process */
+	per_cpu(local_ack_eiem, cpu) |= mask;
+
+	/* enable the interrupt */
+	set_eiem(cpu_eiem & per_cpu(local_ack_eiem, cpu));
+}
+
+#ifdef CONFIG_SMP
+int cpu_check_affinity(unsigned int irq, cpumask_t *dest)
+{
+	int cpu_dest;
+
+	/* timer and ipi have to always be received on all CPUs */
+	if (CHECK_IRQ_PER_CPU(irq)) {
+		/* Bad linux design decision.  The mask has already
+		 * been set; we must reset it */
+		irq_desc[irq].affinity = CPU_MASK_ALL;
+		return -EINVAL;
+	}
+
+	/* whatever mask they set, we just allow one CPU */
+	cpu_dest = first_cpu(*dest);
+	*dest = cpumask_of_cpu(cpu_dest);
+
+	return 0;
+}
+
+static void cpu_set_affinity_irq(unsigned int irq, cpumask_t dest)
+{
+	if (cpu_check_affinity(irq, &dest))
+		return;
+
+	irq_desc[irq].affinity = dest;
+}
+#endif
+
 static struct hw_interrupt_type cpu_interrupt_type = {
 	.typename	= "CPU",
 	.startup	= cpu_startup_irq,
 	.shutdown	= cpu_disable_irq,
 	.enable		= cpu_enable_irq,
 	.disable	= cpu_disable_irq,
-	.ack		= no_ack_irq,
-	.end		= no_end_irq,
-//	.set_affinity	= cpu_set_affinity_irq,
+	.ack		= cpu_ack_irq,
+	.end		= cpu_end_irq,
+#ifdef CONFIG_SMP
+	.set_affinity	= cpu_set_affinity_irq,
+#endif
+	/* XXX: Needs to be written.  We managed without it so far, but
+	 * we really ought to write it.
+	 */
+	.retrigger	= NULL,
 };
 
 int show_interrupts(struct seq_file *p, void *v)
@@ -120,8 +174,10 @@ int show_interrupts(struct seq_file *p, void *v)
 	}
 
 	if (i < NR_IRQS) {
+		struct irqaction *action;
+
 		spin_lock_irqsave(&irq_desc[i].lock, flags);
-		struct irqaction *action = irq_desc[i].action;
+		action = irq_desc[i].action;
 		if (!action)
 			goto skip;
 		seq_printf(p, "%3d: ", i);
@@ -132,7 +188,7 @@ int show_interrupts(struct seq_file *p, void *v)
 		seq_printf(p, "%10u ", kstat_irqs(i));
 #endif
 
-		seq_printf(p, " %14s", irq_desc[i].handler->typename);
+		seq_printf(p, " %14s", irq_desc[i].chip->typename);
 #ifndef PARISC_IRQ_CR16_COUNTS
 		seq_printf(p, "  %s", action->name);
 
@@ -180,16 +236,16 @@ int show_interrupts(struct seq_file *p, void *v)
 ** Then use that to get the Transaction address and data.
 */
 
-int cpu_claim_irq(unsigned int irq, struct hw_interrupt_type *type, void *data)
+int cpu_claim_irq(unsigned int irq, struct irq_chip *type, void *data)
 {
 	if (irq_desc[irq].action)
 		return -EBUSY;
-	if (irq_desc[irq].handler != &cpu_interrupt_type)
+	if (irq_desc[irq].chip != &cpu_interrupt_type)
 		return -EBUSY;
 
 	if (type) {
-		irq_desc[irq].handler = type;
-		irq_desc[irq].handler_data = data;
+		irq_desc[irq].chip = type;
+		irq_desc[irq].chip_data = data;
 		cpu_interrupt_type.enable(irq);
 	}
 	return 0;
@@ -200,13 +256,33 @@ int txn_claim_irq(int irq)
 	return cpu_claim_irq(irq, NULL, NULL) ? -1 : irq;
 }
 
-int txn_alloc_irq(void)
+/*
+ * The bits_wide parameter accommodates the limitations of the HW/SW which
+ * use these bits:
+ * Legacy PA I/O (GSC/NIO): 5 bits (architected EIM register)
+ * V-class (EPIC):          6 bits
+ * N/L/A-class (iosapic):   8 bits
+ * PCI 2.2 MSI:            16 bits
+ * Some PCI devices:       32 bits (Symbios SCSI/ATM/HyperFabric)
+ *
+ * On the service provider side:
+ * o PA 1.1 (and PA2.0 narrow mode)     5-bits (width of EIR register)
+ * o PA 2.0 wide mode                   6-bits (per processor)
+ * o IA64                               8-bits (0-256 total)
+ *
+ * So a Legacy PA I/O device on a PA 2.0 box can't use all the bits supported
+ * by the processor...and the N/L-class I/O subsystem supports more bits than
+ * PA2.0 has. The first case is the problem.
+ */
+int txn_alloc_irq(unsigned int bits_wide)
 {
 	int irq;
 
 	/* never return irq 0 cause that's the interval timer */
 	for (irq = CPU_IRQ_BASE + 1; irq <= CPU_IRQ_MAX; irq++) {
 		if (cpu_claim_irq(irq, NULL, NULL) < 0)
+			continue;
+		if ((irq - CPU_IRQ_BASE) >= (1 << bits_wide))
 			continue;
 		return irq;
 	}
@@ -215,7 +291,18 @@ int txn_alloc_irq(void)
 	return -1;
 }
 
-unsigned long txn_alloc_addr(int virt_irq)
+
+unsigned long txn_affinity_addr(unsigned int irq, int cpu)
+{
+#ifdef CONFIG_SMP
+	irq_desc[irq].affinity = cpumask_of_cpu(cpu);
+#endif
+
+	return cpu_data[cpu].txn_addr;
+}
+
+
+unsigned long txn_alloc_addr(unsigned int virt_irq)
 {
 	static int next_cpu = -1;
 
@@ -229,104 +316,76 @@ unsigned long txn_alloc_addr(int virt_irq)
 	if (next_cpu >= NR_CPUS) 
 		next_cpu = 0;	/* nothing else, assign monarch */
 
-	return cpu_data[next_cpu].txn_addr;
+	return txn_affinity_addr(virt_irq, next_cpu);
 }
 
 
-/*
-** The alloc process needs to accept a parameter to accommodate limitations
-** of the HW/SW which use these bits:
-** Legacy PA I/O (GSC/NIO): 5 bits (architected EIM register)
-** V-class (EPIC):          6 bits
-** N/L-class/A500:          8 bits (iosapic)
-** PCI 2.2 MSI:             16 bits (I think)
-** Existing PCI devices:    32-bits (all Symbios SCSI/ATM/HyperFabric)
-**
-** On the service provider side:
-** o PA 1.1 (and PA2.0 narrow mode)     5-bits (width of EIR register)
-** o PA 2.0 wide mode                   6-bits (per processor)
-** o IA64                               8-bits (0-256 total)
-**
-** So a Legacy PA I/O device on a PA 2.0 box can't use all
-** the bits supported by the processor...and the N/L-class
-** I/O subsystem supports more bits than PA2.0 has. The first
-** case is the problem.
-*/
-unsigned int txn_alloc_data(int virt_irq, unsigned int bits_wide)
+unsigned int txn_alloc_data(unsigned int virt_irq)
 {
-	/* XXX FIXME : bits_wide indicates how wide the transaction
-	** data is allowed to be...we may need a different virt_irq
-	** if this one won't work. Another reason to index virtual
-	** irq's into a table which can manage CPU/IRQ bit separately.
-	*/
-	if ((virt_irq - CPU_IRQ_BASE) > (1 << (bits_wide - 1))) {
-		panic("Sorry -- didn't allocate valid IRQ for this device\n");
-	}
-
 	return virt_irq - CPU_IRQ_BASE;
+}
+
+static inline int eirr_to_irq(unsigned long eirr)
+{
+	int bit = fls_long(eirr);
+	return (BITS_PER_LONG - bit) + TIMER_IRQ;
 }
 
 /* ONLY called from entry.S:intr_extint() */
 void do_cpu_irq_mask(struct pt_regs *regs)
 {
+	struct pt_regs *old_regs;
 	unsigned long eirr_val;
-	unsigned int i=3;	/* limit time in interrupt context */
-
-	/*
-	 * PSW_I or EIEM bits cannot be enabled until after the
-	 * interrupts are processed.
-	 * timer_interrupt() assumes it won't get interrupted when it
-	 * holds the xtime_lock...an unmasked interrupt source could
-	 * interrupt and deadlock by trying to grab xtime_lock too.
-	 * Keeping PSW_I and EIEM disabled avoids this.
-	 */
-	set_eiem(0UL);	/* disable all extr interrupt for now */
-
-	/* 1) only process IRQs that are enabled/unmasked (cpu_eiem)
-	 * 2) We loop here on EIRR contents in order to avoid
-	 *    nested interrupts or having to take another interrupt
-	 *    when we could have just handled it right away.
-	 * 3) Limit the number of times we loop to make sure other
-	 *    processing can occur.
-	 */
-	for (;;) {
-		unsigned long bit = (1UL << (BITS_PER_LONG - 1));
-		unsigned int irq;
-		eirr_val = mfctl(23) & cpu_eiem;
-		if (!eirr_val || !i--)
-			break;
-
-		mtctl(eirr_val, 23); /* reset bits we are going to process */
-
-#ifdef DEBUG_IRQ
-		if (eirr_val != (1UL << MAX_CPU_IRQ))
-			printk(KERN_DEBUG "do_cpu_irq_mask  0x%x & 0x%x\n", eirr_val, cpu_eiem);
+	int irq, cpu = smp_processor_id();
+#ifdef CONFIG_SMP
+	cpumask_t dest;
 #endif
 
-		/* Work our way from MSb to LSb...same order we alloc EIRs */
-		for (irq = TIMER_IRQ; eirr_val && bit; bit>>=1, irq++) {
-			if (!(bit & eirr_val & cpu_eiem))
-				continue;
+	old_regs = set_irq_regs(regs);
+	local_irq_disable();
+	irq_enter();
 
-			/* clear bit in mask - can exit loop sooner */
-			eirr_val &= ~bit;
+	eirr_val = mfctl(23) & cpu_eiem & per_cpu(local_ack_eiem, cpu);
+	if (!eirr_val)
+		goto set_out;
+	irq = eirr_to_irq(eirr_val);
 
-			__do_IRQ(irq, regs);
-		}
+#ifdef CONFIG_SMP
+	dest = irq_desc[irq].affinity;
+	if (CHECK_IRQ_PER_CPU(irq_desc[irq].status) &&
+	    !cpu_isset(smp_processor_id(), dest)) {
+		int cpu = first_cpu(dest);
+
+		printk(KERN_DEBUG "redirecting irq %d from CPU %d to %d\n",
+		       irq, smp_processor_id(), cpu);
+		gsc_writel(irq + CPU_IRQ_BASE,
+			   cpu_data[cpu].hpa);
+		goto set_out;
 	}
-	set_eiem(cpu_eiem);
-}
+#endif
+	__do_IRQ(irq);
 
+ out:
+	irq_exit();
+	set_irq_regs(old_regs);
+	return;
+
+ set_out:
+	set_eiem(cpu_eiem & per_cpu(local_ack_eiem, cpu));
+	goto out;
+}
 
 static struct irqaction timer_action = {
 	.handler = timer_interrupt,
 	.name = "timer",
+	.flags = IRQF_DISABLED | IRQF_TIMER | IRQF_PERCPU | IRQF_IRQPOLL,
 };
 
 #ifdef CONFIG_SMP
 static struct irqaction ipi_action = {
 	.handler = ipi_interrupt,
 	.name = "IPI",
+	.flags = IRQF_DISABLED | IRQF_PERCPU,
 };
 #endif
 
@@ -334,11 +393,11 @@ static void claim_cpu_irqs(void)
 {
 	int i;
 	for (i = CPU_IRQ_BASE; i <= CPU_IRQ_MAX; i++) {
-		irq_desc[i].handler = &cpu_interrupt_type;
+		irq_desc[i].chip = &cpu_interrupt_type;
 	}
 
 	irq_desc[TIMER_IRQ].action = &timer_action;
-	irq_desc[TIMER_IRQ].status |= IRQ_PER_CPU;
+	irq_desc[TIMER_IRQ].status = IRQ_PER_CPU;
 #ifdef CONFIG_SMP
 	irq_desc[IPI_IRQ].action = &ipi_action;
 	irq_desc[IPI_IRQ].status = IRQ_PER_CPU;
@@ -358,13 +417,6 @@ void __init init_IRQ(void)
 #endif
         set_eiem(cpu_eiem);	/* EIEM : enable all external intr */
 
-}
-
-void hw_resend_irq(struct hw_interrupt_type *type, unsigned int irq)
-{
-	/* XXX: Needs to be written.  We managed without it so far, but
-	 * we really ought to write it.
-	 */
 }
 
 void ack_bad_irq(unsigned int irq)

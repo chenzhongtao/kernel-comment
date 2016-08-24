@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2001-2004 Stelian Pop <stelian@popies.net>
  *
- * Copyright (C) 2001-2002 Alcôve <www.alcove.com>
+ * Copyright (C) 2001-2002 AlcÃ´ve <www.alcove.com>
  *
  * Copyright (C) 2000 Andrew Tridgell <tridge@valinux.com>
  *
@@ -36,7 +36,6 @@
 #define MEYE_DRIVER_VERSION __stringify(MEYE_DRIVER_MAJORVERSION) "." \
 			    __stringify(MEYE_DRIVER_MINORVERSION)
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/kfifo.h>
@@ -256,10 +255,12 @@
 /****************************************************************************/
 
 /* Sony Programmable I/O Controller for accessing the camera commands */
-#include <linux/sonypi.h>
+#include <linux/sony-laptop.h>
 
 /* private API definitions */
 #include <linux/meye.h>
+#include <linux/mutex.h>
+
 
 /* Enable jpg software correction */
 #define MEYE_JPEG_CORRECTION	1
@@ -301,7 +302,7 @@ struct meye {
 					/* list of buffers */
 	struct meye_grab_buffer grab_buffer[MEYE_MAX_BUFNBRS];
 	int vma_use_count[MEYE_MAX_BUFNBRS]; /* mmap count */
-	struct semaphore lock;		/* semaphore for open/mmap... */
+	struct mutex lock;		/* mutex for open/mmap... */
 	struct kfifo *grabq;		/* queue for buffers to be grabbed */
 	spinlock_t grabq_lock;		/* lock protecting the queue */
 	struct kfifo *doneq;		/* queue for grabbed buffers */

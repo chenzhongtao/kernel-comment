@@ -32,9 +32,9 @@
    i810AB		7123           
    i810E		7125           
    i815			1132           
+   i845G		2562
 */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -166,12 +166,12 @@ static struct i2c_algo_bit_data i810_i2c_bit_data = {
 	.getsda		= bit_i810i2c_getsda,
 	.getscl		= bit_i810i2c_getscl,
 	.udelay		= CYCLE_DELAY,
-	.mdelay		= CYCLE_DELAY,
 	.timeout	= TIMEOUT,
 };
 
 static struct i2c_adapter i810_i2c_adapter = {
 	.owner		= THIS_MODULE,
+	.id		= I2C_HW_B_I810,
 	.name		= "I810/I815 I2C Adapter",
 	.algo_data	= &i810_i2c_bit_data,
 };
@@ -182,12 +182,12 @@ static struct i2c_algo_bit_data i810_ddc_bit_data = {
 	.getsda		= bit_i810ddc_getsda,
 	.getscl		= bit_i810ddc_getscl,
 	.udelay		= CYCLE_DELAY,
-	.mdelay		= CYCLE_DELAY,
 	.timeout	= TIMEOUT,
 };
 
 static struct i2c_adapter i810_ddc_adapter = {
 	.owner		= THIS_MODULE,
+	.id		= I2C_HW_B_I810,
 	.name		= "I810/I815 DDC Adapter",
 	.algo_data	= &i810_ddc_bit_data,
 };
@@ -221,14 +221,14 @@ static int __devinit i810_probe(struct pci_dev *dev, const struct pci_device_id 
 		return retval;
 	retval = i2c_bit_add_bus(&i810_ddc_adapter);
 	if (retval)
-		i2c_bit_del_bus(&i810_i2c_adapter);
+		i2c_del_adapter(&i810_i2c_adapter);
 	return retval;
 }
 
 static void __devexit i810_remove(struct pci_dev *dev)
 {
-	i2c_bit_del_bus(&i810_ddc_adapter);
-	i2c_bit_del_bus(&i810_i2c_adapter);
+	i2c_del_adapter(&i810_ddc_adapter);
+	i2c_del_adapter(&i810_i2c_adapter);
 	iounmap(ioaddr);
 }
 

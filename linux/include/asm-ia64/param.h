@@ -19,7 +19,6 @@
 #define MAXHOSTNAMELEN	64	/* max length of hostname */
 
 #ifdef __KERNEL__
-# include <linux/config.h>	/* mustn't include <linux/config.h> outside of #ifdef __KERNEL__ */
 # ifdef CONFIG_IA64_HP_SIM
   /*
    * Yeah, simulating stuff is slow, so let us catch some breath between
@@ -27,7 +26,7 @@
    */
 #  define HZ	  32
 # else
-#  define HZ	1024
+#  define HZ	CONFIG_HZ
 # endif
 # define USER_HZ	HZ
 # define CLOCKS_PER_SEC	HZ	/* frequency at which times() counts */

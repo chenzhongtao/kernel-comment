@@ -1,27 +1,27 @@
 /*******************************************************************************
 
-  
-  Copyright(c) 1999 - 2004 Intel Corporation. All rights reserved.
-  
-  This program is free software; you can redistribute it and/or modify it 
-  under the terms of the GNU General Public License as published by the Free 
-  Software Foundation; either version 2 of the License, or (at your option) 
-  any later version.
-  
-  This program is distributed in the hope that it will be useful, but WITHOUT 
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or 
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for 
+  Intel PRO/10GbE Linux driver
+  Copyright(c) 1999 - 2006 Intel Corporation.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms and conditions of the GNU General Public License,
+  version 2, as published by the Free Software Foundation.
+
+  This program is distributed in the hope it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
   more details.
-  
+
   You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc., 59 
-  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-  
-  The full GNU General Public License is included in this distribution in the
-  file called LICENSE.
-  
+  this program; if not, write to the Free Software Foundation, Inc.,
+  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+
+  The full GNU General Public License is included in this distribution in
+  the file called "COPYING".
+
   Contact Information:
   Linux NICS <linux.nics@intel.com>
+  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
 
 *******************************************************************************/
@@ -30,7 +30,6 @@
 #define _IXGB_H_
 
 #include <linux/stddef.h>
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <asm/byteorder.h>
@@ -62,9 +61,7 @@
 #include <net/pkt_sched.h>
 #include <linux/list.h>
 #include <linux/reboot.h>
-#ifdef NETIF_F_TSO
 #include <net/checksum.h>
-#endif
 
 #include <linux/ethtool.h>
 #include <linux/if_vlan.h>
@@ -84,7 +81,12 @@ struct ixgb_adapter;
 #define IXGB_DBG(args...)
 #endif
 
-#define IXGB_ERR(args...) printk(KERN_ERR "ixgb: " args)
+#define PFX "ixgb: "
+#define DPRINTK(nlevel, klevel, fmt, args...) \
+	(void)((NETIF_MSG_##nlevel & adapter->msg_enable) && \
+	printk(KERN_##klevel PFX "%s: %s: " fmt, adapter->netdev->name, \
+		__FUNCTION__ , ## args))
+
 
 /* TX/RX descriptor defines */
 #define DEFAULT_TXD	 256
@@ -106,20 +108,14 @@ struct ixgb_adapter;
 #define IXGB_RXBUFFER_8192  8192
 #define IXGB_RXBUFFER_16384 16384
 
-/* How many Tx Descriptors do we need to call netif_wake_queue? */
-#define IXGB_TX_QUEUE_WAKE 16
-
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
-#define IXGB_RX_BUFFER_WRITE	16	/* Must be power of 2 */
-
-/* only works for sizes that are powers of 2 */
-#define IXGB_ROUNDUP(i, size) ((i) = (((i) + (size) - 1) & ~((size) - 1)))
+#define IXGB_RX_BUFFER_WRITE	8	/* Must be power of 2 */
 
 /* wrapper around a pointer to a socket buffer,
  * so a DMA handle can be stored along with the buffer */
 struct ixgb_buffer {
 	struct sk_buff *skb;
-	uint64_t dma;
+	dma_addr_t dma;
 	unsigned long time_stamp;
 	uint16_t length;
 	uint16_t next_to_watch;
@@ -169,13 +165,16 @@ struct ixgb_adapter {
 	unsigned long led_status;
 
 	/* TX */
-	struct ixgb_desc_ring tx_ring;
+	struct ixgb_desc_ring tx_ring ____cacheline_aligned_in_smp;
+	unsigned int restart_queue;
 	unsigned long timeo_start;
 	uint32_t tx_cmd_type;
 	uint64_t hw_csum_tx_good;
 	uint64_t hw_csum_tx_error;
 	uint32_t tx_int_delay;
+	uint32_t tx_timeout_count;
 	boolean_t tx_int_delay_enable;
+	boolean_t detect_tx_hung;
 
 	/* RX */
 	struct ixgb_desc_ring rx_ring;
@@ -185,15 +184,23 @@ struct ixgb_adapter {
 	boolean_t rx_csum;
 
 	/* OS defined structs */
+	struct napi_struct napi;
 	struct net_device *netdev;
 	struct pci_dev *pdev;
 	struct net_device_stats net_stats;
 
 	/* structs defined in ixgb_hw.h */
 	struct ixgb_hw hw;
+	u16 msg_enable;
 	struct ixgb_hw_stats stats;
-#ifdef CONFIG_PCI_MSI
+	uint32_t alloc_rx_buff_failed;
 	boolean_t have_msi;
-#endif
 };
+
+/* Exported from other modules */
+extern void ixgb_check_options(struct ixgb_adapter *adapter);
+extern void ixgb_set_ethtool_ops(struct net_device *netdev);
+extern char ixgb_driver_name[];
+extern const char ixgb_driver_version[];
+
 #endif /* _IXGB_H_ */

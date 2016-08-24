@@ -34,7 +34,6 @@
  *              HP 6020 writers now supported.
  */
 
-#include <linux/config.h>
 #include <linux/cdrom.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -68,8 +67,8 @@ void sr_vendor_init(Scsi_CD *cd)
 #ifndef CONFIG_BLK_DEV_SR_VENDOR
 	cd->vendor = VENDOR_SCSI3;
 #else
-	char *vendor = cd->device->vendor;
-	char *model = cd->device->model;
+	const char *vendor = cd->device->vendor;
+	const char *model = cd->device->model;
 	
 	/* default */
 	cd->vendor = VENDOR_SCSI3;
@@ -118,7 +117,7 @@ int sr_set_blocklength(Scsi_CD *cd, int blocklength)
 		density = (blocklength > 2048) ? 0x81 : 0x83;
 #endif
 
-	buffer = (unsigned char *) kmalloc(512, GFP_KERNEL | GFP_DMA);
+	buffer = kmalloc(512, GFP_KERNEL | GFP_DMA);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -165,7 +164,7 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 	if (cd->cdi.mask & CDC_MULTI_SESSION)
 		return 0;
 
-	buffer = (unsigned char *) kmalloc(512, GFP_KERNEL | GFP_DMA);
+	buffer = kmalloc(512, GFP_KERNEL | GFP_DMA);
 	if (!buffer)
 		return -ENOMEM;
 

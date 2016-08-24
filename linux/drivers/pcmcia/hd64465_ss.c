@@ -37,13 +37,12 @@
 #include <asm/errno.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 
 #include <asm/io.h>
 #include <asm/hd64465/hd64465.h>
 #include <asm/hd64465/io.h>
 
-#include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
@@ -245,8 +244,8 @@ static void hs_map_irq(hs_socket_t *sp, unsigned int irq)
 
     	hs_mapped_irq[irq].sock = sp;
 	/* insert ourselves as the irq controller */
-	hs_mapped_irq[irq].old_handler = irq_desc[irq].handler;
-	irq_desc[irq].handler = &hd64465_ss_irq_type;
+	hs_mapped_irq[irq].old_handler = irq_desc[irq].chip;
+	irq_desc[irq].chip = &hd64465_ss_irq_type;
 }
 
 
@@ -261,7 +260,7 @@ static void hs_unmap_irq(hs_socket_t *sp, unsigned int irq)
 	    return;
 		
 	/* restore the original irq controller */
-	irq_desc[irq].handler = hs_mapped_irq[irq].old_handler;
+	irq_desc[irq].chip = hs_mapped_irq[irq].old_handler;
 }
 
 /*============================================================*/
@@ -353,20 +352,6 @@ static int hs_init(struct pcmcia_socket *s)
 
 /*============================================================*/
 
-static int hs_suspend(struct pcmcia_socket *s)
-{
-#ifdef HD64465_DEBUG
-    	hs_socket_t *sp = container_of(s, struct hs_socket_t, socket);
-    	DPRINTK("hs_suspend(%d)\n", sp->number);
-#endif
-
-    	/* TODO */
-	
-	return 0;
-}
-
-/*============================================================*/
-
 
 static int hs_get_status(struct pcmcia_socket *s, u_int *value)
 {
@@ -427,18 +412,6 @@ static int hs_get_status(struct pcmcia_socket *s, u_int *value)
     	DPRINTK("hs_get_status(%d) = %x\n", sock, status);
 	
 	*value = status;
-	return 0;
-}
-
-/*============================================================*/
-
-static int hs_get_socket(struct pcmcia_socket *s, socket_state_t *state)
-{
-    	hs_socket_t *sp = container_of(s, struct hs_socket_t, socket);
-
-    	DPRINTK("hs_get_socket(%d)\n", sock);
-	
-	*state = sp->state;
 	return 0;
 }
 
@@ -677,7 +650,7 @@ static int hs_set_mem_map(struct pcmcia_socket *s, struct pccard_mem_map *mem)
  */
 static int hs_irq_demux(int irq, void *dev)
 {
-    	hs_socket_t *sp = (hs_socket_t *)dev;
+    	hs_socket_t *sp = dev;
 	u_int cscr;
     	
     	DPRINTK("hs_irq_demux(irq=%d)\n", irq);
@@ -698,13 +671,12 @@ static int hs_irq_demux(int irq, void *dev)
  * Interrupt handling routine.
  */
  
-static irqreturn_t hs_interrupt(int irq, void *dev, struct pt_regs *regs)
+static irqreturn_t hs_interrupt(int irq, void *dev)
 {
-    	hs_socket_t *sp = (hs_socket_t *)dev;
+    	hs_socket_t *sp = dev;
 	u_int events = 0;
 	u_int cscr;
-	
-	
+
 	cscr = hs_in(sp, CSCR);
 	
 	DPRINTK("hs_interrupt, cscr=%04x\n", cscr);
@@ -763,9 +735,7 @@ static irqreturn_t hs_interrupt(int irq, void *dev, struct pt_regs *regs)
 
 static struct pccard_operations hs_operations = {
 	.init			= hs_init,
-	.suspend		= hs_suspend,
 	.get_status		= hs_get_status,
-	.get_socket		= hs_get_socket,
 	.set_socket		= hs_set_socket,
 	.set_io_map		= hs_set_io_map,
 	.set_mem_map		= hs_set_mem_map,
@@ -790,7 +760,7 @@ static int hs_init_socket(hs_socket_t *sp, int irq, unsigned long mem_base,
 	
 	hd64465_register_irq_demux(sp->irq, hs_irq_demux, sp);
 	
-    	if ((err = request_irq(sp->irq, hs_interrupt, SA_INTERRUPT, MODNAME, sp)) < 0)
+    	if ((err = request_irq(sp->irq, hs_interrupt, IRQF_DISABLED, MODNAME, sp)) < 0)
 	    return err;
     	if (request_mem_region(sp->mem_base, sp->mem_length, MODNAME) == 0) {
     	    sp->mem_base = 0;
@@ -860,27 +830,11 @@ static void hs_exit_socket(hs_socket_t *sp)
 	local_irq_restore(flags);
 }
 
-static int hd64465_suspend(struct device *dev, u32 state, u32 level)
-{
-	int ret = 0;
-	if (level == SUSPEND_SAVE_STATE)
-		ret = pcmcia_socket_dev_suspend(dev, state);
-	return ret;
-}
-
-static int hd64465_resume(struct device *dev, u32 level)
-{
-	int ret = 0;
-	if (level == RESUME_RESTORE_STATE)
-		ret = pcmcia_socket_dev_resume(dev);
-	return ret;
-}
-
 static struct device_driver hd64465_driver = {
 	.name = "hd64465-pcmcia",
 	.bus = &platform_bus_type,
-	.suspend = hd64465_suspend,
-	.resume = hd64465_resume,
+	.suspend = pcmcia_socket_dev_suspend,
+	.resume = pcmcia_socket_dev_resume,
 };
 
 static struct platform_device hd64465_device = {
@@ -953,7 +907,7 @@ static int __init init_hs(void)
 
 	for (i=0; i<HS_MAX_SOCKETS; i++) {
 		unsigned int ret;
-		hs_sockets[i].socket.dev.dev = &hd64465_device.dev;		
+		hs_sockets[i].socket.dev.parent = &hd64465_device.dev;
 		hs_sockets[i].number = i;
 		ret = pcmcia_register_socket(&hs_sockets[i].socket);
 		if (ret && i)

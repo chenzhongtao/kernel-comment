@@ -7,7 +7,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/mm.h>
@@ -79,7 +78,7 @@ static void fb_unmask_irq(unsigned int irq)
 	*CSR_IRQ_ENABLE = fb_irq_mask[_DC21285_INR(irq)];
 }
 
-static struct irqchip fb_chip = {
+static struct irq_chip fb_chip = {
 	.ack	= fb_mask_irq,
 	.mask	= fb_mask_irq,
 	.unmask = fb_unmask_irq,
@@ -97,7 +96,7 @@ static void __init __fb_init_irq(void)
 
 	for (irq = _DC21285_IRQ(0); irq < _DC21285_IRQ(20); irq++) {
 		set_irq_chip(irq, &fb_chip);
-		set_irq_handler(irq, do_level_IRQ);
+		set_irq_handler(irq, handle_level_irq);
 		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
 	}
 }
@@ -130,8 +129,17 @@ void __init footbridge_init_irq(void)
  * it means that we have extra bullet protection on our feet.
  */
 static struct map_desc fb_common_io_desc[] __initdata = {
- { ARMCSR_BASE,	 DC21285_ARMCSR_BASE,	    ARMCSR_SIZE,  MT_DEVICE },
- { XBUS_BASE,    0x40000000,		    XBUS_SIZE,    MT_DEVICE }
+	{
+		.virtual	= ARMCSR_BASE,
+		.pfn		= __phys_to_pfn(DC21285_ARMCSR_BASE),
+		.length		= ARMCSR_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= XBUS_BASE,
+		.pfn		= __phys_to_pfn(0x40000000),
+		.length		= XBUS_SIZE,
+		.type		= MT_DEVICE,
+	}
 };
 
 /*
@@ -140,11 +148,32 @@ static struct map_desc fb_common_io_desc[] __initdata = {
  */
 static struct map_desc ebsa285_host_io_desc[] __initdata = {
 #if defined(CONFIG_ARCH_FOOTBRIDGE) && defined(CONFIG_FOOTBRIDGE_HOST)
- { PCIMEM_BASE,  DC21285_PCI_MEM,	    PCIMEM_SIZE,  MT_DEVICE },
- { PCICFG0_BASE, DC21285_PCI_TYPE_0_CONFIG, PCICFG0_SIZE, MT_DEVICE },
- { PCICFG1_BASE, DC21285_PCI_TYPE_1_CONFIG, PCICFG1_SIZE, MT_DEVICE },
- { PCIIACK_BASE, DC21285_PCI_IACK,	    PCIIACK_SIZE, MT_DEVICE },
- { PCIO_BASE,    DC21285_PCI_IO,	    PCIO_SIZE,	  MT_DEVICE }
+	{
+		.virtual	= PCIMEM_BASE,
+		.pfn		= __phys_to_pfn(DC21285_PCI_MEM),
+		.length		= PCIMEM_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= PCICFG0_BASE,
+		.pfn		= __phys_to_pfn(DC21285_PCI_TYPE_0_CONFIG),
+		.length		= PCICFG0_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= PCICFG1_BASE,
+		.pfn		= __phys_to_pfn(DC21285_PCI_TYPE_1_CONFIG),
+		.length		= PCICFG1_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= PCIIACK_BASE,
+		.pfn		= __phys_to_pfn(DC21285_PCI_IACK),
+		.length		= PCIIACK_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= PCIO_BASE,
+		.pfn		= __phys_to_pfn(DC21285_PCI_IO),
+		.length		= PCIO_SIZE,
+		.type		= MT_DEVICE,
+	},
 #endif
 };
 
@@ -153,8 +182,17 @@ static struct map_desc ebsa285_host_io_desc[] __initdata = {
  */
 static struct map_desc co285_io_desc[] __initdata = {
 #ifdef CONFIG_ARCH_CO285
- { PCIO_BASE,	 DC21285_PCI_IO,	    PCIO_SIZE,    MT_DEVICE },
- { PCIMEM_BASE,	 DC21285_PCI_MEM,	    PCIMEM_SIZE,  MT_DEVICE }
+	{
+		.virtual	= PCIO_BASE,
+		.pfn		= __phys_to_pfn(DC21285_PCI_IO),
+		.length		= PCIO_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= PCIMEM_BASE,
+		.pfn		= __phys_to_pfn(DC21285_PCI_MEM),
+		.length		= PCIMEM_SIZE,
+		.type		= MT_DEVICE,
+	},
 #endif
 };
 

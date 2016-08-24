@@ -4,47 +4,52 @@
  */
 
 #include <asm-generic/vmlinux.lds.h>
-#include <linux/config.h>
+#include <asm/thread_info.h>
+#include <asm/memory.h>
 	
 OUTPUT_ARCH(arm)
 ENTRY(stext)
+
 #ifndef __ARMEB__
 jiffies = jiffies_64;
 #else
 jiffies = jiffies_64 + 4;
 #endif
+
 SECTIONS
 {
-	. = TEXTADDR;
-	.init : {			/* Init code and data		*/
+#ifdef CONFIG_XIP_KERNEL
+	. = XIP_VIRT_ADDR(CONFIG_XIP_PHYS_ADDR);
+#else
+	. = PAGE_OFFSET + TEXT_OFFSET;
+#endif
+	.text.head : {
 		_stext = .;
-			_sinittext = .;
+		_sinittext = .;
+		*(.text.head)
+	}
+
+	.init : {			/* Init code and data		*/
 			*(.init.text)
-			_einittext = .;
+		_einittext = .;
 		__proc_info_begin = .;
-			*(.proc.info)
+			*(.proc.info.init)
 		__proc_info_end = .;
 		__arch_info_begin = .;
-			*(.arch.info)
+			*(.arch.info.init)
 		__arch_info_end = .;
 		__tagtable_begin = .;
-			*(.taglist)
+			*(.taglist.init)
 		__tagtable_end = .;
 		. = ALIGN(16);
 		__setup_start = .;
 			*(.init.setup)
 		__setup_end = .;
 		__early_begin = .;
-			*(__early_param)
+			*(.early_param.init)
 		__early_end = .;
 		__initcall_start = .;
-			*(.initcall1.init)
-			*(.initcall2.init)
-			*(.initcall3.init)
-			*(.initcall4.init)
-			*(.initcall5.init)
-			*(.initcall6.init)
-			*(.initcall7.init)
+			INITCALLS
 		__initcall_end = .;
 		__con_initcall_start = .;
 			*(.con_initcall.init)
@@ -52,13 +57,16 @@ SECTIONS
 		__security_initcall_start = .;
 			*(.security_initcall.init)
 		__security_initcall_end = .;
+#ifdef CONFIG_BLK_DEV_INITRD
 		. = ALIGN(32);
 		__initramfs_start = .;
 			usr/built-in.o(.init.ramfs)
 		__initramfs_end = .;
-		. = ALIGN(64);
+#endif
+		. = ALIGN(4096);
 		__per_cpu_start = .;
 			*(.data.percpu)
+			*(.data.percpu.shared_aligned)
 		__per_cpu_end = .;
 #ifndef CONFIG_XIP_KERNEL
 		__init_begin = _stext;
@@ -72,14 +80,23 @@ SECTIONS
 		*(.exit.text)
 		*(.exit.data)
 		*(.exitcall.exit)
+#ifndef CONFIG_MMU
+		*(.fixup)
+		*(__ex_table)
+#endif
 	}
 
 	.text : {			/* Real text segment		*/
 		_text = .;		/* Text and read-only data	*/
-			*(.text)
+			__exception_text_start = .;
+			*(.exception.text)
+			__exception_text_end = .;
+			TEXT_TEXT
 			SCHED_TEXT
 			LOCK_TEXT
+#ifdef CONFIG_MMU
 			*(.fixup)
+#endif
 			*(.gnu.warning)
 			*(.rodata)
 			*(.rodata.*)
@@ -88,22 +105,15 @@ SECTIONS
 		*(.got)			/* Global offset table		*/
 	}
 
-	. = ALIGN(16);
-	__ex_table : {			/* Exception table		*/
-		__start___ex_table = .;
-			*(__ex_table)
-		__stop___ex_table = .;
-	}
-
 	RODATA
 
 	_etext = .;			/* End of text and rodata section */
 
 #ifdef CONFIG_XIP_KERNEL
 	__data_loc = ALIGN(4);		/* location in binary */
-	. = DATAADDR;
+	. = PAGE_OFFSET + TEXT_OFFSET;
 #else
-	. = ALIGN(8192);
+	. = ALIGN(THREAD_SIZE);
 	__data_loc = .;
 #endif
 
@@ -114,7 +124,7 @@ SECTIONS
 		 * first, the init task union, aligned
 		 * to an 8192 byte boundary.
 		 */
-		*(.init.task)
+		*(.data.init_task)
 
 #ifdef CONFIG_XIP_KERNEL
 		. = ALIGN(4096);
@@ -137,13 +147,24 @@ SECTIONS
 		*(.data.cacheline_aligned)
 
 		/*
+		 * The exception fixup table (might need resorting at runtime)
+		 */
+		. = ALIGN(32);
+		__start___ex_table = .;
+#ifdef CONFIG_MMU
+		*(__ex_table)
+#endif
+		__stop___ex_table = .;
+
+		/*
 		 * and the usual data section
 		 */
-		*(.data)
+		DATA_DATA
 		CONSTRUCTORS
 
 		_edata = .;
 	}
+	_edata_loc = __data_loc + SIZEOF(.data);
 
 	.bss : {
 		__bss_start = .;	/* BSS				*/
@@ -160,3 +181,11 @@ SECTIONS
 	.stab.indexstr 0 : { *(.stab.indexstr) }
 	.comment 0 : { *(.comment) }
 }
+
+/*
+ * These must never be empty
+ * If you have to comment these two assert statements out, your
+ * binutils is too old (for other reasons as well)
+ */
+ASSERT((__proc_info_end - __proc_info_begin), "missing CPU support")
+ASSERT((__arch_info_end - __arch_info_begin), "no machine record defined")

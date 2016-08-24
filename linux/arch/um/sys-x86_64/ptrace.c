@@ -1,26 +1,22 @@
 /*
  * Copyright 2003 PathScale, Inc.
+ * Copyright (C) 2003 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  *
  * Licensed under the GPL
  */
 
 #define __FRAME_OFFSETS
-#include "asm/ptrace.h"
-#include "linux/sched.h"
-#include "linux/errno.h"
-#include "asm/elf.h"
+#include <asm/ptrace.h>
+#include <linux/sched.h>
+#include <linux/errno.h>
+#include <linux/mm.h>
+#include <asm/uaccess.h>
+#include <asm/elf.h>
 
-/* XXX x86_64 */
-unsigned long not_ss;
-unsigned long not_ds;
-unsigned long not_es;
-
-#define SC_SS(r) (not_ss)
-#define SC_DS(r) (not_ds)
-#define SC_ES(r) (not_es)
-
-/* determines which flags the user has access to. */
-/* 1 = access 0 = no access */
+/*
+ * determines which flags the user has access to.
+ * 1 = access 0 = no access
+ */
 #define FLAG_MASK 0x44dd5UL
 
 int putreg(struct task_struct *child, int regno, unsigned long value)
@@ -62,6 +58,25 @@ int putreg(struct task_struct *child, int regno, unsigned long value)
 	return 0;
 }
 
+int poke_user(struct task_struct *child, long addr, long data)
+{
+	if ((addr & 3) || addr < 0)
+		return -EIO;
+
+	if (addr < MAX_REG_OFFSET)
+		return putreg(child, addr, data);
+	else if ((addr >= offsetof(struct user, u_debugreg[0])) &&
+		(addr <= offsetof(struct user, u_debugreg[7]))){
+		addr -= offsetof(struct user, u_debugreg[0]);
+		addr = addr >> 2;
+		if ((addr == 4) || (addr == 5))
+			return -EIO;
+		child->thread.arch.debugregs[addr] = data;
+		return 0;
+	}
+	return -EIO;
+}
+
 unsigned long getreg(struct task_struct *child, int regno)
 {
 	unsigned long retval = ~0UL;
@@ -84,55 +99,96 @@ unsigned long getreg(struct task_struct *child, int regno)
 	return retval;
 }
 
-void arch_switch(void)
+int peek_user(struct task_struct *child, long addr, long data)
 {
-/* XXX
-	printk("arch_switch\n");
-*/
+	/* read the word at location addr in the USER area. */
+	unsigned long tmp;
+
+	if ((addr & 3) || addr < 0)
+		return -EIO;
+
+	tmp = 0;  /* Default return condition */
+	if (addr < MAX_REG_OFFSET){
+		tmp = getreg(child, addr);
+	}
+	else if ((addr >= offsetof(struct user, u_debugreg[0])) &&
+		(addr <= offsetof(struct user, u_debugreg[7]))){
+		addr -= offsetof(struct user, u_debugreg[0]);
+		addr = addr >> 2;
+		tmp = child->thread.arch.debugregs[addr];
+	}
+	return put_user(tmp, (unsigned long *) data);
 }
 
+/* XXX Mostly copied from sys-i386 */
 int is_syscall(unsigned long addr)
 {
-	panic("is_syscall");
+	unsigned short instr;
+	int n;
+
+	n = copy_from_user(&instr, (void __user *) addr, sizeof(instr));
+	if (n){
+		/* access_process_vm() grants access to vsyscall and stub,
+		 * while copy_from_user doesn't. Maybe access_process_vm is
+		 * slow, but that doesn't matter, since it will be called only
+		 * in case of singlestepping, if copy_from_user failed.
+		 */
+		n = access_process_vm(current, addr, &instr, sizeof(instr), 0);
+		if (n != sizeof(instr)) {
+			printk("is_syscall : failed to read instruction from "
+			       "0x%lx\n", addr);
+			return 1;
+		}
+	}
+	/* sysenter */
+	return instr == 0x050f;
 }
 
-int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu )
+int get_fpregs(struct user_i387_struct __user *buf, struct task_struct *child)
 {
-	panic("dump_fpu");
-	return(1);
+	int err, n, cpu = ((struct thread_info *) child->stack)->cpu;
+	long fpregs[HOST_FP_SIZE];
+
+	BUG_ON(sizeof(*buf) != sizeof(fpregs));
+	err = save_fp_registers(userspace_pid[cpu], fpregs);
+	if (err)
+		return err;
+
+	n = copy_to_user(buf, fpregs, sizeof(fpregs));
+	if(n > 0)
+		return -EFAULT;
+
+	return n;
 }
 
-int get_fpregs(unsigned long buf, struct task_struct *child)
+int set_fpregs(struct user_i387_struct __user *buf, struct task_struct *child)
 {
-	panic("get_fpregs");
-	return(0);
+	int n, cpu = ((struct thread_info *) child->stack)->cpu;
+	long fpregs[HOST_FP_SIZE];
+
+	BUG_ON(sizeof(*buf) != sizeof(fpregs));
+	n = copy_from_user(fpregs, buf, sizeof(fpregs));
+	if (n > 0)
+		return -EFAULT;
+
+	return restore_fp_registers(userspace_pid[cpu], fpregs);
 }
 
-int set_fpregs(unsigned long buf, struct task_struct *child)
+long subarch_ptrace(struct task_struct *child, long request, long addr,
+		    long data)
 {
-	panic("set_fpregs");
-	return(0);
-}
+	int ret = -EIO;
 
-int get_fpxregs(unsigned long buf, struct task_struct *tsk)
-{
-	panic("get_fpxregs");
-	return(0);
-}
+	switch (request) {
+	case PTRACE_GETFPXREGS: /* Get the child FPU state. */
+		ret = get_fpregs((struct user_i387_struct __user *) data,
+				 child);
+		break;
+	case PTRACE_SETFPXREGS: /* Set the child FPU state. */
+		ret = set_fpregs((struct user_i387_struct __user *) data,
+				 child);
+		break;
+	}
 
-int set_fpxregs(unsigned long buf, struct task_struct *tsk)
-{
-	panic("set_fxpregs");
-	return(0);
+	return ret;
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

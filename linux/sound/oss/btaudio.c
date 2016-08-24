@@ -32,6 +32,8 @@
 #include <linux/soundcard.h>
 #include <linux/slab.h>
 #include <linux/kdev_t.h>
+#include <linux/mutex.h>
+
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
@@ -108,7 +110,7 @@ struct btaudio {
 
 	/* locking */
 	int            users;
-	struct semaphore lock;
+	struct mutex lock;
 
 	/* risc instructions */
 	unsigned int   risc_size;
@@ -342,7 +344,7 @@ static int btaudio_mixer_ioctl(struct inode *inode, struct file *file,
 	if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
 		memset(&info,0,sizeof(info));
-                strlcpy(info.id,"bt878",sizeof(info.id)-1);
+                strlcpy(info.id, "bt878", sizeof(info.id));
                 strlcpy(info.name,"Brooktree Bt878 audio",sizeof(info.name));
                 if (copy_to_user(argp, &info, sizeof(info)))
                         return -EFAULT;
@@ -427,7 +429,7 @@ static int btaudio_mixer_ioctl(struct inode *inode, struct file *file,
 	return 0;
 }
 
-static struct file_operations btaudio_mixer_fops = {
+static const struct file_operations btaudio_mixer_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.open		= btaudio_mixer_open,
@@ -440,7 +442,7 @@ static struct file_operations btaudio_mixer_fops = {
 static int btaudio_dsp_open(struct inode *inode, struct file *file,
 			    struct btaudio *bta, int analog)
 {
-	down(&bta->lock);
+	mutex_lock(&bta->lock);
 	if (bta->users)
 		goto busy;
 	bta->users++;
@@ -452,11 +454,11 @@ static int btaudio_dsp_open(struct inode *inode, struct file *file,
 	bta->read_count = 0;
 	bta->sampleshift = 0;
 
-	up(&bta->lock);
+	mutex_unlock(&bta->lock);
 	return 0;
 
  busy:
-	up(&bta->lock);
+	mutex_unlock(&bta->lock);
 	return -EBUSY;
 }
 
@@ -496,11 +498,11 @@ static int btaudio_dsp_release(struct inode *inode, struct file *file)
 {
 	struct btaudio *bta = file->private_data;
 
-	down(&bta->lock);
+	mutex_lock(&bta->lock);
 	if (bta->recording)
 		stop_recording(bta);
 	bta->users--;
-	up(&bta->lock);
+	mutex_unlock(&bta->lock);
 	return 0;
 }
 
@@ -513,7 +515,7 @@ static ssize_t btaudio_dsp_read(struct file *file, char __user *buffer,
 	DECLARE_WAITQUEUE(wait, current);
 
 	add_wait_queue(&bta->readq, &wait);
-	down(&bta->lock);
+	mutex_lock(&bta->lock);
 	while (swcount > 0) {
 		if (0 == bta->read_count) {
 			if (!bta->recording) {
@@ -528,10 +530,10 @@ static ssize_t btaudio_dsp_read(struct file *file, char __user *buffer,
 					ret = -EAGAIN;
 				break;
 			}
-			up(&bta->lock);
+			mutex_unlock(&bta->lock);
 			current->state = TASK_INTERRUPTIBLE;
 			schedule();
-			down(&bta->lock);
+			mutex_lock(&bta->lock);
 			if(signal_pending(current)) {
 				if (0 == ret)
 					ret = -EINTR;
@@ -558,7 +560,7 @@ static ssize_t btaudio_dsp_read(struct file *file, char __user *buffer,
 			__s16 __user *dst = (__s16 __user *)(buffer + ret);
 			__s16 avg;
 			int n = ndst>>1;
-			if (0 != verify_area(VERIFY_WRITE,dst,ndst)) {
+			if (!access_ok(VERIFY_WRITE, dst, ndst)) {
 				if (0 == ret)
 					ret = -EFAULT;
 				break;
@@ -574,7 +576,7 @@ static ssize_t btaudio_dsp_read(struct file *file, char __user *buffer,
 			__u8 *src = bta->buf_cpu + bta->read_offset;
 			__u8 __user *dst = buffer + ret;
 			int n = ndst;
-			if (0 != verify_area(VERIFY_WRITE,dst,ndst)) {
+			if (!access_ok(VERIFY_WRITE, dst, ndst)) {
 				if (0 == ret)
 					ret = -EFAULT;
 				break;
@@ -587,7 +589,7 @@ static ssize_t btaudio_dsp_read(struct file *file, char __user *buffer,
 			__u16 *src = (__u16*)(bta->buf_cpu + bta->read_offset);
 			__u16 __user *dst = (__u16 __user *)(buffer + ret);
 			int n = ndst>>1;
-			if (0 != verify_area(VERIFY_WRITE,dst,ndst)) {
+			if (!access_ok(VERIFY_WRITE,dst,ndst)) {
 				if (0 == ret)
 					ret = -EFAULT;
 				break;
@@ -604,7 +606,7 @@ static ssize_t btaudio_dsp_read(struct file *file, char __user *buffer,
 		if (bta->read_offset == bta->buf_size)
 			bta->read_offset = 0;
 	}
-	up(&bta->lock);
+	mutex_unlock(&bta->lock);
 	remove_wait_queue(&bta->readq, &wait);
 	current->state = TASK_RUNNING;
 	return ret;
@@ -651,10 +653,10 @@ static int btaudio_dsp_ioctl(struct inode *inode, struct file *file,
 			bta->decimation  = 0;
 		}
 		if (bta->recording) {
-			down(&bta->lock);
+			mutex_lock(&bta->lock);
 			stop_recording(bta);
 			start_recording(bta);
-			up(&bta->lock);
+			mutex_unlock(&bta->lock);
 		}
 		/* fall through */
         case SOUND_PCM_READ_RATE:
@@ -716,10 +718,10 @@ static int btaudio_dsp_ioctl(struct inode *inode, struct file *file,
 			else
 				bta->bits = 16;
 			if (bta->recording) {
-				down(&bta->lock);
+				mutex_lock(&bta->lock);
 				stop_recording(bta);
 				start_recording(bta);
-				up(&bta->lock);
+				mutex_unlock(&bta->lock);
 			}
 		}
 		if (debug)
@@ -736,9 +738,9 @@ static int btaudio_dsp_ioctl(struct inode *inode, struct file *file,
 
         case SNDCTL_DSP_RESET:
 		if (bta->recording) {
-			down(&bta->lock);
+			mutex_lock(&bta->lock);
 			stop_recording(bta);
-			up(&bta->lock);
+			mutex_unlock(&bta->lock);
 		}
 		return 0;
         case SNDCTL_DSP_GETBLKSIZE:
@@ -794,7 +796,7 @@ static unsigned int btaudio_dsp_poll(struct file *file, struct poll_table_struct
 	return mask;
 }
 
-static struct file_operations btaudio_digital_dsp_fops = {
+static const struct file_operations btaudio_digital_dsp_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.open		= btaudio_dsp_open_digital,
@@ -805,7 +807,7 @@ static struct file_operations btaudio_digital_dsp_fops = {
 	.poll		= btaudio_dsp_poll,
 };
 
-static struct file_operations btaudio_analog_dsp_fops = {
+static const struct file_operations btaudio_analog_dsp_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.open		= btaudio_dsp_open_analog,
@@ -822,7 +824,7 @@ static char *irq_name[] = { "", "", "", "OFLOW", "", "", "", "", "", "", "",
 			    "RISCI", "FBUS", "FTRGT", "FDSR", "PPERR",
 			    "RIPERR", "PABORT", "OCERR", "SCERR" };
 
-static irqreturn_t btaudio_irq(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t btaudio_irq(int irq, void *dev_id)
 {
 	int count = 0;
 	u32 stat,astat;
@@ -913,12 +915,11 @@ static int __devinit btaudio_probe(struct pci_dev *pci_dev,
 		return -EBUSY;
 	}
 
-	bta = kmalloc(sizeof(*bta),GFP_ATOMIC);
+	bta = kzalloc(sizeof(*bta),GFP_ATOMIC);
 	if (!bta) {
 		rc = -ENOMEM;
 		goto fail0;
 	}
-	memset(bta,0,sizeof(*bta));
 
 	bta->pci  = pci_dev;
 	bta->irq  = pci_dev->irq;
@@ -941,7 +942,7 @@ static int __devinit btaudio_probe(struct pci_dev *pci_dev,
 	if (rate)
 		bta->rate = rate;
 	
-	init_MUTEX(&bta->lock);
+	mutex_init(&bta->lock);
         init_waitqueue_head(&bta->readq);
 
 	if (-1 != latency) {
@@ -964,7 +965,7 @@ static int __devinit btaudio_probe(struct pci_dev *pci_dev,
         btwrite(~0U, REG_INT_STAT);
 	pci_set_master(pci_dev);
 
-	if ((rc = request_irq(bta->irq, btaudio_irq, SA_SHIRQ|SA_INTERRUPT,
+	if ((rc = request_irq(bta->irq, btaudio_irq, IRQF_SHARED|IRQF_DISABLED,
 			      "btaudio",(void *)bta)) < 0) {
 		printk(KERN_WARNING
 		       "btaudio: can't request irq (rc=%d)\n",rc);
@@ -1018,6 +1019,7 @@ static int __devinit btaudio_probe(struct pci_dev *pci_dev,
  fail2:
         free_irq(bta->irq,bta);	
  fail1:
+	iounmap(bta->mmio);
 	kfree(bta);
  fail0:
 	release_mem_region(pci_resource_start(pci_dev,0),
@@ -1049,6 +1051,7 @@ static void __devexit btaudio_remove(struct pci_dev *pci_dev)
         free_irq(bta->irq,bta);
 	release_mem_region(pci_resource_start(pci_dev,0),
 			   pci_resource_len(pci_dev,0));
+	iounmap(bta->mmio);
 
 	/* remove from linked list */
 	if (bta == btaudios) {
@@ -1101,7 +1104,7 @@ static int btaudio_init_module(void)
 	       digital ? "digital" : "",
 	       analog && digital ? "+" : "",
 	       analog ? "analog" : "");
-	return pci_module_init(&btaudio_pci_driver);
+	return pci_register_driver(&btaudio_pci_driver);
 }
 
 static void btaudio_cleanup_module(void)

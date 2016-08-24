@@ -42,7 +42,6 @@
 
 /*****************************************************************************/
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/net.h>
@@ -51,6 +50,7 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/bitops.h>
+#include <linux/random.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <linux/interrupt.h>
@@ -60,19 +60,12 @@
 #include <linux/if_arp.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
-/* prototypes for ax25_encapsulate and ax25_rebuild_header */
 #include <net/ax25.h>
-#endif	/* CONFIG_AX25 || CONFIG_AX25_MODULE */
-
-/* make genksyms happy */
-#include <linux/ip.h>
-#include <linux/udp.h>
-#include <linux/tcp.h>
 
 #include <linux/kernel.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <net/net_namespace.h>
 
 #include <asm/uaccess.h>
 #include <linux/init.h>
@@ -165,12 +158,7 @@ static struct net_device *yam_devs[NR_PORTS];
 
 static struct yam_mcs *yam_data;
 
-static char ax25_bcast[7] =
-{'Q' << 1, 'S' << 1, 'T' << 1, ' ' << 1, ' ' << 1, ' ' << 1, '0' << 1};
-static char ax25_test[7] =
-{'L' << 1, 'I' << 1, 'N' << 1, 'U' << 1, 'X' << 1, ' ' << 1, '1' << 1};
-
-static struct timer_list yam_timer = TIMER_INITIALIZER(NULL, 0, 0);
+static DEFINE_TIMER(yam_timer, NULL, 0, 0);
 
 /* --------------------------------------------------------------------- */
 
@@ -442,7 +430,7 @@ static int fpga_download(int iobase, int bitrate)
 
 static void yam_set_uart(struct net_device *dev)
 {
-	struct yam_port *yp = (struct yam_port *) dev->priv;
+	struct yam_port *yp = netdev_priv(dev);
 	int divisor = 115200 / yp->baudrate;
 
 	outb(0, IER(dev->base_addr));
@@ -522,12 +510,10 @@ static inline void yam_rx_flag(struct net_device *dev, struct yam_port *yp)
 				++yp->stats.rx_dropped;
 			} else {
 				unsigned char *cp;
-				skb->dev = dev;
 				cp = skb_put(skb, pkt_len);
 				*cp++ = 0;		/* KISS kludge */
 				memcpy(cp, yp->rx_buf, pkt_len - 1);
-				skb->protocol = htons(ETH_P_AX25);
-				skb->mac.raw = skb->data;
+				skb->protocol = ax25_type_trans(skb, dev);
 				netif_rx(skb);
 				dev->last_rx = jiffies;
 				++yp->stats.rx_packets;
@@ -565,7 +551,7 @@ static void ptt_off(struct net_device *dev)
 
 static int yam_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct yam_port *yp = dev->priv;
+	struct yam_port *yp = netdev_priv(dev);
 
 	skb_queue_tail(&yp->send_queue, skb);
 	dev->trans_start = jiffies;
@@ -582,22 +568,13 @@ static void yam_start_tx(struct net_device *dev, struct yam_port *yp)
 	ptt_on(dev);
 }
 
-static unsigned short random_seed;
-
-static inline unsigned short random_num(void)
-{
-	random_seed = 28629 * random_seed + 157;
-	return random_seed;
-}
-
 static void yam_arbitrate(struct net_device *dev)
 {
-	struct yam_port *yp = dev->priv;
+	struct yam_port *yp = netdev_priv(dev);
 
-	if (!yp || yp->magic != YAM_MAGIC
-		|| yp->tx_state != TX_OFF || skb_queue_empty(&yp->send_queue)) {
+	if (yp->magic != YAM_MAGIC || yp->tx_state != TX_OFF ||
+	    skb_queue_empty(&yp->send_queue))
 		return;
-	}
 	/* tx_state is TX_OFF and there is data to send */
 
 	if (yp->dupmode) {
@@ -617,7 +594,7 @@ static void yam_arbitrate(struct net_device *dev)
 	yp->slotcnt = yp->slot / 10;
 
 	/* is random > persist ? */
-	if ((random_num() % 256) > yp->pers)
+	if ((random32() % 256) > yp->pers)
 		return;
 
 	yam_start_tx(dev, yp);
@@ -662,7 +639,9 @@ static void yam_tx_byte(struct net_device *dev, struct yam_port *yp)
         			dev_kfree_skb_any(skb);
 				break;
 			}
-			memcpy(yp->tx_buf, skb->data + 1, yp->tx_len);
+			skb_copy_from_linear_data_offset(skb, 1,
+							 yp->tx_buf,
+							 yp->tx_len);
 			dev_kfree_skb_any(skb);
 			yp->tx_count = 0;
 			yp->tx_crcl = 0x21;
@@ -714,7 +693,7 @@ static void yam_tx_byte(struct net_device *dev, struct yam_port *yp)
 * ISR routine
 ************************************************************************************/
 
-static irqreturn_t yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t yam_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev;
 	struct yam_port *yp;
@@ -725,7 +704,7 @@ static irqreturn_t yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	for (i = 0; i < NR_PORTS; i++) {
 		dev = yam_devs[i];
-		yp = dev->priv;
+		yp = netdev_priv(dev);
 
 		if (!netif_running(dev))
 			continue;
@@ -784,8 +763,8 @@ static void yam_seq_stop(struct seq_file *seq, void *v)
 
 static int yam_seq_show(struct seq_file *seq, void *v)
 {
-	const struct net_device *dev = v;
-	const struct yam_port *yp = dev->priv;
+	struct net_device *dev = v;
+	const struct yam_port *yp = netdev_priv(dev);
 
 	seq_printf(seq, "Device %s\n", dev->name);
 	seq_printf(seq, "  Up       %d\n", netif_running(dev));
@@ -821,7 +800,7 @@ static int yam_info_open(struct inode *inode, struct file *file)
 	return seq_open(file, &yam_seqops);
 }
 
-static struct file_operations yam_info_fops = {
+static const struct file_operations yam_info_fops = {
 	.owner = THIS_MODULE,
 	.open = yam_info_open,
 	.read = seq_read,
@@ -838,10 +817,10 @@ static struct net_device_stats *yam_get_stats(struct net_device *dev)
 {
 	struct yam_port *yp;
 
-	if (!dev || !dev->priv)
+	if (!dev)
 		return NULL;
 
-	yp = (struct yam_port *) dev->priv;
+	yp = netdev_priv(dev);
 	if (yp->magic != YAM_MAGIC)
 		return NULL;
 
@@ -856,14 +835,14 @@ static struct net_device_stats *yam_get_stats(struct net_device *dev)
 
 static int yam_open(struct net_device *dev)
 {
-	struct yam_port *yp = (struct yam_port *) dev->priv;
+	struct yam_port *yp = netdev_priv(dev);
 	enum uart u;
 	int i;
 	int ret=0;
 
 	printk(KERN_INFO "Trying %s at iobase 0x%lx irq %u\n", dev->name, dev->base_addr, dev->irq);
 
-	if (!dev || !yp || !yp->bitrate)
+	if (!dev || !yp->bitrate)
 		return -ENXIO;
 	if (!dev->base_addr || dev->base_addr > 0x1000 - YAM_EXTENT ||
 		dev->irq < 2 || dev->irq > 15) {
@@ -885,7 +864,7 @@ static int yam_open(struct net_device *dev)
 		goto out_release_base;
 	}
 	outb(0, IER(dev->base_addr));
-	if (request_irq(dev->irq, yam_interrupt, SA_INTERRUPT | SA_SHIRQ, dev->name, dev)) {
+	if (request_irq(dev->irq, yam_interrupt, IRQF_DISABLED | IRQF_SHARED, dev->name, dev)) {
 		printk(KERN_ERR "%s: irq %d busy\n", dev->name, dev->irq);
 		ret = -EBUSY;
 		goto out_release_base;
@@ -900,7 +879,7 @@ static int yam_open(struct net_device *dev)
 	/* Reset overruns for all ports - FPGA programming makes overruns */
 	for (i = 0; i < NR_PORTS; i++) {
 		struct net_device *dev = yam_devs[i];
-		struct yam_port *yp = dev->priv;
+		struct yam_port *yp = netdev_priv(dev);
 		inb(LSR(dev->base_addr));
 		yp->stats.rx_fifo_errors = 0;
 	}
@@ -919,10 +898,11 @@ out_release_base:
 static int yam_close(struct net_device *dev)
 {
 	struct sk_buff *skb;
-	struct yam_port *yp = (struct yam_port *) dev->priv;
+	struct yam_port *yp = netdev_priv(dev);
 
-	if (!dev || !yp)
+	if (!dev)
 		return -EINVAL;
+
 	/*
 	 * disable interrupts
 	 */
@@ -944,7 +924,7 @@ static int yam_close(struct net_device *dev)
 
 static int yam_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
-	struct yam_port *yp = (struct yam_port *) dev->priv;
+	struct yam_port *yp = netdev_priv(dev);
 	struct yamdrv_ioctl_cfg yi;
 	struct yamdrv_ioctl_mcs *ym;
 	int ioctl_cmd;
@@ -952,7 +932,7 @@ static int yam_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	if (copy_from_user(&ioctl_cmd, ifr->ifr_data, sizeof(int)))
 		 return -EFAULT;
 
-	if (yp == NULL || yp->magic != YAM_MAGIC)
+	if (yp->magic != YAM_MAGIC)
 		return -EINVAL;
 
 	if (!capable(CAP_NET_ADMIN))
@@ -1091,7 +1071,7 @@ static int yam_set_mac_address(struct net_device *dev, void *addr)
 
 static void yam_setup(struct net_device *dev)
 {
-	struct yam_port *yp = dev->priv;
+	struct yam_port *yp = netdev_priv(dev);
 
 	yp->magic = YAM_MAGIC;
 	yp->bitrate = DEFAULT_BITRATE;
@@ -1108,7 +1088,6 @@ static void yam_setup(struct net_device *dev)
 
 	dev->base_addr = yp->iobase;
 	dev->irq = yp->irq;
-	SET_MODULE_OWNER(dev);
 
 	dev->open = yam_open;
 	dev->stop = yam_close;
@@ -1118,23 +1097,16 @@ static void yam_setup(struct net_device *dev)
 
 	skb_queue_head_init(&yp->send_queue);
 
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
-	dev->hard_header = ax25_encapsulate;
-	dev->rebuild_header = ax25_rebuild_header;
-#else							/* CONFIG_AX25 || CONFIG_AX25_MODULE */
-	dev->hard_header = NULL;
-	dev->rebuild_header = NULL;
-#endif							/* CONFIG_AX25 || CONFIG_AX25_MODULE */
+	dev->header_ops = &ax25_header_ops;
 
 	dev->set_mac_address = yam_set_mac_address;
 
-	dev->type = ARPHRD_AX25;	/* AF_AX25 device */
-	dev->hard_header_len = 73;	/* We do digipeaters now */
-	dev->mtu = 256;				/* AX25 is the default */
-	dev->addr_len = 7;			/* sizeof an ax.25 address */
-	memcpy(dev->broadcast, ax25_bcast, 7);
-	memcpy(dev->dev_addr, ax25_test, 7);
-
+	dev->type = ARPHRD_AX25;
+	dev->hard_header_len = AX25_MAX_HEADER_LEN;
+	dev->mtu = AX25_MTU;
+	dev->addr_len = AX25_ADDR_LEN;
+	memcpy(dev->broadcast, &ax25_bcast, AX25_ADDR_LEN);
+	memcpy(dev->dev_addr, &ax25_defaddr, AX25_ADDR_LEN);
 }
 
 static int __init yam_init_driver(void)
@@ -1170,7 +1142,7 @@ static int __init yam_init_driver(void)
 	yam_timer.expires = jiffies + HZ / 100;
 	add_timer(&yam_timer);
 
-	proc_net_fops_create("yam", S_IRUGO, &yam_info_fops);
+	proc_net_fops_create(&init_net, "yam", S_IRUGO, &yam_info_fops);
 	return 0;
  error:
 	while (--i >= 0) {
@@ -1202,7 +1174,7 @@ static void __exit yam_cleanup_driver(void)
 		kfree(p);
 	}
 
-	proc_net_remove("yam");
+	proc_net_remove(&init_net, "yam");
 }
 
 /* --------------------------------------------------------------------- */

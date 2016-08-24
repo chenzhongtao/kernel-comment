@@ -54,10 +54,13 @@
  * This is because ar.ec is saved as part of ar.pfs.
  */
 
-#include <linux/config.h>
 
 #include <asm/fpu.h>
-#include <asm/offsets.h>
+
+#ifdef __KERNEL__
+#ifndef ASM_OFFSETS_C
+#include <asm/asm-offsets.h>
+#endif
 
 /*
  * Base-2 logarithm of number of pages to allocate per task structure
@@ -78,10 +81,9 @@
 
 #define KERNEL_STACK_SIZE		IA64_STK_OFFSET
 
-#ifndef __ASSEMBLY__
+#endif /* __KERNEL__ */
 
-#include <asm/current.h>
-#include <asm/page.h>
+#ifndef __ASSEMBLY__
 
 /*
  * This struct defines the way the registers are saved on system
@@ -119,7 +121,7 @@ struct pt_regs {
 	unsigned long ar_unat;		/* interrupted task's NaT register (preserved) */
 	unsigned long ar_pfs;		/* prev function state  */
 	unsigned long ar_rsc;		/* RSE configuration */
-	/* The following two are valid only if cr_ipsr.cpl > 0: */
+	/* The following two are valid only if cr_ipsr.cpl > 0 || ti->flags & _TIF_MCA_INIT */
 	unsigned long ar_rnat;		/* RSE NaT */
 	unsigned long ar_bspstore;	/* RSE bspstore */
 
@@ -227,12 +229,21 @@ struct switch_stack {
 };
 
 #ifdef __KERNEL__
+
+#include <asm/current.h>
+#include <asm/page.h>
+
+#define __ARCH_SYS_PTRACE	1
+
 /*
  * We use the ia64_psr(regs)->ri to determine which of the three
  * instructions in bundle (16 bytes) took the sample. Generate
  * the canonical representation by adding to instruction pointer.
  */
 # define instruction_pointer(regs) ((regs)->cr_iip + ia64_psr(regs)->ri)
+
+#define regs_return_value(regs) ((regs)->r8)
+
 /* Conserve space in histogram by encoding slot bits in address
  * bits 2 and 3 rather than bits 0 and 1.
  */
@@ -243,7 +254,7 @@ struct switch_stack {
 })
 
   /* given a pointer to a task_struct, return the user's pt_regs */
-# define ia64_task_regs(t)		(((struct pt_regs *) ((char *) (t) + IA64_STK_OFFSET)) - 1)
+# define task_pt_regs(t)		(((struct pt_regs *) ((char *) (t) + IA64_STK_OFFSET)) - 1)
 # define ia64_psr(regs)			((struct ia64_psr *) &(regs)->cr_ipsr)
 # define user_mode(regs)		(((struct ia64_psr *) &(regs)->cr_ipsr)->cpl != 0)
 # define user_stack(task,regs)	((long) regs - (long) task == IA64_STK_OFFSET - sizeof(*regs))
@@ -266,7 +277,7 @@ struct switch_stack {
    *
    * On ia64, we can clear the user's pt_regs->r8 to force a successful syscall.
    */
-# define force_successful_syscall_return()	(ia64_task_regs(current)->r8 = 0)
+# define force_successful_syscall_return()	(task_pt_regs(current)->r8 = 0)
 
   struct task_struct;			/* forward decl */
   struct unw_frame_info;		/* forward decl */

@@ -17,6 +17,26 @@
 #include <linux/spinlock.h>
 #include <asm/atomic.h>
  
+/* Each escaped entry is prefixed by ESCAPE_CODE
+ * then one of the following codes, then the
+ * relevant data.
+ * These #defines live in this file so that arch-specific
+ * buffer sync'ing code can access them.
+ */
+#define ESCAPE_CODE			~0UL
+#define CTX_SWITCH_CODE			1
+#define CPU_SWITCH_CODE			2
+#define COOKIE_SWITCH_CODE		3
+#define KERNEL_ENTER_SWITCH_CODE	4
+#define KERNEL_EXIT_SWITCH_CODE		5
+#define MODULE_LOADED_CODE		6
+#define CTX_TGID_CODE			7
+#define TRACE_BEGIN_CODE		8
+#define TRACE_END_CODE			9
+#define XEN_ENTER_SWITCH_CODE		10
+#define SPU_PROFILING_CODE		11
+#define SPU_CTX_SWITCH_CODE		12
+
 struct super_block;
 struct dentry;
 struct file_operations;
@@ -35,6 +55,14 @@ struct oprofile_operations {
 	int (*start)(void);
 	/* Stop delivering interrupts. */
 	void (*stop)(void);
+	/* Arch-specific buffer sync functions.
+	 * Return value = 0:  Success
+	 * Return value = -1: Failure
+	 * Return value = 1:  Run generic sync function
+	 */
+	int (*sync_start)(void);
+	int (*sync_stop)(void);
+
 	/* Initiate a stack backtrace. Optional. */
 	void (*backtrace)(struct pt_regs * const regs, unsigned int depth);
 	/* CPU identification string. */
@@ -56,10 +84,27 @@ int oprofile_arch_init(struct oprofile_operations * ops);
 void oprofile_arch_exit(void);
 
 /**
+ * Add data to the event buffer.
+ * The data passed is free-form, but typically consists of
+ * file offsets, dcookies, context information, and ESCAPE codes.
+ */
+void add_event_entry(unsigned long data);
+
+/**
  * Add a sample. This may be called from any context. Pass
  * smp_processor_id() as cpu.
  */
 void oprofile_add_sample(struct pt_regs * const regs, unsigned long event);
+
+/**
+ * Add an extended sample.  Use this when the PC is not from the regs, and
+ * we cannot determine if we're in kernel mode from the regs.
+ *
+ * This function does perform a backtrace.
+ *
+ */
+void oprofile_add_ext_sample(unsigned long pc, struct pt_regs * const regs,
+				unsigned long event, int is_kernel);
 
 /* Use this instead when the PC value is not from the regs. Doesn't
  * backtrace. */
@@ -74,10 +119,10 @@ void oprofile_add_trace(unsigned long eip);
  * the specified file operations.
  */
 int oprofilefs_create_file(struct super_block * sb, struct dentry * root,
-	char const * name, struct file_operations * fops);
+	char const * name, const struct file_operations * fops);
 
 int oprofilefs_create_file_perm(struct super_block * sb, struct dentry * root,
-	char const * name, struct file_operations * fops, int perm);
+	char const * name, const struct file_operations * fops, int perm);
  
 /** Create a file for read/write access to an unsigned long. */
 int oprofilefs_create_ulong(struct super_block * sb, struct dentry * root,

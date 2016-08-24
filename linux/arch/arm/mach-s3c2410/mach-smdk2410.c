@@ -1,4 +1,4 @@
-/***********************************************************************
+/* linux/arch/arm/mach-s3c2410/mach-smdk2410.c
  *
  * linux/arch/arm/mach-s3c2410/mach-smdk2410.c
  *
@@ -26,6 +26,7 @@
  * @History:
  * derived from linux/arch/arm/mach-s3c2410/mach-bast.c, written by
  * Ben Dooks <ben@simtec.co.uk>
+ *
  ***********************************************************************/
 
 #include <linux/kernel.h>
@@ -34,6 +35,8 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/serial_core.h>
+#include <linux/platform_device.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -44,10 +47,12 @@
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
-#include <asm/arch/regs-serial.h>
+#include <asm/plat-s3c/regs-serial.h>
 
-#include "devs.h"
-#include "cpu.h"
+#include <asm/plat-s3c24xx/devs.h>
+#include <asm/plat-s3c24xx/cpu.h>
+
+#include <asm/plat-s3c24xx/common-smdk.h>
 
 static struct map_desc smdk2410_iodesc[] __initdata = {
   /* nothing here yet */
@@ -57,7 +62,7 @@ static struct map_desc smdk2410_iodesc[] __initdata = {
 #define ULCON S3C2410_LCON_CS8 | S3C2410_LCON_PNONE | S3C2410_LCON_STOPB
 #define UFCON S3C2410_UFCON_RXTRIG8 | S3C2410_UFCON_FIFOMODE
 
-static struct s3c2410_uartcfg smdk2410_uartcfgs[] = {
+static struct s3c2410_uartcfg smdk2410_uartcfgs[] __initdata = {
 	[0] = {
 		.hwport	     = 0,
 		.flags	     = 0,
@@ -89,31 +94,28 @@ static struct platform_device *smdk2410_devices[] __initdata = {
 	&s3c_device_iis,
 };
 
-static struct s3c24xx_board smdk2410_board __initdata = {
-	.devices       = smdk2410_devices,
-	.devices_count = ARRAY_SIZE(smdk2410_devices)
-};
-
-void __init smdk2410_map_io(void)
+static void __init smdk2410_map_io(void)
 {
 	s3c24xx_init_io(smdk2410_iodesc, ARRAY_SIZE(smdk2410_iodesc));
 	s3c24xx_init_clocks(0);
 	s3c24xx_init_uarts(smdk2410_uartcfgs, ARRAY_SIZE(smdk2410_uartcfgs));
-	s3c24xx_set_board(&smdk2410_board);
 }
 
-void __init smdk2410_init_irq(void)
+static void __init smdk2410_init(void)
 {
-	s3c24xx_init_irq();
+	platform_add_devices(smdk2410_devices, ARRAY_SIZE(smdk2410_devices));
+	smdk_machine_init();
 }
 
 MACHINE_START(SMDK2410, "SMDK2410") /* @TODO: request a new identifier and switch
 				    * to SMDK2410 */
-     MAINTAINER("Jonas Dietsche")
-     BOOT_MEM(S3C2410_SDRAM_PA, S3C2410_PA_UART, S3C2410_VA_UART)
-     BOOT_PARAMS(S3C2410_SDRAM_PA + 0x100)
-     MAPIO(smdk2410_map_io)
-     INITIRQ(smdk2410_init_irq)
+	/* Maintainer: Jonas Dietsche */
+	.phys_io	= S3C2410_PA_UART,
+	.io_pg_offst	= (((u32)S3C24XX_VA_UART) >> 18) & 0xfffc,
+	.boot_params	= S3C2410_SDRAM_PA + 0x100,
+	.map_io		= smdk2410_map_io,
+	.init_irq	= s3c24xx_init_irq,
+	.init_machine	= smdk2410_init,
 	.timer		= &s3c24xx_timer,
 MACHINE_END
 

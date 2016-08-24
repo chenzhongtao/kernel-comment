@@ -30,8 +30,7 @@
 
 #define TTY_THRESHOLD_THROTTLE  128
 
-#define LO_WATER	 	(TTY_FLIPBUF_SIZE)
-#define HI_WATER		(TTY_FLIPBUF_SIZE*2*3/4)
+#define HI_WATER		768
 
 // added by James. 03-11-2004.
 #define MOXA_SDS_GETICOUNTER  	(MOXA + 68)
@@ -118,7 +117,7 @@
 
 // enable CTS interrupt
 #define MOXA_MUST_IER_ECTSI		0x80
-// eanble RTS interrupt
+// enable RTS interrupt
 #define MOXA_MUST_IER_ERTSI		0x40
 // enable Xon/Xoff interrupt
 #define MOXA_MUST_IER_XINT		0x20
@@ -438,13 +437,5 @@
 }
 
 #define READ_MOXA_MUST_GDL(baseio)	inb((baseio)+MOXA_MUST_GDL_REGISTER)
-
-
-#ifndef INIT_WORK
-#define INIT_WORK(_work, _func, _data){	\
-	_data->tqueue.routine = _func;\
-	_data->tqueue.data = _data;\
-	}
-#endif
 
 #endif

@@ -1,7 +1,6 @@
 #ifndef __PARISC_SYSTEM_H
 #define __PARISC_SYSTEM_H
 
-#include <linux/config.h>
 #include <asm/psw.h>
 
 /* The program status word as bitfields.  */
@@ -35,7 +34,7 @@ struct pa_psw {
 	unsigned int i:1;
 };
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 #define pa_psw(task) ((struct pa_psw *) ((char *) (task) + TASK_PT_PSW + 4))
 #else
 #define pa_psw(task) ((struct pa_psw *) ((char *) (task) + TASK_PT_PSW))
@@ -48,8 +47,6 @@ extern struct task_struct *_switch_to(struct task_struct *, struct task_struct *
 #define switch_to(prev, next, last) do {			\
 	(last) = _switch_to(prev, next);			\
 } while(0)
-
-
 
 /* interrupt control */
 #define local_save_flags(x)	__asm__ __volatile__("ssm 0, %0" : "=r" (x) : : "memory")
@@ -125,7 +122,7 @@ static inline void set_eiem(unsigned long val)
 ** The __asm__ op below simple prevents gcc/ld from reordering
 ** instructions across the mb() "call".
 */
-#define mb()		__asm__ __volatile__("":::"memory");	/* barrier() */
+#define mb()		__asm__ __volatile__("":::"memory")	/* barrier() */
 #define rmb()		mb()
 #define wmb()		mb()
 #define smp_mb()	mb()
@@ -135,16 +132,8 @@ static inline void set_eiem(unsigned long val)
 #define read_barrier_depends()		do { } while(0)
 
 #define set_mb(var, value)		do { var = value; mb(); } while (0)
-#define set_wmb(var, value)		do { var = value; wmb(); } while (0)
 
-
-/* LDCW, the only atomic read-write operation PA-RISC has. *sigh*.  */
-#define __ldcw(a) ({ \
-	unsigned __ret; \
-	__asm__ __volatile__("ldcw 0(%1),%0" : "=r" (__ret) : "r" (a)); \
-	__ret; \
-})
-
+#ifndef CONFIG_PA20
 /* Because kmalloc only guarantees 8-byte alignment for kmalloc'd data,
    and GCC only guarantees 8-byte alignment for stack locals, we can't
    be assured of 16-byte alignment for atomic lock data even if we
@@ -152,57 +141,42 @@ static inline void set_eiem(unsigned long val)
    we use a struct containing an array of four ints for the atomic lock
    type and dynamically select the 16-byte aligned int from the array
    for the semaphore.  */
-#define __PA_LDCW_ALIGNMENT 16
-#define __ldcw_align(a) ({ \
-  unsigned long __ret = (unsigned long) &(a)->lock[0];        		\
-  __ret = (__ret + __PA_LDCW_ALIGNMENT - 1) & ~(__PA_LDCW_ALIGNMENT - 1); \
-  (volatile unsigned int *) __ret;                                      \
+
+#define __PA_LDCW_ALIGNMENT	16
+#define __ldcw_align(a) ({					\
+	unsigned long __ret = (unsigned long) &(a)->lock[0];	\
+	__ret = (__ret + __PA_LDCW_ALIGNMENT - 1)		\
+		& ~(__PA_LDCW_ALIGNMENT - 1);			\
+	(volatile unsigned int *) __ret;			\
+})
+#define __LDCW	"ldcw"
+
+#else /*CONFIG_PA20*/
+/* From: "Jim Hull" <jim.hull of hp.com>
+   I've attached a summary of the change, but basically, for PA 2.0, as
+   long as the ",CO" (coherent operation) completer is specified, then the
+   16-byte alignment requirement for ldcw and ldcd is relaxed, and instead
+   they only require "natural" alignment (4-byte for ldcw, 8-byte for
+   ldcd). */
+
+#define __PA_LDCW_ALIGNMENT	4
+#define __ldcw_align(a) ((volatile unsigned int *)a)
+#define __LDCW	"ldcw,co"
+
+#endif /*!CONFIG_PA20*/
+
+/* LDCW, the only atomic read-write operation PA-RISC has. *sigh*.  */
+#define __ldcw(a) ({						\
+	unsigned __ret;						\
+	__asm__ __volatile__(__LDCW " 0(%1),%0"			\
+		: "=r" (__ret) : "r" (a));			\
+	__ret;							\
 })
 
 #ifdef CONFIG_SMP
-/*
- * Your basic SMP spinlocks, allowing only a single CPU anywhere
- */
-
-typedef struct {
-	volatile unsigned int lock[4];
-#ifdef CONFIG_DEBUG_SPINLOCK
-	unsigned long magic;
-	volatile unsigned int babble;
-	const char *module;
-	char *bfile;
-	int bline;
-	int oncpu;
-	void *previous;
-	struct task_struct * task;
-#endif
-#ifdef CONFIG_PREEMPT
-	unsigned int break_lock;
-#endif
-} spinlock_t;
-
-#define __lock_aligned __attribute__((__section__(".data.lock_aligned")))
-
+# define __lock_aligned __attribute__((__section__(".data.lock_aligned")))
 #endif
 
-#define KERNEL_START (0x10100000 - 0x1000)
-
-/* This is for the serialisation of PxTLB broadcasts.  At least on the
- * N class systems, only one PxTLB inter processor broadcast can be
- * active at any one time on the Merced bus.  This tlb purge
- * synchronisation is fairly lightweight and harmless so we activate
- * it on all SMP systems not just the N class. */
-#ifdef CONFIG_SMP
-extern spinlock_t pa_tlb_lock;
-
-#define purge_tlb_start(x) spin_lock(&pa_tlb_lock)
-#define purge_tlb_end(x) spin_unlock(&pa_tlb_lock)
-
-#else
-
-#define purge_tlb_start(x) do { } while(0)
-#define purge_tlb_end(x) do { } while (0)
-
-#endif
+#define arch_align_stack(x) (x)
 
 #endif

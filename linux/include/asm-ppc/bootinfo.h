@@ -9,12 +9,7 @@
 #ifndef _PPC_BOOTINFO_H
 #define _PPC_BOOTINFO_H
 
-#include <linux/config.h>
 #include <asm/page.h>
-
-#if defined(CONFIG_APUS) && !defined(__BOOTER__)
-#include <asm-m68k/bootinfo.h>
-#else
 
 struct bi_record {
 	unsigned long tag;		/* tag ID */
@@ -45,7 +40,6 @@ bootinfo_addr(unsigned long offset)
 	return (struct bi_record *)_ALIGN((offset) + (1 << 20) - 1,
 					  (1 << 20));
 }
-#endif /* CONFIG_APUS */
 
 
 #endif /* _PPC_BOOTINFO_H */

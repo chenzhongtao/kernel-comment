@@ -164,34 +164,17 @@ static const config configuration_table[10] = {
     memset((char *)s->head, 0, (unsigned)(s->hash_size-1)*sizeof(*s->head));
 
 /* ========================================================================= */
-int zlib_deflateInit_(
-	z_streamp strm,
-	int level,
-	const char *version,
-	int stream_size
-)
-{
-    return zlib_deflateInit2_(strm, level, Z_DEFLATED, MAX_WBITS,
-			      DEF_MEM_LEVEL,
-			      Z_DEFAULT_STRATEGY, version, stream_size);
-    /* To do: ignore strm->next_in if we use it as window */
-}
-
-/* ========================================================================= */
-int zlib_deflateInit2_(
+int zlib_deflateInit2(
 	z_streamp strm,
 	int  level,
 	int  method,
 	int  windowBits,
 	int  memLevel,
-	int  strategy,
-	const char *version,
-	int stream_size
+	int  strategy
 )
 {
     deflate_state *s;
     int noheader = 0;
-    static char* my_version = ZLIB_VERSION;
     deflate_workspace *mem;
 
     ush *overlay;
@@ -199,10 +182,6 @@ int zlib_deflateInit2_(
      * output size for (length,distance) codes is <= 24 bits.
      */
 
-    if (version == NULL || version[0] != my_version[0] ||
-        stream_size != sizeof(z_stream)) {
-	return Z_VERSION_ERROR;
-    }
     if (strm == NULL) return Z_STREAM_ERROR;
 
     strm->msg = NULL;
@@ -255,6 +234,7 @@ int zlib_deflateInit2_(
 }
 
 /* ========================================================================= */
+#if 0
 int zlib_deflateSetDictionary(
 	z_streamp strm,
 	const Byte *dictionary,
@@ -297,6 +277,7 @@ int zlib_deflateSetDictionary(
     if (hash_head) hash_head = 0;  /* to make compiler happy */
     return Z_OK;
 }
+#endif  /*  0  */
 
 /* ========================================================================= */
 int zlib_deflateReset(
@@ -330,6 +311,7 @@ int zlib_deflateReset(
 }
 
 /* ========================================================================= */
+#if 0
 int zlib_deflateParams(
 	z_streamp strm,
 	int level,
@@ -365,6 +347,7 @@ int zlib_deflateParams(
     s->strategy = strategy;
     return err;
 }
+#endif  /*  0  */
 
 /* =========================================================================
  * Put a short in the pending buffer. The 16-bit value is put in MSB order.
@@ -572,6 +555,7 @@ int zlib_deflateEnd(
 /* =========================================================================
  * Copy the source state to the destination state.
  */
+#if 0
 int zlib_deflateCopy (
 	z_streamp dest,
 	z_streamp source
@@ -624,6 +608,7 @@ int zlib_deflateCopy (
     return Z_OK;
 #endif
 }
+#endif  /*  0  */
 
 /* ===========================================================================
  * Read a new buffer from the current input stream, update the adler32

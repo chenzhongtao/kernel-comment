@@ -1,15 +1,23 @@
 # 
-# Copyright (C) 2000 Jeff Dike (jdike@karaya.com)
+# Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
 # Licensed under the GPL
 #
 
-obj-y = elf_aux.o file.o process.o signal.o time.o tty.o user_syms.o drivers/ \
-	sys-$(SUBARCH)/
+obj-y = aio.o elf_aux.o execvp.o file.o helper.o irq.o main.o mem.o process.o \
+	registers.o sigio.o signal.o start_up.o time.o trap.o tty.o uaccess.o \
+	umid.o tls.o user_syms.o util.o drivers/ sys-$(SUBARCH)/ skas/
 
-USER_OBJS := elf_aux.o file.o process.o signal.o time.o tty.o
-USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
+obj-$(CONFIG_TTY_LOG) += tty_log.o
+user-objs-$(CONFIG_TTY_LOG) += tty_log.o
 
-$(USER_OBJS) : %.o: %.c
-	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
+USER_OBJS := $(user-objs-y) aio.o elf_aux.o execvp.o file.o helper.o irq.o \
+	main.o mem.o process.o registers.o sigio.o signal.o start_up.o time.o \
+	trap.o tty.o tls.o uaccess.o umid.o util.o
 
 CFLAGS_user_syms.o += -DSUBARCH_$(SUBARCH)
+
+HAVE_AIO_ABI := $(shell [ -r /usr/include/linux/aio_abi.h ] && \
+	echo -DHAVE_AIO_ABI )
+CFLAGS_aio.o += $(HAVE_AIO_ABI)
+
+include arch/um/scripts/Makefile.rules

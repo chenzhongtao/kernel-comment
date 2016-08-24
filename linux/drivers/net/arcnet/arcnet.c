@@ -41,10 +41,9 @@
  *     <jojo@repas.de>
  */
 
-#define VERSION "arcnet: v3.93 BETA 2000/04/29 - by Avery Pennarun et al.\n"
+#define VERSION "arcnet: v3.94 BETA 2007/02/08 - by Avery Pennarun et al.\n"
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -52,6 +51,7 @@
 #include <net/arp.h>
 #include <linux/init.h>
 #include <linux/arcdevice.h>
+#include <linux/jiffies.h>
 
 /* "do nothing" functions for protocol drivers */
 static void null_rx(struct net_device *dev, int bufnum,
@@ -61,6 +61,7 @@ static int null_build_header(struct sk_buff *skb, struct net_device *dev,
 static int null_prepare_tx(struct net_device *dev, struct archdr *pkt,
 			   int length, int bufnum);
 
+static void arcnet_rx(struct net_device *dev, int bufnum);
 
 /*
  * one ArcProto per possible proto ID.  None of the elements of
@@ -71,7 +72,7 @@ static int null_prepare_tx(struct net_device *dev, struct archdr *pkt,
  struct ArcProto *arc_proto_map[256], *arc_proto_default,
    *arc_bcast_proto, *arc_raw_proto;
 
-struct ArcProto arc_proto_null =
+static struct ArcProto arc_proto_null =
 {
 	.suffix		= '?',
 	.mtu		= XMTU,
@@ -90,7 +91,6 @@ EXPORT_SYMBOL(arc_proto_map);
 EXPORT_SYMBOL(arc_proto_default);
 EXPORT_SYMBOL(arc_bcast_proto);
 EXPORT_SYMBOL(arc_raw_proto);
-EXPORT_SYMBOL(arc_proto_null);
 EXPORT_SYMBOL(arcnet_unregister_proto);
 EXPORT_SYMBOL(arcnet_debug);
 EXPORT_SYMBOL(alloc_arcdev);
@@ -102,8 +102,8 @@ static int arcnet_close(struct net_device *dev);
 static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void arcnet_timeout(struct net_device *dev);
 static int arcnet_header(struct sk_buff *skb, struct net_device *dev,
-			 unsigned short type, void *daddr, void *saddr,
-			 unsigned len);
+			 unsigned short type, const void *daddr,
+			 const void *saddr, unsigned len);
 static int arcnet_rebuild_header(struct sk_buff *skb);
 static struct net_device_stats *arcnet_get_stats(struct net_device *dev);
 static int go_tx(struct net_device *dev);
@@ -118,7 +118,7 @@ static int __init arcnet_init(void)
 
 	arcnet_debug = debug;
 
-	printk(VERSION);
+	printk("arcnet loaded.\n");
 
 #ifdef ALPHA_WARNING
 	BUGLVL(D_EXTRA) {
@@ -178,10 +178,10 @@ EXPORT_SYMBOL(arcnet_dump_skb);
  * Dump the contents of an ARCnet buffer
  */
 #if (ARCNET_DEBUG_MAX & (D_RX | D_TX))
-void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc,
-			int take_arcnet_lock)
+static void arcnet_dump_packet(struct net_device *dev, int bufnum,
+			       char *desc, int take_arcnet_lock)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	int i, length;
 	unsigned long flags = 0;
 	static uint8_t buf[512];
@@ -208,7 +208,10 @@ void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc,
 
 }
 
-EXPORT_SYMBOL(arcnet_dump_packet);
+#else
+
+#define arcnet_dump_packet(dev, bufnum, desc,take_arcnet_lock) do { } while (0)
+
 #endif
 
 
@@ -244,7 +247,7 @@ void arcnet_unregister_proto(struct ArcProto *proto)
  */
 static void release_arcbuf(struct net_device *dev, int bufnum)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	int i;
 
 	lp->buf_queue[lp->first_free_buf++] = bufnum;
@@ -253,7 +256,7 @@ static void release_arcbuf(struct net_device *dev, int bufnum)
 	BUGLVL(D_DURING) {
 		BUGMSG(D_DURING, "release_arcbuf: freed #%d; buffer queue is now: ",
 		       bufnum);
-		for (i = lp->next_buf; i != lp->first_free_buf; i = ++i % 5)
+		for (i = lp->next_buf; i != lp->first_free_buf; i = (i+1) % 5)
 			BUGMSG2(D_DURING, "#%d ", lp->buf_queue[i]);
 		BUGMSG2(D_DURING, "\n");
 	}
@@ -266,7 +269,7 @@ static void release_arcbuf(struct net_device *dev, int bufnum)
  */
 static int get_arcbuf(struct net_device *dev)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	int buf = -1, i;
 
 	if (!atomic_dec_and_test(&lp->buf_lock)) {
@@ -289,7 +292,7 @@ static int get_arcbuf(struct net_device *dev)
 
 	BUGLVL(D_DURING) {
 		BUGMSG(D_DURING, "get_arcbuf: got #%d; buffer queue is now: ", buf);
-		for (i = lp->next_buf; i != lp->first_free_buf; i = ++i % 5)
+		for (i = lp->next_buf; i != lp->first_free_buf; i = (i+1) % 5)
 			BUGMSG2(D_DURING, "#%d ", lp->buf_queue[i]);
 		BUGMSG2(D_DURING, "\n");
 	}
@@ -314,11 +317,17 @@ static int choose_mtu(void)
 	return mtu == 65535 ? XMTU : mtu;
 }
 
+static const struct header_ops arcnet_header_ops = {
+	.create = arcnet_header,
+	.rebuild = arcnet_rebuild_header,
+};
+
 
 /* Setup a struct device for ARCnet. */
 static void arcdev_setup(struct net_device *dev)
 {
 	dev->type = ARPHRD_ARCNET;
+	dev->header_ops = &arcnet_header_ops;
 	dev->hard_header_len = sizeof(struct archdr);
 	dev->mtu = choose_mtu();
 
@@ -339,8 +348,6 @@ static void arcdev_setup(struct net_device *dev)
 	dev->hard_start_xmit = arcnet_send_packet;
 	dev->tx_timeout = arcnet_timeout;
 	dev->get_stats = arcnet_get_stats;
-	dev->hard_header = arcnet_header;
-	dev->rebuild_header = arcnet_rebuild_header;
 }
 
 struct net_device *alloc_arcdev(char *name)
@@ -367,7 +374,7 @@ struct net_device *alloc_arcdev(char *name)
  */
 static int arcnet_open(struct net_device *dev)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	int count, newmtu, error;
 
 	BUGMSG(D_INIT,"opened.");
@@ -467,7 +474,7 @@ static int arcnet_open(struct net_device *dev)
 /* The inverse routine to arcnet_open - shuts down the card. */
 static int arcnet_close(struct net_device *dev)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 
 	netif_stop_queue(dev);
 
@@ -485,10 +492,10 @@ static int arcnet_close(struct net_device *dev)
 
 
 static int arcnet_header(struct sk_buff *skb, struct net_device *dev,
-			 unsigned short type, void *daddr, void *saddr,
-			 unsigned len)
+			 unsigned short type, const void *daddr,
+			 const void *saddr, unsigned len)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	const struct arcnet_local *lp = netdev_priv(dev);
 	uint8_t _daddr, proto_num;
 	struct ArcProto *proto;
 
@@ -516,9 +523,12 @@ static int arcnet_header(struct sk_buff *skb, struct net_device *dev,
 		 * real header when we do rebuild_header.
 		 */
 		*(uint16_t *) skb_push(skb, 2) = type;
-		if (skb->nh.raw - skb->mac.raw != 2)
+		/*
+		 * XXX: Why not use skb->mac_len?
+		 */
+		if (skb->network_header - skb->mac_header != 2)
 			BUGMSG(D_NORMAL, "arcnet_header: Yikes!  diff (%d) is not 2!\n",
-			       (int)(skb->nh.raw - skb->mac.raw));
+			       (int)(skb->network_header - skb->mac_header));
 		return -2;	/* return error -- can't transmit yet! */
 	}
 	else {
@@ -546,16 +556,18 @@ static int arcnet_header(struct sk_buff *skb, struct net_device *dev,
 static int arcnet_rebuild_header(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	int status = 0;		/* default is failure */
 	unsigned short type;
 	uint8_t daddr=0;
 	struct ArcProto *proto;
-
-	if (skb->nh.raw - skb->mac.raw != 2) {
+	/*
+	 * XXX: Why not use skb->mac_len?
+	 */
+	if (skb->network_header - skb->mac_header != 2) {
 		BUGMSG(D_NORMAL,
-		     "rebuild_header: shouldn't be here! (hdrsize=%d)\n",
-		     (int)(skb->nh.raw - skb->mac.raw));
+		       "rebuild_header: shouldn't be here! (hdrsize=%d)\n",
+		       (int)(skb->network_header - skb->mac_header));
 		return 0;
 	}
 	type = *(uint16_t *) skb_pull(skb, 2);
@@ -591,13 +603,13 @@ static int arcnet_rebuild_header(struct sk_buff *skb)
 /* Called by the kernel in order to transmit a packet. */
 static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	struct archdr *pkt;
 	struct arc_rfc1201 *soft;
 	struct ArcProto *proto;
 	int txbuf;
 	unsigned long flags;
-	int freeskb = 0;
+	int freeskb, retval;
 
 	BUGMSG(D_DURING,
 	       "transmit requested (status=%Xh, txbufs=%d/%d, len=%d, protocol %x)\n",
@@ -615,7 +627,7 @@ static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
 	if (skb->len - ARC_HDR_SIZE > XMTU && !proto->continue_tx) {
 		BUGMSG(D_NORMAL, "fixme: packet too large: compensating badly!\n");
 		dev_kfree_skb(skb);
-		return 0;	/* don't try again */
+		return NETDEV_TX_OK;	/* don't try again */
 	}
 
 	/* We're busy transmitting a packet... */
@@ -623,8 +635,11 @@ static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 	spin_lock_irqsave(&lp->lock, flags);
 	AINTMASK(0);
-
-	txbuf = get_arcbuf(dev);
+	if(lp->next_tx == -1)
+		txbuf = get_arcbuf(dev);
+	else {
+		txbuf = -1;
+	}
 	if (txbuf != -1) {
 		if (proto->prepare_tx(dev, pkt, skb->len, txbuf) &&
 		    !proto->ack_tx) {
@@ -638,6 +653,8 @@ static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
 			lp->outgoing.skb = skb;
 			lp->outgoing.pkt = pkt;
 
+			freeskb = 0;
+
 			if (proto->continue_tx &&
 			    proto->continue_tx(dev, txbuf)) {
 			  BUGMSG(D_NORMAL,
@@ -645,10 +662,12 @@ static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
 				 "(proto='%c')\n", proto->suffix);
 			}
 		}
-
+		retval = NETDEV_TX_OK;
+		dev->trans_start = jiffies;
 		lp->next_tx = txbuf;
 	} else {
-		freeskb = 1;
+		retval = NETDEV_TX_BUSY;
+		freeskb = 0;
 	}
 
 	BUGMSG(D_DEBUG, "%s: %d: %s, status: %x\n",__FILE__,__LINE__,__FUNCTION__,ASTATUS());
@@ -664,7 +683,7 @@ static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
 	if (freeskb) {
 		dev_kfree_skb(skb);
 	}
-	return 0;		/* no need to try again */
+	return retval;		/* no need to try again */
 }
 
 
@@ -674,7 +693,7 @@ static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
  */
 static int go_tx(struct net_device *dev)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 
 	BUGMSG(D_DURING, "go_tx: status=%Xh, intmask=%Xh, next_tx=%d, cur_tx=%d\n",
 	       ASTATUS(), lp->intmask, lp->next_tx, lp->cur_tx);
@@ -690,7 +709,6 @@ static int go_tx(struct net_device *dev)
 	/* start sending */
 	ACOMMAND(TXcmd | (lp->cur_tx << 3));
 
-	dev->trans_start = jiffies;
 	lp->stats.tx_packets++;
 	lp->lasttrans_dest = lp->lastload_dest;
 	lp->lastload_dest = 0;
@@ -705,7 +723,7 @@ static int go_tx(struct net_device *dev)
 static void arcnet_timeout(struct net_device *dev)
 {
 	unsigned long flags;
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	int status = ASTATUS();
 	char *msg;
 
@@ -727,7 +745,7 @@ static void arcnet_timeout(struct net_device *dev)
 	
 	spin_unlock_irqrestore(&lp->lock, flags);
 
-	if (jiffies - lp->last_timeout > 10*HZ) {
+	if (time_after(jiffies, lp->last_timeout + 10*HZ)) {
 		BUGMSG(D_EXTRA, "tx timed out%s (status=%Xh, intmask=%Xh, dest=%02Xh)\n",
 		       msg, status, lp->intmask, lp->lasttrans_dest);
 		lp->last_timeout = jiffies;
@@ -743,7 +761,7 @@ static void arcnet_timeout(struct net_device *dev)
  * interrupts. Establish which device needs attention, and call the correct
  * chipset interrupt handler.
  */
-irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t arcnet_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct arcnet_local *lp;
@@ -754,9 +772,8 @@ irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	BUGMSG(D_DURING, "in arcnet_interrupt\n");
 	
-	lp = (struct arcnet_local *) dev->priv;
-	if (!lp)
-		BUG();
+	lp = dev->priv;
+	BUG_ON(!lp);
 		
 	spin_lock(&lp->lock);
 
@@ -917,6 +934,9 @@ irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 			BUGMSG(D_RECON, "Network reconfiguration detected (status=%Xh)\n",
 			       status);
+			/* MYRECON bit is at bit 7 of diagstatus */
+			if(diagstatus & 0x80)
+				BUGMSG(D_RECON,"Put out that recon myself\n");
 
 			/* is the RECON info empty or old? */
 			if (!lp->first_recon || !lp->last_recon ||
@@ -987,9 +1007,9 @@ irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
  * This is a generic packet receiver that calls arcnet??_rx depending on the
  * protocol ID found.
  */
-void arcnet_rx(struct net_device *dev, int bufnum)
+static void arcnet_rx(struct net_device *dev, int bufnum)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	struct archdr pkt;
 	struct arc_rfc1201 *soft;
 	int length, ofs;
@@ -1053,7 +1073,7 @@ void arcnet_rx(struct net_device *dev, int bufnum)
  */
 static struct net_device_stats *arcnet_get_stats(struct net_device *dev)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	return &lp->stats;
 }
 
@@ -1070,7 +1090,7 @@ static void null_rx(struct net_device *dev, int bufnum,
 static int null_build_header(struct sk_buff *skb, struct net_device *dev,
 			     unsigned short type, uint8_t daddr)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 
 	BUGMSG(D_PROTO,
 	       "tx: can't build header for encap %02Xh; load a protocol driver.\n",
@@ -1085,7 +1105,7 @@ static int null_build_header(struct sk_buff *skb, struct net_device *dev,
 static int null_prepare_tx(struct net_device *dev, struct archdr *pkt,
 			   int length, int bufnum)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	struct arc_hardware newpkt;
 
 	BUGMSG(D_PROTO, "tx: no encap for this host; load a protocol driver.\n");

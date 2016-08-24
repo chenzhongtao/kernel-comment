@@ -27,8 +27,6 @@
 #ifndef _AGP_H
 #define _AGP_H 1
 
-#include <linux/agp_backend.h>
-
 #define AGPIOC_BASE       'A'
 #define AGPIOC_INFO       _IOR (AGPIOC_BASE, 0, struct agp_info*)
 #define AGPIOC_ACQUIRE    _IO  (AGPIOC_BASE, 1)
@@ -111,6 +109,8 @@ typedef struct _agp_unbind {
 } agp_unbind;
 
 #else				/* __KERNEL__ */
+#include <linux/mutex.h>
+#include <linux/agp_backend.h>
 
 #define AGPGART_MINOR 175
 
@@ -197,11 +197,11 @@ struct agp_file_private {
 	struct agp_file_private *next;
 	struct agp_file_private *prev;
 	pid_t my_pid;
-	long access_flags;	/* long req'd for set_bit --RR */
+	unsigned long access_flags;	/* long req'd for set_bit --RR */
 };
 
 struct agp_front_data {
-	struct semaphore agp_mutex;
+	struct mutex agp_mutex;
 	struct agp_controller *current_controller;
 	struct agp_controller *controllers;
 	struct agp_file_private *file_priv_list;

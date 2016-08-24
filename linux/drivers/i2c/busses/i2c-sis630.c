@@ -48,7 +48,6 @@
    Note: we assume there can only be one device, with one SMBus interface.
 */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -93,6 +92,8 @@
 #define SIS630_PCALL		0x04
 #define SIS630_BLOCK_DATA	0x05
 
+static struct pci_driver sis630_driver;
+
 /* insmod parameters */
 static int high_clock;
 static int force;
@@ -102,7 +103,7 @@ module_param(force, bool, 0);
 MODULE_PARM_DESC(force, "Forcibly enable the SIS630. DANGEROUS!");
 
 /* acpi base address */
-static unsigned short acpi_base = 0;
+static unsigned short acpi_base;
 
 /* supported chips */
 static int supported[] = {
@@ -433,7 +434,8 @@ static int sis630_setup(struct pci_dev *sis630_dev)
 	dev_dbg(&sis630_dev->dev, "ACPI base at 0x%04x\n", acpi_base);
 
 	/* Everything is happy, let's grab the memory and set things up. */
-	if (!request_region(acpi_base + SMB_STS, SIS630_SMB_IOREGION, "sis630-smbus")) {
+	if (!request_region(acpi_base + SMB_STS, SIS630_SMB_IOREGION,
+			    sis630_driver.name)) {
 		dev_err(&sis630_dev->dev, "SMBus registers 0x%04x-0x%04x already "
 			"in use!\n", acpi_base + SMB_STS, acpi_base + SMB_SAA);
 		goto exit;
@@ -448,17 +450,15 @@ exit:
 }
 
 
-static struct i2c_algorithm smbus_algorithm = {
-	.name		= "Non-I2C SMBus adapter",
-	.id		= I2C_ALGO_SMBUS,
+static const struct i2c_algorithm smbus_algorithm = {
 	.smbus_xfer	= sis630_access,
 	.functionality	= sis630_func,
 };
 
 static struct i2c_adapter sis630_adapter = {
 	.owner		= THIS_MODULE,
+	.id		= I2C_HW_SMBUS_SIS630,
 	.class		= I2C_CLASS_HWMON,
-	.name		= "unset",
 	.algo		= &smbus_algorithm,
 };
 
@@ -477,7 +477,7 @@ static int __devinit sis630_probe(struct pci_dev *dev, const struct pci_device_i
 		return -ENODEV;
 	}
 
-	/* set up the driverfs linkage to our parent device */
+	/* set up the sysfs linkage to our parent device */
 	sis630_adapter.dev.parent = &dev->dev;
 
 	sprintf(sis630_adapter.name, "SMBus SIS630 adapter at %04x",

@@ -23,14 +23,13 @@
 #include <linux/timer.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/spinlock.h>
 #include <linux/kallsyms.h>
 #include <linux/interrupt.h>
 #include <linux/sysctl.h>
-
+#include <linux/module.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -242,9 +241,6 @@ DO_ERROR(12, SIGILL,  "reserved instruction", reserved_inst, current)
 
 #endif /* CONFIG_SH64_ID2815_WORKAROUND */
 
-
-#include <asm/system.h>
-
 /* Called with interrupts disabled */
 asmlinkage void do_exception_error(unsigned long ex, struct pt_regs *regs)
 {
@@ -286,6 +282,8 @@ void dump_stack(void)
 {
 	show_task(NULL);
 }
+/* Needed by any user of WARN_ON in view of the defn in include/asm-sh/bug.h */
+EXPORT_SYMBOL(dump_stack);
 
 static void do_unhandled_exception(int trapnr, int signr, char *str, char *fn_name,
 		unsigned long error_code, struct pt_regs *regs, struct task_struct *tsk)
@@ -762,7 +760,7 @@ static int misaligned_fixup(struct pt_regs *regs)
 		--user_mode_unaligned_fixup_count;
 		/* Only do 'count' worth of these reports, to remove a potential DoS against syslog */
 		printk("Fixing up unaligned userspace access in \"%s\" pid=%d pc=0x%08x ins=0x%08lx\n",
-		       current->comm, current->pid, (__u32)regs->pc, opcode);
+		       current->comm, task_pid_nr(current), (__u32)regs->pc, opcode);
 	} else
 #endif
 	if (!user_mode(regs) && (kernel_mode_unaligned_fixup_count > 0)) {
@@ -772,7 +770,7 @@ static int misaligned_fixup(struct pt_regs *regs)
 			       (__u32)regs->pc, opcode);
 		} else {
 			printk("Fixing up unaligned kernelspace access in \"%s\" pid=%d pc=0x%08x ins=0x%08lx\n",
-			       current->comm, current->pid, (__u32)regs->pc, opcode);
+			       current->comm, task_pid_nr(current), (__u32)regs->pc, opcode);
 		}
 	}
 
@@ -907,30 +905,57 @@ static int misaligned_fixup(struct pt_regs *regs)
 }
 
 static ctl_table unaligned_table[] = {
-	{1, "kernel_reports", &kernel_mode_unaligned_fixup_count,
-		sizeof(int), 0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "kernel_reports",
+		.data		= &kernel_mode_unaligned_fixup_count,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
 #if defined(CONFIG_SH64_USER_MISALIGNED_FIXUP)
-	{2, "user_reports", &user_mode_unaligned_fixup_count,
-		sizeof(int), 0644, NULL, &proc_dointvec},
-	{3, "user_enable", &user_mode_unaligned_fixup_enable,
-		sizeof(int), 0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "user_reports",
+		.data		= &user_mode_unaligned_fixup_count,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "user_enable",
+		.data		= &user_mode_unaligned_fixup_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec},
 #endif
-	{0}
+	{}
 };
 
 static ctl_table unaligned_root[] = {
-	{1, "unaligned_fixup", NULL, 0, 0555, unaligned_table},
-	{0}
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "unaligned_fixup",
+		.mode		= 0555,
+		unaligned_table
+	},
+	{}
 };
 
 static ctl_table sh64_root[] = {
-	{1, "sh64", NULL, 0, 0555, unaligned_root},
-	{0}
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "sh64",
+		.mode		= 0555,
+		.child		= unaligned_root
+	},
+	{}
 };
 static struct ctl_table_header *sysctl_header;
 static int __init init_sysctl(void)
 {
-	sysctl_header = register_sysctl_table(sh64_root, 0);
+	sysctl_header = register_sysctl_table(sh64_root);
 	return 0;
 }
 
@@ -955,4 +980,3 @@ asmlinkage void do_debug_interrupt(unsigned long code, struct pt_regs *regs)
 	/* Clear all DEBUGINT causes */
 	poke_real_address_q(DM_EXP_CAUSE_PHY, 0x0);
 }
-

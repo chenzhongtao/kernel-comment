@@ -9,32 +9,34 @@
 #include "linux/in6.h"
 #include "asm/uaccess.h"
 
-extern unsigned int csum_partial_copy_from(const char *src, char *dst, int len,
-					   int sum, int *err_ptr);
-extern unsigned csum_partial(const unsigned char *buff, unsigned len,
-                             unsigned sum);
+extern __wsum csum_partial(const void *buff, int len, __wsum sum);
 
 /*
  *	Note: when you get a NULL pointer exception here this means someone
  *	passed in an incorrect kernel address to one of these functions.
  *
  *	If you use these functions directly please don't forget the
- *	verify_area().
+ *	access_ok().
  */
 
 static __inline__
-unsigned int csum_partial_copy_nocheck(const char *src, char *dst,
-				       int len, int sum)
+__wsum csum_partial_copy_nocheck(const void *src, void *dst,
+				       int len, __wsum sum)
 {
 	memcpy(dst, src, len);
 	return(csum_partial(dst, len, sum));
 }
 
 static __inline__
-unsigned int csum_partial_copy_from_user(const char *src, char *dst,
-					 int len, int sum, int *err_ptr)
+__wsum csum_partial_copy_from_user(const void __user *src,
+                                         void *dst, int len, __wsum sum,
+                                         int *err_ptr)
 {
-	return csum_partial_copy_from(src, dst, len, sum, err_ptr);
+        if (copy_from_user(dst, src, len)) {
+                *err_ptr = -EFAULT;
+                return (__force __wsum)-1;
+        }
+        return csum_partial(dst, len, sum);
 }
 
 /**
@@ -45,15 +47,16 @@ unsigned int csum_partial_copy_from_user(const char *src, char *dst,
  * the last step before putting a checksum into a packet.
  * Make sure not to mix with 64bit checksums.
  */
-static inline unsigned int csum_fold(unsigned int sum)
+static inline __sum16 csum_fold(__wsum sum)
 {
 	__asm__(
 		"  addl %1,%0\n"
 		"  adcl $0xffff,%0"
 		: "=r" (sum)
-		: "r" (sum << 16), "0" (sum & 0xffff0000)
+		: "r" ((__force u32)sum << 16),
+		  "0" ((__force u32)sum & 0xffff0000)
 	);
-	return (~sum) >> 16;
+	return (__force __sum16)(~(__force u32)sum >> 16);
 }
 
 /**
@@ -67,28 +70,27 @@ static inline unsigned int csum_fold(unsigned int sum)
  * Returns the pseudo header checksum the input data. Result is
  * 32bit unfolded.
  */
-static inline unsigned long
-csum_tcpudp_nofold(unsigned saddr, unsigned daddr, unsigned short len,
-		   unsigned short proto, unsigned int sum)
+static inline __wsum
+csum_tcpudp_nofold(__be32 saddr, __be32 daddr, unsigned short len,
+		   unsigned short proto, __wsum sum)
 {
 	asm("  addl %1, %0\n"
 	    "  adcl %2, %0\n"
 	    "  adcl %3, %0\n"
 	    "  adcl $0, %0\n"
 		: "=r" (sum)
-	    : "g" (daddr), "g" (saddr), "g" ((ntohs(len)<<16)+proto*256), "0" (sum));
-    return sum;
+	    : "g" (daddr), "g" (saddr), "g" ((len + proto) << 8), "0" (sum));
+	return sum;
 }
 
 /*
  * computes the checksum of the TCP/UDP pseudo-header
  * returns a 16-bit checksum, already complemented
  */
-static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
-						   unsigned long daddr,
-						   unsigned short len,
-						   unsigned short proto,
-						   unsigned int sum)
+static inline __sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr,
+					   unsigned short len,
+					   unsigned short proto,
+					   __wsum sum)
 {
 	return csum_fold(csum_tcpudp_nofold(saddr,daddr,len,proto,sum));
 }
@@ -98,7 +100,7 @@ static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
  * iph: ipv4 header
  * ihl: length of header / 4
  */
-static inline unsigned short ip_fast_csum(unsigned char *iph, unsigned int ihl)
+static inline __sum16 ip_fast_csum(const void *iph, unsigned int ihl)
 {
 	unsigned int sum;
 
@@ -125,7 +127,7 @@ static inline unsigned short ip_fast_csum(unsigned char *iph, unsigned int ihl)
 	: "=r" (sum), "=r" (iph), "=r" (ihl)
 	: "1" (iph), "2" (ihl)
 	: "memory");
-	return(sum);
+	return (__force __sum16)sum;
 }
 
 static inline unsigned add32_with_carry(unsigned a, unsigned b)
@@ -137,15 +139,6 @@ static inline unsigned add32_with_carry(unsigned a, unsigned b)
         return a;
 }
 
-#endif
+extern __sum16 ip_compute_csum(const void *buff, int len);
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+#endif

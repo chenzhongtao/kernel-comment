@@ -3,7 +3,7 @@
  *
  *	This is ALPHA test software. This code may break your machine,
  *	randomly fail to work with new releases, misbehave and/or generally
- *	screw up. It might even work. 
+ *	screw up. It might even work.
  *
  *	This code REQUIRES 2.1.15 or higher
  *
@@ -17,7 +17,6 @@
  *	X.25 001	Jonathan Naylor	Started coding.
  */
 
-#include <linux/config.h>
 #include <linux/if_arp.h>
 #include <linux/init.h>
 #include <net/x25.h>
@@ -120,6 +119,9 @@ void x25_route_device_down(struct net_device *dev)
 			__x25_remove_route(rt);
 	}
 	write_unlock_bh(&x25_route_list_lock);
+
+	/* Remove any related forwarding */
+	x25_clear_forward_by_dev(dev);
 }
 
 /*
@@ -127,7 +129,7 @@ void x25_route_device_down(struct net_device *dev)
  */
 struct net_device *x25_dev_get(char *devname)
 {
-	struct net_device *dev = dev_get_by_name(devname);
+	struct net_device *dev = dev_get_by_name(&init_net, devname);
 
 	if (dev &&
 	    (!(dev->flags & IFF_UP) || (dev->type != ARPHRD_X25

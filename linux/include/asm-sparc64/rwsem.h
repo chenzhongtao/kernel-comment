@@ -15,33 +15,41 @@
 
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <asm/rwsem-const.h>
 
 struct rwsem_waiter;
 
 struct rw_semaphore {
 	signed int count;
-#define RWSEM_UNLOCKED_VALUE		0x00000000
-#define RWSEM_ACTIVE_BIAS		0x00000001
-#define RWSEM_ACTIVE_MASK		0x0000ffff
-#define RWSEM_WAITING_BIAS		0xffff0000
-#define RWSEM_ACTIVE_READ_BIAS		RWSEM_ACTIVE_BIAS
-#define RWSEM_ACTIVE_WRITE_BIAS		(RWSEM_WAITING_BIAS + RWSEM_ACTIVE_BIAS)
 	spinlock_t		wait_lock;
 	struct list_head	wait_list;
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct lockdep_map	dep_map;
+#endif
 };
 
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+# define __RWSEM_DEP_MAP_INIT(lockname) , .dep_map = { .name = #lockname }
+#else
+# define __RWSEM_DEP_MAP_INIT(lockname)
+#endif
+
 #define __RWSEM_INITIALIZER(name) \
-{ RWSEM_UNLOCKED_VALUE, SPIN_LOCK_UNLOCKED, LIST_HEAD_INIT((name).wait_list) }
+{ RWSEM_UNLOCKED_VALUE, SPIN_LOCK_UNLOCKED, LIST_HEAD_INIT((name).wait_list) \
+  __RWSEM_DEP_MAP_INIT(name) }
 
 #define DECLARE_RWSEM(name) \
 	struct rw_semaphore name = __RWSEM_INITIALIZER(name)
 
-static __inline__ void init_rwsem(struct rw_semaphore *sem)
-{
-	sem->count = RWSEM_UNLOCKED_VALUE;
-	spin_lock_init(&sem->wait_lock);
-	INIT_LIST_HEAD(&sem->wait_list);
-}
+extern void __init_rwsem(struct rw_semaphore *sem, const char *name,
+			 struct lock_class_key *key);
+
+#define init_rwsem(sem)						\
+do {								\
+	static struct lock_class_key __key;			\
+								\
+	__init_rwsem((sem), #sem, &__key);			\
+} while (0)
 
 extern void __down_read(struct rw_semaphore *sem);
 extern int __down_read_trylock(struct rw_semaphore *sem);
@@ -51,53 +59,24 @@ extern void __up_read(struct rw_semaphore *sem);
 extern void __up_write(struct rw_semaphore *sem);
 extern void __downgrade_write(struct rw_semaphore *sem);
 
-static __inline__ int rwsem_atomic_update(int delta, struct rw_semaphore *sem)
+static inline void __down_write_nested(struct rw_semaphore *sem, int subclass)
 {
-	int tmp = delta;
-
-	__asm__ __volatile__(
-		"1:\tlduw	[%2], %%g5\n\t"
-		"add		%%g5, %1, %%g7\n\t"
-		"cas		[%2], %%g5, %%g7\n\t"
-		"cmp		%%g5, %%g7\n\t"
-		"bne,pn		%%icc, 1b\n\t"
-		" membar	#StoreLoad | #StoreStore\n\t"
-		"mov		%%g7, %0\n\t"
-		: "=&r" (tmp)
-		: "0" (tmp), "r" (sem)
-		: "g5", "g7", "memory", "cc");
-
-	return tmp + delta;
+	__down_write(sem);
 }
 
-#define rwsem_atomic_add rwsem_atomic_update
-
-static __inline__ __u16 rwsem_cmpxchgw(struct rw_semaphore *sem, __u16 __old, __u16 __new)
+static inline int rwsem_atomic_update(int delta, struct rw_semaphore *sem)
 {
-	u32 old = (sem->count & 0xffff0000) | (u32) __old;
-	u32 new = (old & 0xffff0000) | (u32) __new;
-	u32 prev;
-
-again:
-	__asm__ __volatile__("cas	[%2], %3, %0\n\t"
-			     "membar	#StoreLoad | #StoreStore"
-			     : "=&r" (prev)
-			     : "0" (new), "r" (sem), "r" (old)
-			     : "memory");
-
-	/* To give the same semantics as x86 cmpxchgw, keep trying
-	 * if only the upper 16-bits changed.
-	 */
-	if (prev != old &&
-	    ((prev & 0xffff) == (old & 0xffff)))
-		goto again;
-
-	return prev & 0xffff;
+	return atomic_add_return(delta, (atomic_t *)(&sem->count));
 }
 
-static __inline__ signed long rwsem_cmpxchg(struct rw_semaphore *sem, signed long old, signed long new)
+static inline void rwsem_atomic_add(int delta, struct rw_semaphore *sem)
 {
-	return cmpxchg(&sem->count,old,new);
+	atomic_add(delta, (atomic_t *)(&sem->count));
+}
+
+static inline int rwsem_is_locked(struct rw_semaphore *sem)
+{
+	return (sem->count != 0);
 }
 
 #endif /* __KERNEL__ */

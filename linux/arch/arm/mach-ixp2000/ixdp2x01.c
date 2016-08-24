@@ -3,7 +3,7 @@
  *
  * Code common to Intel IXDP2401 and IXDP2801 platforms
  *
- * Original Author: Andrzej Mialwoski <andrzej.mialwoski@intel.com>
+ * Original Author: Andrzej Mialkowski <andrzej.mialkowski@intel.com>
  * Maintainer: Deepak Saxena <dsaxena@plexity.net>
  *
  * Copyright (C) 2002-2003 Intel Corp.
@@ -15,7 +15,6 @@
  *  option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mm.h>
@@ -29,7 +28,8 @@
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/serial_core.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
+#include <linux/serial_8250.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -51,7 +51,7 @@
  *************************************************************************/
 static void ixdp2x01_irq_mask(unsigned int irq)
 {
-	ixp2000_reg_write(IXDP2X01_INT_MASK_SET_REG,
+	ixp2000_reg_wrb(IXDP2X01_INT_MASK_SET_REG,
 				IXP2000_BOARD_IRQ_MASK(irq));
 }
 
@@ -63,7 +63,7 @@ static void ixdp2x01_irq_unmask(unsigned int irq)
 
 static u32 valid_irq_mask;
 
-static void ixdp2x01_irq_handler(unsigned int irq, struct irqdesc *desc, struct pt_regs *regs)
+static void ixdp2x01_irq_handler(unsigned int irq, struct irq_desc *desc)
 {
 	u32 ex_interrupt;
 	int i;
@@ -79,17 +79,17 @@ static void ixdp2x01_irq_handler(unsigned int irq, struct irqdesc *desc, struct 
 
 	for (i = 0; i < IXP2000_BOARD_IRQS; i++) {
 		if (ex_interrupt & (1 << i)) {
-			struct irqdesc *cpld_desc;
+			struct irq_desc *cpld_desc;
 			int cpld_irq = IXP2000_BOARD_IRQ(0) + i;
 			cpld_desc = irq_desc + cpld_irq;
-			cpld_desc->handle(cpld_irq, cpld_desc, regs);
+			desc_handle_irq(cpld_irq, cpld_desc);
 		}
 	}
 
 	desc->chip->unmask(irq);
 }
 
-static struct irqchip ixdp2x01_irq_chip = {
+static struct irq_chip ixdp2x01_irq_chip = {
 	.mask	= ixdp2x01_irq_mask,
 	.ack	= ixdp2x01_irq_mask,
 	.unmask	= ixdp2x01_irq_unmask
@@ -114,12 +114,12 @@ void __init ixdp2x01_init_irq(void)
 
 	/* Mask all interrupts from CPLD, disable simulation */
 	ixp2000_reg_write(IXDP2X01_INT_MASK_SET_REG, 0xffffffff);
-	ixp2000_reg_write(IXDP2X01_INT_SIM_REG, 0);
+	ixp2000_reg_wrb(IXDP2X01_INT_SIM_REG, 0);
 
 	for (irq = NR_IXP2000_IRQS; irq < NR_IXDP2X01_IRQS; irq++) {
 		if (irq & valid_irq_mask) {
 			set_irq_chip(irq, &ixdp2x01_irq_chip);
-			set_irq_handler(irq, do_level_IRQ);
+			set_irq_handler(irq, handle_level_irq);
 			set_irq_flags(irq, IRQF_VALID);
 		} else {
 			set_irq_flags(irq, 0);
@@ -127,54 +127,92 @@ void __init ixdp2x01_init_irq(void)
 	}
 
 	/* Hook into PCI interrupts */
-	set_irq_chained_handler(IRQ_IXP2000_PCIB, &ixdp2x01_irq_handler);
+	set_irq_chained_handler(IRQ_IXP2000_PCIB, ixdp2x01_irq_handler);
 }
 
 
 /*************************************************************************
- * IXDP2x01 memory map and serial ports
+ * IXDP2x01 memory map
  *************************************************************************/
 static struct map_desc ixdp2x01_io_desc __initdata = {
 	.virtual	= IXDP2X01_VIRT_CPLD_BASE, 
-	.physical	= IXDP2X01_PHYS_CPLD_BASE,
+	.pfn		= __phys_to_pfn(IXDP2X01_PHYS_CPLD_BASE),
 	.length		= IXDP2X01_CPLD_REGION_SIZE,
 	.type		= MT_DEVICE
 };
 
-static struct uart_port ixdp2x01_serial_ports[2] = {
-	{
-		.membase	= (char *)(IXDP2X01_UART1_VIRT_BASE),
-		.mapbase	= (unsigned long)IXDP2X01_UART1_PHYS_BASE,
-		.irq		= IRQ_IXDP2X01_UART1,
-		.flags		= UPF_SKIP_TEST,
-		.iotype		= UPIO_MEM32,
-		.regshift	= 2,
-		.uartclk	= IXDP2X01_UART_CLK,
-		.line		= 1,
-		.type		= PORT_16550A,
-		.fifosize	= 16
-	}, {
-		.membase	= (char *)(IXDP2X01_UART2_VIRT_BASE),
-		.mapbase	= (unsigned long)IXDP2X01_UART2_PHYS_BASE,
-		.irq		= IRQ_IXDP2X01_UART2,
-		.flags		= UPF_SKIP_TEST,
-		.iotype		= UPIO_MEM32,
-		.regshift	= 2,
-		.uartclk	= IXDP2X01_UART_CLK,
-		.line		= 2,
-		.type		= PORT_16550A,
-		.fifosize	= 16
-	}, 
-};
-
 static void __init ixdp2x01_map_io(void)
 {
-	ixp2000_map_io();	
-
+	ixp2000_map_io();
 	iotable_init(&ixdp2x01_io_desc, 1);
+}
 
-	early_serial_setup(&ixdp2x01_serial_ports[0]);
-	early_serial_setup(&ixdp2x01_serial_ports[1]);
+
+/*************************************************************************
+ * IXDP2x01 serial ports
+ *************************************************************************/
+static struct plat_serial8250_port ixdp2x01_serial_port1[] = {
+	{
+		.mapbase	= (unsigned long)IXDP2X01_UART1_PHYS_BASE,
+		.membase	= (char *)IXDP2X01_UART1_VIRT_BASE,
+		.irq		= IRQ_IXDP2X01_UART1,
+		.flags		= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
+		.iotype		= UPIO_MEM32,
+		.regshift	= 2,
+		.uartclk	= IXDP2X01_UART_CLK,
+	},
+	{ }
+};
+
+static struct resource ixdp2x01_uart_resource1 = {
+	.start		= IXDP2X01_UART1_PHYS_BASE,
+	.end		= IXDP2X01_UART1_PHYS_BASE + 0xffff,
+	.flags		= IORESOURCE_MEM,
+};
+
+static struct platform_device ixdp2x01_serial_device1 = {
+	.name		= "serial8250",
+	.id		= PLAT8250_DEV_PLATFORM1,
+	.dev		= {
+		.platform_data		= ixdp2x01_serial_port1,
+	},
+	.num_resources	= 1,
+	.resource	= &ixdp2x01_uart_resource1,
+};
+
+static struct plat_serial8250_port ixdp2x01_serial_port2[] = {
+	{
+		.mapbase	= (unsigned long)IXDP2X01_UART2_PHYS_BASE,
+		.membase	= (char *)IXDP2X01_UART2_VIRT_BASE,
+		.irq		= IRQ_IXDP2X01_UART2,
+		.flags		= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
+		.iotype		= UPIO_MEM32,
+		.regshift	= 2,
+		.uartclk	= IXDP2X01_UART_CLK,
+	}, 
+	{ }
+};
+
+static struct resource ixdp2x01_uart_resource2 = {
+	.start		= IXDP2X01_UART2_PHYS_BASE,
+	.end		= IXDP2X01_UART2_PHYS_BASE + 0xffff,
+	.flags		= IORESOURCE_MEM,
+};
+
+static struct platform_device ixdp2x01_serial_device2 = {
+	.name		= "serial8250",
+	.id		= PLAT8250_DEV_PLATFORM2,
+	.dev		= {
+		.platform_data		= ixdp2x01_serial_port2,
+	},
+	.num_resources	= 1,
+	.resource	= &ixdp2x01_uart_resource2,
+};
+
+static void ixdp2x01_uart_init(void)
+{
+	platform_device_register(&ixdp2x01_serial_device1);
+	platform_device_register(&ixdp2x01_serial_device2);
 }
 
 
@@ -212,6 +250,7 @@ void __init ixdp2x01_pci_preinit(void)
 {
 	ixp2000_reg_write(IXP2000_PCI_ADDR_EXT, 0x00000000);
 	ixp2000_pci_preinit();
+	pcibios_setup("firmware");
 }
 
 #define DEVPIN(dev, pin) ((pin) | ((dev) << 3))
@@ -237,7 +276,7 @@ static int __init ixdp2x01_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	/* Device is located after first MB bridge */
 	case 0x0008:
 		if (tmp_bus == dev->bus) {
-			/* Device is located directy after first MB bridge */
+			/* Device is located directly after first MB bridge */
 			switch (devpin) {
 			case DEVPIN(1, 1):	/* Onboard 82546 ch 0 */
 				if (machine_is_ixdp2401())
@@ -260,7 +299,7 @@ static int __init ixdp2x01_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		break;
 	case 0x0010:
 		if (tmp_bus == dev->bus) {
-			/* Device is located directy after second MB bridge */
+			/* Device is located directly after second MB bridge */
 			/* Secondary bus of second bridge */
 			switch (devpin) {
 			case DEVPIN(0, 1):	/* DB#0 */
@@ -283,7 +322,7 @@ static int ixdp2x01_pci_setup(int nr, struct pci_sys_data *sys)
 {
 	sys->mem_offset = 0xe0000000;
 
-	if (machine_is_ixdp2801())
+	if (machine_is_ixdp2801() || machine_is_ixdp28x5())
 		sys->mem_offset -= ((*IXP2000_PCI_ADDR_EXT & 0xE000) << 16);
 
 	return ixp2000_pci_setup(nr, sys);
@@ -299,15 +338,17 @@ struct hw_pci ixdp2x01_pci __initdata = {
 
 int __init ixdp2x01_pci_init(void)
 {
+	if (machine_is_ixdp2401() || machine_is_ixdp2801() ||\
+		machine_is_ixdp28x5())
+		pci_common_init(&ixdp2x01_pci);
 
-	pci_common_init(&ixdp2x01_pci);
 	return 0;
 }
 
 subsys_initcall(ixdp2x01_pci_init);
 
 /*************************************************************************
- * IXDP2x01 Machine Intialization
+ * IXDP2x01 Machine Initialization
  *************************************************************************/
 static struct flash_platform_data ixdp2x01_flash_platform_data = {
 	.map_name	= "cfi_probe",
@@ -316,7 +357,7 @@ static struct flash_platform_data ixdp2x01_flash_platform_data = {
 
 static unsigned long ixdp2x01_flash_bank_setup(unsigned long ofs)
 {
-	ixp2000_reg_write(IXDP2X01_CPLD_FLASH_REG,
+	ixp2000_reg_wrb(IXDP2X01_CPLD_FLASH_REG,
 		((ofs >> IXDP2X01_FLASH_WINDOW_BITS) | IXDP2X01_CPLD_FLASH_INTERN));
 	return (ofs & IXDP2X01_FLASH_WINDOW_MASK);
 }
@@ -363,37 +404,56 @@ static struct platform_device *ixdp2x01_devices[] __initdata = {
 
 static void __init ixdp2x01_init_machine(void)
 {
-	ixp2000_reg_write(IXDP2X01_CPLD_FLASH_REG,
+	ixp2000_reg_wrb(IXDP2X01_CPLD_FLASH_REG,
 		(IXDP2X01_CPLD_FLASH_BANK_MASK | IXDP2X01_CPLD_FLASH_INTERN));
 	
 	ixdp2x01_flash_data.nr_banks =
 		((*IXDP2X01_CPLD_FLASH_REG & IXDP2X01_CPLD_FLASH_BANK_MASK) + 1);
 
 	platform_add_devices(ixdp2x01_devices, ARRAY_SIZE(ixdp2x01_devices));
+	ixp2000_uart_init();
+	ixdp2x01_uart_init();
 }
 
 
 #ifdef CONFIG_ARCH_IXDP2401
 MACHINE_START(IXDP2401, "Intel IXDP2401 Development Platform")
-	MAINTAINER("MontaVista Software, Inc.")
-	BOOT_MEM(0x00000000, IXP2000_UART_PHYS_BASE, IXP2000_UART_VIRT_BASE)
-	BOOT_PARAMS(0x00000100)
-	MAPIO(ixdp2x01_map_io)
-	INITIRQ(ixdp2x01_init_irq)
+	/* Maintainer: MontaVista Software, Inc. */
+	.phys_io	= IXP2000_UART_PHYS_BASE,
+	.io_pg_offst	= ((IXP2000_UART_VIRT_BASE) >> 18) & 0xfffc,
+	.boot_params	= 0x00000100,
+	.map_io		= ixdp2x01_map_io,
+	.init_irq	= ixdp2x01_init_irq,
 	.timer		= &ixdp2x01_timer,
-	INIT_MACHINE(ixdp2x01_init_machine)
+	.init_machine	= ixdp2x01_init_machine,
 MACHINE_END
 #endif
 
 #ifdef CONFIG_ARCH_IXDP2801
 MACHINE_START(IXDP2801, "Intel IXDP2801 Development Platform")
-	MAINTAINER("MontaVista Software, Inc.")
-	BOOT_MEM(0x00000000, IXP2000_UART_PHYS_BASE, IXP2000_UART_VIRT_BASE)
-	BOOT_PARAMS(0x00000100)
-	MAPIO(ixdp2x01_map_io)
-	INITIRQ(ixdp2x01_init_irq)
+	/* Maintainer: MontaVista Software, Inc. */
+	.phys_io	= IXP2000_UART_PHYS_BASE,
+	.io_pg_offst	= ((IXP2000_UART_VIRT_BASE) >> 18) & 0xfffc,
+	.boot_params	= 0x00000100,
+	.map_io		= ixdp2x01_map_io,
+	.init_irq	= ixdp2x01_init_irq,
 	.timer		= &ixdp2x01_timer,
-	INIT_MACHINE(ixdp2x01_init_machine)
+	.init_machine	= ixdp2x01_init_machine,
+MACHINE_END
+
+/*
+ * IXDP28x5 is basically an IXDP2801 with a different CPU but Intel
+ * changed the machine ID in the bootloader
+ */
+MACHINE_START(IXDP28X5, "Intel IXDP2805/2855 Development Platform")
+	/* Maintainer: MontaVista Software, Inc. */
+	.phys_io	= IXP2000_UART_PHYS_BASE,
+	.io_pg_offst	= ((IXP2000_UART_VIRT_BASE) >> 18) & 0xfffc,
+	.boot_params	= 0x00000100,
+	.map_io		= ixdp2x01_map_io,
+	.init_irq	= ixdp2x01_init_irq,
+	.timer		= &ixdp2x01_timer,
+	.init_machine	= ixdp2x01_init_machine,
 MACHINE_END
 #endif
 

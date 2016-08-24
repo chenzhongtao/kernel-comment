@@ -10,6 +10,10 @@
 
 #include "btree.h"
 
+static struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd);
+static int hfs_brec_update_parent(struct hfs_find_data *fd);
+static int hfs_btree_inc_height(struct hfs_btree *tree);
+
 /* Get the length and offset of the given record in the given node */
 u16 hfs_brec_lenoff(struct hfs_bnode *node, u16 rec, u16 *off)
 {
@@ -40,10 +44,21 @@ u16 hfs_brec_keylen(struct hfs_bnode *node, u16 rec)
 		recoff = hfs_bnode_read_u16(node, node->tree->node_size - (rec + 1) * 2);
 		if (!recoff)
 			return 0;
-		if (node->tree->attributes & HFS_TREE_BIGKEYS)
+		if (node->tree->attributes & HFS_TREE_BIGKEYS) {
 			retval = hfs_bnode_read_u16(node, recoff) + 2;
-		else
+			if (retval > node->tree->max_key_len + 2) {
+				printk(KERN_ERR "hfs: keylen %d too large\n",
+					retval);
+				retval = HFS_BAD_KEYLEN;
+			}
+		} else {
 			retval = (hfs_bnode_read_u8(node, recoff) | 1) + 1;
+			if (retval > node->tree->max_key_len + 1) {
+				printk(KERN_ERR "hfs: keylen %d too large\n",
+					retval);
+				retval = HFS_BAD_KEYLEN;
+			}
+		}
 	}
 	return retval;
 }
@@ -211,7 +226,7 @@ skip:
 	return 0;
 }
 
-struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd)
+static struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd)
 {
 	struct hfs_btree *tree;
 	struct hfs_bnode *node, *new_node;
@@ -320,7 +335,7 @@ struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd)
 	return new_node;
 }
 
-int hfs_brec_update_parent(struct hfs_find_data *fd)
+static int hfs_brec_update_parent(struct hfs_find_data *fd)
 {
 	struct hfs_btree *tree;
 	struct hfs_bnode *node, *new_node, *parent;
@@ -358,7 +373,7 @@ again:
 		end_off = hfs_bnode_read_u16(parent, end_rec_off);
 		if (end_rec_off - end_off < diff) {
 
-			printk("splitting index node...\n");
+			printk(KERN_DEBUG "hfs: splitting index node...\n");
 			fd->bnode = parent;
 			new_node = hfs_bnode_split(fd);
 			if (IS_ERR(new_node))
@@ -418,7 +433,7 @@ out:
 	return 0;
 }
 
-int hfs_btree_inc_height(struct hfs_btree *tree)
+static int hfs_btree_inc_height(struct hfs_btree *tree)
 {
 	struct hfs_bnode *node, *new_node;
 	struct hfs_bnode_desc node_desc;

@@ -28,10 +28,10 @@
 #ifndef _CPQPHP_H
 #define _CPQPHP_H
 
-#include "pci_hotplug.h"
 #include <linux/interrupt.h>
 #include <asm/io.h>		/* for read? and write? functions */
 #include <linux/delay.h>	/* for delays */
+#include <linux/mutex.h>
 
 #define MY_NAME	"cpqphp"
 
@@ -286,7 +286,7 @@ struct event_info {
 struct controller {
 	struct controller *next;
 	u32 ctrl_int_comp;
-	struct semaphore crit_sect;	/* critical section semaphore */
+	struct mutex crit_sect;		/* critical section mutex */
 	void __iomem *hpc_reg;		/* cookie for our pci controller location */
 	struct pci_resource *mem_head;
 	struct pci_resource *p_mem_head;
@@ -317,6 +317,7 @@ struct controller {
 	u16 vendor_id;
 	struct work_struct int_task_event;
 	wait_queue_head_t queue;	/* sleep & wake process */
+	struct dentry *dentry;		/* debugfs dentry */
 };
 
 struct irq_mapping {
@@ -399,12 +400,15 @@ struct resource_lists {
 #define msg_button_ignore	"PCI slot #%d - button press ignored.  (action in progress...)\n"
 
 
-/* sysfs functions for the hotplug controller info */
-extern void cpqhp_create_ctrl_files		(struct controller *ctrl);
+/* debugfs functions for the hotplug controller info */
+extern void cpqhp_initialize_debugfs		(void);
+extern void cpqhp_shutdown_debugfs		(void);
+extern void cpqhp_create_debugfs_files		(struct controller *ctrl);
+extern void cpqhp_remove_debugfs_files		(struct controller *ctrl);
 
 /* controller functions */
 extern void	cpqhp_pushbutton_thread		(unsigned long event_pointer);
-extern irqreturn_t cpqhp_ctrl_intr		(int IRQ, void *data, struct pt_regs *regs);
+extern irqreturn_t cpqhp_ctrl_intr		(int IRQ, void *data);
 extern int	cpqhp_find_available_resources	(struct controller *ctrl, void __iomem *rom_start);
 extern int	cpqhp_event_start_thread	(void);
 extern void	cpqhp_event_stop_thread		(void);

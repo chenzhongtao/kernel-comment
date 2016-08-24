@@ -54,12 +54,12 @@ struct avc_audit_data {
 			char *netif;
 			struct sock *sk;
 			u16 family;
-			u16 dport;
-			u16 sport;
+			__be16 dport;
+			__be16 sport;
 			union {
 				struct {
-					u32 daddr;
-					u32 saddr;
+					__be32 daddr;
+					__be32 saddr;
 				} v4;
 				struct {
 					struct in6_addr daddr;
@@ -93,13 +93,6 @@ struct avc_cache_stats
 };
 
 /*
- * AVC display support
- */
-struct audit_buffer;
-void avc_dump_av(struct audit_buffer *ab, u16 tclass, u32 av);
-void avc_dump_query(struct audit_buffer *ab, u32 ssid, u32 tsid, u16 tclass);
-
-/*
  * AVC operations
  */
 
@@ -109,13 +102,17 @@ void avc_audit(u32 ssid, u32 tsid,
                u16 tclass, u32 requested,
                struct av_decision *avd, int result, struct avc_audit_data *auditdata);
 
+#define AVC_STRICT 1 /* Ignore permissive mode. */
 int avc_has_perm_noaudit(u32 ssid, u32 tsid,
-                         u16 tclass, u32 requested,
-                         struct av_decision *avd);
+			 u16 tclass, u32 requested,
+			 unsigned flags,
+			 struct av_decision *avd);
 
 int avc_has_perm(u32 ssid, u32 tsid,
                  u16 tclass, u32 requested,
                  struct avc_audit_data *auditdata);
+
+u32 avc_policy_seqno(void);
 
 #define AVC_CALLBACK_GRANT		1
 #define AVC_CALLBACK_TRY_REVOKE		2

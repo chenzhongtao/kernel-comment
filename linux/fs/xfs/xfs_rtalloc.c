@@ -1,64 +1,43 @@
 /*
- * Copyright (c) 2000-2004 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
-/*
- * Free realtime space allocation for XFS.
- */
-
 #include "xfs.h"
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
+#include "xfs_bit.h"
 #include "xfs_log.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
 #include "xfs_sb.h"
 #include "xfs_ag.h"
-#include "xfs_dir.h"
 #include "xfs_dir2.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
-#include "xfs_alloc_btree.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_alloc_btree.h"
 #include "xfs_ialloc_btree.h"
-#include "xfs_btree.h"
-#include "xfs_ialloc.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
 #include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
 #include "xfs_dinode.h"
 #include "xfs_inode.h"
+#include "xfs_btree.h"
+#include "xfs_ialloc.h"
 #include "xfs_alloc.h"
 #include "xfs_bmap.h"
-#include "xfs_bit.h"
 #include "xfs_rtalloc.h"
 #include "xfs_fsops.h"
 #include "xfs_error.h"
@@ -149,7 +128,8 @@ xfs_growfs_rt_alloc(
 		/*
 		 * Lock the inode.
 		 */
-		if ((error = xfs_trans_iget(mp, tp, ino, 0, XFS_ILOCK_EXCL, &ip)))
+		if ((error = xfs_trans_iget(mp, tp, ino, 0,
+						XFS_ILOCK_EXCL, &ip)))
 			goto error_exit;
 		XFS_BMAP_INIT(&flist, &firstblock);
 		/*
@@ -159,7 +139,7 @@ xfs_growfs_rt_alloc(
 		cancelflags |= XFS_TRANS_ABORT;
 		error = xfs_bmapi(tp, ip, oblocks, nblocks - oblocks,
 			XFS_BMAPI_WRITE | XFS_BMAPI_METADATA, &firstblock,
-			resblks, &map, &nmap, &flist);
+			resblks, &map, &nmap, &flist, NULL);
 		if (!error && nmap < 1)
 			error = XFS_ERROR(ENOSPC);
 		if (error)
@@ -167,10 +147,10 @@ xfs_growfs_rt_alloc(
 		/*
 		 * Free any blocks freed up in the transaction, then commit.
 		 */
-		error = xfs_bmap_finish(&tp, &flist, firstblock, &committed);
+		error = xfs_bmap_finish(&tp, &flist, &committed);
 		if (error)
 			goto error_exit;
-		xfs_trans_commit(tp, XFS_TRANS_RELEASE_LOG_RES, NULL);
+		xfs_trans_commit(tp, XFS_TRANS_RELEASE_LOG_RES);
 		/*
 		 * Now we need to clear the allocated blocks.
 		 * Do this one block per transaction, to keep it simple.
@@ -189,8 +169,8 @@ xfs_growfs_rt_alloc(
 			/*
 			 * Lock the bitmap inode.
 			 */
-			if ((error = xfs_trans_iget(mp, tp, ino, 0, XFS_ILOCK_EXCL,
-					&ip)))
+			if ((error = xfs_trans_iget(mp, tp, ino, 0,
+							XFS_ILOCK_EXCL, &ip)))
 				goto error_exit;
 			/*
 			 * Get a buffer for the block.
@@ -207,7 +187,7 @@ xfs_growfs_rt_alloc(
 			/*
 			 * Commit the transaction.
 			 */
-			xfs_trans_commit(tp, 0, NULL);
+			xfs_trans_commit(tp, 0);
 		}
 		/*
 		 * Go on to the next extent, if any.
@@ -930,57 +910,6 @@ xfs_rtcheck_alloc_range(
 	xfs_rtblock_t	new;		/* dummy for xfs_rtcheck_range */
 
 	return xfs_rtcheck_range(mp, tp, bno, len, 0, &new, stat);
-}
-#endif
-
-#ifdef DEBUG
-/*
- * Check whether the given block in the bitmap has the given value.
- */
-STATIC int				/* 1 for matches, 0 for not */
-xfs_rtcheck_bit(
-	xfs_mount_t	*mp,		/* file system mount structure */
-	xfs_trans_t	*tp,		/* transaction pointer */
-	xfs_rtblock_t	start,		/* bit (block) to check */
-	int		val)		/* 1 for free, 0 for allocated */
-{
-	int		bit;		/* bit number in the word */
-	xfs_rtblock_t	block;		/* bitmap block number */
-	xfs_buf_t	*bp;		/* buf for the block */
-	xfs_rtword_t	*bufp;		/* pointer into the buffer */
-	/* REFERENCED */
-	int		error;		/* error value */
-	xfs_rtword_t	wdiff;		/* difference between bit & expected */
-	int		word;		/* word number in the buffer */
-	xfs_rtword_t	wval;		/* word value from buffer */
-
-	block = XFS_BITTOBLOCK(mp, start);
-	error = xfs_rtbuf_get(mp, tp, block, 0, &bp);
-	bufp = (xfs_rtword_t *)XFS_BUF_PTR(bp);
-	word = XFS_BITTOWORD(mp, start);
-	bit = (int)(start & (XFS_NBWORD - 1));
-	wval = bufp[word];
-	xfs_trans_brelse(tp, bp);
-	wdiff = (wval ^ -val) & ((xfs_rtword_t)1 << bit);
-	return !wdiff;
-}
-#endif	/* DEBUG */
-
-#if 0
-/*
- * Check that the given extent (block range) is free already.
- */
-STATIC int				/* error */
-xfs_rtcheck_free_range(
-	xfs_mount_t	*mp,		/* file system mount point */
-	xfs_trans_t	*tp,		/* transaction pointer */
-	xfs_rtblock_t	bno,		/* starting block number of extent */
-	xfs_extlen_t	len,		/* length of extent */
-	int		*stat)		/* out: 1 for free, 0 for not */
-{
-	xfs_rtblock_t	new;		/* dummy for xfs_rtcheck_range */
-
-	return xfs_rtcheck_range(mp, tp, bno, len, 1, &new, stat);
 }
 #endif
 
@@ -1949,15 +1878,17 @@ xfs_growfs_rt(
 	/*
 	 * Initial error checking.
 	 */
-	if (mp->m_rtdev_targp || mp->m_rbmip == NULL ||
+	if (mp->m_rtdev_targp == NULL || mp->m_rbmip == NULL ||
 	    (nrblocks = in->newblocks) <= sbp->sb_rblocks ||
 	    (sbp->sb_rblocks && (in->extsize != sbp->sb_rextsize)))
 		return XFS_ERROR(EINVAL);
+	if ((error = xfs_sb_validate_fsb_count(sbp, nrblocks)))
+		return error;
 	/*
 	 * Read in the last block of the device, make sure it exists.
 	 */
 	error = xfs_read_buf(mp, mp->m_rtdev_targp,
-			XFS_FSB_TO_BB(mp, in->newblocks - 1),
+			XFS_FSB_TO_BB(mp, nrblocks - 1),
 			XFS_FSB_TO_BB(mp, 1), 0, &bp);
 	if (error)
 		return error;
@@ -1968,7 +1899,7 @@ xfs_growfs_rt(
 	 */
 	nrextents = nrblocks;
 	do_div(nrextents, in->extsize);
-	nrbmblocks = roundup_64(nrextents, NBBY * sbp->sb_blocksize);
+	nrbmblocks = howmany_64(nrextents, NBBY * sbp->sb_blocksize);
 	nrextslog = xfs_highbit32(nrextents);
 	nrsumlevels = nrextslog + 1;
 	nrsumsize = (uint)sizeof(xfs_suminfo_t) * nrsumlevels * nrbmblocks;
@@ -1996,7 +1927,10 @@ xfs_growfs_rt(
 	if ((error = xfs_growfs_rt_alloc(mp, rsumblocks, nrsumblocks,
 			mp->m_sb.sb_rsumino)))
 		return error;
-	nmp = NULL;
+	/*
+	 * Allocate a new (fake) mount/sb.
+	 */
+	nmp = kmem_alloc(sizeof(*nmp), KM_SLEEP);
 	/*
 	 * Loop over the bitmap blocks.
 	 * We will do everything one bitmap block at a time.
@@ -2007,10 +1941,6 @@ xfs_growfs_rt(
 		     ((sbp->sb_rextents & ((1 << mp->m_blkbit_log) - 1)) != 0);
 	     bmbno < nrbmblocks;
 	     bmbno++) {
-		/*
-		 * Allocate a new (fake) mount/sb.
-		 */
-		nmp = kmem_alloc(sizeof(*nmp), KM_SLEEP);
 		*nmp = *mp;
 		nsbp = &nmp->m_sb;
 		/*
@@ -2038,13 +1968,13 @@ xfs_growfs_rt(
 		cancelflags = 0;
 		if ((error = xfs_trans_reserve(tp, 0,
 				XFS_GROWRTFREE_LOG_RES(nmp), 0, 0, 0)))
-			goto error_exit;
+			break;
 		/*
 		 * Lock out other callers by grabbing the bitmap inode lock.
 		 */
-		if ((error = xfs_trans_iget(mp, tp, 0, mp->m_sb.sb_rbmino,
-				XFS_ILOCK_EXCL, &ip)))
-			goto error_exit;
+		if ((error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rbmino, 0,
+						XFS_ILOCK_EXCL, &ip)))
+			break;
 		ASSERT(ip == mp->m_rbmip);
 		/*
 		 * Update the bitmap inode's size.
@@ -2056,9 +1986,9 @@ xfs_growfs_rt(
 		/*
 		 * Get the summary inode into the transaction.
 		 */
-		if ((error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rsumino,
-				0, XFS_ILOCK_EXCL, &ip)))
-			goto error_exit;
+		if ((error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rsumino, 0,
+						XFS_ILOCK_EXCL, &ip)))
+			break;
 		ASSERT(ip == mp->m_rsumip);
 		/*
 		 * Update the summary inode's size.
@@ -2073,7 +2003,7 @@ xfs_growfs_rt(
 		    mp->m_rsumlevels != nmp->m_rsumlevels) {
 			error = xfs_rtcopy_summary(mp, nmp, tp);
 			if (error)
-				goto error_exit;
+				break;
 		}
 		/*
 		 * Update superblock fields.
@@ -2100,17 +2030,12 @@ xfs_growfs_rt(
 		error = xfs_rtfree_range(nmp, tp, sbp->sb_rextents,
 			nsbp->sb_rextents - sbp->sb_rextents, &bp, &sumbno);
 		if (error)
-			goto error_exit;
+			break;
 		/*
 		 * Mark more blocks free in the superblock.
 		 */
 		xfs_trans_mod_sb(tp, XFS_TRANS_SB_FREXTENTS,
 			nsbp->sb_rextents - sbp->sb_rextents);
-		/*
-		 * Free the fake mp structure.
-		 */
-		kmem_free(nmp, sizeof(*nmp));
-		nmp = NULL;
 		/*
 		 * Update mp values into the real mp structure.
 		 */
@@ -2119,17 +2044,17 @@ xfs_growfs_rt(
 		/*
 		 * Commit the transaction.
 		 */
-		xfs_trans_commit(tp, 0, NULL);
+		xfs_trans_commit(tp, 0);
 	}
-	return 0;
+
+	if (error)
+		xfs_trans_cancel(tp, cancelflags);
 
 	/*
-	 * Error paths come here.
+	 * Free the fake mp structure.
 	 */
-error_exit:
-	if (nmp)
-		kmem_free(nmp, sizeof(*nmp));
-	xfs_trans_cancel(tp, cancelflags);
+	kmem_free(nmp, sizeof(*nmp));
+
 	return error;
 }
 
@@ -2177,10 +2102,9 @@ xfs_rtallocate_extent(
 	/*
 	 * Lock out other callers by grabbing the bitmap inode lock.
 	 */
-	error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rbmino, 0, XFS_ILOCK_EXCL, &ip);
-	if (error) {
+	if ((error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rbmino, 0,
+					XFS_ILOCK_EXCL, &ip)))
 		return error;
-	}
 	sumbp = NULL;
 	/*
 	 * Allocate by size, or near another block, or exactly at some block.
@@ -2240,10 +2164,9 @@ xfs_rtfree_extent(
 	/*
 	 * Synchronize by locking the bitmap inode.
 	 */
-	error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rbmino, 0, XFS_ILOCK_EXCL, &ip);
-	if (error) {
+	if ((error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rbmino, 0,
+					XFS_ILOCK_EXCL, &ip)))
 		return error;
-	}
 #if defined(__KERNEL__) && defined(DEBUG)
 	/*
 	 * Check to see that this whole range is currently allocated.
@@ -2384,8 +2307,8 @@ xfs_rtpick_extent(
 	__uint64_t	seq;		/* sequence number of file creation */
 	__uint64_t	*seqp;		/* pointer to seqno in inode */
 
-	error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rbmino, 0, XFS_ILOCK_EXCL, &ip);
-	if (error)
+	if ((error = xfs_trans_iget(mp, tp, mp->m_sb.sb_rbmino, 0,
+					XFS_ILOCK_EXCL, &ip)))
 		return error;
 	ASSERT(ip == mp->m_rbmip);
 	seqp = (__uint64_t *)&ip->i_d.di_atime;
@@ -2410,60 +2333,3 @@ xfs_rtpick_extent(
 	*pick = b;
 	return 0;
 }
-
-#ifdef DEBUG
-/*
- * Debug code: print out the value of a range in the bitmap.
- */
-void
-xfs_rtprint_range(
-	xfs_mount_t	*mp,		/* file system mount structure */
-	xfs_trans_t	*tp,		/* transaction pointer */
-	xfs_rtblock_t	start,		/* starting block to print */
-	xfs_extlen_t	len)		/* length to print */
-{
-	xfs_extlen_t	i;		/* block number in the extent */
-
-	printk("%Ld: ", (long long)start);
-	for (i = 0; i < len; i++)
-		printk("%d", xfs_rtcheck_bit(mp, tp, start + i, 1));
-	printk("\n");
-}
-
-/*
- * Debug code: print the summary file.
- */
-void
-xfs_rtprint_summary(
-	xfs_mount_t	*mp,		/* file system mount structure */
-	xfs_trans_t	*tp)		/* transaction pointer */
-{
-	xfs_suminfo_t	c;		/* summary data */
-	xfs_rtblock_t	i;		/* bitmap block number */
-	int		l;		/* summary information level */
-	int		p;		/* flag for printed anything */
-	xfs_fsblock_t	sb;		/* summary block number */
-	xfs_buf_t	*sumbp;		/* summary block buffer */
-
-	sumbp = NULL;
-	for (l = 0; l < mp->m_rsumlevels; l++) {
-		for (p = 0, i = 0; i < mp->m_sb.sb_rbmblocks; i++) {
-			(void)xfs_rtget_summary(mp, tp, l, i, &sumbp, &sb, &c);
-			if (c) {
-				if (!p) {
-					printk("%Ld-%Ld:", 1LL << l,
-						XFS_RTMIN((1LL << l) +
-							  ((1LL << l) - 1LL),
-							 mp->m_sb.sb_rextents));
-					p = 1;
-				}
-				printk(" %Ld:%d", (long long)i, c);
-			}
-		}
-		if (p)
-			printk("\n");
-	}
-	if (sumbp)
-		xfs_trans_brelse(tp, sumbp);
-}
-#endif	/* DEBUG */

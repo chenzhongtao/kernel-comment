@@ -18,7 +18,7 @@
 
 #ifndef __ASSEMBLY__
 
-/* Sparc is not segmented, however we need to be able to fool verify_area()
+/* Sparc is not segmented, however we need to be able to fool access_ok()
  * when doing system calls from kernel mode legitimately.
  *
  * "For historical reasons, these macros are grossly misnamed." -Linus
@@ -41,15 +41,11 @@
  * No one can read/write anything from userland in the kernel space by setting
  * large size and address near to PAGE_OFFSET - a fault will break his intentions.
  */
-#define __user_ok(addr,size) ((addr) < STACK_TOP)
+#define __user_ok(addr, size) ({ (void)(size); (addr) < STACK_TOP; })
 #define __kernel_ok (segment_eq(get_fs(), KERNEL_DS))
 #define __access_ok(addr,size) (__user_ok((addr) & get_fs().seg,(size)))
-#define access_ok(type,addr,size) __access_ok((unsigned long)(addr),(size))
-
-static inline int verify_area(int type, const void __user * addr, unsigned long size)
-{
-	return access_ok(type,addr,size)?0:-EFAULT;
-}
+#define access_ok(type, addr, size)					\
+	({ (void)(type); __access_ok((unsigned long)(addr), size); })
 
 /*
  * The exception table consists of pairs of addresses: the first is the
@@ -124,17 +120,6 @@ case 8: __put_user_asm(x,d,addr,__pu_ret); break; \
 default: __pu_ret = __put_user_bad(); break; \
 } } else { __pu_ret = -EFAULT; } __pu_ret; })
 
-#define __put_user_check_ret(x,addr,size,retval) ({ \
-register int __foo __asm__ ("l1"); \
-if (__access_ok(addr,size)) { \
-switch (size) { \
-case 1: __put_user_asm_ret(x,b,addr,retval,__foo); break; \
-case 2: __put_user_asm_ret(x,h,addr,retval,__foo); break; \
-case 4: __put_user_asm_ret(x,,addr,retval,__foo); break; \
-case 8: __put_user_asm_ret(x,d,addr,retval,__foo); break; \
-default: if (__put_user_bad()) return retval; break; \
-} } else return retval; })
-
 #define __put_user_nocheck(x,addr,size) ({ \
 register int __pu_ret; \
 switch (size) { \
@@ -144,16 +129,6 @@ case 4: __put_user_asm(x,,addr,__pu_ret); break; \
 case 8: __put_user_asm(x,d,addr,__pu_ret); break; \
 default: __pu_ret = __put_user_bad(); break; \
 } __pu_ret; })
-
-#define __put_user_nocheck_ret(x,addr,size,retval) ({ \
-register int __foo __asm__ ("l1"); \
-switch (size) { \
-case 1: __put_user_asm_ret(x,b,addr,retval,__foo); break; \
-case 2: __put_user_asm_ret(x,h,addr,retval,__foo); break; \
-case 4: __put_user_asm_ret(x,,addr,retval,__foo); break; \
-case 8: __put_user_asm_ret(x,d,addr,retval,__foo); break; \
-default: if (__put_user_bad()) return retval; break; \
-} })
 
 #define __put_user_asm(x,size,addr,ret)					\
 __asm__ __volatile__(							\
@@ -173,32 +148,6 @@ __asm__ __volatile__(							\
 	".previous\n\n\t"						\
        : "=&r" (ret) : "r" (x), "m" (*__m(addr)),			\
 	 "i" (-EFAULT))
-
-#define __put_user_asm_ret(x,size,addr,ret,foo)				\
-if (__builtin_constant_p(ret) && ret == -EFAULT)			\
-__asm__ __volatile__(							\
-	"/* Put user asm ret, inline. */\n"				\
-"1:\t"	"st"#size " %1, %2\n\n\t"					\
-	".section __ex_table,#alloc\n\t"				\
-	".align	4\n\t"							\
-	".word	1b, __ret_efault\n\n\t"					\
-	".previous\n\n\t"						\
-       : "=r" (foo) : "r" (x), "m" (*__m(addr)));			\
-else									\
-__asm__ __volatile(							\
-	"/* Put user asm ret, inline. */\n"				\
-"1:\t"	"st"#size " %1, %2\n\n\t"					\
-	".section .fixup,#alloc,#execinstr\n\t"				\
-	".align	4\n"							\
-"3:\n\t"								\
-	"ret\n\t"							\
-	" restore %%g0, %3, %%o0\n\t"					\
-	".previous\n\n\t"						\
-	".section __ex_table,#alloc\n\t"				\
-	".align	4\n\t"							\
-	".word	1b, 3b\n\n\t"						\
-	".previous\n\n\t"						\
-       : "=r" (foo) : "r" (x), "m" (*__m(addr)), "i" (ret))
 
 extern int __put_user_bad(void);
 

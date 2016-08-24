@@ -5,7 +5,6 @@
  * (TTY driver and console driver)
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/console.h>
@@ -164,29 +163,22 @@ srmcons_get_private_struct(struct srmcons_private **ps)
 	unsigned long flags;
 	int retval = 0;
 
-	spin_lock_irqsave(&srmconsp_lock, flags);
-
-	do {
-		if (srmconsp != NULL) {
-			*ps = srmconsp;
-			break;
-		}
-
+	if (srmconsp == NULL) {
 		srmconsp = kmalloc(sizeof(*srmconsp), GFP_KERNEL);
-		if (srmconsp == NULL) {
+		spin_lock_irqsave(&srmconsp_lock, flags);
+
+		if (srmconsp == NULL)
 			retval = -ENOMEM;
-			break;
+		else {
+			srmconsp->tty = NULL;
+			spin_lock_init(&srmconsp->lock);
+			init_timer(&srmconsp->timer);
 		}
 
-		srmconsp->tty = NULL;
-		spin_lock_init(&srmconsp->lock);
-		init_timer(&srmconsp->timer);
+		spin_unlock_irqrestore(&srmconsp_lock, flags);
+	}
 
-		*ps = srmconsp;
-	} while(0);
-
-	spin_unlock_irqrestore(&srmconsp_lock, flags);
-
+	*ps = srmconsp;
 	return retval;
 }
 
@@ -237,7 +229,7 @@ srmcons_close(struct tty_struct *tty, struct file *filp)
 
 static struct tty_driver *srmcons_driver;
 
-static struct tty_operations srmcons_ops = {
+static const struct tty_operations srmcons_ops = {
 	.open		= srmcons_open,
 	.close		= srmcons_close,
 	.write		= srmcons_write,
@@ -297,7 +289,7 @@ srm_console_device(struct console *co, int *index)
 	return srmcons_driver;
 }
 
-static int __init
+static int
 srm_console_setup(struct console *co, char *options)
 {
 	return 0;
@@ -308,7 +300,7 @@ static struct console srmcons = {
 	.write		= srm_console_write,
 	.device		= srm_console_device,
 	.setup		= srm_console_setup,
-	.flags		= CON_PRINTBUFFER,
+	.flags		= CON_PRINTBUFFER | CON_BOOT,
 	.index		= -1,
 };
 

@@ -17,9 +17,6 @@ CC		:= $(shell if $(CC) -m64 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then
 NEW_GCC := $(call cc-option-yn, -m64 -mcmodel=medlow)
 NEW_GAS := $(shell if $(LD) -V 2>&1 | grep 'elf64_sparc' > /dev/null; then echo y; else echo n; fi)
 UNDECLARED_REGS := $(shell if $(CC) -c -x assembler /dev/null -Wa,--help | grep undeclared-regs > /dev/null; then echo y; else echo n; fi; )
-INLINE_LIMIT := $(call cc-option-yn, -m64 -finline-limit=100000)
-
-export NEW_GCC
 
 ifneq ($(NEW_GAS),y)
 AS		= sparc64-linux-as
@@ -40,21 +37,17 @@ AS		:= $(AS) --undeclared-regs
 endif
 
 ifneq ($(NEW_GCC),y)
-  CFLAGS := $(CFLAGS) -pipe -mno-fpu -mtune=ultrasparc -mmedlow \
-	    -ffixed-g4 -fcall-used-g5 -fcall-used-g7 -Wno-sign-compare
+  KBUILD_CFLAGS += -pipe -mno-fpu -mtune=ultrasparc -mmedlow \
+	    -ffixed-g4 -ffixed-g5 -fcall-used-g7 -Wno-sign-compare
 else
-  CFLAGS := $(CFLAGS) -m64 -pipe -mno-fpu -mcpu=ultrasparc -mcmodel=medlow \
-	    -ffixed-g4 -fcall-used-g5 -fcall-used-g7 -Wno-sign-compare \
+  KBUILD_CFLAGS += -m64 -pipe -mno-fpu -mcpu=ultrasparc -mcmodel=medlow \
+	    -ffixed-g4 -ffixed-g5 -fcall-used-g7 -Wno-sign-compare \
 	    $(CC_UNDECL)
-  AFLAGS += -m64 -mcpu=ultrasparc $(CC_UNDECL)
-endif
-
-ifeq ($(INLINE_LIMIT),y)
-  CFLAGS := $(CFLAGS) -finline-limit=100000
+  KBUILD_AFLAGS += -m64 -mcpu=ultrasparc $(CC_UNDECL)
 endif
 
 ifeq ($(CONFIG_MCOUNT),y)
-  CFLAGS := $(CFLAGS) -pg
+  KBUILD_CFLAGS += -pg
 endif
 
 head-y := arch/sparc64/kernel/head.o arch/sparc64/kernel/init_task.o
@@ -63,8 +56,6 @@ core-y				+= arch/sparc64/kernel/ arch/sparc64/mm/
 core-$(CONFIG_SOLARIS_EMUL)	+= arch/sparc64/solaris/
 core-y				+= arch/sparc64/math-emu/
 libs-y				+= arch/sparc64/prom/ arch/sparc64/lib/
-
-# FIXME: is drivers- right?
 drivers-$(CONFIG_OPROFILE)	+= arch/sparc64/oprofile/
 
 boot := arch/sparc64/boot

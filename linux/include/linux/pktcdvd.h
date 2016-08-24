@@ -111,10 +111,17 @@ struct pkt_ctrl_command {
 #include <linux/blkdev.h>
 #include <linux/completion.h>
 #include <linux/cdrom.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
+
+/* default bio write queue congestion marks */
+#define PKT_WRITE_CONGESTION_ON    10000
+#define PKT_WRITE_CONGESTION_OFF   9000
+
 
 struct packet_settings
 {
-	__u8			size;		/* packet size in (512 byte) sectors */
+	__u32			size;		/* packet size in (512 byte) sectors */
 	__u8			fp;		/* fixed packets */
 	__u8			link_loss;	/* the rest is specified
 						 * as per Mt Fuji */
@@ -159,15 +166,18 @@ struct packet_iosched
 	struct bio		*read_queue_tail;
 	struct bio		*write_queue;
 	struct bio		*write_queue_tail;
-	int			high_prio_read;	/* An important read request has been queued */
+	sector_t		last_write;	/* The sector where the last write ended */
 	int			successive_reads;
 };
 
 /*
  * 32 buffers of 2048 bytes
  */
-#define PACKET_MAX_SIZE		32
-#define PAGES_PER_PACKET	(PACKET_MAX_SIZE * CD_FRAMESIZE / PAGE_SIZE)
+#if (PAGE_SIZE % CD_FRAMESIZE) != 0
+#error "PAGE_SIZE must be a multiple of CD_FRAMESIZE"
+#endif
+#define PACKET_MAX_SIZE		128
+#define FRAMES_PER_PAGE		(PAGE_SIZE / CD_FRAMESIZE)
 #define PACKET_MAX_SECTORS	(PACKET_MAX_SIZE * CD_FRAMESIZE >> 9)
 
 enum packet_data_state {
@@ -216,7 +226,7 @@ struct packet_data
 	atomic_t		io_errors;	/* Number of read/write errors during IO */
 
 	struct bio		*r_bios[PACKET_MAX_SIZE]; /* bios to use during data gathering */
-	struct page		*pages[PAGES_PER_PACKET];
+	struct page		*pages[PACKET_MAX_SIZE / FRAMES_PER_PAGE];
 
 	int			cache_valid;	/* If non-zero, the data for the zone defined */
 						/* by the sector variable is completely cached */
@@ -237,6 +247,14 @@ struct packet_stacked_data
 	struct pktcdvd_device	*pd;
 };
 #define PSD_POOL_SIZE		64
+
+struct pktcdvd_kobj
+{
+	struct kobject		kobj;
+	struct pktcdvd_device	*pd;
+};
+#define to_pktcdvdkobj(_k) \
+  ((struct pktcdvd_kobj*)container_of(_k,struct pktcdvd_kobj,kobj))
 
 struct pktcdvd_device
 {
@@ -268,6 +286,16 @@ struct pktcdvd_device
 
 	struct packet_iosched   iosched;
 	struct gendisk		*disk;
+
+	int			write_congestion_off;
+	int			write_congestion_on;
+
+	struct class_device	*clsdev;	/* sysfs pktcdvd[0-7] class dev */
+	struct pktcdvd_kobj	*kobj_stat;	/* sysfs pktcdvd[0-7]/stat/     */
+	struct pktcdvd_kobj	*kobj_wqueue;	/* sysfs pktcdvd[0-7]/write_queue/ */
+
+	struct dentry		*dfs_d_root;	/* debugfs: devname directory */
+	struct dentry		*dfs_f_info;	/* debugfs: info file */
 };
 
 #endif /* __KERNEL__ */

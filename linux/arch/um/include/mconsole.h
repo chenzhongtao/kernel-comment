@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2001 Lennert Buytenhek (buytenh@gnu.org)
- * Copyright (C) 2001, 2002 Jeff Dike (jdike@karaya.com)
+ * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
@@ -11,6 +11,8 @@
 #include <stdint.h>
 #define u32 uint32_t
 #endif
+
+#include "sysdep/ptrace.h"
 
 #define MCONSOLE_MAGIC (0xcafebabe)
 #define MCONSOLE_MAX_DATA (512)
@@ -32,7 +34,7 @@ struct mconsole_reply {
 
 struct mconsole_notify {
 	u32 magic;
-	u32 version;	
+	u32 version;
 	enum { MCONSOLE_SOCKET, MCONSOLE_PANIC, MCONSOLE_HANG,
 	       MCONSOLE_USER_NOTIFY } type;
 	u32 len;
@@ -56,17 +58,20 @@ struct mc_request
 	int as_interrupt;
 
 	int originating_fd;
-	int originlen;
+	unsigned int originlen;
 	unsigned char origin[128];			/* sockaddr_un */
 
 	struct mconsole_request request;
 	struct mconsole_command *cmd;
+	struct uml_pt_regs regs;
 };
 
 extern char mconsole_socket_name[];
 
 extern int mconsole_unlink_socket(void);
-extern int mconsole_reply(struct mc_request *req, char *reply, int err,
+extern int mconsole_reply_len(struct mc_request *req, const char *reply,
+			      int len, int err, int more);
+extern int mconsole_reply(struct mc_request *req, const char *str, int err,
 			  int more);
 
 extern void mconsole_version(struct mc_request *req);
@@ -81,23 +86,13 @@ extern void mconsole_stop(struct mc_request *req);
 extern void mconsole_go(struct mc_request *req);
 extern void mconsole_log(struct mc_request *req);
 extern void mconsole_proc(struct mc_request *req);
+extern void mconsole_stack(struct mc_request *req);
 
 extern int mconsole_get_request(int fd, struct mc_request *req);
-extern int mconsole_notify(char *sock_name, int type, const void *data, 
+extern int mconsole_notify(char *sock_name, int type, const void *data,
 			   int len);
 extern char *mconsole_notify_socket(void);
 extern void lock_notify(void);
 extern void unlock_notify(void);
 
 #endif
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

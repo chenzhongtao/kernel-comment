@@ -1,8 +1,9 @@
 #ifndef LINUX_HARDIRQ_H
 #define LINUX_HARDIRQ_H
 
-#include <linux/config.h>
+#include <linux/preempt.h>
 #include <linux/smp_lock.h>
+#include <linux/lockdep.h>
 #include <asm/hardirq.h>
 #include <asm/system.h>
 
@@ -27,11 +28,16 @@
 
 #ifndef HARDIRQ_BITS
 #define HARDIRQ_BITS	12
+
+#ifndef MAX_HARDIRQS_PER_CPU
+#define MAX_HARDIRQS_PER_CPU NR_IRQS
+#endif
+
 /*
  * The hardirq mask has to be large enough to have space for potentially
  * all IRQ sources in the system nesting on a single CPU.
  */
-#if (1 << HARDIRQ_BITS) < NR_IRQS
+#if (1 << HARDIRQ_BITS) < MAX_HARDIRQS_PER_CPU
 # error HARDIRQ_BITS is too low!
 #endif
 #endif
@@ -43,12 +49,16 @@
 #define __IRQ_MASK(x)	((1UL << (x))-1)
 
 #define PREEMPT_MASK	(__IRQ_MASK(PREEMPT_BITS) << PREEMPT_SHIFT)
-#define HARDIRQ_MASK	(__IRQ_MASK(HARDIRQ_BITS) << HARDIRQ_SHIFT)
 #define SOFTIRQ_MASK	(__IRQ_MASK(SOFTIRQ_BITS) << SOFTIRQ_SHIFT)
+#define HARDIRQ_MASK	(__IRQ_MASK(HARDIRQ_BITS) << HARDIRQ_SHIFT)
 
 #define PREEMPT_OFFSET	(1UL << PREEMPT_SHIFT)
 #define SOFTIRQ_OFFSET	(1UL << SOFTIRQ_SHIFT)
 #define HARDIRQ_OFFSET	(1UL << HARDIRQ_SHIFT)
+
+#if PREEMPT_ACTIVE < (1 << (HARDIRQ_SHIFT + HARDIRQ_BITS))
+#error PREEMPT_ACTIVE is too low!
+#endif
 
 #define hardirq_count()	(preempt_count() & HARDIRQ_MASK)
 #define softirq_count()	(preempt_count() & SOFTIRQ_MASK)
@@ -69,6 +79,19 @@
 #endif
 
 #ifdef CONFIG_PREEMPT
+# define PREEMPT_CHECK_OFFSET 1
+#else
+# define PREEMPT_CHECK_OFFSET 0
+#endif
+
+/*
+ * Check whether we were atomic before we did preempt_disable():
+ * (used by the scheduler)
+ */
+#define in_atomic_preempt_off() \
+		((preempt_count() & ~PREEMPT_ACTIVE) != PREEMPT_CHECK_OFFSET)
+
+#ifdef CONFIG_PREEMPT
 # define preemptible()	(preempt_count() == 0 && !irqs_disabled())
 # define IRQ_EXIT_OFFSET (HARDIRQ_OFFSET-1)
 #else
@@ -82,25 +105,48 @@ extern void synchronize_irq(unsigned int irq);
 # define synchronize_irq(irq)	barrier()
 #endif
 
-#define nmi_enter()		irq_enter()
-#define nmi_exit()		sub_preempt_count(HARDIRQ_OFFSET)
+struct task_struct;
 
 #ifndef CONFIG_VIRT_CPU_ACCOUNTING
-static inline void account_user_vtime(struct task_struct *tsk)
-{
-}
-
 static inline void account_system_vtime(struct task_struct *tsk)
 {
 }
 #endif
 
-#define irq_enter()					\
+/*
+ * It is safe to do non-atomic ops on ->hardirq_context,
+ * because NMI handlers may not preempt and the ops are
+ * always balanced, so the interrupted value of ->hardirq_context
+ * will always be restored.
+ */
+#define __irq_enter()					\
 	do {						\
 		account_system_vtime(current);		\
 		add_preempt_count(HARDIRQ_OFFSET);	\
+		trace_hardirq_enter();			\
 	} while (0)
 
+/*
+ * Enter irq context (on NO_HZ, update jiffies):
+ */
+extern void irq_enter(void);
+
+/*
+ * Exit irq context without processing softirqs:
+ */
+#define __irq_exit()					\
+	do {						\
+		trace_hardirq_exit();			\
+		account_system_vtime(current);		\
+		sub_preempt_count(HARDIRQ_OFFSET);	\
+	} while (0)
+
+/*
+ * Exit irq context and process softirqs if needed:
+ */
 extern void irq_exit(void);
+
+#define nmi_enter()		do { lockdep_off(); __irq_enter(); } while (0)
+#define nmi_exit()		do { __irq_exit(); lockdep_on(); } while (0)
 
 #endif /* LINUX_HARDIRQ_H */

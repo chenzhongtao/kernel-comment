@@ -6,7 +6,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kmod.h>
 #include <linux/spinlock.h>
@@ -41,7 +40,7 @@ static struct mtd_chip_driver *get_mtd_chip_driver (const char *name)
 
 	list_for_each(pos, &chip_drvs_list) {
 		this = list_entry(pos, typeof(*this), list);
-		
+
 		if (!strcmp(this->name, name)) {
 			ret = this;
 			break;
@@ -73,7 +72,7 @@ struct mtd_info *do_map_probe(const char *name, struct map_info *map)
 
 	ret = drv->probe(map);
 
-	/* We decrease the use count here. It may have been a 
+	/* We decrease the use count here. It may have been a
 	   probe-only module, which is no longer required from this
 	   point, having given us a handle on (and increased the use
 	   count of) the actual driver code.
@@ -82,7 +81,7 @@ struct mtd_info *do_map_probe(const char *name, struct map_info *map)
 
 	if (ret)
 		return ret;
-	
+
 	return NULL;
 }
 /*

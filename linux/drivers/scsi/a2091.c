@@ -1,8 +1,6 @@
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/blkdev.h>
-#include <linux/sched.h>
-#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 
@@ -25,7 +23,7 @@
 #define DMA(ptr) ((a2091_scsiregs *)((ptr)->base))
 #define HDATA(ptr) ((struct WD33C93_hostdata *)((ptr)->hostdata))
 
-static irqreturn_t a2091_intr (int irq, void *_instance, struct pt_regs *fp)
+static irqreturn_t a2091_intr (int irq, void *_instance)
 {
     unsigned long flags;
     unsigned int status;
@@ -41,7 +39,7 @@ static irqreturn_t a2091_intr (int irq, void *_instance, struct pt_regs *fp)
     return IRQ_HANDLED;
 }
 
-static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
+static int dma_setup(struct scsi_cmnd *cmd, int dir_in)
 {
     unsigned short cntr = CNTR_PDMD | CNTR_INTEN;
     unsigned long addr = virt_to_bus(cmd->SCp.ptr);
@@ -116,7 +114,7 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
     return 0;
 }
 
-static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt, 
+static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
 		      int status)
 {
     /* disable SCSI interrupts */
@@ -173,7 +171,7 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
     }
 }
 
-int __init a2091_detect(Scsi_Host_Template *tpnt)
+int __init a2091_detect(struct scsi_host_template *tpnt)
 {
     static unsigned char called = 0;
     struct Scsi_Host *instance;
@@ -209,7 +207,7 @@ int __init a2091_detect(Scsi_Host_Template *tpnt)
 	regs.SASR = &(DMA(instance)->SASR);
 	regs.SCMD = &(DMA(instance)->SCMD);
 	wd33c93_init(instance, regs, dma_setup, dma_stop, WD33C93_FS_8_10);
-	request_irq(IRQ_AMIGA_PORTS, a2091_intr, SA_SHIRQ, "A2091 SCSI",
+	request_irq(IRQ_AMIGA_PORTS, a2091_intr, IRQF_SHARED, "A2091 SCSI",
 		    instance);
 	DMA(instance)->CNTR = CNTR_PDMD | CNTR_INTEN;
 	num_a2091++;
@@ -218,16 +216,23 @@ int __init a2091_detect(Scsi_Host_Template *tpnt)
     return num_a2091;
 }
 
-static int a2091_bus_reset(Scsi_Cmnd *cmd)
+static int a2091_bus_reset(struct scsi_cmnd *cmd)
 {
 	/* FIXME perform bus-specific reset */
+
+	/* FIXME 2: kill this function, and let midlayer fall back
+	   to the same action, calling wd33c93_host_reset() */
+
+	spin_lock_irq(cmd->device->host->host_lock);
 	wd33c93_host_reset(cmd);
+	spin_unlock_irq(cmd->device->host->host_lock);
+
 	return SUCCESS;
 }
 
 #define HOSTS_C
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "A2901",
 	.name			= "Commodore A2091/A590 SCSI",
 	.detect			= a2091_detect,

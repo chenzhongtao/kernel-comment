@@ -14,6 +14,8 @@
 #ifndef __ASM_ARM_ARCH_IO_H
 #define __ASM_ARM_ARCH_IO_H
 
+#include <asm/hardware.h>
+
 #define IO_SPACE_LIMIT 0xffff
 
 /*
@@ -22,7 +24,6 @@
 #define __io(a)			((void __iomem *)(PCIO_BASE + (a)))
 #if 1
 #define __mem_pci(a)		(a)
-#define __mem_isa(a)		((a) + PCIMEM_BASE)
 #else
 
 static inline void __iomem *___mem_pci(void __iomem *p)
@@ -32,14 +33,7 @@ static inline void __iomem *___mem_pci(void __iomem *p)
 	return p;
 }
 
-static inline void __iomem *___mem_isa(void __iomem *p)
-{
-	unsigned long a = (unsigned long)p;
-	BUG_ON(a >= 16*1048576);
-	return p + PCIMEM_BASE;
-}
 #define __mem_pci(a)		___mem_pci(a)
-#define __mem_isa(a)		___mem_isa(a)
 #endif
 
 #endif

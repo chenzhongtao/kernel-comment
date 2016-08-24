@@ -7,10 +7,7 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- * Extended to all five netfilter hooks by Brad Chapman & Harald Welte
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netdevice.h>
@@ -18,6 +15,7 @@
 #include <net/sock.h>
 #include <net/route.h>
 #include <linux/ip.h>
+#include <net/ip.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
@@ -35,129 +33,97 @@ static struct
 	struct ipt_replace repl;
 	struct ipt_standard entries[5];
 	struct ipt_error term;
-} initial_table __initdata
-= { { "mangle", MANGLE_VALID_HOOKS, 6,
-      sizeof(struct ipt_standard) * 5 + sizeof(struct ipt_error),
-      { [NF_IP_PRE_ROUTING] 	= 0,
-	[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
-	[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
-	[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
-	[NF_IP_POST_ROUTING] 	= sizeof(struct ipt_standard) * 4 },
-      { [NF_IP_PRE_ROUTING] 	= 0,
-	[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
-	[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
-	[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
-	[NF_IP_POST_ROUTING]	= sizeof(struct ipt_standard) * 4 },
-      0, NULL, { } },
-    {
-	    /* PRE_ROUTING */
-	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* LOCAL_IN */
- 	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* FORWARD */
- 	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* LOCAL_OUT */
-	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* POST_ROUTING */
-	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-    },
-    /* ERROR */
-    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-	0,
-	sizeof(struct ipt_entry),
-	sizeof(struct ipt_error),
-	0, { 0, 0 }, { } },
-      { { { { IPT_ALIGN(sizeof(struct ipt_error_target)), IPT_ERROR_TARGET } },
-	  { } },
-	"ERROR"
-      }
-    }
+} initial_table __initdata = {
+	.repl = {
+		.name = "mangle",
+		.valid_hooks = MANGLE_VALID_HOOKS,
+		.num_entries = 6,
+		.size = sizeof(struct ipt_standard) * 5 + sizeof(struct ipt_error),
+		.hook_entry = {
+			[NF_IP_PRE_ROUTING] 	= 0,
+			[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
+			[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
+			[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
+			[NF_IP_POST_ROUTING] 	= sizeof(struct ipt_standard) * 4,
+		},
+		.underflow = {
+			[NF_IP_PRE_ROUTING] 	= 0,
+			[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
+			[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
+			[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
+			[NF_IP_POST_ROUTING]	= sizeof(struct ipt_standard) * 4,
+		},
+	},
+	.entries = {
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* PRE_ROUTING */
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_IN */
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* FORWARD */
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_OUT */
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* POST_ROUTING */
+	},
+	.term = IPT_ERROR_INIT,			/* ERROR */
 };
 
-static struct ipt_table packet_mangler = {
+static struct xt_table packet_mangler = {
 	.name		= "mangle",
 	.valid_hooks	= MANGLE_VALID_HOOKS,
 	.lock		= RW_LOCK_UNLOCKED,
 	.me		= THIS_MODULE,
+	.af		= AF_INET,
 };
 
 /* The work comes in here from netfilter.c. */
 static unsigned int
 ipt_route_hook(unsigned int hook,
-	 struct sk_buff **pskb,
+	 struct sk_buff *skb,
 	 const struct net_device *in,
 	 const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	return ipt_do_table(pskb, hook, in, out, &packet_mangler, NULL);
+	return ipt_do_table(skb, hook, in, out, &packet_mangler);
 }
 
 static unsigned int
 ipt_local_hook(unsigned int hook,
-		   struct sk_buff **pskb,
+		   struct sk_buff *skb,
 		   const struct net_device *in,
 		   const struct net_device *out,
 		   int (*okfn)(struct sk_buff *))
 {
 	unsigned int ret;
+	const struct iphdr *iph;
 	u_int8_t tos;
-	u_int32_t saddr, daddr;
-	unsigned long nfmark;
+	__be32 saddr, daddr;
+	u_int32_t mark;
 
 	/* root is playing with raw sockets. */
-	if ((*pskb)->len < sizeof(struct iphdr)
-	    || (*pskb)->nh.iph->ihl * 4 < sizeof(struct iphdr)) {
+	if (skb->len < sizeof(struct iphdr)
+	    || ip_hdrlen(skb) < sizeof(struct iphdr)) {
 		if (net_ratelimit())
-			printk("ipt_hook: happy cracking.\n");
+			printk("iptable_mangle: ignoring short SOCK_RAW "
+			       "packet.\n");
 		return NF_ACCEPT;
 	}
 
 	/* Save things which could affect route */
-	nfmark = (*pskb)->nfmark;
-	saddr = (*pskb)->nh.iph->saddr;
-	daddr = (*pskb)->nh.iph->daddr;
-	tos = (*pskb)->nh.iph->tos;
+	mark = skb->mark;
+	iph = ip_hdr(skb);
+	saddr = iph->saddr;
+	daddr = iph->daddr;
+	tos = iph->tos;
 
-	ret = ipt_do_table(pskb, hook, in, out, &packet_mangler, NULL);
+	ret = ipt_do_table(skb, hook, in, out, &packet_mangler);
 	/* Reroute for ANY change. */
-	if (ret != NF_DROP && ret != NF_STOLEN && ret != NF_QUEUE
-	    && ((*pskb)->nh.iph->saddr != saddr
-		|| (*pskb)->nh.iph->daddr != daddr
-#ifdef CONFIG_IP_ROUTE_FWMARK
-		|| (*pskb)->nfmark != nfmark
-#endif
-		|| (*pskb)->nh.iph->tos != tos))
-		return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
+	if (ret != NF_DROP && ret != NF_STOLEN && ret != NF_QUEUE) {
+		iph = ip_hdr(skb);
+
+		if (iph->saddr != saddr ||
+		    iph->daddr != daddr ||
+		    skb->mark != mark ||
+		    iph->tos != tos)
+			if (ip_route_me_harder(skb, RTN_UNSPEC))
+				ret = NF_DROP;
+	}
 
 	return ret;
 }
@@ -167,7 +133,7 @@ static struct nf_hook_ops ipt_ops[] = {
 		.hook		= ipt_route_hook,
 		.owner		= THIS_MODULE,
 		.pf		= PF_INET,
-		.hooknum	= NF_IP_PRE_ROUTING, 
+		.hooknum	= NF_IP_PRE_ROUTING,
 		.priority	= NF_IP_PRI_MANGLE,
 	},
 	{
@@ -200,7 +166,7 @@ static struct nf_hook_ops ipt_ops[] = {
 	},
 };
 
-static int __init init(void)
+static int __init iptable_mangle_init(void)
 {
 	int ret;
 
@@ -210,51 +176,22 @@ static int __init init(void)
 		return ret;
 
 	/* Register hooks */
-	ret = nf_register_hook(&ipt_ops[0]);
+	ret = nf_register_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
 	if (ret < 0)
 		goto cleanup_table;
 
-	ret = nf_register_hook(&ipt_ops[1]);
-	if (ret < 0)
-		goto cleanup_hook0;
-
-	ret = nf_register_hook(&ipt_ops[2]);
-	if (ret < 0)
-		goto cleanup_hook1;
-
-	ret = nf_register_hook(&ipt_ops[3]);
-	if (ret < 0)
-		goto cleanup_hook2;
-
-	ret = nf_register_hook(&ipt_ops[4]);
-	if (ret < 0)
-		goto cleanup_hook3;
-
 	return ret;
 
- cleanup_hook3:
-        nf_unregister_hook(&ipt_ops[3]);
- cleanup_hook2:
-        nf_unregister_hook(&ipt_ops[2]);
- cleanup_hook1:
-	nf_unregister_hook(&ipt_ops[1]);
- cleanup_hook0:
-	nf_unregister_hook(&ipt_ops[0]);
  cleanup_table:
 	ipt_unregister_table(&packet_mangler);
-
 	return ret;
 }
 
-static void __exit fini(void)
+static void __exit iptable_mangle_fini(void)
 {
-	unsigned int i;
-
-	for (i = 0; i < sizeof(ipt_ops)/sizeof(struct nf_hook_ops); i++)
-		nf_unregister_hook(&ipt_ops[i]);
-
+	nf_unregister_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
 	ipt_unregister_table(&packet_mangler);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(iptable_mangle_init);
+module_exit(iptable_mangle_fini);

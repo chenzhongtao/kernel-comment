@@ -12,13 +12,13 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 
 #include <asm/hardware.h>
 #include <asm/irq.h>
 #include <asm/mach/irq.h>
 #include <asm/arch/irqs.h>
 
+#include "common.h"
 
 static void lh7a40x_ack_cpld_irq (u32 irq)
 {
@@ -49,16 +49,14 @@ static void lh7a40x_unmask_cpld_irq (u32 irq)
 	}
 }
 
-static struct irqchip lh7a40x_cpld_chip = {
+static struct irq_chip lh7a40x_cpld_chip = {
+	.name	= "CPLD",
 	.ack	= lh7a40x_ack_cpld_irq,
 	.mask	= lh7a40x_mask_cpld_irq,
 	.unmask	= lh7a40x_unmask_cpld_irq,
 };
 
-#define IRQ_DISPATCH(irq) irq_desc[irq].handle ((irq), &irq_desc[irq], regs)
-
-static void lh7a40x_cpld_handler (unsigned int irq, struct irqdesc *desc,
-				  struct pt_regs *regs)
+static void lh7a40x_cpld_handler (unsigned int irq, struct irq_desc *desc)
 {
 	unsigned int mask = CPLD_INTERRUPTS;
 
@@ -119,7 +117,7 @@ void __init lh7a40x_init_board_irq (void)
 	for (irq = IRQ_BOARD_START;
 	     irq < IRQ_BOARD_START + NR_IRQ_BOARD; ++irq) {
 		set_irq_chip (irq, &lh7a40x_cpld_chip);
-		set_irq_handler (irq, do_edge_IRQ);
+		set_irq_handler (irq, handle_edge_irq);
 		set_irq_flags (irq, IRQF_VALID);
 	}
 

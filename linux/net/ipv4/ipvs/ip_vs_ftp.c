@@ -30,8 +30,10 @@
 #include <linux/skbuff.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/netfilter.h>
 #include <net/protocol.h>
 #include <net/tcp.h>
+#include <asm/unaligned.h>
 
 #include <net/ip_vs.h>
 
@@ -44,16 +46,9 @@
  * List of ports (up to IP_VS_APP_MAX_PORTS) to be handled by helper
  * First port is set to the default port.
  */
-static int ports[IP_VS_APP_MAX_PORTS] = {21, 0};
-module_param_array(ports, int, NULL, 0);
-
-/*
- *	Debug level
- */
-#ifdef CONFIG_IP_VS_DEBUG
-static int debug=0;
-module_param(debug, int, 0);
-#endif
+static unsigned short ports[IP_VS_APP_MAX_PORTS] = {21, 0};
+module_param_array(ports, ushort, NULL, 0);
+MODULE_PARM_DESC(ports, "Ports to monitor for FTP control commands");
 
 
 /*	Dummy variable */
@@ -81,7 +76,7 @@ ip_vs_ftp_done_conn(struct ip_vs_app *app, struct ip_vs_conn *cp)
  */
 static int ip_vs_ftp_get_addrport(char *data, char *data_limit,
 				  const char *pattern, size_t plen, char term,
-				  __u32 *addr, __u16 *port,
+				  __be32 *addr, __be16 *port,
 				  char **start, char **end)
 {
 	unsigned char p[6];
@@ -121,8 +116,8 @@ static int ip_vs_ftp_get_addrport(char *data, char *data_limit,
 	if (i != 5)
 		return -1;
 
-	*addr = (p[3]<<24) | (p[2]<<16) | (p[1]<<8) | p[0];
-	*port = (p[5]<<8) | p[4];
+	*addr = get_unaligned((__be32 *)p);
+	*port = get_unaligned((__be16 *)(p + 4));
 	return 1;
 }
 
@@ -141,14 +136,14 @@ static int ip_vs_ftp_get_addrport(char *data, char *data_limit,
  * xxx,xxx,xxx,xxx is the server address, ppp,ppp is the server port number.
  */
 static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
-			 struct sk_buff **pskb, int *diff)
+			 struct sk_buff *skb, int *diff)
 {
 	struct iphdr *iph;
 	struct tcphdr *th;
 	char *data, *data_limit;
 	char *start, *end;
-	__u32 from;
-	__u16 port;
+	__be32 from;
+	__be16 port;
 	struct ip_vs_conn *n_cp;
 	char buf[24];		/* xxx.xxx.xxx.xxx,ppp,ppp\000 */
 	unsigned buf_len;
@@ -161,14 +156,14 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 		return 1;
 
 	/* Linear packets are much easier to deal with. */
-	if (!ip_vs_make_skb_writable(pskb, (*pskb)->len))
+	if (!skb_make_writable(skb, skb->len))
 		return 0;
 
 	if (cp->app_data == &ip_vs_ftp_pasv) {
-		iph = (*pskb)->nh.iph;
+		iph = ip_hdr(skb);
 		th = (struct tcphdr *)&(((char *)iph)[iph->ihl*4]);
 		data = (char *)th + (th->doff << 2);
-		data_limit = (*pskb)->tail;
+		data_limit = skb_tail_pointer(skb);
 
 		if (ip_vs_ftp_get_addrport(data, data_limit,
 					   SERVER_STRING,
@@ -177,7 +172,7 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 					   &start, &end) != 1)
 			return 1;
 
-		IP_VS_DBG(1-debug, "PASV response (%u.%u.%u.%u:%d) -> "
+		IP_VS_DBG(7, "PASV response (%u.%u.%u.%u:%d) -> "
 			  "%u.%u.%u.%u:%d detected\n",
 			  NIPQUAD(from), ntohs(port), NIPQUAD(cp->caddr), 0);
 
@@ -206,7 +201,7 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 		from = n_cp->vaddr;
 		port = n_cp->vport;
 		sprintf(buf,"%d,%d,%d,%d,%d,%d", NIPQUAD(from),
-			port&255, (port>>8)&255);
+			(ntohs(port)>>8)&255, ntohs(port)&255);
 		buf_len = strlen(buf);
 
 		/*
@@ -219,7 +214,7 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 			memcpy(start, buf, buf_len);
 			ret = 1;
 		} else {
-			ret = !ip_vs_skb_replace(*pskb, GFP_ATOMIC, start,
+			ret = !ip_vs_skb_replace(skb, GFP_ATOMIC, start,
 					  end-start, buf, buf_len);
 		}
 
@@ -244,14 +239,14 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
  * the client.
  */
 static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
-			struct sk_buff **pskb, int *diff)
+			struct sk_buff *skb, int *diff)
 {
 	struct iphdr *iph;
 	struct tcphdr *th;
 	char *data, *data_start, *data_limit;
 	char *start, *end;
-	__u32 to;
-	__u16 port;
+	__be32 to;
+	__be16 port;
 	struct ip_vs_conn *n_cp;
 
 	/* no diff required for incoming packets */
@@ -262,25 +257,25 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 		return 1;
 
 	/* Linear packets are much easier to deal with. */
-	if (!ip_vs_make_skb_writable(pskb, (*pskb)->len))
+	if (!skb_make_writable(skb, skb->len))
 		return 0;
 
 	/*
 	 * Detecting whether it is passive
 	 */
-	iph = (*pskb)->nh.iph;
+	iph = ip_hdr(skb);
 	th = (struct tcphdr *)&(((char *)iph)[iph->ihl*4]);
 
 	/* Since there may be OPTIONS in the TCP packet and the HLEN is
 	   the length of the header in 32-bit multiples, it is accurate
 	   to calculate data address by th+HLEN*4 */
 	data = data_start = (char *)th + (th->doff << 2);
-	data_limit = (*pskb)->tail;
+	data_limit = skb_tail_pointer(skb);
 
 	while (data <= data_limit - 6) {
 		if (strnicmp(data, "PASV\r\n", 6) == 0) {
 			/* Passive mode on */
-			IP_VS_DBG(1-debug, "got PASV at %zd of %zd\n",
+			IP_VS_DBG(7, "got PASV at %td of %td\n",
 				  data - data_start,
 				  data_limit - data_start);
 			cp->app_data = &ip_vs_ftp_pasv;
@@ -302,7 +297,7 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 				   &start, &end) != 1)
 		return 1;
 
-	IP_VS_DBG(1-debug, "PORT %u.%u.%u.%u:%d detected\n",
+	IP_VS_DBG(7, "PORT %u.%u.%u.%u:%d detected\n",
 		  NIPQUAD(to), ntohs(port));
 
 	/* Passive mode off */
@@ -311,7 +306,7 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 	/*
 	 * Now update or create a connection entry for it
 	 */
-	IP_VS_DBG(1-debug, "protocol %s %u.%u.%u.%u:%d %u.%u.%u.%u:%d\n",
+	IP_VS_DBG(7, "protocol %s %u.%u.%u.%u:%d %u.%u.%u.%u:%d\n",
 		  ip_vs_proto_name(iph->protocol),
 		  NIPQUAD(to), ntohs(port), NIPQUAD(cp->vaddr), 0);
 
@@ -375,8 +370,8 @@ static int __init ip_vs_ftp_init(void)
 		ret = register_ip_vs_app_inc(app, app->protocol, ports[i]);
 		if (ret)
 			break;
-		IP_VS_DBG(1-debug, "%s: loaded support on port[%d] = %d\n",
-			  app->name, i, ports[i]);
+		IP_VS_INFO("%s: loaded support on port[%d] = %d\n",
+			   app->name, i, ports[i]);
 	}
 
 	if (ret)

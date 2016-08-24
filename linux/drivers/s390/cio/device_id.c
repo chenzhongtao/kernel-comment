@@ -3,85 +3,27 @@
  *
  *    Copyright (C) 2002 IBM Deutschland Entwicklung GmbH,
  *			 IBM Corporation
- *    Author(s): Cornelia Huck(cohuck@de.ibm.com)
+ *    Author(s): Cornelia Huck (cornelia.huck@de.ibm.com)
  *		 Martin Schwidefsky (schwidefsky@de.ibm.com)
  *
  * Sense ID functions.
  */
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
 
 #include <asm/ccwdev.h>
 #include <asm/delay.h>
 #include <asm/cio.h>
 #include <asm/lowcore.h>
+#include <asm/diag.h>
 
 #include "cio.h"
 #include "cio_debug.h"
 #include "css.h"
 #include "device.h"
 #include "ioasm.h"
-
-/*
- * diag210 is used under VM to get information about a virtual device
- */
-#ifdef CONFIG_ARCH_S390X
-int
-diag210(struct diag210 * addr)
-{
-	/*
-	 * diag 210 needs its data below the 2GB border, so we
-	 * use a static data area to be sure
-	 */
-	static struct diag210 diag210_tmp;
-	static DEFINE_SPINLOCK(diag210_lock);
-	unsigned long flags;
-	int ccode;
-
-	spin_lock_irqsave(&diag210_lock, flags);
-	diag210_tmp = *addr;
-
-	asm volatile (
-		"   lhi	  %0,-1\n"
-		"   sam31\n"
-		"   diag  %1,0,0x210\n"
-		"0: ipm	  %0\n"
-		"   srl	  %0,28\n"
-		"1: sam64\n"
-		".section __ex_table,\"a\"\n"
-		"    .align 8\n"
-		"    .quad 0b,1b\n"
-		".previous"
-		: "=&d" (ccode) : "a" (__pa(&diag210_tmp)) : "cc", "memory" );
-
-	*addr = diag210_tmp;
-	spin_unlock_irqrestore(&diag210_lock, flags);
-
-	return ccode;
-}
-#else
-int
-diag210(struct diag210 * addr)
-{
-	int ccode;
-
-	asm volatile (
-		"   lhi	  %0,-1\n"
-		"   diag  %1,0,0x210\n"
-		"0: ipm	  %0\n"
-		"   srl	  %0,28\n"
-		"1:\n"
-		".section __ex_table,\"a\"\n"
-		"    .align 4\n"
-		"    .long 0b,1b\n"
-		".previous"
-		: "=&d" (ccode) : "a" (__pa(addr)) : "cc", "memory" );
-
-	return ccode;
-}
-#endif
 
 /*
  * Input :
@@ -145,7 +87,7 @@ VM_virtual_device_info (__u16 devno, struct senseid *ps)
 		ps->cu_model = 0x60;
 		return;
 	}
-	for (i = 0; i < sizeof(vm_devices) / sizeof(vm_devices[0]); i++)
+	for (i = 0; i < ARRAY_SIZE(vm_devices); i++)
 		if (diag_data.vrdcvcla == vm_devices[i].vrdcvcla &&
 		    diag_data.vrdcvtyp == vm_devices[i].vrdcvtyp) {
 			ps->cu_type = vm_devices[i].cu_type;
@@ -176,14 +118,6 @@ __ccw_device_sense_id_start(struct ccw_device *cdev)
 	sch = to_subchannel(cdev->dev.parent);
 	/* Setup sense channel program. */
 	ccw = cdev->private->iccws;
-	if (sch->schib.pmcw.pim != 0x80) {
-		/* more than one path installed. */
-		ccw->cmd_code = CCW_CMD_SUSPEND_RECONN;
-		ccw->cda = 0;
-		ccw->count = 0;
-		ccw->flags = CCW_FLAG_SLI | CCW_FLAG_CC;
-		ccw++;
-	}
 	ccw->cmd_code = CCW_CMD_SENSE_ID;
 	ccw->cda = (__u32) __pa (&cdev->private->senseid);
 	ccw->count = sizeof (struct senseid);
@@ -198,6 +132,8 @@ __ccw_device_sense_id_start(struct ccw_device *cdev)
 		if ((sch->opm & cdev->private->imask) != 0 &&
 		    cdev->private->iretry > 0) {
 			cdev->private->iretry--;
+			/* Reset internal retry indication. */
+			cdev->private->flags.intretry = 0;
 			ret = cio_start (sch, cdev->private->iccws,
 					 cdev->private->imask);
 			/* ret is 0, -EBUSY, -EACCES or -ENODEV */
@@ -244,8 +180,14 @@ ccw_device_check_sense_id(struct ccw_device *cdev)
 		return 0; /* Success */
 	}
 	/* Check the error cases. */
-	if (irb->scsw.fctl & (SCSW_FCTL_HALT_FUNC | SCSW_FCTL_CLEAR_FUNC))
+	if (irb->scsw.fctl & (SCSW_FCTL_HALT_FUNC | SCSW_FCTL_CLEAR_FUNC)) {
+		/* Retry Sense ID if requested. */
+		if (cdev->private->flags.intretry) {
+			cdev->private->flags.intretry = 0;
+			return -EAGAIN;
+		}
 		return -ETIME;
+	}
 	if (irb->esw.esw0.erw.cons && (irb->ecw[0] & SNS0_CMD_REJECT)) {
 		/*
 		 * if the device doesn't support the SenseID
@@ -256,16 +198,18 @@ ccw_device_check_sense_id(struct ccw_device *cdev)
 		 *     sense id information. So, for intervention required,
 		 *     we use the "whack it until it talks" strategy...
 		 */
-		CIO_MSG_EVENT(2, "SenseID : device %04x on Subchannel %04x "
-			      "reports cmd reject\n",
-			      cdev->private->devno, sch->irq);
+		CIO_MSG_EVENT(2, "SenseID : device %04x on Subchannel "
+			      "0.%x.%04x reports cmd reject\n",
+			      cdev->private->dev_id.devno, sch->schid.ssid,
+			      sch->schid.sch_no);
 		return -EOPNOTSUPP;
 	}
 	if (irb->esw.esw0.erw.cons) {
-		CIO_MSG_EVENT(2, "SenseID : UC on dev %04x, "
+		CIO_MSG_EVENT(2, "SenseID : UC on dev 0.%x.%04x, "
 			      "lpum %02X, cnt %02d, sns :"
 			      " %02X%02X%02X%02X %02X%02X%02X%02X ...\n",
-			      cdev->private->devno,
+			      cdev->private->dev_id.ssid,
+			      cdev->private->dev_id.devno,
 			      irb->esw.esw0.sublog.lpum,
 			      irb->esw.esw0.erw.scnt,
 			      irb->ecw[0], irb->ecw[1],
@@ -277,16 +221,18 @@ ccw_device_check_sense_id(struct ccw_device *cdev)
 	if (irb->scsw.cc == 3) {
 		if ((sch->orb.lpm &
 		     sch->schib.pmcw.pim & sch->schib.pmcw.pam) != 0)
-			CIO_MSG_EVENT(2, "SenseID : path %02X for device %04x on"
-				      " subchannel %04x is 'not operational'\n",
-				      sch->orb.lpm, cdev->private->devno,
-				      sch->irq);
+			CIO_MSG_EVENT(2, "SenseID : path %02X for device %04x "
+				      "on subchannel 0.%x.%04x is "
+				      "'not operational'\n", sch->orb.lpm,
+				      cdev->private->dev_id.devno,
+				      sch->schid.ssid, sch->schid.sch_no);
 		return -EACCES;
 	}
 	/* Hmm, whatever happened, try again. */
 	CIO_MSG_EVENT(2, "SenseID : start_IO() for device %04x on "
-		      "subchannel %04x returns status %02X%02X\n",
-		      cdev->private->devno, sch->irq,
+		      "subchannel 0.%x.%04x returns status %02X%02X\n",
+		      cdev->private->dev_id.devno, sch->schid.ssid,
+		      sch->schid.sch_no,
 		      irb->scsw.dstat, irb->scsw.cstat);
 	return -EAGAIN;
 }
@@ -316,6 +262,7 @@ ccw_device_sense_id_irq(struct ccw_device *cdev, enum dev_event dev_event)
 	if (ccw_device_accumulate_and_sense(cdev, irb) != 0)
 		return;
 	ret = ccw_device_check_sense_id(cdev);
+	memset(&cdev->private->irb, 0, sizeof(struct irb));
 	switch (ret) {
 	/* 0, -ETIME, -EOPNOTSUPP, -EAGAIN or -EACCES */
 	case 0:			/* Sense id succeeded. */
@@ -334,7 +281,7 @@ ccw_device_sense_id_irq(struct ccw_device *cdev, enum dev_event dev_event)
 		/* fall through. */
 	default:		/* Sense ID failed. Try asking VM. */
 		if (MACHINE_IS_VM) {
-			VM_virtual_device_info (cdev->private->devno,
+			VM_virtual_device_info (cdev->private->dev_id.devno,
 						&cdev->private->senseid);
 			if (cdev->private->senseid.cu_type != 0xFFFF) {
 				/* Got the device information from VM. */
@@ -350,5 +297,3 @@ ccw_device_sense_id_irq(struct ccw_device *cdev, enum dev_event dev_event)
 		break;
 	}
 }
-
-EXPORT_SYMBOL(diag210);

@@ -83,7 +83,7 @@ static struct via_ircc_cb *dev_self[] = { NULL, NULL, NULL, NULL };
 
 /* Some prototypes */
 static int via_ircc_open(int i, chipio_t * info, unsigned int id);
-static int __exit via_ircc_close(struct via_ircc_cb *self);
+static int via_ircc_close(struct via_ircc_cb *self);
 static int via_ircc_dma_receive(struct via_ircc_cb *self);
 static int via_ircc_dma_receive_complete(struct via_ircc_cb *self,
 					 int iobase);
@@ -93,8 +93,7 @@ static int via_ircc_hard_xmit_fir(struct sk_buff *skb,
 				  struct net_device *dev);
 static void via_hw_init(struct via_ircc_cb *self);
 static void via_ircc_change_speed(struct via_ircc_cb *self, __u32 baud);
-static irqreturn_t via_ircc_interrupt(int irq, void *dev_id,
-				      struct pt_regs *regs);
+static irqreturn_t via_ircc_interrupt(int irq, void *dev_id);
 static int via_ircc_is_receiving(struct via_ircc_cb *self);
 static int via_ircc_read_dongle_id(int iobase);
 
@@ -111,7 +110,7 @@ static void hwreset(struct via_ircc_cb *self);
 static int via_ircc_dma_xmit(struct via_ircc_cb *self, u16 iobase);
 static int upload_rxdata(struct via_ircc_cb *self, int iobase);
 static int __devinit via_init_one (struct pci_dev *pcidev, const struct pci_device_id *id);
-static void __exit via_remove_one (struct pci_dev *pdev);
+static void __devexit via_remove_one (struct pci_dev *pdev);
 
 /* FIXME : Should use udelay() instead, even if we are x86 only - Jean II */
 static void iodelay(int udelay)
@@ -140,7 +139,7 @@ static struct pci_driver via_driver = {
 	.name		= VIA_MODULE_NAME,
 	.id_table	= via_pci_tbl,
 	.probe		= via_init_one,
-	.remove		= via_remove_one,
+	.remove		= __devexit_p(via_remove_one),
 };
 
 
@@ -273,19 +272,19 @@ static int __devinit via_init_one (struct pci_dev *pcidev, const struct pci_devi
  *    Close all configured chips
  *
  */
-static void __exit via_ircc_clean(void)
+static void via_ircc_clean(void)
 {
 	int i;
 
 	IRDA_DEBUG(3, "%s()\n", __FUNCTION__);
 
-	for (i=0; i < 4; i++) {
+	for (i=0; i < ARRAY_SIZE(dev_self); i++) {
 		if (dev_self[i])
 			via_ircc_close(dev_self[i]);
 	}
 }
 
-static void __exit via_remove_one (struct pci_dev *pdev)
+static void __devexit via_remove_one (struct pci_dev *pdev)
 {
 	IRDA_DEBUG(3, "%s()\n", __FUNCTION__);
 
@@ -326,6 +325,9 @@ static __devinit int via_ircc_open(int i, chipio_t * info, unsigned int id)
 	int err;
 
 	IRDA_DEBUG(3, "%s()\n", __FUNCTION__);
+
+	if (i >= ARRAY_SIZE(dev_self))
+		return -ENOMEM;
 
 	/* Allocate new instance of the driver */
 	dev = alloc_irdadev(sizeof(struct via_ircc_cb));
@@ -427,9 +429,6 @@ static __devinit int via_ircc_open(int i, chipio_t * info, unsigned int id)
 	self->tx_fifo.len = self->tx_fifo.ptr = self->tx_fifo.free = 0;
 	self->tx_fifo.tail = self->tx_buff.head;
 
-	/* Keep track of module usage */
-	SET_MODULE_OWNER(dev);
-
 	/* Override the network functions we need to use */
 	dev->hard_start_xmit = via_ircc_hard_xmit_sir;
 	dev->open = via_ircc_net_open;
@@ -441,7 +440,7 @@ static __devinit int via_ircc_open(int i, chipio_t * info, unsigned int id)
 	if (err)
 		goto err_out4;
 
-	MESSAGE("IrDA: Registered device %s (via-ircc)\n", dev->name);
+	IRDA_MESSAGE("IrDA: Registered device %s (via-ircc)\n", dev->name);
 
 	/* Initialise the hardware..
 	*/
@@ -468,13 +467,13 @@ static __devinit int via_ircc_open(int i, chipio_t * info, unsigned int id)
  *    Close driver instance
  *
  */
-static int __exit via_ircc_close(struct via_ircc_cb *self)
+static int via_ircc_close(struct via_ircc_cb *self)
 {
 	int iobase;
 
 	IRDA_DEBUG(3, "%s()\n", __FUNCTION__);
 
-	ASSERT(self != NULL, return -1;);
+	IRDA_ASSERT(self != NULL, return -1;);
 
 	iobase = self->io.fir_base;
 
@@ -565,7 +564,7 @@ static int via_ircc_read_dongle_id(int iobase)
 {
 	int dongle_id = 9;	/* Default to IBM */
 
-	ERROR("via-ircc: dongle probing not supported, please specify dongle_id module parameter.\n");
+	IRDA_ERROR("via-ircc: dongle probing not supported, please specify dongle_id module parameter.\n");
 	return dongle_id;
 }
 
@@ -707,8 +706,8 @@ static void via_ircc_change_dongle_speed(int iobase, int speed,
 		break;
 
 	default:
-		ERROR("%s: Error: dongle_id %d unsupported !\n",
-		      __FUNCTION__, dongle_id);
+		IRDA_ERROR("%s: Error: dongle_id %d unsupported !\n",
+			   __FUNCTION__, dongle_id);
 	}
 }
 
@@ -826,7 +825,7 @@ static int via_ircc_hard_xmit_sir(struct sk_buff *skb,
 	__u32 speed;
 
 	self = (struct via_ircc_cb *) dev->priv;
-	ASSERT(self != NULL, return 0;);
+	IRDA_ASSERT(self != NULL, return 0;);
 	iobase = self->io.fir_base;
 
 	netif_stop_queue(dev);
@@ -923,8 +922,8 @@ static int via_ircc_hard_xmit_fir(struct sk_buff *skb,
 
 	self->tx_fifo.tail += skb->len;
 	self->stats.tx_bytes += skb->len;
-	memcpy(self->tx_fifo.queue[self->tx_fifo.free].start, skb->data,
-	       skb->len);
+	skb_copy_from_linear_data(skb,
+		      self->tx_fifo.queue[self->tx_fifo.free].start, skb->len);
 	self->tx_fifo.len++;
 	self->tx_fifo.free++;
 //F01   if (self->tx_fifo.len == 1) {
@@ -1123,7 +1122,7 @@ static int via_ircc_dma_receive_complete(struct via_ircc_cb *self,
 		self->stats.rx_bytes += len;
 		self->stats.rx_packets++;
 		skb->dev = self->netdev;
-		skb->mac.raw = skb->data;
+		skb_reset_mac_header(skb);
 		skb->protocol = htons(ETH_P_IRDA);
 		netif_rx(skb);
 		return TRUE;
@@ -1187,7 +1186,7 @@ F01_E */
 		skb_reserve(skb, 1);
 		skb_put(skb, len - 4);
 
-		memcpy(skb->data, self->rx_buff.data, len - 4);
+		skb_copy_to_linear_data(skb, self->rx_buff.data, len - 4);
 		IRDA_DEBUG(2, "%s(): len=%x.rx_buff=%p\n", __FUNCTION__,
 			   len - 4, self->rx_buff.data);
 
@@ -1196,7 +1195,7 @@ F01_E */
 		self->stats.rx_bytes += len;
 		self->stats.rx_packets++;
 		skb->dev = self->netdev;
-		skb->mac.raw = skb->data;
+		skb_reset_mac_header(skb);
 		skb->protocol = htons(ETH_P_IRDA);
 		netif_rx(skb);
 
@@ -1220,14 +1219,19 @@ static int upload_rxdata(struct via_ircc_cb *self, int iobase)
 
 	IRDA_DEBUG(2, "%s(): len=%x\n", __FUNCTION__, len);
 
+	if ((len - 4) < 2) {
+		self->stats.rx_dropped++;
+		return FALSE;
+	}
+
 	skb = dev_alloc_skb(len + 1);
-	if ((skb == NULL) || ((len - 4) < 2)) {
+	if (skb == NULL) {
 		self->stats.rx_dropped++;
 		return FALSE;
 	}
 	skb_reserve(skb, 1);
 	skb_put(skb, len - 4 + 1);
-	memcpy(skb->data, self->rx_buff.data, len - 4 + 1);
+	skb_copy_to_linear_data(skb, self->rx_buff.data, len - 4 + 1);
 	st_fifo->tail++;
 	st_fifo->len++;
 	if (st_fifo->tail > MAX_RX_WINDOW)
@@ -1237,7 +1241,7 @@ static int upload_rxdata(struct via_ircc_cb *self, int iobase)
 	self->stats.rx_bytes += len;
 	self->stats.rx_packets++;
 	skb->dev = self->netdev;
-	skb->mac.raw = skb->data;
+	skb_reset_mac_header(skb);
 	skb->protocol = htons(ETH_P_IRDA);
 	netif_rx(skb);
 	if (st_fifo->len < (MAX_RX_WINDOW + 2)) {
@@ -1296,7 +1300,7 @@ static int RxTimerHandler(struct via_ircc_cb *self, int iobase)
 			}
 			skb_reserve(skb, 1);
 			skb_put(skb, len - 4);
-			memcpy(skb->data, self->rx_buff.data, len - 4);
+			skb_copy_to_linear_data(skb, self->rx_buff.data, len - 4);
 
 			IRDA_DEBUG(2, "%s(): len=%x.head=%x\n", __FUNCTION__,
 				   len - 4, st_fifo->head);
@@ -1306,7 +1310,7 @@ static int RxTimerHandler(struct via_ircc_cb *self, int iobase)
 			self->stats.rx_bytes += len;
 			self->stats.rx_packets++;
 			skb->dev = self->netdev;
-			skb->mac.raw = skb->data;
+			skb_reset_mac_header(skb);
 			skb->protocol = htons(ETH_P_IRDA);
 			netif_rx(skb);
 		}		//while
@@ -1337,13 +1341,12 @@ static int RxTimerHandler(struct via_ircc_cb *self, int iobase)
 
 
 /*
- * Function via_ircc_interrupt (irq, dev_id, regs)
+ * Function via_ircc_interrupt (irq, dev_id)
  *
  *    An interrupt from the chip has arrived. Time to do some work
  *
  */
-static irqreturn_t via_ircc_interrupt(int irq, void *dev_id,
-				      struct pt_regs *regs)
+static irqreturn_t via_ircc_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	struct via_ircc_cb *self;
@@ -1351,8 +1354,8 @@ static irqreturn_t via_ircc_interrupt(int irq, void *dev_id,
 	u8 iHostIntType, iRxIntType, iTxIntType;
 
 	if (!dev) {
-		WARNING("%s: irq %d for unknown device.\n", driver_name,
-			irq);
+		IRDA_WARNING("%s: irq %d for unknown device.\n", driver_name,
+			     irq);
 		return IRQ_NONE;
 	}
 	self = (struct via_ircc_cb *) dev->priv;
@@ -1498,7 +1501,7 @@ static int via_ircc_is_receiving(struct via_ircc_cb *self)
 	int status = FALSE;
 	int iobase;
 
-	ASSERT(self != NULL, return FALSE;);
+	IRDA_ASSERT(self != NULL, return FALSE;);
 
 	iobase = self->io.fir_base;
 	if (CkRxRecv(iobase, self))
@@ -1524,14 +1527,14 @@ static int via_ircc_net_open(struct net_device *dev)
 
 	IRDA_DEBUG(3, "%s()\n", __FUNCTION__);
 
-	ASSERT(dev != NULL, return -1;);
+	IRDA_ASSERT(dev != NULL, return -1;);
 	self = (struct via_ircc_cb *) dev->priv;
 	self->stats.rx_packets = 0;
-	ASSERT(self != NULL, return 0;);
+	IRDA_ASSERT(self != NULL, return 0;);
 	iobase = self->io.fir_base;
 	if (request_irq(self->io.irq, via_ircc_interrupt, 0, dev->name, dev)) {
-		WARNING("%s, unable to allocate irq=%d\n", driver_name,
-			self->io.irq);
+		IRDA_WARNING("%s, unable to allocate irq=%d\n", driver_name,
+			     self->io.irq);
 		return -EAGAIN;
 	}
 	/*
@@ -1539,15 +1542,15 @@ static int via_ircc_net_open(struct net_device *dev)
 	 * failure.
 	 */
 	if (request_dma(self->io.dma, dev->name)) {
-		WARNING("%s, unable to allocate dma=%d\n", driver_name,
-			self->io.dma);
+		IRDA_WARNING("%s, unable to allocate dma=%d\n", driver_name,
+			     self->io.dma);
 		free_irq(self->io.irq, self);
 		return -EAGAIN;
 	}
 	if (self->io.dma2 != self->io.dma) {
 		if (request_dma(self->io.dma2, dev->name)) {
-			WARNING("%s, unable to allocate dma2=%d\n",
-				driver_name, self->io.dma2);
+			IRDA_WARNING("%s, unable to allocate dma2=%d\n",
+				     driver_name, self->io.dma2);
 			free_irq(self->io.irq, self);
 			return -EAGAIN;
 		}
@@ -1590,9 +1593,9 @@ static int via_ircc_net_close(struct net_device *dev)
 
 	IRDA_DEBUG(3, "%s()\n", __FUNCTION__);
 
-	ASSERT(dev != NULL, return -1;);
+	IRDA_ASSERT(dev != NULL, return -1;);
 	self = (struct via_ircc_cb *) dev->priv;
-	ASSERT(self != NULL, return 0;);
+	IRDA_ASSERT(self != NULL, return 0;);
 
 	/* Stop device */
 	netif_stop_queue(dev);
@@ -1627,9 +1630,9 @@ static int via_ircc_net_ioctl(struct net_device *dev, struct ifreq *rq,
 	unsigned long flags;
 	int ret = 0;
 
-	ASSERT(dev != NULL, return -1;);
+	IRDA_ASSERT(dev != NULL, return -1;);
 	self = dev->priv;
-	ASSERT(self != NULL, return -1;);
+	IRDA_ASSERT(self != NULL, return -1;);
 	IRDA_DEBUG(1, "%s(), %s, (cmd=0x%X)\n", __FUNCTION__, dev->name,
 		   cmd);
 	/* Disable interrupts & save flags */

@@ -8,7 +8,6 @@
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  */
-#include <linux/config.h>
 #include <asm/processor.h>
 #include <asm/cache.h>
 #include <asm/errno.h>
@@ -65,9 +64,9 @@
 	.stabs	"arch/ppc/lib/",N_SO,0,0,0f
 	.stabs	"string.S",N_SO,0,0,0f
 
-CACHELINE_BYTES = L1_CACHE_LINE_SIZE
-LG_CACHELINE_BYTES = LG_L1_CACHE_LINE_SIZE
-CACHELINE_MASK = (L1_CACHE_LINE_SIZE-1)
+CACHELINE_BYTES = L1_CACHE_BYTES
+LG_CACHELINE_BYTES = L1_CACHE_SHIFT
+CACHELINE_MASK = (L1_CACHE_BYTES-1)
 
 _GLOBAL(strcpy)
 	addi	r5,r3,-1
@@ -265,12 +264,12 @@ _GLOBAL(cacheable_memcpy)
 	dcbz	r11,r6
 #endif
 	COPY_16_BYTES
-#if L1_CACHE_LINE_SIZE >= 32
+#if L1_CACHE_BYTES >= 32
 	COPY_16_BYTES
-#if L1_CACHE_LINE_SIZE >= 64
+#if L1_CACHE_BYTES >= 64
 	COPY_16_BYTES
 	COPY_16_BYTES
-#if L1_CACHE_LINE_SIZE >= 128
+#if L1_CACHE_BYTES >= 128
 	COPY_16_BYTES
 	COPY_16_BYTES
 	COPY_16_BYTES
@@ -446,6 +445,7 @@ _GLOBAL(__copy_tofrom_user)
 #ifdef CONFIG_8xx
 	/* Don't use prefetch on 8xx */
 	mtctr	r0
+	li	r0,0
 53:	COPY_16_BYTES_WITHEX(0)
 	bdnz	53b
 
@@ -484,12 +484,12 @@ _GLOBAL(__copy_tofrom_user)
 	.text
 /* the main body of the cacheline loop */
 	COPY_16_BYTES_WITHEX(0)
-#if L1_CACHE_LINE_SIZE >= 32
+#if L1_CACHE_BYTES >= 32
 	COPY_16_BYTES_WITHEX(1)
-#if L1_CACHE_LINE_SIZE >= 64
+#if L1_CACHE_BYTES >= 64
 	COPY_16_BYTES_WITHEX(2)
 	COPY_16_BYTES_WITHEX(3)
-#if L1_CACHE_LINE_SIZE >= 128
+#if L1_CACHE_BYTES >= 128
 	COPY_16_BYTES_WITHEX(4)
 	COPY_16_BYTES_WITHEX(5)
 	COPY_16_BYTES_WITHEX(6)
@@ -543,12 +543,12 @@ _GLOBAL(__copy_tofrom_user)
  * 104f (if in read part) or 105f (if in write part), after updating r5
  */
 	COPY_16_BYTES_EXCODE(0)
-#if L1_CACHE_LINE_SIZE >= 32
+#if L1_CACHE_BYTES >= 32
 	COPY_16_BYTES_EXCODE(1)
-#if L1_CACHE_LINE_SIZE >= 64
+#if L1_CACHE_BYTES >= 64
 	COPY_16_BYTES_EXCODE(2)
 	COPY_16_BYTES_EXCODE(3)
-#if L1_CACHE_LINE_SIZE >= 128
+#if L1_CACHE_BYTES >= 128
 	COPY_16_BYTES_EXCODE(4)
 	COPY_16_BYTES_EXCODE(5)
 	COPY_16_BYTES_EXCODE(6)
@@ -564,7 +564,9 @@ _GLOBAL(__copy_tofrom_user)
 /* or write fault in cacheline loop */
 105:	li	r9,1
 92:	li	r3,LG_CACHELINE_BYTES
-	b	99f
+	mfctr	r8
+	add	r0,r0,r8
+	b	106f
 /* read fault in final word loop */
 108:	li	r9,0
 	b	93f
@@ -585,7 +587,7 @@ _GLOBAL(__copy_tofrom_user)
  * r5 + (ctr << r3), and r9 is 0 for read or 1 for write.
  */
 99:	mfctr	r0
-	slw	r3,r0,r3
+106:	slw	r3,r0,r3
 	add.	r3,r3,r5
 	beq	120f			/* shouldn't happen */
 	cmpwi	0,r9,0

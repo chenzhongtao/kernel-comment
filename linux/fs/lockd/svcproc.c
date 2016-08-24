@@ -7,7 +7,6 @@
  * Copyright (C) 1996, Olaf Kirch <okir@monad.swb.de>
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/time.h>
 #include <linux/slab.h>
@@ -22,12 +21,9 @@
 
 #define NLMDBG_FACILITY		NLMDBG_CLIENT
 
-static u32	nlmsvc_callback(struct svc_rqst *, u32, struct nlm_res *);
-static void	nlmsvc_callback_exit(struct rpc_task *);
-
 #ifdef CONFIG_LOCKD_V4
-static u32
-cast_to_nlm(u32 status, u32 vers)
+static __be32
+cast_to_nlm(__be32 status, u32 vers)
 {
 	/* Note: status is assumed to be in network byte order !!! */
 	if (vers != 4){
@@ -37,6 +33,7 @@ cast_to_nlm(u32 status, u32 vers)
 		case nlm_lck_denied_nolocks:
 		case nlm_lck_blocked:
 		case nlm_lck_denied_grace_period:
+		case nlm_drop_reply:
 			break;
 		case nlm4_deadlock:
 			status = nlm_lck_denied;
@@ -56,22 +53,22 @@ cast_to_nlm(u32 status, u32 vers)
 /*
  * Obtain client and file from arguments
  */
-static u32
+static __be32
 nlmsvc_retrieve_args(struct svc_rqst *rqstp, struct nlm_args *argp,
 			struct nlm_host **hostp, struct nlm_file **filp)
 {
 	struct nlm_host		*host = NULL;
 	struct nlm_file		*file = NULL;
 	struct nlm_lock		*lock = &argp->lock;
-	u32			error;
+	__be32			error = 0;
 
 	/* nfsd callbacks must have been installed for this procedure */
 	if (!nlmsvc_ops)
 		return nlm_lck_denied_nolocks;
 
 	/* Obtain host handle */
-	if (!(host = nlmsvc_lookup_host(rqstp))
-	 || (argp->monitor && !host->h_monitored && nsm_monitor(host) < 0))
+	if (!(host = nlmsvc_lookup_host(rqstp, lock->caller, lock->len))
+	 || (argp->monitor && nsm_monitor(host) < 0))
 		goto no_locks;
 	*hostp = host;
 
@@ -92,13 +89,15 @@ nlmsvc_retrieve_args(struct svc_rqst *rqstp, struct nlm_args *argp,
 no_locks:
 	if (host)
 		nlm_release_host(host);
+	if (error)
+		return error;
 	return nlm_lck_denied_nolocks;
 }
 
 /*
  * NULL: Test for presence of service
  */
-static int
+static __be32
 nlmsvc_proc_null(struct svc_rqst *rqstp, void *argp, void *resp)
 {
 	dprintk("lockd: NULL          called\n");
@@ -108,7 +107,7 @@ nlmsvc_proc_null(struct svc_rqst *rqstp, void *argp, void *resp)
 /*
  * TEST: Check for conflicting lock
  */
-static int
+static __be32
 nlmsvc_proc_test(struct svc_rqst *rqstp, struct nlm_args *argp,
 				         struct nlm_res  *resp)
 {
@@ -126,10 +125,12 @@ nlmsvc_proc_test(struct svc_rqst *rqstp, struct nlm_args *argp,
 
 	/* Obtain client and file */
 	if ((resp->status = nlmsvc_retrieve_args(rqstp, argp, &host, &file)))
-		return rpc_success;
+		return resp->status == nlm_drop_reply ? rpc_drop_reply :rpc_success;
 
 	/* Now check for conflicting locks */
-	resp->status = cast_status(nlmsvc_testlock(file, &argp->lock, &resp->lock));
+	resp->status = cast_status(nlmsvc_testlock(rqstp, file, &argp->lock, &resp->lock, &resp->cookie));
+	if (resp->status == nlm_drop_reply)
+		return rpc_drop_reply;
 
 	dprintk("lockd: TEST          status %d vers %d\n",
 		ntohl(resp->status), rqstp->rq_vers);
@@ -138,7 +139,7 @@ nlmsvc_proc_test(struct svc_rqst *rqstp, struct nlm_args *argp,
 	return rpc_success;
 }
 
-static int
+static __be32
 nlmsvc_proc_lock(struct svc_rqst *rqstp, struct nlm_args *argp,
 				         struct nlm_res  *resp)
 {
@@ -157,7 +158,7 @@ nlmsvc_proc_lock(struct svc_rqst *rqstp, struct nlm_args *argp,
 
 	/* Obtain client and file */
 	if ((resp->status = nlmsvc_retrieve_args(rqstp, argp, &host, &file)))
-		return rpc_success;
+		return resp->status == nlm_drop_reply ? rpc_drop_reply :rpc_success;
 
 #if 0
 	/* If supplied state doesn't match current state, we assume it's
@@ -174,6 +175,8 @@ nlmsvc_proc_lock(struct svc_rqst *rqstp, struct nlm_args *argp,
 	/* Now try to lock the file */
 	resp->status = cast_status(nlmsvc_lock(rqstp, file, &argp->lock,
 					       argp->block, &argp->cookie));
+	if (resp->status == nlm_drop_reply)
+		return rpc_drop_reply;
 
 	dprintk("lockd: LOCK          status %d\n", ntohl(resp->status));
 	nlm_release_host(host);
@@ -181,7 +184,7 @@ nlmsvc_proc_lock(struct svc_rqst *rqstp, struct nlm_args *argp,
 	return rpc_success;
 }
 
-static int
+static __be32
 nlmsvc_proc_cancel(struct svc_rqst *rqstp, struct nlm_args *argp,
 				           struct nlm_res  *resp)
 {
@@ -200,7 +203,7 @@ nlmsvc_proc_cancel(struct svc_rqst *rqstp, struct nlm_args *argp,
 
 	/* Obtain client and file */
 	if ((resp->status = nlmsvc_retrieve_args(rqstp, argp, &host, &file)))
-		return rpc_success;
+		return resp->status == nlm_drop_reply ? rpc_drop_reply :rpc_success;
 
 	/* Try to cancel request. */
 	resp->status = cast_status(nlmsvc_cancel_blocked(file, &argp->lock));
@@ -214,7 +217,7 @@ nlmsvc_proc_cancel(struct svc_rqst *rqstp, struct nlm_args *argp,
 /*
  * UNLOCK: release a lock
  */
-static int
+static __be32
 nlmsvc_proc_unlock(struct svc_rqst *rqstp, struct nlm_args *argp,
 				           struct nlm_res  *resp)
 {
@@ -233,7 +236,7 @@ nlmsvc_proc_unlock(struct svc_rqst *rqstp, struct nlm_args *argp,
 
 	/* Obtain client and file */
 	if ((resp->status = nlmsvc_retrieve_args(rqstp, argp, &host, &file)))
-		return rpc_success;
+		return resp->status == nlm_drop_reply ? rpc_drop_reply :rpc_success;
 
 	/* Now try to remove the lock */
 	resp->status = cast_status(nlmsvc_unlock(file, &argp->lock));
@@ -248,102 +251,112 @@ nlmsvc_proc_unlock(struct svc_rqst *rqstp, struct nlm_args *argp,
  * GRANTED: A server calls us to tell that a process' lock request
  * was granted
  */
-static int
+static __be32
 nlmsvc_proc_granted(struct svc_rqst *rqstp, struct nlm_args *argp,
 				            struct nlm_res  *resp)
 {
 	resp->cookie = argp->cookie;
 
 	dprintk("lockd: GRANTED       called\n");
-	resp->status = nlmclnt_grant(&argp->lock);
+	resp->status = nlmclnt_grant(svc_addr_in(rqstp), &argp->lock);
 	dprintk("lockd: GRANTED       status %d\n", ntohl(resp->status));
 	return rpc_success;
 }
+
+/*
+ * This is the generic lockd callback for async RPC calls
+ */
+static void nlmsvc_callback_exit(struct rpc_task *task, void *data)
+{
+	dprintk("lockd: %5u callback returned %d\n", task->tk_pid,
+			-task->tk_status);
+}
+
+static void nlmsvc_callback_release(void *data)
+{
+	nlm_release_call(data);
+}
+
+static const struct rpc_call_ops nlmsvc_callback_ops = {
+	.rpc_call_done = nlmsvc_callback_exit,
+	.rpc_release = nlmsvc_callback_release,
+};
 
 /*
  * `Async' versions of the above service routines. They aren't really,
  * because we send the callback before the reply proper. I hope this
  * doesn't break any clients.
  */
-static int
-nlmsvc_proc_test_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
+static __be32 nlmsvc_callback(struct svc_rqst *rqstp, u32 proc, struct nlm_args *argp,
+		__be32 (*func)(struct svc_rqst *, struct nlm_args *, struct nlm_res  *))
+{
+	struct nlm_host	*host;
+	struct nlm_rqst	*call;
+	__be32 stat;
+
+	host = nlmsvc_lookup_host(rqstp,
+				  argp->lock.caller,
+				  argp->lock.len);
+	if (host == NULL)
+		return rpc_system_err;
+
+	call = nlm_alloc_call(host);
+	if (call == NULL)
+		return rpc_system_err;
+
+	stat = func(rqstp, argp, &call->a_res);
+	if (stat != 0) {
+		nlm_release_call(call);
+		return stat;
+	}
+
+	call->a_flags = RPC_TASK_ASYNC;
+	if (nlm_async_reply(call, proc, &nlmsvc_callback_ops) < 0)
+		return rpc_system_err;
+	return rpc_success;
+}
+
+static __be32 nlmsvc_proc_test_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 					     void	     *resp)
 {
-	struct nlm_res	res;
-	u32		stat;
-
 	dprintk("lockd: TEST_MSG      called\n");
-	memset(&res, 0, sizeof(res));
-
-	if ((stat = nlmsvc_proc_test(rqstp, argp, &res)) == 0)
-		stat = nlmsvc_callback(rqstp, NLMPROC_TEST_RES, &res);
-	return stat;
+	return nlmsvc_callback(rqstp, NLMPROC_TEST_RES, argp, nlmsvc_proc_test);
 }
 
-static int
-nlmsvc_proc_lock_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
+static __be32 nlmsvc_proc_lock_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 					     void	     *resp)
 {
-	struct nlm_res	res;
-	u32		stat;
-
 	dprintk("lockd: LOCK_MSG      called\n");
-	memset(&res, 0, sizeof(res));
-
-	if ((stat = nlmsvc_proc_lock(rqstp, argp, &res)) == 0)
-		stat = nlmsvc_callback(rqstp, NLMPROC_LOCK_RES, &res);
-	return stat;
+	return nlmsvc_callback(rqstp, NLMPROC_LOCK_RES, argp, nlmsvc_proc_lock);
 }
 
-static int
-nlmsvc_proc_cancel_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
+static __be32 nlmsvc_proc_cancel_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 					       void	       *resp)
 {
-	struct nlm_res	res;
-	u32		stat;
-
 	dprintk("lockd: CANCEL_MSG    called\n");
-	memset(&res, 0, sizeof(res));
-
-	if ((stat = nlmsvc_proc_cancel(rqstp, argp, &res)) == 0)
-		stat = nlmsvc_callback(rqstp, NLMPROC_CANCEL_RES, &res);
-	return stat;
+	return nlmsvc_callback(rqstp, NLMPROC_CANCEL_RES, argp, nlmsvc_proc_cancel);
 }
 
-static int
+static __be32
 nlmsvc_proc_unlock_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
                                                void            *resp)
 {
-	struct nlm_res	res;
-	u32		stat;
-
 	dprintk("lockd: UNLOCK_MSG    called\n");
-	memset(&res, 0, sizeof(res));
-
-	if ((stat = nlmsvc_proc_unlock(rqstp, argp, &res)) == 0)
-		stat = nlmsvc_callback(rqstp, NLMPROC_UNLOCK_RES, &res);
-	return stat;
+	return nlmsvc_callback(rqstp, NLMPROC_UNLOCK_RES, argp, nlmsvc_proc_unlock);
 }
 
-static int
+static __be32
 nlmsvc_proc_granted_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
                                                 void            *resp)
 {
-	struct nlm_res	res;
-	u32		stat;
-
 	dprintk("lockd: GRANTED_MSG   called\n");
-	memset(&res, 0, sizeof(res));
-
-	if ((stat = nlmsvc_proc_granted(rqstp, argp, &res)) == 0)
-		stat = nlmsvc_callback(rqstp, NLMPROC_GRANTED_RES, &res);
-	return stat;
+	return nlmsvc_callback(rqstp, NLMPROC_GRANTED_RES, argp, nlmsvc_proc_granted);
 }
 
 /*
  * SHARE: create a DOS share or alter existing share.
  */
-static int
+static __be32
 nlmsvc_proc_share(struct svc_rqst *rqstp, struct nlm_args *argp,
 				          struct nlm_res  *resp)
 {
@@ -362,7 +375,7 @@ nlmsvc_proc_share(struct svc_rqst *rqstp, struct nlm_args *argp,
 
 	/* Obtain client and file */
 	if ((resp->status = nlmsvc_retrieve_args(rqstp, argp, &host, &file)))
-		return rpc_success;
+		return resp->status == nlm_drop_reply ? rpc_drop_reply :rpc_success;
 
 	/* Now try to create the share */
 	resp->status = cast_status(nlmsvc_share_file(host, file, argp));
@@ -376,7 +389,7 @@ nlmsvc_proc_share(struct svc_rqst *rqstp, struct nlm_args *argp,
 /*
  * UNSHARE: Release a DOS share.
  */
-static int
+static __be32
 nlmsvc_proc_unshare(struct svc_rqst *rqstp, struct nlm_args *argp,
 				            struct nlm_res  *resp)
 {
@@ -395,7 +408,7 @@ nlmsvc_proc_unshare(struct svc_rqst *rqstp, struct nlm_args *argp,
 
 	/* Obtain client and file */
 	if ((resp->status = nlmsvc_retrieve_args(rqstp, argp, &host, &file)))
-		return rpc_success;
+		return resp->status == nlm_drop_reply ? rpc_drop_reply :rpc_success;
 
 	/* Now try to unshare the file */
 	resp->status = cast_status(nlmsvc_unshare_file(host, file, argp));
@@ -409,7 +422,7 @@ nlmsvc_proc_unshare(struct svc_rqst *rqstp, struct nlm_args *argp,
 /*
  * NM_LOCK: Create an unmonitored lock
  */
-static int
+static __be32
 nlmsvc_proc_nm_lock(struct svc_rqst *rqstp, struct nlm_args *argp,
 				            struct nlm_res  *resp)
 {
@@ -422,7 +435,7 @@ nlmsvc_proc_nm_lock(struct svc_rqst *rqstp, struct nlm_args *argp,
 /*
  * FREE_ALL: Release all locks and shares held by client
  */
-static int
+static __be32
 nlmsvc_proc_free_all(struct svc_rqst *rqstp, struct nlm_args *argp,
 					     void            *resp)
 {
@@ -440,41 +453,29 @@ nlmsvc_proc_free_all(struct svc_rqst *rqstp, struct nlm_args *argp,
 /*
  * SM_NOTIFY: private callback from statd (not part of official NLM proto)
  */
-static int
+static __be32
 nlmsvc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 					      void	        *resp)
 {
-	struct sockaddr_in	saddr = rqstp->rq_addr;
-	int			vers = argp->vers;
-	int			prot = argp->proto >> 1;
-	struct nlm_host		*host;
+	struct sockaddr_in	saddr;
+
+	memcpy(&saddr, svc_addr_in(rqstp), sizeof(saddr));
 
 	dprintk("lockd: SM_NOTIFY     called\n");
 	if (saddr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)
 	 || ntohs(saddr.sin_port) >= 1024) {
-		printk(KERN_WARNING
-			"lockd: rejected NSM callback from %08x:%d\n",
-			ntohl(rqstp->rq_addr.sin_addr.s_addr),
-			ntohs(rqstp->rq_addr.sin_port));
+		char buf[RPC_MAX_ADDRBUFLEN];
+		printk(KERN_WARNING "lockd: rejected NSM callback from %s\n",
+				svc_print_addr(rqstp, buf, sizeof(buf)));
 		return rpc_system_err;
 	}
 
 	/* Obtain the host pointer for this NFS server and try to
 	 * reclaim all locks we hold on this server.
 	 */
+	memset(&saddr, 0, sizeof(saddr));
 	saddr.sin_addr.s_addr = argp->addr;
-	if ((argp->proto & 1)==0) {
-		if ((host = nlmclnt_lookup_host(&saddr, prot, vers)) != NULL) {
-			nlmclnt_recovery(host, argp->state);
-			nlm_release_host(host);
-		}
-	} else {
-		/* If we run on an NFS server, delete all locks held by the client */
-		if ((host = nlm_lookup_host(1, &saddr, prot, vers)) != NULL) {
-			nlmsvc_free_host_resources(host);
-			nlm_release_host(host);
-		}
-	}
+	nlm_host_rebooted(&saddr, argp->mon, argp->len, argp->state);
 
 	return rpc_success;
 }
@@ -482,7 +483,7 @@ nlmsvc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 /*
  * client sent a GRANTED_RES, let's remove the associated block
  */
-static int
+static __be32
 nlmsvc_proc_granted_res(struct svc_rqst *rqstp, struct nlm_res  *argp,
                                                 void            *resp)
 {
@@ -491,54 +492,8 @@ nlmsvc_proc_granted_res(struct svc_rqst *rqstp, struct nlm_res  *argp,
 
 	dprintk("lockd: GRANTED_RES   called\n");
 
-	nlmsvc_grant_reply(rqstp, &argp->cookie, argp->status);
+	nlmsvc_grant_reply(&argp->cookie, argp->status);
 	return rpc_success;
-}
-
-/*
- * This is the generic lockd callback for async RPC calls
- */
-static u32
-nlmsvc_callback(struct svc_rqst *rqstp, u32 proc, struct nlm_res *resp)
-{
-	struct nlm_host	*host;
-	struct nlm_rqst	*call;
-
-	if (!(call = nlmclnt_alloc_call()))
-		return rpc_system_err;
-
-	host = nlmclnt_lookup_host(&rqstp->rq_addr,
-				rqstp->rq_prot, rqstp->rq_vers);
-	if (!host) {
-		kfree(call);
-		return rpc_system_err;
-	}
-
-	call->a_flags = RPC_TASK_ASYNC;
-	call->a_host  = host;
-	memcpy(&call->a_args, resp, sizeof(*resp));
-
-	if (nlmsvc_async_call(call, proc, nlmsvc_callback_exit) < 0)
-		goto error;
-
-	return rpc_success;
- error:
-	nlm_release_host(host);
-	kfree(call);
-	return rpc_system_err;
-}
-
-static void
-nlmsvc_callback_exit(struct rpc_task *task)
-{
-	struct nlm_rqst	*call = (struct nlm_rqst *) task->tk_calldata;
-
-	if (task->tk_status < 0) {
-		dprintk("lockd: %4d callback failed (errno = %d)\n",
-					task->tk_pid, -task->tk_status);
-	}
-	nlm_release_host(call->a_host);
-	kfree(call);
 }
 
 /*

@@ -2,19 +2,25 @@
 #define ASMARM_PCI_H
 
 #ifdef __KERNEL__
-#include <linux/config.h>
 #include <asm-generic/pci-dma-compat.h>
 
 #include <asm/hardware.h> /* for PCIBIOS_MIN_* */
 
 #define pcibios_scan_all_fns(a, b)	0
 
+#ifdef CONFIG_PCI_HOST_ITE8152
+/* ITE bridge requires setting latency timer to avoid early bus access
+   termination by PIC bus mater devices
+*/
+extern void pcibios_set_master(struct pci_dev *dev);
+#else
 static inline void pcibios_set_master(struct pci_dev *dev)
 {
 	/* No special bus mastering setup handling */
 }
+#endif
 
-static inline void pcibios_penalize_isa_irq(int irq)
+static inline void pcibios_penalize_isa_irq(int irq, int active)
 {
 	/* We don't do dynamic PCI IRQ allocation */
 }
@@ -27,11 +33,6 @@ static inline void pcibios_penalize_isa_irq(int irq)
 #define PCI_DMA_BUS_IS_PHYS     (0)
 
 /*
- * We don't support DAC DMA cycles.
- */
-#define pci_dac_dma_supported(pci_dev, mask)	(0)
-
-/*
  * Whether pci_unmap_{single,page} is a nop depends upon the
  * configuration.
  */
@@ -42,6 +43,16 @@ static inline void pcibios_penalize_isa_irq(int irq)
 #define pci_unmap_len(PTR, LEN_NAME)		((PTR)->LEN_NAME)
 #define pci_unmap_len_set(PTR, LEN_NAME, VAL)	(((PTR)->LEN_NAME) = (VAL))
 
+#ifdef CONFIG_PCI
+static inline void pci_dma_burst_advice(struct pci_dev *pdev,
+					enum pci_dma_burst_strategy *strat,
+					unsigned long *strategy_parameter)
+{
+	*strat = PCI_DMA_BURST_INFINITY;
+	*strategy_parameter = ~0UL;
+}
+#endif
+
 #define HAVE_PCI_MMAP
 extern int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
                                enum pci_mmap_state mmap_state, int write_combine);
@@ -50,8 +61,21 @@ extern void
 pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
 			 struct resource *res);
 
-static inline void pcibios_add_platform_entries(struct pci_dev *dev)
+extern void
+pcibios_bus_to_resource(struct pci_dev *dev, struct resource *res,
+			struct pci_bus_region *region);
+
+static inline struct resource *
+pcibios_select_root(struct pci_dev *pdev, struct resource *res)
 {
+	struct resource *root = NULL;
+
+	if (res->flags & IORESOURCE_IO)
+		root = &ioport_resource;
+	if (res->flags & IORESOURCE_MEM)
+		root = &iomem_resource;
+
+	return root;
 }
 
 #endif /* __KERNEL__ */

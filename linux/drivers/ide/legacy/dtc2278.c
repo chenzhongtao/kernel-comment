@@ -4,10 +4,7 @@
  *  Copyright (C) 1996  Linus Torvalds & author (see below)
  */
 
-#undef REALLY_SLOW_IO           /* most systems can safely undef this */
-
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
@@ -70,22 +67,24 @@ static void sub22 (char b, char c)
 	}
 }
 
-static void tune_dtc2278 (ide_drive_t *drive, u8 pio)
+static DEFINE_SPINLOCK(dtc2278_lock);
+
+static void dtc2278_set_pio_mode(ide_drive_t *drive, const u8 pio)
 {
 	unsigned long flags;
 
-	pio = ide_get_best_pio_mode(drive, pio, 4, NULL);
-
 	if (pio >= 3) {
-		spin_lock_irqsave(&ide_lock, flags);
+		spin_lock_irqsave(&dtc2278_lock, flags);
 		/*
 		 * This enables PIO mode4 (3?) on the first interface
 		 */
 		sub22(1,0xc3);
 		sub22(0,0xa0);
-		spin_unlock_irqrestore(&ide_lock, flags);
+		spin_unlock_irqrestore(&dtc2278_lock, flags);
 	} else {
 		/* we don't know how to set it back again.. */
+		/* Actually we do - there is a data sheet available for the
+		   Winbond but does anyone actually care */
 	}
 
 	/*
@@ -95,10 +94,11 @@ static void tune_dtc2278 (ide_drive_t *drive, u8 pio)
 	HWIF(drive)->drives[!drive->select.b.unit].io_32bit = 1;
 }
 
-static int __init probe_dtc2278(void)
+static int __init dtc2278_probe(void)
 {
 	unsigned long flags;
 	ide_hwif_t *hwif, *mate;
+	static u8 idx[4] = { 0, 1, 0xff, 0xff };
 
 	hwif = &ide_hwifs[0];
 	mate = &ide_hwifs[1];
@@ -126,30 +126,37 @@ static int __init probe_dtc2278(void)
 
 	hwif->serialized = 1;
 	hwif->chipset = ide_dtc2278;
-	hwif->tuneproc = &tune_dtc2278;
+	hwif->pio_mask = ATA_PIO4;
+	hwif->set_pio_mode = &dtc2278_set_pio_mode;
 	hwif->drives[0].no_unmask = 1;
 	hwif->drives[1].no_unmask = 1;
 	hwif->mate = mate;
 
 	mate->serialized = 1;
 	mate->chipset = ide_dtc2278;
+	mate->pio_mask = ATA_PIO4;
 	mate->drives[0].no_unmask = 1;
 	mate->drives[1].no_unmask = 1;
 	mate->mate = hwif;
 	mate->channel = 1;
 
-	probe_hwif_init(hwif);
-	probe_hwif_init(mate);
-
-	create_proc_ide_interfaces();
+	ide_device_add(idx);
 
 	return 0;
 }
 
+int probe_dtc2278 = 0;
+
+module_param_named(probe, probe_dtc2278, bool, 0);
+MODULE_PARM_DESC(probe, "probe for DTC2278xx chipsets");
+
 /* Can be called directly from ide.c. */
 int __init dtc2278_init(void)
 {
-	if (probe_dtc2278()) {
+	if (probe_dtc2278 == 0)
+		return -ENODEV;
+
+	if (dtc2278_probe()) {
 		printk(KERN_ERR "dtc2278: ide interfaces already in use!\n");
 		return -EBUSY;
 	}

@@ -16,7 +16,6 @@ struct r10_private_data_s {
 	mddev_t			*mddev;
 	mirror_info_t		*mirrors;
 	int			raid_disks;
-	int			working_disks;
 	spinlock_t		device_lock;
 
 	/* geometry */
@@ -24,29 +23,42 @@ struct r10_private_data_s {
 	int 			far_copies;   /* number of copies layed out
 					       * at large strides across drives
 					       */
+	int			far_offset;   /* far_copies are offset by 1 stripe
+					       * instead of many
+					       */
 	int			copies;	      /* near_copies * far_copies.
 					       * must be <= raid_disks
 					       */
 	sector_t		stride;	      /* distance between far copies.
-					       * This is size / far_copies
+					       * This is size / far_copies unless
+					       * far_offset, in which case it is
+					       * 1 stripe.
 					       */
 
 	int chunk_shift; /* shift from chunks to sectors */
 	sector_t chunk_mask;
 
 	struct list_head	retry_list;
-	/* for use when syncing mirrors: */
+	/* queue pending writes and submit them on unplug */
+	struct bio_list		pending_bio_list;
+
 
 	spinlock_t		resync_lock;
 	int nr_pending;
+	int nr_waiting;
+	int nr_queued;
 	int barrier;
 	sector_t		next_resync;
+	int			fullsync;  /* set to 1 if a full sync is needed,
+					    * (fresh device added).
+					    * Cleared when a sync completes.
+					    */
 
-	wait_queue_head_t	wait_idle;
-	wait_queue_head_t	wait_resume;
+	wait_queue_head_t	wait_barrier;
 
 	mempool_t *r10bio_pool;
 	mempool_t *r10buf_pool;
+	struct page		*tmppage;
 };
 
 typedef struct r10_private_data_s conf_t;
@@ -96,8 +108,16 @@ struct r10bio_s {
 	} devs[0];
 };
 
+/* when we get a read error on a read-only array, we redirect to another
+ * device without failing the first device, or trying to over-write to
+ * correct the read error.  To keep track of bad blocks on a per-bio
+ * level, we store IO_BLOCKED in the appropriate 'bios' pointer
+ */
+#define IO_BLOCKED ((struct bio*)1)
+
 /* bits for r10bio.state */
 #define	R10BIO_Uptodate	0
 #define	R10BIO_IsSync	1
 #define	R10BIO_IsRecover 2
+#define	R10BIO_Degraded 3
 #endif

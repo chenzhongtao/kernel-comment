@@ -28,9 +28,9 @@ typedef __signed__ int __s32;
 typedef unsigned int __u32;
 
 #ifndef __s390x__
-#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
-typedef __signed__ long long __s64;
-typedef unsigned long long __u64;
+#if defined(__GNUC__)
+__extension__ typedef __signed__ long long __s64;
+__extension__ typedef unsigned long long __u64;
 #endif
 #else /* __s390x__ */
 typedef __signed__ long __s64;
@@ -58,7 +58,6 @@ typedef __signed__ long saddr_t;
 
 #ifndef __ASSEMBLY__
 
-#include <linux/config.h>
 
 typedef signed char s8;
 typedef unsigned char u8;
@@ -79,8 +78,6 @@ typedef unsigned  long u64;
 
 typedef u32 dma_addr_t;
 
-typedef unsigned int kmem_bufctl_t;
-
 #ifndef __s390x__
 typedef union {
 	unsigned long long pair;
@@ -89,11 +86,6 @@ typedef union {
 		unsigned long odd;
 	} subreg;
 } register_pair;
-
-#ifdef CONFIG_LBD
-typedef u64 sector_t;
-#define HAVE_SECTOR_T
-#endif
 
 #endif /* ! __s390x__   */
 #endif /* __ASSEMBLY__  */

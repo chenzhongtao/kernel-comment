@@ -6,20 +6,8 @@
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
 
-#include <linux/time.h>
-#include <linux/iso_fs.h>
-#include <linux/kernel.h>
-#include <linux/string.h>
-#include <linux/stat.h>
-#include <linux/fcntl.h>
-#include <linux/mm.h>
-#include <linux/errno.h>
-#include <linux/config.h>	/* Joliet? */
 #include <linux/smp_lock.h>
-#include <linux/buffer_head.h>
-#include <linux/dcache.h>
-
-#include <asm/uaccess.h>
+#include "isofs.h"
 
 /*
  * ok, we cannot use strncmp, as the name is not in our data space.
@@ -27,7 +15,7 @@
  * some sanity tests.
  */
 static int
-isofs_cmp(struct dentry * dentry, const char * compare, int dlen)
+isofs_cmp(struct dentry *dentry, const char *compare, int dlen)
 {
 	struct qstr qstr;
 
@@ -60,24 +48,24 @@ isofs_cmp(struct dentry * dentry, const char * compare, int dlen)
  */
 static unsigned long
 isofs_find_entry(struct inode *dir, struct dentry *dentry,
-	unsigned long *block_rv, unsigned long* offset_rv,
-	char * tmpname, struct iso_directory_record * tmpde)
+	unsigned long *block_rv, unsigned long *offset_rv,
+	char *tmpname, struct iso_directory_record *tmpde)
 {
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(dir);
 	unsigned char bufbits = ISOFS_BUFFER_BITS(dir);
 	unsigned long block, f_pos, offset, block_saved, offset_saved;
-	struct buffer_head * bh = NULL;
+	struct buffer_head *bh = NULL;
 	struct isofs_sb_info *sbi = ISOFS_SB(dir->i_sb);
 
 	if (!ISOFS_I(dir)->i_first_extent)
 		return 0;
-  
+
 	f_pos = 0;
 	offset = 0;
 	block = 0;
 
 	while (f_pos < dir->i_size) {
-		struct iso_directory_record * de;
+		struct iso_directory_record *de;
 		int de_len, match, i, dlen;
 		char *dpnt;
 
@@ -126,7 +114,7 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 
 		if (sbi->s_rock &&
 		    ((i = get_rock_ridge_filename(de, tmpname, dir)))) {
-			dlen = i; 	/* possibly -1 */
+			dlen = i;	/* possibly -1 */
 			dpnt = tmpname;
 #ifdef CONFIG_JOLIET
 		} else if (sbi->s_joliet_level) {
@@ -142,33 +130,36 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 		}
 
 		/*
-		 * Skip hidden or associated files unless unhide is set 
+		 * Skip hidden or associated files unless hide or showassoc,
+		 * respectively, is set
 		 */
 		match = 0;
 		if (dlen > 0 &&
-		    (!(de->flags[-sbi->s_high_sierra] & 5)
-		     || sbi->s_unhide == 'y'))
-		{
-			match = (isofs_cmp(dentry,dpnt,dlen) == 0);
+			(sbi->s_hide =='n' ||
+				(!(de->flags[-sbi->s_high_sierra] & 1))) &&
+			(sbi->s_showassoc =='y' ||
+				(!(de->flags[-sbi->s_high_sierra] & 4)))) {
+			match = (isofs_cmp(dentry, dpnt, dlen) == 0);
 		}
 		if (match) {
 			isofs_normalize_block_and_offset(de,
 							 &block_saved,
 							 &offset_saved);
-                        *block_rv = block_saved;
-                        *offset_rv = offset_saved;
-			if (bh) brelse(bh);
+			*block_rv = block_saved;
+			*offset_rv = offset_saved;
+			brelse(bh);
 			return 1;
 		}
 	}
-	if (bh) brelse(bh);
+	brelse(bh);
 	return 0;
 }
 
-struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry, struct nameidata *nd)
+struct dentry *isofs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
 	int found;
-	unsigned long block, offset;
+	unsigned long uninitialized_var(block);
+	unsigned long uninitialized_var(offset);
 	struct inode *inode;
 	struct page *page;
 
@@ -180,9 +171,9 @@ struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry, struct n
 
 	lock_kernel();
 	found = isofs_find_entry(dir, dentry,
-				 &block, &offset,
-				 page_address(page),
-				 1024 + page_address(page));
+				&block, &offset,
+				page_address(page),
+				1024 + page_address(page));
 	__free_page(page);
 
 	inode = NULL;
@@ -194,8 +185,5 @@ struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry, struct n
 		}
 	}
 	unlock_kernel();
-	if (inode)
-		return d_splice_alias(inode, dentry);
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 }

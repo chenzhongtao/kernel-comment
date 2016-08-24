@@ -1,13 +1,12 @@
 #ifndef _LINUX_THREADS_H
 #define _LINUX_THREADS_H
 
-#include <linux/config.h>
 
 /*
  * The default limit for the nr of threads is now in
  * /proc/sys/kernel/threads-max.
  */
- 
+
 /*
  * Maximum supported processors that can run under SMP.  This value is
  * set via configure setting.  The maximum is equal to the size of the
@@ -25,11 +24,13 @@
 /*
  * This controls the default maximum pid allocated to a process
  */
-#define PID_MAX_DEFAULT 0x8000
+#define PID_MAX_DEFAULT (CONFIG_BASE_SMALL ? 0x1000 : 0x8000)
 
 /*
- * A maximum of 4 million PIDs should be enough for a while:
+ * A maximum of 4 million PIDs should be enough for a while.
+ * [NOTE: PID/TIDs are limited to 2^29 ~= 500+ million, see futex.h.]
  */
-#define PID_MAX_LIMIT (sizeof(long) > 4 ? 4*1024*1024 : PID_MAX_DEFAULT)
+#define PID_MAX_LIMIT (CONFIG_BASE_SMALL ? PAGE_SIZE * 8 : \
+	(sizeof(long) > 4 ? 4 * 1024 * 1024 : PID_MAX_DEFAULT))
 
 #endif

@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/video/kyro/kyrofb.c
+ *  linux/drivers/video/kyro/fbdev.c
  *
  *  Copyright (C) 2002 STMicroelectronics
  *  Copyright (C) 2003, 2004 Paul Mundt
@@ -9,22 +9,19 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/string.h>
-#include <linux/tty.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/ioctl.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #ifdef CONFIG_MTRR
 #include <asm/mtrr.h>
 #endif
@@ -43,14 +40,14 @@
 #define KHZ2PICOS(a) (1000000000UL/(a))
 
 /****************************************************************************/
-static struct fb_fix_screeninfo kyro_fix __initdata = {
+static struct fb_fix_screeninfo kyro_fix __devinitdata = {
 	.id		= "ST Kyro",
 	.type		= FB_TYPE_PACKED_PIXELS,
 	.visual		= FB_VISUAL_TRUECOLOR,
 	.accel		= FB_ACCEL_NONE,
 };
 
-static struct fb_var_screeninfo kyro_var __initdata = {
+static struct fb_var_screeninfo kyro_var __devinitdata = {
 	/* 640x480, 16bpp @ 60 Hz */
 	.xres		= 640,
 	.yres		= 480,
@@ -73,8 +70,6 @@ static struct fb_var_screeninfo kyro_var __initdata = {
 	.vmode		= FB_VMODE_NONINTERLACED,
 };
 
-static struct kyrofb_info *currentpar;
-
 typedef struct {
 	STG4000REG __iomem *pSTGReg;	/* Virtual address of PCI register region */
 	u32 ulNextFreeVidMem;	/* Offset from start of vid mem to next free region */
@@ -86,18 +81,18 @@ typedef struct {
 /* global graphics card info structure (one per card) */
 static device_info_t deviceInfo;
 
-static char *mode_option __initdata = NULL;
-static int nopan __initdata = 0;
-static int nowrap __initdata = 1;
+static char *mode_option __devinitdata = NULL;
+static int nopan __devinitdata = 0;
+static int nowrap __devinitdata = 1;
 #ifdef CONFIG_MTRR
-static int nomtrr __initdata = 0;
+static int nomtrr __devinitdata = 0;
 #endif
 
 /* PCI driver prototypes */
 static int kyrofb_probe(struct pci_dev *pdev, const struct pci_device_id *ent);
 static void kyrofb_remove(struct pci_dev *pdev);
 
-static struct fb_videomode kyro_modedb[] __initdata = {
+static struct fb_videomode kyro_modedb[] __devinitdata = {
 	{
 		/* 640x350 @ 85Hz */
 		NULL, 85, 640, 350, KHZ2PICOS(31500),
@@ -307,9 +302,9 @@ enum {
 };
 
 /* Accessors */
-int kyro_dev_video_mode_set(struct fb_info *info)
+static int kyro_dev_video_mode_set(struct fb_info *info)
 {
-	struct kyrofb_info *par = (struct kyrofb_info *)info->par;
+	struct kyrofb_info *par = info->par;
 
 	/* Turn off display */
 	StopVTG(deviceInfo.pSTGReg);
@@ -339,8 +334,8 @@ int kyro_dev_video_mode_set(struct fb_info *info)
 	return 0;
 }
 
-int kyro_dev_overlay_create(u32 ulWidth,
-			    u32 ulHeight, int bLinear)
+static int kyro_dev_overlay_create(u32 ulWidth,
+				   u32 ulHeight, int bLinear)
 {
 	u32 offset;
 	u32 stride, uvStride;
@@ -376,7 +371,7 @@ int kyro_dev_overlay_create(u32 ulWidth,
 	return 0;
 }
 
-int kyro_dev_overlay_viewport_set(u32 x, u32 y, u32 ulWidth, u32 ulHeight)
+static int kyro_dev_overlay_viewport_set(u32 x, u32 y, u32 ulWidth, u32 ulHeight)
 {
 	if (deviceInfo.ulOverlayOffset == 0)
 		/* probably haven't called CreateOverlay yet */
@@ -402,7 +397,7 @@ static inline unsigned long get_line_length(int x, int bpp)
 
 static int kyrofb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
-	struct kyrofb_info *par = (struct kyrofb_info *)info->par;
+	struct kyrofb_info *par = info->par;
 
 	if (var->bits_per_pixel != 16 && var->bits_per_pixel != 32) {
 		printk(KERN_WARNING "kyrofb: depth not supported: %u\n", var->bits_per_pixel);
@@ -478,7 +473,7 @@ static int kyrofb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 
 static int kyrofb_set_par(struct fb_info *info)
 {
-	struct kyrofb_info *par = (struct kyrofb_info *)info->par;
+	struct kyrofb_info *par = info->par;
 	unsigned long lineclock;
 	unsigned long frameclock;
 
@@ -536,20 +531,22 @@ static int kyrofb_set_par(struct fb_info *info)
 static int kyrofb_setcolreg(u_int regno, u_int red, u_int green,
 			    u_int blue, u_int transp, struct fb_info *info)
 {
+	struct kyrofb_info *par = info->par;
+
 	if (regno > 255)
 		return 1;	/* Invalid register */
 
 	if (regno < 16) {
 		switch (info->var.bits_per_pixel) {
 		case 16:
-			((u16*)(info->pseudo_palette))[regno] =
+			par->palette[regno] =
 			     (red   & 0xf800) |
 			    ((green & 0xfc00) >> 5) |
 			    ((blue  & 0xf800) >> 11);
 			break;
 		case 32:
 			red >>= 8; green >>= 8; blue >>= 8; transp >>= 8;
-			((u32*)(info->pseudo_palette))[regno] =
+			par->palette[regno] =
 			    (transp << 24) | (red << 16) | (green << 8) | blue;
 			break;
 		}
@@ -558,7 +555,8 @@ static int kyrofb_setcolreg(u_int regno, u_int red, u_int green,
 	return 0;
 }
 
-int __init kyrofb_setup(char *options)
+#ifndef MODULE
+static int __init kyrofb_setup(char *options)
 {
 	char *this_opt;
 
@@ -583,10 +581,10 @@ int __init kyrofb_setup(char *options)
 
 	return 0;
 }
+#endif
 
-static int kyrofb_ioctl(struct inode *inode, struct file *file,
-			unsigned int cmd, unsigned long arg,
-			struct fb_info *info)
+static int kyrofb_ioctl(struct fb_info *info,
+			unsigned int cmd, unsigned long arg)
 {
 	overlay_create ol_create;
 	overlay_viewport_set ol_viewport_set;
@@ -594,7 +592,8 @@ static int kyrofb_ioctl(struct inode *inode, struct file *file,
 
 	switch (cmd) {
 	case KYRO_IOCTL_OVERLAY_CREATE:
-		copy_from_user(&ol_create, argp, sizeof(overlay_create));
+		if (copy_from_user(&ol_create, argp, sizeof(overlay_create)))
+			return -EFAULT;
 
 		if (kyro_dev_overlay_create(ol_create.ulWidth,
 					    ol_create.ulHeight, 0) < 0) {
@@ -604,8 +603,9 @@ static int kyrofb_ioctl(struct inode *inode, struct file *file,
 		}
 		break;
 	case KYRO_IOCTL_OVERLAY_VIEWPORT_SET:
-		copy_from_user(&ol_viewport_set, argp,
-			       sizeof(overlay_viewport_set));
+		if (copy_from_user(&ol_viewport_set, argp,
+			       sizeof(overlay_viewport_set)))
+			return -EFAULT;
 
 		if (kyro_dev_overlay_viewport_set(ol_viewport_set.xOrgin,
 						  ol_viewport_set.yOrgin,
@@ -625,13 +625,16 @@ static int kyrofb_ioctl(struct inode *inode, struct file *file,
 		}
 		break;
 	case KYRO_IOCTL_UVSTRIDE:
-		copy_to_user(argp, &deviceInfo.ulOverlayUVStride, sizeof(unsigned long));
+		if (copy_to_user(argp, &deviceInfo.ulOverlayUVStride, sizeof(unsigned long)))
+			return -EFAULT;
 		break;
 	case KYRO_IOCTL_STRIDE:
-		copy_to_user(argp, &deviceInfo.ulOverlayStride, sizeof(unsigned long));
+		if (copy_to_user(argp, &deviceInfo.ulOverlayStride, sizeof(unsigned long)))
+			return -EFAULT;
 		break;
 	case KYRO_IOCTL_OVERLAY_OFFSET:
-		copy_to_user(argp, &deviceInfo.ulOverlayOffset, sizeof(unsigned long));
+		if (copy_to_user(argp, &deviceInfo.ulOverlayOffset, sizeof(unsigned long)))
+			return -EFAULT;
 		break;
 	}
 
@@ -662,13 +665,13 @@ static struct fb_ops kyrofb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 static int __devinit kyrofb_probe(struct pci_dev *pdev,
 				  const struct pci_device_id *ent)
 {
 	struct fb_info *info;
+	struct kyrofb_info *currentpar;
 	unsigned long size;
 	int err;
 
@@ -677,14 +680,11 @@ static int __devinit kyrofb_probe(struct pci_dev *pdev,
 		return err;
 	}
 
-	size = sizeof(struct fb_info) + sizeof(struct kyrofb_info) + 16 * sizeof(u32);
-	info = kmalloc(size, GFP_KERNEL);
+	info = framebuffer_alloc(sizeof(struct kyrofb_info), &pdev->dev);
 	if (!info)
 		return -ENOMEM;
 
-	memset(info, 0, size);
-
-	currentpar = (struct kyrofb_info *)(info + 1);
+	currentpar = info->par;
 
 	kyro_fix.smem_start = pci_resource_start(pdev, 0);
 	kyro_fix.smem_len   = pci_resource_len(pdev, 0);
@@ -710,8 +710,7 @@ static int __devinit kyrofb_probe(struct pci_dev *pdev,
 
 	info->fbops		= &kyrofb_ops;
 	info->fix		= kyro_fix;
-	info->par		= currentpar;
-	info->pseudo_palette	= (void *)(currentpar + 1);
+	info->pseudo_palette	= currentpar->palette;
 	info->flags		= FBINFO_DEFAULT;
 
 	SetCoreClockPLL(deviceInfo.pSTGReg, pdev);
@@ -735,7 +734,6 @@ static int __devinit kyrofb_probe(struct pci_dev *pdev,
 
 	fb_memset(info->screen_base, 0, size);
 
-	info->device = &pdev->dev;
 	if (register_framebuffer(info) < 0)
 		goto out_unmap;
 
@@ -751,7 +749,7 @@ static int __devinit kyrofb_probe(struct pci_dev *pdev,
 out_unmap:
 	iounmap(currentpar->regbase);
 	iounmap(info->screen_base);
-	kfree(info);
+	framebuffer_release(info);
 
 	return -EINVAL;
 }
@@ -759,7 +757,7 @@ out_unmap:
 static void __devexit kyrofb_remove(struct pci_dev *pdev)
 {
 	struct fb_info *info = pci_get_drvdata(pdev);
-	struct kyrofb_info *par = (struct kyrofb_info *)info->par;
+	struct kyrofb_info *par = info->par;
 
 	/* Reset the board */
 	StopVTG(deviceInfo.pSTGReg);
@@ -783,10 +781,10 @@ static void __devexit kyrofb_remove(struct pci_dev *pdev)
 
 	unregister_framebuffer(info);
 	pci_set_drvdata(pdev, NULL);
-	kfree(info);
+	framebuffer_release(info);
 }
 
-int __init kyrofb_init(void)
+static int __init kyrofb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;
@@ -795,7 +793,7 @@ int __init kyrofb_init(void)
 		return -ENODEV;
 	kyrofb_setup(option);
 #endif
-	return pci_module_init(&kyrofb_pci_driver);
+	return pci_register_driver(&kyrofb_pci_driver);
 }
 
 static void __exit kyrofb_exit(void)

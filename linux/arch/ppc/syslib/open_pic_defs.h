@@ -1,6 +1,4 @@
 /*
- *  arch/ppc/kernel/open_pic_defs.h -- OpenPIC definitions
- *
  *  Copyright (C) 1997 Geert Uytterhoeven
  *
  *  This file is based on the following documentation:
@@ -171,9 +169,6 @@ struct OpenPIC {
      */
     OpenPIC_Processor Processor[OPENPIC_MAX_PROCESSORS];
 };
-
-extern volatile struct OpenPIC __iomem *OpenPIC;
-
 
     /*
      *  Current Task Priority Register

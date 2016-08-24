@@ -21,13 +21,12 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
-#include <linux/bootmem.h>
 #include <linux/module.h>
+#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mpc8260.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/immap_cpm2.h>
 #include <asm/cpm2.h>
 #include <asm/rheap.h>
 
@@ -137,15 +136,14 @@ static void cpm2_dpinit(void)
 	 * varies with the processor and the microcode patches activated.
 	 * But the following should be at least safe.
 	 */
-	rh_attach_region(&cpm_dpmem_info, (void *)CPM_DATAONLY_BASE,
-			CPM_DATAONLY_SIZE);
+	rh_attach_region(&cpm_dpmem_info, CPM_DATAONLY_BASE, CPM_DATAONLY_SIZE);
 }
 
 /* This function returns an index into the DPRAM area.
  */
-uint cpm_dpalloc(uint size, uint align)
+unsigned long cpm_dpalloc(uint size, uint align)
 {
-	void *start;
+	unsigned long start;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cpm_dpmem_lock, flags);
@@ -153,17 +151,17 @@ uint cpm_dpalloc(uint size, uint align)
 	start = rh_alloc(&cpm_dpmem_info, size, "commproc");
 	spin_unlock_irqrestore(&cpm_dpmem_lock, flags);
 
-	return (uint)start;
+	return start;
 }
 EXPORT_SYMBOL(cpm_dpalloc);
 
-int cpm_dpfree(uint offset)
+int cpm_dpfree(unsigned long offset)
 {
 	int ret;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cpm_dpmem_lock, flags);
-	ret = rh_free(&cpm_dpmem_info, (void *)offset);
+	ret = rh_free(&cpm_dpmem_info, offset);
 	spin_unlock_irqrestore(&cpm_dpmem_lock, flags);
 
 	return ret;
@@ -171,17 +169,17 @@ int cpm_dpfree(uint offset)
 EXPORT_SYMBOL(cpm_dpfree);
 
 /* not sure if this is ever needed */
-uint cpm_dpalloc_fixed(uint offset, uint size, uint align)
+unsigned long cpm_dpalloc_fixed(unsigned long offset, uint size, uint align)
 {
-	void *start;
+	unsigned long start;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cpm_dpmem_lock, flags);
 	cpm_dpmem_info.alignment = align;
-	start = rh_alloc_fixed(&cpm_dpmem_info, (void *)offset, size, "commproc");
+	start = rh_alloc_fixed(&cpm_dpmem_info, offset, size, "commproc");
 	spin_unlock_irqrestore(&cpm_dpmem_lock, flags);
 
-	return (uint)start;
+	return start;
 }
 EXPORT_SYMBOL(cpm_dpalloc_fixed);
 
@@ -191,7 +189,7 @@ void cpm_dpdump(void)
 }
 EXPORT_SYMBOL(cpm_dpdump);
 
-void *cpm_dpram_addr(uint offset)
+void *cpm_dpram_addr(unsigned long offset)
 {
 	return (void *)&cpm2_immr->im_dprambase[offset];
 }

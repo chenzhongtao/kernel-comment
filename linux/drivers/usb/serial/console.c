@@ -11,17 +11,15 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/usb.h>
+#include <linux/usb/serial.h>
 
 static int debug;
-
-#include "usb-serial.h"
 
 struct usbcons_info {
 	int			magic;
@@ -54,7 +52,7 @@ static struct console usbcons;
  * serial.c code, except that the specifier is "ttyUSB" instead
  * of "ttyS".
  */
-static int __init usb_console_setup(struct console *co, char *options)
+static int usb_console_setup(struct console *co, char *options)
 {
 	struct usbcons_info *info = &usbcons_info;
 	int baud = 9600;
@@ -67,7 +65,7 @@ static int __init usb_console_setup(struct console *co, char *options)
 	struct usb_serial_port *port;
 	int retval = 0;
 	struct tty_struct *tty;
-	struct termios *termios;
+	struct ktermios *termios;
 
 	dbg ("%s", __FUNCTION__);
 
@@ -166,27 +164,27 @@ static int __init usb_console_setup(struct console *co, char *options)
 	}
 
 	if (serial->type->set_termios) {
+		struct ktermios dummy;
 		/* build up a fake tty structure so that the open call has something
 		 * to look at to get the cflag value */
-		tty = kmalloc (sizeof (*tty), GFP_KERNEL);
+		tty = kzalloc(sizeof(*tty), GFP_KERNEL);
 		if (!tty) {
 			err ("no more memory");
 			return -ENOMEM;
 		}
-		termios = kmalloc (sizeof (*termios), GFP_KERNEL);
+		termios = kzalloc(sizeof(*termios), GFP_KERNEL);
 		if (!termios) {
 			err ("no more memory");
 			kfree (tty);
 			return -ENOMEM;
 		}
-		memset (tty, 0x00, sizeof(*tty));
-		memset (termios, 0x00, sizeof(*termios));
+		memset(&dummy, 0, sizeof(struct ktermios));
 		termios->c_cflag = cflag;
 		tty->termios = termios;
 		port->tty = tty;
 
 		/* set up the initial termios settings */
-		serial->type->set_termios(port, NULL);
+		serial->type->set_termios(port, &dummy);
 		port->tty = NULL;
 		kfree (termios);
 		kfree (tty);
@@ -202,7 +200,7 @@ static void usb_console_write(struct console *co, const char *buf, unsigned coun
 	struct usb_serial *serial;
 	int retval = -ENODEV;
 
-	if (!port)
+	if (!port || port->serial->dev->state == USB_STATE_NOTATTACHED)
 		return;
 	serial = port->serial;
 
@@ -213,17 +211,38 @@ static void usb_console_write(struct console *co, const char *buf, unsigned coun
 
 	if (!port->open_count) {
 		dbg ("%s - port not opened", __FUNCTION__);
-		goto exit;
+		return;
 	}
 
-	/* pass on to the driver specific version of this function if it is available */
-	if (serial->type->write)
-		retval = serial->type->write(port, buf, count);
-	else
-		retval = usb_serial_generic_write(port, buf, count);
-
-exit:
-	dbg("%s - return value (if we had one): %d", __FUNCTION__, retval);
+	while (count) {
+		unsigned int i;
+		unsigned int lf;
+		/* search for LF so we can insert CR if necessary */
+		for (i=0, lf=0 ; i < count ; i++) {
+			if (*(buf + i) == 10) {
+				lf = 1;
+				i++;
+				break;
+			}
+		}
+		/* pass on to the driver specific version of this function if it is available */
+		if (serial->type->write)
+			retval = serial->type->write(port, buf, i);
+		else
+			retval = usb_serial_generic_write(port, buf, i);
+		dbg("%s - return value : %d", __FUNCTION__, retval);
+		if (lf) {
+			/* append CR after LF */
+			unsigned char cr = 13;
+			if (serial->type->write)
+				retval = serial->type->write(port, &cr, 1);
+			else
+				retval = usb_serial_generic_write(port, &cr, 1);
+			dbg("%s - return value : %d", __FUNCTION__, retval);
+		}
+		buf += i;
+		count -= i;
+	}
 }
 
 static struct console usbcons = {
@@ -233,6 +252,14 @@ static struct console usbcons = {
 	.flags =	CON_PRINTBUFFER,
 	.index =	-1,
 };
+
+void usb_serial_console_disconnect(struct usb_serial *serial)
+{
+	if (serial && serial->port && serial->port[0] && serial->port[0] == usbcons_info.port) {
+		usb_serial_console_exit();
+		usb_serial_put(serial);
+	}
+}
 
 void usb_serial_console_init (int serial_debug, int minor)
 {
@@ -259,6 +286,11 @@ void usb_serial_console_init (int serial_debug, int minor)
 
 void usb_serial_console_exit (void)
 {
-	unregister_console(&usbcons);
+	if (usbcons_info.port) {
+		unregister_console(&usbcons);
+		if (usbcons_info.port->open_count)
+			usbcons_info.port->open_count--;
+		usbcons_info.port = NULL;
+	}
 }
 

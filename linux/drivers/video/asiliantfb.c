@@ -29,13 +29,11 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
@@ -46,7 +44,7 @@
 #include <asm/io.h>
 
 /* Built in clock of the 69030 */
-const unsigned Fref = 14318180;
+static const unsigned Fref = 14318180;
 
 #define mmio_base (p->screen_base + 0x400000)
 
@@ -91,11 +89,6 @@ static void mm_write_ar(struct fb_info *p, u8 reg, u8 data)
 }
 #define write_ar(num, val)	mm_write_ar(p, num, val)
 
-/*
- * Exported functions
- */
-int asiliantfb_init(void);
-
 static int asiliantfb_pci_init(struct pci_dev *dp, const struct pci_device_id *);
 static int asiliantfb_check_var(struct fb_var_screeninfo *var,
 				struct fb_info *info);
@@ -111,7 +104,6 @@ static struct fb_ops asiliantfb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 /* Calculate the ratios for the dot clocks without using a single long long
@@ -328,32 +320,29 @@ static int asiliantfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	writeb(green, mmio_base + 0x791);
 	writeb(blue, mmio_base + 0x791);
 
-	switch(p->var.bits_per_pixel) {
-	case 15:
-		if (regno < 16) {
+	if (regno < 16) {
+		switch(p->var.red.offset) {
+		case 10: /* RGB 555 */
 			((u32 *)(p->pseudo_palette))[regno] =
 				((red & 0xf8) << 7) |
 				((green & 0xf8) << 2) |
 				((blue & 0xf8) >> 3);
-		}
-		break;
-	case 16:
-		if (regno < 16) {
+			break;
+		case 11: /* RGB 565 */
 			((u32 *)(p->pseudo_palette))[regno] =
 				((red & 0xf8) << 8) |
 				((green & 0xfc) << 3) |
 				((blue & 0xf8) >> 3);
-		}
-		break;
-	case 24:
-		if (regno < 24) {
+			break;
+		case 16: /* RGB 888 */
 			((u32 *)(p->pseudo_palette))[regno] =
 				(red << 16)  |
 				(green << 8) |
 				(blue);
+			break;
 		}
-		break;
 	}
+
 	return 0;
 }
 
@@ -361,8 +350,6 @@ struct chips_init_reg {
 	unsigned char addr;
 	unsigned char data;
 };
-
-#define N_ELTS(x)	(sizeof(x) / sizeof(x[0]))
 
 static struct chips_init_reg chips_init_sr[] =
 {
@@ -465,30 +452,30 @@ static struct chips_init_reg chips_init_xr[] =
 	{0xd1, 0x01},
 };
 
-static void __init chips_hw_init(struct fb_info *p)
+static void __devinit chips_hw_init(struct fb_info *p)
 {
 	int i;
 
-	for (i = 0; i < N_ELTS(chips_init_xr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_xr); ++i)
 		write_xr(chips_init_xr[i].addr, chips_init_xr[i].data);
 	write_xr(0x81, 0x12);
 	write_xr(0x82, 0x08);
 	write_xr(0x20, 0x00);
-	for (i = 0; i < N_ELTS(chips_init_sr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_sr); ++i)
 		write_sr(chips_init_sr[i].addr, chips_init_sr[i].data);
-	for (i = 0; i < N_ELTS(chips_init_gr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_gr); ++i)
 		write_gr(chips_init_gr[i].addr, chips_init_gr[i].data);
-	for (i = 0; i < N_ELTS(chips_init_ar); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_ar); ++i)
 		write_ar(chips_init_ar[i].addr, chips_init_ar[i].data);
 	/* Enable video output in attribute index register */
 	writeb(0x20, mmio_base + 0x780);
-	for (i = 0; i < N_ELTS(chips_init_cr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_cr); ++i)
 		write_cr(chips_init_cr[i].addr, chips_init_cr[i].data);
-	for (i = 0; i < N_ELTS(chips_init_fr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_fr); ++i)
 		write_fr(chips_init_fr[i].addr, chips_init_fr[i].data);
 }
 
-static struct fb_fix_screeninfo asiliantfb_fix __initdata = {
+static struct fb_fix_screeninfo asiliantfb_fix __devinitdata = {
 	.id =		"Asiliant 69000",
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_PSEUDOCOLOR,
@@ -497,7 +484,7 @@ static struct fb_fix_screeninfo asiliantfb_fix __initdata = {
 	.smem_len =	0x200000,	/* 2MB */
 };
 
-static struct fb_var_screeninfo asiliantfb_var __initdata = {
+static struct fb_var_screeninfo asiliantfb_var __devinitdata = {
 	.xres 		= 640,
 	.yres 		= 480,
 	.xres_virtual 	= 640,
@@ -518,7 +505,7 @@ static struct fb_var_screeninfo asiliantfb_var __initdata = {
 	.vsync_len 	= 2,
 };
 
-static void __init init_asiliant(struct fb_info *p, unsigned long addr)
+static void __devinit init_asiliant(struct fb_info *p, unsigned long addr)
 {
 	p->fix			= asiliantfb_fix;
 	p->fix.smem_start	= addr;
@@ -555,7 +542,7 @@ asiliantfb_pci_init(struct pci_dev *dp, const struct pci_device_id *ent)
 	if (!request_mem_region(addr, size, "asiliantfb"))
 		return -EBUSY;
 
-	p = framebuffer_alloc(sizeof(u32) * 256, &dp->dev);
+	p = framebuffer_alloc(sizeof(u32) * 16, &dp->dev);
 	if (!p)	{
 		release_mem_region(addr, size);
 		return -ENOMEM;
@@ -604,12 +591,12 @@ static struct pci_driver asiliantfb_driver = {
 	.remove =	__devexit_p(asiliantfb_remove),
 };
 
-int __init asiliantfb_init(void)
+static int __init asiliantfb_init(void)
 {
 	if (fb_get_options("asiliantfb", NULL))
 		return -ENODEV;
 
-	return pci_module_init(&asiliantfb_driver);
+	return pci_register_driver(&asiliantfb_driver);
 }
 
 module_init(asiliantfb_init);

@@ -8,7 +8,6 @@
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/kmod.h>
 #include <linux/console.h>
 #include <linux/init.h>
@@ -67,7 +66,7 @@ sclp_conbuf_callback(struct sclp_buffer *buffer, int rc)
 	} while (buffer && sclp_emit_buffer(buffer, sclp_conbuf_callback));
 }
 
-static inline void
+static void
 sclp_conbuf_emit(void)
 {
 	struct sclp_buffer* buffer;

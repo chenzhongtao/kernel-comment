@@ -21,38 +21,15 @@
 #include "card.h"
 #include <linux/interrupt.h>
 
-extern int indicate_status(int, int, ulong, char *);
-extern void check_phystat(unsigned long);
-extern int receivemessage(int, RspMessage *);
-extern int sendmessage(int, unsigned int, unsigned int, unsigned int,
-        unsigned int, unsigned int, unsigned int, unsigned int *);
-extern void rcvpkt(int, RspMessage *);
-
-extern int cinst;
-extern board *sc_adapter[];
-
-int get_card_from_irq(int irq)
-{
-	int i;
-
-	for(i = 0 ; i < cinst ; i++) {
-		if(sc_adapter[i]->interrupt == irq)
-			return i;
-	}
-	return -1;
-}
-
 /*
  * 
  */
-irqreturn_t interrupt_handler(int interrupt, void *cardptr, struct pt_regs *regs)
+irqreturn_t interrupt_handler(int dummy, void *card_inst)
 {
 
 	RspMessage rcvmsg;
 	int channel;
-	int card;
-
-	card = get_card_from_irq(interrupt);
+	int card = (int)(unsigned long) card_inst;
 
 	if(!IS_VALID_CARD(card)) {
 		pr_debug("Invalid param: %d is not a valid card id\n", card);
@@ -91,7 +68,7 @@ irqreturn_t interrupt_handler(int interrupt, void *cardptr, struct pt_regs *regs
 		 */
 		if (IS_CE_MESSAGE(rcvmsg, Lnk, 1, Read))
 		{
-			pr_debug("%s: Received packet 0x%x bytes long at 0x%x\n",
+			pr_debug("%s: Received packet 0x%x bytes long at 0x%lx\n",
 						sc_adapter[card]->devicename,
 						rcvmsg.msg_data.response.msg_len,
 						rcvmsg.msg_data.response.buff_offset);

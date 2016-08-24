@@ -1,9 +1,7 @@
 /*
- * arch/ppc/platforms/85xx/mpc85xx_cds_common.h
- *
  * MPC85xx CDS board definitions
  *
- * Maintainer: Kumar Gala <kumar.gala@freescale.com>
+ * Maintainer: Kumar Gala <galak@kernel.crashing.org>
  *
  * Copyright 2004 Freescale Semiconductor, Inc
  *
@@ -17,7 +15,6 @@
 #ifndef __MACH_MPC85XX_CDS_H__
 #define __MACH_MPC85XX_CDS_H__
 
-#include <linux/config.h>
 #include <linux/serial.h>
 #include <asm/ppcboot.h>
 #include <linux/initrd.h>
@@ -32,6 +29,10 @@
 #define CM_VER	(0)
 #define CM_CSR	(1)
 #define CM_RST	(2)
+
+/* CDS NVRAM/RTC */
+#define CDS_RTC_ADDR	(0xf8000000)
+#define CDS_RTC_SIZE	(8 * 1024)
 
 /* PCI config */
 #define PCI1_CFG_ADDR_OFFSET	(0x8000)
@@ -72,5 +73,8 @@
 #define MPC85XX_PCI2_MEM_OFFSET      0x00000000
 
 #define MPC85XX_PCI2_IO_SIZE         0x01000000
+
+#define NR_8259_INTS		     16
+#define CPM_IRQ_OFFSET		     NR_8259_INTS
 
 #endif /* __MACH_MPC85XX_CDS_H__ */

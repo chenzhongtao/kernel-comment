@@ -12,8 +12,10 @@ typedef s32		compat_ssize_t;
 typedef s32		compat_time_t;
 typedef s32		compat_clock_t;
 typedef s32		compat_pid_t;
-typedef u16		compat_uid_t;
-typedef u16		compat_gid_t;
+typedef u16		__compat_uid_t;
+typedef u16		__compat_gid_t;
+typedef u32		__compat_uid32_t;
+typedef u32		__compat_gid32_t;
 typedef u16		compat_mode_t;
 typedef u32		compat_ino_t;
 typedef u16		compat_dev_t;
@@ -25,11 +27,14 @@ typedef s32		compat_daddr_t;
 typedef u32		compat_caddr_t;
 typedef __kernel_fsid_t	compat_fsid_t;
 typedef s32		compat_key_t;
+typedef s32		compat_timer_t;
 
 typedef s32		compat_int_t;
 typedef s32		compat_long_t;
+typedef s64		compat_s64;
 typedef u32		compat_uint_t;
 typedef u32		compat_ulong_t;
+typedef u64		compat_u64;
 
 struct compat_timespec {
 	compat_time_t	tv_sec;
@@ -46,19 +51,53 @@ struct compat_stat {
 	compat_ino_t	st_ino;
 	compat_mode_t	st_mode;
 	compat_nlink_t	st_nlink;
-	compat_uid_t	st_uid;
-	compat_gid_t	st_gid;
+	__compat_uid_t	st_uid;
+	__compat_gid_t	st_gid;
 	compat_dev_t	st_rdev;
 	compat_off_t	st_size;
 	compat_time_t	st_atime;
-	u32		__unused1;
+	compat_ulong_t	st_atime_nsec;
 	compat_time_t	st_mtime;
-	u32		__unused2;
+	compat_ulong_t	st_mtime_nsec;
 	compat_time_t	st_ctime;
-	u32		__unused3;
+	compat_ulong_t	st_ctime_nsec;
 	compat_off_t	st_blksize;
 	compat_off_t	st_blocks;
 	u32		__unused4[2];
+};
+
+struct compat_stat64 {
+	unsigned long long	st_dev;
+
+	unsigned long long	st_ino;
+
+	unsigned int	st_mode;
+	unsigned int	st_nlink;
+
+	unsigned int	st_uid;
+	unsigned int	st_gid;
+
+	unsigned long long	st_rdev;
+
+	unsigned char	__pad3[8];
+
+	long long	st_size;
+	unsigned int	st_blksize;
+
+	unsigned char	__pad4[8];
+	unsigned int	st_blocks;
+
+	unsigned int	st_atime;
+	unsigned int	st_atime_nsec;
+
+	unsigned int	st_mtime;
+	unsigned int	st_mtime_nsec;
+
+	unsigned int	st_ctime;
+	unsigned int	st_ctime_nsec;
+
+	unsigned int	__unused4;
+	unsigned int	__unused5;
 };
 
 struct compat_flock {
@@ -127,7 +166,7 @@ static inline compat_uptr_t ptr_to_compat(void __user *uptr)
 	return (u32)(unsigned long)uptr;
 }
 
-static __inline__ void __user *compat_alloc_user_space(long len)
+static inline void __user *compat_alloc_user_space(long len)
 {
 	struct pt_regs *regs = current_thread_info()->kregs;
 	unsigned long usp = regs->u_regs[UREG_I6];
@@ -137,15 +176,18 @@ static __inline__ void __user *compat_alloc_user_space(long len)
 	else
 		usp &= 0xffffffffUL;
 
-	return (void __user *) (usp - len);
+	usp -= len;
+	usp &= ~0x7UL;
+
+	return (void __user *) usp;
 }
 
 struct compat_ipc64_perm {
 	compat_key_t key;
-	__kernel_uid_t uid;
-	__kernel_gid_t gid;
-	__kernel_uid_t cuid;
-	__kernel_gid_t cgid;
+	__compat_uid32_t uid;
+	__compat_gid32_t gid;
+	__compat_uid32_t cuid;
+	__compat_gid32_t cgid;
 	unsigned short __pad1;
 	compat_mode_t mode;
 	unsigned short __pad2;

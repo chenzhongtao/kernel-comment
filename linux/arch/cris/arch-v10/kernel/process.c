@@ -1,4 +1,4 @@
-/* $Id: process.c,v 1.9 2004/10/19 13:07:37 starvik Exp $
+/* $Id: process.c,v 1.12 2004/12/27 11:18:32 starvik Exp $
  * 
  *  linux/arch/cris/kernel/process.c
  *
@@ -11,7 +11,6 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/err.h>
 #include <linux/fs.h>
@@ -65,7 +64,7 @@ void hard_reset_now (void)
 #if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 	cause_of_death = 0xbedead;
 #else
-	/* Since we dont plan to keep on reseting the watchdog,
+	/* Since we dont plan to keep on resetting the watchdog,
 	   the key can be arbitrary hence three */
 	*R_WATCHDOG = IO_FIELD(R_WATCHDOG, key, 3) |
 		IO_STATE(R_WATCHDOG, enable, start);
@@ -79,7 +78,7 @@ void hard_reset_now (void)
  */
 unsigned long thread_saved_pc(struct task_struct *t)
 {
-	return (unsigned long)user_regs(t->thread_info)->irp;
+	return task_pt_regs(t)->irp;
 }
 
 static void kernel_thread_helper(void* dummy, int (*fn)(void *), void * arg)
@@ -101,6 +100,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	regs.r11 = (unsigned long)fn;
 	regs.r12 = (unsigned long)arg;
 	regs.irp = (unsigned long)kernel_thread_helper;
+	regs.dccr = 1 << I_DCCR_BITNR;
 
 	/* Ok, create the new process.. */
         return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
@@ -127,7 +127,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	 * remember that the task_struct doubles as the kernel stack for the task
 	 */
 
-	childregs = user_regs(p->thread_info);        
+	childregs = task_pt_regs(p);
         
 	*childregs = *regs;  /* struct copy of pt_regs */
         

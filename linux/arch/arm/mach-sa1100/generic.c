@@ -9,7 +9,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -17,13 +16,18 @@
 #include <linux/pm.h>
 #include <linux/cpufreq.h>
 #include <linux/ioport.h>
+#include <linux/sched.h>	/* just for sched_clock() - funny that */
+#include <linux/platform_device.h>
 
 #include <asm/div64.h>
+#include <asm/cnt32_to_63.h>
 #include <asm/hardware.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/mach/map.h>
+#include <asm/mach/flash.h>
 #include <asm/irq.h>
+#include <asm/gpio.h>
 
 #include "generic.h"
 
@@ -116,18 +120,55 @@ EXPORT_SYMBOL(cpufreq_get);
 
 /*
  * This is the SA11x0 sched_clock implementation.  This has
- * a resolution of 271ns, and a maximum value of 1165s.
+ * a resolution of 271ns, and a maximum value of 32025597s (370 days).
+ *
+ * The return value is guaranteed to be monotonic in that range as
+ * long as there is always less than 582 seconds between successive
+ * calls to this function.
+ *
  *  ( * 1E9 / 3686400 => * 78125 / 288)
  */
 unsigned long long sched_clock(void)
 {
-	unsigned long long v;
+	unsigned long long v = cnt32_to_63(OSCR);
 
-	v = (unsigned long long)OSCR * 78125;
-	do_div(v, 288);
+	/* the <<1 gets rid of the cnt_32_to_63 top bit saving on a bic insn */
+	v *= 78125<<1;
+	do_div(v, 288<<1);
 
 	return v;
 }
+
+int gpio_direction_input(unsigned gpio)
+{
+	unsigned long flags;
+
+	if (gpio > GPIO_MAX)
+		return -EINVAL;
+
+	local_irq_save(flags);
+	GPDR &= ~GPIO_GPIO(gpio);
+	local_irq_restore(flags);
+	return 0;
+}
+
+EXPORT_SYMBOL(gpio_direction_input);
+
+int gpio_direction_output(unsigned gpio, int value)
+{
+	unsigned long flags;
+
+	if (gpio > GPIO_MAX)
+		return -EINVAL;
+
+	local_irq_save(flags);
+	gpio_set_value(gpio, value);
+	GPDR |= GPIO_GPIO(gpio);
+	local_irq_restore(flags);
+	return 0;
+}
+
+EXPORT_SYMBOL(gpio_direction_output);
 
 /*
  * Default power-off for SA1100
@@ -221,6 +262,11 @@ static struct platform_device sa11x0mcp_device = {
 	.resource	= sa11x0mcp_resources,
 };
 
+void sa11x0_set_mcp_data(struct mcp_plat_data *data)
+{
+	sa11x0mcp_device.dev.platform_data = data;
+}
+
 static struct resource sa11x0ssp_resources[] = {
 	[0] = {
 		.start	= 0x80070000,
@@ -278,6 +324,7 @@ static struct platform_device sa11x0mtd_device = {
 void sa11x0_set_flash_data(struct flash_platform_data *flash,
 			   struct resource *res, int nr)
 {
+	flash->name = "sa1100";
 	sa11x0mtd_device.dev.platform_data = flash;
 	sa11x0mtd_device.resource = res;
 	sa11x0mtd_device.num_resources = nr;
@@ -315,6 +362,11 @@ void sa11x0_set_irda_data(struct irda_platform_data *irda)
 	sa11x0ir_device.dev.platform_data = irda;
 }
 
+static struct platform_device sa11x0rtc_device = {
+	.name		= "sa1100-rtc",
+	.id		= -1,
+};
+
 static struct platform_device *sa11x0_devices[] __initdata = {
 	&sa11x0udc_device,
 	&sa11x0uart1_device,
@@ -324,6 +376,7 @@ static struct platform_device *sa11x0_devices[] __initdata = {
 	&sa11x0pcmcia_device,
 	&sa11x0fb_device,
 	&sa11x0mtd_device,
+	&sa11x0rtc_device,
 };
 
 static int __init sa1100_init(void)
@@ -364,11 +417,27 @@ EXPORT_SYMBOL(sa1100fb_lcd_power);
  */
 
 static struct map_desc standard_io_desc[] __initdata = {
- /* virtual     physical    length      type */
-  { 0xf8000000, 0x80000000, 0x00100000, MT_DEVICE }, /* PCM */
-  { 0xfa000000, 0x90000000, 0x00100000, MT_DEVICE }, /* SCM */
-  { 0xfc000000, 0xa0000000, 0x00100000, MT_DEVICE }, /* MER */
-  { 0xfe000000, 0xb0000000, 0x00200000, MT_DEVICE }  /* LCD + DMA */
+  	{	/* PCM */
+		.virtual	=  0xf8000000,
+		.pfn		= __phys_to_pfn(0x80000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}, {	/* SCM */
+		.virtual	=  0xfa000000,
+		.pfn		= __phys_to_pfn(0x90000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}, {	/* MER */
+		.virtual	=  0xfc000000,
+		.pfn		= __phys_to_pfn(0xa0000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}, {	/* LCD + DMA */
+		.virtual	=  0xfe000000,
+		.pfn		= __phys_to_pfn(0xb0000000),
+		.length		= 0x00200000,
+		.type		= MT_DEVICE
+	},
 };
 
 void __init sa1100_map_io(void)

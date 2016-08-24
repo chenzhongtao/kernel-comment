@@ -16,6 +16,8 @@
 /* To add :#define SO_REUSEPORT 0x0200 */
 #define SO_SNDBUF	0x1001
 #define SO_RCVBUF	0x1002
+#define SO_SNDBUFFORCE	0x100a
+#define SO_RCVBUFFORCE	0x100b
 #define SO_SNDLOWAT	0x1003
 #define SO_RCVLOWAT	0x1004
 #define SO_SNDTIMEO	0x1005
@@ -31,6 +33,8 @@
 #define SO_PEERCRED	0x4011
 #define SO_TIMESTAMP	0x4012
 #define SCM_TIMESTAMP	SO_TIMESTAMP
+#define SO_TIMESTAMPNS	0x4013
+#define SCM_TIMESTAMPNS	SO_TIMESTAMPNS
 
 /* Security levels - as per NRL IPv6 - don't actually do anything */
 #define SO_SECURITY_AUTHENTICATION		0x4016
@@ -46,5 +50,6 @@
 #define SO_ACCEPTCONN		0x401c
 
 #define SO_PEERSEC		0x401d
+#define SO_PASSSEC		0x401e
 
 #endif /* _ASM_SOCKET_H */

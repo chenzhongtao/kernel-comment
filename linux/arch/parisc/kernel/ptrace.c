@@ -10,19 +10,19 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/personality.h>
 #include <linux/security.h>
 #include <linux/compat.h>
+#include <linux/signal.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/processor.h>
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
 
 /* PSW bits we allow the debugger to modify */
 #define USER_PSW_BITS	(PSW_N | PSW_V | PSW_CB)
@@ -35,7 +35,7 @@
 #define DBG(x...)
 #endif
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 
 /* This function is needed to translate 32 bit pt_regs offsets in to
  * 64 bit pt_regs offsets.  For example, a 32 bit gdb under a 64 bit kernel
@@ -77,59 +77,19 @@ void ptrace_disable(struct task_struct *child)
 	pa_psw(child)->l = 0;
 }
 
-long sys_ptrace(long request, pid_t pid, long addr, long data)
+long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 {
-	struct task_struct *child;
 	long ret;
 #ifdef DEBUG_PTRACE
 	long oaddr=addr, odata=data;
 #endif
 
-	lock_kernel();
-	ret = -EPERM;
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-
-		ret = security_ptrace(current->parent, current);
-		if (ret) 
-			goto out;
-
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
-		goto out;
-	}
-
-	ret = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-	ret = -EPERM;
-	if (pid == 1)		/* no messing around with init! */
-		goto out_tsk;
-
-	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
-		goto out_tsk;
-	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret < 0)
-		goto out_tsk;
-
 	switch (request) {
 	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 	case PTRACE_PEEKDATA: {
-		int copied;
-
-#ifdef __LP64__
-		if (is_compat_task(child)) {
+#ifdef CONFIG_64BIT
+		if (__is_compat_task(child)) {
+			int copied;
 			unsigned int tmp;
 
 			addr &= 0xffffffffL;
@@ -144,15 +104,7 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 		}
 		else
 #endif
-		{
-			unsigned long tmp;
-
-			copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
-			ret = -EIO;
-			if (copied != sizeof(tmp))
-				goto out_tsk;
-			ret = put_user(tmp,(unsigned long *) data);
-		}
+			ret = generic_ptrace_peekdata(child, addr, data);
 		goto out_tsk;
 	}
 
@@ -160,8 +112,8 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 	case PTRACE_POKETEXT: /* write the word at location addr. */
 	case PTRACE_POKEDATA:
 		ret = 0;
-#ifdef __LP64__
-		if (is_compat_task(child)) {
+#ifdef CONFIG_64BIT
+		if (__is_compat_task(child)) {
 			unsigned int tmp = (unsigned int)data;
 			DBG("sys_ptrace(POKE%s, %d, %lx, %lx)\n",
 				request == PTRACE_POKETEXT ? "TEXT" : "DATA",
@@ -183,8 +135,8 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 	   processes, the kernel saves all regs on a syscall. */
 	case PTRACE_PEEKUSR: {
 		ret = -EIO;
-#ifdef __LP64__
-		if (is_compat_task(child)) {
+#ifdef CONFIG_64BIT
+		if (__is_compat_task(child)) {
 			unsigned int tmp;
 
 			if (addr & (sizeof(int)-1))
@@ -242,8 +194,8 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 			ret = 0;
 			goto out_tsk;
 		}
-#ifdef __LP64__
-		if (is_compat_task(child)) {
+#ifdef CONFIG_64BIT
+		if (__is_compat_task(child)) {
 			if (addr & (sizeof(int)-1))
 				goto out_tsk;
 			if ((addr = translate_usr_offset(addr)) < 0)
@@ -285,7 +237,7 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 		ret = -EIO;
 		DBG("sys_ptrace(%s)\n",
 			request == PTRACE_SYSCALL ? "SYSCALL" : "CONT");
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			goto out_tsk;
 		child->ptrace &= ~(PT_SINGLESTEP|PT_BLOCKSTEP);
 		if (request == PTRACE_SYSCALL) {
@@ -302,6 +254,7 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 		 * sigkill.  perhaps it should be put in the status
 		 * that it wants to exit.
 		 */
+		ret = 0;
 		DBG("sys_ptrace(KILL)\n");
 		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
 			goto out_tsk;
@@ -311,7 +264,7 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 	case PTRACE_SINGLEBLOCK:
 		DBG("sys_ptrace(SINGLEBLOCK)\n");
 		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			goto out_tsk;
 		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		child->ptrace &= ~PT_SINGLESTEP;
@@ -328,7 +281,7 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 	case PTRACE_SINGLESTEP:
 		DBG("sys_ptrace(SINGLESTEP)\n");
 		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			goto out_tsk;
 
 		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
@@ -376,10 +329,6 @@ long sys_ptrace(long request, pid_t pid, long addr, long data)
 		/* give it a chance to run. */
 		goto out_wake;
 
-	case PTRACE_DETACH:
-		ret = ptrace_detach(child, data);
-		goto out_tsk;
-
 	case PTRACE_GETEVENTMSG:
                 ret = put_user(child->ptrace_message, (unsigned int __user *) data);
 		goto out_tsk;
@@ -395,10 +344,7 @@ out_wake:
 	wake_up_process(child);
 	ret = 0;
 out_tsk:
-	put_task_struct(child);
-out:
-	unlock_kernel();
-	DBG("sys_ptrace(%ld, %d, %lx, %lx) returning %ld\n",
+	DBG("arch_ptrace(%ld, %d, %lx, %lx) returning %ld\n",
 		request, pid, oaddr, odata, ret);
 	return ret;
 }

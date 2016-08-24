@@ -24,12 +24,9 @@
   */
 #define SERIAL_DO_RESTART
 #include <linux/module.h>
-#include <linux/config.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
 #include <linux/tty.h>
@@ -50,14 +47,12 @@
 #include <linux/pci.h>
 #include <linux/vmalloc.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/spinlock.h>
 #include <linux/kobject.h>
 #include <linux/firmware.h>
 #include <linux/bitops.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
@@ -74,33 +69,40 @@
 
 static const struct pci_device_id icom_pci_table[] = {
 	{
-	      .vendor = PCI_VENDOR_ID_IBM,
-	      .device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_1,
-	      .subvendor = PCI_ANY_ID,
-	      .subdevice = PCI_ANY_ID,
-	      .driver_data = ADAPTER_V1,
-	 },
+		.vendor = PCI_VENDOR_ID_IBM,
+		.device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_1,
+		.subvendor = PCI_ANY_ID,
+		.subdevice = PCI_ANY_ID,
+		.driver_data = ADAPTER_V1,
+	},
 	{
-	      .vendor = PCI_VENDOR_ID_IBM,
-	      .device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_2,
-	      .subvendor = PCI_VENDOR_ID_IBM,
-	      .subdevice = PCI_DEVICE_ID_IBM_ICOM_V2_TWO_PORTS_RVX,
-	      .driver_data = ADAPTER_V2,
-	 },
+		.vendor = PCI_VENDOR_ID_IBM,
+		.device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_2,
+		.subvendor = PCI_VENDOR_ID_IBM,
+		.subdevice = PCI_DEVICE_ID_IBM_ICOM_V2_TWO_PORTS_RVX,
+		.driver_data = ADAPTER_V2,
+	},
 	{
-	      .vendor = PCI_VENDOR_ID_IBM,
-	      .device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_2,
-	      .subvendor = PCI_VENDOR_ID_IBM,
-	      .subdevice = PCI_DEVICE_ID_IBM_ICOM_V2_ONE_PORT_RVX_ONE_PORT_MDM,
-	      .driver_data = ADAPTER_V2,
-	 },
+		.vendor = PCI_VENDOR_ID_IBM,
+		.device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_2,
+		.subvendor = PCI_VENDOR_ID_IBM,
+		.subdevice = PCI_DEVICE_ID_IBM_ICOM_V2_ONE_PORT_RVX_ONE_PORT_MDM,
+		.driver_data = ADAPTER_V2,
+	},
 	{
-	      .vendor = PCI_VENDOR_ID_IBM,
-	      .device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_2,
-	      .subvendor = PCI_VENDOR_ID_IBM,
-	      .subdevice = PCI_DEVICE_ID_IBM_ICOM_FOUR_PORT_MODEL,
-	      .driver_data = ADAPTER_V2,
-	 },
+		.vendor = PCI_VENDOR_ID_IBM,
+		.device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_2,
+		.subvendor = PCI_VENDOR_ID_IBM,
+		.subdevice = PCI_DEVICE_ID_IBM_ICOM_FOUR_PORT_MODEL,
+		.driver_data = ADAPTER_V2,
+	},
+	{
+		.vendor = PCI_VENDOR_ID_IBM,
+		.device = PCI_DEVICE_ID_IBM_ICOM_DEV_ID_2,
+		.subvendor = PCI_VENDOR_ID_IBM,
+		.subdevice = PCI_DEVICE_ID_IBM_ICOM_V2_ONE_PORT_RVX_ONE_PORT_MDM_PCIE,
+		.driver_data = ADAPTER_V2,
+	},
 	{}
 };
 
@@ -168,7 +170,7 @@ static void free_port_memory(struct icom_port *icom_port)
 	}
 }
 
-static int __init get_port_memory(struct icom_port *icom_port)
+static int __devinit get_port_memory(struct icom_port *icom_port)
 {
 	int index;
 	unsigned long stgAddr;
@@ -731,19 +733,20 @@ static void recv_interrupt(u16 port_int_reg, struct icom_port *icom_port)
 	unsigned short int status;
 	struct uart_icount *icount;
 	unsigned long offset;
+	unsigned char flag;
 
 	trace(icom_port, "RCV_COMPLETE", 0);
 	rcv_buff = icom_port->next_rcv;
 
 	status = cpu_to_le16(icom_port->statStg->rcv[rcv_buff].flags);
 	while (status & SA_FL_RCV_DONE) {
+		int first = -1;
 
 		trace(icom_port, "FID_STATUS", status);
 		count = cpu_to_le16(icom_port->statStg->rcv[rcv_buff].leLength);
 
+                count = tty_buffer_request_room(tty, count);
 		trace(icom_port, "RCV_COUNT", count);
-		if (count > (TTY_FLIPBUF_SIZE - tty->flip.count))
-			count = TTY_FLIPBUF_SIZE - tty->flip.count;
 
 		trace(icom_port, "REAL_COUNT", count);
 
@@ -751,15 +754,10 @@ static void recv_interrupt(u16 port_int_reg, struct icom_port *icom_port)
 			cpu_to_le32(icom_port->statStg->rcv[rcv_buff].leBuffer) -
 			icom_port->recv_buf_pci;
 
-		memcpy(tty->flip.char_buf_ptr,(unsigned char *)
-		       ((unsigned long)icom_port->recv_buf + offset), count);
-
+		/* Block copy all but the last byte as this may have status */
 		if (count > 0) {
-			tty->flip.count += count - 1;
-			tty->flip.char_buf_ptr += count - 1;
-
-			memset(tty->flip.flag_buf_ptr, 0, count);
-			tty->flip.flag_buf_ptr += count - 1;
+			first = icom_port->recv_buf[offset];
+			tty_insert_flip_string(tty, icom_port->recv_buf + offset, count - 1);
 		}
 
 		icount = &icom_port->uart_port.icount;
@@ -767,11 +765,13 @@ static void recv_interrupt(u16 port_int_reg, struct icom_port *icom_port)
 
 		/* Break detect logic */
 		if ((status & SA_FLAGS_FRAME_ERROR)
-		    && (tty->flip.char_buf_ptr[0] == 0x00)) {
+		    && first == 0) {
 			status &= ~SA_FLAGS_FRAME_ERROR;
 			status |= SA_FLAGS_BREAK_DET;
 			trace(icom_port, "BREAK_DET", 0);
 		}
+
+		flag = TTY_NORMAL;
 
 		if (status &
 		    (SA_FLAGS_BREAK_DET | SA_FLAGS_PARITY_ERROR |
@@ -799,33 +799,26 @@ static void recv_interrupt(u16 port_int_reg, struct icom_port *icom_port)
 			status &= icom_port->read_status_mask;
 
 			if (status & SA_FLAGS_BREAK_DET) {
-				*tty->flip.flag_buf_ptr = TTY_BREAK;
+				flag = TTY_BREAK;
 			} else if (status & SA_FLAGS_PARITY_ERROR) {
 				trace(icom_port, "PARITY_ERROR", 0);
-				*tty->flip.flag_buf_ptr = TTY_PARITY;
+				flag = TTY_PARITY;
 			} else if (status & SA_FLAGS_FRAME_ERROR)
-				*tty->flip.flag_buf_ptr = TTY_FRAME;
+				flag = TTY_FRAME;
 
-			if (status & SA_FLAGS_OVERRUN) {
-				/*
-				 * Overrun is special, since it's
-				 * reported immediately, and doesn't
-				 * affect the current character
-				 */
-				if (tty->flip.count < TTY_FLIPBUF_SIZE) {
-					tty->flip.count++;
-					tty->flip.flag_buf_ptr++;
-					tty->flip.char_buf_ptr++;
-					*tty->flip.flag_buf_ptr = TTY_OVERRUN;
-				}
-			}
 		}
 
-		tty->flip.flag_buf_ptr++;
-		tty->flip.char_buf_ptr++;
-		tty->flip.count++;
-		ignore_char:
-			icom_port->statStg->rcv[rcv_buff].flags = 0;
+		tty_insert_flip_char(tty, *(icom_port->recv_buf + offset + count - 1), flag);
+
+		if (status & SA_FLAGS_OVERRUN)
+			/*
+			 * Overrun is special, since it's
+			 * reported immediately, and doesn't
+			 * affect the current character
+			 */
+			tty_insert_flip_char(tty, 0, TTY_OVERRUN);
+ignore_char:
+		icom_port->statStg->rcv[rcv_buff].flags = 0;
 		icom_port->statStg->rcv[rcv_buff].leLength = 0;
 		icom_port->statStg->rcv[rcv_buff].WorkingLength =
 			(unsigned short int) cpu_to_le16(RCV_BUFF_SZ);
@@ -856,8 +849,7 @@ static void process_interrupt(u16 port_int_reg,
 	spin_unlock(&icom_port->uart_port.lock);
 }
 
-static irqreturn_t icom_interrupt(int irq, void *dev_id,
-				  struct pt_regs *regs)
+static irqreturn_t icom_interrupt(int irq, void *dev_id)
 {
 	void __iomem * int_reg;
 	u32 adapter_interrupts;
@@ -990,18 +982,16 @@ static unsigned int icom_get_mctrl(struct uart_port *port)
 	return result;
 }
 
-static void icom_stop_tx(struct uart_port *port, unsigned int tty_stop)
+static void icom_stop_tx(struct uart_port *port)
 {
 	unsigned char cmdReg;
 
-	if (tty_stop) {
-		trace(ICOM_PORT, "STOP", 0);
-		cmdReg = readb(&ICOM_PORT->dram->CmdReg);
-		writeb(cmdReg | CMD_HOLD_XMIT, &ICOM_PORT->dram->CmdReg);
-	}
+	trace(ICOM_PORT, "STOP", 0);
+	cmdReg = readb(&ICOM_PORT->dram->CmdReg);
+	writeb(cmdReg | CMD_HOLD_XMIT, &ICOM_PORT->dram->CmdReg);
 }
 
-static void icom_start_tx(struct uart_port *port, unsigned int tty_start)
+static void icom_start_tx(struct uart_port *port)
 {
 	unsigned char cmdReg;
 
@@ -1102,8 +1092,8 @@ static void icom_close(struct uart_port *port)
 }
 
 static void icom_set_termios(struct uart_port *port,
-			     struct termios *termios,
-			     struct termios *old_termios)
+			     struct ktermios *termios,
+			     struct ktermios *old_termios)
 {
 	int baud;
 	unsigned cflag, iflag;
@@ -1396,7 +1386,7 @@ static void icom_port_active(struct icom_port *icom_port, struct icom_adapter *i
 			    0x8024 + 2 - 2 * (icom_port->port - 2);
 	}
 }
-static int __init icom_load_ports(struct icom_adapter *icom_adapter)
+static int __devinit icom_load_ports(struct icom_adapter *icom_adapter)
 {
 	struct icom_port *icom_port;
 	int port_num;
@@ -1432,13 +1422,11 @@ static int __devinit icom_alloc_adapter(struct icom_adapter
 	struct list_head *tmp;
 
 	icom_adapter = (struct icom_adapter *)
-	    kmalloc(sizeof(struct icom_adapter), GFP_KERNEL);
+	    kzalloc(sizeof(struct icom_adapter), GFP_KERNEL);
 
 	if (!icom_adapter) {
 		return -ENOMEM;
 	}
-
-	memset(icom_adapter, 0, sizeof(struct icom_adapter));
 
 	list_for_each(tmp, &icom_adapter_head) {
 		cur_adapter_entry =
@@ -1491,7 +1479,7 @@ static void icom_remove_adapter(struct icom_adapter *icom_adapter)
 		}
 	}
 
-	free_irq(icom_adapter->irq_number, (void *) icom_adapter);
+	free_irq(icom_adapter->pci_dev->irq, (void *) icom_adapter);
 	iounmap(icom_adapter->base_addr);
 	icom_free_adapter(icom_adapter);
 	pci_release_regions(icom_adapter->pci_dev);
@@ -1525,7 +1513,7 @@ static int __devinit icom_probe(struct pci_dev *dev,
 	}
 
 	if ( (retval = pci_request_regions(dev, "icom"))) {
-		 dev_err(&dev->dev, "pci_request_region FAILED\n");
+		 dev_err(&dev->dev, "pci_request_regions FAILED\n");
 		 pci_disable_device(dev);
 		 return retval;
 	 }
@@ -1557,7 +1545,6 @@ static int __devinit icom_probe(struct pci_dev *dev,
 	}
 
 	 icom_adapter->base_addr_pci = pci_resource_start(dev, 0);
-	 icom_adapter->irq_number = dev->irq;
 	 icom_adapter->pci_dev = dev;
 	 icom_adapter->version = ent->driver_data;
 	 icom_adapter->subsystem_id = ent->subdevice;
@@ -1577,7 +1564,7 @@ static int __devinit icom_probe(struct pci_dev *dev,
 
 	 /* save off irq and request irq line */
 	 if ( (retval = request_irq(dev->irq, icom_interrupt,
-				   SA_INTERRUPT | SA_SHIRQ, ICOM_DRIVER_NAME,
+				   IRQF_DISABLED | IRQF_SHARED, ICOM_DRIVER_NAME,
 				   (void *) icom_adapter))) {
 		  goto probe_exit2;
 	 }
@@ -1588,7 +1575,7 @@ static int __devinit icom_probe(struct pci_dev *dev,
 		icom_port = &icom_adapter->port_info[index];
 
 		if (icom_port->status == ICOM_PORT_ACTIVE) {
-			icom_port->uart_port.irq = icom_port->adapter->irq_number;
+			icom_port->uart_port.irq = icom_port->adapter->pci_dev->irq;
 			icom_port->uart_port.type = PORT_ICOM;
 			icom_port->uart_port.iotype = UPIO_MEM;
 			icom_port->uart_port.membase =

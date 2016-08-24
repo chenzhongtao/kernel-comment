@@ -14,14 +14,10 @@
 #ifndef __ASM_IBM4XX_H__
 #define __ASM_IBM4XX_H__
 
-#include <linux/config.h>
 #include <asm/types.h>
+#include <asm/dcr.h>
 
 #ifdef CONFIG_40x
-
-#if defined(CONFIG_ASH)
-#include <platforms/4xx/ash.h>
-#endif
 
 #if defined(CONFIG_BUBINGA)
 #include <platforms/4xx/bubinga.h>
@@ -33,14 +29,6 @@
 
 #if defined(CONFIG_EP405)
 #include <platforms/4xx/ep405.h>
-#endif
-
-#if defined(CONFIG_OAK)
-#include <platforms/4xx/oak.h>
-#endif
-
-#if defined(CONFIG_REDWOOD_4)
-#include <platforms/4xx/redwood.h>
 #endif
 
 #if defined(CONFIG_REDWOOD_5)
@@ -59,8 +47,8 @@
 #include <platforms/4xx/walnut.h>
 #endif
 
-#if defined(CONFIG_XILINX_ML300)
-#include <platforms/4xx/xilinx_ml300.h>
+#if defined(CONFIG_XILINX_VIRTEX)
+#include <platforms/4xx/virtex.h>
 #endif
 
 #ifndef __ASSEMBLY__
@@ -95,7 +83,11 @@ void ppc4xx_init(unsigned long r3, unsigned long r4, unsigned long r5,
 #define PCI_DRAM_OFFSET	0
 #endif
 
-#elif CONFIG_44x
+#elif defined(CONFIG_44x)
+
+#if defined(CONFIG_BAMBOO)
+#include <platforms/4xx/bamboo.h>
+#endif
 
 #if defined(CONFIG_EBONY)
 #include <platforms/4xx/ebony.h>
@@ -105,8 +97,16 @@ void ppc4xx_init(unsigned long r3, unsigned long r4, unsigned long r5,
 #include <platforms/4xx/luan.h>
 #endif
 
+#if defined(CONFIG_YUCCA)
+#include <platforms/4xx/yucca.h>
+#endif
+
 #if defined(CONFIG_OCOTEA)
 #include <platforms/4xx/ocotea.h>
+#endif
+
+#if defined(CONFIG_TAISHAN)
+#include <platforms/4xx/taishan.h>
 #endif
 
 #ifndef __ASSEMBLY__

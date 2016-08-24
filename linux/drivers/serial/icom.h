@@ -258,7 +258,6 @@ struct icom_port {
 struct icom_adapter {
 	void __iomem * base_addr;
 	unsigned long base_addr_pci;
-	unsigned char irq_number;
 	struct pci_dev *pci_dev;
 	struct icom_port port_info[4];
 	int index;
@@ -286,5 +285,3 @@ struct lookup_int_table {
 	u32	__iomem *global_int_mask;
 	unsigned long	processor_id;
 };
-
-#define MSECS_TO_JIFFIES(ms) (((ms)*HZ+999)/1000)

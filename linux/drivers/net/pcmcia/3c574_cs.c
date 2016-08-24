@@ -86,7 +86,6 @@ earlier 3Com products.
 #include <linux/ethtool.h>
 #include <linux/bitops.h>
 
-#include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
@@ -188,14 +187,16 @@ enum Window1 {
 enum Window3 {			/* Window 3: MAC/config bits. */
 	Wn3_Config=0, Wn3_MAC_Ctrl=6, Wn3_Options=8,
 };
-union wn3_config {
-	int i;
-	struct w3_config_fields {
-		unsigned int ram_size:3, ram_width:1, ram_speed:2, rom_size:2;
-		int pad8:8;
-		unsigned int ram_split:2, pad18:2, xcvr:3, pad21:1, autoselect:1;
-		int pad24:7;
-	} u;
+enum wn3_config {
+	Ram_size = 7,
+	Ram_width = 8,
+	Ram_speed = 0x30,
+	Rom_size = 0xc0,
+	Ram_split_shift = 16,
+	Ram_split = 3 << Ram_split_shift,
+	Xcvr_shift = 20,
+	Xcvr = 7 << Xcvr_shift,
+	Autoselect = 0x1000000,
 };
 
 enum Window4 {		/* Window 4: Xcvr/media bits. */
@@ -205,7 +206,7 @@ enum Window4 {		/* Window 4: Xcvr/media bits. */
 #define MEDIA_TP	0x00C0	/* Enable link beat and jabber for 10baseT. */
 
 struct el3_private {
-	dev_link_t link;
+	struct pcmcia_device	*p_dev;
 	dev_node_t node;
 	struct net_device_stats stats;
 	u16 advertising, partner;		/* NWay media advertisement */
@@ -226,10 +227,8 @@ static char mii_preamble_required = 0;
 
 /* Index of functions. */
 
-static void tc574_config(dev_link_t *link);
-static void tc574_release(dev_link_t *link);
-static int tc574_event(event_t event, int priority,
-					   event_callback_args_t *args);
+static int tc574_config(struct pcmcia_device *link);
+static void tc574_release(struct pcmcia_device *link);
 
 static void mdio_sync(kio_addr_t ioaddr, int bits);
 static int mdio_read(kio_addr_t ioaddr, int phy_id, int location);
@@ -241,22 +240,17 @@ static void tc574_reset(struct net_device *dev);
 static void media_check(unsigned long arg);
 static int el3_open(struct net_device *dev);
 static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev);
-static irqreturn_t el3_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t el3_interrupt(int irq, void *dev_id);
 static void update_stats(struct net_device *dev);
 static struct net_device_stats *el3_get_stats(struct net_device *dev);
 static int el3_rx(struct net_device *dev, int worklimit);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
 static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
-static struct ethtool_ops netdev_ethtool_ops;
+static const struct ethtool_ops netdev_ethtool_ops;
 static void set_rx_mode(struct net_device *dev);
 
-static dev_info_t dev_info = "3c574_cs";
-
-static dev_link_t *tc574_attach(void);
-static void tc574_detach(dev_link_t *);
-
-static dev_link_t *dev_list;
+static void tc574_detach(struct pcmcia_device *p_dev);
 
 /*
 	tc574_attach() creates an "instance" of the driver, allocating
@@ -264,36 +258,31 @@ static dev_link_t *dev_list;
 	with Card Services.
 */
 
-static dev_link_t *tc574_attach(void)
+static int tc574_probe(struct pcmcia_device *link)
 {
 	struct el3_private *lp;
-	client_reg_t client_reg;
-	dev_link_t *link;
 	struct net_device *dev;
-	int ret;
 
 	DEBUG(0, "3c574_attach()\n");
 
 	/* Create the PC card device object. */
 	dev = alloc_etherdev(sizeof(struct el3_private));
 	if (!dev)
-		return NULL;
+		return -ENOMEM;
 	lp = netdev_priv(dev);
-	link = &lp->link;
 	link->priv = dev;
+	lp->p_dev = link;
 
 	spin_lock_init(&lp->window_lock);
 	link->io.NumPorts1 = 32;
 	link->io.Attributes1 = IO_DATA_PATH_WIDTH_16;
-	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
+	link->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING|IRQ_HANDLE_PRESENT;
 	link->irq.IRQInfo1 = IRQ_LEVEL_ID;
 	link->irq.Handler = &el3_interrupt;
 	link->irq.Instance = dev;
 	link->conf.Attributes = CONF_ENABLE_IRQ;
-	link->conf.Vcc = 50;
 	link->conf.IntType = INT_MEMORY_AND_IO;
 	link->conf.ConfigIndex = 1;
-	link->conf.Present = PRESENT_OPTION;
 
 	/* The EL3-specific entries in the device structure. */
 	dev->hard_start_xmit = &el3_start_xmit;
@@ -308,25 +297,7 @@ static dev_link_t *tc574_attach(void)
 	dev->watchdog_timeo = TX_TIMEOUT;
 #endif
 
-	/* Register with Card Services */
-	link->next = dev_list;
-	dev_list = link;
-	client_reg.dev_info = &dev_info;
-	client_reg.EventMask =
-		CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
-			CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
-				CS_EVENT_PM_SUSPEND | CS_EVENT_PM_RESUME;
-	client_reg.event_handler = &tc574_event;
-	client_reg.Version = 0x0210;
-	client_reg.event_callback_args.client_data = link;
-	ret = pcmcia_register_client(&link->handle, &client_reg);
-	if (ret != 0) {
-		cs_error(link->handle, RegisterClient, ret);
-		tc574_detach(link);
-		return NULL;
-	}
-
-	return link;
+	return tc574_config(link);
 } /* tc574_attach */
 
 /*
@@ -338,30 +309,17 @@ static dev_link_t *tc574_attach(void)
 
 */
 
-static void tc574_detach(dev_link_t *link)
+static void tc574_detach(struct pcmcia_device *link)
 {
 	struct net_device *dev = link->priv;
-	dev_link_t **linkp;
 
 	DEBUG(0, "3c574_detach(0x%p)\n", link);
 
-	/* Locate device structure */
-	for (linkp = &dev_list; *linkp; linkp = &(*linkp)->next)
-		if (*linkp == link) break;
-	if (*linkp == NULL)
-		return;
-
-	if (link->dev)
+	if (link->dev_node)
 		unregister_netdev(dev);
 
-	if (link->state & DEV_CONFIG)
-		tc574_release(link);
+	tc574_release(link);
 
-	if (link->handle)
-		pcmcia_deregister_client(link->handle);
-
-	/* Unlink device structure, free bits */
-	*linkp = link->next;
 	free_netdev(dev);
 } /* tc574_detach */
 
@@ -374,52 +332,37 @@ static void tc574_detach(dev_link_t *link)
 #define CS_CHECK(fn, ret) \
   do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
-static char *ram_split[] = {"5:3", "3:1", "1:1", "3:5"};
+static const char *ram_split[] = {"5:3", "3:1", "1:1", "3:5"};
 
-static void tc574_config(dev_link_t *link)
+static int tc574_config(struct pcmcia_device *link)
 {
-	client_handle_t handle = link->handle;
 	struct net_device *dev = link->priv;
 	struct el3_private *lp = netdev_priv(dev);
 	tuple_t tuple;
-	cisparse_t parse;
-	unsigned short buf[32];
+	__le16 buf[32];
 	int last_fn, last_ret, i, j;
 	kio_addr_t ioaddr;
-	u16 *phys_addr;
+	__be16 *phys_addr;
 	char *cardname;
-	union wn3_config config;
+	__u32 config;
+	DECLARE_MAC_BUF(mac);
 
-	phys_addr = (u16 *)dev->dev_addr;
+	phys_addr = (__be16 *)dev->dev_addr;
 
 	DEBUG(0, "3c574_config(0x%p)\n", link);
-
-	tuple.Attributes = 0;
-	tuple.DesiredTuple = CISTPL_CONFIG;
-	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
-	tuple.TupleData = (cisdata_t *)buf;
-	tuple.TupleDataMax = 64;
-	tuple.TupleOffset = 0;
-	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
-	CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
-	link->conf.ConfigBase = parse.config.base;
-	link->conf.Present = parse.config.rmask[0];
-
-	/* Configure card */
-	link->state |= DEV_CONFIG;
 
 	link->io.IOAddrLines = 16;
 	for (i = j = 0; j < 0x400; j += 0x20) {
 		link->io.BasePort1 = j ^ 0x300;
-		i = pcmcia_request_io(link->handle, &link->io);
+		i = pcmcia_request_io(link, &link->io);
 		if (i == CS_SUCCESS) break;
 	}
 	if (i != CS_SUCCESS) {
-		cs_error(link->handle, RequestIO, i);
+		cs_error(link, RequestIO, i);
 		goto failed;
 	}
-	CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
-	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
+	CS_CHECK(RequestIRQ, pcmcia_request_irq(link, &link->irq));
+	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link, &link->conf));
 
 	dev->irq = link->irq.AssignedIRQ;
 	dev->base_addr = link->io.BasePort1;
@@ -429,27 +372,28 @@ static void tc574_config(dev_link_t *link)
 	/* The 3c574 normally uses an EEPROM for configuration info, including
 	   the hardware address.  The future products may include a modem chip
 	   and put the address in the CIS. */
+	tuple.Attributes = 0;
+	tuple.TupleData = (cisdata_t *)buf;
+	tuple.TupleDataMax = 64;
+	tuple.TupleOffset = 0;
 	tuple.DesiredTuple = 0x88;
-	if (pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS) {
-		pcmcia_get_tuple_data(handle, &tuple);
+	if (pcmcia_get_first_tuple(link, &tuple) == CS_SUCCESS) {
+		pcmcia_get_tuple_data(link, &tuple);
 		for (i = 0; i < 3; i++)
-			phys_addr[i] = htons(buf[i]);
+			phys_addr[i] = htons(le16_to_cpu(buf[i]));
 	} else {
 		EL3WINDOW(0);
 		for (i = 0; i < 3; i++)
 			phys_addr[i] = htons(read_eeprom(ioaddr, i + 10));
-		if (phys_addr[0] == 0x6060) {
+		if (phys_addr[0] == htons(0x6060)) {
 			printk(KERN_NOTICE "3c574_cs: IO port conflict at 0x%03lx"
 				   "-0x%03lx\n", dev->base_addr, dev->base_addr+15);
 			goto failed;
 		}
 	}
-	tuple.DesiredTuple = CISTPL_VERS_1;
-	if (pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS &&
-		pcmcia_get_tuple_data(handle, &tuple) == CS_SUCCESS &&
-		pcmcia_parse_tuple(handle, &tuple, &parse) == CS_SUCCESS) {
-		cardname = parse.version_1.str + parse.version_1.ofs[1];
-	} else
+	if (link->prod_id[1])
+		cardname = link->prod_id[1];
+	else
 		cardname = "3Com 3c574";
 
 	{
@@ -459,9 +403,9 @@ static void tc574_config(dev_link_t *link)
 		outw(0<<11, ioaddr + RunnerRdCtrl);
 		printk(KERN_INFO "  ASIC rev %d,", mcr>>3);
 		EL3WINDOW(3);
-		config.i = inl(ioaddr + Wn3_Config);
-		lp->default_media = config.u.xcvr;
-		lp->autoselect = config.u.autoselect;
+		config = inl(ioaddr + Wn3_Config);
+		lp->default_media = (config & Xcvr) >> Xcvr_shift;
+		lp->autoselect = config & Autoselect ? 1 : 0;
 	}
 
 	init_timer(&lp->media);
@@ -506,33 +450,33 @@ static void tc574_config(dev_link_t *link)
 		}
 	}
 
-	link->state &= ~DEV_CONFIG_PENDING;
-	link->dev = &lp->node;
-	SET_NETDEV_DEV(dev, &handle_to_dev(handle));
+	link->dev_node = &lp->node;
+	SET_NETDEV_DEV(dev, &handle_to_dev(link));
 
 	if (register_netdev(dev) != 0) {
 		printk(KERN_NOTICE "3c574_cs: register_netdev() failed\n");
-		link->dev = NULL;
+		link->dev_node = NULL;
 		goto failed;
 	}
 
 	strcpy(lp->node.dev_name, dev->name);
 
-	printk(KERN_INFO "%s: %s at io %#3lx, irq %d, hw_addr ",
-		   dev->name, cardname, dev->base_addr, dev->irq);
-	for (i = 0; i < 6; i++)
-		printk("%02X%s", dev->dev_addr[i], ((i<5) ? ":" : ".\n"));
+	printk(KERN_INFO "%s: %s at io %#3lx, irq %d, "
+	       "hw_addr %s.\n",
+	       dev->name, cardname, dev->base_addr, dev->irq,
+	       print_mac(mac, dev->dev_addr));
 	printk(" %dK FIFO split %s Rx:Tx, %sMII interface.\n",
-		   8 << config.u.ram_size, ram_split[config.u.ram_split],
-		   config.u.autoselect ? "autoselect " : "");
+		   8 << config & Ram_size,
+		   ram_split[(config & Ram_split) >> Ram_split_shift],
+		   config & Autoselect ? "autoselect " : "");
 
-	return;
+	return 0;
 
 cs_failed:
-	cs_error(link->handle, last_fn, last_ret);
+	cs_error(link, last_fn, last_ret);
 failed:
 	tc574_release(link);
-	return;
+	return -ENODEV;
 
 } /* tc574_config */
 
@@ -542,67 +486,32 @@ failed:
 	still open, this will be postponed until it is closed.
 */
 
-static void tc574_release(dev_link_t *link)
+static void tc574_release(struct pcmcia_device *link)
 {
-	DEBUG(0, "3c574_release(0x%p)\n", link);
-
-	pcmcia_release_configuration(link->handle);
-	pcmcia_release_io(link->handle, &link->io);
-	pcmcia_release_irq(link->handle, &link->irq);
-
-	link->state &= ~DEV_CONFIG;
+	pcmcia_disable_device(link);
 }
 
-/*
-	The card status event handler.  Mostly, this schedules other
-	stuff to run after an event is received.  A CARD_REMOVAL event
-	also sets some flags to discourage the net drivers from trying
-	to talk to the card any more.
-*/
-
-static int tc574_event(event_t event, int priority,
-					   event_callback_args_t *args)
+static int tc574_suspend(struct pcmcia_device *link)
 {
-	dev_link_t *link = args->client_data;
 	struct net_device *dev = link->priv;
 
-	DEBUG(1, "3c574_event(0x%06x)\n", event);
+	if (link->open)
+		netif_device_detach(dev);
 
-	switch (event) {
-	case CS_EVENT_CARD_REMOVAL:
-		link->state &= ~DEV_PRESENT;
-		if (link->state & DEV_CONFIG)
-			netif_device_detach(dev);
-		break;
-	case CS_EVENT_CARD_INSERTION:
-		link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
-		tc574_config(link);
-		break;
-	case CS_EVENT_PM_SUSPEND:
-		link->state |= DEV_SUSPEND;
-		/* Fall through... */
-	case CS_EVENT_RESET_PHYSICAL:
-		if (link->state & DEV_CONFIG) {
-			if (link->open)
-				netif_device_detach(dev);
-			pcmcia_release_configuration(link->handle);
-		}
-		break;
-	case CS_EVENT_PM_RESUME:
-		link->state &= ~DEV_SUSPEND;
-		/* Fall through... */
-	case CS_EVENT_CARD_RESET:
-		if (link->state & DEV_CONFIG) {
-			pcmcia_request_configuration(link->handle, &link->conf);
-			if (link->open) {
-				tc574_reset(dev);
-				netif_device_attach(dev);
-			}
-		}
-		break;
-	}
 	return 0;
-} /* tc574_event */
+}
+
+static int tc574_resume(struct pcmcia_device *link)
+{
+	struct net_device *dev = link->priv;
+
+	if (link->open) {
+		tc574_reset(dev);
+		netif_device_attach(dev);
+	}
+
+	return 0;
+}
 
 static void dump_status(struct net_device *dev)
 {
@@ -809,9 +718,9 @@ static void tc574_reset(struct net_device *dev)
 static int el3_open(struct net_device *dev)
 {
 	struct el3_private *lp = netdev_priv(dev);
-	dev_link_t *link = &lp->link;
+	struct pcmcia_device *link = lp->p_dev;
 
-	if (!DEV_OK(link))
+	if (!pcmcia_dev_present(link))
 		return -ENODEV;
 	
 	link->open++;
@@ -900,7 +809,7 @@ static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev)
 }
 
 /* The EL3 interrupt handler. */
-static irqreturn_t el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t el3_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	struct el3_private *lp = netdev_priv(dev);
@@ -1010,7 +919,7 @@ static void media_check(unsigned long arg)
 	if ((inw(ioaddr + EL3_STATUS) & IntLatch) && (inb(ioaddr + Timer) == 0xff)) {
 		if (!lp->fast_poll)
 			printk(KERN_INFO "%s: interrupt(s) dropped!\n", dev->name);
-		el3_interrupt(dev->irq, lp, NULL);
+		el3_interrupt(dev->irq, dev);
 		lp->fast_poll = HZ;
 	}
 	if (lp->fast_poll) {
@@ -1151,7 +1060,6 @@ static int el3_rx(struct net_device *dev, int worklimit)
 			DEBUG(3, "  Receiving packet size %d status %4.4x.\n",
 				  pkt_len, rx_status);
 			if (skb != NULL) {
-				skb->dev = dev;
 				skb_reserve(skb, 2);
 				insl(ioaddr+RX_FIFO, skb_put(skb, pkt_len),
 						((pkt_len+3)>>2));
@@ -1178,7 +1086,7 @@ static void netdev_get_drvinfo(struct net_device *dev,
 	strcpy(info->driver, "3c574_cs");
 }
 
-static struct ethtool_ops netdev_ethtool_ops = {
+static const struct ethtool_ops netdev_ethtool_ops = {
 	.get_drvinfo		= netdev_get_drvinfo,
 };
 
@@ -1255,11 +1163,11 @@ static int el3_close(struct net_device *dev)
 {
 	kio_addr_t ioaddr = dev->base_addr;
 	struct el3_private *lp = netdev_priv(dev);
-	dev_link_t *link = &lp->link;
+	struct pcmcia_device *link = lp->p_dev;
 
 	DEBUG(2, "%s: shutting down ethercard.\n", dev->name);
 	
-	if (DEV_OK(link)) {
+	if (pcmcia_dev_present(link)) {
 		unsigned long flags;
 
 		/* Turn off statistics ASAP.  We update lp->stats below. */
@@ -1274,6 +1182,9 @@ static int el3_close(struct net_device *dev)
 		spin_lock_irqsave(&lp->window_lock, flags);
 		update_stats(dev);
 		spin_unlock_irqrestore(&lp->window_lock, flags);
+
+		/* force interrupts off */
+		outw(SetIntrEnb | 0x0000, ioaddr + EL3_CMD);
 	}
 
 	link->open--;
@@ -1283,13 +1194,23 @@ static int el3_close(struct net_device *dev)
 	return 0;
 }
 
+static struct pcmcia_device_id tc574_ids[] = {
+	PCMCIA_DEVICE_MANF_CARD(0x0101, 0x0574),
+	PCMCIA_MFC_DEVICE_CIS_MANF_CARD(0, 0x0101, 0x0556, "3CCFEM556.cis"),
+	PCMCIA_DEVICE_NULL,
+};
+MODULE_DEVICE_TABLE(pcmcia, tc574_ids);
+
 static struct pcmcia_driver tc574_driver = {
 	.owner		= THIS_MODULE,
 	.drv		= {
 		.name	= "3c574_cs",
 	},
-	.attach		= tc574_attach,
-	.detach		= tc574_detach,
+	.probe		= tc574_probe,
+	.remove		= tc574_detach,
+	.id_table       = tc574_ids,
+	.suspend	= tc574_suspend,
+	.resume		= tc574_resume,
 };
 
 static int __init init_tc574(void)
@@ -1300,7 +1221,6 @@ static int __init init_tc574(void)
 static void __exit exit_tc574(void)
 {
 	pcmcia_unregister_driver(&tc574_driver);
-	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_tc574);

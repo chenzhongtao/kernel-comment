@@ -25,8 +25,6 @@
 #ifndef _IBMVETH_H
 #define _IBMVETH_H
 
-#define IbmVethMaxSendFrags 6
-
 /* constants for H_MULTICAST_CTRL */
 #define IbmVethMcastReceptionModifyBit     0x80000UL
 #define IbmVethMcastReceptionEnableBit     0x20000UL
@@ -41,14 +39,11 @@
 #define IbmVethMcastRemoveFilter     0x2UL
 #define IbmVethMcastClearFilterTable 0x3UL
 
-/* hcall numbers */
-#define H_VIO_SIGNAL             0x104
-#define H_REGISTER_LOGICAL_LAN   0x114
-#define H_FREE_LOGICAL_LAN       0x118
-#define H_ADD_LOGICAL_LAN_BUFFER 0x11C
-#define H_SEND_LOGICAL_LAN       0x120
-#define H_MULTICAST_CTRL         0x130
-#define H_CHANGE_LOGICAL_LAN_MAC 0x14C
+#define IBMVETH_ILLAN_PADDED_PKT_CSUM	0x0000000000002000ULL
+#define IBMVETH_ILLAN_TRUNK_PRI_MASK	0x0000000000000F00ULL
+#define IBMVETH_ILLAN_IPV6_TCP_CSUM		0x0000000000000004ULL
+#define IBMVETH_ILLAN_IPV4_TCP_CSUM		0x0000000000000002ULL
+#define IBMVETH_ILLAN_ACTIVE_TRUNK		0x0000000000000001ULL
 
 /* hcall macros */
 #define h_register_logical_lan(ua, buflst, rxq, fltlst, mac) \
@@ -60,8 +55,36 @@
 #define h_add_logical_lan_buffer(ua, buf) \
   plpar_hcall_norets(H_ADD_LOGICAL_LAN_BUFFER, ua, buf)
 
-#define h_send_logical_lan(ua, buf1, buf2, buf3, buf4, buf5, buf6, correlator) \
-  plpar_hcall_8arg_2ret(H_SEND_LOGICAL_LAN, ua, buf1, buf2, buf3, buf4, buf5, buf6, correlator, &correlator)
+static inline long h_send_logical_lan(unsigned long unit_address,
+		unsigned long desc1, unsigned long desc2, unsigned long desc3,
+		unsigned long desc4, unsigned long desc5, unsigned long desc6,
+		unsigned long corellator_in, unsigned long *corellator_out)
+{
+	long rc;
+	unsigned long retbuf[PLPAR_HCALL9_BUFSIZE];
+
+	rc = plpar_hcall9(H_SEND_LOGICAL_LAN, retbuf, unit_address, desc1,
+			desc2, desc3, desc4, desc5, desc6, corellator_in);
+
+	*corellator_out = retbuf[0];
+
+	return rc;
+}
+
+static inline long h_illan_attributes(unsigned long unit_address,
+				      unsigned long reset_mask, unsigned long set_mask,
+				      unsigned long *ret_attributes)
+{
+	long rc;
+	unsigned long retbuf[PLPAR_HCALL_BUFSIZE];
+
+	rc = plpar_hcall(H_ILLAN_ATTRIBUTES, retbuf, unit_address,
+			 reset_mask, set_mask);
+
+	*ret_attributes = retbuf[0];
+
+	return rc;
+}
 
 #define h_multicast_ctrl(ua, cmd, mac) \
   plpar_hcall_norets(H_MULTICAST_CTRL, ua, cmd, mac)
@@ -69,13 +92,15 @@
 #define h_change_logical_lan_mac(ua, mac) \
   plpar_hcall_norets(H_CHANGE_LOGICAL_LAN_MAC, ua, mac)
 
-#define IbmVethNumBufferPools 3
-#define IbmVethPool0DftSize (1024 * 2)
-#define IbmVethPool1DftSize (1024 * 4)
-#define IbmVethPool2DftSize (1024 * 10)
-#define IbmVethPool0DftCnt  256
-#define IbmVethPool1DftCnt  256
-#define IbmVethPool2DftCnt  256
+#define IbmVethNumBufferPools 5
+#define IBMVETH_BUFF_OH 22 /* Overhead: 14 ethernet header + 8 opaque handle */
+#define IBMVETH_MAX_MTU 68
+#define IBMVETH_MAX_POOL_COUNT 4096
+#define IBMVETH_MAX_BUF_SIZE (1024 * 128)
+
+static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
+static int pool_count[] = { 256, 768, 256, 256, 256 };
+static int pool_active[] = { 1, 1, 0, 0, 0};
 
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
 
@@ -90,6 +115,8 @@ struct ibmveth_buff_pool {
     u16 *free_map;
     dma_addr_t *dma_addr;
     struct sk_buff **skbuff;
+    int active;
+    struct kobject kobj;
 };
 
 struct ibmveth_rx_q {
@@ -104,20 +131,18 @@ struct ibmveth_rx_q {
 struct ibmveth_adapter {
     struct vio_dev *vdev;
     struct net_device *netdev;
+    struct napi_struct napi;
     struct net_device_stats stats;
     unsigned int mcastFilterSize;
     unsigned long mac_addr;
-    unsigned long liobn;
     void * buffer_list_addr;
     void * filter_list_addr;
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
     struct ibmveth_buff_pool rx_buff_pool[IbmVethNumBufferPools];
     struct ibmveth_rx_q rx_queue;
-    atomic_t not_replenishing;
-
-    /* helper tasks */
-    struct work_struct replenish_task;
+    int pool_config;
+    int rx_csum;
 
     /* adapter specific stats */
     u64 replenish_task_cycles;
@@ -126,33 +151,37 @@ struct ibmveth_adapter {
     u64 replenish_add_buff_success;
     u64 rx_invalid_buffer;
     u64 rx_no_buffer;
-    u64 tx_multidesc_send;
-    u64 tx_linearized;
-    u64 tx_linearize_failed;
     u64 tx_map_failed;
     u64 tx_send_failed;
+    spinlock_t stats_lock;
 };
 
-struct ibmveth_buf_desc_fields {	
-    u32 valid : 1;
-    u32 toggle : 1;
-    u32 reserved : 6;
-    u32 length : 24;
-    u32 address;
+struct ibmveth_buf_desc_fields {
+	u32 flags_len;
+#define IBMVETH_BUF_VALID	0x80000000
+#define IBMVETH_BUF_TOGGLE	0x40000000
+#define IBMVETH_BUF_NO_CSUM	0x02000000
+#define IBMVETH_BUF_CSUM_GOOD	0x01000000
+#define IBMVETH_BUF_LEN_MASK	0x00FFFFFF
+	u32 address;
 };
 
 union ibmveth_buf_desc {
-    u64 desc;	
+    u64 desc;
     struct ibmveth_buf_desc_fields fields;
 };
 
 struct ibmveth_rx_q_entry {
-    u16 toggle : 1;
-    u16 valid : 1;
-    u16 reserved : 14;
-    u16 offset;
-    u32 length;
-    u64 correlator;
+	u32 flags_off;
+#define IBMVETH_RXQ_TOGGLE		0x80000000
+#define IBMVETH_RXQ_TOGGLE_SHIFT	31
+#define IBMVETH_RXQ_VALID		0x40000000
+#define IBMVETH_RXQ_NO_CSUM		0x02000000
+#define IBMVETH_RXQ_CSUM_GOOD		0x01000000
+#define IBMVETH_RXQ_OFF_MASK		0x0000FFFF
+
+	u32 length;
+	u64 correlator;
 };
 
 #endif /* _IBMVETH_H */

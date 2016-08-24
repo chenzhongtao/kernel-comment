@@ -15,6 +15,7 @@
 #include <linux/timer.h>
 #include <linux/reboot.h>
 #include <linux/jiffies.h>
+#include <linux/init.h>
 #include <asm/types.h>
 #include <asm/s390_ext.h>
 
@@ -59,7 +60,8 @@ static volatile enum sclp_init_state_t {
 /* Internal state: is a request active at the sclp? */
 static volatile enum sclp_running_state_t {
 	sclp_running_state_idle,
-	sclp_running_state_running
+	sclp_running_state_running,
+	sclp_running_state_reset_pending
 } sclp_running_state = sclp_running_state_idle;
 
 /* Internal state: is a read request pending? */
@@ -85,29 +87,28 @@ static volatile enum sclp_mask_state_t {
 /* Maximum retry counts */
 #define SCLP_INIT_RETRY		3
 #define SCLP_MASK_RETRY		3
-#define SCLP_REQUEST_RETRY	3
 
 /* Timeout intervals in seconds.*/
-#define SCLP_BUSY_INTERVAL	2
-#define SCLP_RETRY_INTERVAL	5
+#define SCLP_BUSY_INTERVAL	10
+#define SCLP_RETRY_INTERVAL	30
 
 static void sclp_process_queue(void);
+static void __sclp_make_read_req(void);
 static int sclp_init_mask(int calculate);
 static int sclp_init(void);
 
 /* Perform service call. Return 0 on success, non-zero otherwise. */
-static int
-service_call(sclp_cmdw_t command, void *sccb)
+int
+sclp_service_call(sclp_cmdw_t command, void *sccb)
 {
 	int cc;
 
-	__asm__ __volatile__(
-		"   .insn rre,0xb2200000,%1,%2\n"  /* servc %1,%2 */
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=&d" (cc)
-		: "d" (command), "a" (__pa(sccb))
-		: "cc", "memory" );
+	asm volatile(
+		"	.insn	rre,0xb2200000,%1,%2\n"  /* servc %1,%2 */
+		"	ipm	%0\n"
+		"	srl	%0,28"
+		: "=&d" (cc) : "d" (command), "a" (__pa(sccb))
+		: "cc", "memory");
 	if (cc == 3)
 		return -EIO;
 	if (cc == 2)
@@ -115,19 +116,16 @@ service_call(sclp_cmdw_t command, void *sccb)
 	return 0;
 }
 
-/* Request timeout handler. Restart the request queue. If DATA is non-zero,
- * force restart of running request. */
-static void
-sclp_request_timeout(unsigned long data)
-{
-	unsigned long flags;
 
-	if (data) {
-		spin_lock_irqsave(&sclp_lock, flags);
-		sclp_running_state = sclp_running_state_idle;
-		spin_unlock_irqrestore(&sclp_lock, flags);
+static void
+__sclp_queue_read_req(void)
+{
+	if (sclp_reading_state == sclp_reading_state_idle) {
+		sclp_reading_state = sclp_reading_state_reading;
+		__sclp_make_read_req();
+		/* Add request to head of queue */
+		list_add(&sclp_read_req.list, &sclp_req_queue);
 	}
-	sclp_process_queue();
 }
 
 /* Set up request retry timer. Called while sclp_lock is locked. */
@@ -142,6 +140,29 @@ __sclp_set_request_timer(unsigned long time, void (*function)(unsigned long),
 	add_timer(&sclp_request_timer);
 }
 
+/* Request timeout handler. Restart the request queue. If DATA is non-zero,
+ * force restart of running request. */
+static void
+sclp_request_timeout(unsigned long data)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sclp_lock, flags);
+	if (data) {
+		if (sclp_running_state == sclp_running_state_running) {
+			/* Break running state and queue NOP read event request
+			 * to get a defined interface state. */
+			__sclp_queue_read_req();
+			sclp_running_state = sclp_running_state_idle;
+		}
+	} else {
+		__sclp_set_request_timer(SCLP_BUSY_INTERVAL * HZ,
+					 sclp_request_timeout, 0);
+	}
+	spin_unlock_irqrestore(&sclp_lock, flags);
+	sclp_process_queue();
+}
+
 /* Try to start a request. Return zero if the request was successfully
  * started or if it will be started at a later time. Return non-zero otherwise.
  * Called while sclp_lock is locked. */
@@ -153,11 +174,9 @@ __sclp_start_request(struct sclp_req *req)
 	if (sclp_running_state != sclp_running_state_idle)
 		return 0;
 	del_timer(&sclp_request_timer);
-	if (req->start_count <= SCLP_REQUEST_RETRY) {
-		rc = service_call(req->command, req->sccb);
-		req->start_count++;
-	} else
-		rc = -EIO;
+	rc = sclp_service_call(req->command, req->sccb);
+	req->start_count++;
+
 	if (rc == 0) {
 		/* Sucessfully started request */
 		req->status = SCLP_REQ_RUNNING;
@@ -195,7 +214,15 @@ sclp_process_queue(void)
 		rc = __sclp_start_request(req);
 		if (rc == 0)
 			break;
-		/* Request failed. */
+		/* Request failed */
+		if (req->start_count > 1) {
+			/* Cannot abort already submitted request - could still
+			 * be active at the SCLP */
+			__sclp_set_request_timer(SCLP_BUSY_INTERVAL * HZ,
+						 sclp_request_timeout, 0);
+			break;
+		}
+		/* Post-processing for aborted request */
 		list_del(&req->list);
 		if (req->callback) {
 			spin_unlock_irqrestore(&sclp_lock, flags);
@@ -225,7 +252,8 @@ sclp_add_request(struct sclp_req *req)
 	list_add_tail(&req->list, &sclp_req_queue);
 	rc = 0;
 	/* Start if request is first in list */
-	if (req->list.prev == &sclp_req_queue) {
+	if (sclp_running_state == sclp_running_state_idle &&
+	    req->list.prev == &sclp_req_queue) {
 		rc = __sclp_start_request(req);
 		if (rc)
 			list_del(&req->list);
@@ -290,15 +318,14 @@ sclp_read_cb(struct sclp_req *req, void *data)
 }
 
 /* Prepare read event data request. Called while sclp_lock is locked. */
-static inline void
-__sclp_make_read_req(void)
+static void __sclp_make_read_req(void)
 {
 	struct sccb_header *sccb;
 
 	sccb = (struct sccb_header *) sclp_read_sccb;
 	clear_page(sccb);
 	memset(&sclp_read_req, 0, sizeof(struct sclp_req));
-	sclp_read_req.command = SCLP_CMDW_READDATA;
+	sclp_read_req.command = SCLP_CMDW_READ_EVENT_DATA;
 	sclp_read_req.status = SCLP_REQ_QUEUED;
 	sclp_read_req.start_count = 0;
 	sclp_read_req.callback = sclp_read_cb;
@@ -328,7 +355,7 @@ __sclp_find_req(u32 sccb)
  * Prepare read event data request if necessary. Start processing of next
  * request on queue. */
 static void
-sclp_interrupt_handler(struct pt_regs *regs, __u16 code)
+sclp_interrupt_handler(__u16 code)
 {
 	struct sclp_req *req;
 	u32 finished_sccb;
@@ -338,6 +365,8 @@ sclp_interrupt_handler(struct pt_regs *regs, __u16 code)
 	finished_sccb = S390_lowcore.ext_params & 0xfffffff8;
 	evbuf_pending = S390_lowcore.ext_params & 0x3;
 	if (finished_sccb) {
+		del_timer(&sclp_request_timer);
+		sclp_running_state = sclp_running_state_reset_pending;
 		req = __sclp_find_req(finished_sccb);
 		if (req) {
 			/* Request post-processing */
@@ -352,25 +381,10 @@ sclp_interrupt_handler(struct pt_regs *regs, __u16 code)
 		sclp_running_state = sclp_running_state_idle;
 	}
 	if (evbuf_pending && sclp_receive_mask != 0 &&
-	    sclp_reading_state == sclp_reading_state_idle &&
-	    sclp_activation_state == sclp_activation_state_active ) {
-		sclp_reading_state = sclp_reading_state_reading;
-		__sclp_make_read_req();
-		/* Add request to head of queue */
-		list_add(&sclp_read_req.list, &sclp_req_queue);
-	}
+	    sclp_activation_state == sclp_activation_state_active)
+		__sclp_queue_read_req();
 	spin_unlock(&sclp_lock);
 	sclp_process_queue();
-}
-
-/* Return current Time-Of-Day clock. */
-static inline u64
-sclp_get_clock(void)
-{
-	u64 result;
-
-	asm volatile ("STCK 0(%1)" : "=m" (result) : "a" (&(result)) : "cc");
-	return result;
 }
 
 /* Convert interval in jiffies to TOD ticks. */
@@ -385,50 +399,53 @@ sclp_tod_from_jiffies(unsigned long jiffies)
 void
 sclp_sync_wait(void)
 {
-	unsigned long psw_mask;
+	unsigned long flags;
 	unsigned long cr0, cr0_sync;
 	u64 timeout;
+	int irq_context;
 
 	/* We'll be disabling timer interrupts, so we need a custom timeout
 	 * mechanism */
 	timeout = 0;
 	if (timer_pending(&sclp_request_timer)) {
 		/* Get timeout TOD value */
-		timeout = sclp_get_clock() +
+		timeout = get_clock() +
 			  sclp_tod_from_jiffies(sclp_request_timer.expires -
 						jiffies);
 	}
+	local_irq_save(flags);
 	/* Prevent bottom half from executing once we force interrupts open */
-	local_bh_disable();
+	irq_context = in_interrupt();
+	if (!irq_context)
+		local_bh_disable();
 	/* Enable service-signal interruption, disable timer interrupts */
+	trace_hardirqs_on();
 	__ctl_store(cr0, 0, 0);
 	cr0_sync = cr0;
 	cr0_sync |= 0x00000200;
 	cr0_sync &= 0xFFFFF3AC;
 	__ctl_load(cr0_sync, 0, 0);
-	asm volatile ("STOSM 0(%1),0x01"
-		      : "=m" (psw_mask) : "a" (&psw_mask) : "memory");
+	__raw_local_irq_stosm(0x01);
 	/* Loop until driver state indicates finished request */
 	while (sclp_running_state != sclp_running_state_idle) {
 		/* Check for expired request timer */
 		if (timer_pending(&sclp_request_timer) &&
-		    sclp_get_clock() > timeout &&
+		    get_clock() > timeout &&
 		    del_timer(&sclp_request_timer))
 			sclp_request_timer.function(sclp_request_timer.data);
-		barrier();
 		cpu_relax();
 	}
-	/* Restore interrupt settings */
-	asm volatile ("SSM 0(%0)"
-		      : : "a" (&psw_mask) : "memory");
+	local_irq_disable();
 	__ctl_load(cr0, 0, 0);
-	__local_bh_enable();
+	if (!irq_context)
+		_local_bh_enable();
+	local_irq_restore(flags);
 }
 
 EXPORT_SYMBOL(sclp_sync_wait);
 
 /* Dispatch changes in send and receive mask to registered listeners. */
-static inline void
+static void
 sclp_dispatch_state_change(void)
 {
 	struct list_head *l;
@@ -493,7 +510,7 @@ sclp_state_change_cb(struct evbuf_header *evbuf)
 }
 
 static struct sclp_register sclp_state_change_event = {
-	.receive_mask = EvTyp_StateChange_Mask,
+	.receive_mask = EVTYP_STATECHANGE_MASK,
 	.receiver_fn = sclp_state_change_cb
 };
 
@@ -611,7 +628,7 @@ __sclp_make_init_req(u32 receive_mask, u32 send_mask)
 	sccb = (struct init_sccb *) sclp_init_sccb;
 	clear_page(sccb);
 	memset(&sclp_init_req, 0, sizeof(struct sclp_req));
-	sclp_init_req.command = SCLP_CMDW_WRITEMASK;
+	sclp_init_req.command = SCLP_CMDW_WRITE_EVENT_MASK;
 	sclp_init_req.status = SCLP_REQ_FILLED;
 	sclp_init_req.start_count = 0;
 	sclp_init_req.callback = NULL;
@@ -757,7 +774,7 @@ EXPORT_SYMBOL(sclp_reactivate);
 /* Handler for external interruption used during initialization. Modify
  * request state to done. */
 static void
-sclp_check_handler(struct pt_regs *regs, __u16 code)
+sclp_check_handler(__u16 code)
 {
 	u32 finished_sccb;
 
@@ -814,7 +831,7 @@ sclp_check_interface(void)
 	for (retry = 0; retry <= SCLP_INIT_RETRY; retry++) {
 		__sclp_make_init_req(0, 0);
 		sccb = (struct init_sccb *) sclp_init_req.sccb;
-		rc = service_call(sclp_init_req.command, sccb);
+		rc = sclp_service_call(sclp_init_req.command, sccb);
 		if (rc == -EIO)
 			break;
 		sclp_init_req.status = SCLP_REQ_RUNNING;
@@ -913,3 +930,10 @@ sclp_init(void)
 	sclp_init_mask(1);
 	return 0;
 }
+
+static __init int sclp_initcall(void)
+{
+	return sclp_init();
+}
+
+arch_initcall(sclp_initcall);

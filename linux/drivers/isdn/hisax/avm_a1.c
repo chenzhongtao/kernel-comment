@@ -101,7 +101,7 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 #include "hscx_irq.c"
 
 static irqreturn_t
-avm_a1_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+avm_a1_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val, sval;
@@ -135,7 +135,7 @@ avm_a1_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-inline static void
+static inline void
 release_ioregs(struct IsdnCardState *cs, int mask)
 {
 	release_region(cs->hw.avm.cfg_reg, 8);
@@ -178,7 +178,7 @@ AVM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-int __init
+int __devinit
 setup_avm_a1(struct IsdnCard *card)
 {
 	u_char val;

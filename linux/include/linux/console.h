@@ -15,12 +15,12 @@
 #define _LINUX_CONSOLE_H_ 1
 
 #include <linux/types.h>
-#include <linux/spinlock.h>
 
 struct vc_data;
 struct console_font_op;
 struct console_font;
 struct module;
+struct tty_struct;
 
 /*
  * this is what the terminal answers to a ESC-Z or csi0c query.
@@ -45,12 +45,13 @@ struct consw {
 	int	(*con_font_get)(struct vc_data *, struct console_font *);
 	int	(*con_font_default)(struct vc_data *, struct console_font *, char *);
 	int	(*con_font_copy)(struct vc_data *, int);
-	int	(*con_resize)(struct vc_data *, unsigned int, unsigned int);
+	int     (*con_resize)(struct vc_data *, unsigned int, unsigned int,
+			       unsigned int);
 	int	(*con_set_palette)(struct vc_data *, unsigned char *);
 	int	(*con_scrolldelta)(struct vc_data *, int);
 	int	(*con_set_origin)(struct vc_data *);
 	void	(*con_save_screen)(struct vc_data *);
-	u8	(*con_build_attr)(struct vc_data *, u8, u8, u8, u8, u8);
+	u8	(*con_build_attr)(struct vc_data *, u8, u8, u8, u8, u8, u8);
 	void	(*con_invert_region)(struct vc_data *, u16 *, int);
 	u16    *(*con_screen_pos)(struct vc_data *, int);
 	unsigned long (*con_getxy)(struct vc_data *, unsigned long, int *, int *);
@@ -59,14 +60,15 @@ struct consw {
 extern const struct consw *conswitchp;
 
 extern const struct consw dummy_con;	/* dummy console buffer */
-extern const struct consw fb_con;	/* frame buffer based console */
 extern const struct consw vga_con;	/* VGA text console */
 extern const struct consw newport_con;	/* SGI Newport console  */
 extern const struct consw prom_con;	/* SPARC PROM console */
 
+int con_is_bound(const struct consw *csw);
+int register_con_driver(const struct consw *csw, int first, int last);
+int unregister_con_driver(const struct consw *csw);
 int take_over_console(const struct consw *sw, int first, int last, int deflt);
 void give_up_console(const struct consw *sw);
-
 /* scroll */
 #define SM_UP       (1)
 #define SM_DOWN     (2)
@@ -77,22 +79,27 @@ void give_up_console(const struct consw *sw);
 #define CM_MOVE     (3)
 
 /*
- *	The interface for a console, or any other device that
- *	wants to capture console messages (printer driver?)
+ * The interface for a console, or any other device that wants to capture
+ * console messages (printer driver?)
+ *
+ * If a console driver is marked CON_BOOT then it will be auto-unregistered
+ * when the first real console is registered.  This is for early-printk drivers.
  */
 
 #define CON_PRINTBUFFER	(1)
 #define CON_CONSDEV	(2) /* Last on the command line */
 #define CON_ENABLED	(4)
+#define CON_BOOT	(8)
+#define CON_ANYTIME	(16) /* Safe to call when cpu is offline */
 
-struct console
-{
-	char	name[8];
+struct console {
+	char	name[16];
 	void	(*write)(struct console *, const char *, unsigned);
 	int	(*read)(struct console *, char *, unsigned);
 	struct tty_driver *(*device)(struct console *, int *);
 	void	(*unblank)(void);
 	int	(*setup)(struct console *, char *);
+	int	(*early_setup)(void);
 	short	flags;
 	short	index;
 	int	cflag;
@@ -101,6 +108,7 @@ struct console
 };
 
 extern int add_preferred_console(char *name, int idx, char *options);
+extern int update_console_cmdline(char *name, int idx, char *name_new, int idx_new, char *options);
 extern void register_console(struct console *);
 extern int unregister_console(struct console *);
 extern struct console *console_drivers;
@@ -113,6 +121,18 @@ extern struct tty_driver *console_device(int *);
 extern void console_stop(struct console *);
 extern void console_start(struct console *);
 extern int is_console_locked(void);
+
+extern int console_suspend_enabled;
+
+/* Suspend and resume console messages over PM events */
+extern void suspend_console(void);
+extern void resume_console(void);
+
+int mda_console_init(void);
+void prom_con_init(void);
+
+void vcs_make_sysfs(struct tty_struct *tty);
+void vcs_remove_sysfs(struct tty_struct *tty);
 
 /* Some debug stub to catch some of the obvious races in the VT code */
 #if 1

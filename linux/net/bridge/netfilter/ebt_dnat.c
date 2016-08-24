@@ -8,29 +8,22 @@
  *
  */
 
+#include <linux/netfilter.h>
 #include <linux/netfilter_bridge/ebtables.h>
 #include <linux/netfilter_bridge/ebt_nat.h>
 #include <linux/module.h>
 #include <net/sock.h>
 
-static int ebt_target_dnat(struct sk_buff **pskb, unsigned int hooknr,
+static int ebt_target_dnat(struct sk_buff *skb, unsigned int hooknr,
    const struct net_device *in, const struct net_device *out,
    const void *data, unsigned int datalen)
 {
 	struct ebt_nat_info *info = (struct ebt_nat_info *)data;
 
-	if (skb_shared(*pskb) || skb_cloned(*pskb)) {
-		struct sk_buff *nskb;
+	if (skb_make_writable(skb, 0))
+		return NF_DROP;
 
-		nskb = skb_copy(*pskb, GFP_ATOMIC);
-		if (!nskb)
-			return NF_DROP;
-		if ((*pskb)->sk)
-			skb_set_owner_w(nskb, (*pskb)->sk);
-		kfree_skb(*pskb);
-		*pskb = nskb;
-	}
-	memcpy(eth_hdr(*pskb)->h_dest, info->mac, ETH_ALEN);
+	memcpy(eth_hdr(skb)->h_dest, info->mac, ETH_ALEN);
 	return info->target;
 }
 
@@ -61,16 +54,16 @@ static struct ebt_target dnat =
 	.me		= THIS_MODULE,
 };
 
-static int __init init(void)
+static int __init ebt_dnat_init(void)
 {
 	return ebt_register_target(&dnat);
 }
 
-static void __exit fini(void)
+static void __exit ebt_dnat_fini(void)
 {
 	ebt_unregister_target(&dnat);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ebt_dnat_init);
+module_exit(ebt_dnat_fini);
 MODULE_LICENSE("GPL");

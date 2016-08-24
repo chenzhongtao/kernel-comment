@@ -14,40 +14,11 @@ extern struct node_map_data node_data[];
 
 #define NODE_DATA(nid)          (&node_data[nid].pg_data)
 
-/*
- * Given a kernel address, find the home node of the underlying memory.
- */
-#define kvaddr_to_nid(kaddr)	pfn_to_nid(__pa(kaddr) >> PAGE_SHIFT)
-
-#define node_mem_map(nid)	(NODE_DATA(nid)->node_mem_map)
 #define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
 #define node_end_pfn(nid)						\
 ({									\
 	pg_data_t *__pgdat = NODE_DATA(nid);				\
 	__pgdat->node_start_pfn + __pgdat->node_spanned_pages;		\
-})
-#define node_localnr(pfn, nid)		((pfn) - node_start_pfn(nid))
-
-#define local_mapnr(kvaddr)						\
-({									\
-	unsigned long __pfn = __pa(kvaddr) >> PAGE_SHIFT;		\
-	(__pfn - node_start_pfn(pfn_to_nid(__pfn)));			\
-})
-
-#define pfn_to_page(pfn)						\
-({									\
-	unsigned long __pfn = (pfn);					\
-	int __node  = pfn_to_nid(__pfn);				\
-	&node_mem_map(__node)[node_localnr(__pfn,__node)];		\
-})
-
-#define page_to_pfn(pg)							\
-({									\
-	struct page *__page = pg;					\
-	struct zone *__zone = page_zone(__page);			\
-	BUG_ON(__zone == NULL);						\
-	(unsigned long)(__page - __zone->zone_mem_map)			\
-		+ __zone->zone_start_pfn;				\
 })
 
 /* We have these possible memory map layouts:
@@ -64,7 +35,7 @@ extern struct node_map_data node_data[];
 #define PFNNID_MAP_MAX  512     /* support 512GB */
 extern unsigned char pfnnid_map[PFNNID_MAP_MAX];
 
-#ifndef __LP64__
+#ifndef CONFIG_64BIT
 #define pfn_is_io(pfn) ((pfn & (0xf0000000UL >> PAGE_SHIFT)) == (0xf0000000UL >> PAGE_SHIFT))
 #else
 /* io can be 0xf0f0f0f0f0xxxxxx or 0xfffffffff0000000 */

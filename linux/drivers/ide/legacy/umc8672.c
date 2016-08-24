@@ -40,7 +40,6 @@
 #define REALLY_SLOW_IO		/* some systems can safely undef this */
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
@@ -106,12 +105,11 @@ static void umc_set_speeds (u8 speeds[])
 		speeds[0], speeds[1], speeds[2], speeds[3]);
 }
 
-static void tune_umc (ide_drive_t *drive, u8 pio)
+static void umc_set_pio_mode(ide_drive_t *drive, const u8 pio)
 {
 	unsigned long flags;
 	ide_hwgroup_t *hwgroup = ide_hwifs[HWIF(drive)->index^1].hwgroup;
 
-	pio = ide_get_best_pio_mode(drive, pio, 4, NULL);
 	printk("%s: setting umc8672 to PIO mode%d (speed %d)\n",
 		drive->name, pio, pio_to_umc[pio]);
 	spin_lock_irqsave(&ide_lock, flags);
@@ -126,8 +124,9 @@ static void tune_umc (ide_drive_t *drive, u8 pio)
 
 static int __init umc8672_probe(void)
 {
-	unsigned long flags;
 	ide_hwif_t *hwif, *mate;
+	unsigned long flags;
+	static u8 idx[4] = { 0, 1, 0xff, 0xff };
 
 	if (!request_region(0x108, 2, "umc8672")) {
 		printk(KERN_ERR "umc8672: ports 0x108-0x109 already in use.\n");
@@ -150,28 +149,36 @@ static int __init umc8672_probe(void)
 	mate = &ide_hwifs[1];
 
 	hwif->chipset = ide_umc8672;
-	hwif->tuneproc = &tune_umc;
+	hwif->pio_mask = ATA_PIO4;
+	hwif->set_pio_mode = &umc_set_pio_mode;
 	hwif->mate = mate;
 
 	mate->chipset = ide_umc8672;
-	mate->tuneproc = &tune_umc;
+	mate->pio_mask = ATA_PIO4;
+	mate->set_pio_mode = &umc_set_pio_mode;
 	mate->mate = hwif;
 	mate->channel = 1;
 
-	probe_hwif_init(hwif);
-	probe_hwif_init(mate);
-
-	create_proc_ide_interfaces();
+	ide_device_add(idx);
 
 	return 0;
 }
 
+int probe_umc8672 = 0;
+
+module_param_named(probe, probe_umc8672, bool, 0);
+MODULE_PARM_DESC(probe, "probe for UMC8672 chipset");
+
 /* Can be called directly from ide.c. */
 int __init umc8672_init(void)
 {
-	if (umc8672_probe())
-		return -ENODEV;
-	return 0;
+	if (probe_umc8672 == 0)
+		goto out;
+
+	if (umc8672_probe() == 0)
+		return 0;;
+out:
+	return -ENODEV;;
 }
 
 #ifdef MODULE

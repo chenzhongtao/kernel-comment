@@ -15,13 +15,12 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 
-#ifndef MAX_HWIFS
-#define MAX_HWIFS	CONFIG_IDE_MAX_HWIFS
-#endif
-
+/* Without this, the initialisation of PCI IDE cards end up calling
+ * ide_init_hwif_ports, which won't work. */
+#ifdef CONFIG_BLK_DEV_IDEPCI
 #define ide_default_io_ctl(base)	(0)
+#endif
 
 #include <asm-generic/ide_iops.h>
 

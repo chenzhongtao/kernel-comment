@@ -3,7 +3,6 @@
 /* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
 
 
-#include <linux/config.h>
 #include <linux/net.h>		/* struct socket, struct proto_ops */
 #include <linux/atm.h>		/* ATM stuff */
 #include <linux/atmdev.h>	/* ATM devices */
@@ -73,7 +72,7 @@ static int pvc_setsockopt(struct socket *sock, int level, int optname,
 
 
 static int pvc_getsockopt(struct socket *sock, int level, int optname,
-		          char __user *optval, int __user *optlen)
+			  char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
 	int error;
@@ -92,7 +91,7 @@ static int pvc_getname(struct socket *sock,struct sockaddr *sockaddr,
 	struct atm_vcc *vcc = ATM_SD(sock);
 
 	if (!vcc->dev || !test_bit(ATM_VF_ADDR,&vcc->flags)) return -ENOTCONN;
-        *sockaddr_len = sizeof(struct sockaddr_atmpvc);
+	*sockaddr_len = sizeof(struct sockaddr_atmpvc);
 	addr = (struct sockaddr_atmpvc *) sockaddr;
 	addr->sap_family = AF_ATMPVC;
 	addr->sap_addr.itf = vcc->dev->number;
@@ -102,7 +101,7 @@ static int pvc_getname(struct socket *sock,struct sockaddr *sockaddr,
 }
 
 
-static struct proto_ops pvc_proto_ops = {
+static const struct proto_ops pvc_proto_ops = {
 	.family =	PF_ATMPVC,
 	.owner =	THIS_MODULE,
 
@@ -125,10 +124,13 @@ static struct proto_ops pvc_proto_ops = {
 };
 
 
-static int pvc_create(struct socket *sock,int protocol)
+static int pvc_create(struct net *net, struct socket *sock,int protocol)
 {
+	if (net != &init_net)
+		return -EAFNOSUPPORT;
+
 	sock->ops = &pvc_proto_ops;
-	return vcc_create(sock, protocol, PF_ATMPVC);
+	return vcc_create(net, sock, protocol, PF_ATMPVC);
 }
 
 

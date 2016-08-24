@@ -10,12 +10,12 @@
  *
  * Cloned from the 2.5 SH version..
  */
-#include <linux/config.h>
 #include <linux/rwsem.h>
 #include <linux/module.h>
 #include <asm/uaccess.h>
 
-extern unsigned long copy_user_memcpy, copy_user_memcpy_end, __copy_user_fixup;
+extern unsigned long copy_user_memcpy, copy_user_memcpy_end;
+extern void __copy_user_fixup(void);
 
 static const struct exception_table_entry __copy_user_fixup_ex = {
 	.fixup = (unsigned long)&__copy_user_fixup,

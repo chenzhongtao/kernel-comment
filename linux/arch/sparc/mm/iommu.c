@@ -7,14 +7,13 @@
  * Copyright (C) 1997,1998 Jakub Jelinek    (jj@sunsite.mff.cuni.cz)
  */
  
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/highmem.h>	/* pte_offset_map => kmap_atomic */
+#include <linux/scatterlist.h>
 
-#include <asm/scatterlist.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/sbus.h>
@@ -133,7 +132,7 @@ iommu_init(int iommund, struct sbus_bus *sbus)
 	    impl, vers, iommu->page_table,
 	    (int)(IOMMU_NPTES*sizeof(iopte_t)), (int)IOMMU_NPTES);
 
-	sbus->iommu = iommu;
+	sbus->ofdev.dev.archdata.iommu = iommu;
 }
 
 /* This begs to be btfixup-ed by srmmu. */
@@ -144,8 +143,9 @@ static void iommu_flush_iotlb(iopte_t *iopte, unsigned int niopte)
 	unsigned long start;
 	unsigned long end;
 
-	start = (unsigned long)iopte & PAGE_MASK;
+	start = (unsigned long)iopte;
 	end = PAGE_ALIGN(start + niopte*sizeof(iopte_t));
+	start &= PAGE_MASK;
 	if (viking_mxcc_present) {
 		while(start < end) {
 			viking_mxcc_flush_page(start);
@@ -166,7 +166,7 @@ static void iommu_flush_iotlb(iopte_t *iopte, unsigned int niopte)
 
 static u32 iommu_get_one(struct page *page, int npages, struct sbus_bus *sbus)
 {
-	struct iommu_struct *iommu = sbus->iommu;
+	struct iommu_struct *iommu = sbus->ofdev.dev.archdata.iommu;
 	int ioptex;
 	iopte_t *iopte, *iopte0;
 	unsigned int busa, busa0;
@@ -238,9 +238,9 @@ static void iommu_get_scsi_sgl_noflush(struct scatterlist *sg, int sz, struct sb
 	while (sz != 0) {
 		--sz;
 		n = (sg->length + sg->offset + PAGE_SIZE-1) >> PAGE_SHIFT;
-		sg->dvma_address = iommu_get_one(sg->page, n, sbus) + sg->offset;
+		sg->dvma_address = iommu_get_one(sg_page(sg), n, sbus) + sg->offset;
 		sg->dvma_length = (__u32) sg->length;
-		sg++;
+		sg = sg_next(sg);
 	}
 }
 
@@ -252,9 +252,9 @@ static void iommu_get_scsi_sgl_gflush(struct scatterlist *sg, int sz, struct sbu
 	while (sz != 0) {
 		--sz;
 		n = (sg->length + sg->offset + PAGE_SIZE-1) >> PAGE_SHIFT;
-		sg->dvma_address = iommu_get_one(sg->page, n, sbus) + sg->offset;
+		sg->dvma_address = iommu_get_one(sg_page(sg), n, sbus) + sg->offset;
 		sg->dvma_length = (__u32) sg->length;
-		sg++;
+		sg = sg_next(sg);
 	}
 }
 
@@ -273,7 +273,7 @@ static void iommu_get_scsi_sgl_pflush(struct scatterlist *sg, int sz, struct sbu
 		 * XXX Is this a good assumption?
 		 * XXX What if someone else unmaps it here and races us?
 		 */
-		if ((page = (unsigned long) page_address(sg->page)) != 0) {
+		if ((page = (unsigned long) page_address(sg_page(sg))) != 0) {
 			for (i = 0; i < n; i++) {
 				if (page != oldpage) {	/* Already flushed? */
 					flush_page_for_dma(page);
@@ -283,20 +283,19 @@ static void iommu_get_scsi_sgl_pflush(struct scatterlist *sg, int sz, struct sbu
 			}
 		}
 
-		sg->dvma_address = iommu_get_one(sg->page, n, sbus) + sg->offset;
+		sg->dvma_address = iommu_get_one(sg_page(sg), n, sbus) + sg->offset;
 		sg->dvma_length = (__u32) sg->length;
-		sg++;
+		sg = sg_next(sg);
 	}
 }
 
 static void iommu_release_one(u32 busa, int npages, struct sbus_bus *sbus)
 {
-	struct iommu_struct *iommu = sbus->iommu;
+	struct iommu_struct *iommu = sbus->ofdev.dev.archdata.iommu;
 	int ioptex;
 	int i;
 
-	if (busa < iommu->start)
-		BUG();
+	BUG_ON(busa < iommu->start);
 	ioptex = (busa - iommu->start) >> PAGE_SHIFT;
 	for (i = 0; i < npages; i++) {
 		iopte_val(iommu->page_table[ioptex + i]) = 0;
@@ -326,7 +325,7 @@ static void iommu_release_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_b
 		n = (sg->length + sg->offset + PAGE_SIZE-1) >> PAGE_SHIFT;
 		iommu_release_one(sg->dvma_address & PAGE_MASK, n, sbus);
 		sg->dvma_address = 0x21212121;
-		sg++;
+		sg = sg_next(sg);
 	}
 }
 
@@ -335,14 +334,14 @@ static int iommu_map_dma_area(dma_addr_t *pba, unsigned long va,
     unsigned long addr, int len)
 {
 	unsigned long page, end;
-	struct iommu_struct *iommu = sbus_root->iommu;
+	struct iommu_struct *iommu = sbus_root->ofdev.dev.archdata.iommu;
 	iopte_t *iopte = iommu->page_table;
 	iopte_t *first;
 	int ioptex;
 
-	if ((va & ~PAGE_MASK) != 0) BUG();
-	if ((addr & ~PAGE_MASK) != 0) BUG();
-	if ((len & ~PAGE_MASK) != 0) BUG();
+	BUG_ON((va & ~PAGE_MASK) != 0);
+	BUG_ON((addr & ~PAGE_MASK) != 0);
+	BUG_ON((len & ~PAGE_MASK) != 0);
 
 	/* page color = physical address */
 	ioptex = bit_map_string_get(&iommu->usemap, len >> PAGE_SHIFT,
@@ -400,13 +399,13 @@ static int iommu_map_dma_area(dma_addr_t *pba, unsigned long va,
 
 static void iommu_unmap_dma_area(unsigned long busa, int len)
 {
-	struct iommu_struct *iommu = sbus_root->iommu;
+	struct iommu_struct *iommu = sbus_root->ofdev.dev.archdata.iommu;
 	iopte_t *iopte = iommu->page_table;
 	unsigned long end;
 	int ioptex = (busa - iommu->start) >> PAGE_SHIFT;
 
-	if ((busa & ~PAGE_MASK) != 0) BUG();
-	if ((len & ~PAGE_MASK) != 0) BUG();
+	BUG_ON((busa & ~PAGE_MASK) != 0);
+	BUG_ON((len & ~PAGE_MASK) != 0);
 
 	iopte += ioptex;
 	end = busa + len;
@@ -421,7 +420,7 @@ static void iommu_unmap_dma_area(unsigned long busa, int len)
 
 static struct page *iommu_translate_dvma(unsigned long busa)
 {
-	struct iommu_struct *iommu = sbus_root->iommu;
+	struct iommu_struct *iommu = sbus_root->ofdev.dev.archdata.iommu;
 	iopte_t *iopte = iommu->page_table;
 
 	iopte += ((busa - iommu->start) >> PAGE_SHIFT);

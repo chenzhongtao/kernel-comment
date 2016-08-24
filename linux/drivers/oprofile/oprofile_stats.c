@@ -22,10 +22,12 @@ void oprofile_reset_stats(void)
 	struct oprofile_cpu_buffer * cpu_buf; 
 	int i;
  
-	for_each_cpu(i) {
+	for_each_possible_cpu(i) {
 		cpu_buf = &cpu_buffer[i]; 
 		cpu_buf->sample_received = 0;
 		cpu_buf->sample_lost_overflow = 0;
+		cpu_buf->backtrace_aborted = 0;
+		cpu_buf->sample_invalid_eip = 0;
 	}
  
 	atomic_set(&oprofile_stats.sample_lost_no_mm, 0);
@@ -46,7 +48,7 @@ void oprofile_create_stats_files(struct super_block * sb, struct dentry * root)
 	if (!dir)
 		return;
 
-	for_each_cpu(i) {
+	for_each_possible_cpu(i) {
 		cpu_buf = &cpu_buffer[i]; 
 		snprintf(buf, 10, "cpu%d", i);
 		cpudir = oprofilefs_mkdir(sb, dir, buf);
@@ -61,6 +63,8 @@ void oprofile_create_stats_files(struct super_block * sb, struct dentry * root)
 			&cpu_buf->sample_lost_overflow);
 		oprofilefs_create_ro_ulong(sb, cpudir, "backtrace_aborted",
 			&cpu_buf->backtrace_aborted);
+		oprofilefs_create_ro_ulong(sb, cpudir, "sample_invalid_eip",
+			&cpu_buf->sample_invalid_eip);
 	}
  
 	oprofilefs_create_ro_atomic(sb, dir, "sample_lost_no_mm",

@@ -12,7 +12,6 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -121,21 +120,15 @@ void machine_halt (void)
 	}
 }
 
-EXPORT_SYMBOL(machine_halt);
-
 void machine_restart (char *__unused)
 {
 	machine_halt ();
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_power_off (void)
 {
 	machine_halt ();
 }
-
-EXPORT_SYMBOL(machine_power_off);
 
 
 /* Interrupts */
@@ -145,7 +138,7 @@ struct v850e_intc_irq_init irq_inits[] = {
 	{ "RPU", IRQ_RPU(0),	IRQ_RPU_NUM,	1, 6 },
 	{ 0 }
 };
-#define NUM_IRQ_INITS ((sizeof irq_inits / sizeof irq_inits[0]) - 1)
+#define NUM_IRQ_INITS (ARRAY_SIZE(irq_inits) - 1)
 
 struct hw_interrupt_type hw_itypes[NUM_IRQ_INITS];
 
@@ -167,5 +160,8 @@ static void make_reg_snap (int irq, void *dummy, struct pt_regs *regs)
 
 static int reg_snap_dev_id;
 static struct irqaction reg_snap_action = {
-	make_reg_snap, 0, CPU_MASK_NONE, "reg_snap", &reg_snap_dev_id, 0
+	.handler = make_reg_snap,
+	.mask = CPU_MASK_NONE,
+	.name = "reg_snap",
+	.dev_id = &reg_snap_dev_id,
 };

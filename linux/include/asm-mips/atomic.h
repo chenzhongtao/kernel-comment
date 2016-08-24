@@ -9,24 +9,16 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1996, 97, 99, 2000, 03, 04 by Ralf Baechle
+ * Copyright (C) 1996, 97, 99, 2000, 03, 04, 06 by Ralf Baechle
  */
-
-/*
- * As workaround for the ATOMIC_DEC_AND_LOCK / atomic_dec_and_lock mess in
- * <linux/spinlock.h> we have to include <linux/spinlock.h> outside the
- * main big wrapper ...
- */
-#include <linux/config.h>
-#include <linux/spinlock.h>
-
 #ifndef _ASM_ATOMIC_H
 #define _ASM_ATOMIC_H
 
+#include <linux/irqflags.h>
+#include <asm/barrier.h>
 #include <asm/cpu-features.h>
 #include <asm/war.h>
-
-extern spinlock_t atomic_lock;
+#include <asm/system.h>
 
 typedef struct { volatile int counter; } atomic_t;
 
@@ -47,7 +39,7 @@ typedef struct { volatile int counter; } atomic_t;
  *
  * Atomically sets the value of @v to @i.
  */
-#define atomic_set(v,i)		((v)->counter = (i))
+#define atomic_set(v, i)		((v)->counter = (i))
 
 /*
  * atomic_add - add integer to atomic variable
@@ -62,28 +54,35 @@ static __inline__ void atomic_add(int i, atomic_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%0, %1		# atomic_add		\n"
 		"	addu	%0, %2					\n"
 		"	sc	%0, %1					\n"
 		"	beqzl	%0, 1b					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else if (cpu_has_llsc) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%0, %1		# atomic_add		\n"
 		"	addu	%0, %2					\n"
 		"	sc	%0, %1					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		v->counter += i;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
 }
 
@@ -100,28 +99,35 @@ static __inline__ void atomic_sub(int i, atomic_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%0, %1		# atomic_sub		\n"
 		"	subu	%0, %2					\n"
 		"	sc	%0, %1					\n"
 		"	beqzl	%0, 1b					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else if (cpu_has_llsc) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%0, %1		# atomic_sub		\n"
 		"	subu	%0, %2					\n"
 		"	sc	%0, %1					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		v->counter -= i;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
 }
 
@@ -132,16 +138,19 @@ static __inline__ int atomic_add_return(int i, atomic_t * v)
 {
 	unsigned long result;
 
+	smp_llsc_mb();
+
 	if (cpu_has_llsc && R10000_LLSC_WAR) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%1, %2		# atomic_add_return	\n"
 		"	addu	%0, %1, %3				\n"
 		"	sc	%0, %2					\n"
 		"	beqzl	%0, 1b					\n"
 		"	addu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
@@ -149,24 +158,30 @@ static __inline__ int atomic_add_return(int i, atomic_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%1, %2		# atomic_add_return	\n"
 		"	addu	%0, %1, %3				\n"
 		"	sc	%0, %2					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
 		"	addu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		result = v->counter;
 		result += i;
 		v->counter = result;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
+
+	smp_llsc_mb();
 
 	return result;
 }
@@ -175,16 +190,19 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
 {
 	unsigned long result;
 
+	smp_llsc_mb();
+
 	if (cpu_has_llsc && R10000_LLSC_WAR) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%1, %2		# atomic_sub_return	\n"
 		"	subu	%0, %1, %3				\n"
 		"	sc	%0, %2					\n"
 		"	beqzl	%0, 1b					\n"
 		"	subu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
@@ -192,50 +210,63 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%1, %2		# atomic_sub_return	\n"
 		"	subu	%0, %1, %3				\n"
 		"	sc	%0, %2					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
 		"	subu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		result = v->counter;
 		result -= i;
 		v->counter = result;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
+
+	smp_llsc_mb();
 
 	return result;
 }
 
 /*
- * atomic_sub_if_positive - add integer to atomic variable
+ * atomic_sub_if_positive - conditionally subtract integer from atomic variable
+ * @i: integer value to subtract
  * @v: pointer of type atomic_t
  *
- * Atomically test @v and decrement if it is greater than 0.
- * The function returns the old value of @v minus 1.
+ * Atomically test @v and subtract @i if @v is greater or equal than @i.
+ * The function returns the old value of @v minus @i.
  */
 static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
 {
 	unsigned long result;
 
+	smp_llsc_mb();
+
 	if (cpu_has_llsc && R10000_LLSC_WAR) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%1, %2		# atomic_sub_if_positive\n"
 		"	subu	%0, %1, %3				\n"
 		"	bltz	%0, 1f					\n"
 		"	sc	%0, %2					\n"
+		"	.set	noreorder				\n"
 		"	beqzl	%0, 1b					\n"
-		"	sync						\n"
+		"	 subu	%0, %1, %3				\n"
+		"	.set	reorder					\n"
 		"1:							\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
@@ -243,32 +274,69 @@ static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	ll	%1, %2		# atomic_sub_if_positive\n"
 		"	subu	%0, %1, %3				\n"
 		"	bltz	%0, 1f					\n"
 		"	sc	%0, %2					\n"
-		"	beqz	%0, 1b					\n"
-		"	sync						\n"
+		"	.set	noreorder				\n"
+		"	beqz	%0, 2f					\n"
+		"	 subu	%0, %1, %3				\n"
+		"	.set	reorder					\n"
 		"1:							\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		result = v->counter;
 		result -= i;
 		if (result >= 0)
 			v->counter = result;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
+
+	smp_llsc_mb();
 
 	return result;
 }
 
-#define atomic_dec_return(v) atomic_sub_return(1,(v))
-#define atomic_inc_return(v) atomic_add_return(1,(v))
+#define atomic_cmpxchg(v, o, n) (cmpxchg(&((v)->counter), (o), (n)))
+#define atomic_xchg(v, new) (xchg(&((v)->counter), (new)))
+
+/**
+ * atomic_add_unless - add unless the number is a given value
+ * @v: pointer of type atomic_t
+ * @a: the amount to add to v...
+ * @u: ...unless v is equal to u.
+ *
+ * Atomically adds @a to @v, so long as it was not @u.
+ * Returns non-zero if @v was not @u, and zero otherwise.
+ */
+static __inline__ int atomic_add_unless(atomic_t *v, int a, int u)
+{
+	int c, old;
+	c = atomic_read(v);
+	for (;;) {
+		if (unlikely(c == (u)))
+			break;
+		old = atomic_cmpxchg((v), c, c + (a));
+		if (likely(old == c))
+			break;
+		c = old;
+	}
+	return c != (u);
+}
+#define atomic_inc_not_zero(v) atomic_add_unless((v), 1, 0)
+
+#define atomic_dec_return(v) atomic_sub_return(1, (v))
+#define atomic_inc_return(v) atomic_add_return(1, (v))
 
 /*
  * atomic_sub_and_test - subtract value from variable and test result
@@ -279,7 +347,7 @@ static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
  * true if the result is zero, or false for all
  * other cases.
  */
-#define atomic_sub_and_test(i,v) (atomic_sub_return((i), (v)) == 0)
+#define atomic_sub_and_test(i, v) (atomic_sub_return((i), (v)) == 0)
 
 /*
  * atomic_inc_and_test - increment and test
@@ -313,7 +381,7 @@ static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
  *
  * Atomically increments @v by 1.
  */
-#define atomic_inc(v) atomic_add(1,(v))
+#define atomic_inc(v) atomic_add(1, (v))
 
 /*
  * atomic_dec - decrement and test
@@ -321,7 +389,7 @@ static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
  *
  * Atomically decrements @v by 1.
  */
-#define atomic_dec(v) atomic_sub(1,(v))
+#define atomic_dec(v) atomic_sub(1, (v))
 
 /*
  * atomic_add_negative - add and test if negative
@@ -332,11 +400,11 @@ static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
  * if the result is negative, or false when
  * result is greater than or equal to zero.
  */
-#define atomic_add_negative(i,v) (atomic_add_return(i, (v)) < 0)
+#define atomic_add_negative(i, v) (atomic_add_return(i, (v)) < 0)
 
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 
-typedef struct { volatile __s64 counter; } atomic64_t;
+typedef struct { volatile long counter; } atomic64_t;
 
 #define ATOMIC64_INIT(i)    { (i) }
 
@@ -352,7 +420,7 @@ typedef struct { volatile __s64 counter; } atomic64_t;
  * @v: pointer of type atomic64_t
  * @i: required value
  */
-#define atomic64_set(v,i)	((v)->counter = (i))
+#define atomic64_set(v, i)	((v)->counter = (i))
 
 /*
  * atomic64_add - add integer to atomic variable
@@ -367,28 +435,35 @@ static __inline__ void atomic64_add(long i, atomic64_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%0, %1		# atomic64_add		\n"
 		"	addu	%0, %2					\n"
 		"	scd	%0, %1					\n"
 		"	beqzl	%0, 1b					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else if (cpu_has_llsc) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%0, %1		# atomic64_add		\n"
 		"	addu	%0, %2					\n"
 		"	scd	%0, %1					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		v->counter += i;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
 }
 
@@ -405,28 +480,35 @@ static __inline__ void atomic64_sub(long i, atomic64_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%0, %1		# atomic64_sub		\n"
 		"	subu	%0, %2					\n"
 		"	scd	%0, %1					\n"
 		"	beqzl	%0, 1b					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else if (cpu_has_llsc) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%0, %1		# atomic64_sub		\n"
 		"	subu	%0, %2					\n"
 		"	scd	%0, %1					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		v->counter -= i;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
 }
 
@@ -437,16 +519,19 @@ static __inline__ long atomic64_add_return(long i, atomic64_t * v)
 {
 	unsigned long result;
 
+	smp_llsc_mb();
+
 	if (cpu_has_llsc && R10000_LLSC_WAR) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%1, %2		# atomic64_add_return	\n"
 		"	addu	%0, %1, %3				\n"
 		"	scd	%0, %2					\n"
 		"	beqzl	%0, 1b					\n"
 		"	addu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
@@ -454,24 +539,30 @@ static __inline__ long atomic64_add_return(long i, atomic64_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%1, %2		# atomic64_add_return	\n"
 		"	addu	%0, %1, %3				\n"
 		"	scd	%0, %2					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
 		"	addu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		result = v->counter;
 		result += i;
 		v->counter = result;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
+
+	smp_llsc_mb();
 
 	return result;
 }
@@ -480,16 +571,19 @@ static __inline__ long atomic64_sub_return(long i, atomic64_t * v)
 {
 	unsigned long result;
 
+	smp_llsc_mb();
+
 	if (cpu_has_llsc && R10000_LLSC_WAR) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%1, %2		# atomic64_sub_return	\n"
 		"	subu	%0, %1, %3				\n"
 		"	scd	%0, %2					\n"
 		"	beqzl	%0, 1b					\n"
 		"	subu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
@@ -497,50 +591,63 @@ static __inline__ long atomic64_sub_return(long i, atomic64_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%1, %2		# atomic64_sub_return	\n"
 		"	subu	%0, %1, %3				\n"
 		"	scd	%0, %2					\n"
-		"	beqz	%0, 1b					\n"
+		"	beqz	%0, 2f					\n"
 		"	subu	%0, %1, %3				\n"
-		"	sync						\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		result = v->counter;
 		result -= i;
 		v->counter = result;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
+
+	smp_llsc_mb();
 
 	return result;
 }
 
 /*
- * atomic64_sub_if_positive - add integer to atomic variable
+ * atomic64_sub_if_positive - conditionally subtract integer from atomic variable
+ * @i: integer value to subtract
  * @v: pointer of type atomic64_t
  *
- * Atomically test @v and decrement if it is greater than 0.
- * The function returns the old value of @v minus 1.
+ * Atomically test @v and subtract @i if @v is greater or equal than @i.
+ * The function returns the old value of @v minus @i.
  */
 static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
 {
 	unsigned long result;
 
+	smp_llsc_mb();
+
 	if (cpu_has_llsc && R10000_LLSC_WAR) {
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%1, %2		# atomic64_sub_if_positive\n"
 		"	dsubu	%0, %1, %3				\n"
 		"	bltz	%0, 1f					\n"
 		"	scd	%0, %2					\n"
+		"	.set	noreorder				\n"
 		"	beqzl	%0, 1b					\n"
-		"	sync						\n"
+		"	 dsubu	%0, %1, %3				\n"
+		"	.set	reorder					\n"
 		"1:							\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
@@ -548,32 +655,71 @@ static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
 		unsigned long temp;
 
 		__asm__ __volatile__(
+		"	.set	mips3					\n"
 		"1:	lld	%1, %2		# atomic64_sub_if_positive\n"
 		"	dsubu	%0, %1, %3				\n"
 		"	bltz	%0, 1f					\n"
 		"	scd	%0, %2					\n"
-		"	beqz	%0, 1b					\n"
-		"	sync						\n"
+		"	.set	noreorder				\n"
+		"	beqz	%0, 2f					\n"
+		"	 dsubu	%0, %1, %3				\n"
+		"	.set	reorder					\n"
 		"1:							\n"
+		"	.subsection 2					\n"
+		"2:	b	1b					\n"
+		"	.previous					\n"
+		"	.set	mips0					\n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
 	} else {
 		unsigned long flags;
 
-		spin_lock_irqsave(&atomic_lock, flags);
+		raw_local_irq_save(flags);
 		result = v->counter;
 		result -= i;
 		if (result >= 0)
 			v->counter = result;
-		spin_unlock_irqrestore(&atomic_lock, flags);
+		raw_local_irq_restore(flags);
 	}
+
+	smp_llsc_mb();
 
 	return result;
 }
 
-#define atomic64_dec_return(v) atomic64_sub_return(1,(v))
-#define atomic64_inc_return(v) atomic64_add_return(1,(v))
+#define atomic64_cmpxchg(v, o, n) \
+	((__typeof__((v)->counter))cmpxchg(&((v)->counter), (o), (n)))
+#define atomic64_xchg(v, new) (xchg(&((v)->counter), (new)))
+
+/**
+ * atomic64_add_unless - add unless the number is a given value
+ * @v: pointer of type atomic64_t
+ * @a: the amount to add to v...
+ * @u: ...unless v is equal to u.
+ *
+ * Atomically adds @a to @v, so long as it was not @u.
+ * Returns non-zero if @v was not @u, and zero otherwise.
+ */
+static __inline__ int atomic64_add_unless(atomic64_t *v, long a, long u)
+{
+	long c, old;
+	c = atomic64_read(v);
+	for (;;) {
+		if (unlikely(c == (u)))
+			break;
+		old = atomic64_cmpxchg((v), c, c + (a));
+		if (likely(old == c))
+			break;
+		c = old;
+	}
+	return c != (u);
+}
+
+#define atomic64_inc_not_zero(v) atomic64_add_unless((v), 1, 0)
+
+#define atomic64_dec_return(v) atomic64_sub_return(1, (v))
+#define atomic64_inc_return(v) atomic64_add_return(1, (v))
 
 /*
  * atomic64_sub_and_test - subtract value from variable and test result
@@ -584,7 +730,7 @@ static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
  * true if the result is zero, or false for all
  * other cases.
  */
-#define atomic64_sub_and_test(i,v) (atomic64_sub_return((i), (v)) == 0)
+#define atomic64_sub_and_test(i, v) (atomic64_sub_return((i), (v)) == 0)
 
 /*
  * atomic64_inc_and_test - increment and test
@@ -618,7 +764,7 @@ static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
  *
  * Atomically increments @v by 1.
  */
-#define atomic64_inc(v) atomic64_add(1,(v))
+#define atomic64_inc(v) atomic64_add(1, (v))
 
 /*
  * atomic64_dec - decrement and test
@@ -626,7 +772,7 @@ static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
  *
  * Atomically decrements @v by 1.
  */
-#define atomic64_dec(v) atomic64_sub(1,(v))
+#define atomic64_dec(v) atomic64_sub(1, (v))
 
 /*
  * atomic64_add_negative - add and test if negative
@@ -637,17 +783,19 @@ static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
  * if the result is negative, or false when
  * result is greater than or equal to zero.
  */
-#define atomic64_add_negative(i,v) (atomic64_add_return(i, (v)) < 0)
+#define atomic64_add_negative(i, v) (atomic64_add_return(i, (v)) < 0)
 
-#endif /* CONFIG_MIPS64 */
+#endif /* CONFIG_64BIT */
 
 /*
  * atomic*_return operations are serializing but not the non-*_return
  * versions.
  */
-#define smp_mb__before_atomic_dec()	smp_mb()
-#define smp_mb__after_atomic_dec()	smp_mb()
-#define smp_mb__before_atomic_inc()	smp_mb()
-#define smp_mb__after_atomic_inc()	smp_mb()
+#define smp_mb__before_atomic_dec()	smp_llsc_mb()
+#define smp_mb__after_atomic_dec()	smp_llsc_mb()
+#define smp_mb__before_atomic_inc()	smp_llsc_mb()
+#define smp_mb__after_atomic_inc()	smp_llsc_mb()
+
+#include <asm-generic/atomic.h>
 
 #endif /* _ASM_ATOMIC_H */

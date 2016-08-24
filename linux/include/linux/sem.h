@@ -2,7 +2,6 @@
 #define _LINUX_SEM_H
 
 #include <linux/ipc.h>
-#include <asm/atomic.h>
 
 /* semop flags */
 #define SEM_UNDO        0x1000  /* undo the operation on exit */
@@ -78,6 +77,9 @@ struct  seminfo {
 #define SEMUSZ  20		/* sizeof struct sem_undo */
 
 #ifdef __KERNEL__
+#include <asm/atomic.h>
+
+struct task_struct;
 
 /* One semaphore structure for each semaphore in the system. */
 struct sem {

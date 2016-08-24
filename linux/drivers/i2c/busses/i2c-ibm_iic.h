@@ -1,5 +1,5 @@
 /*
- * drivers/i2c/i2c-ibm_iic.h
+ * drivers/i2c/busses/i2c-ibm_iic.h
  *
  * Support for the IIC peripheral on IBM PPC 4xx
  * 
@@ -22,7 +22,6 @@
 #ifndef __I2C_IBM_IIC_H_
 #define __I2C_IBM_IIC_H_
 
-#include <linux/config.h>
 #include <linux/i2c.h> 
 
 struct iic_regs {

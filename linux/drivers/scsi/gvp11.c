@@ -1,8 +1,6 @@
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/blkdev.h>
-#include <linux/sched.h>
-#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 
@@ -25,7 +23,7 @@
 #define DMA(ptr) ((gvp11_scsiregs *)((ptr)->base))
 #define HDATA(ptr) ((struct WD33C93_hostdata *)((ptr)->hostdata))
 
-static irqreturn_t gvp11_intr (int irq, void *_instance, struct pt_regs *fp)
+static irqreturn_t gvp11_intr (int irq, void *_instance)
 {
     unsigned long flags;
     unsigned int status;
@@ -48,7 +46,7 @@ void gvp11_setup (char *str, int *ints)
     gvp11_xfer_mask = ints[1];
 }
 
-static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
+static int dma_setup(struct scsi_cmnd *cmd, int dir_in)
 {
     unsigned short cntr = GVP11_DMAC_INT_ENABLE;
     unsigned long addr = virt_to_bus(cmd->SCp.ptr);
@@ -143,8 +141,8 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
     return 0;
 }
 
-static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
-		      int status)
+static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
+		     int status)
 {
     /* stop DMA */
     DMA(instance)->SP_DMA = 1;
@@ -170,7 +168,7 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 
 #define CHECK_WD33C93
 
-int __init gvp11_detect(Scsi_Host_Template *tpnt)
+int __init gvp11_detect(struct scsi_host_template *tpnt)
 {
     static unsigned char called = 0;
     struct Scsi_Host *instance;
@@ -329,7 +327,7 @@ int __init gvp11_detect(Scsi_Host_Template *tpnt)
 		     (epc & GVP_SCSICLKMASK) ? WD33C93_FS_8_10
 					     : WD33C93_FS_12_15);
 
-	request_irq(IRQ_AMIGA_PORTS, gvp11_intr, SA_SHIRQ, "GVP11 SCSI",
+	request_irq(IRQ_AMIGA_PORTS, gvp11_intr, IRQF_SHARED, "GVP11 SCSI",
 		    instance);
 	DMA(instance)->CNTR = GVP11_DMAC_INT_ENABLE;
 	num_gvp11++;
@@ -342,10 +340,18 @@ release:
     return num_gvp11;
 }
 
-static int gvp11_bus_reset(Scsi_Cmnd *cmd)
+static int gvp11_bus_reset(struct scsi_cmnd *cmd)
 {
 	/* FIXME perform bus-specific reset */
+
+	/* FIXME 2: shouldn't we no-op this function (return
+	   FAILED), and fall back to host reset function,
+	   wd33c93_host_reset ? */
+
+	spin_lock_irq(cmd->device->host->host_lock);
 	wd33c93_host_reset(cmd);
+	spin_unlock_irq(cmd->device->host->host_lock);
+
 	return SUCCESS;
 }
 
@@ -354,7 +360,7 @@ static int gvp11_bus_reset(Scsi_Cmnd *cmd)
 
 #include "gvp11.h"
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "GVP11",
 	.name			= "GVP Series II SCSI",
 	.detect			= gvp11_detect,

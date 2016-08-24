@@ -259,7 +259,7 @@ struct ac97_codec {
 	int type;
 	u32 model;
 
-	int modem:1;
+	unsigned int modem:1;
 
 	struct ac97_ops *codec_ops;
 
@@ -323,6 +323,7 @@ struct ac97_ops
 	
 #define AC97_DELUDED_MODEM	1	/* Audio codec reports its a modem */
 #define AC97_NO_PCM_VOLUME	2	/* Volume control is missing 	   */
+#define AC97_DEFAULT_POWER_OFF 4 /* Needs warm reset to power up */
 };
 
 extern int ac97_read_proc (char *page_out, char **start, off_t off,
@@ -330,8 +331,6 @@ extern int ac97_read_proc (char *page_out, char **start, off_t off,
 extern int ac97_probe_codec(struct ac97_codec *);
 extern unsigned int ac97_set_adc_rate(struct ac97_codec *codec, unsigned int rate);
 extern unsigned int ac97_set_dac_rate(struct ac97_codec *codec, unsigned int rate);
-extern int ac97_save_state(struct ac97_codec *codec);
-extern int ac97_restore_state(struct ac97_codec *codec);
 
 extern struct ac97_codec *ac97_alloc_codec(void);
 extern void ac97_release_codec(struct ac97_codec *codec);
@@ -344,9 +343,6 @@ struct ac97_driver {
 	int (*probe) (struct ac97_codec *codec, struct ac97_driver *driver);
 	void (*remove) (struct ac97_codec *codec, struct ac97_driver *driver);
 };
-
-extern int ac97_register_driver(struct ac97_driver *driver);
-extern void ac97_unregister_driver(struct ac97_driver *driver);
 
 /* quirk types */
 enum {

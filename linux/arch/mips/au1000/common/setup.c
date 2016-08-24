@@ -25,13 +25,14 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
+#include <linux/pm.h>
 
 #include <asm/cpu.h>
 #include <asm/bootinfo.h>
@@ -39,25 +40,20 @@
 #include <asm/mipsregs.h>
 #include <asm/reboot.h>
 #include <asm/pgtable.h>
-#include <asm/mach-au1x00/au1000.h>
 #include <asm/time.h>
 
-extern char * __init prom_getcmdline(void);
+#include <au1000.h>
+#include <prom.h>
+
 extern void __init board_setup(void);
 extern void au1000_restart(char *);
 extern void au1000_halt(void);
 extern void au1000_power_off(void);
-extern struct resource ioport_resource;
-extern struct resource iomem_resource;
-extern void (*board_time_init)(void);
 extern void au1x_time_init(void);
-extern void (*board_timer_setup)(struct irqaction *irq);
 extern void au1x_timer_setup(struct irqaction *irq);
-extern void au1xxx_time_init(void);
-extern void au1xxx_timer_setup(struct irqaction *irq);
 extern void set_cpuspec(void);
 
-static int __init au1x00_setup(void)
+void __init plat_mem_setup(void)
 {
 	struct	cpu_spec *sp;
 	char *argptr;
@@ -88,47 +84,25 @@ static int __init au1x00_setup(void)
 	else {
 		/* Clear to obtain best system bus performance */
 		clear_c0_config(1<<19); /* Clear Config[OD] */
- 	}
+	}
 
 	argptr = prom_getcmdline();
 
-#ifdef CONFIG_SERIAL_AU1X00_CONSOLE
+#ifdef CONFIG_SERIAL_8250_CONSOLE
 	if ((argptr = strstr(argptr, "console=")) == NULL) {
 		argptr = prom_getcmdline();
 		strcat(argptr, " console=ttyS0,115200");
 	}
-#endif	  
+#endif
 
 #ifdef CONFIG_FB_AU1100
     if ((argptr = strstr(argptr, "video=")) == NULL) {
         argptr = prom_getcmdline();
         /* default panel */
         /*strcat(argptr, " video=au1100fb:panel:Sharp_320x240_16");*/
-#ifdef CONFIG_MIPS_HYDROGEN3
-         strcat(argptr, " video=au1100fb:panel:Hydrogen_3_NEC_panel_320x240,nohwcursor");
-#else
-        strcat(argptr, " video=au1100fb:panel:s10,nohwcursor");
-#endif
     }
 #endif
 
-#ifdef CONFIG_FB_E1356
-	if ((argptr = strstr(argptr, "video=")) == NULL) {
-		argptr = prom_getcmdline();
-#ifdef CONFIG_MIPS_PB1000
-		strcat(argptr, " video=e1356fb:system:pb1000,mmunalign:1");
-#else
-		strcat(argptr, " video=e1356fb:system:pb1500");
-#endif
-	}
-#endif
-
-#ifdef CONFIG_FB_XPERT98
-	if ((argptr = strstr(argptr, "video=")) == NULL) {
-		argptr = prom_getcmdline();
-		strcat(argptr, " video=atyfb:1024x768-8@70");
-	}
-#endif
 
 #if defined(CONFIG_SOUND_AU1X00) && !defined(CONFIG_SOC_AU1000)
 	/* au1000 does not support vra, au1500 and au1100 do */
@@ -137,9 +111,7 @@ static int __init au1x00_setup(void)
 #endif
 	_machine_restart = au1000_restart;
 	_machine_halt = au1000_halt;
-	_machine_power_off = au1000_power_off;
-	board_time_init = au1xxx_time_init;
-	board_timer_setup = au1xxx_timer_setup;
+	pm_power_off = au1000_power_off;
 
 	/* IO/MEM resources. */
 	set_io_port_base(0);
@@ -153,27 +125,25 @@ static int __init au1x00_setup(void)
 	au_sync();
 	while (au_readl(SYS_COUNTER_CNTRL) & SYS_CNTRL_T0S);
 	au_writel(0, SYS_TOYTRIM);
-
-	return 0;
 }
-
-early_initcall(au1x00_setup);
 
 #if defined(CONFIG_64BIT_PHYS_ADDR)
 /* This routine should be valid for all Au1x based boards */
-phys_t fixup_bigphys_addr(phys_t phys_addr, phys_t size)
+phys_t __fixup_bigphys_addr(phys_t phys_addr, phys_t size)
 {
-	u32 start, end;
-
 	/* Don't fixup 36 bit addresses */
-	if ((phys_addr >> 32) != 0) return phys_addr;
+	if ((phys_addr >> 32) != 0)
+		return phys_addr;
 
 #ifdef CONFIG_PCI
-	start = (u32)Au1500_PCI_MEM_START;
-	end = (u32)Au1500_PCI_MEM_END;
-	/* check for pci memory window */
-	if ((phys_addr >= start) && ((phys_addr + size) < end)) {
-		return (phys_t)((phys_addr - start) + Au1500_PCI_MEM_START);
+	{
+		u32 start = (u32)Au1500_PCI_MEM_START;
+		u32 end   = (u32)Au1500_PCI_MEM_END;
+
+		/* Check for PCI memory window */
+		if (phys_addr >= start && (phys_addr + size - 1) <= end)
+			return (phys_t)
+			       ((phys_addr - start) + Au1500_PCI_MEM_START);
 	}
 #endif
 
@@ -192,4 +162,5 @@ phys_t fixup_bigphys_addr(phys_t phys_addr, phys_t size)
 	/* default nop */
 	return phys_addr;
 }
+EXPORT_SYMBOL(__fixup_bigphys_addr);
 #endif

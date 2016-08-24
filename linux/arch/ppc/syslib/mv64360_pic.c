@@ -1,6 +1,4 @@
 /*
- * arch/ppc/kernel/mv64360_pic.c
- *
  * Interrupt controller support for Marvell's MV64360.
  *
  * Author: Rabeeh Khoury <rabeeh@galileo.co.il>
@@ -48,6 +46,7 @@
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/mv64x60.h>
+#include <asm/machdep.h>
 
 #ifdef CONFIG_IRQ_ALL_CPUS
 #error "The mv64360 does not support distribution of IRQs on all CPUs"
@@ -56,15 +55,14 @@
 
 static void mv64360_unmask_irq(unsigned int);
 static void mv64360_mask_irq(unsigned int);
-static irqreturn_t mv64360_cpu_error_int_handler(int, void *, struct pt_regs *);
-static irqreturn_t mv64360_sram_error_int_handler(int, void *,
-						  struct pt_regs *);
-static irqreturn_t mv64360_pci_error_int_handler(int, void *, struct pt_regs *);
+static irqreturn_t mv64360_cpu_error_int_handler(int, void *);
+static irqreturn_t mv64360_sram_error_int_handler(int, void *);
+static irqreturn_t mv64360_pci_error_int_handler(int, void *);
 
 /* ========================== local declarations =========================== */
 
 struct hw_interrupt_type mv64360_pic = {
-	.typename = " mv64360_pic ",
+	.typename = " mv64360  ",
 	.enable   = mv64360_unmask_irq,
 	.disable  = mv64360_mask_irq,
 	.ack      = mv64360_mask_irq,
@@ -120,7 +118,7 @@ mv64360_init_irq(void)
 	/* All interrupts are level interrupts */
 	for (i = mv64360_irq_base; i < (mv64360_irq_base + 96); i++) {
 		irq_desc[i].status |= IRQ_LEVEL;
-		irq_desc[i].handler = &mv64360_pic;
+		irq_desc[i].chip = &mv64360_pic;
 	}
 
 	if (ppc_md.progress)
@@ -132,9 +130,6 @@ mv64360_init_irq(void)
  * This function returns the lowest interrupt number of all interrupts that
  * are currently asserted.
  *
- * Input Variable(s):
- *  struct pt_regs*	not used
- *
  * Output Variable(s):
  *  None.
  *
@@ -143,7 +138,7 @@ mv64360_init_irq(void)
  *
  */
 int
-mv64360_get_irq(struct pt_regs *regs)
+mv64360_get_irq(void)
 {
 	int irq;
 	int irq_gpp;
@@ -155,9 +150,10 @@ mv64360_get_irq(struct pt_regs *regs)
 	 */
 	int cpu_nr = smp_processor_id();
 	if (cpu_nr == 1) {
-		if (!(mv64x60_read(&bh, MV64360_IC_MAIN_CAUSE_LO) & (1 << 28)))
+		if (!(mv64x60_read(&bh, MV64360_IC_MAIN_CAUSE_LO) &
+		      (1 << MV64x60_IRQ_DOORBELL)))
 			return -1;
-		return 28;
+		return mv64360_irq_base + MV64x60_IRQ_DOORBELL;
 	}
 #endif
 
@@ -171,7 +167,7 @@ mv64360_get_irq(struct pt_regs *regs)
 		if (irq == -1)
 			irq = -2; /* bogus interrupt, should never happen */
 		else {
-			if ((irq >= 24) && (irq < 28)) {
+			if ((irq >= 24) && (irq < MV64x60_IRQ_DOORBELL)) {
 				irq_gpp = mv64x60_read(&bh,
 					MV64x60_GPP_INTR_CAUSE);
 				irq_gpp = __ilog2(irq_gpp &
@@ -217,8 +213,9 @@ mv64360_unmask_irq(unsigned int irq)
 {
 #ifdef CONFIG_SMP
 	/* second CPU gets only doorbell interrupts */
-	if ((irq - mv64360_irq_base) == 28) {
-		mv64x60_set_bits(&bh, MV64360_IC_CPU1_INTR_MASK_LO, (1 << 28));
+	if ((irq - mv64360_irq_base) == MV64x60_IRQ_DOORBELL) {
+		mv64x60_set_bits(&bh, MV64360_IC_CPU1_INTR_MASK_LO,
+				 (1 << MV64x60_IRQ_DOORBELL));
 		return;
 	}
 #endif
@@ -257,8 +254,9 @@ static void
 mv64360_mask_irq(unsigned int irq)
 {
 #ifdef CONFIG_SMP
-	if ((irq - mv64360_irq_base) == 28) {
-		mv64x60_clr_bits(&bh, MV64360_IC_CPU1_INTR_MASK_LO, (1 << 28));
+	if ((irq - mv64360_irq_base) == MV64x60_IRQ_DOORBELL) {
+		mv64x60_clr_bits(&bh, MV64360_IC_CPU1_INTR_MASK_LO,
+				 (1 << MV64x60_IRQ_DOORBELL));
 		return;
 	}
 #endif
@@ -281,7 +279,7 @@ mv64360_mask_irq(unsigned int irq)
 }
 
 static irqreturn_t
-mv64360_cpu_error_int_handler(int irq, void *dev_id, struct pt_regs *regs)
+mv64360_cpu_error_int_handler(int irq, void *dev_id)
 {
 	printk(KERN_ERR "mv64360_cpu_error_int_handler: %s 0x%08x\n",
 		"Error on CPU interface - Cause regiser",
@@ -302,7 +300,7 @@ mv64360_cpu_error_int_handler(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 static irqreturn_t
-mv64360_sram_error_int_handler(int irq, void *dev_id, struct pt_regs *regs)
+mv64360_sram_error_int_handler(int irq, void *dev_id)
 {
 	printk(KERN_ERR "mv64360_sram_error_int_handler: %s 0x%08x\n",
 		"Error in internal SRAM - Cause register",
@@ -323,7 +321,7 @@ mv64360_sram_error_int_handler(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 static irqreturn_t
-mv64360_pci_error_int_handler(int irq, void *dev_id, struct pt_regs *regs)
+mv64360_pci_error_int_handler(int irq, void *dev_id)
 {
 	u32 val;
 	unsigned int pci_bus = (unsigned int)dev_id;
@@ -363,16 +361,22 @@ mv64360_pci_error_int_handler(int irq, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Bit 0 of MV64x60_PCIx_ERR_MASK does not exist on the 64360 and because of
+ * errata FEr-#11 and FEr-##16 for the 64460, it should be 0 on that chip as
+ * well.  IOW, don't set bit 0.
+ */
+#define MV64360_PCI0_ERR_MASK_VAL	0x00a50c24
+
 static int __init
 mv64360_register_hdlrs(void)
 {
-	u32	mask;
 	int	rc;
 
 	/* Clear old errors and register CPU interface error intr handler */
 	mv64x60_write(&bh, MV64x60_CPU_ERR_CAUSE, 0);
-	if ((rc = request_irq(MV64x60_IRQ_CPU_ERR,
-		mv64360_cpu_error_int_handler, SA_INTERRUPT, CPU_INTR_STR, 0)))
+	if ((rc = request_irq(MV64x60_IRQ_CPU_ERR + mv64360_irq_base,
+		mv64360_cpu_error_int_handler, IRQF_DISABLED, CPU_INTR_STR, NULL)))
 		printk(KERN_WARNING "Can't register cpu error handler: %d", rc);
 
 	mv64x60_write(&bh, MV64x60_CPU_ERR_MASK, 0);
@@ -380,40 +384,39 @@ mv64360_register_hdlrs(void)
 
 	/* Clear old errors and register internal SRAM error intr handler */
 	mv64x60_write(&bh, MV64360_SRAM_ERR_CAUSE, 0);
-	if ((rc = request_irq(MV64360_IRQ_SRAM_PAR_ERR,
-		mv64360_sram_error_int_handler,SA_INTERRUPT,SRAM_INTR_STR, 0)))
+	if ((rc = request_irq(MV64360_IRQ_SRAM_PAR_ERR + mv64360_irq_base,
+		mv64360_sram_error_int_handler,IRQF_DISABLED,SRAM_INTR_STR, NULL)))
 		printk(KERN_WARNING "Can't register SRAM error handler: %d",rc);
-
-	/*
-	 * Bit 0 reserved on 64360 and erratum FEr PCI-#11 (PCI internal
-	 * data parity error set incorrectly) on rev 0 & 1 of 64460 requires
-	 * bit 0 to be cleared.
-	 */
-	mask = 0x00a50c24;
-
-	if ((mv64x60_get_bridge_type() == MV64x60_TYPE_MV64460) &&
-		(mv64x60_get_bridge_rev() > 1))
-		mask |= 0x1;	/* enable DPErr on 64460 */
 
 	/* Clear old errors and register PCI 0 error intr handler */
 	mv64x60_write(&bh, MV64x60_PCI0_ERR_CAUSE, 0);
-	if ((rc = request_irq(MV64360_IRQ_PCI0, mv64360_pci_error_int_handler,
-			SA_INTERRUPT, PCI0_INTR_STR, (void *)0)))
+	if ((rc = request_irq(MV64360_IRQ_PCI0 + mv64360_irq_base,
+			mv64360_pci_error_int_handler,
+			IRQF_DISABLED, PCI0_INTR_STR, (void *)0)))
 		printk(KERN_WARNING "Can't register pci 0 error handler: %d",
 			rc);
 
 	mv64x60_write(&bh, MV64x60_PCI0_ERR_MASK, 0);
-	mv64x60_write(&bh, MV64x60_PCI0_ERR_MASK, mask);
+	mv64x60_write(&bh, MV64x60_PCI0_ERR_MASK, MV64360_PCI0_ERR_MASK_VAL);
+
+	/* Erratum FEr PCI-#16 says to clear bit 0 of PCI SERRn Mask reg. */
+	mv64x60_write(&bh, MV64x60_PCI0_ERR_SERR_MASK,
+		mv64x60_read(&bh, MV64x60_PCI0_ERR_SERR_MASK) & ~0x1UL);
 
 	/* Clear old errors and register PCI 1 error intr handler */
 	mv64x60_write(&bh, MV64x60_PCI1_ERR_CAUSE, 0);
-	if ((rc = request_irq(MV64360_IRQ_PCI1, mv64360_pci_error_int_handler,
-			SA_INTERRUPT, PCI1_INTR_STR, (void *)1)))
+	if ((rc = request_irq(MV64360_IRQ_PCI1 + mv64360_irq_base,
+			mv64360_pci_error_int_handler,
+			IRQF_DISABLED, PCI1_INTR_STR, (void *)1)))
 		printk(KERN_WARNING "Can't register pci 1 error handler: %d",
 			rc);
 
 	mv64x60_write(&bh, MV64x60_PCI1_ERR_MASK, 0);
-	mv64x60_write(&bh, MV64x60_PCI1_ERR_MASK, mask);
+	mv64x60_write(&bh, MV64x60_PCI1_ERR_MASK, MV64360_PCI0_ERR_MASK_VAL);
+
+	/* Erratum FEr PCI-#16 says to clear bit 0 of PCI Intr Mask reg. */
+	mv64x60_write(&bh, MV64x60_PCI1_ERR_SERR_MASK,
+		mv64x60_read(&bh, MV64x60_PCI1_ERR_SERR_MASK) & ~0x1UL);
 
 	return 0;
 }

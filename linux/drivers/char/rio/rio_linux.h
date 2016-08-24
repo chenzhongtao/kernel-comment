@@ -23,7 +23,6 @@
  *  Version 1.0 -- July, 1999. 
  * 
  */
-#include <linux/config.h>
 
 #define RIO_NBOARDS        4
 #define RIO_PORTSPERBOARD 128
@@ -37,15 +36,15 @@
 
 
 struct vpd_prom {
-  unsigned short id;
-  char hwrev;
-  char hwass;
-  int uniqid;
-  char myear;
-  char mweek;
-  char hw_feature[5];
-  char oem_id;
-  char identifier[16];
+	unsigned short id;
+	char hwrev;
+	char hwass;
+	int uniqid;
+	char myear;
+	char mweek;
+	char hw_feature[5];
+	char oem_id;
+	char identifier[16];
 };
 
 
@@ -75,13 +74,13 @@ struct vpd_prom {
       (L_ISIG(tty)))
 
 
-#endif /* __KERNEL__ */
+#endif				/* __KERNEL__ */
 
 
 #define RIO_BOARD_INTR_LOCK  1
 
 
-#ifndef RIOCTL_MISC_MINOR 
+#ifndef RIOCTL_MISC_MINOR
 /* Allow others to gather this into "major.h" or something like that */
 #define RIOCTL_MISC_MINOR    169
 #endif
@@ -121,43 +120,55 @@ struct vpd_prom {
             spin_unlock_irqrestore(sem, flags)
 
 #define rio_spin_lock(sem) \
-            spin_lock(sem) 
+            spin_lock(sem)
 
 #define rio_spin_unlock(sem) \
-            spin_unlock(sem) 
+            spin_unlock(sem)
 
 #endif
 
 
 
 #ifdef CONFIG_RIO_OLDPCI
-static inline void *rio_memcpy_toio (void *dummy, void *dest, void *source, int n)
+static inline void __iomem *rio_memcpy_toio(void __iomem *dummy, void __iomem *dest, void *source, int n)
 {
-  char *dst = dest;
-  char *src = source;
+	char __iomem *dst = dest;
+	char *src = source;
 
-  while (n--) {
-    writeb (*src++, dst++);
-    (void) readb (dummy);
-  }
+	while (n--) {
+		writeb(*src++, dst++);
+		(void) readb(dummy);
+	}
 
-  return dest;
+	return dest;
+}
+
+static inline void __iomem *rio_copy_toio(void __iomem *dest, void *source, int n)
+{
+	char __iomem *dst = dest;
+	char *src = source;
+
+	while (n--)
+		writeb(*src++, dst++);
+
+	return dest;
 }
 
 
-static inline void *rio_memcpy_fromio (void *dest, void *source, int n)
+static inline void *rio_memcpy_fromio(void *dest, void __iomem *source, int n)
 {
-  char *dst = dest;
-  char *src = source;
+	char *dst = dest;
+	char __iomem *src = source;
 
-  while (n--) 
-    *dst++ = readb (src++);
+	while (n--)
+		*dst++ = readb(src++);
 
-  return dest;
+	return dest;
 }
 
 #else
 #define rio_memcpy_toio(dummy,dest,source,n)   memcpy_toio(dest, source, n)
+#define rio_copy_toio   		       memcpy_toio
 #define rio_memcpy_fromio                      memcpy_fromio
 #endif
 
@@ -179,9 +190,8 @@ static inline void *rio_memcpy_fromio (void *dest, void *source, int n)
 #define func_exit()  rio_dprintk (RIO_DEBUG_FLOW, "rio: exit  %s\n", __FUNCTION__)
 #define func_enter2() rio_dprintk (RIO_DEBUG_FLOW, "rio: enter %s (port %d)\n",__FUNCTION__, port->line)
 #else
-#define rio_dprintk(f, str...) /* nothing */
+#define rio_dprintk(f, str...)	/* nothing */
 #define func_enter()
 #define func_exit()
 #define func_enter2()
 #endif
-

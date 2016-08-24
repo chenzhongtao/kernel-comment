@@ -12,6 +12,9 @@
 #ifndef GENERIC_SERIAL_H
 #define GENERIC_SERIAL_H
 
+#ifdef __KERNEL__
+#include <linux/mutex.h>
+
 struct real_driver {
   void                    (*disable_tx_interrupts) (void *);
   void                    (*enable_tx_interrupts) (void *);
@@ -34,7 +37,7 @@ struct gs_port {
   int                     xmit_head;
   int                     xmit_tail;
   int                     xmit_cnt;
-  /*  struct semaphore        port_write_sem; */
+  struct mutex            port_write_mutex;
   int                     flags;
   wait_queue_head_t       open_wait;
   wait_queue_head_t       close_wait;
@@ -49,8 +52,10 @@ struct gs_port {
   int                     baud_base;
   int                     baud;
   int                     custom_divisor;
+  spinlock_t              driver_lock;
 };
 
+#endif /* __KERNEL__ */
 
 /* Flags */
 /* Warning: serial.h defines some ASYNC_ flags, they say they are "only"
@@ -70,8 +75,9 @@ struct gs_port {
 #define GS_DEBUG_STUFF   0x00000008
 #define GS_DEBUG_CLOSE   0x00000010
 #define GS_DEBUG_FLOW    0x00000020
+#define GS_DEBUG_WRITE   0x00000040
 
-
+#ifdef __KERNEL__
 void gs_put_char(struct tty_struct *tty, unsigned char ch);
 int  gs_write(struct tty_struct *tty, 
              const unsigned char *buf, int count);
@@ -85,12 +91,10 @@ void gs_hangup(struct tty_struct *tty);
 int  gs_block_til_ready(void *port, struct file *filp);
 void gs_close(struct tty_struct *tty, struct file *filp);
 void gs_set_termios (struct tty_struct * tty, 
-                     struct termios * old_termios);
+                     struct ktermios * old_termios);
 int  gs_init_port(struct gs_port *port);
 int  gs_setserial(struct gs_port *port, struct serial_struct __user *sp);
 int  gs_getserial(struct gs_port *port, struct serial_struct __user *sp);
 void gs_got_break(struct gs_port *port);
-
-extern int gs_debug;
-
+#endif /* __KERNEL__ */
 #endif

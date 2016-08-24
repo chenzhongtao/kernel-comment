@@ -24,13 +24,10 @@ struct semaphore {
 	.wait	= __WAIT_QUEUE_HEAD_INITIALIZER((name).wait),	\
 }
 
-#define __MUTEX_INITIALIZER(name) __SEMAPHORE_INIT(name,1)
-
 #define __DECLARE_SEMAPHORE_GENERIC(name,count)	\
 	struct semaphore name = __SEMAPHORE_INIT(name,count)
 
 #define DECLARE_MUTEX(name)		__DECLARE_SEMAPHORE_GENERIC(name,1)
-#define DECLARE_MUTEX_LOCKED(name)	__DECLARE_SEMAPHORE_GENERIC(name,0)
 
 static inline void sema_init(struct semaphore *sem, int val)
 {
@@ -47,11 +44,6 @@ static inline void init_MUTEX(struct semaphore *sem)
 static inline void init_MUTEX_LOCKED(struct semaphore *sem)
 {
 	sema_init(sem, 0);
-}
-
-static inline int sema_count(struct semaphore *sem)
-{
-	return atomic_read(&sem->count);
 }
 
 /*

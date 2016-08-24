@@ -60,15 +60,13 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/device.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/ioctl.h>
 #include <linux/parport.h>
 #include <linux/ctype.h>
 #include <linux/poll.h>
-#include <asm/uaccess.h>
+#include <linux/major.h>
 #include <linux/ppdev.h>
-#include <linux/smp_lock.h>
-#include <linux/device.h>
+#include <asm/uaccess.h>
 
 #define PP_VERSION "ppdev: user-space parallel port driver"
 #define CHRDEV "ppdev"
@@ -106,7 +104,7 @@ static inline void pp_enable_irq (struct pp_struct *pp)
 static ssize_t pp_read (struct file * file, char __user * buf, size_t count,
 			loff_t * ppos)
 {
-	unsigned int minor = iminor(file->f_dentry->d_inode);
+	unsigned int minor = iminor(file->f_path.dentry->d_inode);
 	struct pp_struct *pp = file->private_data;
 	char * kbuffer;
 	ssize_t bytes_read = 0;
@@ -189,7 +187,7 @@ static ssize_t pp_read (struct file * file, char __user * buf, size_t count,
 static ssize_t pp_write (struct file * file, const char __user * buf,
 			 size_t count, loff_t * ppos)
 {
-	unsigned int minor = iminor(file->f_dentry->d_inode);
+	unsigned int minor = iminor(file->f_path.dentry->d_inode);
 	struct pp_struct *pp = file->private_data;
 	char * kbuffer;
 	ssize_t bytes_written = 0;
@@ -269,9 +267,9 @@ static ssize_t pp_write (struct file * file, const char __user * buf,
 	return bytes_written;
 }
 
-static void pp_irq (int irq, void * private, struct pt_regs * unused)
+static void pp_irq (void *private)
 {
-	struct pp_struct * pp = (struct pp_struct *) private;
+	struct pp_struct *pp = private;
 
 	if (pp->irqresponse) {
 		parport_write_control (pp->pdev->port, pp->irqctl);
@@ -737,9 +735,9 @@ static unsigned int pp_poll (struct file * file, poll_table * wait)
 	return mask;
 }
 
-static struct class_simple *ppdev_class;
+static struct class *ppdev_class;
 
-static struct file_operations pp_fops = {
+static const struct file_operations pp_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.read		= pp_read,
@@ -752,13 +750,13 @@ static struct file_operations pp_fops = {
 
 static void pp_attach(struct parport *port)
 {
-	class_simple_device_add(ppdev_class, MKDEV(PP_MAJOR, port->number),
-			NULL, "parport%d", port->number);
+	device_create(ppdev_class, port->dev, MKDEV(PP_MAJOR, port->number),
+			"parport%d", port->number);
 }
 
 static void pp_detach(struct parport *port)
 {
-	class_simple_device_remove(MKDEV(PP_MAJOR, port->number));
+	device_destroy(ppdev_class, MKDEV(PP_MAJOR, port->number));
 }
 
 static struct parport_driver pp_driver = {
@@ -769,22 +767,17 @@ static struct parport_driver pp_driver = {
 
 static int __init ppdev_init (void)
 {
-	int i, err = 0;
+	int err = 0;
 
 	if (register_chrdev (PP_MAJOR, CHRDEV, &pp_fops)) {
 		printk (KERN_WARNING CHRDEV ": unable to get major %d\n",
 			PP_MAJOR);
 		return -EIO;
 	}
-	ppdev_class = class_simple_create(THIS_MODULE, CHRDEV);
+	ppdev_class = class_create(THIS_MODULE, CHRDEV);
 	if (IS_ERR(ppdev_class)) {
 		err = PTR_ERR(ppdev_class);
 		goto out_chrdev;
-	}
-	devfs_mk_dir("parports");
-	for (i = 0; i < PARPORT_MAX; i++) {
-		devfs_mk_cdev(MKDEV(PP_MAJOR, i),
-				S_IFCHR | S_IRUGO | S_IWUGO, "parports/%d", i);
 	}
 	if (parport_register_driver(&pp_driver)) {
 		printk (KERN_WARNING CHRDEV ": unable to register with parport\n");
@@ -795,10 +788,7 @@ static int __init ppdev_init (void)
 	goto out;
 
 out_class:
-	for (i = 0; i < PARPORT_MAX; i++)
-		devfs_remove("parports/%d", i);
-	devfs_remove("parports");
-	class_simple_destroy(ppdev_class);
+	class_destroy(ppdev_class);
 out_chrdev:
 	unregister_chrdev(PP_MAJOR, CHRDEV);
 out:
@@ -807,13 +797,9 @@ out:
 
 static void __exit ppdev_cleanup (void)
 {
-	int i;
 	/* Clean up all parport stuff */
-	for (i = 0; i < PARPORT_MAX; i++)
-		devfs_remove("parports/%d", i);
 	parport_unregister_driver(&pp_driver);
-	devfs_remove("parports");
-	class_simple_destroy(ppdev_class);
+	class_destroy(ppdev_class);
 	unregister_chrdev (PP_MAJOR, CHRDEV);
 }
 

@@ -37,7 +37,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aic7xxx.h#79 $
+ * $Id: //depot/aic7xxx/aic7xxx/aic7xxx.h#85 $
  *
  * $FreeBSD$
  */
@@ -54,22 +54,12 @@ struct scb_platform_data;
 struct seeprom_descriptor;
 
 /****************************** Useful Macros *********************************/
-#ifndef MAX
-#define MAX(a,b) (((a) > (b)) ? (a) : (b))
-#endif
-
-#ifndef MIN
-#define MIN(a,b) (((a) < (b)) ? (a) : (b))
-#endif
-
 #ifndef TRUE
 #define TRUE 1
 #endif
 #ifndef FALSE
 #define FALSE 0
 #endif
-
-#define NUM_ELEMENTS(array) (sizeof(array) / sizeof(*array))
 
 #define ALL_CHANNELS '\0'
 #define ALL_TARGETS_MASK 0xFFFF
@@ -233,6 +223,7 @@ typedef enum {
 	AHC_TARGETMODE	= 0x20000,	/* Has tested target mode support */
 	AHC_MULTIROLE	= 0x40000,	/* Space for two roles at a time */
 	AHC_REMOVABLE	= 0x80000,	/* Hot-Swap supported */
+	AHC_HVD		= 0x100000,	/* HVD rather than SE */
 	AHC_AIC7770_FE	= AHC_FENONE,
 	/*
 	 * The real 7850 does not support Ultra modes, but there are
@@ -243,7 +234,7 @@ typedef enum {
 	 */
 	AHC_AIC7850_FE	= AHC_SPIOCAP|AHC_AUTOPAUSE|AHC_TARGETMODE|AHC_ULTRA,
 	AHC_AIC7860_FE	= AHC_AIC7850_FE,
-	AHC_AIC7870_FE	= AHC_TARGETMODE,
+	AHC_AIC7870_FE	= AHC_TARGETMODE|AHC_AUTOPAUSE,
 	AHC_AIC7880_FE	= AHC_AIC7870_FE|AHC_ULTRA,
 	/*
 	 * Although we have space for both the initiator and
@@ -346,7 +337,6 @@ typedef enum {
 					  * controller.
 					  */
 	AHC_NEWEEPROM_FMT     = 0x4000,
-	AHC_RESOURCE_SHORTAGE = 0x8000,
 	AHC_TQINFIFO_BLOCKED  = 0x10000,  /* Blocked waiting for ATIOs */
 	AHC_INT50_SPEEDFLEX   = 0x20000,  /*
 					   * Internal 50pin connector
@@ -972,16 +962,6 @@ struct ahc_softc {
 	ahc_bus_chip_init_t	  bus_chip_init;
 
 	/*
-	 * Bus specific suspend routine.
-	 */
-	ahc_bus_suspend_t	  bus_suspend;
-
-	/*
-	 * Bus specific resume routine.
-	 */
-	ahc_bus_resume_t	  bus_resume;
-
-	/*
 	 * Target mode related state kept on a per enabled lun basis.
 	 * Targets that are not enabled will have null entries.
 	 * As an initiator, we keep one target entry for our initiator
@@ -1023,9 +1003,6 @@ struct ahc_softc {
 	/* Critical Section Data */
 	struct cs		 *critical_sections;
 	u_int			  num_critical_sections;
-
-	/* Links for chaining softcs */
-	TAILQ_ENTRY(ahc_softc)	  links;
 
 	/* Channel Names ('A', 'B', etc.) */
 	char			  channel;
@@ -1111,9 +1088,6 @@ struct ahc_softc {
 	uint16_t		  user_tagenable;/* Tagged Queuing allowed */
 };
 
-TAILQ_HEAD(ahc_softc_tailq, ahc_softc);
-extern struct ahc_softc_tailq ahc_tailq;
-
 /************************ Active Device Information ***************************/
 typedef enum {
 	ROLE_UNKNOWN,
@@ -1143,8 +1117,6 @@ struct ahc_pci_identity {
 	char			*name;
 	ahc_device_setup_t	*setup;
 };
-extern struct ahc_pci_identity ahc_pci_ident_table[];
-extern const u_int ahc_num_pci_devs;
 
 /***************************** VL/EISA Declarations ***************************/
 struct aic7770_identity {
@@ -1171,6 +1143,7 @@ struct ahc_pci_identity	*ahc_find_pci_device(ahc_dev_softc_t);
 int			 ahc_pci_config(struct ahc_softc *,
 					struct ahc_pci_identity *);
 int			 ahc_pci_test_register_access(struct ahc_softc *);
+void			 ahc_pci_resume(struct ahc_softc *ahc);
 
 /*************************** EISA/VL Front End ********************************/
 struct aic7770_identity *aic7770_find_device(uint32_t);
@@ -1199,8 +1172,6 @@ void			 ahc_intr_enable(struct ahc_softc *ahc, int enable);
 void			 ahc_pause_and_flushwork(struct ahc_softc *ahc);
 int			 ahc_suspend(struct ahc_softc *ahc); 
 int			 ahc_resume(struct ahc_softc *ahc);
-void			 ahc_softc_insert(struct ahc_softc *);
-struct ahc_softc	*ahc_find_softc(struct ahc_softc *ahc);
 void			 ahc_set_unit(struct ahc_softc *, int);
 void			 ahc_set_name(struct ahc_softc *, char *);
 void			 ahc_alloc_scbs(struct ahc_softc *ahc);
@@ -1297,10 +1268,6 @@ typedef enum {
 	AHC_QUEUE_BASIC,
 	AHC_QUEUE_TAGGED
 } ahc_queue_alg;
-
-void			ahc_set_tags(struct ahc_softc *ahc,
-				     struct ahc_devinfo *devinfo,
-				     ahc_queue_alg alg);
 
 /**************************** Target Mode *************************************/
 #ifdef AHC_TARGET_MODE

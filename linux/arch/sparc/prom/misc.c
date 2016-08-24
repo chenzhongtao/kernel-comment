@@ -5,7 +5,6 @@
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -59,7 +58,7 @@ prom_cmdline(void)
 	extern void install_linux_ticker(void);
 	unsigned long flags;
 
-	if(!serial_console && prom_palette)
+	if (prom_palette)
 		prom_palette (1);
 	spin_lock_irqsave(&prom_lock, flags);
 	install_obp_ticker();
@@ -70,7 +69,7 @@ prom_cmdline(void)
 #ifdef CONFIG_SUN_AUXIO
 	set_auxio(AUXIO_LED, 0);
 #endif
-	if(!serial_console && prom_palette)
+	if (prom_palette)
 		prom_palette (0);
 }
 

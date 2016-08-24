@@ -1,6 +1,4 @@
 /*
- * arch/ppc/syslib/cpc700_pic.c
- *
  * Interrupt controller support for IBM Spruce
  *
  * Authors: Mark Greer, Matt Porter, and Johnnie Peters
@@ -90,14 +88,10 @@ cpc700_mask_and_ack_irq(unsigned int irq)
 }
 
 static struct hw_interrupt_type cpc700_pic = {
-	"CPC700 PIC",
-	NULL,
-	NULL,
-	cpc700_unmask_irq,
-	cpc700_mask_irq,
-	cpc700_mask_and_ack_irq,
-	NULL,
-	NULL
+	.typename = "CPC700 PIC",
+	.enable = cpc700_unmask_irq,
+	.disable = cpc700_mask_irq,
+	.ack = cpc700_mask_and_ack_irq,
 };
 
 __init static void
@@ -146,12 +140,12 @@ cpc700_init_IRQ(void)
 						        /* IRQ 0 is highest */
 
 	for (i = 0; i < 17; i++) {
-		irq_desc[i].handler = &cpc700_pic;
+		irq_desc[i].chip = &cpc700_pic;
 		cpc700_pic_init_irq(i);
 	}
 
 	for (i = 20; i < 32; i++) {
-		irq_desc[i].handler = &cpc700_pic;
+		irq_desc[i].chip = &cpc700_pic;
 		cpc700_pic_init_irq(i);
 	}
 
@@ -164,7 +158,7 @@ cpc700_init_IRQ(void)
  * Find the highest IRQ that generating an interrupt, if any.
  */
 int
-cpc700_get_irq(struct pt_regs *regs)
+cpc700_get_irq(void)
 {
 	int irq = 0;
 	u_int irq_status, irq_test = 1;

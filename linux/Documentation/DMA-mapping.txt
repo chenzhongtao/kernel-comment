@@ -58,11 +58,15 @@ translating each of those pages back to a kernel address using
 something like __va().  [ EDIT: Update this when we integrate
 Gerd Knorr's generic code which does this. ]
 
-This rule also means that you may not use kernel image addresses
-(ie. items in the kernel's data/text/bss segment, or your driver's)
-nor may you use kernel stack addresses for DMA.  Both of these items
-might be mapped somewhere entirely different than the rest of physical
-memory.
+This rule also means that you may use neither kernel image addresses
+(items in data/text/bss segments), nor module image addresses, nor
+stack addresses for DMA.  These could all be mapped somewhere entirely
+different than the rest of physical memory.  Even if those classes of
+memory could physically work with DMA, you'd need to ensure the I/O
+buffers were cacheline-aligned.  Without that, you'd see cacheline
+sharing problems (data corruption) on CPUs with DMA-incoherent caches.
+(The CPU could write to one word, DMA would write to a different one
+in the same cache line, and one of them could be overwritten.)
 
 Also, this means that you cannot take the return of a kmap()
 call and DMA to/from that.  This is similar to vmalloc().
@@ -103,7 +107,7 @@ The query is performed via a call to pci_set_dma_mask():
 
 	int pci_set_dma_mask(struct pci_dev *pdev, u64 device_mask);
 
-The query for consistent allocations is performed via a a call to
+The query for consistent allocations is performed via a call to
 pci_set_consistent_dma_mask():
 
 	int pci_set_consistent_dma_mask(struct pci_dev *pdev, u64 device_mask);
@@ -113,7 +117,7 @@ device_mask is a bit mask describing which bits of a PCI address your
 device supports.  It returns zero if your card can perform DMA
 properly on the machine given the address mask you provided.
 
-If it returns non-zero, your device can not perform DMA properly on
+If it returns non-zero, your device cannot perform DMA properly on
 this platform, and attempting to do so will result in undefined
 behavior.  You must either use a different mask, or not use DMA.
 
@@ -185,16 +189,10 @@ smaller mask as pci_set_dma_mask(). However for the rare case that a
 device driver only uses consistent allocations, one would have to
 check the return value from pci_set_consistent_dma_mask().
 
-If your 64-bit device is going to be an enormous consumer of DMA
-mappings, this can be problematic since the DMA mappings are a
-finite resource on many platforms.  Please see the "DAC Addressing
-for Address Space Hungry Devices" section near the end of this
-document for how to handle this case.
-
 Finally, if your device can only drive the low 24-bits of
 address during PCI bus mastering you might do something like:
 
-	if (pci_set_dma_mask(pdev, 0x00ffffff)) {
+	if (pci_set_dma_mask(pdev, DMA_24BIT_MASK)) {
 		printk(KERN_WARNING
 		       "mydev: 24-bit DMA addressing not available.\n");
 		goto ignore_this_device;
@@ -210,7 +208,7 @@ functions (for example a sound card provides playback and record
 functions) and the various different functions have _different_
 DMA addressing limitations, you may wish to probe each mask and
 only provide the functionality which the machine can handle.  It
-is important that the last call to pci_set_dma_mask() be for the 
+is important that the last call to pci_set_dma_mask() be for the
 most specific mask.
 
 Here is pseudo-code showing how this might be done:
@@ -282,6 +280,11 @@ There are two types of DMA mappings:
 
              in order to get correct behavior on all platforms.
 
+	     Also, on some platforms your driver may need to flush CPU write
+	     buffers in much the same way as it needs to flush write buffers
+	     found in PCI bridges (such as by reading a register's value
+	     after writing it).
+
 - Streaming DMA mappings which are usually mapped for one DMA transfer,
   unmapped right after it (unless you use pci_dma_sync_* below) and for which
   hardware can optimize for sequential accesses.
@@ -301,6 +304,9 @@ There are two types of DMA mappings:
 
 Neither type of DMA mapping has alignment restrictions that come
 from PCI, although some devices may have such restrictions.
+Also, systems with caches that aren't DMA-coherent will work better
+when the underlying buffers don't share cache lines with other data.
+
 
 		 Using Consistent DMA mappings.
 
@@ -443,15 +449,9 @@ Only streaming mappings specify a direction, consistent mappings
 implicitly have a direction attribute setting of
 PCI_DMA_BIDIRECTIONAL.
 
-The SCSI subsystem provides mechanisms for you to easily obtain
-the direction to use, in the SCSI command:
-
-	scsi_to_pci_dma_dir(SCSI_DIRECTION)
-
-Where SCSI_DIRECTION is obtained from the 'sc_data_direction'
-member of the SCSI command your driver is working on.  The
-mentioned interface above returns a value suitable for passing
-into the streaming DMA mapping interfaces below.
+The SCSI subsystem tells you the direction to use in the
+'sc_data_direction' member of the SCSI command your driver is
+working on.
 
 For Networking drivers, it's a rather simple affair.  For transmit
 packets, map/unmap them with the PCI_DMA_TODEVICE direction
@@ -506,7 +506,7 @@ With scatterlists, you map a region gathered from several regions by:
 	int i, count = pci_map_sg(dev, sglist, nents, direction);
 	struct scatterlist *sg;
 
-	for (i = 0, sg = sglist; i < count; i++, sg++) {
+	for_each_sg(sglist, sg, count, i) {
 		hw_address[i] = sg_dma_address(sg);
 		hw_len[i] = sg_dma_len(sg);
 	}
@@ -644,121 +644,6 @@ It is planned to completely remove virt_to_bus() and bus_to_virt() as
 they are entirely deprecated.  Some ports already do not provide these
 as it is impossible to correctly support them.
 
-		64-bit DMA and DAC cycle support
-
-Do you understand all of the text above?  Great, then you already
-know how to use 64-bit DMA addressing under Linux.  Simply make
-the appropriate pci_set_dma_mask() calls based upon your cards
-capabilities, then use the mapping APIs above.
-
-It is that simple.
-
-Well, not for some odd devices.  See the next section for information
-about that.
-
-	DAC Addressing for Address Space Hungry Devices
-
-There exists a class of devices which do not mesh well with the PCI
-DMA mapping API.  By definition these "mappings" are a finite
-resource.  The number of total available mappings per bus is platform
-specific, but there will always be a reasonable amount.
-
-What is "reasonable"?  Reasonable means that networking and block I/O
-devices need not worry about using too many mappings.
-
-As an example of a problematic device, consider compute cluster cards.
-They can potentially need to access gigabytes of memory at once via
-DMA.  Dynamic mappings are unsuitable for this kind of access pattern.
-
-To this end we've provided a small API by which a device driver
-may use DAC cycles to directly address all of physical memory.
-Not all platforms support this, but most do.  It is easy to determine
-whether the platform will work properly at probe time.
-
-First, understand that there may be a SEVERE performance penalty for
-using these interfaces on some platforms.  Therefore, you MUST only
-use these interfaces if it is absolutely required.  %99 of devices can
-use the normal APIs without any problems.
-
-Note that for streaming type mappings you must either use these
-interfaces, or the dynamic mapping interfaces above.  You may not mix
-usage of both for the same device.  Such an act is illegal and is
-guaranteed to put a banana in your tailpipe.
-
-However, consistent mappings may in fact be used in conjunction with
-these interfaces.  Remember that, as defined, consistent mappings are
-always going to be SAC addressable.
-
-The first thing your driver needs to do is query the PCI platform
-layer with your devices DAC addressing capabilities:
-
-	int pci_dac_set_dma_mask(struct pci_dev *pdev, u64 mask);
-
-This routine behaves identically to pci_set_dma_mask.  You may not
-use the following interfaces if this routine fails.
-
-Next, DMA addresses using this API are kept track of using the
-dma64_addr_t type.  It is guaranteed to be big enough to hold any
-DAC address the platform layer will give to you from the following
-routines.  If you have consistent mappings as well, you still
-use plain dma_addr_t to keep track of those.
-
-All mappings obtained here will be direct.  The mappings are not
-translated, and this is the purpose of this dialect of the DMA API.
-
-All routines work with page/offset pairs.  This is the _ONLY_ way to 
-portably refer to any piece of memory.  If you have a cpu pointer
-(which may be validly DMA'd too) you may easily obtain the page
-and offset using something like this:
-
-	struct page *page = virt_to_page(ptr);
-	unsigned long offset = offset_in_page(ptr);
-
-Here are the interfaces:
-
-	dma64_addr_t pci_dac_page_to_dma(struct pci_dev *pdev,
-					 struct page *page,
-					 unsigned long offset,
-					 int direction);
-
-The DAC address for the tuple PAGE/OFFSET are returned.  The direction
-argument is the same as for pci_{map,unmap}_single().  The same rules
-for cpu/device access apply here as for the streaming mapping
-interfaces.  To reiterate:
-
-	The cpu may touch the buffer before pci_dac_page_to_dma.
-	The device may touch the buffer after pci_dac_page_to_dma
-	is made, but the cpu may NOT.
-
-When the DMA transfer is complete, invoke:
-
-	void pci_dac_dma_sync_single_for_cpu(struct pci_dev *pdev,
-					     dma64_addr_t dma_addr,
-					     size_t len, int direction);
-
-This must be done before the CPU looks at the buffer again.
-This interface behaves identically to pci_dma_sync_{single,sg}_for_cpu().
-
-And likewise, if you wish to let the device get back at the buffer after
-the cpu has read/written it, invoke:
-
-	void pci_dac_dma_sync_single_for_device(struct pci_dev *pdev,
-						dma64_addr_t dma_addr,
-						size_t len, int direction);
-
-before letting the device access the DMA area again.
-
-If you need to get back to the PAGE/OFFSET tuple from a dma64_addr_t
-the following interfaces are provided:
-
-	struct page *pci_dac_dma_to_page(struct pci_dev *pdev,
-					 dma64_addr_t dma_addr);
-	unsigned long pci_dac_dma_to_offset(struct pci_dev *pdev,
-					    dma64_addr_t dma_addr);
-
-This is possible with the DAC interfaces purely because they are
-not translated in any way.
-
 		Optimizing Unmap State Space Consumption
 
 On many platforms, pci_unmap_{single,page}() is simply a nop.
@@ -877,5 +762,5 @@ following people:
 	Jay Estabrook <Jay.Estabrook@compaq.com>
 	Thomas Sailer <sailer@ife.ee.ethz.ch>
 	Andrea Arcangeli <andrea@suse.de>
-	Jens Axboe <axboe@suse.de>
+	Jens Axboe <jens.axboe@oracle.com>
 	David Mosberger-Tang <davidm@hpl.hp.com>

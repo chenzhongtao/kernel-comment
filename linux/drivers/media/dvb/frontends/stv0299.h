@@ -73,9 +73,6 @@ struct stv0299_config
 	/* does the inversion require inversion? */
 	u8 invert:1;
 
-	/* Should the enhanced tuning code be used? */
-	u8 enhanced_tuning:1;
-
 	/* Skip reinitialisation? */
 	u8 skip_reinit:1;
 
@@ -90,15 +87,26 @@ struct stv0299_config
 
 	/* Set the symbol rate */
 	int (*set_symbol_rate)(struct dvb_frontend* fe, u32 srate, u32 ratio);
-
-	/* PLL maintenance */
-	int (*pll_init)(struct dvb_frontend* fe);
-	int (*pll_set)(struct dvb_frontend* fe, struct dvb_frontend_parameters* params);
 };
 
-extern int stv0299_writereg (struct dvb_frontend* fe, u8 reg, u8 data);
-
+#if defined(CONFIG_DVB_STV0299) || (defined(CONFIG_DVB_STV0299_MODULE) && defined(MODULE))
 extern struct dvb_frontend* stv0299_attach(const struct stv0299_config* config,
 					   struct i2c_adapter* i2c);
+#else
+static inline struct dvb_frontend* stv0299_attach(const struct stv0299_config* config,
+					   struct i2c_adapter* i2c)
+{
+	printk(KERN_WARNING "%s: driver disabled by Kconfig\n", __FUNCTION__);
+	return NULL;
+}
+#endif // CONFIG_DVB_STV0299
+
+static inline int stv0299_writereg(struct dvb_frontend *fe, u8 reg, u8 val) {
+	int r = 0;
+	u8 buf[] = {reg, val};
+	if (fe->ops.write)
+		r = fe->ops.write(fe, buf, 2);
+	return r;
+}
 
 #endif // STV0299_H

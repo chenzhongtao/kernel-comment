@@ -32,7 +32,6 @@
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/proc_fs.h>
@@ -197,7 +196,7 @@ static unsigned int sym53c416_base_3[2] = {0,0};
 
 #define MAXHOSTS 4
 
-#define SG_ADDRESS(buffer)     ((char *) (page_address((buffer)->page)+(buffer)->offset))
+#define SG_ADDRESS(buffer)     ((char *) sg_virt((buffer)))
 
 enum phases
 {
@@ -326,16 +325,14 @@ static __inline__ unsigned int sym53c416_write(int base, unsigned char *buffer, 
 	return orig_len - len;
 }
 
-static irqreturn_t sym53c416_intr_handle(int irq, void *dev_id,
-					struct pt_regs *regs)
+static irqreturn_t sym53c416_intr_handle(int irq, void *dev_id)
 {
 	struct Scsi_Host *dev = dev_id;
 	int base = 0;
 	int i;
 	unsigned long flags = 0;
 	unsigned char status_reg, pio_int_reg, int_reg;
-	struct scatterlist *sglist;
-	unsigned int sgcount;
+	struct scatterlist *sg;
 	unsigned int tot_trans = 0;
 
 	/* We search the base address of the host adapter which caused the interrupt */
@@ -431,19 +428,15 @@ static irqreturn_t sym53c416_intr_handle(int irq, void *dev_id,
 			{
 				current_command->SCp.phase = data_out;
 				outb(FLUSH_FIFO, base + COMMAND_REG);
-				sym53c416_set_transfer_counter(base, current_command->request_bufflen);
+				sym53c416_set_transfer_counter(base,
+							       scsi_bufflen(current_command));
 				outb(TRANSFER_INFORMATION | PIO_MODE, base + COMMAND_REG);
-				if(!current_command->use_sg)
-					tot_trans = sym53c416_write(base, current_command->request_buffer, current_command->request_bufflen);
-				else
-				{
-					sgcount = current_command->use_sg;
-					sglist = current_command->request_buffer;
-					while(sgcount--)
-					{
-						tot_trans += sym53c416_write(base, SG_ADDRESS(sglist), sglist->length);
-						sglist++;
-					}
+
+				scsi_for_each_sg(current_command,
+						 sg, scsi_sg_count(current_command), i) {
+					tot_trans += sym53c416_write(base,
+								     SG_ADDRESS(sg),
+								     sg->length);
 				}
 				if(tot_trans < current_command->underflow)
 					printk(KERN_WARNING "sym53c416: Underflow, wrote %d bytes, request for %d bytes.\n", tot_trans, current_command->underflow);
@@ -457,19 +450,16 @@ static irqreturn_t sym53c416_intr_handle(int irq, void *dev_id,
 			{
 				current_command->SCp.phase = data_in;
 				outb(FLUSH_FIFO, base + COMMAND_REG);
-				sym53c416_set_transfer_counter(base, current_command->request_bufflen);
+				sym53c416_set_transfer_counter(base,
+							       scsi_bufflen(current_command));
+
 				outb(TRANSFER_INFORMATION | PIO_MODE, base + COMMAND_REG);
-				if(!current_command->use_sg)
-					tot_trans = sym53c416_read(base, current_command->request_buffer, current_command->request_bufflen);
-				else
-				{
-					sgcount = current_command->use_sg;
-					sglist = current_command->request_buffer;
-					while(sgcount--)
-					{
-						tot_trans += sym53c416_read(base, SG_ADDRESS(sglist), sglist->length);
-						sglist++;
-					}
+
+				scsi_for_each_sg(current_command,
+						 sg, scsi_sg_count(current_command), i) {
+					tot_trans += sym53c416_read(base,
+								    SG_ADDRESS(sg),
+								    sg->length);
 				}
 				if(tot_trans < current_command->underflow)
 					printk(KERN_WARNING "sym53c416: Underflow, read %d bytes, request for %d bytes.\n", tot_trans, current_command->underflow);
@@ -616,7 +606,7 @@ static struct isapnp_device_id id_table[] __devinitdata = {
 
 MODULE_DEVICE_TABLE(isapnp, id_table);
 
-void sym53c416_probe(void)
+static void sym53c416_probe(void)
 {
 	int *base = probeaddrs;
 	int ints[2];
@@ -633,7 +623,7 @@ void sym53c416_probe(void)
 	}
 }
 
-int __init sym53c416_detect(Scsi_Host_Template *tpnt)
+int __init sym53c416_detect(struct scsi_host_template *tpnt)
 {
 	unsigned long flags;
 	struct Scsi_Host * shpnt = NULL;
@@ -773,7 +763,7 @@ int sym53c416_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	current_command->SCp.Message = 0;
 
 	spin_lock_irqsave(&sym53c416_lock, flags);
-	outb(SCpnt->device->id, base + DEST_BUS_ID); /* Set scsi id target        */
+	outb(scmd_id(SCpnt), base + DEST_BUS_ID); /* Set scsi id target        */
 	outb(FLUSH_FIFO, base + COMMAND_REG);    /* Flush SCSI and PIO FIFO's */
 	/* Write SCSI command into the SCSI fifo */
 	for(i = 0; i < SCpnt->cmd_len; i++)
@@ -785,37 +775,27 @@ int sym53c416_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	return 0;
 }
 
-static int sym53c416_abort(Scsi_Cmnd *SCpnt)
-{
-	return FAILED;
-}
-
-static int sym53c416_bus_reset(Scsi_Cmnd *SCpnt)
-{
-	return FAILED;
-}
-
-static int sym53c416_device_reset(Scsi_Cmnd *SCpnt)
-{
-	return FAILED;
-}
-
 static int sym53c416_host_reset(Scsi_Cmnd *SCpnt)
 {
 	int base;
 	int scsi_id = -1;	
 	int i;
+	unsigned long flags;
+
+	spin_lock_irqsave(&sym53c416_lock, flags);
 
 	/* printk("sym53c416_reset\n"); */
 	base = SCpnt->device->host->io_port;
 	/* search scsi_id - fixme, we shouldnt need to iterate for this! */
-	for(i = 0; i < host_index && scsi_id != -1; i++)
+	for(i = 0; i < host_index && scsi_id == -1; i++)
 		if(hosts[i].base == base)
 			scsi_id = hosts[i].scsi_id;
 	outb(RESET_CHIP, base + COMMAND_REG);
 	outb(NOOP | PIO_MODE, base + COMMAND_REG);
 	outb(RESET_SCSI_BUS, base + COMMAND_REG);
 	sym53c416_init(base, scsi_id);
+
+	spin_unlock_irqrestore(&sym53c416_lock, flags);
 	return SUCCESS;
 }
 
@@ -859,16 +839,13 @@ module_param_array(sym53c416_3, uint, NULL, 0);
 
 #endif
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name =		"sym53c416",
 	.name =			"Symbios Logic 53c416",
 	.detect =		sym53c416_detect,
 	.info =			sym53c416_info,	
 	.queuecommand =		sym53c416_queuecommand,
-	.eh_abort_handler =	sym53c416_abort,
 	.eh_host_reset_handler =sym53c416_host_reset,
-	.eh_bus_reset_handler = sym53c416_bus_reset,
-	.eh_device_reset_handler =sym53c416_device_reset,
 	.release = 		sym53c416_release,
 	.bios_param =		sym53c416_bios_param,
 	.can_queue =		1,
@@ -877,5 +854,6 @@ static Scsi_Host_Template driver_template = {
 	.cmd_per_lun =		1,
 	.unchecked_isa_dma =	1,
 	.use_clustering =	ENABLE_CLUSTERING,
+	.use_sg_chaining =	ENABLE_SG_CHAINING,
 };
 #include "scsi_module.c"

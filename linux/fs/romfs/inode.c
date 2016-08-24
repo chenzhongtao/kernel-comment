@@ -92,7 +92,7 @@ static inline unsigned long romfs_maxsize(struct super_block *sb)
 
 static inline struct romfs_inode_info *ROMFS_I(struct inode *inode)
 {
-	return list_entry(inode, struct romfs_inode_info, vfs_inode);
+	return container_of(inode, struct romfs_inode_info, vfs_inode);
 }
 
 static __u32
@@ -110,7 +110,7 @@ romfs_checksum(void *data, int size)
 	return sum;
 }
 
-static struct super_operations romfs_ops;
+static const struct super_operations romfs_ops;
 
 static int romfs_fill_super(struct super_block *s, void *data, int silent)
 {
@@ -179,12 +179,12 @@ outnobh:
 /* That's simple too. */
 
 static int
-romfs_statfs(struct super_block *sb, struct kstatfs *buf)
+romfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	buf->f_type = ROMFS_MAGIC;
 	buf->f_bsize = ROMBSIZE;
 	buf->f_bfree = buf->f_bavail = buf->f_ffree;
-	buf->f_blocks = (romfs_maxsize(sb)+ROMBSIZE-1)>>ROMBSBITS;
+	buf->f_blocks = (romfs_maxsize(dentry->d_sb)+ROMBSIZE-1)>>ROMBSBITS;
 	buf->f_namelen = ROMFS_MAXFN;
 	return 0;
 }
@@ -276,7 +276,7 @@ static unsigned char romfs_dtype_table[] = {
 static int
 romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct inode *i = filp->f_dentry->d_inode;
+	struct inode *i = filp->f_path.dentry->d_inode;
 	struct romfs_inode ri;
 	unsigned long offset, maxoff;
 	int j, ino, nextfh;
@@ -418,7 +418,7 @@ static int
 romfs_readpage(struct file *file, struct page * page)
 {
 	struct inode *inode = page->mapping->host;
-	unsigned long offset, avail, readlen;
+	loff_t offset, avail, readlen;
 	void *buf;
 	int result = -EIO;
 
@@ -429,8 +429,8 @@ romfs_readpage(struct file *file, struct page * page)
 		goto err_out;
 
 	/* 32 bit warning -- but not for us :) */
-	offset = page->index << PAGE_CACHE_SHIFT;
-	if (offset < inode->i_size) {
+	offset = page_offset(page);
+	if (offset < i_size_read(inode)) {
 		avail = inode->i_size-offset;
 		readlen = min_t(unsigned long, avail, PAGE_SIZE);
 		if (romfs_copyfrom(inode, buf, ROMFS_I(inode)->i_dataoffset+offset, readlen) == readlen) {
@@ -459,16 +459,16 @@ err_out:
 
 /* Mapping from our types to the kernel */
 
-static struct address_space_operations romfs_aops = {
+static const struct address_space_operations romfs_aops = {
 	.readpage = romfs_readpage
 };
 
-static struct file_operations romfs_dir_operations = {
+static const struct file_operations romfs_dir_operations = {
 	.read		= generic_read_dir,
 	.readdir	= romfs_readdir,
 };
 
-static struct inode_operations romfs_dir_inode_operations = {
+static const struct inode_operations romfs_dir_inode_operations = {
 	.lookup		= romfs_lookup,
 };
 
@@ -550,12 +550,12 @@ romfs_read_inode(struct inode *i)
 	}
 }
 
-static kmem_cache_t * romfs_inode_cachep;
+static struct kmem_cache * romfs_inode_cachep;
 
 static struct inode *romfs_alloc_inode(struct super_block *sb)
 {
 	struct romfs_inode_info *ei;
-	ei = (struct romfs_inode_info *)kmem_cache_alloc(romfs_inode_cachep, SLAB_KERNEL);
+	ei = kmem_cache_alloc(romfs_inode_cachep, GFP_KERNEL);
 	if (!ei)
 		return NULL;
 	return &ei->vfs_inode;
@@ -566,21 +566,20 @@ static void romfs_destroy_inode(struct inode *inode)
 	kmem_cache_free(romfs_inode_cachep, ROMFS_I(inode));
 }
 
-static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+static void init_once(struct kmem_cache *cachep, void *foo)
 {
-	struct romfs_inode_info *ei = (struct romfs_inode_info *) foo;
+	struct romfs_inode_info *ei = foo;
 
-	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
-	    SLAB_CTOR_CONSTRUCTOR)
-		inode_init_once(&ei->vfs_inode);
+	inode_init_once(&ei->vfs_inode);
 }
- 
+
 static int init_inodecache(void)
 {
 	romfs_inode_cachep = kmem_cache_create("romfs_inode_cache",
 					     sizeof(struct romfs_inode_info),
-					     0, SLAB_RECLAIM_ACCOUNT,
-					     init_once, NULL);
+					     0, (SLAB_RECLAIM_ACCOUNT|
+						SLAB_MEM_SPREAD),
+					     init_once);
 	if (romfs_inode_cachep == NULL)
 		return -ENOMEM;
 	return 0;
@@ -588,8 +587,7 @@ static int init_inodecache(void)
 
 static void destroy_inodecache(void)
 {
-	if (kmem_cache_destroy(romfs_inode_cachep))
-		printk(KERN_INFO "romfs_inode_cache: not all structures were freed\n");
+	kmem_cache_destroy(romfs_inode_cachep);
 }
 
 static int romfs_remount(struct super_block *sb, int *flags, char *data)
@@ -598,7 +596,7 @@ static int romfs_remount(struct super_block *sb, int *flags, char *data)
 	return 0;
 }
 
-static struct super_operations romfs_ops = {
+static const struct super_operations romfs_ops = {
 	.alloc_inode	= romfs_alloc_inode,
 	.destroy_inode	= romfs_destroy_inode,
 	.read_inode	= romfs_read_inode,
@@ -606,10 +604,11 @@ static struct super_operations romfs_ops = {
 	.remount_fs	= romfs_remount,
 };
 
-static struct super_block *romfs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
+static int romfs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
 {
-	return get_sb_bdev(fs_type, flags, dev_name, data, romfs_fill_super);
+	return get_sb_bdev(fs_type, flags, dev_name, data, romfs_fill_super,
+			   mnt);
 }
 
 static struct file_system_type romfs_fs_type = {

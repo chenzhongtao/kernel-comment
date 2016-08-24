@@ -7,7 +7,7 @@
  * under the terms of version 2 of the GNU General Public License
  * as published by the Free Software Foundation.
  *
- * For information see http://hq.pm.waw.pl/hdlc/
+ * For information see <http://www.kernel.org/pub/linux/utils/net/hdlc/>
  *
  * Sources of information:
  *    Hitachi HD64572 SCA-II User's Manual
@@ -17,7 +17,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/in.h>
@@ -29,7 +28,7 @@
 #include <linux/netdevice.h>
 #include <linux/hdlc.h>
 #include <linux/pci.h>
-#include <asm/delay.h>
+#include <linux/delay.h>
 #include <asm/io.h>
 
 #include "hd64572.h"
@@ -49,10 +48,6 @@ static const char* devname = "PCI200SYN";
 
 static int pci_clock_freq = 33000000;
 #define CLOCK_BASE pci_clock_freq
-
-#define PCI_VENDOR_ID_GORAMO	0x10B5	/* uses PLX:9050 ID - this card	*/
-#define PCI_DEVICE_ID_PCI200SYN	0x9050	/* doesn't have its own ID	*/
-
 
 /*
  *      PLX PCI9052 local configuration and shared runtime registers.
@@ -262,7 +257,7 @@ static void pci200_pci_remove_one(struct pci_dev *pdev)
 	int i;
 	card_t *card = pci_get_drvdata(pdev);
 
-	for(i = 0; i < 2; i++)
+	for (i = 0; i < 2; i++)
 		if (card->ports[i].card) {
 			struct net_device *dev = port_to_dev(&card->ports[i]);
 			unregister_hdlc_device(dev);
@@ -294,7 +289,6 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 					 const struct pci_device_id *ent)
 {
 	card_t *card;
-	u8 rev_id;
 	u32 __iomem *p;
 	int i;
 	u32 ramsize;
@@ -318,14 +312,13 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 		return i;
 	}
 
-	card = kmalloc(sizeof(card_t), GFP_KERNEL);
+	card = kzalloc(sizeof(card_t), GFP_KERNEL);
 	if (card == NULL) {
 		printk(KERN_ERR "pci200syn: unable to allocate memory\n");
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		return -ENOBUFS;
 	}
-	memset(card, 0, sizeof(card_t));
 	pci_set_drvdata(pdev, card);
 	card->ports[0].dev = alloc_hdlcdev(&card->ports[0]);
 	card->ports[1].dev = alloc_hdlcdev(&card->ports[1]);
@@ -335,7 +328,6 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 		return -ENOMEM;
 	}
 
-	pci_read_config_byte(pdev, PCI_REVISION_ID, &rev_id);
 	if (pci_resource_len(pdev, 0) != PCI200SYN_PLX_SIZE ||
 	    pci_resource_len(pdev, 2) != PCI200SYN_SCA_SIZE ||
 	    pci_resource_len(pdev, 3) < 16384) {
@@ -358,6 +350,7 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 	    card->rambase == NULL) {
 		printk(KERN_ERR "pci200syn: ioremap() failed\n");
 		pci200_pci_remove_one(pdev);
+		return -EFAULT;
 	}
 
 	/* Reset PLX */
@@ -385,6 +378,15 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 	       " %u RX packets rings\n", ramsize / 1024, ramphys,
 	       pdev->irq, card->tx_ring_buffers, card->rx_ring_buffers);
 
+	if (pdev->subsystem_device == PCI_DEVICE_ID_PLX_9050) {
+		printk(KERN_ERR "Detected PCI200SYN card with old "
+		       "configuration data.\n");
+		printk(KERN_ERR "See <http://www.kernel.org/pub/"
+		       "linux/utils/net/hdlc/pci200syn/> for update.\n");
+		printk(KERN_ERR "The card will stop working with"
+		       " future versions of Linux if not updated.\n");
+	}
+
 	if (card->tx_ring_buffers < 1) {
 		printk(KERN_ERR "pci200syn: RAM test failed\n");
 		pci200_pci_remove_one(pdev);
@@ -396,7 +398,7 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 	writew(readw(p) | 0x0040, p);
 
 	/* Allocate IRQ */
-	if(request_irq(pdev->irq, sca_intr, SA_SHIRQ, devname, card)) {
+	if (request_irq(pdev->irq, sca_intr, IRQF_SHARED, devname, card)) {
 		printk(KERN_WARNING "pci200syn: could not allocate IRQ%d.\n",
 		       pdev->irq);
 		pci200_pci_remove_one(pdev);
@@ -406,14 +408,13 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 
 	sca_init(card, 0);
 
-	for(i = 0; i < 2; i++) {
+	for (i = 0; i < 2; i++) {
 		port_t *port = &card->ports[i];
 		struct net_device *dev = port_to_dev(port);
 		hdlc_device *hdlc = dev_to_hdlc(dev);
 		port->phy_node = i;
 
 		spin_lock_init(&port->lock);
-		SET_MODULE_OWNER(dev);
 		dev->irq = card->irq;
 		dev->mem_start = ramphys;
 		dev->mem_end = ramphys + ramsize - 1;
@@ -425,7 +426,7 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 		hdlc->xmit = sca_xmit;
 		port->settings.clock_type = CLOCK_EXT;
 		port->card = card;
-		if(register_hdlc_device(dev)) {
+		if (register_hdlc_device(dev)) {
 			printk(KERN_ERR "pci200syn: unable to register hdlc "
 			       "device\n");
 			port->card = NULL;
@@ -445,8 +446,10 @@ static int __devinit pci200_pci_init_one(struct pci_dev *pdev,
 
 
 static struct pci_device_id pci200_pci_tbl[] __devinitdata = {
-	{ PCI_VENDOR_ID_GORAMO, PCI_DEVICE_ID_PCI200SYN, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050, PCI_VENDOR_ID_PLX,
+	  PCI_DEVICE_ID_PLX_9050, 0, 0, 0 },
+	{ PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050, PCI_VENDOR_ID_PLX,
+	  PCI_DEVICE_ID_PLX_PCI200SYN, 0, 0, 0 },
 	{ 0, }
 };
 
@@ -468,7 +471,7 @@ static int __init pci200_init_module(void)
 		printk(KERN_ERR "pci200syn: Invalid PCI clock frequency\n");
 		return -EINVAL;
 	}
-	return pci_module_init(&pci200_pci_driver);
+	return pci_register_driver(&pci200_pci_driver);
 }
 
 

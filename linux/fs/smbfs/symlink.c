@@ -6,7 +6,6 @@
  *  Please add a note about your changes to smbfs in the ChangeLog file.
  */
 
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/fcntl.h>
@@ -14,7 +13,6 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
-#include <linux/smp_lock.h>
 #include <linux/net.h>
 #include <linux/namei.h>
 
@@ -34,7 +32,7 @@ int smb_symlink(struct inode *inode, struct dentry *dentry, const char *oldname)
 	return smb_proc_symlink(server_from_dentry(dentry), dentry, oldname);
 }
 
-static int smb_follow_link(struct dentry *dentry, struct nameidata *nd)
+static void *smb_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	char *link = __getname();
 	DEBUG1("followlink of %s/%s\n", DENTRY_PATH(dentry));
@@ -45,24 +43,24 @@ static int smb_follow_link(struct dentry *dentry, struct nameidata *nd)
 		int len = smb_proc_read_link(server_from_dentry(dentry),
 						dentry, link, PATH_MAX - 1);
 		if (len < 0) {
-			putname(link);
+			__putname(link);
 			link = ERR_PTR(len);
 		} else {
 			link[len] = 0;
 		}
 	}
 	nd_set_link(nd, link);
-	return 0;
+	return NULL;
 }
 
-static void smb_put_link(struct dentry *dentry, struct nameidata *nd)
+static void smb_put_link(struct dentry *dentry, struct nameidata *nd, void *p)
 {
 	char *s = nd_get_link(nd);
 	if (!IS_ERR(s))
-		putname(s);
+		__putname(s);
 }
 
-struct inode_operations smb_link_inode_operations =
+const struct inode_operations smb_link_inode_operations =
 {
 	.readlink	= generic_readlink,
 	.follow_link	= smb_follow_link,

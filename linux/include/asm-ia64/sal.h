@@ -46,25 +46,28 @@
 extern spinlock_t sal_lock;
 
 /* SAL spec _requires_ eight args for each call. */
-#define __SAL_CALL(result,a0,a1,a2,a3,a4,a5,a6,a7)	\
-	result = (*ia64_sal)(a0,a1,a2,a3,a4,a5,a6,a7)
+#define __IA64_FW_CALL(entry,result,a0,a1,a2,a3,a4,a5,a6,a7)	\
+	result = (*entry)(a0,a1,a2,a3,a4,a5,a6,a7)
 
-# define SAL_CALL(result,args...) do {				\
+# define IA64_FW_CALL(entry,result,args...) do {		\
 	unsigned long __ia64_sc_flags;				\
 	struct ia64_fpreg __ia64_sc_fr[6];			\
 	ia64_save_scratch_fpregs(__ia64_sc_fr);			\
 	spin_lock_irqsave(&sal_lock, __ia64_sc_flags);		\
-	__SAL_CALL(result, args);				\
+	__IA64_FW_CALL(entry, result, args);			\
 	spin_unlock_irqrestore(&sal_lock, __ia64_sc_flags);	\
 	ia64_load_scratch_fpregs(__ia64_sc_fr);			\
 } while (0)
+
+# define SAL_CALL(result,args...)			\
+	IA64_FW_CALL(ia64_sal, result, args);
 
 # define SAL_CALL_NOLOCK(result,args...) do {		\
 	unsigned long __ia64_scn_flags;			\
 	struct ia64_fpreg __ia64_scn_fr[6];		\
 	ia64_save_scratch_fpregs(__ia64_scn_fr);	\
 	local_irq_save(__ia64_scn_flags);		\
-	__SAL_CALL(result, args);			\
+	__IA64_FW_CALL(ia64_sal, result, args);		\
 	local_irq_restore(__ia64_scn_flags);		\
 	ia64_load_scratch_fpregs(__ia64_scn_fr);	\
 } while (0)
@@ -73,7 +76,7 @@ extern spinlock_t sal_lock;
 	struct ia64_fpreg __ia64_scs_fr[6];		\
 	ia64_save_scratch_fpregs(__ia64_scs_fr);	\
 	preempt_disable();				\
-	__SAL_CALL(result, args);			\
+	__IA64_FW_CALL(ia64_sal, result, args);		\
 	preempt_enable();				\
 	ia64_load_scratch_fpregs(__ia64_scs_fr);	\
 } while (0)
@@ -91,6 +94,7 @@ extern spinlock_t sal_lock;
 #define SAL_PCI_CONFIG_READ		0x01000010
 #define SAL_PCI_CONFIG_WRITE		0x01000011
 #define SAL_FREQ_BASE			0x01000012
+#define SAL_PHYSICAL_ID_INFO		0x01000013
 
 #define SAL_UPDATE_PAL			0x01000020
 
@@ -319,7 +323,8 @@ typedef struct sal_log_timestamp {
 typedef struct sal_log_record_header {
 	u64 id;				/* Unique monotonically increasing ID */
 	sal_log_revision_t revision;	/* Major and Minor revision of header */
-	u16 severity;			/* Error Severity */
+	u8 severity;			/* Error Severity */
+	u8 validation_bits;		/* 0: platform_guid, 1: !timestamp */
 	u32 len;			/* Length of this error log in bytes */
 	sal_log_timestamp_t timestamp;	/* Timestamp */
 	efi_guid_t platform_guid;	/* Unique OEM Platform ID */
@@ -656,15 +661,8 @@ ia64_sal_freq_base (unsigned long which, unsigned long *ticks_per_second,
 	return isrv.status;
 }
 
-/* Flush all the processor and platform level instruction and/or data caches */
-static inline s64
-ia64_sal_cache_flush (u64 cache_type)
-{
-	struct ia64_sal_retval isrv;
-	SAL_CALL(isrv, SAL_CACHE_FLUSH, cache_type, 0, 0, 0, 0, 0, 0);
-	return isrv.status;
-}
-
+extern s64 ia64_sal_cache_flush (u64 cache_type);
+extern void __init check_sal_cache_flush (void);
 
 /* Initialize all the processor and platform level instruction and data caches */
 static inline s64
@@ -815,6 +813,17 @@ ia64_sal_update_pal (u64 param_buf, u64 scratch_buf, u64 scratch_buf_size,
 	return isrv.status;
 }
 
+/* Get physical processor die mapping in the platform. */
+static inline s64
+ia64_sal_physical_id_info(u16 *splid)
+{
+	struct ia64_sal_retval isrv;
+	SAL_CALL(isrv, SAL_PHYSICAL_ID_INFO, 0, 0, 0, 0, 0, 0, 0);
+	if (splid)
+		*splid = isrv.v0;
+	return isrv.status;
+}
+
 extern unsigned long sal_platform_features;
 
 extern int (*salinfo_platform_oemdata)(const u8 *, u8 **, u64 *);
@@ -832,6 +841,45 @@ extern int ia64_sal_oemcall_nolock(struct ia64_sal_retval *, u64, u64, u64,
 				   u64, u64, u64, u64, u64);
 extern int ia64_sal_oemcall_reentrant(struct ia64_sal_retval *, u64, u64, u64,
 				      u64, u64, u64, u64, u64);
+#ifdef CONFIG_HOTPLUG_CPU
+/*
+ * System Abstraction Layer Specification
+ * Section 3.2.5.1: OS_BOOT_RENDEZ to SAL return State.
+ * Note: region regs are stored first in head.S _start. Hence they must
+ * stay up front.
+ */
+struct sal_to_os_boot {
+	u64 rr[8];		/* Region Registers */
+	u64 br[6];		/* br0:
+				 * return addr into SAL boot rendez routine */
+	u64 gr1;		/* SAL:GP */
+	u64 gr12;		/* SAL:SP */
+	u64 gr13;		/* SAL: Task Pointer */
+	u64 fpsr;
+	u64 pfs;
+	u64 rnat;
+	u64 unat;
+	u64 bspstore;
+	u64 dcr;		/* Default Control Register */
+	u64 iva;
+	u64 pta;
+	u64 itv;
+	u64 pmv;
+	u64 cmcv;
+	u64 lrr[2];
+	u64 gr[4];
+	u64 pr;			/* Predicate registers */
+	u64 lc;			/* Loop Count */
+	struct ia64_fpreg fp[20];
+};
+
+/*
+ * Global array allocated for NR_CPUS at boot time
+ */
+extern struct sal_to_os_boot sal_boot_rendez_state[NR_CPUS];
+
+extern void ia64_jump_to_sal(struct sal_to_os_boot *);
+#endif
 
 extern void ia64_sal_handler_init(void *entry_point, void *gpval);
 

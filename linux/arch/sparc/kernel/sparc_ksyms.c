@@ -9,7 +9,6 @@
 #define EXPORT_SYMTAB_STROPS
 #define PROMLIB_INTERNAL
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/smp.h>
@@ -20,6 +19,7 @@
 #include <linux/in6.h>
 #include <linux/spinlock.h>
 #include <linux/mm.h>
+#include <linux/syscalls.h>
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
 #endif
@@ -65,7 +65,6 @@ struct poll {
 
 extern int svr4_getcontext (svr4_ucontext_t *, struct pt_regs *);
 extern int svr4_setcontext (svr4_ucontext_t *, struct pt_regs *);
-void _sigpause_common (unsigned int set, struct pt_regs *);
 extern void (*__copy_1page)(void *, const void *);
 extern void __memmove(void *, const void *, __kernel_size_t);
 extern void (*bzero_1page)(void *);
@@ -81,49 +80,33 @@ extern int __lshrdi3(int, int);
 extern int __muldi3(int, int);
 extern int __divdi3(int, int);
 
-extern void dump_thread(struct pt_regs *, struct user *);
-
 /* Private functions with odd calling conventions. */
 extern void ___atomic24_add(void);
 extern void ___atomic24_sub(void);
-extern void ___set_bit(void);
-extern void ___clear_bit(void);
-extern void ___change_bit(void);
+extern void ___rw_read_enter(void);
+extern void ___rw_read_try(void);
+extern void ___rw_read_exit(void);
+extern void ___rw_write_enter(void);
 
 /* Alias functions whose names begin with "." and export the aliases.
  * The module references will be fixed up by module_frob_arch_sections.
  */
-#define DOT_ALIAS2(__ret, __x, __arg1, __arg2) \
-	extern __ret __x(__arg1, __arg2) \
-	             __attribute__((weak, alias("." # __x)));
-
-DOT_ALIAS2(int, div, int, int)
-DOT_ALIAS2(int, mul, int, int)
-DOT_ALIAS2(int, rem, int, int)
-DOT_ALIAS2(unsigned, udiv, unsigned, unsigned)
-DOT_ALIAS2(unsigned, umul, unsigned, unsigned)
-DOT_ALIAS2(unsigned, urem, unsigned, unsigned)
-
-#undef DOT_ALIAS2
+extern int _Div(int, int);
+extern int _Mul(int, int);
+extern int _Rem(int, int);
+extern unsigned _Udiv(unsigned, unsigned);
+extern unsigned _Umul(unsigned, unsigned);
+extern unsigned _Urem(unsigned, unsigned);
 
 /* used by various drivers */
 EXPORT_SYMBOL(sparc_cpu_model);
 EXPORT_SYMBOL(kernel_thread);
-#ifdef CONFIG_DEBUG_SPINLOCK
 #ifdef CONFIG_SMP
-EXPORT_SYMBOL(_do_spin_lock);
-EXPORT_SYMBOL(_do_spin_unlock);
-EXPORT_SYMBOL(_spin_trylock);
-EXPORT_SYMBOL(_do_read_lock);
-EXPORT_SYMBOL(_do_read_unlock);
-EXPORT_SYMBOL(_do_write_lock);
-EXPORT_SYMBOL(_do_write_unlock);
-#endif
-#else
-// XXX find what uses (or used) these.
-// EXPORT_SYMBOL_PRIVATE(_rw_read_enter);
-// EXPORT_SYMBOL_PRIVATE(_rw_read_exit);
-// EXPORT_SYMBOL_PRIVATE(_rw_write_enter);
+// XXX find what uses (or used) these.   AV: see asm/spinlock.h
+EXPORT_SYMBOL(___rw_read_enter);
+EXPORT_SYMBOL(___rw_read_try);
+EXPORT_SYMBOL(___rw_read_exit);
+EXPORT_SYMBOL(___rw_write_enter);
 #endif
 /* semaphores */
 EXPORT_SYMBOL(__up);
@@ -139,18 +122,16 @@ EXPORT_SYMBOL(pfn_base);
 EXPORT_SYMBOL(___atomic24_add);
 EXPORT_SYMBOL(___atomic24_sub);
 
-/* Bit operations. */
-EXPORT_SYMBOL(___set_bit);
-EXPORT_SYMBOL(___clear_bit);
-EXPORT_SYMBOL(___change_bit);
+/* Per-CPU information table */
+EXPORT_PER_CPU_SYMBOL(__cpu_data);
 
 #ifdef CONFIG_SMP
 /* IRQ implementation. */
 EXPORT_SYMBOL(synchronize_irq);
 
-/* Misc SMP information */
-EXPORT_SYMBOL(__cpu_number_map);
-EXPORT_SYMBOL(__cpu_logical_map);
+/* CPU online map and active count. */
+EXPORT_SYMBOL(cpu_online_map);
+EXPORT_SYMBOL(phys_cpu_present_map);
 #endif
 
 EXPORT_SYMBOL(__udelay);
@@ -162,8 +143,7 @@ EXPORT_SYMBOL(mstk48t02_regs);
 EXPORT_SYMBOL(set_auxio);
 EXPORT_SYMBOL(get_auxio);
 #endif
-EXPORT_SYMBOL(request_fast_irq);
-EXPORT_SYMBOL(io_remap_page_range);
+EXPORT_SYMBOL(io_remap_pfn_range);
   /* P3: iounit_xxx may be needed, sun4d users */
 /* EXPORT_SYMBOL(iounit_map_dma_init); */
 /* EXPORT_SYMBOL(iounit_map_dma_page); */
@@ -173,15 +153,14 @@ EXPORT_SYMBOL(BTFIXUP_CALL(___xchg32));
 #else
 EXPORT_SYMBOL(BTFIXUP_CALL(__hard_smp_processor_id));
 #endif
-EXPORT_SYMBOL(BTFIXUP_CALL(enable_irq));
-EXPORT_SYMBOL(BTFIXUP_CALL(disable_irq));
-EXPORT_SYMBOL(BTFIXUP_CALL(__irq_itoa));
 EXPORT_SYMBOL(BTFIXUP_CALL(mmu_unlockarea));
 EXPORT_SYMBOL(BTFIXUP_CALL(mmu_lockarea));
 EXPORT_SYMBOL(BTFIXUP_CALL(mmu_get_scsi_sgl));
 EXPORT_SYMBOL(BTFIXUP_CALL(mmu_get_scsi_one));
 EXPORT_SYMBOL(BTFIXUP_CALL(mmu_release_scsi_sgl));
 EXPORT_SYMBOL(BTFIXUP_CALL(mmu_release_scsi_one));
+
+EXPORT_SYMBOL(BTFIXUP_CALL(pgprot_noncached));
 
 #ifdef CONFIG_SBUS
 EXPORT_SYMBOL(sbus_root);
@@ -234,7 +213,6 @@ EXPORT_SYMBOL(kunmap_atomic);
 /* Solaris/SunOS binary compatibility */
 EXPORT_SYMBOL(svr4_setcontext);
 EXPORT_SYMBOL(svr4_getcontext);
-EXPORT_SYMBOL(_sigpause_common);
 
 EXPORT_SYMBOL(dump_thread);
 
@@ -252,7 +230,6 @@ EXPORT_SYMBOL(prom_node_has_property);
 EXPORT_SYMBOL(prom_setprop);
 EXPORT_SYMBOL(saved_command_line);
 EXPORT_SYMBOL(prom_apply_obio_ranges);
-EXPORT_SYMBOL(prom_getname);
 EXPORT_SYMBOL(prom_feval);
 EXPORT_SYMBOL(prom_getbool);
 EXPORT_SYMBOL(prom_getstring);
@@ -264,20 +241,9 @@ EXPORT_SYMBOL(__prom_getchild);
 EXPORT_SYMBOL(__prom_getsibling);
 
 /* sparc library symbols */
-EXPORT_SYMBOL(memchr);
 EXPORT_SYMBOL(memscan);
 EXPORT_SYMBOL(strlen);
-EXPORT_SYMBOL(strnlen);
-EXPORT_SYMBOL(strcpy);
-EXPORT_SYMBOL(strncpy);
-EXPORT_SYMBOL(strcat);
-EXPORT_SYMBOL(strncat);
-EXPORT_SYMBOL(strcmp);
 EXPORT_SYMBOL(strncmp);
-EXPORT_SYMBOL(strchr);
-EXPORT_SYMBOL(strrchr);
-EXPORT_SYMBOL(strpbrk);
-EXPORT_SYMBOL(strstr);
 EXPORT_SYMBOL(page_kernel);
 
 /* Special internal versions of library functions. */
@@ -295,6 +261,7 @@ EXPORT_SYMBOL(__memmove);
 /* Moving data to/from userspace. */
 EXPORT_SYMBOL(__copy_user);
 EXPORT_SYMBOL(__strncpy_from_user);
+EXPORT_SYMBOL(__strnlen_user);
 
 /* Networking helper routines. */
 EXPORT_SYMBOL(__csum_partial_copy_sparc_generic);
@@ -318,12 +285,12 @@ EXPORT_SYMBOL(__lshrdi3);
 EXPORT_SYMBOL(__muldi3);
 EXPORT_SYMBOL(__divdi3);
 
-EXPORT_SYMBOL(rem);
-EXPORT_SYMBOL(urem);
-EXPORT_SYMBOL(mul);
-EXPORT_SYMBOL(umul);
-EXPORT_SYMBOL(div);
-EXPORT_SYMBOL(udiv);
+EXPORT_SYMBOL(_Rem);
+EXPORT_SYMBOL(_Urem);
+EXPORT_SYMBOL(_Mul);
+EXPORT_SYMBOL(_Umul);
+EXPORT_SYMBOL(_Div);
+EXPORT_SYMBOL(_Udiv);
 
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 EXPORT_SYMBOL(do_BUG);

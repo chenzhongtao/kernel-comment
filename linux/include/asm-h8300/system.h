@@ -1,10 +1,7 @@
 #ifndef _H8300_SYSTEM_H
 #define _H8300_SYSTEM_H
 
-#include <linux/config.h> /* get configuration macros */
 #include <linux/linkage.h>
-
-#define prepare_to_switch()	do { } while(0)
 
 /*
  * switch_to(n) should switch tasks to task ptr, first checking that
@@ -85,9 +82,7 @@ asmlinkage void resume(void);
 #define mb()   asm volatile (""   : : :"memory")
 #define rmb()  asm volatile (""   : : :"memory")
 #define wmb()  asm volatile (""   : : :"memory")
-#define set_rmb(var, value)    do { xchg(&var, value); } while (0)
-#define set_mb(var, value)     set_rmb(var, value)
-#define set_wmb(var, value)    do { var = value; wmb(); } while (0)
+#define set_mb(var, value) do { xchg(&var, value); } while (0)
 
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
@@ -102,7 +97,6 @@ asmlinkage void resume(void);
 #endif
 
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
-#define tas(ptr) (xchg((ptr),1))
 
 struct __xchg_dummy { unsigned long a[100]; };
 #define __xg(x) ((volatile struct __xchg_dummy *)(x))
@@ -143,5 +137,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
         local_irq_disable();		\
         asm("jmp @@0");			\
 })
+
+#define arch_align_stack(x) (x)
 
 #endif /* _H8300_SYSTEM_H */

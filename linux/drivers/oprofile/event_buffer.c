@@ -15,6 +15,7 @@
 #include <linux/vmalloc.h>
 #include <linux/oprofile.h>
 #include <linux/sched.h>
+#include <linux/capability.h>
 #include <linux/dcookies.h>
 #include <linux/fs.h>
 #include <asm/uaccess.h>
@@ -23,7 +24,7 @@
 #include "event_buffer.h"
 #include "oprofile_stats.h"
 
-DECLARE_MUTEX(buffer_sem);
+DEFINE_MUTEX(buffer_mutex);
  
 static unsigned long buffer_opened;
 static DECLARE_WAIT_QUEUE_HEAD(buffer_wait);
@@ -31,7 +32,7 @@ static unsigned long * event_buffer;
 static unsigned long buffer_size;
 static unsigned long buffer_watershed;
 static size_t buffer_pos;
-/* atomic_t because wait_event checks it outside of buffer_sem */
+/* atomic_t because wait_event checks it outside of buffer_mutex */
 static atomic_t buffer_ready = ATOMIC_INIT(0);
 
 /* Add an entry to the event buffer. When we
@@ -59,21 +60,22 @@ void add_event_entry(unsigned long value)
  */
 void wake_up_buffer_waiter(void)
 {
-	down(&buffer_sem);
+	mutex_lock(&buffer_mutex);
 	atomic_set(&buffer_ready, 1);
 	wake_up(&buffer_wait);
-	up(&buffer_sem);
+	mutex_unlock(&buffer_mutex);
 }
 
  
 int alloc_event_buffer(void)
 {
 	int err = -ENOMEM;
+	unsigned long flags;
 
-	spin_lock(&oprofilefs_lock);
+	spin_lock_irqsave(&oprofilefs_lock, flags);
 	buffer_size = fs_buffer_size;
 	buffer_watershed = fs_buffer_watershed;
-	spin_unlock(&oprofilefs_lock);
+	spin_unlock_irqrestore(&oprofilefs_lock, flags);
  
 	if (buffer_watershed >= buffer_size)
 		return -EINVAL;
@@ -94,7 +96,7 @@ void free_event_buffer(void)
 }
 
  
-int event_buffer_open(struct inode * inode, struct file * file)
+static int event_buffer_open(struct inode * inode, struct file * file)
 {
 	int err = -EPERM;
 
@@ -130,7 +132,7 @@ out:
 }
 
 
-int event_buffer_release(struct inode * inode, struct file * file)
+static int event_buffer_release(struct inode * inode, struct file * file)
 {
 	oprofile_stop();
 	oprofile_shutdown();
@@ -142,7 +144,8 @@ int event_buffer_release(struct inode * inode, struct file * file)
 }
 
 
-ssize_t event_buffer_read(struct file * file, char __user * buf, size_t count, loff_t * offset)
+static ssize_t event_buffer_read(struct file * file, char __user * buf,
+				 size_t count, loff_t * offset)
 {
 	int retval = -EINVAL;
 	size_t const max = buffer_size * sizeof(unsigned long);
@@ -160,7 +163,7 @@ ssize_t event_buffer_read(struct file * file, char __user * buf, size_t count, l
 	if (!atomic_read(&buffer_ready))
 		return -EAGAIN;
 
-	down(&buffer_sem);
+	mutex_lock(&buffer_mutex);
 
 	atomic_set(&buffer_ready, 0);
 
@@ -175,11 +178,11 @@ ssize_t event_buffer_read(struct file * file, char __user * buf, size_t count, l
 	buffer_pos = 0;
  
 out:
-	up(&buffer_sem);
+	mutex_unlock(&buffer_mutex);
 	return retval;
 }
  
-struct file_operations event_buffer_fops = {
+const struct file_operations event_buffer_fops = {
 	.open		= event_buffer_open,
 	.release	= event_buffer_release,
 	.read		= event_buffer_read,

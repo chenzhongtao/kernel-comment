@@ -1,5 +1,4 @@
 /*
- * $Id: saa7134-ts.c,v 1.12 2004/11/07 13:17:15 kraxel Exp $
  *
  * device driver for philips saa7134 based TV cards
  * video4linux video interface
@@ -46,16 +45,10 @@ static int buffer_activate(struct saa7134_dev *dev,
 			   struct saa7134_buf *buf,
 			   struct saa7134_buf *next)
 {
-	u32 control;
 
 	dprintk("buffer_activate [%p]",buf);
 	buf->vb.state = STATE_ACTIVE;
 	buf->top_seen = 0;
-
-        /* dma: setup channel 5 (= TS) */
-        control = SAA7134_RS_CONTROL_BURST_16 |
-                SAA7134_RS_CONTROL_ME |
-                (buf->pt->dma >> 12);
 
 	if (NULL == next)
 		next = buf;
@@ -68,8 +61,6 @@ static int buffer_activate(struct saa7134_dev *dev,
 		saa_writel(SAA7134_RS_BA1(5),saa7134_buffer_base(next));
 		saa_writel(SAA7134_RS_BA2(5),saa7134_buffer_base(buf));
 	}
-	saa_writel(SAA7134_RS_PITCH(5),TS_PACKET_SIZE);
-	saa_writel(SAA7134_RS_CONTROL(5),control);
 
 	/* start DMA */
 	saa7134_set_dmabits(dev);
@@ -84,6 +75,7 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
 	struct saa7134_dev *dev = q->priv_data;
 	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
 	unsigned int lines, llength, size;
+	u32 control;
 	int err;
 
 	dprintk("buffer_prepare [%p,%s]\n",buf,v4l2_field_names[field]);
@@ -96,32 +88,46 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
 		return -EINVAL;
 
 	if (buf->vb.size != size) {
-		saa7134_dma_free(dev,buf);
+		saa7134_dma_free(q,buf);
 	}
 
 	if (STATE_NEEDS_INIT == buf->vb.state) {
+		struct videobuf_dmabuf *dma=videobuf_to_dma(&buf->vb);
+
 		buf->vb.width  = llength;
 		buf->vb.height = lines;
 		buf->vb.size   = size;
 		buf->pt        = &dev->ts.pt_ts;
 
-		err = videobuf_iolock(dev->pci,&buf->vb,NULL);
+		err = videobuf_iolock(q,&buf->vb,NULL);
 		if (err)
 			goto oops;
 		err = saa7134_pgtable_build(dev->pci,buf->pt,
-					    buf->vb.dma.sglist,
-					    buf->vb.dma.sglen,
+					    dma->sglist,
+					    dma->sglen,
 					    saa7134_buffer_startpage(buf));
 		if (err)
 			goto oops;
 	}
+
+	/* dma: setup channel 5 (= TS) */
+	control = SAA7134_RS_CONTROL_BURST_16 |
+		  SAA7134_RS_CONTROL_ME |
+		  (buf->pt->dma >> 12);
+
+	saa_writeb(SAA7134_TS_DMA0, ((lines-1)&0xff));
+	saa_writeb(SAA7134_TS_DMA1, (((lines-1)>>8)&0xff));
+	saa_writeb(SAA7134_TS_DMA2, ((((lines-1)>>16)&0x3f) | 0x00)); /* TSNOPIT=0, TSCOLAP=0 */
+	saa_writel(SAA7134_RS_PITCH(5),TS_PACKET_SIZE);
+	saa_writel(SAA7134_RS_CONTROL(5),control);
+
 	buf->vb.state = STATE_PREPARED;
 	buf->activate = buffer_activate;
 	buf->vb.field = field;
 	return 0;
 
  oops:
-	saa7134_dma_free(dev,buf);
+	saa7134_dma_free(q,buf);
 	return err;
 }
 
@@ -147,10 +153,9 @@ static void buffer_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
 
 static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
 {
-	struct saa7134_dev *dev = q->priv_data;
 	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
 
-	saa7134_dma_free(dev,buf);
+	saa7134_dma_free(q,buf);
 }
 
 struct videobuf_queue_ops saa7134_ts_qops = {
@@ -164,13 +169,29 @@ EXPORT_SYMBOL_GPL(saa7134_ts_qops);
 /* ----------------------------------------------------------- */
 /* exported stuff                                              */
 
-static unsigned int tsbufs = 4;
+static unsigned int tsbufs = 8;
 module_param(tsbufs, int, 0444);
 MODULE_PARM_DESC(tsbufs,"number of ts buffers, range 2-32");
 
-static unsigned int ts_nr_packets = 30;
+static unsigned int ts_nr_packets = 64;
 module_param(ts_nr_packets, int, 0444);
 MODULE_PARM_DESC(ts_nr_packets,"size of a ts buffers (in ts packets)");
+
+int saa7134_ts_init_hw(struct saa7134_dev *dev)
+{
+	/* deactivate TS softreset */
+	saa_writeb(SAA7134_TS_SERIAL1, 0x00);
+	/* TSSOP high active, TSVAL high active, TSLOCK ignored */
+	saa_writeb(SAA7134_TS_PARALLEL, 0xec);
+	saa_writeb(SAA7134_TS_PARALLEL_SERIAL, (TS_PACKET_SIZE-1));
+	saa_writeb(SAA7134_TS_DMA0, ((dev->ts.nr_packets-1)&0xff));
+	saa_writeb(SAA7134_TS_DMA1, (((dev->ts.nr_packets-1)>>8)&0xff));
+	/* TSNOPIT=0, TSCOLAP=0 */
+	saa_writeb(SAA7134_TS_DMA2,
+		((((dev->ts.nr_packets-1)>>16)&0x3f) | 0x00));
+
+	return 0;
+}
 
 int saa7134_ts_init1(struct saa7134_dev *dev)
 {
@@ -195,12 +216,7 @@ int saa7134_ts_init1(struct saa7134_dev *dev)
 	saa7134_pgtable_alloc(dev->pci,&dev->ts.pt_ts);
 
 	/* init TS hw */
-	saa_writeb(SAA7134_TS_SERIAL1, 0x00);  /* deactivate TS softreset */
-	saa_writeb(SAA7134_TS_PARALLEL, 0xec); /* TSSOP high active, TSVAL high active, TSLOCK ignored */
-	saa_writeb(SAA7134_TS_PARALLEL_SERIAL, (TS_PACKET_SIZE-1));
-	saa_writeb(SAA7134_TS_DMA0, ((dev->ts.nr_packets-1)&0xff));
-	saa_writeb(SAA7134_TS_DMA1, (((dev->ts.nr_packets-1)>>8)&0xff));
-	saa_writeb(SAA7134_TS_DMA2, ((((dev->ts.nr_packets-1)>>16)&0x3f) | 0x00)); /* TSNOPIT=0, TSCOLAP=0 */
+	saa7134_ts_init_hw(dev);
 
 	return 0;
 }
@@ -220,10 +236,10 @@ void saa7134_irq_ts_done(struct saa7134_dev *dev, unsigned long status)
 	if (dev->ts_q.curr) {
 		field = dev->ts_q.curr->vb.field;
 		if (field == V4L2_FIELD_TOP) {
-			if ((status & 0x100000) != 0x100000)
+			if ((status & 0x100000) != 0x000000)
 				goto done;
 		} else {
-			if ((status & 0x100000) != 0x000000)
+			if ((status & 0x100000) != 0x100000)
 				goto done;
 		}
 		saa7134_buffer_finish(dev,&dev->ts_q,STATE_DONE);

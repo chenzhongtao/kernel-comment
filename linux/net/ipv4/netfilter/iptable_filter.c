@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
+#include <net/ip.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
@@ -25,89 +26,67 @@ static struct
 	struct ipt_replace repl;
 	struct ipt_standard entries[3];
 	struct ipt_error term;
-} initial_table __initdata 
-= { { "filter", FILTER_VALID_HOOKS, 4,
-      sizeof(struct ipt_standard) * 3 + sizeof(struct ipt_error),
-      { [NF_IP_LOCAL_IN] = 0,
-	[NF_IP_FORWARD] = sizeof(struct ipt_standard),
-	[NF_IP_LOCAL_OUT] = sizeof(struct ipt_standard) * 2 },
-      { [NF_IP_LOCAL_IN] = 0,
-	[NF_IP_FORWARD] = sizeof(struct ipt_standard),
-	[NF_IP_LOCAL_OUT] = sizeof(struct ipt_standard) * 2 },
-      0, NULL, { } },
-    {
-	    /* LOCAL_IN */
-	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* FORWARD */
-	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } },
-	    /* LOCAL_OUT */
-	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-		0,
-		sizeof(struct ipt_entry),
-		sizeof(struct ipt_standard),
-		0, { 0, 0 }, { } },
-	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
-		-NF_ACCEPT - 1 } }
-    },
-    /* ERROR */
-    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
-	0,
-	sizeof(struct ipt_entry),
-	sizeof(struct ipt_error),
-	0, { 0, 0 }, { } },
-      { { { { IPT_ALIGN(sizeof(struct ipt_error_target)), IPT_ERROR_TARGET } },
-	  { } },
-	"ERROR"
-      }
-    }
+} initial_table __initdata = {
+	.repl = {
+		.name = "filter",
+		.valid_hooks = FILTER_VALID_HOOKS,
+		.num_entries = 4,
+		.size = sizeof(struct ipt_standard) * 3 + sizeof(struct ipt_error),
+		.hook_entry = {
+			[NF_IP_LOCAL_IN] = 0,
+			[NF_IP_FORWARD] = sizeof(struct ipt_standard),
+			[NF_IP_LOCAL_OUT] = sizeof(struct ipt_standard) * 2,
+		},
+		.underflow = {
+			[NF_IP_LOCAL_IN] = 0,
+			[NF_IP_FORWARD] = sizeof(struct ipt_standard),
+			[NF_IP_LOCAL_OUT] = sizeof(struct ipt_standard) * 2,
+		},
+	},
+	.entries = {
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_IN */
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* FORWARD */
+		IPT_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_OUT */
+	},
+	.term = IPT_ERROR_INIT,			/* ERROR */
 };
 
-static struct ipt_table packet_filter = {
+static struct xt_table packet_filter = {
 	.name		= "filter",
 	.valid_hooks	= FILTER_VALID_HOOKS,
 	.lock		= RW_LOCK_UNLOCKED,
-	.me		= THIS_MODULE
+	.me		= THIS_MODULE,
+	.af		= AF_INET,
 };
 
 /* The work comes in here from netfilter.c. */
 static unsigned int
 ipt_hook(unsigned int hook,
-	 struct sk_buff **pskb,
+	 struct sk_buff *skb,
 	 const struct net_device *in,
 	 const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	return ipt_do_table(pskb, hook, in, out, &packet_filter, NULL);
+	return ipt_do_table(skb, hook, in, out, &packet_filter);
 }
 
 static unsigned int
 ipt_local_out_hook(unsigned int hook,
-		   struct sk_buff **pskb,
+		   struct sk_buff *skb,
 		   const struct net_device *in,
 		   const struct net_device *out,
 		   int (*okfn)(struct sk_buff *))
 {
 	/* root is playing with raw sockets. */
-	if ((*pskb)->len < sizeof(struct iphdr)
-	    || (*pskb)->nh.iph->ihl * 4 < sizeof(struct iphdr)) {
+	if (skb->len < sizeof(struct iphdr) ||
+	    ip_hdrlen(skb) < sizeof(struct iphdr)) {
 		if (net_ratelimit())
-			printk("ipt_hook: happy cracking.\n");
+			printk("iptable_filter: ignoring short SOCK_RAW "
+			       "packet.\n");
 		return NF_ACCEPT;
 	}
 
-	return ipt_do_table(pskb, hook, in, out, &packet_filter, NULL);
+	return ipt_do_table(skb, hook, in, out, &packet_filter);
 }
 
 static struct nf_hook_ops ipt_ops[] = {
@@ -138,7 +117,7 @@ static struct nf_hook_ops ipt_ops[] = {
 static int forward = NF_ACCEPT;
 module_param(forward, bool, 0000);
 
-static int __init init(void)
+static int __init iptable_filter_init(void)
 {
 	int ret;
 
@@ -156,39 +135,22 @@ static int __init init(void)
 		return ret;
 
 	/* Register hooks */
-	ret = nf_register_hook(&ipt_ops[0]);
+	ret = nf_register_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
 	if (ret < 0)
 		goto cleanup_table;
 
-	ret = nf_register_hook(&ipt_ops[1]);
-	if (ret < 0)
-		goto cleanup_hook0;
-
-	ret = nf_register_hook(&ipt_ops[2]);
-	if (ret < 0)
-		goto cleanup_hook1;
-
 	return ret;
 
- cleanup_hook1:
-	nf_unregister_hook(&ipt_ops[1]);
- cleanup_hook0:
-	nf_unregister_hook(&ipt_ops[0]);
  cleanup_table:
 	ipt_unregister_table(&packet_filter);
-
 	return ret;
 }
 
-static void __exit fini(void)
+static void __exit iptable_filter_fini(void)
 {
-	unsigned int i;
-
-	for (i = 0; i < sizeof(ipt_ops)/sizeof(struct nf_hook_ops); i++)
-		nf_unregister_hook(&ipt_ops[i]);
-
+	nf_unregister_hooks(ipt_ops, ARRAY_SIZE(ipt_ops));
 	ipt_unregister_table(&packet_filter);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(iptable_filter_init);
+module_exit(iptable_filter_fini);

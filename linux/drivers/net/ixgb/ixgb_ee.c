@@ -1,27 +1,27 @@
 /*******************************************************************************
 
-  
-  Copyright(c) 1999 - 2004 Intel Corporation. All rights reserved.
-  
-  This program is free software; you can redistribute it and/or modify it 
-  under the terms of the GNU General Public License as published by the Free 
-  Software Foundation; either version 2 of the License, or (at your option) 
-  any later version.
-  
-  This program is distributed in the hope that it will be useful, but WITHOUT 
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or 
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for 
+  Intel PRO/10GbE Linux driver
+  Copyright(c) 1999 - 2006 Intel Corporation.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms and conditions of the GNU General Public License,
+  version 2, as published by the Free Software Foundation.
+
+  This program is distributed in the hope it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
   more details.
-  
+
   You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc., 59 
-  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-  
-  The full GNU General Public License is included in this distribution in the
-  file called LICENSE.
-  
+  this program; if not, write to the Free Software Foundation, Inc.,
+  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+
+  The full GNU General Public License is included in this distribution in
+  the file called "COPYING".
+
   Contact Information:
   Linux NICS <linux.nics@intel.com>
+  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
 
 *******************************************************************************/
@@ -315,7 +315,7 @@ ixgb_wait_eeprom_command(struct ixgb_hw *hw)
  * hw - Struct containing variables accessed by shared code
  *
  * Reads the first 64 16 bit words of the EEPROM and sums the values read.
- * If the the sum of the 64 16 bit words is 0xBABA, the EEPROM's checksum is
+ * If the sum of the 64 16 bit words is 0xBABA, the EEPROM's checksum is
  * valid.
  *
  * Returns:
@@ -372,11 +372,11 @@ ixgb_update_eeprom_checksum(struct ixgb_hw *hw)
  *
  *****************************************************************************/
 void
-ixgb_write_eeprom(struct ixgb_hw *hw,
-		   uint16_t offset,
-		   uint16_t data)
+ixgb_write_eeprom(struct ixgb_hw *hw, uint16_t offset, uint16_t data)
 {
-	/*  Prepare the EEPROM for writing  */
+	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
+
+	/* Prepare the EEPROM for writing */
 	ixgb_setup_eeprom(hw);
 
 	/*  Send the 9-bit EWEN (write enable) command to the EEPROM (5-bit opcode
@@ -409,6 +409,9 @@ ixgb_write_eeprom(struct ixgb_hw *hw,
 
 	/*  Done with writing  */
 	ixgb_cleanup_eeprom(hw);
+
+	/* clear the init_ctrl_reg_1 to signify that the cache is invalidated */
+	ee_map->init_ctrl_reg_1 = cpu_to_le16(EEPROM_ICW1_SIGNATURE_CLEAR);
 
 	return;
 }
@@ -473,16 +476,19 @@ ixgb_get_eeprom_data(struct ixgb_hw *hw)
 		uint16_t ee_data;
 		ee_data = ixgb_read_eeprom(hw, i);
 		checksum += ee_data;
-		hw->eeprom[i] = le16_to_cpu(ee_data);
+		hw->eeprom[i] = cpu_to_le16(ee_data);
 	}
 
 	if (checksum != (uint16_t) EEPROM_SUM) {
 		DEBUGOUT("ixgb_ee: Checksum invalid.\n");
+		/* clear the init_ctrl_reg_1 to signify that the cache is
+		 * invalidated */
+		ee_map->init_ctrl_reg_1 = cpu_to_le16(EEPROM_ICW1_SIGNATURE_CLEAR);
 		return (FALSE);
 	}
 
-	if ((ee_map->init_ctrl_reg_1 & le16_to_cpu(EEPROM_ICW1_SIGNATURE_MASK))
-		 != le16_to_cpu(EEPROM_ICW1_SIGNATURE_VALID)) {
+	if ((ee_map->init_ctrl_reg_1 & cpu_to_le16(EEPROM_ICW1_SIGNATURE_MASK))
+		 != cpu_to_le16(EEPROM_ICW1_SIGNATURE_VALID)) {
 		DEBUGOUT("ixgb_ee: Signature invalid.\n");
 		return(FALSE);
 	}
@@ -505,8 +511,8 @@ ixgb_check_and_get_eeprom_data (struct ixgb_hw* hw)
 {
 	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
 
-	if ((ee_map->init_ctrl_reg_1 & le16_to_cpu(EEPROM_ICW1_SIGNATURE_MASK))
-	    == le16_to_cpu(EEPROM_ICW1_SIGNATURE_VALID)) {
+	if ((ee_map->init_ctrl_reg_1 & cpu_to_le16(EEPROM_ICW1_SIGNATURE_MASK))
+	    == cpu_to_le16(EEPROM_ICW1_SIGNATURE_VALID)) {
 		return (TRUE);
 	} else {
 		return ixgb_get_eeprom_data(hw);
@@ -522,7 +528,7 @@ ixgb_check_and_get_eeprom_data (struct ixgb_hw* hw)
  * Returns:
  *          Word at indexed offset in eeprom, if valid, 0 otherwise.
  ******************************************************************************/
-uint16_t
+__le16
 ixgb_get_eeprom_word(struct ixgb_hw *hw, uint16_t index)
 {
 
@@ -559,24 +565,6 @@ ixgb_get_ee_mac_addr(struct ixgb_hw *hw,
 	}
 }
 
-/******************************************************************************
- * return the compatibility flags from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          compatibility flags if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint16_t
-ixgb_get_ee_compatibility(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->compatibility);
-
-	return(0);
-}
 
 /******************************************************************************
  * return the Printed Board Assembly number from EEPROM
@@ -596,81 +584,6 @@ ixgb_get_ee_pba_number(struct ixgb_hw *hw)
 	return(0);
 }
 
-/******************************************************************************
- * return the Initialization Control Word 1 from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          Initialization Control Word 1 if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint16_t
-ixgb_get_ee_init_ctrl_reg_1(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->init_ctrl_reg_1);
-
-	return(0);
-}
-
-/******************************************************************************
- * return the Initialization Control Word 2 from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          Initialization Control Word 2 if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint16_t
-ixgb_get_ee_init_ctrl_reg_2(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->init_ctrl_reg_2);
-
-	return(0);
-}
-
-/******************************************************************************
- * return the Subsystem Id from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          Subsystem Id if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint16_t
-ixgb_get_ee_subsystem_id(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-	   return(ee_map->subsystem_id);
-
-	return(0);
-}
-
-/******************************************************************************
- * return the Sub Vendor Id from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          Sub Vendor Id if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint16_t
-ixgb_get_ee_subvendor_id(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->subvendor_id);
-
-	return(0);
-}
 
 /******************************************************************************
  * return the Device Id from EEPROM
@@ -686,83 +599,8 @@ ixgb_get_ee_device_id(struct ixgb_hw *hw)
 	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
 
 	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->device_id);
+		return (le16_to_cpu(ee_map->device_id));
 
-	return(0);
+	return (0);
 }
 
-/******************************************************************************
- * return the Vendor Id from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          Device Id if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint16_t
-ixgb_get_ee_vendor_id(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->vendor_id);
-
-	return(0);
-}
-
-/******************************************************************************
- * return the Software Defined Pins Register from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          SDP Register if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint16_t
-ixgb_get_ee_swdpins_reg(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->swdpins_reg);
-
-	return(0);
-}
-
-/******************************************************************************
- * return the D3 Power Management Bits from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          D3 Power Management Bits if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint8_t
-ixgb_get_ee_d3_power(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->d3_power);
-
-	return(0);
-}
-
-/******************************************************************************
- * return the D0 Power Management Bits from EEPROM
- *
- * hw - Struct containing variables accessed by shared code
- *
- * Returns:
- *          D0 Power Management Bits if EEPROM contents are valid, 0 otherwise
- ******************************************************************************/
-uint8_t
-ixgb_get_ee_d0_power(struct ixgb_hw *hw)
-{
-	struct ixgb_ee_map_type *ee_map = (struct ixgb_ee_map_type *)hw->eeprom;
-
-	if(ixgb_check_and_get_eeprom_data(hw) == TRUE)
-		return(ee_map->d0_power);
-
-	return(0);
-}

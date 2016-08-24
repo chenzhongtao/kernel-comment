@@ -15,12 +15,10 @@
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
-#include <linux/smp_lock.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
 #include <linux/ioport.h>
 #include <linux/major.h>
-#include <linux/devfs_fs_kernel.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -79,10 +77,6 @@ struct inst {
 
       unsigned char run_length;
       unsigned char repeat_byte;
-
-      /* These members manage timeouts for programmed delays */
-      wait_queue_head_t wait_queue;
-      struct timer_list timer_list;
 };
 
 static struct inst instances[BPP_NO];
@@ -162,7 +156,7 @@ static unsigned short get_pins(unsigned minor)
 #define BPP_ICR      0x18
 #define BPP_SIZE     0x1A
 
-/* BPP_CSR.  Bits of type RW1 are cleared with writting '1'. */
+/* BPP_CSR.  Bits of type RW1 are cleared with writing '1'. */
 #define P_DEV_ID_MASK   0xf0000000      /* R   */
 #define P_DEV_ID_ZEBRA  0x40000000
 #define P_DEV_ID_L64854 0xa0000000      /*      == NCR 89C100+89C105. Pity. */
@@ -297,16 +291,9 @@ static unsigned short get_pins(unsigned minor)
 
 #endif /* __sparc__ */
 
-static void bpp_wake_up(unsigned long val)
-{ wake_up(&instances[val].wait_queue); }
-
 static void snooze(unsigned long snooze_time, unsigned minor)
 {
-      init_timer(&instances[minor].timer_list);
-      instances[minor].timer_list.expires = jiffies + snooze_time + 1;
-      instances[minor].timer_list.data    = minor;
-      add_timer(&instances[minor].timer_list);
-      sleep_on (&instances[minor].wait_queue);
+	schedule_timeout_uninterruptible(snooze_time + 1);
 }
 
 static int wait_for(unsigned short set, unsigned short clr,
@@ -633,7 +620,7 @@ static long read_ecp(unsigned minor, char __user *c, unsigned long cnt)
 static ssize_t bpp_read(struct file *f, char __user *c, size_t cnt, loff_t * ppos)
 {
       long rc;
-      unsigned minor = iminor(f->f_dentry->d_inode);
+      unsigned minor = iminor(f->f_path.dentry->d_inode);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -786,7 +773,7 @@ static long write_ecp(unsigned minor, const char __user *c, unsigned long cnt)
 static ssize_t bpp_write(struct file *f, const char __user *c, size_t cnt, loff_t * ppos)
 {
       long errno = 0;
-      unsigned minor = iminor(f->f_dentry->d_inode);
+      unsigned minor = iminor(f->f_path.dentry->d_inode);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -858,7 +845,7 @@ static int bpp_ioctl(struct inode *inode, struct file *f, unsigned int cmd,
       return errno;
 }
 
-static struct file_operations bpp_fops = {
+static const struct file_operations bpp_fops = {
 	.owner =	THIS_MODULE,
 	.read =		bpp_read,
 	.write =	bpp_write,
@@ -880,11 +867,8 @@ static void probeLptPort(unsigned idx)
       instances[idx].enhanced = 0;
       instances[idx].direction = 0;
       instances[idx].mode = COMPATIBILITY;
-      instances[idx].wait_queue = 0;
       instances[idx].run_length = 0;
       instances[idx].run_flag = 0;
-      init_timer(&instances[idx].timer_list);
-      instances[idx].timer_list.function = bpp_wake_up;
       if (!request_region(lpAddr,3, dev_name)) return;
 
       /*
@@ -977,11 +961,8 @@ static void probeLptPort(unsigned idx)
       instances[idx].enhanced = 0;
       instances[idx].direction = 0;
       instances[idx].mode = COMPATIBILITY;
-      init_waitqueue_head(&instances[idx].wait_queue);
       instances[idx].run_length = 0;
       instances[idx].run_flag = 0;
-      init_timer(&instances[idx].timer_list);
-      instances[idx].timer_list.function = bpp_wake_up;
 
       if (!rp) return;
 
@@ -1048,11 +1029,6 @@ static int __init bpp_init(void)
 		instances[idx].opened = 0;
 		probeLptPort(idx);
 	}
-	devfs_mk_dir("bpp");
-	for (idx = 0; idx < BPP_NO; idx++) {
-		devfs_mk_cdev(MKDEV(BPP_MAJOR, idx),
-				S_IFCHR | S_IRUSR | S_IWUSR, "bpp/%d", idx);
-	}
 
 	return 0;
 }
@@ -1061,9 +1037,6 @@ static void __exit bpp_cleanup(void)
 {
 	unsigned idx;
 
-	for (idx = 0; idx < BPP_NO; idx++)
-		devfs_remove("bpp/%d", idx);
-	devfs_remove("bpp");
 	unregister_chrdev(BPP_MAJOR, dev_name);
 
 	for (idx = 0;  idx < BPP_NO; idx++) {

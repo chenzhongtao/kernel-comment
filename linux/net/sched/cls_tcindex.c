@@ -4,17 +4,14 @@
  * Written 1998,1999 by Werner Almesberger, EPFL ICA
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
 #include <linux/errno.h>
-#include <linux/netdevice.h>
-#include <net/ip.h>
 #include <net/act_api.h>
+#include <net/netlink.h>
 #include <net/pkt_cls.h>
-#include <net/route.h>
 
 
 /*
@@ -149,11 +146,10 @@ static int tcindex_init(struct tcf_proto *tp)
 	struct tcindex_data *p;
 
 	DPRINTK("tcindex_init(tp %p)\n",tp);
-	p = kmalloc(sizeof(struct tcindex_data),GFP_KERNEL);
+	p = kzalloc(sizeof(struct tcindex_data),GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 
-	memset(p, 0, sizeof(*p));
 	p->mask = 0xffff;
 	p->hash = DEFAULT_HASH_SIZE;
 	p->fall_through = 1;
@@ -194,8 +190,7 @@ found:
 	}
 	tcf_unbind_filter(tp, &r->res);
 	tcf_exts_destroy(tp, &r->exts);
-	if (f)
-		kfree(f);
+	kfree(f);
 	return 0;
 }
 
@@ -225,7 +220,7 @@ tcindex_set_parms(struct tcf_proto *tp, unsigned long base, u32 handle,
 	err = tcf_exts_validate(tp, tb, est, &e, &tcindex_ext_map);
 	if (err < 0)
 		return err;
-	
+
 	memcpy(&cp, p, sizeof(cp));
 	memset(&new_filter_result, 0, sizeof(new_filter_result));
 
@@ -248,9 +243,9 @@ tcindex_set_parms(struct tcf_proto *tp, unsigned long base, u32 handle,
 	}
 
 	if (tb[TCA_TCINDEX_SHIFT-1]) {
-		if (RTA_PAYLOAD(tb[TCA_TCINDEX_SHIFT-1]) < sizeof(u16))
+		if (RTA_PAYLOAD(tb[TCA_TCINDEX_SHIFT-1]) < sizeof(int))
 			goto errout;
-		cp.shift = *(u16 *) RTA_DATA(tb[TCA_TCINDEX_SHIFT-1]);
+		cp.shift = *(int *) RTA_DATA(tb[TCA_TCINDEX_SHIFT-1]);
 	}
 
 	err = -EBUSY;
@@ -298,16 +293,14 @@ tcindex_set_parms(struct tcf_proto *tp, unsigned long base, u32 handle,
 	err = -ENOMEM;
 	if (!cp.perfect && !cp.h) {
 		if (valid_perfect_hash(&cp)) {
-			cp.perfect = kmalloc(cp.hash * sizeof(*r), GFP_KERNEL);
+			cp.perfect = kcalloc(cp.hash, sizeof(*r), GFP_KERNEL);
 			if (!cp.perfect)
 				goto errout;
-			memset(cp.perfect, 0, cp.hash * sizeof(*r));
 			balloc = 1;
 		} else {
-			cp.h = kmalloc(cp.hash * sizeof(f), GFP_KERNEL);
+			cp.h = kcalloc(cp.hash, sizeof(f), GFP_KERNEL);
 			if (!cp.h)
 				goto errout;
-			memset(cp.h, 0, cp.hash * sizeof(f));
 			balloc = 2;
 		}
 	}
@@ -318,16 +311,15 @@ tcindex_set_parms(struct tcf_proto *tp, unsigned long base, u32 handle,
 		r = tcindex_lookup(&cp, handle) ? : &new_filter_result;
 
 	if (r == &new_filter_result) {
-		f = kmalloc(sizeof(*f), GFP_KERNEL);
+		f = kzalloc(sizeof(*f), GFP_KERNEL);
 		if (!f)
 			goto errout_alloc;
-		memset(f, 0, sizeof(*f));
- 	}
+	}
 
 	if (tb[TCA_TCINDEX_CLASSID-1]) {
 		cr.res.classid = *(u32 *) RTA_DATA(tb[TCA_TCINDEX_CLASSID-1]);
 		tcf_bind_filter(tp, &cr.res, base);
- 	}
+	}
 
 	tcf_exts_change(tp, &cr.exts, &e);
 
@@ -347,7 +339,7 @@ tcindex_set_parms(struct tcf_proto *tp, unsigned long base, u32 handle,
 		for (fp = p->h+(handle % p->hash); *fp; fp = &(*fp)->next)
 			/* nothing */;
 		*fp = f;
- 	}
+	}
 	tcf_tree_unlock(tp);
 
 	return 0;
@@ -442,10 +434,8 @@ static void tcindex_destroy(struct tcf_proto *tp)
 	walker.skip = 0;
 	walker.fn = &tcindex_destroy_element;
 	tcindex_walk(tp,&walker);
-	if (p->perfect)
-		kfree(p->perfect);
-	if (p->h)
-		kfree(p->h);
+	kfree(p->perfect);
+	kfree(p->h);
 	kfree(p);
 	tp->root = NULL;
 }
@@ -456,7 +446,7 @@ static int tcindex_dump(struct tcf_proto *tp, unsigned long fh,
 {
 	struct tcindex_data *p = PRIV(tp);
 	struct tcindex_filter_result *r = (struct tcindex_filter_result *) fh;
-	unsigned char *b = skb->tail;
+	unsigned char *b = skb_tail_pointer(skb);
 	struct rtattr *rta;
 
 	DPRINTK("tcindex_dump(tp %p,fh 0x%lx,skb %p,t %p),p %p,r %p,b %p\n",
@@ -471,7 +461,7 @@ static int tcindex_dump(struct tcf_proto *tp, unsigned long fh,
 		RTA_PUT(skb,TCA_TCINDEX_SHIFT,sizeof(p->shift),&p->shift);
 		RTA_PUT(skb,TCA_TCINDEX_FALL_THROUGH,sizeof(p->fall_through),
 		    &p->fall_through);
-		rta->rta_len = skb->tail-b;
+		rta->rta_len = skb_tail_pointer(skb) - b;
 	} else {
 		if (p->perfect) {
 			t->tcm_handle = r-p->perfect;
@@ -494,16 +484,16 @@ static int tcindex_dump(struct tcf_proto *tp, unsigned long fh,
 
 		if (tcf_exts_dump(skb, &r->exts, &tcindex_ext_map) < 0)
 			goto rtattr_failure;
-		rta->rta_len = skb->tail-b;
+		rta->rta_len = skb_tail_pointer(skb) - b;
 
 		if (tcf_exts_dump_stats(skb, &r->exts, &tcindex_ext_map) < 0)
 			goto rtattr_failure;
 	}
-	
+
 	return skb->len;
 
 rtattr_failure:
-	skb_trim(skb, b - skb->data);
+	nlmsg_trim(skb, b);
 	return -1;
 }
 
@@ -527,7 +517,7 @@ static int __init init_tcindex(void)
 	return register_tcf_proto_ops(&cls_tcindex_ops);
 }
 
-static void __exit exit_tcindex(void) 
+static void __exit exit_tcindex(void)
 {
 	unregister_tcf_proto_ops(&cls_tcindex_ops);
 }

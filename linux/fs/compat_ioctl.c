@@ -10,20 +10,19 @@
  * ioctls.
  */
 
-#ifdef INCLUDES
-#include <linux/config.h>
+#include <linux/joystick.h>
+
 #include <linux/types.h>
 #include <linux/compat.h>
 #include <linux/kernel.h>
+#include <linux/capability.h>
 #include <linux/compiler.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/ioctl.h>
 #include <linux/if.h>
 #include <linux/if_bridge.h>
 #include <linux/slab.h>
-#include <linux/hdreg.h>
 #include <linux/raid/md.h>
 #include <linux/kd.h>
 #include <linux/dirent.h>
@@ -35,57 +34,45 @@
 #include <linux/vt.h>
 #include <linux/fs.h>
 #include <linux/file.h>
-#include <linux/fd.h>
 #include <linux/ppp_defs.h>
 #include <linux/if_ppp.h>
 #include <linux/if_pppox.h>
 #include <linux/mtio.h>
-#include <linux/cdrom.h>
-#include <linux/loop.h>
 #include <linux/auto_fs.h>
 #include <linux/auto_fs4.h>
-#include <linux/devfs_fs.h>
 #include <linux/tty.h>
 #include <linux/vt_kern.h>
 #include <linux/fb.h>
-#include <linux/ext2_fs.h>
 #include <linux/videodev.h>
 #include <linux/netdevice.h>
 #include <linux/raw.h>
 #include <linux/smb_fs.h>
-#include <linux/blkpg.h>
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
 #include <linux/rtc.h>
 #include <linux/pci.h>
 #include <linux/module.h>
 #include <linux/serial.h>
-#include <linux/reiserfs_fs.h>
 #include <linux/if_tun.h>
 #include <linux/ctype.h>
-#include <linux/ioctl32.h>
 #include <linux/syscalls.h>
-#include <linux/ncp_fs.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <linux/wireless.h>
 #include <linux/atalk.h>
+#include <linux/loop.h>
 
-#include <net/sock.h>          /* siocdevprivate_ioctl */
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci.h>
 #include <net/bluetooth/rfcomm.h>
 
 #include <linux/capi.h>
+#include <linux/gigaset_dev.h>
 
 #include <scsi/scsi.h>
-/* Ugly hack. */
-#undef __KERNEL__
 #include <scsi/scsi_ioctl.h>
-#define __KERNEL__
 #include <scsi/sg.h>
 
-#include <asm/types.h>
 #include <asm/uaccess.h>
 #include <linux/ethtool.h>
 #include <linux/mii.h>
@@ -93,7 +80,6 @@
 #include <linux/watchdog.h>
 #include <linux/dm-ioctl.h>
 
-#include <asm/module.h>
 #include <linux/soundcard.h>
 #include <linux/lp.h>
 #include <linux/ppdev.h>
@@ -116,21 +102,24 @@
 #include <linux/nbd.h>
 #include <linux/random.h>
 #include <linux/filter.h>
-#include <linux/msdos_fs.h>
 #include <linux/pktcdvd.h>
 
 #include <linux/hiddev.h>
 
-#undef INCLUDES
+#include <linux/dvb/audio.h>
+#include <linux/dvb/dmx.h>
+#include <linux/dvb/frontend.h>
+#include <linux/dvb/video.h>
+
+#ifdef CONFIG_SPARC
+#include <asm/fbio.h>
 #endif
 
-#ifdef CODE
-
-/* Aiee. Someone does not find a difference between int and long */
-#define EXT2_IOC32_GETFLAGS               _IOR('f', 1, int)
-#define EXT2_IOC32_SETFLAGS               _IOW('f', 2, int)
-#define EXT2_IOC32_GETVERSION             _IOR('v', 1, int)
-#define EXT2_IOC32_SETVERSION             _IOW('v', 2, int)
+static int do_ioctl32_pointer(unsigned int fd, unsigned int cmd,
+			      unsigned long arg, struct file *f)
+{
+	return sys_ioctl(fd, cmd, (unsigned long)compat_ptr(arg));
+}
 
 static int w_long(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
@@ -163,253 +152,97 @@ static int rw_long(unsigned int fd, unsigned int cmd, unsigned long arg)
 	return err;
 }
 
-static int do_ext2_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	/* These are just misnamed, they actually get/put from/to user an int */
-	switch (cmd) {
-	case EXT2_IOC32_GETFLAGS: cmd = EXT2_IOC_GETFLAGS; break;
-	case EXT2_IOC32_SETFLAGS: cmd = EXT2_IOC_SETFLAGS; break;
-	case EXT2_IOC32_GETVERSION: cmd = EXT2_IOC_GETVERSION; break;
-	case EXT2_IOC32_SETVERSION: cmd = EXT2_IOC_SETVERSION; break;
-	}
-	return sys_ioctl(fd, cmd, (unsigned long)compat_ptr(arg));
-}
-
-struct video_tuner32 {
-	compat_int_t tuner;
-	char name[32];
-	compat_ulong_t rangelow, rangehigh;
-	u32 flags;	/* It is really u32 in videodev.h */
-	u16 mode, signal;
-};
-
-static int get_video_tuner32(struct video_tuner *kp, struct video_tuner32 __user *up)
-{
-	int i;
-
-	if(get_user(kp->tuner, &up->tuner))
-		return -EFAULT;
-	for(i = 0; i < 32; i++)
-		__get_user(kp->name[i], &up->name[i]);
-	__get_user(kp->rangelow, &up->rangelow);
-	__get_user(kp->rangehigh, &up->rangehigh);
-	__get_user(kp->flags, &up->flags);
-	__get_user(kp->mode, &up->mode);
-	__get_user(kp->signal, &up->signal);
-	return 0;
-}
-
-static int put_video_tuner32(struct video_tuner *kp, struct video_tuner32 __user *up)
-{
-	int i;
-
-	if(put_user(kp->tuner, &up->tuner))
-		return -EFAULT;
-	for(i = 0; i < 32; i++)
-		__put_user(kp->name[i], &up->name[i]);
-	__put_user(kp->rangelow, &up->rangelow);
-	__put_user(kp->rangehigh, &up->rangehigh);
-	__put_user(kp->flags, &up->flags);
-	__put_user(kp->mode, &up->mode);
-	__put_user(kp->signal, &up->signal);
-	return 0;
-}
-
-struct video_buffer32 {
-	compat_caddr_t base;
-	compat_int_t height, width, depth, bytesperline;
-};
-
-static int get_video_buffer32(struct video_buffer *kp, struct video_buffer32 __user *up)
-{
-	u32 tmp;
-
-	if (get_user(tmp, &up->base))
-		return -EFAULT;
-
-	/* This is actually a physical address stored
-	 * as a void pointer.
-	 */
-	kp->base = (void *)(unsigned long) tmp;
-
-	__get_user(kp->height, &up->height);
-	__get_user(kp->width, &up->width);
-	__get_user(kp->depth, &up->depth);
-	__get_user(kp->bytesperline, &up->bytesperline);
-	return 0;
-}
-
-static int put_video_buffer32(struct video_buffer *kp, struct video_buffer32 __user *up)
-{
-	u32 tmp = (u32)((unsigned long)kp->base);
-
-	if(put_user(tmp, &up->base))
-		return -EFAULT;
-	__put_user(kp->height, &up->height);
-	__put_user(kp->width, &up->width);
-	__put_user(kp->depth, &up->depth);
-	__put_user(kp->bytesperline, &up->bytesperline);
-	return 0;
-}
-
-struct video_clip32 {
-	s32 x, y, width, height;	/* Its really s32 in videodev.h */
-	compat_caddr_t next;
-};
-
-struct video_window32 {
-	u32 x, y, width, height, chromakey, flags;
-	compat_caddr_t clips;
-	compat_int_t clipcount;
-};
-
-/* You get back everything except the clips... */
-static int put_video_window32(struct video_window *kp, struct video_window32 __user *up)
-{
-	if(put_user(kp->x, &up->x))
-		return -EFAULT;
-	__put_user(kp->y, &up->y);
-	__put_user(kp->width, &up->width);
-	__put_user(kp->height, &up->height);
-	__put_user(kp->chromakey, &up->chromakey);
-	__put_user(kp->flags, &up->flags);
-	__put_user(kp->clipcount, &up->clipcount);
-	return 0;
-}
-
-#define VIDIOCGTUNER32		_IOWR('v',4, struct video_tuner32)
-#define VIDIOCSTUNER32		_IOW('v',5, struct video_tuner32)
-#define VIDIOCGWIN32		_IOR('v',9, struct video_window32)
-#define VIDIOCSWIN32		_IOW('v',10, struct video_window32)
-#define VIDIOCGFBUF32		_IOR('v',11, struct video_buffer32)
-#define VIDIOCSFBUF32		_IOW('v',12, struct video_buffer32)
-#define VIDIOCGFREQ32		_IOR('v',14, u32)
-#define VIDIOCSFREQ32		_IOW('v',15, u32)
-
-enum {
-	MaxClips = (~0U-sizeof(struct video_window))/sizeof(struct video_clip)
-};
-
-static int do_set_window(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct video_window32 __user *up = compat_ptr(arg);
-	struct video_window __user *vw;
-	struct video_clip __user *p;
-	int nclips;
-	u32 n;
-
-	if (get_user(nclips, &up->clipcount))
-		return -EFAULT;
-
-	/* Peculiar interface... */
-	if (nclips < 0)
-		nclips = VIDEO_CLIPMAP_SIZE;
-
-	if (nclips > MaxClips)
-		return -ENOMEM;
-
-	vw = compat_alloc_user_space(sizeof(struct video_window) +
-				    nclips * sizeof(struct video_clip));
-
-	p = nclips ? (struct video_clip __user *)(vw + 1) : NULL;
-
-	if (get_user(n, &up->x) || put_user(n, &vw->x) ||
-	    get_user(n, &up->y) || put_user(n, &vw->y) ||
-	    get_user(n, &up->width) || put_user(n, &vw->width) ||
-	    get_user(n, &up->height) || put_user(n, &vw->height) ||
-	    get_user(n, &up->chromakey) || put_user(n, &vw->chromakey) ||
-	    get_user(n, &up->flags) || put_user(n, &vw->flags) ||
-	    get_user(n, &up->clipcount) || put_user(n, &vw->clipcount) ||
-	    get_user(n, &up->clips) || put_user(p, &vw->clips))
-		return -EFAULT;
-
-	if (nclips) {
-		struct video_clip32 __user *u = compat_ptr(n);
-		int i;
-		if (!u)
-			return -EINVAL;
-		for (i = 0; i < nclips; i++, u++, p++) {
-			s32 v;
-			if (get_user(v, &u->x) ||
-			    put_user(v, &p->x) ||
-			    get_user(v, &u->y) ||
-			    put_user(v, &p->y) ||
-			    get_user(v, &u->width) ||
-			    put_user(v, &p->width) ||
-			    get_user(v, &u->height) ||
-			    put_user(v, &p->height) ||
-			    put_user(NULL, &p->next))
-				return -EFAULT;
-		}
-	}
-
-	return sys_ioctl(fd, VIDIOCSWIN, (unsigned long)p);
-}
-
-static int do_video_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
+struct compat_video_event {
+	int32_t		type;
+	compat_time_t	timestamp;
 	union {
-		struct video_tuner vt;
-		struct video_buffer vb;
-		struct video_window vw;
-		unsigned long vx;
-	} karg;
+	        video_size_t size;
+		unsigned int frame_rate;
+	} u;
+};
+
+static int do_video_get_event(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct video_event kevent;
 	mm_segment_t old_fs = get_fs();
-	void __user *up = compat_ptr(arg);
-	int err = 0;
-
-	/* First, convert the command. */
-	switch(cmd) {
-	case VIDIOCGTUNER32: cmd = VIDIOCGTUNER; break;
-	case VIDIOCSTUNER32: cmd = VIDIOCSTUNER; break;
-	case VIDIOCGWIN32: cmd = VIDIOCGWIN; break;
-	case VIDIOCGFBUF32: cmd = VIDIOCGFBUF; break;
-	case VIDIOCSFBUF32: cmd = VIDIOCSFBUF; break;
-	case VIDIOCGFREQ32: cmd = VIDIOCGFREQ; break;
-	case VIDIOCSFREQ32: cmd = VIDIOCSFREQ; break;
-	};
-
-	switch(cmd) {
-	case VIDIOCSTUNER:
-	case VIDIOCGTUNER:
-		err = get_video_tuner32(&karg.vt, up);
-		break;
-
-	case VIDIOCSFBUF:
-		err = get_video_buffer32(&karg.vb, up);
-		break;
-
-	case VIDIOCSFREQ:
-		err = get_user(karg.vx, (u32 __user *)up);
-		break;
-	};
-	if(err)
-		goto out;
+	int err;
 
 	set_fs(KERNEL_DS);
-	err = sys_ioctl(fd, cmd, (unsigned long)&karg);
+	err = sys_ioctl(fd, cmd, (unsigned long) &kevent);
 	set_fs(old_fs);
 
-	if(err == 0) {
-		switch(cmd) {
-		case VIDIOCGTUNER:
-			err = put_video_tuner32(&karg.vt, up);
-			break;
+	if (!err) {
+		struct compat_video_event __user *up = compat_ptr(arg);
 
-		case VIDIOCGWIN:
-			err = put_video_window32(&karg.vw, up);
-			break;
-
-		case VIDIOCGFBUF:
-			err = put_video_buffer32(&karg.vb, up);
-			break;
-
-		case VIDIOCGFREQ:
-			err = put_user(((u32)karg.vx), (u32 __user *)up);
-			break;
-		};
+		err  = put_user(kevent.type, &up->type);
+		err |= put_user(kevent.timestamp, &up->timestamp);
+		err |= put_user(kevent.u.size.w, &up->u.size.w);
+		err |= put_user(kevent.u.size.h, &up->u.size.h);
+		err |= put_user(kevent.u.size.aspect_ratio,
+				&up->u.size.aspect_ratio);
+		if (err)
+			err = -EFAULT;
 	}
-out:
+
+	return err;
+}
+
+struct compat_video_still_picture {
+        compat_uptr_t iFrame;
+        int32_t size;
+};
+
+static int do_video_stillpicture(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct compat_video_still_picture __user *up;
+	struct video_still_picture __user *up_native;
+	compat_uptr_t fp;
+	int32_t size;
+	int err;
+
+	up = (struct compat_video_still_picture __user *) arg;
+	err  = get_user(fp, &up->iFrame);
+	err |= get_user(size, &up->size);
+	if (err)
+		return -EFAULT;
+
+	up_native =
+		compat_alloc_user_space(sizeof(struct video_still_picture));
+
+	err =  put_user(compat_ptr(fp), &up_native->iFrame);
+	err |= put_user(size, &up_native->size);
+	if (err)
+		return -EFAULT;
+
+	err = sys_ioctl(fd, cmd, (unsigned long) up_native);
+
+	return err;
+}
+
+struct compat_video_spu_palette {
+	int length;
+	compat_uptr_t palette;
+};
+
+static int do_video_set_spu_palette(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct compat_video_spu_palette __user *up;
+	struct video_spu_palette __user *up_native;
+	compat_uptr_t palp;
+	int length, err;
+
+	up = (struct compat_video_spu_palette __user *) arg;
+	err  = get_user(palp, &up->palette);
+	err |= get_user(length, &up->length);
+
+	up_native = compat_alloc_user_space(sizeof(struct video_spu_palette));
+	err  = put_user(compat_ptr(palp), &up_native->palette);
+	err |= put_user(length, &up_native->length);
+	if (err)
+		return -EFAULT;
+
+	err = sys_ioctl(fd, cmd, (unsigned long) up_native);
+
 	return err;
 }
 
@@ -427,6 +260,23 @@ static int do_siocgstamp(unsigned int fd, unsigned int cmd, unsigned long arg)
 	if(!err) {
 		err = put_user(ktv.tv_sec, &up->tv_sec);
 		err |= __put_user(ktv.tv_usec, &up->tv_usec);
+	}
+	return err;
+}
+
+static int do_siocgstampns(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct compat_timespec __user *up = compat_ptr(arg);
+	struct timespec kts;
+	mm_segment_t old_fs = get_fs();
+	int err;
+
+	set_fs(KERNEL_DS);
+	err = sys_ioctl(fd, cmd, (unsigned long)&kts);
+	set_fs(old_fs);
+	if (!err) {
+		err = put_user(kts.tv_sec, &up->tv_sec);
+		err |= __put_user(kts.tv_nsec, &up->tv_nsec);
 	}
 	return err;
 }
@@ -470,22 +320,21 @@ struct ifconf32 {
 
 static int dev_ifname32(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
-	struct net_device *dev;
-	struct ifreq32 ifr32;
+	struct ifreq __user *uifr;
 	int err;
 
-	if (copy_from_user(&ifr32, compat_ptr(arg), sizeof(ifr32)))
+	uifr = compat_alloc_user_space(sizeof(struct ifreq));
+	if (copy_in_user(uifr, compat_ptr(arg), sizeof(struct ifreq32)))
 		return -EFAULT;
 
-	dev = dev_get_by_index(ifr32.ifr_ifindex);
-	if (!dev)
-		return -ENODEV;
+	err = sys_ioctl(fd, SIOCGIFNAME, (unsigned long)uifr);
+	if (err)
+		return err;
 
-	strlcpy(ifr32.ifr_name, dev->name, sizeof(ifr32.ifr_name));
-	dev_put(dev);
-	
-	err = copy_to_user(compat_ptr(arg), &ifr32, sizeof(ifr32));
-	return (err ? -EFAULT : 0);
+	if (copy_in_user(compat_ptr(arg), uifr, sizeof(struct ifreq32)))
+		return -EFAULT;
+
+	return 0;
 }
 
 static int dev_ifconf(unsigned int fd, unsigned int cmd, unsigned long arg)
@@ -532,7 +381,8 @@ static int dev_ifconf(unsigned int fd, unsigned int cmd, unsigned long arg)
 
 	ifr = ifc.ifc_req;
 	ifr32 = compat_ptr(ifc32.ifcbuf);
-	for (i = 0, j = 0; i < ifc32.ifc_len && j < ifc.ifc_len;
+	for (i = 0, j = 0;
+             i + sizeof (struct ifreq32) <= ifc32.ifc_len && j < ifc.ifc_len;
 	     i += sizeof (struct ifreq32), j += sizeof (struct ifreq)) {
 		if (copy_in_user(ifr32, ifr, sizeof (struct ifreq32)))
 			return -EFAULT;
@@ -548,10 +398,7 @@ static int dev_ifconf(unsigned int fd, unsigned int cmd, unsigned long arg)
 		i = ((i / sizeof(struct ifreq)) * sizeof(struct ifreq32));
 		ifc32.ifc_len = i;
 	} else {
-		if (i <= ifc32.ifc_len)
-			ifc32.ifc_len = i;
-		else
-			ifc32.ifc_len = i - sizeof (struct ifreq32);
+		ifc32.ifc_len = i;
 	}
 	if (copy_to_user(compat_ptr(arg), &ifc32, sizeof(struct ifconf32)))
 		return -EFAULT;
@@ -625,7 +472,7 @@ static int bond_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	};
 }
 
-int siocdevprivate_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
+static int siocdevprivate_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	struct ifreq __user *u_ifreq64;
 	struct ifreq32 __user *u_ifreq32 = compat_ptr(arg);
@@ -798,13 +645,16 @@ static int routing_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 		r = (void *) &r4;
 	}
 
-	if (ret)
-		return -EFAULT;
+	if (ret) {
+		ret = -EFAULT;
+		goto out;
+	}
 
 	set_fs (KERNEL_DS);
 	ret = sys_ioctl (fd, cmd, (unsigned long) r);
 	set_fs (old_fs);
 
+out:
 	if (mysock)
 		sockfd_put(mysock);
 
@@ -812,191 +662,7 @@ static int routing_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 }
 #endif
 
-struct hd_geometry32 {
-	unsigned char heads;
-	unsigned char sectors;
-	unsigned short cylinders;
-	u32 start;
-};
-                        
-static int hdio_getgeo(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs = get_fs();
-	struct hd_geometry geo;
-	struct hd_geometry32 __user *ugeo;
-	int err;
-	
-	set_fs (KERNEL_DS);
-	err = sys_ioctl(fd, HDIO_GETGEO, (unsigned long)&geo);
-	set_fs (old_fs);
-	ugeo = compat_ptr(arg);
-	if (!err) {
-		err = copy_to_user (ugeo, &geo, 4);
-		err |= __put_user (geo.start, &ugeo->start);
-	}
-	return err ? -EFAULT : 0;
-}
-
-struct fb_fix_screeninfo32 {
-	char			id[16];
-        compat_caddr_t	smem_start;
-	u32			smem_len;
-	u32			type;
-	u32			type_aux;
-	u32			visual;
-	u16			xpanstep;
-	u16			ypanstep;
-	u16			ywrapstep;
-	u32			line_length;
-        compat_caddr_t	mmio_start;
-	u32			mmio_len;
-	u32			accel;
-	u16			reserved[3];
-};
-
-struct fb_cmap32 {
-	u32			start;
-	u32			len;
-	compat_caddr_t	red;
-	compat_caddr_t	green;
-	compat_caddr_t	blue;
-	compat_caddr_t	transp;
-};
-
-static int fb_getput_cmap(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct fb_cmap_user __user *cmap;
-	struct fb_cmap32 __user *cmap32;
-	__u32 data;
-	int err;
-
-	cmap = compat_alloc_user_space(sizeof(*cmap));
-	cmap32 = compat_ptr(arg);
-
-	if (copy_in_user(&cmap->start, &cmap32->start, 2 * sizeof(__u32)))
-		return -EFAULT;
-
-	if (get_user(data, &cmap32->red) ||
-	    put_user(compat_ptr(data), &cmap->red) ||
-	    get_user(data, &cmap32->green) ||
-	    put_user(compat_ptr(data), &cmap->green) ||
-	    get_user(data, &cmap32->blue) ||
-	    put_user(compat_ptr(data), &cmap->blue) ||
-	    get_user(data, &cmap32->transp) ||
-	    put_user(compat_ptr(data), &cmap->transp))
-		return -EFAULT;
-
-	err = sys_ioctl(fd, cmd, (unsigned long) cmap);
-
-	if (!err) {
-		if (copy_in_user(&cmap32->start,
-				 &cmap->start,
-				 2 * sizeof(__u32)))
-			err = -EFAULT;
-	}
-	return err;
-}
-
-static int do_fscreeninfo_to_user(struct fb_fix_screeninfo *fix,
-				  struct fb_fix_screeninfo32 __user *fix32)
-{
-	__u32 data;
-	int err;
-
-	err = copy_to_user(&fix32->id, &fix->id, sizeof(fix32->id));
-
-	data = (__u32) (unsigned long) fix->smem_start;
-	err |= put_user(data, &fix32->smem_start);
-
-	err |= put_user(fix->smem_len, &fix32->smem_len);
-	err |= put_user(fix->type, &fix32->type);
-	err |= put_user(fix->type_aux, &fix32->type_aux);
-	err |= put_user(fix->visual, &fix32->visual);
-	err |= put_user(fix->xpanstep, &fix32->xpanstep);
-	err |= put_user(fix->ypanstep, &fix32->ypanstep);
-	err |= put_user(fix->ywrapstep, &fix32->ywrapstep);
-	err |= put_user(fix->line_length, &fix32->line_length);
-
-	data = (__u32) (unsigned long) fix->mmio_start;
-	err |= put_user(data, &fix32->mmio_start);
-
-	err |= put_user(fix->mmio_len, &fix32->mmio_len);
-	err |= put_user(fix->accel, &fix32->accel);
-	err |= copy_to_user(fix32->reserved, fix->reserved,
-			    sizeof(fix->reserved));
-
-	return err;
-}
-
-static int fb_get_fscreeninfo(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs;
-	struct fb_fix_screeninfo fix;
-	struct fb_fix_screeninfo32 __user *fix32;
-	int err;
-
-	fix32 = compat_ptr(arg);
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	err = sys_ioctl(fd, cmd, (unsigned long) &fix);
-	set_fs(old_fs);
-
-	if (!err)
-		err = do_fscreeninfo_to_user(&fix, fix32);
-
-	return err;
-}
-
-static int fb_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	int err;
-
-	switch (cmd) {
-	case FBIOGET_FSCREENINFO:
-		err = fb_get_fscreeninfo(fd,cmd, arg);
-		break;
-
-  	case FBIOGETCMAP:
-	case FBIOPUTCMAP:
-		err = fb_getput_cmap(fd, cmd, arg);
-		break;
-
-	default:
-		do {
-			static int count;
-			if (++count <= 20)
-				printk("%s: Unknown fb ioctl cmd fd(%d) "
-				       "cmd(%08x) arg(%08lx)\n",
-				       __FUNCTION__, fd, cmd, arg);
-		} while(0);
-		err = -ENOSYS;
-		break;
-	};
-
-	return err;
-}
-
-static int hdio_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs = get_fs();
-	unsigned long kval;
-	unsigned int __user *uvp;
-	int error;
-
-	set_fs(KERNEL_DS);
-	error = sys_ioctl(fd, cmd, (long)&kval);
-	set_fs(old_fs);
-
-	if(error == 0) {
-		uvp = compat_ptr(arg);
-		if(put_user(kval, uvp))
-			error = -EFAULT;
-	}
-	return error;
-}
-
-
+#ifdef CONFIG_BLOCK
 typedef struct sg_io_hdr32 {
 	compat_int_t interface_id;	/* [i] 'S' for SCSI generic (required) */
 	compat_int_t dxfer_direction;	/* [i] data transfer direction  */
@@ -1143,6 +809,41 @@ static int sg_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 	return err;
 }
 
+struct compat_sg_req_info { /* used by SG_GET_REQUEST_TABLE ioctl() */
+	char req_state;
+	char orphan;
+	char sg_io_owned;
+	char problem;
+	int pack_id;
+	compat_uptr_t usr_ptr;
+	unsigned int duration;
+	int unused;
+};
+
+static int sg_grt_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	int err, i;
+	sg_req_info_t __user *r;
+	struct compat_sg_req_info __user *o = (void __user *)arg;
+	r = compat_alloc_user_space(sizeof(sg_req_info_t)*SG_MAX_QUEUE);
+	err = sys_ioctl(fd,cmd,(unsigned long)r);
+	if (err < 0)
+		return err;
+	for (i = 0; i < SG_MAX_QUEUE; i++) {
+		void __user *ptr;
+		int d;
+
+		if (copy_in_user(o + i, r + i, offsetof(sg_req_info_t, usr_ptr)) ||
+		    get_user(ptr, &r[i].usr_ptr) ||
+		    get_user(d, &r[i].duration) ||
+		    put_user((u32)(unsigned long)(ptr), &o[i].usr_ptr) ||
+		    put_user(d, &o[i].duration))
+			return -EFAULT;
+	}
+	return err;
+}
+#endif /* CONFIG_BLOCK */
+
 struct sock_fprog32 {
 	unsigned short	len;
 	compat_caddr_t	filter;
@@ -1265,6 +966,7 @@ static int ppp_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 }
 
 
+#ifdef CONFIG_BLOCK
 struct mtget32 {
 	compat_long_t	mt_type;
 	compat_long_t	mt_resid;
@@ -1281,35 +983,9 @@ struct mtpos32 {
 };
 #define MTIOCPOS32	_IOR('m', 3, struct mtpos32)
 
-struct mtconfiginfo32 {
-	compat_long_t	mt_type;
-	compat_long_t	ifc_type;
-	unsigned short	irqnr;
-	unsigned short	dmanr;
-	unsigned short	port;
-	compat_ulong_t	debug;
-	compat_uint_t	have_dens:1;
-	compat_uint_t	have_bsf:1;
-	compat_uint_t	have_fsr:1;
-	compat_uint_t	have_bsr:1;
-	compat_uint_t	have_eod:1;
-	compat_uint_t	have_seek:1;
-	compat_uint_t	have_tell:1;
-	compat_uint_t	have_ras1:1;
-	compat_uint_t	have_ras2:1;
-	compat_uint_t	have_ras3:1;
-	compat_uint_t	have_qfa:1;
-	compat_uint_t	pad1:5;
-	char	reserved[10];
-};
-#define	MTIOCGETCONFIG32	_IOR('m', 4, struct mtconfiginfo32)
-#define	MTIOCSETCONFIG32	_IOW('m', 5, struct mtconfiginfo32)
-
 static int mt_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	mm_segment_t old_fs = get_fs();
-	struct mtconfiginfo info;
-	struct mtconfiginfo32 __user *uinfo32;
 	struct mtget get;
 	struct mtget32 __user *umget32;
 	struct mtpos pos;
@@ -1326,27 +1002,6 @@ static int mt_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case MTIOCGET32:
 		kcmd = MTIOCGET;
 		karg = &get;
-		break;
-	case MTIOCGETCONFIG32:
-		kcmd = MTIOCGETCONFIG;
-		karg = &info;
-		break;
-	case MTIOCSETCONFIG32:
-		kcmd = MTIOCSETCONFIG;
-		karg = &info;
-		uinfo32 = compat_ptr(arg);
-		err = __get_user(info.mt_type, &uinfo32->mt_type);
-		err |= __get_user(info.ifc_type, &uinfo32->ifc_type);
-		err |= __get_user(info.irqnr, &uinfo32->irqnr);
-		err |= __get_user(info.dmanr, &uinfo32->dmanr);
-		err |= __get_user(info.port, &uinfo32->port);
-		err |= __get_user(info.debug, &uinfo32->debug);
-		err |= __copy_from_user((char *)&info.debug
-				     + sizeof(info.debug),
-				     (char __user *)&uinfo32->debug
-				     + sizeof(uinfo32->debug), sizeof(__u32));
-		if (err)
-			return -EFAULT;
 		break;
 	default:
 		do {
@@ -1378,200 +1033,19 @@ static int mt_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 		err |= __put_user(get.mt_fileno, &umget32->mt_fileno);
 		err |= __put_user(get.mt_blkno, &umget32->mt_blkno);
 		break;
-	case MTIOCGETCONFIG32:
-		uinfo32 = compat_ptr(arg);
-		err = __put_user(info.mt_type, &uinfo32->mt_type);
-		err |= __put_user(info.ifc_type, &uinfo32->ifc_type);
-		err |= __put_user(info.irqnr, &uinfo32->irqnr);
-		err |= __put_user(info.dmanr, &uinfo32->dmanr);
-		err |= __put_user(info.port, &uinfo32->port);
-		err |= __put_user(info.debug, &uinfo32->debug);
-		err |= __copy_to_user((char __user *)&uinfo32->debug
-			    		   + sizeof(uinfo32->debug),
-					   (char *)&info.debug + sizeof(info.debug), sizeof(__u32));
-		break;
-	case MTIOCSETCONFIG32:
-		break;
 	}
 	return err ? -EFAULT: 0;
 }
 
-struct cdrom_read_audio32 {
-	union cdrom_addr	addr;
-	u8			addr_format;
-	compat_int_t		nframes;
-	compat_caddr_t		buf;
-};
-
-struct cdrom_generic_command32 {
-	unsigned char	cmd[CDROM_PACKET_SIZE];
-	compat_caddr_t	buffer;
-	compat_uint_t	buflen;
-	compat_int_t	stat;
-	compat_caddr_t	sense;
-	unsigned char	data_direction;
-	compat_int_t	quiet;
-	compat_int_t	timeout;
-	compat_caddr_t	reserved[1];
-};
-  
-static int cdrom_do_read_audio(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct cdrom_read_audio __user *cdread_audio;
-	struct cdrom_read_audio32 __user *cdread_audio32;
-	__u32 data;
-	void __user *datap;
-
-	cdread_audio = compat_alloc_user_space(sizeof(*cdread_audio));
-	cdread_audio32 = compat_ptr(arg);
-
-	if (copy_in_user(&cdread_audio->addr,
-			 &cdread_audio32->addr,
-			 (sizeof(*cdread_audio32) -
-			  sizeof(compat_caddr_t))))
-	 	return -EFAULT;
-
-	if (get_user(data, &cdread_audio32->buf))
-		return -EFAULT;
-	datap = compat_ptr(data);
-	if (put_user(datap, &cdread_audio->buf))
-		return -EFAULT;
-
-	return sys_ioctl(fd, cmd, (unsigned long) cdread_audio);
-}
-
-static int cdrom_do_generic_command(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct cdrom_generic_command __user *cgc;
-	struct cdrom_generic_command32 __user *cgc32;
-	u32 data;
-	unsigned char dir;
-	int itmp;
-
-	cgc = compat_alloc_user_space(sizeof(*cgc));
-	cgc32 = compat_ptr(arg);
-
-	if (copy_in_user(&cgc->cmd, &cgc32->cmd, sizeof(cgc->cmd)) ||
-	    get_user(data, &cgc32->buffer) ||
-	    put_user(compat_ptr(data), &cgc->buffer) ||
-	    copy_in_user(&cgc->buflen, &cgc32->buflen,
-			 (sizeof(unsigned int) + sizeof(int))) ||
-	    get_user(data, &cgc32->sense) ||
-	    put_user(compat_ptr(data), &cgc->sense) ||
-	    get_user(dir, &cgc32->data_direction) ||
-	    put_user(dir, &cgc->data_direction) ||
-	    get_user(itmp, &cgc32->quiet) ||
-	    put_user(itmp, &cgc->quiet) ||
-	    get_user(itmp, &cgc32->timeout) ||
-	    put_user(itmp, &cgc->timeout) ||
-	    get_user(data, &cgc32->reserved[0]) ||
-	    put_user(compat_ptr(data), &cgc->reserved[0]))
-		return -EFAULT;
-
-	return sys_ioctl(fd, cmd, (unsigned long) cgc);
-}
-
-static int cdrom_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	int err;
-
-	switch(cmd) {
-	case CDROMREADAUDIO:
-		err = cdrom_do_read_audio(fd, cmd, arg);
-		break;
-
-	case CDROM_SEND_PACKET:
-		err = cdrom_do_generic_command(fd, cmd, arg);
-		break;
-
-	default:
-		do {
-			static int count;
-			if (++count <= 20)
-				printk("cdrom_ioctl: Unknown cmd fd(%d) "
-				       "cmd(%08x) arg(%08x)\n",
-				       (int)fd, (unsigned int)cmd, (unsigned int)arg);
-		} while(0);
-		err = -EINVAL;
-		break;
-	};
-
-	return err;
-}
-
-struct loop_info32 {
-	compat_int_t	lo_number;      /* ioctl r/o */
-	compat_dev_t	lo_device;      /* ioctl r/o */
-	compat_ulong_t	lo_inode;       /* ioctl r/o */
-	compat_dev_t	lo_rdevice;     /* ioctl r/o */
-	compat_int_t	lo_offset;
-	compat_int_t	lo_encrypt_type;
-	compat_int_t	lo_encrypt_key_size;    /* ioctl w/o */
-	compat_int_t	lo_flags;       /* ioctl r/o */
-	char		lo_name[LO_NAME_SIZE];
-	unsigned char	lo_encrypt_key[LO_KEY_SIZE]; /* ioctl w/o */
-	compat_ulong_t	lo_init[2];
-	char		reserved[4];
-};
-
-static int loop_status(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs = get_fs();
-	struct loop_info l;
-	struct loop_info32 __user *ul;
-	int err = -EINVAL;
-
-	ul = compat_ptr(arg);
-	switch(cmd) {
-	case LOOP_SET_STATUS:
-		err = get_user(l.lo_number, &ul->lo_number);
-		err |= __get_user(l.lo_device, &ul->lo_device);
-		err |= __get_user(l.lo_inode, &ul->lo_inode);
-		err |= __get_user(l.lo_rdevice, &ul->lo_rdevice);
-		err |= __copy_from_user(&l.lo_offset, &ul->lo_offset,
-		        8 + (unsigned long)l.lo_init - (unsigned long)&l.lo_offset);
-		if (err) {
-			err = -EFAULT;
-		} else {
-			set_fs (KERNEL_DS);
-			err = sys_ioctl (fd, cmd, (unsigned long)&l);
-			set_fs (old_fs);
-		}
-		break;
-	case LOOP_GET_STATUS:
-		set_fs (KERNEL_DS);
-		err = sys_ioctl (fd, cmd, (unsigned long)&l);
-		set_fs (old_fs);
-		if (!err) {
-			err = put_user(l.lo_number, &ul->lo_number);
-			err |= __put_user(l.lo_device, &ul->lo_device);
-			err |= __put_user(l.lo_inode, &ul->lo_inode);
-			err |= __put_user(l.lo_rdevice, &ul->lo_rdevice);
-			err |= __copy_to_user(&ul->lo_offset, &l.lo_offset,
-				(unsigned long)l.lo_init - (unsigned long)&l.lo_offset);
-			if (err)
-				err = -EFAULT;
-		}
-		break;
-	default: {
-		static int count;
-		if (++count <= 20)
-			printk("%s: Unknown loop ioctl cmd, fd(%d) "
-			       "cmd(%08x) arg(%08lx)\n",
-			       __FUNCTION__, fd, cmd, arg);
-	}
-	}
-	return err;
-}
-
-extern int tty_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigned long arg);
+#endif /* CONFIG_BLOCK */
 
 #ifdef CONFIG_VT
 
 static int vt_check(struct file *file)
 {
 	struct tty_struct *tty;
-	struct inode *inode = file->f_dentry->d_inode;
+	struct inode *inode = file->f_path.dentry->d_inode;
+	struct vc_data *vc;
 	
 	if (file->f_op->ioctl != tty_ioctl)
 		return -EINVAL;
@@ -1582,12 +1056,16 @@ static int vt_check(struct file *file)
 	                                                
 	if (tty->driver->ioctl != vt_ioctl)
 		return -EINVAL;
-	
+
+	vc = (struct vc_data *)tty->driver_data;
+	if (!vc_cons_allocated(vc->vc_num)) 	/* impossible? */
+		return -ENOIOCTLCMD;
+
 	/*
 	 * To have permissions to do most of the vt ioctls, we either have
-	 * to be the owner of the tty, or super-user.
+	 * to be the owner of the tty, or have CAP_SYS_TTY_CONFIG.
 	 */
-	if (current->signal->tty == tty || capable(CAP_SYS_ADMIN))
+	if (current->signal->tty == tty || capable(CAP_SYS_TTY_CONFIG))
 		return 1;
 	return 0;                                                    
 }
@@ -1620,7 +1098,7 @@ static int do_fontx_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg, 
 		    get_user(data, &user_cfd->chardata))
 			return -EFAULT;
 		op.data = compat_ptr(data);
-		return con_font_op(fg_console, &op);
+		return con_font_op(vc_cons[fg_console].d, &op);
 	case GIO_FONTX:
 		op.op = KD_FONT_OP_GET;
 		op.flags = 0;
@@ -1632,7 +1110,7 @@ static int do_fontx_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg, 
 		if (!data)
 			return 0;
 		op.data = compat_ptr(data);
-		i = con_font_op(fg_console, &op);
+		i = con_font_op(vc_cons[fg_console].d, &op);
 		if (i)
 			return i;
 		if (put_user(op.height, &user_cfd->charheight) ||
@@ -1658,7 +1136,7 @@ static int do_kdfontop_ioctl(unsigned int fd, unsigned int cmd, unsigned long ar
 	struct console_font_op op;
 	struct console_font_op32 __user *fontop = compat_ptr(arg);
 	int perm = vt_check(file), i;
-	struct vt_struct *vt;
+	struct vc_data *vc;
 	
 	if (perm < 0) return perm;
 	
@@ -1668,9 +1146,10 @@ static int do_kdfontop_ioctl(unsigned int fd, unsigned int cmd, unsigned long ar
 		return -EPERM;
 	op.data = compat_ptr(((struct console_font_op32 *)&op)->data);
 	op.flags |= KD_FONT_FLAG_OLD;
-	vt = (struct vt_struct *)((struct tty_struct *)file->private_data)->driver_data;
-	i = con_font_op(vt->vc_num, &op);
-	if (i) return i;
+	vc = ((struct tty_struct *)file->private_data)->driver_data;
+	i = con_font_op(vc, &op);
+	if (i)
+		return i;
 	((struct console_font_op32 *)&op)->data = (unsigned long)op.data;
 	if (copy_to_user(fontop, &op, sizeof(struct console_font_op32)))
 		return -EFAULT;
@@ -1687,16 +1166,28 @@ static int do_unimap_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg,
 	struct unimapdesc32 tmp;
 	struct unimapdesc32 __user *user_ud = compat_ptr(arg);
 	int perm = vt_check(file);
-	
-	if (perm < 0) return perm;
+	struct vc_data *vc;
+
+	if (perm < 0)
+		return perm;
 	if (copy_from_user(&tmp, user_ud, sizeof tmp))
 		return -EFAULT;
+	if (tmp.entries)
+		if (!access_ok(VERIFY_WRITE, compat_ptr(tmp.entries),
+				tmp.entry_ct*sizeof(struct unipair)))
+			return -EFAULT;
+	vc = ((struct tty_struct *)file->private_data)->driver_data;
 	switch (cmd) {
 	case PIO_UNIMAP:
-		if (!perm) return -EPERM;
-		return con_set_unimap(fg_console, tmp.entry_ct, compat_ptr(tmp.entries));
+		if (!perm)
+			return -EPERM;
+		return con_set_unimap(vc, tmp.entry_ct,
+						compat_ptr(tmp.entries));
 	case GIO_UNIMAP:
-		return con_get_unimap(fg_console, tmp.entry_ct, &(user_ud->entry_ct), compat_ptr(tmp.entries));
+		if (!perm && fg_console != vc->vc_num)
+			return -EPERM;
+		return con_get_unimap(vc, tmp.entry_ct, &(user_ud->entry_ct),
+						compat_ptr(tmp.entries));
 	}
 	return 0;
 }
@@ -1773,8 +1264,7 @@ static struct {
 	{ ATM_QUERYLOOP32,   ATM_QUERYLOOP }
 };
 
-#define NR_ATM_IOCTL (sizeof(atm_ioctl_map)/sizeof(atm_ioctl_map[0]))
-
+#define NR_ATM_IOCTL ARRAY_SIZE(atm_ioctl_map)
 
 static int do_atm_iobuf(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
@@ -1892,65 +1382,9 @@ ret_einval(unsigned int fd, unsigned int cmd, unsigned long arg)
 	return -EINVAL;
 }
 
-static int broken_blkgetsize(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	/* The mkswap binary hard codes it to Intel value :-((( */
-	return w_long(fd, BLKGETSIZE, arg);
-}
-
-struct blkpg_ioctl_arg32 {
-	compat_int_t op;
-	compat_int_t flags;
-	compat_int_t datalen;
-	compat_caddr_t data;
-};
-
-static int blkpg_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct blkpg_ioctl_arg32 __user *ua32 = compat_ptr(arg);
-	struct blkpg_ioctl_arg __user *a = compat_alloc_user_space(sizeof(*a));
-	compat_caddr_t udata;
-	compat_int_t n;
-	int err;
-	
-	err = get_user(n, &ua32->op);
-	err |= put_user(n, &a->op);
-	err |= get_user(n, &ua32->flags);
-	err |= put_user(n, &a->flags);
-	err |= get_user(n, &ua32->datalen);
-	err |= put_user(n, &a->datalen);
-	err |= get_user(udata, &ua32->data);
-	err |= put_user(compat_ptr(udata), &a->data);
-	if (err)
-		return err;
-
-	return sys_ioctl(fd, cmd, (unsigned long)a);
-}
-
 static int ioc_settimeout(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	return rw_long(fd, AUTOFS_IOC_SETTIMEOUT, arg);
-}
-
-/* Fix sizeof(sizeof()) breakage */
-#define BLKBSZGET_32   _IOR(0x12,112,int)
-#define BLKBSZSET_32   _IOW(0x12,113,int)
-#define BLKGETSIZE64_32        _IOR(0x12,114,int)
-
-static int do_blkbszget(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-       return sys_ioctl(fd, BLKBSZGET, (unsigned long)compat_ptr(arg));
-}
-
-static int do_blkbszset(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-       return sys_ioctl(fd, BLKBSZSET, (unsigned long)compat_ptr(arg));
-}
-
-static int do_blkgetsize64(unsigned int fd, unsigned int cmd,
-                          unsigned long arg)
-{
-       return sys_ioctl(fd, BLKGETSIZE64, (unsigned long)compat_ptr(arg));
 }
 
 /* Bluetooth ioctls */
@@ -1971,330 +1405,6 @@ static int do_blkgetsize64(unsigned int fd, unsigned int cmd,
 #define HIDPCONNDEL	_IOW('H', 201, int)
 #define HIDPGETCONNLIST	_IOR('H', 210, int)
 #define HIDPGETCONNINFO	_IOR('H', 211, int)
-
-struct floppy_struct32 {
-	compat_uint_t	size;
-	compat_uint_t	sect;
-	compat_uint_t	head;
-	compat_uint_t	track;
-	compat_uint_t	stretch;
-	unsigned char	gap;
-	unsigned char	rate;
-	unsigned char	spec1;
-	unsigned char	fmt_gap;
-	const compat_caddr_t name;
-};
-
-struct floppy_drive_params32 {
-	char		cmos;
-	compat_ulong_t	max_dtr;
-	compat_ulong_t	hlt;
-	compat_ulong_t	hut;
-	compat_ulong_t	srt;
-	compat_ulong_t	spinup;
-	compat_ulong_t	spindown;
-	unsigned char	spindown_offset;
-	unsigned char	select_delay;
-	unsigned char	rps;
-	unsigned char	tracks;
-	compat_ulong_t	timeout;
-	unsigned char	interleave_sect;
-	struct floppy_max_errors max_errors;
-	char		flags;
-	char		read_track;
-	short		autodetect[8];
-	compat_int_t	checkfreq;
-	compat_int_t	native_format;
-};
-
-struct floppy_drive_struct32 {
-	signed char	flags;
-	compat_ulong_t	spinup_date;
-	compat_ulong_t	select_date;
-	compat_ulong_t	first_read_date;
-	short		probed_format;
-	short		track;
-	short		maxblock;
-	short		maxtrack;
-	compat_int_t	generation;
-	compat_int_t	keep_data;
-	compat_int_t	fd_ref;
-	compat_int_t	fd_device;
-	compat_int_t	last_checked;
-	compat_caddr_t dmabuf;
-	compat_int_t	bufblocks;
-};
-
-struct floppy_fdc_state32 {
-	compat_int_t	spec1;
-	compat_int_t	spec2;
-	compat_int_t	dtr;
-	unsigned char	version;
-	unsigned char	dor;
-	compat_ulong_t	address;
-	unsigned int	rawcmd:2;
-	unsigned int	reset:1;
-	unsigned int	need_configure:1;
-	unsigned int	perp_mode:2;
-	unsigned int	has_fifo:1;
-	unsigned int	driver_version;
-	unsigned char	track[4];
-};
-
-struct floppy_write_errors32 {
-	unsigned int	write_errors;
-	compat_ulong_t	first_error_sector;
-	compat_int_t	first_error_generation;
-	compat_ulong_t	last_error_sector;
-	compat_int_t	last_error_generation;
-	compat_uint_t	badness;
-};
-
-#define FDSETPRM32 _IOW(2, 0x42, struct floppy_struct32)
-#define FDDEFPRM32 _IOW(2, 0x43, struct floppy_struct32)
-#define FDGETPRM32 _IOR(2, 0x04, struct floppy_struct32)
-#define FDSETDRVPRM32 _IOW(2, 0x90, struct floppy_drive_params32)
-#define FDGETDRVPRM32 _IOR(2, 0x11, struct floppy_drive_params32)
-#define FDGETDRVSTAT32 _IOR(2, 0x12, struct floppy_drive_struct32)
-#define FDPOLLDRVSTAT32 _IOR(2, 0x13, struct floppy_drive_struct32)
-#define FDGETFDCSTAT32 _IOR(2, 0x15, struct floppy_fdc_state32)
-#define FDWERRORGET32  _IOR(2, 0x17, struct floppy_write_errors32)
-
-static struct {
-	unsigned int	cmd32;
-	unsigned int	cmd;
-} fd_ioctl_trans_table[] = {
-	{ FDSETPRM32, FDSETPRM },
-	{ FDDEFPRM32, FDDEFPRM },
-	{ FDGETPRM32, FDGETPRM },
-	{ FDSETDRVPRM32, FDSETDRVPRM },
-	{ FDGETDRVPRM32, FDGETDRVPRM },
-	{ FDGETDRVSTAT32, FDGETDRVSTAT },
-	{ FDPOLLDRVSTAT32, FDPOLLDRVSTAT },
-	{ FDGETFDCSTAT32, FDGETFDCSTAT },
-	{ FDWERRORGET32, FDWERRORGET }
-};
-
-#define NR_FD_IOCTL_TRANS (sizeof(fd_ioctl_trans_table)/sizeof(fd_ioctl_trans_table[0]))
-
-static int fd_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs = get_fs();
-	void *karg = NULL;
-	unsigned int kcmd = 0;
-	int i, err;
-
-	for (i = 0; i < NR_FD_IOCTL_TRANS; i++)
-		if (cmd == fd_ioctl_trans_table[i].cmd32) {
-			kcmd = fd_ioctl_trans_table[i].cmd;
-			break;
-		}
-	if (!kcmd)
-		return -EINVAL;
-
-	switch (cmd) {
-		case FDSETPRM32:
-		case FDDEFPRM32:
-		case FDGETPRM32:
-		{
-			compat_uptr_t name;
-			struct floppy_struct32 __user *uf;
-			struct floppy_struct *f;
-
-			uf = compat_ptr(arg);
-			f = karg = kmalloc(sizeof(struct floppy_struct), GFP_KERNEL);
-			if (!karg)
-				return -ENOMEM;
-			if (cmd == FDGETPRM32)
-				break;
-			err = __get_user(f->size, &uf->size);
-			err |= __get_user(f->sect, &uf->sect);
-			err |= __get_user(f->head, &uf->head);
-			err |= __get_user(f->track, &uf->track);
-			err |= __get_user(f->stretch, &uf->stretch);
-			err |= __get_user(f->gap, &uf->gap);
-			err |= __get_user(f->rate, &uf->rate);
-			err |= __get_user(f->spec1, &uf->spec1);
-			err |= __get_user(f->fmt_gap, &uf->fmt_gap);
-			err |= __get_user(name, &uf->name);
-			f->name = compat_ptr(name);
-			if (err) {
-				err = -EFAULT;
-				goto out;
-			}
-			break;
-		}
-		case FDSETDRVPRM32:
-		case FDGETDRVPRM32:
-		{
-			struct floppy_drive_params32 __user *uf;
-			struct floppy_drive_params *f;
-
-			uf = compat_ptr(arg);
-			f = karg = kmalloc(sizeof(struct floppy_drive_params), GFP_KERNEL);
-			if (!karg)
-				return -ENOMEM;
-			if (cmd == FDGETDRVPRM32)
-				break;
-			err = __get_user(f->cmos, &uf->cmos);
-			err |= __get_user(f->max_dtr, &uf->max_dtr);
-			err |= __get_user(f->hlt, &uf->hlt);
-			err |= __get_user(f->hut, &uf->hut);
-			err |= __get_user(f->srt, &uf->srt);
-			err |= __get_user(f->spinup, &uf->spinup);
-			err |= __get_user(f->spindown, &uf->spindown);
-			err |= __get_user(f->spindown_offset, &uf->spindown_offset);
-			err |= __get_user(f->select_delay, &uf->select_delay);
-			err |= __get_user(f->rps, &uf->rps);
-			err |= __get_user(f->tracks, &uf->tracks);
-			err |= __get_user(f->timeout, &uf->timeout);
-			err |= __get_user(f->interleave_sect, &uf->interleave_sect);
-			err |= __copy_from_user(&f->max_errors, &uf->max_errors, sizeof(f->max_errors));
-			err |= __get_user(f->flags, &uf->flags);
-			err |= __get_user(f->read_track, &uf->read_track);
-			err |= __copy_from_user(f->autodetect, uf->autodetect, sizeof(f->autodetect));
-			err |= __get_user(f->checkfreq, &uf->checkfreq);
-			err |= __get_user(f->native_format, &uf->native_format);
-			if (err) {
-				err = -EFAULT;
-				goto out;
-			}
-			break;
-		}
-		case FDGETDRVSTAT32:
-		case FDPOLLDRVSTAT32:
-			karg = kmalloc(sizeof(struct floppy_drive_struct), GFP_KERNEL);
-			if (!karg)
-				return -ENOMEM;
-			break;
-		case FDGETFDCSTAT32:
-			karg = kmalloc(sizeof(struct floppy_fdc_state), GFP_KERNEL);
-			if (!karg)
-				return -ENOMEM;
-			break;
-		case FDWERRORGET32:
-			karg = kmalloc(sizeof(struct floppy_write_errors), GFP_KERNEL);
-			if (!karg)
-				return -ENOMEM;
-			break;
-		default:
-			return -EINVAL;
-	}
-	set_fs (KERNEL_DS);
-	err = sys_ioctl (fd, kcmd, (unsigned long)karg);
-	set_fs (old_fs);
-	if (err)
-		goto out;
-	switch (cmd) {
-		case FDGETPRM32:
-		{
-			struct floppy_struct *f = karg;
-			struct floppy_struct32 __user *uf = compat_ptr(arg);
-
-			err = __put_user(f->size, &uf->size);
-			err |= __put_user(f->sect, &uf->sect);
-			err |= __put_user(f->head, &uf->head);
-			err |= __put_user(f->track, &uf->track);
-			err |= __put_user(f->stretch, &uf->stretch);
-			err |= __put_user(f->gap, &uf->gap);
-			err |= __put_user(f->rate, &uf->rate);
-			err |= __put_user(f->spec1, &uf->spec1);
-			err |= __put_user(f->fmt_gap, &uf->fmt_gap);
-			err |= __put_user((u64)f->name, (compat_caddr_t __user *)&uf->name);
-			break;
-		}
-		case FDGETDRVPRM32:
-		{
-			struct floppy_drive_params32 __user *uf;
-			struct floppy_drive_params *f = karg;
-
-			uf = compat_ptr(arg);
-			err = __put_user(f->cmos, &uf->cmos);
-			err |= __put_user(f->max_dtr, &uf->max_dtr);
-			err |= __put_user(f->hlt, &uf->hlt);
-			err |= __put_user(f->hut, &uf->hut);
-			err |= __put_user(f->srt, &uf->srt);
-			err |= __put_user(f->spinup, &uf->spinup);
-			err |= __put_user(f->spindown, &uf->spindown);
-			err |= __put_user(f->spindown_offset, &uf->spindown_offset);
-			err |= __put_user(f->select_delay, &uf->select_delay);
-			err |= __put_user(f->rps, &uf->rps);
-			err |= __put_user(f->tracks, &uf->tracks);
-			err |= __put_user(f->timeout, &uf->timeout);
-			err |= __put_user(f->interleave_sect, &uf->interleave_sect);
-			err |= __copy_to_user(&uf->max_errors, &f->max_errors, sizeof(f->max_errors));
-			err |= __put_user(f->flags, &uf->flags);
-			err |= __put_user(f->read_track, &uf->read_track);
-			err |= __copy_to_user(uf->autodetect, f->autodetect, sizeof(f->autodetect));
-			err |= __put_user(f->checkfreq, &uf->checkfreq);
-			err |= __put_user(f->native_format, &uf->native_format);
-			break;
-		}
-		case FDGETDRVSTAT32:
-		case FDPOLLDRVSTAT32:
-		{
-			struct floppy_drive_struct32 __user *uf;
-			struct floppy_drive_struct *f = karg;
-
-			uf = compat_ptr(arg);
-			err = __put_user(f->flags, &uf->flags);
-			err |= __put_user(f->spinup_date, &uf->spinup_date);
-			err |= __put_user(f->select_date, &uf->select_date);
-			err |= __put_user(f->first_read_date, &uf->first_read_date);
-			err |= __put_user(f->probed_format, &uf->probed_format);
-			err |= __put_user(f->track, &uf->track);
-			err |= __put_user(f->maxblock, &uf->maxblock);
-			err |= __put_user(f->maxtrack, &uf->maxtrack);
-			err |= __put_user(f->generation, &uf->generation);
-			err |= __put_user(f->keep_data, &uf->keep_data);
-			err |= __put_user(f->fd_ref, &uf->fd_ref);
-			err |= __put_user(f->fd_device, &uf->fd_device);
-			err |= __put_user(f->last_checked, &uf->last_checked);
-			err |= __put_user((u64)f->dmabuf, &uf->dmabuf);
-			err |= __put_user((u64)f->bufblocks, &uf->bufblocks);
-			break;
-		}
-		case FDGETFDCSTAT32:
-		{
-			struct floppy_fdc_state32 __user *uf;
-			struct floppy_fdc_state *f = karg;
-
-			uf = compat_ptr(arg);
-			err = __put_user(f->spec1, &uf->spec1);
-			err |= __put_user(f->spec2, &uf->spec2);
-			err |= __put_user(f->dtr, &uf->dtr);
-			err |= __put_user(f->version, &uf->version);
-			err |= __put_user(f->dor, &uf->dor);
-			err |= __put_user(f->address, &uf->address);
-			err |= __copy_to_user((char __user *)&uf->address + sizeof(uf->address),
-					   (char *)&f->address + sizeof(f->address), sizeof(int));
-			err |= __put_user(f->driver_version, &uf->driver_version);
-			err |= __copy_to_user(uf->track, f->track, sizeof(f->track));
-			break;
-		}
-		case FDWERRORGET32:
-		{
-			struct floppy_write_errors32 __user *uf;
-			struct floppy_write_errors *f = karg;
-
-			uf = compat_ptr(arg);
-			err = __put_user(f->write_errors, &uf->write_errors);
-			err |= __put_user(f->first_error_sector, &uf->first_error_sector);
-			err |= __put_user(f->first_error_generation, &uf->first_error_generation);
-			err |= __put_user(f->last_error_sector, &uf->last_error_sector);
-			err |= __put_user(f->last_error_generation, &uf->last_error_generation);
-			err |= __put_user(f->badness, &uf->badness);
-			break;
-		}
-		default:
-			break;
-	}
-	if (err)
-		err = -EFAULT;
-
-out:	if (karg) kfree(karg);
-	return err;
-}
 
 struct mtd_oob_buf32 {
 	u_int32_t start;
@@ -2336,64 +1446,7 @@ static int mtd_rw_oob(unsigned int fd, unsigned int cmd, unsigned long arg)
 	return err;
 }	
 
-#define	VFAT_IOCTL_READDIR_BOTH32	_IOR('r', 1, struct compat_dirent[2])
-#define	VFAT_IOCTL_READDIR_SHORT32	_IOR('r', 2, struct compat_dirent[2])
-
-static long
-put_dirent32 (struct dirent *d, struct compat_dirent __user *d32)
-{
-        int ret;
-
-        if ((ret = verify_area(VERIFY_WRITE, d32,
-                               sizeof(struct compat_dirent))))
-                return ret;
-
-        __put_user(d->d_ino, &d32->d_ino);
-        __put_user(d->d_off, &d32->d_off);
-        __put_user(d->d_reclen, &d32->d_reclen);
-        if (__copy_to_user(d32->d_name, d->d_name, d->d_reclen))
-		return -EFAULT;
-
-        return ret;
-}
-
-static int vfat_ioctl32(unsigned fd, unsigned cmd, unsigned long arg)
-{
-	struct compat_dirent __user *p = compat_ptr(arg);
-	int ret;
-	mm_segment_t oldfs = get_fs();
-	struct dirent d[2];
-
-	switch(cmd)
-	{
-        	case VFAT_IOCTL_READDIR_BOTH32:
-                	cmd = VFAT_IOCTL_READDIR_BOTH;
-                	break;
-        	case VFAT_IOCTL_READDIR_SHORT32:
-                	cmd = VFAT_IOCTL_READDIR_SHORT;
-                	break;
-	}
-
-	set_fs(KERNEL_DS);
-	ret = sys_ioctl(fd,cmd,(unsigned long)&d);
-	set_fs(oldfs);
-	if (ret >= 0) {
-		ret |= put_dirent32(&d[0], p);
-		ret |= put_dirent32(&d[1], p + 1);
-	}
-	return ret;
-}
-
-#define REISERFS_IOC_UNPACK32               _IOW(0xCD,1,int)
-
-static int reiserfs_ioctl32(unsigned fd, unsigned cmd, unsigned long ptr)
-{
-        if (cmd == REISERFS_IOC_UNPACK32)
-                cmd = REISERFS_IOC_UNPACK;
-
-        return sys_ioctl(fd,cmd,ptr);
-}
-
+#ifdef CONFIG_BLOCK
 struct raw32_config_request
 {
         compat_int_t    raw_minor;
@@ -2405,9 +1458,8 @@ static int get_raw32_request(struct raw_config_request *req, struct raw32_config
 {
         int ret;
 
-        if ((ret = verify_area(VERIFY_READ, user_req,
-                               sizeof(struct raw32_config_request))))
-                return ret;
+        if (!access_ok(VERIFY_READ, user_req, sizeof(struct raw32_config_request)))
+                return -EFAULT;
 
         ret = __get_user(req->raw_minor, &user_req->raw_minor);
         ret |= __get_user(req->block_major, &user_req->block_major);
@@ -2420,9 +1472,8 @@ static int set_raw32_request(struct raw_config_request *req, struct raw32_config
 {
 	int ret;
 
-        if ((ret = verify_area(VERIFY_WRITE, user_req,
-                               sizeof(struct raw32_config_request))))
-                return ret;
+        if (!access_ok(VERIFY_WRITE, user_req, sizeof(struct raw32_config_request)))
+                return -EFAULT;
 
         ret = __put_user(req->raw_minor, &user_req->raw_minor);
         ret |= __put_user(req->block_major, &user_req->block_major);
@@ -2460,6 +1511,7 @@ static int raw_ioctl(unsigned fd, unsigned cmd, unsigned long arg)
         }
         return ret;
 }
+#endif /* CONFIG_BLOCK */
 
 struct serial_struct32 {
         compat_int_t    type;
@@ -2492,32 +1544,35 @@ static int serial_struct_ioctl(unsigned fd, unsigned cmd, unsigned long arg)
         struct serial_struct ss;
         mm_segment_t oldseg = get_fs();
         __u32 udata;
+	unsigned int base;
 
         if (cmd == TIOCSSERIAL) {
-                if (verify_area(VERIFY_READ, ss32, sizeof(SS32)))
+                if (!access_ok(VERIFY_READ, ss32, sizeof(SS32)))
                         return -EFAULT;
                 if (__copy_from_user(&ss, ss32, offsetof(SS32, iomem_base)))
 			return -EFAULT;
-                __get_user(udata, &ss32->iomem_base);
+                if (__get_user(udata, &ss32->iomem_base))
+			return -EFAULT;
                 ss.iomem_base = compat_ptr(udata);
-                __get_user(ss.iomem_reg_shift, &ss32->iomem_reg_shift);
-                __get_user(ss.port_high, &ss32->port_high);
+                if (__get_user(ss.iomem_reg_shift, &ss32->iomem_reg_shift) ||
+		    __get_user(ss.port_high, &ss32->port_high))
+			return -EFAULT;
                 ss.iomap_base = 0UL;
         }
         set_fs(KERNEL_DS);
                 err = sys_ioctl(fd,cmd,(unsigned long)(&ss));
         set_fs(oldseg);
         if (cmd == TIOCGSERIAL && err >= 0) {
-                if (verify_area(VERIFY_WRITE, ss32, sizeof(SS32)))
+                if (!access_ok(VERIFY_WRITE, ss32, sizeof(SS32)))
                         return -EFAULT;
                 if (__copy_to_user(ss32,&ss,offsetof(SS32,iomem_base)))
 			return -EFAULT;
-                __put_user((unsigned long)ss.iomem_base  >> 32 ?
-                            0xffffffff : (unsigned)(unsigned long)ss.iomem_base,
-                            &ss32->iomem_base);
-                __put_user(ss.iomem_reg_shift, &ss32->iomem_reg_shift);
-                __put_user(ss.port_high, &ss32->port_high);
-
+		base = (unsigned long)ss.iomem_base  >> 32 ?
+			0xffffffff : (unsigned)(unsigned long)ss.iomem_base;
+		if (__put_user(base, &ss32->iomem_base) ||
+		    __put_user(ss.iomem_reg_shift, &ss32->iomem_reg_shift) ||
+		    __put_user(ss.port_high, &ss32->port_high))
+			return -EFAULT;
         }
         return err;
 }
@@ -2575,229 +1630,11 @@ static int do_usbdevfs_bulk(unsigned int fd, unsigned int cmd, unsigned long arg
         return sys_ioctl(fd, USBDEVFS_BULK, (unsigned long)p);
 }
 
-/* This needs more work before we can enable it.  Unfortunately
- * because of the fancy asynchronous way URB status/error is written
- * back to userspace, we'll need to fiddle with USB devio internals
- * and/or reimplement entirely the frontend of it ourselves. -DaveM
- *
- * The issue is:
- *
- *	When an URB is submitted via usbdevicefs it is put onto an
- *	asynchronous queue.  When the URB completes, it may be reaped
- *	via another ioctl.  During this reaping the status is written
- *	back to userspace along with the length of the transfer.
- *
- *	We must translate into 64-bit kernel types so we pass in a kernel
- *	space copy of the usbdevfs_urb structure.  This would mean that we
- *	must do something to deal with the async entry reaping.  First we
- *	have to deal somehow with this transitory memory we've allocated.
- *	This is problematic since there are many call sites from which the
- *	async entries can be destroyed (and thus when we'd need to free up
- *	this kernel memory).  One of which is the close() op of usbdevicefs.
- *	To handle that we'd need to make our own file_operations struct which
- *	overrides usbdevicefs's release op with our own which runs usbdevicefs's
- *	real release op then frees up the kernel memory.
- *
- *	But how to keep track of these kernel buffers?  We'd need to either
- *	keep track of them in some table _or_ know about usbdevicefs internals
- *	(ie. the exact layout of its file private, which is actually defined
- *	in linux/usbdevice_fs.h, the layout of the async queues are private to
- *	devio.c)
- *
- * There is one possible other solution I considered, also involving knowledge
- * of usbdevicefs internals:
- *
- *	After an URB is submitted, we "fix up" the address back to the user
- *	space one.  This would work if the status/length fields written back
- *	by the async URB completion lines up perfectly in the 32-bit type with
- *	the 64-bit kernel type.  Unfortunately, it does not because the iso
- *	frame descriptors, at the end of the struct, can be written back.
- *
- * I think we'll just need to simply duplicate the devio URB engine here.
+
+/*
+ *  USBDEVFS_SUBMITURB, USBDEVFS_REAPURB and USBDEVFS_REAPURBNDELAY
+ *  are handled in usbdevfs core.			-Christopher Li
  */
-#if 0
-struct usbdevfs_urb32 {
-	unsigned char type;
-	unsigned char endpoint;
-	compat_int_t status;
-	compat_uint_t flags;
-	compat_caddr_t buffer;
-	compat_int_t buffer_length;
-	compat_int_t actual_length;
-	compat_int_t start_frame;
-	compat_int_t number_of_packets;
-	compat_int_t error_count;
-	compat_uint_t signr;
-	compat_caddr_t usercontext; /* unused */
-	struct usbdevfs_iso_packet_desc iso_frame_desc[0];
-};
-
-#define USBDEVFS_SUBMITURB32       _IOR('U', 10, struct usbdevfs_urb32)
-
-static int get_urb32(struct usbdevfs_urb *kurb,
-		     struct usbdevfs_urb32 *uurb)
-{
-	if (get_user(kurb->type, &uurb->type) ||
-	    __get_user(kurb->endpoint, &uurb->endpoint) ||
-	    __get_user(kurb->status, &uurb->status) ||
-	    __get_user(kurb->flags, &uurb->flags) ||
-	    __get_user(kurb->buffer_length, &uurb->buffer_length) ||
-	    __get_user(kurb->actual_length, &uurb->actual_length) ||
-	    __get_user(kurb->start_frame, &uurb->start_frame) ||
-	    __get_user(kurb->number_of_packets, &uurb->number_of_packets) ||
-	    __get_user(kurb->error_count, &uurb->error_count) ||
-	    __get_user(kurb->signr, &uurb->signr))
-		return -EFAULT;
-
-	kurb->usercontext = 0; /* unused currently */
-
-	return 0;
-}
-
-/* Just put back the values which usbdevfs actually changes. */
-static int put_urb32(struct usbdevfs_urb *kurb,
-		     struct usbdevfs_urb32 *uurb)
-{
-	if (put_user(kurb->status, &uurb->status) ||
-	    __put_user(kurb->actual_length, &uurb->actual_length) ||
-	    __put_user(kurb->error_count, &uurb->error_count))
-		return -EFAULT;
-
-	if (kurb->number_of_packets != 0) {
-		int i;
-
-		for (i = 0; i < kurb->number_of_packets; i++) {
-			if (__put_user(kurb->iso_frame_desc[i].actual_length,
-				       &uurb->iso_frame_desc[i].actual_length) ||
-			    __put_user(kurb->iso_frame_desc[i].status,
-				       &uurb->iso_frame_desc[i].status))
-				return -EFAULT;
-		}
-	}
-
-	return 0;
-}
-
-static int get_urb32_isoframes(struct usbdevfs_urb *kurb,
-			       struct usbdevfs_urb32 *uurb)
-{
-	unsigned int totlen;
-	int i;
-
-	if (kurb->type != USBDEVFS_URB_TYPE_ISO) {
-		kurb->number_of_packets = 0;
-		return 0;
-	}
-
-	if (kurb->number_of_packets < 1 ||
-	    kurb->number_of_packets > 128)
-		return -EINVAL;
-
-	if (copy_from_user(&kurb->iso_frame_desc[0],
-			   &uurb->iso_frame_desc[0],
-			   sizeof(struct usbdevfs_iso_packet_desc) *
-			   kurb->number_of_packets))
-		return -EFAULT;
-
-	totlen = 0;
-	for (i = 0; i < kurb->number_of_packets; i++) {
-		unsigned int this_len;
-
-		this_len = kurb->iso_frame_desc[i].length;
-		if (this_len > 1023)
-			return -EINVAL;
-
-		totlen += this_len;
-	}
-
-	if (totlen > 32768)
-		return -EINVAL;
-
-	kurb->buffer_length = totlen;
-
-	return 0;
-}
-
-static int do_usbdevfs_urb(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct usbdevfs_urb *kurb;
-	struct usbdevfs_urb32 *uurb;
-	mm_segment_t old_fs;
-	__u32 udata;
-	void *uptr, *kptr;
-	unsigned int buflen;
-	int err;
-
-	uurb = compat_ptr(arg);
-
-	err = -ENOMEM;
-	kurb = kmalloc(sizeof(struct usbdevfs_urb) +
-		       (sizeof(struct usbdevfs_iso_packet_desc) * 128),
-		       GFP_KERNEL);
-	if (!kurb)
-		goto out;
-
-	err = -EFAULT;
-	if (get_urb32(kurb, uurb))
-		goto out;
-
-	err = get_urb32_isoframes(kurb, uurb);
-	if (err)
-		goto out;
-
-	err = -EFAULT;
-	if (__get_user(udata, &uurb->buffer))
-		goto out;
-	uptr = compat_ptr(udata);
-
-	buflen = kurb->buffer_length;
-	err = verify_area(VERIFY_WRITE, uptr, buflen);
-	if (err)
-		goto out;
-
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	err = sys_ioctl(fd, USBDEVFS_SUBMITURB, (unsigned long) kurb);
-	set_fs(old_fs);
-
-	if (err >= 0) {
-		/* RED-PEN Shit, this doesn't work for async URBs :-( XXX */
-		if (put_urb32(kurb, uurb)) {
-			err = -EFAULT;
-		}
-	}
-
-out:
-	kfree(kurb);
-	return err;
-}
-#endif
-
-#define USBDEVFS_REAPURB32         _IOW('U', 12, u32)
-#define USBDEVFS_REAPURBNDELAY32   _IOW('U', 13, u32)
-
-static int do_usbdevfs_reapurb(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-        mm_segment_t old_fs;
-        void *kptr;
-        int err;
-
-        old_fs = get_fs();
-        set_fs(KERNEL_DS);
-        err = sys_ioctl(fd,
-                        (cmd == USBDEVFS_REAPURB32 ?
-                         USBDEVFS_REAPURB :
-                         USBDEVFS_REAPURBNDELAY),
-                        (unsigned long) &kptr);
-        set_fs(old_fs);
-
-        if (err >= 0 &&
-            put_user((u32)(u64)kptr, (u32 __user *)compat_ptr(arg)))
-                err = -EFAULT;
-
-        return err;
-}
 
 struct usbdevfs_disconnectsignal32 {
         compat_int_t signr;
@@ -2903,11 +1740,11 @@ static int do_i2c_smbus_ioctl(unsigned int fd, unsigned int cmd, unsigned long a
 	tdata = compat_alloc_user_space(sizeof(*tdata));
 	if (tdata == NULL)
 		return -ENOMEM;
-	if (verify_area(VERIFY_WRITE, tdata, sizeof(*tdata)))
+	if (!access_ok(VERIFY_WRITE, tdata, sizeof(*tdata)))
 		return -EFAULT;
 
 	udata = compat_ptr(arg);
-	if (verify_area(VERIFY_READ, udata, sizeof(*udata)))
+	if (!access_ok(VERIFY_READ, udata, sizeof(*udata)))
 		return -EFAULT;
 
 	if (__copy_in_user(&tdata->read_write, &udata->read_write, 2 * sizeof(u8)))
@@ -2933,8 +1770,10 @@ static int do_wireless_ioctl(unsigned int fd, unsigned int cmd, unsigned long ar
 	struct iwreq __user *iwr_u;
 	struct iw_point __user *iwp;
 	struct compat_iw_point __user *iwp_u;
-	compat_caddr_t pointer;
+	compat_caddr_t pointer_u;
+	void __user *pointer;
 	__u16 length, flags;
+	int ret;
 
 	iwr_u = compat_ptr(arg);
 	iwp_u = (struct compat_iw_point __user *) &iwr_u->u.data;
@@ -2944,7 +1783,7 @@ static int do_wireless_ioctl(unsigned int fd, unsigned int cmd, unsigned long ar
 
 	iwp = &iwr->u.data;
 
-	if (verify_area(VERIFY_WRITE, iwr, sizeof(*iwr)))
+	if (!access_ok(VERIFY_WRITE, iwr, sizeof(*iwr)))
 		return -EFAULT;
 
 	if (__copy_in_user(&iwr->ifr_ifrn.ifrn_name[0],
@@ -2952,17 +1791,29 @@ static int do_wireless_ioctl(unsigned int fd, unsigned int cmd, unsigned long ar
 			   sizeof(iwr->ifr_ifrn.ifrn_name)))
 		return -EFAULT;
 
-	if (__get_user(pointer, &iwp_u->pointer) ||
+	if (__get_user(pointer_u, &iwp_u->pointer) ||
 	    __get_user(length, &iwp_u->length) ||
 	    __get_user(flags, &iwp_u->flags))
 		return -EFAULT;
 
-	if (__put_user(compat_ptr(pointer), &iwp->pointer) ||
+	if (__put_user(compat_ptr(pointer_u), &iwp->pointer) ||
 	    __put_user(length, &iwp->length) ||
 	    __put_user(flags, &iwp->flags))
 		return -EFAULT;
 
-	return sys_ioctl(fd, cmd, (unsigned long) iwr);
+	ret = sys_ioctl(fd, cmd, (unsigned long) iwr);
+
+	if (__get_user(pointer, &iwp->pointer) ||
+	    __get_user(length, &iwp->length) ||
+	    __get_user(flags, &iwp->flags))
+		return -EFAULT;
+
+	if (__put_user(ptr_to_compat(pointer), &iwp_u->pointer) ||
+	    __put_user(length, &iwp_u->length) ||
+	    __put_user(flags, &iwp_u->flags))
+		return -EFAULT;
+
+	return ret;
 }
 
 /* Since old style bridge ioctl's endup using SIOCDEVPRIVATE
@@ -2980,197 +1831,826 @@ static int old_bridge_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg
 	return -EINVAL;
 }
 
-#if defined(CONFIG_NCP_FS) || defined(CONFIG_NCP_FS_MODULE)
-struct ncp_ioctl_request_32 {
-	u32 function;
-	u32 size;
-	compat_caddr_t data;
-};
+#define RTC_IRQP_READ32		_IOR('p', 0x0b, compat_ulong_t)
+#define RTC_IRQP_SET32		_IOW('p', 0x0c, compat_ulong_t)
+#define RTC_EPOCH_READ32	_IOR('p', 0x0d, compat_ulong_t)
+#define RTC_EPOCH_SET32		_IOW('p', 0x0e, compat_ulong_t)
 
-struct ncp_fs_info_v2_32 {
-	s32 version;
-	u32 mounted_uid;
-	u32 connection;
-	u32 buffer_size;
-
-	u32 volume_number;
-	u32 directory_id;
-
-	u32 dummy1;
-	u32 dummy2;
-	u32 dummy3;
-};
-
-struct ncp_objectname_ioctl_32
+static int rtc_ioctl(unsigned fd, unsigned cmd, unsigned long arg)
 {
-	s32		auth_type;
-	u32		object_name_len;
-	compat_caddr_t	object_name;	/* an userspace data, in most cases user name */
-};
+	mm_segment_t oldfs = get_fs();
+	compat_ulong_t val32;
+	unsigned long kval;
+	int ret;
 
-struct ncp_privatedata_ioctl_32
-{
-	u32		len;
-	compat_caddr_t	data;		/* ~1000 for NDS */
-};
-
-#define	NCP_IOC_NCPREQUEST_32		_IOR('n', 1, struct ncp_ioctl_request_32)
-#define NCP_IOC_GETMOUNTUID2_32		_IOW('n', 2, u32)
-#define NCP_IOC_GET_FS_INFO_V2_32	_IOWR('n', 4, struct ncp_fs_info_v2_32)
-#define NCP_IOC_GETOBJECTNAME_32	_IOWR('n', 9, struct ncp_objectname_ioctl_32)
-#define NCP_IOC_SETOBJECTNAME_32	_IOR('n', 9, struct ncp_objectname_ioctl_32)
-#define NCP_IOC_GETPRIVATEDATA_32	_IOWR('n', 10, struct ncp_privatedata_ioctl_32)
-#define NCP_IOC_SETPRIVATEDATA_32	_IOR('n', 10, struct ncp_privatedata_ioctl_32)
-
-static int do_ncp_ncprequest(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct ncp_ioctl_request_32 n32;
-	struct ncp_ioctl_request __user *p = compat_alloc_user_space(sizeof(*p));
-
-	if (copy_from_user(&n32, compat_ptr(arg), sizeof(n32)) ||
-	    put_user(n32.function, &p->function) ||
-	    put_user(n32.size, &p->size) ||
-	    put_user(compat_ptr(n32.data), &p->data))
-		return -EFAULT;
-
-	return sys_ioctl(fd, NCP_IOC_NCPREQUEST, (unsigned long)p);
-}
-
-static int do_ncp_getmountuid2(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs = get_fs();
-	__kernel_uid_t kuid;
-	int err;
-
-	cmd = NCP_IOC_GETMOUNTUID2;
-
-	set_fs(KERNEL_DS);
-	err = sys_ioctl(fd, cmd, (unsigned long)&kuid);
-	set_fs(old_fs);
-
-	if (!err)
-		err = put_user(kuid,
-			       (unsigned int __user *) compat_ptr(arg));
-
-	return err;
-}
-
-static int do_ncp_getfsinfo2(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs = get_fs();
-	struct ncp_fs_info_v2_32 n32;
-	struct ncp_fs_info_v2 n;
-	int err;
-
-	if (copy_from_user(&n32, compat_ptr(arg), sizeof(n32)))
-		return -EFAULT;
-	if (n32.version != NCP_GET_FS_INFO_VERSION_V2)
-		return -EINVAL;
-	n.version = NCP_GET_FS_INFO_VERSION_V2;
-
-	set_fs(KERNEL_DS);
-	err = sys_ioctl(fd, NCP_IOC_GET_FS_INFO_V2, (unsigned long)&n);
-	set_fs(old_fs);
-
-	if (!err) {
-		n32.version = n.version;
-		n32.mounted_uid = n.mounted_uid;
-		n32.connection = n.connection;
-		n32.buffer_size = n.buffer_size;
-		n32.volume_number = n.volume_number;
-		n32.directory_id = n.directory_id;
-		n32.dummy1 = n.dummy1;
-		n32.dummy2 = n.dummy2;
-		n32.dummy3 = n.dummy3;
-		err = copy_to_user(compat_ptr(arg), &n32, sizeof(n32)) ? -EFAULT : 0;
+	switch (cmd) {
+	case RTC_IRQP_READ32:
+	case RTC_EPOCH_READ32:
+		set_fs(KERNEL_DS);
+		ret = sys_ioctl(fd, (cmd == RTC_IRQP_READ32) ?
+					RTC_IRQP_READ : RTC_EPOCH_READ,
+					(unsigned long)&kval);
+		set_fs(oldfs);
+		if (ret)
+			return ret;
+		val32 = kval;
+		return put_user(val32, (unsigned int __user *)arg);
+	case RTC_IRQP_SET32:
+		return sys_ioctl(fd, RTC_IRQP_SET, arg); 
+	case RTC_EPOCH_SET32:
+		return sys_ioctl(fd, RTC_EPOCH_SET, arg);
+	default:
+		/* unreached */
+		return -ENOIOCTLCMD;
 	}
-	return err;
 }
 
-static int do_ncp_getobjectname(unsigned int fd, unsigned int cmd, unsigned long arg)
+static int
+lp_timeout_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
-	struct ncp_objectname_ioctl_32 n32, __user *p32 = compat_ptr(arg);
-	struct ncp_objectname_ioctl __user *p = compat_alloc_user_space(sizeof(*p));
-	s32 auth_type;
-	u32 name_len;
-	int err;
-
-	if (copy_from_user(&n32, p32, sizeof(n32)) ||
-	    put_user(n32.object_name_len, &p->object_name_len) ||
-	    put_user(compat_ptr(n32.object_name), &p->object_name))
+	struct compat_timeval __user *tc = (struct compat_timeval __user *)arg;
+	struct timeval __user *tn = compat_alloc_user_space(sizeof(struct timeval));
+	struct timeval ts;
+	if (get_user(ts.tv_sec, &tc->tv_sec) ||
+	    get_user(ts.tv_usec, &tc->tv_usec) ||
+	    put_user(ts.tv_sec, &tn->tv_sec) ||
+	    put_user(ts.tv_usec, &tn->tv_usec))
 		return -EFAULT;
-
-	err = sys_ioctl(fd, NCP_IOC_GETOBJECTNAME, (unsigned long)p);
-        if (err)
-		return err;
-
-	if (get_user(auth_type, &p->auth_type) ||
-	    put_user(auth_type, &p32->auth_type) ||
-	    get_user(name_len, &p->object_name_len) ||
-	    put_user(name_len, &p32->object_name_len))
-		return -EFAULT;
-
-	return 0;
+	return sys_ioctl(fd, cmd, (unsigned long)tn);
 }
 
-static int do_ncp_setobjectname(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct ncp_objectname_ioctl_32 n32, __user *p32 = compat_ptr(arg);
-	struct ncp_objectname_ioctl __user *p = compat_alloc_user_space(sizeof(*p));
 
-	if (copy_from_user(&n32, p32, sizeof(n32)) ||
-	    put_user(n32.auth_type, &p->auth_type) ||
-	    put_user(n32.object_name_len, &p->object_name_len) ||
-	    put_user(compat_ptr(n32.object_name), &p->object_name))
-		return -EFAULT;
+typedef int (*ioctl_trans_handler_t)(unsigned int, unsigned int,
+					unsigned long, struct file *);
 
-	return sys_ioctl(fd, NCP_IOC_SETOBJECTNAME, (unsigned long)p);
-}
+struct ioctl_trans {
+	unsigned long cmd;
+	ioctl_trans_handler_t handler;
+	struct ioctl_trans *next;
+};
 
-static int do_ncp_getprivatedata(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct ncp_privatedata_ioctl_32 n32, __user *p32 = compat_ptr(arg);
-	struct ncp_privatedata_ioctl __user *p =
-		compat_alloc_user_space(sizeof(*p));
-	u32 len;
-	int err;
+#define HANDLE_IOCTL(cmd,handler) \
+	{ (cmd), (ioctl_trans_handler_t)(handler) },
 
-	if (copy_from_user(&n32, p32, sizeof(n32)) ||
-	    put_user(n32.len, &p->len) ||
-	    put_user(compat_ptr(n32.data), &p->data))
-		return -EFAULT;
+/* pointer to compatible structure or no argument */
+#define COMPATIBLE_IOCTL(cmd) \
+	{ (cmd), do_ioctl32_pointer },
 
-	err = sys_ioctl(fd, NCP_IOC_GETPRIVATEDATA, (unsigned long)p);
-        if (err)
-		return err;
+/* argument is an unsigned long integer, not a pointer */
+#define ULONG_IOCTL(cmd) \
+	{ (cmd), (ioctl_trans_handler_t)sys_ioctl },
 
-	if (get_user(len, &p->len) ||
-	    put_user(len, &p32->len))
-		return -EFAULT;
+/* ioctl should not be warned about even if it's not implemented.
+   Valid reasons to use this:
+   - It is implemented with ->compat_ioctl on some device, but programs
+   call it on others too.
+   - The ioctl is not implemented in the native kernel, but programs
+   call it commonly anyways.
+   Most other reasons are not valid. */
+#define IGNORE_IOCTL(cmd) COMPATIBLE_IOCTL(cmd)
 
-	return 0;
-}
+static struct ioctl_trans ioctl_start[] = {
+/* compatible ioctls first */
+COMPATIBLE_IOCTL(0x4B50)   /* KDGHWCLK - not in the kernel, but don't complain */
+COMPATIBLE_IOCTL(0x4B51)   /* KDSHWCLK - not in the kernel, but don't complain */
 
-static int do_ncp_setprivatedata(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	struct ncp_privatedata_ioctl_32 n32;
-	struct ncp_privatedata_ioctl_32 __user *p32 = compat_ptr(arg);
-	struct ncp_privatedata_ioctl __user *p =
-		compat_alloc_user_space(sizeof(*p));
-
-	if (copy_from_user(&n32, p32, sizeof(n32)) ||
-	    put_user(n32.len, &p->len) ||
-	    put_user(compat_ptr(n32.data), &p->data))
-		return -EFAULT;
-
-	return sys_ioctl(fd, NCP_IOC_SETPRIVATEDATA, (unsigned long)p);
-}
+/* Big T */
+COMPATIBLE_IOCTL(TCGETA)
+COMPATIBLE_IOCTL(TCSETA)
+COMPATIBLE_IOCTL(TCSETAW)
+COMPATIBLE_IOCTL(TCSETAF)
+COMPATIBLE_IOCTL(TCSBRK)
+ULONG_IOCTL(TCSBRKP)
+COMPATIBLE_IOCTL(TCXONC)
+COMPATIBLE_IOCTL(TCFLSH)
+COMPATIBLE_IOCTL(TCGETS)
+COMPATIBLE_IOCTL(TCSETS)
+COMPATIBLE_IOCTL(TCSETSW)
+COMPATIBLE_IOCTL(TCSETSF)
+COMPATIBLE_IOCTL(TIOCLINUX)
+COMPATIBLE_IOCTL(TIOCSBRK)
+COMPATIBLE_IOCTL(TIOCCBRK)
+ULONG_IOCTL(TIOCMIWAIT)
+COMPATIBLE_IOCTL(TIOCGICOUNT)
+/* Little t */
+COMPATIBLE_IOCTL(TIOCGETD)
+COMPATIBLE_IOCTL(TIOCSETD)
+COMPATIBLE_IOCTL(TIOCEXCL)
+COMPATIBLE_IOCTL(TIOCNXCL)
+COMPATIBLE_IOCTL(TIOCCONS)
+COMPATIBLE_IOCTL(TIOCGSOFTCAR)
+COMPATIBLE_IOCTL(TIOCSSOFTCAR)
+COMPATIBLE_IOCTL(TIOCSWINSZ)
+COMPATIBLE_IOCTL(TIOCGWINSZ)
+COMPATIBLE_IOCTL(TIOCMGET)
+COMPATIBLE_IOCTL(TIOCMBIC)
+COMPATIBLE_IOCTL(TIOCMBIS)
+COMPATIBLE_IOCTL(TIOCMSET)
+COMPATIBLE_IOCTL(TIOCPKT)
+COMPATIBLE_IOCTL(TIOCNOTTY)
+COMPATIBLE_IOCTL(TIOCSTI)
+COMPATIBLE_IOCTL(TIOCOUTQ)
+COMPATIBLE_IOCTL(TIOCSPGRP)
+COMPATIBLE_IOCTL(TIOCGPGRP)
+ULONG_IOCTL(TIOCSCTTY)
+COMPATIBLE_IOCTL(TIOCGPTN)
+COMPATIBLE_IOCTL(TIOCSPTLCK)
+COMPATIBLE_IOCTL(TIOCSERGETLSR)
+#ifdef TCGETS2
+COMPATIBLE_IOCTL(TCGETS2)
+COMPATIBLE_IOCTL(TCSETS2)
+COMPATIBLE_IOCTL(TCSETSW2)
+COMPATIBLE_IOCTL(TCSETSF2)
 #endif
+/* Little f */
+COMPATIBLE_IOCTL(FIOCLEX)
+COMPATIBLE_IOCTL(FIONCLEX)
+COMPATIBLE_IOCTL(FIOASYNC)
+COMPATIBLE_IOCTL(FIONBIO)
+COMPATIBLE_IOCTL(FIONREAD)  /* This is also TIOCINQ */
+/* 0x00 */
+COMPATIBLE_IOCTL(FIBMAP)
+COMPATIBLE_IOCTL(FIGETBSZ)
+/* RAID */
+COMPATIBLE_IOCTL(RAID_VERSION)
+COMPATIBLE_IOCTL(GET_ARRAY_INFO)
+COMPATIBLE_IOCTL(GET_DISK_INFO)
+COMPATIBLE_IOCTL(PRINT_RAID_DEBUG)
+COMPATIBLE_IOCTL(RAID_AUTORUN)
+COMPATIBLE_IOCTL(CLEAR_ARRAY)
+COMPATIBLE_IOCTL(ADD_NEW_DISK)
+ULONG_IOCTL(HOT_REMOVE_DISK)
+COMPATIBLE_IOCTL(SET_ARRAY_INFO)
+COMPATIBLE_IOCTL(SET_DISK_INFO)
+COMPATIBLE_IOCTL(WRITE_RAID_INFO)
+COMPATIBLE_IOCTL(UNPROTECT_ARRAY)
+COMPATIBLE_IOCTL(PROTECT_ARRAY)
+ULONG_IOCTL(HOT_ADD_DISK)
+ULONG_IOCTL(SET_DISK_FAULTY)
+COMPATIBLE_IOCTL(RUN_ARRAY)
+COMPATIBLE_IOCTL(STOP_ARRAY)
+COMPATIBLE_IOCTL(STOP_ARRAY_RO)
+COMPATIBLE_IOCTL(RESTART_ARRAY_RW)
+COMPATIBLE_IOCTL(GET_BITMAP_FILE)
+ULONG_IOCTL(SET_BITMAP_FILE)
+/* DM */
+COMPATIBLE_IOCTL(DM_VERSION_32)
+COMPATIBLE_IOCTL(DM_REMOVE_ALL_32)
+COMPATIBLE_IOCTL(DM_LIST_DEVICES_32)
+COMPATIBLE_IOCTL(DM_DEV_CREATE_32)
+COMPATIBLE_IOCTL(DM_DEV_REMOVE_32)
+COMPATIBLE_IOCTL(DM_DEV_RENAME_32)
+COMPATIBLE_IOCTL(DM_DEV_SUSPEND_32)
+COMPATIBLE_IOCTL(DM_DEV_STATUS_32)
+COMPATIBLE_IOCTL(DM_DEV_WAIT_32)
+COMPATIBLE_IOCTL(DM_TABLE_LOAD_32)
+COMPATIBLE_IOCTL(DM_TABLE_CLEAR_32)
+COMPATIBLE_IOCTL(DM_TABLE_DEPS_32)
+COMPATIBLE_IOCTL(DM_TABLE_STATUS_32)
+COMPATIBLE_IOCTL(DM_LIST_VERSIONS_32)
+COMPATIBLE_IOCTL(DM_TARGET_MSG_32)
+COMPATIBLE_IOCTL(DM_DEV_SET_GEOMETRY_32)
+COMPATIBLE_IOCTL(DM_VERSION)
+COMPATIBLE_IOCTL(DM_REMOVE_ALL)
+COMPATIBLE_IOCTL(DM_LIST_DEVICES)
+COMPATIBLE_IOCTL(DM_DEV_CREATE)
+COMPATIBLE_IOCTL(DM_DEV_REMOVE)
+COMPATIBLE_IOCTL(DM_DEV_RENAME)
+COMPATIBLE_IOCTL(DM_DEV_SUSPEND)
+COMPATIBLE_IOCTL(DM_DEV_STATUS)
+COMPATIBLE_IOCTL(DM_DEV_WAIT)
+COMPATIBLE_IOCTL(DM_TABLE_LOAD)
+COMPATIBLE_IOCTL(DM_TABLE_CLEAR)
+COMPATIBLE_IOCTL(DM_TABLE_DEPS)
+COMPATIBLE_IOCTL(DM_TABLE_STATUS)
+COMPATIBLE_IOCTL(DM_LIST_VERSIONS)
+COMPATIBLE_IOCTL(DM_TARGET_MSG)
+COMPATIBLE_IOCTL(DM_DEV_SET_GEOMETRY)
+/* Big K */
+COMPATIBLE_IOCTL(PIO_FONT)
+COMPATIBLE_IOCTL(GIO_FONT)
+ULONG_IOCTL(KDSIGACCEPT)
+COMPATIBLE_IOCTL(KDGETKEYCODE)
+COMPATIBLE_IOCTL(KDSETKEYCODE)
+ULONG_IOCTL(KIOCSOUND)
+ULONG_IOCTL(KDMKTONE)
+COMPATIBLE_IOCTL(KDGKBTYPE)
+ULONG_IOCTL(KDSETMODE)
+COMPATIBLE_IOCTL(KDGETMODE)
+ULONG_IOCTL(KDSKBMODE)
+COMPATIBLE_IOCTL(KDGKBMODE)
+ULONG_IOCTL(KDSKBMETA)
+COMPATIBLE_IOCTL(KDGKBMETA)
+COMPATIBLE_IOCTL(KDGKBENT)
+COMPATIBLE_IOCTL(KDSKBENT)
+COMPATIBLE_IOCTL(KDGKBSENT)
+COMPATIBLE_IOCTL(KDSKBSENT)
+COMPATIBLE_IOCTL(KDGKBDIACR)
+COMPATIBLE_IOCTL(KDSKBDIACR)
+COMPATIBLE_IOCTL(KDKBDREP)
+COMPATIBLE_IOCTL(KDGKBLED)
+ULONG_IOCTL(KDSKBLED)
+COMPATIBLE_IOCTL(KDGETLED)
+ULONG_IOCTL(KDSETLED)
+COMPATIBLE_IOCTL(GIO_SCRNMAP)
+COMPATIBLE_IOCTL(PIO_SCRNMAP)
+COMPATIBLE_IOCTL(GIO_UNISCRNMAP)
+COMPATIBLE_IOCTL(PIO_UNISCRNMAP)
+COMPATIBLE_IOCTL(PIO_FONTRESET)
+COMPATIBLE_IOCTL(PIO_UNIMAPCLR)
+/* Big S */
+COMPATIBLE_IOCTL(SCSI_IOCTL_GET_IDLUN)
+COMPATIBLE_IOCTL(SCSI_IOCTL_DOORLOCK)
+COMPATIBLE_IOCTL(SCSI_IOCTL_DOORUNLOCK)
+COMPATIBLE_IOCTL(SCSI_IOCTL_TEST_UNIT_READY)
+COMPATIBLE_IOCTL(SCSI_IOCTL_GET_BUS_NUMBER)
+COMPATIBLE_IOCTL(SCSI_IOCTL_SEND_COMMAND)
+COMPATIBLE_IOCTL(SCSI_IOCTL_PROBE_HOST)
+COMPATIBLE_IOCTL(SCSI_IOCTL_GET_PCI)
+/* Big T */
+COMPATIBLE_IOCTL(TUNSETNOCSUM)
+COMPATIBLE_IOCTL(TUNSETDEBUG)
+COMPATIBLE_IOCTL(TUNSETPERSIST)
+COMPATIBLE_IOCTL(TUNSETOWNER)
+/* Big V */
+COMPATIBLE_IOCTL(VT_SETMODE)
+COMPATIBLE_IOCTL(VT_GETMODE)
+COMPATIBLE_IOCTL(VT_GETSTATE)
+COMPATIBLE_IOCTL(VT_OPENQRY)
+ULONG_IOCTL(VT_ACTIVATE)
+ULONG_IOCTL(VT_WAITACTIVE)
+ULONG_IOCTL(VT_RELDISP)
+ULONG_IOCTL(VT_DISALLOCATE)
+COMPATIBLE_IOCTL(VT_RESIZE)
+COMPATIBLE_IOCTL(VT_RESIZEX)
+COMPATIBLE_IOCTL(VT_LOCKSWITCH)
+COMPATIBLE_IOCTL(VT_UNLOCKSWITCH)
+COMPATIBLE_IOCTL(VT_GETHIFONTMASK)
+/* Little p (/dev/rtc, /dev/envctrl, etc.) */
+COMPATIBLE_IOCTL(RTC_AIE_ON)
+COMPATIBLE_IOCTL(RTC_AIE_OFF)
+COMPATIBLE_IOCTL(RTC_UIE_ON)
+COMPATIBLE_IOCTL(RTC_UIE_OFF)
+COMPATIBLE_IOCTL(RTC_PIE_ON)
+COMPATIBLE_IOCTL(RTC_PIE_OFF)
+COMPATIBLE_IOCTL(RTC_WIE_ON)
+COMPATIBLE_IOCTL(RTC_WIE_OFF)
+COMPATIBLE_IOCTL(RTC_ALM_SET)
+COMPATIBLE_IOCTL(RTC_ALM_READ)
+COMPATIBLE_IOCTL(RTC_RD_TIME)
+COMPATIBLE_IOCTL(RTC_SET_TIME)
+COMPATIBLE_IOCTL(RTC_WKALM_SET)
+COMPATIBLE_IOCTL(RTC_WKALM_RD)
+/*
+ * These two are only for the sbus rtc driver, but
+ * hwclock tries them on every rtc device first when
+ * running on sparc.  On other architectures the entries
+ * are useless but harmless.
+ */
+COMPATIBLE_IOCTL(_IOR('p', 20, int[7])) /* RTCGET */
+COMPATIBLE_IOCTL(_IOW('p', 21, int[7])) /* RTCSET */
+/* Little m */
+COMPATIBLE_IOCTL(MTIOCTOP)
+/* Socket level stuff */
+COMPATIBLE_IOCTL(FIOQSIZE)
+COMPATIBLE_IOCTL(FIOSETOWN)
+COMPATIBLE_IOCTL(SIOCSPGRP)
+COMPATIBLE_IOCTL(FIOGETOWN)
+COMPATIBLE_IOCTL(SIOCGPGRP)
+COMPATIBLE_IOCTL(SIOCATMARK)
+COMPATIBLE_IOCTL(SIOCSIFLINK)
+COMPATIBLE_IOCTL(SIOCSIFENCAP)
+COMPATIBLE_IOCTL(SIOCGIFENCAP)
+COMPATIBLE_IOCTL(SIOCSIFNAME)
+COMPATIBLE_IOCTL(SIOCSARP)
+COMPATIBLE_IOCTL(SIOCGARP)
+COMPATIBLE_IOCTL(SIOCDARP)
+COMPATIBLE_IOCTL(SIOCSRARP)
+COMPATIBLE_IOCTL(SIOCGRARP)
+COMPATIBLE_IOCTL(SIOCDRARP)
+COMPATIBLE_IOCTL(SIOCADDDLCI)
+COMPATIBLE_IOCTL(SIOCDELDLCI)
+COMPATIBLE_IOCTL(SIOCGMIIPHY)
+COMPATIBLE_IOCTL(SIOCGMIIREG)
+COMPATIBLE_IOCTL(SIOCSMIIREG)
+COMPATIBLE_IOCTL(SIOCGIFVLAN)
+COMPATIBLE_IOCTL(SIOCSIFVLAN)
+COMPATIBLE_IOCTL(SIOCBRADDBR)
+COMPATIBLE_IOCTL(SIOCBRDELBR)
+/* SG stuff */
+COMPATIBLE_IOCTL(SG_SET_TIMEOUT)
+COMPATIBLE_IOCTL(SG_GET_TIMEOUT)
+COMPATIBLE_IOCTL(SG_EMULATED_HOST)
+ULONG_IOCTL(SG_SET_TRANSFORM)
+COMPATIBLE_IOCTL(SG_GET_TRANSFORM)
+COMPATIBLE_IOCTL(SG_SET_RESERVED_SIZE)
+COMPATIBLE_IOCTL(SG_GET_RESERVED_SIZE)
+COMPATIBLE_IOCTL(SG_GET_SCSI_ID)
+COMPATIBLE_IOCTL(SG_SET_FORCE_LOW_DMA)
+COMPATIBLE_IOCTL(SG_GET_LOW_DMA)
+COMPATIBLE_IOCTL(SG_SET_FORCE_PACK_ID)
+COMPATIBLE_IOCTL(SG_GET_PACK_ID)
+COMPATIBLE_IOCTL(SG_GET_NUM_WAITING)
+COMPATIBLE_IOCTL(SG_SET_DEBUG)
+COMPATIBLE_IOCTL(SG_GET_SG_TABLESIZE)
+COMPATIBLE_IOCTL(SG_GET_COMMAND_Q)
+COMPATIBLE_IOCTL(SG_SET_COMMAND_Q)
+COMPATIBLE_IOCTL(SG_GET_VERSION_NUM)
+COMPATIBLE_IOCTL(SG_NEXT_CMD_LEN)
+COMPATIBLE_IOCTL(SG_SCSI_RESET)
+COMPATIBLE_IOCTL(SG_GET_REQUEST_TABLE)
+COMPATIBLE_IOCTL(SG_SET_KEEP_ORPHAN)
+COMPATIBLE_IOCTL(SG_GET_KEEP_ORPHAN)
+/* PPP stuff */
+COMPATIBLE_IOCTL(PPPIOCGFLAGS)
+COMPATIBLE_IOCTL(PPPIOCSFLAGS)
+COMPATIBLE_IOCTL(PPPIOCGASYNCMAP)
+COMPATIBLE_IOCTL(PPPIOCSASYNCMAP)
+COMPATIBLE_IOCTL(PPPIOCGUNIT)
+COMPATIBLE_IOCTL(PPPIOCGRASYNCMAP)
+COMPATIBLE_IOCTL(PPPIOCSRASYNCMAP)
+COMPATIBLE_IOCTL(PPPIOCGMRU)
+COMPATIBLE_IOCTL(PPPIOCSMRU)
+COMPATIBLE_IOCTL(PPPIOCSMAXCID)
+COMPATIBLE_IOCTL(PPPIOCGXASYNCMAP)
+COMPATIBLE_IOCTL(PPPIOCSXASYNCMAP)
+COMPATIBLE_IOCTL(PPPIOCXFERUNIT)
+/* PPPIOCSCOMPRESS is translated */
+COMPATIBLE_IOCTL(PPPIOCGNPMODE)
+COMPATIBLE_IOCTL(PPPIOCSNPMODE)
+COMPATIBLE_IOCTL(PPPIOCGDEBUG)
+COMPATIBLE_IOCTL(PPPIOCSDEBUG)
+/* PPPIOCSPASS is translated */
+/* PPPIOCSACTIVE is translated */
+/* PPPIOCGIDLE is translated */
+COMPATIBLE_IOCTL(PPPIOCNEWUNIT)
+COMPATIBLE_IOCTL(PPPIOCATTACH)
+COMPATIBLE_IOCTL(PPPIOCDETACH)
+COMPATIBLE_IOCTL(PPPIOCSMRRU)
+COMPATIBLE_IOCTL(PPPIOCCONNECT)
+COMPATIBLE_IOCTL(PPPIOCDISCONN)
+COMPATIBLE_IOCTL(PPPIOCATTCHAN)
+COMPATIBLE_IOCTL(PPPIOCGCHAN)
+/* PPPOX */
+COMPATIBLE_IOCTL(PPPOEIOCSFWD)
+COMPATIBLE_IOCTL(PPPOEIOCDFWD)
+/* LP */
+COMPATIBLE_IOCTL(LPGETSTATUS)
+/* ppdev */
+COMPATIBLE_IOCTL(PPSETMODE)
+COMPATIBLE_IOCTL(PPRSTATUS)
+COMPATIBLE_IOCTL(PPRCONTROL)
+COMPATIBLE_IOCTL(PPWCONTROL)
+COMPATIBLE_IOCTL(PPFCONTROL)
+COMPATIBLE_IOCTL(PPRDATA)
+COMPATIBLE_IOCTL(PPWDATA)
+COMPATIBLE_IOCTL(PPCLAIM)
+COMPATIBLE_IOCTL(PPRELEASE)
+COMPATIBLE_IOCTL(PPYIELD)
+COMPATIBLE_IOCTL(PPEXCL)
+COMPATIBLE_IOCTL(PPDATADIR)
+COMPATIBLE_IOCTL(PPNEGOT)
+COMPATIBLE_IOCTL(PPWCTLONIRQ)
+COMPATIBLE_IOCTL(PPCLRIRQ)
+COMPATIBLE_IOCTL(PPSETPHASE)
+COMPATIBLE_IOCTL(PPGETMODES)
+COMPATIBLE_IOCTL(PPGETMODE)
+COMPATIBLE_IOCTL(PPGETPHASE)
+COMPATIBLE_IOCTL(PPGETFLAGS)
+COMPATIBLE_IOCTL(PPSETFLAGS)
+/* pktcdvd */
+COMPATIBLE_IOCTL(PACKET_CTRL_CMD)
+/* Big A */
+/* sparc only */
+/* Big Q for sound/OSS */
+COMPATIBLE_IOCTL(SNDCTL_SEQ_RESET)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_SYNC)
+COMPATIBLE_IOCTL(SNDCTL_SYNTH_INFO)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_CTRLRATE)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_GETOUTCOUNT)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_GETINCOUNT)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_PERCMODE)
+COMPATIBLE_IOCTL(SNDCTL_FM_LOAD_INSTR)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_TESTMIDI)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_RESETSAMPLES)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_NRSYNTHS)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_NRMIDIS)
+COMPATIBLE_IOCTL(SNDCTL_MIDI_INFO)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_THRESHOLD)
+COMPATIBLE_IOCTL(SNDCTL_SYNTH_MEMAVL)
+COMPATIBLE_IOCTL(SNDCTL_FM_4OP_ENABLE)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_PANIC)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_OUTOFBAND)
+COMPATIBLE_IOCTL(SNDCTL_SEQ_GETTIME)
+COMPATIBLE_IOCTL(SNDCTL_SYNTH_ID)
+COMPATIBLE_IOCTL(SNDCTL_SYNTH_CONTROL)
+COMPATIBLE_IOCTL(SNDCTL_SYNTH_REMOVESAMPLE)
+/* Big T for sound/OSS */
+COMPATIBLE_IOCTL(SNDCTL_TMR_TIMEBASE)
+COMPATIBLE_IOCTL(SNDCTL_TMR_START)
+COMPATIBLE_IOCTL(SNDCTL_TMR_STOP)
+COMPATIBLE_IOCTL(SNDCTL_TMR_CONTINUE)
+COMPATIBLE_IOCTL(SNDCTL_TMR_TEMPO)
+COMPATIBLE_IOCTL(SNDCTL_TMR_SOURCE)
+COMPATIBLE_IOCTL(SNDCTL_TMR_METRONOME)
+COMPATIBLE_IOCTL(SNDCTL_TMR_SELECT)
+/* Little m for sound/OSS */
+COMPATIBLE_IOCTL(SNDCTL_MIDI_PRETIME)
+COMPATIBLE_IOCTL(SNDCTL_MIDI_MPUMODE)
+COMPATIBLE_IOCTL(SNDCTL_MIDI_MPUCMD)
+/* Big P for sound/OSS */
+COMPATIBLE_IOCTL(SNDCTL_DSP_RESET)
+COMPATIBLE_IOCTL(SNDCTL_DSP_SYNC)
+COMPATIBLE_IOCTL(SNDCTL_DSP_SPEED)
+COMPATIBLE_IOCTL(SNDCTL_DSP_STEREO)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETBLKSIZE)
+COMPATIBLE_IOCTL(SNDCTL_DSP_CHANNELS)
+COMPATIBLE_IOCTL(SOUND_PCM_WRITE_FILTER)
+COMPATIBLE_IOCTL(SNDCTL_DSP_POST)
+COMPATIBLE_IOCTL(SNDCTL_DSP_SUBDIVIDE)
+COMPATIBLE_IOCTL(SNDCTL_DSP_SETFRAGMENT)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETFMTS)
+COMPATIBLE_IOCTL(SNDCTL_DSP_SETFMT)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETOSPACE)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETISPACE)
+COMPATIBLE_IOCTL(SNDCTL_DSP_NONBLOCK)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETCAPS)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETTRIGGER)
+COMPATIBLE_IOCTL(SNDCTL_DSP_SETTRIGGER)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETIPTR)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETOPTR)
+/* SNDCTL_DSP_MAPINBUF,  XXX needs translation */
+/* SNDCTL_DSP_MAPOUTBUF,  XXX needs translation */
+COMPATIBLE_IOCTL(SNDCTL_DSP_SETSYNCRO)
+COMPATIBLE_IOCTL(SNDCTL_DSP_SETDUPLEX)
+COMPATIBLE_IOCTL(SNDCTL_DSP_GETODELAY)
+COMPATIBLE_IOCTL(SNDCTL_DSP_PROFILE)
+COMPATIBLE_IOCTL(SOUND_PCM_READ_RATE)
+COMPATIBLE_IOCTL(SOUND_PCM_READ_CHANNELS)
+COMPATIBLE_IOCTL(SOUND_PCM_READ_BITS)
+COMPATIBLE_IOCTL(SOUND_PCM_READ_FILTER)
+/* Big C for sound/OSS */
+COMPATIBLE_IOCTL(SNDCTL_COPR_RESET)
+COMPATIBLE_IOCTL(SNDCTL_COPR_LOAD)
+COMPATIBLE_IOCTL(SNDCTL_COPR_RDATA)
+COMPATIBLE_IOCTL(SNDCTL_COPR_RCODE)
+COMPATIBLE_IOCTL(SNDCTL_COPR_WDATA)
+COMPATIBLE_IOCTL(SNDCTL_COPR_WCODE)
+COMPATIBLE_IOCTL(SNDCTL_COPR_RUN)
+COMPATIBLE_IOCTL(SNDCTL_COPR_HALT)
+COMPATIBLE_IOCTL(SNDCTL_COPR_SENDMSG)
+COMPATIBLE_IOCTL(SNDCTL_COPR_RCVMSG)
+/* Big M for sound/OSS */
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_VOLUME)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_BASS)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_TREBLE)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_SYNTH)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_PCM)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_SPEAKER)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_LINE)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_MIC)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_CD)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_IMIX)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_ALTPCM)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_RECLEV)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_IGAIN)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_OGAIN)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_LINE1)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_LINE2)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_LINE3)
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_DIGITAL1))
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_DIGITAL2))
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_DIGITAL3))
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_PHONEIN))
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_PHONEOUT))
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_VIDEO))
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_RADIO))
+COMPATIBLE_IOCTL(MIXER_READ(SOUND_MIXER_MONITOR))
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_MUTE)
+/* SOUND_MIXER_READ_ENHANCE,  same value as READ_MUTE */
+/* SOUND_MIXER_READ_LOUD,  same value as READ_MUTE */
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_RECSRC)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_DEVMASK)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_RECMASK)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_STEREODEVS)
+COMPATIBLE_IOCTL(SOUND_MIXER_READ_CAPS)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_VOLUME)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_BASS)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_TREBLE)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_SYNTH)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_PCM)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_SPEAKER)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_LINE)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_MIC)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_CD)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_IMIX)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_ALTPCM)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_RECLEV)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_IGAIN)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_OGAIN)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_LINE1)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_LINE2)
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_LINE3)
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_DIGITAL1))
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_DIGITAL2))
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_DIGITAL3))
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_PHONEIN))
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_PHONEOUT))
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_VIDEO))
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_RADIO))
+COMPATIBLE_IOCTL(MIXER_WRITE(SOUND_MIXER_MONITOR))
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_MUTE)
+/* SOUND_MIXER_WRITE_ENHANCE,  same value as WRITE_MUTE */
+/* SOUND_MIXER_WRITE_LOUD,  same value as WRITE_MUTE */
+COMPATIBLE_IOCTL(SOUND_MIXER_WRITE_RECSRC)
+COMPATIBLE_IOCTL(SOUND_MIXER_INFO)
+COMPATIBLE_IOCTL(SOUND_OLD_MIXER_INFO)
+COMPATIBLE_IOCTL(SOUND_MIXER_ACCESS)
+COMPATIBLE_IOCTL(SOUND_MIXER_AGC)
+COMPATIBLE_IOCTL(SOUND_MIXER_3DSE)
+COMPATIBLE_IOCTL(SOUND_MIXER_PRIVATE1)
+COMPATIBLE_IOCTL(SOUND_MIXER_PRIVATE2)
+COMPATIBLE_IOCTL(SOUND_MIXER_PRIVATE3)
+COMPATIBLE_IOCTL(SOUND_MIXER_PRIVATE4)
+COMPATIBLE_IOCTL(SOUND_MIXER_PRIVATE5)
+COMPATIBLE_IOCTL(SOUND_MIXER_GETLEVELS)
+COMPATIBLE_IOCTL(SOUND_MIXER_SETLEVELS)
+COMPATIBLE_IOCTL(OSS_GETVERSION)
+/* AUTOFS */
+ULONG_IOCTL(AUTOFS_IOC_READY)
+ULONG_IOCTL(AUTOFS_IOC_FAIL)
+COMPATIBLE_IOCTL(AUTOFS_IOC_CATATONIC)
+COMPATIBLE_IOCTL(AUTOFS_IOC_PROTOVER)
+COMPATIBLE_IOCTL(AUTOFS_IOC_EXPIRE)
+COMPATIBLE_IOCTL(AUTOFS_IOC_EXPIRE_MULTI)
+COMPATIBLE_IOCTL(AUTOFS_IOC_PROTOSUBVER)
+COMPATIBLE_IOCTL(AUTOFS_IOC_ASKREGHOST)
+COMPATIBLE_IOCTL(AUTOFS_IOC_TOGGLEREGHOST)
+COMPATIBLE_IOCTL(AUTOFS_IOC_ASKUMOUNT)
+/* Raw devices */
+COMPATIBLE_IOCTL(RAW_SETBIND)
+COMPATIBLE_IOCTL(RAW_GETBIND)
+/* SMB ioctls which do not need any translations */
+COMPATIBLE_IOCTL(SMB_IOC_NEWCONN)
+/* Little a */
+COMPATIBLE_IOCTL(ATMSIGD_CTRL)
+COMPATIBLE_IOCTL(ATMARPD_CTRL)
+COMPATIBLE_IOCTL(ATMLEC_CTRL)
+COMPATIBLE_IOCTL(ATMLEC_MCAST)
+COMPATIBLE_IOCTL(ATMLEC_DATA)
+COMPATIBLE_IOCTL(ATM_SETSC)
+COMPATIBLE_IOCTL(SIOCSIFATMTCP)
+COMPATIBLE_IOCTL(SIOCMKCLIP)
+COMPATIBLE_IOCTL(ATMARP_MKIP)
+COMPATIBLE_IOCTL(ATMARP_SETENTRY)
+COMPATIBLE_IOCTL(ATMARP_ENCAP)
+COMPATIBLE_IOCTL(ATMTCP_CREATE)
+COMPATIBLE_IOCTL(ATMTCP_REMOVE)
+COMPATIBLE_IOCTL(ATMMPC_CTRL)
+COMPATIBLE_IOCTL(ATMMPC_DATA)
+/* Watchdog */
+COMPATIBLE_IOCTL(WDIOC_GETSUPPORT)
+COMPATIBLE_IOCTL(WDIOC_GETSTATUS)
+COMPATIBLE_IOCTL(WDIOC_GETBOOTSTATUS)
+COMPATIBLE_IOCTL(WDIOC_GETTEMP)
+COMPATIBLE_IOCTL(WDIOC_SETOPTIONS)
+COMPATIBLE_IOCTL(WDIOC_KEEPALIVE)
+COMPATIBLE_IOCTL(WDIOC_SETTIMEOUT)
+COMPATIBLE_IOCTL(WDIOC_GETTIMEOUT)
+/* Big R */
+COMPATIBLE_IOCTL(RNDGETENTCNT)
+COMPATIBLE_IOCTL(RNDADDTOENTCNT)
+COMPATIBLE_IOCTL(RNDGETPOOL)
+COMPATIBLE_IOCTL(RNDADDENTROPY)
+COMPATIBLE_IOCTL(RNDZAPENTCNT)
+COMPATIBLE_IOCTL(RNDCLEARPOOL)
+/* Bluetooth */
+COMPATIBLE_IOCTL(HCIDEVUP)
+COMPATIBLE_IOCTL(HCIDEVDOWN)
+COMPATIBLE_IOCTL(HCIDEVRESET)
+COMPATIBLE_IOCTL(HCIDEVRESTAT)
+COMPATIBLE_IOCTL(HCIGETDEVLIST)
+COMPATIBLE_IOCTL(HCIGETDEVINFO)
+COMPATIBLE_IOCTL(HCIGETCONNLIST)
+COMPATIBLE_IOCTL(HCIGETCONNINFO)
+COMPATIBLE_IOCTL(HCISETRAW)
+COMPATIBLE_IOCTL(HCISETSCAN)
+COMPATIBLE_IOCTL(HCISETAUTH)
+COMPATIBLE_IOCTL(HCISETENCRYPT)
+COMPATIBLE_IOCTL(HCISETPTYPE)
+COMPATIBLE_IOCTL(HCISETLINKPOL)
+COMPATIBLE_IOCTL(HCISETLINKMODE)
+COMPATIBLE_IOCTL(HCISETACLMTU)
+COMPATIBLE_IOCTL(HCISETSCOMTU)
+COMPATIBLE_IOCTL(HCIINQUIRY)
+COMPATIBLE_IOCTL(HCIUARTSETPROTO)
+COMPATIBLE_IOCTL(HCIUARTGETPROTO)
+COMPATIBLE_IOCTL(RFCOMMCREATEDEV)
+COMPATIBLE_IOCTL(RFCOMMRELEASEDEV)
+COMPATIBLE_IOCTL(RFCOMMGETDEVLIST)
+COMPATIBLE_IOCTL(RFCOMMGETDEVINFO)
+COMPATIBLE_IOCTL(RFCOMMSTEALDLC)
+COMPATIBLE_IOCTL(BNEPCONNADD)
+COMPATIBLE_IOCTL(BNEPCONNDEL)
+COMPATIBLE_IOCTL(BNEPGETCONNLIST)
+COMPATIBLE_IOCTL(BNEPGETCONNINFO)
+COMPATIBLE_IOCTL(CMTPCONNADD)
+COMPATIBLE_IOCTL(CMTPCONNDEL)
+COMPATIBLE_IOCTL(CMTPGETCONNLIST)
+COMPATIBLE_IOCTL(CMTPGETCONNINFO)
+COMPATIBLE_IOCTL(HIDPCONNADD)
+COMPATIBLE_IOCTL(HIDPCONNDEL)
+COMPATIBLE_IOCTL(HIDPGETCONNLIST)
+COMPATIBLE_IOCTL(HIDPGETCONNINFO)
+/* CAPI */
+COMPATIBLE_IOCTL(CAPI_REGISTER)
+COMPATIBLE_IOCTL(CAPI_GET_MANUFACTURER)
+COMPATIBLE_IOCTL(CAPI_GET_VERSION)
+COMPATIBLE_IOCTL(CAPI_GET_SERIAL)
+COMPATIBLE_IOCTL(CAPI_GET_PROFILE)
+COMPATIBLE_IOCTL(CAPI_MANUFACTURER_CMD)
+COMPATIBLE_IOCTL(CAPI_GET_ERRCODE)
+COMPATIBLE_IOCTL(CAPI_INSTALLED)
+COMPATIBLE_IOCTL(CAPI_GET_FLAGS)
+COMPATIBLE_IOCTL(CAPI_SET_FLAGS)
+COMPATIBLE_IOCTL(CAPI_CLR_FLAGS)
+COMPATIBLE_IOCTL(CAPI_NCCI_OPENCOUNT)
+COMPATIBLE_IOCTL(CAPI_NCCI_GETUNIT)
+/* Siemens Gigaset */
+COMPATIBLE_IOCTL(GIGASET_REDIR)
+COMPATIBLE_IOCTL(GIGASET_CONFIG)
+COMPATIBLE_IOCTL(GIGASET_BRKCHARS)
+COMPATIBLE_IOCTL(GIGASET_VERSION)
+/* Misc. */
+COMPATIBLE_IOCTL(0x41545900)		/* ATYIO_CLKR */
+COMPATIBLE_IOCTL(0x41545901)		/* ATYIO_CLKW */
+COMPATIBLE_IOCTL(PCIIOC_CONTROLLER)
+COMPATIBLE_IOCTL(PCIIOC_MMAP_IS_IO)
+COMPATIBLE_IOCTL(PCIIOC_MMAP_IS_MEM)
+COMPATIBLE_IOCTL(PCIIOC_WRITE_COMBINE)
+/* USB */
+COMPATIBLE_IOCTL(USBDEVFS_RESETEP)
+COMPATIBLE_IOCTL(USBDEVFS_SETINTERFACE)
+COMPATIBLE_IOCTL(USBDEVFS_SETCONFIGURATION)
+COMPATIBLE_IOCTL(USBDEVFS_GETDRIVER)
+COMPATIBLE_IOCTL(USBDEVFS_DISCARDURB)
+COMPATIBLE_IOCTL(USBDEVFS_CLAIMINTERFACE)
+COMPATIBLE_IOCTL(USBDEVFS_RELEASEINTERFACE)
+COMPATIBLE_IOCTL(USBDEVFS_CONNECTINFO)
+COMPATIBLE_IOCTL(USBDEVFS_HUB_PORTINFO)
+COMPATIBLE_IOCTL(USBDEVFS_RESET)
+COMPATIBLE_IOCTL(USBDEVFS_SUBMITURB32)
+COMPATIBLE_IOCTL(USBDEVFS_REAPURB32)
+COMPATIBLE_IOCTL(USBDEVFS_REAPURBNDELAY32)
+COMPATIBLE_IOCTL(USBDEVFS_CLEAR_HALT)
+/* MTD */
+COMPATIBLE_IOCTL(MEMGETINFO)
+COMPATIBLE_IOCTL(MEMERASE)
+COMPATIBLE_IOCTL(MEMLOCK)
+COMPATIBLE_IOCTL(MEMUNLOCK)
+COMPATIBLE_IOCTL(MEMGETREGIONCOUNT)
+COMPATIBLE_IOCTL(MEMGETREGIONINFO)
+COMPATIBLE_IOCTL(MEMGETBADBLOCK)
+COMPATIBLE_IOCTL(MEMSETBADBLOCK)
+/* NBD */
+ULONG_IOCTL(NBD_SET_SOCK)
+ULONG_IOCTL(NBD_SET_BLKSIZE)
+ULONG_IOCTL(NBD_SET_SIZE)
+COMPATIBLE_IOCTL(NBD_DO_IT)
+COMPATIBLE_IOCTL(NBD_CLEAR_SOCK)
+COMPATIBLE_IOCTL(NBD_CLEAR_QUE)
+COMPATIBLE_IOCTL(NBD_PRINT_DEBUG)
+ULONG_IOCTL(NBD_SET_SIZE_BLOCKS)
+COMPATIBLE_IOCTL(NBD_DISCONNECT)
+/* i2c */
+COMPATIBLE_IOCTL(I2C_SLAVE)
+COMPATIBLE_IOCTL(I2C_SLAVE_FORCE)
+COMPATIBLE_IOCTL(I2C_TENBIT)
+COMPATIBLE_IOCTL(I2C_PEC)
+COMPATIBLE_IOCTL(I2C_RETRIES)
+COMPATIBLE_IOCTL(I2C_TIMEOUT)
+/* wireless */
+COMPATIBLE_IOCTL(SIOCSIWCOMMIT)
+COMPATIBLE_IOCTL(SIOCGIWNAME)
+COMPATIBLE_IOCTL(SIOCSIWNWID)
+COMPATIBLE_IOCTL(SIOCGIWNWID)
+COMPATIBLE_IOCTL(SIOCSIWFREQ)
+COMPATIBLE_IOCTL(SIOCGIWFREQ)
+COMPATIBLE_IOCTL(SIOCSIWMODE)
+COMPATIBLE_IOCTL(SIOCGIWMODE)
+COMPATIBLE_IOCTL(SIOCSIWSENS)
+COMPATIBLE_IOCTL(SIOCGIWSENS)
+COMPATIBLE_IOCTL(SIOCSIWRANGE)
+COMPATIBLE_IOCTL(SIOCSIWPRIV)
+COMPATIBLE_IOCTL(SIOCSIWSTATS)
+COMPATIBLE_IOCTL(SIOCSIWAP)
+COMPATIBLE_IOCTL(SIOCGIWAP)
+COMPATIBLE_IOCTL(SIOCSIWRATE)
+COMPATIBLE_IOCTL(SIOCGIWRATE)
+COMPATIBLE_IOCTL(SIOCSIWRTS)
+COMPATIBLE_IOCTL(SIOCGIWRTS)
+COMPATIBLE_IOCTL(SIOCSIWFRAG)
+COMPATIBLE_IOCTL(SIOCGIWFRAG)
+COMPATIBLE_IOCTL(SIOCSIWTXPOW)
+COMPATIBLE_IOCTL(SIOCGIWTXPOW)
+COMPATIBLE_IOCTL(SIOCSIWRETRY)
+COMPATIBLE_IOCTL(SIOCGIWRETRY)
+COMPATIBLE_IOCTL(SIOCSIWPOWER)
+COMPATIBLE_IOCTL(SIOCGIWPOWER)
+COMPATIBLE_IOCTL(SIOCSIWAUTH)
+COMPATIBLE_IOCTL(SIOCGIWAUTH)
+/* hiddev */
+COMPATIBLE_IOCTL(HIDIOCGVERSION)
+COMPATIBLE_IOCTL(HIDIOCAPPLICATION)
+COMPATIBLE_IOCTL(HIDIOCGDEVINFO)
+COMPATIBLE_IOCTL(HIDIOCGSTRING)
+COMPATIBLE_IOCTL(HIDIOCINITREPORT)
+COMPATIBLE_IOCTL(HIDIOCGREPORT)
+COMPATIBLE_IOCTL(HIDIOCSREPORT)
+COMPATIBLE_IOCTL(HIDIOCGREPORTINFO)
+COMPATIBLE_IOCTL(HIDIOCGFIELDINFO)
+COMPATIBLE_IOCTL(HIDIOCGUSAGE)
+COMPATIBLE_IOCTL(HIDIOCSUSAGE)
+COMPATIBLE_IOCTL(HIDIOCGUCODE)
+COMPATIBLE_IOCTL(HIDIOCGFLAG)
+COMPATIBLE_IOCTL(HIDIOCSFLAG)
+COMPATIBLE_IOCTL(HIDIOCGCOLLECTIONINDEX)
+COMPATIBLE_IOCTL(HIDIOCGCOLLECTIONINFO)
+/* dvb */
+COMPATIBLE_IOCTL(AUDIO_STOP)
+COMPATIBLE_IOCTL(AUDIO_PLAY)
+COMPATIBLE_IOCTL(AUDIO_PAUSE)
+COMPATIBLE_IOCTL(AUDIO_CONTINUE)
+COMPATIBLE_IOCTL(AUDIO_SELECT_SOURCE)
+COMPATIBLE_IOCTL(AUDIO_SET_MUTE)
+COMPATIBLE_IOCTL(AUDIO_SET_AV_SYNC)
+COMPATIBLE_IOCTL(AUDIO_SET_BYPASS_MODE)
+COMPATIBLE_IOCTL(AUDIO_CHANNEL_SELECT)
+COMPATIBLE_IOCTL(AUDIO_GET_STATUS)
+COMPATIBLE_IOCTL(AUDIO_GET_CAPABILITIES)
+COMPATIBLE_IOCTL(AUDIO_CLEAR_BUFFER)
+COMPATIBLE_IOCTL(AUDIO_SET_ID)
+COMPATIBLE_IOCTL(AUDIO_SET_MIXER)
+COMPATIBLE_IOCTL(AUDIO_SET_STREAMTYPE)
+COMPATIBLE_IOCTL(AUDIO_SET_EXT_ID)
+COMPATIBLE_IOCTL(AUDIO_SET_ATTRIBUTES)
+COMPATIBLE_IOCTL(AUDIO_SET_KARAOKE)
+COMPATIBLE_IOCTL(DMX_START)
+COMPATIBLE_IOCTL(DMX_STOP)
+COMPATIBLE_IOCTL(DMX_SET_FILTER)
+COMPATIBLE_IOCTL(DMX_SET_PES_FILTER)
+COMPATIBLE_IOCTL(DMX_SET_BUFFER_SIZE)
+COMPATIBLE_IOCTL(DMX_GET_PES_PIDS)
+COMPATIBLE_IOCTL(DMX_GET_CAPS)
+COMPATIBLE_IOCTL(DMX_SET_SOURCE)
+COMPATIBLE_IOCTL(DMX_GET_STC)
+COMPATIBLE_IOCTL(FE_GET_INFO)
+COMPATIBLE_IOCTL(FE_DISEQC_RESET_OVERLOAD)
+COMPATIBLE_IOCTL(FE_DISEQC_SEND_MASTER_CMD)
+COMPATIBLE_IOCTL(FE_DISEQC_RECV_SLAVE_REPLY)
+COMPATIBLE_IOCTL(FE_DISEQC_SEND_BURST)
+COMPATIBLE_IOCTL(FE_SET_TONE)
+COMPATIBLE_IOCTL(FE_SET_VOLTAGE)
+COMPATIBLE_IOCTL(FE_ENABLE_HIGH_LNB_VOLTAGE)
+COMPATIBLE_IOCTL(FE_READ_STATUS)
+COMPATIBLE_IOCTL(FE_READ_BER)
+COMPATIBLE_IOCTL(FE_READ_SIGNAL_STRENGTH)
+COMPATIBLE_IOCTL(FE_READ_SNR)
+COMPATIBLE_IOCTL(FE_READ_UNCORRECTED_BLOCKS)
+COMPATIBLE_IOCTL(FE_SET_FRONTEND)
+COMPATIBLE_IOCTL(FE_GET_FRONTEND)
+COMPATIBLE_IOCTL(FE_GET_EVENT)
+COMPATIBLE_IOCTL(FE_DISHNETWORK_SEND_LEGACY_CMD)
+COMPATIBLE_IOCTL(VIDEO_STOP)
+COMPATIBLE_IOCTL(VIDEO_PLAY)
+COMPATIBLE_IOCTL(VIDEO_FREEZE)
+COMPATIBLE_IOCTL(VIDEO_CONTINUE)
+COMPATIBLE_IOCTL(VIDEO_SELECT_SOURCE)
+COMPATIBLE_IOCTL(VIDEO_SET_BLANK)
+COMPATIBLE_IOCTL(VIDEO_GET_STATUS)
+COMPATIBLE_IOCTL(VIDEO_SET_DISPLAY_FORMAT)
+COMPATIBLE_IOCTL(VIDEO_FAST_FORWARD)
+COMPATIBLE_IOCTL(VIDEO_SLOWMOTION)
+COMPATIBLE_IOCTL(VIDEO_GET_CAPABILITIES)
+COMPATIBLE_IOCTL(VIDEO_CLEAR_BUFFER)
+COMPATIBLE_IOCTL(VIDEO_SET_ID)
+COMPATIBLE_IOCTL(VIDEO_SET_STREAMTYPE)
+COMPATIBLE_IOCTL(VIDEO_SET_FORMAT)
+COMPATIBLE_IOCTL(VIDEO_SET_SYSTEM)
+COMPATIBLE_IOCTL(VIDEO_SET_HIGHLIGHT)
+COMPATIBLE_IOCTL(VIDEO_SET_SPU)
+COMPATIBLE_IOCTL(VIDEO_GET_NAVI)
+COMPATIBLE_IOCTL(VIDEO_SET_ATTRIBUTES)
+COMPATIBLE_IOCTL(VIDEO_GET_SIZE)
+COMPATIBLE_IOCTL(VIDEO_GET_FRAME_RATE)
 
-#undef CODE
-#endif
+/* joystick */
+COMPATIBLE_IOCTL(JSIOCGVERSION)
+COMPATIBLE_IOCTL(JSIOCGAXES)
+COMPATIBLE_IOCTL(JSIOCGBUTTONS)
+COMPATIBLE_IOCTL(JSIOCGNAME(0))
 
-#ifdef DECLARES
+/* now things that need handlers */
 HANDLE_IOCTL(MEMREADOOB32, mtd_rw_oob)
 HANDLE_IOCTL(MEMWRITEOOB32, mtd_rw_oob)
 #ifdef CONFIG_NET
@@ -3193,6 +2673,7 @@ HANDLE_IOCTL(SIOCGIFMAP, dev_ifsioc)
 HANDLE_IOCTL(SIOCSIFMAP, dev_ifsioc)
 HANDLE_IOCTL(SIOCGIFADDR, dev_ifsioc)
 HANDLE_IOCTL(SIOCSIFADDR, dev_ifsioc)
+HANDLE_IOCTL(SIOCSIFHWBROADCAST, dev_ifsioc)
 
 /* ioctls used by appletalk ddp.c */
 HANDLE_IOCTL(SIOCATALKDIFADDR, dev_ifsioc)
@@ -3225,46 +2706,20 @@ HANDLE_IOCTL(SIOCBRDELIF, dev_ifsioc)
 /* Note SIOCRTMSG is no longer, so this is safe and * the user would have seen just an -EINVAL anyways. */
 HANDLE_IOCTL(SIOCRTMSG, ret_einval)
 HANDLE_IOCTL(SIOCGSTAMP, do_siocgstamp)
+HANDLE_IOCTL(SIOCGSTAMPNS, do_siocgstampns)
 #endif
-HANDLE_IOCTL(HDIO_GETGEO, hdio_getgeo)
-HANDLE_IOCTL(BLKRAGET, w_long)
-HANDLE_IOCTL(BLKGETSIZE, w_long)
-HANDLE_IOCTL(0x1260, broken_blkgetsize)
-HANDLE_IOCTL(BLKFRAGET, w_long)
-HANDLE_IOCTL(BLKSECTGET, w_long)
-HANDLE_IOCTL(FBIOGET_FSCREENINFO, fb_ioctl_trans)
-HANDLE_IOCTL(BLKPG, blkpg_ioctl_trans)
-HANDLE_IOCTL(FBIOGETCMAP, fb_ioctl_trans)
-HANDLE_IOCTL(FBIOPUTCMAP, fb_ioctl_trans)
-HANDLE_IOCTL(HDIO_GET_KEEPSETTINGS, hdio_ioctl_trans)
-HANDLE_IOCTL(HDIO_GET_UNMASKINTR, hdio_ioctl_trans)
-HANDLE_IOCTL(HDIO_GET_DMA, hdio_ioctl_trans)
-HANDLE_IOCTL(HDIO_GET_32BIT, hdio_ioctl_trans)
-HANDLE_IOCTL(HDIO_GET_MULTCOUNT, hdio_ioctl_trans)
-HANDLE_IOCTL(HDIO_GET_NOWERR, hdio_ioctl_trans)
-HANDLE_IOCTL(HDIO_GET_NICE, hdio_ioctl_trans)
-HANDLE_IOCTL(FDSETPRM32, fd_ioctl_trans)
-HANDLE_IOCTL(FDDEFPRM32, fd_ioctl_trans)
-HANDLE_IOCTL(FDGETPRM32, fd_ioctl_trans)
-HANDLE_IOCTL(FDSETDRVPRM32, fd_ioctl_trans)
-HANDLE_IOCTL(FDGETDRVPRM32, fd_ioctl_trans)
-HANDLE_IOCTL(FDGETDRVSTAT32, fd_ioctl_trans)
-HANDLE_IOCTL(FDPOLLDRVSTAT32, fd_ioctl_trans)
-HANDLE_IOCTL(FDGETFDCSTAT32, fd_ioctl_trans)
-HANDLE_IOCTL(FDWERRORGET32, fd_ioctl_trans)
+#ifdef CONFIG_BLOCK
 HANDLE_IOCTL(SG_IO,sg_ioctl_trans)
+HANDLE_IOCTL(SG_GET_REQUEST_TABLE, sg_grt_trans)
+#endif
 HANDLE_IOCTL(PPPIOCGIDLE32, ppp_ioctl_trans)
 HANDLE_IOCTL(PPPIOCSCOMPRESS32, ppp_ioctl_trans)
 HANDLE_IOCTL(PPPIOCSPASS32, ppp_sock_fprog_ioctl_trans)
 HANDLE_IOCTL(PPPIOCSACTIVE32, ppp_sock_fprog_ioctl_trans)
+#ifdef CONFIG_BLOCK
 HANDLE_IOCTL(MTIOCGET32, mt_ioctl_trans)
 HANDLE_IOCTL(MTIOCPOS32, mt_ioctl_trans)
-HANDLE_IOCTL(MTIOCGETCONFIG32, mt_ioctl_trans)
-HANDLE_IOCTL(MTIOCSETCONFIG32, mt_ioctl_trans)
-HANDLE_IOCTL(CDROMREADAUDIO, cdrom_ioctl_trans)
-HANDLE_IOCTL(CDROM_SEND_PACKET, cdrom_ioctl_trans)
-HANDLE_IOCTL(LOOP_SET_STATUS, loop_status)
-HANDLE_IOCTL(LOOP_GET_STATUS, loop_status)
+#endif
 #define AUTOFS_IOC_SETTIMEOUT32 _IOWR(0x93,0x64,unsigned int)
 HANDLE_IOCTL(AUTOFS_IOC_SETTIMEOUT32, ioc_settimeout)
 #ifdef CONFIG_VT
@@ -3274,18 +2729,6 @@ HANDLE_IOCTL(PIO_UNIMAP, do_unimap_ioctl)
 HANDLE_IOCTL(GIO_UNIMAP, do_unimap_ioctl)
 HANDLE_IOCTL(KDFONTOP, do_kdfontop_ioctl)
 #endif
-HANDLE_IOCTL(EXT2_IOC32_GETFLAGS, do_ext2_ioctl)
-HANDLE_IOCTL(EXT2_IOC32_SETFLAGS, do_ext2_ioctl)
-HANDLE_IOCTL(EXT2_IOC32_GETVERSION, do_ext2_ioctl)
-HANDLE_IOCTL(EXT2_IOC32_SETVERSION, do_ext2_ioctl)
-HANDLE_IOCTL(VIDIOCGTUNER32, do_video_ioctl)
-HANDLE_IOCTL(VIDIOCSTUNER32, do_video_ioctl)
-HANDLE_IOCTL(VIDIOCGWIN32, do_video_ioctl)
-HANDLE_IOCTL(VIDIOCSWIN32, do_set_window)
-HANDLE_IOCTL(VIDIOCGFBUF32, do_video_ioctl)
-HANDLE_IOCTL(VIDIOCSFBUF32, do_video_ioctl)
-HANDLE_IOCTL(VIDIOCGFREQ32, do_video_ioctl)
-HANDLE_IOCTL(VIDIOCSFREQ32, do_video_ioctl)
 /* One SMB ioctl needs translations. */
 #define SMB_IOC_GETMOUNTUID_32 _IOR('u', 1, compat_uid_t)
 HANDLE_IOCTL(SMB_IOC_GETMOUNTUID_32, do_smb_getmountuid)
@@ -3315,37 +2758,48 @@ HANDLE_IOCTL(SONET_SETFRAMING, do_atm_ioctl)
 HANDLE_IOCTL(SONET_GETFRAMING, do_atm_ioctl)
 HANDLE_IOCTL(SONET_GETFRSENSE, do_atm_ioctl)
 /* block stuff */
-HANDLE_IOCTL(BLKBSZGET_32, do_blkbszget)
-HANDLE_IOCTL(BLKBSZSET_32, do_blkbszset)
-HANDLE_IOCTL(BLKGETSIZE64_32, do_blkgetsize64)
-/* vfat */
-HANDLE_IOCTL(VFAT_IOCTL_READDIR_BOTH32, vfat_ioctl32)
-HANDLE_IOCTL(VFAT_IOCTL_READDIR_SHORT32, vfat_ioctl32)
-HANDLE_IOCTL(REISERFS_IOC_UNPACK32, reiserfs_ioctl32)
+#ifdef CONFIG_BLOCK
 /* Raw devices */
 HANDLE_IOCTL(RAW_SETBIND, raw_ioctl)
 HANDLE_IOCTL(RAW_GETBIND, raw_ioctl)
+#endif
 /* Serial */
 HANDLE_IOCTL(TIOCGSERIAL, serial_struct_ioctl)
 HANDLE_IOCTL(TIOCSSERIAL, serial_struct_ioctl)
+#ifdef TIOCGLTC
+COMPATIBLE_IOCTL(TIOCGLTC)
+COMPATIBLE_IOCTL(TIOCSLTC)
+#endif
+#ifdef TIOCSTART
+/*
+ * For these two we have defintions in ioctls.h and/or termios.h on
+ * some architectures but no actual implemention.  Some applications
+ * like bash call them if they are defined in the headers, so we provide
+ * entries here to avoid syslog message spew.
+ */
+COMPATIBLE_IOCTL(TIOCSTART)
+COMPATIBLE_IOCTL(TIOCSTOP)
+#endif
 /* Usbdevfs */
 HANDLE_IOCTL(USBDEVFS_CONTROL32, do_usbdevfs_control)
 HANDLE_IOCTL(USBDEVFS_BULK32, do_usbdevfs_bulk)
-/*HANDLE_IOCTL(USBDEVFS_SUBMITURB32, do_usbdevfs_urb)*/
-HANDLE_IOCTL(USBDEVFS_REAPURB32, do_usbdevfs_reapurb)
-HANDLE_IOCTL(USBDEVFS_REAPURBNDELAY32, do_usbdevfs_reapurb)
 HANDLE_IOCTL(USBDEVFS_DISCSIGNAL32, do_usbdevfs_discsignal)
+COMPATIBLE_IOCTL(USBDEVFS_IOCTL32)
 /* i2c */
 HANDLE_IOCTL(I2C_FUNCS, w_long)
 HANDLE_IOCTL(I2C_RDWR, do_i2c_rdwr_ioctl)
 HANDLE_IOCTL(I2C_SMBUS, do_i2c_smbus_ioctl)
 /* wireless */
 HANDLE_IOCTL(SIOCGIWRANGE, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCGIWPRIV, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCGIWSTATS, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCSIWSPY, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCGIWSPY, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCSIWTHRSPY, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCGIWTHRSPY, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCSIWMLME, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCGIWAPLIST, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCSIWSCAN, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCGIWSCAN, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCSIWESSID, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCGIWESSID, do_wireless_ioctl)
@@ -3353,18 +2807,221 @@ HANDLE_IOCTL(SIOCSIWNICKN, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCGIWNICKN, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCSIWENCODE, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCGIWENCODE, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCSIWGENIE, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCGIWGENIE, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCSIWENCODEEXT, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCGIWENCODEEXT, do_wireless_ioctl)
+HANDLE_IOCTL(SIOCSIWPMKSA, do_wireless_ioctl)
 HANDLE_IOCTL(SIOCSIFBR, old_bridge_ioctl)
 HANDLE_IOCTL(SIOCGIFBR, old_bridge_ioctl)
+/* Not implemented in the native kernel */
+IGNORE_IOCTL(SIOCGIFCOUNT)
+HANDLE_IOCTL(RTC_IRQP_READ32, rtc_ioctl)
+HANDLE_IOCTL(RTC_IRQP_SET32, rtc_ioctl)
+HANDLE_IOCTL(RTC_EPOCH_READ32, rtc_ioctl)
+HANDLE_IOCTL(RTC_EPOCH_SET32, rtc_ioctl)
 
-#if defined(CONFIG_NCP_FS) || defined(CONFIG_NCP_FS_MODULE)
-HANDLE_IOCTL(NCP_IOC_NCPREQUEST_32, do_ncp_ncprequest)
-HANDLE_IOCTL(NCP_IOC_GETMOUNTUID2_32, do_ncp_getmountuid2)
-HANDLE_IOCTL(NCP_IOC_GET_FS_INFO_V2_32, do_ncp_getfsinfo2)
-HANDLE_IOCTL(NCP_IOC_GETOBJECTNAME_32, do_ncp_getobjectname)
-HANDLE_IOCTL(NCP_IOC_SETOBJECTNAME_32, do_ncp_setobjectname)
-HANDLE_IOCTL(NCP_IOC_GETPRIVATEDATA_32, do_ncp_getprivatedata)
-HANDLE_IOCTL(NCP_IOC_SETPRIVATEDATA_32, do_ncp_setprivatedata)
-#endif
+/* dvb */
+HANDLE_IOCTL(VIDEO_GET_EVENT, do_video_get_event)
+HANDLE_IOCTL(VIDEO_STILLPICTURE, do_video_stillpicture)
+HANDLE_IOCTL(VIDEO_SET_SPU_PALETTE, do_video_set_spu_palette)
 
-#undef DECLARES
+/* parport */
+COMPATIBLE_IOCTL(LPTIME)
+COMPATIBLE_IOCTL(LPCHAR)
+COMPATIBLE_IOCTL(LPABORTOPEN)
+COMPATIBLE_IOCTL(LPCAREFUL)
+COMPATIBLE_IOCTL(LPWAIT)
+COMPATIBLE_IOCTL(LPSETIRQ)
+COMPATIBLE_IOCTL(LPGETSTATUS)
+COMPATIBLE_IOCTL(LPGETSTATUS)
+COMPATIBLE_IOCTL(LPRESET)
+/*LPGETSTATS not implemented, but no kernels seem to compile it in anyways*/
+COMPATIBLE_IOCTL(LPGETFLAGS)
+HANDLE_IOCTL(LPSETTIMEOUT, lp_timeout_trans)
+
+/* fat 'r' ioctls. These are handled by fat with ->compat_ioctl,
+   but we don't want warnings on other file systems. So declare
+   them as compatible here. */
+#define VFAT_IOCTL_READDIR_BOTH32       _IOR('r', 1, struct compat_dirent[2])
+#define VFAT_IOCTL_READDIR_SHORT32      _IOR('r', 2, struct compat_dirent[2])
+
+IGNORE_IOCTL(VFAT_IOCTL_READDIR_BOTH32)
+IGNORE_IOCTL(VFAT_IOCTL_READDIR_SHORT32)
+
+/* loop */
+IGNORE_IOCTL(LOOP_CLR_FD)
+
+#ifdef CONFIG_SPARC
+/* Sparc framebuffers, handled in sbusfb_compat_ioctl() */
+IGNORE_IOCTL(FBIOGTYPE)
+IGNORE_IOCTL(FBIOSATTR)
+IGNORE_IOCTL(FBIOGATTR)
+IGNORE_IOCTL(FBIOSVIDEO)
+IGNORE_IOCTL(FBIOGVIDEO)
+IGNORE_IOCTL(FBIOSCURPOS)
+IGNORE_IOCTL(FBIOGCURPOS)
+IGNORE_IOCTL(FBIOGCURMAX)
+IGNORE_IOCTL(FBIOPUTCMAP32)
+IGNORE_IOCTL(FBIOGETCMAP32)
+IGNORE_IOCTL(FBIOSCURSOR32)
+IGNORE_IOCTL(FBIOGCURSOR32)
 #endif
+};
+
+#define IOCTL_HASHSIZE 256
+static struct ioctl_trans *ioctl32_hash_table[IOCTL_HASHSIZE];
+
+static inline unsigned long ioctl32_hash(unsigned long cmd)
+{
+	return (((cmd >> 6) ^ (cmd >> 4) ^ cmd)) % IOCTL_HASHSIZE;
+}
+
+static void compat_ioctl_error(struct file *filp, unsigned int fd,
+		unsigned int cmd, unsigned long arg)
+{
+	char buf[10];
+	char *fn = "?";
+	char *path;
+
+	/* find the name of the device. */
+	path = (char *)__get_free_page(GFP_KERNEL);
+	if (path) {
+		fn = d_path(filp->f_path.dentry, filp->f_path.mnt, path, PAGE_SIZE);
+		if (IS_ERR(fn))
+			fn = "?";
+	}
+
+	 sprintf(buf,"'%c'", (cmd>>_IOC_TYPESHIFT) & _IOC_TYPEMASK);
+	if (!isprint(buf[1]))
+		sprintf(buf, "%02x", buf[1]);
+	compat_printk("ioctl32(%s:%d): Unknown cmd fd(%d) "
+			"cmd(%08x){t:%s;sz:%u} arg(%08x) on %s\n",
+			current->comm, current->pid,
+			(int)fd, (unsigned int)cmd, buf,
+			(cmd >> _IOC_SIZESHIFT) & _IOC_SIZEMASK,
+			(unsigned int)arg, fn);
+
+	if (path)
+		free_page((unsigned long)path);
+}
+
+asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
+				unsigned long arg)
+{
+	struct file *filp;
+	int error = -EBADF;
+	struct ioctl_trans *t;
+	int fput_needed;
+
+	filp = fget_light(fd, &fput_needed);
+	if (!filp)
+		goto out;
+
+	/* RED-PEN how should LSM module know it's handling 32bit? */
+	error = security_file_ioctl(filp, cmd, arg);
+	if (error)
+		goto out_fput;
+
+	/*
+	 * To allow the compat_ioctl handlers to be self contained
+	 * we need to check the common ioctls here first.
+	 * Just handle them with the standard handlers below.
+	 */
+	switch (cmd) {
+	case FIOCLEX:
+	case FIONCLEX:
+	case FIONBIO:
+	case FIOASYNC:
+	case FIOQSIZE:
+		break;
+
+	case FIBMAP:
+	case FIGETBSZ:
+	case FIONREAD:
+		if (S_ISREG(filp->f_path.dentry->d_inode->i_mode))
+			break;
+		/*FALL THROUGH*/
+
+	default:
+		if (filp->f_op && filp->f_op->compat_ioctl) {
+			error = filp->f_op->compat_ioctl(filp, cmd, arg);
+			if (error != -ENOIOCTLCMD)
+				goto out_fput;
+		}
+
+		if (!filp->f_op ||
+		    (!filp->f_op->ioctl && !filp->f_op->unlocked_ioctl))
+			goto do_ioctl;
+		break;
+	}
+
+	for (t = ioctl32_hash_table[ioctl32_hash(cmd)]; t; t = t->next) {
+		if (t->cmd == cmd)
+			goto found_handler;
+	}
+
+#ifdef CONFIG_NET
+	if (S_ISSOCK(filp->f_path.dentry->d_inode->i_mode) &&
+	    cmd >= SIOCDEVPRIVATE && cmd <= (SIOCDEVPRIVATE + 15)) {
+		error = siocdevprivate_ioctl(fd, cmd, arg);
+	} else
+#endif
+	{
+		static int count;
+
+		if (++count <= 50)
+			compat_ioctl_error(filp, fd, cmd, arg);
+		error = -EINVAL;
+	}
+
+	goto out_fput;
+
+ found_handler:
+	if (t->handler) {
+		lock_kernel();
+		error = t->handler(fd, cmd, arg, filp);
+		unlock_kernel();
+		goto out_fput;
+	}
+
+ do_ioctl:
+	error = vfs_ioctl(filp, fd, cmd, arg);
+ out_fput:
+	fput_light(filp, fput_needed);
+ out:
+	return error;
+}
+
+static void ioctl32_insert_translation(struct ioctl_trans *trans)
+{
+	unsigned long hash;
+	struct ioctl_trans *t;
+
+	hash = ioctl32_hash (trans->cmd);
+	if (!ioctl32_hash_table[hash])
+		ioctl32_hash_table[hash] = trans;
+	else {
+		t = ioctl32_hash_table[hash];
+		while (t->next)
+			t = t->next;
+		trans->next = NULL;
+		t->next = trans;
+	}
+}
+
+static int __init init_sys32_ioctl(void)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ioctl_start); i++) {
+		if (ioctl_start[i].next) {
+			printk("ioctl translation %d bad\n",i);
+			return -1;
+		}
+
+		ioctl32_insert_translation(&ioctl_start[i]);
+	}
+	return 0;
+}
+__initcall(init_sys32_ioctl);

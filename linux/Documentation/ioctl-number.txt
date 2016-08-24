@@ -67,7 +67,7 @@ Code	Seq#	Include File		Comments
 0x00	00-1F	linux/wavefront.h	conflict!
 0x02	all	linux/fd.h
 0x03	all	linux/hdreg.h
-0x04	all	linux/umsdos_fs.h
+0x04	D2-DC	linux/umsdos_fs.h	Dead since 2.6.11, but don't reuse these.
 0x06	all	linux/lp.h
 0x09	all	linux/md.h
 0x12	all	linux/fs.h
@@ -78,8 +78,6 @@ Code	Seq#	Include File		Comments
 '#'	00-3F	IEEE 1394 Subsystem	Block for the entire subsystem
 '1'	00-1F	<linux/timepps.h>	PPS kit from Ulrich Windl
 					<ftp://ftp.de.kernel.org/pub/linux/daemons/ntp/PPS/>
-'6'	00-10	<asm-i386/processor.h>	Intel IA32 microcode update driver
-					<mailto:tigran@veritas.com>
 '8'	all				SNP8023 advanced NIC card
 					<mailto:mcr@solidum.com>
 'A'	00-1F	linux/apm_bios.h
@@ -87,15 +85,16 @@ Code	Seq#	Include File		Comments
 					<mailto:maassen@uni-freiburg.de>
 'C'	all	linux/soundcard.h
 'D'	all	asm-s390/dasd.h
+'E'	all	linux/input.h
 'F'	all	linux/fb.h
+'H'	all	linux/hiddev.h
 'I'	all	linux/isdn.h
 'J'	00-1F	drivers/scsi/gdth_ioctl.h
 'K'	all	linux/kd.h
 'L'	00-1F	linux/loop.h
 'L'	E0-FF	linux/ppdd.h		encrypted disk device driver
 					<http://linux01.gwdg.de/~alatham/ppdd.html>
-'M'	all	linux/soundcard.h	conflict!
-'M'	00-1F	linux/isicom.h		conflict!
+'M'	all	linux/soundcard.h
 'N'	00-1F	drivers/usb/scanner.h
 'P'	all	linux/soundcard.h
 'Q'	all	linux/soundcard.h
@@ -119,7 +118,6 @@ Code	Seq#	Include File		Comments
 'c'	00-7F	linux/comstats.h	conflict!
 'c'	00-7F	linux/coda.h		conflict!
 'd'	00-FF	linux/char/drm/drm/h	conflict!
-'d'	00-1F	linux/devfs_fs.h	conflict!
 'd'	00-DF	linux/video_decoder.h	conflict!
 'd'	F0-FF	linux/digi1.h
 'e'	all	linux/digi1.h		conflict!
@@ -130,19 +128,18 @@ Code	Seq#	Include File		Comments
 					<mailto:zapman@interlan.net>
 'i'	00-3F	linux/i2o.h
 'j'	00-3F	linux/joystick.h
-'k'	all	asm-sparc/kbio.h
-		asm-sparc64/kbio.h
 'l'	00-3F	linux/tcfs_fs.h		transparent cryptographic file system
 					<http://mikonos.dia.unisa.it/tcfs>
 'l'	40-7F	linux/udf_fs_i.h	in development:
-					<http://www.trylinux.com/projects/udf/>
+					<http://sourceforge.net/projects/linux-udf/>
 'm'	all	linux/mtio.h		conflict!
 'm'	all	linux/soundcard.h	conflict!
 'm'	all	linux/synclink.h	conflict!
 'm'	00-1F	net/irda/irmod.h	conflict!
 'n'	00-7F	linux/ncp_fs.h
 'n'	E0-FF	video/matrox.h          matroxfb
-'p'	00-3F	linux/mc146818rtc.h
+'p'	00-0F	linux/phantom.h		conflict! (OpenHaptics needs this)
+'p'	00-3F	linux/mc146818rtc.h	conflict!
 'p'	40-7F	linux/nvram.h
 'p'	80-9F				user-space parport
 					<mailto:tim@cyberelk.net>
@@ -194,3 +191,5 @@ Code	Seq#	Include File		Comments
 					<mailto:aherrman@de.ibm.com>
 0xF3	00-3F	video/sisfb.h		sisfb (in development)
 					<mailto:thomas@winischhofer.net>
+0xF4	00-1F	video/mbxfb.h		mbxfb
+					<mailto:raph@8d.com>

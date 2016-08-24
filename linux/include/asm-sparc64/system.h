@@ -1,13 +1,14 @@
-/* $Id: system.h,v 1.69 2002/02/09 19:49:31 davem Exp $ */
 #ifndef __SPARC64_SYSTEM_H
 #define __SPARC64_SYSTEM_H
 
-#include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/visasm.h>
 
 #ifndef __ASSEMBLY__
+
+#include <linux/irqflags.h>
+
 /*
  * Sparc (general) CPU types
  */
@@ -28,66 +29,56 @@ enum sparc_cpu {
 #define ARCH_SUN4C_SUN4 0
 #define ARCH_SUN4 0
 
-#endif
-
-#define setipl(__new_ipl) \
-	__asm__ __volatile__("wrpr	%0, %%pil"  : : "r" (__new_ipl) : "memory")
-
-#define local_irq_disable() \
-	__asm__ __volatile__("wrpr	15, %%pil" : : : "memory")
-
-#define local_irq_enable() \
-	__asm__ __volatile__("wrpr	0, %%pil" : : : "memory")
-
-#define getipl() \
-({ unsigned long retval; __asm__ __volatile__("rdpr	%%pil, %0" : "=r" (retval)); retval; })
-
-#define swap_pil(__new_pil) \
-({	unsigned long retval; \
-	__asm__ __volatile__("rdpr	%%pil, %0\n\t" \
-			     "wrpr	%1, %%pil" \
-			     : "=&r" (retval) \
-			     : "r" (__new_pil) \
-			     : "memory"); \
-	retval; \
-})
-
-#define read_pil_and_cli() \
-({	unsigned long retval; \
-	__asm__ __volatile__("rdpr	%%pil, %0\n\t" \
-			     "wrpr	15, %%pil" \
-			     : "=r" (retval) \
-			     : : "memory"); \
-	retval; \
-})
-
-#define local_save_flags(flags)		((flags) = getipl())
-#define local_irq_save(flags)		((flags) = read_pil_and_cli())
-#define local_irq_restore(flags)		setipl((flags))
-
-/* On sparc64 IRQ flags are the PIL register.  A value of zero
- * means all interrupt levels are enabled, any other value means
- * only IRQ levels greater than that value will be received.
- * Consequently this means that the lowest IRQ level is one.
+/* These are here in an effort to more fully work around Spitfire Errata
+ * #51.  Essentially, if a memory barrier occurs soon after a mispredicted
+ * branch, the chip can stop executing instructions until a trap occurs.
+ * Therefore, if interrupts are disabled, the chip can hang forever.
+ *
+ * It used to be believed that the memory barrier had to be right in the
+ * delay slot, but a case has been traced recently wherein the memory barrier
+ * was one instruction after the branch delay slot and the chip still hung.
+ * The offending sequence was the following in sym_wakeup_done() of the
+ * sym53c8xx_2 driver:
+ *
+ *	call	sym_ccb_from_dsa, 0
+ *	 movge	%icc, 0, %l0
+ *	brz,pn	%o0, .LL1303
+ *	 mov	%o0, %l2
+ *	membar	#LoadLoad
+ *
+ * The branch has to be mispredicted for the bug to occur.  Therefore, we put
+ * the memory barrier explicitly into a "branch always, predicted taken"
+ * delay slot to avoid the problem case.
  */
-#define irqs_disabled()		\
-({	unsigned long flags;	\
-	local_save_flags(flags);\
-	(flags > 0);		\
-})
+#define membar_safe(type) \
+do {	__asm__ __volatile__("ba,pt	%%xcc, 1f\n\t" \
+			     " membar	" type "\n" \
+			     "1:\n" \
+			     : : : "memory"); \
+} while (0)
+
+#define mb()	\
+	membar_safe("#LoadLoad | #LoadStore | #StoreStore | #StoreLoad")
+#define rmb()	\
+	membar_safe("#LoadLoad")
+#define wmb()	\
+	membar_safe("#StoreStore")
+#define membar_storeload() \
+	membar_safe("#StoreLoad")
+#define membar_storeload_storestore() \
+	membar_safe("#StoreLoad | #StoreStore")
+#define membar_storeload_loadload() \
+	membar_safe("#StoreLoad | #LoadLoad")
+#define membar_storestore_loadstore() \
+	membar_safe("#StoreStore | #LoadStore")
+
+#endif
 
 #define nop() 		__asm__ __volatile__ ("nop")
 
-#define membar(type)	__asm__ __volatile__ ("membar " type : : : "memory")
-#define mb()		\
-	membar("#LoadLoad | #LoadStore | #StoreStore | #StoreLoad")
-#define rmb()		membar("#LoadLoad")
-#define wmb()		membar("#StoreStore")
 #define read_barrier_depends()		do { } while(0)
 #define set_mb(__var, __value) \
-	do { __var = __value; membar("#StoreLoad | #StoreStore"); } while(0)
-#define set_wmb(__var, __value) \
-	do { __var = __value; membar("#StoreStore"); } while(0)
+	do { __var = __value; membar_storeload_storestore(); } while(0)
 
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
@@ -123,13 +114,7 @@ enum sparc_cpu {
 #ifndef __ASSEMBLY__
 
 extern void sun_do_break(void);
-extern int serial_console;
 extern int stop_a_enabled;
-
-static __inline__ int con_is_present(void)
-{
-	return serial_console ? 0 : 1;
-}
 
 extern void synchronize_user_stack(void);
 
@@ -139,18 +124,12 @@ extern void __flushw_user(void);
 #define flush_user_windows flushw_user
 #define flush_register_windows flushw_all
 
-#define prepare_arch_switch(rq, next)		\
-do {	spin_lock(&(next)->switch_lock);	\
-	spin_unlock(&(rq)->lock);		\
+/* Don't hold the runqueue lock over context switch */
+#define __ARCH_WANT_UNLOCKED_CTXSW
+#define prepare_arch_switch(next)		\
+do {						\
 	flushw_all();				\
 } while (0)
-
-#define finish_arch_switch(rq, prev)		\
-do {	spin_unlock_irq(&(prev)->switch_lock);	\
-} while (0)
-
-#define task_running(rq, p) \
-	((rq)->curr == (p) || spin_is_locked(&(p)->switch_lock))
 
 	/* See what happens when you design the chip correctly?
 	 *
@@ -161,11 +140,6 @@ do {	spin_unlock_irq(&(prev)->switch_lock);	\
 	 * not preserve it's value.  Hairy, but it lets us remove 2 loads
 	 * and 2 stores in this critical code path.  -DaveM
 	 */
-#if __GNUC__ >= 3
-#define EXTRA_CLOBBER ,"%l1"
-#else
-#define EXTRA_CLOBBER
-#endif
 #define switch_to(prev, next, last)					\
 do {	if (test_thread_flag(TIF_PERFCTR)) {				\
 		unsigned long __tmp;					\
@@ -180,45 +154,44 @@ do {	if (test_thread_flag(TIF_PERFCTR)) {				\
 	/* If you are tempted to conditionalize the following */	\
 	/* so that ASI is only written if it changes, think again. */	\
 	__asm__ __volatile__("wr %%g0, %0, %%asi"			\
-	: : "r" (__thread_flag_byte_ptr(next->thread_info)[TI_FLAG_BYTE_CURRENT_DS]));\
+	: : "r" (__thread_flag_byte_ptr(task_thread_info(next))[TI_FLAG_BYTE_CURRENT_DS]));\
+	trap_block[current_thread_info()->cpu].thread =			\
+		task_thread_info(next);					\
 	__asm__ __volatile__(						\
-	"mov	%%g4, %%g5\n\t"						\
-	"wrpr	%%g0, 0x95, %%pstate\n\t"				\
+	"mov	%%g4, %%g7\n\t"						\
 	"stx	%%i6, [%%sp + 2047 + 0x70]\n\t"				\
 	"stx	%%i7, [%%sp + 2047 + 0x78]\n\t"				\
 	"rdpr	%%wstate, %%o5\n\t"					\
-	"stx	%%o6, [%%g6 + %3]\n\t"					\
-	"stb	%%o5, [%%g6 + %2]\n\t"					\
-	"rdpr	%%cwp, %%o5\n\t"					\
+	"stx	%%o6, [%%g6 + %6]\n\t"					\
 	"stb	%%o5, [%%g6 + %5]\n\t"					\
-	"mov	%1, %%g6\n\t"						\
-	"ldub	[%1 + %5], %%g1\n\t"					\
+	"rdpr	%%cwp, %%o5\n\t"					\
+	"stb	%%o5, [%%g6 + %8]\n\t"					\
+	"mov	%4, %%g6\n\t"						\
+	"ldub	[%4 + %8], %%g1\n\t"					\
 	"wrpr	%%g1, %%cwp\n\t"					\
-	"ldx	[%%g6 + %3], %%o6\n\t"					\
-	"ldub	[%%g6 + %2], %%o5\n\t"					\
-	"ldx	[%%g6 + %4], %%o7\n\t"					\
-	"mov	%%g6, %%l2\n\t"						\
+	"ldx	[%%g6 + %6], %%o6\n\t"					\
+	"ldub	[%%g6 + %5], %%o5\n\t"					\
+	"ldub	[%%g6 + %7], %%o7\n\t"					\
 	"wrpr	%%o5, 0x0, %%wstate\n\t"				\
 	"ldx	[%%sp + 2047 + 0x70], %%i6\n\t"				\
 	"ldx	[%%sp + 2047 + 0x78], %%i7\n\t"				\
-	"wrpr	%%g0, 0x94, %%pstate\n\t"				\
-	"mov	%%l2, %%g6\n\t"						\
-	"ldx	[%%g6 + %7], %%g4\n\t"					\
-	"wrpr	%%g0, 0x96, %%pstate\n\t"				\
-	"andcc	%%o7, %6, %%g0\n\t"					\
-	"beq,pt %%icc, 1f\n\t"						\
-	" mov	%%g5, %0\n\t"						\
-	"b,a ret_from_syscall\n\t"					\
+	"ldx	[%%g6 + %9], %%g4\n\t"					\
+	"brz,pt %%o7, 1f\n\t"						\
+	" mov	%%g7, %0\n\t"						\
+	"sethi	%%hi(ret_from_syscall), %%g1\n\t"			\
+	"jmpl	%%g1 + %%lo(ret_from_syscall), %%g0\n\t"		\
+	" nop\n\t"							\
 	"1:\n\t"							\
-	: "=&r" (last)							\
-	: "0" (next->thread_info),					\
-	  "i" (TI_WSTATE), "i" (TI_KSP), "i" (TI_FLAGS), "i" (TI_CWP),	\
-	  "i" (_TIF_NEWCHILD), "i" (TI_TASK)				\
+	: "=&r" (last), "=r" (current), "=r" (current_thread_info_reg),	\
+	  "=r" (__local_per_cpu_offset)					\
+	: "0" (task_thread_info(next)),					\
+	  "i" (TI_WSTATE), "i" (TI_KSP), "i" (TI_NEW_CHILD),            \
+	  "i" (TI_CWP), "i" (TI_TASK)					\
 	: "cc",								\
-	        "g1", "g2", "g3",       "g5",       "g7",		\
-	              "l2", "l3", "l4", "l5", "l6", "l7",		\
+	        "g1", "g2", "g3",                   "g7",		\
+	        "l1", "l2", "l3", "l4", "l5", "l6", "l7",		\
 	  "i0", "i1", "i2", "i3", "i4", "i5",				\
-	  "o0", "o1", "o2", "o3", "o4", "o5",       "o7" EXTRA_CLOBBER);\
+	  "o0", "o1", "o2", "o3", "o4", "o5",       "o7");		\
 	/* If you fuck with this, update ret_from_syscall code too. */	\
 	if (test_thread_flag(TIF_PERFCTR)) {				\
 		write_pcr(current_thread_info()->pcr_reg);		\
@@ -226,46 +199,49 @@ do {	if (test_thread_flag(TIF_PERFCTR)) {				\
 	}								\
 } while(0)
 
-static __inline__ unsigned long xchg32(__volatile__ unsigned int *m, unsigned int val)
+static inline unsigned long xchg32(__volatile__ unsigned int *m, unsigned int val)
 {
+	unsigned long tmp1, tmp2;
+
 	__asm__ __volatile__(
 "	membar		#StoreLoad | #LoadLoad\n"
-"	mov		%0, %%g5\n"
-"1:	lduw		[%2], %%g7\n"
-"	cas		[%2], %%g7, %0\n"
-"	cmp		%%g7, %0\n"
+"	mov		%0, %1\n"
+"1:	lduw		[%4], %2\n"
+"	cas		[%4], %2, %0\n"
+"	cmp		%2, %0\n"
 "	bne,a,pn	%%icc, 1b\n"
-"	 mov		%%g5, %0\n"
+"	 mov		%1, %0\n"
 "	membar		#StoreLoad | #StoreStore\n"
-	: "=&r" (val)
+	: "=&r" (val), "=&r" (tmp1), "=&r" (tmp2)
 	: "0" (val), "r" (m)
-	: "g5", "g7", "cc", "memory");
+	: "cc", "memory");
 	return val;
 }
 
-static __inline__ unsigned long xchg64(__volatile__ unsigned long *m, unsigned long val)
+static inline unsigned long xchg64(__volatile__ unsigned long *m, unsigned long val)
 {
+	unsigned long tmp1, tmp2;
+
 	__asm__ __volatile__(
 "	membar		#StoreLoad | #LoadLoad\n"
-"	mov		%0, %%g5\n"
-"1:	ldx		[%2], %%g7\n"
-"	casx		[%2], %%g7, %0\n"
-"	cmp		%%g7, %0\n"
+"	mov		%0, %1\n"
+"1:	ldx		[%4], %2\n"
+"	casx		[%4], %2, %0\n"
+"	cmp		%2, %0\n"
 "	bne,a,pn	%%xcc, 1b\n"
-"	 mov		%%g5, %0\n"
+"	 mov		%1, %0\n"
 "	membar		#StoreLoad | #StoreStore\n"
-	: "=&r" (val)
+	: "=&r" (val), "=&r" (tmp1), "=&r" (tmp2)
 	: "0" (val), "r" (m)
-	: "g5", "g7", "cc", "memory");
+	: "cc", "memory");
 	return val;
 }
 
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
-#define tas(ptr) (xchg((ptr),1))
 
 extern void __xchg_called_with_bad_pointer(void);
 
-static __inline__ unsigned long __xchg(unsigned long x, __volatile__ void * ptr,
+static inline unsigned long __xchg(unsigned long x, __volatile__ void * ptr,
 				       int size)
 {
 	switch (size) {
@@ -288,7 +264,7 @@ extern void die_if_kernel(char *str, struct pt_regs *regs) __attribute__ ((noret
 
 #define __HAVE_ARCH_CMPXCHG 1
 
-static __inline__ unsigned long
+static inline unsigned long
 __cmpxchg_u32(volatile int *m, int old, int new)
 {
 	__asm__ __volatile__("membar #StoreLoad | #LoadLoad\n"
@@ -301,7 +277,7 @@ __cmpxchg_u32(volatile int *m, int old, int new)
 	return new;
 }
 
-static __inline__ unsigned long
+static inline unsigned long
 __cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
 {
 	__asm__ __volatile__("membar #StoreLoad | #LoadLoad\n"
@@ -318,7 +294,7 @@ __cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
    if something tries to do an invalid cmpxchg().  */
 extern void __cmpxchg_called_with_bad_pointer(void);
 
-static __inline__ unsigned long
+static inline unsigned long
 __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
 {
 	switch (size) {
@@ -340,5 +316,7 @@ __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
   })
 
 #endif /* !(__ASSEMBLY__) */
+
+#define arch_align_stack(x) (x)
 
 #endif /* !(__SPARC64_SYSTEM_H) */

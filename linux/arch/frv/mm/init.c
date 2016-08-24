@@ -16,7 +16,6 @@
  *    - Copyright (C) 1995  Hamish Macdonald
  */
 
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/pagemap.h>
@@ -99,7 +98,7 @@ void show_mem(void)
  */
 void __init paging_init(void)
 {
-	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+	unsigned long zones_size[MAX_NR_ZONES] = {0, };
 
 	/* allocate some pages for kernel housekeeping tasks */
 	empty_bad_page_table	= (unsigned long) alloc_bootmem_pages(PAGE_SIZE);
@@ -108,7 +107,7 @@ void __init paging_init(void)
 
 	memset((void *) empty_zero_page, 0, PAGE_SIZE);
 
-#if CONFIG_HIGHMEM
+#ifdef CONFIG_HIGHMEM
 	if (num_physpages - num_mappedpages) {
 		pgd_t *pge;
 		pud_t *pue;
@@ -127,8 +126,7 @@ void __init paging_init(void)
 
 	/* distribute the allocatable pages across the various zones and pass them to the allocator
 	 */
-	zones_size[ZONE_DMA]     = max_low_pfn - min_low_pfn;
-	zones_size[ZONE_NORMAL]  = 0;
+	zones_size[ZONE_NORMAL]  = max_low_pfn - min_low_pfn;
 #ifdef CONFIG_HIGHMEM
 	zones_size[ZONE_HIGHMEM] = num_physpages - num_mappedpages;
 #endif
@@ -169,8 +167,7 @@ void __init mem_init(void)
 		struct page *page = &mem_map[pfn];
 
 		ClearPageReserved(page);
-		set_bit(PG_highmem, &page->flags);
-		set_page_count(page, 1);
+		init_page_count(page);
 		__free_page(page);
 		totalram_pages++;
 	}
@@ -200,7 +197,7 @@ void __init mem_init(void)
 /*
  * free the memory that was only required for initialisation
  */
-void __init free_initmem(void)
+void free_initmem(void)
 {
 #if defined(CONFIG_RAMKERNEL) && !defined(CONFIG_PROTECT_KERNEL)
 	unsigned long start, end, addr;
@@ -211,7 +208,7 @@ void __init free_initmem(void)
 	/* next to check that the page we free is not a partial page */
 	for (addr = start; addr < end; addr += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(addr));
-		set_page_count(virt_to_page(addr), 1);
+		init_page_count(virt_to_page(addr));
 		free_page(addr);
 		totalram_pages++;
 	}
@@ -231,7 +228,7 @@ void __init free_initrd_mem(unsigned long start, unsigned long end)
 	int pages = 0;
 	for (; start < end; start += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(start));
-		set_page_count(virt_to_page(start), 1);
+		init_page_count(virt_to_page(start));
 		free_page(start);
 		totalram_pages++;
 		pages++;

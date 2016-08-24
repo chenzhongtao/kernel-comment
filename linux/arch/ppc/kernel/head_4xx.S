@@ -31,7 +31,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
@@ -40,7 +39,7 @@
 #include <asm/cputable.h>
 #include <asm/thread_info.h>
 #include <asm/ppc_asm.h>
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
 
 /* As with the other PowerPC ports, it is expected that when code
  * execution begins here, the following registers contain valid, yet
@@ -77,10 +76,10 @@ _GLOBAL(_start)
 turn_on_mmu:
 	lis	r0,MSR_KERNEL@h
 	ori	r0,r0,MSR_KERNEL@l
-	mtspr	SRR1,r0
+	mtspr	SPRN_SRR1,r0
 	lis	r0,start_here@h
 	ori	r0,r0,start_here@l
-	mtspr	SRR0,r0
+	mtspr	SPRN_SRR0,r0
 	SYNC
 	rfi				/* enables MMU */
 	b	.			/* prevent prefetch past rfi */
@@ -94,24 +93,6 @@ crit_save:
 _GLOBAL(crit_r10)
 	.space	4
 _GLOBAL(crit_r11)
-	.space	4
-_GLOBAL(crit_sprg0)
-	.space	4
-_GLOBAL(crit_sprg1)
-	.space	4
-_GLOBAL(crit_sprg4)
-	.space	4
-_GLOBAL(crit_sprg5)
-	.space	4
-_GLOBAL(crit_sprg6)
-	.space	4
-_GLOBAL(crit_sprg7)
-	.space	4
-_GLOBAL(crit_pid)
-	.space	4
-_GLOBAL(crit_srr0)
-	.space	4
-_GLOBAL(crit_srr1)
 	.space	4
 
 /*
@@ -130,7 +111,7 @@ _GLOBAL(crit_srr1)
 	mfspr	r11,SPRN_SRR1;		/* check whether user or kernel    */\
 	andi.	r11,r11,MSR_PR;						     \
 	beq	1f;							     \
-	mfspr	r1,SPRG3;		/* if from user, start at top of   */\
+	mfspr	r1,SPRN_SPRG3;		/* if from user, start at top of   */\
 	lwz	r1,THREAD_INFO-THREAD(r1); /* this thread's kernel stack   */\
 	addi	r1,r1,THREAD_SIZE;					     \
 1:	subi	r1,r1,INT_FRAME_SIZE;	/* Allocate an exception frame     */\
@@ -138,16 +119,16 @@ _GLOBAL(crit_srr1)
 	stw	r10,_CCR(r11);          /* save various registers	   */\
 	stw	r12,GPR12(r11);						     \
 	stw	r9,GPR9(r11);						     \
-	mfspr	r10,SPRG0;						     \
+	mfspr	r10,SPRN_SPRG0;						     \
 	stw	r10,GPR10(r11);						     \
-	mfspr	r12,SPRG1;						     \
+	mfspr	r12,SPRN_SPRG1;						     \
 	stw	r12,GPR11(r11);						     \
 	mflr	r10;							     \
 	stw	r10,_LINK(r11);						     \
-	mfspr	r10,SPRG2;						     \
-	mfspr	r12,SRR0;						     \
+	mfspr	r10,SPRN_SPRG2;						     \
+	mfspr	r12,SPRN_SRR0;						     \
 	stw	r10,GPR1(r11);						     \
-	mfspr	r9,SRR1;						     \
+	mfspr	r9,SPRN_SRR1;						     \
 	stw	r10,0(r11);						     \
 	rlwinm	r9,r9,0,14,12;		/* clear MSR_WE (necessary?)	   */\
 	stw	r0,GPR0(r11);						     \
@@ -165,24 +146,6 @@ _GLOBAL(crit_srr1)
 #define CRITICAL_EXCEPTION_PROLOG					     \
 	stw	r10,crit_r10@l(0);	/* save two registers to work with */\
 	stw	r11,crit_r11@l(0);					     \
-	mfspr	r10,SPRG0;						     \
-	stw	r10,crit_sprg0@l(0);					     \
-	mfspr	r10,SPRG1;						     \
-	stw	r10,crit_sprg1@l(0);					     \
-	mfspr	r10,SPRG4;						     \
-	stw	r10,crit_sprg4@l(0);					     \
-	mfspr	r10,SPRG5;						     \
-	stw	r10,crit_sprg5@l(0);					     \
-	mfspr	r10,SPRG6;						     \
-	stw	r10,crit_sprg6@l(0);					     \
-	mfspr	r10,SPRG7;						     \
-	stw	r10,crit_sprg7@l(0);					     \
-	mfspr	r10,SPRN_PID;						     \
-	stw	r10,crit_pid@l(0);					     \
-	mfspr	r10,SRR0;						     \
-	stw	r10,crit_srr0@l(0);					     \
-	mfspr	r10,SRR1;						     \
-	stw	r10,crit_srr1@l(0);					     \
 	mfcr	r10;			/* save CR in r10 for now	   */\
 	mfspr	r11,SPRN_SRR3;		/* check whether user or kernel    */\
 	andi.	r11,r11,MSR_PR;						     \
@@ -190,7 +153,7 @@ _GLOBAL(crit_srr1)
 	ori	r11,r11,critical_stack_top@l;				     \
 	beq	1f;							     \
 	/* COMING FROM USER MODE */					     \
-	mfspr	r11,SPRG3;		/* if from user, start at top of   */\
+	mfspr	r11,SPRN_SPRG3;		/* if from user, start at top of   */\
 	lwz	r11,THREAD_INFO-THREAD(r11); /* this thread's kernel stack */\
 	addi	r11,r11,THREAD_SIZE;					     \
 1:	subi	r11,r11,INT_FRAME_SIZE;	/* Allocate an exception frame     */\
@@ -204,9 +167,9 @@ _GLOBAL(crit_srr1)
 	stw	r12,_DEAR(r11);		/* since they may have had stuff   */\
 	mfspr	r9,SPRN_ESR;		/* in them at the point where the  */\
 	stw	r9,_ESR(r11);		/* exception was taken		   */\
-	mfspr	r12,SRR2;						     \
+	mfspr	r12,SPRN_SRR2;						     \
 	stw	r1,GPR1(r11);						     \
-	mfspr	r9,SRR3;						     \
+	mfspr	r9,SPRN_SRR3;						     \
 	stw	r1,0(r11);						     \
 	tovirt(r1,r11);							     \
 	rlwinm	r9,r9,0,14,12;		/* clear MSR_WE (necessary?)	   */\
@@ -221,9 +184,6 @@ _GLOBAL(crit_srr1)
 	 * r11 saved in crit_r11 and in stack frame,
 	 *	now phys stack/exception frame pointer
 	 * r12 saved in stack frame, now saved SRR2
-	 * SPRG0,1,4,5,6,7 saved in crit_sprg0,1,4,5,6,7
-	 * PID saved in crit_pid
-	 * SRR0,1 saved in crit_srr0,1
 	 * CR saved in stack frame, CR0.EQ = !SRR3.PR
 	 * LR, DEAR, ESR in stack frame
 	 * r1 saved in stack frame, now virt stack/excframe pointer
@@ -284,12 +244,12 @@ label:
 /*
  * 0x0100 - Critical Interrupt Exception
  */
-	CRITICAL_EXCEPTION(0x0100, CriticalInterrupt, UnknownException)
+	CRITICAL_EXCEPTION(0x0100, CriticalInterrupt, unknown_exception)
 
 /*
  * 0x0200 - Machine Check Exception
  */
-	CRITICAL_EXCEPTION(0x0200, MachineCheck, MachineCheckException)
+	CRITICAL_EXCEPTION(0x0200, MachineCheck, machine_check_exception)
 
 /*
  * 0x0300 - Data Storage Exception
@@ -299,8 +259,8 @@ label:
  * and exit.  Otherwise, we call heavywight functions to do the work.
  */
 	START_EXCEPTION(0x0300,	DataStorage)
-	mtspr	SPRG0, r10		/* Save some working registers */
-	mtspr	SPRG1, r11
+	mtspr	SPRN_SPRG0, r10		/* Save some working registers */
+	mtspr	SPRN_SPRG1, r11
 #ifdef CONFIG_403GCX
 	stw     r12, 0(r0)
 	stw     r9, 4(r0)
@@ -309,12 +269,12 @@ label:
 	stw     r11, 8(r0)
 	stw     r12, 12(r0)
 #else
-	mtspr	SPRG4, r12
-	mtspr	SPRG5, r9
+	mtspr	SPRN_SPRG4, r12
+	mtspr	SPRN_SPRG5, r9
 	mfcr	r11
 	mfspr	r12, SPRN_PID
-	mtspr	SPRG7, r11
-	mtspr	SPRG6, r12
+	mtspr	SPRN_SPRG7, r11
+	mtspr	SPRN_SPRG6, r12
 #endif
 
 	/* First, check if it was a zone fault (which means a user
@@ -330,8 +290,9 @@ label:
 	/* If we are faulting a kernel address, we have to use the
 	 * kernel page tables.
 	 */
-	andis.	r11, r10, 0x8000
-	beq	3f
+	lis	r11, TASK_SIZE@h
+	cmplw	r10, r11
+	blt+	3f
 	lis	r11, swapper_pg_dir@h
 	ori	r11, r11, swapper_pg_dir@l
 	li	r9, 0
@@ -341,7 +302,7 @@ label:
 	/* Get the PGD for the current thread.
 	 */
 3:
-	mfspr	r11,SPRG3
+	mfspr	r11,SPRN_SPRG3
 	lwz	r11,PGDIR(r11)
 4:
 	tophys(r11, r11)
@@ -388,15 +349,15 @@ label:
 	lwz     r9, 4(r0)
 	lwz     r12, 0(r0)
 #else
-	mfspr	r12, SPRG6
-	mfspr	r11, SPRG7
+	mfspr	r12, SPRN_SPRG6
+	mfspr	r11, SPRN_SPRG7
 	mtspr	SPRN_PID, r12
 	mtcr	r11
-	mfspr	r9, SPRG5
-	mfspr	r12, SPRG4
+	mfspr	r9, SPRN_SPRG5
+	mfspr	r12, SPRN_SPRG4
 #endif
-	mfspr	r11, SPRG1
-	mfspr	r10, SPRG0
+	mfspr	r11, SPRN_SPRG1
+	mfspr	r10, SPRN_SPRG0
 	PPC405_ERR77_SYNC
 	rfi			/* Should sync shadow TLBs */
 	b	.		/* prevent prefetch past rfi */
@@ -413,15 +374,15 @@ label:
 	lwz     r9, 4(r0)
 	lwz     r12, 0(r0)
 #else
-	mfspr	r12, SPRG6
-	mfspr	r11, SPRG7
+	mfspr	r12, SPRN_SPRG6
+	mfspr	r11, SPRN_SPRG7
 	mtspr	SPRN_PID, r12
 	mtcr	r11
-	mfspr	r9, SPRG5
-	mfspr	r12, SPRG4
+	mfspr	r9, SPRN_SPRG5
+	mfspr	r12, SPRN_SPRG4
 #endif
-	mfspr	r11, SPRG1
-	mfspr	r10, SPRG0
+	mfspr	r11, SPRN_SPRG1
+	mfspr	r10, SPRN_SPRG0
 	b	DataAccess
 
 /*
@@ -443,7 +404,7 @@ label:
 	mfspr	r4,SPRN_DEAR		/* Grab the DEAR and save it */
 	stw	r4,_DEAR(r11)
 	addi	r3,r1,STACK_FRAME_OVERHEAD
-	EXC_XFER_EE(0x600, AlignmentException)
+	EXC_XFER_EE(0x600, alignment_exception)
 
 /* 0x0700 - Program Exception */
 	START_EXCEPTION(0x0700, ProgramCheck)
@@ -451,21 +412,21 @@ label:
 	mfspr	r4,SPRN_ESR		/* Grab the ESR and save it */
 	stw	r4,_ESR(r11)
 	addi	r3,r1,STACK_FRAME_OVERHEAD
-	EXC_XFER_STD(0x700, ProgramCheckException)
+	EXC_XFER_STD(0x700, program_check_exception)
 
-	EXCEPTION(0x0800, Trap_08, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x0900, Trap_09, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x0A00, Trap_0A, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x0B00, Trap_0B, UnknownException, EXC_XFER_EE)
+	EXCEPTION(0x0800, Trap_08, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x0900, Trap_09, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x0A00, Trap_0A, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x0B00, Trap_0B, unknown_exception, EXC_XFER_EE)
 
 /* 0x0C00 - System Call Exception */
 	START_EXCEPTION(0x0C00,	SystemCall)
 	NORMAL_EXCEPTION_PROLOG
 	EXC_XFER_EE_LITE(0xc00, DoSyscall)
 
-	EXCEPTION(0x0D00, Trap_0D, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x0E00, Trap_0E, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x0F00, Trap_0F, UnknownException, EXC_XFER_EE)
+	EXCEPTION(0x0D00, Trap_0D, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x0E00, Trap_0E, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x0F00, Trap_0F, unknown_exception, EXC_XFER_EE)
 
 /* 0x1000 - Programmable Interval Timer (PIT) Exception */
 	START_EXCEPTION(0x1000, Decrementer)
@@ -482,12 +443,15 @@ label:
 
 /* 0x1010 - Fixed Interval Timer (FIT) Exception
 */
-	STND_EXCEPTION(0x1010,	FITException,		UnknownException)
+	STND_EXCEPTION(0x1010,	FITException,		unknown_exception)
 
 /* 0x1020 - Watchdog Timer (WDT) Exception
 */
-
-	CRITICAL_EXCEPTION(0x1020, WDTException, UnknownException)
+#ifdef CONFIG_BOOKE_WDT
+	CRITICAL_EXCEPTION(0x1020, WDTException, WatchdogException)
+#else
+	CRITICAL_EXCEPTION(0x1020, WDTException, unknown_exception)
+#endif
 #endif
 
 /* 0x1100 - Data TLB Miss Exception
@@ -496,8 +460,8 @@ label:
  * load TLB entries from the page table if they exist.
  */
 	START_EXCEPTION(0x1100,	DTLBMiss)
-	mtspr	SPRG0, r10		/* Save some working registers */
-	mtspr	SPRG1, r11
+	mtspr	SPRN_SPRG0, r10		/* Save some working registers */
+	mtspr	SPRN_SPRG1, r11
 #ifdef CONFIG_403GCX
 	stw     r12, 0(r0)
 	stw     r9, 4(r0)
@@ -506,20 +470,21 @@ label:
 	stw     r11, 8(r0)
 	stw     r12, 12(r0)
 #else
-	mtspr	SPRG4, r12
-	mtspr	SPRG5, r9
+	mtspr	SPRN_SPRG4, r12
+	mtspr	SPRN_SPRG5, r9
 	mfcr	r11
 	mfspr	r12, SPRN_PID
-	mtspr	SPRG7, r11
-	mtspr	SPRG6, r12
+	mtspr	SPRN_SPRG7, r11
+	mtspr	SPRN_SPRG6, r12
 #endif
 	mfspr	r10, SPRN_DEAR		/* Get faulting address */
 
 	/* If we are faulting a kernel address, we have to use the
 	 * kernel page tables.
 	 */
-	andis.	r11, r10, 0x8000
-	beq	3f
+	lis	r11, TASK_SIZE@h
+	cmplw	r10, r11
+	blt+	3f
 	lis	r11, swapper_pg_dir@h
 	ori	r11, r11, swapper_pg_dir@l
 	li	r9, 0
@@ -529,7 +494,7 @@ label:
 	/* Get the PGD for the current thread.
 	 */
 3:
-	mfspr	r11,SPRG3
+	mfspr	r11,SPRN_SPRG3
 	lwz	r11,PGDIR(r11)
 4:
 	tophys(r11, r11)
@@ -579,15 +544,15 @@ label:
 	lwz     r9, 4(r0)
 	lwz     r12, 0(r0)
 #else
-	mfspr	r12, SPRG6
-	mfspr	r11, SPRG7
+	mfspr	r12, SPRN_SPRG6
+	mfspr	r11, SPRN_SPRG7
 	mtspr	SPRN_PID, r12
 	mtcr	r11
-	mfspr	r9, SPRG5
-	mfspr	r12, SPRG4
+	mfspr	r9, SPRN_SPRG5
+	mfspr	r12, SPRN_SPRG4
 #endif
-	mfspr	r11, SPRG1
-	mfspr	r10, SPRG0
+	mfspr	r11, SPRN_SPRG1
+	mfspr	r10, SPRN_SPRG0
 	b	DataAccess
 
 /* 0x1200 - Instruction TLB Miss Exception
@@ -595,8 +560,8 @@ label:
  * registers and bailout to a different point.
  */
 	START_EXCEPTION(0x1200,	ITLBMiss)
-	mtspr	SPRG0, r10		/* Save some working registers */
-	mtspr	SPRG1, r11
+	mtspr	SPRN_SPRG0, r10		/* Save some working registers */
+	mtspr	SPRN_SPRG1, r11
 #ifdef CONFIG_403GCX
 	stw     r12, 0(r0)
 	stw     r9, 4(r0)
@@ -605,20 +570,21 @@ label:
 	stw     r11, 8(r0)
 	stw     r12, 12(r0)
 #else
-	mtspr	SPRG4, r12
-	mtspr	SPRG5, r9
+	mtspr	SPRN_SPRG4, r12
+	mtspr	SPRN_SPRG5, r9
 	mfcr	r11
 	mfspr	r12, SPRN_PID
-	mtspr	SPRG7, r11
-	mtspr	SPRG6, r12
+	mtspr	SPRN_SPRG7, r11
+	mtspr	SPRN_SPRG6, r12
 #endif
-	mfspr	r10, SRR0		/* Get faulting address */
+	mfspr	r10, SPRN_SRR0		/* Get faulting address */
 
 	/* If we are faulting a kernel address, we have to use the
 	 * kernel page tables.
 	 */
-	andis.	r11, r10, 0x8000
-	beq	3f
+	lis	r11, TASK_SIZE@h
+	cmplw	r10, r11
+	blt+	3f
 	lis	r11, swapper_pg_dir@h
 	ori	r11, r11, swapper_pg_dir@l
 	li	r9, 0
@@ -628,7 +594,7 @@ label:
 	/* Get the PGD for the current thread.
 	 */
 3:
-	mfspr	r11,SPRG3
+	mfspr	r11,SPRN_SPRG3
 	lwz	r11,PGDIR(r11)
 4:
 	tophys(r11, r11)
@@ -678,36 +644,36 @@ label:
 	lwz     r9, 4(r0)
 	lwz     r12, 0(r0)
 #else
-	mfspr	r12, SPRG6
-	mfspr	r11, SPRG7
+	mfspr	r12, SPRN_SPRG6
+	mfspr	r11, SPRN_SPRG7
 	mtspr	SPRN_PID, r12
 	mtcr	r11
-	mfspr	r9, SPRG5
-	mfspr	r12, SPRG4
+	mfspr	r9, SPRN_SPRG5
+	mfspr	r12, SPRN_SPRG4
 #endif
-	mfspr	r11, SPRG1
-	mfspr	r10, SPRG0
+	mfspr	r11, SPRN_SPRG1
+	mfspr	r10, SPRN_SPRG0
 	b	InstructionAccess
 
-	EXCEPTION(0x1300, Trap_13, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1400, Trap_14, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1500, Trap_15, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1600, Trap_16, UnknownException, EXC_XFER_EE)
+	EXCEPTION(0x1300, Trap_13, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1400, Trap_14, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1500, Trap_15, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1600, Trap_16, unknown_exception, EXC_XFER_EE)
 #ifdef CONFIG_IBM405_ERR51
 	/* 405GP errata 51 */
 	START_EXCEPTION(0x1700, Trap_17)
 	b DTLBMiss
 #else
-	EXCEPTION(0x1700, Trap_17, UnknownException, EXC_XFER_EE)
+	EXCEPTION(0x1700, Trap_17, unknown_exception, EXC_XFER_EE)
 #endif
-	EXCEPTION(0x1800, Trap_18, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1900, Trap_19, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1A00, Trap_1A, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1B00, Trap_1B, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1C00, Trap_1C, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1D00, Trap_1D, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1E00, Trap_1E, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x1F00, Trap_1F, UnknownException, EXC_XFER_EE)
+	EXCEPTION(0x1800, Trap_18, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1900, Trap_19, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1A00, Trap_1A, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1B00, Trap_1B, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1C00, Trap_1C, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1D00, Trap_1D, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1E00, Trap_1E, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1F00, Trap_1F, unknown_exception, EXC_XFER_EE)
 
 /* Check for a single step debug exception while in an exception
  * handler before state has been saved.  This is to catch the case
@@ -754,8 +720,8 @@ label:
 	lwz	r0,GPR0(r11)
 	lwz	r1,GPR1(r11)
 	mtcrf	0x80,r10
-	mtspr	SRR2,r12
-	mtspr	SRR3,r9
+	mtspr	SPRN_SRR2,r12
+	mtspr	SPRN_SRR3,r9
 	lwz	r9,GPR9(r11)
 	lwz	r12,GPR12(r11)
 	lwz	r10,crit_r10@l(0)
@@ -831,15 +797,15 @@ finish_tlb_load:
 	lwz     r9, 4(r0)
 	lwz     r12, 0(r0)
 #else
-	mfspr	r12, SPRG6
-	mfspr	r11, SPRG7
+	mfspr	r12, SPRN_SPRG6
+	mfspr	r11, SPRN_SPRG7
 	mtspr	SPRN_PID, r12
 	mtcr	r11
-	mfspr	r9, SPRG5
-	mfspr	r12, SPRG4
+	mfspr	r9, SPRN_SPRG5
+	mfspr	r12, SPRN_SPRG4
 #endif
-	mfspr	r11, SPRG1
-	mfspr	r10, SPRG0
+	mfspr	r11, SPRN_SPRG1
+	mfspr	r10, SPRN_SPRG0
 	PPC405_ERR77_SYNC
 	rfi			/* Should sync shadow TLBs */
 	b	.		/* prevent prefetch past rfi */
@@ -863,7 +829,7 @@ start_here:
 	/* ptr to phys current thread */
 	tophys(r4,r2)
 	addi	r4,r4,THREAD	/* init task's THREAD */
-	mtspr	SPRG3,r4
+	mtspr	SPRN_SPRG3,r4
 
 	/* stack */
 	lis	r1,init_thread_union@ha
@@ -894,8 +860,8 @@ start_here:
 	tophys(r4,r4)
 	lis	r3,(MSR_KERNEL & ~(MSR_IR|MSR_DR))@h
 	ori	r3,r3,(MSR_KERNEL & ~(MSR_IR|MSR_DR))@l
-	mtspr	SRR0,r4
-	mtspr	SRR1,r3
+	mtspr	SPRN_SRR0,r4
+	mtspr	SPRN_SRR1,r3
 	rfi
 	b	.		/* prevent prefetch past rfi */
 
@@ -920,8 +886,8 @@ start_here:
 	ori	r4,r4,MSR_KERNEL@l
 	lis	r3,start_kernel@h
 	ori	r3,r3,start_kernel@l
-	mtspr	SRR0,r3
-	mtspr	SRR1,r4
+	mtspr	SPRN_SRR0,r3
+	mtspr	SPRN_SRR1,r4
 	rfi			/* enable MMU and jump to start_kernel */
 	b	.		/* prevent prefetch past rfi */
 
@@ -1021,24 +987,31 @@ _GLOBAL(set_context)
  * goes at the beginning of the data segment, which is page-aligned.
  */
 	.data
-_GLOBAL(sdata)
-_GLOBAL(empty_zero_page)
+	.align	12
+	.globl	sdata
+sdata:
+	.globl	empty_zero_page
+empty_zero_page:
 	.space	4096
-_GLOBAL(swapper_pg_dir)
+	.globl	swapper_pg_dir
+swapper_pg_dir:
 	.space	4096
 
 
 /* Stack for handling critical exceptions from kernel mode */
 	.section .bss
-critical_stack_bottom:
+        .align 12
+exception_stack_bottom:
 	.space	4096
 critical_stack_top:
-	.previous
+	.globl	exception_stack_top
+exception_stack_top:
 
 /* This space gets a copy of optional info passed to us by the bootstrap
  * which is used to pass parameters into the kernel like root=/dev/sda1, etc.
  */
-_GLOBAL(cmd_line)
+	.globl	cmd_line
+cmd_line:
 	.space	512
 
 /* Room for two PTE pointers, usually the kernel and current user pointers

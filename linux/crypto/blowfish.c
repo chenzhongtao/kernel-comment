@@ -19,8 +19,9 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mm.h>
-#include <asm/scatterlist.h>
+#include <asm/byteorder.h>
 #include <linux/crypto.h>
+#include <linux/types.h>
 
 #define BF_BLOCK_SIZE 8
 #define BF_MIN_KEY_SIZE 4
@@ -347,25 +348,26 @@ static void encrypt_block(struct bf_ctx *bctx, u32 *dst, u32 *src)
 	dst[1] = yl;
 }
 
-static void bf_encrypt(void *ctx, u8 *dst, const u8 *src)
+static void bf_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
-	const u32 *in_blk = (const u32 *)src;
-	u32 *const out_blk = (u32 *)dst;
+	const __be32 *in_blk = (const __be32 *)src;
+	__be32 *const out_blk = (__be32 *)dst;
 	u32 in32[2], out32[2];
 
 	in32[0] = be32_to_cpu(in_blk[0]);
 	in32[1] = be32_to_cpu(in_blk[1]);
-	encrypt_block(ctx, out32, in32);
+	encrypt_block(crypto_tfm_ctx(tfm), out32, in32);
 	out_blk[0] = cpu_to_be32(out32[0]);
 	out_blk[1] = cpu_to_be32(out32[1]);
 }
 
-static void bf_decrypt(void *ctx, u8 *dst, const u8 *src)
+static void bf_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
-	const u32 *in_blk = (const u32 *)src;
-	u32 *const out_blk = (u32 *)dst;
-	const u32 *P = ((struct bf_ctx *)ctx)->p;
-	const u32 *S = ((struct bf_ctx *)ctx)->s;
+	struct bf_ctx *ctx = crypto_tfm_ctx(tfm);
+	const __be32 *in_blk = (const __be32 *)src;
+	__be32 *const out_blk = (__be32 *)dst;
+	const u32 *P = ctx->p;
+	const u32 *S = ctx->s;
 	u32 yl = be32_to_cpu(in_blk[0]);
 	u32 yr = be32_to_cpu(in_blk[1]);
 
@@ -396,12 +398,13 @@ static void bf_decrypt(void *ctx, u8 *dst, const u8 *src)
 /* 
  * Calculates the blowfish S and P boxes for encryption and decryption.
  */
-static int bf_setkey(void *ctx, const u8 *key, unsigned int keylen, u32 *flags)
+static int bf_setkey(struct crypto_tfm *tfm, const u8 *key, unsigned int keylen)
 {
+	struct bf_ctx *ctx = crypto_tfm_ctx(tfm);
+	u32 *P = ctx->p;
+	u32 *S = ctx->s;
 	short i, j, count;
 	u32 data[2], temp;
-	u32 *P = ((struct bf_ctx *)ctx)->p;
-	u32 *S = ((struct bf_ctx *)ctx)->s;
 
 	/* Copy the initialization s-boxes */
 	for (i = 0, count = 0; i < 256; i++)
@@ -451,6 +454,7 @@ static struct crypto_alg alg = {
 	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
 	.cra_blocksize		=	BF_BLOCK_SIZE,
 	.cra_ctxsize		=	sizeof(struct bf_ctx),
+	.cra_alignmask		=	3,
 	.cra_module		=	THIS_MODULE,
 	.cra_list		=	LIST_HEAD_INIT(alg.cra_list),
 	.cra_u			=	{ .cipher = {

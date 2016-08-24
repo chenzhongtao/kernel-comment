@@ -5,7 +5,7 @@
  * Chris Vitale csv@bluetail.com
  *
  * May 2003
- * 
+ *
  */
 
 #include <linux/netfilter_bridge/ebtables.h>
@@ -17,10 +17,10 @@ static int ebt_filter_802_3(const struct sk_buff *skb, const struct net_device *
 {
 	struct ebt_802_3_info *info = (struct ebt_802_3_info *)data;
 	struct ebt_802_3_hdr *hdr = ebt_802_3_hdr(skb);
-	uint16_t type = hdr->llc.ui.ctrl & IS_UI ? hdr->llc.ui.type : hdr->llc.ni.type;
+	__be16 type = hdr->llc.ui.ctrl & IS_UI ? hdr->llc.ui.type : hdr->llc.ni.type;
 
 	if (info->bitmask & EBT_802_3_SAP) {
-		if (FWINV(info->sap != hdr->llc.ui.ssap, EBT_802_3_SAP)) 
+		if (FWINV(info->sap != hdr->llc.ui.ssap, EBT_802_3_SAP))
 				return EBT_NOMATCH;
 		if (FWINV(info->sap != hdr->llc.ui.dsap, EBT_802_3_SAP))
 				return EBT_NOMATCH;
@@ -29,7 +29,7 @@ static int ebt_filter_802_3(const struct sk_buff *skb, const struct net_device *
 	if (info->bitmask & EBT_802_3_TYPE) {
 		if (!(hdr->llc.ui.dsap == CHECK_TYPE && hdr->llc.ui.ssap == CHECK_TYPE))
 			return EBT_NOMATCH;
-		if (FWINV(info->type != type, EBT_802_3_TYPE)) 
+		if (FWINV(info->type != type, EBT_802_3_TYPE))
 			return EBT_NOMATCH;
 	}
 
@@ -58,16 +58,16 @@ static struct ebt_match filter_802_3 =
 	.me		= THIS_MODULE,
 };
 
-static int __init init(void)
+static int __init ebt_802_3_init(void)
 {
 	return ebt_register_match(&filter_802_3);
 }
 
-static void __exit fini(void)
+static void __exit ebt_802_3_fini(void)
 {
 	ebt_unregister_match(&filter_802_3);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ebt_802_3_init);
+module_exit(ebt_802_3_fini);
 MODULE_LICENSE("GPL");

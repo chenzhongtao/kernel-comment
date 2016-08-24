@@ -3,21 +3,18 @@
  * 
  * (The IMM is the embedded controller in the ZIP Plus drive.)
  * 
- * Current Maintainer: David Campbell (Perth, Western Australia)
- *                     campbell@torque.net
- *
  * My unoffical company acronym list is 21 pages long:
  *      FLA:    Four letter acronym with built in facility for
  *              future expansion to five letters.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/blkdev.h>
 #include <linux/parport.h>
 #include <linux/workqueue.h>
+#include <linux/delay.h>
 #include <asm/io.h>
 
 #include <scsi/scsi.h>
@@ -39,7 +36,7 @@ typedef struct {
 	int base_hi;		/* Hi Base address for ECP-ISA chipset */
 	int mode;		/* Transfer mode                */
 	struct scsi_cmnd *cur_cmd;	/* Current queued command       */
-	struct work_struct imm_tq;	/* Polling interrupt stuff       */
+	struct delayed_work imm_tq;	/* Polling interrupt stuff       */
 	unsigned long jstart;	/* Jiffies at start             */
 	unsigned failed:1;	/* Failure flag                 */
 	unsigned dp:1;		/* Data phase present           */
@@ -610,9 +607,9 @@ static int imm_init(imm_struct *dev)
 	if (imm_connect(dev, 0) != 1)
 		return -EIO;
 	imm_reset_pulse(dev->base);
-	udelay(1000);	/* Delay to allow devices to settle */
+	mdelay(1);	/* Delay to allow devices to settle */
 	imm_disconnect(dev);
-	udelay(1000);	/* Another delay to allow devices to settle */
+	mdelay(1);	/* Another delay to allow devices to settle */
 	return device_check(dev);
 }
 
@@ -708,9 +705,7 @@ static int imm_completion(struct scsi_cmnd *cmd)
 				cmd->SCp.buffer++;
 				cmd->SCp.this_residual =
 				    cmd->SCp.buffer->length;
-				cmd->SCp.ptr =
-				    page_address(cmd->SCp.buffer->page) +
-				    cmd->SCp.buffer->offset;
+				cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 
 				/*
 				 * Make sure that we transfer even number of bytes
@@ -736,19 +731,14 @@ static int imm_completion(struct scsi_cmnd *cmd)
  * the scheduler's task queue to generate a stream of call-backs and
  * complete the request when the drive is ready.
  */
-static void imm_interrupt(void *data)
+static void imm_interrupt(struct work_struct *work)
 {
-	imm_struct *dev = (imm_struct *) data;
+	imm_struct *dev = container_of(work, imm_struct, imm_tq.work);
 	struct scsi_cmnd *cmd = dev->cur_cmd;
 	struct Scsi_Host *host = cmd->device->host;
 	unsigned long flags;
 
-	if (!cmd) {
-		printk("IMM: bug in imm_interrupt\n");
-		return;
-	}
 	if (imm_engine(dev, cmd)) {
-		INIT_WORK(&dev->imm_tq, imm_interrupt, (void *) dev);
 		schedule_delayed_work(&dev->imm_tq, 1);
 		return;
 	}
@@ -829,7 +819,7 @@ static int imm_engine(imm_struct *dev, struct scsi_cmnd *cmd)
 
 		/* Phase 2 - We are now talking to the scsi bus */
 	case 2:
-		if (!imm_select(dev, cmd->device->id)) {
+		if (!imm_select(dev, scmd_id(cmd))) {
 			imm_fail(dev, DID_NO_CONNECT);
 			return 0;
 		}
@@ -852,9 +842,7 @@ static int imm_engine(imm_struct *dev, struct scsi_cmnd *cmd)
 			cmd->SCp.buffer =
 			    (struct scatterlist *) cmd->request_buffer;
 			cmd->SCp.this_residual = cmd->SCp.buffer->length;
-			cmd->SCp.ptr =
-			    page_address(cmd->SCp.buffer->page) +
-			    cmd->SCp.buffer->offset;
+			cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 		} else {
 			/* else fill the only available buffer */
 			cmd->SCp.buffer = NULL;
@@ -956,8 +944,7 @@ static int imm_queuecommand(struct scsi_cmnd *cmd,
 	cmd->result = DID_ERROR << 16;	/* default return code */
 	cmd->SCp.phase = 0;	/* bus free */
 
-	INIT_WORK(&dev->imm_tq, imm_interrupt, dev);
-	schedule_work(&dev->imm_tq);
+	schedule_delayed_work(&dev->imm_tq, 0);
 
 	imm_pb_claim(dev);
 
@@ -1026,9 +1013,9 @@ static int imm_reset(struct scsi_cmnd *cmd)
 
 	imm_connect(dev, CONNECT_NORMAL);
 	imm_reset_pulse(dev->base);
-	udelay(1000);		/* device settle delay */
+	mdelay(1);		/* device settle delay */
 	imm_disconnect(dev);
-	udelay(1000);		/* device settle delay */
+	mdelay(1);		/* device settle delay */
 	return SUCCESS;
 }
 
@@ -1118,6 +1105,10 @@ static int device_check(imm_struct *dev)
 	return -ENODEV;
 }
 
+/*
+ * imm cannot deal with highmem, so this causes all IO pages for this host
+ * to reside in low memory (hence mapped)
+ */
 static int imm_adjust_queue(struct scsi_device *device)
 {
 	blk_queue_bounce_limit(device->request_queue, BLK_BOUNCE_HIGH);
@@ -1140,10 +1131,6 @@ static struct scsi_host_template imm_template = {
 	.use_clustering		= ENABLE_CLUSTERING,
 	.can_queue		= 1,
 	.slave_alloc		= imm_adjust_queue,
-	.unchecked_isa_dma	= 1, /* imm cannot deal with highmem, so
-				      * this is an easy trick to ensure
-				      * all io pages for this host reside
-				      * in low memory */
 };
 
 /***************************************************************************
@@ -1156,7 +1143,7 @@ static int __imm_attach(struct parport *pb)
 {
 	struct Scsi_Host *host;
 	imm_struct *dev;
-	DECLARE_WAIT_QUEUE_HEAD(waiting);
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(waiting);
 	DEFINE_WAIT(wait);
 	int ports;
 	int modes, ppb;
@@ -1164,11 +1151,10 @@ static int __imm_attach(struct parport *pb)
 
 	init_waitqueue_head(&waiting);
 
-	dev = kmalloc(sizeof(imm_struct), GFP_KERNEL);
+	dev = kzalloc(sizeof(imm_struct), GFP_KERNEL);
 	if (!dev)
 		return -ENOMEM;
 
-	memset(dev, 0, sizeof(imm_struct));
 
 	dev->base = -1;
 	dev->mode = IMM_AUTODETECT;
@@ -1228,7 +1214,7 @@ static int __imm_attach(struct parport *pb)
 	else
 		ports = 8;
 
-	INIT_WORK(&dev->imm_tq, imm_interrupt, dev);
+	INIT_DELAYED_WORK(&dev->imm_tq, imm_interrupt);
 
 	err = -ENOMEM;
 	host = scsi_host_alloc(&imm_template, sizeof(imm_struct *));

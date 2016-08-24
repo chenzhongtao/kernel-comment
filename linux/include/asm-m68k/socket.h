@@ -14,6 +14,8 @@
 #define SO_BROADCAST	6
 #define SO_SNDBUF	7
 #define SO_RCVBUF	8
+#define SO_SNDBUFFORCE	32
+#define SO_RCVBUFFORCE	33
 #define SO_KEEPALIVE	9
 #define SO_OOBINLINE	10
 #define SO_NO_CHECK	11
@@ -46,5 +48,8 @@
 #define SO_ACCEPTCONN		30
 
 #define SO_PEERSEC             31
+#define SO_PASSSEC		34
+#define SO_TIMESTAMPNS		35
+#define SCM_TIMESTAMPNS		SO_TIMESTAMPNS
 
 #endif /* _ASM_SOCKET_H */

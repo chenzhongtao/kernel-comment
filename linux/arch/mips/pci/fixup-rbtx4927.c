@@ -7,7 +7,7 @@
  * Author: MontaVista Software, Inc.
  *              ppopov@mvista.com or source@mvista.com
  *
- * Copyright (C) 2000-2001 Toshiba Corporation 
+ * Copyright (C) 2000-2001 Toshiba Corporation
  *
  * Copyright (C) 2004 MontaVista Software Inc.
  * Author: Manish Lachwani (mlachwani@mvista.com)
@@ -79,7 +79,7 @@ static unsigned char backplane_pci_irq[4][4] = {
 				     TX4927_IRQ_IOC_PCIC}
 };
 
-int pci_get_irq(struct pci_dev *dev, int pin)
+static int pci_get_irq(const struct pci_dev *dev, int pin)
 {
 	unsigned char irq = pin;
 
@@ -119,7 +119,7 @@ int pci_get_irq(struct pci_dev *dev, int pin)
 	return irq;
 }
 
-int __init pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+int __init pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	unsigned char irq;
 

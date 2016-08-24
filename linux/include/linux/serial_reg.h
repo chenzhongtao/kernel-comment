@@ -38,6 +38,8 @@
 #define UART_IIR_RDI		0x04 /* Receiver data interrupt */
 #define UART_IIR_RLSI		0x06 /* Receiver line status interrupt */
 
+#define UART_IIR_BUSY		0x07 /* DesignWare APB Busy Detect */
+
 #define UART_FCR	2	/* Out: FIFO Control Register */
 #define UART_FCR_ENABLE_FIFO	0x01 /* Enable the FIFO */
 #define UART_FCR_CLEAR_RCVR	0x02 /* Clear the RCVR FIFO */
@@ -116,6 +118,7 @@
 #define UART_LSR_PE		0x04 /* Parity error indicator */
 #define UART_LSR_OE		0x02 /* Overrun error indicator */
 #define UART_LSR_DR		0x01 /* Receiver data ready */
+#define UART_LSR_BRK_ERROR_BITS	0x1E /* BI, FE, PE, OE bits */
 
 #define UART_MSR	6	/* In:  Modem Status Register */
 #define UART_MSR_DCD		0x80 /* Data Carrier Detect */
@@ -247,10 +250,10 @@
 #define UART_CTR	0xFF
 
 /*
- * The 16C950 Additional Control Reigster
+ * The 16C950 Additional Control Register
  */
 #define UART_ACR_RXDIS	0x01	/* Receiver disable */
-#define UART_ACR_TXDIS	0x02	/* Receiver disable */
+#define UART_ACR_TXDIS	0x02	/* Transmitter disable */
 #define UART_ACR_DSRFC	0x04	/* DSR Flow Control */
 #define UART_ACR_TLENB	0x20	/* 950 trigger levels enable */
 #define UART_ACR_ICRRD	0x40	/* ICR Read enable */

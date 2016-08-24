@@ -16,11 +16,11 @@
 /*
  * Sets up all exception vectors
  */
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/a.out.h>
 #include <linux/user.h>
@@ -38,7 +38,7 @@
 #include <asm/machdep.h>
 #include <asm/siginfo.h>
 
-static char *vec_names[] = {
+static char const * const vec_names[] = {
 	"RESET SP", "RESET PC", "BUS ERROR", "ADDRESS ERROR",
 	"ILLEGAL INSTRUCTION", "ZERO DIVIDE", "CHK", "TRAPcc",
 	"PRIVILEGE VIOLATION", "TRACE", "LINE 1010", "LINE 1111",
@@ -62,8 +62,6 @@ static char *vec_names[] = {
 
 void __init trap_init(void)
 {
-	if (mach_trap_init)
-		mach_trap_init();
 }
 
 void die_if_kernel(char *str, struct pt_regs *fp, int nr)
@@ -82,7 +80,8 @@ void die_if_kernel(char *str, struct pt_regs *fp, int nr)
 
 	printk(KERN_EMERG "Process %s (pid: %d, stackpage=%08lx)\n",
 		current->comm, current->pid, PAGE_SIZE+(unsigned long)current);
-	show_stack(NULL, (unsigned long *)fp);
+	show_stack(NULL, (unsigned long *)(fp + 1));
+	add_taint(TAINT_DIE);
 	do_exit(SIGSEGV);
 }
 
@@ -92,12 +91,12 @@ asmlinkage void buserr_c(struct frame *fp)
 	if (user_mode(&fp->ptregs))
 		current->thread.esp0 = (unsigned long) fp;
 
-#if DEBUG
+#if defined(DEBUG)
 	printk (KERN_DEBUG "*** Bus Error *** Format is %x\n", fp->ptregs.format);
 #endif
 
 	die_if_kernel("bad frame format",&fp->ptregs,0);
-#if DEBUG
+#if defined(DEBUG)
 	printk(KERN_DEBUG "Unknown SIGSEGV - 4\n");
 #endif
 	force_sig(SIGSEGV, current);
@@ -106,17 +105,20 @@ asmlinkage void buserr_c(struct frame *fp)
 
 int kstack_depth_to_print = 48;
 
-void show_stack(struct task_struct *task, unsigned long *esp)
+void show_stack(struct task_struct *task, unsigned long *stack)
 {
-	unsigned long *stack, *endstack, addr;
+	unsigned long *endstack, addr;
 	extern char _start, _etext;
 	int i;
 
-	if (esp == NULL)
-		esp = (unsigned long *) &esp;
+	if (!stack) {
+		if (task)
+			stack = (unsigned long *)task->thread.ksp;
+		else
+			stack = (unsigned long *)&stack;
+	}
 
-	stack = esp;
-	addr = (unsigned long) esp;
+	addr = (unsigned long) stack;
 	endstack = (unsigned long *) PAGE_ALIGN(addr);
 
 	printk(KERN_EMERG "Stack from %08lx:", (unsigned long)stack);
@@ -124,11 +126,12 @@ void show_stack(struct task_struct *task, unsigned long *esp)
 		if (stack + 1 > endstack)
 			break;
 		if (i % 8 == 0)
-			printk(KERN_EMERG "\n       ");
-		printk(KERN_EMERG " %08lx", *stack++);
+			printk("\n" KERN_EMERG "       ");
+		printk(" %08lx", *stack++);
 	}
+	printk("\n");
 
-	printk(KERN_EMERG "\nCall Trace:");
+	printk(KERN_EMERG "Call Trace:");
 	i = 0;
 	while (stack + 1 <= endstack) {
 		addr = *stack++;
@@ -143,18 +146,18 @@ void show_stack(struct task_struct *task, unsigned long *esp)
 		if (((addr >= (unsigned long) &_start) &&
 		     (addr <= (unsigned long) &_etext))) {
 			if (i % 4 == 0)
-				printk(KERN_EMERG "\n       ");
-			printk(KERN_EMERG " [<%08lx>]", addr);
+				printk("\n" KERN_EMERG "       ");
+			printk(" [<%08lx>]", addr);
 			i++;
 		}
 	}
-	printk(KERN_EMERG "\n");
+	printk("\n");
 }
 
 void bad_super_trap(struct frame *fp)
 {
 	console_verbose();
-	if (fp->ptregs.vector < 4*sizeof(vec_names)/sizeof(vec_names[0]))
+	if (fp->ptregs.vector < 4 * ARRAY_SIZE(vec_names))
 		printk (KERN_WARNING "*** %s ***   FORMAT=%X\n",
 			vec_names[(fp->ptregs.vector) >> 2],
 			fp->ptregs.format);
@@ -305,6 +308,8 @@ void dump_stack(void)
 
 	show_stack(current, &stack);
 }
+
+EXPORT_SYMBOL(dump_stack);
 
 #ifdef CONFIG_M68KFPU_EMU
 asmlinkage void fpemu_signal(int signal, int code, void *addr)

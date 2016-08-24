@@ -81,8 +81,10 @@ isac_new_ph(struct IsdnCardState *cs)
 }
 
 static void
-isac_bh(struct IsdnCardState *cs)
+isac_bh(struct work_struct *work)
 {
+	struct IsdnCardState *cs =
+		container_of(work, struct IsdnCardState, tqueue);
 	struct PStack *stptr;
 	
 	if (!cs)
@@ -112,7 +114,7 @@ isac_bh(struct IsdnCardState *cs)
 #endif
 }
 
-void
+static void
 isac_empty_fifo(struct IsdnCardState *cs, int count)
 {
 	u_char *ptr;
@@ -563,22 +565,19 @@ ISAC_l1hw(struct PStack *st, int pr, void *arg)
 	}
 }
 
-void
+static void
 setstack_isac(struct PStack *st, struct IsdnCardState *cs)
 {
 	st->l1.l1hw = ISAC_l1hw;
 }
 
-void 
-DC_Close_isac(struct IsdnCardState *cs) {
-	if (cs->dc.isac.mon_rx) {
-		kfree(cs->dc.isac.mon_rx);
-		cs->dc.isac.mon_rx = NULL;
-	}
-	if (cs->dc.isac.mon_tx) {
-		kfree(cs->dc.isac.mon_tx);
-		cs->dc.isac.mon_tx = NULL;
-	}
+static void
+DC_Close_isac(struct IsdnCardState *cs)
+{
+	kfree(cs->dc.isac.mon_rx);
+	cs->dc.isac.mon_rx = NULL;
+	kfree(cs->dc.isac.mon_tx);
+	cs->dc.isac.mon_tx = NULL;
 }
 
 static void
@@ -612,7 +611,7 @@ dbusy_timer_handler(struct IsdnCardState *cs)
 				debugl1(cs, "D-Channel Busy no skb");
 			}
 			cs->writeisac(cs, ISAC_CMDR, 0x01); /* Transmitter reset */
-			cs->irq_func(cs->irq, cs, NULL);
+			cs->irq_func(cs->irq, cs);
 		}
 	}
 }
@@ -677,7 +676,7 @@ clear_pending_isac_ints(struct IsdnCardState *cs)
 void __devinit
 setup_isac(struct IsdnCardState *cs)
 {
-	INIT_WORK(&cs->tqueue, (void *)(void *) isac_bh, cs);
+	INIT_WORK(&cs->tqueue, isac_bh);
 	cs->dbusytimer.function = (void *) dbusy_timer_handler;
 	cs->dbusytimer.data = (long) cs;
 	init_timer(&cs->dbusytimer);

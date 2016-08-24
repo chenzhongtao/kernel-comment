@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/mpc8260_pci9.c
- *
  * Workaround for device erratum PCI 9.
  * See Motorola's "XPC826xA Family Device Errata Reference."
  * The erratum applies to all 8260 family Hip4 processors.  It is scheduled 
@@ -17,7 +15,6 @@
  * or implied.
  */
 #include <linux/kernel.h>
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/types.h>
@@ -31,7 +28,7 @@
 #include <asm/immap_cpm2.h>
 #include <asm/cpm2.h>
 
-#include "m8260_pci.h"
+#include "m82xx_pci.h"
 
 #ifdef CONFIG_8260_PCI9
 /*#include <asm/mpc8260_pci9.h>*/ /* included in asm/io.h */
@@ -108,7 +105,8 @@ void idma_pci9_init(void)
 	idma_reg[IDMA_CHAN].idmr = 0;		/* mask all IDMA interrupts */
 	idma_reg[IDMA_CHAN].idsr = 0xff;	/* clear all event flags */
 
-	printk("<4>Using IDMA%d for MPC8260 device erratum PCI 9 workaround\n",
+	printk(KERN_WARNING
+		"Using IDMA%d for MPC8260 device erratum PCI 9 workaround\n",
 		IDMA_CHAN + 1);
 
 	return;
@@ -248,11 +246,11 @@ EXPORT_SYMBOL(idma_pci9_read_le);
 
 static inline int is_pci_mem(unsigned long addr)
 {
-	if (addr >= MPC826x_PCI_LOWER_MMIO &&
-	    addr <= MPC826x_PCI_UPPER_MMIO)
+	if (addr >= M82xx_PCI_LOWER_MMIO &&
+		addr <= M82xx_PCI_UPPER_MMIO)
 		return 1;
-	if (addr >= MPC826x_PCI_LOWER_MEM &&
-	    addr <= MPC826x_PCI_UPPER_MEM)
+	if (addr >= M82xx_PCI_LOWER_MEM &&
+		addr <= M82xx_PCI_UPPER_MEM)
 		return 1;
 	return 0;
 }
@@ -342,20 +340,6 @@ void insl(unsigned port, void *buf, int nl)
 	idma_pci9_read((u8 *)buf, (u8 *)addr, nl*sizeof(u32), sizeof(u32), 0);
 }
 
-void insw_ns(unsigned port, void *buf, int ns)
-{
-	u8 *addr = (u8 *)(port + _IO_BASE);
-
-	idma_pci9_read((u8 *)buf, (u8 *)addr, ns*sizeof(u16), sizeof(u16), 0);
-}
-
-void insl_ns(unsigned port, void *buf, int nl)
-{
-	u8 *addr = (u8 *)(port + _IO_BASE);
-
-	idma_pci9_read((u8 *)buf, (u8 *)addr, nl*sizeof(u32), sizeof(u32), 0);
-}
-
 void *memcpy_fromio(void *dest, unsigned long src, size_t count)
 {
 	unsigned long pa = iopa((unsigned long) src);
@@ -376,8 +360,6 @@ EXPORT_SYMBOL(inl);
 EXPORT_SYMBOL(insb);
 EXPORT_SYMBOL(insw);
 EXPORT_SYMBOL(insl);
-EXPORT_SYMBOL(insw_ns);
-EXPORT_SYMBOL(insl_ns);
 EXPORT_SYMBOL(memcpy_fromio);
 
 #endif	/* ifdef CONFIG_8260_PCI9 */

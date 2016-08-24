@@ -190,16 +190,16 @@
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
 
-#ifdef CONFIG_PARISC64
+#ifdef CONFIG_64BIT
 #define is_pdc_pat()	(PDC_TYPE_PAT == pdc_type)
 extern int pdc_pat_get_irt_size(unsigned long *num_entries, unsigned long cell_num);
 extern int pdc_pat_get_irt(void *r_addr, unsigned long cell_num);
-#else	/* ! CONFIG_PARISC64 */
+#else	/* ! CONFIG_64BIT */
 /* No PAT support for 32-bit kernels...sorry */
 #define is_pdc_pat()	(0)
 #define pdc_pat_get_irt_size(num_entries, cell_numn)	PDC_BAD_PROC
 #define pdc_pat_get_irt(r_addr, cell_num)		PDC_BAD_PROC
-#endif	/* ! CONFIG_PARISC64 */
+#endif	/* ! CONFIG_64BIT */
 
 
 struct pdc_pat_cell_num {
@@ -250,7 +250,7 @@ struct pdc_pat_pd_addr_map_entry {
 #define PAT_GET_ENTITY(value)	(((value) >> 56) & 0xffUL)
 #define PAT_GET_DVI(value)	(((value) >> 48) & 0xffUL)
 #define PAT_GET_IOC(value)	(((value) >> 40) & 0xffUL)
-#define PAT_GET_MOD_PAGES(value)(((value) & 0xffffffUL)
+#define PAT_GET_MOD_PAGES(value) ((value) & 0xffffffUL)
 
 
 /*
@@ -302,35 +302,6 @@ extern int pdc_pat_io_pci_cfg_write(unsigned long pci_addr, int pci_size, u32 va
 ** really have to...it might go away some day.
 */
 extern int pdc_pat;     /* arch/parisc/kernel/inventory.c */
-
-/********************************************************************
-* PDC_PAT_CELL[Return Cell Module] memaddr[0] conf_base_addr
-* ----------------------------------------------------------
-* Bit  0 to 51 - conf_base_addr
-* Bit 52 to 62 - reserved
-* Bit       63 - endianess bit
-********************************************************************/
-#define PAT_GET_CBA(value) ((value) & 0xfffffffffffff000UL)
-
-/********************************************************************
-* PDC_PAT_CELL[Return Cell Module] memaddr[1] mod_info
-* ----------------------------------------------------
-* Bit  0 to  7 - entity type
-*    0 = central agent,            1 = processor,
-*    2 = memory controller,        3 = system bus adapter,
-*    4 = local bus adapter,        5 = processor bus converter,
-*    6 = crossbar fabric connect,  7 = fabric interconnect,
-*    8 to 254 reserved,            255 = unknown.
-* Bit  8 to 15 - DVI
-* Bit 16 to 23 - IOC functions
-* Bit 24 to 39 - reserved
-* Bit 40 to 63 - mod_pages
-*    number of 4K pages a module occupies starting at conf_base_addr
-********************************************************************/
-#define PAT_GET_ENTITY(value)	(((value) >> 56) & 0xffUL)
-#define PAT_GET_DVI(value)	(((value) >> 48) & 0xffUL)
-#define PAT_GET_IOC(value)	(((value) >> 40) & 0xffUL)
-#define PAT_GET_MOD_PAGES(value)(((value) & 0xffffffUL)
 
 #endif /* __ASSEMBLY__ */
 

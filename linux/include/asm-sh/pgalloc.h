@@ -1,23 +1,31 @@
 #ifndef __ASM_SH_PGALLOC_H
 #define __ASM_SH_PGALLOC_H
 
-#include <asm/processor.h>
-#include <linux/threads.h>
-#include <linux/slab.h>
-#include <linux/mm.h>
+#include <linux/quicklist.h>
+#include <asm/page.h>
 
-#define pgd_quicklist ((unsigned long *)0)
-#define pmd_quicklist ((unsigned long *)0)
-#define pte_quicklist ((unsigned long *)0)
-#define pgtable_cache_size 0L
+#define QUICK_PGD 0	/* We preserve special mappings over free */
+#define QUICK_PT 1	/* Other page table pages that are zero on free */
 
-#define pmd_populate_kernel(mm, pmd, pte) \
-		set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(pte)))
+static inline void pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmd,
+				       pte_t *pte)
+{
+	set_pmd(pmd, __pmd((unsigned long)pte));
+}
 
 static inline void pmd_populate(struct mm_struct *mm, pmd_t *pmd,
 				struct page *pte)
 {
-	set_pmd(pmd, __pmd(_PAGE_TABLE + page_to_phys(pte)));
+	set_pmd(pmd, __pmd((unsigned long)page_address(pte)));
+}
+
+static inline void pgd_ctor(void *x)
+{
+	pgd_t *pgd = x;
+
+	memcpy(pgd + USER_PTRS_PER_PGD,
+	       swapper_pg_dir + USER_PTRS_PER_PGD,
+	       (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
 }
 
 /*
@@ -25,48 +33,35 @@ static inline void pmd_populate(struct mm_struct *mm, pmd_t *pmd,
  */
 static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	unsigned int pgd_size = (USER_PTRS_PER_PGD * sizeof(pgd_t));
-	pgd_t *pgd = (pgd_t *)kmalloc(pgd_size, GFP_KERNEL);
-
-	if (pgd)
-		memset(pgd, 0, pgd_size);
-
-	return pgd;
+	return quicklist_alloc(QUICK_PGD, GFP_KERNEL | __GFP_REPEAT, pgd_ctor);
 }
 
 static inline void pgd_free(pgd_t *pgd)
 {
-	kfree(pgd);
+	quicklist_free(QUICK_PGD, NULL, pgd);
 }
 
 static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm,
 					  unsigned long address)
 {
-	pte_t *pte;
-
-	pte = (pte_t *) __get_free_page(GFP_KERNEL | __GFP_REPEAT | __GFP_ZERO);
-
-	return pte;
+	return quicklist_alloc(QUICK_PT, GFP_KERNEL | __GFP_REPEAT, NULL);
 }
 
 static inline struct page *pte_alloc_one(struct mm_struct *mm,
 					 unsigned long address)
 {
-	struct page *pte;
-
-   	pte = alloc_pages(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO, 0);
-
-	return pte;
+	void *pg = quicklist_alloc(QUICK_PT, GFP_KERNEL | __GFP_REPEAT, NULL);
+	return pg ? virt_to_page(pg) : NULL;
 }
 
 static inline void pte_free_kernel(pte_t *pte)
 {
-	free_page((unsigned long)pte);
+	quicklist_free(QUICK_PT, NULL, pte);
 }
 
 static inline void pte_free(struct page *pte)
 {
-	__free_page(pte);
+	quicklist_free_page(QUICK_PT, NULL, pte);
 }
 
 #define __pte_free_tlb(tlb,pte) tlb_remove_page((tlb),(pte))
@@ -76,14 +71,13 @@ static inline void pte_free(struct page *pte)
  * inside the pgd, so has no extra memory associated with it.
  */
 
-#define pmd_alloc_one(mm, addr)		({ BUG(); ((pmd_t *)2); })
 #define pmd_free(x)			do { } while (0)
 #define __pmd_free_tlb(tlb,x)		do { } while (0)
-#define pgd_populate(mm, pmd, pte)	BUG()
-#define check_pgt_cache()		do { } while (0)
 
-#ifdef CONFIG_CPU_SH4
-#define PG_mapped			PG_arch_1
-#endif
+static inline void check_pgt_cache(void)
+{
+	quicklist_trim(QUICK_PGD, NULL, 25, 16);
+	quicklist_trim(QUICK_PT, NULL, 25, 16);
+}
 
 #endif /* __ASM_SH_PGALLOC_H */

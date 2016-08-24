@@ -23,7 +23,6 @@
  *      of the GNU General Public License, incorporated herein by reference.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -66,7 +65,6 @@ static struct net_device * __init ipddp_init(void)
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	SET_MODULE_OWNER(dev);
 	strcpy(dev->name, "ipddp%d");
 
 	if (version_printed++ == 0)
@@ -118,7 +116,7 @@ static struct net_device_stats *ipddp_get_stats(struct net_device *dev)
  */
 static int ipddp_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	u32 paddr = ((struct rtable*)skb->dst)->rt_gateway;
+	__be32 paddr = ((struct rtable*)skb->dst)->rt_gateway;
         struct ddpehdr *ddp;
         struct ipddp_route *rt;
         struct atalk_addr *our_addr;
@@ -146,9 +144,7 @@ static int ipddp_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	/* Create the Extended DDP header */
 	ddp = (struct ddpehdr *)skb->data;
-        ddp->deh_len = skb->len;
-        ddp->deh_hops = 1;
-        ddp->deh_pad = 0;
+        ddp->deh_len_hops = htons(skb->len + (1<<10));
         ddp->deh_sum = 0;
 
 	/*
@@ -171,7 +167,6 @@ static int ipddp_xmit(struct sk_buff *skb, struct net_device *dev)
         ddp->deh_sport = 72;
 
         *((__u8 *)(ddp+1)) = 22;        	/* ddp type = IP */
-        *((__u16 *)ddp)=ntohs(*((__u16 *)ddp));	/* fix up length field */
 
         skb->protocol = htons(ETH_P_ATALK);     /* Protocol has changed */
 
@@ -190,7 +185,7 @@ static int ipddp_xmit(struct sk_buff *skb, struct net_device *dev)
  */
 static int ipddp_create(struct ipddp_route *new_rt)
 {
-        struct ipddp_route *rt =(struct ipddp_route*) kmalloc(sizeof(*rt), GFP_KERNEL);
+        struct ipddp_route *rt = kmalloc(sizeof(*rt), GFP_KERNEL);
 
         if (rt == NULL)
                 return -ENOMEM;

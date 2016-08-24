@@ -20,6 +20,7 @@
 #include <linux/errno.h>
 #include <asm/byteorder.h>
 #include <linux/crypto.h>
+#include <linux/types.h>
 
 /* Key is padded to the maximum of 256 bits before round key generation.
  * Any key length <= 256 bits (32 bytes) is allowed by the algorithm.
@@ -31,11 +32,9 @@
 #define SERPENT_BLOCK_SIZE		 16
 
 #define PHI 0x9e3779b9UL
-#define ROL(x,r) ((x) = ((x) << (r)) | ((x) >> (32-(r))))
-#define ROR(x,r) ((x) = ((x) >> (r)) | ((x) << (32-(r))))
 
 #define keyiter(a,b,c,d,i,j) \
-        b ^= d; b ^= c; b ^= a; b ^= PHI ^ i; ROL(b,11); k[j] = b;
+        b ^= d; b ^= c; b ^= a; b ^= PHI ^ i; b = rol32(b,11); k[j] = b;
 
 #define loadkeys(x0,x1,x2,x3,i) \
 	x0=k[i]; x1=k[i+1]; x2=k[i+2]; x3=k[i+3];
@@ -48,24 +47,24 @@
 	x1 ^= k[4*(i)+1];        x0 ^= k[4*(i)+0];
 
 #define LK(x0,x1,x2,x3,x4,i)				\
-					ROL(x0,13);	\
-	ROL(x2,3);	x1 ^= x0;	x4  = x0 << 3;	\
+					x0=rol32(x0,13);\
+	x2=rol32(x2,3);	x1 ^= x0;	x4  = x0 << 3;	\
 	x3 ^= x2;	x1 ^= x2;			\
-	ROL(x1,1);	x3 ^= x4;			\
-	ROL(x3,7);	x4  = x1;			\
+	x1=rol32(x1,1);	x3 ^= x4;			\
+	x3=rol32(x3,7);	x4  = x1;			\
 	x0 ^= x1;	x4 <<= 7;	x2 ^= x3;	\
 	x0 ^= x3;	x2 ^= x4;	x3 ^= k[4*i+3];	\
-	x1 ^= k[4*i+1];	ROL(x0,5);	ROL(x2,22);	\
+	x1 ^= k[4*i+1];	x0=rol32(x0,5);	x2=rol32(x2,22);\
 	x0 ^= k[4*i+0];	x2 ^= k[4*i+2];
 
 #define KL(x0,x1,x2,x3,x4,i)				\
 	x0 ^= k[4*i+0];	x1 ^= k[4*i+1];	x2 ^= k[4*i+2];	\
-	x3 ^= k[4*i+3];	ROR(x0,5);	ROR(x2,22);	\
+	x3 ^= k[4*i+3];	x0=ror32(x0,5);	x2=ror32(x2,22);\
 	x4 =  x1;	x2 ^= x3;	x0 ^= x3;	\
-	x4 <<= 7;	x0 ^= x1;	ROR(x1,1);	\
-	x2 ^= x4;	ROR(x3,7);	x4 = x0 << 3;	\
-	x1 ^= x0;	x3 ^= x4;	ROR(x0,13);	\
-	x1 ^= x2;	x3 ^= x2;	ROR(x2,3);
+	x4 <<= 7;	x0 ^= x1;	x1=ror32(x1,1);	\
+	x2 ^= x4;	x3=ror32(x3,7);	x4 = x0 << 3;	\
+	x1 ^= x0;	x3 ^= x4;	x0=ror32(x0,13);\
+	x1 ^= x2;	x3 ^= x2;	x2=ror32(x2,3);
 
 #define S0(x0,x1,x2,x3,x4)				\
 					x4  = x3;	\
@@ -212,24 +211,18 @@
 	x4 ^= x2;
 
 struct serpent_ctx {
-	u8 iv[SERPENT_BLOCK_SIZE];
 	u32 expkey[SERPENT_EXPKEY_WORDS];
 };
 
 
-static int serpent_setkey(void *ctx, const u8 *key, unsigned int keylen, u32 *flags)
+static int serpent_setkey(struct crypto_tfm *tfm, const u8 *key,
+			  unsigned int keylen)
 {
-	u32 *k = ((struct serpent_ctx *)ctx)->expkey;
+	struct serpent_ctx *ctx = crypto_tfm_ctx(tfm);
+	u32 *k = ctx->expkey;
 	u8  *k8 = (u8 *)k;
 	u32 r0,r1,r2,r3,r4;
 	int i;
-
-	if ((keylen < SERPENT_MIN_KEY_SIZE)
-			|| (keylen > SERPENT_MAX_KEY_SIZE))
-	{
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
-		return -EINVAL;
-	}
 
 	/* Copy key, add padding */
 
@@ -367,13 +360,14 @@ static int serpent_setkey(void *ctx, const u8 *key, unsigned int keylen, u32 *fl
 	return 0;
 }
 
-static void serpent_encrypt(void *ctx, u8 *dst, const u8 *src)
+static void serpent_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
+	struct serpent_ctx *ctx = crypto_tfm_ctx(tfm);
 	const u32
-		*k = ((struct serpent_ctx *)ctx)->expkey,
-		*s = (const u32 *)src;
-	u32	*d = (u32 *)dst,
-		r0, r1, r2, r3, r4;
+		*k = ctx->expkey;
+	const __le32 *s = (const __le32 *)src;
+	__le32	*d = (__le32 *)dst;
+	u32	r0, r1, r2, r3, r4;
 
 /*
  * Note: The conversions between u8* and u32* might cause trouble
@@ -425,13 +419,14 @@ static void serpent_encrypt(void *ctx, u8 *dst, const u8 *src)
 	d[3] = cpu_to_le32(r3);
 }
 
-static void serpent_decrypt(void *ctx, u8 *dst, const u8 *src)
+static void serpent_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
+	struct serpent_ctx *ctx = crypto_tfm_ctx(tfm);
 	const u32
-		*k = ((struct serpent_ctx *)ctx)->expkey,
-		*s = (const u32 *)src;
-	u32	*d = (u32 *)dst,
-		r0, r1, r2, r3, r4;
+		*k = ((struct serpent_ctx *)ctx)->expkey;
+	const __le32 *s = (const __le32 *)src;
+	__le32	*d = (__le32 *)dst;
+	u32	r0, r1, r2, r3, r4;
 
 	r0 = le32_to_cpu(s[0]);
 	r1 = le32_to_cpu(s[1]);
@@ -483,6 +478,7 @@ static struct crypto_alg serpent_alg = {
 	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
 	.cra_blocksize		=	SERPENT_BLOCK_SIZE,
 	.cra_ctxsize		=	sizeof(struct serpent_ctx),
+	.cra_alignmask		=	3,
 	.cra_module		=	THIS_MODULE,
 	.cra_list		=	LIST_HEAD_INIT(serpent_alg.cra_list),
 	.cra_u			=	{ .cipher = {
@@ -493,24 +489,19 @@ static struct crypto_alg serpent_alg = {
 	.cia_decrypt  		=	serpent_decrypt } }
 };
 
-static int tnepres_setkey(void *ctx, const u8 *key, unsigned int keylen, u32 *flags)
+static int tnepres_setkey(struct crypto_tfm *tfm, const u8 *key,
+			  unsigned int keylen)
 {
 	u8 rev_key[SERPENT_MAX_KEY_SIZE];
 	int i;
 
-	if ((keylen < SERPENT_MIN_KEY_SIZE)
-	    || (keylen > SERPENT_MAX_KEY_SIZE)) {
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
-		return -EINVAL;
-	} 
-
 	for (i = 0; i < keylen; ++i)
 		rev_key[keylen - i - 1] = key[i];
  
-	return serpent_setkey(ctx, rev_key, keylen, flags);
+	return serpent_setkey(tfm, rev_key, keylen);
 }
 
-static void tnepres_encrypt(void *ctx, u8 *dst, const u8 *src)
+static void tnepres_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
 	const u32 * const s = (const u32 * const)src;
 	u32 * const d = (u32 * const)dst;
@@ -522,7 +513,7 @@ static void tnepres_encrypt(void *ctx, u8 *dst, const u8 *src)
 	rs[2] = swab32(s[1]);
 	rs[3] = swab32(s[0]);
 
-	serpent_encrypt(ctx, (u8 *)rd, (u8 *)rs);
+	serpent_encrypt(tfm, (u8 *)rd, (u8 *)rs);
 
 	d[0] = swab32(rd[3]);
 	d[1] = swab32(rd[2]);
@@ -530,7 +521,7 @@ static void tnepres_encrypt(void *ctx, u8 *dst, const u8 *src)
 	d[3] = swab32(rd[0]);
 }
 
-static void tnepres_decrypt(void *ctx, u8 *dst, const u8 *src)
+static void tnepres_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
 	const u32 * const s = (const u32 * const)src;
 	u32 * const d = (u32 * const)dst;
@@ -542,7 +533,7 @@ static void tnepres_decrypt(void *ctx, u8 *dst, const u8 *src)
 	rs[2] = swab32(s[1]);
 	rs[3] = swab32(s[0]);
 
-	serpent_decrypt(ctx, (u8 *)rd, (u8 *)rs);
+	serpent_decrypt(tfm, (u8 *)rd, (u8 *)rs);
 
 	d[0] = swab32(rd[3]);
 	d[1] = swab32(rd[2]);
@@ -555,6 +546,7 @@ static struct crypto_alg tnepres_alg = {
 	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
 	.cra_blocksize		=	SERPENT_BLOCK_SIZE,
 	.cra_ctxsize		=	sizeof(struct serpent_ctx),
+	.cra_alignmask		=	3,
 	.cra_module		=	THIS_MODULE,
 	.cra_list		=	LIST_HEAD_INIT(serpent_alg.cra_list),
 	.cra_u			=	{ .cipher = {

@@ -1,13 +1,13 @@
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
 
-#include <linux/config.h>
 #include <linux/cache.h>
 #include <linux/threads.h>
 #include <asm/irq.h>
 
 typedef struct {
 	unsigned int __softirq_pending;
+	unsigned int local_timer_irqs;
 } ____cacheline_aligned irq_cpustat_t;
 
 #include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */

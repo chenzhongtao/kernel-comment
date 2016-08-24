@@ -20,6 +20,7 @@
 #include <linux/notifier.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
+#include <net/net_namespace.h>
 
 #include "security.h"
 #include "objsec.h"
@@ -114,13 +115,12 @@ static struct sel_netif *sel_netif_lookup(struct net_device *dev)
 	if (likely(netif != NULL))
 		goto out;
 	
-	new = kmalloc(sizeof(*new), GFP_ATOMIC);
+	new = kzalloc(sizeof(*new), GFP_ATOMIC);
 	if (!new) {
 		netif = ERR_PTR(-ENOMEM);
 		goto out;
 	}
 	
-	memset(new, 0, sizeof(*new));
 	nsec = &new->nsec;
 
 	ret = security_netif_sid(dev->name, &nsec->if_sid, &nsec->msg_sid);
@@ -234,6 +234,9 @@ static int sel_netif_netdev_notifier_handler(struct notifier_block *this,
                                              unsigned long event, void *ptr)
 {
 	struct net_device *dev = ptr;
+
+	if (dev->nd_net != &init_net)
+		return NOTIFY_DONE;
 
 	if (event == NETDEV_DOWN)
 		sel_netif_kill(dev);

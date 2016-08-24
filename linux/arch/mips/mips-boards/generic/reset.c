@@ -22,7 +22,7 @@
  * Reset the MIPS boards.
  *
  */
-#include <linux/config.h>
+#include <linux/pm.h>
 
 #include <asm/io.h>
 #include <asm/reboot.h>
@@ -39,24 +39,26 @@ static void atlas_machine_power_off(void);
 
 static void mips_machine_restart(char *command)
 {
-        volatile unsigned int *softres_reg = (unsigned int *)ioremap (SOFTRES_REG, sizeof(unsigned int));
+	unsigned int __iomem *softres_reg =
+		ioremap(SOFTRES_REG, sizeof(unsigned int));
 
-	*softres_reg = GORESET;
+	__raw_writel(GORESET, softres_reg);
 }
 
 static void mips_machine_halt(void)
 {
-        volatile unsigned int *softres_reg = (unsigned int *)ioremap (SOFTRES_REG, sizeof(unsigned int));
+	unsigned int __iomem *softres_reg =
+		ioremap(SOFTRES_REG, sizeof(unsigned int));
 
-	*softres_reg = GORESET;
+	__raw_writel(GORESET, softres_reg);
 }
 
 #if defined(CONFIG_MIPS_ATLAS)
 static void atlas_machine_power_off(void)
 {
-        volatile unsigned int *psustby_reg = (unsigned int *)ioremap(ATLAS_PSUSTBY_REG, sizeof(unsigned int));
+	unsigned int __iomem *psustby_reg = ioremap(ATLAS_PSUSTBY_REG, sizeof(unsigned int));
 
-	*psustby_reg = ATLAS_GOSTBY;
+	writew(ATLAS_GOSTBY, psustby_reg);
 }
 #endif
 
@@ -65,9 +67,9 @@ void mips_reboot_setup(void)
 	_machine_restart = mips_machine_restart;
 	_machine_halt = mips_machine_halt;
 #if defined(CONFIG_MIPS_ATLAS)
-	_machine_power_off = atlas_machine_power_off;
+	pm_power_off = atlas_machine_power_off;
 #endif
 #if defined(CONFIG_MIPS_MALTA) || defined(CONFIG_MIPS_SEAD)
-	_machine_power_off = mips_machine_halt;
+	pm_power_off = mips_machine_halt;
 #endif
 }

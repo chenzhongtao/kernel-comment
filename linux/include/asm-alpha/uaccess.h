@@ -48,11 +48,6 @@
 	__access_ok(((unsigned long)(addr)),(size),get_fs());	\
 })
 
-extern inline int verify_area(int type, const void __user * addr, unsigned long size)
-{
-	return access_ok(type,addr,size) ? 0 : -EFAULT;
-}
-
 /*
  * These are the main single-value transfer routines.  They automatically
  * use the right size if we just have the right pointer type.

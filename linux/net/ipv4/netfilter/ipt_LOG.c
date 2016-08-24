@@ -20,32 +20,29 @@
 #include <net/route.h>
 
 #include <linux/netfilter.h>
-#include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_ipv4/ipt_LOG.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
 MODULE_DESCRIPTION("iptables syslog logging module");
 
-static unsigned int nflog = 1;
-module_param(nflog, int, 0400);
-MODULE_PARM_DESC(nflog, "register as internal netfilter logging module");
- 
-#if 0
-#define DEBUGP printk
-#else
-#define DEBUGP(format, args...)
-#endif
-
 /* Use lock to serialize, so printks don't overlap */
 static DEFINE_SPINLOCK(log_lock);
 
 /* One level of recursion won't kill us */
-static void dump_packet(const struct ipt_log_info *info,
+static void dump_packet(const struct nf_loginfo *info,
 			const struct sk_buff *skb,
 			unsigned int iphoff)
 {
-	struct iphdr _iph, *ih;
+	struct iphdr _iph;
+	const struct iphdr *ih;
+	unsigned int logflags;
+
+	if (info->type == NF_LOG_TYPE_LOG)
+		logflags = info->u.log.logflags;
+	else
+		logflags = NF_LOG_MASK;
 
 	ih = skb_header_pointer(skb, iphoff, sizeof(_iph), &_iph);
 	if (ih == NULL) {
@@ -76,7 +73,7 @@ static void dump_packet(const struct ipt_log_info *info,
 	if (ntohs(ih->frag_off) & IP_OFFSET)
 		printk("FRAG:%u ", ntohs(ih->frag_off) & IP_OFFSET);
 
-	if ((info->logflags & IPT_LOG_IPOPT)
+	if ((logflags & IPT_LOG_IPOPT)
 	    && ih->ihl * 4 > sizeof(struct iphdr)) {
 		unsigned char _opt[4 * 15 - sizeof(struct iphdr)], *op;
 		unsigned int i, optsize;
@@ -98,7 +95,8 @@ static void dump_packet(const struct ipt_log_info *info,
 
 	switch (ih->protocol) {
 	case IPPROTO_TCP: {
-		struct tcphdr _tcph, *th;
+		struct tcphdr _tcph;
+		const struct tcphdr *th;
 
 		/* Max length: 10 "PROTO=TCP " */
 		printk("PROTO=TCP ");
@@ -119,7 +117,7 @@ static void dump_packet(const struct ipt_log_info *info,
 		printk("SPT=%u DPT=%u ",
 		       ntohs(th->source), ntohs(th->dest));
 		/* Max length: 30 "SEQ=4294967295 ACK=4294967295 " */
-		if (info->logflags & IPT_LOG_TCPSEQ)
+		if (logflags & IPT_LOG_TCPSEQ)
 			printk("SEQ=%u ACK=%u ",
 			       ntohl(th->seq), ntohl(th->ack_seq));
 		/* Max length: 13 "WINDOW=65535 " */
@@ -146,10 +144,10 @@ static void dump_packet(const struct ipt_log_info *info,
 		/* Max length: 11 "URGP=65535 " */
 		printk("URGP=%u ", ntohs(th->urg_ptr));
 
-		if ((info->logflags & IPT_LOG_TCPOPT)
+		if ((logflags & IPT_LOG_TCPOPT)
 		    && th->doff * 4 > sizeof(struct tcphdr)) {
 			unsigned char _opt[4 * 15 - sizeof(struct tcphdr)];
-			unsigned char *op;
+			const unsigned char *op;
 			unsigned int i, optsize;
 
 			optsize = th->doff * 4 - sizeof(struct tcphdr);
@@ -169,11 +167,16 @@ static void dump_packet(const struct ipt_log_info *info,
 		}
 		break;
 	}
-	case IPPROTO_UDP: {
-		struct udphdr _udph, *uh;
+	case IPPROTO_UDP:
+	case IPPROTO_UDPLITE: {
+		struct udphdr _udph;
+		const struct udphdr *uh;
 
-		/* Max length: 10 "PROTO=UDP " */
-		printk("PROTO=UDP ");
+		if (ih->protocol == IPPROTO_UDP)
+			/* Max length: 10 "PROTO=UDP "     */
+			printk("PROTO=UDP " );
+		else	/* Max length: 14 "PROTO=UDPLITE " */
+			printk("PROTO=UDPLITE ");
 
 		if (ntohs(ih->frag_off) & IP_OFFSET)
 			break;
@@ -194,20 +197,21 @@ static void dump_packet(const struct ipt_log_info *info,
 		break;
 	}
 	case IPPROTO_ICMP: {
-		struct icmphdr _icmph, *ich;
-		static size_t required_len[NR_ICMP_TYPES+1]
+		struct icmphdr _icmph;
+		const struct icmphdr *ich;
+		static const size_t required_len[NR_ICMP_TYPES+1]
 			= { [ICMP_ECHOREPLY] = 4,
 			    [ICMP_DEST_UNREACH]
-			    = 8 + sizeof(struct iphdr) + 8,
+			    = 8 + sizeof(struct iphdr),
 			    [ICMP_SOURCE_QUENCH]
-			    = 8 + sizeof(struct iphdr) + 8,
+			    = 8 + sizeof(struct iphdr),
 			    [ICMP_REDIRECT]
-			    = 8 + sizeof(struct iphdr) + 8,
+			    = 8 + sizeof(struct iphdr),
 			    [ICMP_ECHO] = 4,
 			    [ICMP_TIME_EXCEEDED]
-			    = 8 + sizeof(struct iphdr) + 8,
+			    = 8 + sizeof(struct iphdr),
 			    [ICMP_PARAMETERPROB]
-			    = 8 + sizeof(struct iphdr) + 8,
+			    = 8 + sizeof(struct iphdr),
 			    [ICMP_TIMESTAMP] = 20,
 			    [ICMP_TIMESTAMPREPLY] = 20,
 			    [ICMP_ADDRESS] = 12,
@@ -279,11 +283,12 @@ static void dump_packet(const struct ipt_log_info *info,
 	}
 	/* Max Length */
 	case IPPROTO_AH: {
-		struct ip_auth_hdr _ahdr, *ah;
+		struct ip_auth_hdr _ahdr;
+		const struct ip_auth_hdr *ah;
 
 		if (ntohs(ih->frag_off) & IP_OFFSET)
 			break;
-		
+
 		/* Max length: 9 "PROTO=AH " */
 		printk("PROTO=AH ");
 
@@ -301,7 +306,8 @@ static void dump_packet(const struct ipt_log_info *info,
 		break;
 	}
 	case IPPROTO_ESP: {
-		struct ip_esp_hdr _esph, *eh;
+		struct ip_esp_hdr _esph;
+		const struct ip_esp_hdr *eh;
 
 		/* Max length: 10 "PROTO=ESP " */
 		printk("PROTO=ESP ");
@@ -328,10 +334,10 @@ static void dump_packet(const struct ipt_log_info *info,
 	}
 
 	/* Max length: 15 "UID=4294967295 " */
- 	if ((info->logflags & IPT_LOG_UID) && !iphoff && skb->sk) {
+	if ((logflags & IPT_LOG_UID) && !iphoff && skb->sk) {
 		read_lock_bh(&skb->sk->sk_callback_lock);
 		if (skb->sk->sk_socket && skb->sk->sk_socket->file)
- 			printk("UID=%u ", skb->sk->sk_socket->file->f_uid);
+			printk("UID=%u ", skb->sk->sk_socket->file->f_uid);
 		read_unlock_bh(&skb->sk->sk_callback_lock);
 	}
 
@@ -339,6 +345,7 @@ static void dump_packet(const struct ipt_log_info *info,
 	/* IP:      40+46+6+11+127 = 230 */
 	/* TCP:     10+max(25,20+30+13+9+32+11+127) = 252 */
 	/* UDP:     10+max(25,20) = 35 */
+	/* UDPLITE: 14+max(25,20) = 39 */
 	/* ICMP:    11+max(25, 18+25+max(19,14,24+3+n+10,3+n+10)) = 91+n */
 	/* ESP:     10+max(25)+15 = 50 */
 	/* AH:      9+max(25)+15 = 49 */
@@ -349,28 +356,42 @@ static void dump_packet(const struct ipt_log_info *info,
 	/* maxlen = 230+   91  + 230 + 252 = 803 */
 }
 
+static struct nf_loginfo default_loginfo = {
+	.type	= NF_LOG_TYPE_LOG,
+	.u = {
+		.log = {
+			.level    = 0,
+			.logflags = NF_LOG_MASK,
+		},
+	},
+};
+
 static void
-ipt_log_packet(unsigned int hooknum,
+ipt_log_packet(unsigned int pf,
+	       unsigned int hooknum,
 	       const struct sk_buff *skb,
 	       const struct net_device *in,
 	       const struct net_device *out,
-	       const struct ipt_log_info *loginfo,
-	       const char *level_string,
+	       const struct nf_loginfo *loginfo,
 	       const char *prefix)
 {
+	if (!loginfo)
+		loginfo = &default_loginfo;
+
 	spin_lock_bh(&log_lock);
-	printk(level_string);
-	printk("%sIN=%s OUT=%s ",
-	       prefix == NULL ? loginfo->prefix : prefix,
+	printk("<%d>%sIN=%s OUT=%s ", loginfo->u.log.level,
+	       prefix,
 	       in ? in->name : "",
 	       out ? out->name : "");
 #ifdef CONFIG_BRIDGE_NETFILTER
 	if (skb->nf_bridge) {
-		struct net_device *physindev = skb->nf_bridge->physindev;
-		struct net_device *physoutdev = skb->nf_bridge->physoutdev;
+		const struct net_device *physindev;
+		const struct net_device *physoutdev;
 
+		physindev = skb->nf_bridge->physindev;
 		if (physindev && in != physindev)
 			printk("PHYSIN=%s ", physindev->name);
+		physoutdev = skb->nf_bridge->physoutdev;
 		if (physoutdev && out != physoutdev)
 			printk("PHYSOUT=%s ", physoutdev->name);
 	}
@@ -380,9 +401,9 @@ ipt_log_packet(unsigned int hooknum,
 		/* MAC logging for input chain only. */
 		printk("MAC=");
 		if (skb->dev && skb->dev->hard_header_len
-		    && skb->mac.raw != (void*)skb->nh.iph) {
+		    && skb->mac_header != skb->network_header) {
 			int i;
-			unsigned char *p = skb->mac.raw;
+			const unsigned char *p = skb_mac_header(skb);
 			for (i = 0; i < skb->dev->hard_header_len; i++,p++)
 				printk("%02x%c", *p,
 				       i==skb->dev->hard_header_len - 1
@@ -397,89 +418,76 @@ ipt_log_packet(unsigned int hooknum,
 }
 
 static unsigned int
-ipt_log_target(struct sk_buff **pskb,
+ipt_log_target(struct sk_buff *skb,
 	       const struct net_device *in,
 	       const struct net_device *out,
 	       unsigned int hooknum,
-	       const void *targinfo,
-	       void *userinfo)
+	       const struct xt_target *target,
+	       const void *targinfo)
 {
 	const struct ipt_log_info *loginfo = targinfo;
-	char level_string[4] = "< >";
+	struct nf_loginfo li;
 
-	level_string[1] = '0' + (loginfo->level % 8);
-	ipt_log_packet(hooknum, *pskb, in, out, loginfo, level_string, NULL);
+	li.type = NF_LOG_TYPE_LOG;
+	li.u.log.level = loginfo->level;
+	li.u.log.logflags = loginfo->logflags;
 
-	return IPT_CONTINUE;
+	ipt_log_packet(PF_INET, hooknum, skb, in, out, &li,
+		       loginfo->prefix);
+	return XT_CONTINUE;
 }
 
-static void
-ipt_logfn(unsigned int hooknum,
-	  const struct sk_buff *skb,
-	  const struct net_device *in,
-	  const struct net_device *out,
-	  const char *prefix)
-{
-	struct ipt_log_info loginfo = { 
-		.level = 0, 
-		.logflags = IPT_LOG_MASK, 
-		.prefix = "" 
-	};
-
-	ipt_log_packet(hooknum, skb, in, out, &loginfo, KERN_WARNING, prefix);
-}
-
-static int ipt_log_checkentry(const char *tablename,
-			      const struct ipt_entry *e,
-			      void *targinfo,
-			      unsigned int targinfosize,
-			      unsigned int hook_mask)
+static bool ipt_log_checkentry(const char *tablename,
+			       const void *e,
+			       const struct xt_target *target,
+			       void *targinfo,
+			       unsigned int hook_mask)
 {
 	const struct ipt_log_info *loginfo = targinfo;
-
-	if (targinfosize != IPT_ALIGN(sizeof(struct ipt_log_info))) {
-		DEBUGP("LOG: targinfosize %u != %u\n",
-		       targinfosize, IPT_ALIGN(sizeof(struct ipt_log_info)));
-		return 0;
-	}
 
 	if (loginfo->level >= 8) {
-		DEBUGP("LOG: level %u >= 8\n", loginfo->level);
-		return 0;
+		pr_debug("LOG: level %u >= 8\n", loginfo->level);
+		return false;
 	}
-
 	if (loginfo->prefix[sizeof(loginfo->prefix)-1] != '\0') {
-		DEBUGP("LOG: prefix term %i\n",
-		       loginfo->prefix[sizeof(loginfo->prefix)-1]);
-		return 0;
+		pr_debug("LOG: prefix term %i\n",
+			 loginfo->prefix[sizeof(loginfo->prefix)-1]);
+		return false;
 	}
-
-	return 1;
+	return true;
 }
 
-static struct ipt_target ipt_log_reg = {
+static struct xt_target ipt_log_reg __read_mostly = {
 	.name		= "LOG",
+	.family		= AF_INET,
 	.target		= ipt_log_target,
+	.targetsize	= sizeof(struct ipt_log_info),
 	.checkentry	= ipt_log_checkentry,
 	.me		= THIS_MODULE,
 };
 
-static int __init init(void)
+static struct nf_logger ipt_log_logger ={
+	.name		= "ipt_LOG",
+	.logfn		= &ipt_log_packet,
+	.me		= THIS_MODULE,
+};
+
+static int __init ipt_log_init(void)
 {
-	if (ipt_register_target(&ipt_log_reg))
-		return -EINVAL;
-	if (nflog)
-		nf_log_register(PF_INET, &ipt_logfn);
-	
+	int ret;
+
+	ret = xt_register_target(&ipt_log_reg);
+	if (ret < 0)
+		return ret;
+	nf_log_register(PF_INET, &ipt_log_logger);
 	return 0;
 }
 
-static void __exit fini(void)
+static void __exit ipt_log_fini(void)
 {
-	if (nflog)
-		nf_log_unregister(PF_INET, &ipt_logfn);
-	ipt_unregister_target(&ipt_log_reg);
+	nf_log_unregister(&ipt_log_logger);
+	xt_unregister_target(&ipt_log_reg);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ipt_log_init);
+module_exit(ipt_log_fini);

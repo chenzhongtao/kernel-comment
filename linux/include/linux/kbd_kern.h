@@ -75,7 +75,7 @@ extern int do_poke_blanked_console;
 
 extern void (*kbd_ledfunc)(unsigned int led);
 
-extern void set_console(int nr);
+extern int set_console(int nr);
 extern void schedule_console_callback(void);
 
 static inline void set_leds(void)
@@ -135,6 +135,8 @@ static inline void chg_vc_kbd_led(struct kbd_struct * kbd, int flag)
 
 #define U(x) ((x) ^ 0xf000)
 
+#define BRL_UC_ROW 0x2800
+
 /* keyboard.c */
 
 struct console;
@@ -151,7 +153,15 @@ extern unsigned int keymap_count;
 
 static inline void con_schedule_flip(struct tty_struct *t)
 {
-	schedule_work(&t->flip.work);
+	unsigned long flags;
+	spin_lock_irqsave(&t->buf.lock, flags);
+	if (t->buf.tail != NULL)
+		t->buf.tail->commit = t->buf.tail->used;
+	spin_unlock_irqrestore(&t->buf.lock, flags);
+	schedule_delayed_work(&t->buf.work, 0);
 }
+
+/* mac_hid.c */
+extern int mac_hid_mouse_emulate_buttons(int, unsigned int, int);
 
 #endif

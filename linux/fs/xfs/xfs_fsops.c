@@ -1,66 +1,50 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
+#include "xfs_bit.h"
 #include "xfs_inum.h"
 #include "xfs_log.h"
 #include "xfs_trans.h"
 #include "xfs_sb.h"
-#include "xfs_dir.h"
+#include "xfs_ag.h"
+#include "xfs_dir2.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
-#include "xfs_ag.h"
-#include "xfs_alloc_btree.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_alloc_btree.h"
 #include "xfs_ialloc_btree.h"
+#include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
+#include "xfs_dinode.h"
+#include "xfs_inode.h"
+#include "xfs_inode_item.h"
 #include "xfs_btree.h"
 #include "xfs_error.h"
 #include "xfs_alloc.h"
 #include "xfs_ialloc.h"
 #include "xfs_fsops.h"
 #include "xfs_itable.h"
-#include "xfs_rw.h"
-#include "xfs_refcache.h"
 #include "xfs_trans_space.h"
 #include "xfs_rtalloc.h"
-#include "xfs_dir2.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
-#include "xfs_dir2_sf.h"
-#include "xfs_dinode.h"
-#include "xfs_inode.h"
-#include "xfs_inode_item.h"
+#include "xfs_rw.h"
+#include "xfs_filestream.h"
 
 /*
  * File system operations
@@ -110,7 +94,11 @@ xfs_fs_geometry(
 			(XFS_SB_VERSION_HASDIRV2(&mp->m_sb) ?
 				XFS_FSOP_GEOM_FLAGS_DIRV2 : 0) |
 			(XFS_SB_VERSION_HASSECTOR(&mp->m_sb) ?
-				XFS_FSOP_GEOM_FLAGS_SECTOR : 0);
+				XFS_FSOP_GEOM_FLAGS_SECTOR : 0) |
+			(xfs_sb_version_haslazysbcount(&mp->m_sb) ?
+				XFS_FSOP_GEOM_FLAGS_LAZYSB : 0) |
+			(XFS_SB_VERSION_HASATTR2(&mp->m_sb) ?
+				XFS_FSOP_GEOM_FLAGS_ATTR2 : 0);
 		geo->logsectsize = XFS_SB_VERSION_HASSECTOR(&mp->m_sb) ?
 				mp->m_sb.sb_logsectsize : BBSIZE;
 		geo->rtsectsize = mp->m_sb.sb_blocksize;
@@ -148,13 +136,14 @@ xfs_growfs_data_private(
 	xfs_rfsblock_t		nfree;
 	xfs_agnumber_t		oagcount;
 	int			pct;
-	xfs_sb_t		*sbp;
 	xfs_trans_t		*tp;
 
 	nb = in->newblocks;
 	pct = in->imaxpct;
 	if (nb < mp->m_sb.sb_dblocks || pct < 0 || pct > 100)
 		return XFS_ERROR(EINVAL);
+	if ((error = xfs_sb_validate_fsb_count(&mp->m_sb, nb)))
+		return error;
 	dpct = pct - mp->m_sb.sb_imax_pct;
 	error = xfs_read_buf(mp, mp->m_ddev_targp,
 			XFS_FSB_TO_BB(mp, nb) - XFS_FSS_TO_BB(mp, 1),
@@ -176,6 +165,7 @@ xfs_growfs_data_private(
 	new = nb - mp->m_sb.sb_dblocks;
 	oagcount = mp->m_sb.sb_agcount;
 	if (nagcount > oagcount) {
+		xfs_filestream_flush(mp);
 		down_write(&mp->m_peraglock);
 		mp->m_perag = kmem_realloc(mp->m_perag,
 			sizeof(xfs_perag_t) * nagcount,
@@ -188,6 +178,7 @@ xfs_growfs_data_private(
 		up_write(&mp->m_peraglock);
 	}
 	tp = xfs_trans_alloc(mp, XFS_TRANS_GROWFS);
+	tp->t_flags |= XFS_TRANS_RESERVE;
 	if ((error = xfs_trans_reserve(tp, XFS_GROWFS_SPACE_RES(mp),
 			XFS_GROWDATA_LOG_RES(mp), 0, 0, 0))) {
 		xfs_trans_cancel(tp, 0);
@@ -204,28 +195,26 @@ xfs_growfs_data_private(
 				  XFS_FSS_TO_BB(mp, 1), 0);
 		agf = XFS_BUF_TO_AGF(bp);
 		memset(agf, 0, mp->m_sb.sb_sectsize);
-		INT_SET(agf->agf_magicnum, ARCH_CONVERT, XFS_AGF_MAGIC);
-		INT_SET(agf->agf_versionnum, ARCH_CONVERT, XFS_AGF_VERSION);
-		INT_SET(agf->agf_seqno, ARCH_CONVERT, agno);
+		agf->agf_magicnum = cpu_to_be32(XFS_AGF_MAGIC);
+		agf->agf_versionnum = cpu_to_be32(XFS_AGF_VERSION);
+		agf->agf_seqno = cpu_to_be32(agno);
 		if (agno == nagcount - 1)
 			agsize =
 				nb -
 				(agno * (xfs_rfsblock_t)mp->m_sb.sb_agblocks);
 		else
 			agsize = mp->m_sb.sb_agblocks;
-		INT_SET(agf->agf_length, ARCH_CONVERT, agsize);
-		INT_SET(agf->agf_roots[XFS_BTNUM_BNOi], ARCH_CONVERT,
-			XFS_BNO_BLOCK(mp));
-		INT_SET(agf->agf_roots[XFS_BTNUM_CNTi], ARCH_CONVERT,
-			XFS_CNT_BLOCK(mp));
-		INT_SET(agf->agf_levels[XFS_BTNUM_BNOi], ARCH_CONVERT, 1);
-		INT_SET(agf->agf_levels[XFS_BTNUM_CNTi], ARCH_CONVERT, 1);
-		INT_ZERO(agf->agf_flfirst, ARCH_CONVERT);
-		INT_SET(agf->agf_fllast, ARCH_CONVERT, XFS_AGFL_SIZE(mp) - 1);
-		INT_ZERO(agf->agf_flcount, ARCH_CONVERT);
+		agf->agf_length = cpu_to_be32(agsize);
+		agf->agf_roots[XFS_BTNUM_BNOi] = cpu_to_be32(XFS_BNO_BLOCK(mp));
+		agf->agf_roots[XFS_BTNUM_CNTi] = cpu_to_be32(XFS_CNT_BLOCK(mp));
+		agf->agf_levels[XFS_BTNUM_BNOi] = cpu_to_be32(1);
+		agf->agf_levels[XFS_BTNUM_CNTi] = cpu_to_be32(1);
+		agf->agf_flfirst = 0;
+		agf->agf_fllast = cpu_to_be32(XFS_AGFL_SIZE(mp) - 1);
+		agf->agf_flcount = 0;
 		tmpsize = agsize - XFS_PREALLOC_BLOCKS(mp);
-		INT_SET(agf->agf_freeblks, ARCH_CONVERT, tmpsize);
-		INT_SET(agf->agf_longest, ARCH_CONVERT, tmpsize);
+		agf->agf_freeblks = cpu_to_be32(tmpsize);
+		agf->agf_longest = cpu_to_be32(tmpsize);
 		error = xfs_bwrite(mp, bp);
 		if (error) {
 			goto error0;
@@ -238,19 +227,18 @@ xfs_growfs_data_private(
 				  XFS_FSS_TO_BB(mp, 1), 0);
 		agi = XFS_BUF_TO_AGI(bp);
 		memset(agi, 0, mp->m_sb.sb_sectsize);
-		INT_SET(agi->agi_magicnum, ARCH_CONVERT, XFS_AGI_MAGIC);
-		INT_SET(agi->agi_versionnum, ARCH_CONVERT, XFS_AGI_VERSION);
-		INT_SET(agi->agi_seqno, ARCH_CONVERT, agno);
-		INT_SET(agi->agi_length, ARCH_CONVERT, agsize);
-		INT_ZERO(agi->agi_count, ARCH_CONVERT);
-		INT_SET(agi->agi_root, ARCH_CONVERT, XFS_IBT_BLOCK(mp));
-		INT_SET(agi->agi_level, ARCH_CONVERT, 1);
-		INT_ZERO(agi->agi_freecount, ARCH_CONVERT);
-		INT_SET(agi->agi_newino, ARCH_CONVERT, NULLAGINO);
-		INT_SET(agi->agi_dirino, ARCH_CONVERT, NULLAGINO);
+		agi->agi_magicnum = cpu_to_be32(XFS_AGI_MAGIC);
+		agi->agi_versionnum = cpu_to_be32(XFS_AGI_VERSION);
+		agi->agi_seqno = cpu_to_be32(agno);
+		agi->agi_length = cpu_to_be32(agsize);
+		agi->agi_count = 0;
+		agi->agi_root = cpu_to_be32(XFS_IBT_BLOCK(mp));
+		agi->agi_level = cpu_to_be32(1);
+		agi->agi_freecount = 0;
+		agi->agi_newino = cpu_to_be32(NULLAGINO);
+		agi->agi_dirino = cpu_to_be32(NULLAGINO);
 		for (bucket = 0; bucket < XFS_AGI_UNLINKED_BUCKETS; bucket++)
-			INT_SET(agi->agi_unlinked[bucket], ARCH_CONVERT,
-				NULLAGINO);
+			agi->agi_unlinked[bucket] = cpu_to_be32(NULLAGINO);
 		error = xfs_bwrite(mp, bp);
 		if (error) {
 			goto error0;
@@ -263,17 +251,15 @@ xfs_growfs_data_private(
 			BTOBB(mp->m_sb.sb_blocksize), 0);
 		block = XFS_BUF_TO_SBLOCK(bp);
 		memset(block, 0, mp->m_sb.sb_blocksize);
-		INT_SET(block->bb_magic, ARCH_CONVERT, XFS_ABTB_MAGIC);
-		INT_ZERO(block->bb_level, ARCH_CONVERT);
-		INT_SET(block->bb_numrecs, ARCH_CONVERT, 1);
-		INT_SET(block->bb_leftsib, ARCH_CONVERT, NULLAGBLOCK);
-		INT_SET(block->bb_rightsib, ARCH_CONVERT, NULLAGBLOCK);
-		arec = XFS_BTREE_REC_ADDR(mp->m_sb.sb_blocksize, xfs_alloc,
-			block, 1, mp->m_alloc_mxr[0]);
-		INT_SET(arec->ar_startblock, ARCH_CONVERT,
-			XFS_PREALLOC_BLOCKS(mp));
-		INT_SET(arec->ar_blockcount, ARCH_CONVERT,
-			agsize - INT_GET(arec->ar_startblock, ARCH_CONVERT));
+		block->bb_magic = cpu_to_be32(XFS_ABTB_MAGIC);
+		block->bb_level = 0;
+		block->bb_numrecs = cpu_to_be16(1);
+		block->bb_leftsib = cpu_to_be32(NULLAGBLOCK);
+		block->bb_rightsib = cpu_to_be32(NULLAGBLOCK);
+		arec = XFS_BTREE_REC_ADDR(xfs_alloc, block, 1);
+		arec->ar_startblock = cpu_to_be32(XFS_PREALLOC_BLOCKS(mp));
+		arec->ar_blockcount = cpu_to_be32(
+			agsize - be32_to_cpu(arec->ar_startblock));
 		error = xfs_bwrite(mp, bp);
 		if (error) {
 			goto error0;
@@ -286,18 +272,16 @@ xfs_growfs_data_private(
 			BTOBB(mp->m_sb.sb_blocksize), 0);
 		block = XFS_BUF_TO_SBLOCK(bp);
 		memset(block, 0, mp->m_sb.sb_blocksize);
-		INT_SET(block->bb_magic, ARCH_CONVERT, XFS_ABTC_MAGIC);
-		INT_ZERO(block->bb_level, ARCH_CONVERT);
-		INT_SET(block->bb_numrecs, ARCH_CONVERT, 1);
-		INT_SET(block->bb_leftsib, ARCH_CONVERT, NULLAGBLOCK);
-		INT_SET(block->bb_rightsib, ARCH_CONVERT, NULLAGBLOCK);
-		arec = XFS_BTREE_REC_ADDR(mp->m_sb.sb_blocksize, xfs_alloc,
-			block, 1, mp->m_alloc_mxr[0]);
-		INT_SET(arec->ar_startblock, ARCH_CONVERT,
-			XFS_PREALLOC_BLOCKS(mp));
-		INT_SET(arec->ar_blockcount, ARCH_CONVERT,
-			agsize - INT_GET(arec->ar_startblock, ARCH_CONVERT));
-		nfree += INT_GET(arec->ar_blockcount, ARCH_CONVERT);
+		block->bb_magic = cpu_to_be32(XFS_ABTC_MAGIC);
+		block->bb_level = 0;
+		block->bb_numrecs = cpu_to_be16(1);
+		block->bb_leftsib = cpu_to_be32(NULLAGBLOCK);
+		block->bb_rightsib = cpu_to_be32(NULLAGBLOCK);
+		arec = XFS_BTREE_REC_ADDR(xfs_alloc, block, 1);
+		arec->ar_startblock = cpu_to_be32(XFS_PREALLOC_BLOCKS(mp));
+		arec->ar_blockcount = cpu_to_be32(
+			agsize - be32_to_cpu(arec->ar_startblock));
+		nfree += be32_to_cpu(arec->ar_blockcount);
 		error = xfs_bwrite(mp, bp);
 		if (error) {
 			goto error0;
@@ -310,11 +294,11 @@ xfs_growfs_data_private(
 			BTOBB(mp->m_sb.sb_blocksize), 0);
 		block = XFS_BUF_TO_SBLOCK(bp);
 		memset(block, 0, mp->m_sb.sb_blocksize);
-		INT_SET(block->bb_magic, ARCH_CONVERT, XFS_IBT_MAGIC);
-		INT_ZERO(block->bb_level, ARCH_CONVERT);
-		INT_ZERO(block->bb_numrecs, ARCH_CONVERT);
-		INT_SET(block->bb_leftsib, ARCH_CONVERT, NULLAGBLOCK);
-		INT_SET(block->bb_rightsib, ARCH_CONVERT, NULLAGBLOCK);
+		block->bb_magic = cpu_to_be32(XFS_IBT_MAGIC);
+		block->bb_level = 0;
+		block->bb_numrecs = 0;
+		block->bb_leftsib = cpu_to_be32(NULLAGBLOCK);
+		block->bb_rightsib = cpu_to_be32(NULLAGBLOCK);
 		error = xfs_bwrite(mp, bp);
 		if (error) {
 			goto error0;
@@ -334,10 +318,9 @@ xfs_growfs_data_private(
 		}
 		ASSERT(bp);
 		agi = XFS_BUF_TO_AGI(bp);
-		INT_MOD(agi->agi_length, ARCH_CONVERT, new);
+		be32_add(&agi->agi_length, new);
 		ASSERT(nagcount == oagcount ||
-		       INT_GET(agi->agi_length, ARCH_CONVERT) ==
-				mp->m_sb.sb_agblocks);
+		       be32_to_cpu(agi->agi_length) == mp->m_sb.sb_agblocks);
 		xfs_ialloc_log_agi(tp, bp, XFS_AGI_LENGTH);
 		/*
 		 * Change agf length.
@@ -348,14 +331,15 @@ xfs_growfs_data_private(
 		}
 		ASSERT(bp);
 		agf = XFS_BUF_TO_AGF(bp);
-		INT_MOD(agf->agf_length, ARCH_CONVERT, new);
-		ASSERT(INT_GET(agf->agf_length, ARCH_CONVERT) ==
-				INT_GET(agi->agi_length, ARCH_CONVERT));
+		be32_add(&agf->agf_length, new);
+		ASSERT(be32_to_cpu(agf->agf_length) ==
+		       be32_to_cpu(agi->agi_length));
+		xfs_alloc_log_agf(tp, bp, XFS_AGF_LENGTH);
 		/*
 		 * Free the new space.
 		 */
 		error = xfs_free_extent(tp, XFS_AGB_TO_FSB(mp, agno,
-			INT_GET(agf->agf_length, ARCH_CONVERT) - new), new);
+			be32_to_cpu(agf->agf_length) - new), new);
 		if (error) {
 			goto error0;
 		}
@@ -369,7 +353,7 @@ xfs_growfs_data_private(
 		xfs_trans_mod_sb(tp, XFS_TRANS_SB_FDBLOCKS, nfree);
 	if (dpct)
 		xfs_trans_mod_sb(tp, XFS_TRANS_SB_IMAXPCT, dpct);
-	error = xfs_trans_commit(tp, 0, NULL);
+	error = xfs_trans_commit(tp, 0);
 	if (error) {
 		return error;
 	}
@@ -392,8 +376,7 @@ xfs_growfs_data_private(
 				error, agno);
 			break;
 		}
-		sbp = XFS_BUF_TO_SBP(bp);
-		xfs_xlatesb(sbp, &mp->m_sb, -1, ARCH_CONVERT, XFS_SB_ALL_BITS);
+		xfs_sb_to_disk(XFS_BUF_TO_SBP(bp), &mp->m_sb, XFS_SB_ALL_BITS);
 		/*
 		 * If we get an error writing out the alternate superblocks,
 		 * just issue a warning and continue.  The real work is
@@ -450,10 +433,10 @@ xfs_growfs_data(
 	xfs_growfs_data_t	*in)
 {
 	int error;
-	if (!cpsema(&mp->m_growlock))
+	if (!mutex_trylock(&mp->m_growlock))
 		return XFS_ERROR(EWOULDBLOCK);
 	error = xfs_growfs_data_private(mp, in);
-	vsema(&mp->m_growlock);
+	mutex_unlock(&mp->m_growlock);
 	return error;
 }
 
@@ -463,10 +446,10 @@ xfs_growfs_log(
 	xfs_growfs_log_t	*in)
 {
 	int error;
-	if (!cpsema(&mp->m_growlock))
+	if (!mutex_trylock(&mp->m_growlock))
 		return XFS_ERROR(EWOULDBLOCK);
 	error = xfs_growfs_log_private(mp, in);
-	vsema(&mp->m_growlock);
+	mutex_unlock(&mp->m_growlock);
 	return error;
 }
 
@@ -481,8 +464,9 @@ xfs_fs_counts(
 {
 	unsigned long	s;
 
+	xfs_icsb_sync_counters_flags(mp, XFS_ICSB_LAZY_COUNT);
 	s = XFS_SB_LOCK(mp);
-	cnt->freedata = mp->m_sb.sb_fdblocks;
+	cnt->freedata = mp->m_sb.sb_fdblocks - XFS_ALLOC_SET_ASIDE(mp);
 	cnt->freertx = mp->m_sb.sb_frextents;
 	cnt->freeino = mp->m_sb.sb_ifree;
 	cnt->allocino = mp->m_sb.sb_icount;
@@ -495,7 +479,7 @@ xfs_fs_counts(
  *
  * xfs_reserve_blocks is called to set m_resblks
  * in the in-core mount table. The number of unused reserved blocks
- * is kept in m_resbls_avail.
+ * is kept in m_resblks_avail.
  *
  * Reserve the requested number of blocks if available. Otherwise return
  * as many as possible to satisfy the request. The actual number
@@ -511,63 +495,113 @@ xfs_reserve_blocks(
 	__uint64_t              *inval,
 	xfs_fsop_resblks_t      *outval)
 {
-	__int64_t		lcounter, delta;
+	__int64_t		lcounter, delta, fdblks_delta;
 	__uint64_t		request;
 	unsigned long		s;
 
 	/* If inval is null, report current values and return */
-
 	if (inval == (__uint64_t *)NULL) {
+		if (!outval)
+			return EINVAL;
 		outval->resblks = mp->m_resblks;
 		outval->resblks_avail = mp->m_resblks_avail;
-		return(0);
+		return 0;
 	}
 
 	request = *inval;
+
+	/*
+	 * With per-cpu counters, this becomes an interesting
+	 * problem. we needto work out if we are freeing or allocation
+	 * blocks first, then we can do the modification as necessary.
+	 *
+	 * We do this under the XFS_SB_LOCK so that if we are near
+	 * ENOSPC, we will hold out any changes while we work out
+	 * what to do. This means that the amount of free space can
+	 * change while we do this, so we need to retry if we end up
+	 * trying to reserve more space than is available.
+	 *
+	 * We also use the xfs_mod_incore_sb() interface so that we
+	 * don't have to care about whether per cpu counter are
+	 * enabled, disabled or even compiled in....
+	 */
+retry:
 	s = XFS_SB_LOCK(mp);
+	xfs_icsb_sync_counters_flags(mp, XFS_ICSB_SB_LOCKED);
 
 	/*
 	 * If our previous reservation was larger than the current value,
 	 * then move any unused blocks back to the free pool.
 	 */
-
+	fdblks_delta = 0;
 	if (mp->m_resblks > request) {
 		lcounter = mp->m_resblks_avail - request;
 		if (lcounter  > 0) {		/* release unused blocks */
-			mp->m_sb.sb_fdblocks += lcounter;
+			fdblks_delta = lcounter;
 			mp->m_resblks_avail -= lcounter;
 		}
 		mp->m_resblks = request;
 	} else {
+		__int64_t	free;
+
+		free =  mp->m_sb.sb_fdblocks - XFS_ALLOC_SET_ASIDE(mp);
+		if (!free)
+			goto out; /* ENOSPC and fdblks_delta = 0 */
+
 		delta = request - mp->m_resblks;
-		lcounter = mp->m_sb.sb_fdblocks - delta;
+		lcounter = free - delta;
 		if (lcounter < 0) {
 			/* We can't satisfy the request, just get what we can */
-			mp->m_resblks += mp->m_sb.sb_fdblocks;
-			mp->m_resblks_avail += mp->m_sb.sb_fdblocks;
-			mp->m_sb.sb_fdblocks = 0;
+			mp->m_resblks += free;
+			mp->m_resblks_avail += free;
+			fdblks_delta = -free;
+			mp->m_sb.sb_fdblocks = XFS_ALLOC_SET_ASIDE(mp);
 		} else {
-			mp->m_sb.sb_fdblocks = lcounter;
+			fdblks_delta = -delta;
+			mp->m_sb.sb_fdblocks =
+				lcounter + XFS_ALLOC_SET_ASIDE(mp);
 			mp->m_resblks = request;
 			mp->m_resblks_avail += delta;
 		}
 	}
-
-	outval->resblks = mp->m_resblks;
-	outval->resblks_avail = mp->m_resblks_avail;
+out:
+	if (outval) {
+		outval->resblks = mp->m_resblks;
+		outval->resblks_avail = mp->m_resblks_avail;
+	}
 	XFS_SB_UNLOCK(mp, s);
-	return(0);
+
+	if (fdblks_delta) {
+		/*
+		 * If we are putting blocks back here, m_resblks_avail is
+		 * already at it's max so this will put it in the free pool.
+		 *
+		 * If we need space, we'll either succeed in getting it
+		 * from the free block count or we'll get an enospc. If
+		 * we get a ENOSPC, it means things changed while we were
+		 * calculating fdblks_delta and so we should try again to
+		 * see if there is anything left to reserve.
+		 *
+		 * Don't set the reserved flag here - we don't want to reserve
+		 * the extra reserve blocks from the reserve.....
+		 */
+		int error;
+		error = xfs_mod_incore_sb(mp, XFS_SBS_FDBLOCKS, fdblks_delta, 0);
+		if (error == ENOSPC)
+			goto retry;
+	}
+
+	return 0;
 }
 
 void
-xfs_fs_log_dummy(xfs_mount_t *mp)
+xfs_fs_log_dummy(
+	xfs_mount_t	*mp)
 {
-	xfs_trans_t *tp;
-	xfs_inode_t *ip;
-
+	xfs_trans_t	*tp;
+	xfs_inode_t	*ip;
 
 	tp = _xfs_trans_alloc(mp, XFS_TRANS_DUMMY1);
-	atomic_inc(&mp->m_active_trans);
 	if (xfs_trans_reserve(tp, 0, XFS_ICHANGE_LOG_RES(mp), 0, 0, 0)) {
 		xfs_trans_cancel(tp, 0);
 		return;
@@ -580,7 +614,7 @@ xfs_fs_log_dummy(xfs_mount_t *mp)
 	xfs_trans_ihold(tp, ip);
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	xfs_trans_set_sync(tp);
-	xfs_trans_commit(tp, 0, NULL);
+	xfs_trans_commit(tp, 0);
 
 	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 }
@@ -592,21 +626,21 @@ xfs_fs_goingdown(
 {
 	switch (inflags) {
 	case XFS_FSOP_GOING_FLAGS_DEFAULT: {
-		struct vfs *vfsp = XFS_MTOVFS(mp);
-		struct super_block *sb = freeze_bdev(vfsp->vfs_super->s_bdev);
+		struct super_block *sb = freeze_bdev(mp->m_super->s_bdev);
 
-		if (sb) {
-			xfs_force_shutdown(mp, XFS_FORCE_UMOUNT);
+		if (sb && !IS_ERR(sb)) {
+			xfs_force_shutdown(mp, SHUTDOWN_FORCE_UMOUNT);
 			thaw_bdev(sb->s_bdev, sb);
 		}
 	
 		break;
 	}
 	case XFS_FSOP_GOING_FLAGS_LOGFLUSH:
-		xfs_force_shutdown(mp, XFS_FORCE_UMOUNT);
+		xfs_force_shutdown(mp, SHUTDOWN_FORCE_UMOUNT);
 		break;
 	case XFS_FSOP_GOING_FLAGS_NOLOGFLUSH:
-		xfs_force_shutdown(mp, XFS_FORCE_UMOUNT|XFS_LOG_IO_ERROR);
+		xfs_force_shutdown(mp,
+				SHUTDOWN_FORCE_UMOUNT | SHUTDOWN_LOG_IO_ERROR);
 		break;
 	default:
 		return XFS_ERROR(EINVAL);

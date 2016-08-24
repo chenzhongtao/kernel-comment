@@ -21,9 +21,9 @@
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 
-int dir_notify_enable = 1;
+int dir_notify_enable __read_mostly = 1;
 
-static kmem_cache_t *dn_cache;
+static struct kmem_cache *dn_cache __read_mostly;
 
 static void redo_inode_mask(struct inode *inode)
 {
@@ -42,7 +42,7 @@ void dnotify_flush(struct file *filp, fl_owner_t id)
 	struct dnotify_struct **prev;
 	struct inode *inode;
 
-	inode = filp->f_dentry->d_inode;
+	inode = filp->f_path.dentry->d_inode;
 	if (!S_ISDIR(inode->i_mode))
 		return;
 	spin_lock(&inode->i_lock);
@@ -74,10 +74,10 @@ int fcntl_dirnotify(int fd, struct file *filp, unsigned long arg)
 	}
 	if (!dir_notify_enable)
 		return -EINVAL;
-	inode = filp->f_dentry->d_inode;
+	inode = filp->f_path.dentry->d_inode;
 	if (!S_ISDIR(inode->i_mode))
 		return -ENOTDIR;
-	dn = kmem_cache_alloc(dn_cache, SLAB_KERNEL);
+	dn = kmem_cache_alloc(dn_cache, GFP_KERNEL);
 	if (dn == NULL)
 		return -ENOMEM;
 	spin_lock(&inode->i_lock);
@@ -92,7 +92,7 @@ int fcntl_dirnotify(int fd, struct file *filp, unsigned long arg)
 		prev = &odn->dn_next;
 	}
 
-	error = f_setown(filp, current->pid, 0);
+	error = __f_setown(filp, task_pid(current), PIDTYPE_PID, 0);
 	if (error)
 		goto out_free;
 
@@ -176,7 +176,7 @@ EXPORT_SYMBOL_GPL(dnotify_parent);
 static int __init dnotify_init(void)
 {
 	dn_cache = kmem_cache_create("dnotify_cache",
-		sizeof(struct dnotify_struct), 0, SLAB_PANIC, NULL, NULL);
+		sizeof(struct dnotify_struct), 0, SLAB_PANIC, NULL);
 	return 0;
 }
 

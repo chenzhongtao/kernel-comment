@@ -10,12 +10,12 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
@@ -77,7 +77,7 @@ unsigned long thread_saved_pc(struct task_struct *tsk)
 /*
  * The idle loop on an m68k..
  */
-void default_idle(void)
+static void default_idle(void)
 {
 	if (!need_resched())
 #if defined(MACH_ATARI_ONLY) && !defined(CONFIG_HADES)
@@ -102,7 +102,9 @@ void cpu_idle(void)
 	while (1) {
 		while (!need_resched())
 			idle();
+		preempt_enable_no_resched();
 		schedule();
+		preempt_disable();
 	}
 }
 
@@ -113,16 +115,12 @@ void machine_restart(char * __unused)
 	for (;;);
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_halt(void)
 {
 	if (mach_halt)
 		mach_halt();
 	for (;;);
 }
-
-EXPORT_SYMBOL(machine_halt);
 
 void machine_power_off(void)
 {
@@ -131,7 +129,8 @@ void machine_power_off(void)
 	for (;;);
 }
 
-EXPORT_SYMBOL(machine_power_off);
+void (*pm_power_off)(void) = machine_power_off;
+EXPORT_SYMBOL(pm_power_off);
 
 void show_regs(struct pt_regs * regs)
 {
@@ -189,6 +188,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	set_fs (fs);
 	return pid;
 }
+EXPORT_SYMBOL(kernel_thread);
 
 void flush_thread(void)
 {
@@ -223,13 +223,13 @@ asmlinkage int m68k_clone(struct pt_regs *regs)
 {
 	unsigned long clone_flags;
 	unsigned long newsp;
-	int *parent_tidptr, *child_tidptr;
+	int __user *parent_tidptr, *child_tidptr;
 
 	/* syscall2 puts clone_flags in d1 and usp in d2 */
 	clone_flags = regs->d1;
 	newsp = regs->d2;
-	parent_tidptr = (int *)regs->d3;
-	child_tidptr = (int *)regs->d4;
+	parent_tidptr = (int __user *)regs->d3;
+	child_tidptr = (int __user *)regs->d4;
 	if (!newsp)
 		newsp = rdusp();
 	return do_fork(clone_flags, newsp, regs, 0,
@@ -242,10 +242,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 {
 	struct pt_regs * childregs;
 	struct switch_stack * childstack, *stack;
-	unsigned long stack_offset, *retp;
+	unsigned long *retp;
 
-	stack_offset = THREAD_SIZE - sizeof(struct pt_regs);
-	childregs = (struct pt_regs *) ((unsigned long) (p->thread_info) + stack_offset);
+	childregs = (struct pt_regs *) (task_stack_page(p) + THREAD_SIZE) - 1;
 
 	*childregs = *regs;
 	childregs->d0 = 0;
@@ -314,6 +313,7 @@ int dump_fpu (struct pt_regs *regs, struct user_m68kfp_struct *fpu)
 		: "memory");
 	return 1;
 }
+EXPORT_SYMBOL(dump_fpu);
 
 /*
  * fill in the user structure for a core dump..
@@ -360,11 +360,12 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 	/* dump floating point stuff */
 	dump->u_fpvalid = dump_fpu (regs, &dump->m68kfp);
 }
+EXPORT_SYMBOL(dump_thread);
 
 /*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(char *name, char **argv, char **envp)
+asmlinkage int sys_execve(char __user *name, char __user * __user *argv, char __user * __user *envp)
 {
 	int error;
 	char * filename;
@@ -390,7 +391,7 @@ unsigned long get_wchan(struct task_struct *p)
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
-	stack_page = (unsigned long)(p->thread_info);
+	stack_page = (unsigned long)task_stack_page(p);
 	fp = ((struct switch_stack *)p->thread.ksp)->a6;
 	do {
 		if (fp < stack_page+sizeof(struct thread_info) ||

@@ -121,7 +121,7 @@ struct in_ecid {			/* Packed card ID information	*/
 typedef struct expansion_card ecard_t;
 typedef unsigned long *loader_t;
 
-typedef struct {			/* Card handler routines	*/
+typedef struct expansion_card_ops {	/* Card handler routines	*/
 	void (*irqenable)(ecard_t *ec, int irqnr);
 	void (*irqdisable)(ecard_t *ec, int irqnr);
 	int  (*irqpending)(ecard_t *ec);
@@ -155,11 +155,12 @@ struct expansion_card {
 	struct resource		resource[ECARD_NUM_RESOURCES];
 
 	/* Public data */
-	volatile unsigned char *irqaddr;	/* address of IRQ register	*/
-	volatile unsigned char *fiqaddr;	/* address of FIQ register	*/
+	void __iomem		*irqaddr;	/* address of IRQ register	*/
+	void __iomem		*fiqaddr;	/* address of FIQ register	*/
 	unsigned char		irqmask;	/* IRQ mask			*/
 	unsigned char		fiqmask;	/* FIQ mask			*/
 	unsigned char  		claimed;	/* Card claimed?		*/
+	unsigned char		easi;		/* EASI card			*/
 
 	void			*irq_data;	/* Data for use for IRQ by card	*/
 	void			*fiq_data;	/* Data for use for FIQ by card	*/
@@ -169,7 +170,6 @@ struct expansion_card {
 	CONST unsigned int	dma;		/* DMA number (for request_dma)	*/
 	CONST unsigned int	irq;		/* IRQ number (for request_irq)	*/
 	CONST unsigned int	fiq;		/* FIQ number (for request_irq)	*/
-	CONST card_type_t	type;		/* Type of card			*/
 	CONST struct in_ecid	cid;		/* Card Identification		*/
 
 	/* Private internal data */
@@ -178,6 +178,8 @@ struct expansion_card {
 	CONST loader_t		loader;		/* loader program */
 	u64			dma_mask;
 };
+
+void ecard_setirq(struct expansion_card *ec, const struct expansion_card_ops *ops, void *irq_data);
 
 struct in_chunk_dir {
 	unsigned int start_offset;
@@ -207,9 +209,16 @@ struct in_chunk_dir {
 extern int ecard_readchunk (struct in_chunk_dir *cd, struct expansion_card *ec, int id, int num);
 
 /*
- * Obtain the address of a card
+ * Obtain the address of a card.  This returns the "old style" address
+ * and should no longer be used.
  */
-extern __deprecated unsigned int ecard_address (struct expansion_card *ec, card_type_t card_type, card_speed_t speed);
+static inline unsigned int __deprecated
+ecard_address(struct expansion_card *ec, card_type_t type, card_speed_t speed)
+{
+	extern unsigned int __ecard_address(struct expansion_card *,
+					    card_type_t, card_speed_t);
+	return __ecard_address(ec, type, speed);
+}
 
 /*
  * Request and release ecard resources
@@ -217,55 +226,9 @@ extern __deprecated unsigned int ecard_address (struct expansion_card *ec, card_
 extern int ecard_request_resources(struct expansion_card *ec);
 extern void ecard_release_resources(struct expansion_card *ec);
 
-#ifdef ECARD_C
-/* Definitions internal to ecard.c - for it's use only!!
- *
- * External expansion card header as read from the card
- */
-struct ex_ecid {
-	unsigned char	r_irq:1;
-	unsigned char	r_zero:1;
-	unsigned char	r_fiq:1;
-	unsigned char	r_id:4;
-	unsigned char	r_a:1;
-
-	unsigned char	r_cd:1;
-	unsigned char	r_is:1;
-	unsigned char	r_w:2;
-	unsigned char	r_r1:4;
-
-	unsigned char	r_r2:8;
-
-	unsigned char	r_prod[2];
-
-	unsigned char	r_manu[2];
-
-	unsigned char	r_country;
-
-	unsigned char	r_fiqmask;
-	unsigned char	r_fiqoff[3];
-
-	unsigned char	r_irqmask;
-	unsigned char	r_irqoff[3];
-};
-
-/*
- * Chunk directory entry as read from the card
- */
-struct ex_chunk_dir {
-	unsigned char r_id;
-	unsigned char r_len[3];
-	unsigned long r_start;
-	union {
-		char string[256];
-		char data[1];
-	} d;
-#define c_id(x)		((x)->r_id)
-#define c_len(x)	((x)->r_len[0]|((x)->r_len[1]<<8)|((x)->r_len[2]<<16))
-#define c_start(x)	((x)->r_start)
-};
-
-#endif
+void __iomem *ecardm_iomap(struct expansion_card *ec, unsigned int res,
+			   unsigned long offset, unsigned long maxsize);
+#define ecardm_iounmap(__ec, __addr)	devm_iounmap(&(__ec)->dev, __addr)
 
 extern struct bus_type ecard_bus_type;
 

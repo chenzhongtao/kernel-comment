@@ -57,7 +57,6 @@
 static const char version[] =
 	"smc-ultra.c:v2.02 2/3/98 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -68,6 +67,7 @@ static const char version[] =
 #include <linux/etherdevice.h>
 
 #include <asm/io.h>
+#include <asm/irq.h>
 #include <asm/system.h>
 
 #include "8390.h"
@@ -111,7 +111,7 @@ static struct isapnp_device_id ultra_device_ids[] __initdata = {
 MODULE_DEVICE_TABLE(isapnp, ultra_device_ids);
 #endif
 
-
+
 #define START_PG		0x00	/* First page of TX buffer */
 
 #define ULTRA_CMDREG	0		/* Offset to ASIC command register. */
@@ -122,12 +122,12 @@ MODULE_DEVICE_TABLE(isapnp, ultra_device_ids);
 #define ULTRA_NIC_OFFSET  16	/* NIC register offset from the base_addr. */
 #define ULTRA_IO_EXTENT 32
 #define EN0_ERWCNT		0x08	/* Early receive warning count. */
-
+
 #ifdef CONFIG_NET_POLL_CONTROLLER
 static void ultra_poll(struct net_device *dev)
 {
 	disable_irq(dev->irq);
-	ei_interrupt(dev->irq, dev, NULL);
+	ei_interrupt(dev->irq, dev);
 	enable_irq(dev->irq);
 }
 #endif
@@ -141,8 +141,6 @@ static int __init do_ultra_probe(struct net_device *dev)
 	int i;
 	int base_addr = dev->base_addr;
 	int irq = dev->irq;
-
-	SET_MODULE_OWNER(dev);
 
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	dev->poll_controller = &ultra_poll;
@@ -167,17 +165,6 @@ static int __init do_ultra_probe(struct net_device *dev)
 	return -ENODEV;
 }
 
-static void cleanup_card(struct net_device *dev)
-{
-	/* NB: ultra_close_card() does free_irq */
-#ifdef __ISAPNP__
-	struct pnp_dev *idev = (struct pnp_dev *)ei_status.priv;
-	if (idev)
-		pnp_device_detach(idev);
-#endif
-	release_region(dev->base_addr - ULTRA_NIC_OFFSET, ULTRA_IO_EXTENT);
-}
-
 #ifndef MODULE
 struct net_device * __init ultra_probe(int unit)
 {
@@ -193,12 +180,7 @@ struct net_device * __init ultra_probe(int unit)
 	err = do_ultra_probe(dev);
 	if (err)
 		goto out;
-	err = register_netdev(dev);
-	if (err)
-		goto out1;
 	return dev;
-out1:
-	cleanup_card(dev);
 out:
 	free_netdev(dev);
 	return ERR_PTR(err);
@@ -216,6 +198,7 @@ static int __init ultra_probe1(struct net_device *dev, int ioaddr)
 	unsigned char num_pages, irqreg, addr, piomode;
 	unsigned char idreg = inb(ioaddr + 7);
 	unsigned char reg4 = inb(ioaddr + 4) & 0x7f;
+	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr, ULTRA_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
@@ -242,10 +225,11 @@ static int __init ultra_probe1(struct net_device *dev, int ioaddr)
 
 	model_name = (idreg & 0xF0) == 0x20 ? "SMC Ultra" : "SMC EtherEZ";
 
-	printk("%s: %s at %#3x,", dev->name, model_name, ioaddr);
-
 	for (i = 0; i < 6; i++)
-		printk(" %2.2X", dev->dev_addr[i] = inb(ioaddr + 8 + i));
+		dev->dev_addr[i] = inb(ioaddr + 8 + i);
+
+	printk("%s: %s at %#3x, %s", dev->name, model_name,
+	       ioaddr, print_mac(mac, dev->dev_addr));
 
 	/* Switch from the station address to the alternate register set and
 	   read the useful registers there. */
@@ -294,9 +278,14 @@ static int __init ultra_probe1(struct net_device *dev, int ioaddr)
 	ei_status.rx_start_page = START_PG + TX_PAGES;
 	ei_status.stop_page = num_pages;
 
-	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
-	dev->mem_end = ei_status.rmem_end
-		= dev->mem_start + (ei_status.stop_page - START_PG)*256;
+	ei_status.mem = ioremap(dev->mem_start, (ei_status.stop_page - START_PG)*256);
+	if (!ei_status.mem) {
+		printk(", failed to ioremap.\n");
+		retval =  -ENOMEM;
+		goto out;
+	}
+
+	dev->mem_end = dev->mem_start + (ei_status.stop_page - START_PG)*256;
 
 	if (piomode) {
 		printk(",%s IRQ %d programmed-I/O mode.\n",
@@ -319,6 +308,9 @@ static int __init ultra_probe1(struct net_device *dev, int ioaddr)
 #endif
 	NS8390_init(dev, 0);
 
+	retval = register_netdev(dev);
+	if (retval)
+		goto out;
 	return 0;
 out:
 	release_region(ioaddr, ULTRA_IO_EXTENT);
@@ -430,16 +422,16 @@ ultra_reset_8390(struct net_device *dev)
 static void
 ultra_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
-	unsigned long hdr_start = dev->mem_start + ((ring_page - START_PG)<<8);
+	void __iomem *hdr_start = ei_status.mem + ((ring_page - START_PG)<<8);
 
 	outb(ULTRA_MEMENB, dev->base_addr - ULTRA_NIC_OFFSET);	/* shmem on */
 #ifdef __BIG_ENDIAN
 	/* Officially this is what we are doing, but the readl() is faster */
 	/* unfortunately it isn't endian aware of the struct               */
-	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = le16_to_cpu(hdr->count);
 #else
-	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
+	((unsigned int*)hdr)[0] = readl(hdr_start);
 #endif
 	outb(0x00, dev->base_addr - ULTRA_NIC_OFFSET); /* shmem off */
 }
@@ -450,20 +442,19 @@ ultra_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_p
 static void
 ultra_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
-	unsigned long xfer_start = dev->mem_start + ring_offset - (START_PG<<8);
+	void __iomem *xfer_start = ei_status.mem + ring_offset - (START_PG<<8);
 
 	/* Enable shared memory. */
 	outb(ULTRA_MEMENB, dev->base_addr - ULTRA_NIC_OFFSET);
 
-	if (xfer_start + count > ei_status.rmem_end) {
+	if (ring_offset + count > ei_status.stop_page*256) {
 		/* We must wrap the input move. */
-		int semi_count = ei_status.rmem_end - xfer_start;
-		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
+		int semi_count = ei_status.stop_page*256 - ring_offset;
+		memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
+		memcpy_fromio(skb->data + semi_count, ei_status.mem + TX_PAGES * 256, count);
 	} else {
-		/* Packet is in one chunk -- we can copy + cksum. */
-		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		memcpy_fromio(skb->data, xfer_start, count);
 	}
 
 	outb(0x00, dev->base_addr - ULTRA_NIC_OFFSET);	/* Disable memory. */
@@ -473,12 +464,12 @@ static void
 ultra_block_output(struct net_device *dev, int count, const unsigned char *buf,
 				int start_page)
 {
-	unsigned long shmem = dev->mem_start + ((start_page - START_PG)<<8);
+	void __iomem *shmem = ei_status.mem + ((start_page - START_PG)<<8);
 
 	/* Enable shared memory. */
 	outb(ULTRA_MEMENB, dev->base_addr - ULTRA_NIC_OFFSET);
 
-	isa_memcpy_toio(shmem, buf, count);
+	memcpy_toio(shmem, buf, count);
 
 	outb(0x00, dev->base_addr - ULTRA_NIC_OFFSET); /* Disable memory. */
 }
@@ -544,7 +535,7 @@ ultra_close_card(struct net_device *dev)
 	return 0;
 }
 
-
+
 #ifdef MODULE
 #define MAX_ULTRA_CARDS	4	/* Max number of Ultra cards per module */
 static struct net_device *dev_ultra[MAX_ULTRA_CARDS];
@@ -560,7 +551,7 @@ MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
-int
+int __init
 init_module(void)
 {
 	struct net_device *dev;
@@ -577,11 +568,8 @@ init_module(void)
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		if (do_ultra_probe(dev) == 0) {
-			if (register_netdev(dev) == 0) {
-				dev_ultra[found++] = dev;
-				continue;
-			}
-			cleanup_card(dev);
+			dev_ultra[found++] = dev;
+			continue;
 		}
 		free_netdev(dev);
 		printk(KERN_WARNING "smc-ultra.c: No SMC Ultra card found (i/o = 0x%x).\n", io[this_dev]);
@@ -592,7 +580,19 @@ init_module(void)
 	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	/* NB: ultra_close_card() does free_irq */
+#ifdef __ISAPNP__
+	struct pnp_dev *idev = (struct pnp_dev *)ei_status.priv;
+	if (idev)
+		pnp_device_detach(idev);
+#endif
+	release_region(dev->base_addr - ULTRA_NIC_OFFSET, ULTRA_IO_EXTENT);
+	iounmap(ei_status.mem);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;

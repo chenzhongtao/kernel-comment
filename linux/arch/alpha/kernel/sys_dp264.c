@@ -12,7 +12,6 @@
  * Code supporting the DP264 (EV6+TSUNAMI).
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
@@ -218,7 +217,7 @@ static struct hw_interrupt_type clipper_irq_type = {
 };
 
 static void
-dp264_device_interrupt(unsigned long vector, struct pt_regs * regs)
+dp264_device_interrupt(unsigned long vector)
 {
 #if 1
 	printk("dp264_device_interrupt: NOT IMPLEMENTED YET!! \n");
@@ -237,9 +236,9 @@ dp264_device_interrupt(unsigned long vector, struct pt_regs * regs)
 		i = ffz(~pld);
 		pld &= pld - 1; /* clear least bit set */
 		if (i == 55)
-			isa_device_interrupt(vector, regs);
+			isa_device_interrupt(vector);
 		else
-			handle_irq(16 + i, 16 + i, regs);
+			handle_irq(16 + i);
 #if 0
 		TSUNAMI_cchip->dir0.csr = 1UL << i; mb();
 		tmp = TSUNAMI_cchip->dir0.csr;
@@ -249,7 +248,7 @@ dp264_device_interrupt(unsigned long vector, struct pt_regs * regs)
 }
 
 static void 
-dp264_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
+dp264_srm_device_interrupt(unsigned long vector)
 {
 	int irq;
 
@@ -269,11 +268,11 @@ dp264_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	if (irq >= 32)
 		irq -= 16;
 
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static void 
-clipper_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
+clipper_srm_device_interrupt(unsigned long vector)
 {
 	int irq;
 
@@ -291,7 +290,7 @@ clipper_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	 *
 	 * Eg IRQ 24 is DRIR bit 8, etc, etc
 	 */
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static void __init
@@ -300,7 +299,7 @@ init_tsunami_irqs(struct hw_interrupt_type * ops, int imin, int imax)
 	long i;
 	for (i = imin; i <= imax; ++i) {
 		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = ops;
+		irq_desc[i].chip = ops;
 	}
 }
 
@@ -395,6 +394,22 @@ clipper_init_irq(void)
  */
 
 static int __init
+isa_irq_fixup(struct pci_dev *dev, int irq)
+{
+	u8 irq8;
+
+	if (irq > 0)
+		return irq;
+
+	/* This interrupt is routed via ISA bridge, so we'll
+	   just have to trust whatever value the console might
+	   have assigned.  */
+	pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq8);
+
+	return irq8 & 0xf;
+}
+
+static int __init
 dp264_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[6][5] __initdata = {
@@ -407,25 +422,13 @@ dp264_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		{ 16+ 3, 16+ 3, 16+ 2, 16+ 1, 16+ 0}  /* IdSel 10 slot 3 */
 	};
 	const long min_idsel = 5, max_idsel = 10, irqs_per_slot = 5;
-
 	struct pci_controller *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 
-	if (irq > 0) {
+	if (irq > 0)
 		irq += 16 * hose->index;
-	} else {
-		/* ??? The Contaq IDE controller on the ISA bridge uses
-		   "legacy" interrupts 14 and 15.  I don't know if anything
-		   can wind up at the same slot+pin on hose1, so we'll
-		   just have to trust whatever value the console might
-		   have assigned.  */
 
-		u8 irq8;
-		pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq8);
-		irq = irq8;
-	}
-
-	return irq;
+	return isa_irq_fixup(dev, irq);
 }
 
 static int __init
@@ -453,7 +456,8 @@ monet_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		{    24,    24,    25,    26,    27}  /* IdSel 15 slot 5 PCI2*/
 	};
 	const long min_idsel = 3, max_idsel = 15, irqs_per_slot = 5;
-	return COMMON_TABLE_LOOKUP;
+
+	return isa_irq_fixup(dev, COMMON_TABLE_LOOKUP);
 }
 
 static u8 __init
@@ -507,7 +511,8 @@ webbrick_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		{    47,    47,    46,    45,    44}, /* IdSel 17 slot 3 */
 	};
 	const long min_idsel = 7, max_idsel = 17, irqs_per_slot = 5;
-	return COMMON_TABLE_LOOKUP;
+
+	return isa_irq_fixup(dev, COMMON_TABLE_LOOKUP);
 }
 
 static int __init
@@ -524,14 +529,13 @@ clipper_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		{    -1,    -1,    -1,    -1,    -1}  /* IdSel 7 ISA Bridge */
 	};
 	const long min_idsel = 1, max_idsel = 7, irqs_per_slot = 5;
-
 	struct pci_controller *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 
 	if (irq > 0)
 		irq += 16 * hose->index;
 
-	return irq;
+	return isa_irq_fixup(dev, irq);
 }
 
 static void __init
@@ -539,6 +543,7 @@ dp264_init_pci(void)
 {
 	common_init_pci();
 	SMC669_Init(0);
+	locate_and_init_vga(NULL);
 }
 
 static void __init
@@ -547,6 +552,14 @@ monet_init_pci(void)
 	common_init_pci();
 	SMC669_Init(1);
 	es1888_init();
+	locate_and_init_vga(NULL);
+}
+
+static void __init
+clipper_init_pci(void)
+{
+	common_init_pci();
+	locate_and_init_vga(NULL);
 }
 
 static void __init
@@ -651,7 +664,7 @@ struct alpha_machine_vector clipper_mv __initmv = {
 	.init_arch		= tsunami_init_arch,
 	.init_irq		= clipper_init_irq,
 	.init_rtc		= common_init_rtc,
-	.init_pci		= common_init_pci,
+	.init_pci		= clipper_init_pci,
 	.kill_arch		= tsunami_kill_arch,
 	.pci_map_irq		= clipper_map_irq,
 	.pci_swizzle		= common_swizzle,

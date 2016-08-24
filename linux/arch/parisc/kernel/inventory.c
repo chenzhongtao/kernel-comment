@@ -38,7 +38,7 @@
 */
 #undef DEBUG_PAT
 
-int pdc_type = PDC_TYPE_ILLEGAL;
+int pdc_type __read_mostly = PDC_TYPE_ILLEGAL;
 
 void __init setup_pdc(void)
 {
@@ -47,7 +47,7 @@ void __init setup_pdc(void)
 	struct pdc_system_map_mod_info module_result;
 	struct pdc_module_path module_path;
 	struct pdc_model model;
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	struct pdc_pat_cell_num cell_info;
 #endif
 
@@ -73,7 +73,7 @@ void __init setup_pdc(void)
 	 * clearer message.
 	 */
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	status = pdc_pat_cell_get_number(&cell_info);
 	if (status == PDC_OK) {
 		pdc_type = PDC_TYPE_PAT;
@@ -120,8 +120,8 @@ set_pmem_entry(physmem_range_t *pmem_ptr, unsigned long start,
 	 * pdc info is bad in this case).
 	 */
 
-	if (   ((start & (PAGE_SIZE - 1)) != 0)
-	    || ((pages4k & ((1UL << PDC_PAGE_ADJ_SHIFT) - 1)) != 0) ) {
+	if (unlikely( ((start & (PAGE_SIZE - 1)) != 0)
+	    || ((pages4k & ((1UL << PDC_PAGE_ADJ_SHIFT) - 1)) != 0) )) {
 
 		panic("Memory range doesn't align with page size!\n");
 	}
@@ -152,7 +152,7 @@ static void __init pagezero_memconfig(void)
 	npmem_ranges = 1;
 }
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 
 /* All of the PDC PAT specific code is 64-bit only */
 
@@ -188,7 +188,7 @@ pat_query_module(ulong pcell_loc, ulong mod_index)
 	temp = pa_pdc_cell.cba;
 	dev = alloc_pa_dev(PAT_GET_CBA(temp), &pa_pdc_cell.mod_path);
 	if (!dev) {
-		return PDC_NE_MOD;
+		return PDC_OK;
 	}
 
 	/* alloc_pa_dev sets dev->hpa */
@@ -408,13 +408,13 @@ static void __init sprockets_memconfig(void)
 	}
 }
 
-#else   /* !__LP64__ */
+#else   /* !CONFIG_64BIT */
 
 #define pat_inventory() do { } while (0)
 #define pat_memconfig() do { } while (0)
 #define sprockets_memconfig() pagezero_memconfig()
 
-#endif	/* !__LP64__ */
+#endif	/* !CONFIG_64BIT */
 
 
 #ifndef CONFIG_PA20

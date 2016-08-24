@@ -37,7 +37,6 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/errno.h>
 #include <linux/vt_kern.h>
@@ -75,7 +74,7 @@ static inline void cursor_undrawn(void)
     cursor_drawn = 0;
 }
 
-static const char *__init sticon_startup(void)
+static const char *sticon_startup(void)
 {
     return "STI console";
 }
@@ -87,13 +86,12 @@ static int sticon_set_palette(struct vc_data *c, unsigned char *table)
 
 static void sticon_putc(struct vc_data *conp, int c, int ypos, int xpos)
 {
-    int unit = conp->vc_num;
     int redraw_cursor = 0;
 
     if (vga_is_gfx || console_blanked)
 	    return;
-	    
-    if (vt_cons[unit]->vc_mode != KD_TEXT)
+
+    if (conp->vc_mode != KD_TEXT)
     	    return;
 #if 0
     if ((p->cursor_x == xpos) && (p->cursor_y == ypos)) {
@@ -111,15 +109,14 @@ static void sticon_putc(struct vc_data *conp, int c, int ypos, int xpos)
 static void sticon_putcs(struct vc_data *conp, const unsigned short *s,
 			 int count, int ypos, int xpos)
 {
-    int unit = conp->vc_num;
     int redraw_cursor = 0;
 
     if (vga_is_gfx || console_blanked)
 	    return;
 
-    if (vt_cons[unit]->vc_mode != KD_TEXT)
+    if (conp->vc_mode != KD_TEXT)
     	    return;
-    
+
 #if 0
     if ((p->cursor_y == ypos) && (xpos <= p->cursor_x) &&
 	(p->cursor_x < (xpos + count))) {
@@ -217,7 +214,7 @@ static void sticon_init(struct vc_data *c, int init)
     } else {
 	/* vc_rows = (c->vc_rows > vc_rows) ? vc_rows : c->vc_rows; */
 	/* vc_cols = (c->vc_cols > vc_cols) ? vc_cols : c->vc_cols; */
-	vc_resize(c->vc_num, vc_cols, vc_rows); 
+	vc_resize(c, vc_cols, vc_rows);
 /*	vc_resize_con(vc_rows, vc_cols, c->vc_num); */
     }
 }
@@ -317,7 +314,7 @@ static unsigned long sticon_getxy(struct vc_data *conp, unsigned long pos,
 }
 
 static u8 sticon_build_attr(struct vc_data *conp, u8 color, u8 intens,
-			    u8 blink, u8 underline, u8 reverse)
+			    u8 blink, u8 underline, u8 reverse, u8 italic)
 {
     u8 attr = ((color & 0x70) >> 1) | ((color & 7));
 
@@ -348,7 +345,7 @@ static void sticon_save_screen(struct vc_data *conp)
 {
 }
 
-static struct consw sti_con = {
+static const struct consw sti_con = {
 	.owner			= THIS_MODULE,
 	.con_startup		= sticon_startup,
 	.con_init		= sticon_init,

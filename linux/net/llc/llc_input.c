@@ -12,6 +12,7 @@
  * See the GNU General Public License for more details.
  */
 #include <linux/netdevice.h>
+#include <net/net_namespace.h>
 #include <net/llc.h>
 #include <net/llc_pdu.h>
 #include <net/llc_sap.h>
@@ -99,22 +100,27 @@ out:
 static inline int llc_fixup_skb(struct sk_buff *skb)
 {
 	u8 llc_len = 2;
-	struct llc_pdu_sn *pdu;
+	struct llc_pdu_un *pdu;
 
-	if (!pskb_may_pull(skb, sizeof(*pdu)))
+	if (unlikely(!pskb_may_pull(skb, sizeof(*pdu))))
 		return 0;
 
-	pdu = (struct llc_pdu_sn *)skb->data;
+	pdu = (struct llc_pdu_un *)skb->data;
 	if ((pdu->ctrl_1 & LLC_PDU_TYPE_MASK) == LLC_PDU_TYPE_U)
 		llc_len = 1;
 	llc_len += 2;
-	skb->h.raw += llc_len;
+
+	if (unlikely(!pskb_may_pull(skb, llc_len)))
+		return 0;
+
+	skb->transport_header += llc_len;
 	skb_pull(skb, llc_len);
 	if (skb->protocol == htons(ETH_P_802_2)) {
-		u16 pdulen = eth_hdr(skb)->h_proto,
-		    data_size = ntohs(pdulen) - llc_len;
+		__be16 pdulen = eth_hdr(skb)->h_proto;
+		u16 data_size = ntohs(pdulen) - llc_len;
 
-		skb_trim(skb, data_size);
+		if (unlikely(pskb_trim_rcsum(skb, data_size)))
+			return 0;
 	}
 	return 1;
 }
@@ -132,11 +138,16 @@ static inline int llc_fixup_skb(struct sk_buff *skb)
  *	data now), it queues this frame in the connection's backlog.
  */
 int llc_rcv(struct sk_buff *skb, struct net_device *dev,
-	    struct packet_type *pt)
+	    struct packet_type *pt, struct net_device *orig_dev)
 {
 	struct llc_sap *sap;
 	struct llc_pdu_sn *pdu;
 	int dest;
+	int (*rcv)(struct sk_buff *, struct net_device *,
+		   struct packet_type *, struct net_device *);
+
+	if (dev->nd_net != &init_net)
+		goto drop;
 
 	/*
 	 * When the interface is in promisc. mode, drop all the crap that it
@@ -157,26 +168,33 @@ int llc_rcv(struct sk_buff *skb, struct net_device *dev,
 	sap = llc_sap_find(pdu->dsap);
 	if (unlikely(!sap)) {/* unknown SAP */
 		dprintk("%s: llc_sap_find(%02X) failed!\n", __FUNCTION__,
-		        pdu->dsap);
+			pdu->dsap);
 		goto drop;
 	}
 	/*
 	 * First the upper layer protocols that don't need the full
 	 * LLC functionality
 	 */
-	if (sap->rcv_func) {
-		sap->rcv_func(skb, dev, pt);
-		goto out;
+	rcv = rcu_dereference(sap->rcv_func);
+	if (rcv) {
+		struct sk_buff *cskb = skb_clone(skb, GFP_ATOMIC);
+		if (cskb)
+			rcv(cskb, dev, pt, orig_dev);
 	}
 	dest = llc_pdu_type(skb);
 	if (unlikely(!dest || !llc_type_handlers[dest - 1]))
-		goto drop;
+		goto drop_put;
 	llc_type_handlers[dest - 1](sap, skb);
+out_put:
+	llc_sap_put(sap);
 out:
 	return 0;
 drop:
 	kfree_skb(skb);
 	goto out;
+drop_put:
+	kfree_skb(skb);
+	goto out_put;
 handle_station:
 	if (!llc_station_handler)
 		goto drop;

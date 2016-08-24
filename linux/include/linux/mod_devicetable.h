@@ -1,6 +1,6 @@
 /*
  * Device tables which are exported to userspace via
- * scripts/table2alias.c.  You must keep that file in sync with this
+ * scripts/mod/file2alias.c.  You must keep that file in sync with this
  * header.
  */
 
@@ -33,7 +33,8 @@ struct ieee1394_device_id {
 	__u32 model_id;
 	__u32 specifier_id;
 	__u32 version;
-	kernel_ulong_t driver_data;
+	kernel_ulong_t driver_data
+		__attribute__((aligned(sizeof(kernel_ulong_t))));
 };
 
 
@@ -147,6 +148,24 @@ struct ccw_device_id {
 #define CCW_DEVICE_ID_MATCH_DEVICE_TYPE		0x04
 #define CCW_DEVICE_ID_MATCH_DEVICE_MODEL	0x08
 
+/* s390 AP bus devices */
+struct ap_device_id {
+	__u16 match_flags;	/* which fields to match against */
+	__u8 dev_type;		/* device type */
+	__u8 pad1;
+	__u32 pad2;
+	kernel_ulong_t driver_info;
+};
+
+#define AP_DEVICE_ID_MATCH_DEVICE_TYPE		0x01
+
+#define ACPI_ID_LEN	16 /* only 9 bytes needed here, 16 bytes are used */
+			   /* to workaround crosscompile issues */
+
+struct acpi_device_id {
+	__u8 id[ACPI_ID_LEN];
+	kernel_ulong_t driver_data;
+};
 
 #define PNP_ID_LEN	8
 #define PNP_MAX_DEVICES	8
@@ -164,5 +183,188 @@ struct pnp_card_device_id {
 	} devs[PNP_MAX_DEVICES];
 };
 
+
+#define SERIO_ANY	0xff
+
+struct serio_device_id {
+	__u8 type;
+	__u8 extra;
+	__u8 id;
+	__u8 proto;
+};
+
+/*
+ * Struct used for matching a device
+ */
+struct of_device_id
+{
+	char	name[32];
+	char	type[32];
+	char	compatible[128];
+#ifdef __KERNEL__
+	void	*data;
+#else
+	kernel_ulong_t data;
+#endif
+};
+
+/* VIO */
+struct vio_device_id {
+	char type[32];
+	char compat[32];
+};
+
+/* PCMCIA */
+
+struct pcmcia_device_id {
+	__u16		match_flags;
+
+	__u16		manf_id;
+	__u16 		card_id;
+
+	__u8  		func_id;
+
+	/* for real multi-function devices */
+	__u8  		function;
+
+	/* for pseudo multi-function devices */
+	__u8  		device_no;
+
+	__u32 		prod_id_hash[4]
+		__attribute__((aligned(sizeof(__u32))));
+
+	/* not matched against in kernelspace*/
+#ifdef __KERNEL__
+	const char *	prod_id[4];
+#else
+	kernel_ulong_t	prod_id[4]
+		__attribute__((aligned(sizeof(kernel_ulong_t))));
+#endif
+
+	/* not matched against */
+	kernel_ulong_t	driver_info;
+#ifdef __KERNEL__
+	char *		cisfile;
+#else
+	kernel_ulong_t	cisfile;
+#endif
+};
+
+#define PCMCIA_DEV_ID_MATCH_MANF_ID	0x0001
+#define PCMCIA_DEV_ID_MATCH_CARD_ID	0x0002
+#define PCMCIA_DEV_ID_MATCH_FUNC_ID	0x0004
+#define PCMCIA_DEV_ID_MATCH_FUNCTION	0x0008
+#define PCMCIA_DEV_ID_MATCH_PROD_ID1	0x0010
+#define PCMCIA_DEV_ID_MATCH_PROD_ID2	0x0020
+#define PCMCIA_DEV_ID_MATCH_PROD_ID3	0x0040
+#define PCMCIA_DEV_ID_MATCH_PROD_ID4	0x0080
+#define PCMCIA_DEV_ID_MATCH_DEVICE_NO	0x0100
+#define PCMCIA_DEV_ID_MATCH_FAKE_CIS	0x0200
+#define PCMCIA_DEV_ID_MATCH_ANONYMOUS	0x0400
+
+/* Input */
+#define INPUT_DEVICE_ID_EV_MAX		0x1f
+#define INPUT_DEVICE_ID_KEY_MIN_INTERESTING	0x71
+#define INPUT_DEVICE_ID_KEY_MAX		0x1ff
+#define INPUT_DEVICE_ID_REL_MAX		0x0f
+#define INPUT_DEVICE_ID_ABS_MAX		0x3f
+#define INPUT_DEVICE_ID_MSC_MAX		0x07
+#define INPUT_DEVICE_ID_LED_MAX		0x0f
+#define INPUT_DEVICE_ID_SND_MAX		0x07
+#define INPUT_DEVICE_ID_FF_MAX		0x7f
+#define INPUT_DEVICE_ID_SW_MAX		0x0f
+
+#define INPUT_DEVICE_ID_MATCH_BUS	1
+#define INPUT_DEVICE_ID_MATCH_VENDOR	2
+#define INPUT_DEVICE_ID_MATCH_PRODUCT	4
+#define INPUT_DEVICE_ID_MATCH_VERSION	8
+
+#define INPUT_DEVICE_ID_MATCH_EVBIT	0x0010
+#define INPUT_DEVICE_ID_MATCH_KEYBIT	0x0020
+#define INPUT_DEVICE_ID_MATCH_RELBIT	0x0040
+#define INPUT_DEVICE_ID_MATCH_ABSBIT	0x0080
+#define INPUT_DEVICE_ID_MATCH_MSCIT	0x0100
+#define INPUT_DEVICE_ID_MATCH_LEDBIT	0x0200
+#define INPUT_DEVICE_ID_MATCH_SNDBIT	0x0400
+#define INPUT_DEVICE_ID_MATCH_FFBIT	0x0800
+#define INPUT_DEVICE_ID_MATCH_SWBIT	0x1000
+
+struct input_device_id {
+
+	kernel_ulong_t flags;
+
+	__u16 bustype;
+	__u16 vendor;
+	__u16 product;
+	__u16 version;
+
+	kernel_ulong_t evbit[INPUT_DEVICE_ID_EV_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t keybit[INPUT_DEVICE_ID_KEY_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t relbit[INPUT_DEVICE_ID_REL_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t absbit[INPUT_DEVICE_ID_ABS_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t mscbit[INPUT_DEVICE_ID_MSC_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t ledbit[INPUT_DEVICE_ID_LED_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t sndbit[INPUT_DEVICE_ID_SND_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t ffbit[INPUT_DEVICE_ID_FF_MAX / BITS_PER_LONG + 1];
+	kernel_ulong_t swbit[INPUT_DEVICE_ID_SW_MAX / BITS_PER_LONG + 1];
+
+	kernel_ulong_t driver_info;
+};
+
+/* EISA */
+
+#define EISA_SIG_LEN   8
+
+/* The EISA signature, in ASCII form, null terminated */
+struct eisa_device_id {
+	char          sig[EISA_SIG_LEN];
+	kernel_ulong_t driver_data;
+};
+
+#define EISA_DEVICE_MODALIAS_FMT "eisa:s%s"
+
+struct parisc_device_id {
+	__u8	hw_type;	/* 5 bits used */
+	__u8	hversion_rev;	/* 4 bits */
+	__u16	hversion;	/* 12 bits */
+	__u32	sversion;	/* 20 bits */
+};
+
+#define PA_HWTYPE_ANY_ID	0xff
+#define PA_HVERSION_REV_ANY_ID	0xff
+#define PA_HVERSION_ANY_ID	0xffff
+#define PA_SVERSION_ANY_ID	0xffffffff
+
+/* SDIO */
+
+#define SDIO_ANY_ID (~0)
+
+struct sdio_device_id {
+	__u8	class;			/* Standard interface or SDIO_ANY_ID */
+	__u16	vendor;			/* Vendor or SDIO_ANY_ID */
+	__u16	device;			/* Device ID or SDIO_ANY_ID */
+	kernel_ulong_t driver_data;	/* Data private to the driver */
+};
+
+/* SSB core, see drivers/ssb/ */
+struct ssb_device_id {
+	__u16	vendor;
+	__u16	coreid;
+	__u8	revision;
+};
+#define SSB_DEVICE(_vendor, _coreid, _revision)  \
+	{ .vendor = _vendor, .coreid = _coreid, .revision = _revision, }
+#define SSB_DEVTABLE_END  \
+	{ 0, },
+
+#define SSB_ANY_VENDOR		0xFFFF
+#define SSB_ANY_ID		0xFFFF
+#define SSB_ANY_REV		0xFF
+
+struct virtio_device_id {
+	__u32 device;
+	__u32 vendor;
+};
+#define VIRTIO_DEV_ANY_ID	0xffffffff
 
 #endif /* LINUX_MOD_DEVICETABLE_H */

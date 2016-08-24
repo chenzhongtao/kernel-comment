@@ -41,21 +41,12 @@
 #include "vxfs_extern.h"
 
 
-extern struct address_space_operations vxfs_aops;
-extern struct address_space_operations vxfs_immed_aops;
+extern const struct address_space_operations vxfs_aops;
+extern const struct address_space_operations vxfs_immed_aops;
 
-extern struct inode_operations vxfs_immed_symlink_iops;
+extern const struct inode_operations vxfs_immed_symlink_iops;
 
-static struct file_operations vxfs_file_operations = {
-	.open =			generic_file_open,
-	.llseek =		generic_file_llseek,
-	.read =			generic_file_read,
-	.mmap =			generic_file_mmap,
-	.sendfile =		generic_file_sendfile,
-};
-
-
-kmem_cache_t		*vxfs_inode_cachep;
+struct kmem_cache		*vxfs_inode_cachep;
 
 
 #ifdef DIAGNOSTIC
@@ -108,11 +99,11 @@ vxfs_blkiget(struct super_block *sbp, u_long extent, ino_t ino)
 	offset = ((ino % (sbp->s_blocksize / VXFS_ISIZE)) * VXFS_ISIZE);
 	bp = sb_bread(sbp, block);
 
-	if (buffer_mapped(bp)) {
+	if (bp && buffer_mapped(bp)) {
 		struct vxfs_inode_info	*vip;
 		struct vxfs_dinode	*dip;
 
-		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, SLAB_KERNEL)))
+		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, GFP_KERNEL)))
 			goto fail;
 		dip = (struct vxfs_dinode *)(bp->b_data + offset);
 		memcpy(vip, dip, sizeof(*vip));
@@ -154,7 +145,7 @@ __vxfs_iget(ino_t ino, struct inode *ilistp)
 		struct vxfs_dinode	*dip;
 		caddr_t			kaddr = (char *)page_address(pp);
 
-		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, SLAB_KERNEL)))
+		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, GFP_KERNEL)))
 			goto fail;
 		dip = (struct vxfs_dinode *)(kaddr + offset);
 		memcpy(vip, dip, sizeof(*vip));
@@ -248,11 +239,10 @@ vxfs_iinit(struct inode *ip, struct vxfs_inode_info *vip)
 	ip->i_ctime.tv_nsec = 0;
 	ip->i_mtime.tv_nsec = 0;
 
-	ip->i_blksize = PAGE_SIZE;
 	ip->i_blocks = vip->vii_blocks;
 	ip->i_generation = vip->vii_gen;
 
-	ip->u.generic_ip = (void *)vip;
+	ip->i_private = vip;
 	
 }
 
@@ -304,7 +294,7 @@ vxfs_read_inode(struct inode *ip)
 {
 	struct super_block		*sbp = ip->i_sb;
 	struct vxfs_inode_info		*vip;
-	struct address_space_operations	*aops;
+	const struct address_space_operations	*aops;
 	ino_t				ino = ip->i_ino;
 
 	if (!(vip = __vxfs_iget(ino, VXFS_SBI(sbp)->vsi_ilist)))
@@ -318,7 +308,7 @@ vxfs_read_inode(struct inode *ip)
 		aops = &vxfs_aops;
 
 	if (S_ISREG(ip->i_mode)) {
-		ip->i_fop = &vxfs_file_operations;
+		ip->i_fop = &generic_ro_fops;
 		ip->i_mapping->a_ops = aops;
 	} else if (S_ISDIR(ip->i_mode)) {
 		ip->i_op = &vxfs_dir_inode_ops;
@@ -347,5 +337,5 @@ vxfs_read_inode(struct inode *ip)
 void
 vxfs_clear_inode(struct inode *ip)
 {
-	kmem_cache_free(vxfs_inode_cachep, ip->u.generic_ip);
+	kmem_cache_free(vxfs_inode_cachep, ip->i_private);
 }

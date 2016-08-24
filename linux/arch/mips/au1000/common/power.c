@@ -29,16 +29,18 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/pm.h>
+#include <linux/pm_legacy.h>
 #include <linux/slab.h>
 #include <linux/sysctl.h>
+#include <linux/jiffies.h>
 
 #include <asm/string.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
+#include <asm/cacheflush.h>
 #include <asm/mach-au1x00/au1000.h>
 
 #ifdef CONFIG_PM
@@ -50,7 +52,7 @@
 #  define DPRINTK(fmt, args...)
 #endif
 
-static void calibrate_delay(void);
+static void au1000_calibrate_delay(void);
 
 extern void set_au1x00_speed(unsigned int new_freq);
 extern unsigned int get_au1x00_speed(void);
@@ -59,12 +61,6 @@ extern void set_au1x00_uart_baud_base(unsigned long new_baud_base);
 extern unsigned long save_local_and_disable(int controller);
 extern void restore_local_and_enable(int controller, unsigned long mask);
 extern void local_enable_irq(unsigned int irq_nr);
-
-/* Quick acpi hack. This will have to change! */
-#define	CTL_ACPI 9999
-#define	ACPI_S1_SLP_TYP 19
-#define	ACPI_SLEEP 21
-
 
 static DEFINE_SPINLOCK(pm_lock);
 
@@ -77,17 +73,17 @@ static DEFINE_SPINLOCK(pm_lock);
  * We only have to save/restore registers that aren't otherwise
  * done as part of a driver pm_* function.
  */
-static uint	sleep_aux_pll_cntrl;
-static uint	sleep_cpu_pll_cntrl;
-static uint	sleep_pin_function;
-static uint	sleep_uart0_inten;
-static uint	sleep_uart0_fifoctl;
-static uint	sleep_uart0_linectl;
-static uint	sleep_uart0_clkdiv;
-static uint	sleep_uart0_enable;
-static uint	sleep_usbhost_enable;
-static uint	sleep_usbdev_enable;
-static uint	sleep_static_memctlr[4][3];
+static unsigned int	sleep_aux_pll_cntrl;
+static unsigned int	sleep_cpu_pll_cntrl;
+static unsigned int	sleep_pin_function;
+static unsigned int	sleep_uart0_inten;
+static unsigned int	sleep_uart0_fifoctl;
+static unsigned int	sleep_uart0_linectl;
+static unsigned int	sleep_uart0_clkdiv;
+static unsigned int	sleep_uart0_enable;
+static unsigned int	sleep_usbhost_enable;
+static unsigned int	sleep_usbdev_enable;
+static unsigned int	sleep_static_memctlr[4][3];
 
 /* Define this to cause the value you write to /proc/sys/pm/sleep to
  * set the TOY timer for the amount of time you want to sleep.
@@ -215,7 +211,7 @@ int au_sleep(void)
 	unsigned long wakeup, flags;
 	extern	void	save_and_sleep(void);
 
-	spin_lock_irqsave(&pm_lock,flags);
+	spin_lock_irqsave(&pm_lock, flags);
 
 	save_core_regs();
 
@@ -260,7 +256,7 @@ int au_sleep(void)
 }
 
 static int pm_do_sleep(ctl_table * ctl, int write, struct file *file,
-		       void *buffer, size_t * len)
+		       void __user *buffer, size_t * len, loff_t *ppos)
 {
 	int retval = 0;
 #ifdef SLEEP_TEST_TIMEOUT
@@ -294,10 +290,9 @@ static int pm_do_sleep(ctl_table * ctl, int write, struct file *file,
 }
 
 static int pm_do_suspend(ctl_table * ctl, int write, struct file *file,
-			 void *buffer, size_t * len)
+			 void __user *buffer, size_t * len, loff_t *ppos)
 {
 	int retval = 0;
-	void	au1k_wait(void);
 
 	if (!write) {
 		*len = 0;
@@ -306,7 +301,7 @@ static int pm_do_suspend(ctl_table * ctl, int write, struct file *file,
 		if (retval)
 			return retval;
 		suspend_mode = 1;
-		au1k_wait();
+
 		retval = pm_send_all(PM_RESUME, (void *) 0);
 	}
 	return retval;
@@ -314,7 +309,7 @@ static int pm_do_suspend(ctl_table * ctl, int write, struct file *file,
 
 
 static int pm_do_freq(ctl_table * ctl, int write, struct file *file,
-		      void *buffer, size_t * len)
+		      void __user *buffer, size_t * len, loff_t *ppos)
 {
 	int retval = 0, i;
 	unsigned long val, pll;
@@ -408,31 +403,58 @@ static int pm_do_freq(ctl_table * ctl, int write, struct file *file,
 	}
 
 
-	/* We don't want _any_ interrupts other than
-	 * match20. Otherwise our calibrate_delay()
-	 * calculation will be off, potentially a lot.
+	/*
+	 * We don't want _any_ interrupts other than match20. Otherwise our
+	 * au1000_calibrate_delay() calculation will be off, potentially a lot.
 	 */
 	intc0_mask = save_local_and_disable(0);
 	intc1_mask = save_local_and_disable(1);
 	local_enable_irq(AU1000_TOY_MATCH2_INT);
 	spin_unlock_irqrestore(&pm_lock, flags);
-	calibrate_delay();
+	au1000_calibrate_delay();
 	restore_local_and_enable(0, intc0_mask);
 	restore_local_and_enable(1, intc1_mask);
+
 	return retval;
 }
 
 
 static struct ctl_table pm_table[] = {
-	{ACPI_S1_SLP_TYP, "suspend", NULL, 0, 0600, NULL, &pm_do_suspend},
-	{ACPI_SLEEP, "sleep", NULL, 0, 0600, NULL, &pm_do_sleep},
-	{CTL_ACPI, "freq", NULL, 0, 0600, NULL, &pm_do_freq},
-	{0}
+	{
+		.ctl_name 	= CTL_UNNUMBERED,
+		.procname	= "suspend",
+		.data		= NULL,
+		.maxlen		= 0,
+		.mode		= 0600,
+		.proc_handler	= &pm_do_suspend
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "sleep",
+		.data		= NULL,
+		.maxlen		= 0,
+		.mode		= 0600,
+		.proc_handler	= &pm_do_sleep
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "freq",
+		.data		= NULL,
+		.maxlen		= 0,
+		.mode		= 0600,
+		.proc_handler	= &pm_do_freq
+	},
+	{}
 };
 
 static struct ctl_table pm_dir_table[] = {
-	{CTL_ACPI, "pm", NULL, 0, 0555, pm_table},
-	{0}
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "pm",
+		.mode		= 0555,
+		.child		= pm_table
+	},
+	{}
 };
 
 /*
@@ -440,7 +462,7 @@ static struct ctl_table pm_dir_table[] = {
  */
 static int __init pm_init(void)
 {
-	register_sysctl_table(pm_dir_table, 1);
+	register_sysctl_table(pm_dir_table);
 	return 0;
 }
 
@@ -456,7 +478,7 @@ __initcall(pm_init);
    better than 1% */
 #define LPS_PREC 8
 
-static void calibrate_delay(void)
+static void au1000_calibrate_delay(void)
 {
 	unsigned long ticks, loopbit;
 	int lps_precision = LPS_PREC;

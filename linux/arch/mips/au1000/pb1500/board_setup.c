@@ -23,7 +23,6 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
@@ -40,7 +39,7 @@
 #include <asm/mach-au1x00/au1000.h>
 #include <asm/mach-pb1x00/pb1500.h>
 
-void board_reset (void)
+void board_reset(void)
 {
     /* Hit BCSR.SYSTEM_CONTROL[SW_RST] */
     au_writel(0x00000000, 0xAE00001C);
@@ -57,7 +56,7 @@ void __init board_setup(void)
 	au_writel(0, SYS_PINSTATERD);
 	udelay(100);
 
-#if defined (CONFIG_USB_OHCI) || defined (CONFIG_AU1X00_USB_DEVICE)
+#if defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
 
 	/* GPIO201 is input for PCMCIA card detect */
 	/* GPIO203 is input for PCMCIA interrupt request */
@@ -86,22 +85,17 @@ void __init board_setup(void)
 	/*
 	 * Route 48MHz FREQ2 into USB Host and/or Device
 	 */
-#ifdef CONFIG_USB_OHCI
+#if defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
 	sys_clksrc |= ((4<<12) | (0<<11) | (0<<10));
-#endif
-#ifdef CONFIG_AU1X00_USB_DEVICE
-	sys_clksrc |= ((4<<7) | (0<<6) | (0<<5));
 #endif
 	au_writel(sys_clksrc, SYS_CLKSRC);
 
 
 	pin_func = au_readl(SYS_PINFUNC) & (u32)(~0x8000);
-#ifndef CONFIG_AU1X00_USB_DEVICE
 	// 2nd USB port is USB host
 	pin_func |= 0x8000;
-#endif
 	au_writel(pin_func, SYS_PINFUNC);
-#endif // defined (CONFIG_USB_OHCI) || defined (CONFIG_AU1X00_USB_DEVICE)
+#endif /* defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE) */
 
 
 
@@ -131,7 +125,7 @@ void __init board_setup(void)
 		au_writel((au_readl(0xac000028) | 0x20), 0xac000028);
 	}
 	/* Put the clock in BCD mode */
-	if (readl(0xac00002C) & 0x4) { /* reg B */
+	if (au_readl(0xac00002C) & 0x4) { /* reg B */
 		au_writel(au_readl(0xac00002c) & ~0x4, 0xac00002c);
 		au_sync();
 	}

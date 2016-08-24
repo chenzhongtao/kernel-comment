@@ -13,29 +13,32 @@
  */
 #include <linux/timer.h>
 #include <net/llc_if.h>
+#include <net/sock.h>
 #include <linux/llc.h>
 
 #define LLC_EVENT                1
 #define LLC_PACKET               2
 
-#define LLC_P_TIME               2
-#define LLC_ACK_TIME             1
-#define LLC_REJ_TIME             3
-#define LLC_BUSY_TIME            3
+#define LLC2_P_TIME               2
+#define LLC2_ACK_TIME             1
+#define LLC2_REJ_TIME             3
+#define LLC2_BUSY_TIME            3
 
 struct llc_timer {
 	struct timer_list timer;
-	u16		  expire;	/* timer expire time */
+	unsigned long	  expire;	/* timer expire time */
 };
 
-struct llc_opt {
-	struct sock	    *sk;		/* sock that has this llc_opt */
+struct llc_sock {
+	/* struct sock must be the first member of llc_sock */
+	struct sock	    sk;
 	struct sockaddr_llc addr;		/* address sock is bound to */
 	u8		    state;		/* state of connection */
 	struct llc_sap	    *sap;		/* pointer to parent SAP */
 	struct llc_addr	    laddr;		/* lsap/mac pair */
 	struct llc_addr	    daddr;		/* dsap/mac pair */
 	struct net_device   *dev;		/* device to send to remote */
+	u32		    copied_seq;		/* head of yet unread data */
 	u8		    retry_count;	/* number of retries */
 	u8		    ack_must_be_send;
 	u8		    first_pdu_Ns;
@@ -75,7 +78,10 @@ struct llc_opt {
 					      Used for resending FRMR */
 };
 
-#define llc_sk(__sk) ((struct llc_opt *)(__sk)->sk_protinfo)
+static inline struct llc_sock *llc_sk(const struct sock *sk)
+{
+	return (struct llc_sock *)sk;
+}
 
 static __inline__ void llc_set_backlog_type(struct sk_buff *skb, char type)
 {
@@ -87,7 +93,8 @@ static __inline__ char llc_backlog_type(struct sk_buff *skb)
 	return skb->cb[sizeof(skb->cb) - 1];
 }
 
-extern struct sock *llc_sk_alloc(int family, int priority);
+extern struct sock *llc_sk_alloc(struct net *net, int family, gfp_t priority,
+				 struct proto *prot);
 extern void llc_sk_free(struct sock *sk);
 
 extern void llc_sk_reset(struct sock *sk);
@@ -110,5 +117,4 @@ extern void llc_sap_remove_socket(struct llc_sap *sap, struct sock *sk);
 
 extern u8 llc_data_accept_state(u8 state);
 extern void llc_build_offset_table(void);
-extern int llc_release_sockets(struct llc_sap *sap);
 #endif /* LLC_CONN_H */

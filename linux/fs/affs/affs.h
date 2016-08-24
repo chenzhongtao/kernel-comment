@@ -1,7 +1,6 @@
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
-#include <linux/affs_fs.h>
 #include <linux/amigaffs.h>
 
 /* AmigaOS allows file names with up to 30 characters length.
@@ -172,6 +171,7 @@ extern unsigned long		 affs_parent_ino(struct inode *dir);
 extern struct inode		*affs_new_inode(struct inode *dir);
 extern int			 affs_notify_change(struct dentry *dentry, struct iattr *attr);
 extern void			 affs_put_inode(struct inode *inode);
+extern void			 affs_drop_inode(struct inode *inode);
 extern void			 affs_delete_inode(struct inode *inode);
 extern void			 affs_clear_inode(struct inode *inode);
 extern void			 affs_read_inode(struct inode *inode);
@@ -189,15 +189,15 @@ extern void   affs_dir_truncate(struct inode *);
 
 /* jump tables */
 
-extern struct inode_operations	 affs_file_inode_operations;
-extern struct inode_operations	 affs_dir_inode_operations;
-extern struct inode_operations   affs_symlink_inode_operations;
-extern struct file_operations	 affs_file_operations;
-extern struct file_operations	 affs_file_operations_ofs;
-extern struct file_operations	 affs_dir_operations;
-extern struct address_space_operations	 affs_symlink_aops;
-extern struct address_space_operations	 affs_aops;
-extern struct address_space_operations	 affs_aops_ofs;
+extern const struct inode_operations	 affs_file_inode_operations;
+extern const struct inode_operations	 affs_dir_inode_operations;
+extern const struct inode_operations   affs_symlink_inode_operations;
+extern const struct file_operations	 affs_file_operations;
+extern const struct file_operations	 affs_file_operations_ofs;
+extern const struct file_operations	 affs_dir_operations;
+extern const struct address_space_operations	 affs_symlink_aops;
+extern const struct address_space_operations	 affs_aops;
+extern const struct address_space_operations	 affs_aops_ofs;
 
 extern struct dentry_operations	 affs_dentry_operations;
 extern struct dentry_operations	 affs_dentry_operations_intl;

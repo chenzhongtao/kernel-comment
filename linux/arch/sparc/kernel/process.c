@@ -1,7 +1,6 @@
-/*  $Id: process.c,v 1.161 2002/01/23 11:27:32 davem Exp $
- *  linux/arch/sparc/kernel/process.c
+/*  linux/arch/sparc/kernel/process.c
  *
- *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ *  Copyright (C) 1995 David S. Miller (davem@davemloft.net)
  *  Copyright (C) 1996 Eddie C. Dost   (ecd@skynet.be)
  */
 
@@ -22,9 +21,7 @@
 #include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
-#include <linux/config.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
@@ -41,6 +38,7 @@
 #include <asm/processor.h>
 #include <asm/psr.h>
 #include <asm/elf.h>
+#include <asm/prom.h>
 #include <asm/unistd.h>
 
 /* 
@@ -54,7 +52,8 @@ void (*pm_idle)(void);
  * This is done via auxio, but could be used as a fallback
  * handler when auxio is not present-- unused for now...
  */
-void (*pm_power_off)(void);
+void (*pm_power_off)(void) = machine_power_off;
+EXPORT_SYMBOL(pm_power_off);
 
 /*
  * sysctl - toggle power-off restriction for serial console 
@@ -67,13 +66,6 @@ extern void fpsave(unsigned long *, unsigned long *, void *, unsigned long *);
 struct task_struct *last_task_used_math = NULL;
 struct thread_info *current_set[NR_CPUS];
 
-/*
- * default_idle is new in 2.5. XXX Review, currently stolen from sparc64.
- */
-void default_idle(void)
-{
-}
-
 #ifndef CONFIG_SMP
 
 #define SUN4C_FAULT_HIGH 100
@@ -83,9 +75,6 @@ void default_idle(void)
  */
 void cpu_idle(void)
 {
-	if (current->pid != 0)
-		goto out;
-
 	/* endless idle loop with no priority at all */
 	for (;;) {
 		if (ARCH_SUN4C_SUN4) {
@@ -95,12 +84,11 @@ void cpu_idle(void)
 			static unsigned long fps;
 			unsigned long now;
 			unsigned long faults;
-			unsigned long flags;
 
 			extern unsigned long sun4c_kernel_faults;
 			extern void sun4c_grow_kernel_ring(void);
 
-			local_irq_save(flags);
+			local_irq_disable();
 			now = jiffies;
 			count -= (now - last_jiffies);
 			last_jiffies = now;
@@ -116,18 +104,21 @@ void cpu_idle(void)
 					sun4c_grow_kernel_ring();
 				}
 			}
-			local_irq_restore(flags);
+			local_irq_enable();
 		}
 
-		while((!need_resched()) && pm_idle) {
-			(*pm_idle)();
+		if (pm_idle) {
+			while (!need_resched())
+				(*pm_idle)();
+		} else {
+			while (!need_resched())
+				cpu_relax();
 		}
-
+		preempt_enable_no_resched();
 		schedule();
+		preempt_disable();
 		check_pgt_cache();
 	}
-out:
-	return;
 }
 
 #else
@@ -135,13 +126,15 @@ out:
 /* This is being executed in task 0 'user space'. */
 void cpu_idle(void)
 {
+        set_thread_flag(TIF_POLLING_NRFLAG);
 	/* endless idle loop with no priority at all */
 	while(1) {
-		if(need_resched()) {
-			schedule();
-			check_pgt_cache();
-		}
-		barrier(); /* or else gcc optimizes... */
+		while (!need_resched())
+			cpu_relax();
+		preempt_enable_no_resched();
+		schedule();
+		preempt_disable();
+		check_pgt_cache();
 	}
 }
 
@@ -157,13 +150,11 @@ void machine_halt(void)
 	local_irq_enable();
 	mdelay(8);
 	local_irq_disable();
-	if (!serial_console && prom_palette)
+	if (prom_palette)
 		prom_palette (1);
 	prom_halt();
 	panic("Halt failed!");
 }
-
-EXPORT_SYMBOL(machine_halt);
 
 void machine_restart(char * cmd)
 {
@@ -175,7 +166,7 @@ void machine_restart(char * cmd)
 
 	p = strchr (reboot_command, '\n');
 	if (p) *p = 0;
-	if (!serial_console && prom_palette)
+	if (prom_palette)
 		prom_palette (1);
 	if (cmd)
 		prom_reboot(cmd);
@@ -185,18 +176,15 @@ void machine_restart(char * cmd)
 	panic("Reboot failed!");
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_power_off(void)
 {
 #ifdef CONFIG_SUN_AUXIO
-	if (auxio_power_register && (!serial_console || scons_pwroff))
+	if (auxio_power_register &&
+	    (strcmp(of_console_device->type, "serial") || scons_pwroff))
 		*auxio_power_register |= AUXIO_POWER_OFF;
 #endif
 	machine_halt();
 }
-
-EXPORT_SYMBOL(machine_power_off);
 
 static DEFINE_SPINLOCK(sparc_backtrace_lock);
 
@@ -314,7 +302,7 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 	int count = 0;
 
 	if (tsk != NULL)
-		task_base = (unsigned long) tsk->thread_info;
+		task_base = (unsigned long) task_stack_page(tsk);
 	else
 		task_base = (unsigned long) current_thread_info();
 
@@ -333,12 +321,23 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 	printk("\n");
 }
 
+void dump_stack(void)
+{
+	unsigned long *ksp;
+
+	__asm__ __volatile__("mov	%%fp, %0"
+			     : "=r" (ksp));
+	show_stack(current, ksp);
+}
+
+EXPORT_SYMBOL(dump_stack);
+
 /*
  * Note: sparc64 has a pretty intricated thread_saved_pc, check it out.
  */
 unsigned long thread_saved_pc(struct task_struct *tsk)
 {
-	return tsk->thread_info->kpc;
+	return task_thread_info(tsk)->kpc;
 }
 
 /*
@@ -349,7 +348,7 @@ void exit_thread(void)
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
-	if(current_thread_info()->flags & _TIF_USEDFPU) {
+	if (test_thread_flag(TIF_USEDFPU)) {
 #endif
 		/* Keep process from leaving FPU in a bogon state. */
 		put_psr(get_psr() | PSR_EF);
@@ -358,7 +357,7 @@ void exit_thread(void)
 #ifndef CONFIG_SMP
 		last_task_used_math = NULL;
 #else
-		current_thread_info()->flags &= ~_TIF_USEDFPU;
+		clear_thread_flag(TIF_USEDFPU);
 #endif
 	}
 }
@@ -372,7 +371,7 @@ void flush_thread(void)
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
-	if(current_thread_info()->flags & _TIF_USEDFPU) {
+	if (test_thread_flag(TIF_USEDFPU)) {
 #endif
 		/* Clean the fpu. */
 		put_psr(get_psr() | PSR_EF);
@@ -381,7 +380,7 @@ void flush_thread(void)
 #ifndef CONFIG_SMP
 		last_task_used_math = NULL;
 #else
-		current_thread_info()->flags &= ~_TIF_USEDFPU;
+		clear_thread_flag(TIF_USEDFPU);
 #endif
 	}
 
@@ -393,11 +392,11 @@ void flush_thread(void)
 		/* We must fixup kregs as well. */
 		/* XXX This was not fixed for ti for a while, worked. Unused? */
 		current->thread.kregs = (struct pt_regs *)
-		    ((char *)current->thread_info + (THREAD_SIZE - TRACEREG_SZ));
+		    (task_stack_page(current) + (THREAD_SIZE - TRACEREG_SZ));
 	}
 }
 
-static __inline__ struct sparc_stackf __user *
+static inline struct sparc_stackf __user *
 clone_stackframe(struct sparc_stackf __user *dst,
 		 struct sparc_stackf __user *src)
 {
@@ -460,20 +459,20 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
-	struct thread_info *ti = p->thread_info;
+	struct thread_info *ti = task_thread_info(p);
 	struct pt_regs *childregs;
 	char *new_stack;
 
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
-	if(current_thread_info()->flags & _TIF_USEDFPU) {
+	if (test_thread_flag(TIF_USEDFPU)) {
 #endif
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&p->thread.float_regs[0], &p->thread.fsr,
 		       &p->thread.fpqueue[0], &p->thread.fpqdepth);
 #ifdef CONFIG_SMP
-		current_thread_info()->flags &= ~_TIF_USEDFPU;
+		clear_thread_flag(TIF_USEDFPU);
 #endif
 	}
 
@@ -483,7 +482,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 	 *  V                      V (stk.fr.) V  (pt_regs)  { (stk.fr.) }
 	 *  +----- - - - - - ------+===========+============={+==========}+
 	 */
-	new_stack = (char*)ti + THREAD_SIZE;
+	new_stack = task_stack_page(p) + THREAD_SIZE;
 	if (regs->psr & PSR_PS)
 		new_stack -= STACKFRAME_SZ;
 	new_stack -= STACKFRAME_SZ + TRACEREG_SZ;
@@ -610,13 +609,13 @@ int dump_fpu (struct pt_regs * regs, elf_fpregset_t * fpregs)
 		return 1;
 	}
 #ifdef CONFIG_SMP
-	if (current_thread_info()->flags & _TIF_USEDFPU) {
+	if (test_thread_flag(TIF_USEDFPU)) {
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&current->thread.float_regs[0], &current->thread.fsr,
 		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
 		if (regs != NULL) {
 			regs->psr &= ~(PSR_EF);
-			current_thread_info()->flags &= ~(_TIF_USEDFPU);
+			clear_thread_flag(TIF_USEDFPU);
 		}
 	}
 #else
@@ -685,7 +684,7 @@ out:
  * NOTE! Only a kernel-only process(ie the swapper or direct descendants
  * who haven't done an "execve()") should use this: it will work within
  * a system call from a "real" process, but the process memory space will
- * not be free'd until both the parent and the child have exited.
+ * not be freed until both the parent and the child have exited.
  */
 pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
@@ -725,7 +724,7 @@ unsigned long get_wchan(struct task_struct *task)
             task->state == TASK_RUNNING)
 		goto out;
 
-	fp = task->thread_info->ksp + bias;
+	fp = task_thread_info(task)->ksp + bias;
 	do {
 		/* Bogus frame pointer? */
 		if (fp < (task_base + sizeof(struct thread_info)) ||

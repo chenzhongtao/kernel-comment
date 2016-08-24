@@ -1,6 +1,6 @@
 #include <asm/asmmacro.h>
 #include <asm/ia32.h>
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/signal.h>
 #include <asm/thread_info.h>
 
@@ -51,43 +51,6 @@ ENTRY(ia32_clone)
 	mov rp=loc0
 	br.ret.sptk.many rp
 END(ia32_clone)
-
-ENTRY(sys32_rt_sigsuspend)
-	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8)
-	alloc loc1=ar.pfs,8,2,3,0		// preserve all eight input regs
-	mov loc0=rp
-	mov out0=in0				// mask
-	mov out1=in1				// sigsetsize
-	mov out2=sp				// out2 = &sigscratch
-	.fframe 16
-	adds sp=-16,sp				// allocate dummy "sigscratch"
-	;;
-	.body
-	br.call.sptk.many rp=ia32_rt_sigsuspend
-1:	.restore sp
-	adds sp=16,sp
-	mov rp=loc0
-	mov ar.pfs=loc1
-	br.ret.sptk.many rp
-END(sys32_rt_sigsuspend)
-
-ENTRY(sys32_sigsuspend)
-	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8)
-	alloc loc1=ar.pfs,8,2,3,0		// preserve all eight input regs
-	mov loc0=rp
-	mov out0=in2				// mask (first two args are ignored)
-	;;
-	mov out1=sp				// out1 = &sigscratch
-	.fframe 16
-	adds sp=-16,sp				// allocate dummy "sigscratch"
-	.body
-	br.call.sptk.many rp=ia32_sigsuspend
-1:	.restore sp
-	adds sp=16,sp
-	mov rp=loc0
-	mov ar.pfs=loc1
-	br.ret.sptk.many rp
-END(sys32_sigsuspend)
 
 GLOBAL_ENTRY(ia32_ret_from_clone)
 	PT_REGS_UNWIND_INFO(0)
@@ -215,7 +178,7 @@ ia32_syscall_table:
 	data8 sys32_fork
 	data8 sys_read
 	data8 sys_write
-	data8 sys32_open	  /* 5 */
+	data8 compat_sys_open	  /* 5 */
 	data8 sys_close
 	data8 sys32_waitpid
 	data8 sys_creat
@@ -326,7 +289,7 @@ ia32_syscall_table:
 	data8 sys_ni_syscall
 	data8 compat_sys_wait4
 	data8 sys_swapoff	  /* 115 */
-	data8 sys32_sysinfo
+	data8 compat_sys_sysinfo
 	data8 sys32_ipc
 	data8 sys_fsync
 	data8 sys32_sigreturn
@@ -334,14 +297,14 @@ ia32_syscall_table:
 	data8 sys_setdomainname
 	data8 sys32_newuname
 	data8 sys32_modify_ldt
-	data8 sys_ni_syscall	/* adjtimex */
+	data8 compat_sys_adjtimex
 	data8 sys32_mprotect	  /* 125 */
 	data8 compat_sys_sigprocmask
 	data8 sys_ni_syscall	/* create_module */
 	data8 sys_ni_syscall	/* init_module */
 	data8 sys_ni_syscall	/* delete_module */
 	data8 sys_ni_syscall	/* get_kernel_syms */  /* 130 */
-	data8 sys_quotactl
+	data8 sys32_quotactl
 	data8 sys_getpgid
 	data8 sys_fchdir
 	data8 sys_ni_syscall	/* sys_bdflush */
@@ -389,7 +352,7 @@ ia32_syscall_table:
 	data8 sys_rt_sigpending
 	data8 compat_sys_rt_sigtimedwait
 	data8 sys32_rt_sigqueueinfo
-	data8 sys32_rt_sigsuspend
+	data8 compat_sys_rt_sigsuspend
 	data8 sys32_pread	  /* 180 */
 	data8 sys32_pwrite
 	data8 sys_chown	/* 16-bit version */
@@ -469,7 +432,7 @@ ia32_syscall_table:
 	data8 sys32_epoll_wait
 	data8 sys_remap_file_pages
 	data8 sys_set_tid_address
- 	data8 sys32_timer_create
+ 	data8 compat_sys_timer_create
  	data8 compat_sys_timer_settime	/* 260 */
  	data8 compat_sys_timer_gettime
  	data8 sys_timer_getoverrun
@@ -494,7 +457,7 @@ ia32_syscall_table:
   	data8 compat_sys_mq_notify
   	data8 compat_sys_mq_getsetattr
 	data8 sys_ni_syscall		/* reserved for kexec */
-	data8 sys32_waitid
+	data8 compat_sys_waitid
 
 	// guard against failures to increase IA32_NR_syscalls
 	.org ia32_syscall_table + 8*IA32_NR_syscalls

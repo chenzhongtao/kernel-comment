@@ -12,7 +12,6 @@
 
 #include <linux/fs.h>
 #include <linux/init.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/vfs.h>
 #include <linux/mount.h>
 #include <linux/file.h>
@@ -31,11 +30,11 @@ static struct vfsmount *shm_mnt;
 
 static int __init init_tmpfs(void)
 {
-	register_filesystem(&tmpfs_fs_type);
-#ifdef CONFIG_TMPFS
-	devfs_mk_dir("shm");
-#endif
+	BUG_ON(register_filesystem(&tmpfs_fs_type) != 0);
+
 	shm_mnt = kern_mount(&tmpfs_fs_type);
+	BUG_ON(IS_ERR(shm_mnt));
+
 	return 0;
 }
 module_init(init_tmpfs)
@@ -67,24 +66,25 @@ struct file *shmem_file_setup(char *name, loff_t size, unsigned long flags)
 	if (!dentry)
 		goto put_memory;
 
-	error = -ENFILE;
-	file = get_empty_filp();
-	if (!file)
-		goto put_dentry;
-
 	error = -ENOSPC;
 	inode = ramfs_get_inode(root->d_sb, S_IFREG | S_IRWXUGO, 0);
 	if (!inode)
-		goto close_file;
+		goto put_dentry;
 
 	d_instantiate(dentry, inode);
-	inode->i_size = size;
+	error = -ENFILE;
+	file = alloc_file(shm_mnt, dentry, FMODE_WRITE | FMODE_READ,
+			&ramfs_file_operations);
+	if (!file)
+		goto put_dentry;
+
 	inode->i_nlink = 0;	/* It is unlinked */
-	file->f_vfsmnt = mntget(shm_mnt);
-	file->f_dentry = dentry;
-	file->f_mapping = inode->i_mapping;
-	file->f_op = &ramfs_file_operations;
-	file->f_mode = FMODE_WRITE | FMODE_READ;
+
+	/* notify everyone as to the change of file size */
+	error = do_truncate(dentry, size, 0, file);
+	if (error < 0)
+		goto close_file;
+
 	return file;
 
 close_file:
@@ -120,3 +120,26 @@ int shmem_unuse(swp_entry_t entry, struct page *page)
 {
 	return 0;
 }
+
+#if 0
+int shmem_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	file_accessed(file);
+#ifndef CONFIG_MMU
+	return ramfs_nommu_mmap(file, vma);
+#else
+	return 0;
+#endif
+}
+#endif  /*  0  */
+
+#ifndef CONFIG_MMU
+unsigned long shmem_get_unmapped_area(struct file *file,
+				      unsigned long addr,
+				      unsigned long len,
+				      unsigned long pgoff,
+				      unsigned long flags)
+{
+	return ramfs_nommu_get_unmapped_area(file, addr, len, pgoff, flags);
+}
+#endif

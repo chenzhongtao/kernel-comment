@@ -1,27 +1,25 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright (C) 2001-2003 Red Hat, Inc.
+ * Copyright © 2001-2007 Red Hat, Inc.
  *
  * Created by David Woodhouse <dwmw2@infradead.org>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
  *
- * $Id: super.c,v 1.104 2004/11/23 15:37:31 gleixner Exp $
- *
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/fs.h>
+#include <linux/err.h>
 #include <linux/mount.h>
 #include <linux/jffs2.h>
 #include <linux/pagemap.h>
-#include <linux/mtd/mtd.h>
+#include <linux/mtd/super.h>
 #include <linux/ctype.h>
 #include <linux/namei.h>
 #include "compr.h"
@@ -29,12 +27,12 @@
 
 static void jffs2_put_super(struct super_block *);
 
-static kmem_cache_t *jffs2_inode_cachep;
+static struct kmem_cache *jffs2_inode_cachep;
 
 static struct inode *jffs2_alloc_inode(struct super_block *sb)
 {
 	struct jffs2_inode_info *ei;
-	ei = (struct jffs2_inode_info *)kmem_cache_alloc(jffs2_inode_cachep, SLAB_KERNEL);
+	ei = (struct jffs2_inode_info *)kmem_cache_alloc(jffs2_inode_cachep, GFP_KERNEL);
 	if (!ei)
 		return NULL;
 	return &ei->vfs_inode;
@@ -45,15 +43,12 @@ static void jffs2_destroy_inode(struct inode *inode)
 	kmem_cache_free(jffs2_inode_cachep, JFFS2_INODE_INFO(inode));
 }
 
-static void jffs2_i_init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+static void jffs2_i_init_once(struct kmem_cache *cachep, void *foo)
 {
 	struct jffs2_inode_info *ei = (struct jffs2_inode_info *) foo;
 
-	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
-	    SLAB_CTOR_CONSTRUCTOR) {
-		init_MUTEX_LOCKED(&ei->sem);
-		inode_init_once(&ei->vfs_inode);
-	}
+	init_MUTEX(&ei->sem);
+	inode_init_once(&ei->vfs_inode);
 }
 
 static int jffs2_sync_fs(struct super_block *sb, int wait)
@@ -62,11 +57,11 @@ static int jffs2_sync_fs(struct super_block *sb, int wait)
 
 	down(&c->alloc_sem);
 	jffs2_flush_wbuf_pad(c);
-	up(&c->alloc_sem);	
+	up(&c->alloc_sem);
 	return 0;
 }
 
-static struct super_operations jffs2_super_operations =
+static const struct super_operations jffs2_super_operations =
 {
 	.alloc_inode =	jffs2_alloc_inode,
 	.destroy_inode =jffs2_destroy_inode,
@@ -80,188 +75,49 @@ static struct super_operations jffs2_super_operations =
 	.sync_fs =	jffs2_sync_fs,
 };
 
-static int jffs2_sb_compare(struct super_block *sb, void *data)
+/*
+ * fill in the superblock
+ */
+static int jffs2_fill_super(struct super_block *sb, void *data, int silent)
 {
-	struct jffs2_sb_info *p = data;
-	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
-
-	/* The superblocks are considered to be equivalent if the underlying MTD
-	   device is the same one */
-	if (c->mtd == p->mtd) {
-		D1(printk(KERN_DEBUG "jffs2_sb_compare: match on device %d (\"%s\")\n", p->mtd->index, p->mtd->name));
-		return 1;
-	} else {
-		D1(printk(KERN_DEBUG "jffs2_sb_compare: No match, device %d (\"%s\"), device %d (\"%s\")\n",
-			  c->mtd->index, c->mtd->name, p->mtd->index, p->mtd->name));
-		return 0;
-	}
-}
-
-static int jffs2_sb_set(struct super_block *sb, void *data)
-{
-	struct jffs2_sb_info *p = data;
-
-	/* For persistence of NFS exports etc. we use the same s_dev
-	   each time we mount the device, don't just use an anonymous
-	   device */
-	sb->s_fs_info = p;
-	p->os_priv = sb;
-	sb->s_dev = MKDEV(MTD_BLOCK_MAJOR, p->mtd->index);
-
-	return 0;
-}
-
-static struct super_block *jffs2_get_sb_mtd(struct file_system_type *fs_type,
-					      int flags, const char *dev_name, 
-					      void *data, struct mtd_info *mtd)
-{
-	struct super_block *sb;
 	struct jffs2_sb_info *c;
-	int ret;
 
-	c = kmalloc(sizeof(*c), GFP_KERNEL);
+	D1(printk(KERN_DEBUG "jffs2_get_sb_mtd():"
+		  " New superblock for device %d (\"%s\")\n",
+		  sb->s_mtd->index, sb->s_mtd->name));
+
+	c = kzalloc(sizeof(*c), GFP_KERNEL);
 	if (!c)
-		return ERR_PTR(-ENOMEM);
-	memset(c, 0, sizeof(*c));
-	c->mtd = mtd;
+		return -ENOMEM;
 
-	sb = sget(fs_type, jffs2_sb_compare, jffs2_sb_set, c);
+	c->mtd = sb->s_mtd;
+	c->os_priv = sb;
+	sb->s_fs_info = c;
 
-	if (IS_ERR(sb))
-		goto out_put;
-
-	if (sb->s_root) {
-		/* New mountpoint for JFFS2 which is already mounted */
-		D1(printk(KERN_DEBUG "jffs2_get_sb_mtd(): Device %d (\"%s\") is already mounted\n",
-			  mtd->index, mtd->name));
-		goto out_put;
-	}
-
-	D1(printk(KERN_DEBUG "jffs2_get_sb_mtd(): New superblock for device %d (\"%s\")\n",
-		  mtd->index, mtd->name));
+	/* Initialize JFFS2 superblock locks, the further initialization will
+	 * be done later */
+	init_MUTEX(&c->alloc_sem);
+	init_MUTEX(&c->erase_free_sem);
+	init_waitqueue_head(&c->erase_wait);
+	init_waitqueue_head(&c->inocache_wq);
+	spin_lock_init(&c->erase_completion_lock);
+	spin_lock_init(&c->inocache_lock);
 
 	sb->s_op = &jffs2_super_operations;
-	sb->s_flags = flags | MS_NOATIME;
-
-	ret = jffs2_do_fill_super(sb, data, (flags&MS_VERBOSE)?1:0);
-
-	if (ret) {
-		/* Failure case... */
-		up_write(&sb->s_umount);
-		deactivate_super(sb);
-		return ERR_PTR(ret);
-	}
-
-	sb->s_flags |= MS_ACTIVE;
-	return sb;
-
- out_put:
-	kfree(c);
-	put_mtd_device(mtd);
-
-	return sb;
+	sb->s_flags = sb->s_flags | MS_NOATIME;
+	sb->s_xattr = jffs2_xattr_handlers;
+#ifdef CONFIG_JFFS2_FS_POSIX_ACL
+	sb->s_flags |= MS_POSIXACL;
+#endif
+	return jffs2_do_fill_super(sb, data, silent);
 }
 
-static struct super_block *jffs2_get_sb_mtdnr(struct file_system_type *fs_type,
-					      int flags, const char *dev_name, 
-					      void *data, int mtdnr)
+static int jffs2_get_sb(struct file_system_type *fs_type,
+			int flags, const char *dev_name,
+			void *data, struct vfsmount *mnt)
 {
-	struct mtd_info *mtd;
-
-	mtd = get_mtd_device(NULL, mtdnr);
-	if (!mtd) {
-		D1(printk(KERN_DEBUG "jffs2: MTD device #%u doesn't appear to exist\n", mtdnr));
-		return ERR_PTR(-EINVAL);
-	}
-
-	return jffs2_get_sb_mtd(fs_type, flags, dev_name, data, mtd);
-}
-
-static struct super_block *jffs2_get_sb(struct file_system_type *fs_type,
-					int flags, const char *dev_name,
-					void *data)
-{
-	int err;
-	struct nameidata nd;
-	int mtdnr;
-
-	if (!dev_name)
-		return ERR_PTR(-EINVAL);
-
-	D1(printk(KERN_DEBUG "jffs2_get_sb(): dev_name \"%s\"\n", dev_name));
-
-	/* The preferred way of mounting in future; especially when
-	   CONFIG_BLK_DEV is implemented - we specify the underlying
-	   MTD device by number or by name, so that we don't require 
-	   block device support to be present in the kernel. */
-
-	/* FIXME: How to do the root fs this way? */
-
-	if (dev_name[0] == 'm' && dev_name[1] == 't' && dev_name[2] == 'd') {
-		/* Probably mounting without the blkdev crap */
-		if (dev_name[3] == ':') {
-			struct mtd_info *mtd;
-
-			/* Mount by MTD device name */
-			D1(printk(KERN_DEBUG "jffs2_get_sb(): mtd:%%s, name \"%s\"\n", dev_name+4));
-			for (mtdnr = 0; mtdnr < MAX_MTD_DEVICES; mtdnr++) {
-				mtd = get_mtd_device(NULL, mtdnr);
-				if (mtd) {
-					if (!strcmp(mtd->name, dev_name+4))
-						return jffs2_get_sb_mtd(fs_type, flags, dev_name, data, mtd);
-					put_mtd_device(mtd);
-				}
-			}
-			printk(KERN_NOTICE "jffs2_get_sb(): MTD device with name \"%s\" not found.\n", dev_name+4);
-		} else if (isdigit(dev_name[3])) {
-			/* Mount by MTD device number name */
-			char *endptr;
-			
-			mtdnr = simple_strtoul(dev_name+3, &endptr, 0);
-			if (!*endptr) {
-				/* It was a valid number */
-				D1(printk(KERN_DEBUG "jffs2_get_sb(): mtd%%d, mtdnr %d\n", mtdnr));
-				return jffs2_get_sb_mtdnr(fs_type, flags, dev_name, data, mtdnr);
-			}
-		}
-	}
-
-	/* Try the old way - the hack where we allowed users to mount 
-	   /dev/mtdblock$(n) but didn't actually _use_ the blkdev */
-
-	err = path_lookup(dev_name, LOOKUP_FOLLOW, &nd);
-
-	D1(printk(KERN_DEBUG "jffs2_get_sb(): path_lookup() returned %d, inode %p\n",
-		  err, nd.dentry->d_inode));
-
-	if (err)
-		return ERR_PTR(err);
-
-	err = -EINVAL;
-
-	if (!S_ISBLK(nd.dentry->d_inode->i_mode))
-		goto out;
-
-	if (nd.mnt->mnt_flags & MNT_NODEV) {
-		err = -EACCES;
-		goto out;
-	}
-
-	if (imajor(nd.dentry->d_inode) != MTD_BLOCK_MAJOR) {
-		if (!(flags & MS_VERBOSE)) /* Yes I mean this. Strangely */
-			printk(KERN_NOTICE "Attempt to mount non-MTD device \"%s\" as JFFS2\n",
-			       dev_name);
-		goto out;
-	}
-
-	mtdnr = iminor(nd.dentry->d_inode);
-	path_release(&nd);
-
-	return jffs2_get_sb_mtdnr(fs_type, flags, dev_name, data, mtdnr);
-
-out:
-	path_release(&nd);
-	return ERR_PTR(err);
+	return get_sb_mtd(fs_type, flags, dev_name, data, jffs2_fill_super,
+			  mnt);
 }
 
 static void jffs2_put_super (struct super_block *sb)
@@ -270,19 +126,21 @@ static void jffs2_put_super (struct super_block *sb)
 
 	D2(printk(KERN_DEBUG "jffs2: jffs2_put_super()\n"));
 
-	if (!(sb->s_flags & MS_RDONLY))
-		jffs2_stop_garbage_collect_thread(c);
 	down(&c->alloc_sem);
 	jffs2_flush_wbuf_pad(c);
 	up(&c->alloc_sem);
+
+	jffs2_sum_exit(c);
+
 	jffs2_free_ino_caches(c);
 	jffs2_free_raw_node_refs(c);
-	if (c->mtd->flags & MTD_NO_VIRTBLOCKS)
+	if (jffs2_blocks_use_vmalloc(c))
 		vfree(c->blocks);
 	else
 		kfree(c->blocks);
 	jffs2_flash_cleanup(c);
 	kfree(c->inocache_list);
+	jffs2_clear_xattr_subsystem(c);
 	if (c->mtd->sync)
 		c->mtd->sync(c->mtd);
 
@@ -292,8 +150,9 @@ static void jffs2_put_super (struct super_block *sb)
 static void jffs2_kill_sb(struct super_block *sb)
 {
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
-	generic_shutdown_super(sb);
-	put_mtd_device(c->mtd);
+	if (!(sb->s_flags & MS_RDONLY))
+		jffs2_stop_garbage_collect_thread(c);
+	kill_mtd_super(sb);
 	kfree(c);
 }
 
@@ -308,16 +167,32 @@ static int __init init_jffs2_fs(void)
 {
 	int ret;
 
+	/* Paranoia checks for on-medium structures. If we ask GCC
+	   to pack them with __attribute__((packed)) then it _also_
+	   assumes that they're not aligned -- so it emits crappy
+	   code on some architectures. Ideally we want an attribute
+	   which means just 'no padding', without the alignment
+	   thing. But GCC doesn't have that -- we have to just
+	   hope the structs are the right sizes, instead. */
+	BUILD_BUG_ON(sizeof(struct jffs2_unknown_node) != 12);
+	BUILD_BUG_ON(sizeof(struct jffs2_raw_dirent) != 40);
+	BUILD_BUG_ON(sizeof(struct jffs2_raw_inode) != 68);
+	BUILD_BUG_ON(sizeof(struct jffs2_raw_summary) != 32);
+
 	printk(KERN_INFO "JFFS2 version 2.2."
-#ifdef CONFIG_JFFS2_FS_NAND
+#ifdef CONFIG_JFFS2_FS_WRITEBUFFER
 	       " (NAND)"
 #endif
-	       " (C) 2001-2003 Red Hat, Inc.\n");
+#ifdef CONFIG_JFFS2_SUMMARY
+	       " (SUMMARY) "
+#endif
+	       " © 2001-2006 Red Hat, Inc.\n");
 
 	jffs2_inode_cachep = kmem_cache_create("jffs2_i",
 					     sizeof(struct jffs2_inode_info),
-					     0, SLAB_RECLAIM_ACCOUNT,
-					     jffs2_i_init_once, NULL);
+					     0, (SLAB_RECLAIM_ACCOUNT|
+						SLAB_MEM_SPREAD),
+					     jffs2_i_init_once);
 	if (!jffs2_inode_cachep) {
 		printk(KERN_ERR "JFFS2 error: Failed to initialise inode cache\n");
 		return -ENOMEM;
@@ -361,5 +236,5 @@ module_exit(exit_jffs2_fs);
 
 MODULE_DESCRIPTION("The Journalling Flash File System, v2");
 MODULE_AUTHOR("Red Hat, Inc.");
-MODULE_LICENSE("GPL"); // Actually dual-licensed, but it doesn't matter for 
+MODULE_LICENSE("GPL"); // Actually dual-licensed, but it doesn't matter for
 		       // the sake of this tag. It's Free Software.

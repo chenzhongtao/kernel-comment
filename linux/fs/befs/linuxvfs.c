@@ -22,7 +22,6 @@
 #include "datastream.h"
 #include "super.h"
 #include "io.h"
-#include "endian.h"
 
 MODULE_DESCRIPTION("BeOS File System (BeFS) driver");
 MODULE_AUTHOR("Will Dyson");
@@ -41,15 +40,15 @@ static struct inode *befs_alloc_inode(struct super_block *sb);
 static void befs_destroy_inode(struct inode *inode);
 static int befs_init_inodecache(void);
 static void befs_destroy_inodecache(void);
-static int befs_follow_link(struct dentry *, struct nameidata *);
-static void befs_put_link(struct dentry *, struct nameidata *);
+static void *befs_follow_link(struct dentry *, struct nameidata *);
+static void befs_put_link(struct dentry *, struct nameidata *, void *);
 static int befs_utf2nls(struct super_block *sb, const char *in, int in_len,
 			char **out, int *out_len);
 static int befs_nls2utf(struct super_block *sb, const char *in, int in_len,
 			char **out, int *out_len);
 static void befs_put_super(struct super_block *);
 static int befs_remount(struct super_block *, int *, char *);
-static int befs_statfs(struct super_block *, struct kstatfs *);
+static int befs_statfs(struct dentry *, struct kstatfs *);
 static int parse_options(char *, befs_mount_options *);
 
 static const struct super_operations befs_sops = {
@@ -62,30 +61,24 @@ static const struct super_operations befs_sops = {
 };
 
 /* slab cache for befs_inode_info objects */
-static kmem_cache_t *befs_inode_cachep;
+static struct kmem_cache *befs_inode_cachep;
 
-static struct file_operations befs_dir_operations = {
+static const struct file_operations befs_dir_operations = {
 	.read		= generic_read_dir,
 	.readdir	= befs_readdir,
 };
 
-static struct inode_operations befs_dir_inode_operations = {
+static const struct inode_operations befs_dir_inode_operations = {
 	.lookup		= befs_lookup,
 };
 
-static struct file_operations befs_file_operations = {
-	.llseek		= default_llseek,
-	.read		= generic_file_read,
-	.mmap		= generic_file_readonly_mmap,
-};
-
-static struct address_space_operations befs_aops = {
+static const struct address_space_operations befs_aops = {
 	.readpage	= befs_readpage,
 	.sync_page	= block_sync_page,
 	.bmap		= befs_bmap,
 };
 
-static struct inode_operations befs_symlink_inode_operations = {
+static const struct inode_operations befs_symlink_inode_operations = {
 	.readlink	= generic_readlink,
 	.follow_link	= befs_follow_link,
 	.put_link	= befs_put_link,
@@ -219,7 +212,7 @@ befs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 static int
 befs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct inode *inode = filp->f_dentry->d_inode;
+	struct inode *inode = filp->f_path.dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
 	befs_data_stream *ds = &BEFS_I(inode)->i_data.ds;
 	befs_off_t value;
@@ -229,7 +222,7 @@ befs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	char keybuf[BEFS_NAME_LEN + 1];
 	char *nlsname;
 	int nlsnamelen;
-	const char *dirname = filp->f_dentry->d_name.name;
+	const char *dirname = filp->f_path.dentry->d_name.name;
 
 	befs_debug(sb, "---> befs_readdir() "
 		   "name %s, inode %ld, filp->f_pos %Ld",
@@ -284,7 +277,7 @@ befs_alloc_inode(struct super_block *sb)
 {
         struct befs_inode_info *bi;
         bi = (struct befs_inode_info *)kmem_cache_alloc(befs_inode_cachep,
-							SLAB_KERNEL);
+							GFP_KERNEL);
         if (!bi)
                 return NULL;
         return &bi->vfs_inode;
@@ -296,14 +289,11 @@ befs_destroy_inode(struct inode *inode)
         kmem_cache_free(befs_inode_cachep, BEFS_I(inode));
 }
 
-static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+static void init_once(struct kmem_cache *cachep, void *foo)
 {
         struct befs_inode_info *bi = (struct befs_inode_info *) foo;
-	
-	        if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
-		            SLAB_CTOR_CONSTRUCTOR) {
-			inode_init_once(&bi->vfs_inode);
-		}
+
+	inode_init_once(&bi->vfs_inode);
 }
 
 static void
@@ -331,7 +321,7 @@ befs_read_inode(struct inode *inode)
 	if (!bh) {
 		befs_error(sb, "unable to read inode block - "
 			   "inode = %lu", inode->i_ino);
-		goto unaquire_none;
+		goto unacquire_none;
 	}
 
 	raw_inode = (befs_inode *) bh->b_data;
@@ -340,7 +330,7 @@ befs_read_inode(struct inode *inode)
 
 	if (befs_check_inode(sb, raw_inode, inode->i_ino) != BEFS_OK) {
 		befs_error(sb, "Bad inode: %lu", inode->i_ino);
-		goto unaquire_bh;
+		goto unacquire_bh;
 	}
 
 	inode->i_mode = (umode_t) fs32_to_cpu(sb, raw_inode->mode);
@@ -371,7 +361,6 @@ befs_read_inode(struct inode *inode)
 	inode->i_mtime.tv_nsec = 0;   /* lower 16 bits are not a time */	
 	inode->i_ctime = inode->i_mtime;
 	inode->i_atime = inode->i_mtime;
-	inode->i_blksize = befs_sb->block_size;
 
 	befs_ino->i_inode_num = fsrun_to_cpu(sb, raw_inode->inode_num);
 	befs_ino->i_parent = fsrun_to_cpu(sb, raw_inode->parent);
@@ -398,7 +387,7 @@ befs_read_inode(struct inode *inode)
 	inode->i_mapping->a_ops = &befs_aops;
 
 	if (S_ISREG(inode->i_mode)) {
-		inode->i_fop = &befs_file_operations;
+		inode->i_fop = &generic_ro_fops;
 	} else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &befs_dir_inode_operations;
 		inode->i_fop = &befs_dir_operations;
@@ -408,24 +397,24 @@ befs_read_inode(struct inode *inode)
 		befs_error(sb, "Inode %lu is not a regular file, "
 			   "directory or symlink. THAT IS WRONG! BeFS has no "
 			   "on disk special files", inode->i_ino);
-		goto unaquire_bh;
+		goto unacquire_bh;
 	}
 
 	brelse(bh);
 	befs_debug(sb, "<--- befs_read_inode()");
 	return;
 
-      unaquire_bh:
+      unacquire_bh:
 	brelse(bh);
 
-      unaquire_none:
+      unacquire_none:
 	make_bad_inode(inode);
 	befs_debug(sb, "<--- befs_read_inode() - Bad inode");
 	return;
 }
 
 /* Initialize the inode cache. Called at fs setup.
- * 
+ *
  * Taken from NFS implementation by Al Viro.
  */
 static int
@@ -433,8 +422,9 @@ befs_init_inodecache(void)
 {
 	befs_inode_cachep = kmem_cache_create("befs_inode_cache",
 					      sizeof (struct befs_inode_info),
-					      0, SLAB_RECLAIM_ACCOUNT,
-					      init_once, NULL);
+					      0, (SLAB_RECLAIM_ACCOUNT|
+						SLAB_MEM_SPREAD),
+					      init_once);
 	if (befs_inode_cachep == NULL) {
 		printk(KERN_ERR "befs_init_inodecache: "
 		       "Couldn't initalize inode slabcache\n");
@@ -451,9 +441,7 @@ befs_init_inodecache(void)
 static void
 befs_destroy_inodecache(void)
 {
-	if (kmem_cache_destroy(befs_inode_cachep))
-		printk(KERN_ERR "befs_destroy_inodecache: "
-		       "not all structures were freed\n");
+	kmem_cache_destroy(befs_inode_cachep);
 }
 
 /*
@@ -461,7 +449,7 @@ befs_destroy_inodecache(void)
  * The data stream become link name. Unless the LONG_SYMLINK
  * flag is set.
  */
-static int
+static void *
 befs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	befs_inode_info *befs_ino = BEFS_I(dentry->d_inode);
@@ -487,10 +475,10 @@ befs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	}
 
 	nd_set_link(nd, link);
-	return 0;
+	return NULL;
 }
 
-static void befs_put_link(struct dentry *dentry, struct nameidata *nd)
+static void befs_put_link(struct dentry *dentry, struct nameidata *nd, void *p)
 {
 	befs_inode_info *befs_ino = BEFS_I(dentry->d_inode);
 	if (befs_ino->i_flags & BEFS_LONG_SYMLINK) {
@@ -517,7 +505,11 @@ befs_utf2nls(struct super_block *sb, const char *in,
 	wchar_t uni;
 	int unilen, utflen;
 	char *result;
-	int maxlen = in_len; /* The utf8->nls conversion can't make more chars */
+	/* The utf8->nls conversion won't make the final nls string bigger
+	 * than the utf one, but if the string is pure ascii they'll have the
+	 * same width and an extra char is needed to save the additional \0
+	 */
+	int maxlen = in_len + 1;
 
 	befs_debug(sb, "---> utf2nls()");
 
@@ -567,7 +559,7 @@ befs_utf2nls(struct super_block *sb, const char *in,
  * @sb: Superblock
  * @src: Input string buffer in NLS format
  * @srclen: Length of input string in bytes
- * @dest: The output string in UTF8 format
+ * @dest: The output string in UTF-8 format
  * @destlen: Length of the output buffer
  * 
  * Converts input string @src, which is in the format of the loaded NLS map,
@@ -593,7 +585,10 @@ befs_nls2utf(struct super_block *sb, const char *in,
 	wchar_t uni;
 	int unilen, utflen;
 	char *result;
-	int maxlen = 3 * in_len;
+	/* There're nls characters that will translate to 3-chars-wide UTF-8
+	 * characters, a additional byte is needed to save the final \0
+	 * in special cases */
+	int maxlen = (3 * in_len) + 1;
 
 	befs_debug(sb, "---> nls2utf()\n");
 
@@ -731,20 +726,16 @@ parse_options(char *options, befs_mount_options * opts)
 static void
 befs_put_super(struct super_block *sb)
 {
-	if (BEFS_SB(sb)->mount_opts.iocharset) {
-		kfree(BEFS_SB(sb)->mount_opts.iocharset);
-		BEFS_SB(sb)->mount_opts.iocharset = NULL;
-	}
+	kfree(BEFS_SB(sb)->mount_opts.iocharset);
+	BEFS_SB(sb)->mount_opts.iocharset = NULL;
 
 	if (BEFS_SB(sb)->nls) {
 		unload_nls(BEFS_SB(sb)->nls);
 		BEFS_SB(sb)->nls = NULL;
 	}
 
-	if (sb->s_fs_info) {
-		kfree(sb->s_fs_info);
-		sb->s_fs_info = NULL;
-	}
+	kfree(sb->s_fs_info);
+	sb->s_fs_info = NULL;
 	return;
 }
 
@@ -770,14 +761,14 @@ befs_fill_super(struct super_block *sb, void *data, int silent)
 		printk(KERN_ERR
 		       "BeFS(%s): Unable to allocate memory for private "
 		       "portion of superblock. Bailing.\n", sb->s_id);
-		goto unaquire_none;
+		goto unacquire_none;
 	}
 	befs_sb = BEFS_SB(sb);
 	memset(befs_sb, 0, sizeof(befs_sb_info));
 
 	if (!parse_options((char *) data, &befs_sb->mount_opts)) {
 		befs_error(sb, "cannot parse mount options");
-		goto unaquire_priv_sbp;
+		goto unacquire_priv_sbp;
 	}
 
 	befs_debug(sb, "---> befs_fill_super()");
@@ -803,7 +794,7 @@ befs_fill_super(struct super_block *sb, void *data, int silent)
 
 	if (!(bh = sb_bread(sb, sb_block))) {
 		befs_error(sb, "unable to read superblock");
-		goto unaquire_priv_sbp;
+		goto unacquire_priv_sbp;
 	}
 
 	/* account for offset of super block on x86 */
@@ -818,20 +809,20 @@ befs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 	if (befs_load_sb(sb, disk_sb) != BEFS_OK)
-		goto unaquire_bh;
+		goto unacquire_bh;
 
 	befs_dump_super_block(sb, disk_sb);
 
 	brelse(bh);
 
 	if (befs_check_sb(sb) != BEFS_OK)
-		goto unaquire_priv_sbp;
+		goto unacquire_priv_sbp;
 
 	if( befs_sb->num_blocks > ~((sector_t)0) ) {
 		befs_error(sb, "blocks count: %Lu "
 			"is larger than the host can use",
 			befs_sb->num_blocks);
-		goto unaquire_priv_sbp;
+		goto unacquire_priv_sbp;
 	}
 
 	/*
@@ -847,7 +838,7 @@ befs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sb->s_root) {
 		iput(root);
 		befs_error(sb, "get root inode failed");
-		goto unaquire_priv_sbp;
+		goto unacquire_priv_sbp;
 	}
 
 	/* load nls library */
@@ -869,13 +860,13 @@ befs_fill_super(struct super_block *sb, void *data, int silent)
 
 	return 0;
 /*****************/
-      unaquire_bh:
+      unacquire_bh:
 	brelse(bh);
 
-      unaquire_priv_sbp:
+      unacquire_priv_sbp:
 	kfree(sb->s_fs_info);
 
-      unaquire_none:
+      unacquire_none:
 	sb->s_fs_info = NULL;
 	return -EINVAL;
 }
@@ -889,8 +880,9 @@ befs_remount(struct super_block *sb, int *flags, char *data)
 }
 
 static int
-befs_statfs(struct super_block *sb, struct kstatfs *buf)
+befs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
+	struct super_block *sb = dentry->d_sb;
 
 	befs_debug(sb, "---> befs_statfs()");
 
@@ -908,11 +900,12 @@ befs_statfs(struct super_block *sb, struct kstatfs *buf)
 	return 0;
 }
 
-static struct super_block *
+static int
 befs_get_sb(struct file_system_type *fs_type, int flags, const char *dev_name,
-	    void *data)
+	    void *data, struct vfsmount *mnt)
 {
-	return get_sb_bdev(fs_type, flags, dev_name, data, befs_fill_super);
+	return get_sb_bdev(fs_type, flags, dev_name, data, befs_fill_super,
+			   mnt);
 }
 
 static struct file_system_type befs_fs_type = {
@@ -932,18 +925,18 @@ init_befs_fs(void)
 
 	err = befs_init_inodecache();
 	if (err)
-		goto unaquire_none;
+		goto unacquire_none;
 
 	err = register_filesystem(&befs_fs_type);
 	if (err)
-		goto unaquire_inodecache;
+		goto unacquire_inodecache;
 
 	return 0;
 
-unaquire_inodecache:
+unacquire_inodecache:
 	befs_destroy_inodecache();
 
-unaquire_none:
+unacquire_none:
 	return err;
 }
 

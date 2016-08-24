@@ -11,7 +11,6 @@
 #define	mcfdma_h
 /****************************************************************************/
 
-#include <linux/config.h>
 
 /*
  *	Get address specific defines for this Coldfire member.
@@ -21,7 +20,7 @@
 #define	MCFDMA_BASE1		0x240		/* Base address of DMA 1 */
 #elif defined(CONFIG_M5272)
 #define	MCFDMA_BASE0		0x0e0		/* Base address of DMA 0 */
-#elif defined(CONFIG_M527x) || defined(CONFIG_M528x)
+#elif defined(CONFIG_M523x) || defined(CONFIG_M527x) || defined(CONFIG_M528x)
 /* These are relative to the IPSBAR, not MBAR */
 #define	MCFDMA_BASE0		0x100		/* Base address of DMA 0 */
 #define	MCFDMA_BASE1		0x140		/* Base address of DMA 1 */
@@ -134,7 +133,7 @@
 #define MCFDMA_DIR_ASCEN     0x0800 /* Address Sequence Complete (Completion) interrupt enable */
 #define MCFDMA_DIR_TEEN      0x0200 /* Transfer Error interrupt enable */
 #define MCFDMA_DIR_TCEN      0x0100 /* Transfer Complete (a bus transfer, that is) interrupt enable */
-#define MCFDMA_DIR_INV       0x1000 /* Invalid Combination */
+#define MCFDMA_DIR_INV       0x0010 /* Invalid Combination */
 #define MCFDMA_DIR_ASC       0x0008 /* Address Sequence Complete (DMA Completion) */
 #define MCFDMA_DIR_TE        0x0002 /* Transfer Error */
 #define MCFDMA_DIR_TC        0x0001 /* Transfer Complete */

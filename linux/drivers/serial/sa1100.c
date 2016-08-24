@@ -24,7 +24,6 @@
  *  $Id: sa1100.c,v 1.50 2002/07/29 14:41:04 rmk Exp $
  *
  */
-#include <linux/config.h>
 
 #if defined(CONFIG_SERIAL_SA1100_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #define SUPPORT_SYSRQ
@@ -35,7 +34,7 @@
 #include <linux/init.h>
 #include <linux/console.h>
 #include <linux/sysrq.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/serial_core.h>
@@ -145,7 +144,7 @@ static void sa1100_timeout(unsigned long data)
 /*
  * interrupts disabled on entry
  */
-static void sa1100_stop_tx(struct uart_port *port, unsigned int tty_stop)
+static void sa1100_stop_tx(struct uart_port *port)
 {
 	struct sa1100_port *sport = (struct sa1100_port *)port;
 	u32 utcr3;
@@ -156,19 +155,16 @@ static void sa1100_stop_tx(struct uart_port *port, unsigned int tty_stop)
 }
 
 /*
- * interrupts may not be disabled on entry
+ * port locked and interrupts disabled
  */
-static void sa1100_start_tx(struct uart_port *port, unsigned int tty_start)
+static void sa1100_start_tx(struct uart_port *port)
 {
 	struct sa1100_port *sport = (struct sa1100_port *)port;
-	unsigned long flags;
 	u32 utcr3;
 
-	spin_lock_irqsave(&sport->port.lock, flags);
 	utcr3 = UART_GET_UTCR3(sport);
 	sport->port.read_status_mask |= UTSR0_TO_SM(UTSR0_TFS);
 	UART_PUT_UTCR3(sport, utcr3 | UTCR3_TIE);
-	spin_unlock_irqrestore(&sport->port.lock, flags);
 }
 
 /*
@@ -194,18 +190,16 @@ static void sa1100_enable_ms(struct uart_port *port)
 }
 
 static void
-sa1100_rx_chars(struct sa1100_port *sport, struct pt_regs *regs)
+sa1100_rx_chars(struct sa1100_port *sport)
 {
 	struct tty_struct *tty = sport->port.info->tty;
-	unsigned int status, ch, flg, ignored = 0;
+	unsigned int status, ch, flg;
 
 	status = UTSR1_TO_SM(UART_GET_UTSR1(sport)) |
 		 UTSR0_TO_SM(UART_GET_UTSR0(sport));
 	while (status & UTSR1_TO_SM(UTSR1_RNE)) {
 		ch = UART_GET_CHAR(sport);
 
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-			goto ignore_char;
 		sport->port.icount.rx++;
 
 		flg = TTY_NORMAL;
@@ -214,56 +208,36 @@ sa1100_rx_chars(struct sa1100_port *sport, struct pt_regs *regs)
 		 * note that the error handling code is
 		 * out of the main execution path
 		 */
-		if (status & UTSR1_TO_SM(UTSR1_PRE | UTSR1_FRE | UTSR1_ROR))
-			goto handle_error;
+		if (status & UTSR1_TO_SM(UTSR1_PRE | UTSR1_FRE | UTSR1_ROR)) {
+			if (status & UTSR1_TO_SM(UTSR1_PRE))
+				sport->port.icount.parity++;
+			else if (status & UTSR1_TO_SM(UTSR1_FRE))
+				sport->port.icount.frame++;
+			if (status & UTSR1_TO_SM(UTSR1_ROR))
+				sport->port.icount.overrun++;
 
-		if (uart_handle_sysrq_char(&sport->port, ch, regs))
+			status &= sport->port.read_status_mask;
+
+			if (status & UTSR1_TO_SM(UTSR1_PRE))
+				flg = TTY_PARITY;
+			else if (status & UTSR1_TO_SM(UTSR1_FRE))
+				flg = TTY_FRAME;
+
+#ifdef SUPPORT_SYSRQ
+			sport->port.sysrq = 0;
+#endif
+		}
+
+		if (uart_handle_sysrq_char(&sport->port, ch))
 			goto ignore_char;
 
-	error_return:
-		tty_insert_flip_char(tty, ch, flg);
+		uart_insert_char(&sport->port, status, UTSR1_TO_SM(UTSR1_ROR), ch, flg);
+
 	ignore_char:
 		status = UTSR1_TO_SM(UART_GET_UTSR1(sport)) |
 			 UTSR0_TO_SM(UART_GET_UTSR0(sport));
 	}
- out:
 	tty_flip_buffer_push(tty);
-	return;
-
- handle_error:
-	if (status & UTSR1_TO_SM(UTSR1_PRE))
-		sport->port.icount.parity++;
-	else if (status & UTSR1_TO_SM(UTSR1_FRE))
-		sport->port.icount.frame++;
-	if (status & UTSR1_TO_SM(UTSR1_ROR))
-		sport->port.icount.overrun++;
-
-	if (status & sport->port.ignore_status_mask) {
-		if (++ignored > 100)
-			goto out;
-		goto ignore_char;
-	}
-
-	status &= sport->port.read_status_mask;
-
-	if (status & UTSR1_TO_SM(UTSR1_PRE))
-		flg = TTY_PARITY;
-	else if (status & UTSR1_TO_SM(UTSR1_FRE))
-		flg = TTY_FRAME;
-
-	if (status & UTSR1_TO_SM(UTSR1_ROR)) {
-		/*
-		 * overrun does *not* affect the character
-		 * we read from the FIFO
-		 */
-		tty_insert_flip_char(tty, ch, flg);
-		ch = 0;
-		flg = TTY_OVERRUN;
-	}
-#ifdef SUPPORT_SYSRQ
-	sport->port.sysrq = 0;
-#endif
-	goto error_return;
 }
 
 static void sa1100_tx_chars(struct sa1100_port *sport)
@@ -284,7 +258,7 @@ static void sa1100_tx_chars(struct sa1100_port *sport)
 	sa1100_mctrl_check(sport);
 
 	if (uart_circ_empty(xmit) || uart_tx_stopped(&sport->port)) {
-		sa1100_stop_tx(&sport->port, 0);
+		sa1100_stop_tx(&sport->port);
 		return;
 	}
 
@@ -304,10 +278,10 @@ static void sa1100_tx_chars(struct sa1100_port *sport)
 		uart_write_wakeup(&sport->port);
 
 	if (uart_circ_empty(xmit))
-		sa1100_stop_tx(&sport->port, 0);
+		sa1100_stop_tx(&sport->port);
 }
 
-static irqreturn_t sa1100_int(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sa1100_int(int irq, void *dev_id)
 {
 	struct sa1100_port *sport = dev_id;
 	unsigned int status, pass_counter = 0;
@@ -320,7 +294,7 @@ static irqreturn_t sa1100_int(int irq, void *dev_id, struct pt_regs *regs)
 			/* Clear the receiver idle bit, if set */
 			if (status & UTSR0_RID)
 				UART_PUT_UTSR0(sport, UTSR0_RID);
-			sa1100_rx_chars(sport, regs);
+			sa1100_rx_chars(sport);
 		}
 
 		/* Clear the relevant break bits */
@@ -434,8 +408,8 @@ static void sa1100_shutdown(struct uart_port *port)
 }
 
 static void
-sa1100_set_termios(struct uart_port *port, struct termios *termios,
-		   struct termios *old)
+sa1100_set_termios(struct uart_port *port, struct ktermios *termios,
+		   struct ktermios *old)
 {
 	struct sa1100_port *sport = (struct sa1100_port *)port;
 	unsigned long flags;
@@ -653,7 +627,7 @@ static void __init sa1100_init_ports(void)
 		sa1100_ports[i].port.ops       = &sa1100_pops;
 		sa1100_ports[i].port.fifosize  = 8;
 		sa1100_ports[i].port.line      = i;
-		sa1100_ports[i].port.iotype    = SERIAL_IO_MEM;
+		sa1100_ports[i].port.iotype    = UPIO_MEM;
 		init_timer(&sa1100_ports[i].timer);
 		sa1100_ports[i].timer.function = sa1100_timeout;
 		sa1100_ports[i].timer.data     = (unsigned long)&sa1100_ports[i];
@@ -687,24 +661,24 @@ void __init sa1100_register_uart(int idx, int port)
 
 	switch (port) {
 	case 1:
-		sa1100_ports[idx].port.membase = (void *)&Ser1UTCR0;
+		sa1100_ports[idx].port.membase = (void __iomem *)&Ser1UTCR0;
 		sa1100_ports[idx].port.mapbase = _Ser1UTCR0;
 		sa1100_ports[idx].port.irq     = IRQ_Ser1UART;
-		sa1100_ports[idx].port.flags   = ASYNC_BOOT_AUTOCONF;
+		sa1100_ports[idx].port.flags   = UPF_BOOT_AUTOCONF;
 		break;
 
 	case 2:
-		sa1100_ports[idx].port.membase = (void *)&Ser2UTCR0;
+		sa1100_ports[idx].port.membase = (void __iomem *)&Ser2UTCR0;
 		sa1100_ports[idx].port.mapbase = _Ser2UTCR0;
 		sa1100_ports[idx].port.irq     = IRQ_Ser2ICP;
-		sa1100_ports[idx].port.flags   = ASYNC_BOOT_AUTOCONF;
+		sa1100_ports[idx].port.flags   = UPF_BOOT_AUTOCONF;
 		break;
 
 	case 3:
-		sa1100_ports[idx].port.membase = (void *)&Ser3UTCR0;
+		sa1100_ports[idx].port.membase = (void __iomem *)&Ser3UTCR0;
 		sa1100_ports[idx].port.mapbase = _Ser3UTCR0;
 		sa1100_ports[idx].port.irq     = IRQ_Ser3UART;
-		sa1100_ports[idx].port.flags   = ASYNC_BOOT_AUTOCONF;
+		sa1100_ports[idx].port.flags   = UPF_BOOT_AUTOCONF;
 		break;
 
 	default:
@@ -714,6 +688,14 @@ void __init sa1100_register_uart(int idx, int port)
 
 
 #ifdef CONFIG_SERIAL_SA1100_CONSOLE
+static void sa1100_console_putchar(struct uart_port *port, int ch)
+{
+	struct sa1100_port *sport = (struct sa1100_port *)port;
+
+	while (!(UART_GET_UTSR1(sport) & UTSR1_TNF))
+		barrier();
+	UART_PUT_CHAR(sport, ch);
+}
 
 /*
  * Interrupts are disabled on entering
@@ -722,7 +704,7 @@ static void
 sa1100_console_write(struct console *co, const char *s, unsigned int count)
 {
 	struct sa1100_port *sport = &sa1100_ports[co->index];
-	unsigned int old_utcr3, status, i;
+	unsigned int old_utcr3, status;
 
 	/*
 	 *	First, save UTCR3 and then disable interrupts
@@ -731,21 +713,7 @@ sa1100_console_write(struct console *co, const char *s, unsigned int count)
 	UART_PUT_UTCR3(sport, (old_utcr3 & ~(UTCR3_RIE | UTCR3_TIE)) |
 				UTCR3_TXE);
 
-	/*
-	 *	Now, do each character
-	 */
-	for (i = 0; i < count; i++) {
-		do {
-			status = UART_GET_UTSR1(sport);
-		} while (!(status & UTSR1_TNF));
-		UART_PUT_CHAR(sport, s[i]);
-		if (s[i] == '\n') {
-			do {
-				status = UART_GET_UTSR1(sport);
-			} while (!(status & UTSR1_TNF));
-			UART_PUT_CHAR(sport, '\r');
-		}
-	}
+	uart_console_write(&sport->port, s, count, sa1100_console_putchar);
 
 	/*
 	 *	Finally, wait for transmitter to become empty
@@ -819,7 +787,7 @@ sa1100_console_setup(struct console *co, char *options)
 	return uart_set_options(&sport->port, co, baud, parity, bits, flow);
 }
 
-extern struct uart_driver sa1100_reg;
+static struct uart_driver sa1100_reg;
 static struct console sa1100_console = {
 	.name		= "ttySA",
 	.write		= sa1100_console_write,
@@ -847,36 +815,34 @@ static struct uart_driver sa1100_reg = {
 	.owner			= THIS_MODULE,
 	.driver_name		= "ttySA",
 	.dev_name		= "ttySA",
-	.devfs_name		= "ttySA",
 	.major			= SERIAL_SA1100_MAJOR,
 	.minor			= MINOR_START,
 	.nr			= NR_PORTS,
 	.cons			= SA1100_CONSOLE,
 };
 
-static int sa1100_serial_suspend(struct device *_dev, u32 state, u32 level)
+static int sa1100_serial_suspend(struct platform_device *dev, pm_message_t state)
 {
-	struct sa1100_port *sport = dev_get_drvdata(_dev);
+	struct sa1100_port *sport = platform_get_drvdata(dev);
 
-	if (sport && level == SUSPEND_DISABLE)
+	if (sport)
 		uart_suspend_port(&sa1100_reg, &sport->port);
 
 	return 0;
 }
 
-static int sa1100_serial_resume(struct device *_dev, u32 level)
+static int sa1100_serial_resume(struct platform_device *dev)
 {
-	struct sa1100_port *sport = dev_get_drvdata(_dev);
+	struct sa1100_port *sport = platform_get_drvdata(dev);
 
-	if (sport && level == RESUME_ENABLE)
+	if (sport)
 		uart_resume_port(&sa1100_reg, &sport->port);
 
 	return 0;
 }
 
-static int sa1100_serial_probe(struct device *_dev)
+static int sa1100_serial_probe(struct platform_device *dev)
 {
-	struct platform_device *dev = to_platform_device(_dev);
 	struct resource *res = dev->resource;
 	int i;
 
@@ -889,9 +855,9 @@ static int sa1100_serial_probe(struct device *_dev)
 			if (sa1100_ports[i].port.mapbase != res->start)
 				continue;
 
-			sa1100_ports[i].port.dev = _dev;
+			sa1100_ports[i].port.dev = &dev->dev;
 			uart_add_one_port(&sa1100_reg, &sa1100_ports[i].port);
-			dev_set_drvdata(_dev, &sa1100_ports[i]);
+			platform_set_drvdata(dev, &sa1100_ports[i]);
 			break;
 		}
 	}
@@ -899,11 +865,11 @@ static int sa1100_serial_probe(struct device *_dev)
 	return 0;
 }
 
-static int sa1100_serial_remove(struct device *_dev)
+static int sa1100_serial_remove(struct platform_device *pdev)
 {
-	struct sa1100_port *sport = dev_get_drvdata(_dev);
+	struct sa1100_port *sport = platform_get_drvdata(pdev);
 
-	dev_set_drvdata(_dev, NULL);
+	platform_set_drvdata(pdev, NULL);
 
 	if (sport)
 		uart_remove_one_port(&sa1100_reg, &sport->port);
@@ -911,13 +877,14 @@ static int sa1100_serial_remove(struct device *_dev)
 	return 0;
 }
 
-static struct device_driver sa11x0_serial_driver = {
-	.name		= "sa11x0-uart",
-	.bus		= &platform_bus_type,
+static struct platform_driver sa11x0_serial_driver = {
 	.probe		= sa1100_serial_probe,
 	.remove		= sa1100_serial_remove,
 	.suspend	= sa1100_serial_suspend,
 	.resume		= sa1100_serial_resume,
+	.driver		= {
+		.name	= "sa11x0-uart",
+	},
 };
 
 static int __init sa1100_serial_init(void)
@@ -930,7 +897,7 @@ static int __init sa1100_serial_init(void)
 
 	ret = uart_register_driver(&sa1100_reg);
 	if (ret == 0) {
-		ret = driver_register(&sa11x0_serial_driver);
+		ret = platform_driver_register(&sa11x0_serial_driver);
 		if (ret)
 			uart_unregister_driver(&sa1100_reg);
 	}
@@ -939,7 +906,7 @@ static int __init sa1100_serial_init(void)
 
 static void __exit sa1100_serial_exit(void)
 {
-	driver_unregister(&sa11x0_serial_driver);
+	platform_driver_unregister(&sa11x0_serial_driver);
 	uart_unregister_driver(&sa1100_reg);
 }
 

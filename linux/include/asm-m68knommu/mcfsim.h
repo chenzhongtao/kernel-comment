@@ -12,16 +12,19 @@
 #define	mcfsim_h
 /****************************************************************************/
 
-#include <linux/config.h>
 
 /*
- *	Include 5204, 5206/e, 5249, 5270/5271, 5272, 5280/5282, 5307 or
- *	5407 specific addresses.
+ *	Include 5204, 5206/e, 5235, 5249, 5270/5271, 5272, 5280/5282,
+ *	5307 or 5407 specific addresses.
  */
 #if defined(CONFIG_M5204)
 #include <asm/m5204sim.h>
 #elif defined(CONFIG_M5206) || defined(CONFIG_M5206e)
 #include <asm/m5206sim.h>
+#elif defined(CONFIG_M520x)
+#include <asm/m520xsim.h>
+#elif defined(CONFIG_M523x)
+#include <asm/m523xsim.h>
 #elif defined(CONFIG_M5249)
 #include <asm/m5249sim.h>
 #elif defined(CONFIG_M527x)
@@ -32,6 +35,8 @@
 #include <asm/m528xsim.h>
 #elif defined(CONFIG_M5307)
 #include <asm/m5307sim.h>
+#elif defined(CONFIG_M532x)
+#include <asm/m532xsim.h>
 #elif defined(CONFIG_M5407)
 #include <asm/m5407sim.h>
 #endif
@@ -95,6 +100,20 @@
  */
 #ifndef MCFSIM_IMR_MASKALL
 #define	MCFSIM_IMR_MASKALL	0x3ffe		/* All intr sources */
+#endif
+
+
+/*
+ *	PIT interrupt settings, if not found in mXXXXsim.h file.
+ */
+#ifndef	ICR_INTRCONF
+#define	ICR_INTRCONF		0x2b            /* PIT1 level 5, priority 3 */
+#endif
+#ifndef	MCFPIT_IMR
+#define	MCFPIT_IMR		MCFINTC_IMRH
+#endif
+#ifndef	MCFPIT_IMR_IBIT
+#define	MCFPIT_IMR_IBIT		(1 << (MCFINT_PIT1 - 32))
 #endif
 
 

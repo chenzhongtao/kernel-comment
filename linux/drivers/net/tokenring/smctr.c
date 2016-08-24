@@ -29,7 +29,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
@@ -42,7 +41,6 @@
 #include <linux/time.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <linux/pci.h>
 #include <linux/mca-legacy.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -77,7 +75,7 @@ static int ringspeed;
 
 /* SMC Name of the Adapter. */
 static char smctr_name[] = "SMC TokenCard";
-char *smctr_model = "Unknown";
+static char *smctr_model = "Unknown";
 
 /* Use 0 for production, 1 for verification, 2 for debug, and
  * 3 for very verbose debug.
@@ -142,7 +140,7 @@ static int smctr_init_shared_memory(struct net_device *dev);
 static int smctr_init_tx_bdbs(struct net_device *dev);
 static int smctr_init_tx_fcbs(struct net_device *dev);
 static int smctr_internal_self_test(struct net_device *dev);
-static irqreturn_t smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t smctr_interrupt(int irq, void *dev_id);
 static int smctr_issue_enable_int_cmd(struct net_device *dev,
         __u16 interrupt_enable_mask);
 static int smctr_issue_int_ack(struct net_device *dev, __u16 iack_code,
@@ -532,7 +530,7 @@ static int __init smctr_chk_mca(struct net_device *dev)
 			dev->irq = 15;
                		break;
 	}
-	if (request_irq(dev->irq, smctr_interrupt, SA_SHIRQ, smctr_name, dev)) {
+	if (request_irq(dev->irq, smctr_interrupt, IRQF_SHARED, smctr_name, dev)) {
 		release_region(dev->base_addr, SMCTR_IO_EXTENT);
 		return -ENODEV;
 	}
@@ -1062,7 +1060,7 @@ static int __init smctr_chk_isa(struct net_device *dev)
                         goto out2;
          }
 
-        if (request_irq(dev->irq, smctr_interrupt, SA_SHIRQ, smctr_name, dev))
+        if (request_irq(dev->irq, smctr_interrupt, IRQF_SHARED, smctr_name, dev))
                 goto out2;
 
         /* Get 58x Rom Base */
@@ -1981,7 +1979,7 @@ static int smctr_internal_self_test(struct net_device *dev)
 /*
  * The typical workload of the driver: Handle the network interface interrupts.
  */
-static irqreturn_t smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t smctr_interrupt(int irq, void *dev_id)
 {
         struct net_device *dev = dev_id;
         struct net_local *tp;
@@ -1991,15 +1989,8 @@ static irqreturn_t smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
         __u8 isb_type, isb_subtype;
         __u16 isb_index;
 
-        if(dev == NULL)
-        {
-                printk(KERN_CRIT "%s: irq %d for unknown device.\n", dev->name, irq);
-                return IRQ_NONE;
-        }
-
         ioaddr = dev->base_addr;
         tp = netdev_priv(dev);
-        
 
         if(tp->status == NOT_INITIALIZED)
                 return IRQ_NONE;
@@ -3592,8 +3583,6 @@ struct net_device __init *smctr_probe(int unit)
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	SET_MODULE_OWNER(dev);
-
 	if (unit >= 0) {
 		sprintf(dev->name, "tr%d", unit);
 		netdev_boot_setup_check(dev);
@@ -3701,7 +3690,6 @@ static int smctr_process_rx_packet(MAC_HEADER *rmf, __u16 size,
         __u16 rcode, correlator;
         int err = 0;
         __u8 xframe = 1;
-        __u16 tx_fstatus;
 
         rmf->vl = SWAP_BYTES(rmf->vl);
         if(rx_status & FCB_RX_STATUS_DA_MATCHED)
@@ -3792,7 +3780,9 @@ static int smctr_process_rx_packet(MAC_HEADER *rmf, __u16 size,
                                 }
                                 break;
 
-                        case TX_FORWARD:
+                        case TX_FORWARD: {
+        			__u16 uninitialized_var(tx_fstatus);
+
                                 if((rcode = smctr_rcv_tx_forward(dev, rmf))
                                         != POSITIVE_ACK)
                                 {
@@ -3820,6 +3810,7 @@ static int smctr_process_rx_packet(MAC_HEADER *rmf, __u16 size,
                                         }
                                 }
                                 break;
+			}
 
                         /* Received MAC Frames Processed by CRS/REM/RPS. */
                         case RSP:
@@ -3897,14 +3888,13 @@ static int smctr_process_rx_packet(MAC_HEADER *rmf, __u16 size,
 
                 /* Slide data into a sleek skb. */
                 skb_put(skb, skb->len);
-                memcpy(skb->data, rmf, skb->len);
+                skb_copy_to_linear_data(skb, rmf, skb->len);
 
                 /* Update Counters */
                 tp->MacStat.rx_packets++;
                 tp->MacStat.rx_bytes += skb->len;
 
                 /* Kick the packet on up. */
-                skb->dev = dev;
                 skb->protocol = tr_type_trans(skb, dev);
                 netif_rx(skb);
 		dev->last_rx = jiffies;
@@ -4484,14 +4474,13 @@ static int smctr_rx_frame(struct net_device *dev)
 				if (skb) {
                                 	skb_put(skb, rx_size);
 
-                                	memcpy(skb->data, pbuff, rx_size);
+					skb_copy_to_linear_data(skb, pbuff, rx_size);
 
                                 	/* Update Counters */
                                 	tp->MacStat.rx_packets++;
                                 	tp->MacStat.rx_bytes += skb->len;
 
                                 	/* Kick the packet on up. */
-                                	skb->dev = dev;
                                 	skb->protocol = tr_type_trans(skb, dev);
                                 	netif_rx(skb);
 					dev->last_rx = jiffies;
@@ -5667,7 +5656,7 @@ module_param_array(io, int, NULL, 0);
 module_param_array(irq, int, NULL, 0);
 module_param(ringspeed, int, 0);
 
-static struct net_device *setup_card(int n)
+static struct net_device * __init setup_card(int n)
 {
 	struct net_device *dev = alloc_trdev(sizeof(struct net_local));
 	int err;
@@ -5697,9 +5686,8 @@ out:
 	free_netdev(dev);
 	return ERR_PTR(err);
 }
-			
 
-int init_module(void)
+int __init init_module(void)
 {
         int i, found = 0;
 	struct net_device *dev;
@@ -5715,7 +5703,7 @@ int init_module(void)
         return found ? 0 : -ENODEV;
 }
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
         int i;
 

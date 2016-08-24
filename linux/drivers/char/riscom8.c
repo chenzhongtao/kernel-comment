@@ -46,6 +46,7 @@
 #include <linux/major.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/tty_flip.h>
 
 #include <asm/uaccess.h>
 
@@ -78,15 +79,7 @@
 
 #define RS_EVENT_WRITE_WAKEUP	0
 
-static struct riscom_board * IRQ_to_board[16];
 static struct tty_driver *riscom_driver;
-static unsigned char * tmp_buf;
-static DECLARE_MUTEX(tmp_buf_sem);
-
-static unsigned long baud_table[] =  {
-	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
-	9600, 19200, 38400, 57600, 76800, 0, 
-};
 
 static struct riscom_board rc_board[RC_NBOARD] =  {
 	{
@@ -107,15 +100,15 @@ static struct riscom_port rc_port[RC_NBOARD * RC_NPORT];
 
 /* RISCom/8 I/O ports addresses (without address translation) */
 static unsigned short rc_ioport[] =  {
-#if 1	
+#if 1
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x09, 0x0a, 0x0b, 0x0c,
-#else	
+#else
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x09, 0x0a, 0x0b, 0x0c, 0x10,
 	0x11, 0x12, 0x18, 0x28, 0x31, 0x32, 0x39, 0x3a, 0x40, 0x41, 0x61, 0x62,
 	0x63, 0x64, 0x6b, 0x70, 0x71, 0x78, 0x7a, 0x7b, 0x7f, 0x100, 0x101
-#endif	
+#endif
 };
-#define RC_NIOPORT	(sizeof(rc_ioport) / sizeof(rc_ioport[0]))
+#define RC_NIOPORT	ARRAY_SIZE(rc_ioport)
 
 
 static inline int rc_paranoia_check(struct riscom_port const * port,
@@ -219,14 +212,6 @@ static inline void rc_release_io_range(struct riscom_board * const bp)
 		release_region(RC_TO_ISA(rc_ioport[i]) + bp->base, 1);
 }
 	
-/* Must be called with enabled interrupts */
-static inline void rc_long_delay(unsigned long delay)
-{
-	unsigned long i;
-	
-	for (i = jiffies + delay; time_after(i,jiffies); ) ;
-}
-
 /* Reset and setup CD180 chip */
 static void __init rc_init_CD180(struct riscom_board const * bp)
 {
@@ -237,7 +222,7 @@ static void __init rc_init_CD180(struct riscom_board const * bp)
 	rc_wait_CCR(bp);			   /* Wait for CCR ready        */
 	rc_out(bp, CD180_CCR, CCR_HARDRESET);      /* Reset CD180 chip          */
 	sti();
-	rc_long_delay(HZ/20);                      /* Delay 0.05 sec            */
+	msleep(50);				   /* Delay 0.05 sec            */
 	cli();
 	rc_out(bp, CD180_GIVR, RC_ID);             /* Set ID for this chip      */
 	rc_out(bp, CD180_GICR, 0);                 /* Clear all bits            */
@@ -286,7 +271,7 @@ static int __init rc_probe(struct riscom_board *bp)
 		rc_wait_CCR(bp);
 		rc_out(bp, CD180_CCR, CCR_TXEN);        /* Enable transmitter     */
 		rc_out(bp, CD180_IER, IER_TXRDY);       /* Enable tx empty intr   */
-		rc_long_delay(HZ/20);	       		
+		msleep(50);
 		irqs = probe_irq_off(irqs);
 		val1 = rc_in(bp, RC_BSR);		/* Get Board Status reg   */
 		val2 = rc_in(bp, RC_ACK_TINT);          /* ACK interrupt          */
@@ -354,28 +339,17 @@ static inline void rc_receive_exc(struct riscom_board const * bp)
 	struct riscom_port *port;
 	struct tty_struct *tty;
 	unsigned char status;
-	unsigned char ch;
+	unsigned char ch, flag;
 	
 	if (!(port = rc_get_port(bp, "Receive")))
 		return;
 
 	tty = port->tty;
-	if (tty->flip.count >= TTY_FLIPBUF_SIZE)  {
-		printk(KERN_WARNING "rc%d: port %d: Working around flip "
-				    "buffer overflow.\n",
-		       board_No(bp), port_No(port));
-		return;
-	}
 	
 #ifdef RC_REPORT_OVERRUN	
 	status = rc_in(bp, CD180_RCSR);
-	if (status & RCSR_OE)  {
+	if (status & RCSR_OE)
 		port->overrun++;
-#if 0		
-		printk(KERN_ERR "rc%d: port %d: Overrun. Total %ld overruns\n", 
-		       board_No(bp), port_No(port), port->overrun);
-#endif		
-	}
 	status &= port->mark_mask;
 #else	
 	status = rc_in(bp, CD180_RCSR) & port->mark_mask;
@@ -393,25 +367,24 @@ static inline void rc_receive_exc(struct riscom_board const * bp)
 	} else if (status & RCSR_BREAK)  {
 		printk(KERN_INFO "rc%d: port %d: Handling break...\n",
 		       board_No(bp), port_No(port));
-		*tty->flip.flag_buf_ptr++ = TTY_BREAK;
+		flag = TTY_BREAK;
 		if (port->flags & ASYNC_SAK)
 			do_SAK(tty);
 		
 	} else if (status & RCSR_PE) 
-		*tty->flip.flag_buf_ptr++ = TTY_PARITY;
+		flag = TTY_PARITY;
 	
 	else if (status & RCSR_FE) 
-		*tty->flip.flag_buf_ptr++ = TTY_FRAME;
+		flag = TTY_FRAME;
 	
         else if (status & RCSR_OE)
-		*tty->flip.flag_buf_ptr++ = TTY_OVERRUN;
+		flag = TTY_OVERRUN;
 	
 	else
-		*tty->flip.flag_buf_ptr++ = 0;
+		flag = TTY_NORMAL;
 	
-	*tty->flip.char_buf_ptr++ = ch;
-	tty->flip.count++;
-	schedule_delayed_work(&tty->flip.work, 1);
+	tty_insert_flip_char(tty, ch, flag);
+	tty_flip_buffer_push(tty);
 }
 
 static inline void rc_receive(struct riscom_board const * bp)
@@ -432,17 +405,15 @@ static inline void rc_receive(struct riscom_board const * bp)
 #endif	
 	
 	while (count--)  {
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE)  {
+		if (tty_buffer_request_room(tty, 1) == 0)  {
 			printk(KERN_WARNING "rc%d: port %d: Working around "
 					    "flip buffer overflow.\n",
 			       board_No(bp), port_No(port));
 			break;
 		}
-		*tty->flip.char_buf_ptr++ = rc_in(bp, CD180_RDR);
-		*tty->flip.flag_buf_ptr++ = 0;
-		tty->flip.count++;
+		tty_insert_flip_char(tty, rc_in(bp, CD180_RDR), TTY_NORMAL);
 	}
-	schedule_delayed_work(&tty->flip.work, 1);
+	tty_flip_buffer_push(tty);
 }
 
 static inline void rc_transmit(struct riscom_board const * bp)
@@ -565,20 +536,17 @@ static inline void rc_check_modem(struct riscom_board const * bp)
 }
 
 /* The main interrupt processing routine */
-static irqreturn_t rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
+static irqreturn_t rc_interrupt(int dummy, void * dev_id)
 {
 	unsigned char status;
 	unsigned char ack;
-	struct riscom_board *bp;
+	struct riscom_board *bp = dev_id;
 	unsigned long loop = 0;
 	int handled = 0;
 
-	bp = IRQ_to_board[irq];
-	
-	if (!bp || !(bp->flags & RC_BOARD_ACTIVE))  {
+	if (!(bp->flags & RC_BOARD_ACTIVE))
 		return IRQ_NONE;
-	}
-	
+
 	while ((++loop < 16) && ((status = ~(rc_in(bp, RC_BSR))) &
 				 (RC_BSR_TOUT | RC_BSR_TINT |
 				  RC_BSR_MINT | RC_BSR_RINT))) {
@@ -632,15 +600,15 @@ static irqreturn_t rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
  */
 
 /* Called with disabled interrupts */
-static inline int rc_setup_board(struct riscom_board * bp)
+static int rc_setup_board(struct riscom_board * bp)
 {
 	int error;
 
 	if (bp->flags & RC_BOARD_ACTIVE) 
 		return 0;
 	
-	error = request_irq(bp->irq, rc_interrupt, SA_INTERRUPT,
-			    "RISCom/8", NULL);
+	error = request_irq(bp->irq, rc_interrupt, IRQF_DISABLED,
+			    "RISCom/8", bp);
 	if (error) 
 		return error;
 	
@@ -648,14 +616,13 @@ static inline int rc_setup_board(struct riscom_board * bp)
 	bp->DTR = ~0;
 	rc_out(bp, RC_DTR, bp->DTR);	        /* Drop DTR on all ports */
 	
-	IRQ_to_board[bp->irq] = bp;
 	bp->flags |= RC_BOARD_ACTIVE;
 	
 	return 0;
 }
 
 /* Called with disabled interrupts */
-static inline void rc_shutdown_board(struct riscom_board *bp)
+static void rc_shutdown_board(struct riscom_board *bp)
 {
 	if (!(bp->flags & RC_BOARD_ACTIVE))
 		return;
@@ -663,7 +630,6 @@ static inline void rc_shutdown_board(struct riscom_board *bp)
 	bp->flags &= ~RC_BOARD_ACTIVE;
 	
 	free_irq(bp->irq, NULL);
-	IRQ_to_board[bp->irq] = NULL;
 	
 	bp->DTR = ~0;
 	rc_out(bp, RC_DTR, bp->DTR);	       /* Drop DTR on all ports */
@@ -689,26 +655,12 @@ static void rc_change_speed(struct riscom_board *bp, struct riscom_port *port)
 	port->COR2 = 0;
 	port->MSVR = MSVR_RTS;
 	
-	baud = C_BAUD(tty);
-	
-	if (baud & CBAUDEX) {
-		baud &= ~CBAUDEX;
-		if (baud < 1 || baud > 2) 
-			port->tty->termios->c_cflag &= ~CBAUDEX;
-		else
-			baud += 15;
-	}
-	if (baud == 15)  {
-		if ((port->flags & ASYNC_SPD_MASK) == ASYNC_SPD_HI)
-			baud ++;
-		if ((port->flags & ASYNC_SPD_MASK) == ASYNC_SPD_VHI)
-			baud += 2;
-	}
+	baud = tty_get_baud_rate(tty);
 	
 	/* Select port on the board */
 	rc_out(bp, CD180_CAR, port_No(port));
 	
-	if (!baud_table[baud])  {
+	if (!baud)  {
 		/* Drop DTR & exit */
 		bp->DTR |= (1u << port_No(port));
 		rc_out(bp, RC_DTR, bp->DTR);
@@ -724,7 +676,7 @@ static void rc_change_speed(struct riscom_board *bp, struct riscom_port *port)
 	 */
 	
 	/* Set baud rate for port */
-	tmp = (((RC_OSCFREQ + baud_table[baud]/2) / baud_table[baud] +
+	tmp = (((RC_OSCFREQ + baud/2) / baud +
 		CD180_TPC/2) / CD180_TPC);
 
 	rc_out(bp, CD180_RBPRH, (tmp >> 8) & 0xff); 
@@ -732,7 +684,7 @@ static void rc_change_speed(struct riscom_board *bp, struct riscom_port *port)
 	rc_out(bp, CD180_RBPRL, tmp & 0xff); 
 	rc_out(bp, CD180_TBPRL, tmp & 0xff);
 	
-	baud = (baud_table[baud] + 5) / 10;   /* Estimated CPS */
+	baud = (baud + 5) / 10;   /* Estimated CPS */
 	
 	/* Two timer ticks seems enough to wakeup something like SLIP driver */
 	tmp = ((baud + HZ/2) / HZ) * 2 - CD180_NFIFO;		
@@ -1015,7 +967,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		}
 		schedule();
 	}
-	current->state = TASK_RUNNING;
+	__set_current_state(TASK_RUNNING);
 	remove_wait_queue(&port->open_wait, &wait);
 	if (!tty_hung_up_p(filp))
 		port->count++;
@@ -1152,7 +1104,7 @@ static int rc_write(struct tty_struct * tty,
 	
 	bp = port_Board(port);
 
-	if (!tty || !port->xmit_buf || !tmp_buf)
+	if (!tty || !port->xmit_buf)
 		return 0;
 
 	save_flags(flags);
@@ -1264,7 +1216,6 @@ static void rc_flush_buffer(struct tty_struct *tty)
 	port->xmit_cnt = port->xmit_head = port->xmit_tail = 0;
 	restore_flags(flags);
 	
-	wake_up_interruptible(&tty->write_wait);
 	tty_wakeup(tty);
 }
 
@@ -1546,9 +1497,9 @@ static void rc_start(struct tty_struct * tty)
  * 	do_rc_hangup() -> tty->hangup() -> rc_hangup()
  * 
  */
-static void do_rc_hangup(void *private_)
+static void do_rc_hangup(struct work_struct *ugly_api)
 {
-	struct riscom_port	*port = (struct riscom_port *) private_;
+	struct riscom_port	*port = container_of(ugly_api, struct riscom_port, tqueue_hangup);
 	struct tty_struct	*tty;
 	
 	tty = port->tty;
@@ -1574,7 +1525,7 @@ static void rc_hangup(struct tty_struct * tty)
 	wake_up_interruptible(&port->open_wait);
 }
 
-static void rc_set_termios(struct tty_struct * tty, struct termios * old_termios)
+static void rc_set_termios(struct tty_struct * tty, struct ktermios * old_termios)
 {
 	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
 	unsigned long flags;
@@ -1597,21 +1548,19 @@ static void rc_set_termios(struct tty_struct * tty, struct termios * old_termios
 	}
 }
 
-static void do_softint(void *private_)
+static void do_softint(struct work_struct *ugly_api)
 {
-	struct riscom_port	*port = (struct riscom_port *) private_;
+	struct riscom_port	*port = container_of(ugly_api, struct riscom_port, tqueue);
 	struct tty_struct	*tty;
 	
 	if(!(tty = port->tty)) 
 		return;
 
-	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event))
 		tty_wakeup(tty);
-		wake_up_interruptible(&tty->write_wait);
-	}
 }
 
-static struct tty_operations riscom_ops = {
+static const struct tty_operations riscom_ops = {
 	.open  = rc_open,
 	.close = rc_close,
 	.write = rc_write,
@@ -1640,25 +1589,19 @@ static inline int rc_init_drivers(void)
 	if (!riscom_driver)	
 		return -ENOMEM;
 	
-	if (!(tmp_buf = (unsigned char *) get_zeroed_page(GFP_KERNEL))) {
-		printk(KERN_ERR "rc: Couldn't get free page.\n");
-		put_tty_driver(riscom_driver);
-		return 1;
-	}
-	memset(IRQ_to_board, 0, sizeof(IRQ_to_board));
 	riscom_driver->owner = THIS_MODULE;
 	riscom_driver->name = "ttyL";
-	riscom_driver->devfs_name = "tts/L";
 	riscom_driver->major = RISCOM8_NORMAL_MAJOR;
 	riscom_driver->type = TTY_DRIVER_TYPE_SERIAL;
 	riscom_driver->subtype = SERIAL_TYPE_NORMAL;
 	riscom_driver->init_termios = tty_std_termios;
 	riscom_driver->init_termios.c_cflag =
 		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+	riscom_driver->init_termios.c_ispeed = 9600;
+	riscom_driver->init_termios.c_ospeed = 9600;
 	riscom_driver->flags = TTY_DRIVER_REAL_RAW;
 	tty_set_operations(riscom_driver, &riscom_ops);
 	if ((error = tty_register_driver(riscom_driver)))  {
-		free_page((unsigned long)tmp_buf);
 		put_tty_driver(riscom_driver);
 		printk(KERN_ERR "rc: Couldn't register RISCom/8 driver, "
 				"error = %d\n",
@@ -1669,8 +1612,8 @@ static inline int rc_init_drivers(void)
 	memset(rc_port, 0, sizeof(rc_port));
 	for (i = 0; i < RC_NPORT * RC_NBOARD; i++)  {
 		rc_port[i].magic = RISCOM8_MAGIC;
-		INIT_WORK(&rc_port[i].tqueue, do_softint, &rc_port[i]);
-		INIT_WORK(&rc_port[i].tqueue_hangup, do_rc_hangup, &rc_port[i]);
+		INIT_WORK(&rc_port[i].tqueue, do_softint);
+		INIT_WORK(&rc_port[i].tqueue_hangup, do_rc_hangup);
 		rc_port[i].close_delay = 50 * HZ/100;
 		rc_port[i].closing_wait = 3000 * HZ/100;
 		init_waitqueue_head(&rc_port[i].open_wait);
@@ -1686,7 +1629,6 @@ static void rc_release_drivers(void)
 
 	save_flags(flags);
 	cli();
-	free_page((unsigned long)tmp_buf);
 	tty_unregister_driver(riscom_driver);
 	put_tty_driver(riscom_driver);
 	restore_flags(flags);
@@ -1757,10 +1699,10 @@ static int iobase;
 static int iobase1;
 static int iobase2;
 static int iobase3;
-MODULE_PARM(iobase, "i");
-MODULE_PARM(iobase1, "i");
-MODULE_PARM(iobase2, "i");
-MODULE_PARM(iobase3, "i");
+module_param(iobase, int, 0);
+module_param(iobase1, int, 0);
+module_param(iobase2, int, 0);
+module_param(iobase3, int, 0);
 
 MODULE_LICENSE("GPL");
 #endif /* MODULE */

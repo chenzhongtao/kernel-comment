@@ -8,7 +8,6 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -22,6 +21,7 @@
 #include <asm/contregs.h>
 #include <asm/movs.h>
 #include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/sun3-head.h>
 #include <asm/sun3mmu.h>
 #include <asm/rtc.h>
@@ -36,8 +36,7 @@ extern char _text, _end;
 char sun3_reserved_pmeg[SUN3_PMEGS_NUM];
 
 extern unsigned long sun3_gettimeoffset(void);
-extern int show_sun3_interrupts (struct seq_file *, void *);
-extern void sun3_sched_init(irqreturn_t (*handler)(int, void *, struct pt_regs *));
+extern void sun3_sched_init(irq_handler_t handler);
 extern void sun3_get_model (char* model);
 extern void idprom_init (void);
 extern int sun3_hwclk(int set, struct rtc_time *t);
@@ -129,6 +128,7 @@ void __init sun3_bootmem_alloc(unsigned long memory_start, unsigned long memory_
 	high_memory = (void *)memory_end;
 	availmem = memory_start;
 
+	m68k_setup_node(0);
 	availmem += init_bootmem_node(NODE_DATA(0), start_page, 0, num_pages);
 	availmem = (availmem + (PAGE_SIZE-1)) & PAGE_MASK;
 
@@ -147,22 +147,12 @@ void __init config_sun3(void)
 
         mach_sched_init      =  sun3_sched_init;
         mach_init_IRQ        =  sun3_init_IRQ;
-        mach_default_handler = &sun3_default_handler;
-        mach_request_irq     =  sun3_request_irq;
-        mach_free_irq        =  sun3_free_irq;
-	enable_irq	     =  sun3_enable_irq;
-        disable_irq	     =  sun3_disable_irq;
-	mach_process_int     =  sun3_process_int;
-        mach_get_irq_list    =  show_sun3_interrupts;
         mach_reset           =  sun3_reboot;
 	mach_gettimeoffset   =  sun3_gettimeoffset;
 	mach_get_model	     =  sun3_get_model;
 	mach_hwclk           =  sun3_hwclk;
 	mach_halt	     =  sun3_halt;
 	mach_get_hardware_list = sun3_get_hardware_list;
-#if defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp	     = &dummy_con;
-#endif
 
 	memory_start = ((((int)&_end) + 0x2000) & ~0x1fff);
 // PROM seems to want the last couple of physical pages. --m
@@ -174,7 +164,7 @@ void __init config_sun3(void)
 	sun3_bootmem_alloc(memory_start, memory_end);
 }
 
-void __init sun3_sched_init(irqreturn_t (*timer_routine)(int, void *, struct pt_regs *))
+void __init sun3_sched_init(irq_handler_t timer_routine)
 {
 	sun3_disable_interrupts();
         intersil_clock->cmd_reg=(INTERSIL_RUN|INTERSIL_INT_DISABLE|INTERSIL_24H_MODE);

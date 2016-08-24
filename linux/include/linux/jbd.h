@@ -1,6 +1,6 @@
 /*
  * linux/include/linux/jbd.h
- * 
+ *
  * Written by Stephen C. Tweedie <sct@redhat.com>
  *
  * Copyright 1998-2000 Red Hat, Inc --- All Rights Reserved
@@ -16,8 +16,6 @@
 #ifndef _LINUX_JBD_H
 #define _LINUX_JBD_H
 
-#if defined(CONFIG_JBD) || defined(CONFIG_JBD_MODULE) || !defined(__KERNEL__)
-
 /* Allow this file to be included directly into e2fsprogs */
 #ifndef __KERNEL__
 #include "jfs_compat.h"
@@ -25,9 +23,15 @@
 #define jfs_debug jbd_debug
 #else
 
+#include <linux/types.h>
 #include <linux/buffer_head.h>
 #include <linux/journal-head.h>
 #include <linux/stddef.h>
+#include <linux/bit_spinlock.h>
+#include <linux/mutex.h>
+#include <linux/timer.h>
+#include <linux/lockdep.h>
+
 #include <asm/semaphore.h>
 #endif
 
@@ -54,25 +58,29 @@
  * CONFIG_JBD_DEBUG is on.
  */
 #define JBD_EXPENSIVE_CHECKING
-extern int journal_enable_debug;
+extern u8 journal_enable_debug;
 
 #define jbd_debug(n, f, a...)						\
 	do {								\
 		if ((n) <= journal_enable_debug) {			\
 			printk (KERN_DEBUG "(%s, %d): %s: ",		\
 				__FILE__, __LINE__, __FUNCTION__);	\
-		  	printk (f, ## a);				\
+			printk (f, ## a);				\
 		}							\
 	} while (0)
 #else
 #define jbd_debug(f, a...)	/**/
 #endif
 
-extern void * __jbd_kmalloc (const char *where, size_t size, int flags, int retry);
-#define jbd_kmalloc(size, flags) \
-	__jbd_kmalloc(__FUNCTION__, (size), (flags), journal_oom_retry)
-#define jbd_rep_kmalloc(size, flags) \
-	__jbd_kmalloc(__FUNCTION__, (size), (flags), 1)
+static inline void *jbd_alloc(size_t size, gfp_t flags)
+{
+	return (void *)__get_free_pages(flags, get_order(size));
+}
+
+static inline void jbd_free(void *ptr, size_t size)
+{
+	free_pages((unsigned long)ptr, get_order(size));
+};
 
 #define JFS_MIN_JOURNAL_BLOCKS 1024
 
@@ -91,8 +99,8 @@ extern void * __jbd_kmalloc (const char *where, size_t size, int flags, int retr
  * number of outstanding buffers possible at any time.  When the
  * operation completes, any buffer credits not used are credited back to
  * the transaction, so that at all times we know how many buffers the
- * outstanding updates on a transaction might possibly touch. 
- * 
+ * outstanding updates on a transaction might possibly touch.
+ *
  * This is an opaque datatype.
  **/
 typedef struct handle_s		handle_t;	/* Atomic operation type */
@@ -102,7 +110,7 @@ typedef struct handle_s		handle_t;	/* Atomic operation type */
  * typedef journal_t - The journal_t maintains all of the journaling state information for a single filesystem.
  *
  * journal_t is linked to from the fs superblock structure.
- * 
+ *
  * We use the journal_t to keep track of all outstanding transaction
  * activity on the filesystem, and to manage the state of the log
  * writing process.
@@ -122,7 +130,7 @@ typedef struct journal_s	journal_t;	/* Journal control structure */
  * On-disk structures
  */
 
-/* 
+/*
  * Descriptor block types:
  */
 
@@ -143,8 +151,8 @@ typedef struct journal_header_s
 } journal_header_t;
 
 
-/* 
- * The block tag: used to describe a single buffer in the journal 
+/*
+ * The block tag: used to describe a single buffer in the journal
  */
 typedef struct journal_block_tag_s
 {
@@ -152,9 +160,9 @@ typedef struct journal_block_tag_s
 	__be32		t_flags;	/* See below */
 } journal_block_tag_t;
 
-/* 
+/*
  * The revoke descriptor: used on disk to describe a series of blocks to
- * be revoked from the log 
+ * be revoked from the log
  */
 typedef struct journal_revoke_header_s
 {
@@ -195,9 +203,9 @@ typedef struct journal_superblock_s
 
 /* 0x0024 */
 	/* Remaining fields are only valid in a version-2 superblock */
-	__be32	s_feature_compat; 	/* compatible feature set */
-	__be32	s_feature_incompat; 	/* incompatible feature set */
-	__be32	s_feature_ro_compat; 	/* readonly-compatible feature set */
+	__be32	s_feature_compat;	/* compatible feature set */
+	__be32	s_feature_incompat;	/* incompatible feature set */
+	__be32	s_feature_ro_compat;	/* readonly-compatible feature set */
 /* 0x0030 */
 	__u8	s_uuid[16];		/* 128-bit uuid for journal */
 
@@ -239,19 +247,8 @@ typedef struct journal_superblock_s
 
 #include <linux/fs.h>
 #include <linux/sched.h>
-#include <asm/bug.h>
 
-#define JBD_ASSERTIONS
-#ifdef JBD_ASSERTIONS
-#define J_ASSERT(assert)						\
-do {									\
-	if (!(assert)) {						\
-		printk (KERN_EMERG					\
-			"Assertion failure in %s() at %s:%d: \"%s\"\n",	\
-			__FUNCTION__, __FILE__, __LINE__, # assert);	\
-		BUG();							\
-	}								\
-} while (0)
+#define J_ASSERT(assert)	BUG_ON(!(assert))
 
 #if defined(CONFIG_BUFFER_DEBUG)
 void buffer_assertion_failure(struct buffer_head *bh);
@@ -266,10 +263,6 @@ void buffer_assertion_failure(struct buffer_head *bh);
 #define J_ASSERT_BH(bh, expr)	J_ASSERT(expr)
 #define J_ASSERT_JH(jh, expr)	J_ASSERT(expr)
 #endif
-
-#else
-#define J_ASSERT(assert)	do { } while (0)
-#endif		/* JBD_ASSERTIONS */
 
 #if defined(JBD_PARANOID_IOFAIL)
 #define J_EXPECT(expr, why...)		J_ASSERT(expr)
@@ -366,13 +359,14 @@ struct jbd_revoke_table_s;
  * @h_sync: flag for sync-on-close
  * @h_jdata: flag to force data journaling
  * @h_aborted: flag indicating fatal error on handle
+ * @h_lockdep_map: lockdep info for debugging lock problems
  **/
 
 /* Docbook can't yet cope with the bit fields, but will leave the documentation
- * in so it can be fixed later. 
+ * in so it can be fixed later.
  */
 
-struct handle_s 
+struct handle_s
 {
 	/* Which compound transaction is this update a part of? */
 	transaction_t		*h_transaction;
@@ -391,6 +385,10 @@ struct handle_s
 	unsigned int	h_sync:		1;	/* sync-on-close */
 	unsigned int	h_jdata:	1;	/* force data journaling */
 	unsigned int	h_aborted:	1;	/* fatal error on handle */
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct lockdep_map	h_lockdep_map;
+#endif
 };
 
 
@@ -430,7 +428,7 @@ struct handle_s
  *
  */
 
-struct transaction_s 
+struct transaction_s
 {
 	/* Pointer to the journal for this transaction. [no locking] */
 	journal_t		*t_journal;
@@ -441,6 +439,8 @@ struct transaction_s
 	/*
 	 * Transaction's current state
 	 * [no locking - only kjournald alters this]
+	 * [j_list_lock] guards transition of a transaction into T_FINISHED
+	 * state and subsequent call of __journal_drop_transaction()
 	 * FIXME: needs barriers
 	 * KLUDGE: [use j_state_lock]
 	 */
@@ -450,7 +450,7 @@ struct transaction_s
 		T_RUNDOWN,
 		T_FLUSH,
 		T_COMMIT,
-		T_FINISHED 
+		T_FINISHED
 	}			t_state;
 
 	/*
@@ -497,6 +497,12 @@ struct transaction_s
 	 * this transaction can be checkpointed. [j_list_lock]
 	 */
 	struct journal_head	*t_checkpoint_list;
+
+	/*
+	 * Doubly-linked circular list of all buffers submitted for IO while
+	 * checkpointing. [j_list_lock]
+	 */
+	struct journal_head	*t_checkpoint_io_list;
 
 	/*
 	 * Doubly-linked circular list of temporary buffers currently undergoing
@@ -558,10 +564,11 @@ struct transaction_s
  *     journal_t.
  * @j_flags:  General journaling state flags
  * @j_errno:  Is there an outstanding uncleared error on the journal (from a
- *     prior abort)? 
+ *     prior abort)?
  * @j_sb_buffer: First part of superblock buffer
  * @j_superblock: Second part of superblock buffer
  * @j_format_version: Version of the superblock format
+ * @j_state_lock: Protect the various scalars in the journal
  * @j_barrier_count:  Number of processes waiting to create a barrier lock
  * @j_barrier: The barrier lock itself
  * @j_running_transaction: The current running transaction..
@@ -571,16 +578,16 @@ struct transaction_s
  * @j_wait_transaction_locked: Wait queue for waiting for a locked transaction
  *  to start committing, or for a barrier lock to be released
  * @j_wait_logspace: Wait queue for waiting for checkpointing to complete
- * @j_wait_done_commit: Wait queue for waiting for commit to complete 
+ * @j_wait_done_commit: Wait queue for waiting for commit to complete
  * @j_wait_checkpoint:  Wait queue to trigger checkpointing
  * @j_wait_commit: Wait queue to trigger commit
  * @j_wait_updates: Wait queue to wait for updates to complete
- * @j_checkpoint_sem: Semaphore for locking against concurrent checkpoints
+ * @j_checkpoint_mutex: Mutex for locking against concurrent checkpoints
  * @j_head: Journal head - identifies the first unused block in the journal
  * @j_tail: Journal tail - identifies the oldest still-used block in the
  *  journal.
  * @j_free: Journal free - how many free blocks are there in the journal?
- * @j_first: The block number of the first usable block 
+ * @j_first: The block number of the first usable block
  * @j_last: The block number one beyond the last usable block
  * @j_dev: Device where we store the journal
  * @j_blocksize: blocksize for the location where we store the journal.
@@ -589,14 +596,15 @@ struct transaction_s
  * @j_fs_dev: Device which holds the client fs.  For internal journal this will
  *     be equal to j_dev
  * @j_maxlen: Total maximum capacity of the journal region on disk.
+ * @j_list_lock: Protects the buffer lists and internal buffer state.
  * @j_inode: Optional inode where we store the journal.  If present, all journal
  *     block numbers are mapped into this inode via bmap().
- * @j_tail_sequence:  Sequence number of the oldest transaction in the log 
+ * @j_tail_sequence:  Sequence number of the oldest transaction in the log
  * @j_transaction_sequence: Sequence number of the next transaction to grant
  * @j_commit_sequence: Sequence number of the most recently committed
  *  transaction
  * @j_commit_request: Sequence number of the most recent transaction wanting
- *     commit 
+ *     commit
  * @j_uuid: Uuid of client object.
  * @j_task: Pointer to the current commit thread for this journal
  * @j_max_transaction_buffers:  Maximum number of metadata buffers to allow in a
@@ -604,8 +612,15 @@ struct transaction_s
  * @j_commit_interval: What is the maximum transaction lifetime before we begin
  *  a commit?
  * @j_commit_timer:  The timer used to wakeup the commit thread
+ * @j_revoke_lock: Protect the revoke table
  * @j_revoke: The revoke table - maintains the list of revoked blocks in the
  *     current transaction.
+ * @j_revoke_table: alternate revoke tables for j_revoke
+ * @j_wbuf: array of buffer_heads for journal_commit_transaction
+ * @j_wbufsize: maximum number of buffer_heads allowed in j_wbuf, the
+ *	number that will fit in j_blocksize
+ * @j_last_sync_writer: most recent pid which did a synchronous write
+ * @j_private: An opaque pointer to fs-private information.
  */
 
 struct journal_s
@@ -637,7 +652,7 @@ struct journal_s
 	int			j_barrier_count;
 
 	/* The barrier lock itself */
-	struct semaphore	j_barrier;
+	struct mutex		j_barrier;
 
 	/*
 	 * Transactions: The current running transaction...
@@ -679,7 +694,7 @@ struct journal_s
 	wait_queue_head_t	j_wait_updates;
 
 	/* Semaphore for locking against concurrent checkpoints */
-	struct semaphore 	j_checkpoint_sem;
+	struct mutex		j_checkpoint_mutex;
 
 	/*
 	 * Journal head: identifies the first unused block in the journal.
@@ -712,7 +727,7 @@ struct journal_s
 	 */
 	struct block_device	*j_dev;
 	int			j_blocksize;
-	unsigned int		j_blk_offset;
+	unsigned long		j_blk_offset;
 
 	/*
 	 * Device which holds the client fs.  For internal journal this will be
@@ -778,7 +793,7 @@ struct journal_s
 	unsigned long		j_commit_interval;
 
 	/* The timer used to wakeup the commit thread: */
-	struct timer_list	*j_commit_timer;
+	struct timer_list	j_commit_timer;
 
 	/*
 	 * The revoke table: maintains the list of revoked blocks in the
@@ -789,14 +804,22 @@ struct journal_s
 	struct jbd_revoke_table_s *j_revoke_table[2];
 
 	/*
+	 * array of bhs for journal_commit_transaction
+	 */
+	struct buffer_head	**j_wbuf;
+	int			j_wbufsize;
+
+	pid_t			j_last_sync_writer;
+
+	/*
 	 * An opaque pointer to fs-private information.  ext3 puts its
 	 * superblock pointer here
 	 */
 	void *j_private;
 };
 
-/* 
- * Journal flag definitions 
+/*
+ * Journal flag definitions
  */
 #define JFS_UNMOUNT	0x001	/* Journal thread is being destroyed */
 #define JFS_ABORT	0x002	/* Journaling has been aborted for errors. */
@@ -805,7 +828,7 @@ struct journal_s
 #define JFS_LOADED	0x010	/* The journal superblock has been loaded */
 #define JFS_BARRIER	0x020	/* Use IDE barriers */
 
-/* 
+/*
  * Function declarations for the journaling transaction and buffer
  * management
  */
@@ -829,15 +852,15 @@ extern void journal_commit_transaction(journal_t *);
 
 /* Checkpoint list management */
 int __journal_clean_checkpoint_list(journal_t *journal);
-void __journal_remove_checkpoint(struct journal_head *);
+int __journal_remove_checkpoint(struct journal_head *);
 void __journal_insert_checkpoint(struct journal_head *, transaction_t *);
 
 /* Buffer IO */
-extern int 
+extern int
 journal_write_metadata_buffer(transaction_t	  *transaction,
 			      struct journal_head  *jh_in,
 			      struct journal_head **jh_out,
-			      int		   blocknr);
+			      unsigned long	   blocknr);
 
 /* Transaction locking */
 extern void		__wait_on_journal (journal_t *);
@@ -861,26 +884,23 @@ static inline handle_t *journal_current_handle(void)
 /* The journaling code user interface:
  *
  * Create and destroy handles
- * Register buffer modifications against the current transaction. 
+ * Register buffer modifications against the current transaction.
  */
 
 extern handle_t *journal_start(journal_t *, int nblocks);
 extern int	 journal_restart (handle_t *, int nblocks);
 extern int	 journal_extend (handle_t *, int nblocks);
-extern int	 journal_get_write_access(handle_t *, struct buffer_head *,
-						int *credits);
+extern int	 journal_get_write_access(handle_t *, struct buffer_head *);
 extern int	 journal_get_create_access (handle_t *, struct buffer_head *);
-extern int	 journal_get_undo_access(handle_t *, struct buffer_head *,
-						int *credits);
+extern int	 journal_get_undo_access(handle_t *, struct buffer_head *);
 extern int	 journal_dirty_data (handle_t *, struct buffer_head *);
 extern int	 journal_dirty_metadata (handle_t *, struct buffer_head *);
-extern void	 journal_release_buffer (handle_t *, struct buffer_head *,
-						int credits);
+extern void	 journal_release_buffer (handle_t *, struct buffer_head *);
 extern int	 journal_forget (handle_t *, struct buffer_head *);
 extern void	 journal_sync_buffer (struct buffer_head *);
-extern int	 journal_invalidatepage(journal_t *,
+extern void	 journal_invalidatepage(journal_t *,
 				struct page *, unsigned long);
-extern int	 journal_try_to_free_buffers(journal_t *, struct page *, int);
+extern int	 journal_try_to_free_buffers(journal_t *, struct page *, gfp_t);
 extern int	 journal_stop(handle_t *);
 extern int	 journal_flush (journal_t *);
 extern void	 journal_lock_updates (journal_t *);
@@ -891,11 +911,11 @@ extern journal_t * journal_init_dev(struct block_device *bdev,
 				int start, int len, int bsize);
 extern journal_t * journal_init_inode (struct inode *);
 extern int	   journal_update_format (journal_t *);
-extern int	   journal_check_used_features 
+extern int	   journal_check_used_features
 		   (journal_t *, unsigned long, unsigned long, unsigned long);
-extern int	   journal_check_available_features 
+extern int	   journal_check_available_features
 		   (journal_t *, unsigned long, unsigned long, unsigned long);
-extern int	   journal_set_features 
+extern int	   journal_set_features
 		   (journal_t *, unsigned long, unsigned long, unsigned long);
 extern int	   journal_create     (journal_t *);
 extern int	   journal_load       (journal_t *journal);
@@ -905,7 +925,6 @@ extern int	   journal_wipe       (journal_t *, int);
 extern int	   journal_skip_recovery	(journal_t *);
 extern void	   journal_update_superblock	(journal_t *, int);
 extern void	   __journal_abort_hard	(journal_t *);
-extern void	   __journal_abort_soft	(journal_t *, int);
 extern void	   journal_abort      (journal_t *, int);
 extern int	   journal_errno      (journal_t *);
 extern void	   journal_ack_err    (journal_t *);
@@ -924,9 +943,9 @@ void journal_put_journal_head(struct journal_head *jh);
 /*
  * handle management
  */
-extern kmem_cache_t *jbd_handle_cache;
+extern struct kmem_cache *jbd_handle_cache;
 
-static inline handle_t *jbd_alloc_handle(int gfp_flags)
+static inline handle_t *jbd_alloc_handle(gfp_t gfp_flags)
 {
 	return kmem_cache_alloc(jbd_handle_cache, gfp_flags);
 }
@@ -952,7 +971,6 @@ extern void	   journal_write_revoke_records(journal_t *, transaction_t *);
 extern int	journal_set_revoke(journal_t *, unsigned long, tid_t);
 extern int	journal_test_revoke(journal_t *, unsigned long, tid_t);
 extern void	journal_clear_revoke(journal_t *);
-extern void	journal_brelse_array(struct buffer_head *b[], int n);
 extern void	journal_switch_revoke_table(journal_t *journal);
 
 /*
@@ -990,7 +1008,7 @@ do {								           \
  * bit, when set, indicates that we have had a fatal error somewhere,
  * either inside the journaling layer or indicated to us by the client
  * (eg. ext3), and that we and should not commit any further
- * transactions.  
+ * transactions.
  */
 
 static inline int is_journal_aborted(journal_t *journal)
@@ -1057,7 +1075,7 @@ static inline int jbd_space_needed(journal_t *journal)
 #define BJ_Reserved	7	/* Buffer is reserved for access by journal */
 #define BJ_Locked	8	/* Locked for I/O during commit */
 #define BJ_Types	9
- 
+
 extern int jbd_blocks_per_page(struct inode *inode);
 
 #ifdef __KERNEL__
@@ -1071,19 +1089,4 @@ extern int jbd_blocks_per_page(struct inode *inode);
 
 #endif	/* __KERNEL__ */
 
-#endif	/* CONFIG_JBD || CONFIG_JBD_MODULE || !__KERNEL__ */
-
-/*
- * Compatibility no-ops which allow the kernel to compile without CONFIG_JBD
- * go here.
- */
-
-#if defined(__KERNEL__) && !(defined(CONFIG_JBD) || defined(CONFIG_JBD_MODULE))
-
-#define J_ASSERT(expr)			do {} while (0)
-#define J_ASSERT_BH(bh, expr)		do {} while (0)
-#define buffer_jbd(bh)			0
-#define journal_buffer_journal_lru(bh)	0
-
-#endif	/* defined(__KERNEL__) && !defined(CONFIG_JBD) */
 #endif	/* _LINUX_JBD_H */

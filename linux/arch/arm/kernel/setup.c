@@ -7,7 +7,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
@@ -18,16 +17,17 @@
 #include <linux/console.h>
 #include <linux/bootmem.h>
 #include <linux/seq_file.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/init.h>
 #include <linux/root_dev.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
+#include <linux/smp.h>
+#include <linux/fs.h>
+#include <linux/kexec.h>
 
 #include <asm/cpu.h>
 #include <asm/elf.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
 #include <asm/procinfo.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
@@ -37,6 +37,8 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
+
+#include "compat.h"
 
 #ifndef MEM_SIZE
 #define MEM_SIZE	(16*1024*1024)
@@ -54,10 +56,7 @@ static int __init fpe_setup(char *line)
 __setup("fpe=", fpe_setup);
 #endif
 
-extern unsigned int mem_fclk_21285;
 extern void paging_init(struct meminfo *, struct machine_desc *desc);
-extern void convert_to_tag_list(struct tag *tags);
-extern void squash_mem_tags(struct tag *tag);
 extern void reboot_setup(char *str);
 extern int root_mountflags;
 extern void _stext, _text, _etext, __data_start, _edata, _end;
@@ -65,6 +64,8 @@ extern void _stext, _text, _etext, __data_start, _edata, _end;
 unsigned int processor_id;
 unsigned int __machine_arch_type;
 EXPORT_SYMBOL(__machine_arch_type);
+
+unsigned int __atags_pointer __initdata;
 
 unsigned int system_rev;
 EXPORT_SYMBOL(system_rev);
@@ -91,8 +92,17 @@ struct cpu_user_fns cpu_user;
 #ifdef MULTI_CACHE
 struct cpu_cache_fns cpu_cache;
 #endif
+#ifdef CONFIG_OUTER_CACHE
+struct outer_cache_fns outer_cache;
+#endif
 
-unsigned char aux_device_present;
+struct stack {
+	u32 irq[3];
+	u32 abt[3];
+	u32 und[3];
+} ____cacheline_aligned;
+
+static struct stack stacks[NR_CPUS];
 
 char elf_platform[ELF_PLATFORM_SIZE];
 EXPORT_SYMBOL(elf_platform);
@@ -103,7 +113,7 @@ unsigned long phys_initrd_size __initdata = 0;
 static struct meminfo meminfo __initdata = { 0, };
 static const char *cpu_name;
 static const char *machine_name;
-static char command_line[COMMAND_LINE_SIZE];
+static char __initdata command_line[COMMAND_LINE_SIZE];
 
 static char default_command_line[COMMAND_LINE_SIZE] __initdata = CONFIG_CMDLINE;
 static union { char c[4]; unsigned long l; } endian_test __initdata = { { 'l', '?', '?', 'b' } };
@@ -115,9 +125,24 @@ DEFINE_PER_CPU(struct cpuinfo_arm, cpu_data);
  * Standard memory resources
  */
 static struct resource mem_res[] = {
-	{ "Video RAM",   0,     0,     IORESOURCE_MEM			},
-	{ "Kernel text", 0,     0,     IORESOURCE_MEM			},
-	{ "Kernel data", 0,     0,     IORESOURCE_MEM			}
+	{
+		.name = "Video RAM",
+		.start = 0,
+		.end = 0,
+		.flags = IORESOURCE_MEM
+	},
+	{
+		.name = "Kernel text",
+		.start = 0,
+		.end = 0,
+		.flags = IORESOURCE_MEM
+	},
+	{
+		.name = "Kernel data",
+		.start = 0,
+		.end = 0,
+		.flags = IORESOURCE_MEM
+	}
 };
 
 #define video_ram   mem_res[0]
@@ -125,9 +150,24 @@ static struct resource mem_res[] = {
 #define kernel_data mem_res[2]
 
 static struct resource io_res[] = {
-	{ "reserved",    0x3bc, 0x3be, IORESOURCE_IO | IORESOURCE_BUSY },
-	{ "reserved",    0x378, 0x37f, IORESOURCE_IO | IORESOURCE_BUSY },
-	{ "reserved",    0x278, 0x27f, IORESOURCE_IO | IORESOURCE_BUSY }
+	{
+		.name = "reserved",
+		.start = 0x3bc,
+		.end = 0x3be,
+		.flags = IORESOURCE_IO | IORESOURCE_BUSY
+	},
+	{
+		.name = "reserved",
+		.start = 0x378,
+		.end = 0x37f,
+		.flags = IORESOURCE_IO | IORESOURCE_BUSY
+	},
+	{
+		.name = "reserved",
+		.start = 0x278,
+		.end = 0x27f,
+		.flags = IORESOURCE_IO | IORESOURCE_BUSY
+	}
 };
 
 #define lp0 io_res[0]
@@ -201,7 +241,7 @@ static const char *proc_arch[] = {
 	"5TE",
 	"5TEJ",
 	"6TEJ",
-	"?(10)",
+	"7",
 	"?(11)",
 	"?(12)",
 	"?(13)",
@@ -248,21 +288,40 @@ static void __init dump_cpu_info(int cpu)
 			dump_cache("cache", cpu, CACHE_ISIZE(info));
 		}
 	}
+
+	if (arch_is_coherent())
+		printk("Cache coherency enabled\n");
 }
 
 int cpu_architecture(void)
 {
 	int cpu_arch;
 
-	if ((processor_id & 0x0000f000) == 0) {
+	if ((processor_id & 0x0008f000) == 0) {
 		cpu_arch = CPU_ARCH_UNKNOWN;
-	} else if ((processor_id & 0x0000f000) == 0x00007000) {
+	} else if ((processor_id & 0x0008f000) == 0x00007000) {
 		cpu_arch = (processor_id & (1 << 23)) ? CPU_ARCH_ARMv4T : CPU_ARCH_ARMv3;
-	} else {
+	} else if ((processor_id & 0x00080000) == 0x00000000) {
 		cpu_arch = (processor_id >> 16) & 7;
 		if (cpu_arch)
 			cpu_arch += CPU_ARCH_ARMv3;
-	}
+	} else if ((processor_id & 0x000f0000) == 0x000f0000) {
+		unsigned int mmfr0;
+
+		/* Revised CPUID format. Read the Memory Model Feature
+		 * Register 0 and check for VMSAv7 or PMSAv7 */
+		asm("mrc	p15, 0, %0, c0, c1, 4"
+		    : "=r" (mmfr0));
+		if ((mmfr0 & 0x0000000f) == 0x00000003 ||
+		    (mmfr0 & 0x000000f0) == 0x00000030)
+			cpu_arch = CPU_ARCH_ARMv7;
+		else if ((mmfr0 & 0x0000000f) == 0x00000002 ||
+			 (mmfr0 & 0x000000f0) == 0x00000020)
+			cpu_arch = CPU_ARCH_ARMv6;
+		else
+			cpu_arch = CPU_ARCH_UNKNOWN;
+	} else
+		cpu_arch = CPU_ARCH_UNKNOWN;
 
 	return cpu_arch;
 }
@@ -271,7 +330,7 @@ int cpu_architecture(void)
  * These functions re-use the assembly code in head.S, which
  * already provide the required functionality.
  */
-extern struct proc_info_list *lookup_processor_type(void);
+extern struct proc_info_list *lookup_processor_type(unsigned int);
 extern struct machine_desc *lookup_machine_type(unsigned int);
 
 static void __init setup_processor(void)
@@ -283,7 +342,7 @@ static void __init setup_processor(void)
 	 * types.  The linker builds this table for us from the
 	 * entries in arch/arm/mm/proc-*.S
 	 */
-	list = lookup_processor_type();
+	list = lookup_processor_type(processor_id);
 	if (!list) {
 		printk("CPU configuration botched (ID %08x), unable "
 		       "to continue.\n", processor_id);
@@ -305,17 +364,60 @@ static void __init setup_processor(void)
 	cpu_cache = *list->cache;
 #endif
 
-	printk("CPU: %s [%08x] revision %d (ARMv%s)\n",
+	printk("CPU: %s [%08x] revision %d (ARMv%s), cr=%08lx\n",
 	       cpu_name, processor_id, (int)processor_id & 15,
-	       proc_arch[cpu_architecture()]);
+	       proc_arch[cpu_architecture()], cr_alignment);
 
-	dump_cpu_info(smp_processor_id());
-
-	sprintf(system_utsname.machine, "%s%c", list->arch_name, ENDIANNESS);
+	sprintf(init_utsname()->machine, "%s%c", list->arch_name, ENDIANNESS);
 	sprintf(elf_platform, "%s%c", list->elf_name, ENDIANNESS);
 	elf_hwcap = list->elf_hwcap;
+#ifndef CONFIG_ARM_THUMB
+	elf_hwcap &= ~HWCAP_THUMB;
+#endif
 
 	cpu_proc_init();
+}
+
+/*
+ * cpu_init - initialise one CPU.
+ *
+ * cpu_init dumps the cache information, initialises SMP specific
+ * information, and sets up the per-CPU stacks.
+ */
+void cpu_init(void)
+{
+	unsigned int cpu = smp_processor_id();
+	struct stack *stk = &stacks[cpu];
+
+	if (cpu >= NR_CPUS) {
+		printk(KERN_CRIT "CPU%u: bad primary CPU number\n", cpu);
+		BUG();
+	}
+
+	if (system_state == SYSTEM_BOOTING)
+		dump_cpu_info(cpu);
+
+	/*
+	 * setup stacks for re-entrant exception handlers
+	 */
+	__asm__ (
+	"msr	cpsr_c, %1\n\t"
+	"add	sp, %0, %2\n\t"
+	"msr	cpsr_c, %3\n\t"
+	"add	sp, %0, %4\n\t"
+	"msr	cpsr_c, %5\n\t"
+	"add	sp, %0, %6\n\t"
+	"msr	cpsr_c, %7"
+	    :
+	    : "r" (stk),
+	      "I" (PSR_F_BIT | PSR_I_BIT | IRQ_MODE),
+	      "I" (offsetof(struct stack, irq[0])),
+	      "I" (PSR_F_BIT | PSR_I_BIT | ABT_MODE),
+	      "I" (offsetof(struct stack, abt[0])),
+	      "I" (PSR_F_BIT | PSR_I_BIT | UND_MODE),
+	      "I" (offsetof(struct stack, und[0])),
+	      "I" (PSR_F_BIT | PSR_I_BIT | SVC_MODE)
+	    : "r14");
 }
 
 static struct machine_desc * __init setup_machine(unsigned int nr)
@@ -351,6 +453,23 @@ static void __init early_initrd(char **p)
 }
 __early_param("initrd=", early_initrd);
 
+static void __init arm_add_memory(unsigned long start, unsigned long size)
+{
+	struct membank *bank;
+
+	/*
+	 * Ensure that start/size are aligned to a page boundary.
+	 * Size is appropriately rounded down, start is rounded up.
+	 */
+	size -= start & ~PAGE_MASK;
+
+	bank = &meminfo.bank[meminfo.nr_banks++];
+
+	bank->start = PAGE_ALIGN(start);
+	bank->size  = size & PAGE_MASK;
+	bank->node  = PHYS_TO_NID(start);
+}
+
 /*
  * Pick out the memory size.  We look for mem=size@start,
  * where start and size are "size[KkMm]"
@@ -375,10 +494,7 @@ static void __init early_mem(char **p)
 	if (**p == '@')
 		start = memparse(*p + 1, p);
 
-	meminfo.bank[meminfo.nr_banks].start = start;
-	meminfo.bank[meminfo.nr_banks].size  = size;
-	meminfo.bank[meminfo.nr_banks].node  = PHYS_TO_NID(start);
-	meminfo.nr_banks += 1;
+	arm_add_memory(start, size);
 }
 __early_param("mem=", early_mem);
 
@@ -520,11 +636,7 @@ static int __init parse_tag_mem32(const struct tag *tag)
 			tag->u.mem.start, tag->u.mem.size / 1024);
 		return -EINVAL;
 	}
-	meminfo.bank[meminfo.nr_banks].start = tag->u.mem.start;
-	meminfo.bank[meminfo.nr_banks].size  = tag->u.mem.size;
-	meminfo.bank[meminfo.nr_banks].node  = PHYS_TO_NID(tag->u.mem.start);
-	meminfo.nr_banks += 1;
-
+	arm_add_memory(tag->u.mem.start, tag->u.mem.size);
 	return 0;
 }
 
@@ -672,6 +784,23 @@ static int __init customize_machine(void)
 }
 arch_initcall(customize_machine);
 
+#ifdef CONFIG_KEXEC
+
+/* Physical addr of where the boot params should be for this machine */
+extern unsigned long kexec_boot_params_address;
+
+/* Physical addr of the buffer into which the boot params are copied */
+extern unsigned long kexec_boot_params_copy;
+
+/* Pointer to the boot params buffer, for manipulation and display */
+unsigned long kexec_boot_params;
+EXPORT_SYMBOL(kexec_boot_params);
+
+/* The buffer itself - make sure it is sized correctly */
+static unsigned long kexec_boot_params_buf[(KEXEC_BOOT_PARAMS_SIZE + 3) / 4];
+
+#endif
+
 void __init setup_arch(char **cmdline_p)
 {
 	struct tag *tags = (struct tag *)&init_tags;
@@ -685,8 +814,22 @@ void __init setup_arch(char **cmdline_p)
 	if (mdesc->soft_reboot)
 		reboot_setup("s");
 
-	if (mdesc->param_offset)
-		tags = phys_to_virt(mdesc->param_offset);
+	if (__atags_pointer)
+		tags = phys_to_virt(__atags_pointer);
+	else if (mdesc->boot_params)
+		tags = phys_to_virt(mdesc->boot_params);
+
+#ifdef CONFIG_KEXEC
+	kexec_boot_params_copy = virt_to_phys(kexec_boot_params_buf);
+	kexec_boot_params = (unsigned long)kexec_boot_params_buf;
+	if (__atags_pointer) {
+		kexec_boot_params_address = __atags_pointer;
+		memcpy((void *)kexec_boot_params, tags, KEXEC_BOOT_PARAMS_SIZE);
+	} else if (mdesc->boot_params) {
+		kexec_boot_params_address = mdesc->boot_params;
+		memcpy((void *)kexec_boot_params, tags, KEXEC_BOOT_PARAMS_SIZE);
+	}
+#endif
 
 	/*
 	 * If we have the old style parameters, convert them to
@@ -711,11 +854,17 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_data   = (unsigned long) &_edata;
 	init_mm.brk	   = (unsigned long) &_end;
 
-	memcpy(saved_command_line, from, COMMAND_LINE_SIZE);
-	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
+	memcpy(boot_command_line, from, COMMAND_LINE_SIZE);
+	boot_command_line[COMMAND_LINE_SIZE-1] = '\0';
 	parse_cmdline(cmdline_p, from);
 	paging_init(&meminfo, mdesc);
 	request_standard_resources(&meminfo, mdesc);
+
+#ifdef CONFIG_SMP
+	smp_init_cpus();
+#endif
+
+	cpu_init();
 
 	/*
 	 * Set up various architecture-specific pointers
@@ -738,8 +887,11 @@ static int __init topology_init(void)
 {
 	int cpu;
 
-	for_each_cpu(cpu)
-		register_cpu(&per_cpu(cpu_data, cpu).cpu, cpu, NULL);
+	for_each_possible_cpu(cpu) {
+		struct cpuinfo_arm *cpuinfo = &per_cpu(cpu_data, cpu);
+		cpuinfo->cpu.hotpluggable = 1;
+		register_cpu(&cpuinfo->cpu, cpu);
+	}
 
 	return 0;
 }
@@ -756,6 +908,8 @@ static const char *hwcap_str[] = {
 	"vfp",
 	"edsp",
 	"java",
+	"iwmmxt",
+	"crunch",
 	NULL
 };
 
@@ -784,7 +938,12 @@ static int c_show(struct seq_file *m, void *v)
 
 #if defined(CONFIG_SMP)
 	for_each_online_cpu(i) {
-		seq_printf(m, "Processor\t: %d\n", i);
+		/*
+		 * glibc reads /proc/cpuinfo to determine the number of
+		 * online processors, looking for lines beginning with
+		 * "processor".  Give glibc what it expects.
+		 */
+		seq_printf(m, "processor\t: %d\n", i);
 		seq_printf(m, "BogoMIPS\t: %lu.%02lu\n\n",
 			   per_cpu(cpu_data, i).loops_per_jiffy / (500000UL/HZ),
 			   (per_cpu(cpu_data, i).loops_per_jiffy / (5000UL/HZ)) % 100);
@@ -805,11 +964,11 @@ static int c_show(struct seq_file *m, void *v)
 	seq_printf(m, "\nCPU implementer\t: 0x%02x\n", processor_id >> 24);
 	seq_printf(m, "CPU architecture: %s\n", proc_arch[cpu_architecture()]);
 
-	if ((processor_id & 0x0000f000) == 0x00000000) {
+	if ((processor_id & 0x0008f000) == 0x00000000) {
 		/* pre-ARM7 */
-		seq_printf(m, "CPU part\t\t: %07x\n", processor_id >> 4);
+		seq_printf(m, "CPU part\t: %07x\n", processor_id >> 4);
 	} else {
-		if ((processor_id & 0x0000f000) == 0x00007000) {
+		if ((processor_id & 0x0008f000) == 0x00007000) {
 			/* ARM7 */
 			seq_printf(m, "CPU variant\t: 0x%02x\n",
 				   (processor_id >> 16) & 127);

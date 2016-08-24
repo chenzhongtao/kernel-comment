@@ -1,26 +1,21 @@
 /* linux/include/asm-arm/arch-s3c2410/hardware.h
  *
- * (c) 2003 Simtec Electronics
- *  Ben Dooks <ben@simtec.co.uk>
+ * Copyright (c) 2003 Simtec Electronics
+ *	Ben Dooks <ben@simtec.co.uk>
  *
  * S3C2410 - hardware
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- * Changelog:
- *  21-May-2003 BJD  Created file
- *  06-Jun-2003 BJD  Added CPU frequency settings
- *  03-Sep-2003 BJD  Linux v2.6 support
- *  12-Mar-2004 BJD  Fixed include protection, fixed type of clock vars
- *  14-Sep-2004 BJD  Added misccr and getpin to gpio
- *  01-Oct-2004 BJD  Added the new gpio functions
- *  16-Oct-2004 BJD  Removed the clock variables
 */
 
 #ifndef __ASM_ARCH_HARDWARE_H
 #define __ASM_ARCH_HARDWARE_H
+
+#ifndef __ASM_HARDWARE_H
+#error "Do not include this directly, instead #include <asm/hardware.h>"
+#endif
 
 #ifndef __ASSEMBLY__
 
@@ -54,6 +49,12 @@ extern unsigned int s3c2410_gpio_getcfg(unsigned int pin);
 */
 
 extern int s3c2410_gpio_getirq(unsigned int pin);
+
+#ifdef CONFIG_CPU_S3C2400
+
+extern int s3c2400_gpio_getirq(unsigned int pin);
+
+#endif /* CONFIG_CPU_S3C2400 */
 
 /* s3c2410_gpio_irqfilter
  *
@@ -92,16 +93,19 @@ extern unsigned int s3c2410_gpio_getpin(unsigned int pin);
 
 extern unsigned int s3c2410_modify_misccr(unsigned int clr, unsigned int chg);
 
+#ifdef CONFIG_CPU_S3C2440
+
+extern int s3c2440_set_dsc(unsigned int pin, unsigned int value);
+
+#endif /* CONFIG_CPU_S3C2440 */
+
+
 #endif /* __ASSEMBLY__ */
 
 #include <asm/sizes.h>
 #include <asm/arch/map.h>
 
-/* machine specific includes, such as the BAST */
-
-#if defined(CONFIG_ARCH_BAST)
-#include <asm/arch/bast-cpld.h>
-#endif
+/* machine specific hardware definitions should go after this */
 
 /* currently here until moved into config (todo) */
 #define CONFIG_NO_MULTIWORD_IO

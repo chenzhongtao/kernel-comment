@@ -10,8 +10,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
-#include <linux/version.h>
+#include <linux/utsrelease.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
@@ -30,9 +29,9 @@
 #include <linux/serial.h>
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
+#include <linux/serial_8250.h>
 
 #include <asm/setup.h>
-#include <asm/serial.h>
 #include <asm/irq.h>
 #include <asm/sections.h>
 #include <asm/pgalloc.h>
@@ -44,7 +43,6 @@
 #include <asm/mb-regs.h>
 #include <asm/mb93493-regs.h>
 #include <asm/gdb-stub.h>
-#include <asm/irq-routing.h>
 #include <asm/io.h>
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -61,13 +59,6 @@ static void __init mb93090_display(void);
 static void __init setup_linux_memory(void);
 #else
 static void __init setup_uclinux_memory(void);
-#endif
-
-#ifdef CONFIG_CONSOLE
-extern struct consw *conswitchp;
-#ifdef CONFIG_FRAMEBUFFER
-extern struct consw fb_con;
-#endif
 #endif
 
 #ifdef CONFIG_MB93090_MB00
@@ -116,7 +107,7 @@ unsigned long __initdata num_mappedpages;
 
 struct cpuinfo_frv __nongprelbss boot_cpu_data;
 
-char command_line[COMMAND_LINE_SIZE];
+char __initdata command_line[COMMAND_LINE_SIZE];
 char __initdata redboot_command_line[COMMAND_LINE_SIZE];
 
 #ifdef CONFIG_PM
@@ -197,7 +188,7 @@ static struct clock_cmode __pminitdata clock_cmodes_fr555[16] = {
 static const struct clock_cmode __pminitdata *clock_cmodes;
 static int __pminitdata clock_doubled;
 
-static struct uart_port __initdata __frv_uart0 = {
+static struct uart_port __pminitdata __frv_uart0 = {
 	.uartclk		= 0,
 	.membase		= (char *) UART0_BASE,
 	.irq			= IRQ_CPU_UART0,
@@ -206,7 +197,7 @@ static struct uart_port __initdata __frv_uart0 = {
 	.flags			= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
 };
 
-static struct uart_port __initdata __frv_uart1 = {
+static struct uart_port __pminitdata __frv_uart1 = {
 	.uartclk		= 0,
 	.membase		= (char *) UART1_BASE,
 	.irq			= IRQ_CPU_UART1,
@@ -768,7 +759,7 @@ void __init setup_arch(char **cmdline_p)
 	printk("uClinux FR-V port done by Red Hat Inc <dhowells@redhat.com>\n");
 #endif
 
-	memcpy(saved_command_line, redboot_command_line, COMMAND_LINE_SIZE);
+	memcpy(boot_command_line, redboot_command_line, COMMAND_LINE_SIZE);
 
 	determine_cpu();
 	determine_clocks(1);
@@ -790,26 +781,19 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	/* register those serial ports that are available */
+#ifdef CONFIG_FRV_ONCPU_SERIAL
 #ifndef CONFIG_GDBSTUB_UART0
 	__reg(UART0_BASE + UART_IER * 8) = 0;
 	early_serial_setup(&__frv_uart0);
-//	register_serial(&__frv_uart0);
 #endif
 #ifndef CONFIG_GDBSTUB_UART1
 	__reg(UART1_BASE + UART_IER * 8) = 0;
 	early_serial_setup(&__frv_uart1);
-//	register_serial(&__frv_uart1);
 #endif
-
-#if defined(CONFIG_CHR_DEV_FLASH) || defined(CONFIG_BLK_DEV_FLASH)
-	/* we need to initialize the Flashrom device here since we might
-	 * do things with flash early on in the boot
-	 */
-	flash_probe();
 #endif
 
 	/* deal with the command line - RedBoot may have passed one to the kernel */
-	memcpy(command_line, saved_command_line, sizeof(command_line));
+	memcpy(command_line, boot_command_line, sizeof(command_line));
 	*cmdline_p = &command_line[0];
 	parse_cmdline_early(command_line);
 
@@ -817,7 +801,7 @@ void __init setup_arch(char **cmdline_p)
 	 * - by now the stack is part of the init task */
 	printk("Memory %08lx-%08lx\n", memory_start, memory_end);
 
-	if (memory_start == memory_end) BUG();
+	BUG_ON(memory_start == memory_end);
 
 	init_mm.start_code = (unsigned long) &_stext;
 	init_mm.end_code = (unsigned long) &_etext;
@@ -842,11 +826,6 @@ void __init setup_arch(char **cmdline_p)
         conswitchp = &dummy_con;
 #endif
 #endif
-
-#ifdef CONFIG_BLK_DEV_BLKMEM
-	ROOT_DEV = MKDEV(BLKMEM_MAJOR,0);
-#endif
-	/*rom_length = (unsigned long)&_flashend - (unsigned long)&_romvec;*/
 
 #ifdef CONFIG_MMU
 	setup_linux_memory();
@@ -953,7 +932,7 @@ static void __init setup_linux_memory(void)
 	if (LOADER_TYPE && INITRD_START) {
 		if (INITRD_START + INITRD_SIZE <= (low_top_pfn << PAGE_SHIFT)) {
 			reserve_bootmem(INITRD_START, INITRD_SIZE);
-			initrd_start = INITRD_START ? INITRD_START + PAGE_OFFSET : 0;
+			initrd_start = INITRD_START + PAGE_OFFSET;
 			initrd_end = initrd_start + INITRD_SIZE;
 		}
 		else {

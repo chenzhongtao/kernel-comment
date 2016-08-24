@@ -22,6 +22,7 @@
 #include <asm/core_marvel.h>
 #include <asm/hwrpb.h>
 #include <asm/tlbflush.h>
+#include <asm/vga.h>
 
 #include "proto.h"
 #include "err_impl.h"
@@ -38,7 +39,7 @@
  * Interrupt handling.
  */
 static void 
-io7_device_interrupt(unsigned long vector, struct pt_regs * regs)
+io7_device_interrupt(unsigned long vector)
 {
 	unsigned int pid;
 	unsigned int irq;
@@ -64,7 +65,7 @@ io7_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	irq &= MARVEL_IRQ_VEC_IRQ_MASK;		/* not too many bits */
 	irq |= pid << MARVEL_IRQ_VEC_PE_SHIFT;	/* merge the pid     */
 
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static volatile unsigned long *
@@ -303,7 +304,7 @@ init_io7_irqs(struct io7 *io7,
 	/* Set up the lsi irqs.  */
 	for (i = 0; i < 128; ++i) {
 		irq_desc[base + i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[base + i].handler = lsi_ops;
+		irq_desc[base + i].chip = lsi_ops;
 	}
 
 	/* Disable the implemented irqs in hardware.  */
@@ -317,7 +318,7 @@ init_io7_irqs(struct io7 *io7,
 	/* Set up the msi irqs.  */
 	for (i = 128; i < (128 + 512); ++i) {
 		irq_desc[base + i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[base + i].handler = msi_ops;
+		irq_desc[base + i].chip = msi_ops;
 	}
 
 	for (i = 0; i < 16; ++i)
@@ -335,7 +336,7 @@ marvel_init_irq(void)
 	/* Reserve the legacy irqs.  */
 	for (i = 0; i < 16; ++i) {
 		irq_desc[i].status = IRQ_DISABLED;
-		irq_desc[i].handler = &marvel_legacy_irq_type;
+		irq_desc[i].chip = &marvel_legacy_irq_type;
 	}
 
 	/* Init the io7 irqs.  */
@@ -373,12 +374,11 @@ marvel_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		irq += 0x80;			/* offset for lsi       */
 
 #if 1
-		printk("PCI:%d:%d:%d (hose %d) [%s] is using MSI\n",
+		printk("PCI:%d:%d:%d (hose %d) is using MSI\n",
 		       dev->bus->number, 
 		       PCI_SLOT(dev->devfn), 
 		       PCI_FUNC(dev->devfn),
-		       hose->index,
-		       pci_pretty_name (dev));
+		       hose->index);
 		printk("  %d message(s) from 0x%04x\n", 
 		       1 << ((msg_ctl & PCI_MSI_FLAGS_QSIZE) >> 4),
 		       msg_dat);
@@ -413,17 +413,14 @@ marvel_init_pci(void)
 
 	pci_probe_only = 1;
 	common_init_pci();
-
-#ifdef CONFIG_VGA_HOSE
 	locate_and_init_vga(NULL);
-#endif
 
 	/* Clear any io7 errors.  */
 	for (io7 = NULL; (io7 = marvel_next_io7(io7)) != NULL; ) 
 		io7_clear_errors(io7);
 }
 
-static void
+static void __init
 marvel_init_rtc(void)
 {
 	init_rtc_irq();

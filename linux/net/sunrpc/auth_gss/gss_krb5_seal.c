@@ -63,114 +63,62 @@
 #include <linux/jiffies.h>
 #include <linux/sunrpc/gss_krb5.h>
 #include <linux/random.h>
-#include <asm/scatterlist.h>
 #include <linux/crypto.h>
 
 #ifdef RPC_DEBUG
 # define RPCDBG_FACILITY        RPCDBG_AUTH
 #endif
 
-static inline int
-gss_krb5_padding(int blocksize, int length) {
-	/* Most of the code is block-size independent but in practice we
-	 * use only 8: */
-	BUG_ON(blocksize != 8);
-	return 8 - (length & 7);
-}
+DEFINE_SPINLOCK(krb5_seq_lock);
 
 u32
-krb5_make_token(struct krb5_ctx *ctx, int qop_req,
-		   struct xdr_buf *text, struct xdr_netobj *token,
-		   int toktype)
+gss_get_mic_kerberos(struct gss_ctx *gss_ctx, struct xdr_buf *text,
+		struct xdr_netobj *token)
 {
-	s32			checksum_type;
-	struct xdr_netobj	md5cksum = {.len = 0, .data = NULL};
-	int			blocksize = 0, tmsglen;
+	struct krb5_ctx		*ctx = gss_ctx->internal_ctx_id;
+	char			cksumdata[16];
+	struct xdr_netobj	md5cksum = {.len = 0, .data = cksumdata};
 	unsigned char		*ptr, *krb5_hdr, *msg_start;
 	s32			now;
+	u32			seq_send;
 
-	dprintk("RPC:     gss_krb5_seal\n");
+	dprintk("RPC:       gss_krb5_seal\n");
+	BUG_ON(ctx == NULL);
 
 	now = get_seconds();
 
-	if (qop_req != 0)
-		goto out_err;
-
-	switch (ctx->signalg) {
-		case SGN_ALG_DES_MAC_MD5:
-			checksum_type = CKSUMTYPE_RSA_MD5;
-			break;
-		default:
-			dprintk("RPC:      gss_krb5_seal: ctx->signalg %d not"
-				" supported\n", ctx->signalg);
-			goto out_err;
-	}
-	if (ctx->sealalg != SEAL_ALG_NONE && ctx->sealalg != SEAL_ALG_DES) {
-		dprintk("RPC:      gss_krb5_seal: ctx->sealalg %d not supported\n",
-			ctx->sealalg);
-		goto out_err;
-	}
-
-	if (toktype == KG_TOK_WRAP_MSG) {
-		blocksize = crypto_tfm_alg_blocksize(ctx->enc);
-		tmsglen = blocksize + text->len
-			+ gss_krb5_padding(blocksize, blocksize + text->len);
-	} else {
-		tmsglen = 0;
-	}
-
-	token->len = g_token_size(&ctx->mech_used, 22 + tmsglen);
+	token->len = g_token_size(&ctx->mech_used, 22);
 
 	ptr = token->data;
-	g_make_token_header(&ctx->mech_used, 22 + tmsglen, &ptr);
+	g_make_token_header(&ctx->mech_used, 22, &ptr);
 
-	*ptr++ = (unsigned char) ((toktype>>8)&0xff);
-	*ptr++ = (unsigned char) (toktype&0xff);
+	*ptr++ = (unsigned char) ((KG_TOK_MIC_MSG>>8)&0xff);
+	*ptr++ = (unsigned char) (KG_TOK_MIC_MSG&0xff);
 
 	/* ptr now at byte 2 of header described in rfc 1964, section 1.2.1: */
 	krb5_hdr = ptr - 2;
 	msg_start = krb5_hdr + 24;
 
-	*(u16 *)(krb5_hdr + 2) = htons(ctx->signalg);
+	*(__be16 *)(krb5_hdr + 2) = htons(SGN_ALG_DES_MAC_MD5);
 	memset(krb5_hdr + 4, 0xff, 4);
-	if (toktype == KG_TOK_WRAP_MSG)
-		*(u16 *)(krb5_hdr + 4) = htons(ctx->sealalg);
 
-	if (toktype == KG_TOK_WRAP_MSG) {
-		/* XXX removing support for now */
-		goto out_err;
-	} else { /* Sign only.  */
-		if (make_checksum(checksum_type, krb5_hdr, 8, text,
-				       &md5cksum))
-			goto out_err;
-	}
+	if (make_checksum("md5", krb5_hdr, 8, text, 0, &md5cksum))
+		return GSS_S_FAILURE;
 
-	switch (ctx->signalg) {
-	case SGN_ALG_DES_MAC_MD5:
-		if (krb5_encrypt(ctx->seq, NULL, md5cksum.data,
-				  md5cksum.data, md5cksum.len))
-			goto out_err;
-		memcpy(krb5_hdr + 16,
-		       md5cksum.data + md5cksum.len - KRB5_CKSUM_LENGTH,
-		       KRB5_CKSUM_LENGTH);
+	if (krb5_encrypt(ctx->seq, NULL, md5cksum.data,
+			  md5cksum.data, md5cksum.len))
+		return GSS_S_FAILURE;
 
-		dprintk("RPC:      make_seal_token: cksum data: \n");
-		print_hexl((u32 *) (krb5_hdr + 16), KRB5_CKSUM_LENGTH, 0);
-		break;
-	default:
-		BUG();
-	}
+	memcpy(krb5_hdr + 16, md5cksum.data + md5cksum.len - KRB5_CKSUM_LENGTH,
+	       KRB5_CKSUM_LENGTH);
 
-	kfree(md5cksum.data);
+	spin_lock(&krb5_seq_lock);
+	seq_send = ctx->seq_send++;
+	spin_unlock(&krb5_seq_lock);
 
-	if ((krb5_make_seq_num(ctx->seq, ctx->initiate ? 0 : 0xff,
-			       ctx->seq_send, krb5_hdr + 16, krb5_hdr + 8)))
-		goto out_err;
+	if (krb5_make_seq_num(ctx->seq, ctx->initiate ? 0 : 0xff,
+			       ctx->seq_send, krb5_hdr + 16, krb5_hdr + 8))
+		return GSS_S_FAILURE;
 
-	ctx->seq_send++;
-
-	return ((ctx->endtime < now) ? GSS_S_CONTEXT_EXPIRED : GSS_S_COMPLETE);
-out_err:
-	if (md5cksum.data) kfree(md5cksum.data);
-	return GSS_S_FAILURE;
+	return (ctx->endtime < now) ? GSS_S_CONTEXT_EXPIRED : GSS_S_COMPLETE;
 }

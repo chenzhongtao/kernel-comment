@@ -35,7 +35,6 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/proc_fs.h>
-#include <linux/smp_lock.h>
 
 #include <asm/m48t35.h>
 #include <asm/sn/ioc3.h>
@@ -196,7 +195,7 @@ static int rtc_release(struct inode *inode, struct file *file)
  *	The various file operations we support.
  */
 
-static struct file_operations rtc_fops = {
+static const struct file_operations rtc_fops = {
 	.owner		= THIS_MODULE,
 	.ioctl		= rtc_ioctl,
 	.open		= rtc_open,

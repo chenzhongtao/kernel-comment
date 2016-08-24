@@ -770,13 +770,13 @@ static int sendup_buffer (struct net_device *dev)
 	skb->data[0] = dnode;
 	skb->data[1] = snode;
 	skb->data[2] = llaptype;
-	skb->mac.raw = skb->data;	/* save pointer to llap header */
+	skb_reset_mac_header(skb);	/* save pointer to llap header */
 	skb_pull(skb,3);
 
 	/* copy ddp(s,e)hdr + contents */
-	memcpy(skb->data,(void*)ltdmabuf,len);
+	skb_copy_to_linear_data(skb, ltdmabuf, len);
 
-	skb->h.raw = skb->data;
+	skb_reset_transport_header(skb);
 
 	stats->rx_packets++;
 	stats->rx_bytes+=skb->len;
@@ -790,7 +790,7 @@ static int sendup_buffer (struct net_device *dev)
 /* the handler for the board interrupt */
  
 static irqreturn_t
-ltpc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
+ltpc_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 
@@ -870,15 +870,6 @@ static void set_multicast_list(struct net_device *dev)
 	/* Actually netatalk needs fixing! */
 }
 
-static int ltpc_hard_header (struct sk_buff *skb, struct net_device *dev, 
-	unsigned short type, void *daddr, void *saddr, unsigned len)
-{
-	if(debug & DEBUG_VERBOSE)
-		printk("ltpc_hard_header called for device %s\n",
-			dev->name);
-	return 0;
-}
-
 static int ltpc_poll_counter;
 
 static void ltpc_poll(unsigned long l)
@@ -917,13 +908,14 @@ static int ltpc_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	int i;
 	struct lt_sendlap cbuf;
+	unsigned char *hdr;
 
 	cbuf.command = LT_SENDLAP;
 	cbuf.dnode = skb->data[0];
 	cbuf.laptype = skb->data[2];
 	skb_pull(skb,3);	/* skip past LLAP header */
 	cbuf.length = skb->len;	/* this is host order */
-	skb->h.raw=skb->data;
+	skb_reset_transport_header(skb);
 
 	if(debug & DEBUG_UPPER) {
 		printk("command ");
@@ -932,11 +924,13 @@ static int ltpc_xmit(struct sk_buff *skb, struct net_device *dev)
 		printk("\n");
 	}
 
-	do_write(dev,&cbuf,sizeof(cbuf),skb->h.raw,skb->len);
+	hdr = skb_transport_header(skb);
+	do_write(dev, &cbuf, sizeof(cbuf), hdr, skb->len);
 
 	if(debug & DEBUG_UPPER) {
 		printk("sent %d ddp bytes\n",skb->len);
-		for(i=0;i<skb->len;i++) printk("%02x ",skb->h.raw[i]);
+		for (i = 0; i < skb->len; i++)
+			printk("%02x ", hdr[i]);
 		printk("\n");
 	}
 
@@ -1039,11 +1033,9 @@ struct net_device * __init ltpc_probe(void)
 	unsigned long f;
 	unsigned long timeout;
 
-	dev = alloc_netdev(sizeof(struct ltpc_private), "lt%d", ltalk_setup);
+	dev = alloc_ltalkdev(sizeof(struct ltpc_private));
 	if (!dev)
 		goto out;
-
-	SET_MODULE_OWNER(dev);
 
 	/* probe for the I/O port address */
 	
@@ -1109,8 +1101,7 @@ struct net_device * __init ltpc_probe(void)
 	inb_p(io+1);
 	inb_p(io+3);
 
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(2*HZ/100);
+	msleep(20);
 
 	inb_p(io+0);
 	inb_p(io+2);
@@ -1120,8 +1111,7 @@ struct net_device * __init ltpc_probe(void)
 	inb_p(io+5); /* enable dma */
 	inb_p(io+6); /* tri-state interrupt line */
 
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(HZ);
+	ssleep(1);
 	
 	/* now, figure out which dma channel we're using, unless it's
 	   already been specified */
@@ -1142,7 +1132,6 @@ struct net_device * __init ltpc_probe(void)
 
 	/* Fill in the fields of the device structure with ethernet-generic values. */
 	dev->hard_start_xmit = ltpc_xmit;
-	dev->hard_header = ltpc_hard_header;
 	dev->get_stats = ltpc_get_stats;
 
 	/* add the ltpc-specific things */

@@ -12,7 +12,6 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -184,18 +183,13 @@ void machine_halt (void)
 	for (;;) {}
 }
 
-EXPORT_SYMBOL(machine_halt);
-
 void machine_restart (char *__unused)
 {
 	machine_halt ();
 }
-
-EXPORT_SYMBOL(machine_restart);
 
 void machine_power_off (void)
 {
 	machine_halt ();
 }
 
-EXPORT_SYMBOL(machine_power_off);

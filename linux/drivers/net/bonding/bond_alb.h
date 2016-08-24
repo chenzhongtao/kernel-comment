@@ -18,15 +18,6 @@
  * The full GNU General Public License is included in this distribution in the
  * file called LICENSE.
  *
- *
- * Changes:
- *
- * 2003/08/06 - Amir Noam <amir.noam at intel dot com>
- *	- Add support for setting bond's MAC address with special
- *	  handling required for ALB/TLB.
- *
- * 2003/12/01 - Shmulik Hen <shmulik.hen at intel dot com>
- *	- Code cleanup and style changes
  */
 
 #ifndef __BOND_ALB_H__
@@ -69,8 +60,8 @@ struct tlb_client_info {
  * -------------------------------------------------------------------------
  */
 struct rlb_client_info {
-	u32 ip_src;		/* the server IP address */
-	u32 ip_dst;		/* the client IP address */
+	__be32 ip_src;		/* the server IP address */
+	__be32 ip_dst;		/* the client IP address */
 	u8  mac_dst[ETH_ALEN];	/* the client MAC address */
 	u32 next;		/* The next Hash table entry index */
 	u32 prev;		/* The previous Hash table entry index */
@@ -134,7 +125,7 @@ void bond_alb_deinit_slave(struct bonding *bond, struct slave *slave);
 void bond_alb_handle_link_change(struct bonding *bond, struct slave *slave, char link);
 void bond_alb_handle_active_change(struct bonding *bond, struct slave *new_slave);
 int bond_alb_xmit(struct sk_buff *skb, struct net_device *bond_dev);
-void bond_alb_monitor(struct bonding *bond);
+void bond_alb_monitor(struct work_struct *);
 int bond_alb_set_mac_address(struct net_device *bond_dev, void *addr);
 void bond_alb_clear_vlan(struct bonding *bond, unsigned short vlan_id);
 #endif /* __BOND_ALB_H__ */

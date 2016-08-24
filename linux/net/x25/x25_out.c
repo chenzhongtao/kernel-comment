@@ -3,7 +3,7 @@
  *
  *	This is ALPHA test software. This code may break your machine,
  *	randomly fail to work with new releases, misbehave and/or generally
- *	screw up. It might even work. 
+ *	screw up. It might even work.
  *
  *	This code REQUIRES 2.1.15 or higher
  *
@@ -54,14 +54,14 @@ int x25_output(struct sock *sk, struct sk_buff *skb)
 	unsigned char header[X25_EXT_MIN_LEN];
 	int err, frontlen, len;
 	int sent=0, noblock = X25_SKB_CB(skb)->flags & MSG_DONTWAIT;
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 	int header_len = x25->neighbour->extended ? X25_EXT_MIN_LEN :
 						    X25_STD_MIN_LEN;
 	int max_len = x25_pacsize_to_bytes(x25->facilities.pacsize_out);
 
 	if (skb->len - header_len > max_len) {
 		/* Save a copy of the Header */
-		memcpy(header, skb->data, header_len);
+		skb_copy_from_linear_data(skb, header, header_len);
 		skb_pull(skb, header_len);
 
 		frontlen = skb_headroom(skb);
@@ -78,18 +78,18 @@ int x25_output(struct sock *sk, struct sk_buff *skb)
 					       "sent\n", err, sent);
 				return err;
 			}
-				
+
 			skb_reserve(skbn, frontlen);
 
 			len = max_len > skb->len ? skb->len : max_len;
 
 			/* Copy the user data */
-			memcpy(skb_put(skbn, len), skb->data, len);
+			skb_copy_from_linear_data(skb, skb_put(skbn, len), len);
 			skb_pull(skb, len);
 
 			/* Duplicate the Header */
 			skb_push(skbn, header_len);
-			memcpy(skbn->data, header, header_len);
+			skb_copy_to_linear_data(skbn, header, header_len);
 
 			if (skb->len > 0) {
 				if (x25->neighbour->extended)
@@ -101,7 +101,7 @@ int x25_output(struct sock *sk, struct sk_buff *skb)
 			skb_queue_tail(&sk->sk_write_queue, skbn);
 			sent += len;
 		}
-		
+
 		kfree_skb(skb);
 	} else {
 		skb_queue_tail(&sk->sk_write_queue, skb);
@@ -110,13 +110,13 @@ int x25_output(struct sock *sk, struct sk_buff *skb)
 	return sent;
 }
 
-/* 
+/*
  *	This procedure is passed a buffer descriptor for an iframe. It builds
  *	the rest of the control part of the frame and then writes it out.
  */
 static void x25_send_iframe(struct sock *sk, struct sk_buff *skb)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 
 	if (!skb)
 		return;
@@ -131,7 +131,7 @@ static void x25_send_iframe(struct sock *sk, struct sk_buff *skb)
 		skb->data[2] |= (x25->vr << 5) & 0xE0;
 	}
 
-	x25_transmit_link(skb, x25->neighbour);	
+	x25_transmit_link(skb, x25->neighbour);
 }
 
 void x25_kick(struct sock *sk)
@@ -139,7 +139,7 @@ void x25_kick(struct sock *sk)
 	struct sk_buff *skb, *skbn;
 	unsigned short start, end;
 	int modulus;
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 
 	if (x25->state != X25_STATE_3)
 		return;
@@ -212,7 +212,7 @@ void x25_kick(struct sock *sk)
 
 void x25_enquiry_response(struct sock *sk)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 
 	if (x25->condition & X25_COND_OWN_RX_BUSY)
 		x25_write_internal(sk, X25_RNR);

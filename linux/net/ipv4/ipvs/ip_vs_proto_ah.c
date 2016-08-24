@@ -12,6 +12,8 @@
  *
  */
 
+#include <linux/in.h>
+#include <linux/ip.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/netfilter.h>
@@ -50,15 +52,15 @@ ah_conn_in_get(const struct sk_buff *skb,
 	if (likely(!inverse)) {
 		cp = ip_vs_conn_in_get(IPPROTO_UDP,
 				       iph->saddr,
-				       __constant_htons(PORT_ISAKMP),
+				       htons(PORT_ISAKMP),
 				       iph->daddr,
-				       __constant_htons(PORT_ISAKMP));
+				       htons(PORT_ISAKMP));
 	} else {
 		cp = ip_vs_conn_in_get(IPPROTO_UDP,
 				       iph->daddr,
-				       __constant_htons(PORT_ISAKMP),
+				       htons(PORT_ISAKMP),
 				       iph->saddr,
-				       __constant_htons(PORT_ISAKMP));
+				       htons(PORT_ISAKMP));
 	}
 
 	if (!cp) {
@@ -87,15 +89,15 @@ ah_conn_out_get(const struct sk_buff *skb, struct ip_vs_protocol *pp,
 	if (likely(!inverse)) {
 		cp = ip_vs_conn_out_get(IPPROTO_UDP,
 					iph->saddr,
-					__constant_htons(PORT_ISAKMP),
+					htons(PORT_ISAKMP),
 					iph->daddr,
-					__constant_htons(PORT_ISAKMP));
+					htons(PORT_ISAKMP));
 	} else {
 		cp = ip_vs_conn_out_get(IPPROTO_UDP,
 					iph->daddr,
-					__constant_htons(PORT_ISAKMP),
+					htons(PORT_ISAKMP),
 					iph->saddr,
-					__constant_htons(PORT_ISAKMP));
+					htons(PORT_ISAKMP));
 	}
 
 	if (!cp) {

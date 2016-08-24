@@ -21,11 +21,11 @@
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/list.h>
+#include <linux/amba/bus.h>
+#include <linux/amba/clcd.h>
+#include <linux/clk.h>
 
-#include <asm/hardware/amba.h>
-#include <asm/hardware/clock.h>
-
-#include <asm/hardware/amba_clcd.h>
+#include <asm/sizes.h>
 
 #define to_clcd(info)	container_of(info, struct clcd_fb, fb)
 
@@ -116,56 +116,60 @@ clcdfb_set_bitfields(struct clcd_fb *fb, struct fb_var_screeninfo *var)
 	int ret = 0;
 
 	memset(&var->transp, 0, sizeof(var->transp));
-	memset(&var->red, 0, sizeof(var->red));
-	memset(&var->green, 0, sizeof(var->green));
-	memset(&var->blue, 0, sizeof(var->blue));
+
+	var->red.msb_right = 0;
+	var->green.msb_right = 0;
+	var->blue.msb_right = 0;
 
 	switch (var->bits_per_pixel) {
 	case 1:
 	case 2:
 	case 4:
 	case 8:
-		var->red.length		= 8;
+		var->red.length		= var->bits_per_pixel;
 		var->red.offset		= 0;
-		var->green.length	= 8;
+		var->green.length	= var->bits_per_pixel;
 		var->green.offset	= 0;
-		var->blue.length	= 8;
+		var->blue.length	= var->bits_per_pixel;
 		var->blue.offset	= 0;
 		break;
 	case 16:
-		var->red.length		= 5;
-		var->green.length	= 5;
-		var->blue.length	= 5;
-		if (fb->panel->cntl & CNTL_BGR) {
-			var->red.offset		= 10;
-			var->green.offset	= 5;
-			var->blue.offset	= 0;
-		} else {
-			var->red.offset		= 0;
-			var->green.offset	= 5;
-			var->blue.offset	= 10;
-		}
+		var->red.length = 5;
+		var->blue.length = 5;
+		/*
+		 * Green length can be 5 or 6 depending whether
+		 * we're operating in RGB555 or RGB565 mode.
+		 */
+		if (var->green.length != 5 && var->green.length != 6)
+			var->green.length = 6;
 		break;
-	case 24:
+	case 32:
 		if (fb->panel->cntl & CNTL_LCDTFT) {
 			var->red.length		= 8;
 			var->green.length	= 8;
 			var->blue.length	= 8;
-
-			if (fb->panel->cntl & CNTL_BGR) {
-				var->red.offset		= 16;
-				var->green.offset	= 8;
-				var->blue.offset	= 0;
-			} else {
-				var->red.offset		= 0;
-				var->green.offset	= 8;
-				var->blue.offset	= 16;
-			}
 			break;
 		}
 	default:
 		ret = -EINVAL;
 		break;
+	}
+
+	/*
+	 * >= 16bpp displays have separate colour component bitfields
+	 * encoded in the pixel data.  Calculate their position from
+	 * the bitfield length defined above.
+	 */
+	if (ret == 0 && var->bits_per_pixel >= 16) {
+		if (fb->panel->cntl & CNTL_BGR) {
+			var->blue.offset = 0;
+			var->green.offset = var->blue.offset + var->blue.length;
+			var->red.offset = var->green.offset + var->green.length;
+		} else {
+			var->red.offset = 0;
+			var->green.offset = var->red.offset + var->red.length;
+			var->blue.offset = var->green.offset + var->green.length;
+		}
 	}
 
 	return ret;
@@ -178,6 +182,12 @@ static int clcdfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 
 	if (fb->board->check)
 		ret = fb->board->check(fb, var);
+
+	if (ret == 0 &&
+	    var->xres_virtual * var->bits_per_pixel / 8 *
+	    var->yres_virtual > fb->fb.fix.smem_len)
+		ret = -EINVAL;
+
 	if (ret == 0)
 		ret = clcdfb_set_bitfields(fb, var);
 
@@ -250,7 +260,7 @@ clcdfb_setcolreg(unsigned int regno, unsigned int red, unsigned int green,
 				  convert_bitfield(green, &fb->fb.var.green) |
 				  convert_bitfield(red, &fb->fb.var.red);
 
-	if (fb->fb.var.bits_per_pixel == 8 && regno < 256) {
+	if (fb->fb.fix.visual == FB_VISUAL_PSEUDOCOLOR && regno < 256) {
 		int hw_reg = CLCD_PALETTE + ((regno * 2) & ~3);
 		u32 val, mask, newval;
 
@@ -301,7 +311,7 @@ static int clcdfb_blank(int blank_mode, struct fb_info *info)
 	return 0;
 }
 
-static int clcdfb_mmap(struct fb_info *info, struct file *file,
+static int clcdfb_mmap(struct fb_info *info,
 		       struct vm_area_struct *vma)
 {
 	struct clcd_fb *fb = to_clcd(info);
@@ -326,7 +336,6 @@ static struct fb_ops clcdfb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 	.fb_mmap	= clcdfb_mmap,
 };
 
@@ -340,10 +349,6 @@ static int clcdfb_register(struct clcd_fb *fb)
 		goto out;
 	}
 
-	ret = clk_use(fb->clk);
-	if (ret)
-		goto free_clk;
-
 	fb->fb.fix.mmio_start	= fb->dev->res.start;
 	fb->fb.fix.mmio_len	= SZ_4K;
 
@@ -351,7 +356,7 @@ static int clcdfb_register(struct clcd_fb *fb)
 	if (!fb->regs) {
 		printk(KERN_ERR "CLCD: unable to remap registers\n");
 		ret = -ENOMEM;
-		goto unuse_clk;
+		goto free_clk;
 	}
 
 	fb->fb.fbops		= &clcdfb_ops;
@@ -421,8 +426,6 @@ static int clcdfb_register(struct clcd_fb *fb)
 	printk(KERN_ERR "CLCD: cannot register framebuffer (%d)\n", ret);
 
 	iounmap(fb->regs);
- unuse_clk:
-	clk_unuse(fb->clk);
  free_clk:
 	clk_put(fb->clk);
  out:
@@ -444,13 +447,12 @@ static int clcdfb_probe(struct amba_device *dev, void *id)
 		goto out;
 	}
 
-	fb = (struct clcd_fb *) kmalloc(sizeof(struct clcd_fb), GFP_KERNEL);
+	fb = kzalloc(sizeof(struct clcd_fb), GFP_KERNEL);
 	if (!fb) {
 		printk(KERN_INFO "CLCD: could not allocate new clcd_fb struct\n");
 		ret = -ENOMEM;
 		goto free_region;
 	}
-	memset(fb, 0, sizeof(struct clcd_fb));
 
 	fb->dev = dev;
 	fb->board = board;
@@ -483,7 +485,6 @@ static int clcdfb_remove(struct amba_device *dev)
 	clcdfb_disable(fb);
 	unregister_framebuffer(&fb->fb);
 	iounmap(fb->regs);
-	clk_unuse(fb->clk);
 	clk_put(fb->clk);
 
 	fb->board->remove(fb);
@@ -498,21 +499,21 @@ static int clcdfb_remove(struct amba_device *dev)
 static struct amba_id clcdfb_id_table[] = {
 	{
 		.id	= 0x00041110,
-		.mask	= 0x000fffff,
+		.mask	= 0x000ffffe,
 	},
 	{ 0, 0 },
 };
 
 static struct amba_driver clcd_driver = {
 	.drv 		= {
-		.name	= "clcd-pl110",
+		.name	= "clcd-pl11x",
 	},
 	.probe		= clcdfb_probe,
 	.remove		= clcdfb_remove,
 	.id_table	= clcdfb_id_table,
 };
 
-int __init amba_clcdfb_init(void)
+static int __init amba_clcdfb_init(void)
 {
 	if (fb_get_options("ambafb", NULL))
 		return -ENODEV;

@@ -6,6 +6,34 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 
+#define PSW32_MASK_PER		0x40000000UL
+#define PSW32_MASK_DAT		0x04000000UL
+#define PSW32_MASK_IO		0x02000000UL
+#define PSW32_MASK_EXT		0x01000000UL
+#define PSW32_MASK_KEY		0x00F00000UL
+#define PSW32_MASK_MCHECK	0x00040000UL
+#define PSW32_MASK_WAIT		0x00020000UL
+#define PSW32_MASK_PSTATE	0x00010000UL
+#define PSW32_MASK_ASC		0x0000C000UL
+#define PSW32_MASK_CC		0x00003000UL
+#define PSW32_MASK_PM		0x00000f00UL
+
+#define PSW32_ADDR_AMODE31	0x80000000UL
+#define PSW32_ADDR_INSN		0x7FFFFFFFUL
+
+#define PSW32_BASE_BITS		0x00080000UL
+
+#define PSW32_ASC_PRIMARY	0x00000000UL
+#define PSW32_ASC_ACCREG	0x00004000UL
+#define PSW32_ASC_SECONDARY	0x00008000UL
+#define PSW32_ASC_HOME		0x0000C000UL
+
+#define PSW32_MASK_MERGE(CURRENT,NEW) \
+	(((CURRENT) & ~(PSW32_MASK_CC|PSW32_MASK_PM)) | \
+	 ((NEW) & (PSW32_MASK_CC|PSW32_MASK_PM)))
+
+extern long psw32_user_bits;
+
 #define COMPAT_USER_HZ	100
 
 typedef u32		compat_size_t;
@@ -13,10 +41,10 @@ typedef s32		compat_ssize_t;
 typedef s32		compat_time_t;
 typedef s32		compat_clock_t;
 typedef s32		compat_pid_t;
-typedef u16		compat_uid_t;
-typedef u16		compat_gid_t;
-typedef u32		compat_uid32_t;
-typedef u32		compat_gid32_t;
+typedef u16		__compat_uid_t;
+typedef u16		__compat_gid_t;
+typedef u32		__compat_uid32_t;
+typedef u32		__compat_gid32_t;
 typedef u16		compat_mode_t;
 typedef u32		compat_ino_t;
 typedef u16		compat_dev_t;
@@ -32,8 +60,10 @@ typedef s32		compat_timer_t;
 
 typedef s32		compat_int_t;
 typedef s32		compat_long_t;
+typedef s64		compat_s64;
 typedef u32		compat_uint_t;
 typedef u32		compat_ulong_t;
+typedef u64		compat_u64;
 
 struct compat_timespec {
 	compat_time_t	tv_sec;
@@ -51,8 +81,8 @@ struct compat_stat {
 	compat_ino_t	st_ino;
 	compat_mode_t	st_mode;
 	compat_nlink_t	st_nlink;
-	compat_uid_t	st_uid;
-	compat_gid_t	st_gid;
+	__compat_uid_t	st_uid;
+	__compat_gid_t	st_gid;
 	compat_dev_t	st_rdev;
 	u16		__pad2;
 	u32		st_size;
@@ -128,6 +158,11 @@ static inline void __user *compat_ptr(compat_uptr_t uptr)
 	return (void __user *)(unsigned long)(uptr & 0x7fffffffUL);
 }
 
+static inline compat_uptr_t ptr_to_compat(void __user *uptr)
+{
+	return (u32)(unsigned long)uptr;
+}
+
 static inline void __user *compat_alloc_user_space(long len)
 {
 	unsigned long stack;
@@ -140,10 +175,10 @@ static inline void __user *compat_alloc_user_space(long len)
 
 struct compat_ipc64_perm {
 	compat_key_t key;
-	compat_uid32_t uid;
-	compat_gid32_t gid;
-	compat_uid32_t cuid;
-	compat_gid32_t cgid;
+	__compat_uid32_t uid;
+	__compat_gid32_t gid;
+	__compat_uid32_t cuid;
+	__compat_gid32_t cgid;
 	compat_mode_t mode;
 	unsigned short __pad1;
 	unsigned short seq;

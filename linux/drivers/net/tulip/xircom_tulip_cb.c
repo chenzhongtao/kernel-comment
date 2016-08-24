@@ -10,26 +10,11 @@
 	410 Severn Ave., Suite 210
 	Annapolis MD 21403
 
-	-----------------------------------------------------------
-
-	Linux kernel-specific changes:
-
-	LK1.0 (Ion Badulescu)
-	- Major cleanup
-	- Use 2.4 PCI API
-	- Support ethtool
-	- Rewrite perfect filter/hash code
-	- Use interrupts for media changes
-
-	LK1.1 (Ion Badulescu)
-	- Disallow negotiation of unsupported full-duplex modes
 */
 
 #define DRV_NAME	"xircom_tulip_cb"
-#define DRV_VERSION	"0.91+LK1.1"
-#define DRV_RELDATE	"October 11, 2001"
-
-#define CARDBUS 1
+#define DRV_VERSION	"0.92"
+#define DRV_RELDATE	"June 27, 2006"
 
 /* A few user-configurable values. */
 
@@ -80,7 +65,7 @@ static int rx_copybreak = 100;
 static int csr0 = 0x01A00000 | 0xE000;
 #elif defined(__powerpc__)
 static int csr0 = 0x01B00000 | 0x8000;
-#elif defined(__sparc__)
+#elif defined(CONFIG_SPARC)
 static int csr0 = 0x01B00080 | 0x8000;
 #elif defined(__i386__)
 static int csr0 = 0x01A00000 | 0x8000;
@@ -98,7 +83,6 @@ static int csr0 = 0x00A00000 | 0x4800;
 /* PCI registers */
 #define PCI_POWERMGMT 	0x40
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -307,10 +291,10 @@ struct xircom_private {
 	struct xircom_tx_desc tx_ring[TX_RING_SIZE];
 	/* The saved address of a sent-in-place packet/buffer, for skfree(). */
 	struct sk_buff* tx_skbuff[TX_RING_SIZE];
-#ifdef CARDBUS
+
 	/* The X3201-3 requires 4-byte aligned tx bufs */
 	struct sk_buff* tx_aligned_skbuff[TX_RING_SIZE];
-#endif
+
 	/* The addresses of receive-in-place skbuffs. */
 	struct sk_buff* rx_skbuff[RX_RING_SIZE];
 	u16 setup_frame[PKT_SETUP_SZ / sizeof(u16)];	/* Pseudo-Tx frame to init address table. */
@@ -344,13 +328,13 @@ static void xircom_init_ring(struct net_device *dev);
 static int xircom_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static int xircom_rx(struct net_device *dev);
 static void xircom_media_change(struct net_device *dev);
-static irqreturn_t xircom_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
+static irqreturn_t xircom_interrupt(int irq, void *dev_instance);
 static int xircom_close(struct net_device *dev);
 static struct net_device_stats *xircom_get_stats(struct net_device *dev);
 static int xircom_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 static void set_rx_mode(struct net_device *dev);
 static void check_duplex(struct net_device *dev);
-static struct ethtool_ops ops;
+static const struct ethtool_ops ops;
 
 
 /* The Xircom cards are picky about when certain bits in CSR6 can be
@@ -540,7 +524,6 @@ static int __devinit xircom_init_one(struct pci_dev *pdev, const struct pci_devi
 	int chip_idx = id->driver_data;
 	long ioaddr;
 	int i;
-	u8 chip_rev;
 
 /* when built into the kernel, we only print version if device is found */
 #ifndef MODULE
@@ -564,7 +547,6 @@ static int __devinit xircom_init_one(struct pci_dev *pdev, const struct pci_devi
 		printk (KERN_ERR DRV_NAME "%d: cannot alloc etherdev, aborting\n", board_idx);
 		return -ENOMEM;
 	}
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	dev->base_addr = ioaddr;
@@ -636,9 +618,8 @@ static int __devinit xircom_init_one(struct pci_dev *pdev, const struct pci_devi
 	if (register_netdev(dev))
 		goto err_out_cleardev;
 
-	pci_read_config_byte(pdev, PCI_REVISION_ID, &chip_rev);
 	printk(KERN_INFO "%s: %s rev %d at %#3lx,",
-	       dev->name, xircom_tbl[chip_idx].chip_name, chip_rev, ioaddr);
+	       dev->name, xircom_tbl[chip_idx].chip_name, pdev->revision, ioaddr);
 	for (i = 0; i < 6; i++)
 		printk("%c%2.2X", i ? ':' : ' ', dev->dev_addr[i]);
 	printk(", IRQ %d.\n", dev->irq);
@@ -808,7 +789,7 @@ xircom_open(struct net_device *dev)
 {
 	struct xircom_private *tp = netdev_priv(dev);
 
-	if (request_irq(dev->irq, &xircom_interrupt, SA_SHIRQ, dev->name, dev))
+	if (request_irq(dev->irq, &xircom_interrupt, IRQF_SHARED, dev->name, dev))
 		return -EAGAIN;
 
 	xircom_up(dev);
@@ -899,7 +880,7 @@ static void xircom_init_ring(struct net_device *dev)
 			break;
 		skb->dev = dev;			/* Mark as being used by this device. */
 		tp->rx_ring[i].status = Rx0DescOwned;	/* Owned by Xircom chip */
-		tp->rx_ring[i].buffer1 = virt_to_bus(skb->tail);
+		tp->rx_ring[i].buffer1 = virt_to_bus(skb->data);
 	}
 	tp->dirty_rx = (unsigned int)(i - RX_RING_SIZE);
 
@@ -909,10 +890,8 @@ static void xircom_init_ring(struct net_device *dev)
 		tp->tx_skbuff[i] = NULL;
 		tp->tx_ring[i].status = 0;
 		tp->tx_ring[i].buffer2 = virt_to_bus(&tp->tx_ring[i+1]);
-#ifdef CARDBUS
 		if (tp->chip_id == X3201_3)
 			tp->tx_aligned_skbuff[i] = dev_alloc_skb(PKT_BUF_SZ);
-#endif /* CARDBUS */
 	}
 	tp->tx_ring[i-1].buffer2 = virt_to_bus(&tp->tx_ring[0]);
 }
@@ -932,12 +911,12 @@ xircom_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	entry = tp->cur_tx % TX_RING_SIZE;
 
 	tp->tx_skbuff[entry] = skb;
-#ifdef CARDBUS
 	if (tp->chip_id == X3201_3) {
-		memcpy(tp->tx_aligned_skbuff[entry]->data,skb->data,skb->len);
+		skb_copy_from_linear_data(skb,
+					  tp->tx_aligned_skbuff[entry]->data,
+					  skb->len);
 		tp->tx_ring[entry].buffer1 = virt_to_bus(tp->tx_aligned_skbuff[entry]->data);
 	} else
-#endif
 		tp->tx_ring[entry].buffer1 = virt_to_bus(skb->data);
 
 	if (tp->cur_tx - tp->dirty_tx < TX_RING_SIZE/2) {/* Typical path */
@@ -1064,7 +1043,7 @@ static void check_duplex(struct net_device *dev)
 
 /* The interrupt handler does all of the Rx thread work and cleans up
    after the Tx thread. */
-static irqreturn_t xircom_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
+static irqreturn_t xircom_interrupt(int irq, void *dev_instance)
 {
 	struct net_device *dev = dev_instance;
 	struct xircom_private *tp = netdev_priv(dev);
@@ -1258,11 +1237,10 @@ xircom_rx(struct net_device *dev)
 			   to a minimally-sized skbuff. */
 			if (pkt_len < rx_copybreak
 				&& (skb = dev_alloc_skb(pkt_len + 2)) != NULL) {
-				skb->dev = dev;
 				skb_reserve(skb, 2);	/* 16 byte align the IP header */
 #if ! defined(__alpha__)
-				eth_copy_and_sum(skb, bus_to_virt(tp->rx_ring[entry].buffer1),
-								 pkt_len, 0);
+				skb_copy_to_linear_data(skb, bus_to_virt(tp->rx_ring[entry].buffer1),
+								 pkt_len);
 				skb_put(skb, pkt_len);
 #else
 				memcpy(skb_put(skb, pkt_len),
@@ -1291,7 +1269,7 @@ xircom_rx(struct net_device *dev)
 			if (skb == NULL)
 				break;
 			skb->dev = dev;			/* Mark as being used by this device. */
-			tp->rx_ring[entry].buffer1 = virt_to_bus(skb->tail);
+			tp->rx_ring[entry].buffer1 = virt_to_bus(skb->data);
 			work_done++;
 		}
 		tp->rx_ring[entry].status = Rx0DescOwned;
@@ -1450,7 +1428,7 @@ static void xircom_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *i
 	strcpy(info->bus_info, pci_name(tp->pdev));
 }
 
-static struct ethtool_ops ops = {
+static const struct ethtool_ops ops = {
 	.get_settings = xircom_get_settings,
 	.set_settings = xircom_set_settings,
 	.get_drvinfo = xircom_get_drvinfo,
@@ -1655,7 +1633,7 @@ MODULE_DEVICE_TABLE(pci, xircom_pci_table);
 
 
 #ifdef CONFIG_PM
-static int xircom_suspend(struct pci_dev *pdev, u32 state)
+static int xircom_suspend(struct pci_dev *pdev, pm_message_t state)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	struct xircom_private *tp = netdev_priv(dev);
@@ -1727,7 +1705,7 @@ static int __init xircom_init(void)
 #ifdef MODULE
 	printk(version);
 #endif
-	return pci_module_init(&xircom_driver);
+	return pci_register_driver(&xircom_driver);
 }
 
 

@@ -20,16 +20,14 @@
 
 #include <media/saa7146.h>
 
-/* global variables */
-struct list_head saa7146_devices;
-struct semaphore saa7146_devices_lock;
+LIST_HEAD(saa7146_devices);
+DEFINE_MUTEX(saa7146_devices_lock);
 
-static int initialized = 0;
-static int saa7146_num = 0;
+static int saa7146_num;
 
-unsigned int saa7146_debug = 0;
+unsigned int saa7146_debug;
 
-module_param(saa7146_debug, int, 0644);
+module_param(saa7146_debug, uint, 0644);
 MODULE_PARM_DESC(saa7146_debug, "debug level (default: 0)");
 
 #if 0
@@ -48,64 +46,107 @@ static void dump_registers(struct saa7146_dev* dev)
  * gpio and debi helper functions
  ****************************************************************************/
 
-/* write "data" to the gpio-pin "pin" -- unused */
-void saa7146_set_gpio(struct saa7146_dev *dev, u8 pin, u8 data)
+void saa7146_setgpio(struct saa7146_dev *dev, int port, u32 data)
 {
 	u32 value = 0;
 
-	/* sanity check */
-	if(pin > 3)
-		return;
+	BUG_ON(port > 3);
 
-	/* read old register contents */
-	value = saa7146_read(dev, GPIO_CTRL );
-	
-	value &= ~(0xff << (8*pin));
-	value |= (data << (8*pin));
-
+	value = saa7146_read(dev, GPIO_CTRL);
+	value &= ~(0xff << (8*port));
+	value |= (data << (8*port));
 	saa7146_write(dev, GPIO_CTRL, value);
 }
 
 /* This DEBI code is based on the saa7146 Stradis driver by Nathan Laredo */
-int saa7146_wait_for_debi_done(struct saa7146_dev *dev, int nobusyloop)
+static inline int saa7146_wait_for_debi_done_sleep(struct saa7146_dev *dev,
+				unsigned long us1, unsigned long us2)
 {
-	unsigned long start;
+	unsigned long timeout;
+	int err;
 
 	/* wait for registers to be programmed */
-	start = jiffies;
+	timeout = jiffies + usecs_to_jiffies(us1);
 	while (1) {
-                if (saa7146_read(dev, MC2) & 2)
-                        break;
-		if (time_after(jiffies, start + HZ/20)) {
-			DEB_S(("timed out while waiting for registers getting programmed\n"));
+		err = time_after(jiffies, timeout);
+		if (saa7146_read(dev, MC2) & 2)
+			break;
+		if (err) {
+			printk(KERN_ERR "%s: %s timed out while waiting for "
+					"registers getting programmed\n",
+					dev->name, __FUNCTION__);
 			return -ETIMEDOUT;
 		}
-		if (nobusyloop)
-			msleep(1);
+		msleep(1);
 	}
 
 	/* wait for transfer to complete */
-	start = jiffies;
+	timeout = jiffies + usecs_to_jiffies(us2);
+	while (1) {
+		err = time_after(jiffies, timeout);
+		if (!(saa7146_read(dev, PSR) & SPCI_DEBI_S))
+			break;
+		saa7146_read(dev, MC2);
+		if (err) {
+			DEB_S(("%s: %s timed out while waiting for transfer "
+				"completion\n",	dev->name, __FUNCTION__));
+			return -ETIMEDOUT;
+		}
+		msleep(1);
+	}
+
+	return 0;
+}
+
+static inline int saa7146_wait_for_debi_done_busyloop(struct saa7146_dev *dev,
+				unsigned long us1, unsigned long us2)
+{
+	unsigned long loops;
+
+	/* wait for registers to be programmed */
+	loops = us1;
+	while (1) {
+		if (saa7146_read(dev, MC2) & 2)
+			break;
+		if (!loops--) {
+			printk(KERN_ERR "%s: %s timed out while waiting for "
+					"registers getting programmed\n",
+					dev->name, __FUNCTION__);
+			return -ETIMEDOUT;
+		}
+		udelay(1);
+	}
+
+	/* wait for transfer to complete */
+	loops = us2 / 5;
 	while (1) {
 		if (!(saa7146_read(dev, PSR) & SPCI_DEBI_S))
 			break;
 		saa7146_read(dev, MC2);
-		if (time_after(jiffies, start + HZ/4)) {
-			DEB_S(("timed out while waiting for transfer completion\n"));
+		if (!loops--) {
+			DEB_S(("%s: %s timed out while waiting for transfer "
+				"completion\n", dev->name, __FUNCTION__));
 			return -ETIMEDOUT;
 		}
-		if (nobusyloop)
-			msleep(1);
+		udelay(5);
 	}
 
 	return 0;
+}
+
+int saa7146_wait_for_debi_done(struct saa7146_dev *dev, int nobusyloop)
+{
+	if (nobusyloop)
+		return saa7146_wait_for_debi_done_sleep(dev, 50000, 250000);
+	else
+		return saa7146_wait_for_debi_done_busyloop(dev, 50000, 250000);
 }
 
 /****************************************************************************
  * general helper functions
  ****************************************************************************/
 
-/* this is videobuf_vmalloc_to_sg() from video-buf.c 
+/* this is videobuf_vmalloc_to_sg() from videobuf-dma-sg.c
    make sure virt has been allocated with vmalloc_32(), otherwise the BUG()
    may be triggered on highmem machines */
 static struct scatterlist* vmalloc_to_sg(unsigned char *virt, int nr_pages)
@@ -114,21 +155,19 @@ static struct scatterlist* vmalloc_to_sg(unsigned char *virt, int nr_pages)
 	struct page *pg;
 	int i;
 
-	sglist = kmalloc(sizeof(struct scatterlist)*nr_pages, GFP_KERNEL);
+	sglist = kcalloc(nr_pages, sizeof(struct scatterlist), GFP_KERNEL);
 	if (NULL == sglist)
 		return NULL;
-	memset(sglist,0,sizeof(struct scatterlist)*nr_pages);
+	sg_init_table(sglist, nr_pages);
 	for (i = 0; i < nr_pages; i++, virt += PAGE_SIZE) {
 		pg = vmalloc_to_page(virt);
 		if (NULL == pg)
 			goto err;
-		if (PageHighMem(pg))
-			BUG();
-		sglist[i].page   = pg;
-		sglist[i].length = PAGE_SIZE;
+		BUG_ON(PageHighMem(pg));
+		sg_set_page(&sglist[i], pg, PAGE_SIZE, 0);
 	}
 	return sglist;
-	
+
  err:
 	kfree(sglist);
 	return NULL;
@@ -137,34 +176,51 @@ static struct scatterlist* vmalloc_to_sg(unsigned char *virt, int nr_pages)
 /********************************************************************************/
 /* common page table functions */
 
-char *saa7146_vmalloc_build_pgtable(struct pci_dev *pci, long length, struct saa7146_pgtable *pt)
+void *saa7146_vmalloc_build_pgtable(struct pci_dev *pci, long length, struct saa7146_pgtable *pt)
 {
 	int pages = (length+PAGE_SIZE-1)/PAGE_SIZE;
-	char *mem = vmalloc_32(length);
+	void *mem = vmalloc_32(length);
 	int slen = 0;
 
-	if (NULL == mem) {
-		return NULL;
-	}
+	if (NULL == mem)
+		goto err_null;
 
-	if (!(pt->slist = vmalloc_to_sg(mem, pages))) {
-		vfree(mem);
-		return NULL;
-	}
+	if (!(pt->slist = vmalloc_to_sg(mem, pages)))
+		goto err_free_mem;
 
-	if (saa7146_pgtable_alloc(pci, pt)) {
-		kfree(pt->slist);
-		pt->slist = NULL;
-		vfree(mem);
-		return NULL;
-	}
-	
-	slen = pci_map_sg(pci,pt->slist,pages,PCI_DMA_FROMDEVICE);
-	if (0 != saa7146_pgtable_build_single(pci, pt, pt->slist, slen)) {
-		return NULL;
-	}
+	if (saa7146_pgtable_alloc(pci, pt))
+		goto err_free_slist;
+
+	pt->nents = pages;
+	slen = pci_map_sg(pci,pt->slist,pt->nents,PCI_DMA_FROMDEVICE);
+	if (0 == slen)
+		goto err_free_pgtable;
+
+	if (0 != saa7146_pgtable_build_single(pci, pt, pt->slist, slen))
+		goto err_unmap_sg;
 
 	return mem;
+
+err_unmap_sg:
+	pci_unmap_sg(pci, pt->slist, pt->nents, PCI_DMA_FROMDEVICE);
+err_free_pgtable:
+	saa7146_pgtable_free(pci, pt);
+err_free_slist:
+	kfree(pt->slist);
+	pt->slist = NULL;
+err_free_mem:
+	vfree(mem);
+err_null:
+	return NULL;
+}
+
+void saa7146_vfree_destroy_pgtable(struct pci_dev *pci, void *mem, struct saa7146_pgtable *pt)
+{
+	pci_unmap_sg(pci, pt->slist, pt->nents, PCI_DMA_FROMDEVICE);
+	saa7146_pgtable_free(pci, pt);
+	kfree(pt->slist);
+	pt->slist = NULL;
+	vfree(mem);
 }
 
 void saa7146_pgtable_free(struct pci_dev *pci, struct saa7146_pgtable *pt)
@@ -173,16 +229,12 @@ void saa7146_pgtable_free(struct pci_dev *pci, struct saa7146_pgtable *pt)
 		return;
 	pci_free_consistent(pci, pt->size, pt->cpu, pt->dma);
 	pt->cpu = NULL;
-	if (NULL != pt->slist) {
-		kfree(pt->slist);
-		pt->slist = NULL;
-	}
 }
 
 int saa7146_pgtable_alloc(struct pci_dev *pci, struct saa7146_pgtable *pt)
 {
-        u32          *cpu;
-        dma_addr_t   dma_addr;
+	u32          *cpu;
+	dma_addr_t   dma_addr;
 
 	cpu = pci_alloc_consistent(pci, PAGE_SIZE, &dma_addr);
 	if (NULL == cpu) {
@@ -198,13 +250,13 @@ int saa7146_pgtable_alloc(struct pci_dev *pci, struct saa7146_pgtable *pt)
 int saa7146_pgtable_build_single(struct pci_dev *pci, struct saa7146_pgtable *pt,
 	struct scatterlist *list, int sglen  )
 {
-	u32   *ptr, fill;
+	u32 *ptr, fill;
 	int nr_pages = 0;
-	int   i,p;
+	int i,p;
 
-	BUG_ON( 0 == sglen);
+	BUG_ON(0 == sglen);
 	BUG_ON(list->offset > PAGE_SIZE);
-	
+
 	/* if we have a user buffer, the first page may not be
 	   aligned to a page boundary. */
 	pt->offset = list->offset;
@@ -238,35 +290,21 @@ int saa7146_pgtable_build_single(struct pci_dev *pci, struct saa7146_pgtable *pt
 }
 
 /********************************************************************************/
-/* gpio functions */
-
-void saa7146_setgpio(struct saa7146_dev *dev, int port, u32 data)
-{
-	u32 val = 0;
-
-        val=saa7146_read(dev,GPIO_CTRL);
-        val&=~(0xff << (8*(port)));
-        val|=(data)<<(8*(port));
-        saa7146_write(dev, GPIO_CTRL, val);
-}
-
-/********************************************************************************/
 /* interrupt handler */
-static irqreturn_t interrupt_hw(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t interrupt_hw(int irq, void *dev_id)
 {
 	struct saa7146_dev *dev = dev_id;
-	u32 isr = 0;
+	u32 isr;
+	u32 ack_isr;
 
 	/* read out the interrupt status register */
-	isr = saa7146_read(dev, ISR);
+	ack_isr = isr = saa7146_read(dev, ISR);
 
 	/* is this our interrupt? */
 	if ( 0 == isr ) {
 		/* nope, some other device */
 		return IRQ_NONE;
 	}
-
-	saa7146_write(dev, ISR, isr);
 
 	if( 0 != (dev->ext)) {
 		if( 0 != (dev->ext->irq_mask & isr )) {
@@ -290,21 +328,16 @@ static irqreturn_t interrupt_hw(int irq, void *dev_id, struct pt_regs *regs)
 		isr &= ~MASK_28;
 	}
 	if (0 != (isr & (MASK_16|MASK_17))) {
-		u32 status = saa7146_read(dev, I2C_STATUS);
-		if( (0x3 == (status & 0x3)) || (0 == (status & 0x1)) ) {
-			SAA7146_IER_DISABLE(dev, MASK_16|MASK_17);
-			/* only wake up if we expect something */
-			if( 0 != dev->i2c_op ) {
-				u32 psr = (saa7146_read(dev, PSR) >> 16) & 0x2;
-				u32 ssr = (saa7146_read(dev, SSR) >> 17) & 0x1f;
-				DEB_I2C(("irq: i2c, status: 0x%08x, psr:0x%02x, ssr:0x%02x).\n",status,psr,ssr));
-				dev->i2c_op = 0;
-				wake_up(&dev->i2c_wq);
-			} else {
-				DEB_I2C(("unexpected irq: i2c, status: 0x%08x, isr %#x\n",status, isr));
-			}
+		SAA7146_IER_DISABLE(dev, MASK_16|MASK_17);
+		/* only wake up if we expect something */
+		if (0 != dev->i2c_op) {
+			dev->i2c_op = 0;
+			wake_up(&dev->i2c_wq);
 		} else {
-			DEB_I2C(("unhandled irq: i2c, status: 0x%08x, isr %#x\n",status, isr));
+			u32 psr = saa7146_read(dev, PSR);
+			u32 ssr = saa7146_read(dev, SSR);
+			printk(KERN_WARNING "%s: unexpected i2c irq: isr %08x psr %08x ssr %08x\n",
+			       dev->name, isr, psr, ssr);
 		}
 		isr &= ~(MASK_16|MASK_17);
 	}
@@ -313,6 +346,7 @@ static irqreturn_t interrupt_hw(int irq, void *dev_id, struct pt_regs *regs)
 		ERR(("disabling interrupt source(s)!\n"));
 		SAA7146_IER_DISABLE(dev,isr);
 	}
+	saa7146_write(dev, ISR, ack_isr);
 	return IRQ_HANDLED;
 }
 
@@ -322,18 +356,16 @@ static irqreturn_t interrupt_hw(int irq, void *dev_id, struct pt_regs *regs)
 static int saa7146_init_one(struct pci_dev *pci, const struct pci_device_id *ent)
 {
 	struct saa7146_pci_extension_data *pci_ext = (struct saa7146_pci_extension_data *)ent->driver_data;
-	struct saa7146_extension* ext = pci_ext->ext;
+	struct saa7146_extension *ext = pci_ext->ext;
 	struct saa7146_dev *dev;
 	int err = -ENOMEM;
-	
-	dev = kmalloc(sizeof(struct saa7146_dev), GFP_KERNEL);
+
+	/* clear out mem for sure */
+	dev = kzalloc(sizeof(struct saa7146_dev), GFP_KERNEL);
 	if (!dev) {
 		ERR(("out of memory.\n"));
 		goto out;
 	}
-
-	/* clear out mem for sure */
-	memset(dev, 0x0, sizeof(struct saa7146_dev));
 
 	DEB_EE(("pci:%p\n",pci));
 
@@ -387,14 +419,14 @@ static int saa7146_init_one(struct pci_dev *pci, const struct pci_device_id *ent
 	saa7146_write(dev, MC2, 0xf8000000);
 
 	/* request an interrupt for the saa7146 */
-	err = request_irq(pci->irq, interrupt_hw, SA_SHIRQ | SA_INTERRUPT,
+	err = request_irq(pci->irq, interrupt_hw, IRQF_SHARED | IRQF_DISABLED,
 			  dev->name, dev);
 	if (err < 0) {
 		ERR(("request_irq() failed.\n"));
 		goto err_unmap;
 	}
 
-		err = -ENOMEM;
+	err = -ENOMEM;
 
 	/* get memory for various stuff */
 	dev->d_rps0.cpu_addr = pci_alloc_consistent(pci, SAA7146_RPS_MEM,
@@ -423,23 +455,23 @@ static int saa7146_init_one(struct pci_dev *pci, const struct pci_device_id *ent
 	INFO(("found saa7146 @ mem %p (revision %d, irq %d) (0x%04x,0x%04x).\n", dev->mem, dev->revision, pci->irq, pci->subsystem_vendor, pci->subsystem_device));
 	dev->ext = ext;
 
-	pci_set_drvdata(pci,dev);
+	pci_set_drvdata(pci, dev);
 
-        init_MUTEX(&dev->lock);
+	mutex_init(&dev->lock);
 	spin_lock_init(&dev->int_slock);
 	spin_lock_init(&dev->slock);
 
-	init_MUTEX(&dev->i2c_lock);
+	mutex_init(&dev->i2c_lock);
 
 	dev->module = THIS_MODULE;
 	init_waitqueue_head(&dev->i2c_wq);
 
 	/* set some sane pci arbitrition values */
-	saa7146_write(dev, PCI_BT_V1, 0x1c00101f); 
+	saa7146_write(dev, PCI_BT_V1, 0x1c00101f);
 
 	/* TODO: use the status code of the callback */
 
-			err = -ENODEV;
+	err = -ENODEV;
 
 	if (ext->probe && ext->probe(dev)) {
 		DEB_D(("ext->probe() failed for %p. skipping device.\n",dev));
@@ -460,7 +492,7 @@ out:
 	return err;
 
 err_unprobe:
-	pci_set_drvdata(pci,NULL);
+	pci_set_drvdata(pci, NULL);
 err_free_i2c:
 	pci_free_consistent(pci, SAA7146_RPS_MEM, dev->d_i2c.cpu_addr,
 			    dev->d_i2c.dma_handle);
@@ -527,19 +559,13 @@ int saa7146_register_extension(struct saa7146_extension* ext)
 {
 	DEB_EE(("ext:%p\n",ext));
 
-	if( 0 == initialized ) {
-		INIT_LIST_HEAD(&saa7146_devices);
-		init_MUTEX(&saa7146_devices_lock);
-		initialized = 1;
-	}
-
 	ext->driver.name = ext->name;
 	ext->driver.id_table = ext->pci_tbl;
 	ext->driver.probe = saa7146_init_one;
 	ext->driver.remove = saa7146_remove_one;
 
 	printk("saa7146: register extension '%s'.\n",ext->name);
-	return pci_module_init(&ext->driver);
+	return pci_register_driver(&ext->driver);
 }
 
 int saa7146_unregister_extension(struct saa7146_extension* ext)
@@ -550,23 +576,6 @@ int saa7146_unregister_extension(struct saa7146_extension* ext)
 	return 0;
 }
 
-static int __init saa7146_init_module(void)
-{
-	if( 0 == initialized ) {
-		INIT_LIST_HEAD(&saa7146_devices);
-		init_MUTEX(&saa7146_devices_lock);
-		initialized = 1;
-	}
-	return 0;
-}
-
-static void __exit saa7146_cleanup_module(void)
-{
-}
-
-module_init(saa7146_init_module);
-module_exit(saa7146_cleanup_module);
-
 EXPORT_SYMBOL_GPL(saa7146_register_extension);
 EXPORT_SYMBOL_GPL(saa7146_unregister_extension);
 
@@ -575,11 +584,11 @@ EXPORT_SYMBOL_GPL(saa7146_pgtable_alloc);
 EXPORT_SYMBOL_GPL(saa7146_pgtable_free);
 EXPORT_SYMBOL_GPL(saa7146_pgtable_build_single);
 EXPORT_SYMBOL_GPL(saa7146_vmalloc_build_pgtable);
+EXPORT_SYMBOL_GPL(saa7146_vfree_destroy_pgtable);
 EXPORT_SYMBOL_GPL(saa7146_wait_for_debi_done);
 
 EXPORT_SYMBOL_GPL(saa7146_setgpio);
 
-EXPORT_SYMBOL_GPL(saa7146_i2c_transfer);
 EXPORT_SYMBOL_GPL(saa7146_i2c_adapter_prepare);
 
 EXPORT_SYMBOL_GPL(saa7146_debug);

@@ -2,6 +2,7 @@
  * include/asm-sh/spinlock.h
  *
  * Copyright (C) 2002, 2003 Paul Mundt
+ * Copyright (C) 2006, 2007 Akio Idehara
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -10,25 +11,22 @@
 #ifndef __ASM_SH_SPINLOCK_H
 #define __ASM_SH_SPINLOCK_H
 
-#include <asm/atomic.h>
+/*
+ * The only locking implemented here uses SH-4A opcodes. For others,
+ * split this out as per atomic-*.h.
+ */
+#ifndef CONFIG_CPU_SH4A
+#error "Need movli.l/movco.l for spinlocks"
+#endif
 
 /*
  * Your basic SMP spinlocks, allowing only a single CPU anywhere
  */
-typedef struct {
-	volatile unsigned long lock;
-#ifdef CONFIG_PREEMPT
-	unsigned int break_lock;
-#endif
-} spinlock_t;
 
-#define SPIN_LOCK_UNLOCKED	(spinlock_t) { 0 }
-
-#define spin_lock_init(x)	do { *(x) = SPIN_LOCK_UNLOCKED; } while(0)
-
-#define spin_is_locked(x)	((x)->lock != 0)
-#define spin_unlock_wait(x)	do { barrier(); } while (spin_is_locked(x))
-#define _raw_spin_lock_flags(lock, flags) _raw_spin_lock(lock)
+#define __raw_spin_is_locked(x)		((x)->lock <= 0)
+#define __raw_spin_lock_flags(lock, flags) __raw_spin_lock(lock)
+#define __raw_spin_unlock_wait(x) \
+	do { cpu_relax(); } while ((x)->lock)
 
 /*
  * Simple spin lock operations.  There are two variants, one clears IRQ's
@@ -36,27 +34,58 @@ typedef struct {
  *
  * We make no fairness assumptions.  They have a cost.
  */
-static inline void _raw_spin_lock(spinlock_t *lock)
+static inline void __raw_spin_lock(raw_spinlock_t *lock)
 {
+	unsigned long tmp;
+	unsigned long oldval;
+
 	__asm__ __volatile__ (
-		"1:\n\t"
-		"tas.b @%0\n\t"
-		"bf/s 1b\n\t"
-		"nop\n\t"
-		: "=r" (lock->lock)
+		"1:						\n\t"
+		"movli.l	@%2, %0	! __raw_spin_lock	\n\t"
+		"mov		%0, %1				\n\t"
+		"mov		#0, %0				\n\t"
+		"movco.l	%0, @%2				\n\t"
+		"bf		1b				\n\t"
+		"cmp/pl		%1				\n\t"
+		"bf		1b				\n\t"
+		: "=&z" (tmp), "=&r" (oldval)
 		: "r" (&lock->lock)
 		: "t", "memory"
 	);
 }
 
-static inline void _raw_spin_unlock(spinlock_t *lock)
+static inline void __raw_spin_unlock(raw_spinlock_t *lock)
 {
-	assert_spin_locked(lock);
+	unsigned long tmp;
 
-	lock->lock = 0;
+	__asm__ __volatile__ (
+		"mov		#1, %0 ! __raw_spin_unlock	\n\t"
+		"mov.l		%0, @%1				\n\t"
+		: "=&z" (tmp)
+		: "r" (&lock->lock)
+		: "t", "memory"
+	);
 }
 
-#define _raw_spin_trylock(x) (!test_and_set_bit(0, &(x)->lock))
+static inline int __raw_spin_trylock(raw_spinlock_t *lock)
+{
+	unsigned long tmp, oldval;
+
+	__asm__ __volatile__ (
+		"1:						\n\t"
+		"movli.l	@%2, %0	! __raw_spin_trylock	\n\t"
+		"mov		%0, %1				\n\t"
+		"mov		#0, %0				\n\t"
+		"movco.l	%0, @%2				\n\t"
+		"bf		1b				\n\t"
+		"synco						\n\t"
+		: "=&z" (tmp), "=&r" (oldval)
+		: "r" (&lock->lock)
+		: "t", "memory"
+	);
+
+	return oldval;
+}
 
 /*
  * Read-write spinlocks, allowing multiple readers but only one writer.
@@ -66,59 +95,129 @@ static inline void _raw_spin_unlock(spinlock_t *lock)
  * needs to get a irq-safe write-lock, but readers can get non-irqsafe
  * read-locks.
  */
-typedef struct {
-	spinlock_t lock;
-	atomic_t counter;
-#ifdef CONFIG_PREEMPT
-	unsigned int break_lock;
-#endif
-} rwlock_t;
 
-#define RW_LOCK_BIAS		0x01000000
-#define RW_LOCK_UNLOCKED	(rwlock_t) { { 0 }, { RW_LOCK_BIAS } }
-#define rwlock_init(x)		do { *(x) = RW_LOCK_UNLOCKED; } while (0)
+/**
+ * read_can_lock - would read_trylock() succeed?
+ * @lock: the rwlock in question.
+ */
+#define __raw_read_can_lock(x)	((x)->lock > 0)
 
-static inline void _raw_read_lock(rwlock_t *rw)
+/**
+ * write_can_lock - would write_trylock() succeed?
+ * @lock: the rwlock in question.
+ */
+#define __raw_write_can_lock(x)	((x)->lock == RW_LOCK_BIAS)
+
+static inline void __raw_read_lock(raw_rwlock_t *rw)
 {
-	_raw_spin_lock(&rw->lock);
+	unsigned long tmp;
 
-	atomic_inc(&rw->counter);
-
-	_raw_spin_unlock(&rw->lock);
+	__asm__ __volatile__ (
+		"1:						\n\t"
+		"movli.l	@%1, %0	! __raw_read_lock	\n\t"
+		"cmp/pl		%0				\n\t"
+		"bf		1b				\n\t"
+		"add		#-1, %0				\n\t"
+		"movco.l	%0, @%1				\n\t"
+		"bf		1b				\n\t"
+		: "=&z" (tmp)
+		: "r" (&rw->lock)
+		: "t", "memory"
+	);
 }
 
-static inline void _raw_read_unlock(rwlock_t *rw)
+static inline void __raw_read_unlock(raw_rwlock_t *rw)
 {
-	_raw_spin_lock(&rw->lock);
+	unsigned long tmp;
 
-	atomic_dec(&rw->counter);
-
-	_raw_spin_unlock(&rw->lock);
+	__asm__ __volatile__ (
+		"1:						\n\t"
+		"movli.l	@%1, %0	! __raw_read_unlock	\n\t"
+		"add		#1, %0				\n\t"
+		"movco.l	%0, @%1				\n\t"
+		"bf		1b				\n\t"
+		: "=&z" (tmp)
+		: "r" (&rw->lock)
+		: "t", "memory"
+	);
 }
 
-static inline void _raw_write_lock(rwlock_t *rw)
+static inline void __raw_write_lock(raw_rwlock_t *rw)
 {
-	_raw_spin_lock(&rw->lock);
-	atomic_set(&rw->counter, -1);
+	unsigned long tmp;
+
+	__asm__ __volatile__ (
+		"1:						\n\t"
+		"movli.l	@%1, %0	! __raw_write_lock	\n\t"
+		"cmp/hs		%2, %0				\n\t"
+		"bf		1b				\n\t"
+		"sub		%2, %0				\n\t"
+		"movco.l	%0, @%1				\n\t"
+		"bf		1b				\n\t"
+		: "=&z" (tmp)
+		: "r" (&rw->lock), "r" (RW_LOCK_BIAS)
+		: "t", "memory"
+	);
 }
 
-static inline void _raw_write_unlock(rwlock_t *rw)
+static inline void __raw_write_unlock(raw_rwlock_t *rw)
 {
-	atomic_set(&rw->counter, 0);
-	_raw_spin_unlock(&rw->lock);
+	__asm__ __volatile__ (
+		"mov.l		%1, @%0 ! __raw_write_unlock	\n\t"
+		:
+		: "r" (&rw->lock), "r" (RW_LOCK_BIAS)
+		: "t", "memory"
+	);
 }
 
-#define _raw_read_trylock(lock) generic_raw_read_trylock(lock)
-
-static inline int _raw_write_trylock(rwlock_t *rw)
+static inline int __raw_read_trylock(raw_rwlock_t *rw)
 {
-	if (atomic_sub_and_test(RW_LOCK_BIAS, &rw->counter))
-		return 1;
-	
-	atomic_add(RW_LOCK_BIAS, &rw->counter);
+	unsigned long tmp, oldval;
 
-	return 0;
+	__asm__ __volatile__ (
+		"1:						\n\t"
+		"movli.l	@%2, %0	! __raw_read_trylock	\n\t"
+		"mov		%0, %1				\n\t"
+		"cmp/pl		%0				\n\t"
+		"bf		2f				\n\t"
+		"add		#-1, %0				\n\t"
+		"movco.l	%0, @%2				\n\t"
+		"bf		1b				\n\t"
+		"2:						\n\t"
+		"synco						\n\t"
+		: "=&z" (tmp), "=&r" (oldval)
+		: "r" (&rw->lock)
+		: "t", "memory"
+	);
+
+	return (oldval > 0);
 }
+
+static inline int __raw_write_trylock(raw_rwlock_t *rw)
+{
+	unsigned long tmp, oldval;
+
+	__asm__ __volatile__ (
+		"1:						\n\t"
+		"movli.l	@%2, %0	! __raw_write_trylock	\n\t"
+		"mov		%0, %1				\n\t"
+		"cmp/hs		%3, %0				\n\t"
+		"bf		2f				\n\t"
+		"sub		%3, %0				\n\t"
+		"2:						\n\t"
+		"movco.l	%0, @%2				\n\t"
+		"bf		1b				\n\t"
+		"synco						\n\t"
+		: "=&z" (tmp), "=&r" (oldval)
+		: "r" (&rw->lock), "r" (RW_LOCK_BIAS)
+		: "t", "memory"
+	);
+
+	return (oldval > (RW_LOCK_BIAS - 1));
+}
+
+#define _raw_spin_relax(lock)	cpu_relax()
+#define _raw_read_relax(lock)	cpu_relax()
+#define _raw_write_relax(lock)	cpu_relax()
 
 #endif /* __ASM_SH_SPINLOCK_H */
-

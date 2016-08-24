@@ -1,6 +1,6 @@
 /*
  *  The driver for the Yamaha's DS1/DS1E cards
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -30,8 +30,8 @@
 #include <sound/opl3.h>
 #include <sound/initval.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
-MODULE_DESCRIPTION("Yamaha DS-XG PCI");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
+MODULE_DESCRIPTION("Yamaha DS-1 PCI");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{Yamaha,YMF724},"
 		"{Yamaha,YMF724F},"
@@ -51,11 +51,11 @@ static long joystick_port[SNDRV_CARDS];
 static int rear_switch[SNDRV_CARDS];
 
 module_param_array(index, int, NULL, 0444);
-MODULE_PARM_DESC(index, "Index value for the Yamaha DS-XG PCI soundcard.");
+MODULE_PARM_DESC(index, "Index value for the Yamaha DS-1 PCI soundcard.");
 module_param_array(id, charp, NULL, 0444);
-MODULE_PARM_DESC(id, "ID string for the Yamaha DS-XG PCI soundcard.");
+MODULE_PARM_DESC(id, "ID string for the Yamaha DS-1 PCI soundcard.");
 module_param_array(enable, bool, NULL, 0444);
-MODULE_PARM_DESC(enable, "Enable Yamaha DS-XG soundcard.");
+MODULE_PARM_DESC(enable, "Enable Yamaha DS-1 soundcard.");
 module_param_array(mpu_port, long, NULL, 0444);
 MODULE_PARM_DESC(mpu_port, "MPU-401 Port.");
 module_param_array(fm_port, long, NULL, 0444);
@@ -79,19 +79,105 @@ static struct pci_device_id snd_ymfpci_ids[] = {
 
 MODULE_DEVICE_TABLE(pci, snd_ymfpci_ids);
 
+#ifdef SUPPORT_JOYSTICK
+static int __devinit snd_ymfpci_create_gameport(struct snd_ymfpci *chip, int dev,
+						int legacy_ctrl, int legacy_ctrl2)
+{
+	struct gameport *gp;
+	struct resource *r = NULL;
+	int io_port = joystick_port[dev];
+
+	if (!io_port)
+		return -ENODEV;
+
+	if (chip->pci->device >= 0x0010) { /* YMF 744/754 */
+
+		if (io_port == 1) {
+			/* auto-detect */
+			if (!(io_port = pci_resource_start(chip->pci, 2)))
+				return -ENODEV;
+		}
+	} else {
+		if (io_port == 1) {
+			/* auto-detect */
+			for (io_port = 0x201; io_port <= 0x205; io_port++) {
+				if (io_port == 0x203)
+					continue;
+				if ((r = request_region(io_port, 1, "YMFPCI gameport")) != NULL)
+					break;
+			}
+			if (!r) {
+				printk(KERN_ERR "ymfpci: no gameport ports available\n");
+				return -EBUSY;
+			}
+		}
+		switch (io_port) {
+		case 0x201: legacy_ctrl2 |= 0 << 6; break;
+		case 0x202: legacy_ctrl2 |= 1 << 6; break;
+		case 0x204: legacy_ctrl2 |= 2 << 6; break;
+		case 0x205: legacy_ctrl2 |= 3 << 6; break;
+		default:
+			printk(KERN_ERR "ymfpci: invalid joystick port %#x", io_port);
+			return -EINVAL;
+		}
+	}
+
+	if (!r && !(r = request_region(io_port, 1, "YMFPCI gameport"))) {
+		printk(KERN_ERR "ymfpci: joystick port %#x is in use.\n", io_port);
+		return -EBUSY;
+	}
+
+	chip->gameport = gp = gameport_allocate_port();
+	if (!gp) {
+		printk(KERN_ERR "ymfpci: cannot allocate memory for gameport\n");
+		release_and_free_resource(r);
+		return -ENOMEM;
+	}
+
+
+	gameport_set_name(gp, "Yamaha YMF Gameport");
+	gameport_set_phys(gp, "pci%s/gameport0", pci_name(chip->pci));
+	gameport_set_dev_parent(gp, &chip->pci->dev);
+	gp->io = io_port;
+	gameport_set_port_data(gp, r);
+
+	if (chip->pci->device >= 0x0010) /* YMF 744/754 */
+		pci_write_config_word(chip->pci, PCIR_DSXG_JOYBASE, io_port);
+
+	pci_write_config_word(chip->pci, PCIR_DSXG_LEGACY, legacy_ctrl | YMFPCI_LEGACY_JPEN);
+	pci_write_config_word(chip->pci, PCIR_DSXG_ELEGACY, legacy_ctrl2);
+
+	gameport_register_port(chip->gameport);
+
+	return 0;
+}
+
+void snd_ymfpci_free_gameport(struct snd_ymfpci *chip)
+{
+	if (chip->gameport) {
+		struct resource *r = gameport_get_port_data(chip->gameport);
+
+		gameport_unregister_port(chip->gameport);
+		chip->gameport = NULL;
+
+		release_and_free_resource(r);
+	}
+}
+#else
+static inline int snd_ymfpci_create_gameport(struct snd_ymfpci *chip, int dev, int l, int l2) { return -ENOSYS; }
+void snd_ymfpci_free_gameport(struct snd_ymfpci *chip) { }
+#endif /* SUPPORT_JOYSTICK */
+
 static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 					   const struct pci_device_id *pci_id)
 {
 	static int dev;
-	snd_card_t *card;
+	struct snd_card *card;
 	struct resource *fm_res = NULL;
 	struct resource *mpu_res = NULL;
-#ifdef SUPPORT_JOYSTICK
-	struct resource *joystick_res = NULL;
-#endif
-	ymfpci_t *chip;
-	opl3_t *opl3;
-	char *str;
+	struct snd_ymfpci *chip;
+	struct snd_opl3 *opl3;
+	const char *str, *model;
 	int err;
 	u16 legacy_ctrl, legacy_ctrl2, old_legacy_ctrl;
 
@@ -107,13 +193,13 @@ static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 		return -ENOMEM;
 
 	switch (pci_id->device) {
-	case 0x0004: str = "YMF724"; break;
-	case 0x000d: str = "YMF724F"; break;
-	case 0x000a: str = "YMF740"; break;
-	case 0x000c: str = "YMF740C"; break;
-	case 0x0010: str = "YMF744"; break;
-	case 0x0012: str = "YMF754"; break;
-	default: str = "???"; break;
+	case 0x0004: str = "YMF724";  model = "DS-1"; break;
+	case 0x000d: str = "YMF724F"; model = "DS-1"; break;
+	case 0x000a: str = "YMF740";  model = "DS-1L"; break;
+	case 0x000c: str = "YMF740C"; model = "DS-1L"; break;
+	case 0x0010: str = "YMF744";  model = "DS-1S"; break;
+	case 0x0012: str = "YMF754";  model = "DS-1E"; break;
+	default: model = str = "???"; break;
 	}
 
 	legacy_ctrl = 0;
@@ -138,17 +224,6 @@ static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 			legacy_ctrl |= YMFPCI_LEGACY_MEN;
 			pci_write_config_word(pci, PCIR_DSXG_MPU401BASE, mpu_port[dev]);
 		}
-#ifdef SUPPORT_JOYSTICK
-		if (joystick_port[dev] == 1) {
-			/* auto-detect */
-			joystick_port[dev] = pci_resource_start(pci, 2);
-		}
-		if (joystick_port[dev] > 0 &&
-		    (joystick_res = request_region(joystick_port[dev], 1, "YMFPCI gameport")) != NULL) {
-			legacy_ctrl |= YMFPCI_LEGACY_JPEN;
-			pci_write_config_word(pci, PCIR_DSXG_JOYBASE, joystick_port[dev]);
-		}
-#endif
 	} else {
 		switch (fm_port[dev]) {
 		case 0x388: legacy_ctrl2 |= 0; break;
@@ -178,34 +253,6 @@ static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 			legacy_ctrl2 &= ~YMFPCI_LEGACY2_MPUIO;
 			mpu_port[dev] = 0;
 		}
-#ifdef SUPPORT_JOYSTICK
-		if (joystick_port[dev] == 1) {
-			/* auto-detect */
-			long p;
-			for (p = 0x201; p <= 0x205; p++) {
-				if (p == 0x203) continue;
-				if ((joystick_res = request_region(p, 1, "YMFPCI gameport")) != NULL)
-					break;
-			}
-			if (joystick_res)
-				joystick_port[dev] = p;
-		}
-		switch (joystick_port[dev]) {
-		case 0x201: legacy_ctrl2 |= 0 << 6; break;
-		case 0x202: legacy_ctrl2 |= 1 << 6; break;
-		case 0x204: legacy_ctrl2 |= 2 << 6; break;
-		case 0x205: legacy_ctrl2 |= 3 << 6; break;
-		default: joystick_port[dev] = 0; break;
-		}
-		if (! joystick_res && joystick_port[dev] > 0)
-			joystick_res = request_region(joystick_port[dev], 1, "YMFPCI gameport");
-		if (joystick_res) {
-			legacy_ctrl |= YMFPCI_LEGACY_JPEN;
-		} else {
-			legacy_ctrl2 &= ~YMFPCI_LEGACY2_JSIO;
-			joystick_port[dev] = 0;
-		}
-#endif
 	}
 	if (mpu_res) {
 		legacy_ctrl |= YMFPCI_LEGACY_MIEN;
@@ -218,29 +265,16 @@ static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 				     old_legacy_ctrl,
 			 	     &chip)) < 0) {
 		snd_card_free(card);
-		if (mpu_res) {
-			release_resource(mpu_res);
-			kfree_nocheck(mpu_res);
-		}
-		if (fm_res) {
-			release_resource(fm_res);
-			kfree_nocheck(fm_res);
-		}
-#ifdef SUPPORT_JOYSTICK
-		if (joystick_res) {
-			release_resource(joystick_res);
-			kfree_nocheck(joystick_res);
-		}
-#endif
+		release_and_free_resource(mpu_res);
+		release_and_free_resource(fm_res);
 		return err;
 	}
 	chip->fm_res = fm_res;
 	chip->mpu_res = mpu_res;
-#ifdef SUPPORT_JOYSTICK
-	chip->joystick_res = joystick_res;
-#endif
+	card->private_data = chip;
+
 	strcpy(card->driver, str);
-	sprintf(card->shortname, "Yamaha DS-XG (%s)", str);
+	sprintf(card->shortname, "Yamaha %s (%s)", model, str);
 	sprintf(card->longname, "%s at 0x%lx, irq %i",
 		card->shortname,
 		chip->reg_area_phys,
@@ -271,7 +305,8 @@ static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 	}
 	if (chip->mpu_res) {
 		if ((err = snd_mpu401_uart_new(card, 0, MPU401_HW_YMFPCI,
-					       mpu_port[dev], 1,
+					       mpu_port[dev],
+					       MPU401_INFO_INTEGRATED,
 					       pci->irq, 0, &chip->rawmidi)) < 0) {
 			printk(KERN_WARNING "ymfpci: cannot initialize MPU401 at 0x%lx, skipping...\n", mpu_port[dev]);
 			legacy_ctrl &= ~YMFPCI_LEGACY_MIEN; /* disable MPU401 irq */
@@ -288,16 +323,12 @@ static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 			pci_write_config_word(pci, PCIR_DSXG_LEGACY, legacy_ctrl);
 		} else if ((err = snd_opl3_hwdep_new(opl3, 0, 1, NULL)) < 0) {
 			snd_card_free(card);
-			snd_printk("cannot create opl3 hwdep\n");
+			snd_printk(KERN_ERR "cannot create opl3 hwdep\n");
 			return err;
 		}
 	}
-#ifdef SUPPORT_JOYSTICK
-	if (chip->joystick_res) {
-		chip->gameport.io = joystick_port[dev];
-		gameport_register_port(&chip->gameport);
-	}
-#endif
+
+	snd_ymfpci_create_gameport(chip, dev, legacy_ctrl, legacy_ctrl2);
 
 	if ((err = snd_card_register(card)) < 0) {
 		snd_card_free(card);
@@ -315,16 +346,19 @@ static void __devexit snd_card_ymfpci_remove(struct pci_dev *pci)
 }
 
 static struct pci_driver driver = {
-	.name = "Yamaha DS-XG PCI",
+	.name = "Yamaha DS-1 PCI",
 	.id_table = snd_ymfpci_ids,
 	.probe = snd_card_ymfpci_probe,
 	.remove = __devexit_p(snd_card_ymfpci_remove),
-	SND_PCI_PM_CALLBACKS
+#ifdef CONFIG_PM
+	.suspend = snd_ymfpci_suspend,
+	.resume = snd_ymfpci_resume,
+#endif
 };
 
 static int __init alsa_card_ymfpci_init(void)
 {
-	return pci_module_init(&driver);
+	return pci_register_driver(&driver);
 }
 
 static void __exit alsa_card_ymfpci_exit(void)

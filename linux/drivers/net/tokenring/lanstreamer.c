@@ -100,7 +100,6 @@
 
 #define STREAMER_IOCTL 0
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -118,10 +117,13 @@
 #include <linux/stddef.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <linux/spinlock.h>
 #include <linux/version.h>
 #include <linux/bitops.h>
+#include <linux/jiffies.h>
 
+#include <net/net_namespace.h>
 #include <net/checksum.h>
 
 #include <asm/io.h>
@@ -205,8 +207,7 @@ static int streamer_open(struct net_device *dev);
 static int streamer_xmit(struct sk_buff *skb, struct net_device *dev);
 static int streamer_close(struct net_device *dev);
 static void streamer_set_rx_mode(struct net_device *dev);
-static irqreturn_t streamer_interrupt(int irq, void *dev_id,
-			       struct pt_regs *regs);
+static irqreturn_t streamer_interrupt(int irq, void *dev_id);
 static struct net_device_stats *streamer_get_stats(struct net_device *dev);
 static int streamer_set_mac_address(struct net_device *dev, void *addr);
 static void streamer_arb_cmd(struct net_device *dev);
@@ -244,20 +245,19 @@ static int __devinit streamer_init_one(struct pci_dev *pdev,
 		return -ENOMEM;
 	}
 
-	SET_MODULE_OWNER(dev);
-	streamer_priv = dev->priv;
+	streamer_priv = netdev_priv(dev);
 
 #if STREAMER_NETWORK_MONITOR
 #ifdef CONFIG_PROC_FS
 	if (!dev_streamer)
-		create_proc_read_entry("net/streamer_tr", 0, 0,
+		create_proc_read_entry("streamer_tr", 0, init_net.proc_net,
 					streamer_proc_info, NULL); 
 	streamer_priv->next = dev_streamer;
 	dev_streamer = streamer_priv;
 #endif
 #endif
 
-	rc = pci_set_dma_mask(pdev, 0xFFFFFFFFULL);
+	rc = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
 	if (rc) {
 		printk(KERN_ERR "%s: No suitable PCI mapping available.\n",
 				dev->name);
@@ -404,7 +404,7 @@ static void __devexit streamer_remove_one(struct pci_dev *pdev)
 		return;
 	}
 
-	streamer_priv=dev->priv;
+	streamer_priv=netdev_priv(dev);
 	if (streamer_priv == NULL) {
 		printk(KERN_ERR "lanstreamer::streamer_remove_one, ERROR dev->priv is NULL\n");
 		return;
@@ -423,7 +423,7 @@ static void __devexit streamer_remove_one(struct pci_dev *pdev)
 			}
 		}
 		if (!dev_streamer)
-			remove_proc_entry("net/streamer_tr", NULL);
+			remove_proc_entry("streamer_tr", init_net.proc_net);
 	}
 #endif
 #endif
@@ -447,15 +447,17 @@ static int streamer_reset(struct net_device *dev)
 	unsigned int uaa_addr;
 	struct sk_buff *skb = NULL;
 	__u16 misr;
+#if STREAMER_DEBUG
+	DECLARE_MAC_BUF(mac);
+#endif
 
-	streamer_priv = (struct streamer_private *) dev->priv;
+	streamer_priv = netdev_priv(dev);
 	streamer_mmio = streamer_priv->streamer_mmio;
 
 	writew(readw(streamer_mmio + BCTL) | BCTL_SOFTRESET, streamer_mmio + BCTL);
 	t = jiffies;
 	/* Hold soft reset bit for a while */
-	current->state = TASK_UNINTERRUPTIBLE;
-	schedule_timeout(HZ);
+	ssleep(1);
 	
 	writew(readw(streamer_mmio + BCTL) & ~BCTL_SOFTRESET,
 	       streamer_mmio + BCTL);
@@ -511,9 +513,8 @@ static int streamer_reset(struct net_device *dev)
 	writew(SISR_MI, streamer_mmio + SISR_MASK_SUM);
 
 	while (!((readw(streamer_mmio + SISR)) & SISR_SRB_REPLY)) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(HZ/10);
-		if (jiffies - t > 40 * HZ) {
+		msleep_interruptible(100);
+		if (time_after(jiffies, t + 40 * HZ)) {
 			printk(KERN_ERR
 			       "IBM PCI tokenring card not responding\n");
 			release_region(dev->base_addr, STREAMER_IO_SPACE);
@@ -577,11 +578,8 @@ static int streamer_reset(struct net_device *dev)
 			dev->dev_addr[i+1]= addr & 0xff;
 		}
 #if STREAMER_DEBUG
-		printk("Adapter address: ");
-		for (i = 0; i < 6; i++) {
-			printk("%02x:", dev->dev_addr[i]);
-		}
-		printk("\n");
+		printk("Adapter address: %s\n",
+		       print_mac(mac, dev->dev_addr));
 #endif
 	}
 	return 0;
@@ -589,7 +587,7 @@ static int streamer_reset(struct net_device *dev)
 
 static int streamer_open(struct net_device *dev)
 {
-	struct streamer_private *streamer_priv = (struct streamer_private *) dev->priv;
+	struct streamer_private *streamer_priv = netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	unsigned long flags;
 	char open_error[255];
@@ -602,7 +600,7 @@ static int streamer_open(struct net_device *dev)
 	        rc=streamer_reset(dev);
 	}
 
-	if (request_irq(dev->irq, &streamer_interrupt, SA_SHIRQ, "lanstreamer", dev)) {
+	if (request_irq(dev->irq, &streamer_interrupt, IRQF_SHARED, "lanstreamer", dev)) {
 		return -EAGAIN;
 	}
 #if STREAMER_DEBUG
@@ -906,7 +904,7 @@ static int streamer_open(struct net_device *dev)
 static void streamer_rx(struct net_device *dev)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	struct streamer_rx_desc *rx_desc;
 	int rx_ring_last_received, length, frame_length, buffer_cnt = 0;
@@ -946,8 +944,6 @@ static void streamer_rx(struct net_device *dev)
 				printk(KERN_WARNING "%s: Not enough memory to copy packet to upper layers. \n",	dev->name);
 				streamer_priv->streamer_stats.rx_dropped++;
 			} else {	/* we allocated an skb OK */
-				skb->dev = dev;
-
 				if (buffer_cnt == 1) {
 					/* release the DMA mapping */
 					pci_unmap_single(streamer_priv->pci_dev, 
@@ -1029,11 +1025,11 @@ static void streamer_rx(struct net_device *dev)
 	}			/* end for all completed rx descriptors */
 }
 
-static irqreturn_t streamer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t streamer_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	__u16 sisr;
 	__u16 misr;
@@ -1156,7 +1152,7 @@ static irqreturn_t streamer_interrupt(int irq, void *dev_id, struct pt_regs *reg
 static int streamer_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	unsigned long flags ;
 
@@ -1207,7 +1203,7 @@ static int streamer_xmit(struct sk_buff *skb, struct net_device *dev)
 static int streamer_close(struct net_device *dev)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	unsigned long flags;
 	int i;
@@ -1273,7 +1269,7 @@ static int streamer_close(struct net_device *dev)
 static void streamer_set_rx_mode(struct net_device *dev)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	__u8 options = 0;
 	struct dev_mc_list *dmi;
@@ -1332,7 +1328,7 @@ static void streamer_set_rx_mode(struct net_device *dev)
 
 static void streamer_srb_bh(struct net_device *dev)
 {
-	struct streamer_private *streamer_priv = (struct streamer_private *) dev->priv;
+	struct streamer_private *streamer_priv = netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	__u16 srb_word;
 
@@ -1497,14 +1493,14 @@ static void streamer_srb_bh(struct net_device *dev)
 static struct net_device_stats *streamer_get_stats(struct net_device *dev)
 {
 	struct streamer_private *streamer_priv;
-	streamer_priv = (struct streamer_private *) dev->priv;
+	streamer_priv = netdev_priv(dev);
 	return (struct net_device_stats *) &streamer_priv->streamer_stats;
 }
 
 static int streamer_set_mac_address(struct net_device *dev, void *addr)
 {
 	struct sockaddr *saddr = addr;
-	struct streamer_private *streamer_priv = (struct streamer_private *) dev->priv;
+	struct streamer_private *streamer_priv = netdev_priv(dev);
 
 	if (netif_running(dev)) 
 	{
@@ -1529,7 +1525,7 @@ static int streamer_set_mac_address(struct net_device *dev, void *addr)
 static void streamer_arb_cmd(struct net_device *dev)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	__u8 header_len;
 	__u16 frame_len, buffer_len;
@@ -1543,6 +1539,7 @@ static void streamer_arb_cmd(struct net_device *dev)
 
 #if STREAMER_NETWORK_MONITOR
 	struct trh_hdr *mac_hdr;
+	DECLARE_MAC_BUF(mac);
 #endif
 
 	writew(streamer_priv->arb, streamer_mmio + LAPA);
@@ -1609,23 +1606,18 @@ static void streamer_arb_cmd(struct net_device *dev)
 				      frame_data, buffer_len);
 		} while (next_ptr && (buff_off = next_ptr));
 
+		mac_frame->protocol = tr_type_trans(mac_frame, dev);
 #if STREAMER_NETWORK_MONITOR
 		printk(KERN_WARNING "%s: Received MAC Frame, details: \n",
 		       dev->name);
-		mac_hdr = (struct trh_hdr *) mac_frame->data;
+		mac_hdr = tr_hdr(mac_frame);
 		printk(KERN_WARNING
-		       "%s: MAC Frame Dest. Addr: %02x:%02x:%02x:%02x:%02x:%02x \n",
-		       dev->name, mac_hdr->daddr[0], mac_hdr->daddr[1],
-		       mac_hdr->daddr[2], mac_hdr->daddr[3],
-		       mac_hdr->daddr[4], mac_hdr->daddr[5]);
+		       "%s: MAC Frame Dest. Addr: %s\n",
+		       dev->name, print_mac(mac, mac_hdr->daddr));
 		printk(KERN_WARNING
-		       "%s: MAC Frame Srce. Addr: %02x:%02x:%02x:%02x:%02x:%02x \n",
-		       dev->name, mac_hdr->saddr[0], mac_hdr->saddr[1],
-		       mac_hdr->saddr[2], mac_hdr->saddr[3],
-		       mac_hdr->saddr[4], mac_hdr->saddr[5]);
+		       "%s: MAC Frame Srce. Addr: %s\n",
+		       dev->name, DEV->ADDR6(mac_hdr->saddr));
 #endif
-		mac_frame->dev = dev;
-		mac_frame->protocol = tr_type_trans(mac_frame, dev);
 		netif_rx(mac_frame);
 
 		/* Now tell the card we have dealt with the received frame */
@@ -1745,7 +1737,7 @@ drop_frame:
 static void streamer_asb_bh(struct net_device *dev)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 
 	if (streamer_priv->asb_queued == 1) 
@@ -1789,7 +1781,7 @@ static void streamer_asb_bh(struct net_device *dev)
 static int streamer_change_mtu(struct net_device *dev, int mtu)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u16 max_mtu;
 
 	if (streamer_priv->streamer_ring_speed == 4)
@@ -1853,12 +1845,14 @@ static int streamer_proc_info(char *buffer, char **start, off_t offset,
 static int sprintf_info(char *buffer, struct net_device *dev)
 {
 	struct streamer_private *streamer_priv =
-	    (struct streamer_private *) dev->priv;
+	    netdev_priv(dev);
 	__u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
 	struct streamer_adapter_addr_table sat;
 	struct streamer_parameters_table spt;
 	int size = 0;
 	int i;
+	DECLARE_MAC_BUF(mac);
+	DECLARE_MAC_BUF(mac2);
 
 	writew(streamer_priv->streamer_addr_table_addr, streamer_mmio + LAPA);
 	for (i = 0; i < 14; i += 2) {
@@ -1877,41 +1871,33 @@ static int sprintf_info(char *buffer, struct net_device *dev)
 		datap[size+1]=io_word & 0xff;
 	}
 
-
 	size = sprintf(buffer, "\n%6s: Adapter Address   : Node Address      : Functional Addr\n", dev->name);
 
 	size += sprintf(buffer + size,
-		    "%6s: %02x:%02x:%02x:%02x:%02x:%02x : %02x:%02x:%02x:%02x:%02x:%02x : %02x:%02x:%02x:%02x\n",
-		    dev->name, dev->dev_addr[0], dev->dev_addr[1],
-		    dev->dev_addr[2], dev->dev_addr[3], dev->dev_addr[4],
-		    dev->dev_addr[5], sat.node_addr[0], sat.node_addr[1],
-		    sat.node_addr[2], sat.node_addr[3], sat.node_addr[4],
-		    sat.node_addr[5], sat.func_addr[0], sat.func_addr[1],
-		    sat.func_addr[2], sat.func_addr[3]);
+			"%6s: %s : %s : %02x:%02x:%02x:%02x\n",
+			dev->name, print_mac(mac, dev->dev_addr),
+			print_mac(mac2, sat.node_addr),
+			sat.func_addr[0], sat.func_addr[1],
+			sat.func_addr[2], sat.func_addr[3]);
 
 	size += sprintf(buffer + size, "\n%6s: Token Ring Parameters Table:\n", dev->name);
 
 	size += sprintf(buffer + size, "%6s: Physical Addr : Up Node Address   : Poll Address      : AccPri : Auth Src : Att Code :\n", dev->name);
 
 	size += sprintf(buffer + size,
-		    "%6s: %02x:%02x:%02x:%02x   : %02x:%02x:%02x:%02x:%02x:%02x : %02x:%02x:%02x:%02x:%02x:%02x : %04x   : %04x     :  %04x    :\n",
+		    "%6s: %02x:%02x:%02x:%02x   : %s : %s : %04x   : %04x     :  %04x    :\n",
 		    dev->name, spt.phys_addr[0], spt.phys_addr[1],
 		    spt.phys_addr[2], spt.phys_addr[3],
-		    spt.up_node_addr[0], spt.up_node_addr[1],
-		    spt.up_node_addr[2], spt.up_node_addr[3],
-		    spt.up_node_addr[4], spt.up_node_addr[4],
-		    spt.poll_addr[0], spt.poll_addr[1], spt.poll_addr[2],
-		    spt.poll_addr[3], spt.poll_addr[4], spt.poll_addr[5],
+		    print_mac(mac, spt.up_node_addr),
+		    print_mac(mac2, spt.poll_addr),
 		    ntohs(spt.acc_priority), ntohs(spt.auth_source_class),
 		    ntohs(spt.att_code));
 
 	size += sprintf(buffer + size, "%6s: Source Address    : Bcn T : Maj. V : Lan St : Lcl Rg : Mon Err : Frame Correl : \n", dev->name);
 
 	size += sprintf(buffer + size,
-		    "%6s: %02x:%02x:%02x:%02x:%02x:%02x : %04x  : %04x   : %04x   : %04x   : %04x    :     %04x     : \n",
-		    dev->name, spt.source_addr[0], spt.source_addr[1],
-		    spt.source_addr[2], spt.source_addr[3],
-		    spt.source_addr[4], spt.source_addr[5],
+		    "%6s: %s : %04x  : %04x   : %04x   : %04x   : %04x    :     %04x     : \n",
+		    dev->name, print_mac(mac, spt.source_addr),
 		    ntohs(spt.beacon_type), ntohs(spt.major_vector),
 		    ntohs(spt.lan_status), ntohs(spt.local_ring),
 		    ntohs(spt.mon_error), ntohs(spt.frame_correl));
@@ -1920,75 +1906,15 @@ static int sprintf_info(char *buffer, struct net_device *dev)
 		    dev->name);
 
 	size += sprintf(buffer + size,
-		    "%6s:                :  %02x  :  %02x  : %02x:%02x:%02x:%02x:%02x:%02x : %02x:%02x:%02x:%02x    : \n",
+		    "%6s:                :  %02x  :  %02x  : %s : %02x:%02x:%02x:%02x    : \n",
 		    dev->name, ntohs(spt.beacon_transmit),
-		    ntohs(spt.beacon_receive), spt.beacon_naun[0],
-		    spt.beacon_naun[1], spt.beacon_naun[2],
-		    spt.beacon_naun[3], spt.beacon_naun[4],
-		    spt.beacon_naun[5], spt.beacon_phys[0],
-		    spt.beacon_phys[1], spt.beacon_phys[2],
-		    spt.beacon_phys[3]);
+		    ntohs(spt.beacon_receive),
+		    print_mac(mac, spt.beacon_naun),
+		    spt.beacon_phys[0], spt.beacon_phys[1],
+		    spt.beacon_phys[2], spt.beacon_phys[3]);
 	return size;
 }
 #endif
-#endif
-
-#if STREAMER_IOCTL && (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0))
-static int streamer_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
-{
-        int i;
-	struct streamer_private *streamer_priv = (struct streamer_private *) dev->priv;
-	u8 __iomem *streamer_mmio = streamer_priv->streamer_mmio;
-
-	switch(cmd) {
-	case IOCTL_SISR_MASK:
-		writew(SISR_MI, streamer_mmio + SISR_MASK_SUM);
-		break;
-	case IOCTL_SPIN_LOCK_TEST:
-	        printk(KERN_INFO "spin_lock() called.\n");
-		spin_lock(&streamer_priv->streamer_lock);
-		spin_unlock(&streamer_priv->streamer_lock);
-		printk(KERN_INFO "spin_unlock() finished.\n");
-		break;
-	case IOCTL_PRINT_BDAS:
-	        printk(KERN_INFO "bdas: RXBDA: %x RXLBDA: %x TX2FDA: %x TX2LFDA: %x\n",
-		       readw(streamer_mmio + RXBDA),
-		       readw(streamer_mmio + RXLBDA),
-		       readw(streamer_mmio + TX2FDA),
-		       readw(streamer_mmio + TX2LFDA));
-		break;
-	case IOCTL_PRINT_REGISTERS:
-	        printk(KERN_INFO "registers:\n");
-		printk(KERN_INFO "SISR: %04x MISR: %04x LISR: %04x BCTL: %04x BMCTL: %04x\nmask  %04x mask  %04x\n", 
-		       readw(streamer_mmio + SISR),
-		       readw(streamer_mmio + MISR_RUM),
-		       readw(streamer_mmio + LISR),
-		       readw(streamer_mmio + BCTL),
-		       readw(streamer_mmio + BMCTL_SUM),
-		       readw(streamer_mmio + SISR_MASK),
-		       readw(streamer_mmio + MISR_MASK));
-		break;
-	case IOCTL_PRINT_RX_BUFS:
-	        printk(KERN_INFO "Print rx bufs:\n");
-		for(i=0; i<STREAMER_RX_RING_SIZE; i++)
-		        printk(KERN_INFO "rx_ring %d status: 0x%x\n", i, 
-			       streamer_priv->streamer_rx_ring[i].status);
-		break;
-	case IOCTL_PRINT_TX_BUFS:
-	        printk(KERN_INFO "Print tx bufs:\n");
-		for(i=0; i<STREAMER_TX_RING_SIZE; i++)
-		        printk(KERN_INFO "tx_ring %d status: 0x%x\n", i, 
-			       streamer_priv->streamer_tx_ring[i].status);
-		break;
-	case IOCTL_RX_CMD:
-	        streamer_rx(dev);
-		printk(KERN_INFO "Sent rx command.\n");
-		break;
-	default:
-	        printk(KERN_INFO "Bad ioctl!\n");
-	}
-	return 0;
-}
 #endif
 
 static struct pci_driver streamer_pci_driver = {
@@ -1999,7 +1925,7 @@ static struct pci_driver streamer_pci_driver = {
 };
 
 static int __init streamer_init_module(void) {
-  return pci_module_init(&streamer_pci_driver);
+  return pci_register_driver(&streamer_pci_driver);
 }
 
 static void __exit streamer_cleanup_module(void) {

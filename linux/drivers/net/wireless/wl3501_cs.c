@@ -26,9 +26,7 @@
  * Tested with Planet AP in 2.5.73-bk, 216 Kbytes/s in Infrastructure mode
  * with a SMP machine (dual pentium 100), using pktgen, 432 pps (pkt_size = 60)
  */
-#undef REALLY_SLOW_IO	/* most systems can safely undef this */
 
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/ethtool.h>
@@ -49,7 +47,6 @@
 
 #include <net/iw_handler.h>
 
-#include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
@@ -104,9 +101,8 @@ module_param(pc_debug, int, 0);
  * release a socket, in response to card insertion and ejection events.  They
  * are invoked from the wl24 event handler.
  */
-static void wl3501_config(dev_link_t *link);
-static void wl3501_release(dev_link_t *link);
-static int wl3501_event(event_t event, int pri, event_callback_args_t *args);
+static int wl3501_config(struct pcmcia_device *link);
+static void wl3501_release(struct pcmcia_device *link);
 
 /*
  * The dev_info variable is the "key" that is used to match up this
@@ -228,17 +224,6 @@ static void iw_copy_mgmt_info_element(struct iw_mgmt_info_element *to,
 	iw_set_mgmt_info_element(from->id, to, from->data, from->len);
 }
 
-/*
- * A linked list of "instances" of the wl24 device.  Each actual PCMCIA card
- * corresponds to one device instance, and is described by one dev_link_t
- * structure (defined in ds.h).
- *
- * You may not want to use a linked list for this -- for example, the memory
- * card driver uses an array of dev_link_t pointers, where minor device numbers
- * are used to derive the corresponding array index.
- */
-static dev_link_t *wl3501_dev_list;
-
 static inline void wl3501_switch_page(struct wl3501_card *this, u8 page)
 {
 	wl3501_outb(page, this->base_addr + WL3501_NIC_BSS);
@@ -297,7 +282,8 @@ static int wl3501_get_flash_mac_addr(struct wl3501_card *this)
  *
  * Move 'size' bytes from PC to card. (Shouldn't be interrupted)
  */
-void wl3501_set_to_wla(struct wl3501_card *this, u16 dest, void *src, int size)
+static void wl3501_set_to_wla(struct wl3501_card *this, u16 dest, void *src,
+			      int size)
 {
 	/* switch to SRAM Page 0 */
 	wl3501_switch_page(this, (dest & 0x8000) ? WL3501_BSS_SPAGE1 :
@@ -318,8 +304,8 @@ void wl3501_set_to_wla(struct wl3501_card *this, u16 dest, void *src, int size)
  *
  * Move 'size' bytes from card to PC. (Shouldn't be interrupted)
  */
-void wl3501_get_from_wla(struct wl3501_card *this, u16 src, void *dest,
-			 int size)
+static void wl3501_get_from_wla(struct wl3501_card *this, u16 src, void *dest,
+				int size)
 {
 	/* switch to SRAM Page 0 */
 	wl3501_switch_page(this, (src & 0x8000) ? WL3501_BSS_SPAGE1 :
@@ -873,12 +859,11 @@ static int wl3501_esbq_confirm(struct wl3501_card *this)
 
 static void wl3501_online(struct net_device *dev)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
+	DECLARE_MAC_BUF(mac);
 
-	printk(KERN_INFO "%s: Wireless LAN online. BSSID: "
-	       "%02X %02X %02X %02X %02X %02X\n", dev->name,
-	       this->bssid[0], this->bssid[1], this->bssid[2],
-	       this->bssid[3], this->bssid[4], this->bssid[5]);
+	printk(KERN_INFO "%s: Wireless LAN online. BSSID: %s\n",
+	       dev->name, print_mac(mac, this->bssid));
 	netif_wake_queue(dev);
 }
 
@@ -921,7 +906,7 @@ static int wl3501_mgmt_association(struct wl3501_card *this)
 
 static void wl3501_mgmt_join_confirm(struct net_device *dev, u16 addr)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	struct wl3501_join_confirm sig;
 
 	dprintk(3, "entry");
@@ -1025,7 +1010,7 @@ static inline void wl3501_md_ind_interrupt(struct net_device *dev,
 	} else {
 		skb->dev = dev;
 		skb_reserve(skb, 2); /* IP headers on 16 bytes boundaries */
-		eth_copy_and_sum(skb, (unsigned char *)&sig.daddr, 12, 0);
+		skb_copy_to_linear_data(skb, (unsigned char *)&sig.daddr, 12);
 		wl3501_receive(this, skb->data, pkt_len);
 		skb_put(skb, pkt_len);
 		skb->protocol	= eth_type_trans(skb, dev);
@@ -1060,7 +1045,7 @@ static inline void wl3501_start_confirm_interrupt(struct net_device *dev,
 static inline void wl3501_assoc_confirm_interrupt(struct net_device *dev,
 						  u16 addr)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	struct wl3501_assoc_confirm sig;
 
 	dprintk(3, "entry");
@@ -1089,7 +1074,7 @@ static inline void wl3501_rx_interrupt(struct net_device *dev)
 	int morepkts;
 	u16 addr;
 	u8 sig_id;
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	dprintk(3, "entry");
 loop:
@@ -1158,7 +1143,6 @@ static inline void wl3501_ack_interrupt(struct wl3501_card *this)
  * wl3501_interrupt - Hardware interrupt from card.
  * @irq - Interrupt number
  * @dev_id - net_device
- * @regs - registers
  *
  * We must acknowledge the interrupt as soon as possible, and block the
  * interrupt from the same card immediately to prevent re-entry.
@@ -1167,27 +1151,20 @@ static inline void wl3501_ack_interrupt(struct wl3501_card *this)
  * On the other hand, to prevent SUTRO from malfunctioning, we must
  * unlock the SUTRO as soon as possible.
  */
-static irqreturn_t wl3501_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t wl3501_interrupt(int irq, void *dev_id)
 {
-	struct net_device *dev = (struct net_device *)dev_id;
+	struct net_device *dev = dev_id;
 	struct wl3501_card *this;
-	int handled = 1;
 
-	if (!dev)
-		goto unknown;
-	this = dev->priv;
+	this = netdev_priv(dev);
 	spin_lock(&this->lock);
 	wl3501_ack_interrupt(this);
 	wl3501_block_interrupt(this);
 	wl3501_rx_interrupt(dev);
 	wl3501_unblock_interrupt(this);
 	spin_unlock(&this->lock);
-out:
-	return IRQ_RETVAL(handled);
-unknown:
-	handled = 0;
-	printk(KERN_ERR "%s: irq %d for unknown device.\n", __FUNCTION__, irq);
-	goto out;
+
+	return IRQ_HANDLED;
 }
 
 static int wl3501_reset_board(struct wl3501_card *this)
@@ -1279,18 +1256,13 @@ fail:
 
 static int wl3501_close(struct net_device *dev)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = -ENODEV;
 	unsigned long flags;
-	dev_link_t *link;
+	struct pcmcia_device *link;
+	link = this->p_dev;
 
 	spin_lock_irqsave(&this->lock, flags);
-	/* Check if the device is in wl3501_dev_list */
-	for (link = wl3501_dev_list; link; link = link->next)
-		if (link->priv == dev)
-			break;
-	if (!link)
-		goto out;
 	link->open--;
 
 	/* Stop wl3501_hard_start_xmit() from now on */
@@ -1302,7 +1274,6 @@ static int wl3501_close(struct net_device *dev)
 
 	rc = 0;
 	printk(KERN_INFO "%s: WL3501 closed\n", dev->name);
-out:
 	spin_unlock_irqrestore(&this->lock, flags);
 	return rc;
 }
@@ -1317,7 +1288,7 @@ out:
  */
 static int wl3501_reset(struct net_device *dev)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = -ENODEV;
 
 	wl3501_block_interrupt(this);
@@ -1346,7 +1317,7 @@ out:
 
 static void wl3501_tx_timeout(struct net_device *dev)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	struct net_device_stats *stats = &this->stats;
 	unsigned long flags;
 	int rc;
@@ -1372,7 +1343,7 @@ static void wl3501_tx_timeout(struct net_device *dev)
 static int wl3501_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	int enabled, rc;
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	unsigned long flags;
 
 	spin_lock_irqsave(&this->lock, flags);
@@ -1399,16 +1370,13 @@ static int wl3501_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 static int wl3501_open(struct net_device *dev)
 {
 	int rc = -ENODEV;
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	unsigned long flags;
-	dev_link_t *link;
+	struct pcmcia_device *link;
+	link = this->p_dev;
 
 	spin_lock_irqsave(&this->lock, flags);
-	/* Check if the device is in wl3501_dev_list */
-	for (link = wl3501_dev_list; link; link = link->next)
-		if (link->priv == dev)
-			break;
-	if (!DEV_OK(link))
+	if (!pcmcia_dev_present(link))
 		goto out;
 	netif_device_attach(dev);
 	link->open++;
@@ -1439,16 +1407,16 @@ fail:
 	goto out;
 }
 
-struct net_device_stats *wl3501_get_stats(struct net_device *dev)
+static struct net_device_stats *wl3501_get_stats(struct net_device *dev)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	return &this->stats;
 }
 
-struct iw_statistics *wl3501_get_wireless_stats(struct net_device *dev)
+static struct iw_statistics *wl3501_get_wireless_stats(struct net_device *dev)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	struct iw_statistics *wstats = &this->wstats;
 	u32 value; /* size checked: it is u32 */
 
@@ -1486,7 +1454,7 @@ static void wl3501_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *i
 	strlcpy(info->driver, wl3501_dev_info, sizeof(info->driver));
 }
 
-static struct ethtool_ops ops = {
+static const struct ethtool_ops ops = {
 	.get_drvinfo = wl3501_get_drvinfo
 };
 
@@ -1498,40 +1466,23 @@ static struct ethtool_ops ops = {
  * Services. If it has been released, all local data structures are freed.
  * Otherwise, the structures will be freed when the device is released.
  */
-static void wl3501_detach(dev_link_t *link)
+static void wl3501_detach(struct pcmcia_device *link)
 {
-	dev_link_t **linkp;
-
-	/* Locate device structure */
-	for (linkp = &wl3501_dev_list; *linkp; linkp = &(*linkp)->next)
-		if (*linkp == link)
-			break;
-	if (!*linkp)
-		goto out;
+	struct net_device *dev = link->priv;
 
 	/* If the device is currently configured and active, we won't actually
 	 * delete it yet.  Instead, it is marked so that when the release()
 	 * function is called, that will trigger a proper detach(). */
 
-	if (link->state & DEV_CONFIG) {
-#ifdef PCMCIA_DEBUG
-		printk(KERN_DEBUG "wl3501_cs: detach postponed, '%s' "
-		       "still locked\n", link->dev->dev_name);
-#endif
-		goto out;
-	}
+	while (link->open > 0)
+		wl3501_close(dev);
 
-	/* Break the link with Card Services */
-	if (link->handle)
-		pcmcia_deregister_client(link->handle);
-
-	/* Unlink device structure, free pieces */
-	*linkp = link->next;
+	netif_device_detach(dev);
+	wl3501_release(link);
 
 	if (link->priv)
 		free_netdev(link->priv);
-	kfree(link);
-out:
+
 	return;
 }
 
@@ -1545,7 +1496,7 @@ static int wl3501_get_name(struct net_device *dev, struct iw_request_info *info,
 static int wl3501_set_freq(struct net_device *dev, struct iw_request_info *info,
 			   union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int channel = wrqu->freq.m;
 	int rc = -EINVAL;
 
@@ -1559,7 +1510,7 @@ static int wl3501_set_freq(struct net_device *dev, struct iw_request_info *info,
 static int wl3501_get_freq(struct net_device *dev, struct iw_request_info *info,
 			   union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	wrqu->freq.m = wl3501_chan2freq[this->chan - 1] * 100000;
 	wrqu->freq.e = 1;
@@ -1574,7 +1525,7 @@ static int wl3501_set_mode(struct net_device *dev, struct iw_request_info *info,
 	if (wrqu->mode == IW_MODE_INFRA ||
 	    wrqu->mode == IW_MODE_ADHOC ||
 	    wrqu->mode == IW_MODE_AUTO) {
-		struct wl3501_card *this = dev->priv;
+		struct wl3501_card *this = netdev_priv(dev);
 
 		this->net_type = wrqu->mode;
 		rc = wl3501_reset(dev);
@@ -1585,7 +1536,7 @@ static int wl3501_set_mode(struct net_device *dev, struct iw_request_info *info,
 static int wl3501_get_mode(struct net_device *dev, struct iw_request_info *info,
 			   union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	wrqu->mode = this->net_type;
 	return 0;
@@ -1594,7 +1545,7 @@ static int wl3501_get_mode(struct net_device *dev, struct iw_request_info *info,
 static int wl3501_get_sens(struct net_device *dev, struct iw_request_info *info,
 			   union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	wrqu->sens.value = this->rssi;
 	wrqu->sens.disabled = !wrqu->sens.value;
@@ -1625,7 +1576,7 @@ static int wl3501_get_range(struct net_device *dev,
 static int wl3501_set_wap(struct net_device *dev, struct iw_request_info *info,
 			  union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	static const u8 bcast[ETH_ALEN] = { 255, 255, 255, 255, 255, 255 };
 	int rc = -EINVAL;
 
@@ -1645,7 +1596,7 @@ out:
 static int wl3501_get_wap(struct net_device *dev, struct iw_request_info *info,
 			  union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	wrqu->ap_addr.sa_family = ARPHRD_ETHER;
 	memcpy(wrqu->ap_addr.sa_data, this->bssid, ETH_ALEN);
@@ -1664,7 +1615,7 @@ static int wl3501_set_scan(struct net_device *dev, struct iw_request_info *info,
 static int wl3501_get_scan(struct net_device *dev, struct iw_request_info *info,
 			   union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int i;
 	char *current_ev = extra;
 	struct iw_event iwe;
@@ -1714,7 +1665,7 @@ static int wl3501_set_essid(struct net_device *dev,
 			    struct iw_request_info *info,
 			    union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	if (wrqu->data.flags) {
 		iw_set_mgmt_info_element(IW_MGMT_INFO_ELEMENT_SSID,
@@ -1731,7 +1682,7 @@ static int wl3501_get_essid(struct net_device *dev,
 			    struct iw_request_info *info,
 			    union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	unsigned long flags;
 
 	spin_lock_irqsave(&this->lock, flags);
@@ -1745,7 +1696,7 @@ static int wl3501_get_essid(struct net_device *dev,
 static int wl3501_set_nick(struct net_device *dev, struct iw_request_info *info,
 			   union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	if (wrqu->data.length > sizeof(this->nick))
 		return -E2BIG;
@@ -1756,7 +1707,7 @@ static int wl3501_set_nick(struct net_device *dev, struct iw_request_info *info,
 static int wl3501_get_nick(struct net_device *dev, struct iw_request_info *info,
 			   union iwreq_data *wrqu, char *extra)
 {
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 
 	strlcpy(extra, this->nick, 32);
 	wrqu->data.length = strlen(extra);
@@ -1781,7 +1732,7 @@ static int wl3501_get_rts_threshold(struct net_device *dev,
 				    union iwreq_data *wrqu, char *extra)
 {
 	u16 threshold; /* size checked: it is u16 */
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = wl3501_get_mib_value(this, WL3501_MIB_ATTR_RTS_THRESHOLD,
 				      &threshold, sizeof(threshold));
 	if (!rc) {
@@ -1797,7 +1748,7 @@ static int wl3501_get_frag_threshold(struct net_device *dev,
 				     union iwreq_data *wrqu, char *extra)
 {
 	u16 threshold; /* size checked: it is u16 */
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = wl3501_get_mib_value(this, WL3501_MIB_ATTR_FRAG_THRESHOLD,
 				      &threshold, sizeof(threshold));
 	if (!rc) {
@@ -1813,7 +1764,7 @@ static int wl3501_get_txpow(struct net_device *dev,
 			    union iwreq_data *wrqu, char *extra)
 {
 	u16 txpow;
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = wl3501_get_mib_value(this,
 				      WL3501_MIB_ATTR_CURRENT_TX_PWR_LEVEL,
 				      &txpow, sizeof(txpow));
@@ -1835,21 +1786,21 @@ static int wl3501_get_retry(struct net_device *dev,
 			    union iwreq_data *wrqu, char *extra)
 {
 	u8 retry; /* size checked: it is u8 */
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = wl3501_get_mib_value(this,
 				      WL3501_MIB_ATTR_LONG_RETRY_LIMIT,
 				      &retry, sizeof(retry));
 	if (rc)
 		goto out;
-	if (wrqu->retry.flags & IW_RETRY_MAX) {
-		wrqu->retry.flags = IW_RETRY_LIMIT | IW_RETRY_MAX;
+	if (wrqu->retry.flags & IW_RETRY_LONG) {
+		wrqu->retry.flags = IW_RETRY_LIMIT | IW_RETRY_LONG;
 		goto set_value;
 	}
 	rc = wl3501_get_mib_value(this, WL3501_MIB_ATTR_SHORT_RETRY_LIMIT,
 				  &retry, sizeof(retry));
 	if (rc)
 		goto out;
-	wrqu->retry.flags = IW_RETRY_LIMIT | IW_RETRY_MIN;
+	wrqu->retry.flags = IW_RETRY_LIMIT | IW_RETRY_SHORT;
 set_value:
 	wrqu->retry.value = retry;
 	wrqu->retry.disabled = 0;
@@ -1862,7 +1813,7 @@ static int wl3501_get_encode(struct net_device *dev,
 			     union iwreq_data *wrqu, char *extra)
 {
 	u8 implemented, restricted, keys[100], len_keys, tocopy;
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = wl3501_get_mib_value(this,
 				      WL3501_MIB_ATTR_PRIV_OPT_IMPLEMENTED,
 				      &implemented, sizeof(implemented));
@@ -1889,7 +1840,6 @@ static int wl3501_get_encode(struct net_device *dev,
 	tocopy = min_t(u8, len_keys, wrqu->encoding.length);
 	tocopy = min_t(u8, tocopy, 100);
 	wrqu->encoding.length = tocopy;
-	memset(extra, 0, tocopy);
 	memcpy(extra, keys, tocopy);
 out:
 	return rc;
@@ -1900,7 +1850,7 @@ static int wl3501_get_power(struct net_device *dev,
 			    union iwreq_data *wrqu, char *extra)
 {
 	u8 pwr_state;
-	struct wl3501_card *this = dev->priv;
+	struct wl3501_card *this = netdev_priv(dev);
 	int rc = wl3501_get_mib_value(this,
 				      WL3501_MIB_ATTR_CURRENT_PWR_STATE,
 				      &pwr_state, sizeof(pwr_state));
@@ -1942,9 +1892,9 @@ static const iw_handler	wl3501_handler[] = {
 };
 
 static const struct iw_handler_def wl3501_handler_def = {
-	.num_standard	= sizeof(wl3501_handler) / sizeof(iw_handler),
+	.num_standard	= ARRAY_SIZE(wl3501_handler),
 	.standard	= (iw_handler *)wl3501_handler,
-	.spy_offset	= offsetof(struct wl3501_card, spy_data),
+	.get_wireless_stats = wl3501_get_wireless_stats,
 };
 
 /**
@@ -1956,35 +1906,25 @@ static const struct iw_handler_def wl3501_handler_def = {
  * The dev_link structure is initialized, but we don't actually configure the
  * card at this point -- we wait until we receive a card insertion event.
  */
-static dev_link_t *wl3501_attach(void)
+static int wl3501_probe(struct pcmcia_device *p_dev)
 {
-	client_reg_t client_reg;
-	dev_link_t *link;
 	struct net_device *dev;
-	int ret;
-
-	/* Initialize the dev_link_t structure */
-	link = kmalloc(sizeof(*link), GFP_KERNEL);
-	if (!link)
-		goto out;
-	memset(link, 0, sizeof(struct dev_link_t));
+	struct wl3501_card *this;
 
 	/* The io structure describes IO port mapping */
-	link->io.NumPorts1	= 16;
-	link->io.Attributes1	= IO_DATA_PATH_WIDTH_8;
-	link->io.IOAddrLines	= 5;
+	p_dev->io.NumPorts1	= 16;
+	p_dev->io.Attributes1	= IO_DATA_PATH_WIDTH_8;
+	p_dev->io.IOAddrLines	= 5;
 
 	/* Interrupt setup */
-	link->irq.Attributes	= IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-	link->irq.IRQInfo1	= IRQ_LEVEL_ID;
-	link->irq.Handler = wl3501_interrupt;
+	p_dev->irq.Attributes	= IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
+	p_dev->irq.IRQInfo1	= IRQ_LEVEL_ID;
+	p_dev->irq.Handler = wl3501_interrupt;
 
 	/* General socket configuration */
-	link->conf.Attributes	= CONF_ENABLE_IRQ;
-	link->conf.Vcc		= 50;
-	link->conf.IntType	= INT_MEMORY_AND_IO;
-	link->conf.ConfigIndex	= 1;
-	link->conf.Present	= PRESENT_OPTION;
+	p_dev->conf.Attributes	= CONF_ENABLE_IRQ;
+	p_dev->conf.IntType	= INT_MEMORY_AND_IO;
+	p_dev->conf.ConfigIndex	= 1;
 
 	dev = alloc_etherdev(sizeof(struct wl3501_card));
 	if (!dev)
@@ -1995,37 +1935,18 @@ static dev_link_t *wl3501_attach(void)
 	dev->tx_timeout		= wl3501_tx_timeout;
 	dev->watchdog_timeo	= 5 * HZ;
 	dev->get_stats		= wl3501_get_stats;
-	dev->get_wireless_stats = wl3501_get_wireless_stats;
+	this = netdev_priv(dev);
+	this->wireless_data.spy_data = &this->spy_data;
+	this->p_dev = p_dev;
+	dev->wireless_data	= &this->wireless_data;
 	dev->wireless_handlers	= (struct iw_handler_def *)&wl3501_handler_def;
 	SET_ETHTOOL_OPS(dev, &ops);
 	netif_stop_queue(dev);
-	link->priv = link->irq.Instance = dev;
+	p_dev->priv = p_dev->irq.Instance = dev;
 
-	/* Register with Card Services */
-	link->next		 = wl3501_dev_list;
-	wl3501_dev_list		 = link;
-	client_reg.dev_info	 = &wl3501_dev_info;
-	client_reg.EventMask	 = CS_EVENT_CARD_INSERTION |
-				   CS_EVENT_RESET_PHYSICAL |
-				   CS_EVENT_CARD_RESET |
-				   CS_EVENT_CARD_REMOVAL |
-				   CS_EVENT_PM_SUSPEND |
-				   CS_EVENT_PM_RESUME;
-	client_reg.event_handler = wl3501_event;
-	client_reg.Version	 = 0x0210;
-	client_reg.event_callback_args.client_data = link;
-	ret = pcmcia_register_client(&link->handle, &client_reg);
-	if (ret) {
-		cs_error(link->handle, RegisterClient, ret);
-		wl3501_detach(link);
-		link = NULL;
-	}
-out:
-	return link;
+	return wl3501_config(p_dev);
 out_link:
-	kfree(link);
-	link = NULL;
-	goto out;
+	return -ENOMEM;
 }
 
 #define CS_CHECK(fn, ret) \
@@ -2039,30 +1960,12 @@ do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
  * received, to configure the PCMCIA socket, and to make the ethernet device
  * available to the system.
  */
-static void wl3501_config(dev_link_t *link)
+static int wl3501_config(struct pcmcia_device *link)
 {
-	tuple_t tuple;
-	cisparse_t parse;
-	client_handle_t handle = link->handle;
 	struct net_device *dev = link->priv;
 	int i = 0, j, last_fn, last_ret;
-	unsigned char bf[64];
 	struct wl3501_card *this;
-
-	/* This reads the card's CONFIG tuple to find its config registers. */
-	tuple.Attributes	= 0;
-	tuple.DesiredTuple	= CISTPL_CONFIG;
-	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
-	tuple.TupleData		= bf;
-	tuple.TupleDataMax	= sizeof(bf);
-	tuple.TupleOffset	= 0;
-	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
-	CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
-	link->conf.ConfigBase	= parse.config.base;
-	link->conf.Present	= parse.config.rmask[0];
-
-	/* Configure card */
-	link->state |= DEV_CONFIG;
+	DECLARE_MAC_BUF(mac);
 
 	/* Try allocating IO ports.  This tries a few fixed addresses.  If you
 	 * want, you can also read the card's config table to pick addresses --
@@ -2073,42 +1976,39 @@ static void wl3501_config(dev_link_t *link)
 		 * 0x200-0x2ff, and so on, because this seems safer */
 		link->io.BasePort1 = j;
 		link->io.BasePort2 = link->io.BasePort1 + 0x10;
-		i = pcmcia_request_io(link->handle, &link->io);
+		i = pcmcia_request_io(link, &link->io);
 		if (i == CS_SUCCESS)
 			break;
 	}
 	if (i != CS_SUCCESS) {
-		cs_error(link->handle, RequestIO, i);
+		cs_error(link, RequestIO, i);
 		goto failed;
 	}
 
 	/* Now allocate an interrupt line. Note that this does not actually
 	 * assign a handler to the interrupt. */
 
-	CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
+	CS_CHECK(RequestIRQ, pcmcia_request_irq(link, &link->irq));
 
 	/* This actually configures the PCMCIA socket -- setting up the I/O
 	 * windows and the interrupt mapping.  */
 
-	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
+	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link, &link->conf));
 
 	dev->irq = link->irq.AssignedIRQ;
 	dev->base_addr = link->io.BasePort1;
-	SET_NETDEV_DEV(dev, &handle_to_dev(handle));
+	SET_NETDEV_DEV(dev, &handle_to_dev(link));
 	if (register_netdev(dev)) {
 		printk(KERN_NOTICE "wl3501_cs: register_netdev() failed\n");
 		goto failed;
 	}
 
-	SET_MODULE_OWNER(dev);
-
-	this = dev->priv;
+	this = netdev_priv(dev);
 	/*
 	 * At this point, the dev_node_t structure(s) should be initialized and
-	 * arranged in a linked list at link->dev.
+	 * arranged in a linked list at link->dev_node.
 	 */
-	link->dev = &this->node;
-	link->state &= ~DEV_CONFIG_PENDING;
+	link->dev_node = &this->node;
 
 	this->base_addr = dev->base_addr;
 
@@ -2119,14 +2019,14 @@ static void wl3501_config(dev_link_t *link)
 	}
 	strcpy(this->node.dev_name, dev->name);
 
-	/* print probe information */
-	printk(KERN_INFO "%s: wl3501 @ 0x%3.3x, IRQ %d, MAC addr in flash ROM:",
-	       dev->name, this->base_addr, (int)dev->irq);
-	for (i = 0; i < 6; i++) {
+	for (i = 0; i < 6; i++)
 		dev->dev_addr[i] = ((char *)&this->mac_addr)[i];
-		printk("%c%02x", i ? ':' : ' ', dev->dev_addr[i]);
-	}
-	printk("\n");
+
+	/* print probe information */
+	printk(KERN_INFO "%s: wl3501 @ 0x%3.3x, IRQ %d, "
+	       "MAC addr in flash ROM:%s\n",
+	       dev->name, this->base_addr, (int)dev->irq,
+	       print_mac(mac, dev->dev_addr));
 	/*
 	 * Initialize card parameters - added by jss
 	 */
@@ -2144,13 +2044,13 @@ static void wl3501_config(dev_link_t *link)
 	spin_lock_init(&this->lock);
 	init_waitqueue_head(&this->wait);
 	netif_start_queue(dev);
-	goto out;
+	return 0;
+
 cs_failed:
-	cs_error(link->handle, last_fn, last_ret);
+	cs_error(link, last_fn, last_ret);
 failed:
 	wl3501_release(link);
-out:
-	return;
+	return -ENODEV;
 }
 
 /**
@@ -2161,91 +2061,58 @@ out:
  * and release the PCMCIA configuration.  If the device is still open, this
  * will be postponed until it is closed.
  */
-static void wl3501_release(dev_link_t *link)
+static void wl3501_release(struct pcmcia_device *link)
 {
 	struct net_device *dev = link->priv;
 
 	/* Unlink the device chain */
-	if (link->dev) {
+	if (link->dev_node)
 		unregister_netdev(dev);
-		link->dev = NULL;
-	}
 
-	/* Don't bother checking to see if these succeed or not */
-	pcmcia_release_configuration(link->handle);
-	pcmcia_release_io(link->handle, &link->io);
-	pcmcia_release_irq(link->handle, &link->irq);
-	link->state &= ~DEV_CONFIG;
+	pcmcia_disable_device(link);
 }
 
-/**
- * wl3501_event - The card status event handler
- * @event - event
- * @pri - priority
- * @args - arguments for this event
- *
- * The card status event handler. Mostly, this schedules other stuff to run
- * after an event is received. A CARD_REMOVAL event also sets some flags to
- * discourage the net drivers from trying to talk to the card any more.
- *
- * When a CARD_REMOVAL event is received, we immediately set a flag to block
- * future accesses to this device. All the functions that actually access the
- * device should check this flag to make sure the card is still present.
- */
-static int wl3501_event(event_t event, int pri, event_callback_args_t *args)
+static int wl3501_suspend(struct pcmcia_device *link)
 {
-	dev_link_t *link = args->client_data;
 	struct net_device *dev = link->priv;
 
-	switch (event) {
-	case CS_EVENT_CARD_REMOVAL:
-		link->state &= ~DEV_PRESENT;
-		if (link->state & DEV_CONFIG) {
-			while (link->open > 0)
-				wl3501_close(dev);
-			netif_device_detach(dev);
-			wl3501_release(link);
-		}
-		break;
-	case CS_EVENT_CARD_INSERTION:
-		link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
-		wl3501_config(link);
-		break;
-	case CS_EVENT_PM_SUSPEND:
-		link->state |= DEV_SUSPEND;
-		wl3501_pwr_mgmt(dev->priv, WL3501_SUSPEND);
-		/* Fall through... */
-	case CS_EVENT_RESET_PHYSICAL:
-		if (link->state & DEV_CONFIG) {
-			if (link->open)
-				netif_device_detach(dev);
-			pcmcia_release_configuration(link->handle);
-		}
-		break;
-	case CS_EVENT_PM_RESUME:
-		link->state &= ~DEV_SUSPEND;
-		wl3501_pwr_mgmt(dev->priv, WL3501_RESUME);
-		/* Fall through... */
-	case CS_EVENT_CARD_RESET:
-		if (link->state & DEV_CONFIG) {
-			pcmcia_request_configuration(link->handle, &link->conf);
-			if (link->open) {
-				wl3501_reset(dev);
-				netif_device_attach(dev);
-			}
-		}
-		break;
-	}
+	wl3501_pwr_mgmt(netdev_priv(dev), WL3501_SUSPEND);
+	if (link->open)
+		netif_device_detach(dev);
+
 	return 0;
 }
 
+static int wl3501_resume(struct pcmcia_device *link)
+{
+	struct net_device *dev = link->priv;
+
+	wl3501_pwr_mgmt(netdev_priv(dev), WL3501_RESUME);
+	if (link->open) {
+		wl3501_reset(dev);
+		netif_device_attach(dev);
+	}
+
+	return 0;
+}
+
+
+static struct pcmcia_device_id wl3501_ids[] = {
+	PCMCIA_DEVICE_MANF_CARD(0xd601, 0x0001),
+	PCMCIA_DEVICE_NULL
+};
+MODULE_DEVICE_TABLE(pcmcia, wl3501_ids);
+
 static struct pcmcia_driver wl3501_driver = {
-	.owner          = THIS_MODULE,
-	.drv            = {
-		.name   = "wl3501_cs",
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "wl3501_cs",
 	},
-	.attach         = wl3501_attach,
-	.detach         = wl3501_detach,
+	.probe		= wl3501_probe,
+	.remove		= wl3501_detach,
+	.id_table	= wl3501_ids,
+	.suspend	= wl3501_suspend,
+	.resume		= wl3501_resume,
 };
 
 static int __init wl3501_init_module(void)
@@ -2255,9 +2122,7 @@ static int __init wl3501_init_module(void)
 
 static void __exit wl3501_exit_module(void)
 {
-	dprintk(0, ": unloading");
 	pcmcia_unregister_driver(&wl3501_driver);
-	BUG_ON(wl3501_dev_list != NULL);
 }
 
 module_init(wl3501_init_module);

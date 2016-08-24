@@ -12,13 +12,11 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
@@ -26,8 +24,13 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/pci.h>
 #include <asm/io.h>
 #include <asm/prom.h>
+
+#ifdef CONFIG_PPC64
+#include <asm/pci-bridge.h>
+#endif
 
 #ifdef CONFIG_PPC32
 #include <asm/bootx.h>
@@ -59,8 +62,6 @@ struct offb_par default_par;
      *  Interface used by the world
      */
 
-int offb_init(void);
-
 static int offb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			  u_int transp, struct fb_info *info);
 static int offb_blank(int blank, struct fb_info *info);
@@ -69,11 +70,6 @@ static int offb_blank(int blank, struct fb_info *info);
 extern boot_infos_t *boot_infos;
 #endif
 
-static void offb_init_nodriver(struct device_node *);
-static void offb_init_fb(const char *name, const char *full_name,
-			 int width, int height, int depth, int pitch,
-			 unsigned long address, struct device_node *dp);
-
 static struct fb_ops offb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_setcolreg	= offb_setcolreg,
@@ -81,7 +77,6 @@ static struct fb_ops offb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
     /*
@@ -94,13 +89,42 @@ static int offb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			  u_int transp, struct fb_info *info)
 {
 	struct offb_par *par = (struct offb_par *) info->par;
+	int i, depth;
+	u32 *pal = info->pseudo_palette;
 
-	if (!par->cmap_adr || regno > 255)
+	depth = info->var.bits_per_pixel;
+	if (depth == 16)
+		depth = (info->var.green.length == 5) ? 15 : 16;
+
+	if (regno > 255 ||
+	    (depth == 16 && regno > 63) ||
+	    (depth == 15 && regno > 31))
 		return 1;
+
+	if (regno < 16) {
+		switch (depth) {
+		case 15:
+			pal[regno] = (regno << 10) | (regno << 5) | regno;
+			break;
+		case 16:
+			pal[regno] = (regno << 11) | (regno << 5) | regno;
+			break;
+		case 24:
+			pal[regno] = (regno << 16) | (regno << 8) | regno;
+			break;
+		case 32:
+			i = (regno << 8) | regno;
+			pal[regno] = (i << 16) | i;
+			break;
+		}
+	}
 
 	red >>= 8;
 	green >>= 8;
 	blue >>= 8;
+
+	if (!par->cmap_adr)
+		return 0;
 
 	switch (par->cmap_type) {
 	case cmap_m64:
@@ -133,25 +157,11 @@ static int offb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 		out_le32(par->cmap_adr + 0xb4, (red << 16 | green << 8 | blue));
 		break;
 	case cmap_gxt2000:
-		out_le32((unsigned __iomem *) par->cmap_adr + regno,
+		out_le32(((unsigned __iomem *) par->cmap_adr) + regno,
 			 (red << 16 | green << 8 | blue));
 		break;
 	}
 
-	if (regno < 16)
-		switch (info->var.bits_per_pixel) {
-		case 16:
-			((u16 *) (info->pseudo_palette))[regno] =
-			    (regno << 10) | (regno << 5) | regno;
-			break;
-		case 32:
-			{
-				int i = (regno << 8) | regno;
-				((u32 *) (info->pseudo_palette))[regno] =
-				    (i << 16) | i;
-				break;
-			}
-		}
 	return 0;
 }
 
@@ -203,7 +213,7 @@ static int offb_blank(int blank, struct fb_info *info)
 				out_le32(par->cmap_adr + 0xb4, 0);
 				break;
 			case cmap_gxt2000:
-				out_le32((unsigned __iomem *) par->cmap_adr + i,
+				out_le32(((unsigned __iomem *) par->cmap_adr) + i,
 					 0);
 				break;
 			}
@@ -212,158 +222,27 @@ static int offb_blank(int blank, struct fb_info *info)
 	return 0;
 }
 
-    /*
-     *  Initialisation
-     */
 
-int __init offb_init(void)
+static void __iomem *offb_map_reg(struct device_node *np, int index,
+				  unsigned long offset, unsigned long size)
 {
-	struct device_node *dp = NULL, *boot_disp = NULL;
-#if defined(CONFIG_BOOTX_TEXT) && defined(CONFIG_PPC32)
-	struct device_node *macos_display = NULL;
-#endif
-	if (fb_get_options("offb", NULL))
-		return -ENODEV;
+	const u32 *addrp;
+	u64 asize, taddr;
+	unsigned int flags;
 
-#if defined(CONFIG_BOOTX_TEXT) && defined(CONFIG_PPC32)
-	/* If we're booted from BootX... */
-	if (boot_infos != 0) {
-		unsigned long addr =
-		    (unsigned long) boot_infos->dispDeviceBase;
-		/* find the device node corresponding to the macos display */
-		while ((dp = of_find_node_by_type(dp, "display"))) {
-			int i;
-			/*
-			 * Grrr...  It looks like the MacOS ATI driver
-			 * munges the assigned-addresses property (but
-			 * the AAPL,address value is OK).
-			 */
-			if (strncmp(dp->name, "ATY,", 4) == 0
-			    && dp->n_addrs == 1) {
-				unsigned int *ap =
-				    (unsigned int *) get_property(dp,
-								  "AAPL,address",
-								  NULL);
-				if (ap != NULL) {
-					dp->addrs[0].address = *ap;
-					dp->addrs[0].size = 0x01000000;
-				}
-			}
-
-			/*
-			 * The LTPro on the Lombard powerbook has no addresses
-			 * on the display nodes, they are on their parent.
-			 */
-			if (dp->n_addrs == 0
-			    && device_is_compatible(dp, "ATY,264LTPro")) {
-				int na;
-				unsigned int *ap = (unsigned int *)
-				    get_property(dp, "AAPL,address", &na);
-				if (ap != 0)
-					for (na /= sizeof(unsigned int);
-					     na > 0; --na, ++ap)
-						if (*ap <= addr
-						    && addr <
-						    *ap + 0x1000000)
-							goto foundit;
-			}
-
-			/*
-			 * See if the display address is in one of the address
-			 * ranges for this display.
-			 */
-			for (i = 0; i < dp->n_addrs; ++i) {
-				if (dp->addrs[i].address <= addr
-				    && addr <
-				    dp->addrs[i].address +
-				    dp->addrs[i].size)
-					break;
-			}
-			if (i < dp->n_addrs) {
-			      foundit:
-				printk(KERN_INFO "MacOS display is %s\n",
-				       dp->full_name);
-				macos_display = dp;
-				break;
-			}
-		}
-
-		/* initialize it */
-		offb_init_fb(macos_display ? macos_display->
-			     name : "MacOS display",
-			     macos_display ? macos_display->
-			     full_name : "MacOS display",
-			     boot_infos->dispDeviceRect[2],
-			     boot_infos->dispDeviceRect[3],
-			     boot_infos->dispDeviceDepth,
-			     boot_infos->dispDeviceRowBytes, addr, NULL);
-	}
-#endif /* defined(CONFIG_BOOTX_TEXT) && defined(CONFIG_PPC32) */
-
-	for (dp = NULL; (dp = of_find_node_by_type(dp, "display"));) {
-		if (get_property(dp, "linux,opened", NULL) &&
-		    get_property(dp, "linux,boot-display", NULL)) {
-			boot_disp = dp;
-			offb_init_nodriver(dp);
-		}
-	}
-	for (dp = NULL; (dp = of_find_node_by_type(dp, "display"));) {
-		if (get_property(dp, "linux,opened", NULL) &&
-		    dp != boot_disp)
-			offb_init_nodriver(dp);
-	}
-
-	return 0;
-}
-
-
-static void __init offb_init_nodriver(struct device_node *dp)
-{
-	int *pp, i;
-	unsigned int len;
-	int width = 640, height = 480, depth = 8, pitch;
-	unsigned *up, address;
-
-	if ((pp = (int *) get_property(dp, "depth", &len)) != NULL
-	    && len == sizeof(int))
-		depth = *pp;
-	if ((pp = (int *) get_property(dp, "width", &len)) != NULL
-	    && len == sizeof(int))
-		width = *pp;
-	if ((pp = (int *) get_property(dp, "height", &len)) != NULL
-	    && len == sizeof(int))
-		height = *pp;
-	if ((pp = (int *) get_property(dp, "linebytes", &len)) != NULL
-	    && len == sizeof(int)) {
-		pitch = *pp;
-		if (pitch == 1)
-			pitch = 0x1000;
-	} else
-		pitch = width;
-	if ((up = (unsigned *) get_property(dp, "address", &len)) != NULL
-	    && len == sizeof(unsigned))
-		address = (u_long) * up;
-	else {
-		for (i = 0; i < dp->n_addrs; ++i)
-			if (dp->addrs[i].size >=
-			    pitch * height * depth / 8)
-				break;
-		if (i >= dp->n_addrs) {
-			printk(KERN_ERR
-			       "no framebuffer address found for %s\n",
-			       dp->full_name);
-			return;
-		}
-
-		address = (u_long) dp->addrs[i].address;
-
-		/* kludge for valkyrie */
-		if (strcmp(dp->name, "valkyrie") == 0)
-			address += 0x1000;
-	}
-	offb_init_fb(dp->name, dp->full_name, width, height, depth,
-		     pitch, address, dp);
-
+	addrp = of_get_pci_address(np, index, &asize, &flags);
+	if (addrp == NULL)
+		addrp = of_get_address(np, index, &asize, &flags);
+	if (addrp == NULL)
+		return NULL;
+	if ((flags & (IORESOURCE_IO | IORESOURCE_MEM)) == 0)
+		return NULL;
+	if ((offset + size) > asize)
+		return NULL;
+	taddr = of_translate_address(np, addrp);
+	if (taddr == OF_BAD_ADDR)
+		return NULL;
+	return ioremap(taddr + offset, size);
 }
 
 static void __init offb_init_fb(const char *name, const char *full_name,
@@ -371,7 +250,7 @@ static void __init offb_init_fb(const char *name, const char *full_name,
 				int pitch, unsigned long address,
 				struct device_node *dp)
 {
-	unsigned long res_size = pitch * height * depth / 8;
+	unsigned long res_size = pitch * height * (depth + 7) / 8;
 	struct offb_par *par = &default_par;
 	unsigned long res_start = address;
 	struct fb_fix_screeninfo *fix;
@@ -385,14 +264,14 @@ static void __init offb_init_fb(const char *name, const char *full_name,
 	printk(KERN_INFO
 	       "Using unsupported %dx%d %s at %lx, depth=%d, pitch=%d\n",
 	       width, height, name, address, depth, pitch);
-	if (depth != 8 && depth != 16 && depth != 32) {
+	if (depth != 8 && depth != 15 && depth != 16 && depth != 32) {
 		printk(KERN_ERR "%s: can't use depth = %d\n", full_name,
 		       depth);
 		release_mem_region(res_start, res_size);
 		return;
 	}
 
-	size = sizeof(struct fb_info) + sizeof(u32) * 17;
+	size = sizeof(struct fb_info) + sizeof(u32) * 16;
 
 	info = kmalloc(size, GFP_ATOMIC);
 	
@@ -420,45 +299,41 @@ static void __init offb_init_fb(const char *name, const char *full_name,
 
 	par->cmap_type = cmap_unknown;
 	if (depth == 8) {
-		/* XXX kludge for ati */
 		if (dp && !strncmp(name, "ATY,Rage128", 11)) {
-			unsigned long regbase = dp->addrs[2].address;
-			par->cmap_adr = ioremap(regbase, 0x1FFF);
-			par->cmap_type = cmap_r128;
+			par->cmap_adr = offb_map_reg(dp, 2, 0, 0x1fff);
+			if (par->cmap_adr)
+				par->cmap_type = cmap_r128;
 		} else if (dp && (!strncmp(name, "ATY,RageM3pA", 12)
 				  || !strncmp(name, "ATY,RageM3p12A", 14))) {
-			unsigned long regbase =
-			    dp->parent->addrs[2].address;
-			par->cmap_adr = ioremap(regbase, 0x1FFF);
-			par->cmap_type = cmap_M3A;
+			par->cmap_adr = offb_map_reg(dp, 2, 0, 0x1fff);
+			if (par->cmap_adr)
+				par->cmap_type = cmap_M3A;
 		} else if (dp && !strncmp(name, "ATY,RageM3pB", 12)) {
-			unsigned long regbase =
-			    dp->parent->addrs[2].address;
-			par->cmap_adr = ioremap(regbase, 0x1FFF);
-			par->cmap_type = cmap_M3B;
+			par->cmap_adr = offb_map_reg(dp, 2, 0, 0x1fff);
+			if (par->cmap_adr)
+				par->cmap_type = cmap_M3B;
 		} else if (dp && !strncmp(name, "ATY,Rage6", 9)) {
-			unsigned long regbase = dp->addrs[1].address;
-			par->cmap_adr = ioremap(regbase, 0x1FFF);
-			par->cmap_type = cmap_radeon;
+			par->cmap_adr = offb_map_reg(dp, 1, 0, 0x1fff);
+			if (par->cmap_adr)
+				par->cmap_type = cmap_radeon;
 		} else if (!strncmp(name, "ATY,", 4)) {
 			unsigned long base = address & 0xff000000UL;
 			par->cmap_adr =
 			    ioremap(base + 0x7ff000, 0x1000) + 0xcc0;
 			par->cmap_data = par->cmap_adr + 1;
 			par->cmap_type = cmap_m64;
-		} else if (device_is_compatible(dp, "pci1014,b7")) {
-			unsigned long regbase = dp->addrs[0].address;
-			par->cmap_adr = ioremap(regbase + 0x6000, 0x1000);
-			par->cmap_type = cmap_gxt2000;
+		} else if (dp && (of_device_is_compatible(dp, "pci1014,b7") ||
+				  of_device_is_compatible(dp, "pci1014,21c"))) {
+			par->cmap_adr = offb_map_reg(dp, 0, 0x6000, 0x1000);
+			if (par->cmap_adr)
+				par->cmap_type = cmap_gxt2000;
 		}
-		fix->visual = par->cmap_adr ? FB_VISUAL_PSEUDOCOLOR
-		    : FB_VISUAL_STATIC_PSEUDOCOLOR;
+		fix->visual = (par->cmap_type != cmap_unknown) ?
+			FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_STATIC_PSEUDOCOLOR;
 	} else
-		fix->visual =	/* par->cmap_adr ? FB_VISUAL_DIRECTCOLOR
-				   : */ FB_VISUAL_TRUECOLOR;
+		fix->visual = FB_VISUAL_TRUECOLOR;
 
 	var->xoffset = var->yoffset = 0;
-	var->bits_per_pixel = depth;
 	switch (depth) {
 	case 8:
 		var->bits_per_pixel = 8;
@@ -471,12 +346,23 @@ static void __init offb_init_fb(const char *name, const char *full_name,
 		var->transp.offset = 0;
 		var->transp.length = 0;
 		break;
-	case 16:		/* RGB 555 */
+	case 15:		/* RGB 555 */
 		var->bits_per_pixel = 16;
 		var->red.offset = 10;
 		var->red.length = 5;
 		var->green.offset = 5;
 		var->green.length = 5;
+		var->blue.offset = 0;
+		var->blue.length = 5;
+		var->transp.offset = 0;
+		var->transp.length = 0;
+		break;
+	case 16:		/* RGB 565 */
+		var->bits_per_pixel = 16;
+		var->red.offset = 11;
+		var->red.length = 5;
+		var->green.offset = 5;
+		var->green.length = 6;
 		var->blue.offset = 0;
 		var->blue.length = 5;
 		var->transp.offset = 0;
@@ -516,6 +402,9 @@ static void __init offb_init_fb(const char *name, const char *full_name,
 	fb_alloc_cmap(&info->cmap, 256, 0);
 
 	if (register_framebuffer(info) < 0) {
+		iounmap(par->cmap_adr);
+		par->cmap_adr = NULL;
+		iounmap(info->screen_base);
 		kfree(info);
 		release_mem_region(res_start, res_size);
 		return;
@@ -524,6 +413,140 @@ static void __init offb_init_fb(const char *name, const char *full_name,
 	printk(KERN_INFO "fb%d: Open Firmware frame buffer device on %s\n",
 	       info->node, full_name);
 }
+
+
+static void __init offb_init_nodriver(struct device_node *dp, int no_real_node)
+{
+	unsigned int len;
+	int i, width = 640, height = 480, depth = 8, pitch = 640;
+	unsigned int flags, rsize, addr_prop = 0;
+	unsigned long max_size = 0;
+	u64 rstart, address = OF_BAD_ADDR;
+	const u32 *pp, *addrp, *up;
+	u64 asize;
+
+	pp = of_get_property(dp, "linux,bootx-depth", &len);
+	if (pp == NULL)
+		pp = of_get_property(dp, "depth", &len);
+	if (pp && len == sizeof(u32))
+		depth = *pp;
+
+	pp = of_get_property(dp, "linux,bootx-width", &len);
+	if (pp == NULL)
+		pp = of_get_property(dp, "width", &len);
+	if (pp && len == sizeof(u32))
+		width = *pp;
+
+	pp = of_get_property(dp, "linux,bootx-height", &len);
+	if (pp == NULL)
+		pp = of_get_property(dp, "height", &len);
+	if (pp && len == sizeof(u32))
+		height = *pp;
+
+	pp = of_get_property(dp, "linux,bootx-linebytes", &len);
+	if (pp == NULL)
+		pp = of_get_property(dp, "linebytes", &len);
+	if (pp && len == sizeof(u32) && (*pp != 0xffffffffu))
+		pitch = *pp;
+	else
+		pitch = width * ((depth + 7) / 8);
+
+	rsize = (unsigned long)pitch * (unsigned long)height;
+
+	/* Ok, now we try to figure out the address of the framebuffer.
+	 *
+	 * Unfortunately, Open Firmware doesn't provide a standard way to do
+	 * so. All we can do is a dodgy heuristic that happens to work in
+	 * practice. On most machines, the "address" property contains what
+	 * we need, though not on Matrox cards found in IBM machines. What I've
+	 * found that appears to give good results is to go through the PCI
+	 * ranges and pick one that is both big enough and if possible encloses
+	 * the "address" property. If none match, we pick the biggest
+	 */
+	up = of_get_property(dp, "linux,bootx-addr", &len);
+	if (up == NULL)
+		up = of_get_property(dp, "address", &len);
+	if (up && len == sizeof(u32))
+		addr_prop = *up;
+
+	/* Hack for when BootX is passing us */
+	if (no_real_node)
+		goto skip_addr;
+
+	for (i = 0; (addrp = of_get_address(dp, i, &asize, &flags))
+		     != NULL; i++) {
+		int match_addrp = 0;
+
+		if (!(flags & IORESOURCE_MEM))
+			continue;
+		if (asize < rsize)
+			continue;
+		rstart = of_translate_address(dp, addrp);
+		if (rstart == OF_BAD_ADDR)
+			continue;
+		if (addr_prop && (rstart <= addr_prop) &&
+		    ((rstart + asize) >= (addr_prop + rsize)))
+			match_addrp = 1;
+		if (match_addrp) {
+			address = addr_prop;
+			break;
+		}
+		if (rsize > max_size) {
+			max_size = rsize;
+			address = OF_BAD_ADDR;
+ 		}
+
+		if (address == OF_BAD_ADDR)
+			address = rstart;
+	}
+ skip_addr:
+	if (address == OF_BAD_ADDR && addr_prop)
+		address = (u64)addr_prop;
+	if (address != OF_BAD_ADDR) {
+		/* kludge for valkyrie */
+		if (strcmp(dp->name, "valkyrie") == 0)
+			address += 0x1000;
+		offb_init_fb(no_real_node ? "bootx" : dp->name,
+			     no_real_node ? "display" : dp->full_name,
+			     width, height, depth, pitch, address,
+			     no_real_node ? NULL : dp);
+	}
+}
+
+static int __init offb_init(void)
+{
+	struct device_node *dp = NULL, *boot_disp = NULL;
+
+	if (fb_get_options("offb", NULL))
+		return -ENODEV;
+
+	/* Check if we have a MacOS display without a node spec */
+	if (of_get_property(of_chosen, "linux,bootx-noscreen", NULL) != NULL) {
+		/* The old code tried to work out which node was the MacOS
+		 * display based on the address. I'm dropping that since the
+		 * lack of a node spec only happens with old BootX versions
+		 * (users can update) and with this code, they'll still get
+		 * a display (just not the palette hacks).
+		 */
+		offb_init_nodriver(of_chosen, 1);
+	}
+
+	for (dp = NULL; (dp = of_find_node_by_type(dp, "display"));) {
+		if (of_get_property(dp, "linux,opened", NULL) &&
+		    of_get_property(dp, "linux,boot-display", NULL)) {
+			boot_disp = dp;
+			offb_init_nodriver(dp, 0);
+		}
+	}
+	for (dp = NULL; (dp = of_find_node_by_type(dp, "display"));) {
+		if (of_get_property(dp, "linux,opened", NULL) &&
+		    dp != boot_disp)
+			offb_init_nodriver(dp, 0);
+	}
+
+	return 0;
+}
+
 
 module_init(offb_init);
 MODULE_LICENSE("GPL");

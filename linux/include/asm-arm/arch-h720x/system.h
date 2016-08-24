@@ -1,5 +1,5 @@
 /*
- * linux/arch/arm/mach-h720x/system.h
+ * linux/include/asm-arm/arch-h720x/system.h
  *
  * Copyright (C) 2001-2002 Jungjun Kim, Hynix Semiconductor Inc.
  *
@@ -17,9 +17,11 @@
 static void arch_idle(void)
 {
 	CPU_REG (PMU_BASE, PMU_MODE) = PMU_MODE_IDLE;
-	__asm__ __volatile__(
-	"mov	r0, r0\n\t"
-	"mov	r0, r0");
+	nop();
+	nop();
+	CPU_REG (PMU_BASE, PMU_MODE) = PMU_MODE_RUN;
+	nop();
+	nop();
 }
 
 

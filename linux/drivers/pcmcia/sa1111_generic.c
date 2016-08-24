@@ -5,7 +5,6 @@
  * basically means we handle everything except controlling the
  * power.  Power is machine specific...
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
@@ -122,7 +121,7 @@ void sa1111_pcmcia_socket_suspend(struct soc_pcmcia_socket *skt)
 
 static int pcmcia_probe(struct sa1111_dev *dev)
 {
-	char *base;
+	void __iomem *base;
 
 	if (!request_mem_region(dev->res.start, 512,
 				SA1111_DRIVER_NAME(dev)))
@@ -158,7 +157,7 @@ static int __devexit pcmcia_remove(struct sa1111_dev *dev)
 	return 0;
 }
 
-static int pcmcia_suspend(struct sa1111_dev *dev, u32 state)
+static int pcmcia_suspend(struct sa1111_dev *dev, pm_message_t state)
 {
 	return pcmcia_socket_dev_suspend(&dev->dev, state);
 }
@@ -189,7 +188,7 @@ static void __exit sa1111_drv_pcmcia_exit(void)
 	sa1111_driver_unregister(&pcmcia_driver);
 }
 
-module_init(sa1111_drv_pcmcia_init);
+fs_initcall(sa1111_drv_pcmcia_init);
 module_exit(sa1111_drv_pcmcia_exit);
 
 MODULE_DESCRIPTION("SA1111 PCMCIA card socket driver");

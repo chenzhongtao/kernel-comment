@@ -22,7 +22,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/kernel.h>
@@ -30,7 +29,6 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/timer.h>
 
 #include <linux/device.h>
 #include <linux/firmware.h>
@@ -44,7 +42,7 @@
 #define BT_DBG(D...)
 #endif
 
-#define VERSION "1.0"
+#define VERSION "1.1"
 
 static int ignore = 0;
 
@@ -73,7 +71,7 @@ struct bcm203x_data {
 
 	unsigned long		state;
 
-	struct timer_list	timer;
+	struct work_struct	work;
 
 	struct urb		*urb;
 	unsigned char		*buffer;
@@ -83,7 +81,7 @@ struct bcm203x_data {
 	unsigned int		fw_sent;
 };
 
-static void bcm203x_complete(struct urb *urb, struct pt_regs *regs)
+static void bcm203x_complete(struct urb *urb)
 {
 	struct bcm203x_data *data = urb->context;
 	struct usb_device *udev = urb->dev;
@@ -106,7 +104,7 @@ static void bcm203x_complete(struct urb *urb, struct pt_regs *regs)
 
 		data->state = BCM203X_SELECT_MEMORY;
 
-		mod_timer(&data->timer, jiffies + (HZ / 10));
+		schedule_work(&data->work);
 		break;
 
 	case BCM203X_SELECT_MEMORY:
@@ -159,9 +157,10 @@ static void bcm203x_complete(struct urb *urb, struct pt_regs *regs)
 	}
 }
 
-static void bcm203x_timer(unsigned long user_data)
+static void bcm203x_work(struct work_struct *work)
 {
-	struct bcm203x_data *data = (struct bcm203x_data *) user_data;
+	struct bcm203x_data *data =
+		container_of(work, struct bcm203x_data, work);
 
 	if (usb_submit_urb(data->urb, GFP_ATOMIC) < 0)
 		BT_ERR("Can't submit URB");
@@ -179,13 +178,11 @@ static int bcm203x_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (ignore || (intf->cur_altsetting->desc.bInterfaceNumber != 0))
 		return -ENODEV;
 
-	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (!data) {
 		BT_ERR("Can't allocate memory for data structure");
 		return -ENOMEM;
 	}
-
-	memset(data, 0, sizeof(*data));
 
 	data->udev  = udev;
 	data->state = BCM203X_LOAD_MINIDRV;
@@ -237,6 +234,7 @@ static int bcm203x_probe(struct usb_interface *intf, const struct usb_device_id 
 	data->fw_data = kmalloc(firmware->size, GFP_KERNEL);
 	if (!data->fw_data) {
 		BT_ERR("Can't allocate memory for firmware image");
+		release_firmware(firmware);
 		usb_free_urb(data->urb);
 		kfree(data->buffer);
 		kfree(data);
@@ -249,13 +247,11 @@ static int bcm203x_probe(struct usb_interface *intf, const struct usb_device_id 
 
 	release_firmware(firmware);
 
-	init_timer(&data->timer);
-	data->timer.function = bcm203x_timer;
-	data->timer.data = (unsigned long) data;
+	INIT_WORK(&data->work, bcm203x_work);
 
 	usb_set_intfdata(intf, data);
 
-	mod_timer(&data->timer, jiffies + HZ);
+	schedule_work(&data->work);
 
 	return 0;
 }
@@ -277,7 +273,6 @@ static void bcm203x_disconnect(struct usb_interface *intf)
 }
 
 static struct usb_driver bcm203x_driver = {
-	.owner		= THIS_MODULE,
 	.name		= "bcm203x",
 	.probe		= bcm203x_probe,
 	.disconnect	= bcm203x_disconnect,
@@ -312,3 +307,5 @@ MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Broadcom Blutonium firmware driver ver " VERSION);
 MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");
+MODULE_FIRMWARE("BCM2033-MD.hex");
+MODULE_FIRMWARE("BCM2033-FW.bin");

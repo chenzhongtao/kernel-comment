@@ -19,18 +19,46 @@
 #include <linux/rwsem.h>
 #include <linux/rbtree.h>
 #include <linux/seqlock.h>
+#include <linux/mutex.h>
+
+/* data type for block offset of block group */
+typedef int ext3_grpblk_t;
+
+/* data type for filesystem-wide blocks number */
+typedef unsigned long ext3_fsblk_t;
+
+#define E3FSBLK "%lu"
 
 struct ext3_reserve_window {
-	__u32			_rsv_start;	/* First byte reserved */
-	__u32			_rsv_end;	/* Last byte reserved or 0 */
+	ext3_fsblk_t	_rsv_start;	/* First byte reserved */
+	ext3_fsblk_t	_rsv_end;	/* Last byte reserved or 0 */
 };
 
 struct ext3_reserve_window_node {
-	struct rb_node	 	rsv_node;
-	atomic_t		rsv_goal_size;
-	atomic_t		rsv_alloc_hit;
-	seqlock_t		rsv_seqlock;
+	struct rb_node		rsv_node;
+	__u32			rsv_goal_size;
+	__u32			rsv_alloc_hit;
 	struct ext3_reserve_window	rsv_window;
+};
+
+struct ext3_block_alloc_info {
+	/* information about reservation window */
+	struct ext3_reserve_window_node	rsv_window_node;
+	/*
+	 * was i_next_alloc_block in ext3_inode_info
+	 * is the logical (file-relative) number of the
+	 * most-recently-allocated block in this file.
+	 * We use this for detecting linearly ascending allocation requests.
+	 */
+	__u32                   last_alloc_logical_block;
+	/*
+	 * Was i_next_alloc_goal in ext3_inode_info
+	 * is the *physical* companion to i_next_alloc_block.
+	 * it the physical block number of the block which was most-recentl
+	 * allocated to this file.  This give us the goal (target) for the next
+	 * allocation when we detect linearly ascending requests.
+	 */
+	ext3_fsblk_t		last_alloc_physical_block;
 };
 
 #define rsv_start rsv_window._rsv_start
@@ -47,7 +75,7 @@ struct ext3_inode_info {
 	__u8	i_frag_no;
 	__u8	i_frag_size;
 #endif
-	__u32	i_file_acl;
+	ext3_fsblk_t	i_file_acl;
 	__u32	i_dir_acl;
 	__u32	i_dtime;
 
@@ -61,28 +89,14 @@ struct ext3_inode_info {
 	__u32	i_block_group;
 	__u32	i_state;		/* Dynamic state flags for ext3 */
 
-	/*
-	 * i_next_alloc_block is the logical (file-relative) number of the
-	 * most-recently-allocated block in this file.  Yes, it is misnamed.
-	 * We use this for detecting linearly ascending allocation requests.
-	 */
-	__u32	i_next_alloc_block;
-
-	/*
-	 * i_next_alloc_goal is the *physical* companion to i_next_alloc_block.
-	 * it the the physical block number of the block which was most-recently
-	 * allocated to this file.  This give us the goal (target) for the next
-	 * allocation when we detect linearly ascending requests.
-	 */
-	__u32	i_next_alloc_goal;
-	/* block reservation window */
-	struct ext3_reserve_window_node i_rsv_window;
+	/* block reservation info */
+	struct ext3_block_alloc_info *i_block_alloc_info;
 
 	__u32	i_dir_start_lookup;
 #ifdef CONFIG_EXT3_FS_XATTR
 	/*
 	 * Extended attributes can be read independently of the main file
-	 * data. Taking i_sem even when reading would cause contention
+	 * data. Taking i_mutex even when reading would cause contention
 	 * between readers of EAs and writers of regular file data, so
 	 * instead we synchronize on xattr_sem when reading or changing
 	 * EAs.
@@ -117,16 +131,16 @@ struct ext3_inode_info {
 	__u16 i_extra_isize;
 
 	/*
-	 * truncate_sem is for serialising ext3_truncate() against
+	 * truncate_mutex is for serialising ext3_truncate() against
 	 * ext3_getblock().  In the 2.4 ext2 design, great chunks of inode's
 	 * data tree are chopped off during truncate. We can't do that in
 	 * ext3 because whenever we perform intermediate commits during
 	 * truncate, the inode and all the metadata blocks *must* be in a
 	 * consistent state which allows truncation of the orphans to restart
 	 * during recovery.  Hence we must fix the get_block-vs-truncate race
-	 * by other means, so we have truncate_sem.
+	 * by other means, so we have truncate_mutex.
 	 */
-	struct semaphore truncate_sem;
+	struct mutex truncate_mutex;
 	struct inode vfs_inode;
 };
 

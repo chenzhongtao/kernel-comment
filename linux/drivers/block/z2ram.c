@@ -44,9 +44,6 @@
 extern int m68k_realnum_memory;
 extern struct mem_info m68k_memory[NUM_MEMINFO];
 
-#define TRUE                  (1)
-#define FALSE                 (0)
-
 #define Z2MINOR_COMBINED      (0)
 #define Z2MINOR_Z2ONLY        (1)
 #define Z2MINOR_CHIPONLY      (2)
@@ -70,7 +67,7 @@ static DEFINE_SPINLOCK(z2ram_lock);
 static struct block_device_operations z2_fops;
 static struct gendisk *z2ram_gendisk;
 
-static void do_z2_request(request_queue_t *q)
+static void do_z2_request(struct request_queue *q)
 {
 	struct request *req;
 	while ((req = elv_next_request(q)) != NULL) {
@@ -296,7 +293,7 @@ z2_open( struct inode *inode, struct file *filp )
     return 0;
 
 err_out_kfree:
-    kfree( z2ram_map );
+    kfree(z2ram_map);
 err_out:
     return rc;
 }
@@ -329,7 +326,7 @@ static struct kobject *z2_find(dev_t dev, int *part, void *data)
 
 static struct request_queue *z2_queue;
 
-int __init 
+static int __init 
 z2_init(void)
 {
     int ret;
@@ -354,7 +351,6 @@ z2_init(void)
     z2ram_gendisk->first_minor = 0;
     z2ram_gendisk->fops = &z2_fops;
     sprintf(z2ram_gendisk->disk_name, "z2ram");
-    strcpy(z2ram_gendisk->devfs_name, z2ram_gendisk->disk_name);
 
     z2ram_gendisk->queue = z2_queue;
     add_disk(z2ram_gendisk);
@@ -371,32 +367,11 @@ err:
     return ret;
 }
 
-#if defined(MODULE)
-
-MODULE_LICENSE("GPL");
-
-int
-init_module( void )
-{
-    int error;
-    
-    error = z2_init();
-    if ( error == 0 )
-    {
-	printk( KERN_INFO DEVICE_NAME ": loaded as module\n" );
-    }
-    
-    return error;
-}
-
-void
-cleanup_module( void )
+static void __exit z2_exit(void)
 {
     int i, j;
     blk_unregister_region(MKDEV(Z2RAM_MAJOR, 0), 256);
-    if ( unregister_blkdev( Z2RAM_MAJOR, DEVICE_NAME ) != 0 )
-	printk( KERN_ERR DEVICE_NAME ": unregister of device failed\n");
-
+    unregister_blkdev(Z2RAM_MAJOR, DEVICE_NAME);
     del_gendisk(z2ram_gendisk);
     put_disk(z2ram_gendisk);
     blk_cleanup_queue(z2_queue);
@@ -426,4 +401,7 @@ cleanup_module( void )
 
     return;
 } 
-#endif
+
+module_init(z2_init);
+module_exit(z2_exit);
+MODULE_LICENSE("GPL");

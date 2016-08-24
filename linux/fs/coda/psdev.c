@@ -28,7 +28,6 @@
 #include <linux/delay.h>
 #include <linux/skbuff.h>
 #include <linux/proc_fs.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/vmalloc.h>
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -46,14 +45,8 @@
 #include <linux/coda_linux.h>
 #include <linux/coda_fs_i.h>
 #include <linux/coda_psdev.h>
-#include <linux/coda_proc.h>
 
-#define upc_free(r) kfree(r)
-
-/* 
- * Coda stuff
- */
-extern struct file_system_type coda_fs_type;
+#include "coda_int.h"
 
 /* statistics */
 int           coda_hard;         /* allows signals during upcalls */
@@ -61,7 +54,7 @@ unsigned long coda_timeout = 30; /* .. secs, then signals will dequeue */
 
 
 struct venus_comm coda_comms[MAX_CODADEVS];
-static struct class_simple *coda_psdev_class;
+static struct class *coda_psdev_class;
 
 /*
  * Device operations
@@ -199,7 +192,8 @@ static ssize_t coda_psdev_write(struct file *file, const char __user *buf,
 	if (req->uc_opcode == CODA_OPEN_BY_FD) {
 		struct coda_open_by_fd_out *outp =
 			(struct coda_open_by_fd_out *)req->uc_data;
-		outp->fh = fget(outp->fd);
+		if (!outp->oh.result)
+			outp->fh = fget(outp->fd);
 	}
 
         wake_up(&req->uc_sleep);
@@ -262,12 +256,12 @@ static ssize_t coda_psdev_read(struct file * file, char __user * buf,
 	/* If request was not a signal, enqueue and don't free */
 	if (!(req->uc_flags & REQ_ASYNC)) {
 		req->uc_flags |= REQ_READ;
-		list_add(&(req->uc_chain), vcp->vc_processing.prev);
+		list_add_tail(&(req->uc_chain), &vcp->vc_processing);
 		goto out;
 	}
 
 	CODA_FREE(req->uc_data, sizeof(struct coda_in_hdr));
-	upc_free(req);
+	kfree(req);
 out:
 	unlock_kernel();
 	return (count ? count : retval);
@@ -275,77 +269,76 @@ out:
 
 static int coda_psdev_open(struct inode * inode, struct file * file)
 {
-        struct venus_comm *vcp;
-	int idx;
+	struct venus_comm *vcp;
+	int idx, err;
+
+	idx = iminor(inode);
+	if (idx < 0 || idx >= MAX_CODADEVS)
+		return -ENODEV;
 
 	lock_kernel();
-	idx = iminor(inode);
-	if(idx >= MAX_CODADEVS) {
-		unlock_kernel();
-		return -ENODEV;
-	}
 
+	err = -EBUSY;
 	vcp = &coda_comms[idx];
-	if(vcp->vc_inuse) {
-		unlock_kernel();
-		return -EBUSY;
-	}
-	
-	if (!vcp->vc_inuse++) {
+	if (!vcp->vc_inuse) {
+		vcp->vc_inuse++;
+
 		INIT_LIST_HEAD(&vcp->vc_pending);
 		INIT_LIST_HEAD(&vcp->vc_processing);
 		init_waitqueue_head(&vcp->vc_waitq);
 		vcp->vc_sb = NULL;
 		vcp->vc_seq = 0;
+
+		file->private_data = vcp;
+		err = 0;
 	}
-	
-	file->private_data = vcp;
 
 	unlock_kernel();
-        return 0;
+	return err;
 }
 
 
 static int coda_psdev_release(struct inode * inode, struct file * file)
 {
-        struct venus_comm *vcp = (struct venus_comm *) file->private_data;
-        struct upc_req *req, *tmp;
+	struct venus_comm *vcp = (struct venus_comm *) file->private_data;
+	struct upc_req *req, *tmp;
 
-	lock_kernel();
-	if ( !vcp->vc_inuse ) {
-		unlock_kernel();
+	if (!vcp || !vcp->vc_inuse ) {
 		printk("psdev_release: Not open.\n");
 		return -1;
 	}
 
-	if (--vcp->vc_inuse) {
-		unlock_kernel();
-		return 0;
-	}
-        
-        /* Wakeup clients so they can return. */
+	lock_kernel();
+
+	/* Wakeup clients so they can return. */
 	list_for_each_entry_safe(req, tmp, &vcp->vc_pending, uc_chain) {
+		list_del(&req->uc_chain);
+
 		/* Async requests need to be freed here */
 		if (req->uc_flags & REQ_ASYNC) {
 			CODA_FREE(req->uc_data, sizeof(struct coda_in_hdr));
-			upc_free(req);
+			kfree(req);
 			continue;
 		}
 		req->uc_flags |= REQ_ABORT;
 		wake_up(&req->uc_sleep);
-        }
-        
-	list_for_each_entry(req, &vcp->vc_processing, uc_chain) {
-		req->uc_flags |= REQ_ABORT;
-	        wake_up(&req->uc_sleep);
-        }
+	}
 
+	list_for_each_entry_safe(req, tmp, &vcp->vc_processing, uc_chain) {
+		list_del(&req->uc_chain);
+
+		req->uc_flags |= REQ_ABORT;
+		wake_up(&req->uc_sleep);
+	}
+
+	file->private_data = NULL;
+	vcp->vc_inuse--;
 	unlock_kernel();
 	return 0;
 }
 
 
-static struct file_operations coda_psdev_fops = {
+static const struct file_operations coda_psdev_fops = {
 	.owner		= THIS_MODULE,
 	.read		= coda_psdev_read,
 	.write		= coda_psdev_write,
@@ -363,50 +356,37 @@ static int init_coda_psdev(void)
 		     CODA_PSDEV_MAJOR);
               return -EIO;
 	}
-	coda_psdev_class = class_simple_create(THIS_MODULE, "coda");
+	coda_psdev_class = class_create(THIS_MODULE, "coda");
 	if (IS_ERR(coda_psdev_class)) {
 		err = PTR_ERR(coda_psdev_class);
 		goto out_chrdev;
 	}		
-	devfs_mk_dir ("coda");
-	for (i = 0; i < MAX_CODADEVS; i++) {
-		class_simple_device_add(coda_psdev_class, MKDEV(CODA_PSDEV_MAJOR,i), 
-				NULL, "cfs%d", i);
-		err = devfs_mk_cdev(MKDEV(CODA_PSDEV_MAJOR, i),
-				S_IFCHR|S_IRUSR|S_IWUSR, "coda/%d", i);
-		if (err)
-			goto out_class;
-	}
+	for (i = 0; i < MAX_CODADEVS; i++)
+		class_device_create(coda_psdev_class, NULL,
+				MKDEV(CODA_PSDEV_MAJOR,i), NULL, "cfs%d", i);
 	coda_sysctl_init();
 	goto out;
 
-out_class:
-	for (i = 0; i < MAX_CODADEVS; i++) 
-		class_simple_device_remove(MKDEV(CODA_PSDEV_MAJOR, i));
-	class_simple_destroy(coda_psdev_class);
 out_chrdev:
 	unregister_chrdev(CODA_PSDEV_MAJOR, "coda");
 out:
 	return err;
 }
 
-
-MODULE_AUTHOR("Peter J. Braam <braam@cs.cmu.edu>");
+MODULE_AUTHOR("Jan Harkes, Peter J. Braam");
+MODULE_DESCRIPTION("Coda Distributed File System VFS interface");
+MODULE_ALIAS_CHARDEV_MAJOR(CODA_PSDEV_MAJOR);
 MODULE_LICENSE("GPL");
+#ifdef CONFIG_CODA_FS_OLD_API
+MODULE_VERSION("5.3.21");
+#else
+MODULE_VERSION("6.6");
+#endif
 
-extern int coda_init_inodecache(void);
-extern void coda_destroy_inodecache(void);
 static int __init init_coda(void)
 {
 	int status;
 	int i;
-	printk(KERN_INFO "Coda Kernel/Venus communications, "
-#ifdef CONFIG_CODA_FS_OLD_API
-	       "v5.3.20"
-#else
-	       "v6.0.0"
-#endif
-	       ", coda@cs.cmu.edu\n");
 
 	status = coda_init_inodecache();
 	if (status)
@@ -424,12 +404,9 @@ static int __init init_coda(void)
 	}
 	return 0;
 out:
-	for (i = 0; i < MAX_CODADEVS; i++) {
-		class_simple_device_remove(MKDEV(CODA_PSDEV_MAJOR, i));
-		devfs_remove("coda/%d", i);
-	}
-	class_simple_destroy(coda_psdev_class);
-	devfs_remove("coda");
+	for (i = 0; i < MAX_CODADEVS; i++)
+		class_device_destroy(coda_psdev_class, MKDEV(CODA_PSDEV_MAJOR, i));
+	class_destroy(coda_psdev_class);
 	unregister_chrdev(CODA_PSDEV_MAJOR, "coda");
 	coda_sysctl_clean();
 out1:
@@ -446,12 +423,9 @@ static void __exit exit_coda(void)
         if ( err != 0 ) {
                 printk("coda: failed to unregister filesystem\n");
         }
-	for (i = 0; i < MAX_CODADEVS; i++) {
-		class_simple_device_remove(MKDEV(CODA_PSDEV_MAJOR, i));
-		devfs_remove("coda/%d", i);
-	}
-	class_simple_destroy(coda_psdev_class);
-	devfs_remove("coda");
+	for (i = 0; i < MAX_CODADEVS; i++)
+		class_device_destroy(coda_psdev_class, MKDEV(CODA_PSDEV_MAJOR, i));
+	class_destroy(coda_psdev_class);
 	unregister_chrdev(CODA_PSDEV_MAJOR, "coda");
 	coda_sysctl_clean();
 	coda_destroy_inodecache();

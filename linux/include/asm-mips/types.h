@@ -34,9 +34,9 @@ typedef unsigned long __u64;
 
 #else
 
-#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
-typedef __signed__ long long __s64;
-typedef unsigned long long __u64;
+#if defined(__GNUC__)
+__extension__ typedef __signed__ long long __s64;
+__extension__ typedef unsigned long long __u64;
 #endif
 
 #endif
@@ -52,7 +52,6 @@ typedef unsigned long long __u64;
 
 #ifndef __ASSEMBLY__
 
-#include <linux/config.h>
 
 typedef __signed char s8;
 typedef unsigned char u8;
@@ -78,7 +77,7 @@ typedef unsigned long long u64;
 #endif
 
 #if (defined(CONFIG_HIGHMEM) && defined(CONFIG_64BIT_PHYS_ADDR)) \
-    || defined(CONFIG_MIPS64)
+    || defined(CONFIG_64BIT)
 typedef u64 dma_addr_t;
 #else
 typedef u32 dma_addr_t;
@@ -93,13 +92,6 @@ typedef unsigned long long phys_t;
 #else
 typedef unsigned long phys_t;
 #endif
-
-#ifdef CONFIG_LBD
-typedef u64 sector_t;
-#define HAVE_SECTOR_T
-#endif
-
-typedef unsigned short kmem_bufctl_t;
 
 #endif /* __ASSEMBLY__ */
 

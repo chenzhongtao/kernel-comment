@@ -1,8 +1,8 @@
 /*
  * BRIEF MODULE DESCRIPTION
- *	Alchemy/AMD Au1x00 pci support.
+ *	Alchemy/AMD Au1x00 PCI support.
  *
- * Copyright 2001,2002,2003 MontaVista Software Inc.
+ * Copyright 2001-2003, 2007 MontaVista Software Inc.
  * Author: MontaVista Software, Inc.
  *         	ppopov@mvista.com or source@mvista.com
  *
@@ -28,7 +28,6 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
@@ -50,11 +49,6 @@
 
 int (*board_pci_idsel)(unsigned int devsel, int assert);
 
-/* CP0 hazard avoidance. */
-#define BARRIER __asm__ __volatile__(".set noreorder\n\t" \
-				     "nop; nop; nop; nop;\t" \
-				     ".set reorder\n\t")
-
 void mod_wired_entry(int entry, unsigned long entrylo0,
 		unsigned long entrylo1, unsigned long entryhi,
 		unsigned long pagemask)
@@ -66,23 +60,36 @@ void mod_wired_entry(int entry, unsigned long entrylo0,
 	old_ctx = read_c0_entryhi() & 0xff;
 	old_pagemask = read_c0_pagemask();
 	write_c0_index(entry);
-	BARRIER;
 	write_c0_pagemask(pagemask);
 	write_c0_entryhi(entryhi);
 	write_c0_entrylo0(entrylo0);
 	write_c0_entrylo1(entrylo1);
-	BARRIER;
 	tlb_write_indexed();
-	BARRIER;
 	write_c0_entryhi(old_ctx);
-	BARRIER;
 	write_c0_pagemask(old_pagemask);
 }
 
-struct vm_struct *pci_cfg_vm;
+static struct vm_struct *pci_cfg_vm;
 static int pci_cfg_wired_entry;
-static int first_cfg = 1;
-unsigned long last_entryLo0, last_entryLo1;
+static unsigned long last_entryLo0, last_entryLo1;
+
+/*
+ * We can't ioremap the entire pci config space because it's too large.
+ * Nor can we call ioremap dynamically because some device drivers use
+ * the PCI config routines from within interrupt handlers and that
+ * becomes a problem in get_vm_area().  We use one wired TLB to handle
+ * all config accesses for all busses.
+ */
+void __init au1x_pci_cfg_init(void)
+{
+	/* Reserve a wired entry for PCI config accesses */
+	pci_cfg_vm = get_vm_area(0x2000, VM_IOREMAP);
+	if (!pci_cfg_vm)
+		panic(KERN_ERR "PCI unable to get vm area\n");
+	pci_cfg_wired_entry = read_c0_wired();
+	add_wired_entry(0, 0, (unsigned long)pci_cfg_vm->addr, PM_4K);
+	last_entryLo0 = last_entryLo1 = 0xffffffff;
+}
 
 static int config_access(unsigned char access_type, struct pci_bus *bus,
 			 unsigned int dev_fn, unsigned char where,
@@ -107,30 +114,8 @@ static int config_access(unsigned char access_type, struct pci_bus *bus,
 			Au1500_PCI_STATCMD);
 	au_sync_udelay(1);
 
-	/*
-	 * We can't ioremap the entire pci config space because it's
-	 * too large. Nor can we call ioremap dynamically because some
-	 * device drivers use the pci config routines from within
-	 * interrupt handlers and that becomes a problem in get_vm_area().
-	 * We use one wired tlb to handle all config accesses for all
-	 * busses. To improve performance, if the current device
-	 * is the same as the last device accessed, we don't touch the
-	 * tlb.
-	 */
-	if (first_cfg) {
-		/* reserve a wired entry for pci config accesses */
-		first_cfg = 0;
-		pci_cfg_vm = get_vm_area(0x2000, 0);
-		if (!pci_cfg_vm)
-			panic (KERN_ERR "PCI unable to get vm area\n");
-		pci_cfg_wired_entry = read_c0_wired();
-		add_wired_entry(0, 0, (unsigned long)pci_cfg_vm->addr, PM_4K);
-		last_entryLo0  = last_entryLo1 = 0xffffffff;
-	}
-
-	/* Since the Au1xxx doesn't do the idsel timing exactly to spec,
-	 * many board vendors implement their own off-chip idsel, so call
-	 * it now.  If it doesn't succeed, may as well bail out at this point.
+	/* Allow board vendors to implement their own off-chip idsel.
+	 * If it doesn't succeed, may as well bail out at this point.
 	 */
 	if (board_pci_idsel) {
 		if (board_pci_idsel(device, 1) == 0) {
@@ -155,9 +140,12 @@ static int config_access(unsigned char access_type, struct pci_bus *bus,
 	/* page boundary */
 	cfg_base = cfg_base & PAGE_MASK;
 
+	/*
+	 * To improve performance, if the current device is the same as
+	 * the last device accessed, we don't touch the TLB.
+	 */
 	entryLo0 = (6 << 26)  | (cfg_base >> 6) | (2 << 3) | 7;
 	entryLo1 = (6 << 26)  | (cfg_base >> 6) | (0x1000 >> 6) | (2 << 3) | 7;
-
 	if ((entryLo0 != last_entryLo0) || (entryLo1 != last_entryLo1)) {
 		mod_wired_entry(pci_cfg_wired_entry, entryLo0, entryLo1,
 				(unsigned long)pci_cfg_vm->addr, PM_4K);
@@ -183,7 +171,11 @@ static int config_access(unsigned char access_type, struct pci_bus *bus,
 		error = -1;
 		DBG("Au1x Master Abort\n");
 	} else if ((status >> 28) & 0xf) {
-		DBG("PCI ERR detected: status %x\n", status);
+		DBG("PCI ERR detected: device %d, status %x\n", device, ((status >> 28) & 0xf));
+
+		/* clear errors */
+		au_writel(status & 0xf000ffff, Au1500_PCI_STATCMD);
+
 		*data = 0xffffffff;
 		error = -1;
 	}

@@ -30,7 +30,7 @@ static struct ebt_entries initial_chains[] =
 	},
 };
 
-static struct ebt_replace initial_table =
+static struct ebt_replace_kernel initial_table =
 {
 	.name		= "filter",
 	.valid_hooks	= FILTER_VALID_HOOKS,
@@ -51,20 +51,20 @@ static int check(const struct ebt_table_info *info, unsigned int valid_hooks)
 }
 
 static struct ebt_table frame_filter =
-{ 
+{
 	.name		= "filter",
 	.table		= &initial_table,
-	.valid_hooks	= FILTER_VALID_HOOKS, 
+	.valid_hooks	= FILTER_VALID_HOOKS,
 	.lock		= RW_LOCK_UNLOCKED,
 	.check		= check,
 	.me		= THIS_MODULE,
 };
 
 static unsigned int
-ebt_hook (unsigned int hook, struct sk_buff **pskb, const struct net_device *in,
+ebt_hook(unsigned int hook, struct sk_buff *skb, const struct net_device *in,
    const struct net_device *out, int (*okfn)(struct sk_buff *))
 {
-	return ebt_do_table(hook, pskb, in, out, &frame_filter);
+	return ebt_do_table(hook, skb, in, out, &frame_filter);
 }
 
 static struct nf_hook_ops ebt_ops_filter[] = {
@@ -91,7 +91,7 @@ static struct nf_hook_ops ebt_ops_filter[] = {
 	},
 };
 
-static int __init init(void)
+static int __init ebtable_filter_init(void)
 {
 	int i, j, ret;
 
@@ -109,7 +109,7 @@ cleanup:
 	return ret;
 }
 
-static void __exit fini(void)
+static void __exit ebtable_filter_fini(void)
 {
 	int i;
 
@@ -118,6 +118,6 @@ static void __exit fini(void)
 	ebt_unregister_table(&frame_filter);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ebtable_filter_init);
+module_exit(ebtable_filter_fini);
 MODULE_LICENSE("GPL");

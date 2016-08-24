@@ -328,7 +328,7 @@ adpcm_state *
 isdn_audio_adpcm_init(adpcm_state * s, int nbits)
 {
 	if (!s)
-		s = (adpcm_state *) kmalloc(sizeof(adpcm_state), GFP_ATOMIC);
+		s = kmalloc(sizeof(adpcm_state), GFP_ATOMIC);
 	if (s) {
 		s->a = 0;
 		s->d = 5;
@@ -343,7 +343,7 @@ dtmf_state *
 isdn_audio_dtmf_init(dtmf_state * s)
 {
 	if (!s)
-		s = (dtmf_state *) kmalloc(sizeof(dtmf_state), GFP_ATOMIC);
+		s = kmalloc(sizeof(dtmf_state), GFP_ATOMIC);
 	if (s) {
 		s->idx = 0;
 		s->last = ' ';
@@ -388,16 +388,6 @@ isdn_audio_adpcm2xlaw(adpcm_state * s, int fmt, unsigned char *in,
 	}
 	s->a = a;
 	s->d = d;
-	return olen;
-}
-
-int
-isdn_audio_2adpcm_flush(adpcm_state * s, unsigned char *out)
-{
-	int olen = 0;
-
-	if (s->nleft)
-		isdn_audio_put_bits(0, 8 - s->nleft, s, &out, &olen);
 	return olen;
 }
 
@@ -631,7 +621,7 @@ silence_state *
 isdn_audio_silence_init(silence_state * s)
 {
 	if (!s)
-		s = (silence_state *) kmalloc(sizeof(silence_state), GFP_ATOMIC);
+		s = kmalloc(sizeof(silence_state), GFP_ATOMIC);
 	if (s) {
 		s->idx = 0;
 		s->state = 0;

@@ -5,9 +5,6 @@
  * Copyright (c) 2004  Hirokazu Takata
  */
 
-/* $Id$ */
-
-#include <linux/config.h>
 #include <linux/param.h>
 #ifdef CONFIG_SMP
 #include <linux/sched.h>

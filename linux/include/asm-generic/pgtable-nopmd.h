@@ -5,6 +5,8 @@
 
 #include <asm-generic/pgtable-nopud.h>
 
+#define __PAGETABLE_PMD_FOLDED
+
 /*
  * Having the pmd type consist of a pud gets the size right, and allows
  * us to conceptually access the pud entry that this pmd is folded into
@@ -45,7 +47,7 @@ static inline pmd_t * pmd_offset(pud_t * pud, unsigned long address)
 #define __pmd(x)				((pmd_t) { __pud(x) } )
 
 #define pud_page(pud)				(pmd_page((pmd_t){ pud }))
-#define pud_page_kernel(pud)			(pmd_page_kernel((pmd_t){ pud }))
+#define pud_page_vaddr(pud)			(pmd_page_vaddr((pmd_t){ pud }))
 
 /*
  * allocating and freeing a pmd is trivial: the 1-entry pmd is
@@ -54,6 +56,9 @@ static inline pmd_t * pmd_offset(pud_t * pud, unsigned long address)
 #define pmd_alloc_one(mm, address)		NULL
 #define pmd_free(x)				do { } while (0)
 #define __pmd_free_tlb(tlb, x)			do { } while (0)
+
+#undef  pmd_addr_end
+#define pmd_addr_end(addr, end)			(end)
 
 #endif /* __ASSEMBLY__ */
 

@@ -11,11 +11,11 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/fs.h>
 #include <linux/module.h>
+#include <linux/kernel.h>
 
 #include <asm/machdep.h>
 #include <asm/v850e_uart.h>
@@ -67,8 +67,6 @@ void machine_restart (char *__unused)
 	asm ("jmp r0"); /* Jump to the reset vector.  */
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 /* This says `HALt.' in LEDese.  */
 static unsigned char halt_leds_msg[] = { 0x76, 0x77, 0x38, 0xF8 };
 
@@ -89,14 +87,10 @@ void machine_halt (void)
 		asm ("halt; nop; nop; nop; nop; nop");
 }
 
-EXPORT_SYMBOL(machine_halt);
-
 void machine_power_off (void)
 {
 	machine_halt ();
 }
-
-EXPORT_SYMBOL(machine_power_off);
 
 
 /* Animated LED display for timer tick.  */
@@ -183,8 +177,7 @@ static struct gbus_int_irq_init gbus_irq_inits[] = {
 #endif
 	{ 0 }
 };
-#define NUM_GBUS_IRQ_INITS  \
-   ((sizeof gbus_irq_inits / sizeof gbus_irq_inits[0]) - 1)
+#define NUM_GBUS_IRQ_INITS (ARRAY_SIZE(gbus_irq_inits) - 1)
 
 static struct hw_interrupt_type gbus_hw_itypes[NUM_GBUS_IRQ_INITS];
 

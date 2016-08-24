@@ -17,13 +17,13 @@
  *
  * SEAD specific setup.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/tty.h>
 #include <linux/serial.h>
 #include <linux/serial_core.h>
+#include <linux/serial_8250.h>
 
 #include <asm/cpu.h>
 #include <asm/bootinfo.h>
@@ -35,8 +35,6 @@
 #include <asm/time.h>
 
 extern void mips_reboot_setup(void);
-extern void mips_time_init(void);
-extern void mips_timer_setup(struct irqaction *irq);
 
 static void __init serial_init(void);
 
@@ -45,19 +43,16 @@ const char *get_system_type(void)
 	return "MIPS SEAD";
 }
 
-static void __init sead_setup(void)
+const char display_string[] = "        LINUX ON SEAD       ";
+
+void __init plat_mem_setup(void)
 {
 	ioport_resource.end = 0x7fffffff;
 
-	serial_init ();
-
-	board_time_init = mips_time_init;
-	board_timer_setup = mips_timer_setup;
+	serial_init();
 
 	mips_reboot_setup();
 }
-
-early_initcall(sead_setup);
 
 static void __init serial_init(void)
 {
@@ -71,10 +66,10 @@ static void __init serial_init(void)
 #else
 	s.iobase = SEAD_UART0_REGS_BASE+3;
 #endif
-	s.irq = SEADINT_UART0;
+	s.irq = MIPS_CPU_IRQ_BASE + MIPSCPU_INT_UART0;
 	s.uartclk = SEAD_BASE_BAUD * 16;
-	s.flags = ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST | ASYNC_AUTO_IRQ;
-	s.iotype = 0;
+	s.flags = UPF_BOOT_AUTOCONF | UPF_SKIP_TEST | UPF_AUTO_IRQ;
+	s.iotype = UPIO_PORT;
 	s.regshift = 3;
 
 	if (early_serial_setup(&s) != 0) {

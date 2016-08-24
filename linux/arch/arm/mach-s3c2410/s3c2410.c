@@ -8,16 +8,6 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- * Modifications:
- *     16-May-2003 BJD  Created initial version
- *     16-Aug-2003 BJD  Fixed header files and copyright, added URL
- *     05-Sep-2003 BJD  Moved to kernel v2.6
- *     18-Jan-2004 BJD  Added serial port configuration
- *     21-Aug-2004 BJD  Added new struct s3c2410_board handler
- *     28-Sep-2004 BJD  Updates for new serial port bits
- *     04-Nov-2004 BJD  Updated UART configuration process
- *     10-Jan-2004 BJD  Removed s3c2410_clock_tick_rate
 */
 
 #include <linux/kernel.h>
@@ -26,7 +16,9 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
-#include <linux/device.h>
+#include <linux/sysdev.h>
+#include <linux/serial_core.h>
+#include <linux/platform_device.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -37,114 +29,28 @@
 #include <asm/irq.h>
 
 #include <asm/arch/regs-clock.h>
-#include <asm/arch/regs-serial.h>
+#include <asm/plat-s3c/regs-serial.h>
 
-#include "s3c2410.h"
-#include "cpu.h"
-#include "clock.h"
+#include <asm/plat-s3c24xx/s3c2410.h>
+#include <asm/plat-s3c24xx/cpu.h>
+#include <asm/plat-s3c24xx/devs.h>
+#include <asm/plat-s3c24xx/clock.h>
 
 /* Initial IO mappings */
 
 static struct map_desc s3c2410_iodesc[] __initdata = {
-	IODESC_ENT(USBHOST),
 	IODESC_ENT(CLKPWR),
-	IODESC_ENT(LCD),
-	IODESC_ENT(UART),
 	IODESC_ENT(TIMER),
-	IODESC_ENT(ADC),
-	IODESC_ENT(WATCHDOG)
-};
-
-static struct resource s3c_uart0_resource[] = {
-	[0] = {
-		.start = S3C2410_PA_UART0,
-		.end   = S3C2410_PA_UART0 + 0x3fff,
-		.flags = IORESOURCE_MEM,
-	},
-	[1] = {
-		.start = IRQ_S3CUART_RX0,
-		.end   = IRQ_S3CUART_ERR0,
-		.flags = IORESOURCE_IRQ,
-	}
-
-};
-
-static struct resource s3c_uart1_resource[] = {
-	[0] = {
-		.start = S3C2410_PA_UART1,
-		.end   = S3C2410_PA_UART1 + 0x3fff,
-		.flags = IORESOURCE_MEM,
-	},
-	[1] = {
-		.start = IRQ_S3CUART_RX1,
-		.end   = IRQ_S3CUART_ERR1,
-		.flags = IORESOURCE_IRQ,
-	}
-};
-
-static struct resource s3c_uart2_resource[] = {
-	[0] = {
-		.start = S3C2410_PA_UART2,
-		.end   = S3C2410_PA_UART2 + 0x3fff,
-		.flags = IORESOURCE_MEM,
-	},
-	[1] = {
-		.start = IRQ_S3CUART_RX2,
-		.end   = IRQ_S3CUART_ERR2,
-		.flags = IORESOURCE_IRQ,
-	}
+	IODESC_ENT(WATCHDOG),
 };
 
 /* our uart devices */
-
-static struct platform_device s3c_uart0 = {
-	.name		  = "s3c2410-uart",
-	.id		  = 0,
-	.num_resources	  = ARRAY_SIZE(s3c_uart0_resource),
-	.resource	  = s3c_uart0_resource,
-};
-
-
-static struct platform_device s3c_uart1 = {
-	.name		  = "s3c2410-uart",
-	.id		  = 1,
-	.num_resources	  = ARRAY_SIZE(s3c_uart1_resource),
-	.resource	  = s3c_uart1_resource,
-};
-
-static struct platform_device s3c_uart2 = {
-	.name		  = "s3c2410-uart",
-	.id		  = 2,
-	.num_resources	  = ARRAY_SIZE(s3c_uart2_resource),
-	.resource	  = s3c_uart2_resource,
-};
-
-static struct platform_device *uart_devices[] __initdata = {
-	&s3c_uart0,
-	&s3c_uart1,
-	&s3c_uart2
-};
-
-/* store our uart devices for the serial driver console */
-struct platform_device *s3c2410_uart_devices[3];
-
-static int s3c2410_uart_count = 0;
 
 /* uart registration process */
 
 void __init s3c2410_init_uarts(struct s3c2410_uartcfg *cfg, int no)
 {
-	struct platform_device *platdev;
-	int uart;
-
-	for (uart = 0; uart < no; uart++, cfg++) {
-		platdev = uart_devices[cfg->hwport];
-
-		s3c24xx_uart_devs[uart] = platdev;
-		platdev->dev.platform_data = cfg;
-	}
-
-	s3c2410_uart_count = uart;
+	s3c24xx_init_uartdevs("s3c2410-uart", s3c2410_uart_resources, cfg, no);
 }
 
 /* s3c2410_map_io
@@ -164,36 +70,59 @@ void __init s3c2410_map_io(struct map_desc *mach_desc, int mach_size)
 void __init s3c2410_init_clocks(int xtal)
 {
 	unsigned long tmp;
+	unsigned long fclk;
+	unsigned long hclk;
+	unsigned long pclk;
 
 	/* now we've got our machine bits initialised, work out what
 	 * clocks we've got */
 
-	s3c24xx_fclk = s3c2410_get_pll(__raw_readl(S3C2410_MPLLCON),
-				       s3c24xx_xtal);
+	fclk = s3c2410_get_pll(__raw_readl(S3C2410_MPLLCON), xtal);
 
 	tmp = __raw_readl(S3C2410_CLKDIVN);
 
 	/* work out clock scalings */
 
-	s3c24xx_hclk = s3c24xx_fclk / ((tmp & S3C2410_CLKDIVN_HDIVN) ? 2 : 1);
-	s3c24xx_pclk = s3c24xx_hclk / ((tmp & S3C2410_CLKDIVN_PDIVN) ? 2 : 1);
+	hclk = fclk / ((tmp & S3C2410_CLKDIVN_HDIVN) ? 2 : 1);
+	pclk = hclk / ((tmp & S3C2410_CLKDIVN_PDIVN) ? 2 : 1);
 
 	/* print brieft summary of clocks, etc */
 
 	printk("S3C2410: core %ld.%03ld MHz, memory %ld.%03ld MHz, peripheral %ld.%03ld MHz\n",
-	       print_mhz(s3c24xx_fclk), print_mhz(s3c24xx_hclk),
-	       print_mhz(s3c24xx_pclk));
+	       print_mhz(fclk), print_mhz(hclk), print_mhz(pclk));
 
 	/* initialise the clocks here, to allow other things like the
 	 * console to use them
 	 */
 
-	s3c24xx_setup_clocks();
+	s3c24xx_setup_clocks(xtal, fclk, hclk, pclk);
+	s3c2410_baseclk_add();
 }
+
+struct sysdev_class s3c2410_sysclass = {
+	set_kset_name("s3c2410-core"),
+};
+
+static struct sys_device s3c2410_sysdev = {
+	.cls		= &s3c2410_sysclass,
+};
+
+/* need to register class before we actually register the device, and
+ * we also need to ensure that it has been initialised before any of the
+ * drivers even try to use it (even if not on an s3c2410 based system)
+ * as a driver which may support both 2410 and 2440 may try and use it.
+*/
+
+static int __init s3c2410_core_init(void)
+{
+	return sysdev_class_register(&s3c2410_sysclass);
+}
+
+core_initcall(s3c2410_core_init);
 
 int __init s3c2410_init(void)
 {
 	printk("S3C2410: Initialising architecture\n");
 
-	return platform_add_devices(s3c24xx_uart_devs, s3c2410_uart_count);
+	return sysdev_register(&s3c2410_sysdev);
 }

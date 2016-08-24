@@ -23,7 +23,7 @@
  *
  *
  * The driver brings the USB functions of the MDC800 to Linux.
- * To use the Camera you must support the USB Protocoll of the camera
+ * To use the Camera you must support the USB Protocol of the camera
  * to the Kernel Node.
  * The Driver uses a misc device Node. Create it with :
  * mknod /dev/mustek c 180 32
@@ -94,7 +94,8 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <linux/smp_lock.h>
+#include <linux/wait.h>
+#include <linux/mutex.h>
 
 #include <linux/usb.h>
 #include <linux/fs.h>
@@ -168,7 +169,7 @@ struct mdc800_data
 	int			out_count;	// Bytes in the buffer
 
 	int			open;		// Camera device open ?
-	struct semaphore	io_lock;	// IO -lock
+	struct mutex		io_lock;	// IO -lock
 
 	char 			in [8];		// Command Input Buffer
 	int  			in_count;
@@ -278,14 +279,14 @@ static int mdc800_isReady (char *ch)
 /*
  * USB IRQ Handler for InputLine
  */
-static void mdc800_usb_irq (struct urb *urb, struct pt_regs *res)
+static void mdc800_usb_irq (struct urb *urb)
 {
 	int data_received=0, wake_up;
 	unsigned char* b=urb->transfer_buffer;
 	struct mdc800_data* mdc800=urb->context;
+	int status = urb->status;
 
-	if (urb->status >= 0)
-	{
+	if (status >= 0) {
 
 		//dbg ("%i %i %i %i %i %i %i %i \n",b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7]);
 
@@ -323,14 +324,14 @@ static void mdc800_usb_irq (struct urb *urb, struct pt_regs *res)
 		||
 			((mdc800->camera_request_ready == 3) && (mdc800->camera_busy))
 		||
-			(urb->status < 0)
+			(status < 0)
 		);
 
 	if (wake_up)
 	{
 		mdc800->camera_request_ready=0;
 		mdc800->irq_woken=1;
-		wake_up_interruptible (&mdc800->irq_wait);
+		wake_up (&mdc800->irq_wait);
 	}
 }
 
@@ -346,19 +347,9 @@ static void mdc800_usb_irq (struct urb *urb, struct pt_regs *res)
  */
 static int mdc800_usb_waitForIRQ (int mode, int msec)
 {
-        DECLARE_WAITQUEUE(wait, current);
-	long timeout;
-
 	mdc800->camera_request_ready=1+mode;
 
-	add_wait_queue(&mdc800->irq_wait, &wait);
-	timeout = msec*HZ/1000;
-	while (!mdc800->irq_woken && timeout)
-	{
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		timeout = schedule_timeout (timeout);
-	}
-        remove_wait_queue(&mdc800->irq_wait, &wait);
+	wait_event_timeout(mdc800->irq_wait, mdc800->irq_woken, msec*HZ/1000);
 	mdc800->irq_woken = 0;
 
 	if (mdc800->camera_request_ready>0)
@@ -382,32 +373,29 @@ static int mdc800_usb_waitForIRQ (int mode, int msec)
 /*
  * The write_urb callback function
  */
-static void mdc800_usb_write_notify (struct urb *urb, struct pt_regs *res)
+static void mdc800_usb_write_notify (struct urb *urb)
 {
 	struct mdc800_data* mdc800=urb->context;
+	int status = urb->status;
 
-	if (urb->status != 0)
-	{
-		err ("writing command fails (status=%i)", urb->status);
-	}
+	if (status != 0)
+		err ("writing command fails (status=%i)", status);
 	else
-	{	
 		mdc800->state=READY;
-	}
 	mdc800->written = 1;
-	wake_up_interruptible (&mdc800->write_wait);
+	wake_up (&mdc800->write_wait);
 }
 
 
 /*
  * The download_urb callback function
  */
-static void mdc800_usb_download_notify (struct urb *urb, struct pt_regs *res)
+static void mdc800_usb_download_notify (struct urb *urb)
 {
 	struct mdc800_data* mdc800=urb->context;
+	int status = urb->status;
 
-	if (urb->status == 0)
-	{
+	if (status == 0) {
 		/* Fill output buffer with these data */
 		memcpy (mdc800->out,  urb->transfer_buffer, 64);
 		mdc800->out_count=64;
@@ -417,13 +405,11 @@ static void mdc800_usb_download_notify (struct urb *urb, struct pt_regs *res)
 		{
 			mdc800->state=READY;
 		}
-	}
-	else
-	{
-		err ("request bytes fails (status:%i)", urb->status);
+	} else {
+		err ("request bytes fails (status:%i)", status);
 	}
 	mdc800->downloaded = 1;
-	wake_up_interruptible (&mdc800->download_wait);
+	wake_up (&mdc800->download_wait);
 }
 
 
@@ -432,11 +418,10 @@ static void mdc800_usb_download_notify (struct urb *urb, struct pt_regs *res)
  ***************************************************************************/
 
 static struct usb_driver mdc800_usb_driver;
-static struct file_operations mdc800_device_ops;
+static const struct file_operations mdc800_device_ops;
 static struct usb_class_driver mdc800_class = {
-	.name =		"usb/mdc800%d",
+	.name =		"mdc800%d",
 	.fops =		&mdc800_device_ops,
-	.mode =		S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 	.minor_base =	MDC800_DEVICE_MINOR_BASE,
 };
 
@@ -507,7 +492,7 @@ static int mdc800_usb_probe (struct usb_interface *intf,
 
 	info ("Found Mustek MDC800 on USB.");
 
-	down (&mdc800->io_lock);
+	mutex_lock(&mdc800->io_lock);
 
 	retval = usb_register_dev(intf, &mdc800_class);
 	if (retval) {
@@ -552,7 +537,7 @@ static int mdc800_usb_probe (struct usb_interface *intf,
 
 	mdc800->state=READY;
 
-	up (&mdc800->io_lock);
+	mutex_unlock(&mdc800->io_lock);
 	
 	usb_set_intfdata(intf, mdc800);
 	return 0;
@@ -574,11 +559,15 @@ static void mdc800_usb_disconnect (struct usb_interface *intf)
 
 		usb_deregister_dev(intf, &mdc800_class);
 
+		/* must be under lock to make sure no URB
+		   is submitted after usb_kill_urb() */
+		mutex_lock(&mdc800->io_lock);
 		mdc800->state=NOT_CONNECTED;
 
 		usb_kill_urb(mdc800->irq_urb);
 		usb_kill_urb(mdc800->write_urb);
 		usb_kill_urb(mdc800->download_urb);
+		mutex_unlock(&mdc800->io_lock);
 
 		mdc800->dev = NULL;
 		usb_set_intfdata(intf, NULL);
@@ -630,7 +619,7 @@ static int mdc800_device_open (struct inode* inode, struct file *file)
 	int retval=0;
 	int errn=0;
 
-	down (&mdc800->io_lock);
+	mutex_lock(&mdc800->io_lock);
 	
 	if (mdc800->state == NOT_CONNECTED)
 	{
@@ -655,9 +644,9 @@ static int mdc800_device_open (struct inode* inode, struct file *file)
 
 	retval=0;
 	mdc800->irq_urb->dev = mdc800->dev;
-	if (usb_submit_urb (mdc800->irq_urb, GFP_KERNEL))
-	{
-		err ("request USB irq fails (submit_retval=%i urb_status=%i).",retval, mdc800->irq_urb->status);
+	retval = usb_submit_urb (mdc800->irq_urb, GFP_KERNEL);
+	if (retval) {
+		err ("request USB irq fails (submit_retval=%i).", retval);
 		errn = -EIO;
 		goto error_out;
 	}
@@ -666,7 +655,7 @@ static int mdc800_device_open (struct inode* inode, struct file *file)
 	dbg ("Mustek MDC800 device opened.");
 
 error_out:
-	up (&mdc800->io_lock);
+	mutex_unlock(&mdc800->io_lock);
 	return errn;
 }
 
@@ -679,7 +668,7 @@ static int mdc800_device_release (struct inode* inode, struct file *file)
 	int retval=0;
 	dbg ("Mustek MDC800 device closed.");
 
-	down (&mdc800->io_lock);
+	mutex_lock(&mdc800->io_lock);
 	if (mdc800->open && (mdc800->state != NOT_CONNECTED))
 	{
 		usb_kill_urb(mdc800->irq_urb);
@@ -692,7 +681,7 @@ static int mdc800_device_release (struct inode* inode, struct file *file)
 		retval=-EIO;
 	}
 
-	up(&mdc800->io_lock);
+	mutex_unlock(&mdc800->io_lock);
 	return retval;
 }
 
@@ -704,24 +693,23 @@ static ssize_t mdc800_device_read (struct file *file, char __user *buf, size_t l
 {
 	size_t left=len, sts=len; /* single transfer size */
 	char __user *ptr = buf;
-	long timeout;
-	DECLARE_WAITQUEUE(wait, current);
+	int retval;
 
-	down (&mdc800->io_lock);
+	mutex_lock(&mdc800->io_lock);
 	if (mdc800->state == NOT_CONNECTED)
 	{
-		up (&mdc800->io_lock);
+		mutex_unlock(&mdc800->io_lock);
 		return -EBUSY;
 	}
 	if (mdc800->state == WORKING)
 	{
 		warn ("Illegal State \"working\" reached during read ?!");
-		up (&mdc800->io_lock);
+		mutex_unlock(&mdc800->io_lock);
 		return -EBUSY;
 	}
 	if (!mdc800->open)
 	{
-		up (&mdc800->io_lock);
+		mutex_unlock(&mdc800->io_lock);
 		return -EBUSY;
 	}
 
@@ -729,7 +717,7 @@ static ssize_t mdc800_device_read (struct file *file, char __user *buf, size_t l
 	{
 		if (signal_pending (current)) 
 		{
-			up (&mdc800->io_lock);
+			mutex_unlock(&mdc800->io_lock);
 			return -EINTR;
 		}
 
@@ -745,32 +733,26 @@ static ssize_t mdc800_device_read (struct file *file, char __user *buf, size_t l
 
 				/* Download -> Request new bytes */
 				mdc800->download_urb->dev = mdc800->dev;
-				if (usb_submit_urb (mdc800->download_urb, GFP_KERNEL))
-				{
-					err ("Can't submit download urb (status=%i)",mdc800->download_urb->status);
-					up (&mdc800->io_lock);
+				retval = usb_submit_urb (mdc800->download_urb, GFP_KERNEL);
+				if (retval) {
+					err ("Can't submit download urb (retval=%i)",retval);
+					mutex_unlock(&mdc800->io_lock);
 					return len-left;
 				}
-				add_wait_queue(&mdc800->download_wait, &wait);
-				timeout = TO_DOWNLOAD_GET_READY*HZ/1000;
-				while (!mdc800->downloaded && timeout)
-				{
-					set_current_state(TASK_UNINTERRUPTIBLE);
-					timeout = schedule_timeout (timeout);
-				}
-				remove_wait_queue(&mdc800->download_wait, &wait);
+				wait_event_timeout(mdc800->download_wait, mdc800->downloaded,
+										TO_DOWNLOAD_GET_READY*HZ/1000);
 				mdc800->downloaded = 0;
 				if (mdc800->download_urb->status != 0)
 				{
 					err ("request download-bytes fails (status=%i)",mdc800->download_urb->status);
-					up (&mdc800->io_lock);
+					mutex_unlock(&mdc800->io_lock);
 					return len-left;
 				}
 			}
 			else
 			{
 				/* No more bytes -> that's an error*/
-				up (&mdc800->io_lock);
+				mutex_unlock(&mdc800->io_lock);
 				return -EIO;
 			}
 		}
@@ -779,7 +761,7 @@ static ssize_t mdc800_device_read (struct file *file, char __user *buf, size_t l
 			/* Copy Bytes */
 			if (copy_to_user(ptr, &mdc800->out [mdc800->out_ptr],
 						sts)) {
-				up(&mdc800->io_lock);
+				mutex_unlock(&mdc800->io_lock);
 				return -EFAULT;
 			}
 			ptr+=sts;
@@ -788,7 +770,7 @@ static ssize_t mdc800_device_read (struct file *file, char __user *buf, size_t l
 		}
 	}
 
-	up (&mdc800->io_lock);
+	mutex_unlock(&mdc800->io_lock);
 	return len-left;
 }
 
@@ -802,17 +784,17 @@ static ssize_t mdc800_device_read (struct file *file, char __user *buf, size_t l
 static ssize_t mdc800_device_write (struct file *file, const char __user *buf, size_t len, loff_t *pos)
 {
 	size_t i=0;
-	DECLARE_WAITQUEUE(wait, current);
+	int retval;
 
-	down (&mdc800->io_lock);
+	mutex_lock(&mdc800->io_lock);
 	if (mdc800->state != READY)
 	{
-		up (&mdc800->io_lock);
+		mutex_unlock(&mdc800->io_lock);
 		return -EBUSY;
 	}
 	if (!mdc800->open )
 	{
-		up (&mdc800->io_lock);
+		mutex_unlock(&mdc800->io_lock);
 		return -EBUSY;
 	}
 
@@ -821,13 +803,13 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 		unsigned char c;
 		if (signal_pending (current)) 
 		{
-			up (&mdc800->io_lock);
+			mutex_unlock(&mdc800->io_lock);
 			return -EINTR;
 		}
 		
 		if(get_user(c, buf+i))
 		{
-			up(&mdc800->io_lock);
+			mutex_unlock(&mdc800->io_lock);
 			return -EFAULT;
 		}
 
@@ -848,7 +830,7 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 		}
 		else
 		{
-			up (&mdc800->io_lock);
+			mutex_unlock(&mdc800->io_lock);
 			return -EIO;
 		}
 
@@ -856,12 +838,11 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 		if (mdc800->in_count == 8)
 		{
 			int answersize;
-			long timeout;
 
 			if (mdc800_usb_waitForIRQ (0,TO_GET_READY))
 			{
 				err ("Camera didn't get ready.\n");
-				up (&mdc800->io_lock);
+				mutex_unlock(&mdc800->io_lock);
 				return -EIO;
 			}
 
@@ -870,25 +851,18 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 			mdc800->state=WORKING;
 			memcpy (mdc800->write_urb->transfer_buffer, mdc800->in,8);
 			mdc800->write_urb->dev = mdc800->dev;
-			if (usb_submit_urb (mdc800->write_urb, GFP_KERNEL))
-			{
-				err ("submitting write urb fails (status=%i)", mdc800->write_urb->status);
-				up (&mdc800->io_lock);
+			retval = usb_submit_urb (mdc800->write_urb, GFP_KERNEL);
+			if (retval) {
+				err ("submitting write urb fails (retval=%i)", retval);
+				mutex_unlock(&mdc800->io_lock);
 				return -EIO;
 			}
-			add_wait_queue(&mdc800->write_wait, &wait);
-			timeout = TO_WRITE_GET_READY*HZ/1000;
-			while (!mdc800->written && timeout)
-			{
-				set_current_state(TASK_UNINTERRUPTIBLE);
-				timeout = schedule_timeout (timeout);
-			}
-			remove_wait_queue(&mdc800->write_wait, &wait);
+			wait_event_timeout(mdc800->write_wait, mdc800->written, TO_WRITE_GET_READY*HZ/1000);
 			mdc800->written = 0;
 			if (mdc800->state == WORKING)
 			{
 				usb_kill_urb(mdc800->write_urb);
-				up (&mdc800->io_lock);
+				mutex_unlock(&mdc800->io_lock);
 				return -EIO;
 			}
 
@@ -900,7 +874,7 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 					{
 						err ("call 0x07 before 0x05,0x3e");
 						mdc800->state=READY;
-						up (&mdc800->io_lock);
+						mutex_unlock(&mdc800->io_lock);
 						return -EIO;
 					}
 					mdc800->pic_len=-1;
@@ -919,7 +893,7 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 						if (mdc800_usb_waitForIRQ (1,TO_READ_FROM_IRQ))
 						{
 							err ("requesting answer from irq fails");
-							up (&mdc800->io_lock);
+							mutex_unlock(&mdc800->io_lock);
 							return -EIO;
 						}
 
@@ -947,7 +921,7 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 						if (mdc800_usb_waitForIRQ (0,TO_DEFAULT_COMMAND))
 						{
 							err ("Command Timeout.");
-							up (&mdc800->io_lock);
+							mutex_unlock(&mdc800->io_lock);
 							return -EIO;
 						}
 					}
@@ -957,7 +931,7 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 		}
 		i++;
 	}
-	up (&mdc800->io_lock);
+	mutex_unlock(&mdc800->io_lock);
 	return i;
 }
 
@@ -967,7 +941,7 @@ static ssize_t mdc800_device_write (struct file *file, const char __user *buf, s
 ****************************************************************************/
 
 /* File Operations of this drivers */
-static struct file_operations mdc800_device_ops =
+static const struct file_operations mdc800_device_ops =
 {
 	.owner =	THIS_MODULE,
 	.read =		mdc800_device_read,
@@ -989,7 +963,6 @@ MODULE_DEVICE_TABLE (usb, mdc800_table);
  */
 static struct usb_driver mdc800_usb_driver =
 {
-	.owner =	THIS_MODULE,
 	.name =		"mdc800",
 	.probe =	mdc800_usb_probe,
 	.disconnect =	mdc800_usb_disconnect,
@@ -1002,19 +975,17 @@ static struct usb_driver mdc800_usb_driver =
 	Init and Cleanup this driver (Main Functions)
 *************************************************************************/
 
-#define try(A)           if (!(A)) goto cleanup_on_fail;
-
 static int __init usb_mdc800_init (void)
 {
 	int retval = -ENODEV;
 	/* Allocate Memory */
-	try (mdc800=kmalloc (sizeof (struct mdc800_data), GFP_KERNEL));
+	mdc800=kzalloc (sizeof (struct mdc800_data), GFP_KERNEL);
+	if (!mdc800)
+		goto cleanup_on_fail;
 
-	memset(mdc800, 0, sizeof(struct mdc800_data));
 	mdc800->dev = NULL;
-	mdc800->open=0;
 	mdc800->state=NOT_CONNECTED;
-	init_MUTEX (&mdc800->io_lock);
+	mutex_init (&mdc800->io_lock);
 
 	init_waitqueue_head (&mdc800->irq_wait);
 	init_waitqueue_head (&mdc800->write_wait);
@@ -1024,13 +995,25 @@ static int __init usb_mdc800_init (void)
 	mdc800->downloaded = 0;
 	mdc800->written = 0;
 
-	try (mdc800->irq_urb_buffer=kmalloc (8, GFP_KERNEL));
-	try (mdc800->write_urb_buffer=kmalloc (8, GFP_KERNEL));
-	try (mdc800->download_urb_buffer=kmalloc (64, GFP_KERNEL));
+	mdc800->irq_urb_buffer=kmalloc (8, GFP_KERNEL);
+	if (!mdc800->irq_urb_buffer)
+		goto cleanup_on_fail;
+	mdc800->write_urb_buffer=kmalloc (8, GFP_KERNEL);
+	if (!mdc800->write_urb_buffer)
+		goto cleanup_on_fail;
+	mdc800->download_urb_buffer=kmalloc (64, GFP_KERNEL);
+	if (!mdc800->download_urb_buffer)
+		goto cleanup_on_fail;
 
-	try (mdc800->irq_urb=usb_alloc_urb (0, GFP_KERNEL));
-	try (mdc800->download_urb=usb_alloc_urb (0, GFP_KERNEL));
-	try (mdc800->write_urb=usb_alloc_urb (0, GFP_KERNEL));
+	mdc800->irq_urb=usb_alloc_urb (0, GFP_KERNEL);
+	if (!mdc800->irq_urb)
+		goto cleanup_on_fail;
+	mdc800->download_urb=usb_alloc_urb (0, GFP_KERNEL);
+	if (!mdc800->download_urb)
+		goto cleanup_on_fail;
+	mdc800->write_urb=usb_alloc_urb (0, GFP_KERNEL);
+	if (!mdc800->write_urb)
+		goto cleanup_on_fail;
 
 	/* Register the driver */
 	retval = usb_register(&mdc800_usb_driver);

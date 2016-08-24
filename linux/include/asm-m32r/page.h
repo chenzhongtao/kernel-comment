@@ -1,8 +1,6 @@
 #ifndef _ASM_M32R_PAGE_H
 #define _ASM_M32R_PAGE_H
 
-#include <linux/config.h>
-
 /* PAGE_SHIFT determines the page size */
 #define PAGE_SHIFT	12
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
@@ -17,7 +15,8 @@ extern void copy_page(void *to, void *from);
 #define clear_user_page(page, vaddr, pg)	clear_page(page)
 #define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
 
-#define alloc_zeroed_user_highpage(vma, vaddr) alloc_page_vma(GFP_HIGHUSER | __GFP_ZERO, vma, vaddr)
+#define __alloc_zeroed_user_highpage(movableflags, vma, vaddr) \
+	alloc_page_vma(GFP_HIGHUSER | __GFP_ZERO | movableflags, vma, vaddr)
 #define __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
 
 /*
@@ -58,28 +57,6 @@ typedef struct { unsigned long pgprot; } pgprot_t;
  * and CONFIG_HIGHMEM64G options in the kernel configuration.
  */
 
-
-/* This handles the memory map.. */
-
-#ifndef __ASSEMBLY__
-
-/* Pure 2^n version of get_order */
-static __inline__ int get_order(unsigned long size)
-{
-	int order;
-
-	size = (size - 1) >> (PAGE_SHIFT - 1);
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-
-	return order;
-}
-
-#endif /* __ASSEMBLY__ */
-
 #define __MEMORY_START  CONFIG_MEMORY_START
 #define __MEMORY_SIZE   CONFIG_MEMORY_SIZE
 
@@ -95,9 +72,7 @@ static __inline__ int get_order(unsigned long size)
 
 #ifndef CONFIG_DISCONTIGMEM
 #define PFN_BASE		(CONFIG_MEMORY_START >> PAGE_SHIFT)
-#define pfn_to_page(pfn)	(mem_map + ((pfn) - PFN_BASE))
-#define page_to_pfn(page)	\
-	((unsigned long)((page) - mem_map) + PFN_BASE)
+#define ARCH_PFN_OFFSET		PFN_BASE
 #define pfn_valid(pfn)		(((pfn) - PFN_BASE) < max_mapnr)
 #endif  /* !CONFIG_DISCONTIGMEM */
 
@@ -109,7 +84,8 @@ static __inline__ int get_order(unsigned long size)
 
 #define devmem_is_allowed(x) 1
 
+#include <asm-generic/memory_model.h>
+#include <asm-generic/page.h>
+
 #endif /* __KERNEL__ */
-
 #endif /* _ASM_M32R_PAGE_H */
-

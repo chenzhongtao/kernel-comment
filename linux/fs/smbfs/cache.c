@@ -66,7 +66,7 @@ smb_invalidate_dircache_entries(struct dentry *parent)
 	spin_lock(&dcache_lock);
 	next = parent->d_subdirs.next;
 	while (next != &parent->d_subdirs) {
-		dentry = list_entry(next, struct dentry, d_child);
+		dentry = list_entry(next, struct dentry, d_u.d_child);
 		dentry->d_fsdata = NULL;
 		smb_age_dentry(server, dentry);
 		next = next->next;
@@ -100,7 +100,7 @@ smb_dget_fpos(struct dentry *dentry, struct dentry *parent, unsigned long fpos)
 	spin_lock(&dcache_lock);
 	next = parent->d_subdirs.next;
 	while (next != &parent->d_subdirs) {
-		dent = list_entry(next, struct dentry, d_child);
+		dent = list_entry(next, struct dentry, d_u.d_child);
 		if ((unsigned long)dent->d_fsdata == fpos) {
 			if (dent->d_inode)
 				dget_locked(dent);
@@ -125,7 +125,7 @@ smb_fill_cache(struct file *filp, void *dirent, filldir_t filldir,
 	       struct smb_cache_control *ctrl, struct qstr *qname,
 	       struct smb_fattr *entry)
 {
-	struct dentry *newdent, *dentry = filp->f_dentry;
+	struct dentry *newdent, *dentry = filp->f_path.dentry;
 	struct inode *newino, *inode = dentry->d_inode;
 	struct smb_cache_control ctl = *ctrl;
 	int valid = 0;

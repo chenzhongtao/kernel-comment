@@ -1,6 +1,8 @@
 /*
- * Carsten Langgaard, carstenl@mips.com
- * Copyright (C) 1999,2000 MIPS Technologies, Inc.  All rights reserved.
+ * Copyright (C) 1999, 2000, 2004, 2005  MIPS Technologies, Inc.
+ *	All rights reserved.
+ *	Authors: Carsten Langgaard <carstenl@mips.com>
+ *		 Maciej W. Rozycki <macro@mips.com>
  *
  *  This program is free software; you can distribute it and/or modify it
  *  under the terms of the GNU General Public License (Version 2) as
@@ -17,23 +19,23 @@
  *
  * PROM library initialisation code.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
-#include <asm/io.h>
 #include <asm/bootinfo.h>
+#include <asm/gt64120.h>
+#include <asm/io.h>
+#include <asm/system.h>
+#include <asm/cacheflush.h>
+#include <asm/traps.h>
+
 #include <asm/mips-boards/prom.h>
 #include <asm/mips-boards/generic.h>
-#ifdef CONFIG_MIPS_GT64120
-#include <asm/gt64120.h>
-#endif
-#include <asm/mips-boards/msc01_pci.h>
 #include <asm/mips-boards/bonito64.h>
-#ifdef CONFIG_MIPS_MALTA
+#include <asm/mips-boards/msc01_pci.h>
+
 #include <asm/mips-boards/malta.h>
-#endif
 
 #ifdef CONFIG_KGDB
 extern int rs_kgdb_hook(int, int);
@@ -55,7 +57,8 @@ int *_prom_argv, *_prom_envp;
 
 int init_debug = 0;
 
-unsigned int mips_revision_corid;
+int mips_revision_corid;
+int mips_revision_sconid;
 
 /* Bonito64 system controller register base. */
 unsigned long _pcictrl_bonito;
@@ -143,7 +146,7 @@ static void __init console_config(void)
 	char parity = '\0', bits = '\0', flow = '\0';
 	char *s;
 
-	if ((strstr(prom_getcmdline(), "console=ttyS")) == NULL) {
+	if ((strstr(prom_getcmdline(), "console=")) == NULL) {
 		s = prom_getenv("modetty0");
 		if (s) {
 			while (*s >= '0' && *s <= '9')
@@ -163,15 +166,15 @@ static void __init console_config(void)
 			bits = '8';
 		if (flow == '\0')
 			flow = 'r';
-		sprintf (console_string, " console=ttyS0,%d%c%c%c", baud, parity, bits, flow);
-		strcat (prom_getcmdline(), console_string);
-		prom_printf("Config serial console:%s\n", console_string);
+		sprintf(console_string, " console=ttyS0,%d%c%c%c", baud, parity, bits, flow);
+		strcat(prom_getcmdline(), console_string);
+		pr_info("Config serial console:%s\n", console_string);
 	}
 }
 #endif
 
 #ifdef CONFIG_KGDB
-void __init kgdb_config (void)
+void __init kgdb_config(void)
 {
 	extern int (*generic_putDebugChar)(char);
 	extern char (*generic_getDebugChar)(void);
@@ -200,7 +203,7 @@ void __init kgdb_config (void)
 			generic_putDebugChar = saa9730_putDebugChar;
 			generic_getDebugChar = saa9730_getDebugChar;
 		}
-		else 
+		else
 #endif
 		{
 			speed = rs_kgdb_hook(line, speed);
@@ -208,20 +211,44 @@ void __init kgdb_config (void)
 			generic_getDebugChar = rs_getDebugChar;
 		}
 
-		prom_printf("KGDB: Using serial line /dev/ttyS%d at %d for session, "
-			    "please connect your debugger\n", line ? 1 : 0, speed);
+		pr_info("KGDB: Using serial line /dev/ttyS%d at %d for "
+		        "session, please connect your debugger\n",
+		        line ? 1 : 0, speed);
 
 		{
 			char *s;
 			for (s = "Please connect GDB to this port\r\n"; *s; )
-				generic_putDebugChar (*s++);
+				generic_putDebugChar(*s++);
 		}
 
-		kgdb_enabled = 1;
 		/* Breakpoint is invoked after interrupts are initialised */
 	}
 }
 #endif
+
+void __init mips_nmi_setup(void)
+{
+	void *base;
+	extern char except_vec_nmi;
+
+	base = cpu_has_veic ?
+		(void *)(CAC_BASE + 0xa80) :
+		(void *)(CAC_BASE + 0x380);
+	memcpy(base, &except_vec_nmi, 0x80);
+	flush_icache_range((unsigned long)base, (unsigned long)base + 0x80);
+}
+
+void __init mips_ejtag_setup(void)
+{
+	void *base;
+	extern char except_vec_ejtag_debug;
+
+	base = cpu_has_veic ?
+		(void *)(CAC_BASE + 0xa00) :
+		(void *)(CAC_BASE + 0x300);
+	memcpy(base, &except_vec_ejtag_debug, 0x80);
+	flush_icache_range((unsigned long)base, (unsigned long)base + 0x80);
+}
 
 void __init prom_init(void)
 {
@@ -243,17 +270,45 @@ void __init prom_init(void)
 	mips_revision_corid = MIPS_REVISION_CORID;
 
 	if (mips_revision_corid == MIPS_REVISION_CORID_CORE_EMUL) {
-		if (BONITO_PCIDID == 0x0001df53 || 
+		if (BONITO_PCIDID == 0x0001df53 ||
 		    BONITO_PCIDID == 0x0003df53)
 			mips_revision_corid = MIPS_REVISION_CORID_CORE_EMUL_BON;
 		else
 			mips_revision_corid = MIPS_REVISION_CORID_CORE_EMUL_MSC;
 	}
-	switch(mips_revision_corid) {
-	case MIPS_REVISION_CORID_QED_RM5261:
-	case MIPS_REVISION_CORID_CORE_LV:
-	case MIPS_REVISION_CORID_CORE_FPGA:
-	case MIPS_REVISION_CORID_CORE_FPGAR2:
+
+	mips_revision_sconid = MIPS_REVISION_SCONID;
+	if (mips_revision_sconid == MIPS_REVISION_SCON_OTHER) {
+		switch (mips_revision_corid) {
+		case MIPS_REVISION_CORID_QED_RM5261:
+		case MIPS_REVISION_CORID_CORE_LV:
+		case MIPS_REVISION_CORID_CORE_FPGA:
+		case MIPS_REVISION_CORID_CORE_FPGAR2:
+			mips_revision_sconid = MIPS_REVISION_SCON_GT64120;
+			break;
+		case MIPS_REVISION_CORID_CORE_EMUL_BON:
+		case MIPS_REVISION_CORID_BONITO64:
+		case MIPS_REVISION_CORID_CORE_20K:
+			mips_revision_sconid = MIPS_REVISION_SCON_BONITO;
+			break;
+		case MIPS_REVISION_CORID_CORE_MSC:
+		case MIPS_REVISION_CORID_CORE_FPGA2:
+		case MIPS_REVISION_CORID_CORE_FPGA3:
+		case MIPS_REVISION_CORID_CORE_FPGA4:
+		case MIPS_REVISION_CORID_CORE_24K:
+		case MIPS_REVISION_CORID_CORE_EMUL_MSC:
+			mips_revision_sconid = MIPS_REVISION_SCON_SOCIT;
+			break;
+		default:
+			mips_display_message("CC Error");
+			while (1);   /* We die here... */
+		}
+	}
+
+	switch (mips_revision_sconid) {
+		u32 start, map, mask, data;
+
+	case MIPS_REVISION_SCON_GT64120:
 		/*
 		 * Setup the North bridge to do Master byte-lane swapping
 		 * when running in bigendian.
@@ -266,17 +321,18 @@ void __init prom_init(void)
 #else
 		GT_WRITE(GT_PCI0_CMD_OFS, 0);
 #endif
+		/* Fix up PCI I/O mapping if necessary (for Atlas).  */
+		start = GT_READ(GT_PCI0IOLD_OFS);
+		map = GT_READ(GT_PCI0IOREMAP_OFS);
+		if ((start & map) != 0) {
+			map &= ~start;
+			GT_WRITE(GT_PCI0IOREMAP_OFS, map);
+		}
 
-#ifdef CONFIG_MIPS_MALTA
 		set_io_port_base(MALTA_GT_PORT_BASE);
-#else
-		set_io_port_base((unsigned long)ioremap(0, 0x20000000));
-#endif
 		break;
 
-	case MIPS_REVISION_CORID_CORE_EMUL_BON:
-	case MIPS_REVISION_CORID_BONITO64:
-	case MIPS_REVISION_CORID_CORE_20K:
+	case MIPS_REVISION_SCON_BONITO:
 		_pcictrl_bonito_pcicfg = (unsigned long)ioremap(BONITO_PCICFG_BASE, BONITO_PCICFG_SIZE);
 
 		/*
@@ -300,18 +356,19 @@ void __init prom_init(void)
 			BONITO_BONGENCFG_BYTESWAP;
 #endif
 
-#ifdef CONFIG_MIPS_MALTA
 		set_io_port_base(MALTA_BONITO_PORT_BASE);
-#else
-		set_io_port_base((unsigned long)ioremap(0, 0x20000000));
-#endif
 		break;
 
-	case MIPS_REVISION_CORID_CORE_MSC:
-	case MIPS_REVISION_CORID_CORE_FPGA2:
-	case MIPS_REVISION_CORID_CORE_EMUL_MSC:
-		_pcictrl_msc = (unsigned long)ioremap(MIPS_MSC01_PCI_REG_BASE, 0x2000); 
+	case MIPS_REVISION_SCON_SOCIT:
+	case MIPS_REVISION_SCON_ROCIT:
+		_pcictrl_msc = (unsigned long)ioremap(MIPS_MSC01_PCI_REG_BASE, 0x2000);
+	mips_pci_controller:
+		mb();
+		MSC_READ(MSC01_PCI_CFG, data);
+		MSC_WRITE(MSC01_PCI_CFG, data & ~MSC01_PCI_CFG_EN_BIT);
+		wmb();
 
+		/* Fix up lane swapping.  */
 #ifdef CONFIG_CPU_LITTLE_ENDIAN
 		MSC_WRITE(MSC01_PCI_SWAP, MSC01_PCI_SWAP_NOSWAP);
 #else
@@ -320,21 +377,40 @@ void __init prom_init(void)
 			  MSC01_PCI_SWAP_BYTESWAP << MSC01_PCI_SWAP_MEM_SHF |
 			  MSC01_PCI_SWAP_BYTESWAP << MSC01_PCI_SWAP_BAR0_SHF);
 #endif
+		/* Fix up target memory mapping.  */
+		MSC_READ(MSC01_PCI_BAR0, mask);
+		MSC_WRITE(MSC01_PCI_P2SCMSKL, mask & MSC01_PCI_BAR0_SIZE_MSK);
 
-#ifdef CONFIG_MIPS_MALTA
+		/* Don't handle target retries indefinitely.  */
+		if ((data & MSC01_PCI_CFG_MAXRTRY_MSK) ==
+		    MSC01_PCI_CFG_MAXRTRY_MSK)
+			data = (data & ~(MSC01_PCI_CFG_MAXRTRY_MSK <<
+					 MSC01_PCI_CFG_MAXRTRY_SHF)) |
+			       ((MSC01_PCI_CFG_MAXRTRY_MSK - 1) <<
+				MSC01_PCI_CFG_MAXRTRY_SHF);
+
+		wmb();
+		MSC_WRITE(MSC01_PCI_CFG, data);
+		mb();
+
 		set_io_port_base(MALTA_MSC_PORT_BASE);
-#else
-		set_io_port_base((unsigned long)ioremap(0, 0x20000000));
-#endif
 		break;
 
+	case MIPS_REVISION_SCON_SOCITSC:
+	case MIPS_REVISION_SCON_SOCITSCP:
+		_pcictrl_msc = (unsigned long)ioremap(MIPS_SOCITSC_PCI_REG_BASE, 0x2000);
+		goto mips_pci_controller;
+
 	default:
-		/* Unknown Core card */
-		mips_display_message("CC Error");
-		while(1);   /* We die here... */
+		/* Unknown system controller */
+		mips_display_message("SC Error");
+		while (1);   /* We die here... */
 	}
 #endif
-	prom_printf("\nLINUX started...\n");
+	board_nmi_handler_setup = mips_nmi_setup;
+	board_ejtag_handler_setup = mips_ejtag_setup;
+
+	pr_info("\nLINUX started...\n");
 	prom_init_cmdline();
 	prom_meminit();
 #ifdef CONFIG_SERIAL_8250_CONSOLE

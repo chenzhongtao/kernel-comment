@@ -26,6 +26,10 @@
 #define EBT_CONTINUE -3
 #define EBT_RETURN   -4
 #define NUM_STANDARD_TARGETS   4
+/* ebtables target modules store the verdict inside an int. We can
+ * reclaim a part of this int for backwards compatible extensions.
+ * The 4 lsb are more than enough to store the verdict. */
+#define EBT_VERDICT_BITS 0x0000000F
 
 struct ebt_counter
 {
@@ -34,6 +38,23 @@ struct ebt_counter
 };
 
 struct ebt_replace
+{
+	char name[EBT_TABLE_MAXNAMELEN];
+	unsigned int valid_hooks;
+	/* nr of rules in the table */
+	unsigned int nentries;
+	/* total size of the entries */
+	unsigned int entries_size;
+	/* start of the chains */
+	struct ebt_entries __user *hook_entry[NF_BR_NUMHOOKS];
+	/* nr of counters userspace expects back */
+	unsigned int num_counters;
+	/* where the kernel will put the old counters */
+	struct ebt_counter __user *counters;
+	char __user *entries;
+};
+
+struct ebt_replace_kernel
 {
 	char name[EBT_TABLE_MAXNAMELEN];
 	unsigned int valid_hooks;
@@ -141,7 +162,7 @@ struct ebt_entry {
 	/* this needs to be the first field */
 	unsigned int bitmask;
 	unsigned int invflags;
-	uint16_t ethproto;
+	__be16 ethproto;
 	/* the physical in-dev */
 	char in[IFNAMSIZ];
 	/* the logical in-dev */
@@ -216,7 +237,7 @@ struct ebt_target
 	struct list_head list;
 	const char name[EBT_FUNCTION_MAXNAMELEN];
 	/* returns one of the standard verdicts */
-	int (*target)(struct sk_buff **pskb, unsigned int hooknr,
+	int (*target)(struct sk_buff *skb, unsigned int hooknr,
 	   const struct net_device *in, const struct net_device *out,
 	   const void *targetdata, unsigned int datalen);
 	/* 0 == let it in */
@@ -251,7 +272,7 @@ struct ebt_table
 {
 	struct list_head list;
 	char name[EBT_TABLE_MAXNAMELEN];
-	struct ebt_replace *table;
+	struct ebt_replace_kernel *table;
 	unsigned int valid_hooks;
 	rwlock_t lock;
 	/* e.g. could be the table explicitly only allows certain
@@ -273,7 +294,7 @@ extern int ebt_register_watcher(struct ebt_watcher *watcher);
 extern void ebt_unregister_watcher(struct ebt_watcher *watcher);
 extern int ebt_register_target(struct ebt_target *target);
 extern void ebt_unregister_target(struct ebt_target *target);
-extern unsigned int ebt_do_table(unsigned int hook, struct sk_buff **pskb,
+extern unsigned int ebt_do_table(unsigned int hook, struct sk_buff *skb,
    const struct net_device *in, const struct net_device *out,
    struct ebt_table *table);
 

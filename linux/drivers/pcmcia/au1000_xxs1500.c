@@ -27,7 +27,6 @@
  */
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
@@ -35,10 +34,8 @@
 #include <linux/timer.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
-#include <linux/version.h>
 #include <linux/types.h>
 
-#include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/ss.h>
@@ -53,7 +50,10 @@
 
 #include <asm/au1000.h>
 #include <asm/au1000_pcmcia.h>
-#include <asm/xxs1500.h>
+
+#define PCMCIA_MAX_SOCK		0
+#define PCMCIA_NUM_SOCKS	(PCMCIA_MAX_SOCK + 1)
+#define PCMCIA_IRQ		AU1000_GPIO_4
 
 #if 0
 #define DEBUG(x,args...)	printk(__FUNCTION__ ": " x,##args)

@@ -93,15 +93,15 @@
  *     (c) 1998 Gerd Knorr <kraxel@cs.tu-berlin.de>
  *
  * (following author is not in any relation with this code, but his ideas
- *  were used when writting this driver)
+ *  were used when writing this driver)
  *
  *		 FreeVBE/AF (Matrox), "Shawn Hargreaves" <shawn@talula.demon.co.uk>
  *
  */
 
-/* make checkconfig does not check included files... */
-#include <linux/config.h>
 #include <linux/version.h>
+
+#define __OLD_VIDIOC_
 
 #include "matroxfb_base.h"
 #include "matroxfb_misc.h"
@@ -113,9 +113,10 @@
 #include "matroxfb_g450.h"
 #include <linux/matroxfb.h>
 #include <linux/interrupt.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #ifdef CONFIG_PPC_PMAC
+#include <asm/machdep.h>
 unsigned char nvram_read_byte(int);
 static int default_vmode = VMODE_NVRAM;
 static int default_cmode = CMODE_NVRAM;
@@ -158,9 +159,9 @@ static void update_crtc2(WPMINFO unsigned int pos) {
 
 	/* Make sure that displays are compatible */
 	if (info && (info->fbcon.var.bits_per_pixel == ACCESS_FBINFO(fbcon).var.bits_per_pixel)
-	         && (info->fbcon.var.xres_virtual == ACCESS_FBINFO(fbcon).var.xres_virtual)
-	         && (info->fbcon.var.green.length == ACCESS_FBINFO(fbcon).var.green.length)
-	         ) {
+		 && (info->fbcon.var.xres_virtual == ACCESS_FBINFO(fbcon).var.xres_virtual)
+		 && (info->fbcon.var.green.length == ACCESS_FBINFO(fbcon).var.green.length)
+		 ) {
 		switch (ACCESS_FBINFO(fbcon).var.bits_per_pixel) {
 			case 16:
 			case 32:
@@ -197,7 +198,7 @@ static void matroxfb_crtc1_panpos(WPMINFO2) {
 	}
 }
 
-static irqreturn_t matrox_irq(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t matrox_irq(int irq, void *dev_id)
 {
 	u_int32_t status;
 	int handled = 0;
@@ -224,7 +225,7 @@ static irqreturn_t matrox_irq(int irq, void *dev_id, struct pt_regs *fp)
 
 int matroxfb_enable_irq(WPMINFO int reenable) {
 	u_int32_t bm;
-	
+
 	if (ACCESS_FBINFO(devflags.accelerator) == FB_ACCEL_MATROX_MGAG400)
 		bm = 0x220;
 	else
@@ -232,7 +233,7 @@ int matroxfb_enable_irq(WPMINFO int reenable) {
 
 	if (!test_and_set_bit(0, &ACCESS_FBINFO(irq_flags))) {
 		if (request_irq(ACCESS_FBINFO(pcidev)->irq, matrox_irq,
-				SA_SHIRQ, "matroxfb", MINFO)) {
+				IRQF_SHARED, "matroxfb", MINFO)) {
 			clear_bit(0, &ACCESS_FBINFO(irq_flags));
 			return -EINVAL;
 		}
@@ -241,7 +242,7 @@ int matroxfb_enable_irq(WPMINFO int reenable) {
 		mga_outl(M_IEN, mga_inl(M_IEN) | bm);
 	} else if (reenable) {
 		u_int32_t ien;
-		
+
 		ien = mga_inl(M_IEN);
 		if ((ien & bm) != bm) {
 			printk(KERN_DEBUG "matroxfb: someone disabled IRQ [%08X]\n", ien);
@@ -264,7 +265,6 @@ static void matroxfb_disable_irq(WPMINFO2) {
 }
 
 int matroxfb_wait_for_sync(WPMINFO u_int32_t crtc) {
-	wait_queue_t __wait;
 	struct matrox_vsync *vs;
 	unsigned int cnt;
 	int ret;
@@ -286,7 +286,6 @@ int matroxfb_wait_for_sync(WPMINFO u_int32_t crtc) {
 	if (ret) {
 		return ret;
 	}
-        init_waitqueue_entry(&__wait, current);
 
 	cnt = vs->cnt;
 	ret = wait_event_interruptible_timeout(vs->wait, cnt != vs->cnt, HZ/10);
@@ -349,7 +348,7 @@ static void matrox_pan_var(WPMINFO struct fb_var_screeninfo *var) {
 		mga_setr(M_EXTVGA_INDEX, 0x00, p2);
 	}
 	matroxfb_DAC_unlock_irqrestore(flags);
-	
+
 	update_crtc2(PMINFO pos);
 
 	CRITEND
@@ -392,7 +391,7 @@ static void matroxfb_remove(WPMINFO int dummy) {
 static int matroxfb_open(struct fb_info *info, int user)
 {
 	MINFO_FROM_INFO(info);
-	
+
 	DBG_LOOP(__FUNCTION__)
 
 	if (ACCESS_FBINFO(dead)) {
@@ -408,7 +407,7 @@ static int matroxfb_open(struct fb_info *info, int user)
 static int matroxfb_release(struct fb_info *info, int user)
 {
 	MINFO_FROM_INFO(info);
-	
+
 	DBG_LOOP(__FUNCTION__)
 
 	if (user) {
@@ -499,10 +498,6 @@ static int matroxfb_pitch_adjust(CPMINFO int xres, int bpp) {
 		xres_new = *width;
 	} else {
 		xres_new = matroxfb_test_and_set_rounding(PMINFO xres, bpp);
-	}
-	if (!xres_new) return 0;
-	if (xres != xres_new) {
-		printk(KERN_INFO "matroxfb: cannot set xres to %d, rounded up to %d\n", xres, xres_new);
 	}
 	return xres_new;
 }
@@ -684,6 +679,8 @@ static int matroxfb_setcolreg(unsigned regno, unsigned red, unsigned green,
 		mga_outb(M_DAC_VAL, blue);
 		break;
 	case 16:
+		if (regno >= 16)
+			break;
 		{
 			u_int16_t col =
 				(red << ACCESS_FBINFO(fbcon).var.red.offset)     |
@@ -695,6 +692,8 @@ static int matroxfb_setcolreg(unsigned regno, unsigned red, unsigned green,
 		break;
 	case 24:
 	case 32:
+		if (regno >= 16)
+			break;
 		ACCESS_FBINFO(cmap[regno]) =
 			(red   << ACCESS_FBINFO(fbcon).var.red.offset)   |
 			(green << ACCESS_FBINFO(fbcon).var.green.offset) |
@@ -860,7 +859,7 @@ static int matroxfb_get_vblank(WPMINFO struct fb_vblank *vblank)
 		vblank->flags |= FB_VBLANK_VBLANKING;
 	if (test_bit(0, &ACCESS_FBINFO(irq_flags))) {
 		vblank->flags |= FB_VBLANK_HAVE_COUNT;
-		/* Only one writer, aligned int value... 
+		/* Only one writer, aligned int value...
 		   it should work without lock and without atomic_t */
 		vblank->count = ACCESS_FBINFO(crtc1).vsync.cnt;
 	}
@@ -871,13 +870,12 @@ static struct matrox_altout panellink_output = {
 	.name	 = "Panellink output",
 };
 
-static int matroxfb_ioctl(struct inode *inode, struct file *file,
-			  unsigned int cmd, unsigned long arg,
-			  struct fb_info *info)
+static int matroxfb_ioctl(struct fb_info *info,
+			  unsigned int cmd, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
 	MINFO_FROM_INFO(info);
-	
+
 	DBG(__FUNCTION__)
 
 	if (ACCESS_FBINFO(dead)) {
@@ -1088,7 +1086,7 @@ static int matroxfb_ioctl(struct inode *inode, struct file *file,
 		case VIDIOC_QUERYCAP:
 			{
 				struct v4l2_capability r;
-				
+
 				memset(&r, 0, sizeof(r));
 				strcpy(r.driver, "matroxfb");
 				strcpy(r.card, "Matrox");
@@ -1098,7 +1096,7 @@ static int matroxfb_ioctl(struct inode *inode, struct file *file,
 				if (copy_to_user(argp, &r, sizeof(r)))
 					return -EFAULT;
 				return 0;
-				
+
 			}
 		case VIDIOC_QUERYCTRL:
 			{
@@ -1285,7 +1283,7 @@ static int matroxfb_getmemory(WPMINFO unsigned int maxSize, unsigned int *realSi
 	vaddr_t vm;
 	unsigned int offs;
 	unsigned int offs2;
-	unsigned char store;
+	unsigned char orig;
 	unsigned char bytes[32];
 	unsigned char* tmp;
 
@@ -1298,18 +1296,15 @@ static int matroxfb_getmemory(WPMINFO unsigned int maxSize, unsigned int *realSi
 	if (maxSize > 0x2000000) maxSize = 0x2000000;
 
 	mga_outb(M_EXTVGA_INDEX, 0x03);
-	mga_outb(M_EXTVGA_DATA, mga_inb(M_EXTVGA_DATA) | 0x80);
+	orig = mga_inb(M_EXTVGA_DATA);
+	mga_outb(M_EXTVGA_DATA, orig | 0x80);
 
-	store = mga_readb(vm, 0x1234);
 	tmp = bytes;
 	for (offs = 0x100000; offs < maxSize; offs += 0x200000)
 		*tmp++ = mga_readb(vm, offs);
 	for (offs = 0x100000; offs < maxSize; offs += 0x200000)
 		mga_writeb(vm, offs, 0x02);
-	if (ACCESS_FBINFO(features.accel.has_cacheflush))
-		mga_outb(M_CACHEFLUSH, 0x00);
-	else
-		mga_writeb(vm, 0x1234, 0x99);
+	mga_outb(M_CACHEFLUSH, 0x00);
 	for (offs = 0x100000; offs < maxSize; offs += 0x200000) {
 		if (mga_readb(vm, offs) != 0x02)
 			break;
@@ -1320,10 +1315,9 @@ static int matroxfb_getmemory(WPMINFO unsigned int maxSize, unsigned int *realSi
 	tmp = bytes;
 	for (offs2 = 0x100000; offs2 < maxSize; offs2 += 0x200000)
 		mga_writeb(vm, offs2, *tmp++);
-	mga_writeb(vm, 0x1234, store);
 
 	mga_outb(M_EXTVGA_INDEX, 0x03);
-	mga_outb(M_EXTVGA_DATA, mga_inb(M_EXTVGA_DATA) & ~0x80);
+	mga_outb(M_EXTVGA_DATA, orig);
 
 	*realSize = offs - 0x100000;
 #ifdef CONFIG_FB_MATROX_MILLENIUM
@@ -1429,6 +1423,20 @@ static struct board {
 		MGA_1164,
 		&vbMystique,
 		"Mystique 220 (PCI)"},
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MYS_AGP,	0x02,
+		0,			0,
+		DEVF_VIDEO64BIT | DEVF_CROSS4MB,
+		180000,
+		MGA_1064,
+		&vbMystique,
+		"Mystique (AGP)"},
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MYS_AGP,	0xFF,
+		0,			0,
+		DEVF_VIDEO64BIT | DEVF_SWAPS | DEVF_CROSS4MB,
+		220000,
+		MGA_1164,
+		&vbMystique,
+		"Mystique 220 (AGP)"},
 #endif
 #ifdef CONFIG_FB_MATROX_G
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_MM,	0xFF,
@@ -1687,8 +1695,8 @@ static int initMatrox2(WPMINFO struct board* b){
 		pci_read_config_dword(ACCESS_FBINFO(pcidev), PCI_COMMAND, &cmd);
 		mga_option &= 0x7FFFFFFF; /* clear BIG_ENDIAN */
 		mga_option |= MX_OPTION_BSWAP;
-                /* disable palette snooping */
-                cmd &= ~PCI_COMMAND_VGA_PALETTE;
+		/* disable palette snooping */
+		cmd &= ~PCI_COMMAND_VGA_PALETTE;
 		if (pci_dev_present(intel_82437)) {
 			if (!(mga_option & 0x20000000) && !ACCESS_FBINFO(devflags.nopciretry)) {
 				printk(KERN_WARNING "matroxfb: Disabling PCI retries due to i82437 present\n");
@@ -1806,12 +1814,12 @@ static int initMatrox2(WPMINFO struct board* b){
 
 		if (fv) {
 			tmp = fv * (vesafb_defined.upper_margin + vesafb_defined.yres
-			          + vesafb_defined.lower_margin + vesafb_defined.vsync_len);
+				  + vesafb_defined.lower_margin + vesafb_defined.vsync_len);
 			if ((tmp < fh) || (fh == 0)) fh = tmp;
 		}
 		if (fh) {
 			tmp = fh * (vesafb_defined.left_margin + vesafb_defined.xres
-			          + vesafb_defined.right_margin + vesafb_defined.hsync_len);
+				  + vesafb_defined.right_margin + vesafb_defined.hsync_len);
 			if ((tmp < maxclk) || (maxclk == 0)) maxclk = tmp;
 		}
 		tmp = (maxclk + 499) / 500;
@@ -1831,7 +1839,7 @@ static int initMatrox2(WPMINFO struct board* b){
 	/* FIXME: Where to move this?! */
 #if defined(CONFIG_PPC_PMAC)
 #ifndef MODULE
-	if (_machine == _MACH_Pmac) {
+	if (machine_is(powermac)) {
 		struct fb_var_screeninfo var;
 		if (default_vmode <= 0 || default_vmode > VMODE_MAX)
 			default_vmode = VMODE_640_480_60;
@@ -1858,6 +1866,8 @@ static int initMatrox2(WPMINFO struct board* b){
 							to yres_virtual * xres_virtual < 2^32 */
 	}
 	matroxfb_init_fix(PMINFO2);
+	ACCESS_FBINFO(fbcon.screen_base) = vaddr_va(ACCESS_FBINFO(video.vbase));
+	matroxfb_update_fix(PMINFO2);
 	/* Normalize values (namely yres_virtual) */
 	matroxfb_check_var(&vesafb_defined, &ACCESS_FBINFO(fbcon));
 	/* And put it into "current" var. Do NOT program hardware yet, or we'll not take over
@@ -1885,14 +1895,14 @@ static int initMatrox2(WPMINFO struct board* b){
 
 	/* there is no console on this fb... but we have to initialize hardware
 	 * until someone tells me what is proper thing to do */
- 	if (!ACCESS_FBINFO(initialized)) {
- 		printk(KERN_INFO "fb%d: initializing hardware\n",
- 		       ACCESS_FBINFO(fbcon.node));
- 		/* We have to use FB_ACTIVATE_FORCE, as we had to put vesafb_defined to the fbcon.var
- 		 * already before, so register_framebuffer works correctly. */
- 		vesafb_defined.activate |= FB_ACTIVATE_FORCE;
- 		fb_set_var(&ACCESS_FBINFO(fbcon), &vesafb_defined);
- 	}
+	if (!ACCESS_FBINFO(initialized)) {
+		printk(KERN_INFO "fb%d: initializing hardware\n",
+		       ACCESS_FBINFO(fbcon.node));
+		/* We have to use FB_ACTIVATE_FORCE, as we had to put vesafb_defined to the fbcon.var
+		 * already before, so register_framebuffer works correctly. */
+		vesafb_defined.activate |= FB_ACTIVATE_FORCE;
+		fb_set_var(&ACCESS_FBINFO(fbcon), &vesafb_defined);
+	}
 
 	return 0;
 failVideoIO:;
@@ -1908,8 +1918,8 @@ fail:;
 	return err;
 }
 
-LIST_HEAD(matroxfb_list);
-LIST_HEAD(matroxfb_driver_list);
+static LIST_HEAD(matroxfb_list);
+static LIST_HEAD(matroxfb_driver_list);
 
 #define matroxfb_l(x) list_entry(x, struct matrox_fb_info, next_fb)
 #define matroxfb_driver_l(x) list_entry(x, struct matroxfb_driver, node)
@@ -1988,7 +1998,6 @@ static void matroxfb_unregister_device(struct matrox_fb_info* minfo) {
 
 static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dummy) {
 	struct board* b;
-	u_int8_t rev;
 	u_int16_t svid;
 	u_int16_t sid;
 	struct matrox_fb_info* minfo;
@@ -1999,22 +2008,21 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 #endif
 	DBG(__FUNCTION__)
 
-	pci_read_config_byte(pdev, PCI_REVISION_ID, &rev);
 	svid = pdev->subsystem_vendor;
 	sid = pdev->subsystem_device;
 	for (b = dev_list; b->vendor; b++) {
-		if ((b->vendor != pdev->vendor) || (b->device != pdev->device) || (b->rev < rev)) continue;
+		if ((b->vendor != pdev->vendor) || (b->device != pdev->device) || (b->rev < pdev->revision)) continue;
 		if (b->svid)
 			if ((b->svid != svid) || (b->sid != sid)) continue;
 		break;
 	}
 	/* not match... */
 	if (!b->vendor)
-		return -1;
+		return -ENODEV;
 	if (dev > 0) {
 		/* not requested one... */
 		dev--;
-		return -1;
+		return -ENODEV;
 	}
 	pci_read_config_dword(pdev, PCI_COMMAND, &cmd);
 	if (pci_enable_device(pdev)) {
@@ -2022,7 +2030,7 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 	}
 
 #ifdef CONFIG_FB_MATROX_MULTIHEAD
-	minfo = (struct matrox_fb_info*)kmalloc(sizeof(*minfo), GFP_KERNEL);
+	minfo = kmalloc(sizeof(*minfo), GFP_KERNEL);
 	if (!minfo)
 		return -1;
 #else
@@ -2271,10 +2279,13 @@ static void __init matroxfb_init_params(void) {
 	}
 }
 
-static void __init matrox_init(void) {
+static int __init matrox_init(void) {
+	int err;
+
 	matroxfb_init_params();
-	pci_register_driver(&matroxfb_driver);
+	err = pci_register_driver(&matroxfb_driver);
 	dev = -1;	/* accept all new devices... */
+	return err;
 }
 
 /* **************************** exit-time only **************************** */
@@ -2287,7 +2298,7 @@ static void __exit matrox_done(void) {
 
 /* ************************* init in-kernel code ************************** */
 
-int __init matroxfb_setup(char *options) {
+static int __init matroxfb_setup(char *options) {
 	char *this_opt;
 
 	DBG(__FUNCTION__)
@@ -2351,7 +2362,7 @@ int __init matroxfb_setup(char *options) {
 		else if (!strncmp(this_opt, "dfp:", 4)) {
 			dfp_type = simple_strtoul(this_opt+4, NULL, 0);
 			dfp = 1;
-		}	
+		}
 #ifdef CONFIG_PPC_PMAC
 		else if (!strncmp(this_opt, "vmode:", 6)) {
 			unsigned int vmode = simple_strtoul(this_opt+6, NULL, 0);
@@ -2428,9 +2439,10 @@ int __init matroxfb_setup(char *options) {
 
 static int __initdata initialized = 0;
 
-int __init matroxfb_init(void)
+static int __init matroxfb_init(void)
 {
 	char *option = NULL;
+	int err = 0;
 
 	DBG(__FUNCTION__)
 
@@ -2442,11 +2454,11 @@ int __init matroxfb_init(void)
 		return -ENXIO;
 	if (!initialized) {
 		initialized = 1;
-		matrox_init();
+		err = matrox_init();
 	}
 	hotplug = 1;
 	/* never return failure, user can hotplug matrox later... */
-	return 0;
+	return err;
 }
 
 module_init(matroxfb_init);

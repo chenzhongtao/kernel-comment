@@ -17,7 +17,7 @@
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *s0box_revision = "$Revision: 2.6.2.4 $";
+static const char *s0box_revision = "$Revision: 2.6.2.4 $";
 
 static inline void
 writereg(unsigned int padr, signed int addr, u_char off, u_char val) {
@@ -141,7 +141,7 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 #include "hscx_irq.c"
 
 static irqreturn_t
-s0box_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+s0box_interrupt(int intno, void *dev_id)
 {
 #define MAXCOUNT 5
 	struct IsdnCardState *cs = dev_id;
@@ -183,7 +183,7 @@ s0box_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-void
+static void
 release_io_s0box(struct IsdnCardState *cs)
 {
 	release_region(cs->hw.teles3.cfg_reg, 8);
@@ -211,7 +211,7 @@ S0Box_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-int __init
+int __devinit
 setup_s0box(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;

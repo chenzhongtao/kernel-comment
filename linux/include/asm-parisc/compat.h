@@ -5,6 +5,7 @@
  */
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/thread_info.h>
 
 #define COMPAT_USER_HZ 100
 
@@ -13,8 +14,10 @@ typedef s32	compat_ssize_t;
 typedef s32	compat_time_t;
 typedef s32	compat_clock_t;
 typedef s32	compat_pid_t;
-typedef u32	compat_uid_t;
-typedef u32	compat_gid_t;
+typedef u32	__compat_uid_t;
+typedef u32	__compat_gid_t;
+typedef u32	__compat_uid32_t;
+typedef u32	__compat_gid32_t;
 typedef u16	compat_mode_t;
 typedef u32	compat_ino_t;
 typedef u32	compat_dev_t;
@@ -24,12 +27,14 @@ typedef u16	compat_nlink_t;
 typedef u16	compat_ipc_pid_t;
 typedef s32	compat_daddr_t;
 typedef u32	compat_caddr_t;
-typedef u32	compat_timer_t;
+typedef s32	compat_timer_t;
 
 typedef s32	compat_int_t;
 typedef s32	compat_long_t;
+typedef s64	compat_s64;
 typedef u32	compat_uint_t;
 typedef u32	compat_ulong_t;
+typedef u64	compat_u64;
 
 struct compat_timespec {
 	compat_time_t		tv_sec;
@@ -67,8 +72,8 @@ struct compat_stat {
 	compat_dev_t		st_realdev;
 	u16			st_basemode;
 	u16			st_spareshort;
-	compat_uid_t		st_uid;
-	compat_gid_t		st_gid;
+	__compat_uid32_t	st_uid;
+	__compat_gid32_t	st_gid;
 	u32			st_spare4[3];
 };
 
@@ -131,15 +136,30 @@ typedef u32		compat_sigset_word;
  */
 typedef	u32		compat_uptr_t;
 
-static inline void *compat_ptr(compat_uptr_t uptr)
+static inline void __user *compat_ptr(compat_uptr_t uptr)
 {
-	return (void *)(unsigned long)uptr;
+	return (void __user *)(unsigned long)uptr;
 }
 
-static __inline__ void *compat_alloc_user_space(long len)
+static inline compat_uptr_t ptr_to_compat(void __user *uptr)
+{
+	return (u32)(unsigned long)uptr;
+}
+
+static __inline__ void __user *compat_alloc_user_space(long len)
 {
 	struct pt_regs *regs = &current->thread.regs;
-	return (void *)regs->gr[30];
+	return (void __user *)regs->gr[30];
+}
+
+static inline int __is_compat_task(struct task_struct *t)
+{
+	return test_ti_thread_flag(task_thread_info(t), TIF_32BIT);
+}
+
+static inline int is_compat_task(void)
+{
+	return __is_compat_task(current);
 }
 
 #endif /* _ASM_PARISC_COMPAT_H */

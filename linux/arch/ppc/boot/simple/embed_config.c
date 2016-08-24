@@ -8,7 +8,6 @@
  */
 
 #include <linux/types.h>
-#include <linux/config.h>
 #include <linux/string.h>
 #include <asm/reg.h>
 #ifdef CONFIG_8xx
@@ -20,6 +19,9 @@
 #endif
 #ifdef CONFIG_40x
 #include <asm/io.h>
+#endif
+#ifdef CONFIG_XILINX_VIRTEX
+#include <platforms/4xx/xparameters/xparameters.h>
 #endif
 extern unsigned long timebase_period_ns;
 
@@ -506,7 +508,7 @@ embed_config(bd_t **bdp)
 	memcpy(bd->bi_enetaddr, cp, 6);
 
 	/* can busfreq be calculated? */
-	pvr = mfspr(PVR);
+	pvr = mfspr(SPRN_PVR);
 	if ((pvr & 0xffff0000) == 0x80820000) {
 		bd->bi_busfreq = 100000000;
 		clk_8280(bd);
@@ -742,7 +744,7 @@ embed_config(bd_t **bdp)
 }
 #endif /* WILLOW */
 
-#ifdef CONFIG_XILINX_ML300
+#if defined(CONFIG_XILINX_ML300) || defined(CONFIG_XILINX_ML403)
 void
 embed_config(bd_t ** bdp)
 {
@@ -750,7 +752,9 @@ embed_config(bd_t ** bdp)
 	static const unsigned long congruence_classes = 256;
 	unsigned long addr;
 	unsigned long dccr;
+	uint8_t* cp;
 	bd_t *bd;
+	int i;
 
 	/*
 	 * Invalidate the data cache if the data cache is turned off.
@@ -776,36 +780,26 @@ embed_config(bd_t ** bdp)
 	bd->bi_intfreq = XPAR_CORE_CLOCK_FREQ_HZ;
 	bd->bi_busfreq = XPAR_PLB_CLOCK_FREQ_HZ;
 	bd->bi_pci_busfreq = XPAR_PCI_0_CLOCK_FREQ_HZ;
+
+	/* Copy the default ethernet address */
+	cp = (u_char *)def_enet_addr;
+	for (i=0; i<6; i++)
+		bd->bi_enetaddr[i] = *cp++;
+
 	timebase_period_ns = 1000000000 / bd->bi_tbfreq;
 	/* see bi_tbfreq definition in arch/ppc/platforms/4xx/xilinx_ml300.h */
 }
-#endif /* CONFIG_XILINX_ML300 */
+#endif /* CONFIG_XILINX_ML300 || CONFIG_XILINX_ML403 */
 
 #ifdef CONFIG_IBM_OPENBIOS
 /* This could possibly work for all treeboot roms.
 */
-#if defined(CONFIG_ASH) || defined(CONFIG_BEECH) || defined(CONFIG_BUBINGA)
+#if defined(CONFIG_BUBINGA)
 #define BOARD_INFO_VECTOR       0xFFF80B50 /* openbios 1.19 moved this vector down  - armin */
 #else
 #define BOARD_INFO_VECTOR	0xFFFE0B50
 #endif
 
-#ifdef CONFIG_BEECH
-static void
-get_board_info(bd_t **bdp)
-{
-	typedef void (*PFV)(bd_t *bd);
-	((PFV)(*(unsigned long *)BOARD_INFO_VECTOR))(*bdp);
-	return;
-}
-
-void
-embed_config(bd_t **bdp)
-{
-        *bdp = &bdinfo;
-	get_board_info(bdp);
-}
-#else /* !CONFIG_BEECH */
 void
 embed_config(bd_t **bdp)
 {
@@ -860,7 +854,6 @@ embed_config(bd_t **bdp)
 #endif
 	timebase_period_ns = 1000000000 / bd->bi_tbfreq;
 }
-#endif /* CONFIG_BEECH */
 #endif /* CONFIG_IBM_OPENBIOS */
 
 #ifdef CONFIG_EP405
@@ -943,39 +936,3 @@ embed_config(bd_t **bdp)
 #endif
 }
 #endif
-
-#ifdef CONFIG_RAINIER
-/* Rainier uses vxworks bootrom */
-void
-embed_config(bd_t **bdp)
-{
-	u_char	*cp;
-	int	i;
-	bd_t	*bd;
-	
-	bd = &bdinfo;
-	*bdp = bd;
-	
-	for(i=0;i<8192;i+=32) {
-		__asm__("dccci 0,%0" :: "r" (i));
-	}
-	__asm__("iccci 0,0");
-	__asm__("sync;isync");
-
-	/* init ram for parity */
-	memset(0, 0,0x400000);  /* Lo memory */
-
-
-	bd->bi_memsize   = (32 * 1024 * 1024) ;
-	bd->bi_intfreq = 133000000; //the internal clock is 133 MHz
-	bd->bi_busfreq   = 100000000;
-	bd->bi_pci_busfreq= 33000000;
-
-	cp = (u_char *)def_enet_addr;
-	for (i=0; i<6; i++) {
-		bd->bi_enetaddr[i] = *cp++;
-	}
-
-}
-#endif
-

@@ -11,6 +11,18 @@
  * Head.S contains the SH exception handlers and startup code.
  */
 #include <linux/linkage.h>
+#include <asm/thread_info.h>
+
+#ifdef CONFIG_CPU_SH4A
+#define SYNCO()		synco
+
+#define PREFI(label, reg)	\
+	mov.l	label, reg;	\
+	prefi	@reg
+#else
+#define SYNCO()
+#define PREFI(label, reg)
+#endif
 
 	.section	.empty_zero_page, "aw"
 ENTRY(empty_zero_page)
@@ -21,9 +33,11 @@ ENTRY(empty_zero_page)
 	.long	0x00360000	/* INITRD_START */
 	.long	0x000a0000	/* INITRD_SIZE */
 	.long	0
-	.balign 4096,0,4096
+1:
+	.skip	PAGE_SIZE - empty_zero_page - 1b
 
-	.text	
+	.section	.text.head, "ax"
+
 /*
  * Condition at the entry of _stext:
  *
@@ -40,21 +54,36 @@ ENTRY(_stext)
 	mov.l	1f, r0		! MD=1, RB=0, BL=0, IMASK=0xF
 	ldc	r0, sr
 	!			Initialize global interrupt mask
+#ifdef CONFIG_CPU_HAS_SR_RB
 	mov	#0, r0
 	ldc	r0, r6_bank
+#endif
+	
+	/*
+	 * Prefetch if possible to reduce cache miss penalty.
+	 *
+	 * We do this early on for SH-4A as a micro-optimization,
+	 * as later on we will have speculative execution enabled
+	 * and this will become less of an issue.
+	 */
+	PREFI(5f, r0)
+	PREFI(6f, r0)
+
 	!
 	mov.l	2f, r0
 	mov	r0, r15		! Set initial r15 (stack pointer)
-	mov	#0x20, r1	!
-	shll8	r1		! r1 = 8192
-	sub	r1, r0		!
+#ifdef CONFIG_CPU_HAS_SR_RB
+	mov.l	7f, r0
 	ldc	r0, r7_bank	! ... and initial thread_info
-	!
-	!			Additional CPU initialization
-	mov.l	6f, r0
-	jsr	@r0
-	 nop
+#endif
+	
 	!			Clear BSS area
+#ifdef CONFIG_SMP	
+	mov.l	3f, r0
+	cmp/eq	#0, r0		! skip clear if set to zero
+	bt	10f
+#endif
+	
 	mov.l	3f, r1
 	add	#4, r1
 	mov.l	4f, r2
@@ -62,15 +91,30 @@ ENTRY(_stext)
 9:	cmp/hs	r2, r1
 	bf/s	9b		! while (r1 < r2)
 	 mov.l	r0,@-r2
+
+10:		
+	!			Additional CPU initialization
+	mov.l	6f, r0
+	jsr	@r0
+	 nop
+
+	SYNCO()			! Wait for pending instructions..
+	
 	!			Start kernel
 	mov.l	5f, r0
 	jmp	@r0
 	 nop
 
 	.balign 4
+#if defined(CONFIG_CPU_SH2)
+1:	.long	0x000000F0		! IMASK=0xF
+#else
 1:	.long	0x400080F0		! MD=1, RB=0, BL=0, FD=1, IMASK=0xF
-2:	.long	stack
+#endif
+ENTRY(stack_start)
+2:	.long	init_thread_union+THREAD_SIZE
 3:	.long	__bss_start
 4:	.long	_end
 5:	.long	start_kernel
 6:	.long	sh_cpu_init
+7:	.long	init_thread_union

@@ -43,8 +43,6 @@
  * child task framework of the RPC layer?
  */
 
-#include <linux/sched.h>
-#include <linux/smp_lock.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/sunrpc/sched.h>
@@ -53,13 +51,17 @@
 #include <linux/nfs.h>
 #include <linux/nfs4.h>
 #include <linux/nfs_fs.h>
+#include "nfs4_fs.h"
+#include "delegation.h"
 
 #define NFSDBG_FACILITY	NFSDBG_PROC
 
 void
-nfs4_renew_state(void *data)
+nfs4_renew_state(struct work_struct *work)
 {
-	struct nfs4_client *clp = (struct nfs4_client *)data;
+	struct nfs_client *clp =
+		container_of(work, struct nfs_client, cl_renewd.work);
+	struct rpc_cred *cred;
 	long lease, timeout;
 	unsigned long last, now;
 
@@ -67,7 +69,7 @@ nfs4_renew_state(void *data)
 	dprintk("%s: start\n", __FUNCTION__);
 	/* Are there any active superblocks? */
 	if (list_empty(&clp->cl_superblocks))
-		goto out; 
+		goto out;
 	spin_lock(&clp->cl_lock);
 	lease = clp->cl_lease_time;
 	last = clp->cl_last_renewal;
@@ -75,9 +77,17 @@ nfs4_renew_state(void *data)
 	timeout = (2 * lease) / 3 + (long)last - (long)now;
 	/* Are we close to a lease timeout? */
 	if (time_after(now, last + lease/3)) {
+		cred = nfs4_get_renew_cred(clp);
+		if (cred == NULL) {
+			set_bit(NFS4CLNT_LEASE_EXPIRED, &clp->cl_state);
+			spin_unlock(&clp->cl_lock);
+			nfs_expire_all_delegations(clp);
+			goto out;
+		}
 		spin_unlock(&clp->cl_lock);
 		/* Queue an asynchronous RENEW. */
-		nfs4_proc_async_renew(clp);
+		nfs4_proc_async_renew(clp, cred);
+		put_rpccred(cred);
 		timeout = (2 * lease) / 3;
 		spin_lock(&clp->cl_lock);
 	} else
@@ -97,7 +107,7 @@ out:
 
 /* Must be called with clp->cl_sem locked for writes */
 void
-nfs4_schedule_state_renewal(struct nfs4_client *clp)
+nfs4_schedule_state_renewal(struct nfs_client *clp)
 {
 	long timeout;
 
@@ -110,35 +120,20 @@ nfs4_schedule_state_renewal(struct nfs4_client *clp)
 			__FUNCTION__, (timeout + HZ - 1) / HZ);
 	cancel_delayed_work(&clp->cl_renewd);
 	schedule_delayed_work(&clp->cl_renewd, timeout);
+	set_bit(NFS_CS_RENEWD, &clp->cl_res_state);
 	spin_unlock(&clp->cl_lock);
 }
 
 void
 nfs4_renewd_prepare_shutdown(struct nfs_server *server)
 {
-	struct nfs4_client *clp = server->nfs4_state;
-
-	if (!clp)
-		return;
-	flush_scheduled_work();
-	down_write(&clp->cl_sem);
-	if (!list_empty(&server->nfs4_siblings))
-		list_del_init(&server->nfs4_siblings);
-	up_write(&clp->cl_sem);
+	cancel_delayed_work(&server->nfs_client->cl_renewd);
 }
 
-/* Must be called with clp->cl_sem locked for writes */
 void
-nfs4_kill_renewd(struct nfs4_client *clp)
+nfs4_kill_renewd(struct nfs_client *clp)
 {
-	down_read(&clp->cl_sem);
-	if (!list_empty(&clp->cl_superblocks)) {
-		up_read(&clp->cl_sem);
-		return;
-	}
-	cancel_delayed_work(&clp->cl_renewd);
-	up_read(&clp->cl_sem);
-	flush_scheduled_work();
+	cancel_delayed_work_sync(&clp->cl_renewd);
 }
 
 /*

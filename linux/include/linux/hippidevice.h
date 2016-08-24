@@ -10,7 +10,7 @@
  * Author:	Jes Sorensen, <Jes.Sorensen@cern.ch>
  *
  *		hippidevice.h is based on previous fddidevice.h work by
- *			Ross Biro, <bir7@leland.Stanford.Edu>
+ *			Ross Biro
  *			Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *			Alan Cox, <gw4pts@gw4pts.ampr.org>
  *			Lawrence V. Stefani, <stefani@lkg.dec.com>
@@ -26,8 +26,12 @@
 #include <linux/if_hippi.h>
 
 #ifdef __KERNEL__
-extern unsigned short hippi_type_trans(struct sk_buff *skb,
-				       struct net_device *dev);
+
+struct hippi_cb {
+	__u32	ifield;
+};
+
+extern __be16 hippi_type_trans(struct sk_buff *skb, struct net_device *dev);
 
 extern struct net_device *alloc_hippi_dev(int sizeof_priv);
 #endif

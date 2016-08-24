@@ -26,15 +26,26 @@
  *	ERR_PTR(error).  In the end of sequence they return %NULL. ->show()
  *	returns 0 in case of success and negative number in case of error.
  */
-int seq_open(struct file *file, struct seq_operations *op)
+int seq_open(struct file *file, const struct seq_operations *op)
 {
-	struct seq_file *p = kmalloc(sizeof(*p), GFP_KERNEL);
-	if (!p)
-		return -ENOMEM;
+	struct seq_file *p = file->private_data;
+
+	if (!p) {
+		p = kmalloc(sizeof(*p), GFP_KERNEL);
+		if (!p)
+			return -ENOMEM;
+		file->private_data = p;
+	}
 	memset(p, 0, sizeof(*p));
-	sema_init(&p->sem, 1);
+	mutex_init(&p->lock);
 	p->op = op;
-	file->private_data = p;
+
+	/*
+	 * Wrappers around seq_open(e.g. swaps_open) need to be
+	 * aware of this. If they set f_version themselves, they
+	 * should call seq_open first and then set f_version.
+	 */
+	file->f_version = 0;
 
 	/* SEQ files support lseek, but not pread/pwrite */
 	file->f_mode &= ~(FMODE_PREAD | FMODE_PWRITE);
@@ -44,7 +55,10 @@ EXPORT_SYMBOL(seq_open);
 
 /**
  *	seq_read -	->read() method for sequential files.
- *	@file, @buf, @size, @ppos: see file_operations method
+ *	@file: the file to read from
+ *	@buf: the buffer to read to
+ *	@size: the maximum number of bytes to read
+ *	@ppos: the current position in the file
  *
  *	Ready-made ->f_op->read()
  */
@@ -57,7 +71,19 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 	void *p;
 	int err = 0;
 
-	down(&m->sem);
+	mutex_lock(&m->lock);
+	/*
+	 * seq_file->op->..m_start/m_stop/m_next may do special actions
+	 * or optimisations based on the file->f_version, so we want to
+	 * pass the file->f_version to those methods.
+	 *
+	 * seq_file->version is just copy of f_version, and seq_file
+	 * methods can treat it simply as file version.
+	 * It is copied in first and copied out after all operations.
+	 * It is convenient to have it as  part of structure to avoid the
+	 * need of passing another argument to all the seq_file methods.
+	 */
+	m->version = file->f_version;
 	/* grab buffer if we didn't have one */
 	if (!m->buf) {
 		m->buf = kmalloc(m->size = PAGE_SIZE, GFP_KERNEL);
@@ -98,6 +124,7 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 		if (!m->buf)
 			goto Enomem;
 		m->count = 0;
+		m->version = 0;
 	}
 	m->op->stop(m, p);
 	m->count = 0;
@@ -136,7 +163,8 @@ Done:
 		copied = err;
 	else
 		*ppos += copied;
-	up(&m->sem);
+	file->f_version = m->version;
+	mutex_unlock(&m->lock);
 	return copied;
 Enomem:
 	err = -ENOMEM;
@@ -149,20 +177,23 @@ EXPORT_SYMBOL(seq_read);
 
 static int traverse(struct seq_file *m, loff_t offset)
 {
-	loff_t pos = 0;
+	loff_t pos = 0, index;
 	int error = 0;
 	void *p;
 
-	m->index = 0;
+	m->version = 0;
+	index = 0;
 	m->count = m->from = 0;
-	if (!offset)
+	if (!offset) {
+		m->index = index;
 		return 0;
+	}
 	if (!m->buf) {
 		m->buf = kmalloc(m->size = PAGE_SIZE, GFP_KERNEL);
 		if (!m->buf)
 			return -ENOMEM;
 	}
-	p = m->op->start(m, &m->index);
+	p = m->op->start(m, &index);
 	while (p) {
 		error = PTR_ERR(p);
 		if (IS_ERR(p))
@@ -175,15 +206,17 @@ static int traverse(struct seq_file *m, loff_t offset)
 		if (pos + m->count > offset) {
 			m->from = offset - pos;
 			m->count -= m->from;
+			m->index = index;
 			break;
 		}
 		pos += m->count;
 		m->count = 0;
 		if (pos == offset) {
-			m->index++;
+			index++;
+			m->index = index;
 			break;
 		}
-		p = m->op->next(m, p, &m->index);
+		p = m->op->next(m, p, &index);
 	}
 	m->op->stop(m, p);
 	return error;
@@ -197,7 +230,9 @@ Eoverflow:
 
 /**
  *	seq_lseek -	->llseek() method for sequential files.
- *	@file, @offset, @origin: see file_operations method
+ *	@file: the file in question
+ *	@offset: new position
+ *	@origin: 0 for absolute, 1 for relative position
  *
  *	Ready-made ->f_op->llseek()
  */
@@ -206,7 +241,8 @@ loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 	struct seq_file *m = (struct seq_file *)file->private_data;
 	long long retval = -EINVAL;
 
-	down(&m->sem);
+	mutex_lock(&m->lock);
+	m->version = file->f_version;
 	switch (origin) {
 		case 1:
 			offset += file->f_pos;
@@ -220,6 +256,7 @@ loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 				if (retval) {
 					/* with extreme prejudice... */
 					file->f_pos = 0;
+					m->version = 0;
 					m->index = 0;
 					m->count = 0;
 				} else {
@@ -227,7 +264,8 @@ loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 				}
 			}
 	}
-	up(&m->sem);
+	file->f_version = m->version;
+	mutex_unlock(&m->lock);
 	return retval;
 }
 EXPORT_SYMBOL(seq_lseek);
@@ -235,7 +273,7 @@ EXPORT_SYMBOL(seq_lseek);
 /**
  *	seq_release -	free the structures associated with sequential file.
  *	@file: file in question
- *	@inode: file->f_dentry->d_inode
+ *	@inode: file->f_path.dentry->d_inode
  *
  *	Frees the structures associated with sequential file; can be used
  *	as ->f_op->release() if you don't have private data to destroy.
@@ -374,7 +412,7 @@ EXPORT_SYMBOL(single_open);
 
 int single_release(struct inode *inode, struct file *file)
 {
-	struct seq_operations *op = ((struct seq_file *)file->private_data)->op;
+	const struct seq_operations *op = ((struct seq_file *)file->private_data)->op;
 	int res = seq_release(inode, file);
 	kfree(op);
 	return res;
@@ -390,6 +428,39 @@ int seq_release_private(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 EXPORT_SYMBOL(seq_release_private);
+
+void *__seq_open_private(struct file *f, const struct seq_operations *ops,
+		int psize)
+{
+	int rc;
+	void *private;
+	struct seq_file *seq;
+
+	private = kzalloc(psize, GFP_KERNEL);
+	if (private == NULL)
+		goto out;
+
+	rc = seq_open(f, ops);
+	if (rc < 0)
+		goto out_free;
+
+	seq = f->private_data;
+	seq->private = private;
+	return private;
+
+out_free:
+	kfree(private);
+out:
+	return NULL;
+}
+EXPORT_SYMBOL(__seq_open_private);
+
+int seq_open_private(struct file *filp, const struct seq_operations *ops,
+		int psize)
+{
+	return __seq_open_private(filp, ops, psize) ? 0 : -ENOMEM;
+}
+EXPORT_SYMBOL(seq_open_private);
 
 int seq_putc(struct seq_file *m, char c)
 {
@@ -413,3 +484,37 @@ int seq_puts(struct seq_file *m, const char *s)
 	return -1;
 }
 EXPORT_SYMBOL(seq_puts);
+
+struct list_head *seq_list_start(struct list_head *head, loff_t pos)
+{
+	struct list_head *lh;
+
+	list_for_each(lh, head)
+		if (pos-- == 0)
+			return lh;
+
+	return NULL;
+}
+
+EXPORT_SYMBOL(seq_list_start);
+
+struct list_head *seq_list_start_head(struct list_head *head, loff_t pos)
+{
+	if (!pos)
+		return head;
+
+	return seq_list_start(head, pos - 1);
+}
+
+EXPORT_SYMBOL(seq_list_start_head);
+
+struct list_head *seq_list_next(void *v, struct list_head *head, loff_t *ppos)
+{
+	struct list_head *lh;
+
+	lh = ((struct list_head *)v)->next;
+	++*ppos;
+	return lh == head ? NULL : lh;
+}
+
+EXPORT_SYMBOL(seq_list_next);

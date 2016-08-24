@@ -14,7 +14,6 @@
  */
 
 #include <linux/bitops.h>
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -38,14 +37,14 @@
 
 int gsc_alloc_irq(struct gsc_irq *i)
 {
-	int irq = txn_alloc_irq();
+	int irq = txn_alloc_irq(GSC_EIM_WIDTH);
 	if (irq < 0) {
 		printk("cannot get irq\n");
 		return irq;
 	}
 
 	i->txn_addr = txn_alloc_addr(irq);
-	i->txn_data = txn_alloc_data(irq, GSC_EIM_WIDTH);
+	i->txn_data = txn_alloc_data(irq);
 	i->irq = irq;
 
 	return irq;
@@ -64,7 +63,7 @@ int gsc_claim_irq(struct gsc_irq *i, int irq)
 	}
 
 	i->txn_addr = txn_alloc_addr(irq);
-	i->txn_data = txn_alloc_data(irq, GSC_EIM_WIDTH);
+	i->txn_data = txn_alloc_data(irq);
 	i->irq = irq;
 
 	return irq;
@@ -74,7 +73,7 @@ EXPORT_SYMBOL(gsc_alloc_irq);
 EXPORT_SYMBOL(gsc_claim_irq);
 
 /* Common interrupt demultiplexer used by Asp, Lasi & Wax.  */
-irqreturn_t gsc_asic_intr(int gsc_asic_irq, void *dev, struct pt_regs *regs)
+irqreturn_t gsc_asic_intr(int gsc_asic_irq, void *dev)
 {
 	unsigned long irr;
 	struct gsc_asic *gsc_asic = dev;
@@ -88,7 +87,7 @@ irqreturn_t gsc_asic_intr(int gsc_asic_irq, void *dev, struct pt_regs *regs)
 	do {
 		int local_irq = __ffs(irr);
 		unsigned int irq = gsc_asic->global_irq[local_irq];
-		__do_IRQ(irq, regs);
+		__do_IRQ(irq);
 		irr &= ~(1 << local_irq);
 	} while (irr);
 
@@ -109,7 +108,7 @@ int gsc_find_local_irq(unsigned int irq, int *global_irqs, int limit)
 
 static void gsc_asic_disable_irq(unsigned int irq)
 {
-	struct gsc_asic *irq_dev = irq_desc[irq].handler_data;
+	struct gsc_asic *irq_dev = irq_desc[irq].chip_data;
 	int local_irq = gsc_find_local_irq(irq, irq_dev->global_irq, 32);
 	u32 imr;
 
@@ -124,7 +123,7 @@ static void gsc_asic_disable_irq(unsigned int irq)
 
 static void gsc_asic_enable_irq(unsigned int irq)
 {
-	struct gsc_asic *irq_dev = irq_desc[irq].handler_data;
+	struct gsc_asic *irq_dev = irq_desc[irq].chip_data;
 	int local_irq = gsc_find_local_irq(irq, irq_dev->global_irq, 32);
 	u32 imr;
 
@@ -164,27 +163,39 @@ int gsc_assign_irq(struct hw_interrupt_type *type, void *data)
 	if (irq > GSC_IRQ_MAX)
 		return NO_IRQ;
 
-	irq_desc[irq].handler = type;
-	irq_desc[irq].handler_data = data;
+	irq_desc[irq].chip = type;
+	irq_desc[irq].chip_data = data;
 	return irq++;
 }
 
 void gsc_asic_assign_irq(struct gsc_asic *asic, int local_irq, int *irqp)
 {
-	int irq = gsc_assign_irq(&gsc_asic_interrupt_type, asic);
-	if (irq == NO_IRQ)
-		return;
+	int irq = asic->global_irq[local_irq];
+	
+	if (irq <= 0) {
+		irq = gsc_assign_irq(&gsc_asic_interrupt_type, asic);
+		if (irq == NO_IRQ)
+			return;
 
+		asic->global_irq[local_irq] = irq;
+	}
 	*irqp = irq;
-	asic->global_irq[local_irq] = irq;
+}
+
+static struct device *next_device(struct klist_iter *i)
+{
+	struct klist_node * n = klist_next(i);
+	return n ? container_of(n, struct device, knode_parent) : NULL;
 }
 
 void gsc_fixup_irqs(struct parisc_device *parent, void *ctrl,
 			void (*choose_irq)(struct parisc_device *, void *))
 {
 	struct device *dev;
+	struct klist_iter i;
 
-	list_for_each_entry(dev, &parent->dev.children, node) {
+	klist_iter_init(&parent->dev.klist_children, &i);
+	while ((dev = next_device(&i))) {
 		struct parisc_device *padev = to_parisc_device(dev);
 
 		/* work-around for 715/64 and others which have parent 
@@ -193,13 +204,20 @@ void gsc_fixup_irqs(struct parisc_device *parent, void *ctrl,
 			return gsc_fixup_irqs(padev, ctrl, choose_irq);
 		choose_irq(padev, ctrl);
 	}
+	klist_iter_exit(&i);
 }
 
 int gsc_common_setup(struct parisc_device *parent, struct gsc_asic *gsc_asic)
 {
 	struct resource *res;
+	int i;
 
 	gsc_asic->gsc = parent;
+
+	/* Initialise local irq -> global irq mapping */
+	for (i = 0; i < 32; i++) {
+		gsc_asic->global_irq[i] = NO_IRQ;
+	}
 
 	/* allocate resource region */
 	res = request_mem_region(gsc_asic->hpa, 0x100000, gsc_asic->name);

@@ -2,6 +2,7 @@
  *  linux/arch/arm/mm/proc-v6.S
  *
  *  Copyright (C) 2001 Deep Blue Solutions Ltd.
+ *  Modified by Catalin Marinas for noMMU support
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -11,51 +12,45 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <asm/constants.h>
-#include <asm/procinfo.h>
+#include <asm/asm-offsets.h>
+#include <asm/elf.h>
+#include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
+
+#ifdef CONFIG_SMP
+#include <asm/hardware/arm_scu.h>
+#endif
 
 #include "proc-macros.S"
 
 #define D_CACHE_LINE_SIZE	32
 
-	.macro	cpsie, flags
-	.ifc \flags, f
-	.long	0xf1080040
-	.exitm
-	.endif
-	.ifc \flags, i
-	.long	0xf1080080
-	.exitm
-	.endif
-	.ifc \flags, if
-	.long	0xf10800c0
-	.exitm
-	.endif
-	.err
-	.endm
+#define TTB_C		(1 << 0)
+#define TTB_S		(1 << 1)
+#define TTB_IMP		(1 << 2)
+#define TTB_RGN_NC	(0 << 3)
+#define TTB_RGN_WBWA	(1 << 3)
+#define TTB_RGN_WT	(2 << 3)
+#define TTB_RGN_WB	(3 << 3)
 
-	.macro	cpsid, flags
-	.ifc \flags, f
-	.long	0xf10c0040
-	.exitm
-	.endif
-	.ifc \flags, i
-	.long	0xf10c0080
-	.exitm
-	.endif
-	.ifc \flags, if
-	.long	0xf10c00c0
-	.exitm
-	.endif
-	.err
-	.endm
+#ifndef CONFIG_SMP
+#define TTB_FLAGS	TTB_RGN_WBWA
+#else
+#define TTB_FLAGS	TTB_RGN_WBWA|TTB_S
+#endif
 
 ENTRY(cpu_v6_proc_init)
 	mov	pc, lr
 
 ENTRY(cpu_v6_proc_fin)
-	mov	pc, lr
+	stmfd	sp!, {lr}
+	cpsid	if				@ disable interrupts
+	bl	v6_flush_kern_cache_all
+	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
+	bic	r0, r0, #0x1000			@ ...i............
+	bic	r0, r0, #0x0006			@ .............ca.
+	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
+	ldmfd	sp!, {pc}
 
 /*
  *	cpu_v6_reset(loc)
@@ -103,28 +98,26 @@ ENTRY(cpu_v6_dcache_clean_area)
  *	- we are not using split page tables
  */
 ENTRY(cpu_v6_switch_mm)
+#ifdef CONFIG_MMU
 	mov	r2, #0
 	ldr	r1, [r1, #MM_CONTEXT_ID]	@ get mm->context.id
-	mcr     p15, 0, r2, c7, c5, 6           @ flush BTAC/BTB
+	orr	r0, r0, #TTB_FLAGS
+	mcr	p15, 0, r2, c7, c5, 6		@ flush BTAC/BTB
 	mcr	p15, 0, r2, c7, c10, 4		@ drain write buffer
 	mcr	p15, 0, r0, c2, c0, 0		@ set TTB 0
 	mcr	p15, 0, r1, c13, c0, 1		@ set context ID
+#endif
 	mov	pc, lr
 
-#define nG	(1 << 11)
-#define APX	(1 << 9)
-#define AP1	(1 << 5)
-#define AP0	(1 << 4)
-#define XN	(1 << 0)
-
 /*
- *	cpu_v6_set_pte(ptep, pte)
+ *	cpu_v6_set_pte_ext(ptep, pte, ext)
  *
  *	Set a level 2 translation table entry.
  *
  *	- ptep  - pointer to level 2 translation table entry
  *		  (hardware version is stored at -1024 bytes)
  *	- pte   - PTE value to store
+ *	- ext	- value for extended PTE bits
  *
  *	Permissions:
  *	  YUWD  APX AP1 AP0	SVC	User
@@ -132,44 +125,47 @@ ENTRY(cpu_v6_switch_mm)
  *	  100x   1   0   1	r/o	no acc
  *	  10x0   1   0   1	r/o	no acc
  *	  1011   0   0   1	r/w	no acc
- *	  110x   1   1   0	r/o	r/o
- *	  11x0   1   1   0	r/o	r/o
+ *	  110x   0   1   0	r/w	r/o
+ *	  11x0   0   1   0	r/w	r/o
  *	  1111   0   1   1	r/w	r/w
  */
-ENTRY(cpu_v6_set_pte)
+ENTRY(cpu_v6_set_pte_ext)
+#ifdef CONFIG_MMU
 	str	r1, [r0], #-2048		@ linux version
 
-	bic	r2, r1, #0x00000ff0
-	bic	r2, r2, #0x00000003
-	orr	r2, r2, #AP0 | 2
+	bic	r3, r1, #0x000003f0
+	bic	r3, r3, #0x00000003
+	orr	r3, r3, r2
+	orr	r3, r3, #PTE_EXT_AP0 | 2
 
 	tst	r1, #L_PTE_WRITE
 	tstne	r1, #L_PTE_DIRTY
-	orreq	r2, r2, #APX
+	orreq	r3, r3, #PTE_EXT_APX
 
 	tst	r1, #L_PTE_USER
-	orrne	r2, r2, #AP1 | nG
-	tstne	r2, #APX
-	eorne	r2, r2, #AP0
+	orrne	r3, r3, #PTE_EXT_AP1
+	tstne	r3, #PTE_EXT_APX
+	bicne	r3, r3, #PTE_EXT_APX | PTE_EXT_AP0
 
 	tst	r1, #L_PTE_YOUNG
-	biceq	r2, r2, #APX | AP1 | AP0
+	biceq	r3, r3, #PTE_EXT_APX | PTE_EXT_AP_MASK
 
-@	tst	r1, #L_PTE_EXEC
-@	orreq	r2, r2, #XN
+	tst	r1, #L_PTE_EXEC
+	orreq	r3, r3, #PTE_EXT_XN
 
 	tst	r1, #L_PTE_PRESENT
-	moveq	r2, #0
+	moveq	r3, #0
 
-	str	r2, [r0]
+	str	r3, [r0]
 	mcr	p15, 0, r0, c7, c10, 1 @ flush_pte
+#endif
 	mov	pc, lr
 
 
 
 
 cpu_v6_name:
-	.asciz	"Some Random V6 Processor"
+	.asciz	"ARMv6-compatible processor"
 	.align
 
 	.section ".text.init", #alloc, #execinstr
@@ -190,24 +186,38 @@ cpu_v6_name:
  *	- cache type register is implemented
  */
 __v6_setup:
+#ifdef CONFIG_SMP
+	/* Set up the SCU on core 0 only */
+	mrc	p15, 0, r0, c0, c0, 5		@ CPU core number
+	ands	r0, r0, #15
+	ldreq	r0, =SCU_BASE
+	ldreq	r5, [r0, #SCU_CTRL]
+	orreq	r5, r5, #1
+	streq	r5, [r0, #SCU_CTRL]
+
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	mrc	p15, 0, r0, c1, c0, 1		@ Enable SMP/nAMP mode
+	orr	r0, r0, #0x20
+	mcr	p15, 0, r0, c1, c0, 1
+#endif
+#endif
+
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c14, 0		@ clean+invalidate D cache
 	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
 	mcr	p15, 0, r0, c7, c15, 0		@ clean+invalidate cache
 	mcr	p15, 0, r0, c7, c10, 4		@ drain write buffer
+#ifdef CONFIG_MMU
 	mcr	p15, 0, r0, c8, c7, 0		@ invalidate I + D TLBs
 	mcr	p15, 0, r0, c2, c0, 2		@ TTB control register
+	orr	r4, r4, #TTB_FLAGS
 	mcr	p15, 0, r4, c2, c0, 1		@ load TTB1
-#ifdef CONFIG_VFP
-	mrc	p15, 0, r0, c1, c0, 2
-	orr	r0, r0, #(3 << 20)
-	mcr	p15, 0, r0, c1, c0, 2		@ Enable full access to VFP
-#endif
+#endif /* CONFIG_MMU */
+	adr	r5, v6_crval
+	ldmia	r5, {r5, r6}
 	mrc	p15, 0, r0, c1, c0, 0		@ read control register
-	ldr	r5, v6_cr1_clear		@ get mask for bits to clear
 	bic	r0, r0, r5			@ clear bits them
-	ldr	r5, v6_cr1_set			@ get mask for bits to set
-	orr	r0, r0, r5			@ set them
+	orr	r0, r0, r6			@ set them
 	mov	pc, lr				@ return to head.S:__ret
 
 	/*
@@ -216,12 +226,9 @@ __v6_setup:
 	 * rrrr rrrx xxx0 0101 xxxx xxxx x111 xxxx < forced
 	 *         0 110       0011 1.00 .111 1101 < we want
 	 */
-	.type	v6_cr1_clear, #object
-	.type	v6_cr1_set, #object
-v6_cr1_clear:
-	.word	0x01e0fb7f
-v6_cr1_set:
-	.word	0x00c0387d
+	.type	v6_crval, #object
+v6_crval:
+	crval	clear=0x01e0fb7f, mmuset=0x00c0387d, ucset=0x00c0187c
 
 	.type	v6_processor_functions, #object
 ENTRY(v6_processor_functions)
@@ -232,7 +239,7 @@ ENTRY(v6_processor_functions)
 	.word	cpu_v6_do_idle
 	.word	cpu_v6_dcache_clean_area
 	.word	cpu_v6_switch_mm
-	.word	cpu_v6_set_pte
+	.word	cpu_v6_set_pte_ext
 	.size	v6_processor_functions, . - v6_processor_functions
 
 	.type	cpu_arch_name, #object
@@ -246,7 +253,7 @@ cpu_elf_name:
 	.size	cpu_elf_name, . - cpu_elf_name
 	.align
 
-	.section ".proc.info", #alloc, #execinstr
+	.section ".proc.info.init", #alloc, #execinstr
 
 	/*
 	 * Match any ARMv6 processor core.
@@ -260,10 +267,14 @@ __v6_proc_info:
 		PMD_SECT_CACHEABLE | \
 		PMD_SECT_AP_WRITE | \
 		PMD_SECT_AP_READ
+	.long   PMD_TYPE_SECT | \
+		PMD_SECT_XN | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
 	b	__v6_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP|HWCAP_HALF|HWCAP_THUMB|HWCAP_FAST_MULT|HWCAP_VFP|HWCAP_EDSP|HWCAP_JAVA
+	.long	HWCAP_SWP|HWCAP_HALF|HWCAP_THUMB|HWCAP_FAST_MULT|HWCAP_EDSP|HWCAP_JAVA
 	.long	cpu_v6_name
 	.long	v6_processor_functions
 	.long	v6wbi_tlb_fns

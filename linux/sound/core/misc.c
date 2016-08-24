@@ -1,6 +1,6 @@
 /*
  *  Misc and compatibility things
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -21,26 +21,24 @@
 
 #include <sound/driver.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/time.h>
+#include <linux/ioport.h>
 #include <sound/core.h>
 
-int snd_task_name(struct task_struct *task, char *name, size_t size)
+void release_and_free_resource(struct resource *res)
 {
-	unsigned int idx;
-
-	snd_assert(task != NULL && name != NULL && size >= 2, return -EINVAL);
-	for (idx = 0; idx < sizeof(task->comm) && idx + 1 < size; idx++)
-		name[idx] = task->comm[idx];
-	name[idx] = '\0';
-	return 0;
+	if (res) {
+		release_resource(res);
+		kfree(res);
+	}
 }
+
+EXPORT_SYMBOL(release_and_free_resource);
 
 #ifdef CONFIG_SND_VERBOSE_PRINTK
 void snd_verbose_printk(const char *file, int line, const char *format, ...)
 {
 	va_list args;
-	char tmpbuf[512];
 	
 	if (format[0] == '<' && format[1] >= '0' && format[1] <= '9' && format[2] == '>') {
 		char tmp[] = "<0>";
@@ -51,17 +49,17 @@ void snd_verbose_printk(const char *file, int line, const char *format, ...)
 		printk("ALSA %s:%d: ", file, line);
 	}
 	va_start(args, format);
-	vsnprintf(tmpbuf, sizeof(tmpbuf), format, args);
+	vprintk(format, args);
 	va_end(args);
-	printk(tmpbuf);
 }
+
+EXPORT_SYMBOL(snd_verbose_printk);
 #endif
 
 #if defined(CONFIG_SND_DEBUG) && defined(CONFIG_SND_VERBOSE_PRINTK)
 void snd_verbose_printd(const char *file, int line, const char *format, ...)
 {
 	va_list args;
-	char tmpbuf[512];
 	
 	if (format[0] == '<' && format[1] >= '0' && format[1] <= '9' && format[2] == '>') {
 		char tmp[] = "<0>";
@@ -72,9 +70,38 @@ void snd_verbose_printd(const char *file, int line, const char *format, ...)
 		printk(KERN_DEBUG "ALSA %s:%d: ", file, line);
 	}
 	va_start(args, format);
-	vsnprintf(tmpbuf, sizeof(tmpbuf), format, args);
+	vprintk(format, args);
 	va_end(args);
-	printk(tmpbuf);
 
 }
+
+EXPORT_SYMBOL(snd_verbose_printd);
+#endif
+
+#ifdef CONFIG_PCI
+#include <linux/pci.h>
+/**
+ * snd_pci_quirk_lookup - look up a PCI SSID quirk list
+ * @pci: pci_dev handle
+ * @list: quirk list, terminated by a null entry
+ *
+ * Look through the given quirk list and finds a matching entry
+ * with the same PCI SSID.  When subdevice is 0, all subdevice
+ * values may match.
+ *
+ * Returns the matched entry pointer, or NULL if nothing matched.
+ */
+const struct snd_pci_quirk *
+snd_pci_quirk_lookup(struct pci_dev *pci, const struct snd_pci_quirk *list)
+{
+	const struct snd_pci_quirk *q;
+
+	for (q = list; q->subvendor; q++)
+		if (q->subvendor == pci->subsystem_vendor &&
+		    (!q->subdevice || q->subdevice == pci->subsystem_device))
+			return q;
+	return NULL;
+}
+
+EXPORT_SYMBOL(snd_pci_quirk_lookup);
 #endif

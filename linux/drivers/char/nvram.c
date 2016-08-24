@@ -37,26 +37,17 @@
 #define NVRAM_VERSION	"1.2"
 
 #include <linux/module.h>
-#include <linux/config.h>
-#include <linux/sched.h>
 #include <linux/smp_lock.h>
 #include <linux/nvram.h>
 
 #define PC		1
 #define ATARI		2
-#define COBALT		3
 
 /* select machine configuration */
 #if defined(CONFIG_ATARI)
 #  define MACH ATARI
 #elif defined(__i386__) || defined(__x86_64__) || defined(__arm__)  /* and others?? */
-#define MACH PC
-#  if defined(CONFIG_COBALT)
-#    include <linux/cobalt-nvram.h>
-#    define MACH COBALT
-#  else
-#    define MACH PC
-#  endif
+#  define MACH PC
 #else
 #  error Cannot build nvram driver for this machine configuration.
 #endif
@@ -75,18 +66,6 @@
 #define mach_check_checksum	pc_check_checksum
 #define mach_set_checksum	pc_set_checksum
 #define mach_proc_infos		pc_proc_infos
-
-#endif
-
-#if MACH == COBALT
-
-#define CHECK_DRIVER_INIT()     1
-
-#define NVRAM_BYTES		(128-NVRAM_FIRST_BYTE)
-
-#define mach_check_checksum	cobalt_check_checksum
-#define mach_set_checksum	cobalt_set_checksum
-#define mach_proc_infos		cobalt_proc_infos
 
 #endif
 
@@ -211,12 +190,13 @@ nvram_check_checksum(void)
 	return rv;
 }
 
-void
+static void
 __nvram_set_checksum(void)
 {
 	mach_set_checksum();
 }
 
+#if 0
 void
 nvram_set_checksum(void)
 {
@@ -226,6 +206,7 @@ nvram_set_checksum(void)
 	__nvram_set_checksum();
 	spin_unlock_irqrestore(&rtc_lock, flags);
 }
+#endif  /*  0  */
 
 /*
  * The are the file operation function for user access to /dev/nvram
@@ -436,7 +417,7 @@ nvram_read_proc(char *buffer, char **start, off_t offset,
 
 #endif /* CONFIG_PROC_FS */
 
-static struct file_operations nvram_fops = {
+static const struct file_operations nvram_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= nvram_llseek,
 	.read		= nvram_read,
@@ -555,13 +536,13 @@ pc_proc_infos(unsigned char *nvram, char *buffer, int *len,
 	    (nvram[6] & 1) ? (nvram[6] >> 6) + 1 : 0);
 	PRINT_PROC("Floppy 0 type  : ");
 	type = nvram[2] >> 4;
-	if (type < sizeof (floppy_types) / sizeof (*floppy_types))
+	if (type < ARRAY_SIZE(floppy_types))
 		PRINT_PROC("%s\n", floppy_types[type]);
 	else
 		PRINT_PROC("%d (unknown)\n", type);
 	PRINT_PROC("Floppy 1 type  : ");
 	type = nvram[2] & 0x0f;
-	if (type < sizeof (floppy_types) / sizeof (*floppy_types))
+	if (type < ARRAY_SIZE(floppy_types))
 		PRINT_PROC("%s\n", floppy_types[type]);
 	else
 		PRINT_PROC("%d (unknown)\n", type);
@@ -603,177 +584,6 @@ pc_proc_infos(unsigned char *nvram, char *buffer, int *len,
 #endif
 
 #endif /* MACH == PC */
-
-#if MACH == COBALT
-
-/* the cobalt CMOS has a wider range of its checksum */
-static int cobalt_check_checksum(void)
-{
-	int i;
-	unsigned short sum = 0;
-	unsigned short expect;
-
-	for (i = COBT_CMOS_CKS_START; i <= COBT_CMOS_CKS_END; ++i) {
-		if ((i == COBT_CMOS_CHECKSUM) || (i == (COBT_CMOS_CHECKSUM+1)))
-			continue;
-
-		sum += __nvram_read_byte(i);
-	}
-	expect = __nvram_read_byte(COBT_CMOS_CHECKSUM) << 8 |
-	    __nvram_read_byte(COBT_CMOS_CHECKSUM+1);
-	return ((sum & 0xffff) == expect);
-}
-
-static void cobalt_set_checksum(void)
-{
-	int i;
-	unsigned short sum = 0;
-
-	for (i = COBT_CMOS_CKS_START; i <= COBT_CMOS_CKS_END; ++i) {
-		if ((i == COBT_CMOS_CHECKSUM) || (i == (COBT_CMOS_CHECKSUM+1)))
-			continue;
-
-		sum += __nvram_read_byte(i);
-	}
-
-	__nvram_write_byte(sum >> 8, COBT_CMOS_CHECKSUM);
-	__nvram_write_byte(sum & 0xff, COBT_CMOS_CHECKSUM+1);
-}
-
-#ifdef CONFIG_PROC_FS
-
-static int cobalt_proc_infos(unsigned char *nvram, char *buffer, int *len,
-	off_t *begin, off_t offset, int size)
-{
-	int i;
-	unsigned int checksum;
-	unsigned int flags;
-	char sernum[14];
-	char *key = "cNoEbTaWlOtR!";
-	unsigned char bto_csum;
-
-	spin_lock_irq(&rtc_lock);
-	checksum = __nvram_check_checksum();
-	spin_unlock_irq(&rtc_lock);
-
-	PRINT_PROC("Checksum status: %svalid\n", checksum ? "" : "not ");
-
-	flags = nvram[COBT_CMOS_FLAG_BYTE_0] << 8 
-	    | nvram[COBT_CMOS_FLAG_BYTE_1];
-
-	PRINT_PROC("Console: %s\n",
-		flags & COBT_CMOS_CONSOLE_FLAG ?  "on": "off");
-
-	PRINT_PROC("Firmware Debug Messages: %s\n",
-		flags & COBT_CMOS_DEBUG_FLAG ? "on": "off");
-
-	PRINT_PROC("Auto Prompt: %s\n",
-		flags & COBT_CMOS_AUTO_PROMPT_FLAG ? "on": "off");
-
-	PRINT_PROC("Shutdown Status: %s\n",
-		flags & COBT_CMOS_CLEAN_BOOT_FLAG ? "clean": "dirty");
-
-	PRINT_PROC("Hardware Probe: %s\n",
-		flags & COBT_CMOS_HW_NOPROBE_FLAG ? "partial": "full");
-
-	PRINT_PROC("System Fault: %sdetected\n",
-		flags & COBT_CMOS_SYSFAULT_FLAG ? "": "not ");
-
-	PRINT_PROC("Panic on OOPS: %s\n",
-		flags & COBT_CMOS_OOPSPANIC_FLAG ? "yes": "no");
-
-	PRINT_PROC("Delayed Cache Initialization: %s\n",
-		flags & COBT_CMOS_DELAY_CACHE_FLAG ? "yes": "no");
-
-	PRINT_PROC("Show Logo at Boot: %s\n",
-		flags & COBT_CMOS_NOLOGO_FLAG ? "no": "yes");
-
-	PRINT_PROC("Boot Method: ");
-	switch (nvram[COBT_CMOS_BOOT_METHOD]) {
-	case COBT_CMOS_BOOT_METHOD_DISK:
-		PRINT_PROC("disk\n");
-		break;
-
-	case COBT_CMOS_BOOT_METHOD_ROM:
-		PRINT_PROC("rom\n");
-		break;
-
-	case COBT_CMOS_BOOT_METHOD_NET:
-		PRINT_PROC("net\n");
-		break;
-
-	default:
-		PRINT_PROC("unknown\n");
-		break;
-	}
-
-	PRINT_PROC("Primary Boot Device: %d:%d\n",
-		nvram[COBT_CMOS_BOOT_DEV0_MAJ],
-		nvram[COBT_CMOS_BOOT_DEV0_MIN] );
-	PRINT_PROC("Secondary Boot Device: %d:%d\n",
-		nvram[COBT_CMOS_BOOT_DEV1_MAJ],
-		nvram[COBT_CMOS_BOOT_DEV1_MIN] );
-	PRINT_PROC("Tertiary Boot Device: %d:%d\n",
-		nvram[COBT_CMOS_BOOT_DEV2_MAJ],
-		nvram[COBT_CMOS_BOOT_DEV2_MIN] );
-
-	PRINT_PROC("Uptime: %d\n",
-		nvram[COBT_CMOS_UPTIME_0] << 24 |
-		nvram[COBT_CMOS_UPTIME_1] << 16 |
-		nvram[COBT_CMOS_UPTIME_2] << 8  |
-		nvram[COBT_CMOS_UPTIME_3]);
-
-	PRINT_PROC("Boot Count: %d\n",
-		nvram[COBT_CMOS_BOOTCOUNT_0] << 24 |
-		nvram[COBT_CMOS_BOOTCOUNT_1] << 16 |
-		nvram[COBT_CMOS_BOOTCOUNT_2] << 8  |
-		nvram[COBT_CMOS_BOOTCOUNT_3]);
-
-	/* 13 bytes of serial num */
-	for (i=0 ; i<13 ; i++) {
-		sernum[i] = nvram[COBT_CMOS_SYS_SERNUM_0 + i];
-	}
-	sernum[13] = '\0';
-
-	checksum = 0;
-	for (i=0 ; i<13 ; i++) {
-		checksum += sernum[i] ^ key[i];
-	}
-	checksum = ((checksum & 0x7f) ^ (0xd6)) & 0xff;
-
-	PRINT_PROC("Serial Number: %s", sernum);
-	if (checksum != nvram[COBT_CMOS_SYS_SERNUM_CSUM]) {
-		PRINT_PROC(" (invalid checksum)");
-	}
-	PRINT_PROC("\n");
-
-	PRINT_PROC("Rom Revison: %d.%d.%d\n", nvram[COBT_CMOS_ROM_REV_MAJ],
-		nvram[COBT_CMOS_ROM_REV_MIN], nvram[COBT_CMOS_ROM_REV_REV]);
-
-	PRINT_PROC("BTO Server: %d.%d.%d.%d", nvram[COBT_CMOS_BTO_IP_0],
-		nvram[COBT_CMOS_BTO_IP_1], nvram[COBT_CMOS_BTO_IP_2],
-		nvram[COBT_CMOS_BTO_IP_3]);
-	bto_csum = nvram[COBT_CMOS_BTO_IP_0] + nvram[COBT_CMOS_BTO_IP_1]
-		+ nvram[COBT_CMOS_BTO_IP_2] + nvram[COBT_CMOS_BTO_IP_3];
-	if (bto_csum != nvram[COBT_CMOS_BTO_IP_CSUM]) {
-		PRINT_PROC(" (invalid checksum)");
-	}
-	PRINT_PROC("\n");
-
-	if (flags & COBT_CMOS_VERSION_FLAG
-	 && nvram[COBT_CMOS_VERSION] >= COBT_CMOS_VER_BTOCODE) {
-		PRINT_PROC("BTO Code: 0x%x\n",
-			nvram[COBT_CMOS_BTO_CODE_0] << 24 |
-			nvram[COBT_CMOS_BTO_CODE_1] << 16 |
-			nvram[COBT_CMOS_BTO_CODE_2] << 8 |
-			nvram[COBT_CMOS_BTO_CODE_3]);
-	}
-
-	return 1;
-}
-#endif /* CONFIG_PROC_FS */
-
-#endif /* MACH == COBALT */
 
 #if MACH == ATARI
 
@@ -841,8 +651,6 @@ static char *colors[] = {
 	"2", "4", "16", "256", "65536", "??", "??", "??"
 };
 
-#define fieldsize(a)	(sizeof(a)/sizeof(*a))
-
 static int
 atari_proc_infos(unsigned char *nvram, char *buffer, int *len,
     off_t *begin, off_t offset, int size)
@@ -854,7 +662,7 @@ atari_proc_infos(unsigned char *nvram, char *buffer, int *len,
 	PRINT_PROC("Checksum status  : %svalid\n", checksum ? "" : "not ");
 
 	PRINT_PROC("Boot preference  : ");
-	for (i = fieldsize(boot_prefs) - 1; i >= 0; --i) {
+	for (i = ARRAY_SIZE(boot_prefs) - 1; i >= 0; --i) {
 		if (nvram[1] == boot_prefs[i].val) {
 			PRINT_PROC("%s\n", boot_prefs[i].name);
 			break;
@@ -876,12 +684,12 @@ atari_proc_infos(unsigned char *nvram, char *buffer, int *len,
 		return 1;
 
 	PRINT_PROC("OS language      : ");
-	if (nvram[6] < fieldsize(languages))
+	if (nvram[6] < ARRAY_SIZE(languages))
 		PRINT_PROC("%s\n", languages[nvram[6]]);
 	else
 		PRINT_PROC("%u (undefined)\n", nvram[6]);
 	PRINT_PROC("Keyboard language: ");
-	if (nvram[7] < fieldsize(languages))
+	if (nvram[7] < ARRAY_SIZE(languages))
 		PRINT_PROC("%s\n", languages[nvram[7]]);
 	else
 		PRINT_PROC("%u (undefined)\n", nvram[7]);
@@ -921,6 +729,4 @@ EXPORT_SYMBOL(__nvram_write_byte);
 EXPORT_SYMBOL(nvram_write_byte);
 EXPORT_SYMBOL(__nvram_check_checksum);
 EXPORT_SYMBOL(nvram_check_checksum);
-EXPORT_SYMBOL(__nvram_set_checksum);
-EXPORT_SYMBOL(nvram_set_checksum);
 MODULE_ALIAS_MISCDEV(NVRAM_MINOR);

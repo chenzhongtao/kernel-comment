@@ -28,8 +28,6 @@
 
 struct ttusbdecfe_state {
 
-	struct dvb_frontend_ops ops;
-
 	/* configuration settings */
 	const struct ttusbdecfe_config* config;
 
@@ -42,8 +40,39 @@ struct ttusbdecfe_state {
 
 static int ttusbdecfe_read_status(struct dvb_frontend* fe, fe_status_t* status)
 {
-	*status = FE_HAS_SIGNAL | FE_HAS_VITERBI |
-		  FE_HAS_SYNC | FE_HAS_CARRIER | FE_HAS_LOCK;
+	struct ttusbdecfe_state* state = fe->demodulator_priv;
+	u8 b[] = { 0x00, 0x00, 0x00, 0x00,
+		   0x00, 0x00, 0x00, 0x00 };
+	u8 result[4];
+	int len, ret;
+
+	*status=0;
+
+	ret=state->config->send_command(fe, 0x73, sizeof(b), b, &len, result);
+	if(ret)
+		return ret;
+
+	if(len != 4) {
+		printk(KERN_ERR "%s: unexpected reply\n", __FUNCTION__);
+		return -EIO;
+	}
+
+	switch(result[3]) {
+		case 1:  /* not tuned yet */
+		case 2:  /* no signal/no lock*/
+			break;
+		case 3:	 /* signal found and locked*/
+			*status = FE_HAS_SIGNAL | FE_HAS_VITERBI |
+			FE_HAS_SYNC | FE_HAS_CARRIER | FE_HAS_LOCK;
+			break;
+		case 4:
+			*status = FE_TIMEDOUT;
+			break;
+		default:
+			pr_info("%s: returned unknown value: %d\n",
+				__FUNCTION__, result[3]);
+			return -EIO;
+	}
 
 	return 0;
 }
@@ -62,6 +91,16 @@ static int ttusbdecfe_dvbt_set_frontend(struct dvb_frontend* fe, struct dvb_fron
 	state->config->send_command(fe, 0x71, sizeof(b), b, NULL, NULL);
 
 	return 0;
+}
+
+static int ttusbdecfe_dvbt_get_tune_settings(struct dvb_frontend* fe,
+					struct dvb_frontend_tune_settings* fesettings)
+{
+		fesettings->min_delay_ms = 1500;
+		/* Drift compensation makes no sense for DVB-T */
+		fesettings->step_size = 0;
+		fesettings->max_drift = 0;
+		return 0;
 }
 
 static int ttusbdecfe_dvbs_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters *p)
@@ -156,21 +195,17 @@ struct dvb_frontend* ttusbdecfe_dvbt_attach(const struct ttusbdecfe_config* conf
 	struct ttusbdecfe_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = (struct ttusbdecfe_state*) kmalloc(sizeof(struct ttusbdecfe_state), GFP_KERNEL);
-	if (state == NULL) goto error;
+	state = kmalloc(sizeof(struct ttusbdecfe_state), GFP_KERNEL);
+	if (state == NULL)
+		return NULL;
 
 	/* setup the state */
 	state->config = config;
-	memcpy(&state->ops, &ttusbdecfe_dvbt_ops, sizeof(struct dvb_frontend_ops));
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &ttusbdecfe_dvbt_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
-
-error:
-	if (state) kfree(state);
-	return NULL;
 }
 
 static struct dvb_frontend_ops ttusbdecfe_dvbs_ops;
@@ -180,23 +215,19 @@ struct dvb_frontend* ttusbdecfe_dvbs_attach(const struct ttusbdecfe_config* conf
 	struct ttusbdecfe_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = (struct ttusbdecfe_state*) kmalloc(sizeof(struct ttusbdecfe_state), GFP_KERNEL);
-	if (state == NULL) goto error;
+	state = kmalloc(sizeof(struct ttusbdecfe_state), GFP_KERNEL);
+	if (state == NULL)
+		return NULL;
 
 	/* setup the state */
 	state->config = config;
 	state->voltage = 0;
 	state->hi_band = 0;
-	memcpy(&state->ops, &ttusbdecfe_dvbs_ops, sizeof(struct dvb_frontend_ops));
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &ttusbdecfe_dvbs_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
-
-error:
-	if (state) kfree(state);
-	return NULL;
 }
 
 static struct dvb_frontend_ops ttusbdecfe_dvbt_ops = {
@@ -218,6 +249,8 @@ static struct dvb_frontend_ops ttusbdecfe_dvbt_ops = {
 
 	.set_frontend = ttusbdecfe_dvbt_set_frontend,
 
+	.get_tune_settings = ttusbdecfe_dvbt_get_tune_settings,
+
 	.read_status = ttusbdecfe_read_status,
 };
 
@@ -229,11 +262,11 @@ static struct dvb_frontend_ops ttusbdecfe_dvbs_ops = {
 		.frequency_min		= 950000,
 		.frequency_max		= 2150000,
 		.frequency_stepsize	= 125,
+		.symbol_rate_min        = 1000000,  /* guessed */
+		.symbol_rate_max        = 45000000, /* guessed */
 		.caps =	FE_CAN_FEC_1_2 | FE_CAN_FEC_2_3 | FE_CAN_FEC_3_4 |
 			FE_CAN_FEC_5_6 | FE_CAN_FEC_7_8 | FE_CAN_FEC_AUTO |
-			FE_CAN_QAM_16 | FE_CAN_QAM_64 | FE_CAN_QAM_AUTO |
-			FE_CAN_TRANSMISSION_MODE_AUTO | FE_CAN_GUARD_INTERVAL_AUTO |
-			FE_CAN_HIERARCHY_AUTO,
+			FE_CAN_QPSK
 	},
 
 	.release = ttusbdecfe_release,

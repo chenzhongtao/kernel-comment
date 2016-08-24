@@ -18,6 +18,10 @@
 *! Jul 21 1999  Bjorn Wesen     eLinux port
 *!
 *! $Log: kgdb.c,v $
+*! Revision 1.6  2005/01/14 10:12:17  starvik
+*! KGDB on separate port.
+*! Console fixes from 2.4.
+*!
 *! Revision 1.5  2004/10/07 13:59:08  starvik
 *! Corrected call to set_int_vector
 *!
@@ -29,7 +33,7 @@
 *!
 *! Revision 1.2  2002/11/19 14:35:24  starvik
 *! Changes from linux 2.4
-*! Changed struct initializer syntax to the currently prefered notation
+*! Changed struct initializer syntax to the currently preferred notation
 *!
 *! Revision 1.1  2001/12/17 13:59:27  bjornw
 *! Initial revision
@@ -71,7 +75,7 @@
 *!
 *!---------------------------------------------------------------------------
 *!
-*! $Id: kgdb.c,v 1.5 2004/10/07 13:59:08 starvik Exp $
+*! $Id: kgdb.c,v 1.6 2005/01/14 10:12:17 starvik Exp $
 *!
 *! (C) Copyright 1999, Axis Communications AB, LUND, SWEDEN
 *!
@@ -225,6 +229,7 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/linkage.h>
+#include <linux/reboot.h>
 
 #include <asm/setup.h>
 #include <asm/ptrace.h>
@@ -562,12 +567,6 @@ gdb_cris_strtol (const char *s, char **endptr, int base)
         }
         
 	return x;
-}
-
-int
-double_this(int x)
-{
-        return 2 * x;
 }
 
 /********************************* Register image ****************************/
@@ -960,7 +959,7 @@ stub_is_stopped(int sigval)
 
 	/* Send register contents. We probably only need to send the
 	 * PC, frame pointer and stack pointer here. Other registers will be
-	 * explicitely asked for. But for now, send all. 
+	 * explicitly asked for. But for now, send all.
 	 */
 	
 	for (regno = R0; regno <= USP; regno++) {
@@ -1344,12 +1343,11 @@ handle_exception (int sigval)
 	}
 }
 
-/* The jump is to the address 0x00000002. Performs a complete re-start
-   from scratch. */
+/* Performs a complete re-start from scratch. */
 static void
 kill_restart ()
 {
-	__asm__ volatile ("jump 2");
+	machine_restart("");
 }
 
 /********************************** Breakpoint *******************************/
@@ -1504,6 +1502,11 @@ kgdb_handle_serial:
   jsr getDebugChar
   cmp.b 3, $r10
   bne goback
+  nop
+
+  move.d  [reg+0x5E], $r10		; Get DCCR
+  btstq	   8, $r10			; Test the U-flag.
+  bmi	   goback
   nop
 
 ;;

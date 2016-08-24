@@ -1,5 +1,5 @@
 /* 
- * Copyright (C) 2000, 2001, 2002 Jeff Dike (jdike@karaya.com)
+ * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
@@ -8,27 +8,15 @@
 
 #ifndef __ASSEMBLY__
 
-#include "linux/config.h"
-
-#define pt_regs pt_regs_subarch
-#define show_regs show_regs_subarch
-#define send_sigtrap send_sigtrap_subarch
-
-#include "asm/arch/ptrace.h"
-
-#undef pt_regs
-#undef show_regs
-#undef send_sigtrap
-#undef user_mode
-#undef instruction_pointer
-
+#include "asm/arch/ptrace-abi.h"
+#include <asm/user.h>
 #include "sysdep/ptrace.h"
 
 struct pt_regs {
-	union uml_pt_regs regs;
+	struct uml_pt_regs regs;
 };
 
-#define EMPTY_REGS { regs : EMPTY_UML_PT_REGS }
+#define EMPTY_REGS { .regs = EMPTY_UML_PT_REGS }
 
 #define PT_REGS_IP(r) UPT_IP(&(r)->regs)
 #define PT_REGS_SP(r) UPT_SP(&(r)->regs)
@@ -48,29 +36,23 @@ struct pt_regs {
 
 struct task_struct;
 
+extern long subarch_ptrace(struct task_struct *child, long request, long addr,
+			   long data);
 extern unsigned long getreg(struct task_struct *child, int regno);
 extern int putreg(struct task_struct *child, int regno, unsigned long value);
-extern int get_fpregs(unsigned long buf, struct task_struct *child);
-extern int set_fpregs(unsigned long buf, struct task_struct *child);
-extern int get_fpxregs(unsigned long buf, struct task_struct *child);
-extern int set_fpxregs(unsigned long buf, struct task_struct *tsk);
+extern int get_fpregs(struct user_i387_struct __user *buf,
+		      struct task_struct *child);
+extern int set_fpregs(struct user_i387_struct __user *buf,
+		      struct task_struct *child);
 
 extern void show_regs(struct pt_regs *regs);
 
-extern void send_sigtrap(struct task_struct *tsk, union uml_pt_regs *regs,
+extern void send_sigtrap(struct task_struct *tsk, struct uml_pt_regs *regs,
 			 int error_code);
 
-#endif
+extern int arch_copy_tls(struct task_struct *new);
+extern void clear_flushed_tls(struct task_struct *task);
 
 #endif
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+#endif

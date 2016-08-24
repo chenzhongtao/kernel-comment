@@ -6,7 +6,6 @@
  * NFSv4 callback handling
  */
 
-#include <linux/config.h>
 #include <linux/completion.h>
 #include <linux/ip.h>
 #include <linux/module.h>
@@ -14,7 +13,14 @@
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/svcsock.h>
 #include <linux/nfs_fs.h>
+#include <linux/mutex.h>
+#include <linux/freezer.h>
+
+#include <net/inet_sock.h>
+
+#include "nfs4_fs.h"
 #include "callback.h"
+#include "internal.h"
 
 #define NFSDBG_FACILITY NFSDBG_CALLBACK
 
@@ -27,17 +33,32 @@ struct nfs_callback_data {
 };
 
 static struct nfs_callback_data nfs_callback_info;
-static DECLARE_MUTEX(nfs_callback_sema);
+static DEFINE_MUTEX(nfs_callback_mutex);
 static struct svc_program nfs4_callback_program;
 
+unsigned int nfs_callback_set_tcpport;
 unsigned short nfs_callback_tcpport;
+static const int nfs_set_port_min = 0;
+static const int nfs_set_port_max = 65535;
+
+static int param_set_port(const char *val, struct kernel_param *kp)
+{
+	char *endp;
+	int num = simple_strtol(val, &endp, 0);
+	if (endp == val || *endp || num < nfs_set_port_min || num > nfs_set_port_max)
+		return -EINVAL;
+	*((int *)kp->arg) = num;
+	return 0;
+}
+
+module_param_call(callback_tcpport, param_set_port, param_get_int,
+		 &nfs_callback_set_tcpport, 0644);
 
 /*
  * This is the callback kernel thread.
  */
 static void nfs_callback_svc(struct svc_rqst *rqstp)
 {
-	struct svc_serv *serv = rqstp->rq_server;
 	int err;
 
 	__module_get(THIS_MODULE);
@@ -47,14 +68,22 @@ static void nfs_callback_svc(struct svc_rqst *rqstp)
 	daemonize("nfsv4-svc");
 	/* Process request with signals blocked, but allow SIGKILL.  */
 	allow_signal(SIGKILL);
+	set_freezable();
 
 	complete(&nfs_callback_info.started);
 
-	while (nfs_callback_info.users != 0 || !signalled()) {
+	for(;;) {
+		char buf[RPC_MAX_ADDRBUFLEN];
+
+		if (signalled()) {
+			if (nfs_callback_info.users == 0)
+				break;
+			flush_signals(current);
+		}
 		/*
 		 * Listen for a request on the socket
 		 */
-		err = svc_recv(serv, rqstp, MAX_SCHEDULE_TIMEOUT);
+		err = svc_recv(rqstp, MAX_SCHEDULE_TIMEOUT);
 		if (err == -EAGAIN || err == -EINTR)
 			continue;
 		if (err < 0) {
@@ -63,11 +92,12 @@ static void nfs_callback_svc(struct svc_rqst *rqstp)
 					__FUNCTION__, -err);
 			break;
 		}
-		dprintk("%s: request from %u.%u.%u.%u\n", __FUNCTION__,
-				NIPQUAD(rqstp->rq_addr.sin_addr.s_addr));
-		svc_process(serv, rqstp);
+		dprintk("%s: request from %s\n", __FUNCTION__,
+				svc_print_addr(rqstp, buf, sizeof(buf)));
+		svc_process(rqstp);
 	}
 
+	svc_exit_thread(rqstp);
 	nfs_callback_info.pid = 0;
 	complete(&nfs_callback_info.stopped);
 	unlock_kernel();
@@ -80,40 +110,38 @@ static void nfs_callback_svc(struct svc_rqst *rqstp)
 int nfs_callback_up(void)
 {
 	struct svc_serv *serv;
-	struct svc_sock *svsk;
 	int ret = 0;
 
 	lock_kernel();
-	down(&nfs_callback_sema);
+	mutex_lock(&nfs_callback_mutex);
 	if (nfs_callback_info.users++ || nfs_callback_info.pid != 0)
 		goto out;
 	init_completion(&nfs_callback_info.started);
 	init_completion(&nfs_callback_info.stopped);
-	serv = svc_create(&nfs4_callback_program, NFS4_CALLBACK_BUFSIZE);
+	serv = svc_create(&nfs4_callback_program, NFS4_CALLBACK_BUFSIZE, NULL);
 	ret = -ENOMEM;
 	if (!serv)
 		goto out_err;
-	/* FIXME: We don't want to register this socket with the portmapper */
-	ret = svc_makesock(serv, IPPROTO_TCP, 0);
-	if (ret < 0)
+
+	ret = svc_makesock(serv, IPPROTO_TCP, nfs_callback_set_tcpport,
+							SVC_SOCK_ANONYMOUS);
+	if (ret <= 0)
 		goto out_destroy;
-	if (!list_empty(&serv->sv_permsocks)) {
-		svsk = list_entry(serv->sv_permsocks.next,
-				struct svc_sock, sk_list);
-		nfs_callback_tcpport = ntohs(inet_sk(svsk->sk_sk)->sport);
-		dprintk ("Callback port = 0x%x\n", nfs_callback_tcpport);
-	} else
-		BUG();
+	nfs_callback_tcpport = ret;
+	dprintk("Callback port = 0x%x\n", nfs_callback_tcpport);
+
 	ret = svc_create_thread(nfs_callback_svc, serv);
 	if (ret < 0)
 		goto out_destroy;
 	nfs_callback_info.serv = serv;
 	wait_for_completion(&nfs_callback_info.started);
 out:
-	up(&nfs_callback_sema);
+	mutex_unlock(&nfs_callback_mutex);
 	unlock_kernel();
 	return ret;
 out_destroy:
+	dprintk("Couldn't create callback socket or server thread; err = %d\n",
+		ret);
 	svc_destroy(serv);
 out_err:
 	nfs_callback_info.users--;
@@ -123,191 +151,54 @@ out_err:
 /*
  * Kill the server process if it is not already up.
  */
-int nfs_callback_down(void)
+void nfs_callback_down(void)
 {
-	int ret = 0;
-
 	lock_kernel();
-	down(&nfs_callback_sema);
-	if (--nfs_callback_info.users || nfs_callback_info.pid == 0)
-		goto out;
-	kill_proc(nfs_callback_info.pid, SIGKILL, 1);
-	wait_for_completion(&nfs_callback_info.stopped);
-out:
-	up(&nfs_callback_sema);
+	mutex_lock(&nfs_callback_mutex);
+	nfs_callback_info.users--;
+	do {
+		if (nfs_callback_info.users != 0 || nfs_callback_info.pid == 0)
+			break;
+		if (kill_proc(nfs_callback_info.pid, SIGKILL, 1) < 0)
+			break;
+	} while (wait_for_completion_timeout(&nfs_callback_info.stopped, 5*HZ) == 0);
+	mutex_unlock(&nfs_callback_mutex);
 	unlock_kernel();
-	return ret;
 }
 
-/*
- * AUTH_NULL authentication
- */
-static int nfs_callback_null_accept(struct svc_rqst *rqstp, u32 *authp)
+static int nfs_callback_authenticate(struct svc_rqst *rqstp)
 {
-	struct kvec    *argv = &rqstp->rq_arg.head[0];
-	struct kvec    *resv = &rqstp->rq_res.head[0];
-
-	if (argv->iov_len < 3*4)
-		return SVC_GARBAGE;
-
-	if (svc_getu32(argv) != 0) {
-		dprintk("svc: bad null cred\n");
-		*authp = rpc_autherr_badcred;
-		return SVC_DENIED;
-	}
-	if (svc_getu32(argv) != RPC_AUTH_NULL || svc_getu32(argv) != 0) {
-		dprintk("svc: bad null verf\n");
-		 *authp = rpc_autherr_badverf;
-		 return SVC_DENIED;
-	}
-
-	/* Signal that mapping to nobody uid/gid is required */
-	rqstp->rq_cred.cr_uid = (uid_t) -1;
-	rqstp->rq_cred.cr_gid = (gid_t) -1;
-	rqstp->rq_cred.cr_group_info = groups_alloc(0);
-	if (rqstp->rq_cred.cr_group_info == NULL)
-		return SVC_DROP; /* kmalloc failure - client must retry */
-
-	/* Put NULL verifier */
-	svc_putu32(resv, RPC_AUTH_NULL);
-	svc_putu32(resv, 0);
-	dprintk("%s: success, returning %d!\n", __FUNCTION__, SVC_OK);
-	return SVC_OK;
-}
-
-static int nfs_callback_null_release(struct svc_rqst *rqstp)
-{
-	if (rqstp->rq_cred.cr_group_info)
-		put_group_info(rqstp->rq_cred.cr_group_info);
-	rqstp->rq_cred.cr_group_info = NULL;
-	return 0; /* don't drop */
-}
-
-static struct auth_ops nfs_callback_auth_null = {
-	.name = "null",
-	.flavour = RPC_AUTH_NULL,
-	.accept = nfs_callback_null_accept,
-	.release = nfs_callback_null_release,
-};
-
-/*
- * AUTH_SYS authentication
- */
-static int nfs_callback_unix_accept(struct svc_rqst *rqstp, u32 *authp)
-{
-	struct kvec    *argv = &rqstp->rq_arg.head[0];
-	struct kvec    *resv = &rqstp->rq_res.head[0];
-	struct svc_cred *cred = &rqstp->rq_cred;
-	u32 slen, i;
-	int len = argv->iov_len;
-
-	dprintk("%s: start\n", __FUNCTION__);
-	cred->cr_group_info = NULL;
-	rqstp->rq_client = NULL;
-	if ((len -= 3*4) < 0)
-		return SVC_GARBAGE;
-
-	/* Get length, time stamp and machine name */
-	svc_getu32(argv);
-	svc_getu32(argv);
-	slen = XDR_QUADLEN(ntohl(svc_getu32(argv)));
-	if (slen > 64 || (len -= (slen + 3)*4) < 0)
-		goto badcred;
-	argv->iov_base = (void*)((u32*)argv->iov_base + slen);
-	argv->iov_len -= slen*4;
-
-	cred->cr_uid = ntohl(svc_getu32(argv));
-	cred->cr_gid = ntohl(svc_getu32(argv));
-	slen = ntohl(svc_getu32(argv));
-	if (slen > 16 || (len -= (slen + 2)*4) < 0)
-		goto badcred;
-	cred->cr_group_info = groups_alloc(slen);
-	if (cred->cr_group_info == NULL)
-		return SVC_DROP;
-	for (i = 0; i < slen; i++)
-		GROUP_AT(cred->cr_group_info, i) = ntohl(svc_getu32(argv));
-
-	if (svc_getu32(argv) != RPC_AUTH_NULL || svc_getu32(argv) != 0) {
-		*authp = rpc_autherr_badverf;
-		return SVC_DENIED;
-	}
-	/* Put NULL verifier */
-	svc_putu32(resv, RPC_AUTH_NULL);
-	svc_putu32(resv, 0);
-	dprintk("%s: success, returning %d!\n", __FUNCTION__, SVC_OK);
-	return SVC_OK;
-badcred:
-	*authp = rpc_autherr_badcred;
-	return SVC_DENIED;
-}
-
-static int nfs_callback_unix_release(struct svc_rqst *rqstp)
-{
-	if (rqstp->rq_cred.cr_group_info)
-		put_group_info(rqstp->rq_cred.cr_group_info);
-	rqstp->rq_cred.cr_group_info = NULL;
-	return 0;
-}
-
-static struct auth_ops nfs_callback_auth_unix = {
-	.name = "unix",
-	.flavour = RPC_AUTH_UNIX,
-	.accept = nfs_callback_unix_accept,
-	.release = nfs_callback_unix_release,
-};
-
-/*
- * Hook the authentication protocol
- */
-static int nfs_callback_auth(struct svc_rqst *rqstp, u32 *authp)
-{
-	struct in_addr *addr = &rqstp->rq_addr.sin_addr;
-	struct nfs4_client *clp;
-	struct kvec *argv = &rqstp->rq_arg.head[0];
-	int flavour;
-	int retval;
+	struct sockaddr_in *addr = svc_addr_in(rqstp);
+	struct nfs_client *clp;
+	char buf[RPC_MAX_ADDRBUFLEN];
 
 	/* Don't talk to strangers */
-	clp = nfs4_find_client(addr);
+	clp = nfs_find_client(addr, 4);
 	if (clp == NULL)
 		return SVC_DROP;
-	dprintk("%s: %u.%u.%u.%u NFSv4 callback!\n", __FUNCTION__, NIPQUAD(addr));
-	nfs4_put_client(clp);
-	flavour = ntohl(svc_getu32(argv));
-	switch(flavour) {
+
+	dprintk("%s: %s NFSv4 callback!\n", __FUNCTION__,
+			svc_print_addr(rqstp, buf, sizeof(buf)));
+	nfs_put_client(clp);
+
+	switch (rqstp->rq_authop->flavour) {
 		case RPC_AUTH_NULL:
-			if (rqstp->rq_proc != CB_NULL) {
-				*authp = rpc_autherr_tooweak;
-				retval = SVC_DENIED;
-				break;
-			}
-			rqstp->rq_authop = &nfs_callback_auth_null;
-			retval = nfs_callback_null_accept(rqstp, authp);
+			if (rqstp->rq_proc != CB_NULL)
+				return SVC_DENIED;
 			break;
 		case RPC_AUTH_UNIX:
-			/* Eat the authentication flavour */
-			rqstp->rq_authop = &nfs_callback_auth_unix;
-			retval = nfs_callback_unix_accept(rqstp, authp);
 			break;
+		case RPC_AUTH_GSS:
+			/* FIXME: RPCSEC_GSS handling? */
 		default:
-			/* FIXME: need to add RPCSEC_GSS upcalls */
-#if 0
-			svc_ungetu32(argv);
-			retval = svc_authenticate(rqstp, authp);
-#else
-			*authp = rpc_autherr_rejectedcred;
-			retval = SVC_DENIED;
-#endif
+			return SVC_DENIED;
 	}
-	dprintk("%s: flavour %d returning error %d\n", __FUNCTION__, flavour, retval);
-	return retval;
+	return SVC_OK;
 }
 
 /*
  * Define NFS4 callback program
  */
-extern struct svc_version nfs4_callback_version1;
-
 static struct svc_version *nfs4_callback_version[] = {
 	[1] = &nfs4_callback_version1,
 };
@@ -321,5 +212,5 @@ static struct svc_program nfs4_callback_program = {
 	.pg_name = "NFSv4 callback",			/* service name */
 	.pg_class = "nfs",				/* authentication class */
 	.pg_stats = &nfs4_callback_stats,
-	.pg_authenticate = nfs_callback_auth,
+	.pg_authenticate = nfs_callback_authenticate,
 };

@@ -1,12 +1,10 @@
-/* $Id: irq.c,v 1.114 2002/01/11 08:45:38 davem Exp $
- * irq.c: UltraSparc IRQ handling/init/registry.
+/* irq.c: UltraSparc IRQ handling/init/registry.
  *
- * Copyright (C) 1997  David S. Miller  (davem@caip.rutgers.edu)
+ * Copyright (C) 1997, 2007  David S. Miller  (davem@davemloft.net)
  * Copyright (C) 1998  Eddie C. Dost    (ecd@skynet.be)
  * Copyright (C) 1998  Jakub Jelinek    (jj@ultra.linux.cz)
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
@@ -21,26 +19,30 @@
 #include <linux/delay.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/bootmem.h>
+#include <linux/irq.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/atomic.h>
 #include <asm/system.h>
 #include <asm/irq.h>
+#include <asm/io.h>
 #include <asm/sbus.h>
 #include <asm/iommu.h>
 #include <asm/upa.h>
 #include <asm/oplib.h>
+#include <asm/prom.h>
 #include <asm/timer.h>
 #include <asm/smp.h>
 #include <asm/starfire.h>
 #include <asm/uaccess.h>
 #include <asm/cache.h>
 #include <asm/cpudata.h>
-
-#ifdef CONFIG_SMP
-static void distribute_irqs(void);
-#endif
+#include <asm/auxio.h>
+#include <asm/head.h>
+#include <asm/hypervisor.h>
+#include <asm/cacheflush.h>
 
 /* UPA nodes send interrupt packet to UltraSparc with first data reg
  * value low 5 (7 on Starfire) bits holding the IRQ identifier being
@@ -50,1019 +52,740 @@ static void distribute_irqs(void);
  * To make processing these packets efficient and race free we use
  * an array of irq buckets below.  The interrupt vector handler in
  * entry.S feeds incoming packets into per-cpu pil-indexed lists.
- * The IVEC handler does not need to act atomically, the PIL dispatch
- * code uses CAS to get an atomic snapshot of the list and clear it
- * at the same time.
- */
-
-struct ino_bucket ivector_table[NUM_IVECS] __attribute__ ((aligned (SMP_CACHE_BYTES)));
-
-/* This has to be in the main kernel image, it cannot be
- * turned into per-cpu data.  The reason is that the main
- * kernel image is locked into the TLB and this structure
- * is accessed from the vectored interrupt trap handler.  If
- * access to this structure takes a TLB miss it could cause
- * the 5-level sparc v9 trap stack to overflow.
- */
-struct irq_work_struct {
-	unsigned int	irq_worklists[16];
-};
-struct irq_work_struct __irq_work[NR_CPUS];
-#define irq_work(__cpu, __pil)	&(__irq_work[(__cpu)].irq_worklists[(__pil)])
-
-#ifdef CONFIG_PCI
-/* This is a table of physical addresses used to deal with IBF_DMA_SYNC.
- * It is used for PCI only to synchronize DMA transfers with IRQ delivery
- * for devices behind busses other than APB on Sabre systems.
  *
- * Currently these physical addresses are just config space accesses
- * to the command register for that device.
+ * If you make changes to ino_bucket, please update hand coded assembler
+ * of the vectored interrupt trap handler(s) in entry.S and sun4v_ivec.S
  */
-unsigned long pci_dma_wsync;
-unsigned long dma_sync_reg_table[256];
-unsigned char dma_sync_reg_table_entry = 0;
+struct ino_bucket {
+/*0x00*/unsigned long __irq_chain_pa;
+
+	/* Virtual interrupt number assigned to this INO.  */
+/*0x08*/unsigned int __virt_irq;
+/*0x0c*/unsigned int __pad;
+};
+
+#define NUM_IVECS	(IMAP_INR + 1)
+struct ino_bucket *ivector_table;
+unsigned long ivector_table_pa;
+
+/* On several sun4u processors, it is illegal to mix bypass and
+ * non-bypass accesses.  Therefore we access all INO buckets
+ * using bypass accesses only.
+ */
+static unsigned long bucket_get_chain_pa(unsigned long bucket_pa)
+{
+	unsigned long ret;
+
+	__asm__ __volatile__("ldxa	[%1] %2, %0"
+			     : "=&r" (ret)
+			     : "r" (bucket_pa +
+				    offsetof(struct ino_bucket,
+					     __irq_chain_pa)),
+			       "i" (ASI_PHYS_USE_EC));
+
+	return ret;
+}
+
+static void bucket_clear_chain_pa(unsigned long bucket_pa)
+{
+	__asm__ __volatile__("stxa	%%g0, [%0] %1"
+			     : /* no outputs */
+			     : "r" (bucket_pa +
+				    offsetof(struct ino_bucket,
+					     __irq_chain_pa)),
+			       "i" (ASI_PHYS_USE_EC));
+}
+
+static unsigned int bucket_get_virt_irq(unsigned long bucket_pa)
+{
+	unsigned int ret;
+
+	__asm__ __volatile__("lduwa	[%1] %2, %0"
+			     : "=&r" (ret)
+			     : "r" (bucket_pa +
+				    offsetof(struct ino_bucket,
+					     __virt_irq)),
+			       "i" (ASI_PHYS_USE_EC));
+
+	return ret;
+}
+
+static void bucket_set_virt_irq(unsigned long bucket_pa,
+				unsigned int virt_irq)
+{
+	__asm__ __volatile__("stwa	%0, [%1] %2"
+			     : /* no outputs */
+			     : "r" (virt_irq),
+			       "r" (bucket_pa +
+				    offsetof(struct ino_bucket,
+					     __virt_irq)),
+			       "i" (ASI_PHYS_USE_EC));
+}
+
+#define irq_work_pa(__cpu)	&(trap_block[(__cpu)].irq_worklist_pa)
+
+static struct {
+	unsigned int dev_handle;
+	unsigned int dev_ino;
+	unsigned int in_use;
+} virt_irq_table[NR_IRQS];
+static DEFINE_SPINLOCK(virt_irq_alloc_lock);
+
+unsigned char virt_irq_alloc(unsigned int dev_handle,
+			     unsigned int dev_ino)
+{
+	unsigned long flags;
+	unsigned char ent;
+
+	BUILD_BUG_ON(NR_IRQS >= 256);
+
+	spin_lock_irqsave(&virt_irq_alloc_lock, flags);
+
+	for (ent = 1; ent < NR_IRQS; ent++) {
+		if (!virt_irq_table[ent].in_use)
+			break;
+	}
+	if (ent >= NR_IRQS) {
+		printk(KERN_ERR "IRQ: Out of virtual IRQs.\n");
+		ent = 0;
+	} else {
+		virt_irq_table[ent].dev_handle = dev_handle;
+		virt_irq_table[ent].dev_ino = dev_ino;
+		virt_irq_table[ent].in_use = 1;
+	}
+
+	spin_unlock_irqrestore(&virt_irq_alloc_lock, flags);
+
+	return ent;
+}
+
+#ifdef CONFIG_PCI_MSI
+void virt_irq_free(unsigned int virt_irq)
+{
+	unsigned long flags;
+
+	if (virt_irq >= NR_IRQS)
+		return;
+
+	spin_lock_irqsave(&virt_irq_alloc_lock, flags);
+
+	virt_irq_table[virt_irq].in_use = 0;
+
+	spin_unlock_irqrestore(&virt_irq_alloc_lock, flags);
+}
 #endif
 
-/* This is based upon code in the 32-bit Sparc kernel written mostly by
- * David Redman (djhr@tadpole.co.uk).
- */
-#define MAX_STATIC_ALLOC	4
-static struct irqaction static_irqaction[MAX_STATIC_ALLOC];
-static int static_irq_count;
-
-/* This is exported so that fast IRQ handlers can get at it... -DaveM */
-struct irqaction *irq_action[NR_IRQS+1] = {
-	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL,
-	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL
-};
-
-/* This only synchronizes entities which modify IRQ handler
- * state and some selected user-level spots that want to
- * read things in the table.  IRQ handler processing orders
- * its' accesses such that no locking is needed.
- */
-static DEFINE_SPINLOCK(irq_action_lock);
-
-static void register_irq_proc (unsigned int irq);
-
 /*
- * Upper 2b of irqaction->flags holds the ino.
- * irqaction->mask holds the smp affinity information.
+ * /proc/interrupts printing:
  */
-#define put_ino_in_irqaction(action, irq) \
-	action->flags &= 0xffffffffffffUL; \
-	if (__bucket(irq) == &pil0_dummy_bucket) \
-		action->flags |= 0xdeadUL << 48;  \
-	else \
-		action->flags |= __irq_ino(irq) << 48;
-#define get_ino_in_irqaction(action)	(action->flags >> 48)
-
-#define put_smpaff_in_irqaction(action, smpaff)	(action)->mask = (smpaff)
-#define get_smpaff_in_irqaction(action) 	((action)->mask)
 
 int show_interrupts(struct seq_file *p, void *v)
 {
+	int i = *(loff_t *) v, j;
+	struct irqaction * action;
 	unsigned long flags;
-	int i = *(loff_t *) v;
-	struct irqaction *action;
-#ifdef CONFIG_SMP
-	int j;
-#endif
 
-	spin_lock_irqsave(&irq_action_lock, flags);
-	if (i <= NR_IRQS) {
-		if (!(action = *(i + irq_action)))
-			goto out_unlock;
-		seq_printf(p, "%3d: ", i);
+	if (i == 0) {
+		seq_printf(p, "           ");
+		for_each_online_cpu(j)
+			seq_printf(p, "CPU%d       ",j);
+		seq_putc(p, '\n');
+	}
+
+	if (i < NR_IRQS) {
+		spin_lock_irqsave(&irq_desc[i].lock, flags);
+		action = irq_desc[i].action;
+		if (!action)
+			goto skip;
+		seq_printf(p, "%3d: ",i);
 #ifndef CONFIG_SMP
 		seq_printf(p, "%10u ", kstat_irqs(i));
 #else
-		for (j = 0; j < NR_CPUS; j++) {
-			if (!cpu_online(j))
-				continue;
-			seq_printf(p, "%10u ",
-				   kstat_cpu(j).irqs[i]);
-		}
+		for_each_online_cpu(j)
+			seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
 #endif
-		seq_printf(p, " %s:%lx", action->name,
-			   get_ino_in_irqaction(action));
-		for (action = action->next; action; action = action->next) {
-			seq_printf(p, ", %s:%lx", action->name,
-				   get_ino_in_irqaction(action));
-		}
-		seq_putc(p, '\n');
-	}
-out_unlock:
-	spin_unlock_irqrestore(&irq_action_lock, flags);
+		seq_printf(p, " %9s", irq_desc[i].chip->typename);
+		seq_printf(p, "  %s", action->name);
 
+		for (action=action->next; action; action = action->next)
+			seq_printf(p, ", %s", action->name);
+
+		seq_putc(p, '\n');
+skip:
+		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
+	}
 	return 0;
 }
 
-/* Now these are always passed a true fully specified sun4u INO. */
-void enable_irq(unsigned int irq)
+static unsigned int sun4u_compute_tid(unsigned long imap, unsigned long cpuid)
 {
-	struct ino_bucket *bucket = __bucket(irq);
-	unsigned long imap;
-	unsigned long tid;
+	unsigned int tid;
 
-	imap = bucket->imap;
-	if (imap == 0UL)
-		return;
-
-	preempt_disable();
-
-	if (tlb_type == cheetah || tlb_type == cheetah_plus) {
-		unsigned long ver;
-
-		__asm__ ("rdpr %%ver, %0" : "=r" (ver));
-		if ((ver >> 32) == 0x003e0016) {
-			/* We set it to our JBUS ID. */
-			__asm__ __volatile__("ldxa [%%g0] %1, %0"
-					     : "=r" (tid)
-					     : "i" (ASI_JBUS_CONFIG));
-			tid = ((tid & (0x1fUL<<17)) << 9);
-			tid &= IMAP_TID_JBUS;
-		} else {
-			/* We set it to our Safari AID. */
-			__asm__ __volatile__("ldxa [%%g0] %1, %0"
-					     : "=r" (tid)
-					     : "i" (ASI_SAFARI_CONFIG));
-			tid = ((tid & (0x3ffUL<<17)) << 9);
-			tid &= IMAP_AID_SAFARI;
-		}
-	} else if (this_is_starfire == 0) {
-		/* We set it to our UPA MID. */
-		__asm__ __volatile__("ldxa [%%g0] %1, %0"
-				     : "=r" (tid)
-				     : "i" (ASI_UPA_CONFIG));
-		tid = ((tid & UPA_CONFIG_MID) << 9);
+	if (this_is_starfire) {
+		tid = starfire_translate(imap, cpuid);
+		tid <<= IMAP_TID_SHIFT;
 		tid &= IMAP_TID_UPA;
 	} else {
-		tid = (starfire_translate(imap, smp_processor_id()) << 26);
-		tid &= IMAP_TID_UPA;
+		if (tlb_type == cheetah || tlb_type == cheetah_plus) {
+			unsigned long ver;
+
+			__asm__ ("rdpr %%ver, %0" : "=r" (ver));
+			if ((ver >> 32UL) == __JALAPENO_ID ||
+			    (ver >> 32UL) == __SERRANO_ID) {
+				tid = cpuid << IMAP_TID_SHIFT;
+				tid &= IMAP_TID_JBUS;
+			} else {
+				unsigned int a = cpuid & 0x1f;
+				unsigned int n = (cpuid >> 5) & 0x1f;
+
+				tid = ((a << IMAP_AID_SHIFT) |
+				       (n << IMAP_NID_SHIFT));
+				tid &= (IMAP_AID_SAFARI |
+					IMAP_NID_SAFARI);;
+			}
+		} else {
+			tid = cpuid << IMAP_TID_SHIFT;
+			tid &= IMAP_TID_UPA;
+		}
 	}
 
-	/* NOTE NOTE NOTE, IGN and INO are read-only, IGN is a product
-	 * of this SYSIO's preconfigured IGN in the SYSIO Control
-	 * Register, the hardware just mirrors that value here.
-	 * However for Graphics and UPA Slave devices the full
-	 * IMAP_INR field can be set by the programmer here.
-	 *
-	 * Things like FFB can now be handled via the new IRQ mechanism.
-	 */
-	upa_writel(tid | IMAP_VALID, imap);
-
-	preempt_enable();
+	return tid;
 }
 
-/* This now gets passed true ino's as well. */
-void disable_irq(unsigned int irq)
-{
-	struct ino_bucket *bucket = __bucket(irq);
-	unsigned long imap;
+struct irq_handler_data {
+	unsigned long	iclr;
+	unsigned long	imap;
 
-	imap = bucket->imap;
-	if (imap != 0UL) {
-		u32 tmp;
-
-		/* NOTE: We do not want to futz with the IRQ clear registers
-		 *       and move the state to IDLE, the SCSI code does call
-		 *       disable_irq() to assure atomicity in the queue cmd
-		 *       SCSI adapter driver code.  Thus we'd lose interrupts.
-		 */
-		tmp = upa_readl(imap);
-		tmp &= ~IMAP_VALID;
-		upa_writel(tmp, imap);
-	}
-}
-
-/* The timer is the one "weird" interrupt which is generated by
- * the CPU %tick register and not by some normal vectored interrupt
- * source.  To handle this special case, we use this dummy INO bucket.
- */
-static struct ino_bucket pil0_dummy_bucket = {
-	0,	/* irq_chain */
-	0,	/* pil */
-	0,	/* pending */
-	0,	/* flags */
-	0,	/* __unused */
-	NULL,	/* irq_info */
-	0UL,	/* iclr */
-	0UL,	/* imap */
+	void		(*pre_handler)(unsigned int, void *, void *);
+	void		*arg1;
+	void		*arg2;
 };
 
-unsigned int build_irq(int pil, int inofixup, unsigned long iclr, unsigned long imap)
+#ifdef CONFIG_SMP
+static int irq_choose_cpu(unsigned int virt_irq)
+{
+	cpumask_t mask = irq_desc[virt_irq].affinity;
+	int cpuid;
+
+	if (cpus_equal(mask, CPU_MASK_ALL)) {
+		static int irq_rover;
+		static DEFINE_SPINLOCK(irq_rover_lock);
+		unsigned long flags;
+
+		/* Round-robin distribution... */
+	do_round_robin:
+		spin_lock_irqsave(&irq_rover_lock, flags);
+
+		while (!cpu_online(irq_rover)) {
+			if (++irq_rover >= NR_CPUS)
+				irq_rover = 0;
+		}
+		cpuid = irq_rover;
+		do {
+			if (++irq_rover >= NR_CPUS)
+				irq_rover = 0;
+		} while (!cpu_online(irq_rover));
+
+		spin_unlock_irqrestore(&irq_rover_lock, flags);
+	} else {
+		cpumask_t tmp;
+
+		cpus_and(tmp, cpu_online_map, mask);
+
+		if (cpus_empty(tmp))
+			goto do_round_robin;
+
+		cpuid = first_cpu(tmp);
+	}
+
+	return cpuid;
+}
+#else
+static int irq_choose_cpu(unsigned int virt_irq)
+{
+	return real_hard_smp_processor_id();
+}
+#endif
+
+static void sun4u_irq_enable(unsigned int virt_irq)
+{
+	struct irq_handler_data *data = get_irq_chip_data(virt_irq);
+
+	if (likely(data)) {
+		unsigned long cpuid, imap, val;
+		unsigned int tid;
+
+		cpuid = irq_choose_cpu(virt_irq);
+		imap = data->imap;
+
+		tid = sun4u_compute_tid(imap, cpuid);
+
+		val = upa_readq(imap);
+		val &= ~(IMAP_TID_UPA | IMAP_TID_JBUS |
+			 IMAP_AID_SAFARI | IMAP_NID_SAFARI);
+		val |= tid | IMAP_VALID;
+		upa_writeq(val, imap);
+	}
+}
+
+static void sun4u_set_affinity(unsigned int virt_irq, cpumask_t mask)
+{
+	sun4u_irq_enable(virt_irq);
+}
+
+static void sun4u_irq_disable(unsigned int virt_irq)
+{
+	struct irq_handler_data *data = get_irq_chip_data(virt_irq);
+
+	if (likely(data)) {
+		unsigned long imap = data->imap;
+		unsigned long tmp = upa_readq(imap);
+
+		tmp &= ~IMAP_VALID;
+		upa_writeq(tmp, imap);
+	}
+}
+
+static void sun4u_irq_eoi(unsigned int virt_irq)
+{
+	struct irq_handler_data *data = get_irq_chip_data(virt_irq);
+	struct irq_desc *desc = irq_desc + virt_irq;
+
+	if (unlikely(desc->status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		return;
+
+	if (likely(data))
+		upa_writeq(ICLR_IDLE, data->iclr);
+}
+
+static void sun4v_irq_enable(unsigned int virt_irq)
+{
+	unsigned int ino = virt_irq_table[virt_irq].dev_ino;
+	unsigned long cpuid = irq_choose_cpu(virt_irq);
+	int err;
+
+	err = sun4v_intr_settarget(ino, cpuid);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_intr_settarget(%x,%lu): "
+		       "err(%d)\n", ino, cpuid, err);
+	err = sun4v_intr_setstate(ino, HV_INTR_STATE_IDLE);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_intr_setstate(%x): "
+		       "err(%d)\n", ino, err);
+	err = sun4v_intr_setenabled(ino, HV_INTR_ENABLED);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_intr_setenabled(%x): err(%d)\n",
+		       ino, err);
+}
+
+static void sun4v_set_affinity(unsigned int virt_irq, cpumask_t mask)
+{
+	unsigned int ino = virt_irq_table[virt_irq].dev_ino;
+	unsigned long cpuid = irq_choose_cpu(virt_irq);
+	int err;
+
+	err = sun4v_intr_settarget(ino, cpuid);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_intr_settarget(%x,%lu): "
+		       "err(%d)\n", ino, cpuid, err);
+}
+
+static void sun4v_irq_disable(unsigned int virt_irq)
+{
+	unsigned int ino = virt_irq_table[virt_irq].dev_ino;
+	int err;
+
+	err = sun4v_intr_setenabled(ino, HV_INTR_DISABLED);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_intr_setenabled(%x): "
+		       "err(%d)\n", ino, err);
+}
+
+static void sun4v_irq_eoi(unsigned int virt_irq)
+{
+	unsigned int ino = virt_irq_table[virt_irq].dev_ino;
+	struct irq_desc *desc = irq_desc + virt_irq;
+	int err;
+
+	if (unlikely(desc->status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		return;
+
+	err = sun4v_intr_setstate(ino, HV_INTR_STATE_IDLE);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_intr_setstate(%x): "
+		       "err(%d)\n", ino, err);
+}
+
+static void sun4v_virq_enable(unsigned int virt_irq)
+{
+	unsigned long cpuid, dev_handle, dev_ino;
+	int err;
+
+	cpuid = irq_choose_cpu(virt_irq);
+
+	dev_handle = virt_irq_table[virt_irq].dev_handle;
+	dev_ino = virt_irq_table[virt_irq].dev_ino;
+
+	err = sun4v_vintr_set_target(dev_handle, dev_ino, cpuid);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_vintr_set_target(%lx,%lx,%lu): "
+		       "err(%d)\n",
+		       dev_handle, dev_ino, cpuid, err);
+	err = sun4v_vintr_set_state(dev_handle, dev_ino,
+				    HV_INTR_STATE_IDLE);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_vintr_set_state(%lx,%lx,"
+		       "HV_INTR_STATE_IDLE): err(%d)\n",
+		       dev_handle, dev_ino, err);
+	err = sun4v_vintr_set_valid(dev_handle, dev_ino,
+				    HV_INTR_ENABLED);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_vintr_set_state(%lx,%lx,"
+		       "HV_INTR_ENABLED): err(%d)\n",
+		       dev_handle, dev_ino, err);
+}
+
+static void sun4v_virt_set_affinity(unsigned int virt_irq, cpumask_t mask)
+{
+	unsigned long cpuid, dev_handle, dev_ino;
+	int err;
+
+	cpuid = irq_choose_cpu(virt_irq);
+
+	dev_handle = virt_irq_table[virt_irq].dev_handle;
+	dev_ino = virt_irq_table[virt_irq].dev_ino;
+
+	err = sun4v_vintr_set_target(dev_handle, dev_ino, cpuid);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_vintr_set_target(%lx,%lx,%lu): "
+		       "err(%d)\n",
+		       dev_handle, dev_ino, cpuid, err);
+}
+
+static void sun4v_virq_disable(unsigned int virt_irq)
+{
+	unsigned long dev_handle, dev_ino;
+	int err;
+
+	dev_handle = virt_irq_table[virt_irq].dev_handle;
+	dev_ino = virt_irq_table[virt_irq].dev_ino;
+
+	err = sun4v_vintr_set_valid(dev_handle, dev_ino,
+				    HV_INTR_DISABLED);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_vintr_set_state(%lx,%lx,"
+		       "HV_INTR_DISABLED): err(%d)\n",
+		       dev_handle, dev_ino, err);
+}
+
+static void sun4v_virq_eoi(unsigned int virt_irq)
+{
+	struct irq_desc *desc = irq_desc + virt_irq;
+	unsigned long dev_handle, dev_ino;
+	int err;
+
+	if (unlikely(desc->status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		return;
+
+	dev_handle = virt_irq_table[virt_irq].dev_handle;
+	dev_ino = virt_irq_table[virt_irq].dev_ino;
+
+	err = sun4v_vintr_set_state(dev_handle, dev_ino,
+				    HV_INTR_STATE_IDLE);
+	if (err != HV_EOK)
+		printk(KERN_ERR "sun4v_vintr_set_state(%lx,%lx,"
+		       "HV_INTR_STATE_IDLE): err(%d)\n",
+		       dev_handle, dev_ino, err);
+}
+
+static struct irq_chip sun4u_irq = {
+	.typename	= "sun4u",
+	.enable		= sun4u_irq_enable,
+	.disable	= sun4u_irq_disable,
+	.eoi		= sun4u_irq_eoi,
+	.set_affinity	= sun4u_set_affinity,
+};
+
+static struct irq_chip sun4v_irq = {
+	.typename	= "sun4v",
+	.enable		= sun4v_irq_enable,
+	.disable	= sun4v_irq_disable,
+	.eoi		= sun4v_irq_eoi,
+	.set_affinity	= sun4v_set_affinity,
+};
+
+static struct irq_chip sun4v_virq = {
+	.typename	= "vsun4v",
+	.enable		= sun4v_virq_enable,
+	.disable	= sun4v_virq_disable,
+	.eoi		= sun4v_virq_eoi,
+	.set_affinity	= sun4v_virt_set_affinity,
+};
+
+static void fastcall pre_flow_handler(unsigned int virt_irq,
+				      struct irq_desc *desc)
+{
+	struct irq_handler_data *data = get_irq_chip_data(virt_irq);
+	unsigned int ino = virt_irq_table[virt_irq].dev_ino;
+
+	data->pre_handler(ino, data->arg1, data->arg2);
+
+	handle_fasteoi_irq(virt_irq, desc);
+}
+
+void irq_install_pre_handler(int virt_irq,
+			     void (*func)(unsigned int, void *, void *),
+			     void *arg1, void *arg2)
+{
+	struct irq_handler_data *data = get_irq_chip_data(virt_irq);
+	struct irq_desc *desc = irq_desc + virt_irq;
+
+	data->pre_handler = func;
+	data->arg1 = arg1;
+	data->arg2 = arg2;
+
+	desc->handle_irq = pre_flow_handler;
+}
+
+unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
 {
 	struct ino_bucket *bucket;
+	struct irq_handler_data *data;
+	unsigned int virt_irq;
 	int ino;
 
-	if (pil == 0) {
-		if (iclr != 0UL || imap != 0UL) {
-			prom_printf("Invalid dummy bucket for PIL0 (%lx:%lx)\n",
-				    iclr, imap);
-			prom_halt();
-		}
-		return __irq(&pil0_dummy_bucket);
-	}
+	BUG_ON(tlb_type == hypervisor);
 
-	/* RULE: Both must be specified in all other cases. */
-	if (iclr == 0UL || imap == 0UL) {
-		prom_printf("Invalid build_irq %d %d %016lx %016lx\n",
-			    pil, inofixup, iclr, imap);
-		prom_halt();
-	}
-	
-	ino = (upa_readl(imap) & (IMAP_IGN | IMAP_INO)) + inofixup;
-	if (ino > NUM_IVECS) {
-		prom_printf("Invalid INO %04x (%d:%d:%016lx:%016lx)\n",
-			    ino, pil, inofixup, iclr, imap);
-		prom_halt();
-	}
-
-	/* Ok, looks good, set it up.  Don't touch the irq_chain or
-	 * the pending flag.
-	 */
+	ino = (upa_readq(imap) & (IMAP_IGN | IMAP_INO)) + inofixup;
 	bucket = &ivector_table[ino];
-	if ((bucket->flags & IBF_ACTIVE) ||
-	    (bucket->irq_info != NULL)) {
-		/* This is a gross fatal error if it happens here. */
-		prom_printf("IRQ: Trying to reinit INO bucket, fatal error.\n");
-		prom_printf("IRQ: Request INO %04x (%d:%d:%016lx:%016lx)\n",
-			    ino, pil, inofixup, iclr, imap);
-		prom_printf("IRQ: Existing (%d:%016lx:%016lx)\n",
-			    bucket->pil, bucket->iclr, bucket->imap);
-		prom_printf("IRQ: Cannot continue, halting...\n");
+	virt_irq = bucket_get_virt_irq(__pa(bucket));
+	if (!virt_irq) {
+		virt_irq = virt_irq_alloc(0, ino);
+		bucket_set_virt_irq(__pa(bucket), virt_irq);
+		set_irq_chip_and_handler_name(virt_irq,
+					      &sun4u_irq,
+					      handle_fasteoi_irq,
+					      "IVEC");
+	}
+
+	data = get_irq_chip_data(virt_irq);
+	if (unlikely(data))
+		goto out;
+
+	data = kzalloc(sizeof(struct irq_handler_data), GFP_ATOMIC);
+	if (unlikely(!data)) {
+		prom_printf("IRQ: kzalloc(irq_handler_data) failed.\n");
 		prom_halt();
 	}
-	bucket->imap  = imap;
-	bucket->iclr  = iclr;
-	bucket->pil   = pil;
-	bucket->flags = 0;
+	set_irq_chip_data(virt_irq, data);
 
-	bucket->irq_info = NULL;
-
-	return __irq(bucket);
-}
-
-static void atomic_bucket_insert(struct ino_bucket *bucket)
-{
-	unsigned long pstate;
-	unsigned int *ent;
-
-	__asm__ __volatile__("rdpr %%pstate, %0" : "=r" (pstate));
-	__asm__ __volatile__("wrpr %0, %1, %%pstate"
-			     : : "r" (pstate), "i" (PSTATE_IE));
-	ent = irq_work(smp_processor_id(), bucket->pil);
-	bucket->irq_chain = *ent;
-	*ent = __irq(bucket);
-	__asm__ __volatile__("wrpr %0, 0x0, %%pstate" : : "r" (pstate));
-}
-
-int request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *),
-		unsigned long irqflags, const char *name, void *dev_id)
-{
-	struct irqaction *action, *tmp = NULL;
-	struct ino_bucket *bucket = __bucket(irq);
-	unsigned long flags;
-	int pending = 0;
-
-	if ((bucket != &pil0_dummy_bucket) &&
-	    (bucket < &ivector_table[0] ||
-	     bucket >= &ivector_table[NUM_IVECS])) {
-		unsigned int *caller;
-
-		__asm__ __volatile__("mov %%i7, %0" : "=r" (caller));
-		printk(KERN_CRIT "request_irq: Old style IRQ registry attempt "
-		       "from %p, irq %08x.\n", caller, irq);
-		return -EINVAL;
-	}	
-	if (!handler)
-	    return -EINVAL;
-
-	if ((bucket != &pil0_dummy_bucket) && (irqflags & SA_SAMPLE_RANDOM)) {
-		/*
-	 	 * This function might sleep, we want to call it first,
-	 	 * outside of the atomic block. In SA_STATIC_ALLOC case,
-		 * random driver's kmalloc will fail, but it is safe.
-		 * If already initialized, random driver will not reinit.
-	 	 * Yes, this might clear the entropy pool if the wrong
-	 	 * driver is attempted to be loaded, without actually
-	 	 * installing a new handler, but is this really a problem,
-	 	 * only the sysadmin is able to do this.
-	 	 */
-		rand_initialize_irq(irq);
-	}
-
-	spin_lock_irqsave(&irq_action_lock, flags);
-
-	action = *(bucket->pil + irq_action);
-	if (action) {
-		if ((action->flags & SA_SHIRQ) && (irqflags & SA_SHIRQ))
-			for (tmp = action; tmp->next; tmp = tmp->next)
-				;
-		else {
-			spin_unlock_irqrestore(&irq_action_lock, flags);
-			return -EBUSY;
-		}
-		action = NULL;		/* Or else! */
-	}
-
-	/* If this is flagged as statically allocated then we use our
-	 * private struct which is never freed.
-	 */
-	if (irqflags & SA_STATIC_ALLOC) {
-	    if (static_irq_count < MAX_STATIC_ALLOC)
-		action = &static_irqaction[static_irq_count++];
-	    else
-		printk("Request for IRQ%d (%s) SA_STATIC_ALLOC failed "
-		       "using kmalloc\n", irq, name);
-	}	
-	if (action == NULL)
-	    action = (struct irqaction *)kmalloc(sizeof(struct irqaction),
-						 GFP_ATOMIC);
-	
-	if (!action) { 
-		spin_unlock_irqrestore(&irq_action_lock, flags);
-		return -ENOMEM;
-	}
-
-	if (bucket == &pil0_dummy_bucket) {
-		bucket->irq_info = action;
-		bucket->flags |= IBF_ACTIVE;
-	} else {
-		if ((bucket->flags & IBF_ACTIVE) != 0) {
-			void *orig = bucket->irq_info;
-			void **vector = NULL;
-
-			if ((bucket->flags & IBF_PCI) == 0) {
-				printk("IRQ: Trying to share non-PCI bucket.\n");
-				goto free_and_ebusy;
-			}
-			if ((bucket->flags & IBF_MULTI) == 0) {
-				vector = kmalloc(sizeof(void *) * 4, GFP_ATOMIC);
-				if (vector == NULL)
-					goto free_and_enomem;
-
-				/* We might have slept. */
-				if ((bucket->flags & IBF_MULTI) != 0) {
-					int ent;
-
-					kfree(vector);
-					vector = (void **)bucket->irq_info;
-					for(ent = 0; ent < 4; ent++) {
-						if (vector[ent] == NULL) {
-							vector[ent] = action;
-							break;
-						}
-					}
-					if (ent == 4)
-						goto free_and_ebusy;
-				} else {
-					vector[0] = orig;
-					vector[1] = action;
-					vector[2] = NULL;
-					vector[3] = NULL;
-					bucket->irq_info = vector;
-					bucket->flags |= IBF_MULTI;
-				}
-			} else {
-				int ent;
-
-				vector = (void **)orig;
-				for (ent = 0; ent < 4; ent++) {
-					if (vector[ent] == NULL) {
-						vector[ent] = action;
-						break;
-					}
-				}
-				if (ent == 4)
-					goto free_and_ebusy;
-			}
-		} else {
-			bucket->irq_info = action;
-			bucket->flags |= IBF_ACTIVE;
-		}
-		pending = bucket->pending;
-		if (pending)
-			bucket->pending = 0;
-	}
-
-	action->handler = handler;
-	action->flags = irqflags;
-	action->name = name;
-	action->next = NULL;
-	action->dev_id = dev_id;
-	put_ino_in_irqaction(action, irq);
-	put_smpaff_in_irqaction(action, CPU_MASK_NONE);
-
-	if (tmp)
-		tmp->next = action;
-	else
-		*(bucket->pil + irq_action) = action;
-
-	enable_irq(irq);
-
-	/* We ate the IVEC already, this makes sure it does not get lost. */
-	if (pending) {
-		atomic_bucket_insert(bucket);
-		set_softint(1 << bucket->pil);
-	}
-	spin_unlock_irqrestore(&irq_action_lock, flags);
-	if ((bucket != &pil0_dummy_bucket) && (!(irqflags & SA_STATIC_ALLOC)))
-		register_irq_proc(__irq_ino(irq));
-
-#ifdef CONFIG_SMP
-	distribute_irqs();
-#endif
-	return 0;
-
-free_and_ebusy:
-	kfree(action);
-	spin_unlock_irqrestore(&irq_action_lock, flags);
-	return -EBUSY;
-
-free_and_enomem:
-	kfree(action);
-	spin_unlock_irqrestore(&irq_action_lock, flags);
-	return -ENOMEM;
-}
-
-EXPORT_SYMBOL(request_irq);
-
-void free_irq(unsigned int irq, void *dev_id)
-{
-	struct irqaction *action;
-	struct irqaction *tmp = NULL;
-	unsigned long flags;
-	struct ino_bucket *bucket = __bucket(irq), *bp;
-
-	if ((bucket != &pil0_dummy_bucket) &&
-	    (bucket < &ivector_table[0] ||
-	     bucket >= &ivector_table[NUM_IVECS])) {
-		unsigned int *caller;
-
-		__asm__ __volatile__("mov %%i7, %0" : "=r" (caller));
-		printk(KERN_CRIT "free_irq: Old style IRQ removal attempt "
-		       "from %p, irq %08x.\n", caller, irq);
-		return;
-	}
-	
-	spin_lock_irqsave(&irq_action_lock, flags);
-
-	action = *(bucket->pil + irq_action);
-	if (!action->handler) {
-		printk("Freeing free IRQ %d\n", bucket->pil);
-		return;
-	}
-	if (dev_id) {
-		for ( ; action; action = action->next) {
-			if (action->dev_id == dev_id)
-				break;
-			tmp = action;
-		}
-		if (!action) {
-			printk("Trying to free free shared IRQ %d\n", bucket->pil);
-			spin_unlock_irqrestore(&irq_action_lock, flags);
-			return;
-		}
-	} else if (action->flags & SA_SHIRQ) {
-		printk("Trying to free shared IRQ %d with NULL device ID\n", bucket->pil);
-		spin_unlock_irqrestore(&irq_action_lock, flags);
-		return;
-	}
-
-	if (action->flags & SA_STATIC_ALLOC) {
-		printk("Attempt to free statically allocated IRQ %d (%s)\n",
-		       bucket->pil, action->name);
-		spin_unlock_irqrestore(&irq_action_lock, flags);
-		return;
-	}
-
-	if (action && tmp)
-		tmp->next = action->next;
-	else
-		*(bucket->pil + irq_action) = action->next;
-
-	spin_unlock_irqrestore(&irq_action_lock, flags);
-
-	synchronize_irq(irq);
-
-	spin_lock_irqsave(&irq_action_lock, flags);
-
-	if (bucket != &pil0_dummy_bucket) {
-		unsigned long imap = bucket->imap;
-		void **vector, *orig;
-		int ent;
-
-		orig = bucket->irq_info;
-		vector = (void **)orig;
-
-		if ((bucket->flags & IBF_MULTI) != 0) {
-			int other = 0;
-			void *orphan = NULL;
-			for (ent = 0; ent < 4; ent++) {
-				if (vector[ent] == action)
-					vector[ent] = NULL;
-				else if (vector[ent] != NULL) {
-					orphan = vector[ent];
-					other++;
-				}
-			}
-
-			/* Only free when no other shared irq
-			 * uses this bucket.
-			 */
-			if (other) {
-				if (other == 1) {
-					/* Convert back to non-shared bucket. */
-					bucket->irq_info = orphan;
-					bucket->flags &= ~(IBF_MULTI);
-					kfree(vector);
-				}
-				goto out;
-			}
-		} else {
-			bucket->irq_info = NULL;
-		}
-
-		/* This unique interrupt source is now inactive. */
-		bucket->flags &= ~IBF_ACTIVE;
-
-		/* See if any other buckets share this bucket's IMAP
-		 * and are still active.
-		 */
-		for (ent = 0; ent < NUM_IVECS; ent++) {
-			bp = &ivector_table[ent];
-			if (bp != bucket	&&
-			    bp->imap == imap	&&
-			    (bp->flags & IBF_ACTIVE) != 0)
-				break;
-		}
-
-		/* Only disable when no other sub-irq levels of
-		 * the same IMAP are active.
-		 */
-		if (ent == NUM_IVECS)
-			disable_irq(irq);
-	}
+	data->imap  = imap;
+	data->iclr  = iclr;
 
 out:
-	kfree(action);
-	spin_unlock_irqrestore(&irq_action_lock, flags);
+	return virt_irq;
 }
 
-EXPORT_SYMBOL(free_irq);
-
-#ifdef CONFIG_SMP
-void synchronize_irq(unsigned int irq)
+static unsigned int sun4v_build_common(unsigned long sysino,
+				       struct irq_chip *chip)
 {
-	struct ino_bucket *bucket = __bucket(irq);
+	struct ino_bucket *bucket;
+	struct irq_handler_data *data;
+	unsigned int virt_irq;
 
-#if 0
-	/* The following is how I wish I could implement this.
-	 * Unfortunately the ICLR registers are read-only, you can
-	 * only write ICLR_foo values to them.  To get the current
-	 * IRQ status you would need to get at the IRQ diag registers
-	 * in the PCI/SBUS controller and the layout of those vary
-	 * from one controller to the next, sigh... -DaveM
-	 */
-	unsigned long iclr = bucket->iclr;
+	BUG_ON(tlb_type != hypervisor);
 
-	while (1) {
-		u32 tmp = upa_readl(iclr);
-		
-		if (tmp == ICLR_TRANSMIT ||
-		    tmp == ICLR_PENDING) {
-			cpu_relax();
-			continue;
-		}
-		break;
-	}
-#else
-	/* So we have to do this with a INPROGRESS bit just like x86.  */
-	while (bucket->flags & IBF_INPROGRESS)
-		cpu_relax();
-#endif
-}
-#endif /* CONFIG_SMP */
-
-void catch_disabled_ivec(struct pt_regs *regs)
-{
-	int cpu = smp_processor_id();
-	struct ino_bucket *bucket = __bucket(*irq_work(cpu, 0));
-
-	/* We can actually see this on Ultra/PCI PCI cards, which are bridges
-	 * to other devices.  Here a single IMAP enabled potentially multiple
-	 * unique interrupt sources (which each do have a unique ICLR register.
-	 *
-	 * So what we do is just register that the IVEC arrived, when registered
-	 * for real the request_irq() code will check the bit and signal
-	 * a local CPU interrupt for it.
-	 */
-#if 0
-	printk("IVEC: Spurious interrupt vector (%x) received at (%016lx)\n",
-	       bucket - &ivector_table[0], regs->tpc);
-#endif
-	*irq_work(cpu, 0) = 0;
-	bucket->pending = 1;
-}
-
-/* Tune this... */
-#define FORWARD_VOLUME		12
-
-#ifdef CONFIG_SMP
-
-static inline void redirect_intr(int cpu, struct ino_bucket *bp)
-{
-	/* Ok, here is what is going on:
-	 * 1) Retargeting IRQs on Starfire is very
-	 *    expensive so just forget about it on them.
-	 * 2) Moving around very high priority interrupts
-	 *    is a losing game.
-	 * 3) If the current cpu is idle, interrupts are
-	 *    useful work, so keep them here.  But do not
-	 *    pass to our neighbour if he is not very idle.
-	 * 4) If sysadmin explicitly asks for directed intrs,
-	 *    Just Do It.
-	 */
-	struct irqaction *ap = bp->irq_info;
-	cpumask_t cpu_mask;
-	unsigned int buddy, ticks;
-
-	cpu_mask = get_smpaff_in_irqaction(ap);
-	cpus_and(cpu_mask, cpu_mask, cpu_online_map);
-	if (cpus_empty(cpu_mask))
-		cpu_mask = cpu_online_map;
-
-	if (this_is_starfire != 0 ||
-	    bp->pil >= 10 || current->pid == 0)
-		goto out;
-
-	/* 'cpu' is the MID (ie. UPAID), calculate the MID
-	 * of our buddy.
-	 */
-	buddy = cpu + 1;
-	if (buddy >= NR_CPUS)
-		buddy = 0;
-
-	ticks = 0;
-	while (!cpu_isset(buddy, cpu_mask)) {
-		if (++buddy >= NR_CPUS)
-			buddy = 0;
-		if (++ticks > NR_CPUS) {
-			put_smpaff_in_irqaction(ap, CPU_MASK_NONE);
-			goto out;
-		}
+	bucket = &ivector_table[sysino];
+	virt_irq = bucket_get_virt_irq(__pa(bucket));
+	if (!virt_irq) {
+		virt_irq = virt_irq_alloc(0, sysino);
+		bucket_set_virt_irq(__pa(bucket), virt_irq);
+		set_irq_chip_and_handler_name(virt_irq, chip,
+					      handle_fasteoi_irq,
+					      "IVEC");
 	}
 
-	if (buddy == cpu)
+	data = get_irq_chip_data(virt_irq);
+	if (unlikely(data))
 		goto out;
 
-	/* Voo-doo programming. */
-	if (cpu_data(buddy).idle_volume < FORWARD_VOLUME)
-		goto out;
+	data = kzalloc(sizeof(struct irq_handler_data), GFP_ATOMIC);
+	if (unlikely(!data)) {
+		prom_printf("IRQ: kzalloc(irq_handler_data) failed.\n");
+		prom_halt();
+	}
+	set_irq_chip_data(virt_irq, data);
 
-	/* This just so happens to be correct on Cheetah
-	 * at the moment.
+	/* Catch accidental accesses to these things.  IMAP/ICLR handling
+	 * is done by hypervisor calls on sun4v platforms, not by direct
+	 * register accesses.
 	 */
-	buddy <<= 26;
-
-	/* Push it to our buddy. */
-	upa_writel(buddy | IMAP_VALID, bp->imap);
+	data->imap = ~0UL;
+	data->iclr = ~0UL;
 
 out:
-	return;
+	return virt_irq;
 }
 
-#endif
+unsigned int sun4v_build_irq(u32 devhandle, unsigned int devino)
+{
+	unsigned long sysino = sun4v_devino_to_sysino(devhandle, devino);
+
+	return sun4v_build_common(sysino, &sun4v_irq);
+}
+
+unsigned int sun4v_build_virq(u32 devhandle, unsigned int devino)
+{
+	struct irq_handler_data *data;
+	struct ino_bucket *bucket;
+	unsigned long hv_err, cookie;
+	unsigned int virt_irq;
+
+	bucket = kzalloc(sizeof(struct ino_bucket), GFP_ATOMIC);
+	if (unlikely(!bucket))
+		return 0;
+	__flush_dcache_range((unsigned long) bucket,
+			     ((unsigned long) bucket +
+			      sizeof(struct ino_bucket)));
+
+	virt_irq = virt_irq_alloc(devhandle, devino);
+	bucket_set_virt_irq(__pa(bucket), virt_irq);
+
+	set_irq_chip_and_handler_name(virt_irq, &sun4v_virq,
+				      handle_fasteoi_irq,
+				      "IVEC");
+
+	data = kzalloc(sizeof(struct irq_handler_data), GFP_ATOMIC);
+	if (unlikely(!data))
+		return 0;
+
+	set_irq_chip_data(virt_irq, data);
+
+	/* Catch accidental accesses to these things.  IMAP/ICLR handling
+	 * is done by hypervisor calls on sun4v platforms, not by direct
+	 * register accesses.
+	 */
+	data->imap = ~0UL;
+	data->iclr = ~0UL;
+
+	cookie = ~__pa(bucket);
+	hv_err = sun4v_vintr_set_cookie(devhandle, devino, cookie);
+	if (hv_err) {
+		prom_printf("IRQ: Fatal, cannot set cookie for [%x:%x] "
+			    "err=%lu\n", devhandle, devino, hv_err);
+		prom_halt();
+	}
+
+	return virt_irq;
+}
+
+void ack_bad_irq(unsigned int virt_irq)
+{
+	unsigned int ino = virt_irq_table[virt_irq].dev_ino;
+
+	if (!ino)
+		ino = 0xdeadbeef;
+
+	printk(KERN_CRIT "Unexpected IRQ from ino[%x] virt_irq[%u]\n",
+	       ino, virt_irq);
+}
 
 void handler_irq(int irq, struct pt_regs *regs)
 {
-	struct ino_bucket *bp, *nbp;
-	int cpu = smp_processor_id();
-
-#ifndef CONFIG_SMP
-	/*
-	 * Check for TICK_INT on level 14 softint.
-	 */
-	{
-		unsigned long clr_mask = 1 << irq;
-		unsigned long tick_mask = tick_ops->softint_mask;
-
-		if ((irq == 14) && (get_softint() & tick_mask)) {
-			irq = 0;
-			clr_mask = tick_mask;
-		}
-		clear_softint(clr_mask);
-	}
-#else
-	int should_forward = 1;
+	unsigned long pstate, bucket_pa;
+	struct pt_regs *old_regs;
 
 	clear_softint(1 << irq);
-#endif
 
+	old_regs = set_irq_regs(regs);
 	irq_enter();
-	kstat_this_cpu.irqs[irq]++;
 
-	/* Sliiiick... */
-#ifndef CONFIG_SMP
-	bp = ((irq != 0) ?
-	      __bucket(xchg32(irq_work(cpu, irq), 0)) :
-	      &pil0_dummy_bucket);
-#else
-	bp = __bucket(xchg32(irq_work(cpu, irq), 0));
-#endif
-	for ( ; bp != NULL; bp = nbp) {
-		unsigned char flags = bp->flags;
-		unsigned char random = 0;
+	/* Grab an atomic snapshot of the pending IVECs.  */
+	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
+			     "wrpr	%0, %3, %%pstate\n\t"
+			     "ldx	[%2], %1\n\t"
+			     "stx	%%g0, [%2]\n\t"
+			     "wrpr	%0, 0x0, %%pstate\n\t"
+			     : "=&r" (pstate), "=&r" (bucket_pa)
+			     : "r" (irq_work_pa(smp_processor_id())),
+			       "i" (PSTATE_IE)
+			     : "memory");
 
-		nbp = __bucket(bp->irq_chain);
-		bp->irq_chain = 0;
+	while (bucket_pa) {
+		struct irq_desc *desc;
+		unsigned long next_pa;
+		unsigned int virt_irq;
 
-		bp->flags |= IBF_INPROGRESS;
+		next_pa = bucket_get_chain_pa(bucket_pa);
+		virt_irq = bucket_get_virt_irq(bucket_pa);
+		bucket_clear_chain_pa(bucket_pa);
 
-		if ((flags & IBF_ACTIVE) != 0) {
-#ifdef CONFIG_PCI
-			if ((flags & IBF_DMA_SYNC) != 0) {
-				upa_readl(dma_sync_reg_table[bp->synctab_ent]);
-				upa_readq(pci_dma_wsync);
-			}
-#endif
-			if ((flags & IBF_MULTI) == 0) {
-				struct irqaction *ap = bp->irq_info;
-				int ret;
+		desc = irq_desc + virt_irq;
 
-				ret = ap->handler(__irq(bp), ap->dev_id, regs);
-				if (ret == IRQ_HANDLED)
-					random |= ap->flags;
-			} else {
-				void **vector = (void **)bp->irq_info;
-				int ent;
-				for (ent = 0; ent < 4; ent++) {
-					struct irqaction *ap = vector[ent];
-					if (ap != NULL) {
-						int ret;
+		desc->handle_irq(virt_irq, desc);
 
-						ret = ap->handler(__irq(bp),
-								  ap->dev_id,
-								  regs);
-						if (ret == IRQ_HANDLED)
-							random |= ap->flags;
-					}
-				}
-			}
-			/* Only the dummy bucket lacks IMAP/ICLR. */
-			if (bp->pil != 0) {
-#ifdef CONFIG_SMP
-				if (should_forward) {
-					redirect_intr(cpu, bp);
-					should_forward = 0;
-				}
-#endif
-				upa_writel(ICLR_IDLE, bp->iclr);
-
-				/* Test and add entropy */
-				if (random & SA_SAMPLE_RANDOM)
-					add_interrupt_randomness(irq);
-			}
-		} else
-			bp->pending = 1;
-
-		bp->flags &= ~IBF_INPROGRESS;
+		bucket_pa = next_pa;
 	}
-	irq_exit();
-}
-
-#ifdef CONFIG_BLK_DEV_FD
-extern void floppy_interrupt(int irq, void *dev_cookie, struct pt_regs *regs);
-
-void sparc_floppy_irq(int irq, void *dev_cookie, struct pt_regs *regs)
-{
-	struct irqaction *action = *(irq + irq_action);
-	struct ino_bucket *bucket;
-	int cpu = smp_processor_id();
-
-	irq_enter();
-	kstat_this_cpu.irqs[irq]++;
-
-	*(irq_work(cpu, irq)) = 0;
-	bucket = get_ino_in_irqaction(action) + ivector_table;
-
-	bucket->flags |= IBF_INPROGRESS;
-
-	floppy_interrupt(irq, dev_cookie, regs);
-	upa_writel(ICLR_IDLE, bucket->iclr);
-
-	bucket->flags &= ~IBF_INPROGRESS;
 
 	irq_exit();
-}
-#endif
-
-/* The following assumes that the branch lies before the place we
- * are branching to.  This is the case for a trap vector...
- * You have been warned.
- */
-#define SPARC_BRANCH(dest_addr, inst_addr) \
-          (0x10800000 | ((((dest_addr)-(inst_addr))>>2)&0x3fffff))
-
-#define SPARC_NOP (0x01000000)
-
-static void install_fast_irq(unsigned int cpu_irq,
-			     irqreturn_t (*handler)(int, void *, struct pt_regs *))
-{
-	extern unsigned long sparc64_ttable_tl0;
-	unsigned long ttent = (unsigned long) &sparc64_ttable_tl0;
-	unsigned int *insns;
-
-	ttent += 0x820;
-	ttent += (cpu_irq - 1) << 5;
-	insns = (unsigned int *) ttent;
-	insns[0] = SPARC_BRANCH(((unsigned long) handler),
-				((unsigned long)&insns[0]));
-	insns[1] = SPARC_NOP;
-	__asm__ __volatile__("membar #StoreStore; flush %0" : : "r" (ttent));
+	set_irq_regs(old_regs);
 }
 
-int request_fast_irq(unsigned int irq,
-		     irqreturn_t (*handler)(int, void *, struct pt_regs *),
-		     unsigned long irqflags, const char *name, void *dev_id)
+#ifdef CONFIG_HOTPLUG_CPU
+void fixup_irqs(void)
 {
-	struct irqaction *action;
-	struct ino_bucket *bucket = __bucket(irq);
-	unsigned long flags;
+	unsigned int irq;
 
-	/* No pil0 dummy buckets allowed here. */
-	if (bucket < &ivector_table[0] ||
-	    bucket >= &ivector_table[NUM_IVECS]) {
-		unsigned int *caller;
+	for (irq = 0; irq < NR_IRQS; irq++) {
+		unsigned long flags;
 
-		__asm__ __volatile__("mov %%i7, %0" : "=r" (caller));
-		printk(KERN_CRIT "request_fast_irq: Old style IRQ registry attempt "
-		       "from %p, irq %08x.\n", caller, irq);
-		return -EINVAL;
-	}	
-	
-	if (!handler)
-		return -EINVAL;
-
-	if ((bucket->pil == 0) || (bucket->pil == 14)) {
-		printk("request_fast_irq: Trying to register shared IRQ 0 or 14.\n");
-		return -EBUSY;
-	}
-
-	spin_lock_irqsave(&irq_action_lock, flags);
-
-	action = *(bucket->pil + irq_action);
-	if (action) {
-		if (action->flags & SA_SHIRQ)
-			panic("Trying to register fast irq when already shared.\n");
-		if (irqflags & SA_SHIRQ)
-			panic("Trying to register fast irq as shared.\n");
-		printk("request_fast_irq: Trying to register yet already owned.\n");
-		spin_unlock_irqrestore(&irq_action_lock, flags);
-		return -EBUSY;
-	}
-
-	/*
-	 * We do not check for SA_SAMPLE_RANDOM in this path. Neither do we
-	 * support smp intr affinity in this path.
-	 */
-	if (irqflags & SA_STATIC_ALLOC) {
-		if (static_irq_count < MAX_STATIC_ALLOC)
-			action = &static_irqaction[static_irq_count++];
-		else
-			printk("Request for IRQ%d (%s) SA_STATIC_ALLOC failed "
-			       "using kmalloc\n", bucket->pil, name);
-	}
-	if (action == NULL)
-		action = (struct irqaction *)kmalloc(sizeof(struct irqaction),
-						     GFP_ATOMIC);
-	if (!action) {
-		spin_unlock_irqrestore(&irq_action_lock, flags);
-		return -ENOMEM;
-	}
-	install_fast_irq(bucket->pil, handler);
-
-	bucket->irq_info = action;
-	bucket->flags |= IBF_ACTIVE;
-
-	action->handler = handler;
-	action->flags = irqflags;
-	action->dev_id = NULL;
-	action->name = name;
-	action->next = NULL;
-	put_ino_in_irqaction(action, irq);
-	put_smpaff_in_irqaction(action, CPU_MASK_NONE);
-
-	*(bucket->pil + irq_action) = action;
-	enable_irq(irq);
-
-	spin_unlock_irqrestore(&irq_action_lock, flags);
-
-#ifdef CONFIG_SMP
-	distribute_irqs();
-#endif
-	return 0;
-}
-
-/* We really don't need these at all on the Sparc.  We only have
- * stubs here because they are exported to modules.
- */
-unsigned long probe_irq_on(void)
-{
-	return 0;
-}
-
-EXPORT_SYMBOL(probe_irq_on);
-
-int probe_irq_off(unsigned long mask)
-{
-	return 0;
-}
-
-EXPORT_SYMBOL(probe_irq_off);
-
-#ifdef CONFIG_SMP
-static int retarget_one_irq(struct irqaction *p, int goal_cpu)
-{
-	struct ino_bucket *bucket = get_ino_in_irqaction(p) + ivector_table;
-	unsigned long imap = bucket->imap;
-	unsigned int tid;
-
-	while (!cpu_online(goal_cpu)) {
-		if (++goal_cpu >= NR_CPUS)
-			goal_cpu = 0;
-	}
-
-	if (tlb_type == cheetah || tlb_type == cheetah_plus) {
-		tid = goal_cpu << 26;
-		tid &= IMAP_AID_SAFARI;
-	} else if (this_is_starfire == 0) {
-		tid = goal_cpu << 26;
-		tid &= IMAP_TID_UPA;
-	} else {
-		tid = (starfire_translate(imap, goal_cpu) << 26);
-		tid &= IMAP_TID_UPA;
-	}
-	upa_writel(tid | IMAP_VALID, imap);
-
-	while (!cpu_online(goal_cpu)) {
-		if (++goal_cpu >= NR_CPUS)
-			goal_cpu = 0;
-	}
-
-	return goal_cpu;
-}
-
-/* Called from request_irq. */
-static void distribute_irqs(void)
-{
-	unsigned long flags;
-	int cpu, level;
-
-	spin_lock_irqsave(&irq_action_lock, flags);
-	cpu = 0;
-
-	/*
-	 * Skip the timer at [0], and very rare error/power intrs at [15].
-	 * Also level [12], it causes problems on Ex000 systems.
-	 */
-	for (level = 1; level < NR_IRQS; level++) {
-		struct irqaction *p = irq_action[level];
-		if (level == 12) continue;
-		while(p) {
-			cpu = retarget_one_irq(p, cpu);
-			p = p->next;
+		spin_lock_irqsave(&irq_desc[irq].lock, flags);
+		if (irq_desc[irq].action &&
+		    !(irq_desc[irq].status & IRQ_PER_CPU)) {
+			if (irq_desc[irq].chip->set_affinity)
+				irq_desc[irq].chip->set_affinity(irq,
+					irq_desc[irq].affinity);
 		}
+		spin_unlock_irqrestore(&irq_desc[irq].lock, flags);
 	}
-	spin_unlock_irqrestore(&irq_action_lock, flags);
 }
 #endif
 
+struct sun5_timer {
+	u64	count0;
+	u64	limit0;
+	u64	count1;
+	u64	limit1;
+};
 
-struct sun5_timer *prom_timers;
+static struct sun5_timer *prom_timers;
 static u64 prom_limit0, prom_limit1;
 
 static void map_prom_timers(void)
 {
-	unsigned int addr[3];
-	int tnode, err;
+	struct device_node *dp;
+	const unsigned int *addr;
 
 	/* PROM timer node hangs out in the top level of device siblings... */
-	tnode = prom_finddevice("/counter-timer");
+	dp = of_find_node_by_path("/");
+	dp = dp->child;
+	while (dp) {
+		if (!strcmp(dp->name, "counter-timer"))
+			break;
+		dp = dp->sibling;
+	}
 
 	/* Assume if node is not present, PROM uses different tick mechanism
 	 * which we should not care about.
 	 */
-	if (tnode == 0 || tnode == -1) {
+	if (!dp) {
 		prom_timers = (struct sun5_timer *) 0;
 		return;
 	}
 
 	/* If PROM is really using this, it must be mapped by him. */
-	err = prom_getproperty(tnode, "address", (char *)addr, sizeof(addr));
-	if (err == -1) {
+	addr = of_get_property(dp, "address", NULL);
+	if (!addr) {
 		prom_printf("PROM does not have timer mapped, trying to continue.\n");
 		prom_timers = (struct sun5_timer *) 0;
 		return;
@@ -1097,55 +820,142 @@ static void kill_prom_timer(void)
 	: "g1", "g2");
 }
 
-void enable_prom_timer(void)
-{
-	if (!prom_timers)
-		return;
-
-	/* Set it to whatever was there before. */
-	prom_timers->limit1 = prom_limit1;
-	prom_timers->count1 = 0;
-	prom_timers->limit0 = prom_limit0;
-	prom_timers->count0 = 0;
-}
-
 void init_irqwork_curcpu(void)
 {
-	register struct irq_work_struct *workp asm("o2");
-	unsigned long tmp;
 	int cpu = hard_smp_processor_id();
 
-	memset(__irq_work + cpu, 0, sizeof(*workp));
+	trap_block[cpu].irq_worklist_pa = 0UL;
+}
 
-	/* Make sure we are called with PSTATE_IE disabled.  */
-	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
-			     : "=r" (tmp));
-	if (tmp & PSTATE_IE) {
-		prom_printf("BUG: init_irqwork_curcpu() called with "
-			    "PSTATE_IE enabled, bailing.\n");
-		__asm__ __volatile__("mov	%%i7, %0\n\t"
-				     : "=r" (tmp));
-		prom_printf("BUG: Called from %lx\n", tmp);
+/* Please be very careful with register_one_mondo() and
+ * sun4v_register_mondo_queues().
+ *
+ * On SMP this gets invoked from the CPU trampoline before
+ * the cpu has fully taken over the trap table from OBP,
+ * and it's kernel stack + %g6 thread register state is
+ * not fully cooked yet.
+ *
+ * Therefore you cannot make any OBP calls, not even prom_printf,
+ * from these two routines.
+ */
+static void __cpuinit register_one_mondo(unsigned long paddr, unsigned long type, unsigned long qmask)
+{
+	unsigned long num_entries = (qmask + 1) / 64;
+	unsigned long status;
+
+	status = sun4v_cpu_qconf(type, paddr, num_entries);
+	if (status != HV_EOK) {
+		prom_printf("SUN4V: sun4v_cpu_qconf(%lu:%lx:%lu) failed, "
+			    "err %lu\n", type, paddr, num_entries, status);
+		prom_halt();
+	}
+}
+
+void __cpuinit sun4v_register_mondo_queues(int this_cpu)
+{
+	struct trap_per_cpu *tb = &trap_block[this_cpu];
+
+	register_one_mondo(tb->cpu_mondo_pa, HV_CPU_QUEUE_CPU_MONDO,
+			   tb->cpu_mondo_qmask);
+	register_one_mondo(tb->dev_mondo_pa, HV_CPU_QUEUE_DEVICE_MONDO,
+			   tb->dev_mondo_qmask);
+	register_one_mondo(tb->resum_mondo_pa, HV_CPU_QUEUE_RES_ERROR,
+			   tb->resum_qmask);
+	register_one_mondo(tb->nonresum_mondo_pa, HV_CPU_QUEUE_NONRES_ERROR,
+			   tb->nonresum_qmask);
+}
+
+static void __init alloc_one_mondo(unsigned long *pa_ptr, unsigned long qmask)
+{
+	unsigned long size = PAGE_ALIGN(qmask + 1);
+	void *p = __alloc_bootmem(size, size, 0);
+	if (!p) {
+		prom_printf("SUN4V: Error, cannot allocate mondo queue.\n");
 		prom_halt();
 	}
 
-	/* Set interrupt globals.  */
-	workp = &__irq_work[cpu];
-	__asm__ __volatile__(
-	"rdpr	%%pstate, %0\n\t"
-	"wrpr	%0, %1, %%pstate\n\t"
-	"mov	%2, %%g6\n\t"
-	"wrpr	%0, 0x0, %%pstate\n\t"
-	: "=&r" (tmp)
-	: "i" (PSTATE_IG), "r" (workp));
+	*pa_ptr = __pa(p);
 }
+
+static void __init alloc_one_kbuf(unsigned long *pa_ptr, unsigned long qmask)
+{
+	unsigned long size = PAGE_ALIGN(qmask + 1);
+	void *p = __alloc_bootmem(size, size, 0);
+
+	if (!p) {
+		prom_printf("SUN4V: Error, cannot allocate kbuf page.\n");
+		prom_halt();
+	}
+
+	*pa_ptr = __pa(p);
+}
+
+static void __init init_cpu_send_mondo_info(struct trap_per_cpu *tb)
+{
+#ifdef CONFIG_SMP
+	void *page;
+
+	BUILD_BUG_ON((NR_CPUS * sizeof(u16)) > (PAGE_SIZE - 64));
+
+	page = alloc_bootmem_pages(PAGE_SIZE);
+	if (!page) {
+		prom_printf("SUN4V: Error, cannot allocate cpu mondo page.\n");
+		prom_halt();
+	}
+
+	tb->cpu_mondo_block_pa = __pa(page);
+	tb->cpu_list_pa = __pa(page + 64);
+#endif
+}
+
+/* Allocate mondo and error queues for all possible cpus.  */
+static void __init sun4v_init_mondo_queues(void)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct trap_per_cpu *tb = &trap_block[cpu];
+
+		alloc_one_mondo(&tb->cpu_mondo_pa, tb->cpu_mondo_qmask);
+		alloc_one_mondo(&tb->dev_mondo_pa, tb->dev_mondo_qmask);
+		alloc_one_mondo(&tb->resum_mondo_pa, tb->resum_qmask);
+		alloc_one_kbuf(&tb->resum_kernel_buf_pa, tb->resum_qmask);
+		alloc_one_mondo(&tb->nonresum_mondo_pa, tb->nonresum_qmask);
+		alloc_one_kbuf(&tb->nonresum_kernel_buf_pa,
+			       tb->nonresum_qmask);
+
+		init_cpu_send_mondo_info(tb);
+	}
+
+	/* Load up the boot cpu's entries.  */
+	sun4v_register_mondo_queues(hard_smp_processor_id());
+}
+
+static struct irqaction timer_irq_action = {
+	.name = "timer",
+};
 
 /* Only invoked on boot processor. */
 void __init init_IRQ(void)
 {
+	unsigned long size;
+
 	map_prom_timers();
 	kill_prom_timer();
-	memset(&ivector_table[0], 0, sizeof(ivector_table));
+
+	size = sizeof(struct ino_bucket) * NUM_IVECS;
+	ivector_table = alloc_bootmem(size);
+	if (!ivector_table) {
+		prom_printf("Fatal error, cannot allocate ivector_table\n");
+		prom_halt();
+	}
+	__flush_dcache_range((unsigned long) ivector_table,
+			     ((unsigned long) ivector_table) + size);
+
+	ivector_table_pa = __pa(ivector_table);
+
+	if (tlb_type == hypervisor)
+		sun4v_init_mondo_queues();
 
 	/* We need to clear any IRQ's pending in the soft interrupt
 	 * registers, a spurious one could be left around from the
@@ -1164,106 +974,6 @@ void __init init_IRQ(void)
 			     : /* No outputs */
 			     : "i" (PSTATE_IE)
 			     : "g1");
+
+	irq_desc[0].action = &timer_irq_action;
 }
-
-static struct proc_dir_entry * root_irq_dir;
-static struct proc_dir_entry * irq_dir [NUM_IVECS];
-
-#ifdef CONFIG_SMP
-
-static int irq_affinity_read_proc (char *page, char **start, off_t off,
-			int count, int *eof, void *data)
-{
-	struct ino_bucket *bp = ivector_table + (long)data;
-	struct irqaction *ap = bp->irq_info;
-	cpumask_t mask;
-	int len;
-
-	mask = get_smpaff_in_irqaction(ap);
-	if (cpus_empty(mask))
-		mask = cpu_online_map;
-
-	len = cpumask_scnprintf(page, count, mask);
-	if (count - len < 2)
-		return -EINVAL;
-	len += sprintf(page + len, "\n");
-	return len;
-}
-
-static inline void set_intr_affinity(int irq, cpumask_t hw_aff)
-{
-	struct ino_bucket *bp = ivector_table + irq;
-
-	/* Users specify affinity in terms of hw cpu ids.
-	 * As soon as we do this, handler_irq() might see and take action.
-	 */
-	put_smpaff_in_irqaction((struct irqaction *)bp->irq_info, hw_aff);
-
-	/* Migration is simply done by the next cpu to service this
-	 * interrupt.
-	 */
-}
-
-static int irq_affinity_write_proc (struct file *file, const char __user *buffer,
-					unsigned long count, void *data)
-{
-	int irq = (long) data, full_count = count, err;
-	cpumask_t new_value;
-
-	err = cpumask_parse(buffer, count, new_value);
-
-	/*
-	 * Do not allow disabling IRQs completely - it's a too easy
-	 * way to make the system unusable accidentally :-) At least
-	 * one online CPU still has to be targeted.
-	 */
-	cpus_and(new_value, new_value, cpu_online_map);
-	if (cpus_empty(new_value))
-		return -EINVAL;
-
-	set_intr_affinity(irq, new_value);
-
-	return full_count;
-}
-
-#endif
-
-#define MAX_NAMELEN 10
-
-static void register_irq_proc (unsigned int irq)
-{
-	char name [MAX_NAMELEN];
-
-	if (!root_irq_dir || irq_dir[irq])
-		return;
-
-	memset(name, 0, MAX_NAMELEN);
-	sprintf(name, "%x", irq);
-
-	/* create /proc/irq/1234 */
-	irq_dir[irq] = proc_mkdir(name, root_irq_dir);
-
-#ifdef CONFIG_SMP
-	/* XXX SMP affinity not supported on starfire yet. */
-	if (this_is_starfire == 0) {
-		struct proc_dir_entry *entry;
-
-		/* create /proc/irq/1234/smp_affinity */
-		entry = create_proc_entry("smp_affinity", 0600, irq_dir[irq]);
-
-		if (entry) {
-			entry->nlink = 1;
-			entry->data = (void *)(long)irq;
-			entry->read_proc = irq_affinity_read_proc;
-			entry->write_proc = irq_affinity_write_proc;
-		}
-	}
-#endif
-}
-
-void init_irq_proc (void)
-{
-	/* create /proc/irq */
-	root_irq_dir = proc_mkdir("irq", NULL);
-}
-

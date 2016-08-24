@@ -21,22 +21,20 @@
  *	 - making it shorter - scr_readw are macros which expand in PRETTY long code
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/errno.h>
 #include <linux/tty.h>
-#include <linux/devfs_fs_kernel.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/init.h>
+#include <linux/mutex.h>
 #include <linux/vt_kern.h>
 #include <linux/selection.h>
 #include <linux/kbd_kern.h>
 #include <linux/console.h>
-#include <linux/smp_lock.h>
 #include <linux/device.h>
+
 #include <asm/uaccess.h>
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
@@ -52,14 +50,17 @@ vcs_size(struct inode *inode)
 	int size;
 	int minor = iminor(inode);
 	int currcons = minor & 127;
+	struct vc_data *vc;
+
 	if (currcons == 0)
 		currcons = fg_console;
 	else
 		currcons--;
 	if (!vc_cons_allocated(currcons))
 		return -ENXIO;
+	vc = vc_cons[currcons].d;
 
-	size = vc_cons[currcons].d->vc_rows * vc_cons[currcons].d->vc_cols;
+	size = vc->vc_rows * vc->vc_cols;
 
 	if (minor & 128)
 		size = 2*size + HEADER_SIZE;
@@ -70,11 +71,11 @@ static loff_t vcs_lseek(struct file *file, loff_t offset, int orig)
 {
 	int size;
 
-	down(&con_buf_sem);
-	size = vcs_size(file->f_dentry->d_inode);
+	mutex_lock(&con_buf_mtx);
+	size = vcs_size(file->f_path.dentry->d_inode);
 	switch (orig) {
 		default:
-			up(&con_buf_sem);
+			mutex_unlock(&con_buf_mtx);
 			return -EINVAL;
 		case 2:
 			offset += size;
@@ -85,11 +86,11 @@ static loff_t vcs_lseek(struct file *file, loff_t offset, int orig)
 			break;
 	}
 	if (offset < 0 || offset > size) {
-		up(&con_buf_sem);
+		mutex_unlock(&con_buf_mtx);
 		return -EINVAL;
 	}
 	file->f_pos = offset;
-	up(&con_buf_sem);
+	mutex_unlock(&con_buf_mtx);
 	return file->f_pos;
 }
 
@@ -97,7 +98,7 @@ static loff_t vcs_lseek(struct file *file, loff_t offset, int orig)
 static ssize_t
 vcs_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	struct inode *inode = file->f_dentry->d_inode;
+	struct inode *inode = file->f_path.dentry->d_inode;
 	unsigned int currcons = iminor(inode);
 	struct vc_data *vc;
 	long pos;
@@ -106,7 +107,7 @@ vcs_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	unsigned short *org = NULL;
 	ssize_t ret;
 
-	down(&con_buf_sem);
+	mutex_lock(&con_buf_mtx);
 
 	pos = *ppos;
 
@@ -263,14 +264,14 @@ vcs_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 		ret = read;
 unlock_out:
 	release_console_sem();
-	up(&con_buf_sem);
+	mutex_unlock(&con_buf_mtx);
 	return ret;
 }
 
 static ssize_t
 vcs_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	struct inode *inode = file->f_dentry->d_inode;
+	struct inode *inode = file->f_path.dentry->d_inode;
 	unsigned int currcons = iminor(inode);
 	struct vc_data *vc;
 	long pos;
@@ -280,7 +281,7 @@ vcs_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 	u16 *org0 = NULL, *org = NULL;
 	size_t ret;
 
-	down(&con_buf_sem);
+	mutex_lock(&con_buf_mtx);
 
 	pos = *ppos;
 
@@ -416,7 +417,7 @@ vcs_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 			while (this_round > 1) {
 				unsigned short w;
 
-				w = get_unaligned(((const unsigned short *)con_buf0));
+				w = get_unaligned(((unsigned short *)con_buf0));
 				vcs_scr_writew(vc, w, org++);
 				con_buf0 += 2;
 				this_round -= 2;
@@ -442,7 +443,7 @@ vcs_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 		buf += orig_count;
 		pos += orig_count;
 		if (org0)
-			update_region(currcons, (unsigned long)(org0), org-org0);
+			update_region(vc, (unsigned long)(org0), org - org0);
 	}
 	*ppos += written;
 	ret = written;
@@ -450,7 +451,7 @@ vcs_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 unlock_out:
 	release_console_sem();
 
-	up(&con_buf_sem);
+	mutex_unlock(&con_buf_mtx);
 
 	return ret;
 }
@@ -464,43 +465,36 @@ vcs_open(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static struct file_operations vcs_fops = {
+static const struct file_operations vcs_fops = {
 	.llseek		= vcs_lseek,
 	.read		= vcs_read,
 	.write		= vcs_write,
 	.open		= vcs_open,
 };
 
-static struct class_simple *vc_class;
+static struct class *vc_class;
 
-void vcs_make_devfs(struct tty_struct *tty)
+void vcs_make_sysfs(struct tty_struct *tty)
 {
-	devfs_mk_cdev(MKDEV(VCS_MAJOR, tty->index + 1),
-			S_IFCHR|S_IRUSR|S_IWUSR,
-			"vcc/%u", tty->index + 1);
-	devfs_mk_cdev(MKDEV(VCS_MAJOR, tty->index + 129),
-			S_IFCHR|S_IRUSR|S_IWUSR,
-			"vcc/a%u", tty->index + 1);
-	class_simple_device_add(vc_class, MKDEV(VCS_MAJOR, tty->index + 1), NULL, "vcs%u", tty->index + 1);
-	class_simple_device_add(vc_class, MKDEV(VCS_MAJOR, tty->index + 129), NULL, "vcsa%u", tty->index + 1);
+	device_create(vc_class, NULL, MKDEV(VCS_MAJOR, tty->index + 1),
+			"vcs%u", tty->index + 1);
+	device_create(vc_class, NULL, MKDEV(VCS_MAJOR, tty->index + 129),
+			"vcsa%u", tty->index + 1);
 }
-void vcs_remove_devfs(struct tty_struct *tty)
+
+void vcs_remove_sysfs(struct tty_struct *tty)
 {
-	devfs_remove("vcc/%u", tty->index + 1);
-	devfs_remove("vcc/a%u", tty->index + 1);
-	class_simple_device_remove(MKDEV(VCS_MAJOR, tty->index + 1));
-	class_simple_device_remove(MKDEV(VCS_MAJOR, tty->index + 129));
+	device_destroy(vc_class, MKDEV(VCS_MAJOR, tty->index + 1));
+	device_destroy(vc_class, MKDEV(VCS_MAJOR, tty->index + 129));
 }
 
 int __init vcs_init(void)
 {
 	if (register_chrdev(VCS_MAJOR, "vcs", &vcs_fops))
 		panic("unable to get major %d for vcs device", VCS_MAJOR);
-	vc_class = class_simple_create(THIS_MODULE, "vc");
+	vc_class = class_create(THIS_MODULE, "vc");
 
-	devfs_mk_cdev(MKDEV(VCS_MAJOR, 0), S_IFCHR|S_IRUSR|S_IWUSR, "vcc/0");
-	devfs_mk_cdev(MKDEV(VCS_MAJOR, 128), S_IFCHR|S_IRUSR|S_IWUSR, "vcc/a0");
-	class_simple_device_add(vc_class, MKDEV(VCS_MAJOR, 0), NULL, "vcs");
-	class_simple_device_add(vc_class, MKDEV(VCS_MAJOR, 128), NULL, "vcsa");
+	device_create(vc_class, NULL, MKDEV(VCS_MAJOR, 0), "vcs");
+	device_create(vc_class, NULL, MKDEV(VCS_MAJOR, 128), "vcsa");
 	return 0;
 }

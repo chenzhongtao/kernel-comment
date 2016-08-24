@@ -6,7 +6,6 @@
  *
  * Derived from the x86 and Alpha versions.
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -17,6 +16,7 @@
 #include <linux/user.h>
 #include <linux/security.h>
 #include <linux/audit.h>
+#include <linux/signal.h>
 
 #include <asm/pgtable.h>
 #include <asm/processor.h>
@@ -253,7 +253,7 @@ get_rnat (struct task_struct *task, struct switch_stack *sw,
 	long num_regs, nbits;
 	struct pt_regs *pt;
 
-	pt = ia64_task_regs(task);
+	pt = task_pt_regs(task);
 	kbsp = (unsigned long *) sw->ar_bspstore;
 	ubspstore = (unsigned long *) pt->ar_bspstore;
 
@@ -313,7 +313,7 @@ put_rnat (struct task_struct *task, struct switch_stack *sw,
 	struct pt_regs *pt;
 	unsigned long cfm, *urbs_kargs;
 
-	pt = ia64_task_regs(task);
+	pt = task_pt_regs(task);
 	kbsp = (unsigned long *) sw->ar_bspstore;
 	ubspstore = (unsigned long *) pt->ar_bspstore;
 
@@ -406,7 +406,7 @@ ia64_peek (struct task_struct *child, struct switch_stack *child_stack,
 
 	urbs_end = (long *) user_rbs_end;
 	laddr = (unsigned long *) addr;
-	child_regs = ia64_task_regs(child);
+	child_regs = task_pt_regs(child);
 	bspstore = (unsigned long *) child_regs->ar_bspstore;
 	krbs = (unsigned long *) child + IA64_RBS_OFFSET/8;
 	if (on_kernel_rbs(addr, (unsigned long) bspstore,
@@ -466,7 +466,7 @@ ia64_poke (struct task_struct *child, struct switch_stack *child_stack,
 	struct pt_regs *child_regs;
 
 	laddr = (unsigned long *) addr;
-	child_regs = ia64_task_regs(child);
+	child_regs = task_pt_regs(child);
 	bspstore = (unsigned long *) child_regs->ar_bspstore;
 	krbs = (unsigned long *) child + IA64_RBS_OFFSET/8;
 	if (on_kernel_rbs(addr, (unsigned long) bspstore,
@@ -566,7 +566,7 @@ thread_matches (struct task_struct *thread, unsigned long addr)
 		 */
 		return 0;
 
-	thread_regs = ia64_task_regs(thread);
+	thread_regs = task_pt_regs(thread);
 	thread_rbs_end = ia64_get_user_rbs_end(thread, thread_regs, NULL);
 	if (!on_kernel_rbs(addr, thread_regs->ar_bspstore, thread_rbs_end))
 		return 0;
@@ -586,8 +586,9 @@ thread_matches (struct task_struct *thread, unsigned long addr)
 static struct task_struct *
 find_thread_for_addr (struct task_struct *child, unsigned long addr)
 {
-	struct task_struct *g, *p;
+	struct task_struct *p;
 	struct mm_struct *mm;
+	struct list_head *this, *next;
 	int mm_users;
 
 	if (!(mm = get_task_mm(child)))
@@ -599,28 +600,21 @@ find_thread_for_addr (struct task_struct *child, unsigned long addr)
 		goto out;		/* not multi-threaded */
 
 	/*
-	 * First, traverse the child's thread-list.  Good for scalability with
-	 * NPTL-threads.
+	 * Traverse the current process' children list.  Every task that
+	 * one attaches to becomes a child.  And it is only attached children
+	 * of the debugger that are of interest (ptrace_check_attach checks
+	 * for this).
 	 */
-	p = child;
-	do {
-		if (thread_matches(p, addr)) {
-			child = p;
-			goto out;
-		}
-		if (mm_users-- <= 1)
-			goto out;
-	} while ((p = next_thread(p)) != child);
-
-	do_each_thread(g, p) {
-		if (child->mm != mm)
+ 	list_for_each_safe(this, next, &current->children) {
+		p = list_entry(this, struct task_struct, sibling);
+		if (p->tgid != child->tgid)
 			continue;
-
 		if (thread_matches(p, addr)) {
 			child = p;
 			goto out;
 		}
-	} while_each_thread(g, p);
+	}
+
   out:
 	mmput(mm);
 	return child;
@@ -632,13 +626,19 @@ find_thread_for_addr (struct task_struct *child, unsigned long addr)
 inline void
 ia64_flush_fph (struct task_struct *task)
 {
-	struct ia64_psr *psr = ia64_psr(ia64_task_regs(task));
+	struct ia64_psr *psr = ia64_psr(task_pt_regs(task));
 
+	/*
+	 * Prevent migrating this task while
+	 * we're fiddling with the FPU state
+	 */
+	preempt_disable();
 	if (ia64_is_local_fpu_owner(task) && psr->mfh) {
 		psr->mfh = 0;
 		task->thread.flags |= IA64_THREAD_FPH_VALID;
 		ia64_save_fpu(&task->thread.fph[0]);
 	}
+	preempt_enable();
 }
 
 /*
@@ -652,7 +652,7 @@ ia64_flush_fph (struct task_struct *task)
 void
 ia64_sync_fph (struct task_struct *task)
 {
-	struct ia64_psr *psr = ia64_psr(ia64_task_regs(task));
+	struct ia64_psr *psr = ia64_psr(task_pt_regs(task));
 
 	ia64_flush_fph(task);
 	if (!(task->thread.flags & IA64_THREAD_FPH_VALID)) {
@@ -691,25 +691,59 @@ convert_to_non_syscall (struct task_struct *child, struct pt_regs  *pt,
 			unsigned long cfm)
 {
 	struct unw_frame_info info, prev_info;
-	unsigned long ip, pr;
+	unsigned long ip, sp, pr;
 
 	unw_init_from_blocked_task(&info, child);
 	while (1) {
 		prev_info = info;
 		if (unw_unwind(&info) < 0)
 			return;
-		if (unw_get_rp(&info, &ip) < 0)
+
+		unw_get_sp(&info, &sp);
+		if ((long)((unsigned long)child + IA64_STK_OFFSET - sp)
+		    < IA64_PT_REGS_SIZE) {
+			dprintk("ptrace.%s: ran off the top of the kernel "
+				"stack\n", __FUNCTION__);
 			return;
-		if (ip < FIXADDR_USER_END)
+		}
+		if (unw_get_pr (&prev_info, &pr) < 0) {
+			unw_get_rp(&prev_info, &ip);
+			dprintk("ptrace.%s: failed to read "
+				"predicate register (ip=0x%lx)\n",
+				__FUNCTION__, ip);
+			return;
+		}
+		if (unw_is_intr_frame(&info)
+		    && (pr & (1UL << PRED_USER_STACK)))
 			break;
 	}
 
+	/*
+	 * Note: at the time of this call, the target task is blocked
+	 * in notify_resume_user() and by clearling PRED_LEAVE_SYSCALL
+	 * (aka, "pLvSys") we redirect execution from
+	 * .work_pending_syscall_end to .work_processed_kernel.
+	 */
 	unw_get_pr(&prev_info, &pr);
-	pr &= ~(1UL << PRED_SYSCALL);
+	pr &= ~((1UL << PRED_SYSCALL) | (1UL << PRED_LEAVE_SYSCALL));
 	pr |=  (1UL << PRED_NON_SYSCALL);
 	unw_set_pr(&prev_info, pr);
 
 	pt->cr_ifs = (1UL << 63) | cfm;
+	/*
+	 * Clear the memory that is NOT written on syscall-entry to
+	 * ensure we do not leak kernel-state to user when execution
+	 * resumes.
+	 */
+	pt->r2 = 0;
+	pt->r3 = 0;
+	pt->r14 = 0;
+	memset(&pt->r16, 0, 16*8);	/* clear r16-r31 */
+	memset(&pt->f6, 0, 6*16);	/* clear f6-f11 */
+	pt->b7 = 0;
+	pt->ar_ccv = 0;
+	pt->ar_csd = 0;
+	pt->ar_ssd = 0;
 }
 
 static int
@@ -759,7 +793,7 @@ access_uarea (struct task_struct *child, unsigned long addr,
 					  + offsetof(struct pt_regs, reg)))
 
 
-	pt = ia64_task_regs(child);
+	pt = task_pt_regs(child);
 	sw = (struct switch_stack *) (child->thread.ksp + 16);
 
 	if ((addr & 0x7) != 0) {
@@ -917,11 +951,22 @@ access_uarea (struct task_struct *child, unsigned long addr,
 			return 0;
 
 		      case PT_CR_IPSR:
-			if (write_access)
-				pt->cr_ipsr = ((*data & IPSR_MASK)
+			if (write_access) {
+				unsigned long tmp = *data;
+				/* psr.ri==3 is a reserved value: SDM 2:25 */
+				if ((tmp & IA64_PSR_RI) == IA64_PSR_RI)
+					tmp &= ~IA64_PSR_RI;
+				pt->cr_ipsr = ((tmp & IPSR_MASK)
 					       | (pt->cr_ipsr & ~IPSR_MASK));
-			else
+			} else
 				*data = (pt->cr_ipsr & IPSR_MASK);
+			return 0;
+
+		      case PT_AR_RSC:
+			if (write_access)
+				pt->ar_rsc = *data | (3 << 2); /* force PL3 */
+			else
+				*data = pt->ar_rsc;
 			return 0;
 
 		      case PT_AR_RNAT:
@@ -974,9 +1019,6 @@ access_uarea (struct task_struct *child, unsigned long addr,
 			break;
 		      case PT_AR_BSPSTORE:
 			ptr = pt_reg_addr(pt, ar_bspstore);
-			break;
-		      case PT_AR_RSC:
-			ptr = pt_reg_addr(pt, ar_rsc);
 			break;
 		      case PT_AR_UNAT:
 			ptr = pt_reg_addr(pt, ar_unat);
@@ -1074,17 +1116,14 @@ ptrace_getregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 	struct ia64_fpreg fpval;
 	struct switch_stack *sw;
 	struct pt_regs *pt;
-	long ret, retval;
+	long ret, retval = 0;
 	char nat = 0;
 	int i;
 
-	retval = verify_area(VERIFY_WRITE, ppr,
-			     sizeof(struct pt_all_user_regs));
-	if (retval != 0) {
+	if (!access_ok(VERIFY_WRITE, ppr, sizeof(struct pt_all_user_regs)))
 		return -EIO;
-	}
 
-	pt = ia64_task_regs(child);
+	pt = task_pt_regs(child);
 	sw = (struct switch_stack *) (child->thread.ksp + 16);
 	unw_init_from_blocked_task(&info, child);
 	if (unw_unwind_to_user(&info) < 0) {
@@ -1104,8 +1143,6 @@ ptrace_getregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 	    || access_uarea(child, PT_CFM, &cfm, 0)
 	    || access_uarea(child, PT_NAT_BITS, &nat_bits, 0))
 		return -EIO;
-
-	retval = 0;
 
 	/* control regs */
 
@@ -1218,23 +1255,20 @@ ptrace_getregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 static long
 ptrace_setregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 {
-	unsigned long psr, ec, lc, rnat, bsp, cfm, nat_bits, val = 0;
+	unsigned long psr, rsc, ec, lc, rnat, bsp, cfm, nat_bits, val = 0;
 	struct unw_frame_info info;
 	struct switch_stack *sw;
 	struct ia64_fpreg fpval;
 	struct pt_regs *pt;
-	long ret, retval;
+	long ret, retval = 0;
 	int i;
 
 	memset(&fpval, 0, sizeof(fpval));
 
-	retval = verify_area(VERIFY_READ, ppr,
-			     sizeof(struct pt_all_user_regs));
-	if (retval != 0) {
+	if (!access_ok(VERIFY_READ, ppr, sizeof(struct pt_all_user_regs)))
 		return -EIO;
-	}
 
-	pt = ia64_task_regs(child);
+	pt = task_pt_regs(child);
 	sw = (struct switch_stack *) (child->thread.ksp + 16);
 	unw_init_from_blocked_task(&info, child);
 	if (unw_unwind_to_user(&info) < 0) {
@@ -1246,8 +1280,6 @@ ptrace_setregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 		return -EIO;
 	}
 
-	retval = 0;
-
 	/* control regs */
 
 	retval |= __get_user(pt->cr_iip, &ppr->cr_iip);
@@ -1256,7 +1288,7 @@ ptrace_setregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 	/* app regs */
 
 	retval |= __get_user(pt->ar_pfs, &ppr->ar[PT_AUR_PFS]);
-	retval |= __get_user(pt->ar_rsc, &ppr->ar[PT_AUR_RSC]);
+	retval |= __get_user(rsc, &ppr->ar[PT_AUR_RSC]);
 	retval |= __get_user(pt->ar_bspstore, &ppr->ar[PT_AUR_BSPSTORE]);
 	retval |= __get_user(pt->ar_unat, &ppr->ar[PT_AUR_UNAT]);
 	retval |= __get_user(pt->ar_ccv, &ppr->ar[PT_AUR_CCV]);
@@ -1354,6 +1386,7 @@ ptrace_setregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 	retval |= __get_user(nat_bits, &ppr->nat);
 
 	retval |= access_uarea(child, PT_CR_IPSR, &psr, 1);
+	retval |= access_uarea(child, PT_AR_RSC, &rsc, 1);
 	retval |= access_uarea(child, PT_AR_EC, &ec, 1);
 	retval |= access_uarea(child, PT_AR_LC, &lc, 1);
 	retval |= access_uarea(child, PT_AR_RNAT, &rnat, 1);
@@ -1373,9 +1406,10 @@ ptrace_setregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 void
 ptrace_disable (struct task_struct *child)
 {
-	struct ia64_psr *child_psr = ia64_psr(ia64_task_regs(child));
+	struct ia64_psr *child_psr = ia64_psr(task_pt_regs(child));
 
 	/* make sure the single step/taken-branch trap bits are not set: */
+	clear_tsk_thread_flag(child, TIF_SINGLESTEP);
 	child_psr->ss = 0;
 	child_psr->tb = 0;
 }
@@ -1392,14 +1426,7 @@ sys_ptrace (long request, pid_t pid, unsigned long addr, unsigned long data)
 	lock_kernel();
 	ret = -EPERM;
 	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-		ret = security_ptrace(current->parent, current);
-		if (ret)
-			goto out;
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
+		ret = ptrace_traceme();
 		goto out;
 	}
 
@@ -1433,7 +1460,7 @@ sys_ptrace (long request, pid_t pid, unsigned long addr, unsigned long data)
 	if (ret < 0)
 		goto out_tsk;
 
-	pt = ia64_task_regs(child);
+	pt = task_pt_regs(child);
 	sw = (struct switch_stack *) (child->thread.ksp + 16);
 
 	switch (request) {
@@ -1491,7 +1518,7 @@ sys_ptrace (long request, pid_t pid, unsigned long addr, unsigned long data)
 	      case PTRACE_CONT:
 		/* restart after signal. */
 		ret = -EIO;
-		if (data > _NSIG)
+		if (!valid_signal(data))
 			goto out_tsk;
 		if (request == PTRACE_SYSCALL)
 			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
@@ -1503,6 +1530,7 @@ sys_ptrace (long request, pid_t pid, unsigned long addr, unsigned long data)
 		 * Make sure the single step/taken-branch trap bits
 		 * are not set:
 		 */
+		clear_tsk_thread_flag(child, TIF_SINGLESTEP);
 		ia64_psr(pt)->ss = 0;
 		ia64_psr(pt)->tb = 0;
 
@@ -1530,10 +1558,11 @@ sys_ptrace (long request, pid_t pid, unsigned long addr, unsigned long data)
 		/* let child execute for one instruction */
 	      case PTRACE_SINGLEBLOCK:
 		ret = -EIO;
-		if (data > _NSIG)
+		if (!valid_signal(data))
 			goto out_tsk;
 
 		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+		set_tsk_thread_flag(child, TIF_SINGLESTEP);
 		if (request == PTRACE_SINGLESTEP) {
 			ia64_psr(pt)->ss = 1;
 		} else {
@@ -1573,13 +1602,9 @@ sys_ptrace (long request, pid_t pid, unsigned long addr, unsigned long data)
 }
 
 
-void
+static void
 syscall_trace (void)
 {
-	if (!test_thread_flag(TIF_SYSCALL_TRACE))
-		return;
-	if (!(current->ptrace & PT_PTRACED))
-		return;
 	/*
 	 * The 0x80 provides a way for the tracing parent to
 	 * distinguish between a syscall stop and SIGTRAP delivery.
@@ -1605,20 +1630,25 @@ syscall_trace_enter (long arg0, long arg1, long arg2, long arg3,
 		     long arg4, long arg5, long arg6, long arg7,
 		     struct pt_regs regs)
 {
-	long syscall;
-
-	if (unlikely(current->audit_context)) {
-		if (IS_IA32_PROCESS(&regs))
-			syscall = regs.r1;
-		else
-			syscall = regs.r15;
-
-		audit_syscall_entry(current, syscall, arg0, arg1, arg2, arg3);
-	}
-
-	if (test_thread_flag(TIF_SYSCALL_TRACE)
+	if (test_thread_flag(TIF_SYSCALL_TRACE) 
 	    && (current->ptrace & PT_PTRACED))
 		syscall_trace();
+
+	if (unlikely(current->audit_context)) {
+		long syscall;
+		int arch;
+
+		if (IS_IA32_PROCESS(&regs)) {
+			syscall = regs.r1;
+			arch = AUDIT_ARCH_I386;
+		} else {
+			syscall = regs.r15;
+			arch = AUDIT_ARCH_IA64;
+		}
+
+		audit_syscall_entry(arch, syscall, arg0, arg1, arg2, arg3);
+	}
+
 }
 
 /* "asmlinkage" so the input arguments are preserved... */
@@ -1628,10 +1658,17 @@ syscall_trace_leave (long arg0, long arg1, long arg2, long arg3,
 		     long arg4, long arg5, long arg6, long arg7,
 		     struct pt_regs regs)
 {
-	if (unlikely(current->audit_context))
-		audit_syscall_exit(current, regs.r8);
+	if (unlikely(current->audit_context)) {
+		int success = AUDITSC_RESULT(regs.r10);
+		long result = regs.r8;
 
-	if (test_thread_flag(TIF_SYSCALL_TRACE)
+		if (success != AUDITSC_SUCCESS)
+			result = -result;
+		audit_syscall_exit(success, result);
+	}
+
+	if ((test_thread_flag(TIF_SYSCALL_TRACE)
+	    || test_thread_flag(TIF_SINGLESTEP))
 	    && (current->ptrace & PT_PTRACED))
 		syscall_trace();
 }

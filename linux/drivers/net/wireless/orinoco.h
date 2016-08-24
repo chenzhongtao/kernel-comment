@@ -7,13 +7,11 @@
 #ifndef _ORINOCO_H
 #define _ORINOCO_H
 
-#define DRIVER_VERSION "0.13e"
+#define DRIVER_VERSION "0.15"
 
-#include <linux/types.h>
-#include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/wireless.h>
-#include <linux/version.h>
+#include <net/iw_handler.h>
 
 #include "hermes.h"
 
@@ -22,13 +20,21 @@
 
 #define WIRELESS_SPY		// enable iwspy support
 
+#define MAX_SCAN_LEN		4096
+
 #define ORINOCO_MAX_KEY_SIZE	14
 #define ORINOCO_MAX_KEYS	4
 
 struct orinoco_key {
-	u16 len;	/* always stored as little-endian */
+	__le16 len;	/* always stored as little-endian */
 	char data[ORINOCO_MAX_KEY_SIZE];
 } __attribute__ ((packed));
+
+typedef enum {
+	FIRMWARE_TYPE_AGERE,
+	FIRMWARE_TYPE_INTERSIL,
+	FIRMWARE_TYPE_SYMBOL
+} fwtype_t;
 
 struct orinoco_private {
 	void *card;	/* Pointer to card dependent structure */
@@ -42,7 +48,8 @@ struct orinoco_private {
 	/* driver state */
 	int open;
 	u16 last_linkstatus;
-	int connected;
+	struct work_struct join_work;
+	struct work_struct wevent_work;
 
 	/* Net device stuff */
 	struct net_device *ndev;
@@ -54,19 +61,24 @@ struct orinoco_private {
 	u16 txfid;
 
 	/* Capabilities of the hardware/firmware */
-	int firmware_type;
-#define FIRMWARE_TYPE_AGERE 1
-#define FIRMWARE_TYPE_INTERSIL 2
-#define FIRMWARE_TYPE_SYMBOL 3
-	int has_ibss, has_port3, has_ibss_any, ibss_port;
-	int has_wep, has_big_wep;
-	int has_mwo;
-	int has_pm;
-	int has_preamble;
-	int has_sensitivity;
+	fwtype_t firmware_type;
+	char fw_name[32];
+	int ibss_port;
 	int nicbuf_size;
 	u16 channel_mask;
-	int broken_disableport;
+
+	/* Boolean capabilities */
+	unsigned int has_ibss:1;
+	unsigned int has_port3:1;
+	unsigned int has_wep:1;
+	unsigned int has_big_wep:1;
+	unsigned int has_mwo:1;
+	unsigned int has_pm:1;
+	unsigned int has_preamble:1;
+	unsigned int has_sensitivity:1;
+	unsigned int has_hostscan:1;
+	unsigned int broken_disableport:1;
+	unsigned int broken_monitor:1;
 
 	/* Configuration paramaters */
 	u32 iw_mode;
@@ -76,20 +88,27 @@ struct orinoco_private {
 	int bitratemode;
  	char nick[IW_ESSID_MAX_SIZE+1];
 	char desired_essid[IW_ESSID_MAX_SIZE+1];
+	char desired_bssid[ETH_ALEN];
+	int bssid_fixed;
 	u16 frag_thresh, mwo_robust;
 	u16 channel;
 	u16 ap_density, rts_thresh;
 	u16 pm_on, pm_mcast, pm_period, pm_timeout;
 	u16 preamble;
 #ifdef WIRELESS_SPY
-	int			spy_number;
-	u_char			spy_address[IW_MAX_SPY][ETH_ALEN];
-	struct iw_quality	spy_stat[IW_MAX_SPY];
+ 	struct iw_spy_data spy_data; /* iwspy support */
+	struct iw_public_data	wireless_data;
 #endif
 
 	/* Configuration dependent variables */
 	int port_type, createibss;
 	int promiscuous, mc_count;
+
+	/* Scanning support */
+	int	scan_inprogress;	/* Scan pending... */
+	u32	scan_mode;		/* Type of scan done */
+	char *	scan_result;		/* Result of previous scan */
+	int	scan_len;		/* Lenght of result */
 };
 
 #ifdef ORINOCO_DEBUG
@@ -99,35 +118,28 @@ extern int orinoco_debug;
 #define DEBUG(n, args...) do { } while (0)
 #endif	/* ORINOCO_DEBUG */
 
-#define TRACE_ENTER(devname) DEBUG(2, "%s: -> %s()\n", devname, __FUNCTION__);
-#define TRACE_EXIT(devname)  DEBUG(2, "%s: <- %s()\n", devname, __FUNCTION__);
-
 /********************************************************************/
 /* Exported prototypes                                              */
 /********************************************************************/
 
 extern struct net_device *alloc_orinocodev(int sizeof_card,
 					   int (*hard_reset)(struct orinoco_private *));
+extern void free_orinocodev(struct net_device *dev);
 extern int __orinoco_up(struct net_device *dev);
 extern int __orinoco_down(struct net_device *dev);
-extern int orinoco_stop(struct net_device *dev);
 extern int orinoco_reinit_firmware(struct net_device *dev);
-extern irqreturn_t orinoco_interrupt(int irq, void * dev_id, struct pt_regs *regs);
+extern irqreturn_t orinoco_interrupt(int irq, void * dev_id);
 
 /********************************************************************/
 /* Locking and synchronization functions                            */
 /********************************************************************/
 
-/* These functions *must* be inline or they will break horribly on
- * SPARC, due to its weird semantics for save/restore flags. extern
- * inline should prevent the kernel from linking or module from
- * loading if they are not inlined. */
-extern inline int orinoco_lock(struct orinoco_private *priv,
+static inline int orinoco_lock(struct orinoco_private *priv,
 			       unsigned long *flags)
 {
 	spin_lock_irqsave(&priv->lock, *flags);
 	if (priv->hw_unavailable) {
-		printk(KERN_DEBUG "orinoco_lock() called with hw_unavailable (dev=%p)\n",
+		DEBUG(1, "orinoco_lock() called with hw_unavailable (dev=%p)\n",
 		       priv->ndev);
 		spin_unlock_irqrestore(&priv->lock, *flags);
 		return -EBUSY;
@@ -135,7 +147,7 @@ extern inline int orinoco_lock(struct orinoco_private *priv,
 	return 0;
 }
 
-extern inline void orinoco_unlock(struct orinoco_private *priv,
+static inline void orinoco_unlock(struct orinoco_private *priv,
 				  unsigned long *flags)
 {
 	spin_unlock_irqrestore(&priv->lock, *flags);

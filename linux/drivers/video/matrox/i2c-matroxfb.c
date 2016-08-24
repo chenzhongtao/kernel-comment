@@ -95,12 +95,12 @@ static struct i2c_adapter matrox_i2c_adapter_template =
 
 static struct i2c_algo_bit_data matrox_i2c_algo_template =
 {
-	NULL,
-	matroxfb_gpio_setsda,
-	matroxfb_gpio_setscl,
-	matroxfb_gpio_getsda,
-	matroxfb_gpio_getscl,
-	10, 10, 100,
+	.setsda		= matroxfb_gpio_setsda,
+	.setscl		= matroxfb_gpio_setscl,
+	.getsda		= matroxfb_gpio_getsda,
+	.getscl		= matroxfb_gpio_getscl,
+	.udelay		= 10,
+	.timeout	= 100,
 };
 
 static int i2c_bus_reg(struct i2c_bit_adapter* b, struct matrox_fb_info* minfo, 
@@ -111,10 +111,11 @@ static int i2c_bus_reg(struct i2c_bit_adapter* b, struct matrox_fb_info* minfo,
 	b->mask.data = data;
 	b->mask.clock = clock;
 	b->adapter = matrox_i2c_adapter_template;
-	snprintf(b->adapter.name, I2C_NAME_SIZE, name,
+	snprintf(b->adapter.name, sizeof(b->adapter.name), name,
 		minfo->fbcon.node);
 	i2c_set_adapdata(&b->adapter, b);
 	b->adapter.algo_data = &b->bac;
+	b->adapter.dev.parent = &ACCESS_FBINFO(pcidev)->dev;
 	b->bac = matrox_i2c_algo_template;
 	b->bac.data = b;
 	err = i2c_bit_add_bus(&b->adapter);
@@ -124,7 +125,7 @@ static int i2c_bus_reg(struct i2c_bit_adapter* b, struct matrox_fb_info* minfo,
 
 static void i2c_bit_bus_del(struct i2c_bit_adapter* b) {
 	if (b->initialized) {
-		i2c_bit_del_bus(&b->adapter);
+		i2c_del_adapter(&b->adapter);
 		b->initialized = 0;
 	}
 }
@@ -146,7 +147,7 @@ static void* i2c_matroxfb_probe(struct matrox_fb_info* minfo) {
 	unsigned long flags;
 	struct matroxfb_dh_maven_info* m2info;
 
-	m2info = (struct matroxfb_dh_maven_info*)kmalloc(sizeof(*m2info), GFP_KERNEL);
+	m2info = kzalloc(sizeof(*m2info), GFP_KERNEL);
 	if (!m2info)
 		return NULL;
 
@@ -154,8 +155,6 @@ static void* i2c_matroxfb_probe(struct matrox_fb_info* minfo) {
 	matroxfb_DAC_out(PMINFO DAC_XGENIODATA, 0xFF);
 	matroxfb_DAC_out(PMINFO DAC_XGENIOCTRL, 0x00);
 	matroxfb_DAC_unlock_irqrestore(flags);
-
-	memset(m2info, 0, sizeof(*m2info));
 
 	switch (ACCESS_FBINFO(chip)) {
 		case MGA_2064:

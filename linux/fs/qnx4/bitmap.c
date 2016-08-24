@@ -13,7 +13,6 @@
  * 28-06-1998 by Frank Denis : qnx4_free_inode (to be fixed) .
  */
 
-#include <linux/config.h>
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/qnx4_fs.h>
@@ -23,13 +22,15 @@
 #include <linux/buffer_head.h>
 #include <linux/bitops.h>
 
+#if 0
 int qnx4_new_block(struct super_block *sb)
 {
 	return 0;
 }
+#endif  /*  0  */
 
-void count_bits(register const char *bmPart, register int size,
-		int *const tf)
+static void count_bits(register const char *bmPart, register int size,
+		       int *const tf)
 {
 	char b;
 	int tot = *tf;

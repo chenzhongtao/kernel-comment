@@ -1,40 +1,36 @@
 /*
- * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2003,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
+#include "xfs_vnodeops.h"
+#include "xfs_bmap_btree.h"
+#include "xfs_inode.h"
 
+/*
+ * And this gunk is needed for xfs_mount.h"
+ */
+#include "xfs_log.h"
+#include "xfs_trans.h"
+#include "xfs_sb.h"
+#include "xfs_dmapi.h"
+#include "xfs_inum.h"
+#include "xfs_ag.h"
+#include "xfs_mount.h"
 
-uint64_t vn_generation;		/* vnode generation number */
-DEFINE_SPINLOCK(vnumber_lock);
 
 /*
  * Dedicated vnode inactive/reclaim sync semaphores.
@@ -42,147 +38,60 @@ DEFINE_SPINLOCK(vnumber_lock);
  */
 #define NVSYNC                  37
 #define vptosync(v)             (&vsync[((unsigned long)v) % NVSYNC])
-sv_t vsync[NVSYNC];
-
-/*
- * Translate stat(2) file types to vnode types and vice versa.
- * Aware of numeric order of S_IFMT and vnode type values.
- */
-enum vtype iftovt_tab[] = {
-	VNON, VFIFO, VCHR, VNON, VDIR, VNON, VBLK, VNON,
-	VREG, VNON, VLNK, VNON, VSOCK, VNON, VNON, VNON
-};
-
-u_short vttoif_tab[] = {
-	0, S_IFREG, S_IFDIR, S_IFBLK, S_IFCHR, S_IFLNK, S_IFIFO, 0, S_IFSOCK
-};
-
+static wait_queue_head_t vsync[NVSYNC];
 
 void
 vn_init(void)
 {
-	register sv_t *svp;
-	register int i;
+	int i;
 
-	for (svp = vsync, i = 0; i < NVSYNC; i++, svp++)
-		init_sv(svp, SV_DEFAULT, "vsy", i);
+	for (i = 0; i < NVSYNC; i++)
+		init_waitqueue_head(&vsync[i]);
+}
+
+void
+vn_iowait(
+	xfs_inode_t	*ip)
+{
+	wait_queue_head_t *wq = vptosync(ip);
+
+	wait_event(*wq, (atomic_read(&ip->i_iocount) == 0));
+}
+
+void
+vn_iowake(
+	xfs_inode_t	*ip)
+{
+	if (atomic_dec_and_test(&ip->i_iocount))
+		wake_up(vptosync(ip));
 }
 
 /*
- * Clean a vnode of filesystem-specific data and prepare it for reuse.
+ * Volume managers supporting multiple paths can send back ENODEV when the
+ * final path disappears.  In this case continuing to fill the page cache
+ * with dirty data which cannot be written out is evil, so prevent that.
  */
-STATIC int
-vn_reclaim(
-	struct vnode	*vp)
+void
+vn_ioerror(
+	xfs_inode_t	*ip,
+	int		error,
+	char		*f,
+	int		l)
 {
-	int		error;
-
-	XFS_STATS_INC(vn_reclaim);
-	vn_trace_entry(vp, "vn_reclaim", (inst_t *)__return_address);
-
-	/*
-	 * Only make the VOP_RECLAIM call if there are behaviors
-	 * to call.
-	 */
-	if (vp->v_fbhv) {
-		VOP_RECLAIM(vp, error);
-		if (error)
-			return -error;
-	}
-	ASSERT(vp->v_fbhv == NULL);
-
-	VN_LOCK(vp);
-	vp->v_flag &= (VRECLM|VWAIT);
-	VN_UNLOCK(vp, 0);
-
-	vp->v_type = VNON;
-	vp->v_fbhv = NULL;
-
-#ifdef XFS_VNODE_TRACE
-	ktrace_free(vp->v_trace);
-	vp->v_trace = NULL;
-#endif
-
-	return 0;
+	if (unlikely(error == -ENODEV))
+		xfs_do_force_shutdown(ip->i_mount, SHUTDOWN_DEVICE_REQ, f, l);
 }
 
-STATIC void
-vn_wakeup(
-	struct vnode	*vp)
-{
-	VN_LOCK(vp);
-	if (vp->v_flag & VWAIT)
-		sv_broadcast(vptosync(vp));
-	vp->v_flag &= ~(VRECLM|VWAIT|VMODIFIED);
-	VN_UNLOCK(vp, 0);
-}
-
-int
-vn_wait(
-	struct vnode	*vp)
-{
-	VN_LOCK(vp);
-	if (vp->v_flag & (VINACT | VRECLM)) {
-		vp->v_flag |= VWAIT;
-		sv_wait(vptosync(vp), PINOD, &vp->v_lock, 0);
-		return 1;
-	}
-	VN_UNLOCK(vp, 0);
-	return 0;
-}
-
-struct vnode *
+bhv_vnode_t *
 vn_initialize(
 	struct inode	*inode)
 {
-	struct vnode	*vp = LINVFS_GET_VP(inode);
+	bhv_vnode_t	*vp = vn_from_inode(inode);
 
 	XFS_STATS_INC(vn_active);
 	XFS_STATS_INC(vn_alloc);
 
-	vp->v_flag = VMODIFIED;
-	spinlock_init(&vp->v_lock, "v_lock");
-
-	spin_lock(&vnumber_lock);
-	if (!++vn_generation)	/* v_number shouldn't be zero */
-		vn_generation++;
-	vp->v_number = vn_generation;
-	spin_unlock(&vnumber_lock);
-
 	ASSERT(VN_CACHED(vp) == 0);
-
-	/* Initialize the first behavior and the behavior chain head. */
-	vn_bhv_head_init(VN_BHV_HEAD(vp), "vnode");
-
-#ifdef	XFS_VNODE_TRACE
-	vp->v_trace = ktrace_alloc(VNODE_TRACE_SIZE, KM_SLEEP);
-	printk("Allocated VNODE_TRACE at 0x%p\n", vp->v_trace);
-#endif	/* XFS_VNODE_TRACE */
-
-	vn_trace_exit(vp, "vn_initialize", (inst_t *)__return_address);
-	return vp;
-}
-
-/*
- * Get a reference on a vnode.
- */
-vnode_t *
-vn_get(
-	struct vnode	*vp,
-	vmap_t		*vmap)
-{
-	struct inode	*inode;
-
-	XFS_STATS_INC(vn_get);
-	inode = LINVFS_GET_IP(vp);
-	if (inode->i_state & I_FREEING)
-		return NULL;
-
-	inode = ilookup(vmap->v_vfsp->vfs_super, vmap->v_ino);
-	if (!inode)	/* Inode not present */
-		return NULL;
-
-	vn_trace_exit(vp, "vn_get", (inst_t *)__return_address);
 
 	return vp;
 }
@@ -194,19 +103,18 @@ vn_get(
  */
 void
 vn_revalidate_core(
-	struct vnode	*vp,
-	vattr_t		*vap)
+	bhv_vnode_t	*vp,
+	bhv_vattr_t	*vap)
 {
-	struct inode	*inode = LINVFS_GET_IP(vp);
+	struct inode	*inode = vn_to_inode(vp);
 
-	inode->i_mode	    = VTTOIF(vap->va_type) | vap->va_mode;
+	inode->i_mode	    = vap->va_mode;
 	inode->i_nlink	    = vap->va_nlink;
 	inode->i_uid	    = vap->va_uid;
 	inode->i_gid	    = vap->va_gid;
 	inode->i_blocks	    = vap->va_nblocks;
 	inode->i_mtime	    = vap->va_mtime;
 	inode->i_ctime	    = vap->va_ctime;
-	inode->i_atime	    = vap->va_atime;
 	if (vap->va_xflags & XFS_XFLAG_IMMUTABLE)
 		inode->i_flags |= S_IMMUTABLE;
 	else
@@ -229,227 +137,106 @@ vn_revalidate_core(
  * Revalidate the Linux inode from the vnode.
  */
 int
-vn_revalidate(
-	struct vnode	*vp)
+__vn_revalidate(
+	bhv_vnode_t	*vp,
+	bhv_vattr_t	*vattr)
 {
-	vattr_t		va;
 	int		error;
 
-	vn_trace_entry(vp, "vn_revalidate", (inst_t *)__return_address);
-	ASSERT(vp->v_fbhv != NULL);
-
-	va.va_mask = XFS_AT_STAT|XFS_AT_XFLAGS;
-	VOP_GETATTR(vp, &va, 0, NULL, error);
-	if (!error) {
-		vn_revalidate_core(vp, &va);
-		VUNMODIFY(vp);
+	vn_trace_entry(xfs_vtoi(vp), __FUNCTION__, (inst_t *)__return_address);
+	vattr->va_mask = XFS_AT_STAT | XFS_AT_XFLAGS;
+	error = xfs_getattr(xfs_vtoi(vp), vattr, 0);
+	if (likely(!error)) {
+		vn_revalidate_core(vp, vattr);
+		xfs_iflags_clear(xfs_vtoi(vp), XFS_IMODIFIED);
 	}
 	return -error;
 }
 
-/*
- * purge a vnode from the cache
- * At this point the vnode is guaranteed to have no references (vn_count == 0)
- * The caller has to make sure that there are no ways someone could
- * get a handle (via vn_get) on the vnode (usually done via a mount/vfs lock).
- */
-void
-vn_purge(
-	struct vnode	*vp,
-	vmap_t		*vmap)
+int
+vn_revalidate(
+	bhv_vnode_t	*vp)
 {
-	vn_trace_entry(vp, "vn_purge", (inst_t *)__return_address);
+	bhv_vattr_t	vattr;
 
-again:
-	/*
-	 * Check whether vp has already been reclaimed since our caller
-	 * sampled its version while holding a filesystem cache lock that
-	 * its VOP_RECLAIM function acquires.
-	 */
-	VN_LOCK(vp);
-	if (vp->v_number != vmap->v_number) {
-		VN_UNLOCK(vp, 0);
-		return;
-	}
-
-	/*
-	 * If vp is being reclaimed or inactivated, wait until it is inert,
-	 * then proceed.  Can't assume that vnode is actually reclaimed
-	 * just because the reclaimed flag is asserted -- a vn_alloc
-	 * reclaim can fail.
-	 */
-	if (vp->v_flag & (VINACT | VRECLM)) {
-		ASSERT(vn_count(vp) == 0);
-		vp->v_flag |= VWAIT;
-		sv_wait(vptosync(vp), PINOD, &vp->v_lock, 0);
-		goto again;
-	}
-
-	/*
-	 * Another process could have raced in and gotten this vnode...
-	 */
-	if (vn_count(vp) > 0) {
-		VN_UNLOCK(vp, 0);
-		return;
-	}
-
-	XFS_STATS_DEC(vn_active);
-	vp->v_flag |= VRECLM;
-	VN_UNLOCK(vp, 0);
-
-	/*
-	 * Call VOP_RECLAIM and clean vp. The FSYNC_INVAL flag tells
-	 * vp's filesystem to flush and invalidate all cached resources.
-	 * When vn_reclaim returns, vp should have no private data,
-	 * either in a system cache or attached to v_data.
-	 */
-	if (vn_reclaim(vp) != 0)
-		panic("vn_purge: cannot reclaim");
-
-	/*
-	 * Wakeup anyone waiting for vp to be reclaimed.
-	 */
-	vn_wakeup(vp);
+	return __vn_revalidate(vp, &vattr);
 }
 
 /*
  * Add a reference to a referenced vnode.
  */
-struct vnode *
+bhv_vnode_t *
 vn_hold(
-	struct vnode	*vp)
+	bhv_vnode_t	*vp)
 {
 	struct inode	*inode;
 
 	XFS_STATS_INC(vn_hold);
 
-	VN_LOCK(vp);
-	inode = igrab(LINVFS_GET_IP(vp));
+	inode = igrab(vn_to_inode(vp));
 	ASSERT(inode);
-	VN_UNLOCK(vp, 0);
 
 	return vp;
 }
 
-/*
- *  Call VOP_INACTIVE on last reference.
- */
-void
-vn_rele(
-	struct vnode	*vp)
-{
-	int		vcnt;
-	int		cache;
-
-	XFS_STATS_INC(vn_rele);
-
-	VN_LOCK(vp);
-
-	vn_trace_entry(vp, "vn_rele", (inst_t *)__return_address);
-	vcnt = vn_count(vp);
-
-	/*
-	 * Since we always get called from put_inode we know
-	 * that i_count won't be decremented after we
-	 * return.
-	 */
-	if (!vcnt) {
-		/*
-		 * As soon as we turn this on, noone can find us in vn_get
-		 * until we turn off VINACT or VRECLM
-		 */
-		vp->v_flag |= VINACT;
-		VN_UNLOCK(vp, 0);
-
-		/*
-		 * Do not make the VOP_INACTIVE call if there
-		 * are no behaviors attached to the vnode to call.
-		 */
-		if (vp->v_fbhv)
-			VOP_INACTIVE(vp, NULL, cache);
-
-		VN_LOCK(vp);
-		if (vp->v_flag & VWAIT)
-			sv_broadcast(vptosync(vp));
-
-		vp->v_flag &= ~(VINACT|VWAIT|VRECLM|VMODIFIED);
-	}
-
-	VN_UNLOCK(vp, 0);
-
-	vn_trace_exit(vp, "vn_rele", (inst_t *)__return_address);
-}
-
-/*
- * Finish the removal of a vnode.
- */
-void
-vn_remove(
-	struct vnode	*vp)
-{
-	vmap_t		vmap;
-
-	/* Make sure we don't do this to the same vnode twice */
-	if (!(vp->v_fbhv))
-		return;
-
-	XFS_STATS_INC(vn_remove);
-	vn_trace_exit(vp, "vn_remove", (inst_t *)__return_address);
-
-	/*
-	 * After the following purge the vnode
-	 * will no longer exist.
-	 */
-	VMAP(vp, vmap);
-	vn_purge(vp, &vmap);
-}
-
-
 #ifdef	XFS_VNODE_TRACE
 
-#define KTRACE_ENTER(vp, vk, s, line, ra)			\
-	ktrace_enter(	(vp)->v_trace,				\
+/*
+ * Reference count of Linux inode if present, -1 if the xfs_inode
+ * has no associated Linux inode.
+ */
+static inline int xfs_icount(struct xfs_inode *ip)
+{
+	bhv_vnode_t *vp = XFS_ITOV_NULL(ip);
+
+	if (vp)
+		return vn_count(vp);
+	return -1;
+}
+
+#define KTRACE_ENTER(ip, vk, s, line, ra)			\
+	ktrace_enter(	(ip)->i_trace,				\
 /*  0 */		(void *)(__psint_t)(vk),		\
 /*  1 */		(void *)(s),				\
 /*  2 */		(void *)(__psint_t) line,		\
-/*  3 */		(void *)(vn_count(vp)), \
+/*  3 */		(void *)(__psint_t)xfs_icount(ip),	\
 /*  4 */		(void *)(ra),				\
-/*  5 */		(void *)(__psunsigned_t)(vp)->v_flag,	\
+/*  5 */		NULL,					\
 /*  6 */		(void *)(__psint_t)current_cpu(),	\
 /*  7 */		(void *)(__psint_t)current_pid(),	\
 /*  8 */		(void *)__return_address,		\
-/*  9 */		0, 0, 0, 0, 0, 0, 0)
+/*  9 */		NULL, NULL, NULL, NULL, NULL, NULL, NULL)
 
 /*
  * Vnode tracing code.
  */
 void
-vn_trace_entry(vnode_t *vp, char *func, inst_t *ra)
+vn_trace_entry(xfs_inode_t *ip, const char *func, inst_t *ra)
 {
-	KTRACE_ENTER(vp, VNODE_KTRACE_ENTRY, func, 0, ra);
+	KTRACE_ENTER(ip, VNODE_KTRACE_ENTRY, func, 0, ra);
 }
 
 void
-vn_trace_exit(vnode_t *vp, char *func, inst_t *ra)
+vn_trace_exit(xfs_inode_t *ip, const char *func, inst_t *ra)
 {
-	KTRACE_ENTER(vp, VNODE_KTRACE_EXIT, func, 0, ra);
+	KTRACE_ENTER(ip, VNODE_KTRACE_EXIT, func, 0, ra);
 }
 
 void
-vn_trace_hold(vnode_t *vp, char *file, int line, inst_t *ra)
+vn_trace_hold(xfs_inode_t *ip, char *file, int line, inst_t *ra)
 {
-	KTRACE_ENTER(vp, VNODE_KTRACE_HOLD, file, line, ra);
+	KTRACE_ENTER(ip, VNODE_KTRACE_HOLD, file, line, ra);
 }
 
 void
-vn_trace_ref(vnode_t *vp, char *file, int line, inst_t *ra)
+vn_trace_ref(xfs_inode_t *ip, char *file, int line, inst_t *ra)
 {
-	KTRACE_ENTER(vp, VNODE_KTRACE_REF, file, line, ra);
+	KTRACE_ENTER(ip, VNODE_KTRACE_REF, file, line, ra);
 }
 
 void
-vn_trace_rele(vnode_t *vp, char *file, int line, inst_t *ra)
+vn_trace_rele(xfs_inode_t *ip, char *file, int line, inst_t *ra)
 {
-	KTRACE_ENTER(vp, VNODE_KTRACE_RELE, file, line, ra);
+	KTRACE_ENTER(ip, VNODE_KTRACE_RELE, file, line, ra);
 }
 #endif	/* XFS_VNODE_TRACE */

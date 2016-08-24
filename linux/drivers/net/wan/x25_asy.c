@@ -107,13 +107,9 @@ static struct x25_asy *x25_asy_alloc(void)
 static void x25_asy_free(struct x25_asy *sl)
 {
 	/* Free all X.25 frame buffers. */
-	if (sl->rbuff)  {
-		kfree(sl->rbuff);
-	}
+	kfree(sl->rbuff);
 	sl->rbuff = NULL;
-	if (sl->xbuff)  {
-		kfree(sl->xbuff);
-	}
+	kfree(sl->xbuff);
 	sl->xbuff = NULL;
 
 	if (!test_and_clear_bit(SLF_INUSE, &sl->flags)) {
@@ -127,17 +123,15 @@ static int x25_asy_change_mtu(struct net_device *dev, int newmtu)
 	unsigned char *xbuff, *rbuff;
 	int len = 2* newmtu;
 
-	xbuff = (unsigned char *) kmalloc (len + 4, GFP_ATOMIC);
-	rbuff = (unsigned char *) kmalloc (len + 4, GFP_ATOMIC);
+	xbuff = kmalloc(len + 4, GFP_ATOMIC);
+	rbuff = kmalloc(len + 4, GFP_ATOMIC);
 
 	if (xbuff == NULL || rbuff == NULL)  
 	{
 		printk("%s: unable to grow X.25 buffers, MTU change cancelled.\n",
 		       dev->name);
-		if (xbuff != NULL)  
-			kfree(xbuff);
-		if (rbuff != NULL)  
-			kfree(rbuff);
+		kfree(xbuff);
+		kfree(rbuff);
 		return -ENOMEM;
 	}
 
@@ -169,10 +163,8 @@ static int x25_asy_change_mtu(struct net_device *dev, int newmtu)
 
 	spin_unlock_bh(&sl->lock);
 
-	if (xbuff != NULL) 
-		kfree(xbuff);
-	if (rbuff != NULL)
-		kfree(rbuff);
+	kfree(xbuff);
+	kfree(rbuff);
 	return 0;
 }
 
@@ -473,11 +465,11 @@ static int x25_asy_open(struct net_device *dev)
 
 	len = dev->mtu * 2;
 
-	sl->rbuff = (unsigned char *) kmalloc(len + 4, GFP_KERNEL);
+	sl->rbuff = kmalloc(len + 4, GFP_KERNEL);
 	if (sl->rbuff == NULL)   {
 		goto norbuff;
 	}
-	sl->xbuff = (unsigned char *) kmalloc(len + 4, GFP_KERNEL);
+	sl->xbuff = kmalloc(len + 4, GFP_KERNEL);
 	if (sl->xbuff == NULL)   {
 		goto noxbuff;
 	}
@@ -521,11 +513,6 @@ static int x25_asy_close(struct net_device *dev)
 		printk(KERN_ERR "x25_asy_close: lapb_unregister error -%d\n",err);
 	spin_unlock(&sl->lock);
 	return 0;
-}
-
-static int x25_asy_receive_room(struct tty_struct *tty)
-{
-	return 65536;  /* We can handle an infinite amount of data. :-) */
 }
 
 /*
@@ -581,6 +568,7 @@ static int x25_asy_open_tty(struct tty_struct *tty)
 
 	sl->tty = tty;
 	tty->disc_data = sl;
+	tty->receive_room = 65536;
 	if (tty->driver->flush_buffer)  {
 		tty->driver->flush_buffer(tty);
 	}
@@ -731,12 +719,8 @@ static int x25_asy_ioctl(struct tty_struct *tty, struct file *file,
 		return 0;
 	case SIOCSIFHWADDR:
 		return -EINVAL;
-	/* Allow stty to read, but not set, the serial port */
-	case TCGETS:
-	case TCGETA:
-		return n_tty_ioctl(tty, file, cmd, arg);
 	default:
-		return -ENOIOCTLCMD;
+		return tty_mode_ioctl(tty, file, cmd, arg);
 	}
 }
 
@@ -787,7 +771,6 @@ static struct tty_ldisc x25_ldisc = {
 	.close		= x25_asy_close_tty,
 	.ioctl		= x25_asy_ioctl,
 	.receive_buf	= x25_asy_receive_buf,
-	.receive_room	= x25_asy_receive_room,
 	.write_wakeup	= x25_asy_write_wakeup,
 };
 
@@ -799,14 +782,12 @@ static int __init init_x25_asy(void)
 	printk(KERN_INFO "X.25 async: version 0.00 ALPHA "
 			"(dynamic channels, max=%d).\n", x25_asy_maxdev );
 
-	x25_asy_devs = kmalloc(sizeof(struct net_device *)*x25_asy_maxdev, 
-			       GFP_KERNEL);
+	x25_asy_devs = kcalloc(x25_asy_maxdev, sizeof(struct net_device*), GFP_KERNEL);
 	if (!x25_asy_devs) {
 		printk(KERN_WARNING "X25 async: Can't allocate x25_asy_ctrls[] "
 				"array! Uaargh! (-> No X.25 available)\n");
 		return -ENOMEM;
 	}
-	memset(x25_asy_devs, 0, sizeof(struct net_device *)*x25_asy_maxdev); 
 
 	return tty_register_ldisc(N_X25, &x25_ldisc);
 }
@@ -837,7 +818,7 @@ static void __exit exit_x25_asy(void)
 	}
 
 	kfree(x25_asy_devs);
-	tty_register_ldisc(N_X25, NULL);
+	tty_unregister_ldisc(N_X25);
 }
 
 module_init(init_x25_asy);

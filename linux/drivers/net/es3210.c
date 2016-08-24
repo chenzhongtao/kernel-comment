@@ -130,8 +130,6 @@ static int __init do_es_probe(struct net_device *dev)
 	int irq = dev->irq;
 	int mem_start = dev->mem_start;
 
-	SET_MODULE_OWNER(dev);
-
 	if (ioaddr > 0x1ff)		/* Check a single specified location. */
 		return es_probe1(dev, ioaddr);
 	else if (ioaddr > 0)		/* Don't probe at all. */
@@ -155,12 +153,6 @@ static int __init do_es_probe(struct net_device *dev)
 	return -ENODEV;
 }
 
-static void cleanup_card(struct net_device *dev)
-{
-	free_irq(dev->irq, dev);
-	release_region(dev->base_addr, ES_IO_EXTENT);
-}
-
 #ifndef MODULE
 struct net_device * __init es_probe(int unit)
 {
@@ -176,12 +168,7 @@ struct net_device * __init es_probe(int unit)
 	err = do_es_probe(dev);
 	if (err)
 		goto out;
-	err = register_netdev(dev);
-	if (err)
-		goto out1;
 	return dev;
-out1:
-	cleanup_card(dev);
 out:
 	free_netdev(dev);
 	return ERR_PTR(err);
@@ -192,6 +179,7 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 {
 	int i, retval;
 	unsigned long eisa_id;
+	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr + ES_SA_PROM, ES_IO_EXTENT, "es3210"))
 		return -ENODEV;
@@ -203,7 +191,6 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 		inb(ioaddr + ES_CFG4), inb(ioaddr + ES_CFG5), inb(ioaddr + ES_CFG6));
 #endif
 
-
 /*	Check the EISA ID of the card. */
 	eisa_id = inl(ioaddr + ES_ID_PORT);
 	if ((eisa_id != ES_EISA_ID1) && (eisa_id != ES_EISA_ID2)) {
@@ -211,21 +198,21 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 		goto out;
 	}
 
+	for (i = 0; i < ETHER_ADDR_LEN ; i++)
+		dev->dev_addr[i] = inb(ioaddr + ES_SA_PROM + i);
+
 /*	Check the Racal vendor ID as well. */
-	if (inb(ioaddr + ES_SA_PROM + 0) != ES_ADDR0
-		|| inb(ioaddr + ES_SA_PROM + 1) != ES_ADDR1
-		|| inb(ioaddr + ES_SA_PROM + 2) != ES_ADDR2 ) {
-		printk("es3210.c: card not found");
-		for(i = 0; i < ETHER_ADDR_LEN; i++)
-			printk(" %02x", inb(ioaddr + ES_SA_PROM + i));
-		printk(" (invalid prefix).\n");
+	if (dev->dev_addr[0] != ES_ADDR0 ||
+	    dev->dev_addr[1] != ES_ADDR1 ||
+	    dev->dev_addr[2] != ES_ADDR2) {
+		printk("es3210.c: card not found %s (invalid_prefix).\n",
+		       print_mac(mac, dev->dev_addr));
 		retval = -ENODEV;
 		goto out;
 	}
 
-	printk("es3210.c: ES3210 rev. %ld at %#x, node", eisa_id>>24, ioaddr);
-	for(i = 0; i < ETHER_ADDR_LEN; i++)
-		printk(" %02x", (dev->dev_addr[i] = inb(ioaddr + ES_SA_PROM + i)));
+	printk("es3210.c: ES3210 rev. %ld at %#x, node %s",
+	       eisa_id>>24, ioaddr, print_mac(mac, dev->dev_addr));
 
 	/* Snarf the interrupt now. */
 	if (dev->irq == 0) {
@@ -271,9 +258,14 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 		printk(" assigning ");
 	}
 
-	dev->mem_end = ei_status.rmem_end = dev->mem_start
-		+ (ES_STOP_PG - ES_START_PG)*256;
-	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
+	ei_status.mem = ioremap(dev->mem_start, (ES_STOP_PG - ES_START_PG)*256);
+	if (!ei_status.mem) {
+		printk("ioremap failed - giving up\n");
+		retval = -ENXIO;
+		goto out1;
+	}
+
+	dev->mem_end = dev->mem_start + (ES_STOP_PG - ES_START_PG)*256;
 
 	printk("mem %#lx-%#lx\n", dev->mem_start, dev->mem_end-1);
 
@@ -304,6 +296,10 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 	dev->poll_controller = ei_poll;
 #endif
 	NS8390_init(dev, 0);
+
+	retval = register_netdev(dev);
+	if (retval)
+		goto out1;
 	return 0;
 out1:
 	free_irq(dev->irq, dev);
@@ -353,8 +349,8 @@ static void es_reset_8390(struct net_device *dev)
 static void
 es_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
-	unsigned long hdr_start = dev->mem_start + ((ring_page - ES_START_PG)<<8);
-	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	void __iomem *hdr_start = ei_status.mem + ((ring_page - ES_START_PG)<<8);
+	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = (hdr->count + 3) & ~3;     /* Round up allocation. */
 }
 
@@ -367,27 +363,27 @@ es_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page
 static void es_block_input(struct net_device *dev, int count, struct sk_buff *skb,
 						  int ring_offset)
 {
-	unsigned long xfer_start = dev->mem_start + ring_offset - (ES_START_PG<<8);
+	void __iomem *xfer_start = ei_status.mem + ring_offset - ES_START_PG*256;
 
-	if (xfer_start + count > ei_status.rmem_end) {
+	if (ring_offset + count > ES_STOP_PG*256) {
 		/* Packet wraps over end of ring buffer. */
-		int semi_count = ei_status.rmem_end - xfer_start;
-		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
+		int semi_count = ES_STOP_PG*256 - ring_offset;
+		memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
+		memcpy_fromio(skb->data + semi_count, ei_status.mem, count);
 	} else {
 		/* Packet is in one chunk. */
-		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		memcpy_fromio(skb->data, xfer_start, count);
 	}
 }
 
 static void es_block_output(struct net_device *dev, int count,
 				const unsigned char *buf, int start_page)
 {
-	unsigned long shmem = dev->mem_start + ((start_page - ES_START_PG)<<8);
+	void __iomem *shmem = ei_status.mem + ((start_page - ES_START_PG)<<8);
 
 	count = (count + 3) & ~3;     /* Round up to doubleword */
-	isa_memcpy_toio(shmem, buf, count);
+	memcpy_toio(shmem, buf, count);
 }
 
 static int es_open(struct net_device *dev)
@@ -423,8 +419,7 @@ MODULE_PARM_DESC(mem, "memory base address(es)");
 MODULE_DESCRIPTION("Racal-Interlan ES3210 EISA ethernet driver");
 MODULE_LICENSE("GPL");
 
-int
-init_module(void)
+int __init init_module(void)
 {
 	struct net_device *dev;
 	int this_dev, found = 0;
@@ -439,11 +434,8 @@ init_module(void)
 		dev->base_addr = io[this_dev];
 		dev->mem_start = mem[this_dev];
 		if (do_es_probe(dev) == 0) {
-			if (register_netdev(dev) == 0) {
-				dev_es3210[found++] = dev;
-				continue;
-			}
-			cleanup_card(dev);
+			dev_es3210[found++] = dev;
+			continue;
 		}
 		free_netdev(dev);
 		printk(KERN_WARNING "es3210.c: No es3210 card found (i/o = 0x%x).\n", io[this_dev]);
@@ -454,7 +446,14 @@ init_module(void)
 	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, ES_IO_EXTENT);
+	iounmap(ei_status.mem);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;

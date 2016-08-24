@@ -18,7 +18,6 @@
 #define	mcfne_h
 /****************************************************************************/
 
-#include <linux/config.h>
 
 /*
  *	Support for NE2000 clones devices in ColdFire based boards.
@@ -35,7 +34,7 @@
  *	Define the basic hardware resources of NE2000 boards.
  */
 
-#if defined(CONFIG_M5206) && defined(CONFIG_ARNEWSH)
+#if defined(CONFIG_ARN5206)
 #define NE2000_ADDR		0x40000300
 #define NE2000_ODDOFFSET	0x00010000
 #define	NE2000_IRQ_VECTOR	0xf0
@@ -44,7 +43,7 @@
 #define	NE2000_BYTE		volatile unsigned short
 #endif
 
-#if defined(CONFIG_M5206e) && defined(CONFIG_MOTOROLA)
+#if defined(CONFIG_M5206eC3)
 #define	NE2000_ADDR		0x40000300
 #define	NE2000_ODDOFFSET	0x00010000
 #define	NE2000_IRQ_VECTOR	0x1c
@@ -61,7 +60,7 @@
 #define	NE2000_BYTE		volatile unsigned char
 #endif
 
-#if defined(CONFIG_M5206e) && defined(CONFIG_CFV240)
+#if defined(CONFIG_CFV240)
 #define NE2000_ADDR             0x40010000
 #define NE2000_ADDR1            0x40010001
 #define NE2000_ODDOFFSET        0x00000000
@@ -72,7 +71,7 @@
 #define	NE2000_BYTE		volatile unsigned char
 #endif
 
-#if defined(CONFIG_M5307) && defined(CONFIG_MOTOROLA)
+#if defined(CONFIG_M5307C3)
 #define NE2000_ADDR		0x40000300
 #define NE2000_ODDOFFSET	0x00010000
 #define NE2000_IRQ_VECTOR	0x1b
@@ -114,7 +113,7 @@
 #define	RSWAP(w)		(((w) << 8) | ((w) >> 8))
 #endif
 
-#if defined(CONFIG_M5307) && defined(CONFIG_ARNEWSH)
+#if defined(CONFIG_ARN5307)
 #define NE2000_ADDR		0xfe600300
 #define NE2000_ODDOFFSET	0x00010000
 #define NE2000_IRQ_VECTOR	0x1b
@@ -123,7 +122,7 @@
 #define	NE2000_BYTE		volatile unsigned short
 #endif
 
-#if defined(CONFIG_M5407)
+#if defined(CONFIG_M5407C3)
 #define NE2000_ADDR		0x40000300
 #define NE2000_ODDOFFSET	0x00010000
 #define NE2000_IRQ_VECTOR	0x1b
@@ -264,7 +263,7 @@ void ne2000_outsw(unsigned int addr, const void *vbuf, unsigned long len)
  *	Minor differences between the different board types.
  */
 
-#if defined(CONFIG_M5206) && defined(CONFIG_ARNEWSH)
+#if defined(CONFIG_ARN5206)
 void ne2000_irqsetup(int irq)
 {
 	volatile unsigned char  *icrp;
@@ -275,7 +274,7 @@ void ne2000_irqsetup(int irq)
 }
 #endif
 
-#if defined(CONFIG_M5206e) && defined(CONFIG_MOTOROLA)
+#if defined(CONFIG_M5206eC3)
 void ne2000_irqsetup(int irq)
 {
 	volatile unsigned char  *icrp;
@@ -286,7 +285,7 @@ void ne2000_irqsetup(int irq)
 }
 #endif
 
-#if defined(CONFIG_M5206e) && defined(CONFIG_CFV240)
+#if defined(CONFIG_CFV240)
 void ne2000_irqsetup(int irq)
 {
 	volatile unsigned char  *icrp;

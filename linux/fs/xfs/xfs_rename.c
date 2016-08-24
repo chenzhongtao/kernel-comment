@@ -1,61 +1,44 @@
 /*
- * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2003,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
 #include "xfs_log.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
 #include "xfs_sb.h"
-#include "xfs_dir.h"
+#include "xfs_ag.h"
 #include "xfs_dir2.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
+#include "xfs_da_btree.h"
 #include "xfs_bmap_btree.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
 #include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
 #include "xfs_dinode.h"
-#include "xfs_inode_item.h"
 #include "xfs_inode.h"
+#include "xfs_inode_item.h"
 #include "xfs_bmap.h"
 #include "xfs_error.h"
 #include "xfs_quota.h"
 #include "xfs_refcache.h"
 #include "xfs_utils.h"
 #include "xfs_trans_space.h"
-#include "xfs_da_btree.h"
-#include "xfs_dir_leaf.h"
 
 
 /*
@@ -102,8 +85,8 @@ STATIC int
 xfs_lock_for_rename(
 	xfs_inode_t	*dp1,	/* old (source) directory inode */
 	xfs_inode_t	*dp2,	/* new (target) directory inode */
-	vname_t		*vname1,/* old entry name */
-	vname_t		*vname2,/* new entry name */
+	bhv_vname_t	*vname1,/* old entry name */
+	bhv_vname_t	*vname2,/* new entry name */
 	xfs_inode_t	**ipp1,	/* inode of old entry */
 	xfs_inode_t	**ipp2,	/* inode of new entry, if it
 				   already exists, NULL otherwise. */
@@ -146,8 +129,7 @@ xfs_lock_for_rename(
 		lock_mode = xfs_ilock_map_shared(dp2);
 	}
 
-	error = xfs_dir_lookup_int(XFS_ITOBHV(dp2), lock_mode,
-				   vname2, &inum2, &ip2);
+	error = xfs_dir_lookup_int(dp2, lock_mode, vname2, &inum2, &ip2);
 	if (error == ENOENT) {		/* target does not need to exist. */
 		inum2 = 0;
 	} else if (error) {
@@ -234,23 +216,20 @@ xfs_lock_for_rename(
 	return 0;
 }
 
-
-int rename_which_error_return = 0;
-
 /*
  * xfs_rename
  */
 int
 xfs_rename(
-	bhv_desc_t	*src_dir_bdp,
-	vname_t		*src_vname,
-	vnode_t		*target_dir_vp,
-	vname_t		*target_vname,
-	cred_t		*credp)
+	xfs_inode_t	*src_dp,
+	bhv_vname_t	*src_vname,
+	bhv_vnode_t	*target_dir_vp,
+	bhv_vname_t	*target_vname)
 {
+	bhv_vnode_t	*src_dir_vp = XFS_ITOV(src_dp);
 	xfs_trans_t	*tp;
-	xfs_inode_t	*src_dp, *target_dp, *src_ip, *target_ip;
-	xfs_mount_t	*mp;
+	xfs_inode_t	*target_dp, *src_ip, *target_ip;
+	xfs_mount_t	*mp = src_dp->i_mount;
 	int		new_parent;		/* moving to a new dir */
 	int		src_is_directory;	/* src_name is a directory */
 	int		error;
@@ -260,8 +239,6 @@ xfs_rename(
 	int		committed;
 	xfs_inode_t	*inodes[4];
 	int		target_ip_dropped = 0;	/* dropped target_ip link? */
-	vnode_t		*src_dir_vp;
-	bhv_desc_t	*target_dir_bdp;
 	int		spaceres;
 	int		target_link_zero = 0;
 	int		num_inodes;
@@ -270,27 +247,20 @@ xfs_rename(
 	int		src_namelen = VNAMELEN(src_vname);
 	int		target_namelen = VNAMELEN(target_vname);
 
-	src_dir_vp = BHV_TO_VNODE(src_dir_bdp);
-	vn_trace_entry(src_dir_vp, "xfs_rename", (inst_t *)__return_address);
-	vn_trace_entry(target_dir_vp, "xfs_rename", (inst_t *)__return_address);
+	vn_trace_entry(src_dp, "xfs_rename", (inst_t *)__return_address);
+	vn_trace_entry(xfs_vtoi(target_dir_vp), "xfs_rename", (inst_t *)__return_address);
 
 	/*
 	 * Find the XFS behavior descriptor for the target directory
 	 * vnode since it was not handed to us.
 	 */
-	target_dir_bdp = vn_bhv_lookup_unlocked(VN_BHV_HEAD(target_dir_vp),
-						&xfs_vnodeops);
-	if (target_dir_bdp == NULL) {
+	target_dp = xfs_vtoi(target_dir_vp);
+	if (target_dp == NULL) {
 		return XFS_ERROR(EXDEV);
 	}
 
-	src_dp = XFS_BHVTOI(src_dir_bdp);
-	target_dp = XFS_BHVTOI(target_dir_bdp);
-	mp = src_dp->i_mount;
-
-	if (DM_EVENT_ENABLED(src_dir_vp->v_vfsp, src_dp, DM_EVENT_RENAME) ||
-	    DM_EVENT_ENABLED(target_dir_vp->v_vfsp,
-				target_dp, DM_EVENT_RENAME)) {
+	if (DM_EVENT_ENABLED(src_dp, DM_EVENT_RENAME) ||
+	    DM_EVENT_ENABLED(target_dp, DM_EVENT_RENAME)) {
 		error = XFS_SEND_NAMESP(mp, DM_EVENT_RENAME,
 					src_dir_vp, DM_RIGHT_NULL,
 					target_dir_vp, DM_RIGHT_NULL,
@@ -316,7 +286,6 @@ xfs_rename(
 			&num_inodes);
 
 	if (error) {
-		rename_which_error_return = __LINE__;
 		/*
 		 * We have nothing locked, no inode references, and
 		 * no transaction, so just get out.
@@ -332,11 +301,22 @@ xfs_rename(
 		 */
 		if (target_ip == NULL && (src_dp != target_dp) &&
 		    target_dp->i_d.di_nlink >= XFS_MAXLINK) {
-			rename_which_error_return = __LINE__;
 			error = XFS_ERROR(EMLINK);
 			xfs_rename_unlock4(inodes, XFS_ILOCK_SHARED);
 			goto rele_return;
 		}
+	}
+
+	/*
+	 * If we are using project inheritance, we only allow renames
+	 * into our tree when the project IDs are the same; else the
+	 * tree quota mechanism would be circumvented.
+	 */
+	if (unlikely((target_dp->i_d.di_flags & XFS_DIFLAG_PROJINHERIT) &&
+		     (target_dp->i_d.di_projid != src_ip->i_d.di_projid))) {
+		error = XFS_ERROR(EXDEV);
+		xfs_rename_unlock4(inodes, XFS_ILOCK_SHARED);
+		goto rele_return;
 	}
 
 	new_parent = (src_dp != target_dp);
@@ -359,7 +339,6 @@ xfs_rename(
 				XFS_TRANS_PERM_LOG_RES, XFS_RENAME_LOG_COUNT);
 	}
 	if (error) {
-		rename_which_error_return = __LINE__;
 		xfs_trans_cancel(tp, 0);
 		goto rele_return;
 	}
@@ -369,7 +348,6 @@ xfs_rename(
 	 */
 	if ((error = XFS_QM_DQVOPRENAME(mp, inodes))) {
 		xfs_trans_cancel(tp, cancel_flags);
-		rename_which_error_return = __LINE__;
 		goto rele_return;
 	}
 
@@ -411,38 +389,29 @@ xfs_rename(
 		 * fit before actually inserting it.
 		 */
 		if (spaceres == 0 &&
-		    (error = XFS_DIR_CANENTER(mp, tp, target_dp, target_name,
-				target_namelen))) {
-			rename_which_error_return = __LINE__;
+		    (error = xfs_dir_canenter(tp, target_dp, target_name,
+						target_namelen)))
 			goto error_return;
-		}
 		/*
 		 * If target does not exist and the rename crosses
 		 * directories, adjust the target directory link count
 		 * to account for the ".." reference from the new entry.
 		 */
-		error = XFS_DIR_CREATENAME(mp, tp, target_dp, target_name,
+		error = xfs_dir_createname(tp, target_dp, target_name,
 					   target_namelen, src_ip->i_ino,
 					   &first_block, &free_list, spaceres);
-		if (error == ENOSPC) {
-			rename_which_error_return = __LINE__;
+		if (error == ENOSPC)
 			goto error_return;
-		}
-		if (error) {
-			rename_which_error_return = __LINE__;
+		if (error)
 			goto abort_return;
-		}
 		xfs_ichgtime(target_dp, XFS_ICHGTIME_MOD | XFS_ICHGTIME_CHG);
 
 		if (new_parent && src_is_directory) {
 			error = xfs_bumplink(tp, target_dp);
-			if (error) {
-				rename_which_error_return = __LINE__;
+			if (error)
 				goto abort_return;
-			}
 		}
 	} else { /* target_ip != NULL */
-
 		/*
 		 * If target exists and it's a directory, check that both
 		 * target and source are directories and that target can be
@@ -452,10 +421,9 @@ xfs_rename(
 			/*
 			 * Make sure target dir is empty.
 			 */
-			if (!(XFS_DIR_ISEMPTY(target_ip->i_mount, target_ip)) ||
+			if (!(xfs_dir_isempty(target_ip)) ||
 			    (target_ip->i_d.di_nlink > 2)) {
 				error = XFS_ERROR(EEXIST);
-				rename_which_error_return = __LINE__;
 				goto error_return;
 			}
 		}
@@ -469,13 +437,11 @@ xfs_rename(
 		 * In case there is already an entry with the same
 		 * name at the destination directory, remove it first.
 		 */
-		error = XFS_DIR_REPLACE(mp, tp, target_dp, target_name,
-			target_namelen, src_ip->i_ino, &first_block,
-			&free_list, spaceres);
-		if (error) {
-			rename_which_error_return = __LINE__;
+		error = xfs_dir_replace(tp, target_dp, target_name,
+					target_namelen, src_ip->i_ino,
+					&first_block, &free_list, spaceres);
+		if (error)
 			goto abort_return;
-		}
 		xfs_ichgtime(target_dp, XFS_ICHGTIME_MOD | XFS_ICHGTIME_CHG);
 
 		/*
@@ -483,10 +449,8 @@ xfs_rename(
 		 * dir no longer points to it.
 		 */
 		error = xfs_droplink(tp, target_ip);
-		if (error) {
-			rename_which_error_return = __LINE__;
+		if (error)
 			goto abort_return;
-		}
 		target_ip_dropped = 1;
 
 		if (src_is_directory) {
@@ -494,10 +458,8 @@ xfs_rename(
 			 * Drop the link from the old "." entry.
 			 */
 			error = xfs_droplink(tp, target_ip);
-			if (error) {
-				rename_which_error_return = __LINE__;
+			if (error)
 				goto abort_return;
-			}
 		}
 
 		/* Do this test while we still hold the locks */
@@ -509,19 +471,15 @@ xfs_rename(
 	 * Remove the source.
 	 */
 	if (new_parent && src_is_directory) {
-
 		/*
 		 * Rewrite the ".." entry to point to the new
 		 * directory.
 		 */
-		error = XFS_DIR_REPLACE(mp, tp, src_ip, "..", 2,
-					target_dp->i_ino, &first_block,
-					&free_list, spaceres);
+		error = xfs_dir_replace(tp, src_ip, "..", 2, target_dp->i_ino,
+					&first_block, &free_list, spaceres);
 		ASSERT(error != EEXIST);
-		if (error) {
-			rename_which_error_return = __LINE__;
+		if (error)
 			goto abort_return;
-		}
 		xfs_ichgtime(src_ip, XFS_ICHGTIME_MOD | XFS_ICHGTIME_CHG);
 
 	} else {
@@ -549,18 +507,14 @@ xfs_rename(
 		 * entry that's moved no longer points to it.
 		 */
 		error = xfs_droplink(tp, src_dp);
-		if (error) {
-			rename_which_error_return = __LINE__;
+		if (error)
 			goto abort_return;
-		}
 	}
 
-	error = XFS_DIR_REMOVENAME(mp, tp, src_dp, src_name, src_namelen,
+	error = xfs_dir_removename(tp, src_dp, src_name, src_namelen,
 			src_ip->i_ino, &first_block, &free_list, spaceres);
-	if (error) {
-		rename_which_error_return = __LINE__;
+	if (error)
 		goto abort_return;
-	}
 	xfs_ichgtime(src_dp, XFS_ICHGTIME_MOD | XFS_ICHGTIME_CHG);
 
 	/*
@@ -589,7 +543,7 @@ xfs_rename(
 	 * rename transaction goes to disk before returning to
 	 * the user.
 	 */
-	if (mp->m_flags & XFS_MOUNT_WSYNC) {
+	if (mp->m_flags & (XFS_MOUNT_WSYNC|XFS_MOUNT_DIRSYNC)) {
 		xfs_trans_set_sync(tp);
 	}
 
@@ -605,7 +559,7 @@ xfs_rename(
 		IHOLD(target_ip);
 	IHOLD(src_ip);
 
-	error = xfs_bmap_finish(&tp, &free_list, first_block, &committed);
+	error = xfs_bmap_finish(&tp, &free_list, &committed);
 	if (error) {
 		xfs_bmap_cancel(&free_list);
 		xfs_trans_cancel(tp, (XFS_TRANS_RELEASE_LOG_RES |
@@ -624,7 +578,7 @@ xfs_rename(
 	 * trans_commit will unlock src_ip, target_ip & decrement
 	 * the vnode references.
 	 */
-	error = xfs_trans_commit(tp, XFS_TRANS_RELEASE_LOG_RES, NULL);
+	error = xfs_trans_commit(tp, XFS_TRANS_RELEASE_LOG_RES);
 	if (target_ip != NULL) {
 		xfs_refcache_purge_ip(target_ip);
 		IRELE(target_ip);
@@ -632,22 +586,16 @@ xfs_rename(
 	/*
 	 * Let interposed file systems know about removed links.
 	 */
-	if (target_ip_dropped) {
-		VOP_LINK_REMOVED(XFS_ITOV(target_ip), target_dir_vp,
-					target_link_zero);
+	if (target_ip_dropped)
 		IRELE(target_ip);
-	}
-
-	FSC_NOTIFY_NAME_CHANGED(XFS_ITOV(src_ip));
 
 	IRELE(src_ip);
 
 	/* Fall through to std_return with error = 0 or errno from
 	 * xfs_trans_commit	 */
 std_return:
-	if (DM_EVENT_ENABLED(src_dir_vp->v_vfsp, src_dp, DM_EVENT_POSTRENAME) ||
-	    DM_EVENT_ENABLED(target_dir_vp->v_vfsp,
-				target_dp, DM_EVENT_POSTRENAME)) {
+	if (DM_EVENT_ENABLED(src_dp, DM_EVENT_POSTRENAME) ||
+	    DM_EVENT_ENABLED(target_dp, DM_EVENT_POSTRENAME)) {
 		(void) XFS_SEND_NAMESP (mp, DM_EVENT_POSTRENAME,
 					src_dir_vp, DM_RIGHT_NULL,
 					target_dir_vp, DM_RIGHT_NULL,

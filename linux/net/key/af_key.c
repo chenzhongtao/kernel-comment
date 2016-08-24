@@ -14,7 +14,7 @@
  *		Derek Atkins <derek@ihtfp.com>
  */
 
-#include <linux/config.h>
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/socket.h>
@@ -26,6 +26,7 @@
 #include <linux/in6.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
+#include <net/net_namespace.h>
 #include <net/xfrm.h>
 
 #include <net/sock.h>
@@ -42,11 +43,17 @@ static atomic_t pfkey_table_users = ATOMIC_INIT(0);
 
 static atomic_t pfkey_socks_nr = ATOMIC_INIT(0);
 
-struct pfkey_opt {
-	int	registered;
-	int	promisc;
+struct pfkey_sock {
+	/* struct sock must be the first member of struct pfkey_sock */
+	struct sock	sk;
+	int		registered;
+	int		promisc;
 };
-#define pfkey_sk(__sk) ((struct pfkey_opt *)(__sk)->sk_protinfo)
+
+static inline struct pfkey_sock *pfkey_sk(struct sock *sk)
+{
+	return (struct pfkey_sock *)sk;
+}
 
 static void pfkey_sock_destruct(struct sock *sk)
 {
@@ -59,8 +66,6 @@ static void pfkey_sock_destruct(struct sock *sk)
 
 	BUG_TRAP(!atomic_read(&sk->sk_rmem_alloc));
 	BUG_TRAP(!atomic_read(&sk->sk_wmem_alloc));
-
-	kfree(pfkey_sk(sk));
 
 	atomic_dec(&pfkey_socks_nr);
 }
@@ -109,7 +114,7 @@ static __inline__ void pfkey_unlock_table(void)
 }
 
 
-static struct proto_ops pfkey_ops;
+static const struct proto_ops pfkey_ops;
 
 static void pfkey_insert(struct sock *sk)
 {
@@ -125,11 +130,19 @@ static void pfkey_remove(struct sock *sk)
 	pfkey_table_ungrab();
 }
 
-static int pfkey_create(struct socket *sock, int protocol)
+static struct proto key_proto = {
+	.name	  = "KEY",
+	.owner	  = THIS_MODULE,
+	.obj_size = sizeof(struct pfkey_sock),
+};
+
+static int pfkey_create(struct net *net, struct socket *sock, int protocol)
 {
 	struct sock *sk;
-	struct pfkey_opt *pfk;
 	int err;
+
+	if (net != &init_net)
+		return -EAFNOSUPPORT;
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
@@ -139,21 +152,12 @@ static int pfkey_create(struct socket *sock, int protocol)
 		return -EPROTONOSUPPORT;
 
 	err = -ENOMEM;
-	sk = sk_alloc(PF_KEY, GFP_KERNEL, 1, NULL);
+	sk = sk_alloc(net, PF_KEY, GFP_KERNEL, &key_proto);
 	if (sk == NULL)
 		goto out;
-	
+
 	sock->ops = &pfkey_ops;
 	sock_init_data(sock, sk);
-	sk_set_owner(sk, THIS_MODULE);
-
-	err = -ENOMEM;
-	pfk = sk->sk_protinfo = kmalloc(sizeof(*pfk), GFP_KERNEL);
-	if (!pfk) {
-		sk_free(sk);
-		goto out;
-	}
-	memset(pfk, 0, sizeof(*pfk));
 
 	sk->sk_family = PF_KEY;
 	sk->sk_destruct = pfkey_sock_destruct;
@@ -185,7 +189,7 @@ static int pfkey_release(struct socket *sock)
 }
 
 static int pfkey_broadcast_one(struct sk_buff *skb, struct sk_buff **skb2,
-			       int allocation, struct sock *sk)
+			       gfp_t allocation, struct sock *sk)
 {
 	int err = -ENOBUFS;
 
@@ -217,7 +221,7 @@ static int pfkey_broadcast_one(struct sk_buff *skb, struct sk_buff **skb2,
 #define BROADCAST_ONE		1
 #define BROADCAST_REGISTERED	2
 #define BROADCAST_PROMISC_ONLY	4
-static int pfkey_broadcast(struct sk_buff *skb, int allocation,
+static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 			   int broadcast_flags, struct sock *one_sk)
 {
 	struct sock *sk;
@@ -233,7 +237,7 @@ static int pfkey_broadcast(struct sk_buff *skb, int allocation,
 
 	pfkey_lock_table();
 	sk_for_each(sk, node, &pfkey_table) {
-		struct pfkey_opt *pfk = pfkey_sk(sk);
+		struct pfkey_sock *pfk = pfkey_sk(sk);
 		int err2;
 
 		/* Yes, it means that if you are meant to receive this
@@ -297,8 +301,7 @@ static int pfkey_error(struct sadb_msg *orig, int err, struct sock *sk)
 		err = EINTR;
 	if (err >= 512)
 		err = EINVAL;
-	if (err <= 0 || err >= 256)
-		BUG();
+	BUG_ON(err <= 0 || err >= 256);
 
 	hdr = (struct sadb_msg *) skb_put(skb, sizeof(struct sadb_msg));
 	pfkey_hdr_dup(hdr, orig);
@@ -336,6 +339,7 @@ static u8 sadb_ext_min_len[] = {
 	[SADB_X_EXT_NAT_T_SPORT]	= (u8) sizeof(struct sadb_x_nat_t_port),
 	[SADB_X_EXT_NAT_T_DPORT]	= (u8) sizeof(struct sadb_x_nat_t_port),
 	[SADB_X_EXT_NAT_T_OA]		= (u8) sizeof(struct sadb_address),
+	[SADB_X_EXT_SEC_CTX]		= (u8) sizeof(struct sadb_x_sec_ctx),
 };
 
 /* Verify sadb_address_{len,prefixlen} against sa_family.  */
@@ -351,16 +355,14 @@ static int verify_address_len(void *p)
 
 	switch (addr->sa_family) {
 	case AF_INET:
-		len  = sizeof(*sp) + sizeof(*sin) + (sizeof(uint64_t) - 1);
-		len /= sizeof(uint64_t);
+		len = DIV_ROUND_UP(sizeof(*sp) + sizeof(*sin), sizeof(uint64_t));
 		if (sp->sadb_address_len != len ||
 		    sp->sadb_address_prefixlen > 32)
 			return -EINVAL;
 		break;
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	case AF_INET6:
-		len  = sizeof(*sp) + sizeof(*sin6) + (sizeof(uint64_t) - 1);
-		len /= sizeof(uint64_t);
+		len = DIV_ROUND_UP(sizeof(*sp) + sizeof(*sin6), sizeof(uint64_t));
 		if (sp->sadb_address_len != len ||
 		    sp->sadb_address_prefixlen > 128)
 			return -EINVAL;
@@ -378,9 +380,53 @@ static int verify_address_len(void *p)
 		 */
 		return -EINVAL;
 		break;
-	};
+	}
 
 	return 0;
+}
+
+static inline int pfkey_sec_ctx_len(struct sadb_x_sec_ctx *sec_ctx)
+{
+	return DIV_ROUND_UP(sizeof(struct sadb_x_sec_ctx) +
+			    sec_ctx->sadb_x_ctx_len,
+			    sizeof(uint64_t));
+}
+
+static inline int verify_sec_ctx_len(void *p)
+{
+	struct sadb_x_sec_ctx *sec_ctx = (struct sadb_x_sec_ctx *)p;
+	int len = sec_ctx->sadb_x_ctx_len;
+
+	if (len > PAGE_SIZE)
+		return -EINVAL;
+
+	len = pfkey_sec_ctx_len(sec_ctx);
+
+	if (sec_ctx->sadb_x_sec_len != len)
+		return -EINVAL;
+
+	return 0;
+}
+
+static inline struct xfrm_user_sec_ctx *pfkey_sadb2xfrm_user_sec_ctx(struct sadb_x_sec_ctx *sec_ctx)
+{
+	struct xfrm_user_sec_ctx *uctx = NULL;
+	int ctx_size = sec_ctx->sadb_x_ctx_len;
+
+	uctx = kmalloc((sizeof(*uctx)+ctx_size), GFP_KERNEL);
+
+	if (!uctx)
+		return NULL;
+
+	uctx->len = pfkey_sec_ctx_len(sec_ctx);
+	uctx->exttype = sec_ctx->sadb_x_sec_exttype;
+	uctx->ctx_doi = sec_ctx->sadb_x_ctx_doi;
+	uctx->ctx_alg = sec_ctx->sadb_x_ctx_alg;
+	uctx->ctx_len = sec_ctx->sadb_x_ctx_len;
+	memcpy(uctx + 1, sec_ctx + 1,
+	       uctx->ctx_len);
+
+	return uctx;
 }
 
 static int present_and_same_family(struct sadb_address *src,
@@ -437,7 +483,11 @@ static int parse_exthdrs(struct sk_buff *skb, struct sadb_msg *hdr, void **ext_h
 			    ext_type == SADB_X_EXT_NAT_T_OA) {
 				if (verify_address_len(p))
 					return -EINVAL;
-			}				
+			}
+			if (ext_type == SADB_X_EXT_SEC_CTX) {
+				if (verify_sec_ctx_len(p))
+					return -EINVAL;
+			}
 			ext_hdrs[ext_type-1] = p;
 		}
 		p   += ext_len;
@@ -502,12 +552,12 @@ static int pfkey_sadb_addr2xfrm_addr(struct sadb_address *addr,
 {
 	switch (((struct sockaddr*)(addr + 1))->sa_family) {
 	case AF_INET:
-		xaddr->a4 = 
+		xaddr->a4 =
 			((struct sockaddr_in *)(addr + 1))->sin_addr.s_addr;
 		return AF_INET;
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	case AF_INET6:
-		memcpy(xaddr->a6, 
+		memcpy(xaddr->a6,
 		       &((struct sockaddr_in6 *)(addr + 1))->sin6_addr,
 		       sizeof(struct in6_addr));
 		return AF_INET6;
@@ -576,7 +626,37 @@ pfkey_sockaddr_size(sa_family_t family)
 	/* NOTREACHED */
 }
 
-static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys, int hsc)
+static inline int pfkey_mode_from_xfrm(int mode)
+{
+	switch(mode) {
+	case XFRM_MODE_TRANSPORT:
+		return IPSEC_MODE_TRANSPORT;
+	case XFRM_MODE_TUNNEL:
+		return IPSEC_MODE_TUNNEL;
+	case XFRM_MODE_BEET:
+		return IPSEC_MODE_BEET;
+	default:
+		return -1;
+	}
+}
+
+static inline int pfkey_mode_to_xfrm(int mode)
+{
+	switch(mode) {
+	case IPSEC_MODE_ANY:	/*XXX*/
+	case IPSEC_MODE_TRANSPORT:
+		return XFRM_MODE_TRANSPORT;
+	case IPSEC_MODE_TUNNEL:
+		return XFRM_MODE_TUNNEL;
+	case IPSEC_MODE_BEET:
+		return XFRM_MODE_BEET;
+	default:
+		return -1;
+	}
+}
+
+static struct sk_buff *__pfkey_xfrm_state2msg(struct xfrm_state *x,
+					      int add_keys, int hsc)
 {
 	struct sk_buff *skb;
 	struct sadb_msg *hdr;
@@ -586,6 +666,9 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	struct sadb_key *key;
 	struct sadb_x_sa2 *sa2;
 	struct sockaddr_in *sin;
+	struct sadb_x_sec_ctx *sec_ctx;
+	struct xfrm_sec_ctx *xfrm_ctx;
+	int ctx_size = 0;
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	struct sockaddr_in6 *sin6;
 #endif
@@ -594,21 +677,28 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	int encrypt_key_size = 0;
 	int sockaddr_size;
 	struct xfrm_encap_tmpl *natt = NULL;
+	int mode;
 
 	/* address family check */
 	sockaddr_size = pfkey_sockaddr_size(x->props.family);
 	if (!sockaddr_size)
-		ERR_PTR(-EINVAL);
+		return ERR_PTR(-EINVAL);
 
 	/* base, SA, (lifetime (HSC),) address(SD), (address(P),)
 	   key(AE), (identity(SD),) (sensitivity)> */
-	size = sizeof(struct sadb_msg) +sizeof(struct sadb_sa) + 
+	size = sizeof(struct sadb_msg) +sizeof(struct sadb_sa) +
 		sizeof(struct sadb_lifetime) +
 		((hsc & 1) ? sizeof(struct sadb_lifetime) : 0) +
 		((hsc & 2) ? sizeof(struct sadb_lifetime) : 0) +
-			sizeof(struct sadb_address)*2 + 
+			sizeof(struct sadb_address)*2 +
 				sockaddr_size*2 +
 					sizeof(struct sadb_x_sa2);
+
+	if ((xfrm_ctx = x->security)) {
+		ctx_size = PFKEY_ALIGN8(xfrm_ctx->ctx_len);
+		size += sizeof(struct sadb_x_sec_ctx) + ctx_size;
+	}
+
 	/* identity & sensitivity */
 
 	if ((x->props.family == AF_INET &&
@@ -622,13 +712,13 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 
 	if (add_keys) {
 		if (x->aalg && x->aalg->alg_key_len) {
-			auth_key_size = 
-				PFKEY_ALIGN8((x->aalg->alg_key_len + 7) / 8); 
+			auth_key_size =
+				PFKEY_ALIGN8((x->aalg->alg_key_len + 7) / 8);
 			size += sizeof(struct sadb_key) + auth_key_size;
 		}
 		if (x->ealg && x->ealg->alg_key_len) {
-			encrypt_key_size = 
-				PFKEY_ALIGN8((x->ealg->alg_key_len+7) / 8); 
+			encrypt_key_size =
+				PFKEY_ALIGN8((x->ealg->alg_key_len+7) / 8);
 			size += sizeof(struct sadb_key) + encrypt_key_size;
 		}
 	}
@@ -656,13 +746,18 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	sa->sadb_sa_exttype = SADB_EXT_SA;
 	sa->sadb_sa_spi = x->id.spi;
 	sa->sadb_sa_replay = x->props.replay_window;
-	sa->sadb_sa_state = SADB_SASTATE_DYING;
-	if (x->km.state == XFRM_STATE_VALID && !x->km.dying)
-		sa->sadb_sa_state = SADB_SASTATE_MATURE;
-	else if (x->km.state == XFRM_STATE_ACQ)
+	switch (x->km.state) {
+	case XFRM_STATE_VALID:
+		sa->sadb_sa_state = x->km.dying ?
+			SADB_SASTATE_DYING : SADB_SASTATE_MATURE;
+		break;
+	case XFRM_STATE_ACQ:
 		sa->sadb_sa_state = SADB_SASTATE_LARVAL;
-	else if (x->km.state == XFRM_STATE_EXPIRED)
+		break;
+	default:
 		sa->sadb_sa_state = SADB_SASTATE_DEAD;
+		break;
+	}
 	sa->sadb_sa_auth = 0;
 	if (x->aalg) {
 		struct xfrm_algo_desc *a = xfrm_aalg_get_byname(x->aalg->alg_name, 0);
@@ -685,10 +780,12 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 		sa->sadb_sa_flags |= SADB_SAFLAGS_NOECN;
 	if (x->props.flags & XFRM_STATE_DECAP_DSCP)
 		sa->sadb_sa_flags |= SADB_SAFLAGS_DECAP_DSCP;
+	if (x->props.flags & XFRM_STATE_NOPMTUDISC)
+		sa->sadb_sa_flags |= SADB_SAFLAGS_NOPMTUDISC;
 
 	/* hard time */
 	if (hsc & 2) {
-		lifetime = (struct sadb_lifetime *)  skb_put(skb, 
+		lifetime = (struct sadb_lifetime *)  skb_put(skb,
 							     sizeof(struct sadb_lifetime));
 		lifetime->sadb_lifetime_len =
 			sizeof(struct sadb_lifetime)/sizeof(uint64_t);
@@ -700,7 +797,7 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	}
 	/* soft time */
 	if (hsc & 1) {
-		lifetime = (struct sadb_lifetime *)  skb_put(skb, 
+		lifetime = (struct sadb_lifetime *)  skb_put(skb,
 							     sizeof(struct sadb_lifetime));
 		lifetime->sadb_lifetime_len =
 			sizeof(struct sadb_lifetime)/sizeof(uint64_t);
@@ -721,16 +818,16 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	lifetime->sadb_lifetime_addtime = x->curlft.add_time;
 	lifetime->sadb_lifetime_usetime = x->curlft.use_time;
 	/* src address */
-	addr = (struct sadb_address*) skb_put(skb, 
+	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
-	addr->sadb_address_len = 
+	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
 			sizeof(uint64_t);
 	addr->sadb_address_exttype = SADB_EXT_ADDRESS_SRC;
-	/* "if the ports are non-zero, then the sadb_address_proto field, 
-	   normally zero, MUST be filled in with the transport 
+	/* "if the ports are non-zero, then the sadb_address_proto field,
+	   normally zero, MUST be filled in with the transport
 	   protocol's number." - RFC2367 */
-	addr->sadb_address_proto = 0; 
+	addr->sadb_address_proto = 0;
 	addr->sadb_address_reserved = 0;
 	if (x->props.family == AF_INET) {
 		addr->sadb_address_prefixlen = 32;
@@ -743,29 +840,29 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	}
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	else if (x->props.family == AF_INET6) {
- 		addr->sadb_address_prefixlen = 128;
+		addr->sadb_address_prefixlen = 128;
 
 		sin6 = (struct sockaddr_in6 *) (addr + 1);
 		sin6->sin6_family = AF_INET6;
 		sin6->sin6_port = 0;
 		sin6->sin6_flowinfo = 0;
- 		memcpy(&sin6->sin6_addr, x->props.saddr.a6,
+		memcpy(&sin6->sin6_addr, x->props.saddr.a6,
 		       sizeof(struct in6_addr));
 		sin6->sin6_scope_id = 0;
- 	}
+	}
 #endif
 	else
 		BUG();
 
 	/* dst address */
-	addr = (struct sadb_address*) skb_put(skb, 
+	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
-	addr->sadb_address_len = 
+	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
 			sizeof(uint64_t);
 	addr->sadb_address_exttype = SADB_EXT_ADDRESS_DST;
-	addr->sadb_address_proto = 0; 
-	addr->sadb_address_prefixlen = 32; /* XXX */ 
+	addr->sadb_address_proto = 0;
+	addr->sadb_address_prefixlen = 32; /* XXX */
 	addr->sadb_address_reserved = 0;
 	if (x->props.family == AF_INET) {
 		sin = (struct sockaddr_in *) (addr + 1);
@@ -775,9 +872,9 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 		memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 
 		if (x->sel.saddr.a4 != x->props.saddr.a4) {
-			addr = (struct sadb_address*) skb_put(skb, 
+			addr = (struct sadb_address*) skb_put(skb,
 				sizeof(struct sadb_address)+sockaddr_size);
-			addr->sadb_address_len = 
+			addr->sadb_address_len =
 				(sizeof(struct sadb_address)+sockaddr_size)/
 				sizeof(uint64_t);
 			addr->sadb_address_exttype = SADB_EXT_ADDRESS_PROXY;
@@ -806,9 +903,9 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 
 		if (memcmp (x->sel.saddr.a6, x->props.saddr.a6,
 			    sizeof(struct in6_addr))) {
-			addr = (struct sadb_address *) skb_put(skb, 
+			addr = (struct sadb_address *) skb_put(skb,
 				sizeof(struct sadb_address)+sockaddr_size);
-			addr->sadb_address_len = 
+			addr->sadb_address_len =
 				(sizeof(struct sadb_address)+sockaddr_size)/
 				sizeof(uint64_t);
 			addr->sadb_address_exttype = SADB_EXT_ADDRESS_PROXY;
@@ -832,7 +929,7 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 
 	/* auth key */
 	if (add_keys && auth_key_size) {
-		key = (struct sadb_key *) skb_put(skb, 
+		key = (struct sadb_key *) skb_put(skb,
 						  sizeof(struct sadb_key)+auth_key_size);
 		key->sadb_key_len = (sizeof(struct sadb_key) + auth_key_size) /
 			sizeof(uint64_t);
@@ -843,14 +940,14 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	}
 	/* encrypt key */
 	if (add_keys && encrypt_key_size) {
-		key = (struct sadb_key *) skb_put(skb, 
+		key = (struct sadb_key *) skb_put(skb,
 						  sizeof(struct sadb_key)+encrypt_key_size);
-		key->sadb_key_len = (sizeof(struct sadb_key) + 
+		key->sadb_key_len = (sizeof(struct sadb_key) +
 				     encrypt_key_size) / sizeof(uint64_t);
 		key->sadb_key_exttype = SADB_EXT_KEY_ENCRYPT;
 		key->sadb_key_bits = x->ealg->alg_key_len;
 		key->sadb_key_reserved = 0;
-		memcpy(key + 1, x->ealg->alg_key, 
+		memcpy(key + 1, x->ealg->alg_key,
 		       (x->ealg->alg_key_len+7)/8);
 	}
 
@@ -858,7 +955,11 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	sa2 = (struct sadb_x_sa2 *)  skb_put(skb, sizeof(struct sadb_x_sa2));
 	sa2->sadb_x_sa2_len = sizeof(struct sadb_x_sa2)/sizeof(uint64_t);
 	sa2->sadb_x_sa2_exttype = SADB_X_EXT_SA2;
-	sa2->sadb_x_sa2_mode = x->props.mode + 1;
+	if ((mode = pfkey_mode_from_xfrm(x->props.mode)) < 0) {
+		kfree_skb(skb);
+		return ERR_PTR(-EINVAL);
+	}
+	sa2->sadb_x_sa2_mode = mode;
 	sa2->sadb_x_sa2_reserved1 = 0;
 	sa2->sadb_x_sa2_reserved2 = 0;
 	sa2->sadb_x_sa2_sequence = 0;
@@ -892,19 +993,50 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 		n_port->sadb_x_nat_t_port_reserved = 0;
 	}
 
+	/* security context */
+	if (xfrm_ctx) {
+		sec_ctx = (struct sadb_x_sec_ctx *) skb_put(skb,
+				sizeof(struct sadb_x_sec_ctx) + ctx_size);
+		sec_ctx->sadb_x_sec_len =
+		  (sizeof(struct sadb_x_sec_ctx) + ctx_size) / sizeof(uint64_t);
+		sec_ctx->sadb_x_sec_exttype = SADB_X_EXT_SEC_CTX;
+		sec_ctx->sadb_x_ctx_doi = xfrm_ctx->ctx_doi;
+		sec_ctx->sadb_x_ctx_alg = xfrm_ctx->ctx_alg;
+		sec_ctx->sadb_x_ctx_len = xfrm_ctx->ctx_len;
+		memcpy(sec_ctx + 1, xfrm_ctx->ctx_str,
+		       xfrm_ctx->ctx_len);
+	}
+
 	return skb;
 }
 
-static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr, 
+
+static inline struct sk_buff *pfkey_xfrm_state2msg(struct xfrm_state *x)
+{
+	struct sk_buff *skb;
+
+	skb = __pfkey_xfrm_state2msg(x, 1, 3);
+
+	return skb;
+}
+
+static inline struct sk_buff *pfkey_xfrm_state2msg_expire(struct xfrm_state *x,
+							  int hsc)
+{
+	return __pfkey_xfrm_state2msg(x, 0, hsc);
+}
+
+static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
 						void **ext_hdrs)
 {
-	struct xfrm_state *x; 
+	struct xfrm_state *x;
 	struct sadb_lifetime *lifetime;
 	struct sadb_sa *sa;
 	struct sadb_key *key;
+	struct sadb_x_sec_ctx *sec_ctx;
 	uint16_t proto;
 	int err;
-	
+
 
 	sa = (struct sadb_sa *) ext_hdrs[SADB_EXT_SA-1];
 	if (!sa ||
@@ -937,7 +1069,7 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
    SADB_SASTATE_MATURE and the kernel MUST return an error if this is
    not true.
 
-           However, KAME setkey always uses SADB_SASTATE_LARVAL.
+	   However, KAME setkey always uses SADB_SASTATE_LARVAL.
 	   Hence, we have to _ignore_ sadb_sa_state, which is also reasonable.
 	 */
 	if (sa->sadb_sa_auth > SADB_AALG_MAX ||
@@ -969,6 +1101,8 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
 		x->props.flags |= XFRM_STATE_NOECN;
 	if (sa->sadb_sa_flags & SADB_SAFLAGS_DECAP_DSCP)
 		x->props.flags |= XFRM_STATE_DECAP_DSCP;
+	if (sa->sadb_sa_flags & SADB_SAFLAGS_NOPMTUDISC)
+		x->props.flags |= XFRM_STATE_NOPMTUDISC;
 
 	lifetime = (struct sadb_lifetime*) ext_hdrs[SADB_EXT_LIFETIME_HARD-1];
 	if (lifetime != NULL) {
@@ -984,6 +1118,21 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
 		x->lft.soft_add_expires_seconds = lifetime->sadb_lifetime_addtime;
 		x->lft.soft_use_expires_seconds = lifetime->sadb_lifetime_usetime;
 	}
+
+	sec_ctx = (struct sadb_x_sec_ctx *) ext_hdrs[SADB_X_EXT_SEC_CTX-1];
+	if (sec_ctx != NULL) {
+		struct xfrm_user_sec_ctx *uctx = pfkey_sadb2xfrm_user_sec_ctx(sec_ctx);
+
+		if (!uctx)
+			goto out;
+
+		err = security_xfrm_state_alloc(x, uctx);
+		kfree(uctx);
+
+		if (err)
+			goto out;
+	}
+
 	key = (struct sadb_key*) ext_hdrs[SADB_EXT_KEY_AUTH-1];
 	if (sa->sadb_sa_auth) {
 		int keysize = 0;
@@ -1042,20 +1191,23 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
 	}
 	/* x->algo.flags = sa->sadb_sa_flags; */
 
-	x->props.family = pfkey_sadb_addr2xfrm_addr((struct sadb_address *) ext_hdrs[SADB_EXT_ADDRESS_SRC-1], 
+	x->props.family = pfkey_sadb_addr2xfrm_addr((struct sadb_address *) ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
 						    &x->props.saddr);
 	if (!x->props.family) {
 		err = -EAFNOSUPPORT;
 		goto out;
 	}
-	pfkey_sadb_addr2xfrm_addr((struct sadb_address *) ext_hdrs[SADB_EXT_ADDRESS_DST-1], 
+	pfkey_sadb_addr2xfrm_addr((struct sadb_address *) ext_hdrs[SADB_EXT_ADDRESS_DST-1],
 				  &x->id.daddr);
 
 	if (ext_hdrs[SADB_X_EXT_SA2-1]) {
 		struct sadb_x_sa2 *sa2 = (void*)ext_hdrs[SADB_X_EXT_SA2-1];
-		x->props.mode = sa2->sadb_x_sa2_mode;
-		if (x->props.mode)
-			x->props.mode--;
+		int mode = pfkey_mode_to_xfrm(sa2->sadb_x_sa2_mode);
+		if (mode < 0) {
+			err = -EINVAL;
+			goto out;
+		}
+		x->props.mode = mode;
 		x->props.reqid = sa2->sadb_x_sa2_reqid;
 	}
 
@@ -1066,6 +1218,9 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
 		x->sel.family = pfkey_sadb_addr2xfrm_addr(addr, &x->sel.saddr);
 		x->sel.prefixlen_s = addr->sadb_address_prefixlen;
 	}
+
+	if (!x->sel.family)
+		x->sel.family = x->props.family;
 
 	if (ext_hdrs[SADB_X_EXT_NAT_T_TYPE-1]) {
 		struct sadb_x_nat_t_type* n_type;
@@ -1091,17 +1246,11 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
 		}
 	}
 
-	x->type = xfrm_get_type(proto, x->props.family);
-	if (x->type == NULL) {
-		err = -ENOPROTOOPT;
+	err = xfrm_init_state(x);
+	if (err)
 		goto out;
-	}
-	if (x->type->init_state(x, NULL)) {
-		err = -EINVAL;
-		goto out;
-	}
+
 	x->km.seq = hdr->sadb_msg_seq;
-	x->km.state = XFRM_STATE_VALID;
 	return x;
 
 out:
@@ -1121,8 +1270,11 @@ static int pfkey_getspi(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 	struct sadb_x_sa2 *sa2;
 	struct sadb_address *saddr, *daddr;
 	struct sadb_msg *out_hdr;
+	struct sadb_spirange *range;
 	struct xfrm_state *x = NULL;
-	u8 mode;
+	int mode;
+	int err;
+	u32 min_spi, max_spi;
 	u32 reqid;
 	u8 proto;
 	unsigned short family;
@@ -1137,7 +1289,9 @@ static int pfkey_getspi(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 		return -EINVAL;
 
 	if ((sa2 = ext_hdrs[SADB_X_EXT_SA2-1]) != NULL) {
-		mode = sa2->sadb_x_sa2_mode - 1;
+		mode = pfkey_mode_to_xfrm(sa2->sadb_x_sa2_mode);
+		if (mode < 0)
+			return -EINVAL;
 		reqid = sa2->sadb_x_sa2_reqid;
 	} else {
 		mode = 0;
@@ -1175,25 +1329,17 @@ static int pfkey_getspi(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 	if (x == NULL)
 		return -ENOENT;
 
-	resp_skb = ERR_PTR(-ENOENT);
+	min_spi = 0x100;
+	max_spi = 0x0fffffff;
 
-	spin_lock_bh(&x->lock);
-	if (x->km.state != XFRM_STATE_DEAD) {
-		struct sadb_spirange *range = ext_hdrs[SADB_EXT_SPIRANGE-1];
-		u32 min_spi, max_spi;
-
-		if (range != NULL) {
-			min_spi = range->sadb_spirange_min;
-			max_spi = range->sadb_spirange_max;
-		} else {
-			min_spi = 0x100;
-			max_spi = 0x0fffffff;
-		}
-		xfrm_alloc_spi(x, htonl(min_spi), htonl(max_spi));
-		if (x->id.spi)
-			resp_skb = pfkey_xfrm_state2msg(x, 0, 3);
+	range = ext_hdrs[SADB_EXT_SPIRANGE-1];
+	if (range) {
+		min_spi = range->sadb_spirange_min;
+		max_spi = range->sadb_spirange_max;
 	}
-	spin_unlock_bh(&x->lock);
+
+	err = xfrm_alloc_spi(x, min_spi, max_spi);
+	resp_skb = err ? ERR_PTR(err) : pfkey_xfrm_state2msg(x);
 
 	if (IS_ERR(resp_skb)) {
 		xfrm_state_put(x);
@@ -1240,52 +1386,111 @@ static int pfkey_acquire(struct sock *sk, struct sk_buff *skb, struct sadb_msg *
 	return 0;
 }
 
+static inline int event2poltype(int event)
+{
+	switch (event) {
+	case XFRM_MSG_DELPOLICY:
+		return SADB_X_SPDDELETE;
+	case XFRM_MSG_NEWPOLICY:
+		return SADB_X_SPDADD;
+	case XFRM_MSG_UPDPOLICY:
+		return SADB_X_SPDUPDATE;
+	case XFRM_MSG_POLEXPIRE:
+	//	return SADB_X_SPDEXPIRE;
+	default:
+		printk("pfkey: Unknown policy event %d\n", event);
+		break;
+	}
+
+	return 0;
+}
+
+static inline int event2keytype(int event)
+{
+	switch (event) {
+	case XFRM_MSG_DELSA:
+		return SADB_DELETE;
+	case XFRM_MSG_NEWSA:
+		return SADB_ADD;
+	case XFRM_MSG_UPDSA:
+		return SADB_UPDATE;
+	case XFRM_MSG_EXPIRE:
+		return SADB_EXPIRE;
+	default:
+		printk("pfkey: Unknown SA event %d\n", event);
+		break;
+	}
+
+	return 0;
+}
+
+/* ADD/UPD/DEL */
+static int key_notify_sa(struct xfrm_state *x, struct km_event *c)
+{
+	struct sk_buff *skb;
+	struct sadb_msg *hdr;
+
+	skb = pfkey_xfrm_state2msg(x);
+
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	hdr = (struct sadb_msg *) skb->data;
+	hdr->sadb_msg_version = PF_KEY_V2;
+	hdr->sadb_msg_type = event2keytype(c->event);
+	hdr->sadb_msg_satype = pfkey_proto2satype(x->id.proto);
+	hdr->sadb_msg_errno = 0;
+	hdr->sadb_msg_reserved = 0;
+	hdr->sadb_msg_seq = c->seq;
+	hdr->sadb_msg_pid = c->pid;
+
+	pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_ALL, NULL);
+
+	return 0;
+}
 
 static int pfkey_add(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
 {
-	struct sk_buff *out_skb;
-	struct sadb_msg *out_hdr;
 	struct xfrm_state *x;
 	int err;
+	struct km_event c;
 
-	xfrm_probe_algs();
-	
 	x = pfkey_msg2xfrm_state(hdr, ext_hdrs);
 	if (IS_ERR(x))
 		return PTR_ERR(x);
 
+	xfrm_state_hold(x);
 	if (hdr->sadb_msg_type == SADB_ADD)
 		err = xfrm_state_add(x);
 	else
 		err = xfrm_state_update(x);
 
+	xfrm_audit_state_add(x, err ? 0 : 1,
+			     audit_get_loginuid(current->audit_context), 0);
+
 	if (err < 0) {
 		x->km.state = XFRM_STATE_DEAD;
-		xfrm_state_put(x);
-		return err;
+		__xfrm_state_put(x);
+		goto out;
 	}
 
-	out_skb = pfkey_xfrm_state2msg(x, 0, 3);
-	if (IS_ERR(out_skb))
-		return  PTR_ERR(out_skb); /* XXX Should we return 0 here ? */
-
-	out_hdr = (struct sadb_msg *) out_skb->data;
-	out_hdr->sadb_msg_version = hdr->sadb_msg_version;
-	out_hdr->sadb_msg_type = hdr->sadb_msg_type;
-	out_hdr->sadb_msg_satype = pfkey_proto2satype(x->id.proto);
-	out_hdr->sadb_msg_errno = 0;
-	out_hdr->sadb_msg_reserved = 0;
-	out_hdr->sadb_msg_seq = hdr->sadb_msg_seq;
-	out_hdr->sadb_msg_pid = hdr->sadb_msg_pid;
-
-	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_ALL, sk);
-
-	return 0;
+	if (hdr->sadb_msg_type == SADB_ADD)
+		c.event = XFRM_MSG_NEWSA;
+	else
+		c.event = XFRM_MSG_UPDSA;
+	c.seq = hdr->sadb_msg_seq;
+	c.pid = hdr->sadb_msg_pid;
+	km_state_notify(x, &c);
+out:
+	xfrm_state_put(x);
+	return err;
 }
 
 static int pfkey_delete(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
 {
 	struct xfrm_state *x;
+	struct km_event c;
+	int err;
 
 	if (!ext_hdrs[SADB_EXT_SA-1] ||
 	    !present_and_same_family(ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
@@ -1296,18 +1501,29 @@ static int pfkey_delete(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 	if (x == NULL)
 		return -ESRCH;
 
+	if ((err = security_xfrm_state_delete(x)))
+		goto out;
+
 	if (xfrm_state_kern(x)) {
-		xfrm_state_put(x);
-		return -EPERM;
+		err = -EPERM;
+		goto out;
 	}
-	
-	xfrm_state_delete(x);
+
+	err = xfrm_state_delete(x);
+
+	if (err < 0)
+		goto out;
+
+	c.seq = hdr->sadb_msg_seq;
+	c.pid = hdr->sadb_msg_pid;
+	c.event = XFRM_MSG_DELSA;
+	km_state_notify(x, &c);
+out:
+	xfrm_audit_state_delete(x, err ? 0 : 1,
+			       audit_get_loginuid(current->audit_context), 0);
 	xfrm_state_put(x);
 
-	pfkey_broadcast(skb_clone(skb, GFP_KERNEL), GFP_KERNEL, 
-			BROADCAST_ALL, sk);
-
-	return 0;
+	return err;
 }
 
 static int pfkey_get(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
@@ -1326,7 +1542,7 @@ static int pfkey_get(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr,
 	if (x == NULL)
 		return -ESRCH;
 
-	out_skb = pfkey_xfrm_state2msg(x, 1, 3);
+	out_skb = pfkey_xfrm_state2msg(x);
 	proto = x->id.proto;
 	xfrm_state_put(x);
 	if (IS_ERR(out_skb))
@@ -1334,7 +1550,7 @@ static int pfkey_get(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr,
 
 	out_hdr = (struct sadb_msg *) out_skb->data;
 	out_hdr->sadb_msg_version = hdr->sadb_msg_version;
-	out_hdr->sadb_msg_type = SADB_DUMP;
+	out_hdr->sadb_msg_type = SADB_GET;
 	out_hdr->sadb_msg_satype = pfkey_proto2satype(proto);
 	out_hdr->sadb_msg_errno = 0;
 	out_hdr->sadb_msg_reserved = 0;
@@ -1345,7 +1561,8 @@ static int pfkey_get(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr,
 	return 0;
 }
 
-static struct sk_buff *compose_sadb_supported(struct sadb_msg *orig, int allocation)
+static struct sk_buff *compose_sadb_supported(struct sadb_msg *orig,
+					      gfp_t allocation)
 {
 	struct sk_buff *skb;
 	struct sadb_msg *hdr;
@@ -1356,13 +1573,13 @@ static struct sk_buff *compose_sadb_supported(struct sadb_msg *orig, int allocat
 		auth_len *= sizeof(struct sadb_alg);
 		auth_len += sizeof(struct sadb_supported);
 	}
-	
+
 	enc_len = xfrm_count_enc_supported();
 	if (enc_len) {
 		enc_len *= sizeof(struct sadb_alg);
 		enc_len += sizeof(struct sadb_supported);
 	}
-	
+
 	len = enc_len + auth_len + sizeof(struct sadb_msg);
 
 	skb = alloc_skb(len + 16, allocation);
@@ -1418,7 +1635,7 @@ out_put_algs:
 
 static int pfkey_register(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
 {
-	struct pfkey_opt *pfk = pfkey_sk(sk);
+	struct pfkey_sock *pfk = pfkey_sk(sk);
 	struct sk_buff *supp_skb;
 
 	if (hdr->sadb_msg_satype > SADB_SATYPE_MAX)
@@ -1431,7 +1648,7 @@ static int pfkey_register(struct sock *sk, struct sk_buff *skb, struct sadb_msg 
 	}
 
 	xfrm_probe_algs();
-	
+
 	supp_skb = compose_sadb_supported(hdr, GFP_KERNEL);
 	if (!supp_skb) {
 		if (hdr->sadb_msg_satype != SADB_SATYPE_UNSPEC)
@@ -1445,28 +1662,49 @@ static int pfkey_register(struct sock *sk, struct sk_buff *skb, struct sadb_msg 
 	return 0;
 }
 
+static int key_notify_sa_flush(struct km_event *c)
+{
+	struct sk_buff *skb;
+	struct sadb_msg *hdr;
+
+	skb = alloc_skb(sizeof(struct sadb_msg) + 16, GFP_ATOMIC);
+	if (!skb)
+		return -ENOBUFS;
+	hdr = (struct sadb_msg *) skb_put(skb, sizeof(struct sadb_msg));
+	hdr->sadb_msg_satype = pfkey_proto2satype(c->data.proto);
+	hdr->sadb_msg_type = SADB_FLUSH;
+	hdr->sadb_msg_seq = c->seq;
+	hdr->sadb_msg_pid = c->pid;
+	hdr->sadb_msg_version = PF_KEY_V2;
+	hdr->sadb_msg_errno = (uint8_t) 0;
+	hdr->sadb_msg_len = (sizeof(struct sadb_msg) / sizeof(uint64_t));
+
+	pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_ALL, NULL);
+
+	return 0;
+}
+
 static int pfkey_flush(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
 {
 	unsigned proto;
-	struct sk_buff *skb_out;
-	struct sadb_msg *hdr_out;
+	struct km_event c;
+	struct xfrm_audit audit_info;
+	int err;
 
 	proto = pfkey_satype2proto(hdr->sadb_msg_satype);
 	if (proto == 0)
 		return -EINVAL;
 
-	skb_out = alloc_skb(sizeof(struct sadb_msg) + 16, GFP_KERNEL);
-	if (!skb_out)
-		return -ENOBUFS;
-
-	xfrm_state_flush(proto);
-
-	hdr_out = (struct sadb_msg *) skb_put(skb_out, sizeof(struct sadb_msg));
-	pfkey_hdr_dup(hdr_out, hdr);
-	hdr_out->sadb_msg_errno = (uint8_t) 0;
-	hdr_out->sadb_msg_len = (sizeof(struct sadb_msg) / sizeof(uint64_t));
-
-	pfkey_broadcast(skb_out, GFP_KERNEL, BROADCAST_ALL, NULL);
+	audit_info.loginuid = audit_get_loginuid(current->audit_context);
+	audit_info.secid = 0;
+	err = xfrm_state_flush(proto, &audit_info);
+	if (err)
+		return err;
+	c.data.proto = proto;
+	c.seq = hdr->sadb_msg_seq;
+	c.pid = hdr->sadb_msg_pid;
+	c.event = XFRM_MSG_FLUSHSA;
+	km_state_notify(NULL, &c);
 
 	return 0;
 }
@@ -1484,7 +1722,7 @@ static int dump_sa(struct xfrm_state *x, int count, void *ptr)
 	struct sk_buff *out_skb;
 	struct sadb_msg *out_hdr;
 
-	out_skb = pfkey_xfrm_state2msg(x, 1, 3);
+	out_skb = pfkey_xfrm_state2msg(x);
 	if (IS_ERR(out_skb))
 		return PTR_ERR(out_skb);
 
@@ -1514,7 +1752,7 @@ static int pfkey_dump(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr
 
 static int pfkey_promisc(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
 {
-	struct pfkey_opt *pfk = pfkey_sk(sk);
+	struct pfkey_sock *pfk = pfkey_sk(sk);
 	int satype = hdr->sadb_msg_satype;
 
 	if (hdr->sadb_msg_len == (sizeof(*hdr) / sizeof(uint64_t))) {
@@ -1550,7 +1788,8 @@ static u32 gen_reqid(void)
 		++reqid;
 		if (reqid == 0)
 			reqid = IPSEC_MANUAL_REQID_MAX+1;
-		if (xfrm_policy_walk(check_reqid, (void*)&reqid) != -EEXIST)
+		if (xfrm_policy_walk(XFRM_POLICY_TYPE_MAIN, check_reqid,
+				     (void*)&reqid) != -EEXIST)
 			return reqid;
 	} while (reqid != start);
 	return 0;
@@ -1564,6 +1803,7 @@ parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	struct sockaddr_in6 *sin6;
 #endif
+	int mode;
 
 	if (xp->xfrm_nr >= XFRM_MAX_DEPTH)
 		return -ELOOP;
@@ -1572,7 +1812,9 @@ parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
 		return -EINVAL;
 
 	t->id.proto = rq->sadb_x_ipsecrequest_proto; /* XXX check proto */
-	t->mode = rq->sadb_x_ipsecrequest_mode-1;
+	if ((mode = pfkey_mode_to_xfrm(rq->sadb_x_ipsecrequest_mode)) < 0)
+		return -EINVAL;
+	t->mode = mode;
 	if (rq->sadb_x_ipsecrequest_level == IPSEC_LEVEL_USE)
 		t->optional = 1;
 	else if (rq->sadb_x_ipsecrequest_level == IPSEC_LEVEL_UNIQUE) {
@@ -1584,12 +1826,12 @@ parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
 	}
 
 	/* addresses present only in tunnel mode */
-	if (t->mode) {
-		switch (xp->family) {
+	if (t->mode == XFRM_MODE_TUNNEL) {
+		struct sockaddr *sa;
+		sa = (struct sockaddr *)(rq+1);
+		switch(sa->sa_family) {
 		case AF_INET:
-			sin = (void*)(rq+1);
-			if (sin->sin_family != AF_INET)
-				return -EINVAL;
+			sin = (struct sockaddr_in*)sa;
 			t->saddr.a4 = sin->sin_addr.s_addr;
 			sin++;
 			if (sin->sin_family != AF_INET)
@@ -1598,9 +1840,7 @@ parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
 			break;
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 		case AF_INET6:
-			sin6 = (void *)(rq+1);
-			if (sin6->sin6_family != AF_INET6)
-				return -EINVAL;
+			sin6 = (struct sockaddr_in6*)sa;
 			memcpy(t->saddr.a6, &sin6->sin6_addr, sizeof(struct in6_addr));
 			sin6++;
 			if (sin6->sin6_family != AF_INET6)
@@ -1611,7 +1851,10 @@ parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
 		default:
 			return -EINVAL;
 		}
-	}
+		t->encap_family = sa->sa_family;
+	} else
+		t->encap_family = xp->family;
+
 	/* No way to set this via kame pfkey */
 	t->aalgos = t->ealgos = t->calgos = ~0;
 	xp->xfrm_nr++;
@@ -1634,20 +1877,40 @@ parse_ipsecrequests(struct xfrm_policy *xp, struct sadb_x_policy *pol)
 	return 0;
 }
 
+static inline int pfkey_xfrm_policy2sec_ctx_size(struct xfrm_policy *xp)
+{
+  struct xfrm_sec_ctx *xfrm_ctx = xp->security;
+
+	if (xfrm_ctx) {
+		int len = sizeof(struct sadb_x_sec_ctx);
+		len += xfrm_ctx->ctx_len;
+		return PFKEY_ALIGN8(len);
+	}
+	return 0;
+}
+
 static int pfkey_xfrm_policy2msg_size(struct xfrm_policy *xp)
 {
+	struct xfrm_tmpl *t;
 	int sockaddr_size = pfkey_sockaddr_size(xp->family);
-	int socklen = (xp->family == AF_INET ?
-		       sizeof(struct sockaddr_in) :
-		       sizeof(struct sockaddr_in6));
+	int socklen = 0;
+	int i;
+
+	for (i=0; i<xp->xfrm_nr; i++) {
+		t = xp->xfrm_vec + i;
+		socklen += (t->encap_family == AF_INET ?
+			    sizeof(struct sockaddr_in) :
+			    sizeof(struct sockaddr_in6));
+	}
 
 	return sizeof(struct sadb_msg) +
 		(sizeof(struct sadb_lifetime) * 3) +
-		(sizeof(struct sadb_address) * 2) + 
+		(sizeof(struct sadb_address) * 2) +
 		(sockaddr_size * 2) +
 		sizeof(struct sadb_x_policy) +
-		(xp->xfrm_nr * (sizeof(struct sadb_x_ipsecrequest) +
-				(socklen * 2)));
+		(xp->xfrm_nr * sizeof(struct sadb_x_ipsecrequest)) +
+		(socklen * 2) +
+		pfkey_xfrm_policy2sec_ctx_size(xp);
 }
 
 static struct sk_buff * pfkey_xfrm_policy2msg_prep(struct xfrm_policy *xp)
@@ -1664,13 +1927,15 @@ static struct sk_buff * pfkey_xfrm_policy2msg_prep(struct xfrm_policy *xp)
 	return skb;
 }
 
-static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, int dir)
+static int pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, int dir)
 {
 	struct sadb_msg *hdr;
 	struct sadb_address *addr;
 	struct sadb_lifetime *lifetime;
 	struct sadb_x_policy *pol;
 	struct sockaddr_in   *sin;
+	struct sadb_x_sec_ctx *sec_ctx;
+	struct xfrm_sec_ctx *xfrm_ctx;
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	struct sockaddr_in6  *sin6;
 #endif
@@ -1688,9 +1953,9 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 	memset(hdr, 0, size);	/* XXX do we need this ? */
 
 	/* src address */
-	addr = (struct sadb_address*) skb_put(skb, 
+	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
-	addr->sadb_address_len = 
+	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
 			sizeof(uint64_t);
 	addr->sadb_address_exttype = SADB_EXT_ADDRESS_SRC;
@@ -1720,14 +1985,14 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 		BUG();
 
 	/* dst address */
-	addr = (struct sadb_address*) skb_put(skb, 
+	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
 	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
 			sizeof(uint64_t);
 	addr->sadb_address_exttype = SADB_EXT_ADDRESS_DST;
 	addr->sadb_address_proto = pfkey_proto_from_xfrm(xp->selector.proto);
-	addr->sadb_address_prefixlen = xp->selector.prefixlen_d; 
+	addr->sadb_address_prefixlen = xp->selector.prefixlen_d;
 	addr->sadb_address_reserved = 0;
 	if (xp->family == AF_INET) {
 		sin = (struct sockaddr_in *) (addr + 1);
@@ -1751,7 +2016,7 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 		BUG();
 
 	/* hard time */
-	lifetime = (struct sadb_lifetime *)  skb_put(skb, 
+	lifetime = (struct sadb_lifetime *)  skb_put(skb,
 						     sizeof(struct sadb_lifetime));
 	lifetime->sadb_lifetime_len =
 		sizeof(struct sadb_lifetime)/sizeof(uint64_t);
@@ -1761,7 +2026,7 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 	lifetime->sadb_lifetime_addtime = xp->lft.hard_add_expires_seconds;
 	lifetime->sadb_lifetime_usetime = xp->lft.hard_use_expires_seconds;
 	/* soft time */
-	lifetime = (struct sadb_lifetime *)  skb_put(skb, 
+	lifetime = (struct sadb_lifetime *)  skb_put(skb,
 						     sizeof(struct sadb_lifetime));
 	lifetime->sadb_lifetime_len =
 		sizeof(struct sadb_lifetime)/sizeof(uint64_t);
@@ -1771,7 +2036,7 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 	lifetime->sadb_lifetime_addtime = xp->lft.soft_add_expires_seconds;
 	lifetime->sadb_lifetime_usetime = xp->lft.soft_use_expires_seconds;
 	/* current time */
-	lifetime = (struct sadb_lifetime *)  skb_put(skb, 
+	lifetime = (struct sadb_lifetime *)  skb_put(skb,
 						     sizeof(struct sadb_lifetime));
 	lifetime->sadb_lifetime_len =
 		sizeof(struct sadb_lifetime)/sizeof(uint64_t);
@@ -1799,10 +2064,13 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 		struct sadb_x_ipsecrequest *rq;
 		struct xfrm_tmpl *t = xp->xfrm_vec + i;
 		int req_size;
+		int mode;
 
 		req_size = sizeof(struct sadb_x_ipsecrequest);
-		if (t->mode)
-			req_size += 2*socklen;
+		if (t->mode == XFRM_MODE_TUNNEL)
+			req_size += ((t->encap_family == AF_INET ?
+				     sizeof(struct sockaddr_in) :
+				     sizeof(struct sockaddr_in6)) * 2);
 		else
 			size -= 2*socklen;
 		rq = (void*)skb_put(skb, req_size);
@@ -1810,15 +2078,17 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 		memset(rq, 0, sizeof(*rq));
 		rq->sadb_x_ipsecrequest_len = req_size;
 		rq->sadb_x_ipsecrequest_proto = t->id.proto;
-		rq->sadb_x_ipsecrequest_mode = t->mode+1;
+		if ((mode = pfkey_mode_from_xfrm(t->mode)) < 0)
+			return -EINVAL;
+		rq->sadb_x_ipsecrequest_mode = mode;
 		rq->sadb_x_ipsecrequest_level = IPSEC_LEVEL_REQUIRE;
 		if (t->reqid)
 			rq->sadb_x_ipsecrequest_level = IPSEC_LEVEL_UNIQUE;
 		if (t->optional)
 			rq->sadb_x_ipsecrequest_level = IPSEC_LEVEL_USE;
 		rq->sadb_x_ipsecrequest_reqid = t->reqid;
-		if (t->mode) {
-			switch (xp->family) {
+		if (t->mode == XFRM_MODE_TUNNEL) {
+			switch (t->encap_family) {
 			case AF_INET:
 				sin = (void*)(rq+1);
 				sin->sin_family = AF_INET;
@@ -1855,19 +2125,67 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 			}
 		}
 	}
+
+	/* security context */
+	if ((xfrm_ctx = xp->security)) {
+		int ctx_size = pfkey_xfrm_policy2sec_ctx_size(xp);
+
+		sec_ctx = (struct sadb_x_sec_ctx *) skb_put(skb, ctx_size);
+		sec_ctx->sadb_x_sec_len = ctx_size / sizeof(uint64_t);
+		sec_ctx->sadb_x_sec_exttype = SADB_X_EXT_SEC_CTX;
+		sec_ctx->sadb_x_ctx_doi = xfrm_ctx->ctx_doi;
+		sec_ctx->sadb_x_ctx_alg = xfrm_ctx->ctx_alg;
+		sec_ctx->sadb_x_ctx_len = xfrm_ctx->ctx_len;
+		memcpy(sec_ctx + 1, xfrm_ctx->ctx_str,
+		       xfrm_ctx->ctx_len);
+	}
+
 	hdr->sadb_msg_len = size / sizeof(uint64_t);
 	hdr->sadb_msg_reserved = atomic_read(&xp->refcnt);
+
+	return 0;
+}
+
+static int key_notify_policy(struct xfrm_policy *xp, int dir, struct km_event *c)
+{
+	struct sk_buff *out_skb;
+	struct sadb_msg *out_hdr;
+	int err;
+
+	out_skb = pfkey_xfrm_policy2msg_prep(xp);
+	if (IS_ERR(out_skb)) {
+		err = PTR_ERR(out_skb);
+		goto out;
+	}
+	err = pfkey_xfrm_policy2msg(out_skb, xp, dir);
+	if (err < 0)
+		return err;
+
+	out_hdr = (struct sadb_msg *) out_skb->data;
+	out_hdr->sadb_msg_version = PF_KEY_V2;
+
+	if (c->data.byid && c->event == XFRM_MSG_DELPOLICY)
+		out_hdr->sadb_msg_type = SADB_X_SPDDELETE2;
+	else
+		out_hdr->sadb_msg_type = event2poltype(c->event);
+	out_hdr->sadb_msg_errno = 0;
+	out_hdr->sadb_msg_seq = c->seq;
+	out_hdr->sadb_msg_pid = c->pid;
+	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_ALL, NULL);
+out:
+	return 0;
+
 }
 
 static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
 {
-	int err;
+	int err = 0;
 	struct sadb_lifetime *lifetime;
 	struct sadb_address *sa;
 	struct sadb_x_policy *pol;
 	struct xfrm_policy *xp;
-	struct sk_buff *out_skb;
-	struct sadb_msg *out_hdr;
+	struct km_event c;
+	struct sadb_x_sec_ctx *sec_ctx;
 
 	if (!present_and_same_family(ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
 				     ext_hdrs[SADB_EXT_ADDRESS_DST-1]) ||
@@ -1888,7 +2206,7 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 		      XFRM_POLICY_BLOCK : XFRM_POLICY_ALLOW);
 	xp->priority = pol->sadb_x_policy_priority;
 
-	sa = ext_hdrs[SADB_EXT_ADDRESS_SRC-1], 
+	sa = ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
 	xp->family = pfkey_sadb_addr2xfrm_addr(sa, &xp->selector.saddr);
 	if (!xp->family) {
 		err = -EINVAL;
@@ -1899,9 +2217,9 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 	xp->selector.proto = pfkey_proto_to_xfrm(sa->sadb_address_proto);
 	xp->selector.sport = ((struct sockaddr_in *)(sa+1))->sin_port;
 	if (xp->selector.sport)
-		xp->selector.sport_mask = ~0;
+		xp->selector.sport_mask = htons(0xffff);
 
-	sa = ext_hdrs[SADB_EXT_ADDRESS_DST-1], 
+	sa = ext_hdrs[SADB_EXT_ADDRESS_DST-1],
 	pfkey_sadb_addr2xfrm_addr(sa, &xp->selector.daddr);
 	xp->selector.prefixlen_d = sa->sadb_address_prefixlen;
 
@@ -1912,7 +2230,23 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 
 	xp->selector.dport = ((struct sockaddr_in *)(sa+1))->sin_port;
 	if (xp->selector.dport)
-		xp->selector.dport_mask = ~0;
+		xp->selector.dport_mask = htons(0xffff);
+
+	sec_ctx = (struct sadb_x_sec_ctx *) ext_hdrs[SADB_X_EXT_SEC_CTX-1];
+	if (sec_ctx != NULL) {
+		struct xfrm_user_sec_ctx *uctx = pfkey_sadb2xfrm_user_sec_ctx(sec_ctx);
+
+		if (!uctx) {
+			err = -ENOBUFS;
+			goto out;
+		}
+
+		err = security_xfrm_policy_alloc(xp, uctx);
+		kfree(uctx);
+
+		if (err)
+			goto out;
+	}
 
 	xp->lft.soft_byte_limit = XFRM_INF;
 	xp->lft.hard_byte_limit = XFRM_INF;
@@ -1935,34 +2269,29 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 	    (err = parse_ipsecrequests(xp, pol)) < 0)
 		goto out;
 
-	out_skb = pfkey_xfrm_policy2msg_prep(xp);
-	if (IS_ERR(out_skb)) {
-		err =  PTR_ERR(out_skb);
-		goto out;
-	}
-
 	err = xfrm_policy_insert(pol->sadb_x_policy_dir-1, xp,
 				 hdr->sadb_msg_type != SADB_X_SPDUPDATE);
-	if (err) {
-		kfree_skb(out_skb);
+
+	xfrm_audit_policy_add(xp, err ? 0 : 1,
+			     audit_get_loginuid(current->audit_context), 0);
+
+	if (err)
 		goto out;
-	}
 
-	pfkey_xfrm_policy2msg(out_skb, xp, pol->sadb_x_policy_dir-1);
+	if (hdr->sadb_msg_type == SADB_X_SPDUPDATE)
+		c.event = XFRM_MSG_UPDPOLICY;
+	else
+		c.event = XFRM_MSG_NEWPOLICY;
 
+	c.seq = hdr->sadb_msg_seq;
+	c.pid = hdr->sadb_msg_pid;
+
+	km_policy_notify(xp, pol->sadb_x_policy_dir-1, &c);
 	xfrm_pol_put(xp);
-
-	out_hdr = (struct sadb_msg *) out_skb->data;
-	out_hdr->sadb_msg_version = hdr->sadb_msg_version;
-	out_hdr->sadb_msg_type = hdr->sadb_msg_type;
-	out_hdr->sadb_msg_satype = 0;
-	out_hdr->sadb_msg_errno = 0;
-	out_hdr->sadb_msg_seq = hdr->sadb_msg_seq;
-	out_hdr->sadb_msg_pid = hdr->sadb_msg_pid;
-	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_ALL, sk);
 	return 0;
 
 out:
+	security_xfrm_policy_free(xp);
 	kfree(xp);
 	return err;
 }
@@ -1972,10 +2301,10 @@ static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, struct sadb_msg
 	int err;
 	struct sadb_address *sa;
 	struct sadb_x_policy *pol;
-	struct xfrm_policy *xp;
-	struct sk_buff *out_skb;
-	struct sadb_msg *out_hdr;
+	struct xfrm_policy *xp, tmp;
 	struct xfrm_selector sel;
+	struct km_event c;
+	struct sadb_x_sec_ctx *sec_ctx;
 
 	if (!present_and_same_family(ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
 				     ext_hdrs[SADB_EXT_ADDRESS_DST-1]) ||
@@ -1988,66 +2317,66 @@ static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, struct sadb_msg
 
 	memset(&sel, 0, sizeof(sel));
 
-	sa = ext_hdrs[SADB_EXT_ADDRESS_SRC-1], 
+	sa = ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
 	sel.family = pfkey_sadb_addr2xfrm_addr(sa, &sel.saddr);
 	sel.prefixlen_s = sa->sadb_address_prefixlen;
 	sel.proto = pfkey_proto_to_xfrm(sa->sadb_address_proto);
 	sel.sport = ((struct sockaddr_in *)(sa+1))->sin_port;
 	if (sel.sport)
-		sel.sport_mask = ~0;
+		sel.sport_mask = htons(0xffff);
 
-	sa = ext_hdrs[SADB_EXT_ADDRESS_DST-1], 
+	sa = ext_hdrs[SADB_EXT_ADDRESS_DST-1],
 	pfkey_sadb_addr2xfrm_addr(sa, &sel.daddr);
 	sel.prefixlen_d = sa->sadb_address_prefixlen;
 	sel.proto = pfkey_proto_to_xfrm(sa->sadb_address_proto);
 	sel.dport = ((struct sockaddr_in *)(sa+1))->sin_port;
 	if (sel.dport)
-		sel.dport_mask = ~0;
+		sel.dport_mask = htons(0xffff);
 
-	xp = xfrm_policy_bysel(pol->sadb_x_policy_dir-1, &sel, 1);
+	sec_ctx = (struct sadb_x_sec_ctx *) ext_hdrs[SADB_X_EXT_SEC_CTX-1];
+	memset(&tmp, 0, sizeof(struct xfrm_policy));
+
+	if (sec_ctx != NULL) {
+		struct xfrm_user_sec_ctx *uctx = pfkey_sadb2xfrm_user_sec_ctx(sec_ctx);
+
+		if (!uctx)
+			return -ENOMEM;
+
+		err = security_xfrm_policy_alloc(&tmp, uctx);
+		kfree(uctx);
+
+		if (err)
+			return err;
+	}
+
+	xp = xfrm_policy_bysel_ctx(XFRM_POLICY_TYPE_MAIN, pol->sadb_x_policy_dir-1,
+				   &sel, tmp.security, 1, &err);
+	security_xfrm_policy_free(&tmp);
+
 	if (xp == NULL)
 		return -ENOENT;
 
-	err = 0;
+	xfrm_audit_policy_delete(xp, err ? 0 : 1,
+				audit_get_loginuid(current->audit_context), 0);
 
-	out_skb = pfkey_xfrm_policy2msg_prep(xp);
-	if (IS_ERR(out_skb)) {
-		err =  PTR_ERR(out_skb);
+	if (err)
 		goto out;
-	}
-	pfkey_xfrm_policy2msg(out_skb, xp, pol->sadb_x_policy_dir-1);
 
-	out_hdr = (struct sadb_msg *) out_skb->data;
-	out_hdr->sadb_msg_version = hdr->sadb_msg_version;
-	out_hdr->sadb_msg_type = SADB_X_SPDDELETE;
-	out_hdr->sadb_msg_satype = 0;
-	out_hdr->sadb_msg_errno = 0;
-	out_hdr->sadb_msg_seq = hdr->sadb_msg_seq;
-	out_hdr->sadb_msg_pid = hdr->sadb_msg_pid;
-	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_ALL, sk);
-	err = 0;
+	c.seq = hdr->sadb_msg_seq;
+	c.pid = hdr->sadb_msg_pid;
+	c.event = XFRM_MSG_DELPOLICY;
+	km_policy_notify(xp, pol->sadb_x_policy_dir-1, &c);
 
 out:
 	xfrm_pol_put(xp);
 	return err;
 }
 
-static int pfkey_spdget(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
+static int key_pol_get_resp(struct sock *sk, struct xfrm_policy *xp, struct sadb_msg *hdr, int dir)
 {
 	int err;
-	struct sadb_x_policy *pol;
-	struct xfrm_policy *xp;
 	struct sk_buff *out_skb;
 	struct sadb_msg *out_hdr;
-
-	if ((pol = ext_hdrs[SADB_X_EXT_POLICY-1]) == NULL)
-		return -EINVAL;
-
-	xp = xfrm_policy_byid(0, pol->sadb_x_policy_id,
-			      hdr->sadb_msg_type == SADB_X_SPDDELETE2);
-	if (xp == NULL)
-		return -ENOENT;
-
 	err = 0;
 
 	out_skb = pfkey_xfrm_policy2msg_prep(xp);
@@ -2055,7 +2384,9 @@ static int pfkey_spdget(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 		err =  PTR_ERR(out_skb);
 		goto out;
 	}
-	pfkey_xfrm_policy2msg(out_skb, xp, pol->sadb_x_policy_dir-1);
+	err = pfkey_xfrm_policy2msg(out_skb, xp, dir);
+	if (err < 0)
+		goto out;
 
 	out_hdr = (struct sadb_msg *) out_skb->data;
 	out_hdr->sadb_msg_version = hdr->sadb_msg_version;
@@ -2064,8 +2395,241 @@ static int pfkey_spdget(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 	out_hdr->sadb_msg_errno = 0;
 	out_hdr->sadb_msg_seq = hdr->sadb_msg_seq;
 	out_hdr->sadb_msg_pid = hdr->sadb_msg_pid;
-	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_ALL, sk);
+	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_ONE, sk);
 	err = 0;
+
+out:
+	return err;
+}
+
+#ifdef CONFIG_NET_KEY_MIGRATE
+static int pfkey_sockaddr_pair_size(sa_family_t family)
+{
+	switch (family) {
+	case AF_INET:
+		return PFKEY_ALIGN8(sizeof(struct sockaddr_in) * 2);
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	case AF_INET6:
+		return PFKEY_ALIGN8(sizeof(struct sockaddr_in6) * 2);
+#endif
+	default:
+		return 0;
+	}
+	/* NOTREACHED */
+}
+
+static int parse_sockaddr_pair(struct sadb_x_ipsecrequest *rq,
+			       xfrm_address_t *saddr, xfrm_address_t *daddr,
+			       u16 *family)
+{
+	struct sockaddr *sa = (struct sockaddr *)(rq + 1);
+	if (rq->sadb_x_ipsecrequest_len <
+	    pfkey_sockaddr_pair_size(sa->sa_family))
+		return -EINVAL;
+
+	switch (sa->sa_family) {
+	case AF_INET:
+		{
+			struct sockaddr_in *sin;
+			sin = (struct sockaddr_in *)sa;
+			if ((sin+1)->sin_family != AF_INET)
+				return -EINVAL;
+			memcpy(&saddr->a4, &sin->sin_addr, sizeof(saddr->a4));
+			sin++;
+			memcpy(&daddr->a4, &sin->sin_addr, sizeof(daddr->a4));
+			*family = AF_INET;
+			break;
+		}
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	case AF_INET6:
+		{
+			struct sockaddr_in6 *sin6;
+			sin6 = (struct sockaddr_in6 *)sa;
+			if ((sin6+1)->sin6_family != AF_INET6)
+				return -EINVAL;
+			memcpy(&saddr->a6, &sin6->sin6_addr,
+			       sizeof(saddr->a6));
+			sin6++;
+			memcpy(&daddr->a6, &sin6->sin6_addr,
+			       sizeof(daddr->a6));
+			*family = AF_INET6;
+			break;
+		}
+#endif
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int ipsecrequests_to_migrate(struct sadb_x_ipsecrequest *rq1, int len,
+				    struct xfrm_migrate *m)
+{
+	int err;
+	struct sadb_x_ipsecrequest *rq2;
+	int mode;
+
+	if (len <= sizeof(struct sadb_x_ipsecrequest) ||
+	    len < rq1->sadb_x_ipsecrequest_len)
+		return -EINVAL;
+
+	/* old endoints */
+	err = parse_sockaddr_pair(rq1, &m->old_saddr, &m->old_daddr,
+				  &m->old_family);
+	if (err)
+		return err;
+
+	rq2 = (struct sadb_x_ipsecrequest *)((u8 *)rq1 + rq1->sadb_x_ipsecrequest_len);
+	len -= rq1->sadb_x_ipsecrequest_len;
+
+	if (len <= sizeof(struct sadb_x_ipsecrequest) ||
+	    len < rq2->sadb_x_ipsecrequest_len)
+		return -EINVAL;
+
+	/* new endpoints */
+	err = parse_sockaddr_pair(rq2, &m->new_saddr, &m->new_daddr,
+				  &m->new_family);
+	if (err)
+		return err;
+
+	if (rq1->sadb_x_ipsecrequest_proto != rq2->sadb_x_ipsecrequest_proto ||
+	    rq1->sadb_x_ipsecrequest_mode != rq2->sadb_x_ipsecrequest_mode ||
+	    rq1->sadb_x_ipsecrequest_reqid != rq2->sadb_x_ipsecrequest_reqid)
+		return -EINVAL;
+
+	m->proto = rq1->sadb_x_ipsecrequest_proto;
+	if ((mode = pfkey_mode_to_xfrm(rq1->sadb_x_ipsecrequest_mode)) < 0)
+		return -EINVAL;
+	m->mode = mode;
+	m->reqid = rq1->sadb_x_ipsecrequest_reqid;
+
+	return ((int)(rq1->sadb_x_ipsecrequest_len +
+		      rq2->sadb_x_ipsecrequest_len));
+}
+
+static int pfkey_migrate(struct sock *sk, struct sk_buff *skb,
+			 struct sadb_msg *hdr, void **ext_hdrs)
+{
+	int i, len, ret, err = -EINVAL;
+	u8 dir;
+	struct sadb_address *sa;
+	struct sadb_x_policy *pol;
+	struct sadb_x_ipsecrequest *rq;
+	struct xfrm_selector sel;
+	struct xfrm_migrate m[XFRM_MAX_DEPTH];
+
+	if (!present_and_same_family(ext_hdrs[SADB_EXT_ADDRESS_SRC - 1],
+	    ext_hdrs[SADB_EXT_ADDRESS_DST - 1]) ||
+	    !ext_hdrs[SADB_X_EXT_POLICY - 1]) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	pol = ext_hdrs[SADB_X_EXT_POLICY - 1];
+	if (!pol) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	if (pol->sadb_x_policy_dir >= IPSEC_DIR_MAX) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	dir = pol->sadb_x_policy_dir - 1;
+	memset(&sel, 0, sizeof(sel));
+
+	/* set source address info of selector */
+	sa = ext_hdrs[SADB_EXT_ADDRESS_SRC - 1];
+	sel.family = pfkey_sadb_addr2xfrm_addr(sa, &sel.saddr);
+	sel.prefixlen_s = sa->sadb_address_prefixlen;
+	sel.proto = pfkey_proto_to_xfrm(sa->sadb_address_proto);
+	sel.sport = ((struct sockaddr_in *)(sa + 1))->sin_port;
+	if (sel.sport)
+		sel.sport_mask = htons(0xffff);
+
+	/* set destination address info of selector */
+	sa = ext_hdrs[SADB_EXT_ADDRESS_DST - 1],
+	pfkey_sadb_addr2xfrm_addr(sa, &sel.daddr);
+	sel.prefixlen_d = sa->sadb_address_prefixlen;
+	sel.proto = pfkey_proto_to_xfrm(sa->sadb_address_proto);
+	sel.dport = ((struct sockaddr_in *)(sa + 1))->sin_port;
+	if (sel.dport)
+		sel.dport_mask = htons(0xffff);
+
+	rq = (struct sadb_x_ipsecrequest *)(pol + 1);
+
+	/* extract ipsecrequests */
+	i = 0;
+	len = pol->sadb_x_policy_len * 8 - sizeof(struct sadb_x_policy);
+
+	while (len > 0 && i < XFRM_MAX_DEPTH) {
+		ret = ipsecrequests_to_migrate(rq, len, &m[i]);
+		if (ret < 0) {
+			err = ret;
+			goto out;
+		} else {
+			rq = (struct sadb_x_ipsecrequest *)((u8 *)rq + ret);
+			len -= ret;
+			i++;
+		}
+	}
+
+	if (!i || len > 0) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	return xfrm_migrate(&sel, dir, XFRM_POLICY_TYPE_MAIN, m, i);
+
+ out:
+	return err;
+}
+#else
+static int pfkey_migrate(struct sock *sk, struct sk_buff *skb,
+			 struct sadb_msg *hdr, void **ext_hdrs)
+{
+	return -ENOPROTOOPT;
+}
+#endif
+
+
+static int pfkey_spdget(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
+{
+	unsigned int dir;
+	int err = 0, delete;
+	struct sadb_x_policy *pol;
+	struct xfrm_policy *xp;
+	struct km_event c;
+
+	if ((pol = ext_hdrs[SADB_X_EXT_POLICY-1]) == NULL)
+		return -EINVAL;
+
+	dir = xfrm_policy_id2dir(pol->sadb_x_policy_id);
+	if (dir >= XFRM_POLICY_MAX)
+		return -EINVAL;
+
+	delete = (hdr->sadb_msg_type == SADB_X_SPDDELETE2);
+	xp = xfrm_policy_byid(XFRM_POLICY_TYPE_MAIN, dir, pol->sadb_x_policy_id,
+			      delete, &err);
+	if (xp == NULL)
+		return -ENOENT;
+
+	if (delete) {
+		xfrm_audit_policy_delete(xp, err ? 0 : 1,
+				audit_get_loginuid(current->audit_context), 0);
+
+		if (err)
+			goto out;
+		c.seq = hdr->sadb_msg_seq;
+		c.pid = hdr->sadb_msg_pid;
+		c.data.byid = 1;
+		c.event = XFRM_MSG_DELPOLICY;
+		km_policy_notify(xp, dir, &c);
+	} else {
+		err = key_pol_get_resp(sk, xp, hdr, dir);
+	}
 
 out:
 	xfrm_pol_put(xp);
@@ -2077,12 +2641,15 @@ static int dump_sp(struct xfrm_policy *xp, int dir, int count, void *ptr)
 	struct pfkey_dump_data *data = ptr;
 	struct sk_buff *out_skb;
 	struct sadb_msg *out_hdr;
+	int err;
 
 	out_skb = pfkey_xfrm_policy2msg_prep(xp);
 	if (IS_ERR(out_skb))
 		return PTR_ERR(out_skb);
 
-	pfkey_xfrm_policy2msg(out_skb, xp, dir);
+	err = pfkey_xfrm_policy2msg(out_skb, xp, dir);
+	if (err < 0)
+		return err;
 
 	out_hdr = (struct sadb_msg *) out_skb->data;
 	out_hdr->sadb_msg_version = data->hdr->sadb_msg_version;
@@ -2099,25 +2666,45 @@ static int pfkey_spddump(struct sock *sk, struct sk_buff *skb, struct sadb_msg *
 {
 	struct pfkey_dump_data data = { .skb = skb, .hdr = hdr, .sk = sk };
 
-	return xfrm_policy_walk(dump_sp, &data);
+	return xfrm_policy_walk(XFRM_POLICY_TYPE_MAIN, dump_sp, &data);
+}
+
+static int key_notify_policy_flush(struct km_event *c)
+{
+	struct sk_buff *skb_out;
+	struct sadb_msg *hdr;
+
+	skb_out = alloc_skb(sizeof(struct sadb_msg) + 16, GFP_ATOMIC);
+	if (!skb_out)
+		return -ENOBUFS;
+	hdr = (struct sadb_msg *) skb_put(skb_out, sizeof(struct sadb_msg));
+	hdr->sadb_msg_type = SADB_X_SPDFLUSH;
+	hdr->sadb_msg_seq = c->seq;
+	hdr->sadb_msg_pid = c->pid;
+	hdr->sadb_msg_version = PF_KEY_V2;
+	hdr->sadb_msg_errno = (uint8_t) 0;
+	hdr->sadb_msg_len = (sizeof(struct sadb_msg) / sizeof(uint64_t));
+	pfkey_broadcast(skb_out, GFP_ATOMIC, BROADCAST_ALL, NULL);
+	return 0;
+
 }
 
 static int pfkey_spdflush(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr, void **ext_hdrs)
 {
-	struct sk_buff *skb_out;
-	struct sadb_msg *hdr_out;
+	struct km_event c;
+	struct xfrm_audit audit_info;
+	int err;
 
-	skb_out = alloc_skb(sizeof(struct sadb_msg) + 16, GFP_KERNEL);
-	if (!skb_out)
-		return -ENOBUFS;
-
-	xfrm_policy_flush();
-
-	hdr_out = (struct sadb_msg *) skb_put(skb_out, sizeof(struct sadb_msg));
-	pfkey_hdr_dup(hdr_out, hdr);
-	hdr_out->sadb_msg_errno = (uint8_t) 0;
-	hdr_out->sadb_msg_len = (sizeof(struct sadb_msg) / sizeof(uint64_t));
-	pfkey_broadcast(skb_out, GFP_KERNEL, BROADCAST_ALL, NULL);
+	audit_info.loginuid = audit_get_loginuid(current->audit_context);
+	audit_info.secid = 0;
+	err = xfrm_policy_flush(XFRM_POLICY_TYPE_MAIN, &audit_info);
+	if (err)
+		return err;
+	c.data.type = XFRM_POLICY_TYPE_MAIN;
+	c.event = XFRM_MSG_FLUSHPOLICY;
+	c.pid = hdr->sadb_msg_pid;
+	c.seq = hdr->sadb_msg_seq;
+	km_policy_notify(NULL, 0, &c);
 
 	return 0;
 }
@@ -2147,6 +2734,7 @@ static pfkey_handler pfkey_funcs[SADB_MAX + 1] = {
 	[SADB_X_SPDFLUSH]	= pfkey_spdflush,
 	[SADB_X_SPDSETIDX]	= pfkey_spdadd,
 	[SADB_X_SPDDELETE2]	= pfkey_spdget,
+	[SADB_X_MIGRATE]	= pfkey_migrate,
 };
 
 static int pfkey_process(struct sock *sk, struct sk_buff *skb, struct sadb_msg *hdr)
@@ -2196,12 +2784,22 @@ static struct sadb_msg *pfkey_get_base_msg(struct sk_buff *skb, int *errp)
 
 static inline int aalg_tmpl_set(struct xfrm_tmpl *t, struct xfrm_algo_desc *d)
 {
-	return t->aalgos & (1 << d->desc.sadb_alg_id);
+	unsigned int id = d->desc.sadb_alg_id;
+
+	if (id >= sizeof(t->aalgos) * 8)
+		return 0;
+
+	return (t->aalgos >> id) & 1;
 }
 
 static inline int ealg_tmpl_set(struct xfrm_tmpl *t, struct xfrm_algo_desc *d)
 {
-	return t->ealgos & (1 << d->desc.sadb_alg_id);
+	unsigned int id = d->desc.sadb_alg_id;
+
+	if (id >= sizeof(t->ealgos) * 8)
+		return 0;
+
+	return (t->ealgos >> id) & 1;
 }
 
 static int count_ah_combs(struct xfrm_tmpl *t)
@@ -2226,15 +2824,15 @@ static int count_esp_combs(struct xfrm_tmpl *t)
 		struct xfrm_algo_desc *ealg = xfrm_ealg_get_byidx(i);
 		if (!ealg)
 			break;
-			
+
 		if (!(ealg_tmpl_set(t, ealg) && ealg->available))
 			continue;
-			
+
 		for (k = 1; ; k++) {
 			struct xfrm_algo_desc *aalg = xfrm_aalg_get_byidx(k);
 			if (!aalg)
 				break;
-				
+
 			if (aalg_tmpl_set(t, aalg) && aalg->available)
 				sz += sizeof(struct sadb_comb);
 		}
@@ -2289,10 +2887,10 @@ static void dump_esp_combs(struct sk_buff *skb, struct xfrm_tmpl *t)
 		struct xfrm_algo_desc *ealg = xfrm_ealg_get_byidx(i);
 		if (!ealg)
 			break;
-	
+
 		if (!(ealg_tmpl_set(t, ealg) && ealg->available))
 			continue;
-			
+
 		for (k = 1; ; k++) {
 			struct sadb_comb *c;
 			struct xfrm_algo_desc *aalg = xfrm_aalg_get_byidx(k);
@@ -2317,13 +2915,25 @@ static void dump_esp_combs(struct sk_buff *skb, struct xfrm_tmpl *t)
 	}
 }
 
-static int pfkey_send_notify(struct xfrm_state *x, int hard)
+static int key_notify_policy_expire(struct xfrm_policy *xp, struct km_event *c)
+{
+	return 0;
+}
+
+static int key_notify_sa_expire(struct xfrm_state *x, struct km_event *c)
 {
 	struct sk_buff *out_skb;
 	struct sadb_msg *out_hdr;
-	int hsc = (hard ? 2 : 1);
+	int hard;
+	int hsc;
 
-	out_skb = pfkey_xfrm_state2msg(x, 0, hsc);
+	hard = c->data.hard;
+	if (hard)
+		hsc = 2;
+	else
+		hsc = 1;
+
+	out_skb = pfkey_xfrm_state2msg_expire(x, hsc);
 	if (IS_ERR(out_skb))
 		return PTR_ERR(out_skb);
 
@@ -2337,6 +2947,51 @@ static int pfkey_send_notify(struct xfrm_state *x, int hard)
 	out_hdr->sadb_msg_pid = 0;
 
 	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_REGISTERED, NULL);
+	return 0;
+}
+
+static int pfkey_send_notify(struct xfrm_state *x, struct km_event *c)
+{
+	switch (c->event) {
+	case XFRM_MSG_EXPIRE:
+		return key_notify_sa_expire(x, c);
+	case XFRM_MSG_DELSA:
+	case XFRM_MSG_NEWSA:
+	case XFRM_MSG_UPDSA:
+		return key_notify_sa(x, c);
+	case XFRM_MSG_FLUSHSA:
+		return key_notify_sa_flush(c);
+	case XFRM_MSG_NEWAE: /* not yet supported */
+		break;
+	default:
+		printk("pfkey: Unknown SA event %d\n", c->event);
+		break;
+	}
+
+	return 0;
+}
+
+static int pfkey_send_policy_notify(struct xfrm_policy *xp, int dir, struct km_event *c)
+{
+	if (xp && xp->type != XFRM_POLICY_TYPE_MAIN)
+		return 0;
+
+	switch (c->event) {
+	case XFRM_MSG_POLEXPIRE:
+		return key_notify_policy_expire(xp, c);
+	case XFRM_MSG_DELPOLICY:
+	case XFRM_MSG_NEWPOLICY:
+	case XFRM_MSG_UPDPOLICY:
+		return key_notify_policy(xp, dir, c);
+	case XFRM_MSG_FLUSHPOLICY:
+		if (c->data.type != XFRM_POLICY_TYPE_MAIN)
+			break;
+		return key_notify_policy_flush(c);
+	default:
+		printk("pfkey: Unknown policy event %d\n", c->event);
+		break;
+	}
+
 	return 0;
 }
 
@@ -2364,7 +3019,10 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 #endif
 	int sockaddr_size;
 	int size;
-	
+	struct sadb_x_sec_ctx *sec_ctx;
+	struct xfrm_sec_ctx *xfrm_ctx;
+	int ctx_size = 0;
+
 	sockaddr_size = pfkey_sockaddr_size(x->props.family);
 	if (!sockaddr_size)
 		return -EINVAL;
@@ -2373,16 +3031,21 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 		(sizeof(struct sadb_address) * 2) +
 		(sockaddr_size * 2) +
 		sizeof(struct sadb_x_policy);
-	
+
 	if (x->id.proto == IPPROTO_AH)
 		size += count_ah_combs(t);
 	else if (x->id.proto == IPPROTO_ESP)
 		size += count_esp_combs(t);
 
+	if ((xfrm_ctx = x->security)) {
+		ctx_size = PFKEY_ALIGN8(xfrm_ctx->ctx_len);
+		size +=  sizeof(struct sadb_x_sec_ctx) + ctx_size;
+	}
+
 	skb =  alloc_skb(size + 16, GFP_ATOMIC);
 	if (skb == NULL)
 		return -ENOMEM;
-	
+
 	hdr = (struct sadb_msg *) skb_put(skb, sizeof(struct sadb_msg));
 	hdr->sadb_msg_version = PF_KEY_V2;
 	hdr->sadb_msg_type = SADB_ACQUIRE;
@@ -2394,9 +3057,9 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 	hdr->sadb_msg_pid = 0;
 
 	/* src address */
-	addr = (struct sadb_address*) skb_put(skb, 
+	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
-	addr->sadb_address_len = 
+	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
 			sizeof(uint64_t);
 	addr->sadb_address_exttype = SADB_EXT_ADDRESS_SRC;
@@ -2426,9 +3089,9 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 #endif
 	else
 		BUG();
-	
+
 	/* dst address */
-	addr = (struct sadb_address*) skb_put(skb, 
+	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
 	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
@@ -2437,7 +3100,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 	addr->sadb_address_proto = 0;
 	addr->sadb_address_reserved = 0;
 	if (x->props.family == AF_INET) {
-		addr->sadb_address_prefixlen = 32; 
+		addr->sadb_address_prefixlen = 32;
 
 		sin = (struct sockaddr_in *) (addr + 1);
 		sin->sin_family = AF_INET;
@@ -2447,7 +3110,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 	}
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	else if (x->props.family == AF_INET6) {
-		addr->sadb_address_prefixlen = 128; 
+		addr->sadb_address_prefixlen = 128;
 
 		sin6 = (struct sockaddr_in6 *) (addr + 1);
 		sin6->sin6_family = AF_INET6;
@@ -2474,16 +3137,31 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 	else if (x->id.proto == IPPROTO_ESP)
 		dump_esp_combs(skb, t);
 
+	/* security context */
+	if (xfrm_ctx) {
+		sec_ctx = (struct sadb_x_sec_ctx *) skb_put(skb,
+				sizeof(struct sadb_x_sec_ctx) + ctx_size);
+		sec_ctx->sadb_x_sec_len =
+		  (sizeof(struct sadb_x_sec_ctx) + ctx_size) / sizeof(uint64_t);
+		sec_ctx->sadb_x_sec_exttype = SADB_X_EXT_SEC_CTX;
+		sec_ctx->sadb_x_ctx_doi = xfrm_ctx->ctx_doi;
+		sec_ctx->sadb_x_ctx_alg = xfrm_ctx->ctx_alg;
+		sec_ctx->sadb_x_ctx_len = xfrm_ctx->ctx_len;
+		memcpy(sec_ctx + 1, xfrm_ctx->ctx_str,
+		       xfrm_ctx->ctx_len);
+	}
+
 	return pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_REGISTERED, NULL);
 }
 
-static struct xfrm_policy *pfkey_compile_policy(u16 family, int opt,
-                                                u8 *data, int len, int *dir)
+static struct xfrm_policy *pfkey_compile_policy(struct sock *sk, int opt,
+						u8 *data, int len, int *dir)
 {
 	struct xfrm_policy *xp;
 	struct sadb_x_policy *pol = (struct sadb_x_policy*)data;
+	struct sadb_x_sec_ctx *sec_ctx;
 
-	switch (family) {
+	switch (sk->sk_family) {
 	case AF_INET:
 		if (opt != IP_IPSEC_POLICY) {
 			*dir = -EOPNOTSUPP;
@@ -2524,22 +3202,46 @@ static struct xfrm_policy *pfkey_compile_policy(u16 family, int opt,
 	xp->lft.hard_byte_limit = XFRM_INF;
 	xp->lft.soft_packet_limit = XFRM_INF;
 	xp->lft.hard_packet_limit = XFRM_INF;
-	xp->family = family;
+	xp->family = sk->sk_family;
 
 	xp->xfrm_nr = 0;
 	if (pol->sadb_x_policy_type == IPSEC_POLICY_IPSEC &&
 	    (*dir = parse_ipsecrequests(xp, pol)) < 0)
 		goto out;
 
+	/* security context too */
+	if (len >= (pol->sadb_x_policy_len*8 +
+	    sizeof(struct sadb_x_sec_ctx))) {
+		char *p = (char *)pol;
+		struct xfrm_user_sec_ctx *uctx;
+
+		p += pol->sadb_x_policy_len*8;
+		sec_ctx = (struct sadb_x_sec_ctx *)p;
+		if (len < pol->sadb_x_policy_len*8 +
+		    sec_ctx->sadb_x_sec_len) {
+			*dir = -EINVAL;
+			goto out;
+		}
+		if ((*dir = verify_sec_ctx_len(p)))
+			goto out;
+		uctx = pfkey_sadb2xfrm_user_sec_ctx(sec_ctx);
+		*dir = security_xfrm_policy_alloc(xp, uctx);
+		kfree(uctx);
+
+		if (*dir)
+			goto out;
+	}
+
 	*dir = pol->sadb_x_policy_dir-1;
 	return xp;
 
 out:
+	security_xfrm_policy_free(xp);
 	kfree(xp);
 	return NULL;
 }
 
-static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, u16 sport)
+static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, __be16 sport)
 {
 	struct sk_buff *skb;
 	struct sadb_msg *hdr;
@@ -2572,17 +3274,17 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	 * HDR | SA | ADDRESS_SRC (old addr) | NAT_T_SPORT (old port) |
 	 * ADDRESS_DST (new addr) | NAT_T_DPORT (new port)
 	 */
-	
+
 	size = sizeof(struct sadb_msg) +
 		sizeof(struct sadb_sa) +
 		(sizeof(struct sadb_address) * 2) +
 		(sockaddr_size * 2) +
 		(sizeof(struct sadb_x_nat_t_port) * 2);
-	
+
 	skb =  alloc_skb(size + 16, GFP_ATOMIC);
 	if (skb == NULL)
 		return -ENOMEM;
-	
+
 	hdr = (struct sadb_msg *) skb_put(skb, sizeof(struct sadb_msg));
 	hdr->sadb_msg_version = PF_KEY_V2;
 	hdr->sadb_msg_type = SADB_X_NAT_T_NEW_MAPPING;
@@ -2607,7 +3309,7 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	/* ADDRESS_SRC (old addr) */
 	addr = (struct sadb_address*)
 		skb_put(skb, sizeof(struct sadb_address)+sockaddr_size);
-	addr->sadb_address_len = 
+	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
 			sizeof(uint64_t);
 	addr->sadb_address_exttype = SADB_EXT_ADDRESS_SRC;
@@ -2648,7 +3350,7 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	/* ADDRESS_DST (new addr) */
 	addr = (struct sadb_address*)
 		skb_put(skb, sizeof(struct sadb_address)+sockaddr_size);
-	addr->sadb_address_len = 
+	addr->sadb_address_len =
 		(sizeof(struct sadb_address)+sockaddr_size)/
 			sizeof(uint64_t);
 	addr->sadb_address_exttype = SADB_EXT_ADDRESS_DST;
@@ -2688,6 +3390,241 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	return pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_REGISTERED, NULL);
 }
 
+#ifdef CONFIG_NET_KEY_MIGRATE
+static int set_sadb_address(struct sk_buff *skb, int sasize, int type,
+			    struct xfrm_selector *sel)
+{
+	struct sadb_address *addr;
+	struct sockaddr_in *sin;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	struct sockaddr_in6 *sin6;
+#endif
+	addr = (struct sadb_address *)skb_put(skb, sizeof(struct sadb_address) + sasize);
+	addr->sadb_address_len = (sizeof(struct sadb_address) + sasize)/8;
+	addr->sadb_address_exttype = type;
+	addr->sadb_address_proto = sel->proto;
+	addr->sadb_address_reserved = 0;
+
+	switch (type) {
+	case SADB_EXT_ADDRESS_SRC:
+		if (sel->family == AF_INET) {
+			addr->sadb_address_prefixlen = sel->prefixlen_s;
+			sin = (struct sockaddr_in *)(addr + 1);
+			sin->sin_family = AF_INET;
+			memcpy(&sin->sin_addr.s_addr, &sel->saddr,
+			       sizeof(sin->sin_addr.s_addr));
+			sin->sin_port = 0;
+			memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
+		}
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+		else if (sel->family == AF_INET6) {
+			addr->sadb_address_prefixlen = sel->prefixlen_s;
+			sin6 = (struct sockaddr_in6 *)(addr + 1);
+			sin6->sin6_family = AF_INET6;
+			sin6->sin6_port = 0;
+			sin6->sin6_flowinfo = 0;
+			sin6->sin6_scope_id = 0;
+			memcpy(&sin6->sin6_addr.s6_addr, &sel->saddr,
+			       sizeof(sin6->sin6_addr.s6_addr));
+		}
+#endif
+		break;
+	case SADB_EXT_ADDRESS_DST:
+		if (sel->family == AF_INET) {
+			addr->sadb_address_prefixlen = sel->prefixlen_d;
+			sin = (struct sockaddr_in *)(addr + 1);
+			sin->sin_family = AF_INET;
+			memcpy(&sin->sin_addr.s_addr, &sel->daddr,
+			       sizeof(sin->sin_addr.s_addr));
+			sin->sin_port = 0;
+			memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
+		}
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+		else if (sel->family == AF_INET6) {
+			addr->sadb_address_prefixlen = sel->prefixlen_d;
+			sin6 = (struct sockaddr_in6 *)(addr + 1);
+			sin6->sin6_family = AF_INET6;
+			sin6->sin6_port = 0;
+			sin6->sin6_flowinfo = 0;
+			sin6->sin6_scope_id = 0;
+			memcpy(&sin6->sin6_addr.s6_addr, &sel->daddr,
+			       sizeof(sin6->sin6_addr.s6_addr));
+		}
+#endif
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int set_ipsecrequest(struct sk_buff *skb,
+			    uint8_t proto, uint8_t mode, int level,
+			    uint32_t reqid, uint8_t family,
+			    xfrm_address_t *src, xfrm_address_t *dst)
+{
+	struct sadb_x_ipsecrequest *rq;
+	struct sockaddr_in *sin;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	struct sockaddr_in6 *sin6;
+#endif
+	int size_req;
+
+	size_req = sizeof(struct sadb_x_ipsecrequest) +
+		   pfkey_sockaddr_pair_size(family);
+
+	rq = (struct sadb_x_ipsecrequest *)skb_put(skb, size_req);
+	memset(rq, 0, size_req);
+	rq->sadb_x_ipsecrequest_len = size_req;
+	rq->sadb_x_ipsecrequest_proto = proto;
+	rq->sadb_x_ipsecrequest_mode = mode;
+	rq->sadb_x_ipsecrequest_level = level;
+	rq->sadb_x_ipsecrequest_reqid = reqid;
+
+	switch (family) {
+	case AF_INET:
+		sin = (struct sockaddr_in *)(rq + 1);
+		sin->sin_family = AF_INET;
+		memcpy(&sin->sin_addr.s_addr, src,
+		       sizeof(sin->sin_addr.s_addr));
+		sin++;
+		sin->sin_family = AF_INET;
+		memcpy(&sin->sin_addr.s_addr, dst,
+		       sizeof(sin->sin_addr.s_addr));
+		break;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	case AF_INET6:
+		sin6 = (struct sockaddr_in6 *)(rq + 1);
+		sin6->sin6_family = AF_INET6;
+		sin6->sin6_port = 0;
+		sin6->sin6_flowinfo = 0;
+		sin6->sin6_scope_id = 0;
+		memcpy(&sin6->sin6_addr.s6_addr, src,
+		       sizeof(sin6->sin6_addr.s6_addr));
+		sin6++;
+		sin6->sin6_family = AF_INET6;
+		sin6->sin6_port = 0;
+		sin6->sin6_flowinfo = 0;
+		sin6->sin6_scope_id = 0;
+		memcpy(&sin6->sin6_addr.s6_addr, dst,
+		       sizeof(sin6->sin6_addr.s6_addr));
+		break;
+#endif
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_NET_KEY_MIGRATE
+static int pfkey_send_migrate(struct xfrm_selector *sel, u8 dir, u8 type,
+			      struct xfrm_migrate *m, int num_bundles)
+{
+	int i;
+	int sasize_sel;
+	int size = 0;
+	int size_pol = 0;
+	struct sk_buff *skb;
+	struct sadb_msg *hdr;
+	struct sadb_x_policy *pol;
+	struct xfrm_migrate *mp;
+
+	if (type != XFRM_POLICY_TYPE_MAIN)
+		return 0;
+
+	if (num_bundles <= 0 || num_bundles > XFRM_MAX_DEPTH)
+		return -EINVAL;
+
+	/* selector */
+	sasize_sel = pfkey_sockaddr_size(sel->family);
+	if (!sasize_sel)
+		return -EINVAL;
+	size += (sizeof(struct sadb_address) + sasize_sel) * 2;
+
+	/* policy info */
+	size_pol += sizeof(struct sadb_x_policy);
+
+	/* ipsecrequests */
+	for (i = 0, mp = m; i < num_bundles; i++, mp++) {
+		/* old locator pair */
+		size_pol += sizeof(struct sadb_x_ipsecrequest) +
+			    pfkey_sockaddr_pair_size(mp->old_family);
+		/* new locator pair */
+		size_pol += sizeof(struct sadb_x_ipsecrequest) +
+			    pfkey_sockaddr_pair_size(mp->new_family);
+	}
+
+	size += sizeof(struct sadb_msg) + size_pol;
+
+	/* alloc buffer */
+	skb = alloc_skb(size, GFP_ATOMIC);
+	if (skb == NULL)
+		return -ENOMEM;
+
+	hdr = (struct sadb_msg *)skb_put(skb, sizeof(struct sadb_msg));
+	hdr->sadb_msg_version = PF_KEY_V2;
+	hdr->sadb_msg_type = SADB_X_MIGRATE;
+	hdr->sadb_msg_satype = pfkey_proto2satype(m->proto);
+	hdr->sadb_msg_len = size / 8;
+	hdr->sadb_msg_errno = 0;
+	hdr->sadb_msg_reserved = 0;
+	hdr->sadb_msg_seq = 0;
+	hdr->sadb_msg_pid = 0;
+
+	/* selector src */
+	set_sadb_address(skb, sasize_sel, SADB_EXT_ADDRESS_SRC, sel);
+
+	/* selector dst */
+	set_sadb_address(skb, sasize_sel, SADB_EXT_ADDRESS_DST, sel);
+
+	/* policy information */
+	pol = (struct sadb_x_policy *)skb_put(skb, sizeof(struct sadb_x_policy));
+	pol->sadb_x_policy_len = size_pol / 8;
+	pol->sadb_x_policy_exttype = SADB_X_EXT_POLICY;
+	pol->sadb_x_policy_type = IPSEC_POLICY_IPSEC;
+	pol->sadb_x_policy_dir = dir + 1;
+	pol->sadb_x_policy_id = 0;
+	pol->sadb_x_policy_priority = 0;
+
+	for (i = 0, mp = m; i < num_bundles; i++, mp++) {
+		/* old ipsecrequest */
+		int mode = pfkey_mode_from_xfrm(mp->mode);
+		if (mode < 0)
+			goto err;
+		if (set_ipsecrequest(skb, mp->proto, mode,
+				     (mp->reqid ?  IPSEC_LEVEL_UNIQUE : IPSEC_LEVEL_REQUIRE),
+				     mp->reqid, mp->old_family,
+				     &mp->old_saddr, &mp->old_daddr) < 0)
+			goto err;
+
+		/* new ipsecrequest */
+		if (set_ipsecrequest(skb, mp->proto, mode,
+				     (mp->reqid ? IPSEC_LEVEL_UNIQUE : IPSEC_LEVEL_REQUIRE),
+				     mp->reqid, mp->new_family,
+				     &mp->new_saddr, &mp->new_daddr) < 0)
+			goto err;
+	}
+
+	/* broadcast migrate message to sockets */
+	pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_ALL, NULL);
+
+	return 0;
+
+err:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+#else
+static int pfkey_send_migrate(struct xfrm_selector *sel, u8 dir, u8 type,
+			      struct xfrm_migrate *m, int num_bundles)
+{
+	return -ENOPROTOOPT;
+}
+#endif
+
 static int pfkey_sendmsg(struct kiocb *kiocb,
 			 struct socket *sock, struct msghdr *msg, size_t len)
 {
@@ -2717,9 +3654,9 @@ static int pfkey_sendmsg(struct kiocb *kiocb,
 	if (!hdr)
 		goto out;
 
-	down(&xfrm_cfg_sem);
+	mutex_lock(&xfrm_cfg_mutex);
 	err = pfkey_process(sk, skb, hdr);
-	up(&xfrm_cfg_sem);
+	mutex_unlock(&xfrm_cfg_mutex);
 
 out:
 	if (err && hdr && pfkey_error(hdr, err, sk) == 0)
@@ -2753,7 +3690,7 @@ static int pfkey_recvmsg(struct kiocb *kiocb,
 		copied = len;
 	}
 
-	skb->h.raw = skb->data;
+	skb_reset_transport_header(skb);
 	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 	if (err)
 		goto out_free;
@@ -2768,7 +3705,7 @@ out:
 	return err;
 }
 
-static struct proto_ops pfkey_ops = {
+static const struct proto_ops pfkey_ops = {
 	.family		=	PF_KEY,
 	.owner		=	THIS_MODULE,
 	/* Operations that make no sense on pfkey sockets. */
@@ -2823,7 +3760,7 @@ static int pfkey_read_proc(char *buffer, char **start, off_t offset,
 			       );
 
 		buffer[len++] = '\n';
-		
+
 		pos = begin + len;
 		if (pos < offset) {
 			len = 0;
@@ -2856,23 +3793,47 @@ static struct xfrm_mgr pfkeyv2_mgr =
 	.acquire	= pfkey_send_acquire,
 	.compile_policy	= pfkey_compile_policy,
 	.new_mapping	= pfkey_send_new_mapping,
+	.notify_policy	= pfkey_send_policy_notify,
+	.migrate	= pfkey_send_migrate,
 };
 
 static void __exit ipsec_pfkey_exit(void)
 {
 	xfrm_unregister_km(&pfkeyv2_mgr);
-	remove_proc_entry("net/pfkey", NULL);
+	remove_proc_entry("pfkey", init_net.proc_net);
 	sock_unregister(PF_KEY);
+	proto_unregister(&key_proto);
 }
 
 static int __init ipsec_pfkey_init(void)
 {
-	sock_register(&pfkey_family_ops);
+	int err = proto_register(&key_proto, 0);
+
+	if (err != 0)
+		goto out;
+
+	err = sock_register(&pfkey_family_ops);
+	if (err != 0)
+		goto out_unregister_key_proto;
 #ifdef CONFIG_PROC_FS
-	create_proc_read_entry("net/pfkey", 0, NULL, pfkey_read_proc, NULL);
+	err = -ENOMEM;
+	if (create_proc_read_entry("pfkey", 0, init_net.proc_net, pfkey_read_proc, NULL) == NULL)
+		goto out_sock_unregister;
 #endif
-	xfrm_register_km(&pfkeyv2_mgr);
-	return 0;
+	err = xfrm_register_km(&pfkeyv2_mgr);
+	if (err != 0)
+		goto out_remove_proc_entry;
+out:
+	return err;
+out_remove_proc_entry:
+#ifdef CONFIG_PROC_FS
+	remove_proc_entry("net/pfkey", NULL);
+out_sock_unregister:
+#endif
+	sock_unregister(PF_KEY);
+out_unregister_key_proto:
+	proto_unregister(&key_proto);
+	goto out;
 }
 
 module_init(ipsec_pfkey_init);

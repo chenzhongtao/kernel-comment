@@ -27,7 +27,6 @@
  *	same manner.
  */
 
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -140,13 +139,12 @@ static int __devinit probe_one(struct pci_dev *pdev, const struct pci_device_id 
 	printk(KERN_INFO "kahlua: XpressAudio on IRQ %d, DMA %d, %d\n",
 		irq, dma8, dma16);
 	
-	hw_config = kmalloc(sizeof(struct address_info), GFP_KERNEL);
+	hw_config = kzalloc(sizeof(struct address_info), GFP_KERNEL);
 	if(hw_config == NULL)
 	{
 		printk(KERN_ERR "kahlua: out of memory.\n");
 		return 1;
 	}
-	memset(hw_config, 0, sizeof(*hw_config));
 	
 	pci_set_drvdata(pdev, hw_config);
 	
@@ -218,7 +216,7 @@ static struct pci_driver kahlua_driver = {
 static int __init kahlua_init_module(void)
 {
 	printk(KERN_INFO "Cyrix Kahlua VSA1 XpressAudio support (c) Copyright 2003 Red Hat Inc\n");
-	return pci_module_init(&kahlua_driver);
+	return pci_register_driver(&kahlua_driver);
 }
 
 static void __devexit kahlua_cleanup_module(void)

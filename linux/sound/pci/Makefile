@@ -1,8 +1,10 @@
 #
 # Makefile for ALSA
-# Copyright (c) 2001 by Jaroslav Kysela <perex@suse.cz>
+# Copyright (c) 2001 by Jaroslav Kysela <perex@perex.cz>
 #
 
+snd-ad1889-objs := ad1889.o
+snd-als300-objs := als300.o
 snd-als4000-objs := als4000.o
 snd-atiixp-objs := atiixp.o
 snd-atiixp-modem-objs := atiixp_modem.o
@@ -10,6 +12,7 @@ snd-azt3328-objs := azt3328.o
 snd-bt87x-objs := bt87x.o
 snd-cmipci-objs := cmipci.o
 snd-cs4281-objs := cs4281.o
+snd-cs5530-objs := cs5530.o
 snd-ens1370-objs := ens1370.o
 snd-ens1371-objs := ens1371.o
 snd-es1938-objs := es1938.o
@@ -25,6 +28,8 @@ snd-via82xx-objs := via82xx.o
 snd-via82xx-modem-objs := via82xx_modem.o
 
 # Toplevel Module Dependency
+obj-$(CONFIG_SND_AD1889) += snd-ad1889.o
+obj-$(CONFIG_SND_ALS300) += snd-als300.o
 obj-$(CONFIG_SND_ALS4000) += snd-als4000.o
 obj-$(CONFIG_SND_ATIIXP) += snd-atiixp.o
 obj-$(CONFIG_SND_ATIIXP_MODEM) += snd-atiixp-modem.o
@@ -32,6 +37,7 @@ obj-$(CONFIG_SND_AZT3328) += snd-azt3328.o
 obj-$(CONFIG_SND_BT87X) += snd-bt87x.o
 obj-$(CONFIG_SND_CMIPCI) += snd-cmipci.o
 obj-$(CONFIG_SND_CS4281) += snd-cs4281.o
+obj-$(CONFIG_SND_CS5530) += snd-cs5530.o
 obj-$(CONFIG_SND_ENS1370) += snd-ens1370.o
 obj-$(CONFIG_SND_ENS1371) += snd-ens1371.o
 obj-$(CONFIG_SND_ES1938) += snd-es1938.o
@@ -52,11 +58,16 @@ obj-$(CONFIG_SND) += \
 	au88x0/ \
 	ca0106/ \
 	cs46xx/ \
+	cs5535audio/ \
+	echoaudio/ \
 	emu10k1/ \
+	hda/ \
 	ice1712/ \
 	korg1212/ \
 	mixart/ \
 	nm256/ \
+	pcxhr/ \
+	riptide/ \
 	rme9652/ \
 	trident/ \
 	ymfpci/ \

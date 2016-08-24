@@ -1,40 +1,28 @@
 /* 
- * Copyright (C) 2002 Jeff Dike (jdike@karaya.com)
+ * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
 #ifndef __ARCH_UM_MMU_H
 #define __ARCH_UM_MMU_H
 
-#include "linux/config.h"
-#include "choose-mode.h"
+#include "uml-config.h"
+#include "mm_id.h"
+#include "asm/ldt.h"
 
-#ifdef CONFIG_MODE_TT
-#include "mmu-tt.h"
+typedef struct mm_context {
+	struct mm_id id;
+	unsigned long last_page_table;
+#ifdef CONFIG_3_LEVEL_PGTABLES
+	unsigned long last_pmd;
 #endif
-
-#ifdef CONFIG_MODE_SKAS
-#include "mmu-skas.h"
-#endif
-
-typedef union {
-#ifdef CONFIG_MODE_TT
-	struct mmu_context_tt tt;
-#endif
-#ifdef CONFIG_MODE_SKAS
-	struct mmu_context_skas skas;
-#endif
+	struct uml_ldt ldt;
 } mm_context_t;
 
-#endif
+extern void __switch_mm(struct mm_id * mm_idp);
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+/* Avoid tangled inclusion with asm/ldt.h */
+extern long init_new_ldt(struct mm_context *to_mm, struct mm_context *from_mm);
+extern void free_ldt(struct mm_context *mm);
+
+#endif

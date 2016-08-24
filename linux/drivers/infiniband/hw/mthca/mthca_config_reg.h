@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004 Topspin Communications.  All rights reserved.
+ * Copyright (c) 2005 Mellanox Technologies. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -46,5 +47,6 @@
 #define MTHCA_MAP_ECR_SIZE     (MTHCA_ECR_SIZE + MTHCA_ECR_CLR_SIZE)
 #define MTHCA_CLR_INT_BASE     0xf00d8
 #define MTHCA_CLR_INT_SIZE     0x00008
+#define MTHCA_EQ_SET_CI_SIZE   (8 * 32)
 
 #endif /* MTHCA_CONFIG_REG_H */

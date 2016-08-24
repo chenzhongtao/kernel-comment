@@ -5,7 +5,7 @@
  */
 
 /*
- *  This file contains the i386 architecture specific IDE code.
+ *  This file contains the ARM architecture specific IDE code.
  */
 
 #ifndef __ASMARM_IDE_H
@@ -18,7 +18,6 @@
 #endif
 
 #if !defined(CONFIG_ARCH_L7200)
-# define IDE_ARCH_OBSOLETE_INIT
 # ifdef CONFIG_ARCH_CLPS7500
 #  define ide_default_io_ctl(base)	((base) + 0x206) /* obsolete */
 # else

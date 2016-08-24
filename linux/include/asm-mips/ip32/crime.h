@@ -17,9 +17,6 @@
  */
 #define CRIME_BASE	0x14000000	/* physical */
 
-#undef BIT
-#define BIT(x)	(1UL << (x))
-
 struct sgi_crime {
 	volatile unsigned long id;
 #define CRIME_ID_MASK			0xff
@@ -154,7 +151,7 @@ struct sgi_crime {
 #define CRIME_MEM_ERROR_ECC_REPL_MASK	0xffffffff
 };
 
-extern struct sgi_crime *crime;
+extern struct sgi_crime __iomem *crime;
 
 #define CRIME_HI_MEM_BASE	0x40000000	/* this is where whole 1G of RAM is mapped */
 

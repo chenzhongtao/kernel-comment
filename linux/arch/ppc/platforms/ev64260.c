@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/ev64260.c
- *
  * Board setup routines for the Marvell/Galileo EV-64260-BP Evaluation Board.
  *
  * Author: Mark A. Greer <mgreer@mvista.com>
@@ -22,7 +20,6 @@
  * Note: The 750CXe and 7450 are not stable with a 125MHz or 133MHz TCLK/SYSCLK.
  * 	At 100MHz, they are solid.
  */
-#include <linux/config.h>
 
 #include <linux/delay.h>
 #include <linux/pci.h>
@@ -33,10 +30,12 @@
 #include <linux/console.h>
 #include <linux/initrd.h>
 #include <linux/root_dev.h>
+#include <linux/platform_device.h>
 #if !defined(CONFIG_SERIAL_MPSC_CONSOLE)
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/serial_core.h>
+#include <linux/serial_8250.h>
 #else
 #include <linux/mv643xx.h>
 #endif
@@ -80,14 +79,14 @@ ev64260_get_cpu_speed(void)
 {
 	unsigned long	pvr, hid1, pll_ext;
 
-	pvr = PVR_VER(mfspr(PVR));
+	pvr = PVR_VER(mfspr(SPRN_PVR));
 
 	if (pvr != PVR_VER(PVR_7450)) {
-		hid1 = mfspr(HID1) >> 28;
+		hid1 = mfspr(SPRN_HID1) >> 28;
 		return ev64260_get_bus_speed() * cpu_7xx[hid1]/2;
 	}
 	else {
-		hid1 = (mfspr(HID1) & 0x0001e000) >> 13;
+		hid1 = (mfspr(SPRN_HID1) & 0x0001e000) >> 13;
 		pll_ext = 0; /* No way to read; must get from schematic */
 		return ev64260_get_bus_speed() * cpu_745x[pll_ext][hid1]/2;
 	}
@@ -329,7 +328,7 @@ ev64260_early_serial_map(void)
 		port.irq = EV64260_UART_0_IRQ;
 		port.uartclk = BASE_BAUD * 16;
 		port.regshift = 2;
-		port.iotype = SERIAL_IO_MEM;
+		port.iotype = UPIO_MEM;
 		port.flags = STD_COM_FLAGS;
 
 #if defined(CONFIG_SERIAL_TEXT_DEBUG) || defined(CONFIG_KGDB)
@@ -415,15 +414,15 @@ ev64260_fixup_mpsc_pdata(struct platform_device *pdev)
 	return;
 }
 
-static int __init
+static int
 ev64260_platform_notify(struct device *dev)
 {
 	static struct {
 		char	*bus_id;
 		void	((*rtn)(struct platform_device *pdev));
 	} dev_map[] = {
-		{ MPSC_CTLR_NAME "0", ev64260_fixup_mpsc_pdata },
-		{ MPSC_CTLR_NAME "1", ev64260_fixup_mpsc_pdata },
+		{ MPSC_CTLR_NAME ".0", ev64260_fixup_mpsc_pdata },
+		{ MPSC_CTLR_NAME ".1", ev64260_fixup_mpsc_pdata },
 	};
 	struct platform_device	*pdev;
 	int	i;
@@ -530,7 +529,7 @@ ev64260_show_cpuinfo(struct seq_file *m)
 {
 	uint pvid;
 
-	pvid = mfspr(PVR);
+	pvid = mfspr(SPRN_PVR);
 	seq_printf(m, "vendor\t\t: " BOARD_VENDOR "\n");
 	seq_printf(m, "machine\t\t: " BOARD_MACHINE "\n");
 	seq_printf(m, "cpu MHz\t\t: %d\n", ev64260_get_cpu_speed()/1000/1000);
@@ -563,8 +562,8 @@ static __inline__ void
 ev64260_set_bat(void)
 {
 	mb();
-	mtspr(DBAT1U, 0xfb0001fe);
-	mtspr(DBAT1L, 0xfb00002a);
+	mtspr(SPRN_DBAT1U, 0xfb0001fe);
+	mtspr(SPRN_DBAT1L, 0xfb00002a);
 	mb();
 
 	return;

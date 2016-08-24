@@ -1,12 +1,20 @@
 /*
- * linux/drivers/ide/pci/siimage.c		Version 1.07	Nov 30, 2003
+ * linux/drivers/ide/pci/siimage.c		Version 1.19	Nov 16 2007
  *
  * Copyright (C) 2001-2002	Andre Hedrick <andre@linux-ide.org>
  * Copyright (C) 2003		Red Hat <alan@redhat.com>
+ * Copyright (C) 2007		MontaVista Software, Inc.
+ * Copyright (C) 2007		Bartlomiej Zolnierkiewicz
  *
  *  May be copied or modified under the terms of the GNU General Public License
  *
- *  Documentation available under NDA only
+ *  Documentation for CMD680:
+ *  http://gkernel.sourceforge.net/specs/sii/sii-0680a-v1.31.pdf.bz2
+ *
+ *  Documentation for SiI 3112:
+ *  http://gkernel.sourceforge.net/specs/sii/3112A_SiI-DS-0095-B2.pdf.bz2
+ *
+ *  Errata and other documentation only available under NDA.
  *
  *
  *  FAQ Items:
@@ -18,10 +26,18 @@
  *
  *	If you have strange problems with nVidia chipset systems please
  *	see the SI support documentation and update your system BIOS
- *	if neccessary
+ *	if necessary
+ *
+ *  The Dell DRAC4 has some interesting features including effectively hot
+ *  unplugging/replugging the virtual CD interface when the DRAC is reset.
+ *  This often causes drivers/ide/siimage to panic but is ok with the rather
+ *  smarter code in libata.
+ *
+ * TODO:
+ * - IORDY fixes
+ * - VDMA support
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -32,9 +48,6 @@
 
 #include <asm/io.h>
 
-#undef SIIMAGE_VIRTUAL_DMAPIO
-#undef SIIMAGE_LARGE_DMA
-
 /**
  *	pdev_is_sata		-	check if device is SATA
  *	@pdev:	PCI device to check
@@ -44,8 +57,8 @@
  
 static int pdev_is_sata(struct pci_dev *pdev)
 {
-	switch(pdev->device)
-	{
+#ifdef CONFIG_BLK_DEV_IDE_SATA
+	switch(pdev->device) {
 		case PCI_DEVICE_ID_SII_3112:
 		case PCI_DEVICE_ID_SII_1210SA:
 			return 1;
@@ -53,9 +66,10 @@ static int pdev_is_sata(struct pci_dev *pdev)
 			return 0;
 	}
 	BUG();
+#endif
 	return 0;
 }
- 
+
 /**
  *	is_sata			-	check if hwif is SATA
  *	@hwif:	interface to check
@@ -114,189 +128,122 @@ static inline unsigned long siimage_seldev(ide_drive_t *drive, int r)
 }
 
 /**
- *	siimage_ratemask	-	Compute available modes
- *	@drive: IDE drive
+ *	sil_udma_filter		-	compute UDMA mask
+ *	@drive: IDE device
  *
- *	Compute the available speeds for the devices on the interface.
+ *	Compute the available UDMA speeds for the device on the interface.
+ *
  *	For the CMD680 this depends on the clocking mode (scsc), for the
- *	SI3312 SATA controller life is a bit simpler. Enforce UDMA33
- *	as a limit if there is no 80pin cable present.
+ *	SI3112 SATA controller life is a bit simpler.
  */
- 
-static byte siimage_ratemask (ide_drive_t *drive)
+
+static u8 sil_pata_udma_filter(ide_drive_t *drive)
 {
-	ide_hwif_t *hwif	= HWIF(drive);
-	u8 mode	= 0, scsc = 0;
+	ide_hwif_t *hwif = drive->hwif;
 	unsigned long base = (unsigned long) hwif->hwif_data;
+	u8 mask = 0, scsc = 0;
 
 	if (hwif->mmio)
 		scsc = hwif->INB(base + 0x4A);
 	else
 		pci_read_config_byte(hwif->pci_dev, 0x8A, &scsc);
 
-	if(is_sata(hwif))
-	{
-		if(strstr(drive->id->model, "Maxtor"))
-			return 3;
-		return 4;
-	}
-	
 	if ((scsc & 0x30) == 0x10)	/* 133 */
-		mode = 4;
+		mask = ATA_UDMA6;
 	else if ((scsc & 0x30) == 0x20)	/* 2xPCI */
-		mode = 4;
+		mask = ATA_UDMA6;
 	else if ((scsc & 0x30) == 0x00)	/* 100 */
-		mode = 3;
+		mask = ATA_UDMA5;
 	else 	/* Disabled ? */
 		BUG();
 
-	if (!eighty_ninty_three(drive))
-		mode = min(mode, (u8)1);
-	return mode;
+	return mask;
 }
 
-/**
- *	siimage_taskfile_timing	-	turn timing data to a mode
- *	@hwif: interface to query
- *
- *	Read the timing data for the interface and return the 
- *	mode that is being used.
- */
- 
-static byte siimage_taskfile_timing (ide_hwif_t *hwif)
+static u8 sil_sata_udma_filter(ide_drive_t *drive)
 {
-	u16 timing	= 0x328a;
-	unsigned long addr = siimage_selreg(hwif, 2);
-
-	if (hwif->mmio)
-		timing = hwif->INW(addr);
-	else
-		pci_read_config_word(hwif->pci_dev, addr, &timing);
-
-	switch (timing) {
-		case 0x10c1:	return 4;
-		case 0x10c3:	return 3;
-		case 0x1104:
-		case 0x1281:	return 2;
-		case 0x2283:	return 1;
-		case 0x328a:
-		default:	return 0;
-	}
+	return strstr(drive->id->model, "Maxtor") ? ATA_UDMA5 : ATA_UDMA6;
 }
 
 /**
- *	simmage_tuneproc	-	tune a drive
- *	@drive: drive to tune
- *	@mode_wanted: the target operating mode
+ *	sil_set_pio_mode	-	set host controller for PIO mode
+ *	@drive: drive
+ *	@pio: PIO mode number
  *
  *	Load the timing settings for this device mode into the
  *	controller. If we are in PIO mode 3 or 4 turn on IORDY
  *	monitoring (bit 9). The TF timing is bits 31:16
  */
- 
-static void siimage_tuneproc (ide_drive_t *drive, byte mode_wanted)
+
+static void sil_set_pio_mode(ide_drive_t *drive, u8 pio)
 {
+	const u16 tf_speed[]	= { 0x328a, 0x2283, 0x1281, 0x10c3, 0x10c1 };
+	const u16 data_speed[]	= { 0x328a, 0x2283, 0x1104, 0x10c3, 0x10c1 };
+
 	ide_hwif_t *hwif	= HWIF(drive);
+	ide_drive_t *pair	= ide_get_paired_drive(drive);
 	u32 speedt		= 0;
 	u16 speedp		= 0;
 	unsigned long addr	= siimage_seldev(drive, 0x04);
 	unsigned long tfaddr	= siimage_selreg(hwif, 0x02);
-	
-	/* cheat for now and use the docs */
-	switch(mode_wanted) {
-		case 4:	
-			speedp = 0x10c1; 
-			speedt = 0x10c1;
-			break;
-		case 3:	
-			speedp = 0x10C3; 
-			speedt = 0x10C3;
-			break;
-		case 2:	
-			speedp = 0x1104; 
-			speedt = 0x1281;
-			break;
-		case 1:		
-			speedp = 0x2283; 
-			speedt = 0x1281;
-			break;
-		case 0:
-		default:
-			speedp = 0x328A; 
-			speedt = 0x328A;
-			break;
+	unsigned long base	= (unsigned long)hwif->hwif_data;
+	u8 tf_pio		= pio;
+	u8 addr_mask		= hwif->channel ? (hwif->mmio ? 0xF4 : 0x84)
+						: (hwif->mmio ? 0xB4 : 0x80);
+	u8 mode			= 0;
+	u8 unit			= drive->select.b.unit;
+
+	/* trim *taskfile* PIO to the slowest of the master/slave */
+	if (pair->present) {
+		u8 pair_pio = ide_get_best_pio_mode(pair, 255, 4);
+
+		if (pair_pio < tf_pio)
+			tf_pio = pair_pio;
 	}
-	if (hwif->mmio)
-	{
-		hwif->OUTW(speedt, addr);
-		hwif->OUTW(speedp, tfaddr);
+
+	/* cheat for now and use the docs */
+	speedp = data_speed[pio];
+	speedt = tf_speed[tf_pio];
+
+	if (hwif->mmio) {
+		hwif->OUTW(speedp, addr);
+		hwif->OUTW(speedt, tfaddr);
 		/* Now set up IORDY */
-		if(mode_wanted == 3 || mode_wanted == 4)
+		if (pio > 2)
 			hwif->OUTW(hwif->INW(tfaddr-2)|0x200, tfaddr-2);
 		else
 			hwif->OUTW(hwif->INW(tfaddr-2)&~0x200, tfaddr-2);
-	}
-	else
-	{
+
+		mode = hwif->INB(base + addr_mask);
+		mode &= ~(unit ? 0x30 : 0x03);
+		mode |= (unit ? 0x10 : 0x01);
+		hwif->OUTB(mode, base + addr_mask);
+	} else {
 		pci_write_config_word(hwif->pci_dev, addr, speedp);
 		pci_write_config_word(hwif->pci_dev, tfaddr, speedt);
 		pci_read_config_word(hwif->pci_dev, tfaddr-2, &speedp);
 		speedp &= ~0x200;
 		/* Set IORDY for mode 3 or 4 */
-		if(mode_wanted == 3 || mode_wanted == 4)
+		if (pio > 2)
 			speedp |= 0x200;
 		pci_write_config_word(hwif->pci_dev, tfaddr-2, speedp);
+
+		pci_read_config_byte(hwif->pci_dev, addr_mask, &mode);
+		mode &= ~(unit ? 0x30 : 0x03);
+		mode |= (unit ? 0x10 : 0x01);
+		pci_write_config_byte(hwif->pci_dev, addr_mask, mode);
 	}
 }
 
 /**
- *	config_siimage_chipset_for_pio	-	set drive timings
- *	@drive: drive to tune
- *	@speed we want
+ *	sil_set_dma_mode	-	set host controller for DMA mode
+ *	@drive: drive
+ *	@speed: DMA mode
  *
- *	Compute the best pio mode we can for a given device. Also honour
- *	the timings for the driver when dealing with mixed devices. Some
- *	of this is ugly but its all wrapped up here
- *
- *	The SI680 can also do VDMA - we need to start using that
- *
- *	FIXME: we use the BIOS channel timings to avoid driving the task
- *	files too fast at the disk. We need to compute the master/slave
- *	drive PIO mode properly so that we can up the speed on a hotplug
- *	system.
+ *	Tune the SiI chipset for the desired DMA mode.
  */
- 
-static void config_siimage_chipset_for_pio (ide_drive_t *drive, byte set_speed)
-{
-	u8 channel_timings	= siimage_taskfile_timing(HWIF(drive));
-	u8 speed = 0, set_pio	= ide_get_best_pio_mode(drive, 4, 5, NULL);
 
-	/* WARNING PIO timing mess is going to happen b/w devices, argh */
-	if ((channel_timings != set_pio) && (set_pio > channel_timings))
-		set_pio = channel_timings;
-
-	siimage_tuneproc(drive, set_pio);
-	speed = XFER_PIO_0 + set_pio;
-	if (set_speed)
-		(void) ide_config_drive_speed(drive, speed);
-}
-
-static void config_chipset_for_pio (ide_drive_t *drive, byte set_speed)
-{
-	config_siimage_chipset_for_pio(drive, set_speed);
-}
-
-/**
- *	siimage_tune_chipset	-	set controller timings
- *	@drive: Drive to set up
- *	@xferspeed: speed we want to achieve
- *
- *	Tune the SII chipset for the desired mode. If we can't achieve
- *	the desired mode then tune for a lower one, but ultimately
- *	make the thing work.
- */
- 
-static int siimage_tune_chipset (ide_drive_t *drive, byte xferspeed)
+static void sil_set_dma_mode(ide_drive_t *drive, const u8 speed)
 {
 	u8 ultra6[]		= { 0x0F, 0x0B, 0x07, 0x05, 0x03, 0x02, 0x01 };
 	u8 ultra5[]		= { 0x0C, 0x07, 0x05, 0x04, 0x02, 0x01 };
@@ -305,7 +252,6 @@ static int siimage_tune_chipset (ide_drive_t *drive, byte xferspeed)
 	ide_hwif_t *hwif	= HWIF(drive);
 	u16 ultra = 0, multi	= 0;
 	u8 mode = 0, unit	= drive->select.b.unit;
-	u8 speed		= ide_rate_filter(siimage_ratemask(drive), xferspeed);
 	unsigned long base	= (unsigned long)hwif->hwif_data;
 	u8 scsc = 0, addr_mask	= ((hwif->channel) ?
 				    ((hwif->mmio) ? 0xF4 : 0x84) :
@@ -333,20 +279,11 @@ static int siimage_tune_chipset (ide_drive_t *drive, byte xferspeed)
 	scsc = is_sata(hwif) ? 1 : scsc;
 
 	switch(speed) {
-		case XFER_PIO_4:
-		case XFER_PIO_3:
-		case XFER_PIO_2:
-		case XFER_PIO_1:
-		case XFER_PIO_0:
-			siimage_tuneproc(drive, (speed - XFER_PIO_0));
-			mode |= ((unit) ? 0x10 : 0x01);
-			break;
 		case XFER_MW_DMA_2:
 		case XFER_MW_DMA_1:
 		case XFER_MW_DMA_0:
 			multi = dma[speed - XFER_MW_DMA_0];
 			mode |= ((unit) ? 0x20 : 0x02);
-			config_siimage_chipset_for_pio(drive, 0);
 			break;
 		case XFER_UDMA_6:
 		case XFER_UDMA_5:
@@ -359,10 +296,9 @@ static int siimage_tune_chipset (ide_drive_t *drive, byte xferspeed)
 			ultra |= ((scsc) ? (ultra6[speed - XFER_UDMA_0]) :
 					   (ultra5[speed - XFER_UDMA_0]));
 			mode |= ((unit) ? 0x30 : 0x03);
-			config_siimage_chipset_for_pio(drive, 0);
 			break;
 		default:
-			return 1;
+			return;
 	}
 
 	if (hwif->mmio) {
@@ -374,67 +310,6 @@ static int siimage_tune_chipset (ide_drive_t *drive, byte xferspeed)
 		pci_write_config_word(hwif->pci_dev, ma, multi);
 		pci_write_config_word(hwif->pci_dev, ua, ultra);
 	}
-	return (ide_config_drive_speed(drive, speed));
-}
-
-/**
- *	config_chipset_for_dma	-	configure for DMA
- *	@drive: drive to configure
- *
- *	Called by the IDE layer when it wants the timings set up.
- *	For the CMD680 we also need to set up the PIO timings and
- *	enable DMA.
- */
- 
-static int config_chipset_for_dma (ide_drive_t *drive)
-{
-	u8 speed	= ide_dma_speed(drive, siimage_ratemask(drive));
-
-	config_chipset_for_pio(drive, !speed);
-
-	if (!speed)
-		return 0;
-
-	if (ide_set_xfer_rate(drive, speed))
-		return 0;
-
-	if (!drive->init_speed)
-		drive->init_speed = speed;
-
-	return ide_dma_enable(drive);
-}
-
-/**
- *	siimage_configure_drive_for_dma	-	set up for DMA transfers
- *	@drive: drive we are going to set up
- *
- *	Set up the drive for DMA, tune the controller and drive as 
- *	required. If the drive isn't suitable for DMA or we hit
- *	other problems then we will drop down to PIO and set up
- *	PIO appropriately
- */
- 
-static int siimage_config_drive_for_dma (ide_drive_t *drive)
-{
-	ide_hwif_t *hwif	= HWIF(drive);
-	struct hd_driveid *id	= drive->id;
-
-	if ((id->capability & 1) != 0 && drive->autodma) {
-
-		if (ide_use_dma(drive)) {
-			if (config_chipset_for_dma(drive))
-				return hwif->ide_dma_on(drive);
-		}
-
-		goto fast_ata_pio;
-
-	} else if ((id->capability & 8) || (id->field_valid & 2)) {
-fast_ata_pio:
-		config_chipset_for_pio(drive, 1);
-		return hwif->ide_dma_off_quietly(drive);
-	}
-	/* IORDY not supported */
-	return 0;
 }
 
 /* returns 1 if dma irq issued, 0 otherwise */
@@ -455,36 +330,6 @@ static int siimage_io_ide_dma_test_irq (ide_drive_t *drive)
 	return 0;
 }
 
-#if 0
-/**
- *	siimage_mmio_ide_dma_count	-	DMA bytes done
- *	@drive
- *
- *	If we are doing VDMA the CMD680 requires a little bit
- *	of more careful handling and we have to read the counts
- *	off ourselves. For non VDMA life is normal.
- */
- 
-static int siimage_mmio_ide_dma_count (ide_drive_t *drive)
-{
-#ifdef SIIMAGE_VIRTUAL_DMAPIO
-	struct request *rq	= HWGROUP(drive)->rq;
-	ide_hwif_t *hwif	= HWIF(drive);
-	u32 count		= (rq->nr_sectors * SECTOR_SIZE);
-	u32 rcount		= 0;
-	unsigned long addr	= siimage_selreg(hwif, 0x1C);
-
-	hwif->OUTL(count, addr);
-	rcount = hwif->INL(addr);
-
-	printk("\n%s: count = %d, rcount = %d, nr_sectors = %lu\n",
-		drive->name, count, rcount, rq->nr_sectors);
-
-#endif /* SIIMAGE_VIRTUAL_DMAPIO */
-	return __ide_dma_count(drive);
-}
-#endif
-
 /**
  *	siimage_mmio_ide_dma_test_irq	-	check we caused an IRQ
  *	@drive: drive we are testing
@@ -496,22 +341,21 @@ static int siimage_mmio_ide_dma_count (ide_drive_t *drive)
 static int siimage_mmio_ide_dma_test_irq (ide_drive_t *drive)
 {
 	ide_hwif_t *hwif	= HWIF(drive);
-	unsigned long base	= (unsigned long)hwif->hwif_data;
 	unsigned long addr	= siimage_selreg(hwif, 0x1);
 
 	if (SATA_ERROR_REG) {
-		u32 ext_stat = hwif->INL(base + 0x10);
+		unsigned long base = (unsigned long)hwif->hwif_data;
+
+		u32 ext_stat = readl((void __iomem *)(base + 0x10));
 		u8 watchdog = 0;
 		if (ext_stat & ((hwif->channel) ? 0x40 : 0x10)) {
-			u32 sata_error = hwif->INL(SATA_ERROR_REG);
-			hwif->OUTL(sata_error, SATA_ERROR_REG);
+			u32 sata_error = readl((void __iomem *)SATA_ERROR_REG);
+			writel(sata_error, (void __iomem *)SATA_ERROR_REG);
 			watchdog = (sata_error & 0x00680000) ? 1 : 0;
-#if 1
 			printk(KERN_WARNING "%s: sata_error = 0x%08x, "
 				"watchdog = %d, %s\n",
 				drive->name, sata_error, watchdog,
 				__FUNCTION__);
-#endif
 
 		} else {
 			watchdog = (ext_stat & 0x8000) ? 1 : 0;
@@ -523,18 +367,18 @@ static int siimage_mmio_ide_dma_test_irq (ide_drive_t *drive)
 	}
 
 	/* return 1 if INTR asserted */
-	if ((hwif->INB(hwif->dma_status) & 0x04) == 0x04)
+	if ((readb((void __iomem *)hwif->dma_status) & 0x04) == 0x04)
 		return 1;
 
 	/* return 1 if Device INTR asserted */
-	if ((hwif->INB(addr) & 8) == 8)
+	if ((readb((void __iomem *)addr) & 8) == 8)
 		return 0;	//return 1;
 
 	return 0;
 }
 
 /**
- *	siimage_busproc		-	bus isolation ioctl
+ *	sil_sata_busproc	-	bus isolation IOCTL
  *	@drive: drive to isolate/restore
  *	@state: bus state to set
  *
@@ -542,16 +386,16 @@ static int siimage_mmio_ide_dma_test_irq (ide_drive_t *drive)
  *	SATA controller the work required is quite limited, we 
  *	just have to clean up the statistics
  */
- 
-static int siimage_busproc (ide_drive_t * drive, int state)
+
+static int sil_sata_busproc(ide_drive_t * drive, int state)
 {
 	ide_hwif_t *hwif	= HWIF(drive);
 	u32 stat_config		= 0;
 	unsigned long addr	= siimage_selreg(hwif, 0);
 
-	if (hwif->mmio) {
-		stat_config = hwif->INL(addr);
-	} else
+	if (hwif->mmio)
+		stat_config = readl((void __iomem *)addr);
+	else
 		pci_read_config_dword(hwif->pci_dev, addr, &stat_config);
 
 	switch (state) {
@@ -575,90 +419,44 @@ static int siimage_busproc (ide_drive_t * drive, int state)
 }
 
 /**
- *	siimage_reset_poll	-	wait for sata reset
+ *	sil_sata_reset_poll	-	wait for SATA reset
  *	@drive: drive we are resetting
  *
  *	Poll the SATA phy and see whether it has come back from the dead
  *	yet.
  */
- 
-static int siimage_reset_poll (ide_drive_t *drive)
+
+static int sil_sata_reset_poll(ide_drive_t *drive)
 {
 	if (SATA_STATUS_REG) {
 		ide_hwif_t *hwif	= HWIF(drive);
 
-		if ((hwif->INL(SATA_STATUS_REG) & 0x03) != 0x03) {
+		/* SATA_STATUS_REG is valid only when in MMIO mode */
+		if ((readl((void __iomem *)SATA_STATUS_REG) & 0x03) != 0x03) {
 			printk(KERN_WARNING "%s: reset phy dead, status=0x%08x\n",
-				hwif->name, hwif->INL(SATA_STATUS_REG));
+				hwif->name, readl((void __iomem *)SATA_STATUS_REG));
 			HWGROUP(drive)->polling = 0;
 			return ide_started;
 		}
-		return 0;
-	} else {
-		return 0;
 	}
+
+	return 0;
 }
 
 /**
- *	siimage_pre_reset	-	reset hook
+ *	sil_sata_pre_reset	-	reset hook
  *	@drive: IDE device being reset
  *
  *	For the SATA devices we need to handle recalibration/geometry
  *	differently
  */
- 
-static void siimage_pre_reset (ide_drive_t *drive)
-{
-	if (drive->media != ide_disk)
-		return;
 
-	if (is_sata(HWIF(drive)))
-	{
+static void sil_sata_pre_reset(ide_drive_t *drive)
+{
+	if (drive->media == ide_disk) {
 		drive->special.b.set_geometry = 0;
 		drive->special.b.recalibrate = 0;
 	}
-}
-
-/**
- *	siimage_reset	-	reset a device on an siimage controller
- *	@drive: drive to reset
- *
- *	Perform a controller level reset fo the device. For
- *	SATA we must also check the PHY.
- */
- 
-static void siimage_reset (ide_drive_t *drive)
-{
-	ide_hwif_t *hwif	= HWIF(drive);
-	u8 reset		= 0;
-	unsigned long addr	= siimage_selreg(hwif, 0);
-
-	if (hwif->mmio) {
-		reset = hwif->INB(addr);
-		hwif->OUTB((reset|0x03), addr);
-		/* FIXME:posting */
-		udelay(25);
-		hwif->OUTB(reset, addr);
-		(void) hwif->INB(addr);
-	} else {
-		pci_read_config_byte(hwif->pci_dev, addr, &reset);
-		pci_write_config_byte(hwif->pci_dev, addr, reset|0x03);
-		udelay(25);
-		pci_write_config_byte(hwif->pci_dev, addr, reset);
-		pci_read_config_byte(hwif->pci_dev, addr, &reset);
-	}
-
-	if (SATA_STATUS_REG) {
-		u32 sata_stat = hwif->INL(SATA_STATUS_REG);
-		printk(KERN_WARNING "%s: reset phy, status=0x%08x, %s\n",
-			hwif->name, sata_stat, __FUNCTION__);
-		if (!(sata_stat)) {
-			printk(KERN_WARNING "%s: reset phy dead, status=0x%08x\n",
-				hwif->name, sata_stat);
-			drive->failures++;
-		}
-	}
-
 }
 
 /**
@@ -701,6 +499,7 @@ static unsigned int setup_mmio_siimage (struct pci_dev *dev, const char *name)
 	unsigned long barsize	= pci_resource_len(dev, 5);
 	u8 tmpbyte	= 0;
 	void __iomem *ioaddr;
+	u32 tmp, irq_mask;
 
 	/*
 	 *	Drop back to PIO if we can't map the mmio. Some
@@ -726,6 +525,14 @@ static unsigned int setup_mmio_siimage (struct pci_dev *dev, const char *name)
 	pci_set_drvdata(dev, (void *) ioaddr);
 
 	if (pdev_is_sata(dev)) {
+		/* make sure IDE0/1 interrupts are not masked */
+		irq_mask = (1 << 22) | (1 << 23);
+		tmp = readl(ioaddr + 0x48);
+		if (tmp & irq_mask) {
+			tmp &= ~irq_mask;
+			writel(tmp, ioaddr + 0x48);
+			readl(ioaddr + 0x48); /* flush */
+		}
 		writel(0, ioaddr + 0x148);
 		writel(0, ioaddr + 0x1C8);
 	}
@@ -787,13 +594,9 @@ static unsigned int setup_mmio_siimage (struct pci_dev *dev, const char *name)
 
 static unsigned int __devinit init_chipset_siimage(struct pci_dev *dev, const char *name)
 {
-	u32 class_rev	= 0;
-	u8 tmpbyte	= 0;
-	u8 BA5_EN	= 0;
+	u8 rev = dev->revision, tmpbyte = 0, BA5_EN = 0;
 
-        pci_read_config_dword(dev, PCI_CLASS_REVISION, &class_rev);
-        class_rev &= 0xff;
-	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, (class_rev) ? 1 : 255);	
+	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, rev ? 1 : 255);
 
 	pci_read_config_byte(dev, 0x8A, &BA5_EN);
 	if ((BA5_EN & 0x01) || (pci_resource_start(dev, 5))) {
@@ -848,7 +651,7 @@ static unsigned int __devinit init_chipset_siimage(struct pci_dev *dev, const ch
  *	time.
  *
  *	The hardware supports buffered taskfiles and also some rather nice
- *	extended PRD tables. Unfortunately right now we don't.
+ *	extended PRD tables. For better SI3112 support use the libata driver
  */
 
 static void __devinit init_mmio_iops_siimage(ide_hwif_t *hwif)
@@ -868,7 +671,7 @@ static void __devinit init_mmio_iops_siimage(ide_hwif_t *hwif)
 
 	/*
 	 *	Now set up the hw. We have to do this ourselves as
-	 *	the MMIO layout isnt the same as the the standard port
+	 *	the MMIO layout isnt the same as the standard port
 	 *	based I/O
 	 */
 
@@ -885,9 +688,6 @@ static void __devinit init_mmio_iops_siimage(ide_hwif_t *hwif)
 	 *	so we can't currently use it sanely since we want to
 	 *	use LBA48 mode.
 	 */	
-//	base += 0x10;
-//	hwif->no_lba48 = 1;
-
 	hw.io_ports[IDE_DATA_OFFSET]	= base;
 	hw.io_ports[IDE_ERROR_OFFSET]	= base + 1;
 	hw.io_ports[IDE_NSECTOR_OFFSET]	= base + 2;
@@ -912,25 +712,13 @@ static void __devinit init_mmio_iops_siimage(ide_hwif_t *hwif)
 		hwif->sata_misc[SATA_IEN_OFFSET]	= base + 0x148;
 	}
 
-	hw.irq				= hwif->pci_dev->irq;
+	memcpy(hwif->io_ports, hw.io_ports, sizeof(hwif->io_ports));
 
-	memcpy(&hwif->hw, &hw, sizeof(hw));
-	memcpy(hwif->io_ports, hwif->hw.io_ports, sizeof(hwif->hw.io_ports));
+	hwif->irq = dev->irq;
 
-	hwif->irq			= hw.irq;
+	hwif->dma_base = (unsigned long)addr + (ch ? 0x08 : 0x00);
 
-       	base = (unsigned long) addr;
-
-#ifdef SIIMAGE_LARGE_DMA
-/* Watch the brackets - even Ken and Dennis get some language design wrong */
-	hwif->dma_base			= base + (ch ? 0x18 : 0x10);
-	hwif->dma_base2			= base + (ch ? 0x08 : 0x00);
-	hwif->dma_prdtable		= hwif->dma_base2 + 4;
-#else /* ! SIIMAGE_LARGE_DMA */
-	hwif->dma_base			= base + (ch ? 0x08 : 0x00);
-	hwif->dma_base2			= base + (ch ? 0x18 : 0x10);
-#endif /* SIIMAGE_LARGE_DMA */
-	hwif->mmio			= 2;
+	hwif->mmio = 1;
 }
 
 static int is_dev_seagate_sata(ide_drive_t *drive)
@@ -982,19 +770,14 @@ static void __devinit siimage_fixup(ide_hwif_t *hwif)
 
 static void __devinit init_iops_siimage(ide_hwif_t *hwif)
 {
-	struct pci_dev *dev	= hwif->pci_dev;
-	u32 class_rev		= 0;
-
-	pci_read_config_dword(dev, PCI_CLASS_REVISION, &class_rev);
-	class_rev &= 0xff;
-	
 	hwif->hwif_data = NULL;
 
 	/* Pessimal until we finish probing */
 	hwif->rqsize = 15;
 
-	if (pci_get_drvdata(dev) == NULL)
+	if (pci_get_drvdata(hwif->pci_dev) == NULL)
 		return;
+
 	init_mmio_iops_siimage(hwif);
 }
 
@@ -1006,16 +789,17 @@ static void __devinit init_iops_siimage(ide_hwif_t *hwif)
  *	interface.
  */
 
-static unsigned int __devinit ata66_siimage(ide_hwif_t *hwif)
+static u8 __devinit ata66_siimage(ide_hwif_t *hwif)
 {
 	unsigned long addr = siimage_selreg(hwif, 0);
-	if (pci_get_drvdata(hwif->pci_dev) == NULL) {
-		u8 ata66 = 0;
-		pci_read_config_byte(hwif->pci_dev, addr, &ata66);
-		return (ata66 & 0x01) ? 1 : 0;
-	}
+	u8 ata66 = 0;
 
-	return (hwif->INB(addr) & 0x01) ? 1 : 0;
+	if (pci_get_drvdata(hwif->pci_dev) == NULL)
+		pci_read_config_byte(hwif->pci_dev, addr, &ata66);
+	else
+		ata66 = hwif->INB(addr);
+
+	return (ata66 & 0x01) ? ATA_CBL_PATA80 : ATA_CBL_PATA40;
 }
 
 /**
@@ -1029,48 +813,40 @@ static unsigned int __devinit ata66_siimage(ide_hwif_t *hwif)
 
 static void __devinit init_hwif_siimage(ide_hwif_t *hwif)
 {
-	hwif->autodma = 0;
-	
-	hwif->resetproc = &siimage_reset;
-	hwif->speedproc = &siimage_tune_chipset;
-	hwif->tuneproc	= &siimage_tuneproc;
-	hwif->reset_poll = &siimage_reset_poll;
-	hwif->pre_reset = &siimage_pre_reset;
+	u8 sata = is_sata(hwif);
 
-	if(is_sata(hwif))
-		hwif->busproc   = &siimage_busproc;
+	hwif->set_pio_mode = &sil_set_pio_mode;
+	hwif->set_dma_mode = &sil_set_dma_mode;
 
-	if (!hwif->dma_base) {
-		hwif->drives[0].autotune = 1;
-		hwif->drives[1].autotune = 1;
+	if (sata) {
+		static int first = 1;
+
+		hwif->busproc = &sil_sata_busproc;
+		hwif->reset_poll = &sil_sata_reset_poll;
+		hwif->pre_reset = &sil_sata_pre_reset;
+		hwif->udma_filter = &sil_sata_udma_filter;
+
+		if (first) {
+			printk(KERN_INFO "siimage: For full SATA support you should use the libata sata_sil module.\n");
+			first = 0;
+		}
+	} else
+		hwif->udma_filter = &sil_pata_udma_filter;
+
+	if (hwif->dma_base == 0)
 		return;
-	}
 
-	hwif->ultra_mask = 0x7f;
-	hwif->mwdma_mask = 0x07;
-	hwif->swdma_mask = 0x07;
+	if (sata)
+		hwif->host_flags |= IDE_HFLAG_NO_ATAPI_DMA;
 
-	if (!is_sata(hwif))
-		hwif->atapi_dma = 1;
-
-	hwif->ide_dma_check = &siimage_config_drive_for_dma;
-	if (!(hwif->udma_four))
-		hwif->udma_four = ata66_siimage(hwif);
+	if (hwif->cbl != ATA_CBL_PATA40_SHORT)
+		hwif->cbl = ata66_siimage(hwif);
 
 	if (hwif->mmio) {
 		hwif->ide_dma_test_irq = &siimage_mmio_ide_dma_test_irq;
 	} else {
 		hwif->ide_dma_test_irq = & siimage_io_ide_dma_test_irq;
 	}
-	
-	/*
-	 *	The BIOS often doesn't set up DMA on this controller
-	 *	so we always do it.
-	 */
-
-	hwif->autodma = 1;
-	hwif->drives[0].autodma = hwif->autodma;
-	hwif->drives[1].autodma = hwif->autodma;
 }
 
 #define DECLARE_SII_DEV(name_str)			\
@@ -1080,12 +856,13 @@ static void __devinit init_hwif_siimage(ide_hwif_t *hwif)
 		.init_iops	= init_iops_siimage,	\
 		.init_hwif	= init_hwif_siimage,	\
 		.fixup		= siimage_fixup,	\
-		.channels	= 2,			\
-		.autodma	= AUTODMA,		\
-		.bootable	= ON_BOARD,		\
+		.host_flags	= IDE_HFLAG_BOOTABLE,	\
+		.pio_mask	= ATA_PIO4,		\
+		.mwdma_mask	= ATA_MWDMA2,		\
+		.udma_mask	= ATA_UDMA6,		\
 	}
 
-static ide_pci_device_t siimage_chipsets[] __devinitdata = {
+static const struct ide_port_info siimage_chipsets[] __devinitdata = {
 	/* 0 */ DECLARE_SII_DEV("SiI680"),
 	/* 1 */ DECLARE_SII_DEV("SiI3112 Serial ATA"),
 	/* 2 */ DECLARE_SII_DEV("Adaptec AAR-1210SA")
@@ -1105,11 +882,11 @@ static int __devinit siimage_init_one(struct pci_dev *dev, const struct pci_devi
 	return ide_setup_pci_device(dev, &siimage_chipsets[id->driver_data]);
 }
 
-static struct pci_device_id siimage_pci_tbl[] = {
-	{ PCI_VENDOR_ID_CMD, PCI_DEVICE_ID_SII_680,  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+static const struct pci_device_id siimage_pci_tbl[] = {
+	{ PCI_VDEVICE(CMD, PCI_DEVICE_ID_SII_680),    0 },
 #ifdef CONFIG_BLK_DEV_IDE_SATA
-	{ PCI_VENDOR_ID_CMD, PCI_DEVICE_ID_SII_3112, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1},
-	{ PCI_VENDOR_ID_CMD, PCI_DEVICE_ID_SII_1210SA, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2},
+	{ PCI_VDEVICE(CMD, PCI_DEVICE_ID_SII_3112),   1 },
+	{ PCI_VDEVICE(CMD, PCI_DEVICE_ID_SII_1210SA), 2 },
 #endif
 	{ 0, },
 };
@@ -1121,7 +898,7 @@ static struct pci_driver driver = {
 	.probe		= siimage_init_one,
 };
 
-static int siimage_ide_init(void)
+static int __init siimage_ide_init(void)
 {
 	return ide_pci_register_driver(&driver);
 }

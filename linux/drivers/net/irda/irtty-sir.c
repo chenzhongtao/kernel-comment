@@ -20,7 +20,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *     
@@ -32,6 +32,8 @@
 #include <linux/init.h>
 #include <asm/uaccess.h>
 #include <linux/smp_lock.h>
+#include <linux/delay.h>
+#include <linux/mutex.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
@@ -59,8 +61,8 @@ static int irtty_chars_in_buffer(struct sir_dev *dev)
 {
 	struct sirtty_cb *priv = dev->priv;
 
-	ASSERT(priv != NULL, return -1;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
+	IRDA_ASSERT(priv != NULL, return -1;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
 
 	return priv->tty->driver->chars_in_buffer(priv->tty);
 }
@@ -87,8 +89,8 @@ static void irtty_wait_until_sent(struct sir_dev *dev)
 	struct sirtty_cb *priv = dev->priv;
 	struct tty_struct *tty;
 
-	ASSERT(priv != NULL, return;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return;);
+	IRDA_ASSERT(priv != NULL, return;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return;);
 
 	tty = priv->tty;
 	if (tty->driver->wait_until_sent) {
@@ -97,8 +99,7 @@ static void irtty_wait_until_sent(struct sir_dev *dev)
 		unlock_kernel();
 	}
 	else {
-		set_task_state(current, TASK_UNINTERRUPTIBLE);
-		schedule_timeout(msecs_to_jiffies(USBSERIAL_TX_DONE_DELAY));
+		msleep(USBSERIAL_TX_DONE_DELAY);
 	}
 }
 
@@ -116,11 +117,11 @@ static int irtty_change_speed(struct sir_dev *dev, unsigned speed)
 {
 	struct sirtty_cb *priv = dev->priv;
 	struct tty_struct *tty;
-        struct termios old_termios;
+        struct ktermios old_termios;
 	int cflag;
 
-	ASSERT(priv != NULL, return -1;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
+	IRDA_ASSERT(priv != NULL, return -1;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
 
 	tty = priv->tty;
 
@@ -183,8 +184,8 @@ static int irtty_set_dtr_rts(struct sir_dev *dev, int dtr, int rts)
 	int set = 0;
 	int clear = 0;
 
-	ASSERT(priv != NULL, return -1;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
+	IRDA_ASSERT(priv != NULL, return -1;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
 
 	if (rts)
 		set |= TIOCM_RTS;
@@ -201,7 +202,7 @@ static int irtty_set_dtr_rts(struct sir_dev *dev, int dtr, int rts)
 	 * This function is not yet defined for all tty driver, so
 	 * let's be careful... Jean II
 	 */
-	ASSERT(priv->tty->driver->tiocmset != NULL, return -1;);
+	IRDA_ASSERT(priv->tty->driver->tiocmset != NULL, return -1;);
 	priv->tty->driver->tiocmset(priv->tty, NULL, set, clear);
 
 	return 0;
@@ -220,8 +221,8 @@ static int irtty_do_write(struct sir_dev *dev, const unsigned char *ptr, size_t 
 	struct tty_struct *tty;
 	int writelen;
 
-	ASSERT(priv != NULL, return -1;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
+	IRDA_ASSERT(priv != NULL, return -1;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
 
 	tty = priv->tty;
 	if (!tty->driver->write)
@@ -262,15 +263,15 @@ static void irtty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 	struct sirtty_cb *priv = tty->disc_data;
 	int	i;
 
-	ASSERT(priv != NULL, return;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return;);
+	IRDA_ASSERT(priv != NULL, return;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return;);
 
 	if (unlikely(count==0))		/* yes, this happens */
 		return;
 
 	dev = priv->dev;
 	if (!dev) {
-		WARNING("%s(), not ready yet!\n", __FUNCTION__);
+		IRDA_WARNING("%s(), not ready yet!\n", __FUNCTION__);
 		return;
 	}
 
@@ -289,22 +290,6 @@ static void irtty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 }
 
 /*
- * Function irtty_receive_room (tty)
- *
- *    Used by the TTY to find out how much data we can receive at a time
- * 
-*/
-static int irtty_receive_room(struct tty_struct *tty) 
-{
-	struct sirtty_cb *priv = tty->disc_data;
-
-	ASSERT(priv != NULL, return 0;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return 0;);
-
-	return 65536;  /* We can handle an infinite amount of data. :-) */
-}
-
-/*
  * Function irtty_write_wakeup (tty)
  *
  *    Called by the driver when there's room for more data.  If we have
@@ -315,8 +300,8 @@ static void irtty_write_wakeup(struct tty_struct *tty)
 {
 	struct sirtty_cb *priv = tty->disc_data;
 
-	ASSERT(priv != NULL, return;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return;);
+	IRDA_ASSERT(priv != NULL, return;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return;);
 
 	tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
 
@@ -333,7 +318,7 @@ static void irtty_write_wakeup(struct tty_struct *tty)
 
 static inline void irtty_stop_receiver(struct tty_struct *tty, int stop)
 {
-	struct termios old_termios;
+	struct ktermios old_termios;
 	int cflag;
 
 	lock_kernel();
@@ -354,7 +339,7 @@ static inline void irtty_stop_receiver(struct tty_struct *tty, int stop)
 /*****************************************************************/
 
 /* serialize ldisc open/close with sir_dev */
-static DECLARE_MUTEX(irtty_sem);
+static DEFINE_MUTEX(irtty_mutex);
 
 /* notifier from sir_dev when irda% device gets opened (ifup) */
 
@@ -364,11 +349,11 @@ static int irtty_start_dev(struct sir_dev *dev)
 	struct tty_struct *tty;
 
 	/* serialize with ldisc open/close */
-	down(&irtty_sem);
+	mutex_lock(&irtty_mutex);
 
 	priv = dev->priv;
 	if (unlikely(!priv || priv->magic!=IRTTY_MAGIC)) {
-		up(&irtty_sem);
+		mutex_unlock(&irtty_mutex);
 		return -ESTALE;
 	}
 
@@ -379,7 +364,7 @@ static int irtty_start_dev(struct sir_dev *dev)
 	/* Make sure we can receive more data */
 	irtty_stop_receiver(tty, FALSE);
 
-	up(&irtty_sem);
+	mutex_unlock(&irtty_mutex);
 	return 0;
 }
 
@@ -391,11 +376,11 @@ static int irtty_stop_dev(struct sir_dev *dev)
 	struct tty_struct *tty;
 
 	/* serialize with ldisc open/close */
-	down(&irtty_sem);
+	mutex_lock(&irtty_mutex);
 
 	priv = dev->priv;
 	if (unlikely(!priv || priv->magic!=IRTTY_MAGIC)) {
-		up(&irtty_sem);
+		mutex_unlock(&irtty_mutex);
 		return -ESTALE;
 	}
 
@@ -406,14 +391,14 @@ static int irtty_stop_dev(struct sir_dev *dev)
 	if (tty->driver->stop)
 		tty->driver->stop(tty);
 
-	up(&irtty_sem);
+	mutex_unlock(&irtty_mutex);
 
 	return 0;
 }
 
 /* ------------------------------------------------------- */
 
-struct sir_driver sir_tty_drv = {
+static struct sir_driver sir_tty_drv = {
 	.owner			= THIS_MODULE,
 	.driver_name		= "sir_tty",
 	.start_dev		= irtty_start_dev,
@@ -440,27 +425,22 @@ static int irtty_ioctl(struct tty_struct *tty, struct file *file, unsigned int c
 	struct sirtty_cb *priv = tty->disc_data;
 	int err = 0;
 
-	ASSERT(priv != NULL, return -ENODEV;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return -EBADR;);
+	IRDA_ASSERT(priv != NULL, return -ENODEV;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return -EBADR;);
 
 	IRDA_DEBUG(3, "%s(cmd=0x%X)\n", __FUNCTION__, cmd);
 
 	dev = priv->dev;
-	ASSERT(dev != NULL, return -1;);
+	IRDA_ASSERT(dev != NULL, return -1;);
 
 	switch (cmd) {
-	case TCGETS:
-	case TCGETA:
-		err = n_tty_ioctl(tty, file, cmd, arg);
-		break;
-
 	case IRTTY_IOCTDONGLE:
 		/* this call blocks for completion */
 		err = sirdev_set_dongle(dev, (IRDA_DONGLE) arg);
 		break;
 
 	case IRTTY_IOCGET:
-		ASSERT(dev->netdev != NULL, return -1;);
+		IRDA_ASSERT(dev->netdev != NULL, return -1;);
 
 		memset(&info, 0, sizeof(info)); 
 		strncpy(info.name, dev->netdev->name, sizeof(info.name)-1);
@@ -469,7 +449,7 @@ static int irtty_ioctl(struct tty_struct *tty, struct file *file, unsigned int c
 			err = -EFAULT;
 		break;
 	default:
-		err = -ENOIOCTLCMD;
+		err = tty_mode_ioctl(tty, file, cmd, arg);
 		break;
 	}
 	return err;
@@ -520,22 +500,22 @@ static int irtty_open(struct tty_struct *tty)
 	}
 
 	/* allocate private device info block */
-	priv = kmalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		goto out_put;
-	memset(priv, 0, sizeof(*priv));
 
 	priv->magic = IRTTY_MAGIC;
 	priv->tty = tty;
 	priv->dev = dev;
 
 	/* serialize with start_dev - in case we were racing with ifup */
-	down(&irtty_sem);
+	mutex_lock(&irtty_mutex);
 
 	dev->priv = priv;
 	tty->disc_data = priv;
+	tty->receive_room = 65536;
 
-	up(&irtty_sem);
+	mutex_unlock(&irtty_mutex);
 
 	IRDA_DEBUG(0, "%s - %s: irda line discipline opened\n", __FUNCTION__, tty->name);
 
@@ -558,8 +538,8 @@ static void irtty_close(struct tty_struct *tty)
 {
 	struct sirtty_cb *priv = tty->disc_data;
 
-	ASSERT(priv != NULL, return;);
-	ASSERT(priv->magic == IRTTY_MAGIC, return;);
+	IRDA_ASSERT(priv != NULL, return;);
+	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return;);
 
 	/* Hm, with a dongle attached the dongle driver wants
 	 * to close the dongle - which requires the use of
@@ -605,7 +585,6 @@ static struct tty_ldisc irda_ldisc = {
 	.ioctl		= irtty_ioctl,
  	.poll		= NULL,
 	.receive_buf	= irtty_receive_buf,
-	.receive_room	= irtty_receive_room,
 	.write_wakeup	= irtty_write_wakeup,
 	.owner		= THIS_MODULE,
 };
@@ -617,8 +596,8 @@ static int __init irtty_sir_init(void)
 	int err;
 
 	if ((err = tty_register_ldisc(N_IRDA, &irda_ldisc)) != 0)
-		ERROR("IrDA: can't register line discipline (err = %d)\n",
-			err);
+		IRDA_ERROR("IrDA: can't register line discipline (err = %d)\n",
+			   err);
 	return err;
 }
 
@@ -626,9 +605,9 @@ static void __exit irtty_sir_cleanup(void)
 {
 	int err;
 
-	if ((err = tty_register_ldisc(N_IRDA, NULL))) {
-		ERROR("%s(), can't unregister line discipline (err = %d)\n",
-		      __FUNCTION__, err);
+	if ((err = tty_unregister_ldisc(N_IRDA))) {
+		IRDA_ERROR("%s(), can't unregister line discipline (err = %d)\n",
+			   __FUNCTION__, err);
 	}
 }
 

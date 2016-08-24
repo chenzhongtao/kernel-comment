@@ -212,10 +212,10 @@ fail_base2:
 //						xsurf_iops,
 						IRQ_AMIGA_PORTS);
 			}	
-			
-			index = ide_register_hw(&hw, &hwif);
+
+			index = ide_register_hw(&hw, NULL, 1, &hwif);
 			if (index != -1) {
-				hwif->mmio = 2;
+				hwif->mmio = 1;
 				printk("ide%d: ", index);
 				switch(type) {
 				case BOARD_BUDDHA:

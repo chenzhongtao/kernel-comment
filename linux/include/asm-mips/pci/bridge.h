@@ -15,6 +15,7 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <asm/xtalk/xwidget.h>		/* generic widget header */
+#include <asm/sn/types.h>
 
 /* I/O page size */
 
@@ -359,7 +360,7 @@ typedef struct bridge_err_cmdword_s {
 #define BRIDGE_TYPE0_CFG_FUNC_OFF	0x00000100	/* Type 0 Cfg Func Offset (1..7) */
 #define BRIDGE_TYPE0_CFG_DEV(s)		(BRIDGE_TYPE0_CFG_DEV0+\
 					 (s)*BRIDGE_TYPE0_CFG_SLOT_OFF)
-#define BRIDGE_TYPE0_CFG_DEVF(s,f)	(BRIDGE_TYPE0_CFG_DEV0+\
+#define BRIDGE_TYPE0_CFG_DEVF(s, f)	(BRIDGE_TYPE0_CFG_DEV0+\
 					 (s)*BRIDGE_TYPE0_CFG_SLOT_OFF+\
 					 (f)*BRIDGE_TYPE0_CFG_FUNC_OFF)
 
@@ -537,7 +538,7 @@ typedef struct bridge_err_cmdword_s {
 		 BRIDGE_ISR_PMU_ESIZE_FAULT)
 
 /*
- * List of Errors which are fatal and kill the sytem
+ * List of Errors which are fatal and kill the system
  */
 #define BRIDGE_ISR_ERROR_FATAL		\
 		((BRIDGE_ISR_XTALK_ERROR & ~BRIDGE_ISR_XREAD_REQ_TIMEOUT)|\
@@ -847,5 +848,7 @@ struct bridge_controller {
 
 extern void register_bridge_irq(unsigned int irq);
 extern int request_bridge_irq(struct bridge_controller *bc);
+
+extern struct pci_ops bridge_pci_ops;
 
 #endif /* _ASM_PCI_BRIDGE_H */

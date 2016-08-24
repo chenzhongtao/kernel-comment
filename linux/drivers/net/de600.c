@@ -38,13 +38,6 @@ static const char version[] = "de600.c: $Revision: 1.41-2.5 $,  Bjorn Ekwall (bj
 /* Add more time here if your adapter won't work OK: */
 #define DE600_SLOW_DOWN	udelay(delay_time)
 
- /*
- * If you still have trouble reading/writing to the adapter,
- * modify the following "#define": (see <asm/io.h> for more info)
-#define REALLY_SLOW_IO
- */
-#define SLOW_IO_BY_JUMPING /* Looks "better" than dummy write to port 0x80 :-) */
-
 /* use 0 for production, 1 for verification, >2 for debug */
 #ifdef DE600_DEBUG
 #define PRINTK(x) if (de600_debug >= 2) printk x
@@ -161,11 +154,6 @@ static int de600_close(struct net_device *dev)
 	return 0;
 }
 
-static struct net_device_stats *get_stats(struct net_device *dev)
-{
-	return (struct net_device_stats *)(dev->priv);
-}
-
 static inline void trigger_interrupt(struct net_device *dev)
 {
 	de600_put_command(FLIP_IRQ);
@@ -179,7 +167,7 @@ static inline void trigger_interrupt(struct net_device *dev)
  * Copy a buffer to the adapter transmit page memory.
  * Start sending.
  */
- 
+
 static int de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	unsigned long flags;
@@ -258,21 +246,15 @@ static int de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * Handle the network interface interrupts.
  */
 
-static irqreturn_t de600_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t de600_interrupt(int irq, void *dev_id)
 {
 	struct net_device	*dev = dev_id;
 	u8		irq_status;
 	int		retrig = 0;
 	int		boguscount = 0;
 
-	/* This might just as well be deleted now, no crummy drivers present :-) */
-	if ((dev == NULL) || (DE600_IRQ != irq)) {
-		printk(KERN_ERR "%s: bogus interrupt %d\n", dev?dev->name:"DE-600", irq);
-		return IRQ_NONE;
-	}
-
 	spin_lock(&de600_lock);
-	
+
 	select_nic();
 	irq_status = de600_read_status(dev);
 
@@ -321,7 +303,7 @@ static int de600_tx_intr(struct net_device *dev, int irq_status)
 	if (!(irq_status & TX_FAILED16)) {
 		tx_fifo_out = (tx_fifo_out + 1) % TX_PAGES;
 		++free_tx_pages;
-		((struct net_device_stats *)(dev->priv))->tx_packets++;
+		dev->stats.tx_packets++;
 		netif_wake_queue(dev);
 	}
 
@@ -372,7 +354,6 @@ static void de600_rx_intr(struct net_device *dev)
 	}
 	/* else */
 
-	skb->dev = dev;
 	skb_reserve(skb,2);	/* Align */
 
 	/* 'skb->data' points to the start of sk_buff data area. */
@@ -389,8 +370,8 @@ static void de600_rx_intr(struct net_device *dev)
 
 	/* update stats */
 	dev->last_rx = jiffies;
-	((struct net_device_stats *)(dev->priv))->rx_packets++; /* count all receives */
-	((struct net_device_stats *)(dev->priv))->rx_bytes += size; /* count all received bytes */
+	dev->stats.rx_packets++; /* count all receives */
+	dev->stats.rx_bytes += size; /* count all received bytes */
 
 	/*
 	 * If any worth-while packets have been received, netif_rx()
@@ -403,12 +384,12 @@ static struct net_device * __init de600_probe(void)
 	int	i;
 	struct net_device *dev;
 	int err;
+	DECLARE_MAC_BUF(mac);
 
-	dev = alloc_etherdev(sizeof(struct net_device_stats));
+	dev = alloc_etherdev(0);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	SET_MODULE_OWNER(dev);
 
 	if (!request_region(DE600_IO, 3, "de600")) {
 		printk(KERN_WARNING "DE600: port 0x%x busy\n", DE600_IO);
@@ -458,12 +439,7 @@ static struct net_device * __init de600_probe(void)
 		goto out1;
 	}
 
-	printk(", Ethernet Address: %02X", dev->dev_addr[0]);
-	for (i = 1; i < ETH_ALEN; i++)
-		printk(":%02X",dev->dev_addr[i]);
-	printk("\n");
-
-	dev->get_stats = get_stats;
+	printk(", Ethernet Address: %s\n", print_mac(mac, dev->dev_addr));
 
 	dev->open = de600_open;
 	dev->stop = de600_close;

@@ -7,7 +7,6 @@
  * impossible at the moment.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/linkage.h>
 #include <linux/ctype.h>
@@ -19,7 +18,6 @@
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/sched.h>
 #include <linux/sunrpc/stats.h>
-#include <linux/sunrpc/xprt.h>
 
 /*
  * Declare the debug flags here
@@ -37,14 +35,8 @@ static ctl_table		sunrpc_table[];
 void
 rpc_register_sysctl(void)
 {
-	if (!sunrpc_table_header) {
-		sunrpc_table_header = register_sysctl_table(sunrpc_table, 1);
-#ifdef CONFIG_PROC_FS
-		if (sunrpc_table[0].de)
-			sunrpc_table[0].de->owner = THIS_MODULE;
-#endif
-	}
-			
+	if (!sunrpc_table_header)
+		sunrpc_table_header = register_sysctl_table(sunrpc_table);
 }
 
 void
@@ -95,9 +87,8 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 			left--, s++;
 		*(unsigned int *) table->data = value;
 		/* Display the RPC tasks on writing to rpc_debug */
-		if (table->ctl_name == CTL_RPCDEBUG) {
+		if (strcmp(table->procname, "rpc_debug") == 0)
 			rpc_show_tasks();
-		}
 	} else {
 		if (!access_ok(VERIFY_WRITE, buffer, left))
 			return -EFAULT;
@@ -119,63 +110,35 @@ done:
 	return 0;
 }
 
-static unsigned int min_slot_table_size = RPC_MIN_SLOT_TABLE;
-static unsigned int max_slot_table_size = RPC_MAX_SLOT_TABLE;
 
 static ctl_table debug_table[] = {
 	{
-		.ctl_name	= CTL_RPCDEBUG,
 		.procname	= "rpc_debug",
 		.data		= &rpc_debug,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dodebug
-	}, 
+	},
 	{
-		.ctl_name	= CTL_NFSDEBUG,
 		.procname	= "nfs_debug",
 		.data		= &nfs_debug,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dodebug
-	}, 
+	},
 	{
-		.ctl_name	= CTL_NFSDDEBUG,
 		.procname	= "nfsd_debug",
 		.data		= &nfsd_debug,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dodebug
-	}, 
+	},
 	{
-		.ctl_name	= CTL_NLMDEBUG,
 		.procname	= "nlm_debug",
 		.data		= &nlm_debug,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dodebug
-	}, 
-	{
-		.ctl_name	= CTL_SLOTTABLE_UDP,
-		.procname	= "udp_slot_table_entries",
-		.data		= &xprt_udp_slot_table_entries,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
-		.extra1		= &min_slot_table_size,
-		.extra2		= &max_slot_table_size
-	},
-	{
-		.ctl_name	= CTL_SLOTTABLE_TCP,
-		.procname	= "tcp_slot_table_entries",
-		.data		= &xprt_tcp_slot_table_entries,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
-		.extra1		= &min_slot_table_size,
-		.extra2		= &max_slot_table_size
 	},
 	{ .ctl_name = 0 }
 };

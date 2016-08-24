@@ -44,13 +44,12 @@
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/bitops.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
 
-#include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/ss.h>
@@ -91,7 +90,7 @@ static int do_scan = 1;
 /* Bit map of interrupts to choose from */
 static u_int irq_mask = 0xffff;
 static int irq_list[16];
-static int irq_list_count;
+static unsigned int irq_list_count;
 
 /* The card status change interrupt -- 0 means autoselect */
 static int cs_irq;
@@ -117,7 +116,7 @@ module_param(cycle_time, int, 0444);
 
 /*====================================================================*/
 
-static irqreturn_t tcic_interrupt(int irq, void *dev, struct pt_regs *regs);
+static irqreturn_t tcic_interrupt(int irq, void *dev);
 static void tcic_timer(u_long data);
 static struct pccard_operations tcic_operations;
 
@@ -182,13 +181,6 @@ static void tcic_setl(u_char reg, u_int data)
     outw(data >> 16, tcic_base+reg+2);
 }
 
-static u_char tcic_aux_getb(u_short reg)
-{
-    u_char mode = (tcic_getb(TCIC_MODE) & TCIC_MODE_PGMMASK) | reg;
-    tcic_setb(TCIC_MODE, mode);
-    return tcic_getb(TCIC_AUX);
-}
-
 static void tcic_aux_setb(u_short reg, u_char data)
 {
     u_char mode = (tcic_getb(TCIC_MODE) & TCIC_MODE_PGMMASK) | reg;
@@ -226,7 +218,7 @@ static int to_cycles(int ns)
 
 static volatile u_int irq_hits;
 
-static irqreturn_t __init tcic_irq_count(int irq, void *dev, struct pt_regs *regs)
+static irqreturn_t __init tcic_irq_count(int irq, void *dev)
 {
     irq_hits++;
     return IRQ_HANDLED;
@@ -373,27 +365,11 @@ static int __init get_tcic_id(void)
 
 /*====================================================================*/
 
-static int tcic_drv_suspend(struct device *dev, u32 state, u32 level)
-{
-	int ret = 0;
-	if (level == SUSPEND_SAVE_STATE)
-		ret = pcmcia_socket_dev_suspend(dev, state);
-	return ret;
-}
-
-static int tcic_drv_resume(struct device *dev, u32 level)
-{
-	int ret = 0;
-	if (level == RESUME_RESTORE_STATE)
-		ret = pcmcia_socket_dev_resume(dev);
-	return ret;
-}
-
 static struct device_driver tcic_driver = {
 	.name = "tcic-pcmcia",
 	.bus = &platform_bus_type,
-	.suspend = tcic_drv_suspend,
-	.resume = tcic_drv_resume,
+	.suspend = pcmcia_socket_dev_suspend,
+	.resume = pcmcia_socket_dev_resume,
 };
 
 static struct platform_device tcic_device = {
@@ -529,14 +505,14 @@ static int __init init_tcic(void)
     }
     
     /* jump start interrupt handler, if needed */
-    tcic_interrupt(0, NULL, NULL);
+    tcic_interrupt(0, NULL);
 
     platform_device_register(&tcic_device);
 
     for (i = 0; i < sockets; i++) {
 	    socket_table[i].socket.ops = &tcic_operations;
 	    socket_table[i].socket.resource_ops = &pccard_nonstatic_ops;
-	    socket_table[i].socket.dev.dev = &tcic_device.dev;
+	    socket_table[i].socket.dev.parent = &tcic_device.dev;
 	    ret = pcmcia_register_socket(&socket_table[i].socket);
 	    if (ret && i)
 		    pcmcia_unregister_socket(&socket_table[0].socket);
@@ -571,7 +547,7 @@ static void __exit exit_tcic(void)
 
 /*====================================================================*/
 
-static irqreturn_t tcic_interrupt(int irq, void *dev, struct pt_regs *regs)
+static irqreturn_t tcic_interrupt(int irq, void *dev)
 {
     int i, quick = 0;
     u_char latch, sstat;
@@ -630,7 +606,7 @@ static void tcic_timer(u_long data)
 {
     debug(2, "tcic_timer()\n");
     tcic_timer_pending = 0;
-    tcic_interrupt(0, NULL, NULL);
+    tcic_interrupt(0, NULL);
 } /* tcic_timer */
 
 /*====================================================================*/
@@ -658,59 +634,6 @@ static int tcic_get_status(struct pcmcia_socket *sock, u_int *value)
     debug(1, "GetStatus(%d) = %#2.2x\n", psock, *value);
     return 0;
 } /* tcic_get_status */
-  
-/*====================================================================*/
-
-static int tcic_get_socket(struct pcmcia_socket *sock, socket_state_t *state)
-{
-    u_short psock = container_of(sock, struct tcic_socket, socket)->psock;
-    u_char reg;
-    u_short scf1, scf2;
-    
-    tcic_setl(TCIC_ADDR, (psock << TCIC_ADDR_SS_SHFT)
-	      | TCIC_ADDR_INDREG | TCIC_SCF1(psock));
-    scf1 = tcic_getw(TCIC_DATA);
-    state->flags = (scf1 & TCIC_SCF1_IOSTS) ? SS_IOCARD : 0;
-    state->flags |= (scf1 & TCIC_SCF1_DMA_MASK) ? SS_DMA_MODE : 0;
-    state->flags |= (scf1 & TCIC_SCF1_SPKR) ? SS_SPKR_ENA : 0;
-    if (tcic_getb(TCIC_SCTRL) & TCIC_SCTRL_ENA)
-	state->flags |= SS_OUTPUT_ENA;
-    state->io_irq = scf1 & TCIC_SCF1_IRQ_MASK;
-    if (state->io_irq == 1) state->io_irq = 11;
-
-    reg = tcic_getb(TCIC_PWR);
-    state->Vcc = state->Vpp = 0;
-    if (reg & TCIC_PWR_VCC(psock)) {
-	if (reg & TCIC_PWR_VPP(psock))
-	    state->Vcc = 50;
-	else
-	    state->Vcc = state->Vpp = 50;
-    } else {
-	if (reg & TCIC_PWR_VPP(psock)) {
-	    state->Vcc = 50;
-	    state->Vpp = 120;
-	}
-    }
-    reg = tcic_aux_getb(TCIC_AUX_ILOCK);
-    state->flags |= (reg & TCIC_ILOCK_CRESET) ? SS_RESET : 0;
-
-    /* Card status change interrupt mask */
-    tcic_setw(TCIC_ADDR, TCIC_SCF2(psock));
-    scf2 = tcic_getw(TCIC_DATA);
-    state->csc_mask = (scf2 & TCIC_SCF2_MCD) ? 0 : SS_DETECT;
-    if (state->flags & SS_IOCARD) {
-	state->csc_mask |= (scf2 & TCIC_SCF2_MLBAT1) ? 0 : SS_STSCHG;
-    } else {
-	state->csc_mask |= (scf2 & TCIC_SCF2_MLBAT1) ? 0 : SS_BATDEAD;
-	state->csc_mask |= (scf2 & TCIC_SCF2_MLBAT2) ? 0 : SS_BATWARN;
-	state->csc_mask |= (scf2 & TCIC_SCF2_MRDY) ? 0 : SS_READY;
-    }
-
-    debug(1, "GetSocket(%d) = flags %#3.3x, Vcc %d, Vpp %d, "
-	  "io_irq %d, csc_mask %#2.2x\n", psock, state->flags,
-	  state->Vcc, state->Vpp, state->io_irq, state->csc_mask);
-    return 0;
-} /* tcic_get_socket */
 
 /*====================================================================*/
 
@@ -833,8 +756,9 @@ static int tcic_set_mem_map(struct pcmcia_socket *sock, struct pccard_mem_map *m
     u_long base, len, mmap;
 
     debug(1, "SetMemMap(%d, %d, %#2.2x, %d ns, "
-	  "%#lx-%#lx, %#x)\n", psock, mem->map, mem->flags,
-	  mem->speed, mem->res->start, mem->res->end, mem->card_start);
+	  "%#llx-%#llx, %#x)\n", psock, mem->map, mem->flags,
+	  mem->speed, (unsigned long long)mem->res->start,
+	  (unsigned long long)mem->res->end, mem->card_start);
     if ((mem->map > 3) || (mem->card_start > 0x3ffffff) ||
 	(mem->res->start > 0xffffff) || (mem->res->end > 0xffffff) ||
 	(mem->res->start > mem->res->end) || (mem->speed > 1000))
@@ -888,16 +812,9 @@ static int tcic_init(struct pcmcia_socket *s)
 	return 0;
 }
 
-static int tcic_suspend(struct pcmcia_socket *sock)
-{
-	return tcic_set_socket(sock, &dead_socket);
-}
-
 static struct pccard_operations tcic_operations = {
 	.init		   = tcic_init,
-	.suspend	   = tcic_suspend,
 	.get_status	   = tcic_get_status,
-	.get_socket	   = tcic_get_socket,
 	.set_socket	   = tcic_set_socket,
 	.set_io_map	   = tcic_set_io_map,
 	.set_mem_map	   = tcic_set_mem_map,

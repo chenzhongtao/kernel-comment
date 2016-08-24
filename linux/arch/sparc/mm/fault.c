@@ -18,12 +18,11 @@
 #include <linux/signal.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/kdebug.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/memreg.h>
@@ -31,10 +30,7 @@
 #include <asm/oplib.h>
 #include <asm/smp.h>
 #include <asm/traps.h>
-#include <asm/kdebug.h>
 #include <asm/uaccess.h>
-
-#define ELEMENTS(arr) (sizeof (arr)/sizeof (arr[0]))
 
 extern int prom_node_root;
 
@@ -230,6 +226,7 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
 	unsigned long g2;
 	siginfo_t info;
 	int from_user = !(regs->psr & PSR_PS);
+	int fault;
 
 	if(text_fault)
 		address = regs->pc;
@@ -293,19 +290,18 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	switch (handle_mm_fault(mm, vma, address, write)) {
-	case VM_FAULT_SIGBUS:
-		goto do_sigbus;
-	case VM_FAULT_OOM:
-		goto out_of_memory;
-	case VM_FAULT_MAJOR:
-		current->maj_flt++;
-		break;
-	case VM_FAULT_MINOR:
-	default:
-		current->min_flt++;
-		break;
+	fault = handle_mm_fault(mm, vma, address, write);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto do_sigbus;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 	up_read(&mm->mmap_sem);
 	return;
 
@@ -373,7 +369,7 @@ out_of_memory:
 	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (from_user)
-		do_exit(SIGKILL);
+		do_group_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:

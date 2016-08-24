@@ -16,9 +16,6 @@
 #error "Do not include this directly, instead #include <asm/hardware.h>"
 #endif
 
-#define	IXDP425_FLASH_BASE	IXP4XX_EXP_BUS_CS0_BASE_PHYS
-#define	IXDP425_FLASH_SIZE	IXP4XX_EXP_BUS_CSX_REGION_SIZE
-
 #define	IXDP425_SDA_PIN		7
 #define	IXDP425_SCL_PIN		6
 
@@ -35,4 +32,8 @@
 #define	IXDP425_PCI_INTC_PIN	9
 #define	IXDP425_PCI_INTD_PIN	8
 
+/* NAND Flash pins */
+#define	IXDP425_NAND_NCE_PIN	12
 
+#define	IXDP425_NAND_CMD_BYTE	0x01
+#define	IXDP425_NAND_ADDR_BYTE	0x02

@@ -140,27 +140,7 @@ enum {D_PRT, D_PRO, D_UNI, D_MOD, D_SLV, D_DLY};
 #include <linux/blkdev.h>
 #include <asm/uaccess.h>
 
-static spinlock_t pcd_lock;
-
-#ifndef MODULE
-
-#include "setup.h"
-
-static STT pcd_stt[6] = {
-	{"drive0", 6, drive0},
-	{"drive1", 6, drive1},
-	{"drive2", 6, drive2},
-	{"drive3", 6, drive3},
-	{"disable", 1, &disable},
-	{"nice", 1, &nice}
-};
-
-void pcd_setup(char *str, int *ints)
-{
-	generic_setup(pcd_stt, 6, str);
-}
-
-#endif
+static DEFINE_SPINLOCK(pcd_lock);
 
 module_param(verbose, bool, 0644);
 module_param(major, int, 0);
@@ -203,7 +183,7 @@ static int pcd_packet(struct cdrom_device_info *cdi,
 static int pcd_detect(void);
 static void pcd_probe_capabilities(void);
 static void do_pcd_read_drq(void);
-static void do_pcd_request(request_queue_t * q);
+static void do_pcd_request(struct request_queue * q);
 static void do_pcd_read(void);
 
 struct pcd_unit {
@@ -218,7 +198,7 @@ struct pcd_unit {
 	struct gendisk *disk;
 };
 
-struct pcd_unit pcd[PCD_UNITS];
+static struct pcd_unit pcd[PCD_UNITS];
 
 static char pcd_scratch[64];
 static char pcd_buffer[2048];	/* raw block buffer */
@@ -536,8 +516,7 @@ static int pcd_tray_move(struct cdrom_device_info *cdi, int position)
 
 static void pcd_sleep(int cs)
 {
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(cs);
+	schedule_timeout_interruptible(cs);
 }
 
 static int pcd_reset(struct pcd_unit *cd)
@@ -734,7 +713,7 @@ static int pcd_detect(void)
 /* I/O request processing */
 static struct request_queue *pcd_queue;
 
-static void do_pcd_request(request_queue_t * q)
+static void do_pcd_request(struct request_queue * q)
 {
 	if (pcd_busy)
 		return;
@@ -933,12 +912,12 @@ static int __init pcd_init(void)
 	int unit;
 
 	if (disable)
-		return -1;
+		return -EINVAL;
 
 	pcd_init_units();
 
 	if (pcd_detect())
-		return -1;
+		return -ENODEV;
 
 	/* get the atapi capabilities page */
 	pcd_probe_capabilities();
@@ -946,7 +925,7 @@ static int __init pcd_init(void)
 	if (register_blkdev(major, name)) {
 		for (unit = 0, cd = pcd; unit < PCD_UNITS; unit++, cd++)
 			put_disk(cd->disk);
-		return -1;
+		return -EBUSY;
 	}
 
 	pcd_queue = blk_init_queue(do_pcd_request, &pcd_lock);
@@ -954,7 +933,7 @@ static int __init pcd_init(void)
 		unregister_blkdev(major, name);
 		for (unit = 0, cd = pcd; unit < PCD_UNITS; unit++, cd++)
 			put_disk(cd->disk);
-		return -1;
+		return -ENOMEM;
 	}
 
 	for (unit = 0, cd = pcd; unit < PCD_UNITS; unit++, cd++) {

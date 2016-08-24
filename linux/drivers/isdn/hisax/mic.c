@@ -18,7 +18,7 @@
 
 extern const char *CardType[];
 
-const char *mic_revision = "$Revision: 1.12.2.4 $";
+static const char *mic_revision = "$Revision: 1.12.2.4 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -120,7 +120,7 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 #include "hscx_irq.c"
 
 static irqreturn_t
-mic_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+mic_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
@@ -157,7 +157,7 @@ mic_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-void
+static void
 release_io_mic(struct IsdnCardState *cs)
 {
 	int bytecnt = 8;
@@ -189,7 +189,7 @@ mic_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-int __init
+int __devinit
 setup_mic(struct IsdnCard *card)
 {
 	int bytecnt;

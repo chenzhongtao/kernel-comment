@@ -104,8 +104,6 @@ static int automatic_resume; /* experimental .. better should be zero */
 static int rfdadd;	/* rfdadd=1 may be better for 8K MEM cards */
 static int fifo=0x8;	/* don't change */
 
-/* #define REALLY_SLOW_IO */
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -195,7 +193,7 @@ sizeof(nop_cmd) = 8;
 #define NI52_ADDR2 0x01
 
 static int     ni52_probe1(struct net_device *dev,int ioaddr);
-static irqreturn_t ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr);
+static irqreturn_t ni52_interrupt(int irq,void *dev_id);
 static int     ni52_open(struct net_device *dev);
 static int     ni52_close(struct net_device *dev);
 static int     ni52_send_packet(struct sk_buff *,struct net_device *);
@@ -383,8 +381,6 @@ struct net_device * __init ni52_probe(int unit)
 		memstart = dev->mem_start;
 		memend = dev->mem_end;
 	}
-
-	SET_MODULE_OWNER(dev);
 
 	if (io > 0x1ff)	{	/* Check a single specified location. */
 		err = ni52_probe1(dev, io);
@@ -639,7 +635,7 @@ static int init586(struct net_device *dev)
 	/*
 	 * TDR, wire check .. e.g. no resistor e.t.c
 	 */
-	 
+
 	tdr_cmd = (struct tdr_cmd_struct *)ptr;
 
 	tdr_cmd->cmd_status	= 0;
@@ -837,7 +833,7 @@ static void *alloc_rfa(struct net_device *dev,void *ptr)
  * Interrupt Handler ...
  */
 
-static irqreturn_t ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
+static irqreturn_t ni52_interrupt(int irq,void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	unsigned short stat;
@@ -936,10 +932,9 @@ static void ni52_rcv_int(struct net_device *dev)
 					skb = (struct sk_buff *) dev_alloc_skb(totlen+2);
 					if(skb != NULL)
 					{
-						skb->dev = dev;
 						skb_reserve(skb,2);
 						skb_put(skb,totlen);
-						eth_copy_and_sum(skb,(char *) p->base+(unsigned long) rbd->buffer,totlen,0);
+						skb_copy_to_linear_data(skb,(char *) p->base+(unsigned long) rbd->buffer,totlen);
 						skb->protocol=eth_type_trans(skb,dev);
 						netif_rx(skb);
 						dev->last_rx = jiffies;
@@ -1185,7 +1180,7 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 	else
 #endif
 	{
-		memcpy((char *)p->xmit_cbuffs[p->xmit_count],(char *)(skb->data),skb->len);
+		skb_copy_from_linear_data(skb, (char *) p->xmit_cbuffs[p->xmit_count], skb->len);
 		len = skb->len;
 		if (len < ETH_ZLEN) {
 			len = ETH_ZLEN;
@@ -1323,7 +1318,7 @@ MODULE_PARM_DESC(irq, "NI5210 IRQ number,required");
 MODULE_PARM_DESC(memstart, "NI5210 memory base address,required");
 MODULE_PARM_DESC(memend, "NI5210 memory end address,required");
 
-int init_module(void)
+int __init init_module(void)
 {
 	if(io <= 0x0 || !memend || !memstart || irq < 2) {
 		printk("ni52: Autoprobing not allowed for modules.\nni52: Set symbols 'io' 'irq' 'memstart' and 'memend'\n");
@@ -1335,7 +1330,7 @@ int init_module(void)
 	return 0;
 }
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
 	unregister_netdev(dev_ni52);
 	release_region(dev_ni52->base_addr, NI52_TOTAL_SIZE);

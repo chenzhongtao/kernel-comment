@@ -10,18 +10,43 @@
  *  For read stereo/mono you must wait 0.1 sec after set frequency and
  *  card unmuted so I set frequency on unmute
  *  Signal handling seem to work only on autoscanning (not implemented)
+ *
+ *  Converted to V4L2 API by Mauro Carvalho Chehab <mchehab@infradead.org>
  */
 
 #include <linux/module.h>	/* Modules 			*/
 #include <linux/init.h>		/* Initdata			*/
-#include <linux/ioport.h>	/* check_region, request_region	*/
+#include <linux/ioport.h>	/* request_region		*/
 #include <linux/delay.h>	/* udelay			*/
 #include <asm/io.h>		/* outb, outb_p			*/
 #include <asm/uaccess.h>	/* copy to/from user		*/
-#include <linux/videodev.h>	/* kernel radio structs		*/
-#include <asm/semaphore.h>
+#include <linux/videodev2.h>	/* kernel radio structs		*/
+#include <media/v4l2-common.h>
+#include <linux/mutex.h>
 
-static struct semaphore lock;
+static struct mutex lock;
+
+#include <linux/version.h>      /* for KERNEL_VERSION MACRO     */
+#define RADIO_VERSION KERNEL_VERSION(0,0,2)
+
+static struct v4l2_queryctrl radio_qctrl[] = {
+	{
+		.id            = V4L2_CID_AUDIO_MUTE,
+		.name          = "Mute",
+		.minimum       = 0,
+		.maximum       = 1,
+		.default_value = 1,
+		.type          = V4L2_CTRL_TYPE_BOOLEAN,
+	},{
+		.id            = V4L2_CID_AUDIO_VOLUME,
+		.name          = "Volume",
+		.minimum       = 0,
+		.maximum       = 65535,
+		.step          = 1<<12,
+		.default_value = 0xff,
+		.type          = V4L2_CTRL_TYPE_INTEGER,
+	}
+};
 
 #undef DEBUG
 //#define DEBUG 1
@@ -48,7 +73,7 @@ static int io = 0x384;
 static int radio_nr = -1;
 
 /* hw precision is 12.5 kHz
- * It is only usefull to give freq in intervall of 200 (=0.0125Mhz),
+ * It is only useful to give freq in intervall of 200 (=0.0125Mhz),
  * other bits will be truncated
  */
 #define RSF16_ENCODE(x)	((x)/200+856)
@@ -201,161 +226,214 @@ static int fmr2_setvolume(struct fmr2_device *dev)
 	return 0;
 }
 
-static int fmr2_do_ioctl(struct inode *inode, struct file *file,
-                      unsigned int cmd, void *arg)
+static int vidioc_querycap(struct file *file, void  *priv,
+					struct v4l2_capability *v)
+{
+	strlcpy(v->driver, "radio-sf16fmr2", sizeof(v->driver));
+	strlcpy(v->card, "SF16-FMR2 radio", sizeof(v->card));
+	sprintf(v->bus_info, "ISA");
+	v->version = RADIO_VERSION;
+	v->capabilities = V4L2_CAP_TUNER;
+	return 0;
+}
+
+static int vidioc_g_tuner(struct file *file, void *priv,
+					struct v4l2_tuner *v)
+{
+	int mult;
+	struct video_device *dev = video_devdata(file);
+	struct fmr2_device *fmr2 = dev->priv;
+
+	if (v->index > 0)
+		return -EINVAL;
+
+	strcpy(v->name, "FM");
+	v->type = V4L2_TUNER_RADIO;
+
+	mult = (fmr2->flags & V4L2_TUNER_CAP_LOW) ? 1 : 1000;
+	v->rangelow = RSF16_MINFREQ/mult;
+	v->rangehigh = RSF16_MAXFREQ/mult;
+	v->rxsubchans = V4L2_TUNER_SUB_MONO | V4L2_TUNER_MODE_STEREO;
+	v->capability = fmr2->flags&V4L2_TUNER_CAP_LOW;
+	v->audmode = fmr2->stereo ? V4L2_TUNER_MODE_STEREO:
+				V4L2_TUNER_MODE_MONO;
+	mutex_lock(&lock);
+	v->signal = fmr2_getsigstr(fmr2);
+	mutex_unlock(&lock);
+	return 0;
+}
+
+static int vidioc_s_tuner(struct file *file, void *priv,
+					struct v4l2_tuner *v)
+{
+	if (v->index > 0)
+		return -EINVAL;
+	return 0;
+}
+
+static int vidioc_s_frequency(struct file *file, void *priv,
+					struct v4l2_frequency *f)
 {
 	struct video_device *dev = video_devdata(file);
 	struct fmr2_device *fmr2 = dev->priv;
-	debug_print((KERN_DEBUG "freq %ld flags %d vol %d mute %d "
-		"stereo %d type %d\n",
-		fmr2->curfreq, fmr2->flags, fmr2->curvol, fmr2->mute,
-		fmr2->stereo, fmr2->card_type));
 
-	switch(cmd)
-	{
-		case VIDIOCGCAP:
-		{
-			struct video_capability *v = arg;
-			memset(v,0,sizeof(*v));
-			strcpy(v->name, "SF16-FMR2 radio");
-			v->type=VID_TYPE_TUNER;
-			v->channels=1;
-			v->audios=1;
-			return 0;
-		}
-		case VIDIOCGTUNER:
-		{
-			struct video_tuner *v = arg;
-			int mult;
+	if (!(fmr2->flags & V4L2_TUNER_CAP_LOW))
+		f->frequency *= 1000;
+	if (f->frequency < RSF16_MINFREQ ||
+			f->frequency > RSF16_MAXFREQ )
+		return -EINVAL;
+	/*rounding in steps of 200 to match th freq
+	that will be used */
+	fmr2->curfreq = (f->frequency/200)*200;
 
-			if(v->tuner)     /* Only 1 tuner */
-				return -EINVAL;
-			strcpy(v->name, "FM");
-			mult = (fmr2->flags & VIDEO_TUNER_LOW) ? 1 : 1000;
-			v->rangelow = RSF16_MINFREQ/mult;
-			v->rangehigh = RSF16_MAXFREQ/mult;
-			v->flags = fmr2->flags | VIDEO_AUDIO_MUTABLE;
-			if (fmr2->mute)
-				v->flags |= VIDEO_AUDIO_MUTE;
-			v->mode=VIDEO_MODE_AUTO;
-			down(&lock);
-			v->signal = fmr2_getsigstr(fmr2);
-			up(&lock);
-			return 0;
-		}
-		case VIDIOCSTUNER:
-		{
-			struct video_tuner *v = arg;
-			if (v->tuner!=0)
-				return -EINVAL;
-			fmr2->flags = v->flags & VIDEO_TUNER_LOW;
-			return 0;
-		}
-		case VIDIOCGFREQ:
-		{
-			unsigned long *freq = arg;
-			*freq = fmr2->curfreq;
-			if (!(fmr2->flags & VIDEO_TUNER_LOW))
-				*freq /= 1000;
-			return 0;
-		}
-		case VIDIOCSFREQ:
-		{
-			unsigned long *freq = arg;
-			if (!(fmr2->flags & VIDEO_TUNER_LOW))
-				*freq *= 1000;
-			if ( *freq < RSF16_MINFREQ || *freq > RSF16_MAXFREQ )
-				return -EINVAL;
-			/* rounding in steps of 200 to match th freq
-			 * that will be used
-			 */
-			fmr2->curfreq = (*freq/200)*200;
-
-			/* set card freq (if not muted) */
-			if (fmr2->curvol && !fmr2->mute)
-			{
-				down(&lock);
-				fmr2_setfreq(fmr2);
-				up(&lock);
-			}
-			return 0;
-		}
-		case VIDIOCGAUDIO:
-		{
-			struct video_audio *v = arg;
-			memset(v,0,sizeof(*v));
-			/* !!! do not return VIDEO_AUDIO_MUTE */
-			v->flags = VIDEO_AUDIO_MUTABLE;
-			strcpy(v->name, "Radio");
-			/* get current stereo mode */
-			v->mode = fmr2->stereo ? VIDEO_SOUND_STEREO: VIDEO_SOUND_MONO;
-			/* volume supported ? */
-			if (fmr2->card_type == 11)
-			{
-				v->flags |= VIDEO_AUDIO_VOLUME;
-				v->step = 1 << 12;
-				v->volume = fmr2->curvol;
-			}
-			debug_print((KERN_DEBUG "Get flags %d vol %d\n", v->flags, v->volume));
-			return 0;
-		}
-		case VIDIOCSAUDIO:
-		{
-			struct video_audio *v = arg;
-			if(v->audio)
-				return -EINVAL;
-			debug_print((KERN_DEBUG "Set flags %d vol %d\n", v->flags, v->volume));
-			/* set volume */
-			if (v->flags & VIDEO_AUDIO_VOLUME)
-				fmr2->curvol = v->volume; /* !!! set with precision */
-			if (fmr2->card_type != 11) fmr2->curvol = 65535;
-			fmr2->mute = 0;
-			if (v->flags & VIDEO_AUDIO_MUTE)
-				fmr2->mute = 1;
-#ifdef DEBUG
-			if (fmr2->curvol && !fmr2->mute)
-				printk(KERN_DEBUG "unmute\n");
-			else
-				printk(KERN_DEBUG "mute\n");
-#endif
-			down(&lock);
-			if (fmr2->curvol && !fmr2->mute)
-			{
-				fmr2_setvolume(fmr2);
-				fmr2_setfreq(fmr2);
-			}
-			else fmr2_mute(fmr2->port);
-			up(&lock);
-			return 0;
-		}
-		case VIDIOCGUNIT:
-		{
-			struct video_unit *v = arg;
-			v->video=VIDEO_NO_UNIT;
-			v->vbi=VIDEO_NO_UNIT;
-			v->radio=dev->minor;
-			v->audio=0; /* How do we find out this??? */
-			v->teletext=VIDEO_NO_UNIT;
-			return 0;
-		}
-		default:
-			return -ENOIOCTLCMD;
+	/* set card freq (if not muted) */
+	if (fmr2->curvol && !fmr2->mute) {
+		mutex_lock(&lock);
+		fmr2_setfreq(fmr2);
+		mutex_unlock(&lock);
 	}
+	return 0;
 }
 
-static int fmr2_ioctl(struct inode *inode, struct file *file,
-                      unsigned int cmd, unsigned long arg)
- {
-	return video_usercopy(inode, file, cmd, arg, fmr2_do_ioctl);
+static int vidioc_g_frequency(struct file *file, void *priv,
+					struct v4l2_frequency *f)
+{
+	struct video_device *dev = video_devdata(file);
+	struct fmr2_device *fmr2 = dev->priv;
+
+	f->type = V4L2_TUNER_RADIO;
+	f->frequency = fmr2->curfreq;
+	if (!(fmr2->flags & V4L2_TUNER_CAP_LOW))
+		f->frequency /= 1000;
+	return 0;
+}
+
+static int vidioc_queryctrl(struct file *file, void *priv,
+					struct v4l2_queryctrl *qc)
+{
+	int i;
+	struct video_device *dev = video_devdata(file);
+	struct fmr2_device *fmr2 = dev->priv;
+
+	for (i = 0; i < ARRAY_SIZE(radio_qctrl); i++) {
+		if ((fmr2->card_type != 11)
+				&& V4L2_CID_AUDIO_VOLUME)
+			radio_qctrl[i].step = 65535;
+		if (qc->id && qc->id == radio_qctrl[i].id) {
+			memcpy(qc, &(radio_qctrl[i]),
+						sizeof(*qc));
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
+
+static int vidioc_g_ctrl(struct file *file, void *priv,
+					struct v4l2_control *ctrl)
+{
+	struct video_device *dev = video_devdata(file);
+	struct fmr2_device *fmr2 = dev->priv;
+
+	switch (ctrl->id) {
+	case V4L2_CID_AUDIO_MUTE:
+		ctrl->value = fmr2->mute;
+		return 0;
+	case V4L2_CID_AUDIO_VOLUME:
+		ctrl->value = fmr2->curvol;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static int vidioc_s_ctrl(struct file *file, void *priv,
+					struct v4l2_control *ctrl)
+{
+	struct video_device *dev = video_devdata(file);
+	struct fmr2_device *fmr2 = dev->priv;
+
+	switch (ctrl->id) {
+	case V4L2_CID_AUDIO_MUTE:
+		fmr2->mute = ctrl->value;
+		if (fmr2->card_type != 11) {
+			if (!fmr2->mute)
+				fmr2->curvol = 65535;
+			else
+				fmr2->curvol = 0;
+		}
+		break;
+	case V4L2_CID_AUDIO_VOLUME:
+		fmr2->curvol = ctrl->value;
+		if (fmr2->card_type != 11) {
+			if (fmr2->curvol) {
+				fmr2->curvol = 65535;
+				fmr2->mute = 0;
+			} else {
+				fmr2->curvol = 0;
+				fmr2->mute = 1;
+			}
+		}
+		break;
+	default:
+		return -EINVAL;
+	}
+
+#ifdef DEBUG
+	if (fmr2->curvol && !fmr2->mute)
+		printk(KERN_DEBUG "unmute\n");
+	else
+		printk(KERN_DEBUG "mute\n");
+#endif
+
+	mutex_lock(&lock);
+	if (fmr2->curvol && !fmr2->mute) {
+		fmr2_setvolume(fmr2);
+		fmr2_setfreq(fmr2);
+	} else
+		fmr2_mute(fmr2->port);
+	mutex_unlock(&lock);
+	return 0;
+}
+
+static int vidioc_g_audio(struct file *file, void *priv,
+					struct v4l2_audio *a)
+{
+	if (a->index > 1)
+		return -EINVAL;
+
+	strcpy(a->name, "Radio");
+	a->capability = V4L2_AUDCAP_STEREO;
+	return 0;
+}
+
+static int vidioc_g_input(struct file *filp, void *priv, unsigned int *i)
+{
+	*i = 0;
+	return 0;
+}
+
+static int vidioc_s_input(struct file *filp, void *priv, unsigned int i)
+{
+	if (i != 0)
+		return -EINVAL;
+	return 0;
+}
+
+static int vidioc_s_audio(struct file *file, void *priv,
+					struct v4l2_audio *a)
+{
+	if (a->index != 0)
+		return -EINVAL;
+	return 0;
 }
 
 static struct fmr2_device fmr2_unit;
 
-static struct file_operations fmr2_fops = {
+static const struct file_operations fmr2_fops = {
 	.owner          = THIS_MODULE,
 	.open           = video_exclusive_open,
 	.release        = video_exclusive_release,
-	.ioctl          = fmr2_ioctl,
+	.ioctl          = video_ioctl2,
+	.compat_ioctl	= v4l_compat_ioctl32,
 	.llseek         = no_llseek,
 };
 
@@ -364,8 +442,19 @@ static struct video_device fmr2_radio=
 	.owner		= THIS_MODULE,
 	.name		= "SF16FMR2 radio",
 	. type		= VID_TYPE_TUNER,
-	.hardware	= VID_HARDWARE_SF16FMR2,
 	.fops		= &fmr2_fops,
+	.vidioc_querycap    = vidioc_querycap,
+	.vidioc_g_tuner     = vidioc_g_tuner,
+	.vidioc_s_tuner     = vidioc_s_tuner,
+	.vidioc_g_audio     = vidioc_g_audio,
+	.vidioc_s_audio     = vidioc_s_audio,
+	.vidioc_g_input     = vidioc_g_input,
+	.vidioc_s_input     = vidioc_s_input,
+	.vidioc_g_frequency = vidioc_g_frequency,
+	.vidioc_s_frequency = vidioc_s_frequency,
+	.vidioc_queryctrl   = vidioc_queryctrl,
+	.vidioc_g_ctrl      = vidioc_g_ctrl,
+	.vidioc_s_ctrl      = vidioc_s_ctrl,
 };
 
 static int __init fmr2_init(void)
@@ -375,11 +464,11 @@ static int __init fmr2_init(void)
 	fmr2_unit.mute = 0;
 	fmr2_unit.curfreq = 0;
 	fmr2_unit.stereo = 1;
-	fmr2_unit.flags = VIDEO_TUNER_LOW;
+	fmr2_unit.flags = V4L2_TUNER_CAP_LOW;
 	fmr2_unit.card_type = 0;
 	fmr2_radio.priv = &fmr2_unit;
 
-	init_MUTEX(&lock);
+	mutex_init(&lock);
 
 	if (request_region(io, 2, "sf16fmr2"))
 	{
@@ -394,12 +483,11 @@ static int __init fmr2_init(void)
 	}
 
 	printk(KERN_INFO "SF16FMR2 radio card driver at 0x%x.\n", io);
-	debug_print((KERN_DEBUG "Mute %d Low %d\n",VIDEO_AUDIO_MUTE,VIDEO_TUNER_LOW));
 	/* mute card - prevents noisy bootups */
-	down(&lock);
+	mutex_lock(&lock);
 	fmr2_mute(io);
 	fmr2_product_info(&fmr2_unit);
-	up(&lock);
+	mutex_unlock(&lock);
 	debug_print((KERN_DEBUG "card_type %d\n", fmr2_unit.card_type));
 	return 0;
 }

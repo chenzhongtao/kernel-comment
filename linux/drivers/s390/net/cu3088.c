@@ -1,11 +1,9 @@
 /*
- * $Id: cu3088.c,v 1.34 2004/06/15 13:16:27 pavlic Exp $
- *
  * CTC / LCS ccw_device driver
  *
  * Copyright (C) 2002 IBM Deutschland Entwicklung GmbH, IBM Corporation
  * Author(s): Arnd Bergmann <arndb@de.ibm.com>
- *            Cornelia Huck <cohuck@de.ibm.com>
+ *            Cornelia Huck <cornelia.huck@de.ibm.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,11 +20,12 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  */
-
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/err.h>
 
+#include <asm/s390_rdev.h>
 #include <asm/ccwdev.h>
 #include <asm/ccwgroup.h>
 
@@ -39,6 +38,7 @@ const char *cu3088_type[] = {
 	"FICON channel",
 	"P390 LCS card",
 	"OSA LCS card",
+	"CLAW channel device",
 	"unknown channel type",
 	"unsupported channel type",
 };
@@ -51,12 +51,13 @@ static struct ccw_device_id cu3088_ids[] = {
 	{ CCW_DEVICE(0x3088, 0x1e), .driver_info = channel_type_ficon },
 	{ CCW_DEVICE(0x3088, 0x01), .driver_info = channel_type_p390 },
 	{ CCW_DEVICE(0x3088, 0x60), .driver_info = channel_type_osa2 },
+	{ CCW_DEVICE(0x3088, 0x61), .driver_info = channel_type_claw },
 	{ /* end of list */ }
 };
 
 static struct ccw_driver cu3088_driver;
 
-struct device *cu3088_root_dev;
+static struct device *cu3088_root_dev;
 
 static ssize_t
 group_write(struct device_driver *drv, const char *buf, size_t count)
@@ -76,7 +77,7 @@ group_write(struct device_driver *drv, const char *buf, size_t count)
 		int len;
 
 		if (!(end = strchr(start, delim[i])))
-			return count;
+			return -EINVAL;
 		len = min_t(ptrdiff_t, BUS_ID_SIZE, end - start + 1);
 		strlcpy (bus_ids[i], start, len);
 		argv[i] = bus_ids[i];
@@ -93,7 +94,7 @@ static DRIVER_ATTR(group, 0200, NULL, group_write);
 
 /* Register-unregister for ctc&lcs */
 int
-register_cu3088_discipline(struct ccwgroup_driver *dcp) 
+register_cu3088_discipline(struct ccwgroup_driver *dcp)
 {
 	int rc;
 
@@ -108,7 +109,7 @@ register_cu3088_discipline(struct ccwgroup_driver *dcp)
 	rc = driver_create_file(&dcp->driver, &driver_attr_group);
 	if (rc)
 		ccwgroup_driver_unregister(dcp);
-		
+
 	return rc;
 
 }
@@ -136,7 +137,7 @@ static int __init
 cu3088_init (void)
 {
 	int rc;
-	
+
 	cu3088_root_dev = s390_root_dev_register("cu3088");
 	if (IS_ERR(cu3088_root_dev))
 		return PTR_ERR(cu3088_root_dev);

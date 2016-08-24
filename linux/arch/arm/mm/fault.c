@@ -8,10 +8,8 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/signal.h>
-#include <linux/ptrace.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 
@@ -108,14 +106,15 @@ __do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
  */
 static void
 __do_user_fault(struct task_struct *tsk, unsigned long addr,
-		unsigned int fsr, int code, struct pt_regs *regs)
+		unsigned int fsr, unsigned int sig, int code,
+		struct pt_regs *regs)
 {
 	struct siginfo si;
 
 #ifdef CONFIG_DEBUG_USER
 	if (user_debug & UDBG_SEGV) {
-		printk(KERN_DEBUG "%s: unhandled page fault at 0x%08lx, code 0x%03x\n",
-		       tsk->comm, addr, fsr);
+		printk(KERN_DEBUG "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+		       tsk->comm, sig, addr, fsr);
 		show_pte(tsk->mm, addr);
 		show_regs(regs);
 	}
@@ -124,29 +123,30 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 	tsk->thread.address = addr;
 	tsk->thread.error_code = fsr;
 	tsk->thread.trap_no = 14;
-	si.si_signo = SIGSEGV;
+	si.si_signo = sig;
 	si.si_errno = 0;
 	si.si_code = code;
 	si.si_addr = (void __user *)addr;
-	force_sig_info(SIGSEGV, &si, tsk);
+	force_sig_info(sig, &si, tsk);
 }
 
-void
-do_bad_area(struct task_struct *tsk, struct mm_struct *mm, unsigned long addr,
-	    unsigned int fsr, struct pt_regs *regs)
+void do_bad_area(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
+	struct task_struct *tsk = current;
+	struct mm_struct *mm = tsk->active_mm;
+
 	/*
 	 * If we are in kernel mode at this point, we
 	 * have no context to handle this fault with.
 	 */
 	if (user_mode(regs))
-		__do_user_fault(tsk, addr, fsr, SEGV_MAPERR, regs);
+		__do_user_fault(tsk, addr, fsr, SIGSEGV, SEGV_MAPERR, regs);
 	else
 		__do_kernel_fault(mm, addr, fsr, regs);
 }
 
-#define VM_FAULT_BADMAP		(-20)
-#define VM_FAULT_BADACCESS	(-21)
+#define VM_FAULT_BADMAP		0x010000
+#define VM_FAULT_BADACCESS	0x020000
 
 static int
 __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
@@ -170,7 +170,7 @@ good_area:
 	if (fsr & (1 << 11)) /* write? */
 		mask = VM_WRITE;
 	else
-		mask = VM_READ|VM_EXEC;
+		mask = VM_READ|VM_EXEC|VM_WRITE;
 
 	fault = VM_FAULT_BADACCESS;
 	if (!(vma->vm_flags & mask))
@@ -183,28 +183,29 @@ good_area:
 	 */
 survive:
 	fault = handle_mm_fault(mm, vma, addr & PAGE_MASK, fsr & (1 << 11));
-
-	/*
-	 * Handle the "normal" cases first - successful and sigbus
-	 */
-	switch (fault) {
-	case VM_FAULT_MAJOR:
-		tsk->maj_flt++;
-		return fault;
-	case VM_FAULT_MINOR:
-		tsk->min_flt++;
-	case VM_FAULT_SIGBUS:
-		return fault;
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			return fault;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		tsk->maj_flt++;
+	else
+		tsk->min_flt++;
+	return fault;
 
-	if (tsk->pid != 1)
+out_of_memory:
+	if (!is_global_init(tsk))
 		goto out;
 
 	/*
-	 * If we are out of memory for pid1,
-	 * sleep for a while and retry
+	 * If we are out of memory for pid1, sleep for a while and retry
 	 */
+	up_read(&mm->mmap_sem);
 	yield();
+	down_read(&mm->mmap_sem);
 	goto survive;
 
 check_stack:
@@ -219,7 +220,7 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
 	struct task_struct *tsk;
 	struct mm_struct *mm;
-	int fault;
+	int fault, sig, code;
 
 	tsk = current;
 	mm  = tsk->mm;
@@ -228,25 +229,28 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
 
-	down_read(&mm->mmap_sem);
+	/*
+	 * As per x86, we may deadlock here.  However, since the kernel only
+	 * validly references user space from well defined areas of the code,
+	 * we can bug out early if this is from code which shouldn't.
+	 */
+	if (!down_read_trylock(&mm->mmap_sem)) {
+		if (!user_mode(regs) && !search_exception_tables(regs->ARM_pc))
+			goto no_context;
+		down_read(&mm->mmap_sem);
+	}
+
 	fault = __do_page_fault(mm, addr, fsr, tsk);
 	up_read(&mm->mmap_sem);
 
 	/*
-	 * Handle the "normal" case first
+	 * Handle the "normal" case first - VM_FAULT_MAJOR / VM_FAULT_MINOR
 	 */
-	if (fault > 0)
+	if (likely(!(fault & (VM_FAULT_ERROR | VM_FAULT_BADMAP | VM_FAULT_BADACCESS))))
 		return 0;
-
-	/*
-	 * We had some memory, but were unable to
-	 * successfully fix up this page fault.
-	 */
-	if (fault == 0)
-		goto do_sigbus;
 
 	/*
 	 * If we are in kernel mode at this point, we
@@ -255,42 +259,35 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	if (!user_mode(regs))
 		goto no_context;
 
-	if (fault == VM_FAULT_OOM) {
+	if (fault & VM_FAULT_OOM) {
 		/*
-		 * We ran out of memory, or some other thing happened to
-		 * us that made us unable to handle the page fault gracefully.
+		 * We ran out of memory, or some other thing
+		 * happened to us that made us unable to handle
+		 * the page fault gracefully.
 		 */
 		printk("VM: killing process %s\n", tsk->comm);
-		do_exit(SIGKILL);
-	} else
-		__do_user_fault(tsk, addr, fsr, fault == VM_FAULT_BADACCESS ?
-				SEGV_ACCERR : SEGV_MAPERR, regs);
-	return 0;
-
-
-/*
- * We ran out of memory, or some other thing happened to us that made
- * us unable to handle the page fault gracefully.
- */
-do_sigbus:
-	/*
-	 * Send a sigbus, regardless of whether we were in kernel
-	 * or user mode.
-	 */
-	tsk->thread.address = addr;
-	tsk->thread.error_code = fsr;
-	tsk->thread.trap_no = 14;
-	force_sig(SIGBUS, tsk);
-#ifdef CONFIG_DEBUG_USER
-	if (user_debug & UDBG_BUS) {
-		printk(KERN_DEBUG "%s: sigbus at 0x%08lx, pc=0x%08lx\n",
-			current->comm, addr, instruction_pointer(regs));
-	}
-#endif
-
-	/* Kernel mode? Handle exceptions or die */
-	if (user_mode(regs))
+		do_group_exit(SIGKILL);
 		return 0;
+	}
+	if (fault & VM_FAULT_SIGBUS) {
+		/*
+		 * We had some memory, but were unable to
+		 * successfully fix up this page fault.
+		 */
+		sig = SIGBUS;
+		code = BUS_ADRERR;
+	} else {
+		/*
+		 * Something tried to access memory that
+		 * isn't in our memory map..
+		 */
+		sig = SIGSEGV;
+		code = fault == VM_FAULT_BADACCESS ?
+			SEGV_ACCERR : SEGV_MAPERR;
+	}
+
+	__do_user_fault(tsk, addr, fsr, sig, code, regs);
+	return 0;
 
 no_context:
 	__do_kernel_fault(mm, addr, fsr, regs);
@@ -318,7 +315,6 @@ static int
 do_translation_fault(unsigned long addr, unsigned int fsr,
 		     struct pt_regs *regs)
 {
-	struct task_struct *tsk;
 	unsigned int index;
 	pgd_t *pgd, *pgd_k;
 	pmd_t *pmd, *pmd_k;
@@ -350,9 +346,7 @@ do_translation_fault(unsigned long addr, unsigned int fsr,
 	return 0;
 
 bad_area:
-	tsk = current;
-
-	do_bad_area(tsk, tsk->active_mm, addr, fsr, regs);
+	do_bad_area(addr, fsr, regs);
 	return 0;
 }
 
@@ -363,8 +357,7 @@ bad_area:
 static int
 do_sect_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
-	struct task_struct *tsk = current;
-	do_bad_area(tsk, tsk->active_mm, addr, fsr, regs);
+	do_bad_area(addr, fsr, regs);
 	return 0;
 }
 
@@ -380,49 +373,50 @@ do_bad(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 static struct fsr_info {
 	int	(*fn)(unsigned long addr, unsigned int fsr, struct pt_regs *regs);
 	int	sig;
+	int	code;
 	const char *name;
 } fsr_info[] = {
 	/*
 	 * The following are the standard ARMv3 and ARMv4 aborts.  ARMv5
 	 * defines these to be "precise" aborts.
 	 */
-	{ do_bad,		SIGSEGV, "vector exception"		   },
-	{ do_bad,		SIGILL,	 "alignment exception"		   },
-	{ do_bad,		SIGKILL, "terminal exception"		   },
-	{ do_bad,		SIGILL,	 "alignment exception"		   },
-	{ do_bad,		SIGBUS,	 "external abort on linefetch"	   },
-	{ do_translation_fault,	SIGSEGV, "section translation fault"	   },
-	{ do_bad,		SIGBUS,	 "external abort on linefetch"	   },
-	{ do_page_fault,	SIGSEGV, "page translation fault"	   },
-	{ do_bad,		SIGBUS,	 "external abort on non-linefetch" },
-	{ do_bad,		SIGSEGV, "section domain fault"		   },
-	{ do_bad,		SIGBUS,	 "external abort on non-linefetch" },
-	{ do_bad,		SIGSEGV, "page domain fault"		   },
-	{ do_bad,		SIGBUS,	 "external abort on translation"   },
-	{ do_sect_fault,	SIGSEGV, "section permission fault"	   },
-	{ do_bad,		SIGBUS,	 "external abort on translation"   },
-	{ do_page_fault,	SIGSEGV, "page permission fault"	   },
+	{ do_bad,		SIGSEGV, 0,		"vector exception"		   },
+	{ do_bad,		SIGILL,	 BUS_ADRALN,	"alignment exception"		   },
+	{ do_bad,		SIGKILL, 0,		"terminal exception"		   },
+	{ do_bad,		SIGILL,	 BUS_ADRALN,	"alignment exception"		   },
+	{ do_bad,		SIGBUS,	 0,		"external abort on linefetch"	   },
+	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"section translation fault"	   },
+	{ do_bad,		SIGBUS,	 0,		"external abort on linefetch"	   },
+	{ do_page_fault,	SIGSEGV, SEGV_MAPERR,	"page translation fault"	   },
+	{ do_bad,		SIGBUS,	 0,		"external abort on non-linefetch"  },
+	{ do_bad,		SIGSEGV, SEGV_ACCERR,	"section domain fault"		   },
+	{ do_bad,		SIGBUS,	 0,		"external abort on non-linefetch"  },
+	{ do_bad,		SIGSEGV, SEGV_ACCERR,	"page domain fault"		   },
+	{ do_bad,		SIGBUS,	 0,		"external abort on translation"	   },
+	{ do_sect_fault,	SIGSEGV, SEGV_ACCERR,	"section permission fault"	   },
+	{ do_bad,		SIGBUS,	 0,		"external abort on translation"	   },
+	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"page permission fault"		   },
 	/*
 	 * The following are "imprecise" aborts, which are signalled by bit
 	 * 10 of the FSR, and may not be recoverable.  These are only
 	 * supported if the CPU abort handler supports bit 10.
 	 */
-	{ do_bad,		SIGBUS,  "unknown 16"			   },
-	{ do_bad,		SIGBUS,  "unknown 17"			   },
-	{ do_bad,		SIGBUS,  "unknown 18"			   },
-	{ do_bad,		SIGBUS,  "unknown 19"			   },
-	{ do_bad,		SIGBUS,  "lock abort"			   }, /* xscale */
-	{ do_bad,		SIGBUS,  "unknown 21"			   },
-	{ do_bad,		SIGBUS,  "imprecise external abort"	   }, /* xscale */
-	{ do_bad,		SIGBUS,  "unknown 23"			   },
-	{ do_bad,		SIGBUS,  "dcache parity error"		   }, /* xscale */
-	{ do_bad,		SIGBUS,  "unknown 25"			   },
-	{ do_bad,		SIGBUS,  "unknown 26"			   },
-	{ do_bad,		SIGBUS,  "unknown 27"			   },
-	{ do_bad,		SIGBUS,  "unknown 28"			   },
-	{ do_bad,		SIGBUS,  "unknown 29"			   },
-	{ do_bad,		SIGBUS,  "unknown 30"			   },
-	{ do_bad,		SIGBUS,  "unknown 31"			   }
+	{ do_bad,		SIGBUS,  0,		"unknown 16"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 17"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 18"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 19"			   },
+	{ do_bad,		SIGBUS,  0,		"lock abort"			   }, /* xscale */
+	{ do_bad,		SIGBUS,  0,		"unknown 21"			   },
+	{ do_bad,		SIGBUS,  BUS_OBJERR,	"imprecise external abort"	   }, /* xscale */
+	{ do_bad,		SIGBUS,  0,		"unknown 23"			   },
+	{ do_bad,		SIGBUS,  0,		"dcache parity error"		   }, /* xscale */
+	{ do_bad,		SIGBUS,  0,		"unknown 25"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 26"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 27"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 28"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 29"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 30"			   },
+	{ do_bad,		SIGBUS,  0,		"unknown 31"			   }
 };
 
 void __init
@@ -439,22 +433,26 @@ hook_fault_code(int nr, int (*fn)(unsigned long, unsigned int, struct pt_regs *)
 /*
  * Dispatch a data abort to the relevant handler.
  */
-asmlinkage void
+asmlinkage void __exception
 do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
 	const struct fsr_info *inf = fsr_info + (fsr & 15) + ((fsr & (1 << 10)) >> 6);
+	struct siginfo info;
 
 	if (!inf->fn(addr, fsr, regs))
 		return;
 
 	printk(KERN_ALERT "Unhandled fault: %s (0x%03x) at 0x%08lx\n",
 		inf->name, fsr, addr);
-	force_sig(inf->sig, current);
-	show_pte(current->mm, addr);
-	die_if_kernel("Oops", regs, 0);
+
+	info.si_signo = inf->sig;
+	info.si_errno = 0;
+	info.si_code  = inf->code;
+	info.si_addr  = (void __user *)addr;
+	arm_notify_die("", regs, &info, fsr, 0);
 }
 
-asmlinkage void
+asmlinkage void __exception
 do_PrefetchAbort(unsigned long addr, struct pt_regs *regs)
 {
 	do_translation_fault(addr, 0, regs);

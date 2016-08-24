@@ -1,6 +1,8 @@
 #ifndef _LINUX_PERSONALITY_H
 #define _LINUX_PERSONALITY_H
 
+#ifdef __KERNEL__
+
 /*
  * Handling of different ABIs (personalities).
  */
@@ -12,12 +14,15 @@ extern int		register_exec_domain(struct exec_domain *);
 extern int		unregister_exec_domain(struct exec_domain *);
 extern int		__set_personality(unsigned long);
 
+#endif /* __KERNEL__ */
+
 /*
  * Flags for bug emulation.
  *
  * These occupy the top three bytes.
  */
 enum {
+	ADDR_NO_RANDOMIZE = 	0x0040000,	/* disable randomization of VA space */
 	FDPIC_FUNCPTRS =	0x0080000,	/* userspace function ptrs point to descriptors
 						 * (signal handling)
 						 */
@@ -35,7 +40,7 @@ enum {
  * Security-relevant compatibility flags that must be
  * cleared upon setuid or setgid exec:
  */
-#define PER_CLEAR_ON_SETID (READ_IMPLIES_EXEC)
+#define PER_CLEAR_ON_SETID (READ_IMPLIES_EXEC|ADDR_NO_RANDOMIZE)
 
 /*
  * Personality types.
@@ -70,6 +75,7 @@ enum {
 	PER_MASK =		0x00ff,
 };
 
+#ifdef __KERNEL__
 
 /*
  * Description of an execution domain.
@@ -108,6 +114,8 @@ struct exec_domain {
  * Change personality of the currently running process.
  */
 #define set_personality(pers) \
-	((current->personality == pers) ? 0 : __set_personality(pers))
+	((current->personality == (pers)) ? 0 : __set_personality(pers))
+
+#endif /* __KERNEL__ */
 
 #endif /* _LINUX_PERSONALITY_H */

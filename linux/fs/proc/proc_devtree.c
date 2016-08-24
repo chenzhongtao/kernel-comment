@@ -12,15 +12,8 @@
 #include <asm/uaccess.h>
 
 #ifndef HAVE_ARCH_DEVTREE_FIXUPS
-static inline void set_node_proc_entry(struct device_node *np, struct proc_dir_entry *de)
-{
-}
-
-static void inline set_node_name_link(struct device_node *np, struct proc_dir_entry *de)
-{
-}
-
-static void inline set_node_addr_link(struct device_node *np, struct proc_dir_entry *de)
+static inline void set_node_proc_entry(struct device_node *np,
+				       struct proc_dir_entry *de)
 {
 }
 #endif
@@ -45,7 +38,7 @@ static int property_read_proc(char *page, char **start, off_t off,
 		n = count;
 	else
 		*eof = 1;
-	memcpy(page, pp->value + off, n);
+	memcpy(page, (char *)pp->value + off, n);
 	*start = page;
 	return n;
 }
@@ -56,92 +49,166 @@ static int property_read_proc(char *page, char **start, off_t off,
  */
 
 /*
+ * Add a property to a node
+ */
+static struct proc_dir_entry *
+__proc_device_tree_add_prop(struct proc_dir_entry *de, struct property *pp,
+		const char *name)
+{
+	struct proc_dir_entry *ent;
+
+	/*
+	 * Unfortunately proc_register puts each new entry
+	 * at the beginning of the list.  So we rearrange them.
+	 */
+	ent = create_proc_read_entry(name,
+				     strncmp(name, "security-", 9)
+				     ? S_IRUGO : S_IRUSR, de,
+				     property_read_proc, pp);
+	if (ent == NULL)
+		return NULL;
+
+	if (!strncmp(name, "security-", 9))
+		ent->size = 0; /* don't leak number of password chars */
+	else
+		ent->size = pp->length;
+
+	return ent;
+}
+
+
+void proc_device_tree_add_prop(struct proc_dir_entry *pde, struct property *prop)
+{
+	__proc_device_tree_add_prop(pde, prop, prop->name);
+}
+
+void proc_device_tree_remove_prop(struct proc_dir_entry *pde,
+				  struct property *prop)
+{
+	remove_proc_entry(prop->name, pde);
+}
+
+void proc_device_tree_update_prop(struct proc_dir_entry *pde,
+				  struct property *newprop,
+				  struct property *oldprop)
+{
+	struct proc_dir_entry *ent;
+
+	for (ent = pde->subdir; ent != NULL; ent = ent->next)
+		if (ent->data == oldprop)
+			break;
+	if (ent == NULL) {
+		printk(KERN_WARNING "device-tree: property \"%s\" "
+		       " does not exist\n", oldprop->name);
+	} else {
+		ent->data = newprop;
+		ent->size = newprop->length;
+	}
+}
+
+/*
+ * Various dodgy firmware might give us nodes and/or properties with
+ * conflicting names. That's generally ok, except for exporting via /proc,
+ * so munge names here to ensure they're unique.
+ */
+
+static int duplicate_name(struct proc_dir_entry *de, const char *name)
+{
+	struct proc_dir_entry *ent;
+	int found = 0;
+
+	spin_lock(&proc_subdir_lock);
+
+	for (ent = de->subdir; ent != NULL; ent = ent->next) {
+		if (strcmp(ent->name, name) == 0) {
+			found = 1;
+			break;
+		}
+	}
+
+	spin_unlock(&proc_subdir_lock);
+
+	return found;
+}
+
+static const char *fixup_name(struct device_node *np, struct proc_dir_entry *de,
+		const char *name)
+{
+	char *fixed_name;
+	int fixup_len = strlen(name) + 2 + 1; /* name + #x + \0 */
+	int i = 1, size;
+
+realloc:
+	fixed_name = kmalloc(fixup_len, GFP_KERNEL);
+	if (fixed_name == NULL) {
+		printk(KERN_ERR "device-tree: Out of memory trying to fixup "
+				"name \"%s\"\n", name);
+		return name;
+	}
+
+retry:
+	size = snprintf(fixed_name, fixup_len, "%s#%d", name, i);
+	size++; /* account for NULL */
+
+	if (size > fixup_len) {
+		/* We ran out of space, free and reallocate. */
+		kfree(fixed_name);
+		fixup_len = size;
+		goto realloc;
+	}
+
+	if (duplicate_name(de, fixed_name)) {
+		/* Multiple duplicates. Retry with a different offset. */
+		i++;
+		goto retry;
+	}
+
+	printk(KERN_WARNING "device-tree: Duplicate name in %s, "
+			"renamed to \"%s\"\n", np->full_name, fixed_name);
+
+	return fixed_name;
+}
+
+/*
  * Process a node, adding entries for its children and its properties.
  */
-void proc_device_tree_add_node(struct device_node *np, struct proc_dir_entry *de)
+void proc_device_tree_add_node(struct device_node *np,
+			       struct proc_dir_entry *de)
 {
 	struct property *pp;
 	struct proc_dir_entry *ent;
-	struct device_node *child, *sib;
-	const char *p, *at;
-	int l;
-	struct proc_dir_entry *list, **lastp, *al;
+	struct device_node *child;
+	const char *p;
 
 	set_node_proc_entry(np, de);
-	lastp = &list;
-	for (pp = np->properties; pp != 0; pp = pp->next) {
-		/*
-		 * Unfortunately proc_register puts each new entry
-		 * at the beginning of the list.  So we rearrange them.
-		 */
-		ent = create_proc_read_entry(pp->name, strncmp(pp->name, "security-", 9) ?
-					     S_IRUGO : S_IRUSR, de, property_read_proc, pp);
-		if (ent == 0)
-			break;
-		if (!strncmp(pp->name, "security-", 9))
-		     ent->size = 0; /* don't leak number of password chars */
-		else
-		     ent->size = pp->length;
-		*lastp = ent;
-		lastp = &ent->next;
-	}
-	child = NULL;
-	while ((child = of_get_next_child(np, child))) {
+	for (child = NULL; (child = of_get_next_child(np, child));) {
+		/* Use everything after the last slash, or the full name */
 		p = strrchr(child->full_name, '/');
 		if (!p)
 			p = child->full_name;
 		else
 			++p;
-		/* chop off '@0' if the name ends with that */
-		l = strlen(p);
-		if (l > 2 && p[l-2] == '@' && p[l-1] == '0')
-			l -= 2;
+
+		if (duplicate_name(de, p))
+			p = fixup_name(np, de, p);
+
 		ent = proc_mkdir(p, de);
 		if (ent == 0)
 			break;
-		*lastp = ent;
-		lastp = &ent->next;
 		proc_device_tree_add_node(child, ent);
-
-		/*
-		 * If we left the address part on the name, consider
-		 * adding symlinks from the name and address parts.
-		 */
-		if (p[l] != 0 || (at = strchr(p, '@')) == 0)
-			continue;
-
-		/*
-		 * If this is the first node with a given name property,
-		 * add a symlink with the name property as its name.
-		 */
-		sib = NULL;
-		while ((sib = of_get_next_child(np, sib)) && sib != child)
-			if (sib->name && strcmp(sib->name, child->name) == 0)
-				break;
-		if (sib == child && strncmp(p, child->name, l) != 0) {
-			al = proc_symlink(child->name, de, ent->name);
-			if (al == 0) {
-				of_node_put(sib);
-				break;
-			}
-			set_node_name_link(child, al);
-			*lastp = al;
-			lastp = &al->next;
-		}
-		of_node_put(sib);
-		/*
-		 * Add another directory with the @address part as its name.
-		 */
-		al = proc_symlink(at, de, ent->name);
-		if (al == 0)
-			break;
-		set_node_addr_link(child, al);
-		*lastp = al;
-		lastp = &al->next;
 	}
 	of_node_put(child);
-	*lastp = NULL;
-	de->subdir = list;
+
+	for (pp = np->properties; pp != 0; pp = pp->next) {
+		p = pp->name;
+
+		if (duplicate_name(de, p))
+			p = fixup_name(np, de, p);
+
+		ent = __proc_device_tree_add_prop(de, pp, p);
+		if (ent == 0)
+			break;
+	}
 }
 
 /*

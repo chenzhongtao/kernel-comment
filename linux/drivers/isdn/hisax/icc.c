@@ -24,10 +24,10 @@
 #define DBUSY_TIMER_VALUE 80
 #define ARCOFI_USE 0
 
-static char *ICCVer[] __initdata =
+static char *ICCVer[] =
 {"2070 A1/A3", "2070 B1", "2070 B2/B3", "2070 V2.4"};
 
-void __init
+void
 ICCVersion(struct IsdnCardState *cs, char *s)
 {
 	int val;
@@ -77,8 +77,10 @@ icc_new_ph(struct IsdnCardState *cs)
 }
 
 static void
-icc_bh(struct IsdnCardState *cs)
+icc_bh(struct work_struct *work)
 {
+	struct IsdnCardState *cs =
+		container_of(work, struct IsdnCardState, tqueue);
 	struct PStack *stptr;
 	
 	if (!cs)
@@ -108,7 +110,7 @@ icc_bh(struct IsdnCardState *cs)
 #endif
 }
 
-void
+static void
 icc_empty_fifo(struct IsdnCardState *cs, int count)
 {
 	u_char *ptr;
@@ -563,22 +565,18 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 	}
 }
 
-void
+static void
 setstack_icc(struct PStack *st, struct IsdnCardState *cs)
 {
 	st->l1.l1hw = ICC_l1hw;
 }
 
-void 
+static void
 DC_Close_icc(struct IsdnCardState *cs) {
-	if (cs->dc.icc.mon_rx) {
-		kfree(cs->dc.icc.mon_rx);
-		cs->dc.icc.mon_rx = NULL;
-	}
-	if (cs->dc.icc.mon_tx) {
-		kfree(cs->dc.icc.mon_tx);
-		cs->dc.icc.mon_tx = NULL;
-	}
+	kfree(cs->dc.icc.mon_rx);
+	cs->dc.icc.mon_rx = NULL;
+	kfree(cs->dc.icc.mon_tx);
+	cs->dc.icc.mon_tx = NULL;
 }
 
 static void
@@ -612,12 +610,12 @@ dbusy_timer_handler(struct IsdnCardState *cs)
 				debugl1(cs, "D-Channel Busy no skb");
 			}
 			cs->writeisac(cs, ICC_CMDR, 0x01); /* Transmitter reset */
-			cs->irq_func(cs->irq, cs, NULL);
+			cs->irq_func(cs->irq, cs);
 		}
 	}
 }
 
-void __init
+void
 initicc(struct IsdnCardState *cs)
 {
 	cs->setstack_d = setstack_icc;
@@ -650,7 +648,7 @@ initicc(struct IsdnCardState *cs)
 	ph_command(cs, ICC_CMD_DI);
 }
 
-void __init
+void
 clear_pending_icc_ints(struct IsdnCardState *cs)
 {
 	int val, eval;
@@ -678,7 +676,7 @@ clear_pending_icc_ints(struct IsdnCardState *cs)
 void __devinit
 setup_icc(struct IsdnCardState *cs)
 {
-	INIT_WORK(&cs->tqueue, (void *)(void *) icc_bh, cs);
+	INIT_WORK(&cs->tqueue, icc_bh);
 	cs->dbusytimer.function = (void *) dbusy_timer_handler;
 	cs->dbusytimer.data = (long) cs;
 	init_timer(&cs->dbusytimer);

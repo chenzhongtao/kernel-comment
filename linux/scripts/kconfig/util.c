@@ -33,7 +33,7 @@ int file_write_dep(const char *name)
 	FILE *out;
 
 	if (!name)
-		name = ".config.cmd";
+		name = ".kconfig.d";
 	out = fopen("..config.tmp", "w");
 	if (!out)
 		return 1;
@@ -44,7 +44,9 @@ int file_write_dep(const char *name)
 		else
 			fprintf(out, "\t%s\n", file->name);
 	}
-	fprintf(out, "\n.config include/linux/autoconf.h: $(deps_config)\n\n$(deps_config):\n");
+	fprintf(out, "\ninclude/config/auto.conf: \\\n"
+		     "\t$(deps_config)\n\n"
+		     "$(deps_config): ;\n");
 	fclose(out);
 	rename("..config.tmp", name);
 	return 0;
@@ -82,12 +84,15 @@ void str_free(struct gstr *gs)
 /* Append to growable string */
 void str_append(struct gstr *gs, const char *s)
 {
-	size_t l = strlen(gs->s) + strlen(s) + 1;
-	if (l > gs->len) {
-		gs->s   = realloc(gs->s, l);
-		gs->len = l;
+	size_t l;
+	if (s) {
+		l = strlen(gs->s) + strlen(s) + 1;
+		if (l > gs->len) {
+			gs->s   = realloc(gs->s, l);
+			gs->len = l;
+		}
+		strcat(gs->s, s);
 	}
-	strcat(gs->s, s);
 }
 
 /* Append printf formatted string to growable string */
@@ -101,7 +106,7 @@ void str_printf(struct gstr *gs, const char *fmt, ...)
 	va_end(ap);
 }
 
-/* Retreive value of growable string */
+/* Retrieve value of growable string */
 const char *str_get(struct gstr *gs)
 {
 	return gs->s;

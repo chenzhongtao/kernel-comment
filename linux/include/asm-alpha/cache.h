@@ -4,7 +4,6 @@
 #ifndef __ARCH_ALPHA_CACHE_H
 #define __ARCH_ALPHA_CACHE_H
 
-#include <linux/config.h>
 
 /* Bytes per L1 (data) cache line. */
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_EV6)
@@ -20,6 +19,5 @@
 
 #define L1_CACHE_ALIGN(x)  (((x)+(L1_CACHE_BYTES-1))&~(L1_CACHE_BYTES-1))
 #define SMP_CACHE_BYTES    L1_CACHE_BYTES
-#define L1_CACHE_SHIFT_MAX L1_CACHE_SHIFT
 
 #endif

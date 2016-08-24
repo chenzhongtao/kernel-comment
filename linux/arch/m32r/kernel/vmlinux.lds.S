@@ -1,18 +1,20 @@
 /* ld script to make M32R Linux kernel
  */
 
-#include <linux/config.h>
 #include <asm-generic/vmlinux.lds.h>
 #include <asm/addrspace.h>
 #include <asm/page.h>
 
 OUTPUT_ARCH(m32r)
-ENTRY(startup_32)
 #if defined(__LITTLE_ENDIAN__)
        jiffies = jiffies_64;
 #else
        jiffies = jiffies_64 + 4;
 #endif
+
+kernel_entry = boot - 0x80000000;
+ENTRY(kernel_entry)
+
 SECTIONS
 {
   . = CONFIG_MEMORY_START + __PAGE_OFFSET;
@@ -25,7 +27,7 @@ SECTIONS
   _text = .;			/* Text and read-only data */
   .boot : { *(.boot) } = 0
   .text : {
-	*(.text)
+	TEXT_TEXT
 	SCHED_TEXT
 	LOCK_TEXT
 	*(.fixup)
@@ -48,7 +50,7 @@ SECTIONS
   .data : {			/* Data */
 	*(.spu)
 	*(.spi)
-	*(.data)
+	DATA_DATA
 	CONSTRUCTORS
 	}
 
@@ -84,13 +86,7 @@ SECTIONS
   __setup_end = .;
   __initcall_start = .;
   .initcall.init : {
-	*(.initcall1.init)
-	*(.initcall2.init)
-	*(.initcall3.init)
-	*(.initcall4.init)
-	*(.initcall5.init)
-	*(.initcall6.init)
-	*(.initcall7.init)
+	INITCALLS
   }
   __initcall_end = .;
   __con_initcall_start = .;
@@ -106,14 +102,15 @@ SECTIONS
      from .altinstructions and .eh_frame */
   .exit.text : { *(.exit.text) }
   .exit.data : { *(.exit.data) }
+
+#ifdef CONFIG_BLK_DEV_INITRD
   . = ALIGN(4096);
   __initramfs_start = .;
   .init.ramfs : { *(.init.ramfs) }
   __initramfs_end = .;
-  . = ALIGN(32);
-  __per_cpu_start = .;
-  .data.percpu  : { *(.data.percpu) }
-  __per_cpu_end = .;
+#endif
+
+  PERCPU(4096)
   . = ALIGN(4096);
   __init_end = .;
   /* freed after init ends here */

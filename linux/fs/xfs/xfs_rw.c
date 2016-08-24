@@ -1,64 +1,47 @@
 /*
- * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2006 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
+#include "xfs_bit.h"
 #include "xfs_log.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
 #include "xfs_sb.h"
 #include "xfs_ag.h"
-#include "xfs_dir.h"
 #include "xfs_dir2.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
-#include "xfs_alloc_btree.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_alloc_btree.h"
 #include "xfs_ialloc_btree.h"
+#include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
+#include "xfs_dinode.h"
+#include "xfs_inode.h"
+#include "xfs_inode_item.h"
 #include "xfs_itable.h"
 #include "xfs_btree.h"
 #include "xfs_alloc.h"
 #include "xfs_ialloc.h"
 #include "xfs_attr.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
-#include "xfs_dir2_sf.h"
-#include "xfs_dinode.h"
-#include "xfs_inode_item.h"
-#include "xfs_inode.h"
 #include "xfs_bmap.h"
 #include "xfs_acl.h"
-#include "xfs_mac.h"
 #include "xfs_error.h"
 #include "xfs_buf_item.h"
 #include "xfs_rw.h"
@@ -100,9 +83,93 @@ xfs_write_clear_setuid(
 	}
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	xfs_trans_set_sync(tp);
-	error = xfs_trans_commit(tp, 0, NULL);
+	error = xfs_trans_commit(tp, 0);
 	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 	return 0;
+}
+
+/*
+ * Handle logging requirements of various synchronous types of write.
+ */
+int
+xfs_write_sync_logforce(
+	xfs_mount_t	*mp,
+	xfs_inode_t	*ip)
+{
+	int		error = 0;
+
+	/*
+	 * If we're treating this as O_DSYNC and we have not updated the
+	 * size, force the log.
+	 */
+	if (!(mp->m_flags & XFS_MOUNT_OSYNCISOSYNC) &&
+	    !(ip->i_update_size)) {
+		xfs_inode_log_item_t	*iip = ip->i_itemp;
+
+		/*
+		 * If an allocation transaction occurred
+		 * without extending the size, then we have to force
+		 * the log up the proper point to ensure that the
+		 * allocation is permanent.  We can't count on
+		 * the fact that buffered writes lock out direct I/O
+		 * writes - the direct I/O write could have extended
+		 * the size nontransactionally, then finished before
+		 * we started.  xfs_write_file will think that the file
+		 * didn't grow but the update isn't safe unless the
+		 * size change is logged.
+		 *
+		 * Force the log if we've committed a transaction
+		 * against the inode or if someone else has and
+		 * the commit record hasn't gone to disk (e.g.
+		 * the inode is pinned).  This guarantees that
+		 * all changes affecting the inode are permanent
+		 * when we return.
+		 */
+		if (iip && iip->ili_last_lsn) {
+			xfs_log_force(mp, iip->ili_last_lsn,
+					XFS_LOG_FORCE | XFS_LOG_SYNC);
+		} else if (xfs_ipincount(ip) > 0) {
+			xfs_log_force(mp, (xfs_lsn_t)0,
+					XFS_LOG_FORCE | XFS_LOG_SYNC);
+		}
+
+	} else {
+		xfs_trans_t	*tp;
+
+		/*
+		 * O_SYNC or O_DSYNC _with_ a size update are handled
+		 * the same way.
+		 *
+		 * If the write was synchronous then we need to make
+		 * sure that the inode modification time is permanent.
+		 * We'll have updated the timestamp above, so here
+		 * we use a synchronous transaction to log the inode.
+		 * It's not fast, but it's necessary.
+		 *
+		 * If this a dsync write and the size got changed
+		 * non-transactionally, then we need to ensure that
+		 * the size change gets logged in a synchronous
+		 * transaction.
+		 */
+		tp = xfs_trans_alloc(mp, XFS_TRANS_WRITE_SYNC);
+		if ((error = xfs_trans_reserve(tp, 0,
+						XFS_SWRITE_LOG_RES(mp),
+						0, 0, 0))) {
+			/* Transaction reserve failed */
+			xfs_trans_cancel(tp, 0);
+		} else {
+			/* Transaction reserve successful */
+			xfs_ilock(ip, XFS_ILOCK_EXCL);
+			xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
+			xfs_trans_ihold(tp, ip);
+			xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
+			xfs_trans_set_sync(tp);
+			error = xfs_trans_commit(tp, 0);
+			xfs_iunlock(ip, XFS_ILOCK_EXCL);
+		}
+	}
+
+	return error;
 }
 
 /*
@@ -111,24 +178,21 @@ xfs_write_clear_setuid(
  * the shop, make sure that absolutely nothing persistent happens to
  * this filesystem after this point.
  */
-
 void
 xfs_do_force_shutdown(
-	bhv_desc_t	*bdp,
+	xfs_mount_t	*mp,
 	int		flags,
 	char		*fname,
 	int		lnnum)
 {
 	int		logerror;
-	xfs_mount_t	*mp;
 
-	mp = XFS_BHVTOM(bdp);
-	logerror = flags & XFS_LOG_IO_ERROR;
+	logerror = flags & SHUTDOWN_LOG_IO_ERROR;
 
-	if (!(flags & XFS_FORCE_UMOUNT)) {
-		cmn_err(CE_NOTE,
-		"xfs_force_shutdown(%s,0x%x) called from line %d of file %s.  Return address = 0x%p",
-			mp->m_fsname,flags,lnnum,fname,__return_address);
+	if (!(flags & SHUTDOWN_FORCE_UMOUNT)) {
+		cmn_err(CE_NOTE, "xfs_force_shutdown(%s,0x%x) called from "
+				 "line %d of file %s.  Return address = 0x%p",
+			mp->m_fsname, flags, lnnum, fname, __return_address);
 	}
 	/*
 	 * No need to duplicate efforts.
@@ -139,33 +203,37 @@ xfs_do_force_shutdown(
 	/*
 	 * This flags XFS_MOUNT_FS_SHUTDOWN, makes sure that we don't
 	 * queue up anybody new on the log reservations, and wakes up
-	 * everybody who's sleeping on log reservations and tells
-	 * them the bad news.
+	 * everybody who's sleeping on log reservations to tell them
+	 * the bad news.
 	 */
 	if (xfs_log_force_umount(mp, logerror))
 		return;
 
-	if (flags & XFS_CORRUPT_INCORE) {
+	if (flags & SHUTDOWN_CORRUPT_INCORE) {
 		xfs_cmn_err(XFS_PTAG_SHUTDOWN_CORRUPT, CE_ALERT, mp,
     "Corruption of in-memory data detected.  Shutting down filesystem: %s",
 			mp->m_fsname);
 		if (XFS_ERRLEVEL_HIGH <= xfs_error_level) {
 			xfs_stack_trace();
 		}
-	} else if (!(flags & XFS_FORCE_UMOUNT)) {
+	} else if (!(flags & SHUTDOWN_FORCE_UMOUNT)) {
 		if (logerror) {
 			xfs_cmn_err(XFS_PTAG_SHUTDOWN_LOGERROR, CE_ALERT, mp,
-			"Log I/O Error Detected.  Shutting down filesystem: %s",
+		"Log I/O Error Detected.  Shutting down filesystem: %s",
 				mp->m_fsname);
-		} else if (!(flags & XFS_SHUTDOWN_REMOTE_REQ)) {
+		} else if (flags & SHUTDOWN_DEVICE_REQ) {
 			xfs_cmn_err(XFS_PTAG_SHUTDOWN_IOERROR, CE_ALERT, mp,
-				"I/O Error Detected.  Shutting down filesystem: %s",
+		"All device paths lost.  Shutting down filesystem: %s",
+				mp->m_fsname);
+		} else if (!(flags & SHUTDOWN_REMOTE_REQ)) {
+			xfs_cmn_err(XFS_PTAG_SHUTDOWN_IOERROR, CE_ALERT, mp,
+		"I/O Error Detected.  Shutting down filesystem: %s",
 				mp->m_fsname);
 		}
 	}
-	if (!(flags & XFS_FORCE_UMOUNT)) {
-		cmn_err(CE_ALERT,
-		"Please umount the filesystem, and rectify the problem(s)");
+	if (!(flags & SHUTDOWN_FORCE_UMOUNT)) {
+		cmn_err(CE_ALERT, "Please umount the filesystem, "
+				  "and rectify the problem(s)");
 	}
 }
 
@@ -252,6 +320,7 @@ xfs_bioerror_relse(
 	}
 	return (EIO);
 }
+
 /*
  * Prints out an ALERT message about I/O error.
  */
@@ -264,13 +333,11 @@ xfs_ioerror_alert(
 {
 	cmn_err(CE_ALERT,
  "I/O error in filesystem (\"%s\") meta-data dev %s block 0x%llx"
- "       (\"%s\") error %d buf count %u",
+ "       (\"%s\") error %d buf count %zd",
 		(!mp || !mp->m_fsname) ? "(fs name not set)" : mp->m_fsname,
-		XFS_BUFTARG_NAME(bp->pb_target),
-		(__uint64_t)blkno,
-		func,
-		XFS_BUF_GETERROR(bp),
-		XFS_BUF_COUNT(bp));
+		XFS_BUFTARG_NAME(XFS_BUF_TARGET(bp)),
+		(__uint64_t)blkno, func,
+		XFS_BUF_GETERROR(bp), XFS_BUF_COUNT(bp));
 }
 
 /*
@@ -350,7 +417,7 @@ xfs_bwrite(
 		 * from bwrite and we could be tracing a buffer that has
 		 * been reused.
 		 */
-		xfs_force_shutdown(mp, XFS_METADATA_IO_ERROR);
+		xfs_force_shutdown(mp, SHUTDOWN_META_IO_ERROR);
 	}
 	return (error);
 }

@@ -8,19 +8,54 @@ menu "Intel IXP4xx Implementation Options"
 
 comment "IXP4xx Platforms"
 
-config ARCH_AVILA
+config MACH_NSLU2
+	bool
+	prompt "Linksys NSLU2"
+	select PCI
+	help
+	  Say 'Y' here if you want your kernel to support Linksys's
+	  NSLU2 NAS device. For more information on this platform,
+	  see http://www.nslu2-linux.org
+
+config MACH_AVILA
 	bool "Avila"
+	select PCI
 	help
 	  Say 'Y' here if you want your kernel to support the Gateworks
 	  Avila Network Platform. For more information on this platform,
 	  see <file:Documentation/arm/IXP4xx>.
 
+config MACH_LOFT
+    bool "Loft"
+    depends on MACH_AVILA
+    help
+	  Say 'Y' here if you want your kernel to support the Giant
+	  Shoulder Inc Loft board (a minor variation on the standard
+	  Gateworks Avila Network Platform).
+
 config ARCH_ADI_COYOTE
 	bool "Coyote"
+	select PCI
 	help
 	  Say 'Y' here if you want your kernel to support the ADI 
 	  Engineering Coyote Gateway Reference Platform. For more
 	  information on this platform, see <file:Documentation/arm/IXP4xx>.
+
+config MACH_GATEWAY7001
+	bool "Gateway 7001"
+	select PCI
+	help
+	  Say 'Y' here if you want your kernel to support Gateway's
+	  7001 Access Point. For more information on this platform,
+	  see http://openwrt.org
+
+config MACH_WG302V2
+	bool "Netgear WG302 v2 / WAG302 v2"
+	select PCI
+	help
+	  Say 'Y' here if you want your kernel to support Netgear's
+	  WG302 v2 or WAG302 v2 Access Points. For more information
+	  on this platform, see http://openwrt.org
 
 config ARCH_IXDP425
 	bool "IXDP425"
@@ -41,8 +76,14 @@ config MACH_IXDP465
 	help
 	  Say 'Y' here if you want your kernel to support Intel's
 	  IXDP465 Development Platform (Also known as BMP).
-	  For more information on this platform, see Documentation/arm/IXP4xx.
+	  For more information on this platform, see <file:Documentation/arm/IXP4xx>.
 
+config MACH_KIXRP435
+	bool "KIXRP435"
+	help
+	  Say 'Y' here if you want your kernel to support Intel's
+	  KIXRP435 Reference Platform.
+	  For more information on this platform, see <file:Documentation/arm/IXP4xx>.
 
 #
 # IXCDP1100 is the exact same HW as IXDP425, but with a different machine 
@@ -61,12 +102,27 @@ config ARCH_PRPMC1100
 	  PrPCM1100 Processor Mezanine Module. For more information on
 	  this platform, see <file:Documentation/arm/IXP4xx>.
 
-#
-# Avila and IXDP share the same source for now. Will change in future
-#
+config MACH_NAS100D
+	bool
+	prompt "NAS100D"
+	select PCI
+	help
+	  Say 'Y' here if you want your kernel to support Iomega's
+	  NAS 100d device. For more information on this platform,
+	  see http://www.nslu2-linux.org/wiki/NAS100d/HomePage
+
+config MACH_DSMG600
+	bool
+	prompt "D-Link DSM-G600 RevA"
+	select PCI
+	help
+	  Say 'Y' here if you want your kernel to support D-Link's
+	  DSM-G600 RevA device. For more information on this platform,
+	  see http://www.nslu2-linux.org/wiki/DSMG600/HomePage
+
 config	ARCH_IXDP4XX
 	bool
-	depends on ARCH_IXDP425 || ARCH_AVILA || MACH_IXDP465
+	depends on ARCH_IXDP425 || MACH_IXDP465 || MACH_KIXRP435
 	default y
 
 #
@@ -77,9 +133,15 @@ config CPU_IXP46X
 	depends on MACH_IXDP465
 	default y
 
+config CPU_IXP43X
+	bool
+	depends on MACH_KIXRP435
+	default y
+
 config MACH_GTWX5715
 	bool "Gemtek WX5715 (Linksys WRV54G)"
 	depends on ARCH_IXP4XX
+	select PCI
 	help
 		This board is currently inside the Linksys WRV54G Gateways.
 
@@ -94,11 +156,16 @@ config MACH_GTWX5715
 		"High Speed" UART is n/c (as far as I can tell)
 		20 Pin ARM/Xscale JTAG interface on J2
 
-
 comment "IXP4xx Options"
+
+config DMABOUNCE
+	bool
+	default y
+	depends on PCI
 
 config IXP4XX_INDIRECT_PCI
 	bool "Use indirect PCI memory access"
+	depends on PCI
 	help
           IXP4xx provides two methods of accessing PCI memory space:
 
@@ -107,12 +174,12 @@ config IXP4XX_INDIRECT_PCI
              into the kernel and we can use the standard read[bwl]/write[bwl]
              macros. This is the preferred method due to speed but it
              limits the system to just 64MB of PCI memory. This can be 
-             problamatic if using video cards and other memory-heavy devices.
+             problematic if using video cards and other memory-heavy devices.
           
           2) If > 64MB of memory space is required, the IXP4xx can be 
 	     configured to use indirect registers to access PCI This allows 
 	     for up to 128MB (0x48000000 to 0x4fffffff) of memory on the bus. 
-	     The disadvantadge of this is that every PCI access requires 
+	     The disadvantage of this is that every PCI access requires 
 	     three local register accesses plus a spinlock, but in some 
 	     cases the performance hit is acceptable. In addition, you cannot 
 	     mmap() PCI devices in this case due to the indirect nature

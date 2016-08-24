@@ -8,13 +8,13 @@
  *	-- Copyright (C) 2003 IBM Deutschland Entwicklung GmbH, IBM Corporation
  */
 
-#include <linux/config.h>
 #include <linux/bootmem.h>
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/list.h>
 #include <linux/types.h>
+#include <linux/err.h>
 
 #include <asm/ccwdev.h>
 #include <asm/cio.h>
@@ -22,6 +22,7 @@
 #include <asm/ebcdic.h>
 
 #include "raw3270.h"
+#include "tty3270.h"
 #include "ctrlchar.h"
 
 #define CON3270_OUTPUT_BUFFER_SIZE 1024
@@ -69,8 +70,7 @@ static void con3270_update(struct con3270 *);
 /*
  * Setup timeout for a device. On timeout trigger an update.
  */
-void
-con3270_set_timer(struct con3270 *cp, int expires)
+static void con3270_set_timer(struct con3270 *cp, int expires)
 {
 	if (expires == 0) {
 		if (timer_pending(&cp->timer))
@@ -212,6 +212,9 @@ con3270_update(struct con3270 *cp)
 	unsigned long updated;
 	struct string *s, *n;
 	int rc;
+
+	if (cp->view.dev)
+		raw3270_activate_view(&cp->view);
 
 	wrq = xchg(&cp->write, 0);
 	if (!wrq) {
@@ -489,8 +492,6 @@ con3270_write(struct console *co, const char *str, unsigned int count)
 	unsigned char c;
 
 	cp = condev;
-	if (cp->view.dev)
-		raw3270_activate_view(&cp->view);
 	spin_lock_irqsave(&cp->view.lock, flags);
 	while (count-- > 0) {
 		c = *str++;
@@ -506,8 +507,6 @@ con3270_write(struct console *co, const char *str, unsigned int count)
 		con3270_set_timer(cp, HZ/10);
 	spin_unlock_irqrestore(&cp->view.lock,flags);
 }
-
-extern struct tty_driver *tty3270_driver;
 
 static struct tty_driver *
 con3270_device(struct console *c, int *index)
@@ -555,12 +554,6 @@ con3270_unblank(void)
 	spin_unlock_irqrestore(&cp->view.lock, flags);
 }
 
-static int __init 
-con3270_consetup(struct console *co, char *options)
-{
-	return 0;
-}
-
 /*
  *  The console structure for the 3270 console
  */
@@ -569,7 +562,6 @@ static struct console con3270 = {
 	.write	 = con3270_write,
 	.device	 = con3270_device,
 	.unblank = con3270_unblank,
-	.setup	 = con3270_consetup,
 	.flags	 = CON_PRINTBUFFER,
 };
 
@@ -591,12 +583,12 @@ con3270_init(void)
 
 	/* Set the console mode for VM */
 	if (MACHINE_IS_VM) {
-		cpcmd("TERM CONMODE 3270", 0, 0);
-		cpcmd("TERM AUTOCR OFF", 0, 0);
+		cpcmd("TERM CONMODE 3270", NULL, 0, NULL);
+		cpcmd("TERM AUTOCR OFF", NULL, 0, NULL);
 	}
 
 	cdev = ccw_device_probe_console();
-	if (!cdev)
+	if (IS_ERR(cdev))
 		return -ENODEV;
 	rp = raw3270_setup_console(cdev);
 	if (IS_ERR(rp))
@@ -620,7 +612,7 @@ con3270_init(void)
 		     (void (*)(unsigned long)) con3270_read_tasklet,
 		     (unsigned long) condev->read);
 
-	raw3270_add_view(&condev->view, &con3270_fn, 0);
+	raw3270_add_view(&condev->view, &con3270_fn, 1);
 
 	INIT_LIST_HEAD(&condev->freemem);
 	for (i = 0; i < CON3270_STRING_PAGES; i++) {

@@ -1,5 +1,5 @@
 /*
- * drivers/i2c/i2c-ibm_iic.c
+ * drivers/i2c/busses/i2c-ibm_iic.c
  *
  * Support for the IIC peripheral on IBM PPC 4xx
  *
@@ -18,7 +18,7 @@
  *   	Copyright 1995-97 Simon G. Vogl
  *                1998-99 Hans Berglund
  *
- *   	With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> 
+ *   	With some changes from KyÃ¶sti MÃ¤lkki <kmalkki@cc.hut.fi>
  *	and even Frodo Looijaard <frodol@dds.nl>
  *
  * This program is free software; you can redistribute  it and/or modify it
@@ -28,7 +28,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
@@ -321,7 +320,7 @@ err:
 /*
  * IIC interrupt handler
  */
-static irqreturn_t iic_handler(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t iic_handler(int irq, void *dev_id)
 {
 	struct ibm_iic_private* dev = (struct ibm_iic_private*)dev_id;
 	volatile struct iic_regs __iomem *iic = dev->vaddr;
@@ -549,7 +548,7 @@ static inline int iic_address_neq(const struct i2c_msg* p1,
  * Generic master transfer entrypoint. 
  * Returns the number of processed messages or error (<0)
  */
-static int iic_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
+static int iic_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 {
     	struct ibm_iic_private* dev = (struct ibm_iic_private*)(i2c_get_adapdata(adap));
 	volatile struct iic_regs __iomem *iic = dev->vaddr;
@@ -626,14 +625,8 @@ static u32 iic_func(struct i2c_adapter *adap)
 	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL | I2C_FUNC_10BIT_ADDR;
 }
 
-static struct i2c_algorithm iic_algo = {
-	.name 		= "IBM IIC algorithm",
-	.id   		= I2C_ALGO_OCP,
+static const struct i2c_algorithm iic_algo = {
 	.master_xfer 	= iic_xfer,
-	.smbus_xfer	= NULL,
-	.slave_send	= NULL,
-	.slave_recv	= NULL,
-	.algo_control	= NULL,
 	.functionality	= iic_func
 };
 
@@ -678,16 +671,21 @@ static int __devinit iic_probe(struct ocp_device *ocp){
 		printk(KERN_WARNING"ibm-iic%d: missing additional data!\n",
 			ocp->def->index);
 
-	if (!(dev = kmalloc(sizeof(*dev), GFP_KERNEL))){
+	if (!(dev = kzalloc(sizeof(*dev), GFP_KERNEL))) {
 		printk(KERN_CRIT "ibm-iic%d: failed to allocate device data\n",
 			ocp->def->index);
 		return -ENOMEM;
 	}
 
-	memset(dev, 0, sizeof(*dev));
 	dev->idx = ocp->def->index;
 	ocp_set_drvdata(ocp, dev);
 	
+	if (!request_mem_region(ocp->def->paddr, sizeof(struct iic_regs),
+				"ibm_iic")) {
+		ret = -EBUSY;
+		goto fail1;
+	}
+
 	if (!(dev->vaddr = ioremap(ocp->def->paddr, sizeof(struct iic_regs)))){
 		printk(KERN_CRIT "ibm-iic%d: failed to ioremap device registers\n",
 			dev->idx);
@@ -699,7 +697,7 @@ static int __devinit iic_probe(struct ocp_device *ocp){
 
 	dev->irq = iic_force_poll ? -1 : ocp->def->irq;
 	if (dev->irq >= 0){
-		/* Disable interrupts until we finish intialization,
+		/* Disable interrupts until we finish initialization,
 		   assumes level-sensitive IRQ setup...
 		 */
 		iic_interrupt_mode(dev, 0);
@@ -729,16 +727,25 @@ static int __devinit iic_probe(struct ocp_device *ocp){
 	
 	/* Register it with i2c layer */
 	adap = &dev->adap;
+	adap->dev.parent = &ocp->dev;
 	strcpy(adap->name, "IBM IIC");
 	i2c_set_adapdata(adap, dev);
-	adap->id = I2C_HW_OCP | iic_algo.id;
+	adap->id = I2C_HW_OCP;
+	adap->class = I2C_CLASS_HWMON;
 	adap->algo = &iic_algo;
 	adap->client_register = NULL;
 	adap->client_unregister = NULL;
 	adap->timeout = 1;
 	adap->retries = 1;
 
-	if ((ret = i2c_add_adapter(adap)) != 0){
+	/*
+	 * If "dev->idx" is negative we consider it as zero.
+	 * The reason to do so is to avoid sysfs names that only make
+	 * sense when there are multiple adapters.
+	 */
+	adap->nr = dev->idx >= 0 ? dev->idx : 0;
+
+	if ((ret = i2c_add_numbered_adapter(adap)) < 0) {
 		printk(KERN_CRIT "ibm-iic%d: failed to register i2c adapter\n",
 			dev->idx);
 		goto fail;
@@ -757,6 +764,8 @@ fail:
 
 	iounmap(dev->vaddr);
 fail2:	
+	release_mem_region(ocp->def->paddr, sizeof(struct iic_regs));
+fail1:
 	ocp_set_drvdata(ocp, NULL);
 	kfree(dev);	
 	return ret;
@@ -784,6 +793,7 @@ static void __devexit iic_remove(struct ocp_device *ocp)
 		    free_irq(dev->irq, dev);
 		}
 		iounmap(dev->vaddr);
+		release_mem_region(ocp->def->paddr, sizeof(struct iic_regs));
 		kfree(dev);
 	}
 }

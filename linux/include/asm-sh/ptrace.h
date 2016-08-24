@@ -1,8 +1,6 @@
 #ifndef __ASM_SH_PTRACE_H
 #define __ASM_SH_PTRACE_H
 
-#include <asm/ubc.h>
-
 /*
  * Copyright (C) 1999, 2000  Niibe Yutaka
  *
@@ -43,9 +41,6 @@
 
 #define REG_FPSCR	55
 #define REG_FPUL	56
-
-/* options set using PTRACE_SETOPTIONS */
-#define PTRACE_O_TRACESYSGOOD     0x00000001
 
 /*
  * This struct defines the way the registers are stored on the
@@ -90,6 +85,16 @@ struct pt_dspregs {
 #define user_mode(regs) (((regs)->sr & 0x40000000)==0)
 #define instruction_pointer(regs) ((regs)->pc)
 extern void show_regs(struct pt_regs *);
+
+#ifdef CONFIG_SH_DSP
+#define task_pt_regs(task) \
+	((struct pt_regs *) (task_stack_page(task) + THREAD_SIZE \
+		 - sizeof(struct pt_dspregs) - sizeof(unsigned long)) - 1)
+#else
+#define task_pt_regs(task) \
+	((struct pt_regs *) (task_stack_page(task) + THREAD_SIZE \
+		 - sizeof(unsigned long)) - 1)
+#endif
 
 static inline unsigned long profile_pc(struct pt_regs *regs)
 {

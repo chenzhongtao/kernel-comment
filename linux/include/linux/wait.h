@@ -19,7 +19,6 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 #include <linux/list.h>
 #include <linux/stddef.h>
 #include <linux/spinlock.h>
@@ -33,7 +32,7 @@ int default_wake_function(wait_queue_t *wait, unsigned mode, int sync, void *key
 struct __wait_queue {
 	unsigned int flags;
 #define WQ_FLAG_EXCLUSIVE	0x01
-	struct task_struct * task;
+	void *private;
 	wait_queue_func_t func;
 	struct list_head task_list;
 };
@@ -54,13 +53,14 @@ struct __wait_queue_head {
 };
 typedef struct __wait_queue_head wait_queue_head_t;
 
+struct task_struct;
 
 /*
  * Macros for declaration and initialisaton of the datatypes
  */
 
 #define __WAITQUEUE_INITIALIZER(name, tsk) {				\
-	.task		= tsk,						\
+	.private	= tsk,						\
 	.func		= default_wake_function,			\
 	.task_list	= { NULL, NULL } }
 
@@ -68,7 +68,7 @@ typedef struct __wait_queue_head wait_queue_head_t;
 	wait_queue_t name = __WAITQUEUE_INITIALIZER(name, tsk)
 
 #define __WAIT_QUEUE_HEAD_INITIALIZER(name) {				\
-	.lock		= SPIN_LOCK_UNLOCKED,				\
+	.lock		= __SPIN_LOCK_UNLOCKED(name.lock),		\
 	.task_list	= { &(name).task_list, &(name).task_list } }
 
 #define DECLARE_WAIT_QUEUE_HEAD(name) \
@@ -77,16 +77,21 @@ typedef struct __wait_queue_head wait_queue_head_t;
 #define __WAIT_BIT_KEY_INITIALIZER(word, bit)				\
 	{ .flags = word, .bit_nr = bit, }
 
-static inline void init_waitqueue_head(wait_queue_head_t *q)
-{
-	q->lock = SPIN_LOCK_UNLOCKED;
-	INIT_LIST_HEAD(&q->task_list);
-}
+extern void init_waitqueue_head(wait_queue_head_t *q);
+
+#ifdef CONFIG_LOCKDEP
+# define __WAIT_QUEUE_HEAD_INIT_ONSTACK(name) \
+	({ init_waitqueue_head(&name); name; })
+# define DECLARE_WAIT_QUEUE_HEAD_ONSTACK(name) \
+	wait_queue_head_t name = __WAIT_QUEUE_HEAD_INIT_ONSTACK(name)
+#else
+# define DECLARE_WAIT_QUEUE_HEAD_ONSTACK(name) DECLARE_WAIT_QUEUE_HEAD(name)
+#endif
 
 static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
 {
 	q->flags = 0;
-	q->task = p;
+	q->private = p;
 	q->func = default_wake_function;
 }
 
@@ -94,7 +99,7 @@ static inline void init_waitqueue_func_entry(wait_queue_t *q,
 					wait_queue_func_t func)
 {
 	q->flags = 0;
-	q->task = NULL;
+	q->private = NULL;
 	q->func = func;
 }
 
@@ -110,7 +115,7 @@ static inline int waitqueue_active(wait_queue_head_t *q)
  * aio specifies a wait queue entry with an async notification
  * callback routine, not associated with any task.
  */
-#define is_sync_wait(wait)	(!(wait) || ((wait)->task))
+#define is_sync_wait(wait)	(!(wait) || ((wait)->private))
 
 extern void FASTCALL(add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait));
 extern void FASTCALL(add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait));
@@ -169,6 +174,18 @@ do {									\
 	finish_wait(&wq, &__wait);					\
 } while (0)
 
+/**
+ * wait_event - sleep until a condition gets true
+ * @wq: the waitqueue to wait on
+ * @condition: a C expression for the event to wait for
+ *
+ * The process is put to sleep (TASK_UNINTERRUPTIBLE) until the
+ * @condition evaluates to true. The @condition is checked each time
+ * the waitqueue @wq is woken up.
+ *
+ * wake_up() has to be called after changing any variable that could
+ * change the result of the wait condition.
+ */
 #define wait_event(wq, condition) 					\
 do {									\
 	if (condition)	 						\
@@ -191,6 +208,22 @@ do {									\
 	finish_wait(&wq, &__wait);					\
 } while (0)
 
+/**
+ * wait_event_timeout - sleep until a condition gets true or a timeout elapses
+ * @wq: the waitqueue to wait on
+ * @condition: a C expression for the event to wait for
+ * @timeout: timeout, in jiffies
+ *
+ * The process is put to sleep (TASK_UNINTERRUPTIBLE) until the
+ * @condition evaluates to true. The @condition is checked each time
+ * the waitqueue @wq is woken up.
+ *
+ * wake_up() has to be called after changing any variable that could
+ * change the result of the wait condition.
+ *
+ * The function returns 0 if the @timeout elapsed, and the remaining
+ * jiffies if the condition evaluated to true before the timeout elapsed.
+ */
 #define wait_event_timeout(wq, condition, timeout)			\
 ({									\
 	long __ret = timeout;						\
@@ -217,6 +250,21 @@ do {									\
 	finish_wait(&wq, &__wait);					\
 } while (0)
 
+/**
+ * wait_event_interruptible - sleep until a condition gets true
+ * @wq: the waitqueue to wait on
+ * @condition: a C expression for the event to wait for
+ *
+ * The process is put to sleep (TASK_INTERRUPTIBLE) until the
+ * @condition evaluates to true or a signal is received.
+ * The @condition is checked each time the waitqueue @wq is woken up.
+ *
+ * wake_up() has to be called after changing any variable that could
+ * change the result of the wait condition.
+ *
+ * The function will return -ERESTARTSYS if it was interrupted by a
+ * signal and 0 if @condition evaluated to true.
+ */
 #define wait_event_interruptible(wq, condition)				\
 ({									\
 	int __ret = 0;							\
@@ -245,6 +293,23 @@ do {									\
 	finish_wait(&wq, &__wait);					\
 } while (0)
 
+/**
+ * wait_event_interruptible_timeout - sleep until a condition gets true or a timeout elapses
+ * @wq: the waitqueue to wait on
+ * @condition: a C expression for the event to wait for
+ * @timeout: timeout, in jiffies
+ *
+ * The process is put to sleep (TASK_INTERRUPTIBLE) until the
+ * @condition evaluates to true or a signal is received.
+ * The @condition is checked each time the waitqueue @wq is woken up.
+ *
+ * wake_up() has to be called after changing any variable that could
+ * change the result of the wait condition.
+ *
+ * The function returns 0 if the @timeout elapsed, -ERESTARTSYS if it
+ * was interrupted by a signal, and the remaining jiffies otherwise
+ * if the condition evaluated to true before the timeout elapsed.
+ */
 #define wait_event_interruptible_timeout(wq, condition, timeout)	\
 ({									\
 	long __ret = timeout;						\
@@ -301,15 +366,15 @@ static inline void remove_wait_queue_locked(wait_queue_head_t *q,
 
 /*
  * These are the old interfaces to sleep waiting for an event.
- * They are racy.  DO NOT use them, use the wait_event* interfaces above.  
- * We plan to remove these interfaces during 2.7.
+ * They are racy.  DO NOT use them, use the wait_event* interfaces above.
+ * We plan to remove these interfaces.
  */
-extern void FASTCALL(sleep_on(wait_queue_head_t *q));
-extern long FASTCALL(sleep_on_timeout(wait_queue_head_t *q,
-				      signed long timeout));
-extern void FASTCALL(interruptible_sleep_on(wait_queue_head_t *q));
-extern long FASTCALL(interruptible_sleep_on_timeout(wait_queue_head_t *q,
-						    signed long timeout));
+extern void sleep_on(wait_queue_head_t *q);
+extern long sleep_on_timeout(wait_queue_head_t *q,
+				      signed long timeout);
+extern void interruptible_sleep_on(wait_queue_head_t *q);
+extern long interruptible_sleep_on_timeout(wait_queue_head_t *q,
+					   signed long timeout);
 
 /*
  * Waitqueues which are removed from the waitqueue_head at wakeup time
@@ -324,18 +389,16 @@ int wake_bit_function(wait_queue_t *wait, unsigned mode, int sync, void *key);
 
 #define DEFINE_WAIT(name)						\
 	wait_queue_t name = {						\
-		.task		= current,				\
+		.private	= current,				\
 		.func		= autoremove_wake_function,		\
-		.task_list	= {	.next = &(name).task_list,	\
-					.prev = &(name).task_list,	\
-				},					\
+		.task_list	= LIST_HEAD_INIT((name).task_list),	\
 	}
 
 #define DEFINE_WAIT_BIT(name, word, bit)				\
 	struct wait_bit_queue name = {					\
 		.key = __WAIT_BIT_KEY_INITIALIZER(word, bit),		\
 		.wait	= {						\
-			.task		= current,			\
+			.private	= current,			\
 			.func		= wake_bit_function,		\
 			.task_list	=				\
 				LIST_HEAD_INIT((name).wait.task_list),	\
@@ -344,7 +407,7 @@ int wake_bit_function(wait_queue_t *wait, unsigned mode, int sync, void *key);
 
 #define init_wait(wait)							\
 	do {								\
-		(wait)->task = current;					\
+		(wait)->private = current;				\
 		(wait)->func = autoremove_wake_function;		\
 		INIT_LIST_HEAD(&(wait)->task_list);			\
 	} while (0)

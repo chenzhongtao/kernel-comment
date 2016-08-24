@@ -151,32 +151,11 @@ enum {D_PRT, D_PRO, D_UNI, D_MOD, D_GEO, D_SBY, D_DLY, D_SLV};
 #include <linux/cdrom.h>	/* for the eject ioctl */
 #include <linux/blkdev.h>
 #include <linux/blkpg.h>
+#include <linux/kernel.h>
 #include <asm/uaccess.h>
-#include <linux/sched.h>
 #include <linux/workqueue.h>
 
 static DEFINE_SPINLOCK(pd_lock);
-
-#ifndef MODULE
-
-#include "setup.h"
-
-static STT pd_stt[7] = {
-	{"drive0", 8, drive0},
-	{"drive1", 8, drive1},
-	{"drive2", 8, drive2},
-	{"drive3", 8, drive3},
-	{"disable", 1, &disable},
-	{"cluster", 1, &cluster},
-	{"nice", 1, &nice}
-};
-
-void pd_setup(char *str, int *ints)
-{
-	generic_setup(pd_stt, 7, str);
-}
-
-#endif
 
 module_param(verbose, bool, 0);
 module_param(major, int, 0);
@@ -255,7 +234,7 @@ struct pd_unit {
 	struct gendisk *gd;
 };
 
-struct pd_unit pd[PD_UNITS];
+static struct pd_unit pd[PD_UNITS];
 
 static char pd_scratch[512];	/* scratch block buffer */
 
@@ -296,7 +275,7 @@ static void pd_print_error(struct pd_unit *disk, char *msg, int status)
 	int i;
 
 	printk("%s: %s: status = 0x%x =", disk->name, msg, status);
-	for (i = 0; i < 18; i++)
+	for (i = 0; i < ARRAY_SIZE(pd_errs); i++)
 		if (status & (1 << i))
 			printk(" %s", pd_errs[i]);
 	printk("\n");
@@ -372,19 +351,19 @@ static enum action (*phase)(void);
 
 static void run_fsm(void);
 
-static void ps_tq_int( void *data);
+static void ps_tq_int(struct work_struct *work);
 
-static DECLARE_WORK(fsm_tq, ps_tq_int, NULL);
+static DECLARE_DELAYED_WORK(fsm_tq, ps_tq_int);
 
 static void schedule_fsm(void)
 {
 	if (!nice)
-		schedule_work(&fsm_tq);
+		schedule_delayed_work(&fsm_tq, 0);
 	else
 		schedule_delayed_work(&fsm_tq, nice-1);
 }
 
-static void ps_tq_int(void *data)
+static void ps_tq_int(struct work_struct *work)
 {
 	run_fsm();
 }
@@ -457,7 +436,7 @@ static char *pd_buf;		/* buffer for request in progress */
 
 static enum action do_pd_io_start(void)
 {
-	if (pd_req->flags & REQ_SPECIAL) {
+	if (blk_special_request(pd_req)) {
 		phase = pd_special;
 		return pd_special();
 	}
@@ -684,11 +663,11 @@ static enum action pd_identify(struct pd_unit *disk)
 		return Fail;
 	pi_read_block(disk->pi, pd_scratch, 512);
 	disk->can_lba = pd_scratch[99] & 2;
-	disk->sectors = le16_to_cpu(*(u16 *) (pd_scratch + 12));
-	disk->heads = le16_to_cpu(*(u16 *) (pd_scratch + 6));
-	disk->cylinders = le16_to_cpu(*(u16 *) (pd_scratch + 2));
+	disk->sectors = le16_to_cpu(*(__le16 *) (pd_scratch + 12));
+	disk->heads = le16_to_cpu(*(__le16 *) (pd_scratch + 6));
+	disk->cylinders = le16_to_cpu(*(__le16 *) (pd_scratch + 2));
 	if (disk->can_lba)
-		disk->capacity = le32_to_cpu(*(u32 *) (pd_scratch + 120));
+		disk->capacity = le32_to_cpu(*(__le32 *) (pd_scratch + 120));
 	else
 		disk->capacity = disk->sectors * disk->heads * disk->cylinders;
 
@@ -719,7 +698,7 @@ static enum action pd_identify(struct pd_unit *disk)
 
 /* end of io request engine */
 
-static void do_pd_request(request_queue_t * q)
+static void do_pd_request(struct request_queue * q)
 {
 	if (pd_req)
 		return;
@@ -733,19 +712,18 @@ static void do_pd_request(request_queue_t * q)
 static int pd_special_command(struct pd_unit *disk,
 		      enum action (*func)(struct pd_unit *disk))
 {
-	DECLARE_COMPLETION(wait);
+	DECLARE_COMPLETION_ONSTACK(wait);
 	struct request rq;
 	int err = 0;
 
 	memset(&rq, 0, sizeof(rq));
 	rq.errors = 0;
-	rq.rq_status = RQ_ACTIVE;
 	rq.rq_disk = disk->gd;
 	rq.ref_count = 1;
-	rq.waiting = &wait;
-	blk_insert_request(disk->gd->queue, &rq, 0, func, 0);
+	rq.end_io_data = &wait;
+	rq.end_io = blk_end_sync_rq;
+	blk_insert_request(disk->gd->queue, &rq, 0, func);
 	wait_for_completion(&wait);
-	rq.waiting = NULL;
 	if (rq.errors)
 		err = -EIO;
 	blk_put_request(&rq);
@@ -767,31 +745,32 @@ static int pd_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int pd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+{
+	struct pd_unit *disk = bdev->bd_disk->private_data;
+
+	if (disk->alt_geom) {
+		geo->heads = PD_LOG_HEADS;
+		geo->sectors = PD_LOG_SECTS;
+		geo->cylinders = disk->capacity / (geo->heads * geo->sectors);
+	} else {
+		geo->heads = disk->heads;
+		geo->sectors = disk->sectors;
+		geo->cylinders = disk->cylinders;
+	}
+
+	return 0;
+}
+
 static int pd_ioctl(struct inode *inode, struct file *file,
 	 unsigned int cmd, unsigned long arg)
 {
 	struct pd_unit *disk = inode->i_bdev->bd_disk->private_data;
-	struct hd_geometry __user *geo = (struct hd_geometry __user *) arg;
-	struct hd_geometry g;
 
 	switch (cmd) {
 	case CDROMEJECT:
 		if (disk->access == 1)
 			pd_special_command(disk, pd_eject);
-		return 0;
-	case HDIO_GETGEO:
-		if (disk->alt_geom) {
-			g.heads = PD_LOG_HEADS;
-			g.sectors = PD_LOG_SECTS;
-			g.cylinders = disk->capacity / (g.heads * g.sectors);
-		} else {
-			g.heads = disk->heads;
-			g.sectors = disk->sectors;
-			g.cylinders = disk->cylinders;
-		}
-		g.start = get_start_sect(inode->i_bdev);
-		if (copy_to_user(geo, &g, sizeof(struct hd_geometry)))
-			return -EFAULT;
 		return 0;
 	default:
 		return -EINVAL;
@@ -835,6 +814,7 @@ static struct block_device_operations pd_fops = {
 	.open		= pd_open,
 	.release	= pd_release,
 	.ioctl		= pd_ioctl,
+	.getgeo		= pd_getgeo,
 	.media_changed	= pd_check_media,
 	.revalidate_disk= pd_revalidate
 };

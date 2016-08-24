@@ -1,115 +1,73 @@
 /*
  * Copyright (C) 2004 PathScale, Inc
+ * Copyright (C) 2004 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
 #include <errno.h>
-#include <string.h>
-#include <sys/ptrace.h>
-#include "sysdep/ptrace.h"
-#include "uml-config.h"
-#include "skas_ptregs.h"
-#include "registers.h"
+#include "kern_constants.h"
+#include "longjmp.h"
 #include "user.h"
+#include "sysdep/ptrace_user.h"
 
-/* These are set once at boot time and not changed thereafter */
-
-static unsigned long exec_regs[HOST_FRAME_SIZE];
-static unsigned long exec_fp_regs[HOST_FP_SIZE];
-static unsigned long exec_fpx_regs[HOST_XFP_SIZE];
-static int have_fpx_regs = 1;
-
-void init_thread_registers(union uml_pt_regs *to)
+int save_fp_registers(int pid, unsigned long *fp_regs)
 {
-	memcpy(to->skas.regs, exec_regs, sizeof(to->skas.regs));
-	memcpy(to->skas.fp, exec_fp_regs, sizeof(to->skas.fp));
-	if(have_fpx_regs)
-		memcpy(to->skas.xfp, exec_fpx_regs, sizeof(to->skas.xfp));
+	if (ptrace(PTRACE_GETFPREGS, pid, 0, fp_regs) < 0)
+		return -errno;
+	return 0;
 }
 
-static int move_registers(int pid, int int_op, union uml_pt_regs *regs,
-			  int fp_op, unsigned long *fp_regs)
+int restore_fp_registers(int pid, unsigned long *fp_regs)
 {
-	if(ptrace(int_op, pid, 0, regs->skas.regs) < 0)
-		return(-errno);
-
-	if(ptrace(fp_op, pid, 0, fp_regs) < 0)
-		return(-errno);
-
-	return(0);
+	if (ptrace(PTRACE_SETFPREGS, pid, 0, fp_regs) < 0)
+		return -errno;
+	return 0;
 }
 
-void save_registers(int pid, union uml_pt_regs *regs)
+int save_fpx_registers(int pid, unsigned long *fp_regs)
 {
-	unsigned long *fp_regs;
-	int err, fp_op;
-
-	if(have_fpx_regs){
-		fp_op = PTRACE_GETFPXREGS;
-		fp_regs = regs->skas.xfp;
-	}
-	else {
-		fp_op = PTRACE_GETFPREGS;
-		fp_regs = regs->skas.fp;
-	}
-
-	err = move_registers(pid, PTRACE_GETREGS, regs, fp_op, fp_regs);
-	if(err)
-		panic("save_registers - saving registers failed, errno = %d\n",
-		      -err);
+	if (ptrace(PTRACE_GETFPXREGS, pid, 0, fp_regs) < 0)
+		return -errno;
+	return 0;
 }
 
-void restore_registers(int pid, union uml_pt_regs *regs)
+int restore_fpx_registers(int pid, unsigned long *fp_regs)
 {
-	unsigned long *fp_regs;
-	int err, fp_op;
-
-	if(have_fpx_regs){
-		fp_op = PTRACE_SETFPXREGS;
-		fp_regs = regs->skas.xfp;
-	}
-	else {
-		fp_op = PTRACE_SETFPREGS;
-		fp_regs = regs->skas.fp;
-	}
-
-	err = move_registers(pid, PTRACE_SETREGS, regs, fp_op, fp_regs);
-	if(err)
-		panic("restore_registers - saving registers failed, "
-		      "errno = %d\n", -err);
+	if (ptrace(PTRACE_SETFPXREGS, pid, 0, fp_regs) < 0)
+		return -errno;
+	return 0;
 }
 
-void init_registers(int pid)
+unsigned long get_thread_reg(int reg, jmp_buf *buf)
 {
+	switch (reg) {
+	case EIP:
+		return buf[0]->__eip;
+	case UESP:
+		return buf[0]->__esp;
+	case EBP:
+		return buf[0]->__ebp;
+	default:
+		printk(UM_KERN_ERR "get_thread_regs - unknown register %d\n",
+		       reg);
+		return 0;
+	}
+}
+
+int have_fpx_regs = 1;
+
+void arch_init_registers(int pid)
+{
+	unsigned long fpx_regs[HOST_XFP_SIZE];
 	int err;
 
-	err = ptrace(PTRACE_GETREGS, pid, 0, exec_regs);
-	if(err)
-		panic("check_ptrace : PTRACE_GETREGS failed, errno = %d",
-		      err);
-
-	err = ptrace(PTRACE_GETFPXREGS, pid, 0, exec_fpx_regs);
+	err = ptrace(PTRACE_GETFPXREGS, pid, 0, fpx_regs);
 	if(!err)
 		return;
 
-	have_fpx_regs = 0;
-	if(err != EIO)
+	if(errno != EIO)
 		panic("check_ptrace : PTRACE_GETFPXREGS failed, errno = %d",
-		      err);
+		      errno);
 
-	err = ptrace(PTRACE_GETFPREGS, pid, 0, exec_fp_regs);
-	if(err)
-		panic("check_ptrace : PTRACE_GETFPREGS failed, errno = %d",
-		      err);
+	have_fpx_regs = 0;
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

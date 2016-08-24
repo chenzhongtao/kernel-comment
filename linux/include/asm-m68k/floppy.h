@@ -17,8 +17,7 @@
 
 #include <linux/vmalloc.h>
 
-asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id,
-				      struct pt_regs *regs);
+asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id);
 
 /* constants... */
 
@@ -32,9 +31,6 @@ asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id,
 #define FLOPPY0_TYPE (MACH_IS_Q40 ? 6 : 4)
 #define FLOPPY1_TYPE 0
 
-#define FLOPPY_MOTOR_MASK 0xf0
-
-
 /* basically PC init + set use_virtual_dma */
 #define  FDC1 m68k_floppy_init()
 
@@ -46,7 +42,7 @@ asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id,
 
 static int virtual_dma_count=0;
 static int virtual_dma_residue=0;
-static char *virtual_dma_addr=0;
+static char *virtual_dma_addr=NULL;
 static int virtual_dma_mode=0;
 static int doing_pdma=0;
 
@@ -88,8 +84,8 @@ static __inline__ void fd_outb(unsigned char value, int port)
 static int fd_request_irq(void)
 {
 	if(MACH_IS_Q40)
-		return request_irq(FLOPPY_IRQ, floppy_hardint,SA_INTERRUPT,
-						   "floppy", floppy_hardint);
+		return request_irq(FLOPPY_IRQ, floppy_hardint,
+				   IRQF_DISABLED, "floppy", floppy_hardint);
 	else if(MACH_IS_SUN3X)
 		return sun3xflop_request_irq();
 	return -ENXIO;
@@ -184,8 +180,7 @@ static void fd_disable_dma(void)
 
 /* this is the only truly Q40 specific function */
 
-asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id,
-				      struct pt_regs *regs)
+asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id)
 {
 	register unsigned char st;
 
@@ -198,7 +193,7 @@ asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id,
 	static int dma_wait=0;
 #endif
 	if(!doing_pdma) {
-		floppy_interrupt(irq, dev_id, regs);
+		floppy_interrupt(irq, dev_id);
 		return IRQ_HANDLED;
 	}
 
@@ -246,7 +241,7 @@ asmlinkage irqreturn_t floppy_hardint(int irq, void *dev_id,
 		dma_wait=0;
 #endif
 		doing_pdma = 0;
-		floppy_interrupt(irq, dev_id, regs);
+		floppy_interrupt(irq, dev_id);
 		return IRQ_HANDLED;
 	}
 #ifdef TRACE_FLPY_INT

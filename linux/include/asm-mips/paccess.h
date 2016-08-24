@@ -13,29 +13,28 @@
 #ifndef _ASM_PACCESS_H
 #define _ASM_PACCESS_H
 
-#include <linux/config.h>
 #include <linux/errno.h>
 
-#ifdef CONFIG_MIPS32
+#ifdef CONFIG_32BIT
 #define __PA_ADDR	".word"
 #endif
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 #define __PA_ADDR	".dword"
 #endif
 
 extern asmlinkage void handle_ibe(void);
 extern asmlinkage void handle_dbe(void);
 
-#define put_dbe(x,ptr) __put_dbe((x),(ptr),sizeof(*(ptr)))
-#define get_dbe(x,ptr) __get_dbe((x),(ptr),sizeof(*(ptr)))
+#define put_dbe(x, ptr) __put_dbe((x), (ptr), sizeof(*(ptr)))
+#define get_dbe(x, ptr) __get_dbe((x), (ptr), sizeof(*(ptr)))
 
 struct __large_pstruct { unsigned long buf[100]; };
 #define __mp(x) (*(struct __large_pstruct *)(x))
 
-#define __get_dbe(x,ptr,size)						\
+#define __get_dbe(x, ptr, size)						\
 ({									\
 	long __gu_err;							\
-	__typeof(*(ptr)) __gu_val;					\
+	__typeof__(*(ptr)) __gu_val;					\
 	unsigned long __gu_addr;					\
 	__asm__("":"=r" (__gu_val));					\
 	__gu_addr = (unsigned long) (ptr);				\
@@ -52,7 +51,7 @@ struct __large_pstruct { unsigned long buf[100]; };
 })
 
 #define __get_dbe_asm(insn)						\
-({									\
+{									\
 	__asm__ __volatile__(						\
 	"1:\t" insn "\t%1,%2\n\t"					\
 	"move\t%0,$0\n"							\
@@ -67,11 +66,11 @@ struct __large_pstruct { unsigned long buf[100]; };
 	".previous"							\
 	:"=r" (__gu_err), "=r" (__gu_val)				\
 	:"o" (__mp(__gu_addr)), "i" (-EFAULT));				\
-})
+}
 
 extern void __get_dbe_unknown(void);
 
-#define __put_dbe(x,ptr,size)						\
+#define __put_dbe(x, ptr, size)						\
 ({									\
 	long __pu_err;							\
 	__typeof__(*(ptr)) __pu_val;					\
@@ -90,7 +89,7 @@ extern void __get_dbe_unknown(void);
 })
 
 #define __put_dbe_asm(insn)						\
-({									\
+{									\
 	__asm__ __volatile__(						\
 	"1:\t" insn "\t%1,%2\n\t"					\
 	"move\t%0,$0\n"							\
@@ -104,7 +103,7 @@ extern void __get_dbe_unknown(void);
 	".previous"							\
 	: "=r" (__pu_err)						\
 	: "r" (__pu_val), "o" (__mp(__pu_addr)), "i" (-EFAULT));	\
-})
+}
 
 extern void __put_dbe_unknown(void);
 

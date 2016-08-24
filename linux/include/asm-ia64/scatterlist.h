@@ -6,8 +6,13 @@
  *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  */
 
+#include <asm/types.h>
+
 struct scatterlist {
-	struct page *page;
+#ifdef CONFIG_DEBUG_SG
+	unsigned long sg_magic;
+#endif
+	unsigned long page_link;
 	unsigned int offset;
 	unsigned int length;	/* buffer length */
 
@@ -24,5 +29,10 @@ struct scatterlist {
  * that's 4GB - 1.
  */
 #define ISA_DMA_THRESHOLD	0xffffffff
+
+#define sg_dma_len(sg)		((sg)->dma_length)
+#define sg_dma_address(sg)	((sg)->dma_address)
+
+#define	ARCH_HAS_SG_CHAIN
 
 #endif /* _ASM_IA64_SCATTERLIST_H */

@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/ocotea.h
- *
  * Ocotea board definitions
  *
  * Matt Porter <mporter@kernel.crashing.org>
@@ -18,7 +16,6 @@
 #ifndef __ASM_OCOTEA_H__
 #define __ASM_OCOTEA_H__
 
-#include <linux/config.h>
 #include <platforms/4xx/ibm440gx.h>
 
 /* F/W TLB mapping used in bootloader glue to reset EMAC */
@@ -55,15 +52,24 @@
  */
 #define RS_TABLE_SIZE	2
 
-/* OpenBIOS defined UART mappings, used before early_serial_setup */
+#if defined(__BOOTER__)
+/* OpenBIOS defined UART mappings, used by bootloader shim */
 #define UART0_IO_BASE	0xE0000200
 #define UART1_IO_BASE	0xE0000300
+#else
+/* head_44x.S created UART mapping, used before early_serial_setup.
+ * We cannot use default OpenBIOS UART mappings because they
+ * don't work for configurations with more than 512M RAM.    --ebs
+ */
+#define UART0_IO_BASE	0xF0000200
+#define UART1_IO_BASE	0xF0000300
+#endif
 
 #define BASE_BAUD	11059200/16
 #define STD_UART_OP(num)					\
 	{ 0, BASE_BAUD, 0, UART##num##_INT,			\
 		(ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST),	\
-		iomem_base: UART##num##_IO_BASE,		\
+		iomem_base: (void*)UART##num##_IO_BASE,		\
 		io_type: SERIAL_IO_MEM},
 
 #define SERIAL_PORT_DFNS	\

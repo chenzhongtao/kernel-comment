@@ -33,7 +33,7 @@
 #define RFCOMM_DEFAULT_MTU	127
 #define RFCOMM_DEFAULT_CREDITS	7
 
-#define RFCOMM_MAX_L2CAP_MTU	1024
+#define RFCOMM_MAX_L2CAP_MTU	1013
 #define RFCOMM_MAX_CREDITS	40
 
 #define RFCOMM_SKB_HEAD_RESERVE	8
@@ -80,9 +80,9 @@
 #define RFCOMM_RPN_STOP_15	1
 
 #define RFCOMM_RPN_PARITY_NONE	0x0
-#define RFCOMM_RPN_PARITY_ODD	0x4
-#define RFCOMM_RPN_PARITY_EVEN	0x5
-#define RFCOMM_RPN_PARITY_MARK	0x6
+#define RFCOMM_RPN_PARITY_ODD	0x1
+#define RFCOMM_RPN_PARITY_EVEN	0x3
+#define RFCOMM_RPN_PARITY_MARK	0x5
 #define RFCOMM_RPN_PARITY_SPACE	0x7
 
 #define RFCOMM_RPN_FLOW_NONE	0x00
@@ -124,7 +124,7 @@ struct rfcomm_pn {
 	u8  flow_ctrl;
 	u8  priority;
 	u8  ack_timer;
-	u16 mtu;
+	__le16 mtu;
 	u8  max_retrans;
 	u8  credits;
 } __attribute__ ((packed));
@@ -136,7 +136,7 @@ struct rfcomm_rpn {
 	u8  flow_ctrl;
 	u8  xon_char;
 	u8  xoff_char;
-	u16 param_mask;
+	__le16 param_mask;
 } __attribute__ ((packed));
 
 struct rfcomm_rls {
@@ -223,8 +223,14 @@ struct rfcomm_dlc {
 #define RFCOMM_CFC_DISABLED 0
 #define RFCOMM_CFC_ENABLED  RFCOMM_MAX_CREDITS
 
+/* ---- RFCOMM SEND RPN ---- */
+int rfcomm_send_rpn(struct rfcomm_session *s, int cr, u8 dlci,
+			u8 bit_rate, u8 data_bits, u8 stop_bits,
+			u8 parity, u8 flow_ctrl_settings, 
+			u8 xon_char, u8 xoff_char, u16 param_mask);
+
 /* ---- RFCOMM DLCs (channels) ---- */
-struct rfcomm_dlc *rfcomm_dlc_alloc(int prio);
+struct rfcomm_dlc *rfcomm_dlc_alloc(gfp_t prio);
 void rfcomm_dlc_free(struct rfcomm_dlc *d);
 int  rfcomm_dlc_open(struct rfcomm_dlc *d, bdaddr_t *src, bdaddr_t *dst, u8 channel);
 int  rfcomm_dlc_close(struct rfcomm_dlc *d, int reason);
@@ -269,9 +275,6 @@ static inline void rfcomm_session_hold(struct rfcomm_session *s)
 	atomic_inc(&s->refcnt);
 }
 
-/* ---- RFCOMM chechsum ---- */
-extern u8 rfcomm_crc_table[];
-
 /* ---- RFCOMM sockets ---- */
 struct sockaddr_rc {
 	sa_family_t	rc_family;
@@ -293,9 +296,10 @@ struct rfcomm_conninfo {
 #define RFCOMM_LM_RELIABLE	0x0010
 #define RFCOMM_LM_SECURE	0x0020
 
-#define rfcomm_pi(sk)   ((struct rfcomm_pinfo *)sk->sk_protinfo)
+#define rfcomm_pi(sk) ((struct rfcomm_pinfo *) sk)
 
 struct rfcomm_pinfo {
+	struct bt_sock bt;
 	struct rfcomm_dlc   *dlc;
 	u8     channel;
 	u32    link_mode;
@@ -319,6 +323,7 @@ int  rfcomm_connect_ind(struct rfcomm_session *s, u8 channel, struct rfcomm_dlc 
 #define RFCOMM_RELEASE_ONHUP  1
 #define RFCOMM_HANGUP_NOW     2
 #define RFCOMM_TTY_ATTACHED   3
+#define RFCOMM_TTY_RELEASED   4
 
 struct rfcomm_dev_req {
 	s16      dev_id;
@@ -346,7 +351,5 @@ struct rfcomm_dev_list_req {
 int  rfcomm_dev_ioctl(struct sock *sk, unsigned int cmd, void __user *arg);
 int  rfcomm_init_ttys(void);
 void rfcomm_cleanup_ttys(void);
-
-extern struct proc_dir_entry *proc_bt_rfcomm;
 
 #endif /* __RFCOMM_H */

@@ -7,10 +7,8 @@
  *                            Hitoshi Yamamoto
  */
 
-/* $Id$ */
-
-#include <linux/config.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/stddef.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
@@ -23,7 +21,11 @@
 #include <linux/root_dev.h>
 #include <linux/seq_file.h>
 #include <linux/timex.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
+#include <linux/cpu.h>
+#include <linux/nodemask.h>
+#include <linux/pfn.h>
+
 #include <asm/processor.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
@@ -36,12 +38,6 @@
 extern void init_mmu(void);
 #endif
 
-#if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_HD)	\
-	|| defined(CONFIG_BLK_DEV_IDE_MODULE)			\
-	|| defined(CONFIG_BLK_DEV_HD_MODULE)
-struct drive_info_struct { char dummy[32]; } drive_info;
-#endif
-
 extern char _end[];
 
 /*
@@ -52,7 +48,7 @@ struct cpuinfo_m32r boot_cpu_data;
 #ifdef CONFIG_BLK_DEV_RAM
 extern int rd_doload;	/* 1 = load ramdisk, 0 = don't load */
 extern int rd_prompt;	/* 1 = prompt for ramdisk, 0 = don't prompt */
-extern int rd_image_start;  /* starting block # of image */
+extern int rd_image_start;	/* starting block # of image */
 #endif
 
 #if defined(CONFIG_VGA_CONSOLE)
@@ -68,7 +64,7 @@ struct screen_info screen_info = {
 
 extern int root_mountflags;
 
-static char command_line[COMMAND_LINE_SIZE];
+static char __initdata command_line[COMMAND_LINE_SIZE];
 
 static struct resource data_resource = {
 	.name   = "Kernel data",
@@ -99,8 +95,8 @@ static __inline__ void parse_mem_cmdline(char ** cmdline_p)
 	int usermem = 0;
 
 	/* Save unparsed command line copy for /proc/cmdline */
-	memcpy(saved_command_line, COMMAND_LINE, COMMAND_LINE_SIZE);
-	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
+	memcpy(boot_command_line, COMMAND_LINE, COMMAND_LINE_SIZE);
+	boot_command_line[COMMAND_LINE_SIZE-1] = '\0';
 
 	memory_start = (unsigned long)CONFIG_MEMORY_START+PAGE_OFFSET;
 	memory_end = memory_start+(unsigned long)CONFIG_MEMORY_SIZE;
@@ -200,9 +196,7 @@ static unsigned long __init setup_memory(void)
 	if (LOADER_TYPE && INITRD_START) {
 		if (INITRD_START + INITRD_SIZE <= (max_low_pfn << PAGE_SHIFT)) {
 			reserve_bootmem(INITRD_START, INITRD_SIZE);
-			initrd_start = INITRD_START ?
-				INITRD_START + PAGE_OFFSET : 0;
-
+			initrd_start = INITRD_START + PAGE_OFFSET;
 			initrd_end = initrd_start + INITRD_SIZE;
 			printk("initrd:start[%08lx],size[%08lx]\n",
 				initrd_start, INITRD_SIZE);
@@ -222,8 +216,6 @@ static unsigned long __init setup_memory(void)
 #else	/* CONFIG_DISCONTIGMEM */
 extern unsigned long setup_memory(void);
 #endif	/* CONFIG_DISCONTIGMEM */
-
-#define M32R_PCC_PCATCR	0x00ef7014	/* will move to m32r.h */
 
 void __init setup_arch(char **cmdline_p)
 {
@@ -273,6 +265,20 @@ void __init setup_arch(char **cmdline_p)
 	paging_init();
 }
 
+static struct cpu cpu_devices[NR_CPUS];
+
+static int __init topology_init(void)
+{
+	int i;
+
+	for_each_present_cpu(i)
+		register_cpu(&cpu_devices[i], i);
+
+	return 0;
+}
+
+subsys_initcall(topology_init);
+
 #ifdef CONFIG_PROC_FS
 /*
  *	Get CPU information for use by the procfs.
@@ -285,43 +291,50 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 #ifdef CONFIG_SMP
 	if (!cpu_online(cpu))
 		return 0;
-#endif  /* CONFIG_SMP */
+#endif	/* CONFIG_SMP */
 
 	seq_printf(m, "processor\t: %ld\n", cpu);
 
-#ifdef CONFIG_CHIP_VDEC2
+#if defined(CONFIG_CHIP_VDEC2)
 	seq_printf(m, "cpu family\t: VDEC2\n"
 		"cache size\t: Unknown\n");
-#elif  CONFIG_CHIP_M32700
+#elif defined(CONFIG_CHIP_M32700)
 	seq_printf(m,"cpu family\t: M32700\n"
 		"cache size\t: I-8KB/D-8KB\n");
-#elif  CONFIG_CHIP_M32102
+#elif defined(CONFIG_CHIP_M32102)
 	seq_printf(m,"cpu family\t: M32102\n"
 		"cache size\t: I-8KB\n");
-#elif  CONFIG_CHIP_OPSP
+#elif defined(CONFIG_CHIP_OPSP)
 	seq_printf(m,"cpu family\t: OPSP\n"
 		"cache size\t: I-8KB/D-8KB\n");
-#elif  CONFIG_CHIP_MP
+#elif defined(CONFIG_CHIP_MP)
 	seq_printf(m, "cpu family\t: M32R-MP\n"
 		"cache size\t: I-xxKB/D-xxKB\n");
+#elif  defined(CONFIG_CHIP_M32104)
+	seq_printf(m,"cpu family\t: M32104\n"
+		"cache size\t: I-8KB/D-8KB\n");
 #else
 	seq_printf(m, "cpu family\t: Unknown\n");
 #endif
 	seq_printf(m, "bogomips\t: %lu.%02lu\n",
 		c->loops_per_jiffy/(500000/HZ),
 		(c->loops_per_jiffy/(5000/HZ)) % 100);
-#ifdef CONFIG_PLAT_MAPPI
+#if defined(CONFIG_PLAT_MAPPI)
 	seq_printf(m, "Machine\t\t: Mappi Evaluation board\n");
-#elif CONFIG_PLAT_MAPPI2
+#elif defined(CONFIG_PLAT_MAPPI2)
 	seq_printf(m, "Machine\t\t: Mappi-II Evaluation board\n");
-#elif  CONFIG_PLAT_M32700UT
+#elif defined(CONFIG_PLAT_MAPPI3)
+	seq_printf(m, "Machine\t\t: Mappi-III Evaluation board\n");
+#elif defined(CONFIG_PLAT_M32700UT)
 	seq_printf(m, "Machine\t\t: M32700UT Evaluation board\n");
-#elif  CONFIG_PLAT_OPSPUT
+#elif defined(CONFIG_PLAT_OPSPUT)
 	seq_printf(m, "Machine\t\t: OPSPUT Evaluation board\n");
-#elif  CONFIG_PLAT_USRV
+#elif defined(CONFIG_PLAT_USRV)
 	seq_printf(m, "Machine\t\t: uServer\n");
-#elif  CONFIG_PLAT_OAKS32R
+#elif defined(CONFIG_PLAT_OAKS32R)
 	seq_printf(m, "Machine\t\t: OAKS32R\n");
+#elif  defined(CONFIG_PLAT_M32104UT)
+	seq_printf(m, "Machine\t\t: M3T-M32104UT uT Engine board\n");
 #else
 	seq_printf(m, "Machine\t\t: Unknown\n");
 #endif
@@ -354,12 +367,12 @@ static void c_stop(struct seq_file *m, void *v)
 }
 
 struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	show_cpuinfo,
+	.start = c_start,
+	.next = c_next,
+	.stop = c_stop,
+	.show = show_cpuinfo,
 };
-#endif  /* CONFIG_PROC_FS */
+#endif	/* CONFIG_PROC_FS */
 
 unsigned long cpu_initialized __initdata = 0;
 
@@ -371,7 +384,7 @@ unsigned long cpu_initialized __initdata = 0;
  */
 #if defined(CONFIG_CHIP_VDEC2) || defined(CONFIG_CHIP_XNUX2)	\
 	|| defined(CONFIG_CHIP_M32700) || defined(CONFIG_CHIP_M32102) \
-	|| defined(CONFIG_CHIP_OPSP)
+	|| defined(CONFIG_CHIP_OPSP) || defined(CONFIG_CHIP_M32104)
 void __init cpu_init (void)
 {
 	int cpu_id = smp_processor_id();
@@ -399,7 +412,6 @@ void __init cpu_init (void)
 #endif
 
 	/* Set up ICUIMASK */
-	outl(0x00070000, M32R_ICU_IMASK_PORTL);   /* imask=111 */
+	outl(0x00070000, M32R_ICU_IMASK_PORTL);		/* imask=111 */
 }
-#endif  /* defined(CONFIG_CHIP_VDEC2) ... */
-
+#endif	/* defined(CONFIG_CHIP_VDEC2) ... */

@@ -16,8 +16,8 @@
 #define PTRACE_KILL		   8
 #define PTRACE_SINGLESTEP	   9
 
-#define PTRACE_ATTACH		0x10
-#define PTRACE_DETACH		0x11
+#define PTRACE_ATTACH		  16
+#define PTRACE_DETACH		  17
 
 #define PTRACE_SYSCALL		  24
 
@@ -51,6 +51,10 @@
 #ifdef __KERNEL__
 /*
  * Ptrace flags
+ *
+ * The owner ship rules for task->ptrace which holds the ptrace
+ * flags is simple.  When a task is running it owns it's task->ptrace
+ * flags.  When the a task is stopped the ptracer owns task->ptrace.
  */
 
 #define PT_PTRACED	0x00000001
@@ -76,6 +80,10 @@
 #include <linux/compiler.h>		/* For unlikely.  */
 #include <linux/sched.h>		/* For struct task_struct.  */
 
+
+extern long arch_ptrace(struct task_struct *child, long request, long addr, long data);
+extern struct task_struct *ptrace_get_task_struct(pid_t pid);
+extern int ptrace_traceme(void);
 extern int ptrace_readdata(struct task_struct *tsk, unsigned long src, char __user *dst, int len);
 extern int ptrace_writedata(struct task_struct *tsk, char __user *src, unsigned long dst, int len);
 extern int ptrace_attach(struct task_struct *tsk);
@@ -88,6 +96,8 @@ extern void __ptrace_link(struct task_struct *child,
 			  struct task_struct *new_parent);
 extern void __ptrace_unlink(struct task_struct *child);
 extern void ptrace_untrace(struct task_struct *child);
+extern int ptrace_may_attach(struct task_struct *task);
+extern int __ptrace_may_attach(struct task_struct *task);
 
 static inline void ptrace_link(struct task_struct *child,
 			       struct task_struct *new_parent)
@@ -101,6 +111,8 @@ static inline void ptrace_unlink(struct task_struct *child)
 		__ptrace_unlink(child);
 }
 
+int generic_ptrace_peekdata(struct task_struct *tsk, long addr, long data);
+int generic_ptrace_pokedata(struct task_struct *tsk, long addr, long data);
 
 #ifndef force_successful_syscall_return
 /*

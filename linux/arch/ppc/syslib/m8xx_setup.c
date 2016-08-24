@@ -1,6 +1,4 @@
 /*
- *  arch/ppc/kernel/setup.c
- *
  *  Copyright (C) 1995  Linus Torvalds
  *  Adapted from 'alpha' version by Gary Thomas
  *  Modified by Cort Dougan (cort@cs.nmt.edu)
@@ -12,7 +10,6 @@
  * bootup setup stuff..
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -34,6 +31,13 @@
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 
+#if defined(CONFIG_MTD) && defined(CONFIG_MTD_PHYSMAP)
+#include <linux/mtd/partitions.h>
+#include <linux/mtd/physmap.h>
+#include <linux/mtd/mtd.h>
+#include <linux/mtd/map.h>
+#endif
+
 #include <asm/mmu.h>
 #include <asm/reg.h>
 #include <asm/residual.h>
@@ -45,8 +49,37 @@
 #include <asm/bootinfo.h>
 #include <asm/time.h>
 #include <asm/xmon.h>
+#include <asm/ppc_sys.h>
 
 #include "ppc8xx_pic.h"
+
+#ifdef CONFIG_MTD_PHYSMAP
+#define MPC8xxADS_BANK_WIDTH 4
+#endif
+
+#define MPC8xxADS_U_BOOT_SIZE          0x80000
+#define MPC8xxADS_FREE_AREA_OFFSET     MPC8xxADS_U_BOOT_SIZE
+
+#if defined(CONFIG_MTD_PARTITIONS)
+ /*
+   NOTE: bank width and interleave relative to the installed flash
+   should have been chosen within MTD_CFI_GEOMETRY options.
+ */
+static struct mtd_partition mpc8xxads_partitions[] = {
+	{
+		.name = "bootloader",
+		.size = MPC8xxADS_U_BOOT_SIZE,
+		.offset = 0,
+		.mask_flags   = MTD_WRITEABLE,  /* force read-only */
+	}, {
+		.name = "User FS",
+		.offset = MPC8xxADS_FREE_AREA_OFFSET
+	}
+};
+
+#define mpc8xxads_part_num ARRAY_SIZE(mpc8xxads_partitions)
+
+#endif
 
 static int m8xx_set_rtc_time(unsigned long time);
 static unsigned long m8xx_get_rtc_time(void);
@@ -57,7 +90,7 @@ unsigned char __res[sizeof(bd_t)];
 extern void m8xx_ide_init(void);
 
 extern unsigned long find_available_memory(void);
-extern void m8xx_cpm_reset(uint cpm_page);
+extern void m8xx_cpm_reset(void);
 extern void m8xx_wdt_handler_install(bd_t *bp);
 extern void rpxfb_alloc_pages(void);
 extern void cpm_interrupt_init(void);
@@ -70,13 +103,13 @@ board_init(void)
 void __init
 m8xx_setup_arch(void)
 {
-	int	cpm_page;
-
-	cpm_page = (int) alloc_bootmem_pages(PAGE_SIZE);
+#if defined(CONFIG_MTD) && defined(CONFIG_MTD_PHYSMAP)
+	bd_t *binfo = (bd_t *)__res;
+#endif
 
 	/* Reset the Communication Processor Module.
 	*/
-	m8xx_cpm_reset(cpm_page);
+	m8xx_cpm_reset();
 
 #ifdef CONFIG_FB_RPX
 	rpxfb_alloc_pages();
@@ -109,6 +142,17 @@ m8xx_setup_arch(void)
 	}
 #endif
 #endif
+
+#if defined (CONFIG_MPC86XADS) || defined (CONFIG_MPC885ADS)
+#if defined(CONFIG_MTD_PHYSMAP)
+       physmap_configure(binfo->bi_flashstart, binfo->bi_flashsize,
+                                               MPC8xxADS_BANK_WIDTH, NULL);
+#ifdef CONFIG_MTD_PARTITIONS
+       physmap_set_partitions(mpc8xxads_partitions, mpc8xxads_part_num);
+#endif /* CONFIG_MTD_PARTITIONS */
+#endif /* CONFIG_MTD_PHYSMAP */
+#endif
+
 	board_init();
 }
 
@@ -125,7 +169,7 @@ abort(void)
 }
 
 /* A place holder for time base interrupts, if they are ever enabled. */
-irqreturn_t timebase_interrupt(int irq, void * dev, struct pt_regs * regs)
+irqreturn_t timebase_interrupt(int irq, void * dev)
 {
 	printk ("timebase_interrupt()\n");
 
@@ -138,6 +182,18 @@ static struct irqaction tbint_irqaction = {
 	.name = "tbint",
 };
 
+/* per-board overridable init_internal_rtc() function. */
+void __init __attribute__ ((weak))
+init_internal_rtc(void)
+{
+	/* Disable the RTC one second and alarm interrupts. */
+	clrbits16(&((immap_t *)IMAP_ADDR)->im_sit.sit_rtcsc, (RTCSC_SIE | RTCSC_ALE));
+
+	/* Enable the RTC */
+	setbits16(&((immap_t *)IMAP_ADDR)->im_sit.sit_rtcsc, (RTCSC_RTF | RTCSC_RTE));
+
+}
+
 /* The decrementer counts at the system (internal) clock frequency divided by
  * sixteen, or external oscillator divided by four.  We force the processor
  * to use system clock divided by sixteen.
@@ -148,12 +204,11 @@ void __init m8xx_calibrate_decr(void)
 	int freq, fp, divisor;
 
 	/* Unlock the SCCR. */
-	((volatile immap_t *)IMAP_ADDR)->im_clkrstk.cark_sccrk = ~KAPWR_KEY;
-	((volatile immap_t *)IMAP_ADDR)->im_clkrstk.cark_sccrk = KAPWR_KEY;
+	out_be32(&((immap_t *)IMAP_ADDR)->im_clkrstk.cark_sccrk, ~KAPWR_KEY);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_clkrstk.cark_sccrk, KAPWR_KEY);
 
 	/* Force all 8xx processors to use divide by 16 processor clock. */
-	((volatile immap_t *)IMAP_ADDR)->im_clkrst.car_sccr |= 0x02000000;
-
+	setbits32(&((immap_t *)IMAP_ADDR)->im_clkrst.car_sccr, 0x02000000);
 	/* Processor frequency is MHz.
 	 * The value 'fp' is the number of decrementer ticks per second.
 	 */
@@ -179,28 +234,21 @@ void __init m8xx_calibrate_decr(void)
 	 * we guarantee the registers are locked, then we unlock them
 	 * for our use.
 	 */
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_tbscrk = ~KAPWR_KEY;
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_rtcsck = ~KAPWR_KEY;
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_tbk    = ~KAPWR_KEY;
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_tbscrk =  KAPWR_KEY;
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_rtcsck =  KAPWR_KEY;
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_tbk    =  KAPWR_KEY;
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_tbscrk, ~KAPWR_KEY);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_rtcsck, ~KAPWR_KEY);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_tbk, ~KAPWR_KEY);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_tbscrk, KAPWR_KEY);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_rtcsck, KAPWR_KEY);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_tbk, KAPWR_KEY);
 
-	/* Disable the RTC one second and alarm interrupts. */
-	((volatile immap_t *)IMAP_ADDR)->im_sit.sit_rtcsc &=
-						~(RTCSC_SIE | RTCSC_ALE);
-	/* Enable the RTC */
-	((volatile immap_t *)IMAP_ADDR)->im_sit.sit_rtcsc |=
-						(RTCSC_RTF | RTCSC_RTE);
+	init_internal_rtc();
 
 	/* Enabling the decrementer also enables the timebase interrupts
 	 * (or from the other point of view, to get decrementer interrupts
 	 * we have to enable the timebase).  The decrementer interrupt
 	 * is wired into the vector table, nothing to do here for that.
 	 */
-	((volatile immap_t *)IMAP_ADDR)->im_sit.sit_tbscr =
-				((mk_int_int_mask(DEC_INTERRUPT) << 8) |
-					 (TBSCR_TBF | TBSCR_TBE));
+	out_be16(&((immap_t *)IMAP_ADDR)->im_sit.sit_tbscr, (mk_int_int_mask(DEC_INTERRUPT) << 8) | (TBSCR_TBF | TBSCR_TBE));
 
 	if (setup_irq(DEC_INTERRUPT, &tbint_irqaction))
 		panic("Could not allocate timer IRQ!");
@@ -220,9 +268,9 @@ void __init m8xx_calibrate_decr(void)
 static int
 m8xx_set_rtc_time(unsigned long time)
 {
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_rtck = KAPWR_KEY;
-	((volatile immap_t *)IMAP_ADDR)->im_sit.sit_rtc = time;
-	((volatile immap_t *)IMAP_ADDR)->im_sitk.sitk_rtck = ~KAPWR_KEY;
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_rtck, KAPWR_KEY);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sit.sit_rtc, time);
+	out_be32(&((immap_t *)IMAP_ADDR)->im_sitk.sitk_rtck, ~KAPWR_KEY);
 	return(0);
 }
 
@@ -230,7 +278,7 @@ static unsigned long
 m8xx_get_rtc_time(void)
 {
 	/* Get time from the RTC. */
-	return((unsigned long)(((immap_t *)IMAP_ADDR)->im_sit.sit_rtc));
+	return (unsigned long) in_be32(&((immap_t *)IMAP_ADDR)->im_sit.sit_rtc);
 }
 
 static void
@@ -239,13 +287,13 @@ m8xx_restart(char *cmd)
 	__volatile__ unsigned char dummy;
 
 	local_irq_disable();
-	((immap_t *)IMAP_ADDR)->im_clkrst.car_plprcr |= 0x00000080;
 
+	setbits32(&((immap_t *)IMAP_ADDR)->im_clkrst.car_plprcr, 0x00000080);
 	/* Clear the ME bit in MSR to cause checkstop on machine check
 	*/
 	mtmsr(mfmsr() & ~0x1000);
 
-	dummy = ((immap_t *)IMAP_ADDR)->im_clkrst.res[0];
+	dummy = in_8(&((immap_t *)IMAP_ADDR)->im_clkrst.res[0]);
 	printk("Restart failed\n");
 	while(1);
 }
@@ -270,8 +318,8 @@ m8xx_show_percpuinfo(struct seq_file *m, int i)
 
 	bp = (bd_t *)__res;
 
-	seq_printf(m, "clock\t\t: %ldMHz\n"
-		   "bus clock\t: %ldMHz\n",
+	seq_printf(m, "clock\t\t: %uMHz\n"
+		   "bus clock\t: %uMHz\n",
 		   bp->bi_intfreq / 1000000,
 		   bp->bi_busfreq / 1000000);
 
@@ -298,21 +346,20 @@ m8xx_init_IRQ(void)
 	int i;
 
 	for (i = SIU_IRQ_OFFSET ; i < SIU_IRQ_OFFSET + NR_SIU_INTS ; i++)
-		irq_desc[i].handler = &ppc8xx_pic;
+		irq_desc[i].chip = &ppc8xx_pic;
 
 	cpm_interrupt_init();
 
 #if defined(CONFIG_PCI)
 	for (i = I8259_IRQ_OFFSET ; i < I8259_IRQ_OFFSET + NR_8259_INTS ; i++)
-		irq_desc[i].handler = &i8259_pic;
+		irq_desc[i].chip = &i8259_pic;
 
 	i8259_pic_irq_offset = I8259_IRQ_OFFSET;
 	i8259_init(0);
 
 	/* The i8259 cascade interrupt must be level sensitive. */
-	((immap_t *)IMAP_ADDR)->im_siu_conf.sc_siel &=
-		~(0x80000000 >> ISA_BRIDGE_INT);
 
+	clrbits32(&((immap_t *)IMAP_ADDR)->im_siu_conf.sc_siel, (0x80000000 >> ISA_BRIDGE_INT));
 	if (setup_irq(ISA_BRIDGE_INT, &mbx_i8259_irqaction))
 		enable_irq(ISA_BRIDGE_INT);
 #endif	/* CONFIG_PCI */
@@ -366,7 +413,7 @@ m8xx_map_io(void)
 	io_block_mapping(_IO_BASE,_IO_BASE,_IO_BASE_SIZE, _PAGE_IO);
 #endif
 #endif
-#if defined(CONFIG_HTDMSOUND) || defined(CONFIG_RPXTOUCH) || defined(CONFIG_FB_RPX)
+#if defined(CONFIG_RPXTOUCH) || defined(CONFIG_FB_RPX)
 	io_block_mapping(HIOX_CSR_ADDR, HIOX_CSR_ADDR, HIOX_CSR_SIZE, _PAGE_IO);
 #endif
 #ifdef CONFIG_FADS
@@ -408,9 +455,10 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 		strcpy(cmd_line, (char *)(r6+KERNELBASE));
 	}
 
+	identify_ppc_sys_by_name(BOARD_CHIP_NAME);
+
 	ppc_md.setup_arch		= m8xx_setup_arch;
 	ppc_md.show_percpuinfo		= m8xx_show_percpuinfo;
-	ppc_md.irq_canonicalize	= NULL;
 	ppc_md.init_IRQ			= m8xx_init_IRQ;
 	ppc_md.get_irq			= m8xx_get_irq;
 	ppc_md.init			= NULL;
@@ -427,7 +475,7 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.find_end_of_memory	= m8xx_find_end_of_memory;
 	ppc_md.setup_io_mappings	= m8xx_map_io;
 
-#if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
+#if defined(CONFIG_BLK_DEV_MPC8xx_IDE)
 	m8xx_ide_init();
 #endif
 }

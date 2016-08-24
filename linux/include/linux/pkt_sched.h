@@ -77,8 +77,8 @@ struct tc_ratespec
 {
 	unsigned char	cell_log;
 	unsigned char	__reserved;
-	unsigned short	feature;
-	short		addend;
+	unsigned short	overhead;
+	short		cell_align;
 	unsigned short	mpu;
 	__u32		rate;
 };
@@ -93,12 +93,22 @@ struct tc_fifo_qopt
 /* PRIO section */
 
 #define TCQ_PRIO_BANDS	16
+#define TCQ_MIN_PRIO_BANDS 2
 
 struct tc_prio_qopt
 {
 	int	bands;			/* Number of bands */
 	__u8	priomap[TC_PRIO_MAX+1];	/* Map: logical priority -> PRIO band */
 };
+
+enum
+{
+	TCA_PRIO_UNSPEC,
+	TCA_PRIO_MQ,
+	__TCA_PRIO_MAX
+};
+
+#define TCA_PRIO_MAX    (__TCA_PRIO_MAX - 1)
 
 /* TBF section */
 
@@ -169,6 +179,7 @@ struct tc_red_qopt
 	unsigned char   Scell_log;	/* cell size for idle damping */
 	unsigned char	flags;
 #define TC_RED_ECN	1
+#define TC_RED_HARDDROP	2
 };
 
 struct tc_red_xstats
@@ -194,36 +205,34 @@ enum
 
 #define TCA_GRED_MAX (__TCA_GRED_MAX - 1)
 
-#define TCA_SET_OFF TCA_GRED_PARMS
 struct tc_gred_qopt
 {
-       __u32           limit;          /* HARD maximal queue length (bytes)    
-*/
-       __u32           qth_min;        /* Min average length threshold (bytes) 
-*/
-       __u32           qth_max;        /* Max average length threshold (bytes) 
-*/
-       __u32           DP;             /* upto 2^32 DPs */
-       __u32           backlog;        
-       __u32           qave;   
-       __u32           forced; 
-       __u32           early;  
-       __u32           other;  
-       __u32           pdrop;  
-
-       unsigned char   Wlog;           /* log(W)               */
-       unsigned char   Plog;           /* log(P_max/(qth_max-qth_min)) */
-       unsigned char   Scell_log;      /* cell size for idle damping */
-       __u8            prio;		/* prio of this VQ */
-       __u32	packets;
-       __u32	bytesin;
+	__u32		limit;        /* HARD maximal queue length (bytes)    */
+	__u32		qth_min;      /* Min average length threshold (bytes) */
+	__u32		qth_max;      /* Max average length threshold (bytes) */
+	__u32		DP;           /* upto 2^32 DPs */
+	__u32		backlog;
+	__u32		qave;
+	__u32		forced;
+	__u32		early;
+	__u32		other;
+	__u32		pdrop;
+	__u8		Wlog;         /* log(W)               */
+	__u8		Plog;         /* log(P_max/(qth_max-qth_min)) */
+	__u8		Scell_log;    /* cell size for idle damping */
+	__u8		prio;         /* prio of this VQ */
+	__u32		packets;
+	__u32		bytesin;
 };
+
 /* gred setup */
 struct tc_gred_sopt
 {
-       __u32           DPs;
-       __u32           def_DP;
-       __u8            grio;
+	__u32		DPs;
+	__u32		def_DP;
+	__u8		grio;
+	__u8		flags;
+	__u16		pad1;
 };
 
 /* HTB section */
@@ -351,6 +360,7 @@ struct tc_cbq_ovl
 #define	TC_CBQ_OVL_DROP		3
 #define	TC_CBQ_OVL_RCLASSIC	4
 	unsigned char	priority2;
+	__u16		pad;
 	__u32		penalty;
 };
 
@@ -427,6 +437,8 @@ enum
 	TCA_NETEM_UNSPEC,
 	TCA_NETEM_CORR,
 	TCA_NETEM_DELAY_DIST,
+	TCA_NETEM_REORDER,
+	TCA_NETEM_CORRUPT,
 	__TCA_NETEM_MAX,
 };
 
@@ -437,7 +449,7 @@ struct tc_netem_qopt
 	__u32	latency;	/* added delay (us) */
 	__u32   limit;		/* fifo limit (packets) */
 	__u32	loss;		/* random packet loss (0=none ~0=100%) */
-	__u32	gap;		/* re-ordering gap (0 for delay all) */
+	__u32	gap;		/* re-ordering gap (0 for none) */
 	__u32   duplicate;	/* random packet dup  (0=none ~0=100%) */
 	__u32	jitter;		/* random jitter in latency (us) */
 };
@@ -447,6 +459,18 @@ struct tc_netem_corr
 	__u32	delay_corr;	/* delay correlation */
 	__u32	loss_corr;	/* packet loss correlation */
 	__u32	dup_corr;	/* duplicate correlation  */
+};
+
+struct tc_netem_reorder
+{
+	__u32	probability;
+	__u32	correlation;
+};
+
+struct tc_netem_corrupt
+{
+	__u32	probability;
+	__u32	correlation;
 };
 
 #define NETEM_DIST_SCALE	8192

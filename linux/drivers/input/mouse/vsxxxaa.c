@@ -1,7 +1,7 @@
 /*
  * Driver for	DEC VSXXX-AA mouse (hockey-puck mouse, ball or two rollers)
- * 		DEC VSXXX-GA mouse (rectangular mouse, with ball)
- * 		DEC VSXXX-AB tablet (digitizer with hair cross or stylus)
+ *		DEC VSXXX-GA mouse (rectangular mouse, with ball)
+ *		DEC VSXXX-AB tablet (digitizer with hair cross or stylus)
  *
  * Copyright (C) 2003-2004 by Jan-Benedict Glaw <jbglaw@lug-owl.de>
  *
@@ -81,7 +81,6 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/input.h>
-#include <linux/config.h>
 #include <linux/serio.h>
 #include <linux/init.h>
 
@@ -112,7 +111,7 @@ MODULE_LICENSE ("GPL");
 
 
 struct vsxxxaa {
-	struct input_dev dev;
+	struct input_dev *dev;
 	struct serio *serio;
 #define BUFLEN 15 /* At least 5 is needed for a full tablet packet */
 	unsigned char buf[BUFLEN];
@@ -153,22 +152,25 @@ vsxxxaa_detection_done (struct vsxxxaa *mouse)
 {
 	switch (mouse->type) {
 		case 0x02:
-			sprintf (mouse->name, "DEC VSXXX-AA/-GA mouse");
+			strlcpy (mouse->name, "DEC VSXXX-AA/-GA mouse",
+				 sizeof (mouse->name));
 			break;
 
 		case 0x04:
-			sprintf (mouse->name, "DEC VSXXX-AB digitizer");
+			strlcpy (mouse->name, "DEC VSXXX-AB digitizer",
+				 sizeof (mouse->name));
 			break;
 
 		default:
-			sprintf (mouse->name, "unknown DEC pointer device "
-					"(type = 0x%02x)", mouse->type);
+			snprintf (mouse->name, sizeof (mouse->name),
+				  "unknown DEC pointer device (type = 0x%02x)",
+				  mouse->type);
 			break;
 	}
 
-	printk (KERN_INFO "Found %s version 0x%02x from country 0x%02x "
-			"on port %s\n", mouse->name, mouse->version,
-			mouse->country, mouse->phys);
+	printk (KERN_INFO
+		"Found %s version 0x%02x from country 0x%02x on port %s\n",
+		mouse->name, mouse->version, mouse->country, mouse->phys);
 }
 
 /*
@@ -209,9 +211,9 @@ vsxxxaa_smells_like_packet (struct vsxxxaa *mouse, unsigned char type, size_t le
 }
 
 static void
-vsxxxaa_handle_REL_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
+vsxxxaa_handle_REL_packet (struct vsxxxaa *mouse)
 {
-	struct input_dev *dev = &mouse->dev;
+	struct input_dev *dev = mouse->dev;
 	unsigned char *buf = mouse->buf;
 	int left, middle, right;
 	int dx, dy;
@@ -256,7 +258,6 @@ vsxxxaa_handle_REL_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
 	/*
 	 * Report what we've found so far...
 	 */
-	input_regs (dev, regs);
 	input_report_key (dev, BTN_LEFT, left);
 	input_report_key (dev, BTN_MIDDLE, middle);
 	input_report_key (dev, BTN_RIGHT, right);
@@ -267,9 +268,9 @@ vsxxxaa_handle_REL_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
 }
 
 static void
-vsxxxaa_handle_ABS_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
+vsxxxaa_handle_ABS_packet (struct vsxxxaa *mouse)
 {
-	struct input_dev *dev = &mouse->dev;
+	struct input_dev *dev = mouse->dev;
 	unsigned char *buf = mouse->buf;
 	int left, middle, right, touch;
 	int x, y;
@@ -310,7 +311,6 @@ vsxxxaa_handle_ABS_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
 	/*
 	 * Report what we've found so far...
 	 */
-	input_regs (dev, regs);
 	input_report_key (dev, BTN_LEFT, left);
 	input_report_key (dev, BTN_MIDDLE, middle);
 	input_report_key (dev, BTN_RIGHT, right);
@@ -321,16 +321,16 @@ vsxxxaa_handle_ABS_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
 }
 
 static void
-vsxxxaa_handle_POR_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
+vsxxxaa_handle_POR_packet (struct vsxxxaa *mouse)
 {
-	struct input_dev *dev = &mouse->dev;
+	struct input_dev *dev = mouse->dev;
 	unsigned char *buf = mouse->buf;
 	int left, middle, right;
 	unsigned char error;
 
 	/*
 	 * Check for Power-On-Reset packets. These are sent out
-	 * after plugging the mouse in, or when explicitely
+	 * after plugging the mouse in, or when explicitly
 	 * requested by sending 'T'.
 	 *
 	 * [0]:	1	0	1	0	R3	R2	R1	R0
@@ -365,7 +365,6 @@ vsxxxaa_handle_POR_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
 
 	if (error <= 0x1f) {
 		/* No (serious) error. Report buttons */
-		input_regs (dev, regs);
 		input_report_key (dev, BTN_LEFT, left);
 		input_report_key (dev, BTN_MIDDLE, middle);
 		input_report_key (dev, BTN_RIGHT, right);
@@ -393,7 +392,7 @@ vsxxxaa_handle_POR_packet (struct vsxxxaa *mouse, struct pt_regs *regs)
 }
 
 static void
-vsxxxaa_parse_buffer (struct vsxxxaa *mouse, struct pt_regs *regs)
+vsxxxaa_parse_buffer (struct vsxxxaa *mouse)
 {
 	unsigned char *buf = mouse->buf;
 	int stray_bytes;
@@ -430,7 +429,7 @@ vsxxxaa_parse_buffer (struct vsxxxaa *mouse, struct pt_regs *regs)
 				continue;
 			}
 
-			vsxxxaa_handle_REL_packet (mouse, regs);
+			vsxxxaa_handle_REL_packet (mouse);
 			continue; /* More to parse? */
 		}
 
@@ -444,7 +443,7 @@ vsxxxaa_parse_buffer (struct vsxxxaa *mouse, struct pt_regs *regs)
 				continue;
 			}
 
-			vsxxxaa_handle_ABS_packet (mouse, regs);
+			vsxxxaa_handle_ABS_packet (mouse);
 			continue; /* More to parse? */
 		}
 
@@ -458,7 +457,7 @@ vsxxxaa_parse_buffer (struct vsxxxaa *mouse, struct pt_regs *regs)
 				continue;
 			}
 
-			vsxxxaa_handle_POR_packet (mouse, regs);
+			vsxxxaa_handle_POR_packet (mouse);
 			continue; /* More to parse? */
 		}
 
@@ -467,13 +466,12 @@ vsxxxaa_parse_buffer (struct vsxxxaa *mouse, struct pt_regs *regs)
 }
 
 static irqreturn_t
-vsxxxaa_interrupt (struct serio *serio, unsigned char data, unsigned int flags,
-		struct pt_regs *regs)
+vsxxxaa_interrupt (struct serio *serio, unsigned char data, unsigned int flags)
 {
-	struct vsxxxaa *mouse = serio->private;
+	struct vsxxxaa *mouse = serio_get_drvdata (serio);
 
 	vsxxxaa_queue_byte (mouse, data);
-	vsxxxaa_parse_buffer (mouse, regs);
+	vsxxxaa_parse_buffer (mouse);
 
 	return IRQ_HANDLED;
 }
@@ -481,91 +479,104 @@ vsxxxaa_interrupt (struct serio *serio, unsigned char data, unsigned int flags,
 static void
 vsxxxaa_disconnect (struct serio *serio)
 {
-	struct vsxxxaa *mouse = serio->private;
+	struct vsxxxaa *mouse = serio_get_drvdata (serio);
 
-	input_unregister_device (&mouse->dev);
 	serio_close (serio);
+	serio_set_drvdata (serio, NULL);
+	input_unregister_device (mouse->dev);
 	kfree (mouse);
 }
 
-static void
+static int
 vsxxxaa_connect (struct serio *serio, struct serio_driver *drv)
 {
 	struct vsxxxaa *mouse;
+	struct input_dev *input_dev;
+	int err = -ENOMEM;
 
-	if ((serio->type & SERIO_TYPE) != SERIO_RS232)
-		return;
-	if ((serio->type & SERIO_PROTO) != SERIO_VSXXXAA)
-		return;
+	mouse = kzalloc (sizeof (struct vsxxxaa), GFP_KERNEL);
+	input_dev = input_allocate_device ();
+	if (!mouse || !input_dev)
+		goto fail1;
 
-	if (!(mouse = kmalloc (sizeof (struct vsxxxaa), GFP_KERNEL)))
-		return;
-
-	memset (mouse, 0, sizeof (struct vsxxxaa));
-
-	init_input_dev (&mouse->dev);
-	set_bit (EV_KEY, mouse->dev.evbit);		/* We have buttons */
-	set_bit (EV_REL, mouse->dev.evbit);
-	set_bit (EV_ABS, mouse->dev.evbit);
-	set_bit (BTN_LEFT, mouse->dev.keybit);		/* We have 3 buttons */
-	set_bit (BTN_MIDDLE, mouse->dev.keybit);
-	set_bit (BTN_RIGHT, mouse->dev.keybit);
-	set_bit (BTN_TOUCH, mouse->dev.keybit);		/* ...and Tablet */
-	set_bit (REL_X, mouse->dev.relbit);
-	set_bit (REL_Y, mouse->dev.relbit);
-	set_bit (ABS_X, mouse->dev.absbit);
-	set_bit (ABS_Y, mouse->dev.absbit);
-
-	mouse->dev.absmin[ABS_X] = 0;
-	mouse->dev.absmax[ABS_X] = 1023;
-	mouse->dev.absmin[ABS_Y] = 0;
-	mouse->dev.absmax[ABS_Y] = 1023;
-
-	mouse->dev.private = mouse;
-	serio->private = mouse;
-
-	sprintf (mouse->name, "DEC VSXXX-AA/-GA mouse or VSXXX-AB digitizer");
-	sprintf (mouse->phys, "%s/input0", serio->phys);
-	mouse->dev.name = mouse->name;
-	mouse->dev.phys = mouse->phys;
-	mouse->dev.id.bustype = BUS_RS232;
-	mouse->dev.dev = &serio->dev;
+	mouse->dev = input_dev;
 	mouse->serio = serio;
+	strlcat (mouse->name, "DEC VSXXX-AA/-GA mouse or VSXXX-AB digitizer",
+		 sizeof (mouse->name));
+	snprintf (mouse->phys, sizeof (mouse->phys), "%s/input0", serio->phys);
 
-	if (serio_open (serio, drv)) {
-		kfree (mouse);
-		return;
-	}
+	input_dev->name = mouse->name;
+	input_dev->phys = mouse->phys;
+	input_dev->id.bustype = BUS_RS232;
+	input_dev->dev.parent = &serio->dev;
+
+	set_bit (EV_KEY, input_dev->evbit);		/* We have buttons */
+	set_bit (EV_REL, input_dev->evbit);
+	set_bit (EV_ABS, input_dev->evbit);
+	set_bit (BTN_LEFT, input_dev->keybit);		/* We have 3 buttons */
+	set_bit (BTN_MIDDLE, input_dev->keybit);
+	set_bit (BTN_RIGHT, input_dev->keybit);
+	set_bit (BTN_TOUCH, input_dev->keybit);		/* ...and Tablet */
+	set_bit (REL_X, input_dev->relbit);
+	set_bit (REL_Y, input_dev->relbit);
+	input_set_abs_params (input_dev, ABS_X, 0, 1023, 0, 0);
+	input_set_abs_params (input_dev, ABS_Y, 0, 1023, 0, 0);
+
+	serio_set_drvdata (serio, mouse);
+
+	err = serio_open (serio, drv);
+	if (err)
+		goto fail2;
 
 	/*
 	 * Request selftest. Standard packet format and differential
 	 * mode will be requested after the device ID'ed successfully.
 	 */
-	mouse->serio->write (mouse->serio, 'T'); /* Test */
+	serio->write (serio, 'T'); /* Test */
 
-	input_register_device (&mouse->dev);
+	err = input_register_device (input_dev);
+	if (err)
+		goto fail3;
 
-	printk (KERN_INFO "input: %s on %s\n", mouse->name, mouse->phys);
+	return 0;
+
+ fail3:	serio_close (serio);
+ fail2:	serio_set_drvdata (serio, NULL);
+ fail1:	input_free_device (input_dev);
+	kfree (mouse);
+	return err;
 }
+
+static struct serio_device_id vsxxaa_serio_ids[] = {
+	{
+		.type	= SERIO_RS232,
+		.proto	= SERIO_VSXXXAA,
+		.id	= SERIO_ANY,
+		.extra	= SERIO_ANY,
+	},
+	{ 0 }
+};
+
+MODULE_DEVICE_TABLE(serio, vsxxaa_serio_ids);
 
 static struct serio_driver vsxxxaa_drv = {
 	.driver		= {
 		.name	= "vsxxxaa",
 	},
 	.description	= DRIVER_DESC,
+	.id_table	= vsxxaa_serio_ids,
 	.connect	= vsxxxaa_connect,
 	.interrupt	= vsxxxaa_interrupt,
 	.disconnect	= vsxxxaa_disconnect,
 };
 
-int __init
+static int __init
 vsxxxaa_init (void)
 {
-	serio_register_driver(&vsxxxaa_drv);
-	return 0;
+	return serio_register_driver(&vsxxxaa_drv);
 }
 
-void __exit
+static void __exit
 vsxxxaa_exit (void)
 {
 	serio_unregister_driver(&vsxxxaa_drv);

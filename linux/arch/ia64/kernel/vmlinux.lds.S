@@ -1,4 +1,3 @@
-#include <linux/config.h>
 
 #include <asm/cache.h>
 #include <asm/ptrace.h>
@@ -8,6 +7,11 @@
 #define LOAD_OFFSET	(KERNEL_START - KERNEL_TR_PAGE_SIZE)
 #include <asm-generic/vmlinux.lds.h>
 
+#define IVT_TEXT							\
+		VMLINUX_SYMBOL(__start_ivt_text) = .;			\
+		*(.text.ivt)						\
+		VMLINUX_SYMBOL(__end_ivt_text) = .;
+
 OUTPUT_FORMAT("elf64-ia64-little")
 OUTPUT_ARCH(ia64)
 ENTRY(phys_start)
@@ -16,6 +20,8 @@ PHDRS {
   code   PT_LOAD;
   percpu PT_LOAD;
   data   PT_LOAD;
+  note   PT_NOTE;
+  unwind 0x70000001; /* PT_IA_64_UNWIND, but ld doesn't match the name */
 }
 SECTIONS
 {
@@ -39,12 +45,15 @@ SECTIONS
 
   .text : AT(ADDR(.text) - LOAD_OFFSET)
     {
-	*(.text.ivt)
-	*(.text)
+	IVT_TEXT
+	TEXT_TEXT
 	SCHED_TEXT
 	LOCK_TEXT
+	KPROBES_TEXT
 	*(.gnu.linkonce.t*)
     }
+  .text.head : AT(ADDR(.text.head) - LOAD_OFFSET)
+	{ *(.text.head) }
   .text2 : AT(ADDR(.text2) - LOAD_OFFSET)
 	{ *(.text2) }
 #ifdef CONFIG_SMP
@@ -55,6 +64,9 @@ SECTIONS
 
   /* Read-only data */
 
+  NOTES :code :note		/* put .notes in text and mark in PT_NOTE  */
+  code_continues : {} :code	/* switch back to regular program...  */
+
   /* Exception table */
   . = ALIGN(16);
   __ex_table : AT(ADDR(__ex_table) - LOAD_OFFSET)
@@ -64,33 +76,24 @@ SECTIONS
 	  __stop___ex_table = .;
 	}
 
-  .data.patch.vtop : AT(ADDR(.data.patch.vtop) - LOAD_OFFSET)
+  /* MCA table */
+  . = ALIGN(16);
+  __mca_table : AT(ADDR(__mca_table) - LOAD_OFFSET)
 	{
-	  __start___vtop_patchlist = .;
-	  *(.data.patch.vtop)
-	  __end___vtop_patchlist = .;
+	  __start___mca_table = .;
+	  *(__mca_table)
+	  __stop___mca_table = .;
 	}
 
-  .data.patch.mckinley_e9 : AT(ADDR(.data.patch.mckinley_e9) - LOAD_OFFSET)
+  .data.patch.phys_stack_reg : AT(ADDR(.data.patch.phys_stack_reg) - LOAD_OFFSET)
 	{
-	  __start___mckinley_e9_bundles = .;
-	  *(.data.patch.mckinley_e9)
-	  __end___mckinley_e9_bundles = .;
+	  __start___phys_stack_reg_patchlist = .;
+	  *(.data.patch.phys_stack_reg)
+	  __end___phys_stack_reg_patchlist = .;
 	}
 
   /* Global data */
   _data = .;
-
-#if defined(CONFIG_IA64_GENERIC)
-  /* Machine Vector */
-  . = ALIGN(16);
-  .machvec : AT(ADDR(.machvec) - LOAD_OFFSET)
-	{
-	  machvec_start = .;
-	  *(.machvec)
-	  machvec_end = .;
-	}
-#endif
 
   /* Unwind info & table: */
   . = ALIGN(8);
@@ -101,7 +104,8 @@ SECTIONS
 	  __start_unwind = .;
 	  *(.IA_64.unwind*)
 	  __end_unwind = .;
-	}
+	} :code :unwind
+  code_continues2 : {} : code
 
   RODATA
 
@@ -122,12 +126,14 @@ SECTIONS
   .init.data : AT(ADDR(.init.data) - LOAD_OFFSET)
 	{ *(.init.data) }
 
+#ifdef CONFIG_BLK_DEV_INITRD
   .init.ramfs : AT(ADDR(.init.ramfs) - LOAD_OFFSET)
 	{
 	  __initramfs_start = .;
 	  *(.init.ramfs)
 	  __initramfs_end = .;
 	}
+#endif
 
    . = ALIGN(16);
   .init.setup : AT(ADDR(.init.setup) - LOAD_OFFSET)
@@ -139,15 +145,36 @@ SECTIONS
   .initcall.init : AT(ADDR(.initcall.init) - LOAD_OFFSET)
 	{
 	  __initcall_start = .;
-	  *(.initcall1.init)
-	  *(.initcall2.init)
-	  *(.initcall3.init)
-	  *(.initcall4.init)
-	  *(.initcall5.init)
-	  *(.initcall6.init)
-	  *(.initcall7.init)
+	INITCALLS
 	  __initcall_end = .;
 	}
+
+  .data.patch.vtop : AT(ADDR(.data.patch.vtop) - LOAD_OFFSET)
+	{
+	  __start___vtop_patchlist = .;
+	  *(.data.patch.vtop)
+	  __end___vtop_patchlist = .;
+	}
+
+  .data.patch.mckinley_e9 : AT(ADDR(.data.patch.mckinley_e9) - LOAD_OFFSET)
+	{
+	  __start___mckinley_e9_bundles = .;
+	  *(.data.patch.mckinley_e9)
+	  __end___mckinley_e9_bundles = .;
+	}
+
+#if defined(CONFIG_IA64_GENERIC)
+  /* Machine Vector */
+  . = ALIGN(16);
+  .machvec : AT(ADDR(.machvec) - LOAD_OFFSET)
+	{
+	  machvec_start = .;
+	  *(.machvec)
+	  machvec_end = .;
+	}
+#endif
+
+  . = ALIGN(8);
    __con_initcall_start = .;
   .con_initcall.init : AT(ADDR(.con_initcall.init) - LOAD_OFFSET)
 	{ *(.con_initcall.init) }
@@ -169,7 +196,12 @@ SECTIONS
 	  *(.data.gate)
 	  __stop_gate_section = .;
 	}
-  . = ALIGN(PAGE_SIZE);		/* make sure the gate page doesn't expose kernel data */
+  . = ALIGN(PAGE_SIZE);		/* make sure the gate page doesn't expose
+  				 * kernel data
+				 */
+
+  .data.read_mostly : AT(ADDR(.data.read_mostly) - LOAD_OFFSET)
+        { *(.data.read_mostly) }
 
   .data.cacheline_aligned : AT(ADDR(.data.cacheline_aligned) - LOAD_OFFSET)
         { *(.data.cacheline_aligned) }
@@ -182,13 +214,21 @@ SECTIONS
 	{
 		__per_cpu_start = .;
 		*(.data.percpu)
+		*(.data.percpu.shared_aligned)
 		__per_cpu_end = .;
 	}
-  . = __phys_per_cpu_start + PERCPU_PAGE_SIZE;	/* ensure percpu data fits into percpu page size */
+  . = __phys_per_cpu_start + PERCPU_PAGE_SIZE;	/* ensure percpu data fits
+  						 * into percpu page size
+						 */
 
   data : { } :data
   .data : AT(ADDR(.data) - LOAD_OFFSET)
-	{ *(.data) *(.data1) *(.gnu.linkonce.d*) CONSTRUCTORS }
+	{
+		DATA_DATA
+		*(.data1)
+		*(.gnu.linkonce.d*)
+		CONSTRUCTORS
+	}
 
   . = ALIGN(16);	/* gp must be 16-byte aligned for exc. table */
   .got : AT(ADDR(.got) - LOAD_OFFSET)
@@ -200,11 +240,12 @@ SECTIONS
   .sdata : AT(ADDR(.sdata) - LOAD_OFFSET)
 	{ *(.sdata) *(.sdata1) *(.srdata) }
   _edata  =  .;
-  _bss = .;
+  __bss_start = .;
   .sbss : AT(ADDR(.sbss) - LOAD_OFFSET)
 	{ *(.sbss) *(.scommon) }
   .bss : AT(ADDR(.bss) - LOAD_OFFSET)
 	{ *(.bss) *(COMMON) }
+  __bss_stop = .;
 
   _end = .;
 
@@ -242,10 +283,6 @@ SECTIONS
   .debug_typenames 0 : { *(.debug_typenames) }
   .debug_varnames  0 : { *(.debug_varnames) }
   /* These must appear regardless of  .  */
-  /* Discard them for now since Intel SoftSDV cannot handle them.
-  .comment 0 : { *(.comment) }
-  .note 0 : { *(.note) }
-  */
   /DISCARD/ : { *(.comment) }
   /DISCARD/ : { *(.note) }
 }

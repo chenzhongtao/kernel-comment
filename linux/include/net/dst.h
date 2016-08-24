@@ -8,7 +8,7 @@
 #ifndef _NET_DST_H
 #define _NET_DST_H
 
-#include <linux/config.h>
+#include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/rcupdate.h>
 #include <linux/jiffies.h>
@@ -37,21 +37,20 @@ struct sk_buff;
 
 struct dst_entry
 {
-	struct dst_entry        *next;
-	atomic_t		__refcnt;	/* client references	*/
-	int			__use;
+	struct rcu_head		rcu_head;
 	struct dst_entry	*child;
 	struct net_device       *dev;
-	int			obsolete;
+	short			error;
+	short			obsolete;
 	int			flags;
 #define DST_HOST		1
 #define DST_NOXFRM		2
 #define DST_NOPOLICY		4
 #define DST_NOHASH		8
-	unsigned long		lastuse;
 	unsigned long		expires;
 
 	unsigned short		header_len;	/* more space at head required */
+	unsigned short		nfheader_len;	/* more non-fragment space at head required */
 	unsigned short		trailer_len;	/* space to reserve at tail */
 
 	u32			metrics[RTAX_MAX];
@@ -59,8 +58,6 @@ struct dst_entry
 
 	unsigned long		rate_last;	/* rate limiting for ICMP */
 	unsigned long		rate_tokens;
-
-	int			error;
 
 	struct neighbour	*neighbour;
 	struct hh_cache		*hh;
@@ -74,8 +71,16 @@ struct dst_entry
 #endif
 
 	struct  dst_ops	        *ops;
-	struct rcu_head		rcu_head;
 		
+	unsigned long		lastuse;
+	atomic_t		__refcnt;	/* client references	*/
+	int			__use;
+	union {
+		struct dst_entry *next;
+		struct rtable    *rt_next;
+		struct rt6_info   *rt6_next;
+		struct dn_route  *dn_next;
+	};
 	char			info[0];
 };
 
@@ -83,7 +88,7 @@ struct dst_entry
 struct dst_ops
 {
 	unsigned short		family;
-	unsigned short		protocol;
+	__be16			protocol;
 	unsigned		gc_thresh;
 
 	int			(*gc)(void);
@@ -94,11 +99,10 @@ struct dst_ops
 	struct dst_entry *	(*negative_advice)(struct dst_entry *);
 	void			(*link_failure)(struct sk_buff *);
 	void			(*update_pmtu)(struct dst_entry *dst, u32 mtu);
-	int			(*get_mss)(struct dst_entry *dst, u32 mtu);
 	int			entry_size;
 
 	atomic_t		entries;
-	kmem_cache_t 		*kmem_cachep;
+	struct kmem_cache 		*kmem_cachep;
 };
 
 #ifdef __KERNEL__
@@ -109,19 +113,23 @@ dst_metric(const struct dst_entry *dst, int metric)
 	return dst->metrics[metric-1];
 }
 
-static inline u32
-dst_path_metric(const struct dst_entry *dst, int metric)
+static inline u32 dst_mtu(const struct dst_entry *dst)
 {
-	return dst->path->metrics[metric-1];
+	u32 mtu = dst_metric(dst, RTAX_MTU);
+	/*
+	 * Alexey put it here, so ask him about it :)
+	 */
+	barrier();
+	return mtu;
 }
 
 static inline u32
-dst_pmtu(const struct dst_entry *dst)
+dst_allfrag(const struct dst_entry *dst)
 {
-	u32 mtu = dst_path_metric(dst, RTAX_MTU);
+	int ret = dst_metric(dst, RTAX_FEATURES) & RTAX_FEATURE_ALLFRAG;
 	/* Yes, _exactly_. This is paranoia. */
 	barrier();
-	return mtu;
+	return ret;
 }
 
 static inline int
@@ -133,6 +141,13 @@ dst_metric_locked(struct dst_entry *dst, int metric)
 static inline void dst_hold(struct dst_entry * dst)
 {
 	atomic_inc(&dst->__refcnt);
+}
+
+static inline void dst_use(struct dst_entry *dst, unsigned long time)
+{
+	dst_hold(dst);
+	dst->__use++;
+	dst->lastuse = time;
 }
 
 static inline
@@ -221,16 +236,7 @@ static inline void dst_set_expires(struct dst_entry *dst, int timeout)
 /* Output packet to network from transport.  */
 static inline int dst_output(struct sk_buff *skb)
 {
-	int err;
-
-	for (;;) {
-		err = skb->dst->output(skb);
-
-		if (likely(err == 0))
-			return err;
-		if (unlikely(err != NET_XMIT_BYPASS))
-			return err;
-	}
+	return skb->dst->output(skb);
 }
 
 /* Input packet from network to transport.  */
@@ -249,6 +255,13 @@ static inline int dst_input(struct sk_buff *skb)
 	}
 }
 
+static inline struct dst_entry *dst_check(struct dst_entry *dst, u32 cookie)
+{
+	if (dst->obsolete)
+		dst = dst->ops->check(dst, cookie);
+	return dst;
+}
+
 extern void		dst_init(void);
 
 struct flowi;
@@ -258,9 +271,16 @@ static inline int xfrm_lookup(struct dst_entry **dst_p, struct flowi *fl,
 {
 	return 0;
 } 
+static inline int __xfrm_lookup(struct dst_entry **dst_p, struct flowi *fl,
+				struct sock *sk, int flags)
+{
+	return 0;
+}
 #else
 extern int xfrm_lookup(struct dst_entry **dst_p, struct flowi *fl,
 		       struct sock *sk, int flags);
+extern int __xfrm_lookup(struct dst_entry **dst_p, struct flowi *fl,
+			 struct sock *sk, int flags);
 #endif
 #endif
 

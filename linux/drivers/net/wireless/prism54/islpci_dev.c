@@ -1,5 +1,4 @@
 /*
- *  
  *  Copyright (C) 2002 Intersil Americas Inc.
  *  Copyright (C) 2003 Herbert Valerio Riedel <hvr@gnu.org>
  *  Copyright (C) 2003 Luis R. Rodriguez <mcgrof@ruslug.rutgers.edu>
@@ -19,10 +18,10 @@
  *
  */
 
-#include <linux/version.h>
 #include <linux/module.h>
 
 #include <linux/netdevice.h>
+#include <linux/ethtool.h>
 #include <linux/pci.h>
 #include <linux/etherdevice.h>
 #include <linux/delay.h>
@@ -44,6 +43,7 @@
 
 static int prism54_bring_down(islpci_private *);
 static int islpci_alloc_memory(islpci_private *);
+static struct net_device_stats *islpci_statistics(struct net_device *);
 
 /* Temporary dummy MAC address to use until firmware is loaded.
  * The idea there is that some tools (such as nameif) may query
@@ -52,7 +52,7 @@ static int islpci_alloc_memory(islpci_private *);
  * Of course, this is not the final/real MAC address. It doesn't
  * matter, as you are suppose to be able to change it anytime via
  * ndev->set_mac_address. Jean II */
-const unsigned char	dummy_mac[6] = { 0x00, 0x30, 0xB4, 0x00, 0x00, 0x00 };
+static const unsigned char	dummy_mac[6] = { 0x00, 0x30, 0xB4, 0x00, 0x00, 0x00 };
 
 static int
 isl_upload_firmware(islpci_private *priv)
@@ -115,7 +115,7 @@ isl_upload_firmware(islpci_private *priv)
 			    ISL38XX_MEMORY_WINDOW_SIZE : fw_len;
 			u32 __iomem *dev_fw_ptr = device_base + ISL38XX_DIRECT_MEM_WIN;
 
-			/* set the cards base address for writting the data */
+			/* set the card's base address for writing the data */
 			isl38xx_w32_flush(device_base, reg,
 					  ISL38XX_DIR_MEM_BASE_REG);
 			wmb();	/* be paranoid */
@@ -182,7 +182,7 @@ isl_upload_firmware(islpci_private *priv)
 ******************************************************************************/
 
 irqreturn_t
-islpci_interrupt(int irq, void *config, struct pt_regs *regs)
+islpci_interrupt(int irq, void *config)
 {
 	u32 reg;
 	islpci_private *priv = config;
@@ -413,7 +413,7 @@ prism54_bring_down(islpci_private *priv)
 	islpci_set_state(priv, PRV_STATE_PREBOOT);
 
 	/* disable all device interrupts in case they weren't */
-	isl38xx_disable_interrupts(priv->device_base);  
+	isl38xx_disable_interrupts(priv->device_base);
 
 	/* For safety reasons, we may want to ensure that no DMA transfer is
 	 * currently in progress by emptying the TX and RX queues. */
@@ -438,8 +438,7 @@ prism54_bring_down(islpci_private *priv)
 	wmb();
 
 	/* wait a while for the device to reset */
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(50*HZ/1000);
+	schedule_timeout_uninterruptible(msecs_to_jiffies(50));
 
 	return 0;
 }
@@ -481,7 +480,7 @@ islpci_reset_if(islpci_private *priv)
 
 	DEFINE_WAIT(wait);
 	prepare_to_wait(&priv->reset_done, &wait, TASK_UNINTERRUPTIBLE);
-	
+
 	/* now the last step is to reset the interface */
 	isl38xx_interface_reset(priv->device_base, priv->device_host_address);
 	islpci_set_state(priv, PRV_STATE_PREINIT);
@@ -489,16 +488,15 @@ islpci_reset_if(islpci_private *priv)
         for(count = 0; count < 2 && result; count++) {
 		/* The software reset acknowledge needs about 220 msec here.
 		 * Be conservative and wait for up to one second. */
-	
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		remaining = schedule_timeout(HZ);
+
+		remaining = schedule_timeout_uninterruptible(HZ);
 
 		if(remaining > 0) {
 			result = 0;
 			break;
 		}
 
-		/* If we're here it's because our IRQ hasn't yet gone through. 
+		/* If we're here it's because our IRQ hasn't yet gone through.
 		 * Retry a bit more...
 		 */
 		printk(KERN_ERR "%s: no 'reset complete' IRQ seen - retrying\n",
@@ -516,7 +514,7 @@ islpci_reset_if(islpci_private *priv)
 
 	/* Now that the device is 100% up, let's allow
 	 * for the other interrupts --
-	 * NOTE: this is not *yet* true since we've only allowed the 
+	 * NOTE: this is not *yet* true since we've only allowed the
 	 * INIT interrupt on the IRQ line. We can perhaps poll
 	 * the IRQ line until we know for sure the reset went through */
 	isl38xx_enable_common_interrupts(priv->device_base);
@@ -607,7 +605,7 @@ islpci_reset(islpci_private *priv, int reload_firmware)
 	return rc;
 }
 
-struct net_device_stats *
+static struct net_device_stats *
 islpci_statistics(struct net_device *ndev)
 {
 	islpci_private *priv = netdev_priv(ndev);
@@ -717,8 +715,8 @@ islpci_alloc_memory(islpci_private *priv)
 	}
 
 	prism54_acl_init(&priv->acl);
-	prism54_wpa_ie_init(priv);
-	if (mgt_init(priv)) 
+	prism54_wpa_bss_ie_init(priv);
+	if (mgt_init(priv))
 		goto out_free;
 
 	return 0;
@@ -755,8 +753,7 @@ islpci_free_memory(islpci_private *priv)
 			pci_unmap_single(priv->pdev, buf->pci_addr,
 					 buf->size, PCI_DMA_FROMDEVICE);
 		buf->pci_addr = 0;
-		if (buf->mem)
-			kfree(buf->mem);
+		kfree(buf->mem);
 		buf->size = 0;
 		buf->mem = NULL;
         }
@@ -777,7 +774,7 @@ islpci_free_memory(islpci_private *priv)
 
 	/* Free the acces control list and the WPA list */
 	prism54_acl_clean(&priv->acl);
-	prism54_wpa_ie_clean(priv);
+	prism54_wpa_bss_ie_clean(priv);
 	mgt_clean(priv);
 
 	return 0;
@@ -791,6 +788,17 @@ islpci_set_multicast_list(struct net_device *dev)
 }
 #endif
 
+static void islpci_ethtool_get_drvinfo(struct net_device *dev,
+                                       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+}
+
+static struct ethtool_ops islpci_ethtool_ops = {
+	.get_drvinfo = islpci_ethtool_get_drvinfo,
+};
+
 struct net_device *
 islpci_setup(struct pci_dev *pdev)
 {
@@ -800,7 +808,6 @@ islpci_setup(struct pci_dev *pdev)
 	if (!ndev)
 		return ndev;
 
-	SET_MODULE_OWNER(ndev);
 	pci_set_drvdata(pdev, ndev);
 #if defined(SET_NETDEV_DEV)
 	SET_NETDEV_DEV(ndev, &pdev->dev);
@@ -814,10 +821,10 @@ islpci_setup(struct pci_dev *pdev)
 	ndev->open = &islpci_open;
 	ndev->stop = &islpci_close;
 	ndev->get_stats = &islpci_statistics;
-	ndev->get_wireless_stats = &prism54_get_wireless_stats;
 	ndev->do_ioctl = &prism54_ioctl;
 	ndev->wireless_handlers =
 	    (struct iw_handler_def *) &prism54_handler_def;
+	ndev->ethtool_ops = &islpci_ethtool_ops;
 
 	ndev->hard_start_xmit = &islpci_eth_transmit;
 	/* ndev->set_multicast_list = &islpci_set_multicast_list; */
@@ -839,11 +846,9 @@ islpci_setup(struct pci_dev *pdev)
 	priv->ndev->type = (priv->iw_mode == IW_MODE_MONITOR) ?
 		priv->monitor_type : ARPHRD_ETHER;
 
-#if WIRELESS_EXT > 16
 	/* Add pointers to enable iwspy support. */
 	priv->wireless_data.spy_data = &priv->spy_data;
 	ndev->wireless_data = &priv->wireless_data;
-#endif /* WIRELESS_EXT > 16 */
 
 	/* save the start and end address of the PCI memory area */
 	ndev->mem_start = (unsigned long) priv->device_base;
@@ -867,11 +872,10 @@ islpci_setup(struct pci_dev *pdev)
 	priv->state_off = 1;
 
 	/* initialize workqueue's */
-	INIT_WORK(&priv->stats_work,
-		  (void (*)(void *)) prism54_update_stats, priv);
+	INIT_WORK(&priv->stats_work, prism54_update_stats);
 	priv->stats_timestamp = 0;
 
-	INIT_WORK(&priv->reset_task, islpci_do_reset_and_wake, priv);
+	INIT_WORK(&priv->reset_task, islpci_do_reset_and_wake);
 	priv->reset_task_pending = 0;
 
 	/* allocate various memory areas */

@@ -10,10 +10,10 @@
  *    Copyright (C) 2000 Grant Grundler <grundler at parisc-linux.org>
  *    Copyright (C) 2001 Richard Hirst <rhirst with parisc-linux.org>
  *    Copyright (C) 2001-2002 Ryan Bradetich <rbrad at parisc-linux.org>
- *    Copyright (C) 2001 Helge Deller <deller at parisc-linux.org>
+ *    Copyright (C) 2001-2007 Helge Deller <deller at parisc-linux.org>
  *    Copyright (C) 2000-2001 Thomas Bogendoerfer <tsbogend at parisc-linux.org>
  *    Copyright (C) 2002 Randolph Chung <tausq with parisc-linux.org>
- *
+ *    Copyright (C) 2005-2006 Kyle McMartin <kyle at parisc-linux.org>
  *
  *    This program is free software; you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -30,12 +30,7 @@
  *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#undef ENTRY_SAME
-#undef ENTRY_DIFF
-#undef ENTRY_UHOH
-#undef ENTRY_COMP
-#undef ENTRY_OURS
-#if defined(__LP64__) && !defined(SYSCALL_TABLE_64BIT)
+#if defined(CONFIG_64BIT) && !defined(SYSCALL_TABLE_64BIT)
 /* Use ENTRY_SAME for 32-bit syscalls which are the same on wide and
  * narrow palinux.  Use ENTRY_DIFF for those where a 32-bit specific
  * implementation is required on wide palinux.  Use ENTRY_COMP where
@@ -46,7 +41,7 @@
 #define ENTRY_UHOH(_name_) .dword sys32_##unimplemented
 #define ENTRY_OURS(_name_) .dword parisc_##_name_
 #define ENTRY_COMP(_name_) .dword compat_sys_##_name_
-#elif defined(__LP64__) && defined(SYSCALL_TABLE_64BIT)
+#elif defined(CONFIG_64BIT) && defined(SYSCALL_TABLE_64BIT)
 #define ENTRY_SAME(_name_) .dword sys_##_name_
 #define ENTRY_DIFF(_name_) .dword sys_##_name_
 #define ENTRY_UHOH(_name_) .dword sys_##_name_
@@ -132,7 +127,7 @@
 	ENTRY_SAME(socketpair)
 	ENTRY_SAME(setpgid)
 	ENTRY_SAME(send)
-	ENTRY_SAME(newuname)
+	ENTRY_OURS(newuname)
 	ENTRY_SAME(umask)		/* 60 */
 	ENTRY_SAME(chroot)
 	ENTRY_SAME(ustat)
@@ -197,7 +192,7 @@
 	/* struct rusage contains longs... */
 	ENTRY_COMP(wait4)
 	ENTRY_SAME(swapoff)		/* 115 */
-	ENTRY_DIFF(sysinfo)
+	ENTRY_COMP(sysinfo)
 	ENTRY_SAME(shutdown)
 	ENTRY_SAME(fsync)
 	ENTRY_SAME(madvise)
@@ -207,7 +202,7 @@
 	/* struct sockaddr... */
 	ENTRY_SAME(recvfrom)
 	/* struct timex contains longs */
-	ENTRY_DIFF(adjtimex)
+	ENTRY_COMP(adjtimex)
 	ENTRY_SAME(mprotect)		/* 125 */
 	/* old_sigset_t forced to 32 bits.  Beware glibc sigset_t */
 	ENTRY_COMP(sigprocmask)
@@ -221,15 +216,13 @@
 	ENTRY_SAME(fchdir)
 	ENTRY_SAME(bdflush)
 	ENTRY_SAME(sysfs)		/* 135 */
-	ENTRY_SAME(personality)
+	ENTRY_OURS(personality)
 	ENTRY_SAME(ni_syscall)	/* for afs_syscall */
 	ENTRY_SAME(setfsuid)
 	ENTRY_SAME(setfsgid)
 	/* I think this might work */
 	ENTRY_SAME(llseek)		/* 140 */
-	/* struct linux_dirent has longs, like 'unsigned long d_ino' which
-	 * almost definitely should be 'ino_t d_ino' but it's too late now */
-	ENTRY_DIFF(getdents)
+	ENTRY_COMP(getdents)
 	/* it is POSSIBLE that select will be OK because even though fd_set
 	 * contains longs, the macros and sizes are clever. */
 	ENTRY_COMP(select)
@@ -282,12 +275,12 @@
 	 * to worry about faulting trying to copy in a larger 64-bit
 	 * struct from a 32-bit user-space app.
 	 */
-	ENTRY_SAME(rt_sigqueueinfo)
-	ENTRY_SAME(rt_sigsuspend_wrapper) /* not really SAME -- see the code */
+	ENTRY_COMP(rt_sigqueueinfo)
+	ENTRY_COMP(rt_sigsuspend)
 	ENTRY_SAME(chown)		/* 180 */
 	/* setsockopt() used by iptables: SO_SET_REPLACE/SO_SET_ADD_COUNTERS */
 	ENTRY_COMP(setsockopt)
-	ENTRY_SAME(getsockopt)
+	ENTRY_COMP(getsockopt)
 	ENTRY_COMP(sendmsg)
 	ENTRY_COMP(recvmsg)
 	ENTRY_SAME(semop)		/* 185 */
@@ -297,7 +290,7 @@
 	ENTRY_DIFF(msgrcv)
 	ENTRY_SAME(msgget)		/* 190 */
 	ENTRY_SAME(msgctl)
-	ENTRY_SAME(shmat_wrapper)
+	ENTRY_SAME(shmat)
 	ENTRY_SAME(shmdt)
 	ENTRY_SAME(shmget)
 	ENTRY_SAME(shmctl)		/* 195 */
@@ -368,5 +361,54 @@
 	ENTRY_COMP(mbind)		/* 260 */
 	ENTRY_COMP(get_mempolicy)
 	ENTRY_COMP(set_mempolicy)
+	ENTRY_SAME(ni_syscall)	/* 263: reserved for vserver */
+	ENTRY_SAME(add_key)
+	ENTRY_SAME(request_key)		/* 265 */
+	ENTRY_SAME(keyctl)
+	ENTRY_SAME(ioprio_set)
+	ENTRY_SAME(ioprio_get)
+	ENTRY_SAME(inotify_init)
+	ENTRY_SAME(inotify_add_watch)	/* 270 */
+	ENTRY_SAME(inotify_rm_watch)
+	ENTRY_SAME(migrate_pages)
+	ENTRY_COMP(pselect6)
+	ENTRY_COMP(ppoll)
+	ENTRY_COMP(openat)		/* 275 */
+	ENTRY_SAME(mkdirat)
+	ENTRY_SAME(mknodat)
+	ENTRY_SAME(fchownat)
+	ENTRY_COMP(futimesat)
+	ENTRY_SAME(fstatat64)		/* 280 */
+	ENTRY_SAME(unlinkat)
+	ENTRY_SAME(renameat)
+	ENTRY_SAME(linkat)
+	ENTRY_SAME(symlinkat)
+	ENTRY_SAME(readlinkat)		/* 285 */
+	ENTRY_SAME(fchmodat)
+	ENTRY_SAME(faccessat)
+	ENTRY_SAME(unshare)
+	ENTRY_COMP(set_robust_list)
+	ENTRY_COMP(get_robust_list)	/* 290 */
+	ENTRY_SAME(splice)
+	ENTRY_OURS(sync_file_range)
+	ENTRY_SAME(tee)
+	ENTRY_COMP(vmsplice)
+	ENTRY_COMP(move_pages)		/* 295 */
+	ENTRY_SAME(getcpu)
+	ENTRY_SAME(epoll_pwait)
+	ENTRY_COMP(statfs64)
+	ENTRY_COMP(fstatfs64)
+	ENTRY_COMP(kexec_load)		/* 300 */
+	ENTRY_COMP(utimensat)
+	ENTRY_COMP(signalfd)
+	ENTRY_COMP(timerfd)
+	ENTRY_SAME(eventfd)
+	ENTRY_COMP(fallocate)		/* 305 */
+
 	/* Nothing yet */
 
+#undef ENTRY_SAME
+#undef ENTRY_DIFF
+#undef ENTRY_UHOH
+#undef ENTRY_COMP
+#undef ENTRY_OURS

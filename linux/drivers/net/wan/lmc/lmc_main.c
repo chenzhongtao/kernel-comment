@@ -100,7 +100,7 @@ static int lmc_rx (struct net_device *dev);
 static int lmc_open(struct net_device *dev);
 static int lmc_close(struct net_device *dev);
 static struct net_device_stats *lmc_get_stats(struct net_device *dev);
-static irqreturn_t lmc_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
+static irqreturn_t lmc_interrupt(int irq, void *dev_instance);
 static void lmc_initcsrs(lmc_softc_t * const sc, lmc_csrptr_t csr_base, size_t csr_size);
 static void lmc_softreset(lmc_softc_t * const);
 static void lmc_running_reset(struct net_device *dev);
@@ -142,9 +142,10 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
          * To date internally, just copy this out to the user.
          */
     case LMCIOCGINFO: /*fold01*/
-        if (copy_to_user(ifr->ifr_data, &sc->ictl, sizeof (lmc_ctl_t)))
-            return -EFAULT;
-        ret = 0;
+	if (copy_to_user(ifr->ifr_data, &sc->ictl, sizeof(lmc_ctl_t)))
+		ret = -EFAULT;
+	else
+		ret = 0;
         break;
 
     case LMCIOCSINFO: /*fold01*/
@@ -159,8 +160,10 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
             break;
         }
 
-        if (copy_from_user(&ctl, ifr->ifr_data, sizeof (lmc_ctl_t)))
-            return -EFAULT;
+	if (copy_from_user(&ctl, ifr->ifr_data, sizeof(lmc_ctl_t))) {
+		ret = -EFAULT;
+		break;
+	}
 
         sc->lmc_media->set_status (sc, &ctl);
 
@@ -190,8 +193,10 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
 		break;
 	    }
 
-	    if (copy_from_user(&new_type, ifr->ifr_data, sizeof(u_int16_t)))
-                return -EFAULT;
+	    if (copy_from_user(&new_type, ifr->ifr_data, sizeof(u_int16_t))) {
+		ret = -EFAULT;
+		break;
+	    }
 
             
 	    if (new_type == old_type)
@@ -229,9 +234,10 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
         sc->lmc_xinfo.Magic1 = 0xDEADBEEF;
 
         if (copy_to_user(ifr->ifr_data, &sc->lmc_xinfo,
-                         sizeof (struct lmc_xinfo)))
-            return -EFAULT;
-        ret = 0;
+			 sizeof(struct lmc_xinfo)))
+		ret = -EFAULT;
+	else
+		ret = 0;
 
         break;
 
@@ -262,9 +268,9 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
 
         if (copy_to_user(ifr->ifr_data, &sc->stats,
                          sizeof (struct lmc_statistics)))
-            return -EFAULT;
-
-        ret = 0;
+		ret = -EFAULT;
+	else
+		ret = 0;
         break;
 
     case LMCIOCCLEARLMCSTATS: /*fold01*/
@@ -292,8 +298,10 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
             break;
         }
 
-        if (copy_from_user(&ctl, ifr->ifr_data, sizeof (lmc_ctl_t)))
-            return -EFAULT;
+	if (copy_from_user(&ctl, ifr->ifr_data, sizeof(lmc_ctl_t))) {
+		ret = -EFAULT;
+		break;
+	}
         sc->lmc_media->set_circuit_type(sc, ctl.circuit_type);
         sc->ictl.circuit_type = ctl.circuit_type;
         ret = 0;
@@ -318,12 +326,15 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
 
 #ifdef DEBUG
     case LMCIOCDUMPEVENTLOG:
-        if (copy_to_user(ifr->ifr_data, &lmcEventLogIndex, sizeof (u32)))
-            return -EFAULT;
+	if (copy_to_user(ifr->ifr_data, &lmcEventLogIndex, sizeof(u32))) {
+		ret = -EFAULT;
+		break;
+	}
         if (copy_to_user(ifr->ifr_data + sizeof (u32), lmcEventLogBuf, sizeof (lmcEventLogBuf)))
-            return -EFAULT;
+		ret = -EFAULT;
+	else
+		ret = 0;
 
-        ret = 0;
         break;
 #endif /* end ifdef _DBG_EVENTLOG */
     case LMCIOCT1CONTROL: /*fold01*/
@@ -346,8 +357,10 @@ int lmc_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd) /*fold00*/
              */
             netif_stop_queue(dev);
 
-            if (copy_from_user(&xc, ifr->ifr_data, sizeof (struct lmc_xilinx_control)))
-                return -EFAULT;
+	if (copy_from_user(&xc, ifr->ifr_data, sizeof(struct lmc_xilinx_control))) {
+		ret = -EFAULT;
+		break;
+	}
             switch(xc.command){
             case lmc_xilinx_reset: /*fold02*/
                 {
@@ -641,7 +654,7 @@ static void lmc_watchdog (unsigned long data) /*fold00*/
     spin_lock_irqsave(&sc->lmc_lock, flags);
 
     if(sc->check != 0xBEAFCAFE){
-        printk("LMC: Corrupt net_device stuct, breaking out\n");
+        printk("LMC: Corrupt net_device struct, breaking out\n");
 	spin_unlock_irqrestore(&sc->lmc_lock, flags);
         return;
     }
@@ -723,7 +736,7 @@ static void lmc_watchdog (unsigned long data) /*fold00*/
         /* lmc_reset (sc); Why reset??? The link can go down ok */
 
         /* Inform the world that link has been lost */
-        dev->flags &= ~IFF_RUNNING;
+	netif_carrier_off(dev);
     }
 
     /*
@@ -736,7 +749,7 @@ static void lmc_watchdog (unsigned long data) /*fold00*/
          /* lmc_reset (sc); Again why reset??? */
 
          /* Inform the world that link protocol is back up. */
-         dev->flags |= IFF_RUNNING;
+	 netif_carrier_on(dev);
 
          /* Now we have to tell the syncppp that we had an outage
           * and that it should deal.  Calling sppp_reopen here
@@ -883,7 +896,6 @@ static int __devinit lmc_init_one(struct pci_dev *pdev,
     dev->base_addr = pci_resource_start(pdev, 0);
     dev->irq = pdev->irq;
 
-    SET_MODULE_OWNER(dev);
     SET_NETDEV_DEV(dev, &pdev->dev);
 
     /*
@@ -1058,7 +1070,7 @@ static int lmc_open (struct net_device *dev) /*fold00*/
     lmc_softreset (sc);
 
     /* Since we have to use PCI bus, this should work on x86,alpha,ppc */
-    if (request_irq (dev->irq, &lmc_interrupt, SA_SHIRQ, dev->name, dev)){
+    if (request_irq (dev->irq, &lmc_interrupt, IRQF_SHARED, dev->name, dev)){
         printk(KERN_WARNING "%s: could not get irq: %d\n", dev->name, dev->irq);
         lmc_trace(dev, "lmc_open irq failed out");
         return -EAGAIN;
@@ -1168,8 +1180,6 @@ static void lmc_running_reset (struct net_device *dev) /*fold00*/
     sc->lmc_media->set_link_status (sc, 1);
     sc->lmc_media->set_status (sc, NULL);
 
-    //dev->flags |= IFF_RUNNING;
-    
     netif_wake_queue(dev);
 
     sc->lmc_txfull = 0;
@@ -1233,8 +1243,6 @@ static int lmc_ifdown (struct net_device *dev) /*fold00*/
     csr6 &= ~LMC_DEC_SR;		/* Turn off the Receive bit */
     LMC_CSR_WRITE (sc, csr_command, csr6);
 
-    dev->flags &= ~IFF_RUNNING;
-
     sc->stats.rx_missed_errors +=
         LMC_CSR_READ (sc, csr_missed_frames) & 0xffff;
 
@@ -1277,7 +1285,7 @@ static int lmc_ifdown (struct net_device *dev) /*fold00*/
 /* Interrupt handling routine.  This will take an incoming packet, or clean
  * up after a trasmit.
  */
-static irqreturn_t lmc_interrupt (int irq, void *dev_instance, struct pt_regs *regs) /*fold00*/
+static irqreturn_t lmc_interrupt (int irq, void *dev_instance) /*fold00*/
 {
     struct net_device *dev = (struct net_device *) dev_instance;
     lmc_softc_t *sc;
@@ -1640,7 +1648,7 @@ static int lmc_rx (struct net_device *dev) /*fold00*/
             if (nsb) {
                 sc->lmc_rxq[i] = nsb;
                 nsb->dev = dev;
-                sc->lmc_rxring[i].buffer1 = virt_to_bus (nsb->tail);
+                sc->lmc_rxring[i].buffer1 = virt_to_bus(skb_tail_pointer(nsb));
             }
             sc->failed_recv_alloc = 1;
             goto skip_packet;
@@ -1671,8 +1679,8 @@ static int lmc_rx (struct net_device *dev) /*fold00*/
             skb_put (skb, len);
             skb->protocol = lmc_proto_type(sc, skb);
             skb->protocol = htons(ETH_P_WAN_PPP);
-            skb->mac.raw = skb->data;
-//            skb->nh.raw = skb->data;
+            skb_reset_mac_header(skb);
+            /* skb_reset_network_header(skb); */
             skb->dev = dev;
             lmc_proto_netif(sc, skb);
 
@@ -1683,7 +1691,7 @@ static int lmc_rx (struct net_device *dev) /*fold00*/
             if (nsb) {
                 sc->lmc_rxq[i] = nsb;
                 nsb->dev = dev;
-                sc->lmc_rxring[i].buffer1 = virt_to_bus (nsb->tail);
+                sc->lmc_rxring[i].buffer1 = virt_to_bus(skb_tail_pointer(nsb));
                 /* Transferred to 21140 below */
             }
             else {
@@ -1706,11 +1714,11 @@ static int lmc_rx (struct net_device *dev) /*fold00*/
             if(!nsb) {
                 goto give_it_anyways;
             }
-            memcpy(skb_put(nsb, len), skb->data, len);
+            skb_copy_from_linear_data(skb, skb_put(nsb, len), len);
             
             nsb->protocol = lmc_proto_type(sc, skb);
-            nsb->mac.raw = nsb->data;
-//            nsb->nh.raw = nsb->data;
+            skb_reset_mac_header(nsb);
+            /* skb_reset_network_header(nsb); */
             nsb->dev = dev;
             lmc_proto_netif(sc, nsb);
         }
@@ -1794,7 +1802,7 @@ static struct pci_driver lmc_driver = {
 
 static int __init init_lmc(void)
 {
-    return pci_module_init(&lmc_driver);
+    return pci_register_driver(&lmc_driver);
 }
 
 static void __exit exit_lmc(void)
@@ -1936,7 +1944,7 @@ static void lmc_softreset (lmc_softc_t * const sc) /*fold00*/
         sc->lmc_rxring[i].status = 0x80000000;
 
         /* used to be PKT_BUF_SZ now uses skb since we lose some to head room */
-        sc->lmc_rxring[i].length = skb->end - skb->data;
+        sc->lmc_rxring[i].length = skb_tailroom(skb);
 
         /* use to be tail which is dumb since you're thinking why write
          * to the end of the packj,et but since there's nothing there tail == data

@@ -148,7 +148,7 @@ NEW IN THIS RELEASE
 		for async connections.
 
 	o Added the PPPCONFIG utility
-		Used to configure the PPPD dameon for the
+		Used to configure the PPPD daemon for the
 		WANPIPE Async PPP and standard serial port.
 		The wancfg calls the pppconfig to configure
 		the pppd.
@@ -214,7 +214,7 @@ PRODUCT COMPONENTS AND RELATED FILES
 /usr/local/wanrouter/patches/kdrivers:
 	Sources of the latest WANPIPE device drivers.
 	These are used to UPGRADE the linux kernel to the newest
-	version if the kernel source has already been pathced with
+	version if the kernel source has already been patched with
 	WANPIPE drivers.
 
 /usr/local/wanrouter/samples:
@@ -250,7 +250,6 @@ PRODUCT COMPONENTS AND RELATED FILES
 	sdladrv.h	SDLA support module API definitions
 	sdlasfm.h	SDLA firmware module definitions
 	if_wanpipe.h	WANPIPE Socket definitions
-	if_wanpipe_common.h	WANPIPE Socket/Driver common definitions.
 	sdlapci.h	WANPIPE PCI definitions
 	
 
@@ -336,7 +335,7 @@ REVISION HISTORY
 				creating applications using BiSync
    				streaming.        
 
-2.0.5   Aug 04, 1999 		CHDLC initializatin bug fix.
+2.0.5   Aug 04, 1999 		CHDLC initialization bug fix.
 				PPP interrupt driven driver: 
   				Fix to the PPP line hangup problem.
 				New PPP firmware
@@ -350,12 +349,12 @@ REVISION HISTORY
 				 Available as a patch.                 
 
 2.0.6   Aug 17, 1999		Increased debugging in statup scripts
-				Fixed insallation bugs from 2.0.5
+				Fixed installation bugs from 2.0.5
 				Kernel patch works for both 2.2.10 and 2.2.11 kernels.
 				There is no functional difference between the two packages         
 
 2.0.7   Aug 26, 1999		o  Merged X25API code into WANPIPE.
-				o  Fixed a memeory leak for X25API
+				o  Fixed a memory leak for X25API
 				o  Updated the X25API code for 2.2.X kernels.
 				o  Improved NEM handling.   
 
@@ -373,7 +372,7 @@ REVISION HISTORY
 				o cfgft1 GUI csu/dsu configurator
 				o wancfg GUI configuration file 
 				  configurator.
-				o Architectual directory changes.
+				o Architectural directory changes.
 
 beta-2.1.4 Jul 2000		o Dynamic interface configuration:
 					Network interfaces reflect the state
@@ -412,7 +411,7 @@ beta-2.1.4 Jul 2000		o Dynamic interface configuration:
 
 beta3-2.1.4 Jul 2000		o X25 M_BIT Problem fix.
 				o Added the Multi-Port PPP
-				  Updated utilites for the Multi-Port PPP.
+				  Updated utilities for the Multi-Port PPP.
 
 2.1.4	Aut 2000
 				o In X25API:
@@ -434,24 +433,24 @@ beta3-2.1.4 Jul 2000		o X25 M_BIT Problem fix.
 				  change. 
 	  
 beta1-2.1.5 	Nov 15 2000
-				o Fixed the MulitPort PPP Support for kernels 2.2.16 and above.
+				o Fixed the MultiPort PPP Support for kernels 2.2.16 and above.
 				  2.2.X kernels only
 
 				o Secured the driver UDP debugging calls
-					- All illegal netowrk debugging calls are reported to
+					- All illegal network debugging calls are reported to
 					  the log.
 					- Defined a set of allowed commands, all other denied.
 					
 				o Cpipemon
 					- Added set FT1 commands to the cpipemon. Thus CSU/DSU
-					  configuraiton can be performed using cpipemon.
+					  configuration can be performed using cpipemon.
 					  All systems that cannot run cfgft1 GUI utility should
 					  use cpipemon to configure the on board CSU/DSU.
 
 
 				o Keyboard Led Monitor/Debugger
-					- A new utilty /usr/sbin/wpkbdmon uses keyboard leds
-					  to convey operatinal statistic information of the 
+					- A new utility /usr/sbin/wpkbdmon uses keyboard leds
+					  to convey operational statistic information of the 
 					  Sangoma WANPIPE cards.
 					NUM_LOCK    = Line State  (On=connected,    Off=disconnected)
 					CAPS_LOCK   = Tx data     (On=transmitting, Off=no tx data)
@@ -464,13 +463,13 @@ beta1-2.1.5 	Nov 15 2000
 					- Appropriate number of devices are dynamically loaded 
 					  based on the number of Sangoma cards found.
 
-					  Note: The kernel configuraiton option 
+					  Note: The kernel configuration option 
 						CONFIG_WANPIPE_CARDS has been taken out.
 					
 				o Fixed the Frame Relay and Chdlc network interfaces so they are
 				  compatible with libpcap libraries.  Meaning, tcpdump, snort,
 				  ethereal, and all other packet sniffers and debuggers work on
-				  all WANPIPE netowrk interfaces.
+				  all WANPIPE network interfaces.
 					- Set the network interface encoding type to ARPHRD_PPP.
 					  This tell the sniffers that data obtained from the
 					  network interface is in pure IP format.
@@ -514,7 +513,7 @@ beta2-2.2.0	Jan 8 2001
 				o Patches for 2.4.0 kernel
 				o Patches for 2.2.18 kernel
 				o Minor updates to PPP and CHLDC drivers.
-				  Note: No functinal difference. 
+				  Note: No functional difference.
 
 beta3-2.2.9	Jan 10 2001
 				o I missed the 2.2.18 kernel patches in beta2-2.2.0
@@ -570,7 +569,7 @@ bata1-2.2.1	Feb 09 2001
 
 				Option to COMPILE WANPIPE modules against the currently 
 				running kernel, thus no need for manual kernel and module
-				re-compilatin.
+				re-compilation.
 			
 			o Updates and Bug Fixes to wancfg utility.
 

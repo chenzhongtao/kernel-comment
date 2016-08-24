@@ -11,10 +11,23 @@
 
 #include <linux/proc_fs.h>
 
+#ifdef CONFIG_PROC_SYSCTL
+extern int proc_sys_init(void);
+#else
+static inline void proc_sys_init(void) { }
+#endif
+#ifdef CONFIG_NET
+extern int proc_net_init(void);
+#else
+static inline int proc_net_init(void) { return 0; }
+#endif
+
 struct vmalloc_info {
 	unsigned long	used;
 	unsigned long	largest_chunk;
 };
+
+extern struct mm_struct *mm_for_maps(struct task_struct *);
 
 #ifdef CONFIG_MMU
 #define VMALLOC_TOTAL (VMALLOC_END - VMALLOC_START)
@@ -28,21 +41,42 @@ do {						\
 	(vmi)->largest_chunk = 0;		\
 } while(0)
 
+extern int nommu_vma_show(struct seq_file *, struct vm_area_struct *);
 #endif
 
-extern void create_seq_entry(char *name, mode_t mode, struct file_operations *f);
+extern int maps_protect;
+
+extern void create_seq_entry(char *name, mode_t mode, const struct file_operations *f);
 extern int proc_exe_link(struct inode *, struct dentry **, struct vfsmount **);
 extern int proc_tid_stat(struct task_struct *,  char *);
 extern int proc_tgid_stat(struct task_struct *, char *);
 extern int proc_pid_status(struct task_struct *, char *);
 extern int proc_pid_statm(struct task_struct *, char *);
 
-static inline struct task_struct *proc_task(struct inode *inode)
+extern const struct file_operations proc_maps_operations;
+extern const struct file_operations proc_numa_maps_operations;
+extern const struct file_operations proc_smaps_operations;
+
+extern const struct file_operations proc_maps_operations;
+extern const struct file_operations proc_numa_maps_operations;
+extern const struct file_operations proc_smaps_operations;
+
+
+void free_proc_entry(struct proc_dir_entry *de);
+
+int proc_init_inodecache(void);
+
+static inline struct pid *proc_pid(struct inode *inode)
 {
-	return PROC_I(inode)->task;
+	return PROC_I(inode)->pid;
 }
 
-static inline int proc_type(struct inode *inode)
+static inline struct task_struct *get_proc_task(struct inode *inode)
 {
-	return PROC_I(inode)->type;
+	return get_pid_task(proc_pid(inode), PIDTYPE_PID);
+}
+
+static inline int proc_fd(struct inode *inode)
+{
+	return PROC_I(inode)->fd;
 }

@@ -183,7 +183,7 @@ static struct card {
 	short addr_offset;
 	unsigned char *vendor_id;
 	char *cardname;
-	long config;
+	unsigned long config;
 } cards[] = {
 	{
 		.id0	     = NI65_ID0,
@@ -248,7 +248,7 @@ struct priv
 };
 
 static int  ni65_probe1(struct net_device *dev,int);
-static irqreturn_t ni65_interrupt(int irq, void * dev_id, struct pt_regs *regs);
+static irqreturn_t ni65_interrupt(int irq, void * dev_id);
 static void ni65_recv_intr(struct net_device *dev,int);
 static void ni65_xmit_intr(struct net_device *dev,int);
 static int  ni65_open(struct net_device *dev);
@@ -324,7 +324,7 @@ static int ni65_close(struct net_device *dev)
 	struct priv *p = (struct priv *) dev->priv;
 
 	netif_stop_queue(dev);
-	
+
 	outw(inw(PORT+L_RESET),PORT+L_RESET); /* that's the hard way */
 
 #ifdef XMT_VIA_SKB
@@ -489,20 +489,20 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 				int dma = dmatab[i];
 				if(test_bit(dma,&dma_channels) || request_dma(dma,"ni6510"))
 					continue;
-					
+
 				flags=claim_dma_lock();
 				disable_dma(dma);
 				set_dma_mode(dma,DMA_MODE_CASCADE);
 				enable_dma(dma);
 				release_dma_lock(flags);
-				
+
 				ni65_init_lance(p,dev->dev_addr,0,0); /* trigger memory access */
-				
+
 				flags=claim_dma_lock();
 				disable_dma(dma);
 				free_dma(dma);
 				release_dma_lock(flags);
-				
+
 				if(readreg(CSR0) & CSR0_IDON)
 					break;
 			}
@@ -526,8 +526,7 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 			ni65_init_lance(p,dev->dev_addr,0,0);
 			irq_mask = probe_irq_on();
 			writereg(CSR0_INIT|CSR0_INEA,CSR0); /* trigger interrupt */
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_timeout(HZ/50);
+			msleep(20);
 			dev->irq = probe_irq_off(irq_mask);
 			if(!dev->irq)
 			{
@@ -551,7 +550,6 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	}
 
 	dev->base_addr = ioaddr;
-	SET_MODULE_OWNER(dev);
 	dev->open		= ni65_open;
 	dev->stop		= ni65_close;
 	dev->hard_start_xmit	= ni65_send_packet;
@@ -611,7 +609,6 @@ static void *ni65_alloc_mem(struct net_device *dev,char *what,int size,int type)
 			printk(KERN_WARNING "%s: unable to allocate %s memory.\n",dev->name,what);
 			return NULL;
 		}
-		skb->dev = dev;
 		skb_reserve(skb,2+16);
 		skb_put(skb,R_BUF_SIZE);	 /* grab the whole space .. (not necessary) */
 		ptr = skb->data;
@@ -697,8 +694,7 @@ static void ni65_free_buffer(struct priv *p)
 		return;
 
 	for(i=0;i<TMDNUM;i++) {
-		if(p->tmdbounce[i])
-			kfree(p->tmdbounce[i]);
+		kfree(p->tmdbounce[i]);
 #ifdef XMT_VIA_SKB
 		if(p->tmd_skb[i])
 			dev_kfree_skb(p->tmd_skb[i]);
@@ -711,12 +707,10 @@ static void ni65_free_buffer(struct priv *p)
 		if(p->recv_skb[i])
 			dev_kfree_skb(p->recv_skb[i]);
 #else
-		if(p->recvbounce[i])
-			kfree(p->recvbounce[i]);
+		kfree(p->recvbounce[i]);
 #endif
 	}
-	if(p->self)
-		kfree(p->self);
+	kfree(p->self);
 }
 
 
@@ -875,7 +869,7 @@ static int ni65_lance_reinit(struct net_device *dev)
 /*
  * interrupt handler
  */
-static irqreturn_t ni65_interrupt(int irq, void * dev_id, struct pt_regs * regs)
+static irqreturn_t ni65_interrupt(int irq, void * dev_id)
 {
 	int csr0 = 0;
 	struct net_device *dev = dev_id;
@@ -885,7 +879,7 @@ static irqreturn_t ni65_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 	p = (struct priv *) dev->priv;
 
 	spin_lock(&p->ring_lock);
-	
+
 	while(--bcnt) {
 		csr0 = inw(PORT+L_DATAREG);
 
@@ -1098,11 +1092,10 @@ static void ni65_recv_intr(struct net_device *dev,int csr0)
 			if(skb)
 			{
 				skb_reserve(skb,2);
-	skb->dev = dev;
 #ifdef RCV_VIA_SKB
 				if( (unsigned long) (skb->data + R_BUF_SIZE) > 0x1000000) {
 					skb_put(skb,len);
-					eth_copy_and_sum(skb, (unsigned char *)(p->recv_skb[p->rmdnum]->data),len,0);
+					skb_copy_to_linear_data(skb, (unsigned char *)(p->recv_skb[p->rmdnum]->data),len);
 				}
 				else {
 					struct sk_buff *skb1 = p->recv_skb[p->rmdnum];
@@ -1114,7 +1107,7 @@ static void ni65_recv_intr(struct net_device *dev,int csr0)
 				}
 #else
 				skb_put(skb,len);
-				eth_copy_and_sum(skb, (unsigned char *) p->recvbounce[p->rmdnum],len,0);
+				skb_copy_to_linear_data(skb, (unsigned char *) p->recvbounce[p->rmdnum],len);
 #endif
 				p->stats.rx_packets++;
 				p->stats.rx_bytes += len;
@@ -1143,7 +1136,7 @@ static void ni65_recv_intr(struct net_device *dev,int csr0)
 /*
  * kick xmitter ..
  */
- 
+
 static void ni65_timeout(struct net_device *dev)
 {
 	int i;
@@ -1167,7 +1160,7 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 	struct priv *p = (struct priv *) dev->priv;
 
 	netif_stop_queue(dev);
-	
+
 	if (test_and_set_bit(0, (void*)&p->lock)) {
 		printk(KERN_ERR "%s: Queue was locked.\n", dev->name);
 		return 1;
@@ -1182,8 +1175,9 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 		if( (unsigned long) (skb->data + skb->len) > 0x1000000) {
 #endif
 
-			memcpy((char *) p->tmdbounce[p->tmdbouncenum] ,(char *)skb->data,
-							 (skb->len > T_BUF_SIZE) ? T_BUF_SIZE : skb->len);
+			skb_copy_from_linear_data(skb, p->tmdbounce[p->tmdbouncenum],
+				      skb->len > T_BUF_SIZE ? T_BUF_SIZE :
+							      skb->len);
 			if (len > skb->len)
 				memset((char *)p->tmdbounce[p->tmdbouncenum]+skb->len, 0, len-skb->len);
 			dev_kfree_skb (skb);
@@ -1213,10 +1207,10 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 		if(p->tmdnum != p->tmdlast)
 			netif_wake_queue(dev);
-			
+
 		p->lock = 0;
 		dev->trans_start = jiffies;
-		
+
 		spin_unlock_irqrestore(&p->ring_lock, flags);
 	}
 
@@ -1257,13 +1251,13 @@ MODULE_PARM_DESC(irq, "ni6510 IRQ number (ignored for some cards)");
 MODULE_PARM_DESC(io, "ni6510 I/O base address");
 MODULE_PARM_DESC(dma, "ni6510 ISA DMA channel (ignored for some cards)");
 
-int init_module(void)
+int __init init_module(void)
 {
  	dev_ni65 = ni65_probe(-1);
 	return IS_ERR(dev_ni65) ? PTR_ERR(dev_ni65) : 0;
 }
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
  	unregister_netdev(dev_ni65);
  	cleanup_card(dev_ni65);

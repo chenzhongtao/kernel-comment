@@ -19,6 +19,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <net/net_namespace.h>
 #include <net/llc.h>
 
 LIST_HEAD(llc_sap_list);
@@ -33,13 +34,13 @@ unsigned char llc_station_mac_sa[ETH_ALEN];
  */
 static struct llc_sap *llc_sap_alloc(void)
 {
-	struct llc_sap *sap = kmalloc(sizeof(*sap), GFP_ATOMIC);
+	struct llc_sap *sap = kzalloc(sizeof(*sap), GFP_ATOMIC);
 
 	if (sap) {
-		memset(sap, 0, sizeof(*sap));
 		sap->state = LLC_SAP_STATE_ACTIVE;
 		memcpy(sap->laddr.mac, llc_station_mac_sa, ETH_ALEN);
 		rwlock_init(&sap->sk_list.lock);
+		atomic_set(&sap->refcnt, 1);
 	}
 	return sap;
 }
@@ -52,9 +53,7 @@ static struct llc_sap *llc_sap_alloc(void)
  */
 static void llc_add_sap(struct llc_sap *sap)
 {
-	write_lock_bh(&llc_sap_list_lock);
 	list_add_tail(&sap->node, &llc_sap_list);
-	write_unlock_bh(&llc_sap_list_lock);
 }
 
 /**
@@ -70,11 +69,25 @@ static void llc_del_sap(struct llc_sap *sap)
 	write_unlock_bh(&llc_sap_list_lock);
 }
 
+static struct llc_sap *__llc_sap_find(unsigned char sap_value)
+{
+	struct llc_sap* sap;
+
+	list_for_each_entry(sap, &llc_sap_list, node)
+		if (sap->laddr.lsap == sap_value)
+			goto out;
+	sap = NULL;
+out:
+	return sap;
+}
+
 /**
  *	llc_sap_find - searchs a SAP in station
  *	@sap_value: sap to be found
  *
  *	Searchs for a sap in the sap list of the LLC's station upon the sap ID.
+ *	If the sap is found it will be refcounted and the user will have to do
+ *	a llc_sap_put after use.
  *	Returns the sap or %NULL if not found.
  */
 struct llc_sap *llc_sap_find(unsigned char sap_value)
@@ -82,11 +95,9 @@ struct llc_sap *llc_sap_find(unsigned char sap_value)
 	struct llc_sap* sap;
 
 	read_lock_bh(&llc_sap_list_lock);
-	list_for_each_entry(sap, &llc_sap_list, node)
-		if (sap->laddr.lsap == sap_value)
-			goto out;
-	sap = NULL;
-out:
+	sap = __llc_sap_find(sap_value);
+	if (sap)
+		llc_sap_hold(sap);
 	read_unlock_bh(&llc_sap_list_lock);
 	return sap;
 }
@@ -103,14 +114,14 @@ out:
 struct llc_sap *llc_sap_open(unsigned char lsap,
 			     int (*func)(struct sk_buff *skb,
 					 struct net_device *dev,
-					 struct packet_type *pt))
+					 struct packet_type *pt,
+					 struct net_device *orig_dev))
 {
-	struct llc_sap *sap = llc_sap_find(lsap);
+	struct llc_sap *sap = NULL;
 
-	if (sap) { /* SAP already exists */
-		sap = NULL;
+	write_lock_bh(&llc_sap_list_lock);
+	if (__llc_sap_find(lsap)) /* SAP already exists */
 		goto out;
-	}
 	sap = llc_sap_alloc();
 	if (!sap)
 		goto out;
@@ -118,6 +129,7 @@ struct llc_sap *llc_sap_open(unsigned char lsap,
 	sap->rcv_func	= func;
 	llc_add_sap(sap);
 out:
+	write_unlock_bh(&llc_sap_list_lock);
 	return sap;
 }
 
@@ -149,8 +161,14 @@ static struct packet_type llc_tr_packet_type = {
 
 static int __init llc_init(void)
 {
-	if (dev_base->next)
-		memcpy(llc_station_mac_sa, dev_base->next->dev_addr, ETH_ALEN);
+	struct net_device *dev;
+
+	dev = first_net_device(&init_net);
+	if (dev != NULL)
+		dev = next_net_device(dev);
+
+	if (dev != NULL)
+		memcpy(llc_station_mac_sa, dev->dev_addr, ETH_ALEN);
 	else
 		memset(llc_station_mac_sa, 0, ETH_ALEN);
 	dev_add_pack(&llc_packet_type);

@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/lite5200.c
- *
  * Platform support file for the Freescale LITE5200 based on MPC52xx.
  * A maximum of this file should be moved to syslib/mpc52xx_?????
  * so that new platform based on MPC52xx need a minimal platform file
@@ -13,7 +11,7 @@
  * Dale Farnsworth <dale.farnsworth@mvista.com> and
  * Wolfgang Denk <wd@denx.de>
  * 
- * Copyright 2004 Sylvain Munaut <tnt@246tNt.com>
+ * Copyright 2004-2005 Sylvain Munaut <tnt@246tNt.com>
  * Copyright 2003 Motorola Inc.
  * Copyright 2003 MontaVista Software Inc.
  * Copyright 2003 DENX Software Engineering (wd@denx.de)
@@ -23,17 +21,19 @@
  * kind, whether express or implied.
  */
 
-#include <linux/config.h>
 #include <linux/initrd.h>
 #include <linux/seq_file.h>
 #include <linux/kdev_t.h>
 #include <linux/root_dev.h>
 #include <linux/console.h>
+#include <linux/module.h>
 
 #include <asm/bootinfo.h>
 #include <asm/io.h>
-#include <asm/ocp.h>
 #include <asm/mpc52xx.h>
+#include <asm/ppc_sys.h>
+#include <asm/machdep.h>
+#include <asm/pci-bridge.h>
 
 
 extern int powersave_nap;
@@ -44,33 +44,19 @@ EXPORT_SYMBOL(__res);	/* For modules */
 
 
 /* ======================================================================== */
-/* OCP device definition                                                    */
-/* For board/shared resources like PSCs                                     */
-/* ======================================================================== */
-/* Be sure not to load conficting devices : e.g. loading the UART drivers for
- * PSC1 and then also loading a AC97 for this same PSC.
- * For details about how to create an entry, look in the doc of the concerned
- * driver ( eg drivers/serial/mpc52xx_uart.c for the PSC in uart mode )
- */
-
-struct ocp_def board_ocp[] = {
-	{
-		.vendor		= OCP_VENDOR_FREESCALE,
-		.function	= OCP_FUNC_PSC_UART,
-		.index		= 0,
-		.paddr		= MPC52xx_PSC1,
-		.irq		= MPC52xx_PSC1_IRQ,
-		.pm		= OCP_CPM_NA,
-	},
-	{	/* Terminating entry */
-		.vendor		= OCP_VENDOR_INVALID
-	}
-};
-
-
-/* ======================================================================== */
 /* Platform specific code                                                   */
 /* ======================================================================== */
+
+/* Supported PSC function in "preference" order */
+struct mpc52xx_psc_func mpc52xx_psc_functions[] = {
+		{       .id     = 0,
+			.func   = "uart",
+		},
+		{       .id     = -1,   /* End entry */
+			.func   = NULL,
+		}
+	};
+
 
 static int
 lite5200_show_cpuinfo(struct seq_file *m)
@@ -79,42 +65,101 @@ lite5200_show_cpuinfo(struct seq_file *m)
 	return 0;
 }
 
+#ifdef CONFIG_PCI
+#ifdef CONFIG_LITE5200B
+static int
+lite5200_map_irq(struct pci_dev *dev, unsigned char idsel,
+		    unsigned char pin)
+{
+	static char pci_irq_table[][4] =
+	/*
+	 *      PCI IDSEL/INTPIN->INTLINE
+	 *        A             B             C             D
+	 */
+	{
+		{MPC52xx_IRQ0, MPC52xx_IRQ1, MPC52xx_IRQ2, MPC52xx_IRQ3},
+		{MPC52xx_IRQ1, MPC52xx_IRQ2, MPC52xx_IRQ3, MPC52xx_IRQ0},
+	};
+
+	const long min_idsel = 24, max_idsel = 25, irqs_per_slot = 4;
+	return PCI_IRQ_TABLE_LOOKUP;
+}
+#else /* Original Lite */
+static int
+lite5200_map_irq(struct pci_dev *dev, unsigned char idsel, unsigned char pin)
+{
+	return (pin == 1) && (idsel==24) ? MPC52xx_IRQ0 : -1;
+}
+#endif
+#endif
+
 static void __init
 lite5200_setup_cpu(void)
 {
-	struct mpc52xx_intr *intr;
+	struct mpc52xx_gpio __iomem *gpio;
+	struct mpc52xx_intr __iomem *intr;
 
+	u32 port_config;
 	u32 intr_ctrl;
 
 	/* Map zones */
-	intr = (struct mpc52xx_intr *)
-		ioremap(MPC52xx_INTR,sizeof(struct mpc52xx_intr));
+	gpio = ioremap(MPC52xx_PA(MPC52xx_GPIO_OFFSET), MPC52xx_GPIO_SIZE);
+	intr = ioremap(MPC52xx_PA(MPC52xx_INTR_OFFSET), MPC52xx_INTR_SIZE);
 
-	if (!intr) {
-		printk("lite5200.c: Error while mapping INTR during lite5200_setup_cpu\n");
+	if (!gpio || !intr) {
+		printk(KERN_ERR __FILE__ ": "
+			"Error while mapping GPIO/INTR during "
+			"lite5200_setup_cpu\n");
 		goto unmap_regs;
 	}
 
-	/* IRQ[0-3] setup : IRQ0     - Level Active Low  */
-	/*                  IRQ[1-3] - Level Active High */
+	/* Get port mux config */
+	port_config = in_be32(&gpio->port_config);
+
+	/* 48Mhz internal, pin is GPIO */
+	port_config &= ~0x00800000;
+
+	/* USB port */
+	port_config &= ~0x00007000;	/* Differential mode - USB1 only */
+	port_config |=  0x00001000;
+
+	/* ATA CS is on csb_4/5 */
+	port_config &= ~0x03000000;
+	port_config |=  0x01000000;
+
+	/* Commit port config */
+	out_be32(&gpio->port_config, port_config);
+
+	/* IRQ[0-3] setup */
 	intr_ctrl = in_be32(&intr->ctrl);
 	intr_ctrl &= ~0x00ff0000;
-	intr_ctrl |=  0x00c00000;
+#ifdef CONFIG_LITE5200B
+	/* IRQ[0-3] Level Active Low */
+	intr_ctrl |=  0x00ff0000;
+#else
+	/* IRQ0 Level Active Low
+	 * IRQ[1-3] Level Active High */
+ 	intr_ctrl |=  0x00c00000;
+#endif
 	out_be32(&intr->ctrl, intr_ctrl);
 
 	/* Unmap reg zone */
 unmap_regs:
+	if (gpio) iounmap(gpio);
 	if (intr) iounmap(intr);
 }
 
 static void __init
 lite5200_setup_arch(void)
 {
-	/* Add board OCP definitions */
-	mpc52xx_add_board_devices(board_ocp);
-
 	/* CPU & Port mux setup */
-	lite5200_setup_cpu();
+	mpc52xx_setup_cpu();	/* Generic */
+	lite5200_setup_cpu();	/* Platform specific */
+
+#ifdef CONFIG_PCI
+	/* PCI Bridge setup */
+	mpc52xx_find_bridges();
+#endif
 }
 
 void __init
@@ -150,15 +195,24 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 		}
 	}
 
+	/* PPC Sys identification */
+	identify_ppc_sys_by_id(mfspr(SPRN_SVR));
+
 	/* BAT setup */
 	mpc52xx_set_bat();
 
-	/* No ISA bus AFAIK */
+	/* No ISA bus by default */
+#ifdef CONFIG_PCI
 	isa_io_base		= 0;
 	isa_mem_base		= 0;
+#endif
 
 	/* Powersave */
-	powersave_nap = 1;	/* We allow this platform to NAP */
+	/* This is provided as an example on how to do it. But you
+	   need to be aware that NAP disable bus snoop and that may
+	   be required for some devices to work properly, like USB ... */
+	/* powersave_nap = 1; */
+
 
 	/* Setup the ppc_md struct */
 	ppc_md.setup_arch	= lite5200_setup_arch;
@@ -166,6 +220,10 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.show_percpuinfo	= NULL;
 	ppc_md.init_IRQ		= mpc52xx_init_irq;
 	ppc_md.get_irq		= mpc52xx_get_irq;
+
+#ifdef CONFIG_PCI
+	ppc_md.pci_map_irq	= lite5200_map_irq;
+#endif
 
 	ppc_md.find_end_of_memory = mpc52xx_find_end_of_memory;
 	ppc_md.setup_io_mappings  = mpc52xx_map_io;

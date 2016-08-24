@@ -5,7 +5,6 @@
  * Copyright (C) 1999-2000, 2002-2003, 2005 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
@@ -14,7 +13,6 @@
 #include <linux/shm.h>
 #include <linux/file.h>		/* doh, must come after sched.h... */
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/syscalls.h>
 #include <linux/highuid.h>
 #include <linux/hugetlb.h>
@@ -34,8 +32,15 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 	if (len > RGN_MAP_LIMIT)
 		return -ENOMEM;
 
+	/* handle fixed mapping: prevent overlap with huge pages */
+	if (flags & MAP_FIXED) {
+		if (is_hugepage_only_range(mm, addr, len))
+			return -EINVAL;
+		return addr;
+	}
+
 #ifdef CONFIG_HUGETLB_PAGE
-	if (REGION_NUMBER(addr) == REGION_HPAGE)
+	if (REGION_NUMBER(addr) == RGN_HPAGE)
 		addr = 0;
 #endif
 	if (!addr)
@@ -90,20 +95,6 @@ asmlinkage unsigned long
 sys_getpagesize (void)
 {
 	return PAGE_SIZE;
-}
-
-asmlinkage unsigned long
-ia64_shmat (int shmid, void __user *shmaddr, int shmflg)
-{
-	unsigned long raddr;
-	int retval;
-
-	retval = do_shmat(shmid, shmaddr, shmflg, &raddr);
-	if (retval < 0)
-		return retval;
-
-	force_successful_syscall_return();
-	return raddr;
 }
 
 asmlinkage unsigned long
@@ -165,7 +156,7 @@ out:
 asmlinkage long
 sys_pipe (void)
 {
-	struct pt_regs *regs = ia64_task_regs(current);
+	struct pt_regs *regs = task_pt_regs(current);
 	int fd[2];
 	int retval;
 
@@ -178,10 +169,25 @@ sys_pipe (void)
 	return retval;
 }
 
+int ia64_mmap_check(unsigned long addr, unsigned long len,
+		unsigned long flags)
+{
+	unsigned long roff;
+
+	/*
+	 * Don't permit mappings into unmapped space, the virtual page table
+	 * of a region, or across a region boundary.  Note: RGN_MAP_LIMIT is
+	 * equal to 2^n-PAGE_SIZE (for some integer n <= 61) and len > 0.
+	 */
+	roff = REGION_OFFSET(addr);
+	if ((len > RGN_MAP_LIMIT) || (roff > (RGN_MAP_LIMIT - len)))
+		return -EINVAL;
+	return 0;
+}
+
 static inline unsigned long
 do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, unsigned long pgoff)
 {
-	unsigned long roff;
 	struct file *file = NULL;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
@@ -196,27 +202,9 @@ do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, un
 		}
 	}
 
-	/*
-	 * A zero mmap always succeeds in Linux, independent of whether or not the
-	 * remaining arguments are valid.
-	 */
-	if (len == 0)
-		goto out;
-
 	/* Careful about overflows.. */
 	len = PAGE_ALIGN(len);
 	if (!len || len > TASK_SIZE) {
-		addr = -EINVAL;
-		goto out;
-	}
-
-	/*
-	 * Don't permit mappings into unmapped space, the virtual page table of a region,
-	 * or across a region boundary.  Note: RGN_MAP_LIMIT is equal to 2^n-PAGE_SIZE
-	 * (for some integer n <= 61) and len > 0.
-	 */
-	roff = REGION_OFFSET(addr);
-	if ((len > RGN_MAP_LIMIT) || (roff > (RGN_MAP_LIMIT - len))) {
 		addr = -EINVAL;
 		goto out;
 	}

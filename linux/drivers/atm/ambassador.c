@@ -31,6 +31,8 @@
 #include <linux/atmdev.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/poison.h>
+#include <linux/bitrev.h>
 
 #include <asm/atomic.h>
 #include <asm/io.h>
@@ -296,16 +298,16 @@ static inline void __init show_version (void) {
 #endif
 #define UCODE2(x) #x
 
-static u32 __initdata ucode_start = 
+static u32 __devinitdata ucode_start =
 #include UCODE(start)
 ;
 
-static region __initdata ucode_regions[] = {
+static region __devinitdata ucode_regions[] = {
 #include UCODE(regions)
   { 0, 0 }
 };
 
-static u32 __initdata ucode_data[] = {
+static u32 __devinitdata ucode_data[] = {
 #include UCODE(data)
   0xdeadbeef
 };
@@ -345,7 +347,7 @@ static inline u32 rd_plain (const amb_dev * dev, size_t addr) {
 }
 
 static inline void wr_mem (const amb_dev * dev, size_t addr, u32 data) {
-  u32 be = cpu_to_be32 (data);
+  __be32 be = cpu_to_be32 (data);
   PRINTD (DBG_FLOW|DBG_REGS, "wr: %08zx <- %08x b[%08x]", addr, data, be);
 #ifdef AMB_MMIO
   dev->membase[addr / sizeof(u32)] = be;
@@ -356,9 +358,9 @@ static inline void wr_mem (const amb_dev * dev, size_t addr, u32 data) {
 
 static inline u32 rd_mem (const amb_dev * dev, size_t addr) {
 #ifdef AMB_MMIO
-  u32 be = dev->membase[addr / sizeof(u32)];
+  __be32 be = dev->membase[addr / sizeof(u32)];
 #else
-  u32 be = inl (dev->iobase + addr);
+  __be32 be = inl (dev->iobase + addr);
 #endif
   u32 data = be32_to_cpu (be);
   PRINTD (DBG_FLOW|DBG_REGS, "rd: %08zx -> %08x b[%08x]", addr, data, be);
@@ -513,7 +515,7 @@ static void rx_complete (amb_dev * dev, rx_out * rx) {
 	  
 	  // VC layer stats
 	  atomic_inc(&atm_vcc->stats->rx);
-	  do_gettimeofday(&skb->stamp);
+	  __net_timestamp(skb);
 	  // end of our responsability
 	  atm_vcc->push (atm_vcc, skb);
 	  return;
@@ -794,7 +796,9 @@ static void drain_rx_pools (amb_dev * dev) {
     drain_rx_pool (dev, pool);
 }
 
-static inline void fill_rx_pool (amb_dev * dev, unsigned char pool, int priority) {
+static inline void fill_rx_pool (amb_dev * dev, unsigned char pool,
+                                 gfp_t priority)
+{
   rx_in rx;
   amb_rxq * rxq;
   
@@ -817,7 +821,7 @@ static inline void fill_rx_pool (amb_dev * dev, unsigned char pool, int priority
     }
     // cast needed as there is no %? for pointer differences
     PRINTD (DBG_SKB, "allocated skb at %p, head %p, area %li",
-	    skb, skb->head, (long) (skb->end - skb->head));
+	    skb, skb->head, (long) (skb_end_pointer(skb) - skb->head));
     rx.handle = virt_to_bus (skb);
     rx.host_address = cpu_to_be32 (virt_to_bus (skb->data));
     if (rx_give (dev, &rx, pool))
@@ -858,17 +862,10 @@ static inline void interrupts_off (amb_dev * dev) {
 
 /********** interrupt handling **********/
 
-static irqreturn_t interrupt_handler(int irq, void *dev_id,
-					struct pt_regs *pt_regs) {
-  amb_dev * dev = (amb_dev *) dev_id;
-  (void) pt_regs;
+static irqreturn_t interrupt_handler(int irq, void *dev_id) {
+  amb_dev * dev = dev_id;
   
   PRINTD (DBG_IRQ|DBG_FLOW, "interrupt_handler: %p", dev_id);
-  
-  if (!dev_id) {
-    PRINTD (DBG_IRQ|DBG_ERR, "irq with NULL dev_id: %d", irq);
-    return IRQ_NONE;
-  }
   
   {
     u32 interrupt = rd_plain (dev, offsetof(amb_mem, interrupt));
@@ -912,8 +909,8 @@ static irqreturn_t interrupt_handler(int irq, void *dev_id,
 
 /********** make rate (not quite as much fun as Horizon) **********/
 
-static unsigned int make_rate (unsigned int rate, rounding r,
-			       u16 * bits, unsigned int * actual) {
+static int make_rate (unsigned int rate, rounding r,
+		      u16 * bits, unsigned int * actual) {
   unsigned char exp = -1; // hush gcc
   unsigned int man = -1;  // hush gcc
   
@@ -976,7 +973,7 @@ static unsigned int make_rate (unsigned int rate, rounding r,
       }
       case round_up: {
 	// check all bits that we are discarding
-	if (man & (-1>>9)) {
+	if (man & (~0U>>9)) {
 	  man = (man>>(32-9)) + 1;
 	  if (man == (1<<9)) {
 	    // no need to check for round up outside of range
@@ -1043,7 +1040,7 @@ static int amb_open (struct atm_vcc * atm_vcc)
   struct atm_qos * qos;
   struct atm_trafprm * txtp;
   struct atm_trafprm * rxtp;
-  u16 tx_rate_bits;
+  u16 tx_rate_bits = -1; // hush gcc
   u16 tx_vc_bits = -1; // hush gcc
   u16 tx_frame_bits = -1; // hush gcc
   
@@ -1099,6 +1096,8 @@ static int amb_open (struct atm_vcc * atm_vcc)
 	    r = round_up;
 	  }
 	  error = make_rate (pcr, r, &tx_rate_bits, NULL);
+	  if (error)
+	    return error;
 	  tx_vc_bits = TX_UBR_CAPPED;
 	  tx_frame_bits = TX_FRAME_CAPPED;
 	}
@@ -1539,7 +1538,7 @@ static void do_housekeeping (unsigned long arg) {
 
 /********** creation of communication queues **********/
 
-static int __init create_queues (amb_dev * dev, unsigned int cmds,
+static int __devinit create_queues (amb_dev * dev, unsigned int cmds,
 				 unsigned int txs, unsigned int * rxs,
 				 unsigned int * rx_buffer_sizes) {
   unsigned char pool;
@@ -1769,7 +1768,7 @@ static  int decode_loader_result (loader_command cmd, u32 result)
 	return res;
 }
 
-static int __init do_loader_command (volatile loader_block * lb,
+static int __devinit do_loader_command (volatile loader_block * lb,
 				     const amb_dev * dev, loader_command cmd) {
   
   unsigned long timeout;
@@ -1825,7 +1824,7 @@ static int __init do_loader_command (volatile loader_block * lb,
 
 /* loader: determine loader version */
 
-static int __init get_loader_version (loader_block * lb,
+static int __devinit get_loader_version (loader_block * lb,
 				      const amb_dev * dev, u32 * version) {
   int res;
   
@@ -1841,7 +1840,7 @@ static int __init get_loader_version (loader_block * lb,
 
 /* loader: write memory data blocks */
 
-static int __init loader_write (loader_block * lb,
+static int __devinit loader_write (loader_block * lb,
 				const amb_dev * dev, const u32 * data,
 				u32 address, unsigned int count) {
   unsigned int i;
@@ -1860,7 +1859,7 @@ static int __init loader_write (loader_block * lb,
 
 /* loader: verify memory data blocks */
 
-static int __init loader_verify (loader_block * lb,
+static int __devinit loader_verify (loader_block * lb,
 				 const amb_dev * dev, const u32 * data,
 				 u32 address, unsigned int count) {
   unsigned int i;
@@ -1885,7 +1884,7 @@ static int __init loader_verify (loader_block * lb,
 
 /* loader: start microcode */
 
-static int __init loader_start (loader_block * lb,
+static int __devinit loader_start (loader_block * lb,
 				const amb_dev * dev, u32 address) {
   PRINTD (DBG_FLOW|DBG_LOAD, "loader_start");
   
@@ -1961,7 +1960,7 @@ static int amb_reset (amb_dev * dev, int diags) {
 
 /********** transfer and start the microcode **********/
 
-static int __init ucode_init (loader_block * lb, amb_dev * dev) {
+static int __devinit ucode_init (loader_block * lb, amb_dev * dev) {
   unsigned int i = 0;
   unsigned int total = 0;
   const u32 * pointer = ucode_data;
@@ -1993,7 +1992,7 @@ static int __init ucode_init (loader_block * lb, amb_dev * dev) {
     }
     i += 1;
   }
-  if (*pointer == 0xdeadbeef) {
+  if (*pointer == ATM_POISON) {
     return loader_start (lb, dev, ucode_start);
   } else {
     // cast needed as there is no %? for pointer differnces
@@ -2007,11 +2006,11 @@ static int __init ucode_init (loader_block * lb, amb_dev * dev) {
 
 /********** give adapter parameters **********/
   
-static inline u32 bus_addr(void * addr) {
+static inline __be32 bus_addr(void * addr) {
     return cpu_to_be32 (virt_to_bus (addr));
 }
 
-static int __init amb_talk (amb_dev * dev) {
+static int __devinit amb_talk (amb_dev * dev) {
   adap_talk_block a;
   unsigned char pool;
   unsigned long timeout;
@@ -2058,7 +2057,7 @@ static int __init amb_talk (amb_dev * dev) {
 }
 
 // get microcode version
-static void __init amb_ucode_version (amb_dev * dev) {
+static void __devinit amb_ucode_version (amb_dev * dev) {
   u32 major;
   u32 minor;
   command cmd;
@@ -2072,20 +2071,8 @@ static void __init amb_ucode_version (amb_dev * dev) {
   PRINTK (KERN_INFO, "microcode version is %u.%u", major, minor);
 }
   
-// swap bits within byte to get Ethernet ordering
-static u8 bit_swap (u8 byte)
-{
-    const u8 swap[] = {
-      0x0, 0x8, 0x4, 0xc,
-      0x2, 0xa, 0x6, 0xe,
-      0x1, 0x9, 0x5, 0xd,
-      0x3, 0xb, 0x7, 0xf
-    };
-    return ((swap[byte & 0xf]<<4) | swap[byte>>4]);
-}
-
 // get end station address
-static void __init amb_esi (amb_dev * dev, u8 * esi) {
+static void __devinit amb_esi (amb_dev * dev, u8 * esi) {
   u32 lower4;
   u16 upper2;
   command cmd;
@@ -2105,9 +2092,9 @@ static void __init amb_esi (amb_dev * dev, u8 * esi) {
     PRINTDB (DBG_INIT, "ESI:");
     for (i = 0; i < ESI_LEN; ++i) {
       if (i < 4)
-	  esi[i] = bit_swap (lower4>>(8*i));
+	  esi[i] = bitrev8(lower4>>(8*i));
       else
-	  esi[i] = bit_swap (upper2>>(8*(i-4)));
+	  esi[i] = bitrev8(upper2>>(8*(i-4)));
       PRINTDM (DBG_INIT, " %02x", esi[i]);
     }
     
@@ -2131,7 +2118,7 @@ static void fixup_plx_window (amb_dev *dev, loader_block *lb)
 	return;
 }
 
-static int __init amb_init (amb_dev * dev)
+static int __devinit amb_init (amb_dev * dev)
 {
   loader_block lb;
   
@@ -2255,7 +2242,8 @@ static int __devinit amb_probe(struct pci_dev *pci_dev, const struct pci_device_
 	}
 
 	PRINTD (DBG_INFO, "found Madge ATM adapter (amb) at"
-		" IO %lx, IRQ %u, MEM %p", pci_resource_start(pci_dev, 1),
+		" IO %llx, IRQ %u, MEM %p",
+		(unsigned long long)pci_resource_start(pci_dev, 1),
 		irq, bus_to_virt(pci_resource_start(pci_dev, 0)));
 
 	// check IO region
@@ -2283,7 +2271,7 @@ static int __devinit amb_probe(struct pci_dev *pci_dev, const struct pci_device_
 	setup_pci_dev(pci_dev);
 
 	// grab (but share) IRQ and install handler
-	err = request_irq(irq, interrupt_handler, SA_SHIRQ, DEV_LABEL, dev);
+	err = request_irq(irq, interrupt_handler, IRQF_SHARED, DEV_LABEL, dev);
 	if (err < 0) {
 		PRINTK (KERN_ERR, "request IRQ failed!");
 		goto out_reset;
@@ -2447,7 +2435,7 @@ static int __init amb_module_init (void)
   amb_check_args();
   
   // get the juice
-  return pci_module_init(&amb_driver);
+  return pci_register_driver(&amb_driver);
 }
 
 /********** module exit **********/
@@ -2455,8 +2443,8 @@ static int __init amb_module_init (void)
 static void __exit amb_module_exit (void)
 {
   PRINTD (DBG_FLOW|DBG_INIT, "cleanup_module");
-  
-  return pci_unregister_driver(&amb_driver);
+
+  pci_unregister_driver(&amb_driver);
 }
 
 module_init(amb_module_init);

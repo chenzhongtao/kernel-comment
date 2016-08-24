@@ -103,7 +103,7 @@ static volatile unsigned char cmd_buffer[16];
 static struct ESP_regs eregs;
 
 /***************************************************************** Detection */
-static int mca_esp_detect(Scsi_Host_Template *tpnt)
+static int mca_esp_detect(struct scsi_host_template *tpnt)
 {
 	struct NCR_ESP *esp;
 	static int io_port_by_pos[] = MCA_53C9X_IO_PORTS;
@@ -122,7 +122,7 @@ static int mca_esp_detect(Scsi_Host_Template *tpnt)
 		if ((slot = mca_find_adapter(*id_to_check, 0)) !=
 		  MCA_NOTFOUND) 
 		{
-			esp = esp_allocate(tpnt, (void *) NULL);
+			esp = esp_allocate(tpnt, NULL, 0);
 
 			pos[0] = mca_read_stored_pos(slot, 2);
 			pos[1] = mca_read_stored_pos(slot, 3);
@@ -444,7 +444,7 @@ static void dma_led_off(struct NCR_ESP *esp)
 	outb(inb(PS2_SYS_CTR) & 0x3f, PS2_SYS_CTR);
 }
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "mca_53c9x",
 	.name			= "NCR 53c9x SCSI",
 	.detect			= mca_esp_detect,

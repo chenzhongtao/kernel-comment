@@ -18,37 +18,22 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
-#include <linux/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/socket.h>
-#include <linux/sockios.h>
-#include <linux/in.h>
 #include <linux/errno.h>
-#include <linux/interrupt.h>
-#include <linux/if_ether.h>
-#include <linux/inet.h>
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/notifier.h>
-#include <linux/netfilter.h>
-#include <net/ip.h>
-#include <net/route.h>
 #include <linux/skbuff.h>
-#include <net/sock.h>
+#include <net/netlink.h>
 #include <net/act_api.h>
 #include <net/pkt_cls.h>
 
+#define HTSIZE (PAGE_SIZE/sizeof(struct fw_filter *))
+
 struct fw_head
 {
-	struct fw_filter *ht[256];
+	struct fw_filter *ht[HTSIZE];
+	u32 mask;
 };
 
 struct fw_filter
@@ -69,7 +54,28 @@ static struct tcf_ext_map fw_ext_map = {
 
 static __inline__ int fw_hash(u32 handle)
 {
-	return handle&0xFF;
+	if (HTSIZE == 4096)
+		return ((handle >> 24) & 0xFFF) ^
+		       ((handle >> 12) & 0xFFF) ^
+		       (handle & 0xFFF);
+	else if (HTSIZE == 2048)
+		return ((handle >> 22) & 0x7FF) ^
+		       ((handle >> 11) & 0x7FF) ^
+		       (handle & 0x7FF);
+	else if (HTSIZE == 1024)
+		return ((handle >> 20) & 0x3FF) ^
+		       ((handle >> 10) & 0x3FF) ^
+		       (handle & 0x3FF);
+	else if (HTSIZE == 512)
+		return (handle >> 27) ^
+		       ((handle >> 18) & 0x1FF) ^
+		       ((handle >> 9) & 0x1FF) ^
+		       (handle & 0x1FF);
+	else if (HTSIZE == 256) {
+		u8 *t = (u8 *) &handle;
+		return t[0] ^ t[1] ^ t[2] ^ t[3];
+	} else
+		return handle & (HTSIZE - 1);
 }
 
 static int fw_classify(struct sk_buff *skb, struct tcf_proto *tp,
@@ -78,13 +84,10 @@ static int fw_classify(struct sk_buff *skb, struct tcf_proto *tp,
 	struct fw_head *head = (struct fw_head*)tp->root;
 	struct fw_filter *f;
 	int r;
-#ifdef CONFIG_NETFILTER
-	u32 id = skb->nfmark;
-#else
-	u32 id = 0;
-#endif
+	u32 id = skb->mark;
 
 	if (head != NULL) {
+		id &= head->mask;
 		for (f=head->ht[fw_hash(id)]; f; f=f->next) {
 			if (f->id == id) {
 				*res = f->res;
@@ -152,7 +155,7 @@ static void fw_destroy(struct tcf_proto *tp)
 	if (head == NULL)
 		return;
 
-	for (h=0; h<256; h++) {
+	for (h=0; h<HTSIZE; h++) {
 		while ((f=head->ht[h]) != NULL) {
 			head->ht[h] = f->next;
 			fw_delete_filter(tp, f);
@@ -187,7 +190,9 @@ static int
 fw_change_attrs(struct tcf_proto *tp, struct fw_filter *f,
 	struct rtattr **tb, struct rtattr **tca, unsigned long base)
 {
+	struct fw_head *head = (struct fw_head *)tp->root;
 	struct tcf_exts e;
+	u32 mask;
 	int err;
 
 	err = tcf_exts_validate(tp, tb, tca[TCA_RATE-1], &e, &fw_ext_map);
@@ -209,6 +214,15 @@ fw_change_attrs(struct tcf_proto *tp, struct fw_filter *f,
 			goto errout;
 	}
 #endif /* CONFIG_NET_CLS_IND */
+
+	if (tb[TCA_FW_MASK-1]) {
+		if (RTA_PAYLOAD(tb[TCA_FW_MASK-1]) != sizeof(u32))
+			goto errout;
+		mask = *(u32*)RTA_DATA(tb[TCA_FW_MASK-1]);
+		if (mask != head->mask)
+			goto errout;
+	} else if (head->mask != 0xFFFFFFFF)
+		goto errout;
 
 	tcf_exts_change(tp, &f->exts, &e);
 
@@ -245,20 +259,26 @@ static int fw_change(struct tcf_proto *tp, unsigned long base,
 		return -EINVAL;
 
 	if (head == NULL) {
-		head = kmalloc(sizeof(struct fw_head), GFP_KERNEL);
+		u32 mask = 0xFFFFFFFF;
+		if (tb[TCA_FW_MASK-1]) {
+			if (RTA_PAYLOAD(tb[TCA_FW_MASK-1]) != sizeof(u32))
+				return -EINVAL;
+			mask = *(u32*)RTA_DATA(tb[TCA_FW_MASK-1]);
+		}
+
+		head = kzalloc(sizeof(struct fw_head), GFP_KERNEL);
 		if (head == NULL)
 			return -ENOBUFS;
-		memset(head, 0, sizeof(*head));
+		head->mask = mask;
 
 		tcf_tree_lock(tp);
 		tp->root = head;
 		tcf_tree_unlock(tp);
 	}
 
-	f = kmalloc(sizeof(struct fw_filter), GFP_KERNEL);
+	f = kzalloc(sizeof(struct fw_filter), GFP_KERNEL);
 	if (f == NULL)
 		return -ENOBUFS;
-	memset(f, 0, sizeof(*f));
 
 	f->id = handle;
 
@@ -275,8 +295,7 @@ static int fw_change(struct tcf_proto *tp, unsigned long base,
 	return 0;
 
 errout:
-	if (f)
-		kfree(f);
+	kfree(f);
 	return err;
 }
 
@@ -291,7 +310,7 @@ static void fw_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 	if (arg->stop)
 		return;
 
-	for (h = 0; h < 256; h++) {
+	for (h = 0; h < HTSIZE; h++) {
 		struct fw_filter *f;
 
 		for (f = head->ht[h]; f; f = f->next) {
@@ -311,8 +330,9 @@ static void fw_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 static int fw_dump(struct tcf_proto *tp, unsigned long fh,
 		   struct sk_buff *skb, struct tcmsg *t)
 {
+	struct fw_head *head = (struct fw_head *)tp->root;
 	struct fw_filter *f = (struct fw_filter*)fh;
-	unsigned char	 *b = skb->tail;
+	unsigned char *b = skb_tail_pointer(skb);
 	struct rtattr *rta;
 
 	if (f == NULL)
@@ -332,11 +352,13 @@ static int fw_dump(struct tcf_proto *tp, unsigned long fh,
 	if (strlen(f->indev))
 		RTA_PUT(skb, TCA_FW_INDEV, IFNAMSIZ, f->indev);
 #endif /* CONFIG_NET_CLS_IND */
+	if (head->mask != 0xFFFFFFFF)
+		RTA_PUT(skb, TCA_FW_MASK, 4, &head->mask);
 
 	if (tcf_exts_dump(skb, &f->exts, &fw_ext_map) < 0)
 		goto rtattr_failure;
 
-	rta->rta_len = skb->tail - b;
+	rta->rta_len = skb_tail_pointer(skb) - b;
 
 	if (tcf_exts_dump_stats(skb, &f->exts, &fw_ext_map) < 0)
 		goto rtattr_failure;
@@ -344,7 +366,7 @@ static int fw_dump(struct tcf_proto *tp, unsigned long fh,
 	return skb->len;
 
 rtattr_failure:
-	skb_trim(skb, b - skb->data);
+	nlmsg_trim(skb, b);
 	return -1;
 }
 
@@ -368,7 +390,7 @@ static int __init init_fw(void)
 	return register_tcf_proto_ops(&cls_fw_ops);
 }
 
-static void __exit exit_fw(void) 
+static void __exit exit_fw(void)
 {
 	unregister_tcf_proto_ops(&cls_fw_ops);
 }

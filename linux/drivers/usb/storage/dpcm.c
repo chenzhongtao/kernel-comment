@@ -29,14 +29,13 @@
  * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/config.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
 
+#include "usb.h"
 #include "transport.h"
 #include "protocol.h"
-#include "usb.h"
 #include "debug.h"
 #include "dpcm.h"
 #include "sddr09.h"
@@ -47,43 +46,43 @@
  */
 int dpcm_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
-  int ret;
+	int ret;
 
-  if(srb == NULL)
-    return USB_STOR_TRANSPORT_ERROR;
+	if (srb == NULL)
+		return USB_STOR_TRANSPORT_ERROR;
 
-  US_DEBUGP("dpcm_transport: LUN=%d\n", srb->device->lun);
+	US_DEBUGP("dpcm_transport: LUN=%d\n", srb->device->lun);
 
-  switch(srb->device->lun) {
-  case 0:
+	switch (srb->device->lun) {
+		case 0:
 
-    /*
-     * LUN 0 corresponds to the CompactFlash card reader.
-     */
-    ret = usb_stor_CB_transport(srb, us);
-    break;
+			/*
+			 * LUN 0 corresponds to the CompactFlash card reader.
+			 */
+			ret = usb_stor_CB_transport(srb, us);
+			break;
 
 #ifdef CONFIG_USB_STORAGE_SDDR09
-  case 1:
+		case 1:
 
-    /*
-     * LUN 1 corresponds to the SmartMedia card reader.
-     */
+			/*
+			 * LUN 1 corresponds to the SmartMedia card reader.
+			 */
 
-    /*
-     * Set the LUN to 0 (just in case).
-     */
-    srb->device->lun = 0; us->srb->device->lun = 0;
-    ret = sddr09_transport(srb, us);
-    srb->device->lun = 1; us->srb->device->lun = 1;
-    break;
+			/*
+			 * Set the LUN to 0 (just in case).
+			 */
+			srb->device->lun = 0; us->srb->device->lun = 0;
+			ret = sddr09_transport(srb, us);
+			srb->device->lun = 1; us->srb->device->lun = 1;
+			break;
 
 #endif
 
-  default:
-    US_DEBUGP("dpcm_transport: Invalid LUN %d\n", srb->device->lun);
-    ret = USB_STOR_TRANSPORT_ERROR;
-    break;
-  }
-  return ret;
+		default:
+			US_DEBUGP("dpcm_transport: Invalid LUN %d\n", srb->device->lun);
+			ret = USB_STOR_TRANSPORT_ERROR;
+			break;
+	}
+	return ret;
 }

@@ -9,11 +9,9 @@
  * Support functions for the SH5 PCI hardware.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/rwsem.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/errno.h>
@@ -39,7 +37,7 @@ static void __init pci_fixup_ide_bases(struct pci_dev *d)
 	 */
 	if ((d->class >> 8) != PCI_CLASS_STORAGE_IDE)
 		return;
-	printk("PCI: IDE base address fixup for %s\n", d->slot_name);
+	printk("PCI: IDE base address fixup for %s\n", pci_name(d));
 	for(i=0; i<4; i++) {
 		struct resource *r = &d->resource[i];
 		if ((r->start & ~0x80) == 0x374) {
@@ -50,7 +48,7 @@ static void __init pci_fixup_ide_bases(struct pci_dev *d)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, pci_fixup_ide_bases);
 
-char * __init pcibios_setup(char *str)
+char * __devinit pcibios_setup(char *str)
 {
 	return str;
 }
@@ -342,8 +340,9 @@ static int __init map_cayman_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	return result;
 }
 
-irqreturn_t pcish5_err_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t pcish5_err_irq(int irq, void *dev_id)
 {
+	struct pt_regs *regs = get_irq_regs();
 	unsigned pci_int, pci_air, pci_cir, pci_aint;
 
 	pci_int = SH5PCI_READ(INT);
@@ -370,14 +369,12 @@ irqreturn_t pcish5_err_irq(int irq, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-irqreturn_t pcish5_serr_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t pcish5_serr_irq(int irq, void *dev_id)
 {
 	printk("SERR IRQ\n");
 
 	return IRQ_NONE;
 }
-
-#define ROUND_UP(x, a)		(((x) + (a) - 1) & ~((a) - 1))
 
 static void __init
 pcibios_size_bridge(struct pci_bus *bus, struct resource *ior,
@@ -435,8 +432,8 @@ pcibios_size_bridge(struct pci_bus *bus, struct resource *ior,
 	mem_res.end -= mem_res.start;
 
 	/* Align the sizes up by bridge rules */
-	io_res.end = ROUND_UP(io_res.end, 4*1024) - 1;
-	mem_res.end = ROUND_UP(mem_res.end, 1*1024*1024) - 1;
+	io_res.end = ALIGN(io_res.end, 4*1024) - 1;
+	mem_res.end = ALIGN(mem_res.end, 1*1024*1024) - 1;
 
 	/* Adjust the bridge's allocation requirements */
 	bridge->resource[0].end = bridge->resource[0].start + io_res.end;
@@ -449,17 +446,15 @@ pcibios_size_bridge(struct pci_bus *bus, struct resource *ior,
 
 	/* adjust parent's resource requirements */
 	if (ior) {
-		ior->end = ROUND_UP(ior->end, 4*1024);
+		ior->end = ALIGN(ior->end, 4*1024);
 		ior->end += io_res.end;
 	}
 
 	if (memr) {
-		memr->end = ROUND_UP(memr->end, 1*1024*1024);
+		memr->end = ALIGN(memr->end, 1*1024*1024);
 		memr->end += mem_res.end;
 	}
 }
-
-#undef ROUND_UP
 
 static void __init pcibios_size_bridges(void)
 {
@@ -474,18 +469,18 @@ static void __init pcibios_size_bridges(void)
 static int __init pcibios_init(void)
 {
         if (request_irq(IRQ_ERR, pcish5_err_irq,
-                        SA_INTERRUPT, "PCI Error",NULL) < 0) {
+                        IRQF_DISABLED, "PCI Error",NULL) < 0) {
                 printk(KERN_ERR "PCISH5: Cannot hook PCI_PERR interrupt\n");
                 return -EINVAL;
         }
 
         if (request_irq(IRQ_SERR, pcish5_serr_irq,
-                        SA_INTERRUPT, "PCI SERR interrupt", NULL) < 0) {
+                        IRQF_DISABLED, "PCI SERR interrupt", NULL) < 0) {
                 printk(KERN_ERR "PCISH5: Cannot hook PCI_SERR interrupt\n");
                 return -EINVAL;
         }
 
-	/* The pci subsytem needs to know where memory is and how much
+	/* The pci subsystem needs to know where memory is and how much
 	 * of it there is. I've simply made these globals. A better mechanism
 	 * is probably needed.
 	 */
@@ -502,7 +497,7 @@ static int __init pcibios_init(void)
 
 subsys_initcall(pcibios_init);
 
-void __init pcibios_fixup_bus(struct pci_bus *bus)
+void __devinit pcibios_fixup_bus(struct pci_bus *bus)
 {
 	struct pci_dev *dev = bus->self;
 	int i;
@@ -526,10 +521,10 @@ void __init pcibios_fixup_bus(struct pci_bus *bus)
 		bus->resource[0]->start = PCIBIOS_MIN_IO;
 		bus->resource[1]->start = PCIBIOS_MIN_MEM;
 #else
-		bus->resource[0]->end = 0
-		bus->resource[1]->end = 0
-		bus->resource[0]->start =0
-		  bus->resource[1]->start = 0;
+		bus->resource[0]->end = 0;
+		bus->resource[1]->end = 0;
+		bus->resource[0]->start =0;
+		bus->resource[1]->start = 0;
 #endif
 		/* Turn off downstream PF memory address range by default */
 		bus->resource[2]->start = 1024*1024;

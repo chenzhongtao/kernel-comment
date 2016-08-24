@@ -56,39 +56,48 @@
  * /proc/sysvipc/sem support (c) 1999 Dragos Acostachioaie <dragos@iname.com>
  *
  * SMP-threaded, sysctl's added
- * (c) 1999 Manfred Spraul <manfreds@colorfullife.com>
+ * (c) 1999 Manfred Spraul <manfred@colorfullife.com>
  * Enforced range limit on SEM_UNDO
  * (c) 2001 Red Hat Inc <alan@redhat.com>
  * Lockless wakeup
  * (c) 2003 Manfred Spraul <manfred@colorfullife.com>
+ *
+ * support for audit of ipc object properties and permission changes
+ * Dustin Kirkland <dustin.kirkland@us.ibm.com>
+ *
+ * namespaces support
+ * OpenVZ, SWsoft Inc.
+ * Pavel Emelianov <xemul@openvz.org>
  */
 
-#include <linux/config.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 #include <linux/time.h>
-#include <linux/smp_lock.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
+#include <linux/audit.h>
+#include <linux/capability.h>
+#include <linux/seq_file.h>
+#include <linux/rwsem.h>
+#include <linux/nsproxy.h>
+
 #include <asm/uaccess.h>
 #include "util.h"
 
+#define sem_ids(ns)	(*((ns)->ids[IPC_SEM_IDS]))
 
-#define sem_lock(id)	((struct sem_array*)ipc_lock(&sem_ids,id))
-#define sem_unlock(sma)	ipc_unlock(&(sma)->sem_perm)
-#define sem_rmid(id)	((struct sem_array*)ipc_rmid(&sem_ids,id))
-#define sem_checkid(sma, semid)	\
-	ipc_checkid(&sem_ids,&sma->sem_perm,semid)
-#define sem_buildid(id, seq) \
-	ipc_buildid(&sem_ids, id, seq)
-static struct ipc_ids sem_ids;
+#define sem_unlock(sma)		ipc_unlock(&(sma)->sem_perm)
+#define sem_checkid(sma, semid)	ipc_checkid(&sma->sem_perm, semid)
+#define sem_buildid(id, seq)	ipc_buildid(id, seq)
 
-static int newary (key_t, int, int);
-static void freeary (struct sem_array *sma, int id);
+static struct ipc_ids init_sem_ids;
+
+static int newary(struct ipc_namespace *, struct ipc_params *);
+static void freeary(struct ipc_namespace *, struct sem_array *);
 #ifdef CONFIG_PROC_FS
-static int sysvipc_sem_read_proc(char *buffer, char **start, off_t offset, int length, int *eof, void *data);
+static int sysvipc_sem_proc_show(struct seq_file *s, void *it);
 #endif
 
 #define SEMMSL_FAST	256 /* 512 bytes on stack */
@@ -103,22 +112,100 @@ static int sysvipc_sem_read_proc(char *buffer, char **start, off_t offset, int l
  *	
  */
 
-int sem_ctls[4] = {SEMMSL, SEMMNS, SEMOPM, SEMMNI};
-#define sc_semmsl	(sem_ctls[0])
-#define sc_semmns	(sem_ctls[1])
-#define sc_semopm	(sem_ctls[2])
-#define sc_semmni	(sem_ctls[3])
+#define sc_semmsl	sem_ctls[0]
+#define sc_semmns	sem_ctls[1]
+#define sc_semopm	sem_ctls[2]
+#define sc_semmni	sem_ctls[3]
 
-static int used_sems;
+static void __sem_init_ns(struct ipc_namespace *ns, struct ipc_ids *ids)
+{
+	ns->ids[IPC_SEM_IDS] = ids;
+	ns->sc_semmsl = SEMMSL;
+	ns->sc_semmns = SEMMNS;
+	ns->sc_semopm = SEMOPM;
+	ns->sc_semmni = SEMMNI;
+	ns->used_sems = 0;
+	ipc_init_ids(ids);
+}
+
+int sem_init_ns(struct ipc_namespace *ns)
+{
+	struct ipc_ids *ids;
+
+	ids = kmalloc(sizeof(struct ipc_ids), GFP_KERNEL);
+	if (ids == NULL)
+		return -ENOMEM;
+
+	__sem_init_ns(ns, ids);
+	return 0;
+}
+
+void sem_exit_ns(struct ipc_namespace *ns)
+{
+	struct sem_array *sma;
+	int next_id;
+	int total, in_use;
+
+	down_write(&sem_ids(ns).rw_mutex);
+
+	in_use = sem_ids(ns).in_use;
+
+	for (total = 0, next_id = 0; total < in_use; next_id++) {
+		sma = idr_find(&sem_ids(ns).ipcs_idr, next_id);
+		if (sma == NULL)
+			continue;
+		ipc_lock_by_ptr(&sma->sem_perm);
+		freeary(ns, sma);
+		total++;
+	}
+	up_write(&sem_ids(ns).rw_mutex);
+
+	kfree(ns->ids[IPC_SEM_IDS]);
+	ns->ids[IPC_SEM_IDS] = NULL;
+}
 
 void __init sem_init (void)
 {
-	used_sems = 0;
-	ipc_init_ids(&sem_ids,sc_semmni);
+	__sem_init_ns(&init_ipc_ns, &init_sem_ids);
+	ipc_init_proc_interface("sysvipc/sem",
+				"       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime\n",
+				IPC_SEM_IDS, sysvipc_sem_proc_show);
+}
 
-#ifdef CONFIG_PROC_FS
-	create_proc_read_entry("sysvipc/sem", 0, NULL, sysvipc_sem_read_proc, NULL);
-#endif
+/*
+ * This routine is called in the paths where the rw_mutex is held to protect
+ * access to the idr tree.
+ */
+static inline struct sem_array *sem_lock_check_down(struct ipc_namespace *ns,
+						int id)
+{
+	struct kern_ipc_perm *ipcp = ipc_lock_check_down(&sem_ids(ns), id);
+
+	return container_of(ipcp, struct sem_array, sem_perm);
+}
+
+/*
+ * sem_lock_(check_) routines are called in the paths where the rw_mutex
+ * is not held.
+ */
+static inline struct sem_array *sem_lock(struct ipc_namespace *ns, int id)
+{
+	struct kern_ipc_perm *ipcp = ipc_lock(&sem_ids(ns), id);
+
+	return container_of(ipcp, struct sem_array, sem_perm);
+}
+
+static inline struct sem_array *sem_lock_check(struct ipc_namespace *ns,
+						int id)
+{
+	struct kern_ipc_perm *ipcp = ipc_lock_check(&sem_ids(ns), id);
+
+	return container_of(ipcp, struct sem_array, sem_perm);
+}
+
+static inline void sem_rmid(struct ipc_namespace *ns, struct sem_array *s)
+{
+	ipc_rmid(&sem_ids(ns), &s->sem_perm);
 }
 
 /*
@@ -136,7 +223,7 @@ void __init sem_init (void)
  *   	* if it's IN_WAKEUP, then it must wait until the value changes
  *   	* if it's not -EINTR, then the operation was completed by
  *   	  update_queue. semtimedop can return queue.status without
- *   	  performing any operation on the semaphore array.
+ *   	  performing any operation on the sem array.
  *   	* otherwise it must acquire the spinlock and check what's up.
  *
  * The two-stage algorithm is necessary to protect against the following
@@ -155,16 +242,27 @@ void __init sem_init (void)
  */
 #define IN_WAKEUP	1
 
-static int newary (key_t key, int nsems, int semflg)
+/**
+ * newary - Create a new semaphore set
+ * @ns: namespace
+ * @params: ptr to the structure that contains key, semflg and nsems
+ *
+ * Called with sem_ids.rw_mutex held (as a writer)
+ */
+
+static int newary(struct ipc_namespace *ns, struct ipc_params *params)
 {
 	int id;
 	int retval;
 	struct sem_array *sma;
 	int size;
+	key_t key = params->key;
+	int nsems = params->u.nsems;
+	int semflg = params->flg;
 
 	if (!nsems)
 		return -EINVAL;
-	if (used_sems + nsems > sc_semmns)
+	if (ns->used_sems + nsems > ns->sc_semmns)
 		return -ENOSPC;
 
 	size = sizeof (*sma) + nsems * sizeof (struct sem);
@@ -184,14 +282,15 @@ static int newary (key_t key, int nsems, int semflg)
 		return retval;
 	}
 
-	id = ipc_addid(&sem_ids, &sma->sem_perm, sc_semmni);
-	if(id == -1) {
+	id = ipc_addid(&sem_ids(ns), &sma->sem_perm, ns->sc_semmni);
+	if (id < 0) {
 		security_sem_free(sma);
 		ipc_rcu_putref(sma);
-		return -ENOSPC;
+		return id;
 	}
-	used_sems += nsems;
+	ns->used_sems += nsems;
 
+	sma->sem_perm.id = sem_buildid(id, sma->sem_perm.seq);
 	sma->sem_base = (struct sem *) &sma[1];
 	/* sma->sem_pending = NULL; */
 	sma->sem_pending_last = &sma->sem_pending;
@@ -200,46 +299,56 @@ static int newary (key_t key, int nsems, int semflg)
 	sma->sem_ctime = get_seconds();
 	sem_unlock(sma);
 
-	return sem_buildid(id, sma->sem_perm.seq);
+	return sma->sem_perm.id;
 }
 
-asmlinkage long sys_semget (key_t key, int nsems, int semflg)
+
+/*
+ * Called with sem_ids.rw_mutex and ipcp locked.
+ */
+static inline int sem_security(struct kern_ipc_perm *ipcp, int semflg)
 {
-	int id, err = -EINVAL;
 	struct sem_array *sma;
 
-	if (nsems < 0 || nsems > sc_semmsl)
-		return -EINVAL;
-	down(&sem_ids.sem);
-	
-	if (key == IPC_PRIVATE) {
-		err = newary(key, nsems, semflg);
-	} else if ((id = ipc_findkey(&sem_ids, key)) == -1) {  /* key not used */
-		if (!(semflg & IPC_CREAT))
-			err = -ENOENT;
-		else
-			err = newary(key, nsems, semflg);
-	} else if (semflg & IPC_CREAT && semflg & IPC_EXCL) {
-		err = -EEXIST;
-	} else {
-		sma = sem_lock(id);
-		if(sma==NULL)
-			BUG();
-		if (nsems > sma->sem_nsems)
-			err = -EINVAL;
-		else if (ipcperms(&sma->sem_perm, semflg))
-			err = -EACCES;
-		else {
-			int semid = sem_buildid(id, sma->sem_perm.seq);
-			err = security_sem_associate(sma, semflg);
-			if (!err)
-				err = semid;
-		}
-		sem_unlock(sma);
-	}
+	sma = container_of(ipcp, struct sem_array, sem_perm);
+	return security_sem_associate(sma, semflg);
+}
 
-	up(&sem_ids.sem);
-	return err;
+/*
+ * Called with sem_ids.rw_mutex and ipcp locked.
+ */
+static inline int sem_more_checks(struct kern_ipc_perm *ipcp,
+				struct ipc_params *params)
+{
+	struct sem_array *sma;
+
+	sma = container_of(ipcp, struct sem_array, sem_perm);
+	if (params->u.nsems > sma->sem_nsems)
+		return -EINVAL;
+
+	return 0;
+}
+
+asmlinkage long sys_semget(key_t key, int nsems, int semflg)
+{
+	struct ipc_namespace *ns;
+	struct ipc_ops sem_ops;
+	struct ipc_params sem_params;
+
+	ns = current->nsproxy->ipc_ns;
+
+	if (nsems < 0 || nsems > ns->sc_semmsl)
+		return -EINVAL;
+
+	sem_ops.getnew = newary;
+	sem_ops.associate = sem_security;
+	sem_ops.more_checks = sem_more_checks;
+
+	sem_params.key = key;
+	sem_params.flg = semflg;
+	sem_params.u.nsems = nsems;
+
+	return ipcget(ns, &sem_ids(ns), &sem_ops, &sem_params);
 }
 
 /* Manage the doubly linked list sma->sem_pending as a FIFO:
@@ -378,6 +487,7 @@ static void update_queue (struct sem_array * sma)
 			/* hands-off: q will disappear immediately after
 			 * writing q->status.
 			 */
+			smp_wmb();
 			q->status = error;
 			q = n;
 		} else {
@@ -432,15 +542,14 @@ static int count_semzcnt (struct sem_array * sma, ushort semnum)
 	return semzcnt;
 }
 
-/* Free a semaphore set. freeary() is called with sem_ids.sem down and
- * the spinlock for this semaphore set hold. sem_ids.sem remains locked
- * on exit.
+/* Free a semaphore set. freeary() is called with sem_ids.rw_mutex locked
+ * as a writer and the spinlock for this semaphore set hold. sem_ids.rw_mutex
+ * remains locked on exit.
  */
-static void freeary (struct sem_array *sma, int id)
+static void freeary(struct ipc_namespace *ns, struct sem_array *sma)
 {
 	struct sem_undo *un;
 	struct sem_queue *q;
-	int size;
 
 	/* Invalidate the existing undo structures for this semaphore set.
 	 * (They will be freed without any further action in exit_sem()
@@ -458,16 +567,16 @@ static void freeary (struct sem_array *sma, int id)
 		n = q->next;
 		q->status = IN_WAKEUP;
 		wake_up_process(q->sleeper); /* doesn't sleep */
+		smp_wmb();
 		q->status = -EIDRM;	/* hands-off q */
 		q = n;
 	}
 
-	/* Remove the semaphore set from the ID array*/
-	sma = sem_rmid(id);
+	/* Remove the semaphore set from the IDR */
+	sem_rmid(ns, sma);
 	sem_unlock(sma);
 
-	used_sems -= sma->sem_nsems;
-	size = sizeof (*sma) + sma->sem_nsems * sizeof (struct sem);
+	ns->used_sems -= sma->sem_nsems;
 	security_sem_free(sma);
 	ipc_rcu_putref(sma);
 }
@@ -494,7 +603,8 @@ static unsigned long copy_semid_to_user(void __user *buf, struct semid64_ds *in,
 	}
 }
 
-static int semctl_nolock(int semid, int semnum, int cmd, int version, union semun arg)
+static int semctl_nolock(struct ipc_namespace *ns, int semid, int semnum,
+		int cmd, int version, union semun arg)
 {
 	int err = -EINVAL;
 	struct sem_array *sma;
@@ -511,24 +621,24 @@ static int semctl_nolock(int semid, int semnum, int cmd, int version, union semu
 			return err;
 		
 		memset(&seminfo,0,sizeof(seminfo));
-		seminfo.semmni = sc_semmni;
-		seminfo.semmns = sc_semmns;
-		seminfo.semmsl = sc_semmsl;
-		seminfo.semopm = sc_semopm;
+		seminfo.semmni = ns->sc_semmni;
+		seminfo.semmns = ns->sc_semmns;
+		seminfo.semmsl = ns->sc_semmsl;
+		seminfo.semopm = ns->sc_semopm;
 		seminfo.semvmx = SEMVMX;
 		seminfo.semmnu = SEMMNU;
 		seminfo.semmap = SEMMAP;
 		seminfo.semume = SEMUME;
-		down(&sem_ids.sem);
+		down_read(&sem_ids(ns).rw_mutex);
 		if (cmd == SEM_INFO) {
-			seminfo.semusz = sem_ids.in_use;
-			seminfo.semaem = used_sems;
+			seminfo.semusz = sem_ids(ns).in_use;
+			seminfo.semaem = ns->used_sems;
 		} else {
 			seminfo.semusz = SEMUSZ;
 			seminfo.semaem = SEMAEM;
 		}
-		max_id = sem_ids.max_id;
-		up(&sem_ids.sem);
+		max_id = ipc_get_maxid(&sem_ids(ns));
+		up_read(&sem_ids(ns).rw_mutex);
 		if (copy_to_user (arg.__buf, &seminfo, sizeof(struct seminfo))) 
 			return -EFAULT;
 		return (max_id < 0) ? 0: max_id;
@@ -538,14 +648,9 @@ static int semctl_nolock(int semid, int semnum, int cmd, int version, union semu
 		struct semid64_ds tbuf;
 		int id;
 
-		if(semid >= sem_ids.entries->size)
-			return -EINVAL;
-
-		memset(&tbuf,0,sizeof(tbuf));
-
-		sma = sem_lock(semid);
-		if(sma == NULL)
-			return -EINVAL;
+		sma = sem_lock(ns, semid);
+		if (IS_ERR(sma))
+			return PTR_ERR(sma);
 
 		err = -EACCES;
 		if (ipcperms (&sma->sem_perm, S_IRUGO))
@@ -555,7 +660,9 @@ static int semctl_nolock(int semid, int semnum, int cmd, int version, union semu
 		if (err)
 			goto out_unlock;
 
-		id = sem_buildid(semid, sma->sem_perm.seq);
+		id = sma->sem_perm.id;
+
+		memset(&tbuf, 0, sizeof(tbuf));
 
 		kernel_to_ipc64_perm(&sma->sem_perm, &tbuf.sem_perm);
 		tbuf.sem_otime  = sma->sem_otime;
@@ -575,7 +682,8 @@ out_unlock:
 	return err;
 }
 
-static int semctl_main(int semid, int semnum, int cmd, int version, union semun arg)
+static int semctl_main(struct ipc_namespace *ns, int semid, int semnum,
+		int cmd, int version, union semun arg)
 {
 	struct sem_array *sma;
 	struct sem* curr;
@@ -584,15 +692,11 @@ static int semctl_main(int semid, int semnum, int cmd, int version, union semun 
 	ushort* sem_io = fast_sem_io;
 	int nsems;
 
-	sma = sem_lock(semid);
-	if(sma==NULL)
-		return -EINVAL;
+	sma = sem_lock_check(ns, semid);
+	if (IS_ERR(sma))
+		return PTR_ERR(sma);
 
 	nsems = sma->sem_nsems;
-
-	err=-EIDRM;
-	if (sem_checkid(sma,semid))
-		goto out_unlock;
 
 	err = -EACCES;
 	if (ipcperms (&sma->sem_perm, (cmd==SETVAL||cmd==SETALL)?S_IWUGO:S_IRUGO))
@@ -737,7 +841,7 @@ static int semctl_main(int semid, int semnum, int cmd, int version, union semun 
 		for (un = sma->undo; un; un = un->id_next)
 			un->semadj[semnum] = 0;
 		curr->semval = val;
-		curr->sempid = current->tgid;
+		curr->sempid = task_tgid_vnr(current);
 		sma->sem_ctime = get_seconds();
 		/* maybe some queued-up processes were waiting for this */
 		update_queue(sma);
@@ -793,27 +897,33 @@ static inline unsigned long copy_semid_from_user(struct sem_setbuf *out, void __
 	}
 }
 
-static int semctl_down(int semid, int semnum, int cmd, int version, union semun arg)
+static int semctl_down(struct ipc_namespace *ns, int semid, int semnum,
+		int cmd, int version, union semun arg)
 {
 	struct sem_array *sma;
 	int err;
-	struct sem_setbuf setbuf;
+	struct sem_setbuf uninitialized_var(setbuf);
 	struct kern_ipc_perm *ipcp;
 
 	if(cmd == IPC_SET) {
 		if(copy_semid_from_user (&setbuf, arg.buf, version))
 			return -EFAULT;
 	}
-	sma = sem_lock(semid);
-	if(sma==NULL)
-		return -EINVAL;
+	sma = sem_lock_check_down(ns, semid);
+	if (IS_ERR(sma))
+		return PTR_ERR(sma);
 
-	if (sem_checkid(sma,semid)) {
-		err=-EIDRM;
-		goto out_unlock;
-	}	
 	ipcp = &sma->sem_perm;
-	
+
+	err = audit_ipc_obj(ipcp);
+	if (err)
+		goto out_unlock;
+
+	if (cmd == IPC_SET) {
+		err = audit_ipc_set_perm(0, setbuf.uid, setbuf.gid, setbuf.mode);
+		if (err)
+			goto out_unlock;
+	}
 	if (current->euid != ipcp->cuid && 
 	    current->euid != ipcp->uid && !capable(CAP_SYS_ADMIN)) {
 	    	err=-EPERM;
@@ -826,7 +936,7 @@ static int semctl_down(int semid, int semnum, int cmd, int version, union semun 
 
 	switch(cmd){
 	case IPC_RMID:
-		freeary(sma, semid);
+		freeary(ns, sma);
 		err = 0;
 		break;
 	case IPC_SET:
@@ -854,17 +964,19 @@ asmlinkage long sys_semctl (int semid, int semnum, int cmd, union semun arg)
 {
 	int err = -EINVAL;
 	int version;
+	struct ipc_namespace *ns;
 
 	if (semid < 0)
 		return -EINVAL;
 
 	version = ipc_parse_version(&cmd);
+	ns = current->nsproxy->ipc_ns;
 
 	switch(cmd) {
 	case IPC_INFO:
 	case SEM_INFO:
 	case SEM_STAT:
-		err = semctl_nolock(semid,semnum,cmd,version,arg);
+		err = semctl_nolock(ns,semid,semnum,cmd,version,arg);
 		return err;
 	case GETALL:
 	case GETVAL:
@@ -874,48 +986,18 @@ asmlinkage long sys_semctl (int semid, int semnum, int cmd, union semun arg)
 	case IPC_STAT:
 	case SETVAL:
 	case SETALL:
-		err = semctl_main(semid,semnum,cmd,version,arg);
+		err = semctl_main(ns,semid,semnum,cmd,version,arg);
 		return err;
 	case IPC_RMID:
 	case IPC_SET:
-		down(&sem_ids.sem);
-		err = semctl_down(semid,semnum,cmd,version,arg);
-		up(&sem_ids.sem);
+		down_write(&sem_ids(ns).rw_mutex);
+		err = semctl_down(ns,semid,semnum,cmd,version,arg);
+		up_write(&sem_ids(ns).rw_mutex);
 		return err;
 	default:
 		return -EINVAL;
 	}
 }
-
-static inline void lock_semundo(void)
-{
-	struct sem_undo_list *undo_list;
-
-	undo_list = current->sysvsem.undo_list;
-	if ((undo_list != NULL) && (atomic_read(&undo_list->refcnt) != 1))
-		spin_lock(&undo_list->lock);
-}
-
-/* This code has an interaction with copy_semundo().
- * Consider; two tasks are sharing the undo_list. task1
- * acquires the undo_list lock in lock_semundo().  If task2 now
- * exits before task1 releases the lock (by calling
- * unlock_semundo()), then task1 will never call spin_unlock().
- * This leave the sem_undo_list in a locked state.  If task1 now creats task3
- * and once again shares the sem_undo_list, the sem_undo_list will still be
- * locked, and future SEM_UNDO operations will deadlock.  This case is
- * dealt with in copy_semundo() by having it reinitialize the spin lock when 
- * the refcnt goes from 1 to 2.
- */
-static inline void unlock_semundo(void)
-{
-	struct sem_undo_list *undo_list;
-
-	undo_list = current->sysvsem.undo_list;
-	if ((undo_list != NULL) && (atomic_read(&undo_list->refcnt) != 1))
-		spin_unlock(&undo_list->lock);
-}
-
 
 /* If the task doesn't already have a undo_list, then allocate one
  * here.  We guarantee there is only one thread using this undo list,
@@ -931,18 +1013,13 @@ static inline void unlock_semundo(void)
 static inline int get_undo_list(struct sem_undo_list **undo_listp)
 {
 	struct sem_undo_list *undo_list;
-	int size;
 
 	undo_list = current->sysvsem.undo_list;
 	if (!undo_list) {
-		size = sizeof(struct sem_undo_list);
-		undo_list = (struct sem_undo_list *) kmalloc(size, GFP_KERNEL);
+		undo_list = kzalloc(sizeof(*undo_list), GFP_KERNEL);
 		if (undo_list == NULL)
 			return -ENOMEM;
-		memset(undo_list, 0, size);
-		/* don't initialize unodhd->lock here.  It's done
-		 * in copy_semundo() instead.
-		 */
+		spin_lock_init(&undo_list->lock);
 		atomic_set(&undo_list->refcnt, 1);
 		current->sysvsem.undo_list = undo_list;
 	}
@@ -970,7 +1047,7 @@ static struct sem_undo *lookup_undo(struct sem_undo_list *ulp, int semid)
 	return un;
 }
 
-static struct sem_undo *find_undo(int semid)
+static struct sem_undo *find_undo(struct ipc_namespace *ns, int semid)
 {
 	struct sem_array *sma;
 	struct sem_undo_list *ulp;
@@ -982,41 +1059,35 @@ static struct sem_undo *find_undo(int semid)
 	if (error)
 		return ERR_PTR(error);
 
-	lock_semundo();
+	spin_lock(&ulp->lock);
 	un = lookup_undo(ulp, semid);
-	unlock_semundo();
+	spin_unlock(&ulp->lock);
 	if (likely(un!=NULL))
 		goto out;
 
 	/* no undo structure around - allocate one. */
-	sma = sem_lock(semid);
-	un = ERR_PTR(-EINVAL);
-	if(sma==NULL)
-		goto out;
-	un = ERR_PTR(-EIDRM);
-	if (sem_checkid(sma,semid)) {
-		sem_unlock(sma);
-		goto out;
-	}
+	sma = sem_lock_check(ns, semid);
+	if (IS_ERR(sma))
+		return ERR_PTR(PTR_ERR(sma));
+
 	nsems = sma->sem_nsems;
 	ipc_rcu_getref(sma);
 	sem_unlock(sma);
 
-	new = (struct sem_undo *) kmalloc(sizeof(struct sem_undo) + sizeof(short)*nsems, GFP_KERNEL);
+	new = kzalloc(sizeof(struct sem_undo) + sizeof(short)*nsems, GFP_KERNEL);
 	if (!new) {
 		ipc_lock_by_ptr(&sma->sem_perm);
 		ipc_rcu_putref(sma);
 		sem_unlock(sma);
 		return ERR_PTR(-ENOMEM);
 	}
-	memset(new, 0, sizeof(struct sem_undo) + sizeof(short)*nsems);
 	new->semadj = (short *) &new[1];
 	new->semid = semid;
 
-	lock_semundo();
+	spin_lock(&ulp->lock);
 	un = lookup_undo(ulp, semid);
 	if (un) {
-		unlock_semundo();
+		spin_unlock(&ulp->lock);
 		kfree(new);
 		ipc_lock_by_ptr(&sma->sem_perm);
 		ipc_rcu_putref(sma);
@@ -1027,7 +1098,7 @@ static struct sem_undo *find_undo(int semid)
 	ipc_rcu_putref(sma);
 	if (sma->sem_perm.deleted) {
 		sem_unlock(sma);
-		unlock_semundo();
+		spin_unlock(&ulp->lock);
 		kfree(new);
 		un = ERR_PTR(-EIDRM);
 		goto out;
@@ -1038,7 +1109,7 @@ static struct sem_undo *find_undo(int semid)
 	sma->undo = new;
 	sem_unlock(sma);
 	un = new;
-	unlock_semundo();
+	spin_unlock(&ulp->lock);
 out:
 	return un;
 }
@@ -1051,13 +1122,16 @@ asmlinkage long sys_semtimedop(int semid, struct sembuf __user *tsops,
 	struct sembuf fast_sops[SEMOPM_FAST];
 	struct sembuf* sops = fast_sops, *sop;
 	struct sem_undo *un;
-	int undos = 0, decrease = 0, alter = 0, max;
+	int undos = 0, alter = 0, max;
 	struct sem_queue queue;
 	unsigned long jiffies_left = 0;
+	struct ipc_namespace *ns;
+
+	ns = current->nsproxy->ipc_ns;
 
 	if (nsops < 1 || semid < 0)
 		return -EINVAL;
-	if (nsops > sc_semopm)
+	if (nsops > ns->sc_semopm)
 		return -E2BIG;
 	if(nsops > SEMOPM_FAST) {
 		sops = kmalloc(sizeof(*sops)*nsops,GFP_KERNEL);
@@ -1086,17 +1160,14 @@ asmlinkage long sys_semtimedop(int semid, struct sembuf __user *tsops,
 		if (sop->sem_num >= max)
 			max = sop->sem_num;
 		if (sop->sem_flg & SEM_UNDO)
-			undos++;
-		if (sop->sem_op < 0)
-			decrease = 1;
-		if (sop->sem_op > 0)
+			undos = 1;
+		if (sop->sem_op != 0)
 			alter = 1;
 	}
-	alter |= decrease;
 
 retry_undos:
 	if (undos) {
-		un = find_undo(semid);
+		un = find_undo(ns, semid);
 		if (IS_ERR(un)) {
 			error = PTR_ERR(un);
 			goto out_free;
@@ -1104,15 +1175,14 @@ retry_undos:
 	} else
 		un = NULL;
 
-	sma = sem_lock(semid);
-	error=-EINVAL;
-	if(sma==NULL)
+	sma = sem_lock_check(ns, semid);
+	if (IS_ERR(sma)) {
+		error = PTR_ERR(sma);
 		goto out_free;
-	error = -EIDRM;
-	if (sem_checkid(sma,semid))
-		goto out_unlock_free;
+	}
+
 	/*
-	 * semid identifies are not unique - find_undo may have
+	 * semid identifiers are not unique - find_undo may have
 	 * allocated an undo structure, it was invalidated by an RMID
 	 * and now a new array with received the same id. Check and retry.
 	 */
@@ -1132,7 +1202,7 @@ retry_undos:
 	if (error)
 		goto out_unlock_free;
 
-	error = try_atomic_semop (sma, sops, nsops, un, current->tgid);
+	error = try_atomic_semop (sma, sops, nsops, un, task_tgid_vnr(current));
 	if (error <= 0) {
 		if (alter && error == 0)
 			update_queue (sma);
@@ -1147,7 +1217,7 @@ retry_undos:
 	queue.sops = sops;
 	queue.nsops = nsops;
 	queue.undo = un;
-	queue.pid = current->tgid;
+	queue.pid = task_tgid_vnr(current);
 	queue.id = semid;
 	queue.alter = alter;
 	if (alter)
@@ -1177,10 +1247,9 @@ retry_undos:
 		goto out_free;
 	}
 
-	sma = sem_lock(semid);
-	if(sma==NULL) {
-		if(queue.prev != NULL)
-			BUG();
+	sma = sem_lock(ns, semid);
+	if (IS_ERR(sma)) {
+		BUG_ON(queue.prev != NULL);
 		error = -EIDRM;
 		goto out_free;
 	}
@@ -1216,10 +1285,6 @@ asmlinkage long sys_semop (int semid, struct sembuf __user *tsops, unsigned nsop
 
 /* If CLONE_SYSVSEM is set, establish sharing of SEM_UNDO state between
  * parent and child tasks.
- *
- * See the notes above unlock_semundo() regarding the spin_lock_init()
- * in this code.  Initialize the undo_list->lock here instead of get_undo_list()
- * because of the reasoning in the comment above unlock_semundo.
  */
 
 int copy_semundo(unsigned long clone_flags, struct task_struct *tsk)
@@ -1231,8 +1296,6 @@ int copy_semundo(unsigned long clone_flags, struct task_struct *tsk)
 		error = get_undo_list(&undo_list);
 		if (error)
 			return error;
-		if (atomic_read(&undo_list->refcnt) == 1)
-			spin_lock_init(&undo_list->lock);
 		atomic_inc(&undo_list->refcnt);
 		tsk->sysvsem.undo_list = undo_list;
 	} else 
@@ -1257,6 +1320,7 @@ void exit_sem(struct task_struct *tsk)
 {
 	struct sem_undo_list *undo_list;
 	struct sem_undo *u, **up;
+	struct ipc_namespace *ns;
 
 	undo_list = tsk->sysvsem.undo_list;
 	if (!undo_list)
@@ -1265,6 +1329,7 @@ void exit_sem(struct task_struct *tsk)
 	if (!atomic_dec_and_test(&undo_list->refcnt))
 		return;
 
+	ns = tsk->nsproxy->ipc_ns;
 	/* There's no need to hold the semundo list lock, as current
          * is the last task exiting for this undo list.
 	 */
@@ -1278,14 +1343,14 @@ void exit_sem(struct task_struct *tsk)
 
 		if(semid == -1)
 			continue;
-		sma = sem_lock(semid);
-		if (sma == NULL)
+		sma = sem_lock(ns, semid);
+		if (IS_ERR(sma))
 			continue;
 
 		if (u->semid == -1)
 			goto next_entry;
 
-		BUG_ON(sem_checkid(sma,u->semid));
+		BUG_ON(sem_checkid(sma, u->semid));
 
 		/* remove u from the sma->undo list */
 		for (unp = &sma->undo; (un = *unp); unp = &un->id_next) {
@@ -1299,9 +1364,9 @@ found:
 		/* perform adjustments registered in u */
 		nsems = sma->sem_nsems;
 		for (i = 0; i < nsems; i++) {
-			struct sem * sem = &sma->sem_base[i];
+			struct sem * semaphore = &sma->sem_base[i];
 			if (u->semadj[i]) {
-				sem->semval += u->semadj[i];
+				semaphore->semval += u->semadj[i];
 				/*
 				 * Range checks of the new semaphore value,
 				 * not defined by sus:
@@ -1315,11 +1380,11 @@ found:
 				 *
 				 * 	Manfred <manfred@colorfullife.com>
 				 */
-				if (sem->semval < 0)
-					sem->semval = 0;
-				if (sem->semval > SEMVMX)
-					sem->semval = SEMVMX;
-				sem->sempid = current->tgid;
+				if (semaphore->semval < 0)
+					semaphore->semval = 0;
+				if (semaphore->semval > SEMVMX)
+					semaphore->semval = SEMVMX;
+				semaphore->sempid = task_tgid_vnr(current);
 			}
 		}
 		sma->sem_otime = get_seconds();
@@ -1332,50 +1397,21 @@ next_entry:
 }
 
 #ifdef CONFIG_PROC_FS
-static int sysvipc_sem_read_proc(char *buffer, char **start, off_t offset, int length, int *eof, void *data)
+static int sysvipc_sem_proc_show(struct seq_file *s, void *it)
 {
-	off_t pos = 0;
-	off_t begin = 0;
-	int i, len = 0;
+	struct sem_array *sma = it;
 
-	len += sprintf(buffer, "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime\n");
-	down(&sem_ids.sem);
-
-	for(i = 0; i <= sem_ids.max_id; i++) {
-		struct sem_array *sma;
-		sma = sem_lock(i);
-		if(sma) {
-			len += sprintf(buffer + len, "%10d %10d  %4o %10lu %5u %5u %5u %5u %10lu %10lu\n",
-				sma->sem_perm.key,
-				sem_buildid(i,sma->sem_perm.seq),
-				sma->sem_perm.mode,
-				sma->sem_nsems,
-				sma->sem_perm.uid,
-				sma->sem_perm.gid,
-				sma->sem_perm.cuid,
-				sma->sem_perm.cgid,
-				sma->sem_otime,
-				sma->sem_ctime);
-			sem_unlock(sma);
-
-			pos += len;
-			if(pos < offset) {
-				len = 0;
-	    			begin = pos;
-			}
-			if(pos > offset + length)
-				goto done;
-		}
-	}
-	*eof = 1;
-done:
-	up(&sem_ids.sem);
-	*start = buffer + (offset - begin);
-	len -= (offset - begin);
-	if(len > length)
-		len = length;
-	if(len < 0)
-		len = 0;
-	return len;
+	return seq_printf(s,
+			  "%10d %10d  %4o %10lu %5u %5u %5u %5u %10lu %10lu\n",
+			  sma->sem_perm.key,
+			  sma->sem_perm.id,
+			  sma->sem_perm.mode,
+			  sma->sem_nsems,
+			  sma->sem_perm.uid,
+			  sma->sem_perm.gid,
+			  sma->sem_perm.cuid,
+			  sma->sem_perm.cgid,
+			  sma->sem_otime,
+			  sma->sem_ctime);
 }
 #endif

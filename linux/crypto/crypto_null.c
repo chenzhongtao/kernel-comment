@@ -19,39 +19,41 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mm.h>
-#include <asm/scatterlist.h>
 #include <linux/crypto.h>
+#include <linux/string.h>
 
 #define NULL_KEY_SIZE		0
 #define NULL_BLOCK_SIZE		1
 #define NULL_DIGEST_SIZE	0
 
-static int null_compress(void *ctx, const u8 *src, unsigned int slen,
-                         u8 *dst, unsigned int *dlen)
+static int null_compress(struct crypto_tfm *tfm, const u8 *src,
+			 unsigned int slen, u8 *dst, unsigned int *dlen)
+{
+	if (slen > *dlen)
+		return -EINVAL;
+	memcpy(dst, src, slen);
+	*dlen = slen;
+	return 0;
+}
+
+static void null_init(struct crypto_tfm *tfm)
+{ }
+
+static void null_update(struct crypto_tfm *tfm, const u8 *data,
+			unsigned int len)
+{ }
+
+static void null_final(struct crypto_tfm *tfm, u8 *out)
+{ }
+
+static int null_setkey(struct crypto_tfm *tfm, const u8 *key,
+		       unsigned int keylen)
 { return 0; }
 
-static int null_decompress(void *ctx, const u8 *src, unsigned int slen,
-                           u8 *dst, unsigned int *dlen)
-{ return 0; }
-
-static void null_init(void *ctx)
-{ }
-
-static void null_update(void *ctx, const u8 *data, unsigned int len)
-{ }
-
-static void null_final(void *ctx, u8 *out)
-{ }
-
-static int null_setkey(void *ctx, const u8 *key,
-                       unsigned int keylen, u32 *flags)
-{ return 0; }
-
-static void null_encrypt(void *ctx, u8 *dst, const u8 *src)
-{ }
-
-static void null_decrypt(void *ctx, u8 *dst, const u8 *src)
-{ }
+static void null_crypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
+{
+	memcpy(dst, src, NULL_BLOCK_SIZE);
+}
 
 static struct crypto_alg compress_null = {
 	.cra_name		=	"compress_null",
@@ -62,7 +64,7 @@ static struct crypto_alg compress_null = {
 	.cra_list		=       LIST_HEAD_INIT(compress_null.cra_list),
 	.cra_u			=	{ .compress = {
 	.coa_compress 		=	null_compress,
-	.coa_decompress		=	null_decompress } }
+	.coa_decompress		=	null_compress } }
 };
 
 static struct crypto_alg digest_null = {
@@ -90,8 +92,8 @@ static struct crypto_alg cipher_null = {
 	.cia_min_keysize	=	NULL_KEY_SIZE,
 	.cia_max_keysize	=	NULL_KEY_SIZE,
 	.cia_setkey		= 	null_setkey,
-	.cia_encrypt		=	null_encrypt,
-	.cia_decrypt		=	null_decrypt } }
+	.cia_encrypt		=	null_crypt,
+	.cia_decrypt		=	null_crypt } }
 };
 
 MODULE_ALIAS("compress_null");

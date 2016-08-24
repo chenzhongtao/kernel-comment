@@ -10,18 +10,15 @@
  * Released under the GPL
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -31,6 +28,7 @@
 #include <linux/mii.h>
 #include <linux/ethtool.h>
 #include <linux/bitops.h>
+#include <linux/dma-mapping.h>
 
 #include <asm/8xx_immap.h>
 #include <asm/pgtable.h>
@@ -38,7 +36,6 @@
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 #include <asm/commproc.h>
-#include <asm/dma-mapping.h>
 
 #include "fec_8xx.h"
 
@@ -55,11 +52,11 @@ MODULE_AUTHOR("Pantelis Antoniou <panto@intracom.gr>");
 MODULE_DESCRIPTION("Motorola 8xx FEC ethernet driver");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(fec_8xx_debug, "i");
+int fec_8xx_debug = -1;		/* -1 == use FEC_8XX_DEF_MSG_ENABLE as value */
+module_param(fec_8xx_debug, int, 0);
 MODULE_PARM_DESC(fec_8xx_debug,
 		 "FEC 8xx bitmapped debugging message enable value");
 
-int fec_8xx_debug = -1;		/* -1 == use FEC_8XX_DEF_MSG_ENABLE as value */
 
 /*************************************************/
 
@@ -468,9 +465,9 @@ void fec_stop(struct net_device *dev)
 }
 
 /* common receive function */
-static int fec_enet_rx_common(struct net_device *dev, int *budget)
+static int fec_enet_rx_common(struct fec_enet_private *ep,
+			      struct net_device *dev, int budget)
 {
-	struct fec_enet_private *fep = netdev_priv(dev);
 	fec_t *fecp = fep->fecp;
 	const struct fec_platform_info *fpi = fep->fpi;
 	cbd_t *bdp;
@@ -478,14 +475,6 @@ static int fec_enet_rx_common(struct net_device *dev, int *budget)
 	int received = 0;
 	__u16 pkt_len, sc;
 	int curidx;
-	int rx_work_limit;
-
-	if (fpi->use_napi) {
-		rx_work_limit = min(dev->quota, *budget);
-
-		if (!netif_running(dev))
-			return 0;
-	}
 
 	/*
 	 * First, grab all of the stats for the incoming packet.
@@ -533,11 +522,6 @@ static int fec_enet_rx_common(struct net_device *dev, int *budget)
 			BUG_ON(skbn == NULL);
 
 		} else {
-
-			/* napi, got packet but no quota */
-			if (fpi->use_napi && --rx_work_limit < 0)
-				break;
-
 			skb = fep->rx_skbuff[curidx];
 			BUG_ON(skb == NULL);
 
@@ -553,7 +537,9 @@ static int fec_enet_rx_common(struct net_device *dev, int *budget)
 				skbn = dev_alloc_skb(pkt_len + 2);
 				if (skbn != NULL) {
 					skb_reserve(skbn, 2);	/* align IP header */
-					memcpy(skbn->data, skb->data, pkt_len);
+					skb_copy_from_linear_data(skb,
+								  skbn->data,
+								  pkt_len);
 					/* swap */
 					skbt = skb;
 					skb = skbn;
@@ -563,7 +549,6 @@ static int fec_enet_rx_common(struct net_device *dev, int *budget)
 				skbn = dev_alloc_skb(ENET_RX_FRSIZE);
 
 			if (skbn != NULL) {
-				skb->dev = dev;
 				skb_put(skb, pkt_len);	/* Make room */
 				skb->protocol = eth_type_trans(skb, dev);
 				received++;
@@ -601,25 +586,24 @@ static int fec_enet_rx_common(struct net_device *dev, int *budget)
 		 * able to keep up at the expense of system resources.
 		 */
 		FW(fecp, r_des_active, 0x01000000);
+
+		if (received >= budget)
+			break;
+
 	}
 
 	fep->cur_rx = bdp;
 
 	if (fpi->use_napi) {
-		dev->quota -= received;
-		*budget -= received;
+		if (received < budget) {
+			netif_rx_complete(dev, &fep->napi);
 
-		if (rx_work_limit < 0)
-			return 1;	/* not done */
-
-		/* done */
-		netif_rx_complete(dev);
-
-		/* enable RX interrupt bits */
-		FS(fecp, imask, FEC_ENET_RXF | FEC_ENET_RXB);
+			/* enable RX interrupt bits */
+			FS(fecp, imask, FEC_ENET_RXF | FEC_ENET_RXB);
+		}
 	}
 
-	return 0;
+	return received;
 }
 
 static void fec_enet_tx(struct net_device *dev)
@@ -709,7 +693,7 @@ static void fec_enet_tx(struct net_device *dev)
  * This is called from the MPC core interrupt.
  */
 static irqreturn_t
-fec_enet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+fec_enet_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct fec_enet_private *fep;
@@ -745,12 +729,12 @@ fec_enet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 		if ((int_events & FEC_ENET_RXF) != 0) {
 			if (!fpi->use_napi)
-				fec_enet_rx_common(dev, NULL);
+				fec_enet_rx_common(fep, dev, ~0);
 			else {
-				if (netif_rx_schedule_prep(dev)) {
+				if (netif_rx_schedule_prep(dev, &fep->napi)) {
 					/* disable rx interrupts */
 					FC(fecp, imask, FEC_ENET_RXF | FEC_ENET_RXB);
-					__netif_rx_schedule(dev);
+					__netif_rx_schedule(dev, &fep->napi);
 				} else {
 					printk(KERN_ERR DRV_MODULE_NAME
 					       ": %s driver bug! interrupt while in poll!\n",
@@ -769,7 +753,7 @@ fec_enet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 /* This interrupt occurs when the PHY detects a link change. */
 static irqreturn_t
-fec_mii_link_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+fec_mii_link_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct fec_enet_private *fep;
@@ -895,10 +879,13 @@ static int fec_enet_open(struct net_device *dev)
 	const struct fec_platform_info *fpi = fep->fpi;
 	unsigned long flags;
 
+	napi_enable(&fep->napi);
+
 	/* Install our interrupt handler. */
 	if (request_irq(fpi->fec_irq, fec_enet_interrupt, 0, "fec", dev) != 0) {
 		printk(KERN_ERR DRV_MODULE_NAME
 		       ": %s Could not allocate FEC IRQ!", dev->name);
+		napi_disable(&fep->napi);
 		return -EINVAL;
 	}
 
@@ -909,6 +896,7 @@ static int fec_enet_open(struct net_device *dev)
 		printk(KERN_ERR DRV_MODULE_NAME
 		       ": %s Could not allocate PHY IRQ!", dev->name);
 		free_irq(fpi->fec_irq, dev);
+		napi_disable(&fep->napi);
 		return -EINVAL;
 	}
 
@@ -934,6 +922,7 @@ static int fec_enet_close(struct net_device *dev)
 	unsigned long flags;
 
 	netif_stop_queue(dev);
+	napi_disable(&fep->napi);
 	netif_carrier_off(dev);
 
 	if (fpi->use_mdio)
@@ -957,9 +946,12 @@ static struct net_device_stats *fec_enet_get_stats(struct net_device *dev)
 	return &fep->stats;
 }
 
-static int fec_enet_poll(struct net_device *dev, int *budget)
+static int fec_enet_poll(struct napi_struct *napi, int budget)
 {
-	return fec_enet_rx_common(dev, budget);
+	struct fec_enet_private *fep = container_of(napi, struct fec_enet_private, napi);
+	struct net_device *dev = fep->dev;
+
+	return fec_enet_rx_common(fep, dev, budget);
 }
 
 /*************************************************************************/
@@ -1035,20 +1027,18 @@ static void fec_set_msglevel(struct net_device *dev, __u32 value)
 	fep->msg_enable = value;
 }
 
-static struct ethtool_ops fec_ethtool_ops = {
-	.get_drvinfo = fec_get_drvinfo,
-	.get_regs_len = fec_get_regs_len,
-	.get_settings = fec_get_settings,
-	.set_settings = fec_set_settings,
-	.nway_reset = fec_nway_reset,
-	.get_link = ethtool_op_get_link,
-	.get_msglevel = fec_get_msglevel,
-	.set_msglevel = fec_set_msglevel,
-	.get_tx_csum = ethtool_op_get_tx_csum,
-	.set_tx_csum = ethtool_op_set_tx_csum,	/* local! */
-	.get_sg = ethtool_op_get_sg,
-	.set_sg = ethtool_op_set_sg,
-	.get_regs = fec_get_regs,
+static const struct ethtool_ops fec_ethtool_ops = {
+	.get_drvinfo	= fec_get_drvinfo,
+	.get_regs_len	= fec_get_regs_len,
+	.get_settings	= fec_get_settings,
+	.set_settings	= fec_set_settings,
+	.nway_reset	= fec_nway_reset,
+	.get_link	= ethtool_op_get_link,
+	.get_msglevel	= fec_get_msglevel,
+	.set_msglevel	= fec_set_msglevel,
+	.set_tx_csum	= ethtool_op_set_tx_csum,	/* local! */
+	.set_sg		= ethtool_op_set_sg,
+	.get_regs	= fec_get_regs,
 };
 
 static int fec_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
@@ -1106,9 +1096,9 @@ int fec_8xx_init_one(const struct fec_platform_info *fpi,
 		err = -ENOMEM;
 		goto err;
 	}
-	SET_MODULE_OWNER(dev);
 
 	fep = netdev_priv(dev);
+	fep->dev = dev;
 
 	/* partial reset of FEC */
 	fec_whack_reset(fecp);
@@ -1174,10 +1164,9 @@ int fec_8xx_init_one(const struct fec_platform_info *fpi,
 	dev->get_stats = fec_enet_get_stats;
 	dev->set_multicast_list = fec_set_multicast_list;
 	dev->set_mac_address = fec_set_mac_address;
-	if (fpi->use_napi) {
-		dev->poll = fec_enet_poll;
-		dev->weight = fpi->napi_weight;
-	}
+	netif_napi_add(dev, &fec->napi,
+		       fec_enet_poll, fpi->napi_weight);
+
 	dev->ethtool_ops = &fec_ethtool_ops;
 	dev->do_ioctl = fec_ioctl;
 

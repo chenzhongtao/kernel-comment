@@ -23,7 +23,6 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
@@ -40,7 +39,7 @@
 #include <asm/mach-au1x00/au1000.h>
 #include <asm/mach-pb1x00/pb1000.h>
 
-void board_reset (void)
+void board_reset(void)
 {
 }
 
@@ -55,7 +54,7 @@ void __init board_setup(void)
 	au_writel(0, SYS_PINSTATERD);
 	udelay(100);
 
-#if defined (CONFIG_USB_OHCI) || defined (CONFIG_AU1X00_USB_DEVICE)
+#if defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
 	/* zero and disable FREQ2 */
 	sys_freqctrl = au_readl(SYS_FREQCTRL0);
 	sys_freqctrl &= ~0xFFF00000;
@@ -103,25 +102,21 @@ void __init board_setup(void)
 	/*
 	 * Route 48MHz FREQ2 into USB Host and/or Device
 	 */
-#ifdef CONFIG_USB_OHCI
+#if defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
 	sys_clksrc |= ((4<<12) | (0<<11) | (0<<10));
-#endif
-#ifdef CONFIG_AU1X00_USB_DEVICE
-	sys_clksrc |= ((4<<7) | (0<<6) | (0<<5));
 #endif
 	au_writel(sys_clksrc, SYS_CLKSRC);
 
 	// configure pins GPIO[14:9] as GPIO
 	pin_func = au_readl(SYS_PINFUNC) & (u32)(~0x8080);
 
-#ifndef CONFIG_AU1X00_USB_DEVICE
 	// 2nd USB port is USB host
 	pin_func |= 0x8000;
-#endif
+
 	au_writel(pin_func, SYS_PINFUNC);
 	au_writel(0x2800, SYS_TRIOUTCLR);
 	au_writel(0x0030, SYS_OUTPUTCLR);
-#endif // defined (CONFIG_USB_OHCI) || defined (CONFIG_AU1X00_USB_DEVICE)
+#endif /* defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE) */
 
 	// make gpio 15 an input (for interrupt line)
 	pin_func = au_readl(SYS_PINFUNC) & (u32)(~0x100);
@@ -174,7 +169,7 @@ void __init board_setup(void)
 	case 0x02: /* HB */
 		break;
 	default:  /* HC and newer */
-		/* Enable sys bus clock divider when IDLE state or no bus 
+		/* Enable sys bus clock divider when IDLE state or no bus
 		   activity. */
 		au_writel(au_readl(SYS_POWERCTRL) | (0x3 << 5), SYS_POWERCTRL);
 		break;

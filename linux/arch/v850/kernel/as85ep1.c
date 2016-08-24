@@ -11,7 +11,6 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -143,7 +142,7 @@ static struct v850e_intc_irq_init irq_inits[] = {
 	{ "ST",  IRQ_INTST(0), 	IRQ_INTST_NUM, 	3, 5 },
 	{ 0 }
 };
-#define NUM_IRQ_INITS ((sizeof irq_inits / sizeof irq_inits[0]) - 1)
+#define NUM_IRQ_INITS (ARRAY_SIZE(irq_inits) - 1)
 
 static struct hw_interrupt_type hw_itypes[NUM_IRQ_INITS];
 
@@ -160,8 +159,6 @@ void machine_restart (char *__unused)
 	asm ("jmp r0"); /* Jump to the reset vector.  */
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_halt (void)
 {
 #ifdef CONFIG_RESET_GUARD
@@ -173,14 +170,10 @@ void machine_halt (void)
 		asm ("halt; nop; nop; nop; nop; nop");
 }
 
-EXPORT_SYMBOL(machine_halt);
-
 void machine_power_off (void)
 {
 	machine_halt ();
 }
-
-EXPORT_SYMBOL(machine_power_off);
 
 /* Called before configuring an on-chip UART.  */
 void as85ep1_uart_pre_configure (unsigned chan, unsigned cflags, unsigned baud)

@@ -16,13 +16,15 @@
 
 #define _PAGE_PRESENT	0x001
 #define _PAGE_NEWPAGE	0x002
-#define _PAGE_NEWPROT   0x004
-#define _PAGE_FILE	0x008   /* set:pagecache unset:swap */
-#define _PAGE_PROTNONE	0x010	/* If not present */
+#define _PAGE_NEWPROT	0x004
 #define _PAGE_RW	0x020
 #define _PAGE_USER	0x040
 #define _PAGE_ACCESSED	0x080
 #define _PAGE_DIRTY	0x100
+/* If _PAGE_PRESENT is clear, we use these: */
+#define _PAGE_FILE	0x008	/* nonlinear file mapping, saved PTE; unset:swap */
+#define _PAGE_PROTNONE	0x010	/* if the user mapped it with PROT_NONE;
+				   pte_present gives true */
 
 #ifdef CONFIG_3_LEVEL_PGTABLES
 #include "asm/pgtable-3level.h"
@@ -106,7 +108,7 @@ extern unsigned long end_iomem;
 /*
  * Define this if things work differently on an i386 and an i486:
  * it will (on an i486) warn about kernel memory accesses that are
- * done without a 'verify_area(VERIFY_WRITE,..)'
+ * done without a 'access_ok(VERIFY_WRITE,..)'
  */
 #undef TEST_VERIFY_AREA
 
@@ -114,17 +116,9 @@ extern unsigned long end_iomem;
 extern unsigned long pg0[1024];
 
 /*
- * BAD_PAGETABLE is used when we need a bogus page-table, while
- * BAD_PAGE is used for a bogus page.
- *
  * ZERO_PAGE is a global shared page that is always zero: used
  * for zero-mapped memory areas etc..
  */
-extern pte_t __bad_page(void);
-extern pte_t * __bad_pagetable(void);
-
-#define BAD_PAGETABLE __bad_pagetable()
-#define BAD_PAGE __bad_page()
 
 #define ZERO_PAGE(vaddr) virt_to_page(empty_zero_page)
 
@@ -142,9 +136,9 @@ extern pte_t * __bad_pagetable(void);
 #define PAGE_PTR(address) \
 ((unsigned long)(address)>>(PAGE_SHIFT-SIZEOF_PTR_LOG2)&PTR_MASK&~PAGE_MASK)
 
-#define pte_clear(xp) pte_set_val(*(xp), (phys_t) 0, __pgprot(_PAGE_NEWPAGE))
+#define pte_clear(mm,addr,xp) pte_set_val(*(xp), (phys_t) 0, __pgprot(_PAGE_NEWPAGE))
 
-#define pmd_none(x)	(!(pmd_val(x) & ~_PAGE_NEWPAGE))
+#define pmd_none(x)	(!((unsigned long)pmd_val(x) & ~_PAGE_NEWPAGE))
 #define	pmd_bad(x)	((pmd_val(x) & (~PAGE_MASK & ~_PAGE_USER)) != _KERNPG_TABLE)
 #define pmd_present(x)	(pmd_val(x) & _PAGE_PRESENT)
 #define pmd_clear(xp)	do { pmd_val(*(xp)) = _PAGE_NEWPAGE; } while (0)
@@ -159,20 +153,28 @@ extern pte_t * __bad_pagetable(void);
 
 #define pmd_page(pmd) phys_to_page(pmd_val(pmd) & PAGE_MASK)
 
+#define pte_page(x) pfn_to_page(pte_pfn(x))
 #define pte_address(x) (__va(pte_val(x) & PAGE_MASK))
 #define mk_phys(a, r) ((a) + (((unsigned long) r) << REGION_SHIFT))
 #define phys_addr(p) ((p) & ~REGION_MASK)
+
+#define pte_present(x)	pte_get_bits(x, (_PAGE_PRESENT | _PAGE_PROTNONE))
+
+/*
+ * =================================
+ * Flags checking section.
+ * =================================
+ */
+
+static inline int pte_none(pte_t pte)
+{
+	return pte_is_zero(pte);
+}
 
 /*
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
  */
-static inline int pte_user(pte_t pte)
-{
-	return((pte_get_bits(pte, _PAGE_USER)) &&
-	       !(pte_get_bits(pte, _PAGE_PROTNONE)));
-}
-
 static inline int pte_read(pte_t pte)
 { 
 	return((pte_get_bits(pte, _PAGE_USER)) &&
@@ -218,16 +220,16 @@ static inline int pte_newprot(pte_t pte)
 	return(pte_present(pte) && (pte_get_bits(pte, _PAGE_NEWPROT)));
 }
 
-static inline pte_t pte_rdprotect(pte_t pte)
-{ 
-	pte_clear_bits(pte, _PAGE_USER);
-	return(pte_mknewprot(pte));
-}
+/*
+ * =================================
+ * Flags setting section.
+ * =================================
+ */
 
-static inline pte_t pte_exprotect(pte_t pte)
-{ 
-	pte_clear_bits(pte, _PAGE_USER);
-	return(pte_mknewprot(pte));
+static inline pte_t pte_mknewprot(pte_t pte)
+{
+	pte_set_bits(pte, _PAGE_NEWPROT);
+	return(pte);
 }
 
 static inline pte_t pte_mkclean(pte_t pte)
@@ -249,12 +251,6 @@ static inline pte_t pte_wrprotect(pte_t pte)
 }
 
 static inline pte_t pte_mkread(pte_t pte)
-{ 
-	pte_set_bits(pte, _PAGE_RW);
-	return(pte_mknewprot(pte)); 
-}
-
-static inline pte_t pte_mkexec(pte_t pte)
 { 
 	pte_set_bits(pte, _PAGE_USER);
 	return(pte_mknewprot(pte)); 
@@ -286,23 +282,50 @@ static inline pte_t pte_mkuptodate(pte_t pte)
 	return(pte); 
 }
 
-extern phys_t page_to_phys(struct page *page);
+static inline pte_t pte_mknewpage(pte_t pte)
+{
+	pte_set_bits(pte, _PAGE_NEWPAGE);
+	return(pte);
+}
+
+static inline void set_pte(pte_t *pteptr, pte_t pteval)
+{
+	pte_copy(*pteptr, pteval);
+
+	/* If it's a swap entry, it needs to be marked _PAGE_NEWPAGE so
+	 * fix_range knows to unmap it.  _PAGE_NEWPROT is specific to
+	 * mapped pages.
+	 */
+
+	*pteptr = pte_mknewpage(*pteptr);
+	if(pte_present(*pteptr)) *pteptr = pte_mknewprot(*pteptr);
+}
+#define set_pte_at(mm,addr,ptep,pteval) set_pte(ptep,pteval)
 
 /*
  * Conversion functions: convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
 
-extern pte_t mk_pte(struct page *page, pgprot_t pgprot);
+#define phys_to_page(phys) pfn_to_page(phys_to_pfn(phys))
+#define __virt_to_page(virt) phys_to_page(__pa(virt))
+#define page_to_phys(page) pfn_to_phys(page_to_pfn(page))
+
+#define mk_pte(page, pgprot) \
+	({ pte_t pte;					\
+							\
+	pte_set_val(pte, page_to_phys(page), (pgprot));	\
+	if (pte_present(pte))				\
+		pte_mknewprot(pte_mknewpage(pte));	\
+	pte;})
 
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
 	pte_set_val(pte, (pte_val(pte) & _PAGE_CHG_MASK), newprot);
-	if(pte_present(pte)) pte = pte_mknewpage(pte_mknewprot(pte));
 	return pte; 
 }
 
-#define pmd_page_kernel(pmd) ((unsigned long) __va(pmd_val(pmd) & PAGE_MASK))
+#define pmd_page_vaddr(pmd) ((unsigned long) __va(pmd_val(pmd) & PAGE_MASK))
 
 /*
  * the pgd page can be thought of an array like this: pgd_t[PTRS_PER_PGD]
@@ -342,7 +365,7 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
  */
 #define pte_index(address) (((address) >> PAGE_SHIFT) & (PTRS_PER_PTE - 1))
 #define pte_offset_kernel(dir, address) \
-	((pte_t *) pmd_page_kernel(*(dir)) +  pte_index(address))
+	((pte_t *) pmd_page_vaddr(*(dir)) +  pte_index(address))
 #define pte_offset_map(dir, address) \
 	((pte_t *)page_address(pmd_page(*(dir))) + pte_index(address))
 #define pte_offset_map_nested(dir, address) pte_offset_map(dir, address)
@@ -367,11 +390,18 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 
 #include <asm-generic/pgtable-nopud.h>
 
+#ifdef CONFIG_HIGHMEM
+/* Clear a kernel PTE and flush it from the TLB */
+#define kpte_clear_flush(ptep, vaddr)					\
+do {									\
+	pte_clear(&init_mm, vaddr, ptep);				\
+	__flush_tlb_one(vaddr);						\
+} while (0)
+#endif
+
 #endif
 #endif
 
-extern struct page *phys_to_page(const unsigned long phys);
-extern struct page *__virt_to_page(const unsigned long virt);
 #define virt_to_page(addr) __virt_to_page((const unsigned long) addr)
 
 /*

@@ -54,7 +54,7 @@ static struct scsi_host_template NCR_Q720_tpnt = {
 };
 
 static irqreturn_t
-NCR_Q720_intr(int irq, void *data, struct pt_regs * regs)
+NCR_Q720_intr(int irq, void *data)
 {
 	struct NCR_Q720_private *p = (struct NCR_Q720_private *)data;
 	__u8 sir = (readb(p->mem_base + 0x0d) & 0xf0) >> 4;
@@ -68,7 +68,7 @@ NCR_Q720_intr(int irq, void *data, struct pt_regs * regs)
 
 	while((siop = ffz(sir)) < p->siops) {
 		sir |= 1<<siop;
-		ncr53c8xx_intr(irq, p->hosts[siop], regs);
+		ncr53c8xx_intr(irq, p->hosts[siop]);
 	}
 	return IRQ_HANDLED;
 }
@@ -148,11 +148,10 @@ NCR_Q720_probe(struct device *dev)
 	__u32 base_addr, mem_size;
 	void __iomem *mem_base;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 
-	memset(p, 0, sizeof(*p));
 	pos2 = mca_device_read_pos(mca_dev, 2);
 	/* enable device */
 	pos2 |=  NCR_Q720_POS2_BOARD_ENABLE | NCR_Q720_POS2_INTERRUPT_ENABLE;
@@ -225,7 +224,7 @@ NCR_Q720_probe(struct device *dev)
 
 	/* The first 1k of the memory buffer is a memory map of the registers
 	 */
-	mem_base = (__u32)dma_mark_declared_memory_occupied(dev, base_addr,
+	mem_base = dma_mark_declared_memory_occupied(dev, base_addr,
 							    1024);
 	if (IS_ERR(mem_base)) {
 		printk("NCR_Q720 failed to reserve memory mapped region\n");
@@ -265,7 +264,7 @@ NCR_Q720_probe(struct device *dev)
 	p->irq = irq;
 	p->siops = siops;
 
-	if (request_irq(irq, NCR_Q720_intr, SA_SHIRQ, "NCR_Q720", p)) {
+	if (request_irq(irq, NCR_Q720_intr, IRQF_SHARED, "NCR_Q720", p)) {
 		printk(KERN_ERR "NCR_Q720: request irq %d failed\n", irq);
 		goto out_release;
 	}

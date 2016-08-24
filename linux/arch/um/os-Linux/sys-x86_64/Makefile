@@ -1,11 +1,10 @@
 #
-# Copyright (C) 2000 Jeff Dike (jdike@karaya.com)
+# Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
 # Licensed under the GPL
 #
 
-obj-$(CONFIG_MODE_SKAS) = registers.o
+obj-y = registers.o prctl.o signal.o
 
-USER_OBJS := $(foreach file,$(obj-y),$(obj)/$(file))
+USER_OBJS := $(obj-y)
 
-$(USER_OBJS) : %.o: %.c
-	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
+include arch/um/scripts/Makefile.rules

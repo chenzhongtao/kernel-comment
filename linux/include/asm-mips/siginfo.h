@@ -9,10 +9,8 @@
 #ifndef _ASM_SIGINFO_H
 #define _ASM_SIGINFO_H
 
-#include <linux/config.h>
 
-#define SIGEV_HEAD_SIZE	(sizeof(long) + 2*sizeof(int))
-#define SIGEV_PAD_SIZE	((SIGEV_MAX_SIZE-SIGEV_HEAD_SIZE) / sizeof(int))
+#define __ARCH_SIGEV_PREAMBLE_SIZE (sizeof(long) + 2*sizeof(int))
 #undef __ARCH_SI_TRAPNO	/* exception code needs to fill this ...  */
 
 #define HAVE_ARCH_SIGINFO_T
@@ -27,10 +25,10 @@ struct siginfo;
 /*
  * Careful to keep union _sifields from shifting ...
  */
-#ifdef CONFIG_MIPS32
+#ifdef CONFIG_32BIT
 #define __ARCH_SI_PREAMBLE_SIZE (3 * sizeof(int))
 #endif
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 #define __ARCH_SI_PREAMBLE_SIZE (4 * sizeof(int))
 #endif
 
@@ -108,8 +106,8 @@ typedef struct siginfo {
 #undef SI_TIMER
 #undef SI_MESGQ
 #define SI_ASYNCIO	-2	/* sent by AIO completion */
-#define SI_TIMER __SI_CODE(__SI_TIMER,-3) /* sent by timer expiration */
-#define SI_MESGQ __SI_CODE(__SI_MESGQ,-4) /* sent by real time mesq state change */
+#define SI_TIMER __SI_CODE(__SI_TIMER, -3) /* sent by timer expiration */
+#define SI_MESGQ __SI_CODE(__SI_MESGQ, -4) /* sent by real time mesq state change */
 
 #ifdef __KERNEL__
 

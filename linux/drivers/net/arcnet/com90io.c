@@ -160,7 +160,7 @@ static int __init com90io_probe(struct net_device *dev)
 		return -ENODEV;
 	}
 	if (!request_region(ioaddr, ARCNET_TOTAL_SIZE, "com90io probe")) {
-		BUGMSG(D_INIT_REASONS, "IO check_region %x-%x failed.\n",
+		BUGMSG(D_INIT_REASONS, "IO request_region %x-%x failed.\n",
 		       ioaddr, ioaddr + ARCNET_TOTAL_SIZE - 1);
 		return -ENXIO;
 	}
@@ -242,13 +242,13 @@ static int __init com90io_found(struct net_device *dev)
 		BUGMSG(D_NORMAL, "Can't get IRQ %d!\n", dev->irq);
 		return -ENODEV;
 	}
-	/* Reserve the I/O region - guaranteed to work by check_region */
+	/* Reserve the I/O region */
 	if (!request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)")) {
 		free_irq(dev->irq, dev);
 		return -EBUSY;
 	}
 
-	lp = (struct arcnet_local *) (dev->priv);
+	lp = dev->priv;
 	lp->card_name = "COM90xx I/O";
 	lp->hw.command = com90io_command;
 	lp->hw.status = com90io_status;
@@ -290,7 +290,7 @@ static int __init com90io_found(struct net_device *dev)
  */
 static int com90io_reset(struct net_device *dev, int really_reset)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	short ioaddr = dev->base_addr;
 
 	BUGMSG(D_INIT, "Resetting %s (status=%02Xh)\n", dev->name, ASTATUS());
@@ -397,8 +397,6 @@ static int __init com90io_init(void)
 	dev = alloc_arcdev(device);
 	if (!dev)
 		return -ENOMEM;
-
-	SET_MODULE_OWNER(dev);
 
 	dev->base_addr = io;
 	dev->irq = irq;

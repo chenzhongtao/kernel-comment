@@ -9,30 +9,17 @@
  */
 
 #include <linux/module.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
-#include <linux/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/socket.h>
-#include <linux/sockios.h>
-#include <linux/in.h>
 #include <linux/errno.h>
-#include <linux/interrupt.h>
-#include <linux/if_ether.h>
-#include <linux/inet.h>
+#include <linux/if_arp.h>
 #include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/notifier.h>
 #include <linux/init.h>
-#include <net/ip.h>
-#include <net/route.h>
 #include <linux/skbuff.h>
 #include <linux/moduleparam.h>
-#include <net/sock.h>
+#include <net/dst.h>
+#include <net/neighbour.h>
 #include <net/pkt_sched.h>
 
 /*
@@ -94,14 +81,13 @@ teql_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	struct net_device *dev = sch->dev;
 	struct teql_sched_data *q = qdisc_priv(sch);
 
-	__skb_queue_tail(&q->q, skb);
-	if (q->q.qlen <= dev->tx_queue_len) {
+	if (q->q.qlen < dev->tx_queue_len) {
+		__skb_queue_tail(&q->q, skb);
 		sch->bstats.bytes += skb->len;
 		sch->bstats.packets++;
 		return 0;
 	}
 
-	__skb_unlink(skb, &q->q);
 	kfree_skb(skb);
 	sch->qstats.drops++;
 	return NET_XMIT_DROP;
@@ -177,7 +163,7 @@ teql_destroy(struct Qdisc* sch)
 				teql_neigh_release(xchg(&dat->ncache, NULL));
 				break;
 			}
-				
+
 		} while ((prev = q) != master->slaves);
 	}
 }
@@ -226,7 +212,6 @@ static int teql_qdisc_init(struct Qdisc *sch, struct rtattr *opt)
 	return 0;
 }
 
-/* "teql*" netdevice routines */
 
 static int
 __teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *dev)
@@ -247,9 +232,12 @@ __teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *
 	}
 	if (neigh_event_send(n, skb_res) == 0) {
 		int err;
+
 		read_lock(&n->lock);
-		err = dev->hard_header(skb, dev, ntohs(skb->protocol), n->ha, NULL, skb->len);
+		err = dev_hard_header(skb, dev, ntohs(skb->protocol),
+				      n->ha, NULL, skb->len);
 		read_unlock(&n->lock);
+
 		if (err < 0) {
 			neigh_release(n);
 			return -EINVAL;
@@ -261,10 +249,13 @@ __teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *
 	return (skb_res == NULL) ? -EAGAIN : 1;
 }
 
-static __inline__ int
-teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *dev)
+static inline int teql_resolve(struct sk_buff *skb,
+			       struct sk_buff *skb_res, struct net_device *dev)
 {
-	if (dev->hard_header == NULL ||
+	if (dev->qdisc == &noop_qdisc)
+		return -ENODEV;
+
+	if (dev->header_ops == NULL ||
 	    skb->dst == NULL ||
 	    skb->dst->neighbour == NULL)
 		return 0;
@@ -273,11 +264,12 @@ teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *de
 
 static int teql_master_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct teql_master *master = (void*)dev->priv;
+	struct teql_master *master = netdev_priv(dev);
 	struct Qdisc *start, *q;
 	int busy;
 	int nores;
 	int len = skb->len;
+	int subq = skb_get_queue_mapping(skb);
 	struct sk_buff *skb_res = NULL;
 
 	start = master->slaves;
@@ -291,30 +283,30 @@ restart:
 
 	do {
 		struct net_device *slave = q->dev;
-		
+
 		if (slave->qdisc_sleeping != q)
 			continue;
-		if (netif_queue_stopped(slave) || ! netif_running(slave)) {
+		if (netif_queue_stopped(slave) ||
+		    __netif_subqueue_stopped(slave, subq) ||
+		    !netif_running(slave)) {
 			busy = 1;
 			continue;
 		}
 
 		switch (teql_resolve(skb, skb_res, slave)) {
 		case 0:
-			if (spin_trylock(&slave->xmit_lock)) {
-				slave->xmit_lock_owner = smp_processor_id();
+			if (netif_tx_trylock(slave)) {
 				if (!netif_queue_stopped(slave) &&
+				    !__netif_subqueue_stopped(slave, subq) &&
 				    slave->hard_start_xmit(skb, slave) == 0) {
-					slave->xmit_lock_owner = -1;
-					spin_unlock(&slave->xmit_lock);
+					netif_tx_unlock(slave);
 					master->slaves = NEXT_SLAVE(q);
 					netif_wake_queue(dev);
 					master->stats.tx_packets++;
 					master->stats.tx_bytes += len;
 					return 0;
 				}
-				slave->xmit_lock_owner = -1;
-				spin_unlock(&slave->xmit_lock);
+				netif_tx_unlock(slave);
 			}
 			if (netif_queue_stopped(dev))
 				busy = 1;
@@ -326,7 +318,7 @@ restart:
 			nores = 1;
 			break;
 		}
-		__skb_pull(skb, skb->nh.raw - skb->data);
+		__skb_pull(skb, skb_network_offset(skb));
 	} while ((q = NEXT_SLAVE(q)) != start);
 
 	if (nores && skb_res == NULL) {
@@ -349,7 +341,7 @@ drop:
 static int teql_master_open(struct net_device *dev)
 {
 	struct Qdisc * q;
-	struct teql_master *m = (void*)dev->priv;
+	struct teql_master *m = netdev_priv(dev);
 	int mtu = 0xFFFE;
 	unsigned flags = IFF_NOARP|IFF_MULTICAST;
 
@@ -396,13 +388,13 @@ static int teql_master_close(struct net_device *dev)
 
 static struct net_device_stats *teql_master_stats(struct net_device *dev)
 {
-	struct teql_master *m = (void*)dev->priv;
+	struct teql_master *m = netdev_priv(dev);
 	return &m->stats;
 }
 
 static int teql_master_mtu(struct net_device *dev, int new_mtu)
 {
-	struct teql_master *m = (void*)dev->priv;
+	struct teql_master *m = netdev_priv(dev);
 	struct Qdisc *q;
 
 	if (new_mtu < 68)
@@ -422,12 +414,12 @@ static int teql_master_mtu(struct net_device *dev, int new_mtu)
 
 static __init void teql_master_setup(struct net_device *dev)
 {
-	struct teql_master *master = dev->priv;
+	struct teql_master *master = netdev_priv(dev);
 	struct Qdisc_ops *ops = &master->qops;
 
 	master->dev	= dev;
 	ops->priv_size  = sizeof(struct teql_sched_data);
-	
+
 	ops->enqueue	=	teql_enqueue;
 	ops->dequeue	=	teql_dequeue;
 	ops->requeue	=	teql_requeue;
@@ -446,7 +438,6 @@ static __init void teql_master_setup(struct net_device *dev)
 	dev->tx_queue_len	= 100;
 	dev->flags		= IFF_NOARP;
 	dev->hard_header_len	= LL_MAX_HEADER;
-	SET_MODULE_OWNER(dev);
 }
 
 static LIST_HEAD(master_dev_list);
@@ -475,7 +466,7 @@ static int __init teql_init(void)
 			break;
 		}
 
-		master = dev->priv;
+		master = netdev_priv(dev);
 
 		strlcpy(master->qops.id, dev->name, IFNAMSIZ);
 		err = register_qdisc(&master->qops);
@@ -491,7 +482,7 @@ static int __init teql_init(void)
 	return i ? 0 : err;
 }
 
-static void __exit teql_exit(void) 
+static void __exit teql_exit(void)
 {
 	struct teql_master *master, *nxt;
 

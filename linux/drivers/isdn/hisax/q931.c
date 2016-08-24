@@ -516,7 +516,7 @@ struct MessageType cause_1tr6[] =
 	{CAUSE_UserInfoDiscarded, "User Info Discarded"}
 };
 
-int cause_1tr6_len = (sizeof(cause_1tr6) / sizeof(struct MessageType));
+static int cause_1tr6_len = (sizeof(cause_1tr6) / sizeof(struct MessageType));
 
 static int
 prcause_1tr6(char *dest, u_char * p)
@@ -935,7 +935,7 @@ display(char *dest, u_char * p)
 	return (dp - dest);
 }
 
-int
+static int
 prfacility(char *dest, u_char * p)
 {
 	char *dp = dest;
@@ -1402,12 +1402,12 @@ dlogframe(struct IsdnCardState *cs, struct sk_buff *skb, int dir)
 			}
 			/* No, locate it in the table */
 			if (cset == 0) {
-				for (i = 0; i < IESIZE; i++)
+				for (i = 0; i < IESIZE_NI1; i++)
 					if (*buf == ielist_ni1[i].nr)
 						break;
 
 				/* When not found, give appropriate msg */
-				if (i != IESIZE) {
+				if (i != IESIZE_NI1) {
 					dp += sprintf(dp, "  %s\n", ielist_ni1[i].descr);
 					dp += ielist_ni1[i].f(dp, buf);
 				} else

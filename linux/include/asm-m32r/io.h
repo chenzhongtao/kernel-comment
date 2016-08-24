@@ -60,7 +60,7 @@ __ioremap(unsigned long offset, unsigned long size, unsigned long flags);
  *	address.
  */
 
-static inline void * ioremap(unsigned long offset, unsigned long size)
+static inline void __iomem *ioremap(unsigned long offset, unsigned long size)
 {
 	return __ioremap(offset, size, 0);
 }
@@ -166,38 +166,6 @@ static inline void _writel(unsigned long l, unsigned long addr)
 
 #define flush_write_buffers() do { } while (0)  /* M32R_FIXME */
 
-/**
- *	check_signature		-	find BIOS signatures
- *	@io_addr: mmio address to check
- *	@signature:  signature block
- *	@length: length of signature
- *
- *	Perform a signature comparison with the ISA mmio address io_addr.
- *	Returns 1 on a match.
- *
- *	This function is deprecated. New drivers should use ioremap and
- *	check_signature.
- */
-
-static inline int check_signature(void __iomem *io_addr,
-        const unsigned char *signature, int length)
-{
-        int retval = 0;
-#if 0
-printk("check_signature\n");
-        do {
-                if (readb(io_addr) != *signature)
-                        goto out;
-                io_addr++;
-                signature++;
-                length--;
-        } while (length);
-        retval = 1;
-out:
-#endif
-        return retval;
-}
-
 static inline void
 memset_io(volatile void __iomem *addr, unsigned char val, int count)
 {
@@ -215,6 +183,17 @@ memcpy_toio(volatile void __iomem *dst, const void *src, int count)
 {
 	memcpy((void __force *) dst, src, count);
 }
+
+/*
+ * Convert a physical pointer to a virtual kernel pointer for /dev/mem
+ * access
+ */
+#define xlate_dev_mem_ptr(p)	__va(p)
+
+/*
+ * Convert a virtual cached pointer to an uncached pointer
+ */
+#define xlate_dev_kmem_ptr(p)	p
 
 #endif  /* __KERNEL__ */
 

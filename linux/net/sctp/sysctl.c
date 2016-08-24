@@ -42,56 +42,64 @@
  */
 
 #include <net/sctp/structs.h>
+#include <net/sctp/sctp.h>
 #include <linux/sysctl.h>
 
-static ctl_handler sctp_sysctl_jiffies_ms;
-static long rto_timer_min = 1;
-static long rto_timer_max = 86400000; /* One day */
+static int zero = 0;
+static int one = 1;
+static int timer_max = 86400000; /* ms in one day */
+static int int_max = INT_MAX;
+static long sack_timer_min = 1;
+static long sack_timer_max = 500;
+
+extern int sysctl_sctp_mem[3];
+extern int sysctl_sctp_rmem[3];
+extern int sysctl_sctp_wmem[3];
 
 static ctl_table sctp_table[] = {
 	{
 		.ctl_name	= NET_SCTP_RTO_INITIAL,
 		.procname	= "rto_initial",
 		.data		= &sctp_rto_initial,
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
-		.strategy	= &sctp_sysctl_jiffies_ms,
-		.extra1         = &rto_timer_min,
-		.extra2         = &rto_timer_max
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1         = &one,
+		.extra2         = &timer_max
 	},
 	{
 		.ctl_name	= NET_SCTP_RTO_MIN,
 		.procname	= "rto_min",
 		.data		= &sctp_rto_min,
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
-		.strategy	= &sctp_sysctl_jiffies_ms,
-		.extra1         = &rto_timer_min,
-		.extra2         = &rto_timer_max
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1         = &one,
+		.extra2         = &timer_max
 	},
 	{
 		.ctl_name	= NET_SCTP_RTO_MAX,
 		.procname	= "rto_max",
 		.data		= &sctp_rto_max,
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
-		.strategy	= &sctp_sysctl_jiffies_ms,
-		.extra1         = &rto_timer_min,
-		.extra2         = &rto_timer_max
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1         = &one,
+		.extra2         = &timer_max
 	},
 	{
 		.ctl_name	= NET_SCTP_VALID_COOKIE_LIFE,
 		.procname	= "valid_cookie_life",
 		.data		= &sctp_valid_cookie_life,
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
-		.strategy	= &sctp_sysctl_jiffies_ms,
-		.extra1         = &rto_timer_min,
-		.extra2         = &rto_timer_max
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1         = &one,
+		.extra2         = &timer_max
 	},
 	{
 		.ctl_name	= NET_SCTP_MAX_BURST,
@@ -99,7 +107,10 @@ static ctl_table sctp_table[] = {
 		.data		= &sctp_max_burst,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &zero,
+		.extra2		= &int_max
 	},
 	{
 		.ctl_name	= NET_SCTP_ASSOCIATION_MAX_RETRANS,
@@ -107,7 +118,28 @@ static ctl_table sctp_table[] = {
 		.data		= &sctp_max_retrans_association,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &one,
+		.extra2		= &int_max
+	},
+	{
+		.ctl_name	= NET_SCTP_SNDBUF_POLICY,
+		.procname	= "sndbuf_policy",
+		.data		= &sctp_sndbuf_policy,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
+	},
+	{
+		.ctl_name	= NET_SCTP_RCVBUF_POLICY,
+		.procname	= "rcvbuf_policy",
+		.data		= &sctp_rcvbuf_policy,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
 	},
 	{
 		.ctl_name	= NET_SCTP_PATH_MAX_RETRANS,
@@ -115,7 +147,10 @@ static ctl_table sctp_table[] = {
 		.data		= &sctp_max_retrans_path,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &one,
+		.extra2		= &int_max
 	},
 	{
 		.ctl_name	= NET_SCTP_MAX_INIT_RETRANSMITS,
@@ -123,45 +158,48 @@ static ctl_table sctp_table[] = {
 		.data		= &sctp_max_retrans_init,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &one,
+		.extra2		= &int_max
 	},
 	{
 		.ctl_name	= NET_SCTP_HB_INTERVAL,
 		.procname	= "hb_interval",
 		.data		= &sctp_hb_interval,
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
-		.strategy	= &sctp_sysctl_jiffies_ms,
-		.extra1         = &rto_timer_min,
-		.extra2         = &rto_timer_max
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1         = &one,
+		.extra2         = &timer_max
 	},
 	{
 		.ctl_name	= NET_SCTP_PRESERVE_ENABLE,
 		.procname	= "cookie_preserve_enable",
 		.data		= &sctp_cookie_preserve_enable,
-		.maxlen		= sizeof(long),
+		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
-		.strategy	= &sctp_sysctl_jiffies_ms,
-		.extra1         = &rto_timer_min,
-		.extra2         = &rto_timer_max
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
 	},
 	{
 		.ctl_name	= NET_SCTP_RTO_ALPHA,
 		.procname	= "rto_alpha_exp_divisor",
 		.data		= &sctp_rto_alpha,
 		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
 	},
 	{
 		.ctl_name	= NET_SCTP_RTO_BETA,
 		.procname	= "rto_beta_exp_divisor",
 		.data		= &sctp_rto_beta,
 		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
 	},
 	{
 		.ctl_name	= NET_SCTP_ADDIP_ENABLE,
@@ -169,7 +207,8 @@ static ctl_table sctp_table[] = {
 		.data		= &sctp_addip_enable,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
 	},
 	{
 		.ctl_name	= NET_SCTP_PRSCTP_ENABLE,
@@ -177,7 +216,61 @@ static ctl_table sctp_table[] = {
 		.data		= &sctp_prsctp_enable,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
+	},
+	{
+		.ctl_name	= NET_SCTP_SACK_TIMEOUT,
+		.procname	= "sack_timeout",
+		.data		= &sctp_sack_timeout,
+		.maxlen		= sizeof(long),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1         = &sack_timer_min,
+		.extra2         = &sack_timer_max,
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "sctp_mem",
+		.data		= &sysctl_sctp_mem,
+		.maxlen		= sizeof(sysctl_sctp_mem),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "sctp_rmem",
+		.data		= &sysctl_sctp_rmem,
+		.maxlen		= sizeof(sysctl_sctp_rmem),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "sctp_wmem",
+		.data		= &sysctl_sctp_wmem,
+		.maxlen		= sizeof(sysctl_sctp_wmem),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "auth_enable",
+		.data		= &sctp_auth_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "addip_noauth_enable",
+		.data		= &sctp_addip_noauth,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+		.strategy	= &sysctl_intvec
 	},
 	{ .ctl_name = 0 }
 };
@@ -207,45 +300,11 @@ static struct ctl_table_header * sctp_sysctl_header;
 /* Sysctl registration.  */
 void sctp_sysctl_register(void)
 {
-	sctp_sysctl_header = register_sysctl_table(sctp_root_table, 0);
+	sctp_sysctl_header = register_sysctl_table(sctp_root_table);
 }
 
 /* Sysctl deregistration.  */
 void sctp_sysctl_unregister(void)
 {
 	unregister_sysctl_table(sctp_sysctl_header);
-}
-
-/* Strategy function to convert jiffies to milliseconds.  */
-static int sctp_sysctl_jiffies_ms(ctl_table *table, int __user *name, int nlen,
-		void __user *oldval, size_t __user *oldlenp,
-		void __user *newval, size_t newlen, void **context) {
-
-	if (oldval) {
-		size_t olen;
-
-		if (oldlenp) {
-			if (get_user(olen, oldlenp))
-				return -EFAULT;
-
-			if (olen != sizeof (int))
-				return -EINVAL;
-		}
-		if (put_user((*(int *)(table->data) * 1000) / HZ,
-			(int __user *)oldval) ||
-		    (oldlenp && put_user(sizeof (int), oldlenp)))
-			return -EFAULT;
-	}
-	if (newval && newlen) {
-		int new;
-
-		if (newlen != sizeof (int))
-			return -EINVAL;
-
-		if (get_user(new, (int __user *)newval))
-			return -EFAULT;
-
-		*(int *)(table->data) = (new * HZ) / 1000;
-	}
-	return 1;
 }

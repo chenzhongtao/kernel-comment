@@ -21,34 +21,27 @@
 
 static volatile u32* uart_base;
 
-static __inline__ void putc(char c)
+static inline void putc(int c)
 {
 	/* Check THRE and TEMT bits before we transmit the character.
 	 */
-	while ((uart_base[UART_LSR] & TX_DONE) != TX_DONE); 
+	while ((uart_base[UART_LSR] & TX_DONE) != TX_DONE)
+		barrier();
+
 	*uart_base = c;
 }
 
-/*
- * This does not append a newline
- */
-static void putstr(const char *s)
+static void flush(void)
 {
-	while (*s)
-	{
-		putc(*s);
-		if (*s == '\n')
-			putc('\r');
-		s++;
-	}
 }
 
 static __inline__ void __arch_decomp_setup(unsigned long arch_id)
 {
 	/*
-	 * Coyote and gtwx5715 only have UART2 connected
+	 * Some boards are using UART2 as console
 	 */
-	if (machine_is_adi_coyote() || machine_is_gtwx5715())
+	if (machine_is_adi_coyote() || machine_is_gtwx5715() ||
+			 machine_is_gateway7001() || machine_is_wg302v2())
 		uart_base = (volatile u32*) IXP4XX_UART2_BASE_PHYS;
 	else
 		uart_base = (volatile u32*) IXP4XX_UART1_BASE_PHYS;

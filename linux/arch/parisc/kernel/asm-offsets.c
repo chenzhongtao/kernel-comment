@@ -30,7 +30,6 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/thread_info.h>
-#include <linux/version.h>
 #include <linux/ptrace.h>
 #include <linux/hardirq.h>
 
@@ -45,7 +44,7 @@
 
 #define BLANK() asm volatile("\n->" : : )
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 #define FRAME_SIZE	128
 #else
 #define FRAME_SIZE	64
@@ -55,7 +54,7 @@
 
 int main(void)
 {
-	DEFINE(TASK_THREAD_INFO, offsetof(struct task_struct, thread_info));
+	DEFINE(TASK_THREAD_INFO, offsetof(struct task_struct, stack));
 	DEFINE(TASK_STATE, offsetof(struct task_struct, state));
 	DEFINE(TASK_FLAGS, offsetof(struct task_struct, flags));
 	DEFINE(TASK_SIGPENDING, offsetof(struct task_struct, pending));
@@ -289,8 +288,8 @@ int main(void)
 	DEFINE(ASM_PGD_ENTRY_SIZE, PGD_ENTRY_SIZE);
 	DEFINE(ASM_PMD_ENTRY_SIZE, PMD_ENTRY_SIZE);
 	DEFINE(ASM_PTE_ENTRY_SIZE, PTE_ENTRY_SIZE);
+	DEFINE(ASM_PFN_PTE_SHIFT, PFN_PTE_SHIFT);
 	DEFINE(ASM_PT_INITIAL, PT_INITIAL);
-	DEFINE(ASM_PAGE_SIZE, PAGE_SIZE);
 	BLANK();
 	DEFINE(EXCDATA_IP, offsetof(struct exception_data, fault_ip));
 	DEFINE(EXCDATA_SPACE, offsetof(struct exception_data, fault_space));

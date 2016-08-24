@@ -18,7 +18,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -27,7 +27,6 @@
 #ifndef IRLAP_H
 #define IRLAP_H
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
@@ -49,6 +48,9 @@
 
 /* May be different when we get VFIR */
 #define LAP_MAX_HEADER (LAP_ADDR_HEADER + LAP_CTRL_HEADER)
+
+/* Each IrDA device gets a random 32 bits IRLAP device address */
+#define LAP_ALEN 4
 
 #define BROADCAST  0xffffffff /* Broadcast device address */
 #define CBROADCAST 0xfe       /* Connection broadcast address */
@@ -206,6 +208,8 @@ struct irlap_cb {
 	int    xbofs_delay;   /* Nr of XBOF's used to MTT */
 	int    bofs_count;    /* Negotiated extra BOFs */
 	int    next_bofs;     /* Negotiated extra BOFs after next frame */
+
+	int    mode;     /* IrLAP mode (primary, secondary or monitor) */
 };
 
 /* 
@@ -285,6 +289,23 @@ static inline int irlap_is_primary(struct irlap_cb *self)
 static inline void irlap_clear_disconnect(struct irlap_cb *self)
 {
 	self->disconnect_pending = FALSE;
+}
+
+/*
+ * Function irlap_next_state (self, state)
+ *
+ *    Switches state and provides debug information
+ *
+ */
+static inline void irlap_next_state(struct irlap_cb *self, IRLAP_STATE state)
+{
+	/*
+	if (!self || self->magic != LAP_MAGIC)
+		return;
+
+	IRDA_DEBUG(4, "next LAP state = %s\n", irlap_state[state]);
+	*/
+	self->state = state;
 }
 
 #endif

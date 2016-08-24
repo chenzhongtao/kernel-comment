@@ -4,7 +4,7 @@
  *  VMA_VM_FLAGS
  *  VM_EXEC
  */
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
 #include <asm/thread_info.h>
 
 /*
@@ -48,4 +48,26 @@
  */
 	.macro	asid, rd, rn
 	and	\rd, \rn, #255
+	.endm
+
+	.macro	crval, clear, mmuset, ucset
+#ifdef CONFIG_MMU
+	.word	\clear
+	.word	\mmuset
+#else
+	.word	\clear
+	.word	\ucset
+#endif
+	.endm
+
+/*
+ * cache_line_size - get the cache line size from the CSIDR register
+ * (available on ARMv7+). It assumes that the CSSR register was configured
+ * to access the L1 data cache CSIDR.
+ */
+	.macro	dcache_line_size, reg, tmp
+	mrc	p15, 1, \tmp, c0, c0, 0		@ read CSIDR
+	and	\tmp, \tmp, #7			@ cache line size encoding
+	mov	\reg, #16			@ size offset
+	mov	\reg, \reg, lsl \tmp		@ actual cache line size
 	.endm

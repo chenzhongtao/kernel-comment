@@ -14,8 +14,8 @@
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/device.h>
+#include <linux/amba/bus.h>
 
-#include <asm/hardware/amba.h>
 #include <asm/hardware.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -40,25 +40,32 @@ static int integrator_set_rtc(void)
 	return 1;
 }
 
-static void rtc_read_alarm(struct rtc_wkalrm *alrm)
+static int integrator_rtc_read_alarm(struct rtc_wkalrm *alrm)
 {
 	rtc_time_to_tm(readl(rtc_base + RTC_MR), &alrm->time);
+	return 0;
 }
 
-static int rtc_set_alarm(struct rtc_wkalrm *alrm)
+static inline int integrator_rtc_set_alarm(struct rtc_wkalrm *alrm)
 {
 	unsigned long time;
 	int ret;
 
-	ret = rtc_tm_to_time(&alrm->time, &time);
+	/*
+	 * At the moment, we can only deal with non-wildcarded alarm times.
+	 */
+	ret = rtc_valid_tm(&alrm->time);
+	if (ret == 0)
+		ret = rtc_tm_to_time(&alrm->time, &time);
 	if (ret == 0)
 		writel(time, rtc_base + RTC_MR);
 	return ret;
 }
 
-static void rtc_read_time(struct rtc_time *tm)
+static int integrator_rtc_read_time(struct rtc_time *tm)
 {
 	rtc_time_to_tm(readl(rtc_base + RTC_DR), tm);
+	return 0;
 }
 
 /*
@@ -69,7 +76,7 @@ static void rtc_read_time(struct rtc_time *tm)
  * edge of the 1Hz clock, we must write the time one second
  * in advance.
  */
-static int rtc_set_time(struct rtc_time *tm)
+static inline int integrator_rtc_set_time(struct rtc_time *tm)
 {
 	unsigned long time;
 	int ret;
@@ -83,13 +90,13 @@ static int rtc_set_time(struct rtc_time *tm)
 
 static struct rtc_ops rtc_ops = {
 	.owner		= THIS_MODULE,
-	.read_time	= rtc_read_time,
-	.set_time	= rtc_set_time,
-	.read_alarm	= rtc_read_alarm,
-	.set_alarm	= rtc_set_alarm,
+	.read_time	= integrator_rtc_read_time,
+	.set_time	= integrator_rtc_set_time,
+	.read_alarm	= integrator_rtc_read_alarm,
+	.set_alarm	= integrator_rtc_set_alarm,
 };
 
-static irqreturn_t rtc_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t arm_rtc_interrupt(int irq, void *dev_id)
 {
 	writel(0, rtc_base + RTC_EOI);
 	return IRQ_HANDLED;
@@ -117,7 +124,7 @@ static int rtc_probe(struct amba_device *dev, void *id)
 
 	xtime.tv_sec = __raw_readl(rtc_base + RTC_DR);
 
-	ret = request_irq(dev->irq[0], rtc_interrupt, SA_INTERRUPT,
+	ret = request_irq(dev->irq[0], arm_rtc_interrupt, IRQF_DISABLED,
 			  "rtc-pl030", dev);
 	if (ret)
 		goto map_out;
@@ -158,7 +165,7 @@ static int rtc_remove(struct amba_device *dev)
 
 static struct timespec rtc_delta;
 
-static int rtc_suspend(struct amba_device *dev, u32 state)
+static int rtc_suspend(struct amba_device *dev, pm_message_t state)
 {
 	struct timespec rtc;
 

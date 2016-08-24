@@ -32,6 +32,7 @@ enum {
   IPPROTO_PUP = 12,		/* PUP protocol				*/
   IPPROTO_UDP = 17,		/* User Datagram Protocol		*/
   IPPROTO_IDP = 22,		/* XNS IDP protocol			*/
+  IPPROTO_DCCP = 33,		/* Datagram Congestion Control Protocol */
   IPPROTO_RSVP = 46,		/* RSVP protocol			*/
   IPPROTO_GRE = 47,		/* Cisco GRE tunnels (rfc 1701,1702)	*/
 
@@ -39,10 +40,12 @@ enum {
 
   IPPROTO_ESP = 50,            /* Encapsulation Security Payload protocol */
   IPPROTO_AH = 51,             /* Authentication Header protocol       */
+  IPPROTO_BEETPH = 94,	       /* IP option pseudo header for BEET */
   IPPROTO_PIM    = 103,		/* Protocol Independent Multicast	*/
 
   IPPROTO_COMP   = 108,                /* Compression Header protocol */
   IPPROTO_SCTP   = 132,		/* Stream Control Transport Protocol	*/
+  IPPROTO_UDPLITE = 136,	/* UDP-Lite (RFC 3828)			*/
 
   IPPROTO_RAW	 = 255,		/* Raw IP packets			*/
   IPPROTO_MAX
@@ -51,7 +54,7 @@ enum {
 
 /* Internet address. */
 struct in_addr {
-	__u32	s_addr;
+	__be32	s_addr;
 };
 
 #define IP_TOS		1
@@ -71,6 +74,7 @@ struct in_addr {
 #define IP_FREEBIND	15
 #define IP_IPSEC_POLICY	16
 #define IP_XFRM_POLICY	17
+#define IP_PASSSEC	18
 
 /* BSD compatibility */
 #define IP_RECVRETOPTS	IP_RETOPTS
@@ -79,6 +83,7 @@ struct in_addr {
 #define IP_PMTUDISC_DONT		0	/* Never send DF frames */
 #define IP_PMTUDISC_WANT		1	/* Use per route hints	*/
 #define IP_PMTUDISC_DO			2	/* Always DF		*/
+#define IP_PMTUDISC_PROBE		3       /* Ignore dst pmtu      */
 
 #define IP_MULTICAST_IF			32
 #define IP_MULTICAST_TTL 		33
@@ -121,17 +126,17 @@ struct ip_mreqn
 };
 
 struct ip_mreq_source {
-	__u32		imr_multiaddr;
-	__u32		imr_interface;
-	__u32		imr_sourceaddr;
+	__be32		imr_multiaddr;
+	__be32		imr_interface;
+	__be32		imr_sourceaddr;
 };
 
 struct ip_msfilter {
-	__u32		imsf_multiaddr;
-	__u32		imsf_interface;
+	__be32		imsf_multiaddr;
+	__be32		imsf_interface;
 	__u32		imsf_fmode;
 	__u32		imsf_numsrc;
-	__u32		imsf_slist[1];
+	__be32		imsf_slist[1];
 };
 
 #define IP_MSFILTER_SIZE(numsrc) \
@@ -175,7 +180,7 @@ struct in_pktinfo
 #define __SOCK_SIZE__	16		/* sizeof(struct sockaddr)	*/
 struct sockaddr_in {
   sa_family_t		sin_family;	/* Address family		*/
-  unsigned short int	sin_port;	/* Port number			*/
+  __be16		sin_port;	/* Port number			*/
   struct in_addr	sin_addr;	/* Internet address		*/
 
   /* Pad to size of `struct sockaddr'. */

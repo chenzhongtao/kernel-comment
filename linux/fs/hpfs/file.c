@@ -86,25 +86,33 @@ static int hpfs_writepage(struct page *page, struct writeback_control *wbc)
 {
 	return block_write_full_page(page,hpfs_get_block, wbc);
 }
+
 static int hpfs_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page,hpfs_get_block);
 }
-static int hpfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
+
+static int hpfs_write_begin(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned flags,
+			struct page **pagep, void **fsdata)
 {
-	return cont_prepare_write(page,from,to,hpfs_get_block,
-		&hpfs_i(page->mapping->host)->mmu_private);
+	*pagep = NULL;
+	return cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
+				hpfs_get_block,
+				&hpfs_i(mapping->host)->mmu_private);
 }
+
 static sector_t _hpfs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,hpfs_get_block);
 }
-struct address_space_operations hpfs_aops = {
+
+const struct address_space_operations hpfs_aops = {
 	.readpage = hpfs_readpage,
 	.writepage = hpfs_writepage,
 	.sync_page = block_sync_page,
-	.prepare_write = hpfs_prepare_write,
-	.commit_write = generic_commit_write,
+	.write_begin = hpfs_write_begin,
+	.write_end = generic_write_end,
 	.bmap = _hpfs_bmap
 };
 
@@ -113,27 +121,26 @@ static ssize_t hpfs_file_write(struct file *file, const char __user *buf,
 {
 	ssize_t retval;
 
-	retval = generic_file_write(file, buf, count, ppos);
-	if (retval > 0) {
-		struct inode *inode = file->f_dentry->d_inode;
-		inode->i_mtime = CURRENT_TIME_SEC;
-		hpfs_i(inode)->i_dirty = 1;
-	}
+	retval = do_sync_write(file, buf, count, ppos);
+	if (retval > 0)
+		hpfs_i(file->f_path.dentry->d_inode)->i_dirty = 1;
 	return retval;
 }
 
-struct file_operations hpfs_file_ops =
+const struct file_operations hpfs_file_ops =
 {
 	.llseek		= generic_file_llseek,
-	.read		= generic_file_read,
+	.read		= do_sync_read,
+	.aio_read	= generic_file_aio_read,
 	.write		= hpfs_file_write,
+	.aio_write	= generic_file_aio_write,
 	.mmap		= generic_file_mmap,
 	.release	= hpfs_file_release,
 	.fsync		= hpfs_file_fsync,
-	.sendfile	= generic_file_sendfile,
+	.splice_read	= generic_file_splice_read,
 };
 
-struct inode_operations hpfs_file_iops =
+const struct inode_operations hpfs_file_iops =
 {
 	.truncate	= hpfs_truncate,
 	.setattr	= hpfs_notify_change,

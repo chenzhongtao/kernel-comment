@@ -15,25 +15,22 @@
  */
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/fcntl.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
-#include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
-#include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/crc32.h>
 #include <linux/bitops.h>
+#include <linux/platform_device.h>
 
-#include <asm/system.h>
-#include <asm/irq.h>
+#include <asm/hardware.h>
 #include <asm/io.h>
-#include <asm/dma.h>
+#include <asm/system.h>
 
 #define TX_BUFFERS 15
 #define RX_BUFFERS 25
@@ -41,7 +38,7 @@
 #include "am79c961a.h"
 
 static irqreturn_t
-am79c961_interrupt (int irq, void *dev_id, struct pt_regs *regs);
+am79c961_interrupt (int irq, void *dev_id);
 
 static unsigned int net_debug = NET_DEBUG;
 
@@ -85,7 +82,7 @@ static inline unsigned short read_ireg(u_long base_addr, u_int reg)
 	u_short v;
 	__asm__(
 	"str%?h	%1, [%2]	@ NAT_RAP\n\t"
-	"str%?h	%0, [%2, #8]	@ NET_IDP\n\t"
+	"ldr%?h	%0, [%2, #8]	@ NET_IDP\n\t"
 	: "=r" (v)
 	: "r" (reg), "r" (ISAIO_BASE + 0x0464));
 	return v;
@@ -283,12 +280,15 @@ static void am79c961_timer(unsigned long data)
 	lnkstat = read_ireg(dev->base_addr, ISALED0) & ISALED0_LNKST;
 	carrier = netif_carrier_ok(dev);
 
-	if (lnkstat && !carrier)
+	if (lnkstat && !carrier) {
 		netif_carrier_on(dev);
-	else if (!lnkstat && carrier)
+		printk("%s: link up\n", dev->name);
+	} else if (!lnkstat && carrier) {
 		netif_carrier_off(dev);
+		printk("%s: link down\n", dev->name);
+	}
 
-	mod_timer(&priv->timer, jiffies + 5*HZ);
+	mod_timer(&priv->timer, jiffies + msecs_to_jiffies(500));
 }
 
 /*
@@ -414,7 +414,7 @@ static void am79c961_setmulticastlist (struct net_device *dev)
 	/*
 	 * Update the multicast hash table
 	 */
-	for (i = 0; i < sizeof(multi_hash) / sizeof(multi_hash[0]); i++)
+	for (i = 0; i < ARRAY_SIZE(multi_hash); i++)
 		write_rreg(dev->base_addr, i + LADRL, multi_hash[i]);
 
 	/*
@@ -526,7 +526,6 @@ am79c961_rx(struct net_device *dev, struct dev_priv *priv)
 		skb = dev_alloc_skb(len + 2);
 
 		if (skb) {
-			skb->dev = dev;
 			skb_reserve(skb, 2);
 
 			am_readbuffer(dev, pktaddr, skb_put(skb, len), len);
@@ -596,7 +595,7 @@ am79c961_tx(struct net_device *dev, struct dev_priv *priv)
 }
 
 static irqreturn_t
-am79c961_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+am79c961_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *)dev_id;
 	struct dev_priv *priv = netdev_priv(dev);
@@ -635,7 +634,7 @@ static void am79c961_poll_controller(struct net_device *dev)
 {
 	unsigned long flags;
 	local_irq_save(flags);
-	am79c961_interrupt(dev->irq, dev, NULL);
+	am79c961_interrupt(dev->irq, dev);
 	local_irq_restore(flags);
 }
 #endif
@@ -668,16 +667,23 @@ static void __init am79c961_banner(void)
 		printk(KERN_INFO "%s", version);
 }
 
-static int __init am79c961_init(void)
+static int __init am79c961_probe(struct platform_device *pdev)
 {
+	struct resource *res;
 	struct net_device *dev;
 	struct dev_priv *priv;
 	int i, ret;
+
+	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
+	if (!res)
+		return -ENODEV;
 
 	dev = alloc_etherdev(sizeof(struct dev_priv));
 	ret = -ENOMEM;
 	if (!dev)
 		goto out;
+
+	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	priv = netdev_priv(dev);
 
@@ -686,10 +692,12 @@ static int __init am79c961_init(void)
 	 * The PNP initialisation should have been
 	 * done by the ether bootp loader.
 	 */
-	dev->base_addr = 0x220;
-	dev->irq = IRQ_EBSA110_ETHERNET;
+	dev->base_addr = res->start;
+	dev->irq = platform_get_irq(pdev, 0);
 
-    	ret = -ENODEV;
+	ret = -ENODEV;
+	if (dev->irq < 0)
+		goto nodev;
 	if (!request_region(dev->base_addr, 0x18, dev->name))
 		goto nodev;
 
@@ -708,14 +716,10 @@ static int __init am79c961_init(void)
 	    inb(dev->base_addr + 4) != 0x2b)
 	    	goto release;
 
-	am79c961_banner();
-	printk(KERN_INFO "%s: ether address ", dev->name);
-
-	/* Retrive and print the ethernet address. */
-	for (i = 0; i < 6; i++) {
+	for (i = 0; i < 6; i++)
 		dev->dev_addr[i] = inb(dev->base_addr + i * 2) & 0xff;
-		printk (i == 5 ? "%02x\n" : "%02x:", dev->dev_addr[i]);
-	}
+
+	am79c961_banner();
 
 	spin_lock_init(&priv->chip_lock);
 	init_timer(&priv->timer);
@@ -736,8 +740,13 @@ static int __init am79c961_init(void)
 #endif
 
 	ret = register_netdev(dev);
-	if (ret == 0)
+	if (ret == 0) {
+		DECLARE_MAC_BUF(mac);
+
+		printk(KERN_INFO "%s: ether address %s\n",
+		       dev->name, print_mac(mac, dev->dev_addr));
 		return 0;
+	}
 
 release:
 	release_region(dev->base_addr, 0x18);
@@ -745,6 +754,18 @@ nodev:
 	free_netdev(dev);
 out:
 	return ret;
+}
+
+static struct platform_driver am79c961_driver = {
+	.probe		= am79c961_probe,
+	.driver		= {
+		.name	= "am79c961",
+	},
+};
+
+static int __init am79c961_init(void)
+{
+	return platform_driver_register(&am79c961_driver);
 }
 
 __initcall(am79c961_init);

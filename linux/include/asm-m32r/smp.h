@@ -1,10 +1,6 @@
 #ifndef _ASM_M32R_SMP_H
 #define _ASM_M32R_SMP_H
 
-/* $Id$ */
-
-#include <linux/config.h>
-
 #ifdef CONFIG_SMP
 #ifndef __ASSEMBLY__
 
@@ -61,15 +57,14 @@ extern physid_mask_t phys_cpu_present_map;
  * Some lowlevel functions might want to know about
  * the real CPU ID <-> CPU # mapping.
  */
-extern volatile int physid_2_cpu[NR_CPUS];
 extern volatile int cpu_2_physid[NR_CPUS];
-#define physid_to_cpu(physid)	physid_2_cpu[physid]
 #define cpu_to_physid(cpu_id)	cpu_2_physid[cpu_id]
 
-#define smp_processor_id()	(current_thread_info()->cpu)
+#define raw_smp_processor_id()	(current_thread_info()->cpu)
 
 extern cpumask_t cpu_callout_map;
-#define cpu_possible_map cpu_callout_map
+extern cpumask_t cpu_possible_map;
+extern cpumask_t cpu_present_map;
 
 static __inline__ int hard_smp_processor_id(void)
 {
@@ -113,6 +108,10 @@ extern unsigned long send_IPI_mask_phys(cpumask_t, int, int);
 #define IPI_SHIFT	(0)
 #define NR_IPIS		(8)
 
-#endif	/* CONFIG_SMP */
+#else	/* CONFIG_SMP */
+
+#define hard_smp_processor_id()		0
+
+#endif /* CONFIG_SMP */
 
 #endif	/* _ASM_M32R_SMP_H */

@@ -5,8 +5,9 @@ The main development site and CVS repository for these
 drivers is http://linuxtv.org/.
 
 The developer mailing list linux-dvb is also hosted there,
-see http://linuxtv.org/mailinglists.xml. Please check
-the archive http://linuxtv.org/mailinglists/linux-dvb/
+see http://linuxtv.org/lists.php. Please check
+the archive http://linuxtv.org/pipermail/linux-dvb/
+and the Wiki http://linuxtv.org/wiki/
 before asking newbie questions on the list.
 
 API documentation, utilities and test/example programs
@@ -15,15 +16,27 @@ are available as part of the old driver package for Linux 2.4
 We plan to split this into separate packages, but it's not
 been done yet.
 
-http://linuxtv.org/download/dvb/
+http://linuxtv.org/downloads/
 
 What's inside this directory:
 
-"cards.txt" 
+"avermedia.txt"
+contains detailed information about the
+Avermedia DVB-T cards. See also "bt8xx.txt".
+
+"bt8xx.txt"
+contains detailed information about the
+various bt8xx based "budget" DVB cards.
+
+"cards.txt"
 contains a list of supported hardware.
 
+"ci.txt"
+contains detailed information about the
+CI module as part from TwinHan cards and Clones.
+
 "contributors.txt"
-is the who-is-who of DVB development
+is the who-is-who of DVB development.
 
 "faq.txt"
 contains frequently asked questions and their answers.
@@ -33,19 +46,17 @@ script to download and extract firmware for those devices
 that require it.
 
 "ttusb-dec.txt"
-contains detailed informations about the
+contains detailed information about the
 TT DEC2000/DEC3000 USB DVB hardware.
-
-"bt8xx.txt" 
-contains detailed installation instructions for the
-various bt8xx based "budget" DVB cards
-(Nebula, Pinnacle PCTV, Twinhan DST)
-
-"README.dibusb"
-contains detailed information about adapters
-based on DiBcom reference design.
 
 "udev.txt"
 how to get DVB and udev up and running.
+
+"README.dvb-usb"
+contains detailed information about the DVB USB cards.
+
+"README.flexcop"
+contains detailed information about the
+Technisat- and Flexcop B2C2 drivers.
 
 Good luck and have fun!

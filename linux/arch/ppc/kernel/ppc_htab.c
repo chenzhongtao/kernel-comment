@@ -10,15 +10,14 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/sysctl.h>
+#include <linux/capability.h>
 #include <linux/ctype.h>
 #include <linux/threads.h>
-#include <linux/smp_lock.h>
 #include <linux/seq_file.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
@@ -51,7 +50,7 @@ static int ppc_htab_open(struct inode *inode, struct file *file)
 	return single_open(file, ppc_htab_show, NULL);
 }
 
-struct file_operations ppc_htab_operations = {
+const struct file_operations ppc_htab_operations = {
 	.open		= ppc_htab_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -103,12 +102,12 @@ static char *pmc2_lookup(unsigned long mmcr0)
 static int ppc_htab_show(struct seq_file *m, void *v)
 {
 	unsigned long mmcr0 = 0, pmc1 = 0, pmc2 = 0;
-#if defined(CONFIG_PPC_STD_MMU) && !defined(CONFIG_PPC64BRIDGE)
+#if defined(CONFIG_PPC_STD_MMU)
 	unsigned int kptes = 0, uptes = 0;
 	PTE *ptr;
 #endif /* CONFIG_PPC_STD_MMU */
 
-	if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
+	if (cpu_has_feature(CPU_FTR_604_PERF_MON)) {
 		mmcr0 = mfspr(SPRN_MMCR0);
 		pmc1 = mfspr(SPRN_PMC1);
 		pmc2 = mfspr(SPRN_PMC2);
@@ -132,7 +131,6 @@ static int ppc_htab_show(struct seq_file *m, void *v)
 		return 0;
 	}
 
-#ifndef CONFIG_PPC64BRIDGE
 	for (ptr = Hash; ptr < Hash_end; ptr++) {
 		unsigned int mctx, vsid;
 
@@ -146,7 +144,6 @@ static int ppc_htab_show(struct seq_file *m, void *v)
 		else
 			uptes++;
 	}
-#endif
 
 	seq_printf(m,
 		      "PTE Hash Table Information\n"
@@ -154,20 +151,16 @@ static int ppc_htab_show(struct seq_file *m, void *v)
 		      "Buckets\t\t: %lu\n"
  		      "Address\t\t: %08lx\n"
 		      "Entries\t\t: %lu\n"
-#ifndef CONFIG_PPC64BRIDGE
 		      "User ptes\t: %u\n"
 		      "Kernel ptes\t: %u\n"
 		      "Percent full\t: %lu%%\n"
-#endif
                       , (unsigned long)(Hash_size>>10),
 		      (Hash_size/(sizeof(PTE)*8)),
 		      (unsigned long)Hash,
 		      Hash_size/sizeof(PTE)
-#ifndef CONFIG_PPC64BRIDGE
                       , uptes,
 		      kptes,
 		      ((kptes+uptes)*100) / (Hash_size/sizeof(PTE))
-#endif
 		);
 
 	seq_printf(m,
@@ -209,7 +202,7 @@ static ssize_t ppc_htab_write(struct file * file, const char __user * ubuffer,
 
 	if ( !strncmp( buffer, "reset", 5) )
 	{
-		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
+		if (cpu_has_feature(CPU_FTR_604_PERF_MON)) {
 			/* reset PMC1 and PMC2 */
 			mtspr(SPRN_PMC1, 0);
 			mtspr(SPRN_PMC2, 0);
@@ -221,7 +214,7 @@ static ssize_t ppc_htab_write(struct file * file, const char __user * ubuffer,
 	}
 
 	/* Everything below here requires the performance monitor feature. */
-	if ( !cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON )
+	if (!cpu_has_feature(CPU_FTR_604_PERF_MON))
 		return count;
 
 	/* turn off performance monitoring */
@@ -339,7 +332,7 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 		"0.5", "1.0", "(reserved2)", "(reserved3)"
 	};
 
-	if (!(cur_cpu_spec[0]->cpu_features & CPU_FTR_L2CR))
+	if (!cpu_has_feature(CPU_FTR_L2CR))
 		return -EFAULT;
 
 	if ( /*!table->maxlen ||*/ (*ppos && !write)) {
@@ -443,22 +436,26 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
  */
 static ctl_table htab_ctl_table[]={
 	{
-		.ctl_name	= KERN_PPC_L2CR,
 		.procname	= "l2cr",
 		.mode		= 0644,
 		.proc_handler	= &proc_dol2crvec,
 	},
-	{ 0, },
+	{}
 };
 static ctl_table htab_sysctl_root[] = {
-	{ 1, "kernel", NULL, 0, 0755, htab_ctl_table, },
- 	{ 0,},
+	{
+		.ctl_name	= CTL_KERN,
+		.procname	= "kernel",
+		.mode		= 0555,
+		.child		= htab_ctl_table,
+	},
+	{}
 };
 
 static int __init
 register_ppc_htab_sysctl(void)
 {
-	register_sysctl_table(htab_sysctl_root, 0);
+	register_sysctl_table(htab_sysctl_root);
 
 	return 0;
 }

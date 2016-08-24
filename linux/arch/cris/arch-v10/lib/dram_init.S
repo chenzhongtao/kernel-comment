@@ -40,7 +40,7 @@
  * Copy warning from head.S about r8 and r9
  *
  * Revision 1.7  2001/04/18 12:05:39  bjornw
- * Fixed comments, and explicitely include config.h to be sure its there
+ * Fixed comments, and explicitly include config.h to be sure its there
  *
  * Revision 1.6  2001/04/10 06:20:16  starvik
  * Delay should be 200us, not 200ns
@@ -66,11 +66,10 @@
  */
 
 /* Just to be certain the config file is included, we include it here
- * explicitely instead of depending on it being included in the file that
+ * explicitly instead of depending on it being included in the file that
  * uses this code.
  */
 
-#include <linux/config.h>
 
 	;; WARNING! The registers r8 and r9 are used as parameters carrying
 	;; information from the decompressor (if the kernel was compressed). 

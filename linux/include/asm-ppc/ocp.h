@@ -26,13 +26,11 @@
 
 #include <linux/init.h>
 #include <linux/list.h>
-#include <linux/config.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/device.h>
+#include <linux/rwsem.h>
 
 #include <asm/mmu.h>
 #include <asm/ocp_ids.h>
-#include <asm/rwsem.h>
 #include <asm/semaphore.h>
 
 #ifdef CONFIG_PPC_OCP
@@ -119,7 +117,7 @@ struct ocp_driver {
 	const struct ocp_device_id *id_table;	/* NULL if wants all devices */
 	int  (*probe)  (struct ocp_device *dev);	/* New device inserted */
 	void (*remove) (struct ocp_device *dev);	/* Device removed (NULL if not a hot-plug capable driver) */
-	int  (*suspend) (struct ocp_device *dev, u32 state);	/* Device suspended */
+	int  (*suspend) (struct ocp_device *dev, pm_message_t state);	/* Device suspended */
 	int  (*resume) (struct ocp_device *dev);	                /* Device woken up */
 	struct device_driver driver;
 };
@@ -189,7 +187,7 @@ extern void ocp_for_each_device(void(*callback)(struct ocp_device *, void *arg),
 /* Sysfs support */
 #define OCP_SYSFS_ADDTL(type, format, name, field)			\
 static ssize_t								\
-show_##name##_##field(struct device *dev, char *buf)			\
+show_##name##_##field(struct device *dev, struct device_attribute *attr, char *buf)			\
 {									\
 	struct ocp_device *odev = to_ocp_dev(dev);			\
 	type *add = odev->def->additions;				\
@@ -200,10 +198,6 @@ static DEVICE_ATTR(name##_##field, S_IRUGO, show_##name##_##field, NULL);
 
 #ifdef CONFIG_IBM_OCP
 #include <asm/ibm_ocp.h>
-#endif
-
-#ifdef CONFIG_FSL_OCP
-#include <asm/fsl_ocp.h>
 #endif
 
 #endif				/* CONFIG_PPC_OCP */

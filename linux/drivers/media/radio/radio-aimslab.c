@@ -1,5 +1,6 @@
 /* radiotrack (radioreveal) driver for Linux radio support
  * (c) 1997 M. Kirkwood
+ * Converted to V4L2 API by Mauro Carvalho Chehab <mchehab@infradead.org>
  * Converted to new API by Alan Cox <Alan.Cox@linux.org>
  * Various bugfixes and enhancements by Russell Kroll <rkroll@exploits.org>
  *
@@ -24,26 +25,29 @@
  *   out(port, start_increasing_volume);
  *   wait(a_wee_while);
  *   out(port, stop_changing_the_volume);
- *  
+ *
  */
 
 #include <linux/module.h>	/* Modules 			*/
 #include <linux/init.h>		/* Initdata			*/
-#include <linux/ioport.h>	/* check_region, request_region	*/
+#include <linux/ioport.h>	/* request_region		*/
 #include <linux/delay.h>	/* udelay			*/
 #include <asm/io.h>		/* outb, outb_p			*/
 #include <asm/uaccess.h>	/* copy to/from user		*/
-#include <linux/videodev.h>	/* kernel radio structs		*/
-#include <linux/config.h>	/* CONFIG_RADIO_RTRACK_PORT 	*/
+#include <linux/videodev2.h>	/* kernel radio structs		*/
+#include <media/v4l2-common.h>
 #include <asm/semaphore.h>	/* Lock for the I/O 		*/
+
+#include <linux/version.h>	/* for KERNEL_VERSION MACRO	*/
+#define RADIO_VERSION KERNEL_VERSION(0,0,2)
 
 #ifndef CONFIG_RADIO_RTRACK_PORT
 #define CONFIG_RADIO_RTRACK_PORT -1
 #endif
 
-static int io = CONFIG_RADIO_RTRACK_PORT; 
+static int io = CONFIG_RADIO_RTRACK_PORT;
 static int radio_nr = -1;
-static struct semaphore lock;
+static struct mutex lock;
 
 struct rt_device
 {
@@ -59,7 +63,7 @@ struct rt_device
 static void sleep_delay(long n)
 {
 	/* Sleep nicely for 'n' uS */
-	int d=n/(1000000/HZ);
+	int d=n/msecs_to_jiffies(1000);
 	if(!d)
 		udelay(n);
 	else
@@ -83,23 +87,23 @@ static void rt_incvol(void)
 static void rt_mute(struct rt_device *dev)
 {
 	dev->muted = 1;
-	down(&lock);
+	mutex_lock(&lock);
 	outb(0xd0, io);			/* volume steady, off		*/
-	up(&lock);
+	mutex_unlock(&lock);
 }
 
 static int rt_setvol(struct rt_device *dev, int vol)
 {
 	int i;
 
-	down(&lock);
-	
+	mutex_lock(&lock);
+
 	if(vol == dev->curvol) {	/* requested volume = current */
 		if (dev->muted) {	/* user is unmuting the card  */
 			dev->muted = 0;
 			outb (0xd8, io);	/* enable card */
-		}	
-		up(&lock);
+		}
+		mutex_unlock(&lock);
 		return 0;
 	}
 
@@ -108,24 +112,24 @@ static int rt_setvol(struct rt_device *dev, int vol)
 		sleep_delay(2000000);	/* make sure it's totally down	*/
 		outb(0xd0, io);		/* volume steady, off		*/
 		dev->curvol = 0;	/* track the volume state!	*/
-		up(&lock);
+		mutex_unlock(&lock);
 		return 0;
 	}
 
 	dev->muted = 0;
 	if(vol > dev->curvol)
-		for(i = dev->curvol; i < vol; i++) 
+		for(i = dev->curvol; i < vol; i++)
 			rt_incvol();
 	else
-		for(i = dev->curvol; i > vol; i--) 
+		for(i = dev->curvol; i > vol; i--)
 			rt_decvol();
 
 	dev->curvol = vol;
-	up(&lock);
+	mutex_unlock(&lock);
 	return 0;
 }
 
-/* the 128+64 on these outb's is to keep the volume stable while tuning 
+/* the 128+64 on these outb's is to keep the volume stable while tuning
  * without them, the volume _will_ creep up with each frequency change
  * and bit 4 (+16) is to keep the signal strength meter enabled
  */
@@ -140,7 +144,7 @@ static void send_0_byte(int port, struct rt_device *dev)
 		outb_p(128+64+16+8+  1, port);  /* on + wr-enable + data low */
 		outb_p(128+64+16+8+2+1, port);  /* clock */
 	}
-	sleep_delay(1000); 
+	sleep_delay(1000);
 }
 
 static void send_1_byte(int port, struct rt_device *dev)
@@ -148,13 +152,13 @@ static void send_1_byte(int port, struct rt_device *dev)
 	if ((dev->curvol == 0) || (dev->muted)) {
 		outb_p(128+64+16+4  +1, port);   /* wr-enable+data high */
 		outb_p(128+64+16+4+2+1, port);   /* clock */
-	} 
+	}
 	else {
 		outb_p(128+64+16+8+4  +1, port); /* on+wr-enable+data high */
 		outb_p(128+64+16+8+4+2+1, port); /* clock */
 	}
 
-	sleep_delay(1000); 
+	sleep_delay(1000);
 }
 
 static int rt_setfreq(struct rt_device *dev, unsigned long freq)
@@ -167,9 +171,9 @@ static int rt_setfreq(struct rt_device *dev, unsigned long freq)
 
 	freq += 171200;			/* Add 10.7 MHz IF 		*/
 	freq /= 800;			/* Convert to 50 kHz units	*/
-	
-	down(&lock);			/* Stop other ops interfering */
-	 
+
+	mutex_lock(&lock);			/* Stop other ops interfering */
+
 	send_0_byte (io, dev);		/*  0: LSB of frequency		*/
 
 	for (i = 0; i < 13; i++)	/*   : frequency bits (1-13)	*/
@@ -195,8 +199,8 @@ static int rt_setfreq(struct rt_device *dev, unsigned long freq)
 		outb (0xd0, io);	/* volume steady + sigstr */
 	else
 		outb (0xd8, io);	/* volume steady + sigstr + on */
-		
-	up(&lock);
+
+	mutex_unlock(&lock);
 
 	return 0;
 }
@@ -208,97 +212,178 @@ static int rt_getsigstr(struct rt_device *dev)
 	return 1;		/* signal present		*/
 }
 
-static int rt_do_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, void *arg)
-{
-	struct video_device *dev = video_devdata(file);
-	struct rt_device *rt=dev->priv;
-	
-	switch(cmd)
+static struct v4l2_queryctrl radio_qctrl[] = {
 	{
-		case VIDIOCGCAP:
-		{
-			struct video_capability *v = arg;
-			memset(v,0,sizeof(*v));
-			v->type=VID_TYPE_TUNER;
-			v->channels=1;
-			v->audios=1;
-			strcpy(v->name, "RadioTrack");
-			return 0;
-		}
-		case VIDIOCGTUNER:
-		{
-			struct video_tuner *v = arg;
-			if(v->tuner)	/* Only 1 tuner */ 
-				return -EINVAL;
-			v->rangelow=(87*16000);
-			v->rangehigh=(108*16000);
-			v->flags=VIDEO_TUNER_LOW;
-			v->mode=VIDEO_MODE_AUTO;
-			strcpy(v->name, "FM");
-			v->signal=0xFFFF*rt_getsigstr(rt);
-			return 0;
-		}
-		case VIDIOCSTUNER:
-		{
-			struct video_tuner *v = arg;
-			if(v->tuner!=0)
-				return -EINVAL;
-			/* Only 1 tuner so no setting needed ! */
-			return 0;
-		}
-		case VIDIOCGFREQ:
-		{
-			unsigned long *freq = arg;
-			*freq = rt->curfreq;
-			return 0;
-		}
-		case VIDIOCSFREQ:
-		{
-			unsigned long *freq = arg;
-			rt->curfreq = *freq;
-			rt_setfreq(rt, rt->curfreq);
-			return 0;
-		}
-		case VIDIOCGAUDIO:
-		{	
-			struct video_audio *v = arg;
-			memset(v,0, sizeof(*v));
-			v->flags|=VIDEO_AUDIO_MUTABLE|VIDEO_AUDIO_VOLUME;
-			v->volume=rt->curvol * 6554;
-			v->step=6554;
-			strcpy(v->name, "Radio");
-			return 0;			
-		}
-		case VIDIOCSAUDIO:
-		{
-			struct video_audio *v = arg;
-			if(v->audio) 
-				return -EINVAL;
-			if(v->flags&VIDEO_AUDIO_MUTE) 
-				rt_mute(rt);
-			else
-				rt_setvol(rt,v->volume/6554);
-			return 0;
-		}
-		default:
-			return -ENOIOCTLCMD;
+		.id            = V4L2_CID_AUDIO_MUTE,
+		.name          = "Mute",
+		.minimum       = 0,
+		.maximum       = 1,
+		.default_value = 1,
+		.type          = V4L2_CTRL_TYPE_BOOLEAN,
+	},{
+		.id            = V4L2_CID_AUDIO_VOLUME,
+		.name          = "Volume",
+		.minimum       = 0,
+		.maximum       = 0xff,
+		.step          = 1,
+		.default_value = 0xff,
+		.type          = V4L2_CTRL_TYPE_INTEGER,
 	}
+};
+
+static int vidioc_querycap(struct file *file, void  *priv,
+					struct v4l2_capability *v)
+{
+	strlcpy(v->driver, "radio-aimslab", sizeof(v->driver));
+	strlcpy(v->card, "RadioTrack", sizeof(v->card));
+	sprintf(v->bus_info, "ISA");
+	v->version = RADIO_VERSION;
+	v->capabilities = V4L2_CAP_TUNER;
+	return 0;
 }
 
-static int rt_ioctl(struct inode *inode, struct file *file,
-		    unsigned int cmd, unsigned long arg)
+static int vidioc_g_tuner(struct file *file, void *priv,
+					struct v4l2_tuner *v)
 {
-	return video_usercopy(inode, file, cmd, arg, rt_do_ioctl);
+	struct video_device *dev = video_devdata(file);
+	struct rt_device *rt = dev->priv;
+
+	if (v->index > 0)
+		return -EINVAL;
+
+	strcpy(v->name, "FM");
+	v->type = V4L2_TUNER_RADIO;
+	v->rangelow = (87*16000);
+	v->rangehigh = (108*16000);
+	v->rxsubchans = V4L2_TUNER_SUB_MONO;
+	v->capability = V4L2_TUNER_CAP_LOW;
+	v->audmode = V4L2_TUNER_MODE_MONO;
+	v->signal = 0xffff*rt_getsigstr(rt);
+	return 0;
+}
+
+static int vidioc_s_tuner(struct file *file, void *priv,
+					struct v4l2_tuner *v)
+{
+	if (v->index > 0)
+		return -EINVAL;
+	return 0;
+}
+
+static int vidioc_s_frequency(struct file *file, void *priv,
+					struct v4l2_frequency *f)
+{
+	struct video_device *dev = video_devdata(file);
+	struct rt_device *rt = dev->priv;
+
+	rt->curfreq = f->frequency;
+	rt_setfreq(rt, rt->curfreq);
+	return 0;
+}
+
+static int vidioc_g_frequency(struct file *file, void *priv,
+					struct v4l2_frequency *f)
+{
+	struct video_device *dev = video_devdata(file);
+	struct rt_device *rt = dev->priv;
+
+	f->type = V4L2_TUNER_RADIO;
+	f->frequency = rt->curfreq;
+	return 0;
+}
+
+static int vidioc_queryctrl(struct file *file, void *priv,
+					struct v4l2_queryctrl *qc)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(radio_qctrl); i++) {
+		if (qc->id && qc->id == radio_qctrl[i].id) {
+			memcpy(qc, &(radio_qctrl[i]),
+						sizeof(*qc));
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
+
+static int vidioc_g_ctrl(struct file *file, void *priv,
+					struct v4l2_control *ctrl)
+{
+	struct video_device *dev = video_devdata(file);
+	struct rt_device *rt = dev->priv;
+
+	switch (ctrl->id) {
+	case V4L2_CID_AUDIO_MUTE:
+		ctrl->value = rt->muted;
+		return 0;
+	case V4L2_CID_AUDIO_VOLUME:
+		ctrl->value = rt->curvol * 6554;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static int vidioc_s_ctrl(struct file *file, void *priv,
+					struct v4l2_control *ctrl)
+{
+	struct video_device *dev = video_devdata(file);
+	struct rt_device *rt = dev->priv;
+
+	switch (ctrl->id) {
+	case V4L2_CID_AUDIO_MUTE:
+		if (ctrl->value)
+			rt_mute(rt);
+		else
+			rt_setvol(rt,rt->curvol);
+		return 0;
+	case V4L2_CID_AUDIO_VOLUME:
+		rt_setvol(rt,ctrl->value);
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static int vidioc_g_audio (struct file *file, void *priv,
+					struct v4l2_audio *a)
+{
+	if (a->index > 1)
+		return -EINVAL;
+
+	strcpy(a->name, "Radio");
+	a->capability = V4L2_AUDCAP_STEREO;
+	return 0;
+}
+
+static int vidioc_g_input(struct file *filp, void *priv, unsigned int *i)
+{
+	*i = 0;
+	return 0;
+}
+
+static int vidioc_s_input(struct file *filp, void *priv, unsigned int i)
+{
+	if (i != 0)
+		return -EINVAL;
+	return 0;
+}
+
+static int vidioc_s_audio(struct file *file, void *priv,
+					struct v4l2_audio *a)
+{
+	if (a->index != 0)
+		return -EINVAL;
+	return 0;
 }
 
 static struct rt_device rtrack_unit;
 
-static struct file_operations rtrack_fops = {
+static const struct file_operations rtrack_fops = {
 	.owner		= THIS_MODULE,
 	.open           = video_exclusive_open,
 	.release        = video_exclusive_release,
-	.ioctl	        = rt_ioctl,
+	.ioctl		= video_ioctl2,
+	.compat_ioctl	= v4l_compat_ioctl32,
 	.llseek         = no_llseek,
 };
 
@@ -307,8 +392,19 @@ static struct video_device rtrack_radio=
 	.owner		= THIS_MODULE,
 	.name		= "RadioTrack radio",
 	.type		= VID_TYPE_TUNER,
-	.hardware	= VID_HARDWARE_RTRACK,
 	.fops           = &rtrack_fops,
+	.vidioc_querycap    = vidioc_querycap,
+	.vidioc_g_tuner     = vidioc_g_tuner,
+	.vidioc_s_tuner     = vidioc_s_tuner,
+	.vidioc_g_audio     = vidioc_g_audio,
+	.vidioc_s_audio     = vidioc_s_audio,
+	.vidioc_g_input     = vidioc_g_input,
+	.vidioc_s_input     = vidioc_s_input,
+	.vidioc_g_frequency = vidioc_g_frequency,
+	.vidioc_s_frequency = vidioc_s_frequency,
+	.vidioc_queryctrl   = vidioc_queryctrl,
+	.vidioc_g_ctrl      = vidioc_g_ctrl,
+	.vidioc_s_ctrl      = vidioc_s_ctrl,
 };
 
 static int __init rtrack_init(void)
@@ -319,14 +415,14 @@ static int __init rtrack_init(void)
 		return -EINVAL;
 	}
 
-	if (!request_region(io, 2, "rtrack")) 
+	if (!request_region(io, 2, "rtrack"))
 	{
 		printk(KERN_ERR "rtrack: port 0x%x already in use\n", io);
 		return -EBUSY;
 	}
 
 	rtrack_radio.priv=&rtrack_unit;
-	
+
 	if(video_register_device(&rtrack_radio, VFL_TYPE_RADIO, radio_nr)==-1)
 	{
 		release_region(io, 2);
@@ -335,10 +431,10 @@ static int __init rtrack_init(void)
 	printk(KERN_INFO "AIMSlab RadioTrack/RadioReveal card driver.\n");
 
 	/* Set up the I/O locking */
-	
-	init_MUTEX(&lock);
-	
- 	/* mute card - prevents noisy bootups */
+
+	mutex_init(&lock);
+
+	/* mute card - prevents noisy bootups */
 
 	/* this ensures that the volume is all the way down  */
 	outb(0x48, io);		/* volume down but still "on"	*/

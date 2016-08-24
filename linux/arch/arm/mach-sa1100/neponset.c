@@ -4,11 +4,10 @@
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/ptrace.h>
 #include <linux/tty.h>
 #include <linux/ioport.h>
 #include <linux/serial_core.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 
 #include <asm/hardware.h>
@@ -29,12 +28,12 @@
  * is rather unfortunate.
  */
 static void
-neponset_irq_handler(unsigned int irq, struct irqdesc *desc, struct pt_regs *regs)
+neponset_irq_handler(unsigned int irq, struct irq_desc *desc)
 {
 	unsigned int irr;
 
 	while (1) {
-		struct irqdesc *d;
+		struct irq_desc *d;
 
 		/*
 		 * Acknowledge the parent IRQ.
@@ -59,14 +58,22 @@ neponset_irq_handler(unsigned int irq, struct irqdesc *desc, struct pt_regs *reg
 		if (irr & (IRR_ETHERNET | IRR_USAR)) {
 			desc->chip->mask(irq);
 
+			/*
+			 * Ack the interrupt now to prevent re-entering
+			 * this neponset handler.  Again, this is safe
+			 * since we'll check the IRR register prior to
+			 * leaving.
+			 */
+			desc->chip->ack(irq);
+
 			if (irr & IRR_ETHERNET) {
 				d = irq_desc + IRQ_NEPONSET_SMC9196;
-				d->handle(IRQ_NEPONSET_SMC9196, d, regs);
+				desc_handle_irq(IRQ_NEPONSET_SMC9196, d);
 			}
 
 			if (irr & IRR_USAR) {
 				d = irq_desc + IRQ_NEPONSET_USAR;
-				d->handle(IRQ_NEPONSET_USAR, d, regs);
+				desc_handle_irq(IRQ_NEPONSET_USAR, d);
 			}
 
 			desc->chip->unmask(irq);
@@ -74,7 +81,7 @@ neponset_irq_handler(unsigned int irq, struct irqdesc *desc, struct pt_regs *reg
 
 		if (irr & IRR_SA1111) {
 			d = irq_desc + IRQ_NEPONSET_SA1111;
-			d->handle(IRQ_NEPONSET_SA1111, d, regs);
+			desc_handle_irq(IRQ_NEPONSET_SA1111, d);
 		}
 	}
 }
@@ -132,12 +139,12 @@ static u_int neponset_get_mctrl(struct uart_port *port)
 	return ret;
 }
 
-static struct sa1100_port_fns neponset_port_fns __initdata = {
+static struct sa1100_port_fns neponset_port_fns __devinitdata = {
 	.set_mctrl	= neponset_set_mctrl,
 	.get_mctrl	= neponset_get_mctrl,
 };
 
-static int neponset_probe(struct device *dev)
+static int __devinit neponset_probe(struct platform_device *dev)
 {
 	sa1100_register_uart_fns(&neponset_port_fns);
 
@@ -160,9 +167,9 @@ static int neponset_probe(struct device *dev)
 	 * Setup other Neponset IRQs.  SA1111 will be done by the
 	 * generic SA1111 code.
 	 */
-	set_irq_handler(IRQ_NEPONSET_SMC9196, do_simple_IRQ);
+	set_irq_handler(IRQ_NEPONSET_SMC9196, handle_simple_irq);
 	set_irq_flags(IRQ_NEPONSET_SMC9196, IRQF_VALID | IRQF_PROBE);
-	set_irq_handler(IRQ_NEPONSET_USAR, do_simple_IRQ);
+	set_irq_handler(IRQ_NEPONSET_USAR, handle_simple_irq);
 	set_irq_flags(IRQ_NEPONSET_USAR, IRQF_VALID | IRQF_PROBE);
 
 	/*
@@ -178,34 +185,21 @@ static int neponset_probe(struct device *dev)
 /*
  * LDM power management.
  */
-static int neponset_suspend(struct device *dev, u32 state, u32 level)
+static unsigned int neponset_saved_state;
+
+static int neponset_suspend(struct platform_device *dev, pm_message_t state)
 {
 	/*
 	 * Save state.
 	 */
-	if (level == SUSPEND_SAVE_STATE ||
-	    level == SUSPEND_DISABLE ||
-	    level == SUSPEND_POWER_DOWN) {
-		if (!dev->power.saved_state)
-			dev->power.saved_state = kmalloc(sizeof(unsigned int), GFP_KERNEL);
-		if (!dev->power.saved_state)
-			return -ENOMEM;
-
-		*(unsigned int *)dev->power.saved_state = NCR_0;
-	}
+	neponset_saved_state = NCR_0;
 
 	return 0;
 }
 
-static int neponset_resume(struct device *dev, u32 level)
+static int neponset_resume(struct platform_device *dev)
 {
-	if (level == RESUME_RESTORE_STATE || level == RESUME_ENABLE) {
-		if (dev->power.saved_state) {
-			NCR_0 = *(unsigned int *)dev->power.saved_state;
-			kfree(dev->power.saved_state);
-			dev->power.saved_state = NULL;
-		}
-	}
+	NCR_0 = neponset_saved_state;
 
 	return 0;
 }
@@ -215,12 +209,13 @@ static int neponset_resume(struct device *dev, u32 level)
 #define neponset_resume  NULL
 #endif
 
-static struct device_driver neponset_device_driver = {
-	.name		= "neponset",
-	.bus		= &platform_bus_type,
+static struct platform_driver neponset_device_driver = {
 	.probe		= neponset_probe,
 	.suspend	= neponset_suspend,
 	.resume		= neponset_resume,
+	.driver		= {
+		.name	= "neponset",
+	},
 };
 
 static struct resource neponset_resources[] = {
@@ -266,6 +261,7 @@ static struct platform_device sa1111_device = {
 
 static struct resource smc91x_resources[] = {
 	[0] = {
+		.name	= "smc91x-regs",
 		.start	= SA1100_CS3_PHYS,
 		.end	= SA1100_CS3_PHYS + 0x01ffffff,
 		.flags	= IORESOURCE_MEM,
@@ -276,6 +272,7 @@ static struct resource smc91x_resources[] = {
 		.flags	= IORESOURCE_IRQ,
 	},
 	[2] = {
+		.name	= "smc91x-attrib",
 		.start	= SA1100_CS3_PHYS + 0x02000000,
 		.end	= SA1100_CS3_PHYS + 0x03ffffff,
 		.flags	= IORESOURCE_MEM,
@@ -295,9 +292,11 @@ static struct platform_device *devices[] __initdata = {
 	&smc91x_device,
 };
 
+extern void sa1110_mb_disable(void);
+
 static int __init neponset_init(void)
 {
-	driver_register(&neponset_device_driver);
+	platform_driver_register(&neponset_device_driver);
 
 	/*
 	 * The Neponset is only present on the Assabet machine type.
@@ -329,9 +328,17 @@ static int __init neponset_init(void)
 subsys_initcall(neponset_init);
 
 static struct map_desc neponset_io_desc[] __initdata = {
- /* virtual     physical    length type */
-  { 0xf3000000, 0x10000000, SZ_1M, MT_DEVICE }, /* System Registers */
-  { 0xf4000000, 0x40000000, SZ_1M, MT_DEVICE }  /* SA-1111 */
+	{	/* System Registers */
+		.virtual	=  0xf3000000,
+		.pfn		= __phys_to_pfn(0x10000000),
+		.length		= SZ_1M,
+		.type		= MT_DEVICE
+	}, {	/* SA-1111 */
+		.virtual	=  0xf4000000,
+		.pfn		= __phys_to_pfn(0x40000000),
+		.length		= SZ_1M,
+		.type		= MT_DEVICE
+	}
 };
 
 void __init neponset_map_io(void)

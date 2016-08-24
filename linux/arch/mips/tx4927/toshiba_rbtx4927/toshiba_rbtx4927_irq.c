@@ -31,7 +31,7 @@
 
 
 /*
-IRQ  Device  
+IRQ  Device
 00   RBTX4927-ISA/00
 01   RBTX4927-ISA/01 PS2/Keyboard
 02   RBTX4927-ISA/02 Cascade RBTX4927-ISA (irqs 8-15)
@@ -52,15 +52,15 @@ IRQ  Device
 16   TX4927-CP0/00 Software 0
 17   TX4927-CP0/01 Software 1
 18   TX4927-CP0/02 Cascade TX4927-CP0
-19   TX4927-CP0/03 Multiplexed -- do not use 
-20   TX4927-CP0/04 Multiplexed -- do not use 
-21   TX4927-CP0/05 Multiplexed -- do not use 
-22   TX4927-CP0/06 Multiplexed -- do not use 
+19   TX4927-CP0/03 Multiplexed -- do not use
+20   TX4927-CP0/04 Multiplexed -- do not use
+21   TX4927-CP0/05 Multiplexed -- do not use
+22   TX4927-CP0/06 Multiplexed -- do not use
 23   TX4927-CP0/07 CPU TIMER
 
 24   TX4927-PIC/00
 25   TX4927-PIC/01
-26   TX4927-PIC/02  
+26   TX4927-PIC/02
 27   TX4927-PIC/03 Cascade RBTX4927-IOC
 28   TX4927-PIC/04
 29   TX4927-PIC/05 RBTX4927 RTL-8019AS ethernet
@@ -80,7 +80,7 @@ IRQ  Device
 43   TX4927-PIC/19
 44   TX4927-PIC/20
 45   TX4927-PIC/21
-46   TX4927-PIC/22 TX4927 PCI PCI-ERR 
+46   TX4927-PIC/22 TX4927 PCI PCI-ERR
 47   TX4927-PIC/23 TX4927 PCI PCI-PMA (not used)
 48   TX4927-PIC/24
 49   TX4927-PIC/25
@@ -100,7 +100,7 @@ IRQ  Device
 62 RBTX4927-IOC/06
 63 RBTX4927-IOC/07
 
-NOTES: 
+NOTES:
 SouthBridge/INTR is mapped to SouthBridge/A=PCI-B/#58
 SouthBridge/ISA/pin=0 no pci irq used by this device
 SouthBridge/IDE/pin=1 no pci irq used by this device, using INTR via ISA IRQ14
@@ -111,7 +111,6 @@ SuperIO/PS2/Mouse, using INTR via ISA IRQ12 (mouse not currently supported)
 JP7 is not bus master -- do NOT use -- only 4 pci bus master's allowed -- SouthBridge, JP4, JP5, JP6
 */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -128,15 +127,13 @@ JP7 is not bus master -- do NOT use -- only 4 pci bus master's allowed -- SouthB
 #include <asm/irq.h>
 #include <asm/pci.h>
 #include <asm/processor.h>
-#include <asm/ptrace.h>
 #include <asm/reboot.h>
 #include <asm/time.h>
+#include <asm/wbflush.h>
 #include <linux/bootmem.h>
 #include <linux/blkdev.h>
-#ifdef CONFIG_RTC_DS1742
-#include <linux/ds1742rtc.h>
-#endif
 #ifdef CONFIG_TOSHIBA_FPCIB0
+#include <asm/i8259.h>
 #include <asm/tx4927/smsc_fdc37m81x.h>
 #endif
 #include <asm/tx4927/toshiba_rbtx4927.h>
@@ -152,20 +149,8 @@ JP7 is not bus master -- do NOT use -- only 4 pci bus master's allowed -- SouthB
 #define TOSHIBA_RBTX4927_IRQ_EROR          ( 1 <<  2 )
 
 #define TOSHIBA_RBTX4927_IRQ_IOC_INIT      ( 1 << 10 )
-#define TOSHIBA_RBTX4927_IRQ_IOC_STARTUP   ( 1 << 11 )
-#define TOSHIBA_RBTX4927_IRQ_IOC_SHUTDOWN  ( 1 << 12 )
 #define TOSHIBA_RBTX4927_IRQ_IOC_ENABLE    ( 1 << 13 )
 #define TOSHIBA_RBTX4927_IRQ_IOC_DISABLE   ( 1 << 14 )
-#define TOSHIBA_RBTX4927_IRQ_IOC_MASK      ( 1 << 15 )
-#define TOSHIBA_RBTX4927_IRQ_IOC_ENDIRQ    ( 1 << 16 )
-
-#define TOSHIBA_RBTX4927_IRQ_ISA_INIT      ( 1 << 20 )
-#define TOSHIBA_RBTX4927_IRQ_ISA_STARTUP   ( 1 << 21 )
-#define TOSHIBA_RBTX4927_IRQ_ISA_SHUTDOWN  ( 1 << 22 )
-#define TOSHIBA_RBTX4927_IRQ_ISA_ENABLE    ( 1 << 23 )
-#define TOSHIBA_RBTX4927_IRQ_ISA_DISABLE   ( 1 << 24 )
-#define TOSHIBA_RBTX4927_IRQ_ISA_MASK      ( 1 << 25 )
-#define TOSHIBA_RBTX4927_IRQ_ISA_ENDIRQ    ( 1 << 26 )
 
 #define TOSHIBA_RBTX4927_SETUP_ALL         0xffffffff
 #endif
@@ -175,20 +160,9 @@ JP7 is not bus master -- do NOT use -- only 4 pci bus master's allowed -- SouthB
 static const u32 toshiba_rbtx4927_irq_debug_flag =
     (TOSHIBA_RBTX4927_IRQ_NONE | TOSHIBA_RBTX4927_IRQ_INFO |
      TOSHIBA_RBTX4927_IRQ_WARN | TOSHIBA_RBTX4927_IRQ_EROR
-//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_INIT  
-//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_STARTUP  
-//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_SHUTDOWN  
-//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_ENABLE  
-//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_DISABLE  
-//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_MASK  
-//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_ENDIRQ  
-//                                                 | TOSHIBA_RBTX4927_IRQ_ISA_INIT  
-//                                                 | TOSHIBA_RBTX4927_IRQ_ISA_STARTUP  
-//                                                 | TOSHIBA_RBTX4927_IRQ_ISA_SHUTDOWN  
-//                                                 | TOSHIBA_RBTX4927_IRQ_ISA_ENABLE  
-//                                                 | TOSHIBA_RBTX4927_IRQ_ISA_DISABLE  
-//                                                 | TOSHIBA_RBTX4927_IRQ_ISA_MASK  
-//                                                 | TOSHIBA_RBTX4927_IRQ_ISA_ENDIRQ
+//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_INIT
+//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_ENABLE
+//                                                 | TOSHIBA_RBTX4927_IRQ_IOC_DISABLE
     );
 #endif
 
@@ -202,7 +176,7 @@ static const u32 toshiba_rbtx4927_irq_debug_flag =
            printk( "%s(%s:%u)::%s", __FUNCTION__, __FILE__, __LINE__, tmp ); \
         }
 #else
-#define TOSHIBA_RBTX4927_IRQ_DPRINTK(flag,str...)
+#define TOSHIBA_RBTX4927_IRQ_DPRINTK(flag, str...)
 #endif
 
 
@@ -214,71 +188,24 @@ static const u32 toshiba_rbtx4927_irq_debug_flag =
 #define TOSHIBA_RBTX4927_IRQ_IOC_BEG  ((TX4927_IRQ_PIC_END+1)+TOSHIBA_RBTX4927_IRQ_IOC_RAW_BEG)	/* 56 */
 #define TOSHIBA_RBTX4927_IRQ_IOC_END  ((TX4927_IRQ_PIC_END+1)+TOSHIBA_RBTX4927_IRQ_IOC_RAW_END)	/* 63 */
 
-
-#define TOSHIBA_RBTX4927_IRQ_ISA_BEG MI8259_IRQ_ISA_BEG
-#define TOSHIBA_RBTX4927_IRQ_ISA_END MI8259_IRQ_ISA_END
-#define TOSHIBA_RBTX4927_IRQ_ISA_MID ((TOSHIBA_RBTX4927_IRQ_ISA_BEG+TOSHIBA_RBTX4927_IRQ_ISA_END+1)/2)
-
-
 #define TOSHIBA_RBTX4927_IRQ_NEST_IOC_ON_PIC TX4927_IRQ_NEST_EXT_ON_PIC
 #define TOSHIBA_RBTX4927_IRQ_NEST_ISA_ON_IOC (TOSHIBA_RBTX4927_IRQ_IOC_BEG+2)
-#define TOSHIBA_RBTX4927_IRQ_NEST_ISA_ON_ISA (TOSHIBA_RBTX4927_IRQ_ISA_BEG+2)
 
 extern int tx4927_using_backplane;
 
-#ifdef CONFIG_TOSHIBA_FPCIB0
-extern void enable_8259A_irq(unsigned int irq);
-extern void disable_8259A_irq(unsigned int irq);
-extern void mask_and_ack_8259A(unsigned int irq);
-#endif
-
-static unsigned int toshiba_rbtx4927_irq_ioc_startup(unsigned int irq);
-static void toshiba_rbtx4927_irq_ioc_shutdown(unsigned int irq);
 static void toshiba_rbtx4927_irq_ioc_enable(unsigned int irq);
 static void toshiba_rbtx4927_irq_ioc_disable(unsigned int irq);
-static void toshiba_rbtx4927_irq_ioc_mask_and_ack(unsigned int irq);
-static void toshiba_rbtx4927_irq_ioc_end(unsigned int irq);
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static unsigned int toshiba_rbtx4927_irq_isa_startup(unsigned int irq);
-static void toshiba_rbtx4927_irq_isa_shutdown(unsigned int irq);
-static void toshiba_rbtx4927_irq_isa_enable(unsigned int irq);
-static void toshiba_rbtx4927_irq_isa_disable(unsigned int irq);
-static void toshiba_rbtx4927_irq_isa_mask_and_ack(unsigned int irq);
-static void toshiba_rbtx4927_irq_isa_end(unsigned int irq);
-#endif
-
-static DEFINE_SPINLOCK(toshiba_rbtx4927_ioc_lock);
-
 
 #define TOSHIBA_RBTX4927_IOC_NAME "RBTX4927-IOC"
-static struct hw_interrupt_type toshiba_rbtx4927_irq_ioc_type = {
-	.typename = TOSHIBA_RBTX4927_IOC_NAME,
-	.startup = toshiba_rbtx4927_irq_ioc_startup,
-	.shutdown = toshiba_rbtx4927_irq_ioc_shutdown,
-	.enable = toshiba_rbtx4927_irq_ioc_enable,
-	.disable = toshiba_rbtx4927_irq_ioc_disable,
-	.ack = toshiba_rbtx4927_irq_ioc_mask_and_ack,
-	.end = toshiba_rbtx4927_irq_ioc_end,
-	.set_affinity = NULL
+static struct irq_chip toshiba_rbtx4927_irq_ioc_type = {
+	.name = TOSHIBA_RBTX4927_IOC_NAME,
+	.ack = toshiba_rbtx4927_irq_ioc_disable,
+	.mask = toshiba_rbtx4927_irq_ioc_disable,
+	.mask_ack = toshiba_rbtx4927_irq_ioc_disable,
+	.unmask = toshiba_rbtx4927_irq_ioc_enable,
 };
-#define TOSHIBA_RBTX4927_IOC_INTR_ENAB 0xbc002000
-#define TOSHIBA_RBTX4927_IOC_INTR_STAT 0xbc002006
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-#define TOSHIBA_RBTX4927_ISA_NAME "RBTX4927-ISA"
-static struct hw_interrupt_type toshiba_rbtx4927_irq_isa_type = {
-	.typename = TOSHIBA_RBTX4927_ISA_NAME,
-	.startup = toshiba_rbtx4927_irq_isa_startup,
-	.shutdown = toshiba_rbtx4927_irq_isa_shutdown,
-	.enable = toshiba_rbtx4927_irq_isa_enable,
-	.disable = toshiba_rbtx4927_irq_isa_disable,
-	.ack = toshiba_rbtx4927_irq_isa_mask_and_ack,
-	.end = toshiba_rbtx4927_irq_isa_end,
-	.set_affinity = NULL
-};
-#endif
+#define TOSHIBA_RBTX4927_IOC_INTR_ENAB (void __iomem *)0xbc002000UL
+#define TOSHIBA_RBTX4927_IOC_INTR_STAT (void __iomem *)0xbc002006UL
 
 
 u32 bit2num(u32 num)
@@ -296,10 +223,8 @@ u32 bit2num(u32 num)
 int toshiba_rbtx4927_irq_nested(int sw_irq)
 {
 	u32 level3;
-	u32 level4;
-	u32 level5;
 
-	level3 = reg_rd08(TOSHIBA_RBTX4927_IOC_INTR_STAT) & 0x1f;
+	level3 = readb(TOSHIBA_RBTX4927_IOC_INTR_STAT) & 0x1f;
 	if (level3) {
 		sw_irq = TOSHIBA_RBTX4927_IRQ_IOC_BEG + bit2num(level3);
 		if (sw_irq != TOSHIBA_RBTX4927_IRQ_NEST_ISA_ON_IOC) {
@@ -307,29 +232,10 @@ int toshiba_rbtx4927_irq_nested(int sw_irq)
 		}
 	}
 #ifdef CONFIG_TOSHIBA_FPCIB0
-	{
-		if (tx4927_using_backplane) {
-			outb(0x0A, 0x20);
-			level4 = inb(0x20) & 0xff;
-			if (level4) {
-				sw_irq =
-				    TOSHIBA_RBTX4927_IRQ_ISA_BEG +
-				    bit2num(level4);
-				if (sw_irq !=
-				    TOSHIBA_RBTX4927_IRQ_NEST_ISA_ON_ISA) {
-					goto RETURN;
-				}
-			}
-
-			outb(0x0A, 0xA0);
-			level5 = inb(0xA0) & 0xff;
-			if (level5) {
-				sw_irq =
-				    TOSHIBA_RBTX4927_IRQ_ISA_MID +
-				    bit2num(level5);
-				goto RETURN;
-			}
-		}
+	if (tx4927_using_backplane) {
+		int irq = i8259_irq();
+		if (irq >= 0)
+			sw_irq = irq;
 	}
 #endif
 
@@ -337,16 +243,12 @@ int toshiba_rbtx4927_irq_nested(int sw_irq)
 	return (sw_irq);
 }
 
-//#define TOSHIBA_RBTX4927_PIC_ACTION(s) { no_action, 0, CPU_MASK_NONE, s, NULL, NULL }
-#define TOSHIBA_RBTX4927_PIC_ACTION(s) { no_action, SA_SHIRQ, CPU_MASK_NONE, s, NULL, NULL }
-static struct irqaction toshiba_rbtx4927_irq_ioc_action =
-TOSHIBA_RBTX4927_PIC_ACTION(TOSHIBA_RBTX4927_IOC_NAME);
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static struct irqaction toshiba_rbtx4927_irq_isa_master =
-TOSHIBA_RBTX4927_PIC_ACTION(TOSHIBA_RBTX4927_ISA_NAME "/M");
-static struct irqaction toshiba_rbtx4927_irq_isa_slave =
-TOSHIBA_RBTX4927_PIC_ACTION(TOSHIBA_RBTX4927_ISA_NAME "/S");
-#endif
+static struct irqaction toshiba_rbtx4927_irq_ioc_action = {
+	.handler	= no_action,
+	.flags		= IRQF_SHARED,
+	.mask		= CPU_MASK_NONE,
+	.name		= TOSHIBA_RBTX4927_IOC_NAME
+};
 
 
 /**********************************************************************************/
@@ -364,58 +266,16 @@ static void __init toshiba_rbtx4927_irq_ioc_init(void)
 				     TOSHIBA_RBTX4927_IRQ_IOC_END);
 
 	for (i = TOSHIBA_RBTX4927_IRQ_IOC_BEG;
-	     i <= TOSHIBA_RBTX4927_IRQ_IOC_END; i++) {
-		irq_desc[i].status = IRQ_DISABLED;
-		irq_desc[i].action = 0;
-		irq_desc[i].depth = 3;
-		irq_desc[i].handler = &toshiba_rbtx4927_irq_ioc_type;
-	}
+	     i <= TOSHIBA_RBTX4927_IRQ_IOC_END; i++)
+		set_irq_chip_and_handler(i, &toshiba_rbtx4927_irq_ioc_type,
+					 handle_level_irq);
 
 	setup_irq(TOSHIBA_RBTX4927_IRQ_NEST_IOC_ON_PIC,
 		  &toshiba_rbtx4927_irq_ioc_action);
-
-	return;
 }
-
-static unsigned int toshiba_rbtx4927_irq_ioc_startup(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_IOC_STARTUP,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_IOC_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_IOC_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	toshiba_rbtx4927_irq_ioc_enable(irq);
-
-	return (0);
-}
-
-
-static void toshiba_rbtx4927_irq_ioc_shutdown(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_IOC_SHUTDOWN,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_IOC_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_IOC_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	toshiba_rbtx4927_irq_ioc_disable(irq);
-
-	return;
-}
-
 
 static void toshiba_rbtx4927_irq_ioc_enable(unsigned int irq)
 {
-	unsigned long flags;
 	volatile unsigned char v;
 
 	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_IOC_ENABLE,
@@ -428,21 +288,14 @@ static void toshiba_rbtx4927_irq_ioc_enable(unsigned int irq)
 		panic("\n");
 	}
 
-	spin_lock_irqsave(&toshiba_rbtx4927_ioc_lock, flags);
-
-	v = TX4927_RD08(TOSHIBA_RBTX4927_IOC_INTR_ENAB);
+	v = readb(TOSHIBA_RBTX4927_IOC_INTR_ENAB);
 	v |= (1 << (irq - TOSHIBA_RBTX4927_IRQ_IOC_BEG));
-	TOSHIBA_RBTX4927_WR08(TOSHIBA_RBTX4927_IOC_INTR_ENAB, v);
-
-	spin_unlock_irqrestore(&toshiba_rbtx4927_ioc_lock, flags);
-
-	return;
+	writeb(v, TOSHIBA_RBTX4927_IOC_INTR_ENAB);
 }
 
 
 static void toshiba_rbtx4927_irq_ioc_disable(unsigned int irq)
 {
-	unsigned long flags;
 	volatile unsigned char v;
 
 	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_IOC_DISABLE,
@@ -455,235 +308,27 @@ static void toshiba_rbtx4927_irq_ioc_disable(unsigned int irq)
 		panic("\n");
 	}
 
-	spin_lock_irqsave(&toshiba_rbtx4927_ioc_lock, flags);
-
-	v = TX4927_RD08(TOSHIBA_RBTX4927_IOC_INTR_ENAB);
+	v = readb(TOSHIBA_RBTX4927_IOC_INTR_ENAB);
 	v &= ~(1 << (irq - TOSHIBA_RBTX4927_IRQ_IOC_BEG));
-	TOSHIBA_RBTX4927_WR08(TOSHIBA_RBTX4927_IOC_INTR_ENAB, v);
-
-	spin_unlock_irqrestore(&toshiba_rbtx4927_ioc_lock, flags);
-
-	return;
+	writeb(v, TOSHIBA_RBTX4927_IOC_INTR_ENAB);
+	mmiowb();
 }
-
-
-static void toshiba_rbtx4927_irq_ioc_mask_and_ack(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_IOC_MASK,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_IOC_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_IOC_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	toshiba_rbtx4927_irq_ioc_disable(irq);
-
-	return;
-}
-
-
-static void toshiba_rbtx4927_irq_ioc_end(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_IOC_ENDIRQ,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_IOC_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_IOC_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	if (!(irq_desc[irq].status & (IRQ_DISABLED | IRQ_INPROGRESS))) {
-		toshiba_rbtx4927_irq_ioc_enable(irq);
-	}
-
-	return;
-}
-
-
-/**********************************************************************************/
-/* Functions for isa                                                              */
-/**********************************************************************************/
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static void __init toshiba_rbtx4927_irq_isa_init(void)
-{
-	int i;
-
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_ISA_INIT,
-				     "beg=%d end=%d\n",
-				     TOSHIBA_RBTX4927_IRQ_ISA_BEG,
-				     TOSHIBA_RBTX4927_IRQ_ISA_END);
-
-	for (i = TOSHIBA_RBTX4927_IRQ_ISA_BEG;
-	     i <= TOSHIBA_RBTX4927_IRQ_ISA_END; i++) {
-		irq_desc[i].status = IRQ_DISABLED;
-		irq_desc[i].action = 0;
-		irq_desc[i].depth =
-		    ((i < TOSHIBA_RBTX4927_IRQ_ISA_MID) ? (4) : (5));
-		irq_desc[i].handler = &toshiba_rbtx4927_irq_isa_type;
-	}
-
-	setup_irq(TOSHIBA_RBTX4927_IRQ_NEST_ISA_ON_IOC,
-		  &toshiba_rbtx4927_irq_isa_master);
-	setup_irq(TOSHIBA_RBTX4927_IRQ_NEST_ISA_ON_ISA,
-		  &toshiba_rbtx4927_irq_isa_slave);
-
-	/* make sure we are looking at IRR (not ISR) */
-	outb(0x0A, 0x20);
-	outb(0x0A, 0xA0);
-
-	return;
-}
-#endif
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static unsigned int toshiba_rbtx4927_irq_isa_startup(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_ISA_STARTUP,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_ISA_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_ISA_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	toshiba_rbtx4927_irq_isa_enable(irq);
-
-	return (0);
-}
-#endif
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static void toshiba_rbtx4927_irq_isa_shutdown(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_ISA_SHUTDOWN,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_ISA_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_ISA_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	toshiba_rbtx4927_irq_isa_disable(irq);
-
-	return;
-}
-#endif
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static void toshiba_rbtx4927_irq_isa_enable(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_ISA_ENABLE,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_ISA_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_ISA_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	enable_8259A_irq(irq);
-
-	return;
-}
-#endif
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static void toshiba_rbtx4927_irq_isa_disable(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_ISA_DISABLE,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_ISA_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_ISA_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	disable_8259A_irq(irq);
-
-	return;
-}
-#endif
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static void toshiba_rbtx4927_irq_isa_mask_and_ack(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_ISA_MASK,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_ISA_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_ISA_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	mask_and_ack_8259A(irq);
-
-	return;
-}
-#endif
-
-
-#ifdef CONFIG_TOSHIBA_FPCIB0
-static void toshiba_rbtx4927_irq_isa_end(unsigned int irq)
-{
-	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_ISA_ENDIRQ,
-				     "irq=%d\n", irq);
-
-	if (irq < TOSHIBA_RBTX4927_IRQ_ISA_BEG
-	    || irq > TOSHIBA_RBTX4927_IRQ_ISA_END) {
-		TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_EROR,
-					     "bad irq=%d\n", irq);
-		panic("\n");
-	}
-
-	if (!(irq_desc[irq].status & (IRQ_DISABLED | IRQ_INPROGRESS))) {
-		toshiba_rbtx4927_irq_isa_enable(irq);
-	}
-
-	return;
-}
-#endif
 
 
 void __init arch_init_irq(void)
 {
 	extern void tx4927_irq_init(void);
 
-	local_irq_disable();
-
 	tx4927_irq_init();
 	toshiba_rbtx4927_irq_ioc_init();
 #ifdef CONFIG_TOSHIBA_FPCIB0
-	{
-		if (tx4927_using_backplane) {
-			toshiba_rbtx4927_irq_isa_init();
-		}
-	}
+	if (tx4927_using_backplane)
+		init_i8259_irqs();
 #endif
+	/* Onboard 10M Ether: High Active */
+	set_irq_type(RBTX4927_RTL_8019_IRQ, IRQF_TRIGGER_HIGH);
 
 	wbflush();
-
-	return;
 }
 
 void toshiba_rbtx4927_irq_dump(char *key)
@@ -692,13 +337,13 @@ void toshiba_rbtx4927_irq_dump(char *key)
 	{
 		u32 i, j = 0;
 		for (i = 0; i < NR_IRQS; i++) {
-			if (strcmp(irq_desc[i].handler->typename, "none")
+			if (strcmp(irq_desc[i].chip->name, "none")
 			    == 0)
 				continue;
 
 			if ((i >= 1)
-			    && (irq_desc[i - 1].handler->typename ==
-				irq_desc[i].handler->typename)) {
+			    && (irq_desc[i - 1].chip->name ==
+				irq_desc[i].chip->name)) {
 				j++;
 			} else {
 				j = 0;
@@ -707,16 +352,15 @@ void toshiba_rbtx4927_irq_dump(char *key)
 			    (TOSHIBA_RBTX4927_IRQ_INFO,
 			     "%s irq=0x%02x/%3d s=0x%08x h=0x%08x a=0x%08x ah=0x%08x d=%1d n=%s/%02d\n",
 			     key, i, i, irq_desc[i].status,
-			     (u32) irq_desc[i].handler,
+			     (u32) irq_desc[i].chip,
 			     (u32) irq_desc[i].action,
 			     (u32) (irq_desc[i].action ? irq_desc[i].
 				    action->handler : 0),
 			     irq_desc[i].depth,
-			     irq_desc[i].handler->typename, j);
+			     irq_desc[i].chip->name, j);
 		}
 	}
 #endif
-	return;
 }
 
 void toshiba_rbtx4927_irq_dump_pics(char *s)
@@ -744,12 +388,12 @@ void toshiba_rbtx4927_irq_dump_pics(char *s)
 	level1_m = level0_m;
 	level1_s = level0_s & 0x87;
 
-	level2 = TX4927_RD(0xff1ff6a0);
+	level2 = __raw_readl((void __iomem *)0xff1ff6a0UL);
 	level2_p = (((level2 & 0x10000)) ? 0 : 1);
 	level2_s = (((level2 & 0x1f) == 0x1f) ? 0 : (level2 & 0x1f));
 
-	level3_m = reg_rd08(TOSHIBA_RBTX4927_IOC_INTR_ENAB) & 0x1f;
-	level3_s = reg_rd08(TOSHIBA_RBTX4927_IOC_INTR_STAT) & 0x1f;
+	level3_m = readb(TOSHIBA_RBTX4927_IOC_INTR_ENAB) & 0x1f;
+	level3_s = readb(TOSHIBA_RBTX4927_IOC_INTR_STAT) & 0x1f;
 
 	level4_m = inb(0x21);
 	outb(0x0A, 0x20);
@@ -781,6 +425,4 @@ void toshiba_rbtx4927_irq_dump_pics(char *s)
 				     level5_s);
 	TOSHIBA_RBTX4927_IRQ_DPRINTK(TOSHIBA_RBTX4927_IRQ_INFO, "[%s]\n",
 				     s);
-
-	return;
 }

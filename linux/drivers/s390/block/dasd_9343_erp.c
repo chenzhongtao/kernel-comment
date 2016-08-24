@@ -1,10 +1,9 @@
-/* 
+/*
  * File...........: linux/drivers/s390/block/dasd_9345_erp.c
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
  * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 2000
  *
- * $Revision: 1.13 $
  */
 
 #define PRINTK_HEADER "dasd_erp(9343)"

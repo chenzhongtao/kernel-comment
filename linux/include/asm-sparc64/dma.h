@@ -7,7 +7,6 @@
 #ifndef _ASM_SPARC64_DMA_H
 #define _ASM_SPARC64_DMA_H
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/spinlock.h>
@@ -15,17 +14,6 @@
 #include <asm/sbus.h>
 #include <asm/delay.h>
 #include <asm/oplib.h>
-
-extern spinlock_t  dma_spin_lock;
-
-#define claim_dma_lock() \
-({	unsigned long flags; \
-	spin_lock_irqsave(&dma_spin_lock, flags); \
-	flags; \
-})
-
-#define release_dma_lock(__flags) \
-	spin_unlock_irqrestore(&dma_spin_lock, __flags);
 
 /* These are irrelevant for Sparc DMA, but we leave it in so that
  * things can compile.
@@ -153,9 +141,9 @@ extern void dvma_init(struct sbus_bus *);
 #define DMA_MAXEND(addr) (0x01000000UL-(((unsigned long)(addr))&0x00ffffffUL))
 
 /* Yes, I hack a lot of elisp in my spare time... */
-#define DMA_ERROR_P(regs)  (((sbus_readl((regs) + DMA_CSR) & DMA_HNDL_ERROR))
-#define DMA_IRQ_P(regs)    (((sbus_readl((regs) + DMA_CSR)) & (DMA_HNDL_INTR | DMA_HNDL_ERROR)))
-#define DMA_WRITE_P(regs)  (((sbus_readl((regs) + DMA_CSR) & DMA_ST_WRITE))
+#define DMA_ERROR_P(regs)  ((sbus_readl((regs) + DMA_CSR) & DMA_HNDL_ERROR))
+#define DMA_IRQ_P(regs)    ((sbus_readl((regs) + DMA_CSR)) & (DMA_HNDL_INTR | DMA_HNDL_ERROR))
+#define DMA_WRITE_P(regs)  ((sbus_readl((regs) + DMA_CSR) & DMA_ST_WRITE))
 #define DMA_OFF(__regs)		\
 do {	u32 tmp = sbus_readl((__regs) + DMA_CSR); \
 	tmp &= ~DMA_ENABLE; \
@@ -205,10 +193,6 @@ do {	u32 tmp = sbus_readl((__regs) + DMA_CSR); \
 
 #define for_each_dvma(dma) \
         for((dma) = dma_chain; (dma); (dma) = (dma)->next)
-
-extern int get_dma_list(char *);
-extern int request_dma(unsigned int, __const__ char *);
-extern void free_dma(unsigned int);
 
 /* From PCI */
 

@@ -1,22 +1,17 @@
-/* 
+/*
  * File...........: linux/drivers/s390/block/dasd_int.h
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
- *                  Horst Hummel <Horst.Hummel@de.ibm.com> 
+ *		    Horst Hummel <Horst.Hummel@de.ibm.com>
  *		    Martin Schwidefsky <schwidefsky@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
  * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
  *
- * $Revision: 1.63 $
  */
 
 #ifndef DASD_INT_H
 #define DASD_INT_H
 
 #ifdef __KERNEL__
-
-/* erp debugging in dasd.c and dasd_3990_erp.c */
-#define ERP_DEBUG
-
 
 /* we keep old device allocation scheme; IOW, minors are still in 0..255 */
 #define DASD_PER_MAJOR (1U << (MINORBITS - DASD_PARTN_BITS))
@@ -27,7 +22,7 @@
  *   new: the dasd_device structure is allocated.
  *   known: the discipline for the device is identified.
  *   basic: the device can do basic i/o.
- *   accept: the device is analysed (format is known).
+ *   unfmt: the device could not be analyzed (format is unknown).
  *   ready: partition detection is done and the device is can do block io.
  *   online: the device accepts requests from the block device queue.
  *
@@ -48,16 +43,17 @@
 #define DASD_STATE_NEW	  0
 #define DASD_STATE_KNOWN  1
 #define DASD_STATE_BASIC  2
-#define DASD_STATE_READY  3
-#define DASD_STATE_ONLINE 4
+#define DASD_STATE_UNFMT  3
+#define DASD_STATE_READY  4
+#define DASD_STATE_ONLINE 5
 
 #include <linux/module.h>
 #include <linux/wait.h>
 #include <linux/blkdev.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/genhd.h>
 #include <linux/hdreg.h>
 #include <linux/interrupt.h>
+#include <linux/log2.h>
 #include <asm/ccwdev.h>
 #include <linux/workqueue.h>
 #include <asm/debug.h>
@@ -68,15 +64,6 @@
  * SECTION: Type definitions
  */
 struct dasd_device;
-
-typedef int (*dasd_ioctl_fn_t) (struct block_device *bdev, int no, long args);
-
-struct dasd_ioctl {
-	struct list_head list;
-	struct module *owner;
-	int no;
-	dasd_ioctl_fn_t handler;
-};
 
 typedef enum {
 	dasd_era_fatal = -1,	/* no chance to recover		     */
@@ -195,7 +182,7 @@ struct dasd_ccw_req {
         void *callback_data;
 };
 
-/* 
+/*
  * dasd_ccw_req -> status can be:
  */
 #define DASD_CQR_FILLED   0x00	/* request is ready to be processed */
@@ -208,6 +195,7 @@ struct dasd_ccw_req {
 
 /* per dasd_ccw_req flags */
 #define DASD_CQR_FLAGS_USE_ERP   0	/* use ERP for this request */
+#define DASD_CQR_FLAGS_FAILFAST  1	/* FAILFAST */
 
 /* Signature for error recovery functions. */
 typedef struct dasd_ccw_req *(*dasd_erp_fn_t) (struct dasd_ccw_req *);
@@ -256,7 +244,7 @@ struct dasd_discipline {
         /*
          * Error recovery functions. examine_error() returns a value that
          * indicates what to do for an error condition. If examine_error()
-         * returns 'dasd_era_recover' erp_action() is called to create a 
+	 * returns 'dasd_era_recover' erp_action() is called to create a
          * special error recovery ccw. erp_postaction() is called after
          * an error recovery ccw has finished its execution. dump_sense
          * is called for every error condition to print the sense data
@@ -271,24 +259,57 @@ struct dasd_discipline {
         /* i/o control functions. */
 	int (*fill_geometry) (struct dasd_device *, struct hd_geometry *);
 	int (*fill_info) (struct dasd_device *, struct dasd_information2_t *);
+	int (*ioctl) (struct dasd_device *, unsigned int, void __user *);
 };
 
 extern struct dasd_discipline *dasd_diag_discipline_pointer;
 
+/*
+ * Unique identifier for dasd device.
+ */
+struct dasd_uid {
+	__u8 alias;
+	char vendor[4];
+	char serial[15];
+	__u16 ssid;
+	__u8 unit_addr;
+};
+
+/*
+ * Notification numbers for extended error reporting notifications:
+ * The DASD_EER_DISABLE notification is sent before a dasd_device (and it's
+ * eer pointer) is freed. The error reporting module needs to do all necessary
+ * cleanup steps.
+ * The DASD_EER_TRIGGER notification sends the actual error reports (triggers).
+ */
+#define DASD_EER_DISABLE 0
+#define DASD_EER_TRIGGER 1
+
+/* Trigger IDs for extended error reporting DASD_EER_TRIGGER notification */
+#define DASD_EER_FATALERROR  1
+#define DASD_EER_NOPATH      2
+#define DASD_EER_STATECHANGE 3
+#define DASD_EER_PPRCSUSPEND 4
+
 struct dasd_device {
 	/* Block device stuff. */
 	struct gendisk *gdp;
-	request_queue_t *request_queue;
+	struct request_queue *request_queue;
 	spinlock_t request_queue_lock;
 	struct block_device *bdev;
         unsigned int devindex;
-	unsigned long blocks;		/* size of volume in blocks */
-	unsigned int bp_block;		/* bytes per block */
-	unsigned int s2b_shift;		/* log2 (bp_block/512) */
-	unsigned long flags;		/* per device flags */
+	unsigned long blocks;	   /* size of volume in blocks */
+	unsigned int bp_block;	   /* bytes per block */
+	unsigned int s2b_shift;	   /* log2 (bp_block/512) */
+	unsigned long flags;	   /* per device flags */
+	unsigned short features;   /* copy of devmap-features (read-only!) */
+
+	/* extended error reporting stuff (eer) */
+	struct dasd_ccw_req *eer_cqr;
 
 	/* Device discipline stuff. */
 	struct dasd_discipline *discipline;
+	struct dasd_discipline *base_discipline;
 	char *private;
 
 	/* Device state and target state. */
@@ -329,10 +350,10 @@ struct dasd_device {
 #define DASD_STOPPED_DC_EIO  16        /* disconnected, return -EIO */
 
 /* per device flags */
-#define DASD_FLAG_RO		0	/* device is read-only */
-#define DASD_FLAG_USE_DIAG	1	/* use diag disciplnie */
 #define DASD_FLAG_DSC_ERROR	2	/* return -EIO when disconnected */
 #define DASD_FLAG_OFFLINE	3	/* device is in offline processing */
+#define DASD_FLAG_EER_SNSS	4	/* A SNSS is required */
+#define DASD_FLAG_EER_IN_USE	5	/* A SNSS request is running */
 
 void dasd_put_device_wake(struct dasd_device *);
 
@@ -436,7 +457,7 @@ dasd_free_chunk(struct list_head *chunk_list, void *mem)
 static inline int
 dasd_check_blocksize(int bsize)
 {
-	if (bsize < 512 || bsize > 4096 || (bsize & (bsize - 1)) != 0)
+	if (bsize < 512 || bsize > 4096 || !is_power_of_2(bsize))
 		return -EMEDIUMTYPE;
 	return 0;
 }
@@ -450,7 +471,7 @@ extern struct dasd_profile_info_t dasd_global_profile;
 extern unsigned int dasd_profile_level;
 extern struct block_device_operations dasd_device_operations;
 
-extern kmem_cache_t *dasd_page_cache;
+extern struct kmem_cache *dasd_page_cache;
 
 struct dasd_ccw_req *
 dasd_kmalloc_request(char *, int, int, struct dasd_device *);
@@ -488,12 +509,14 @@ void dasd_generic_remove (struct ccw_device *cdev);
 int dasd_generic_set_online(struct ccw_device *, struct dasd_discipline *);
 int dasd_generic_set_offline (struct ccw_device *cdev);
 int dasd_generic_notify(struct ccw_device *, int);
-void dasd_generic_auto_online (struct ccw_driver *);
+
+int dasd_generic_read_dev_chars(struct dasd_device *, char *, void **, int);
 
 /* externals in dasd_devmap.c */
 extern int dasd_max_devindex;
 extern int dasd_probeonly;
 extern int dasd_autodetect;
+extern int dasd_nopav;
 
 int dasd_devmap_init(void);
 void dasd_devmap_exit(void);
@@ -501,10 +524,16 @@ void dasd_devmap_exit(void);
 struct dasd_device *dasd_create_device(struct ccw_device *);
 void dasd_delete_device(struct dasd_device *);
 
+int dasd_get_uid(struct ccw_device *, struct dasd_uid *);
+int dasd_set_uid(struct ccw_device *, struct dasd_uid *);
+int dasd_get_feature(struct ccw_device *, int);
+int dasd_set_feature(struct ccw_device *, int, int);
+
 int dasd_add_sysfs_files(struct ccw_device *);
 void dasd_remove_sysfs_files(struct ccw_device *);
 
 struct dasd_device *dasd_device_from_cdev(struct ccw_device *);
+struct dasd_device *dasd_device_from_cdev_locked(struct ccw_device *);
 struct dasd_device *dasd_device_from_devindex(int);
 
 int dasd_parse(void);
@@ -519,11 +548,8 @@ int dasd_scan_partitions(struct dasd_device *);
 void dasd_destroy_partitions(struct dasd_device *);
 
 /* externals in dasd_ioctl.c */
-int  dasd_ioctl_init(void);
-void dasd_ioctl_exit(void);
-int  dasd_ioctl_no_register(struct module *, int, dasd_ioctl_fn_t);
-int  dasd_ioctl_no_unregister(struct module *, int, dasd_ioctl_fn_t);
 int  dasd_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
+long dasd_compat_ioctl(struct file *, unsigned int, unsigned long);
 
 /* externals in dasd_proc.c */
 int dasd_proc_init(void);
@@ -536,7 +562,6 @@ struct dasd_ccw_req *dasd_alloc_erp_request(char *, int, int,
 					    struct dasd_device *);
 void dasd_free_erp_request(struct dasd_ccw_req *, struct dasd_device *);
 void dasd_log_sense(struct dasd_ccw_req *, struct irb *);
-void dasd_log_ccw(struct dasd_ccw_req *, int, __u32);
 
 /* externals in dasd_3370_erp.c */
 dasd_era_t dasd_3370_erp_examine(struct dasd_ccw_req *, struct irb *);
@@ -552,25 +577,30 @@ dasd_era_t dasd_9336_erp_examine(struct dasd_ccw_req *, struct irb *);
 dasd_era_t dasd_9343_erp_examine(struct dasd_ccw_req *, struct irb *);
 struct dasd_ccw_req *dasd_9343_erp_action(struct dasd_ccw_req *);
 
+/* externals in dasd_eer.c */
+#ifdef CONFIG_DASD_EER
+int dasd_eer_init(void);
+void dasd_eer_exit(void);
+int dasd_eer_enable(struct dasd_device *);
+void dasd_eer_disable(struct dasd_device *);
+void dasd_eer_write(struct dasd_device *, struct dasd_ccw_req *cqr,
+		    unsigned int id);
+void dasd_eer_snss(struct dasd_device *);
+
+static inline int dasd_eer_enabled(struct dasd_device *device)
+{
+	return device->eer_cqr != NULL;
+}
+#else
+#define dasd_eer_init()		(0)
+#define dasd_eer_exit()		do { } while (0)
+#define dasd_eer_enable(d)	(0)
+#define dasd_eer_disable(d)	do { } while (0)
+#define dasd_eer_write(d,c,i)	do { } while (0)
+#define dasd_eer_snss(d)	do { } while (0)
+#define dasd_eer_enabled(d)	(0)
+#endif	/* CONFIG_DASD_ERR */
+
 #endif				/* __KERNEL__ */
 
 #endif				/* DASD_H */
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4 
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: 1
- * tab-width: 8
- * End:
- */

@@ -1,5 +1,5 @@
 /*
- * linux/include/linux/auth_gss.h
+ * linux/include/linux/sunrpc/auth_gss.h
  *
  * Declarations for RPCSEC_GSS
  *
@@ -68,26 +68,23 @@ struct rpc_gss_init_res {
 
 struct gss_cl_ctx {
 	atomic_t		count;
-	u32			gc_proc;
+	enum rpc_gss_proc	gc_proc;
 	u32			gc_seq;
 	spinlock_t		gc_seq_lock;
 	struct gss_ctx		*gc_gss_ctx;
 	struct xdr_netobj	gc_wire_ctx;
 	u32			gc_win;
+	unsigned long		gc_expiry;
+	struct rcu_head		gc_rcu;
 };
 
+struct gss_upcall_msg;
 struct gss_cred {
 	struct rpc_cred		gc_base;
-	u32			gc_flavor;
+	enum rpc_gss_svc	gc_service;
 	struct gss_cl_ctx	*gc_ctx;
+	struct gss_upcall_msg	*gc_upcall;
 };
-
-#define gc_uid			gc_base.cr_uid
-#define gc_count		gc_base.cr_count
-#define gc_flags		gc_base.cr_flags
-#define gc_expire		gc_base.cr_expire
-
-void print_hexl(u32 *p, u_int length, u_int offset);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SUNRPC_AUTH_GSS_H */

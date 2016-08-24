@@ -1,7 +1,6 @@
 #ifndef _ALPHA_HARDIRQ_H
 #define _ALPHA_HARDIRQ_H
 
-#include <linux/config.h>
 #include <linux/threads.h>
 #include <linux/cache.h>
 
@@ -12,6 +11,8 @@ typedef struct {
 } ____cacheline_aligned irq_cpustat_t;
 
 #include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
+
+void ack_bad_irq(unsigned int irq);
 
 #define HARDIRQ_BITS	12
 

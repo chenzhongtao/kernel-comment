@@ -11,7 +11,7 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
 
 #define COPY_COUNT (PAGE_SZ/64 PLD( -1 ))
 
@@ -43,4 +43,4 @@ ENTRY(copy_page)
 		bgt	1b				@	1
 	PLD(	ldmeqia r1!, {r3, r4, ip, lr}	)
 	PLD(	beq	2b			)
-		LOADREGS(fd, sp!, {r4, pc})		@	3
+		ldmfd	sp!, {r4, pc}			@	3

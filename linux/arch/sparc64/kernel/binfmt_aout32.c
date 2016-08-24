@@ -31,16 +31,18 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
+#include <asm/mmu_context.h>
 
 static int load_aout32_binary(struct linux_binprm *, struct pt_regs * regs);
 static int load_aout32_library(struct file*);
-static int aout32_core_dump(long signr, struct pt_regs * regs, struct file *file);
-
-extern void dump_thread(struct pt_regs *, struct user *);
+static int aout32_core_dump(long signr, struct pt_regs *regs, struct file *file, unsigned long limit);
 
 static struct linux_binfmt aout32_format = {
-	NULL, THIS_MODULE, load_aout32_binary, load_aout32_library, aout32_core_dump,
-	PAGE_SIZE
+	.module		= THIS_MODULE,
+	.load_binary	= load_aout32_binary,
+	.load_shlib	= load_aout32_library,
+	.core_dump	= aout32_core_dump,
+	.min_coredump	= PAGE_SIZE,
 };
 
 static void set_brk(unsigned long start, unsigned long end)
@@ -84,7 +86,7 @@ if (file->f_op->llseek) { \
  * dumping of the process results in another error..
  */
 
-static int aout32_core_dump(long signr, struct pt_regs *regs, struct file *file)
+static int aout32_core_dump(long signr, struct pt_regs *regs, struct file *file, unsigned long limit)
 {
 	mm_segment_t fs;
 	int has_dumped = 0;
@@ -103,20 +105,18 @@ static int aout32_core_dump(long signr, struct pt_regs *regs, struct file *file)
 
 /* If the size of the dump file exceeds the rlimit, then see what would happen
    if we wrote the stack, but not the data area.  */
-	if ((dump.u_dsize+dump.u_ssize) >
-	    current->signal->rlim[RLIMIT_CORE].rlim_cur)
+	if (dump.u_dsize + dump.u_ssize > limit)
 		dump.u_dsize = 0;
 
 /* Make sure we have enough room to write the stack and data areas. */
-	if ((dump.u_ssize) >
-	    current->signal->rlim[RLIMIT_CORE].rlim_cur)
+	if (dump.u_ssize > limit)
 		dump.u_ssize = 0;
 
 /* make sure we actually have a data and stack area to dump */
 	set_fs(USER_DS);
-	if (verify_area(VERIFY_READ, (void __user *) START_DATA(dump), dump.u_dsize))
+	if (!access_ok(VERIFY_READ, (void __user *) START_DATA(dump), dump.u_dsize))
 		dump.u_dsize = 0;
-	if (verify_area(VERIFY_READ, (void __user *) START_STACK(dump), dump.u_ssize))
+	if (!access_ok(VERIFY_READ, (void __user *) START_STACK(dump), dump.u_ssize))
 		dump.u_ssize = 0;
 
 	set_fs(KERNEL_DS);
@@ -178,7 +178,7 @@ static u32 __user *create_aout32_tables(char __user *p, struct linux_binprm *bpr
 			get_user(c,p++);
 		} while (c);
 	}
-	put_user(NULL,argv);
+	put_user(0,argv);
 	current->mm->arg_end = current->mm->env_start = (unsigned long) p;
 	while (envc-->0) {
 		char c;
@@ -187,7 +187,7 @@ static u32 __user *create_aout32_tables(char __user *p, struct linux_binprm *bpr
 			get_user(c,p++);
 		} while (c);
 	}
-	put_user(NULL,envp);
+	put_user(0,envp);
 	current->mm->env_end = (unsigned long) p;
 	return sp;
 }
@@ -210,7 +210,7 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != OMAGIC &&
 	     N_MAGIC(ex) != QMAGIC && N_MAGIC(ex) != NMAGIC) ||
 	    N_TRSIZE(ex) || N_DRSIZE(ex) ||
-	    bprm->file->f_dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
+	    bprm->file->f_path.dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
 		return -ENOEXEC;
 	}
 
@@ -240,8 +240,9 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		(current->mm->start_data = N_DATADDR(ex));
 	current->mm->brk = ex.a_bss +
 		(current->mm->start_brk = N_BSSADDR(ex));
+	current->mm->free_area_cache = current->mm->mmap_base;
+	current->mm->cached_hole_size = 0;
 
-	current->mm->rss = 0;
 	current->mm->mmap = NULL;
 	compute_creds(bprm);
  	current->flags &= ~PF_FORKNOEXEC;
@@ -332,15 +333,8 @@ beyond_if:
 
 	current->mm->start_stack =
 		(unsigned long) create_aout32_tables((char __user *)bprm->p, bprm);
-	if (!(orig_thr_flags & _TIF_32BIT)) {
-		unsigned long pgd_cache = get_pgd_cache(current->mm->pgd);
+	tsb_context_switch(current->mm);
 
-		__asm__ __volatile__("stxa\t%0, [%1] %2\n\t"
-				     "membar #Sync"
-				     : /* no outputs */
-				     : "r" (pgd_cache),
-				       "r" (TSB_REG), "i" (ASI_DMMU));
-	}
 	start_thread32(regs, ex.a_entry, current->mm->start_stack);
 	if (current->ptrace & PT_PTRACED)
 		send_sig(SIGTRAP, current, 0);
@@ -356,7 +350,7 @@ static int load_aout32_library(struct file *file)
 	int retval;
 	struct exec ex;
 
-	inode = file->f_dentry->d_inode;
+	inode = file->f_path.dentry->d_inode;
 
 	retval = -ENOEXEC;
 	error = kernel_read(file, 0, (char *) &ex, sizeof(ex));

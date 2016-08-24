@@ -1,24 +1,24 @@
 /*
-** hp100.c 
+** hp100.c
 ** HP CASCADE Architecture Driver for 100VG-AnyLan Network Adapters
 **
 ** $Id: hp100.c,v 1.58 2001/09/24 18:03:01 perex Exp perex $
 **
 ** Based on the HP100 driver written by Jaroslav Kysela <perex@jcu.cz>
-** Extended for new busmaster capable chipsets by 
+** Extended for new busmaster capable chipsets by
 ** Siegfried "Frieder" Loeffler (dg1sek) <floeff@mathematik.uni-stuttgart.de>
 **
-** Maintained by: Jaroslav Kysela <perex@suse.cz>
-** 
+** Maintained by: Jaroslav Kysela <perex@perex.cz>
+**
 ** This driver has only been tested with
 ** -- HP J2585B 10/100 Mbit/s PCI Busmaster
-** -- HP J2585A 10/100 Mbit/s PCI 
-** -- HP J2970  10 Mbit/s PCI Combo 10base-T/BNC
-** -- HP J2973  10 Mbit/s PCI 10base-T
+** -- HP J2585A 10/100 Mbit/s PCI
+** -- HP J2970A 10 Mbit/s PCI Combo 10base-T/BNC
+** -- HP J2973A 10 Mbit/s PCI 10base-T
 ** -- HP J2573  10/100 ISA
 ** -- Compex ReadyLink ENET100-VG4  10/100 Mbit/s PCI / EISA
 ** -- Compex FreedomLine 100/VG  10/100 Mbit/s ISA / EISA / PCI
-** 
+**
 ** but it should also work with the other CASCADE based adapters.
 **
 ** TODO:
@@ -65,7 +65,7 @@
 **   - timing changes in xmit routines, relogin to 100VG hub added when
 **     driver does reset
 **   - included fix for Compex FreedomLine PCI adapter
-** 
+**
 ** 1.54 -> 1.55
 **   - fixed bad initialization in init_module
 **   - added Compex FreedomLine adapter
@@ -73,10 +73,10 @@
 **
 ** 1.53 -> 1.54
 **   - added hardware multicast filter support (doesn't work)
-**   - little changes in hp100_sense_lan routine 
+**   - little changes in hp100_sense_lan routine
 **     - added support for Coax and AUI (J2970)
 **   - fix for multiple cards and hp100_mode parameter (insmod)
-**   - fix for shared IRQ 
+**   - fix for shared IRQ
 **
 ** 1.52 -> 1.53
 **   - fixed bug in multicast support
@@ -96,7 +96,6 @@
 
 #undef HP100_MULTICAST_FILTER	/* Need to be debugged... */
 
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -106,15 +105,16 @@
 #include <linux/interrupt.h>
 #include <linux/eisa.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/types.h>
-#include <linux/config.h>	/* for CONFIG_PCI */
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
+#include <linux/jiffies.h>
 
 #include <asm/io.h>
 
@@ -188,10 +188,12 @@ struct hp100_private {
 /*
  *  variables
  */
+#ifdef CONFIG_ISA
 static const char *hp100_isa_tbl[] = {
 	"HWPF150", /* HP J2573 rev A */
 	"HWP1950", /* HP J2573 */
 };
+#endif
 
 #ifdef CONFIG_EISA
 static struct eisa_device_id hp100_eisa_tbl[] = {
@@ -247,7 +249,7 @@ static void hp100_misc_interrupt(struct net_device *dev);
 static void hp100_update_stats(struct net_device *dev);
 static void hp100_clear_stats(struct hp100_private *lp, int ioaddr);
 static void hp100_set_multicast_list(struct net_device *dev);
-static irqreturn_t hp100_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t hp100_interrupt(int irq, void *dev_id);
 static void hp100_start_interface(struct net_device *dev);
 static void hp100_stop_interface(struct net_device *dev);
 static void hp100_load_eeprom(struct net_device *dev, u_short ioaddr);
@@ -276,7 +278,7 @@ static void hp100_RegisterDump(struct net_device *dev);
  * Convert an address in a kernel buffer to a bus/phys/dma address.
  * This work *only* for memory fragments part of lp->page_vaddr,
  * because it was properly DMA allocated via pci_alloc_consistent(),
- * so we just need to "retreive" the original mapping to bus/phys/dma
+ * so we just need to "retrieve" the original mapping to bus/phys/dma
  * address - Jean II */
 static inline dma_addr_t virt_to_whatever(struct net_device *dev, u32 * ptr)
 {
@@ -286,7 +288,7 @@ static inline dma_addr_t virt_to_whatever(struct net_device *dev, u32 * ptr)
 
 static inline u_int pdl_map_data(struct hp100_private *lp, void *data)
 {
-	return pci_map_single(lp->pci_dev, data, 
+	return pci_map_single(lp->pci_dev, data,
 			      MAX_ETHER_SIZE, PCI_DMA_FROMDEVICE);
 }
 
@@ -333,6 +335,7 @@ static __devinit const char *hp100_read_id(int ioaddr)
 	return str;
 }
 
+#ifdef CONFIG_ISA
 static __init int hp100_isa_probe1(struct net_device *dev, int ioaddr)
 {
 	const char *sig;
@@ -353,7 +356,7 @@ static __init int hp100_isa_probe1(struct net_device *dev, int ioaddr)
 		goto err;
 
 	for (i = 0; i < ARRAY_SIZE(hp100_isa_tbl); i++) {
-		if (!strcmp(hp100_isa_tbl[i], sig)) 
+		if (!strcmp(hp100_isa_tbl[i], sig))
 			break;
 
 	}
@@ -373,11 +376,11 @@ static int  __init hp100_isa_probe(struct net_device *dev, int addr)
 {
 	int err = -ENODEV;
 
-	/* Probe for a specific ISA address */		
+	/* Probe for a specific ISA address */
 	if (addr > 0xff && addr < 0x400)
 		err = hp100_isa_probe1(dev, addr);
 
-	else if (addr != 0) 
+	else if (addr != 0)
 		err = -ENXIO;
 
 	else {
@@ -390,9 +393,9 @@ static int  __init hp100_isa_probe(struct net_device *dev, int addr)
 	}
 	return err;
 }
+#endif /* CONFIG_ISA */
 
-
-#ifndef MODULE
+#if !defined(MODULE) && defined(CONFIG_ISA)
 struct net_device * __init hp100_probe(int unit)
 {
 	struct net_device *dev = alloc_etherdev(sizeof(struct hp100_private));
@@ -400,8 +403,6 @@ struct net_device * __init hp100_probe(int unit)
 
 	if (!dev)
 		return ERR_PTR(-ENODEV);
-
-	SET_MODULE_OWNER(dev);
 
 #ifdef HP100_DEBUG_B
 	hp100_outw(0x4200, TRACE);
@@ -417,17 +418,12 @@ struct net_device * __init hp100_probe(int unit)
 	if (err)
 		goto out;
 
-	err = register_netdev(dev);
-	if (err)
-		goto out1;
 	return dev;
- out1:
-	release_region(dev->base_addr, HP100_REGION_SIZE);
  out:
 	free_netdev(dev);
 	return ERR_PTR(err);
 }
-#endif
+#endif /* !MODULE && CONFIG_ISA */
 
 static int __devinit hp100_probe1(struct net_device *dev, int ioaddr,
 				  u_char bus, struct pci_dev *pci_dev)
@@ -453,7 +449,7 @@ static int __devinit hp100_probe1(struct net_device *dev, int ioaddr,
 	if (!request_region(ioaddr, HP100_REGION_SIZE, "hp100"))
 		goto out1;
 
-	if (hp100_inw(HW_ID) != HP100_HW_ID_CASCADE) 
+	if (hp100_inw(HW_ID) != HP100_HW_ID_CASCADE)
 		goto out2;
 
 	chip = hp100_inw(PAGING) & HP100_CHIPID_MASK;
@@ -496,7 +492,7 @@ static int __devinit hp100_probe1(struct net_device *dev, int ioaddr,
 	 * Use the variable "hp100_mode" upon insmod or as kernel parameter to
 	 * force driver modes:
 	 * hp100_mode=1 -> default, use busmaster mode if configured.
-	 * hp100_mode=2 -> enable shared memory mode 
+	 * hp100_mode=2 -> enable shared memory mode
 	 * hp100_mode=3 -> force use of i/o mapped mode.
 	 * hp100_mode=4 -> same as 1, but re-set the enable bit on the card.
 	 */
@@ -562,7 +558,7 @@ static int __devinit hp100_probe1(struct net_device *dev, int ioaddr,
 			 * Also, we can have EISA Busmaster cards (not tested),
 			 * so beware !!! - Jean II */
 			if((bus == HP100_BUS_PCI) &&
-			   (pci_set_dma_mask(pci_dev, 0xffffffff))) {
+			   (pci_set_dma_mask(pci_dev, DMA_32BIT_MASK))) {
 				/* Gracefully fallback to shared memory */
 				goto busmasterfail;
 			}
@@ -694,9 +690,9 @@ static int __devinit hp100_probe1(struct net_device *dev, int ioaddr,
 	hp100_clear_stats(lp, ioaddr);
 
 	/* If busmaster mode is wanted, a dma-capable memory area is needed for
-	 * the rx and tx PDLs 
+	 * the rx and tx PDLs
 	 * PCI cards can access the whole PC memory. Therefore GFP_DMA is not
-	 * needed for the allocation of the memory area. 
+	 * needed for the allocation of the memory area.
 	 */
 
 	/* TODO: We do not need this with old cards, where PDLs are stored
@@ -723,7 +719,7 @@ static int __devinit hp100_probe1(struct net_device *dev, int ioaddr,
 	}
 
 	/* Initialise the card. */
-	/* (I'm not really sure if it's a good idea to do this during probing, but 
+	/* (I'm not really sure if it's a good idea to do this during probing, but
 	 * like this it's assured that the lan connection type can be sensed
 	 * correctly)
 	 */
@@ -776,11 +772,22 @@ static int __devinit hp100_probe1(struct net_device *dev, int ioaddr,
 		printk("Warning! Link down.\n");
 	}
 
+	err = register_netdev(dev);
+	if (err)
+		goto out3;
+
 	return 0;
+out3:
+	if (local_mode == 1)
+		pci_free_consistent(lp->pci_dev, MAX_RINGSIZE + 0x0f,
+				    lp->page_vaddr_algn,
+				    virt_to_whatever(dev, lp->page_vaddr_algn));
+	if (mem_ptr_virt)
+		iounmap(mem_ptr_virt);
 out2:
 	release_region(ioaddr, HP100_REGION_SIZE);
 out1:
-	return -ENODEV;
+	return err;
 }
 
 /* This procedure puts the card into a stable init state */
@@ -854,7 +861,7 @@ static void hp100_hwinit(struct net_device *dev)
 	/* Next comes code from mmuinit procedure of SCO BM driver which is
 	 * called from HWconfigure in the SCO driver.  */
 
-	/* Initialise MMU, eventually switch on Busmaster Mode, initialise 
+	/* Initialise MMU, eventually switch on Busmaster Mode, initialise
 	 * multicast filter...
 	 */
 	hp100_mmuinit(dev);
@@ -872,11 +879,11 @@ static void hp100_hwinit(struct net_device *dev)
 		hp100_login_to_vg_hub(dev, 0);	/* relogin */
 
 }
-
 
-/* 
+
+/*
  * mmuinit - Reinitialise Cascade MMU and MAC settings.
- * Note: Must already be in reset and leaves card in reset. 
+ * Note: Must already be in reset and leaves card in reset.
  */
 static void hp100_mmuinit(struct net_device *dev)
 {
@@ -902,7 +909,7 @@ static void hp100_mmuinit(struct net_device *dev)
 	hp100_outw(0xffff, IRQ_STATUS);	/* ack IRQ */
 
 	/*
-	 * Enable Hardware 
+	 * Enable Hardware
 	 * - Clear Debug En, Rx Hdr Pipe, EE En, I/O En, Fake Int and Intr En
 	 * - Set Tri-State Int, Bus Master Rd/Wr, and Mem Map Disable
 	 * - Clear Priority, Advance Pkt and Xmit Cmd
@@ -977,7 +984,7 @@ static void hp100_mmuinit(struct net_device *dev)
 			 * 4 bytes for header). We will leave NUM_RXPDLS * 508 (rounded
 			 * to the next higher 1k boundary) bytes for the rx-pdl's
 			 * Note: For non-etr chips the transmit stop register must be
-			 * programmed on a 1k boundary, i.e. bits 9:0 must be zero. 
+			 * programmed on a 1k boundary, i.e. bits 9:0 must be zero.
 			 */
 			pdl_stop = lp->memory_size;
 			xmit_stop = (pdl_stop - 508 * (MAX_RX_PDL) - 16) & ~(0x03ff);
@@ -1072,7 +1079,7 @@ static int hp100_open(struct net_device *dev)
 	/* New: if bus is PCI or EISA, interrupts might be shared interrupts */
 	if (request_irq(dev->irq, hp100_interrupt,
 			lp->bus == HP100_BUS_PCI || lp->bus ==
-			HP100_BUS_EISA ? SA_SHIRQ : SA_INTERRUPT,
+			HP100_BUS_EISA ? IRQF_SHARED : IRQF_DISABLED,
 			"hp100", dev)) {
 		printk("hp100: %s: unable to get IRQ %d\n", dev->name, dev->irq);
 		return -EAGAIN;
@@ -1125,10 +1132,10 @@ static int hp100_close(struct net_device *dev)
 
 	return 0;
 }
-
+
 
 /*
- * Configure the PDL Rx rings and LAN 
+ * Configure the PDL Rx rings and LAN
  */
 static void hp100_init_pdls(struct net_device *dev)
 {
@@ -1176,7 +1183,7 @@ static void hp100_init_pdls(struct net_device *dev)
 		}
 	}
 }
-
+
 
 /* These functions "format" the entries in the pdl structure   */
 /* They return how much memory the fragments need.            */
@@ -1194,10 +1201,10 @@ static int hp100_init_rxpdl(struct net_device *dev,
 	ringptr->pdl_paddr = virt_to_whatever(dev, pdlptr + 1);
 	ringptr->skb = (void *) NULL;
 
-	/* 
+	/*
 	 * Write address and length of first PDL Fragment (which is used for
 	 * storing the RX-Header
-	 * We use the 4 bytes _before_ the PDH in the pdl memory area to 
+	 * We use the 4 bytes _before_ the PDH in the pdl memory area to
 	 * store this information. (PDH is at offset 0x04)
 	 */
 	/* Note that pdlptr+1 and not pdlptr is the pointer to the PDH */
@@ -1224,9 +1231,9 @@ static int hp100_init_txpdl(struct net_device *dev,
 }
 
 /*
- * hp100_build_rx_pdl allocates an skb_buff of maximum size plus two bytes 
+ * hp100_build_rx_pdl allocates an skb_buff of maximum size plus two bytes
  * for possible odd word alignment rounding up to next dword and set PDL
- * address for fragment#2 
+ * address for fragment#2
  * Returns: 0 if unable to allocate skb_buff
  *          1 if successful
  */
@@ -1246,13 +1253,13 @@ static int hp100_build_rx_pdl(hp100_ring_t * ringptr,
 #endif
 
 	/* Allocate skb buffer of maximum size */
-	/* Note: This depends on the alloc_skb functions allocating more 
+	/* Note: This depends on the alloc_skb functions allocating more
 	 * space than requested, i.e. aligning to 16bytes */
 
 	ringptr->skb = dev_alloc_skb(((MAX_ETHER_SIZE + 2 + 3) / 4) * 4);
 
 	if (NULL != ringptr->skb) {
-		/* 
+		/*
 		 * Reserve 2 bytes at the head of the buffer to land the IP header
 		 * on a long word boundary (According to the Network Driver section
 		 * in the Linux KHG, this should help to increase performance.)
@@ -1264,10 +1271,10 @@ static int hp100_build_rx_pdl(hp100_ring_t * ringptr,
 
 		/* ringptr->pdl points to the beginning of the PDL, i.e. the PDH */
 		/* Note: 1st Fragment is used for the 4 byte packet status
-		 * (receive header). Its PDL entries are set up by init_rxpdl. So 
+		 * (receive header). Its PDL entries are set up by init_rxpdl. So
 		 * here we only have to set up the PDL fragment entries for the data
-		 * part. Those 4 bytes will be stored in the DMA memory region 
-		 * directly before the PDL. 
+		 * part. Those 4 bytes will be stored in the DMA memory region
+		 * directly before the PDL.
 		 */
 #ifdef HP100_DEBUG_BM
 		printk("hp100: %s: build_rx_pdl: PDH@0x%x, skb->data (len %d) at 0x%x\n",
@@ -1279,7 +1286,7 @@ static int hp100_build_rx_pdl(hp100_ring_t * ringptr,
 		/* Conversion to new PCI API : map skbuf data to PCI bus.
 		 * Doc says it's OK for EISA as well - Jean II */
 		ringptr->pdl[0] = 0x00020000;	/* Write PDH */
-		ringptr->pdl[3] = pdl_map_data(netdev_priv(dev), 
+		ringptr->pdl[3] = pdl_map_data(netdev_priv(dev),
 					       ringptr->skb->data);
 		ringptr->pdl[4] = MAX_ETHER_SIZE;	/* Length of Data */
 
@@ -1400,7 +1407,7 @@ static void hp100_BM_shutdown(struct net_device *dev)
 			}
 		} else {	/* Shasta or Rainier Shutdown/Reset */
 			/* To ensure all bus master inloading activity has ceased,
-			 * wait for no Rx PDAs or no Rx packets on card. 
+			 * wait for no Rx PDAs or no Rx packets on card.
 			 */
 			hp100_page(PERFORMANCE);
 			/* 100 ms timeout */
@@ -1416,7 +1423,7 @@ static void hp100_BM_shutdown(struct net_device *dev)
 
 			/* To ensure all bus master outloading activity has ceased,
 			 * wait until the Tx PDA count goes to zero or no more Tx space
-			 * available in the Tx region of the card. 
+			 * available in the Tx region of the card.
 			 */
 			/* 100 ms timeout */
 			for (time = 0; time < 10000; time++) {
@@ -1455,7 +1462,7 @@ static int hp100_check_lan(struct net_device *dev)
 	return 0;
 }
 
-/* 
+/*
  *  transmit functions
  */
 
@@ -1479,12 +1486,9 @@ static int hp100_start_xmit_bm(struct sk_buff *skb, struct net_device *dev)
 
 	if (skb->len <= 0)
 		return 0;
-		
-	if (skb->len < ETH_ZLEN && lp->chip == HP100_CHIPID_SHASTA) {
-		skb = skb_padto(skb, ETH_ZLEN);
-		if (skb == NULL)
-			return 0;
-	}
+
+	if (lp->chip == HP100_CHIPID_SHASTA && skb_padto(skb, ETH_ZLEN))
+		return 0;
 
 	/* Get Tx ring tail pointer */
 	if (lp->txrtail->next == lp->txrhead) {
@@ -1493,7 +1497,7 @@ static int hp100_start_xmit_bm(struct sk_buff *skb, struct net_device *dev)
 		printk("hp100: %s: start_xmit_bm: No TX PDL available.\n", dev->name);
 #endif
 		/* not waited long enough since last tx? */
-		if (jiffies - dev->trans_start < HZ)
+		if (time_before(jiffies, dev->trans_start + HZ))
 			return -EAGAIN;
 
 		if (hp100_check_lan(dev))
@@ -1572,14 +1576,14 @@ static int hp100_start_xmit_bm(struct sk_buff *skb, struct net_device *dev)
 
 	return 0;
 }
-
+
 
 /* clean_txring checks if packets have been sent by the card by reading
  * the TX_PDL register from the performance page and comparing it to the
  * number of commited packets. It then frees the skb's of the packets that
  * obviously have been sent to the network.
  *
- * Needs the PERFORMANCE page selected. 
+ * Needs the PERFORMANCE page selected.
  */
 static void hp100_clean_txring(struct net_device *dev)
 {
@@ -1646,7 +1650,7 @@ static int hp100_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		printk("hp100: %s: start_xmit: tx free mem = 0x%x\n", dev->name, i);
 #endif
 		/* not waited long enough since last failed tx try? */
-		if (jiffies - dev->trans_start < HZ) {
+		if (time_before(jiffies, dev->trans_start + HZ)) {
 #ifdef HP100_DEBUG
 			printk("hp100: %s: trans_start timing problem\n",
 			       dev->name);
@@ -1712,17 +1716,10 @@ static int hp100_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	hp100_outw(i, FRAGMENT_LEN);	/* and first/only fragment length    */
 
 	if (lp->mode == 2) {	/* memory mapped */
-		if (lp->mem_ptr_virt) {	/* high pci memory was remapped */
-			/* Note: The J2585B needs alignment to 32bits here!  */
-			memcpy_toio(lp->mem_ptr_virt, skb->data, (skb->len + 3) & ~3);
-			if (!ok_flag)
-				memset_io(lp->mem_ptr_virt, 0, HP100_MIN_PACKET_SIZE - skb->len);
-		} else {
-			/* Note: The J2585B needs alignment to 32bits here!  */
-			isa_memcpy_toio(lp->mem_ptr_phys, skb->data, (skb->len + 3) & ~3);
-			if (!ok_flag)
-				isa_memset_io(lp->mem_ptr_phys, 0, HP100_MIN_PACKET_SIZE - skb->len);
-		}
+		/* Note: The J2585B needs alignment to 32bits here!  */
+		memcpy_toio(lp->mem_ptr_virt, skb->data, (skb->len + 3) & ~3);
+		if (!ok_flag)
+			memset_io(lp->mem_ptr_virt, 0, HP100_MIN_PACKET_SIZE - skb->len);
 	} else {		/* programmed i/o */
 		outsl(ioaddr + HP100_REG_DATA32, skb->data,
 		      (skb->len + 3) >> 2);
@@ -1747,15 +1744,15 @@ static int hp100_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	return 0;
 }
-
+
 
 /*
  * Receive Function (Non-Busmaster mode)
- * Called when an "Receive Packet" interrupt occurs, i.e. the receive 
+ * Called when an "Receive Packet" interrupt occurs, i.e. the receive
  * packet counter is non-zero.
  * For non-busmaster, this function does the whole work of transfering
  * the packet to the host memory and then up to higher layers via skb
- * and netif_rx. 
+ * and netif_rx.
  */
 
 static void hp100_rx(struct net_device *dev)
@@ -1792,10 +1789,7 @@ static void hp100_rx(struct net_device *dev)
 		/* First we get the header, which contains information about the */
 		/* actual length of the received packet. */
 		if (lp->mode == 2) {	/* memory mapped mode */
-			if (lp->mem_ptr_virt)	/* if memory was remapped */
-				header = readl(lp->mem_ptr_virt);
-			else
-				header = isa_readl(lp->mem_ptr_phys);
+			header = readl(lp->mem_ptr_virt);
 		} else		/* programmed i/o */
 			header = hp100_inl(DATA32);
 
@@ -1820,20 +1814,15 @@ static void hp100_rx(struct net_device *dev)
 			u_char *ptr;
 
 			skb_reserve(skb,2);
-			skb->dev = dev;
 
 			/* ptr to start of the sk_buff data area */
 			skb_put(skb, pkt_len);
 			ptr = skb->data;
 
 			/* Now transfer the data from the card into that area */
-			if (lp->mode == 2) {
-				if (lp->mem_ptr_virt)
-					memcpy_fromio(ptr, lp->mem_ptr_virt,pkt_len);
-				/* Note alignment to 32bit transfers */
-				else
-					isa_memcpy_fromio(ptr, lp->mem_ptr_phys, pkt_len);
-			} else	/* io mapped */
+			if (lp->mode == 2)
+				memcpy_fromio(ptr, lp->mem_ptr_virt,pkt_len);
+			else	/* io mapped */
 				insl(ioaddr + HP100_REG_DATA32, ptr, pkt_len >> 2);
 
 			skb->protocol = eth_type_trans(skb, dev);
@@ -1865,7 +1854,7 @@ static void hp100_rx(struct net_device *dev)
 #endif
 }
 
-/* 
+/*
  * Receive Function for Busmaster Mode
  */
 static void hp100_rx_bm(struct net_device *dev)
@@ -1886,7 +1875,7 @@ static void hp100_rx_bm(struct net_device *dev)
 		printk("hp100: %s: rx_bm called although no PDLs were committed to adapter?\n", dev->name);
 		return;
 	} else
-		/* RX_PKT_CNT states how many PDLs are currently formatted and available to 
+		/* RX_PKT_CNT states how many PDLs are currently formatted and available to
 		 * the cards BM engine */
 	if ((hp100_inw(RX_PKT_CNT) & 0x00ff) >= lp->rxrcommit) {
 		printk("hp100: %s: More packets received than commited? RX_PKT_CNT=0x%x, commit=0x%x\n",
@@ -1899,7 +1888,7 @@ static void hp100_rx_bm(struct net_device *dev)
 	while ((lp->rxrcommit > hp100_inb(RX_PDL))) {
 		/*
 		 * The packet was received into the pdl pointed to by lp->rxrhead (
-		 * the oldest pdl in the ring 
+		 * the oldest pdl in the ring
 		 */
 
 		/* First we get the header, which contains information about the */
@@ -2054,7 +2043,7 @@ static void hp100_clear_stats(struct hp100_private *lp, int ioaddr)
 	hp100_page(PERFORMANCE);
 	spin_unlock_irqrestore(&lp->lock, flags);
 }
-
+
 
 /*
  *  multicast setup
@@ -2104,9 +2093,9 @@ static void hp100_set_multicast_list(struct net_device *dev)
 				addrs = dmi->dmi_addr;
 				if ((*addrs & 0x01) == 0x01) {	/* multicast address? */
 #ifdef HP100_DEBUG
-					printk("hp100: %s: multicast = %02x:%02x:%02x:%02x:%02x:%02x, ",
-						     dev->name, addrs[0], addrs[1], addrs[2],
-						     addrs[3], addrs[4], addrs[5]);
+					DECLARE_MAC_BUF(mac);
+					printk("hp100: %s: multicast = %s, ",
+						     dev->name, print_mac(mac, addrs));
 #endif
 					for (j = idx = 0; j < 6; j++) {
 						idx ^= *addrs++ & 0x3f;
@@ -2195,7 +2184,7 @@ static void hp100_set_multicast_list(struct net_device *dev)
  *  hardware interrupt handling
  */
 
-static irqreturn_t hp100_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t hp100_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	struct hp100_private *lp = netdev_priv(dev);
@@ -2231,9 +2220,9 @@ static irqreturn_t hp100_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	/* We're only interested in those interrupts we really enabled. */
 	/* val &= hp100_inw( IRQ_MASK ); */
 
-	/* 
-	 * RX_PDL_FILL_COMPL is set whenever a RX_PDL has been executed. A RX_PDL 
-	 * is considered executed whenever the RX_PDL data structure is no longer 
+	/*
+	 * RX_PDL_FILL_COMPL is set whenever a RX_PDL has been executed. A RX_PDL
+	 * is considered executed whenever the RX_PDL data structure is no longer
 	 * needed.
 	 */
 	if (val & HP100_RX_PDL_FILL_COMPL) {
@@ -2244,7 +2233,7 @@ static irqreturn_t hp100_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		}
 	}
 
-	/* 
+	/*
 	 * The RX_PACKET interrupt is set, when the receive packet counter is
 	 * non zero. We use this interrupt for receiving in slave mode. In
 	 * busmaster mode, we use it to make sure we did not miss any rx_pdl_fill
@@ -2270,10 +2259,10 @@ static irqreturn_t hp100_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	hp100_outw(val, IRQ_STATUS);
 
 	/*
-	 * RX_ERROR is set when a packet is dropped due to no memory resources on 
-	 * the card or when a RCV_ERR occurs. 
-	 * TX_ERROR is set when a TX_ABORT condition occurs in the MAC->exists  
-	 * only in the 802.3 MAC and happens when 16 collisions occur during a TX 
+	 * RX_ERROR is set when a packet is dropped due to no memory resources on
+	 * the card or when a RCV_ERR occurs.
+	 * TX_ERROR is set when a TX_ABORT condition occurs in the MAC->exists
+	 * only in the 802.3 MAC and happens when 16 collisions occur during a TX
 	 */
 	if (val & (HP100_TX_ERROR | HP100_RX_ERROR)) {
 #ifdef HP100_DEBUG_IRQ
@@ -2286,20 +2275,20 @@ static irqreturn_t hp100_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		}
 	}
 
-	/* 
-	 * RX_PDA_ZERO is set when the PDA count goes from non-zero to zero. 
+	/*
+	 * RX_PDA_ZERO is set when the PDA count goes from non-zero to zero.
 	 */
 	if ((lp->mode == 1) && (val & (HP100_RX_PDA_ZERO)))
 		hp100_rxfill(dev);
 
-	/* 
-	 * HP100_TX_COMPLETE interrupt occurs when packet transmitted on wire 
-	 * is completed 
+	/*
+	 * HP100_TX_COMPLETE interrupt occurs when packet transmitted on wire
+	 * is completed
 	 */
 	if ((lp->mode == 1) && (val & (HP100_TX_COMPLETE)))
 		hp100_clean_txring(dev);
 
-	/* 
+	/*
 	 * MISC_ERROR is set when either the LAN link goes down or a detected
 	 * bus error occurs.
 	 */
@@ -2482,12 +2471,12 @@ static int hp100_sense_lan(struct net_device *dev)
 
 	/* Those cards don't have a 100 Mbit connector */
 	if ( !strcmp(lp->id, "HWP1920")  ||
-	     (lp->pci_dev && 
-	      lp->pci_dev->vendor == PCI_VENDOR_ID && 
+	     (lp->pci_dev &&
+	      lp->pci_dev->vendor == PCI_VENDOR_ID &&
 	      (lp->pci_dev->device == PCI_DEVICE_ID_HP_J2970A ||
 	       lp->pci_dev->device == PCI_DEVICE_ID_HP_J2973A)))
 		return HP100_LAN_ERR;
-	
+
 	if (val_VG & HP100_LINK_CABLE_ST)	/* Can hear the HUBs tone. */
 		return HP100_LAN_100;
 	return HP100_LAN_ERR;
@@ -2510,10 +2499,8 @@ static int hp100_down_vg_link(struct net_device *dev)
 	do {
 		if (hp100_inb(VG_LAN_CFG_1) & HP100_LINK_CABLE_ST)
 			break;
-		if (!in_interrupt()) {
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(1);
-		}
+		if (!in_interrupt())
+			schedule_timeout_interruptible(1);
 	} while (time_after(time, jiffies));
 
 	if (time_after_eq(jiffies, time))	/* no signal->no logout */
@@ -2529,10 +2516,8 @@ static int hp100_down_vg_link(struct net_device *dev)
 	do {
 		if (!(hp100_inb(VG_LAN_CFG_1) & HP100_LINK_UP_ST))
 			break;
-		if (!in_interrupt()) {
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(1);
-		}
+		if (!in_interrupt())
+			schedule_timeout_interruptible(1);
 	} while (time_after(time, jiffies));
 
 #ifdef HP100_DEBUG
@@ -2570,10 +2555,8 @@ static int hp100_down_vg_link(struct net_device *dev)
 		do {
 			if (!(hp100_inb(MAC_CFG_4) & HP100_MAC_SEL_ST))
 				break;
-			if (!in_interrupt()) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout(1);
-			}
+			if (!in_interrupt())
+				schedule_timeout_interruptible(1);
 		} while (time_after(time, jiffies));
 
 		hp100_orb(HP100_AUTO_MODE, MAC_CFG_3);	/* Autosel back on */
@@ -2584,10 +2567,8 @@ static int hp100_down_vg_link(struct net_device *dev)
 	do {
 		if ((hp100_inb(VG_LAN_CFG_1) & HP100_LINK_CABLE_ST) == 0)
 			break;
-		if (!in_interrupt()) {
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(1);
-		}
+		if (!in_interrupt())
+			schedule_timeout_interruptible(1);
 	} while (time_after(time, jiffies));
 
 	if (time_before_eq(time, jiffies)) {
@@ -2599,10 +2580,8 @@ static int hp100_down_vg_link(struct net_device *dev)
 
 	time = jiffies + (2 * HZ);	/* This seems to take a while.... */
 	do {
-		if (!in_interrupt()) {
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(1);
-		}
+		if (!in_interrupt())
+			schedule_timeout_interruptible(1);
 	} while (time_after(time, jiffies));
 
 	return 0;
@@ -2652,10 +2631,8 @@ static int hp100_login_to_vg_hub(struct net_device *dev, u_short force_relogin)
 		do {
 			if (~(hp100_inb(VG_LAN_CFG_1) & HP100_LINK_UP_ST))
 				break;
-			if (!in_interrupt()) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout(1);
-			}
+			if (!in_interrupt())
+				schedule_timeout_interruptible(1);
 		} while (time_after(time, jiffies));
 
 		/* Start an addressed training and optionally request promiscuous port */
@@ -2690,10 +2667,8 @@ static int hp100_login_to_vg_hub(struct net_device *dev, u_short force_relogin)
 		do {
 			if (hp100_inb(VG_LAN_CFG_1) & HP100_LINK_CABLE_ST)
 				break;
-			if (!in_interrupt()) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout(1);
-			}
+			if (!in_interrupt())
+				schedule_timeout_interruptible(1);
 		} while (time_before(jiffies, time));
 
 		if (time_after_eq(jiffies, time)) {
@@ -2716,10 +2691,8 @@ static int hp100_login_to_vg_hub(struct net_device *dev, u_short force_relogin)
 #endif
 					break;
 				}
-				if (!in_interrupt()) {
-					set_current_state(TASK_INTERRUPTIBLE);
-					schedule_timeout(1);
-				}
+				if (!in_interrupt())
+					schedule_timeout_interruptible(1);
 			} while (time_after(time, jiffies));
 		}
 
@@ -2849,8 +2822,8 @@ static void cleanup_dev(struct net_device *d)
 	release_region(d->base_addr, HP100_REGION_SIZE);
 
 	if (p->mode == 1)	/* busmaster */
-		pci_free_consistent(p->pci_dev, MAX_RINGSIZE + 0x0f, 
-				    p->page_vaddr_algn, 
+		pci_free_consistent(p->pci_dev, MAX_RINGSIZE + 0x0f,
+				    p->page_vaddr_algn,
 				    virt_to_whatever(d, p->page_vaddr_algn));
 	if (p->mem_ptr_virt)
 		iounmap(p->mem_ptr_virt);
@@ -2868,25 +2841,18 @@ static int __init hp100_eisa_probe (struct device *gendev)
 	if (!dev)
 		return -ENOMEM;
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &edev->dev);
 
 	err = hp100_probe1(dev, edev->base_addr + 0xC38, HP100_BUS_EISA, NULL);
 	if (err)
 		goto out1;
 
-	err = register_netdev(dev);
-	if (err)
-		goto out2;
-	
 #ifdef HP100_DEBUG
-	printk("hp100: %s: EISA adapter found at 0x%x\n", dev->name, 
+	printk("hp100: %s: EISA adapter found at 0x%x\n", dev->name,
 	       dev->base_addr);
 #endif
 	gendev->driver_data = dev;
 	return 0;
- out2:
-	release_region(dev->base_addr, HP100_REGION_SIZE);
  out1:
 	free_netdev(dev);
 	return err;
@@ -2927,7 +2893,6 @@ static int __devinit hp100_pci_probe (struct pci_dev *pdev,
 		goto out0;
 	}
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
@@ -2946,22 +2911,17 @@ static int __devinit hp100_pci_probe (struct pci_dev *pdev,
 		pci_command |= PCI_COMMAND_MASTER;
 		pci_write_config_word(pdev, PCI_COMMAND, pci_command);
 	}
-	
+
 	ioaddr = pci_resource_start(pdev, 0);
 	err = hp100_probe1(dev, ioaddr, HP100_BUS_PCI, pdev);
-	if (err) 
-		goto out1;
-	err = register_netdev(dev);
 	if (err)
-		goto out2;
-	
+		goto out1;
+
 #ifdef HP100_DEBUG
 	printk("hp100: %s: PCI adapter found at 0x%x\n", dev->name, ioaddr);
 #endif
 	pci_set_drvdata(pdev, dev);
 	return 0;
- out2:
-	release_region(dev->base_addr, HP100_REGION_SIZE);
  out1:
 	free_netdev(dev);
  out0:
@@ -2991,7 +2951,7 @@ static struct pci_driver hp100_pci_driver = {
  */
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>, "
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>, "
               "Siegfried \"Frieder\" Loeffler (dg1sek) <floeff@mathematik.uni-stuttgart.de>");
 MODULE_DESCRIPTION("HP CASCADE Architecture Driver for 100VG-AnyLan Network Adapters");
 
@@ -3029,25 +2989,18 @@ static int __init hp100_isa_init(void)
 
 			return -ENOMEM;
 		}
-		SET_MODULE_OWNER(dev);
 
 		err = hp100_isa_probe(dev, hp100_port[i]);
-		if (!err) {
-			err = register_netdev(dev);
-			if (!err) 
-				hp100_devlist[cards++] = dev;
-			else
-				release_region(dev->base_addr, HP100_REGION_SIZE);
-		}
-
-		if (err)
+		if (!err)
+			hp100_devlist[cards++] = dev;
+		else
 			free_netdev(dev);
 	}
 
 	return cards > 0 ? 0 : -ENODEV;
 }
 
-static void __exit hp100_isa_cleanup(void) 
+static void hp100_isa_cleanup(void)
 {
 	int i;
 
@@ -3071,12 +3024,12 @@ static int __init hp100_module_init(void)
 		goto out;
 #ifdef CONFIG_EISA
 	err = eisa_driver_register(&hp100_eisa_driver);
-	if (err && err != -ENODEV) 
+	if (err && err != -ENODEV)
 		goto out2;
 #endif
 #ifdef CONFIG_PCI
-	err = pci_module_init(&hp100_pci_driver);
-	if (err && err != -ENODEV) 
+	err = pci_register_driver(&hp100_pci_driver);
+	if (err && err != -ENODEV)
 		goto out3;
 #endif
  out:

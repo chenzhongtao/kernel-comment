@@ -7,6 +7,8 @@
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/bootmem.h>
+#include <linux/scatterlist.h>
+#include <linux/log2.h>
 
 #include <asm/io.h>
 #include <asm/hwrpb.h>
@@ -53,11 +55,11 @@ size_for_memory(unsigned long max)
 {
 	unsigned long mem = max_low_pfn << PAGE_SHIFT;
 	if (mem < max)
-		max = 1UL << ceil_log2(mem);
+		max = roundup_pow_of_two(mem);
 	return max;
 }
 
-struct pci_iommu_arena *
+struct pci_iommu_arena * __init
 iommu_arena_new_node(int nid, struct pci_controller *hose, dma_addr_t base,
 		     unsigned long window_size, unsigned long align)
 {
@@ -116,7 +118,7 @@ iommu_arena_new_node(int nid, struct pci_controller *hose, dma_addr_t base,
 	return arena;
 }
 
-struct pci_iommu_arena *
+struct pci_iommu_arena * __init
 iommu_arena_new(struct pci_controller *hose, dma_addr_t base,
 		unsigned long window_size, unsigned long align)
 {
@@ -206,6 +208,10 @@ iommu_arena_free(struct pci_iommu_arena *arena, long ofs, long n)
 		p[i] = 0;
 }
 
+/* True if the machine supports DAC addressing, and DEV can
+   make use of it given MASK.  */
+static int pci_dac_dma_supported(struct pci_dev *hwdev, u64 mask);
+
 /* Map a single buffer of the indicated size for PCI DMA in streaming
    mode.  The 32-bit PCI bus mastering address to use is returned.
    Once the device is given the dma address, the device owns this memory
@@ -300,6 +306,7 @@ pci_map_single(struct pci_dev *pdev, void *cpu_addr, size_t size, int dir)
 	dac_allowed = pdev ? pci_dac_dma_supported(pdev, pdev->dma_mask) : 0; 
 	return pci_map_single_1(pdev, cpu_addr, size, dac_allowed);
 }
+EXPORT_SYMBOL(pci_map_single);
 
 dma_addr_t
 pci_map_page(struct pci_dev *pdev, struct page *page, unsigned long offset,
@@ -314,6 +321,7 @@ pci_map_page(struct pci_dev *pdev, struct page *page, unsigned long offset,
 	return pci_map_single_1(pdev, (char *)page_address(page) + offset, 
 				size, dac_allowed);
 }
+EXPORT_SYMBOL(pci_map_page);
 
 /* Unmap a single streaming mode DMA translation.  The DMA_ADDR and
    SIZE must match what was provided for in a previous pci_map_single
@@ -379,6 +387,7 @@ pci_unmap_single(struct pci_dev *pdev, dma_addr_t dma_addr, size_t size,
 	DBGA2("pci_unmap_single: sg [%lx,%lx] np %ld from %p\n",
 	      dma_addr, size, npages, __builtin_return_address(0));
 }
+EXPORT_SYMBOL(pci_unmap_single);
 
 void
 pci_unmap_page(struct pci_dev *pdev, dma_addr_t dma_addr,
@@ -386,6 +395,7 @@ pci_unmap_page(struct pci_dev *pdev, dma_addr_t dma_addr,
 {
 	pci_unmap_single(pdev, dma_addr, size, direction);
 }
+EXPORT_SYMBOL(pci_unmap_page);
 
 /* Allocate and map kernel buffer using consistent mode DMA for PCI
    device.  Returns non-NULL cpu-view pointer to the buffer if
@@ -397,7 +407,7 @@ pci_alloc_consistent(struct pci_dev *pdev, size_t size, dma_addr_t *dma_addrp)
 {
 	void *cpu_addr;
 	long order = get_order(size);
-	int gfp = GFP_ATOMIC;
+	gfp_t gfp = GFP_ATOMIC;
 
 try_again:
 	cpu_addr = (void *)__get_free_pages(gfp, order);
@@ -427,6 +437,7 @@ try_again:
 
 	return cpu_addr;
 }
+EXPORT_SYMBOL(pci_alloc_consistent);
 
 /* Free and unmap a consistent DMA buffer.  CPU_ADDR and DMA_ADDR must
    be values that were returned from pci_alloc_consistent.  SIZE must
@@ -444,7 +455,7 @@ pci_free_consistent(struct pci_dev *pdev, size_t size, void *cpu_addr,
 	DBGA2("pci_free_consistent: [%x,%lx] from %p\n",
 	      dma_addr, size, __builtin_return_address(0));
 }
-
+EXPORT_SYMBOL(pci_free_consistent);
 
 /* Classify the elements of the scatterlist.  Write dma_address
    of each element with:
@@ -455,7 +466,7 @@ pci_free_consistent(struct pci_dev *pdev, size_t size, void *cpu_addr,
    Write dma_length of each leader with the combined lengths of
    the mergable followers.  */
 
-#define SG_ENT_VIRT_ADDRESS(SG) (page_address((SG)->page) + (SG)->offset)
+#define SG_ENT_VIRT_ADDRESS(SG) (sg_virt((SG)))
 #define SG_ENT_PHYS_ADDRESS(SG) __pa(SG_ENT_VIRT_ADDRESS(SG))
 
 static void
@@ -672,6 +683,7 @@ pci_map_sg(struct pci_dev *pdev, struct scatterlist *sg, int nents,
 		pci_unmap_sg(pdev, start, out - start, direction);
 	return 0;
 }
+EXPORT_SYMBOL(pci_map_sg);
 
 /* Unmap a set of streaming mode DMA translations.  Again, cpu read
    rules concerning calls here are the same as for pci_unmap_single()
@@ -752,6 +764,7 @@ pci_unmap_sg(struct pci_dev *pdev, struct scatterlist *sg, int nents,
 
 	DBGA("pci_unmap_sg: %ld entries\n", nents - (end - sg));
 }
+EXPORT_SYMBOL(pci_unmap_sg);
 
 
 /* Return whether the given PCI device DMA address mask can be
@@ -786,6 +799,7 @@ pci_dma_supported(struct pci_dev *pdev, u64 mask)
 
 	return 0;
 }
+EXPORT_SYMBOL(pci_dma_supported);
 
 
 /*
@@ -888,7 +902,7 @@ iommu_unbind(struct pci_iommu_arena *arena, long pg_start, long pg_count)
 /* True if the machine supports DAC addressing, and DEV can
    make use of it given MASK.  */
 
-int
+static int
 pci_dac_dma_supported(struct pci_dev *dev, u64 mask)
 {
 	dma64_addr_t dac_offset = alpha_mv.pci_dac_offset;
@@ -908,29 +922,6 @@ pci_dac_dma_supported(struct pci_dev *dev, u64 mask)
 
 	return ok;
 }
-
-dma64_addr_t
-pci_dac_page_to_dma(struct pci_dev *pdev, struct page *page,
-		    unsigned long offset, int direction)
-{
-	return (alpha_mv.pci_dac_offset
-		+ __pa(page_address(page)) 
-		+ (dma64_addr_t) offset);
-}
-
-struct page *
-pci_dac_dma_to_page(struct pci_dev *pdev, dma64_addr_t dma_addr)
-{
-	unsigned long paddr = (dma_addr & PAGE_MASK) - alpha_mv.pci_dac_offset;
-	return virt_to_page(__va(paddr));
-}
-
-unsigned long
-pci_dac_dma_to_offset(struct pci_dev *pdev, dma64_addr_t dma_addr)
-{
-	return (dma_addr & ~PAGE_MASK);
-}
-
 
 /* Helper for generic DMA-mapping functions. */
 
@@ -957,6 +948,7 @@ alpha_gendev_to_pci(struct device *dev)
 	/* This assumes ISA bus master with dma_mask 0xffffff. */
 	return NULL;
 }
+EXPORT_SYMBOL(alpha_gendev_to_pci);
 
 int
 dma_set_mask(struct device *dev, u64 mask)
@@ -969,3 +961,4 @@ dma_set_mask(struct device *dev, u64 mask)
 
 	return 0;
 }
+EXPORT_SYMBOL(dma_set_mask);

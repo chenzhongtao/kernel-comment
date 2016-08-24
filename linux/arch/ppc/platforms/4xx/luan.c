@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/4xx/luan.c
- *
  * Luan board specific routines
  *
  * Matt Porter <mporter@kernel.crashing.org>
@@ -13,7 +11,6 @@
  * option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -28,12 +25,12 @@
 #include <linux/delay.h>
 #include <linux/ide.h>
 #include <linux/initrd.h>
-#include <linux/irq.h>
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/tty.h>
 #include <linux/serial.h>
 #include <linux/serial_core.h>
+#include <linux/serial_8250.h>
 
 #include <asm/system.h>
 #include <asm/pgtable.h>
@@ -53,14 +50,7 @@
 #include <syslib/ibm440gx_common.h>
 #include <syslib/ibm440sp_common.h>
 
-/*
- * This is a horrible kludge, we eventually need to abstract this
- * generic PHY stuff, so the  standard phy mode defines can be
- * easily used from arch code.
- */
-#include "../../../../drivers/net/ibm_emac/ibm_emac_phy.h"
-
-bd_t __res;
+extern bd_t __res;
 
 static struct ibm44x_clocks clocks __initdata;
 
@@ -223,9 +213,8 @@ luan_setup_hose(struct pci_controller *hose,
 	hose->io_space.end = LUAN_PCIX_UPPER_IO;
 	hose->mem_space.start = lower_mem;
 	hose->mem_space.end = upper_mem;
-	isa_io_base =
-		(unsigned long)ioremap64(pcix_io_base, PCIX_IO_SIZE);
-	hose->io_base_virt = (void *)isa_io_base;
+	hose->io_base_virt = ioremap64(pcix_io_base, PCIX_IO_SIZE);
+	isa_io_base = (unsigned long) hose->io_base_virt;
 
 	setup_indirect_pci(hose, cfga, cfgd);
 	hose->set_cfg_type = 1;
@@ -241,9 +230,14 @@ luan_setup_hoses(void)
 
 	/* Allocate hoses for PCIX1 and PCIX2 */
 	hose1 = pcibios_alloc_controller();
-	hose2 = pcibios_alloc_controller();
-	if (!hose1 || !hose2)
+	if (!hose1)
 		return;
+
+	hose2 = pcibios_alloc_controller();
+	if (!hose2) {
+		pcibios_free_controller(hose1);
+		return;
+	}
 
 	/* Setup PCIX1 */
 	hose1->first_busno = 0;
@@ -288,8 +282,8 @@ luan_early_serial_map(void)
 	port.irq = UART0_INT;
 	port.uartclk = clocks.uart0;
 	port.regshift = 0;
-	port.iotype = SERIAL_IO_MEM;
-	port.flags = ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST;
+	port.iotype = UPIO_MEM;
+	port.flags = UPF_BOOT_AUTOCONF | UPF_SKIP_TEST;
 	port.line = 0;
 
 	if (early_serial_setup(&port) != 0) {
@@ -364,16 +358,7 @@ luan_setup_arch(void)
 void __init platform_init(unsigned long r3, unsigned long r4,
 		unsigned long r5, unsigned long r6, unsigned long r7)
 {
-	parse_bootinfo(find_bootinfo());
-
-	/*
-	 * If we were passed in a board information, copy it into the
-	 * residual data area.
-	 */
-	if (r3)
-		__res = *(bd_t *)(r3 + KERNELBASE);
-
-	ibm44x_platform_init();
+	ibm44x_platform_init(r3, r4, r5, r6, r7);
 
 	ppc_md.setup_arch = luan_setup_arch;
 	ppc_md.show_cpuinfo = luan_show_cpuinfo;

@@ -1,4 +1,3 @@
-#include <linux/version.h>
 #include <media/saa7146_vv.h>
 
 static u32 saa7146_i2c_func(struct i2c_adapter *adapter)
@@ -12,7 +11,7 @@ static u32 saa7146_i2c_func(struct i2c_adapter *adapter)
 }
 
 /* this function returns the status-register of our i2c-device */
-static inline u32 saa7146_i2c_status(struct saa7146_dev *dev) 
+static inline u32 saa7146_i2c_status(struct saa7146_dev *dev)
 {
 	u32 iicsta = saa7146_read(dev, I2C_STATUS);
 /*
@@ -22,10 +21,10 @@ static inline u32 saa7146_i2c_status(struct saa7146_dev *dev)
 }
 
 /* this function runs through the i2c-messages and prepares the data to be
-   sent through the saa7146. have a look at the specifications p. 122 ff 
+   sent through the saa7146. have a look at the specifications p. 122 ff
    to understand this. it returns the number of u32s to send, or -1
    in case of an error. */
-static int saa7146_i2c_msg_prepare(const struct i2c_msg m[], int num, u32 *op)
+static int saa7146_i2c_msg_prepare(const struct i2c_msg *m, int num, u32 *op)
 {
 	int h1, h2;
 	int i, j, addr;
@@ -56,7 +55,7 @@ static int saa7146_i2c_msg_prepare(const struct i2c_msg m[], int num, u32 *op)
 		/* insert the address of the i2c-slave.
 		   note: we get 7 bit i2c-addresses,
 		   so we have to perform a translation */
-		addr = (m[i].addr*2) + ( (0 != (m[i].flags & I2C_M_RD)) ? 1 : 0); 
+		addr = (m[i].addr*2) + ( (0 != (m[i].flags & I2C_M_RD)) ? 1 : 0);
 		h1 = op_count/3; h2 = op_count%3;
 		op[h1] |= (	    (u8)addr << ((3-h2)*8));
 		op[h1] |= (SAA7146_I2C_START << ((3-h2)*2));
@@ -70,8 +69,8 @@ static int saa7146_i2c_msg_prepare(const struct i2c_msg m[], int num, u32 *op)
 			op[h1] |= (       SAA7146_I2C_CONT << ((3-h2)*2));
 			op_count++;
 		}
-		
-	}			
+
+	}
 
 	/* have a look at the last byte inserted:
 	  if it was: ...CONT change it to ...STOP */
@@ -81,7 +80,7 @@ static int saa7146_i2c_msg_prepare(const struct i2c_msg m[], int num, u32 *op)
 		op[h1] |= (SAA7146_I2C_STOP << ((3-h2)*2));
 	}
 
-	/* return the number of u32s to send */	
+	/* return the number of u32s to send */
 	return mem;
 }
 
@@ -89,7 +88,7 @@ static int saa7146_i2c_msg_prepare(const struct i2c_msg m[], int num, u32 *op)
    which bytes were read through the adapter and write them back to the corresponding
    i2c-message. but instead, we simply write back all bytes.
    fixme: this could be improved. */
-static int saa7146_i2c_msg_cleanup(const struct i2c_msg m[], int num, u32 *op)
+static int saa7146_i2c_msg_cleanup(const struct i2c_msg *m, int num, u32 *op)
 {
 	int i, j;
 	int op_count = 0;
@@ -106,16 +105,16 @@ static int saa7146_i2c_msg_cleanup(const struct i2c_msg m[], int num, u32 *op)
 			op_count++;
 		}
 	}
-	
+
 	return 0;
 }
 
 /* this functions resets the i2c-device and returns 0 if everything was fine, otherwise -1 */
-static int saa7146_i2c_reset(struct saa7146_dev *dev) 
+static int saa7146_i2c_reset(struct saa7146_dev *dev)
 {
 	/* get current status */
 	u32 status = saa7146_i2c_status(dev);
-	
+
 	/* clear registers for sure */
 	saa7146_write(dev, I2C_STATUS, dev->i2c_bitrate);
 	saa7146_write(dev, I2C_TRANSFER, 0);
@@ -135,7 +134,7 @@ static int saa7146_i2c_reset(struct saa7146_dev *dev)
 		saa7146_write(dev, I2C_STATUS, dev->i2c_bitrate);
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
 		msleep(SAA7146_I2C_DELAY);
- 	}
+	}
 
 	/* check if any error is (still) present. (this can be necessary because p.123, note 1) */
 	status = saa7146_i2c_status(dev);
@@ -160,7 +159,7 @@ static int saa7146_i2c_reset(struct saa7146_dev *dev)
 		saa7146_write(dev, I2C_STATUS, dev->i2c_bitrate);
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
 		msleep(SAA7146_I2C_DELAY);
-     	}
+	}
 
 	/* if any error is still present, a fatal error has occured ... */
 	status = saa7146_i2c_status(dev);
@@ -190,13 +189,22 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 		saa7146_write(dev, I2C_TRANSFER, *dword);
 
 		dev->i2c_op = 1;
+		SAA7146_ISR_CLEAR(dev, MASK_16|MASK_17);
 		SAA7146_IER_ENABLE(dev, MASK_16|MASK_17);
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
 
-		wait_event_interruptible(dev->i2c_wq, dev->i2c_op == 0);
-		if (signal_pending (current)) {
-			/* a signal arrived */
-			return -ERESTARTSYS;
+		timeout = HZ/100 + 1; /* 10ms */
+		timeout = wait_event_interruptible_timeout(dev->i2c_wq, dev->i2c_op == 0, timeout);
+		if (timeout == -ERESTARTSYS || dev->i2c_op) {
+			SAA7146_IER_DISABLE(dev, MASK_16|MASK_17);
+			SAA7146_ISR_CLEAR(dev, MASK_16|MASK_17);
+			if (timeout == -ERESTARTSYS)
+				/* a signal arrived */
+				return -ERESTARTSYS;
+
+			printk(KERN_WARNING "%s %s [irq]: timed out waiting for end of xfer\n",
+				dev->name, __FUNCTION__);
+			return -EIO;
 		}
 		status = saa7146_read(dev, I2C_STATUS);
 	} else {
@@ -212,17 +220,16 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 				break;
 			}
 			if (time_after(jiffies,timeout)) {
-				printk(KERN_WARNING "saa7146_i2c_writeout: timed out waiting for MC2\n");
+				printk(KERN_WARNING "%s %s: timed out waiting for MC2\n",
+					dev->name, __FUNCTION__);
 				return -EIO;
 			}
 		}
 		/* wait until we get a transfer done or error */
 		timeout = jiffies + HZ/100 + 1; /* 10ms */
+		/* first read usually delivers bogus results... */
+		saa7146_i2c_status(dev);
 		while(1) {
-			/**
-			 *  first read usually delivers bogus results...
-			 */
-			saa7146_i2c_status(dev);
 			status = saa7146_i2c_status(dev);
 			if ((status & 0x3) != 1)
 				break;
@@ -230,19 +237,28 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 				/* this is normal when probing the bus
 				 * (no answer from nonexisistant device...)
 				 */
-				DEB_I2C(("saa7146_i2c_writeout: timed out waiting for end of xfer\n"));
+				printk(KERN_WARNING "%s %s [poll]: timed out waiting for end of xfer\n",
+					dev->name, __FUNCTION__);
 				return -EIO;
 			}
-			if ((++trial < 20) && short_delay)
+			if (++trial < 50 && short_delay)
 				udelay(10);
 			else
-			msleep(1);
+				msleep(1);
 		}
 	}
 
 	/* give a detailed status report */
-	if ( 0 != (status & SAA7146_I2C_ERR)) {
+	if ( 0 != (status & (SAA7146_I2C_SPERR | SAA7146_I2C_APERR |
+			     SAA7146_I2C_DTERR | SAA7146_I2C_DRERR |
+			     SAA7146_I2C_AL    | SAA7146_I2C_ERR   |
+			     SAA7146_I2C_BUSY)) ) {
 
+		if ( 0 == (status & SAA7146_I2C_ERR) ||
+		     0 == (status & SAA7146_I2C_BUSY) ) {
+			/* it may take some time until ERR goes high - ignore */
+			DEB_I2C(("unexpected i2c status %04x\n", status));
+		}
 		if( 0 != (status & SAA7146_I2C_SPERR) ) {
 			DEB_I2C(("error due to invalid start/stop condition.\n"));
 		}
@@ -272,21 +288,21 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 	return 0;
 }
 
-int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], int num, int retries)
+static int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg *msgs, int num, int retries)
 {
 	int i = 0, count = 0;
 	u32* buffer = dev->d_i2c.cpu_addr;
 	int err = 0;
-        int address_err = 0;
-        int short_delay = 0;
-	
-	if (down_interruptible (&dev->i2c_lock))
+	int address_err = 0;
+	int short_delay = 0;
+
+	if (mutex_lock_interruptible(&dev->i2c_lock))
 		return -ERESTARTSYS;
 
 	for(i=0;i<num;i++) {
 		DEB_I2C(("msg:%d/%d\n",i+1,num));
 	}
-	
+
 	/* prepare the message(s), get number of u32s to transfer */
 	count = saa7146_i2c_msg_prepare(msgs, num, buffer);
 	if ( 0 > count ) {
@@ -296,14 +312,14 @@ int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], i
 
 	if ( count > 3 || 0 != (SAA7146_I2C_SHORT_DELAY & dev->ext->flags) )
 		short_delay = 1;
-  
+
 	do {
 		/* reset the i2c-device if necessary */
 		err = saa7146_i2c_reset(dev);
 		if ( 0 > err ) {
 			DEB_I2C(("could not reset i2c-device.\n"));
 			goto out;
-		}	
+		}
 
 		/* write out the u32s one after another */
 		for(i = 0; i < count; i++) {
@@ -314,10 +330,10 @@ int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], i
 				   thinks that an address error occured. in that case, the
 				   transaction should be retrying, even if an address error
 				   occured. analog saa7146 based cards extensively rely on
-				   i2c address probing, however, and address errors indicate that a 
+				   i2c address probing, however, and address errors indicate that a
 				   device is really *not* there. retrying in that case
 				   increases the time the device needs to probe greatly, so
-				   it should be avoided. because of the fact, that only 
+				   it should be avoided. because of the fact, that only
 				   analog based cards use irq based i2c transactions (for dvb
 				   cards, this screwes up other interrupt sources), we bail out
 				   completely for analog cards after an address error and trust
@@ -326,7 +342,7 @@ int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], i
 					if( 0 != (SAA7146_USE_I2C_IRQ & dev->ext->flags)) {
 						goto out;
 					}
-				        address_err++;
+					address_err++;
 				}
 				DEB_I2C(("error while sending message(s). starting again.\n"));
 				break;
@@ -336,17 +352,17 @@ int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], i
 			err = num;
 			break;
 		}
-	        
-	        /* delay a bit before retrying */
-	        msleep(10);
-		
+
+		/* delay a bit before retrying */
+		msleep(10);
+
 	} while (err != num && retries--);
 
-        /* if every retry had an address error, exit right away */
-        if (address_err == retries) {
-	        goto out;
+	/* if every retry had an address error, exit right away */
+	if (address_err == retries) {
+		goto out;
 	}
-      
+
 	/* if any things had to be read, get the results */
 	if ( 0 != saa7146_i2c_msg_cleanup(msgs, num, buffer)) {
 		DEB_I2C(("could not cleanup i2c-message.\n"));
@@ -358,7 +374,7 @@ int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], i
 	DEB_I2C(("transmission successful. (msg:%d).\n",err));
 out:
 	/* another bug in revision 0: the i2c-registers get uploaded randomly by other
-	   uploads, so we better clear them out before continueing */	
+	   uploads, so we better clear them out before continueing */
 	if( 0 == dev->revision ) {
 		u32 zero = 0;
 		saa7146_i2c_reset(dev);
@@ -367,15 +383,15 @@ out:
 		}
 	}
 
-	up(&dev->i2c_lock);
-	return err;	
+	mutex_unlock(&dev->i2c_lock);
+	return err;
 }
 
 /* utility functions */
-static int saa7146_i2c_xfer(struct i2c_adapter* adapter, struct i2c_msg msg[], int num)
+static int saa7146_i2c_xfer(struct i2c_adapter* adapter, struct i2c_msg *msg, int num)
 {
 	struct saa7146_dev* dev = i2c_get_adapdata(adapter);
-	
+
 	/* use helper function to transfer data */
 	return saa7146_i2c_transfer(dev, msg, num, adapter->retries);
 }
@@ -387,8 +403,6 @@ static int saa7146_i2c_xfer(struct i2c_adapter* adapter, struct i2c_msg msg[], i
 
 /* exported algorithm data */
 static struct i2c_algorithm saa7146_algo = {
-	.name		= "saa7146 i2c algorithm",
-	.id		= I2C_ALGO_SAA7146,
 	.master_xfer	= saa7146_i2c_xfer,
 	.functionality	= saa7146_i2c_func,
 };
@@ -396,7 +410,7 @@ static struct i2c_algorithm saa7146_algo = {
 int saa7146_i2c_adapter_prepare(struct saa7146_dev *dev, struct i2c_adapter *i2c_adapter, u32 bitrate)
 {
 	DEB_EE(("bitrate: 0x%08x\n",bitrate));
-	
+
 	/* enable i2c-port pins */
 	saa7146_write(dev, MC1, (MASK_08 | MASK_24));
 
@@ -404,18 +418,15 @@ int saa7146_i2c_adapter_prepare(struct saa7146_dev *dev, struct i2c_adapter *i2c
 	saa7146_i2c_reset(dev);
 
 	if( NULL != i2c_adapter ) {
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0))
-		i2c_adapter->data = dev;
-#else
 		BUG_ON(!i2c_adapter->class);
 		i2c_set_adapdata(i2c_adapter,dev);
-#endif
+		i2c_adapter->dev.parent    = &dev->pci->dev;
 		i2c_adapter->algo	   = &saa7146_algo;
 		i2c_adapter->algo_data     = NULL;
-		i2c_adapter->id 	   = I2C_ALGO_SAA7146;
+		i2c_adapter->id		   = I2C_HW_SAA7146;
 		i2c_adapter->timeout = SAA7146_I2C_TIMEOUT;
 		i2c_adapter->retries = SAA7146_I2C_RETRIES;
 	}
-	
+
 	return 0;
 }

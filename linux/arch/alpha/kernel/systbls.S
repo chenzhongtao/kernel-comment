@@ -4,7 +4,6 @@
  * The system call table. 
  */
 
-#include <linux/config.h>			/* CONFIG_OSF4_COMPAT */
 #include <asm/unistd.h>
 
 	.data
@@ -227,7 +226,7 @@ sys_call_table:
 	.quad sys_semop
 	.quad osf_utsname
 	.quad sys_lchown
-	.quad osf_shmat
+	.quad sys_shmat
 	.quad sys_shmctl			/* 210 */
 	.quad sys_shmdt
 	.quad sys_shmget
@@ -458,6 +457,46 @@ sys_call_table:
 	.quad sys_mq_notify
 	.quad sys_mq_getsetattr
 	.quad sys_waitid
+	.quad sys_add_key
+	.quad sys_request_key			/* 440 */
+	.quad sys_keyctl
+	.quad sys_ioprio_set
+	.quad sys_ioprio_get
+	.quad sys_inotify_init
+	.quad sys_inotify_add_watch		/* 445 */
+	.quad sys_inotify_rm_watch
+	.quad sys_fdatasync
+	.quad sys_kexec_load
+	.quad sys_migrate_pages
+	.quad sys_openat			/* 450 */
+	.quad sys_mkdirat
+	.quad sys_mknodat
+	.quad sys_fchownat
+	.quad sys_futimesat
+	.quad sys_fstatat64			/* 455 */
+	.quad sys_unlinkat
+	.quad sys_renameat
+	.quad sys_linkat
+	.quad sys_symlinkat
+	.quad sys_readlinkat			/* 460 */
+	.quad sys_fchmodat
+	.quad sys_faccessat
+	.quad sys_pselect6
+	.quad sys_ppoll
+	.quad sys_unshare			/* 465 */
+	.quad sys_set_robust_list
+	.quad sys_get_robust_list
+	.quad sys_splice
+	.quad sys_sync_file_range
+	.quad sys_tee				/* 470 */
+	.quad sys_vmsplice
+	.quad sys_move_pages
+	.quad sys_getcpu
+	.quad sys_epoll_pwait
+	.quad sys_utimensat			/* 475 */
+	.quad sys_signalfd
+	.quad sys_timerfd
+	.quad sys_eventfd
 
 	.size sys_call_table, . - sys_call_table
 	.type sys_call_table, @object

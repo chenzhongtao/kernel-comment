@@ -19,7 +19,6 @@
  *				   and abstracted EGPIO interface.
  *
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -130,7 +129,7 @@ static int h3600_irda_set_power(struct device *dev, unsigned int state)
 	return 0;
 }
 
-static void h3600_irda_set_speed(struct device *dev, int speed)
+static void h3600_irda_set_speed(struct device *dev, unsigned int speed)
 {
 	if (speed < 4000000) {
 		clr_h3600_egpio(IPAQ_EGPIO_IR_FSEL);
@@ -223,10 +222,22 @@ static void h3xxx_lcd_power(int enable)
 }
 
 static struct map_desc h3600_io_desc[] __initdata = {
- /* virtual	       physical 	  length      type */
-  { H3600_BANK_2_VIRT, SA1100_CS2_PHYS,   0x02800000, MT_DEVICE }, /* static memory bank 2  CS#2 */
-  { H3600_BANK_4_VIRT, SA1100_CS4_PHYS,   0x00800000, MT_DEVICE }, /* static memory bank 4  CS#4 */
-  { H3600_EGPIO_VIRT,  H3600_EGPIO_PHYS,  0x01000000, MT_DEVICE }, /* EGPIO 0		CS#5 */
+  	{	/* static memory bank 2  CS#2 */
+		.virtual	=  H3600_BANK_2_VIRT,
+		.pfn		= __phys_to_pfn(SA1100_CS2_PHYS),
+		.length		= 0x02800000,
+		.type		= MT_DEVICE
+	}, {	/* static memory bank 4  CS#4 */
+		.virtual	=  H3600_BANK_4_VIRT,
+		.pfn		= __phys_to_pfn(SA1100_CS4_PHYS),
+		.length		= 0x00800000,
+		.type		= MT_DEVICE
+	}, {	/* EGPIO 0		CS#5 */
+		.virtual	=  H3600_EGPIO_VIRT,
+		.pfn		= __phys_to_pfn(H3600_EGPIO_PHYS),
+		.length		= 0x01000000,
+		.type		= MT_DEVICE
+	}
 };
 
 /*
@@ -380,10 +391,11 @@ static void __init h3100_map_io(void)
 }
 
 MACHINE_START(H3100, "Compaq iPAQ H3100")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xf8000000)
-	BOOT_PARAMS(0xc0000100)
-	MAPIO(h3100_map_io)
-	INITIRQ(sa1100_init_irq)
+	.phys_io	= 0x80000000,
+	.io_pg_offst	= ((0xf8000000) >> 18) & 0xfffc,
+	.boot_params	= 0xc0000100,
+	.map_io		= h3100_map_io,
+	.init_irq	= sa1100_init_irq,
 	.timer		= &sa1100_timer,
 	.init_machine	= h3xxx_mach_init,
 MACHINE_END
@@ -496,10 +508,11 @@ static void __init h3600_map_io(void)
 }
 
 MACHINE_START(H3600, "Compaq iPAQ H3600")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xf8000000)
-	BOOT_PARAMS(0xc0000100)
-	MAPIO(h3600_map_io)
-	INITIRQ(sa1100_init_irq)
+	.phys_io	= 0x80000000,
+	.io_pg_offst	= ((0xf8000000) >> 18) & 0xfffc,
+	.boot_params	= 0xc0000100,
+	.map_io		= h3600_map_io,
+	.init_irq	= sa1100_init_irq,
 	.timer		= &sa1100_timer,
 	.init_machine	= h3xxx_mach_init,
 MACHINE_END
@@ -689,7 +702,7 @@ static u32 gpio_irq_mask[] = {
 	GPIO2_SD_CON_SLT,
 };
 
-static void h3800_IRQ_demux(unsigned int irq, struct irqdesc *desc, struct pt_regs *regs)
+static void h3800_IRQ_demux(unsigned int irq, struct irq_desc *desc)
 {
 	int i;
 
@@ -706,14 +719,14 @@ static void h3800_IRQ_demux(unsigned int irq, struct irqdesc *desc, struct pt_re
 		if (0) printk("%s KPIO 0x%08X\n", __FUNCTION__, irq);
 		for (j = 0; j < H3800_KPIO_IRQ_COUNT; j++)
 			if (irq & kpio_irq_mask[j])
-				do_edge_IRQ(H3800_KPIO_IRQ_COUNT + j, irq_desc + H3800_KPIO_IRQ_COUNT + j, regs);
+				handle_edge_irq(H3800_KPIO_IRQ_COUNT + j, irq_desc + H3800_KPIO_IRQ_COUNT + j);
 
 		/* GPIO2 */
 		irq = H3800_ASIC2_GPIINTFLAG;
 		if (0) printk("%s GPIO 0x%08X\n", __FUNCTION__, irq);
 		for (j = 0; j < H3800_GPIO_IRQ_COUNT; j++)
 			if (irq & gpio_irq_mask[j])
-				do_edge_IRQ(H3800_GPIO_IRQ_COUNT + j, irq_desc + H3800_GPIO_IRQ_COUNT + j , regs);
+				handle_edge_irq(H3800_GPIO_IRQ_COUNT + j, irq_desc + H3800_GPIO_IRQ_COUNT + j);
 	}
 
 	if (i >= MAX_ASIC_ISR_LOOPS)
@@ -727,7 +740,7 @@ static void h3800_IRQ_demux(unsigned int irq, struct irqdesc *desc, struct pt_re
 static struct irqaction h3800_irq = {
 	.name		= "h3800_asic",
 	.handler	= h3800_IRQ_demux,
-	.flags		= SA_INTERRUPT,
+	.flags		= IRQF_DISABLED | IRQF_TIMER | IRQF_IRQPOLL,
 };
 
 u32 kpio_int_shadow = 0;
@@ -822,7 +835,7 @@ static void __init h3800_init_irq(void)
 	}
 #endif
 	set_irq_type(IRQ_GPIO_H3800_ASIC, IRQT_RISING);
-	set_irq_chained_handler(IRQ_GPIO_H3800_ASIC, &h3800_IRQ_demux);
+	set_irq_chained_handler(IRQ_GPIO_H3800_ASIC, h3800_IRQ_demux);
 }
 
 
@@ -881,10 +894,11 @@ static void __init h3800_map_io(void)
 }
 
 MACHINE_START(H3800, "Compaq iPAQ H3800")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xf8000000)
-	BOOT_PARAMS(0xc0000100)
-	MAPIO(h3800_map_io)
-	INITIRQ(h3800_init_irq)
+	.phys_io	= 0x80000000,
+	.io_pg_offst	= ((0xf8000000) >> 18) & 0xfffc,
+	.boot_params	= 0xc0000100,
+	.map_io		= h3800_map_io,
+	.init_irq	= h3800_init_irq,
 	.timer		= &sa1100_timer,
 	.init_machine	= h3xxx_mach_init,
 MACHINE_END

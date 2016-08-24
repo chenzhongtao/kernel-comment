@@ -18,7 +18,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *     
@@ -179,7 +179,7 @@ static int tekram_change_speed(struct sir_dev *dev, unsigned speed)
 		break;
 
 	default:
-		ERROR("%s - undefined state %d\n", __FUNCTION__, state);
+		IRDA_ERROR("%s - undefined state %d\n", __FUNCTION__, state);
 		ret = -EINVAL;
 		break;
 	}
@@ -210,8 +210,7 @@ static int tekram_reset(struct sir_dev *dev)
 	sirdev_set_dtr_rts(dev, FALSE, TRUE); 
 
 	/* Should sleep 1 ms */
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(msecs_to_jiffies(1));
+	msleep(1);
 
 	/* Set DTR, Set RTS */
 	sirdev_set_dtr_rts(dev, TRUE, TRUE);

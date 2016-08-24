@@ -129,10 +129,8 @@
 #define STRx(x) STRINGIFY(x)
 #define NO_WRITE_STR STRx(NO_WRITE)
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
@@ -146,11 +144,12 @@
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/ecard.h>
 
 #include "../scsi.h"
+#include <scsi/scsi_dbg.h>
 #include <scsi/scsi_host.h>
+#include <scsi/scsi_transport_spi.h>
 #include "acornscsi.h"
 #include "msgqueue.h"
 #include "scsi.h"
@@ -194,7 +193,8 @@
 unsigned int sdtr_period = SDTR_PERIOD;
 unsigned int sdtr_size   = SDTR_SIZE;
 
-static void acornscsi_done(AS_Host *host, Scsi_Cmnd **SCpntp, unsigned int result);
+static void acornscsi_done(AS_Host *host, struct scsi_cmnd **SCpntp,
+			   unsigned int result);
 static int acornscsi_reconnect_finish(AS_Host *host);
 static void acornscsi_dma_cleanup(AS_Host *host);
 static void acornscsi_abortcmd(AS_Host *host, unsigned char tag);
@@ -712,7 +712,7 @@ static
 intr_ret_t acornscsi_kick(AS_Host *host)
 {
     int from_queue = 0;
-    Scsi_Cmnd *SCpnt;
+    struct scsi_cmnd *SCpnt;
 
     /* first check to see if a command is waiting to be executed */
     SCpnt = host->origSCpnt;
@@ -796,15 +796,15 @@ intr_ret_t acornscsi_kick(AS_Host *host)
 }    
 
 /*
- * Function: void acornscsi_done(AS_Host *host, Scsi_Cmnd **SCpntp, unsigned int result)
+ * Function: void acornscsi_done(AS_Host *host, struct scsi_cmnd **SCpntp, unsigned int result)
  * Purpose : complete processing for command
  * Params  : host   - interface that completed
  *	     result - driver byte of result
  */
-static
-void acornscsi_done(AS_Host *host, Scsi_Cmnd **SCpntp, unsigned int result)
+static void acornscsi_done(AS_Host *host, struct scsi_cmnd **SCpntp,
+			   unsigned int result)
 {
-    Scsi_Cmnd *SCpnt = *SCpntp;
+	struct scsi_cmnd *SCpnt = *SCpntp;
 
     /* clean up */
     sbic_arm_write(host->scsi.io_port, SBIC_SOURCEID, SOURCEID_ER | SOURCEID_DSP);
@@ -866,7 +866,7 @@ void acornscsi_done(AS_Host *host, Scsi_Cmnd **SCpntp, unsigned int result)
 		    default:
 			printk(KERN_ERR "scsi%d.H: incomplete data transfer detected: result=%08X command=",
 				host->host->host_no, SCpnt->result);
-			print_command(SCpnt->cmnd);
+			__scsi_print_command(SCpnt->cmnd);
 			acornscsi_dumpdma(host, "done");
 		 	acornscsi_dumplog(host, SCpnt->device->id);
 			SCpnt->result &= 0xffff;
@@ -895,7 +895,7 @@ void acornscsi_done(AS_Host *host, Scsi_Cmnd **SCpntp, unsigned int result)
  * Notes    : this will only be one SG entry or less
  */
 static
-void acornscsi_data_updateptr(AS_Host *host, Scsi_Pointer *SCp, unsigned int length)
+void acornscsi_data_updateptr(AS_Host *host, struct scsi_pointer *SCp, unsigned int length)
 {
     SCp->ptr += length;
     SCp->this_residual -= length;
@@ -1318,7 +1318,7 @@ acornscsi_write_pio(AS_Host *host, char *bytes, int *ptr, int len, unsigned int 
 static void
 acornscsi_sendcommand(AS_Host *host)
 {
-    Scsi_Cmnd *SCpnt = host->SCpnt;
+	struct scsi_cmnd *SCpnt = host->SCpnt;
 
     sbic_arm_write(host->scsi.io_port, SBIC_TRANSCNTH, 0);
     sbic_arm_writenext(host->scsi.io_port, 0);
@@ -1369,7 +1369,7 @@ void acornscsi_sendmessage(AS_Host *host)
 
 	host->scsi.last_message = msg->msg[0];
 #if (DEBUG & DEBUG_MESSAGES)
-	print_msg(msg->msg);
+	spi_print_msg(msg->msg);
 #endif
 	break;
 
@@ -1391,7 +1391,7 @@ void acornscsi_sendmessage(AS_Host *host)
 	while ((msg = msgqueue_getmsg(&host->scsi.msgs, msgnr++)) != NULL) {
 	    unsigned int i;
 #if (DEBUG & DEBUG_MESSAGES)
-	    print_msg(msg);
+	    spi_print_msg(msg);
 #endif
 	    i = 0;
 	    if (acornscsi_write_pio(host, msg->msg, &i, msg->length, 1000000))
@@ -1487,7 +1487,7 @@ void acornscsi_message(AS_Host *host)
 #if (DEBUG & DEBUG_MESSAGES)
     printk("scsi%d.%c: message in: ",
 	    host->host->host_no, acornscsi_target(host));
-    print_msg(message);
+    spi_print_msg(message);
     printk("\n");
 #endif
 
@@ -1693,7 +1693,7 @@ void acornscsi_message(AS_Host *host)
 		acornscsi_sbic_issuecmd(host, CMND_ASSERTATN);
 		msgqueue_addmsg(&host->scsi.msgs, 1, ABORT);
 	    } else {
-		Scsi_Cmnd *SCpnt = host->SCpnt;
+		struct scsi_cmnd *SCpnt = host->SCpnt;
 
 		acornscsi_dma_cleanup(host);
 
@@ -2460,14 +2460,13 @@ intr_ret_t acornscsi_sbicintr(AS_Host *host, int in_irq)
 }
 
 /*
- * Prototype: void acornscsi_intr(int irq, void *dev_id, struct pt_regs *regs)
+ * Prototype: void acornscsi_intr(int irq, void *dev_id)
  * Purpose  : handle interrupts from Acorn SCSI card
  * Params   : irq    - interrupt number
  *	      dev_id - device specific data (AS_Host structure)
- *	      regs   - processor registers when interrupt occurred
  */
 static irqreturn_t
-acornscsi_intr(int irq, void *dev_id, struct pt_regs *regs)
+acornscsi_intr(int irq, void *dev_id)
 {
     AS_Host *host = (AS_Host *)dev_id;
     intr_ret_t ret;
@@ -2509,13 +2508,14 @@ acornscsi_intr(int irq, void *dev_id, struct pt_regs *regs)
  */
 
 /*
- * Function : acornscsi_queuecmd(Scsi_Cmnd *cmd, void (*done)(Scsi_Cmnd *))
+ * Function : acornscsi_queuecmd(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *))
  * Purpose  : queues a SCSI command
  * Params   : cmd  - SCSI command
  *	      done - function called on completion, with pointer to command descriptor
  * Returns  : 0, or < 0 on error.
  */
-int acornscsi_queuecmd(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
+int acornscsi_queuecmd(struct scsi_cmnd *SCpnt,
+		       void (*done)(struct scsi_cmnd *))
 {
     AS_Host *host = (AS_Host *)SCpnt->device->host->hostdata;
 
@@ -2565,17 +2565,18 @@ int acornscsi_queuecmd(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 }
 
 /*
- * Prototype: void acornscsi_reportstatus(Scsi_Cmnd **SCpntp1, Scsi_Cmnd **SCpntp2, int result)
+ * Prototype: void acornscsi_reportstatus(struct scsi_cmnd **SCpntp1, struct scsi_cmnd **SCpntp2, int result)
  * Purpose  : pass a result to *SCpntp1, and check if *SCpntp1 = *SCpntp2
  * Params   : SCpntp1 - pointer to command to return
  *	      SCpntp2 - pointer to command to check
  *	      result  - result to pass back to mid-level done function
  * Returns  : *SCpntp2 = NULL if *SCpntp1 is the same command structure as *SCpntp2.
  */
-static inline
-void acornscsi_reportstatus(Scsi_Cmnd **SCpntp1, Scsi_Cmnd **SCpntp2, int result)
+static inline void acornscsi_reportstatus(struct scsi_cmnd **SCpntp1,
+					  struct scsi_cmnd **SCpntp2,
+					  int result)
 {
-    Scsi_Cmnd *SCpnt = *SCpntp1;
+	struct scsi_cmnd *SCpnt = *SCpntp1;
 
     if (SCpnt) {
 	*SCpntp1 = NULL;
@@ -2591,13 +2592,12 @@ void acornscsi_reportstatus(Scsi_Cmnd **SCpntp1, Scsi_Cmnd **SCpntp2, int result
 enum res_abort { res_not_running, res_success, res_success_clear, res_snooze };
 
 /*
- * Prototype: enum res acornscsi_do_abort(Scsi_Cmnd *SCpnt)
+ * Prototype: enum res acornscsi_do_abort(struct scsi_cmnd *SCpnt)
  * Purpose  : abort a command on this host
  * Params   : SCpnt - command to abort
  * Returns  : our abort status
  */
-static enum res_abort
-acornscsi_do_abort(AS_Host *host, Scsi_Cmnd *SCpnt)
+static enum res_abort acornscsi_do_abort(AS_Host *host, struct scsi_cmnd *SCpnt)
 {
 	enum res_abort res = res_not_running;
 
@@ -2684,12 +2684,12 @@ acornscsi_do_abort(AS_Host *host, Scsi_Cmnd *SCpnt)
 }
 
 /*
- * Prototype: int acornscsi_abort(Scsi_Cmnd *SCpnt)
+ * Prototype: int acornscsi_abort(struct scsi_cmnd *SCpnt)
  * Purpose  : abort a command on this host
  * Params   : SCpnt - command to abort
  * Returns  : one of SCSI_ABORT_ macros
  */
-int acornscsi_abort(Scsi_Cmnd *SCpnt)
+int acornscsi_abort(struct scsi_cmnd *SCpnt)
 {
 	AS_Host *host = (AS_Host *) SCpnt->device->host->hostdata;
 	int result;
@@ -2770,16 +2770,16 @@ int acornscsi_abort(Scsi_Cmnd *SCpnt)
 }
 
 /*
- * Prototype: int acornscsi_reset(Scsi_Cmnd *SCpnt, unsigned int reset_flags)
+ * Prototype: int acornscsi_reset(struct scsi_cmnd *SCpnt, unsigned int reset_flags)
  * Purpose  : reset a command on this host/reset this host
  * Params   : SCpnt  - command causing reset
  *	      result - what type of reset to perform
  * Returns  : one of SCSI_RESET_ macros
  */
-int acornscsi_reset(Scsi_Cmnd *SCpnt, unsigned int reset_flags)
+int acornscsi_reset(struct scsi_cmnd *SCpnt, unsigned int reset_flags)
 {
-    AS_Host *host = (AS_Host *)SCpnt->device->host->hostdata;
-    Scsi_Cmnd *SCptr;
+	AS_Host *host = (AS_Host *)SCpnt->device->host->hostdata;
+	struct scsi_cmnd *SCptr;
     
     host->stats.resets += 1;
 
@@ -2861,7 +2861,7 @@ int acornscsi_proc_info(struct Scsi_Host *instance, char *buffer, char **start, 
 			int length, int inout)
 {
     int pos, begin = 0, devidx;
-    Scsi_Device *scd;
+    struct scsi_device *scd;
     AS_Host *host;
     char *p = buffer;
 
@@ -2970,7 +2970,7 @@ int acornscsi_proc_info(struct Scsi_Host *instance, char *buffer, char **start, 
     return pos;
 }
 
-static Scsi_Host_Template acornscsi_template = {
+static struct scsi_host_template acornscsi_template = {
 	.module			= THIS_MODULE,
 	.proc_info		= acornscsi_proc_info,
 	.name			= "AcornSCSI",
@@ -3030,7 +3030,7 @@ acornscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	if (!request_region(host->io_port, 2048, "acornscsi(ram)"))
 		goto err_5;
 
-	ret = request_irq(host->irq, acornscsi_intr, SA_INTERRUPT, "acornscsi", ashost);
+	ret = request_irq(host->irq, acornscsi_intr, IRQF_DISABLED, "acornscsi", ashost);
 	if (ret) {
 		printk(KERN_CRIT "scsi%d: IRQ%d not free: %d\n",
 			host->host_no, ashost->scsi.irq, ret);

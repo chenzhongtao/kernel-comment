@@ -6,7 +6,6 @@
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
-#include <linux/config.h>
 
 #define ENTRY(name)				\
 	.align 32;				\
@@ -38,6 +37,10 @@ name:
 
 /*
  * Helper macros for accessing user memory.
+ *
+ * When adding any new .section/.previous entries here, make sure to
+ * also add it to the DISCARD section in arch/ia64/kernel/gate.lds.S or
+ * unpleasant things will happen.
  */
 
 	.section "__ex_table", "a"		// declare section & section attributes
@@ -49,6 +52,17 @@ name:
 # define EXCLR(y,x...)				\
 	.xdata4 "__ex_table", 99f-., y-.+4;	\
   [99:]	x
+
+/*
+ * Tag MCA recoverable instruction ranges.
+ */
+
+	.section "__mca_table", "a"		// declare section & section attributes
+	.previous
+
+# define MCA_RECOVER_RANGE(y)			\
+	.xdata4 "__mca_table", y-., 99f-.;	\
+  [99:]
 
 /*
  * Mark instructions that need a load of a virtual address patched to be
@@ -88,6 +102,16 @@ name:
 #else
 # define FSYS_RETURN	br.ret.sptk.many b6
 #endif
+
+/*
+ * If physical stack register size is different from DEF_NUM_STACK_REG,
+ * dynamically patch the kernel for correct size.
+ */
+	.section ".data.patch.phys_stack_reg", "a"
+	.previous
+#define LOAD_PHYS_STACK_REG_SIZE(reg)			\
+[1:]	adds reg=IA64_NUM_PHYS_STACK_REG*8+8,r0;	\
+	.xdata4 ".data.patch.phys_stack_reg", 1b-.
 
 /*
  * Up until early 2004, use of .align within a function caused bad unwind info.

@@ -4,11 +4,6 @@
  * PURPOSE
  *  Fsync handling routines for the OSTA-UDF(tm) filesystem.
  *
- * CONTACTS
- *  E-mail regarding any portion of the Linux UDF file system should be
- *  directed to the development team mailing list (run by majordomo):
- *      linux_udf@hpesjro.fc.hp.com
- *
  * COPYRIGHT
  *  This file is distributed under the terms of the GNU General Public
  *  License (GPL). Copies of the GPL can be obtained from:
@@ -26,7 +21,6 @@
 #include "udfdecl.h"
 
 #include <linux/fs.h>
-#include <linux/smp_lock.h>
 
 static int udf_fsync_inode(struct inode *, int);
 
@@ -35,9 +29,10 @@ static int udf_fsync_inode(struct inode *, int);
  *	even pass file to fsync ?
  */
 
-int udf_fsync_file(struct file * file, struct dentry *dentry, int datasync)
+int udf_fsync_file(struct file *file, struct dentry *dentry, int datasync)
 {
 	struct inode *inode = dentry->d_inode;
+
 	return udf_fsync_inode(inode, datasync);
 }
 
@@ -51,6 +46,7 @@ static int udf_fsync_inode(struct inode *inode, int datasync)
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
 		return err;
 
-	err |= udf_sync_inode (inode);
+	err |= udf_sync_inode(inode);
+
 	return err ? -EIO : 0;
 }

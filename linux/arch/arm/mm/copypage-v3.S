@@ -12,7 +12,7 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <asm/assembler.h>
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
 
 		.text
 		.align	5
@@ -35,7 +35,7 @@ ENTRY(v3_copy_user_page)
 	stmia	r0!, {r3, r4, ip, lr}		@	4
 	ldmneia	r1!, {r3, r4, ip, lr}		@	4
 	bne	1b				@	1
-	LOADREGS(fd, sp!, {r4, pc})		@	3
+	ldmfd	sp!, {r4, pc}			@	3
 
 	.align	5
 /*

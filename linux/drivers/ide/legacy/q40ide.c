@@ -80,6 +80,7 @@ void q40_ide_setup_ports ( hw_regs_t *hw,
 {
 	int i;
 
+	memset(hw, 0, sizeof(hw_regs_t));
 	for (i = 0; i < IDE_NR_PORTS; i++) {
 		/* BIG FAT WARNING: 
 		   assumption: only DATA port is ever used in 16 bit mode */
@@ -88,9 +89,8 @@ void q40_ide_setup_ports ( hw_regs_t *hw,
 		else
 			hw->io_ports[i] = Q40_ISA_IO_B(base + offsets[i]);
 	}
-	
+
 	hw->irq = irq;
-	hw->dma = NO_DMA;
 	hw->ack_intr = ack_intr;
 /*
  *	hw->iops = iops;
@@ -101,7 +101,7 @@ void q40_ide_setup_ports ( hw_regs_t *hw,
 
 /* 
  * the static array is needed to have the name reported in /proc/ioports,
- * hwif->name unfortunately isn´t available yet
+ * hwif->name unfortunately isn't available yet
  */
 static const char *q40_ide_names[Q40IDE_NUM_HWIFS]={
 	"ide0", "ide1"
@@ -111,7 +111,7 @@ static const char *q40_ide_names[Q40IDE_NUM_HWIFS]={
  *  Probe for Q40 IDE interfaces
  */
 
-void q40ide_init(void)
+void __init q40ide_init(void)
 {
     int i;
     ide_hwif_t *hwif;
@@ -141,10 +141,10 @@ void q40ide_init(void)
 			0, NULL,
 //			m68kide_iops,
 			q40ide_default_irq(pcide_bases[i]));
-	index = ide_register_hw(&hw, &hwif);
+	index = ide_register_hw(&hw, NULL, 1, &hwif);
 	// **FIXME**
 	if (index != -1)
-		hwif->mmio = 2;
+		hwif->mmio = 1;
     }
 }
 

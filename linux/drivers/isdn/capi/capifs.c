@@ -15,6 +15,9 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/ctype.h>
+#include <linux/sched.h>	/* current */
+
+#include "capifs.h"
 
 MODULE_DESCRIPTION("CAPI4Linux: /dev/capi/ filesystem");
 MODULE_AUTHOR("Carsten Paeth");
@@ -101,7 +104,6 @@ capifs_fill_super(struct super_block *s, void *data, int silent)
 	inode->i_ino = 1;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	inode->i_blocks = 0;
-	inode->i_blksize = 1024;
 	inode->i_uid = inode->i_gid = 0;
 	inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO | S_IWUSR;
 	inode->i_op = &simple_dir_inode_operations;
@@ -118,10 +120,10 @@ fail:
 	return -ENOMEM;
 }
 
-static struct super_block *capifs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
+static int capifs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
 {
-	return get_sb_single(fs_type, flags, data, capifs_fill_super);
+	return get_sb_single(fs_type, flags, data, capifs_fill_super, mnt);
 }
 
 static struct file_system_type capifs_fs_type = {
@@ -135,7 +137,7 @@ static struct dentry *get_node(int num)
 {
 	char s[10];
 	struct dentry *root = capifs_root;
-	down(&root->d_inode->i_sem);
+	mutex_lock(&root->d_inode->i_mutex);
 	return lookup_one_len(s, root, sprintf(s, "%d", num));
 }
 
@@ -146,7 +148,6 @@ void capifs_new_ncci(unsigned int number, dev_t device)
 	if (!inode)
 		return;
 	inode->i_ino = number+2;
-	inode->i_blksize = 1024;
 	inode->i_uid = config.setuid ? config.uid : current->fsuid;
 	inode->i_gid = config.setgid ? config.gid : current->fsgid;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
@@ -156,7 +157,7 @@ void capifs_new_ncci(unsigned int number, dev_t device)
 	dentry = get_node(number);
 	if (!IS_ERR(dentry) && !dentry->d_inode)
 		d_instantiate(dentry, inode);
-	up(&capifs_root->d_inode->i_sem);
+	mutex_unlock(&capifs_root->d_inode->i_mutex);
 }
 
 void capifs_free_ncci(unsigned int number)
@@ -172,7 +173,7 @@ void capifs_free_ncci(unsigned int number)
 		}
 		dput(dentry);
 	}
-	up(&capifs_root->d_inode->i_sem);
+	mutex_unlock(&capifs_root->d_inode->i_mutex);
 }
 
 static int __init capifs_init(void)
@@ -191,8 +192,10 @@ static int __init capifs_init(void)
 	err = register_filesystem(&capifs_fs_type);
 	if (!err) {
 		capifs_mnt = kern_mount(&capifs_fs_type);
-		if (IS_ERR(capifs_mnt))
+		if (IS_ERR(capifs_mnt)) {
 			err = PTR_ERR(capifs_mnt);
+			unregister_filesystem(&capifs_fs_type);
+		}
 	}
 	if (!err)
 		printk(KERN_NOTICE "capifs: Rev %s\n", rev);

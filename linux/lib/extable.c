@@ -1,5 +1,4 @@
 /*
- * lib/extable.c
  * Derived from arch/ppc/mm/extable.c and arch/i386/mm/extable.c.
  *
  * Copyright (C) 2004 Paul Mackerras, IBM Corp.
@@ -10,13 +9,10 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/sort.h>
 #include <asm/uaccess.h>
-
-extern struct exception_table_entry __start___ex_table[];
-extern struct exception_table_entry __stop___ex_table[];
 
 #ifndef ARCH_HAS_SORT_EXTABLE
 /*
@@ -25,26 +21,23 @@ extern struct exception_table_entry __stop___ex_table[];
  * This is used both for the kernel exception table and for
  * the exception tables of modules that get loaded.
  */
+static int cmp_ex(const void *a, const void *b)
+{
+	const struct exception_table_entry *x = a, *y = b;
+
+	/* avoid overflow */
+	if (x->insn > y->insn)
+		return 1;
+	if (x->insn < y->insn)
+		return -1;
+	return 0;
+}
+
 void sort_extable(struct exception_table_entry *start,
 		  struct exception_table_entry *finish)
 {
-	struct exception_table_entry el, *p, *q;
-
-	/* insertion sort */
-	for (p = start + 1; p < finish; ++p) {
-		/* start .. p-1 is sorted */
-		if (p[0].insn < p[-1].insn) {
-			/* move element p down to its right place */
-			el = *p;
-			q = p;
-			do {
-				/* el comes before q[-1], move q[-1] up one */
-				q[0] = q[-1];
-				--q;
-			} while (q > start && el.insn < q[-1].insn);
-			*q = el;
-		}
-	}
+	sort(start, finish - start, sizeof(struct exception_table_entry),
+	     cmp_ex, NULL);
 }
 #endif
 

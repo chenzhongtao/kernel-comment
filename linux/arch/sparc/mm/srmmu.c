@@ -8,7 +8,6 @@
  * Copyright (C) 1999,2000 Anton Blanchard (anton@samba.org)
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
@@ -19,13 +18,13 @@
 #include <linux/bootmem.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/kdebug.h>
 
 #include <asm/bitext.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
-#include <asm/kdebug.h>
 #include <asm/vaddrs.h>
 #include <asm/traps.h>
 #include <asm/smp.h>
@@ -257,7 +256,7 @@ static inline pte_t srmmu_pte_modify(pte_t pte, pgprot_t newprot)
 { return __pte((pte_val(pte) & SRMMU_CHG_MASK) | pgprot_val(newprot)); }
 
 /* to find an entry in a top-level page table... */
-extern inline pgd_t *srmmu_pgd_offset(struct mm_struct * mm, unsigned long address)
+static inline pgd_t *srmmu_pgd_offset(struct mm_struct * mm, unsigned long address)
 { return mm->pgd + (address >> SRMMU_PGDIR_SHIFT); }
 
 /* Find an entry in the second-level page table.. */
@@ -400,7 +399,7 @@ void srmmu_nocache_calcsize(void)
 	srmmu_nocache_end = SRMMU_NOCACHE_VADDR + srmmu_nocache_size;
 }
 
-void srmmu_nocache_init(void)
+void __init srmmu_nocache_init(void)
 {
 	unsigned int bitmap_bits;
 	pgd_t *pgd;
@@ -1003,8 +1002,7 @@ extern void viking_flush_cache_all(void);
 extern void viking_flush_cache_mm(struct mm_struct *mm);
 extern void viking_flush_cache_range(struct vm_area_struct *vma, unsigned long start,
 				     unsigned long end);
-extern void viking_flush_cache_page(struct vm_area_struct *vma,
-				    unsigned long page);
+extern void viking_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
 extern void viking_flush_page_to_ram(unsigned long page);
 extern void viking_flush_page_for_dma(unsigned long page);
 extern void viking_flush_sig_insns(struct mm_struct *mm, unsigned long addr);
@@ -1300,7 +1298,12 @@ void __init srmmu_paging_init(void)
 
 	flush_cache_all();
 	srmmu_set_ctable_ptr((unsigned long)srmmu_ctx_table_phys);
+#ifdef CONFIG_SMP
+	/* Stop from hanging here... */
+	local_flush_tlb_all();
+#else
 	flush_tlb_all();
+#endif
 	poke_srmmu();
 
 #ifdef CONFIG_SUN_IO
@@ -1344,7 +1347,6 @@ void __init srmmu_paging_init(void)
 
 		free_area_init_node(0, &contig_page_data, zones_size,
 				    pfn_base, zholes_size);
-		mem_map = contig_page_data.node_mem_map;
 	}
 }
 
@@ -1418,6 +1420,7 @@ static void __init init_vac_layout(void)
 				max_size = vac_cache_size;
 			if(vac_line_size < min_line_size)
 				min_line_size = vac_line_size;
+			//FIXME: cpus not contiguous!!
 			cpu++;
 			if (cpu >= NR_CPUS || !cpu_online(cpu))
 				break;
@@ -2129,6 +2132,13 @@ static unsigned long srmmu_pte_to_pgoff(pte_t pte)
 	return pte_val(pte) >> SRMMU_PTE_FILE_SHIFT;
 }
 
+static pgprot_t srmmu_pgprot_noncached(pgprot_t prot)
+{
+	prot &= ~__pgprot(SRMMU_CACHE);
+
+	return prot;
+}
+
 /* Load up routines and constants for sun4m and sun4d mmu */
 void __init ld_mmu_srmmu(void)
 {
@@ -2144,14 +2154,14 @@ void __init ld_mmu_srmmu(void)
 	BTFIXUPSET_SIMM13(ptrs_per_pgd, SRMMU_PTRS_PER_PGD);
 
 	BTFIXUPSET_INT(page_none, pgprot_val(SRMMU_PAGE_NONE));
-	BTFIXUPSET_INT(page_shared, pgprot_val(SRMMU_PAGE_SHARED));
+	PAGE_SHARED = pgprot_val(SRMMU_PAGE_SHARED);
 	BTFIXUPSET_INT(page_copy, pgprot_val(SRMMU_PAGE_COPY));
 	BTFIXUPSET_INT(page_readonly, pgprot_val(SRMMU_PAGE_RDONLY));
 	BTFIXUPSET_INT(page_kernel, pgprot_val(SRMMU_PAGE_KERNEL));
 	page_kernel = pgprot_val(SRMMU_PAGE_KERNEL);
-	pg_iobits = SRMMU_VALID | SRMMU_WRITE | SRMMU_REF;
 
 	/* Functions */
+	BTFIXUPSET_CALL(pgprot_noncached, srmmu_pgprot_noncached, BTFIXUPCALL_NORM);
 #ifndef CONFIG_SMP	
 	BTFIXUPSET_CALL(___xchg32, ___xchg32_sun4md, BTFIXUPCALL_SWAPG1G2);
 #endif
@@ -2162,7 +2172,7 @@ void __init ld_mmu_srmmu(void)
 
 	BTFIXUPSET_CALL(pte_pfn, srmmu_pte_pfn, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pmd_page, srmmu_pmd_page, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pgd_page, srmmu_pgd_page, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pgd_page_vaddr, srmmu_pgd_page, BTFIXUPCALL_NORM);
 
 	BTFIXUPSET_SETHI(none_mask, 0xF0000000);
 
@@ -2198,7 +2208,6 @@ void __init ld_mmu_srmmu(void)
 	BTFIXUPSET_CALL(free_pgd_fast, srmmu_free_pgd_fast, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(get_pgd_fast, srmmu_get_pgd_fast, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_HALF(pte_readi, SRMMU_NOREAD);
 	BTFIXUPSET_HALF(pte_writei, SRMMU_WRITE);
 	BTFIXUPSET_HALF(pte_dirtyi, SRMMU_DIRTY);
 	BTFIXUPSET_HALF(pte_youngi, SRMMU_REF);

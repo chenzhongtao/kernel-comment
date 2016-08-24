@@ -156,33 +156,15 @@ enum {D_PRT, D_PRO, D_UNI, D_MOD, D_SLV, D_DLY};
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/mtio.h>
 #include <linux/pg.h>
 #include <linux/device.h>
+#include <linux/sched.h>	/* current, TASK_* */
+#include <linux/jiffies.h>
 
 #include <asm/uaccess.h>
-
-#ifndef MODULE
-
-#include "setup.h"
-
-static STT pg_stt[5] = {
-	{"drive0", 6, drive0},
-	{"drive1", 6, drive1},
-	{"drive2", 6, drive2},
-	{"drive3", 6, drive3},
-	{"disable", 1, &disable}
-};
-
-void pg_setup(char *str, int *ints)
-{
-	generic_setup(pg_stt, 5, str);
-}
-
-#endif
 
 module_param(verbose, bool, 0644);
 module_param(major, int, 0);
@@ -235,17 +217,17 @@ struct pg {
 	char name[PG_NAMELEN];	/* pg0, pg1, ... */
 };
 
-struct pg devices[PG_UNITS];
+static struct pg devices[PG_UNITS];
 
 static int pg_identify(struct pg *dev, int log);
 
 static char pg_scratch[512];	/* scratch block buffer */
 
-static struct class_simple *pg_class;
+static struct class *pg_class;
 
 /* kernel glue structures */
 
-static struct file_operations pg_fops = {
+static const struct file_operations pg_fops = {
 	.owner = THIS_MODULE,
 	.read = pg_read,
 	.write = pg_write,
@@ -295,8 +277,7 @@ static inline u8 DRIVE(struct pg *dev)
 
 static void pg_sleep(int cs)
 {
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(cs);
+	schedule_timeout_interruptible(cs);
 }
 
 static int pg_wait(struct pg *dev, int go, int stop, unsigned long tmo, char *msg)
@@ -661,54 +642,46 @@ static ssize_t pg_read(struct file *filp, char __user *buf, size_t count, loff_t
 
 static int __init pg_init(void)
 {
-	int unit, err = 0;
+	int unit;
+	int err;
 
 	if (disable){
-		err = -1;
+		err = -EINVAL;
 		goto out;
 	}
 
 	pg_init_units();
 
 	if (pg_detect()) {
-		err = -1;
+		err = -ENODEV;
 		goto out;
 	}
 
-	if (register_chrdev(major, name, &pg_fops)) {
+	err = register_chrdev(major, name, &pg_fops);
+	if (err < 0) {
 		printk("pg_init: unable to get major number %d\n", major);
 		for (unit = 0; unit < PG_UNITS; unit++) {
 			struct pg *dev = &devices[unit];
 			if (dev->present)
 				pi_release(dev->pi);
 		}
-		err = -1;
 		goto out;
 	}
-	pg_class = class_simple_create(THIS_MODULE, "pg");
+	major = err;	/* In case the user specified `major=0' (dynamic) */
+	pg_class = class_create(THIS_MODULE, "pg");
 	if (IS_ERR(pg_class)) {
 		err = PTR_ERR(pg_class);
 		goto out_chrdev;
 	}
-	devfs_mk_dir("pg");
 	for (unit = 0; unit < PG_UNITS; unit++) {
 		struct pg *dev = &devices[unit];
-		if (dev->present) {
-			class_simple_device_add(pg_class, MKDEV(major, unit), 
+		if (dev->present)
+			class_device_create(pg_class, NULL, MKDEV(major, unit),
 					NULL, "pg%u", unit);
-			err = devfs_mk_cdev(MKDEV(major, unit),
-				      S_IFCHR | S_IRUSR | S_IWUSR, "pg/%u",
-				      unit);
-			if (err) 
-				goto out_class;
-		}
 	}
 	err = 0;
 	goto out;
 
-out_class:
-	class_simple_device_remove(MKDEV(major, unit));
-	class_simple_destroy(pg_class);
 out_chrdev:
 	unregister_chrdev(major, "pg");
 out:
@@ -721,13 +694,10 @@ static void __exit pg_exit(void)
 
 	for (unit = 0; unit < PG_UNITS; unit++) {
 		struct pg *dev = &devices[unit];
-		if (dev->present) {
-			class_simple_device_remove(MKDEV(major, unit));
-			devfs_remove("pg/%u", unit);
-		}
+		if (dev->present)
+			class_device_destroy(pg_class, MKDEV(major, unit));
 	}
-	class_simple_destroy(pg_class);
-	devfs_remove("pg");
+	class_destroy(pg_class);
 	unregister_chrdev(major, name);
 
 	for (unit = 0; unit < PG_UNITS; unit++) {

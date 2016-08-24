@@ -11,9 +11,8 @@
 #include <linux/fs.h>
 #include <linux/in.h>
 #include <linux/types.h>
+#include <linux/magic.h>
 
-#include <linux/ncp_fs_i.h>
-#include <linux/ncp_fs_sb.h>
 #include <linux/ipx.h>
 #include <linux/ncp_no.h>
 
@@ -146,10 +145,9 @@ struct ncp_nls_ioctl
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
+#include <linux/ncp_fs_i.h>
+#include <linux/ncp_fs_sb.h>
 
-/* undef because public define in umsdos_fs.h (ncp_fs.h isn't public) */
-#undef PRINTK
 /* define because it is easy to change PRINTK to {*}PRINTK */
 #define PRINTK(format, args...) printk(KERN_DEBUG format , ## args)
 
@@ -186,10 +184,6 @@ struct ncp_entry_info {
 	__u8			file_handle[6];
 };
 
-/* Guess, what 0x564c is :-) */
-#define NCP_SUPER_MAGIC  0x564c
-
-
 static inline struct ncp_server *NCP_SBP(struct super_block *sb)
 {
 	return sb->s_fs_info;
@@ -201,34 +195,6 @@ static inline struct ncp_inode_info *NCP_FINFO(struct inode *inode)
 	return container_of(inode, struct ncp_inode_info, vfs_inode);
 }
 
-#ifdef DEBUG_NCP_MALLOC
-
-#include <linux/slab.h>
-
-extern int ncp_malloced;
-extern int ncp_current_malloced;
-
-static inline void *
- ncp_kmalloc(unsigned int size, int priority)
-{
-	ncp_malloced += 1;
-	ncp_current_malloced += 1;
-	return kmalloc(size, priority);
-}
-
-static inline void ncp_kfree_s(void *obj, int size)
-{
-	ncp_current_malloced -= 1;
-	kfree(obj);
-}
-
-#else				/* DEBUG_NCP_MALLOC */
-
-#define ncp_kmalloc(s,p) kmalloc(s,p)
-#define ncp_kfree_s(o,s) kfree(o)
-
-#endif				/* DEBUG_NCP_MALLOC */
-
 /* linux/fs/ncpfs/inode.c */
 int ncp_notify_change(struct dentry *, struct iattr *);
 struct inode *ncp_iget(struct super_block *, struct ncp_entry_info *);
@@ -236,14 +202,15 @@ void ncp_update_inode(struct inode *, struct ncp_entry_info *);
 void ncp_update_inode2(struct inode *, struct ncp_entry_info *);
 
 /* linux/fs/ncpfs/dir.c */
-extern struct inode_operations ncp_dir_inode_operations;
-extern struct file_operations ncp_dir_operations;
+extern const struct inode_operations ncp_dir_inode_operations;
+extern const struct file_operations ncp_dir_operations;
 int ncp_conn_logged_in(struct super_block *);
 int ncp_date_dos2unix(__le16 time, __le16 date);
 void ncp_date_unix2dos(int unix_date, __le16 * time, __le16 * date);
 
 /* linux/fs/ncpfs/ioctl.c */
 int ncp_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
+long ncp_compat_ioctl(struct file *, unsigned int, unsigned long);
 
 /* linux/fs/ncpfs/sock.c */
 int ncp_request2(struct ncp_server *server, int function,
@@ -257,8 +224,8 @@ void ncp_lock_server(struct ncp_server *server);
 void ncp_unlock_server(struct ncp_server *server);
 
 /* linux/fs/ncpfs/file.c */
-extern struct inode_operations ncp_file_inode_operations;
-extern struct file_operations ncp_file_operations;
+extern const struct inode_operations ncp_file_inode_operations;
+extern const struct file_operations ncp_file_operations;
 int ncp_make_open(struct inode *, int);
 
 /* linux/fs/ncpfs/mmap.c */

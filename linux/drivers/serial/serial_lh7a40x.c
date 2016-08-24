@@ -27,7 +27,6 @@
  *
  */
 
-#include <linux/config.h>
 
 #if defined(CONFIG_SERIAL_LH7A40X_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #define SUPPORT_SYSRQ
@@ -112,13 +111,12 @@ struct uart_port_lh7a40x {
 	unsigned int statusPrev; /* Most recently read modem status */
 };
 
-static void lh7a40xuart_stop_tx (struct uart_port* port, unsigned int tty_stop)
+static void lh7a40xuart_stop_tx (struct uart_port* port)
 {
 	BIT_CLR (port, UART_R_INTEN, TxInt);
 }
 
-static void lh7a40xuart_start_tx (struct uart_port* port,
-				  unsigned int tty_start)
+static void lh7a40xuart_start_tx (struct uart_port* port)
 {
 	BIT_SET (port, UART_R_INTEN, TxInt);
 
@@ -137,32 +135,19 @@ static void lh7a40xuart_enable_ms (struct uart_port* port)
 	BIT_SET (port, UART_R_INTEN, ModemInt);
 }
 
-static void
-#ifdef SUPPORT_SYSRQ
-lh7a40xuart_rx_chars (struct uart_port* port, struct pt_regs* regs)
-#else
-lh7a40xuart_rx_chars (struct uart_port* port)
-#endif
+static void lh7a40xuart_rx_chars (struct uart_port* port)
 {
 	struct tty_struct* tty = port->info->tty;
 	int cbRxMax = 256;	/* (Gross) limit on receive */
-	unsigned int data, flag;/* Received data and status */
+	unsigned int data;	/* Received data and status */
+	unsigned int flag;
 
 	while (!(UR (port, UART_R_STATUS) & nRxRdy) && --cbRxMax) {
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
-			if (tty->low_latency)
-				tty_flip_buffer_push(tty);
-			/*
-			 * If this failed then we will throw away the
-			 * bytes but must do so to clear interrupts
-			 */
-		}
-
 		data = UR (port, UART_R_DATA);
 		flag = TTY_NORMAL;
 		++port->icount.rx;
 
-		if (data & RxError) {	/* Quick check, short-circuit */
+		if (unlikely(data & RxError)) {
 			if (data & RxBreak) {
 				data &= ~(RxFramingError | RxParityError);
 				++port->icount.brk;
@@ -187,21 +172,10 @@ lh7a40xuart_rx_chars (struct uart_port* port)
 				flag = TTY_FRAME;
 		}
 
-		if (uart_handle_sysrq_char (port, (unsigned char) data, regs))
+		if (uart_handle_sysrq_char (port, (unsigned char) data))
 			continue;
 
-		if ((data & port->ignore_status_mask) == 0) {
-			tty_insert_flip_char(tty, data, flag);
-		}
-		if ((data & RxOverrunError)
-		    && tty->flip.count < TTY_FLIPBUF_SIZE) {
-			/*
-			 * Overrun is special, since it's reported
-			 * immediately, and doesn't affect the current
-			 * character
-			 */
-			tty_insert_flip_char(tty, 0, TTY_OVERRUN);
-		}
+		uart_insert_char(port, data, RxOverrunError, data, flag);
 	}
 	tty_flip_buffer_push (tty);
 	return;
@@ -219,7 +193,7 @@ static void lh7a40xuart_tx_chars (struct uart_port* port)
 		return;
 	}
 	if (uart_circ_empty (xmit) || uart_tx_stopped (port)) {
-		lh7a40xuart_stop_tx (port, 0);
+		lh7a40xuart_stop_tx (port);
 		return;
 	}
 
@@ -241,7 +215,7 @@ static void lh7a40xuart_tx_chars (struct uart_port* port)
 		uart_write_wakeup (port);
 
 	if (uart_circ_empty (xmit))
-		lh7a40xuart_stop_tx (port, 0);
+		lh7a40xuart_stop_tx (port);
 }
 
 static void lh7a40xuart_modem_status (struct uart_port* port)
@@ -269,8 +243,7 @@ static void lh7a40xuart_modem_status (struct uart_port* port)
 	wake_up_interruptible (&port->info->delta_msr_wait);
 }
 
-static irqreturn_t lh7a40xuart_int (int irq, void* dev_id,
-				    struct pt_regs* regs)
+static irqreturn_t lh7a40xuart_int (int irq, void* dev_id)
 {
 	struct uart_port* port = dev_id;
 	unsigned int cLoopLimit = ISR_LOOP_LIMIT;
@@ -279,11 +252,7 @@ static irqreturn_t lh7a40xuart_int (int irq, void* dev_id,
 
 	do {
 		if (isr & (RxInt | RxTimeoutInt))
-#ifdef SUPPORT_SYSRQ
-			lh7a40xuart_rx_chars(port, regs);
-#else
 			lh7a40xuart_rx_chars(port);
-#endif
 		if (isr & ModemInt)
 			lh7a40xuart_modem_status (port);
 		if (isr & TxInt)
@@ -324,7 +293,7 @@ static void lh7a40xuart_set_mctrl (struct uart_port* port, unsigned int mctrl)
 	/* Note, kernel appears to be setting DTR and RTS on console. */
 
 	/* *** FIXME: this deserves more work.  There's some work in
-               tracing all of the IO pins. */
+	       tracing all of the IO pins. */
 #if 0
 	if( port->mapbase == UART1_PHYS) {
 		gpioRegs_t *gpio = (gpioRegs_t *)IO_ADDRESS(GPIO_PHYS);
@@ -379,8 +348,8 @@ static void lh7a40xuart_shutdown (struct uart_port* port)
 }
 
 static void lh7a40xuart_set_termios (struct uart_port* port,
-				     struct termios* termios,
-				     struct termios* old)
+				     struct ktermios* termios,
+				     struct ktermios* old)
 {
 	unsigned int con;
 	unsigned int inten;
@@ -522,12 +491,12 @@ static struct uart_port_lh7a40x lh7a40x_ports[DEV_NR] = {
 		.port = {
 			.membase	= (void*) io_p2v (UART1_PHYS),
 			.mapbase	= UART1_PHYS,
-			.iotype		= SERIAL_IO_MEM,
+			.iotype		= UPIO_MEM,
 			.irq		= IRQ_UART1INTR,
 			.uartclk	= 14745600/2,
 			.fifosize	= 16,
 			.ops		= &lh7a40x_uart_ops,
-			.flags		= ASYNC_BOOT_AUTOCONF,
+			.flags		= UPF_BOOT_AUTOCONF,
 			.line		= 0,
 		},
 	},
@@ -535,12 +504,12 @@ static struct uart_port_lh7a40x lh7a40x_ports[DEV_NR] = {
 		.port = {
 			.membase	= (void*) io_p2v (UART2_PHYS),
 			.mapbase	= UART2_PHYS,
-			.iotype		= SERIAL_IO_MEM,
+			.iotype		= UPIO_MEM,
 			.irq		= IRQ_UART2INTR,
 			.uartclk	= 14745600/2,
 			.fifosize	= 16,
 			.ops		= &lh7a40x_uart_ops,
-			.flags		= ASYNC_BOOT_AUTOCONF,
+			.flags		= UPF_BOOT_AUTOCONF,
 			.line		= 1,
 		},
 	},
@@ -548,12 +517,12 @@ static struct uart_port_lh7a40x lh7a40x_ports[DEV_NR] = {
 		.port = {
 			.membase	= (void*) io_p2v (UART3_PHYS),
 			.mapbase	= UART3_PHYS,
-			.iotype		= SERIAL_IO_MEM,
+			.iotype		= UPIO_MEM,
 			.irq		= IRQ_UART3INTR,
 			.uartclk	= 14745600/2,
 			.fifosize	= 16,
 			.ops		= &lh7a40x_uart_ops,
-			.flags		= ASYNC_BOOT_AUTOCONF,
+			.flags		= UPF_BOOT_AUTOCONF,
 			.line		= 2,
 		},
 	},
@@ -564,6 +533,12 @@ static struct uart_port_lh7a40x lh7a40x_ports[DEV_NR] = {
 #else
 # define LH7A40X_CONSOLE &lh7a40x_console
 
+static void lh7a40xuart_console_putchar(struct uart_port *port, int ch)
+{
+	while (UR(port, UART_R_STATUS) & nTxRdy)
+		;
+	UR(port, UART_R_DATA) = ch;
+}
 
 static void lh7a40xuart_console_write (struct console* co,
 				       const char* s,
@@ -577,16 +552,7 @@ static void lh7a40xuart_console_write (struct console* co,
 	UR (port, UART_R_INTEN) = 0;		/* Disable all interrupts */
 	BIT_SET (port, UART_R_CON, UARTEN | SIRDIS); /* Enable UART */
 
-	for (; count-- > 0; ++s) {
-		while (UR (port, UART_R_STATUS) & nTxRdy)
-			;
-		UR (port, UART_R_DATA) = *s;
-		if (*s == '\n') {
-			while ((UR (port, UART_R_STATUS) & TxBusy))
-				;
-			UR (port, UART_R_DATA) = '\r';
-		}
-	}
+	uart_console_write(port, s, count, lh7a40xuart_console_putchar);
 
 				/* Wait until all characters are sent */
 	while (UR (port, UART_R_STATUS) & TxBusy)
@@ -644,7 +610,7 @@ static int __init lh7a40xuart_console_setup (struct console* co, char* options)
 	return uart_set_options (port, co, baud, parity, bits, flow);
 }
 
-extern struct uart_driver lh7a40x_reg;
+static struct uart_driver lh7a40x_reg;
 static struct console lh7a40x_console = {
 	.name		= "ttyAM",
 	.write		= lh7a40xuart_console_write,
@@ -686,9 +652,13 @@ static int __init lh7a40xuart_init(void)
 	if (ret == 0) {
 		int i;
 
-		for (i = 0; i < DEV_NR; i++)
+		for (i = 0; i < DEV_NR; i++) {
+			/* UART3, when used, requires GPIO pin reallocation */
+			if (lh7a40x_ports[i].port.mapbase == UART3_PHYS)
+				GPIO_PINMUX |= 1<<3;
 			uart_add_one_port (&lh7a40x_reg,
 					   &lh7a40x_ports[i].port);
+		}
 	}
 	return ret;
 }

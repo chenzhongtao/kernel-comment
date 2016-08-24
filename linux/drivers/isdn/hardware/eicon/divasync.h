@@ -216,7 +216,7 @@ typedef struct
 #define SERIAL_HOOK_RING 0x85
 #define SERIAL_HOOK_DETACH 0x8f
  unsigned char Flags;           /* function refinements   */
- /* parameters passed by the the ATTACH request      */
+ /* parameters passed by the ATTACH request      */
  SERIAL_INT_CB InterruptHandler; /* called on each interrupt  */
  SERIAL_DPC_CB DeferredHandler; /* called on hook state changes */
  void   *HandlerContext; /* context for both handlers */
@@ -256,7 +256,6 @@ typedef struct
 #define NO_ORDER_CHECK_MASK 0x00000010
 #define LOW_CHANNEL_MASK 0x00000020
 #define NO_HSCX30_MASK  0x00000040
-#define MODE_MASK   0x00000080
 #define SET_BOARD   0x00001000
 #define SET_CRC4   0x00030000
 #define SET_L1_TRISTATE  0x00040000

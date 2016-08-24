@@ -24,7 +24,7 @@ static loff_t hpfs_dir_lseek(struct file *filp, loff_t off, int whence)
 	loff_t new_off = off + (whence == 1 ? filp->f_pos : 0);
 	loff_t pos;
 	struct quad_buffer_head qbh;
-	struct inode *i = filp->f_dentry->d_inode;
+	struct inode *i = filp->f_path.dentry->d_inode;
 	struct hpfs_inode_info *hpfs_inode = hpfs_i(i);
 	struct super_block *s = i->i_sb;
 
@@ -32,19 +32,19 @@ static loff_t hpfs_dir_lseek(struct file *filp, loff_t off, int whence)
 
 	/*printk("dir lseek\n");*/
 	if (new_off == 0 || new_off == 1 || new_off == 11 || new_off == 12 || new_off == 13) goto ok;
-	down(&i->i_sem);
+	mutex_lock(&i->i_mutex);
 	pos = ((loff_t) hpfs_de_as_down_as_possible(s, hpfs_inode->i_dno) << 4) + 1;
 	while (pos != new_off) {
 		if (map_pos_dirent(i, &pos, &qbh)) hpfs_brelse4(&qbh);
 		else goto fail;
 		if (pos == 12) goto fail;
 	}
-	up(&i->i_sem);
+	mutex_unlock(&i->i_mutex);
 ok:
 	unlock_kernel();
 	return filp->f_pos = new_off;
 fail:
-	up(&i->i_sem);
+	mutex_unlock(&i->i_mutex);
 	/*printk("illegal lseek: %016llx\n", new_off);*/
 	unlock_kernel();
 	return -ESPIPE;
@@ -52,7 +52,7 @@ fail:
 
 static int hpfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct inode *inode = filp->f_dentry->d_inode;
+	struct inode *inode = filp->f_path.dentry->d_inode;
 	struct hpfs_inode_info *hpfs_inode = hpfs_i(inode);
 	struct quad_buffer_head qbh;
 	struct hpfs_dirent *de;
@@ -84,7 +84,8 @@ static int hpfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		}
 		if (!fno->dirflag) {
 			e = 1;
-			hpfs_error(inode->i_sb, "not a directory, fnode %08x",inode->i_ino);
+			hpfs_error(inode->i_sb, "not a directory, fnode %08lx",
+					(unsigned long)inode->i_ino);
 		}
 		if (hpfs_inode->i_dno != fno->u.external[0].disk_secno) {
 			e = 1;
@@ -144,8 +145,11 @@ static int hpfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		}
 		if (de->first || de->last) {
 			if (hpfs_sb(inode->i_sb)->sb_chk) {
-				if (de->first && !de->last && (de->namelen != 2 || de ->name[0] != 1 || de->name[1] != 1)) hpfs_error(inode->i_sb, "hpfs_readdir: bad ^A^A entry; pos = %08x", old_pos);
-				if (de->last && (de->namelen != 1 || de ->name[0] != 255)) hpfs_error(inode->i_sb, "hpfs_readdir: bad \\377 entry; pos = %08x", old_pos);
+				if (de->first && !de->last && (de->namelen != 2
+				    || de ->name[0] != 1 || de->name[1] != 1))
+					hpfs_error(inode->i_sb, "hpfs_readdir: bad ^A^A entry; pos = %08lx", old_pos);
+				if (de->last && (de->namelen != 1 || de ->name[0] != 255))
+					hpfs_error(inode->i_sb, "hpfs_readdir: bad \\377 entry; pos = %08lx", old_pos);
 			}
 			hpfs_brelse4(&qbh);
 			goto again;
@@ -310,7 +314,7 @@ struct dentry *hpfs_lookup(struct inode *dir, struct dentry *dentry, struct name
 	return ERR_PTR(-ENOENT);
 }
 
-struct file_operations hpfs_dir_ops =
+const struct file_operations hpfs_dir_ops =
 {
 	.llseek		= hpfs_dir_lseek,
 	.read		= generic_read_dir,

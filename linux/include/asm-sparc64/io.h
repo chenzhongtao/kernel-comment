@@ -1,4 +1,3 @@
-/* $Id: io.h,v 1.47 2001/12/13 10:36:02 davem Exp $ */
 #ifndef __SPARC64_IO_H
 #define __SPARC64_IO_H
 
@@ -14,25 +13,12 @@
 #define __SLOW_DOWN_IO	do { } while (0)
 #define SLOW_DOWN_IO	do { } while (0)
 
-extern unsigned long virt_to_bus_not_defined_use_pci_map(volatile void *addr);
-#define virt_to_bus virt_to_bus_not_defined_use_pci_map
-extern unsigned long bus_to_virt_not_defined_use_pci_map(volatile void *addr);
-#define bus_to_virt bus_to_virt_not_defined_use_pci_map
-
 /* BIO layer definitions. */
 extern unsigned long kern_base, kern_size;
 #define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
 #define BIO_VMERGE_BOUNDARY	8192
 
-/* Different PCI controllers we support have their PCI MEM space
- * mapped to an either 2GB (Psycho) or 4GB (Sabre) aligned area,
- * so need to chop off the top 33 or 32 bits.
- */
-extern unsigned long pci_memspace_mask;
-
-#define bus_dvma_to_mem(__vaddr) ((__vaddr) & pci_memspace_mask)
-
-static __inline__ u8 _inb(unsigned long addr)
+static inline u8 _inb(unsigned long addr)
 {
 	u8 ret;
 
@@ -43,7 +29,7 @@ static __inline__ u8 _inb(unsigned long addr)
 	return ret;
 }
 
-static __inline__ u16 _inw(unsigned long addr)
+static inline u16 _inw(unsigned long addr)
 {
 	u16 ret;
 
@@ -54,7 +40,7 @@ static __inline__ u16 _inw(unsigned long addr)
 	return ret;
 }
 
-static __inline__ u32 _inl(unsigned long addr)
+static inline u32 _inl(unsigned long addr)
 {
 	u32 ret;
 
@@ -65,21 +51,21 @@ static __inline__ u32 _inl(unsigned long addr)
 	return ret;
 }
 
-static __inline__ void _outb(u8 b, unsigned long addr)
+static inline void _outb(u8 b, unsigned long addr)
 {
 	__asm__ __volatile__("stba\t%r0, [%1] %2\t/* pci_outb */"
 			     : /* no outputs */
 			     : "Jr" (b), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E_L));
 }
 
-static __inline__ void _outw(u16 w, unsigned long addr)
+static inline void _outw(u16 w, unsigned long addr)
 {
 	__asm__ __volatile__("stha\t%r0, [%1] %2\t/* pci_outw */"
 			     : /* no outputs */
 			     : "Jr" (w), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E_L));
 }
 
-static __inline__ void _outl(u32 l, unsigned long addr)
+static inline void _outl(u32 l, unsigned long addr)
 {
 	__asm__ __volatile__("stwa\t%r0, [%1] %2\t/* pci_outl */"
 			     : /* no outputs */
@@ -100,18 +86,41 @@ static __inline__ void _outl(u32 l, unsigned long addr)
 #define inl_p(__addr)		inl(__addr)
 #define outl_p(__l, __addr)	outl(__l, __addr)
 
-extern void outsb(void __iomem *addr, const void *src, unsigned long count);
-extern void outsw(void __iomem *addr, const void *src, unsigned long count);
-extern void outsl(void __iomem *addr, const void *src, unsigned long count);
-extern void insb(void __iomem *addr, void *dst, unsigned long count);
-extern void insw(void __iomem *addr, void *dst, unsigned long count);
-extern void insl(void __iomem *addr, void *dst, unsigned long count);
-#define ioread8_rep(a,d,c)	insb(a,d,c)
-#define ioread16_rep(a,d,c)	insw(a,d,c)
-#define ioread32_rep(a,d,c)	insl(a,d,c)
-#define iowrite8_rep(a,s,c)	outsb(a,s,c)
-#define iowrite16_rep(a,s,c)	outsw(a,s,c)
-#define iowrite32_rep(a,s,c)	outsl(a,s,c)
+extern void outsb(unsigned long, const void *, unsigned long);
+extern void outsw(unsigned long, const void *, unsigned long);
+extern void outsl(unsigned long, const void *, unsigned long);
+extern void insb(unsigned long, void *, unsigned long);
+extern void insw(unsigned long, void *, unsigned long);
+extern void insl(unsigned long, void *, unsigned long);
+
+static inline void ioread8_rep(void __iomem *port, void *buf, unsigned long count)
+{
+	insb((unsigned long __force)port, buf, count);
+}
+static inline void ioread16_rep(void __iomem *port, void *buf, unsigned long count)
+{
+	insw((unsigned long __force)port, buf, count);
+}
+
+static inline void ioread32_rep(void __iomem *port, void *buf, unsigned long count)
+{
+	insl((unsigned long __force)port, buf, count);
+}
+
+static inline void iowrite8_rep(void __iomem *port, const void *buf, unsigned long count)
+{
+	outsb((unsigned long __force)port, buf, count);
+}
+
+static inline void iowrite16_rep(void __iomem *port, const void *buf, unsigned long count)
+{
+	outsw((unsigned long __force)port, buf, count);
+}
+
+static inline void iowrite32_rep(void __iomem *port, const void *buf, unsigned long count)
+{
+	outsl((unsigned long __force)port, buf, count);
+}
 
 /* Memory functions, same as I/O accesses on Ultra. */
 static inline u8 _readb(const volatile void __iomem *addr)
@@ -195,7 +204,7 @@ static inline void _writeq(u64 q, volatile void __iomem *addr)
 #define writeq(__q, __addr)	_writeq(__q, __addr)
 
 /* Now versions without byte-swapping. */
-static __inline__ u8 _raw_readb(unsigned long addr)
+static inline u8 _raw_readb(unsigned long addr)
 {
 	u8 ret;
 
@@ -206,7 +215,7 @@ static __inline__ u8 _raw_readb(unsigned long addr)
 	return ret;
 }
 
-static __inline__ u16 _raw_readw(unsigned long addr)
+static inline u16 _raw_readw(unsigned long addr)
 {
 	u16 ret;
 
@@ -217,7 +226,7 @@ static __inline__ u16 _raw_readw(unsigned long addr)
 	return ret;
 }
 
-static __inline__ u32 _raw_readl(unsigned long addr)
+static inline u32 _raw_readl(unsigned long addr)
 {
 	u32 ret;
 
@@ -228,7 +237,7 @@ static __inline__ u32 _raw_readl(unsigned long addr)
 	return ret;
 }
 
-static __inline__ u64 _raw_readq(unsigned long addr)
+static inline u64 _raw_readq(unsigned long addr)
 {
 	u64 ret;
 
@@ -239,28 +248,28 @@ static __inline__ u64 _raw_readq(unsigned long addr)
 	return ret;
 }
 
-static __inline__ void _raw_writeb(u8 b, unsigned long addr)
+static inline void _raw_writeb(u8 b, unsigned long addr)
 {
 	__asm__ __volatile__("stba\t%r0, [%1] %2\t/* pci_raw_writeb */"
 			     : /* no outputs */
 			     : "Jr" (b), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E));
 }
 
-static __inline__ void _raw_writew(u16 w, unsigned long addr)
+static inline void _raw_writew(u16 w, unsigned long addr)
 {
 	__asm__ __volatile__("stha\t%r0, [%1] %2\t/* pci_raw_writew */"
 			     : /* no outputs */
 			     : "Jr" (w), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E));
 }
 
-static __inline__ void _raw_writel(u32 l, unsigned long addr)
+static inline void _raw_writel(u32 l, unsigned long addr)
 {
 	__asm__ __volatile__("stwa\t%r0, [%1] %2\t/* pci_raw_writel */"
 			     : /* no outputs */
 			     : "Jr" (l), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E));
 }
 
-static __inline__ void _raw_writeq(u64 q, unsigned long addr)
+static inline void _raw_writeq(u64 q, unsigned long addr)
 {
 	__asm__ __volatile__("stxa\t%r0, [%1] %2\t/* pci_raw_writeq */"
 			     : /* no outputs */
@@ -417,21 +426,6 @@ _memcpy_toio(volatile void __iomem *dst, const void *src, __kernel_size_t n)
 
 #define memcpy_toio(d,s,sz)	_memcpy_toio(d,s,sz)
 
-static inline int check_signature(void __iomem *io_addr,
-				  const unsigned char *signature,
-				  int length)
-{
-	int retval = 0;
-	do {
-		if (readb(io_addr) != *signature++)
-			goto out;
-		io_addr++;
-	} while (--length);
-	retval = 1;
-out:
-	return retval;
-}
-
 #define mmiowb()
 
 #ifdef __KERNEL__
@@ -479,11 +473,16 @@ extern void pci_iounmap(struct pci_dev *dev, void __iomem *);
 #define sbus_iounmap(__addr, __size)	\
 	release_region((unsigned long)(__addr), (__size))
 
-/* Nothing to do */
+/*
+ * Convert a physical pointer to a virtual kernel pointer for /dev/mem
+ * access
+ */
+#define xlate_dev_mem_ptr(p)	__va(p)
 
-#define dma_cache_inv(_start,_size)		do { } while (0)
-#define dma_cache_wback(_start,_size)		do { } while (0)
-#define dma_cache_wback_inv(_start,_size)	do { } while (0)
+/*
+ * Convert a virtual cached pointer to an uncached pointer
+ */
+#define xlate_dev_kmem_ptr(p)	p
 
 #endif
 

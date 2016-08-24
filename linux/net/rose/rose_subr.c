@@ -11,7 +11,6 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -21,14 +20,14 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp.h>
+#include <net/tcp_states.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <net/rose.h>
 
-static int rose_create_facilities(unsigned char *buffer, rose_cb *rose);
+static int rose_create_facilities(unsigned char *buffer, struct rose_sock *rose);
 
 /*
  *	This routine purges all of the queues of frames.
@@ -47,7 +46,7 @@ void rose_clear_queues(struct sock *sk)
 void rose_frames_acked(struct sock *sk, unsigned short nr)
 {
 	struct sk_buff *skb;
-	rose_cb *rose = rose_sk(sk);
+	struct rose_sock *rose = rose_sk(sk);
 
 	/*
 	 * Remove all the ack-ed frames from the ack queue.
@@ -74,7 +73,7 @@ void rose_requeue_frames(struct sock *sk)
 		if (skb_prev == NULL)
 			skb_queue_head(&sk->sk_write_queue, skb);
 		else
-			skb_append(skb_prev, skb);
+			skb_append(skb_prev, skb, &sk->sk_write_queue);
 		skb_prev = skb;
 	}
 }
@@ -85,7 +84,7 @@ void rose_requeue_frames(struct sock *sk)
  */
 int rose_validate_nr(struct sock *sk, unsigned short nr)
 {
-	rose_cb *rose = rose_sk(sk);
+	struct rose_sock *rose = rose_sk(sk);
 	unsigned short vc = rose->va;
 
 	while (vc != rose->vs) {
@@ -102,7 +101,7 @@ int rose_validate_nr(struct sock *sk, unsigned short nr)
  */
 void rose_write_internal(struct sock *sk, int frametype)
 {
-	rose_cb *rose = rose_sk(sk);
+	struct rose_sock *rose = rose_sk(sk);
 	struct sk_buff *skb;
 	unsigned char  *dptr;
 	unsigned char  lci1, lci2;
@@ -337,13 +336,13 @@ static int rose_parse_ccitt(unsigned char *p, struct rose_facilities_struct *fac
 				memcpy(&facilities->source_addr, p + 7, ROSE_ADDR_LEN);
 				memcpy(callsign, p + 12,   l - 10);
 				callsign[l - 10] = '\0';
-				facilities->source_call = *asc2ax(callsign);
+				asc2ax(&facilities->source_call, callsign);
 			}
 			if (*p == FAC_CCITT_SRC_NSAP) {
 				memcpy(&facilities->dest_addr, p + 7, ROSE_ADDR_LEN);
 				memcpy(callsign, p + 12, l - 10);
 				callsign[l - 10] = '\0';
-				facilities->dest_call = *asc2ax(callsign);
+				asc2ax(&facilities->dest_call, callsign);
 			}
 			p   += l + 2;
 			n   += l + 2;
@@ -396,10 +395,11 @@ int rose_parse_facilities(unsigned char *p,
 	return 1;
 }
 
-static int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
+static int rose_create_facilities(unsigned char *buffer, struct rose_sock *rose)
 {
 	unsigned char *p = buffer + 1;
 	char *callsign;
+	char buf[11];
 	int len, nb;
 
 	/* National Facilities */
@@ -456,7 +456,7 @@ static int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
 
 	*p++ = FAC_CCITT_DEST_NSAP;
 
-	callsign = ax2asc(&rose->dest_call);
+	callsign = ax2asc(buf, &rose->dest_call);
 
 	*p++ = strlen(callsign) + 10;
 	*p++ = (strlen(callsign) + 9) * 2;		/* ??? */
@@ -471,7 +471,7 @@ static int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
 
 	*p++ = FAC_CCITT_SRC_NSAP;
 
-	callsign = ax2asc(&rose->source_call);
+	callsign = ax2asc(buf, &rose->source_call);
 
 	*p++ = strlen(callsign) + 10;
 	*p++ = (strlen(callsign) + 9) * 2;		/* ??? */
@@ -492,7 +492,7 @@ static int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
 
 void rose_disconnect(struct sock *sk, int reason, int cause, int diagnostic)
 {
-	rose_cb *rose = rose_sk(sk);
+	struct rose_sock *rose = rose_sk(sk);
 
 	rose_stop_timer(sk);
 	rose_stop_idletimer(sk);

@@ -14,7 +14,6 @@
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -128,8 +127,8 @@ badge4_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state
 
 static struct pcmcia_low_level badge4_pcmcia_ops = {
 	.owner			= THIS_MODULE,
-	.init			= sa1111_pcmcia_hw_init,
-	.shutdown		= sa1111_pcmcia_hw_shutdown,
+	.hw_init		= sa1111_pcmcia_hw_init,
+	.hw_shutdown		= sa1111_pcmcia_hw_shutdown,
 	.socket_state		= sa1111_pcmcia_socket_state,
 	.configure_socket	= badge4_pcmcia_configure_socket,
 

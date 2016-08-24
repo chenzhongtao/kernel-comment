@@ -1,7 +1,6 @@
 #ifndef __ASM_PARISC_PCI_H
 #define __ASM_PARISC_PCI_H
 
-#include <linux/config.h>
 #include <asm/scatterlist.h>
 
 
@@ -18,6 +17,18 @@
 */
 #define PCI_MAX_BUSSES	256
 
+
+/* To be used as: mdelay(pci_post_reset_delay);
+ *
+ * post_reset is the time the kernel should stall to prevent anyone from
+ * accessing the PCI bus once #RESET is de-asserted. 
+ * PCI spec somewhere says 1 second but with multi-PCI bus systems,
+ * this makes the boot time much longer than necessary.
+ * 20ms seems to work for all the HP PCI implementations to date.
+ */
+#define pci_post_reset_delay 50
+
+
 /*
 ** pci_hba_data (aka H2P_OBJECT in HP/UX)
 **
@@ -28,7 +39,7 @@
 ** Data needed by pcibios layer belongs here.
 */
 struct pci_hba_data {
-	unsigned long	base_addr;	/* aka Host Physical Address */
+	void __iomem   *base_addr;	/* aka Host Physical Address */
 	const struct parisc_device *dev; /* device from PA bus walk */
 	struct pci_bus *hba_bus;	/* primary PCI bus below HBA */
 	int		hba_num;	/* I/O port space access "key" */
@@ -69,7 +80,7 @@ struct pci_hba_data {
 #define PCI_PORT_HBA(a)		((a) >> HBA_PORT_SPACE_BITS)
 #define PCI_PORT_ADDR(a)	((a) & (HBA_PORT_SPACE_SIZE - 1))
 
-#if CONFIG_PARISC64
+#ifdef CONFIG_64BIT
 #define PCI_F_EXTEND		0xffffffff00000000UL
 #define PCI_IS_LMMIO(hba,a)	pci_is_lmmio(hba,a)
 
@@ -83,21 +94,27 @@ static __inline__  int pci_is_lmmio(struct pci_hba_data *hba, unsigned long a)
 
 /*
 ** Convert between PCI (IO_VIEW) addresses and processor (PA_VIEW) addresses.
-** See pcibios.c for more conversions used by Generic PCI code.
+** See pci.c for more conversions used by Generic PCI code.
+**
+** Platform characteristics/firmware guarantee that
+**	(1) PA_VIEW - IO_VIEW = lmmio_offset for both LMMIO and ELMMIO
+**	(2) PA_VIEW == IO_VIEW for GMMIO
 */
 #define PCI_BUS_ADDR(hba,a)	(PCI_IS_LMMIO(hba,a)	\
 		?  ((a) - hba->lmmio_space_offset)	/* mangle LMMIO */ \
 		: (a))					/* GMMIO */
-#define PCI_HOST_ADDR(hba,a)	((a) + hba->lmmio_space_offset)
+#define PCI_HOST_ADDR(hba,a)	(((a) & PCI_F_EXTEND) == 0 \
+		? (a) + hba->lmmio_space_offset \
+		: (a))
 
-#else	/* !CONFIG_PARISC64 */
+#else	/* !CONFIG_64BIT */
 
 #define PCI_BUS_ADDR(hba,a)	(a)
 #define PCI_HOST_ADDR(hba,a)	(a)
 #define PCI_F_EXTEND		0UL
 #define PCI_IS_LMMIO(hba,a)	(1)	/* 32-bit doesn't support GMMIO */
 
-#endif /* !CONFIG_PARISC64 */
+#endif /* !CONFIG_64BIT */
 
 /*
 ** KLUGE: linux/pci.h include asm/pci.h BEFORE declaring struct pci_bus
@@ -106,16 +123,33 @@ static __inline__  int pci_is_lmmio(struct pci_hba_data *hba, unsigned long a)
 struct pci_bus;
 struct pci_dev;
 
-/* The PCI address space does equal the physical memory
- * address space.  The networking and block device layers use
+/*
+ * If the PCI device's view of memory is the same as the CPU's view of memory,
+ * PCI_DMA_BUS_IS_PHYS is true.  The networking and block device layers use
  * this boolean for bounce buffer decisions.
  */
-#define PCI_DMA_BUS_IS_PHYS     (1)
+#ifdef CONFIG_PA20
+/* All PA-2.0 machines have an IOMMU. */
+#define PCI_DMA_BUS_IS_PHYS	0
+#define parisc_has_iommu()	do { } while (0)
+#else
+
+#if defined(CONFIG_IOMMU_CCIO) || defined(CONFIG_IOMMU_SBA)
+extern int parisc_bus_is_phys; 	/* in arch/parisc/kernel/setup.c */
+#define PCI_DMA_BUS_IS_PHYS	parisc_bus_is_phys
+#define parisc_has_iommu()	do { parisc_bus_is_phys = 0; } while (0)
+#else
+#define PCI_DMA_BUS_IS_PHYS	1
+#define parisc_has_iommu()	do { } while (0)
+#endif
+
+#endif	/* !CONFIG_PA20 */
+
 
 /*
 ** Most PCI devices (eg Tulip, NCR720) also export the same registers
 ** to both MMIO and I/O port space.  Due to poor performance of I/O Port
-** access under HP PCI bus adapters, strongly reccomend use of MMIO
+** access under HP PCI bus adapters, strongly recommend the use of MMIO
 ** address space.
 **
 ** While I'm at it more PA programming notes:
@@ -168,46 +202,93 @@ struct pci_bios_ops {
 */
 extern struct pci_port_ops *pci_port;
 extern struct pci_bios_ops *pci_bios;
-extern int pci_post_reset_delay;	/* delay after de-asserting #RESET */
-extern int pci_hba_count;
-extern struct pci_hba_data *parisc_pci_hba[];
 
 #ifdef CONFIG_PCI
 extern void pcibios_register_hba(struct pci_hba_data *);
 extern void pcibios_set_master(struct pci_dev *);
 #else
-extern inline void pcibios_register_hba(struct pci_hba_data *x)
+static inline void pcibios_register_hba(struct pci_hba_data *x)
 {
 }
 #endif
 
 /*
-** used by drivers/pci/pci.c:pci_do_scan_bus()
-**   0 == check if bridge is numbered before re-numbering.
-**   1 == pci_do_scan_bus() should automatically number all PCI-PCI bridges.
-**
-** REVISIT:
-**   To date, only alpha sets this to one. We'll need to set this
-**   to zero for legacy platforms and one for PAT platforms.
-*/
-#define pcibios_assign_all_busses()     (pdc_type == PDC_TYPE_PAT)
-#define pcibios_scan_all_fns(a, b)	0
+ * pcibios_assign_all_busses() is used in drivers/pci/pci.c:pci_do_scan_bus()
+ *   0 == check if bridge is numbered before re-numbering.
+ *   1 == pci_do_scan_bus() should automatically number all PCI-PCI bridges.
+ *
+ *   We *should* set this to zero for "legacy" platforms and one
+ *   for PAT platforms.
+ *
+ *   But legacy platforms also need to renumber the busses below a Host
+ *   Bus controller.  Adding a 4-port Tulip card on the first PCI root
+ *   bus of a C200 resulted in the secondary bus being numbered as 1.
+ *   The second PCI host bus controller's root bus had already been
+ *   assigned bus number 1 by firmware and sysfs complained.
+ *
+ *   Firmware isn't doing anything wrong here since each controller
+ *   is its own PCI domain.  It's simpler and easier for us to renumber
+ *   the busses rather than treat each Dino as a separate PCI domain.
+ *   Eventually, we may want to introduce PCI domains for Superdome or
+ *   rp7420/8420 boxes and then revisit this issue.
+ */
+#define pcibios_assign_all_busses()     (1)
+#define pcibios_scan_all_fns(a, b)	(0)
 
 #define PCIBIOS_MIN_IO          0x10
 #define PCIBIOS_MIN_MEM         0x1000 /* NBPG - but pci/setup-res.c dies */
 
-/* Don't support DAC yet. */
-#define pci_dac_dma_supported(pci_dev, mask)   (0)
-
 /* export the pci_ DMA API in terms of the dma_ one */
 #include <asm-generic/pci-dma-compat.h>
+
+#ifdef CONFIG_PCI
+static inline void pci_dma_burst_advice(struct pci_dev *pdev,
+					enum pci_dma_burst_strategy *strat,
+					unsigned long *strategy_parameter)
+{
+	unsigned long cacheline_size;
+	u8 byte;
+
+	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &byte);
+	if (byte == 0)
+		cacheline_size = 1024;
+	else
+		cacheline_size = (int) byte * 4;
+
+	*strat = PCI_DMA_BURST_MULTIPLE;
+	*strategy_parameter = cacheline_size;
+}
+#endif
 
 extern void
 pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
 			 struct resource *res);
 
-static inline void pcibios_add_platform_entries(struct pci_dev *dev)
+extern void
+pcibios_bus_to_resource(struct pci_dev *dev, struct resource *res,
+			struct pci_bus_region *region);
+
+static inline struct resource *
+pcibios_select_root(struct pci_dev *pdev, struct resource *res)
 {
+	struct resource *root = NULL;
+
+	if (res->flags & IORESOURCE_IO)
+		root = &ioport_resource;
+	if (res->flags & IORESOURCE_MEM)
+		root = &iomem_resource;
+
+	return root;
+}
+
+static inline void pcibios_penalize_isa_irq(int irq, int active)
+{
+	/* We don't need to penalize isa irq's */
+}
+
+static inline int pci_get_legacy_ide_irq(struct pci_dev *dev, int channel)
+{
+	return channel ? 15 : 14;
 }
 
 #endif /* __ASM_PARISC_PCI_H */

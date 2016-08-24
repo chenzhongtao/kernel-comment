@@ -43,12 +43,46 @@
  *
  */
 
-#define INTENNUM_OFF              0x8
-#define INTDISNUM_OFF             0xC
+#define INTCNTL_OFF               0x00
+#define NIMASK_OFF                0x04
+#define INTENNUM_OFF              0x08
+#define INTDISNUM_OFF             0x0C
+#define INTENABLEH_OFF            0x10
+#define INTENABLEL_OFF            0x14
+#define INTTYPEH_OFF              0x18
+#define INTTYPEL_OFF              0x1C
+#define NIPRIORITY_OFF(x)         (0x20+4*(7-(x)))
+#define NIVECSR_OFF               0x40
+#define FIVECSR_OFF               0x44
+#define INTSRCH_OFF               0x48
+#define INTSRCL_OFF               0x4C
+#define INTFRCH_OFF               0x50
+#define INTFRCL_OFF               0x54
+#define NIPNDH_OFF                0x58
+#define NIPNDL_OFF                0x5C
+#define FIPNDH_OFF                0x60
+#define FIPNDL_OFF                0x64
 
 #define VA_AITC_BASE              IO_ADDRESS(IMX_AITC_BASE)
-#define IMX_AITC_INTDISNUM       (VA_AITC_BASE + INTDISNUM_OFF)
+#define IMX_AITC_INTCNTL         (VA_AITC_BASE + INTCNTL_OFF)
+#define IMX_AITC_NIMASK          (VA_AITC_BASE + NIMASK_OFF)
 #define IMX_AITC_INTENNUM        (VA_AITC_BASE + INTENNUM_OFF)
+#define IMX_AITC_INTDISNUM       (VA_AITC_BASE + INTDISNUM_OFF)
+#define IMX_AITC_INTENABLEH      (VA_AITC_BASE + INTENABLEH_OFF)
+#define IMX_AITC_INTENABLEL      (VA_AITC_BASE + INTENABLEL_OFF)
+#define IMX_AITC_INTTYPEH        (VA_AITC_BASE + INTTYPEH_OFF)
+#define IMX_AITC_INTTYPEL        (VA_AITC_BASE + INTTYPEL_OFF)
+#define IMX_AITC_NIPRIORITY(x)   (VA_AITC_BASE + NIPRIORITY_OFF(x))
+#define IMX_AITC_NIVECSR         (VA_AITC_BASE + NIVECSR_OFF)
+#define IMX_AITC_FIVECSR         (VA_AITC_BASE + FIVECSR_OFF)
+#define IMX_AITC_INTSRCH         (VA_AITC_BASE + INTSRCH_OFF)
+#define IMX_AITC_INTSRCL         (VA_AITC_BASE + INTSRCL_OFF)
+#define IMX_AITC_INTFRCH         (VA_AITC_BASE + INTFRCH_OFF)
+#define IMX_AITC_INTFRCL         (VA_AITC_BASE + INTFRCL_OFF)
+#define IMX_AITC_NIPNDH          (VA_AITC_BASE + NIPNDH_OFF)
+#define IMX_AITC_NIPNDL          (VA_AITC_BASE + NIPNDL_OFF)
+#define IMX_AITC_FIPNDH          (VA_AITC_BASE + FIPNDH_OFF)
+#define IMX_AITC_FIPNDL          (VA_AITC_BASE + FIPNDL_OFF)
 
 #if 0
 #define DEBUG_IRQ(fmt...)	printk(fmt)
@@ -127,7 +161,7 @@ static void
 imx_gpio_ack_irq(unsigned int irq)
 {
 	DEBUG_IRQ("%s: irq %d\n", __FUNCTION__, irq);
-	ISR(IRQ_TO_REG(irq)) |= 1 << ((irq - IRQ_GPIOA(0)) % 32);
+	ISR(IRQ_TO_REG(irq)) = 1 << ((irq - IRQ_GPIOA(0)) % 32);
 }
 
 static void
@@ -146,13 +180,13 @@ imx_gpio_unmask_irq(unsigned int irq)
 
 static void
 imx_gpio_handler(unsigned int mask, unsigned int irq,
-                 struct irqdesc *desc, struct pt_regs *regs)
+                 struct irq_desc *desc)
 {
 	desc = irq_desc + irq;
 	while (mask) {
 		if (mask & 1) {
 			DEBUG_IRQ("handling irq %d\n", irq);
-			desc->handle(irq, desc, regs);
+			desc_handle_irq(irq, desc);
 		}
 		irq++;
 		desc++;
@@ -161,60 +195,58 @@ imx_gpio_handler(unsigned int mask, unsigned int irq,
 }
 
 static void
-imx_gpioa_demux_handler(unsigned int irq_unused, struct irqdesc *desc,
-			struct pt_regs *regs)
+imx_gpioa_demux_handler(unsigned int irq_unused, struct irq_desc *desc)
 {
 	unsigned int mask, irq;
 
 	mask = ISR(0);
 	irq = IRQ_GPIOA(0);
-	imx_gpio_handler(mask, irq, desc, regs);
+	imx_gpio_handler(mask, irq, desc);
 }
 
 static void
-imx_gpiob_demux_handler(unsigned int irq_unused, struct irqdesc *desc,
-			struct pt_regs *regs)
+imx_gpiob_demux_handler(unsigned int irq_unused, struct irq_desc *desc)
 {
 	unsigned int mask, irq;
 
 	mask = ISR(1);
 	irq = IRQ_GPIOB(0);
-	imx_gpio_handler(mask, irq, desc, regs);
+	imx_gpio_handler(mask, irq, desc);
 }
 
 static void
-imx_gpioc_demux_handler(unsigned int irq_unused, struct irqdesc *desc,
-			struct pt_regs *regs)
+imx_gpioc_demux_handler(unsigned int irq_unused, struct irq_desc *desc)
 {
 	unsigned int mask, irq;
 
 	mask = ISR(2);
 	irq = IRQ_GPIOC(0);
-	imx_gpio_handler(mask, irq, desc, regs);
+	imx_gpio_handler(mask, irq, desc);
 }
 
 static void
-imx_gpiod_demux_handler(unsigned int irq_unused, struct irqdesc *desc,
-			struct pt_regs *regs)
+imx_gpiod_demux_handler(unsigned int irq_unused, struct irq_desc *desc)
 {
 	unsigned int mask, irq;
 
 	mask = ISR(3);
 	irq = IRQ_GPIOD(0);
-	imx_gpio_handler(mask, irq, desc, regs);
+	imx_gpio_handler(mask, irq, desc);
 }
 
-static struct irqchip imx_internal_chip = {
+static struct irq_chip imx_internal_chip = {
+	.name = "MPU",
 	.ack = imx_mask_irq,
 	.mask = imx_mask_irq,
 	.unmask = imx_unmask_irq,
 };
 
-static struct irqchip imx_gpio_chip = {
+static struct irq_chip imx_gpio_chip = {
+	.name = "GPIO",
 	.ack = imx_gpio_ack_irq,
 	.mask = imx_gpio_mask_irq,
 	.unmask = imx_gpio_unmask_irq,
-	.type = imx_gpio_irq_type,
+	.set_type = imx_gpio_irq_type,
 };
 
 void __init
@@ -224,7 +256,12 @@ imx_init_irq(void)
 
 	DEBUG_IRQ("Initializing imx interrupts\n");
 
-	/* Mask all interrupts initially */
+	/* Disable all interrupts initially. */
+	/* Do not rely on the bootloader. */
+	__raw_writel(0, IMX_AITC_INTENABLEH);
+	__raw_writel(0, IMX_AITC_INTENABLEL);
+
+	/* Mask all GPIO interrupts as well */
 	IMR(0) = 0;
 	IMR(1) = 0;
 	IMR(2) = 0;
@@ -232,13 +269,13 @@ imx_init_irq(void)
 
 	for (irq = 0; irq < IMX_IRQS; irq++) {
 		set_irq_chip(irq, &imx_internal_chip);
-		set_irq_handler(irq, do_level_IRQ);
+		set_irq_handler(irq, handle_level_irq);
 		set_irq_flags(irq, IRQF_VALID);
 	}
 
 	for (irq = IRQ_GPIOA(0); irq < IRQ_GPIOD(32); irq++) {
 		set_irq_chip(irq, &imx_gpio_chip);
-		set_irq_handler(irq, do_edge_IRQ);
+		set_irq_handler(irq, handle_edge_irq);
 		set_irq_flags(irq, IRQF_VALID);
 	}
 
@@ -247,6 +284,6 @@ imx_init_irq(void)
 	set_irq_chained_handler(GPIO_INT_PORTC, imx_gpioc_demux_handler);
 	set_irq_chained_handler(GPIO_INT_PORTD, imx_gpiod_demux_handler);
 
-	/* Disable all interrupts initially. */
-	/* In IMX this is done in the bootloader. */
+	/* Release masking of interrupts according to priority */
+	__raw_writel(-1, IMX_AITC_NIMASK);
 }

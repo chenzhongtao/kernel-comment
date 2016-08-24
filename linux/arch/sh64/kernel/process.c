@@ -20,261 +20,17 @@
 /*
  * This file handles the architecture-dependent parts of process handling..
  */
-
-/* Temporary flags/tests. All to be removed/undefined. BEGIN */
-#define IDLE_TRACE
-#define VM_SHOW_TABLES
-#define VM_TEST_FAULT
-#define VM_TEST_RTLBMISS
-#define VM_TEST_WTLBMISS
-
-#undef VM_SHOW_TABLES
-#undef IDLE_TRACE
-/* Temporary flags/tests. All to be removed/undefined. END */
-
-#define __KERNEL_SYSCALLS__
-#include <stdarg.h>
-
-#include <linux/config.h>
-#include <linux/kernel.h>
-#include <linux/rwsem.h>
 #include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
+#include <linux/fs.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
-#include <linux/vmalloc.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/interrupt.h>
-#include <linux/unistd.h>
-#include <linux/delay.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
-
+#include <linux/module.h>
+#include <linux/proc_fs.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/processor.h>		/* includes also <asm/registers.h> */
-#include <asm/mmu_context.h>
-#include <asm/elf.h>
-#include <asm/page.h>
-
-#include <linux/irq.h>
 
 struct task_struct *last_task_used_math = NULL;
-
-#ifdef IDLE_TRACE
-#ifdef VM_SHOW_TABLES
-/* For testing */
-static void print_PTE(long base)
-{
-	int i, skip=0;
-	long long x, y, *p = (long long *) base;
-
-	for (i=0; i< 512; i++, p++){
-		if (*p == 0) {
-			if (!skip) {
-				skip++;
-				printk("(0s) ");
-			}
-		} else {
-			skip=0;
-			x = (*p) >> 32;
-			y = (*p) & 0xffffffff;
-			printk("%08Lx%08Lx ", x, y);
-			if (!((i+1)&0x3)) printk("\n");
-		}
-	}
-}
-
-/* For testing */
-static void print_DIR(long base)
-{
-	int i, skip=0;
-	long *p = (long *) base;
-
-	for (i=0; i< 512; i++, p++){
-		if (*p == 0) {
-			if (!skip) {
-				skip++;
-				printk("(0s) ");
-			}
-		} else {
-			skip=0;
-			printk("%08lx ", *p);
-			if (!((i+1)&0x7)) printk("\n");
-		}
-	}
-}
-
-/* For testing */
-static void print_vmalloc_first_tables(void)
-{
-
-#define PRESENT	0x800	/* Bit 11 */
-
-	/*
-	 * Do it really dirty by looking at raw addresses,
-         * raw offsets, no types. If we used pgtable/pgalloc
-	 * macros/definitions we could hide potential bugs.
-	 *
-	 * Note that pointers are 32-bit for CDC.
-	 */
-	long pgdt, pmdt, ptet;
-
-	pgdt = (long) &swapper_pg_dir;
-	printk("-->PGD (0x%08lx):\n", pgdt);
-	print_DIR(pgdt);
-	printk("\n");
-
-	/* VMALLOC pool is mapped at 0xc0000000, second (pointer) entry in PGD */
-	pgdt += 4;
-	pmdt = (long) (* (long *) pgdt);
-	if (!(pmdt & PRESENT)) {
-		printk("No PMD\n");
-		return;
-	} else pmdt &= 0xfffff000;
-
-	printk("-->PMD (0x%08lx):\n", pmdt);
-	print_DIR(pmdt);
-	printk("\n");
-
-	/* Get the pmdt displacement for 0xc0000000 */
-	pmdt += 2048;
-
-	/* just look at first two address ranges ... */
-        /* ... 0xc0000000 ... */
-	ptet = (long) (* (long *) pmdt);
-	if (!(ptet & PRESENT)) {
-		printk("No PTE0\n");
-		return;
-	} else ptet &= 0xfffff000;
-
-	printk("-->PTE0 (0x%08lx):\n", ptet);
-	print_PTE(ptet);
-	printk("\n");
-
-        /* ... 0xc0001000 ... */
-	ptet += 4;
-	if (!(ptet & PRESENT)) {
-		printk("No PTE1\n");
-		return;
-	} else ptet &= 0xfffff000;
-	printk("-->PTE1 (0x%08lx):\n", ptet);
-	print_PTE(ptet);
-	printk("\n");
-}
-#else
-#define print_vmalloc_first_tables()
-#endif	/* VM_SHOW_TABLES */
-
-static void test_VM(void)
-{
-	void *a, *b, *c;
-
-#ifdef VM_SHOW_TABLES
-	printk("Initial PGD/PMD/PTE\n");
-#endif
-        print_vmalloc_first_tables();
-
-	printk("Allocating 2 bytes\n");
-	a = vmalloc(2);
-        print_vmalloc_first_tables();
-
-	printk("Allocating 4100 bytes\n");
-	b = vmalloc(4100);
-        print_vmalloc_first_tables();
-
-	printk("Allocating 20234 bytes\n");
-	c = vmalloc(20234);
-        print_vmalloc_first_tables();
-
-#ifdef VM_TEST_FAULT
-	/* Here you may want to fault ! */
-
-#ifdef VM_TEST_RTLBMISS
-	printk("Ready to fault upon read.\n");
-	if (* (char *) a) {
-		printk("RTLBMISSed on area a !\n");
-	}
-	printk("RTLBMISSed on area a !\n");
-#endif
-
-#ifdef VM_TEST_WTLBMISS
-	printk("Ready to fault upon write.\n");
-	*((char *) b) = 'L';
-	printk("WTLBMISSed on area b !\n");
-#endif
-
-#endif	/* VM_TEST_FAULT */
-
-	printk("Deallocating the 4100 byte chunk\n");
-	vfree(b);
-        print_vmalloc_first_tables();
-
-	printk("Deallocating the 2 byte chunk\n");
-	vfree(a);
-        print_vmalloc_first_tables();
-
-	printk("Deallocating the last chunk\n");
-	vfree(c);
-        print_vmalloc_first_tables();
-}
-
-extern unsigned long volatile jiffies;
-int once = 0;
-unsigned long old_jiffies;
-int pid = -1, pgid = -1;
-
-void idle_trace(void)
-{
-
-	_syscall0(int, getpid)
-	_syscall1(int, getpgid, int, pid)
-
-	if (!once) {
-        	/* VM allocation/deallocation simple test */
-		test_VM();
-		pid = getpid();
-
-        	printk("Got all through to Idle !!\n");
-        	printk("I'm now going to loop forever ...\n");
-        	printk("Any ! below is a timer tick.\n");
-		printk("Any . below is a getpgid system call from pid = %d.\n", pid);
-
-
-        	old_jiffies = jiffies;
-		once++;
-	}
-
-	if (old_jiffies != jiffies) {
-		old_jiffies = jiffies - old_jiffies;
-		switch (old_jiffies) {
-		case 1:
-			printk("!");
-			break;
-		case 2:
-			printk("!!");
-			break;
-		case 3:
-			printk("!!!");
-			break;
-		case 4:
-			printk("!!!!");
-			break;
-		default:
-			printk("(%d!)", (int) old_jiffies);
-		}
-		old_jiffies = jiffies;
-	}
-	pgid = getpgid(pid);
-	printk(".");
-}
-#else
-#define idle_trace()	do { } while (0)
-#endif	/* IDLE_TRACE */
 
 static int hlt_counter = 1;
 
@@ -307,40 +63,33 @@ __setup("hlt", hlt_setup);
 
 static inline void hlt(void)
 {
-	if (hlt_counter)
-		return;
-
 	__asm__ __volatile__ ("sleep" : : : "memory");
 }
 
 /*
  * The idle loop on a uniprocessor SH..
  */
-void default_idle(void)
+void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
 	while (1) {
 		if (hlt_counter) {
-			while (1)
-				if (need_resched())
-					break;
+			while (!need_resched())
+				cpu_relax();
 		} else {
 			local_irq_disable();
 			while (!need_resched()) {
 				local_irq_enable();
-				idle_trace();
 				hlt();
 				local_irq_disable();
 			}
 			local_irq_enable();
 		}
+		preempt_enable_no_resched();
 		schedule();
+		preempt_disable();
 	}
-}
 
-void cpu_idle(void)
-{
-	default_idle();
 }
 
 void machine_restart(char * __unused)
@@ -361,6 +110,9 @@ void machine_power_off(void)
 
 	enter_deep_standby();
 }
+
+void (*pm_power_off)(void) = machine_power_off;
+EXPORT_SYMBOL(pm_power_off);
 
 void show_regs(struct pt_regs * regs)
 {
@@ -626,6 +378,10 @@ void free_task_struct(struct task_struct *p)
 /*
  * Create a kernel thread
  */
+ATTRIB_NORET void kernel_thread_helper(void *arg, int (*fn)(void *))
+{
+	do_exit(fn(arg));
+}
 
 /*
  * This is the mechanism for creating a new kernel thread.
@@ -633,24 +389,21 @@ void free_task_struct(struct task_struct *p)
  * NOTE! Only a kernel-only process(ie the swapper or direct descendants
  * who haven't done an "execve()") should use this: it will work within
  * a system call from a "real" process, but the process memory space will
- * not be free'd until both the parent and the child have exited.
+ * not be freed until both the parent and the child have exited.
  */
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
-	/* A bit less processor dependent than older sh ... */
+	struct pt_regs regs;
 
-	unsigned int reply;
+	memset(&regs, 0, sizeof(regs));
+	regs.regs[2] = (unsigned long)arg;
+	regs.regs[3] = (unsigned long)fn;
 
-static __inline__ _syscall2(int,clone,unsigned long,flags,unsigned long,newsp)
-static __inline__ _syscall1(int,exit,int,ret)
+	regs.pc = (unsigned long)kernel_thread_helper;
+	regs.sr = (1 << 30);
 
-	reply = clone(flags | CLONE_VM, 0);
-	if (!reply) {
-		/* Child */
-		reply = exit(fn(arg));
-	}
-
-	return reply;
+	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0,
+		       &regs, 0, NULL, NULL);
 }
 
 /*
@@ -671,7 +424,7 @@ void exit_thread(void)
 	   null it here, there is no other path through which it would get safely
 	   nulled. */
 
-#ifndef CONFIG_NOFPU_SUPPORT
+#ifdef CONFIG_SH_FPU
 	if (last_task_used_math == current) {
 		last_task_used_math = NULL;
 	}
@@ -683,7 +436,7 @@ void flush_thread(void)
 
 	/* Called by fs/exec.c (flush_old_exec) to remove traces of a
 	 * previously running executable. */
-#ifndef CONFIG_NOFPU_SUPPORT
+#ifdef CONFIG_SH_FPU
 	if (last_task_used_math == current) {
 		last_task_used_math = NULL;
 	}
@@ -709,7 +462,7 @@ void release_thread(struct task_struct *dead_task)
 /* Fill in the fpu structure for a core dump.. */
 int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 {
-#ifndef CONFIG_NOFPU_SUPPORT
+#ifdef CONFIG_SH_FPU
 	int fpvalid;
 	struct task_struct *tsk = current;
 
@@ -741,7 +494,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	struct pt_regs *childregs;
 	unsigned long long se;			/* Sign extension */
 
-#ifndef CONFIG_NOFPU_SUPPORT
+#ifdef CONFIG_SH_FPU
 	if(last_task_used_math == current) {
 		grab_fpu();
 		fpsave(&current->thread.fpu.hard);
@@ -751,7 +504,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	}
 #endif
 	/* Copy from sh version */
-	childregs = ((struct pt_regs *)(THREAD_SIZE + (unsigned long) p->thread_info )) - 1;
+	childregs = (struct pt_regs *)(THREAD_SIZE + task_stack_page(p)) - 1;
 
 	*childregs = *regs;
 
@@ -759,7 +512,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 		childregs->regs[15] = usp;
 		p->thread.uregs = childregs;
 	} else {
-		childregs->regs[15] = (unsigned long)p->thread_info + THREAD_SIZE;
+		childregs->regs[15] = (unsigned long)task_stack_page(p) + THREAD_SIZE;
 	}
 
 	childregs->regs[9] = 0; /* Set return value for child */
@@ -780,26 +533,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	childregs->regs[15] = se;
 
 	return 0;
-}
-
-/*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-	dump->magic = CMAGIC;
-	dump->start_code = current->mm->start_code;
-	dump->start_data  = current->mm->start_data;
-	dump->start_stack = regs->regs[15] & ~(PAGE_SIZE - 1);
-	dump->u_tsize = (current->mm->end_code - dump->start_code) >> PAGE_SHIFT;
-	dump->u_dsize = (current->mm->brk + (PAGE_SIZE-1) - dump->start_data) >> PAGE_SHIFT;
-	dump->u_ssize = (current->mm->start_stack - dump->start_stack +
-			 PAGE_SIZE - 1) >> PAGE_SHIFT;
-	/* Debug registers will come here. */
-
-	dump->regs = *regs;
-
-	dump->u_fpvalid = dump_fpu(regs, &dump->fpu);
 }
 
 asmlinkage int sys_fork(unsigned long r2, unsigned long r3,
@@ -924,16 +657,13 @@ unsigned long get_wchan(struct task_struct *p)
    */
 
 #if defined(CONFIG_SH64_PROC_ASIDS)
-#include <linux/init.h>
-#include <linux/proc_fs.h>
-
 static int
 asids_proc_info(char *buf, char **start, off_t fpos, int length, int *eof, void *data)
 {
 	int len=0;
 	struct task_struct *p;
 	read_lock(&tasklist_lock);
-	for_each_task(p) {
+	for_each_process(p) {
 		int pid = p->pid;
 		struct mm_struct *mm;
 		if (!pid) continue;
@@ -942,7 +672,7 @@ asids_proc_info(char *buf, char **start, off_t fpos, int length, int *eof, void 
 			unsigned long asid, context;
 			context = mm->context;
 			asid = (context & 0xff);
-			len += sprintf(buf+len, "%5d : %02x\n", pid, asid);
+			len += sprintf(buf+len, "%5d : %02lx\n", pid, asid);
 		} else {
 			len += sprintf(buf+len, "%5d : (none)\n", pid);
 		}
@@ -954,10 +684,8 @@ asids_proc_info(char *buf, char **start, off_t fpos, int length, int *eof, void 
 
 static int __init register_proc_asids(void)
 {
-  create_proc_read_entry("asids", 0, NULL, asids_proc_info, NULL);
-  return 0;
+	create_proc_read_entry("asids", 0, NULL, asids_proc_info, NULL);
+	return 0;
 }
-
 __initcall(register_proc_asids);
 #endif
-

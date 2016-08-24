@@ -1,66 +1,111 @@
-/* 
- * Copyright (C) 2001, 2002 Jeff Dike (jdike@karaya.com)
+/*
+ * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include "linux/sched.h"
-#include "linux/slab.h"
-#include "linux/list.h"
+#include "linux/irqreturn.h"
 #include "linux/kd.h"
-#include "linux/interrupt.h"
-#include "linux/devfs_fs_kernel.h"
-#include "asm/uaccess.h"
 #include "chan_kern.h"
-#include "irq_user.h"
-#include "line.h"
-#include "kern.h"
-#include "user_util.h"
-#include "kern_util.h"
-#include "os.h"
 #include "irq_kern.h"
+#include "irq_user.h"
+#include "os.h"
 
 #define LINE_BUFSIZE 4096
 
-static irqreturn_t line_interrupt(int irq, void *data, struct pt_regs *unused)
+static irqreturn_t line_interrupt(int irq, void *data)
 {
-	struct tty_struct *tty = data;
-	struct line *line = tty->driver_data;
+	struct chan *chan = data;
+	struct line *line = chan->line;
+	struct tty_struct *tty = line->tty;
 
 	if (line)
 		chan_interrupt(&line->chan_list, &line->task, tty, irq);
 	return IRQ_HANDLED;
 }
 
-static void line_timer_cb(void *arg)
+static void line_timer_cb(struct work_struct *work)
 {
-	struct tty_struct *tty = arg;
-	struct line *line = tty->driver_data;
+	struct line *line = container_of(work, struct line, task.work);
 
-	line_interrupt(line->driver->read_irq, arg, NULL);
+	if (!line->throttled)
+		chan_interrupt(&line->chan_list, &line->task, line->tty,
+			       line->driver->read_irq);
 }
 
-static int write_room(struct line *dev)
+/*
+ * Returns the free space inside the ring buffer of this line.
+ *
+ * Should be called while holding line->lock (this does not modify data).
+ */
+static int write_room(struct line *line)
 {
 	int n;
 
-	if (dev->buffer == NULL)
-		return (LINE_BUFSIZE - 1);
+	if (line->buffer == NULL)
+		return LINE_BUFSIZE - 1;
 
-	n = dev->head - dev->tail;
+	/* This is for the case where the buffer is wrapped! */
+	n = line->head - line->tail;
+
 	if (n <= 0)
-		n = LINE_BUFSIZE + n;
-	return (n - 1);
+		n = LINE_BUFSIZE + n; /* The other case */
+	return n - 1;
 }
 
+int line_write_room(struct tty_struct *tty)
+{
+	struct line *line = tty->driver_data;
+	unsigned long flags;
+	int room;
+
+	if (tty->stopped)
+		return 0;
+
+	spin_lock_irqsave(&line->lock, flags);
+	room = write_room(line);
+	spin_unlock_irqrestore(&line->lock, flags);
+
+	/*XXX: Warning to remove */
+	if (0 == room)
+		printk(KERN_DEBUG "%s: %s: no room left in buffer\n",
+		       __FUNCTION__,tty->name);
+	return room;
+}
+
+int line_chars_in_buffer(struct tty_struct *tty)
+{
+	struct line *line = tty->driver_data;
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&line->lock, flags);
+
+	/*write_room subtracts 1 for the needed NULL, so we readd it.*/
+	ret = LINE_BUFSIZE - (write_room(line) + 1);
+	spin_unlock_irqrestore(&line->lock, flags);
+
+	return ret;
+}
+
+/*
+ * This copies the content of buf into the circular buffer associated with
+ * this line.
+ * The return value is the number of characters actually copied, i.e. the ones
+ * for which there was space: this function is not supposed to ever flush out
+ * the circular buffer.
+ *
+ * Must be called while holding line->lock!
+ */
 static int buffer_data(struct line *line, const char *buf, int len)
 {
 	int end, room;
 
-	if(line->buffer == NULL){
+	if (line->buffer == NULL) {
 		line->buffer = kmalloc(LINE_BUFSIZE, GFP_ATOMIC);
 		if (line->buffer == NULL) {
-			printk("buffer_data - atomic allocation failed\n");
-			return(0);
+			printk(KERN_ERR "buffer_data - atomic allocation "
+			       "failed\n");
+			return 0;
 		}
 		line->head = line->buffer;
 		line->tail = line->buffer;
@@ -70,83 +115,91 @@ static int buffer_data(struct line *line, const char *buf, int len)
 	len = (len > room) ? room : len;
 
 	end = line->buffer + LINE_BUFSIZE - line->tail;
-	if(len < end){
+
+	if (len < end) {
 		memcpy(line->tail, buf, len);
 		line->tail += len;
 	}
 	else {
+		/* The circular buffer is wrapping */
 		memcpy(line->tail, buf, end);
 		buf += end;
 		memcpy(line->buffer, buf, len - end);
 		line->tail = line->buffer + len - end;
 	}
 
-	return(len);
+	return len;
 }
 
+/*
+ * Flushes the ring buffer to the output channels. That is, write_chan is
+ * called, passing it line->head as buffer, and an appropriate count.
+ *
+ * On exit, returns 1 when the buffer is empty,
+ * 0 when the buffer is not empty on exit,
+ * and -errno when an error occurred.
+ *
+ * Must be called while holding line->lock!*/
 static int flush_buffer(struct line *line)
 {
 	int n, count;
 
 	if ((line->buffer == NULL) || (line->head == line->tail))
-		return(1);
+		return 1;
 
 	if (line->tail < line->head) {
+		/* line->buffer + LINE_BUFSIZE is the end of the buffer! */
 		count = line->buffer + LINE_BUFSIZE - line->head;
+
 		n = write_chan(&line->chan_list, line->head, count,
 			       line->driver->write_irq);
 		if (n < 0)
-			return(n);
-		if (n == count)
+			return n;
+		if (n == count) {
+			/*
+			 * We have flushed from ->head to buffer end, now we
+			 * must flush only from the beginning to ->tail.
+			 */
 			line->head = line->buffer;
-		else {
+		} else {
 			line->head += n;
-			return(0);
+			return 0;
 		}
 	}
 
 	count = line->tail - line->head;
-	n = write_chan(&line->chan_list, line->head, count, 
+	n = write_chan(&line->chan_list, line->head, count,
 		       line->driver->write_irq);
-	if(n < 0) return(n);
+
+	if (n < 0)
+		return n;
 
 	line->head += n;
-	return(line->head == line->tail);
+	return line->head == line->tail;
 }
 
-int line_write(struct tty_struct *tty, const unsigned char *buf, int len)
+void line_flush_buffer(struct tty_struct *tty)
 {
 	struct line *line = tty->driver_data;
 	unsigned long flags;
-	int n, err, ret = 0;
+	int err;
 
-	if(tty->stopped) return 0;
+	/*XXX: copied from line_write, verify if it is correct!*/
+	if (tty->stopped)
+		return;
 
-	down(&line->sem);
-	if(line->head != line->tail){
-		local_irq_save(flags);
-		ret = buffer_data(line, buf, len);
-		err = flush_buffer(line);
-		local_irq_restore(flags);
-		if(err <= 0)
-			ret = err;
-	}
-	else {
-		n = write_chan(&line->chan_list, buf, len, 
-			       line->driver->write_irq);
-		if(n < 0){
-			ret = n;
-			goto out_up;
-		}
+	spin_lock_irqsave(&line->lock, flags);
+	err = flush_buffer(line);
+	spin_unlock_irqrestore(&line->lock, flags);
+}
 
-		len -= n;
-		ret += n;
-		if(len > 0)
-			ret += buffer_data(line, buf + n, len);
-	}
- out_up:
-	up(&line->sem);
-	return(ret);
+/*
+ * We map both ->flush_chars and ->put_char (which go in pair) onto
+ * ->flush_buffer and ->write. Hope it's not that bad.
+ */
+void line_flush_chars(struct tty_struct *tty)
+{
+	line_flush_buffer(tty);
 }
 
 void line_put_char(struct tty_struct *tty, unsigned char ch)
@@ -154,34 +207,59 @@ void line_put_char(struct tty_struct *tty, unsigned char ch)
 	line_write(tty, &ch, sizeof(ch));
 }
 
-void line_set_termios(struct tty_struct *tty, struct termios * old)
+int line_write(struct tty_struct *tty, const unsigned char *buf, int len)
+{
+	struct line *line = tty->driver_data;
+	unsigned long flags;
+	int n, ret = 0;
+
+	if (tty->stopped)
+		return 0;
+
+	spin_lock_irqsave(&line->lock, flags);
+	if (line->head != line->tail)
+		ret = buffer_data(line, buf, len);
+	else {
+		n = write_chan(&line->chan_list, buf, len,
+			       line->driver->write_irq);
+		if (n < 0) {
+			ret = n;
+			goto out_up;
+		}
+
+		len -= n;
+		ret += n;
+		if (len > 0)
+			ret += buffer_data(line, buf + n, len);
+	}
+out_up:
+	spin_unlock_irqrestore(&line->lock, flags);
+	return ret;
+}
+
+void line_set_termios(struct tty_struct *tty, struct ktermios * old)
 {
 	/* nothing */
 }
 
-int line_chars_in_buffer(struct tty_struct *tty)
-{
-	return 0;
-}
-
-static struct {
+static const struct {
 	int  cmd;
 	char *level;
 	char *name;
 } tty_ioctls[] = {
 	/* don't print these, they flood the log ... */
 	{ TCGETS,      NULL,       "TCGETS"      },
-        { TCSETS,      NULL,       "TCSETS"      },
-        { TCSETSW,     NULL,       "TCSETSW"     },
-        { TCFLSH,      NULL,       "TCFLSH"      },
-        { TCSBRK,      NULL,       "TCSBRK"      },
+	{ TCSETS,      NULL,       "TCSETS"      },
+	{ TCSETSW,     NULL,       "TCSETSW"     },
+	{ TCFLSH,      NULL,       "TCFLSH"      },
+	{ TCSBRK,      NULL,       "TCSBRK"      },
 
 	/* general tty stuff */
-        { TCSETSF,     KERN_DEBUG, "TCSETSF"     },
-        { TCGETA,      KERN_DEBUG, "TCGETA"      },
-        { TIOCMGET,    KERN_DEBUG, "TIOCMGET"    },
-        { TCSBRKP,     KERN_DEBUG, "TCSBRKP"     },
-        { TIOCMSET,    KERN_DEBUG, "TIOCMSET"    },
+	{ TCSETSF,     KERN_DEBUG, "TCSETSF"     },
+	{ TCGETA,      KERN_DEBUG, "TCGETA"      },
+	{ TIOCMGET,    KERN_DEBUG, "TIOCMGET"    },
+	{ TCSBRKP,     KERN_DEBUG, "TCSBRKP"     },
+	{ TIOCMSET,    KERN_DEBUG, "TIOCMSET"    },
 
 	/* linux-specific ones */
 	{ TIOCLINUX,   KERN_INFO,  "TIOCLINUX"   },
@@ -238,145 +316,194 @@ int line_ioctl(struct tty_struct *tty, struct file * file,
 		for (i = 0; i < ARRAY_SIZE(tty_ioctls); i++)
 			if (cmd == tty_ioctls[i].cmd)
 				break;
-		if (i < ARRAY_SIZE(tty_ioctls)) {
-			if (NULL != tty_ioctls[i].level)
-				printk("%s%s: %s: ioctl %s called\n",
-				       tty_ioctls[i].level, __FUNCTION__,
-				       tty->name, tty_ioctls[i].name);
-		} else {
+		if (i == ARRAY_SIZE(tty_ioctls)) {
 			printk(KERN_ERR "%s: %s: unknown ioctl: 0x%x\n",
 			       __FUNCTION__, tty->name, cmd);
 		}
 		ret = -ENOIOCTLCMD;
 		break;
 	}
-	return(ret);
+	return ret;
 }
 
-static irqreturn_t line_write_interrupt(int irq, void *data,
-					struct pt_regs *unused)
+void line_throttle(struct tty_struct *tty)
 {
-	struct tty_struct *tty = data;
 	struct line *line = tty->driver_data;
+
+	deactivate_chan(&line->chan_list, line->driver->read_irq);
+	line->throttled = 1;
+}
+
+void line_unthrottle(struct tty_struct *tty)
+{
+	struct line *line = tty->driver_data;
+
+	line->throttled = 0;
+	chan_interrupt(&line->chan_list, &line->task, tty,
+		       line->driver->read_irq);
+
+	/*
+	 * Maybe there is enough stuff pending that calling the interrupt
+	 * throttles us again.  In this case, line->throttled will be 1
+	 * again and we shouldn't turn the interrupt back on.
+	 */
+	if (!line->throttled)
+		reactivate_chan(&line->chan_list, line->driver->read_irq);
+}
+
+static irqreturn_t line_write_interrupt(int irq, void *data)
+{
+	struct chan *chan = data;
+	struct line *line = chan->line;
+	struct tty_struct *tty = line->tty;
 	int err;
 
+	/*
+	 * Interrupts are disabled here because we registered the interrupt with
+	 * IRQF_DISABLED (see line_setup_irq).
+	 */
+
+	spin_lock(&line->lock);
 	err = flush_buffer(line);
-	if(err == 0)
-		return(IRQ_NONE);
-	else if(err < 0){
+	if (err == 0) {
+		return IRQ_NONE;
+	} else if (err < 0) {
 		line->head = line->buffer;
 		line->tail = line->buffer;
 	}
+	spin_unlock(&line->lock);
 
-	if(tty == NULL)
-		return(IRQ_NONE);
+	if (tty == NULL)
+		return IRQ_NONE;
 
-	if(test_bit(TTY_DO_WRITE_WAKEUP, &tty->flags) &&
+	if (test_bit(TTY_DO_WRITE_WAKEUP, &tty->flags) &&
 	   (tty->ldisc.write_wakeup != NULL))
 		(tty->ldisc.write_wakeup)(tty);
-	
-	/* BLOCKING mode
+
+	/*
+	 * BLOCKING mode
 	 * In blocking mode, everything sleeps on tty->write_wait.
 	 * Sleeping in the console driver would break non-blocking
 	 * writes.
 	 */
 
-	if(waitqueue_active(&tty->write_wait))
+	if (waitqueue_active(&tty->write_wait))
 		wake_up_interruptible(&tty->write_wait);
-	return(IRQ_HANDLED);
+	return IRQ_HANDLED;
 }
 
-int line_setup_irq(int fd, int input, int output, struct tty_struct *tty)
+int line_setup_irq(int fd, int input, int output, struct line *line, void *data)
 {
-	struct line *line = tty->driver_data;
-	struct line_driver *driver = line->driver;
-	int err = 0, flags = SA_INTERRUPT | SA_SHIRQ | SA_SAMPLE_RANDOM;
+	const struct line_driver *driver = line->driver;
+	int err = 0, flags = IRQF_DISABLED | IRQF_SHARED | IRQF_SAMPLE_RANDOM;
 
-	if(input) err = um_request_irq(driver->read_irq, fd, IRQ_READ, 
-				       line_interrupt, flags, 
-				       driver->read_irq_name, tty);
-	if(err) return(err);
-	if(output) err = um_request_irq(driver->write_irq, fd, IRQ_WRITE, 
-					line_write_interrupt, flags, 
-					driver->write_irq_name, tty);
+	if (input)
+		err = um_request_irq(driver->read_irq, fd, IRQ_READ,
+				       line_interrupt, flags,
+				       driver->read_irq_name, data);
+	if (err)
+		return err;
+	if (output)
+		err = um_request_irq(driver->write_irq, fd, IRQ_WRITE,
+					line_write_interrupt, flags,
+					driver->write_irq_name, data);
 	line->have_irq = 1;
-	return(err);
+	return err;
 }
 
-void line_disable(struct tty_struct *tty, int current_irq)
+/*
+ * Normally, a driver like this can rely mostly on the tty layer
+ * locking, particularly when it comes to the driver structure.
+ * However, in this case, mconsole requests can come in "from the
+ * side", and race with opens and closes.
+ *
+ * mconsole config requests will want to be sure the device isn't in
+ * use, and get_config, open, and close will want a stable
+ * configuration.  The checking and modification of the configuration
+ * is done under a spinlock.  Checking whether the device is in use is
+ * line->tty->count > 1, also under the spinlock.
+ *
+ * tty->count serves to decide whether the device should be enabled or
+ * disabled on the host.  If it's equal to 1, then we are doing the
+ * first open or last close.  Otherwise, open and close just return.
+ */
+
+int line_open(struct line *lines, struct tty_struct *tty)
 {
-	struct line *line = tty->driver_data;
+	struct line *line = &lines[tty->index];
+	int err = -ENODEV;
 
-	if(!line->have_irq)
-		return;
+	spin_lock(&line->count_lock);
+	if (!line->valid)
+		goto out_unlock;
 
-	if(line->driver->read_irq == current_irq)
-		free_irq_later(line->driver->read_irq, tty);
-	else {
-		free_irq_by_irq_and_dev(line->driver->read_irq, tty);
-		free_irq(line->driver->read_irq, tty);
-	}
+	err = 0;
+	if (tty->count > 1)
+		goto out_unlock;
 
-	if(line->driver->write_irq == current_irq)
-		free_irq_later(line->driver->write_irq, tty);
-	else {
-		free_irq_by_irq_and_dev(line->driver->write_irq, tty);
-		free_irq(line->driver->write_irq, tty);
-	}
+	spin_unlock(&line->count_lock);
 
-	line->have_irq = 0;
-}
-
-int line_open(struct line *lines, struct tty_struct *tty,
-	      struct chan_opts *opts)
-{
-	struct line *line;
-	int err = 0;
-
-	line = &lines[tty->index];
 	tty->driver_data = line;
+	line->tty = tty;
 
-	down(&line->sem);
-	if (tty->count == 1) {
-		if (!line->valid) {
-			err = -ENODEV;
-			goto out;
-		}
-		if (list_empty(&line->chan_list)) {
-			err = parse_chan_pair(line->init_str, &line->chan_list,
-					      line->init_pri, tty->index, opts);
-			if(err) goto out;
-			err = open_chan(&line->chan_list);
-			if(err) goto out;
-		}
-		enable_chan(&line->chan_list, tty);
-		INIT_WORK(&line->task, line_timer_cb, tty);
-	}
+	err = enable_chan(line);
+	if (err)
+		return err;
 
-	if(!line->sigio){
+	INIT_DELAYED_WORK(&line->task, line_timer_cb);
+
+	if (!line->sigio) {
 		chan_enable_winch(&line->chan_list, tty);
 		line->sigio = 1;
 	}
+
 	chan_window_size(&line->chan_list, &tty->winsize.ws_row,
 			 &tty->winsize.ws_col);
-	line->count++;
 
-out:
-	up(&line->sem);
-	return(err);
+	return err;
+
+out_unlock:
+	spin_unlock(&line->count_lock);
+	return err;
 }
+
+static void unregister_winch(struct tty_struct *tty);
 
 void line_close(struct tty_struct *tty, struct file * filp)
 {
 	struct line *line = tty->driver_data;
 
-	down(&line->sem);
-	line->count--;
-	if (tty->count == 1) {
-		line_disable(tty, -1);
-		tty->driver_data = NULL;
+	/*
+	 * If line_open fails (and tty->driver_data is never set),
+	 * tty_open will call line_close.  So just return in this case.
+	 */
+	if (line == NULL)
+		return;
+
+	/* We ignore the error anyway! */
+	flush_buffer(line);
+
+	spin_lock(&line->count_lock);
+	if (!line->valid)
+		goto out_unlock;
+
+	if (tty->count > 1)
+		goto out_unlock;
+
+	spin_unlock(&line->count_lock);
+
+	line->tty = NULL;
+	tty->driver_data = NULL;
+
+	if (line->sigio) {
+		unregister_winch(tty);
+		line->sigio = 0;
 	}
-	up(&line->sem);
+
+	return;
+
+out_unlock:
+	spin_unlock(&line->count_lock);
 }
 
 void close_lines(struct line *lines, int nlines)
@@ -384,77 +511,113 @@ void close_lines(struct line *lines, int nlines)
 	int i;
 
 	for(i = 0; i < nlines; i++)
-		close_chan(&lines[i].chan_list);
+		close_chan(&lines[i].chan_list, 0);
 }
 
-int line_setup(struct line *lines, int num, char *init, int all_allowed)
+static int setup_one_line(struct line *lines, int n, char *init, int init_prio,
+			  char **error_out)
 {
-	int i, n;
+	struct line *line = &lines[n];
+	int err = -EINVAL;
+
+	spin_lock(&line->count_lock);
+
+	if (line->tty != NULL) {
+		*error_out = "Device is already open";
+		goto out;
+	}
+
+	if (line->init_pri <= init_prio) {
+		line->init_pri = init_prio;
+		if (!strcmp(init, "none"))
+			line->valid = 0;
+		else {
+			line->init_str = init;
+			line->valid = 1;
+		}
+	}
+	err = 0;
+out:
+	spin_unlock(&line->count_lock);
+	return err;
+}
+
+/*
+ * Common setup code for both startup command line and mconsole initialization.
+ * @lines contains the array (of size @num) to modify;
+ * @init is the setup string;
+ * @error_out is an error string in the case of failure;
+ */
+
+int line_setup(struct line *lines, unsigned int num, char *init,
+	       char **error_out)
+{
+	int i, n, err;
 	char *end;
 
-	if(*init == '=') n = -1;
+	if (*init == '=') {
+		/*
+		 * We said con=/ssl= instead of con#=, so we are configuring all
+		 * consoles at once.
+		 */
+		n = -1;
+	}
 	else {
 		n = simple_strtoul(init, &end, 0);
-		if(*end != '='){
-			printk(KERN_ERR "line_setup failed to parse \"%s\"\n", 
-			       init);
-			return(0);
+		if (*end != '=') {
+			*error_out = "Couldn't parse device number";
+			return -EINVAL;
 		}
 		init = end;
 	}
 	init++;
-	if((n >= 0) && (n >= num)){
-		printk("line_setup - %d out of range ((0 ... %d) allowed)\n",
-		       n, num - 1);
-		return(0);
+
+	if (n >= (signed int) num) {
+		*error_out = "Device number out of range";
+		return -EINVAL;
 	}
-	else if (n >= 0){
-		if (lines[n].count > 0) {
-			printk("line_setup - device %d is open\n", n);
-			return(0);
-		}
-		if (lines[n].init_pri <= INIT_ONE){
-			lines[n].init_pri = INIT_ONE;
-			if (!strcmp(init, "none"))
-				lines[n].valid = 0;
-			else {
-				lines[n].init_str = init;
-				lines[n].valid = 1;
-			}	
-		}
-	}
-	else if(!all_allowed){
-		printk("line_setup - can't configure all devices from "
-		       "mconsole\n");
-		return(0);
+	else if (n >= 0) {
+		err = setup_one_line(lines, n, init, INIT_ONE, error_out);
+		if (err)
+			return err;
 	}
 	else {
-		for(i = 0; i < num; i++){
-			if(lines[i].init_pri <= INIT_ALL){
-				lines[i].init_pri = INIT_ALL;
-				if(!strcmp(init, "none")) lines[i].valid = 0;
-				else {
-					lines[i].init_str = init;
-					lines[i].valid = 1;
-				}
-			}
+		for(i = 0; i < num; i++) {
+			err = setup_one_line(lines, i, init, INIT_ALL,
+					     error_out);
+			if (err)
+				return err;
 		}
 	}
-	return(1);
+	return n == -1 ? num : n;
 }
 
-int line_config(struct line *lines, int num, char *str)
+int line_config(struct line *lines, unsigned int num, char *str,
+		const struct chan_opts *opts, char **error_out)
 {
-	char *new = uml_strdup(str);
+	struct line *line;
+	char *new;
+	int n;
 
-	if(new == NULL){
-		printk("line_config - uml_strdup failed\n");
-		return(-ENOMEM);
+	if (*str == '=') {
+		*error_out = "Can't configure all devices from mconsole";
+		return -EINVAL;
 	}
-	return(!line_setup(lines, num, new, 0));
+
+	new = kstrdup(str, GFP_KERNEL);
+	if (new == NULL) {
+		*error_out = "Failed to allocate memory";
+		return -ENOMEM;
+	}
+	n = line_setup(lines, num, new, error_out);
+	if (n < 0)
+		return n;
+
+	line = &lines[n];
+	return parse_chan_pair(line->init_str, line, n, opts, error_out);
 }
 
-int line_get_config(char *name, struct line *lines, int num, char *str, 
+int line_get_config(char *name, struct line *lines, unsigned int num, char *str,
 		    int size, char **error_out)
 {
 	struct line *line;
@@ -462,55 +625,59 @@ int line_get_config(char *name, struct line *lines, int num, char *str,
 	int dev, n = 0;
 
 	dev = simple_strtoul(name, &end, 0);
-	if((*end != '\0') || (end == name)){
+	if ((*end != '\0') || (end == name)) {
 		*error_out = "line_get_config failed to parse device number";
-		return(0);
+		return 0;
 	}
 
-	if((dev < 0) || (dev >= num)){
-		*error_out = "device number of of range";
-		return(0);
+	if ((dev < 0) || (dev >= num)) {
+		*error_out = "device number out of range";
+		return 0;
 	}
 
 	line = &lines[dev];
 
-	down(&line->sem);
-	if(!line->valid)
+	spin_lock(&line->count_lock);
+	if (!line->valid)
 		CONFIG_CHUNK(str, size, n, "none", 1);
-	else if(line->count == 0)
+	else if (line->tty == NULL)
 		CONFIG_CHUNK(str, size, n, line->init_str, 1);
 	else n = chan_config_string(&line->chan_list, str, size, error_out);
-	up(&line->sem);
+	spin_unlock(&line->count_lock);
 
-	return(n);
+	return n;
 }
 
-int line_remove(struct line *lines, int num, char *str)
+int line_id(char **str, int *start_out, int *end_out)
 {
+	char *end;
+	int n;
+
+	n = simple_strtoul(*str, &end, 0);
+	if ((*end != '\0') || (end == *str))
+		return -1;
+
+	*str = end;
+	*start_out = n;
+	*end_out = n;
+	return n;
+}
+
+int line_remove(struct line *lines, unsigned int num, int n, char **error_out)
+{
+	int err;
 	char config[sizeof("conxxxx=none\0")];
 
-	sprintf(config, "%s=none", str);
-	return(!line_setup(lines, num, config, 0));
+	sprintf(config, "%d=none", n);
+	err = line_setup(lines, num, config, error_out);
+	if (err >= 0)
+		err = 0;
+	return err;
 }
 
-int line_write_room(struct tty_struct *tty)
-{
-	struct line *dev = tty->driver_data;
-	int room;
-
-	if (tty->stopped)
-		return 0;
-	room = write_room(dev);
-	if (0 == room)
-		printk(KERN_DEBUG "%s: %s: no room left in buffer\n",
-		       __FUNCTION__,tty->name);
-	return room;
-}
-
-struct tty_driver *line_register_devfs(struct lines *set,
-			 struct line_driver *line_driver, 
-			 struct tty_operations *ops, struct line *lines,
-			 int nlines)
+struct tty_driver *register_lines(struct line_driver *line_driver,
+				  const struct tty_operations *ops,
+				  struct line *lines, int nlines)
 {
 	int i;
 	struct tty_driver *driver = alloc_tty_driver(nlines);
@@ -520,7 +687,6 @@ struct tty_driver *line_register_devfs(struct lines *set,
 
 	driver->driver_name = line_driver->name;
 	driver->name = line_driver->device_name;
-	driver->devfs_name = line_driver->devfs_name;
 	driver->major = line_driver->major;
 	driver->minor_start = line_driver->minor_start;
 	driver->type = line_driver->type;
@@ -530,14 +696,14 @@ struct tty_driver *line_register_devfs(struct lines *set,
 	tty_set_operations(driver, ops);
 
 	if (tty_register_driver(driver)) {
-		printk("%s: can't register %s driver\n",
-		       __FUNCTION__,line_driver->name);
+		printk(KERN_ERR "register_lines : can't register %s driver\n",
+		       line_driver->name);
 		put_tty_driver(driver);
 		return NULL;
 	}
 
-	for(i = 0; i < nlines; i++){
-		if(!lines[i].valid) 
+	for(i = 0; i < nlines; i++) {
+		if (!lines[i].valid)
 			tty_unregister_device(driver, i);
 	}
 
@@ -545,20 +711,30 @@ struct tty_driver *line_register_devfs(struct lines *set,
 	return driver;
 }
 
-void lines_init(struct line *lines, int nlines)
+static DEFINE_SPINLOCK(winch_handler_lock);
+static LIST_HEAD(winch_handlers);
+
+void lines_init(struct line *lines, int nlines, struct chan_opts *opts)
 {
 	struct line *line;
+	char *error;
 	int i;
 
-	for(i = 0; i < nlines; i++){
+	for(i = 0; i < nlines; i++) {
 		line = &lines[i];
 		INIT_LIST_HEAD(&line->chan_list);
-		sema_init(&line->sem, 1);
-		if(line->init_str != NULL){
-			line->init_str = uml_strdup(line->init_str);
-			if(line->init_str == NULL)
-				printk("lines_init - uml_strdup returned "
-				       "NULL\n");
+
+		if (line->init_str == NULL)
+			continue;
+
+		line->init_str = kstrdup(line->init_str, GFP_KERNEL);
+		if (line->init_str == NULL)
+			printk(KERN_ERR "lines_init - kstrdup returned NULL\n");
+
+		if (parse_chan_pair(line->init_str, line, i, opts, &error)) {
+			printk(KERN_ERR "parse_chan_pair failed for "
+			       "device %d : %s\n", i, error);
+			line->valid = 0;
 		}
 	}
 }
@@ -569,9 +745,25 @@ struct winch {
 	int tty_fd;
 	int pid;
 	struct tty_struct *tty;
+	unsigned long stack;
 };
 
-irqreturn_t winch_interrupt(int irq, void *data, struct pt_regs *unused)
+static void free_winch(struct winch *winch, int free_irq_ok)
+{
+	list_del(&winch->list);
+
+	if (winch->pid != -1)
+		os_kill_process(winch->pid, 1);
+	if (winch->fd != -1)
+		os_close_file(winch->fd);
+	if (winch->stack != 0)
+		free_stack(winch->stack, 0);
+	if (free_irq_ok)
+		free_irq(WINCH_IRQ, winch);
+	kfree(winch);
+}
+
+static irqreturn_t winch_interrupt(int irq, void *data)
 {
 	struct winch *winch = data;
 	struct tty_struct *tty;
@@ -579,74 +771,104 @@ irqreturn_t winch_interrupt(int irq, void *data, struct pt_regs *unused)
 	int err;
 	char c;
 
-	if(winch->fd != -1){
+	if (winch->fd != -1) {
 		err = generic_read(winch->fd, &c, NULL);
-		if(err < 0){
-			if(err != -EAGAIN){
-				printk("winch_interrupt : read failed, "
-				       "errno = %d\n", -err);
-				printk("fd %d is losing SIGWINCH support\n",
-				       winch->tty_fd);
-				return(IRQ_HANDLED);
+		if (err < 0) {
+			if (err != -EAGAIN) {
+				printk(KERN_ERR "winch_interrupt : "
+				       "read failed, errno = %d\n", -err);
+				printk(KERN_ERR "fd %d is losing SIGWINCH "
+				       "support\n", winch->tty_fd);
+				free_winch(winch, 0);
+				return IRQ_HANDLED;
 			}
 			goto out;
 		}
 	}
-	tty  = winch->tty;
+	tty = winch->tty;
 	if (tty != NULL) {
 		line = tty->driver_data;
-		chan_window_size(&line->chan_list,
-				 &tty->winsize.ws_row, 
+		chan_window_size(&line->chan_list, &tty->winsize.ws_row,
 				 &tty->winsize.ws_col);
-		kill_pg(tty->pgrp, SIGWINCH, 1);
+		kill_pgrp(tty->pgrp, SIGWINCH, 1);
 	}
  out:
-	if(winch->fd != -1)
+	if (winch->fd != -1)
 		reactivate_fd(winch->fd, WINCH_IRQ);
-	return(IRQ_HANDLED);
+	return IRQ_HANDLED;
 }
 
-DECLARE_MUTEX(winch_handler_sem);
-LIST_HEAD(winch_handlers);
-
-void register_winch_irq(int fd, int tty_fd, int pid, struct tty_struct *tty)
+void register_winch_irq(int fd, int tty_fd, int pid, struct tty_struct *tty,
+			unsigned long stack)
 {
 	struct winch *winch;
 
-	down(&winch_handler_sem);
 	winch = kmalloc(sizeof(*winch), GFP_KERNEL);
 	if (winch == NULL) {
-		printk("register_winch_irq - kmalloc failed\n");
-		goto out;
+		printk(KERN_ERR "register_winch_irq - kmalloc failed\n");
+		goto cleanup;
 	}
+
 	*winch = ((struct winch) { .list  	= LIST_HEAD_INIT(winch->list),
 				   .fd  	= fd,
 				   .tty_fd 	= tty_fd,
 				   .pid  	= pid,
-				   .tty 	= tty });
+				   .tty 	= tty,
+				   .stack	= stack });
+
+	if (um_request_irq(WINCH_IRQ, fd, IRQ_READ, winch_interrupt,
+			   IRQF_DISABLED | IRQF_SHARED | IRQF_SAMPLE_RANDOM,
+			   "winch", winch) < 0) {
+		printk(KERN_ERR "register_winch_irq - failed to register "
+		       "IRQ\n");
+		goto out_free;
+	}
+
+	spin_lock(&winch_handler_lock);
 	list_add(&winch->list, &winch_handlers);
-	if(um_request_irq(WINCH_IRQ, fd, IRQ_READ, winch_interrupt, 
-			  SA_INTERRUPT | SA_SHIRQ | SA_SAMPLE_RANDOM, 
-			  "winch", winch) < 0)
-		printk("register_winch_irq - failed to register IRQ\n");
- out:
-	up(&winch_handler_sem);
+	spin_unlock(&winch_handler_lock);
+
+	return;
+
+ out_free:
+	kfree(winch);
+ cleanup:
+	os_kill_process(pid, 1);
+	os_close_file(fd);
+	if (stack != 0)
+		free_stack(stack, 0);
 }
 
-static void winch_cleanup(void)
+static void unregister_winch(struct tty_struct *tty)
 {
 	struct list_head *ele;
 	struct winch *winch;
 
-	list_for_each(ele, &winch_handlers){
+	spin_lock(&winch_handler_lock);
+
+	list_for_each(ele, &winch_handlers) {
 		winch = list_entry(ele, struct winch, list);
-		if(winch->fd != -1){
-			deactivate_fd(winch->fd, WINCH_IRQ);
-			os_close_file(winch->fd);
+		if (winch->tty == tty) {
+			free_winch(winch, 1);
+			break;
 		}
-		if(winch->pid != -1) 
-			os_kill_process(winch->pid, 1);
 	}
+	spin_unlock(&winch_handler_lock);
+}
+
+static void winch_cleanup(void)
+{
+	struct list_head *ele, *next;
+	struct winch *winch;
+
+	spin_lock(&winch_handler_lock);
+
+	list_for_each_safe(ele, next, &winch_handlers) {
+		winch = list_entry(ele, struct winch, list);
+		free_winch(winch, 1);
+	}
+
+	spin_unlock(&winch_handler_lock);
 }
 __uml_exitcall(winch_cleanup);
 
@@ -655,27 +877,17 @@ char *add_xterm_umid(char *base)
 	char *umid, *title;
 	int len;
 
-	umid = get_umid(1);
-	if(umid == NULL) return(base);
-	
+	umid = get_umid();
+	if (*umid == '\0')
+		return base;
+
 	len = strlen(base) + strlen(" ()") + strlen(umid) + 1;
 	title = kmalloc(len, GFP_KERNEL);
-	if(title == NULL){
-		printk("Failed to allocate buffer for xterm title\n");
-		return(base);
+	if (title == NULL) {
+		printk(KERN_ERR "Failed to allocate buffer for xterm title\n");
+		return base;
 	}
 
 	snprintf(title, len, "%s (%s)", base, umid);
-	return(title);
+	return title;
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

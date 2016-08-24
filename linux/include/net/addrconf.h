@@ -17,6 +17,8 @@
 
 #define IPV6_MAX_ADDRESSES		16
 
+#include <linux/in6.h>
+
 struct prefix_info {
 	__u8			type;
 	__u8			length;
@@ -33,9 +35,9 @@ struct prefix_info {
 #else
 #error "Please fix <asm/byteorder.h>"
 #endif
-	__u32			valid;
-	__u32			prefered;
-	__u32			reserved2;
+	__be32			valid;
+	__be32			prefered;
+	__be32			reserved2;
 
 	struct in6_addr		prefix;
 };
@@ -43,13 +45,13 @@ struct prefix_info {
 
 #ifdef __KERNEL__
 
-#include <linux/in6.h>
 #include <linux/netdevice.h>
 #include <net/if_inet6.h>
+#include <net/ipv6.h>
 
 #define IN6_ADDR_HSIZE		16
 
-extern void			addrconf_init(void);
+extern int			addrconf_init(void);
 extern void			addrconf_cleanup(void);
 
 extern int			addrconf_add_ifaddr(void __user *arg);
@@ -59,6 +61,9 @@ extern int			addrconf_set_dstaddr(void __user *arg);
 extern int			ipv6_chk_addr(struct in6_addr *addr,
 					      struct net_device *dev,
 					      int strict);
+#if defined(CONFIG_IPV6_MIP6) || defined(CONFIG_IPV6_MIP6_MODULE)
+extern int			ipv6_chk_home_addr(struct in6_addr *addr);
+#endif
 extern struct inet6_ifaddr *	ipv6_get_ifaddr(struct in6_addr *addr,
 						struct net_device *dev,
 						int strict);
@@ -68,7 +73,9 @@ extern int			ipv6_get_saddr(struct dst_entry *dst,
 extern int			ipv6_dev_get_saddr(struct net_device *dev, 
 					       struct in6_addr *daddr,
 					       struct in6_addr *saddr);
-extern int			ipv6_get_lladdr(struct net_device *dev, struct in6_addr *);
+extern int			ipv6_get_lladdr(struct net_device *dev,
+						struct in6_addr *addr,
+						unsigned char banned_flags);
 extern int			ipv6_rcv_saddr_equal(const struct sock *sk, 
 						      const struct sock *sk2);
 extern void			addrconf_join_solict(struct net_device *dev,
@@ -102,6 +109,8 @@ extern int ipv6_is_mld(struct sk_buff *skb, int nexthdr);
 
 extern void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len);
 
+extern int ipv6_get_hoplimit(struct net_device *dev);
+
 /*
  *	anycast prototypes (anycast.c)
  */
@@ -122,20 +131,18 @@ extern int unregister_inet6addr_notifier(struct notifier_block *nb);
 static inline struct inet6_dev *
 __in6_dev_get(struct net_device *dev)
 {
-	return (struct inet6_dev *)dev->ip6_ptr;
+	return rcu_dereference(dev->ip6_ptr);
 }
-
-extern rwlock_t addrconf_lock;
 
 static inline struct inet6_dev *
 in6_dev_get(struct net_device *dev)
 {
 	struct inet6_dev *idev = NULL;
-	read_lock(&addrconf_lock);
-	idev = dev->ip6_ptr;
+	rcu_read_lock();
+	idev = __in6_dev_get(dev);
 	if (idev)
 		atomic_inc(&idev->refcnt);
-	read_unlock(&addrconf_lock);
+	rcu_read_unlock();
 	return idev;
 }
 
@@ -178,7 +185,7 @@ static __inline__ u8 ipv6_addr_hash(const struct in6_addr *addr)
 	 * This will include the IEEE address token on links that support it.
 	 */
 
-	word = addr->s6_addr32[2] ^ addr->s6_addr32[3];
+	word = (__force u32)(addr->s6_addr32[2] ^ addr->s6_addr32[3]);
 	word ^= (word >> 16);
 	word ^= (word >> 8);
 
@@ -233,6 +240,11 @@ static inline int ipv6_addr_is_ll_all_routers(const struct in6_addr *addr)
 		addr->s6_addr32[2] == 0 &&
 		addr->s6_addr32[3] == htonl(0x00000002));
 }
+
+#ifdef CONFIG_PROC_FS
+extern int if6_proc_init(void);
+extern void if6_proc_exit(void);
+#endif
 
 #endif
 #endif

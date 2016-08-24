@@ -4,40 +4,70 @@
  *  Information structures for board-specific data
  *
  *  Copyright (C) 2004	Nokia Corporation
- *  Written by Juha Yrjölä <juha.yrjola@nokia.com>
+ *  Written by Juha YrjÃ¶lÃ¤ <juha.yrjola@nokia.com>
  */
 
 #ifndef _OMAP_BOARD_H
 #define _OMAP_BOARD_H
 
-#include <linux/config.h>
 #include <linux/types.h>
+
+#include <asm/arch/gpio-switch.h>
 
 /* Different peripheral ids */
 #define OMAP_TAG_CLOCK		0x4f01
 #define OMAP_TAG_MMC		0x4f02
-#define OMAP_TAG_UART		0x4f03
+#define OMAP_TAG_SERIAL_CONSOLE 0x4f03
 #define OMAP_TAG_USB		0x4f04
 #define OMAP_TAG_LCD		0x4f05
 #define OMAP_TAG_GPIO_SWITCH	0x4f06
+#define OMAP_TAG_UART		0x4f07
+#define OMAP_TAG_FBMEM		0x4f08
+#define OMAP_TAG_STI_CONSOLE	0x4f09
+#define OMAP_TAG_CAMERA_SENSOR	0x4f0a
 
 #define OMAP_TAG_BOOT_REASON    0x4f80
 #define OMAP_TAG_FLASH_PART	0x4f81
+#define OMAP_TAG_VERSION_STR	0x4f82
 
 struct omap_clock_config {
 	/* 0 for 12 MHz, 1 for 13 MHz and 2 for 19.2 MHz */
 	u8 system_clock_type;
 };
 
-struct omap_mmc_config {
-	u8 mmc_blocks;
-	s16 mmc1_power_pin, mmc2_power_pin;
-	s16 mmc1_switch_pin, mmc2_switch_pin;
+struct omap_mmc_conf {
+	unsigned enabled:1;
+	/* nomux means "standard" muxing is wrong on this board, and that
+	 * board-specific code handled it before common init logic.
+	 */
+	unsigned nomux:1;
+	/* switch pin can be for card detect (default) or card cover */
+	unsigned cover:1;
+	/* 4 wire signaling is optional, and is only used for SD/SDIO */
+	unsigned wire4:1;
+	s16 power_pin;
+	s16 switch_pin;
+	s16 wp_pin;
 };
 
-struct omap_uart_config {
+struct omap_mmc_config {
+	struct omap_mmc_conf mmc[2];
+};
+
+struct omap_serial_console_config {
 	u8 console_uart;
 	u32 console_speed;
+};
+
+struct omap_sti_console_config {
+	unsigned enable:1;
+	u8 channel;
+};
+
+struct omap_camera_sensor_config {
+	u16 reset_gpio;
+	int (*power_on)(void * data);
+	int (*power_off)(void * data);
 };
 
 struct omap_usb_config {
@@ -71,18 +101,31 @@ struct omap_usb_config {
 struct omap_lcd_config {
 	char panel_name[16];
 	char ctrl_name[16];
+	s16  nreset_gpio;
+	u8   data_lines;
 };
 
-/* Cover:
- *      high -> closed
- *      low  -> open
- * Connection:
- *      high -> connected
- *      low  -> disconnected
- */
-#define OMAP_GPIO_SWITCH_TYPE_COVER		0x0000
-#define OMAP_GPIO_SWITCH_TYPE_CONNECTION	0x0001
-#define OMAP_GPIO_SWITCH_FLAG_INVERTED          0x0001
+struct device;
+struct fb_info;
+struct omap_backlight_config {
+	int default_intensity;
+	int (*set_power)(struct device *dev, int state);
+	int (*check_fb)(struct fb_info *fb);
+};
+
+struct omap_fbmem_config {
+	u32 start;
+	u32 size;
+};
+
+struct omap_pwm_led_platform_data {
+	const char *name;
+	int intensity_timer;
+	int blink_timer;
+	void (*set_power)(struct omap_pwm_led_platform_data *self, int on_off);
+};
+
+/* See include/asm-arm/arch-omap/gpio-switch.h for definitions */
 struct omap_gpio_switch_config {
 	char name[12];
 	u16 gpio;
@@ -90,6 +133,12 @@ struct omap_gpio_switch_config {
 	int type:4;
 	int key_code:24; /* Linux key code */
 };
+
+struct omap_uart_config {
+	/* Bit field of UARTs present; bit 0 --> UART1 */
+	unsigned int enabled_uarts;
+};
+
 
 struct omap_flash_part_config {
 	char part_table[0];
@@ -99,6 +148,13 @@ struct omap_boot_reason_config {
 	char reason_str[12];
 };
 
+struct omap_version_config {
+	char component[12];
+	char version[12];
+};
+
+
+#include <asm-arm/arch-omap/board-nokia.h>
 
 struct omap_board_config_entry {
 	u16 tag;
@@ -122,5 +178,9 @@ extern const void *omap_get_var_config(u16 tag, size_t *len);
 
 extern struct omap_board_config_kernel *omap_board_config;
 extern int omap_board_config_size;
+
+
+/* for TI reference platforms sharing the same debug card */
+extern int debug_card_init(u32 addr, unsigned gpio);
 
 #endif

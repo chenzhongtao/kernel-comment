@@ -1,12 +1,11 @@
 /*
- *	linux/arch/alpha/kernel/machvec.h
+ *	linux/arch/alpha/kernel/machvec_impl.h
  *
  *	Copyright (C) 1997, 1998  Richard Henderson
  *
  * This file has goodies to help simplify instantiation of machine vectors.
  */
 
-#include <linux/config.h>
 #include <asm/pgalloc.h>
 
 /* Whee.  These systems don't have an HAE:
@@ -41,7 +40,7 @@
 #define CAT1(x,y)  x##y
 #define CAT(x,y)   CAT1(x,y)
 
-#define DO_DEFAULT_RTC rtc_port: 0x70
+#define DO_DEFAULT_RTC .rtc_port = 0x70
 
 #define DO_EV4_MMU							\
 	.max_asn =			EV4_MAX_ASN,			\
@@ -135,7 +134,7 @@
 #define __initmv __initdata
 #define ALIAS_MV(x)
 #else
-#define __initmv
+#define __initmv __initdata_refok
 
 /* GCC actually has a syntax for defining aliases, but is under some
    delusion that you shouldn't be able to declare it extern somewhere

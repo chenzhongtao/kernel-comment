@@ -25,26 +25,20 @@
 #ifndef __HCI_CORE_H
 #define __HCI_CORE_H
 
-#include <linux/proc_fs.h>
 #include <net/bluetooth/hci.h>
 
 /* HCI upper protocols */
 #define HCI_PROTO_L2CAP	0
 #define HCI_PROTO_SCO	1
 
-#define HCI_INIT_TIMEOUT (HZ * 10)
-
-extern struct proc_dir_entry *proc_bt_hci;
-
 /* HCI Core structures */
-
 struct inquiry_data {
 	bdaddr_t	bdaddr;
 	__u8		pscan_rep_mode;
 	__u8		pscan_period_mode;
 	__u8		pscan_mode;
 	__u8		dev_class[3];
-	__u16		clock_offset;
+	__le16		clock_offset;
 	__s8		rssi;
 };
 
@@ -77,12 +71,23 @@ struct hci_dev {
 	__u16		id;
 	__u8		type;
 	bdaddr_t	bdaddr;
+	__u8		dev_name[248];
+	__u8		dev_class[3];
 	__u8		features[8];
+	__u8		commands[64];
+	__u8		hci_ver;
+	__u16		hci_rev;
+	__u16		manufacturer;
 	__u16		voice_setting;
 
 	__u16		pkt_type;
+	__u16		esco_type;
 	__u16		link_policy;
 	__u16		link_mode;
+
+	__u32		idle_timeout;
+	__u16		sniff_min_interval;
+	__u16		sniff_max_interval;
 
 	unsigned long	quirks;
 
@@ -108,6 +113,7 @@ struct hci_dev {
 	struct sk_buff_head	cmd_q;
 
 	struct sk_buff		*sent_cmd;
+	struct sk_buff		*reassembly[3];
 
 	struct semaphore	req_lock;
 	wait_queue_head_t	req_wait_q;
@@ -126,11 +132,8 @@ struct hci_dev {
 
 	atomic_t 		promisc;
 
-#ifdef CONFIG_PROC_FS
-	struct proc_dir_entry	*proc;
-#endif
-
-	struct class_device	class_dev;
+	struct device		*parent;
+	struct device		dev;
 
 	struct module 		*owner;
 
@@ -152,18 +155,29 @@ struct hci_conn {
 	bdaddr_t	 dst;
 	__u16		 handle;
 	__u16		 state;
+	__u8             mode;
 	__u8		 type;
 	__u8		 out;
+	__u8		 attempt;
 	__u8		 dev_class[3];
+	__u8             features[8];
+	__u16            interval;
+	__u16            link_policy;
 	__u32		 link_mode;
+	__u8             power_save;
 	unsigned long	 pend;
-	
+
 	unsigned int	 sent;
-	
+
 	struct sk_buff_head data_q;
 
-	struct timer_list timer;
-	
+	struct timer_list disc_timer;
+	struct timer_list idle_timer;
+
+	struct work_struct work;
+
+	struct device	dev;
+
 	struct hci_dev	*hdev;
 	void		*l2cap_data;
 	void		*sco_data;
@@ -217,7 +231,9 @@ void hci_inquiry_cache_update(struct hci_dev *hdev, struct inquiry_data *data);
 /* ----- HCI Connections ----- */
 enum {
 	HCI_CONN_AUTH_PEND,
-	HCI_CONN_ENCRYPT_PEND
+	HCI_CONN_ENCRYPT_PEND,
+	HCI_CONN_RSWITCH_PEND,
+	HCI_CONN_MODE_CHANGE_PEND,
 };
 
 static inline void hci_conn_hash_init(struct hci_dev *hdev)
@@ -279,43 +295,61 @@ static inline struct hci_conn *hci_conn_hash_lookup_ba(struct hci_dev *hdev,
 	return NULL;
 }
 
+static inline struct hci_conn *hci_conn_hash_lookup_state(struct hci_dev *hdev,
+					__u8 type, __u16 state)
+{
+	struct hci_conn_hash *h = &hdev->conn_hash;
+	struct list_head *p;
+	struct hci_conn  *c;
+
+	list_for_each(p, &h->list) {
+		c = list_entry(p, struct hci_conn, list);
+		if (c->type == type && c->state == state)
+			return c;
+	}
+	return NULL;
+}
+
+void hci_acl_connect(struct hci_conn *conn);
 void hci_acl_disconn(struct hci_conn *conn, __u8 reason);
 void hci_add_sco(struct hci_conn *conn, __u16 handle);
+void hci_setup_sync(struct hci_conn *conn, __u16 handle);
 
 struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst);
-int    hci_conn_del(struct hci_conn *conn);
-void   hci_conn_hash_flush(struct hci_dev *hdev);
+int hci_conn_del(struct hci_conn *conn);
+void hci_conn_hash_flush(struct hci_dev *hdev);
+void hci_conn_check_pending(struct hci_dev *hdev);
 
 struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *src);
 int hci_conn_auth(struct hci_conn *conn);
 int hci_conn_encrypt(struct hci_conn *conn);
 int hci_conn_change_link_key(struct hci_conn *conn);
+int hci_conn_switch_role(struct hci_conn *conn, uint8_t role);
 
-static inline void hci_conn_set_timer(struct hci_conn *conn, unsigned long timeout)
-{
-	mod_timer(&conn->timer, jiffies + timeout);
-}
-
-static inline void hci_conn_del_timer(struct hci_conn *conn)
-{
-	del_timer(&conn->timer);
-}
+void hci_conn_enter_active_mode(struct hci_conn *conn);
+void hci_conn_enter_sniff_mode(struct hci_conn *conn);
 
 static inline void hci_conn_hold(struct hci_conn *conn)
 {
 	atomic_inc(&conn->refcnt);
-	hci_conn_del_timer(conn);
+	del_timer(&conn->disc_timer);
 }
 
 static inline void hci_conn_put(struct hci_conn *conn)
 {
 	if (atomic_dec_and_test(&conn->refcnt)) {
+		unsigned long timeo;
 		if (conn->type == ACL_LINK) {
-			unsigned long timeo = (conn->out) ?
-				HCI_DISCONN_TIMEOUT : HCI_DISCONN_TIMEOUT * 2;
-			hci_conn_set_timer(conn, timeo);
+			del_timer(&conn->idle_timer);
+			if (conn->state == BT_CONNECTED) {
+				timeo = msecs_to_jiffies(HCI_DISCONN_TIMEOUT);
+				if (!conn->out)
+					timeo *= 2;
+			} else
+				timeo = msecs_to_jiffies(10);
 		} else
-			hci_conn_set_timer(conn, HZ / 100);
+			timeo = msecs_to_jiffies(10);
+		mod_timer(&conn->disc_timer, jiffies + timeo);
 	}
 }
 
@@ -402,7 +436,7 @@ static inline int hci_recv_frame(struct sk_buff *skb)
 	bt_cb(skb)->incoming = 1;
 
 	/* Time stamp */
-	do_gettimeofday(&skb->stamp);
+	__net_timestamp(skb);
 
 	/* Queue frame for rx task */
 	skb_queue_tail(&hdev->rx_q, skb);
@@ -410,14 +444,21 @@ static inline int hci_recv_frame(struct sk_buff *skb)
 	return 0;
 }
 
+int hci_recv_fragment(struct hci_dev *hdev, int type, void *data, int count);
+
 int hci_register_sysfs(struct hci_dev *hdev);
 void hci_unregister_sysfs(struct hci_dev *hdev);
+void hci_conn_add_sysfs(struct hci_conn *conn);
+void hci_conn_del_sysfs(struct hci_conn *conn);
 
-#define SET_HCIDEV_DEV(hdev, pdev) ((hdev)->class_dev.dev = (pdev))
+#define SET_HCIDEV_DEV(hdev, pdev) ((hdev)->parent = (pdev))
 
 /* ----- LMP capabilities ----- */
-#define lmp_rswitch_capable(dev) (dev->features[0] & LMP_RSWITCH)
-#define lmp_encrypt_capable(dev) (dev->features[0] & LMP_ENCRYPT)
+#define lmp_rswitch_capable(dev)   ((dev)->features[0] & LMP_RSWITCH)
+#define lmp_encrypt_capable(dev)   ((dev)->features[0] & LMP_ENCRYPT)
+#define lmp_sniff_capable(dev)     ((dev)->features[0] & LMP_SNIFF)
+#define lmp_sniffsubr_capable(dev) ((dev)->features[5] & LMP_SNIFF_SUBR)
+#define lmp_esco_capable(dev)      ((dev)->features[3] & LMP_ESCO)
 
 /* ----- HCI protocols ----- */
 struct hci_proto {
@@ -515,6 +556,8 @@ struct hci_cb {
 
 	void (*auth_cfm)	(struct hci_conn *conn, __u8 status);
 	void (*encrypt_cfm)	(struct hci_conn *conn, __u8 status, __u8 encrypt);
+	void (*key_change_cfm)	(struct hci_conn *conn, __u8 status);
+	void (*role_switch_cfm)	(struct hci_conn *conn, __u8 status, __u8 role);
 };
 
 static inline void hci_auth_cfm(struct hci_conn *conn, __u8 status)
@@ -547,17 +590,43 @@ static inline void hci_encrypt_cfm(struct hci_conn *conn, __u8 status, __u8 encr
 	read_unlock_bh(&hci_cb_list_lock);
 }
 
+static inline void hci_key_change_cfm(struct hci_conn *conn, __u8 status)
+{
+	struct list_head *p;
+
+	read_lock_bh(&hci_cb_list_lock);
+	list_for_each(p, &hci_cb_list) {
+		struct hci_cb *cb = list_entry(p, struct hci_cb, list);
+		if (cb->key_change_cfm)
+			cb->key_change_cfm(conn, status);
+	}
+	read_unlock_bh(&hci_cb_list_lock);
+}
+
+static inline void hci_role_switch_cfm(struct hci_conn *conn, __u8 status, __u8 role)
+{
+	struct list_head *p;
+
+	read_lock_bh(&hci_cb_list_lock);
+	list_for_each(p, &hci_cb_list) {
+		struct hci_cb *cb = list_entry(p, struct hci_cb, list);
+		if (cb->role_switch_cfm)
+			cb->role_switch_cfm(conn, status, role);
+	}
+	read_unlock_bh(&hci_cb_list_lock);
+}
+
 int hci_register_cb(struct hci_cb *hcb);
 int hci_unregister_cb(struct hci_cb *hcb);
 
 int hci_register_notifier(struct notifier_block *nb);
 int hci_unregister_notifier(struct notifier_block *nb);
 
-int hci_send_cmd(struct hci_dev *hdev, __u16 ogf, __u16 ocf, __u32 plen, void *param);
+int hci_send_cmd(struct hci_dev *hdev, __u16 opcode, __u32 plen, void *param);
 int hci_send_acl(struct hci_conn *conn, struct sk_buff *skb, __u16 flags);
 int hci_send_sco(struct hci_conn *conn, struct sk_buff *skb);
 
-void *hci_sent_cmd_data(struct hci_dev *hdev, __u16 ogf, __u16 ocf);
+void *hci_sent_cmd_data(struct hci_dev *hdev, __u16 opcode);
 
 void hci_si_event(struct hci_dev *hdev, int type, int dlen, void *data);
 
@@ -565,8 +634,10 @@ void hci_si_event(struct hci_dev *hdev, int type, int dlen, void *data);
 void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb);
 
 /* HCI info for socket */
-#define hci_pi(sk)	((struct hci_pinfo *)sk->sk_protinfo)
+#define hci_pi(sk) ((struct hci_pinfo *) sk)
+
 struct hci_pinfo {
+	struct bt_sock    bt;
 	struct hci_dev    *hdev;
 	struct hci_filter filter;
 	__u32             cmsg_mask;

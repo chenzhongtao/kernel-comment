@@ -16,7 +16,6 @@
  * - move bus probe to a kernel thread
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -36,12 +35,12 @@
 #include <linux/spinlock.h>
 #include <linux/completion.h>
 #include <linux/device.h>
-#include <linux/devfs_fs_kernel.h>
 
 #include <asm/uaccess.h>
 #include <asm/semaphore.h>
 #ifdef CONFIG_PPC
 #include <asm/prom.h>
+#include <asm/machdep.h>
 #endif
 
 
@@ -77,10 +76,10 @@ static struct adb_driver *adb_driver_list[] = {
 	NULL
 };
 
-static struct class_simple *adb_dev_class;
+static struct class *adb_dev_class;
 
 struct adb_driver *adb_controller;
-struct notifier_block *adb_client_list = NULL;
+BLOCKING_NOTIFIER_HEAD(adb_client_list);
 static int adb_got_sleep;
 static int adb_inited;
 static pid_t adb_probe_task_pid;
@@ -90,8 +89,8 @@ static int sleepy_trackpad;
 static int autopoll_devs;
 int __adb_probe_sync;
 
-#ifdef CONFIG_PMAC_PBOOK
-static int adb_notify_sleep(struct pmu_sleep_notifier *self, int when);
+#ifdef CONFIG_PM_SLEEP
+static void adb_notify_sleep(struct pmu_sleep_notifier *self, int when);
 static struct pmu_sleep_notifier adb_sleep_notifier = {
 	adb_notify_sleep,
 	SLEEP_LEVEL_ADB,
@@ -104,7 +103,7 @@ static void adbdev_init(void);
 static int try_handler_change(int, int);
 
 static struct adb_handler {
-	void (*handler)(unsigned char *, int, struct pt_regs *, int);
+	void (*handler)(unsigned char *, int, int);
 	int original_address;
 	int handler_id;
 	int busy;
@@ -249,31 +248,25 @@ static int adb_scan_bus(void)
 static int
 adb_probe_task(void *x)
 {
-	sigset_t blocked;
-
 	strcpy(current->comm, "kadbprobe");
-
-	sigfillset(&blocked);
-	sigprocmask(SIG_BLOCK, &blocked, NULL);
-	flush_signals(current);
 
 	printk(KERN_INFO "adb: starting probe task...\n");
 	do_adb_reset_bus();
 	printk(KERN_INFO "adb: finished probe task...\n");
-	
+
 	adb_probe_task_pid = 0;
 	up(&adb_probe_mutex);
-	
+
 	return 0;
 }
 
 static void
-__adb_probe_task(void *data)
+__adb_probe_task(struct work_struct *bullshit)
 {
 	adb_probe_task_pid = kernel_thread(adb_probe_task, NULL, SIGCHLD | CLONE_KERNEL);
 }
 
-static DECLARE_WORK(adb_reset_work, __adb_probe_task, NULL);
+static DECLARE_WORK(adb_reset_work, __adb_probe_task);
 
 int
 adb_reset_bus(void)
@@ -294,7 +287,7 @@ int __init adb_init(void)
 	int i;
 
 #ifdef CONFIG_PPC32
-	if ( (_machine != _MACH_chrp) && (_machine != _MACH_Pmac) )
+	if (!machine_is(chrp) && !machine_is(powermac))
 		return 0;
 #endif
 #ifdef CONFIG_MAC
@@ -320,9 +313,9 @@ int __init adb_init(void)
 		printk(KERN_WARNING "Warning: no ADB interface detected\n");
 		adb_controller = NULL;
 	} else {
-#ifdef CONFIG_PMAC_PBOOK
+#ifdef CONFIG_PM_SLEEP
 		pmu_register_sleep_notifier(&adb_sleep_notifier);
-#endif /* CONFIG_PMAC_PBOOK */
+#endif /* CONFIG_PM */
 #ifdef CONFIG_PPC
 		if (machine_is_compatible("AAPL,PowerBook1998") ||
 			machine_is_compatible("PowerBook1,1"))
@@ -337,15 +330,13 @@ int __init adb_init(void)
 
 __initcall(adb_init);
 
-#ifdef CONFIG_PMAC_PBOOK
+#ifdef CONFIG_PM
 /*
  * notify clients before sleep and reset bus afterwards
  */
-int
+void
 adb_notify_sleep(struct pmu_sleep_notifier *self, int when)
 {
-	int ret;
-	
 	switch (when) {
 	case PBOOK_SLEEP_REQUEST:
 		adb_got_sleep = 1;
@@ -354,21 +345,8 @@ adb_notify_sleep(struct pmu_sleep_notifier *self, int when)
 		/* Stop autopoll */
 		if (adb_controller->autopoll)
 			adb_controller->autopoll(0);
-		ret = notifier_call_chain(&adb_client_list, ADB_MSG_POWERDOWN, NULL);
-		if (ret & NOTIFY_STOP_MASK) {
-			up(&adb_probe_mutex);
-			return PBOOK_SLEEP_REFUSE;
-		}
-		break;
-	case PBOOK_SLEEP_REJECT:
-		if (adb_got_sleep) {
-			adb_got_sleep = 0;
-			up(&adb_probe_mutex);
-			adb_reset_bus();
-		}
-		break;
-		
-	case PBOOK_SLEEP_NOW:
+		blocking_notifier_call_chain(&adb_client_list,
+			ADB_MSG_POWERDOWN, NULL);
 		break;
 	case PBOOK_WAKE:
 		adb_got_sleep = 0;
@@ -376,14 +354,13 @@ adb_notify_sleep(struct pmu_sleep_notifier *self, int when)
 		adb_reset_bus();
 		break;
 	}
-	return PBOOK_SLEEP_OK;
 }
-#endif /* CONFIG_PMAC_PBOOK */
+#endif /* CONFIG_PM */
 
 static int
 do_adb_reset_bus(void)
 {
-	int ret, nret;
+	int ret;
 	
 	if (adb_controller == NULL)
 		return -ENXIO;
@@ -391,12 +368,8 @@ do_adb_reset_bus(void)
 	if (adb_controller->autopoll)
 		adb_controller->autopoll(0);
 
-	nret = notifier_call_chain(&adb_client_list, ADB_MSG_PRE_RESET, NULL);
-	if (nret & NOTIFY_STOP_MASK) {
-		if (adb_controller->autopoll)
-			adb_controller->autopoll(autopoll_devs);
-		return -EBUSY;
-	}
+	blocking_notifier_call_chain(&adb_client_list,
+		ADB_MSG_PRE_RESET, NULL);
 
 	if (sleepy_trackpad) {
 		/* Let the trackpad settle down */
@@ -426,9 +399,8 @@ do_adb_reset_bus(void)
 	}
 	up(&adb_handler_sem);
 
-	nret = notifier_call_chain(&adb_client_list, ADB_MSG_POST_RESET, NULL);
-	if (nret & NOTIFY_STOP_MASK)
-		return -EBUSY;
+	blocking_notifier_call_chain(&adb_client_list,
+		ADB_MSG_POST_RESET, NULL);
 	
 	return ret;
 }
@@ -520,7 +492,7 @@ bail:
     the handler_id id it doesn't match. */
 int
 adb_register(int default_id, int handler_id, struct adb_ids *ids,
-	     void (*handler)(unsigned char *, int, struct pt_regs *, int))
+	     void (*handler)(unsigned char *, int, int))
 {
 	int i;
 
@@ -568,13 +540,13 @@ adb_unregister(int index)
 }
 
 void
-adb_input(unsigned char *buf, int nb, struct pt_regs *regs, int autopoll)
+adb_input(unsigned char *buf, int nb, int autopoll)
 {
 	int i, id;
 	static int dump_adb_input = 0;
 	unsigned long flags;
 	
-	void (*handler)(unsigned char *, int, struct pt_regs *, int);
+	void (*handler)(unsigned char *, int, int);
 
 	/* We skip keystrokes and mouse moves when the sleep process
 	 * has been started. We stop autopoll, but this is another security
@@ -595,7 +567,7 @@ adb_input(unsigned char *buf, int nb, struct pt_regs *regs, int autopoll)
 		adb_handler[id].busy = 1;
 	write_unlock_irqrestore(&adb_handler_lock, flags);
 	if (handler != NULL) {
-		(*handler)(buf, nb, regs, autopoll);
+		(*handler)(buf, nb, autopoll);
 		wmb();
 		adb_handler[id].busy = 0;
 	}
@@ -755,7 +727,7 @@ static int adb_release(struct inode *inode, struct file *file)
 static ssize_t adb_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	int ret;
+	int ret = 0;
 	struct adbdev_state *state = file->private_data;
 	struct adb_request *req;
 	wait_queue_t wait = __WAITQUEUE_INITIALIZER(wait,current);
@@ -765,9 +737,8 @@ static ssize_t adb_read(struct file *file, char __user *buf,
 		return -EINVAL;
 	if (count > sizeof(req->reply))
 		count = sizeof(req->reply);
-	ret = verify_area(VERIFY_WRITE, buf, count);
-	if (ret)
-		return ret;
+	if (!access_ok(VERIFY_WRITE, buf, count))
+		return -EFAULT;
 
 	req = NULL;
 	spin_lock_irqsave(&state->lock, flags);
@@ -824,11 +795,10 @@ static ssize_t adb_write(struct file *file, const char __user *buf,
 		return -EINVAL;
 	if (adb_controller == NULL)
 		return -ENXIO;
-	ret = verify_area(VERIFY_READ, buf, count);
-	if (ret)
-		return ret;
+	if (!access_ok(VERIFY_READ, buf, count))
+		return -EFAULT;
 
-	req = (struct adb_request *) kmalloc(sizeof(struct adb_request),
+	req = kmalloc(sizeof(struct adb_request),
 					     GFP_KERNEL);
 	if (req == NULL)
 		return -ENOMEM;
@@ -885,7 +855,7 @@ out:
 	return ret;
 }
 
-static struct file_operations adb_fops = {
+static const struct file_operations adb_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.read		= adb_read,
@@ -902,11 +872,8 @@ adbdev_init(void)
 		return;
 	}
 
-	devfs_mk_cdev(MKDEV(ADB_MAJOR, 0), S_IFCHR | S_IRUSR | S_IWUSR, "adb");
-
-	adb_dev_class = class_simple_create(THIS_MODULE, "adb");
-	if (IS_ERR(adb_dev_class)) {
+	adb_dev_class = class_create(THIS_MODULE, "adb");
+	if (IS_ERR(adb_dev_class))
 		return;
-	}
-	class_simple_device_add(adb_dev_class, MKDEV(ADB_MAJOR, 0), NULL, "adb");
+	class_device_create(adb_dev_class, NULL, MKDEV(ADB_MAJOR, 0), NULL, "adb");
 }

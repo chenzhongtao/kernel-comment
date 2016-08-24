@@ -29,24 +29,24 @@
 #include <asm/sibyte/sb1250_int.h>
 
 static void *mailbox_set_regs[] = {
-	(void *)IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_SET_CPU),
-	(void *)IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_SET_CPU)
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_SET_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_SET_CPU)
 };
 
 static void *mailbox_clear_regs[] = {
-	(void *)IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CLR_CPU),
-	(void *)IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CLR_CPU)
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CLR_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CLR_CPU)
 };
 
 static void *mailbox_regs[] = {
-	(void *)IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CPU),
-	(void *)IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CPU)
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CPU)
 };
 
 /*
  * SMP init and finish on secondary CPUs
  */
-void sb1250_smp_init(void)
+void __cpuinit sb1250_smp_init(void)
 {
 	unsigned int imask = STATUSF_IP4 | STATUSF_IP3 | STATUSF_IP2 |
 		STATUSF_IP1 | STATUSF_IP0;
@@ -55,10 +55,11 @@ void sb1250_smp_init(void)
 	change_c0_status(ST0_IM, imask);
 }
 
-void sb1250_smp_finish(void)
+void __cpuinit sb1250_smp_finish(void)
 {
-	extern void sb1250_time_init(void);
-	sb1250_time_init();
+	extern void sb1250_clockevent_init(void);
+
+	sb1250_clockevent_init();
 	local_irq_enable();
 }
 
@@ -73,20 +74,20 @@ void sb1250_smp_finish(void)
  */
 void core_send_ipi(int cpu, unsigned int action)
 {
-	bus_writeq((((u64)action) << 48), mailbox_set_regs[cpu]);
+	__raw_writeq((((u64)action) << 48), mailbox_set_regs[cpu]);
 }
 
-void sb1250_mailbox_interrupt(struct pt_regs *regs)
+void sb1250_mailbox_interrupt(void)
 {
 	int cpu = smp_processor_id();
 	unsigned int action;
 
 	kstat_this_cpu.irqs[K_INT_MBOX_0]++;
 	/* Load the mailbox register to figure out what we're supposed to do */
-	action = (__bus_readq(mailbox_regs[cpu]) >> 48) & 0xffff;
+	action = (____raw_readq(mailbox_regs[cpu]) >> 48) & 0xffff;
 
 	/* Clear the mailbox to clear the interrupt */
-	__bus_writeq(((u64)action) << 48, mailbox_clear_regs[cpu]);
+	____raw_writeq(((u64)action) << 48, mailbox_clear_regs[cpu]);
 
 	/*
 	 * Nothing to do for SMP_RESCHEDULE_YOURSELF; returning from the

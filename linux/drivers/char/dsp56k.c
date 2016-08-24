@@ -25,7 +25,6 @@
 
 #include <linux/module.h>
 #include <linux/slab.h>	/* for kmalloc() and kfree() */
-#include <linux/sched.h>	/* for struct wait_queue etc */
 #include <linux/major.h>
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -33,8 +32,6 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/init.h>
-#include <linux/devfs_fs_kernel.h>
-#include <linux/smp_lock.h>
 #include <linux/device.h>
 
 #include <asm/atarihw.h>
@@ -139,12 +136,12 @@ static int sizeof_bootstrap = 375;
 
 
 static struct dsp56k_device {
-	long in_use;
+	unsigned long in_use;
 	long maxio, timeout;
 	int tx_wsize, rx_wsize;
 } dsp56k;
 
-static struct class_simple *dsp56k_class;
+static struct class *dsp56k_class;
 
 static int dsp56k_reset(void)
 {
@@ -165,7 +162,7 @@ static int dsp56k_reset(void)
 	return 0;
 }
 
-static int dsp56k_upload(u_char *bin, int len)
+static int dsp56k_upload(u_char __user *bin, int len)
 {
 	int i;
 	u_char *p;
@@ -199,10 +196,10 @@ static int dsp56k_upload(u_char *bin, int len)
 	return 0;
 }
 
-static ssize_t dsp56k_read(struct file *file, char *buf, size_t count,
+static ssize_t dsp56k_read(struct file *file, char __user *buf, size_t count,
 			   loff_t *ppos)
 {
-	struct inode *inode = file->f_dentry->d_inode;
+	struct inode *inode = file->f_path.dentry->d_inode;
 	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
@@ -225,10 +222,10 @@ static ssize_t dsp56k_read(struct file *file, char *buf, size_t count,
 		}
 		case 2:  /* 16 bit */
 		{
-			short *data;
+			short __user *data;
 
 			count /= 2;
-			data = (short*) buf;
+			data = (short __user *) buf;
 			handshake(count, dsp56k.maxio, dsp56k.timeout, DSP56K_RECEIVE,
 				  put_user(dsp56k_host_interface.data.w[1], data+n++));
 			return 2*n;
@@ -244,10 +241,10 @@ static ssize_t dsp56k_read(struct file *file, char *buf, size_t count,
 		}
 		case 4:  /* 32 bit */
 		{
-			long *data;
+			long __user *data;
 
 			count /= 4;
-			data = (long*) buf;
+			data = (long __user *) buf;
 			handshake(count, dsp56k.maxio, dsp56k.timeout, DSP56K_RECEIVE,
 				  put_user(dsp56k_host_interface.data.l, data+n++));
 			return 4*n;
@@ -262,10 +259,10 @@ static ssize_t dsp56k_read(struct file *file, char *buf, size_t count,
 	}
 }
 
-static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
+static ssize_t dsp56k_write(struct file *file, const char __user *buf, size_t count,
 			    loff_t *ppos)
 {
-	struct inode *inode = file->f_dentry->d_inode;
+	struct inode *inode = file->f_path.dentry->d_inode;
 	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
@@ -287,10 +284,10 @@ static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
 		}
 		case 2:  /* 16 bit */
 		{
-			const short *data;
+			const short __user *data;
 
 			count /= 2;
-			data = (const short *)buf;
+			data = (const short __user *)buf;
 			handshake(count, dsp56k.maxio, dsp56k.timeout, DSP56K_TRANSMIT,
 				  get_user(dsp56k_host_interface.data.w[1], data+n++));
 			return 2*n;
@@ -306,10 +303,10 @@ static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
 		}
 		case 4:  /* 32 bit */
 		{
-			const long *data;
+			const long __user *data;
 
 			count /= 4;
-			data = (const long *)buf;
+			data = (const long __user *)buf;
 			handshake(count, dsp56k.maxio, dsp56k.timeout, DSP56K_TRANSMIT,
 				  get_user(dsp56k_host_interface.data.l, data+n++));
 			return 4*n;
@@ -328,6 +325,7 @@ static int dsp56k_ioctl(struct inode *inode, struct file *file,
 			unsigned int cmd, unsigned long arg)
 {
 	int dev = iminor(inode) & 0x0f;
+	void __user *argp = (void __user *)arg;
 
 	switch(dev)
 	{
@@ -336,9 +334,9 @@ static int dsp56k_ioctl(struct inode *inode, struct file *file,
 		switch(cmd) {
 		case DSP56K_UPLOAD:
 		{
-			char *bin;
+			char __user *bin;
 			int r, len;
-			struct dsp56k_upload *binary = (struct dsp56k_upload *) arg;
+			struct dsp56k_upload __user *binary = argp;
     
 			if(get_user(len, &binary->len) < 0)
 				return -EFAULT;
@@ -372,7 +370,7 @@ static int dsp56k_ioctl(struct inode *inode, struct file *file,
 		case DSP56K_HOST_FLAGS:
 		{
 			int dir, out, status;
-			struct dsp56k_host_flags *hf = (struct dsp56k_host_flags*) arg;
+			struct dsp56k_host_flags __user *hf = argp;
     
 			if(get_user(dir, &hf->dir) < 0)
 				return -EFAULT;
@@ -420,7 +418,7 @@ static int dsp56k_ioctl(struct inode *inode, struct file *file,
 #if 0
 static unsigned int dsp56k_poll(struct file *file, poll_table *wait)
 {
-	int dev = iminor(file->f_dentry->d_inode) & 0x0f;
+	int dev = iminor(file->f_path.dentry->d_inode) & 0x0f;
 
 	switch(dev)
 	{
@@ -483,7 +481,7 @@ static int dsp56k_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static struct file_operations dsp56k_fops = {
+static const struct file_operations dsp56k_fops = {
 	.owner		= THIS_MODULE,
 	.read		= dsp56k_read,
 	.write		= dsp56k_write,
@@ -510,24 +508,16 @@ static int __init dsp56k_init_driver(void)
 		printk("DSP56k driver: Unable to register driver\n");
 		return -ENODEV;
 	}
-	dsp56k_class = class_simple_create(THIS_MODULE, "dsp56k");
+	dsp56k_class = class_create(THIS_MODULE, "dsp56k");
 	if (IS_ERR(dsp56k_class)) {
 		err = PTR_ERR(dsp56k_class);
 		goto out_chrdev;
 	}
-	class_simple_device_add(dsp56k_class, MKDEV(DSP56K_MAJOR, 0), NULL, "dsp56k");
-
-	err = devfs_mk_cdev(MKDEV(DSP56K_MAJOR, 0),
-		      S_IFCHR | S_IRUSR | S_IWUSR, "dsp56k");
-	if(err)
-		goto out_class;
+	device_create(dsp56k_class, NULL, MKDEV(DSP56K_MAJOR, 0), "dsp56k");
 
 	printk(banner);
 	goto out;
 
-out_class:
-	class_simple_device_remove(MKDEV(DSP56K_MAJOR, 0));
-	class_simple_destroy(dsp56k_class);
 out_chrdev:
 	unregister_chrdev(DSP56K_MAJOR, "dsp56k");
 out:
@@ -537,10 +527,9 @@ module_init(dsp56k_init_driver);
 
 static void __exit dsp56k_cleanup_driver(void)
 {
-	class_simple_device_remove(MKDEV(DSP56K_MAJOR, 0));
-	class_simple_destroy(dsp56k_class);
+	device_destroy(dsp56k_class, MKDEV(DSP56K_MAJOR, 0));
+	class_destroy(dsp56k_class);
 	unregister_chrdev(DSP56K_MAJOR, "dsp56k");
-	devfs_remove("dsp56k");
 }
 module_exit(dsp56k_cleanup_driver);
 

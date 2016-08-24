@@ -1,4 +1,4 @@
-/* 
+/*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (C) 2000-2001 Qualcomm Incorporated
 
@@ -12,25 +12,23 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
 /* Bluetooth SCO sockets. */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/major.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
@@ -39,8 +37,7 @@
 #include <linux/interrupt.h>
 #include <linux/socket.h>
 #include <linux/skbuff.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
+#include <linux/device.h>
 #include <linux/list.h>
 #include <net/sock.h>
 
@@ -56,9 +53,9 @@
 #define BT_DBG(D...)
 #endif
 
-#define VERSION "0.4"
+#define VERSION "0.5"
 
-static struct proto_ops sco_sock_ops;
+static const struct proto_ops sco_sock_ops;
 
 static struct bt_sock_list sco_sk_list = {
 	.lock = RW_LOCK_UNLOCKED
@@ -111,17 +108,14 @@ static void sco_sock_init_timer(struct sock *sk)
 static struct sco_conn *sco_conn_add(struct hci_conn *hcon, __u8 status)
 {
 	struct hci_dev *hdev = hcon->hdev;
-	struct sco_conn *conn;
+	struct sco_conn *conn = hcon->sco_data;
 
-	if ((conn = hcon->sco_data))
+	if (conn || status)
 		return conn;
 
-	if (status)
-		return conn;
-
-	if (!(conn = kmalloc(sizeof(struct sco_conn), GFP_ATOMIC)))
+	conn = kzalloc(sizeof(struct sco_conn), GFP_ATOMIC);
+	if (!conn)
 		return NULL;
-	memset(conn, 0, sizeof(struct sco_conn));
 
 	spin_lock_init(&conn->lock);
 
@@ -137,6 +131,7 @@ static struct sco_conn *sco_conn_add(struct hci_conn *hcon, __u8 status)
 		conn->mtu = 60;
 
 	BT_DBG("hcon %p conn %p", hcon, conn);
+
 	return conn;
 }
 
@@ -154,7 +149,7 @@ static int sco_conn_del(struct hci_conn *hcon, int err)
 	struct sco_conn *conn;
 	struct sock *sk;
 
-	if (!(conn = hcon->sco_data)) 
+	if (!(conn = hcon->sco_data))
 		return 0;
 
 	BT_DBG("hcon %p conn %p, err %d", hcon, conn, err);
@@ -194,7 +189,7 @@ static int sco_connect(struct sock *sk)
 	struct sco_conn *conn;
 	struct hci_conn *hcon;
 	struct hci_dev  *hdev;
-	int err = 0;
+	int err, type;
 
 	BT_DBG("%s -> %s", batostr(src), batostr(dst));
 
@@ -205,7 +200,9 @@ static int sco_connect(struct sock *sk)
 
 	err = -ENOMEM;
 
-	hcon = hci_connect(hdev, SCO_LINK, dst);
+	type = lmp_esco_capable(hdev) ? ESCO_LINK : SCO_LINK;
+
+	hcon = hci_connect(hdev, type, dst);
 	if (!hcon)
 		goto done;
 
@@ -229,6 +226,7 @@ static int sco_connect(struct sock *sk)
 		sk->sk_state = BT_CONNECT;
 		sco_sock_set_timer(sk, sk->sk_sndtimeo);
 	}
+
 done:
 	hci_dev_unlock_bh(hdev);
 	hci_dev_put(hdev);
@@ -257,7 +255,7 @@ static inline int sco_send_frame(struct sock *sk, struct msghdr *msg, int len)
 	}
 
 	if ((err = hci_send_sco(conn->hcon, skb)) < 0)
-		goto fail;
+		return err;
 
 	return count;
 
@@ -334,9 +332,6 @@ static void sco_sock_destruct(struct sock *sk)
 
 	skb_queue_purge(&sk->sk_receive_queue);
 	skb_queue_purge(&sk->sk_write_queue);
-
-	if (sk->sk_protinfo)
-		kfree(sk->sk_protinfo);
 }
 
 static void sco_sock_cleanup_listen(struct sock *parent)
@@ -352,7 +347,7 @@ static void sco_sock_cleanup_listen(struct sock *parent)
 	}
 
 	parent->sk_state  = BT_CLOSED;
-	parent->sk_zapped = 1;
+	sock_set_flag(parent, SOCK_ZAPPED);
 }
 
 /* Kill socket (only if zapped and orphan)
@@ -360,7 +355,7 @@ static void sco_sock_cleanup_listen(struct sock *parent)
  */
 static void sco_sock_kill(struct sock *sk)
 {
-	if (!sk->sk_zapped || sk->sk_socket)
+	if (!sock_flag(sk, SOCK_ZAPPED) || sk->sk_socket)
 		return;
 
 	BT_DBG("sk %p state %d", sk, sk->sk_state);
@@ -399,9 +394,9 @@ static void sco_sock_close(struct sock *sk)
 		break;
 
 	default:
-		sk->sk_zapped = 1;
+		sock_set_flag(sk, SOCK_ZAPPED);
 		break;
-	};
+	}
 
 	release_sock(sk);
 
@@ -412,22 +407,33 @@ static void sco_sock_init(struct sock *sk, struct sock *parent)
 {
 	BT_DBG("sk %p", sk);
 
-	if (parent) 
+	if (parent)
 		sk->sk_type = parent->sk_type;
 }
 
-static struct sock *sco_sock_alloc(struct socket *sock, int proto, int prio)
+static struct proto sco_proto = {
+	.name		= "SCO",
+	.owner		= THIS_MODULE,
+	.obj_size	= sizeof(struct sco_pinfo)
+};
+
+static struct sock *sco_sock_alloc(struct net *net, struct socket *sock, int proto, gfp_t prio)
 {
 	struct sock *sk;
 
-	sk = bt_sock_alloc(sock, proto, sizeof(struct sco_pinfo), prio);
+	sk = sk_alloc(net, PF_BLUETOOTH, prio, &sco_proto);
 	if (!sk)
 		return NULL;
 
-	sk_set_owner(sk, THIS_MODULE);
+	sock_init_data(sock, sk);
+	INIT_LIST_HEAD(&bt_sk(sk)->accept_q);
 
 	sk->sk_destruct = sco_sock_destruct;
 	sk->sk_sndtimeo = SCO_CONN_TIMEOUT;
+
+	sock_reset_flag(sk, SOCK_ZAPPED);
+
+	sk->sk_protocol = proto;
 	sk->sk_state    = BT_OPEN;
 
 	sco_sock_init_timer(sk);
@@ -436,7 +442,7 @@ static struct sock *sco_sock_alloc(struct socket *sock, int proto, int prio)
 	return sk;
 }
 
-static int sco_sock_create(struct socket *sock, int protocol)
+static int sco_sock_create(struct net *net, struct socket *sock, int protocol)
 {
 	struct sock *sk;
 
@@ -449,7 +455,8 @@ static int sco_sock_create(struct socket *sock, int protocol)
 
 	sock->ops = &sco_sock_ops;
 
-	if (!(sk = sco_sock_alloc(sock, protocol, GFP_KERNEL)))
+	sk = sco_sock_alloc(net, sock, protocol, GFP_ATOMIC);
+	if (!sk)
 		return -ENOMEM;
 
 	sco_sock_init(sk, NULL);
@@ -518,7 +525,7 @@ static int sco_sock_connect(struct socket *sock, struct sockaddr *addr, int alen
 	if ((err = sco_connect(sk)))
 		goto done;
 
-	err = bt_sock_wait_state(sk, BT_CONNECTED, 
+	err = bt_sock_wait_state(sk, BT_CONNECTED,
 			sock_sndtimeo(sk, flags & O_NONBLOCK));
 
 done:
@@ -623,7 +630,7 @@ static int sco_sock_getname(struct socket *sock, struct sockaddr *addr, int *len
 	return 0;
 }
 
-static int sco_sock_sendmsg(struct kiocb *iocb, struct socket *sock, 
+static int sco_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 			    struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
@@ -631,8 +638,9 @@ static int sco_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 
 	BT_DBG("sock %p, sk %p", sock, sk);
 
-	if (sk->sk_err)
-		return sock_error(sk);
+	err = sock_error(sk);
+	if (err)
+		return err;
 
 	if (msg->msg_flags & MSG_OOB)
 		return -EOPNOTSUPP;
@@ -672,7 +680,7 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname, char
 	struct sock *sk = sock->sk;
 	struct sco_options opts;
 	struct sco_conninfo cinfo;
-	int len, err = 0; 
+	int len, err = 0;
 
 	BT_DBG("sk %p", sk);
 
@@ -756,7 +764,7 @@ static void __sco_chan_add(struct sco_conn *conn, struct sock *sk, struct sock *
 		bt_accept_enqueue(parent, sk);
 }
 
-/* Delete channel. 
+/* Delete channel.
  * Must be called on the locked socket. */
 static void sco_chan_del(struct sock *sk, int err)
 {
@@ -766,7 +774,7 @@ static void sco_chan_del(struct sock *sk, int err)
 
 	BT_DBG("sk %p, conn %p, err %d", sk, conn, err);
 
-	if (conn) { 
+	if (conn) {
 		sco_conn_lock(conn);
 		conn->sk = NULL;
 		sco_pi(sk)->conn = NULL;
@@ -778,7 +786,7 @@ static void sco_chan_del(struct sock *sk, int err)
 	sk->sk_err   = err;
 	sk->sk_state_change(sk);
 
-	sk->sk_zapped = 1;
+	sock_set_flag(sk, SOCK_ZAPPED);
 }
 
 static void sco_conn_ready(struct sco_conn *conn)
@@ -802,7 +810,7 @@ static void sco_conn_ready(struct sco_conn *conn)
 
 		bh_lock_sock(parent);
 
-		sk = sco_sock_alloc(NULL, BTPROTO_SCO, GFP_ATOMIC);
+		sk = sco_sock_alloc(parent->sk_net, NULL, BTPROTO_SCO, GFP_ATOMIC);
 		if (!sk) {
 			bh_unlock_sock(parent);
 			goto done;
@@ -841,7 +849,7 @@ static int sco_connect_cfm(struct hci_conn *hcon, __u8 status)
 {
 	BT_DBG("hcon %p bdaddr %s status %d", hcon, batostr(&hcon->dst), status);
 
-	if (hcon->type != SCO_LINK)
+	if (hcon->type != SCO_LINK && hcon->type != ESCO_LINK)
 		return 0;
 
 	if (!status) {
@@ -850,7 +858,7 @@ static int sco_connect_cfm(struct hci_conn *hcon, __u8 status)
 		conn = sco_conn_add(hcon, status);
 		if (conn)
 			sco_conn_ready(conn);
-	} else 
+	} else
 		sco_conn_del(hcon, bt_err(status));
 
 	return 0;
@@ -860,10 +868,11 @@ static int sco_disconn_ind(struct hci_conn *hcon, __u8 reason)
 {
 	BT_DBG("hcon %p reason %d", hcon, reason);
 
-	if (hcon->type != SCO_LINK)
+	if (hcon->type != SCO_LINK && hcon->type != ESCO_LINK)
 		return 0;
 
 	sco_conn_del(hcon, bt_err(reason));
+
 	return 0;
 }
 
@@ -882,97 +891,32 @@ static int sco_recv_scodata(struct hci_conn *hcon, struct sk_buff *skb)
 	}
 
 drop:
-	kfree_skb(skb);	
+	kfree_skb(skb);
 	return 0;
 }
 
-/* ---- Proc fs support ---- */
-#ifdef CONFIG_PROC_FS
-static void *sco_seq_start(struct seq_file *seq, loff_t *pos)
+static ssize_t sco_sysfs_show(struct class *dev, char *buf)
 {
 	struct sock *sk;
 	struct hlist_node *node;
-	loff_t l = *pos;
+	char *str = buf;
 
 	read_lock_bh(&sco_sk_list.lock);
 
-	sk_for_each(sk, node, &sco_sk_list.head)
-		if (!l--)
-			goto found;
-	sk = NULL;
-found:
-	return sk;
-}
+	sk_for_each(sk, node, &sco_sk_list.head) {
+		str += sprintf(str, "%s %s %d\n",
+				batostr(&bt_sk(sk)->src), batostr(&bt_sk(sk)->dst),
+				sk->sk_state);
+	}
 
-static void *sco_seq_next(struct seq_file *seq, void *e, loff_t *pos)
-{
-	struct sock *sk = e;
-	(*pos)++;
-	return sk_next(sk);
-}
-
-static void sco_seq_stop(struct seq_file *seq, void *e)
-{
 	read_unlock_bh(&sco_sk_list.lock);
+
+	return (str - buf);
 }
 
-static int  sco_seq_show(struct seq_file *seq, void *e)
-{
-	struct sock *sk = e;
-	seq_printf(seq, "%s %s %d\n",
-			batostr(&bt_sk(sk)->src), batostr(&bt_sk(sk)->dst), sk->sk_state);
-	return 0;
-}
+static CLASS_ATTR(sco, S_IRUGO, sco_sysfs_show, NULL);
 
-static struct seq_operations sco_seq_ops = {
-	.start	= sco_seq_start,
-	.next	= sco_seq_next,
-	.stop	= sco_seq_stop,
-	.show	= sco_seq_show 
-};
-
-static int sco_seq_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &sco_seq_ops);
-}
-
-static struct file_operations sco_seq_fops = {
-	.owner		= THIS_MODULE,
-	.open		= sco_seq_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
-static int __init sco_proc_init(void)
-{
-	struct proc_dir_entry *p = create_proc_entry("sco", S_IRUGO, proc_bt);
-	if (!p)
-		return -ENOMEM;
-	p->owner     = THIS_MODULE;
-	p->proc_fops = &sco_seq_fops;
-	return 0;
-}
-
-static void __exit sco_proc_cleanup(void)
-{
-	remove_proc_entry("sco", proc_bt);
-}
-
-#else /* CONFIG_PROC_FS */
-
-static int __init sco_proc_init(void)
-{
-	return 0;
-}
-
-static void __exit sco_proc_cleanup(void)
-{
-	return;
-}
-#endif /* CONFIG_PROC_FS */
-
-static struct proto_ops sco_sock_ops = {
+static const struct proto_ops sco_sock_ops = {
 	.family		= PF_BLUETOOTH,
 	.owner		= THIS_MODULE,
 	.release	= sco_sock_release,
@@ -1011,36 +955,47 @@ static int __init sco_init(void)
 {
 	int err;
 
-	if ((err = bt_sock_register(BTPROTO_SCO, &sco_sock_family_ops))) {
+	err = proto_register(&sco_proto, 0);
+	if (err < 0)
+		return err;
+
+	err = bt_sock_register(BTPROTO_SCO, &sco_sock_family_ops);
+	if (err < 0) {
 		BT_ERR("SCO socket registration failed");
-		return err;
+		goto error;
 	}
 
-	if ((err = hci_register_proto(&sco_hci_proto))) {
+	err = hci_register_proto(&sco_hci_proto);
+	if (err < 0) {
 		BT_ERR("SCO protocol registration failed");
-		return err;
+		bt_sock_unregister(BTPROTO_SCO);
+		goto error;
 	}
 
-	sco_proc_init();
+	if (class_create_file(bt_class, &class_attr_sco) < 0)
+		BT_ERR("Failed to create SCO info file");
 
 	BT_INFO("SCO (Voice Link) ver %s", VERSION);
 	BT_INFO("SCO socket layer initialized");
 
 	return 0;
+
+error:
+	proto_unregister(&sco_proto);
+	return err;
 }
 
 static void __exit sco_exit(void)
 {
-	int err;
+	class_remove_file(bt_class, &class_attr_sco);
 
-	sco_proc_cleanup();
+	if (bt_sock_unregister(BTPROTO_SCO) < 0)
+		BT_ERR("SCO socket unregistration failed");
 
-	/* Unregister socket, protocol and notifier */
-	if ((err = bt_sock_unregister(BTPROTO_SCO)))
-		BT_ERR("SCO socket unregistration failed. %d", err);
+	if (hci_unregister_proto(&sco_hci_proto) < 0)
+		BT_ERR("SCO protocol unregistration failed");
 
-	if ((err = hci_unregister_proto(&sco_hci_proto)))
-		BT_ERR("SCO protocol unregistration failed. %d", err);
+	proto_unregister(&sco_proto);
 }
 
 module_init(sco_init);

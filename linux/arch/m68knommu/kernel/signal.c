@@ -116,7 +116,7 @@ sys_sigaction(int sig, const struct old_sigaction *act,
 
 	if (act) {
 		old_sigset_t mask;
-		if (verify_area(VERIFY_READ, act, sizeof(*act)) ||
+		if (!access_ok(VERIFY_READ, act, sizeof(*act)) ||
 		    __get_user(new_ka.sa.sa_handler, &act->sa_handler) ||
 		    __get_user(new_ka.sa.sa_restorer, &act->sa_restorer))
 			return -EFAULT;
@@ -128,7 +128,7 @@ sys_sigaction(int sig, const struct old_sigaction *act,
 	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
 
 	if (!ret && oact) {
-		if (verify_area(VERIFY_WRITE, oact, sizeof(*oact)) ||
+		if (!access_ok(VERIFY_WRITE, oact, sizeof(*oact)) ||
 		    __put_user(old_ka.sa.sa_handler, &oact->sa_handler) ||
 		    __put_user(old_ka.sa.sa_restorer, &oact->sa_restorer))
 			return -EFAULT;
@@ -285,6 +285,7 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext *usc, void *fp,
 	regs->d1 = context.sc_d1;
 	regs->a0 = context.sc_a0;
 	regs->a1 = context.sc_a1;
+	((struct switch_stack *)regs - 1)->a5 = context.sc_a5;
 	regs->sr = (regs->sr & 0xff00) | (context.sc_sr & 0xff);
 	regs->pc = context.sc_pc;
 	regs->orig_d0 = -1;		/* disable syscall checks */
@@ -360,7 +361,7 @@ asmlinkage int do_sigreturn(unsigned long __unused)
 	sigset_t set;
 	int d0;
 
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
 	if (__get_user(set.sig[0], &frame->sc.sc_mask) ||
 	    (_NSIG_WORDS > 1 &&
@@ -392,7 +393,7 @@ asmlinkage int do_rt_sigreturn(unsigned long __unused)
 	sigset_t set;
 	int d0;
 
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;
@@ -498,6 +499,7 @@ static void setup_sigcontext(struct sigcontext *sc, struct pt_regs *regs,
 	sc->sc_d1 = regs->d1;
 	sc->sc_a0 = regs->a0;
 	sc->sc_a1 = regs->a1;
+	sc->sc_a5 = ((struct switch_stack *)regs - 1)->a5;
 	sc->sc_sr = regs->sr;
 	sc->sc_pc = regs->pc;
 	sc->sc_formatvec = regs->format << 12 | regs->vector;
@@ -551,7 +553,7 @@ get_sigframe(struct k_sigaction *ka, struct pt_regs *regs, size_t frame_size)
 
 	/* This is the X/Open sanctioned signal stack switching.  */
 	if (ka->sa.sa_flags & SA_ONSTACK) {
-		if (!on_sig_stack(usp))
+		if (!sas_ss_flags(usp))
 			usp = current->sas_ss_sp + current->sas_ss_size;
 	}
 	return (void *)((usp - frame_size) & -8UL);
@@ -597,13 +599,16 @@ static void setup_frame (int sig, struct k_sigaction *ka,
 	/* Set up registers for signal handler */
 	wrusp ((unsigned long) frame);
 	regs->pc = (unsigned long) ka->sa.sa_handler;
+	((struct switch_stack *)regs - 1)->a5 = current->mm->start_data;
+	regs->format = 0x4; /*set format byte to make stack appear modulo 4 
+						which it will be when doing the rte */
 
 adjust_stack:
 	/* Prepare to skip over the extra stuff in the exception frame.  */
 	if (regs->stkadj) {
 		struct pt_regs *tregs =
 			(struct pt_regs *)((ulong)regs + regs->stkadj);
-#if DEBUG
+#if defined(DEBUG)
 		printk(KERN_DEBUG "Performing stackadjust=%04x\n", regs->stkadj);
 #endif
 		/* This must be copied with decreasing addresses to
@@ -664,13 +669,16 @@ static void setup_rt_frame (int sig, struct k_sigaction *ka, siginfo_t *info,
 	/* Set up registers for signal handler */
 	wrusp ((unsigned long) frame);
 	regs->pc = (unsigned long) ka->sa.sa_handler;
+	((struct switch_stack *)regs - 1)->a5 = current->mm->start_data;
+	regs->format = 0x4; /*set format byte to make stack appear modulo 4 
+						which it will be when doing the rte */
 
 adjust_stack:
 	/* Prepare to skip over the extra stuff in the exception frame.  */
 	if (regs->stkadj) {
 		struct pt_regs *tregs =
 			(struct pt_regs *)((ulong)regs + regs->stkadj);
-#if DEBUG
+#if defined(DEBUG)
 		printk(KERN_DEBUG "Performing stackadjust=%04x\n", regs->stkadj);
 #endif
 		/* This must be copied with decreasing addresses to
@@ -732,13 +740,12 @@ handle_signal(int sig, struct k_sigaction *ka, siginfo_t *info,
 	if (ka->sa.sa_flags & SA_ONESHOT)
 		ka->sa.sa_handler = SIG_DFL;
 
-	if (!(ka->sa.sa_flags & SA_NODEFER)) {
-		spin_lock_irq(&current->sighand->siglock);
-		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	spin_lock_irq(&current->sighand->siglock);
+	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	if (!(ka->sa.sa_flags & SA_NODEFER))
 		sigaddset(&current->blocked,sig);
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 }
 
 /*
@@ -774,15 +781,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 	/* Did we come from a system call? */
 	if (regs->orig_d0 >= 0) {
 		/* Restart the system call - no handlers present */
-		if (regs->d0 == -ERESTARTNOHAND
-		    || regs->d0 == -ERESTARTSYS
-		    || regs->d0 == -ERESTARTNOINTR) {
-			regs->d0 = regs->orig_d0;
-			regs->pc -= 2;
-		} else if (regs->d0 == -ERESTART_RESTARTBLOCK) {
-			regs->d0 = __NR_restart_syscall;
-			regs->pc -= 2;
-		}
+		handle_restart(regs, NULL, 0);
 	}
 	return 0;
 }

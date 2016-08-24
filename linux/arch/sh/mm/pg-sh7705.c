@@ -45,13 +45,13 @@ static inline void __flush_purge_virtual_region(void *p1, void *virt, int size)
 
 		p = __pa(p1_begin);
 
-	        ways = cpu_data->dcache.ways;
+	        ways = current_cpu_data.dcache.ways;
 		addr = CACHE_OC_ADDRESS_ARRAY;
 
 		do {
 			unsigned long data;
 
-			addr |= (v & cpu_data->dcache.entry_mask);
+			addr |= (v & current_cpu_data.dcache.entry_mask);
 
 			data = ctrl_inl(addr);
 			if ((data & CACHE_PHYSADDR_MASK) ==
@@ -60,7 +60,7 @@ static inline void __flush_purge_virtual_region(void *p1, void *virt, int size)
 				ctrl_outl(data, addr);
 			}
 
-			addr += cpu_data->dcache.way_incr;
+			addr += current_cpu_data.dcache.way_incr;
 		} while (--ways);
 
 		p1_begin += L1_CACHE_BYTES;
@@ -117,11 +117,11 @@ void copy_user_page(void *to, void *from, unsigned long address, struct page *pg
  * For SH7705, we have our own implementation for ptep_get_and_clear
  * Copied from pg-sh4.c
  */
-inline pte_t ptep_get_and_clear(pte_t *ptep)
+inline pte_t ptep_get_and_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
 	pte_t pte = *ptep;
 
-	pte_clear(ptep);
+	pte_clear(mm, addr, ptep);
 	if (!pte_not_present(pte)) {
 		unsigned long pfn = pte_pfn(pte);
 		if (pfn_valid(pfn)) {

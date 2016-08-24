@@ -11,7 +11,6 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
@@ -171,8 +170,7 @@ static struct cb_pic_irq_init cb_pic_irq_inits[] = {
 	{ "CB_EXTTM2",       IRQ_CB_EXTTM2,       1, 1, 6 },
 	{ 0 }
 };
-#define NUM_CB_PIC_IRQ_INITS  \
-   ((sizeof cb_pic_irq_inits / sizeof cb_pic_irq_inits[0]) - 1)
+#define NUM_CB_PIC_IRQ_INITS (ARRAY_SIZE(cb_pic_irq_inits) - 1)
 
 static struct hw_interrupt_type cb_pic_hw_itypes[NUM_CB_PIC_IRQ_INITS];
 static unsigned char cb_pic_active_irqs = 0;
@@ -264,7 +262,7 @@ static unsigned cb_pic_startup_irq (unsigned irq)
 
 	if (cb_pic_active_irqs == 0) {
 		rval = request_irq (IRQ_CB_PIC, cb_pic_handle_irq,
-				    SA_INTERRUPT, "cb_pic_handler", 0);
+				    IRQF_DISABLED, "cb_pic_handler", 0);
 		if (rval != 0)
 			return rval;
 	}

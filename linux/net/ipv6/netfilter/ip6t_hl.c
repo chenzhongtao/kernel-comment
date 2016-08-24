@@ -1,80 +1,103 @@
-/* Hop Limit matching module */
-
-/* (C) 2001-2002 Maciej Soltysiak <solt@dns.toxicfilms.tv>
- * Based on HW's ttl module
+/*
+ * Hop Limit modification target for ip6tables
+ * Maciej Soltysiak <solt@dns.toxicfilms.tv>
+ * Based on HW's TTL module
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * This software is distributed under the terms of GNU GPL
  */
 
 #include <linux/module.h>
 #include <linux/skbuff.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
 
-#include <linux/netfilter_ipv6/ip6t_hl.h>
-#include <linux/netfilter_ipv6/ip6_tables.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter_ipv6/ip6t_HL.h>
 
 MODULE_AUTHOR("Maciej Soltysiak <solt@dns.toxicfilms.tv>");
-MODULE_DESCRIPTION("IP tables Hop Limit matching module");
+MODULE_DESCRIPTION("IP6 tables Hop Limit modification module");
 MODULE_LICENSE("GPL");
 
-static int match(const struct sk_buff *skb, const struct net_device *in,
-		 const struct net_device *out, const void *matchinfo,
-		 int offset, unsigned int protoff,
-		 int *hotdrop)
+static unsigned int ip6t_hl_target(struct sk_buff *skb,
+				   const struct net_device *in,
+				   const struct net_device *out,
+				   unsigned int hooknum,
+				   const struct xt_target *target,
+				   const void *targinfo)
 {
-	const struct ip6t_hl_info *info = matchinfo;
-	const struct ipv6hdr *ip6h = skb->nh.ipv6h;
+	struct ipv6hdr *ip6h;
+	const struct ip6t_HL_info *info = targinfo;
+	int new_hl;
+
+	if (!skb_make_writable(skb, skb->len))
+		return NF_DROP;
+
+	ip6h = ipv6_hdr(skb);
 
 	switch (info->mode) {
-		case IP6T_HL_EQ:
-			return (ip6h->hop_limit == info->hop_limit);
+		case IP6T_HL_SET:
+			new_hl = info->hop_limit;
 			break;
-		case IP6T_HL_NE:
-			return (!(ip6h->hop_limit == info->hop_limit));
+		case IP6T_HL_INC:
+			new_hl = ip6h->hop_limit + info->hop_limit;
+			if (new_hl > 255)
+				new_hl = 255;
 			break;
-		case IP6T_HL_LT:
-			return (ip6h->hop_limit < info->hop_limit);
-			break;
-		case IP6T_HL_GT:
-			return (ip6h->hop_limit > info->hop_limit);
+		case IP6T_HL_DEC:
+			new_hl = ip6h->hop_limit - info->hop_limit;
+			if (new_hl < 0)
+				new_hl = 0;
 			break;
 		default:
-			printk(KERN_WARNING "ip6t_hl: unknown mode %d\n", 
-				info->mode);
-			return 0;
+			new_hl = ip6h->hop_limit;
+			break;
 	}
 
-	return 0;
+	ip6h->hop_limit = new_hl;
+
+	return XT_CONTINUE;
 }
 
-static int checkentry(const char *tablename, const struct ip6t_ip6 *ip,
-		      void *matchinfo, unsigned int matchsize,
-		      unsigned int hook_mask)
+static bool ip6t_hl_checkentry(const char *tablename,
+		const void *entry,
+		const struct xt_target *target,
+		void *targinfo,
+		unsigned int hook_mask)
 {
-	if (matchsize != IP6T_ALIGN(sizeof(struct ip6t_hl_info)))
-		return 0;
+	const struct ip6t_HL_info *info = targinfo;
 
-	return 1;
+	if (info->mode > IP6T_HL_MAXMODE) {
+		printk(KERN_WARNING "ip6t_HL: invalid or unknown Mode %u\n",
+			info->mode);
+		return false;
+	}
+	if (info->mode != IP6T_HL_SET && info->hop_limit == 0) {
+		printk(KERN_WARNING "ip6t_HL: increment/decrement doesn't "
+			"make sense with value 0\n");
+		return false;
+	}
+	return true;
 }
 
-static struct ip6t_match hl_match = {
-	.name		= "hl",
-	.match		= &match,
-	.checkentry	= &checkentry,
-	.me		= THIS_MODULE,
+static struct xt_target ip6t_HL __read_mostly = {
+	.name 		= "HL",
+	.family		= AF_INET6,
+	.target		= ip6t_hl_target,
+	.targetsize	= sizeof(struct ip6t_HL_info),
+	.table		= "mangle",
+	.checkentry	= ip6t_hl_checkentry,
+	.me		= THIS_MODULE
 };
 
-static int __init init(void)
+static int __init ip6t_hl_init(void)
 {
-	return ip6t_register_match(&hl_match);
+	return xt_register_target(&ip6t_HL);
 }
 
-static void __exit fini(void)
+static void __exit ip6t_hl_fini(void)
 {
-	ip6t_unregister_match(&hl_match);
-
+	xt_unregister_target(&ip6t_HL);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ip6t_hl_init);
+module_exit(ip6t_hl_fini);

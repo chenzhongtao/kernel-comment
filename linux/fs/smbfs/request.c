@@ -6,10 +6,12 @@
  *  Please add a note about your changes to smbfs in the ChangeLog file.
  */
 
+#include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/net.h>
+#include <linux/sched.h>
 
 #include <linux/smb_fs.h>
 #include <linux/smbno.h>
@@ -22,10 +24,8 @@
 /* #define SMB_SLAB_DEBUG	(SLAB_RED_ZONE | SLAB_POISON) */
 #define SMB_SLAB_DEBUG	0
 
-#define ROUND_UP(x) (((x)+3) & ~3)
-
 /* cache for request structures */
-static kmem_cache_t *req_cachep;
+static struct kmem_cache *req_cachep;
 
 static int smb_request_send_req(struct smb_request *req);
 
@@ -40,7 +40,7 @@ int smb_init_request_cache(void)
 	req_cachep = kmem_cache_create("smb_request",
 				       sizeof(struct smb_request), 0,
 				       SMB_SLAB_DEBUG | SLAB_HWCACHE_ALIGN,
-				       NULL, NULL);
+				       NULL);
 	if (req_cachep == NULL)
 		return -ENOMEM;
 
@@ -49,8 +49,7 @@ int smb_init_request_cache(void)
 
 void smb_destroy_request_cache(void)
 {
-	if (kmem_cache_destroy(req_cachep))
-		printk(KERN_INFO "smb_destroy_request_cache: not all structures were freed\n");
+	kmem_cache_destroy(req_cachep);
 }
 
 /*
@@ -62,20 +61,19 @@ static struct smb_request *smb_do_alloc_request(struct smb_sb_info *server,
 	struct smb_request *req;
 	unsigned char *buf = NULL;
 
-	req = kmem_cache_alloc(req_cachep, SLAB_KERNEL);
+	req = kmem_cache_zalloc(req_cachep, GFP_KERNEL);
 	VERBOSE("allocating request: %p\n", req);
 	if (!req)
 		goto out;
 
 	if (bufsize > 0) {
-		buf = smb_kmalloc(bufsize, GFP_NOFS);
+		buf = kmalloc(bufsize, GFP_NOFS);
 		if (!buf) {
 			kmem_cache_free(req_cachep, req);
 			return NULL;
 		}
 	}
 
-	memset(req, 0, sizeof(struct smb_request));
 	req->rq_buffer = buf;
 	req->rq_bufsize = bufsize;
 	req->rq_server = server;
@@ -124,9 +122,8 @@ static void smb_free_request(struct smb_request *req)
 {
 	atomic_dec(&req->rq_server->nr_requests);
 	if (req->rq_buffer && !(req->rq_flags & SMB_REQ_STATIC))
-		smb_kfree(req->rq_buffer);
-	if (req->rq_trans2buffer)
-		smb_kfree(req->rq_trans2buffer);
+		kfree(req->rq_buffer);
+	kfree(req->rq_trans2buffer);
 	kmem_cache_free(req_cachep, req);
 }
 
@@ -183,8 +180,8 @@ static int smb_setup_request(struct smb_request *req)
 	req->rq_err = 0;
 	req->rq_errno = 0;
 	req->rq_fragment = 0;
-	if (req->rq_trans2buffer)
-		smb_kfree(req->rq_trans2buffer);
+	kfree(req->rq_trans2buffer);
+	req->rq_trans2buffer = NULL;
 
 	return 0;
 }
@@ -203,8 +200,8 @@ static int smb_setup_trans2request(struct smb_request *req)
 
 	const int smb_parameters = 15;
 	const int header = SMB_HEADER_LEN + 2 * smb_parameters + 2;
-	const int oparam = ROUND_UP(header + 3);
-	const int odata  = ROUND_UP(oparam + req->rq_lparm);
+	const int oparam = ALIGN(header + 3, sizeof(u32));
+	const int odata  = ALIGN(oparam + req->rq_lparm, sizeof(u32));
 	const int bcc = (req->rq_data ? odata + req->rq_ldata :
 					oparam + req->rq_lparm) - header;
 
@@ -341,9 +338,11 @@ int smb_add_request(struct smb_request *req)
 		/*
 		 * On timeout or on interrupt we want to try and remove the
 		 * request from the recvq/xmitq.
+		 * First check if the request is still part of a queue. (May
+		 * have been removed by some error condition)
 		 */
 		smb_lock_server(server);
-		if (!(req->rq_flags & SMB_REQ_RECEIVED)) {
+		if (!list_empty(&req->rq_queue)) {
 			list_del_init(&req->rq_queue);
 			smb_rput(req);
 		}
@@ -400,8 +399,7 @@ static int smb_request_send_req(struct smb_request *req)
 	if (!(req->rq_flags & SMB_REQ_TRANSMITTED))
 		goto out;
 
-	list_del_init(&req->rq_queue);
-	list_add_tail(&req->rq_queue, &server->recvq);
+	list_move_tail(&req->rq_queue, &server->recvq);
 	result = 1;
 out:
 	return result;
@@ -435,8 +433,7 @@ int smb_request_send_server(struct smb_sb_info *server)
 	result = smb_request_send_req(req);
 	if (result < 0) {
 		server->conn_error = result;
-		list_del_init(&req->rq_queue);
-		list_add(&req->rq_queue, &server->xmitq);
+		list_move(&req->rq_queue, &server->xmitq);
 		result = -EIO;
 		goto out;
 	}
@@ -647,10 +644,9 @@ static int smb_recv_trans2(struct smb_sb_info *server, struct smb_request *req)
 			goto out_too_long;
 
 		req->rq_trans2bufsize = buf_len;
-		req->rq_trans2buffer = smb_kmalloc(buf_len, GFP_NOFS);
+		req->rq_trans2buffer = kzalloc(buf_len, GFP_NOFS);
 		if (!req->rq_trans2buffer)
 			goto out_no_mem;
-		memset(req->rq_trans2buffer, 0, buf_len);
 
 		req->rq_parm = req->rq_trans2buffer;
 		req->rq_data = req->rq_trans2buffer + parm_tot;
@@ -786,8 +782,7 @@ int smb_request_recv(struct smb_sb_info *server)
 		/* We should never be called with any of these states */
 	case SMB_RECV_END:
 	case SMB_RECV_REQUEST:
-		server->rstate = SMB_RECV_END;
-		break;
+		BUG();
 	}
 
 	if (result < 0) {

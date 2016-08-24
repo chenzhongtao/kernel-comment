@@ -8,7 +8,6 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -166,9 +165,9 @@ found:
 //			&gayle_iops,
 			IRQ_AMIGA_PORTS);
 
-	index = ide_register_hw(&hw, &hwif);
+	index = ide_register_hw(&hw, NULL, 1, &hwif);
 	if (index != -1) {
-	    hwif->mmio = 2;
+	    hwif->mmio = 1;
 	    switch (i) {
 		case 0:
 		    printk("ide%d: Gayle IDE interface (A%d style)\n", index,

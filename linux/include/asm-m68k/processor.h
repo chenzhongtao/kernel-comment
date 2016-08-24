@@ -13,7 +13,7 @@
  */
 #define current_text_addr() ({ __label__ _l; _l: &&_l;})
 
-#include <linux/config.h>
+#include <linux/thread_info.h>
 #include <asm/segment.h>
 #include <asm/fpu.h>
 #include <asm/ptrace.h>
@@ -38,11 +38,7 @@ static inline void wrusp(unsigned long usp)
 #ifndef CONFIG_SUN3
 #define TASK_SIZE	(0xF0000000UL)
 #else
-#ifdef __ASSEMBLY__
-#define TASK_SIZE	(0x0E000000)
-#else
 #define TASK_SIZE	(0x0E000000UL)
-#endif
 #endif
 
 /* This decides where the kernel will search for a free chunk of vm
@@ -54,16 +50,6 @@ static inline void wrusp(unsigned long usp)
 #define TASK_UNMAPPED_BASE	0x0A000000UL
 #endif
 #define TASK_UNMAPPED_ALIGN(addr, off)	PAGE_ALIGN(addr)
-
-struct task_work {
-	unsigned char sigpending;
-	unsigned char notify_resume;	/* request for notification on
-					   userspace execution resumption */
-	char          need_resched;
-	unsigned char delayed_trace;	/* single step a syscall */
-	unsigned char syscall_trace;	/* count of syscall interceptors */
-	unsigned char pad[3];
-};
 
 struct thread_struct {
 	unsigned long  ksp;		/* kernel stack pointer */
@@ -77,14 +63,14 @@ struct thread_struct {
 	unsigned long  fp[8*3];
 	unsigned long  fpcntl[3];	/* fp control regs */
 	unsigned char  fpstate[FPSTATESIZE];  /* floating point state */
-	struct task_work work;
+	struct thread_info info;
 };
 
 #define INIT_THREAD  {							\
-	ksp:	sizeof(init_stack) + (unsigned long) init_stack,	\
-	sr:	PS_S,							\
-	fs:	__KERNEL_DS,						\
-	info:	INIT_THREAD_INFO(init_task)				\
+	.ksp	= sizeof(init_stack) + (unsigned long) init_stack,	\
+	.sr	= PS_S,							\
+	.fs	= __KERNEL_DS,						\
+	.info	= INIT_THREAD_INFO(init_task),				\
 }
 
 /*

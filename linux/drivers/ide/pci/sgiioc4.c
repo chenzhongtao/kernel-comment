@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2003-2006 Silicon Graphics, Inc.  All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License
@@ -12,11 +12,6 @@
  * You should have received a copy of the GNU General Public
  * License along with this program; if not, write the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information:  Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
  *
  * For further information regarding this notice, see:
  *
@@ -34,9 +29,13 @@
 #include <linux/mm.h>
 #include <linux/ioport.h>
 #include <linux/blkdev.h>
+#include <linux/scatterlist.h>
+#include <linux/ioc4.h>
 #include <asm/io.h>
 
 #include <linux/ide.h>
+
+#define DRV_NAME "SGIIOC4"
 
 /* IOC4 Specific Definitions */
 #define IOC4_CMD_OFFSET		0x100
@@ -114,24 +113,24 @@ sgiioc4_init_hwif_ports(hw_regs_t * hw, unsigned long data_port,
 static void
 sgiioc4_maskproc(ide_drive_t * drive, int mask)
 {
-	ide_hwif_t *hwif = HWIF(drive);
-	hwif->OUTB(mask ? (drive->ctl | 2) : (drive->ctl & ~2),
-		   IDE_CONTROL_REG);
+	writeb(mask ? (drive->ctl | 2) : (drive->ctl & ~2),
+	       (void __iomem *)IDE_CONTROL_REG);
 }
 
 
 static int
 sgiioc4_checkirq(ide_hwif_t * hwif)
 {
-	u8 intr_reg =
-	    hwif->INL(hwif->io_ports[IDE_IRQ_OFFSET] + IOC4_INTR_REG * 4);
+	unsigned long intr_addr =
+		hwif->io_ports[IDE_IRQ_OFFSET] + IOC4_INTR_REG * 4;
 
-	if (intr_reg & 0x03)
+	if ((u8)readl((void __iomem *)intr_addr) & 0x03)
 		return 1;
 
 	return 0;
 }
 
+static u8 sgiioc4_INB(unsigned long);
 
 static int
 sgiioc4_clearirq(ide_drive_t * drive)
@@ -142,21 +141,21 @@ sgiioc4_clearirq(ide_drive_t * drive)
 	    hwif->io_ports[IDE_IRQ_OFFSET] + (IOC4_INTR_REG << 2);
 
 	/* Code to check for PCI error conditions */
-	intr_reg = hwif->INL(other_ir);
+	intr_reg = readl((void __iomem *)other_ir);
 	if (intr_reg & 0x03) { /* Valid IOC4-IDE interrupt */
 		/*
-		 * Using hwif->INB to read the IDE_STATUS_REG has a side effect
+		 * Using sgiioc4_INB to read the IDE_STATUS_REG has a side effect
 		 * of clearing the interrupt.  The first read should clear it
 		 * if it is set.  The second read should return a "clear" status
 		 * if it got cleared.  If not, then spin for a bit trying to
 		 * clear it.
 		 */
-		u8 stat = hwif->INB(IDE_STATUS_REG);
+		u8 stat = sgiioc4_INB(IDE_STATUS_REG);
 		int count = 0;
-		stat = hwif->INB(IDE_STATUS_REG);
+		stat = sgiioc4_INB(IDE_STATUS_REG);
 		while ((stat & 0x80) && (count++ < 100)) {
 			udelay(1);
-			stat = hwif->INB(IDE_STATUS_REG);
+			stat = sgiioc4_INB(IDE_STATUS_REG);
 		}
 
 		if (intr_reg & 0x02) {
@@ -165,9 +164,9 @@ sgiioc4_clearirq(ide_drive_t * drive)
 			    pci_stat_cmd_reg;
 
 			pci_err_addr_low =
-				hwif->INL(hwif->io_ports[IDE_IRQ_OFFSET]);
+				readl((void __iomem *)hwif->io_ports[IDE_IRQ_OFFSET]);
 			pci_err_addr_high =
-				hwif->INL(hwif->io_ports[IDE_IRQ_OFFSET] + 4);
+				readl((void __iomem *)(hwif->io_ports[IDE_IRQ_OFFSET] + 4));
 			pci_read_config_dword(hwif->pci_dev, PCI_COMMAND,
 					      &pci_stat_cmd_reg);
 			printk(KERN_ERR
@@ -184,9 +183,9 @@ sgiioc4_clearirq(ide_drive_t * drive)
 		}
 
 		/* Clear the Interrupt, Error bits on the IOC4 */
-		hwif->OUTL(0x03, other_ir);
+		writel(0x03, (void __iomem *)other_ir);
 
-		intr_reg = hwif->INL(other_ir);
+		intr_reg = readl((void __iomem *)other_ir);
 	}
 
 	return intr_reg & 3;
@@ -195,23 +194,25 @@ sgiioc4_clearirq(ide_drive_t * drive)
 static void sgiioc4_ide_dma_start(ide_drive_t * drive)
 {
 	ide_hwif_t *hwif = HWIF(drive);
-	unsigned int reg = hwif->INL(hwif->dma_base + IOC4_DMA_CTRL * 4);
+	unsigned long ioc4_dma_addr = hwif->dma_base + IOC4_DMA_CTRL * 4;
+	unsigned int reg = readl((void __iomem *)ioc4_dma_addr);
 	unsigned int temp_reg = reg | IOC4_S_DMA_START;
 
-	hwif->OUTL(temp_reg, hwif->dma_base + IOC4_DMA_CTRL * 4);
+	writel(temp_reg, (void __iomem *)ioc4_dma_addr);
 }
 
 static u32
 sgiioc4_ide_dma_stop(ide_hwif_t *hwif, u64 dma_base)
 {
+	unsigned long ioc4_dma_addr = dma_base + IOC4_DMA_CTRL * 4;
 	u32	ioc4_dma;
 	int	count;
 
 	count = 0;
-	ioc4_dma = hwif->INL(dma_base + IOC4_DMA_CTRL * 4);
+	ioc4_dma = readl((void __iomem *)ioc4_dma_addr);
 	while ((ioc4_dma & IOC4_S_DMA_STOP) && (count++ < 200)) {
 		udelay(1);
-		ioc4_dma = hwif->INL(dma_base + IOC4_DMA_CTRL * 4);
+		ioc4_dma = readl((void __iomem *)ioc4_dma_addr);
 	}
 	return ioc4_dma;
 }
@@ -222,11 +223,11 @@ sgiioc4_ide_dma_end(ide_drive_t * drive)
 {
 	u32 ioc4_dma, bc_dev, bc_mem, num, valid = 0, cnt = 0;
 	ide_hwif_t *hwif = HWIF(drive);
-	u64 dma_base = hwif->dma_base;
+	unsigned long dma_base = hwif->dma_base;
 	int dma_stat = 0;
-	unsigned long *ending_dma = (unsigned long *) hwif->dma_base2;
+	unsigned long *ending_dma = ide_get_hwifdata(hwif);
 
-	hwif->OUTL(IOC4_S_DMA_STOP, dma_base + IOC4_DMA_CTRL * 4);
+	writel(IOC4_S_DMA_STOP, (void __iomem *)(dma_base + IOC4_DMA_CTRL * 4));
 
 	ioc4_dma = sgiioc4_ide_dma_stop(hwif, dma_base);
 
@@ -258,8 +259,8 @@ sgiioc4_ide_dma_end(ide_drive_t * drive)
 		dma_stat = 1;
 	}
 
-	bc_dev = hwif->INL(dma_base + IOC4_BC_DEV * 4);
-	bc_mem = hwif->INL(dma_base + IOC4_BC_MEM * 4);
+	bc_dev = readl((void __iomem *)(dma_base + IOC4_BC_DEV * 4));
+	bc_mem = readl((void __iomem *)(dma_base + IOC4_BC_MEM * 4));
 
 	if ((bc_dev & 0x01FF) || (bc_mem & 0x1FF)) {
 		if (bc_dev > bc_mem + 8) {
@@ -277,34 +278,22 @@ sgiioc4_ide_dma_end(ide_drive_t * drive)
 }
 
 static int
-sgiioc4_ide_dma_check(ide_drive_t * drive)
-{
-	if (ide_config_drive_speed(drive, XFER_MW_DMA_2) != 0) {
-		printk(KERN_INFO
-		       "Couldnot set %s in Multimode-2 DMA mode | "
-			   "Drive %s using PIO instead\n",
-		       drive->name, drive->name);
-		drive->using_dma = 0;
-	} else
-		drive->using_dma = 1;
-
-	return 0;
-}
-
-static int
 sgiioc4_ide_dma_on(ide_drive_t * drive)
 {
 	drive->using_dma = 1;
 
-	return HWIF(drive)->ide_dma_host_on(drive);
+	return 0;
 }
 
-static int
-sgiioc4_ide_dma_off_quietly(ide_drive_t * drive)
+static void sgiioc4_dma_off_quietly(ide_drive_t *drive)
 {
 	drive->using_dma = 0;
 
-	return HWIF(drive)->ide_dma_host_off(drive);
+	drive->hwif->dma_host_off(drive);
+}
+
+static void sgiioc4_set_dma_mode(ide_drive_t *drive, const u8 speed)
+{
 }
 
 /* returns 1 if dma irq issued, 0 otherwise */
@@ -314,29 +303,13 @@ sgiioc4_ide_dma_test_irq(ide_drive_t * drive)
 	return sgiioc4_checkirq(HWIF(drive));
 }
 
-static int
-sgiioc4_ide_dma_host_on(ide_drive_t * drive)
+static void sgiioc4_dma_host_on(ide_drive_t * drive)
 {
-	if (drive->using_dma)
-		return 0;
-
-	return 1;
 }
 
-static int
-sgiioc4_ide_dma_host_off(ide_drive_t * drive)
+static void sgiioc4_dma_host_off(ide_drive_t * drive)
 {
 	sgiioc4_clearirq(drive);
-
-	return 0;
-}
-
-static int
-sgiioc4_ide_dma_lostirq(ide_drive_t * drive)
-{
-	HWIF(drive)->resetproc(drive);
-
-	return __ide_dma_lostirq(drive);
 }
 
 static void
@@ -346,20 +319,28 @@ sgiioc4_resetproc(ide_drive_t * drive)
 	sgiioc4_clearirq(drive);
 }
 
+static void
+sgiioc4_dma_lost_irq(ide_drive_t * drive)
+{
+	sgiioc4_resetproc(drive);
+
+	ide_dma_lost_irq(drive);
+}
+
 static u8
 sgiioc4_INB(unsigned long port)
 {
-	u8 reg = (u8) inb(port);
+	u8 reg = (u8) readb((void __iomem *) port);
 
 	if ((port & 0xFFF) == 0x11C) {	/* Status register of IOC4 */
 		if (reg & 0x51) {	/* Not busy...check for interrupt */
 			unsigned long other_ir = port - 0x110;
-			unsigned int intr_reg = (u32) inl(other_ir);
+			unsigned int intr_reg = (u32) readl((void __iomem *) other_ir);
 
 			/* Clear the Interrupt, Error bits on the IOC4 */
 			if (intr_reg & 0x03) {
-				outl(0x03, other_ir);
-				intr_reg = (u32) inl(other_ir);
+				writel(0x03, (void __iomem *) other_ir);
+				intr_reg = (u32) readl((void __iomem *) other_ir);
 			}
 		}
 	}
@@ -368,44 +349,51 @@ sgiioc4_INB(unsigned long port)
 }
 
 /* Creates a dma map for the scatter-gather list entries */
-static void __devinit
+static int __devinit
 ide_dma_sgiioc4(ide_hwif_t * hwif, unsigned long dma_base)
 {
+	void __iomem *virt_dma_base;
 	int num_ports = sizeof (ioc4_dma_regs_t);
+	void *pad;
 
 	printk(KERN_INFO "%s: BM-DMA at 0x%04lx-0x%04lx\n", hwif->name,
 	       dma_base, dma_base + num_ports - 1);
 
-	if (!request_region(dma_base, num_ports, hwif->name)) {
+	if (!request_mem_region(dma_base, num_ports, hwif->name)) {
 		printk(KERN_ERR
 		       "%s(%s) -- ERROR, Addresses 0x%p to 0x%p "
 		       "ALREADY in use\n",
 		       __FUNCTION__, hwif->name, (void *) dma_base,
 		       (void *) dma_base + num_ports - 1);
-		goto dma_alloc_failure;
+		return -1;
 	}
 
-	hwif->dma_base = dma_base;
+	virt_dma_base = ioremap(dma_base, num_ports);
+	if (virt_dma_base == NULL) {
+		printk(KERN_ERR
+		       "%s(%s) -- ERROR, Unable to map addresses 0x%lx to 0x%lx\n",
+		       __FUNCTION__, hwif->name, dma_base, dma_base + num_ports - 1);
+		goto dma_remap_failure;
+	}
+	hwif->dma_base = (unsigned long) virt_dma_base;
+
 	hwif->dmatable_cpu = pci_alloc_consistent(hwif->pci_dev,
 					  IOC4_PRD_ENTRIES * IOC4_PRD_BYTES,
 					  &hwif->dmatable_dma);
 
 	if (!hwif->dmatable_cpu)
-		goto dma_alloc_failure;
+		goto dma_pci_alloc_failure;
 
 	hwif->sg_max_nents = IOC4_PRD_ENTRIES;
 
-	hwif->dma_base2 = (unsigned long)
-		pci_alloc_consistent(hwif->pci_dev,
-				     IOC4_IDE_CACHELINE_SIZE,
-				     (dma_addr_t *) &(hwif->dma_status));
+	pad = pci_alloc_consistent(hwif->pci_dev, IOC4_IDE_CACHELINE_SIZE,
+				   (dma_addr_t *) &(hwif->dma_status));
 
-	if (!hwif->dma_base2)
-		goto dma_base2alloc_failure;
+	if (pad) {
+		ide_set_hwifdata(hwif, pad);
+		return 0;
+	}
 
-	return;
-
-dma_base2alloc_failure:
 	pci_free_consistent(hwif->pci_dev,
 			    IOC4_PRD_ENTRIES * IOC4_PRD_BYTES,
 			    hwif->dmatable_cpu, hwif->dmatable_dma);
@@ -415,10 +403,13 @@ dma_base2alloc_failure:
 	printk(KERN_INFO
 	       "Changing from DMA to PIO mode for Drive %s\n", hwif->name);
 
-dma_alloc_failure:
-	/* Disable DMA because we couldnot allocate any DMA maps */
-	hwif->autodma = 0;
-	hwif->atapi_dma = 0;
+dma_pci_alloc_failure:
+	iounmap(virt_dma_base);
+
+dma_remap_failure:
+	release_mem_region(dma_base, num_ports);
+
+	return -1;
 }
 
 /* Initializes the IOC4 DMA Engine */
@@ -427,16 +418,17 @@ sgiioc4_configure_for_dma(int dma_direction, ide_drive_t * drive)
 {
 	u32 ioc4_dma;
 	ide_hwif_t *hwif = HWIF(drive);
-	u64 dma_base = hwif->dma_base;
+	unsigned long dma_base = hwif->dma_base;
+	unsigned long ioc4_dma_addr = dma_base + IOC4_DMA_CTRL * 4;
 	u32 dma_addr, ending_dma_addr;
 
-	ioc4_dma = hwif->INL(dma_base + IOC4_DMA_CTRL * 4);
+	ioc4_dma = readl((void __iomem *)ioc4_dma_addr);
 
 	if (ioc4_dma & IOC4_S_DMA_ACTIVE) {
 		printk(KERN_WARNING
 			"%s(%s):Warning!! DMA from previous transfer was still active\n",
 		       __FUNCTION__, drive->name);
-		hwif->OUTL(IOC4_S_DMA_STOP, dma_base + IOC4_DMA_CTRL * 4);
+		writel(IOC4_S_DMA_STOP, (void __iomem *)ioc4_dma_addr);
 		ioc4_dma = sgiioc4_ide_dma_stop(hwif, dma_base);
 
 		if (ioc4_dma & IOC4_S_DMA_STOP)
@@ -445,13 +437,13 @@ sgiioc4_configure_for_dma(int dma_direction, ide_drive_t * drive)
 			       __FUNCTION__, drive->name);
 	}
 
-	ioc4_dma = hwif->INL(dma_base + IOC4_DMA_CTRL * 4);
+	ioc4_dma = readl((void __iomem *)ioc4_dma_addr);
 	if (ioc4_dma & IOC4_S_DMA_ERROR) {
 		printk(KERN_WARNING
 		       "%s(%s) : Warning!! - DMA Error during Previous"
 		       " transfer | status 0x%x\n",
 		       __FUNCTION__, drive->name, ioc4_dma);
-		hwif->OUTL(IOC4_S_DMA_STOP, dma_base + IOC4_DMA_CTRL * 4);
+		writel(IOC4_S_DMA_STOP, (void __iomem *)ioc4_dma_addr);
 		ioc4_dma = sgiioc4_ide_dma_stop(hwif, dma_base);
 
 		if (ioc4_dma & IOC4_S_DMA_STOP)
@@ -462,14 +454,14 @@ sgiioc4_configure_for_dma(int dma_direction, ide_drive_t * drive)
 
 	/* Address of the Scatter Gather List */
 	dma_addr = cpu_to_le32(hwif->dmatable_dma);
-	hwif->OUTL(dma_addr, dma_base + IOC4_DMA_PTR_L * 4);
+	writel(dma_addr, (void __iomem *)(dma_base + IOC4_DMA_PTR_L * 4));
 
 	/* Address of the Ending DMA */
-	memset((unsigned int *) hwif->dma_base2, 0, IOC4_IDE_CACHELINE_SIZE);
+	memset(ide_get_hwifdata(hwif), 0, IOC4_IDE_CACHELINE_SIZE);
 	ending_dma_addr = cpu_to_le32(hwif->dma_status);
-	hwif->OUTL(ending_dma_addr, dma_base + IOC4_DMA_END_ADDR * 4);
+	writel(ending_dma_addr, (void __iomem *)(dma_base + IOC4_DMA_END_ADDR * 4));
 
-	hwif->OUTL(dma_direction, dma_base + IOC4_DMA_CTRL * 4);
+	writel(dma_direction, (void __iomem *)ioc4_dma_addr);
 	drive->waiting_for_dma = 1;
 }
 
@@ -509,7 +501,7 @@ sgiioc4_build_dma_table(ide_drive_t * drive, struct request *rq, int ddir)
 				       drive->name);
 				goto use_pio_instead;
 			} else {
-				u32 xcount, bcount =
+				u32 bcount =
 				    0x10000 - (cur_addr & 0xffff);
 
 				if (bcount > cur_len)
@@ -524,8 +516,7 @@ sgiioc4_build_dma_table(ide_drive_t * drive, struct request *rq, int ddir)
 				*table = 0x0;
 				table++;
 
-				xcount = bcount & 0xffff;
-				*table = cpu_to_be32(xcount);
+				*table = cpu_to_be32(bcount);
 				table++;
 
 				cur_addr += bcount;
@@ -533,7 +524,7 @@ sgiioc4_build_dma_table(ide_drive_t * drive, struct request *rq, int ddir)
 			}
 		}
 
-		sg++;
+		sg = sg_next(sg);
 		i--;
 	}
 
@@ -582,14 +573,10 @@ static int sgiioc4_ide_dma_setup(ide_drive_t *drive)
 static void __devinit
 ide_init_sgiioc4(ide_hwif_t * hwif)
 {
-	hwif->mmio = 2;
-	hwif->autodma = 1;
-	hwif->atapi_dma = 1;
-	hwif->ultra_mask = 0x0;	/* Disable Ultra DMA */
-	hwif->mwdma_mask = 0x2;	/* Multimode-2 DMA  */
-	hwif->swdma_mask = 0x2;
-	hwif->tuneproc = NULL;	/* Sets timing for PIO mode */
-	hwif->speedproc = NULL;	/* Sets timing for DMA &/or PIO modes */
+	hwif->mmio = 1;
+	hwif->pio_mask = 0x00;
+	hwif->set_pio_mode = NULL; /* Sets timing for PIO mode */
+	hwif->set_dma_mode = &sgiioc4_set_dma_mode;
 	hwif->selectproc = NULL;/* Use the default routine to select drive */
 	hwif->reset_poll = NULL;/* No HBA specific reset_poll needed */
 	hwif->pre_reset = NULL;	/* No HBA specific pre_set needed */
@@ -600,54 +587,80 @@ ide_init_sgiioc4(ide_hwif_t * hwif)
 	hwif->quirkproc = NULL;
 	hwif->busproc = NULL;
 
+	hwif->INB = &sgiioc4_INB;
+
+	if (hwif->dma_base == 0)
+		return;
+
+	hwif->mwdma_mask = ATA_MWDMA2_ONLY;
+
 	hwif->dma_setup = &sgiioc4_ide_dma_setup;
 	hwif->dma_start = &sgiioc4_ide_dma_start;
 	hwif->ide_dma_end = &sgiioc4_ide_dma_end;
-	hwif->ide_dma_check = &sgiioc4_ide_dma_check;
 	hwif->ide_dma_on = &sgiioc4_ide_dma_on;
-	hwif->ide_dma_off_quietly = &sgiioc4_ide_dma_off_quietly;
+	hwif->dma_off_quietly = &sgiioc4_dma_off_quietly;
 	hwif->ide_dma_test_irq = &sgiioc4_ide_dma_test_irq;
-	hwif->ide_dma_host_on = &sgiioc4_ide_dma_host_on;
-	hwif->ide_dma_host_off = &sgiioc4_ide_dma_host_off;
-	hwif->ide_dma_lostirq = &sgiioc4_ide_dma_lostirq;
-	hwif->ide_dma_timeout = &__ide_dma_timeout;
-	hwif->INB = &sgiioc4_INB;
+	hwif->dma_host_on = &sgiioc4_dma_host_on;
+	hwif->dma_host_off = &sgiioc4_dma_host_off;
+	hwif->dma_lost_irq = &sgiioc4_dma_lost_irq;
+	hwif->dma_timeout = &ide_dma_timeout;
 }
 
 static int __devinit
-sgiioc4_ide_setup_pci_device(struct pci_dev *dev, ide_pci_device_t * d)
+sgiioc4_ide_setup_pci_device(struct pci_dev *dev)
 {
-	unsigned long base, ctl, dma_base, irqport;
+	unsigned long cmd_base, dma_base, irqport;
+	unsigned long bar0, cmd_phys_base, ctl;
+	void __iomem *virt_base;
 	ide_hwif_t *hwif;
 	int h;
+	u8 idx[4] = { 0xff, 0xff, 0xff, 0xff };
 
+	/*
+	 * Find an empty HWIF; if none available, return -ENOMEM.
+	 */
 	for (h = 0; h < MAX_HWIFS; ++h) {
 		hwif = &ide_hwifs[h];
-		/* Find an empty HWIF */
 		if (hwif->chipset == ide_unknown)
 			break;
 	}
-
-	/*  Get the CmdBlk and CtrlBlk Base Registers */
-	base = pci_resource_start(dev, 0) + IOC4_CMD_OFFSET;
-	ctl = pci_resource_start(dev, 0) + IOC4_CTRL_OFFSET;
-	irqport = pci_resource_start(dev, 0) + IOC4_INTR_OFFSET;
-	dma_base = pci_resource_start(dev, 0) + IOC4_DMA_OFFSET;
-
-	if (!request_region(base, IOC4_CMD_CTL_BLK_SIZE, hwif->name)) {
-		printk(KERN_ERR
-			"%s : %s -- ERROR, Port Addresses "
-			"0x%p to 0x%p ALREADY in use\n",
-		       __FUNCTION__, hwif->name, (void *) base,
-		       (void *) base + IOC4_CMD_CTL_BLK_SIZE);
+	if (h == MAX_HWIFS) {
+		printk(KERN_ERR "%s: too many IDE interfaces, no room in table\n",
+				DRV_NAME);
 		return -ENOMEM;
 	}
 
-	if (hwif->io_ports[IDE_DATA_OFFSET] != base) {
+	/*  Get the CmdBlk and CtrlBlk Base Registers */
+	bar0 = pci_resource_start(dev, 0);
+	virt_base = ioremap(bar0, pci_resource_len(dev, 0));
+	if (virt_base == NULL) {
+		printk(KERN_ERR "%s: Unable to remap BAR 0 address: 0x%lx\n",
+				DRV_NAME, bar0);
+		return -ENOMEM;
+	}
+	cmd_base = (unsigned long) virt_base + IOC4_CMD_OFFSET;
+	ctl = (unsigned long) virt_base + IOC4_CTRL_OFFSET;
+	irqport = (unsigned long) virt_base + IOC4_INTR_OFFSET;
+	dma_base = pci_resource_start(dev, 0) + IOC4_DMA_OFFSET;
+
+	cmd_phys_base = bar0 + IOC4_CMD_OFFSET;
+	if (!request_mem_region(cmd_phys_base, IOC4_CMD_CTL_BLK_SIZE,
+	    hwif->name)) {
+		printk(KERN_ERR
+			"%s : %s -- ERROR, Addresses "
+			"0x%p to 0x%p ALREADY in use\n",
+		       __FUNCTION__, hwif->name, (void *) cmd_phys_base,
+		       (void *) cmd_phys_base + IOC4_CMD_CTL_BLK_SIZE);
+		return -ENOMEM;
+	}
+
+	if (hwif->io_ports[IDE_DATA_OFFSET] != cmd_base) {
+		hw_regs_t hw;
+
 		/* Initialize the IO registers */
-		sgiioc4_init_hwif_ports(&hwif->hw, base, ctl, irqport);
-		memcpy(hwif->io_ports, hwif->hw.io_ports,
-		       sizeof (hwif->io_ports));
+		memset(&hw, 0, sizeof(hw));
+		sgiioc4_init_hwif_ports(&hw, cmd_base, ctl, irqport);
+		memcpy(hwif->io_ports, hw.io_ports, sizeof(hwif->io_ports));
 		hwif->noprobe = !hwif->io_ports[IDE_DATA_OFFSET];
 	}
 
@@ -655,101 +668,75 @@ sgiioc4_ide_setup_pci_device(struct pci_dev *dev, ide_pci_device_t * d)
 	hwif->chipset = ide_pci;
 	hwif->pci_dev = dev;
 	hwif->channel = 0;	/* Single Channel chip */
-	hwif->cds = (struct ide_pci_device_s *) d;
 	hwif->gendev.parent = &dev->dev;/* setup proper ancestral information */
 
+	/* The IOC4 uses MMIO rather than Port IO. */
+	default_hwif_mmiops(hwif);
+
 	/* Initializing chipset IRQ Registers */
-	hwif->OUTL(0x03, irqport + IOC4_INTR_SET * 4);
+	writel(0x03, (void __iomem *)(irqport + IOC4_INTR_SET * 4));
+
+	if (dma_base == 0 || ide_dma_sgiioc4(hwif, dma_base))
+		printk(KERN_INFO "%s: %s Bus-Master DMA disabled\n",
+				 hwif->name, DRV_NAME);
 
 	ide_init_sgiioc4(hwif);
 
-	if (dma_base)
-		ide_dma_sgiioc4(hwif, dma_base);
-	else
-		printk(KERN_INFO "%s: %s Bus-Master DMA disabled\n",
-		       hwif->name, d->name);
+	idx[0] = hwif->index;
 
-	if (probe_hwif_init(hwif))
+	if (ide_device_add(idx))
 		return -EIO;
-
-	/* Create /proc/ide entries */
-	create_proc_ide_interfaces(); 
 
 	return 0;
 }
 
 static unsigned int __devinit
-pci_init_sgiioc4(struct pci_dev *dev, ide_pci_device_t * d)
+pci_init_sgiioc4(struct pci_dev *dev)
 {
-	unsigned int class_rev;
 	int ret;
 
-	ret = pci_enable_device(dev);
-	if (ret < 0) {
-		printk(KERN_ERR
-		       "Failed to enable device %s at slot %s\n",
-		       d->name, dev->slot_name);
-		goto out;
-	}
-	pci_set_master(dev);
-
-	pci_read_config_dword(dev, PCI_CLASS_REVISION, &class_rev);
-	class_rev &= 0xff;
 	printk(KERN_INFO "%s: IDE controller at PCI slot %s, revision %d\n",
-			d->name, dev->slot_name, class_rev);
-	if (class_rev < IOC4_SUPPORTED_FIRMWARE_REV) {
+			 DRV_NAME, pci_name(dev), dev->revision);
+
+	if (dev->revision < IOC4_SUPPORTED_FIRMWARE_REV) {
 		printk(KERN_ERR "Skipping %s IDE controller in slot %s: "
-			"firmware is obsolete - please upgrade to revision"
-			"46 or higher\n", d->name, dev->slot_name);
+				"firmware is obsolete - please upgrade to "
+				"revision46 or higher\n",
+				DRV_NAME, pci_name(dev));
 		ret = -EAGAIN;
 		goto out;
 	}
-	ret = sgiioc4_ide_setup_pci_device(dev, d);
+	ret = sgiioc4_ide_setup_pci_device(dev);
 out:
 	return ret;
 }
 
-static ide_pci_device_t sgiioc4_chipsets[] __devinitdata = {
-	{
-	 /* Channel 0 */
-	 .name = "SGIIOC4",
-	 .init_hwif = ide_init_sgiioc4,
-	 .init_dma = ide_dma_sgiioc4,
-	 .channels = 1,
-	 .autodma = AUTODMA,
-	 /* SGI IOC4 doesn't have enablebits. */
-	 .bootable = ON_BOARD,
-	}
-};
-
-static int __devinit
-sgiioc4_init_one(struct pci_dev *dev, const struct pci_device_id *id)
+int
+ioc4_ide_attach_one(struct ioc4_driver_data *idd)
 {
-	pci_init_sgiioc4(dev, &sgiioc4_chipsets[id->driver_data]);
-	return 0;
+	/* PCI-RT does not bring out IDE connection.
+	 * Do not attach to this particular IOC4.
+	 */
+	if (idd->idd_variant == IOC4_VARIANT_PCI_RT)
+		return 0;
+
+	return pci_init_sgiioc4(idd->idd_pdev);
 }
 
-static struct pci_device_id sgiioc4_pci_tbl[] = {
-	{PCI_VENDOR_ID_SGI, PCI_DEVICE_ID_SGI_IOC4, PCI_ANY_ID,
-	 PCI_ANY_ID, 0x0b4000, 0xFFFFFF, 0},
-	{0}
-};
-MODULE_DEVICE_TABLE(pci, sgiioc4_pci_tbl);
-
-static struct pci_driver __devinitdata driver = {
-	.name = "SGI-IOC4_IDE",
-	.id_table = sgiioc4_pci_tbl,
-	.probe = sgiioc4_init_one,
+static struct ioc4_submodule ioc4_ide_submodule = {
+	.is_name = "IOC4_ide",
+	.is_owner = THIS_MODULE,
+	.is_probe = ioc4_ide_attach_one,
+/*	.is_remove = ioc4_ide_remove_one,	*/
 };
 
-static int __devinit
-sgiioc4_ide_init(void)
+static int __init ioc4_ide_init(void)
 {
-	return ide_pci_register_driver(&driver);
+	return ioc4_register_submodule(&ioc4_ide_submodule);
 }
 
-module_init(sgiioc4_ide_init);
+late_initcall(ioc4_ide_init); /* Call only after IDE init is done */
 
-MODULE_AUTHOR("Aniket Malatpure - Silicon Graphics Inc. (SGI)");
-MODULE_DESCRIPTION("PCI driver module for SGI IOC4 Base-IO Card");
+MODULE_AUTHOR("Aniket Malatpure/Jeremy Higdon");
+MODULE_DESCRIPTION("IDE PCI driver module for SGI IOC4 Base-IO Card");
 MODULE_LICENSE("GPL");

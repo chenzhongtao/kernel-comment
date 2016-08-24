@@ -17,7 +17,6 @@
 #ifndef	__PPC4XX_PIC_H__
 #define	__PPC4XX_PIC_H__
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/irq.h>
 
@@ -43,11 +42,11 @@
  *
  */
 struct ppc4xx_uic_settings {
-	u32 	polarity;
-	u32 	triggering;
-	u32	ext_irq_mask;
+	u32 polarity;
+	u32 triggering;
+	u32 ext_irq_mask;
 };
 
 extern void ppc4xx_pic_init(void);
 
-#endif	/* __PPC4XX_PIC_H__ */
+#endif				/* __PPC4XX_PIC_H__ */

@@ -15,6 +15,7 @@
 #ifndef __LINUX_OVCAMCHIP_PRIV_H
 #define __LINUX_OVCAMCHIP_PRIV_H
 
+#include <linux/i2c.h>
 #include <media/ovcamchip.h>
 
 #ifdef DEBUG
@@ -82,6 +83,6 @@ extern int ov_write_regvals(struct i2c_client *c,
 			    struct ovcamchip_regvals *rvals);
 
 extern int ov_write_mask(struct i2c_client *c, unsigned char reg,
-	      		 unsigned char value, unsigned char mask);
+			 unsigned char value, unsigned char mask);
 
 #endif

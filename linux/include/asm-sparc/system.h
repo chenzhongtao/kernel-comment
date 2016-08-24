@@ -1,21 +1,19 @@
-/* $Id: system.h,v 1.86 2001/10/30 04:57:10 davem Exp $ */
-#include <linux/config.h>
-
 #ifndef __SPARC_SYSTEM_H
 #define __SPARC_SYSTEM_H
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/threads.h>	/* NR_CPUS */
 #include <linux/thread_info.h>
 
-#include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/psr.h>
 #include <asm/ptrace.h>
 #include <asm/btfixup.h>
+#include <asm/smp.h>
 
 #ifndef __ASSEMBLY__
+
+#include <linux/irqflags.h>
 
 /*
  * Sparc (general) CPU types
@@ -56,7 +54,7 @@ extern void sun_do_break(void);
 extern int serial_console;
 extern int stop_a_enabled;
 
-static __inline__ int con_is_present(void)
+static inline int con_is_present(void)
 {
 	return serial_console ? 0 : 1;
 }
@@ -101,7 +99,7 @@ extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
  * SWITCH_ENTER and SWITH_DO_LAZY_FPU do not work yet (e.g. SMP does not work)
  * XXX WTF is the above comment? Found in late teen 2.4.x.
  */
-#define prepare_arch_switch(rq, next) do { \
+#define prepare_arch_switch(next) do { \
 	__asm__ __volatile__( \
 	".globl\tflush_patch_switch\nflush_patch_switch:\n\t" \
 	"save %sp, -0x40, %sp; save %sp, -0x40, %sp; save %sp, -0x40, %sp\n\t" \
@@ -109,8 +107,6 @@ extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 	"save %sp, -0x40, %sp\n\t" \
 	"restore; restore; restore; restore; restore; restore; restore"); \
 } while(0)
-#define finish_arch_switch(rq, next)	spin_unlock_irq(&(rq)->lock)
-#define task_running(rq, p)		((rq)->curr == (p))
 
 	/* Much care has gone into this code, do not touch it.
 	 *
@@ -158,7 +154,7 @@ extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 	"here:\n"									\
         : "=&r" (last)									\
         : "r" (&(current_set[hard_smp_processor_id()])),	\
-	  "r" ((next)->thread_info),				\
+	  "r" (task_thread_info(next)),				\
 	  "i" (TI_KPSR),					\
 	  "i" (TI_KSP),						\
 	  "i" (TI_TASK)						\
@@ -168,33 +164,12 @@ extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 	  "o0", "o1", "o2", "o3",                   "o7");	\
 	} while(0)
 
-/*
- * Changing the IRQ level on the Sparc.
- */
-extern void local_irq_restore(unsigned long);
-extern unsigned long __local_irq_save(void);
-extern void local_irq_enable(void);
-
-static inline unsigned long getipl(void)
-{
-	unsigned long retval;
-
-	__asm__ __volatile__("rd	%%psr, %0" : "=r" (retval));
-	return retval;
-}
-
-#define local_save_flags(flags)	((flags) = getipl())
-#define local_irq_save(flags)	((flags) = __local_irq_save())
-#define local_irq_disable()	((void) __local_irq_save())
-#define irqs_disabled()		((getipl() & PSR_PIL) != 0)
-
 /* XXX Change this if we ever use a PSO mode kernel. */
 #define mb()	__asm__ __volatile__ ("" : : : "memory")
 #define rmb()	mb()
 #define wmb()	mb()
 #define read_barrier_depends()	do { } while(0)
 #define set_mb(__var, __value)  do { __var = __value; mb(); } while(0)
-#define set_wmb(__var, __value) set_mb(__var, __value)
 #define smp_mb()	__asm__ __volatile__("":::"memory")
 #define smp_rmb()	__asm__ __volatile__("":::"memory")
 #define smp_wmb()	__asm__ __volatile__("":::"memory")
@@ -207,7 +182,7 @@ static inline unsigned long getipl(void)
 BTFIXUPDEF_CALL(void, ___xchg32, void)
 #endif
 
-extern __inline__ unsigned long xchg_u32(__volatile__ unsigned long *m, unsigned long val)
+static inline unsigned long xchg_u32(__volatile__ unsigned long *m, unsigned long val)
 {
 #ifdef CONFIG_SMP
 	__asm__ __volatile__("swap [%2], %0"
@@ -237,11 +212,10 @@ extern __inline__ unsigned long xchg_u32(__volatile__ unsigned long *m, unsigned
 }
 
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
-#define tas(ptr) (xchg((ptr),1))
 
 extern void __xchg_called_with_bad_pointer(void);
 
-static __inline__ unsigned long __xchg(unsigned long x, __volatile__ void * ptr, int size)
+static inline unsigned long __xchg(unsigned long x, __volatile__ void * ptr, int size)
 {
 	switch (size) {
 	case 4:
@@ -256,5 +230,7 @@ extern void die_if_kernel(char *str, struct pt_regs *regs) __attribute__ ((noret
 #endif /* __KERNEL__ */
 
 #endif /* __ASSEMBLY__ */
+
+#define arch_align_stack(x) (x)
 
 #endif /* !(__SPARC_SYSTEM_H) */

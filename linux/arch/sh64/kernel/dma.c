@@ -31,7 +31,7 @@ typedef struct {
 } dma_info_t;
 
 static dma_info_t dma_info[MAX_DMA_CHANNELS];
-extern spinlock_t dma_spin_lock;
+static DEFINE_SPINLOCK(dma_spin_lock);
 
 /* arch/sh64/kernel/irq_intc.c */
 extern void make_intc_irq(unsigned int irq);
@@ -115,7 +115,7 @@ static irqreturn_t dma_mte(int irq, void *dev_id, struct pt_regs *regs)
 
 static struct irqaction irq_dmte = {
 	.handler	= dma_mte,
-	.flags		= SA_INTERRUPT,
+	.flags		= IRQF_DISABLED,
 	.name		= "DMA MTE",
 };
 
@@ -152,7 +152,7 @@ static irqreturn_t dma_err(int irq, void *dev_id, struct pt_regs *regs)
 
 static struct irqaction irq_derr = {
 	.handler	= dma_err,
-	.flags		= SA_INTERRUPT,
+	.flags		= IRQF_DISABLED,
 	.name		= "DMA Error",
 };
 

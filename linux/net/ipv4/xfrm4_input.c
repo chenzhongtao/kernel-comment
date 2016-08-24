@@ -6,69 +6,64 @@
  *		Split up af-specific portion
  *	Derek Atkins <derek@ihtfp.com>
  *		Add Encapsulation support
- * 	
+ *
  */
 
 #include <linux/module.h>
 #include <linux/string.h>
-#include <net/inet_ecn.h>
+#include <linux/netfilter.h>
+#include <linux/netfilter_ipv4.h>
 #include <net/ip.h>
 #include <net/xfrm.h>
 
-int xfrm4_rcv(struct sk_buff *skb)
+#ifdef CONFIG_NETFILTER
+static inline int xfrm4_rcv_encap_finish(struct sk_buff *skb)
 {
-	return xfrm4_rcv_encap(skb, 0);
-}
+	if (skb->dst == NULL) {
+		const struct iphdr *iph = ip_hdr(skb);
 
-EXPORT_SYMBOL(xfrm4_rcv);
-
-static inline void ipip_ecn_decapsulate(struct sk_buff *skb)
-{
-	struct iphdr *outer_iph = skb->nh.iph;
-	struct iphdr *inner_iph = skb->h.ipiph;
-
-	if (INET_ECN_is_ce(outer_iph->tos))
-		IP_ECN_set_ce(inner_iph);
-}
-
-static int xfrm4_parse_spi(struct sk_buff *skb, u8 nexthdr, u32 *spi, u32 *seq)
-{
-	switch (nexthdr) {
-	case IPPROTO_IPIP:
-		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-			return -EINVAL;
-		*spi = skb->nh.iph->saddr;
-		*seq = 0;
-		return 0;
+		if (ip_route_input(skb, iph->daddr, iph->saddr, iph->tos,
+				   skb->dev))
+			goto drop;
 	}
-
-	return xfrm_parse_spi(skb, nexthdr, spi, seq);
+	return dst_input(skb);
+drop:
+	kfree_skb(skb);
+	return NET_RX_DROP;
 }
+#endif
 
-int xfrm4_rcv_encap(struct sk_buff *skb, __u16 encap_type)
+int xfrm4_rcv_encap(struct sk_buff *skb, int nexthdr, __be32 spi,
+		    int encap_type)
 {
 	int err;
-	u32 spi, seq;
-	struct sec_decap_state xfrm_vec[XFRM_MAX_DEPTH];
+	__be32 seq;
+	struct xfrm_state *xfrm_vec[XFRM_MAX_DEPTH];
 	struct xfrm_state *x;
 	int xfrm_nr = 0;
 	int decaps = 0;
+	unsigned int nhoff = offsetof(struct iphdr, protocol);
 
-	if ((err = xfrm4_parse_spi(skb, skb->nh.iph->protocol, &spi, &seq)) != 0)
+	seq = 0;
+	if (!spi && (err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0)
 		goto drop;
 
 	do {
-		struct iphdr *iph = skb->nh.iph;
+		const struct iphdr *iph = ip_hdr(skb);
 
 		if (xfrm_nr == XFRM_MAX_DEPTH)
 			goto drop;
 
-		x = xfrm_state_lookup((xfrm_address_t *)&iph->daddr, spi, iph->protocol, AF_INET);
+		x = xfrm_state_lookup((xfrm_address_t *)&iph->daddr, spi,
+				      nexthdr, AF_INET);
 		if (x == NULL)
 			goto drop;
 
 		spin_lock(&x->lock);
 		if (unlikely(x->km.state != XFRM_STATE_VALID))
+			goto drop_unlock;
+
+		if ((x->encap ? x->encap->encap_type : 0) != encap_type)
 			goto drop_unlock;
 
 		if (x->props.replay_window && xfrm_replay_check(x, seq))
@@ -77,9 +72,11 @@ int xfrm4_rcv_encap(struct sk_buff *skb, __u16 encap_type)
 		if (xfrm_state_check_expire(x))
 			goto drop_unlock;
 
-		xfrm_vec[xfrm_nr].decap.decap_type = encap_type;
-		if (x->type->input(x, &(xfrm_vec[xfrm_nr].decap), skb))
+		nexthdr = x->type->input(x, skb);
+		if (nexthdr <= 0)
 			goto drop_unlock;
+
+		skb_network_header(skb)[nhoff] = nexthdr;
 
 		/* only the first xfrm gets the encap type */
 		encap_type = 0;
@@ -92,31 +89,18 @@ int xfrm4_rcv_encap(struct sk_buff *skb, __u16 encap_type)
 
 		spin_unlock(&x->lock);
 
-		xfrm_vec[xfrm_nr++].xvec = x;
+		xfrm_vec[xfrm_nr++] = x;
 
-		iph = skb->nh.iph;
+		if (x->outer_mode->input(x, skb))
+			goto drop;
 
-		if (x->props.mode) {
-			if (iph->protocol != IPPROTO_IPIP)
-				goto drop;
-			if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-				goto drop;
-			if (skb_cloned(skb) &&
-			    pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
-				goto drop;
-			if (x->props.flags & XFRM_STATE_DECAP_DSCP)
-				ipv4_copy_dscp(iph, skb->h.ipiph);
-			if (!(x->props.flags & XFRM_STATE_NOECN))
-				ipip_ecn_decapsulate(skb);
-			skb->mac.raw = memmove(skb->data - skb->mac_len,
-					       skb->mac.raw, skb->mac_len);
-			skb->nh.raw = skb->data;
-			memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
+		if (x->outer_mode->flags & XFRM_MODE_FLAG_TUNNEL) {
 			decaps = 1;
 			break;
 		}
 
-		if ((err = xfrm_parse_spi(skb, skb->nh.iph->protocol, &spi, &seq)) < 0)
+		err = xfrm_parse_spi(skb, nexthdr, &spi, &seq);
+		if (err < 0)
 			goto drop;
 	} while (!err);
 
@@ -134,18 +118,29 @@ int xfrm4_rcv_encap(struct sk_buff *skb, __u16 encap_type)
 	if (xfrm_nr + skb->sp->len > XFRM_MAX_DEPTH)
 		goto drop;
 
-	memcpy(skb->sp->x+skb->sp->len, xfrm_vec, xfrm_nr*sizeof(struct sec_decap_state));
+	memcpy(skb->sp->xvec + skb->sp->len, xfrm_vec,
+	       xfrm_nr * sizeof(xfrm_vec[0]));
 	skb->sp->len += xfrm_nr;
 
+	nf_reset(skb);
+
 	if (decaps) {
-		if (!(skb->dev->flags&IFF_LOOPBACK)) {
-			dst_release(skb->dst);
-			skb->dst = NULL;
-		}
+		dst_release(skb->dst);
+		skb->dst = NULL;
 		netif_rx(skb);
 		return 0;
 	} else {
-		return -skb->nh.iph->protocol;
+#ifdef CONFIG_NETFILTER
+		__skb_push(skb, skb->data - skb_network_header(skb));
+		ip_hdr(skb)->tot_len = htons(skb->len);
+		ip_send_check(ip_hdr(skb));
+
+		NF_HOOK(PF_INET, NF_IP_PRE_ROUTING, skb, skb->dev, NULL,
+			xfrm4_rcv_encap_finish);
+		return 0;
+#else
+		return -ip_hdr(skb)->protocol;
+#endif
 	}
 
 drop_unlock:
@@ -153,8 +148,111 @@ drop_unlock:
 	xfrm_state_put(x);
 drop:
 	while (--xfrm_nr >= 0)
-		xfrm_state_put(xfrm_vec[xfrm_nr].xvec);
+		xfrm_state_put(xfrm_vec[xfrm_nr]);
 
 	kfree_skb(skb);
 	return 0;
 }
+EXPORT_SYMBOL(xfrm4_rcv_encap);
+
+/* If it's a keepalive packet, then just eat it.
+ * If it's an encapsulated packet, then pass it to the
+ * IPsec xfrm input.
+ * Returns 0 if skb passed to xfrm or was dropped.
+ * Returns >0 if skb should be passed to UDP.
+ * Returns <0 if skb should be resubmitted (-ret is protocol)
+ */
+int xfrm4_udp_encap_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	struct udp_sock *up = udp_sk(sk);
+	struct udphdr *uh;
+	struct iphdr *iph;
+	int iphlen, len;
+	int ret;
+
+	__u8 *udpdata;
+	__be32 *udpdata32;
+	__u16 encap_type = up->encap_type;
+
+	/* if this is not encapsulated socket, then just return now */
+	if (!encap_type)
+		return 1;
+
+	/* If this is a paged skb, make sure we pull up
+	 * whatever data we need to look at. */
+	len = skb->len - sizeof(struct udphdr);
+	if (!pskb_may_pull(skb, sizeof(struct udphdr) + min(len, 8)))
+		return 1;
+
+	/* Now we can get the pointers */
+	uh = udp_hdr(skb);
+	udpdata = (__u8 *)uh + sizeof(struct udphdr);
+	udpdata32 = (__be32 *)udpdata;
+
+	switch (encap_type) {
+	default:
+	case UDP_ENCAP_ESPINUDP:
+		/* Check if this is a keepalive packet.  If so, eat it. */
+		if (len == 1 && udpdata[0] == 0xff) {
+			goto drop;
+		} else if (len > sizeof(struct ip_esp_hdr) && udpdata32[0] != 0) {
+			/* ESP Packet without Non-ESP header */
+			len = sizeof(struct udphdr);
+		} else
+			/* Must be an IKE packet.. pass it through */
+			return 1;
+		break;
+	case UDP_ENCAP_ESPINUDP_NON_IKE:
+		/* Check if this is a keepalive packet.  If so, eat it. */
+		if (len == 1 && udpdata[0] == 0xff) {
+			goto drop;
+		} else if (len > 2 * sizeof(u32) + sizeof(struct ip_esp_hdr) &&
+			   udpdata32[0] == 0 && udpdata32[1] == 0) {
+
+			/* ESP Packet with Non-IKE marker */
+			len = sizeof(struct udphdr) + 2 * sizeof(u32);
+		} else
+			/* Must be an IKE packet.. pass it through */
+			return 1;
+		break;
+	}
+
+	/* At this point we are sure that this is an ESPinUDP packet,
+	 * so we need to remove 'len' bytes from the packet (the UDP
+	 * header and optional ESP marker bytes) and then modify the
+	 * protocol to ESP, and then call into the transform receiver.
+	 */
+	if (skb_cloned(skb) && pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+		goto drop;
+
+	/* Now we can update and verify the packet length... */
+	iph = ip_hdr(skb);
+	iphlen = iph->ihl << 2;
+	iph->tot_len = htons(ntohs(iph->tot_len) - len);
+	if (skb->len < iphlen + len) {
+		/* packet is too small!?! */
+		goto drop;
+	}
+
+	/* pull the data buffer up to the ESP header and set the
+	 * transport header to point to ESP.  Keep UDP on the stack
+	 * for later.
+	 */
+	__skb_pull(skb, len);
+	skb_reset_transport_header(skb);
+
+	/* process ESP */
+	ret = xfrm4_rcv_encap(skb, IPPROTO_ESP, 0, encap_type);
+	return ret;
+
+drop:
+	kfree_skb(skb);
+	return 0;
+}
+
+int xfrm4_rcv(struct sk_buff *skb)
+{
+	return xfrm4_rcv_spi(skb, ip_hdr(skb)->protocol, 0);
+}
+
+EXPORT_SYMBOL(xfrm4_rcv);

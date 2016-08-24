@@ -2,11 +2,12 @@
  * amd76xrom.c
  *
  * Normal mappings of chips in physical memory
- * $Id: amd76xrom.c,v 1.19 2004/11/28 09:40:39 dwmw2 Exp $
+ * $Id: amd76xrom.c,v 1.21 2005/11/07 11:14:26 gleixner Exp $
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
+#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <asm/io.h>
@@ -14,7 +15,6 @@
 #include <linux/mtd/map.h>
 #include <linux/mtd/cfi.h>
 #include <linux/mtd/flashchip.h>
-#include <linux/config.h>
 #include <linux/pci.h>
 #include <linux/pci_ids.h>
 #include <linux/list.h>
@@ -45,6 +45,23 @@ struct amd76xrom_map_info {
 	char map_name[sizeof(MOD_NAME) + 2 + ADDRESS_NAME_LEN];
 };
 
+/* The 2 bits controlling the window size are often set to allow reading
+ * the BIOS, but too small to allow writing, since the lock registers are
+ * 4MiB lower in the address space than the data.
+ *
+ * This is intended to prevent flashing the bios, perhaps accidentally.
+ *
+ * This parameter allows the normal driver to over-ride the BIOS settings.
+ *
+ * The bits are 6 and 7.  If both bits are set, it is a 5MiB window.
+ * If only the 7 Bit is set, it is a 4MiB window.  Otherwise, a
+ * 64KiB window.
+ *
+ */
+static uint win_size_bits;
+module_param(win_size_bits, uint, 0);
+MODULE_PARM_DESC(win_size_bits, "ROM window size bits override for 0x43 byte, normally set by BIOS.");
+
 static struct amd76xrom_window amd76xrom_window = {
 	.maps = LIST_HEAD_INIT(amd76xrom_window.maps),
 };
@@ -58,6 +75,7 @@ static void amd76xrom_cleanup(struct amd76xrom_window *window)
 		/* Disable writes through the rom window */
 		pci_read_config_byte(window->pdev, 0x40, &byte);
 		pci_write_config_byte(window->pdev, 0x40, byte & ~1);
+		pci_dev_put(window->pdev);
 	}
 
 	/* Free all of the mtd devices */
@@ -70,7 +88,7 @@ static void amd76xrom_cleanup(struct amd76xrom_window *window)
 		list_del(&map->list);
 		kfree(map);
 	}
-	if (window->rsrc.parent) 
+	if (window->rsrc.parent)
 		release_resource(&window->rsrc);
 
 	if (window->virt) {
@@ -92,8 +110,18 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 	struct amd76xrom_map_info *map = NULL;
 	unsigned long map_top;
 
-	/* Remember the pci dev I find the window in */
+	/* Remember the pci dev I find the window in - already have a ref */
 	window->pdev = pdev;
+
+	/* Enable the selected rom window.  This is often incorrectly
+	 * set up by the BIOS, and the 4MiB offset for the lock registers
+	 * requires the full 5MiB of window space.
+	 *
+	 * This 'write, then read' approach leaves the bits for
+	 * other uses of the hardware info.
+	 */
+	pci_read_config_byte(pdev, 0x43, &byte);
+	pci_write_config_byte(pdev, 0x43, byte | win_size_bits );
 
 	/* Assume the rom window is properly setup, and find it's size */
 	pci_read_config_byte(pdev, 0x43, &byte);
@@ -107,7 +135,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 		window->phys = 0xffff0000; /* 64KiB */
 	}
 	window->size = 0xffffffffUL - window->phys + 1UL;
-	
+
 	/*
 	 * Try to reserve the window mem region.  If this fails then
 	 * it is likely due to a fragment of the window being
@@ -123,22 +151,17 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 		window->rsrc.parent = NULL;
 		printk(KERN_ERR MOD_NAME
 			" %s(): Unable to register resource"
-			" 0x%.08lx-0x%.08lx - kernel bug?\n",
+			" 0x%.16llx-0x%.16llx - kernel bug?\n",
 			__func__,
-			window->rsrc.start, window->rsrc.end);
+			(unsigned long long)window->rsrc.start,
+			(unsigned long long)window->rsrc.end);
 	}
 
-#if 0
-
-	/* Enable the selected rom window */
-	pci_read_config_byte(pdev, 0x43, &byte);
-	pci_write_config_byte(pdev, 0x43, byte | rwindow->segen_bits);
-#endif
 
 	/* Enable writes through the rom window */
 	pci_read_config_byte(pdev, 0x40, &byte);
 	pci_write_config_byte(pdev, 0x40, byte | 1);
-	
+
 	/* FIXME handle registers 0x80 - 0x8C the bios region locks */
 
 	/* For write accesses caches are useless */
@@ -182,11 +205,11 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 			(((unsigned long)(window->virt)) + offset);
 		map->map.size = 0xffffffffUL - map_top + 1UL;
 		/* Set the name of the map to the address I am trying */
-		sprintf(map->map_name, "%s @%08lx",
-			MOD_NAME, map->map.phys);
+		sprintf(map->map_name, "%s @%08Lx",
+			MOD_NAME, (unsigned long long)map->map.phys);
 
 		/* There is no generic VPP support */
-		for(map->map.bankwidth = 32; map->map.bankwidth; 
+		for(map->map.bankwidth = 32; map->map.bankwidth;
 			map->map.bankwidth >>= 1)
 		{
 			char **probe_type;
@@ -239,7 +262,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 		for(i = 0; i < cfi->numchips; i++) {
 			cfi->chips[i].start += offset;
 		}
-		
+
 		/* Now that the mtd devices is complete claim and export it */
 		map->mtd->owner = THIS_MODULE;
 		if (add_mtd_device(map->mtd)) {
@@ -259,9 +282,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 
  out:
 	/* Free any left over map structures */
-	if (map) {
-		kfree(map);
-	}
+	kfree(map);
 	/* See if I have any map structures */
 	if (list_empty(&window->maps)) {
 		amd76xrom_cleanup(window);
@@ -279,9 +300,9 @@ static void __devexit amd76xrom_remove_one (struct pci_dev *pdev)
 }
 
 static struct pci_device_id amd76xrom_pci_tbl[] = {
-	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_7410,  
+	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_7410,
 		PCI_ANY_ID, PCI_ANY_ID, },
-	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_7440,  
+	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_7440,
 		PCI_ANY_ID, PCI_ANY_ID, },
 	{ PCI_VENDOR_ID_AMD, 0x7468 }, /* amd8111 support */
 	{ 0, }
@@ -304,7 +325,7 @@ static int __init init_amd76xrom(void)
 	struct pci_device_id *id;
 	pdev = NULL;
 	for(id = amd76xrom_pci_tbl; id->vendor; id++) {
-		pdev = pci_find_device(id->vendor, id->device, NULL);
+		pdev = pci_get_device(id->vendor, id->device, NULL);
 		if (pdev) {
 			break;
 		}
@@ -314,7 +335,7 @@ static int __init init_amd76xrom(void)
 	}
 	return -ENXIO;
 #if 0
-	return pci_module_init(&amd76xrom_driver);
+	return pci_register_driver(&amd76xrom_driver);
 #endif
 }
 

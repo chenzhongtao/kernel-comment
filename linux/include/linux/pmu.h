@@ -6,7 +6,6 @@
  * Copyright (C) 1998 Paul Mackerras.
  */
 
-#include <linux/config.h>
 
 #define PMU_DRIVER_VERSION	2
 
@@ -140,7 +139,7 @@ extern int find_via_pmu(void);
 
 extern int pmu_request(struct adb_request *req,
 		void (*done)(struct adb_request *), int nbytes, ...);
-
+extern int pmu_queue_request(struct adb_request *req);
 extern void pmu_poll(void);
 extern void pmu_poll_adb(void); /* For use by xmon */
 extern void pmu_wait_complete(struct adb_request *req);
@@ -160,13 +159,7 @@ extern void pmu_unlock(void);
 extern int pmu_present(void);
 extern int pmu_get_model(void);
 
-extern int pmu_i2c_combined_read(int bus, int addr, int subaddr,  u8* data, int len);
-extern int pmu_i2c_stdsub_write(int bus, int addr, int subaddr,  u8* data, int len);
-extern int pmu_i2c_simple_read(int bus, int addr,  u8* data, int len);
-extern int pmu_i2c_simple_write(int bus, int addr,  u8* data, int len);
-
-
-#ifdef CONFIG_PMAC_PBOOK
+#ifdef CONFIG_PM
 /*
  * Stuff for putting the powerbook to sleep and waking it again.
  *
@@ -175,24 +168,16 @@ extern int pmu_i2c_simple_write(int bus, int addr,  u8* data, int len);
 
 struct pmu_sleep_notifier
 {
-	int (*notifier_call)(struct pmu_sleep_notifier *self, int when);
+	void (*notifier_call)(struct pmu_sleep_notifier *self, int when);
 	int priority;
 	struct list_head list;
 };
 
 /* Code values for calling sleep/wakeup handlers
- *
- * Note: If a sleep request got cancelled, all drivers will get
- * the PBOOK_SLEEP_REJECT, even those who didn't get the PBOOK_SLEEP_REQUEST.
  */
 #define PBOOK_SLEEP_REQUEST	1
 #define PBOOK_SLEEP_NOW		2
-#define PBOOK_SLEEP_REJECT	3
-#define PBOOK_WAKE		4
-
-/* Result codes returned by the notifiers */
-#define PBOOK_SLEEP_OK		0
-#define PBOOK_SLEEP_REFUSE	-1
+#define PBOOK_WAKE		3
 
 /* priority levels in notifiers */
 #define SLEEP_LEVEL_VIDEO	100	/* Video driver (first wake) */
@@ -207,6 +192,8 @@ struct pmu_sleep_notifier
 /* special register notifier functions */
 int pmu_register_sleep_notifier(struct pmu_sleep_notifier* notifier);
 int pmu_unregister_sleep_notifier(struct pmu_sleep_notifier* notifier);
+
+#endif /* CONFIG_PM */
 
 #define PMU_MAX_BATTERIES	2
 
@@ -235,6 +222,15 @@ extern int pmu_battery_count;
 extern struct pmu_battery_info pmu_batteries[PMU_MAX_BATTERIES];
 extern unsigned int pmu_power_flags;
 
-#endif /* CONFIG_PMAC_PBOOK */
+/* Backlight */
+extern void pmu_backlight_init(void);
+
+/* some code needs to know if the PMU was suspended for hibernation */
+#if defined(CONFIG_PM_SLEEP) && defined(CONFIG_PPC32)
+extern int pmu_sys_suspended;
+#else
+/* if power management is not configured it can't be suspended */
+#define pmu_sys_suspended	0
+#endif
 
 #endif	/* __KERNEL__ */

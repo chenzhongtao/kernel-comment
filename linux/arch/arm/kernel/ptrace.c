@@ -13,11 +13,11 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/security.h>
 #include <linux/init.h>
+#include <linux/signal.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -53,23 +53,6 @@
 #endif
 
 /*
- * Get the address of the live pt_regs for the specified task.
- * These are saved onto the top kernel stack when the process
- * is not running.
- *
- * Note: if a user thread is execve'd from kernel space, the
- * kernel stack will not be empty on entry to the kernel, so
- * ptracing these tasks will fail.
- */
-static inline struct pt_regs *
-get_user_regs(struct task_struct *task)
-{
-	return (struct pt_regs *)
-		((unsigned long)task->thread_info + THREAD_SIZE -
-				 8 - sizeof(struct pt_regs));
-}
-
-/*
  * this routine will get a word off of the processes privileged stack.
  * the offset is how far from the base addr as stored in the THREAD.
  * this routine assumes that all the privileged stacks are in our
@@ -77,7 +60,7 @@ get_user_regs(struct task_struct *task)
  */
 static inline long get_user_reg(struct task_struct *task, int offset)
 {
-	return get_user_regs(task)->uregs[offset];
+	return task_pt_regs(task)->uregs[offset];
 }
 
 /*
@@ -89,7 +72,7 @@ static inline long get_user_reg(struct task_struct *task, int offset)
 static inline int
 put_user_reg(struct task_struct *task, int offset, long data)
 {
-	struct pt_regs newregs, *regs = get_user_regs(task);
+	struct pt_regs newregs, *regs = task_pt_regs(task);
 	int ret = -EINVAL;
 
 	newregs = *regs;
@@ -239,6 +222,15 @@ get_branch_address(struct task_struct *child, unsigned long pc, unsigned long in
 		 * data processing
 		 */
 		long aluop1, aluop2, ccbit;
+
+	        if ((insn & 0x0fffffd0) == 0x012fff10) {
+		        /*
+			 * bx or blx
+			 */
+			alt = get_user_reg(child, insn & 15);
+			break;
+		}
+
 
 		if ((insn & 0xf000) != 0xf000)
 			break;
@@ -390,16 +382,16 @@ static void clear_breakpoint(struct task_struct *task, struct debug_entry *bp)
 
 		if (ret != 2 || old_insn.thumb != BREAKINST_THUMB)
 			printk(KERN_ERR "%s:%d: corrupted Thumb breakpoint at "
-				"0x%08lx (0x%04x)\n", task->comm, task->pid,
-				addr, old_insn.thumb);
+				"0x%08lx (0x%04x)\n", task->comm,
+				task_pid_nr(task), addr, old_insn.thumb);
 	} else {
 		ret = swap_insn(task, addr & ~3, &old_insn.arm,
 				&bp->insn.arm, 4);
 
 		if (ret != 4 || old_insn.arm != BREAKINST_ARM)
 			printk(KERN_ERR "%s:%d: corrupted ARM breakpoint at "
-				"0x%08lx (0x%08x)\n", task->comm, task->pid,
-				addr, old_insn.arm);
+				"0x%08lx (0x%08x)\n", task->comm,
+				task_pid_nr(task), addr, old_insn.arm);
 	}
 }
 
@@ -410,7 +402,7 @@ void ptrace_set_bpt(struct task_struct *child)
 	u32 insn;
 	int res;
 
-	regs = get_user_regs(child);
+	regs = task_pt_regs(child);
 	pc = instruction_pointer(regs);
 
 	if (thumb_mode(regs)) {
@@ -464,13 +456,10 @@ void ptrace_cancel_bpt(struct task_struct *child)
 
 /*
  * Called by kernel/ptrace.c when detaching..
- *
- * Make sure the single step bit is not set.
  */
 void ptrace_disable(struct task_struct *child)
 {
-	child->ptrace &= ~PT_SINGLESTEP;
-	ptrace_cancel_bpt(child);
+	single_step_disable(child);
 }
 
 /*
@@ -561,7 +550,7 @@ static int ptrace_write_user(struct task_struct *tsk, unsigned long off,
  */
 static int ptrace_getregs(struct task_struct *tsk, void __user *uregs)
 {
-	struct pt_regs *regs = get_user_regs(tsk);
+	struct pt_regs *regs = task_pt_regs(tsk);
 
 	return copy_to_user(uregs, regs, sizeof(struct pt_regs)) ? -EFAULT : 0;
 }
@@ -576,7 +565,7 @@ static int ptrace_setregs(struct task_struct *tsk, void __user *uregs)
 
 	ret = -EFAULT;
 	if (copy_from_user(&newregs, uregs, sizeof(struct pt_regs)) == 0) {
-		struct pt_regs *regs = get_user_regs(tsk);
+		struct pt_regs *regs = task_pt_regs(tsk);
 
 		ret = -EINVAL;
 		if (valid_user_regs(&newregs)) {
@@ -593,7 +582,7 @@ static int ptrace_setregs(struct task_struct *tsk, void __user *uregs)
  */
 static int ptrace_getfpregs(struct task_struct *tsk, void __user *ufp)
 {
-	return copy_to_user(ufp, &tsk->thread_info->fpstate,
+	return copy_to_user(ufp, &task_thread_info(tsk)->fpstate,
 			    sizeof(struct user_fp)) ? -EFAULT : 0;
 }
 
@@ -602,15 +591,72 @@ static int ptrace_getfpregs(struct task_struct *tsk, void __user *ufp)
  */
 static int ptrace_setfpregs(struct task_struct *tsk, void __user *ufp)
 {
-	struct thread_info *thread = tsk->thread_info;
+	struct thread_info *thread = task_thread_info(tsk);
 	thread->used_cp[1] = thread->used_cp[2] = 1;
 	return copy_from_user(&thread->fpstate, ufp,
 			      sizeof(struct user_fp)) ? -EFAULT : 0;
 }
 
-static int do_ptrace(int request, struct task_struct *child, long addr, long data)
+#ifdef CONFIG_IWMMXT
+
+/*
+ * Get the child iWMMXt state.
+ */
+static int ptrace_getwmmxregs(struct task_struct *tsk, void __user *ufp)
 {
-	unsigned long tmp;
+	struct thread_info *thread = task_thread_info(tsk);
+
+	if (!test_ti_thread_flag(thread, TIF_USING_IWMMXT))
+		return -ENODATA;
+	iwmmxt_task_disable(thread);  /* force it to ram */
+	return copy_to_user(ufp, &thread->fpstate.iwmmxt, IWMMXT_SIZE)
+		? -EFAULT : 0;
+}
+
+/*
+ * Set the child iWMMXt state.
+ */
+static int ptrace_setwmmxregs(struct task_struct *tsk, void __user *ufp)
+{
+	struct thread_info *thread = task_thread_info(tsk);
+
+	if (!test_ti_thread_flag(thread, TIF_USING_IWMMXT))
+		return -EACCES;
+	iwmmxt_task_release(thread);  /* force a reload */
+	return copy_from_user(&thread->fpstate.iwmmxt, ufp, IWMMXT_SIZE)
+		? -EFAULT : 0;
+}
+
+#endif
+
+#ifdef CONFIG_CRUNCH
+/*
+ * Get the child Crunch state.
+ */
+static int ptrace_getcrunchregs(struct task_struct *tsk, void __user *ufp)
+{
+	struct thread_info *thread = task_thread_info(tsk);
+
+	crunch_task_disable(thread);  /* force it to ram */
+	return copy_to_user(ufp, &thread->crunchstate, CRUNCH_SIZE)
+		? -EFAULT : 0;
+}
+
+/*
+ * Set the child Crunch state.
+ */
+static int ptrace_setcrunchregs(struct task_struct *tsk, void __user *ufp)
+{
+	struct thread_info *thread = task_thread_info(tsk);
+
+	crunch_task_release(thread);  /* force a reload */
+	return copy_from_user(&thread->crunchstate, ufp, CRUNCH_SIZE)
+		? -EFAULT : 0;
+}
+#endif
+
+long arch_ptrace(struct task_struct *child, long request, long addr, long data)
+{
 	int ret;
 
 	switch (request) {
@@ -619,12 +665,7 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 		 */
 		case PTRACE_PEEKTEXT:
 		case PTRACE_PEEKDATA:
-			ret = access_process_vm(child, addr, &tmp,
-						sizeof(unsigned long), 0);
-			if (ret == sizeof(unsigned long))
-				ret = put_user(tmp, (unsigned long __user *) data);
-			else
-				ret = -EIO;
+			ret = generic_ptrace_peekdata(child, addr, data);
 			break;
 
 		case PTRACE_PEEKUSR:
@@ -636,12 +677,7 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 		 */
 		case PTRACE_POKETEXT:
 		case PTRACE_POKEDATA:
-			ret = access_process_vm(child, addr, &data,
-						sizeof(unsigned long), 1);
-			if (ret == sizeof(unsigned long))
-				ret = 0;
-			else
-				ret = -EIO;
+			ret = generic_ptrace_pokedata(child, addr, data);
 			break;
 
 		case PTRACE_POKEUSR:
@@ -654,16 +690,14 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 		case PTRACE_SYSCALL:
 		case PTRACE_CONT:
 			ret = -EIO;
-			if ((unsigned long) data > _NSIG)
+			if (!valid_signal(data))
 				break;
 			if (request == PTRACE_SYSCALL)
 				set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 			else
 				clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 			child->exit_code = data;
-			/* make sure single-step breakpoint is gone. */
-			child->ptrace &= ~PT_SINGLESTEP;
-			ptrace_cancel_bpt(child);
+			single_step_disable(child);
 			wake_up_process(child);
 			ret = 0;
 			break;
@@ -674,9 +708,7 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 		 * exit.
 		 */
 		case PTRACE_KILL:
-			/* make sure single-step breakpoint is gone. */
-			child->ptrace &= ~PT_SINGLESTEP;
-			ptrace_cancel_bpt(child);
+			single_step_disable(child);
 			if (child->exit_state != EXIT_ZOMBIE) {
 				child->exit_code = SIGKILL;
 				wake_up_process(child);
@@ -689,18 +721,14 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 		 */
 		case PTRACE_SINGLESTEP:
 			ret = -EIO;
-			if ((unsigned long) data > _NSIG)
+			if (!valid_signal(data))
 				break;
-			child->ptrace |= PT_SINGLESTEP;
+			single_step_enable(child);
 			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 			child->exit_code = data;
 			/* give it a chance to run. */
 			wake_up_process(child);
 			ret = 0;
-			break;
-
-		case PTRACE_DETACH:
-			ret = ptrace_detach(child, data);
 			break;
 
 		case PTRACE_GETREGS:
@@ -719,10 +747,35 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 			ret = ptrace_setfpregs(child, (void __user *)data);
 			break;
 
+#ifdef CONFIG_IWMMXT
+		case PTRACE_GETWMMXREGS:
+			ret = ptrace_getwmmxregs(child, (void __user *)data);
+			break;
+
+		case PTRACE_SETWMMXREGS:
+			ret = ptrace_setwmmxregs(child, (void __user *)data);
+			break;
+#endif
+
 		case PTRACE_GET_THREAD_AREA:
-			ret = put_user(child->thread_info->tp_value,
+			ret = put_user(task_thread_info(child)->tp_value,
 				       (unsigned long __user *) data);
 			break;
+
+		case PTRACE_SET_SYSCALL:
+			task_thread_info(child)->syscall = data;
+			ret = 0;
+			break;
+
+#ifdef CONFIG_CRUNCH
+		case PTRACE_GETCRUNCHREGS:
+			ret = ptrace_getcrunchregs(child, (void __user *)data);
+			break;
+
+		case PTRACE_SETCRUNCHREGS:
+			ret = ptrace_setcrunchregs(child, (void __user *)data);
+			break;
+#endif
 
 		default:
 			ret = ptrace_request(child, request, addr, data);
@@ -732,61 +785,14 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 	return ret;
 }
 
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
-{
-	struct task_struct *child;
-	int ret;
-
-	lock_kernel();
-	ret = -EPERM;
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-		ret = security_ptrace(current->parent, current);
-		if (ret)
-			goto out;
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
-		goto out;
-	}
-	ret = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-
-	ret = -EPERM;
-	if (pid == 1)		/* you may not mess with init */
-		goto out_tsk;
-
-	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
-		goto out_tsk;
-	}
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret == 0)
-		ret = do_ptrace(request, child, addr, data);
-
-out_tsk:
-	put_task_struct(child);
-out:
-	unlock_kernel();
-	return ret;
-}
-
-asmlinkage void syscall_trace(int why, struct pt_regs *regs)
+asmlinkage int syscall_trace(int why, struct pt_regs *regs, int scno)
 {
 	unsigned long ip;
 
 	if (!test_thread_flag(TIF_SYSCALL_TRACE))
-		return;
+		return scno;
 	if (!(current->ptrace & PT_PTRACED))
-		return;
+		return scno;
 
 	/*
 	 * Save IP.  IP is used to denote syscall entry/exit:
@@ -794,6 +800,8 @@ asmlinkage void syscall_trace(int why, struct pt_regs *regs)
 	 */
 	ip = regs->ARM_ip;
 	regs->ARM_ip = why;
+
+	current_thread_info()->syscall = scno;
 
 	/* the 0x80 provides a way for the tracing parent to distinguish
 	   between a syscall stop and SIGTRAP delivery */
@@ -809,4 +817,6 @@ asmlinkage void syscall_trace(int why, struct pt_regs *regs)
 		current->exit_code = 0;
 	}
 	regs->ARM_ip = ip;
+
+	return current_thread_info()->syscall;
 }

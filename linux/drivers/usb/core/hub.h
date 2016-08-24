@@ -131,7 +131,7 @@ struct usb_hub_descriptor {
 	__u8  bDescLength;
 	__u8  bDescriptorType;
 	__u8  bNbrPorts;
-	__u16 wHubCharacteristics;
+	__le16 wHubCharacteristics;
 	__u8  bPwrOn2PwrGood;
 	__u8  bHubContrCurrent;
 	    	/* add 1 bit for hub status change; round to bytes */
@@ -157,6 +157,12 @@ enum hub_led_mode {
 
 struct usb_device;
 
+/* Transaction Translator Think Times, in bits */
+#define HUB_TTTT_8_BITS		0x00
+#define HUB_TTTT_16_BITS	0x20
+#define HUB_TTTT_24_BITS	0x40
+#define HUB_TTTT_32_BITS	0x60
+
 /*
  * As of USB 2.0, full/low speed devices are segregated into trees.
  * One type grows from USB 1.1 host controllers (OHCI, UHCI etc).
@@ -170,6 +176,7 @@ struct usb_device;
 struct usb_tt {
 	struct usb_device	*hub;	/* upstream highspeed hub */
 	int			multi;	/* true means one TT per port */
+	unsigned		think_time;	/* think time in ns */
 
 	/* for control/bulk error recovery (CLEAR_TT_BUFFER) */
 	spinlock_t		lock;
@@ -184,52 +191,5 @@ struct usb_tt_clear {
 };
 
 extern void usb_hub_tt_clear_buffer (struct usb_device *dev, int pipe);
-
-struct usb_hub {
-	struct device		*intfdev;	/* the "interface" device */
-	struct usb_device	*hdev;
-	struct urb		*urb;		/* for interrupt polling pipe */
-
-	/* buffer for urb ... with extra space in case of babble */
-	char			(*buffer)[8];
-	dma_addr_t		buffer_dma;	/* DMA address for buffer */
-	union {
-		struct usb_hub_status	hub;
-		struct usb_port_status	port;
-	}			*status;	/* buffer for status reports */
-
-	int			error;		/* last reported error */
-	int			nerrors;	/* track consecutive errors */
-
-	struct list_head	event_list;	/* hubs w/data or errs ready */
-	unsigned long		event_bits[1];	/* status change bitmask */
-	unsigned long		change_bits[1];	/* ports with logical connect
-							status change */
-#if USB_MAXCHILDREN > 31 /* 8*sizeof(unsigned long) - 1 */
-#error event_bits[] is too short!
-#endif
-
-	struct usb_hub_descriptor *descriptor;	/* class descriptor */
-	struct usb_tt		tt;		/* Transaction Translator */
-
-	u8			power_budget;	/* in 2mA units; or zero */
-
-	unsigned		quiescing:1;
-
-	unsigned		has_indicators:1;
-	enum hub_led_mode	indicator[USB_MAXCHILDREN];
-	struct work_struct	leds;
-};
-
-/* use this for low-powered root hubs */
-static inline void
-hub_set_power_budget (struct usb_device *hubdev, unsigned mA)
-{
-	struct usb_hub	*hub;
-
-	hub = (struct usb_hub *)
-		usb_get_intfdata (hubdev->actconfig->interface[0]);
-	hub->power_budget = min(mA,(unsigned)500)/2;
-}
 
 #endif /* __LINUX_HUB_H */

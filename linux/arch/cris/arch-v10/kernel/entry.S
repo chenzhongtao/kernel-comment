@@ -1,4 +1,4 @@
-/* $Id: entry.S,v 1.23 2004/10/19 13:07:37 starvik Exp $
+/* $Id: entry.S,v 1.28 2005/06/20 05:06:30 starvik Exp $
  *
  *  linux/arch/cris/entry.S
  *
@@ -7,6 +7,22 @@
  *  Authors:	Bjorn Wesen (bjornw@axis.com)
  *
  *  $Log: entry.S,v $
+ *  Revision 1.28  2005/06/20 05:06:30  starvik
+ *  Remove unnecessary diff to kernel.org tree
+ *
+ *  Revision 1.27  2005/03/04 08:16:16  starvik
+ *  Merge of Linux 2.6.11.
+ *
+ *  Revision 1.26  2005/01/11 13:49:47  starvik
+ *  Added NMI handler.
+ *
+ *  Revision 1.25  2004/12/27 11:18:32  starvik
+ *  Merge of Linux 2.6.10 (not functional yet).
+ *
+ *  Revision 1.24  2004/12/22 10:41:23  starvik
+ *  Updates to make v10 compile with the latest SMP aware generic code (even
+ *  though v10 will never have SMP).
+ *
  *  Revision 1.23  2004/10/19 13:07:37  starvik
  *  Merge of Linux 2.6.9
  *
@@ -81,7 +97,7 @@
  *
  *  Revision 1.36  2001/11/22 13:36:36  bjornw
  *  * In ret_from_intr, check regs->dccr for usermode reentrance instead of
- *    DCCR explicitely (because the latter might not reflect current reality)
+ *    DCCR explicitly (because the latter might not reflect current reality)
  *  * In mmu_bus_fault, set $r9 _after_ calling the C-code instead of before
  *    since $r9 is call-clobbered and is potentially needed afterwards
  *
@@ -247,14 +263,13 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <linux/sys.h>
 #include <asm/unistd.h>
 #include <asm/arch/sv_addr_ag.h>
 #include <asm/errno.h>
 #include <asm/thread_info.h>
-#include <asm/arch/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 
@@ -279,6 +294,7 @@
 #ifdef CONFIG_PREEMPT	
 	; Check if preemptive kernel scheduling should be done
 _resume_kernel:
+	di
 	; Load current task struct
 	movs.w	-8192, $r0	;  THREAD_SIZE = 8192
 	and.d	$sp, $r0
@@ -291,12 +307,7 @@ _need_resched:
 	bpl	_Rexit
 	nop
 	; Ok, lets's do some preemptive kernel scheduling
-	move.d	PREEMPT_ACTIVE, $r10
-	move.d	$r10, [$r0+TI_preempt_count] ; Mark as active
-	ei
-	jsr	schedule
-	clear.d	[$r0+TI_preempt_count] ;  Mark as inactive
-	di
+	jsr	preempt_schedule_irq
 	; Load new task struct
 	movs.w	-8192, $r0	;  THREAD_SIZE = 8192
 	and.d	$sp, $r0
@@ -489,9 +500,8 @@ _work_notifysig:
 	;; deal with pending signals and notify-resume requests
 
 	move.d	$r9, $r10	; do_notify_resume syscall/irq param
-	moveq	0, $r11		; oldset param - 0 in this case
-	move.d	$sp, $r12	; the regs param
-	move.d  $r1, $r13	; the thread_info_flags parameter
+	move.d	$sp, $r11	; the regs param
+	move.d  $r1, $r12	; the thread_info_flags parameter
 	jsr	do_notify_resume
 	
 	ba _Rexit
@@ -590,15 +600,15 @@ mmu_bus_fault:
 	move.d	$r0, [$sp+16]
 1:	btstq	12, $r1		   ; Refill?
 	bpl	2f
-	lsrq	PMD_SHIFT, $r1     ; Get PMD index into PGD (bit 24-31)
-	move.d  [current_pgd], $r0 ; PGD for the current process
+	lsrq	24, $r1     ; Get PGD index (bit 24-31)
+	move.d  [per_cpu__current_pgd], $r0 ; PGD for the current process
 	move.d	[$r0+$r1.d], $r0   ; Get PMD
 	beq	2f
 	nop
 	and.w	PAGE_MASK, $r0	   ; Remove PMD flags
 	move.d  [R_MMU_CAUSE], $r1
 	lsrq	PAGE_SHIFT, $r1
-	and.d	0x7ff, $r1         ; Get PTE index into PMD (bit 13-24)
+	and.d	0x7ff, $r1         ; Get PTE index into PGD (bit 13-23)
 	move.d	[$r0+$r1.d], $r1   ; Get PTE
 	beq	2f
 	nop
@@ -656,11 +666,6 @@ hwbreakpoint:
 	nop
 	
 IRQ1_interrupt:
-
-#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
-;; If we receive a watchdog interrupt while it is not expected, then set
-;; up a canonical frame and dump register contents before dying.
-
 	;; this prologue MUST match the one in irq.h and the struct in ptregs.h!!!
 	move	$brp,[$sp=$sp-16]; instruction pointer and room for a fake SBFS frame
 	push	$srp
@@ -672,9 +677,22 @@ IRQ1_interrupt:
 	push	$r10		; push orig_r10
 	clear.d [$sp=$sp-4]	; frametype == 0, normal frame
 
-;; We don't check that we actually were bit by the watchdog as opposed to
-;; an external NMI, since there is currently no handler for external NMI.
+	;; If there is a glitch on the NMI pin shorter than ~100ns
+	;; (i.e. non-active by the time we get here) then the nmi_pin bit
+	;; in R_IRQ_MASK0_RD will already be cleared.  The watchdog_nmi bit
+	;; is cleared by us however (when feeding the watchdog), which is why
+	;; we use that bit to determine what brought us here.
 
+	move.d	[R_IRQ_MASK0_RD], $r1 ; External NMI or watchdog?
+	and.d   (1<<30), $r1
+	bne	wdog
+	move.d  $sp, $r10
+	jsr	handle_nmi
+	setf m			; Enable NMI again
+	ba	_Rexit		; Return the standard way
+	nop
+wdog:
+#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 ;; Check if we're waiting for reset to happen, as signalled by
 ;; hard_reset_now setting cause_of_death to a magic value.  If so, just
 ;; get stuck until reset happens.
@@ -762,22 +780,9 @@ multiple_interrupt:
 	push	$r10		; push orig_r10
 	clear.d [$sp=$sp-4]	; frametype == 0, normal frame
 	
-	moveq	2, $r2		; first bit we care about is the timer0 irq
-	move.d	[R_VECT_MASK_RD], $r0; read the irq bits that triggered the multiple irq
-	move.d	$r0, [R_VECT_MASK_CLR] ; Block all active IRQs
-1:	
-	btst	$r2, $r0	; check for the irq given by bit r2
-	bpl	2f
-	move.d  $r2, $r10	; First argument to do_IRQ
-	move.d  $sp, $r11	; second argument to do_IRQ
-	jsr	do_IRQ
-2:
-	addq	1, $r2		; next vector bit
-	cmp.b	32, $r2
-	bne	1b	; process all irq's up to and including number 31
-	moveq	0, $r9  ; make ret_from_intr realise we came from an ir
+	move.d  $sp, $r10
+	jsr	do_multiple_IRQ
 	
-	move.d	$r0, [R_VECT_MASK_SET] ;  Unblock all the IRQs
 	jump    ret_from_intr
 
 do_sigtrap:
@@ -824,6 +829,13 @@ _ugdb_handle_breakpoint:
 	ba	do_sigtrap		; SIGTRAP the offending process. 
 	pop	$dccr			; Restore dccr in delay slot.
 	
+	.global kernel_execve
+kernel_execve:
+	move.d __NR_execve, $r9
+	break 13
+	ret
+	nop
+
 	.data
 
 hw_bp_trigs:
@@ -1118,6 +1130,46 @@ sys_call_table:
 	.long sys_mq_getsetattr
 	.long sys_ni_syscall		/* reserved for kexec */
 	.long sys_waitid
+	.long sys_ni_syscall		/* 285 */ /* available */
+	.long sys_add_key
+	.long sys_request_key
+	.long sys_keyctl
+	.long sys_ioprio_set
+	.long sys_ioprio_get		/* 290 */
+	.long sys_inotify_init
+	.long sys_inotify_add_watch
+	.long sys_inotify_rm_watch
+	.long sys_migrate_pages
+	.long sys_openat		/* 295 */
+	.long sys_mkdirat
+	.long sys_mknodat
+	.long sys_fchownat
+	.long sys_futimesat
+	.long sys_fstatat64		/* 300 */
+	.long sys_unlinkat
+	.long sys_renameat
+	.long sys_linkat
+	.long sys_symlinkat
+	.long sys_readlinkat		/* 305 */
+	.long sys_fchmodat
+	.long sys_faccessat
+	.long sys_pselect6
+	.long sys_ppoll
+	.long sys_unshare		/* 310 */
+	.long sys_set_robust_list
+	.long sys_get_robust_list
+	.long sys_splice
+	.long sys_sync_file_range
+	.long sys_tee			/* 315 */
+	.long sys_vmsplice
+	.long sys_move_pages
+	.long sys_getcpu
+	.long sys_epoll_pwait
+	.long sys_utimensat		/* 320 */
+	.long sys_signalfd
+	.long sys_timerfd
+	.long sys_eventfd
+	.long sys_fallocate
 
         /*
          * NOTE!! This doesn't have to be exact - we just have

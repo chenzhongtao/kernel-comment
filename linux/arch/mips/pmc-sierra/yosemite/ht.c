@@ -23,12 +23,10 @@
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/version.h>
 #include <asm/pci.h>
 #include <asm/io.h>
 
@@ -117,7 +115,7 @@ static int titan_ht_config_read_word(struct pci_dev *device,
 
 u32 longswap(unsigned long l)
 {
-        unsigned char b1,b2,b3,b4;
+        unsigned char b1, b2, b3, b4;
 
         b1 = l&255;
         b2 = (l>>8)&255;
@@ -303,7 +301,7 @@ int pcibios_enable_resources(struct pci_dev *dev)
                 if (!r->start && r->end) {
                         printk(KERN_ERR
                                "PCI: Device %s not available because of "
-                               "resource collisions\n", dev->slot_name);
+                               "resource collisions\n", pci_name(dev));
                         return -EINVAL;
                 }
                 if (r->flags & IORESOURCE_IO)
@@ -361,7 +359,7 @@ void pcibios_update_resource(struct pci_dev *dev, struct resource *root,
         if (resource < 6) {
                 reg = PCI_BASE_ADDRESS_0 + 4 * resource;
         } else if (resource == PCI_ROM_RESOURCE) {
-                res->flags |= PCI_ROM_ADDRESS_ENABLE;
+		res->flags |= IORESOURCE_ROM_ENABLE;
                 reg = dev->rom_base_reg;
         } else {
                 /*
@@ -377,26 +375,26 @@ void pcibios_update_resource(struct pci_dev *dev, struct resource *root,
             ((new & PCI_BASE_ADDRESS_SPACE_IO) ? PCI_BASE_ADDRESS_IO_MASK :
              PCI_BASE_ADDRESS_MEM_MASK)) {
                 printk(KERN_ERR "PCI: Error while updating region "
-                       "%s/%d (%08x != %08x)\n", dev->slot_name, resource,
+                       "%s/%d (%08x != %08x)\n", pci_name(dev), resource,
                        new, check);
         }
 }
 
 
 void pcibios_align_resource(void *data, struct resource *res,
-                            unsigned long size, unsigned long align)
+                            resource_size_t size, resource_size_t align)
 {
         struct pci_dev *dev = data;
 
         if (res->flags & IORESOURCE_IO) {
-                unsigned long start = res->start;
+                resource_size_t start = res->start;
 
                 /* We need to avoid collisions with `mirrored' VGA ports
                    and other strange ISA hardware, so we always want the
                    addresses kilobyte aligned.  */
                 if (size > 0x100) {
                         printk(KERN_ERR "PCI: I/O Region %s/%d too large"
-                               " (%ld bytes)\n", dev->slot_name,
+                               " (%ld bytes)\n", pci_name(dev),
                                 dev->resource - res, size);
                 }
 

@@ -11,7 +11,6 @@
  *		 Stefan Bader <shbader@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/bio.h>
@@ -37,20 +36,19 @@ tape_std_assign_timeout(unsigned long data)
 {
 	struct tape_request *	request;
 	struct tape_device *	device;
+	int rc;
 
 	request = (struct tape_request *) data;
 	if ((device = request->device) == NULL)
 		BUG();
 
-	spin_lock_irq(get_ccwdev_lock(device->cdev));
-	if (request->callback != NULL) {
-		DBF_EVENT(3, "%08x: Assignment timeout. Device busy.\n",
+	DBF_EVENT(3, "%08x: Assignment timeout. Device busy.\n",
 			device->cdev_id);
-		PRINT_ERR("%s: Assignment timeout. Device busy.\n",
-			device->cdev->dev.bus_id);
-		ccw_device_clear(device->cdev, (long) request);
-	}
-	spin_unlock_irq(get_ccwdev_lock(device->cdev));
+	rc = tape_cancel_io(device, request);
+	if(rc)
+		PRINT_ERR("(%s): Assign timeout: Cancel failed with rc = %i\n",
+			device->cdev->dev.bus_id, rc);
+
 }
 
 int
@@ -649,7 +647,10 @@ tape_std_mtcompression(struct tape_device *device, int mt_count)
 		return PTR_ERR(request);
 	request->op = TO_NOP;
 	/* setup ccws */
-	*device->modeset_byte = (mt_count == 0) ? 0x00 : 0x08;
+	if (mt_count == 0)
+		*device->modeset_byte &= ~0x08;
+	else
+		*device->modeset_byte |= 0x08;
 	tape_ccw_cc(request->cpaddr, MODE_SET_DB, 1, device->modeset_byte);
 	tape_ccw_end(request->cpaddr + 1, NOP, 0, NULL);
 	/* execute it */

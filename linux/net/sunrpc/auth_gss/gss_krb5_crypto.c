@@ -34,14 +34,16 @@
  * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
  */
 
+#include <linux/err.h>
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <asm/scatterlist.h>
+#include <linux/scatterlist.h>
 #include <linux/crypto.h>
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/sunrpc/gss_krb5.h>
+#include <linux/sunrpc/xdr.h>
 
 #ifdef RPC_DEBUG
 # define RPCDBG_FACILITY        RPCDBG_AUTH
@@ -49,50 +51,43 @@
 
 u32
 krb5_encrypt(
-	struct crypto_tfm *tfm,
+	struct crypto_blkcipher *tfm,
 	void * iv,
 	void * in,
 	void * out,
 	int length)
 {
 	u32 ret = -EINVAL;
-        struct scatterlist sg[1];
+	struct scatterlist sg[1];
 	u8 local_iv[16] = {0};
+	struct blkcipher_desc desc = { .tfm = tfm, .info = local_iv };
 
-	dprintk("RPC:      krb5_encrypt: input data:\n");
-	print_hexl((u32 *)in, length, 0);
-
-	if (length % crypto_tfm_alg_blocksize(tfm) != 0)
+	if (length % crypto_blkcipher_blocksize(tfm) != 0)
 		goto out;
 
-	if (crypto_tfm_alg_ivsize(tfm) > 16) {
-		dprintk("RPC:      gss_k5encrypt: tfm iv size to large %d\n",
-		         crypto_tfm_alg_ivsize(tfm));
+	if (crypto_blkcipher_ivsize(tfm) > 16) {
+		dprintk("RPC:       gss_k5encrypt: tfm iv size to large %d\n",
+			 crypto_blkcipher_ivsize(tfm));
 		goto out;
 	}
 
 	if (iv)
-		memcpy(local_iv, iv, crypto_tfm_alg_ivsize(tfm));
+		memcpy(local_iv, iv, crypto_blkcipher_ivsize(tfm));
 
 	memcpy(out, in, length);
-	sg[0].page = virt_to_page(out);
-	sg[0].offset = offset_in_page(out);
-	sg[0].length = length;
+	sg_init_one(sg, out, length);
 
-	ret = crypto_cipher_encrypt_iv(tfm, sg, sg, length, local_iv);
-
-	dprintk("RPC:      krb5_encrypt: output data:\n");
-	print_hexl((u32 *)out, length, 0);
+	ret = crypto_blkcipher_encrypt_iv(&desc, sg, sg, length);
 out:
-	dprintk("RPC:      krb5_encrypt returns %d\n",ret);
-	return(ret);
+	dprintk("RPC:       krb5_encrypt returns %d\n", ret);
+	return ret;
 }
 
 EXPORT_SYMBOL(krb5_encrypt);
 
 u32
 krb5_decrypt(
-     struct crypto_tfm *tfm,
+     struct crypto_blkcipher *tfm,
      void * iv,
      void * in,
      void * out,
@@ -101,109 +96,243 @@ krb5_decrypt(
 	u32 ret = -EINVAL;
 	struct scatterlist sg[1];
 	u8 local_iv[16] = {0};
+	struct blkcipher_desc desc = { .tfm = tfm, .info = local_iv };
 
-	dprintk("RPC:      krb5_decrypt: input data:\n");
-	print_hexl((u32 *)in, length, 0);
-
-	if (length % crypto_tfm_alg_blocksize(tfm) != 0)
+	if (length % crypto_blkcipher_blocksize(tfm) != 0)
 		goto out;
 
-	if (crypto_tfm_alg_ivsize(tfm) > 16) {
-		dprintk("RPC:      gss_k5decrypt: tfm iv size to large %d\n",
-			crypto_tfm_alg_ivsize(tfm));
+	if (crypto_blkcipher_ivsize(tfm) > 16) {
+		dprintk("RPC:       gss_k5decrypt: tfm iv size to large %d\n",
+			crypto_blkcipher_ivsize(tfm));
 		goto out;
 	}
 	if (iv)
-		memcpy(local_iv,iv, crypto_tfm_alg_ivsize(tfm));
+		memcpy(local_iv,iv, crypto_blkcipher_ivsize(tfm));
 
 	memcpy(out, in, length);
-	sg[0].page = virt_to_page(out);
-	sg[0].offset = offset_in_page(out);
-	sg[0].length = length;
+	sg_init_one(sg, out, length);
 
-	ret = crypto_cipher_decrypt_iv(tfm, sg, sg, length, local_iv);
-
-	dprintk("RPC:      krb5_decrypt: output_data:\n");
-	print_hexl((u32 *)out, length, 0);
+	ret = crypto_blkcipher_decrypt_iv(&desc, sg, sg, length);
 out:
-	dprintk("RPC:      gss_k5decrypt returns %d\n",ret);
-	return(ret);
+	dprintk("RPC:       gss_k5decrypt returns %d\n",ret);
+	return ret;
 }
 
 EXPORT_SYMBOL(krb5_decrypt);
 
-static void
-buf_to_sg(struct scatterlist *sg, char *ptr, int len) {
-	sg->page = virt_to_page(ptr);
-	sg->offset = offset_in_page(ptr);
-	sg->length = len;
+static int
+checksummer(struct scatterlist *sg, void *data)
+{
+	struct hash_desc *desc = data;
+
+	return crypto_hash_update(desc, sg, sg->length);
 }
 
 /* checksum the plaintext data and hdrlen bytes of the token header */
 s32
-make_checksum(s32 cksumtype, char *header, int hdrlen, struct xdr_buf *body,
-		   struct xdr_netobj *cksum)
+make_checksum(char *cksumname, char *header, int hdrlen, struct xdr_buf *body,
+		   int body_offset, struct xdr_netobj *cksum)
 {
-	char                            *cksumname;
-	struct crypto_tfm               *tfm = NULL; /* XXX add to ctx? */
+	struct hash_desc                desc; /* XXX add to ctx? */
 	struct scatterlist              sg[1];
-	u32                             code = GSS_S_FAILURE;
-	int				len, thislen, offset;
-	int				i;
+	int err;
 
-	switch (cksumtype) {
-		case CKSUMTYPE_RSA_MD5:
-			cksumname = "md5";
-			break;
-		default:
-			dprintk("RPC:      krb5_make_checksum:"
-				" unsupported checksum %d", cksumtype);
-			goto out;
-	}
-	if (!(tfm = crypto_alloc_tfm(cksumname, 0)))
+	desc.tfm = crypto_alloc_hash(cksumname, 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(desc.tfm))
+		return GSS_S_FAILURE;
+	cksum->len = crypto_hash_digestsize(desc.tfm);
+	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
+
+	err = crypto_hash_init(&desc);
+	if (err)
 		goto out;
-	cksum->len = crypto_tfm_alg_digestsize(tfm);
-	if ((cksum->data = kmalloc(cksum->len, GFP_KERNEL)) == NULL)
+	sg_init_one(sg, header, hdrlen);
+	err = crypto_hash_update(&desc, sg, hdrlen);
+	if (err)
 		goto out;
+	err = xdr_process_buf(body, body_offset, body->len - body_offset,
+			      checksummer, &desc);
+	if (err)
+		goto out;
+	err = crypto_hash_final(&desc, cksum->data);
 
-	crypto_digest_init(tfm);
-	buf_to_sg(sg, header, hdrlen);
-	crypto_digest_update(tfm, sg, 1);
-	if (body->head[0].iov_len) {
-		buf_to_sg(sg, body->head[0].iov_base, body->head[0].iov_len);
-		crypto_digest_update(tfm, sg, 1);
-	}
-
-	len = body->page_len;
-	if (len != 0) {
-		offset = body->page_base & (PAGE_CACHE_SIZE - 1);
-		i = body->page_base >> PAGE_CACHE_SHIFT;
-		thislen = PAGE_CACHE_SIZE - offset;
-		do {
-			if (thislen > len)
-				thislen = len;
-			sg->page = body->pages[i];
-			sg->offset = offset;
-			sg->length = thislen;
-			kmap(sg->page); /* XXX kmap_atomic? */
-			crypto_digest_update(tfm, sg, 1);
-			kunmap(sg->page);
-			len -= thislen;
-			i++;
-			offset = 0;
-			thislen = PAGE_CACHE_SIZE;
-		} while(len != 0);
-	}
-	if (body->tail[0].iov_len) {
-		buf_to_sg(sg, body->tail[0].iov_base, body->tail[0].iov_len);
-		crypto_digest_update(tfm, sg, 1);
-	}
-	crypto_digest_final(tfm, cksum->data);
-	code = 0;
 out:
-	if (tfm)
-		crypto_free_tfm(tfm);
-	return code;
+	crypto_free_hash(desc.tfm);
+	return err ? GSS_S_FAILURE : 0;
 }
 
 EXPORT_SYMBOL(make_checksum);
+
+struct encryptor_desc {
+	u8 iv[8]; /* XXX hard-coded blocksize */
+	struct blkcipher_desc desc;
+	int pos;
+	struct xdr_buf *outbuf;
+	struct page **pages;
+	struct scatterlist infrags[4];
+	struct scatterlist outfrags[4];
+	int fragno;
+	int fraglen;
+};
+
+static int
+encryptor(struct scatterlist *sg, void *data)
+{
+	struct encryptor_desc *desc = data;
+	struct xdr_buf *outbuf = desc->outbuf;
+	struct page *in_page;
+	int thislen = desc->fraglen + sg->length;
+	int fraglen, ret;
+	int page_pos;
+
+	/* Worst case is 4 fragments: head, end of page 1, start
+	 * of page 2, tail.  Anything more is a bug. */
+	BUG_ON(desc->fragno > 3);
+
+	page_pos = desc->pos - outbuf->head[0].iov_len;
+	if (page_pos >= 0 && page_pos < outbuf->page_len) {
+		/* pages are not in place: */
+		int i = (page_pos + outbuf->page_base) >> PAGE_CACHE_SHIFT;
+		in_page = desc->pages[i];
+	} else {
+		in_page = sg_page(sg);
+	}
+	sg_set_page(&desc->infrags[desc->fragno], in_page, sg->length,
+		    sg->offset);
+	sg_set_page(&desc->outfrags[desc->fragno], sg_page(sg), sg->length,
+		    sg->offset);
+	desc->fragno++;
+	desc->fraglen += sg->length;
+	desc->pos += sg->length;
+
+	fraglen = thislen & 7; /* XXX hardcoded blocksize */
+	thislen -= fraglen;
+
+	if (thislen == 0)
+		return 0;
+
+	sg_mark_end(&desc->infrags[desc->fragno - 1]);
+	sg_mark_end(&desc->outfrags[desc->fragno - 1]);
+
+	ret = crypto_blkcipher_encrypt_iv(&desc->desc, desc->outfrags,
+					  desc->infrags, thislen);
+	if (ret)
+		return ret;
+
+	sg_init_table(desc->infrags, 4);
+	sg_init_table(desc->outfrags, 4);
+
+	if (fraglen) {
+		sg_set_page(&desc->outfrags[0], sg_page(sg), fraglen,
+				sg->offset + sg->length - fraglen);
+		desc->infrags[0] = desc->outfrags[0];
+		sg_assign_page(&desc->infrags[0], in_page);
+		desc->fragno = 1;
+		desc->fraglen = fraglen;
+	} else {
+		desc->fragno = 0;
+		desc->fraglen = 0;
+	}
+	return 0;
+}
+
+int
+gss_encrypt_xdr_buf(struct crypto_blkcipher *tfm, struct xdr_buf *buf,
+		    int offset, struct page **pages)
+{
+	int ret;
+	struct encryptor_desc desc;
+
+	BUG_ON((buf->len - offset) % crypto_blkcipher_blocksize(tfm) != 0);
+
+	memset(desc.iv, 0, sizeof(desc.iv));
+	desc.desc.tfm = tfm;
+	desc.desc.info = desc.iv;
+	desc.desc.flags = 0;
+	desc.pos = offset;
+	desc.outbuf = buf;
+	desc.pages = pages;
+	desc.fragno = 0;
+	desc.fraglen = 0;
+
+	sg_init_table(desc.infrags, 4);
+	sg_init_table(desc.outfrags, 4);
+
+	ret = xdr_process_buf(buf, offset, buf->len - offset, encryptor, &desc);
+	return ret;
+}
+
+EXPORT_SYMBOL(gss_encrypt_xdr_buf);
+
+struct decryptor_desc {
+	u8 iv[8]; /* XXX hard-coded blocksize */
+	struct blkcipher_desc desc;
+	struct scatterlist frags[4];
+	int fragno;
+	int fraglen;
+};
+
+static int
+decryptor(struct scatterlist *sg, void *data)
+{
+	struct decryptor_desc *desc = data;
+	int thislen = desc->fraglen + sg->length;
+	int fraglen, ret;
+
+	/* Worst case is 4 fragments: head, end of page 1, start
+	 * of page 2, tail.  Anything more is a bug. */
+	BUG_ON(desc->fragno > 3);
+	sg_set_page(&desc->frags[desc->fragno], sg_page(sg), sg->length,
+		    sg->offset);
+	desc->fragno++;
+	desc->fraglen += sg->length;
+
+	fraglen = thislen & 7; /* XXX hardcoded blocksize */
+	thislen -= fraglen;
+
+	if (thislen == 0)
+		return 0;
+
+	sg_mark_end(&desc->frags[desc->fragno - 1]);
+
+	ret = crypto_blkcipher_decrypt_iv(&desc->desc, desc->frags,
+					  desc->frags, thislen);
+	if (ret)
+		return ret;
+
+	sg_init_table(desc->frags, 4);
+
+	if (fraglen) {
+		sg_set_page(&desc->frags[0], sg_page(sg), fraglen,
+				sg->offset + sg->length - fraglen);
+		desc->fragno = 1;
+		desc->fraglen = fraglen;
+	} else {
+		desc->fragno = 0;
+		desc->fraglen = 0;
+	}
+	return 0;
+}
+
+int
+gss_decrypt_xdr_buf(struct crypto_blkcipher *tfm, struct xdr_buf *buf,
+		    int offset)
+{
+	struct decryptor_desc desc;
+
+	/* XXXJBF: */
+	BUG_ON((buf->len - offset) % crypto_blkcipher_blocksize(tfm) != 0);
+
+	memset(desc.iv, 0, sizeof(desc.iv));
+	desc.desc.tfm = tfm;
+	desc.desc.info = desc.iv;
+	desc.desc.flags = 0;
+	desc.fragno = 0;
+	desc.fraglen = 0;
+
+	sg_init_table(desc.frags, 4);
+
+	return xdr_process_buf(buf, offset, buf->len - offset, decryptor, &desc);
+}
+
+EXPORT_SYMBOL(gss_decrypt_xdr_buf);

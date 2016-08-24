@@ -6,131 +6,12 @@
 *!
 *! Functions exported: ds1302_readreg, ds1302_writereg, ds1302_init
 *!
-*! $Log: ds1302.c,v $
-*! Revision 1.14  2004/08/24 06:48:43  starvik
-*! Whitespace cleanup
-*!
-*! Revision 1.13  2004/05/28 09:26:59  starvik
-*! Modified I2C initialization to work in 2.6.
-*!
-*! Revision 1.12  2004/05/14 07:58:03  starvik
-*! Merge of changes from 2.4
-*!
-*! Revision 1.10  2004/02/04 09:25:12  starvik
-*! Merge of Linux 2.6.2
-*!
-*! Revision 1.9  2003/07/04 08:27:37  starvik
-*! Merge of Linux 2.5.74
-*!
-*! Revision 1.8  2003/04/09 05:20:47  starvik
-*! Merge of Linux 2.5.67
-*!
-*! Revision 1.6  2003/01/09 14:42:51  starvik
-*! Merge of Linux 2.5.55
-*!
-*! Revision 1.4  2002/12/11 13:13:57  starvik
-*! Added arch/ to v10 specific includes
-*! Added fix from Linux 2.4 in serial.c (flush_to_flip_buffer)
-*!
-*! Revision 1.3  2002/11/20 11:56:10  starvik
-*! Merge of Linux 2.5.48
-*!
-*! Revision 1.2  2002/11/18 13:16:06  starvik
-*! Linux 2.5 port of latest 2.4 drivers
-*!
-*! Revision 1.15  2002/10/11 16:14:33  johana
-*! Added CONFIG_ETRAX_DS1302_TRICKLE_CHARGE and initial setting of the
-*! trcklecharge register.
-*!
-*! Revision 1.14  2002/10/10 12:15:38  magnusmn
-*! Added support for having the RST signal on bit g0
-*!
-*! Revision 1.13  2002/05/29 15:16:08  johana
-*! Removed unused variables.
-*!
-*! Revision 1.12  2002/04/10 15:35:25  johana
-*! Moved probe function closer to init function and marked it __init.
-*!
-*! Revision 1.11  2001/06/14 12:35:52  jonashg
-*! The ATA hack is back. It is unfortunately the only way to set g27 to output.
-*!
-*! Revision 1.9  2001/06/14 10:00:14  jonashg
-*! No need for tempudelay to be inline anymore (had to adjust the usec to
-*! loops conversion because of this to make it slow enough to be a udelay).
-*!
-*! Revision 1.8  2001/06/14 08:06:32  jonashg
-*! Made tempudelay delay usecs (well, just a tad more).
-*!
-*! Revision 1.7  2001/06/13 14:18:11  jonashg
-*! Only allow processes with SYS_TIME capability to set time and charge.
-*!
-*! Revision 1.6  2001/06/12 15:22:07  jonashg
-*! * Made init function __init.
-*! * Parameter to out_byte() is unsigned char.
-*! * The magic number 42 has got a name.
-*! * Removed comment about /proc (nothing is exported there).
-*!
-*! Revision 1.5  2001/06/12 14:35:13  jonashg
-*! Gave the module a name and added it to printk's.
-*!
-*! Revision 1.4  2001/05/31 14:53:40  jonashg
-*! Made tempudelay() inline so that the watchdog doesn't reset (see
-*! function comment).
-*!
-*! Revision 1.3  2001/03/26 16:03:06  bjornw
-*! Needs linux/config.h
-*!
-*! Revision 1.2  2001/03/20 19:42:00  bjornw
-*! Use the ETRAX prefix on the DS1302 options
-*!
-*! Revision 1.1  2001/03/20 09:13:50  magnusmn
-*! Linux 2.4 port
-*!
-*! Revision 1.10  2000/07/05 15:38:23  bjornw
-*! Dont update kernel time when a RTC_SET_TIME is done
-*!
-*! Revision 1.9  2000/03/02 15:42:59  macce
-*! * Hack to make RTC work on all 2100/2400
-*!
-*! Revision 1.8  2000/02/23 16:59:18  torbjore
-*! added setup of R_GEN_CONFIG when RTC is connected to the generic port.
-*!
-*! Revision 1.7  2000/01/17 15:51:43  johana
-*! Added RTC_SET_CHARGE ioctl to enable trickle charger.
-*!
-*! Revision 1.6  1999/10/27 13:19:47  bjornw
-*! Added update_xtime_from_cmos which reads back the updated RTC into the kernel.
-*! /dev/rtc calls it now.
-*!
-*! Revision 1.5  1999/10/27 12:39:37  bjornw
-*! Disabled superuser check. Anyone can now set the time.
-*!
-*! Revision 1.4  1999/09/02 13:27:46  pkj
-*! Added shadow for R_PORT_PB_CONFIG.
-*! Renamed port_g_shadow to port_g_data_shadow.
-*!
-*! Revision 1.3  1999/09/02 08:28:06  pkj
-*! Made it possible to select either port PB or the generic port for the RST
-*! signal line to the DS1302 RTC.
-*! Also make sure the RST bit is configured as output on Port PB (if used).
-*!
-*! Revision 1.2  1999/09/01 14:47:20  bjornw
-*! Added support for /dev/rtc operations with ioctl RD_TIME and SET_TIME to read
-*! and set the date. Register as major 121.
-*!
-*! Revision 1.1  1999/09/01 09:45:29  bjornw
-*! Implemented a DS1302 RTC driver.
-*!
-*!
 *! ---------------------------------------------------------------------------
 *!
-*! (C) Copyright 1999, 2000, 2001  Axis Communications AB, LUND, SWEDEN
-*!
-*! $Id: ds1302.c,v 1.14 2004/08/24 06:48:43 starvik Exp $
+*! (C) Copyright 1999-2007 Axis Communications AB, LUND, SWEDEN
 *!
 *!***************************************************************************/
 
-#include <linux/config.h>
 
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -139,12 +20,16 @@
 #include <linux/miscdevice.h>
 #include <linux/delay.h>
 #include <linux/bcd.h>
+#include <linux/capability.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/arch/svinto.h>
 #include <asm/io.h>
 #include <asm/rtc.h>
+#include <asm/arch/io_interface_mux.h>
+
+#include "i2c.h"
 
 #define RTC_MAJOR_NR 121 /* local major, change later */
 
@@ -320,7 +205,6 @@ get_rtc_time(struct rtc_time *rtc_tm)
 	unsigned long flags;
 
 	local_irq_save(flags);
-	local_irq_disable();
 
 	rtc_tm->tm_sec = CMOS_READ(RTC_SECONDS);
 	rtc_tm->tm_min = CMOS_READ(RTC_MINUTES);
@@ -358,7 +242,7 @@ static int
 rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	  unsigned long arg) 
 {
-        unsigned long flags;
+	unsigned long flags;
 
 	switch(cmd) {
 		case RTC_RD_TIME:	/* read the time/date from RTC	*/
@@ -382,7 +266,7 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 				return -EPERM;
 
 			if (copy_from_user(&rtc_tm, (struct rtc_time*)arg, sizeof(struct rtc_time)))
-				return -EFAULT;    	
+				return -EFAULT;
 
 			yrs = rtc_tm.tm_year + 1900;
 			mon = rtc_tm.tm_mon + 1;   /* tm_mon starts at zero */
@@ -419,7 +303,6 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			BIN_TO_BCD(yrs);
 
 			local_irq_save(flags);
-			local_irq_disable();
 			CMOS_WRITE(yrs, RTC_YEAR);
 			CMOS_WRITE(mon, RTC_MONTH);
 			CMOS_WRITE(day, RTC_DAY_OF_MONTH);
@@ -438,7 +321,7 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 		case RTC_SET_CHARGE: /* set the RTC TRICKLE CHARGE register */
 		{
-			int tcs_val;                        
+			int tcs_val;
 
 			if (!capable(CAP_SYS_TIME))
 				return -EPERM;
@@ -491,9 +374,9 @@ print_rtc_status(void)
 
 /* The various file operations we support. */
 
-static struct file_operations rtc_fops = {
-        .owner          = THIS_MODULE,
-        .ioctl          = rtc_ioctl,	
+static const struct file_operations rtc_fops = {
+	.owner =	THIS_MODULE,
+	.ioctl =	rtc_ioctl,
 }; 
 
 /* Probe for the chip by writing something to its RAM and try reading it back. */
@@ -532,7 +415,7 @@ ds1302_probe(void)
 		       "PB",
 #endif
 		       CONFIG_ETRAX_DS1302_RSTBIT);
-                print_rtc_status();
+		       print_rtc_status();
 		retval = 1;
 	} else {
 		stop();
@@ -548,7 +431,9 @@ ds1302_probe(void)
 int __init
 ds1302_init(void) 
 {
+#ifdef CONFIG_ETRAX_I2C
 	i2c_init();
+#endif
 
 	if (!ds1302_probe()) {
 #ifdef CONFIG_ETRAX_DS1302_RST_ON_GENERIC_PORT
@@ -558,25 +443,42 @@ ds1302_init(void)
 		 *
 		 * Make sure that R_GEN_CONFIG is setup correct.
 		 */
-    		genconfig_shadow = ((genconfig_shadow &
-				     ~IO_MASK(R_GEN_CONFIG, ata)) | 
-				   (IO_STATE(R_GEN_CONFIG, ata, select)));    
-    		*R_GEN_CONFIG = genconfig_shadow;
+		/* Allocating the ATA interface will grab almost all
+		 * pins in I/O groups a, b, c and d.  A consequence of
+		 * allocating the ATA interface is that the fixed
+		 * interfaces shared RAM, parallel port 0, parallel
+		 * port 1, parallel port W, SCSI-8 port 0, SCSI-8 port
+		 * 1, SCSI-W, serial port 2, serial port 3,
+		 * synchronous serial port 3 and USB port 2 and almost
+		 * all GPIO pins on port g cannot be used.
+		 */
+		if (cris_request_io_interface(if_ata, "ds1302/ATA")) {
+			printk(KERN_WARNING "ds1302: Failed to get IO interface\n");
+			return -1;
+		}
+
 #elif CONFIG_ETRAX_DS1302_RSTBIT == 0
-		
-		/* Set the direction of this bit to out. */		
-    		genconfig_shadow = ((genconfig_shadow &
-				     ~IO_MASK(R_GEN_CONFIG, g0dir)) | 
-				   (IO_STATE(R_GEN_CONFIG, g0dir, out)));    
-    		*R_GEN_CONFIG = genconfig_shadow;
+		if (cris_io_interface_allocate_pins(if_gpio_grp_a,
+						    'g',
+						    CONFIG_ETRAX_DS1302_RSTBIT,
+						    CONFIG_ETRAX_DS1302_RSTBIT)) {
+			printk(KERN_WARNING "ds1302: Failed to get IO interface\n");
+			return -1;
+		}
+
+		/* Set the direction of this bit to out. */
+		genconfig_shadow = ((genconfig_shadow &
+ 				     ~IO_MASK(R_GEN_CONFIG, g0dir)) |
+ 				   (IO_STATE(R_GEN_CONFIG, g0dir, out)));
+		*R_GEN_CONFIG = genconfig_shadow;
 #endif
 		if (!ds1302_probe()) {
 			printk(KERN_WARNING "%s: RTC not found.\n", ds1302_name);
-      			return -1;
+			return -1;
 		}
 #else
 		printk(KERN_WARNING "%s: RTC not found.\n", ds1302_name);
-    		return -1;
+		return -1;
 #endif
   	}
 	/* Initialise trickle charger */

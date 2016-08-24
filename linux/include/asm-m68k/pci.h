@@ -43,7 +43,7 @@ static inline void pcibios_set_master(struct pci_dev *dev)
 	/* No special bus mastering setup handling */
 }
 
-static inline void pcibios_penalize_isa_irq(int irq)
+static inline void pcibios_penalize_isa_irq(int irq, int active)
 {
 	/* We don't do dynamic PCI IRQ allocation */
 }
@@ -53,9 +53,5 @@ static inline void pcibios_penalize_isa_irq(int irq)
  * this boolean for bounce buffer decisions.
  */
 #define PCI_DMA_BUS_IS_PHYS	(1)
-
-static inline void pcibios_add_platform_entries(struct pci_dev *dev)
-{
-}
 
 #endif /* _ASM_M68K_PCI_H */

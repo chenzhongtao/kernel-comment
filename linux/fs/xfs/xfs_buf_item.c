@@ -1,57 +1,33 @@
 /*
- * Copyright (c) 2000-2004 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
-/*
- * This file contains the implementation of the xfs_buf_log_item.
- * It contains the item operations used to manipulate the buf log
- * items as well as utility routines used by the buffer specific
- * transaction routines.
- */
-
 #include "xfs.h"
-
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
+#include "xfs_bit.h"
 #include "xfs_log.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
-#include "xfs_buf_item.h"
 #include "xfs_sb.h"
-#include "xfs_dir.h"
+#include "xfs_ag.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
+#include "xfs_buf_item.h"
 #include "xfs_trans_priv.h"
-#include "xfs_rw.h"
-#include "xfs_bit.h"
 #include "xfs_error.h"
 
 
@@ -122,12 +98,12 @@ xfs_buf_item_flush_log_debug(
 }
 
 /*
- * This function is called to verify that our caller's have logged
+ * This function is called to verify that our callers have logged
  * all the bytes that they changed.
  *
  * It does this by comparing the original copy of the buffer stored in
  * the buf log item's bli_orig array to the current copy of the buffer
- * and ensuring that all bytes which miscompare are set in the bli_logged
+ * and ensuring that all bytes which mismatch are set in the bli_logged
  * array of the buf log item.
  */
 STATIC void
@@ -172,7 +148,7 @@ STATIC void	xfs_buf_do_callbacks(xfs_buf_t *bp, xfs_log_item_t *lip);
  *
  * If the XFS_BLI_STALE flag has been set, then log nothing.
  */
-uint
+STATIC uint
 xfs_buf_item_size(
 	xfs_buf_log_item_t	*bip)
 {
@@ -240,7 +216,7 @@ xfs_buf_item_size(
  * format structure, and the rest point to contiguous chunks
  * within the buffer.
  */
-void
+STATIC void
 xfs_buf_item_format(
 	xfs_buf_log_item_t	*bip,
 	xfs_log_iovec_t		*log_vector)
@@ -259,7 +235,6 @@ xfs_buf_item_format(
 	ASSERT((bip->bli_flags & XFS_BLI_LOGGED) ||
 	       (bip->bli_flags & XFS_BLI_STALE));
 	bp = bip->bli_buf;
-	ASSERT(XFS_BUF_BP_ISMAPPED(bp));
 	vecp = log_vector;
 
 	/*
@@ -274,6 +249,7 @@ xfs_buf_item_format(
 		       ((bip->bli_format.blf_map_size - 1) * sizeof(uint)));
 	vecp->i_addr = (xfs_caddr_t)&bip->bli_format;
 	vecp->i_len = base_size;
+	XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_BFORMAT);
 	vecp++;
 	nvecs = 1;
 
@@ -320,12 +296,14 @@ xfs_buf_item_format(
 			buffer_offset = first_bit * XFS_BLI_CHUNK;
 			vecp->i_addr = xfs_buf_offset(bp, buffer_offset);
 			vecp->i_len = nbits * XFS_BLI_CHUNK;
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_BCHUNK);
 			nvecs++;
 			break;
 		} else if (next_bit != last_bit + 1) {
 			buffer_offset = first_bit * XFS_BLI_CHUNK;
 			vecp->i_addr = xfs_buf_offset(bp, buffer_offset);
 			vecp->i_len = nbits * XFS_BLI_CHUNK;
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_BCHUNK);
 			nvecs++;
 			vecp++;
 			first_bit = next_bit;
@@ -337,6 +315,7 @@ xfs_buf_item_format(
 			buffer_offset = first_bit * XFS_BLI_CHUNK;
 			vecp->i_addr = xfs_buf_offset(bp, buffer_offset);
 			vecp->i_len = nbits * XFS_BLI_CHUNK;
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_BCHUNK);
 /* You would think we need to bump the nvecs here too, but we do not
  * this number is used by recovery, and it gets confused by the boundary
  * split here
@@ -365,7 +344,7 @@ xfs_buf_item_format(
  * item in memory so it cannot be written out.  Simply call bpin()
  * on the buffer to do this.
  */
-void
+STATIC void
 xfs_buf_item_pin(
 	xfs_buf_log_item_t	*bip)
 {
@@ -391,7 +370,7 @@ xfs_buf_item_pin(
  * If the XFS_BLI_STALE flag is set and we are the last reference,
  * then free up the buf log item and unlock the buffer.
  */
-void
+STATIC void
 xfs_buf_item_unpin(
 	xfs_buf_log_item_t	*bip,
 	int			stale)
@@ -446,7 +425,7 @@ xfs_buf_item_unpin(
  * so we need to free the item's descriptor (that points to the item)
  * in the transaction.
  */
-void
+STATIC void
 xfs_buf_item_unpin_remove(
 	xfs_buf_log_item_t	*bip,
 	xfs_trans_t		*tp)
@@ -493,7 +472,7 @@ xfs_buf_item_unpin_remove(
  * the lock right away, return 0.  If we can get the lock, pull the
  * buffer from the free list, mark it busy, and return 1.
  */
-uint
+STATIC uint
 xfs_buf_item_trylock(
 	xfs_buf_log_item_t	*bip)
 {
@@ -537,7 +516,7 @@ xfs_buf_item_trylock(
  * This is for support of xfs_trans_bhold(). Make sure the
  * XFS_BLI_HOLD field is cleared if we don't free the item.
  */
-void
+STATIC void
 xfs_buf_item_unlock(
 	xfs_buf_log_item_t	*bip)
 {
@@ -602,8 +581,8 @@ xfs_buf_item_unlock(
 	 * If the buf item isn't tracking any data, free it.
 	 * Otherwise, if XFS_BLI_HOLD is set clear it.
 	 */
-	if (xfs_count_bits(bip->bli_format.blf_data_map,
-			      bip->bli_format.blf_map_size, 0) == 0) {
+	if (xfs_bitmap_empty(bip->bli_format.blf_data_map,
+			     bip->bli_format.blf_map_size)) {
 		xfs_buf_item_relse(bp);
 	} else if (hold) {
 		bip->bli_flags &= ~XFS_BLI_HOLD;
@@ -635,7 +614,7 @@ xfs_buf_item_unlock(
  * by returning the original lsn of that transaction here rather than
  * the current one.
  */
-xfs_lsn_t
+STATIC xfs_lsn_t
 xfs_buf_item_committed(
 	xfs_buf_log_item_t	*bip,
 	xfs_lsn_t		lsn)
@@ -649,32 +628,13 @@ xfs_buf_item_committed(
 }
 
 /*
- * This is called when the transaction holding the buffer is aborted.
- * Just behave as if the transaction had been cancelled. If we're shutting down
- * and have aborted this transaction, we'll trap this buffer when it tries to
- * get written out.
- */
-void
-xfs_buf_item_abort(
-	xfs_buf_log_item_t	*bip)
-{
-	xfs_buf_t	*bp;
-
-	bp = bip->bli_buf;
-	xfs_buftrace("XFS_ABORT", bp);
-	XFS_BUF_SUPER_STALE(bp);
-	xfs_buf_item_unlock(bip);
-	return;
-}
-
-/*
  * This is called to asynchronously write the buffer associated with this
  * buf log item out to disk. The buffer will already have been locked by
  * a successful call to xfs_buf_item_trylock().  If the buffer still has
  * B_DELWRI set, then get it going out to disk with a call to bawrite().
  * If not, then just release the buffer.
  */
-void
+STATIC void
 xfs_buf_item_push(
 	xfs_buf_log_item_t	*bip)
 {
@@ -693,7 +653,7 @@ xfs_buf_item_push(
 }
 
 /* ARGSUSED */
-void
+STATIC void
 xfs_buf_item_committing(xfs_buf_log_item_t *bip, xfs_lsn_t commit_lsn)
 {
 }
@@ -701,7 +661,7 @@ xfs_buf_item_committing(xfs_buf_log_item_t *bip, xfs_lsn_t commit_lsn)
 /*
  * This is the ops vector shared by all buf log items.
  */
-struct xfs_item_ops xfs_buf_item_ops = {
+static struct xfs_item_ops xfs_buf_item_ops = {
 	.iop_size	= (uint(*)(xfs_log_item_t*))xfs_buf_item_size,
 	.iop_format	= (void(*)(xfs_log_item_t*, xfs_log_iovec_t*))
 					xfs_buf_item_format,
@@ -714,7 +674,6 @@ struct xfs_item_ops xfs_buf_item_ops = {
 	.iop_committed	= (xfs_lsn_t(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_buf_item_committed,
 	.iop_push	= (void(*)(xfs_log_item_t*))xfs_buf_item_push,
-	.iop_abort	= (void(*)(xfs_log_item_t*))xfs_buf_item_abort,
 	.iop_pushbuf	= NULL,
 	.iop_committing = (void(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_buf_item_committing
@@ -922,7 +881,6 @@ xfs_buf_item_relse(
 	XFS_BUF_SET_FSPRIVATE(bp, bip->bli_item.li_bio_list);
 	if ((XFS_BUF_FSPRIVATE(bp, void *) == NULL) &&
 	    (XFS_BUF_IODONE_FUNC(bp) != NULL)) {
-		ASSERT((XFS_BUF_ISUNINITIAL(bp)) == 0);
 		XFS_BUF_CLR_IODONE_FUNC(bp);
 	}
 
@@ -1050,9 +1008,9 @@ xfs_buf_iodone_callbacks(
 		if ((XFS_BUF_TARGET(bp) != lasttarg) ||
 		    (time_after(jiffies, (lasttime + 5*HZ)))) {
 			lasttime = jiffies;
-			prdev("XFS write error in file system meta-data "
-			      "block 0x%llx in %s",
-			      XFS_BUF_TARGET(bp),
+			cmn_err(CE_ALERT, "Device %s, XFS metadata write error"
+					" block 0x%llx in %s",
+				XFS_BUFTARG_NAME(XFS_BUF_TARGET(bp)),
 			      (__uint64_t)XFS_BUF_ADDR(bp), mp->m_fsname);
 		}
 		lasttarg = XFS_BUF_TARGET(bp);
@@ -1128,7 +1086,7 @@ xfs_buf_error_relse(
 	XFS_BUF_ERROR(bp,0);
 	xfs_buftrace("BUF_ERROR_RELSE", bp);
 	if (! XFS_FORCED_SHUTDOWN(mp))
-		xfs_force_shutdown(mp, XFS_METADATA_IO_ERROR);
+		xfs_force_shutdown(mp, SHUTDOWN_META_IO_ERROR);
 	/*
 	 * We have to unpin the pinned buffers so do the
 	 * callbacks.

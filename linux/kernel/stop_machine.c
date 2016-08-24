@@ -1,11 +1,18 @@
-#include <linux/stop_machine.h>
-#include <linux/kthread.h>
-#include <linux/sched.h>
+/* Copyright 2005 Rusty Russell rusty@rustcorp.com.au IBM Corporation.
+ * GPL v2 and any later version.
+ */
 #include <linux/cpu.h>
 #include <linux/err.h>
+#include <linux/kthread.h>
+#include <linux/module.h>
+#include <linux/sched.h>
+#include <linux/stop_machine.h>
 #include <linux/syscalls.h>
+#include <linux/interrupt.h>
+
 #include <asm/atomic.h>
 #include <asm/semaphore.h>
+#include <asm/uaccess.h>
 
 /* Since we effect priority and affinity (both of which are visible
  * to, and settable by outside processes) we do indirection via a
@@ -32,7 +39,7 @@ static int stopmachine(void *cpu)
 	set_cpus_allowed(current, cpumask_of_cpu((int)(long)cpu));
 
 	/* Ack: we are alive */
-	mb(); /* Theoretically the ack = 0 might not be on this CPU yet. */
+	smp_mb(); /* Theoretically the ack = 0 might not be on this CPU yet. */
 	atomic_inc(&stopmachine_thread_ack);
 
 	/* Simple state machine */
@@ -40,16 +47,17 @@ static int stopmachine(void *cpu)
 		if (stopmachine_state == STOPMACHINE_DISABLE_IRQ 
 		    && !irqs_disabled) {
 			local_irq_disable();
+			hard_irq_disable();
 			irqs_disabled = 1;
 			/* Ack: irqs disabled. */
-			mb(); /* Must read state first. */
+			smp_mb(); /* Must read state first. */
 			atomic_inc(&stopmachine_thread_ack);
 		} else if (stopmachine_state == STOPMACHINE_PREPARE
 			   && !prepared) {
 			/* Everyone is in place, hold CPU. */
 			preempt_disable();
 			prepared = 1;
-			mb(); /* Must read state first. */
+			smp_mb(); /* Must read state first. */
 			atomic_inc(&stopmachine_thread_ack);
 		}
 		/* Yield in first stage: migration threads need to
@@ -61,7 +69,7 @@ static int stopmachine(void *cpu)
 	}
 
 	/* Ack: we are exiting. */
-	mb(); /* Must read state first. */
+	smp_mb(); /* Must read state first. */
 	atomic_inc(&stopmachine_thread_ack);
 
 	if (irqs_disabled)
@@ -76,7 +84,7 @@ static int stopmachine(void *cpu)
 static void stopmachine_set_state(enum stopmachine_state state)
 {
 	atomic_set(&stopmachine_thread_ack, 0);
-	wmb();
+	smp_wmb();
 	stopmachine_state = state;
 	while (atomic_read(&stopmachine_thread_ack) != stopmachine_num_threads)
 		cpu_relax();
@@ -85,17 +93,13 @@ static void stopmachine_set_state(enum stopmachine_state state)
 static int stop_machine(void)
 {
 	int i, ret = 0;
-	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
-
-	/* One high-prio thread per cpu.  We'll do this one. */
-	sys_sched_setscheduler(current->pid, SCHED_FIFO, &param);
 
 	atomic_set(&stopmachine_thread_ack, 0);
 	stopmachine_num_threads = 0;
 	stopmachine_state = STOPMACHINE_WAIT;
 
 	for_each_online_cpu(i) {
-		if (i == _smp_processor_id())
+		if (i == raw_smp_processor_id())
 			continue;
 		ret = kernel_thread(stopmachine, (void *)(long)i,CLONE_KERNEL);
 		if (ret < 0)
@@ -110,17 +114,16 @@ static int stop_machine(void)
 	/* If some failed, kill them all. */
 	if (ret < 0) {
 		stopmachine_set_state(STOPMACHINE_EXIT);
-		up(&stopmachine_mutex);
 		return ret;
 	}
 
-	/* Don't schedule us away at this point, please. */
-	local_irq_disable();
-
 	/* Now they are all started, make them hold the CPUs, ready. */
+	preempt_disable();
 	stopmachine_set_state(STOPMACHINE_PREPARE);
 
 	/* Make them disable irqs. */
+	local_irq_disable();
+	hard_irq_disable();
 	stopmachine_set_state(STOPMACHINE_DISABLE_IRQ);
 
 	return 0;
@@ -130,6 +133,7 @@ static void restart_machine(void)
 {
 	stopmachine_set_state(STOPMACHINE_EXIT);
 	local_irq_enable();
+	preempt_enable_no_resched();
 }
 
 struct stop_machine_data
@@ -177,10 +181,14 @@ struct task_struct *__stop_machine_run(int (*fn)(void *), void *data,
 
 	/* If they don't care which CPU fn runs on, bind to any online one. */
 	if (cpu == NR_CPUS)
-		cpu = _smp_processor_id();
+		cpu = raw_smp_processor_id();
 
 	p = kthread_create(do_stop, &smdata, "kstopmachine");
 	if (!IS_ERR(p)) {
+		struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
+
+		/* One high-prio thread per cpu.  We'll do this one. */
+		sched_setscheduler(p, SCHED_FIFO, &param);
 		kthread_bind(p, cpu);
 		wake_up_process(p);
 		wait_for_completion(&smdata.done);
@@ -205,3 +213,4 @@ int stop_machine_run(int (*fn)(void *), void *data, unsigned int cpu)
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(stop_machine_run);

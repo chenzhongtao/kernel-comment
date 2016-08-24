@@ -40,10 +40,7 @@ struct pxafb_dma_descriptor {
 struct pxafb_info {
 	struct fb_info		fb;
 	struct device		*dev;
-
-	u_int			max_bpp;
-	u_int			max_xres;
-	u_int			max_yres;
+	struct clk		*clk;
 
 	/*
 	 * These are the addresses we mapped
@@ -74,6 +71,7 @@ struct pxafb_info {
 
 	u_int			lccr0;
 	u_int			lccr3;
+	u_int			lccr4;
 	u_int			cmap_inverse:1,
 				cmap_static:1,
 				unused:30;
@@ -82,6 +80,9 @@ struct pxafb_info {
 	u_int			reg_lccr1;
 	u_int			reg_lccr2;
 	u_int			reg_lccr3;
+	u_int			reg_lccr4;
+
+	unsigned long	hsync_time;
 
 	volatile u_char		state;
 	volatile u_char		task_state;
@@ -110,15 +111,6 @@ struct pxafb_info {
 #define C_STARTUP		(7)
 
 #define PXA_NAME	"PXA"
-
-/*
- *  Debug macros
- */
-#if DEBUG
-#  define DPRINTK(fmt, args...)	printk("%s: " fmt, __FUNCTION__ , ## args)
-#else
-#  define DPRINTK(fmt, args...)
-#endif
 
 /*
  * Minimum X and Y resolutions

@@ -191,13 +191,6 @@ static struct devlist smc_devlist[] __initdata = {
 /* store this information for the driver.. */
 struct smc_local {
 	/*
- 	   these are things that the kernel wants me to keep, so users
-	   can find out semi-useless statistics of how well the card is
-	   performing
- 	*/
-	struct net_device_stats stats;
-
-	/*
 	   If I have to wait until memory is available to send
 	   a packet, I will store the skbuff here, until I get the
 	   desired memory.  Then, I'll send it out and free it.
@@ -249,12 +242,6 @@ static void smc_timeout(struct net_device *dev);
 static int smc_close(struct net_device *dev);
 
 /*
- . This routine allows the proc file system to query the driver's
- . statistics.
-*/
-static struct net_device_stats * smc_query_statistics( struct net_device *dev);
-
-/*
  . Finally, a call to set promiscuous mode ( for TCPDUMP and related
  . programs ) and multicast modes.
 */
@@ -270,7 +257,7 @@ static void smc_set_multicast_list(struct net_device *dev);
 /*
  . Handles the actual interrupt
 */
-static irqreturn_t smc_interrupt(int irq, void *, struct pt_regs *regs);
+static irqreturn_t smc_interrupt(int irq, void *);
 /*
  . This is a separate procedure to handle the receipt of a packet, to
  . leave the interrupt code looking slightly cleaner
@@ -514,7 +501,7 @@ static int smc_wait_to_send_packet( struct sk_buff * skb, struct net_device * de
 
 	if ( lp->saved_skb) {
 		/* THIS SHOULD NEVER HAPPEN. */
-		lp->stats.tx_aborted_errors++;
+		dev->stats.tx_aborted_errors++;
 		printk(CARDNAME": Bad Craziness - sent packet while busy.\n" );
 		return 1;
 	}
@@ -523,14 +510,13 @@ static int smc_wait_to_send_packet( struct sk_buff * skb, struct net_device * de
 	length = skb->len;
 
 	if (length < ETH_ZLEN) {
-		skb = skb_padto(skb, ETH_ZLEN);
-		if (skb == NULL) {
+		if (skb_padto(skb, ETH_ZLEN)) {
 			netif_wake_queue(dev);
 			return 0;
 		}
 		length = ETH_ZLEN;
 	}
-		
+
 	/*
 	** The MMU wants the number of pages to be the number of 256 bytes
 	** 'pages', minus 1 ( since a packet can't ever have 0 pages :) )
@@ -732,12 +718,9 @@ static int ifport;
 struct net_device * __init smc_init(int unit)
 {
 	struct net_device *dev = alloc_etherdev(sizeof(struct smc_local));
-	static struct devlist *smcdev = smc_devlist;
+	struct devlist *smcdev = smc_devlist;
 	int err = 0;
 
-#ifndef NO_AUTOPROBE
-	smcdev = smc_devlist;
-#endif
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 
@@ -747,8 +730,6 @@ struct net_device * __init smc_init(int unit)
 		io = dev->base_addr;
 		irq = dev->irq;
 	}
-
-	SET_MODULE_OWNER(dev);
 
 	if (io > 0x1ff) {	/* Check a single specified location. */
 		err = smc_probe(dev, io);
@@ -894,6 +875,8 @@ static int __init smc_probe(struct net_device *dev, int ioaddr)
 	word configuration_register;
 	word memory_info_register;
 	word memory_cfg_register;
+
+	DECLARE_MAC_BUF(mac);
 
 	/* Grab the region so that no one else tries to probe our ioports. */
 	if (!request_region(ioaddr, SMC_IO_EXTENT, DRV_NAME))
@@ -1050,10 +1033,7 @@ static int __init smc_probe(struct net_device *dev, int ioaddr)
 	/*
 	 . Print the Ethernet address
 	*/
-	printk("ADDR: ");
-	for (i = 0; i < 5; i++)
-		printk("%2.2x:", dev->dev_addr[i] );
-	printk("%2.2x \n", dev->dev_addr[5] );
+	printk("ADDR: %s\n", print_mac(mac, dev->dev_addr));
 
 	/* set the private data to zero by default */
 	memset(dev->priv, 0, sizeof(struct smc_local));
@@ -1071,7 +1051,6 @@ static int __init smc_probe(struct net_device *dev, int ioaddr)
 	dev->hard_start_xmit    	= smc_wait_to_send_packet;
 	dev->tx_timeout		    	= smc_timeout;
 	dev->watchdog_timeo		= HZ/20;
-	dev->get_stats			= smc_query_statistics;
 	dev->set_multicast_list 	= smc_set_multicast_list;
 
 	return 0;
@@ -1163,7 +1142,7 @@ static int smc_open(struct net_device *dev)
 		address  |= dev->dev_addr[ i ];
 		outw( address, ioaddr + ADDR0 + i );
 	}
-	
+
 	netif_start_queue(dev);
 	return 0;
 }
@@ -1205,7 +1184,6 @@ static void smc_timeout(struct net_device *dev)
 */
 static void smc_rcv(struct net_device *dev)
 {
-	struct smc_local *lp = netdev_priv(dev);
 	int 	ioaddr = dev->base_addr;
 	int 	packet_number;
 	word	status;
@@ -1249,13 +1227,13 @@ static void smc_rcv(struct net_device *dev)
 
 		/* set multicast stats */
 		if ( status & RS_MULTICAST )
-			lp->stats.multicast++;
+			dev->stats.multicast++;
 
 		skb = dev_alloc_skb( packet_length + 5);
 
 		if ( skb == NULL ) {
 			printk(KERN_NOTICE CARDNAME ": Low memory, packet dropped.\n");
-			lp->stats.rx_dropped++;
+			dev->stats.rx_dropped++;
 			goto done;
 		}
 
@@ -1266,7 +1244,6 @@ static void smc_rcv(struct net_device *dev)
 
 		skb_reserve( skb, 2 );   /* 16 bit alignment */
 
-		skb->dev = dev;
 		data = skb_put( skb, packet_length);
 
 #ifdef USE_32_BIT
@@ -1296,16 +1273,16 @@ static void smc_rcv(struct net_device *dev)
 		skb->protocol = eth_type_trans(skb, dev );
 		netif_rx(skb);
 		dev->last_rx = jiffies;
-		lp->stats.rx_packets++;
-		lp->stats.rx_bytes += packet_length;
+		dev->stats.rx_packets++;
+		dev->stats.rx_bytes += packet_length;
 	} else {
 		/* error ... */
-		lp->stats.rx_errors++;
+		dev->stats.rx_errors++;
 
-		if ( status & RS_ALGNERR )  lp->stats.rx_frame_errors++;
+		if ( status & RS_ALGNERR )  dev->stats.rx_frame_errors++;
 		if ( status & (RS_TOOSHORT | RS_TOOLONG ) )
-			lp->stats.rx_length_errors++;
-		if ( status & RS_BADCRC)	lp->stats.rx_crc_errors++;
+			dev->stats.rx_length_errors++;
+		if ( status & RS_BADCRC)	dev->stats.rx_crc_errors++;
 	}
 
 done:
@@ -1353,12 +1330,12 @@ static void smc_tx( struct net_device * dev )
 	tx_status = inw( ioaddr + DATA_1 );
 	PRINTK3((CARDNAME": TX DONE STATUS: %4x \n", tx_status ));
 
-	lp->stats.tx_errors++;
-	if ( tx_status & TS_LOSTCAR ) lp->stats.tx_carrier_errors++;
+	dev->stats.tx_errors++;
+	if ( tx_status & TS_LOSTCAR ) dev->stats.tx_carrier_errors++;
 	if ( tx_status & TS_LATCOL  ) {
 		printk(KERN_DEBUG CARDNAME
 			": Late collision occurred on last xmit.\n");
-		lp->stats.tx_window_errors++;
+		dev->stats.tx_window_errors++;
 	}
 #if 0
 		if ( tx_status & TS_16COL ) { ... }
@@ -1395,7 +1372,7 @@ static void smc_tx( struct net_device * dev )
  .
  ---------------------------------------------------------------------*/
 
-static irqreturn_t smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
+static irqreturn_t smc_interrupt(int irq, void * dev_id)
 {
 	struct net_device *dev 	= dev_id;
 	int ioaddr 		= dev->base_addr;
@@ -1453,10 +1430,10 @@ static irqreturn_t smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 			SMC_SELECT_BANK( 0 );
 			card_stats = inw( ioaddr + COUNTER );
 			/* single collisions */
-			lp->stats.collisions += card_stats & 0xF;
+			dev->stats.collisions += card_stats & 0xF;
 			card_stats >>= 4;
 			/* multiple collisions */
-			lp->stats.collisions += card_stats & 0xF;
+			dev->stats.collisions += card_stats & 0xF;
 
 			/* these are for when linux supports these statistics */
 
@@ -1465,7 +1442,7 @@ static irqreturn_t smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 				": TX_BUFFER_EMPTY handled\n"));
 			outb( IM_TX_EMPTY_INT, ioaddr + INTERRUPT );
 			mask &= ~IM_TX_EMPTY_INT;
-			lp->stats.tx_packets += lp->packets_waiting;
+			dev->stats.tx_packets += lp->packets_waiting;
 			lp->packets_waiting = 0;
 
 		} else if (status & IM_ALLOC_INT ) {
@@ -1484,8 +1461,8 @@ static irqreturn_t smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 
 			PRINTK2((CARDNAME": Handoff done successfully.\n"));
 		} else if (status & IM_RX_OVRN_INT ) {
-			lp->stats.rx_errors++;
-			lp->stats.rx_fifo_errors++;
+			dev->stats.rx_errors++;
+			dev->stats.rx_fifo_errors++;
 			outb( IM_RX_OVRN_INT, ioaddr + INTERRUPT );
 		} else if (status & IM_EPH_INT ) {
 			PRINTK((CARDNAME ": UNSUPPORTED: EPH INTERRUPT \n"));
@@ -1526,16 +1503,6 @@ static int smc_close(struct net_device *dev)
 
 	/* Update the statistics here. */
 	return 0;
-}
-
-/*------------------------------------------------------------
- . Get the current statistics.
- . This may be called with the card open or closed.
- .-------------------------------------------------------------*/
-static struct net_device_stats* smc_query_statistics(struct net_device *dev) {
-	struct smc_local *lp = netdev_priv(dev);
-
-	return &lp->stats;
 }
 
 /*-----------------------------------------------------------
@@ -1607,7 +1574,7 @@ MODULE_PARM_DESC(io, "SMC 99194 I/O base address");
 MODULE_PARM_DESC(irq, "SMC 99194 IRQ number");
 MODULE_PARM_DESC(ifport, "SMC 99194 interface port (0-default, 1-TP, 2-AUI)");
 
-int init_module(void)
+int __init init_module(void)
 {
 	if (io == 0)
 		printk(KERN_WARNING
@@ -1620,7 +1587,7 @@ int init_module(void)
 	return 0;
 }
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
 	unregister_netdev(devSMC9194);
 	free_irq(devSMC9194->irq, devSMC9194);

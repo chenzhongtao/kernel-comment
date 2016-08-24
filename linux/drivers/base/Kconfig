@@ -1,5 +1,13 @@
 menu "Generic Driver Options"
 
+config UEVENT_HELPER_PATH
+	string "path to uevent helper"
+	depends on HOTPLUG
+	default "/sbin/hotplug"
+	help
+	  Path to uevent helper program forked by the kernel for
+	  every uevent.
+
 config STANDALONE
 	bool "Select only drivers that don't need compile-time external firmware" if EXPERIMENTAL
 	default y
@@ -19,11 +27,11 @@ config PREVENT_FIRMWARE_BUILD
 	  If unsure say Y here.
 
 config FW_LOADER
-	tristate "Hotplug firmware loading support"
-	select HOTPLUG
+	tristate "Userspace firmware loading support"
+	depends on HOTPLUG
 	---help---
 	  This option is provided for the case where no in-kernel-tree modules
-	  require hotplug firmware loading support, but a module built outside
+	  require userspace firmware loading support, but a module built outside
 	  the kernel tree does.
 
 config DEBUG_DRIVER
@@ -36,5 +44,21 @@ config DEBUG_DRIVER
 	  going on.
 
 	  If you are unsure about this, say N here.
+
+config DEBUG_DEVRES
+	bool "Managed device resources verbose debug messages"
+	depends on DEBUG_KERNEL
+	help
+	  This option enables kernel parameter devres.log. If set to
+	  non-zero, devres debug messages are printed. Select this if
+	  you are having a problem with devres or want to debug
+	  resource management for a managed device. devres.log can be
+	  switched on and off from sysfs node.
+
+	  If you are unsure about this, Say N here.
+
+config SYS_HYPERVISOR
+	bool
+	default n
 
 endmenu

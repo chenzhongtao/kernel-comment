@@ -18,11 +18,11 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/config.h>
 #include <linux/cpufreq.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
+#include <linux/platform_device.h>
 
 #include <asm/hardware.h>
 #include <asm/io.h>
@@ -58,7 +58,7 @@ static inline u_int pxa2xx_mcxx_asst(u_int pcmcia_cycle_ns,
 				     u_int mem_clk_10khz)
 {
 	u_int code = pcmcia_cycle_ns * mem_clk_10khz;
-	return (code / 300000) + ((code % 300000) ? 1 : 0) - 1;
+	return (code / 300000) + ((code % 300000) ? 1 : 0) + 1;
 }
 
 static inline u_int pxa2xx_mcxx_setup(u_int pcmcia_cycle_ns,
@@ -166,7 +166,7 @@ pxa2xx_pcmcia_frequency_change(struct soc_pcmcia_socket *skt,
 }
 #endif
 
-int pxa2xx_drv_pcmcia_probe(struct device *dev)
+int __pxa2xx_drv_pcmcia_probe(struct device *dev)
 {
 	int ret;
 	struct pcmcia_low_level *ops;
@@ -203,50 +203,55 @@ int pxa2xx_drv_pcmcia_probe(struct device *dev)
 
 	return ret;
 }
-EXPORT_SYMBOL(pxa2xx_drv_pcmcia_probe);
+EXPORT_SYMBOL(__pxa2xx_drv_pcmcia_probe);
 
-static int pxa2xx_drv_pcmcia_suspend(struct device *dev, u32 state, u32 level)
+
+static int pxa2xx_drv_pcmcia_probe(struct platform_device *dev)
 {
-	int ret = 0;
-	if (level == SUSPEND_SAVE_STATE)
-		ret = pcmcia_socket_dev_suspend(dev, state);
-	return ret;
+	return __pxa2xx_drv_pcmcia_probe(&dev->dev);
 }
 
-static int pxa2xx_drv_pcmcia_resume(struct device *dev, u32 level)
+static int pxa2xx_drv_pcmcia_remove(struct platform_device *dev)
 {
-	int ret = 0;
-	if (level == RESUME_RESTORE_STATE)
-	{
-		struct pcmcia_low_level *ops = dev->platform_data;
-		int nr = ops ? ops->nr : 0;
-
-		MECR = nr > 1 ? MECR_CIT | MECR_NOS : (nr > 0 ? MECR_CIT : 0);
-		ret = pcmcia_socket_dev_resume(dev);
-	}
-	return ret;
+	return soc_common_drv_pcmcia_remove(&dev->dev);
 }
 
-static struct device_driver pxa2xx_pcmcia_driver = {
+static int pxa2xx_drv_pcmcia_suspend(struct platform_device *dev, pm_message_t state)
+{
+	return pcmcia_socket_dev_suspend(&dev->dev, state);
+}
+
+static int pxa2xx_drv_pcmcia_resume(struct platform_device *dev)
+{
+	struct pcmcia_low_level *ops = dev->dev.platform_data;
+	int nr = ops ? ops->nr : 0;
+
+	MECR = nr > 1 ? MECR_CIT | MECR_NOS : (nr > 0 ? MECR_CIT : 0);
+
+	return pcmcia_socket_dev_resume(&dev->dev);
+}
+
+static struct platform_driver pxa2xx_pcmcia_driver = {
 	.probe		= pxa2xx_drv_pcmcia_probe,
-	.remove		= soc_common_drv_pcmcia_remove,
+	.remove		= pxa2xx_drv_pcmcia_remove,
 	.suspend 	= pxa2xx_drv_pcmcia_suspend,
 	.resume 	= pxa2xx_drv_pcmcia_resume,
-	.name		= "pxa2xx-pcmcia",
-	.bus		= &platform_bus_type,
+	.driver		= {
+		.name	= "pxa2xx-pcmcia",
+	},
 };
 
 static int __init pxa2xx_pcmcia_init(void)
 {
-	return driver_register(&pxa2xx_pcmcia_driver);
+	return platform_driver_register(&pxa2xx_pcmcia_driver);
 }
 
 static void __exit pxa2xx_pcmcia_exit(void)
 {
-	driver_unregister(&pxa2xx_pcmcia_driver);
+	platform_driver_unregister(&pxa2xx_pcmcia_driver);
 }
 
-module_init(pxa2xx_pcmcia_init);
+fs_initcall(pxa2xx_pcmcia_init);
 module_exit(pxa2xx_pcmcia_exit);
 
 MODULE_AUTHOR("Stefan Eletzhofer <stefan.eletzhofer@inquant.de> and Ian Molton <spyro@f2s.com>");

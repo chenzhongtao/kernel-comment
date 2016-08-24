@@ -27,7 +27,6 @@
 #ifndef __ASM_PB1550_H
 #define __ASM_PB1550_H
 
-#include <linux/config.h>
 #include <linux/types.h>
 
 #define DBDMA_AC97_TX_CHAN DSCR_CMD0_PSC1_TX
@@ -165,5 +164,12 @@ static BCSR * const bcsr = (BCSR *)BCSR_PHYS_ADDR;
 			((NAND_T_PUL & 0xF)	<< NAND_T_PUL_SHIFT) | \
 			((NAND_T_SU  & 0xF)	<< NAND_T_SU_SHIFT)  | \
 			((NAND_T_WH  & 0xF)	<< NAND_T_WH_SHIFT)
+
+#define NAND_CS 1
+
+/* should be done by yamon */
+#define NAND_STCFG  0x00400005 /* 8-bit NAND */
+#define NAND_STTIME 0x00007774 /* valid for 396MHz SD=2 only */
+#define NAND_STADDR 0x12000FFF /* physical address 0x20000000 */
 
 #endif /* __ASM_PB1550_H */

@@ -19,12 +19,12 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/amba/bus.h>
+#include <linux/amba/kmi.h>
+#include <linux/clk.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/hardware/amba.h>
-#include <asm/hardware/amba_kmi.h>
-#include <asm/hardware/clock.h>
 
 #define KMI_BASE	(kmi->base)
 
@@ -37,14 +37,14 @@ struct amba_kmi_port {
 	unsigned int		open;
 };
 
-static irqreturn_t amba_kmi_int(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t amba_kmi_int(int irq, void *dev_id)
 {
 	struct amba_kmi_port *kmi = dev_id;
 	unsigned int status = readb(KMIIR);
 	int handled = IRQ_NONE;
 
 	while (status & KMIIR_RXINTR) {
-		serio_interrupt(kmi->io, readb(KMIDATA), 0, regs);
+		serio_interrupt(kmi->io, readb(KMIDATA), 0);
 		status = readb(KMIIR);
 		handled = IRQ_HANDLED;
 	}
@@ -72,13 +72,9 @@ static int amba_kmi_open(struct serio *io)
 	unsigned int divisor;
 	int ret;
 
-	ret = clk_use(kmi->clk);
-	if (ret)
-		goto out;
-
 	ret = clk_enable(kmi->clk);
 	if (ret)
-		goto clk_unuse;
+		goto out;
 
 	divisor = clk_get_rate(kmi->clk) / 8000000 - 1;
 	writeb(divisor, KMICLKDIV);
@@ -97,8 +93,6 @@ static int amba_kmi_open(struct serio *io)
 
  clk_disable:
 	clk_disable(kmi->clk);
- clk_unuse:
-	clk_unuse(kmi->clk);
  out:
 	return ret;
 }
@@ -111,7 +105,6 @@ static void amba_kmi_close(struct serio *io)
 
 	free_irq(kmi->irq, kmi);
 	clk_disable(kmi->clk);
-	clk_unuse(kmi->clk);
 }
 
 static int amba_kmi_probe(struct amba_device *dev, void *id)
@@ -124,17 +117,15 @@ static int amba_kmi_probe(struct amba_device *dev, void *id)
 	if (ret)
 		return ret;
 
-	kmi = kmalloc(sizeof(struct amba_kmi_port), GFP_KERNEL);
-	io = kmalloc(sizeof(struct serio), GFP_KERNEL);
+	kmi = kzalloc(sizeof(struct amba_kmi_port), GFP_KERNEL);
+	io = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!kmi || !io) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	memset(kmi, 0, sizeof(struct amba_kmi_port));
-	memset(io, 0, sizeof(struct serio));
 
-	io->type	= SERIO_8042;
+	io->id.type	= SERIO_8042;
 	io->write	= amba_kmi_write;
 	io->open	= amba_kmi_open;
 	io->close	= amba_kmi_close;

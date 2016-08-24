@@ -1,4 +1,6 @@
-<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V3.1//EN"[]>
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.1.2//EN"
+	"http://www.oasis-open.org/docbook/xml/4.1.2/docbookx.dtd" []>
 
 <book id="LKLockingGuide">
  <bookinfo>
@@ -217,10 +219,10 @@
    </para>
 
    <sect1 id="lock-intro">
-   <title>Two Main Types of Kernel Locks: Spinlocks and Semaphores</title>
+   <title>Three Main Types of Kernel Locks: Spinlocks, Mutexes and Semaphores</title>
 
    <para>
-     There are two main types of kernel locks.  The fundamental type
+     There are three main types of kernel locks.  The fundamental type
      is the spinlock 
      (<filename class="headerfile">include/asm/spinlock.h</filename>),
      which is a very simple single-holder lock: if you can't get the 
@@ -228,20 +230,26 @@
      very small and fast, and can be used anywhere.
    </para>
    <para>
-     The second type is a semaphore
+     The second type is a mutex
+     (<filename class="headerfile">include/linux/mutex.h</filename>): it
+     is like a spinlock, but you may block holding a mutex.
+     If you can't lock a mutex, your task will suspend itself, and be woken
+     up when the mutex is released.  This means the CPU can do something
+     else while you are waiting.  There are many cases when you simply
+     can't sleep (see <xref linkend="sleeping-things"/>), and so have to
+     use a spinlock instead.
+   </para>
+   <para>
+     The third type is a semaphore
      (<filename class="headerfile">include/asm/semaphore.h</filename>): it
      can have more than one holder at any time (the number decided at
      initialization time), although it is most commonly used as a
-     single-holder lock (a mutex).  If you can't get a semaphore,
-     your task will put itself on the queue, and be woken up when the
-     semaphore is released.  This means the CPU will do something
-     else while you are waiting, but there are many cases when you
-     simply can't sleep (see <xref linkend="sleeping-things">), and so
-     have to use a spinlock instead.
+     single-holder lock (a mutex).  If you can't get a semaphore, your
+     task will be suspended and later on woken up - just like for mutexes.
    </para>
    <para>
      Neither type of lock is recursive: see
-     <xref linkend="deadlock">.
+     <xref linkend="deadlock"/>.
    </para>
    </sect1>
  
@@ -326,7 +334,7 @@
     <para>
       Note that you can also use <function>spin_lock_irq()</function>
       or <function>spin_lock_irqsave()</function> here, which stop
-      hardware interrupts as well: see <xref linkend="hardirq-context">.
+      hardware interrupts as well: see <xref linkend="hardirq-context"/>.
     </para>
 
     <para>
@@ -403,7 +411,7 @@
 
      <para>
        The same softirq can run on the other CPUs: you can use a
-       per-CPU array (see <xref linkend="per-cpu">) for better
+       per-CPU array (see <xref linkend="per-cpu"/>) for better
        performance.  If you're going so far as to use a softirq,
        you probably care about scalable performance enough
        to justify the extra complexity.
@@ -543,122 +551,155 @@
 	<function>spin_lock_irqsave()</function>, which is a superset
 	of all other spinlock primitives.
    </para>
+
    <table>
 <title>Table of Locking Requirements</title>
-<TGROUP COLS="11">
-<TBODY>
-<ROW>
-<ENTRY></ENTRY>
-<ENTRY>IRQ Handler A</ENTRY>
-<ENTRY>IRQ Handler B</ENTRY>
-<ENTRY>Softirq A</ENTRY>
-<ENTRY>Softirq B</ENTRY>
-<ENTRY>Tasklet A</ENTRY>
-<ENTRY>Tasklet B</ENTRY>
-<ENTRY>Timer A</ENTRY>
-<ENTRY>Timer B</ENTRY>
-<ENTRY>User Context A</ENTRY>
-<ENTRY>User Context B</ENTRY>
-</ROW>
+<tgroup cols="11">
+<tbody>
 
-<ROW>
-<ENTRY>IRQ Handler A</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry></entry>
+<entry>IRQ Handler A</entry>
+<entry>IRQ Handler B</entry>
+<entry>Softirq A</entry>
+<entry>Softirq B</entry>
+<entry>Tasklet A</entry>
+<entry>Tasklet B</entry>
+<entry>Timer A</entry>
+<entry>Timer B</entry>
+<entry>User Context A</entry>
+<entry>User Context B</entry>
+</row>
 
-<ROW>
-<ENTRY>IRQ Handler B</ENTRY>
-<ENTRY>spin_lock_irqsave</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry>IRQ Handler A</entry>
+<entry>None</entry>
+</row>
 
-<ROW>
-<ENTRY>Softirq A</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-</ROW>
+<row>
+<entry>IRQ Handler B</entry>
+<entry>SLIS</entry>
+<entry>None</entry>
+</row>
 
-<ROW>
-<ENTRY>Softirq B</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-</ROW>
+<row>
+<entry>Softirq A</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SL</entry>
+</row>
 
-<ROW>
-<ENTRY>Tasklet A</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry>Softirq B</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+</row>
 
-<ROW>
-<ENTRY>Tasklet B</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry>Tasklet A</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>None</entry>
+</row>
 
-<ROW>
-<ENTRY>Timer A</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry>Tasklet B</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>None</entry>
+</row>
 
-<ROW>
-<ENTRY>Timer B</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>spin_lock</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry>Timer A</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>None</entry>
+</row>
 
-<ROW>
-<ENTRY>User Context A</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry>Timer B</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>SL</entry>
+<entry>None</entry>
+</row>
 
-<ROW>
-<ENTRY>User Context B</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_irq</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>spin_lock_bh</ENTRY>
-<ENTRY>down_interruptible</ENTRY>
-<ENTRY>None</ENTRY>
-</ROW>
+<row>
+<entry>User Context A</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>None</entry>
+</row>
 
-</TBODY>
-</TGROUP>
-</TABLE>
+<row>
+<entry>User Context B</entry>
+<entry>SLI</entry>
+<entry>SLI</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>SLBH</entry>
+<entry>DI</entry>
+<entry>None</entry>
+</row>
+
+</tbody>
+</tgroup>
+</table>
+
+   <table>
+<title>Legend for Locking Requirements Table</title>
+<tgroup cols="2">
+<tbody>
+
+<row>
+<entry>SLIS</entry>
+<entry>spin_lock_irqsave</entry>
+</row>
+<row>
+<entry>SLI</entry>
+<entry>spin_lock_irq</entry>
+</row>
+<row>
+<entry>SL</entry>
+<entry>spin_lock</entry>
+</row>
+<row>
+<entry>SLBH</entry>
+<entry>spin_lock_bh</entry>
+</row>
+<row>
+<entry>DI</entry>
+<entry>down_interruptible</entry>
+</row>
+
+</tbody>
+</tgroup>
+</table>
+
 </sect1>
 </chapter>
 
@@ -1582,7 +1623,7 @@ the amount of locking which needs to be done.
     <para>
       Our final dilemma is this: when can we actually destroy the
       removed element?  Remember, a reader might be stepping through
-      this element in the list right now: it we free this element and
+      this element in the list right now: if we free this element and
       the <symbol>next</symbol> pointer changes, the reader will jump
       off into garbage and crash.  We need to wait until we know that
       all the readers who were traversing the list when we deleted the

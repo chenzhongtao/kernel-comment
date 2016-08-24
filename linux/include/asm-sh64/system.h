@@ -14,8 +14,6 @@
  *
  */
 
-#include <linux/config.h>
-#include <linux/kernel.h>
 #include <asm/registers.h>
 #include <asm/processor.h>
 
@@ -45,8 +43,6 @@ extern struct task_struct *sh64_switch_to(struct task_struct *prev,
 
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 
-#define tas(ptr) (xchg((ptr), 1))
-
 extern void __xchg_called_with_bad_pointer(void);
 
 #define mb()	__asm__ __volatile__ ("synco": : :"memory")
@@ -66,9 +62,7 @@ extern void __xchg_called_with_bad_pointer(void);
 #define smp_read_barrier_depends()	do { } while (0)
 #endif /* CONFIG_SMP */
 
-#define set_rmb(var, value) do { xchg(&var, value); } while (0)
-#define set_mb(var, value) set_rmb(var, value)
-#define set_wmb(var, value) do { var = value; wmb(); } while (0)
+#define set_mb(var, value) do { (void)xchg(&var, value); } while (0)
 
 /* Interrupt Control */
 #ifndef HARD_CLI
@@ -133,7 +127,7 @@ static __inline__ void local_irq_disable(void)
 	(flags != 0);			\
 })
 
-extern __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
+static inline unsigned long xchg_u32(volatile int * m, unsigned long val)
 {
 	unsigned long flags, retval;
 
@@ -144,7 +138,7 @@ extern __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
 	return retval;
 }
 
-extern __inline__ unsigned long xchg_u8(volatile unsigned char * m, unsigned long val)
+static inline unsigned long xchg_u8(volatile unsigned char * m, unsigned long val)
 {
 	unsigned long flags, retval;
 
@@ -190,5 +184,7 @@ extern void print_seg(char *file,int line);
 #endif	/* CONFIG_SH_ALPHANUMERIC */
 
 #define PL() printk("@ <%s,%s:%d>\n",__FILE__,__FUNCTION__,__LINE__)
+
+#define arch_align_stack(x) (x)
 
 #endif /* __ASM_SH64_SYSTEM_H */

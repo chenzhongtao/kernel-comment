@@ -58,7 +58,7 @@ static int pcips2_write(struct serio *io, unsigned char val)
 	return 0;
 }
 
-static irqreturn_t pcips2_interrupt(int irq, void *devid, struct pt_regs *regs)
+static irqreturn_t pcips2_interrupt(int irq, void *devid)
 {
 	struct pcips2_data *ps2if = devid;
 	unsigned char status, scancode;
@@ -80,7 +80,7 @@ static irqreturn_t pcips2_interrupt(int irq, void *devid, struct pt_regs *regs)
 		if (hweight8(scancode) & 1)
 			flag ^= SERIO_PARITY;
 
-		serio_interrupt(ps2if->io, scancode, flag, regs);
+		serio_interrupt(ps2if->io, scancode, flag);
 	} while (1);
 	return IRQ_RETVAL(handled);
 }
@@ -107,7 +107,7 @@ static int pcips2_open(struct serio *io)
 	outb(PS2_CTRL_ENABLE, ps2if->base);
 	pcips2_flush_input(ps2if);
 
-	ret = request_irq(ps2if->dev->irq, pcips2_interrupt, SA_SHIRQ,
+	ret = request_irq(ps2if->dev->irq, pcips2_interrupt, IRQF_SHARED,
 			  "pcips2", ps2if);
 	if (ret == 0)
 		val = PS2_CTRL_ENABLE | PS2_CTRL_RXIRQ;
@@ -140,17 +140,15 @@ static int __devinit pcips2_probe(struct pci_dev *dev, const struct pci_device_i
 	if (ret)
 		goto disable;
 
-	ps2if = kmalloc(sizeof(struct pcips2_data), GFP_KERNEL);
-	serio = kmalloc(sizeof(struct serio), GFP_KERNEL);
+	ps2if = kzalloc(sizeof(struct pcips2_data), GFP_KERNEL);
+	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!ps2if || !serio) {
 		ret = -ENOMEM;
 		goto release;
 	}
 
-	memset(ps2if, 0, sizeof(struct pcips2_data));
-	memset(serio, 0, sizeof(struct serio));
 
-	serio->type		= SERIO_8042;
+	serio->id.type		= SERIO_8042;
 	serio->write		= pcips2_write;
 	serio->open		= pcips2_open;
 	serio->close		= pcips2_close;
@@ -217,7 +215,7 @@ static struct pci_driver pcips2_driver = {
 
 static int __init pcips2_init(void)
 {
-	return pci_module_init(&pcips2_driver);
+	return pci_register_driver(&pcips2_driver);
 }
 
 static void __exit pcips2_exit(void)

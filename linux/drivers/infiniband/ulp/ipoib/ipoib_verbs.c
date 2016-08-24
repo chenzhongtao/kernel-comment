@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004, 2005 Topspin Communications.  All rights reserved.
+ * Copyright (c) 2005 Mellanox Technologies. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -32,15 +33,12 @@
  * $Id: ipoib_verbs.c 1349 2004-12-16 21:09:43Z roland $
  */
 
-#include <ib_cache.h>
-
 #include "ipoib.h"
 
 int ipoib_mcast_attach(struct net_device *dev, u16 mlid, union ib_gid *mgid)
 {
 	struct ipoib_dev_priv *priv = netdev_priv(dev);
 	struct ib_qp_attr *qp_attr;
-	int attr_mask;
 	int ret;
 	u16 pkey_index;
 
@@ -49,7 +47,7 @@ int ipoib_mcast_attach(struct net_device *dev, u16 mlid, union ib_gid *mgid)
 	if (!qp_attr)
 		goto out;
 
-	if (ib_find_cached_pkey(priv->ca, priv->port, priv->pkey, &pkey_index)) {
+	if (ib_find_pkey(priv->ca, priv->port, priv->pkey, &pkey_index)) {
 		clear_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
 		ret = -ENXIO;
 		goto out;
@@ -58,17 +56,16 @@ int ipoib_mcast_attach(struct net_device *dev, u16 mlid, union ib_gid *mgid)
 
 	/* set correct QKey for QP */
 	qp_attr->qkey = priv->qkey;
-	attr_mask = IB_QP_QKEY;
-	ret = ib_modify_qp(priv->qp, qp_attr, attr_mask);
+	ret = ib_modify_qp(priv->qp, qp_attr, IB_QP_QKEY);
 	if (ret) {
 		ipoib_warn(priv, "failed to modify QP, ret = %d\n", ret);
 		goto out;
 	}
 
 	/* attach QP to multicast group */
-	down(&priv->mcast_mutex);
+	mutex_lock(&priv->mcast_mutex);
 	ret = ib_attach_mcast(priv->qp, mgid, mlid);
-	up(&priv->mcast_mutex);
+	mutex_unlock(&priv->mcast_mutex);
 	if (ret)
 		ipoib_warn(priv, "failed to attach to multicast group, ret = %d\n", ret);
 
@@ -82,39 +79,29 @@ int ipoib_mcast_detach(struct net_device *dev, u16 mlid, union ib_gid *mgid)
 	struct ipoib_dev_priv *priv = netdev_priv(dev);
 	int ret;
 
-	down(&priv->mcast_mutex);
+	mutex_lock(&priv->mcast_mutex);
 	ret = ib_detach_mcast(priv->qp, mgid, mlid);
-	up(&priv->mcast_mutex);
+	mutex_unlock(&priv->mcast_mutex);
 	if (ret)
 		ipoib_warn(priv, "ib_detach_mcast failed (result = %d)\n", ret);
 
 	return ret;
 }
 
-int ipoib_qp_create(struct net_device *dev)
+int ipoib_init_qp(struct net_device *dev)
 {
 	struct ipoib_dev_priv *priv = netdev_priv(dev);
 	int ret;
-	u16 pkey_index;
 	struct ib_qp_attr qp_attr;
 	int attr_mask;
 
-	/*
-	 * Search through the port P_Key table for the requested pkey value.
-	 * The port has to be assigned to the respective IB partition in
-	 * advance.
-	 */
-	ret = ib_find_cached_pkey(priv->ca, priv->port, priv->pkey, &pkey_index);
-	if (ret) {
-		clear_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
-		return ret;
-	}
-	set_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
+	if (!test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags))
+		return -1;
 
 	qp_attr.qp_state = IB_QPS_INIT;
 	qp_attr.qkey = 0;
 	qp_attr.port_num = priv->port;
-	qp_attr.pkey_index = pkey_index;
+	qp_attr.pkey_index = priv->pkey_index;
 	attr_mask =
 	    IB_QP_QKEY |
 	    IB_QP_PORT |
@@ -148,10 +135,11 @@ int ipoib_qp_create(struct net_device *dev)
 	return 0;
 
 out_fail:
-	ib_destroy_qp(priv->qp);
-	priv->qp = NULL;
+	qp_attr.qp_state = IB_QPS_RESET;
+	if (ib_modify_qp(priv->qp, &qp_attr, IB_QP_STATE))
+		ipoib_warn(priv, "Failed to modify QP to RESET state\n");
 
-	return -EINVAL;
+	return ret;
 }
 
 int ipoib_transport_dev_init(struct net_device *dev, struct ib_device *ca)
@@ -159,15 +147,16 @@ int ipoib_transport_dev_init(struct net_device *dev, struct ib_device *ca)
 	struct ipoib_dev_priv *priv = netdev_priv(dev);
 	struct ib_qp_init_attr init_attr = {
 		.cap = {
-			.max_send_wr  = IPOIB_TX_RING_SIZE,
-			.max_recv_wr  = IPOIB_RX_RING_SIZE,
+			.max_send_wr  = ipoib_sendq_size,
+			.max_recv_wr  = ipoib_recvq_size,
 			.max_send_sge = 1,
 			.max_recv_sge = 1
 		},
 		.sq_sig_type = IB_SIGNAL_ALL_WR,
-		.rq_sig_type = IB_SIGNAL_ALL_WR,
 		.qp_type     = IB_QPT_UD
 	};
+
+	int ret, size;
 
 	priv->pd = ib_alloc_pd(priv->ca);
 	if (IS_ERR(priv->pd)) {
@@ -175,29 +164,33 @@ int ipoib_transport_dev_init(struct net_device *dev, struct ib_device *ca)
 		return -ENODEV;
 	}
 
-	priv->cq = ib_create_cq(priv->ca, ipoib_ib_completion, NULL, dev,
-				IPOIB_TX_RING_SIZE + IPOIB_RX_RING_SIZE + 1);
+	priv->mr = ib_get_dma_mr(priv->pd, IB_ACCESS_LOCAL_WRITE);
+	if (IS_ERR(priv->mr)) {
+		printk(KERN_WARNING "%s: ib_get_dma_mr failed\n", ca->name);
+		goto out_free_pd;
+	}
+
+	size = ipoib_sendq_size + ipoib_recvq_size + 1;
+	ret = ipoib_cm_dev_init(dev);
+	if (!ret)
+		size += ipoib_recvq_size + 1 /* 1 extra for rx_drain_qp */;
+
+	priv->cq = ib_create_cq(priv->ca, ipoib_ib_completion, NULL, dev, size, 0);
 	if (IS_ERR(priv->cq)) {
 		printk(KERN_WARNING "%s: failed to create CQ\n", ca->name);
-		goto out_free_pd;
+		goto out_free_mr;
 	}
 
 	if (ib_req_notify_cq(priv->cq, IB_CQ_NEXT_COMP))
 		goto out_free_cq;
 
-	priv->mr = ib_get_dma_mr(priv->pd, IB_ACCESS_LOCAL_WRITE);
-	if (IS_ERR(priv->mr)) {
-		printk(KERN_WARNING "%s: ib_get_dma_mr failed\n", ca->name);
-		goto out_free_cq;
-	}
-
 	init_attr.send_cq = priv->cq;
-	init_attr.recv_cq = priv->cq,
+	init_attr.recv_cq = priv->cq;
 
 	priv->qp = ib_create_qp(priv->pd, &init_attr);
 	if (IS_ERR(priv->qp)) {
 		printk(KERN_WARNING "%s: failed to create QP\n", ca->name);
-		goto out_free_mr;
+		goto out_free_cq;
 	}
 
 	priv->dev->dev_addr[1] = (priv->qp->qp_num >> 16) & 0xff;
@@ -213,11 +206,12 @@ int ipoib_transport_dev_init(struct net_device *dev, struct ib_device *ca)
 
 	return 0;
 
-out_free_mr:
-	ib_dereg_mr(priv->mr);
-
 out_free_cq:
 	ib_destroy_cq(priv->cq);
+
+out_free_mr:
+	ib_dereg_mr(priv->mr);
+	ipoib_cm_dev_cleanup(dev);
 
 out_free_pd:
 	ib_dealloc_pd(priv->pd);
@@ -236,11 +230,13 @@ void ipoib_transport_dev_cleanup(struct net_device *dev)
 		clear_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
 	}
 
-	if (ib_dereg_mr(priv->mr))
-		ipoib_warn(priv, "ib_dereg_mr failed\n");
-
 	if (ib_destroy_cq(priv->cq))
 		ipoib_warn(priv, "ib_cq_destroy failed\n");
+
+	ipoib_cm_dev_cleanup(dev);
+
+	if (ib_dereg_mr(priv->mr))
+		ipoib_warn(priv, "ib_dereg_mr failed\n");
 
 	if (ib_dealloc_pd(priv->pd))
 		ipoib_warn(priv, "ib_dealloc_pd failed\n");
@@ -252,10 +248,18 @@ void ipoib_event(struct ib_event_handler *handler,
 	struct ipoib_dev_priv *priv =
 		container_of(handler, struct ipoib_dev_priv, event_handler);
 
-	if (record->event == IB_EVENT_PORT_ACTIVE ||
+	if (record->element.port_num != priv->port)
+		return;
+
+	if (record->event == IB_EVENT_PORT_ERR    ||
+	    record->event == IB_EVENT_PORT_ACTIVE ||
 	    record->event == IB_EVENT_LID_CHANGE  ||
-	    record->event == IB_EVENT_SM_CHANGE) {
-		ipoib_dbg(priv, "Port active event\n");
-		schedule_work(&priv->flush_task);
+	    record->event == IB_EVENT_SM_CHANGE   ||
+	    record->event == IB_EVENT_CLIENT_REREGISTER) {
+		ipoib_dbg(priv, "Port state change event\n");
+		queue_work(ipoib_workqueue, &priv->flush_task);
+	} else if (record->event == IB_EVENT_PKEY_CHANGE) {
+		ipoib_dbg(priv, "P_Key change event on port:%d\n", priv->port);
+		queue_work(ipoib_workqueue, &priv->pkey_event_task);
 	}
 }

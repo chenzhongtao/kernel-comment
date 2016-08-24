@@ -3,36 +3,28 @@
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  */
+
+#undef DEBUG
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/interrupt.h>
-#include <linux/ioport.h>
-#include <linux/socket.h>
-#include <linux/in.h>
-#include <linux/route.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
+#include <linux/platform_device.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/bitops.h>
 
-#include <asm/byteorder.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/sgi/hpc3.h>
 #include <asm/sgi/ip22.h>
-#include <asm/sgialib.h>
+#include <asm/sgi/seeq.h>
 
 #include "sgiseeq.h"
-
-static char *version = "sgiseeq.c: David S. Miller (dm@engr.sgi.com)\n";
 
 static char *sgiseeqstr = "SGI Seeq8003";
 
@@ -61,8 +53,6 @@ static char *sgiseeqstr = "SGI Seeq8003";
 			    sp->tx_old + (SEEQ_TX_BUFFERS - 1) - sp->tx_new : \
 			    sp->tx_old - sp->tx_new - 1)
 
-#define DEBUG
-
 struct sgiseeq_rx_desc {
 	volatile struct hpc_dma_desc rdma;
 	volatile signed int buf_vaddr;
@@ -85,6 +75,7 @@ struct sgiseeq_init_block { /* Note the name ;-) */
 
 struct sgiseeq_private {
 	struct sgiseeq_init_block *srings;
+	dma_addr_t srings_dma;
 
 	/* Ptrs to the descriptors in uncached space. */
 	struct sgiseeq_rx_desc *rx_desc;
@@ -102,20 +93,14 @@ struct sgiseeq_private {
 	unsigned char control;
 	unsigned char mode;
 
-	struct net_device_stats stats;
-
-	struct net_device *next_module;
 	spinlock_t tx_lock;
 };
 
-/* A list of all installed seeq devices, for removing the driver module. */
-static struct net_device *root_sgiseeq_dev;
-
 static inline void hpc3_eth_reset(struct hpc3_ethregs *hregs)
 {
-	hregs->rx_reset = HPC3_ERXRST_CRESET | HPC3_ERXRST_CLRIRQ;
+	hregs->reset = HPC3_ERST_CRESET | HPC3_ERST_CLRIRQ;
 	udelay(20);
-	hregs->rx_reset = 0;
+	hregs->reset = 0;
 }
 
 static inline void reset_hpc3_and_seeq(struct hpc3_ethregs *hregs,
@@ -136,14 +121,29 @@ static inline void seeq_go(struct sgiseeq_private *sp,
 	hregs->rx_ctrl = HPC3_ERXCTRL_ACTIVE;
 }
 
-static inline void seeq_load_eaddr(struct net_device *dev,
-				   struct sgiseeq_regs *sregs)
+static inline void __sgiseeq_set_mac_address(struct net_device *dev)
 {
+	struct sgiseeq_private *sp = netdev_priv(dev);
+	struct sgiseeq_regs *sregs = sp->sregs;
 	int i;
 
 	sregs->tstat = SEEQ_TCMD_RB0;
 	for (i = 0; i < 6; i++)
 		sregs->rw.eth_addr[i] = dev->dev_addr[i];
+}
+
+static int sgiseeq_set_mac_address(struct net_device *dev, void *addr)
+{
+	struct sgiseeq_private *sp = netdev_priv(dev);
+	struct sockaddr *sa = addr;
+
+	memcpy(dev->dev_addr, sa->sa_data, dev->addr_len);
+
+	spin_lock_irq(&sp->tx_lock);
+	__sgiseeq_set_mac_address(dev);
+	spin_unlock_irq(&sp->tx_lock);
+
+	return 0;
 }
 
 #define TCNTINFO_INIT (HPCDMA_EOX | HPCDMA_ETXD)
@@ -159,13 +159,7 @@ static int seeq_init_ring(struct net_device *dev)
 	sp->rx_new = sp->tx_new = 0;
 	sp->rx_old = sp->tx_old = 0;
 
-	seeq_load_eaddr(dev, sp->sregs);
-
-	/* XXX for now just accept packets directly to us
-	 * XXX and ether-broadcast.  Will do multicast and
-	 * XXX promiscuous mode later. -davem
-	 */
-	sp->mode = SEEQ_RCMD_RBCAST;
+	__sgiseeq_set_mac_address(dev);
 
 	/* Setup tx ring. */
 	for(i = 0; i < SEEQ_TX_BUFFERS; i++) {
@@ -175,7 +169,7 @@ static int seeq_init_ring(struct net_device *dev)
 			buffer = (unsigned long) kmalloc(PKT_BUF_SZ, GFP_KERNEL);
 			if (!buffer)
 				return -ENOMEM;
-			sp->tx_desc[i].buf_vaddr = KSEG1ADDR(buffer);
+			sp->tx_desc[i].buf_vaddr = CKSEG1ADDR(buffer);
 			sp->tx_desc[i].tdma.pbuf = CPHYSADDR(buffer);
 		}
 		sp->tx_desc[i].tdma.cntinfo = TCNTINFO_INIT;
@@ -189,7 +183,7 @@ static int seeq_init_ring(struct net_device *dev)
 			buffer = (unsigned long) kmalloc(PKT_BUF_SZ, GFP_KERNEL);
 			if (!buffer)
 				return -ENOMEM;
-			sp->rx_desc[i].buf_vaddr = KSEG1ADDR(buffer);
+			sp->rx_desc[i].buf_vaddr = CKSEG1ADDR(buffer);
 			sp->rx_desc[i].rdma.pbuf = CPHYSADDR(buffer);
 		}
 		sp->rx_desc[i].rdma.cntinfo = RCNTINFO_INIT;
@@ -202,7 +196,7 @@ static int seeq_init_ring(struct net_device *dev)
 static struct sgiseeq_private *gpriv;
 static struct net_device *gdev;
 
-void sgiseeq_dump_rings(void)
+static void sgiseeq_dump_rings(void)
 {
 	static int once;
 	struct sgiseeq_rx_desc *r = gpriv->rx_desc;
@@ -243,7 +237,6 @@ void sgiseeq_dump_rings(void)
 
 #define TSTAT_INIT_SEEQ (SEEQ_TCMD_IPT|SEEQ_TCMD_I16|SEEQ_TCMD_IC|SEEQ_TCMD_IUF)
 #define TSTAT_INIT_EDLC ((TSTAT_INIT_SEEQ) | SEEQ_TCMD_RB2)
-#define RDMACFG_INIT    (HPC3_ERXDCFG_FRXDC | HPC3_ERXDCFG_FEOP | HPC3_ERXDCFG_FIRQ)
 
 static int init_seeq(struct net_device *dev, struct sgiseeq_private *sp,
 		     struct sgiseeq_regs *sregs)
@@ -265,8 +258,6 @@ static int init_seeq(struct net_device *dev, struct sgiseeq_private *sp,
 		sregs->tstat = TSTAT_INIT_SEEQ;
 	}
 
-	hregs->rx_dconfig |= RDMACFG_INIT;
-
 	hregs->rx_ndptr = CPHYSADDR(sp->rx_desc);
 	hregs->tx_ndptr = CPHYSADDR(sp->tx_desc);
 
@@ -274,18 +265,17 @@ static int init_seeq(struct net_device *dev, struct sgiseeq_private *sp,
 	return 0;
 }
 
-static inline void record_rx_errors(struct sgiseeq_private *sp,
-				    unsigned char status)
+static void record_rx_errors(struct net_device *dev, unsigned char status)
 {
 	if (status & SEEQ_RSTAT_OVERF ||
 	    status & SEEQ_RSTAT_SFRAME)
-		sp->stats.rx_over_errors++;
+		dev->stats.rx_over_errors++;
 	if (status & SEEQ_RSTAT_CERROR)
-		sp->stats.rx_crc_errors++;
+		dev->stats.rx_crc_errors++;
 	if (status & SEEQ_RSTAT_DERROR)
-		sp->stats.rx_frame_errors++;
+		dev->stats.rx_frame_errors++;
 	if (status & SEEQ_RSTAT_REOF)
-		sp->stats.rx_errors++;
+		dev->stats.rx_errors++;
 }
 
 static inline void rx_maybe_restart(struct sgiseeq_private *sp,
@@ -307,9 +297,9 @@ static inline void sgiseeq_rx(struct net_device *dev, struct sgiseeq_private *sp
 			      struct sgiseeq_regs *sregs)
 {
 	struct sgiseeq_rx_desc *rd;
-	struct sk_buff *skb = 0;
+	struct sk_buff *skb = NULL;
 	unsigned char pkt_status;
-	unsigned char *pkt_pointer = 0;
+	unsigned char *pkt_pointer = NULL;
 	int len = 0;
 	unsigned int orig_end = PREV_RX(sp->rx_new);
 
@@ -324,24 +314,30 @@ static inline void sgiseeq_rx(struct net_device *dev, struct sgiseeq_private *sp
 			skb = dev_alloc_skb(len + 2);
 
 			if (skb) {
-				skb->dev = dev;
 				skb_reserve(skb, 2);
 				skb_put(skb, len);
 
 				/* Copy out of kseg1 to avoid silly cache flush. */
-				eth_copy_and_sum(skb, pkt_pointer + 2, len, 0);
+				skb_copy_to_linear_data(skb, pkt_pointer + 2, len);
 				skb->protocol = eth_type_trans(skb, dev);
-				netif_rx(skb);
-				dev->last_rx = jiffies;
-				sp->stats.rx_packets++;
-				sp->stats.rx_bytes += len;
+
+				/* We don't want to receive our own packets */
+				if (memcmp(eth_hdr(skb)->h_source, dev->dev_addr, ETH_ALEN)) {
+					netif_rx(skb);
+					dev->last_rx = jiffies;
+					dev->stats.rx_packets++;
+					dev->stats.rx_bytes += len;
+				} else {
+					/* Silently drop my own packets */
+					dev_kfree_skb_irq(skb);
+				}
 			} else {
 				printk (KERN_NOTICE "%s: Memory squeeze, deferring packet.\n",
 					dev->name);
-				sp->stats.rx_dropped++;
+				dev->stats.rx_dropped++;
 			}
 		} else {
-			record_rx_errors(sp, pkt_status);
+			record_rx_errors(dev, pkt_status);
 		}
 
 		/* Return the entry to the ring pool. */
@@ -373,7 +369,7 @@ static inline void kick_tx(struct sgiseeq_tx_desc *td,
 	 */
 	while ((td->tdma.cntinfo & (HPCDMA_XIU | HPCDMA_ETXD)) ==
 	      (HPCDMA_XIU | HPCDMA_ETXD))
-		td = (struct sgiseeq_tx_desc *)(long) KSEG1ADDR(td->tdma.pnext);
+		td = (struct sgiseeq_tx_desc *)(long) CKSEG1ADDR(td->tdma.pnext);
 	if (td->tdma.cntinfo & HPCDMA_XIU) {
 		hregs->tx_ndptr = CPHYSADDR(td);
 		hregs->tx_ctrl = HPC3_ETXCTRL_ACTIVE;
@@ -393,11 +389,11 @@ static inline void sgiseeq_tx(struct net_device *dev, struct sgiseeq_private *sp
 	if (!(status & (HPC3_ETXCTRL_ACTIVE | SEEQ_TSTAT_PTRANS))) {
 		/* Oops, HPC detected some sort of error. */
 		if (status & SEEQ_TSTAT_R16)
-			sp->stats.tx_aborted_errors++;
+			dev->stats.tx_aborted_errors++;
 		if (status & SEEQ_TSTAT_UFLOW)
-			sp->stats.tx_fifo_errors++;
+			dev->stats.tx_fifo_errors++;
 		if (status & SEEQ_TSTAT_LCLS)
-			sp->stats.collisions++;
+			dev->stats.collisions++;
 	}
 
 	/* Ack 'em... */
@@ -413,14 +409,14 @@ static inline void sgiseeq_tx(struct net_device *dev, struct sgiseeq_private *sp
 			}
 			break;
 		}
-		sp->stats.tx_packets++;
+		dev->stats.tx_packets++;
 		sp->tx_old = NEXT_TX(sp->tx_old);
 		td->tdma.cntinfo &= ~(HPCDMA_XIU | HPCDMA_XIE);
 		td->tdma.cntinfo |= HPCDMA_EOX;
 	}
 }
 
-static irqreturn_t sgiseeq_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sgiseeq_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	struct sgiseeq_private *sp = netdev_priv(dev);
@@ -430,7 +426,7 @@ static irqreturn_t sgiseeq_interrupt(int irq, void *dev_id, struct pt_regs *regs
 	spin_lock(&sp->tx_lock);
 
 	/* Ack the IRQ and set software state. */
-	hregs->rx_reset = HPC3_ERXRST_CLRIRQ;
+	hregs->reset = HPC3_ERST_CLRIRQ;
 
 	/* Always check for received packets. */
 	sgiseeq_rx(dev, sp, hregs, sregs);
@@ -477,11 +473,13 @@ static int sgiseeq_close(struct net_device *dev)
 {
 	struct sgiseeq_private *sp = netdev_priv(dev);
 	struct sgiseeq_regs *sregs = sp->sregs;
+	unsigned int irq = dev->irq;
 
 	netif_stop_queue(dev);
 
 	/* Shutdown the Seeq. */
 	reset_hpc3_and_seeq(sp->hregs, sregs);
+	free_irq(irq, dev);
 
 	return 0;
 }
@@ -502,12 +500,6 @@ static inline int sgiseeq_reset(struct net_device *dev)
 	return 0;
 }
 
-void sgiseeq_my_reset(void)
-{
-	printk("RESET!\n");
-	sgiseeq_reset(gdev);
-}
-
 static int sgiseeq_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct sgiseeq_private *sp = netdev_priv(dev);
@@ -521,7 +513,7 @@ static int sgiseeq_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Setup... */
 	skblen = skb->len;
 	len = (skblen <= ETH_ZLEN) ? ETH_ZLEN : skblen;
-	sp->stats.tx_bytes += len;
+	dev->stats.tx_bytes += len;
 	entry = sp->tx_new;
 	td = &sp->tx_desc[entry];
 
@@ -538,7 +530,7 @@ static int sgiseeq_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 *    entry and the HPC got to the end of the chain before we
 	 *    added this new entry and restarted it.
 	 */
-	memcpy((char *)(long)td->buf_vaddr, skb->data, skblen);
+	skb_copy_from_linear_data(skb, (char *)(long)td->buf_vaddr, skblen);
 	if (len != skblen)
 		memset((char *)(long)td->buf_vaddr + skb->len, 0, len-skblen);
 	td->tdma.cntinfo = (len & HPCDMA_BCNT) |
@@ -574,15 +566,24 @@ static void timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static struct net_device_stats *sgiseeq_get_stats(struct net_device *dev)
-{
-	struct sgiseeq_private *sp = netdev_priv(dev);
-
-	return &sp->stats;
-}
-
 static void sgiseeq_set_multicast(struct net_device *dev)
 {
+	struct sgiseeq_private *sp = (struct sgiseeq_private *) dev->priv;
+	unsigned char oldmode = sp->mode;
+
+	if(dev->flags & IFF_PROMISC)
+		sp->mode = SEEQ_RCMD_RANY;
+	else if ((dev->flags & IFF_ALLMULTI) || dev->mc_count)
+		sp->mode = SEEQ_RCMD_RBMCAST;
+	else
+		sp->mode = SEEQ_RCMD_RBCAST;
+
+	/* XXX I know this sucks, but is there a better way to reprogram
+	 * XXX the receiver? At least, this shouldn't happen too often.
+	 */
+
+	if (oldmode != sp->mode)
+		sgiseeq_reset(dev);
 }
 
 static inline void setup_tx_ring(struct sgiseeq_tx_desc *buf, int nbufs)
@@ -612,12 +613,16 @@ static inline void setup_rx_ring(struct sgiseeq_rx_desc *buf, int nbufs)
 
 #define ALIGNED(x)  ((((unsigned long)(x)) + 0xf) & ~(0xf))
 
-static int sgiseeq_init(struct hpc3_regs* regs, int irq)
+static int __init sgiseeq_probe(struct platform_device *pdev)
 {
+	struct sgiseeq_platform_data *pd = pdev->dev.platform_data;
+	struct hpc3_regs *hpcregs = pd->hpc;
 	struct sgiseeq_init_block *sr;
+	unsigned int irq = pd->irq;
 	struct sgiseeq_private *sp;
 	struct net_device *dev;
 	int err, i;
+	DECLARE_MAC_BUF(mac);
 
 	dev = alloc_etherdev(sizeof (struct sgiseeq_private));
 	if (!dev) {
@@ -625,45 +630,46 @@ static int sgiseeq_init(struct hpc3_regs* regs, int irq)
 		err = -ENOMEM;
 		goto err_out;
 	}
+
+	platform_set_drvdata(pdev, dev);
 	sp = netdev_priv(dev);
 
 	/* Make private data page aligned */
-	sr = (struct sgiseeq_init_block *) get_zeroed_page(GFP_KERNEL);
+	sr = dma_alloc_coherent(&pdev->dev, sizeof(*sp->srings),
+				&sp->srings_dma, GFP_KERNEL);
 	if (!sr) {
 		printk(KERN_ERR "Sgiseeq: Page alloc failed, aborting.\n");
 		err = -ENOMEM;
 		goto err_out_free_dev;
 	}
 	sp->srings = sr;
+	sp->rx_desc = sp->srings->rxvector;
+	sp->tx_desc = sp->srings->txvector;
 
-#define EADDR_NVOFS     250
-	for (i = 0; i < 3; i++) {
-		unsigned short tmp = ip22_nvram_read(EADDR_NVOFS / 2 + i);
+	/* A couple calculations now, saves many cycles later. */
+	setup_rx_ring(sp->rx_desc, SEEQ_RX_BUFFERS);
+	setup_tx_ring(sp->tx_desc, SEEQ_TX_BUFFERS);
 
-		dev->dev_addr[2 * i]     = tmp >> 8;
-		dev->dev_addr[2 * i + 1] = tmp & 0xff;
-	}
+	memcpy(dev->dev_addr, pd->mac, ETH_ALEN);
 
 #ifdef DEBUG
 	gpriv = sp;
 	gdev = dev;
 #endif
-	sp->sregs = (struct sgiseeq_regs *) &hpc3c0->eth_ext[0];
-	sp->hregs = &hpc3c0->ethregs;
+	sp->sregs = (struct sgiseeq_regs *) &hpcregs->eth_ext[0];
+	sp->hregs = &hpcregs->ethregs;
 	sp->name = sgiseeqstr;
+	sp->mode = SEEQ_RCMD_RBCAST;
 
-	sp->rx_desc = (struct sgiseeq_rx_desc *)
-	              KSEG1ADDR(ALIGNED(&sp->srings->rxvector[0]));
-	dma_cache_wback_inv((unsigned long)&sp->srings->rxvector,
-	                    sizeof(sp->srings->rxvector));
-	sp->tx_desc = (struct sgiseeq_tx_desc *)
-	              KSEG1ADDR(ALIGNED(&sp->srings->txvector[0]));
-	dma_cache_wback_inv((unsigned long)&sp->srings->txvector,
-	                    sizeof(sp->srings->txvector));
+	/* Setup PIO and DMA transfer timing */
+	sp->hregs->pconfig = 0x161;
+	sp->hregs->dconfig = HPC3_EDCFG_FIRQ | HPC3_EDCFG_FEOP |
+			     HPC3_EDCFG_FRXDC | HPC3_EDCFG_PTO | 0x026;
 
-	/* A couple calculations now, saves many cycles later. */
-	setup_rx_ring(sp->rx_desc, SEEQ_RX_BUFFERS);
-	setup_tx_ring(sp->tx_desc, SEEQ_TX_BUFFERS);
+	/* Setup PIO and DMA transfer timing */
+	sp->hregs->pconfig = 0x161;
+	sp->hregs->dconfig = HPC3_EDCFG_FIRQ | HPC3_EDCFG_FEOP |
+			     HPC3_EDCFG_FRXDC | HPC3_EDCFG_PTO | 0x026;
 
 	/* Reset the chip. */
 	hpc3_eth_reset(sp->hregs);
@@ -679,8 +685,8 @@ static int sgiseeq_init(struct hpc3_regs* regs, int irq)
 	dev->hard_start_xmit	= sgiseeq_start_xmit;
 	dev->tx_timeout		= timeout;
 	dev->watchdog_timeo	= (200 * HZ) / 1000;
-	dev->get_stats		= sgiseeq_get_stats;
 	dev->set_multicast_list	= sgiseeq_set_multicast;
+	dev->set_mac_address	= sgiseeq_set_mac_address;
 	dev->irq		= irq;
 
 	if (register_netdev(dev)) {
@@ -690,17 +696,13 @@ static int sgiseeq_init(struct hpc3_regs* regs, int irq)
 		goto err_out_free_page;
 	}
 
-	printk(KERN_INFO "%s: SGI Seeq8003 ", dev->name);
-	for (i = 0; i < 6; i++)
-		printk("%2.2x%c", dev->dev_addr[i], i == 5 ? '\n' : ':');
-
-	sp->next_module = root_sgiseeq_dev;
-	root_sgiseeq_dev = dev;
+	printk(KERN_INFO "%s: %s %s\n",
+	       dev->name, sgiseeqstr, print_mac(mac, dev->dev_addr));
 
 	return 0;
 
 err_out_free_page:
-	free_page((unsigned long) sp);
+	free_page((unsigned long) sp->srings);
 err_out_free_dev:
 	kfree(dev);
 
@@ -708,32 +710,46 @@ err_out:
 	return err;
 }
 
-static int __init sgiseeq_probe(void)
+static int __exit sgiseeq_remove(struct platform_device *pdev)
 {
-	printk(version);
+	struct net_device *dev = platform_get_drvdata(pdev);
+	struct sgiseeq_private *sp = netdev_priv(dev);
 
-	/* On board adapter on 1st HPC is always present */
-	return sgiseeq_init(hpc3c0, SGI_ENET_IRQ);
+	unregister_netdev(dev);
+	dma_free_coherent(&pdev->dev, sizeof(*sp->srings), sp->srings,
+	                  sp->srings_dma);
+	free_netdev(dev);
+	platform_set_drvdata(pdev, NULL);
+
+	return 0;
 }
 
-static void __exit sgiseeq_exit(void)
-{
-	struct net_device *next, *dev;
-	struct sgiseeq_private *sp;
-	int irq;
-
-	for (dev = root_sgiseeq_dev; dev; dev = next) {
-		sp = (struct sgiseeq_private *) netdev_priv(dev);
-		next = sp->next_module;
-		irq = dev->irq;
-		unregister_netdev(dev);
-		free_irq(irq, dev);
-		free_page((unsigned long) sp);
-		free_netdev(dev);
+static struct platform_driver sgiseeq_driver = {
+	.probe	= sgiseeq_probe,
+	.remove	= __devexit_p(sgiseeq_remove),
+	.driver = {
+		.name	= "sgiseeq"
 	}
+};
+
+static int __init sgiseeq_module_init(void)
+{
+	if (platform_driver_register(&sgiseeq_driver)) {
+		printk(KERN_ERR "Driver registration failed\n");
+		return -ENODEV;
+	}
+
+	return 0;
 }
 
-module_init(sgiseeq_probe);
-module_exit(sgiseeq_exit);
+static void __exit sgiseeq_module_exit(void)
+{
+	platform_driver_unregister(&sgiseeq_driver);
+}
 
+module_init(sgiseeq_module_init);
+module_exit(sgiseeq_module_exit);
+
+MODULE_DESCRIPTION("SGI Seeq 8003 driver");
+MODULE_AUTHOR("Linux/MIPS Mailing List <linux-mips@linux-mips.org>");
 MODULE_LICENSE("GPL");

@@ -34,8 +34,10 @@
  *
  */
 
+#include <linux/ip.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/skbuff.h>
 
 #include <net/ip_vs.h>
 
@@ -61,7 +63,7 @@ struct ip_vs_sh_bucket {
 /*
  *	Returns hash value for IPVS SH entry
  */
-static inline unsigned ip_vs_sh_hashkey(__u32 addr)
+static inline unsigned ip_vs_sh_hashkey(__be32 addr)
 {
 	return (ntohl(addr)*2654435761UL) & IP_VS_SH_TAB_MASK;
 }
@@ -71,7 +73,7 @@ static inline unsigned ip_vs_sh_hashkey(__u32 addr)
  *      Get ip_vs_dest associated with supplied parameters.
  */
 static inline struct ip_vs_dest *
-ip_vs_sh_get(struct ip_vs_sh_bucket *tbl, __u32 addr)
+ip_vs_sh_get(struct ip_vs_sh_bucket *tbl, __be32 addr)
 {
 	return (tbl[ip_vs_sh_hashkey(addr)]).dest;
 }
@@ -199,7 +201,7 @@ ip_vs_sh_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 {
 	struct ip_vs_dest *dest;
 	struct ip_vs_sh_bucket *tbl;
-	struct iphdr *iph = skb->nh.iph;
+	struct iphdr *iph = ip_hdr(skb);
 
 	IP_VS_DBG(6, "ip_vs_sh_schedule(): Scheduling...\n");
 

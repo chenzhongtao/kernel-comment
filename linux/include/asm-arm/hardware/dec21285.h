@@ -18,9 +18,8 @@
 #define DC21285_PCI_IO			0x7c000000
 #define DC21285_PCI_MEM			0x80000000
 
-#include <linux/config.h>
 #ifndef __ASSEMBLY__
-#include <asm/arch/hardware.h>
+#include <asm/hardware.h>
 #define DC21285_IO(x)		((volatile unsigned long *)(ARMCSR_BASE+(x)))
 #else
 #define DC21285_IO(x)		(x)

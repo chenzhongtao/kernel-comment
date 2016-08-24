@@ -14,7 +14,6 @@
 #include <linux/delay.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <linux/bootmem.h>
 
 #include <asm/io.h>
 #include <asm/prom.h>
@@ -38,12 +37,12 @@ indirect_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 	if (ppc_md.pci_exclude_device)
 		if (ppc_md.pci_exclude_device(bus->number, devfn))
 			return PCIBIOS_DEVICE_NOT_FOUND;
-	
+
 	if (hose->set_cfg_type)
 		if (bus->number != hose->first_busno)
 			cfg_type = 1;
 
-	PCI_CFG_OUT(hose->cfg_addr, 					 
+	PCI_CFG_OUT(hose->cfg_addr,
 		 (0x80000000 | ((bus->number - hose->bus_offset) << 16)
 		  | (devfn << 8) | ((offset & 0xfc) | cfg_type)));
 
@@ -82,7 +81,7 @@ indirect_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		if (bus->number != hose->first_busno)
 			cfg_type = 1;
 
-	PCI_CFG_OUT(hose->cfg_addr, 					 
+	PCI_CFG_OUT(hose->cfg_addr,
 		 (0x80000000 | ((bus->number - hose->bus_offset) << 16)
 		  | (devfn << 8) | ((offset & 0xfc) | cfg_type)));
 

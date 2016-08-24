@@ -75,8 +75,8 @@ enum sctp_optname {
 #define SCTP_SET_PEER_PRIMARY_ADDR SCTP_SET_PEER_PRIMARY_ADDR
 	SCTP_PRIMARY_ADDR,
 #define SCTP_PRIMARY_ADDR SCTP_PRIMARY_ADDR
-	SCTP_ADAPTION_LAYER,      
-#define SCTP_ADAPTION_LAYER SCTP_ADAPTION_LAYER
+	SCTP_ADAPTATION_LAYER,
+#define SCTP_ADAPTATION_LAYER SCTP_ADAPTATION_LAYER
 	SCTP_DISABLE_FRAGMENTS,
 #define SCTP_DISABLE_FRAGMENTS SCTP_DISABLE_FRAGMENTS
 	SCTP_PEER_ADDR_PARAMS,
@@ -93,6 +93,31 @@ enum sctp_optname {
 #define SCTP_STATUS SCTP_STATUS
 	SCTP_GET_PEER_ADDR_INFO,
 #define SCTP_GET_PEER_ADDR_INFO SCTP_GET_PEER_ADDR_INFO
+	SCTP_DELAYED_ACK_TIME,
+#define SCTP_DELAYED_ACK_TIME SCTP_DELAYED_ACK_TIME
+	SCTP_CONTEXT,	/* Receive Context */
+#define SCTP_CONTEXT SCTP_CONTEXT
+	SCTP_FRAGMENT_INTERLEAVE,
+#define SCTP_FRAGMENT_INTERLEAVE SCTP_FRAGMENT_INTERLEAVE
+	SCTP_PARTIAL_DELIVERY_POINT,	/* Set/Get partial delivery point */
+#define SCTP_PARTIAL_DELIVERY_POINT SCTP_PARTIAL_DELIVERY_POINT
+	SCTP_MAX_BURST,		/* Set/Get max burst */
+#define SCTP_MAX_BURST SCTP_MAX_BURST
+	SCTP_AUTH_CHUNK,	/* Set only: add a chunk type to authenticat */
+#define SCTP_AUTH_CHUNK SCTP_AUTH_CHUNK
+	SCTP_HMAC_IDENT,
+#define SCTP_HMAC_IDENT SCTP_HMAC_IDENT
+	SCTP_AUTH_KEY,
+#define SCTP_AUTH_KEY SCTP_AUTH_KEY
+	SCTP_AUTH_ACTIVE_KEY,
+#define SCTP_AUTH_ACTIVE_KEY SCTP_AUTH_ACTIVE_KEY
+	SCTP_AUTH_DELETE_KEY,
+#define SCTP_AUTH_DELETE_KEY SCTP_AUTH_DELETE_KEY
+	SCTP_PEER_AUTH_CHUNKS,		/* Read only */
+#define SCTP_PEER_AUTH_CHUNKS SCTP_PEER_AUTH_CHUNKS
+	SCTP_LOCAL_AUTH_CHUNKS,		/* Read only */
+#define SCTP_LOCAL_AUTH_CHUNKS SCTP_LOCAL_AUTH_CHUNKS
+
 
 	/* Internal Socket Options. Some of the sctp library functions are 
 	 * implemented using these socket options.
@@ -103,12 +128,18 @@ enum sctp_optname {
 #define SCTP_SOCKOPT_BINDX_REM	SCTP_SOCKOPT_BINDX_REM
 	SCTP_SOCKOPT_PEELOFF, 	/* peel off association. */
 #define SCTP_SOCKOPT_PEELOFF	SCTP_SOCKOPT_PEELOFF
-	SCTP_GET_PEER_ADDRS_NUM, 	/* Get number of peer addresss. */
-#define SCTP_GET_PEER_ADDRS_NUM	SCTP_GET_PEER_ADDRS_NUM
+	SCTP_GET_PEER_ADDRS_NUM_OLD, 	/* Get number of peer addresss. */
+#define SCTP_GET_PEER_ADDRS_NUM_OLD	SCTP_GET_PEER_ADDRS_NUM_OLD
+	SCTP_GET_PEER_ADDRS_OLD, 	/* Get all peer addresss. */
+#define SCTP_GET_PEER_ADDRS_OLD	SCTP_GET_PEER_ADDRS_OLD
+	SCTP_GET_LOCAL_ADDRS_NUM_OLD, 	/* Get number of local addresss. */
+#define SCTP_GET_LOCAL_ADDRS_NUM_OLD	SCTP_GET_LOCAL_ADDRS_NUM_OLD
+	SCTP_GET_LOCAL_ADDRS_OLD, 	/* Get all local addresss. */
+#define SCTP_GET_LOCAL_ADDRS_OLD	SCTP_GET_LOCAL_ADDRS_OLD
+	SCTP_SOCKOPT_CONNECTX, /* CONNECTX requests. */
+#define SCTP_SOCKOPT_CONNECTX	SCTP_SOCKOPT_CONNECTX
 	SCTP_GET_PEER_ADDRS, 	/* Get all peer addresss. */
 #define SCTP_GET_PEER_ADDRS	SCTP_GET_PEER_ADDRS
-	SCTP_GET_LOCAL_ADDRS_NUM, 	/* Get number of local addresss. */
-#define SCTP_GET_LOCAL_ADDRS_NUM	SCTP_GET_LOCAL_ADDRS_NUM
 	SCTP_GET_LOCAL_ADDRS, 	/* Get all local addresss. */
 #define SCTP_GET_LOCAL_ADDRS	SCTP_GET_LOCAL_ADDRS
 };
@@ -165,10 +196,10 @@ struct sctp_sndrcvinfo {
  */
 
 enum sctp_sinfo_flags {
-	MSG_UNORDERED = 1,  /* Send/receive message unordered. */
-	MSG_ADDR_OVER = 2,  /* Override the primary destination. */
-	MSG_ABORT=4,        /* Send an ABORT message to the peer. */
-	/* MSG_EOF is already defined per socket.h */
+	SCTP_UNORDERED = 1,  /* Send/receive message unordered. */
+	SCTP_ADDR_OVER = 2,  /* Override the primary destination. */
+	SCTP_ABORT=4,        /* Send an ABORT message to the peer. */
+	SCTP_EOF=MSG_FIN,    /* Initiate graceful shutdown process. */	
 };
 
 
@@ -203,6 +234,7 @@ struct sctp_assoc_change {
 	__u16 sac_outbound_streams;
 	__u16 sac_inbound_streams;
 	sctp_assoc_t sac_assoc_id;
+	__u8 sac_info[0];
 };
 
 /*
@@ -237,7 +269,7 @@ struct sctp_paddr_change {
 	int spc_state;
 	int spc_error;
 	sctp_assoc_t spc_assoc_id;
-};
+} __attribute__((packed, aligned(4)));
 
 /*
  *    spc_state:  32 bits (signed integer)
@@ -251,6 +283,7 @@ enum sctp_spc_state {
 	SCTP_ADDR_REMOVED,
 	SCTP_ADDR_ADDED,
 	SCTP_ADDR_MADE_PRIM,
+	SCTP_ADDR_CONFIRMED,
 };
 
 
@@ -321,17 +354,17 @@ struct sctp_shutdown_event {
 };
 
 /*
- * 5.3.1.6 SCTP_ADAPTION_INDICATION
+ * 5.3.1.6 SCTP_ADAPTATION_INDICATION
  *
- *   When a peer sends a Adaption Layer Indication parameter , SCTP
+ *   When a peer sends a Adaptation Layer Indication parameter , SCTP
  *   delivers this notification to inform the application
- *   that of the peers requested adaption layer.
+ *   that of the peers requested adaptation layer.
  */
-struct sctp_adaption_event {
+struct sctp_adaptation_event {
 	__u16 sai_type;
 	__u16 sai_flags;
 	__u32 sai_length;
-	__u32 sai_adaption_ind;
+	__u32 sai_adaptation_ind;
 	sctp_assoc_t sai_assoc_id;
 };
 
@@ -352,6 +385,19 @@ struct sctp_pdapi_event {
 
 enum { SCTP_PARTIAL_DELIVERY_ABORTED=0, };
 
+struct sctp_authkey_event {
+	__u16 auth_type;
+	__u16 auth_flags;
+	__u32 auth_length;
+	__u16 auth_keynumber;
+	__u16 auth_altkeynumber;
+	__u32 auth_indication;
+	sctp_assoc_t auth_assoc_id;
+};
+
+enum { SCTP_AUTH_NEWKEY = 0, };
+
+
 /*
  * Described in Section 7.3
  *   Ancillary Data and Notification Interest Options
@@ -364,7 +410,7 @@ struct sctp_event_subscribe {
 	__u8 sctp_peer_error_event;
 	__u8 sctp_shutdown_event;
 	__u8 sctp_partial_delivery_event;
-	__u8 sctp_adaption_layer_event;
+	__u8 sctp_adaptation_layer_event;
 };
 
 /*
@@ -385,8 +431,9 @@ union sctp_notification {
 	struct sctp_remote_error sn_remote_error;
 	struct sctp_send_failed sn_send_failed;
 	struct sctp_shutdown_event sn_shutdown_event;
-	struct sctp_adaption_event sn_adaption_event;
+	struct sctp_adaptation_event sn_adaptation_event;
 	struct sctp_pdapi_event sn_pdapi_event;
+	struct sctp_authkey_event sn_authkey_event;
 };
 
 /* Section 5.3.1
@@ -402,7 +449,8 @@ enum sctp_sn_type {
 	SCTP_REMOTE_ERROR,
 	SCTP_SHUTDOWN_EVENT,
 	SCTP_PARTIAL_DELIVERY_EVENT,
-	SCTP_ADAPTION_INDICATION,
+	SCTP_ADAPTATION_INDICATION,
+	SCTP_AUTHENTICATION_INDICATION,
 };
 
 /* Notification error codes used to fill up the error fields in some
@@ -462,7 +510,7 @@ struct sctp_assocparams {
 struct sctp_setpeerprim {
 	sctp_assoc_t            sspp_assoc_id;
 	struct sockaddr_storage sspp_addr;
-};
+} __attribute__((packed, aligned(4)));
 
 /*
  * 7.1.10 Set Primary Address (SCTP_PRIMARY_ADDR)
@@ -475,16 +523,16 @@ struct sctp_setpeerprim {
 struct sctp_prim {
 	sctp_assoc_t            ssp_assoc_id;
 	struct sockaddr_storage ssp_addr;
-};
+} __attribute__((packed, aligned(4)));
 
 /*
- * 7.1.11 Set Adaption Layer Indicator (SCTP_ADAPTION_LAYER)
+ * 7.1.11 Set Adaptation Layer Indicator (SCTP_ADAPTATION_LAYER)
  *
- * Requests that the local endpoint set the specified Adaption Layer
+ * Requests that the local endpoint set the specified Adaptation Layer
  * Indication parameter for all future INIT and INIT-ACK exchanges.
  */
-struct sctp_setadaption {
-	__u32	ssb_adaption_ind;
+struct sctp_setadaptation {
+	__u32	ssb_adaptation_ind;
 };
 
 /*
@@ -497,11 +545,88 @@ struct sctp_setadaption {
  *   unreachable. The following structure is used to access and modify an
  *   address's parameters:
  */
+enum  sctp_spp_flags {
+	SPP_HB_ENABLE = 1<<0,		/*Enable heartbeats*/
+	SPP_HB_DISABLE = 1<<1,		/*Disable heartbeats*/
+	SPP_HB = SPP_HB_ENABLE | SPP_HB_DISABLE,
+	SPP_HB_DEMAND = 1<<2,		/*Send heartbeat immediately*/
+	SPP_PMTUD_ENABLE = 1<<3,	/*Enable PMTU discovery*/
+	SPP_PMTUD_DISABLE = 1<<4,	/*Disable PMTU discovery*/
+	SPP_PMTUD = SPP_PMTUD_ENABLE | SPP_PMTUD_DISABLE,
+	SPP_SACKDELAY_ENABLE = 1<<5,	/*Enable SACK*/
+	SPP_SACKDELAY_DISABLE = 1<<6,	/*Disable SACK*/
+	SPP_SACKDELAY = SPP_SACKDELAY_ENABLE | SPP_SACKDELAY_DISABLE,
+	SPP_HB_TIME_IS_ZERO = 1<<7,	/* Set HB delay to 0 */
+};
+
 struct sctp_paddrparams {
 	sctp_assoc_t		spp_assoc_id;
 	struct sockaddr_storage	spp_address;
 	__u32			spp_hbinterval;
 	__u16			spp_pathmaxrxt;
+	__u32			spp_pathmtu;
+	__u32			spp_sackdelay;
+	__u32			spp_flags;
+} __attribute__((packed, aligned(4)));
+
+/*
+ * 7.1.18.  Add a chunk that must be authenticated (SCTP_AUTH_CHUNK)
+ *
+ * This set option adds a chunk type that the user is requesting to be
+ * received only in an authenticated way.  Changes to the list of chunks
+ * will only effect future associations on the socket.
+ */
+struct sctp_authchunk {
+	__u8		sauth_chunk;
+};
+
+/*
+ * 7.1.19.  Get or set the list of supported HMAC Identifiers (SCTP_HMAC_IDENT)
+ *
+ * This option gets or sets the list of HMAC algorithms that the local
+ * endpoint requires the peer to use.
+*/
+struct sctp_hmacalgo {
+	__u16		shmac_num_idents;
+	__u16		shmac_idents[];
+};
+
+/*
+ * 7.1.20.  Set a shared key (SCTP_AUTH_KEY)
+ *
+ * This option will set a shared secret key which is used to build an
+ * association shared key.
+ */
+struct sctp_authkey {
+	sctp_assoc_t	sca_assoc_id;
+	__u16		sca_keynumber;
+	__u16		sca_keylen;
+	__u8		sca_key[];
+};
+
+/*
+ * 7.1.21.  Get or set the active shared key (SCTP_AUTH_ACTIVE_KEY)
+ *
+ * This option will get or set the active shared key to be used to build
+ * the association shared key.
+ */
+
+struct sctp_authkeyid {
+	sctp_assoc_t	scact_assoc_id;
+	__u16		scact_keynumber;
+};
+
+
+/* 7.1.23. Delayed Ack Timer (SCTP_DELAYED_ACK_TIME)
+ *
+ *   This options will get or set the delayed ack timer.  The time is set
+ *   in milliseconds.  If the assoc_id is 0, then this sets or gets the
+ *   endpoints default delayed ack timer value.  If the assoc_id field is
+ *   non-zero, then the set or get effects the specified association.
+ */
+struct sctp_assoc_value {
+    sctp_assoc_t            assoc_id;
+    uint32_t                assoc_value;
 };
 
 /*
@@ -521,12 +646,22 @@ struct sctp_paddrinfo {
 	__u32			spinfo_srtt;
 	__u32			spinfo_rto;
 	__u32			spinfo_mtu;
-};
+} __attribute__((packed, aligned(4)));
 
 /* Peer addresses's state. */
+/* UNKNOWN: Peer address passed by the upper layer in sendmsg or connect[x]
+ * calls.
+ * UNCONFIRMED: Peer address received in INIT/INIT-ACK address parameters.
+ *              Not yet confirmed by a heartbeat and not available for data
+ *		transfers.
+ * ACTIVE : Peer address confirmed, active and available for data transfers.
+ * INACTIVE: Peer address inactive and not available for data transfers.
+ */
 enum sctp_spinfo_state {
 	SCTP_INACTIVE,
 	SCTP_ACTIVE,
+	SCTP_UNCONFIRMED,
+	SCTP_UNKNOWN = 0xffff  /* Value used for transport state unknown */
 };
 
 /*
@@ -551,15 +686,32 @@ struct sctp_status {
 };
 
 /*
+ * 7.2.3.  Get the list of chunks the peer requires to be authenticated
+ *         (SCTP_PEER_AUTH_CHUNKS)
+ *
+ * This option gets a list of chunks for a specified association that
+ * the peer requires to be received authenticated only.
+ */
+struct sctp_authchunks {
+	sctp_assoc_t            gauth_assoc_id;
+	uint8_t                 gauth_chunks[];
+};
+
+/*
  * 8.3, 8.5 get all peer/local addresses in an association.
  * This parameter struct is used by SCTP_GET_PEER_ADDRS and 
  * SCTP_GET_LOCAL_ADDRS socket options used internally to implement
  * sctp_getpaddrs() and sctp_getladdrs() API. 
  */
-struct sctp_getaddrs {
+struct sctp_getaddrs_old {
 	sctp_assoc_t            assoc_id;
 	int			addr_num;
 	struct sockaddr		__user *addrs;
+};
+struct sctp_getaddrs {
+	sctp_assoc_t		assoc_id; /*input*/
+	__u32			addr_num; /*output*/
+	__u8			addrs[0]; /*output, variable size*/
 };
 
 /* These are bit fields for msghdr->msg_flags.  See section 5.1.  */

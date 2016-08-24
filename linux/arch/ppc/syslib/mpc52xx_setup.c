@@ -1,6 +1,4 @@
 /*
- * arch/ppc/syslib/mpc52xx_setup.c
- *
  * Common code for the boards based on Freescale MPC52xx embedded CPU.
  *
  * 
@@ -17,15 +15,15 @@
  * kind, whether express or implied.
  */
 
-#include <linux/config.h>
 
 #include <asm/io.h>
 #include <asm/time.h>
 #include <asm/mpc52xx.h>
 #include <asm/mpc52xx_psc.h>
-#include <asm/ocp.h>
 #include <asm/pgtable.h>
 #include <asm/ppcboot.h>
+
+#include <syslib/mpc52xx_pci.h>
 
 extern bd_t __res;
 
@@ -39,17 +37,14 @@ static int core_mult[] = {		/* CPU Frequency multiplier, taken    */
 void
 mpc52xx_restart(char *cmd)
 {
-	struct mpc52xx_gpt* gpt0 = (struct mpc52xx_gpt*) MPC52xx_GPTx(0);
+	struct mpc52xx_gpt __iomem *gpt0 = MPC52xx_VA(MPC52xx_GPTx_OFFSET(0));
 
 	local_irq_disable();
 
 	/* Turn on the watchdog and wait for it to expire. It effectively
 	  does a reset */
-	if (gpt0 != NULL) {
-		out_be32(&gpt0->count, 0x000000ff);
-		out_be32(&gpt0->mode, 0x00009004);
-	} else
-		printk(KERN_ERR "mpc52xx_restart: Unable to ioremap GPT0 registers, -> looping ...");
+	out_be32(&gpt0->count, 0x000000ff);
+	out_be32(&gpt0->mode, 0x00009004);
 
 	while (1);
 }
@@ -80,29 +75,29 @@ mpc52xx_set_bat(void)
 	 * mpc52xx_find_end_of_memory, and UARTs/GPIO access for debug
 	 */
 	mb();
-	mtspr(DBAT2U, 0xf0001ffe);
-	mtspr(DBAT2L, 0xf000002a);
+	mtspr(SPRN_DBAT2U, 0xf0001ffe);
+	mtspr(SPRN_DBAT2L, 0xf000002a);
 	mb();
 }
 
 void __init
 mpc52xx_map_io(void)
 {
-	/* Here we only map the MBAR */
+	/* Here we map the MBAR and the whole upper zone. MBAR is only
+	   64k but we can't map only 64k with BATs. Map the whole
+	   0xf0000000 range is ok and helps eventual lpb devices placed there */
 	io_block_mapping(
-		MPC52xx_MBAR_VIRT, MPC52xx_MBAR, MPC52xx_MBAR_SIZE, _PAGE_IO);
+		MPC52xx_MBAR_VIRT, MPC52xx_MBAR, 0x10000000, _PAGE_IO);
 }
 
 
 #ifdef CONFIG_SERIAL_TEXT_DEBUG
-#ifdef MPC52xx_PF_CONSOLE_PORT
-#define MPC52xx_CONSOLE MPC52xx_PSCx(MPC52xx_PF_CONSOLE_PORT)
-#else
+#ifndef MPC52xx_PF_CONSOLE_PORT
 #error "mpc52xx PSC for console not selected"
 #endif
 
 static void
-mpc52xx_psc_putc(struct mpc52xx_psc * psc, unsigned char c)
+mpc52xx_psc_putc(struct mpc52xx_psc __iomem *psc, unsigned char c)
 {
 	while (!(in_be16(&psc->mpc52xx_psc_status) &
 	         MPC52xx_PSC_SR_TXRDY));
@@ -112,8 +107,10 @@ mpc52xx_psc_putc(struct mpc52xx_psc * psc, unsigned char c)
 void
 mpc52xx_progress(char *s, unsigned short hex)
 {
-	struct mpc52xx_psc *psc = (struct mpc52xx_psc *)MPC52xx_CONSOLE;
 	char c;
+	struct mpc52xx_psc __iomem *psc;
+
+	psc = MPC52xx_VA(MPC52xx_PSCx_OFFSET(MPC52xx_PF_CONSOLE_PORT));
 
 	while ((c = *s++) != 0) {
 		if (c == '\n')
@@ -138,11 +135,11 @@ mpc52xx_find_end_of_memory(void)
 	 * else get size from sdram config registers
 	 */
 	if (ramsize == 0) {
-		struct mpc52xx_mmap_ctl *mmap_ctl;
+		struct mpc52xx_mmap_ctl __iomem *mmap_ctl;
 		u32 sdram_config_0, sdram_config_1;
 
 		/* Temp BAT2 mapping active when this is called ! */
-		mmap_ctl = (struct mpc52xx_mmap_ctl*) MPC52xx_MMAP_CTL;
+		mmap_ctl = MPC52xx_VA(MPC52xx_MMAP_CTL_OFFSET);
 
 		sdram_config_0 = in_be32(&mmap_ctl->sdram0);
 		sdram_config_1 = in_be32(&mmap_ctl->sdram1);
@@ -169,13 +166,11 @@ mpc52xx_calibrate_decr(void)
 	/* if bootloader didn't pass bus frequencies, calculate them */
 	if (xlbfreq == 0) {
 		/* Get RTC & Clock manager modules */
-		struct mpc52xx_rtc *rtc;
-		struct mpc52xx_cdm *cdm;
+		struct mpc52xx_rtc __iomem *rtc;
+		struct mpc52xx_cdm __iomem *cdm;
 
-		rtc = (struct mpc52xx_rtc*)
-			ioremap(MPC52xx_RTC, sizeof(struct mpc52xx_rtc));
-		cdm = (struct mpc52xx_cdm*)
-			ioremap(MPC52xx_CDM, sizeof(struct mpc52xx_cdm));
+		rtc = ioremap(MPC52xx_PA(MPC52xx_RTC_OFFSET), MPC52xx_RTC_SIZE);
+		cdm = ioremap(MPC52xx_PA(MPC52xx_CDM_OFFSET), MPC52xx_CDM_SIZE);
 
 		if ((rtc==NULL) || (cdm==NULL))
 			panic("Can't ioremap RTC/CDM while computing bus freq");
@@ -212,8 +207,8 @@ mpc52xx_calibrate_decr(void)
 		__res.bi_pcifreq = pcifreq;
 
 		/* Release mapping */
-		iounmap((void*)rtc);
-		iounmap((void*)cdm);
+		iounmap(rtc);
+		iounmap(cdm);
 	}
 
 	divisor = 4;
@@ -224,9 +219,59 @@ mpc52xx_calibrate_decr(void)
 
 
 void __init
-mpc52xx_add_board_devices(struct ocp_def board_ocp[]) {
-	while (board_ocp->vendor != OCP_VENDOR_INVALID)
-		if(ocp_add_one_device(board_ocp++))
-			printk("mpc5200-ocp: Failed to add board device !\n");
+mpc52xx_setup_cpu(void)
+{
+	struct mpc52xx_cdm  __iomem *cdm;
+	struct mpc52xx_xlb  __iomem *xlb;
+
+	/* Map zones */
+	cdm  = ioremap(MPC52xx_PA(MPC52xx_CDM_OFFSET), MPC52xx_CDM_SIZE);
+	xlb  = ioremap(MPC52xx_PA(MPC52xx_XLB_OFFSET), MPC52xx_XLB_SIZE);
+
+	if (!cdm || !xlb) {
+		printk(KERN_ERR __FILE__ ": "
+			"Error while mapping CDM/XLB during "
+			"mpc52xx_setup_cpu\n");
+		goto unmap_regs;
+	}
+
+	/* Use internal 48 Mhz */
+	out_8(&cdm->ext_48mhz_en, 0x00);
+	out_8(&cdm->fd_enable, 0x01);
+	if (in_be32(&cdm->rstcfg) & 0x40)	/* Assumes 33Mhz clock */
+		out_be16(&cdm->fd_counters, 0x0001);
+	else
+		out_be16(&cdm->fd_counters, 0x5555);
+
+	/* Configure the XLB Arbiter priorities */
+	out_be32(&xlb->master_pri_enable, 0xff);
+	out_be32(&xlb->master_priority, 0x11111111);
+
+	/* Enable ram snooping for 1GB window */
+	out_be32(&xlb->config, in_be32(&xlb->config) | MPC52xx_XLB_CFG_SNOOP);
+	out_be32(&xlb->snoop_window, MPC52xx_PCI_TARGET_MEM | 0x1d);
+
+	/* Disable XLB pipelining */
+	/* (cfr errata 292. We could do this only just before ATA PIO
+	    transaction and re-enable it after ...) */
+	out_be32(&xlb->config, in_be32(&xlb->config) | MPC52xx_XLB_CFG_PLDIS);
+
+	/* Unmap reg zone */
+unmap_regs:
+	if (cdm)  iounmap(cdm);
+	if (xlb)  iounmap(xlb);
 }
 
+
+int mpc52xx_match_psc_function(int psc_idx, const char *func)
+{
+	struct mpc52xx_psc_func *cf = mpc52xx_psc_functions;
+
+	while ((cf->id != -1) && (cf->func != NULL)) {
+		if ((cf->id == psc_idx) && !strcmp(cf->func,func))
+			return 1;
+		cf++;
+	}
+
+	return 0;
+}

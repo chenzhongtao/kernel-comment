@@ -80,9 +80,24 @@ static struct adapter_parm adapter_parm[] = {
 		.setscl	= { 0x01, DATA, 1 },
 		.getsda	= { 0x10, STAT, 1 },
 	},
+	/* type 6: Barco LPT->DVI (K5800236) adapter */
+	{
+		.setsda	= { 0x02, DATA, 1 },
+		.setscl	= { 0x01, DATA, 1 },
+		.getsda	= { 0x20, STAT, 0 },
+		.getscl	= { 0x40, STAT, 0 },
+		.init	= { 0xfc, DATA, 0 },
+	},
+	/* type 7: One For All JP1 parallel port adapter */
+	{
+		.setsda	= { 0x01, DATA, 0 },
+		.setscl	= { 0x02, DATA, 0 },
+		.getsda	= { 0x80, STAT, 1 },
+		.init	= { 0x04, DATA, 1 },
+	},
 };
 
-static int type;
+static int type = -1;
 module_param(type, int, 0);
 MODULE_PARM_DESC(type,
 	"Type of adapter:\n"
@@ -91,4 +106,7 @@ MODULE_PARM_DESC(type,
 	" 2 = Velleman K8000 adapter\n"
 	" 3 = ELV adapter\n"
 	" 4 = ADM1032 evaluation board\n"
-	" 5 = ADM1025, ADM1030 and ADM1031 evaluation boards\n");
+	" 5 = ADM1025, ADM1030 and ADM1031 evaluation boards\n"
+	" 6 = Barco LPT->DVI (K5800236) adapter\n"
+	" 7 = One For All JP1 parallel port adapter\n"
+);

@@ -1,5 +1,5 @@
 /*
- *	Linux NET3:	IP/IP protocol decoder. 
+ *	Linux NET3:	IP/IP protocol decoder.
  *
  *	Version: $Id: ipip.c,v 1.50 2001/10/02 02:22:36 davem Exp $
  *
@@ -35,14 +35,14 @@
 	Thanks for the great code!
 
 		-Sam Lantinga	(slouken@cs.ucdavis.edu)  02/01/95
-		
+
 	Minor tweaks:
 		Cleaned up the code a little and added some pre-1.3.0 tweaks.
 		dev->hard_header/hard_header_len changed to use no headers.
 		Comments/bracketing tweaked.
 		Made the tunnels use dev->name not tunnel: when error reporting.
 		Added tx_dropped stat
-		
+
 		-Alan Cox	(Alan.Cox@linux.org) 21 March 95
 
 	Reworked:
@@ -52,7 +52,7 @@
 		Note:  There is currently no firewall or ICMP handling done.
 
 		-Sam Lantinga	(slouken@cs.ucdavis.edu) 02/13/96
-		
+
 */
 
 /* Things I wish I had known when writing the tunnel driver:
@@ -75,7 +75,7 @@
 	"allocated" with skb_put().  You can then write up to skb->len
 	bytes to that buffer.  If you need more, you can call skb_put()
 	again with the additional amount of space you need.  You can
-	find out how much more space you can allocate by calling 
+	find out how much more space you can allocate by calling
 	"skb_tailroom(skb)".
 	Now, to add header space, call "skb_push(skb, header_len)".
 	This creates space at the beginning of the buffer and returns
@@ -92,11 +92,10 @@
    For comments look at net/ipv4/ip_gre.c --ANK
  */
 
- 
-#include <linux/config.h>
+
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <asm/uaccess.h>
 #include <linux/skbuff.h>
@@ -108,17 +107,17 @@
 #include <linux/mroute.h>
 #include <linux/init.h>
 #include <linux/netfilter_ipv4.h>
+#include <linux/if_ether.h>
 
 #include <net/sock.h>
 #include <net/ip.h>
 #include <net/icmp.h>
-#include <net/protocol.h>
 #include <net/ipip.h>
 #include <net/inet_ecn.h>
 #include <net/xfrm.h>
 
 #define HASH_SIZE  16
-#define HASH(addr) ((addr^(addr>>4))&0xF)
+#define HASH(addr) (((__force u32)addr^((__force u32)addr>>4))&0xF)
 
 static int ipip_fb_tunnel_init(struct net_device *dev);
 static int ipip_tunnel_init(struct net_device *dev);
@@ -134,7 +133,7 @@ static struct ip_tunnel **tunnels[4] = { tunnels_wc, tunnels_l, tunnels_r, tunne
 
 static DEFINE_RWLOCK(ipip_lock);
 
-static struct ip_tunnel * ipip_tunnel_lookup(u32 remote, u32 local)
+static struct ip_tunnel * ipip_tunnel_lookup(__be32 remote, __be32 local)
 {
 	unsigned h0 = HASH(remote);
 	unsigned h1 = HASH(local);
@@ -158,10 +157,10 @@ static struct ip_tunnel * ipip_tunnel_lookup(u32 remote, u32 local)
 	return NULL;
 }
 
-static struct ip_tunnel **ipip_bucket(struct ip_tunnel *t)
+static struct ip_tunnel **__ipip_bucket(struct ip_tunnel_parm *parms)
 {
-	u32 remote = t->parms.iph.daddr;
-	u32 local = t->parms.iph.saddr;
+	__be32 remote = parms->iph.daddr;
+	__be32 local = parms->iph.saddr;
 	unsigned h = 0;
 	int prio = 0;
 
@@ -176,6 +175,10 @@ static struct ip_tunnel **ipip_bucket(struct ip_tunnel *t)
 	return &tunnels[prio][h];
 }
 
+static inline struct ip_tunnel **ipip_bucket(struct ip_tunnel *t)
+{
+	return __ipip_bucket(&t->parms);
+}
 
 static void ipip_tunnel_unlink(struct ip_tunnel *t)
 {
@@ -203,23 +206,13 @@ static void ipip_tunnel_link(struct ip_tunnel *t)
 
 static struct ip_tunnel * ipip_tunnel_locate(struct ip_tunnel_parm *parms, int create)
 {
-	u32 remote = parms->iph.daddr;
-	u32 local = parms->iph.saddr;
+	__be32 remote = parms->iph.daddr;
+	__be32 local = parms->iph.saddr;
 	struct ip_tunnel *t, **tp, *nt;
 	struct net_device *dev;
-	unsigned h = 0;
-	int prio = 0;
 	char name[IFNAMSIZ];
 
-	if (remote) {
-		prio |= 2;
-		h ^= HASH(remote);
-	}
-	if (local) {
-		prio |= 1;
-		h ^= HASH(local);
-	}
-	for (tp = &tunnels[prio][h]; (t = *tp) != NULL; tp = &t->next) {
+	for (tp = __ipip_bucket(parms); (t = *tp) != NULL; tp = &t->next) {
 		if (local == t->parms.iph.saddr && remote == t->parms.iph.daddr)
 			return t;
 	}
@@ -232,7 +225,7 @@ static struct ip_tunnel * ipip_tunnel_locate(struct ip_tunnel_parm *parms, int c
 		int i;
 		for (i=1; i<100; i++) {
 			sprintf(name, "tunl%d", i);
-			if (__dev_get_by_name(name) == NULL)
+			if (__dev_get_by_name(&init_net, name) == NULL)
 				break;
 		}
 		if (i==100)
@@ -243,8 +236,7 @@ static struct ip_tunnel * ipip_tunnel_locate(struct ip_tunnel_parm *parms, int c
 	if (dev == NULL)
 		return NULL;
 
-	nt = dev->priv;
-	SET_MODULE_OWNER(dev);
+	nt = netdev_priv(dev);
 	dev->init = ipip_tunnel_init;
 	nt->parms = *parms;
 
@@ -255,7 +247,6 @@ static struct ip_tunnel * ipip_tunnel_locate(struct ip_tunnel_parm *parms, int c
 
 	dev_hold(dev);
 	ipip_tunnel_link(nt);
-	/* Do not decrement MOD_USE_COUNT here. */
 	return nt;
 
 failed:
@@ -269,11 +260,11 @@ static void ipip_tunnel_uninit(struct net_device *dev)
 		tunnels_wc[0] = NULL;
 		write_unlock_bh(&ipip_lock);
 	} else
-		ipip_tunnel_unlink((struct ip_tunnel*)dev->priv);
+		ipip_tunnel_unlink(netdev_priv(dev));
 	dev_put(dev);
 }
 
-static void ipip_err(struct sk_buff *skb, void *__unused)
+static int ipip_err(struct sk_buff *skb, u32 info)
 {
 #ifndef I_WISH_WORLD_WERE_PERFECT
 
@@ -282,24 +273,25 @@ static void ipip_err(struct sk_buff *skb, void *__unused)
    ICMP in the real Internet is absolutely infeasible.
  */
 	struct iphdr *iph = (struct iphdr*)skb->data;
-	int type = skb->h.icmph->type;
-	int code = skb->h.icmph->code;
+	const int type = icmp_hdr(skb)->type;
+	const int code = icmp_hdr(skb)->code;
 	struct ip_tunnel *t;
+	int err;
 
 	switch (type) {
 	default:
 	case ICMP_PARAMETERPROB:
-		return;
+		return 0;
 
 	case ICMP_DEST_UNREACH:
 		switch (code) {
 		case ICMP_SR_FAILED:
 		case ICMP_PORT_UNREACH:
 			/* Impossible event. */
-			return;
+			return 0;
 		case ICMP_FRAG_NEEDED:
 			/* Soft state for pmtu is maintained by IP core. */
-			return;
+			return 0;
 		default:
 			/* All others are translated to HOST_UNREACH.
 			   rfc2003 contains "deep thoughts" about NET_UNREACH,
@@ -310,14 +302,18 @@ static void ipip_err(struct sk_buff *skb, void *__unused)
 		break;
 	case ICMP_TIME_EXCEEDED:
 		if (code != ICMP_EXC_TTL)
-			return;
+			return 0;
 		break;
 	}
+
+	err = -ENOENT;
 
 	read_lock(&ipip_lock);
 	t = ipip_tunnel_lookup(iph->daddr, iph->saddr);
 	if (t == NULL || t->parms.iph.daddr == 0)
 		goto out;
+
+	err = 0;
 	if (t->parms.iph.ttl == 0 && type == ICMP_TIME_EXCEEDED)
 		goto out;
 
@@ -328,36 +324,38 @@ static void ipip_err(struct sk_buff *skb, void *__unused)
 	t->err_time = jiffies;
 out:
 	read_unlock(&ipip_lock);
-	return;
+	return err;
 #else
 	struct iphdr *iph = (struct iphdr*)dp;
 	int hlen = iph->ihl<<2;
 	struct iphdr *eiph;
-	int type = skb->h.icmph->type;
-	int code = skb->h.icmph->code;
+	const int type = icmp_hdr(skb)->type;
+	const int code = icmp_hdr(skb)->code;
 	int rel_type = 0;
 	int rel_code = 0;
-	int rel_info = 0;
+	__be32 rel_info = 0;
+	__u32 n = 0;
 	struct sk_buff *skb2;
 	struct flowi fl;
 	struct rtable *rt;
 
 	if (len < hlen + sizeof(struct iphdr))
-		return;
+		return 0;
 	eiph = (struct iphdr*)(dp + hlen);
 
 	switch (type) {
 	default:
-		return;
+		return 0;
 	case ICMP_PARAMETERPROB:
-		if (skb->h.icmph->un.gateway < hlen)
-			return;
+		n = ntohl(icmp_hdr(skb)->un.gateway) >> 24;
+		if (n < hlen)
+			return 0;
 
 		/* So... This guy found something strange INSIDE encapsulated
 		   packet. Well, he is fool, but what can we do ?
 		 */
 		rel_type = ICMP_PARAMETERPROB;
-		rel_info = skb->h.icmph->un.gateway - hlen;
+		rel_info = htonl((n - hlen) << 24);
 		break;
 
 	case ICMP_DEST_UNREACH:
@@ -365,16 +363,17 @@ out:
 		case ICMP_SR_FAILED:
 		case ICMP_PORT_UNREACH:
 			/* Impossible event. */
-			return;
+			return 0;
 		case ICMP_FRAG_NEEDED:
 			/* And it is the only really necessary thing :-) */
-			rel_info = ntohs(skb->h.icmph->un.frag.mtu);
-			if (rel_info < hlen+68)
-				return;
-			rel_info -= hlen;
+			n = ntohs(icmp_hdr(skb)->un.frag.mtu);
+			if (n < hlen+68)
+				return 0;
+			n -= hlen;
 			/* BSD 4.2 MORE DOES NOT EXIST IN NATURE. */
-			if (rel_info > ntohs(eiph->tot_len))
-				return;
+			if (n > ntohs(eiph->tot_len))
+				return 0;
+			rel_info = htonl(n);
 			break;
 		default:
 			/* All others are translated to HOST_UNREACH.
@@ -388,18 +387,18 @@ out:
 		break;
 	case ICMP_TIME_EXCEEDED:
 		if (code != ICMP_EXC_TTL)
-			return;
+			return 0;
 		break;
 	}
 
 	/* Prepare fake skb to feed it to icmp_send */
 	skb2 = skb_clone(skb, GFP_ATOMIC);
 	if (skb2 == NULL)
-		return;
+		return 0;
 	dst_release(skb2->dst);
 	skb2->dst = NULL;
 	skb_pull(skb2, skb->data - (u8*)eiph);
-	skb2->nh.raw = skb2->data;
+	skb_reset_network_header(skb2);
 
 	/* Try to guess incoming interface */
 	memset(&fl, 0, sizeof(fl));
@@ -408,7 +407,7 @@ out:
 	fl.proto = IPPROTO_IPIP;
 	if (ip_route_output_key(&rt, &key)) {
 		kfree_skb(skb2);
-		return;
+		return 0;
 	}
 	skb2->dev = rt->u.dst.dev;
 
@@ -423,27 +422,26 @@ out:
 		    rt->u.dst.dev->type != ARPHRD_TUNNEL) {
 			ip_rt_put(rt);
 			kfree_skb(skb2);
-			return;
+			return 0;
 		}
 	} else {
 		ip_rt_put(rt);
 		if (ip_route_input(skb2, eiph->daddr, eiph->saddr, eiph->tos, skb2->dev) ||
 		    skb2->dst->dev->type != ARPHRD_TUNNEL) {
 			kfree_skb(skb2);
-			return;
+			return 0;
 		}
 	}
 
 	/* change mtu on this route */
 	if (type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED) {
-		if (rel_info > dst_pmtu(skb2->dst)) {
+		if (n > dst_mtu(skb2->dst)) {
 			kfree_skb(skb2);
-			return;
+			return 0;
 		}
-		skb2->dst->ops->update_pmtu(skb2->dst, rel_info);
-		rel_info = htonl(rel_info);
+		skb2->dst->ops->update_pmtu(skb2->dst, n);
 	} else if (type == ICMP_TIME_EXCEEDED) {
-		struct ip_tunnel *t = (struct ip_tunnel*)skb2->dev->priv;
+		struct ip_tunnel *t = netdev_priv(skb2->dev);
 		if (t->parms.iph.ttl) {
 			rel_type = ICMP_DEST_UNREACH;
 			rel_code = ICMP_HOST_UNREACH;
@@ -452,13 +450,14 @@ out:
 
 	icmp_send(skb2, rel_type, rel_code, rel_info);
 	kfree_skb(skb2);
-	return;
+	return 0;
 #endif
 }
 
-static inline void ipip_ecn_decapsulate(struct iphdr *outer_iph, struct sk_buff *skb)
+static inline void ipip_ecn_decapsulate(const struct iphdr *outer_iph,
+					struct sk_buff *skb)
 {
-	struct iphdr *inner_iph = skb->nh.iph;
+	struct iphdr *inner_iph = ip_hdr(skb);
 
 	if (INET_ECN_is_ce(outer_iph->tos))
 		IP_ECN_set_ce(inner_iph);
@@ -466,13 +465,8 @@ static inline void ipip_ecn_decapsulate(struct iphdr *outer_iph, struct sk_buff 
 
 static int ipip_rcv(struct sk_buff *skb)
 {
-	struct iphdr *iph;
 	struct ip_tunnel *tunnel;
-
-	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-		goto out;
-
-	iph = skb->nh.iph;
+	const struct iphdr *iph = ip_hdr(skb);
 
 	read_lock(&ipip_lock);
 	if ((tunnel = ipip_tunnel_lookup(iph->saddr, iph->daddr)) != NULL) {
@@ -484,9 +478,8 @@ static int ipip_rcv(struct sk_buff *skb)
 
 		secpath_reset(skb);
 
-		skb->mac.raw = skb->nh.raw;
-		skb->nh.raw = skb->data;
-		memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
+		skb->mac_header = skb->network_header;
+		skb_reset_network_header(skb);
 		skb->protocol = htons(ETH_P_IP);
 		skb->pkt_type = PACKET_HOST;
 
@@ -503,7 +496,6 @@ static int ipip_rcv(struct sk_buff *skb)
 	}
 	read_unlock(&ipip_lock);
 
-out:
 	return -1;
 }
 
@@ -514,17 +506,17 @@ out:
 
 static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct ip_tunnel *tunnel = (struct ip_tunnel*)dev->priv;
+	struct ip_tunnel *tunnel = netdev_priv(dev);
 	struct net_device_stats *stats = &tunnel->stat;
 	struct iphdr  *tiph = &tunnel->parms.iph;
 	u8     tos = tunnel->parms.iph.tos;
-	u16    df = tiph->frag_off;
+	__be16 df = tiph->frag_off;
 	struct rtable *rt;     			/* Route to the other host */
 	struct net_device *tdev;			/* Device to other host */
-	struct iphdr  *old_iph = skb->nh.iph;
+	struct iphdr  *old_iph = ip_hdr(skb);
 	struct iphdr  *iph;			/* Our new IP header */
-	int    max_headroom;			/* The extra header space needed */
-	u32    dst = tiph->daddr;
+	unsigned int max_headroom;		/* The extra header space needed */
+	__be32 dst = tiph->daddr;
 	int    mtu;
 
 	if (tunnel->recursion++) {
@@ -569,9 +561,9 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	if (tiph->frag_off)
-		mtu = dst_pmtu(&rt->u.dst) - sizeof(struct iphdr);
+		mtu = dst_mtu(&rt->u.dst) - sizeof(struct iphdr);
 	else
-		mtu = skb->dst ? dst_pmtu(skb->dst) : dev->mtu;
+		mtu = skb->dst ? dst_mtu(skb->dst) : dev->mtu;
 
 	if (mtu < 68) {
 		tunnel->stat.collisions++;
@@ -602,11 +594,12 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	 */
 	max_headroom = (LL_RESERVED_SPACE(tdev)+sizeof(struct iphdr));
 
-	if (skb_headroom(skb) < max_headroom || skb_cloned(skb) || skb_shared(skb)) {
+	if (skb_headroom(skb) < max_headroom || skb_shared(skb) ||
+	    (skb_cloned(skb) && !skb_clone_writable(skb, 0))) {
 		struct sk_buff *new_skb = skb_realloc_headroom(skb, max_headroom);
 		if (!new_skb) {
 			ip_rt_put(rt);
-  			stats->tx_dropped++;
+			stats->tx_dropped++;
 			dev_kfree_skb(skb);
 			tunnel->recursion--;
 			return 0;
@@ -615,12 +608,15 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			skb_set_owner_w(new_skb, skb->sk);
 		dev_kfree_skb(skb);
 		skb = new_skb;
-		old_iph = skb->nh.iph;
+		old_iph = ip_hdr(skb);
 	}
 
-	skb->h.raw = skb->nh.raw;
-	skb->nh.raw = skb_push(skb, sizeof(struct iphdr));
+	skb->transport_header = skb->network_header;
+	skb_push(skb, sizeof(struct iphdr));
+	skb_reset_network_header(skb);
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
+	IPCB(skb)->flags &= ~(IPSKB_XFRM_TUNNEL_SIZE | IPSKB_XFRM_TRANSFORMED |
+			      IPSKB_REROUTED);
 	dst_release(skb->dst);
 	skb->dst = &rt->u.dst;
 
@@ -628,7 +624,7 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	 *	Push down and install the IPIP header.
 	 */
 
-	iph 			=	skb->nh.iph;
+	iph 			=	ip_hdr(skb);
 	iph->version		=	4;
 	iph->ihl		=	sizeof(struct iphdr)>>2;
 	iph->frag_off		=	df;
@@ -673,7 +669,7 @@ ipip_tunnel_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd)
 			t = ipip_tunnel_locate(&p, 0);
 		}
 		if (t == NULL)
-			t = (struct ip_tunnel*)dev->priv;
+			t = netdev_priv(dev);
 		memcpy(&p, &t->parms, sizeof(p));
 		if (copy_to_user(ifr->ifr_ifru.ifru_data, &p, sizeof(p)))
 			err = -EFAULT;
@@ -710,7 +706,7 @@ ipip_tunnel_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd)
 					err = -EINVAL;
 					break;
 				}
-				t = (struct ip_tunnel*)dev->priv;
+				t = netdev_priv(dev);
 				ipip_tunnel_unlink(t);
 				t->parms.iph.saddr = p.iph.saddr;
 				t->parms.iph.daddr = p.iph.daddr;
@@ -751,7 +747,8 @@ ipip_tunnel_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd)
 				goto done;
 			dev = t->dev;
 		}
-		err = unregister_netdevice(dev);
+		unregister_netdevice(dev);
+		err = 0;
 		break;
 
 	default:
@@ -764,7 +761,7 @@ done:
 
 static struct net_device_stats *ipip_tunnel_get_stats(struct net_device *dev)
 {
-	return &(((struct ip_tunnel*)dev->priv)->stat);
+	return &(((struct ip_tunnel*)netdev_priv(dev))->stat);
 }
 
 static int ipip_tunnel_change_mtu(struct net_device *dev, int new_mtu)
@@ -777,7 +774,6 @@ static int ipip_tunnel_change_mtu(struct net_device *dev, int new_mtu)
 
 static void ipip_tunnel_setup(struct net_device *dev)
 {
-	SET_MODULE_OWNER(dev);
 	dev->uninit		= ipip_tunnel_uninit;
 	dev->hard_start_xmit	= ipip_tunnel_xmit;
 	dev->get_stats		= ipip_tunnel_get_stats;
@@ -787,7 +783,7 @@ static void ipip_tunnel_setup(struct net_device *dev)
 
 	dev->type		= ARPHRD_TUNNEL;
 	dev->hard_header_len 	= LL_MAX_HEADER + sizeof(struct iphdr);
-	dev->mtu		= 1500 - sizeof(struct iphdr);
+	dev->mtu		= ETH_DATA_LEN - sizeof(struct iphdr);
 	dev->flags		= IFF_NOARP;
 	dev->iflink		= 0;
 	dev->addr_len		= 4;
@@ -799,7 +795,7 @@ static int ipip_tunnel_init(struct net_device *dev)
 	struct ip_tunnel *tunnel;
 	struct iphdr *iph;
 
-	tunnel = (struct ip_tunnel*)dev->priv;
+	tunnel = netdev_priv(dev);
 	iph = &tunnel->parms.iph;
 
 	tunnel->dev = dev;
@@ -824,7 +820,7 @@ static int ipip_tunnel_init(struct net_device *dev)
 	}
 
 	if (!tdev && tunnel->parms.link)
-		tdev = __dev_get_by_index(tunnel->parms.link);
+		tdev = __dev_get_by_index(&init_net, tunnel->parms.link);
 
 	if (tdev) {
 		dev->hard_header_len = tdev->hard_header_len + sizeof(struct iphdr);
@@ -837,7 +833,7 @@ static int ipip_tunnel_init(struct net_device *dev)
 
 static int __init ipip_fb_tunnel_init(struct net_device *dev)
 {
-	struct ip_tunnel *tunnel = dev->priv;
+	struct ip_tunnel *tunnel = netdev_priv(dev);
 	struct iphdr *iph = &tunnel->parms.iph;
 
 	tunnel->dev = dev;
@@ -855,6 +851,7 @@ static int __init ipip_fb_tunnel_init(struct net_device *dev)
 static struct xfrm_tunnel ipip_handler = {
 	.handler	=	ipip_rcv,
 	.err_handler	=	ipip_err,
+	.priority	=	1,
 };
 
 static char banner[] __initdata =
@@ -866,7 +863,7 @@ static int __init ipip_init(void)
 
 	printk(banner);
 
-	if (xfrm4_tunnel_register(&ipip_handler) < 0) {
+	if (xfrm4_tunnel_register(&ipip_handler, AF_INET)) {
 		printk(KERN_INFO "ipip init: can't register tunnel\n");
 		return -EAGAIN;
 	}
@@ -888,16 +885,33 @@ static int __init ipip_init(void)
  err2:
 	free_netdev(ipip_fb_tunnel_dev);
  err1:
-	xfrm4_tunnel_deregister(&ipip_handler);
+	xfrm4_tunnel_deregister(&ipip_handler, AF_INET);
 	goto out;
+}
+
+static void __exit ipip_destroy_tunnels(void)
+{
+	int prio;
+
+	for (prio = 1; prio < 4; prio++) {
+		int h;
+		for (h = 0; h < HASH_SIZE; h++) {
+			struct ip_tunnel *t;
+			while ((t = tunnels[prio][h]) != NULL)
+				unregister_netdevice(t->dev);
+		}
+	}
 }
 
 static void __exit ipip_fini(void)
 {
-	if (xfrm4_tunnel_deregister(&ipip_handler) < 0)
+	if (xfrm4_tunnel_deregister(&ipip_handler, AF_INET))
 		printk(KERN_INFO "ipip close: can't deregister tunnel\n");
 
-	unregister_netdev(ipip_fb_tunnel_dev);
+	rtnl_lock();
+	ipip_destroy_tunnels();
+	unregister_netdevice(ipip_fb_tunnel_dev);
+	rtnl_unlock();
 }
 
 module_init(ipip_init);

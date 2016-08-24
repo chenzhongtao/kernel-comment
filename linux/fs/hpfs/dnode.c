@@ -78,7 +78,7 @@ static void for_all_poss(struct inode *inode, void (*f)(loff_t *, loff_t, loff_t
 	return;
 }
 
-void hpfs_pos_subst(loff_t *p, loff_t f, loff_t t)
+static void hpfs_pos_subst(loff_t *p, loff_t f, loff_t t)
 {
 	if (*p == f) *p = t;
 }
@@ -88,7 +88,7 @@ void hpfs_pos_subst(loff_t *p, loff_t f, loff_t t)
 	if ((*p & ~0x3f) == (f & ~0x3f)) *p = (t & ~0x3f) | (*p & 0x3f);
 }*/
 
-void hpfs_pos_ins(loff_t *p, loff_t d, loff_t c)
+static void hpfs_pos_ins(loff_t *p, loff_t d, loff_t c)
 {
 	if ((*p & ~0x3f) == (d & ~0x3f) && (*p & 0x3f) >= (d & 0x3f)) {
 		int n = (*p & 0x3f) + c;
@@ -97,7 +97,7 @@ void hpfs_pos_ins(loff_t *p, loff_t d, loff_t c)
 	}
 }
 
-void hpfs_pos_del(loff_t *p, loff_t d, loff_t c)
+static void hpfs_pos_del(loff_t *p, loff_t d, loff_t c)
 {
 	if ((*p & ~0x3f) == (d & ~0x3f) && (*p & 0x3f) >= (d & 0x3f)) {
 		int n = (*p & 0x3f) - c;
@@ -189,7 +189,8 @@ struct hpfs_dirent *hpfs_add_de(struct super_block *s, struct dnode *d, unsigned
 
 /* Delete dirent and don't care about its subtree */
 
-void hpfs_delete_de(struct super_block *s, struct dnode *d, struct hpfs_dirent *de)
+static void hpfs_delete_de(struct super_block *s, struct dnode *d,
+			   struct hpfs_dirent *de)
 {
 	if (de->last) {
 		hpfs_error(s, "attempt to delete last dirent in dnode %08x", d->self);
@@ -221,8 +222,9 @@ static void fix_up_ptrs(struct super_block *s, struct dnode *d)
 
 /* Add an entry to dnode and do dnode splitting if required */
 
-int hpfs_add_to_dnode(struct inode *i, dnode_secno dno, unsigned char *name, unsigned namelen,
-		      struct hpfs_dirent *new_de, dnode_secno down_ptr)
+static int hpfs_add_to_dnode(struct inode *i, dnode_secno dno,
+			     unsigned char *name, unsigned namelen,
+			     struct hpfs_dirent *new_de, dnode_secno down_ptr)
 {
 	struct quad_buffer_head qbh, qbh1, qbh2;
 	struct dnode *d, *ad, *rd, *nd = NULL;
@@ -242,12 +244,12 @@ int hpfs_add_to_dnode(struct inode *i, dnode_secno dno, unsigned char *name, uns
 	go_up:
 	if (namelen >= 256) {
 		hpfs_error(i->i_sb, "hpfs_add_to_dnode: namelen == %d", namelen);
-		if (nd) kfree(nd);
+		kfree(nd);
 		kfree(nname);
 		return 1;
 	}
 	if (!(d = hpfs_map_dnode(i->i_sb, dno, &qbh))) {
-		if (nd) kfree(nd);
+		kfree(nd);
 		kfree(nname);
 		return 1;
 	}
@@ -255,7 +257,7 @@ int hpfs_add_to_dnode(struct inode *i, dnode_secno dno, unsigned char *name, uns
 	if (hpfs_sb(i->i_sb)->sb_chk)
 		if (hpfs_stop_cycles(i->i_sb, dno, &c1, &c2, "hpfs_add_to_dnode")) {
 			hpfs_brelse4(&qbh);
-			if (nd) kfree(nd);
+			kfree(nd);
 			kfree(nname);
 			return 1;
 		}
@@ -268,7 +270,7 @@ int hpfs_add_to_dnode(struct inode *i, dnode_secno dno, unsigned char *name, uns
 		for_all_poss(i, hpfs_pos_subst, 5, t + 1);
 		hpfs_mark_4buffers_dirty(&qbh);
 		hpfs_brelse4(&qbh);
-		if (nd) kfree(nd);
+		kfree(nd);
 		kfree(nname);
 		return 0;
 	}
@@ -531,10 +533,13 @@ static void delete_empty_dnode(struct inode *i, dnode_secno dno)
 			struct buffer_head *bh;
 			struct dnode *d1;
 			struct quad_buffer_head qbh1;
-			if (hpfs_sb(i->i_sb)->sb_chk) if (up != i->i_ino) {
-				hpfs_error(i->i_sb, "bad pointer to fnode, dnode %08x, pointing to %08x, should be %08x", dno, up, i->i_ino);
+			if (hpfs_sb(i->i_sb)->sb_chk)
+			    if (up != i->i_ino) {
+				hpfs_error(i->i_sb,
+					"bad pointer to fnode, dnode %08x, pointing to %08x, should be %08lx",
+					dno, up, (unsigned long)i->i_ino);
 				return;
-			}
+			    }
 			if ((d1 = hpfs_map_dnode(i->i_sb, down, &qbh1))) {
 				d1->up = up;
 				d1->root_dnode = 1;
@@ -849,7 +854,9 @@ struct hpfs_dirent *map_pos_dirent(struct inode *inode, loff_t *posp,
 	/* Going to the next dirent */
 	if ((d = de_next_de(de)) < dnode_end_de(dnode)) {
 		if (!(++*posp & 077)) {
-			hpfs_error(inode->i_sb, "map_pos_dirent: pos crossed dnode boundary; pos = %08x", *posp);
+			hpfs_error(inode->i_sb,
+				"map_pos_dirent: pos crossed dnode boundary; pos = %08llx",
+				(unsigned long long)*posp);
 			goto bail;
 		}
 		/* We're going down the tree */

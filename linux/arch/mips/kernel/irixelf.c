@@ -8,8 +8,10 @@
  *
  * Copyright (C) 1993 - 1994 Eric Youngdale <ericy@cais.com>
  * Copyright (C) 1996 - 2004 David S. Miller <dm@engr.sgi.com>
- * Copyright (C) 2004 Steven J. Hill <sjhill@realitydiluted.com>
+ * Copyright (C) 2004 - 2005 Steven J. Hill <sjhill@realitydiluted.com>
  */
+#undef DEBUG
+
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
@@ -29,98 +31,125 @@
 #include <linux/shm.h>
 #include <linux/personality.h>
 #include <linux/elfcore.h>
-#include <linux/smp_lock.h>
 
-#include <asm/uaccess.h>
 #include <asm/mipsregs.h>
+#include <asm/namei.h>
 #include <asm/prctl.h>
+#include <asm/uaccess.h>
 
 #define DLINFO_ITEMS 12
 
 #include <linux/elf.h>
 
-#undef DEBUG_ELF
-
 static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs);
 static int load_irix_library(struct file *);
 static int irix_core_dump(long signr, struct pt_regs * regs,
-                          struct file *file);
+                          struct file *file, unsigned long limit);
 
 static struct linux_binfmt irix_format = {
-	NULL, THIS_MODULE, load_irix_binary, load_irix_library,
-	irix_core_dump, PAGE_SIZE
+	.module		= THIS_MODULE,
+	.load_binary	= load_irix_binary,
+	.load_shlib	= load_irix_library,
+	.core_dump	= irix_core_dump,
+	.min_coredump	= PAGE_SIZE,
 };
 
-#ifndef elf_addr_t
-#define elf_addr_t unsigned long
-#endif
-
-#ifdef DEBUG_ELF
 /* Debugging routines. */
 static char *get_elf_p_type(Elf32_Word p_type)
 {
-	int i = (int) p_type;
+#ifdef DEBUG
+	switch (p_type) {
+	case PT_NULL:
+		return "PT_NULL";
+		break;
 
-	switch(i) {
-	case PT_NULL: return("PT_NULL"); break;
-	case PT_LOAD: return("PT_LOAD"); break;
-	case PT_DYNAMIC: return("PT_DYNAMIC"); break;
-	case PT_INTERP: return("PT_INTERP"); break;
-	case PT_NOTE: return("PT_NOTE"); break;
-	case PT_SHLIB: return("PT_SHLIB"); break;
-	case PT_PHDR: return("PT_PHDR"); break;
-	case PT_LOPROC: return("PT_LOPROC/REGINFO"); break;
-	case PT_HIPROC: return("PT_HIPROC"); break;
-	default: return("PT_BOGUS"); break;
+	case PT_LOAD:
+		return "PT_LOAD";
+		break;
+
+	case PT_DYNAMIC:
+		return "PT_DYNAMIC";
+		break;
+
+	case PT_INTERP:
+		return "PT_INTERP";
+		break;
+
+	case PT_NOTE:
+		return "PT_NOTE";
+		break;
+
+	case PT_SHLIB:
+		return "PT_SHLIB";
+		break;
+
+	case PT_PHDR:
+		return "PT_PHDR";
+		break;
+
+	case PT_LOPROC:
+		return "PT_LOPROC/REGINFO";
+		break;
+
+	case PT_HIPROC:
+		return "PT_HIPROC";
+		break;
+
+	default:
+		return "PT_BOGUS";
+		break;
 	}
+#endif
 }
 
 static void print_elfhdr(struct elfhdr *ehp)
 {
 	int i;
 
-	printk("ELFHDR: e_ident<");
-	for(i = 0; i < (EI_NIDENT - 1); i++) printk("%x ", ehp->e_ident[i]);
-	printk("%x>\n", ehp->e_ident[i]);
-	printk("        e_type[%04x] e_machine[%04x] e_version[%08lx]\n",
-	       (unsigned short) ehp->e_type, (unsigned short) ehp->e_machine,
-	       (unsigned long) ehp->e_version);
-	printk("        e_entry[%08lx] e_phoff[%08lx] e_shoff[%08lx] "
-	       "e_flags[%08lx]\n",
-	       (unsigned long) ehp->e_entry, (unsigned long) ehp->e_phoff,
-	       (unsigned long) ehp->e_shoff, (unsigned long) ehp->e_flags);
-	printk("        e_ehsize[%04x] e_phentsize[%04x] e_phnum[%04x]\n",
-	       (unsigned short) ehp->e_ehsize, (unsigned short) ehp->e_phentsize,
-	       (unsigned short) ehp->e_phnum);
-	printk("        e_shentsize[%04x] e_shnum[%04x] e_shstrndx[%04x]\n",
-	       (unsigned short) ehp->e_shentsize, (unsigned short) ehp->e_shnum,
-	       (unsigned short) ehp->e_shstrndx);
+	pr_debug("ELFHDR: e_ident<");
+	for (i = 0; i < (EI_NIDENT - 1); i++)
+		pr_debug("%x ", ehp->e_ident[i]);
+	pr_debug("%x>\n", ehp->e_ident[i]);
+	pr_debug("        e_type[%04x] e_machine[%04x] e_version[%08lx]\n",
+	         (unsigned short) ehp->e_type, (unsigned short) ehp->e_machine,
+	         (unsigned long) ehp->e_version);
+	pr_debug("        e_entry[%08lx] e_phoff[%08lx] e_shoff[%08lx] "
+	         "e_flags[%08lx]\n",
+	         (unsigned long) ehp->e_entry, (unsigned long) ehp->e_phoff,
+	         (unsigned long) ehp->e_shoff, (unsigned long) ehp->e_flags);
+	pr_debug("        e_ehsize[%04x] e_phentsize[%04x] e_phnum[%04x]\n",
+	         (unsigned short) ehp->e_ehsize,
+	         (unsigned short) ehp->e_phentsize,
+	         (unsigned short) ehp->e_phnum);
+	pr_debug("        e_shentsize[%04x] e_shnum[%04x] e_shstrndx[%04x]\n",
+	         (unsigned short) ehp->e_shentsize,
+	         (unsigned short) ehp->e_shnum,
+	         (unsigned short) ehp->e_shstrndx);
 }
 
 static void print_phdr(int i, struct elf_phdr *ep)
 {
-	printk("PHDR[%d]: p_type[%s] p_offset[%08lx] p_vaddr[%08lx] "
-	       "p_paddr[%08lx]\n", i, get_elf_p_type(ep->p_type),
-	       (unsigned long) ep->p_offset, (unsigned long) ep->p_vaddr,
-	       (unsigned long) ep->p_paddr);
-	printk("         p_filesz[%08lx] p_memsz[%08lx] p_flags[%08lx] "
-	       "p_align[%08lx]\n", (unsigned long) ep->p_filesz,
-	       (unsigned long) ep->p_memsz, (unsigned long) ep->p_flags,
-	       (unsigned long) ep->p_align);
+	pr_debug("PHDR[%d]: p_type[%s] p_offset[%08lx] p_vaddr[%08lx] "
+	         "p_paddr[%08lx]\n", i, get_elf_p_type(ep->p_type),
+	         (unsigned long) ep->p_offset, (unsigned long) ep->p_vaddr,
+	         (unsigned long) ep->p_paddr);
+	pr_debug("         p_filesz[%08lx] p_memsz[%08lx] p_flags[%08lx] "
+	         "p_align[%08lx]\n", (unsigned long) ep->p_filesz,
+	         (unsigned long) ep->p_memsz, (unsigned long) ep->p_flags,
+	         (unsigned long) ep->p_align);
 }
 
 static void dump_phdrs(struct elf_phdr *ep, int pnum)
 {
 	int i;
 
-	for(i = 0; i < pnum; i++, ep++) {
-		if((ep->p_type == PT_LOAD) ||
-		   (ep->p_type == PT_INTERP) ||
-		   (ep->p_type == PT_PHDR))
+	for (i = 0; i < pnum; i++, ep++) {
+		if ((ep->p_type == PT_LOAD) ||
+		    (ep->p_type == PT_INTERP) ||
+		    (ep->p_type == PT_PHDR))
 			print_phdr(i, ep);
 	}
 }
-#endif /* (DEBUG_ELF) */
 
 static void set_brk(unsigned long start, unsigned long end)
 {
@@ -146,24 +175,23 @@ static void padzero(unsigned long elf_bss)
 	nbyte = elf_bss & (PAGE_SIZE-1);
 	if (nbyte) {
 		nbyte = PAGE_SIZE - nbyte;
-		clear_user((void *) elf_bss, nbyte);
+		clear_user((void __user *) elf_bss, nbyte);
 	}
 }
 
-unsigned long * create_irix_tables(char * p, int argc, int envc,
-				   struct elfhdr * exec, unsigned int load_addr,
-				   unsigned int interp_load_addr,
-				   struct pt_regs *regs, struct elf_phdr *ephdr)
+static unsigned long * create_irix_tables(char * p, int argc, int envc,
+	struct elfhdr * exec, unsigned int load_addr,
+	unsigned int interp_load_addr, struct pt_regs *regs,
+	struct elf_phdr *ephdr)
 {
 	elf_addr_t *argv;
 	elf_addr_t *envp;
 	elf_addr_t *sp, *csp;
 
-#ifdef DEBUG_ELF
-	printk("create_irix_tables: p[%p] argc[%d] envc[%d] "
-	       "load_addr[%08x] interp_load_addr[%08x]\n",
-	       p, argc, envc, load_addr, interp_load_addr);
-#endif
+	pr_debug("create_irix_tables: p[%p] argc[%d] envc[%d] "
+	         "load_addr[%08x] interp_load_addr[%08x]\n",
+	         p, argc, envc, load_addr, interp_load_addr);
+
 	sp = (elf_addr_t *) (~15UL & (unsigned long) p);
 	csp = sp;
 	csp -= exec ? DLINFO_ITEMS*2 : 2;
@@ -178,26 +206,26 @@ unsigned long * create_irix_tables(char * p, int argc, int envc,
 	 * Put the ELF interpreter info on the stack
 	 */
 #define NEW_AUX_ENT(nr, id, val) \
-	  __put_user ((id), sp+(nr*2)); \
-	  __put_user ((val), sp+(nr*2+1)); \
+	  __put_user((id), sp+(nr*2)); \
+	  __put_user((val), sp+(nr*2+1)); \
 
 	sp -= 2;
 	NEW_AUX_ENT(0, AT_NULL, 0);
 
-	if(exec) {
+	if (exec) {
 		sp -= 11*2;
 
-		NEW_AUX_ENT (0, AT_PHDR, load_addr + exec->e_phoff);
-		NEW_AUX_ENT (1, AT_PHENT, sizeof (struct elf_phdr));
-		NEW_AUX_ENT (2, AT_PHNUM, exec->e_phnum);
-		NEW_AUX_ENT (3, AT_PAGESZ, ELF_EXEC_PAGESIZE);
-		NEW_AUX_ENT (4, AT_BASE, interp_load_addr);
-		NEW_AUX_ENT (5, AT_FLAGS, 0);
-		NEW_AUX_ENT (6, AT_ENTRY, (elf_addr_t) exec->e_entry);
-		NEW_AUX_ENT (7, AT_UID, (elf_addr_t) current->uid);
-		NEW_AUX_ENT (8, AT_EUID, (elf_addr_t) current->euid);
-		NEW_AUX_ENT (9, AT_GID, (elf_addr_t) current->gid);
-		NEW_AUX_ENT (10, AT_EGID, (elf_addr_t) current->egid);
+		NEW_AUX_ENT(0, AT_PHDR, load_addr + exec->e_phoff);
+		NEW_AUX_ENT(1, AT_PHENT, sizeof(struct elf_phdr));
+		NEW_AUX_ENT(2, AT_PHNUM, exec->e_phnum);
+		NEW_AUX_ENT(3, AT_PAGESZ, ELF_EXEC_PAGESIZE);
+		NEW_AUX_ENT(4, AT_BASE, interp_load_addr);
+		NEW_AUX_ENT(5, AT_FLAGS, 0);
+		NEW_AUX_ENT(6, AT_ENTRY, (elf_addr_t) exec->e_entry);
+		NEW_AUX_ENT(7, AT_UID, (elf_addr_t) current->uid);
+		NEW_AUX_ENT(8, AT_EUID, (elf_addr_t) current->euid);
+		NEW_AUX_ENT(9, AT_GID, (elf_addr_t) current->gid);
+		NEW_AUX_ENT(10, AT_EGID, (elf_addr_t) current->egid);
 	}
 #undef NEW_AUX_ENT
 
@@ -206,16 +234,16 @@ unsigned long * create_irix_tables(char * p, int argc, int envc,
 	sp -= argc+1;
 	argv = sp;
 
-	__put_user((elf_addr_t)argc,--sp);
+	__put_user((elf_addr_t)argc, --sp);
 	current->mm->arg_start = (unsigned long) p;
 	while (argc-->0) {
-		__put_user((unsigned long)p,argv++);
+		__put_user((unsigned long)p, argv++);
 		p += strlen_user(p);
 	}
 	__put_user((unsigned long) NULL, argv);
 	current->mm->arg_end = current->mm->env_start = (unsigned long) p;
 	while (envc-->0) {
-		__put_user((unsigned long)p,envp++);
+		__put_user((unsigned long)p, envp++);
 		p += strlen_user(p);
 	}
 	__put_user((unsigned long) NULL, envp);
@@ -248,21 +276,18 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 	last_bss = 0;
 	error = load_addr = 0;
 
-#ifdef DEBUG_ELF
 	print_elfhdr(interp_elf_ex);
-#endif
 
 	/* First of all, some simple consistency checks */
 	if ((interp_elf_ex->e_type != ET_EXEC &&
 	     interp_elf_ex->e_type != ET_DYN) ||
-	     !irix_elf_check_arch(interp_elf_ex) ||
 	     !interpreter->f_op->mmap) {
 		printk("IRIX interp has bad e_type %d\n", interp_elf_ex->e_type);
 		return 0xffffffff;
 	}
 
 	/* Now read in all of the header information */
-	if(sizeof(struct elf_phdr) * interp_elf_ex->e_phnum > PAGE_SIZE) {
+	if (sizeof(struct elf_phdr) * interp_elf_ex->e_phnum > PAGE_SIZE) {
 	    printk("IRIX interp header bigger than a page (%d)\n",
 		   (sizeof(struct elf_phdr) * interp_elf_ex->e_phnum));
 	    return 0xffffffff;
@@ -271,15 +296,15 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 	elf_phdata = kmalloc(sizeof(struct elf_phdr) * interp_elf_ex->e_phnum,
 			     GFP_KERNEL);
 
-	if(!elf_phdata) {
-          printk("Cannot kmalloc phdata for IRIX interp.\n");
-	  return 0xffffffff;
+	if (!elf_phdata) {
+		printk("Cannot kmalloc phdata for IRIX interp.\n");
+		return 0xffffffff;
 	}
 
 	/* If the size of this structure has changed, then punt, since
 	 * we will be doing the wrong thing.
 	 */
-	if(interp_elf_ex->e_phentsize != 32) {
+	if (interp_elf_ex->e_phentsize != 32) {
 		printk("IRIX interp e_phentsize == %d != 32 ",
 		       interp_elf_ex->e_phentsize);
 		kfree(elf_phdata);
@@ -290,72 +315,72 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 			   (char *) elf_phdata,
 			   sizeof(struct elf_phdr) * interp_elf_ex->e_phnum);
 
-#ifdef DEBUG_ELF
 	dump_phdrs(elf_phdata, interp_elf_ex->e_phnum);
-#endif
 
 	eppnt = elf_phdata;
-	for(i=0; i<interp_elf_ex->e_phnum; i++, eppnt++) {
-	  if(eppnt->p_type == PT_LOAD) {
-	    int elf_type = MAP_PRIVATE | MAP_DENYWRITE;
-	    int elf_prot = 0;
-	    unsigned long vaddr = 0;
-	    if (eppnt->p_flags & PF_R) elf_prot =  PROT_READ;
-	    if (eppnt->p_flags & PF_W) elf_prot |= PROT_WRITE;
-	    if (eppnt->p_flags & PF_X) elf_prot |= PROT_EXEC;
-	    elf_type |= MAP_FIXED;
-	    vaddr = eppnt->p_vaddr;
+	for (i = 0; i < interp_elf_ex->e_phnum; i++, eppnt++) {
+		if (eppnt->p_type == PT_LOAD) {
+			int elf_type = MAP_PRIVATE | MAP_DENYWRITE;
+			int elf_prot = 0;
+			unsigned long vaddr = 0;
+			if (eppnt->p_flags & PF_R)
+				elf_prot =  PROT_READ;
+			if (eppnt->p_flags & PF_W)
+				elf_prot |= PROT_WRITE;
+			if (eppnt->p_flags & PF_X)
+				elf_prot |= PROT_EXEC;
+			elf_type |= MAP_FIXED;
+			vaddr = eppnt->p_vaddr;
 
-#ifdef DEBUG_ELF
-	    printk("INTERP do_mmap(%p, %08lx, %08lx, %08lx, %08lx, %08lx) ",
-		   interpreter, vaddr,
-		   (unsigned long) (eppnt->p_filesz + (eppnt->p_vaddr & 0xfff)),
-		   (unsigned long) elf_prot, (unsigned long) elf_type,
-		   (unsigned long) (eppnt->p_offset & 0xfffff000));
-#endif
-	    down_write(&current->mm->mmap_sem);
-	    error = do_mmap(interpreter, vaddr,
-			    eppnt->p_filesz + (eppnt->p_vaddr & 0xfff),
-			    elf_prot, elf_type,
-			    eppnt->p_offset & 0xfffff000);
-	    up_write(&current->mm->mmap_sem);
+			pr_debug("INTERP do_mmap"
+			         "(%p, %08lx, %08lx, %08lx, %08lx, %08lx) ",
+			         interpreter, vaddr,
+			         (unsigned long)
+			         (eppnt->p_filesz + (eppnt->p_vaddr & 0xfff)),
+			         (unsigned long)
+			         elf_prot, (unsigned long) elf_type,
+			         (unsigned long)
+			         (eppnt->p_offset & 0xfffff000));
 
-	    if(error < 0 && error > -1024) {
-		    printk("Aieee IRIX interp mmap error=%d\n", error);
-		    break;  /* Real error */
-	    }
-#ifdef DEBUG_ELF
-	    printk("error=%08lx ", (unsigned long) error);
-#endif
-	    if(!load_addr && interp_elf_ex->e_type == ET_DYN) {
-	      load_addr = error;
-#ifdef DEBUG_ELF
-              printk("load_addr = error ");
-#endif
-	    }
+			down_write(&current->mm->mmap_sem);
+			error = do_mmap(interpreter, vaddr,
+			eppnt->p_filesz + (eppnt->p_vaddr & 0xfff),
+			elf_prot, elf_type,
+			eppnt->p_offset & 0xfffff000);
+			up_write(&current->mm->mmap_sem);
 
-	    /* Find the end of the file  mapping for this phdr, and keep
-	     * track of the largest address we see for this.
-	     */
-	    k = eppnt->p_vaddr + eppnt->p_filesz;
-	    if(k > elf_bss) elf_bss = k;
+			if (error < 0 && error > -1024) {
+				printk("Aieee IRIX interp mmap error=%d\n",
+				       error);
+				break;  /* Real error */
+			}
+			pr_debug("error=%08lx ", (unsigned long) error);
+			if (!load_addr && interp_elf_ex->e_type == ET_DYN) {
+				load_addr = error;
+				pr_debug("load_addr = error ");
+			}
 
-	    /* Do the same thing for the memory mapping - between
-	     * elf_bss and last_bss is the bss section.
-	     */
-	    k = eppnt->p_memsz + eppnt->p_vaddr;
-	    if(k > last_bss) last_bss = k;
-#ifdef DEBUG_ELF
-	    printk("\n");
-#endif
-	  }
+			/*
+			 * Find the end of the file  mapping for this phdr, and
+			 * keep track of the largest address we see for this.
+			 */
+			k = eppnt->p_vaddr + eppnt->p_filesz;
+			if (k > elf_bss)
+				elf_bss = k;
+
+			/* Do the same thing for the memory mapping - between
+			 * elf_bss and last_bss is the bss section.
+			 */
+			k = eppnt->p_memsz + eppnt->p_vaddr;
+			if (k > last_bss)
+				last_bss = k;
+			pr_debug("\n");
+		}
 	}
 
 	/* Now use mmap to map the library into memory. */
-	if(error < 0 && error > -1024) {
-#ifdef DEBUG_ELF
-		printk("got error %d\n", error);
-#endif
+	if (error < 0 && error > -1024) {
+		pr_debug("got error %d\n", error);
 		kfree(elf_phdata);
 		return 0xffffffff;
 	}
@@ -365,16 +390,12 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 	 * that there are zero-mapped pages up to and including the
 	 * last bss page.
 	 */
-#ifdef DEBUG_ELF
-	printk("padzero(%08lx) ", (unsigned long) (elf_bss));
-#endif
+	pr_debug("padzero(%08lx) ", (unsigned long) (elf_bss));
 	padzero(elf_bss);
 	len = (elf_bss + 0xfff) & 0xfffff000; /* What we have mapped so far */
 
-#ifdef DEBUG_ELF
-	printk("last_bss[%08lx] len[%08lx]\n", (unsigned long) last_bss,
-	       (unsigned long) len);
-#endif
+	pr_debug("last_bss[%08lx] len[%08lx]\n", (unsigned long) last_bss,
+	         (unsigned long) len);
 
 	/* Map the last of the bss segment */
 	if (last_bss > len) {
@@ -395,13 +416,8 @@ static int verify_binary(struct elfhdr *ehp, struct linux_binprm *bprm)
 		return -ENOEXEC;
 
 	/* First of all, some simple consistency checks */
-	if((ehp->e_type != ET_EXEC && ehp->e_type != ET_DYN) ||
-	    !irix_elf_check_arch(ehp) || !bprm->file->f_op->mmap) {
-		return -ENOEXEC;
-	}
-
-	/* Only support MIPS ARCH2 or greater IRIX binaries for now. */
-	if(!(ehp->e_flags & EF_MIPS_ARCH) && !(ehp->e_flags & 0x04)) {
+	if ((ehp->e_type != ET_EXEC && ehp->e_type != ET_DYN) ||
+	    !bprm->file->f_op->mmap) {
 		return -ENOEXEC;
 	}
 
@@ -411,16 +427,17 @@ static int verify_binary(struct elfhdr *ehp, struct linux_binprm *bprm)
 	 * XXX all registers as 64bits on cpu's capable of this at
 	 * XXX exception time plus frob the XTLB exception vector.
 	 */
-	if((ehp->e_flags & 0x20)) {
+	if ((ehp->e_flags & EF_MIPS_ABI2))
 		return -ENOEXEC;
-	}
 
-	return 0; /* It's ok. */
+	return 0;
 }
 
-#define IRIX_INTERP_PREFIX "/usr/gnemul/irix"
-
-/* Look for an IRIX ELF interpreter. */
+/*
+ * This is where the detailed check is performed. Irix binaries
+ * use interpreters with 'libc.so' in the name, so this function
+ * can differentiate between Linux and Irix binaries.
+ */
 static inline int look_for_irix_interpreter(char **name,
 					    struct file **interpreter,
 					    struct elfhdr *interp_elf_ex,
@@ -432,7 +449,7 @@ static inline int look_for_irix_interpreter(char **name,
 	struct file *file = NULL;
 
 	*name = NULL;
-	for(i = 0; i < pnum; i++, epp++) {
+	for (i = 0; i < pnum; i++, epp++) {
 		if (epp->p_type != PT_INTERP)
 			continue;
 
@@ -440,12 +457,11 @@ static inline int look_for_irix_interpreter(char **name,
 		if (*name != NULL)
 			goto out;
 
-		*name = kmalloc((epp->p_filesz + strlen(IRIX_INTERP_PREFIX)),
-				GFP_KERNEL);
+		*name = kmalloc(epp->p_filesz + strlen(IRIX_EMUL), GFP_KERNEL);
 		if (!*name)
 			return -ENOMEM;
 
-		strcpy(*name, IRIX_INTERP_PREFIX);
+		strcpy(*name, IRIX_EMUL);
 		retval = kernel_read(bprm->file, epp->p_offset, (*name + 16),
 		                     epp->p_filesz);
 		if (retval < 0)
@@ -490,8 +506,8 @@ static inline void map_executable(struct file *fp, struct elf_phdr *epp, int pnu
 	unsigned int tmp;
 	int i, prot;
 
-	for(i = 0; i < pnum; i++, epp++) {
-		if(epp->p_type != PT_LOAD)
+	for (i = 0; i < pnum; i++, epp++) {
+		if (epp->p_type != PT_LOAD)
 			continue;
 
 		/* Map it. */
@@ -506,23 +522,23 @@ static inline void map_executable(struct file *fp, struct elf_phdr *epp, int pnu
 	        up_write(&current->mm->mmap_sem);
 
 		/* Fixup location tracking vars. */
-		if((epp->p_vaddr & 0xfffff000) < *estack)
+		if ((epp->p_vaddr & 0xfffff000) < *estack)
 			*estack = (epp->p_vaddr & 0xfffff000);
-		if(!*laddr)
+		if (!*laddr)
 			*laddr = epp->p_vaddr - epp->p_offset;
-		if(epp->p_vaddr < *scode)
+		if (epp->p_vaddr < *scode)
 			*scode = epp->p_vaddr;
 
 		tmp = epp->p_vaddr + epp->p_filesz;
-		if(tmp > *ebss)
+		if (tmp > *ebss)
 			*ebss = tmp;
-		if((epp->p_flags & PF_X) && *ecode < tmp)
+		if ((epp->p_flags & PF_X) && *ecode < tmp)
 			*ecode = tmp;
-		if(*edata < tmp)
+		if (*edata < tmp)
 			*edata = tmp;
 
 		tmp = epp->p_vaddr + epp->p_memsz;
-		if(tmp > *ebrk)
+		if (tmp > *ebrk)
 			*ebrk = tmp;
 	}
 
@@ -536,12 +552,12 @@ static inline int map_interpreter(struct elf_phdr *epp, struct elfhdr *ihp,
 	int i;
 
 	*eentry = 0xffffffff;
-	for(i = 0; i < pnum; i++, epp++) {
-		if(epp->p_type != PT_INTERP)
+	for (i = 0; i < pnum; i++, epp++) {
+		if (epp->p_type != PT_INTERP)
 			continue;
 
 		/* We should have fielded this error elsewhere... */
-		if(*eentry != 0xffffffff)
+		if (*eentry != 0xffffffff)
 			return -1;
 
 		set_fs(old_fs);
@@ -562,13 +578,13 @@ static inline int map_interpreter(struct elf_phdr *epp, struct elfhdr *ihp,
  * process and the system, here we map the page and fill the
  * structure
  */
-void irix_map_prda_page (void)
+static void irix_map_prda_page(void)
 {
 	unsigned long v;
 	struct prda *pp;
 
 	down_write(&current->mm->mmap_sem);
-	v =  do_brk (PRDA_ADDRESS, PAGE_SIZE);
+	v =  do_brk(PRDA_ADDRESS, PAGE_SIZE);
 	up_write(&current->mm->mmap_sem);
 
 	if (v < 0)
@@ -601,16 +617,33 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 	load_addr = 0;
 	has_interp = has_ephdr = 0;
-	elf_ihdr = elf_ephdr = 0;
+	elf_ihdr = elf_ephdr = NULL;
 	elf_ex = *((struct elfhdr *) bprm->buf);
 	retval = -ENOEXEC;
 
 	if (verify_binary(&elf_ex, bprm))
 		goto out;
 
-#ifdef DEBUG_ELF
+	/*
+	 * Telling -o32 static binaries from Linux and Irix apart from each
+	 * other is difficult. There are 2 differences to be noted for static
+	 * binaries from the 2 operating systems:
+	 *
+	 *    1) Irix binaries have their .text section before their .init
+	 *       section. Linux binaries are just the opposite.
+	 *
+	 *    2) Irix binaries usually have <= 12 sections and Linux
+	 *       binaries have > 20.
+	 *
+	 * We will use Method #2 since Method #1 would require us to read in
+	 * the section headers which is way too much overhead. This appears
+	 * to work for everything we have ran into so far. If anyone has a
+	 * better method to tell the binaries apart, I'm listening.
+	 */
+	if (elf_ex.e_shnum > 20)
+		goto out;
+
 	print_elfhdr(&elf_ex);
-#endif
 
 	/* Now read in all of the header information */
 	size = elf_ex.e_phentsize * elf_ex.e_phnum;
@@ -623,17 +656,14 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	}
 
 	retval = kernel_read(bprm->file, elf_ex.e_phoff, (char *)elf_phdata, size);
-
 	if (retval < 0)
 		goto out_free_ph;
 
-#ifdef DEBUG_ELF
 	dump_phdrs(elf_phdata, elf_ex.e_phnum);
-#endif
 
 	/* Set some things for later. */
-	for(i = 0; i < elf_ex.e_phnum; i++) {
-		switch(elf_phdata[i].p_type) {
+	for (i = 0; i < elf_ex.e_phnum; i++) {
+		switch (elf_phdata[i].p_type) {
 		case PT_INTERP:
 			has_interp = 1;
 			elf_ihdr = &elf_phdata[i];
@@ -644,9 +674,8 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			break;
 		};
 	}
-#ifdef DEBUG_ELF
-	printk("\n");
-#endif
+
+	pr_debug("\n");
 
 	elf_bss = 0;
 	elf_brk = 0;
@@ -657,16 +686,23 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	end_code = 0;
 	end_data = 0;
 
-	retval = look_for_irix_interpreter(&elf_interpreter,
-	                                   &interpreter,
+	/*
+	 * If we get a return value, we change the value to be ENOEXEC
+	 * so that we can exit gracefully and the main binary format
+	 * search loop in 'fs/exec.c' will move onto the next handler
+	 * which should be the normal ELF binary handler.
+	 */
+	retval = look_for_irix_interpreter(&elf_interpreter, &interpreter,
 					   &interp_elf_ex, elf_phdata, bprm,
 					   elf_ex.e_phnum);
-	if (retval)
+	if (retval) {
+		retval = -ENOEXEC;
 		goto out_free_file;
+	}
 
 	if (elf_interpreter) {
 		retval = verify_irix_interpreter(&interp_elf_ex);
-		if(retval)
+		if (retval)
 			goto out_free_interp;
 	}
 
@@ -692,7 +728,6 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	/* Do this so that we can load the interpreter, if need be.  We will
 	 * change some of these later.
 	 */
-	current->mm->rss = 0;
 	setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
 	current->mm->start_stack = bprm->p;
 
@@ -706,12 +741,12 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	               &load_addr, &start_code, &elf_bss, &end_code,
 	               &end_data, &elf_brk);
 
-	if(elf_interpreter) {
+	if (elf_interpreter) {
 		retval = map_interpreter(elf_phdata, &interp_elf_ex,
 					 interpreter, &interp_load_addr,
 					 elf_ex.e_phnum, old_fs, &elf_entry);
 		kfree(elf_interpreter);
-		if(retval) {
+		if (retval) {
 			set_fs(old_fs);
 			printk("Unable to load IRIX ELF interpreter\n");
 			send_sig(SIGSEGV, current, 0);
@@ -746,18 +781,16 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	 * IRIX maps a page at 0x200000 which holds some system
 	 * information.  Programs depend on this.
 	 */
-	irix_map_prda_page ();
+	irix_map_prda_page();
 
 	padzero(elf_bss);
 
-#ifdef DEBUG_ELF
-	printk("(start_brk) %lx\n" , (long) current->mm->start_brk);
-	printk("(end_code) %lx\n" , (long) current->mm->end_code);
-	printk("(start_code) %lx\n" , (long) current->mm->start_code);
-	printk("(end_data) %lx\n" , (long) current->mm->end_data);
-	printk("(start_stack) %lx\n" , (long) current->mm->start_stack);
-	printk("(brk) %lx\n" , (long) current->mm->brk);
-#endif
+	pr_debug("(start_brk) %lx\n" , (long) current->mm->start_brk);
+	pr_debug("(end_code) %lx\n" , (long) current->mm->end_code);
+	pr_debug("(start_code) %lx\n" , (long) current->mm->start_code);
+	pr_debug("(end_data) %lx\n" , (long) current->mm->end_data);
+	pr_debug("(start_stack) %lx\n" , (long) current->mm->start_stack);
+	pr_debug("(brk) %lx\n" , (long) current->mm->brk);
 
 #if 0 /* XXX No fucking way dude... */
 	/* Why this, you ask???  Well SVr4 maps page 0 as read-only,
@@ -782,11 +815,10 @@ out_free_dentry:
 	allow_write_access(interpreter);
 	fput(interpreter);
 out_free_interp:
-	if (elf_interpreter)
-		kfree(elf_interpreter);
+	kfree(elf_interpreter);
 out_free_file:
 out_free_ph:
-	kfree (elf_phdata);
+	kfree(elf_phdata);
 	goto out;
 }
 
@@ -802,7 +834,7 @@ static int load_irix_library(struct file *file)
 	int retval;
 	unsigned int bss;
 	int error;
-	int i,j, k;
+	int i, j, k;
 
 	error = kernel_read(file, 0, (char *) &elf_ex, sizeof(elf_ex));
 	if (error != sizeof(elf_ex))
@@ -812,12 +844,12 @@ static int load_irix_library(struct file *file)
 		return -ENOEXEC;
 
 	/* First of all, some simple consistency checks. */
-	if(elf_ex.e_type != ET_EXEC || elf_ex.e_phnum > 2 ||
-	   !irix_elf_check_arch(&elf_ex) || !file->f_op->mmap)
+	if (elf_ex.e_type != ET_EXEC || elf_ex.e_phnum > 2 ||
+	   !file->f_op->mmap)
 		return -ENOEXEC;
 
 	/* Now read in all of the header information. */
-	if(sizeof(struct elf_phdr) * elf_ex.e_phnum > PAGE_SIZE)
+	if (sizeof(struct elf_phdr) * elf_ex.e_phnum > PAGE_SIZE)
 		return -ENOEXEC;
 
 	elf_phdata = kmalloc(sizeof(struct elf_phdr) * elf_ex.e_phnum, GFP_KERNEL);
@@ -828,15 +860,15 @@ static int load_irix_library(struct file *file)
 			   sizeof(struct elf_phdr) * elf_ex.e_phnum);
 
 	j = 0;
-	for(i=0; i<elf_ex.e_phnum; i++)
-		if((elf_phdata + i)->p_type == PT_LOAD) j++;
+	for (i=0; i<elf_ex.e_phnum; i++)
+		if ((elf_phdata + i)->p_type == PT_LOAD) j++;
 
-	if(j != 1)  {
+	if (j != 1)  {
 		kfree(elf_phdata);
 		return -ENOEXEC;
 	}
 
-	while(elf_phdata->p_type != PT_LOAD) elf_phdata++;
+	while (elf_phdata->p_type != PT_LOAD) elf_phdata++;
 
 	/* Now use mmap to map the library into memory. */
 	down_write(&current->mm->mmap_sem);
@@ -874,73 +906,82 @@ static int load_irix_library(struct file *file)
  * phdrs there are in the USER_PHDRP array.  We return the vaddr the
  * first phdr was successfully mapped to.
  */
-unsigned long irix_mapelf(int fd, struct elf_phdr *user_phdrp, int cnt)
+unsigned long irix_mapelf(int fd, struct elf_phdr __user *user_phdrp, int cnt)
 {
-	struct elf_phdr *hp;
+	unsigned long type, vaddr, filesz, offset, flags;
+	struct elf_phdr __user *hp;
 	struct file *filp;
 	int i, retval;
 
-#ifdef DEBUG_ELF
-	printk("irix_mapelf: fd[%d] user_phdrp[%p] cnt[%d]\n",
-	       fd, user_phdrp, cnt);
-#endif
+	pr_debug("irix_mapelf: fd[%d] user_phdrp[%p] cnt[%d]\n",
+	         fd, user_phdrp, cnt);
 
 	/* First get the verification out of the way. */
 	hp = user_phdrp;
-	retval = verify_area(VERIFY_READ, hp, (sizeof(struct elf_phdr) * cnt));
-	if(retval) {
-#ifdef DEBUG_ELF
-		printk("irix_mapelf: verify_area fails!\n");
-#endif
-		return retval;
+	if (!access_ok(VERIFY_READ, hp, (sizeof(struct elf_phdr) * cnt))) {
+		pr_debug("irix_mapelf: bad pointer to ELF PHDR!\n");
+
+		return -EFAULT;
 	}
 
-#ifdef DEBUG_ELF
 	dump_phdrs(user_phdrp, cnt);
-#endif
 
-	for(i = 0; i < cnt; i++, hp++)
-		if(hp->p_type != PT_LOAD) {
+	for (i = 0; i < cnt; i++, hp++) {
+		if (__get_user(type, &hp->p_type))
+			return -EFAULT;
+		if (type != PT_LOAD) {
 			printk("irix_mapelf: One section is not PT_LOAD!\n");
 			return -ENOEXEC;
 		}
+	}
 
 	filp = fget(fd);
 	if (!filp)
 		return -EACCES;
-	if(!filp->f_op) {
+	if (!filp->f_op) {
 		printk("irix_mapelf: Bogon filp!\n");
 		fput(filp);
 		return -EACCES;
 	}
 
 	hp = user_phdrp;
-	for(i = 0; i < cnt; i++, hp++) {
+	for (i = 0; i < cnt; i++, hp++) {
 		int prot;
 
-		prot  = (hp->p_flags & PF_R) ? PROT_READ : 0;
-		prot |= (hp->p_flags & PF_W) ? PROT_WRITE : 0;
-		prot |= (hp->p_flags & PF_X) ? PROT_EXEC : 0;
+		retval = __get_user(vaddr, &hp->p_vaddr);
+		retval |= __get_user(filesz, &hp->p_filesz);
+		retval |= __get_user(offset, &hp->p_offset);
+		retval |= __get_user(flags, &hp->p_flags);
+		if (retval)
+			return retval;
+
+		prot  = (flags & PF_R) ? PROT_READ : 0;
+		prot |= (flags & PF_W) ? PROT_WRITE : 0;
+		prot |= (flags & PF_X) ? PROT_EXEC : 0;
+
 		down_write(&current->mm->mmap_sem);
-		retval = do_mmap(filp, (hp->p_vaddr & 0xfffff000),
-				 (hp->p_filesz + (hp->p_vaddr & 0xfff)),
+		retval = do_mmap(filp, (vaddr & 0xfffff000),
+				 (filesz + (vaddr & 0xfff)),
 				 prot, (MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE),
-				 (hp->p_offset & 0xfffff000));
+				 (offset & 0xfffff000));
 		up_write(&current->mm->mmap_sem);
 
-		if(retval != (hp->p_vaddr & 0xfffff000)) {
+		if (retval != (vaddr & 0xfffff000)) {
 			printk("irix_mapelf: do_mmap fails with %d!\n", retval);
 			fput(filp);
 			return retval;
 		}
 	}
 
-#ifdef DEBUG_ELF
-	printk("irix_mapelf: Success, returning %08lx\n",
-		(unsigned long) user_phdrp->p_vaddr);
-#endif
+	pr_debug("irix_mapelf: Success, returning %08lx\n",
+		 (unsigned long) user_phdrp->p_vaddr);
+
 	fput(filp);
-	return user_phdrp->p_vaddr;
+
+	if (__get_user(vaddr, &user_phdrp->p_vaddr))
+		return -EFAULT;
+
+	return vaddr;
 }
 
 /*
@@ -953,9 +994,9 @@ unsigned long irix_mapelf(int fd, struct elf_phdr *user_phdrp, int cnt)
 /* These are the only things you should do on a core-file: use only these
  * functions to write out all the necessary info.
  */
-static int dump_write(struct file *file, const void *addr, int nr)
+static int dump_write(struct file *file, const void __user *addr, int nr)
 {
-	return file->f_op->write(file, addr, nr, &file->f_pos) == nr;
+	return file->f_op->write(file, (const char __user *) addr, nr, &file->f_pos) == nr;
 }
 
 static int dump_seek(struct file *file, off_t off)
@@ -987,8 +1028,6 @@ static inline int maydump(struct vm_area_struct *vma)
 	return 1;
 }
 
-#define roundup(x, y)  ((((x)+((y)-1))/(y))*(y))
-
 /* An ELF note in memory. */
 struct memelfnote
 {
@@ -1003,13 +1042,11 @@ static int notesize(struct memelfnote *en)
 	int sz;
 
 	sz = sizeof(struct elf_note);
-	sz += roundup(strlen(en->name), 4);
+	sz += roundup(strlen(en->name) + 1, 4);
 	sz += roundup(en->datasz, 4);
 
 	return sz;
 }
-
-/* #define DEBUG */
 
 #define DUMP_WRITE(addr, nr)	\
 	if (!dump_write(file, (addr), (nr))) \
@@ -1022,7 +1059,7 @@ static int writenote(struct memelfnote *men, struct file *file)
 {
 	struct elf_note en;
 
-	en.n_namesz = strlen(men->name);
+	en.n_namesz = strlen(men->name) + 1;
 	en.n_descsz = men->datasz;
 	en.n_type = men->type;
 
@@ -1054,7 +1091,7 @@ end_coredump:
  * and then they are actually written out.  If we run out of core limit
  * we just truncate.
  */
-static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
+static int irix_core_dump(long signr, struct pt_regs *regs, struct file *file, unsigned long limit)
 {
 	int has_dumped = 0;
 	mm_segment_t fs;
@@ -1064,9 +1101,8 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 	struct vm_area_struct *vma;
 	struct elfhdr elf;
 	off_t offset = 0, dataoff;
-	int limit = current->signal->rlim[RLIMIT_CORE].rlim_cur;
-	int numnote = 4;
-	struct memelfnote notes[4];
+	int numnote = 3;
+	struct memelfnote notes[3];
 	struct elf_prstatus prstatus;	/* NT_PRSTATUS */
 	elf_fpregset_t fpu;		/* NT_PRFPREG */
 	struct elf_prpsinfo psinfo;	/* NT_PRPSINFO */
@@ -1074,7 +1110,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 	/* Count what's needed to dump, up to the limit of coredump size. */
 	segs = 0;
 	size = 0;
-	for(vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
+	for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
 		if (maydump(vma))
 		{
 			int sz = vma->vm_end-vma->vm_start;
@@ -1087,9 +1123,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 
 		segs++;
 	}
-#ifdef DEBUG
-	printk("irix_core_dump: %d segs taking %d bytes\n", segs, size);
-#endif
+	pr_debug("irix_core_dump: %d segs taking %d bytes\n", segs, size);
 
 	/* Set up header. */
 	memcpy(elf.e_ident, ELFMAG, SELFMAG);
@@ -1138,8 +1172,8 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 	prstatus.pr_sighold = current->blocked.sig[0];
 	psinfo.pr_pid = prstatus.pr_pid = current->pid;
 	psinfo.pr_ppid = prstatus.pr_ppid = current->parent->pid;
-	psinfo.pr_pgrp = prstatus.pr_pgrp = process_group(current);
-	psinfo.pr_sid = prstatus.pr_sid = current->signal->session;
+	psinfo.pr_pgrp = prstatus.pr_pgrp = task_pgrp_nr(current);
+	psinfo.pr_sid = prstatus.pr_sid = task_session_nr(current);
 	if (current->pid == current->tgid) {
 		/*
 		 * This is the record for the group leader.  Add in the
@@ -1188,9 +1222,9 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 
 		len = current->mm->arg_end - current->mm->arg_start;
 		len = len >= ELF_PRARGSZ ? ELF_PRARGSZ : len;
-		copy_from_user(&psinfo.pr_psargs,
-			       (const char *)current->mm->arg_start, len);
-		for(i = 0; i < len; i++)
+		(void *) copy_from_user(&psinfo.pr_psargs,
+			       (const char __user *)current->mm->arg_start, len);
+		for (i = 0; i < len; i++)
 			if (psinfo.pr_psargs[i] == 0)
 				psinfo.pr_psargs[i] = ' ';
 		psinfo.pr_psargs[len] = 0;
@@ -1199,20 +1233,15 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 	}
 	strlcpy(psinfo.pr_fname, current->comm, sizeof(psinfo.pr_fname));
 
-	notes[2].name = "CORE";
-	notes[2].type = NT_TASKSTRUCT;
-	notes[2].datasz = sizeof(*current);
-	notes[2].data = current;
-
 	/* Try to dump the FPU. */
-	prstatus.pr_fpvalid = dump_fpu (regs, &fpu);
+	prstatus.pr_fpvalid = dump_fpu(regs, &fpu);
 	if (!prstatus.pr_fpvalid) {
 		numnote--;
 	} else {
-		notes[3].name = "CORE";
-		notes[3].type = NT_PRFPREG;
-		notes[3].datasz = sizeof(fpu);
-		notes[3].data = &fpu;
+		notes[2].name = "CORE";
+		notes[2].type = NT_PRFPREG;
+		notes[2].datasz = sizeof(fpu);
+		notes[2].data = &fpu;
 	}
 
 	/* Write notes phdr entry. */
@@ -1220,7 +1249,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 		struct elf_phdr phdr;
 		int sz = 0;
 
-		for(i = 0; i < numnote; i++)
+		for (i = 0; i < numnote; i++)
 			sz += notesize(&notes[i]);
 
 		phdr.p_type = PT_NOTE;
@@ -1240,7 +1269,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 	dataoff = offset = roundup(offset, PAGE_SIZE);
 
 	/* Write program headers for segments dump. */
-	for(vma = current->mm->mmap, i = 0;
+	for (vma = current->mm->mmap, i = 0;
 		i < segs && vma != NULL; vma = vma->vm_next) {
 		struct elf_phdr phdr;
 		size_t sz;
@@ -1257,14 +1286,16 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 		phdr.p_memsz = sz;
 		offset += phdr.p_filesz;
 		phdr.p_flags = vma->vm_flags & VM_READ ? PF_R : 0;
-		if (vma->vm_flags & VM_WRITE) phdr.p_flags |= PF_W;
-		if (vma->vm_flags & VM_EXEC) phdr.p_flags |= PF_X;
+		if (vma->vm_flags & VM_WRITE)
+			phdr.p_flags |= PF_W;
+		if (vma->vm_flags & VM_EXEC)
+			phdr.p_flags |= PF_X;
 		phdr.p_align = PAGE_SIZE;
 
 		DUMP_WRITE(&phdr, sizeof(phdr));
 	}
 
-	for(i = 0; i < numnote; i++)
+	for (i = 0; i < numnote; i++)
 		if (!writenote(&notes[i], file))
 			goto end_coredump;
 
@@ -1272,7 +1303,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 
 	DUMP_SEEK(dataoff);
 
-	for(i = 0, vma = current->mm->mmap;
+	for (i = 0, vma = current->mm->mmap;
 	    i < segs && vma != NULL;
 	    vma = vma->vm_next) {
 		unsigned long addr = vma->vm_start;
@@ -1281,10 +1312,8 @@ static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 		if (!maydump(vma))
 			continue;
 		i++;
-#ifdef DEBUG
-		printk("elf_core_dump: writing %08lx %lx\n", addr, len);
-#endif
-		DUMP_WRITE((void *)addr, len);
+		pr_debug("elf_core_dump: writing %08lx %lx\n", addr, len);
+		DUMP_WRITE((void __user *)addr, len);
 	}
 
 	if ((off_t) file->f_pos != offset) {
@@ -1300,7 +1329,7 @@ end_coredump:
 
 static int __init init_irix_binfmt(void)
 {
-	int init_inventory(void);
+	extern int init_inventory(void);
 	extern asmlinkage unsigned long sys_call_table;
 	extern asmlinkage unsigned long sys_call_table_irix5;
 
@@ -1319,7 +1348,9 @@ static int __init init_irix_binfmt(void)
 
 static void __exit exit_irix_binfmt(void)
 {
-	/* Remove the IRIX ELF loaders. */
+	/*
+	 * Remove the Irix ELF loader.
+	 */
 	unregister_binfmt(&irix_format);
 }
 

@@ -35,6 +35,7 @@
 #define __LINUX_IPMI_H
 
 #include <linux/ipmi_msgdefs.h>
+#include <linux/compiler.h>
 
 /*
  * This file describes an interface to an IPMI driver.  You have to
@@ -147,6 +148,13 @@ struct ipmi_lan_addr
 #define IPMI_BMC_CHANNEL  0xf
 #define IPMI_NUM_CHANNELS 0x10
 
+/*
+ * Used to signify an "all channel" bitmask.  This is more than the
+ * actual number of channels because this is used in userland and
+ * will cover us if the number of channels is extended.
+ */
+#define IPMI_CHAN_ALL     (~0)
+
 
 /*
  * A raw IPMI message without any addressing.  This covers both
@@ -200,6 +208,15 @@ struct kernel_ipmi_msg
    code as the first byte of the incoming data, unlike a response. */
 
 
+/*
+ * Modes for ipmi_set_maint_mode() and the userland IOCTL.  The AUTO
+ * setting is the default and means it will be set on certain
+ * commands.  Hard setting it on and off will override automatic
+ * operation.
+ */
+#define IPMI_MAINTENANCE_MODE_AUTO	0
+#define IPMI_MAINTENANCE_MODE_OFF	1
+#define IPMI_MAINTENANCE_MODE_ON	2
 
 #ifdef __KERNEL__
 
@@ -208,6 +225,8 @@ struct kernel_ipmi_msg
  */
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/device.h>
+#include <linux/proc_fs.h>
 
 /* Opaque type for a IPMI message user.  One of these is needed to
    send and receive messages. */
@@ -236,7 +255,8 @@ struct ipmi_recv_msg
 	/* The user_msg_data is the data supplied when a message was
 	   sent, if this is a response to a sent message.  If this is
 	   not a response to a sent message, then user_msg_data will
-	   be NULL. */
+	   be NULL.  If the user above is NULL, then this will be the
+	   intf. */
 	void             *user_msg_data;
 
 	/* Call this when done with the message.  It will presumably free
@@ -249,10 +269,7 @@ struct ipmi_recv_msg
 };
 
 /* Allocate and free the receive message. */
-static inline void ipmi_free_recv_msg(struct ipmi_recv_msg *msg)
-{
-	msg->done(msg);
-}
+void ipmi_free_recv_msg(struct ipmi_recv_msg *msg);
 
 struct ipmi_user_hndl
 {
@@ -293,13 +310,19 @@ void ipmi_get_version(ipmi_user_t   user,
    this user, so it will affect all users of this interface.  This is
    so some initialization code can come in and do the OEM-specific
    things it takes to determine your address (if not the BMC) and set
-   it for everyone else. */
-void ipmi_set_my_address(ipmi_user_t   user,
-			 unsigned char address);
-unsigned char ipmi_get_my_address(ipmi_user_t user);
-void ipmi_set_my_LUN(ipmi_user_t   user,
-		     unsigned char LUN);
-unsigned char ipmi_get_my_LUN(ipmi_user_t user);
+   it for everyone else.  Note that each channel can have its own address. */
+int ipmi_set_my_address(ipmi_user_t   user,
+			unsigned int  channel,
+			unsigned char address);
+int ipmi_get_my_address(ipmi_user_t   user,
+			unsigned int  channel,
+			unsigned char *address);
+int ipmi_set_my_LUN(ipmi_user_t   user,
+		    unsigned int  channel,
+		    unsigned char LUN);
+int ipmi_get_my_LUN(ipmi_user_t   user,
+		    unsigned int  channel,
+		    unsigned char *LUN);
 
 /*
  * Like ipmi_request, but lets you specify the number of retries and
@@ -342,19 +365,61 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
 			     int                  priority);
 
 /*
+ * Poll the IPMI interface for the user.  This causes the IPMI code to
+ * do an immediate check for information from the driver and handle
+ * anything that is immediately pending.  This will not block in any
+ * way.  This is useful if you need to implement polling from the user
+ * for things like modifying the watchdog timeout when a panic occurs
+ * or disabling the watchdog timer on a reboot.
+ */
+void ipmi_poll_interface(ipmi_user_t user);
+
+/*
  * When commands come in to the SMS, the user can register to receive
- * them.  Only one user can be listening on a specific netfn/cmd pair
+ * them.  Only one user can be listening on a specific netfn/cmd/chan tuple
  * at a time, you will get an EBUSY error if the command is already
  * registered.  If a command is received that does not have a user
  * registered, the driver will automatically return the proper
- * error.
+ * error.  Channels are specified as a bitfield, use IPMI_CHAN_ALL to
+ * mean all channels.
  */
 int ipmi_register_for_cmd(ipmi_user_t   user,
 			  unsigned char netfn,
-			  unsigned char cmd);
+			  unsigned char cmd,
+			  unsigned int  chans);
 int ipmi_unregister_for_cmd(ipmi_user_t   user,
 			    unsigned char netfn,
-			    unsigned char cmd);
+			    unsigned char cmd,
+			    unsigned int  chans);
+
+/*
+ * Go into a mode where the driver will not autonomously attempt to do
+ * things with the interface.  It will still respond to attentions and
+ * interrupts, and it will expect that commands will complete.  It
+ * will not automatcially check for flags, events, or things of that
+ * nature.
+ *
+ * This is primarily used for firmware upgrades.  The idea is that
+ * when you go into firmware upgrade mode, you do this operation
+ * and the driver will not attempt to do anything but what you tell
+ * it or what the BMC asks for.
+ *
+ * Note that if you send a command that resets the BMC, the driver
+ * will still expect a response from that command.  So the BMC should
+ * reset itself *after* the response is sent.  Resetting before the
+ * response is just silly.
+ *
+ * If in auto maintenance mode, the driver will automatically go into
+ * maintenance mode for 30 seconds if it sees a cold reset, a warm
+ * reset, or a firmware NetFN.  This means that code that uses only
+ * firmware NetFN commands to do upgrades will work automatically
+ * without change, assuming it sends a message every 30 seconds or
+ * less.
+ *
+ * See the IPMI_MAINTENANCE_MODE_xxx defines for what the mode means.
+ */
+int ipmi_get_maintenance_mode(ipmi_user_t user);
+int ipmi_set_maintenance_mode(ipmi_user_t user, int mode);
 
 /*
  * Allow run-to-completion mode to be set for the interface of
@@ -387,7 +452,7 @@ struct ipmi_smi_watcher
 	   the watcher list.  So you can add and remove users from the
 	   IPMI interface, send messages, etc., but you cannot add
 	   or remove SMI watchers or SMI interfaces. */
-	void (*new_smi)(int if_num);
+	void (*new_smi)(int if_num, struct device *dev);
 	void (*smi_gone)(int if_num);
 };
 
@@ -564,6 +629,36 @@ struct ipmi_cmdspec
 #define IPMICTL_UNREGISTER_FOR_CMD	_IOR(IPMI_IOC_MAGIC, 15,	\
 					     struct ipmi_cmdspec)
 
+/*
+ * Register to get commands from other entities on specific channels.
+ * This way, you can only listen on specific channels, or have messages
+ * from some channels go to one place and other channels to someplace
+ * else.  The chans field is a bitmask, (1 << channel) for each channel.
+ * It may be IPMI_CHAN_ALL for all channels.
+ */
+struct ipmi_cmdspec_chans
+{
+	unsigned int netfn;
+	unsigned int cmd;
+	unsigned int chans;
+};
+
+/*
+ * Register to receive a specific command on specific channels.  error values:
+ *   - EFAULT - an address supplied was invalid.
+ *   - EBUSY - One of the netfn/cmd/chans supplied was already in use.
+ *   - ENOMEM - could not allocate memory for the entry.
+ */
+#define IPMICTL_REGISTER_FOR_CMD_CHANS	_IOR(IPMI_IOC_MAGIC, 28,	\
+					     struct ipmi_cmdspec_chans)
+/*
+ * Unregister some netfn/cmd/chans.  error values:
+ *  - EFAULT - an address supplied was invalid.
+ *  - ENOENT - None of the netfn/cmd/chans were found registered for this user.
+ */
+#define IPMICTL_UNREGISTER_FOR_CMD_CHANS _IOR(IPMI_IOC_MAGIC, 29,	\
+					     struct ipmi_cmdspec_chans)
+
 /* 
  * Set whether this interface receives events.  Note that the first
  * user registered for events will get all pending events for the
@@ -580,6 +675,16 @@ struct ipmi_cmdspec
  * things it takes to determine your address (if not the BMC) and set
  * it for everyone else.  You should probably leave the LUN alone.
  */
+struct ipmi_channel_lun_address_set
+{
+	unsigned short channel;
+	unsigned char  value;
+};
+#define IPMICTL_SET_MY_CHANNEL_ADDRESS_CMD _IOR(IPMI_IOC_MAGIC, 24, struct ipmi_channel_lun_address_set)
+#define IPMICTL_GET_MY_CHANNEL_ADDRESS_CMD _IOR(IPMI_IOC_MAGIC, 25, struct ipmi_channel_lun_address_set)
+#define IPMICTL_SET_MY_CHANNEL_LUN_CMD	   _IOR(IPMI_IOC_MAGIC, 26, struct ipmi_channel_lun_address_set)
+#define IPMICTL_GET_MY_CHANNEL_LUN_CMD	   _IOR(IPMI_IOC_MAGIC, 27, struct ipmi_channel_lun_address_set)
+/* Legacy interfaces, these only set IPMB 0. */
 #define IPMICTL_SET_MY_ADDRESS_CMD	_IOR(IPMI_IOC_MAGIC, 17, unsigned int)
 #define IPMICTL_GET_MY_ADDRESS_CMD	_IOR(IPMI_IOC_MAGIC, 18, unsigned int)
 #define IPMICTL_SET_MY_LUN_CMD		_IOR(IPMI_IOC_MAGIC, 19, unsigned int)
@@ -598,5 +703,12 @@ struct ipmi_timing_parms
 					     struct ipmi_timing_parms)
 #define IPMICTL_GET_TIMING_PARMS_CMD	_IOR(IPMI_IOC_MAGIC, 23, \
 					     struct ipmi_timing_parms)
+
+/*
+ * Set the maintenance mode.  See ipmi_set_maintenance_mode() above
+ * for a description of what this does.
+ */
+#define IPMICTL_GET_MAINTENANCE_MODE_CMD	_IOR(IPMI_IOC_MAGIC, 30, int)
+#define IPMICTL_SET_MAINTENANCE_MODE_CMD	_IOW(IPMI_IOC_MAGIC, 31, int)
 
 #endif /* __LINUX_IPMI_H */

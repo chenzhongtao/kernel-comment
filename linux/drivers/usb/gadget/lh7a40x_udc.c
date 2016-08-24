@@ -21,6 +21,8 @@
  *
  */
 
+#include <linux/platform_device.h>
+
 #include "lh7a40x_udc.h"
 
 //#define DEBUG printk
@@ -71,16 +73,11 @@ static char *state_names[] = {
 static int lh7a40x_ep_enable(struct usb_ep *ep,
 			     const struct usb_endpoint_descriptor *);
 static int lh7a40x_ep_disable(struct usb_ep *ep);
-static struct usb_request *lh7a40x_alloc_request(struct usb_ep *ep, int);
+static struct usb_request *lh7a40x_alloc_request(struct usb_ep *ep, gfp_t);
 static void lh7a40x_free_request(struct usb_ep *ep, struct usb_request *);
-static void *lh7a40x_alloc_buffer(struct usb_ep *ep, unsigned, dma_addr_t *,
-				  int);
-static void lh7a40x_free_buffer(struct usb_ep *ep, void *, dma_addr_t,
-				unsigned);
-static int lh7a40x_queue(struct usb_ep *ep, struct usb_request *, int);
+static int lh7a40x_queue(struct usb_ep *ep, struct usb_request *, gfp_t);
 static int lh7a40x_dequeue(struct usb_ep *ep, struct usb_request *);
 static int lh7a40x_set_halt(struct usb_ep *ep, int);
-static int lh7a40x_fifo_status(struct usb_ep *ep);
 static int lh7a40x_fifo_status(struct usb_ep *ep);
 static void lh7a40x_fifo_flush(struct usb_ep *ep);
 static void lh7a40x_ep0_kick(struct lh7a40x_udc *dev, struct lh7a40x_ep *ep);
@@ -102,9 +99,6 @@ static struct usb_ep_ops lh7a40x_ep_ops = {
 
 	.alloc_request = lh7a40x_alloc_request,
 	.free_request = lh7a40x_free_request,
-
-	.alloc_buffer = lh7a40x_alloc_buffer,
-	.free_buffer = lh7a40x_free_buffer,
 
 	.queue = lh7a40x_queue,
 	.dequeue = lh7a40x_dequeue,
@@ -421,9 +415,10 @@ int usb_gadget_register_driver(struct usb_gadget_driver *driver)
 	DEBUG("%s: %s\n", __FUNCTION__, driver->driver.name);
 
 	if (!driver
-	    || driver->speed != USB_SPEED_FULL
-	    || !driver->bind
-	    || !driver->unbind || !driver->disconnect || !driver->setup)
+			|| driver->speed != USB_SPEED_FULL
+			|| !driver->bind
+			|| !driver->disconnect
+			|| !driver->setup)
 		return -EINVAL;
 	if (!dev)
 		return -ENODEV;
@@ -470,7 +465,7 @@ int usb_gadget_unregister_driver(struct usb_gadget_driver *driver)
 
 	if (!dev)
 		return -ENODEV;
-	if (!driver || driver != dev->driver)
+	if (!driver || driver != dev->driver || !driver->unbind)
 		return -EINVAL;
 
 	spin_lock_irqsave(&dev->lock, flags);
@@ -705,7 +700,7 @@ void nuke(struct lh7a40x_ep *ep, int status)
 		done(ep, req, status);
 	}
 
-	/* Disable IRQ if EP is enabled (has decriptor) */
+	/* Disable IRQ if EP is enabled (has descriptor) */
 	if (ep->desc)
 		pio_irq_disable(ep_index(ep));
 }
@@ -920,7 +915,7 @@ static void lh7a40x_reset_intr(struct lh7a40x_udc *dev)
 /*
  *	lh7a40x usb client interrupt handler.
  */
-static irqreturn_t lh7a40x_udc_irq(int irq, void *_dev, struct pt_regs *r)
+static irqreturn_t lh7a40x_udc_irq(int irq, void *_dev)
 {
 	struct lh7a40x_udc *dev = _dev;
 
@@ -1060,10 +1055,10 @@ static int lh7a40x_ep_enable(struct usb_ep *_ep,
 	ep->pio_irqs = 0;
 	ep->ep.maxpacket = le16_to_cpu(desc->wMaxPacketSize);
 
+	spin_unlock_irqrestore(&ep->dev->lock, flags);
+
 	/* Reset halt state (does flush) */
 	lh7a40x_set_halt(_ep, 0);
-
-	spin_unlock_irqrestore(&ep->dev->lock, flags);
 
 	DEBUG("%s: enabled %s\n", __FUNCTION__, _ep->name);
 	return 0;
@@ -1106,17 +1101,16 @@ static int lh7a40x_ep_disable(struct usb_ep *_ep)
 }
 
 static struct usb_request *lh7a40x_alloc_request(struct usb_ep *ep,
-						 int gfp_flags)
+						 gfp_t gfp_flags)
 {
 	struct lh7a40x_request *req;
 
 	DEBUG("%s, %p\n", __FUNCTION__, ep);
 
-	req = kmalloc(sizeof *req, gfp_flags);
+	req = kzalloc(sizeof(*req), gfp_flags);
 	if (!req)
 		return 0;
 
-	memset(req, 0, sizeof *req);
 	INIT_LIST_HEAD(&req->queue);
 
 	return &req->req;
@@ -1133,32 +1127,12 @@ static void lh7a40x_free_request(struct usb_ep *ep, struct usb_request *_req)
 	kfree(req);
 }
 
-static void *lh7a40x_alloc_buffer(struct usb_ep *ep, unsigned bytes,
-				  dma_addr_t * dma, int gfp_flags)
-{
-	char *retval;
-
-	DEBUG("%s (%p, %d, %d)\n", __FUNCTION__, ep, bytes, gfp_flags);
-
-	retval = kmalloc(bytes, gfp_flags & ~(__GFP_DMA | __GFP_HIGHMEM));
-	if (retval)
-		*dma = virt_to_bus(retval);
-	return retval;
-}
-
-static void lh7a40x_free_buffer(struct usb_ep *ep, void *buf, dma_addr_t dma,
-				unsigned bytes)
-{
-	DEBUG("%s, %p\n", __FUNCTION__, ep);
-	kfree(buf);
-}
-
 /** Queue one request
  *  Kickstart transfer if needed
  *  NOTE: Sets INDEX register
  */
 static int lh7a40x_queue(struct usb_ep *_ep, struct usb_request *_req,
-			 int gfp_flags)
+			 gfp_t gfp_flags)
 {
 	struct lh7a40x_request *req;
 	struct lh7a40x_ep *ep;
@@ -1298,7 +1272,7 @@ static int lh7a40x_set_halt(struct usb_ep *_ep, int value)
 			/*
 			 * Attempts to halt IN endpoints will fail (returning -EAGAIN)
 			 * if any transfer requests are still queued, or if the controller
-			 * FIFO still holds bytes that the host hasn’t collected.
+			 * FIFO still holds bytes that the host hasn't collected.
 			 */
 			spin_unlock_irqrestore(&ep->dev->lock, flags);
 			DEBUG
@@ -1773,6 +1747,7 @@ static void lh7a40x_ep0_setup(struct lh7a40x_udc *dev, u32 csr)
 					break;
 
 				qep = &dev->ep[ep_num];
+				spin_unlock(&dev->lock);
 				if (ctrl.bRequest == USB_REQ_SET_FEATURE) {
 					DEBUG_SETUP("SET_FEATURE (%d)\n",
 						    ep_num);
@@ -1782,6 +1757,7 @@ static void lh7a40x_ep0_setup(struct lh7a40x_udc *dev, u32 csr)
 						    ep_num);
 					lh7a40x_set_halt(&qep->ep, 0);
 				}
+				spin_lock(&dev->lock);
 				usb_set_index(0);
 
 				/* Reply with a ZLP on next IN token */
@@ -2083,28 +2059,28 @@ static struct lh7a40x_udc memory = {
 /*
  * 	probe - binds to the platform device
  */
-static int lh7a40x_udc_probe(struct device *_dev)
+static int lh7a40x_udc_probe(struct platform_device *pdev)
 {
 	struct lh7a40x_udc *dev = &memory;
 	int retval;
 
-	DEBUG("%s: %p\n", __FUNCTION__, _dev);
+	DEBUG("%s: %p\n", __FUNCTION__, pdev);
 
 	spin_lock_init(&dev->lock);
-	dev->dev = _dev;
+	dev->dev = &pdev->dev;
 
 	device_initialize(&dev->gadget.dev);
-	dev->gadget.dev.parent = _dev;
+	dev->gadget.dev.parent = &pdev->dev;
 
 	the_controller = dev;
-	dev_set_drvdata(_dev, dev);
+	platform_set_drvdata(pdev, dev);
 
 	udc_disable(dev);
 	udc_reinit(dev);
 
 	/* irq setup after old hardware state is cleaned up */
 	retval =
-	    request_irq(IRQ_USBINTR, lh7a40x_udc_irq, SA_INTERRUPT, driver_name,
+	    request_irq(IRQ_USBINTR, lh7a40x_udc_irq, IRQF_DISABLED, driver_name,
 			dev);
 	if (retval != 0) {
 		DEBUG(KERN_ERR "%s: can't get irq %i, err %d\n", driver_name,
@@ -2117,19 +2093,21 @@ static int lh7a40x_udc_probe(struct device *_dev)
 	return retval;
 }
 
-static int lh7a40x_udc_remove(struct device *_dev)
+static int lh7a40x_udc_remove(struct platform_device *pdev)
 {
-	struct lh7a40x_udc *dev = _dev->driver_data;
+	struct lh7a40x_udc *dev = platform_get_drvdata(pdev);
 
-	DEBUG("%s: %p\n", __FUNCTION__, dev);
+	DEBUG("%s: %p\n", __FUNCTION__, pdev);
+
+	if (dev->driver)
+		return -EBUSY;
 
 	udc_disable(dev);
 	remove_proc_files();
-	usb_gadget_unregister_driver(dev->driver);
 
 	free_irq(IRQ_USBINTR, dev);
 
-	dev_set_drvdata(_dev, 0);
+	platform_set_drvdata(pdev, 0);
 
 	the_controller = 0;
 
@@ -2138,25 +2116,27 @@ static int lh7a40x_udc_remove(struct device *_dev)
 
 /*-------------------------------------------------------------------------*/
 
-static struct device_driver udc_driver = {
-	.name = (char *)driver_name,
-	.bus = &platform_bus_type,
+static struct platform_driver udc_driver = {
 	.probe = lh7a40x_udc_probe,
-	.remove = lh7a40x_udc_remove
+	.remove = lh7a40x_udc_remove,
 	    /* FIXME power management support */
 	    /* .suspend = ... disable UDC */
 	    /* .resume = ... re-enable UDC */
+	.driver	= {
+		.name = (char *)driver_name,
+		.owner = THIS_MODULE,
+	},
 };
 
 static int __init udc_init(void)
 {
 	DEBUG("%s: %s version %s\n", __FUNCTION__, driver_name, DRIVER_VERSION);
-	return driver_register(&udc_driver);
+	return platform_driver_register(&udc_driver);
 }
 
 static void __exit udc_exit(void)
 {
-	driver_unregister(&udc_driver);
+	platform_driver_unregister(&udc_driver);
 }
 
 module_init(udc_init);

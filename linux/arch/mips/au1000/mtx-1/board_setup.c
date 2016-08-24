@@ -28,7 +28,6 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
@@ -44,7 +43,10 @@
 #include <asm/pgtable.h>
 #include <asm/mach-au1x00/au1000.h>
 
-void board_reset (void)
+extern int (*board_pci_idsel)(unsigned int devsel, int assert);
+int    mtx1_pci_idsel(unsigned int devsel, int assert);
+
+void board_reset(void)
 {
 	/* Hit BCSR.SYSTEM_CONTROL[SW_RST] */
 	au_writel(0x00000000, 0xAE00001C);
@@ -52,15 +54,11 @@ void board_reset (void)
 
 void __init board_setup(void)
 {
-#if defined (CONFIG_USB_OHCI) || defined (CONFIG_AU1X00_USB_DEVICE)
-#ifdef CONFIG_AU1X00_USB_DEVICE
-	// 2nd USB port is USB device
-	au_writel(au_readl(SYS_PINFUNC) & (u32)(~0x8000), SYS_PINFUNC);
-#endif
+#if defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
 	// enable USB power switch
 	au_writel( au_readl(GPIO2_DIR) | 0x10, GPIO2_DIR );
 	au_writel( 0x100000, GPIO2_OUTPUT );
-#endif // defined (CONFIG_USB_OHCI) || defined (CONFIG_AU1X00_USB_DEVICE)
+#endif /* defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE) */
 
 #ifdef CONFIG_PCI
 #if defined(__MIPSEB__)
@@ -71,19 +69,43 @@ void __init board_setup(void)
 #endif
 
 	// initialize sys_pinfunc:
-	// disable second ethernet port (SYS_PF_NI2)
-	// set U3/GPIO23 to GPIO23 (SYS_PF_U3)
-	au_writel( SYS_PF_NI2 | SYS_PF_U3, SYS_PINFUNC );
+	au_writel( SYS_PF_NI2, SYS_PINFUNC );
 
 	// initialize GPIO
 	au_writel( 0xFFFFFFFF, SYS_TRIOUTCLR );
 	au_writel( 0x00000001, SYS_OUTPUTCLR ); // set M66EN (PCI 66MHz) to OFF
 	au_writel( 0x00000008, SYS_OUTPUTSET ); // set PCI CLKRUN# to OFF
+	au_writel( 0x00000002, SYS_OUTPUTSET ); // set EXT_IO3 ON
 	au_writel( 0x00000020, SYS_OUTPUTCLR ); // set eth PHY TX_ER to OFF
 
 	// enable LED and set it to green
 	au_writel( au_readl(GPIO2_DIR) | 0x1800, GPIO2_DIR );
 	au_writel( 0x18000800, GPIO2_OUTPUT );
 
+	board_pci_idsel = mtx1_pci_idsel;
+
 	printk("4G Systems MTX-1 Board\n");
 }
+
+int
+mtx1_pci_idsel(unsigned int devsel, int assert)
+{
+#define MTX_IDSEL_ONLY_0_AND_3 0
+#if MTX_IDSEL_ONLY_0_AND_3
+       if (devsel != 0 && devsel != 3) {
+               printk("*** not 0 or 3\n");
+               return 0;
+       }
+#endif
+
+       if (assert && devsel != 0) {
+               // supress signal to cardbus
+               au_writel( 0x00000002, SYS_OUTPUTCLR ); // set EXT_IO3 OFF
+       }
+       else {
+               au_writel( 0x00000002, SYS_OUTPUTSET ); // set EXT_IO3 ON
+       }
+       au_sync_udelay(1);
+       return 1;
+}
+

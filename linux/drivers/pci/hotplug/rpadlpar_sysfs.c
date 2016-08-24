@@ -14,7 +14,7 @@
  */
 #include <linux/kobject.h>
 #include <linux/string.h>
-#include "pci_hotplug.h"
+#include <linux/pci_hotplug.h>
 #include "rpadlpar.h"
 
 #define DLPAR_KOBJ_NAME       "control"
@@ -48,7 +48,7 @@ dlpar_attr_store(struct kobject * kobj, struct attribute * attr,
 	struct dlpar_io_attr *dlpar_attr = container_of(attr,
 						struct dlpar_io_attr, attr);
 	return dlpar_attr->store ?
-		dlpar_attr->store(dlpar_attr, buf, nbytes) : 0;
+		dlpar_attr->store(dlpar_attr, buf, nbytes) : -EIO;
 }
 
 static struct sysfs_ops dlpar_attr_sysfs_ops = {
@@ -62,7 +62,7 @@ static ssize_t add_slot_store(struct dlpar_io_attr *dlpar_attr,
 	char drc_name[MAX_DRC_NAME_LEN];
 	char *end;
 
-	if (nbytes > MAX_DRC_NAME_LEN)
+	if (nbytes >= MAX_DRC_NAME_LEN)
 		return 0;
 
 	memcpy(drc_name, buf, nbytes);
@@ -83,7 +83,7 @@ static ssize_t remove_slot_store(struct dlpar_io_attr *dlpar_attr,
 	char drc_name[MAX_DRC_NAME_LEN];
 	char *end;
 
-	if (nbytes > MAX_DRC_NAME_LEN)
+	if (nbytes >= MAX_DRC_NAME_LEN)
 		return 0;
 
 	memcpy(drc_name, buf, nbytes);
@@ -129,16 +129,17 @@ struct kobj_type ktype_dlpar_io = {
 };
 
 struct kset dlpar_io_kset = {
-	.subsys = &pci_hotplug_slots_subsys,
-	.kobj = {.name = DLPAR_KOBJ_NAME, .ktype=&ktype_dlpar_io,},
+	.kobj = {.ktype = &ktype_dlpar_io,
+		 .parent = &pci_hotplug_slots_subsys.kobj},
 	.ktype = &ktype_dlpar_io,
 };
 
 int dlpar_sysfs_init(void)
 {
+	kobject_set_name(&dlpar_io_kset.kobj, DLPAR_KOBJ_NAME);
 	if (kset_register(&dlpar_io_kset)) {
 		printk(KERN_ERR "rpadlpar_io: cannot register kset for %s\n",
-				dlpar_io_kset.kobj.name);
+				kobject_name(&dlpar_io_kset.kobj));
 		return -EINVAL;
 	}
 

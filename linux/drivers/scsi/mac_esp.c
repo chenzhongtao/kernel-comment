@@ -43,11 +43,8 @@
 
 /* #define DEBUG_MAC_ESP */
 
-#define mac_turnon_irq(x)	mac_enable_irq(x)
-#define mac_turnoff_irq(x)	mac_disable_irq(x)
-
 extern void esp_handle(struct NCR_ESP *esp);
-extern void mac_esp_intr(int irq, void *dev_id, struct pt_regs *pregs);
+extern void mac_esp_intr(int irq, void *dev_id);
 
 static int  dma_bytes_sent(struct NCR_ESP * esp, int fifo_count);
 static int  dma_can_transfer(struct NCR_ESP * esp, Scsi_Cmnd *sp);
@@ -91,7 +88,7 @@ static int setup_hostid = -1;
  * set up properly!
  */
 
-void mac_esp_intr(int irq, void *dev_id, struct pt_regs *pregs)
+void mac_esp_intr(int irq, void *dev_id)
 {
 	struct NCR_ESP *esp = (struct NCR_ESP *) dev_id;
 	int irq_p = 0;
@@ -125,24 +122,24 @@ void mac_esp_intr(int irq, void *dev_id, struct pt_regs *pregs)
  * acknowledge on the various machines
  */
 
-void scsi_esp_polled(int irq, void *dev_id, struct pt_regs *pregs)
+void scsi_esp_polled(int irq, void *dev_id)
 {
 	if (esp_initialized == 0)
 		return;
 
-	mac_esp_intr(irq, dev_id, pregs);
+	mac_esp_intr(irq, dev_id);
 }
 
-void fake_intr(int irq, void *dev_id, struct pt_regs *pregs)
+void fake_intr(int irq, void *dev_id)
 {
 #ifdef DEBUG_MAC_ESP
 	printk("mac_esp: got irq\n");
 #endif
 
-	mac_esp_intr(irq, dev_id, pregs);
+	mac_esp_intr(irq, dev_id);
 }
 
-irqreturn_t fake_drq(int irq, void *dev_id, struct pt_regs *pregs)
+irqreturn_t fake_drq(int irq, void *dev_id)
 {
 	printk("mac_esp: got drq\n");
 	return IRQ_HANDLED;
@@ -300,7 +297,7 @@ unsigned long get_base(int chip_num)
  * Model dependent ESP setup
  */
 
-int mac_esp_detect(Scsi_Host_Template * tpnt)
+int mac_esp_detect(struct scsi_host_template * tpnt)
 {
 	int quick = 0;
 	int chipnum, chipspresent = 0;
@@ -354,7 +351,7 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 	for (chipnum = 0; chipnum < chipspresent; chipnum ++) {
 		struct NCR_ESP * esp;
 
-		esp = esp_allocate(tpnt, (void *) NULL);
+		esp = esp_allocate(tpnt, NULL, 0);
 		esp->eregs = (struct ESP_regs *) get_base(chipnum);
 
 		esp->dma_irq_p = &esp_dafb_dma_irq_p;
@@ -639,13 +636,13 @@ static void dma_init_write(struct NCR_ESP * esp, char * vaddress, int length)
 
 static void dma_ints_off(struct NCR_ESP * esp)
 {
-	mac_turnoff_irq(esp->irq);
+	disable_irq(esp->irq);
 }
 
 
 static void dma_ints_on(struct NCR_ESP * esp)
 {
-	mac_turnon_irq(esp->irq);
+	enable_irq(esp->irq);
 }
 
 /*
@@ -730,7 +727,7 @@ static void dma_setup_quick(struct NCR_ESP * esp, __u32 addr, int count, int wri
 #endif
 }
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "mac_esp",
 	.name			= "Mac 53C9x SCSI",
 	.detect			= mac_esp_detect,

@@ -11,11 +11,12 @@
 #include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
+#include <linux/capability.h>
 #include <linux/fcntl.h>
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/mc146818rtc.h>	/* For struct rtc_time and ioctls, etc */
-#include <linux/smp_lock.h>
+#include <linux/bcd.h>
 #include <asm/mvme16xhw.h>
 
 #include <asm/io.h>
@@ -30,9 +31,6 @@
  *	ioctls.
  */
 
-#define BCD2BIN(val) (((val)&15) + ((val)>>4)*10)
-#define BIN2BCD(val) ((((val)/10)<<4) + (val)%10)
-
 static const unsigned char days_in_mo[] =
 {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
@@ -44,6 +42,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	volatile MK48T08ptr_t rtc = (MK48T08ptr_t)MVME_RTC_BASE;
 	unsigned long flags;
 	struct rtc_time wtime;
+	void __user *argp = (void __user *)arg;
 
 	switch (cmd) {
 	case RTC_RD_TIME:	/* Read the time/date from RTC	*/
@@ -63,7 +62,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		wtime.tm_wday = BCD2BIN(rtc->bcd_dow)-1;
 		rtc->ctrl = 0;
 		local_irq_restore(flags);
-		return copy_to_user((void *)arg, &wtime, sizeof wtime) ?
+		return copy_to_user(argp, &wtime, sizeof wtime) ?
 								-EFAULT : 0;
 	}
 	case RTC_SET_TIME:	/* Set the RTC */
@@ -75,8 +74,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
 
-		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg,
-				   sizeof(struct rtc_time)))
+		if (copy_from_user(&rtc_tm, argp, sizeof(struct rtc_time)))
 			return -EFAULT;
 
 		yrs = rtc_tm.tm_year;
@@ -148,7 +146,7 @@ static int rtc_release(struct inode *inode, struct file *file)
  *	The various file operations we support.
  */
 
-static struct file_operations rtc_fops = {
+static const struct file_operations rtc_fops = {
 	.ioctl =	rtc_ioctl,
 	.open =		rtc_open,
 	.release =	rtc_release,
@@ -161,7 +159,7 @@ static struct miscdevice rtc_dev=
 	.fops =		&rtc_fops
 };
 
-int __init rtc_MK48T08_init(void)
+static int __init rtc_MK48T08_init(void)
 {
 	if (!MACH_IS_MVME16x)
 		return -ENODEV;
@@ -169,4 +167,4 @@ int __init rtc_MK48T08_init(void)
 	printk(KERN_INFO "MK48T08 Real Time Clock Driver v%s\n", RTC_VERSION);
 	return misc_register(&rtc_dev);
 }
-
+module_init(rtc_MK48T08_init);

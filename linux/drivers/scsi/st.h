@@ -3,11 +3,35 @@
 #define _ST_H
 
 #include <linux/completion.h>
+#include <linux/mutex.h>
+#include <linux/kref.h>
+#include <scsi/scsi_cmnd.h>
 
+/* Descriptor for analyzed sense data */
+struct st_cmdstatus {
+	int midlevel_result;
+	struct scsi_sense_hdr sense_hdr;
+	int have_sense;
+	u64 uremainder64;
+	u8 flags;
+	u8 remainder_valid;
+	u8 fixed_format;
+	u8 deferred;
+};
+
+struct scsi_tape;
+
+/* scsi tape command */
+struct st_request {
+	unsigned char cmd[MAX_COMMAND_SIZE];
+	unsigned char sense[SCSI_SENSE_BUFFERSIZE];
+	int result;
+	struct scsi_tape *stp;
+	struct completion *waiting;
+};
 
 /* The tape buffer descriptor. */
 struct st_buffer {
-	unsigned char in_use;
 	unsigned char dma;	/* DMA-able buffer */
 	unsigned char do_dio;   /* direct i/o set up? */
 	int buffer_size;
@@ -15,9 +39,9 @@ struct st_buffer {
 	int buffer_bytes;
 	int read_pointer;
 	int writing;
-	int midlevel_result;
 	int syscall_result;
-	struct scsi_request *last_SRpnt;
+	struct st_request *last_SRpnt;
+	struct st_cmdstatus cmdstat;
 	unsigned char *b_data;
 	unsigned short use_sg;	/* zero or max number of s/g segments for this adapter */
 	unsigned short sg_segs;		/* number of segments in s/g list */
@@ -75,7 +99,7 @@ struct st_partstat {
 struct scsi_tape {
 	struct scsi_driver *driver;
 	struct scsi_device *device;
-	struct semaphore lock;	/* For serialization */
+	struct mutex lock;	/* For serialization */
 	struct completion wait;	/* For SCSI commands */
 	struct st_buffer *buffer;
 
@@ -94,7 +118,8 @@ struct scsi_tape {
 	unsigned char cln_sense_value;
 	unsigned char cln_sense_mask;
 	unsigned char use_pf;			/* Set Page Format bit in all mode selects? */
-	unsigned char try_dio;			/* try direct i/o? */
+	unsigned char try_dio;			/* try direct i/o in general? */
+	unsigned char try_dio_now;		/* try direct i/o before next close? */
 	unsigned char c_algo;			/* compression algorithm */
 	unsigned char pos_unknown;			/* after reset position unknown */
 	int tape_type;
@@ -144,6 +169,7 @@ struct scsi_tape {
 	unsigned char last_sense[16];
 #endif
 	struct gendisk *disk;
+	struct kref     kref;
 };
 
 /* Bit masks for use_pf */
@@ -191,5 +217,10 @@ struct scsi_tape {
 #define ST_YES         2
 
 #define EXTENDED_SENSE_START  18
+
+/* Masks for some conditions in the sense data */
+#define SENSE_FMK   0x80
+#define SENSE_EOM   0x40
+#define SENSE_ILI   0x20
 
 #endif

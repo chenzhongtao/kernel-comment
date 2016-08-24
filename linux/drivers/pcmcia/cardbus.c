@@ -31,7 +31,6 @@
 #include <asm/io.h>
 
 #define IN_CARD_SERVICES
-#include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
 #include <pcmcia/ss.h>
 #include <pcmcia/cs.h>
@@ -40,8 +39,6 @@
 #include "cs_internal.h"
 
 /*====================================================================*/
-
-#define FIND_FIRST_BIT(n)	((n) - ((n) & ((n)-1)))
 
 /* Offsets in the Expansion ROM Image Header */
 #define ROM_SIGNATURE		0x0000	/* 2 bytes */
@@ -139,7 +136,7 @@ int read_cb_mem(struct pcmcia_socket * s, int space, u_int addr, u_int len, void
 
 	cs_dbg(s, 3, "read_cb_mem(%d, %#x, %u)\n", space, addr, len);
 
-	dev = pci_find_slot(s->cb_dev->subordinate->number, 0);
+	dev = pci_get_slot(s->cb_dev->subordinate, 0);
 	if (!dev)
 		goto fail;
 
@@ -153,6 +150,9 @@ int read_cb_mem(struct pcmcia_socket * s, int space, u_int addr, u_int len, void
 	}
 
 	res = dev->resource + space - 1;
+
+	pci_dev_put(dev);
+
 	if (!res->flags)
 		goto fail;
 
@@ -229,6 +229,11 @@ int cb_alloc(struct pcmcia_socket * s)
 	pci_bus_size_bridges(bus);
 	pci_bus_assign_resources(bus);
 	cardbus_assign_irqs(bus, s->pci_irq);
+
+	/* socket specific tune function */
+	if (s->tune_bridge)
+		s->tune_bridge(s, bus);
+
 	pci_enable_bridges(bus);
 	pci_bus_add_devices(bus);
 

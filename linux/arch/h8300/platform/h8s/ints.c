@@ -20,6 +20,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/seq_file.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/bootmem.h>
 #include <linux/random.h>
 #include <linux/hardirq.h>
@@ -52,7 +53,7 @@ struct irq_pins {
 	unsigned char bit_no;
 };
 /* ISTR = 0 */
-const static struct irq_pins irq_assign_table0[16]={
+static const struct irq_pins irq_assign_table0[16]={
         {H8300_GPIO_P5,H8300_GPIO_B0},{H8300_GPIO_P5,H8300_GPIO_B1},
 	{H8300_GPIO_P5,H8300_GPIO_B2},{H8300_GPIO_P5,H8300_GPIO_B3},
 	{H8300_GPIO_P5,H8300_GPIO_B4},{H8300_GPIO_P5,H8300_GPIO_B5},
@@ -63,7 +64,7 @@ const static struct irq_pins irq_assign_table0[16]={
 	{H8300_GPIO_PF,H8300_GPIO_B1},{H8300_GPIO_PF,H8300_GPIO_B2},
 };
 /* ISTR = 1 */
-const static struct irq_pins irq_assign_table1[16]={
+static const struct irq_pins irq_assign_table1[16]={
 	{H8300_GPIO_P8,H8300_GPIO_B0},{H8300_GPIO_P8,H8300_GPIO_B1},
 	{H8300_GPIO_P8,H8300_GPIO_B2},{H8300_GPIO_P8,H8300_GPIO_B3},
 	{H8300_GPIO_P8,H8300_GPIO_B4},{H8300_GPIO_P8,H8300_GPIO_B5},
@@ -176,9 +177,9 @@ int request_irq(unsigned int irq,
 	}		
 
 	if (use_kmalloc)
-		irq_handle = (irq_handler_t *)kmalloc(sizeof(irq_handler_t), GFP_ATOMIC);
+		irq_handle = kmalloc(sizeof(irq_handler_t), GFP_ATOMIC);
 	else {
-		/* use bootmem allocater */
+		/* use bootmem allocator */
 		irq_handle = (irq_handler_t *)alloc_bootmem(sizeof(irq_handler_t));
 		irq_handle = (irq_handler_t *)((unsigned long)irq_handle | 0x80000000);
 	}
@@ -192,7 +193,7 @@ int request_irq(unsigned int irq,
 	irq_handle->dev_id  = dev_id;
 	irq_handle->devname = devname;
 	irq_list[irq] = irq_handle;
-	if (irq_handle->flags & SA_SAMPLE_RANDOM)
+	if (irq_handle->flags & IRQF_SAMPLE_RANDOM)
 		rand_initialize_irq(irq);
 	
 	/* enable interrupt */
@@ -270,7 +271,7 @@ asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 		if (irq_list[vec]) {
 			irq_list[vec]->handler(vec, irq_list[vec]->dev_id, fp);
 			irq_list[vec]->count++;
-			if (irq_list[vec]->flags & SA_SAMPLE_RANDOM)
+			if (irq_list[vec]->flags & IRQF_SAMPLE_RANDOM)
 				add_interrupt_randomness(vec);
 		}
 	} else {

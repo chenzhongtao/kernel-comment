@@ -101,7 +101,7 @@ void smp_call_function_interrupt(void);
 
 void smp_send_timer(void);
 void smp_ipi_timer_interrupt(struct pt_regs *);
-void smp_local_timer_interrupt(struct pt_regs *);
+void smp_local_timer_interrupt(void);
 
 void send_IPI_allbutself(int, int);
 static void send_IPI_mask(cpumask_t, int, int);
@@ -202,7 +202,7 @@ void smp_flush_cache_all_interrupt(void)
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* TLB flush request Routins                                                 */
+/* TLB flush request Routines                                                */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 
 /*==========================================================================*
@@ -231,7 +231,7 @@ void smp_flush_tlb_all(void)
 	local_irq_save(flags);
 	__flush_tlb_all();
 	local_irq_restore(flags);
-	smp_call_function(flush_tlb_all_ipi, 0, 1, 1);
+	smp_call_function(flush_tlb_all_ipi, NULL, 1, 1);
 	preempt_enable();
 }
 
@@ -275,12 +275,14 @@ static void flush_tlb_all_ipi(void *info)
  *==========================================================================*/
 void smp_flush_tlb_mm(struct mm_struct *mm)
 {
-	int cpu_id = smp_processor_id();
+	int cpu_id;
 	cpumask_t cpu_mask;
-	unsigned long *mmc = &mm->context[cpu_id];
+	unsigned long *mmc;
 	unsigned long flags;
 
 	preempt_disable();
+	cpu_id = smp_processor_id();
+	mmc = &mm->context[cpu_id];
 	cpu_mask = mm->cpu_vm_mask;
 	cpu_clear(cpu_id, cpu_mask);
 
@@ -343,12 +345,14 @@ void smp_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 void smp_flush_tlb_page(struct vm_area_struct *vma, unsigned long va)
 {
 	struct mm_struct *mm = vma->vm_mm;
-	int cpu_id = smp_processor_id();
+	int cpu_id;
 	cpumask_t cpu_mask;
-	unsigned long *mmc = &mm->context[cpu_id];
+	unsigned long *mmc;
 	unsigned long flags;
 
 	preempt_disable();
+	cpu_id = smp_processor_id();
+	mmc = &mm->context[cpu_id];
 	cpu_mask = mm->cpu_vm_mask;
 	cpu_clear(cpu_id, cpu_mask);
 
@@ -374,7 +378,7 @@ void smp_flush_tlb_page(struct vm_area_struct *vma, unsigned long va)
  * Name:         flush_tlb_others
  *
  * Description:  This routine requests other CPU to execute flush TLB.
- *               1.Setup parmeters.
+ *               1.Setup parameters.
  *               2.Send 'INVALIDATE_TLB_IPI' to other CPU.
  *                 Request other CPU to execute 'smp_invalidate_interrupt()'.
  *               3.Wait for other CPUs operation finished.
@@ -498,7 +502,7 @@ void smp_invalidate_interrupt(void)
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* Stop CPU request Routins                                                 */
+/* Stop CPU request Routines                                                 */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 
 /*==========================================================================*
@@ -562,7 +566,7 @@ static void stop_this_cpu(void *dummy)
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* Call function Routins                                                     */
+/* Call function Routines                                                    */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 
 /*==========================================================================*
@@ -686,7 +690,7 @@ void smp_call_function_interrupt(void)
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* Timer Routins                                                             */
+/* Timer Routines                                                            */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 
 /*==========================================================================*
@@ -730,9 +734,12 @@ void smp_send_timer(void)
  *==========================================================================*/
 void smp_ipi_timer_interrupt(struct pt_regs *regs)
 {
+	struct pt_regs *old_regs;
+	old_regs = set_irq_regs(regs);
 	irq_enter();
-	smp_local_timer_interrupt(regs);
+	smp_local_timer_interrupt();
 	irq_exit();
+	set_irq_regs(old_regs);
 }
 
 /*==========================================================================*
@@ -758,9 +765,9 @@ void smp_ipi_timer_interrupt(struct pt_regs *regs)
  * ---------- --- --------------------------------------------------------
  * 2003-06-24 hy  use per_cpu structure.
  *==========================================================================*/
-void smp_local_timer_interrupt(struct pt_regs *regs)
+void smp_local_timer_interrupt(void)
 {
-	int user = user_mode(regs);
+	int user = user_mode(get_irq_regs());
 	int cpu_id = smp_processor_id();
 
 	/*
@@ -770,7 +777,7 @@ void smp_local_timer_interrupt(struct pt_regs *regs)
 	 * useful with a profiling multiplier != 1
 	 */
 
-	profile_tick(CPU_PROFILING, regs);
+	profile_tick(CPU_PROFILING);
 
 	if (--per_cpu(prof_counter, cpu_id) <= 0) {
 		/*
@@ -795,7 +802,7 @@ void smp_local_timer_interrupt(struct pt_regs *regs)
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* Send IPI Routins                                                          */
+/* Send IPI Routines                                                         */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 
 /*==========================================================================*
@@ -807,7 +814,7 @@ void smp_local_timer_interrupt(struct pt_regs *regs)
  *
  * Arguments:    ipi_num - Number of IPI
  *               try -  0 : Send IPI certainly.
- *                     !0 : The following IPI is not sended when Target CPU
+ *                     !0 : The following IPI is not sent when Target CPU
  *                          has not received the before IPI.
  *
  * Returns:      void (cannot fail)
@@ -837,7 +844,7 @@ void send_IPI_allbutself(int ipi_num, int try)
  * Arguments:    cpu_mask - Bitmap of target CPUs logical ID
  *               ipi_num - Number of IPI
  *               try -  0 : Send IPI certainly.
- *                     !0 : The following IPI is not sended when Target CPU
+ *                     !0 : The following IPI is not sent when Target CPU
  *                          has not received the before IPI.
  *
  * Returns:      void (cannot fail)
@@ -878,7 +885,7 @@ static void send_IPI_mask(cpumask_t cpumask, int ipi_num, int try)
  * Arguments:    cpu_mask - Bitmap of target CPUs physical ID
  *               ipi_num - Number of IPI
  *               try -  0 : Send IPI certainly.
- *                     !0 : The following IPI is not sended when Target CPU
+ *                     !0 : The following IPI is not sent when Target CPU
  *                          has not received the before IPI.
  *
  * Returns:      IPICRi regster value.
@@ -892,7 +899,6 @@ unsigned long send_IPI_mask_phys(cpumask_t physid_mask, int ipi_num,
 	int try)
 {
 	spinlock_t *ipilock;
-	unsigned long flags = 0;
 	volatile unsigned long *ipicr_addr;
 	unsigned long ipicr_val;
 	unsigned long my_physid_mask;
@@ -916,50 +922,27 @@ unsigned long send_IPI_mask_phys(cpumask_t physid_mask, int ipi_num,
 	 * write IPICRi (send IPIi)
 	 * unlock ipi_lock[i]
 	 */
+	spin_lock(ipilock);
 	__asm__ __volatile__ (
-		";; LOCK ipi_lock[i]		\n\t"
-		".fillinsn			\n"
-		"1:				\n\t"
-		"mvfc	%1, psw 		\n\t"
-		"clrpsw	#0x40 -> nop		\n\t"
-		DCACHE_CLEAR("r4", "r5", "%2")
-		"lock	r4, @%2			\n\t"
-		"addi	r4, #-1			\n\t"
-		"unlock	r4, @%2			\n\t"
-		"mvtc	%1, psw			\n\t"
-		"bnez	r4, 2f			\n\t"
-		LOCK_SECTION_START(".balign 4 \n\t")
-		".fillinsn			\n"
-		"2:				\n\t"
-		"ld	r4, @%2			\n\t"
-		"blez	r4, 2b			\n\t"
-		"bra	1b			\n\t"
-		LOCK_SECTION_END
 		";; CHECK IPICRi == 0		\n\t"
 		".fillinsn			\n"
-		"3:				\n\t"
-		"ld	%0, @%3			\n\t"
-		"and	%0, %6			\n\t"
-		"beqz	%0, 4f			\n\t"
-		"bnez	%5, 5f			\n\t"
-		"bra	3b			\n\t"
+		"1:				\n\t"
+		"ld	%0, @%1			\n\t"
+		"and	%0, %4			\n\t"
+		"beqz	%0, 2f			\n\t"
+		"bnez	%3, 3f			\n\t"
+		"bra	1b			\n\t"
 		";; WRITE IPICRi (send IPIi)	\n\t"
 		".fillinsn			\n"
-		"4:				\n\t"
-		"st	%4, @%3			\n\t"
-		";; UNLOCK ipi_lock[i]		\n\t"
+		"2:				\n\t"
+		"st	%2, @%1			\n\t"
 		".fillinsn			\n"
-		"5:				\n\t"
-		"ldi	r4, #1			\n\t"
-		"st	r4, @%2			\n\t"
+		"3:				\n\t"
 		: "=&r"(ipicr_val)
-		: "r"(flags), "r"(&ipilock->slock), "r"(ipicr_addr),
-		  "r"(mask), "r"(try), "r"(my_physid_mask)
-		: "memory", "r4"
-#ifdef CONFIG_CHIP_M32700_TS1
-		, "r5"
-#endif	/* CONFIG_CHIP_M32700_TS1 */
+		: "r"(ipicr_addr), "r"(mask), "r"(try), "r"(my_physid_mask)
+		: "memory"
 	);
+	spin_unlock(ipilock);
 
 	return ipicr_val;
 }

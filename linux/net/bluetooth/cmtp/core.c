@@ -1,4 +1,4 @@
-/* 
+/*
    CMTP implementation for Linux Bluetooth stack (BlueZ).
    Copyright (C) 2002-2003 Marcel Holtmann <marcel@holtmann.org>
 
@@ -10,27 +10,26 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/major.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
 #include <linux/fcntl.h>
+#include <linux/freezer.h>
 #include <linux/skbuff.h>
 #include <linux/socket.h>
 #include <linux/ioctl.h>
@@ -126,7 +125,7 @@ static inline void cmtp_add_msgpart(struct cmtp_session *session, int id, const 
 	}
 
 	if (skb && (skb->len > 0))
-		memcpy(skb_put(nskb, skb->len), skb->data, skb->len);
+		skb_copy_from_linear_data(skb, skb_put(nskb, skb->len), skb->len);
 
 	memcpy(skb_put(nskb, count), buf, count);
 
@@ -214,7 +213,7 @@ static int cmtp_send_frame(struct cmtp_session *session, unsigned char *data, in
 	return kernel_sendmsg(sock, &msg, &iv, 1, len);
 }
 
-static int cmtp_process_transmit(struct cmtp_session *session)
+static void cmtp_process_transmit(struct cmtp_session *session)
 {
 	struct sk_buff *skb, *nskb;
 	unsigned char *hdr;
@@ -224,7 +223,7 @@ static int cmtp_process_transmit(struct cmtp_session *session)
 
 	if (!(nskb = alloc_skb(session->mtu, GFP_ATOMIC))) {
 		BT_ERR("Can't allocate memory for new frame");
-		return -ENOMEM;
+		return;
 	}
 
 	while ((skb = skb_dequeue(&session->transmit))) {
@@ -258,7 +257,7 @@ static int cmtp_process_transmit(struct cmtp_session *session)
 			hdr[2] = size >> 8;
 		}
 
-		memcpy(skb_put(nskb, size), skb->data, size);
+		skb_copy_from_linear_data(skb, skb_put(nskb, size), size);
 		skb_pull(skb, size);
 
 		if (skb->len > 0) {
@@ -276,8 +275,6 @@ static int cmtp_process_transmit(struct cmtp_session *session)
 	cmtp_send_frame(session, nskb->data, nskb->len);
 
 	kfree_skb(nskb);
-
-	return skb_queue_len(&session->transmit);
 }
 
 static int cmtp_session(void *arg)
@@ -291,7 +288,6 @@ static int cmtp_session(void *arg)
 
 	daemonize("kcmtpd_ctr_%d", session->num);
 	set_user_nice(current, -15);
-	current->flags |= PF_NOFREEZE;
 
 	init_waitqueue_entry(&wait, current);
 	add_wait_queue(sk->sk_sleep, &wait);
@@ -339,10 +335,9 @@ int cmtp_add_connection(struct cmtp_connadd_req *req, struct socket *sock)
 	baswap(&src, &bt_sk(sock->sk)->src);
 	baswap(&dst, &bt_sk(sock->sk)->dst);
 
-	session = kmalloc(sizeof(struct cmtp_session), GFP_KERNEL);
-	if (!session) 
+	session = kzalloc(sizeof(struct cmtp_session), GFP_KERNEL);
+	if (!session)
 		return -ENOMEM;
-	memset(session, 0, sizeof(struct cmtp_session));
 
 	down_write(&cmtp_session_sem);
 

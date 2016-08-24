@@ -79,7 +79,7 @@ static IADEV *ia_dev[8];
 static struct atm_dev *_ia_dev[8];
 static int iadev_count;
 static void ia_led_timer(unsigned long arg);
-static struct timer_list ia_timer = TIMER_INITIALIZER(ia_led_timer, 0, 0);
+static DEFINE_TIMER(ia_timer, ia_led_timer, 0, 0);
 static int IA_TX_BUF = DFL_TX_BUFFERS, IA_TX_BUF_SZ = DFL_TX_BUF_SZ;
 static int IA_RX_BUF = DFL_RX_BUFFERS, IA_RX_BUF_SZ = DFL_RX_BUF_SZ;
 static uint IADebugFlag = /* IF_IADBG_ERR | IF_IADBG_CBR| IF_IADBG_INIT_ADAPTER
@@ -305,7 +305,7 @@ static void clear_lockup (struct atm_vcc *vcc, IADEV *dev) {
 **  |  R | NZ |  5-bit exponent  |        9-bit mantissa         |
 **  +----+----+------------------+-------------------------------+
 ** 
-**    R = reserverd (written as 0)
+**    R = reserved (written as 0)
 **    NZ = 0 if 0 cells/sec; 1 otherwise
 **
 **    if NZ = 1, rate = 1.mmmmmmmmm x 2^(eeeee) cells/sec
@@ -1601,14 +1601,14 @@ static int rx_init(struct atm_dev *dev)
   
 	skb_queue_head_init(&iadev->rx_dma_q);  
 	iadev->rx_free_desc_qhead = NULL;   
-	iadev->rx_open = kmalloc(4*iadev->num_vc,GFP_KERNEL);
-	if (!iadev->rx_open)  
-	{  
+
+	iadev->rx_open = kzalloc(4 * iadev->num_vc, GFP_KERNEL);
+	if (!iadev->rx_open) {
 		printk(KERN_ERR DEV_LABEL "itf %d couldn't get free page\n",
 		dev->number);  
 		goto err_free_dle;
 	}  
-	memset(iadev->rx_open, 0, 4*iadev->num_vc);  
+
         iadev->rxing = 1;
         iadev->rx_pkt_cnt = 0;
 	/* Mode Register */  
@@ -1778,16 +1778,18 @@ static int open_tx(struct atm_vcc *vcc)
         if (ia_vcc->pcr < iadev->rate_limit)
            skb_queue_head_init (&ia_vcc->txing_skb);
         if (ia_vcc->pcr < iadev->rate_limit) {
-           if (vcc->qos.txtp.max_sdu != 0) {
+	   struct sock *sk = sk_atm(vcc);
+
+	   if (vcc->qos.txtp.max_sdu != 0) {
                if (ia_vcc->pcr > 60000)
-                  vcc->sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 5;
+                  sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 5;
                else if (ia_vcc->pcr > 2000)
-                  vcc->sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 4;
+                  sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 4;
                else
-                 vcc->sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 3;
+                 sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 3;
            }
            else
-             vcc->sk->sk_sndbuf = 24576;
+             sk->sk_sndbuf = 24576;
         }
            
 	vc = (struct main_vc *)iadev->MAIN_VC_TABLE_ADDR;  
@@ -2193,7 +2195,7 @@ err_out:
 	return -ENOMEM;
 }   
    
-static irqreturn_t ia_int(int irq, void *dev_id, struct pt_regs *regs)  
+static irqreturn_t ia_int(int irq, void *dev_id)  
 {  
    struct atm_dev *dev;  
    IADEV *iadev;  
@@ -2282,13 +2284,12 @@ static int reset_sar(struct atm_dev *dev)
 }  
 	  
 	  
-static int __init ia_init(struct atm_dev *dev)
+static int __devinit ia_init(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
 	unsigned long real_base;
 	void __iomem *base;
 	unsigned short command;  
-	unsigned char revision;  
 	int error, i; 
 	  
 	/* The device has been identified and registered. Now we read   
@@ -2303,16 +2304,14 @@ static int __init ia_init(struct atm_dev *dev)
 	real_base = pci_resource_start (iadev->pci, 0);
 	iadev->irq = iadev->pci->irq;
 		  
-	if ((error = pci_read_config_word(iadev->pci, PCI_COMMAND,&command))   
-		    || (error = pci_read_config_byte(iadev->pci,   
-				PCI_REVISION_ID,&revision)))   
-	{  
+	error = pci_read_config_word(iadev->pci, PCI_COMMAND, &command);
+	if (error) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): init error 0x%x\n",  
 				dev->number,error);  
 		return -EINVAL;  
 	}  
 	IF_INIT(printk(DEV_LABEL "(itf %d): rev.%d,realbase=0x%lx,irq=%d\n",  
-			dev->number, revision, real_base, iadev->irq);)  
+			dev->number, iadev->pci->revision, real_base, iadev->irq);)
 	  
 	/* find mapping size of board */  
 	  
@@ -2351,7 +2350,7 @@ static int __init ia_init(struct atm_dev *dev)
 		return error;  
 	}  
 	IF_INIT(printk(DEV_LABEL " (itf %d): rev.%d,base=%p,irq=%d\n",  
-			dev->number, revision, base, iadev->irq);)  
+			dev->number, iadev->pci->revision, base, iadev->irq);)
 	  
 	/* filling the iphase dev structure */  
 	iadev->mem = iadev->pci_map_size /2;  
@@ -2478,7 +2477,7 @@ static void ia_free_rx(IADEV *iadev)
 			  iadev->rx_dle_dma);  
 }
 
-static int __init ia_start(struct atm_dev *dev)
+static int __devinit ia_start(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
 	int error;  
@@ -2486,7 +2485,7 @@ static int __init ia_start(struct atm_dev *dev)
 	u32 ctrl_reg;  
 	IF_EVENT(printk(">ia_start\n");)  
 	iadev = INPH_IA_DEV(dev);  
-        if (request_irq(iadev->irq, &ia_int, SA_SHIRQ, DEV_LABEL, dev)) {  
+        if (request_irq(iadev->irq, &ia_int, IRQF_SHARED, DEV_LABEL, dev)) {
                 printk(KERN_ERR DEV_LABEL "(itf %d): IRQ%d is already in use\n",  
                     dev->number, iadev->irq);  
 		error = -EAGAIN;
@@ -3172,12 +3171,12 @@ static int __devinit ia_init_one(struct pci_dev *pdev,
         unsigned long flags;
 	int ret;
 
-	iadev = kmalloc(sizeof(*iadev), GFP_KERNEL); 
+	iadev = kzalloc(sizeof(*iadev), GFP_KERNEL);
 	if (!iadev) {
 		ret = -ENOMEM;
 		goto err_out;
 	}
-	memset(iadev, 0, sizeof(*iadev));
+
 	iadev->pci = pdev;
 
 	IF_INIT(printk("ia detected at bus:%d dev: %d function:%d\n",
@@ -3244,8 +3243,8 @@ static void __devexit ia_remove_one(struct pci_dev *pdev)
 	iadev_count--;
 	ia_dev[iadev_count] = NULL;
 	_ia_dev[iadev_count] = NULL;
+	IF_EVENT(printk("deregistering iav at (itf:%d)\n", dev->number);)
 	atm_dev_deregister(dev);
-	IF_EVENT(printk("iav deregistered at (itf:%d)\n", dev->number);)
 
       	iounmap(iadev->base);  
 	pci_disable_device(pdev);
@@ -3274,7 +3273,7 @@ static int __init ia_module_init(void)
 {
 	int ret;
 
-	ret = pci_module_init(&ia_driver);
+	ret = pci_register_driver(&ia_driver);
 	if (ret >= 0) {
 		ia_timer.expires = jiffies + 3*HZ;
 		add_timer(&ia_timer); 

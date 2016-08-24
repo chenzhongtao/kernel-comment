@@ -38,11 +38,8 @@
  * TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
  *
  *****************************************************************************/
-static char ixj_h_rcsid[] = "$Id: ixj.h,v 4.1 2001/08/04 14:49:27 craigs Exp $";
-
 #define IXJ_VERSION 3031
 
-#include <linux/version.h>
 #include <linux/types.h>
 
 #include <linux/ixjuser.h>
@@ -51,14 +48,10 @@ static char ixj_h_rcsid[] = "$Id: ixj.h,v 4.1 2001/08/04 14:49:27 craigs Exp $";
 typedef __u16 WORD;
 typedef __u32 DWORD;
 typedef __u8 BYTE;
-typedef __u8 BOOL;
 
 #ifndef IXJMAX
 #define IXJMAX 16
 #endif
-
-#define TRUE 1
-#define FALSE 0
 
 /******************************************************************************
 *
@@ -1298,7 +1291,7 @@ typedef struct {
 	Proc_Info_Type Info_write;
 	unsigned short frame_count;
 	unsigned int filter_hist[4];
-	unsigned char filter_en[4];
+	unsigned char filter_en[6];
 	unsigned short proc_load;
 	unsigned long framesread;
 	unsigned long frameswritten;

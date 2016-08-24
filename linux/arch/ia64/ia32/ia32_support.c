@@ -58,7 +58,7 @@ load_desc (u16 selector)
 void
 ia32_load_segment_descriptors (struct task_struct *task)
 {
-	struct pt_regs *regs = ia64_task_regs(task);
+	struct pt_regs *regs = task_pt_regs(task);
 
 	/* Setup the segment descriptors */
 	regs->r24 = load_desc(regs->r16 >> 16);		/* ESD */
@@ -113,7 +113,7 @@ void
 ia32_load_state (struct task_struct *t)
 {
 	unsigned long eflag, fsr, fcr, fir, fdr, tssd;
-	struct pt_regs *regs = ia64_task_regs(t);
+	struct pt_regs *regs = task_pt_regs(t);
 
 	eflag = t->thread.eflag;
 	fsr = t->thread.fsr;
@@ -249,13 +249,11 @@ ia32_init (void)
 
 #if PAGE_SHIFT > IA32_PAGE_SHIFT
 	{
-		extern kmem_cache_t *partial_page_cachep;
+		extern struct kmem_cache *ia64_partial_page_cachep;
 
-		partial_page_cachep = kmem_cache_create("partial_page_cache",
-							sizeof(struct partial_page), 0, 0,
-							NULL, NULL);
-		if (!partial_page_cachep)
-			panic("Cannot create partial page SLAB cache");
+		ia64_partial_page_cachep = kmem_cache_create("ia64_partial_page_cache",
+					sizeof(struct ia64_partial_page),
+					0, SLAB_PANIC, NULL);
 	}
 #endif
 	return 0;

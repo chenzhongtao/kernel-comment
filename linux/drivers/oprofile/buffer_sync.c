@@ -26,7 +26,9 @@
 #include <linux/profile.h>
 #include <linux/module.h>
 #include <linux/fs.h>
- 
+#include <linux/oprofile.h>
+#include <linux/sched.h>
+
 #include "oprofile_stats.h"
 #include "event_buffer.h"
 #include "cpu_buffer.h"
@@ -34,22 +36,25 @@
  
 static LIST_HEAD(dying_tasks);
 static LIST_HEAD(dead_tasks);
-cpumask_t marked_cpus = CPU_MASK_NONE;
+static cpumask_t marked_cpus = CPU_MASK_NONE;
 static DEFINE_SPINLOCK(task_mortuary);
-void process_task_mortuary(void);
+static void process_task_mortuary(void);
 
 
 /* Take ownership of the task struct and place it on the
  * list for processing. Only after two full buffer syncs
  * does the task eventually get freed, because by then
  * we are sure we will not reference it again.
+ * Can be invoked from softirq via RCU callback due to
+ * call_rcu() of the task struct, hence the _irqsave.
  */
 static int task_free_notify(struct notifier_block * self, unsigned long val, void * data)
 {
+	unsigned long flags;
 	struct task_struct * task = data;
-	spin_lock(&task_mortuary);
+	spin_lock_irqsave(&task_mortuary, flags);
 	list_add(&task->tasks, &dying_tasks);
-	spin_unlock(&task_mortuary);
+	spin_unlock_irqrestore(&task_mortuary, flags);
 	return NOTIFY_OK;
 }
 
@@ -62,7 +67,7 @@ static int task_exit_notify(struct notifier_block * self, unsigned long val, voi
 	/* To avoid latency problems, we only process the current CPU,
 	 * hoping that most samples for the task are on this CPU
 	 */
-	sync_buffer(_smp_processor_id());
+	sync_buffer(raw_smp_processor_id());
   	return 0;
 }
 
@@ -86,7 +91,7 @@ static int munmap_notify(struct notifier_block * self, unsigned long val, void *
 		/* To avoid latency problems, we only process the current CPU,
 		 * hoping that most samples for the task are on this CPU
 		 */
-		sync_buffer(_smp_processor_id());
+		sync_buffer(raw_smp_processor_id());
 		return 0;
 	}
 
@@ -105,10 +110,10 @@ static int module_load_notify(struct notifier_block * self, unsigned long val, v
 		return 0;
 
 	/* FIXME: should we process all CPU buffers ? */
-	down(&buffer_sem);
+	mutex_lock(&buffer_mutex);
 	add_event_entry(ESCAPE_CODE);
 	add_event_entry(MODULE_LOADED_CODE);
-	up(&buffer_sem);
+	mutex_unlock(&buffer_mutex);
 #endif
 	return 0;
 }
@@ -206,7 +211,7 @@ static inline unsigned long fast_get_dcookie(struct dentry * dentry,
  */
 static unsigned long get_exec_dcookie(struct mm_struct * mm)
 {
-	unsigned long cookie = 0;
+	unsigned long cookie = NO_COOKIE;
 	struct vm_area_struct * vma;
  
 	if (!mm)
@@ -217,8 +222,8 @@ static unsigned long get_exec_dcookie(struct mm_struct * mm)
 			continue;
 		if (!(vma->vm_flags & VM_EXECUTABLE))
 			continue;
-		cookie = fast_get_dcookie(vma->vm_file->f_dentry,
-			vma->vm_file->f_vfsmnt);
+		cookie = fast_get_dcookie(vma->vm_file->f_path.dentry,
+			vma->vm_file->f_path.mnt);
 		break;
 	}
 
@@ -234,35 +239,42 @@ out:
  */
 static unsigned long lookup_dcookie(struct mm_struct * mm, unsigned long addr, off_t * offset)
 {
-	unsigned long cookie = 0;
+	unsigned long cookie = NO_COOKIE;
 	struct vm_area_struct * vma;
 
 	for (vma = find_vma(mm, addr); vma; vma = vma->vm_next) {
  
-		if (!vma->vm_file)
-			continue;
-
 		if (addr < vma->vm_start || addr >= vma->vm_end)
 			continue;
 
-		cookie = fast_get_dcookie(vma->vm_file->f_dentry,
-			vma->vm_file->f_vfsmnt);
-		*offset = (vma->vm_pgoff << PAGE_SHIFT) + addr - vma->vm_start; 
+		if (vma->vm_file) {
+			cookie = fast_get_dcookie(vma->vm_file->f_path.dentry,
+				vma->vm_file->f_path.mnt);
+			*offset = (vma->vm_pgoff << PAGE_SHIFT) + addr -
+				vma->vm_start;
+		} else {
+			/* must be an anonymous map */
+			*offset = addr;
+		}
+
 		break;
 	}
+
+	if (!vma)
+		cookie = INVALID_COOKIE;
 
 	return cookie;
 }
 
 
-static unsigned long last_cookie = ~0UL;
+static unsigned long last_cookie = INVALID_COOKIE;
  
 static void add_cpu_switch(int i)
 {
 	add_event_entry(ESCAPE_CODE);
 	add_event_entry(CPU_SWITCH_CODE);
 	add_event_entry(i);
-	last_cookie = ~0UL;
+	last_cookie = INVALID_COOKIE;
 }
 
 static void add_kernel_ctx_switch(unsigned int in_kernel)
@@ -317,7 +329,7 @@ static int add_us_sample(struct mm_struct * mm, struct op_sample * s)
  
  	cookie = lookup_dcookie(mm, s->eip, &offset);
  
-	if (!cookie) {
+	if (cookie == INVALID_COOKIE) {
 		atomic_inc(&oprofile_stats.sample_lost_no_mapping);
 		return 0;
 	}
@@ -422,27 +434,24 @@ static void increment_tail(struct oprofile_cpu_buffer * b)
  * and to have reached the list, it must have gone through
  * one full sync already.
  */
-void process_task_mortuary(void)
+static void process_task_mortuary(void)
 {
-	struct list_head * pos;
-	struct list_head * pos2;
+	unsigned long flags;
+	LIST_HEAD(local_dead_tasks);
 	struct task_struct * task;
+	struct task_struct * ttask;
 
-	spin_lock(&task_mortuary);
+	spin_lock_irqsave(&task_mortuary, flags);
 
-	list_for_each_safe(pos, pos2, &dead_tasks) {
-		task = list_entry(pos, struct task_struct, tasks);
+	list_splice_init(&dead_tasks, &local_dead_tasks);
+	list_splice_init(&dying_tasks, &dead_tasks);
+
+	spin_unlock_irqrestore(&task_mortuary, flags);
+
+	list_for_each_entry_safe(task, ttask, &local_dead_tasks, tasks) {
 		list_del(&task->tasks);
 		free_task(task);
 	}
-
-	list_for_each_safe(pos, pos2, &dying_tasks) {
-		task = list_entry(pos, struct task_struct, tasks);
-		list_del(&task->tasks);
-		list_add_tail(&task->tasks, &dead_tasks);
-	}
-
-	spin_unlock(&task_mortuary);
 }
 
 
@@ -494,7 +503,7 @@ void sync_buffer(int cpu)
 	sync_buffer_state state = sb_buffer_start;
 	unsigned long available;
 
-	down(&buffer_sem);
+	mutex_lock(&buffer_mutex);
  
 	add_cpu_switch(cpu);
 
@@ -543,5 +552,5 @@ void sync_buffer(int cpu)
 
 	mark_done(cpu);
 
-	up(&buffer_sem);
+	mutex_unlock(&buffer_mutex);
 }

@@ -26,7 +26,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/blkdev.h>
@@ -47,7 +46,7 @@
 #define MAX_SLOTS 8
 static __u8 __initdata id_array[MAX_SLOTS] = { [0 ... MAX_SLOTS-1] = 7 };
 
-char *sim710;		/* command line passed by insmod */
+static char *sim710;		/* command line passed by insmod */
 
 MODULE_AUTHOR("Richard Hirst");
 MODULE_DESCRIPTION("Simple NCR53C710 driver");
@@ -61,7 +60,7 @@ module_param(sim710, charp, 0);
 #define ARG_SEP ','
 #endif
 
-__init int
+static __init int
 param_setup(char *str)
 {
 	char *pos = str, *next;
@@ -75,7 +74,7 @@ param_setup(char *str)
 		else if(!strncmp(pos, "id:", 3)) {
 			if(slot == -1) {
 				printk(KERN_WARNING "sim710: Must specify slot for id parameter\n");
-			} else if(slot > MAX_SLOTS) {
+			} else if(slot >= MAX_SLOTS) {
 				printk(KERN_WARNING "sim710: Illegal slot %d for id %d\n", slot, val);
 			} else {
 				id_array[slot] = val;
@@ -101,7 +100,7 @@ sim710_probe_common(struct device *dev, unsigned long base_addr,
 {
 	struct Scsi_Host * host = NULL;
 	struct NCR_700_Host_Parameters *hostdata =
-		kmalloc(sizeof(struct NCR_700_Host_Parameters),	GFP_KERNEL);
+		kzalloc(sizeof(struct NCR_700_Host_Parameters),	GFP_KERNEL);
 
 	printk(KERN_NOTICE "sim710: %s\n", dev->bus_id);
 	printk(KERN_NOTICE "sim710: irq = %d, clock = %d, base = 0x%lx, scsi_id = %d\n",
@@ -111,7 +110,6 @@ sim710_probe_common(struct device *dev, unsigned long base_addr,
 		printk(KERN_ERR "sim710: Failed to allocate host data\n");
 		goto out;
 	}
-	memset(hostdata, 0, sizeof(struct NCR_700_Host_Parameters));
 
 	if(request_region(base_addr, 64, "sim710") == NULL) {
 		printk(KERN_ERR "sim710: Failed to reserve IO region 0x%lx\n",
@@ -120,25 +118,35 @@ sim710_probe_common(struct device *dev, unsigned long base_addr,
 	}
 
 	/* Fill in the three required pieces of hostdata */
-	hostdata->base = base_addr;
+	hostdata->base = ioport_map(base_addr, 64);
 	hostdata->differential = differential;
 	hostdata->clock = clock;
 	hostdata->chip710 = 1;
-	NCR_700_set_io_mapped(hostdata);
+	hostdata->burst_length = 8;
 
 	/* and register the chip */
-	if((host = NCR_700_detect(&sim710_driver_template, hostdata, dev, irq,
-				  scsi_id)) == NULL) {
+	if((host = NCR_700_detect(&sim710_driver_template, hostdata, dev))
+	   == NULL) {
 		printk(KERN_ERR "sim710: No host detected; card configuration problem?\n");
 		goto out_release;
 	}
+	host->this_id = scsi_id;
+	host->base = base_addr;
+	host->irq = irq;
+	if (request_irq(irq, NCR_700_intr, IRQF_SHARED, "sim710", host)) {
+		printk(KERN_ERR "sim710: request_irq failed\n");
+		goto out_put_host;
+	}
 
+	dev_set_drvdata(dev, host);
 	scsi_scan_host(host);
 
 	return 0;
 
+ out_put_host:
+	scsi_host_put(host);
  out_release:
-	release_region(host->base, 64);
+	release_region(base_addr, 64);
  out_free:
 	kfree(hostdata);
  out:
@@ -148,7 +156,7 @@ sim710_probe_common(struct device *dev, unsigned long base_addr,
 static __devexit int
 sim710_device_remove(struct device *dev)
 {
-	struct Scsi_Host *host = dev_to_shost(dev);
+	struct Scsi_Host *host = dev_get_drvdata(dev);
 	struct NCR_700_Host_Parameters *hostdata =
 		(struct NCR_700_Host_Parameters *)host->hostdata[0];
 
@@ -156,6 +164,7 @@ sim710_device_remove(struct device *dev)
 	NCR_700_release(host);
 	kfree(hostdata);
 	free_irq(host->irq, host);
+	release_region(host->base, 64);
 	return 0;
 }
 
@@ -274,6 +283,7 @@ static struct eisa_device_id sim710_eisa_ids[] = {
 	{ "HWP0C80" },
 	{ "" }
 };
+MODULE_DEVICE_TABLE(eisa, sim710_eisa_ids);
 
 static __init int
 sim710_eisa_probe(struct device *dev)
@@ -314,7 +324,7 @@ sim710_eisa_probe(struct device *dev)
 				   differential, scsi_id);
 }
 
-struct eisa_driver sim710_eisa_driver = {
+static struct eisa_driver sim710_eisa_driver = {
 	.id_table		= sim710_eisa_ids,
 	.driver = {
 		.name		= "sim710",

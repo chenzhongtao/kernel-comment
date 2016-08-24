@@ -11,7 +11,6 @@
 
 #include <asm-generic/4level-fixup.h>
 
-#include <linux/config.h>
 #include <linux/spinlock.h>
 #include <linux/swap.h>
 #include <asm/types.h>
@@ -47,7 +46,6 @@ BTFIXUPDEF_SIMM13(user_ptrs_per_pgd)
 #define pgd_ERROR(e)   __builtin_trap()
 
 BTFIXUPDEF_INT(page_none)
-BTFIXUPDEF_INT(page_shared)
 BTFIXUPDEF_INT(page_copy)
 BTFIXUPDEF_INT(page_readonly)
 BTFIXUPDEF_INT(page_kernel)
@@ -63,11 +61,11 @@ BTFIXUPDEF_INT(page_kernel)
 #define PTRS_PER_PMD    	BTFIXUP_SIMM13(ptrs_per_pmd)
 #define PTRS_PER_PGD    	BTFIXUP_SIMM13(ptrs_per_pgd)
 #define USER_PTRS_PER_PGD	BTFIXUP_SIMM13(user_ptrs_per_pgd)
-#define FIRST_USER_PGD_NR	0
+#define FIRST_USER_ADDRESS	0
 #define PTE_SIZE		(PTRS_PER_PTE*4)
 
 #define PAGE_NONE      __pgprot(BTFIXUP_INT(page_none))
-#define PAGE_SHARED    __pgprot(BTFIXUP_INT(page_shared))
+extern pgprot_t PAGE_SHARED;
 #define PAGE_COPY      __pgprot(BTFIXUP_INT(page_copy))
 #define PAGE_READONLY  __pgprot(BTFIXUP_INT(page_readonly))
 
@@ -81,6 +79,8 @@ extern unsigned long page_kernel;
 
 /* Top-level page directory */
 extern pgd_t swapper_pg_dir[1024];
+
+extern void paging_init(void);
 
 /* Page table for 0-4MB for everybody, on the Sparc this
  * holds the same as on the i386.
@@ -142,28 +142,28 @@ extern unsigned long empty_zero_page;
 /*
  */
 BTFIXUPDEF_CALL_CONST(struct page *, pmd_page, pmd_t)
-BTFIXUPDEF_CALL_CONST(unsigned long, pgd_page, pgd_t)
+BTFIXUPDEF_CALL_CONST(unsigned long, pgd_page_vaddr, pgd_t)
 
 #define pmd_page(pmd) BTFIXUP_CALL(pmd_page)(pmd)
-#define pgd_page(pgd) BTFIXUP_CALL(pgd_page)(pgd)
+#define pgd_page_vaddr(pgd) BTFIXUP_CALL(pgd_page_vaddr)(pgd)
 
 BTFIXUPDEF_SETHI(none_mask)
 BTFIXUPDEF_CALL_CONST(int, pte_present, pte_t)
 BTFIXUPDEF_CALL(void, pte_clear, pte_t *)
 
-extern __inline__ int pte_none(pte_t pte)
+static inline int pte_none(pte_t pte)
 {
 	return !(pte_val(pte) & ~BTFIXUP_SETHI(none_mask));
 }
 
 #define pte_present(pte) BTFIXUP_CALL(pte_present)(pte)
-#define pte_clear(pte) BTFIXUP_CALL(pte_clear)(pte)
+#define pte_clear(mm,addr,pte) BTFIXUP_CALL(pte_clear)(pte)
 
 BTFIXUPDEF_CALL_CONST(int, pmd_bad, pmd_t)
 BTFIXUPDEF_CALL_CONST(int, pmd_present, pmd_t)
 BTFIXUPDEF_CALL(void, pmd_clear, pmd_t *)
 
-extern __inline__ int pmd_none(pmd_t pmd)
+static inline int pmd_none(pmd_t pmd)
 {
 	return !(pmd_val(pmd) & ~BTFIXUP_SETHI(none_mask));
 }
@@ -186,45 +186,24 @@ BTFIXUPDEF_CALL(void, pgd_clear, pgd_t *)
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
  */
-BTFIXUPDEF_HALF(pte_readi)
 BTFIXUPDEF_HALF(pte_writei)
 BTFIXUPDEF_HALF(pte_dirtyi)
 BTFIXUPDEF_HALF(pte_youngi)
 
-extern int pte_read(pte_t pte) __attribute_const__;
-extern __inline__ int pte_read(pte_t pte)
-{
-	switch (sparc_cpu_model){
-	case sun4:
-	case sun4c:
-		return pte_val(pte) & BTFIXUP_HALF(pte_readi);
-	case sun4d:
-	case sun4e:
-	case sun4m:
-		return !(pte_val(pte) & BTFIXUP_HALF(pte_readi));
-	/* pacify gcc warnings */
-	case sun4u:
-	case sun_unknown:
-	case ap1000:
-	default:
-		return 0;
-	}
-}
-
-extern int pte_write(pte_t pte) __attribute_const__;
-extern __inline__ int pte_write(pte_t pte)
+static int pte_write(pte_t pte) __attribute_const__;
+static inline int pte_write(pte_t pte)
 {
 	return pte_val(pte) & BTFIXUP_HALF(pte_writei);
 }
 
-extern int pte_dirty(pte_t pte) __attribute_const__;
-extern __inline__ int pte_dirty(pte_t pte)
+static int pte_dirty(pte_t pte) __attribute_const__;
+static inline int pte_dirty(pte_t pte)
 {
 	return pte_val(pte) & BTFIXUP_HALF(pte_dirtyi);
 }
 
-extern int pte_young(pte_t pte) __attribute_const__;
-extern __inline__ int pte_young(pte_t pte)
+static int pte_young(pte_t pte) __attribute_const__;
+static inline int pte_young(pte_t pte)
 {
 	return pte_val(pte) & BTFIXUP_HALF(pte_youngi);
 }
@@ -234,8 +213,8 @@ extern __inline__ int pte_young(pte_t pte)
  */
 BTFIXUPDEF_HALF(pte_filei)
 
-extern int pte_file(pte_t pte) __attribute_const__;
-extern __inline__ int pte_file(pte_t pte)
+static int pte_file(pte_t pte) __attribute_const__;
+static inline int pte_file(pte_t pte)
 {
 	return pte_val(pte) & BTFIXUP_HALF(pte_filei);
 }
@@ -246,20 +225,20 @@ BTFIXUPDEF_HALF(pte_wrprotecti)
 BTFIXUPDEF_HALF(pte_mkcleani)
 BTFIXUPDEF_HALF(pte_mkoldi)
 
-extern pte_t pte_wrprotect(pte_t pte) __attribute_const__;
-extern __inline__ pte_t pte_wrprotect(pte_t pte)
+static pte_t pte_wrprotect(pte_t pte) __attribute_const__;
+static inline pte_t pte_wrprotect(pte_t pte)
 {
 	return __pte(pte_val(pte) & ~BTFIXUP_HALF(pte_wrprotecti));
 }
 
-extern pte_t pte_mkclean(pte_t pte) __attribute_const__;
-extern __inline__ pte_t pte_mkclean(pte_t pte)
+static pte_t pte_mkclean(pte_t pte) __attribute_const__;
+static inline pte_t pte_mkclean(pte_t pte)
 {
 	return __pte(pte_val(pte) & ~BTFIXUP_HALF(pte_mkcleani));
 }
 
-extern pte_t pte_mkold(pte_t pte) __attribute_const__;
-extern __inline__ pte_t pte_mkold(pte_t pte)
+static pte_t pte_mkold(pte_t pte) __attribute_const__;
+static inline pte_t pte_mkold(pte_t pte)
 {
 	return __pte(pte_val(pte) & ~BTFIXUP_HALF(pte_mkoldi));
 }
@@ -272,8 +251,6 @@ BTFIXUPDEF_CALL_CONST(pte_t, pte_mkyoung, pte_t)
 #define pte_mkdirty(pte) BTFIXUP_CALL(pte_mkdirty)(pte)
 #define pte_mkyoung(pte) BTFIXUP_CALL(pte_mkyoung)(pte)
 
-#define page_pte_prot(page, prot)	mk_pte(page, prot)
-#define page_pte(page)			mk_pte(page, __pgprot(0))
 #define pfn_pte(pfn, prot)		mk_pte(pfn_to_page(pfn), prot)
 
 BTFIXUPDEF_CALL(unsigned long,	 pte_pfn, pte_t)
@@ -288,15 +265,18 @@ BTFIXUPDEF_CALL_CONST(pte_t, mk_pte, struct page *, pgprot_t)
 
 BTFIXUPDEF_CALL_CONST(pte_t, mk_pte_phys, unsigned long, pgprot_t)
 BTFIXUPDEF_CALL_CONST(pte_t, mk_pte_io, unsigned long, pgprot_t, int)
+BTFIXUPDEF_CALL_CONST(pgprot_t, pgprot_noncached, pgprot_t)
 
 #define mk_pte(page,pgprot) BTFIXUP_CALL(mk_pte)(page,pgprot)
 #define mk_pte_phys(page,pgprot) BTFIXUP_CALL(mk_pte_phys)(page,pgprot)
 #define mk_pte_io(page,pgprot,space) BTFIXUP_CALL(mk_pte_io)(page,pgprot,space)
 
+#define pgprot_noncached(pgprot) BTFIXUP_CALL(pgprot_noncached)(pgprot)
+
 BTFIXUPDEF_INT(pte_modify_mask)
 
-extern pte_t pte_modify(pte_t pte, pgprot_t newprot) __attribute_const__;
-extern __inline__ pte_t pte_modify(pte_t pte, pgprot_t newprot)
+static pte_t pte_modify(pte_t pte, pgprot_t newprot) __attribute_const__;
+static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
 	return __pte((pte_val(pte) & BTFIXUP_INT(pte_modify_mask)) |
 		pgprot_val(newprot));
@@ -328,9 +308,6 @@ BTFIXUPDEF_CALL(pte_t *, pte_offset_kernel, pmd_t *, unsigned long)
 #define pte_unmap(pte)		do{}while(0)
 #define pte_unmap_nested(pte)	do{}while(0)
 
-/* The permissions for pgprot_val to make a page mapped on the obio space */
-extern unsigned int pg_iobits;
-
 /* Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
  * hook is made available.
@@ -339,6 +316,7 @@ extern unsigned int pg_iobits;
 BTFIXUPDEF_CALL(void, set_pte, pte_t *, pte_t)
 
 #define set_pte(ptep,pteval) BTFIXUP_CALL(set_pte)(ptep,pteval)
+#define set_pte_at(mm,addr,ptep,pteval) set_pte(ptep,pteval)
 
 struct seq_file;
 BTFIXUPDEF_CALL(void, mmu_info, struct seq_file *)
@@ -402,13 +380,13 @@ extern struct ctx_list ctx_used;        /* Head of used contexts list */
 
 #define NO_CONTEXT     -1
 
-extern __inline__ void remove_from_ctx_list(struct ctx_list *entry)
+static inline void remove_from_ctx_list(struct ctx_list *entry)
 {
 	entry->next->prev = entry->prev;
 	entry->prev->next = entry->next;
 }
 
-extern __inline__ void add_to_ctx_list(struct ctx_list *head, struct ctx_list *entry)
+static inline void add_to_ctx_list(struct ctx_list *head, struct ctx_list *entry)
 {
 	entry->next = head;
 	(entry->prev = head->prev)->next = entry;
@@ -417,7 +395,7 @@ extern __inline__ void add_to_ctx_list(struct ctx_list *head, struct ctx_list *e
 #define add_to_free_ctxlist(entry) add_to_ctx_list(&ctx_free, entry)
 #define add_to_used_ctxlist(entry) add_to_ctx_list(&ctx_used, entry)
 
-extern __inline__ unsigned long
+static inline unsigned long
 __get_phys (unsigned long addr)
 {
 	switch (sparc_cpu_model){
@@ -432,7 +410,7 @@ __get_phys (unsigned long addr)
 	}
 }
 
-extern __inline__ int
+static inline int
 __get_iospace (unsigned long addr)
 {
 	switch (sparc_cpu_model){
@@ -453,8 +431,28 @@ extern unsigned long *sparc_valid_addr_bitmap;
 #define kern_addr_valid(addr) \
 	(test_bit(__pa((unsigned long)(addr))>>20, sparc_valid_addr_bitmap))
 
-extern int io_remap_page_range(struct vm_area_struct *vma, unsigned long from, unsigned long to,
-			       unsigned long size, pgprot_t prot, int space);
+extern int io_remap_pfn_range(struct vm_area_struct *vma,
+			      unsigned long from, unsigned long pfn,
+			      unsigned long size, pgprot_t prot);
+
+/*
+ * For sparc32&64, the pfn in io_remap_pfn_range() carries <iospace> in
+ * its high 4 bits.  These macros/functions put it there or get it from there.
+ */
+#define MK_IOSPACE_PFN(space, pfn)	(pfn | (space << (BITS_PER_LONG - 4)))
+#define GET_IOSPACE(pfn)		(pfn >> (BITS_PER_LONG - 4))
+#define GET_PFN(pfn)			(pfn & 0x0fffffffUL)
+
+#define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
+#define ptep_set_access_flags(__vma, __address, __ptep, __entry, __dirty) \
+({									  \
+	int __changed = !pte_same(*(__ptep), __entry);			  \
+	if (__changed) {						  \
+		set_pte_at((__vma)->vm_mm, (__address), __ptep, __entry); \
+		flush_tlb_page(__vma, __address);			  \
+	}								  \
+	(sparc_cpu_model == sun4c) || __changed;			  \
+})
 
 #include <asm-generic/pgtable.h>
 

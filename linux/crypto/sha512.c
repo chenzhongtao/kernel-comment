@@ -13,18 +13,13 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/crypto.h>
+#include <linux/types.h>
+#include <crypto/sha.h>
 
-#include <asm/scatterlist.h>
 #include <asm/byteorder.h>
-
-#define SHA384_DIGEST_SIZE 48
-#define SHA512_DIGEST_SIZE 64
-#define SHA384_HMAC_BLOCK_SIZE  96
-#define SHA512_HMAC_BLOCK_SIZE 128
 
 struct sha512_ctx {
 	u64 state[8];
@@ -83,29 +78,9 @@ static const u64 sha512_K[80] = {
 #define s0(x)       (RORu64(x, 1) ^ RORu64(x, 8) ^ (x >> 7))
 #define s1(x)       (RORu64(x,19) ^ RORu64(x,61) ^ (x >> 6))
 
-/* H* initial state for SHA-512 */
-#define H0         0x6a09e667f3bcc908ULL
-#define H1         0xbb67ae8584caa73bULL
-#define H2         0x3c6ef372fe94f82bULL
-#define H3         0xa54ff53a5f1d36f1ULL
-#define H4         0x510e527fade682d1ULL
-#define H5         0x9b05688c2b3e6c1fULL
-#define H6         0x1f83d9abfb41bd6bULL
-#define H7         0x5be0cd19137e2179ULL
-
-/* H'* initial state for SHA-384 */
-#define HP0 0xcbbb9d5dc1059ed8ULL
-#define HP1 0x629a292a367cd507ULL
-#define HP2 0x9159015a3070dd17ULL
-#define HP3 0x152fecd8f70e5939ULL
-#define HP4 0x67332667ffc00b31ULL
-#define HP5 0x8eb44a8768581511ULL
-#define HP6 0xdb0c2e0d64f98fa7ULL
-#define HP7 0x47b5481dbefa4fa4ULL
-
 static inline void LOAD_OP(int I, u64 *W, const u8 *input)
 {
-	W[I] = __be64_to_cpu( ((u64*)(input))[I] );
+	W[I] = __be64_to_cpu( ((__be64*)(input))[I] );
 }
 
 static inline void BLEND_OP(int I, u64 *W)
@@ -160,41 +135,39 @@ sha512_transform(u64 *state, u64 *W, const u8 *input)
 }
 
 static void
-sha512_init(void *ctx)
+sha512_init(struct crypto_tfm *tfm)
 {
-        struct sha512_ctx *sctx = ctx;
-	sctx->state[0] = H0;
-	sctx->state[1] = H1;
-	sctx->state[2] = H2;
-	sctx->state[3] = H3;
-	sctx->state[4] = H4;
-	sctx->state[5] = H5;
-	sctx->state[6] = H6;
-	sctx->state[7] = H7;
+	struct sha512_ctx *sctx = crypto_tfm_ctx(tfm);
+	sctx->state[0] = SHA512_H0;
+	sctx->state[1] = SHA512_H1;
+	sctx->state[2] = SHA512_H2;
+	sctx->state[3] = SHA512_H3;
+	sctx->state[4] = SHA512_H4;
+	sctx->state[5] = SHA512_H5;
+	sctx->state[6] = SHA512_H6;
+	sctx->state[7] = SHA512_H7;
 	sctx->count[0] = sctx->count[1] = sctx->count[2] = sctx->count[3] = 0;
-	memset(sctx->buf, 0, sizeof(sctx->buf));
 }
 
 static void
-sha384_init(void *ctx)
+sha384_init(struct crypto_tfm *tfm)
 {
-        struct sha512_ctx *sctx = ctx;
-        sctx->state[0] = HP0;
-        sctx->state[1] = HP1;
-        sctx->state[2] = HP2;
-        sctx->state[3] = HP3;
-        sctx->state[4] = HP4;
-        sctx->state[5] = HP5;
-        sctx->state[6] = HP6;
-        sctx->state[7] = HP7;
+	struct sha512_ctx *sctx = crypto_tfm_ctx(tfm);
+	sctx->state[0] = SHA384_H0;
+	sctx->state[1] = SHA384_H1;
+	sctx->state[2] = SHA384_H2;
+	sctx->state[3] = SHA384_H3;
+	sctx->state[4] = SHA384_H4;
+	sctx->state[5] = SHA384_H5;
+	sctx->state[6] = SHA384_H6;
+	sctx->state[7] = SHA384_H7;
         sctx->count[0] = sctx->count[1] = sctx->count[2] = sctx->count[3] = 0;
-        memset(sctx->buf, 0, sizeof(sctx->buf));
 }
 
 static void
-sha512_update(void *ctx, const u8 *data, unsigned int len)
+sha512_update(struct crypto_tfm *tfm, const u8 *data, unsigned int len)
 {
-        struct sha512_ctx *sctx = ctx;
+	struct sha512_ctx *sctx = crypto_tfm_ctx(tfm);
 
 	unsigned int i, index, part_len;
 
@@ -232,74 +205,42 @@ sha512_update(void *ctx, const u8 *data, unsigned int len)
 }
 
 static void
-sha512_final(void *ctx, u8 *hash)
+sha512_final(struct crypto_tfm *tfm, u8 *hash)
 {
-        struct sha512_ctx *sctx = ctx;
-	
+	struct sha512_ctx *sctx = crypto_tfm_ctx(tfm);
         static u8 padding[128] = { 0x80, };
-
-        u32 t;
-	u64 t2;
-        u8 bits[128];
+	__be64 *dst = (__be64 *)hash;
+	__be32 bits[4];
 	unsigned int index, pad_len;
-	int i, j;
-
-        index = pad_len = t = i = j = 0;
-        t2 = 0;
+	int i;
 
 	/* Save number of bits */
-	t = sctx->count[0];
-	bits[15] = t; t>>=8;
-	bits[14] = t; t>>=8;
-	bits[13] = t; t>>=8;
-	bits[12] = t; 
-	t = sctx->count[1];
-	bits[11] = t; t>>=8;
-	bits[10] = t; t>>=8;
-	bits[9 ] = t; t>>=8;
-	bits[8 ] = t; 
-	t = sctx->count[2];
-	bits[7 ] = t; t>>=8;
-	bits[6 ] = t; t>>=8;
-	bits[5 ] = t; t>>=8;
-	bits[4 ] = t; 
-	t = sctx->count[3];
-	bits[3 ] = t; t>>=8;
-	bits[2 ] = t; t>>=8;
-	bits[1 ] = t; t>>=8;
-	bits[0 ] = t; 
+	bits[3] = cpu_to_be32(sctx->count[0]);
+	bits[2] = cpu_to_be32(sctx->count[1]);
+	bits[1] = cpu_to_be32(sctx->count[2]);
+	bits[0] = cpu_to_be32(sctx->count[3]);
 
 	/* Pad out to 112 mod 128. */
 	index = (sctx->count[0] >> 3) & 0x7f;
 	pad_len = (index < 112) ? (112 - index) : ((128+112) - index);
-	sha512_update(sctx, padding, pad_len);
+	sha512_update(tfm, padding, pad_len);
 
 	/* Append length (before padding) */
-	sha512_update(sctx, bits, 16);
+	sha512_update(tfm, (const u8 *)bits, sizeof(bits));
 
 	/* Store state in digest */
-	for (i = j = 0; i < 8; i++, j += 8) {
-		t2 = sctx->state[i];
-		hash[j+7] = (char)t2 & 0xff; t2>>=8;
-		hash[j+6] = (char)t2 & 0xff; t2>>=8;
-		hash[j+5] = (char)t2 & 0xff; t2>>=8;
-		hash[j+4] = (char)t2 & 0xff; t2>>=8;
-		hash[j+3] = (char)t2 & 0xff; t2>>=8;
-		hash[j+2] = (char)t2 & 0xff; t2>>=8;
-		hash[j+1] = (char)t2 & 0xff; t2>>=8;
-		hash[j  ] = (char)t2 & 0xff;
-	}
-	
+	for (i = 0; i < 8; i++)
+		dst[i] = cpu_to_be64(sctx->state[i]);
+
 	/* Zeroize sensitive information. */
 	memset(sctx, 0, sizeof(struct sha512_ctx));
 }
 
-static void sha384_final(void *ctx, u8 *hash)
+static void sha384_final(struct crypto_tfm *tfm, u8 *hash)
 {
-        struct sha512_ctx *sctx = ctx;
         u8 D[64];
 
-        sha512_final(sctx, D);
+	sha512_final(tfm, D);
 
         memcpy(hash, D, 48);
         memset(D, 0, 64);
@@ -308,9 +249,10 @@ static void sha384_final(void *ctx, u8 *hash)
 static struct crypto_alg sha512 = {
         .cra_name       = "sha512",
         .cra_flags      = CRYPTO_ALG_TYPE_DIGEST,
-        .cra_blocksize  = SHA512_HMAC_BLOCK_SIZE,
+	.cra_blocksize  = SHA512_BLOCK_SIZE,
         .cra_ctxsize    = sizeof(struct sha512_ctx),
         .cra_module     = THIS_MODULE,
+	.cra_alignmask	= 3,
         .cra_list       = LIST_HEAD_INIT(sha512.cra_list),
         .cra_u          = { .digest = {
                                 .dia_digestsize = SHA512_DIGEST_SIZE,
@@ -323,8 +265,9 @@ static struct crypto_alg sha512 = {
 static struct crypto_alg sha384 = {
         .cra_name       = "sha384",
         .cra_flags      = CRYPTO_ALG_TYPE_DIGEST,
-        .cra_blocksize  = SHA384_HMAC_BLOCK_SIZE,
+	.cra_blocksize  = SHA384_BLOCK_SIZE,
         .cra_ctxsize    = sizeof(struct sha512_ctx),
+	.cra_alignmask	= 3,
         .cra_module     = THIS_MODULE,
         .cra_list       = LIST_HEAD_INIT(sha384.cra_list),
         .cra_u          = { .digest = {

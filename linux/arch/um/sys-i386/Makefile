@@ -1,34 +1,21 @@
-obj-y = bitops.o bugs.o checksum.o delay.o fault.o ksyms.o ldt.o ptrace.o \
-	ptrace_user.o semaphore.o signal.o sigcontext.o syscalls.o sysrq.o
+#
+# Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+#
 
-obj-$(CONFIG_HIGHMEM) += highmem.o
-obj-$(CONFIG_MODULES) += module.o
+obj-y = bug.o bugs.o checksum.o delay.o fault.o ksyms.o ldt.o ptrace.o \
+	ptrace_user.o setjmp.o signal.o stub.o stub_segv.o syscalls.o sysrq.o \
+	sys_call_table.o tls.o
 
-USER_OBJS := bugs.o ptrace_user.o sigcontext.o fault.o
-USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
+subarch-obj-y = lib/bitops_32.o lib/semaphore_32.o lib/string_32.o
+subarch-obj-$(CONFIG_HIGHMEM) += mm/highmem_32.o
+subarch-obj-$(CONFIG_MODULES) += kernel/module_32.o
 
-SYMLINKS = bitops.c semaphore.c highmem.c module.c
+USER_OBJS := bugs.o ptrace_user.o fault.o
 
-# this needs to be before the foreach, because clean-files does not accept
-# complete paths like $(src)/$f.
-clean-files := $(SYMLINKS)
+USER_OBJS += user-offsets.s
+extra-y += user-offsets.s
 
-SYMLINKS := $(foreach f,$(SYMLINKS),$(src)/$f)
+UNPROFILE_OBJS := stub_segv.o
+CFLAGS_stub_segv.o := $(CFLAGS_NO_HARDENING)
 
-bitops.c-dir = lib
-semaphore.c-dir = kernel
-highmem.c-dir = mm
-module.c-dir = kernel
-
-define make_link
-	-rm -f $1
-	ln -sf $(TOPDIR)/arch/i386/$($(notdir $1)-dir)/$(notdir $1) $1
-endef
-
-$(USER_OBJS) : %.o: %.c
-	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
-
-$(SYMLINKS): 
-	$(call make_link,$@)
-
-subdir- := util
+include arch/um/scripts/Makefile.rules

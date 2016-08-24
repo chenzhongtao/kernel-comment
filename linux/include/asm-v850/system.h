@@ -18,8 +18,6 @@
 #include <asm/ptrace.h>
 
 
-#define prepare_to_switch()	do { } while (0)
-
 /*
  * switch_to(n) should switch tasks to task ptr, first checking that
  * ptr isn't the current task, in which case it does nothing.
@@ -68,9 +66,7 @@ static inline int irqs_disabled (void)
 #define rmb()			mb ()
 #define wmb()			mb ()
 #define read_barrier_depends()	((void)0)
-#define set_rmb(var, value)	do { xchg (&var, value); } while (0)
-#define set_mb(var, value)	set_rmb (var, value)
-#define set_wmb(var, value)	do { var = value; wmb (); } while (0)
+#define set_mb(var, value)	do { xchg (&var, value); } while (0)
 
 #define smp_mb()	mb ()
 #define smp_rmb()	rmb ()
@@ -79,9 +75,8 @@ static inline int irqs_disabled (void)
 
 #define xchg(ptr, with) \
   ((__typeof__ (*(ptr)))__xchg ((unsigned long)(with), (ptr), sizeof (*(ptr))))
-#define tas(ptr) (xchg ((ptr), 1))
 
-extern inline unsigned long __xchg (unsigned long with,
+static inline unsigned long __xchg (unsigned long with,
 				    __volatile__ void *ptr, int size)
 {
 	unsigned long tmp, flags;
@@ -107,5 +102,7 @@ extern inline unsigned long __xchg (unsigned long with,
 
 	return tmp;
 }
+
+#define arch_align_stack(x) (x)
 
 #endif /* __V850_SYSTEM_H__ */

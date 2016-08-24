@@ -8,20 +8,31 @@
 
 #include "flask.h"
 
-int avc_ss_grant(u32 ssid, u32 tsid, u16 tclass, u32 perms, u32 seqno);
-
-int avc_ss_try_revoke(u32 ssid, u32 tsid, u16 tclass, u32 perms, u32 seqno,
-		      u32 *out_retained);
-
-int avc_ss_revoke(u32 ssid, u32 tsid, u16 tclass, u32 perms, u32 seqno);
-
 int avc_ss_reset(u32 seqno);
 
-int avc_ss_set_auditallow(u32 ssid, u32 tsid, u16 tclass, u32 perms,
-			  u32 seqno, u32 enable);
+struct av_perm_to_string
+{
+	u16 tclass;
+	u32 value;
+	const char *name;
+};
 
-int avc_ss_set_auditdeny(u32 ssid, u32 tsid, u16 tclass, u32 perms,
-			 u32 seqno, u32 enable);
+struct av_inherit
+{
+	u16 tclass;
+	const char **common_pts;
+	u32 common_base;
+};
+
+struct selinux_class_perm
+{
+	const struct av_perm_to_string *av_perm_to_string;
+	u32 av_pts_len;
+	const char **class_to_string;
+	u32 cts_len;
+	const struct av_inherit *av_inherit;
+	u32 av_inherit_len;
+};
 
 #endif /* _SELINUX_AVC_SS_H_ */
 

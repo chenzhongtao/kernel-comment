@@ -1,4 +1,3 @@
-#define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -7,6 +6,7 @@
 #include <linux/romfs_fs.h>
 #include <linux/initrd.h>
 #include <linux/sched.h>
+#include <linux/freezer.h>
 
 #include "do_mounts.h"
 
@@ -35,16 +35,16 @@ static int __init do_linuxrc(void * shell)
 	(void) sys_open("/dev/console",O_RDWR,0);
 	(void) sys_dup(0);
 	(void) sys_dup(0);
-	return execve(shell, argv, envp_init);
+	return kernel_execve(shell, argv, envp_init);
 }
 
 static void __init handle_initrd(void)
 {
 	int error;
-	int i, pid;
+	int pid;
 
 	real_root_dev = new_encode_dev(ROOT_DEV);
-	create_dev("/dev/root.old", Root_RAM0, NULL);
+	create_dev("/dev/root.old", Root_RAM0);
 	/* mount initrd on rootfs' /root */
 	mount_block_root("/dev/root.old", root_mountflags & ~MS_RDONLY);
 	sys_mkdir("/old", 0700);
@@ -54,13 +54,19 @@ static void __init handle_initrd(void)
 	sys_chdir("/root");
 	sys_mount(".", "/", NULL, MS_MOVE, NULL);
 	sys_chroot(".");
-	mount_devfs_fs ();
+
+	/*
+	 * In case that a resume from disk is carried out by linuxrc or one of
+	 * its children, we need to tell the freezer not to wait for us.
+	 */
+	current->flags |= PF_FREEZER_SKIP;
 
 	pid = kernel_thread(do_linuxrc, "/linuxrc", SIGCHLD);
-	if (pid > 0) {
-		while (pid != sys_wait4(-1, &i, 0, NULL))
+	if (pid > 0)
+		while (pid != sys_wait4(-1, NULL, 0, NULL))
 			yield();
-	}
+
+	current->flags &= ~PF_FREEZER_SKIP;
 
 	/* move initrd to rootfs' /old */
 	sys_fchdir(old_fd);
@@ -70,7 +76,6 @@ static void __init handle_initrd(void)
 	sys_chroot(".");
 	sys_close(old_fd);
 	sys_close(root_fd);
-	umount_devfs("/old/dev");
 
 	if (new_decode_dev(real_root_dev) == Root_RAM0) {
 		sys_chdir("/old");
@@ -86,7 +91,10 @@ static void __init handle_initrd(void)
 		printk("okay\n");
 	else {
 		int fd = sys_open("/dev/root.old", O_RDWR, 0);
-		printk("failed\n");
+		if (error == -ENOENT)
+			printk("/initrd does not exist. Ignored.\n");
+		else
+			printk("failed\n");
 		printk(KERN_NOTICE "Unmounting old root\n");
 		sys_umount("/old", MNT_DETACH);
 		printk(KERN_NOTICE "Trying to free ramdisk memory ... ");
@@ -103,7 +111,7 @@ static void __init handle_initrd(void)
 int __init initrd_load(void)
 {
 	if (mount_initrd) {
-		create_dev("/dev/ram", Root_RAM0, NULL);
+		create_dev("/dev/ram", Root_RAM0);
 		/*
 		 * Load the initrd data into /dev/ram0. Execute it as initrd
 		 * unless /dev/ram0 is supposed to be our actual root device,

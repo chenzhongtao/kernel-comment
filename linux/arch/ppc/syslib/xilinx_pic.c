@@ -1,6 +1,4 @@
 /*
- * arch/ppc/syslib/xilinx_pic.c
- *
  * Interrupt controller driver for Xilinx Virtex-II Pro.
  *
  * Author: MontaVista Software, Inc.
@@ -15,8 +13,9 @@
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <asm/io.h>
-#include <asm/xparameters.h>
+#include <platforms/4xx/xparameters/xparameters.h>
 #include <asm/ibm4xx.h>
+#include <asm/machdep.h>
 
 /* No one else should require these constants, so define them locally here. */
 #define ISR 0			/* Interrupt Status Register */
@@ -79,18 +78,15 @@ xilinx_intc_end(unsigned int irq)
 }
 
 static struct hw_interrupt_type xilinx_intc = {
-	"Xilinx Interrupt Controller",
-	NULL,
-	NULL,
-	xilinx_intc_enable,
-	xilinx_intc_disable,
-	xilinx_intc_disable_and_ack,
-	xilinx_intc_end,
-	0
+	.typename = "Xilinx Interrupt Controller",
+	.enable = xilinx_intc_enable,
+	.disable = xilinx_intc_disable,
+	.ack = xilinx_intc_disable_and_ack,
+	.end = xilinx_intc_end,
 };
 
 int
-xilinx_pic_get_irq(struct pt_regs *regs)
+xilinx_pic_get_irq(void)
 {
 	int irq;
 
@@ -114,6 +110,14 @@ ppc4xx_pic_init(void)
 {
 	int i;
 
+	/*
+	 * NOTE: The assumption here is that NR_IRQS is 32 or less
+	 * (NR_IRQS is 32 for PowerPC 405 cores by default).
+	 */
+#if (NR_IRQS > 32)
+#error NR_IRQS > 32 not supported
+#endif
+
 #if XPAR_XINTC_USE_DCR == 0
 	intc = ioremap(XPAR_INTC_0_BASEADDR, 32);
 
@@ -126,7 +130,7 @@ ppc4xx_pic_init(void)
 
 	/*
 	 * Disable all external interrupts until they are
-	 * explicity requested.
+	 * explicitly requested.
 	 */
 	intc_out_be32(intc + IER, 0);
 
@@ -138,6 +142,12 @@ ppc4xx_pic_init(void)
 
 	ppc_md.get_irq = xilinx_pic_get_irq;
 
-	for (i = 0; i < NR_IRQS; ++i)
-		irq_desc[i].handler = &xilinx_intc;
+	for (i = 0; i < NR_IRQS; ++i) {
+		irq_desc[i].chip = &xilinx_intc;
+
+		if (XPAR_INTC_0_KIND_OF_INTR & (0x00000001 << i))
+			irq_desc[i].status &= ~IRQ_LEVEL;
+		else
+			irq_desc[i].status |= IRQ_LEVEL;
+	}
 }

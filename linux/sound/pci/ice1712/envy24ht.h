@@ -4,7 +4,7 @@
 /*
  *   ALSA driver for ICEnsemble VT1724 (Envy24)
  *
- *	Copyright (c) 2000 Jaroslav Kysela <perex@suse.cz>
+ *	Copyright (c) 2000 Jaroslav Kysela <perex@perex.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -106,7 +106,7 @@ enum {
 #define VT1724_REG_I2C_BYTE_ADDR	0x11	/* byte */
 #define VT1724_REG_I2C_DATA		0x12	/* byte */
 #define VT1724_REG_I2C_CTRL		0x13	/* byte */
-#define   VT1724_I2C_EEPROM		0x80	/* EEPROM exists */
+#define   VT1724_I2C_EEPROM		0x80	/* 1 = EEPROM exists */
 #define   VT1724_I2C_BUSY		0x01	/* busy bit */
 
 #define VT1724_REG_GPIO_DATA	0x14	/* word */
@@ -209,7 +209,7 @@ enum {
 #define VT1724_MT_PDMA1_COUNT		0x76	/* word */
 
 
-unsigned char snd_vt1724_read_i2c(ice1712_t *ice, unsigned char dev, unsigned char addr);
-void snd_vt1724_write_i2c(ice1712_t *ice, unsigned char dev, unsigned char addr, unsigned char data);
+unsigned char snd_vt1724_read_i2c(struct snd_ice1712 *ice, unsigned char dev, unsigned char addr);
+void snd_vt1724_write_i2c(struct snd_ice1712 *ice, unsigned char dev, unsigned char addr, unsigned char data);
 
 #endif /* __SOUND_VT1724_H */

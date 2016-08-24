@@ -9,7 +9,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
@@ -98,7 +97,7 @@ static int b1pci_probe(struct capicardparams *p, struct pci_dev *pdev)
 	b1_reset(card->port);
 	b1_getrevision(card);
 	
-	retval = request_irq(card->irq, b1_interrupt, SA_SHIRQ, card->name, card);
+	retval = request_irq(card->irq, b1_interrupt, IRQF_SHARED, card->name, card);
 	if (retval) {
 		printk(KERN_ERR "b1pci: unable to get IRQ %d.\n", card->irq);
 		retval = -EBUSY;
@@ -235,7 +234,7 @@ static int b1pciv4_probe(struct capicardparams *p, struct pci_dev *pdev)
 	b1dma_reset(card);
 	b1_getrevision(card);
 
-	retval = request_irq(card->irq, b1dma_interrupt, SA_SHIRQ, card->name, card);
+	retval = request_irq(card->irq, b1dma_interrupt, IRQF_SHARED, card->name, card);
 	if (retval) {
 		printk(KERN_ERR "b1pci: unable to get IRQ %d.\n",
 		       card->irq);
@@ -391,7 +390,7 @@ static int __init b1pci_init(void)
 		strcpy(rev, "1.0");
 
 
-	err = pci_module_init(&b1pci_pci_driver);
+	err = pci_register_driver(&b1pci_pci_driver);
 	if (!err) {
 		strlcpy(capi_driver_b1pci.revision, rev, 32);
 		register_capi_driver(&capi_driver_b1pci);

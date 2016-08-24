@@ -1,4 +1,4 @@
-/* 
+/*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (C) 2000-2001 Qualcomm Incorporated
 
@@ -12,32 +12,29 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
 /* Bluetooth address family and sockets. */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/types.h>
 #include <linux/list.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/major.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/init.h>
 #include <linux/poll.h>
-#include <linux/proc_fs.h>
 #include <net/sock.h>
 
 #if defined(CONFIG_KMOD)
@@ -51,46 +48,59 @@
 #define BT_DBG(D...)
 #endif
 
-#define VERSION "2.7"
-
-struct proc_dir_entry *proc_bt;
-EXPORT_SYMBOL(proc_bt);
+#define VERSION "2.11"
 
 /* Bluetooth sockets */
 #define BT_MAX_PROTO	8
 static struct net_proto_family *bt_proto[BT_MAX_PROTO];
-
-static kmem_cache_t *bt_sock_cache;
+static DEFINE_RWLOCK(bt_proto_lock);
 
 int bt_sock_register(int proto, struct net_proto_family *ops)
 {
+	int err = 0;
+
 	if (proto < 0 || proto >= BT_MAX_PROTO)
 		return -EINVAL;
 
-	if (bt_proto[proto])
-		return -EEXIST;
+	write_lock(&bt_proto_lock);
 
-	bt_proto[proto] = ops;
-	return 0;
+	if (bt_proto[proto])
+		err = -EEXIST;
+	else
+		bt_proto[proto] = ops;
+
+	write_unlock(&bt_proto_lock);
+
+	return err;
 }
 EXPORT_SYMBOL(bt_sock_register);
 
 int bt_sock_unregister(int proto)
 {
+	int err = 0;
+
 	if (proto < 0 || proto >= BT_MAX_PROTO)
 		return -EINVAL;
 
-	if (!bt_proto[proto])
-		return -ENOENT;
+	write_lock(&bt_proto_lock);
 
-	bt_proto[proto] = NULL;
-	return 0;
+	if (!bt_proto[proto])
+		err = -ENOENT;
+	else
+		bt_proto[proto] = NULL;
+
+	write_unlock(&bt_proto_lock);
+
+	return err;
 }
 EXPORT_SYMBOL(bt_sock_unregister);
 
-static int bt_sock_create(struct socket *sock, int proto)
+static int bt_sock_create(struct net *net, struct socket *sock, int proto)
 {
-	int err = 0;
+	int err;
+
+	if (net != &init_net)
+		return -EAFNOSUPPORT;
 
 	if (proto < 0 || proto >= BT_MAX_PROTO)
 		return -EINVAL;
@@ -100,43 +110,20 @@ static int bt_sock_create(struct socket *sock, int proto)
 		request_module("bt-proto-%d", proto);
 	}
 #endif
+
 	err = -EPROTONOSUPPORT;
+
+	read_lock(&bt_proto_lock);
+
 	if (bt_proto[proto] && try_module_get(bt_proto[proto]->owner)) {
-		err = bt_proto[proto]->create(sock, proto);
+		err = bt_proto[proto]->create(net, sock, proto);
 		module_put(bt_proto[proto]->owner);
 	}
-	return err; 
+
+	read_unlock(&bt_proto_lock);
+
+	return err;
 }
-
-struct sock *bt_sock_alloc(struct socket *sock, int proto, int pi_size, int prio)
-{
-	struct sock *sk;
-	void *pi;
-
-	sk = sk_alloc(PF_BLUETOOTH, prio, sizeof(struct bt_sock), bt_sock_cache);
-	if (!sk)
-		return NULL;
-
-	if (pi_size) {
-		pi = kmalloc(pi_size, prio);
-		if (!pi) {
-			sk_free(sk);
-			return NULL;
-		}
-		memset(pi, 0, pi_size);
-		sk->sk_protinfo = pi;
-	}
-
-	sock_init_data(sock, sk);
-	INIT_LIST_HEAD(&bt_sk(sk)->accept_q);
-
-	sk->sk_zapped   = 0;
-	sk->sk_protocol = proto;
-	sk->sk_state    = BT_OPEN;
-
-	return sk;
-}
-EXPORT_SYMBOL(bt_sock_alloc);
 
 void bt_sock_link(struct bt_sock_list *l, struct sock *sk)
 {
@@ -237,7 +224,7 @@ int bt_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 		copied = len;
 	}
 
-	skb->h.raw = skb->data;
+	skb_reset_transport_header(skb);
 	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 
 	skb_free_datagram(sk, skb);
@@ -275,10 +262,13 @@ unsigned int bt_sock_poll(struct file * file, struct socket *sock, poll_table *w
 	if (sk->sk_err || !skb_queue_empty(&sk->sk_error_queue))
 		mask |= POLLERR;
 
+	if (sk->sk_shutdown & RCV_SHUTDOWN)
+		mask |= POLLRDHUP;
+
 	if (sk->sk_shutdown == SHUTDOWN_MASK)
 		mask |= POLLHUP;
 
-	if (!skb_queue_empty(&sk->sk_receive_queue) || 
+	if (!skb_queue_empty(&sk->sk_receive_queue) ||
 			(sk->sk_shutdown & RCV_SHUTDOWN))
 		mask |= POLLIN | POLLRDNORM;
 
@@ -311,7 +301,7 @@ int bt_sock_wait_state(struct sock *sk, int state, unsigned long timeo)
 		set_current_state(TASK_INTERRUPTIBLE);
 
 		if (!timeo) {
-			err = -EAGAIN;
+			err = -EINPROGRESS;
 			break;
 		}
 
@@ -324,10 +314,9 @@ int bt_sock_wait_state(struct sock *sk, int state, unsigned long timeo)
 		timeo = schedule_timeout(timeo);
 		lock_sock(sk);
 
-		if (sk->sk_err) {
-			err = sock_error(sk);
+		err = sock_error(sk);
+		if (err)
 			break;
-		}
 	}
 	set_current_state(TASK_RUNNING);
 	remove_wait_queue(sk->sk_sleep, &wait);
@@ -341,35 +330,23 @@ static struct net_proto_family bt_sock_family_ops = {
 	.create	= bt_sock_create,
 };
 
-extern int hci_sock_init(void);
-extern int hci_sock_cleanup(void);
-
-extern int bt_sysfs_init(void);
-extern int bt_sysfs_cleanup(void);
-
 static int __init bt_init(void)
 {
+	int err;
+
 	BT_INFO("Core ver %s", VERSION);
 
-	proc_bt = proc_mkdir("bluetooth", NULL);
-	if (proc_bt)
-		proc_bt->owner = THIS_MODULE;
+	err = bt_sysfs_init();
+	if (err < 0)
+		return err;
 
-	/* Init socket cache */
-	bt_sock_cache = kmem_cache_create("bt_sock",
-			sizeof(struct bt_sock), 0,
-			SLAB_HWCACHE_ALIGN, NULL, NULL);
-
-	if (!bt_sock_cache) {
-		BT_ERR("Socket cache creation failed");
-		return -ENOMEM;
+	err = sock_register(&bt_sock_family_ops);
+	if (err < 0) {
+		bt_sysfs_cleanup();
+		return err;
 	}
 
-	sock_register(&bt_sock_family_ops);
-
 	BT_INFO("HCI device and connection manager initialized");
-
-	bt_sysfs_init();
 
 	hci_sock_init();
 
@@ -380,12 +357,9 @@ static void __exit bt_exit(void)
 {
 	hci_sock_cleanup();
 
-	bt_sysfs_cleanup();
-
 	sock_unregister(PF_BLUETOOTH);
-	kmem_cache_destroy(bt_sock_cache);
 
-	remove_proc_entry("bluetooth", NULL);
+	bt_sysfs_cleanup();
 }
 
 subsys_initcall(bt_init);

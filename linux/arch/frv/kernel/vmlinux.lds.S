@@ -44,13 +44,7 @@ SECTIONS
 
   __initcall_start = .;
   .initcall.init : {
-	*(.initcall1.init)
-	*(.initcall2.init)
-	*(.initcall3.init)
-	*(.initcall4.init)
-	*(.initcall5.init)
-	*(.initcall6.init)
-	*(.initcall7.init)
+	INITCALLS
   }
   __initcall_end = .;
   __con_initcall_start = .;
@@ -63,14 +57,14 @@ SECTIONS
   __alt_instructions_end = .;
  .altinstr_replacement : { *(.altinstr_replacement) }
 
-  __per_cpu_start = .;
-  .data.percpu  : { *(.data.percpu) }
-  __per_cpu_end = .;
+  PERCPU(4096)
 
+#ifdef CONFIG_BLK_DEV_INITRD
   . = ALIGN(4096);
   __initramfs_start = .;
   .init.ramfs : { *(.init.ramfs) }
   __initramfs_end = .;
+#endif
 
   . = ALIGN(THREAD_SIZE);
   __init_end = .;
@@ -82,6 +76,12 @@ SECTIONS
 	  *(.data.init_task)
   }
 
+  . = ALIGN(4096);
+  .data.page_aligned : { *(.data.idt) }
+
+  . = ALIGN(L1_CACHE_BYTES);
+  .data.cacheline_aligned : { *(.data.cacheline_aligned) }
+
   .trap : {
 	/* trap table management - read entry-table.S before modifying */
 	. = ALIGN(8192);
@@ -92,26 +92,25 @@ SECTIONS
 	*(.trap.break)
   }
 
-  . = ALIGN(4096);
-  .data.page_aligned : { *(.data.idt) }
-
-  . = ALIGN(L1_CACHE_BYTES);
-  .data.cacheline_aligned : { *(.data.cacheline_aligned) }
-
   /* Text and read-only data */
   . = ALIGN(4);
   _text = .;
   _stext = .;
   .text : {
-	*(
-		.text.start .text .text.*
+	*(.text.start)
+	*(.text.entry)
+	*(.text.break)
+	*(.text.tlbmiss)
+	TEXT_TEXT
+	SCHED_TEXT
+	LOCK_TEXT
 #ifdef CONFIG_DEBUG_INFO
+	*(
 	.init.text
 	.exit.text
 	.exitcall.exit
-#endif
 	)
-	SCHED_TEXT
+#endif
 	*(.fixup)
 	*(.gnu.warning)
 	*(.exitcall.exit)
@@ -137,7 +136,8 @@ SECTIONS
 
   _sdata = .;
   .data : {			/* Data */
-	*(.data .data.*)
+	DATA_DATA
+	*(.data.*)
 	*(.exit.data)
 	CONSTRUCTORS
 	}

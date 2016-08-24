@@ -1,13 +1,11 @@
-/* 
+/*
  * File...........: linux/drivers/s390/block/dasd_fba.c
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
  * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
  *
- * $Revision: 1.39 $
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <asm/debug.h>
@@ -46,8 +44,8 @@ struct dasd_fba_private {
 };
 
 static struct ccw_device_id dasd_fba_ids[] = {
-	{ CCW_DEVICE_DEVTYPE (0x6310, 0, 0x9336, 0), driver_info: 0x1},
-	{ CCW_DEVICE_DEVTYPE (0x3880, 0, 0x3370, 0), driver_info: 0x2},
+	{ CCW_DEVICE_DEVTYPE (0x6310, 0, 0x9336, 0), .driver_info = 0x1},
+	{ CCW_DEVICE_DEVTYPE (0x3880, 0, 0x3370, 0), .driver_info = 0x2},
 	{ /* end of list */ },
 };
 
@@ -57,19 +55,13 @@ static struct ccw_driver dasd_fba_driver; /* see below */
 static int
 dasd_fba_probe(struct ccw_device *cdev)
 {
-	int ret;
-
-	ret = dasd_generic_probe (cdev, &dasd_fba_discipline);
-	if (ret)
-		return ret;
-	ccw_device_set_options(cdev, CCWDEV_DO_PATHGROUP);
-	return 0;
+	return dasd_generic_probe(cdev, &dasd_fba_discipline);
 }
 
 static int
 dasd_fba_set_online(struct ccw_device *cdev)
 {
-	return dasd_generic_set_online (cdev, &dasd_fba_discipline);
+	return dasd_generic_set_online(cdev, &dasd_fba_discipline);
 }
 
 static struct ccw_driver dasd_fba_driver = {
@@ -83,7 +75,7 @@ static struct ccw_driver dasd_fba_driver = {
 	.notify      = dasd_generic_notify,
 };
 
-static inline void
+static void
 define_extent(struct ccw1 * ccw, struct DE_fba_data *data, int rw,
 	      int blksize, int beg, int nr)
 {
@@ -103,7 +95,7 @@ define_extent(struct ccw1 * ccw, struct DE_fba_data *data, int rw,
 	data->ext_end = nr - 1;
 }
 
-static inline void
+static void
 locate_record(struct ccw1 * ccw, struct LO_fba_data *data, int rw,
 	      int block_nr, int block_ct)
 {
@@ -126,13 +118,13 @@ static int
 dasd_fba_check_characteristics(struct dasd_device *device)
 {
 	struct dasd_fba_private *private;
-	struct ccw_device *cdev = device->cdev;	
+	struct ccw_device *cdev = device->cdev;
 	void *rdc_data;
 	int rc;
 
 	private = (struct dasd_fba_private *) device->private;
 	if (private == NULL) {
-		private = kmalloc(sizeof(struct dasd_fba_private), GFP_KERNEL);
+		private = kzalloc(sizeof(struct dasd_fba_private), GFP_KERNEL);
 		if (private == NULL) {
 			DEV_MESSAGE(KERN_WARNING, device, "%s",
 				    "memory allocation failed for private "
@@ -143,7 +135,7 @@ dasd_fba_check_characteristics(struct dasd_device *device)
 	}
 	/* Read Device Characteristics */
 	rdc_data = (void *) &(private->rdc_data);
-	rc = read_dev_chars(device->cdev, &rdc_data, 32);
+	rc = dasd_generic_read_dev_chars(device, "FBA ", &rdc_data, 32);
 	if (rc) {
 		DEV_MESSAGE(KERN_WARNING, device,
 			    "Read device characteristics returned error %d",
@@ -205,7 +197,7 @@ dasd_fba_examine_error(struct dasd_ccw_req * cqr, struct irb * irb)
 	if (irb->scsw.cstat == 0x00 &&
 	    irb->scsw.dstat == (DEV_STAT_CHN_END | DEV_STAT_DEV_END))
 		return dasd_era_none;
-	
+
 	cdev = device->cdev;
 	switch (cdev->id.dev_type) {
 	case 0x3370:
@@ -242,14 +234,13 @@ dasd_fba_build_cp(struct dasd_device * device, struct request *req)
 	struct LO_fba_data *LO_data;
 	struct dasd_ccw_req *cqr;
 	struct ccw1 *ccw;
-	struct bio *bio;
+	struct req_iterator iter;
 	struct bio_vec *bv;
 	char *dst;
 	int count, cidaw, cplength, datasize;
 	sector_t recid, first_rec, last_rec;
 	unsigned int blksize, off;
 	unsigned char cmd;
-	int i;
 
 	private = (struct dasd_fba_private *) device->private;
 	if (rq_data_dir(req) == READ) {
@@ -265,18 +256,15 @@ dasd_fba_build_cp(struct dasd_device * device, struct request *req)
 	/* Check struct bio and count the number of blocks for the request. */
 	count = 0;
 	cidaw = 0;
-	rq_for_each_bio(bio, req) {
-		bio_for_each_segment(bv, bio, i) {
-			if (bv->bv_len & (blksize - 1))
-				/* Fba can only do full blocks. */
-				return ERR_PTR(-EINVAL);
-			count += bv->bv_len >> (device->s2b_shift + 9);
-#if defined(CONFIG_ARCH_S390X)
-			if (idal_is_needed (page_address(bv->bv_page),
-					    bv->bv_len))
-				cidaw += bv->bv_len / blksize;
+	rq_for_each_segment(bv, req, iter) {
+		if (bv->bv_len & (blksize - 1))
+			/* Fba can only do full blocks. */
+			return ERR_PTR(-EINVAL);
+		count += bv->bv_len >> (device->s2b_shift + 9);
+#if defined(CONFIG_64BIT)
+		if (idal_is_needed (page_address(bv->bv_page), bv->bv_len))
+			cidaw += bv->bv_len / blksize;
 #endif
-		}
 	}
 	/* Paranoia. */
 	if (count != last_rec - first_rec + 1)
@@ -312,11 +300,11 @@ dasd_fba_build_cp(struct dasd_device * device, struct request *req)
 		locate_record(ccw++, LO_data++, rq_data_dir(req), 0, count);
 	}
 	recid = first_rec;
-	rq_for_each_bio(bio, req) bio_for_each_segment(bv, bio, i) {
+	rq_for_each_segment(bv, req, iter) {
 		dst = page_address(bv->bv_page) + bv->bv_offset;
 		if (dasd_page_cache) {
 			char *copy = kmem_cache_alloc(dasd_page_cache,
-						      SLAB_DMA | __GFP_NOWARN);
+						      GFP_DMA | __GFP_NOWARN);
 			if (copy && rq_data_dir(req) == WRITE)
 				memcpy(copy + bv->bv_offset, dst, bv->bv_len);
 			if (copy)
@@ -352,8 +340,12 @@ dasd_fba_build_cp(struct dasd_device * device, struct request *req)
 			recid++;
 		}
 	}
+	if (req->cmd_flags & REQ_FAILFAST)
+		set_bit(DASD_CQR_FLAGS_FAILFAST, &cqr->flags);
 	cqr->device = device;
 	cqr->expires = 5 * 60 * HZ;	/* 5 minutes */
+	cqr->retries = 32;
+	cqr->buildclk = get_clock();
 	cqr->status = DASD_CQR_FILLED;
 	return cqr;
 }
@@ -363,11 +355,11 @@ dasd_fba_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 {
 	struct dasd_fba_private *private;
 	struct ccw1 *ccw;
-	struct bio *bio;
+	struct req_iterator iter;
 	struct bio_vec *bv;
 	char *dst, *cda;
 	unsigned int blksize, off;
-	int i, status;
+	int status;
 
 	if (!dasd_page_cache)
 		goto out;
@@ -378,7 +370,7 @@ dasd_fba_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 	ccw++;
 	if (private->rdc_data.mode.bits.data_chain != 0)
 		ccw++;
-	rq_for_each_bio(bio, req) bio_for_each_segment(bv, bio, i) {
+	rq_for_each_segment(bv, req, iter) {
 		dst = page_address(bv->bv_page) + bv->bv_offset;
 		for (off = 0; off < bv->bv_len; off += blksize) {
 			/* Skip locate record. */
@@ -536,7 +528,7 @@ dasd_fba_dump_sense(struct dasd_device *device, struct dasd_ccw_req * req,
  * 8192 bytes (=2 pages). For 64 bit one dasd_mchunkt_t structure has
  * 24 bytes, the struct dasd_ccw_req has 136 bytes and each block can use
  * up to 16 bytes (8 for the ccw and 8 for the idal pointer). In
- * addition we have one define extent ccw + 16 bytes of data and a 
+ * addition we have one define extent ccw + 16 bytes of data and a
  * locate record ccw for each block (stupid devices!) + 16 bytes of data.
  * That makes:
  * (8192 - 24 - 136 - 8 - 16) / 40 = 200.2 blocks at maximum.
@@ -566,16 +558,8 @@ static struct dasd_discipline dasd_fba_discipline = {
 static int __init
 dasd_fba_init(void)
 {
-	int ret;
-
 	ASCEBC(dasd_fba_discipline.ebcname, 4);
-
-	ret = ccw_driver_register(&dasd_fba_driver);
-	if (ret)
-		return ret;
-
-	dasd_generic_auto_online(&dasd_fba_driver);
-	return 0;
+	return ccw_driver_register(&dasd_fba_driver);
 }
 
 static void __exit
@@ -586,22 +570,3 @@ dasd_fba_cleanup(void)
 
 module_init(dasd_fba_init);
 module_exit(dasd_fba_cleanup);
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4 
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: 1
- * tab-width: 8
- * End:
- */

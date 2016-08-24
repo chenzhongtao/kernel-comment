@@ -8,77 +8,116 @@
  * directory of the kernel sources for details.
  */
 
+#include <linux/bitmap.h>
 #include <linux/kernel.h>
-#include <linux/config.h>
 #include <linux/list.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
-#include <linux/interrupt.h>
-#include <linux/kmod.h>
-#include <linux/completion.h>
 #include <linux/delay.h>
-#include <linux/pci.h>
+#include <linux/kthread.h>
+#include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/mutex.h>
+#include <linux/freezer.h>
 #include <asm/atomic.h>
+#include <asm/semaphore.h>
 
-#include "ieee1394_types.h"
-#include "ieee1394.h"
-#include "hosts.h"
-#include "ieee1394_transactions.h"
-#include "highlevel.h"
 #include "csr.h"
+#include "highlevel.h"
+#include "hosts.h"
+#include "ieee1394.h"
+#include "ieee1394_core.h"
+#include "ieee1394_hotplug.h"
+#include "ieee1394_types.h"
+#include "ieee1394_transactions.h"
 #include "nodemgr.h"
 
-static int ignore_drivers = 0;
-module_param(ignore_drivers, int, 0444);
+static int ignore_drivers;
+module_param(ignore_drivers, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ignore_drivers, "Disable automatic probing for drivers.");
 
 struct nodemgr_csr_info {
 	struct hpsb_host *host;
 	nodeid_t nodeid;
 	unsigned int generation;
+	unsigned int speed_unverified:1;
 };
 
 
-static char *nodemgr_find_oui_name(int oui)
+/*
+ * Correct the speed map entry.  This is necessary
+ *  - for nodes with link speed < phy speed,
+ *  - for 1394b nodes with negotiated phy port speed < IEEE1394_SPEED_MAX.
+ * A possible speed is determined by trial and error, using quadlet reads.
+ */
+static int nodemgr_check_speed(struct nodemgr_csr_info *ci, u64 addr,
+			       quadlet_t *buffer)
 {
-#ifdef CONFIG_IEEE1394_OUI_DB
-	extern struct oui_list_struct {
-		int oui;
-		char *name;
-	} oui_list[];
-	int i;
+	quadlet_t q;
+	u8 i, *speed, old_speed, good_speed;
+	int error;
 
-	for (i = 0; oui_list[i].name; i++)
-		if (oui_list[i].oui == oui)
-			return oui_list[i].name;
-#endif
-	return NULL;
+	speed = &(ci->host->speed[NODEID_TO_NODE(ci->nodeid)]);
+	old_speed = *speed;
+	good_speed = IEEE1394_SPEED_MAX + 1;
+
+	/* Try every speed from S100 to old_speed.
+	 * If we did it the other way around, a too low speed could be caught
+	 * if the retry succeeded for some other reason, e.g. because the link
+	 * just finished its initialization. */
+	for (i = IEEE1394_SPEED_100; i <= old_speed; i++) {
+		*speed = i;
+		error = hpsb_read(ci->host, ci->nodeid, ci->generation, addr,
+				  &q, sizeof(quadlet_t));
+		if (error)
+			break;
+		*buffer = q;
+		good_speed = i;
+	}
+	if (good_speed <= IEEE1394_SPEED_MAX) {
+		HPSB_DEBUG("Speed probe of node " NODE_BUS_FMT " yields %s",
+			   NODE_BUS_ARGS(ci->host, ci->nodeid),
+			   hpsb_speedto_str[good_speed]);
+		*speed = good_speed;
+		ci->speed_unverified = 0;
+		return 0;
+	}
+	*speed = old_speed;
+	return error;
 }
 
-
 static int nodemgr_bus_read(struct csr1212_csr *csr, u64 addr, u16 length,
-                            void *buffer, void *__ci)
+			    void *buffer, void *__ci)
 {
 	struct nodemgr_csr_info *ci = (struct nodemgr_csr_info*)__ci;
-	int i, ret = 0;
+	int i, error;
 
-	for (i = 0; i < 3; i++) {
-		ret = hpsb_read(ci->host, ci->nodeid, ci->generation, addr,
-				buffer, length);
-		if (!ret)
+	for (i = 1; ; i++) {
+		error = hpsb_read(ci->host, ci->nodeid, ci->generation, addr,
+				  buffer, length);
+		if (!error) {
+			ci->speed_unverified = 0;
+			break;
+		}
+		/* Give up after 3rd failure. */
+		if (i == 3)
 			break;
 
+		/* The ieee1394_core guessed the node's speed capability from
+		 * the self ID.  Check whether a lower speed works. */
+		if (ci->speed_unverified && length == sizeof(quadlet_t)) {
+			error = nodemgr_check_speed(ci, addr, buffer);
+			if (!error)
+				break;
+		}
 		if (msleep_interruptible(334))
 			return -EINTR;
 	}
-
-	return ret;
+	return error;
 }
 
 static int nodemgr_get_max_rom(quadlet_t *bus_info_data, void *__ci)
 {
-	return (CSR1212_BE32_TO_CPU(bus_info_data[2]) >> 8) & 0x3;
+	return (be32_to_cpu(bus_info_data[2]) >> 8) & 0x3;
 }
 
 static struct csr1212_bus_ops nodemgr_csr_ops = {
@@ -107,21 +146,14 @@ static struct csr1212_bus_ops nodemgr_csr_ops = {
  * but now we are much simpler because of the LDM.
  */
 
-static DECLARE_MUTEX(nodemgr_serialize);
-
 struct host_info {
 	struct hpsb_host *host;
 	struct list_head list;
-	struct completion exited;
-	struct semaphore reset_sem;
-	int pid;
-	char daemon_name[15];
-	int kill_me;
+	struct task_struct *thread;
 };
 
 static int nodemgr_bus_match(struct device * dev, struct device_driver * drv);
-static int nodemgr_hotplug(struct class_device *cdev, char **envp, int num_envp,
-			   char *buffer, int buffer_size);
+static int nodemgr_uevent(struct device *dev, struct kobj_uevent_env *env);
 static void nodemgr_resume_ne(struct node_entry *ne);
 static void nodemgr_remove_ne(struct node_entry *ne);
 static struct node_entry *find_entry_by_guid(u64 guid);
@@ -131,37 +163,38 @@ struct bus_type ieee1394_bus_type = {
 	.match		= nodemgr_bus_match,
 };
 
-static void host_cls_release(struct class_device *class_dev)
+static void host_cls_release(struct device *dev)
 {
-	put_device(&container_of((class_dev), struct hpsb_host, class_dev)->device);
+	put_device(&container_of((dev), struct hpsb_host, host_dev)->device);
 }
 
 struct class hpsb_host_class = {
 	.name		= "ieee1394_host",
-	.release	= host_cls_release,
+	.dev_release	= host_cls_release,
 };
 
-static void ne_cls_release(struct class_device *class_dev)
+static void ne_cls_release(struct device *dev)
 {
-	put_device(&container_of((class_dev), struct node_entry, class_dev)->device);
+	put_device(&container_of((dev), struct node_entry, node_dev)->device);
 }
 
-struct class nodemgr_ne_class = {
+static struct class nodemgr_ne_class = {
 	.name		= "ieee1394_node",
-	.release	= ne_cls_release,
+	.dev_release	= ne_cls_release,
 };
 
-static void ud_cls_release(struct class_device *class_dev)
+static void ud_cls_release(struct device *dev)
 {
-	put_device(&container_of((class_dev), struct unit_directory, class_dev)->device);
+	put_device(&container_of((dev), struct unit_directory, unit_dev)->device);
 }
 
 /* The name here is only so that unit directory hotplug works with old
- * style hotplug, which only ever did unit directories anyway. */
-struct class nodemgr_ud_class = {
+ * style hotplug, which only ever did unit directories anyway.
+ */
+static struct class nodemgr_ud_class = {
 	.name		= "ieee1394",
-	.release	= ud_cls_release,
-	.hotplug	= nodemgr_hotplug,
+	.dev_release	= ud_cls_release,
+	.dev_uevent	= nodemgr_uevent,
 };
 
 static struct hpsb_highlevel nodemgr_highlevel;
@@ -212,6 +245,16 @@ static struct device nodemgr_dev_template_ne = {
 	.release	= nodemgr_release_ne,
 };
 
+/* This dummy driver prevents the host devices from being scanned. We have no
+ * useful drivers for them yet, and there would be a deadlock possible if the
+ * driver core scans the host device while the host's low-level driver (i.e.
+ * the host's parent device) is being removed. */
+static struct device_driver nodemgr_mid_layer_driver = {
+	.bus		= &ieee1394_bus_type,
+	.name		= "nodemgr",
+	.owner		= THIS_MODULE,
+};
+
 struct device nodemgr_dev_template_host = {
 	.bus		= &ieee1394_bus_type,
 	.release	= nodemgr_release_host,
@@ -219,7 +262,7 @@ struct device nodemgr_dev_template_host = {
 
 
 #define fw_attr(class, class_type, field, type, format_string)		\
-static ssize_t fw_show_##class##_##field (struct device *dev, char *buf)\
+static ssize_t fw_show_##class##_##field (struct device *dev, struct device_attribute *attr, char *buf)\
 {									\
 	class_type *class;						\
 	class = container_of(dev, class_type, device);			\
@@ -231,7 +274,7 @@ static struct device_attribute dev_attr_##class##_##field = {		\
 };
 
 #define fw_attr_td(class, class_type, td_kv)				\
-static ssize_t fw_show_##class##_##td_kv (struct device *dev, char *buf)\
+static ssize_t fw_show_##class##_##td_kv (struct device *dev, struct device_attribute *attr, char *buf)\
 {									\
 	int len;							\
 	class_type *class = container_of(dev, class_type, device);	\
@@ -239,7 +282,7 @@ static ssize_t fw_show_##class##_##td_kv (struct device *dev, char *buf)\
 	memcpy(buf,							\
 	       CSR1212_TEXTUAL_DESCRIPTOR_LEAF_DATA(class->td_kv),	\
 	       len);							\
-	while ((buf + len - 1) == '\0')					\
+	while (buf[len - 1] == '\0')					\
 		len--;							\
 	buf[len++] = '\n';						\
 	buf[len] = '\0';						\
@@ -259,12 +302,12 @@ static ssize_t fw_drv_show_##field (struct device_driver *drv, char *buf) \
 	return sprintf(buf, format_string, (type)driver->field);\
 }								\
 static struct driver_attribute driver_attr_drv_##field = {	\
-        .attr = {.name = __stringify(field), .mode = S_IRUGO },	\
-        .show   = fw_drv_show_##field,				\
+	.attr = {.name = __stringify(field), .mode = S_IRUGO },	\
+	.show   = fw_drv_show_##field,				\
 };
 
 
-static ssize_t fw_show_ne_bus_options(struct device *dev, char *buf)
+static ssize_t fw_show_ne_bus_options(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct node_entry *ne = container_of(dev, struct node_entry, device);
 
@@ -280,50 +323,60 @@ static ssize_t fw_show_ne_bus_options(struct device *dev, char *buf)
 static DEVICE_ATTR(bus_options,S_IRUGO,fw_show_ne_bus_options,NULL);
 
 
-static ssize_t fw_show_ne_tlabels_free(struct device *dev, char *buf)
+#ifdef HPSB_DEBUG_TLABELS
+static ssize_t fw_show_ne_tlabels_free(struct device *dev,
+				       struct device_attribute *attr, char *buf)
 {
 	struct node_entry *ne = container_of(dev, struct node_entry, device);
-	return sprintf(buf, "%d\n", atomic_read(&ne->tpool->count.count) + 1);
+	unsigned long flags;
+	unsigned long *tp = ne->host->tl_pool[NODEID_TO_NODE(ne->nodeid)].map;
+	int tf;
+
+	spin_lock_irqsave(&hpsb_tlabel_lock, flags);
+	tf = 64 - bitmap_weight(tp, 64);
+	spin_unlock_irqrestore(&hpsb_tlabel_lock, flags);
+
+	return sprintf(buf, "%d\n", tf);
 }
 static DEVICE_ATTR(tlabels_free,S_IRUGO,fw_show_ne_tlabels_free,NULL);
 
 
-static ssize_t fw_show_ne_tlabels_allocations(struct device *dev, char *buf)
+static ssize_t fw_show_ne_tlabels_mask(struct device *dev,
+				       struct device_attribute *attr, char *buf)
 {
 	struct node_entry *ne = container_of(dev, struct node_entry, device);
-	return sprintf(buf, "%u\n", ne->tpool->allocations);
-}
-static DEVICE_ATTR(tlabels_allocations,S_IRUGO,fw_show_ne_tlabels_allocations,NULL);
+	unsigned long flags;
+	unsigned long *tp = ne->host->tl_pool[NODEID_TO_NODE(ne->nodeid)].map;
+	u64 tm;
 
-
-static ssize_t fw_show_ne_tlabels_mask(struct device *dev, char *buf)
-{
-	struct node_entry *ne = container_of(dev, struct node_entry, device);
+	spin_lock_irqsave(&hpsb_tlabel_lock, flags);
 #if (BITS_PER_LONG <= 32)
-	return sprintf(buf, "0x%08lx%08lx\n", ne->tpool->pool[0], ne->tpool->pool[1]);
+	tm = ((u64)tp[0] << 32) + tp[1];
 #else
-	return sprintf(buf, "0x%016lx\n", ne->tpool->pool[0]);
+	tm = tp[0];
 #endif
+	spin_unlock_irqrestore(&hpsb_tlabel_lock, flags);
+
+	return sprintf(buf, "0x%016llx\n", (unsigned long long)tm);
 }
 static DEVICE_ATTR(tlabels_mask, S_IRUGO, fw_show_ne_tlabels_mask, NULL);
+#endif /* HPSB_DEBUG_TLABELS */
 
 
-static ssize_t fw_set_ignore_driver(struct device *dev, const char *buf, size_t count)
+static ssize_t fw_set_ignore_driver(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct unit_directory *ud = container_of(dev, struct unit_directory, device);
 	int state = simple_strtoul(buf, NULL, 10);
 
 	if (state == 1) {
-		down_write(&dev->bus->subsys.rwsem);
-		device_release_driver(dev);
 		ud->ignore_driver = 1;
-		up_write(&dev->bus->subsys.rwsem);
-	} else if (!state)
+		device_release_driver(dev);
+	} else if (state == 0)
 		ud->ignore_driver = 0;
 
 	return count;
 }
-static ssize_t fw_get_ignore_driver(struct device *dev, char *buf)
+static ssize_t fw_get_ignore_driver(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct unit_directory *ud = container_of(dev, struct unit_directory, device);
 
@@ -352,27 +405,15 @@ static ssize_t fw_get_destroy_node(struct bus_type *bus, char *buf)
 }
 static BUS_ATTR(destroy_node, S_IWUSR | S_IRUGO, fw_get_destroy_node, fw_set_destroy_node);
 
-static int nodemgr_rescan_bus_thread(void *__unused)
+
+static ssize_t fw_set_rescan(struct bus_type *bus, const char *buf,
+			     size_t count)
 {
-	/* No userlevel access needed */
-	daemonize("kfwrescan");
+	int error = 0;
 
-	bus_rescan_devices(&ieee1394_bus_type);
-
-	return 0;
-}
-
-static ssize_t fw_set_rescan(struct bus_type *bus, const char *buf, size_t count)
-{
-	int state = simple_strtoul(buf, NULL, 10);
-
-	/* Don't wait for this, or care about errors. Root could do
-	 * something stupid and spawn this a lot of times, but that's
-	 * root's fault. */
-	if (state == 1)
-		kernel_thread(nodemgr_rescan_bus_thread, NULL, CLONE_KERNEL);
-
-	return count;
+	if (simple_strtoul(buf, NULL, 10) == 1)
+		error = bus_rescan_devices(&ieee1394_bus_type);
+	return error ? error : count;
 }
 static ssize_t fw_get_rescan(struct bus_type *bus, char *buf)
 {
@@ -388,7 +429,7 @@ static ssize_t fw_set_ignore_drivers(struct bus_type *bus, const char *buf, size
 
 	if (state == 1)
 		ignore_drivers = 1;
-	else if (!state)
+	else if (state == 0)
 		ignore_drivers = 0;
 
 	return count;
@@ -413,11 +454,9 @@ fw_attr(ne, struct node_entry, nodeid, unsigned int, "0x%04x\n")
 
 fw_attr(ne, struct node_entry, vendor_id, unsigned int, "0x%06x\n")
 fw_attr_td(ne, struct node_entry, vendor_name_kv)
-fw_attr(ne, struct node_entry, vendor_oui, const char *, "%s\n")
 
 fw_attr(ne, struct node_entry, guid, unsigned long long, "0x%016Lx\n")
 fw_attr(ne, struct node_entry, guid_vendor_id, unsigned int, "0x%06x\n")
-fw_attr(ne, struct node_entry, guid_vendor_oui, const char *, "%s\n")
 fw_attr(ne, struct node_entry, in_limbo, int, "%d\n");
 
 static struct device_attribute *const fw_ne_attrs[] = {
@@ -427,9 +466,10 @@ static struct device_attribute *const fw_ne_attrs[] = {
 	&dev_attr_ne_vendor_id,
 	&dev_attr_ne_nodeid,
 	&dev_attr_bus_options,
+#ifdef HPSB_DEBUG_TLABELS
 	&dev_attr_tlabels_free,
-	&dev_attr_tlabels_allocations,
 	&dev_attr_tlabels_mask,
+#endif
 };
 
 
@@ -442,7 +482,6 @@ fw_attr(ud, struct unit_directory, model_id, unsigned int, "0x%06x\n")
 fw_attr(ud, struct unit_directory, specifier_id, unsigned int, "0x%06x\n")
 fw_attr(ud, struct unit_directory, version, unsigned int, "0x%06x\n")
 fw_attr_td(ud, struct unit_directory, vendor_name_kv)
-fw_attr(ud, struct unit_directory, vendor_oui, const char *, "%s\n")
 fw_attr_td(ud, struct unit_directory, model_name_kv)
 
 static struct device_attribute *const fw_ud_attrs[] = {
@@ -480,7 +519,7 @@ static ssize_t fw_show_drv_device_ids(struct device_driver *drv, char *buf)
 	int length = 0;
 	char *scratch = buf;
 
-        driver = container_of(drv, struct hpsb_protocol_driver, driver);
+	driver = container_of(drv, struct hpsb_protocol_driver, driver);
 
 	for (id = driver->id_table; id->match_flags != 0; id++) {
 		int need_coma = 0;
@@ -537,7 +576,11 @@ static void nodemgr_create_drv_files(struct hpsb_protocol_driver *driver)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(fw_drv_attrs); i++)
-		driver_create_file(drv, fw_drv_attrs[i]);
+		if (driver_create_file(drv, fw_drv_attrs[i]))
+			goto fail;
+	return;
+fail:
+	HPSB_ERR("Failed to add sysfs attribute");
 }
 
 
@@ -557,7 +600,11 @@ static void nodemgr_create_ne_dev_files(struct node_entry *ne)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(fw_ne_attrs); i++)
-		device_create_file(dev, fw_ne_attrs[i]);
+		if (device_create_file(dev, fw_ne_attrs[i]))
+			goto fail;
+	return;
+fail:
+	HPSB_ERR("Failed to add sysfs attribute");
 }
 
 
@@ -567,11 +614,16 @@ static void nodemgr_create_host_dev_files(struct hpsb_host *host)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(fw_host_attrs); i++)
-		device_create_file(dev, fw_host_attrs[i]);
+		if (device_create_file(dev, fw_host_attrs[i]))
+			goto fail;
+	return;
+fail:
+	HPSB_ERR("Failed to add sysfs attribute");
 }
 
 
-static struct node_entry *find_entry_by_nodeid(struct hpsb_host *host, nodeid_t nodeid);
+static struct node_entry *find_entry_by_nodeid(struct hpsb_host *host,
+					       nodeid_t nodeid);
 
 static void nodemgr_update_host_dev_links(struct hpsb_host *host)
 {
@@ -582,12 +634,18 @@ static void nodemgr_update_host_dev_links(struct hpsb_host *host)
 	sysfs_remove_link(&dev->kobj, "busmgr_id");
 	sysfs_remove_link(&dev->kobj, "host_id");
 
-	if ((ne = find_entry_by_nodeid(host, host->irm_id)))
-		sysfs_create_link(&dev->kobj, &ne->device.kobj, "irm_id");
-	if ((ne = find_entry_by_nodeid(host, host->busmgr_id)))
-		sysfs_create_link(&dev->kobj, &ne->device.kobj, "busmgr_id");
-	if ((ne = find_entry_by_nodeid(host, host->node_id)))
-		sysfs_create_link(&dev->kobj, &ne->device.kobj, "host_id");
+	if ((ne = find_entry_by_nodeid(host, host->irm_id)) &&
+	    sysfs_create_link(&dev->kobj, &ne->device.kobj, "irm_id"))
+		goto fail;
+	if ((ne = find_entry_by_nodeid(host, host->busmgr_id)) &&
+	    sysfs_create_link(&dev->kobj, &ne->device.kobj, "busmgr_id"))
+		goto fail;
+	if ((ne = find_entry_by_nodeid(host, host->node_id)) &&
+	    sysfs_create_link(&dev->kobj, &ne->device.kobj, "host_id"))
+		goto fail;
+	return;
+fail:
+	HPSB_ERR("Failed to update sysfs attributes for host %d", host->id);
 }
 
 static void nodemgr_create_ud_dev_files(struct unit_directory *ud)
@@ -596,32 +654,38 @@ static void nodemgr_create_ud_dev_files(struct unit_directory *ud)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(fw_ud_attrs); i++)
-		device_create_file(dev, fw_ud_attrs[i]);
-
+		if (device_create_file(dev, fw_ud_attrs[i]))
+			goto fail;
 	if (ud->flags & UNIT_DIRECTORY_SPECIFIER_ID)
-		device_create_file(dev, &dev_attr_ud_specifier_id);
-
+		if (device_create_file(dev, &dev_attr_ud_specifier_id))
+			goto fail;
 	if (ud->flags & UNIT_DIRECTORY_VERSION)
-		device_create_file(dev, &dev_attr_ud_version);
-
+		if (device_create_file(dev, &dev_attr_ud_version))
+			goto fail;
 	if (ud->flags & UNIT_DIRECTORY_VENDOR_ID) {
-		device_create_file(dev, &dev_attr_ud_vendor_id);
-		if (ud->vendor_name_kv)
-			device_create_file(dev, &dev_attr_ud_vendor_name_kv);
+		if (device_create_file(dev, &dev_attr_ud_vendor_id))
+			goto fail;
+		if (ud->vendor_name_kv &&
+		    device_create_file(dev, &dev_attr_ud_vendor_name_kv))
+			goto fail;
 	}
-
 	if (ud->flags & UNIT_DIRECTORY_MODEL_ID) {
-		device_create_file(dev, &dev_attr_ud_model_id);
-		if (ud->model_name_kv)
-			device_create_file(dev, &dev_attr_ud_model_name_kv);
+		if (device_create_file(dev, &dev_attr_ud_model_id))
+			goto fail;
+		if (ud->model_name_kv &&
+		    device_create_file(dev, &dev_attr_ud_model_name_kv))
+			goto fail;
 	}
+	return;
+fail:
+	HPSB_ERR("Failed to add sysfs attribute");
 }
 
 
 static int nodemgr_bus_match(struct device * dev, struct device_driver * drv)
 {
-        struct hpsb_protocol_driver *driver;
-        struct unit_directory *ud;
+	struct hpsb_protocol_driver *driver;
+	struct unit_directory *ud;
 	struct ieee1394_device_id *id;
 
 	/* We only match unit directories */
@@ -629,55 +693,77 @@ static int nodemgr_bus_match(struct device * dev, struct device_driver * drv)
 		return 0;
 
 	ud = container_of(dev, struct unit_directory, device);
-	driver = container_of(drv, struct hpsb_protocol_driver, driver);
-
 	if (ud->ne->in_limbo || ud->ignore_driver)
 		return 0;
 
-        for (id = driver->id_table; id->match_flags != 0; id++) {
-                if ((id->match_flags & IEEE1394_MATCH_VENDOR_ID) &&
-                    id->vendor_id != ud->vendor_id)
-                        continue;
+	/* We only match drivers of type hpsb_protocol_driver */
+	if (drv == &nodemgr_mid_layer_driver)
+		return 0;
 
-                if ((id->match_flags & IEEE1394_MATCH_MODEL_ID) &&
-                    id->model_id != ud->model_id)
-                        continue;
+	driver = container_of(drv, struct hpsb_protocol_driver, driver);
+	for (id = driver->id_table; id->match_flags != 0; id++) {
+		if ((id->match_flags & IEEE1394_MATCH_VENDOR_ID) &&
+		    id->vendor_id != ud->vendor_id)
+			continue;
 
-                if ((id->match_flags & IEEE1394_MATCH_SPECIFIER_ID) &&
-                    id->specifier_id != ud->specifier_id)
-                        continue;
+		if ((id->match_flags & IEEE1394_MATCH_MODEL_ID) &&
+		    id->model_id != ud->model_id)
+			continue;
 
-                if ((id->match_flags & IEEE1394_MATCH_VERSION) &&
-                    id->version != ud->version)
-                        continue;
+		if ((id->match_flags & IEEE1394_MATCH_SPECIFIER_ID) &&
+		    id->specifier_id != ud->specifier_id)
+			continue;
+
+		if ((id->match_flags & IEEE1394_MATCH_VERSION) &&
+		    id->version != ud->version)
+			continue;
 
 		return 1;
-        }
+	}
 
 	return 0;
 }
 
 
+static DEFINE_MUTEX(nodemgr_serialize_remove_uds);
+
 static void nodemgr_remove_uds(struct node_entry *ne)
 {
-	struct class_device *cdev, *next;
-	struct unit_directory *ud;
+	struct device *dev;
+	struct unit_directory *tmp, *ud;
 
-	list_for_each_entry_safe(cdev, next, &nodemgr_ud_class.children, node) {
-		ud = container_of(cdev, struct unit_directory, class_dev);
-
-		if (ud->ne != ne)
-			continue;
-
-		class_device_unregister(&ud->class_dev);
+	/* Iteration over nodemgr_ud_class.devices has to be protected by
+	 * nodemgr_ud_class.sem, but device_unregister() will eventually
+	 * take nodemgr_ud_class.sem too. Therefore pick out one ud at a time,
+	 * release the semaphore, and then unregister the ud. Since this code
+	 * may be called from other contexts besides the knodemgrds, protect the
+	 * gap after release of the semaphore by nodemgr_serialize_remove_uds.
+	 */
+	mutex_lock(&nodemgr_serialize_remove_uds);
+	for (;;) {
+		ud = NULL;
+		down(&nodemgr_ud_class.sem);
+		list_for_each_entry(dev, &nodemgr_ud_class.devices, node) {
+			tmp = container_of(dev, struct unit_directory,
+					   unit_dev);
+			if (tmp->ne == ne) {
+				ud = tmp;
+				break;
+			}
+		}
+		up(&nodemgr_ud_class.sem);
+		if (ud == NULL)
+			break;
+		device_unregister(&ud->unit_dev);
 		device_unregister(&ud->device);
 	}
+	mutex_unlock(&nodemgr_serialize_remove_uds);
 }
 
 
 static void nodemgr_remove_ne(struct node_entry *ne)
 {
-	struct device *dev = &ne->device;
+	struct device *dev;
 
 	dev = get_device(&ne->device);
 	if (!dev)
@@ -685,23 +771,25 @@ static void nodemgr_remove_ne(struct node_entry *ne)
 
 	HPSB_DEBUG("Node removed: ID:BUS[" NODE_BUS_FMT "]  GUID[%016Lx]",
 		   NODE_BUS_ARGS(ne->host, ne->nodeid), (unsigned long long)ne->guid);
-
 	nodemgr_remove_uds(ne);
 
-	class_device_unregister(&ne->class_dev);
+	device_unregister(&ne->node_dev);
 	device_unregister(dev);
 
 	put_device(dev);
 }
 
+static int __nodemgr_remove_host_dev(struct device *dev, void *data)
+{
+	if (dev->bus == &ieee1394_bus_type)
+		nodemgr_remove_ne(container_of(dev, struct node_entry,
+				  device));
+	return 0;
+}
 
 static void nodemgr_remove_host_dev(struct device *dev)
 {
-	struct device *ne_dev, *next;
-
-	list_for_each_entry_safe(ne_dev, next, &dev->children, node)
-		nodemgr_remove_ne(container_of(ne_dev, struct node_entry, device));
-
+	WARN_ON(device_for_each_child(dev, NULL, __nodemgr_remove_host_dev));
 	sysfs_remove_link(&dev->kobj, "irm_id");
 	sysfs_remove_link(&dev->kobj, "busmgr_id");
 	sysfs_remove_link(&dev->kobj, "host_id");
@@ -715,16 +803,16 @@ static void nodemgr_update_bus_options(struct node_entry *ne)
 #endif
 	quadlet_t busoptions = be32_to_cpu(ne->csr->bus_info_data[2]);
 
-	ne->busopt.irmc         = (busoptions >> 31) & 1;
-	ne->busopt.cmc          = (busoptions >> 30) & 1;
-	ne->busopt.isc          = (busoptions >> 29) & 1;
-	ne->busopt.bmc          = (busoptions >> 28) & 1;
-	ne->busopt.pmc          = (busoptions >> 27) & 1;
-	ne->busopt.cyc_clk_acc  = (busoptions >> 16) & 0xff;
-	ne->busopt.max_rec      = 1 << (((busoptions >> 12) & 0xf) + 1);
+	ne->busopt.irmc		= (busoptions >> 31) & 1;
+	ne->busopt.cmc		= (busoptions >> 30) & 1;
+	ne->busopt.isc		= (busoptions >> 29) & 1;
+	ne->busopt.bmc		= (busoptions >> 28) & 1;
+	ne->busopt.pmc		= (busoptions >> 27) & 1;
+	ne->busopt.cyc_clk_acc	= (busoptions >> 16) & 0xff;
+	ne->busopt.max_rec	= 1 << (((busoptions >> 12) & 0xf) + 1);
 	ne->busopt.max_rom	= (busoptions >> 8) & 0x3;
-	ne->busopt.generation   = (busoptions >> 4) & 0xf;
-	ne->busopt.lnkspd       = busoptions & 0x7;
+	ne->busopt.generation	= (busoptions >> 4) & 0xf;
+	ne->busopt.lnkspd	= busoptions & 0x7;
 
 	HPSB_VERBOSE("NodeMgr: raw=0x%08x irmc=%d cmc=%d isc=%d bmc=%d pmc=%d "
 		     "cyc_clk_acc=%d max_rec=%d max_rom=%d gen=%d lspd=%d",
@@ -741,23 +829,19 @@ static struct node_entry *nodemgr_create_node(octlet_t guid, struct csr1212_csr 
 					      unsigned int generation)
 {
 	struct hpsb_host *host = hi->host;
-        struct node_entry *ne;
+	struct node_entry *ne;
 
-	ne = kmalloc(sizeof(struct node_entry), GFP_KERNEL);
-        if (!ne) return NULL;
+	ne = kzalloc(sizeof(*ne), GFP_KERNEL);
+	if (!ne)
+		goto fail_alloc;
 
-	memset(ne, 0, sizeof(struct node_entry));
-
-	ne->tpool = &host->tpool[nodeid & NODE_MASK];
-
-        ne->host = host;
-        ne->nodeid = nodeid;
+	ne->host = host;
+	ne->nodeid = nodeid;
 	ne->generation = generation;
 	ne->needs_probe = 1;
 
-        ne->guid = guid;
+	ne->guid = guid;
 	ne->guid_vendor_id = (guid >> 40) & 0xffffff;
-	ne->guid_vendor_oui = nodemgr_find_oui_name(ne->guid_vendor_id);
 	ne->csr = csr;
 
 	memcpy(&ne->device, &nodemgr_dev_template_ne,
@@ -766,17 +850,17 @@ static struct node_entry *nodemgr_create_node(octlet_t guid, struct csr1212_csr 
 	snprintf(ne->device.bus_id, BUS_ID_SIZE, "%016Lx",
 		 (unsigned long long)(ne->guid));
 
-	ne->class_dev.dev = &ne->device;
-	ne->class_dev.class = &nodemgr_ne_class;
-	snprintf(ne->class_dev.class_id, BUS_ID_SIZE, "%016Lx",
-		 (unsigned long long)(ne->guid));
+	ne->node_dev.parent = &ne->device;
+	ne->node_dev.class = &nodemgr_ne_class;
+	snprintf(ne->node_dev.bus_id, BUS_ID_SIZE, "%016Lx",
+		(unsigned long long)(ne->guid));
 
-	device_register(&ne->device);
-	class_device_register(&ne->class_dev);
+	if (device_register(&ne->device))
+		goto fail_devreg;
+	if (device_register(&ne->node_dev))
+		goto fail_classdevreg;
 	get_device(&ne->device);
 
-	if (ne->guid_vendor_oui)
-		device_create_file(&ne->device, &dev_attr_ne_guid_vendor_oui);
 	nodemgr_create_ne_dev_files(ne);
 
 	nodemgr_update_bus_options(ne);
@@ -785,51 +869,92 @@ static struct node_entry *nodemgr_create_node(octlet_t guid, struct csr1212_csr 
 		   (host->node_id == nodeid) ? "Host" : "Node",
 		   NODE_BUS_ARGS(host, nodeid), (unsigned long long)guid);
 
-        return ne;
+	return ne;
+
+fail_classdevreg:
+	device_unregister(&ne->device);
+fail_devreg:
+	kfree(ne);
+fail_alloc:
+	HPSB_ERR("Failed to create node ID:BUS[" NODE_BUS_FMT "]  GUID[%016Lx]",
+		 NODE_BUS_ARGS(host, nodeid), (unsigned long long)guid);
+
+	return NULL;
 }
 
 
 static struct node_entry *find_entry_by_guid(u64 guid)
 {
-	struct class *class = &nodemgr_ne_class;
-	struct class_device *cdev;
+	struct device *dev;
 	struct node_entry *ne, *ret_ne = NULL;
 
-	down_read(&class->subsys.rwsem);
-	list_for_each_entry(cdev, &class->children, node) {
-		ne = container_of(cdev, struct node_entry, class_dev);
+	down(&nodemgr_ne_class.sem);
+	list_for_each_entry(dev, &nodemgr_ne_class.devices, node) {
+		ne = container_of(dev, struct node_entry, node_dev);
 
 		if (ne->guid == guid) {
 			ret_ne = ne;
 			break;
 		}
 	}
-	up_read(&class->subsys.rwsem);
+	up(&nodemgr_ne_class.sem);
 
-        return ret_ne;
+	return ret_ne;
 }
 
 
-static struct node_entry *find_entry_by_nodeid(struct hpsb_host *host, nodeid_t nodeid)
+static struct node_entry *find_entry_by_nodeid(struct hpsb_host *host,
+					       nodeid_t nodeid)
 {
-	struct class *class = &nodemgr_ne_class;
-	struct class_device *cdev;
+	struct device *dev;
 	struct node_entry *ne, *ret_ne = NULL;
 
-	down_read(&class->subsys.rwsem);
-	list_for_each_entry(cdev, &class->children, node) {
-		ne = container_of(cdev, struct node_entry, class_dev);
+	down(&nodemgr_ne_class.sem);
+	list_for_each_entry(dev, &nodemgr_ne_class.devices, node) {
+		ne = container_of(dev, struct node_entry, node_dev);
 
 		if (ne->host == host && ne->nodeid == nodeid) {
 			ret_ne = ne;
 			break;
 		}
 	}
-	up_read(&class->subsys.rwsem);
+	up(&nodemgr_ne_class.sem);
 
 	return ret_ne;
 }
 
+
+static void nodemgr_register_device(struct node_entry *ne, 
+	struct unit_directory *ud, struct device *parent)
+{
+	memcpy(&ud->device, &nodemgr_dev_template_ud,
+	       sizeof(ud->device));
+
+	ud->device.parent = parent;
+
+	snprintf(ud->device.bus_id, BUS_ID_SIZE, "%s-%u",
+		 ne->device.bus_id, ud->id);
+
+	ud->unit_dev.parent = &ud->device;
+	ud->unit_dev.class = &nodemgr_ud_class;
+	snprintf(ud->unit_dev.bus_id, BUS_ID_SIZE, "%s-%u",
+		 ne->device.bus_id, ud->id);
+
+	if (device_register(&ud->device))
+		goto fail_devreg;
+	if (device_register(&ud->unit_dev))
+		goto fail_classdevreg;
+	get_device(&ud->device);
+
+	nodemgr_create_ud_dev_files(ud);
+
+	return;
+
+fail_classdevreg:
+	device_unregister(&ud->device);
+fail_devreg:
+	HPSB_ERR("Failed to create unit %s", ud->device.bus_id);
+}	
 
 
 /* This implementation currently only scans the config rom and its
@@ -840,20 +965,19 @@ static struct unit_directory *nodemgr_process_unit_directory
 	 unsigned int *id, struct unit_directory *parent)
 {
 	struct unit_directory *ud;
-	struct unit_directory *ud_temp = NULL;
+	struct unit_directory *ud_child = NULL;
 	struct csr1212_dentry *dentry;
 	struct csr1212_keyval *kv;
 	u8 last_key_id = 0;
 
-	ud = kmalloc(sizeof(struct unit_directory), GFP_KERNEL);
+	ud = kzalloc(sizeof(*ud), GFP_KERNEL);
 	if (!ud)
 		goto unit_directory_error;
 
-	memset (ud, 0, sizeof(struct unit_directory));
-
 	ud->ne = ne;
 	ud->ignore_driver = ignore_drivers;
-	ud->address = ud_kv->offset + CSR1212_CONFIG_ROM_SPACE_BASE;
+	ud->address = ud_kv->offset + CSR1212_REGISTER_SPACE_BASE;
+	ud->directory_id = ud->address & 0xffffff;
 	ud->ud_kv = ud_kv;
 	ud->id = (*id)++;
 
@@ -863,9 +987,6 @@ static struct unit_directory *nodemgr_process_unit_directory
 			if (kv->key.type == CSR1212_KV_TYPE_IMMEDIATE) {
 				ud->vendor_id = kv->value.immediate;
 				ud->flags |= UNIT_DIRECTORY_VENDOR_ID;
-
-				if (ud->vendor_id)
-					ud->vendor_oui = nodemgr_find_oui_name(ud->vendor_id);
 			}
 			break;
 
@@ -893,13 +1014,13 @@ static struct unit_directory *nodemgr_process_unit_directory
 			    CSR1212_TEXTUAL_DESCRIPTOR_LEAF_LANGUAGE(kv) == 0) {
 				switch (last_key_id) {
 				case CSR1212_KV_ID_VENDOR:
-					ud->vendor_name_kv = kv;
 					csr1212_keep_keyval(kv);
+					ud->vendor_name_kv = kv;
 					break;
 
 				case CSR1212_KV_ID_MODEL:
-					ud->model_name_kv = kv;
 					csr1212_keep_keyval(kv);
+					ud->model_name_kv = kv;
 					break;
 
 				}
@@ -907,44 +1028,66 @@ static struct unit_directory *nodemgr_process_unit_directory
 			break;
 
 		case CSR1212_KV_ID_DEPENDENT_INFO:
-			if (kv->key.type == CSR1212_KV_TYPE_DIRECTORY) {
-				/* This should really be done in SBP2 as this is
-				 * doing SBP2 specific parsing. */
-				ud->flags |= UNIT_DIRECTORY_HAS_LUN_DIRECTORY;
-				ud_temp = nodemgr_process_unit_directory(hi, ne, kv, id,
-									 parent);
-
-				if (ud_temp == NULL)
-					break;
-
-				/* inherit unspecified values */
-				if ((ud->flags & UNIT_DIRECTORY_VENDOR_ID) &&
-				    !(ud_temp->flags & UNIT_DIRECTORY_VENDOR_ID))
-				{
-					ud_temp->flags |=  UNIT_DIRECTORY_VENDOR_ID;
-					ud_temp->vendor_id = ud->vendor_id;
-					ud_temp->vendor_oui = ud->vendor_oui;
+			/* Logical Unit Number */
+			if (kv->key.type == CSR1212_KV_TYPE_IMMEDIATE) {
+				if (ud->flags & UNIT_DIRECTORY_HAS_LUN) {
+					ud_child = kmemdup(ud, sizeof(*ud_child), GFP_KERNEL);
+					if (!ud_child)
+						goto unit_directory_error;
+					nodemgr_register_device(ne, ud_child, &ne->device);
+					ud_child = NULL;
+					
+					ud->id = (*id)++;
 				}
+				ud->lun = kv->value.immediate;
+				ud->flags |= UNIT_DIRECTORY_HAS_LUN;
+
+			/* Logical Unit Directory */
+			} else if (kv->key.type == CSR1212_KV_TYPE_DIRECTORY) {
+				/* This should really be done in SBP2 as this is
+				 * doing SBP2 specific parsing.
+				 */
+				
+				/* first register the parent unit */
+				ud->flags |= UNIT_DIRECTORY_HAS_LUN_DIRECTORY;
+				if (ud->device.bus != &ieee1394_bus_type)
+					nodemgr_register_device(ne, ud, &ne->device);
+				
+				/* process the child unit */
+				ud_child = nodemgr_process_unit_directory(hi, ne, kv, id, ud);
+
+				if (ud_child == NULL)
+					break;
+				
+				/* inherit unspecified values, the driver core picks it up */
 				if ((ud->flags & UNIT_DIRECTORY_MODEL_ID) &&
-				    !(ud_temp->flags & UNIT_DIRECTORY_MODEL_ID))
+				    !(ud_child->flags & UNIT_DIRECTORY_MODEL_ID))
 				{
-					ud_temp->flags |=  UNIT_DIRECTORY_MODEL_ID;
-					ud_temp->model_id = ud->model_id;
+					ud_child->flags |=  UNIT_DIRECTORY_MODEL_ID;
+					ud_child->model_id = ud->model_id;
 				}
 				if ((ud->flags & UNIT_DIRECTORY_SPECIFIER_ID) &&
-				    !(ud_temp->flags & UNIT_DIRECTORY_SPECIFIER_ID))
+				    !(ud_child->flags & UNIT_DIRECTORY_SPECIFIER_ID))
 				{
-					ud_temp->flags |=  UNIT_DIRECTORY_SPECIFIER_ID;
-					ud_temp->specifier_id = ud->specifier_id;
+					ud_child->flags |=  UNIT_DIRECTORY_SPECIFIER_ID;
+					ud_child->specifier_id = ud->specifier_id;
 				}
 				if ((ud->flags & UNIT_DIRECTORY_VERSION) &&
-				    !(ud_temp->flags & UNIT_DIRECTORY_VERSION))
+				    !(ud_child->flags & UNIT_DIRECTORY_VERSION))
 				{
-					ud_temp->flags |=  UNIT_DIRECTORY_VERSION;
-					ud_temp->version = ud->version;
+					ud_child->flags |=  UNIT_DIRECTORY_VERSION;
+					ud_child->version = ud->version;
 				}
+				
+				/* register the child unit */
+				ud_child->flags |= UNIT_DIRECTORY_LUN_DIRECTORY;
+				nodemgr_register_device(ne, ud_child, &ud->device);
 			}
 
+			break;
+
+		case CSR1212_KV_ID_DIRECTORY_ID:
+			ud->directory_id = kv->value.immediate;
 			break;
 
 		default:
@@ -952,37 +1095,15 @@ static struct unit_directory *nodemgr_process_unit_directory
 		}
 		last_key_id = kv->key.id;
 	}
-
-	memcpy(&ud->device, &nodemgr_dev_template_ud,
-	       sizeof(ud->device));
-
-	if (parent) {
-		ud->flags |= UNIT_DIRECTORY_LUN_DIRECTORY;
-		ud->device.parent = &parent->device;
-	} else
-		ud->device.parent = &ne->device;
-
-	snprintf(ud->device.bus_id, BUS_ID_SIZE, "%s-%u",
-		 ne->device.bus_id, ud->id);
-
-	ud->class_dev.dev = &ud->device;
-	ud->class_dev.class = &nodemgr_ud_class;
-	snprintf(ud->class_dev.class_id, BUS_ID_SIZE, "%s-%u",
-		 ne->device.bus_id, ud->id);
-
-	device_register(&ud->device);
-	class_device_register(&ud->class_dev);
-	get_device(&ud->device);
-
-	if (ud->vendor_oui)
-		device_create_file(&ud->device, &dev_attr_ud_vendor_oui);
-	nodemgr_create_ud_dev_files(ud);
+	
+	/* do not process child units here and only if not already registered */
+	if (!parent && ud->device.bus != &ieee1394_bus_type)
+		nodemgr_register_device(ne, ud, &ne->device);
 
 	return ud;
 
 unit_directory_error:
-	if (ud != NULL)
-		kfree(ud);
+	kfree(ud);
 	return NULL;
 }
 
@@ -991,7 +1112,7 @@ static void nodemgr_process_root_directory(struct host_info *hi, struct node_ent
 {
 	unsigned int ud_id = 0;
 	struct csr1212_dentry *dentry;
-	struct csr1212_keyval *kv;
+	struct csr1212_keyval *kv, *vendor_name_kv = NULL;
 	u8 last_key_id = 0;
 
 	ne->needs_probe = 0;
@@ -1000,9 +1121,6 @@ static void nodemgr_process_root_directory(struct host_info *hi, struct node_ent
 		switch (kv->key.id) {
 		case CSR1212_KV_ID_VENDOR:
 			ne->vendor_id = kv->value.immediate;
-
-			if (ne->vendor_id)
-				ne->vendor_oui = nodemgr_find_oui_name(ne->vendor_id);
 			break;
 
 		case CSR1212_KV_ID_NODE_CAPABILITIES:
@@ -1021,8 +1139,8 @@ static void nodemgr_process_root_directory(struct host_info *hi, struct node_ent
 				    CSR1212_TEXTUAL_DESCRIPTOR_LEAF_WIDTH(kv) == 0 &&
 				    CSR1212_TEXTUAL_DESCRIPTOR_LEAF_CHAR_SET(kv) == 0 &&
 				    CSR1212_TEXTUAL_DESCRIPTOR_LEAF_LANGUAGE(kv) == 0) {
-					ne->vendor_name_kv = kv;
 					csr1212_keep_keyval(kv);
+					vendor_name_kv = kv;
 				}
 			}
 			break;
@@ -1030,39 +1148,40 @@ static void nodemgr_process_root_directory(struct host_info *hi, struct node_ent
 		last_key_id = kv->key.id;
 	}
 
-	if (ne->vendor_oui)
-		device_create_file(&ne->device, &dev_attr_ne_vendor_oui);
-	if (ne->vendor_name_kv)
-		device_create_file(&ne->device, &dev_attr_ne_vendor_name_kv);
+	if (ne->vendor_name_kv) {
+		kv = ne->vendor_name_kv;
+		ne->vendor_name_kv = vendor_name_kv;
+		csr1212_release_keyval(kv);
+	} else if (vendor_name_kv) {
+		ne->vendor_name_kv = vendor_name_kv;
+		if (device_create_file(&ne->device,
+				       &dev_attr_ne_vendor_name_kv) != 0)
+			HPSB_ERR("Failed to add sysfs attribute");
+	}
 }
 
 #ifdef CONFIG_HOTPLUG
 
-static int nodemgr_hotplug(struct class_device *cdev, char **envp, int num_envp,
-			   char *buffer, int buffer_size)
+static int nodemgr_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	struct unit_directory *ud;
-	int i = 0;
-	int length = 0;
+	int retval = 0;
+	/* ieee1394:venNmoNspNverN */
+	char buf[8 + 1 + 3 + 8 + 2 + 8 + 2 + 8 + 3 + 8 + 1];
 
-	if (!cdev)
+	if (!dev)
 		return -ENODEV;
 
-	ud = container_of(cdev, struct unit_directory, class_dev);
+	ud = container_of(dev, struct unit_directory, unit_dev);
 
 	if (ud->ne->in_limbo || ud->ignore_driver)
 		return -ENODEV;
 
 #define PUT_ENVP(fmt,val) 					\
 do {								\
-    	int printed;						\
-	envp[i++] = buffer;					\
-	printed = snprintf(buffer, buffer_size - length,	\
-			   fmt, val);				\
-	if ((buffer_size - (length+printed) <= 0) || (i >= num_envp))	\
-		return -ENOMEM;					\
-	length += printed+1;					\
-	buffer += printed+1;					\
+	retval = add_uevent_var(env, fmt, val);		\
+	if (retval)						\
+		return retval;					\
 } while (0)
 
 	PUT_ENVP("VENDOR_ID=%06x", ud->vendor_id);
@@ -1070,18 +1189,21 @@ do {								\
 	PUT_ENVP("GUID=%016Lx", (unsigned long long)ud->ne->guid);
 	PUT_ENVP("SPECIFIER_ID=%06x", ud->specifier_id);
 	PUT_ENVP("VERSION=%06x", ud->version);
+	snprintf(buf, sizeof(buf), "ieee1394:ven%08Xmo%08Xsp%08Xver%08X",
+			ud->vendor_id,
+			ud->model_id,
+			ud->specifier_id,
+			ud->version);
+	PUT_ENVP("MODALIAS=%s", buf);
 
 #undef PUT_ENVP
-
-	envp[i] = NULL;
 
 	return 0;
 }
 
 #else
 
-static int nodemgr_hotplug(struct class_device *cdev, char **envp, int num_envp,
-			   char *buffer, int buffer_size)
+static int nodemgr_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	return -ENODEV;
 }
@@ -1089,16 +1211,20 @@ static int nodemgr_hotplug(struct class_device *cdev, char **envp, int num_envp,
 #endif /* CONFIG_HOTPLUG */
 
 
-int hpsb_register_protocol(struct hpsb_protocol_driver *driver)
+int __hpsb_register_protocol(struct hpsb_protocol_driver *drv,
+			     struct module *owner)
 {
-	int ret;
+	int error;
+
+	drv->driver.bus = &ieee1394_bus_type;
+	drv->driver.owner = owner;
+	drv->driver.name = drv->name;
 
 	/* This will cause a probe for devices */
-	ret = driver_register(&driver->driver);
-	if (!ret)
-		nodemgr_create_drv_files(driver);
-
-	return ret;
+	error = driver_register(&drv->driver);
+	if (!error)
+		nodemgr_create_drv_files(drv);
+	return error;
 }
 
 void hpsb_unregister_protocol(struct hpsb_protocol_driver *driver)
@@ -1141,6 +1267,13 @@ static void nodemgr_update_node(struct node_entry *ne, struct csr1212_csr *csr,
 
 		/* Mark the node as new, so it gets re-probed */
 		ne->needs_probe = 1;
+	} else {
+		/* old cache is valid, so update its generation */
+		struct nodemgr_csr_info *ci = ne->csr->private;
+		ci->generation = generation;
+		/* free the partially filled now unneeded new cache */
+		kfree(csr->private);
+		csr1212_destroy_csr(csr);
 	}
 
 	if (ne->in_limbo)
@@ -1160,14 +1293,21 @@ static void nodemgr_node_scan_one(struct host_info *hi,
 	octlet_t guid;
 	struct csr1212_csr *csr;
 	struct nodemgr_csr_info *ci;
+	u8 *speed;
 
-	ci = kmalloc(sizeof(struct nodemgr_csr_info), GFP_KERNEL);
+	ci = kmalloc(sizeof(*ci), GFP_KERNEL);
 	if (!ci)
 		return;
 
 	ci->host = host;
 	ci->nodeid = nodeid;
 	ci->generation = generation;
+
+	/* Prepare for speed probe which occurs when reading the ROM */
+	speed = &(host->speed[NODEID_TO_NODE(nodeid)]);
+	if (*speed > host->csr.lnk_spd)
+		*speed = host->csr.lnk_spd;
+	ci->speed_unverified = *speed > IEEE1394_SPEED_100;
 
 	/* We need to detect when the ConfigROM's generation has changed,
 	 * so we only update the node's info when it needs to be.  */
@@ -1207,78 +1347,94 @@ static void nodemgr_node_scan_one(struct host_info *hi,
 		nodemgr_create_node(guid, csr, hi, nodeid, generation);
 	else
 		nodemgr_update_node(ne, csr, hi, nodeid, generation);
-
-	return;
 }
 
 
 static void nodemgr_node_scan(struct host_info *hi, int generation)
 {
-        int count;
-        struct hpsb_host *host = hi->host;
-        struct selfid *sid = (struct selfid *)host->topology_map;
-        nodeid_t nodeid = LOCAL_BUS;
+	int count;
+	struct hpsb_host *host = hi->host;
+	struct selfid *sid = (struct selfid *)host->topology_map;
+	nodeid_t nodeid = LOCAL_BUS;
 
-        /* Scan each node on the bus */
-        for (count = host->selfid_count; count; count--, sid++) {
-                if (sid->extended)
-                        continue;
+	/* Scan each node on the bus */
+	for (count = host->selfid_count; count; count--, sid++) {
+		if (sid->extended)
+			continue;
 
-                if (!sid->link_active) {
-                        nodeid++;
-                        continue;
-                }
-                nodemgr_node_scan_one(hi, nodeid++, generation);
-        }
+		if (!sid->link_active) {
+			nodeid++;
+			continue;
+		}
+		nodemgr_node_scan_one(hi, nodeid++, generation);
+	}
 }
 
 
 static void nodemgr_suspend_ne(struct node_entry *ne)
 {
-	struct class_device *cdev;
+	struct device *dev;
 	struct unit_directory *ud;
+	struct device_driver *drv;
+	int error;
 
 	HPSB_DEBUG("Node suspended: ID:BUS[" NODE_BUS_FMT "]  GUID[%016Lx]",
 		   NODE_BUS_ARGS(ne->host, ne->nodeid), (unsigned long long)ne->guid);
 
 	ne->in_limbo = 1;
-	device_create_file(&ne->device, &dev_attr_ne_in_limbo);
+	WARN_ON(device_create_file(&ne->device, &dev_attr_ne_in_limbo));
 
-	down_write(&ne->device.bus->subsys.rwsem);
-	list_for_each_entry(cdev, &nodemgr_ud_class.children, node) {
-		ud = container_of(cdev, struct unit_directory, class_dev);
-
+	down(&nodemgr_ud_class.sem);
+	list_for_each_entry(dev, &nodemgr_ud_class.devices, node) {
+		ud = container_of(dev, struct unit_directory, unit_dev);
 		if (ud->ne != ne)
 			continue;
 
-		if (ud->device.driver &&
-		    (!ud->device.driver->suspend ||
-		      ud->device.driver->suspend(&ud->device, 0, 0)))
+		drv = get_driver(ud->device.driver);
+		if (!drv)
+			continue;
+
+		error = 1; /* release if suspend is not implemented */
+		if (drv->suspend) {
+			down(&ud->device.sem);
+			error = drv->suspend(&ud->device, PMSG_SUSPEND);
+			up(&ud->device.sem);
+		}
+		if (error)
 			device_release_driver(&ud->device);
+		put_driver(drv);
 	}
-	up_write(&ne->device.bus->subsys.rwsem);
+	up(&nodemgr_ud_class.sem);
 }
 
 
 static void nodemgr_resume_ne(struct node_entry *ne)
 {
-	struct class_device *cdev;
+	struct device *dev;
 	struct unit_directory *ud;
+	struct device_driver *drv;
 
 	ne->in_limbo = 0;
 	device_remove_file(&ne->device, &dev_attr_ne_in_limbo);
 
-	down_read(&ne->device.bus->subsys.rwsem);
-	list_for_each_entry(cdev, &nodemgr_ud_class.children, node) {
-		ud = container_of(cdev, struct unit_directory, class_dev);
-
+	down(&nodemgr_ud_class.sem);
+	list_for_each_entry(dev, &nodemgr_ud_class.devices, node) {
+		ud = container_of(dev, struct unit_directory, unit_dev);
 		if (ud->ne != ne)
 			continue;
 
-		if (ud->device.driver && ud->device.driver->resume)
-			ud->device.driver->resume(&ud->device, 0);
+		drv = get_driver(ud->device.driver);
+		if (!drv)
+			continue;
+
+		if (drv->resume) {
+			down(&ud->device.sem);
+			drv->resume(&ud->device);
+			up(&ud->device.sem);
+		}
+		put_driver(drv);
 	}
-	up_read(&ne->device.bus->subsys.rwsem);
+	up(&nodemgr_ud_class.sem);
 
 	HPSB_DEBUG("Node resumed: ID:BUS[" NODE_BUS_FMT "]  GUID[%016Lx]",
 		   NODE_BUS_ARGS(ne->host, ne->nodeid), (unsigned long long)ne->guid);
@@ -1287,26 +1443,61 @@ static void nodemgr_resume_ne(struct node_entry *ne)
 
 static void nodemgr_update_pdrv(struct node_entry *ne)
 {
+	struct device *dev;
 	struct unit_directory *ud;
+	struct device_driver *drv;
 	struct hpsb_protocol_driver *pdrv;
-	struct class *class = &nodemgr_ud_class;
-	struct class_device *cdev;
+	int error;
 
-	down_read(&class->subsys.rwsem);
-	list_for_each_entry(cdev, &class->children, node) {
-		ud = container_of(cdev, struct unit_directory, class_dev);
-		if (ud->ne != ne || !ud->device.driver)
+	down(&nodemgr_ud_class.sem);
+	list_for_each_entry(dev, &nodemgr_ud_class.devices, node) {
+		ud = container_of(dev, struct unit_directory, unit_dev);
+		if (ud->ne != ne)
 			continue;
 
-		pdrv = container_of(ud->device.driver, struct hpsb_protocol_driver, driver);
+		drv = get_driver(ud->device.driver);
+		if (!drv)
+			continue;
 
-		if (pdrv->update && pdrv->update(ud)) {
-			down_write(&ud->device.bus->subsys.rwsem);
-			device_release_driver(&ud->device);
-			up_write(&ud->device.bus->subsys.rwsem);
+		error = 0;
+		pdrv = container_of(drv, struct hpsb_protocol_driver, driver);
+		if (pdrv->update) {
+			down(&ud->device.sem);
+			error = pdrv->update(ud);
+			up(&ud->device.sem);
 		}
+		if (error)
+			device_release_driver(&ud->device);
+		put_driver(drv);
 	}
-	up_read(&class->subsys.rwsem);
+	up(&nodemgr_ud_class.sem);
+}
+
+
+/* Write the BROADCAST_CHANNEL as per IEEE1394a 8.3.2.3.11 and 8.4.2.3.  This
+ * seems like an optional service but in the end it is practically mandatory
+ * as a consequence of these clauses.
+ *
+ * Note that we cannot do a broadcast write to all nodes at once because some
+ * pre-1394a devices would hang. */
+static void nodemgr_irm_write_bc(struct node_entry *ne, int generation)
+{
+	const u64 bc_addr = (CSR_REGISTER_BASE | CSR_BROADCAST_CHANNEL);
+	quadlet_t bc_remote, bc_local;
+	int error;
+
+	if (!ne->host->is_irm || ne->generation != generation ||
+	    ne->nodeid == ne->host->node_id)
+		return;
+
+	bc_local = cpu_to_be32(ne->host->csr.broadcast_channel);
+
+	/* Check if the register is implemented and 1394a compliant. */
+	error = hpsb_read(ne->host, ne->nodeid, generation, bc_addr, &bc_remote,
+			  sizeof(bc_remote));
+	if (!error && bc_remote & cpu_to_be32(0x80000000) &&
+	    bc_remote != bc_local)
+		hpsb_node_write(ne, bc_addr, &bc_local, sizeof(bc_local));
 }
 
 
@@ -1320,6 +1511,8 @@ static void nodemgr_probe_ne(struct host_info *hi, struct node_entry *ne, int ge
 	dev = get_device(&ne->device);
 	if (!dev)
 		return;
+
+	nodemgr_irm_write_bc(ne, generation);
 
 	/* If "needs_probe", then this is either a new or changed node we
 	 * rescan totally. If the generation matches for an existing node
@@ -1340,25 +1533,37 @@ static void nodemgr_probe_ne(struct host_info *hi, struct node_entry *ne, int ge
 static void nodemgr_node_probe(struct host_info *hi, int generation)
 {
 	struct hpsb_host *host = hi->host;
-	struct class *class = &nodemgr_ne_class;
-	struct class_device *cdev;
+	struct device *dev;
+	struct node_entry *ne;
 
 	/* Do some processing of the nodes we've probed. This pulls them
 	 * into the sysfs layer if needed, and can result in processing of
 	 * unit-directories, or just updating the node and it's
-	 * unit-directories. */
-	down_read(&class->subsys.rwsem);
-	list_for_each_entry(cdev, &class->children, node)
-		nodemgr_probe_ne(hi, container_of(cdev, struct node_entry, class_dev), generation);
-        up_read(&class->subsys.rwsem);
+	 * unit-directories.
+	 *
+	 * Run updates before probes. Usually, updates are time-critical
+	 * while probes are time-consuming. (Well, those probes need some
+	 * improvement...) */
+
+	down(&nodemgr_ne_class.sem);
+	list_for_each_entry(dev, &nodemgr_ne_class.devices, node) {
+		ne = container_of(dev, struct node_entry, node_dev);
+		if (!ne->needs_probe)
+			nodemgr_probe_ne(hi, ne, generation);
+	}
+	list_for_each_entry(dev, &nodemgr_ne_class.devices, node) {
+		ne = container_of(dev, struct node_entry, node_dev);
+		if (ne->needs_probe)
+			nodemgr_probe_ne(hi, ne, generation);
+	}
+	up(&nodemgr_ne_class.sem);
 
 
 	/* If we had a bus reset while we were scanning the bus, it is
 	 * possible that we did not probe all nodes.  In that case, we
 	 * skip the clean up for now, since we could remove nodes that
-	 * were still on the bus.  The bus reset increased hi->reset_sem,
-	 * so there's a bus scan pending which will do the clean up
-	 * eventually.
+	 * were still on the bus.  Another bus scan is pending which will
+	 * do the clean up eventually.
 	 *
 	 * Now let's tell the bus to rescan our devices. This may seem
 	 * like overhead, but the driver-model core will only scan a
@@ -1369,14 +1574,30 @@ static void nodemgr_node_probe(struct host_info *hi, int generation)
 	 * just removed.  */
 
 	if (generation == get_hpsb_generation(host))
-		bus_rescan_devices(&ieee1394_bus_type);
-
-	return;
+		if (bus_rescan_devices(&ieee1394_bus_type))
+			HPSB_DEBUG("bus_rescan_devices had an error");
 }
 
-/* Because we are a 1394a-2000 compliant IRM, we need to inform all the other
- * nodes of the broadcast channel.  (Really we're only setting the validity
- * bit). Other IRM responsibilities go in here as well. */
+static int nodemgr_send_resume_packet(struct hpsb_host *host)
+{
+	struct hpsb_packet *packet;
+	int error = -ENOMEM;
+
+	packet = hpsb_make_phypacket(host,
+			EXTPHYPACKET_TYPE_RESUME |
+			NODEID_TO_NODE(host->node_id) << PHYPACKET_PORT_SHIFT);
+	if (packet) {
+		packet->no_waiter = 1;
+		packet->generation = get_hpsb_generation(host);
+		error = hpsb_send_packet(packet);
+	}
+	if (error)
+		HPSB_WARN("fw-host%d: Failed to broadcast resume packet",
+			  host->id);
+	return error;
+}
+
+/* Perform a few high-level IRM responsibilities. */
 static int nodemgr_do_irm_duties(struct hpsb_host *host, int cycles)
 {
 	quadlet_t bc;
@@ -1385,13 +1606,8 @@ static int nodemgr_do_irm_duties(struct hpsb_host *host, int cycles)
 	if (!host->is_irm || host->irm_id == (nodeid_t)-1)
 		return 1;
 
-	host->csr.broadcast_channel |= 0x40000000;  /* set validity bit */
-
-	bc = cpu_to_be32(host->csr.broadcast_channel);
-
-	hpsb_write(host, LOCAL_BUS | ALL_NODES, get_hpsb_generation(host),
-		   (CSR_REGISTER_BASE | CSR_BROADCAST_CHANNEL),
-		   &bc, sizeof(quadlet_t));
+	/* We are a 1394a-2000 compliant IRM. Set the validity bit. */
+	host->csr.broadcast_channel |= 0x40000000;
 
 	/* If there is no bus manager then we should set the root node's
 	 * force_root bit to promote bus stability per the 1394
@@ -1399,9 +1615,13 @@ static int nodemgr_do_irm_duties(struct hpsb_host *host, int cycles)
 	if (host->busmgr_id == 0xffff && host->node_count > 1)
 	{
 		u16 root_node = host->node_count - 1;
-		struct node_entry *ne = find_entry_by_nodeid(host, root_node | LOCAL_BUS);
 
-		if (ne && ne->busopt.cmc)
+		/* get cycle master capability flag from root node */
+		if (host->is_cycmst ||
+		    (!hpsb_read(host, LOCAL_BUS | root_node, get_hpsb_generation(host),
+				(CSR_REGISTER_BASE + CSR_CONFIG_ROM + 2 * sizeof(quadlet_t)),
+				&bc, sizeof(quadlet_t)) &&
+		     be32_to_cpu(bc) & 1 << CSR_CMC_SHIFT))
 			hpsb_send_phy_config(host, root_node, -1);
 		else {
 			HPSB_DEBUG("The root node is not cycle master capable; "
@@ -1420,6 +1640,13 @@ static int nodemgr_do_irm_duties(struct hpsb_host *host, int cycles)
 		}
 	}
 
+	/* Some devices suspend their ports while being connected to an inactive
+	 * host adapter, i.e. if connected before the low-level driver is
+	 * loaded.  They become visible either when physically unplugged and
+	 * replugged, or when receiving a resume packet.  Send one once. */
+	if (!host->resume_packet_sent && !nodemgr_send_resume_packet(host))
+		host->resume_packet_sent = 1;
+
 	return 1;
 }
 
@@ -1431,7 +1658,7 @@ static int nodemgr_check_irm_capability(struct hpsb_host *host, int cycles)
 	quadlet_t bc;
 	int status;
 
-	if (host->is_irm)
+	if (hpsb_disable_irm || host->is_irm)
 		return 1;
 
 	status = hpsb_read(host, LOCAL_BUS | (host->irm_id),
@@ -1463,41 +1690,34 @@ static int nodemgr_host_thread(void *__hi)
 {
 	struct host_info *hi = (struct host_info *)__hi;
 	struct hpsb_host *host = hi->host;
-	int reset_cycles = 0;
+	unsigned int g, generation = 0;
+	int i, reset_cycles = 0;
 
-	/* No userlevel access needed */
-	daemonize(hi->daemon_name);
-
+	set_freezable();
 	/* Setup our device-model entries */
 	nodemgr_create_host_dev_files(host);
 
-	/* Sit and wait for a signal to probe the nodes on the bus. This
-	 * happens when we get a bus reset. */
-	while (1) {
-		unsigned int generation = 0;
-		int i;
+	for (;;) {
+		/* Sleep until next bus reset */
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (get_hpsb_generation(host) == generation &&
+		    !kthread_should_stop())
+			schedule();
+		__set_current_state(TASK_RUNNING);
 
-		if (down_interruptible(&hi->reset_sem) ||
-		    down_interruptible(&nodemgr_serialize)) {
-			if (try_to_freeze(PF_FREEZE))
-				continue;
-			printk("NodeMgr: received unexpected signal?!\n" );
-			break;
-		}
-
-		if (hi->kill_me) {
-			up(&nodemgr_serialize);
-			break;
-		}
+		/* Thread may have been woken up to freeze or to exit */
+		if (try_to_freeze())
+			continue;
+		if (kthread_should_stop())
+			goto exit;
 
 		/* Pause for 1/4 second in 1/16 second intervals,
 		 * to make sure things settle down. */
+		g = get_hpsb_generation(host);
 		for (i = 0; i < 4 ; i++) {
-			set_current_state(TASK_INTERRUPTIBLE);
-			if (msleep_interruptible(63)) {
-				up(&nodemgr_serialize);
-				goto caught_signal;
-			}
+			msleep_interruptible(63);
+			if (kthread_should_stop())
+				goto exit;
 
 			/* Now get the generation in which the node ID's we collect
 			 * are valid.  During the bus scan we will use this generation
@@ -1507,35 +1727,23 @@ static int nodemgr_host_thread(void *__hi)
 			generation = get_hpsb_generation(host);
 
 			/* If we get a reset before we are done waiting, then
-			 * start the the waiting over again */
-			while (!down_trylock(&hi->reset_sem))
-				i = 0;
-
-			/* Check the kill_me again */
-			if (hi->kill_me) {
-				up(&nodemgr_serialize);
-				goto caught_signal;
-			}
+			 * start the waiting over again */
+			if (generation != g)
+				g = generation, i = 0;
 		}
 
-		if (!nodemgr_check_irm_capability(host, reset_cycles)) {
+		if (!nodemgr_check_irm_capability(host, reset_cycles) ||
+		    !nodemgr_do_irm_duties(host, reset_cycles)) {
 			reset_cycles++;
-			up(&nodemgr_serialize);
 			continue;
 		}
+		reset_cycles = 0;
 
 		/* Scan our nodes to get the bus options and create node
 		 * entries. This does not do the sysfs stuff, since that
-		 * would trigger hotplug callbacks and such, which is a
-		 * bad idea at this point. */
+		 * would trigger uevents and such, which is a bad idea at
+		 * this point. */
 		nodemgr_node_scan(hi, generation);
-		if (!nodemgr_do_irm_duties(host, reset_cycles)) {
-			reset_cycles++;
-			up(&nodemgr_serialize);
-			continue;
-		}
-
-		reset_cycles = 0;
 
 		/* This actually does the full probe, with sysfs
 		 * registration. */
@@ -1543,59 +1751,43 @@ static int nodemgr_host_thread(void *__hi)
 
 		/* Update some of our sysfs symlinks */
 		nodemgr_update_host_dev_links(host);
-
-		up(&nodemgr_serialize);
 	}
-
-caught_signal:
+exit:
 	HPSB_VERBOSE("NodeMgr: Exiting thread");
-
-	complete_and_exit(&hi->exited, 0);
+	return 0;
 }
 
-struct node_entry *hpsb_guid_get_entry(u64 guid)
+/**
+ * nodemgr_for_each_host - call a function for each IEEE 1394 host
+ * @data: an address to supply to the callback
+ * @cb: function to call for each host
+ *
+ * Iterate the hosts, calling a given function with supplied data for each host.
+ * If the callback fails on a host, i.e. if it returns a non-zero value, the
+ * iteration is stopped.
+ *
+ * Return value: 0 on success, non-zero on failure (same as returned by last run
+ * of the callback).
+ */
+int nodemgr_for_each_host(void *data, int (*cb)(struct hpsb_host *, void *))
 {
-        struct node_entry *ne;
-
-	down(&nodemgr_serialize);
-        ne = find_entry_by_guid(guid);
-	up(&nodemgr_serialize);
-
-        return ne;
-}
-
-struct node_entry *hpsb_nodeid_get_entry(struct hpsb_host *host, nodeid_t nodeid)
-{
-	struct node_entry *ne;
-
-	down(&nodemgr_serialize);
-	ne = find_entry_by_nodeid(host, nodeid);
-	up(&nodemgr_serialize);
-
-	return ne;
-}
-
-
-int nodemgr_for_each_host(void *__data, int (*cb)(struct hpsb_host *, void *))
-{
-	struct class *class = &hpsb_host_class;
-	struct class_device *cdev;
+	struct device *dev;
 	struct hpsb_host *host;
 	int error = 0;
 
-	down_read(&class->subsys.rwsem);
-	list_for_each_entry(cdev, &class->children, node) {
-		host = container_of(cdev, struct hpsb_host, class_dev);
+	down(&hpsb_host_class.sem);
+	list_for_each_entry(dev, &hpsb_host_class.devices, node) {
+		host = container_of(dev, struct hpsb_host, host_dev);
 
-		if ((error = cb(host, __data)))
+		if ((error = cb(host, data)))
 			break;
 	}
-	up_read(&class->subsys.rwsem);
+	up(&hpsb_host_class.sem);
 
 	return error;
 }
 
-/* The following four convenience functions use a struct node_entry
+/* The following two convenience functions use a struct node_entry
  * for addressing a node on the bus.  They are intended for use by any
  * process context, not just the nodemgr thread, so we need to be a
  * little careful when reading out the node ID and generation.  The
@@ -1610,22 +1802,20 @@ int nodemgr_for_each_host(void *__data, int (*cb)(struct hpsb_host *, void *))
  * ID's.
  */
 
-void hpsb_node_fill_packet(struct node_entry *ne, struct hpsb_packet *pkt)
+/**
+ * hpsb_node_fill_packet - fill some destination information into a packet
+ * @ne: destination node
+ * @packet: packet to fill in
+ *
+ * This will fill in the given, pre-initialised hpsb_packet with the current
+ * information from the node entry (host, node ID, bus generation number).
+ */
+void hpsb_node_fill_packet(struct node_entry *ne, struct hpsb_packet *packet)
 {
-        pkt->host = ne->host;
-        pkt->generation = ne->generation;
+	packet->host = ne->host;
+	packet->generation = ne->generation;
 	barrier();
-        pkt->node_id = ne->nodeid;
-}
-
-int hpsb_node_read(struct node_entry *ne, u64 addr,
-		   quadlet_t *buffer, size_t length)
-{
-	unsigned int generation = ne->generation;
-
-	barrier();
-	return hpsb_read(ne->host, ne->nodeid, generation,
-			 addr, buffer, length);
+	packet->node_id = ne->nodeid;
 }
 
 int hpsb_node_write(struct node_entry *ne, u64 addr,
@@ -1638,56 +1828,32 @@ int hpsb_node_write(struct node_entry *ne, u64 addr,
 			  addr, buffer, length);
 }
 
-int hpsb_node_lock(struct node_entry *ne, u64 addr,
-		   int extcode, quadlet_t *data, quadlet_t arg)
-{
-	unsigned int generation = ne->generation;
-
-	barrier();
-	return hpsb_lock(ne->host, ne->nodeid, generation,
-			 addr, extcode, data, arg);
-}
-
 static void nodemgr_add_host(struct hpsb_host *host)
 {
 	struct host_info *hi;
 
 	hi = hpsb_create_hostinfo(&nodemgr_highlevel, host, sizeof(*hi));
-
 	if (!hi) {
-		HPSB_ERR ("NodeMgr: out of memory in add host");
+		HPSB_ERR("NodeMgr: out of memory in add host");
 		return;
 	}
-
 	hi->host = host;
-	init_completion(&hi->exited);
-        sema_init(&hi->reset_sem, 0);
-
-	sprintf(hi->daemon_name, "knodemgrd_%d", host->id);
-
-	hi->pid = kernel_thread(nodemgr_host_thread, hi, CLONE_KERNEL);
-
-	if (hi->pid < 0) {
-		HPSB_ERR ("NodeMgr: failed to start %s thread for %s",
-			  hi->daemon_name, host->driver->name);
+	hi->thread = kthread_run(nodemgr_host_thread, hi, "knodemgrd_%d",
+				 host->id);
+	if (IS_ERR(hi->thread)) {
+		HPSB_ERR("NodeMgr: cannot start thread for host %d", host->id);
 		hpsb_destroy_hostinfo(&nodemgr_highlevel, host);
-		return;
 	}
-
-	return;
 }
 
 static void nodemgr_host_reset(struct hpsb_host *host)
 {
 	struct host_info *hi = hpsb_get_hostinfo(&nodemgr_highlevel, host);
 
-	if (hi != NULL) {
-		HPSB_VERBOSE("NodeMgr: Processing host reset for %s", hi->daemon_name);
-		up(&hi->reset_sem);
-	} else
-		HPSB_ERR ("NodeMgr: could not process reset of unused host");
-
-	return;
+	if (hi) {
+		HPSB_VERBOSE("NodeMgr: Processing reset for host %d", host->id);
+		wake_up_process(hi->thread);
+	}
 }
 
 static void nodemgr_remove_host(struct hpsb_host *host)
@@ -1695,18 +1861,9 @@ static void nodemgr_remove_host(struct hpsb_host *host)
 	struct host_info *hi = hpsb_get_hostinfo(&nodemgr_highlevel, host);
 
 	if (hi) {
-		if (hi->pid >= 0) {
-			hi->kill_me = 1;
-			mb();
-			up(&hi->reset_sem);
-			wait_for_completion(&hi->exited);
-			nodemgr_remove_host_dev(&host->device);
-		}
-	} else
-		HPSB_ERR("NodeMgr: host %s does not exist, cannot remove",
-			 host->driver->name);
-
-	return;
+		kthread_stop(hi->thread);
+		nodemgr_remove_host_dev(&host->device);
+	}
 }
 
 static struct hpsb_highlevel nodemgr_highlevel = {
@@ -1718,27 +1875,35 @@ static struct hpsb_highlevel nodemgr_highlevel = {
 
 int init_ieee1394_nodemgr(void)
 {
-	int ret;
+	int error;
 
-	ret = class_register(&nodemgr_ne_class);
-	if (ret < 0)
-		return ret;
-
-	ret = class_register(&nodemgr_ud_class);
-	if (ret < 0) {
-		class_unregister(&nodemgr_ne_class);
-		return ret;
-	}
+	error = class_register(&nodemgr_ne_class);
+	if (error)
+		goto fail_ne;
+	error = class_register(&nodemgr_ud_class);
+	if (error)
+		goto fail_ud;
+	error = driver_register(&nodemgr_mid_layer_driver);
+	if (error)
+		goto fail_ml;
+	/* This driver is not used if nodemgr is off (disable_nodemgr=1). */
+	nodemgr_dev_template_host.driver = &nodemgr_mid_layer_driver;
 
 	hpsb_register_highlevel(&nodemgr_highlevel);
-
 	return 0;
+
+fail_ml:
+	class_unregister(&nodemgr_ud_class);
+fail_ud:
+	class_unregister(&nodemgr_ne_class);
+fail_ne:
+	return error;
 }
 
 void cleanup_ieee1394_nodemgr(void)
 {
-        hpsb_unregister_highlevel(&nodemgr_highlevel);
-
+	hpsb_unregister_highlevel(&nodemgr_highlevel);
+	driver_unregister(&nodemgr_mid_layer_driver);
 	class_unregister(&nodemgr_ud_class);
 	class_unregister(&nodemgr_ne_class);
 }

@@ -26,9 +26,9 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/utsname.h>
+#include <linux/ipc.h>
 
 #include <asm/uaccess.h>
-#include <asm/ipc.h>
 
 extern unsigned long do_mremap(unsigned long addr, unsigned long old_len,
 			       unsigned long new_len, unsigned long flags,
@@ -51,13 +51,6 @@ asmlinkage int sys_pipe(unsigned long __user *fildes)
 	return error;
 }
 
-/*
- * This is the lowest virtual address we can permit any user space
- * mapping to be mapped at.  This is particularly important for
- * non-high vector CPUs.
- */
-#define MIN_MAP_ADDR	(PAGE_SIZE)
-
 /* common code for old and new mmaps */
 inline long do_mmap2(
 	unsigned long addr, unsigned long len,
@@ -69,7 +62,7 @@ inline long do_mmap2(
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
-	if (flags & MAP_FIXED && addr < MIN_MAP_ADDR)
+	if (flags & MAP_FIXED && addr < FIRST_USER_ADDRESS)
 		goto out;
 
 	error = -EBADF;
@@ -122,7 +115,7 @@ sys_arm_mremap(unsigned long addr, unsigned long old_len,
 {
 	unsigned long ret = -EINVAL;
 
-	if (flags & MREMAP_FIXED && new_addr < MIN_MAP_ADDR)
+	if (flags & MREMAP_FIXED && new_addr < FIRST_USER_ADDRESS)
 		goto out;
 
 	down_write(&current->mm->mmap_sem);
@@ -154,6 +147,7 @@ asmlinkage int old_select(struct sel_arg_struct __user *arg)
 	return sys_select(a.n, a.inp, a.outp, a.exp, a.tvp);
 }
 
+#if !defined(CONFIG_AEABI) || defined(CONFIG_OABI_COMPAT)
 /*
  * sys_ipc() is the de-multiplexer for the SysV IPC calls..
  *
@@ -169,7 +163,11 @@ asmlinkage int sys_ipc(uint call, int first, int second, int third,
 
 	switch (call) {
 	case SEMOP:
-		return sys_semop(first, (struct sembuf __user *)ptr, second);
+		return sys_semtimedop (first, (struct sembuf __user *)ptr, second, NULL);
+	case SEMTIMEDOP:
+		return sys_semtimedop(first, (struct sembuf __user *)ptr, second,
+					(const struct timespec __user *)fifth);
+
 	case SEMGET:
 		return sys_semget (first, second, third);
 	case SEMCTL: {
@@ -229,13 +227,19 @@ asmlinkage int sys_ipc(uint call, int first, int second, int third,
 		return -ENOSYS;
 	}
 }
+#endif
 
 /* Fork a new task - this creates a new program thread.
  * This is called indirectly via a small wrapper
  */
 asmlinkage int sys_fork(struct pt_regs *regs)
 {
+#ifdef CONFIG_MMU
 	return do_fork(SIGCHLD, regs->ARM_sp, regs, 0, NULL, NULL);
+#else
+	/* can not support in nommu mode */
+	return(-EINVAL);
+#endif
 }
 
 /* Clone a task - this clones the calling program thread.
@@ -275,7 +279,7 @@ out:
 	return error;
 }
 
-long execve(const char *filename, char **argv, char **envp)
+int kernel_execve(const char *filename, char *const argv[], char *const envp[])
 {
 	struct pt_regs regs;
 	int ret;
@@ -305,12 +309,22 @@ long execve(const char *filename, char **argv, char **envp)
 		"b	ret_to_user"
 		:
 		: "r" (current_thread_info()),
-		  "Ir" (THREAD_SIZE - 8 - sizeof(regs)),
+		  "Ir" (THREAD_START_SP - sizeof(regs)),
 		  "r" (&regs),
 		  "Ir" (sizeof(regs))
-		: "r0", "r1", "r2", "r3", "ip", "memory");
+		: "r0", "r1", "r2", "r3", "ip", "lr", "memory");
 
  out:
 	return ret;
 }
-EXPORT_SYMBOL(execve);
+EXPORT_SYMBOL(kernel_execve);
+
+/*
+ * Since loff_t is a 64 bit type we avoid a lot of ABI hassle
+ * with a different argument ordering.
+ */
+asmlinkage long sys_arm_fadvise64_64(int fd, int advice,
+				     loff_t offset, loff_t len)
+{
+	return sys_fadvise64_64(fd, offset, len, advice);
+}

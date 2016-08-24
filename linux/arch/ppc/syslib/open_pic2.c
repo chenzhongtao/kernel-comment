@@ -1,6 +1,4 @@
 /*
- *  arch/ppc/kernel/open_pic.c -- OpenPIC Interrupt Handling
- *
  *  Copyright (C) 1997 Geert Uytterhoeven
  *
  *  This file is subject to the terms and conditions of the GNU General Public
@@ -12,12 +10,10 @@
  *  register accesses
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/init.h>
-#include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/sysdev.h>
 #include <linux/errno.h>
@@ -25,10 +21,10 @@
 #include <asm/signal.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/prom.h>
 #include <asm/sections.h>
 #include <asm/open_pic.h>
 #include <asm/i8259.h>
+#include <asm/machdep.h>
 
 #include "open_pic_defs.h"
 
@@ -83,13 +79,11 @@ static void openpic2_end_irq(unsigned int irq_nr);
 static void openpic2_ack_irq(unsigned int irq_nr);
 
 struct hw_interrupt_type open_pic2 = {
-	" OpenPIC2 ",
-	NULL,
-	NULL,
-	openpic2_enable_irq,
-	openpic2_disable_irq,
-	openpic2_ack_irq,
-	openpic2_end_irq,
+	.typename = " OpenPIC2 ",
+	.enable = openpic2_enable_irq,
+	.disable = openpic2_disable_irq,
+	.ack = openpic2_ack_irq,
+	.end = openpic2_end_irq,
 };
 
 /*
@@ -295,7 +289,7 @@ void __init openpic2_init(int offset)
 
 	/* Init descriptors */
 	for (i = offset; i < NumSources + offset; i++)
-		irq_desc[i].handler = &open_pic2;
+		irq_desc[i].chip = &open_pic2;
 
 	/* Initialize the spurious interrupt */
 	if (ppc_md.progress) ppc_md.progress("openpic2: spurious",0x3bd);
@@ -535,7 +529,7 @@ static void openpic2_end_irq(unsigned int irq_nr)
 }
 
 int
-openpic2_get_irq(struct pt_regs *regs)
+openpic2_get_irq(void)
 {
 	int irq = openpic2_irq();
 
@@ -578,7 +572,7 @@ static void openpic2_cached_disable_irq(u_int irq)
  * we need something better to deal with that... Maybe switch to S1 for
  * cpufreq changes
  */
-int openpic2_suspend(struct sys_device *sysdev, u32 state)
+int openpic2_suspend(struct sys_device *sysdev, pm_message_t state)
 {
 	int	i;
 	unsigned long flags;

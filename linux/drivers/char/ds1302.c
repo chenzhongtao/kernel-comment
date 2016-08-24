@@ -12,7 +12,6 @@
 *!
 *!***************************************************************************/
 
-#include <linux/config.h>
 
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -121,7 +120,6 @@ get_rtc_time(struct rtc_time *rtc_tm)
 	unsigned long flags;
 
 	local_irq_save(flags);
-	local_irq_disable();
 
 	rtc_tm->tm_sec = CMOS_READ(RTC_SECONDS);
 	rtc_tm->tm_min = CMOS_READ(RTC_MINUTES);
@@ -220,7 +218,6 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			BIN_TO_BCD(yrs);
 
 			local_irq_save(flags);
-			local_irq_disable();
 			CMOS_WRITE(yrs, RTC_YEAR);
 			CMOS_WRITE(mon, RTC_MONTH);
 			CMOS_WRITE(day, RTC_DAY_OF_MONTH);
@@ -283,7 +280,7 @@ get_rtc_status(char *buf)
 
 /* The various file operations we support. */
 
-static struct file_operations rtc_fops = {
+static const struct file_operations rtc_fops = {
 	.owner		= THIS_MODULE,
 	.ioctl		= rtc_ioctl,
 };

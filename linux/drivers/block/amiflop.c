@@ -64,6 +64,7 @@
 #include <linux/buffer_head.h>
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
+#include <linux/interrupt.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
@@ -131,7 +132,7 @@ static struct fd_drive_type drive_types[] = {
 { FD_DD_5,	"DD 5.25", 40, 2, 14716, 13630, 1, 40, 81, 6, 30, 2},
 { FD_NODRIVE, "No Drive", 0, 0,     0,     0, 0,  0,  0,  0,  0, 0}
 };
-static int num_dr_types = sizeof(drive_types) / sizeof(drive_types[0]);
+static int num_dr_types = ARRAY_SIZE(drive_types);
 
 static int amiga_read(int), dos_read(int);
 static void amiga_write(int), dos_write(int);
@@ -194,6 +195,8 @@ static DECLARE_WAIT_QUEUE_HEAD(ms_wait);
  */
 #define MAX_ERRORS 12
 
+#define custom amiga_custom
+
 /* Prevent "aliased" accesses. */
 static int fd_ref[4] = { 0,0,0,0 };
 static int fd_device[4] = { 0, 0, 0, 0 };
@@ -206,7 +209,7 @@ static int fd_device[4] = { 0, 0, 0, 0 };
 
 /* Milliseconds timer */
 
-static irqreturn_t ms_isr(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t ms_isr(int irq, void *dummy)
 {
 	ms_busy = -1;
 	wake_up(&ms_wait);
@@ -557,7 +560,7 @@ static unsigned long fd_get_drive_id(int drive)
 	return (id);
 }
 
-static irqreturn_t fd_block_done(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t fd_block_done(int irq, void *dummy)
 {
 	if (block_flag)
 		custom.dsklen = 0x4000;
@@ -1360,7 +1363,7 @@ static void redo_fd_request(void)
 #ifdef DEBUG
 		printk("fd: sector %ld + %d requested for %s\n",
 		       CURRENT->sector,cnt,
-		       (CURRENT->cmd==READ)?"read":"write");
+		       (rq_data_dir(CURRENT) == READ) ? "read" : "write");
 #endif
 		block = CURRENT->sector + cnt;
 		if ((int)block > floppy->blocks) {
@@ -1419,9 +1422,19 @@ static void redo_fd_request(void)
 	goto repeat;
 }
 
-static void do_fd_request(request_queue_t * q)
+static void do_fd_request(struct request_queue * q)
 {
 	redo_fd_request();
+}
+
+static int fd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+{
+	int drive = MINOR(bdev->bd_dev) & 3;
+
+	geo->heads = unit[drive].type->heads;
+	geo->sectors = unit[drive].dtype->sects * unit[drive].type->sect_mult;
+	geo->cylinders = unit[drive].type->tracks;
+	return 0;
 }
 
 static int fd_ioctl(struct inode *inode, struct file *filp,
@@ -1429,20 +1442,9 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 {
 	int drive = iminor(inode) & 3;
 	static struct floppy_struct getprm;
+	void __user *argp = (void __user *)param;
 
 	switch(cmd){
-	case HDIO_GETGEO:
-	{
-		struct hd_geometry loc;
-		loc.heads = unit[drive].type->heads;
-		loc.sectors = unit[drive].dtype->sects * unit[drive].type->sect_mult;
-		loc.cylinders = unit[drive].type->tracks;
-		loc.start = 0;
-		if (copy_to_user((void *)param, (void *)&loc,
-				 sizeof(struct hd_geometry)))
-			return -EFAULT;
-		break;
-	}
 	case FDFMTBEG:
 		get_fdc(drive);
 		if (fd_ref[drive] > 1) {
@@ -1478,7 +1480,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		break;
 	case FDFMTEND:
 		floppy_off(drive);
-		invalidate_bdev(inode->i_bdev, 0);
+		invalidate_bdev(inode->i_bdev);
 		break;
 	case FDGETPRM:
 		memset((void *)&getprm, 0, sizeof (getprm));
@@ -1486,9 +1488,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		getprm.head=unit[drive].type->heads;
 		getprm.sect=unit[drive].dtype->sects * unit[drive].type->sect_mult;
 		getprm.size=unit[drive].blocks;
-		if (copy_to_user((void *)param,
-				 (void *)&getprm,
-				 sizeof(struct floppy_struct)))
+		if (copy_to_user(argp, &getprm, sizeof(struct floppy_struct)))
 			return -EFAULT;
 		break;
 	case FDSETPRM:
@@ -1500,8 +1500,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		break;
 #ifdef RAW_IOCTL
 	case IOCTL_RAW_TRACK:
-		if (copy_to_user((void *)param, raw_buf,
-				 unit[drive].type->read_size))
+		if (copy_to_user(argp, raw_buf, unit[drive].type->read_size))
 			return -EFAULT;
 		else
 			return unit[drive].type->read_size;
@@ -1652,14 +1651,9 @@ static struct block_device_operations floppy_fops = {
 	.open		= floppy_open,
 	.release	= floppy_release,
 	.ioctl		= fd_ioctl,
+	.getgeo		= fd_getgeo,
 	.media_changed	= amiga_floppy_change,
 };
-
-void __init amiga_floppy_setup (char *str, int *ints)
-{
-	printk (KERN_INFO "amiflop: Setting default df0 to %x\n", ints[1]);
-	fd_def_df0 = ints[1];
-}
 
 static int __init fd_probe_drives(void)
 {
@@ -1715,9 +1709,12 @@ static struct kobject *floppy_find(dev_t dev, int *part, void *data)
 	return get_disk(unit[drive].gendisk);
 }
 
-int __init amiga_floppy_init(void)
+static int __init amiga_floppy_init(void)
 {
 	int i, ret;
+
+	if (!MACH_IS_AMIGA)
+		return -ENXIO;
 
 	if (!AMIGAHW_PRESENT(AMI_FLOPPY))
 		return -ENXIO;
@@ -1815,15 +1812,8 @@ out_blkdev:
 	return ret;
 }
 
+module_init(amiga_floppy_init);
 #ifdef MODULE
-#include <linux/version.h>
-
-int init_module(void)
-{
-	if (!MACH_IS_AMIGA)
-		return -ENXIO;
-	return amiga_floppy_init();
-}
 
 #if 0 /* not safe to unload */
 void cleanup_module(void)
@@ -1847,4 +1837,19 @@ void cleanup_module(void)
 	unregister_blkdev(FLOPPY_MAJOR, "fd");
 }
 #endif
+
+#else
+static int __init amiga_floppy_setup (char *str)
+{
+	int n;
+	if (!MACH_IS_AMIGA)
+		return 0;
+	if (!get_option(&str, &n))
+		return 0;
+	printk (KERN_INFO "amiflop: Setting default df0 to %x\n", n);
+	fd_def_df0 = n;
+	return 1;
+}
+
+__setup("floppy=", amiga_floppy_setup);
 #endif

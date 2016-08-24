@@ -28,7 +28,6 @@
  * Thomas Lange, thomas@corelatus.com
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
@@ -173,7 +172,8 @@ struct fec_enet_private {
 	uint	phy_status;
 	uint	phy_speed;
 	phy_info_t	*phy;
-	struct tq_struct phy_task;
+	struct work_struct phy_task;
+	struct net_device *dev;
 
 	uint	sequence_done;
 
@@ -199,7 +199,7 @@ static int fec_enet_start_xmit(struct sk_buff *skb, struct net_device *dev);
 #ifdef	CONFIG_USE_MDIO
 static void fec_enet_mii(struct net_device *dev);
 #endif	/* CONFIG_USE_MDIO */
-static void fec_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs);
+static irqreturn_t fec_enet_interrupt(int irq, void * dev_id);
 #ifdef CONFIG_FEC_PACKETHOOK
 static void  fec_enet_tx(struct net_device *dev, __u32 regval);
 static void  fec_enet_rx(struct net_device *dev, __u32 regval);
@@ -471,8 +471,8 @@ fec_timeout(struct net_device *dev)
 /* The interrupt handler.
  * This is called from the MPC core interrupt.
  */
-static	void
-fec_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs)
+static	irqreturn_t
+fec_enet_interrupt(int irq, void * dev_id)
 {
 	struct	net_device *dev = dev_id;
 	volatile fec_t	*fecp;
@@ -525,6 +525,7 @@ printk("%s[%d] %s: unexpected FEC_ENET_MII event\n", __FILE__,__LINE__,__FUNCTIO
 		}
 
 	}
+	return IRQ_RETVAL(IRQ_HANDLED);
 }
 
 
@@ -723,9 +724,8 @@ while (!(bdp->cbd_sc & BD_ENET_RX_EMPTY)) {
 		printk("%s: Memory squeeze, dropping packet.\n", dev->name);
 		fep->stats.rx_dropped++;
 	} else {
-		skb->dev = dev;
 		skb_put(skb,pkt_len-4);	/* Make room */
-		eth_copy_and_sum(skb, data, pkt_len-4, 0);
+		skb_copy_to_linear_data(skb, data, pkt_len-4);
 		skb->protocol=eth_type_trans(skb,dev);
 		netif_rx(skb);
 	}
@@ -1263,9 +1263,11 @@ static void mii_display_status(struct net_device *dev)
 	printk(".\n");
 }
 
-static void mii_display_config(struct net_device *dev)
+static void mii_display_config(struct work_struct *work)
 {
-	struct fec_enet_private *fep = dev->priv;
+	struct fec_enet_private *fep =
+		container_of(work, struct fec_enet_private, phy_task);
+	struct net_device *dev = fep->dev;
 	volatile uint *s = &(fep->phy_status);
 
 	printk("%s: config: auto-negotiation ", dev->name);
@@ -1294,9 +1296,11 @@ static void mii_display_config(struct net_device *dev)
 	fep->sequence_done = 1;
 }
 
-static void mii_relink(struct net_device *dev)
+static void mii_relink(struct work_struct *work)
 {
-	struct fec_enet_private *fep = dev->priv;
+	struct fec_enet_private *fep =
+		container_of(work, struct fec_enet_private, phy_task);
+	struct net_device *dev = fep->dev;
 	int duplex;
 
 	fep->link = (fep->phy_status & PHY_STAT_LINK) ? 1 : 0;
@@ -1323,18 +1327,18 @@ static void mii_queue_relink(uint mii_reg, struct net_device *dev)
 {
 	struct fec_enet_private *fep = dev->priv;
 
-	fep->phy_task.routine = (void *)mii_relink;
-	fep->phy_task.data = dev;
-	schedule_task(&fep->phy_task);
+	fep->dev = dev;
+	INIT_WORK(&fep->phy_task, mii_relink);
+	schedule_work(&fep->phy_task);
 }
 
 static void mii_queue_config(uint mii_reg, struct net_device *dev)
 {
 	struct fec_enet_private *fep = dev->priv;
 
-	fep->phy_task.routine = (void *)mii_display_config;
-	fep->phy_task.data = dev;
-	schedule_task(&fep->phy_task);
+	fep->dev = dev;
+	INIT_WORK(&fep->phy_task, mii_display_config);
+	schedule_work(&fep->phy_task);
 }
 
 
@@ -1403,11 +1407,11 @@ mii_discover_phy(uint mii_reg, struct net_device *dev)
 
 /* This interrupt occurs when the PHY detects a link change.
 */
-static void
+static
 #ifdef CONFIG_RPXCLASSIC
-mii_link_interrupt(void *dev_id)
+void mii_link_interrupt(void *dev_id)
 #else
-mii_link_interrupt(int irq, void * dev_id, struct pt_regs * regs)
+irqreturn_t mii_link_interrupt(int irq, void * dev_id)
 #endif
 {
 #ifdef	CONFIG_USE_MDIO
@@ -1440,6 +1444,9 @@ mii_link_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 printk("%s[%d] %s: unexpected Link interrupt\n", __FILE__,__LINE__,__FUNCTION__);
 #endif	/* CONFIG_USE_MDIO */
 
+#ifndef CONFIG_RPXCLASSIC
+	return IRQ_RETVAL(IRQ_HANDLED);
+#endif	/* CONFIG_RPXCLASSIC */
 }
 
 static int
@@ -1575,7 +1582,7 @@ static int __init fec_enet_init(void)
 	struct fec_enet_private *fep;
 	int i, j, k, err;
 	unsigned char	*eap, *iap, *ba;
-	unsigned long	mem_addr;
+	dma_addr_t	mem_addr;
 	volatile	cbd_t	*bdp;
 	cbd_t		*cbd_base;
 	volatile	immap_t	*immap;
@@ -1640,7 +1647,8 @@ static int __init fec_enet_init(void)
 		printk("FEC initialization failed.\n");
 		return 1;
 	}
-	cbd_base = (cbd_t *)consistent_alloc(GFP_KERNEL, PAGE_SIZE, &mem_addr);
+	cbd_base = (cbd_t *)dma_alloc_coherent(dev->class_dev.dev, PAGE_SIZE,
+					       &mem_addr, GFP_KERNEL);
 
 	/* Set receive and transmit descriptor base.
 	*/
@@ -1657,7 +1665,10 @@ static int __init fec_enet_init(void)
 
 		/* Allocate a page.
 		*/
-		ba = (unsigned char *)consistent_alloc(GFP_KERNEL, PAGE_SIZE, &mem_addr);
+		ba = (unsigned char *)dma_alloc_coherent(dev->class_dev.dev,
+							 PAGE_SIZE,
+							 &mem_addr,
+							 GFP_KERNEL);
 		/* BUG: no check for failure */
 
 		/* Initialize the BD for every fragment in the page.
@@ -1735,7 +1746,7 @@ static int __init fec_enet_init(void)
 
 	/* Bits moved from Rev. D onward.
 	*/
-	if ((mfspr(IMMR) & 0xffff) < 0x0501)
+	if ((mfspr(SPRN_IMMR) & 0xffff) < 0x0501)
 		immap->im_ioport.iop_pddir = 0x1c58;	/* Pre rev. D */
 	else
 		immap->im_ioport.iop_pddir = 0x1fff;	/* Rev. D and later */
@@ -1867,7 +1878,7 @@ fec_restart(struct net_device *dev, int duplex)
 	bdp--;
 	bdp->cbd_sc |= BD_SC_WRAP;
 
-	/* ...and the same for transmmit.
+	/* ...and the same for transmit.
 	*/
 	bdp = fep->tx_bd_base;
 	for (i=0; i<TX_RING_SIZE; i++) {

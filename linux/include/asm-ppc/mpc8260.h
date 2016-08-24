@@ -8,7 +8,6 @@
 #ifndef __ASM_PPC_MPC8260_H__
 #define __ASM_PPC_MPC8260_H__
 
-#include <linux/config.h>
 
 #ifdef CONFIG_8260
 
@@ -41,7 +40,7 @@
 #endif
 
 #ifdef CONFIG_PCI_8260
-#include <syslib/m8260_pci.h>
+#include <syslib/m82xx_pci.h>
 #endif
 
 /* Make sure the memory translation stuff is there if PCI not used.
@@ -67,11 +66,35 @@
 #define IO_VIRT_ADDR	IO_PHYS_ADDR
 #endif
 
+enum ppc_sys_devices {
+	MPC82xx_CPM_FCC1,
+	MPC82xx_CPM_FCC2,
+	MPC82xx_CPM_FCC3,
+	MPC82xx_CPM_I2C,
+	MPC82xx_CPM_SCC1,
+	MPC82xx_CPM_SCC2,
+	MPC82xx_CPM_SCC3,
+	MPC82xx_CPM_SCC4,
+	MPC82xx_CPM_SPI,
+	MPC82xx_CPM_MCC1,
+	MPC82xx_CPM_MCC2,
+	MPC82xx_CPM_SMC1,
+	MPC82xx_CPM_SMC2,
+	MPC82xx_CPM_USB,
+	MPC82xx_SEC1,
+	MPC82xx_MDIO_BB,
+	NUM_PPC_SYS_DEVS,
+};
+
 #ifndef __ASSEMBLY__
 /* The "residual" data board information structure the boot loader
  * hands to us.
  */
 extern unsigned char __res[];
+#endif
+
+#ifndef BOARD_CHIP_NAME
+#define BOARD_CHIP_NAME ""
 #endif
 
 #endif /* CONFIG_8260 */

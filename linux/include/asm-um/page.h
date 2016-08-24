@@ -9,7 +9,7 @@
 
 struct page;
 
-#include <linux/config.h>
+#include <linux/types.h>
 #include <asm/vm-flags.h>
 
 /* PAGE_SHIFT determines the page size */
@@ -27,7 +27,7 @@ struct page;
 #define clear_user_page(page, vaddr, pg)	clear_page(page)
 #define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
 
-#if defined(CONFIG_3_LEVEL_PGTABLES) && !defined(CONFIG_64_BIT)
+#if defined(CONFIG_3_LEVEL_PGTABLES) && !defined(CONFIG_64BIT)
 
 typedef struct { unsigned long pte_low, pte_high; } pte_t;
 typedef struct { unsigned long long pmd; } pmd_t;
@@ -44,6 +44,9 @@ typedef struct { unsigned long pgd; } pgd_t;
 #define pte_set_val(pte, phys, prot) \
 	({ (pte).pte_high = (phys) >> 32; \
 	   (pte).pte_low = (phys) | pgprot_val(prot); })
+
+#define pmd_val(x)	((x).pmd)
+#define __pmd(x) ((pmd_t) { (x) } )
 
 typedef unsigned long long pfn_t;
 typedef unsigned long long phys_t;
@@ -93,13 +96,15 @@ extern unsigned long uml_physmem;
 
 #define __va_space (8*1024*1024)
 
-extern unsigned long to_phys(void *virt);
-extern void *to_virt(unsigned long phys);
-#define __pa(virt) to_phys((void *) virt)
-#define __va(phys) to_virt((unsigned long) phys)
+#include "mem.h"
 
-#define page_to_pfn(page) ((page) - mem_map)
-#define pfn_to_page(pfn) (mem_map + (pfn))
+/* Cast to unsigned long before casting to void * to avoid a warning from
+ * mmap_kmem about cutting a long long down to a void *.  Not sure that
+ * casting is the right thing, but 32-bit UML can't have 64-bit virtual
+ * addresses
+ */
+#define __pa(virt) to_phys((void *) (unsigned long) (virt))
+#define __va(phys) to_virt((unsigned long) (phys))
 
 #define phys_to_pfn(p) ((p) >> PAGE_SHIFT)
 #define pfn_to_phys(pfn) ((pfn) << PAGE_SHIFT)
@@ -107,24 +112,10 @@ extern void *to_virt(unsigned long phys);
 #define pfn_valid(pfn) ((pfn) < max_mapnr)
 #define virt_addr_valid(v) pfn_valid(phys_to_pfn(__pa(v)))
 
-/* Pure 2^n version of get_order */
-static __inline__ int get_order(unsigned long size)
-{
-	int order;
-
-	size = (size-1) >> (PAGE_SHIFT-1);
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-	return order;
-}
-
-extern struct page *arch_validate(struct page *page, int mask, int order);
+extern struct page *arch_validate(struct page *page, gfp_t mask, int order);
 #define HAVE_ARCH_VALIDATE
 
-extern void arch_free_page(struct page *page, int order);
-#define HAVE_ARCH_FREE_PAGE
+#include <asm-generic/memory_model.h>
+#include <asm-generic/page.h>
 
 #endif

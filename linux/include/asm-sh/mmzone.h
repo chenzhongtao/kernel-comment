@@ -1,61 +1,46 @@
-/*
- *  linux/include/asm-sh/mmzone.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
 #ifndef __ASM_SH_MMZONE_H
 #define __ASM_SH_MMZONE_H
 
-#include <linux/config.h>
+#ifdef __KERNEL__
 
-#ifdef CONFIG_DISCONTIGMEM
+#ifdef CONFIG_NEED_MULTIPLE_NODES
+extern struct pglist_data *node_data[];
+#define NODE_DATA(nid)		(node_data[nid])
 
-/* Currently, just for HP690 */
-#define PHYSADDR_TO_NID(phys)	((((phys) - __MEMORY_START) >= 0x01000000)?1:0)
+#define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
+#define node_end_pfn(nid)	(NODE_DATA(nid)->node_start_pfn + \
+				 NODE_DATA(nid)->node_spanned_pages)
 
-extern pg_data_t discontig_page_data[MAX_NUMNODES];
-extern bootmem_data_t discontig_node_bdata[MAX_NUMNODES];
-
-/*
- * Following are macros that each numa implmentation must define.
- */
-
-/*
- * Given a kernel address, find the home node of the underlying memory.
- */
-#define KVADDR_TO_NID(kaddr)	PHYSADDR_TO_NID(__pa(kaddr))
-
-/*
- * Return a pointer to the node data for node n.
- */
-#define NODE_DATA(nid)		(&discontig_page_data[nid])
-
-/*
- * NODE_MEM_MAP gives the kaddr for the mem_map of the node.
- */
-#define NODE_MEM_MAP(nid)	(NODE_DATA(nid)->node_mem_map)
-
-#define phys_to_page(phys)						\
-({ unsigned int node = PHYSADDR_TO_NID(phys); 		      		\
-   NODE_MEM_MAP(node)				 		 	\
-     + (((phys) - NODE_DATA(node)->node_start_paddr) >> PAGE_SHIFT); })
-
-static inline int is_valid_page(struct page *page)
+static inline int pfn_to_nid(unsigned long pfn)
 {
-	unsigned int i;
+	int nid;
 
-	for (i = 0; i < MAX_NUMNODES; i++) {
-		if (page >= NODE_MEM_MAP(i) &&
-		    page < NODE_MEM_MAP(i) + NODE_DATA(i)->node_size)
-			return 1;
-	}
-	return 0;
+	for (nid = 0; nid < MAX_NUMNODES; nid++)
+		if (pfn >= node_start_pfn(nid) && pfn <= node_end_pfn(nid))
+			break;
+
+	return nid;
 }
 
-#define VALID_PAGE(page)	is_valid_page(page)
-#define page_to_phys(page)	PHYSADDR(page_address(page))
+static inline struct pglist_data *pfn_to_pgdat(unsigned long pfn)
+{
+	return NODE_DATA(pfn_to_nid(pfn));
+}
 
-#endif /* CONFIG_DISCONTIGMEM */
-#endif
+/* arch/sh/mm/numa.c */
+void __init setup_bootmem_node(int nid, unsigned long start, unsigned long end);
+#else
+static inline void
+setup_bootmem_node(int nid, unsigned long start, unsigned long end)
+{
+}
+#endif /* CONFIG_NEED_MULTIPLE_NODES */
+
+/* Platform specific mem init */
+void __init plat_mem_setup(void);
+
+/* arch/sh/kernel/setup.c */
+void __init setup_bootmem_allocator(unsigned long start_pfn);
+
+#endif /* __KERNEL__ */
+#endif /* __ASM_SH_MMZONE_H */

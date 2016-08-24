@@ -7,7 +7,6 @@
  * Copyright (C) 1996,98,99 Jakub Jelinek  (jj@sunsite.mff.cuni.cz)
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 
 #include <asm/head.h>
@@ -21,121 +20,19 @@
 #include <asm/visasm.h>
 #include <asm/estate.h>
 #include <asm/auxio.h>
-
-/* #define SYSCALL_TRACING	1 */
+#include <asm/sfafsr.h>
+#include <asm/pil.h>
+#include <asm/unistd.h>
 
 #define curptr      g6
-
-#define NR_SYSCALLS 284      /* Each OS is different... */
 
 	.text
 	.align		32
 
-	.globl		sparc64_vpte_patchme1
-	.globl		sparc64_vpte_patchme2
-/*
- * On a second level vpte miss, check whether the original fault is to the OBP 
- * range (note that this is only possible for instruction miss, data misses to
- * obp range do not use vpte). If so, go back directly to the faulting address.
- * This is because we want to read the tpc, otherwise we have no way of knowing
- * the 8k aligned faulting address if we are using >8k kernel pagesize. This also
- * ensures no vpte range addresses are dropped into tlb while obp is executing
- * (see inherit_locked_prom_mappings() rant).
- */
-sparc64_vpte_nucleus:
-	mov		0xf, %g5
-	sllx		%g5, 28, %g5			! Load 0xf0000000
-	cmp		%g4, %g5			! Is addr >= LOW_OBP_ADDRESS?
-	blu,pn		%xcc, sparc64_vpte_patchme1
-	 mov		0x1, %g5
-	sllx		%g5, 32, %g5			! Load 0x100000000
-	cmp		%g4, %g5			! Is addr < HI_OBP_ADDRESS?
-	blu,pn		%xcc, obp_iaddr_patch
-	 nop
-sparc64_vpte_patchme1:
-	sethi		%hi(0), %g5			! This has to be patched
-sparc64_vpte_patchme2:
-	or		%g5, %lo(0), %g5		! This is patched too
-	ba,pt		%xcc, sparc64_kpte_continue	! Part of dtlb_backend
-	 add		%g1, %g1, %g1			! Finish PMD offset adjustment
-
-vpte_noent:
-	mov		TLB_SFSR, %g1			! Restore %g1 value
-	stxa		%g4, [%g1 + %g1] ASI_DMMU	! Restore previous TAG_ACCESS
-	done						! Slick trick
-
-	.globl		obp_iaddr_patch
-	.globl		obp_daddr_patch
-
-obp_iaddr_patch:
-	sethi		%hi(0), %g5			! This and following is patched
-	or		%g5, %lo(0), %g5		! g5 now holds obp pmd base physaddr
-	wrpr		%g0, 1, %tl			! Behave as if we are at TL0
-	rdpr		%tpc, %g4			! Find original faulting iaddr
-	srlx		%g4, 13, %g4			! Throw out context bits
-	sllx		%g4, 13, %g4			! g4 has vpn + ctx0 now
-	mov		TLB_SFSR, %g1			! Restore %g1 value
-	stxa		%g4, [%g1 + %g1] ASI_IMMU	! Restore previous TAG_ACCESS
-	srlx		%g4, 23, %g6			! Find pmd number
-	and		%g6, 0x7ff, %g6			! Find pmd number
-	sllx		%g6, 2, %g6			! Find pmd offset
-	lduwa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pmd, ie pagetable physaddr
-	brz,pn		%g5, longpath			! Kill the PROM ? :-)
-	 sllx		%g5, 11, %g5			! Shift into place
-	srlx		%g4, 13, %g6			! find pte number in pagetable
-	and		%g6, 0x3ff, %g6			! find pte number in pagetable
-	sllx		%g6, 3, %g6			! find pte offset in pagetable
-	ldxa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pte
-	brgez,pn	%g5, longpath			! Kill the PROM ? :-)
-	 nop
-	stxa		%g5, [%g0] ASI_ITLB_DATA_IN	! put into tlb
-	retry						! go back to original fault
-
-obp_daddr_patch:
-	sethi		%hi(0), %g5			! This and following is patched
-	or		%g5, %lo(0), %g5		! g5 now holds obp pmd base physaddr
-	srlx		%g4, 23, %g6			! Find pmd number
-	and		%g6, 0x7ff, %g6			! Find pmd number
-	sllx		%g6, 2, %g6			! Find pmd offset
-	lduwa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pmd, ie pagetable physaddr
-	brz,pn		%g5, longpath
-	 sllx		%g5, 11, %g5			! Shift into place
-	srlx		%g4, 13, %g6			! find pte number in pagetable
-	and		%g6, 0x3ff, %g6			! find pte number in pagetable
-	sllx		%g6, 3, %g6			! find pte offset in pagetable
-	ldxa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pte
-	brgez,pn	%g5, longpath
-	 nop
-	stxa		%g5, [%g0] ASI_DTLB_DATA_IN	! put into tlb
-	retry
-
-/*
- * On a first level data miss, check whether this is to the OBP range (note that
- * such accesses can be made by prom, as well as by kernel using prom_getproperty
- * on "address"), and if so, do not use vpte access ... rather, use information
- * saved during inherit_prom_mappings() using 8k pagesize.
- */
-kvmap:
-	mov		0xf, %g5
-	sllx		%g5, 28, %g5			! Load 0xf0000000
-	cmp		%g4, %g5			! Is addr >= LOW_OBP_ADDRESS?
-	blu,pn		%xcc, vmalloc_addr
-	 mov		0x1, %g5
-	sllx		%g5, 32, %g5			! Load 0x100000000
-	cmp		%g4, %g5			! Is addr < HI_OBP_ADDRESS?
-	blu,pn		%xcc, obp_daddr_patch
-	 nop
-vmalloc_addr:						! vmalloc addr accessed
-	ldxa		[%g3 + %g6] ASI_N, %g5		! Yep, load k-vpte
-	brgez,pn	%g5, longpath			! Valid, load into TLB
-	 nop
-	stxa		%g5, [%g0] ASI_DTLB_DATA_IN	! Reload TLB
-	retry
-
 	/* This is trivial with the new code... */
 	.globl		do_fpdis
 do_fpdis:
-	sethi		%hi(TSTATE_PEF), %g4					! IEU0
+	sethi		%hi(TSTATE_PEF), %g4
 	rdpr		%tstate, %g5
 	andcc		%g5, %g4, %g0
 	be,pt		%xcc, 1f
@@ -152,18 +49,19 @@ do_fpdis:
 	add		%g0, %g0, %g0
 	ba,a,pt		%xcc, rtrap_clr_l6
 
-1:	ldub		[%g6 + TI_FPSAVED], %g5					! Load	Group
-	wr		%g0, FPRS_FEF, %fprs					! LSU	Group+4bubbles
-	andcc		%g5, FPRS_FEF, %g0					! IEU1	Group
-	be,a,pt		%icc, 1f						! CTI
-	 clr		%g7							! IEU0
-	ldx		[%g6 + TI_GSR], %g7					! Load	Group
-1:	andcc		%g5, FPRS_DL, %g0					! IEU1
-	bne,pn		%icc, 2f						! CTI
-	 fzero		%f0							! FPA
-	andcc		%g5, FPRS_DU, %g0					! IEU1  Group
-	bne,pn		%icc, 1f						! CTI
-	 fzero		%f2							! FPA
+1:	TRAP_LOAD_THREAD_REG(%g6, %g1)
+	ldub		[%g6 + TI_FPSAVED], %g5
+	wr		%g0, FPRS_FEF, %fprs
+	andcc		%g5, FPRS_FEF, %g0
+	be,a,pt		%icc, 1f
+	 clr		%g7
+	ldx		[%g6 + TI_GSR], %g7
+1:	andcc		%g5, FPRS_DL, %g0
+	bne,pn		%icc, 2f
+	 fzero		%f0
+	andcc		%g5, FPRS_DU, %g0
+	bne,pn		%icc, 1f
+	 fzero		%f2
 	faddd		%f0, %f2, %f4
 	fmuld		%f0, %f2, %f6
 	faddd		%f0, %f2, %f8
@@ -198,14 +96,30 @@ do_fpdis:
 	add		%g6, TI_FPREGS + 0x80, %g1
 	faddd		%f0, %f2, %f4
 	fmuld		%f0, %f2, %f6
-	ldxa		[%g3] ASI_DMMU, %g5
-	add		%g6, TI_FPREGS + 0xc0, %g2
-	stxa		%g0, [%g3] ASI_DMMU
+
+661:	ldxa		[%g3] ASI_DMMU, %g5
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	ldxa		[%g3] ASI_MMU, %g5
+	.previous
+
+	sethi		%hi(sparc64_kern_sec_context), %g2
+	ldx		[%g2 + %lo(sparc64_kern_sec_context)], %g2
+
+661:	stxa		%g2, [%g3] ASI_DMMU
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	stxa		%g2, [%g3] ASI_MMU
+	.previous
+
 	membar		#Sync
+	add		%g6, TI_FPREGS + 0xc0, %g2
 	faddd		%f0, %f2, %f8
 	fmuld		%f0, %f2, %f10
-	ldda		[%g1] ASI_BLK_S, %f32	! grrr, where is ASI_BLK_NUCLEUS 8-(
+	membar		#Sync
+	ldda		[%g1] ASI_BLK_S, %f32
 	ldda		[%g2] ASI_BLK_S, %f48
+	membar		#Sync
 	faddd		%f0, %f2, %f12
 	fmuld		%f0, %f2, %f14
 	faddd		%f0, %f2, %f16
@@ -217,21 +131,37 @@ do_fpdis:
 	faddd		%f0, %f2, %f28
 	fmuld		%f0, %f2, %f30
 	b,pt		%xcc, fpdis_exit
-	 membar		#Sync
+	 nop
 2:	andcc		%g5, FPRS_DU, %g0
 	bne,pt		%icc, 3f
 	 fzero		%f32
 	mov		SECONDARY_CONTEXT, %g3
 	fzero		%f34
-	ldxa		[%g3] ASI_DMMU, %g5
+
+661:	ldxa		[%g3] ASI_DMMU, %g5
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	ldxa		[%g3] ASI_MMU, %g5
+	.previous
+
 	add		%g6, TI_FPREGS, %g1
-	stxa		%g0, [%g3] ASI_DMMU
+	sethi		%hi(sparc64_kern_sec_context), %g2
+	ldx		[%g2 + %lo(sparc64_kern_sec_context)], %g2
+
+661:	stxa		%g2, [%g3] ASI_DMMU
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	stxa		%g2, [%g3] ASI_MMU
+	.previous
+
 	membar		#Sync
 	add		%g6, TI_FPREGS + 0x40, %g2
 	faddd		%f32, %f34, %f36
 	fmuld		%f32, %f34, %f38
-	ldda		[%g1] ASI_BLK_S, %f0	! grrr, where is ASI_BLK_NUCLEUS 8-(
+	membar		#Sync
+	ldda		[%g1] ASI_BLK_S, %f0
 	ldda		[%g2] ASI_BLK_S, %f16
+	membar		#Sync
 	faddd		%f32, %f34, %f40
 	fmuld		%f32, %f34, %f42
 	faddd		%f32, %f34, %f44
@@ -245,21 +175,42 @@ do_fpdis:
 	faddd		%f32, %f34, %f60
 	fmuld		%f32, %f34, %f62
 	ba,pt		%xcc, fpdis_exit
-	 membar		#Sync
+	 nop
 3:	mov		SECONDARY_CONTEXT, %g3
 	add		%g6, TI_FPREGS, %g1
-	ldxa		[%g3] ASI_DMMU, %g5
-	mov		0x40, %g2
-	stxa		%g0, [%g3] ASI_DMMU
+
+661:	ldxa		[%g3] ASI_DMMU, %g5
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	ldxa		[%g3] ASI_MMU, %g5
+	.previous
+
+	sethi		%hi(sparc64_kern_sec_context), %g2
+	ldx		[%g2 + %lo(sparc64_kern_sec_context)], %g2
+
+661:	stxa		%g2, [%g3] ASI_DMMU
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	stxa		%g2, [%g3] ASI_MMU
+	.previous
+
 	membar		#Sync
-	ldda		[%g1] ASI_BLK_S, %f0		! grrr, where is ASI_BLK_NUCLEUS 8-(
+	mov		0x40, %g2
+	membar		#Sync
+	ldda		[%g1] ASI_BLK_S, %f0
 	ldda		[%g1 + %g2] ASI_BLK_S, %f16
 	add		%g1, 0x80, %g1
 	ldda		[%g1] ASI_BLK_S, %f32
 	ldda		[%g1 + %g2] ASI_BLK_S, %f48
 	membar		#Sync
 fpdis_exit:
-	stxa		%g5, [%g3] ASI_DMMU
+
+661:	stxa		%g5, [%g3] ASI_DMMU
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	stxa		%g5, [%g3] ASI_MMU
+	.previous
+
 	membar		#Sync
 fpdis_exit2:
 	wr		%g7, 0, %gsr
@@ -280,6 +231,7 @@ fp_other_bounce:
 	.globl		do_fpother_check_fitos
 	.align		32
 do_fpother_check_fitos:
+	TRAP_LOAD_THREAD_REG(%g6, %g1)
 	sethi		%hi(fp_other_bounce - 4), %g7
 	or		%g7, %lo(fp_other_bounce - 4), %g7
 
@@ -403,6 +355,7 @@ fitos_emul_fini:
 	.globl		do_fptrap
 	.align		32
 do_fptrap:
+	TRAP_LOAD_THREAD_REG(%g6, %g1)
 	stx		%fsr, [%g6 + TI_XFSR]
 do_fptrap_after_fsr:
 	ldub		[%g6 + TI_FPSAVED], %g3
@@ -412,10 +365,24 @@ do_fptrap_after_fsr:
 	rd		%gsr, %g3
 	stx		%g3, [%g6 + TI_GSR]
 	mov		SECONDARY_CONTEXT, %g3
-	add		%g6, TI_FPREGS, %g2
-	ldxa		[%g3] ASI_DMMU, %g5
-	stxa		%g0, [%g3] ASI_DMMU
+
+661:	ldxa		[%g3] ASI_DMMU, %g5
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	ldxa		[%g3] ASI_MMU, %g5
+	.previous
+
+	sethi		%hi(sparc64_kern_sec_context), %g2
+	ldx		[%g2 + %lo(sparc64_kern_sec_context)], %g2
+
+661:	stxa		%g2, [%g3] ASI_DMMU
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	stxa		%g2, [%g3] ASI_MMU
+	.previous
+
 	membar		#Sync
+	add		%g6, TI_FPREGS, %g2
 	andcc		%g1, FPRS_DL, %g0
 	be,pn		%icc, 4f
 	 mov		0x40, %g3
@@ -428,7 +395,13 @@ do_fptrap_after_fsr:
 	stda		%f48, [%g2 + %g3] ASI_BLK_S
 5:	mov		SECONDARY_CONTEXT, %g1
 	membar		#Sync
-	stxa		%g5, [%g1] ASI_DMMU
+
+661:	stxa		%g5, [%g1] ASI_DMMU
+	.section	.sun4v_1insn_patch, "ax"
+	.word		661b
+	stxa		%g5, [%g1] ASI_MMU
+	.previous
+
 	membar		#Sync
 	ba,pt		%xcc, etrap
 	 wr		%g0, 0, %fprs
@@ -437,14 +410,11 @@ do_fptrap_after_fsr:
 	 *
 	 * DATA 0: [low 32-bits]  Address of function to call, jmp to this
 	 *         [high 32-bits] MMU Context Argument 0, place in %g5
-	 * DATA 1: Address Argument 1, place in %g6
+	 * DATA 1: Address Argument 1, place in %g1
 	 * DATA 2: Address Argument 2, place in %g7
 	 *
 	 * With this method we can do most of the cross-call tlb/cache
 	 * flushing very quickly.
-	 *
-	 * Current CPU's IRQ worklist table is locked into %g1,
-	 * don't touch.
 	 */
 	.text
 	.align		32
@@ -459,27 +429,23 @@ do_ivec:
 	stxa		%g0, [%g0] ASI_INTR_RECEIVE
 	membar		#Sync
 
-	sethi		%hi(ivector_table), %g2
-	sllx		%g3, 5, %g3
-	or		%g2, %lo(ivector_table), %g2
+	sethi		%hi(ivector_table_pa), %g2
+	ldx		[%g2 + %lo(ivector_table_pa)], %g2
+	sllx		%g3, 4, %g3
 	add		%g2, %g3, %g3
-	ldx		[%g3 + 0x08], %g2	/* irq_info */
-	ldub		[%g3 + 0x04], %g4	/* pil */
-	brz,pn		%g2, do_ivec_spurious
-	 mov		1, %g2
 
-	sllx		%g2, %g4, %g2
-	sllx		%g4, 2, %g4
-	lduw		[%g6 + %g4], %g5	/* g5 = irq_work(cpu, pil) */
-	stw		%g5, [%g3 + 0x00]	/* bucket->irq_chain = g5 */
-	stw		%g3, [%g6 + %g4]	/* irq_work(cpu, pil) = bucket */
-	wr		%g2, 0x0, %set_softint
+	TRAP_LOAD_IRQ_WORK_PA(%g6, %g1)
+
+	ldx		[%g6], %g5
+	stxa		%g5, [%g3] ASI_PHYS_USE_EC
+	stx		%g3, [%g6]
+	wr		%g0, 1 << PIL_DEVICE_IRQ, %set_softint
 	retry
 do_ivec_xcall:
 	mov		0x50, %g1
-
 	ldxa		[%g1 + %g0] ASI_INTR_R, %g1
 	srl		%g3, 0, %g3
+
 	mov		0x60, %g7
 	ldxa		[%g7 + %g0] ASI_INTR_R, %g7
 	stxa		%g0, [%g0] ASI_INTR_RECEIVE
@@ -489,89 +455,6 @@ do_ivec_xcall:
 
 	.align		32
 1:	jmpl		%g3, %g0
-	 nop
-
-do_ivec_spurious:
-	stw		%g3, [%g6 + 0x00]	/* irq_work(cpu, 0) = bucket */
-	rdpr		%pstate, %g5
-
-	wrpr		%g5, PSTATE_IG | PSTATE_AG, %pstate
-	sethi		%hi(109f), %g7
-	ba,pt		%xcc, etrap
-109:	 or		%g7, %lo(109b), %g7
-	call		catch_disabled_ivec
-	 add		%sp, PTREGS_OFF, %o0
-	ba,pt		%xcc, rtrap
-	 clr		%l6
-
-	.globl		save_alternate_globals
-save_alternate_globals: /* %o0 = save_area */
-	rdpr		%pstate, %o5
-	andn		%o5, PSTATE_IE, %o1
-	wrpr		%o1, PSTATE_AG, %pstate
-	stx		%g0, [%o0 + 0x00]
-	stx		%g1, [%o0 + 0x08]
-	stx		%g2, [%o0 + 0x10]
-	stx		%g3, [%o0 + 0x18]
-	stx		%g4, [%o0 + 0x20]
-	stx		%g5, [%o0 + 0x28]
-	stx		%g6, [%o0 + 0x30]
-	stx		%g7, [%o0 + 0x38]
-	wrpr		%o1, PSTATE_IG, %pstate
-	stx		%g0, [%o0 + 0x40]
-	stx		%g1, [%o0 + 0x48]
-	stx		%g2, [%o0 + 0x50]
-	stx		%g3, [%o0 + 0x58]
-	stx		%g4, [%o0 + 0x60]
-	stx		%g5, [%o0 + 0x68]
-	stx		%g6, [%o0 + 0x70]
-	stx		%g7, [%o0 + 0x78]
-	wrpr		%o1, PSTATE_MG, %pstate
-	stx		%g0, [%o0 + 0x80]
-	stx		%g1, [%o0 + 0x88]
-	stx		%g2, [%o0 + 0x90]
-	stx		%g3, [%o0 + 0x98]
-	stx		%g4, [%o0 + 0xa0]
-	stx		%g5, [%o0 + 0xa8]
-	stx		%g6, [%o0 + 0xb0]
-	stx		%g7, [%o0 + 0xb8]
-	wrpr		%o5, 0x0, %pstate
-	retl
-	 nop
-
-	.globl		restore_alternate_globals
-restore_alternate_globals: /* %o0 = save_area */
-	rdpr		%pstate, %o5
-	andn		%o5, PSTATE_IE, %o1
-	wrpr		%o1, PSTATE_AG, %pstate
-	ldx		[%o0 + 0x00], %g0
-	ldx		[%o0 + 0x08], %g1
-	ldx		[%o0 + 0x10], %g2
-	ldx		[%o0 + 0x18], %g3
-	ldx		[%o0 + 0x20], %g4
-	ldx		[%o0 + 0x28], %g5
-	ldx		[%o0 + 0x30], %g6
-	ldx		[%o0 + 0x38], %g7
-	wrpr		%o1, PSTATE_IG, %pstate
-	ldx		[%o0 + 0x40], %g0
-	ldx		[%o0 + 0x48], %g1
-	ldx		[%o0 + 0x50], %g2
-	ldx		[%o0 + 0x58], %g3
-	ldx		[%o0 + 0x60], %g4
-	ldx		[%o0 + 0x68], %g5
-	ldx		[%o0 + 0x70], %g6
-	ldx		[%o0 + 0x78], %g7
-	wrpr		%o1, PSTATE_MG, %pstate
-	ldx		[%o0 + 0x80], %g0
-	ldx		[%o0 + 0x88], %g1
-	ldx		[%o0 + 0x90], %g2
-	ldx		[%o0 + 0x98], %g3
-	ldx		[%o0 + 0xa0], %g4
-	ldx		[%o0 + 0xa8], %g5
-	ldx		[%o0 + 0xb0], %g6
-	ldx		[%o0 + 0xb8], %g7
-	wrpr		%o5, 0x0, %pstate
-	retl
 	 nop
 
 	.globl		getcc, setcc
@@ -593,9 +476,24 @@ setcc:
 	retl
 	 stx		%o1, [%o0 + PT_V9_TSTATE]
 
-	.globl		utrap, utrap_ill
-utrap:	brz,pn		%g1, etrap
+	.globl		utrap_trap
+utrap_trap:		/* %g3=handler,%g4=level */
+	TRAP_LOAD_THREAD_REG(%g6, %g1)
+	ldx		[%g6 + TI_UTRAPS], %g1
+	brnz,pt		%g1, invoke_utrap
 	 nop
+
+	ba,pt		%xcc, etrap
+	 rd		%pc, %g7
+	mov		%l4, %o1
+        call		bad_trap
+	 add		%sp, PTREGS_OFF, %o0
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+invoke_utrap:
+	sllx		%g3, 3, %g3
+	ldx		[%g1 + %g3], %g1
 	save		%sp, -128, %sp
 	rdpr		%tstate, %l6
 	rdpr		%cwp, %l7
@@ -605,201 +503,108 @@ utrap:	brz,pn		%g1, etrap
 	rdpr		%tnpc, %l7
 	wrpr		%g1, 0, %tnpc
 	done
-utrap_ill:
-        call		bad_trap
-	 add		%sp, PTREGS_OFF, %o0
-	ba,pt		%xcc, rtrap
-	 clr		%l6
 
-#ifdef CONFIG_BLK_DEV_FD
-	.globl		floppy_hardint
-floppy_hardint:
-	wr		%g0, (1 << 11), %clear_softint
-	sethi		%hi(doing_pdma), %g1
-	ld		[%g1 + %lo(doing_pdma)], %g2
-	brz,pn		%g2, floppy_dosoftint
-	 sethi		%hi(fdc_status), %g3
-	ldx		[%g3 + %lo(fdc_status)], %g3
-	sethi		%hi(pdma_vaddr), %g5
-	ldx		[%g5 + %lo(pdma_vaddr)], %g4
-	sethi		%hi(pdma_size), %g5
-	ldx		[%g5 + %lo(pdma_size)], %g5
-
-next_byte:
-	lduba		[%g3] ASI_PHYS_BYPASS_EC_E, %g7
-	andcc		%g7, 0x80, %g0
-	be,pn		%icc, floppy_fifo_emptied
-	 andcc		%g7, 0x20, %g0
-	be,pn		%icc, floppy_overrun
-	 andcc		%g7, 0x40, %g0
-	be,pn		%icc, floppy_write
-	 sub		%g5, 1, %g5
-
-	inc		%g3
-	lduba		[%g3] ASI_PHYS_BYPASS_EC_E, %g7
-	dec		%g3
-	orcc		%g0, %g5, %g0
-	stb		%g7, [%g4]
-	bne,pn		%xcc, next_byte
-	 add		%g4, 1, %g4
-
-	b,pt		%xcc, floppy_tdone
-	 nop
-
-floppy_write:
-	ldub		[%g4], %g7
-	orcc		%g0, %g5, %g0
-	inc		%g3
-	stba		%g7, [%g3] ASI_PHYS_BYPASS_EC_E
-	dec		%g3
-	bne,pn		%xcc, next_byte
-	 add		%g4, 1, %g4
-
-floppy_tdone:
-	sethi		%hi(pdma_vaddr), %g1
-	stx		%g4, [%g1 + %lo(pdma_vaddr)]
-	sethi		%hi(pdma_size), %g1
-	stx		%g5, [%g1 + %lo(pdma_size)]
-	sethi		%hi(auxio_register), %g1
-	ldx		[%g1 + %lo(auxio_register)], %g7
-	lduba		[%g7] ASI_PHYS_BYPASS_EC_E, %g5
-	or		%g5, AUXIO_AUX1_FTCNT, %g5
-/*	andn		%g5, AUXIO_AUX1_MASK, %g5 */
-	stba		%g5, [%g7] ASI_PHYS_BYPASS_EC_E
-	andn		%g5, AUXIO_AUX1_FTCNT, %g5
-/*	andn		%g5, AUXIO_AUX1_MASK, %g5 */
-
-	nop; nop;  nop; nop;  nop; nop;
-	nop; nop;  nop; nop;  nop; nop;
-
-	stba		%g5, [%g7] ASI_PHYS_BYPASS_EC_E
-	sethi		%hi(doing_pdma), %g1
-	b,pt		%xcc, floppy_dosoftint
-	 st		%g0, [%g1 + %lo(doing_pdma)]
-
-floppy_fifo_emptied:
-	sethi		%hi(pdma_vaddr), %g1
-	stx		%g4, [%g1 + %lo(pdma_vaddr)]
-	sethi		%hi(pdma_size), %g1
-	stx		%g5, [%g1 + %lo(pdma_size)]
-	sethi		%hi(irq_action), %g1
-	or		%g1, %lo(irq_action), %g1
-	ldx		[%g1 + (11 << 3)], %g3		! irqaction[floppy_irq]
-	ldx		[%g3 + 0x08], %g4		! action->flags>>48==ino
-	sethi		%hi(ivector_table), %g3
-	srlx		%g4, 48, %g4
-	or		%g3, %lo(ivector_table), %g3
-	sllx		%g4, 5, %g4
-	ldx		[%g3 + %g4], %g4		! &ivector_table[ino]
-	ldx		[%g4 + 0x10], %g4		! bucket->iclr
-	stwa		%g0, [%g4] ASI_PHYS_BYPASS_EC_E	! ICLR_IDLE
-	membar		#Sync				! probably not needed...
-	retry
-
-floppy_overrun:
-	sethi		%hi(pdma_vaddr), %g1
-	stx		%g4, [%g1 + %lo(pdma_vaddr)]
-	sethi		%hi(pdma_size), %g1
-	stx		%g5, [%g1 + %lo(pdma_size)]
-	sethi		%hi(doing_pdma), %g1
-	st		%g0, [%g1 + %lo(doing_pdma)]
-
-floppy_dosoftint:
-	rdpr		%pil, %g2
-	wrpr		%g0, 15, %pil
-	sethi		%hi(109f), %g7
-	b,pt		%xcc, etrap_irq
-109:	 or		%g7, %lo(109b), %g7
-
-	mov		11, %o0
-	mov		0, %o1
-	call		sparc_floppy_irq
-	 add		%sp, PTREGS_OFF, %o2
-
-	b,pt		%xcc, rtrap_irq
-	 nop
-
-#endif /* CONFIG_BLK_DEV_FD */
-
-	/* XXX Here is stuff we still need to write... -DaveM XXX */
-	.globl		netbsd_syscall
-netbsd_syscall:
-	retl
-	 nop
-
-	/* These next few routines must be sure to clear the
-	 * SFSR FaultValid bit so that the fast tlb data protection
-	 * handler does not flush the wrong context and lock up the
-	 * box.
+	/* We need to carefully read the error status, ACK
+	 * the errors, prevent recursive traps, and pass the
+	 * information on to C code for logging.
+	 *
+	 * We pass the AFAR in as-is, and we encode the status
+	 * information as described in asm-sparc64/sfafsr.h
 	 */
-	.globl		__do_data_access_exception
-	.globl		__do_data_access_exception_tl1
-__do_data_access_exception_tl1:
-	rdpr		%pstate, %g4
-	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
-	mov		TLB_SFSR, %g3
-	mov		DMMU_SFAR, %g5
-	ldxa		[%g3] ASI_DMMU, %g4	! Get SFSR
-	ldxa		[%g5] ASI_DMMU, %g5	! Get SFAR
-	stxa		%g0, [%g3] ASI_DMMU	! Clear SFSR.FaultValid bit
+	.globl		__spitfire_access_error
+__spitfire_access_error:
+	/* Disable ESTATE error reporting so that we do not
+	 * take recursive traps and RED state the processor.
+	 */
+	stxa		%g0, [%g0] ASI_ESTATE_ERROR_EN
 	membar		#Sync
-	ba,pt		%xcc, winfix_dax
-	 rdpr		%tpc, %g3
-__do_data_access_exception:
-	rdpr		%pstate, %g4
-	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
-	mov		TLB_SFSR, %g3
-	mov		DMMU_SFAR, %g5
-	ldxa		[%g3] ASI_DMMU, %g4	! Get SFSR
-	ldxa		[%g5] ASI_DMMU, %g5	! Get SFAR
-	stxa		%g0, [%g3] ASI_DMMU	! Clear SFSR.FaultValid bit
-	membar		#Sync
-	sethi		%hi(109f), %g7
-	ba,pt		%xcc, etrap
-109:	 or		%g7, %lo(109b), %g7
-	mov		%l4, %o1
-	mov		%l5, %o2
-	call		data_access_exception
-	 add		%sp, PTREGS_OFF, %o0
-	ba,pt		%xcc, rtrap
-	 clr		%l6
 
-	.globl		__do_instruction_access_exception
-	.globl		__do_instruction_access_exception_tl1
-__do_instruction_access_exception_tl1:
-	rdpr		%pstate, %g4
-	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
-	mov		TLB_SFSR, %g3
-	mov		DMMU_SFAR, %g5
-	ldxa		[%g3] ASI_DMMU, %g4	! Get SFSR
-	ldxa		[%g5] ASI_DMMU, %g5	! Get SFAR
-	stxa		%g0, [%g3] ASI_IMMU	! Clear FaultValid bit
+	mov		UDBE_UE, %g1
+	ldxa		[%g0] ASI_AFSR, %g4	! Get AFSR
+
+	/* __spitfire_cee_trap branches here with AFSR in %g4 and
+	 * UDBE_CE in %g1.  It only clears ESTATE_ERR_CE in the
+	 * ESTATE Error Enable register.
+	 */
+__spitfire_cee_trap_continue:
+	ldxa		[%g0] ASI_AFAR, %g5	! Get AFAR
+
+	rdpr		%tt, %g3
+	and		%g3, 0x1ff, %g3		! Paranoia
+	sllx		%g3, SFSTAT_TRAP_TYPE_SHIFT, %g3
+	or		%g4, %g3, %g4
+	rdpr		%tl, %g3
+	cmp		%g3, 1
+	mov		1, %g3
+	bleu		%xcc, 1f
+	 sllx		%g3, SFSTAT_TL_GT_ONE_SHIFT, %g3
+
+	or		%g4, %g3, %g4
+
+	/* Read in the UDB error register state, clearing the
+	 * sticky error bits as-needed.  We only clear them if
+	 * the UE bit is set.  Likewise, __spitfire_cee_trap
+	 * below will only do so if the CE bit is set.
+	 *
+	 * NOTE: UltraSparc-I/II have high and low UDB error
+	 *       registers, corresponding to the two UDB units
+	 *       present on those chips.  UltraSparc-IIi only
+	 *       has a single UDB, called "SDB" in the manual.
+	 *       For IIi the upper UDB register always reads
+	 *       as zero so for our purposes things will just
+	 *       work with the checks below.
+	 */
+1:	ldxa		[%g0] ASI_UDBH_ERROR_R, %g3
+	and		%g3, 0x3ff, %g7		! Paranoia
+	sllx		%g7, SFSTAT_UDBH_SHIFT, %g7
+	or		%g4, %g7, %g4
+	andcc		%g3, %g1, %g3		! UDBE_UE or UDBE_CE
+	be,pn		%xcc, 1f
+	 nop
+	stxa		%g3, [%g0] ASI_UDB_ERROR_W
 	membar		#Sync
-	sethi		%hi(109f), %g7
+
+1:	mov		0x18, %g3
+	ldxa		[%g3] ASI_UDBL_ERROR_R, %g3
+	and		%g3, 0x3ff, %g7		! Paranoia
+	sllx		%g7, SFSTAT_UDBL_SHIFT, %g7
+	or		%g4, %g7, %g4
+	andcc		%g3, %g1, %g3		! UDBE_UE or UDBE_CE
+	be,pn		%xcc, 1f
+	 nop
+	mov		0x18, %g7
+	stxa		%g3, [%g7] ASI_UDB_ERROR_W
+	membar		#Sync
+
+1:	/* Ok, now that we've latched the error state,
+	 * clear the sticky bits in the AFSR.
+	 */
+	stxa		%g4, [%g0] ASI_AFSR
+	membar		#Sync
+
+	rdpr		%tl, %g2
+	cmp		%g2, 1
+	rdpr		%pil, %g2
+	bleu,pt		%xcc, 1f
+	 wrpr		%g0, 15, %pil
+
 	ba,pt		%xcc, etraptl1
-109:	 or		%g7, %lo(109b), %g7
-	mov		%l4, %o1
-	mov		%l5, %o2
-	call		instruction_access_exception_tl1
-	 add		%sp, PTREGS_OFF, %o0
-	ba,pt		%xcc, rtrap
-	 clr		%l6
+	 rd		%pc, %g7
 
-__do_instruction_access_exception:
-	rdpr		%pstate, %g4
-	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
-	mov		TLB_SFSR, %g3
-	mov		DMMU_SFAR, %g5
-	ldxa		[%g3] ASI_DMMU, %g4	! Get SFSR
-	ldxa		[%g5] ASI_DMMU, %g5	! Get SFAR
-	stxa		%g0, [%g3] ASI_IMMU	! Clear FaultValid bit
-	membar		#Sync
-	sethi		%hi(109f), %g7
-	ba,pt		%xcc, etrap
-109:	 or		%g7, %lo(109b), %g7
+	ba,pt		%xcc, 2f
+	 nop
+
+1:	ba,pt		%xcc, etrap_irq
+	 rd		%pc, %g7
+
+2:
+#ifdef CONFIG_TRACE_IRQFLAGS
+	call	trace_hardirqs_off
+	 nop
+#endif
 	mov		%l4, %o1
 	mov		%l5, %o2
-	call		instruction_access_exception
+	call		spitfire_access_error
 	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
@@ -821,212 +626,124 @@ __do_instruction_access_exception:
 	 * as it is the only situation where we can safely record
 	 * and log.  For trap level >1 we just clear the CE bit
 	 * in the AFSR and return.
-	 */
-
-	/* Our trap handling infrastructure allows us to preserve
-	 * two 64-bit values during etrap for arguments to
-	 * subsequent C code.  Therefore we encode the information
-	 * as follows:
 	 *
-	 * value 1) Full 64-bits of AFAR
-	 * value 2) Low 33-bits of AFSR, then bits 33-->42
-	 *          are UDBL error status and bits 43-->52
-	 *          are UDBH error status
+	 * This is just like __spiftire_access_error above, but it
+	 * specifically handles correctable errors.  If an
+	 * uncorrectable error is indicated in the AFSR we
+	 * will branch directly above to __spitfire_access_error
+	 * to handle it instead.  Uncorrectable therefore takes
+	 * priority over correctable, and the error logging
+	 * C code will notice this case by inspecting the
+	 * trap type.
 	 */
-	.align	64
-	.globl	cee_trap
-cee_trap:
-	ldxa	[%g0] ASI_AFSR, %g1		! Read AFSR
-	ldxa	[%g0] ASI_AFAR, %g2		! Read AFAR
-	sllx	%g1, 31, %g1			! Clear reserved bits
-	srlx	%g1, 31, %g1			! in AFSR
-
-	/* NOTE: UltraSparc-I/II have high and low UDB error
-	 *       registers, corresponding to the two UDB units
-	 *       present on those chips.  UltraSparc-IIi only
-	 *       has a single UDB, called "SDB" in the manual.
-	 *       For IIi the upper UDB register always reads
-	 *       as zero so for our purposes things will just
-	 *       work with the checks below.
-	 */
-	ldxa	[%g0] ASI_UDBL_ERROR_R, %g3	! Read UDB-Low error status
-	andcc	%g3, (1 << 8), %g4		! Check CE bit
-	sllx	%g3, (64 - 10), %g3		! Clear reserved bits
-	srlx	%g3, (64 - 10), %g3		! in UDB-Low error status
-
-	sllx	%g3, (33 + 0), %g3		! Shift up to encoding area
-	or	%g1, %g3, %g1			! Or it in
-	be,pn	%xcc, 1f			! Branch if CE bit was clear
+	.globl		__spitfire_cee_trap
+__spitfire_cee_trap:
+	ldxa		[%g0] ASI_AFSR, %g4	! Get AFSR
+	mov		1, %g3
+	sllx		%g3, SFAFSR_UE_SHIFT, %g3
+	andcc		%g4, %g3, %g0		! Check for UE
+	bne,pn		%xcc, __spitfire_access_error
 	 nop
-	stxa	%g4, [%g0] ASI_UDB_ERROR_W	! Clear CE sticky bit in UDBL
-	membar	#Sync				! Synchronize ASI stores
-1:	mov	0x18, %g5			! Addr of UDB-High error status
-	ldxa	[%g5] ASI_UDBH_ERROR_R, %g3	! Read it
 
-	andcc	%g3, (1 << 8), %g4		! Check CE bit
-	sllx	%g3, (64 - 10), %g3		! Clear reserved bits
-	srlx	%g3, (64 - 10), %g3		! in UDB-High error status
-	sllx	%g3, (33 + 10), %g3		! Shift up to encoding area
-	or	%g1, %g3, %g1			! Or it in
-	be,pn	%xcc, 1f			! Branch if CE bit was clear
-	 nop
-	nop
-
-	stxa	%g4, [%g5] ASI_UDB_ERROR_W	! Clear CE sticky bit in UDBH
-	membar	#Sync				! Synchronize ASI stores
-1:	mov	1, %g5				! AFSR CE bit is
-	sllx	%g5, 20, %g5			! bit 20
-	stxa	%g5, [%g0] ASI_AFSR		! Clear CE sticky bit in AFSR
-	membar	#Sync				! Synchronize ASI stores
-	sllx	%g2, (64 - 41), %g2		! Clear reserved bits
-	srlx	%g2, (64 - 41), %g2		! in latched AFAR
-
-	andn	%g2, 0x0f, %g2			! Finish resv bit clearing
-	mov	%g1, %g4			! Move AFSR+UDB* into save reg
-	mov	%g2, %g5			! Move AFAR into save reg
-	rdpr	%pil, %g2
-	wrpr	%g0, 15, %pil
-	ba,pt	%xcc, etrap_irq
-	 rd	%pc, %g7
-	mov	%l4, %o0
-
-	mov	%l5, %o1
-	call	cee_log
-	 add	%sp, PTREGS_OFF, %o2
-	ba,a,pt	%xcc, rtrap_irq
-
-	/* Capture I/D/E-cache state into per-cpu error scoreboard.
-	 *
-	 * %g1:		(TL>=0) ? 1 : 0
-	 * %g2:		scratch
-	 * %g3:		scratch
-	 * %g4:		AFSR
-	 * %g5:		AFAR
-	 * %g6:		current thread ptr
-	 * %g7:		scratch
+	/* Ok, in this case we only have a correctable error.
+	 * Indicate we only wish to capture that state in register
+	 * %g1, and we only disable CE error reporting unlike UE
+	 * handling which disables all errors.
 	 */
-#define CHEETAH_LOG_ERROR						\
-	/* Put "TL1" software bit into AFSR. */				\
-	and		%g1, 0x1, %g1;					\
-	sllx		%g1, 63, %g2;					\
-	or		%g4, %g2, %g4;					\
-	/* Get log entry pointer for this cpu at this trap level. */	\
-	BRANCH_IF_JALAPENO(g2,g3,50f)					\
-	ldxa		[%g0] ASI_SAFARI_CONFIG, %g2;			\
-	srlx		%g2, 17, %g2;					\
-	ba,pt		%xcc, 60f; 					\
-	 and		%g2, 0x3ff, %g2;				\
-50:	ldxa		[%g0] ASI_JBUS_CONFIG, %g2;			\
-	srlx		%g2, 17, %g2;					\
-	and		%g2, 0x1f, %g2;					\
-60:	sllx		%g2, 9, %g2;					\
-	sethi		%hi(cheetah_error_log), %g3;			\
-	ldx		[%g3 + %lo(cheetah_error_log)], %g3;		\
-	brz,pn		%g3, 80f;					\
-	 nop;								\
-	add		%g3, %g2, %g3;					\
-	sllx		%g1, 8, %g1;					\
-	add		%g3, %g1, %g1;					\
-	/* %g1 holds pointer to the top of the logging scoreboard */	\
-	ldx		[%g1 + 0x0], %g7;				\
-	cmp		%g7, -1;					\
-	bne,pn		%xcc, 80f;					\
-	 nop;								\
-	stx		%g4, [%g1 + 0x0];				\
-	stx		%g5, [%g1 + 0x8];				\
-	add		%g1, 0x10, %g1;					\
-	/* %g1 now points to D-cache logging area */			\
-	set		0x3ff8, %g2;	/* DC_addr mask		*/	\
-	and		%g5, %g2, %g2;	/* DC_addr bits of AFAR	*/	\
-	srlx		%g5, 12, %g3;					\
-	or		%g3, 1, %g3;	/* PHYS tag + valid	*/	\
-10:	ldxa		[%g2] ASI_DCACHE_TAG, %g7;			\
-	cmp		%g3, %g7;	/* TAG match?		*/	\
-	bne,pt		%xcc, 13f;					\
-	 nop;								\
-	/* Yep, what we want, capture state. */				\
-	stx		%g2, [%g1 + 0x20];				\
-	stx		%g7, [%g1 + 0x28];				\
-	/* A membar Sync is required before and after utag access. */	\
-	membar		#Sync;						\
-	ldxa		[%g2] ASI_DCACHE_UTAG, %g7;			\
-	membar		#Sync;						\
-	stx		%g7, [%g1 + 0x30];				\
-	ldxa		[%g2] ASI_DCACHE_SNOOP_TAG, %g7;		\
-	stx		%g7, [%g1 + 0x38];				\
-	clr		%g3;						\
-12:	ldxa		[%g2 + %g3] ASI_DCACHE_DATA, %g7;		\
-	stx		%g7, [%g1];					\
-	add		%g3, (1 << 5), %g3;				\
-	cmp		%g3, (4 << 5);					\
-	bl,pt		%xcc, 12b;					\
-	 add		%g1, 0x8, %g1;					\
-	ba,pt		%xcc, 20f;					\
-	 add		%g1, 0x20, %g1;					\
-13:	sethi		%hi(1 << 14), %g7;				\
-	add		%g2, %g7, %g2;					\
-	srlx		%g2, 14, %g7;					\
-	cmp		%g7, 4;						\
-	bl,pt		%xcc, 10b;					\
-	 nop;								\
-	add		%g1, 0x40, %g1;					\
-20:	/* %g1 now points to I-cache logging area */			\
-	set		0x1fe0, %g2;	/* IC_addr mask		*/	\
-	and		%g5, %g2, %g2;	/* IC_addr bits of AFAR	*/	\
-	sllx		%g2, 1, %g2;	/* IC_addr[13:6]==VA[12:5] */	\
-	srlx		%g5, (13 - 8), %g3; /* Make PTAG */		\
-	andn		%g3, 0xff, %g3;	/* Mask off undefined bits */	\
-21:	ldxa		[%g2] ASI_IC_TAG, %g7;				\
-	andn		%g7, 0xff, %g7;					\
-	cmp		%g3, %g7;					\
-	bne,pt		%xcc, 23f;					\
-	 nop;								\
-	/* Yep, what we want, capture state. */				\
-	stx		%g2, [%g1 + 0x40];				\
-	stx		%g7, [%g1 + 0x48];				\
-	add		%g2, (1 << 3), %g2;				\
-	ldxa		[%g2] ASI_IC_TAG, %g7;				\
-	add		%g2, (1 << 3), %g2;				\
-	stx		%g7, [%g1 + 0x50];				\
-	ldxa		[%g2] ASI_IC_TAG, %g7;				\
-	add		%g2, (1 << 3), %g2;				\
-	stx		%g7, [%g1 + 0x60];				\
-	ldxa		[%g2] ASI_IC_TAG, %g7;				\
-	stx		%g7, [%g1 + 0x68];				\
-	sub		%g2, (3 << 3), %g2;				\
-	ldxa		[%g2] ASI_IC_STAG, %g7;				\
-	stx		%g7, [%g1 + 0x58];				\
-	clr		%g3;						\
-	srlx		%g2, 2, %g2;					\
-22:	ldxa		[%g2 + %g3] ASI_IC_INSTR, %g7;			\
-	stx		%g7, [%g1];					\
-	add		%g3, (1 << 3), %g3;				\
-	cmp		%g3, (8 << 3);					\
-	bl,pt		%xcc, 22b;					\
-	 add		%g1, 0x8, %g1;					\
-	ba,pt		%xcc, 30f;					\
-	 add		%g1, 0x30, %g1;					\
-23:	sethi		%hi(1 << 14), %g7;				\
-	add		%g2, %g7, %g2;					\
-	srlx		%g2, 14, %g7;					\
-	cmp		%g7, 4;						\
-	bl,pt		%xcc, 21b;					\
-	 nop;								\
-	add		%g1, 0x70, %g1;					\
-30:	/* %g1 now points to E-cache logging area */			\
-	andn		%g5, (32 - 1), %g2;	/* E-cache subblock */	\
-	stx		%g2, [%g1 + 0x20];				\
-	ldxa		[%g2] ASI_EC_TAG_DATA, %g7;			\
-	stx		%g7, [%g1 + 0x28];				\
-	ldxa		[%g2] ASI_EC_R, %g0;				\
-	clr		%g3;						\
-31:	ldxa		[%g3] ASI_EC_DATA, %g7;				\
-	stx		%g7, [%g1 + %g3];				\
-	add		%g3, 0x8, %g3;					\
-	cmp		%g3, 0x20;					\
-	bl,pt		%xcc, 31b;					\
-	 nop;								\
-80:	/* DONE */
+	ldxa		[%g0] ASI_ESTATE_ERROR_EN, %g3
+	andn		%g3, ESTATE_ERR_CE, %g3
+	stxa		%g3, [%g0] ASI_ESTATE_ERROR_EN
+	membar		#Sync
+
+	/* Preserve AFSR in %g4, indicate UDB state to capture in %g1 */
+	ba,pt		%xcc, __spitfire_cee_trap_continue
+	 mov		UDBE_CE, %g1
+
+	.globl		__spitfire_data_access_exception
+	.globl		__spitfire_data_access_exception_tl1
+__spitfire_data_access_exception_tl1:
+	rdpr		%pstate, %g4
+	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
+	mov		TLB_SFSR, %g3
+	mov		DMMU_SFAR, %g5
+	ldxa		[%g3] ASI_DMMU, %g4	! Get SFSR
+	ldxa		[%g5] ASI_DMMU, %g5	! Get SFAR
+	stxa		%g0, [%g3] ASI_DMMU	! Clear SFSR.FaultValid bit
+	membar		#Sync
+	rdpr		%tt, %g3
+	cmp		%g3, 0x80		! first win spill/fill trap
+	blu,pn		%xcc, 1f
+	 cmp		%g3, 0xff		! last win spill/fill trap
+	bgu,pn		%xcc, 1f
+	 nop
+	ba,pt		%xcc, winfix_dax
+	 rdpr		%tpc, %g3
+1:	sethi		%hi(109f), %g7
+	ba,pt		%xcc, etraptl1
+109:	 or		%g7, %lo(109b), %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		spitfire_data_access_exception_tl1
+	 add		%sp, PTREGS_OFF, %o0
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+__spitfire_data_access_exception:
+	rdpr		%pstate, %g4
+	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
+	mov		TLB_SFSR, %g3
+	mov		DMMU_SFAR, %g5
+	ldxa		[%g3] ASI_DMMU, %g4	! Get SFSR
+	ldxa		[%g5] ASI_DMMU, %g5	! Get SFAR
+	stxa		%g0, [%g3] ASI_DMMU	! Clear SFSR.FaultValid bit
+	membar		#Sync
+	sethi		%hi(109f), %g7
+	ba,pt		%xcc, etrap
+109:	 or		%g7, %lo(109b), %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		spitfire_data_access_exception
+	 add		%sp, PTREGS_OFF, %o0
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+	.globl		__spitfire_insn_access_exception
+	.globl		__spitfire_insn_access_exception_tl1
+__spitfire_insn_access_exception_tl1:
+	rdpr		%pstate, %g4
+	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
+	mov		TLB_SFSR, %g3
+	ldxa		[%g3] ASI_IMMU, %g4	! Get SFSR
+	rdpr		%tpc, %g5		! IMMU has no SFAR, use TPC
+	stxa		%g0, [%g3] ASI_IMMU	! Clear FaultValid bit
+	membar		#Sync
+	sethi		%hi(109f), %g7
+	ba,pt		%xcc, etraptl1
+109:	 or		%g7, %lo(109b), %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		spitfire_insn_access_exception_tl1
+	 add		%sp, PTREGS_OFF, %o0
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+__spitfire_insn_access_exception:
+	rdpr		%pstate, %g4
+	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
+	mov		TLB_SFSR, %g3
+	ldxa		[%g3] ASI_IMMU, %g4	! Get SFSR
+	rdpr		%tpc, %g5		! IMMU has no SFAR, use TPC
+	stxa		%g0, [%g3] ASI_IMMU	! Clear FaultValid bit
+	membar		#Sync
+	sethi		%hi(109f), %g7
+	ba,pt		%xcc, etrap
+109:	 or		%g7, %lo(109b), %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		spitfire_insn_access_exception
+	 add		%sp, PTREGS_OFF, %o0
+	ba,pt		%xcc, rtrap
+	 clr		%l6
 
 	/* These get patched into the trap table at boot time
 	 * once we know we have a cheetah processor.
@@ -1108,13 +825,18 @@ cheetah_plus_dcpe_trap_vector:
 	nop
 
 do_cheetah_plus_data_parity:
-	ba,pt		%xcc, etrap
+	rdpr		%pil, %g2
+	wrpr		%g0, 15, %pil
+	ba,pt		%xcc, etrap_irq
 	 rd		%pc, %g7
+#ifdef CONFIG_TRACE_IRQFLAGS
+	call		trace_hardirqs_off
+	 nop
+#endif
 	mov		0x0, %o0
 	call		cheetah_plus_parity_error
 	 add		%sp, PTREGS_OFF, %o1
-	ba,pt		%xcc, rtrap
-	 clr		%l6
+	ba,a,pt		%xcc, rtrap_irq
 
 cheetah_plus_dcpe_trap_vector_tl1:
 	membar		#Sync
@@ -1138,13 +860,18 @@ cheetah_plus_icpe_trap_vector:
 	nop
 
 do_cheetah_plus_insn_parity:
-	ba,pt		%xcc, etrap
+	rdpr		%pil, %g2
+	wrpr		%g0, 15, %pil
+	ba,pt		%xcc, etrap_irq
 	 rd		%pc, %g7
+#ifdef CONFIG_TRACE_IRQFLAGS
+	call		trace_hardirqs_off
+	 nop
+#endif
 	mov		0x1, %o0
 	call		cheetah_plus_parity_error
 	 add		%sp, PTREGS_OFF, %o1
-	ba,pt		%xcc, rtrap
-	 clr		%l6
+	ba,a,pt		%xcc, rtrap_irq
 
 cheetah_plus_icpe_trap_vector_tl1:
 	membar		#Sync
@@ -1177,6 +904,10 @@ do_dcpe_tl1:
 	 nop
 	wrpr		%g1, %tl		! Restore original trap level
 do_dcpe_tl1_nonfatal:	/* Ok we may use interrupt globals safely. */
+	sethi		%hi(dcache_parity_tl1_occurred), %g2
+	lduw		[%g2 + %lo(dcache_parity_tl1_occurred)], %g1
+	add		%g1, 1, %g1
+	stw		%g1, [%g2 + %lo(dcache_parity_tl1_occurred)]
 	/* Reset D-cache parity */
 	sethi		%hi(1 << 16), %g1	! D-cache size
 	mov		(1 << 5), %g2		! D-cache line size
@@ -1223,6 +954,10 @@ do_icpe_tl1:
 	 nop
 	wrpr		%g1, %tl		! Restore original trap level
 do_icpe_tl1_nonfatal:	/* Ok we may use interrupt globals safely. */
+	sethi		%hi(icache_parity_tl1_occurred), %g2
+	lduw		[%g2 + %lo(icache_parity_tl1_occurred)], %g1
+	add		%g1, 1, %g1
+	stw		%g1, [%g2 + %lo(icache_parity_tl1_occurred)]
 	/* Flush I-cache */
 	sethi		%hi(1 << 15), %g1	! I-cache size
 	mov		(1 << 5), %g2		! I-cache line size
@@ -1264,6 +999,170 @@ dcpe_icpe_tl1_common:
 	membar		#Sync
 	retry
 
+	/* Capture I/D/E-cache state into per-cpu error scoreboard.
+	 *
+	 * %g1:		(TL>=0) ? 1 : 0
+	 * %g2:		scratch
+	 * %g3:		scratch
+	 * %g4:		AFSR
+	 * %g5:		AFAR
+	 * %g6:		unused, will have current thread ptr after etrap
+	 * %g7:		scratch
+	 */
+__cheetah_log_error:
+	/* Put "TL1" software bit into AFSR. */
+	and		%g1, 0x1, %g1
+	sllx		%g1, 63, %g2
+	or		%g4, %g2, %g4
+
+	/* Get log entry pointer for this cpu at this trap level. */
+	BRANCH_IF_JALAPENO(g2,g3,50f)
+	ldxa		[%g0] ASI_SAFARI_CONFIG, %g2
+	srlx		%g2, 17, %g2
+	ba,pt		%xcc, 60f
+	 and		%g2, 0x3ff, %g2
+
+50:	ldxa		[%g0] ASI_JBUS_CONFIG, %g2
+	srlx		%g2, 17, %g2
+	and		%g2, 0x1f, %g2
+
+60:	sllx		%g2, 9, %g2
+	sethi		%hi(cheetah_error_log), %g3
+	ldx		[%g3 + %lo(cheetah_error_log)], %g3
+	brz,pn		%g3, 80f
+	 nop
+
+	add		%g3, %g2, %g3
+	sllx		%g1, 8, %g1
+	add		%g3, %g1, %g1
+
+	/* %g1 holds pointer to the top of the logging scoreboard */
+	ldx		[%g1 + 0x0], %g7
+	cmp		%g7, -1
+	bne,pn		%xcc, 80f
+	 nop
+
+	stx		%g4, [%g1 + 0x0]
+	stx		%g5, [%g1 + 0x8]
+	add		%g1, 0x10, %g1
+
+	/* %g1 now points to D-cache logging area */
+	set		0x3ff8, %g2	/* DC_addr mask		*/
+	and		%g5, %g2, %g2	/* DC_addr bits of AFAR	*/
+	srlx		%g5, 12, %g3
+	or		%g3, 1, %g3	/* PHYS tag + valid	*/
+
+10:	ldxa		[%g2] ASI_DCACHE_TAG, %g7
+	cmp		%g3, %g7	/* TAG match?		*/
+	bne,pt		%xcc, 13f
+	 nop
+
+	/* Yep, what we want, capture state. */
+	stx		%g2, [%g1 + 0x20]
+	stx		%g7, [%g1 + 0x28]
+
+	/* A membar Sync is required before and after utag access. */
+	membar		#Sync
+	ldxa		[%g2] ASI_DCACHE_UTAG, %g7
+	membar		#Sync
+	stx		%g7, [%g1 + 0x30]
+	ldxa		[%g2] ASI_DCACHE_SNOOP_TAG, %g7
+	stx		%g7, [%g1 + 0x38]
+	clr		%g3
+
+12:	ldxa		[%g2 + %g3] ASI_DCACHE_DATA, %g7
+	stx		%g7, [%g1]
+	add		%g3, (1 << 5), %g3
+	cmp		%g3, (4 << 5)
+	bl,pt		%xcc, 12b
+	 add		%g1, 0x8, %g1
+
+	ba,pt		%xcc, 20f
+	 add		%g1, 0x20, %g1
+
+13:	sethi		%hi(1 << 14), %g7
+	add		%g2, %g7, %g2
+	srlx		%g2, 14, %g7
+	cmp		%g7, 4
+	bl,pt		%xcc, 10b
+	 nop
+
+	add		%g1, 0x40, %g1
+
+	/* %g1 now points to I-cache logging area */
+20:	set		0x1fe0, %g2	/* IC_addr mask		*/
+	and		%g5, %g2, %g2	/* IC_addr bits of AFAR	*/
+	sllx		%g2, 1, %g2	/* IC_addr[13:6]==VA[12:5] */
+	srlx		%g5, (13 - 8), %g3 /* Make PTAG */
+	andn		%g3, 0xff, %g3	/* Mask off undefined bits */
+
+21:	ldxa		[%g2] ASI_IC_TAG, %g7
+	andn		%g7, 0xff, %g7
+	cmp		%g3, %g7
+	bne,pt		%xcc, 23f
+	 nop
+
+	/* Yep, what we want, capture state. */
+	stx		%g2, [%g1 + 0x40]
+	stx		%g7, [%g1 + 0x48]
+	add		%g2, (1 << 3), %g2
+	ldxa		[%g2] ASI_IC_TAG, %g7
+	add		%g2, (1 << 3), %g2
+	stx		%g7, [%g1 + 0x50]
+	ldxa		[%g2] ASI_IC_TAG, %g7
+	add		%g2, (1 << 3), %g2
+	stx		%g7, [%g1 + 0x60]
+	ldxa		[%g2] ASI_IC_TAG, %g7
+	stx		%g7, [%g1 + 0x68]
+	sub		%g2, (3 << 3), %g2
+	ldxa		[%g2] ASI_IC_STAG, %g7
+	stx		%g7, [%g1 + 0x58]
+	clr		%g3
+	srlx		%g2, 2, %g2
+
+22:	ldxa		[%g2 + %g3] ASI_IC_INSTR, %g7
+	stx		%g7, [%g1]
+	add		%g3, (1 << 3), %g3
+	cmp		%g3, (8 << 3)
+	bl,pt		%xcc, 22b
+	 add		%g1, 0x8, %g1
+
+	ba,pt		%xcc, 30f
+	 add		%g1, 0x30, %g1
+
+23:	sethi		%hi(1 << 14), %g7
+	add		%g2, %g7, %g2
+	srlx		%g2, 14, %g7
+	cmp		%g7, 4
+	bl,pt		%xcc, 21b
+	 nop
+
+	add		%g1, 0x70, %g1
+
+	/* %g1 now points to E-cache logging area */
+30:	andn		%g5, (32 - 1), %g2
+	stx		%g2, [%g1 + 0x20]
+	ldxa		[%g2] ASI_EC_TAG_DATA, %g7
+	stx		%g7, [%g1 + 0x28]
+	ldxa		[%g2] ASI_EC_R, %g0
+	clr		%g3
+
+31:	ldxa		[%g3] ASI_EC_DATA, %g7
+	stx		%g7, [%g1 + %g3]
+	add		%g3, 0x8, %g3
+	cmp		%g3, 0x20
+
+	bl,pt		%xcc, 31b
+	 nop
+80:
+	rdpr		%tt, %g2
+	cmp		%g2, 0x70
+	be		c_fast_ecc
+	 cmp		%g2, 0x63
+	be		c_cee
+	 nop
+	ba,pt		%xcc, c_deferred
+
 	/* Cheetah FECC trap handling, we get here from tl{0,1}_fecc
 	 * in the trap table.  That code has done a memory barrier
 	 * and has disabled both the I-cache and D-cache in the DCU
@@ -1289,12 +1188,18 @@ cheetah_fast_ecc:
 	stxa		%g4, [%g0] ASI_AFSR
 	membar		#Sync
 
-	CHEETAH_LOG_ERROR
+	ba,pt		%xcc, __cheetah_log_error
+	 nop
 
+c_fast_ecc:
 	rdpr		%pil, %g2
 	wrpr		%g0, 15, %pil
 	ba,pt		%xcc, etrap_irq
 	 rd		%pc, %g7
+#ifdef CONFIG_TRACE_IRQFLAGS
+	call		trace_hardirqs_off
+	 nop
+#endif
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		cheetah_fecc_handler
@@ -1315,12 +1220,18 @@ cheetah_cee:
 	stxa		%g4, [%g0] ASI_AFSR
 	membar		#Sync
 
-	CHEETAH_LOG_ERROR
+	ba,pt		%xcc, __cheetah_log_error
+	 nop
 
+c_cee:
 	rdpr		%pil, %g2
 	wrpr		%g0, 15, %pil
 	ba,pt		%xcc, etrap_irq
 	 rd		%pc, %g7
+#ifdef CONFIG_TRACE_IRQFLAGS
+	call		trace_hardirqs_off
+	 nop
+#endif
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		cheetah_cee_handler
@@ -1341,12 +1252,18 @@ cheetah_deferred_trap:
 	stxa		%g4, [%g0] ASI_AFSR
 	membar		#Sync
 
-	CHEETAH_LOG_ERROR
+	ba,pt		%xcc, __cheetah_log_error
+	 nop
 
+c_deferred:
 	rdpr		%pil, %g2
 	wrpr		%g0, 15, %pil
 	ba,pt		%xcc, etrap_irq
 	 rd		%pc, %g7
+#ifdef CONFIG_TRACE_IRQFLAGS
+	call		trace_hardirqs_off
+	 nop
+#endif
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		cheetah_deferred_handler
@@ -1516,7 +1433,6 @@ execve_merge:
 	 add		%sp, PTREGS_OFF, %o0
 
 	.globl	sys_pipe, sys_sigpause, sys_nis_syscall
-	.globl	sys_sigsuspend, sys_rt_sigsuspend
 	.globl	sys_rt_sigreturn
 	.globl	sys_ptrace
 	.globl	sys_sigaltstack
@@ -1540,28 +1456,6 @@ sys32_sigaltstack:
 		 mov		%i6, %o2
 #endif
 		.align		32
-sys_sigsuspend:	add		%sp, PTREGS_OFF, %o0
-		call		do_sigsuspend
-		 add		%o7, 1f-.-4, %o7
-		nop
-sys_rt_sigsuspend: /* NOTE: %o0,%o1 have a correct value already */
-		add		%sp, PTREGS_OFF, %o2
-		call		do_rt_sigsuspend
-		 add		%o7, 1f-.-4, %o7
-		nop
-#ifdef CONFIG_COMPAT
-	.globl	sys32_rt_sigsuspend
-sys32_rt_sigsuspend: /* NOTE: %o0,%o1 have a correct value already */
-		srl		%o0, 0, %o0
-		add		%sp, PTREGS_OFF, %o2
-		call		do_rt_sigsuspend32
-		 add		%o7, 1f-.-4, %o7
-#endif
-		/* NOTE: %o0 has a correct value already */
-sys_sigpause:	add		%sp, PTREGS_OFF, %o1
-		call		do_sigpause
-		 add		%o7, 1f-.-4, %o7
-		nop
 #ifdef CONFIG_COMPAT
 	.globl	sys32_sigreturn
 sys32_sigreturn:
@@ -1589,11 +1483,12 @@ sys_ptrace:	add		%sp, PTREGS_OFF, %o0
 		nop
 		.align		32
 1:		ldx		[%curptr + TI_FLAGS], %l5
-		andcc		%l5, _TIF_SYSCALL_TRACE, %g0
+		andcc		%l5, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %g0
 		be,pt		%icc, rtrap
 		 clr		%l6
+		add		%sp, PTREGS_OFF, %o0
 		call		syscall_trace
-		 nop
+		 mov		1, %o1
 
 		ba,pt		%xcc, rtrap
 		 clr		%l6
@@ -1636,13 +1531,13 @@ sys_clone:	flushw
 		ba,pt		%xcc, sparc_do_fork
 		 add		%sp, PTREGS_OFF, %o2
 ret_from_syscall:
-		/* Clear SPARC_FLAG_NEWCHILD, switch_to leaves thread.flags in
-		 * %o7 for us.  Check performance counter stuff too.
+		/* Clear current_thread_info()->new_child, and
+		 * check performance counter stuff too.
 		 */
-		andn		%o7, _TIF_NEWCHILD, %l0
-		stx		%l0, [%g6 + TI_FLAGS]
+		stb		%g0, [%g6 + TI_NEW_CHILD]
+		ldx		[%g6 + TI_FLAGS], %l0
 		call		schedule_tail
-		 mov		%g5, %o0
+		 mov		%g7, %o0
 		andcc		%l0, _TIF_PERFCTR, %g0
 		be,pt		%icc, 1f
 		 nop
@@ -1661,13 +1556,14 @@ ret_from_syscall:
 
 1:		b,pt		%xcc, ret_sys_call
 		 ldx		[%sp + PTREGS_OFF + PT_V9_I0], %o0
-sparc_exit:	wrpr		%g0, (PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV), %pstate
+sparc_exit:	rdpr		%pstate, %g2
+		wrpr		%g2, PSTATE_IE, %pstate
 		rdpr		%otherwin, %g1
 		rdpr		%cansave, %g3
 		add		%g3, %g1, %g3
 		wrpr		%g3, 0x0, %cansave
 		wrpr		%g0, 0x0, %otherwin
-		wrpr		%g0, (PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV | PSTATE_IE), %pstate
+		wrpr		%g2, 0x0, %pstate
 		ba,pt		%xcc, sys_exit
 		 stb		%g0, [%g6 + TI_WSAVED]
 
@@ -1677,18 +1573,20 @@ linux_sparc_ni_syscall:
 	 or		%l7, %lo(sys_ni_syscall), %l7
 
 linux_syscall_trace32:
+	add		%sp, PTREGS_OFF, %o0
 	call		syscall_trace
-	 nop
+	 clr		%o1
 	srl		%i0, 0, %o0
-	mov		%i4, %o4
+	srl		%i4, 0, %o4
 	srl		%i1, 0, %o1
 	srl		%i2, 0, %o2
 	b,pt		%xcc, 2f
 	 srl		%i3, 0, %o3
 
 linux_syscall_trace:
+	add		%sp, PTREGS_OFF, %o0
 	call		syscall_trace
-	 nop
+	 clr		%o1
 	mov		%i0, %o0
 	mov		%i1, %o1
 	mov		%i2, %o2
@@ -1706,11 +1604,6 @@ linux_sparc_syscall32:
 	bgeu,pn		%xcc, linux_sparc_ni_syscall		! CTI
 	 srl		%i0, 0, %o0				! IEU0
 	sll		%g1, 2, %l4				! IEU0	Group
-#ifdef SYSCALL_TRACING
-	call		syscall_trace_entry
-	 add		%sp, PTREGS_OFF, %o0
-	srl		%i0, 0, %o0
-#endif
 	srl		%i4, 0, %o4				! IEU1
 	lduw		[%l7 + %l4], %l7			! Load
 	srl		%i1, 0, %o1				! IEU0	Group
@@ -1718,7 +1611,7 @@ linux_sparc_syscall32:
 
 	srl		%i5, 0, %o5				! IEU1
 	srl		%i2, 0, %o2				! IEU0	Group
-	andcc		%l0, _TIF_SYSCALL_TRACE, %g0		! IEU0	Group
+	andcc		%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %g0
 	bne,pn		%icc, linux_syscall_trace32		! CTI
 	 mov		%i0, %l5				! IEU1
 	call		%l7					! CTI	Group brk forced
@@ -1734,11 +1627,6 @@ linux_sparc_syscall:
 	bgeu,pn		%xcc, linux_sparc_ni_syscall		! CTI
 	 mov		%i0, %o0				! IEU0
 	sll		%g1, 2, %l4				! IEU0	Group
-#ifdef SYSCALL_TRACING
-	call		syscall_trace_entry
-	 add		%sp, PTREGS_OFF, %o0
-	mov		%i0, %o0
-#endif
 	mov		%i1, %o1				! IEU1
 	lduw		[%l7 + %l4], %l7			! Load
 4:	mov		%i2, %o2				! IEU0	Group
@@ -1746,7 +1634,7 @@ linux_sparc_syscall:
 
 	mov		%i3, %o3				! IEU1
 	mov		%i4, %o4				! IEU0	Group
-	andcc		%l0, _TIF_SYSCALL_TRACE, %g0		! IEU1	Group+1 bubble
+	andcc		%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %g0
 	bne,pn		%icc, linux_syscall_trace		! CTI	Group
 	 mov		%i0, %l5				! IEU0
 2:	call		%l7					! CTI	Group brk forced
@@ -1755,12 +1643,6 @@ linux_sparc_syscall:
 
 3:	stx		%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 ret_sys_call:
-#ifdef SYSCALL_TRACING
-	mov		%o0, %o1
-	call		syscall_trace_exit
-	 add		%sp, PTREGS_OFF, %o0
-	mov		%o1, %o0
-#endif
 	ldx		[%sp + PTREGS_OFF + PT_V9_TSTATE], %g3
 	ldx		[%sp + PTREGS_OFF + PT_V9_TNPC], %l1 ! pc = npc
 	sra		%o0, 0, %o0
@@ -1770,17 +1652,13 @@ ret_sys_call:
 	/* Check if force_successful_syscall_return()
 	 * was invoked.
 	 */
-	ldx		[%curptr + TI_FLAGS], %l0
-	andcc		%l0, _TIF_SYSCALL_SUCCESS, %g0
-	be,pt		%icc, 1f
-	 andn		%l0, _TIF_SYSCALL_SUCCESS, %l0
-	ba,pt		%xcc, 80f
-	 stx		%l0, [%curptr + TI_FLAGS]
+	ldub            [%curptr + TI_SYS_NOERROR], %l2
+	brnz,a,pn       %l2, 80f
+	 stb		%g0, [%curptr + TI_SYS_NOERROR]
 
-1:
 	cmp		%o0, -ERESTART_RESTARTBLOCK
 	bgeu,pn		%xcc, 1f
-	 andcc		%l0, _TIF_SYSCALL_TRACE, %l6	
+	 andcc		%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %l6
 80:
 	/* System call success, clear Carry condition code. */
 	andn		%g3, %g2, %g3
@@ -1795,7 +1673,7 @@ ret_sys_call:
 	/* System call failure, set Carry condition code.
 	 * Also, get abs(errno) to return to the process.
 	 */
-	andcc		%l0, _TIF_SYSCALL_TRACE, %l6	
+	andcc		%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %l6	
 	sub		%g0, %o0, %o0
 	or		%g3, %g2, %g3
 	stx		%o0, [%sp + PTREGS_OFF + PT_V9_I0]
@@ -1808,8 +1686,9 @@ ret_sys_call:
 	b,pt		%xcc, rtrap
 	 stx		%l2, [%sp + PTREGS_OFF + PT_V9_TNPC]
 linux_syscall_trace2:
+	add		%sp, PTREGS_OFF, %o0
 	call		syscall_trace
-	 nop
+	 mov		1, %o1
 	stx		%l1, [%sp + PTREGS_OFF + PT_V9_TPC]
 	ba,pt		%xcc, rtrap
 	 stx		%l2, [%sp + PTREGS_OFF + PT_V9_TNPC]
@@ -1829,3 +1708,900 @@ __flushw_user:
 	 restore	%g0, %g0, %g0
 2:	retl
 	 nop
+
+#ifdef CONFIG_SMP
+	.globl		hard_smp_processor_id
+hard_smp_processor_id:
+#endif
+	.globl		real_hard_smp_processor_id
+real_hard_smp_processor_id:
+	__GET_CPUID(%o0)
+	retl
+	 nop
+
+	/* %o0: devhandle
+	 * %o1:	devino
+	 *
+	 * returns %o0: sysino
+	 */
+	.globl	sun4v_devino_to_sysino
+	.type	sun4v_devino_to_sysino,#function
+sun4v_devino_to_sysino:
+	mov	HV_FAST_INTR_DEVINO2SYSINO, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 mov	%o1, %o0
+	.size	sun4v_devino_to_sysino, .-sun4v_devino_to_sysino
+
+	/* %o0: sysino
+	 *
+	 * returns %o0: intr_enabled (HV_INTR_{DISABLED,ENABLED})
+	 */
+	.globl	sun4v_intr_getenabled
+	.type	sun4v_intr_getenabled,#function
+sun4v_intr_getenabled:
+	mov	HV_FAST_INTR_GETENABLED, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 mov	%o1, %o0
+	.size	sun4v_intr_getenabled, .-sun4v_intr_getenabled
+
+	/* %o0: sysino
+	 * %o1: intr_enabled (HV_INTR_{DISABLED,ENABLED})
+	 */
+	.globl	sun4v_intr_setenabled
+	.type	sun4v_intr_setenabled,#function
+sun4v_intr_setenabled:
+	mov	HV_FAST_INTR_SETENABLED, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_intr_setenabled, .-sun4v_intr_setenabled
+
+	/* %o0: sysino
+	 *
+	 * returns %o0: intr_state (HV_INTR_STATE_*)
+	 */
+	.globl	sun4v_intr_getstate
+	.type	sun4v_intr_getstate,#function
+sun4v_intr_getstate:
+	mov	HV_FAST_INTR_GETSTATE, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 mov	%o1, %o0
+	.size	sun4v_intr_getstate, .-sun4v_intr_getstate
+
+	/* %o0: sysino
+	 * %o1: intr_state (HV_INTR_STATE_*)
+	 */
+	.globl	sun4v_intr_setstate
+	.type	sun4v_intr_setstate,#function
+sun4v_intr_setstate:
+	mov	HV_FAST_INTR_SETSTATE, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_intr_setstate, .-sun4v_intr_setstate
+
+	/* %o0: sysino
+	 *
+	 * returns %o0: cpuid
+	 */
+	.globl	sun4v_intr_gettarget
+	.type	sun4v_intr_gettarget,#function
+sun4v_intr_gettarget:
+	mov	HV_FAST_INTR_GETTARGET, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 mov	%o1, %o0
+	.size	sun4v_intr_gettarget, .-sun4v_intr_gettarget
+
+	/* %o0: sysino
+	 * %o1: cpuid
+	 */
+	.globl	sun4v_intr_settarget
+	.type	sun4v_intr_settarget,#function
+sun4v_intr_settarget:
+	mov	HV_FAST_INTR_SETTARGET, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_intr_settarget, .-sun4v_intr_settarget
+
+	/* %o0:	cpuid
+	 * %o1: pc
+	 * %o2:	rtba
+	 * %o3:	arg0
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_cpu_start
+	.type	sun4v_cpu_start,#function
+sun4v_cpu_start:
+	mov	HV_FAST_CPU_START, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_cpu_start, .-sun4v_cpu_start
+
+	/* %o0:	cpuid
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_cpu_stop
+	.type	sun4v_cpu_stop,#function
+sun4v_cpu_stop:
+	mov	HV_FAST_CPU_STOP, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_cpu_stop, .-sun4v_cpu_stop
+
+	/* returns %o0:	status  */
+	.globl	sun4v_cpu_yield
+	.type	sun4v_cpu_yield, #function
+sun4v_cpu_yield:
+	mov	HV_FAST_CPU_YIELD, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_cpu_yield, .-sun4v_cpu_yield
+
+	/* %o0:	type
+	 * %o1:	queue paddr
+	 * %o2:	num queue entries
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_cpu_qconf
+	.type	sun4v_cpu_qconf,#function
+sun4v_cpu_qconf:
+	mov	HV_FAST_CPU_QCONF, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_cpu_qconf, .-sun4v_cpu_qconf
+
+	/* %o0:	num cpus in cpu list
+	 * %o1:	cpu list paddr
+	 * %o2:	mondo block paddr
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_cpu_mondo_send
+	.type	sun4v_cpu_mondo_send,#function
+sun4v_cpu_mondo_send:
+	mov	HV_FAST_CPU_MONDO_SEND, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_cpu_mondo_send, .-sun4v_cpu_mondo_send
+
+	/* %o0:	CPU ID
+	 *
+	 * returns %o0:	-status if status non-zero, else
+	 *         %o0:	cpu state as HV_CPU_STATE_*
+	 */
+	.globl	sun4v_cpu_state
+	.type	sun4v_cpu_state,#function
+sun4v_cpu_state:
+	mov	HV_FAST_CPU_STATE, %o5
+	ta	HV_FAST_TRAP
+	brnz,pn	%o0, 1f
+	 sub	%g0, %o0, %o0
+	mov	%o1, %o0
+1:	retl
+	 nop
+	.size	sun4v_cpu_state, .-sun4v_cpu_state
+
+	/* %o0: virtual address
+	 * %o1: must be zero
+	 * %o2: TTE
+	 * %o3: HV_MMU_* flags
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_mmu_map_perm_addr
+	.type	sun4v_mmu_map_perm_addr,#function
+sun4v_mmu_map_perm_addr:
+	mov	HV_FAST_MMU_MAP_PERM_ADDR, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_mmu_map_perm_addr, .-sun4v_mmu_map_perm_addr
+
+	/* %o0: number of TSB descriptions
+	 * %o1: TSB descriptions real address
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_mmu_tsb_ctx0
+	.type	sun4v_mmu_tsb_ctx0,#function
+sun4v_mmu_tsb_ctx0:
+	mov	HV_FAST_MMU_TSB_CTX0, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_mmu_tsb_ctx0, .-sun4v_mmu_tsb_ctx0
+
+	/* %o0:	API group number
+	 * %o1: pointer to unsigned long major number storage
+	 * %o2: pointer to unsigned long minor number storage
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_get_version
+	.type	sun4v_get_version,#function
+sun4v_get_version:
+	mov	HV_CORE_GET_VER, %o5
+	mov	%o1, %o3
+	mov	%o2, %o4
+	ta	HV_CORE_TRAP
+	stx	%o1, [%o3]
+	retl
+	 stx	%o2, [%o4]
+	.size	sun4v_get_version, .-sun4v_get_version
+
+	/* %o0: API group number
+	 * %o1: desired major number
+	 * %o2: desired minor number
+	 * %o3: pointer to unsigned long actual minor number storage
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_set_version
+	.type	sun4v_set_version,#function
+sun4v_set_version:
+	mov	HV_CORE_SET_VER, %o5
+	mov	%o3, %o4
+	ta	HV_CORE_TRAP
+	retl
+	 stx	%o1, [%o4]
+	.size	sun4v_set_version, .-sun4v_set_version
+
+	/* %o0: pointer to unsigned long time
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_tod_get
+	.type	sun4v_tod_get,#function
+sun4v_tod_get:
+	mov	%o0, %o4
+	mov	HV_FAST_TOD_GET, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_tod_get, .-sun4v_tod_get
+
+	/* %o0: time
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_tod_set
+	.type	sun4v_tod_set,#function
+sun4v_tod_set:
+	mov	HV_FAST_TOD_SET, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_tod_set, .-sun4v_tod_set
+
+	/* %o0: pointer to unsigned long status
+	 *
+	 * returns %o0: signed character
+	 */
+	.globl	sun4v_con_getchar
+	.type	sun4v_con_getchar,#function
+sun4v_con_getchar:
+	mov	%o0, %o4
+	mov	HV_FAST_CONS_GETCHAR, %o5
+	clr	%o0
+	clr	%o1
+	ta	HV_FAST_TRAP
+	stx	%o0, [%o4]
+	retl
+	 sra	%o1, 0, %o0
+	.size	sun4v_con_getchar, .-sun4v_con_getchar
+
+	/* %o0: signed long character
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_con_putchar
+	.type	sun4v_con_putchar,#function
+sun4v_con_putchar:
+	mov	HV_FAST_CONS_PUTCHAR, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 sra	%o0, 0, %o0
+	.size	sun4v_con_putchar, .-sun4v_con_putchar
+
+	/* %o0: buffer real address
+	 * %o1: buffer size
+	 * %o2: pointer to unsigned long bytes_read
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_con_read
+	.type	sun4v_con_read,#function
+sun4v_con_read:
+	mov	%o2, %o4
+	mov	HV_FAST_CONS_READ, %o5
+	ta	HV_FAST_TRAP
+	brnz	%o0, 1f
+	 cmp	%o1, -1		/* break */
+	be,a,pn	%icc, 1f
+	 mov	%o1, %o0
+	cmp	%o1, -2		/* hup */
+	be,a,pn	%icc, 1f
+	 mov	%o1, %o0
+	stx	%o1, [%o4]
+1:	retl
+	 nop
+	.size	sun4v_con_read, .-sun4v_con_read
+
+	/* %o0: buffer real address
+	 * %o1: buffer size
+	 * %o2: pointer to unsigned long bytes_written
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_con_write
+	.type	sun4v_con_write,#function
+sun4v_con_write:
+	mov	%o2, %o4
+	mov	HV_FAST_CONS_WRITE, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_con_write, .-sun4v_con_write
+
+	/* %o0:	soft state
+	 * %o1:	address of description string
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_mach_set_soft_state
+	.type	sun4v_mach_set_soft_state,#function
+sun4v_mach_set_soft_state:
+	mov	HV_FAST_MACH_SET_SOFT_STATE, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_mach_set_soft_state, .-sun4v_mach_set_soft_state
+
+	/* %o0: exit code
+	 *
+	 * Does not return.
+	 */
+	.globl	sun4v_mach_exit
+	.type	sun4v_mach_exit,#function
+sun4v_mach_exit:
+	mov	HV_FAST_MACH_EXIT, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_mach_exit, .-sun4v_mach_exit
+
+	/* %o0: buffer real address
+	 * %o1: buffer length
+	 * %o2: pointer to unsigned long real_buf_len
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_mach_desc
+	.type	sun4v_mach_desc,#function
+sun4v_mach_desc:
+	mov	%o2, %o4
+	mov	HV_FAST_MACH_DESC, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_mach_desc, .-sun4v_mach_desc
+
+	/* %o0: new timeout in milliseconds
+	 * %o1: pointer to unsigned long orig_timeout
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_mach_set_watchdog
+	.type	sun4v_mach_set_watchdog,#function
+sun4v_mach_set_watchdog:
+	mov	%o1, %o4
+	mov	HV_FAST_MACH_SET_WATCHDOG, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_mach_set_watchdog, .-sun4v_mach_set_watchdog
+
+	/* No inputs and does not return.  */
+	.globl	sun4v_mach_sir
+	.type	sun4v_mach_sir,#function
+sun4v_mach_sir:
+	mov	%o1, %o4
+	mov	HV_FAST_MACH_SIR, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_mach_sir, .-sun4v_mach_sir
+
+	/* %o0: channel
+	 * %o1:	ra
+	 * %o2:	num_entries
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_tx_qconf
+	.type	sun4v_ldc_tx_qconf,#function
+sun4v_ldc_tx_qconf:
+	mov	HV_FAST_LDC_TX_QCONF, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ldc_tx_qconf, .-sun4v_ldc_tx_qconf
+
+	/* %o0: channel
+	 * %o1:	pointer to unsigned long ra
+	 * %o2:	pointer to unsigned long num_entries
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_tx_qinfo
+	.type	sun4v_ldc_tx_qinfo,#function
+sun4v_ldc_tx_qinfo:
+	mov	%o1, %g1
+	mov	%o2, %g2
+	mov	HV_FAST_LDC_TX_QINFO, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	stx	%o2, [%g2]
+	retl
+	 nop
+	.size	sun4v_ldc_tx_qinfo, .-sun4v_ldc_tx_qinfo
+
+	/* %o0: channel
+	 * %o1:	pointer to unsigned long head_off
+	 * %o2:	pointer to unsigned long tail_off
+	 * %o2:	pointer to unsigned long chan_state
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_tx_get_state
+	.type	sun4v_ldc_tx_get_state,#function
+sun4v_ldc_tx_get_state:
+	mov	%o1, %g1
+	mov	%o2, %g2
+	mov	%o3, %g3
+	mov	HV_FAST_LDC_TX_GET_STATE, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	stx	%o2, [%g2]
+	stx	%o3, [%g3]
+	retl
+	 nop
+	.size	sun4v_ldc_tx_get_state, .-sun4v_ldc_tx_get_state
+
+	/* %o0: channel
+	 * %o1:	tail_off
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_tx_set_qtail
+	.type	sun4v_ldc_tx_set_qtail,#function
+sun4v_ldc_tx_set_qtail:
+	mov	HV_FAST_LDC_TX_SET_QTAIL, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ldc_tx_set_qtail, .-sun4v_ldc_tx_set_qtail
+
+	/* %o0: channel
+	 * %o1:	ra
+	 * %o2:	num_entries
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_rx_qconf
+	.type	sun4v_ldc_rx_qconf,#function
+sun4v_ldc_rx_qconf:
+	mov	HV_FAST_LDC_RX_QCONF, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ldc_rx_qconf, .-sun4v_ldc_rx_qconf
+
+	/* %o0: channel
+	 * %o1:	pointer to unsigned long ra
+	 * %o2:	pointer to unsigned long num_entries
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_rx_qinfo
+	.type	sun4v_ldc_rx_qinfo,#function
+sun4v_ldc_rx_qinfo:
+	mov	%o1, %g1
+	mov	%o2, %g2
+	mov	HV_FAST_LDC_RX_QINFO, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	stx	%o2, [%g2]
+	retl
+	 nop
+	.size	sun4v_ldc_rx_qinfo, .-sun4v_ldc_rx_qinfo
+
+	/* %o0: channel
+	 * %o1:	pointer to unsigned long head_off
+	 * %o2:	pointer to unsigned long tail_off
+	 * %o2:	pointer to unsigned long chan_state
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_rx_get_state
+	.type	sun4v_ldc_rx_get_state,#function
+sun4v_ldc_rx_get_state:
+	mov	%o1, %g1
+	mov	%o2, %g2
+	mov	%o3, %g3
+	mov	HV_FAST_LDC_RX_GET_STATE, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	stx	%o2, [%g2]
+	stx	%o3, [%g3]
+	retl
+	 nop
+	.size	sun4v_ldc_rx_get_state, .-sun4v_ldc_rx_get_state
+
+	/* %o0: channel
+	 * %o1:	head_off
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_rx_set_qhead
+	.type	sun4v_ldc_rx_set_qhead,#function
+sun4v_ldc_rx_set_qhead:
+	mov	HV_FAST_LDC_RX_SET_QHEAD, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ldc_rx_set_qhead, .-sun4v_ldc_rx_set_qhead
+
+	/* %o0: channel
+	 * %o1:	ra
+	 * %o2:	num_entries
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_ldc_set_map_table
+	.type	sun4v_ldc_set_map_table,#function
+sun4v_ldc_set_map_table:
+	mov	HV_FAST_LDC_SET_MAP_TABLE, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ldc_set_map_table, .-sun4v_ldc_set_map_table
+
+	/* %o0: channel
+	 * %o1:	pointer to unsigned long ra
+	 * %o2:	pointer to unsigned long num_entries
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_ldc_get_map_table
+	.type	sun4v_ldc_get_map_table,#function
+sun4v_ldc_get_map_table:
+	mov	%o1, %g1
+	mov	%o2, %g2
+	mov	HV_FAST_LDC_GET_MAP_TABLE, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	stx	%o2, [%g2]
+	retl
+	 nop
+	.size	sun4v_ldc_get_map_table, .-sun4v_ldc_get_map_table
+
+	/* %o0:	channel
+	 * %o1:	dir_code
+	 * %o2:	tgt_raddr
+	 * %o3:	lcl_raddr
+	 * %o4:	len
+	 * %o5:	pointer to unsigned long actual_len
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_copy
+	.type	sun4v_ldc_copy,#function
+sun4v_ldc_copy:
+	mov	%o5, %g1
+	mov	HV_FAST_LDC_COPY, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	retl
+	 nop
+	.size	sun4v_ldc_copy, .-sun4v_ldc_copy
+
+	/* %o0:	channel
+	 * %o1:	cookie
+	 * %o2:	pointer to unsigned long ra
+	 * %o3:	pointer to unsigned long perm
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_mapin
+	.type	sun4v_ldc_mapin,#function
+sun4v_ldc_mapin:
+	mov	%o2, %g1
+	mov	%o3, %g2
+	mov	HV_FAST_LDC_MAPIN, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	stx	%o2, [%g2]
+	retl
+	 nop
+	.size	sun4v_ldc_mapin, .-sun4v_ldc_mapin
+
+	/* %o0:	ra
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_unmap
+	.type	sun4v_ldc_unmap,#function
+sun4v_ldc_unmap:
+	mov	HV_FAST_LDC_UNMAP, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ldc_unmap, .-sun4v_ldc_unmap
+
+	/* %o0: channel
+	 * %o1:	cookie
+	 * %o2:	mte_cookie
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ldc_revoke
+	.type	sun4v_ldc_revoke,#function
+sun4v_ldc_revoke:
+	mov	HV_FAST_LDC_REVOKE, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ldc_revoke, .-sun4v_ldc_revoke
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	pointer to unsigned long cookie
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_get_cookie
+	.type	sun4v_vintr_get_cookie,#function
+sun4v_vintr_get_cookie:
+	mov	%o2, %g1
+	mov	HV_FAST_VINTR_GET_COOKIE, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	retl
+	 nop
+	.size	sun4v_vintr_get_cookie, .-sun4v_vintr_get_cookie
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	cookie
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_set_cookie
+	.type	sun4v_vintr_set_cookie,#function
+sun4v_vintr_set_cookie:
+	mov	HV_FAST_VINTR_SET_COOKIE, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_vintr_set_cookie, .-sun4v_vintr_set_cookie
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	pointer to unsigned long valid_state
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_get_valid
+	.type	sun4v_vintr_get_valid,#function
+sun4v_vintr_get_valid:
+	mov	%o2, %g1
+	mov	HV_FAST_VINTR_GET_VALID, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	retl
+	 nop
+	.size	sun4v_vintr_get_valid, .-sun4v_vintr_get_valid
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	valid_state
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_set_valid
+	.type	sun4v_vintr_set_valid,#function
+sun4v_vintr_set_valid:
+	mov	HV_FAST_VINTR_SET_VALID, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_vintr_set_valid, .-sun4v_vintr_set_valid
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	pointer to unsigned long state
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_get_state
+	.type	sun4v_vintr_get_state,#function
+sun4v_vintr_get_state:
+	mov	%o2, %g1
+	mov	HV_FAST_VINTR_GET_STATE, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	retl
+	 nop
+	.size	sun4v_vintr_get_state, .-sun4v_vintr_get_state
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	state
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_set_state
+	.type	sun4v_vintr_set_state,#function
+sun4v_vintr_set_state:
+	mov	HV_FAST_VINTR_SET_STATE, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_vintr_set_state, .-sun4v_vintr_set_state
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	pointer to unsigned long cpuid
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_get_target
+	.type	sun4v_vintr_get_target,#function
+sun4v_vintr_get_target:
+	mov	%o2, %g1
+	mov	HV_FAST_VINTR_GET_TARGET, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%g1]
+	retl
+	 nop
+	.size	sun4v_vintr_get_target, .-sun4v_vintr_get_target
+
+	/* %o0: device handle
+	 * %o1:	device INO
+	 * %o2:	cpuid
+	 *
+	 * returns %o0: status
+	 */
+	.globl	sun4v_vintr_set_target
+	.type	sun4v_vintr_set_target,#function
+sun4v_vintr_set_target:
+	mov	HV_FAST_VINTR_SET_TARGET, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_vintr_set_target, .-sun4v_vintr_set_target
+
+	/* %o0: NCS sub-function
+	 * %o1:	sub-function arg real-address
+	 * %o2:	sub-function arg size
+	 *
+	 * returns %o0:	status
+	 */
+	.globl	sun4v_ncs_request
+	.type	sun4v_ncs_request,#function
+sun4v_ncs_request:
+	mov	HV_FAST_NCS_REQUEST, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_ncs_request, .-sun4v_ncs_request
+
+	.globl	sun4v_svc_send
+	.type	sun4v_svc_send,#function
+sun4v_svc_send:
+	save	%sp, -192, %sp
+	mov	%i0, %o0
+	mov	%i1, %o1
+	mov	%i2, %o2
+	mov	HV_FAST_SVC_SEND, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%i3]
+	ret
+	restore
+	.size	sun4v_svc_send, .-sun4v_svc_send
+
+	.globl	sun4v_svc_recv
+	.type	sun4v_svc_recv,#function
+sun4v_svc_recv:
+	save	%sp, -192, %sp
+	mov	%i0, %o0
+	mov	%i1, %o1
+	mov	%i2, %o2
+	mov	HV_FAST_SVC_RECV, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%i3]
+	ret
+	restore
+	.size	sun4v_svc_recv, .-sun4v_svc_recv
+
+	.globl	sun4v_svc_getstatus
+	.type	sun4v_svc_getstatus,#function
+sun4v_svc_getstatus:
+	mov	HV_FAST_SVC_GETSTATUS, %o5
+	mov	%o1, %o4
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_svc_getstatus, .-sun4v_svc_getstatus
+
+	.globl	sun4v_svc_setstatus
+	.type	sun4v_svc_setstatus,#function
+sun4v_svc_setstatus:
+	mov	HV_FAST_SVC_SETSTATUS, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_svc_setstatus, .-sun4v_svc_setstatus
+
+	.globl	sun4v_svc_clrstatus
+	.type	sun4v_svc_clrstatus,#function
+sun4v_svc_clrstatus:
+	mov	HV_FAST_SVC_CLRSTATUS, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_svc_clrstatus, .-sun4v_svc_clrstatus
+
+	.globl	sun4v_mmustat_conf
+	.type	sun4v_mmustat_conf,#function
+sun4v_mmustat_conf:
+	mov	%o1, %o4
+	mov	HV_FAST_MMUSTAT_CONF, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_mmustat_conf, .-sun4v_mmustat_conf
+
+	.globl	sun4v_mmustat_info
+	.type	sun4v_mmustat_info,#function
+sun4v_mmustat_info:
+	mov	%o0, %o4
+	mov	HV_FAST_MMUSTAT_INFO, %o5
+	ta	HV_FAST_TRAP
+	stx	%o1, [%o4]
+	retl
+	 nop
+	.size	sun4v_mmustat_info, .-sun4v_mmustat_info
+
+	.globl	sun4v_mmu_demap_all
+	.type	sun4v_mmu_demap_all,#function
+sun4v_mmu_demap_all:
+	clr	%o0
+	clr	%o1
+	mov	HV_MMU_ALL, %o2
+	mov	HV_FAST_MMU_DEMAP_ALL, %o5
+	ta	HV_FAST_TRAP
+	retl
+	 nop
+	.size	sun4v_mmu_demap_all, .-sun4v_mmu_demap_all

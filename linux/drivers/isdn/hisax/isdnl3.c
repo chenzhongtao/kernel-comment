@@ -18,7 +18,6 @@
 #include <linux/init.h>
 #include "hisax.h"
 #include "isdnl3.h"
-#include <linux/config.h>
 
 const char *l3_revision = "$Revision: 2.22.2.3 $";
 
@@ -232,18 +231,6 @@ no_l3_proto_spec(struct PStack *st, isdn_ctrl *ic)
 	return(-1);
 }
 
-#ifdef	CONFIG_HISAX_EURO
-extern void setstack_dss1(struct PStack *st);
-#endif
-
-#ifdef  CONFIG_HISAX_NI1
-extern void setstack_ni1(struct PStack *st);
-#endif
-
-#ifdef	CONFIG_HISAX_1TR6
-extern void setstack_1tr6(struct PStack *st);
-#endif
-
 struct l3_process
 *getl3proc(struct PStack *st, int cr)
 {
@@ -302,7 +289,7 @@ release_l3_process(struct l3_process *p)
 				!test_bit(FLG_PTP, &p->st->l2.flag)) {
 				if (p->debug)
 					l3_debug(p->st, "release_l3_process: last process");
-				if (!skb_queue_len(&p->st->l3.squeue)) {
+				if (skb_queue_empty(&p->st->l3.squeue)) {
 					if (p->debug)
 						l3_debug(p->st, "release_l3_process: release link");
 					if (p->st->protocol != ISDN_PTYPE_NI1)
@@ -390,7 +377,7 @@ setstack_l3dc(struct PStack *st, struct Channel *chanp)
 	}
 }
 
-void
+static void
 isdnl3_trans(struct PStack *st, int pr, void *arg) {
 	st->l3.l3l2(st, pr, arg);
 }

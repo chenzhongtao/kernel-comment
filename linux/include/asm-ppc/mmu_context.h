@@ -2,11 +2,12 @@
 #ifndef __PPC_MMU_CONTEXT_H
 #define __PPC_MMU_CONTEXT_H
 
-#include <linux/config.h>
+#include <linux/bitops.h>
+
 #include <asm/atomic.h>
-#include <asm/bitops.h>
 #include <asm/mmu.h>
 #include <asm/cputable.h>
+#include <asm-generic/mm_hooks.h>
 
 /*
  * On 32-bit PowerPC 6xx/7xx/7xxx CPUs, we use a set of 16 VSIDs
@@ -63,7 +64,7 @@ static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 #define LAST_CONTEXT    	255
 #define FIRST_CONTEXT    	1
 
-#elif defined(CONFIG_E500)
+#elif defined(CONFIG_E200) || defined(CONFIG_E500)
 #define NO_CONTEXT      	256
 #define LAST_CONTEXT    	255
 #define FIRST_CONTEXT    	1
@@ -71,7 +72,7 @@ static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 #else
 
 /* PPC 6xx, 7xx CPUs */
-#define NO_CONTEXT      	((mm_context_t) -1)
+#define NO_CONTEXT      	((unsigned long) -1)
 #define LAST_CONTEXT    	32767
 #define FIRST_CONTEXT    	1
 #endif
@@ -86,7 +87,7 @@ static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
  * can be used for debugging on all processors (if you happen to have
  * an Abatron).
  */
-extern void set_context(mm_context_t context, pgd_t *pgd);
+extern void set_context(unsigned long contextid, pgd_t *pgd);
 
 /*
  * Bitmap of contexts in use.
@@ -99,7 +100,7 @@ extern unsigned long context_map[];
  * Its use is an optimization only, we can't rely on this context
  * number to be free, but it usually will be.
  */
-extern mm_context_t next_mmu_context;
+extern unsigned long next_mmu_context;
 
 /*
  * If we don't have sufficient contexts to give one to every task
@@ -118,9 +119,9 @@ extern void steal_context(void);
  */
 static inline void get_mmu_context(struct mm_struct *mm)
 {
-	mm_context_t ctx;
+	unsigned long ctx;
 
-	if (mm->context != NO_CONTEXT)
+	if (mm->context.id != NO_CONTEXT)
 		return;
 #ifdef FEW_CONTEXTS
 	while (atomic_dec_if_positive(&nr_free_contexts) < 0)
@@ -133,7 +134,7 @@ static inline void get_mmu_context(struct mm_struct *mm)
 			ctx = 0;
 	}
 	next_mmu_context = (ctx + 1) & LAST_CONTEXT;
-	mm->context = ctx;
+	mm->context.id = ctx;
 #ifdef FEW_CONTEXTS
 	context_mm[ctx] = mm;
 #endif
@@ -142,33 +143,38 @@ static inline void get_mmu_context(struct mm_struct *mm)
 /*
  * Set up the context for a new address space.
  */
-#define init_new_context(tsk,mm)	(((mm)->context = NO_CONTEXT), 0)
+static inline int init_new_context(struct task_struct *t, struct mm_struct *mm)
+{
+	mm->context.id = NO_CONTEXT;
+	mm->context.vdso_base = 0;
+	return 0;
+}
 
 /*
  * We're finished using the context for an address space.
  */
 static inline void destroy_context(struct mm_struct *mm)
 {
-	if (mm->context != NO_CONTEXT) {
-		clear_bit(mm->context, context_map);
-		mm->context = NO_CONTEXT;
+	preempt_disable();
+	if (mm->context.id != NO_CONTEXT) {
+		clear_bit(mm->context.id, context_map);
+		mm->context.id = NO_CONTEXT;
 #ifdef FEW_CONTEXTS
 		atomic_inc(&nr_free_contexts);
 #endif
 	}
+	preempt_enable();
 }
 
 static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 			     struct task_struct *tsk)
 {
 #ifdef CONFIG_ALTIVEC
-	asm volatile (
- BEGIN_FTR_SECTION
-	"dssall;\n"
+	if (cpu_has_feature(CPU_FTR_ALTIVEC))
+	asm volatile ("dssall;\n"
 #ifndef CONFIG_POWER4
 	 "sync;\n" /* G4 needs a sync here, G5 apparently not */
 #endif
- END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	 : : );
 #endif /* CONFIG_ALTIVEC */
 
@@ -180,7 +186,7 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 
 	/* Setup new userspace context */
 	get_mmu_context(next);
-	set_context(next->context, next->pgd);
+	set_context(next->context.id, next->pgd);
 }
 
 #define deactivate_mm(tsk,mm)	do { } while (0)

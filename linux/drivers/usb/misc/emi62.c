@@ -1,7 +1,7 @@
 /* 
  * Emagic EMI 2|6 usb audio interface firmware loader.
  * Copyright (C) 2002
- * 	Tapio Laxström (tapio.laxstrom@iptime.fi)
+ * 	Tapio LaxstrÃ¶m (tapio.laxstrom@iptime.fi)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, as published by
@@ -15,6 +15,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/usb.h>
+#include <linux/delay.h>
 
 #define MAX_INTEL_HEX_RECORD_LENGTH 16
 typedef struct _INTEL_HEX_RECORD
@@ -60,13 +61,12 @@ static void __exit emi62_exit (void);
 static int emi62_writememory (struct usb_device *dev, int address, unsigned char *data, int length, __u8 request)
 {
 	int result;
-	unsigned char *buffer =  kmalloc (length, GFP_KERNEL);
+	unsigned char *buffer =  kmemdup(data, length, GFP_KERNEL);
 
 	if (!buffer) {
 		err("emi62: kmalloc(%d) failed.", length);
 		return -ENOMEM;
 	}
-	memcpy (buffer, data, length);
 	/* Note: usb_control_msg returns negative value on error or length of the
 	 * 		 data that was written! */
 	result = usb_control_msg (dev, usb_sndctrlpipe(dev, 0), request, 0x40, address, 0, buffer, length, 300);
@@ -123,6 +123,11 @@ static int emi62_load_firmware (struct usb_device *dev)
 
 	/* De-assert reset (let the CPU run) */
 	err = emi62_set_reset(dev,0);
+	if (err < 0) {
+		err("%s - error loading firmware: error = %d", __FUNCTION__, err);
+		goto wraperr;
+	}
+	msleep(250);	/* let device settle */
 
 	/* 2. We upload the FPGA firmware into the EMI
 	 * Note: collect up to 1023 (yes!) bytes and send them with
@@ -166,6 +171,7 @@ static int emi62_load_firmware (struct usb_device *dev)
 		err("%s - error loading firmware: error = %d", __FUNCTION__, err);
 		goto wraperr;
 	}
+	msleep(250);	/* let device settle */
 
 	/* 4. We put the part of the firmware that lies in the external RAM into the EZ-USB */
 
@@ -228,6 +234,7 @@ static int emi62_load_firmware (struct usb_device *dev)
 		err("%s - error loading firmware: error = %d", __FUNCTION__, err);
 		goto wraperr;
 	}
+	msleep(250);	/* let device settle */
 
 	kfree(buf);
 
@@ -266,7 +273,6 @@ static void emi62_disconnect(struct usb_interface *intf)
 }
 
 static struct usb_driver emi62_driver = {
-	.owner		= THIS_MODULE,
 	.name		= "emi62 - firmware loader",
 	.probe		= emi62_probe,
 	.disconnect	= emi62_disconnect,
@@ -290,7 +296,7 @@ static void __exit emi62_exit (void)
 module_init(emi62_init);
 module_exit(emi62_exit);
 
-MODULE_AUTHOR("tapio laxström");
+MODULE_AUTHOR("Tapio LaxstrÃ¶m");
 MODULE_DESCRIPTION("Emagic EMI 6|2m firmware loader.");
 MODULE_LICENSE("GPL");
 

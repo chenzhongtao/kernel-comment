@@ -23,7 +23,6 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
@@ -40,7 +39,7 @@
 #include <asm/pgtable.h>
 #include <asm/au1000.h>
 
-void board_reset (void)
+void board_reset(void)
 {
 	/* Hit BCSR.SYSTEM_CONTROL[SW_RST] */
 	au_writel(0x00000000, 0xAE00001C);
@@ -49,7 +48,7 @@ void board_reset (void)
 void __init board_setup(void)
 {
 	u32 pin_func;
-	
+
 	// set multiple use pins (UART3/GPIO) to UART (it's used as UART too)
 	pin_func = au_readl(SYS_PINFUNC) & (u32)(~SYS_PF_UR3);
 	pin_func |= SYS_PF_UR3;
@@ -75,11 +74,11 @@ void __init board_setup(void)
 	au_writel(1, GPIO2_ENABLE);
 	/* gpio2 208/9/10/11 are inputs */
 	au_writel((1<<8) | (1<<9) | (1<<10) | (1<<11), GPIO2_DIR);
-	
+
 	/* turn off power */
 	au_writel((au_readl(GPIO2_PINSTATE) & ~(1<<14))|(1<<30), GPIO2_OUTPUT);
 #endif
-	
+
 
 #ifdef CONFIG_PCI
 #if defined(__MIPSEB__)

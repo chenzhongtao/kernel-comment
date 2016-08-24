@@ -4,36 +4,23 @@
 # Licensed under the GPL
 #
 
-lib-y = bitops.o bugs.o csum-partial.o delay.o fault.o mem.o memcpy.o \
-	ptrace.o ptrace_user.o semaphore.o sigcontext.o signal.o \
-	syscalls.o sysrq.o thunk.o
+obj-y = bug.o bugs.o delay.o fault.o ldt.o mem.o ptrace.o ptrace_user.o \
+	setjmp.o signal.o stub.o stub_segv.o syscalls.o syscall_table.o \
+	sysrq.o ksyms.o tls.o
 
-USER_OBJS := ptrace_user.o sigcontext.o
-USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
+obj-$(CONFIG_MODULES) += um_module.o
 
-SYMLINKS = bitops.c csum-copy.S csum-partial.c csum-wrappers.c memcpy.S \
-	semaphore.c thunk.S
-SYMLINKS := $(foreach f,$(SYMLINKS),$(src)/$f)
+subarch-obj-y = lib/bitops_64.o lib/csum-partial_64.o lib/memcpy_64.o lib/thunk_64.o
+subarch-obj-$(CONFIG_MODULES) += kernel/module_64.o
 
-clean-files := $(SYMLINKS)
+ldt-y = ../sys-i386/ldt.o
 
-bitops.c-dir = lib
-csum-copy.S-dir = lib
-csum-partial.c-dir = lib
-csum-wrappers.c-dir = lib
-memcpy.S-dir = lib
-semaphore.c-dir = kernel
-thunk.S-dir = lib
+USER_OBJS := ptrace_user.o
 
-define make_link
-       -rm -f $1
-       ln -sf $(TOPDIR)/arch/x86_64/$($(notdir $1)-dir)/$(notdir $1) $1
-endef
+USER_OBJS += user-offsets.s
+extra-y += user-offsets.s
 
-$(SYMLINKS):
-	$(call make_link,$@)
+UNPROFILE_OBJS := stub_segv.o
+CFLAGS_stub_segv.o := $(CFLAGS_NO_HARDENING)
 
-$(USER_OBJS) : %.o: %.c
-	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
-
-CFLAGS_csum-partial.o := -Dcsum_partial=arch_csum_partial
+include arch/um/scripts/Makefile.rules

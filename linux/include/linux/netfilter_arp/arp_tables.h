@@ -19,8 +19,12 @@
 #include <linux/compiler.h>
 #include <linux/netfilter_arp.h>
 
-#define ARPT_FUNCTION_MAXNAMELEN 30
-#define ARPT_TABLE_MAXNAMELEN 32
+#include <linux/netfilter/x_tables.h>
+
+#define ARPT_FUNCTION_MAXNAMELEN XT_FUNCTION_MAXNAMELEN
+#define ARPT_TABLE_MAXNAMELEN XT_TABLE_MAXNAMELEN
+#define arpt_target xt_target
+#define arpt_table xt_table
 
 #define ARPT_DEV_ADDR_LEN_MAX 16
 
@@ -42,11 +46,11 @@ struct arpt_arp {
 	struct arpt_devaddr_info tgt_devaddr;
 
 	/* ARP operation code. */
-	u_int16_t arpop, arpop_mask;
+	__be16 arpop, arpop_mask;
 
 	/* ARP hardware address and protocol address format. */
-	u_int16_t arhrd, arhrd_mask;
-	u_int16_t arpro, arpro_mask;
+	__be16 arhrd, arhrd_mask;
+	__be16 arpro, arpro_mask;
 
 	/* The protocol address length is only accepted if it is 4
 	 * so there is no use in offering a way to do filtering on it.
@@ -61,39 +65,8 @@ struct arpt_arp {
 	u_int16_t invflags;
 };
 
-struct arpt_entry_target
-{
-	union {
-		struct {
-			u_int16_t target_size;
-
-			/* Used by userspace */
-			char name[ARPT_FUNCTION_MAXNAMELEN];
-		} user;
-		struct {
-			u_int16_t target_size;
-
-			/* Used inside the kernel */
-			struct arpt_target *target;
-		} kernel;
-
-		/* Total length */
-		u_int16_t target_size;
-	} u;
-
-	unsigned char data[0];
-};
-
-struct arpt_standard_target
-{
-	struct arpt_entry_target target;
-	int verdict;
-};
-
-struct arpt_counters
-{
-	u_int64_t pcnt, bcnt;			/* Packet and byte counters */
-};
+#define arpt_entry_target xt_entry_target
+#define arpt_standard_target xt_standard_target
 
 /* Values for "flag" field in struct arpt_ip (general arp structure).
  * No flags defined yet.
@@ -129,7 +102,7 @@ struct arpt_entry
 	unsigned int comefrom;
 
 	/* Packet and byte counters. */
-	struct arpt_counters counters;
+	struct xt_counters counters;
 
 	/* The matches (if any), then the target. */
 	unsigned char elems[0];
@@ -139,8 +112,10 @@ struct arpt_entry
  * New IP firewall options for [gs]etsockopt at the RAW IP level.
  * Unlike BSD Linux inherits IP options so you don't have to use a raw
  * socket for this. Instead we check rights in the calls.
+ *
+ * ATTENTION: check linux/in.h before adding new number here.
  */
-#define ARPT_BASE_CTL		96	/* base for firewall socket options */
+#define ARPT_BASE_CTL		96
 
 #define ARPT_SO_SET_REPLACE		(ARPT_BASE_CTL)
 #define ARPT_SO_SET_ADD_COUNTERS	(ARPT_BASE_CTL + 1)
@@ -148,13 +123,15 @@ struct arpt_entry
 
 #define ARPT_SO_GET_INFO		(ARPT_BASE_CTL)
 #define ARPT_SO_GET_ENTRIES		(ARPT_BASE_CTL + 1)
-#define ARPT_SO_GET_MAX			ARPT_SO_GET_ENTRIES
+/* #define ARPT_SO_GET_REVISION_MATCH	(APRT_BASE_CTL + 2) */
+#define ARPT_SO_GET_REVISION_TARGET	(ARPT_BASE_CTL + 3)
+#define ARPT_SO_GET_MAX			(ARPT_SO_GET_REVISION_TARGET)
 
 /* CONTINUE verdict for targets */
-#define ARPT_CONTINUE 0xFFFFFFFF
+#define ARPT_CONTINUE XT_CONTINUE
 
 /* For standard target */
-#define ARPT_RETURN (-NF_MAX_VERDICT - 1)
+#define ARPT_RETURN XT_RETURN
 
 /* The argument to ARPT_SO_GET_INFO */
 struct arpt_getinfo
@@ -205,23 +182,15 @@ struct arpt_replace
 	/* Number of counters (must be equal to current number of entries). */
 	unsigned int num_counters;
 	/* The old entries' counters. */
-	struct arpt_counters __user *counters;
+	struct xt_counters __user *counters;
 
 	/* The entries (hang off end: not really an array). */
 	struct arpt_entry entries[0];
 };
 
 /* The argument to ARPT_SO_ADD_COUNTERS. */
-struct arpt_counters_info
-{
-	/* Which table. */
-	char name[ARPT_TABLE_MAXNAMELEN];
-
-	unsigned int num_counters;
-
-	/* The counters (actually `number' of these). */
-	struct arpt_counters counters[0];
-};
+#define arpt_counters_info xt_counters_info
+#define arpt_counters xt_counters
 
 /* The argument to ARPT_SO_GET_ENTRIES. */
 struct arpt_get_entries
@@ -237,9 +206,9 @@ struct arpt_get_entries
 };
 
 /* Standard return verdict, or do jump. */
-#define ARPT_STANDARD_TARGET ""
+#define ARPT_STANDARD_TARGET XT_STANDARD_TARGET
 /* Error verdict. */
-#define ARPT_ERROR_TARGET "ERROR"
+#define ARPT_ERROR_TARGET XT_ERROR_TARGET
 
 /* Helper functions */
 static __inline__ struct arpt_entry_target *arpt_get_target(struct arpt_entry *e)
@@ -269,71 +238,60 @@ static __inline__ struct arpt_entry_target *arpt_get_target(struct arpt_entry *e
  */
 #ifdef __KERNEL__
 
-/* Registration hooks for targets. */
-struct arpt_target
+/* Standard entry. */
+struct arpt_standard
 {
-	struct list_head list;
-
-	const char name[ARPT_FUNCTION_MAXNAMELEN];
-
-	/* Returns verdict. */
-	unsigned int (*target)(struct sk_buff **pskb,
-			       unsigned int hooknum,
-			       const struct net_device *in,
-			       const struct net_device *out,
-			       const void *targinfo,
-			       void *userdata);
-
-	/* Called when user tries to insert an entry of this type:
-           hook_mask is a bitmask of hooks from which it can be
-           called. */
-	/* Should return true or false. */
-	int (*checkentry)(const char *tablename,
-			  const struct arpt_entry *e,
-			  void *targinfo,
-			  unsigned int targinfosize,
-			  unsigned int hook_mask);
-
-	/* Called when entry of this type deleted. */
-	void (*destroy)(void *targinfo, unsigned int targinfosize);
-
-	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
-	struct module *me;
+	struct arpt_entry entry;
+	struct arpt_standard_target target;
 };
 
-extern int arpt_register_target(struct arpt_target *target);
-extern void arpt_unregister_target(struct arpt_target *target);
-
-/* Furniture shopping... */
-struct arpt_table
+struct arpt_error_target
 {
-	struct list_head list;
-
-	/* A unique name... */
-	char name[ARPT_TABLE_MAXNAMELEN];
-
-	/* What hooks you will enter on */
-	unsigned int valid_hooks;
-
-	/* Lock for the curtain */
-	rwlock_t lock;
-
-	/* Man behind the curtain... */
-	struct arpt_table_info *private;
-
-	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
-	struct module *me;
+	struct arpt_entry_target target;
+	char errorname[ARPT_FUNCTION_MAXNAMELEN];
 };
+
+struct arpt_error
+{
+	struct arpt_entry entry;
+	struct arpt_error_target target;
+};
+
+#define ARPT_ENTRY_INIT(__size)						       \
+{									       \
+	.target_offset	= sizeof(struct arpt_entry),			       \
+	.next_offset	= (__size),					       \
+}
+
+#define ARPT_STANDARD_INIT(__verdict)					       \
+{									       \
+	.entry		= ARPT_ENTRY_INIT(sizeof(struct arpt_standard)),       \
+	.target		= XT_TARGET_INIT(ARPT_STANDARD_TARGET,		       \
+					 sizeof(struct arpt_standard_target)), \
+	.target.verdict	= -(__verdict) - 1,				       \
+}
+
+#define ARPT_ERROR_INIT							       \
+{									       \
+	.entry		= ARPT_ENTRY_INIT(sizeof(struct arpt_error)),	       \
+	.target		= XT_TARGET_INIT(ARPT_ERROR_TARGET,		       \
+					 sizeof(struct arpt_error_target)),    \
+	.target.errorname = "ERROR",					       \
+}
+
+#define arpt_register_target(tgt) 	\
+({	(tgt)->family = NF_ARP;		\
+ 	xt_register_target(tgt); })
+#define arpt_unregister_target(tgt) xt_unregister_target(tgt)
 
 extern int arpt_register_table(struct arpt_table *table,
 			       const struct arpt_replace *repl);
 extern void arpt_unregister_table(struct arpt_table *table);
-extern unsigned int arpt_do_table(struct sk_buff **pskb,
+extern unsigned int arpt_do_table(struct sk_buff *skb,
 				  unsigned int hook,
 				  const struct net_device *in,
 				  const struct net_device *out,
-				  struct arpt_table *table,
-				  void *userdata);
+				  struct arpt_table *table);
 
 #define ARPT_ALIGN(s) (((s) + (__alignof__(struct arpt_entry)-1)) & ~(__alignof__(struct arpt_entry)-1))
 #endif /*__KERNEL__*/

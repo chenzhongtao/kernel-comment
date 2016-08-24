@@ -173,7 +173,7 @@ static void l1m_debug(struct FsmInst *fi, char *fmt, ...)
 	char buf[256];
 	
 	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
+	vsnprintf(buf, sizeof(buf), fmt, args);
 	DBG(8, "%s", buf);
 	va_end(args);
 }
@@ -275,7 +275,7 @@ static void dout_debug(struct FsmInst *fi, char *fmt, ...)
 	char buf[256];
 	
 	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
+	vsnprintf(buf, sizeof(buf), fmt, args);
 	DBG(0x2, "%s", buf);
 	va_end(args);
 }
@@ -370,11 +370,11 @@ static void fifo_reseted(void *context)
 	FsmEvent(&adapter->d_out.fsm, EV_DOUT_RESETED, NULL);
 }
 
-static void usb_d_out_complete(struct urb *urb, struct pt_regs *regs)
+static void usb_d_out_complete(struct urb *urb)
 {
 	struct st5481_adapter *adapter = urb->context;
 	struct st5481_d_out *d_out = &adapter->d_out;
-	int buf_nr;
+	long buf_nr;
 	
 	DBG(2, "");
 
@@ -382,16 +382,20 @@ static void usb_d_out_complete(struct urb *urb, struct pt_regs *regs)
 	test_and_clear_bit(buf_nr, &d_out->busy);
 
 	if (unlikely(urb->status < 0)) {
-		if (urb->status != -ENOENT && urb->status != -ESHUTDOWN) {
-			WARN("urb status %d",urb->status);
-			if (d_out->busy == 0) {
-				st5481_usb_pipe_reset(adapter, EP_D_OUT | USB_DIR_OUT, fifo_reseted, adapter);
-			}
-			return;
-		} else {
-			DBG(1,"urb killed"); 
-			return; // Give up
+		switch (urb->status) {
+			case -ENOENT:
+			case -ESHUTDOWN:
+			case -ECONNRESET:
+				DBG(1,"urb killed status %d", urb->status);
+				break;
+			default: 
+				WARN("urb status %d",urb->status);
+				if (d_out->busy == 0) {
+					st5481_usb_pipe_reset(adapter, EP_D_OUT | USB_DIR_OUT, fifo_reseted, adapter);
+				}
+				break;
 		}
+		return; // Give up
 	}
 
 	FsmEvent(&adapter->d_out.fsm, EV_DOUT_COMPLETE, (void *) buf_nr);
@@ -542,7 +546,7 @@ static void dout_reseted(struct FsmInst *fsm, int event, void *arg)
 static void dout_complete(struct FsmInst *fsm, int event, void *arg)
 {
 	struct st5481_adapter *adapter = fsm->userdata;
-	int buf_nr = (int) arg;
+	long buf_nr = (long) arg;
 
 	usb_d_out(adapter, buf_nr);
 }
@@ -592,9 +596,7 @@ void st5481_d_l2l1(struct hisax_if *hisax_d_if, int pr, void *arg)
 		break;
 	case PH_DATA | REQUEST:
 		DBG(2, "PH_DATA REQUEST len %d", skb->len);
-		if (adapter->d_out.tx_skb)
-			BUG();
-
+		BUG_ON(adapter->d_out.tx_skb);
 		adapter->d_out.tx_skb = skb;
 		FsmEvent(&adapter->d_out.fsm, EV_DOUT_START_XMIT, NULL);
 		break;
@@ -709,14 +711,14 @@ int st5481_setup_d(struct st5481_adapter *adapter)
 
 	adapter->l1m.fsm = &l1fsm;
 	adapter->l1m.state = ST_L1_F3;
-	adapter->l1m.debug = 1;
+	adapter->l1m.debug = st5481_debug & 0x100;
 	adapter->l1m.userdata = adapter;
 	adapter->l1m.printdebug = l1m_debug;
 	FsmInitTimer(&adapter->l1m, &adapter->timer);
 
 	adapter->d_out.fsm.fsm = &dout_fsm;
 	adapter->d_out.fsm.state = ST_DOUT_NONE;
-	adapter->d_out.fsm.debug = 1;
+	adapter->d_out.fsm.debug = st5481_debug & 0x100;
 	adapter->d_out.fsm.userdata = adapter;
 	adapter->d_out.fsm.printdebug = dout_debug;
 

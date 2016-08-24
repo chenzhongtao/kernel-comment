@@ -104,7 +104,7 @@ int com20020_check(struct net_device *dev)
 	SET_SUBADR(SUB_SETUP1);
 	outb(lp->setup, _XREG);
 
-	if (lp->card_flags & ARC_CAN_10MBIT)
+	if (lp->clockm != 0)
 	{
 		SET_SUBADR(SUB_SETUP2);
 		outb(lp->setup2, _XREG);
@@ -159,7 +159,7 @@ int com20020_found(struct net_device *dev, int shared)
 
 	/* Initialize the rest of the device structure. */
 
-	lp = (struct arcnet_local *) dev->priv;
+	lp = dev->priv;
 
 	lp->hw.owner = THIS_MODULE;
 	lp->hw.command = com20020_command;
@@ -233,7 +233,7 @@ int com20020_found(struct net_device *dev, int shared)
  */
 static int com20020_reset(struct net_device *dev, int really_reset)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	u_int ioaddr = dev->base_addr;
 	u_char inbyte;
 
@@ -300,7 +300,7 @@ static int com20020_status(struct net_device *dev)
 
 static void com20020_close(struct net_device *dev)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	int ioaddr = dev->base_addr;
 
 	/* disable transmitter */
@@ -337,12 +337,16 @@ static void com20020_set_mc_list(struct net_device *dev)
 	}
 }
 
-#ifdef MODULE
-
+#if defined(CONFIG_ARCNET_COM20020_PCI_MODULE) || \
+    defined(CONFIG_ARCNET_COM20020_ISA_MODULE) || \
+    defined(CONFIG_ARCNET_COM20020_CS_MODULE)
 EXPORT_SYMBOL(com20020_check);
 EXPORT_SYMBOL(com20020_found);
+#endif
 
 MODULE_LICENSE("GPL");
+
+#ifdef MODULE
 
 int init_module(void)
 {

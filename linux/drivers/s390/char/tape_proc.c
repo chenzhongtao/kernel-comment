@@ -11,10 +11,10 @@
  * PROCFS Functions
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/vmalloc.h>
 #include <linux/seq_file.h>
+#include <linux/proc_fs.h>
 
 #define TAPE_DBF_AREA	tape_core_dbf
 
@@ -109,7 +109,7 @@ static int tape_proc_open(struct inode *inode, struct file *file)
 	return seq_open(file, &tape_proc_seq);
 }
 
-static struct file_operations tape_proc_ops =
+static const struct file_operations tape_proc_ops =
 {
 	.open		= tape_proc_open,
 	.read		= seq_read,

@@ -24,13 +24,10 @@ struct semaphore {
 	.wait		= __WAIT_QUEUE_HEAD_INITIALIZER((name).wait)	\
 }
 
-#define __MUTEX_INITIALIZER(name)	__SEMAPHORE_INITIALIZER(name,1)
-
 #define __DECLARE_SEMAPHORE_GENERIC(name,count)					\
 	struct semaphore name = __SEMAPHORE_INITIALIZER(name, count)
 
 #define DECLARE_MUTEX(name)		__DECLARE_SEMAPHORE_GENERIC(name, 1)
-#define DECLARE_MUTEX_LOCKED(name)	__DECLARE_SEMAPHORE_GENERIC(name, 0)
 
 static inline void
 sema_init (struct semaphore *sem, int val)
@@ -63,7 +60,7 @@ static inline void
 down (struct semaphore *sem)
 {
 	might_sleep();
-	if (atomic_dec_return(&sem->count) < 0)
+	if (ia64_fetchadd(-1, &sem->count.counter, acq) < 1)
 		__down(sem);
 }
 
@@ -77,7 +74,7 @@ down_interruptible (struct semaphore * sem)
 	int ret = 0;
 
 	might_sleep();
-	if (atomic_dec_return(&sem->count) < 0)
+	if (ia64_fetchadd(-1, &sem->count.counter, acq) < 1)
 		ret = __down_interruptible(sem);
 	return ret;
 }
@@ -87,7 +84,7 @@ down_trylock (struct semaphore *sem)
 {
 	int ret = 0;
 
-	if (atomic_dec_return(&sem->count) < 0)
+	if (ia64_fetchadd(-1, &sem->count.counter, acq) < 1)
 		ret = __down_trylock(sem);
 	return ret;
 }
@@ -95,7 +92,7 @@ down_trylock (struct semaphore *sem)
 static inline void
 up (struct semaphore * sem)
 {
-	if (atomic_inc_return(&sem->count) <= 0)
+	if (ia64_fetchadd(1, &sem->count.counter, rel) <= -1)
 		__up(sem);
 }
 

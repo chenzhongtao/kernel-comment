@@ -15,7 +15,6 @@
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
@@ -23,6 +22,7 @@
 #include <linux/tty.h>
 #include <linux/serial.h>
 #include <linux/serial_core.h>
+#include <linux/serial_8250.h>
 
 #include <asm/cpu.h>
 #include <asm/bootinfo.h>
@@ -35,9 +35,6 @@
 #include <asm/traps.h>
 
 extern void mips_reboot_setup(void);
-extern void mips_time_init(void);
-extern void mips_timer_setup(struct irqaction *irq);
-extern unsigned long mips_rtc_get_time(void);
 
 #ifdef CONFIG_KGDB
 extern void kgdb_config(void);
@@ -50,25 +47,21 @@ const char *get_system_type(void)
 	return "MIPS Atlas";
 }
 
-static int __init atlas_setup(void)
+const char display_string[] = "        LINUX ON ATLAS       ";
+
+void __init plat_mem_setup(void)
 {
+	mips_pcibios_init();
+
 	ioport_resource.end = 0x7fffffff;
 
-	serial_init ();
+	serial_init();
 
 #ifdef CONFIG_KGDB
 	kgdb_config();
 #endif
 	mips_reboot_setup();
-
-	board_time_init = mips_time_init;
-	board_timer_setup = mips_timer_setup;
-	rtc_get_time = mips_rtc_get_time;
-
-	return 0;
 }
-
-early_initcall(atlas_setup);
 
 static void __init serial_init(void)
 {
@@ -82,10 +75,10 @@ static void __init serial_init(void)
 #else
 	s.iobase = ATLAS_UART_REGS_BASE+3;
 #endif
-	s.irq = ATLASINT_UART;
+	s.irq = ATLAS_INT_UART;
 	s.uartclk = ATLAS_BASE_BAUD * 16;
-	s.flags = ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST | ASYNC_AUTO_IRQ;
-	s.iotype = SERIAL_IO_PORT;
+	s.flags = UPF_BOOT_AUTOCONF | UPF_SKIP_TEST | UPF_AUTO_IRQ;
+	s.iotype = UPIO_PORT;
 	s.regshift = 3;
 
 	if (early_serial_setup(&s) != 0) {

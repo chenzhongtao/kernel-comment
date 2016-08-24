@@ -107,7 +107,7 @@ struct net_local {
 static int	netcard_probe1(struct net_device *dev, int ioaddr);
 static int	net_open(struct net_device *dev);
 static int	net_send_packet(struct sk_buff *skb, struct net_device *dev);
-static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t net_interrupt(int irq, void *dev_id);
 static void	net_rx(struct net_device *dev);
 static int	net_close(struct net_device *dev);
 static struct	net_device_stats *net_get_stats(struct net_device *dev);
@@ -133,8 +133,6 @@ static int __init do_netcard_probe(struct net_device *dev)
 	int base_addr = dev->base_addr;
 	int irq = dev->irq;
 
-	SET_MODULE_OWNER(dev);
-
 	if (base_addr > 0x1ff)    /* Check a single specified location. */
 		return netcard_probe1(dev, base_addr);
 	else if (base_addr != 0)  /* Don't probe at all. */
@@ -149,7 +147,7 @@ static int __init do_netcard_probe(struct net_device *dev)
 
 	return -ENODEV;
 }
- 
+
 static void cleanup_card(struct net_device *dev)
 {
 #ifdef jumpered_dma
@@ -176,12 +174,7 @@ struct net_device * __init netcard_probe(int unit)
 	err = do_netcard_probe(dev);
 	if (err)
 		goto out;
-	err = register_netdev(dev);
-	if (err)
-		goto out1;
 	return dev;
-out1:
-	cleanup_card(dev);
 out:
 	free_netdev(dev);
 	return ERR_PTR(err);
@@ -199,16 +192,17 @@ static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 	static unsigned version_printed;
 	int i;
 	int err = -ENODEV;
+	DECLARE_MAC_BUF(mac);
 
 	/* Grab the region so that no one else tries to probe our ioports. */
 	if (!request_region(ioaddr, NETCARD_IO_EXTENT, cardname))
 		return -EBUSY;
 
 	/*
-	 * For ethernet adaptors the first three octets of the station address 
+	 * For ethernet adaptors the first three octets of the station address
 	 * contains the manufacturer's unique code. That might be a good probe
 	 * method. Ideally you would add additional checks.
-	 */ 
+	 */
 	if (inb(ioaddr + 0) != SA_ADDR0
 		||	 inb(ioaddr + 1) != SA_ADDR1
 		||	 inb(ioaddr + 2) != SA_ADDR2)
@@ -224,7 +218,9 @@ static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 
 	/* Retrieve and print the ethernet address. */
 	for (i = 0; i < 6; i++)
-		printk(" %2.2x", dev->dev_addr[i] = inb(ioaddr + i));
+		dev->dev_addr[i] = inb(ioaddr + i);
+
+	printk("%s", print_mac(mac, dev->dev_addr));
 
 	err = -EAGAIN;
 #ifdef jumpered_interrupts
@@ -297,7 +293,7 @@ static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 		if (i <= 0) {
 			printk("DMA probe failed.\n");
 			goto out1;
-		} 
+		}
 		if (request_dma(dev->dma, cardname)) {
 			printk("probed DMA %d allocation failed.\n", dev->dma);
 			goto out1;
@@ -315,8 +311,16 @@ static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 	dev->set_multicast_list = &set_multicast_list;
 
         dev->tx_timeout		= &net_tx_timeout;
-        dev->watchdog_timeo	= MY_TX_TIMEOUT; 
+        dev->watchdog_timeo	= MY_TX_TIMEOUT;
+
+	err = register_netdev(dev);
+	if (err)
+		goto out2;
 	return 0;
+out2:
+#ifdef jumpered_dma
+	free_dma(dev->dma);
+#endif
 out1:
 #ifdef jumpered_interrupts
 	free_irq(dev->irq, dev);
@@ -501,7 +505,7 @@ void net_tx(struct net_device *dev)
  * The typical workload of the driver:
  * Handle the network interface interrupts.
  */
-static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t net_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct net_local *np;
@@ -548,7 +552,7 @@ net_rx(struct net_device *dev)
 	do {
 		int status = inw(ioaddr);
 		int pkt_len = inw(ioaddr);
-	  
+
 		if (pkt_len == 0)		/* Read all the frames? */
 			break;			/* Done for now */
 
@@ -563,7 +567,7 @@ net_rx(struct net_device *dev)
 			struct sk_buff *skb;
 
 			lp->stats.rx_bytes+=pkt_len;
-			
+
 			skb = dev_alloc_skb(pkt_len);
 			if (skb == NULL) {
 				printk(KERN_NOTICE "%s: Memory squeeze, dropping packet.\n",
@@ -660,7 +664,7 @@ set_multicast_list(struct net_device *dev)
 
 		outw(MULTICAST, ioaddr);
 	}
-	else 
+	else
 		outw(0, ioaddr);
 }
 
@@ -691,11 +695,8 @@ int init_module(void)
 	dev->dma       = dma;
 	dev->mem_start = mem;
 	if (do_netcard_probe(dev) == 0) {
-		if (register_netdev(dev) == 0)
-			this_device = dev;
-			return 0;
-		}
-		cleanup_card(dev);
+		this_device = dev;
+		return 0;
 	}
 	free_netdev(dev);
 	return -ENXIO;

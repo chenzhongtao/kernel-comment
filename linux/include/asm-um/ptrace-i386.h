@@ -1,13 +1,17 @@
 /* 
- * Copyright (C) 2000, 2001, 2002 Jeff Dike (jdike@karaya.com)
+ * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
 #ifndef __UM_PTRACE_I386_H
 #define __UM_PTRACE_I386_H
 
-#include "sysdep/ptrace.h"
+#define HOST_AUDIT_ARCH AUDIT_ARCH_I386
+
+#include "linux/compiler.h"
 #include "asm/ptrace-generic.h"
+#include <asm/user.h>
+#include "sysdep/ptrace.h"
 
 #define PT_REGS_EAX(r) UPT_EAX(&(r)->regs)
 #define PT_REGS_EBX(r) UPT_EBX(&(r)->regs)
@@ -30,17 +34,27 @@
 #define PT_REGS_SYSCALL_RET(r) PT_REGS_EAX(r)
 #define PT_FIX_EXEC_STACK(sp) do ; while(0)
 
+/* Cope with a conditional i386 definition. */
+#undef profile_pc
+#define profile_pc(regs) PT_REGS_IP(regs)
+
 #define user_mode(r) UPT_IS_USER(&(r)->regs)
 
-#endif
-
 /*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
+ * Forward declaration to avoid including sysdep/tls.h, which causes a
+ * circular include, and compilation failures.
  */
+struct user_desc;
+
+extern int get_fpxregs(struct user_fxsr_struct __user *buf,
+		       struct task_struct *child);
+extern int set_fpxregs(struct user_fxsr_struct __user *buf,
+		       struct task_struct *tsk);
+
+extern int ptrace_get_thread_area(struct task_struct *child, int idx,
+                                  struct user_desc __user *user_desc);
+
+extern int ptrace_set_thread_area(struct task_struct *child, int idx,
+                                  struct user_desc __user *user_desc);
+
+#endif

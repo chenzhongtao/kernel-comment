@@ -1,7 +1,7 @@
 /*
  * Driver for Sound Core PDAudioCF soundcard
  *
- * Copyright (c) 2003 by Jaroslav Kysela <perex@suse.cz>
+ * Copyright (c) 2003 by Jaroslav Kysela <perex@perex.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -22,13 +22,14 @@
 #include <sound/core.h>
 #include "pdaudiocf.h"
 #include <sound/initval.h>
+#include <asm/irq_regs.h>
 
 /*
  *
  */
-irqreturn_t pdacf_interrupt(int irq, void *dev, struct pt_regs *regs)
+irqreturn_t pdacf_interrupt(int irq, void *dev)
 {
-	pdacf_t *chip = dev;
+	struct snd_pdacf *chip = dev;
 	unsigned short stat;
 
 	if ((chip->chip_status & (PDAUDIOCF_STAT_IS_STALE|
@@ -45,7 +46,7 @@ irqreturn_t pdacf_interrupt(int irq, void *dev, struct pt_regs *regs)
 		if (!(stat & PDAUDIOCF_IRQAKM))
 			stat |= PDAUDIOCF_IRQAKM;	/* check rate */
 	}
-	if (regs != NULL)
+	if (get_irq_regs() != NULL)
 		snd_ak4117_check_rate_and_errors(chip->ak4117, 0);
 	return IRQ_HANDLED;
 }
@@ -204,7 +205,7 @@ static inline void pdacf_transfer_stereo24be(u8 *dst, u32 xor, unsigned int size
 	}
 }
 
-static void pdacf_transfer(pdacf_t *chip, unsigned int size, unsigned int off)
+static void pdacf_transfer(struct snd_pdacf *chip, unsigned int size, unsigned int off)
 {
 	unsigned long rdp_port = chip->port + PDAUDIOCF_REG_MD;
 	unsigned int xor = chip->pcm_xor;
@@ -258,7 +259,7 @@ static void pdacf_transfer(pdacf_t *chip, unsigned int size, unsigned int off)
 
 void pdacf_tasklet(unsigned long private_data)
 {
-	pdacf_t *chip = (pdacf_t *) private_data;
+	struct snd_pdacf *chip = (struct snd_pdacf *) private_data;
 	int size, off, cont, rdp, wdp;
 
 	if ((chip->chip_status & (PDAUDIOCF_STAT_IS_STALE|PDAUDIOCF_STAT_IS_CONFIGURED)) != PDAUDIOCF_STAT_IS_CONFIGURED)

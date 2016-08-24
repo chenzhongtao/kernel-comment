@@ -1,5 +1,5 @@
 /*
- * arch/mips/vr41xx/nec-cmbvr4133/pci_fixup.c
+ * arch/mips/pci/fixup-vr4133.c
  *
  * The NEC CMB-VR4133 Board specific PCI fixups.
  *
@@ -15,11 +15,12 @@
  * Author: Manish Lachwani (mlachwani@mvista.com)
  *
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/kernel.h>
 
 #include <asm/io.h>
+#include <asm/i8259.h>
 #include <asm/vr41xx/cmbvr4133.h>
 
 extern int vr4133_rockhopper;
@@ -45,7 +46,7 @@ int pcibios_plat_dev_init(struct pci_dev *dev)
 
 	/*
 	 * we have to open the bridges' windows down to 0 because otherwise
- 	 * we cannot access ISA south bridge I/O registers that get mapped from
+	 * we cannot access ISA south bridge I/O registers that get mapped from
 	 * 0. for example, 8259 PIC would be unaccessible without that
 	 */
 	if(dev->vendor == PCI_VENDOR_ID_INTEL && dev->device == PCI_DEVICE_ID_INTEL_S21152BB) {
@@ -143,7 +144,7 @@ int rockhopper_get_irq(struct pci_dev *dev, u8 pin, u8 slot)
 	if (bus == NULL)
 		return -1;
 
-	for (i = 0; i < sizeof (int_map) / sizeof (int_map[0]); i++) {
+	for (i = 0; i < ARRAY_SIZE(int_map); i++) {
 		if (int_map[i].bus == bus->number && int_map[i].slot == slot) {
 			int line;
 			for (line = 0; line < 4; line++)
@@ -161,24 +162,14 @@ int rockhopper_get_irq(struct pci_dev *dev, u8 pin, u8 slot)
 #ifdef CONFIG_ROCKHOPPER
 void i8259_init(void)
 {
-	outb(0x11, 0x20);		/* Master ICW1 */
-	outb(I8259_IRQ_BASE, 0x21);	/* Master ICW2 */
-	outb(0x04, 0x21);		/* Master ICW3 */
-	outb(0x01, 0x21);		/* Master ICW4 */
-	outb(0xff, 0x21);		/* Master IMW */
-
-	outb(0x11, 0xa0);		/* Slave ICW1 */
-	outb(I8259_IRQ_BASE + 8, 0xa1);	/* Slave ICW2 */
-	outb(0x02, 0xa1);		/* Slave ICW3 */
-	outb(0x01, 0xa1);		/* Slave ICW4 */
-	outb(0xff, 0xa1);		/* Slave IMW */
+	init_i8259_irqs();
 
 	outb(0x00, 0x4d0);
 	outb(0x02, 0x4d1);	/* USB IRQ9 is level */
 }
 #endif
 
-int __init pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+int __init pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	extern int pci_probe_only;
 	pci_probe_only = 1;

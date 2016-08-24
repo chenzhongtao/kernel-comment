@@ -9,11 +9,13 @@
 
 #include <linux/fs.h>
 #include <linux/jbd.h>
+#include <linux/capability.h>
 #include <linux/ext3_fs.h>
 #include <linux/ext3_jbd.h>
 #include <linux/time.h>
+#include <linux/compat.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
-
 
 int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		unsigned long arg)
@@ -26,6 +28,7 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 
 	switch (cmd) {
 	case EXT3_IOC_GETFLAGS:
+		ext3_get_inode_flags(ei);
 		flags = ei->i_flags & EXT3_FL_USER_VISIBLE;
 		return put_user(flags, (int __user *) arg);
 	case EXT3_IOC_SETFLAGS: {
@@ -38,7 +41,7 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		if (IS_RDONLY(inode))
 			return -EROFS;
 
-		if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
+		if (!is_owner_or_cap(inode))
 			return -EACCES;
 
 		if (get_user(flags, (int __user *) arg))
@@ -47,6 +50,12 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		if (!S_ISDIR(inode->i_mode))
 			flags &= ~EXT3_DIRSYNC_FL;
 
+		mutex_lock(&inode->i_mutex);
+		/* Is it quota file? Do not allow user to mess with it */
+		if (IS_NOQUOTA(inode)) {
+			mutex_unlock(&inode->i_mutex);
+			return -EPERM;
+		}
 		oldflags = ei->i_flags;
 
 		/* The JOURNAL_DATA flag is modifiable only by root */
@@ -59,8 +68,10 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		 * This test looks nicer. Thanks to Pauline Middelink
 		 */
 		if ((flags ^ oldflags) & (EXT3_APPEND_FL | EXT3_IMMUTABLE_FL)) {
-			if (!capable(CAP_LINUX_IMMUTABLE))
+			if (!capable(CAP_LINUX_IMMUTABLE)) {
+				mutex_unlock(&inode->i_mutex);
 				return -EPERM;
+			}
 		}
 
 		/*
@@ -68,14 +79,18 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		 * the relevant capability.
 		 */
 		if ((jflag ^ oldflags) & (EXT3_JOURNAL_DATA_FL)) {
-			if (!capable(CAP_SYS_RESOURCE))
+			if (!capable(CAP_SYS_RESOURCE)) {
+				mutex_unlock(&inode->i_mutex);
 				return -EPERM;
+			}
 		}
 
 
 		handle = ext3_journal_start(inode, 1);
-		if (IS_ERR(handle))
+		if (IS_ERR(handle)) {
+			mutex_unlock(&inode->i_mutex);
 			return PTR_ERR(handle);
+		}
 		if (IS_SYNC(inode))
 			handle->h_sync = 1;
 		err = ext3_reserve_inode_write(handle, inode, &iloc);
@@ -92,11 +107,14 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		err = ext3_mark_iloc_dirty(handle, inode, &iloc);
 flags_err:
 		ext3_journal_stop(handle);
-		if (err)
+		if (err) {
+			mutex_unlock(&inode->i_mutex);
 			return err;
+		}
 
 		if ((jflag ^ oldflags) & (EXT3_JOURNAL_DATA_FL))
 			err = ext3_change_inode_journal_flag(inode, jflag);
+		mutex_unlock(&inode->i_mutex);
 		return err;
 	}
 	case EXT3_IOC_GETVERSION:
@@ -109,7 +127,7 @@ flags_err:
 		__u32 generation;
 		int err;
 
-		if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
+		if (!is_owner_or_cap(inode))
 			return -EPERM;
 		if (IS_RDONLY(inode))
 			return -EROFS;
@@ -153,19 +171,22 @@ flags_err:
 		}
 #endif
 	case EXT3_IOC_GETRSVSZ:
-		if (test_opt(inode->i_sb, RESERVATION) && S_ISREG(inode->i_mode)) {
-			rsv_window_size = atomic_read(&ei->i_rsv_window.rsv_goal_size);
+		if (test_opt(inode->i_sb, RESERVATION)
+			&& S_ISREG(inode->i_mode)
+			&& ei->i_block_alloc_info) {
+			rsv_window_size = ei->i_block_alloc_info->rsv_window_node.rsv_goal_size;
 			return put_user(rsv_window_size, (int __user *)arg);
 		}
 		return -ENOTTY;
-	case EXT3_IOC_SETRSVSZ:
+	case EXT3_IOC_SETRSVSZ: {
+
 		if (!test_opt(inode->i_sb, RESERVATION) ||!S_ISREG(inode->i_mode))
 			return -ENOTTY;
 
 		if (IS_RDONLY(inode))
 			return -EROFS;
 
-		if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
+		if (!is_owner_or_cap(inode))
 			return -EACCES;
 
 		if (get_user(rsv_window_size, (int __user *)arg))
@@ -173,10 +194,24 @@ flags_err:
 
 		if (rsv_window_size > EXT3_MAX_RESERVE_BLOCKS)
 			rsv_window_size = EXT3_MAX_RESERVE_BLOCKS;
-		atomic_set(&ei->i_rsv_window.rsv_goal_size, rsv_window_size);
+
+		/*
+		 * need to allocate reservation structure for this inode
+		 * before set the window size
+		 */
+		mutex_lock(&ei->truncate_mutex);
+		if (!ei->i_block_alloc_info)
+			ext3_init_block_alloc_info(inode);
+
+		if (ei->i_block_alloc_info){
+			struct ext3_reserve_window_node *rsv = &ei->i_block_alloc_info->rsv_window_node;
+			rsv->rsv_goal_size = rsv_window_size;
+		}
+		mutex_unlock(&ei->truncate_mutex);
 		return 0;
+	}
 	case EXT3_IOC_GROUP_EXTEND: {
-		unsigned long n_blocks_count;
+		ext3_fsblk_t n_blocks_count;
 		struct super_block *sb = inode->i_sb;
 		int err;
 
@@ -224,3 +259,55 @@ flags_err:
 		return -ENOTTY;
 	}
 }
+
+#ifdef CONFIG_COMPAT
+long ext3_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct inode *inode = file->f_path.dentry->d_inode;
+	int ret;
+
+	/* These are just misnamed, they actually get/put from/to user an int */
+	switch (cmd) {
+	case EXT3_IOC32_GETFLAGS:
+		cmd = EXT3_IOC_GETFLAGS;
+		break;
+	case EXT3_IOC32_SETFLAGS:
+		cmd = EXT3_IOC_SETFLAGS;
+		break;
+	case EXT3_IOC32_GETVERSION:
+		cmd = EXT3_IOC_GETVERSION;
+		break;
+	case EXT3_IOC32_SETVERSION:
+		cmd = EXT3_IOC_SETVERSION;
+		break;
+	case EXT3_IOC32_GROUP_EXTEND:
+		cmd = EXT3_IOC_GROUP_EXTEND;
+		break;
+	case EXT3_IOC32_GETVERSION_OLD:
+		cmd = EXT3_IOC_GETVERSION_OLD;
+		break;
+	case EXT3_IOC32_SETVERSION_OLD:
+		cmd = EXT3_IOC_SETVERSION_OLD;
+		break;
+#ifdef CONFIG_JBD_DEBUG
+	case EXT3_IOC32_WAIT_FOR_READONLY:
+		cmd = EXT3_IOC_WAIT_FOR_READONLY;
+		break;
+#endif
+	case EXT3_IOC32_GETRSVSZ:
+		cmd = EXT3_IOC_GETRSVSZ;
+		break;
+	case EXT3_IOC32_SETRSVSZ:
+		cmd = EXT3_IOC_SETRSVSZ;
+		break;
+	case EXT3_IOC_GROUP_ADD:
+		break;
+	default:
+		return -ENOIOCTLCMD;
+	}
+	lock_kernel();
+	ret = ext3_ioctl(inode, file, cmd, (unsigned long) compat_ptr(arg));
+	unlock_kernel();
+	return ret;
+}
+#endif

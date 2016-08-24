@@ -21,6 +21,8 @@
 #ifndef _ASM_GT64120_H
 #define _ASM_GT64120_H
 
+#include <linux/clocksource.h>
+
 #include <asm/addrspace.h>
 #include <asm/byteorder.h>
 
@@ -451,6 +453,13 @@
 #define GT_SDRAM_OPMODE_OP_MODE		3
 #define GT_SDRAM_OPMODE_OP_CBR		4
 
+#define GT_TC_CONTROL_ENTC0_SHF		0
+#define GT_TC_CONTROL_ENTC0_MSK		(MSK(1) << GT_TC_CONTROL_ENTC0_SHF)
+#define GT_TC_CONTROL_ENTC0_BIT		GT_TC_CONTROL_ENTC0_MSK
+#define GT_TC_CONTROL_SELTC0_SHF	1
+#define GT_TC_CONTROL_SELTC0_MSK	(MSK(1) << GT_TC_CONTROL_SELTC0_SHF)
+#define GT_TC_CONTROL_SELTC0_BIT	GT_TC_CONTROL_SELTC0_MSK
+
 
 #define GT_PCI0_BARE_SWSCS3BOOTDIS_SHF	0
 #define GT_PCI0_BARE_SWSCS3BOOTDIS_MSK	(MSK(1) << GT_PCI0_BARE_SWSCS3BOOTDIS_SHF)
@@ -523,6 +532,13 @@
 #define GT_PCI0_CMD_SWORDSWAP_MSK	(MSK(1) << GT_PCI0_CMD_SWORDSWAP_SHF)
 #define GT_PCI0_CMD_SWORDSWAP_BIT	GT_PCI0_CMD_SWORDSWAP_MSK
 
+#define GT_INTR_T0EXP_SHF		8
+#define GT_INTR_T0EXP_MSK		(MSK(1) << GT_INTR_T0EXP_SHF)
+#define GT_INTR_T0EXP_BIT		GT_INTR_T0EXP_MSK
+#define GT_INTR_RETRYCTR0_SHF		20
+#define GT_INTR_RETRYCTR0_MSK		(MSK(1) << GT_INTR_RETRYCTR0_SHF)
+#define GT_INTR_RETRYCTR0_BIT		GT_INTR_RETRYCTR0_MSK
+
 /*
  *  Misc
  */
@@ -557,5 +573,8 @@
 	do { *(volatile u32 *)(GT64120_BASE+(ofs)) = (data); } while (0)
 #define GT_READ(ofs)		le32_to_cpu(__GT_READ(ofs))
 #define GT_WRITE(ofs, data)	__GT_WRITE(ofs, cpu_to_le32(data))
+
+extern void gt641xx_set_base_clock(unsigned int clock);
+extern int gt641xx_timer0_state(void);
 
 #endif /* _ASM_GT64120_H */

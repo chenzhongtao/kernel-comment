@@ -7,7 +7,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/serial.h>
 #include <linux/serial_reg.h>
 
@@ -59,7 +58,7 @@ static inline unsigned int serial_in(struct IsdnCardState *cs, int offset)
 static inline unsigned int serial_inp(struct IsdnCardState *cs, int offset)
 {
 #ifdef SERIAL_DEBUG_REG
-#ifdef CONFIG_SERIAL_NOPAUSE_IO
+#ifdef ELSA_SERIAL_NOPAUSE_IO
 	u_int val = inb(cs->hw.elsa.base + 8 + offset);
 	debugl1(cs,"inp  %s %02x",ModemIn[offset], val);
 #else
@@ -68,7 +67,7 @@ static inline unsigned int serial_inp(struct IsdnCardState *cs, int offset)
 #endif
 	return(val);
 #else
-#ifdef CONFIG_SERIAL_NOPAUSE_IO
+#ifdef ELSA_SERIAL_NOPAUSE_IO
 	return inb(cs->hw.elsa.base + 8 + offset);
 #else
 	return inb_p(cs->hw.elsa.base + 8 + offset);
@@ -88,13 +87,13 @@ static inline void serial_outp(struct IsdnCardState *cs, int offset,
 			       int value)
 {
 #ifdef SERIAL_DEBUG_REG
-#ifdef CONFIG_SERIAL_NOPAUSE_IO
+#ifdef ELSA_SERIAL_NOPAUSE_IO
 	debugl1(cs,"outp %s %02x",ModemOut[offset], value);
 #else
 	debugl1(cs,"outP %s %02x",ModemOut[offset], value);
 #endif
 #endif
-#ifdef CONFIG_SERIAL_NOPAUSE_IO
+#ifdef ELSA_SERIAL_NOPAUSE_IO
 	outb(value, cs->hw.elsa.base + 8 + offset);
 #else
     	outb_p(value, cs->hw.elsa.base + 8 + offset);
@@ -237,7 +236,7 @@ static void mshutdown(struct IsdnCardState *cs)
 #endif
 }
 
-inline int
+static inline int
 write_modem(struct BCState *bcs) {
 	int ret=0;
 	struct IsdnCardState *cs = bcs->cs;
@@ -255,14 +254,16 @@ write_modem(struct BCState *bcs) {
 	count = len;
 	if (count > MAX_MODEM_BUF - fp) {
 		count = MAX_MODEM_BUF - fp;
-		memcpy(cs->hw.elsa.transbuf + fp, bcs->tx_skb->data, count);
+		skb_copy_from_linear_data(bcs->tx_skb,
+					  cs->hw.elsa.transbuf + fp, count);
 		skb_pull(bcs->tx_skb, count);
 		cs->hw.elsa.transcnt += count;
 		ret = count;
 		count = len - count;
 		fp = 0;
 	}
-	memcpy((cs->hw.elsa.transbuf + fp), bcs->tx_skb->data, count);
+	skb_copy_from_linear_data(bcs->tx_skb,
+				  cs->hw.elsa.transbuf + fp, count);
 	skb_pull(bcs->tx_skb, count);
 	cs->hw.elsa.transcnt += count;
 	ret += count;
@@ -275,7 +276,7 @@ write_modem(struct BCState *bcs) {
 	return(ret);
 }
 
-inline void
+static inline void
 modem_fill(struct BCState *bcs) {
 		
 	if (bcs->tx_skb) {
@@ -422,7 +423,7 @@ extern int open_hscxstate(struct IsdnCardState *cs, struct BCState *bcs);
 extern void modehscx(struct BCState *bcs, int mode, int bc);
 extern void hscx_l2l1(struct PStack *st, int pr, void *arg);
 
-void
+static void
 close_elsastate(struct BCState *bcs)
 {
 	modehscx(bcs, 0, bcs->channel);
@@ -442,7 +443,7 @@ close_elsastate(struct BCState *bcs)
 	}
 }
 
-void
+static void
 modem_write_cmd(struct IsdnCardState *cs, u_char *buf, int len) {
 	int count, fp;
 	u_char *msg = buf;
@@ -472,7 +473,7 @@ modem_write_cmd(struct IsdnCardState *cs, u_char *buf, int len) {
 	}
 }
 
-void
+static void
 modem_set_init(struct IsdnCardState *cs) {
 	int timeout;
 
@@ -521,7 +522,7 @@ modem_set_init(struct IsdnCardState *cs) {
 	udelay(RCV_DELAY);
 }
 
-void
+static void
 modem_set_dial(struct IsdnCardState *cs, int outgoing) {
 	int timeout;
 #define RCV_DELAY 20000	
@@ -543,7 +544,7 @@ modem_set_dial(struct IsdnCardState *cs, int outgoing) {
 	udelay(RCV_DELAY);
 }
 
-void
+static void
 modem_l2l1(struct PStack *st, int pr, void *arg)
 {
 	struct BCState *bcs = st->l1.bcs;
@@ -579,7 +580,7 @@ modem_l2l1(struct PStack *st, int pr, void *arg)
 	}
 }
 
-int
+static int
 setstack_elsa(struct PStack *st, struct BCState *bcs)
 {
 
@@ -614,7 +615,7 @@ setstack_elsa(struct PStack *st, struct BCState *bcs)
 	return (0);
 }
 
-void
+static void
 init_modem(struct IsdnCardState *cs) {
 
 	cs->bcs[0].BC_SetStack = setstack_elsa;
@@ -641,7 +642,7 @@ init_modem(struct IsdnCardState *cs) {
 	modem_set_init(cs);
 }
 
-void
+static void
 release_modem(struct IsdnCardState *cs) {
 
 	cs->hw.elsa.MFlag = 0;

@@ -27,24 +27,6 @@
 
 #define USB_RT_ACM		(USB_TYPE_CLASS | USB_RECIP_INTERFACE)
 
-#define ACM_REQ_COMMAND		0x00
-#define ACM_REQ_RESPONSE	0x01
-#define ACM_REQ_SET_FEATURE	0x02
-#define ACM_REQ_GET_FEATURE	0x03
-#define ACM_REQ_CLEAR_FEATURE	0x04
-
-#define ACM_REQ_SET_LINE	0x20
-#define ACM_REQ_GET_LINE	0x21
-#define ACM_REQ_SET_CONTROL	0x22
-#define ACM_REQ_SEND_BREAK	0x23
-
-/*
- * IRQs.
- */
-
-#define ACM_IRQ_NETWORK		0x00
-#define ACM_IRQ_LINE_STATE	0x20
-
 /*
  * Output control lines.
  */
@@ -66,31 +48,68 @@
 #define ACM_CTRL_OVERRUN	0x40
 
 /*
- * Line speed and caracter encoding.
- */
-
-struct acm_line {
-	__le32 speed;
-	__u8 stopbits;
-	__u8 parity;
-	__u8 databits;
-} __attribute__ ((packed));
-
-/*
  * Internal driver structures.
  */
+
+/*
+ * The only reason to have several buffers is to accomodate assumptions
+ * in line disciplines. They ask for empty space amount, receive our URB size,
+ * and proceed to issue several 1-character writes, assuming they will fit.
+ * The very first write takes a complete URB. Fortunately, this only happens
+ * when processing onlcr, so we only need 2 buffers. These values must be
+ * powers of 2.
+ */
+#define ACM_NW  2
+#define ACM_NR  16
+
+struct acm_wb {
+	unsigned char *buf;
+	dma_addr_t dmah;
+	int len;
+	int use;
+};
+
+struct acm_rb {
+	struct list_head	list;
+	int			size;
+	unsigned char		*base;
+	dma_addr_t		dma;
+};
+
+struct acm_ru {
+	struct list_head	list;
+	struct acm_rb		*buffer;
+	struct urb		*urb;
+	struct acm		*instance;
+};
 
 struct acm {
 	struct usb_device *dev;				/* the corresponding usb device */
 	struct usb_interface *control;			/* control interface */
 	struct usb_interface *data;			/* data interface */
 	struct tty_struct *tty;				/* the corresponding tty */
-	struct urb *ctrlurb, *readurb, *writeurb;	/* urbs */
-	u8 *ctrl_buffer, *read_buffer, *write_buffer;	/* buffers of urbs */
-	dma_addr_t ctrl_dma, read_dma, write_dma;	/* dma handles of buffers */
-	struct acm_line line;				/* line coding (bits, stop, parity) */
+	struct urb *ctrlurb, *writeurb;			/* urbs */
+	u8 *ctrl_buffer;				/* buffers of urbs */
+	dma_addr_t ctrl_dma;				/* dma handles of buffers */
+	u8 *country_codes;				/* country codes from device */
+	unsigned int country_code_size;			/* size of this buffer */
+	unsigned int country_rel_date;			/* release date of version */
+	struct acm_wb wb[ACM_NW];
+	struct acm_ru ru[ACM_NR];
+	struct acm_rb rb[ACM_NR];
+	int rx_buflimit;
+	int rx_endpoint;
+	spinlock_t read_lock;
+	struct list_head spare_read_urbs;
+	struct list_head spare_read_bufs;
+	struct list_head filled_read_bufs;
+	int write_current;				/* current write buffer */
+	int write_used;					/* number of non-empty write buffers */
+	int write_ready;				/* write urb is not running */
+	spinlock_t write_lock;
+	struct usb_cdc_line_coding line;		/* bits, stop, parity */
 	struct work_struct work;			/* work queue entry for line discipline waking up */
-	struct tasklet_struct bh;			/* rx processing */
+	struct tasklet_struct urb_task;                 /* rx processing */
 	spinlock_t throttle_lock;			/* synchronize throtteling and read callback */
 	unsigned int ctrlin;				/* input control lines (DCD, DSR, RI, break, overruns) */
 	unsigned int ctrlout;				/* output control lines (DTR, RTS) */
@@ -100,30 +119,11 @@ struct acm {
 	unsigned int minor;				/* acm minor number */
 	unsigned char throttle;				/* throttled by tty layer */
 	unsigned char clocal;				/* termios CLOCAL */
-	unsigned char ready_for_write;			/* write urb can be used */
-	unsigned char resubmit_to_unthrottle;		/* throtteling has disabled the read urb */
 	unsigned int ctrl_caps;				/* control capabilities from the class specific header */
 };
-
-/* "Union Functional Descriptor" from CDC spec 5.2.3.X */
-struct union_desc {
-	u8	bLength;
-	u8	bDescriptorType;
-	u8	bDescriptorSubType;
-
-	u8	bMasterInterface0;
-	u8	bSlaveInterface0;
-	/* ... and there could be other slave interfaces */
-} __attribute__ ((packed));
-
-/* class specific descriptor types */
-#define CDC_HEADER_TYPE			0x00
-#define CDC_CALL_MANAGEMENT_TYPE	0x01
-#define CDC_AC_MANAGEMENT_TYPE		0x02
-#define CDC_UNION_TYPE			0x06
-#define CDC_COUNTRY_TYPE		0x07
 
 #define CDC_DATA_INTERFACE_TYPE	0x0a
 
 /* constants describing various quirks and errors */
 #define NO_UNION_NORMAL			1
+#define SINGLE_RX_URB			2

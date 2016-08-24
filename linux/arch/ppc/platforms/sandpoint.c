@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/sandpoint_setup.c
- *
  * Board setup routines for the Motorola SPS Sandpoint Test Platform.
  *
  * Author: Mark A. Greer
@@ -56,13 +54,12 @@
  *
  *
  * Motorola has finally released a version of DINK32 that correctly
- * (seemingly) initalizes the memory controller correctly, regardless
+ * (seemingly) initializes the memory controller correctly, regardless
  * of the amount of memory in the system.  Once a method of determining
  * what version of DINK initializes the system for us, if applicable, is
  * found, we can hopefully stop hardcoding 32MB of RAM.
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -74,13 +71,13 @@
 #include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/delay.h>
-#include <linux/irq.h>
 #include <linux/ide.h>
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/serial.h>
 #include <linux/tty.h>	/* for linux/serial_core.h */
 #include <linux/serial_core.h>
+#include <linux/serial_8250.h>
 
 #include <asm/system.h>
 #include <asm/pgtable.h>
@@ -99,6 +96,7 @@
 #include <asm/mpc10x.h>
 #include <asm/pci-bridge.h>
 #include <asm/kgdb.h>
+#include <asm/ppc_sys.h>
 
 #include "sandpoint.h"
 
@@ -201,13 +199,6 @@ sandpoint_setup_winbond_83553(struct pci_controller *hose)
 				devfn,
 				0x48, /* ISA-to-PCI Addr Decoder Control */
 				0xf0);
-
-	/* Enable RTC and Keyboard address locations.  */
-	early_write_config_byte(hose,
-				0,
-				devfn,
-				0x4d,	/* Chip Select Control Register */
-				0x00);
 
 	/* Enable Port 92.  */
 	early_write_config_byte(hose,
@@ -312,6 +303,28 @@ sandpoint_setup_arch(void)
 	/* Lookup PCI host bridges */
 	sandpoint_find_bridges();
 
+	if (strncmp (cur_ppc_sys_spec->ppc_sys_name, "8245", 4) == 0)
+	{
+		bd_t *bp = (bd_t *)__res;
+		struct plat_serial8250_port *pdata;
+
+		pdata = (struct plat_serial8250_port *) ppc_sys_get_pdata(MPC10X_UART0);
+		if (pdata)
+		{
+			pdata[0].uartclk = bp->bi_busfreq;
+		}
+
+#ifdef CONFIG_SANDPOINT_ENABLE_UART1
+		pdata = (struct plat_serial8250_port *) ppc_sys_get_pdata(MPC10X_UART1);
+		if (pdata)
+		{
+			pdata[0].uartclk = bp->bi_busfreq;
+		}
+#else
+		ppc_sys_device_remove(MPC10X_UART1);
+#endif
+	}
+
 	printk(KERN_INFO "Motorola SPS Sandpoint Test Platform\n");
 	printk(KERN_INFO "Port by MontaVista Software, Inc. (source@mvista.com)\n");
 
@@ -319,10 +332,10 @@ sandpoint_setup_arch(void)
 	 * We will do this now with good known values.  Future versions
 	 * of DINK32 are supposed to get this correct.
 	 */
-	if (cur_cpu_spec[0]->cpu_features & CPU_FTR_SPEC7450)
+	if (cpu_has_feature(CPU_FTR_SPEC7450))
 		/* 745x is different.  We only want to pass along enable. */
 		_set_L2CR(L2CR_L2E);
-	else if (cur_cpu_spec[0]->cpu_features & CPU_FTR_L2CR)
+	else if (cpu_has_feature(CPU_FTR_L2CR))
 		/* All modules have 1MB of L2.  We also assume that an
 		 * L2 divisor of 3 will work.
 		 */
@@ -330,7 +343,7 @@ sandpoint_setup_arch(void)
 				| L2CR_L2RAM_PIPE | L2CR_L2OH_1_0 | L2CR_L2DF);
 #if 0
 	/* Untested right now. */
-	if (cur_cpu_spec[0]->cpu_features & CPU_FTR_L3CR) {
+	if (cpu_has_feature(CPU_FTR_L3CR)) {
 		/* Magic value. */
 		_set_L3CR(0x8f032000);
 	}
@@ -460,7 +473,7 @@ sandpoint_request_io(void)
 arch_initcall(sandpoint_request_io);
 
 /*
- * Interrupt setup and service.  Interrrupts on the Sandpoint come
+ * Interrupt setup and service.  Interrupts on the Sandpoint come
  * from the four PCI slots plus the 8259 in the Winbond Super I/O (SIO).
  * The 8259 is cascaded from EPIC IRQ0, IRQ1-4 map to PCI slots 1-4,
  * IDE is on EPIC 7 and 8.
@@ -478,27 +491,10 @@ sandpoint_init_IRQ(void)
 			i8259_irq);
 
 	/*
-	 * openpic_init() has set up irq_desc[16-31] to be openpic
-	 * interrupts.  We need to set irq_desc[0-15] to be i8259
-	 * interrupts.
-	 */
-	for(i=0; i < NUM_8259_INTERRUPTS; i++)
-		irq_desc[i].handler = &i8259_pic;
-
-	/*
 	 * The EPIC allows for a read in the range of 0xFEF00000 ->
 	 * 0xFEFFFFFF to generate a PCI interrupt-acknowledge transaction.
 	 */
-	i8259_init(0xfef00000);
-}
-
-static u32
-sandpoint_irq_canonicalize(u32 irq)
-{
-	if (irq == 2)
-		return 9;
-	else
-		return irq;
+	i8259_init(0xfef00000, 0);
 }
 
 static unsigned long __init
@@ -509,7 +505,7 @@ sandpoint_find_end_of_memory(void)
 	if (bp->bi_memsize)
 		return bp->bi_memsize;
 
-	/* DINK32 13.0 correctly initalizes things, so iff you use
+	/* DINK32 13.0 correctly initializes things, so iff you use
 	 * this you _should_ be able to change this instead of a
 	 * hardcoded value. */
 #if 0
@@ -681,7 +677,7 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	 * are non-zero, then we should use the board info from the bd_t
 	 * structure and the cmdline pointed to by r6 instead of the
 	 * information from birecs, if any.  Otherwise, use the information
-	 * from birecs as discovered by the preceeding call to
+	 * from birecs as discovered by the preceding call to
 	 * parse_bootinfo().  This rule should work with both PPCBoot, which
 	 * uses a bd_t board info structure, and the kernel boot wrapper,
 	 * which uses birecs.
@@ -711,10 +707,10 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ISA_DMA_THRESHOLD = 0x00ffffff;
 	DMA_MODE_READ = 0x44;
 	DMA_MODE_WRITE = 0x48;
+	ppc_do_canonicalize_irqs = 1;
 
 	ppc_md.setup_arch = sandpoint_setup_arch;
 	ppc_md.show_cpuinfo = sandpoint_show_cpuinfo;
-	ppc_md.irq_canonicalize = sandpoint_irq_canonicalize;
 	ppc_md.init_IRQ = sandpoint_init_IRQ;
 	ppc_md.get_irq = openpic_get_irq;
 

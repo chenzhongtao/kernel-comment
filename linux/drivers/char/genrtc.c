@@ -12,7 +12,7 @@
  *
  *	This driver allows use of the real time clock (built into
  *	nearly all computers) from user space. It exports the /dev/rtc
- *	interface supporting various ioctl() and also the /proc/dev/rtc
+ *	interface supporting various ioctl() and also the /proc/driver/rtc
  *	pseudo-file for status information.
  *
  *	The ioctls can be used to set the interrupt behaviour where
@@ -43,7 +43,6 @@
 #define RTC_VERSION	"1.07"
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/fcntl.h>
@@ -103,7 +102,7 @@ static void gen_rtc_interrupt(unsigned long arg);
  * Routine to poll RTC seconds field for change as often as possible,
  * after first RTC_UIE use timer to reduce polling
  */
-static void genrtc_troutine(void *data)
+static void genrtc_troutine(struct work_struct *work)
 {
 	unsigned int tmp = get_rtc_ss();
 	
@@ -174,7 +173,6 @@ static void gen_rtc_interrupt(unsigned long arg)
 static ssize_t gen_rtc_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	DECLARE_WAITQUEUE(wait, current);
 	unsigned long data;
 	ssize_t retval;
 
@@ -184,33 +182,22 @@ static ssize_t gen_rtc_read(struct file *file, char __user *buf,
 	if (file->f_flags & O_NONBLOCK && !gen_rtc_irq_data)
 		return -EAGAIN;
 
-	add_wait_queue(&gen_rtc_wait, &wait);
-	retval = -ERESTARTSYS;
-
-	while (1) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		data = xchg(&gen_rtc_irq_data, 0);
-		if (data)
-			break;
-		if (signal_pending(current))
-			goto out;
-		schedule();
-	}
+	retval = wait_event_interruptible(gen_rtc_wait,
+			(data = xchg(&gen_rtc_irq_data, 0)));
+	if (retval)
+		goto out;
 
 	/* first test allows optimizer to nuke this case for 32-bit machines */
 	if (sizeof (int) != sizeof (long) && count == sizeof (unsigned int)) {
 		unsigned int uidata = data;
-		retval = put_user(uidata, (unsigned long __user *)buf);
+		retval = put_user(uidata, (unsigned int __user *)buf) ?:
+			sizeof(unsigned int);
 	}
 	else {
-		retval = put_user(data, (unsigned long __user *)buf);
+		retval = put_user(data, (unsigned long __user *)buf) ?:
+			sizeof(unsigned long);
 	}
-	if (!retval)
-		retval = sizeof(unsigned long);
- out:
-	current->state = TASK_RUNNING;
-	remove_wait_queue(&gen_rtc_wait, &wait);
-
+out:
 	return retval;
 }
 
@@ -256,7 +243,7 @@ static inline int gen_set_rtc_irq_bit(unsigned char bit)
 		irq_active = 1;
 		stop_rtc_timers = 0;
 		lostint = 0;
-		INIT_WORK(&genrtc_task, genrtc_troutine, NULL);
+		INIT_WORK(&genrtc_task, genrtc_troutine);
 		oldsecs = get_rtc_ss();
 		init_timer(&timer_task);
 
@@ -378,7 +365,7 @@ static int gen_rtc_release(struct inode *inode, struct file *file)
 #ifdef CONFIG_PROC_FS
 
 /*
- *	Info exported via "/proc/rtc".
+ *	Info exported via "/proc/driver/rtc".
  */
 
 static int gen_rtc_proc_output(char *buf)
@@ -483,7 +470,7 @@ static inline int gen_rtc_proc_init(void) { return 0; }
  *	The various file operations we support.
  */
 
-static struct file_operations gen_rtc_fops = {
+static const struct file_operations gen_rtc_fops = {
 	.owner		= THIS_MODULE,
 #ifdef CONFIG_GEN_RTC_X
 	.read		= gen_rtc_read,

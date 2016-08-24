@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/cpci690.h
- *
  * Definitions for Force CPCI690
  *
  * Author: Mark A. Greer <mgreer@mvista.com>
@@ -69,5 +67,8 @@ typedef struct board_info {
 #define	CPCI690_IPMI_SIZE_ACTUAL		0x10 /* 16 bytes of IPMI */
 #define	CPCI690_IPMI_SIZE		max(GT64260_WINDOW_SIZE_MIN,	\
 						CPCI690_IPMI_SIZE_ACTUAL)
+
+#define	CPCI690_MPSC_BAUD			9600
+#define	CPCI690_MPSC_CLK_SRC			8 /* TCLK */
 
 #endif /* __PPC_PLATFORMS_CPCI690_H */

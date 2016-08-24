@@ -8,7 +8,6 @@
 #ifndef __MACH_RPX_DEFS
 #define __MACH_RPX_DEFS
 
-#include <linux/config.h>
 
 #ifndef __ASSEMBLY__
 /* A Board Information structure that is given to a program when
@@ -69,10 +68,6 @@ extern bd_t m8xx_board_info;
 #define BCSR2_EN232XCVR		((uint)0x00008000)
 #define BCSR2_QSPACESEL		((uint)0x00004000)
 #define BCSR2_FETHLEDMODE	((uint)0x00000800)	/* CLLF */
-
-#if defined(CONFIG_HTDMSOUND)
-#include <platforms/rpxhiox.h>
-#endif
 
 /* define IO_BASE for pcmcia, CLLF only */
 #if !defined(CONFIG_PCI)

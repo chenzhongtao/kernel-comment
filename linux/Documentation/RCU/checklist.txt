@@ -32,13 +32,20 @@ over a rather long period of time, but improvements are always welcome!
 	them -- even x86 allows reads to be reordered), and be prepared
 	to explain why this added complexity is worthwhile.  If you
 	choose #c, be prepared to explain how this single task does not
-	become a major bottleneck on big multiprocessor machines.
+	become a major bottleneck on big multiprocessor machines (for
+	example, if the task is updating information relating to itself
+	that other tasks can read, there by definition can be no
+	bottleneck).
 
 2.	Do the RCU read-side critical sections make proper use of
 	rcu_read_lock() and friends?  These primitives are needed
 	to suppress preemption (or bottom halves, in the case of
 	rcu_read_lock_bh()) in the read-side critical sections,
 	and are also an excellent aid to readability.
+
+	As a rough rule of thumb, any dereference of an RCU-protected
+	pointer must be covered by rcu_read_lock() or rcu_read_lock_bh()
+	or by the appropriate update-side lock.
 
 3.	Does the update code tolerate concurrent accesses?
 
@@ -87,29 +94,40 @@ over a rather long period of time, but improvements are always welcome!
 
 		The rcu_dereference() primitive is used by the various
 		"_rcu()" list-traversal primitives, such as the
-		list_for_each_entry_rcu().
+		list_for_each_entry_rcu().  Note that it is perfectly
+		legal (if redundant) for update-side code to use
+		rcu_dereference() and the "_rcu()" list-traversal
+		primitives.  This is particularly useful in code
+		that is common to readers and updaters.
 
-	b.	If the list macros are being used, the list_del_rcu(),
-		list_add_tail_rcu(), and list_del_rcu() primitives must
-		be used in order to prevent weakly ordered machines from
-		misordering structure initialization and pointer planting.
+	b.	If the list macros are being used, the list_add_tail_rcu()
+		and list_add_rcu() primitives must be used in order
+		to prevent weakly ordered machines from misordering
+		structure initialization and pointer planting.
 		Similarly, if the hlist macros are being used, the
-		hlist_del_rcu() and hlist_add_head_rcu() primitives
-		are required.
+		hlist_add_head_rcu() primitive is required.
 
-	c.	Updates must ensure that initialization of a given
+	c.	If the list macros are being used, the list_del_rcu()
+		primitive must be used to keep list_del()'s pointer
+		poisoning from inflicting toxic effects on concurrent
+		readers.  Similarly, if the hlist macros are being used,
+		the hlist_del_rcu() primitive is required.
+
+		The list_replace_rcu() primitive may be used to
+		replace an old structure with a new one in an
+		RCU-protected list.
+
+	d.	Updates must ensure that initialization of a given
 		structure happens before pointers to that structure are
 		publicized.  Use the rcu_assign_pointer() primitive
 		when publicizing a pointer to a structure that can
 		be traversed by an RCU read-side critical section.
 
-		[The rcu_assign_pointer() primitive is in process.]
-
 5.	If call_rcu(), or a related primitive such as call_rcu_bh(),
 	is used, the callback function must be written to be called
 	from softirq context.  In particular, it cannot block.
 
-6.	Since synchronize_kernel() blocks, it cannot be called from
+6.	Since synchronize_rcu() can block, it cannot be called from
 	any sort of irq context.
 
 7.	If the updater uses call_rcu(), then the corresponding readers
@@ -125,10 +143,48 @@ over a rather long period of time, but improvements are always welcome!
 	such cases is a must, of course!  And the jury is still out on
 	whether the increased speed is worth it.
 
-8.	Although synchronize_kernel() is a bit slower than is call_rcu(),
-	it usually results in simpler code.  So, unless update performance
-	is important or the updaters cannot block, synchronize_kernel()
-	should be used in preference to call_rcu().
+8.	Although synchronize_rcu() is a bit slower than is call_rcu(),
+	it usually results in simpler code.  So, unless update
+	performance is critically important or the updaters cannot block,
+	synchronize_rcu() should be used in preference to call_rcu().
+
+	An especially important property of the synchronize_rcu()
+	primitive is that it automatically self-limits: if grace periods
+	are delayed for whatever reason, then the synchronize_rcu()
+	primitive will correspondingly delay updates.  In contrast,
+	code using call_rcu() should explicitly limit update rate in
+	cases where grace periods are delayed, as failing to do so can
+	result in excessive realtime latencies or even OOM conditions.
+
+	Ways of gaining this self-limiting property when using call_rcu()
+	include:
+
+	a.	Keeping a count of the number of data-structure elements
+		used by the RCU-protected data structure, including those
+		waiting for a grace period to elapse.  Enforce a limit
+		on this number, stalling updates as needed to allow
+		previously deferred frees to complete.
+
+		Alternatively, limit only the number awaiting deferred
+		free rather than the total number of elements.
+
+	b.	Limiting update rate.  For example, if updates occur only
+		once per hour, then no explicit rate limiting is required,
+		unless your system is already badly broken.  The dcache
+		subsystem takes this approach -- updates are guarded
+		by a global lock, limiting their rate.
+
+	c.	Trusted update -- if updates can only be done manually by
+		superuser or some other trusted user, then it might not
+		be necessary to automatically limit them.  The theory
+		here is that superuser already has lots of ways to crash
+		the machine.
+
+	d.	Use call_rcu_bh() rather than call_rcu(), in order to take
+		advantage of call_rcu_bh()'s faster grace periods.
+
+	e.	Periodically invoke synchronize_rcu(), permitting a limited
+		number of updates per grace period.
 
 9.	All RCU list-traversal primitives, which include
 	list_for_each_rcu(), list_for_each_entry_rcu(),
@@ -140,18 +196,74 @@ over a rather long period of time, but improvements are always welcome!
 
 	Use of the _rcu() list-traversal primitives outside of an
 	RCU read-side critical section causes no harm other than
-	a slight performance degradation on Alpha CPUs and some
-	confusion on the part of people trying to read the code.
-
-	Another way of thinking of this is "If you are holding the
-	lock that prevents the data structure from changing, why do
-	you also need RCU-based protection?"  That said, there may
-	well be situations where use of the _rcu() list-traversal
-	primitives while the update-side lock is held results in
-	simpler and more maintainable code.  The jury is still out
-	on this question.
+	a slight performance degradation on Alpha CPUs.  It can
+	also be quite helpful in reducing code bloat when common
+	code is shared between readers and updaters.
 
 10.	Conversely, if you are in an RCU read-side critical section,
 	you -must- use the "_rcu()" variants of the list macros.
 	Failing to do so will break Alpha and confuse people reading
 	your code.
+
+11.	Note that synchronize_rcu() -only- guarantees to wait until
+	all currently executing rcu_read_lock()-protected RCU read-side
+	critical sections complete.  It does -not- necessarily guarantee
+	that all currently running interrupts, NMIs, preempt_disable()
+	code, or idle loops will complete.  Therefore, if you do not have
+	rcu_read_lock()-protected read-side critical sections, do -not-
+	use synchronize_rcu().
+
+	If you want to wait for some of these other things, you might
+	instead need to use synchronize_irq() or synchronize_sched().
+
+12.	Any lock acquired by an RCU callback must be acquired elsewhere
+	with irq disabled, e.g., via spin_lock_irqsave().  Failing to
+	disable irq on a given acquisition of that lock will result in
+	deadlock as soon as the RCU callback happens to interrupt that
+	acquisition's critical section.
+
+13.	RCU callbacks can be and are executed in parallel.  In many cases,
+	the callback code simply wrappers around kfree(), so that this
+	is not an issue (or, more accurately, to the extent that it is
+	an issue, the memory-allocator locking handles it).  However,
+	if the callbacks do manipulate a shared data structure, they
+	must use whatever locking or other synchronization is required
+	to safely access and/or modify that data structure.
+
+14.	SRCU (srcu_read_lock(), srcu_read_unlock(), and synchronize_srcu())
+	may only be invoked from process context.  Unlike other forms of
+	RCU, it -is- permissible to block in an SRCU read-side critical
+	section (demarked by srcu_read_lock() and srcu_read_unlock()),
+	hence the "SRCU": "sleepable RCU".  Please note that if you
+	don't need to sleep in read-side critical sections, you should
+	be using RCU rather than SRCU, because RCU is almost always
+	faster and easier to use than is SRCU.
+
+	Also unlike other forms of RCU, explicit initialization
+	and cleanup is required via init_srcu_struct() and
+	cleanup_srcu_struct().	These are passed a "struct srcu_struct"
+	that defines the scope of a given SRCU domain.	Once initialized,
+	the srcu_struct is passed to srcu_read_lock(), srcu_read_unlock()
+	and synchronize_srcu().  A given synchronize_srcu() waits only
+	for SRCU read-side critical sections governed by srcu_read_lock()
+	and srcu_read_unlock() calls that have been passd the same
+	srcu_struct.  This property is what makes sleeping read-side
+	critical sections tolerable -- a given subsystem delays only
+	its own updates, not those of other subsystems using SRCU.
+	Therefore, SRCU is less prone to OOM the system than RCU would
+	be if RCU's read-side critical sections were permitted to
+	sleep.
+
+	The ability to sleep in read-side critical sections does not
+	come for free.	First, corresponding srcu_read_lock() and
+	srcu_read_unlock() calls must be passed the same srcu_struct.
+	Second, grace-period-detection overhead is amortized only
+	over those updates sharing a given srcu_struct, rather than
+	being globally amortized as they are for other forms of RCU.
+	Therefore, SRCU should be used in preference to rw_semaphore
+	only in extremely read-intensive situations, or in situations
+	requiring SRCU's read-side deadlock immunity or low read-side
+	realtime latency.
+
+	Note that, rcu_assign_pointer() and rcu_dereference() relate to
+	SRCU just as they do to other forms of RCU.

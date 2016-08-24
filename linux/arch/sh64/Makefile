@@ -11,13 +11,6 @@
 # for "archclean" and "archdep" for cleaning up and making dependencies for
 # this architecture
 #
-# Note that top level Makefile automagically builds dependencies for SUBDIRS
-# but does not automagically clean SUBDIRS. Therefore "archclean" should clean
-# up all, "archdep" does nothing on added SUBDIRS.
-#
-ifndef include_config
--include .config
-endif
 
 cpu-y				:= -mb
 cpu-$(CONFIG_LITTLE_ENDIAN)	:= -ml
@@ -33,13 +26,21 @@ LDFLAGS			+= -EB  -mshelf32_linux
 endif
 
 # No requirements for endianess support from AFLAGS, 'as' always run through gcc
-AFLAGS		+= -m5 -isa=sh64 -traditional
-CFLAGS		+= $(cpu-y)
+KBUILD_CFLAGS		+= $(cpu-y)
 
 LDFLAGS_vmlinux	+= --defsym phys_stext=_stext-$(CONFIG_CACHED_MEMORY_OFFSET) \
-		   -e phys_stext
+		  --defsym phys_stext_shmedia=phys_stext+1 \
+		  -e phys_stext_shmedia
 
 OBJCOPYFLAGS	:= -O binary -R .note -R .comment -R .stab -R .stabstr -S
+
+#
+# arch/sh64/defconfig never had any hope of being
+# frequently updated, so use one that does
+#
+KBUILD_DEFCONFIG	:= cayman_defconfig
+
+KBUILD_IMAGE		:= arch/$(ARCH)/boot/zImage
 
 ifdef LOADADDR
 LINKFLAGS     += -Ttext $(word 1,$(LOADADDR))
@@ -48,13 +49,16 @@ endif
 machine-$(CONFIG_SH_CAYMAN)	:= cayman
 machine-$(CONFIG_SH_SIMULATOR)	:= sim
 machine-$(CONFIG_SH_HARP)	:= harp
-machine-$(CONFIG_SH_ROMRAM)	:= romram
 
 head-y := arch/$(ARCH)/kernel/head.o arch/$(ARCH)/kernel/init_task.o
 
-core-y += $(addprefix arch/$(ARCH)/, kernel/ mm/ mach-$(machine-y)/)
+core-y	+= arch/sh64/kernel/ arch/sh64/mm/
 
-LIBGCC := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
+ifneq ($(machine-y),)
+core-y	+= arch/sh64/mach-$(machine-y)/
+endif
+
+LIBGCC := $(shell $(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
 libs-y	+= arch/$(ARCH)/lib/ $(LIBGCC)
 
 drivers-$(CONFIG_OPROFILE)	+= arch/sh64/oprofile/
@@ -69,11 +73,7 @@ compressed: zImage
 archclean:
 	$(Q)$(MAKE) $(clean)=$(boot)
 
-prepare: include/asm-$(ARCH)/asm-offsets.h arch/$(ARCH)/lib/syscalltab.h
-
-include/asm-$(ARCH)/asm-offsets.h: arch/$(ARCH)/kernel/asm-offsets.s \
-				   include/asm include/linux/version.h
-	$(call filechk,gen-asm-offsets)
+archprepare: arch/$(ARCH)/lib/syscalltab.h
 
 define filechk_gen-syscalltab
        (set -e; \
@@ -92,7 +92,7 @@ define filechk_gen-syscalltab
 	echo "struct syscall_info {"; \
 	echo "	const char *name;"; \
 	echo "} syscall_info_table[] = {"; \
-	sed -e '/^.*\.long /!d;s//\t{ "/;s/\(\([^/]*\)\/\)\{1\}.*/\2/; \
+	sed -e '/^.*\.long /!d;s//    { "/;s/\(\([^/]*\)\/\)\{1\}.*/\2/; \
 		s/[ \t]*$$//g;s/$$/" },/;s/\("\)sys_/\1/g'; \
 	echo "};"; \
 	echo ""; \
@@ -104,9 +104,8 @@ endef
 arch/$(ARCH)/lib/syscalltab.h: arch/sh64/kernel/syscalls.S
 	$(call filechk,gen-syscalltab)
 
-CLEAN_FILES += include/asm-$(ARCH)/asm-offsets.h arch/$(ARCH)/lib/syscalltab.h
+CLEAN_FILES += arch/$(ARCH)/lib/syscalltab.h
 
 define archhelp
-	@echo '  zImage 	           - Compressed kernel image (arch/sh64/boot/zImage)'
+	@echo '* zImage 	           - Compressed kernel image'
 endef
-

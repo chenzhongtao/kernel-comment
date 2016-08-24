@@ -1,36 +1,30 @@
 /* linux/include/asm-arm/arch-s3c2410/system.h
  *
- * (c) 2003 Simtec Electronics
- *  Ben Dooks <ben@simtec.co.uk>
+ * Copyright (c) 2003 Simtec Electronics
+ *	Ben Dooks <ben@simtec.co.uk>
  *
  * S3C2410 - System function defines and includes
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- * Changelog:
- *  12-May-2003 BJD  Created file
- *  14-May-2003 BJD  Removed idle to aid debugging
- *  12-Jun-2003 BJD  Added reset via watchdog
- *  04-Sep-2003 BJD  Moved to v2.6
- *  28-Oct-2004 BJD  Added over-ride for idle, and fixed reset panic()
- */
+*/
 
 #include <asm/hardware.h>
 #include <asm/io.h>
 
 #include <asm/arch/map.h>
 #include <asm/arch/idle.h>
+#include <asm/arch/reset.h>
 
-#include <asm/arch/regs-watchdog.h>
+#include <asm/plat-s3c/regs-watchdog.h>
 #include <asm/arch/regs-clock.h>
 
 void (*s3c24xx_idle)(void);
+void (*s3c24xx_reset_hook)(void);
 
 void s3c24xx_default_idle(void)
 {
-	unsigned long reg = S3C2410_CLKCON;
 	unsigned long tmp;
 	int i;
 
@@ -40,16 +34,18 @@ void s3c24xx_default_idle(void)
 
 	/* Warning: going into idle state upsets jtag scanning */
 
-	__raw_writel(__raw_readl(reg) | (1<<2), reg);
+	__raw_writel(__raw_readl(S3C2410_CLKCON) | S3C2410_CLKCON_IDLE,
+		     S3C2410_CLKCON);
 
 	/* the samsung port seems to do a loop and then unset idle.. */
 	for (i = 0; i < 50; i++) {
-		tmp += __raw_readl(reg); /* ensure loop not optimised out */
+		tmp += __raw_readl(S3C2410_CLKCON); /* ensure loop not optimised out */
 	}
 
 	/* this bit is not cleared on re-start... */
 
-	__raw_writel(__raw_readl(reg) & ~(1<<2), reg);
+	__raw_writel(__raw_readl(S3C2410_CLKCON) & ~S3C2410_CLKCON_IDLE,
+		     S3C2410_CLKCON);
 }
 
 static void arch_idle(void)
@@ -60,13 +56,15 @@ static void arch_idle(void)
 		s3c24xx_default_idle();
 }
 
-
 static void
 arch_reset(char mode)
 {
 	if (mode == 's') {
 		cpu_reset(0);
 	}
+
+	if (s3c24xx_reset_hook)
+		s3c24xx_reset_hook();
 
 	printk("arch_reset: attempting watchdog reset\n");
 
@@ -78,7 +76,7 @@ arch_reset(char mode)
 
 	/* set the watchdog to go and reset... */
 	__raw_writel(S3C2410_WTCON_ENABLE|S3C2410_WTCON_DIV16|S3C2410_WTCON_RSTEN |
-		     S3C2410_WTCON_PRESCALE(0x80), S3C2410_WTCON);
+		     S3C2410_WTCON_PRESCALE(0x20), S3C2410_WTCON);
 
 	/* wait for reset to assert... */
 	mdelay(5000);

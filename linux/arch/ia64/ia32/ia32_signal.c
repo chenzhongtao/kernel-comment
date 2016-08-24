@@ -18,7 +18,6 @@
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/syscalls.h>
 #include <linux/unistd.h>
@@ -29,7 +28,6 @@
 #include <asm/uaccess.h>
 #include <asm/rse.h>
 #include <asm/sigcontext.h>
-#include <asm/segment.h>
 
 #include "ia32priv.h"
 
@@ -256,7 +254,7 @@ save_ia32_fpstate_live (struct _fpstate_ia32 __user *save)
 	 */
 	fp_tos = (fsr>>11)&0x7;
 	fr8_st_map = (8-fp_tos)&0x7;
-	ptp = ia64_task_regs(tsk);
+	ptp = task_pt_regs(tsk);
 	fpregp = (struct _fpreg_ia32 *)(((unsigned long)buf + 15) & ~15);
 	ia64f2ia32f(fpregp, &ptp->f8);
 	copy_to_user(&save->_st[(0+fr8_st_map)&0x7], fpregp, sizeof(struct _fpreg_ia32));
@@ -390,7 +388,7 @@ restore_ia32_fpstate_live (struct _fpstate_ia32 __user *save)
 	fr8_st_map = (8-fp_tos)&0x7;
 	fpregp = (struct _fpreg_ia32 *)(((unsigned long)buf + 15) & ~15);
 
-	ptp = ia64_task_regs(tsk);
+	ptp = task_pt_regs(tsk);
 	copy_from_user(fpregp, &save->_st[(0+fr8_st_map)&0x7], sizeof(struct _fpreg_ia32));
 	ia32f2ia64f(&ptp->f8, fpregp);
 	copy_from_user(fpregp, &save->_st[(1+fr8_st_map)&0x7], sizeof(struct _fpreg_ia32));
@@ -453,60 +451,20 @@ sigact_set_handler (struct k_sigaction *sa, unsigned int handler, unsigned int r
 		sa->sa.sa_handler = (__sighandler_t) (((unsigned long) restorer << 32) | handler);
 }
 
-long
-__ia32_rt_sigsuspend (compat_sigset_t *sset, unsigned int sigsetsize, struct sigscratch *scr)
+asmlinkage long
+sys32_sigsuspend (int history0, int history1, old_sigset_t mask)
 {
-	extern long ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall);
-	sigset_t oldset, set;
-
-	scr->scratch_unat = 0;	/* avoid leaking kernel bits to user level */
-	memset(&set, 0, sizeof(&set));
-
-	if (memcpy(&set.sig, &sset->sig, sigsetsize))
-		return -EFAULT;
-
-	sigdelsetmask(&set, ~_BLOCKABLE);
-
+	mask &= _BLOCKABLE;
 	spin_lock_irq(&current->sighand->siglock);
-	{
-		oldset = current->blocked;
-		current->blocked = set;
-		recalc_sigpending();
-	}
+	current->saved_sigmask = current->blocked;
+	siginitset(&current->blocked, mask);
+	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	/*
-	 * The return below usually returns to the signal handler.  We need to pre-set the
-	 * correct error code here to ensure that the right values get saved in sigcontext
-	 * by ia64_do_signal.
-	 */
-	scr->pt.r8 = -EINTR;
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (ia64_do_signal(&oldset, scr, 1))
-			return -EINTR;
-	}
-}
-
-asmlinkage long
-ia32_rt_sigsuspend (compat_sigset_t __user *uset, unsigned int sigsetsize, struct sigscratch *scr)
-{
-	compat_sigset_t set;
-
-	if (sigsetsize > sizeof(compat_sigset_t))
-		return -EINVAL;
-
-	if (copy_from_user(&set.sig, &uset->sig, sigsetsize))
-		return -EFAULT;
-
-	return __ia32_rt_sigsuspend(&set, sigsetsize, scr);
-}
-
-asmlinkage long
-ia32_sigsuspend (unsigned int mask, struct sigscratch *scr)
-{
-	return __ia32_rt_sigsuspend((compat_sigset_t *) &mask, sizeof(mask), scr);
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	set_thread_flag(TIF_RESTORE_SIGMASK);
+	return -ERESTARTNOHAND;
 }
 
 asmlinkage long
@@ -517,6 +475,7 @@ sys32_signal (int sig, unsigned int handler)
 
 	sigact_set_handler(&new_sa, handler, 0);
 	new_sa.sa.sa_flags = SA_ONESHOT | SA_NOMASK;
+	sigemptyset(&new_sa.sa.sa_mask);
 
 	ret = do_sigaction(sig, &new_sa, &old_sa);
 
@@ -778,7 +737,7 @@ restore_sigcontext_ia32 (struct pt_regs *regs, struct sigcontext_ia32 __user *sc
 		struct _fpstate * buf;
 		err |= __get_user(buf, &sc->fpstate);
 		if (buf) {
-			if (verify_area(VERIFY_READ, buf, sizeof(*buf)))
+			if (!access_ok(VERIFY_READ, buf, sizeof(*buf)))
 				goto badframe;
 			err |= restore_i387(buf);
 		}
@@ -812,7 +771,11 @@ get_sigframe (struct k_sigaction *ka, struct pt_regs * regs, size_t frame_size)
 	}
 	/* Legacy stack switching not supported */
 
-	return (void __user *)((esp - frame_size) & -8ul);
+	esp -= frame_size;
+	/* Align the stack pointer according to the i386 ABI,
+	 * i.e. so that on function entry ((sp + 4) & 15) == 0. */
+	esp = ((esp + 4) & -16ul) - 4;
+	return (void __user *) esp;
 }
 
 static int
@@ -978,7 +941,7 @@ sys32_sigreturn (int arg0, int arg1, int arg2, int arg3, int arg4, int arg5,
 	sigset_t set;
 	int eax;
 
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
 
 	if (__get_user(set.sig[0], &frame->sc.oldmask)
@@ -1010,7 +973,7 @@ sys32_rt_sigreturn (int arg0, int arg1, int arg2, int arg3, int arg4,
 	sigset_t set;
 	int eax;
 
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;

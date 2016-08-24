@@ -21,35 +21,42 @@
 #include <net/llc_s_ev.h>
 #include <net/llc_s_st.h>
 #include <net/sock.h>
-#include <linux/tcp.h>
+#include <net/tcp_states.h>
 #include <linux/llc.h>
 
 /**
  *	llc_alloc_frame - allocates sk_buff for frame
+ *	@dev: network device this skb will be sent over
  *
  *	Allocates an sk_buff for frame and initializes sk_buff fields.
  *	Returns allocated skb or %NULL when out of memory.
  */
-struct sk_buff *llc_alloc_frame(void)
+struct sk_buff *llc_alloc_frame(struct sock *sk, struct net_device *dev)
 {
 	struct sk_buff *skb = alloc_skb(128, GFP_ATOMIC);
 
 	if (skb) {
+		skb_reset_mac_header(skb);
 		skb_reserve(skb, 50);
-		skb->nh.raw   = skb->h.raw = skb->data;
+		skb_reset_network_header(skb);
+		skb_reset_transport_header(skb);
 		skb->protocol = htons(ETH_P_802_2);
-		skb->dev      = dev_base->next;
-		skb->mac.raw  = skb->head;
+		skb->dev      = dev;
+		if (sk != NULL)
+			skb_set_owner_w(skb, sk);
 	}
 	return skb;
 }
 
-void llc_save_primitive(struct sk_buff* skb, u8 prim)
+void llc_save_primitive(struct sock *sk, struct sk_buff* skb, u8 prim)
 {
-	struct sockaddr_llc *addr = llc_ui_skb_cb(skb);
+	struct sockaddr_llc *addr;
 
        /* save primitive for use by the user. */
-	addr->sllc_family = skb->sk->sk_family;
+	addr		  = llc_ui_skb_cb(skb);
+
+	memset(addr, 0, sizeof(*addr));
+	addr->sllc_family = sk->sk_family;
 	addr->sllc_arphrd = skb->dev->type;
 	addr->sllc_test   = prim == LLC_TEST_PRIM;
 	addr->sllc_xid    = prim == LLC_XID_PRIM;
@@ -189,13 +196,13 @@ static void llc_sap_state_process(struct llc_sap *sap, struct sk_buff *skb)
 		if (skb->sk->sk_state == TCP_LISTEN)
 			kfree_skb(skb);
 		else {
-			llc_save_primitive(skb, ev->prim);
+			llc_save_primitive(skb->sk, skb, ev->prim);
 
 			/* queue skb to the user. */
 			if (sock_queue_rcv_skb(skb->sk, skb))
 				kfree_skb(skb);
 		}
-	} 
+	}
 	kfree_skb(skb);
 }
 
@@ -209,7 +216,7 @@ static void llc_sap_state_process(struct llc_sap *sap, struct sk_buff *skb)
  *	This function is called when upper layer wants to send a TEST pdu.
  *	Returns 0 for success, 1 otherwise.
  */
-void llc_build_and_send_test_pkt(struct llc_sap *sap, 
+void llc_build_and_send_test_pkt(struct llc_sap *sap,
 				 struct sk_buff *skb, u8 *dmac, u8 dsap)
 {
 	struct llc_sap_state_ev *ev = llc_sap_ev(skb);
@@ -218,7 +225,7 @@ void llc_build_and_send_test_pkt(struct llc_sap *sap,
 	ev->daddr.lsap = dsap;
 	memcpy(ev->saddr.mac, skb->dev->dev_addr, IFHWADDRLEN);
 	memcpy(ev->daddr.mac, dmac, IFHWADDRLEN);
-	
+
 	ev->type      = LLC_SAP_EV_TYPE_PRIM;
 	ev->prim      = LLC_TEST_PRIM;
 	ev->prim_type = LLC_PRIM_TYPE_REQ;
@@ -276,14 +283,14 @@ static void llc_sap_rcv(struct llc_sap *sap, struct sk_buff *skb)
  *	mac, and local sap. Returns pointer for socket found, %NULL otherwise.
  */
 static struct sock *llc_lookup_dgram(struct llc_sap *sap,
-				     struct llc_addr *laddr)
+				     const struct llc_addr *laddr)
 {
 	struct sock *rc;
 	struct hlist_node *node;
 
 	read_lock_bh(&sap->sk_list.lock);
 	sk_for_each(rc, node, &sap->sk_list.list) {
-		struct llc_opt *llc = llc_sk(rc);
+		struct llc_sock *llc = llc_sk(rc);
 
 		if (rc->sk_type == SOCK_DGRAM &&
 		    llc->laddr.lsap == laddr->lsap &&
@@ -298,19 +305,65 @@ found:
 	return rc;
 }
 
+/**
+ * 	llc_sap_mcast - Deliver multicast PDU's to all matching datagram sockets.
+ *	@sap: SAP
+ *	@laddr: address of local LLC (MAC + SAP)
+ *
+ *	Search socket list of the SAP and finds connections with same sap.
+ *	Deliver clone to each.
+ */
+static void llc_sap_mcast(struct llc_sap *sap,
+			  const struct llc_addr *laddr,
+			  struct sk_buff *skb)
+{
+	struct sock *sk;
+	struct hlist_node *node;
+
+	read_lock_bh(&sap->sk_list.lock);
+	sk_for_each(sk, node, &sap->sk_list.list) {
+		struct llc_sock *llc = llc_sk(sk);
+		struct sk_buff *skb1;
+
+		if (sk->sk_type != SOCK_DGRAM)
+			continue;
+
+		if (llc->laddr.lsap != laddr->lsap)
+			continue;
+
+		if (llc->dev != skb->dev)
+			continue;
+
+		skb1 = skb_clone(skb, GFP_ATOMIC);
+		if (!skb1)
+			break;
+
+		sock_hold(sk);
+		skb_set_owner_r(skb1, sk);
+		llc_sap_rcv(sap, skb1);
+		sock_put(sk);
+	}
+	read_unlock_bh(&sap->sk_list.lock);
+}
+
+
 void llc_sap_handler(struct llc_sap *sap, struct sk_buff *skb)
 {
 	struct llc_addr laddr;
-	struct sock *sk;
 
 	llc_pdu_decode_da(skb, laddr.mac);
 	llc_pdu_decode_dsap(skb, &laddr.lsap);
 
-	sk = llc_lookup_dgram(sap, &laddr);
-	if (sk) {
-		skb->sk = sk;
-		llc_sap_rcv(sap, skb);
-		sock_put(sk);
-	} else
+	if (llc_mac_multicast(laddr.mac)) {
+		llc_sap_mcast(sap, &laddr, skb);
 		kfree_skb(skb);
+	} else {
+		struct sock *sk = llc_lookup_dgram(sap, &laddr);
+		if (sk) {
+			skb_set_owner_r(skb, sk);
+			llc_sap_rcv(sap, skb);
+			sock_put(sk);
+		} else
+			kfree_skb(skb);
+	}
 }

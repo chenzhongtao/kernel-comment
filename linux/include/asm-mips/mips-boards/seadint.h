@@ -20,9 +20,9 @@
 #ifndef _MIPS_SEADINT_H
 #define _MIPS_SEADINT_H
 
-#define SEADINT_UART0     2
-#define SEADINT_UART1     3
+#include <irq.h>
 
-extern void seadint_init(void);
+#define MIPSCPU_INT_UART0	2
+#define MIPSCPU_INT_UART1	3
 
 #endif /* !(_MIPS_SEADINT_H) */

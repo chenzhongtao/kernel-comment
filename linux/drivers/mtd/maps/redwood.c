@@ -1,5 +1,5 @@
 /*
- * $Id: redwood.c,v 1.10 2004/11/04 13:24:15 gleixner Exp $
+ * $Id: redwood.c,v 1.11 2005/11/07 11:14:28 gleixner Exp $
  *
  * drivers/mtd/maps/redwood.c
  *
@@ -13,7 +13,6 @@
  * or implied.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -79,7 +78,7 @@ static struct mtd_partition redwood_flash_partitions[] = {
 
 #define RW_PART0_OF	0
 #define RW_PART0_SZ	0x400000	/* 4 MiB data */
-#define RW_PART1_OF	RW_PART0_OF + RW_PART0_SZ 
+#define RW_PART1_OF	RW_PART0_OF + RW_PART0_SZ
 #define RW_PART1_SZ	0x10000		/* 64K VPD */
 #define RW_PART2_OF	RW_PART1_OF + RW_PART1_SZ
 #define RW_PART2_SZ	0x400000 - (0x10000 + 0x20000)
@@ -121,13 +120,14 @@ struct map_info redwood_flash_map = {
 };
 
 
-#define NUM_REDWOOD_FLASH_PARTITIONS \
-	(sizeof(redwood_flash_partitions)/sizeof(redwood_flash_partitions[0]))
+#define NUM_REDWOOD_FLASH_PARTITIONS ARRAY_SIZE(redwood_flash_partitions)
 
 static struct mtd_info *redwood_mtd;
 
 int __init init_redwood_flash(void)
 {
+	int err;
+
 	printk(KERN_NOTICE "redwood: flash mapping: %x at %x\n",
 			WINDOW_SIZE, WINDOW_ADDR);
 
@@ -143,11 +143,18 @@ int __init init_redwood_flash(void)
 
 	if (redwood_mtd) {
 		redwood_mtd->owner = THIS_MODULE;
-		return add_mtd_partitions(redwood_mtd,
+		err = add_mtd_partitions(redwood_mtd,
 				redwood_flash_partitions,
 				NUM_REDWOOD_FLASH_PARTITIONS);
+		if (err) {
+			printk("init_redwood_flash: add_mtd_partitions failed\n");
+			iounmap(redwood_flash_map.virt);
+		}
+		return err;
+
 	}
 
+	iounmap(redwood_flash_map.virt);
 	return -ENXIO;
 }
 

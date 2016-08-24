@@ -13,7 +13,6 @@
 #ifndef _ASM_FIXMAP_H
 #define _ASM_FIXMAP_H
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <asm/page.h>
 #ifdef CONFIG_HIGHMEM
@@ -26,7 +25,7 @@
  * addresses. The point is to have a constant address at
  * compile time, but to set the physical address only
  * in the boot process. We allocate these special  addresses
- * from the end of virtual memory (0xfffff000) backwards.
+ * from the end of P3 backwards.
  * Also this lets us do fail-safe vmalloc(), we
  * can guarantee that these special addresses and
  * vmalloc()-ed addresses never overlap.
@@ -47,6 +46,9 @@
  * fix-mapped?
  */
 enum fixed_addresses {
+#define FIX_N_COLOURS 16
+	FIX_CMAP_BEGIN,
+	FIX_CMAP_END = FIX_CMAP_BEGIN + FIX_N_COLOURS,
 #ifdef CONFIG_HIGHMEM
 	FIX_KMAP_BEGIN,	/* reserved pte's for temporary kernel mappings */
 	FIX_KMAP_END = FIX_KMAP_BEGIN+(KM_TYPE_NR*NR_CPUS)-1,
@@ -54,8 +56,8 @@ enum fixed_addresses {
 	__end_of_fixed_addresses
 };
 
-extern void __set_fixmap (enum fixed_addresses idx,
-					unsigned long phys, pgprot_t flags);
+extern void __set_fixmap(enum fixed_addresses idx,
+			 unsigned long phys, pgprot_t flags);
 
 #define set_fixmap(idx, phys) \
 		__set_fixmap(idx, phys, PAGE_KERNEL)
@@ -107,5 +109,4 @@ static inline unsigned long virt_to_fix(const unsigned long vaddr)
 	BUG_ON(vaddr >= FIXADDR_TOP || vaddr < FIXADDR_START);
 	return __virt_to_fix(vaddr);
 }
-
 #endif

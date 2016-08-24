@@ -12,7 +12,7 @@
 #include <linux/mm.h>
 #include <linux/sysctl.h>
 
-extern int sysctl_unix_max_dgram_qlen;
+#include <net/af_unix.h>
 
 static ctl_table unix_table[] = {
 	{
@@ -50,7 +50,7 @@ static struct ctl_table_header * unix_sysctl_header;
 
 void unix_sysctl_register(void)
 {
-	unix_sysctl_header = register_sysctl_table(unix_root_table, 0);
+	unix_sysctl_header = register_sysctl_table(unix_root_table);
 }
 
 void unix_sysctl_unregister(void)

@@ -6,7 +6,6 @@
   (C) 2001 Andreas Gruenbacher, <a.gruenbacher@computer.org>
 */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/xattr.h>
 
@@ -116,3 +115,11 @@ exit_ext2_xattr(void)
 
 # endif  /* CONFIG_EXT2_FS_XATTR */
 
+#ifdef CONFIG_EXT2_FS_SECURITY
+extern int ext2_init_security(struct inode *inode, struct inode *dir);
+#else
+static inline int ext2_init_security(struct inode *inode, struct inode *dir)
+{
+	return 0;
+}
+#endif

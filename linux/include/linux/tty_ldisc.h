@@ -59,7 +59,12 @@
  * 	low-level driver can "grab" an ioctl request before the line
  * 	discpline has a chance to see it.
  * 
- * void	(*set_termios)(struct tty_struct *tty, struct termios * old);
+ * long	(*compat_ioctl)(struct tty_struct * tty, struct file * file,
+ * 		        unsigned int cmd, unsigned long arg);
+ *
+ *      Process ioctl calls from 32-bit process on 64-bit system
+ *
+ * void	(*set_termios)(struct tty_struct *tty, struct ktermios * old);
  *
  * 	This function notifies the line discpline that a change has
  * 	been made to the termios structure.
@@ -80,14 +85,6 @@
  * 	character received by the device.  <fp> is a pointer to a
  * 	pointer of flag bytes which indicate whether a character was
  * 	received with a parity error, etc.
- * 
- * int	(*receive_room)(struct tty_struct *);
- *
- * 	This function is called by the low-level tty driver to
- * 	determine how many characters the line discpline can accept.
- * 	The low-level driver must not send more characters than was
- * 	indicated by receive_room, or the line discpline may drop
- * 	those characters.
  * 
  * void	(*write_wakeup)(struct tty_struct *);
  *
@@ -126,7 +123,9 @@ struct tty_ldisc {
 			 const unsigned char * buf, size_t nr);	
 	int	(*ioctl)(struct tty_struct * tty, struct file * file,
 			 unsigned int cmd, unsigned long arg);
-	void	(*set_termios)(struct tty_struct *tty, struct termios * old);
+	long	(*compat_ioctl)(struct tty_struct * tty, struct file * file,
+				unsigned int cmd, unsigned long arg);
+	void	(*set_termios)(struct tty_struct *tty, struct ktermios * old);
 	unsigned int (*poll)(struct tty_struct *, struct file *,
 			     struct poll_table_struct *);
 	int	(*hangup)(struct tty_struct *tty);
@@ -136,7 +135,6 @@ struct tty_ldisc {
 	 */
 	void	(*receive_buf)(struct tty_struct *, const unsigned char *cp,
 			       char *fp, int count);
-	int	(*receive_room)(struct tty_struct *);
 	void	(*write_wakeup)(struct tty_struct *);
 
 	struct  module *owner;

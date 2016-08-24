@@ -17,7 +17,7 @@
  * Bill Ryder - bryder@sgi.com formerly of Silicon Graphics, Inc.- wrote the 
  * FTDI_SIO implementation.
  *
- * Philipp G�hring - pg@futureware.at - added the Device ID of the USB relais
+ * Philipp Gühring - pg@futureware.at - added the Device ID of the USB relais
  * from Rudolf Gugler
  *
  */
@@ -27,12 +27,42 @@
 #define FTDI_8U232AM_PID 0x6001 /* Similar device to SIO above */
 #define FTDI_8U232AM_ALT_PID 0x6006 /* FTDI's alternate PID for above */
 #define FTDI_8U2232C_PID 0x6010 /* Dual channel device */
+#define FTDI_232RL_PID  0xFBFA  /* Product ID for FT232RL */
 #define FTDI_RELAIS_PID	0xFA10  /* Relais device from Rudolf Gugler */
 #define FTDI_NF_RIC_VID	0x0DCD	/* Vendor Id */
 #define FTDI_NF_RIC_PID	0x0001	/* Product Id */
+#define FTDI_USBX_707_PID 0xF857	/* ADSTech IR Blaster USBX-707 */
+
+
+/* www.canusb.com Lawicel CANUSB device */
+#define FTDI_CANUSB_PID 0xFFA8 /* Product Id */
+
+/* AlphaMicro Components AMC-232USB01 device */
+#define FTDI_AMC232_PID 0xFF00 /* Product Id */
+
+/* ACT Solutions HomePro ZWave interface (http://www.act-solutions.com/HomePro.htm) */
+#define FTDI_ACTZWAVE_PID	0xF2D0
+
+
+/* www.starting-point-systems.com µChameleon device */
+#define FTDI_MICRO_CHAMELEON_PID	0xCAA0	/* Product Id */
 
 /* www.irtrans.de device */
 #define FTDI_IRTRANS_PID 0xFC60 /* Product Id */
+
+
+/* www.thoughttechnology.com/ TT-USB provide with procomp use ftdi_sio */
+#define FTDI_TTUSB_PID 0xFF20 /* Product Id */
+
+/* iPlus device */
+#define FTDI_IPLUS_PID 0xD070 /* Product Id */
+#define FTDI_IPLUS2_PID 0xD071 /* Product Id */
+
+/* DMX4ALL DMX Interfaces */
+#define FTDI_DMX4ALL 0xC850
+
+/* OpenDCC (www.opendcc.de) product id */
+#define FTDI_OPENDCC_PID	0xBFD8
 
 /* www.crystalfontz.com devices - thanx for providing free devices for evaluation ! */
 /* they use the ftdi chipset for the USB interface and the vendor id is the same */
@@ -49,6 +79,12 @@
 /* broadband internet service.  The following PID is exhibited by the usb device supplied */
 /* (the VID is the standard ftdi vid (FTDI_VID) */
 #define FTDI_VNHCPCUSB_D_PID 0xfe38 /* Product Id */
+
+/*
+ * PCDJ use ftdi based dj-controllers.  The following PID is for their DAC-2 device
+ * http://www.pcdjhardware.com/DAC2.asp (PID sent by Wouter Paesen)
+ * (the VID is the standard ftdi vid (FTDI_VID) */
+#define FTDI_PCDJ_DAC2_PID 0xFA88
 
 /*
  * The following are the values for the Matrix Orbital LCD displays,
@@ -84,6 +120,7 @@
 #define SEALEVEL_2102_PID	0x2102	/* SeaLINK+485 (2102) */
 #define SEALEVEL_2103_PID	0x2103	/* SeaLINK+232I (2103) */
 #define SEALEVEL_2104_PID	0x2104	/* SeaLINK+485I (2104) */
+#define SEALEVEL_2106_PID	0x9020	/* SeaLINK+422 (2106) */
 #define SEALEVEL_2201_1_PID	0x2211	/* SeaPORT+2/232 (2201) Port 1 */
 #define SEALEVEL_2201_2_PID	0x2221	/* SeaPORT+2/232 (2201) Port 2 */
 #define SEALEVEL_2202_1_PID	0x2212	/* SeaPORT+2/485 (2202) Port 1 */
@@ -128,22 +165,86 @@
 #define SEALEVEL_2803_8_PID	0X2883 	/* SeaLINK+8 (2803) Port 8 */
 
 /*
+ * The following are the values for two KOBIL chipcard terminals.
+ */
+#define KOBIL_VID		0x0d46	/* KOBIL Vendor ID */
+#define KOBIL_CONV_B1_PID	0x2020	/* KOBIL Konverter for B1 */
+#define KOBIL_CONV_KAAN_PID	0x2021	/* KOBIL_Konverter for KAAN */
+
+/*
+ * Icom ID-1 digital transceiver
+ */
+
+#define ICOM_ID1_VID            0x0C26
+#define ICOM_ID1_PID            0x0004
+
+/*
+ * ASK.fr devices
+ */
+#define FTDI_ASK_RDR400_PID	0xC991	/* ASK RDR 400 series card reader */
+
+/*
+ * FTDI USB UART chips used in construction projects from the
+ * Elektor Electronics magazine (http://elektor-electronics.co.uk)
+ */
+#define ELEKTOR_VID		0x0C7D
+#define ELEKTOR_FT323R_PID	0x0005	/* RFID-Reader, issue 09-2006 */
+
+/*
  * DSS-20 Sync Station for Sony Ericsson P800
  */
- 
 #define FTDI_DSS20_PID          0xFC82  
 
 /*
  * Home Electronics (www.home-electro.com) USB gadgets
  */
-#define FTDI_HE_TIRA1_PID	0xFA78	/* Tira-1 IR tranceiver */
+#define FTDI_HE_TIRA1_PID	0xFA78	/* Tira-1 IR transceiver */
 
 /* USB-UIRT - An infrared receiver and transmitter using the 8U232AM chip */
 /* http://home.earthlink.net/~jrhees/USBUIRT/index.htm */
 #define FTDI_USB_UIRT_PID	0xF850	/* Product Id */
 
-/* ELV USB Module UO100 (PID sent by Stefan Frings) */
-#define FTDI_ELV_UO100_PID	0xFB58	/* Product Id */
+/* TNC-X USB-to-packet-radio adapter, versions prior to 3.0 (DLP module) */
+
+#define FTDI_TNC_X_PID		0xEBE0
+
+/*
+ * ELV USB devices submitted by Christian Abt of ELV (www.elv.de).
+ * All of these devices use FTDI's vendor ID (0x0403).
+ *
+ * The previously included PID for the UO 100 module was incorrect.
+ * In fact, that PID was for ELV's UR 100 USB-RS232 converter (0xFB58).
+ *
+ * Armin Laeuger originally sent the PID for the UM 100 module.
+ */
+#define FTDI_ELV_UR100_PID	0xFB58	/* USB-RS232-Umsetzer (UR 100) */
+#define FTDI_ELV_UM100_PID	0xFB5A	/* USB-Modul UM 100 */
+#define FTDI_ELV_UO100_PID	0xFB5B	/* USB-Modul UO 100 */
+#define FTDI_ELV_ALC8500_PID	0xF06E	/* ALC 8500 Expert */
+/* Additional ELV PIDs that default to using the FTDI D2XX drivers on
+ * MS Windows, rather than the FTDI Virtual Com Port drivers.
+ * Maybe these will be easier to use with the libftdi/libusb user-space
+ * drivers, or possibly the Comedi drivers in some cases. */
+#define FTDI_ELV_CLI7000_PID	0xFB59	/* Computer-Light-Interface (CLI 7000) */
+#define FTDI_ELV_PPS7330_PID	0xFB5C	/* Processor-Power-Supply (PPS 7330) */
+#define FTDI_ELV_TFM100_PID	0xFB5D	/* Temperartur-Feuchte Messgeraet (TFM 100) */
+#define FTDI_ELV_UDF77_PID	0xFB5E	/* USB DCF Funkurh (UDF 77) */
+#define FTDI_ELV_UIO88_PID	0xFB5F	/* USB-I/O Interface (UIO 88) */
+#define FTDI_ELV_UAD8_PID	0xF068	/* USB-AD-Wandler (UAD 8) */
+#define FTDI_ELV_UDA7_PID	0xF069	/* USB-DA-Wandler (UDA 7) */
+#define FTDI_ELV_USI2_PID	0xF06A	/* USB-Schrittmotoren-Interface (USI 2) */
+#define FTDI_ELV_T1100_PID	0xF06B	/* Thermometer (T 1100) */
+#define FTDI_ELV_PCD200_PID	0xF06C	/* PC-Datenlogger (PCD 200) */
+#define FTDI_ELV_ULA200_PID	0xF06D	/* USB-LCD-Ansteuerung (ULA 200) */
+#define FTDI_ELV_FHZ1000PC_PID	0xF06F	/* FHZ 1000 PC */
+#define FTDI_ELV_CSI8_PID	0xE0F0	/* Computer-Schalt-Interface (CSI 8) */
+#define FTDI_ELV_EM1000DL_PID	0xE0F1	/* PC-Datenlogger fuer Energiemonitor (EM 1000 DL) */
+#define FTDI_ELV_PCK100_PID	0xE0F2	/* PC-Kabeltester (PCK 100) */
+#define FTDI_ELV_RFP500_PID	0xE0F3	/* HF-Leistungsmesser (RFP 500) */
+#define FTDI_ELV_FS20SIG_PID	0xE0F4	/* Signalgeber (FS 20 SIG) */
+#define FTDI_ELV_WS300PC_PID	0xE0F6	/* PC-Wetterstation (WS 300 PC) */
+#define FTDI_ELV_FHZ1300PC_PID	0xE0E8	/* FHZ 1300 PC */
+#define FTDI_ELV_WS500_PID	0xE0E9	/* PC-Wetterstation (WS 500) */
 
 /*
  * Definitions for ID TECH (www.idt-net.com) devices
@@ -156,11 +257,27 @@
  */
 #define OCT_VID			0x0B39	/* OCT vendor ID */
 /* Note: OCT US101 is also rebadged as Dick Smith Electronics (NZ) XH6381 */
-/* Also rebadged as SIIG Inc. model US2308 */
+/* Also rebadged as Dick Smith Electronics (Aus) XH6451 */
+/* Also rebadged as SIIG Inc. model US2308 hardware version 1 */
 #define OCT_US101_PID		0x0421	/* OCT US101 USB to RS-232 */
 
 /* an infrared receiver for user access control with IR tags */
 #define FTDI_PIEGROUP_PID	0xF208	/* Product Id */
+
+/*
+ * Definitions for Artemis astronomical USB based cameras
+ * Check it at http://www.artemisccd.co.uk/
+ */
+#define FTDI_ARTEMIS_PID	0xDF28	/* All Artemis Cameras */
+
+/*
+ * Definitions for ATIK Instruments astronomical USB based cameras
+ * Check it at http://www.atik-instruments.com/
+ */
+#define FTDI_ATIK_ATK16_PID	0xDF30	/* ATIK ATK-16 Grayscale Camera */
+#define FTDI_ATIK_ATK16C_PID	0xDF32	/* ATIK ATK-16C Colour Camera */
+#define FTDI_ATIK_ATK16HR_PID	0xDF31	/* ATIK ATK-16HR Grayscale Camera */
+#define FTDI_ATIK_ATK16HRC_PID	0xDF33	/* ATIK ATK-16HRC Colour Camera */
 
 /*
  * Protego product ids
@@ -201,8 +318,9 @@
 
 /* CCS Inc. ICDU/ICDU40 product ID - the FT232BM is used in an in-circuit-debugger */
 /* unit for PIC16's/PIC18's */
-#define FTDI_CCSICDU20_0_PID    0xF9D0     
-#define FTDI_CCSICDU40_1_PID    0xF9D1     
+#define FTDI_CCSICDU20_0_PID    0xF9D0
+#define FTDI_CCSICDU40_1_PID    0xF9D1
+#define FTDI_CCSMACHX_2_PID     0xF9D2
 
 /* Inside Accesso contactless reader (http://www.insidefr.com) */
 #define INSIDE_ACCESSO		0xFAD0
@@ -219,11 +337,18 @@
  */
 #define FALCOM_VID		0x0F94	/* Vendor Id */
 #define FALCOM_TWIST_PID	0x0001	/* Falcom Twist USB GPRS modem */
+#define FALCOM_SAMBA_PID	0x0005	/* Falcom Samba USB GPRS modem */
 
 /*
  * SUUNTO product ids
  */
 #define FTDI_SUUNTO_SPORTS_PID	0xF680	/* Suunto Sports instrument */
+
+/*
+ * TTi (Thurlby Thandar Instruments)
+ */
+#define TTI_VID			0x103E	/* Vendor Id */
+#define TTI_QL355P_PID		0x03E8	/* TTi QL355P power supply */
 
 /*
  * Definitions for B&B Electronics products.
@@ -235,16 +360,187 @@
 
 /*
  * RM Michaelides CANview USB (http://www.rmcan.com)
- * CAN filedbus interface adapter, addad by port GmbH www.port.de)
+ * CAN fieldbus interface adapter, added by port GmbH www.port.de)
+ * Ian Abbott changed the macro names for consistency.
  */
-#define FTDI_RM_VID		0x0403	/* Vendor  Id */
-#define FTDI_RMCANVIEW_PID	0xfd60	/* Product Id */
+#define FTDI_RM_CANVIEW_PID	0xfd60	/* Product Id */
 
 /*
  * EVER Eco Pro UPS (http://www.ever.com.pl/)
  */
 
 #define	EVER_ECO_PRO_CDS	0xe520	/* RS-232 converter */
+
+/*
+ * 4N-GALAXY.DE PIDs for CAN-USB, USB-RS232, USB-RS422, USB-RS485,
+ * USB-TTY activ, USB-TTY passiv.  Some PIDs are used by several devices
+ * and I'm not entirely sure which are used by which.
+ */
+#define FTDI_4N_GALAXY_DE_1_PID	0xF3C0
+#define FTDI_4N_GALAXY_DE_2_PID	0xF3C1
+
+/*
+ * Mobility Electronics products.
+ */
+#define MOBILITY_VID			0x1342
+#define MOBILITY_USB_SERIAL_PID		0x0202	/* EasiDock USB 200 serial */
+
+/*
+ * microHAM product IDs (http://www.microham.com).
+ * Submitted by Justin Burket (KL1RL) <zorton@jtan.com>
+ * and Mike Studer (K6EEP) <k6eep@hamsoftware.org>.
+ * Ian Abbott <abbotti@mev.co.uk> added a few more from the driver INF file.
+ */
+#define FTDI_MHAM_KW_PID 0xEEE8		/* USB-KW interface */
+#define FTDI_MHAM_YS_PID 0xEEE9		/* USB-YS interface */
+#define FTDI_MHAM_Y6_PID 0xEEEA		/* USB-Y6 interface */
+#define FTDI_MHAM_Y8_PID 0xEEEB		/* USB-Y8 interface */
+#define FTDI_MHAM_IC_PID 0xEEEC		/* USB-IC interface */
+#define FTDI_MHAM_DB9_PID 0xEEED	/* USB-DB9 interface */
+#define FTDI_MHAM_RS232_PID 0xEEEE	/* USB-RS232 interface */
+#define FTDI_MHAM_Y9_PID 0xEEEF		/* USB-Y9 interface */
+
+/*
+ * Active Robots product ids.
+ */
+#define FTDI_ACTIVE_ROBOTS_PID	0xE548	/* USB comms board */
+
+/*
+ * Xsens Technologies BV products (http://www.xsens.com).
+ */
+#define XSENS_CONVERTER_0_PID	0xD388
+#define XSENS_CONVERTER_1_PID	0xD389
+#define XSENS_CONVERTER_2_PID	0xD38A
+#define XSENS_CONVERTER_3_PID	0xD38B
+#define XSENS_CONVERTER_4_PID	0xD38C
+#define XSENS_CONVERTER_5_PID	0xD38D
+#define XSENS_CONVERTER_6_PID	0xD38E
+#define XSENS_CONVERTER_7_PID	0xD38F
+
+/*
+ * Teratronik product ids.
+ * Submitted by O. Wölfelschneider.
+ */
+#define FTDI_TERATRONIK_VCP_PID	 0xEC88	/* Teratronik device (preferring VCP driver on windows) */
+#define FTDI_TERATRONIK_D2XX_PID 0xEC89	/* Teratronik device (preferring D2XX driver on windows) */
+
+/*
+ * Evolution Robotics products (http://www.evolution.com/).
+ * Submitted by Shawn M. Lavelle.
+ */
+#define EVOLUTION_VID		0xDEEE	/* Vendor ID */
+#define EVOLUTION_ER1_PID	0x0300	/* ER1 Control Module */
+#define EVO_8U232AM_PID	0x02FF	/* Evolution robotics RCM2 (FT232AM)*/
+#define EVO_HYBRID_PID		0x0302	/* Evolution robotics RCM4 PID (FT232BM)*/
+#define EVO_RCM4_PID		0x0303	/* Evolution robotics RCM4 PID */
+
+/* Pyramid Computer GmbH */
+#define FTDI_PYRAMID_PID	0xE6C8	/* Pyramid Appliance Display */
+
+/*
+ * Posiflex inc retail equipment (http://www.posiflex.com.tw)
+ */
+#define POSIFLEX_VID		0x0d3a  /* Vendor ID */
+#define POSIFLEX_PP7000_PID	0x0300  /* PP-7000II thermal printer */
+
+/*
+ * Westrex International devices submitted by Cory Lee
+ */
+#define FTDI_WESTREX_MODEL_777_PID	0xDC00	/* Model 777 */
+#define FTDI_WESTREX_MODEL_8900F_PID	0xDC01	/* Model 8900F */
+
+/*
+ * RR-CirKits LocoBuffer USB (http://www.rr-cirkits.com)
+ */
+#define FTDI_RRCIRKITS_LOCOBUFFER_PID	0xc7d0	/* LocoBuffer USB */
+
+/*
+ * Eclo (http://www.eclo.pt/) product IDs.
+ * PID 0xEA90 submitted by Martin Grill.
+ */
+#define FTDI_ECLO_COM_1WIRE_PID	0xEA90	/* COM to 1-Wire USB adaptor */
+
+/*
+ * Papouch products (http://www.papouch.com/)
+ * Submitted by Folkert van Heusden
+ */
+
+#define PAPOUCH_VID			0x5050	/* Vendor ID */
+#define PAPOUCH_TMU_PID			0x0400	/* TMU USB Thermometer */
+
+/*
+ * ACG Identification Technologies GmbH products (http://www.acg.de/).
+ * Submitted by anton -at- goto10 -dot- org.
+ */
+#define FTDI_ACG_HFDUAL_PID		0xDD20	/* HF Dual ISO Reader (RFID) */
+
+/*
+ * Yost Engineering, Inc. products (www.yostengineering.com).
+ * PID 0xE050 submitted by Aaron Prose.
+ */
+#define FTDI_YEI_SERVOCENTER31_PID	0xE050	/* YEI ServoCenter3.1 USB */
+
+/*
+ * ThorLabs USB motor drivers
+ */
+#define FTDI_THORLABS_PID		0xfaf0 /* ThorLabs USB motor drivers */
+
+/*
+ * Testo products (http://www.testo.com/)
+ * Submitted by Colin Leroy
+ */
+#define TESTO_VID			0x128D
+#define TESTO_USB_INTERFACE_PID		0x0001
+
+/*
+ * Gamma Scout (http://gamma-scout.com/). Submitted by rsc@runtux.com.
+ */
+#define FTDI_GAMMA_SCOUT_PID		0xD678	/* Gamma Scout online */
+
+/*
+ * Tactrix OpenPort (ECU) devices.
+ * OpenPort 1.3M submitted by Donour Sizemore.
+ * OpenPort 1.3S and 1.3U submitted by Ian Abbott.
+ */
+#define FTDI_TACTRIX_OPENPORT_13M_PID	0xCC48	/* OpenPort 1.3 Mitsubishi */
+#define FTDI_TACTRIX_OPENPORT_13S_PID	0xCC49	/* OpenPort 1.3 Subaru */
+#define FTDI_TACTRIX_OPENPORT_13U_PID	0xCC4A	/* OpenPort 1.3 Universal */
+
+/*
+ * Telldus Technologies
+ */
+#define TELLDUS_VID			0x1781	/* Vendor ID */
+#define TELLDUS_TELLSTICK_PID		0x0C30	/* RF control dongle 433 MHz using FT232RL */
+
+/*
+ * IBS elektronik product ids
+ * Submitted by Thomas Schleusener
+ */
+#define FTDI_IBS_US485_PID	0xff38  /* IBS US485 (USB<-->RS422/485 interface) */
+#define FTDI_IBS_PICPRO_PID	0xff39  /* IBS PIC-Programmer */
+#define FTDI_IBS_PCMCIA_PID	0xff3a  /* IBS Card reader for PCMCIA SRAM-cards */
+#define FTDI_IBS_PK1_PID	0xff3b  /* IBS PK1 - Particel counter */
+#define FTDI_IBS_RS232MON_PID	0xff3c  /* IBS RS232 - Monitor */
+#define FTDI_IBS_APP70_PID	0xff3d  /* APP 70 (dust monitoring system) */
+#define FTDI_IBS_PEDO_PID	0xff3e  /* IBS PEDO-Modem (RF modem 868.35 MHz) */
+#define FTDI_IBS_PROD_PID	0xff3f  /* future device */
+
+/*
+ *  MaxStream devices	www.maxstream.net
+ */
+#define FTDI_MAXSTREAM_PID	0xEE18	/* Xbee PKG-U Module */
+
+/* Olimex */
+#define OLIMEX_VID			0x15BA
+#define OLIMEX_ARM_USB_OCD_PID		0x0003
+
+
+/*
+ * The Mobility Lab (TML)
+ * Submitted by Pierre Castella
+ */
+#define TML_VID			0x1B91	/* Vendor ID */
+#define TML_USB_SERIAL_PID	0x0064	/* USB - Serial Converter */
 
 /* Commands */
 #define FTDI_SIO_RESET 		0 /* Reset the port */
@@ -257,10 +553,6 @@
 #define FTDI_SIO_SET_ERROR_CHAR	7 /* Set the error character */
 #define FTDI_SIO_SET_LATENCY_TIMER	9 /* Set the latency timer */
 #define FTDI_SIO_GET_LATENCY_TIMER	10 /* Get the latency timer */
-
-/* Port interface code for FT2232C */
-#define INTERFACE_A		1
-#define INTERFACE_B		2
 
 
 /*
@@ -373,6 +665,7 @@ typedef enum {
 	FT8U232AM = 2,
 	FT232BM = 3,
 	FT2232C = 4,
+	FT232RL = 5,
 } ftdi_chip_type_t;
 
 typedef enum {
@@ -612,7 +905,7 @@ typedef enum {
  */
 
 /* FTDI_SIO_GET_MODEM_STATUS */
-/* Retreive the current value of the modem status register */
+/* Retrieve the current value of the modem status register */
 
 #define FTDI_SIO_GET_MODEM_STATUS_REQUEST_TYPE 0xc0
 #define FTDI_SIO_GET_MODEM_STATUS_REQUEST FTDI_SIO_GET_MODEM_STATUS

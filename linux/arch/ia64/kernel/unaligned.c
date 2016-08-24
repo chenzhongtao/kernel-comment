@@ -15,7 +15,6 @@
  */
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/smp_lock.h>
 #include <linux/tty.h>
 
 #include <asm/intrinsics.h>
@@ -24,7 +23,7 @@
 #include <asm/uaccess.h>
 #include <asm/unaligned.h>
 
-extern void die_if_kernel(char *str, struct pt_regs *regs, long err) __attribute__ ((noreturn));
+extern void die_if_kernel(char *str, struct pt_regs *regs, long err);
 
 #undef DEBUG_UNALIGNED_TRAP
 
@@ -51,6 +50,15 @@ dump (const char *str, void *vp, size_t len)
 #define IA64_FIRST_STACKED_GR	32
 #define IA64_FIRST_ROTATING_FR	32
 #define SIGN_EXT9		0xffffffffffffff00ul
+
+/*
+ *  sysctl settable hook which tells the kernel whether to honor the
+ *  IA64_THREAD_UAC_NOPRINT prctl.  Because this is user settable, we want
+ *  to allow the super user to enable/disable this for security reasons
+ *  (i.e. don't allow attacker to fill up logs with unaligned accesses).
+ */
+int no_unaligned_warning;
+static int noprint_warning;
 
 /*
  * For M-unit:
@@ -1283,8 +1291,9 @@ within_logging_rate_limit (void)
 
 	if (jiffies - last_time > 5*HZ)
 		count = 0;
-	if (++count < 5) {
+	if (count < 5) {
 		last_time = jiffies;
+		count++;
 		return 1;
 	}
 	return 0;
@@ -1323,14 +1332,16 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 		if ((current->thread.flags & IA64_THREAD_UAC_SIGBUS) != 0)
 			goto force_sigbus;
 
-		if (!(current->thread.flags & IA64_THREAD_UAC_NOPRINT)
-		    && within_logging_rate_limit())
+		if (!no_unaligned_warning &&
+		    !(current->thread.flags & IA64_THREAD_UAC_NOPRINT) &&
+		    within_logging_rate_limit())
 		{
 			char buf[200];	/* comm[] is at most 16 bytes... */
 			size_t len;
 
 			len = sprintf(buf, "%s(%d): unaligned access to 0x%016lx, "
-				      "ip=0x%016lx\n\r", current->comm, current->pid,
+				      "ip=0x%016lx\n\r", current->comm,
+				      task_pid_nr(current),
 				      ifa, regs->cr_iip + ipsr->ri);
 			/*
 			 * Don't call tty_write_message() if we're in the kernel; we might
@@ -1339,7 +1350,22 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 			if (user_mode(regs))
 				tty_write_message(current->signal->tty, buf);
 			buf[len-1] = '\0';	/* drop '\r' */
-			printk(KERN_WARNING "%s", buf);	/* watch for command names containing %s */
+			/* watch for command names containing %s */
+			printk(KERN_WARNING "%s", buf);
+		} else {
+			if (no_unaligned_warning && !noprint_warning) {
+				noprint_warning = 1;
+				printk(KERN_WARNING "%s(%d) encountered an "
+				       "unaligned exception which required\n"
+				       "kernel assistance, which degrades "
+				       "the performance of the application.\n"
+				       "Unaligned exception warnings have "
+				       "been disabled by the system "
+				       "administrator\n"
+				       "echo 0 > /proc/sys/kernel/ignore-"
+				       "unaligned-usertrap to re-enable\n",
+				       current->comm, task_pid_nr(current));
+			}
 		}
 	} else {
 		if (within_logging_rate_limit())
@@ -1380,6 +1406,10 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	 *		- ldX.spill
 	 *		- stX.spill
 	 *	Reason: RNATs are based on addresses
+	 *		- ld16
+	 *		- st16
+	 *	Reason: ld16 and st16 are supposed to occur in a single
+	 *		memory op
 	 *
 	 *	synchronization:
 	 *		- cmpxchg
@@ -1401,6 +1431,10 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	switch (opcode) {
 	      case LDS_OP:
 	      case LDSA_OP:
+		if (u.insn.x)
+			/* oops, really a semaphore op (cmpxchg, etc) */
+			goto failure;
+		/* no break */
 	      case LDS_IMM_OP:
 	      case LDSA_IMM_OP:
 	      case LDFS_OP:
@@ -1425,6 +1459,10 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	      case LDCCLR_OP:
 	      case LDCNC_OP:
 	      case LDCCLRACQ_OP:
+		if (u.insn.x)
+			/* oops, really a semaphore op (cmpxchg, etc) */
+			goto failure;
+		/* no break */
 	      case LD_IMM_OP:
 	      case LDA_IMM_OP:
 	      case LDBIAS_IMM_OP:
@@ -1437,6 +1475,10 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 
 	      case ST_OP:
 	      case STREL_OP:
+		if (u.insn.x)
+			/* oops, really a semaphore op (cmpxchg, etc) */
+			goto failure;
+		/* no break */
 	      case ST_IMM_OP:
 	      case STREL_IMM_OP:
 		ret = emulate_store_int(ifa, u.insn, regs);
@@ -1446,14 +1488,17 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	      case LDFA_OP:
 	      case LDFCCLR_OP:
 	      case LDFCNC_OP:
-	      case LDF_IMM_OP:
-	      case LDFA_IMM_OP:
-	      case LDFCCLR_IMM_OP:
-	      case LDFCNC_IMM_OP:
 		if (u.insn.x)
 			ret = emulate_load_floatpair(ifa, u.insn, regs);
 		else
 			ret = emulate_load_float(ifa, u.insn, regs);
+		break;
+
+	      case LDF_IMM_OP:
+	      case LDFA_IMM_OP:
+	      case LDFCCLR_IMM_OP:
+	      case LDFCNC_IMM_OP:
+		ret = emulate_load_float(ifa, u.insn, regs);
 		break;
 
 	      case STF_OP:

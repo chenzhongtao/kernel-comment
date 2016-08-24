@@ -35,6 +35,7 @@
 #define __LC_IO_NEW_PSW                 0x01f0
 #endif /* !__s390x__ */
 
+#define __LC_IPL_PARMBLOCK_PTR		0x014
 #define __LC_EXT_PARAMS                 0x080
 #define __LC_CPU_ADDRESS                0x084
 #define __LC_EXT_INT_CODE               0x086
@@ -47,6 +48,7 @@
 #define __LC_PER_ATMID			0x096
 #define __LC_PER_ADDRESS		0x098
 #define __LC_PER_ACCESS_ID		0x0A1
+#define __LC_AR_MODE_ID			0x0A3
 
 #define __LC_SUBCHANNEL_ID              0x0B8
 #define __LC_SUBCHANNEL_NR              0x0BA
@@ -68,6 +70,7 @@
 #define __LC_SYSTEM_TIMER		0x270
 #define __LC_LAST_UPDATE_CLOCK		0x278
 #define __LC_STEAL_CLOCK		0x280
+#define __LC_RETURN_MCCK_PSW            0x288
 #define __LC_KERNEL_STACK               0xC40
 #define __LC_THREAD_INFO		0xC44
 #define __LC_ASYNC_STACK                0xC48
@@ -90,36 +93,49 @@
 #define __LC_SYSTEM_TIMER		0x278
 #define __LC_LAST_UPDATE_CLOCK		0x280
 #define __LC_STEAL_CLOCK		0x288
-#define __LC_DIAG44_OPCODE		0x290
+#define __LC_RETURN_MCCK_PSW            0x290
 #define __LC_KERNEL_STACK               0xD40
 #define __LC_THREAD_INFO		0xD48
 #define __LC_ASYNC_STACK                0xD50
 #define __LC_KERNEL_ASCE		0xD58
 #define __LC_USER_ASCE			0xD60
 #define __LC_PANIC_STACK                0xD68
-#define __LC_CPUID                      0xD90
-#define __LC_CPUADDR                    0xD98
+#define __LC_CPUID			0xD80
+#define __LC_CPUADDR			0xD88
 #define __LC_IPLDEV                     0xDB8
 #define __LC_JIFFY_TIMER		0xDC0
 #define __LC_CURRENT			0xDD8
 #define __LC_INT_CLOCK			0xDE8
 #endif /* __s390x__ */
 
-#define __LC_PANIC_MAGIC                0xE00
 
+#define __LC_PANIC_MAGIC		0xE00
 #ifndef __s390x__
 #define __LC_PFAULT_INTPARM             0x080
+#define __LC_CPU_TIMER_SAVE_AREA        0x0D8
+#define __LC_CLOCK_COMP_SAVE_AREA	0x0E0
+#define __LC_PSW_SAVE_AREA		0x100
+#define __LC_PREFIX_SAVE_AREA		0x108
 #define __LC_AREGS_SAVE_AREA            0x120
+#define __LC_FPREGS_SAVE_AREA		0x160
+#define __LC_GPREGS_SAVE_AREA           0x180
 #define __LC_CREGS_SAVE_AREA            0x1C0
 #else /* __s390x__ */
 #define __LC_PFAULT_INTPARM             0x11B8
+#define __LC_FPREGS_SAVE_AREA		0x1200
+#define __LC_GPREGS_SAVE_AREA           0x1280
+#define __LC_PSW_SAVE_AREA		0x1300
+#define __LC_PREFIX_SAVE_AREA		0x1318
+#define __LC_FP_CREG_SAVE_AREA		0x131C
+#define __LC_TODREG_SAVE_AREA		0x1324
+#define __LC_CPU_TIMER_SAVE_AREA        0x1328
+#define __LC_CLOCK_COMP_SAVE_AREA	0x1331
 #define __LC_AREGS_SAVE_AREA            0x1340
 #define __LC_CREGS_SAVE_AREA            0x1380
 #endif /* __s390x__ */
 
 #ifndef __ASSEMBLY__
 
-#include <linux/config.h>
 #include <asm/processor.h>
 #include <linux/types.h>
 #include <asm/sigp.h>
@@ -130,6 +146,52 @@ void system_call(void);
 void pgm_check_handler(void);
 void mcck_int_handler(void);
 void io_int_handler(void);
+
+struct save_area_s390 {
+	u32	ext_save;
+	u64	timer;
+	u64	clk_cmp;
+	u8	pad1[24];
+	u8	psw[8];
+	u32	pref_reg;
+	u8	pad2[20];
+	u32	acc_regs[16];
+	u64	fp_regs[4];
+	u32	gp_regs[16];
+	u32	ctrl_regs[16];
+}  __attribute__((packed));
+
+struct save_area_s390x {
+	u64	fp_regs[16];
+	u64	gp_regs[16];
+	u8	psw[16];
+	u8	pad1[8];
+	u32	pref_reg;
+	u32	fp_ctrl_reg;
+	u8	pad2[4];
+	u32	tod_reg;
+	u64	timer;
+	u64	clk_cmp;
+	u8	pad3[8];
+	u32	acc_regs[16];
+	u64	ctrl_regs[16];
+}  __attribute__((packed));
+
+union save_area {
+	struct save_area_s390	s390;
+	struct save_area_s390x	s390x;
+};
+
+#define SAVE_AREA_BASE_S390	0xd4
+#define SAVE_AREA_BASE_S390X	0x1200
+
+#ifndef __s390x__
+#define SAVE_AREA_SIZE sizeof(struct save_area_s390)
+#define SAVE_AREA_BASE SAVE_AREA_BASE_S390
+#else
+#define SAVE_AREA_SIZE sizeof(struct save_area_s390x)
+#define SAVE_AREA_BASE SAVE_AREA_BASE_S390X
+#endif
 
 struct _lowcore
 {
@@ -167,16 +229,19 @@ struct _lowcore
 	__u16        subchannel_nr;            /* 0x0ba */
 	__u32        io_int_parm;              /* 0x0bc */
 	__u32        io_int_word;              /* 0x0c0 */
-        __u8         pad3[0xD8-0xC4];          /* 0x0c4 */
+	__u8	     pad3[0xc8-0xc4];	       /* 0x0c4 */
+	__u32	     stfl_fac_list;	       /* 0x0c8 */
+	__u8	     pad4[0xd4-0xcc];	       /* 0x0cc */
+	__u32        extended_save_area_addr;  /* 0x0d4 */
 	__u32        cpu_timer_save_area[2];   /* 0x0d8 */
 	__u32        clock_comp_save_area[2];  /* 0x0e0 */
 	__u32        mcck_interruption_code[2]; /* 0x0e8 */
-	__u8         pad4[0xf4-0xf0];          /* 0x0f0 */
+	__u8	     pad5[0xf4-0xf0];	       /* 0x0f0 */
 	__u32        external_damage_code;     /* 0x0f4 */
 	__u32        failing_storage_address;  /* 0x0f8 */
-	__u8         pad5[0x100-0xfc];         /* 0x0fc */
+	__u8	     pad6[0x100-0xfc];	       /* 0x0fc */
 	__u32        st_status_fixed_logout[4];/* 0x100 */
-	__u8         pad6[0x120-0x110];        /* 0x110 */
+	__u8	     pad7[0x120-0x110];        /* 0x110 */
 	__u32        access_regs_save_area[16];/* 0x120 */
 	__u32        floating_pt_save_area[8]; /* 0x160 */
 	__u32        gpregs_save_area[16];     /* 0x180 */
@@ -192,7 +257,8 @@ struct _lowcore
 	__u64        system_timer;             /* 0x270 */
 	__u64        last_update_clock;        /* 0x278 */
 	__u64        steal_clock;              /* 0x280 */
-	__u8         pad8[0xc00-0x288];        /* 0x288 */
+        psw_t        return_mcck_psw;          /* 0x288 */
+	__u8         pad8[0xc00-0x290];        /* 0x290 */
 
         /* System info area */
 	__u32        save_area[16];            /* 0xc00 */
@@ -202,7 +268,8 @@ struct _lowcore
 	__u32        kernel_asce;              /* 0xc4c */
 	__u32        user_asce;                /* 0xc50 */
 	__u32        panic_stack;              /* 0xc54 */
-	__u8         pad10[0xc60-0xc58];       /* 0xc58 */
+	__u32	     user_exec_asce;	       /* 0xc58 */
+	__u8	     pad10[0xc60-0xc5c];       /* 0xc5c */
 	/* entry.S sensitive area start */
 	struct       cpuinfo_S390 cpu_data;    /* 0xc60 */
 	__u32        ipl_device;               /* 0xc7c */
@@ -281,8 +348,8 @@ struct _lowcore
 	__u64        system_timer;             /* 0x278 */
 	__u64        last_update_clock;        /* 0x280 */
 	__u64        steal_clock;              /* 0x288 */
-	__u32        diag44_opcode;            /* 0x290 */
-        __u8         pad8[0xc00-0x294];        /* 0x294 */
+        psw_t        return_mcck_psw;          /* 0x290 */
+        __u8         pad8[0xc00-0x2a0];        /* 0x2a0 */
         /* System info area */
 	__u64        save_area[16];            /* 0xc00 */
         __u8         pad9[0xd40-0xc80];        /* 0xc80 */
@@ -292,7 +359,8 @@ struct _lowcore
 	__u64        kernel_asce;              /* 0xd58 */
 	__u64        user_asce;                /* 0xd60 */
 	__u64        panic_stack;              /* 0xd68 */
-	__u8         pad10[0xd80-0xd70];       /* 0xd70 */
+	__u64	     user_exec_asce;	       /* 0xd70 */
+	__u8	     pad10[0xd80-0xd78];       /* 0xd78 */
 	/* entry.S sensitive area start */
 	struct       cpuinfo_S390 cpu_data;    /* 0xd80 */
 	__u32        ipl_device;               /* 0xdb8 */
@@ -339,9 +407,17 @@ struct _lowcore
 #define S390_lowcore (*((struct _lowcore *) 0))
 extern struct _lowcore *lowcore_ptr[];
 
-extern __inline__ void set_prefix(__u32 address)
+static inline void set_prefix(__u32 address)
 {
-        __asm__ __volatile__ ("spx %0" : : "m" (address) : "memory" );
+	asm volatile("spx %0" : : "m" (address) : "memory");
+}
+
+static inline __u32 store_prefix(void)
+{
+	__u32 address;
+
+	asm volatile("stpx %0" : "=m" (address));
+	return address;
 }
 
 #define __PANIC_MAGIC           0xDEADC0DE

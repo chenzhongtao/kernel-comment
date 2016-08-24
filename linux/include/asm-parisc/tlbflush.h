@@ -3,11 +3,26 @@
 
 /* TLB flushing routines.... */
 
-#include <linux/config.h>
 #include <linux/mm.h>
+#include <linux/sched.h>
 #include <asm/mmu_context.h>
 
+
+/* This is for the serialisation of PxTLB broadcasts.  At least on the
+ * N class systems, only one PxTLB inter processor broadcast can be
+ * active at any one time on the Merced bus.  This tlb purge
+ * synchronisation is fairly lightweight and harmless so we activate
+ * it on all SMP systems not just the N class.  We also need to have
+ * preemption disabled on uniprocessor machines, and spin_lock does that
+ * nicely.
+ */
+extern spinlock_t pa_tlb_lock;
+
+#define purge_tlb_start(x) spin_lock(&pa_tlb_lock)
+#define purge_tlb_end(x) spin_unlock(&pa_tlb_lock)
+
 extern void flush_tlb_all(void);
+extern void flush_tlb_all_local(void *);
 
 /*
  * flush_tlb_mm()
@@ -42,10 +57,6 @@ static inline void flush_tlb_mm(struct mm_struct *mm)
 #endif
 }
 
-extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm, unsigned long start, unsigned long end)
-{
-}
- 
 static inline void flush_tlb_page(struct vm_area_struct *vma,
 	unsigned long addr)
 {
@@ -59,37 +70,11 @@ static inline void flush_tlb_page(struct vm_area_struct *vma,
 	purge_tlb_end();
 }
 
-static inline void flush_tlb_range(struct vm_area_struct *vma,
-	unsigned long start, unsigned long end)
-{
-	unsigned long npages;
+void __flush_tlb_range(unsigned long sid,
+	unsigned long start, unsigned long end);
 
-	
-	npages = ((end - (start & PAGE_MASK)) + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
-	if (npages >= 512)  /* XXX arbitrary, should be tuned */
-		flush_tlb_all();
-	else {
+#define flush_tlb_range(vma,start,end) __flush_tlb_range((vma)->vm_mm->context,start,end)
 
-		mtsp(vma->vm_mm->context,1);
-		if (split_tlb) {
-			purge_tlb_start();
-			while (npages--) {
-				pdtlb(start);
-				pitlb(start);
-				start += PAGE_SIZE;
-			}
-			purge_tlb_end();
-		} else {
-			purge_tlb_start();
-			while (npages--) {
-				pdtlb(start);
-				start += PAGE_SIZE;
-			}
-			purge_tlb_end();
-		}
-	}
-}
-
-#define flush_tlb_kernel_range(start, end) flush_tlb_all()
+#define flush_tlb_kernel_range(start, end) __flush_tlb_range(0,start,end)
 
 #endif

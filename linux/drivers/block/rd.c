@@ -42,7 +42,6 @@
  * and set blk_size for -ENOSPC,     Werner Fink <werner@suse.de>, Apr '99
  */
 
-#include <linux/config.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <asm/atomic.h>
@@ -50,7 +49,6 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/pagemap.h>
 #include <linux/blkdev.h>
 #include <linux/genhd.h>
@@ -86,7 +84,7 @@ int rd_size = CONFIG_BLK_DEV_RAM_SIZE;		/* Size of the RAM disks */
  * behaviour. The default is still BLOCK_SIZE (needed by rd_load_image that
  * supposes the filesystem in the image uses a BLOCK_SIZE blocksize).
  */
-int rd_blocksize = BLOCK_SIZE;			/* blocksize of the RAM disks */
+static int rd_blocksize = CONFIG_BLK_DEV_RAM_BLOCKSIZE;
 
 /*
  * Copyright (C) 2000 Linus Torvalds.
@@ -153,8 +151,8 @@ static int ramdisk_commit_write(struct file *file, struct page *page,
 }
 
 /*
- * ->writepage to the the blockdev's mapping has to redirty the page so that the
- * VM doesn't go and steal it.  We return WRITEPAGE_ACTIVATE so that the VM
+ * ->writepage to the blockdev's mapping has to redirty the page so that the
+ * VM doesn't go and steal it.  We return AOP_WRITEPAGE_ACTIVATE so that the VM
  * won't try to (pointlessly) write the page again for a while.
  *
  * Really, these pages should not be on the LRU at all.
@@ -165,7 +163,7 @@ static int ramdisk_writepage(struct page *page, struct writeback_control *wbc)
 		make_page_uptodate(page);
 	SetPageDirty(page);
 	if (wbc->for_reclaim)
-		return WRITEPAGE_ACTIVATE;
+		return AOP_WRITEPAGE_ACTIVATE;
 	unlock_page(page);
 	return 0;
 }
@@ -186,17 +184,31 @@ static int ramdisk_writepages(struct address_space *mapping,
  */
 static int ramdisk_set_page_dirty(struct page *page)
 {
-	SetPageDirty(page);
+	if (!TestSetPageDirty(page))
+		return 1;
 	return 0;
 }
 
-static struct address_space_operations ramdisk_aops = {
+/*
+ * releasepage is called by pagevec_strip/try_to_release_page if
+ * buffers_heads_over_limit is true. Without a releasepage function
+ * try_to_free_buffers is called instead. That can unset the dirty
+ * bit of our ram disk pages, which will be eventually freed, even
+ * if the page is still in use.
+ */
+static int ramdisk_releasepage(struct page *page, gfp_t dummy)
+{
+	return 0;
+}
+
+static const struct address_space_operations ramdisk_aops = {
 	.readpage	= ramdisk_readpage,
 	.prepare_write	= ramdisk_prepare_write,
 	.commit_write	= ramdisk_commit_write,
 	.writepage	= ramdisk_writepage,
 	.set_page_dirty	= ramdisk_set_page_dirty,
 	.writepages	= ramdisk_writepages,
+	.releasepage	= ramdisk_releasepage,
 };
 
 static int rd_blkdev_pagecache_IO(int rw, struct bio_vec *vec, sector_t sector,
@@ -265,7 +277,7 @@ static int rd_blkdev_pagecache_IO(int rw, struct bio_vec *vec, sector_t sector,
  * 19-JAN-1998  Richard Gooch <rgooch@atnf.csiro.au>  Added devfs support
  *
  */
-static int rd_make_request(request_queue_t *q, struct bio *bio)
+static int rd_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct block_device *bdev = bio->bi_bdev;
 	struct address_space * mapping = bdev->bd_inode->i_mapping;
@@ -288,10 +300,10 @@ static int rd_make_request(request_queue_t *q, struct bio *bio)
 	if (ret)
 		goto fail;
 
-	bio_endio(bio, bio->bi_size, 0);
+	bio_endio(bio, 0);
 	return 0;
 fail:
-	bio_io_error(bio, bio->bi_size);
+	bio_io_error(bio);
 	return 0;
 } 
 
@@ -310,12 +322,12 @@ static int rd_ioctl(struct inode *inode, struct file *file,
 	 * cache
 	 */
 	error = -EBUSY;
-	down(&bdev->bd_sem);
+	mutex_lock(&bdev->bd_mutex);
 	if (bdev->bd_openers <= 2) {
 		truncate_inode_pages(bdev->bd_inode->i_mapping, 0);
 		error = 0;
 	}
-	up(&bdev->bd_sem);
+	mutex_unlock(&bdev->bd_mutex);
 	return error;
 }
 
@@ -325,7 +337,7 @@ static int rd_ioctl(struct inode *inode, struct file *file,
  */
 static struct backing_dev_info rd_backing_dev_info = {
 	.ra_pages	= 0,	/* No readahead */
-	.memory_backed	= 1,	/* Does not contribute to dirty memory */
+	.capabilities	= BDI_CAP_NO_ACCT_DIRTY | BDI_CAP_NO_WRITEBACK | BDI_CAP_MAP_COPY,
 	.unplug_io_fn	= default_unplug_io_fn,
 };
 
@@ -336,7 +348,7 @@ static struct backing_dev_info rd_backing_dev_info = {
  */
 static struct backing_dev_info rd_file_backing_dev_info = {
 	.ra_pages	= 0,	/* No readahead */
-	.memory_backed	= 0,	/* Does contribute to dirty memory */
+	.capabilities	= BDI_CAP_MAP_COPY,	/* Does contribute to dirty memory */
 	.unplug_io_fn	= default_unplug_io_fn,
 };
 
@@ -348,7 +360,7 @@ static int rd_open(struct inode *inode, struct file *filp)
 		struct block_device *bdev = inode->i_bdev;
 		struct address_space *mapping;
 		unsigned bsize;
-		int gfp_mask;
+		gfp_t gfp_mask;
 
 		inode = igrab(bdev->bd_inode);
 		rd_bdev[unit] = bdev;
@@ -366,7 +378,7 @@ static int rd_open(struct inode *inode, struct file *filp)
 		/*
 		 * Deep badness.  rd_blkdev_pagecache_IO() needs to allocate
 		 * pagecache pages within a request_fn.  We cannot recur back
-		 * into the filesytem which is mounted atop the ramdisk, because
+		 * into the filesystem which is mounted atop the ramdisk, because
 		 * that would deadlock on fs locks.  And we really don't want
 		 * to reenter rd_blkdev_pagecache_IO when we're already within
 		 * that function.
@@ -404,15 +416,17 @@ static void __exit rd_cleanup(void)
 		struct block_device *bdev = rd_bdev[i];
 		rd_bdev[i] = NULL;
 		if (bdev) {
-			invalidate_bdev(bdev, 1);
+			invalidate_bdev(bdev);
 			blkdev_put(bdev);
 		}
 		del_gendisk(rd_disks[i]);
 		put_disk(rd_disks[i]);
 		blk_cleanup_queue(rd_queue[i]);
 	}
-	devfs_remove("rd");
 	unregister_blkdev(RAMDISK_MAJOR, "ramdisk");
+
+	bdi_destroy(&rd_file_backing_dev_info);
+	bdi_destroy(&rd_backing_dev_info);
 }
 
 /*
@@ -421,7 +435,19 @@ static void __exit rd_cleanup(void)
 static int __init rd_init(void)
 {
 	int i;
-	int err = -ENOMEM;
+	int err;
+
+	err = bdi_init(&rd_backing_dev_info);
+	if (err)
+		goto out2;
+
+	err = bdi_init(&rd_file_backing_dev_info);
+	if (err) {
+		bdi_destroy(&rd_backing_dev_info);
+		goto out2;
+	}
+
+	err = -ENOMEM;
 
 	if (rd_blocksize > PAGE_SIZE || rd_blocksize < 512 ||
 			(rd_blocksize & (rd_blocksize-1))) {
@@ -434,6 +460,12 @@ static int __init rd_init(void)
 		rd_disks[i] = alloc_disk(1);
 		if (!rd_disks[i])
 			goto out;
+
+		rd_queue[i] = blk_alloc_queue(GFP_KERNEL);
+		if (!rd_queue[i]) {
+			put_disk(rd_disks[i]);
+			goto out;
+		}
 	}
 
 	if (register_blkdev(RAMDISK_MAJOR, "ramdisk")) {
@@ -441,14 +473,8 @@ static int __init rd_init(void)
 		goto out;
 	}
 
-	devfs_mk_dir("rd");
-
 	for (i = 0; i < CONFIG_BLK_DEV_RAM_COUNT; i++) {
 		struct gendisk *disk = rd_disks[i];
-
-		rd_queue[i] = blk_alloc_queue(GFP_KERNEL);
-		if (!rd_queue[i])
-			goto out_queue;
 
 		blk_queue_make_request(rd_queue[i], &rd_make_request);
 		blk_queue_hardsect_size(rd_queue[i], rd_blocksize);
@@ -460,7 +486,6 @@ static int __init rd_init(void)
 		disk->queue = rd_queue[i];
 		disk->flags |= GENHD_FL_SUPPRESS_PARTITION_INFO;
 		sprintf(disk->disk_name, "ram%d", i);
-		sprintf(disk->devfs_name, "rd/%d", i);
 		set_capacity(disk, rd_size * 2);
 		add_disk(rd_disks[i]);
 	}
@@ -471,13 +496,14 @@ static int __init rd_init(void)
 		CONFIG_BLK_DEV_RAM_COUNT, rd_size, rd_blocksize);
 
 	return 0;
-out_queue:
-	unregister_blkdev(RAMDISK_MAJOR, "ramdisk");
 out:
 	while (i--) {
 		put_disk(rd_disks[i]);
 		blk_cleanup_queue(rd_queue[i]);
 	}
+	bdi_destroy(&rd_backing_dev_info);
+	bdi_destroy(&rd_file_backing_dev_info);
+out2:
 	return err;
 }
 
@@ -491,17 +517,12 @@ static int __init ramdisk_size(char *str)
 	rd_size = simple_strtol(str,NULL,0);
 	return 1;
 }
-static int __init ramdisk_size2(char *str)	/* kludge */
-{
-	return ramdisk_size(str);
-}
 static int __init ramdisk_blocksize(char *str)
 {
 	rd_blocksize = simple_strtol(str,NULL,0);
 	return 1;
 }
-__setup("ramdisk=", ramdisk_size);
-__setup("ramdisk_size=", ramdisk_size2);
+__setup("ramdisk_size=", ramdisk_size);
 __setup("ramdisk_blocksize=", ramdisk_blocksize);
 #endif
 

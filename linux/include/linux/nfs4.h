@@ -14,9 +14,10 @@
 #define _LINUX_NFS4_H
 
 #include <linux/types.h>
-#include <linux/list.h>
 
+#define NFS4_BITMAP_SIZE	2
 #define NFS4_VERIFIER_SIZE	8
+#define NFS4_STATEID_SIZE	16
 #define NFS4_FHSIZE		128
 #define NFS4_MAXPATHLEN		PATH_MAX
 #define NFS4_MAXNAMLEN		NAME_MAX
@@ -28,7 +29,7 @@
 #define NFS4_ACCESS_DELETE      0x0010
 #define NFS4_ACCESS_EXECUTE     0x0020
 
-#define NFS4_FH_PERISTENT		0x0000
+#define NFS4_FH_PERSISTENT		0x0000
 #define NFS4_FH_NOEXPIRE_WITH_OPEN	0x0001
 #define NFS4_FH_VOLATILE_ANY		0x0002
 #define NFS4_FH_VOL_MIGRATION		0x0004
@@ -97,22 +98,24 @@ enum nfs4_acl_whotype {
 	NFS4_ACL_WHO_EVERYONE,
 };
 
+#ifdef __KERNEL__
+#include <linux/list.h>
+
 struct nfs4_ace {
 	uint32_t	type;
 	uint32_t	flag;
 	uint32_t	access_mask;
 	int		whotype;
 	uid_t		who;
-	struct list_head l_ace;
 };
 
 struct nfs4_acl {
 	uint32_t	naces;
-	struct list_head ace_head;
+	struct nfs4_ace	aces[0];
 };
 
 typedef struct { char data[NFS4_VERIFIER_SIZE]; } nfs4_verifier;
-typedef struct { char data[16]; } nfs4_stateid;
+typedef struct { char data[NFS4_STATEID_SIZE]; } nfs4_stateid;
 
 enum nfs_opnum4 {
 	OP_ACCESS = 3,
@@ -154,6 +157,12 @@ enum nfs_opnum4 {
 	OP_RELEASE_LOCKOWNER = 39,
 	OP_ILLEGAL = 10044,
 };
+
+/*Defining first and last NFS4 operations implemented.
+Needs to be updated if more operations are defined in future.*/
+
+#define FIRST_NFS4_OP	OP_ACCESS
+#define LAST_NFS4_OP 	OP_RELEASE_LOCKOWNER
 
 enum nfsstat4 {
 	NFS4_OK = 0,
@@ -345,8 +354,6 @@ enum lock_type4 {
 #define NFS4_MINOR_VERSION 0
 #define NFS4_DEBUG 1
 
-#ifdef __KERNEL__
-
 /* Index of predefined Linux client operations */
 
 enum {
@@ -382,6 +389,9 @@ enum {
 	NFSPROC4_CLNT_READDIR,
 	NFSPROC4_CLNT_SERVER_CAPS,
 	NFSPROC4_CLNT_DELEGRETURN,
+	NFSPROC4_CLNT_GETACL,
+	NFSPROC4_CLNT_SETACL,
+	NFSPROC4_CLNT_FS_LOCATIONS,
 };
 
 #endif

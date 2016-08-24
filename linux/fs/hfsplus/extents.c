@@ -11,13 +11,13 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/pagemap.h>
-#include <linux/version.h>
 
 #include "hfsplus_fs.h"
 #include "hfsplus_raw.h"
 
 /* Compare two extents keys, returns 0 on same, pos/neg for difference */
-int hfsplus_ext_cmp_key(hfsplus_btree_key *k1, hfsplus_btree_key *k2)
+int hfsplus_ext_cmp_key(const hfsplus_btree_key *k1,
+			const hfsplus_btree_key *k2)
 {
 	__be32 k1id, k2id;
 	__be32 k1s, k2s;
@@ -37,8 +37,8 @@ int hfsplus_ext_cmp_key(hfsplus_btree_key *k1, hfsplus_btree_key *k2)
 	return be32_to_cpu(k1s) < be32_to_cpu(k2s) ? -1 : 1;
 }
 
-void hfsplus_ext_build_key(hfsplus_btree_key *key, u32 cnid,
-			  u32 block, u8 type)
+static void hfsplus_ext_build_key(hfsplus_btree_key *key, u32 cnid,
+				  u32 block, u8 type)
 {
 	key->key_len = cpu_to_be16(HFSPLUS_EXT_KEYLEN - 2);
 	key->ext.cnid = cpu_to_be32(cnid);
@@ -263,8 +263,9 @@ static int hfsplus_add_extent(struct hfsplus_extent *extent, u32 offset,
 	return -EIO;
 }
 
-int hfsplus_free_extents(struct super_block *sb, struct hfsplus_extent *extent,
-			 u32 offset, u32 block_nr)
+static int hfsplus_free_extents(struct super_block *sb,
+				struct hfsplus_extent *extent,
+				u32 offset, u32 block_nr)
 {
 	u32 count, start;
 	int i;
@@ -349,10 +350,9 @@ int hfsplus_file_extend(struct inode *inode)
 
 	if (HFSPLUS_SB(sb).alloc_file->i_size * 8 < HFSPLUS_SB(sb).total_blocks - HFSPLUS_SB(sb).free_blocks + 8) {
 		// extend alloc file
-		printk("extend alloc file! (%Lu,%u,%u)\n", HFSPLUS_SB(sb).alloc_file->i_size * 8,
+		printk(KERN_ERR "hfs: extend alloc file! (%Lu,%u,%u)\n", HFSPLUS_SB(sb).alloc_file->i_size * 8,
 			HFSPLUS_SB(sb).total_blocks, HFSPLUS_SB(sb).free_blocks);
 		return -ENOSPC;
-		//BUG();
 	}
 
 	down(&HFSPLUS_I(inode).extents_lock);
@@ -443,24 +443,23 @@ void hfsplus_file_truncate(struct inode *inode)
 	if (inode->i_size > HFSPLUS_I(inode).phys_size) {
 		struct address_space *mapping = inode->i_mapping;
 		struct page *page;
-		u32 size = inode->i_size - 1;
+		void *fsdata;
+		u32 size = inode->i_size;
 		int res;
 
-		page = grab_cache_page(mapping, size >> PAGE_CACHE_SHIFT);
-		if (!page)
-			return;
-		size &= PAGE_CACHE_SIZE - 1;
-		size++;
-		res = mapping->a_ops->prepare_write(NULL, page, size, size);
-		if (!res)
-			res = mapping->a_ops->commit_write(NULL, page, size, size);
+		res = pagecache_write_begin(NULL, mapping, size, 0,
+						AOP_FLAG_UNINTERRUPTIBLE,
+						&page, &fsdata);
 		if (res)
-			inode->i_size = HFSPLUS_I(inode).phys_size;
-		unlock_page(page);
-		page_cache_release(page);
+			return;
+		res = pagecache_write_end(NULL, mapping, size, 0, 0, page, fsdata);
+		if (res < 0)
+			return;
 		mark_inode_dirty(inode);
 		return;
-	}
+	} else if (inode->i_size == HFSPLUS_I(inode).phys_size)
+		return;
+
 	blk_cnt = (inode->i_size + HFSPLUS_SB(sb).alloc_blksz - 1) >> HFSPLUS_SB(sb).alloc_blksz_shift;
 	alloc_cnt = HFSPLUS_I(inode).alloc_blocks;
 	if (blk_cnt == alloc_cnt)

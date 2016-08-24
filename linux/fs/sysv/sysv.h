@@ -136,6 +136,9 @@ extern unsigned long sysv_count_free_blocks(struct super_block *);
 
 /* itree.c */
 extern void sysv_truncate(struct inode *);
+extern int __sysv_write_begin(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned flags,
+			struct page **pagep, void **fsdata);
 
 /* inode.c */
 extern int sysv_write_inode(struct inode *, int);
@@ -143,6 +146,9 @@ extern int sysv_sync_inode(struct inode *);
 extern int sysv_sync_file(struct file *, struct dentry *, int);
 extern void sysv_set_inode(struct inode *, dev_t);
 extern int sysv_getattr(struct vfsmount *, struct dentry *, struct kstat *);
+extern int sysv_init_icache(void);
+extern void sysv_destroy_icache(void);
+
 
 /* dir.c */
 extern struct sysv_dir_entry *sysv_find_entry(struct dentry *, struct page **);
@@ -156,13 +162,13 @@ extern struct sysv_dir_entry *sysv_dotdot(struct inode *, struct page **);
 extern ino_t sysv_inode_by_name(struct dentry *);
 
 
-extern struct inode_operations sysv_file_inode_operations;
-extern struct inode_operations sysv_dir_inode_operations;
-extern struct inode_operations sysv_fast_symlink_inode_operations;
-extern struct file_operations sysv_file_operations;
-extern struct file_operations sysv_dir_operations;
-extern struct address_space_operations sysv_aops;
-extern struct super_operations sysv_sops;
+extern const struct inode_operations sysv_file_inode_operations;
+extern const struct inode_operations sysv_dir_inode_operations;
+extern const struct inode_operations sysv_fast_symlink_inode_operations;
+extern const struct file_operations sysv_file_operations;
+extern const struct file_operations sysv_dir_operations;
+extern const struct address_space_operations sysv_aops;
+extern const struct super_operations sysv_sops;
 extern struct dentry_operations sysv_dentry_operations;
 
 

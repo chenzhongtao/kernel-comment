@@ -1,13 +1,18 @@
-/* Copyright (c) 2004 Coraid, Inc.  See COPYING for GPL terms. */
-#define VERSION "5"
+/* Copyright (c) 2006 Coraid, Inc.  See COPYING for GPL terms. */
+#define VERSION "32"
 #define AOE_MAJOR 152
 #define DEVICE_NAME "aoe"
+
+/* set AOE_PARTITIONS to 1 to use whole-disks only
+ * default is 16, which is 15 partitions plus the whole disk
+ */
 #ifndef AOE_PARTITIONS
-#define AOE_PARTITIONS 16
+#define AOE_PARTITIONS (16)
 #endif
-#define SYSMINOR(aoemajor, aoeminor) ((aoemajor) * 10 + (aoeminor))
-#define AOEMAJOR(sysminor) ((sysminor) / 10)
-#define AOEMINOR(sysminor) ((sysminor) % 10)
+
+#define SYSMINOR(aoemajor, aoeminor) ((aoemajor) * NPERSHELF + (aoeminor))
+#define AOEMAJOR(sysminor) ((sysminor) / NPERSHELF)
+#define AOEMINOR(sysminor) ((sysminor) % NPERSHELF)
 #define WHITESPACE " \t\v\f\n"
 
 enum {
@@ -34,13 +39,13 @@ enum {
 struct aoe_hdr {
 	unsigned char dst[6];
 	unsigned char src[6];
-	unsigned char type[2];
+	__be16 type;
 	unsigned char verfl;
 	unsigned char err;
-	unsigned char major[2];
+	__be16 major;
 	unsigned char minor;
 	unsigned char cmd;
-	unsigned char tag[4];
+	__be32 tag;
 };
 
 struct aoe_atahdr {
@@ -58,9 +63,9 @@ struct aoe_atahdr {
 };
 
 struct aoe_cfghdr {
-	unsigned char bufcnt[2];
-	unsigned char fwver[2];
-	unsigned char res;
+	__be16 bufcnt;
+	__be16 fwver;
+	unsigned char scnt;
 	unsigned char aoeccmd;
 	unsigned char cslen[2];
 };
@@ -70,21 +75,25 @@ enum {
 	DEVFL_TKILL = (1<<1),	/* flag for timer to know when to kill self */
 	DEVFL_EXT = (1<<2),	/* device accepts lba48 commands */
 	DEVFL_CLOSEWAIT = (1<<3), /* device is waiting for all closes to revalidate */
-	DEVFL_WC_UPDATE = (1<<4), /* this device needs to update write cache status */
-	DEVFL_WORKON = (1<<4),
+	DEVFL_GDALLOC = (1<<4),	/* need to alloc gendisk */
+	DEVFL_PAUSE = (1<<5),
+	DEVFL_NEWSIZE = (1<<6),	/* need to update dev size in block layer */
+	DEVFL_MAXBCNT = (1<<7), /* d->maxbcnt is not changeable */
+	DEVFL_KICKME = (1<<8),
 
 	BUFFL_FAIL = 1,
 };
 
 enum {
-	MAXATADATA = 1024,
-	NPERSHELF = 10,
+	DEFAULTBCNT = 2 * 512,	/* 2 sectors */
+	NPERSHELF = 16,		/* number of slots per shelf address */
 	FREETAG = -1,
 	MIN_BUFS = 8,
 };
 
 struct buf {
 	struct list_head bufs;
+	ulong start_time;	/* for disk stats */
 	ulong flags;
 	ulong nframesout;
 	char *bufaddr;
@@ -100,11 +109,9 @@ struct frame {
 	ulong waited;
 	struct buf *buf;
 	char *bufaddr;
-	int writedatalen;
-	int ndata;
-
-	/* largest possible */
-	unsigned char data[sizeof(struct aoe_hdr) + sizeof(struct aoe_atahdr)];
+	ulong bcnt;
+	sector_t lba;
+	struct sk_buff *skb;
 };
 
 struct aoedev {
@@ -114,23 +121,27 @@ struct aoedev {
 	ulong sysminor;
 	ulong aoemajor;
 	ulong aoeminor;
-	ulong nopen;		/* (bd_openers isn't available without sleeping) */
-	ulong rttavg;		/* round trip average of requests/responses */
+	u16 nopen;		/* (bd_openers isn't available without sleeping) */
+	u16 lasttag;		/* last tag sent */
+	u16 rttavg;		/* round trip average of requests/responses */
+	u16 mintimer;
 	u16 fw_ver;		/* version of blade's firmware */
+	u16 maxbcnt;
 	struct work_struct work;/* disk create work struct */
 	struct gendisk *gd;
-	request_queue_t blkq;
+	struct request_queue blkq;
 	struct hd_geometry geo; 
 	sector_t ssize;
 	struct timer_list timer;
 	spinlock_t lock;
 	struct net_device *ifp;	/* interface ed is attached to */
-	struct sk_buff *skblist;/* packets needing to be sent */
+	struct sk_buff *sendq_hd; /* packets needing to be sent, list head */
+	struct sk_buff *sendq_tl;
 	mempool_t *bufpool;	/* for deadlock-free Buf allocation */
 	struct list_head bufq;	/* queue of bios to work on */
 	struct buf *inprocess;	/* the one we're currently working on */
-	ulong lasttag;		/* last tag sent */
-	ulong nframes;		/* number of frames below */
+	ushort lostjumbo;
+	ushort nframes;		/* number of frames below */
 	struct frame *frames;
 };
 
@@ -143,19 +154,20 @@ void aoedisk_rm_sysfs(struct aoedev *d);
 int aoechr_init(void);
 void aoechr_exit(void);
 void aoechr_error(char *);
-void aoechr_hdump(char *, int len);
 
 void aoecmd_work(struct aoedev *d);
-void aoecmd_cfg(ushort, unsigned char);
+void aoecmd_cfg(ushort aoemajor, unsigned char aoeminor);
 void aoecmd_ata_rsp(struct sk_buff *);
 void aoecmd_cfg_rsp(struct sk_buff *);
+void aoecmd_sleepwork(struct work_struct *);
+struct sk_buff *new_skb(ulong);
 
 int aoedev_init(void);
 void aoedev_exit(void);
-struct aoedev *aoedev_bymac(unsigned char *);
+struct aoedev *aoedev_by_aoeaddr(int maj, int min);
+struct aoedev *aoedev_by_sysminor_m(ulong sysminor, ulong bufcnt);
 void aoedev_downdev(struct aoedev *d);
-struct aoedev *aoedev_set(ulong, unsigned char *, struct net_device *, ulong);
-int aoedev_busy(void);
+int aoedev_isbusy(struct aoedev *d);
 
 int aoenet_init(void);
 void aoenet_exit(void);

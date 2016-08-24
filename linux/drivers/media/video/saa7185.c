@@ -1,4 +1,4 @@
-/* 
+/*
  * saa7185 - Philips SAA7185B video encoder driver version 0.0.3
  *
  * Copyright (C) 1998 Dave Perks <dperks@ibm.net>
@@ -33,28 +33,24 @@
 #include <linux/major.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
-#include <linux/pci.h>
 #include <linux/signal.h>
+#include <linux/types.h>
+#include <linux/i2c.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-#include <linux/sched.h>
-#include <asm/segment.h>
-#include <linux/types.h>
+#include <asm/uaccess.h>
 
 #include <linux/videodev.h>
-#include <asm/uaccess.h>
+#include <linux/video_encoder.h>
 
 MODULE_DESCRIPTION("Philips SAA7185 video encoder driver");
 MODULE_AUTHOR("Dave Perks");
 MODULE_LICENSE("GPL");
 
-#include <linux/i2c.h>
-#include <linux/i2c-dev.h>
 
 #define I2C_NAME(s) (s)->name
 
-#include <linux/video_encoder.h>
 
 static int debug = 0;
 module_param(debug, int, 0);
@@ -114,24 +110,21 @@ saa7185_write_block (struct i2c_client *client,
 	if (i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		/* do raw I2C, not smbus compatible */
 		struct saa7185 *encoder = i2c_get_clientdata(client);
-		struct i2c_msg msg;
 		u8 block_data[32];
+		int block_len;
 
-		msg.addr = client->addr;
-		msg.flags = 0;
 		while (len >= 2) {
-			msg.buf = (char *) block_data;
-			msg.len = 0;
-			block_data[msg.len++] = reg = data[0];
+			block_len = 0;
+			block_data[block_len++] = reg = data[0];
 			do {
-				block_data[msg.len++] =
+				block_data[block_len++] =
 				    encoder->reg[reg++] = data[1];
 				len -= 2;
 				data += 2;
 			} while (len >= 2 && data[0] == reg &&
-				 msg.len < 32);
-			if ((ret = i2c_transfer(client->adapter,
-						&msg, 1)) < 0)
+				 block_len < 32);
+			if ((ret = i2c_master_send(client, block_data,
+						   block_len)) < 0)
 				break;
 		}
 	} else {
@@ -380,25 +373,15 @@ saa7185_command (struct i2c_client *client,
  * concerning the addresses: i2c wants 7 bit (without the r/w bit), so '>>1'
  */
 static unsigned short normal_i2c[] = { I2C_SAA7185 >> 1, I2C_CLIENT_END };
-static unsigned short normal_i2c_range[] = { I2C_CLIENT_END };
 
-static unsigned short probe[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short probe_range[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short ignore[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short ignore_range[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short force[2] = { I2C_CLIENT_END , I2C_CLIENT_END };
-                                                                                
+static unsigned short ignore = I2C_CLIENT_END;
+
 static struct i2c_client_address_data addr_data = {
 	.normal_i2c		= normal_i2c,
-	.normal_i2c_range	= normal_i2c_range,
-	.probe			= probe,
-	.probe_range		= probe_range,
-	.ignore			= ignore,
-	.ignore_range		= ignore_range,
-	.force			= force
+	.probe			= &ignore,
+	.ignore			= &ignore,
 };
 
-static int saa7185_i2c_id = 0;
 static struct i2c_driver i2c_driver_saa7185;
 
 static int
@@ -419,24 +402,19 @@ saa7185_detect_client (struct i2c_adapter *adapter,
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return 0;
 
-	client = kmalloc(sizeof(struct i2c_client), GFP_KERNEL);
+	client = kzalloc(sizeof(struct i2c_client), GFP_KERNEL);
 	if (client == 0)
 		return -ENOMEM;
-	memset(client, 0, sizeof(struct i2c_client));
 	client->addr = address;
 	client->adapter = adapter;
 	client->driver = &i2c_driver_saa7185;
-	client->flags = I2C_CLIENT_ALLOW_USE;
-	client->id = saa7185_i2c_id++;
-	snprintf(I2C_NAME(client), sizeof(I2C_NAME(client)) - 1,
-		"saa7185[%d]", client->id);
+	strlcpy(I2C_NAME(client), "saa7185", sizeof(I2C_NAME(client)));
 
-	encoder = kmalloc(sizeof(struct saa7185), GFP_KERNEL);
+	encoder = kzalloc(sizeof(struct saa7185), GFP_KERNEL);
 	if (encoder == NULL) {
 		kfree(client);
 		return -ENOMEM;
 	}
-	memset(encoder, 0, sizeof(struct saa7185));
 	encoder->norm = VIDEO_MODE_NTSC;
 	encoder->enable = 1;
 	i2c_set_clientdata(client, encoder);
@@ -500,11 +478,11 @@ saa7185_detach_client (struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static struct i2c_driver i2c_driver_saa7185 = {
-	.owner = THIS_MODULE,
-	.name = "saa7185",	/* name */
+	.driver = {
+		.name = "saa7185",	/* name */
+	},
 
 	.id = I2C_DRIVERID_SAA7185B,
-	.flags = I2C_DF_NOTIFY,
 
 	.attach_adapter = saa7185_attach_adapter,
 	.detach_client = saa7185_detach_client,

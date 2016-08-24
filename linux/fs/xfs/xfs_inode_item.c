@@ -1,66 +1,44 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2002,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
- */
-
-/*
- * This file contains the implementation of the xfs_inode_log_item.
- * It contains the item operations used to manipulate the inode log
- * items as well as utility routines used by the inode specific
- * transaction routines.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
+#include "xfs_bit.h"
 #include "xfs_log.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
 #include "xfs_buf_item.h"
 #include "xfs_sb.h"
-#include "xfs_dir.h"
+#include "xfs_ag.h"
 #include "xfs_dir2.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
 #include "xfs_trans_priv.h"
-#include "xfs_ag.h"
-#include "xfs_alloc_btree.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_alloc_btree.h"
 #include "xfs_ialloc_btree.h"
+#include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
+#include "xfs_dinode.h"
+#include "xfs_inode.h"
+#include "xfs_inode_item.h"
 #include "xfs_btree.h"
 #include "xfs_ialloc.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
-#include "xfs_dir2_sf.h"
-#include "xfs_dinode.h"
-#include "xfs_inode_item.h"
-#include "xfs_inode.h"
 #include "xfs_rw.h"
 
 
@@ -248,6 +226,7 @@ xfs_inode_item_format(
 
 	vecp->i_addr = (xfs_caddr_t)&iip->ili_format;
 	vecp->i_len  = sizeof(xfs_inode_log_format_t);
+	XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_IFORMAT);
 	vecp++;
 	nvecs	     = 1;
 
@@ -290,8 +269,14 @@ xfs_inode_item_format(
 	if (ip->i_update_size)
 		ip->i_update_size = 0;
 
+	/*
+	 * Make sure to get the latest atime from the Linux inode.
+	 */
+	xfs_synchronize_atime(ip);
+
 	vecp->i_addr = (xfs_caddr_t)&ip->i_d;
 	vecp->i_len  = sizeof(xfs_dinode_core_t);
+	XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_ICORE);
 	vecp++;
 	nvecs++;
 	iip->ili_format.ilf_fields |= XFS_ILOG_CORE;
@@ -339,7 +324,7 @@ xfs_inode_item_format(
 			nrecs = ip->i_df.if_bytes /
 				(uint)sizeof(xfs_bmbt_rec_t);
 			ASSERT(nrecs > 0);
-#if ARCH_CONVERT == ARCH_NOCONVERT
+#ifdef XFS_NATIVE_HOST
 			if (nrecs == ip->i_d.di_nextents) {
 				/*
 				 * There are no delayed allocation
@@ -349,6 +334,7 @@ xfs_inode_item_format(
 				vecp->i_addr =
 					(char *)(ip->i_df.if_u1.if_extents);
 				vecp->i_len = ip->i_df.if_bytes;
+				XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_IEXT);
 			} else
 #endif
 			{
@@ -367,6 +353,7 @@ xfs_inode_item_format(
 				vecp->i_addr = (xfs_caddr_t)ext_buffer;
 				vecp->i_len = xfs_iextents_copy(ip, ext_buffer,
 						XFS_DATA_FORK);
+				XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_IEXT);
 			}
 			ASSERT(vecp->i_len <= ip->i_df.if_bytes);
 			iip->ili_format.ilf_dsize = vecp->i_len;
@@ -384,6 +371,7 @@ xfs_inode_item_format(
 			ASSERT(ip->i_df.if_broot != NULL);
 			vecp->i_addr = (xfs_caddr_t)ip->i_df.if_broot;
 			vecp->i_len = ip->i_df.if_broot_bytes;
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_IBROOT);
 			vecp++;
 			nvecs++;
 			iip->ili_format.ilf_dsize = ip->i_df.if_broot_bytes;
@@ -409,6 +397,7 @@ xfs_inode_item_format(
 			ASSERT((ip->i_df.if_real_bytes == 0) ||
 			       (ip->i_df.if_real_bytes == data_bytes));
 			vecp->i_len = (int)data_bytes;
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_ILOCAL);
 			vecp++;
 			nvecs++;
 			iip->ili_format.ilf_dsize = (unsigned)data_bytes;
@@ -467,7 +456,7 @@ xfs_inode_item_format(
 #endif
 			ASSERT(nrecs > 0);
 			ASSERT(nrecs == ip->i_d.di_anextents);
-#if ARCH_CONVERT == ARCH_NOCONVERT
+#ifdef XFS_NATIVE_HOST
 			/*
 			 * There are not delayed allocation extents
 			 * for attributes, so just point at the array.
@@ -486,6 +475,7 @@ xfs_inode_item_format(
 			vecp->i_len = xfs_iextents_copy(ip, ext_buffer,
 					XFS_ATTR_FORK);
 #endif
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_IATTR_EXT);
 			iip->ili_format.ilf_asize = vecp->i_len;
 			vecp++;
 			nvecs++;
@@ -500,6 +490,7 @@ xfs_inode_item_format(
 			ASSERT(ip->i_afp->if_broot != NULL);
 			vecp->i_addr = (xfs_caddr_t)ip->i_afp->if_broot;
 			vecp->i_len = ip->i_afp->if_broot_bytes;
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_IATTR_BROOT);
 			vecp++;
 			nvecs++;
 			iip->ili_format.ilf_asize = ip->i_afp->if_broot_bytes;
@@ -523,6 +514,7 @@ xfs_inode_item_format(
 			ASSERT((ip->i_afp->if_real_bytes == 0) ||
 			       (ip->i_afp->if_real_bytes == data_bytes));
 			vecp->i_len = (int)data_bytes;
+			XLOG_VEC_SET_TYPE(vecp, XLOG_REG_TYPE_IATTR_LOCAL);
 			vecp++;
 			nvecs++;
 			iip->ili_format.ilf_asize = (unsigned)data_bytes;
@@ -586,7 +578,7 @@ xfs_inode_item_unpin_remove(
  * been or is in the process of being flushed, then (ideally) we'd like to
  * see if the inode's buffer is still incore, and if so give it a nudge.
  * We delay doing so until the pushbuf routine, though, to avoid holding
- * the AIL lock across a call to the blackhole which is the buffercache.
+ * the AIL lock across a call to the blackhole which is the buffer cache.
  * Also we don't want to sleep in any device strategy routines, which can happen
  * if we do the subsequent bawrite in here.
  */
@@ -614,7 +606,7 @@ xfs_inode_item_trylock(
 		if (iip->ili_pushbuf_flag == 0) {
 			iip->ili_pushbuf_flag = 1;
 #ifdef DEBUG
-			iip->ili_push_owner = get_thread_id();
+			iip->ili_push_owner = current_pid();
 #endif
 			/*
 			 * Inode is left locked in shared mode.
@@ -751,21 +743,6 @@ xfs_inode_item_committed(
 }
 
 /*
- * The transaction with the inode locked has aborted.  The inode
- * must not be dirty within the transaction (unless we're forcibly
- * shutting down).  We simply unlock just as if the transaction
- * had been cancelled.
- */
-STATIC void
-xfs_inode_item_abort(
-	xfs_inode_log_item_t	*iip)
-{
-	xfs_inode_item_unlock(iip);
-	return;
-}
-
-
-/*
  * This gets called by xfs_trans_push_ail(), when IOP_TRYLOCK
  * failed to get the inode flush lock but did get the inode locked SHARED.
  * Here we're trying to see if the inode buffer is incore, and if so whether it's
@@ -793,14 +770,14 @@ xfs_inode_item_pushbuf(
 	 * trying to duplicate our effort.
 	 */
 	ASSERT(iip->ili_pushbuf_flag != 0);
-	ASSERT(iip->ili_push_owner == get_thread_id());
+	ASSERT(iip->ili_push_owner == current_pid());
 
 	/*
 	 * If flushlock isn't locked anymore, chances are that the
 	 * inode flush completed and the inode was taken off the AIL.
 	 * So, just get out.
 	 */
-	if ((valusema(&(ip->i_flock)) > 0)  ||
+	if (!issemalocked(&(ip->i_flock)) ||
 	    ((iip->ili_item.li_flags & XFS_LI_IN_AIL) == 0)) {
 		iip->ili_pushbuf_flag = 0;
 		xfs_iunlock(ip, XFS_ILOCK_SHARED);
@@ -822,7 +799,7 @@ xfs_inode_item_pushbuf(
 			 * If not, we can flush it async.
 			 */
 			dopush = ((iip->ili_item.li_flags & XFS_LI_IN_AIL) &&
-				  (valusema(&(ip->i_flock)) <= 0));
+				  issemalocked(&(ip->i_flock)));
 			iip->ili_pushbuf_flag = 0;
 			xfs_iunlock(ip, XFS_ILOCK_SHARED);
 			xfs_buftrace("INODE ITEM PUSH", bp);
@@ -870,7 +847,7 @@ xfs_inode_item_push(
 	ip = iip->ili_inode;
 
 	ASSERT(ismrlocked(&(ip->i_lock), MR_ACCESS));
-	ASSERT(valusema(&(ip->i_flock)) <= 0);
+	ASSERT(issemalocked(&(ip->i_flock)));
 	/*
 	 * Since we were able to lock the inode's flush lock and
 	 * we found it on the AIL, the inode must be dirty.  This
@@ -910,7 +887,7 @@ xfs_inode_item_committing(
 /*
  * This is the ops vector shared by all buf log items.
  */
-struct xfs_item_ops xfs_inode_item_ops = {
+static struct xfs_item_ops xfs_inode_item_ops = {
 	.iop_size	= (uint(*)(xfs_log_item_t*))xfs_inode_item_size,
 	.iop_format	= (void(*)(xfs_log_item_t*, xfs_log_iovec_t*))
 					xfs_inode_item_format,
@@ -923,7 +900,6 @@ struct xfs_item_ops xfs_inode_item_ops = {
 	.iop_committed	= (xfs_lsn_t(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_inode_item_committed,
 	.iop_push	= (void(*)(xfs_log_item_t*))xfs_inode_item_push,
-	.iop_abort	= (void(*)(xfs_log_item_t*))xfs_inode_item_abort,
 	.iop_pushbuf	= (void(*)(xfs_log_item_t*))xfs_inode_item_pushbuf,
 	.iop_committing = (void(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_inode_item_committing
@@ -1089,4 +1065,53 @@ xfs_istale_done(
 	xfs_inode_log_item_t	*iip)
 {
 	xfs_iflush_abort(iip->ili_inode);
+}
+
+/*
+ * convert an xfs_inode_log_format struct from either 32 or 64 bit versions
+ * (which can have different field alignments) to the native version
+ */
+int
+xfs_inode_item_format_convert(
+	xfs_log_iovec_t		*buf,
+	xfs_inode_log_format_t	*in_f)
+{
+	if (buf->i_len == sizeof(xfs_inode_log_format_32_t)) {
+		xfs_inode_log_format_32_t *in_f32;
+
+		in_f32 = (xfs_inode_log_format_32_t *)buf->i_addr;
+		in_f->ilf_type = in_f32->ilf_type;
+		in_f->ilf_size = in_f32->ilf_size;
+		in_f->ilf_fields = in_f32->ilf_fields;
+		in_f->ilf_asize = in_f32->ilf_asize;
+		in_f->ilf_dsize = in_f32->ilf_dsize;
+		in_f->ilf_ino = in_f32->ilf_ino;
+		/* copy biggest field of ilf_u */
+		memcpy(in_f->ilf_u.ilfu_uuid.__u_bits,
+		       in_f32->ilf_u.ilfu_uuid.__u_bits,
+		       sizeof(uuid_t));
+		in_f->ilf_blkno = in_f32->ilf_blkno;
+		in_f->ilf_len = in_f32->ilf_len;
+		in_f->ilf_boffset = in_f32->ilf_boffset;
+		return 0;
+	} else if (buf->i_len == sizeof(xfs_inode_log_format_64_t)){
+		xfs_inode_log_format_64_t *in_f64;
+
+		in_f64 = (xfs_inode_log_format_64_t *)buf->i_addr;
+		in_f->ilf_type = in_f64->ilf_type;
+		in_f->ilf_size = in_f64->ilf_size;
+		in_f->ilf_fields = in_f64->ilf_fields;
+		in_f->ilf_asize = in_f64->ilf_asize;
+		in_f->ilf_dsize = in_f64->ilf_dsize;
+		in_f->ilf_ino = in_f64->ilf_ino;
+		/* copy biggest field of ilf_u */
+		memcpy(in_f->ilf_u.ilfu_uuid.__u_bits,
+		       in_f64->ilf_u.ilfu_uuid.__u_bits,
+		       sizeof(uuid_t));
+		in_f->ilf_blkno = in_f64->ilf_blkno;
+		in_f->ilf_len = in_f64->ilf_len;
+		in_f->ilf_boffset = in_f64->ilf_boffset;
+		return 0;
+	}
+	return EFSCORRUPTED;
 }

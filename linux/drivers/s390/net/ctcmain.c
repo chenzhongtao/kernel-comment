@@ -1,13 +1,12 @@
 /*
- * $Id: ctcmain.c,v 1.68 2004/12/27 09:25:27 heicarst Exp $
- *
  * CTC / ESCON network driver
  *
  * Copyright (C) 2001 IBM Deutschland Entwicklung GmbH, IBM Corporation
  * Author(s): Fritz Elfert (elfert@de.ibm.com, felfert@millenux.com)
- * Fixes by : Jochen Röhrig (roehrig@de.ibm.com)
+ * Fixes by : Jochen RÃ¶hrig (roehrig@de.ibm.com)
  *            Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- * Driver Model stuff by : Cornelia Huck <cohuck@de.ibm.com>
+	      Peter Tiedemann (ptiedem@de.ibm.com)
+ * Driver Model stuff by : Cornelia Huck <cornelia.huck@de.ibm.com>
  *
  * Documentation used:
  *  - Principles of Operation (IBM doc#: SA22-7201-06)
@@ -20,7 +19,7 @@
  *  Dieter Wellerdiek (wel@de.ibm.com)
  *  Martin Schwidefsky (schwidefsky@de.ibm.com)
  *  Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
- *  Jochen Röhrig (roehrig@de.ibm.com)
+ *  Jochen RÃ¶hrig (roehrig@de.ibm.com)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -36,12 +35,8 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * RELEASE-TAG: CTC/ESCON network driver $Revision: 1.68 $
- *
  */
-
 #undef DEBUG
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -50,7 +45,6 @@
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/timer.h>
-#include <linux/sched.h>
 #include <linux/bitops.h>
 
 #include <linux/signal.h>
@@ -70,289 +64,15 @@
 
 #include <asm/idals.h>
 
-#include "ctctty.h"
 #include "fsm.h"
 #include "cu3088.h"
+
 #include "ctcdbug.h"
+#include "ctcmain.h"
 
 MODULE_AUTHOR("(C) 2000 IBM Corp. by Fritz Elfert (felfert@millenux.com)");
 MODULE_DESCRIPTION("Linux for S/390 CTC/Escon Driver");
 MODULE_LICENSE("GPL");
-
-/**
- * CCW commands, used in this driver.
- */
-#define CCW_CMD_WRITE		0x01
-#define CCW_CMD_READ		0x02
-#define CCW_CMD_SET_EXTENDED	0xc3
-#define CCW_CMD_PREPARE		0xe3
-
-#define CTC_PROTO_S390          0
-#define CTC_PROTO_LINUX         1
-#define CTC_PROTO_LINUX_TTY     2
-#define CTC_PROTO_OS390         3
-#define CTC_PROTO_MAX           3
-
-#define CTC_BUFSIZE_LIMIT       65535
-#define CTC_BUFSIZE_DEFAULT     32768
-
-#define CTC_TIMEOUT_5SEC        5000
-
-#define CTC_INITIAL_BLOCKLEN    2
-
-#define READ			0
-#define WRITE			1
-
-#define CTC_ID_SIZE             BUS_ID_SIZE+3
-
-
-struct ctc_profile {
-	unsigned long maxmulti;
-	unsigned long maxcqueue;
-	unsigned long doios_single;
-	unsigned long doios_multi;
-	unsigned long txlen;
-	unsigned long tx_time;
-	struct timespec send_stamp;
-};
-
-/**
- * Definition of one channel
- */
-struct channel {
-
-	/**
-	 * Pointer to next channel in list.
-	 */
-	struct channel *next;
-	char id[CTC_ID_SIZE];
-	struct ccw_device *cdev;
-
-	/**
-	 * Type of this channel.
-	 * CTC/A or Escon for valid channels.
-	 */
-	enum channel_types type;
-
-	/**
-	 * Misc. flags. See CHANNEL_FLAGS_... below
-	 */
-	__u32 flags;
-
-	/**
-	 * The protocol of this channel
-	 */
-	__u16 protocol;
-
-	/**
-	 * I/O and irq related stuff
-	 */
-	struct ccw1 *ccw;
-	struct irb *irb;
-
-	/**
-	 * RX/TX buffer size
-	 */
-	int max_bufsize;
-
-	/**
-	 * Transmit/Receive buffer.
-	 */
-	struct sk_buff *trans_skb;
-
-	/**
-	 * Universal I/O queue.
-	 */
-	struct sk_buff_head io_queue;
-
-	/**
-	 * TX queue for collecting skb's during busy.
-	 */
-	struct sk_buff_head collect_queue;
-
-	/**
-	 * Amount of data in collect_queue.
-	 */
-	int collect_len;
-
-	/**
-	 * spinlock for collect_queue and collect_len
-	 */
-	spinlock_t collect_lock;
-
-	/**
-	 * Timer for detecting unresposive
-	 * I/O operations.
-	 */
-	fsm_timer timer;
-
-	/**
-	 * Retry counter for misc. operations.
-	 */
-	int retry;
-
-	/**
-	 * The finite state machine of this channel
-	 */
-	fsm_instance *fsm;
-
-	/**
-	 * The corresponding net_device this channel
-	 * belongs to.
-	 */
-	struct net_device *netdev;
-
-	struct ctc_profile prof;
-
-	unsigned char *trans_skb_data;
-
-	__u16 logflags;
-};
-
-#define CHANNEL_FLAGS_READ            0
-#define CHANNEL_FLAGS_WRITE           1
-#define CHANNEL_FLAGS_INUSE           2
-#define CHANNEL_FLAGS_BUFSIZE_CHANGED 4
-#define CHANNEL_FLAGS_FAILED          8
-#define CHANNEL_FLAGS_WAITIRQ        16
-#define CHANNEL_FLAGS_RWMASK 1
-#define CHANNEL_DIRECTION(f) (f & CHANNEL_FLAGS_RWMASK)
-
-#define LOG_FLAG_ILLEGALPKT  1
-#define LOG_FLAG_ILLEGALSIZE 2
-#define LOG_FLAG_OVERRUN     4
-#define LOG_FLAG_NOMEM       8
-
-#define CTC_LOGLEVEL_INFO     1
-#define CTC_LOGLEVEL_NOTICE   2
-#define CTC_LOGLEVEL_WARN     4
-#define CTC_LOGLEVEL_EMERG    8
-#define CTC_LOGLEVEL_ERR     16
-#define CTC_LOGLEVEL_DEBUG   32
-#define CTC_LOGLEVEL_CRIT    64
-
-#define CTC_LOGLEVEL_DEFAULT \
-(CTC_LOGLEVEL_INFO | CTC_LOGLEVEL_NOTICE | CTC_LOGLEVEL_WARN | CTC_LOGLEVEL_CRIT)
-
-#define CTC_LOGLEVEL_MAX     ((CTC_LOGLEVEL_CRIT<<1)-1)
-
-static int loglevel = CTC_LOGLEVEL_DEFAULT;
-
-#define ctc_pr_debug(fmt, arg...) \
-do { if (loglevel & CTC_LOGLEVEL_DEBUG) printk(KERN_DEBUG fmt,##arg); } while (0)
-
-#define ctc_pr_info(fmt, arg...) \
-do { if (loglevel & CTC_LOGLEVEL_INFO) printk(KERN_INFO fmt,##arg); } while (0)
-
-#define ctc_pr_notice(fmt, arg...) \
-do { if (loglevel & CTC_LOGLEVEL_NOTICE) printk(KERN_NOTICE fmt,##arg); } while (0)
-
-#define ctc_pr_warn(fmt, arg...) \
-do { if (loglevel & CTC_LOGLEVEL_WARN) printk(KERN_WARNING fmt,##arg); } while (0)
-
-#define ctc_pr_emerg(fmt, arg...) \
-do { if (loglevel & CTC_LOGLEVEL_EMERG) printk(KERN_EMERG fmt,##arg); } while (0)
-
-#define ctc_pr_err(fmt, arg...) \
-do { if (loglevel & CTC_LOGLEVEL_ERR) printk(KERN_ERR fmt,##arg); } while (0)
-
-#define ctc_pr_crit(fmt, arg...) \
-do { if (loglevel & CTC_LOGLEVEL_CRIT) printk(KERN_CRIT fmt,##arg); } while (0)
-
-/**
- * Linked list of all detected channels.
- */
-static struct channel *channels = NULL;
-
-struct ctc_priv {
-	struct net_device_stats stats;
-	unsigned long tbusy;
-	/**
-	 * The finite state machine of this interface.
-	 */
-	fsm_instance *fsm;
-	/**
-	 * The protocol of this device
-	 */
-	__u16 protocol;
- 	/**
- 	 * Timer for restarting after I/O Errors
- 	 */
- 	fsm_timer               restart_timer;
-
-	struct channel *channel[2];
-};
-
-/**
- * Definition of our link level header.
- */
-struct ll_header {
-	__u16 length;
-	__u16 type;
-	__u16 unused;
-};
-#define LL_HEADER_LENGTH (sizeof(struct ll_header))
-
-/**
- * Compatibility macros for busy handling
- * of network devices.
- */
-static __inline__ void
-ctc_clear_busy(struct net_device * dev)
-{
-	clear_bit(0, &(((struct ctc_priv *) dev->priv)->tbusy));
-	if (((struct ctc_priv *)dev->priv)->protocol != CTC_PROTO_LINUX_TTY)
-		netif_wake_queue(dev);
-}
-
-static __inline__ int
-ctc_test_and_set_busy(struct net_device * dev)
-{
-	if (((struct ctc_priv *)dev->priv)->protocol != CTC_PROTO_LINUX_TTY)
-		netif_stop_queue(dev);
-	return test_and_set_bit(0, &((struct ctc_priv *) dev->priv)->tbusy);
-}
-
-/**
- * Print Banner.
- */
-static void
-print_banner(void)
-{
-	static int printed = 0;
-	char vbuf[] = "$Revision: 1.68 $";
-	char *version = vbuf;
-
-	if (printed)
-		return;
-	if ((version = strchr(version, ':'))) {
-		char *p = strchr(version + 1, '$');
-		if (p)
-			*p = '\0';
-	} else
-		version = " ??? ";
-	printk(KERN_INFO "CTC driver Version%s"
-#ifdef DEBUG
-		    " (DEBUG-VERSION, " __DATE__ __TIME__ ")"
-#endif
-		    " initialized\n", version);
-	printed = 1;
-}
-
-/**
- * Return type of a detected device.
- */
-static enum channel_types
-get_channel_type(struct ccw_device_id *id)
-{
-	enum channel_types type = (enum channel_types) id->driver_info;
-
-	if (type == channel_type_ficon)
-		type = channel_type_escon;
-
-	return type;
-}
-
 /**
  * States of the interface statemachine.
  */
@@ -368,7 +88,7 @@ enum dev_states {
 	/**
 	 * MUST be always the last element!!
 	 */
-	NR_DEV_STATES
+	CTC_NR_DEV_STATES
 };
 
 static const char *dev_state_names[] = {
@@ -396,7 +116,7 @@ enum dev_events {
 	/**
 	 * MUST be always the last element!!
 	 */
-	NR_DEV_EVENTS
+	CTC_NR_DEV_EVENTS
 };
 
 static const char *dev_event_names[] = {
@@ -408,7 +128,7 @@ static const char *dev_event_names[] = {
 	"TX down",
 	"Restart",
 };
-
+
 /**
  * Events of the channel statemachine
  */
@@ -473,40 +193,6 @@ enum ch_events {
 	NR_CH_EVENTS,
 };
 
-static const char *ch_event_names[] = {
-	"ccw_device success",
-	"ccw_device busy",
-	"ccw_device enodev",
-	"ccw_device ioerr",
-	"ccw_device unknown",
-
-	"Status ATTN & BUSY",
-	"Status ATTN",
-	"Status BUSY",
-
-	"Unit check remote reset",
-	"Unit check remote system reset",
-	"Unit check TX timeout",
-	"Unit check TX parity",
-	"Unit check Hardware failure",
-	"Unit check RX parity",
-	"Unit check ZERO",
-	"Unit check Unknown",
-
-	"SubChannel check Unknown",
-
-	"Machine check failure",
-	"Machine check operational",
-
-	"IRQ normal",
-	"IRQ final",
-
-	"Timer",
-
-	"Start",
-	"Stop",
-};
-
 /**
  * States of the channel statemachine.
  */
@@ -542,6 +228,76 @@ enum ch_states {
 	NR_CH_STATES,
 };
 
+static int loglevel = CTC_LOGLEVEL_DEFAULT;
+
+/**
+ * Linked list of all detected channels.
+ */
+static struct channel *channels = NULL;
+
+/**
+ * Print Banner.
+ */
+static void
+print_banner(void)
+{
+	static int printed = 0;
+
+	if (printed)
+		return;
+
+	printk(KERN_INFO "CTC driver initialized\n");
+	printed = 1;
+}
+
+/**
+ * Return type of a detected device.
+ */
+static enum channel_types
+get_channel_type(struct ccw_device_id *id)
+{
+	enum channel_types type = (enum channel_types) id->driver_info;
+
+	if (type == channel_type_ficon)
+		type = channel_type_escon;
+
+	return type;
+}
+
+static const char *ch_event_names[] = {
+	"ccw_device success",
+	"ccw_device busy",
+	"ccw_device enodev",
+	"ccw_device ioerr",
+	"ccw_device unknown",
+
+	"Status ATTN & BUSY",
+	"Status ATTN",
+	"Status BUSY",
+
+	"Unit check remote reset",
+	"Unit check remote system reset",
+	"Unit check TX timeout",
+	"Unit check TX parity",
+	"Unit check Hardware failure",
+	"Unit check RX parity",
+	"Unit check ZERO",
+	"Unit check Unknown",
+
+	"SubChannel check Unknown",
+
+	"Machine check failure",
+	"Machine check operational",
+
+	"IRQ normal",
+	"IRQ final",
+
+	"Timer",
+
+	"Start",
+	"Stop",
+};
+
 static const char *ch_state_names[] = {
 	"Idle",
 	"Stopped",
@@ -560,7 +316,7 @@ static const char *ch_state_names[] = {
 	"Restarting",
 	"Not operational",
 };
-
+
 #ifdef DEBUG
 /**
  * Dump header and first 16 bytes of an sk_buff for debugging purposes.
@@ -612,7 +368,7 @@ ctc_dump_skb(struct sk_buff *skb, int offset)
  * @param ch The channel where this skb has been received.
  * @param pskb The received skb.
  */
-static __inline__ void
+static void
 ctc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 {
 	struct net_device *dev = ch->netdev;
@@ -699,7 +455,7 @@ ctc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 			return;
 		}
 		skb_put(pskb, header->length);
-		pskb->mac.raw = pskb->data;
+		skb_reset_mac_header(pskb);
 		len -= header->length;
 		skb = dev_alloc_skb(pskb->len);
 		if (!skb) {
@@ -716,22 +472,20 @@ ctc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 			privptr->stats.rx_dropped++;
 			return;
 		}
-		memcpy(skb_put(skb, pskb->len), pskb->data, pskb->len);
-		skb->mac.raw = skb->data;
+		skb_copy_from_linear_data(pskb, skb_put(skb, pskb->len),
+					  pskb->len);
+		skb_reset_mac_header(skb);
 		skb->dev = pskb->dev;
 		skb->protocol = pskb->protocol;
 		pskb->ip_summed = CHECKSUM_UNNECESSARY;
-		if (ch->protocol == CTC_PROTO_LINUX_TTY)
-			ctc_tty_netif_rx(skb);
-		else
-			netif_rx_ni(skb);
 		/**
-		 * Successful rx; reset logflags
+		 * reset logflags
 		 */
 		ch->logflags = 0;
-		dev->last_rx = jiffies;
 		privptr->stats.rx_packets++;
 		privptr->stats.rx_bytes += skb->len;
+		netif_rx_ni(skb);
+		dev->last_rx = jiffies;
 		if (len > 0) {
 			skb_pull(pskb, header->length);
 			if (skb_tailroom(pskb) < LL_HEADER_LENGTH) {
@@ -758,7 +512,7 @@ ctc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
  * @param ch          The channel, the error belongs to.
  * @param return_code The error code to inspect.
  */
-static void inline
+static void
 ccw_check_return_code(struct channel *ch, int return_code, char *msg)
 {
 	DBF_TEXT(trace, 5, __FUNCTION__);
@@ -793,14 +547,13 @@ ccw_check_return_code(struct channel *ch, int return_code, char *msg)
  * @param ch    The channel, the sense code belongs to.
  * @param sense The sense code to inspect.
  */
-static void inline
+static void
 ccw_unit_check(struct channel *ch, unsigned char sense)
 {
 	DBF_TEXT(trace, 5, __FUNCTION__);
 	if (sense & SNS0_INTERVENTION_REQ) {
 		if (sense & 0x01) {
-			if (ch->protocol != CTC_PROTO_LINUX_TTY)
-				ctc_pr_debug("%s: Interface disc. or Sel. reset "
+			ctc_pr_debug("%s: Interface disc. or Sel. reset "
 					"(remote)\n", ch->id);
 			fsm_event(ch->fsm, CH_EVENT_UC_RCRESET, ch);
 		} else {
@@ -850,7 +603,7 @@ ctc_purge_skb_queue(struct sk_buff_head *q)
 	}
 }
 
-static __inline__ int
+static int
 ctc_checkalloc_buffer(struct channel *ch, int warn)
 {
 	DBF_TEXT(trace, 5, __FUNCTION__);
@@ -897,7 +650,7 @@ static void
 fsm_action_nop(fsm_instance * fi, int event, void *arg)
 {
 }
-
+
 /**
  * Actions for channel - statemachines.
  *****************************************************************************/
@@ -921,7 +674,7 @@ ch_action_txdone(fsm_instance * fi, int event, void *arg)
 	int first = 1;
 	int i;
 	unsigned long duration;
-	struct timespec done_stamp = xtime;
+	struct timespec done_stamp = current_kernel_time();
 
 	DBF_TEXT(trace, 4, __FUNCTION__);
 
@@ -954,7 +707,8 @@ ch_action_txdone(fsm_instance * fi, int event, void *arg)
 			spin_unlock(&ch->collect_lock);
 			return;
 		}
-		ch->trans_skb->tail = ch->trans_skb->data = ch->trans_skb_data;
+		ch->trans_skb->data = ch->trans_skb_data;
+		skb_reset_tail_pointer(ch->trans_skb);
 		ch->trans_skb->len = 0;
 		if (ch->prof.maxmulti < (ch->collect_len + 2))
 			ch->prof.maxmulti = ch->collect_len + 2;
@@ -963,8 +717,9 @@ ch_action_txdone(fsm_instance * fi, int event, void *arg)
 		*((__u16 *) skb_put(ch->trans_skb, 2)) = ch->collect_len + 2;
 		i = 0;
 		while ((skb = skb_dequeue(&ch->collect_queue))) {
-			memcpy(skb_put(ch->trans_skb, skb->len), skb->data,
-			       skb->len);
+			skb_copy_from_linear_data(skb, skb_put(ch->trans_skb,
+							       skb->len),
+						  skb->len);
 			privptr->stats.tx_packets++;
 			privptr->stats.tx_bytes += skb->len - LL_HEADER_LENGTH;
 			atomic_dec(&skb->users);
@@ -975,7 +730,7 @@ ch_action_txdone(fsm_instance * fi, int event, void *arg)
 		spin_unlock(&ch->collect_lock);
 		ch->ccw[1].count = ch->trans_skb->len;
 		fsm_addtimer(&ch->timer, CTC_TIMEOUT_5SEC, CH_EVENT_TIMER, ch);
-		ch->prof.send_stamp = xtime;
+		ch->prof.send_stamp = current_kernel_time();
 		rc = ccw_device_start(ch->cdev, &ch->ccw[0],
 				      (unsigned long) ch, 0xff, 0);
 		ch->prof.doios_multi++;
@@ -1079,7 +834,8 @@ ch_action_rx(fsm_instance * fi, int event, void *arg)
 		ctc_unpack_skb(ch, skb);
 	}
  again:
-	skb->data = skb->tail = ch->trans_skb_data;
+	skb->data = ch->trans_skb_data;
+	skb_reset_tail_pointer(skb);
 	skb->len = 0;
 	if (ctc_checkalloc_buffer(ch, 1))
 		return;
@@ -1129,7 +885,7 @@ ch_action_firstio(fsm_instance * fi, int event, void *arg)
 	}
 
 	/**
-	 * Don´t setup a timer for receiving the initial RX frame
+	 * Don't setup a timer for receiving the initial RX frame
 	 * if in compatibility mode, since VM TCP delays the initial
 	 * frame until it has some data to send.
 	 */
@@ -1149,10 +905,10 @@ ch_action_firstio(fsm_instance * fi, int event, void *arg)
 		ccw_check_return_code(ch, rc, "init IO");
 	}
 	/**
-	 * If in compatibility mode since we don´t setup a timer, we
+	 * If in compatibility mode since we don't setup a timer, we
 	 * also signal RX channel up immediately. This enables us
 	 * to send packets early which in turn usually triggers some
-	 * reply from VM TCP which brings up the RX channel to it´s
+	 * reply from VM TCP which brings up the RX channel to it's
 	 * final state.
 	 */
 	if ((CHANNEL_DIRECTION(ch->flags) == READ) &&
@@ -1728,19 +1484,18 @@ ch_action_iofatal(fsm_instance * fi, int event, void *arg)
 	}
 }
 
-static void 
+static void
 ch_action_reinit(fsm_instance *fi, int event, void *arg)
 {
  	struct channel *ch = (struct channel *)arg;
  	struct net_device *dev = ch->netdev;
  	struct ctc_priv *privptr = dev->priv;
- 
+
 	DBF_TEXT(trace, 4, __FUNCTION__);
  	ch_action_iofatal(fi, event, arg);
  	fsm_addtimer(&privptr->restart_timer, 1000, DEV_EVENT_RESTART, dev);
 }
 
-
 /**
  * The statemachine for a channel.
  */
@@ -1851,7 +1606,7 @@ static const fsm_node ch_fsm[] = {
 };
 
 static const int CH_FSM_LEN = sizeof (ch_fsm) / sizeof (fsm_node);
-
+
 /**
  * Functions related to setup and device detection.
  *****************************************************************************/
@@ -1867,7 +1622,7 @@ less_than(char *id1, char *id2)
 	}
 	dev1 = simple_strtoul(id1, &id1, 16);
 	dev2 = simple_strtoul(id2, &id2, 16);
-	
+
 	return (dev1 < dev2);
 }
 
@@ -1887,19 +1642,19 @@ add_channel(struct ccw_device *cdev, enum channel_types type)
 	struct channel *ch;
 
 	DBF_TEXT(trace, 2, __FUNCTION__);
-	if ((ch =
-	     (struct channel *) kmalloc(sizeof (struct channel),
-					GFP_KERNEL)) == NULL) {
+	ch = kzalloc(sizeof(struct channel), GFP_KERNEL);
+	if (!ch) {
 		ctc_pr_warn("ctc: Out of memory in add_channel\n");
 		return -1;
 	}
-	memset(ch, 0, sizeof (struct channel));
-	if ((ch->ccw = (struct ccw1 *) kmalloc(sizeof (struct ccw1) * 8,
-					       GFP_KERNEL | GFP_DMA)) == NULL) {
+	/* assure all flags and counters are reset */
+	ch->ccw = kzalloc(8 * sizeof(struct ccw1), GFP_KERNEL | GFP_DMA);
+	if (!ch->ccw) {
 		kfree(ch);
 		ctc_pr_warn("ctc: Out of memory in add_channel\n");
 		return -1;
 	}
+
 
 	/**
 	 * "static" ccws are used in the following way:
@@ -1914,26 +1669,21 @@ add_channel(struct ccw_device *cdev, enum channel_types type)
 	 *           4: write (idal allocated on every write).
 	 *           5: nop
 	 * ccw[6..7] (Channel program for initial channel setup):
-	 *           3: set extended mode
-	 *           4: nop
+	 *           6: set extended mode
+	 *           7: nop
 	 *
 	 * ch->ccw[0..5] are initialized in ch_action_start because
 	 * the channel's direction is yet unknown here.
 	 */
 	ch->ccw[6].cmd_code = CCW_CMD_SET_EXTENDED;
 	ch->ccw[6].flags = CCW_FLAG_SLI;
-	ch->ccw[6].count = 0;
-	ch->ccw[6].cda = 0;
 
 	ch->ccw[7].cmd_code = CCW_CMD_NOOP;
 	ch->ccw[7].flags = CCW_FLAG_SLI;
-	ch->ccw[7].count = 0;
-	ch->ccw[7].cda = 0;
 
 	ch->cdev = cdev;
 	snprintf(ch->id, CTC_ID_SIZE, "ch-%s", cdev->dev.bus_id);
 	ch->type = type;
-	loglevel = CTC_LOGLEVEL_DEFAULT;
 	ch->fsm = init_fsm(ch->id, ch_state_names,
 			   ch_event_names, NR_CH_STATES, NR_CH_EVENTS,
 			   ch_fsm, CH_FSM_LEN, GFP_KERNEL);
@@ -1944,18 +1694,17 @@ add_channel(struct ccw_device *cdev, enum channel_types type)
 		return -1;
 	}
 	fsm_newstate(ch->fsm, CH_STATE_IDLE);
-	if ((ch->irb = (struct irb *) kmalloc(sizeof (struct irb),
-					      GFP_KERNEL)) == NULL) {
+	ch->irb = kzalloc(sizeof(struct irb), GFP_KERNEL);
+	if (!ch->irb) {
 		ctc_pr_warn("ctc: Out of memory in add_channel\n");
 		kfree_fsm(ch->fsm);
 		kfree(ch->ccw);
 		kfree(ch);
 		return -1;
 	}
-	memset(ch->irb, 0, sizeof (struct irb));
 	while (*c && less_than((*c)->id, ch->id))
 		c = &(*c)->next;
-	if (!strncmp((*c)->id, ch->id, CTC_ID_SIZE)) {
+	if (*c && (!strncmp((*c)->id, ch->id, CTC_ID_SIZE))) {
 		ctc_pr_debug(
 			"ctc: add_channel: device %s already in list, "
 			"using old entry\n", (*c)->id);
@@ -1965,6 +1714,9 @@ add_channel(struct ccw_device *cdev, enum channel_types type)
 		kfree(ch);
 		return 0;
 	}
+
+	spin_lock_init(&ch->collect_lock);
+
 	fsm_settimer(ch->fsm, &ch->timer);
 	skb_queue_head_init(&ch->io_queue);
 	skb_queue_head_init(&ch->collect_queue);
@@ -2011,6 +1763,8 @@ channel_remove(struct channel *ch)
 				dev_kfree_skb(ch->trans_skb);
 			}
 			kfree(ch->ccw);
+			kfree(ch->irb);
+			kfree(ch);
 			return;
 		}
 		c = &((*c)->next);
@@ -2139,7 +1893,7 @@ ctc_irq_handler(struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 			    irb->scsw.dstat);
 		return;
 	}
-	
+
 	priv = ((struct ccwgroup_device *)cdev->dev.driver_data)
 		->dev.driver_data;
 
@@ -2153,7 +1907,7 @@ ctc_irq_handler(struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 			   "device %s\n", cdev->dev.bus_id);
 		return;
 	}
-	
+
 	dev = (struct net_device *) (ch->netdev);
 	if (dev == NULL) {
 		ctc_pr_crit("ctc: ctc_irq_handler dev=NULL bus_id=%s, ch=0x%p\n",
@@ -2203,7 +1957,7 @@ ctc_irq_handler(struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 		fsm_event(ch->fsm, CH_EVENT_IRQ, ch);
 
 }
-
+
 /**
  * Actions for interface - statemachine.
  *****************************************************************************/
@@ -2252,12 +2006,12 @@ dev_action_stop(fsm_instance * fi, int event, void *arg)
 		fsm_event(ch->fsm, CH_EVENT_STOP, ch);
 	}
 }
-static void 
+static void
 dev_action_restart(fsm_instance *fi, int event, void *arg)
 {
 	struct net_device *dev = (struct net_device *)arg;
 	struct ctc_priv *privptr = dev->priv;
-	
+
 	DBF_TEXT(trace, 3, __FUNCTION__);
 	ctc_pr_debug("%s: Restarting\n", dev->name);
 	dev_action_stop(fi, event, arg);
@@ -2278,7 +2032,6 @@ static void
 dev_action_chup(fsm_instance * fi, int event, void *arg)
 {
 	struct net_device *dev = (struct net_device *) arg;
-	struct ctc_priv *privptr = dev->priv;
 
 	DBF_TEXT(trace, 3, __FUNCTION__);
 	switch (fsm_getstate(fi)) {
@@ -2293,8 +2046,6 @@ dev_action_chup(fsm_instance * fi, int event, void *arg)
 				fsm_newstate(fi, DEV_STATE_RUNNING);
 				ctc_pr_info("%s: connected with remote side\n",
 					    dev->name);
-				if (privptr->protocol == CTC_PROTO_LINUX_TTY)
-					ctc_tty_setcarrier(dev, 1);
 				ctc_clear_busy(dev);
 			}
 			break;
@@ -2303,8 +2054,6 @@ dev_action_chup(fsm_instance * fi, int event, void *arg)
 				fsm_newstate(fi, DEV_STATE_RUNNING);
 				ctc_pr_info("%s: connected with remote side\n",
 					    dev->name);
-				if (privptr->protocol == CTC_PROTO_LINUX_TTY)
-					ctc_tty_setcarrier(dev, 1);
 				ctc_clear_busy(dev);
 			}
 			break;
@@ -2330,14 +2079,10 @@ dev_action_chup(fsm_instance * fi, int event, void *arg)
 static void
 dev_action_chdown(fsm_instance * fi, int event, void *arg)
 {
-	struct net_device *dev = (struct net_device *) arg;
-	struct ctc_priv *privptr = dev->priv;
 
 	DBF_TEXT(trace, 3, __FUNCTION__);
 	switch (fsm_getstate(fi)) {
 		case DEV_STATE_RUNNING:
-			if (privptr->protocol == CTC_PROTO_LINUX_TTY)
-				ctc_tty_setcarrier(dev, 0);
 			if (event == DEV_EVENT_TXDOWN)
 				fsm_newstate(fi, DEV_STATE_STARTWAIT_TX);
 			else
@@ -2436,13 +2181,18 @@ transmit_skb(struct channel *ch, struct sk_buff *skb)
 	int rc = 0;
 
 	DBF_TEXT(trace, 5, __FUNCTION__);
+	/* we need to acquire the lock for testing the state
+	 * otherwise we can have an IRQ changing the state to
+	 * TXIDLE after the test but before acquiring the lock.
+	 */
+	spin_lock_irqsave(&ch->collect_lock, saveflags);
 	if (fsm_getstate(ch->fsm) != CH_STATE_TXIDLE) {
 		int l = skb->len + LL_HEADER_LENGTH;
 
-		spin_lock_irqsave(&ch->collect_lock, saveflags);
-		if (ch->collect_len + l > ch->max_bufsize - 2)
-			rc = -EBUSY;
-		else {
+		if (ch->collect_len + l > ch->max_bufsize - 2) {
+			spin_unlock_irqrestore(&ch->collect_lock, saveflags);
+			return -EBUSY;
+		} else {
 			atomic_inc(&skb->users);
 			header.length = l;
 			header.type = skb->protocol;
@@ -2458,7 +2208,7 @@ transmit_skb(struct channel *ch, struct sk_buff *skb)
 		int ccw_idx;
 		struct sk_buff *nskb;
 		unsigned long hi;
-
+		spin_unlock_irqrestore(&ch->collect_lock, saveflags);
 		/**
 		 * Protect skb against beeing free'd by upper
 		 * layers.
@@ -2477,12 +2227,14 @@ transmit_skb(struct channel *ch, struct sk_buff *skb)
 		 * IDAL support in CTC is broken, so we have to
 		 * care about skb's above 2G ourselves.
 		 */
-		hi = ((unsigned long) skb->tail + LL_HEADER_LENGTH) >> 31;
+		hi = ((unsigned long)skb_tail_pointer(skb) +
+		      LL_HEADER_LENGTH) >> 31;
 		if (hi) {
 			nskb = alloc_skb(skb->len, GFP_ATOMIC | GFP_DMA);
 			if (!nskb) {
 				atomic_dec(&skb->users);
 				skb_pull(skb, LL_HEADER_LENGTH + 2);
+				ctc_clear_busy(ch->netdev);
 				return -ENOMEM;
 			} else {
 				memcpy(skb_put(nskb, skb->len),
@@ -2508,14 +2260,16 @@ transmit_skb(struct channel *ch, struct sk_buff *skb)
 				 */
 				atomic_dec(&skb->users);
 				skb_pull(skb, LL_HEADER_LENGTH + 2);
+				ctc_clear_busy(ch->netdev);
 				return -EBUSY;
 			}
 
-			ch->trans_skb->tail = ch->trans_skb->data;
+			skb_reset_tail_pointer(ch->trans_skb);
 			ch->trans_skb->len = 0;
 			ch->ccw[1].count = skb->len;
-			memcpy(skb_put(ch->trans_skb, skb->len), skb->data,
-			       skb->len);
+			skb_copy_from_linear_data(skb, skb_put(ch->trans_skb,
+							       skb->len),
+						  skb->len);
 			atomic_dec(&skb->users);
 			dev_kfree_skb_irq(skb);
 			ccw_idx = 0;
@@ -2527,7 +2281,7 @@ transmit_skb(struct channel *ch, struct sk_buff *skb)
 		fsm_newstate(ch->fsm, CH_STATE_TX);
 		fsm_addtimer(&ch->timer, CTC_TIMEOUT_5SEC, CH_EVENT_TIMER, ch);
 		spin_lock_irqsave(get_ccwdev_lock(ch->cdev), saveflags);
-		ch->prof.send_stamp = xtime;
+		ch->prof.send_stamp = current_kernel_time();
 		rc = ccw_device_start(ch->cdev, &ch->ccw[ccw_idx],
 				      (unsigned long) ch, 0xff, 0);
 		spin_unlock_irqrestore(get_ccwdev_lock(ch->cdev), saveflags);
@@ -2554,9 +2308,10 @@ transmit_skb(struct channel *ch, struct sk_buff *skb)
 		}
 	}
 
+	ctc_clear_busy(ch->netdev);
 	return rc;
 }
-
+
 /**
  * Interface API for upper network layers
  *****************************************************************************/
@@ -2629,12 +2384,10 @@ ctc_tx(struct sk_buff *skb, struct net_device * dev)
 
 	/**
 	 * If channels are not running, try to restart them
-	 * and throw away packet. 
+	 * and throw away packet.
 	 */
 	if (fsm_getstate(privptr->fsm) != DEV_STATE_RUNNING) {
 		fsm_event(privptr->fsm, DEV_EVENT_START, dev);
-		if (privptr->protocol == CTC_PROTO_LINUX_TTY)
-			return -EBUSY;
 		dev_kfree_skb(skb);
 		privptr->stats.tx_dropped++;
 		privptr->stats.tx_errors++;
@@ -2648,7 +2401,6 @@ ctc_tx(struct sk_buff *skb, struct net_device * dev)
 	dev->trans_start = jiffies;
 	if (transmit_skb(privptr->channel[WRITE], skb) != 0)
 		rc = 1;
-	ctc_clear_busy(dev);
 	return rc;
 }
 
@@ -2694,8 +2446,9 @@ ctc_stats(struct net_device * dev)
 /*
  * sysfs attributes
  */
+
 static ssize_t
-buffer_show(struct device *dev, char *buf)
+buffer_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct ctc_priv *priv;
 
@@ -2703,65 +2456,70 @@ buffer_show(struct device *dev, char *buf)
 	if (!priv)
 		return -ENODEV;
 	return sprintf(buf, "%d\n",
-		       priv->channel[READ]->max_bufsize);
+			priv->buffer_size);
 }
 
 static ssize_t
-buffer_write(struct device *dev, const char *buf, size_t count)
+buffer_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct ctc_priv *priv;
 	struct net_device *ndev;
 	int bs1;
+	char buffer[16];
 
 	DBF_TEXT(trace, 3, __FUNCTION__);
+	DBF_TEXT(trace, 3, buf);
 	priv = dev->driver_data;
-	if (!priv)
+	if (!priv) {
+		DBF_TEXT(trace, 3, "bfnopriv");
 		return -ENODEV;
-	ndev = priv->channel[READ]->netdev;
-	if (!ndev)
-		return -ENODEV;
-	sscanf(buf, "%u", &bs1);
+	}
 
+	sscanf(buf, "%u", &bs1);
 	if (bs1 > CTC_BUFSIZE_LIMIT)
-		return -EINVAL;
+		goto einval;
+	if (bs1 < (576 + LL_HEADER_LENGTH + 2))
+		goto einval;
+	priv->buffer_size = bs1;	// just to overwrite the default
+
+	ndev = priv->channel[READ]->netdev;
+	if (!ndev) {
+		DBF_TEXT(trace, 3, "bfnondev");
+		return -ENODEV;
+	}
+
 	if ((ndev->flags & IFF_RUNNING) &&
 	    (bs1 < (ndev->mtu + LL_HEADER_LENGTH + 2)))
-		return -EINVAL;
-	if (bs1 < (576 + LL_HEADER_LENGTH + 2))
-		return -EINVAL;
+		goto einval;
 
-	priv->channel[READ]->max_bufsize =
-	    priv->channel[WRITE]->max_bufsize = bs1;
+	priv->channel[READ]->max_bufsize = bs1;
+	priv->channel[WRITE]->max_bufsize = bs1;
 	if (!(ndev->flags & IFF_RUNNING))
 		ndev->mtu = bs1 - LL_HEADER_LENGTH - 2;
 	priv->channel[READ]->flags |= CHANNEL_FLAGS_BUFSIZE_CHANGED;
 	priv->channel[WRITE]->flags |= CHANNEL_FLAGS_BUFSIZE_CHANGED;
 
+	sprintf(buffer, "%d",priv->buffer_size);
+	DBF_TEXT(trace, 3, buffer);
 	return count;
 
+einval:
+	DBF_TEXT(trace, 3, "buff_err");
+	return -EINVAL;
 }
 
 static ssize_t
-loglevel_show(struct device *dev, char *buf)
+loglevel_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct ctc_priv *priv;
-
-	priv = dev->driver_data;
-	if (!priv)
-		return -ENODEV;
 	return sprintf(buf, "%d\n", loglevel);
 }
 
 static ssize_t
-loglevel_write(struct device *dev, const char *buf, size_t count)
+loglevel_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
-	struct ctc_priv *priv;
 	int ll1;
 
 	DBF_TEXT(trace, 5, __FUNCTION__);
-	priv = dev->driver_data;
-	if (!priv)
-		return -ENODEV;
 	sscanf(buf, "%i", &ll1);
 
 	if ((ll1 > CTC_LOGLEVEL_MAX) || (ll1 < 0))
@@ -2779,7 +2537,7 @@ ctc_print_statistics(struct ctc_priv *priv)
 	DBF_TEXT(trace, 4, __FUNCTION__);
 	if (!priv)
 		return;
-	sbuf = (char *)kmalloc(2048, GFP_KERNEL);
+	sbuf = kmalloc(2048, GFP_KERNEL);
 	if (sbuf == NULL)
 		return;
 	p = sbuf;
@@ -2810,7 +2568,7 @@ ctc_print_statistics(struct ctc_priv *priv)
 }
 
 static ssize_t
-stats_show(struct device *dev, char *buf)
+stats_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct ctc_priv *priv = dev->driver_data;
 	if (!priv)
@@ -2820,7 +2578,7 @@ stats_show(struct device *dev, char *buf)
 }
 
 static ssize_t
-stats_write(struct device *dev, const char *buf, size_t count)
+stats_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct ctc_priv *priv = dev->driver_data;
 	if (!priv)
@@ -2831,28 +2589,6 @@ stats_write(struct device *dev, const char *buf, size_t count)
 	return count;
 }
 
-static DEVICE_ATTR(buffer, 0644, buffer_show, buffer_write);
-static DEVICE_ATTR(loglevel, 0644, loglevel_show, loglevel_write);
-static DEVICE_ATTR(stats, 0644, stats_show, stats_write);
-
-static int
-ctc_add_attributes(struct device *dev)
-{
-//	device_create_file(dev, &dev_attr_buffer);
-	device_create_file(dev, &dev_attr_loglevel);
-	device_create_file(dev, &dev_attr_stats);
-	return 0;
-}
-
-static void
-ctc_remove_attributes(struct device *dev)
-{
-	device_remove_file(dev, &dev_attr_stats);
-	device_remove_file(dev, &dev_attr_loglevel);
-//	device_remove_file(dev, &dev_attr_buffer);
-}
-
-
 static void
 ctc_netdev_unregister(struct net_device * dev)
 {
@@ -2861,20 +2597,13 @@ ctc_netdev_unregister(struct net_device * dev)
 	if (!dev)
 		return;
 	privptr = (struct ctc_priv *) dev->priv;
-	if (privptr->protocol != CTC_PROTO_LINUX_TTY)
-		unregister_netdev(dev);
-	else
-		ctc_tty_unregister_netdev(dev);
+	unregister_netdev(dev);
 }
 
 static int
 ctc_netdev_register(struct net_device * dev)
 {
-	struct ctc_priv *privptr = (struct ctc_priv *) dev->priv;
-	if (privptr->protocol != CTC_PROTO_LINUX_TTY)
-		return register_netdev(dev);
-	else
-		return ctc_tty_register_netdev(dev);
+	return register_netdev(dev);
 }
 
 static void
@@ -2895,53 +2624,8 @@ ctc_free_netdevice(struct net_device * dev, int free_dev)
 #endif
 }
 
-/**
- * Initialize everything of the net device except the name and the
- * channel structs.
- */
-static struct net_device *
-ctc_init_netdevice(struct net_device * dev, int alloc_device, 
-		   struct ctc_priv *privptr)
-{
-	if (!privptr)
-		return NULL;
-
-	DBF_TEXT(setup, 3, __FUNCTION__);
-	if (alloc_device) {
-		dev = kmalloc(sizeof (struct net_device), GFP_KERNEL);
-		if (!dev)
-			return NULL;
-		memset(dev, 0, sizeof (struct net_device));
-	}
-
-	dev->priv = privptr;
-	privptr->fsm = init_fsm("ctcdev", dev_state_names,
-				dev_event_names, NR_DEV_STATES, NR_DEV_EVENTS,
-				dev_fsm, DEV_FSM_LEN, GFP_KERNEL);
-	if (privptr->fsm == NULL) {
-		if (alloc_device)
-			kfree(dev);
-		return NULL;
-	}
-	fsm_newstate(privptr->fsm, DEV_STATE_STOPPED);
-	fsm_settimer(privptr->fsm, &privptr->restart_timer);
-	dev->mtu = CTC_BUFSIZE_DEFAULT - LL_HEADER_LENGTH - 2;
-	dev->hard_start_xmit = ctc_tx;
-	dev->open = ctc_open;
-	dev->stop = ctc_close;
-	dev->get_stats = ctc_stats;
-	dev->change_mtu = ctc_change_mtu;
-	dev->hard_header_len = LL_HEADER_LENGTH + 2;
-	dev->addr_len = 0;
-	dev->type = ARPHRD_SLIP;
-	dev->tx_queue_len = 100;
-	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
-	SET_MODULE_OWNER(dev);
-	return dev;
-}
-
 static ssize_t
-ctc_proto_show(struct device *dev, char *buf)
+ctc_proto_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct ctc_priv *priv;
 
@@ -2953,7 +2637,7 @@ ctc_proto_show(struct device *dev, char *buf)
 }
 
 static ssize_t
-ctc_proto_store(struct device *dev, const char *buf, size_t count)
+ctc_proto_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct ctc_priv *priv;
 	int value;
@@ -2965,17 +2649,17 @@ ctc_proto_store(struct device *dev, const char *buf, size_t count)
 	if (!priv)
 		return -ENODEV;
 	sscanf(buf, "%u", &value);
-	if ((value < 0) || (value > CTC_PROTO_MAX))
+	if (!((value == CTC_PROTO_S390)  ||
+	      (value == CTC_PROTO_LINUX) ||
+	      (value == CTC_PROTO_OS390)))
 		return -EINVAL;
 	priv->protocol = value;
 
 	return count;
 }
 
-static DEVICE_ATTR(protocol, 0644, ctc_proto_show, ctc_proto_store);
-
 static ssize_t
-ctc_type_show(struct device *dev, char *buf)
+ctc_type_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct ccwgroup_device *cgdev;
 
@@ -2986,7 +2670,12 @@ ctc_type_show(struct device *dev, char *buf)
 	return sprintf(buf, "%s\n", cu3088_type[cgdev->cdev[0]->id.driver_info]);
 }
 
+static DEVICE_ATTR(buffer, 0644, buffer_show, buffer_write);
+static DEVICE_ATTR(protocol, 0644, ctc_proto_show, ctc_proto_store);
 static DEVICE_ATTR(type, 0444, ctc_type_show, NULL);
+
+static DEVICE_ATTR(loglevel, 0644, loglevel_show, loglevel_write);
+static DEVICE_ATTR(stats, 0644, stats_show, stats_write);
 
 static struct attribute *ctc_attr[] = {
 	&dev_attr_protocol.attr,
@@ -2998,6 +2687,29 @@ static struct attribute *ctc_attr[] = {
 static struct attribute_group ctc_attr_group = {
 	.attrs = ctc_attr,
 };
+
+static int
+ctc_add_attributes(struct device *dev)
+{
+	int rc;
+
+	rc = device_create_file(dev, &dev_attr_loglevel);
+	if (rc)
+		goto out;
+	rc = device_create_file(dev, &dev_attr_stats);
+	if (!rc)
+		goto out;
+	device_remove_file(dev, &dev_attr_loglevel);
+out:
+	return rc;
+}
+
+static void
+ctc_remove_attributes(struct device *dev)
+{
+	device_remove_file(dev, &dev_attr_stats);
+	device_remove_file(dev, &dev_attr_loglevel);
+}
 
 static int
 ctc_add_files(struct device *dev)
@@ -3018,45 +2730,80 @@ ctc_remove_files(struct device *dev)
 /**
  * Add ctc specific attributes.
  * Add ctc private data.
- * 
+ *
  * @param cgdev pointer to ccwgroup_device just added
  *
  * @returns 0 on success, !0 on failure.
  */
-
 static int
 ctc_probe_device(struct ccwgroup_device *cgdev)
 {
 	struct ctc_priv *priv;
 	int rc;
+	char buffer[16];
 
 	pr_debug("%s() called\n", __FUNCTION__);
-	DBF_TEXT(trace, 3, __FUNCTION__);
+	DBF_TEXT(setup, 3, __FUNCTION__);
 
 	if (!get_device(&cgdev->dev))
 		return -ENODEV;
 
-	priv = kmalloc(sizeof (struct ctc_priv), GFP_KERNEL);
+	priv = kzalloc(sizeof(struct ctc_priv), GFP_KERNEL);
 	if (!priv) {
 		ctc_pr_err("%s: Out of memory\n", __func__);
 		put_device(&cgdev->dev);
 		return -ENOMEM;
 	}
 
-	memset(priv, 0, sizeof (struct ctc_priv));
 	rc = ctc_add_files(&cgdev->dev);
 	if (rc) {
 		kfree(priv);
 		put_device(&cgdev->dev);
 		return rc;
 	}
-
+	priv->buffer_size = CTC_BUFSIZE_DEFAULT;
 	cgdev->cdev[0]->handler = ctc_irq_handler;
 	cgdev->cdev[1]->handler = ctc_irq_handler;
 	cgdev->dev.driver_data = priv;
 
+	sprintf(buffer, "%p", priv);
+	DBF_TEXT(data, 3, buffer);
+
+	sprintf(buffer, "%u", (unsigned int)sizeof(struct ctc_priv));
+	DBF_TEXT(data, 3, buffer);
+
+	sprintf(buffer, "%p", &channels);
+	DBF_TEXT(data, 3, buffer);
+
+	sprintf(buffer, "%u", (unsigned int)sizeof(struct channel));
+	DBF_TEXT(data, 3, buffer);
+
 	return 0;
 }
+
+/**
+ * Device setup function called by alloc_netdev().
+ *
+ * @param dev  Device to be setup.
+ */
+void ctc_init_netdevice(struct net_device * dev)
+{
+	DBF_TEXT(setup, 3, __FUNCTION__);
+
+	if (dev->mtu == 0)
+		dev->mtu = CTC_BUFSIZE_DEFAULT - LL_HEADER_LENGTH - 2;
+	dev->hard_start_xmit = ctc_tx;
+	dev->open = ctc_open;
+	dev->stop = ctc_close;
+	dev->get_stats = ctc_stats;
+	dev->change_mtu = ctc_change_mtu;
+	dev->hard_header_len = LL_HEADER_LENGTH + 2;
+	dev->addr_len = 0;
+	dev->type = ARPHRD_SLIP;
+	dev->tx_queue_len = 100;
+	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
+}
+
 
 /**
  *
@@ -3076,6 +2823,7 @@ ctc_new_device(struct ccwgroup_device *cgdev)
 	struct ctc_priv *privptr;
 	struct net_device *dev;
 	int ret;
+	char buffer[16];
 
 	pr_debug("%s() called\n", __FUNCTION__);
 	DBF_TEXT(setup, 3, __FUNCTION__);
@@ -3084,8 +2832,11 @@ ctc_new_device(struct ccwgroup_device *cgdev)
 	if (!privptr)
 		return -ENODEV;
 
+	sprintf(buffer, "%d", privptr->buffer_size);
+	DBF_TEXT(setup, 3, buffer);
+
 	type = get_channel_type(&cgdev->cdev[0]->id);
-	
+
 	snprintf(read_id, CTC_ID_SIZE, "ch-%s", cgdev->cdev[0]->dev.bus_id);
 	snprintf(write_id, CTC_ID_SIZE, "ch-%s", cgdev->cdev[1]->dev.bus_id);
 
@@ -3106,24 +2857,29 @@ ctc_new_device(struct ccwgroup_device *cgdev)
 		 	"ccw_device_set_online (cdev[1]) failed with ret = %d\n", ret);
 	}
 
-	dev = ctc_init_netdevice(NULL, 1, privptr);
-
+	dev = alloc_netdev(0, "ctc%d", ctc_init_netdevice);
 	if (!dev) {
 		ctc_pr_warn("ctc_init_netdevice failed\n");
 		goto out;
 	}
+	dev->priv = privptr;
 
-	if (privptr->protocol == CTC_PROTO_LINUX_TTY)
-		strlcpy(dev->name, "ctctty%d", IFNAMSIZ);
-	else
-		strlcpy(dev->name, "ctc%d", IFNAMSIZ);
+	privptr->fsm = init_fsm("ctcdev", dev_state_names,
+			dev_event_names, CTC_NR_DEV_STATES, CTC_NR_DEV_EVENTS,
+			dev_fsm, DEV_FSM_LEN, GFP_KERNEL);
+	if (privptr->fsm == NULL) {
+		free_netdev(dev);
+		goto out;
+	}
+	fsm_newstate(privptr->fsm, DEV_STATE_STOPPED);
+	fsm_settimer(privptr->fsm, &privptr->restart_timer);
 
 	for (direction = READ; direction <= WRITE; direction++) {
 		privptr->channel[direction] =
 		    channel_get(type, direction == READ ? read_id : write_id,
 				direction);
 		if (privptr->channel[direction] == NULL) {
-			if (direction == WRITE) 
+			if (direction == WRITE)
 				channel_free(privptr->channel[READ]);
 
 			ctc_free_netdevice(dev, 1);
@@ -3131,7 +2887,7 @@ ctc_new_device(struct ccwgroup_device *cgdev)
 		}
 		privptr->channel[direction]->netdev = dev;
 		privptr->channel[direction]->protocol = privptr->protocol;
-		privptr->channel[direction]->max_bufsize = CTC_BUFSIZE_DEFAULT;
+		privptr->channel[direction]->max_bufsize = privptr->buffer_size;
 	}
 	/* sysfs magic */
 	SET_NETDEV_DEV(dev, &cgdev->dev);
@@ -3141,7 +2897,12 @@ ctc_new_device(struct ccwgroup_device *cgdev)
 		goto out;
 	}
 
-	ctc_add_attributes(&cgdev->dev);
+	if (ctc_add_attributes(&cgdev->dev)) {
+		ctc_netdev_unregister(dev);
+		dev->priv = NULL;
+		ctc_free_netdevice(dev, 1);
+		goto out;
+	}
 
 	strlcpy(privptr->fsm->name, dev->name, sizeof (privptr->fsm->name));
 
@@ -3171,9 +2932,10 @@ ctc_shutdown_device(struct ccwgroup_device *cgdev)
 {
 	struct ctc_priv *priv;
 	struct net_device *ndev;
-		
-	DBF_TEXT(trace, 3, __FUNCTION__);
+
+	DBF_TEXT(setup, 3, __FUNCTION__);
 	pr_debug("%s() called\n", __FUNCTION__);
+
 
 	priv = cgdev->dev.driver_data;
 	ndev = NULL;
@@ -3210,7 +2972,6 @@ ctc_shutdown_device(struct ccwgroup_device *cgdev)
 		channel_remove(priv->channel[READ]);
 	if (priv->channel[WRITE])
 		channel_remove(priv->channel[WRITE]);
-	
 	priv->channel[READ] = priv->channel[WRITE] = NULL;
 
 	return 0;
@@ -3223,7 +2984,7 @@ ctc_remove_device(struct ccwgroup_device *cgdev)
 	struct ctc_priv *priv;
 
 	pr_debug("%s() called\n", __FUNCTION__);
-	DBF_TEXT(trace, 3, __FUNCTION__);
+	DBF_TEXT(setup, 3, __FUNCTION__);
 
 	priv = cgdev->dev.driver_data;
 	if (!priv)
@@ -3260,8 +3021,8 @@ static struct ccwgroup_driver ctc_group_driver = {
 static void __exit
 ctc_exit(void)
 {
+	DBF_TEXT(setup, 3, __FUNCTION__);
 	unregister_cu3088_discipline(&ctc_group_driver);
-	ctc_tty_cleanup();
 	ctc_unregister_dbf_views();
 	ctc_pr_info("CTC driver unloaded\n");
 }
@@ -3277,6 +3038,10 @@ ctc_init(void)
 {
 	int ret = 0;
 
+	loglevel = CTC_LOGLEVEL_DEFAULT;
+
+	DBF_TEXT(setup, 3, __FUNCTION__);
+
 	print_banner();
 
 	ret = ctc_register_dbf_views();
@@ -3284,10 +3049,8 @@ ctc_init(void)
 		ctc_pr_crit("ctc_init failed with ctc_register_dbf_views rc = %d\n", ret);
 		return ret;
 	}
-	ctc_tty_init();
 	ret = register_cu3088_discipline(&ctc_group_driver);
 	if (ret) {
-		ctc_tty_cleanup();
 		ctc_unregister_dbf_views();
 	}
 	return ret;

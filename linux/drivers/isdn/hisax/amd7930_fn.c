@@ -97,7 +97,7 @@ static WORD initAMD[] = {
 };
 
 
-void /* macro wWordAMD */
+static void /* macro wWordAMD */
 WriteWordAmd7930(struct IsdnCardState *cs, BYTE reg, WORD val)
 {
         wByteAMD(cs, 0x00, reg);
@@ -105,7 +105,7 @@ WriteWordAmd7930(struct IsdnCardState *cs, BYTE reg, WORD val)
         wByteAMD(cs, 0x01, HIBYTE(val));
 }
 
-WORD /* macro rWordAMD */
+static WORD /* macro rWordAMD */
 ReadWordAmd7930(struct IsdnCardState *cs, BYTE reg)
 {
         WORD res;
@@ -232,9 +232,10 @@ Amd7930_new_ph(struct IsdnCardState *cs)
 
 
 static void
-Amd7930_bh(struct IsdnCardState *cs)
+Amd7930_bh(struct work_struct *work)
 {
-
+	struct IsdnCardState *cs =
+		container_of(work, struct IsdnCardState, tqueue);
         struct PStack *stptr;
 
 	if (!cs)
@@ -665,7 +666,7 @@ Amd7930_l1hw(struct PStack *st, int pr, void *arg)
 	}
 }
 
-void
+static void
 setstack_Amd7930(struct PStack *st, struct IsdnCardState *cs)
 {
 
@@ -676,7 +677,7 @@ setstack_Amd7930(struct PStack *st, struct IsdnCardState *cs)
 }
 
 
-void
+static void
 DC_Close_Amd7930(struct IsdnCardState *cs) {
         if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "Amd7930: DC_Close called");
@@ -733,7 +734,7 @@ dbusy_timer_handler(struct IsdnCardState *cs)
 			wByteAMD(cs, 0x21, 0x82);
 			wByteAMD(cs, 0x21, 0x02);
 			spin_unlock_irqrestore(&cs->lock, flags);
-			cs->irq_func(cs->irq, cs, NULL);
+			cs->irq_func(cs->irq, cs);
 
                         if (cs->debug & L1_DEB_ISAC)
 				debugl1(cs, "Amd7930: dbusy_timer_handler: Transmitter reset");
@@ -766,7 +767,7 @@ Amd7930_init(struct IsdnCardState *cs)
                 /* read */
                 if (*ptr++ >= 0x100) {
 			if (cmd < 8)
-                                /* setzt Register zurück */
+                                /* reset register */
                                 rByteAMD(cs, cmd);
 			else {
 				wByteAMD(cs, 0x00, cmd);
@@ -789,7 +790,7 @@ Amd7930_init(struct IsdnCardState *cs)
 void __devinit
 setup_Amd7930(struct IsdnCardState *cs)
 {
-        INIT_WORK(&cs->tqueue, (void *)(void *) Amd7930_bh, cs);
+        INIT_WORK(&cs->tqueue, Amd7930_bh);
 	cs->dbusytimer.function = (void *) dbusy_timer_handler;
 	cs->dbusytimer.data = (long) cs;
 	init_timer(&cs->dbusytimer);

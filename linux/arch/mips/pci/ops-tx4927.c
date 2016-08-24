@@ -1,16 +1,16 @@
 /*
  * Copyright 2001 MontaVista Software Inc.
  * Author: MontaVista Software, Inc.
- *              ahennessy@mvista.com       
+ *              ahennessy@mvista.com
  *
- * Copyright (C) 2000-2001 Toshiba Corporation 
+ * Copyright (C) 2000-2001 Toshiba Corporation
  * Copyright (C) 2004 by Ralf Baechle (ralf@linux-mips.org)
  *
  * Based on arch/mips/ddb5xxx/ddb5477/pci_ops.c
  *
  *     Define the pci_ops for the Toshiba rbtx4927
  *
- * Much of the code is derived from the original DDB5074 port by 
+ * Much of the code is derived from the original DDB5074 port by
  * Geert Uytterhoeven <geert@sonycom.com>
  *
  * Copyright 2004 MontaVista Software Inc.
@@ -119,7 +119,7 @@ static int tx4927_pcibios_read_config(struct pci_bus *bus, unsigned int devfn, i
 
 	switch (size) {
 	case 1:
-		*val = *(volatile u8 *) ((ulong) & tx4927_pcicptr->
+		*val = *(volatile u8 *) ((unsigned long) & tx4927_pcicptr->
                               g2pcfgdata |
 #ifdef __LITTLE_ENDIAN
 						(where & 3));
@@ -128,7 +128,7 @@ static int tx4927_pcibios_read_config(struct pci_bus *bus, unsigned int devfn, i
 #endif
 		break;
 	case 2:
-		*val = *(volatile u16 *) ((ulong) & tx4927_pcicptr->
+		*val = *(volatile u16 *) ((unsigned long) & tx4927_pcicptr->
                                g2pcfgdata |
 #ifdef __LITTLE_ENDIAN
 						(where & 3));
@@ -168,7 +168,7 @@ static int tx4927_pcibios_write_config(struct pci_bus *bus, unsigned int devfn, 
 
 	switch (size) {
 	case 1:
-		 *(volatile u8 *) ((ulong) & tx4927_pcicptr->
+		 *(volatile u8 *) ((unsigned long) & tx4927_pcicptr->
                           g2pcfgdata |
 #ifdef __LITTLE_ENDIAN
 					(where & 3)) = val;
@@ -178,7 +178,7 @@ static int tx4927_pcibios_write_config(struct pci_bus *bus, unsigned int devfn, 
 		break;
 
 	case 2:
-		*(volatile u16 *) ((ulong) & tx4927_pcicptr->
+		*(volatile u16 *) ((unsigned long) & tx4927_pcicptr->
                            g2pcfgdata |
 #ifdef __LITTLE_ENDIAN
 					(where & 3)) = val;

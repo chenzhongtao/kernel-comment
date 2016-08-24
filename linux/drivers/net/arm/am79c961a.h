@@ -1,5 +1,5 @@
 /*
- * linux/drivers/net/am79c961.h
+ * linux/drivers/net/arm/am79c961a.h
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -142,7 +142,5 @@ struct dev_priv {
     spinlock_t		chip_lock;
     struct timer_list	timer;
 };
-
-extern int	am79c961_probe (struct net_device *dev);
 
 #endif

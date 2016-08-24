@@ -22,6 +22,9 @@
 
 #include <linux/highmem.h>
 #include <linux/mempool.h>
+#include <linux/ioprio.h>
+
+#ifdef CONFIG_BLOCK
 
 /* Platforms may set this to teach the BIO layer about IOMMU hardware. */
 #include <asm/io.h>
@@ -46,7 +49,7 @@
 #define BIO_BUG_ON
 #endif
 
-#define BIO_MAX_PAGES		(256)
+#define BIO_MAX_PAGES		256
 #define BIO_MAX_SIZE		(BIO_MAX_PAGES << PAGE_CACHE_SHIFT)
 #define BIO_MAX_SECTORS		(BIO_MAX_SIZE >> 9)
 
@@ -59,8 +62,9 @@ struct bio_vec {
 	unsigned int	bv_offset;
 };
 
+struct bio_set;
 struct bio;
-typedef int (bio_end_io_t) (struct bio *, unsigned int, int);
+typedef void (bio_end_io_t) (struct bio *, int);
 typedef void (bio_destructor_t) (struct bio *);
 
 /*
@@ -68,7 +72,8 @@ typedef void (bio_destructor_t) (struct bio *);
  * stacking drivers)
  */
 struct bio {
-	sector_t		bi_sector;
+	sector_t		bi_sector;	/* device address in 512 byte
+						   sectors */
 	struct bio		*bi_next;	/* request queue link */
 	struct block_device	*bi_bdev;
 	unsigned long		bi_flags;	/* status, command, etc */
@@ -146,6 +151,20 @@ struct bio {
 #define BIO_RW_BARRIER	2
 #define BIO_RW_FAILFAST	3
 #define BIO_RW_SYNC	4
+#define BIO_RW_META	5
+
+/*
+ * upper 16 bits of bi_rw define the io priority of this bio
+ */
+#define BIO_PRIO_SHIFT	(8 * sizeof(unsigned long) - IOPRIO_BITS)
+#define bio_prio(bio)	((bio)->bi_rw >> BIO_PRIO_SHIFT)
+#define bio_prio_valid(bio)	ioprio_valid(bio_prio(bio))
+
+#define bio_set_prio(bio, prio)		do {			\
+	WARN_ON(prio >= (1 << IOPRIO_BITS));			\
+	(bio)->bi_rw &= ((1UL << BIO_PRIO_SHIFT) - 1);		\
+	(bio)->bi_rw |= ((unsigned long) (prio) << BIO_PRIO_SHIFT);	\
+} while (0)
 
 /*
  * various member access, note that bio_data should of course not be used
@@ -157,12 +176,28 @@ struct bio {
 #define bio_offset(bio)		bio_iovec((bio))->bv_offset
 #define bio_segments(bio)	((bio)->bi_vcnt - (bio)->bi_idx)
 #define bio_sectors(bio)	((bio)->bi_size >> 9)
-#define bio_cur_sectors(bio)	(bio_iovec(bio)->bv_len >> 9)
-#define bio_data(bio)		(page_address(bio_page((bio))) + bio_offset((bio)))
 #define bio_barrier(bio)	((bio)->bi_rw & (1 << BIO_RW_BARRIER))
 #define bio_sync(bio)		((bio)->bi_rw & (1 << BIO_RW_SYNC))
 #define bio_failfast(bio)	((bio)->bi_rw & (1 << BIO_RW_FAILFAST))
 #define bio_rw_ahead(bio)	((bio)->bi_rw & (1 << BIO_RW_AHEAD))
+#define bio_rw_meta(bio)	((bio)->bi_rw & (1 << BIO_RW_META))
+#define bio_empty_barrier(bio)	(bio_barrier(bio) && !(bio)->bi_size)
+
+static inline unsigned int bio_cur_sectors(struct bio *bio)
+{
+	if (bio->bi_vcnt)
+		return bio_iovec(bio)->bv_len >> 9;
+
+	return 0;
+}
+
+static inline void *bio_data(struct bio *bio)
+{
+	if (bio->bi_vcnt)
+		return page_address(bio_page(bio)) + bio_offset(bio);
+
+	return NULL;
+}
 
 /*
  * will die
@@ -206,7 +241,7 @@ struct bio {
 #define BIO_SEG_BOUNDARY(q, b1, b2) \
 	BIOVEC_SEG_BOUNDARY((q), __BVEC_END((b1)), __BVEC_START((b2)))
 
-#define bio_io_error(bio, bytes) bio_endio((bio), (bytes), -EIO)
+#define bio_io_error(bio) bio_endio((bio), -EIO)
 
 /*
  * drivers should not use the __ version unless they _really_ want to
@@ -258,28 +293,43 @@ extern struct bio_pair *bio_split(struct bio *bi, mempool_t *pool,
 extern mempool_t *bio_split_pool;
 extern void bio_pair_release(struct bio_pair *dbio);
 
-extern struct bio *bio_alloc(int, int);
-extern void bio_put(struct bio *);
+extern struct bio_set *bioset_create(int, int);
+extern void bioset_free(struct bio_set *);
 
-extern void bio_endio(struct bio *, unsigned int, int);
+extern struct bio *bio_alloc(gfp_t, int);
+extern struct bio *bio_alloc_bioset(gfp_t, int, struct bio_set *);
+extern void bio_put(struct bio *);
+extern void bio_free(struct bio *, struct bio_set *);
+
+extern void bio_endio(struct bio *, int);
 struct request_queue;
 extern int bio_phys_segments(struct request_queue *, struct bio *);
 extern int bio_hw_segments(struct request_queue *, struct bio *);
 
 extern void __bio_clone(struct bio *, struct bio *);
-extern struct bio *bio_clone(struct bio *, int);
+extern struct bio *bio_clone(struct bio *, gfp_t);
 
 extern void bio_init(struct bio *);
 
 extern int bio_add_page(struct bio *, struct page *, unsigned int,unsigned int);
+extern int bio_add_pc_page(struct request_queue *, struct bio *, struct page *,
+			   unsigned int, unsigned int);
 extern int bio_get_nr_vecs(struct block_device *);
 extern struct bio *bio_map_user(struct request_queue *, struct block_device *,
 				unsigned long, unsigned int, int);
+struct sg_iovec;
+extern struct bio *bio_map_user_iov(struct request_queue *,
+				    struct block_device *,
+				    struct sg_iovec *, int, int);
 extern void bio_unmap_user(struct bio *);
+extern struct bio *bio_map_kern(struct request_queue *, void *, unsigned int,
+				gfp_t);
 extern void bio_set_pages_dirty(struct bio *bio);
 extern void bio_check_pages_dirty(struct bio *bio);
+extern void bio_release_pages(struct bio *bio);
 extern struct bio *bio_copy_user(struct request_queue *, unsigned long, unsigned int, int);
 extern int bio_uncopy_user(struct bio *);
+void zero_fill_bio(struct bio *bio);
 
 #ifdef CONFIG_HIGHMEM
 /*
@@ -287,9 +337,8 @@ extern int bio_uncopy_user(struct bio *);
  * bvec_kmap_irq and bvec_kunmap_irq!!
  *
  * This function MUST be inlined - it plays with the CPU interrupt flags.
- * Hence the `extern inline'.
  */
-extern inline char *bvec_kmap_irq(struct bio_vec *bvec, unsigned long *flags)
+static inline char *bvec_kmap_irq(struct bio_vec *bvec, unsigned long *flags)
 {
 	unsigned long addr;
 
@@ -305,7 +354,7 @@ extern inline char *bvec_kmap_irq(struct bio_vec *bvec, unsigned long *flags)
 	return (char *) addr + bvec->bv_offset;
 }
 
-extern inline void bvec_kunmap_irq(char *buffer, unsigned long *flags)
+static inline void bvec_kunmap_irq(char *buffer, unsigned long *flags)
 {
 	unsigned long ptr = (unsigned long) buffer & PAGE_MASK;
 
@@ -318,7 +367,7 @@ extern inline void bvec_kunmap_irq(char *buffer, unsigned long *flags)
 #define bvec_kunmap_irq(buf, flags)	do { *(flags) = 0; } while (0)
 #endif
 
-extern inline char *__bio_kmap_irq(struct bio *bio, unsigned short idx,
+static inline char *__bio_kmap_irq(struct bio *bio, unsigned short idx,
 				   unsigned long *flags)
 {
 	return bvec_kmap_irq(bio_iovec_idx(bio, idx), flags);
@@ -329,4 +378,5 @@ extern inline char *__bio_kmap_irq(struct bio *bio, unsigned short idx,
 	__bio_kmap_irq((bio), (bio)->bi_idx, (flags))
 #define bio_kunmap_irq(buf,flags)	__bio_kunmap_irq(buf, flags)
 
+#endif /* CONFIG_BLOCK */
 #endif /* __LINUX_BIO_H */

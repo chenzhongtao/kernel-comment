@@ -1,7 +1,7 @@
 /* sunsab.c: ASYNC Driver for the SIEMENS SAB82532 DUSCC.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
- * Copyright (C) 2002  David S. Miller (davem@redhat.com)
+ * Copyright (C) 2002, 2006  David S. Miller (davem@davemloft.net)
  *
  * Rewrote buffer handling to use CIRC(Circular Buffer) macros.
  *   Maxim Krasnyanskiy <maxk@qualcomm.com>
@@ -12,13 +12,11 @@
  *   Theodore Ts'o <tytso@mit.edu>, 2001-Oct-12
  *
  * Ported to new 2.5.x UART layer.
- *   David S. Miller <davem@redhat.com>
+ *   David S. Miller <davem@davemloft.net>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -37,10 +35,10 @@
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/oplib.h>
-#include <asm/ebus.h>
+#include <asm/prom.h>
+#include <asm/of_device.h>
 
-#if defined(CONFIG_SERIAL_SUNZILOG_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
+#if defined(CONFIG_SERIAL_SUNSAB_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #define SUPPORT_SYSRQ
 #endif
 
@@ -60,7 +58,18 @@ struct uart_sunsab_port {
 	unsigned char			interrupt_mask1;/* ISR1 masking		*/
 	unsigned char			pvr_dtr_bit;	/* Which PVR bit is DTR */
 	unsigned char			pvr_dsr_bit;	/* Which PVR bit is DSR */
+	unsigned int			gis_shift;
 	int				type;		/* SAB82532 version	*/
+
+	/* Setting configuration bits while the transmitter is active
+	 * can cause garbage characters to get emitted by the chip.
+	 * Therefore, we cache such writes here and do the real register
+	 * write the next time the transmitter becomes idle.
+	 */
+	unsigned int			cached_ebrg;
+	unsigned char			cached_mode;
+	unsigned char			cached_pvr;
+	unsigned char			cached_dafo;
 };
 
 /*
@@ -99,8 +108,7 @@ static __inline__ void sunsab_cec_wait(struct uart_sunsab_port *up)
 
 static struct tty_struct *
 receive_chars(struct uart_sunsab_port *up,
-	      union sab82532_irq_status *stat,
-	      struct pt_regs *regs)
+	      union sab82532_irq_status *stat)
 {
 	struct tty_struct *tty = NULL;
 	unsigned char buf[32];
@@ -149,21 +157,14 @@ receive_chars(struct uart_sunsab_port *up,
 		saw_console_brk = 1;
 
 	for (i = 0; i < count; i++) {
-		unsigned char ch = buf[i];
+		unsigned char ch = buf[i], flag;
 
 		if (tty == NULL) {
-			uart_handle_sysrq_char(&up->port, ch, regs);
+			uart_handle_sysrq_char(&up->port, ch);
 			continue;
 		}
 
-		if (unlikely(tty->flip.count >= TTY_FLIPBUF_SIZE)) {
-			tty->flip.work.func((void *)tty);
-			if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-				return tty; // if TTY_DONT_FLIP is set
-		}
-
-		*tty->flip.char_buf_ptr = ch;
-		*tty->flip.flag_buf_ptr = TTY_NORMAL;
+		flag = TTY_NORMAL;
 		up->port.icount.rx++;
 
 		if (unlikely(stat->sreg.isr0 & (SAB82532_ISR0_PERR |
@@ -199,34 +200,21 @@ receive_chars(struct uart_sunsab_port *up,
 			stat->sreg.isr1 &= ((up->port.read_status_mask >> 8) & 0xff);
 
 			if (stat->sreg.isr1 & SAB82532_ISR1_BRK) {
-				*tty->flip.flag_buf_ptr = TTY_BREAK;
+				flag = TTY_BREAK;
 			} else if (stat->sreg.isr0 & SAB82532_ISR0_PERR)
-				*tty->flip.flag_buf_ptr = TTY_PARITY;
+				flag = TTY_PARITY;
 			else if (stat->sreg.isr0 & SAB82532_ISR0_FERR)
-				*tty->flip.flag_buf_ptr = TTY_FRAME;
+				flag = TTY_FRAME;
 		}
 
-		if (uart_handle_sysrq_char(&up->port, ch, regs))
+		if (uart_handle_sysrq_char(&up->port, ch))
 			continue;
 
 		if ((stat->sreg.isr0 & (up->port.ignore_status_mask & 0xff)) == 0 &&
-		    (stat->sreg.isr1 & ((up->port.ignore_status_mask >> 8) & 0xff)) == 0){
-			tty->flip.flag_buf_ptr++;
-			tty->flip.char_buf_ptr++;
-			tty->flip.count++;
-		}
-		if ((stat->sreg.isr0 & SAB82532_ISR0_RFO) &&
-		    tty->flip.count < TTY_FLIPBUF_SIZE) {
-			/*
-			 * Overrun is special, since it's reported
-			 * immediately, and doesn't affect the current
-			 * character.
-			 */
-			*tty->flip.flag_buf_ptr = TTY_OVERRUN;
-			tty->flip.flag_buf_ptr++;
-			tty->flip.char_buf_ptr++;
-			tty->flip.count++;
-		}
+		    (stat->sreg.isr1 & ((up->port.ignore_status_mask >> 8) & 0xff)) == 0)
+			tty_insert_flip_char(tty, ch, flag);
+		if (stat->sreg.isr0 & SAB82532_ISR0_RFO)
+			tty_insert_flip_char(tty, 0, TTY_OVERRUN);
 	}
 
 	if (saw_console_brk)
@@ -235,7 +223,8 @@ receive_chars(struct uart_sunsab_port *up,
 	return tty;
 }
 
-static void sunsab_stop_tx(struct uart_port *, unsigned int);
+static void sunsab_stop_tx(struct uart_port *);
+static void sunsab_tx_idle(struct uart_sunsab_port *);
 
 static void transmit_chars(struct uart_sunsab_port *up,
 			   union sab82532_irq_status *stat)
@@ -258,11 +247,11 @@ static void transmit_chars(struct uart_sunsab_port *up,
 		return;
 
 	set_bit(SAB82532_XPR, &up->irqflags);
+	sunsab_tx_idle(up);
 
 	if (uart_circ_empty(xmit) || uart_tx_stopped(&up->port)) {
 		up->interrupt_mask1 |= SAB82532_IMR1_XPR;
 		writeb(up->interrupt_mask1, &up->regs->w.imr1);
-		uart_write_wakeup(&up->port);
 		return;
 	}
 
@@ -289,7 +278,7 @@ static void transmit_chars(struct uart_sunsab_port *up,
 		uart_write_wakeup(&up->port);
 
 	if (uart_circ_empty(xmit))
-		sunsab_stop_tx(&up->port, 0);
+		sunsab_stop_tx(&up->port);
 }
 
 static void check_status(struct uart_sunsab_port *up,
@@ -311,19 +300,21 @@ static void check_status(struct uart_sunsab_port *up,
 	wake_up_interruptible(&up->port.info->delta_msr_wait);
 }
 
-static irqreturn_t sunsab_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sunsab_interrupt(int irq, void *dev_id)
 {
 	struct uart_sunsab_port *up = dev_id;
 	struct tty_struct *tty;
 	union sab82532_irq_status status;
 	unsigned long flags;
+	unsigned char gis;
 
 	spin_lock_irqsave(&up->port.lock, flags);
 
 	status.stat = 0;
-	if (readb(&up->regs->r.gis) & SAB82532_GIS_ISA0)
+	gis = readb(&up->regs->r.gis) >> up->gis_shift;
+	if (gis & 1)
 		status.sreg.isr0 = readb(&up->regs->r.isr0);
-	if (readb(&up->regs->r.gis) & SAB82532_GIS_ISA1)
+	if (gis & 2)
 		status.sreg.isr1 = readb(&up->regs->r.isr1);
 
 	tty = NULL;
@@ -331,38 +322,9 @@ static irqreturn_t sunsab_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		if ((status.sreg.isr0 & (SAB82532_ISR0_TCD | SAB82532_ISR0_TIME |
 					 SAB82532_ISR0_RFO | SAB82532_ISR0_RPF)) ||
 		    (status.sreg.isr1 & SAB82532_ISR1_BRK))
-			tty = receive_chars(up, &status, regs);
+			tty = receive_chars(up, &status);
 		if ((status.sreg.isr0 & SAB82532_ISR0_CDSC) ||
 		    (status.sreg.isr1 & SAB82532_ISR1_CSC))
-			check_status(up, &status);
-		if (status.sreg.isr1 & (SAB82532_ISR1_ALLS | SAB82532_ISR1_XPR))
-			transmit_chars(up, &status);
-	}
-
-	spin_unlock(&up->port.lock);
-
-	if (tty)
-		tty_flip_buffer_push(tty);
-
-	up++;
-
-	spin_lock(&up->port.lock);
-
-	status.stat = 0;
-	if (readb(&up->regs->r.gis) & SAB82532_GIS_ISB0)
-		status.sreg.isr0 = readb(&up->regs->r.isr0);
-	if (readb(&up->regs->r.gis) & SAB82532_GIS_ISB1)
-		status.sreg.isr1 = readb(&up->regs->r.isr1);
-
-	tty = NULL;
-	if (status.stat) {
-		if ((status.sreg.isr0 & (SAB82532_ISR0_TCD | SAB82532_ISR0_TIME |
-					 SAB82532_ISR0_RFO | SAB82532_ISR0_RPF)) ||
-		    (status.sreg.isr1 & SAB82532_ISR1_BRK))
-
-			tty = receive_chars(up, &status, regs);
-		if ((status.sreg.isr0 & SAB82532_ISR0_CDSC) ||
-		    (status.sreg.isr1 & (SAB82532_ISR1_BRK | SAB82532_ISR1_CSC)))
 			check_status(up, &status);
 		if (status.sreg.isr1 & (SAB82532_ISR1_ALLS | SAB82532_ISR1_XPR))
 			transmit_chars(up, &status);
@@ -397,34 +359,31 @@ static void sunsab_set_mctrl(struct uart_port *port, unsigned int mctrl)
 	struct uart_sunsab_port *up = (struct uart_sunsab_port *) port;
 
 	if (mctrl & TIOCM_RTS) {
-		writeb(readb(&up->regs->rw.mode) & ~SAB82532_MODE_FRTS,
-		       &up->regs->rw.mode);
-		writeb(readb(&up->regs->rw.mode) | SAB82532_MODE_RTS,
-		       &up->regs->rw.mode);
+		up->cached_mode &= ~SAB82532_MODE_FRTS;
+		up->cached_mode |= SAB82532_MODE_RTS;
 	} else {
-		writeb(readb(&up->regs->rw.mode) | SAB82532_MODE_FRTS,
-		       &up->regs->rw.mode);
-		writeb(readb(&up->regs->rw.mode) | SAB82532_MODE_RTS,
-		       &up->regs->rw.mode);
+		up->cached_mode |= (SAB82532_MODE_FRTS |
+				    SAB82532_MODE_RTS);
 	}
 	if (mctrl & TIOCM_DTR) {
-		writeb(readb(&up->regs->rw.pvr) & ~(up->pvr_dtr_bit), &up->regs->rw.pvr);
+		up->cached_pvr &= ~(up->pvr_dtr_bit);
 	} else {
-		writeb(readb(&up->regs->rw.pvr) | up->pvr_dtr_bit, &up->regs->rw.pvr);
+		up->cached_pvr |= up->pvr_dtr_bit;
 	}
+
+	set_bit(SAB82532_REGS_PENDING, &up->irqflags);
+	if (test_bit(SAB82532_XPR, &up->irqflags))
+		sunsab_tx_idle(up);
 }
 
-/* port->lock is not held.  */
+/* port->lock is held by caller and interrupts are disabled.  */
 static unsigned int sunsab_get_mctrl(struct uart_port *port)
 {
 	struct uart_sunsab_port *up = (struct uart_sunsab_port *) port;
-	unsigned long flags;
 	unsigned char val;
 	unsigned int result;
 
 	result = 0;
-
-	spin_lock_irqsave(&up->port.lock, flags);
 
 	val = readb(&up->regs->r.pvr);
 	result |= (val & up->pvr_dsr_bit) ? 0 : TIOCM_DSR;
@@ -435,13 +394,11 @@ static unsigned int sunsab_get_mctrl(struct uart_port *port)
 	val = readb(&up->regs->r.star);
 	result |= (val & SAB82532_STAR_CTS) ? TIOCM_CTS : 0;
 
-	spin_unlock_irqrestore(&up->port.lock, flags);
-
 	return result;
 }
 
 /* port->lock held by caller.  */
-static void sunsab_stop_tx(struct uart_port *port, unsigned int tty_stop)
+static void sunsab_stop_tx(struct uart_port *port)
 {
 	struct uart_sunsab_port *up = (struct uart_sunsab_port *) port;
 
@@ -450,7 +407,26 @@ static void sunsab_stop_tx(struct uart_port *port, unsigned int tty_stop)
 }
 
 /* port->lock held by caller.  */
-static void sunsab_start_tx(struct uart_port *port, unsigned int tty_start)
+static void sunsab_tx_idle(struct uart_sunsab_port *up)
+{
+	if (test_bit(SAB82532_REGS_PENDING, &up->irqflags)) {
+		u8 tmp;
+
+		clear_bit(SAB82532_REGS_PENDING, &up->irqflags);
+		writeb(up->cached_mode, &up->regs->rw.mode);
+		writeb(up->cached_pvr, &up->regs->rw.pvr);
+		writeb(up->cached_dafo, &up->regs->w.dafo);
+
+		writeb(up->cached_ebrg & 0xff, &up->regs->w.bgr);
+		tmp = readb(&up->regs->rw.ccr2);
+		tmp &= ~0xc0;
+		tmp |= (up->cached_ebrg >> 2) & 0xc0;
+		writeb(tmp, &up->regs->rw.ccr2);
+	}
+}
+
+/* port->lock held by caller.  */
+static void sunsab_start_tx(struct uart_port *port)
 {
 	struct uart_sunsab_port *up = (struct uart_sunsab_port *) port;
 	struct circ_buf *xmit = &up->port.info->xmit;
@@ -517,12 +493,16 @@ static void sunsab_break_ctl(struct uart_port *port, int break_state)
 
 	spin_lock_irqsave(&up->port.lock, flags);
 
-	val = readb(&up->regs->rw.dafo);
+	val = up->cached_dafo;
 	if (break_state)
 		val |= SAB82532_DAFO_XBRK;
 	else
 		val &= ~SAB82532_DAFO_XBRK;
-	writeb(val, &up->regs->rw.dafo);
+	up->cached_dafo = val;
+
+	set_bit(SAB82532_REGS_PENDING, &up->irqflags);
+	if (test_bit(SAB82532_XPR, &up->irqflags))
+		sunsab_tx_idle(up);
 
 	spin_unlock_irqrestore(&up->port.lock, flags);
 }
@@ -533,6 +513,10 @@ static int sunsab_startup(struct uart_port *port)
 	struct uart_sunsab_port *up = (struct uart_sunsab_port *) port;
 	unsigned long flags;
 	unsigned char tmp;
+	int err = request_irq(up->port.irq, sunsab_interrupt,
+			      IRQF_SHARED, "sab", up);
+	if (err)
+		return err;
 
 	spin_lock_irqsave(&up->port.lock, flags);
 
@@ -566,8 +550,9 @@ static int sunsab_startup(struct uart_port *port)
 	       SAB82532_CCR2_TOE, &up->regs->w.ccr2);
 	writeb(0, &up->regs->w.ccr3);
 	writeb(SAB82532_CCR4_MCK4 | SAB82532_CCR4_EBRG, &up->regs->w.ccr4);
-	writeb(SAB82532_MODE_RTS | SAB82532_MODE_FCTS |
-	       SAB82532_MODE_RAC, &up->regs->w.mode);
+	up->cached_mode = (SAB82532_MODE_RTS | SAB82532_MODE_FCTS |
+			   SAB82532_MODE_RAC);
+	writeb(up->cached_mode, &up->regs->w.mode);
 	writeb(SAB82532_RFC_DPS|SAB82532_RFC_RFTH_32, &up->regs->w.rfc);
 	
 	tmp = readb(&up->regs->rw.ccr0);
@@ -598,7 +583,6 @@ static void sunsab_shutdown(struct uart_port *port)
 {
 	struct uart_sunsab_port *up = (struct uart_sunsab_port *) port;
 	unsigned long flags;
-	unsigned char tmp;
 
 	spin_lock_irqsave(&up->port.lock, flags);
 
@@ -609,14 +593,13 @@ static void sunsab_shutdown(struct uart_port *port)
 	writeb(up->interrupt_mask1, &up->regs->w.imr1);
 
 	/* Disable break condition */
-	tmp = readb(&up->regs->rw.dafo);
-	tmp &= ~SAB82532_DAFO_XBRK;
-	writeb(tmp, &up->regs->rw.dafo);
+	up->cached_dafo = readb(&up->regs->rw.dafo);
+	up->cached_dafo &= ~SAB82532_DAFO_XBRK;
+	writeb(up->cached_dafo, &up->regs->rw.dafo);
 
 	/* Disable Receiver */	
-	tmp = readb(&up->regs->rw.mode);
-	tmp &= ~SAB82532_MODE_RAC;
-	writeb(tmp, &up->regs->rw.mode);
+	up->cached_mode &= ~SAB82532_MODE_RAC;
+	writeb(up->cached_mode, &up->regs->rw.mode);
 
 	/*
 	 * XXX FIXME
@@ -636,6 +619,7 @@ static void sunsab_shutdown(struct uart_port *port)
 #endif
 
 	spin_unlock_irqrestore(&up->port.lock, flags);
+	free_irq(up->port.irq, up);
 }
 
 /*
@@ -682,9 +666,9 @@ static void calc_ebrg(int baud, int *n_ret, int *m_ret)
 
 /* Internal routine, port->lock is held and local interrupts are disabled.  */
 static void sunsab_convert_to_sab(struct uart_sunsab_port *up, unsigned int cflag,
-				  unsigned int iflag, int baud)
+				  unsigned int iflag, unsigned int baud,
+				  unsigned int quot)
 {
-	unsigned int ebrg;
 	unsigned char dafo;
 	int bits, n, m;
 
@@ -713,10 +697,11 @@ static void sunsab_convert_to_sab(struct uart_sunsab_port *up, unsigned int cfla
 	} else {
 		dafo |= SAB82532_DAFO_PAR_EVEN;
 	}
+	up->cached_dafo = dafo;
 
 	calc_ebrg(baud, &n, &m);
 
-	ebrg = n | (m << 6);
+	up->cached_ebrg = n | (m << 6);
 
 	up->tec_timeout = (10 * 1000000) / baud;
 	up->cec_timeout = up->tec_timeout >> 2;
@@ -766,28 +751,29 @@ static void sunsab_convert_to_sab(struct uart_sunsab_port *up, unsigned int cfla
 		up->port.ignore_status_mask |= (SAB82532_ISR0_RPF |
 						SAB82532_ISR0_TCD);
 
-	/* Now bang the new settings into the chip.  */
-	sunsab_cec_wait(up);
-	sunsab_tec_wait(up);
-	writeb(dafo, &up->regs->w.dafo);
-	writeb(ebrg & 0xff, &up->regs->w.bgr);
-	writeb((readb(&up->regs->rw.ccr2) & ~0xc0) | ((ebrg >> 2) & 0xc0),
-	       &up->regs->rw.ccr2);
+	uart_update_timeout(&up->port, cflag,
+			    (up->port.uartclk / (16 * quot)));
 
-	writeb(readb(&up->regs->rw.mode) | SAB82532_MODE_RAC, &up->regs->rw.mode);
-
+	/* Now schedule a register update when the chip's
+	 * transmitter is idle.
+	 */
+	up->cached_mode |= SAB82532_MODE_RAC;
+	set_bit(SAB82532_REGS_PENDING, &up->irqflags);
+	if (test_bit(SAB82532_XPR, &up->irqflags))
+		sunsab_tx_idle(up);
 }
 
 /* port->lock is not held.  */
-static void sunsab_set_termios(struct uart_port *port, struct termios *termios,
-			       struct termios *old)
+static void sunsab_set_termios(struct uart_port *port, struct ktermios *termios,
+			       struct ktermios *old)
 {
 	struct uart_sunsab_port *up = (struct uart_sunsab_port *) port;
 	unsigned long flags;
-	int baud = uart_get_baud_rate(port, termios, old, 0, 4000000);
+	unsigned int baud = uart_get_baud_rate(port, termios, old, 0, 4000000);
+	unsigned int quot = uart_get_divisor(port, baud);
 
 	spin_lock_irqsave(&up->port.lock, flags);
-	sunsab_convert_to_sab(up, termios->c_cflag, termios->c_iflag, baud);
+	sunsab_convert_to_sab(up, termios->c_cflag, termios->c_iflag, baud, quot);
 	spin_unlock_irqrestore(&up->port.lock, flags);
 }
 
@@ -841,55 +827,64 @@ static struct uart_ops sunsab_pops = {
 static struct uart_driver sunsab_reg = {
 	.owner			= THIS_MODULE,
 	.driver_name		= "serial",
-	.devfs_name		= "tts/",
 	.dev_name		= "ttyS",
 	.major			= TTY_MAJOR,
 };
 
 static struct uart_sunsab_port *sunsab_ports;
-static int num_channels;
 
 #ifdef CONFIG_SERIAL_SUNSAB_CONSOLE
 
-static __inline__ void sunsab_console_putchar(struct uart_sunsab_port *up, char c)
+static void sunsab_console_putchar(struct uart_port *port, int c)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&up->port.lock, flags);
+	struct uart_sunsab_port *up = (struct uart_sunsab_port *)port;
 
 	sunsab_tec_wait(up);
 	writeb(c, &up->regs->w.tic);
-
-	spin_unlock_irqrestore(&up->port.lock, flags);
 }
 
 static void sunsab_console_write(struct console *con, const char *s, unsigned n)
 {
 	struct uart_sunsab_port *up = &sunsab_ports[con->index];
-	int i;
+	unsigned long flags;
+	int locked = 1;
 
-	for (i = 0; i < n; i++) {
-		if (*s == '\n')
-			sunsab_console_putchar(up, '\r');
-		sunsab_console_putchar(up, *s++);
-	}
+	local_irq_save(flags);
+	if (up->port.sysrq) {
+		locked = 0;
+	} else if (oops_in_progress) {
+		locked = spin_trylock(&up->port.lock);
+	} else
+		spin_lock(&up->port.lock);
+
+	uart_console_write(&up->port, s, n, sunsab_console_putchar);
 	sunsab_tec_wait(up);
+
+	if (locked)
+		spin_unlock(&up->port.lock);
+	local_irq_restore(flags);
 }
 
 static int sunsab_console_setup(struct console *con, char *options)
 {
 	struct uart_sunsab_port *up = &sunsab_ports[con->index];
 	unsigned long flags;
-	int baud;
+	unsigned int baud, quot;
+
+	/*
+	 * The console framework calls us for each and every port
+	 * registered. Defer the console setup until the requested
+	 * port has been properly discovered. A bit of a hack,
+	 * though...
+	 */
+	if (up->port.type != PORT_SUNSAB)
+		return -1;
 
 	printk("Console: ttyS%d (SAB82532)\n",
 	       (sunsab_reg.minor - 64) + con->index);
 
 	sunserial_console_termios(con);
 
-	/* Firmware console speed is limited to 150-->38400 baud so
-	 * this hackish cflag thing is OK.
-	 */
 	switch (con->cflag & CBAUD) {
 	case B150: baud = 150; break;
 	case B300: baud = 300; break;
@@ -900,6 +895,10 @@ static int sunsab_console_setup(struct console *con, char *options)
 	default: case B9600: baud = 9600; break;
 	case B19200: baud = 19200; break;
 	case B38400: baud = 38400; break;
+	case B57600: baud = 57600; break;
+	case B115200: baud = 115200; break;
+	case B230400: baud = 230400; break;
+	case B460800: baud = 460800; break;
 	};
 
 	/*
@@ -926,7 +925,8 @@ static int sunsab_console_setup(struct console *con, char *options)
 				SAB82532_IMR1_XPR;
 	writeb(up->interrupt_mask1, &up->regs->w.imr1);
 
-	sunsab_convert_to_sab(up, con->cflag, 0, baud);
+	quot = uart_get_divisor(&up->port, baud);
+	sunsab_convert_to_sab(up, con->cflag, 0, baud, quot);
 	sunsab_set_mctrl(&up->port, TIOCM_DTR | TIOCM_RTS);
 
 	spin_unlock_irqrestore(&up->port.lock, flags);
@@ -943,221 +943,198 @@ static struct console sunsab_console = {
 	.index	=	-1,
 	.data	=	&sunsab_reg,
 };
-#define SUNSAB_CONSOLE	(&sunsab_console)
 
-static void __init sunsab_console_init(void)
+static inline struct console *SUNSAB_CONSOLE(void)
 {
-	int i;
-
-	if (con_is_present())
-		return;
-
-	for (i = 0; i < num_channels; i++) {
-		int this_minor = sunsab_reg.minor + i;
-
-		if ((this_minor - 64) == (serial_console - 1))
-			break;
-	}
-	if (i == num_channels)
-		return;
-
-	sunsab_console.index = i;
-	register_console(&sunsab_console);
+	return &sunsab_console;
 }
 #else
-#define SUNSAB_CONSOLE		(NULL)
+#define SUNSAB_CONSOLE()	(NULL)
 #define sunsab_console_init()	do { } while (0)
 #endif
 
-static void __init for_each_sab_edev(void (*callback)(struct linux_ebus_device *, void *), void *arg)
+static int __devinit sunsab_init_one(struct uart_sunsab_port *up,
+				     struct of_device *op,
+				     unsigned long offset,
+				     int line)
 {
-	struct linux_ebus *ebus;
-	struct linux_ebus_device *edev = NULL;
+	up->port.line = line;
+	up->port.dev = &op->dev;
 
-	for_each_ebus(ebus) {
-		for_each_ebusdev(edev, ebus) {
-			if (!strcmp(edev->prom_name, "se")) {
-				callback(edev, arg);
-				continue;
-			} else if (!strcmp(edev->prom_name, "serial")) {
-				char compat[32];
-				int clen;
-
-				/* On RIO this can be an SE, check it.  We could
-				 * just check ebus->is_rio, but this is more portable.
-				 */
-				clen = prom_getproperty(edev->prom_node, "compatible",
-							compat, sizeof(compat));
-				if (clen > 0) {
-					if (strncmp(compat, "sab82532", 8) == 0) {
-						callback(edev, arg);
-						continue;
-					}
-				}
-			}
-		}
-	}
-}
-
-static void __init sab_count_callback(struct linux_ebus_device *edev, void *arg)
-{
-	int *count_p = arg;
-
-	(*count_p)++;
-}
-
-static void __init sab_attach_callback(struct linux_ebus_device *edev, void *arg)
-{
-	int *instance_p = arg;
-	struct uart_sunsab_port *up;
-	unsigned long regs, offset;
-	int i;
-
-	/* Note: ports are located in reverse order */
-	regs = edev->resource[0].start;
-	offset = sizeof(union sab82532_async_regs);
-	for (i = 0; i < 2; i++) {
-		up = &sunsab_ports[(*instance_p * 2) + 1 - i];
-
-		memset(up, 0, sizeof(*up));
-		up->regs = ioremap(regs + offset, sizeof(union sab82532_async_regs));
-		up->port.irq = edev->irqs[0];
-		up->port.fifosize = SAB82532_XMIT_FIFO_SIZE;
-		up->port.mapbase = (unsigned long)up->regs;
-		up->port.iotype = SERIAL_IO_MEM;
-
-		writeb(SAB82532_IPC_IC_ACT_LOW, &up->regs->w.ipc);
-
-		offset -= sizeof(union sab82532_async_regs);
-	}
-	
-	(*instance_p)++;
-}
-
-static int __init probe_for_sabs(void)
-{
-	int this_sab = 0;
-
-	/* Find device instances.  */
-	for_each_sab_edev(&sab_count_callback, &this_sab);
-	if (!this_sab)
-		return -ENODEV;
-
-	/* Allocate tables.  */
-	sunsab_ports = kmalloc(sizeof(struct uart_sunsab_port) * this_sab * 2,
-			       GFP_KERNEL);
-	if (!sunsab_ports)
+	up->port.mapbase = op->resource[0].start + offset;
+	up->port.membase = of_ioremap(&op->resource[0], offset,
+				      sizeof(union sab82532_async_regs),
+				      "sab");
+	if (!up->port.membase)
 		return -ENOMEM;
+	up->regs = (union sab82532_async_regs __iomem *) up->port.membase;
 
-	num_channels = this_sab * 2;
+	up->port.irq = op->irqs[0];
 
-	this_sab = 0;
-	for_each_sab_edev(&sab_attach_callback, &this_sab);
+	up->port.fifosize = SAB82532_XMIT_FIFO_SIZE;
+	up->port.iotype = UPIO_MEM;
+
+	writeb(SAB82532_IPC_IC_ACT_LOW, &up->regs->w.ipc);
+
+	up->port.ops = &sunsab_pops;
+	up->port.type = PORT_SUNSAB;
+	up->port.uartclk = SAB_BASE_BAUD;
+
+	up->type = readb(&up->regs->r.vstr) & 0x0f;
+	writeb(~((1 << 1) | (1 << 2) | (1 << 4)), &up->regs->w.pcr);
+	writeb(0xff, &up->regs->w.pim);
+	if ((up->port.line & 0x1) == 0) {
+		up->pvr_dsr_bit = (1 << 0);
+		up->pvr_dtr_bit = (1 << 1);
+		up->gis_shift = 2;
+	} else {
+		up->pvr_dsr_bit = (1 << 3);
+		up->pvr_dtr_bit = (1 << 2);
+		up->gis_shift = 0;
+	}
+	up->cached_pvr = (1 << 1) | (1 << 2) | (1 << 4);
+	writeb(up->cached_pvr, &up->regs->w.pvr);
+	up->cached_mode = readb(&up->regs->rw.mode);
+	up->cached_mode |= SAB82532_MODE_FRTS;
+	writeb(up->cached_mode, &up->regs->rw.mode);
+	up->cached_mode |= SAB82532_MODE_RTS;
+	writeb(up->cached_mode, &up->regs->rw.mode);
+
+	up->tec_timeout = SAB82532_MAX_TEC_TIMEOUT;
+	up->cec_timeout = SAB82532_MAX_CEC_TIMEOUT;
+
 	return 0;
 }
 
-static void __init sunsab_init_hw(void)
+static int __devinit sab_probe(struct of_device *op, const struct of_device_id *match)
 {
-	int i;
+	static int inst;
+	struct uart_sunsab_port *up;
+	int err;
 
-	for (i = 0; i < num_channels; i++) {
-		struct uart_sunsab_port *up = &sunsab_ports[i];
+	up = &sunsab_ports[inst * 2];
 
-		up->port.line = i;
-		up->port.ops = &sunsab_pops;
-		up->port.type = PORT_SUNSAB;
-		up->port.uartclk = SAB_BASE_BAUD;
+	err = sunsab_init_one(&up[0], op,
+			      0,
+			      (inst * 2) + 0);
+	if (err)
+		goto out;
 
-		up->type = readb(&up->regs->r.vstr) & 0x0f;
-		writeb(~((1 << 1) | (1 << 2) | (1 << 4)), &up->regs->w.pcr);
-		writeb(0xff, &up->regs->w.pim);
-		if (up->port.line == 0) {
-			up->pvr_dsr_bit = (1 << 0);
-			up->pvr_dtr_bit = (1 << 1);
-		} else {
-			up->pvr_dsr_bit = (1 << 3);
-			up->pvr_dtr_bit = (1 << 2);
-		}
-		writeb((1 << 1) | (1 << 2) | (1 << 4), &up->regs->w.pvr);
-		writeb(readb(&up->regs->rw.mode) | SAB82532_MODE_FRTS,
-		       &up->regs->rw.mode);
-		writeb(readb(&up->regs->rw.mode) | SAB82532_MODE_RTS,
-		       &up->regs->rw.mode);
+	err = sunsab_init_one(&up[1], op,
+			      sizeof(union sab82532_async_regs),
+			      (inst * 2) + 1);
+	if (err)
+		goto out1;
 
-		up->tec_timeout = SAB82532_MAX_TEC_TIMEOUT;
-		up->cec_timeout = SAB82532_MAX_CEC_TIMEOUT;
+	sunserial_console_match(SUNSAB_CONSOLE(), op->node,
+				&sunsab_reg, up[0].port.line);
 
-		if (!(up->port.line & 0x01)) {
-			if (request_irq(up->port.irq, sunsab_interrupt,
-			                SA_SHIRQ, "serial(sab82532)", up)) {
-				printk("sunsab%d: can't get IRQ %x\n",
-				       i, up->port.irq);
-				continue;
-			}
-		}
-	}
+	sunserial_console_match(SUNSAB_CONSOLE(), op->node,
+				&sunsab_reg, up[1].port.line);
+
+	err = uart_add_one_port(&sunsab_reg, &up[0].port);
+	if (err)
+		goto out2;
+
+	err = uart_add_one_port(&sunsab_reg, &up[1].port);
+	if (err)
+		goto out3;
+
+	dev_set_drvdata(&op->dev, &up[0]);
+
+	inst++;
+
+	return 0;
+
+out3:
+	uart_remove_one_port(&sunsab_reg, &up[0].port);
+out2:
+	of_iounmap(&op->resource[0],
+		   up[1].port.membase,
+		   sizeof(union sab82532_async_regs));
+out1:
+	of_iounmap(&op->resource[0],
+		   up[0].port.membase,
+		   sizeof(union sab82532_async_regs));
+out:
+	return err;
 }
+
+static int __devexit sab_remove(struct of_device *op)
+{
+	struct uart_sunsab_port *up = dev_get_drvdata(&op->dev);
+
+	uart_remove_one_port(&sunsab_reg, &up[1].port);
+	uart_remove_one_port(&sunsab_reg, &up[0].port);
+	of_iounmap(&op->resource[0],
+		   up[1].port.membase,
+		   sizeof(union sab82532_async_regs));
+	of_iounmap(&op->resource[0],
+		   up[0].port.membase,
+		   sizeof(union sab82532_async_regs));
+
+	dev_set_drvdata(&op->dev, NULL);
+
+	return 0;
+}
+
+static struct of_device_id sab_match[] = {
+	{
+		.name = "se",
+	},
+	{
+		.name = "serial",
+		.compatible = "sab82532",
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, sab_match);
+
+static struct of_platform_driver sab_driver = {
+	.name		= "sab",
+	.match_table	= sab_match,
+	.probe		= sab_probe,
+	.remove		= __devexit_p(sab_remove),
+};
 
 static int __init sunsab_init(void)
 {
-	int ret = probe_for_sabs();
-	int i;
+	struct device_node *dp;
+	int err;
+	int num_channels = 0;
 
-	if (ret < 0)
-		return ret;
+	for_each_node_by_name(dp, "se")
+		num_channels += 2;
+	for_each_node_by_name(dp, "serial") {
+		if (of_device_is_compatible(dp, "sab82532"))
+			num_channels += 2;
+	}
 
-	sunsab_init_hw();
+	if (num_channels) {
+		sunsab_ports = kzalloc(sizeof(struct uart_sunsab_port) *
+				       num_channels, GFP_KERNEL);
+		if (!sunsab_ports)
+			return -ENOMEM;
 
-	sunsab_reg.minor = sunserial_current_minor;
-	sunsab_reg.nr = num_channels;
-	sunsab_reg.cons = SUNSAB_CONSOLE;
+		sunsab_reg.cons = SUNSAB_CONSOLE();
+		err = sunserial_register_minors(&sunsab_reg, num_channels);
+		if (err) {
+			kfree(sunsab_ports);
+			sunsab_ports = NULL;
 
-	ret = uart_register_driver(&sunsab_reg);
-	if (ret < 0) {
-		int i;
-
-		for (i = 0; i < num_channels; i++) {
-			struct uart_sunsab_port *up = &sunsab_ports[i];
-
-			if (!(up->port.line & 0x01))
-				free_irq(up->port.irq, up);
-			iounmap(up->regs);
+			return err;
 		}
-		kfree(sunsab_ports);
-		sunsab_ports = NULL;
-
-		return ret;
 	}
 
-	sunserial_current_minor += num_channels;
-	
-	sunsab_console_init();
-
-	for (i = 0; i < num_channels; i++) {
-		struct uart_sunsab_port *up = &sunsab_ports[i];
-
-		uart_add_one_port(&sunsab_reg, &up->port);
-	}
-
-	return 0;
+	return of_register_driver(&sab_driver, &of_bus_type);
 }
 
 static void __exit sunsab_exit(void)
 {
-	int i;
-
-	for (i = 0; i < num_channels; i++) {
-		struct uart_sunsab_port *up = &sunsab_ports[i];
-
-		uart_remove_one_port(&sunsab_reg, &up->port);
-
-		if (!(up->port.line & 0x01))
-			free_irq(up->port.irq, up);
-		iounmap(up->regs);
+	of_unregister_driver(&sab_driver);
+	if (sunsab_reg.nr) {
+		sunserial_unregister_minors(&sunsab_reg, sunsab_reg.nr);
 	}
-
-	sunserial_current_minor -= num_channels;
-	uart_unregister_driver(&sunsab_reg);
 
 	kfree(sunsab_ports);
 	sunsab_ports = NULL;

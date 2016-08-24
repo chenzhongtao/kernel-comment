@@ -33,7 +33,7 @@ static struct seq_operations proc_keys_ops = {
 	.show	= proc_keys_show,
 };
 
-static struct file_operations proc_keys_fops = {
+static const struct file_operations proc_keys_fops = {
 	.open		= proc_keys_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -54,7 +54,7 @@ static struct seq_operations proc_key_users_ops = {
 	.show	= proc_key_users_show,
 };
 
-static struct file_operations proc_key_users_fops = {
+static const struct file_operations proc_key_users_fops = {
 	.open		= proc_key_users_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -137,10 +137,17 @@ static int proc_keys_show(struct seq_file *m, void *v)
 	struct timespec now;
 	unsigned long timo;
 	char xbuf[12];
+	int rc;
+
+	/* check whether the current task is allowed to view the key (assuming
+	 * non-possession) */
+	rc = key_task_permission(make_key_ref(key, 0), current, KEY_VIEW);
+	if (rc < 0)
+		return 0;
 
 	now = current_kernel_time();
 
-	read_lock(&key->lock);
+	rcu_read_lock();
 
 	/* come up with a suitable timeout value */
 	if (key->expiry == 0) {
@@ -164,14 +171,17 @@ static int proc_keys_show(struct seq_file *m, void *v)
 			sprintf(xbuf, "%luw", timo / (60*60*24*7));
 	}
 
-	seq_printf(m, "%08x %c%c%c%c%c%c %5d %4s %06x %5d %5d %-9.9s ",
+#define showflag(KEY, LETTER, FLAG) \
+	(test_bit(FLAG,	&(KEY)->flags) ? LETTER : '-')
+
+	seq_printf(m, "%08x %c%c%c%c%c%c %5d %4s %08x %5d %5d %-9.9s ",
 		   key->serial,
-		   key->flags & KEY_FLAG_INSTANTIATED	? 'I' : '-',
-		   key->flags & KEY_FLAG_REVOKED	? 'R' : '-',
-		   key->flags & KEY_FLAG_DEAD		? 'D' : '-',
-		   key->flags & KEY_FLAG_IN_QUOTA	? 'Q' : '-',
-		   key->flags & KEY_FLAG_USER_CONSTRUCT	? 'U' : '-',
-		   key->flags & KEY_FLAG_NEGATIVE	? 'N' : '-',
+		   showflag(key, 'I', KEY_FLAG_INSTANTIATED),
+		   showflag(key, 'R', KEY_FLAG_REVOKED),
+		   showflag(key, 'D', KEY_FLAG_DEAD),
+		   showflag(key, 'Q', KEY_FLAG_IN_QUOTA),
+		   showflag(key, 'U', KEY_FLAG_USER_CONSTRUCT),
+		   showflag(key, 'N', KEY_FLAG_NEGATIVE),
 		   atomic_read(&key->usage),
 		   xbuf,
 		   key->perm,
@@ -179,11 +189,13 @@ static int proc_keys_show(struct seq_file *m, void *v)
 		   key->gid,
 		   key->type->name);
 
+#undef showflag
+
 	if (key->type->describe)
 		key->type->describe(key, m);
 	seq_putc(m, '\n');
 
-	read_unlock(&key->lock);
+	rcu_read_unlock();
 
 	return 0;
 

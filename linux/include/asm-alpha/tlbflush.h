@@ -1,7 +1,6 @@
 #ifndef _ALPHA_TLBFLUSH_H
 #define _ALPHA_TLBFLUSH_H
 
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <asm/compiler.h>
 
@@ -91,17 +90,6 @@ flush_tlb_other(struct mm_struct *mm)
 	/* Check it's not zero first to avoid cacheline ping pong
 	   when possible.  */
 	if (*mmc) *mmc = 0;
-}
-
-/* Flush a specified range of user mapping page tables from TLB.
-   Although Alpha uses VPTE caches, this can be a nop, as Alpha does
-   not have finegrained tlb flushing, so it will flush VPTE stuff
-   during next flush_tlb_range.  */
-
-static inline void
-flush_tlb_pgtables(struct mm_struct *mm, unsigned long start,
-		   unsigned long end)
-{
 }
 
 #ifndef CONFIG_SMP

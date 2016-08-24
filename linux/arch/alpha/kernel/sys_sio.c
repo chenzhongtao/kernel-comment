@@ -10,14 +10,13 @@
  * Kenetics's Platform 2000, Avanti (AlphaStation), XL, and AlphaBook1.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 
 #include <asm/compiler.h>
 #include <asm/ptrace.h>
@@ -79,18 +78,22 @@ alphabook1_init_arch(void)
  * example, sound boards seem to like using IRQ 9.
  *
  * This is NOT how we should do it. PIRQ0-X should have
- * their own IRQ's, the way intel uses the IO-APIC irq's.
+ * their own IRQs, the way intel uses the IO-APIC IRQs.
  */
 
 static void __init
 sio_pci_route(void)
 {
-#if defined(ALPHA_RESTORE_SRM_SETUP)
-	/* First, read and save the original setting. */
+	unsigned int orig_route_tab;
+
+	/* First, ALWAYS read and print the original setting. */
 	pci_bus_read_config_dword(pci_isa_hose->bus, PCI_DEVFN(7, 0), 0x60,
-				  &saved_config.orig_route_tab);
+				  &orig_route_tab);
 	printk("%s: PIRQ original 0x%x new 0x%x\n", __FUNCTION__,
-	       saved_config.orig_route_tab, alpha_mv.sys.sio.route_tab);
+	       orig_route_tab, alpha_mv.sys.sio.route_tab);
+
+#if defined(ALPHA_RESTORE_SRM_SETUP)
+	saved_config.orig_route_tab = orig_route_tab;
 #endif
 
 	/* Now override with desired setting. */
@@ -105,7 +108,7 @@ sio_collect_irq_levels(void)
 	struct pci_dev *dev = NULL;
 
 	/* Iterate through the devices, collecting IRQ levels.  */
-	while ((dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
+	for_each_pci_dev(dev) {
 		if ((dev->class >> 16 == PCI_BASE_CLASS_BRIDGE) &&
 		    (dev->class >> 8 != PCI_CLASS_BRIDGE_PCMCIA))
 			continue;
@@ -229,8 +232,8 @@ alphabook1_init_pci(void)
 	 */
 
 	dev = NULL;
-	while ((dev = pci_find_device(PCI_VENDOR_ID_NCR, PCI_ANY_ID, dev))) {
-                if (dev->device == PCI_DEVICE_ID_NCR_53C810
+	while ((dev = pci_get_device(PCI_VENDOR_ID_NCR, PCI_ANY_ID, dev))) {
+		if (dev->device == PCI_DEVICE_ID_NCR_53C810
 		    || dev->device == PCI_DEVICE_ID_NCR_53C815
 		    || dev->device == PCI_DEVICE_ID_NCR_53C820
 		    || dev->device == PCI_DEVICE_ID_NCR_53C825) {
@@ -335,7 +338,7 @@ struct alpha_machine_vector avanti_mv __initmv = {
 	.pci_swizzle		= common_swizzle,
 
 	.sys = { .sio = {
-		.route_tab	= 0x0b0a0e0f,
+		.route_tab	= 0x0b0a050f, /* leave 14 for IDE, 9 for SND */
 	}}
 };
 ALIAS_MV(avanti)

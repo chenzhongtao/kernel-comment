@@ -17,6 +17,7 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 
 /* Possible states of device */
 enum {
@@ -52,18 +53,19 @@ struct loop_device {
 	unsigned	lo_blocksize;
 	void		*key_data; 
 
-	int		old_gfp_mask;
+	gfp_t		old_gfp_mask;
 
 	spinlock_t		lo_lock;
 	struct bio 		*lo_bio;
 	struct bio		*lo_biotail;
 	int			lo_state;
-	struct semaphore	lo_sem;
-	struct semaphore	lo_ctl_mutex;
-	struct semaphore	lo_bh_mutex;
-	atomic_t		lo_pending;
+	struct mutex		lo_ctl_mutex;
+	struct task_struct	*lo_thread;
+	wait_queue_head_t	lo_event;
 
-	request_queue_t		*lo_queue;
+	struct request_queue	*lo_queue;
+	struct gendisk		*lo_disk;
+	struct list_head	lo_list;
 };
 
 #endif /* __KERNEL__ */
@@ -71,7 +73,10 @@ struct loop_device {
 /*
  * Loop flags
  */
-#define LO_FLAGS_READ_ONLY	1
+enum {
+	LO_FLAGS_READ_ONLY	= 1,
+	LO_FLAGS_USE_AOPS	= 2,
+};
 
 #include <asm/posix_types.h>	/* for __kernel_old_dev_t */
 #include <asm/types.h>		/* for __u64 */

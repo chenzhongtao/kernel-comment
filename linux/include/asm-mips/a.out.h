@@ -10,7 +10,6 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 
 #endif
 
@@ -35,12 +34,14 @@ struct exec
 
 #ifdef __KERNEL__
 
-#ifdef CONFIG_MIPS32
+#ifdef CONFIG_32BIT
 #define STACK_TOP	TASK_SIZE
 #endif
-#ifdef CONFIG_MIPS64
-#define STACK_TOP	(current->thread.mflags & MF_32BIT_ADDR ? TASK_SIZE32 : TASK_SIZE)
+#ifdef CONFIG_64BIT
+#define STACK_TOP	\
+      (test_thread_flag(TIF_32BIT_ADDR) ? TASK_SIZE32 : TASK_SIZE)
 #endif
+#define STACK_TOP_MAX	TASK_SIZE
 
 #endif
 

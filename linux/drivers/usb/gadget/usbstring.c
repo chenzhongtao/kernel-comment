@@ -14,13 +14,13 @@
 #include <linux/device.h>
 #include <linux/init.h>
 
-#include <linux/usb_ch9.h>
-#include <linux/usb_gadget.h>
+#include <linux/usb/ch9.h>
+#include <linux/usb/gadget.h>
 
 #include <asm/unaligned.h>
 
 
-static int utf8_to_utf16le(const char *s, u16 *cp, unsigned len)
+static int utf8_to_utf16le(const char *s, __le16 *cp, unsigned len)
 {
 	int	count = 0;
 	u8	c;
@@ -126,7 +126,7 @@ usb_gadget_get_string (struct usb_gadget_strings *table, int id, u8 *buf)
 	/* string descriptors have length, tag, then UTF16-LE text */
 	len = min ((size_t) 126, strlen (s->s));
 	memset (buf + 2, 0, 2 * len);	/* zero all the bytes */
-	len = utf8_to_utf16le(s->s, (u16 *)&buf[2], len);
+	len = utf8_to_utf16le(s->s, (__le16 *)&buf[2], len);
 	if (len < 0)
 		return -EINVAL;
 	buf [0] = (len + 1) * 2;

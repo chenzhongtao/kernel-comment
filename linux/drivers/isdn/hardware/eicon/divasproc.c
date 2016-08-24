@@ -10,7 +10,6 @@
  * of the GNU General Public License, incorporated herein by reference.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/poll.h>
@@ -114,7 +113,7 @@ static int divas_close(struct inode *inode, struct file *file)
 	return (0);
 }
 
-static struct file_operations divas_fops = {
+static const struct file_operations divas_fops = {
 	.owner   = THIS_MODULE,
 	.llseek  = no_llseek,
 	.read    = divas_read,
@@ -381,7 +380,7 @@ int create_adapter_proc(diva_os_xdi_adapter_t * a)
 	char tmp[16];
 
 	sprintf(tmp, "%s%d", adapter_dir_name, a->controller);
-	if (!(de = create_proc_entry(tmp, S_IFDIR, proc_net_eicon)))
+	if (!(de = proc_mkdir(tmp, proc_net_eicon)))
 		return (0);
 	a->proc_adapter_dir = (void *) de;
 

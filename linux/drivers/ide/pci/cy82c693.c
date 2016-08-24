@@ -1,5 +1,5 @@
 /*
- * linux/drivers/ide/pci/cy82c693.c		Version 0.40	Sep. 10, 2002
+ * linux/drivers/ide/pci/cy82c693.c		Version 0.42	Oct 23, 2007
  *
  *  Copyright (C) 1998-2000 Andreas S. Krebs (akrebs@altavista.net), Maintainer
  *  Copyright (C) 1998-2002 Andre Hedrick <andre@linux-ide.org>, Integrator
@@ -44,7 +44,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/pci.h>
@@ -98,9 +97,6 @@
 #define CY82_INDEX_CHANNEL1	0x31
 #define CY82_INDEX_TIMEOUT	0x32
 
-/* the max PIO mode - from datasheet */
-#define CY82C693_MAX_PIO	4
-
 /* the min and max PCI bus speed in MHz - from datasheet */
 #define CY82C963_MIN_BUS_SPEED	25
 #define CY82C963_MAX_BUS_SPEED	33
@@ -149,9 +145,6 @@ static void compute_clocks (u8 pio, pio_clocks_t *p_pclk)
 	 * so you can play with the idebus=xx parameter
 	 */
 
-	if (pio > CY82C693_MAX_PIO)
-		pio = CY82C693_MAX_PIO;
-
 	/* let's calc the address setup time clocks */
 	p_pclk->address_time = (u8)calc_clk(ide_pio_timings[pio].setup_time, bus_speed);
 
@@ -198,8 +191,8 @@ static void cy82c693_dma_enable (ide_drive_t *drive, int mode, int single)
 #if CY82C693_DEBUG_LOGS
 	/* for debug let's show the previous values */
 
-	HWIF(drive)->OUTB(index, CY82_INDEX_PORT);
-	data = HWIF(drive)->INB(CY82_DATA_PORT);
+	outb(index, CY82_INDEX_PORT);
+	data = inb(CY82_DATA_PORT);
 
 	printk (KERN_INFO "%s (ch=%d, dev=%d): DMA mode is %d (single=%d)\n",
 		drive->name, HWIF(drive)->channel, drive->select.b.unit,
@@ -208,8 +201,8 @@ static void cy82c693_dma_enable (ide_drive_t *drive, int mode, int single)
 
 	data = (u8)mode|(u8)(single<<2);
 
-	HWIF(drive)->OUTB(index, CY82_INDEX_PORT);
-	HWIF(drive)->OUTB(data, CY82_DATA_PORT);
+	outb(index, CY82_INDEX_PORT);
+	outb(data, CY82_DATA_PORT);
 
 #if CY82C693_DEBUG_INFO
 	printk(KERN_INFO "%s (ch=%d, dev=%d): set DMA mode to %d (single=%d)\n",
@@ -228,8 +221,8 @@ static void cy82c693_dma_enable (ide_drive_t *drive, int mode, int single)
 	 */
 
 	data = BUSMASTER_TIMEOUT;
-	HWIF(drive)->OUTB(CY82_INDEX_TIMEOUT, CY82_INDEX_PORT);
-	HWIF(drive)->OUTB(data, CY82_DATA_PORT);
+	outb(CY82_INDEX_TIMEOUT, CY82_INDEX_PORT);
+	outb(data, CY82_DATA_PORT);
 
 #if CY82C693_DEBUG_INFO	
 	printk (KERN_INFO "%s: Set IDE Bus Master TimeOut Register to 0x%X\n",
@@ -270,10 +263,7 @@ static int cy82c693_ide_dma_on (ide_drive_t *drive)
         return __ide_dma_on(drive);
 }
 
-/*
- * tune ide drive - set PIO mode
- */
-static void cy82c693_tune_drive (ide_drive_t *drive, u8 pio)
+static void cy82c693_set_pio_mode(ide_drive_t *drive, const u8 pio)
 {
 	ide_hwif_t *hwif = HWIF(drive);
 	struct pci_dev *dev = hwif->pci_dev;
@@ -282,7 +272,7 @@ static void cy82c693_tune_drive (ide_drive_t *drive, u8 pio)
 
 	/* select primary or secondary channel */
 	if (hwif->index > 0) {  /* drive is on the secondary channel */
-		dev = pci_find_slot(dev->bus->number, dev->devfn+1);
+		dev = pci_get_slot(dev->bus, dev->devfn+1);
 		if (!dev) {
 			printk(KERN_ERR "%s: tune_drive: "
 				"Cannot find secondary interface!\n",
@@ -329,13 +319,6 @@ static void cy82c693_tune_drive (ide_drive_t *drive, u8 pio)
 		drive->name, hwif->channel, drive->select.b.unit,
 		addrCtrl, pclk.time_16r, pclk.time_16w, pclk.time_8);
 #endif /* CY82C693_DEBUG_LOGS */
-
-	/* first let's calc the pio modes */
-	pio = ide_get_best_pio_mode(drive, pio, CY82C693_MAX_PIO, NULL);
-
-#if CY82C693_DEBUG_INFO
-	printk (KERN_INFO "%s: Selected PIO mode %d\n", drive->name, pio);
-#endif /* CY82C693_DEBUG_INFO */
 
 	/* let's calc the values for this PIO mode */
 	compute_clocks(pio, &pclk);
@@ -391,7 +374,7 @@ static void cy82c693_tune_drive (ide_drive_t *drive, u8 pio)
 /*
  * this function is called during init and is used to setup the cy82c693 chip
  */
-static unsigned int __init init_chipset_cy82c693(struct pci_dev *dev, const char *name)
+static unsigned int __devinit init_chipset_cy82c693(struct pci_dev *dev, const char *name)
 {
 	if (PCI_FUNC(dev->devfn) != 1)
 		return 0;
@@ -443,34 +426,20 @@ static unsigned int __init init_chipset_cy82c693(struct pci_dev *dev, const char
 /*
  * the init function - called for each ide channel once
  */
-static void __init init_hwif_cy82c693(ide_hwif_t *hwif)
+static void __devinit init_hwif_cy82c693(ide_hwif_t *hwif)
 {
-	hwif->autodma = 0;
+	hwif->set_pio_mode = &cy82c693_set_pio_mode;
 
-	hwif->chipset = ide_cy82c693;
-	hwif->tuneproc = &cy82c693_tune_drive;
-
-	if (!hwif->dma_base) {
-		hwif->drives[0].autotune = 1;
-		hwif->drives[1].autotune = 1;
+	if (hwif->dma_base == 0)
 		return;
-	}
-
-	hwif->atapi_dma = 1;
-	hwif->mwdma_mask = 0x04;
-	hwif->swdma_mask = 0x04;
 
 	hwif->ide_dma_on = &cy82c693_ide_dma_on;
-	if (!noautodma)
-		hwif->autodma = 1;
-	hwif->drives[0].autodma = hwif->autodma;
-	hwif->drives[1].autodma = hwif->autodma;
 }
 
-static __initdata ide_hwif_t *primary;
-
-void __init init_iops_cy82c693(ide_hwif_t *hwif)
+static void __devinit init_iops_cy82c693(ide_hwif_t *hwif)
 {
+	static ide_hwif_t *primary;
+
 	if (PCI_FUNC(hwif->pci_dev->devfn) == 1)
 		primary = hwif;
 	else {
@@ -479,21 +448,21 @@ void __init init_iops_cy82c693(ide_hwif_t *hwif)
 	}
 }
 
-static ide_pci_device_t cy82c693_chipsets[] __devinitdata = {
-	{	/* 0 */
-		.name		= "CY82C693",
-		.init_chipset	= init_chipset_cy82c693,
-		.init_iops	= init_iops_cy82c693,
-		.init_hwif	= init_hwif_cy82c693,
-		.channels	= 1,
-		.autodma	= AUTODMA,
-		.bootable	= ON_BOARD,
-	}
+static const struct ide_port_info cy82c693_chipset __devinitdata = {
+	.name		= "CY82C693",
+	.init_chipset	= init_chipset_cy82c693,
+	.init_iops	= init_iops_cy82c693,
+	.init_hwif	= init_hwif_cy82c693,
+	.chipset	= ide_cy82c693,
+	.host_flags	= IDE_HFLAG_SINGLE | IDE_HFLAG_TRUST_BIOS_FOR_DMA |
+			  IDE_HFLAG_BOOTABLE,
+	.pio_mask	= ATA_PIO4,
+	.swdma_mask	= ATA_SWDMA2_ONLY,
+	.mwdma_mask	= ATA_MWDMA2_ONLY,
 };
 
 static int __devinit cy82c693_init_one(struct pci_dev *dev, const struct pci_device_id *id)
 {
-	ide_pci_device_t *d = &cy82c693_chipsets[id->driver_data];
 	struct pci_dev *dev2;
 	int ret = -ENODEV;
 
@@ -501,14 +470,15 @@ static int __devinit cy82c693_init_one(struct pci_dev *dev, const struct pci_dev
 	   Function 1 is primary IDE channel, function 2 - secondary. */
         if ((dev->class >> 8) == PCI_CLASS_STORAGE_IDE &&
 	    PCI_FUNC(dev->devfn) == 1) {
-		dev2 = pci_find_slot(dev->bus->number, dev->devfn + 1);
-		ret = ide_setup_pci_devices(dev, dev2, d);
+		dev2 = pci_get_slot(dev->bus, dev->devfn + 1);
+		ret = ide_setup_pci_devices(dev, dev2, &cy82c693_chipset);
+		/* We leak pci refs here but thats ok - we can't be unloaded */
 	}
 	return ret;
 }
 
-static struct pci_device_id cy82c693_pci_tbl[] = {
-	{ PCI_VENDOR_ID_CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+static const struct pci_device_id cy82c693_pci_tbl[] = {
+	{ PCI_VDEVICE(CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693), 0 },
 	{ 0, },
 };
 MODULE_DEVICE_TABLE(pci, cy82c693_pci_tbl);
@@ -519,7 +489,7 @@ static struct pci_driver driver = {
 	.probe		= cy82c693_init_one,
 };
 
-static int cy82c693_ide_init(void)
+static int __init cy82c693_ide_init(void)
 {
 	return ide_pci_register_driver(&driver);
 }

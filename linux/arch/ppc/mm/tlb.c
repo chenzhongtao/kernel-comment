@@ -23,11 +23,11 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/highmem.h>
+#include <linux/pagemap.h>
 #include <asm/tlbflush.h>
 #include <asm/tlb.h>
 
@@ -42,28 +42,8 @@ void flush_hash_entry(struct mm_struct *mm, pte_t *ptep, unsigned long addr)
 
 	if (Hash != 0) {
 		ptephys = __pa(ptep) & PAGE_MASK;
-		flush_hash_pages(mm->context, addr, ptephys, 1);
+		flush_hash_pages(mm->context.id, addr, ptephys, 1);
 	}
-}
-
-/*
- * Called by ptep_test_and_clear_young()
- */
-void flush_hash_one_pte(pte_t *ptep)
-{
-	struct page *ptepage;
-	struct mm_struct *mm;
-	unsigned long ptephys;
-	unsigned long addr;
-
-	if (Hash == 0)
-		return;
-	
-	ptepage = virt_to_page(ptep);
-	mm = (struct mm_struct *) ptepage->mapping;
-	ptephys = __pa(ptep) & PAGE_MASK;
-	addr = ptepage->index + (((unsigned long)ptep & ~PAGE_MASK) << 10);
-	flush_hash_pages(mm->context, addr, ptephys, 1);
 }
 
 /*
@@ -122,7 +102,7 @@ static void flush_range(struct mm_struct *mm, unsigned long start,
 	pmd_t *pmd;
 	unsigned long pmd_end;
 	int count;
-	unsigned int ctx = mm->context;
+	unsigned int ctx = mm->context.id;
 
 	if (Hash == 0) {
 		_tlbia();
@@ -186,7 +166,7 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long vmaddr)
 	mm = (vmaddr < TASK_SIZE)? vma->vm_mm: &init_mm;
 	pmd = pmd_offset(pgd_offset(mm, vmaddr), vmaddr);
 	if (!pmd_none(*pmd))
-		flush_hash_pages(mm->context, vmaddr, pmd_val(*pmd), 1);
+		flush_hash_pages(mm->context.id, vmaddr, pmd_val(*pmd), 1);
 	FINISH_FLUSH;
 }
 

@@ -1,5 +1,4 @@
 /*
- * $Id: saa7134-input.c,v 1.12 2004/11/07 13:17:15 kraxel Exp $
  *
  * handle saa7134 IR remotes via linux kernel input layer.
  *
@@ -22,7 +21,6 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/input.h>
 
@@ -37,290 +35,188 @@ static unsigned int ir_debug = 0;
 module_param(ir_debug, int, 0644);
 MODULE_PARM_DESC(ir_debug,"enable debug messages [IR]");
 
+static int pinnacle_remote = 0;
+module_param(pinnacle_remote, int, 0644);    /* Choose Pinnacle PCTV remote */
+MODULE_PARM_DESC(pinnacle_remote, "Specify Pinnacle PCTV remote: 0=coloured, 1=grey (defaults to 0)");
+
+static int ir_rc5_remote_gap = 885;
+module_param(ir_rc5_remote_gap, int, 0644);
+static int ir_rc5_key_timeout = 115;
+module_param(ir_rc5_key_timeout, int, 0644);
+
+static int repeat_delay = 500;
+module_param(repeat_delay, int, 0644);
+MODULE_PARM_DESC(repeat_delay, "delay before key repeat started");
+static int repeat_period = 33;
+module_param(repeat_period, int, 0644);
+MODULE_PARM_DESC(repeat_period, "repeat period between"
+    "keypresses when key is down");
+
 #define dprintk(fmt, arg...)	if (ir_debug) \
 	printk(KERN_DEBUG "%s/ir: " fmt, dev->name , ## arg)
+#define i2cdprintk(fmt, arg...)    if (ir_debug) \
+	printk(KERN_DEBUG "%s/ir: " fmt, ir->c.name , ## arg)
 
-/* ---------------------------------------------------------------------- */
+/** rc5 functions */
+static int saa7134_rc5_irq(struct saa7134_dev *dev);
 
-static IR_KEYTAB_TYPE flyvideo_codes[IR_KEYTAB_SIZE] = {
-	[   15 ] = KEY_KP0,
-	[    3 ] = KEY_KP1,
-	[    4 ] = KEY_KP2,
-	[    5 ] = KEY_KP3,
-	[    7 ] = KEY_KP4,
-	[    8 ] = KEY_KP5,
-	[    9 ] = KEY_KP6,
-	[   11 ] = KEY_KP7,
-	[   12 ] = KEY_KP8,
-	[   13 ] = KEY_KP9,
-
-	[   14 ] = KEY_TUNER,        // Air/Cable
-	[   17 ] = KEY_VIDEO,        // Video
-	[   21 ] = KEY_AUDIO,        // Audio
-	[    0 ] = KEY_POWER,        // Pover
-	[    2 ] = KEY_ZOOM,         // Fullscreen
-	[   27 ] = KEY_MUTE,         // Mute
-	[   20 ] = KEY_VOLUMEUP,
-	[   23 ] = KEY_VOLUMEDOWN,
-	[   18 ] = KEY_CHANNELUP,    // Channel +
-	[   19 ] = KEY_CHANNELDOWN,  // Channel -
-	[    6 ] = KEY_AGAIN,        // Recal
-	[   16 ] = KEY_KPENTER,      // Enter
-
-#if 1 /* FIXME */
-	[   26 ] = KEY_F22,          // Stereo
-	[   24 ] = KEY_EDIT,         // AV Source
-#endif
-};
-
-static IR_KEYTAB_TYPE cinergy_codes[IR_KEYTAB_SIZE] = {
-	[    0 ] = KEY_KP0,
-	[    1 ] = KEY_KP1,
-	[    2 ] = KEY_KP2,
-	[    3 ] = KEY_KP3,
-	[    4 ] = KEY_KP4,
-	[    5 ] = KEY_KP5,
-	[    6 ] = KEY_KP6,
-	[    7 ] = KEY_KP7,
-	[    8 ] = KEY_KP8,
-	[    9 ] = KEY_KP9,
-
-	[ 0x0a ] = KEY_POWER,
-	[ 0x0b ] = KEY_PROG1,           // app
-	[ 0x0c ] = KEY_ZOOM,            // zoom/fullscreen
-	[ 0x0d ] = KEY_CHANNELUP,       // channel
-	[ 0x0e ] = KEY_CHANNELDOWN,     // channel-
-	[ 0x0f ] = KEY_VOLUMEUP,
-	[ 0x10 ] = KEY_VOLUMEDOWN,
-	[ 0x11 ] = KEY_TUNER,           // AV
-	[ 0x12 ] = KEY_NUMLOCK,         // -/--
-	[ 0x13 ] = KEY_AUDIO,           // audio
-	[ 0x14 ] = KEY_MUTE,
-	[ 0x15 ] = KEY_UP,
-	[ 0x16 ] = KEY_DOWN,
-	[ 0x17 ] = KEY_LEFT,
-	[ 0x18 ] = KEY_RIGHT,
-	[ 0x19 ] = BTN_LEFT,
-	[ 0x1a ] = BTN_RIGHT,
-	[ 0x1b ] = KEY_WWW,             // text
-	[ 0x1c ] = KEY_REWIND,
-	[ 0x1d ] = KEY_FORWARD,
-	[ 0x1e ] = KEY_RECORD,
-	[ 0x1f ] = KEY_PLAY,
-	[ 0x20 ] = KEY_PREVIOUSSONG,
-	[ 0x21 ] = KEY_NEXTSONG,
-	[ 0x22 ] = KEY_PAUSE,
-	[ 0x23 ] = KEY_STOP,
-};
-
-/* Alfons Geser <a.geser@cox.net>
- * updates from Job D. R. Borges <jobdrb@ig.com.br> */
-static IR_KEYTAB_TYPE eztv_codes[IR_KEYTAB_SIZE] = {
-        [ 18 ] = KEY_POWER,
-        [  1 ] = KEY_TV,             // DVR
-        [ 21 ] = KEY_DVD,            // DVD
-        [ 23 ] = KEY_AUDIO,          // music
-                                     // DVR mode / DVD mode / music mode
-
-        [ 27 ] = KEY_MUTE,           // mute
-        [  2 ] = KEY_LANGUAGE,       // MTS/SAP / audio / autoseek
-        [ 30 ] = KEY_SUBTITLE,       // closed captioning / subtitle / seek
-        [ 22 ] = KEY_ZOOM,           // full screen
-        [ 28 ] = KEY_VIDEO,          // video source / eject / delall
-        [ 29 ] = KEY_RESTART,        // playback / angle / del
-        [ 47 ] = KEY_SEARCH,         // scan / menu / playlist
-        [ 48 ] = KEY_CHANNEL,        // CH surfing / bookmark / memo
-
-        [ 49 ] = KEY_HELP,           // help
-        [ 50 ] = KEY_MODE,           // num/memo
-        [ 51 ] = KEY_ESC,            // cancel
-
-	[ 12 ] = KEY_UP,             // up
-	[ 16 ] = KEY_DOWN,           // down
-	[  8 ] = KEY_LEFT,           // left
-	[  4 ] = KEY_RIGHT,          // right
-	[  3 ] = KEY_SELECT,         // select
-
-	[ 31 ] = KEY_REWIND,         // rewind
-	[ 32 ] = KEY_PLAYPAUSE,      // play/pause
-	[ 41 ] = KEY_FORWARD,        // forward
-	[ 20 ] = KEY_AGAIN,          // repeat
-	[ 43 ] = KEY_RECORD,         // recording
-	[ 44 ] = KEY_STOP,           // stop
-	[ 45 ] = KEY_PLAY,           // play
-	[ 46 ] = KEY_SHUFFLE,        // snapshot / shuffle
-
-        [  0 ] = KEY_KP0,
-        [  5 ] = KEY_KP1,
-        [  6 ] = KEY_KP2,
-        [  7 ] = KEY_KP3,
-        [  9 ] = KEY_KP4,
-        [ 10 ] = KEY_KP5,
-        [ 11 ] = KEY_KP6,
-        [ 13 ] = KEY_KP7,
-        [ 14 ] = KEY_KP8,
-        [ 15 ] = KEY_KP9,
-
-        [ 42 ] = KEY_VOLUMEUP,
-        [ 17 ] = KEY_VOLUMEDOWN,
-        [ 24 ] = KEY_CHANNELUP,      // CH.tracking up
-        [ 25 ] = KEY_CHANNELDOWN,    // CH.tracking down
-
-        [ 19 ] = KEY_KPENTER,        // enter
-        [ 33 ] = KEY_KPDOT,          // . (decimal dot)
-};
-
-static IR_KEYTAB_TYPE avacssmart_codes[IR_KEYTAB_SIZE] = {
-        [ 30 ] = KEY_POWER,		// power
-	[ 28 ] = KEY_SEARCH,		// scan
-        [  7 ] = KEY_SELECT,		// source
-
-	[ 22 ] = KEY_VOLUMEUP,
-	[ 20 ] = KEY_VOLUMEDOWN,
-        [ 31 ] = KEY_CHANNELUP,
-	[ 23 ] = KEY_CHANNELDOWN,
-	[ 24 ] = KEY_MUTE,
-
-	[  2 ] = KEY_KP0,
-        [  1 ] = KEY_KP1,
-        [ 11 ] = KEY_KP2,
-        [ 27 ] = KEY_KP3,
-        [  5 ] = KEY_KP4,
-        [  9 ] = KEY_KP5,
-        [ 21 ] = KEY_KP6,
-	[  6 ] = KEY_KP7,
-        [ 10 ] = KEY_KP8,
-	[ 18 ] = KEY_KP9,
-	[ 16 ] = KEY_KPDOT,
-
-	[  3 ] = KEY_TUNER,		// tv/fm
-        [  4 ] = KEY_REWIND,		// fm tuning left or function left
-        [ 12 ] = KEY_FORWARD,		// fm tuning right or function right
-
-	[  0 ] = KEY_RECORD,
-        [  8 ] = KEY_STOP,
-        [ 17 ] = KEY_PLAY,
-
-	[ 25 ] = KEY_ZOOM,
-	[ 14 ] = KEY_MENU,		// function
-	[ 19 ] = KEY_AGAIN,		// recall
-	[ 29 ] = KEY_RESTART,		// reset
-
-// FIXME
-	[ 13 ] = KEY_F21,		// mts
-        [ 15 ] = KEY_F22,		// min
-	[ 26 ] = KEY_F23,		// freeze
-};
-
-/* Alex Hermann <gaaf@gmx.net> */
-static IR_KEYTAB_TYPE md2819_codes[IR_KEYTAB_SIZE] = {
-	[ 40 ] = KEY_KP1,
-	[ 24 ] = KEY_KP2,
-	[ 56 ] = KEY_KP3,
-	[ 36 ] = KEY_KP4,
-	[ 20 ] = KEY_KP5,
-	[ 52 ] = KEY_KP6,
-	[ 44 ] = KEY_KP7,
-	[ 28 ] = KEY_KP8,
-	[ 60 ] = KEY_KP9,
-	[ 34 ] = KEY_KP0,
-
-	[ 32 ] = KEY_TV,		// TV/FM
-	[ 16 ] = KEY_CD,		// CD
-	[ 48 ] = KEY_TEXT,		// TELETEXT
-	[  0 ] = KEY_POWER,		// POWER
-
-	[  8 ] = KEY_VIDEO,		// VIDEO
-	[  4 ] = KEY_AUDIO,		// AUDIO
-	[ 12 ] = KEY_ZOOM,		// FULL SCREEN
-
-	[ 18 ] = KEY_SUBTITLE,		// DISPLAY	- ???
-	[ 50 ] = KEY_REWIND,		// LOOP		- ???
-	[  2 ] = KEY_PRINT,		// PREVIEW	- ???
-
-	[ 42 ] = KEY_SEARCH,		// AUTOSCAN
-	[ 26 ] = KEY_SLEEP,		// FREEZE	- ???
-	[ 58 ] = KEY_SHUFFLE,		// SNAPSHOT	- ???
-	[ 10 ] = KEY_MUTE,		// MUTE
-
-	[ 38 ] = KEY_RECORD,		// RECORD
-	[ 22 ] = KEY_PAUSE,		// PAUSE
-	[ 54 ] = KEY_STOP,		// STOP
-	[  6 ] = KEY_PLAY,		// PLAY
-
-	[ 46 ] = KEY_RED,		// <RED>
-	[ 33 ] = KEY_GREEN,		// <GREEN>
-	[ 14 ] = KEY_YELLOW,		// <YELLOW>
-	[  1 ] = KEY_BLUE,		// <BLUE>
-
-	[ 30 ] = KEY_VOLUMEDOWN,	// VOLUME-
-	[ 62 ] = KEY_VOLUMEUP,		// VOLUME+
-	[ 17 ] = KEY_CHANNELDOWN,	// CHANNEL/PAGE-
-	[ 49 ] = KEY_CHANNELUP		// CHANNEL/PAGE+
-};
-/* ---------------------------------------------------------------------- */
+/* -------------------- GPIO generic keycode builder -------------------- */
 
 static int build_key(struct saa7134_dev *dev)
 {
-	struct saa7134_ir *ir = dev->remote;
+	struct card_ir *ir = dev->remote;
 	u32 gpio, data;
 
+	/* here comes the additional handshake steps for some cards */
+	switch (dev->board) {
+	case SAA7134_BOARD_GOTVIEW_7135:
+		saa_setb(SAA7134_GPIO_GPSTATUS1, 0x80);
+		saa_clearb(SAA7134_GPIO_GPSTATUS1, 0x80);
+		break;
+	}
 	/* rising SAA7134_GPIO_GPRESCAN reads the status */
 	saa_clearb(SAA7134_GPIO_GPMODE3,SAA7134_GPIO_GPRESCAN);
 	saa_setb(SAA7134_GPIO_GPMODE3,SAA7134_GPIO_GPRESCAN);
 
 	gpio = saa_readl(SAA7134_GPIO_GPSTATUS0 >> 2);
-        if (ir->polling) {
-                if (ir->last_gpio == gpio)
-                        return 0;
-                ir->last_gpio = gpio;
-        }
+	if (ir->polling) {
+		if (ir->last_gpio == gpio)
+			return 0;
+		ir->last_gpio = gpio;
+	}
 
- 	data = ir_extract_bits(gpio, ir->mask_keycode);
+	data = ir_extract_bits(gpio, ir->mask_keycode);
 	dprintk("build_key gpio=0x%x mask=0x%x data=%d\n",
 		gpio, ir->mask_keycode, data);
 
-	if ((ir->mask_keydown  &&  (0 != (gpio & ir->mask_keydown))) ||
-	    (ir->mask_keyup    &&  (0 == (gpio & ir->mask_keyup)))) {
-		ir_input_keydown(&ir->dev,&ir->ir,data,data);
-	} else {
-		ir_input_nokey(&ir->dev,&ir->ir);
+	if (ir->polling) {
+		if ((ir->mask_keydown  &&  (0 != (gpio & ir->mask_keydown))) ||
+		    (ir->mask_keyup    &&  (0 == (gpio & ir->mask_keyup)))) {
+			ir_input_keydown(ir->dev, &ir->ir, data, data);
+		} else {
+			ir_input_nokey(ir->dev, &ir->ir);
+		}
 	}
+	else {	/* IRQ driven mode - handle key press and release in one go */
+		if ((ir->mask_keydown  &&  (0 != (gpio & ir->mask_keydown))) ||
+		    (ir->mask_keyup    &&  (0 == (gpio & ir->mask_keyup)))) {
+			ir_input_keydown(ir->dev, &ir->ir, data, data);
+			ir_input_nokey(ir->dev, &ir->ir);
+		}
+	}
+
 	return 0;
 }
 
-/* ---------------------------------------------------------------------- */
+/* --------------------- Chip specific I2C key builders ----------------- */
+
+static int get_key_purpletv(struct IR_i2c *ir, u32 *ir_key, u32 *ir_raw)
+{
+	unsigned char b;
+
+	/* poll IR chip */
+	if (1 != i2c_master_recv(&ir->c,&b,1)) {
+		i2cdprintk("read error\n");
+		return -EIO;
+	}
+
+	/* no button press */
+	if (b==0)
+		return 0;
+
+	/* repeating */
+	if (b & 0x80)
+		return 1;
+
+	*ir_key = b;
+	*ir_raw = b;
+	return 1;
+}
+
+static int get_key_hvr1110(struct IR_i2c *ir, u32 *ir_key, u32 *ir_raw)
+{
+	unsigned char buf[5], cod4, code3, code4;
+
+	/* poll IR chip */
+	if (5 != i2c_master_recv(&ir->c,buf,5))
+		return -EIO;
+
+	cod4	= buf[4];
+	code4	= (cod4 >> 2);
+	code3	= buf[3];
+	if (code3 == 0)
+		/* no key pressed */
+		return 0;
+
+	/* return key */
+	*ir_key = code4;
+	*ir_raw = code4;
+	return 1;
+}
 
 void saa7134_input_irq(struct saa7134_dev *dev)
 {
-        struct saa7134_ir *ir = dev->remote;
+	struct card_ir *ir = dev->remote;
 
-        if (!ir->polling)
+	if (!ir->polling && !ir->rc5_gpio) {
 		build_key(dev);
+	} else if (ir->rc5_gpio) {
+		saa7134_rc5_irq(dev);
+	}
 }
 
 static void saa7134_input_timer(unsigned long data)
 {
-	struct saa7134_dev *dev = (struct saa7134_dev*)data;
-	struct saa7134_ir *ir = dev->remote;
-	unsigned long timeout;
+	struct saa7134_dev *dev = (struct saa7134_dev *)data;
+	struct card_ir *ir = dev->remote;
 
 	build_key(dev);
-	timeout = jiffies + (ir->polling * HZ / 1000);
-	mod_timer(&ir->timer, timeout);
+	mod_timer(&ir->timer, jiffies + msecs_to_jiffies(ir->polling));
+}
+
+void saa7134_ir_start(struct saa7134_dev *dev, struct card_ir *ir)
+{
+	if (ir->polling) {
+		setup_timer(&ir->timer, saa7134_input_timer,
+			    (unsigned long)dev);
+		ir->timer.expires  = jiffies + HZ;
+		add_timer(&ir->timer);
+	} else if (ir->rc5_gpio) {
+		/* set timer_end for code completion */
+		init_timer(&ir->timer_end);
+		ir->timer_end.function = ir_rc5_timer_end;
+		ir->timer_end.data = (unsigned long)ir;
+		init_timer(&ir->timer_keyup);
+		ir->timer_keyup.function = ir_rc5_timer_keyup;
+		ir->timer_keyup.data = (unsigned long)ir;
+		ir->shift_by = 2;
+		ir->start = 0x2;
+		ir->addr = 0x17;
+		ir->rc5_key_timeout = ir_rc5_key_timeout;
+		ir->rc5_remote_gap = ir_rc5_remote_gap;
+	}
+}
+
+void saa7134_ir_stop(struct saa7134_dev *dev)
+{
+	if (dev->remote->polling)
+		del_timer_sync(&dev->remote->timer);
 }
 
 int saa7134_input_init1(struct saa7134_dev *dev)
 {
-	struct saa7134_ir *ir;
+	struct card_ir *ir;
+	struct input_dev *input_dev;
 	IR_KEYTAB_TYPE *ir_codes = NULL;
 	u32 mask_keycode = 0;
 	u32 mask_keydown = 0;
 	u32 mask_keyup   = 0;
 	int polling      = 0;
+	int rc5_gpio	 = 0;
 	int ir_type      = IR_TYPE_OTHER;
+	int err;
 
-	if (!dev->has_remote)
+	if (dev->has_remote != SAA7134_REMOTE_GPIO)
 		return -ENODEV;
 	if (disable_ir)
 		return -ENODEV;
@@ -329,38 +225,131 @@ int saa7134_input_init1(struct saa7134_dev *dev)
 	switch (dev->board) {
 	case SAA7134_BOARD_FLYVIDEO2000:
 	case SAA7134_BOARD_FLYVIDEO3000:
-		ir_codes     = flyvideo_codes;
+	case SAA7134_BOARD_FLYTVPLATINUM_FM:
+	case SAA7134_BOARD_FLYTVPLATINUM_MINI2:
+		ir_codes     = ir_codes_flyvideo;
 		mask_keycode = 0xEC00000;
 		mask_keydown = 0x0040000;
 		break;
 	case SAA7134_BOARD_CINERGY400:
 	case SAA7134_BOARD_CINERGY600:
-		ir_codes     = cinergy_codes;
+	case SAA7134_BOARD_CINERGY600_MK3:
+		ir_codes     = ir_codes_cinergy;
 		mask_keycode = 0x00003f;
 		mask_keyup   = 0x040000;
 		break;
 	case SAA7134_BOARD_ECS_TVP3XP:
 	case SAA7134_BOARD_ECS_TVP3XP_4CB5:
-                ir_codes     = eztv_codes;
-                mask_keycode = 0x00017c;
-                mask_keyup   = 0x000002;
+		ir_codes     = ir_codes_eztv;
+		mask_keycode = 0x00017c;
+		mask_keyup   = 0x000002;
 		polling      = 50; // ms
-                break;
+		break;
+	case SAA7134_BOARD_KWORLD_XPERT:
 	case SAA7134_BOARD_AVACSSMARTTV:
-	        ir_codes     = avacssmart_codes;
+		ir_codes     = ir_codes_pixelview;
 		mask_keycode = 0x00001F;
 		mask_keyup   = 0x000020;
 		polling      = 50; // ms
 		break;
 	case SAA7134_BOARD_MD2819:
+	case SAA7134_BOARD_KWORLD_VSTREAM_XPERT:
+	case SAA7134_BOARD_AVERMEDIA_305:
 	case SAA7134_BOARD_AVERMEDIA_307:
-		ir_codes     = md2819_codes;
+	case SAA7134_BOARD_AVERMEDIA_STUDIO_305:
+	case SAA7134_BOARD_AVERMEDIA_STUDIO_307:
+	case SAA7134_BOARD_AVERMEDIA_STUDIO_507:
+	case SAA7134_BOARD_AVERMEDIA_GO_007_FM:
+		ir_codes     = ir_codes_avermedia;
 		mask_keycode = 0x0007C8;
 		mask_keydown = 0x000010;
 		polling      = 50; // ms
 		/* Set GPIO pin2 to high to enable the IR controller */
 		saa_setb(SAA7134_GPIO_GPMODE0, 0x4);
 		saa_setb(SAA7134_GPIO_GPSTATUS0, 0x4);
+		break;
+	case SAA7134_BOARD_AVERMEDIA_777:
+	case SAA7134_BOARD_AVERMEDIA_A16AR:
+		ir_codes     = ir_codes_avermedia;
+		mask_keycode = 0x02F200;
+		mask_keydown = 0x000400;
+		polling      = 50; // ms
+		/* Without this we won't receive key up events */
+		saa_setb(SAA7134_GPIO_GPMODE1, 0x1);
+		saa_setb(SAA7134_GPIO_GPSTATUS1, 0x1);
+		break;
+	case SAA7134_BOARD_KWORLD_TERMINATOR:
+		ir_codes     = ir_codes_pixelview;
+		mask_keycode = 0x00001f;
+		mask_keyup   = 0x000060;
+		polling      = 50; // ms
+		break;
+	case SAA7134_BOARD_MANLI_MTV001:
+	case SAA7134_BOARD_MANLI_MTV002:
+	case SAA7134_BOARD_BEHOLD_409FM:
+		ir_codes     = ir_codes_manli;
+		mask_keycode = 0x001f00;
+		mask_keyup   = 0x004000;
+		polling      = 50; // ms
+		break;
+	case SAA7134_BOARD_SEDNA_PC_TV_CARDBUS:
+		ir_codes     = ir_codes_pctv_sedna;
+		mask_keycode = 0x001f00;
+		mask_keyup   = 0x004000;
+		polling      = 50; // ms
+		break;
+	case SAA7134_BOARD_GOTVIEW_7135:
+		ir_codes     = ir_codes_gotview7135;
+		mask_keycode = 0x0003CC;
+		mask_keydown = 0x000010;
+		polling	     = 5; /* ms */
+		saa_setb(SAA7134_GPIO_GPMODE1, 0x80);
+		break;
+	case SAA7134_BOARD_VIDEOMATE_TV_PVR:
+	case SAA7134_BOARD_VIDEOMATE_GOLD_PLUS:
+	case SAA7134_BOARD_VIDEOMATE_TV_GOLD_PLUSII:
+		ir_codes     = ir_codes_videomate_tv_pvr;
+		mask_keycode = 0x00003F;
+		mask_keyup   = 0x400000;
+		polling      = 50; // ms
+		break;
+	case SAA7134_BOARD_PROTEUS_2309:
+		ir_codes     = ir_codes_proteus_2309;
+		mask_keycode = 0x00007F;
+		mask_keyup   = 0x000080;
+		polling      = 50; // ms
+		break;
+	case SAA7134_BOARD_VIDEOMATE_DVBT_300:
+	case SAA7134_BOARD_VIDEOMATE_DVBT_200:
+		ir_codes     = ir_codes_videomate_tv_pvr;
+		mask_keycode = 0x003F00;
+		mask_keyup   = 0x040000;
+		break;
+	case SAA7134_BOARD_FLYDVBS_LR300:
+	case SAA7134_BOARD_FLYDVBT_LR301:
+	case SAA7134_BOARD_FLYDVBTDUO:
+		ir_codes     = ir_codes_flydvb;
+		mask_keycode = 0x0001F00;
+		mask_keydown = 0x0040000;
+		break;
+	case SAA7134_BOARD_ASUSTeK_P7131_DUAL:
+	case SAA7134_BOARD_ASUSTeK_P7131_HYBRID_LNA:
+		ir_codes     = ir_codes_asus_pc39;
+		mask_keydown = 0x0040000;
+		rc5_gpio = 1;
+		break;
+	case SAA7134_BOARD_ENCORE_ENLTV:
+	case SAA7134_BOARD_ENCORE_ENLTV_FM:
+		ir_codes     = ir_codes_encore_enltv;
+		mask_keycode = 0x00007f;
+		mask_keyup   = 0x040000;
+		polling      = 50; // ms
+		break;
+	case SAA7134_BOARD_10MOONSTVMASTER3:
+		ir_codes     = ir_codes_encore_enltv;
+		mask_keycode = 0x5f80000;
+		mask_keyup   = 0x8000000;
+		polling      = 50; //ms
 		break;
 	}
 	if (NULL == ir_codes) {
@@ -369,16 +358,21 @@ int saa7134_input_init1(struct saa7134_dev *dev)
 		return -ENODEV;
 	}
 
-	ir = kmalloc(sizeof(*ir),GFP_KERNEL);
-	if (NULL == ir)
-		return -ENOMEM;
-	memset(ir,0,sizeof(*ir));
+	ir = kzalloc(sizeof(*ir), GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (!ir || !input_dev) {
+		err = -ENOMEM;
+		goto err_out_free;
+	}
+
+	ir->dev = input_dev;
 
 	/* init hardware-specific stuff */
 	ir->mask_keycode = mask_keycode;
 	ir->mask_keydown = mask_keydown;
 	ir->mask_keyup   = mask_keyup;
-        ir->polling      = polling;
+	ir->polling      = polling;
+	ir->rc5_gpio	 = rc5_gpio;
 
 	/* init input device */
 	snprintf(ir->name, sizeof(ir->name), "saa7134 IR (%s)",
@@ -386,32 +380,40 @@ int saa7134_input_init1(struct saa7134_dev *dev)
 	snprintf(ir->phys, sizeof(ir->phys), "pci-%s/ir0",
 		 pci_name(dev->pci));
 
-	ir_input_init(&ir->dev, &ir->ir, ir_type, ir_codes);
-	ir->dev.name = ir->name;
-	ir->dev.phys = ir->phys;
-	ir->dev.id.bustype = BUS_PCI;
-	ir->dev.id.version = 1;
+	ir_input_init(input_dev, &ir->ir, ir_type, ir_codes);
+	input_dev->name = ir->name;
+	input_dev->phys = ir->phys;
+	input_dev->id.bustype = BUS_PCI;
+	input_dev->id.version = 1;
 	if (dev->pci->subsystem_vendor) {
-		ir->dev.id.vendor  = dev->pci->subsystem_vendor;
-		ir->dev.id.product = dev->pci->subsystem_device;
+		input_dev->id.vendor  = dev->pci->subsystem_vendor;
+		input_dev->id.product = dev->pci->subsystem_device;
 	} else {
-		ir->dev.id.vendor  = dev->pci->vendor;
-		ir->dev.id.product = dev->pci->device;
+		input_dev->id.vendor  = dev->pci->vendor;
+		input_dev->id.product = dev->pci->device;
 	}
+	input_dev->dev.parent = &dev->pci->dev;
 
-	/* all done */
 	dev->remote = ir;
-	if (ir->polling) {
-		init_timer(&ir->timer);
-		ir->timer.function = saa7134_input_timer;
-		ir->timer.data     = (unsigned long)dev;
-		ir->timer.expires  = jiffies + HZ;
-		add_timer(&ir->timer);
-	}
+	saa7134_ir_start(dev, ir);
 
-	input_register_device(&dev->remote->dev);
-	printk("%s: registered input device for IR\n",dev->name);
+	err = input_register_device(ir->dev);
+	if (err)
+		goto err_out_stop;
+
+	/* the remote isn't as bouncy as a keyboard */
+	ir->dev->rep[REP_DELAY] = repeat_delay;
+	ir->dev->rep[REP_PERIOD] = repeat_period;
+
 	return 0;
+
+ err_out_stop:
+	saa7134_ir_stop(dev);
+	dev->remote = NULL;
+ err_out_free:
+	input_free_device(input_dev);
+	kfree(ir);
+	return err;
 }
 
 void saa7134_input_fini(struct saa7134_dev *dev)
@@ -419,11 +421,89 @@ void saa7134_input_fini(struct saa7134_dev *dev)
 	if (NULL == dev->remote)
 		return;
 
-	input_unregister_device(&dev->remote->dev);
-	if (dev->remote->polling)
-		del_timer_sync(&dev->remote->timer);
+	saa7134_ir_stop(dev);
+	input_unregister_device(dev->remote->dev);
 	kfree(dev->remote);
 	dev->remote = NULL;
+}
+
+void saa7134_set_i2c_ir(struct saa7134_dev *dev, struct IR_i2c *ir)
+{
+	if (disable_ir) {
+		dprintk("Found supported i2c remote, but IR has been disabled\n");
+		ir->get_key=NULL;
+		return;
+	}
+
+	switch (dev->board) {
+	case SAA7134_BOARD_PINNACLE_PCTV_110i:
+	case SAA7134_BOARD_PINNACLE_PCTV_310i:
+		snprintf(ir->c.name, sizeof(ir->c.name), "Pinnacle PCTV");
+		if (pinnacle_remote == 0) {
+			ir->get_key   = get_key_pinnacle_color;
+			ir->ir_codes = ir_codes_pinnacle_color;
+		} else {
+			ir->get_key   = get_key_pinnacle_grey;
+			ir->ir_codes = ir_codes_pinnacle_grey;
+		}
+		break;
+	case SAA7134_BOARD_UPMOST_PURPLE_TV:
+		snprintf(ir->c.name, sizeof(ir->c.name), "Purple TV");
+		ir->get_key   = get_key_purpletv;
+		ir->ir_codes  = ir_codes_purpletv;
+		break;
+	case SAA7134_BOARD_HAUPPAUGE_HVR1110:
+		snprintf(ir->c.name, sizeof(ir->c.name), "HVR 1110");
+		ir->get_key   = get_key_hvr1110;
+		ir->ir_codes  = ir_codes_hauppauge_new;
+		break;
+	default:
+		dprintk("Shouldn't get here: Unknown board %x for I2C IR?\n",dev->board);
+		break;
+	}
+
+}
+
+static int saa7134_rc5_irq(struct saa7134_dev *dev)
+{
+	struct card_ir *ir = dev->remote;
+	struct timeval tv;
+	u32 gap;
+	unsigned long current_jiffies, timeout;
+
+	/* get time of bit */
+	current_jiffies = jiffies;
+	do_gettimeofday(&tv);
+
+	/* avoid overflow with gap >1s */
+	if (tv.tv_sec - ir->base_time.tv_sec > 1) {
+		gap = 200000;
+	} else {
+		gap = 1000000 * (tv.tv_sec - ir->base_time.tv_sec) +
+		    tv.tv_usec - ir->base_time.tv_usec;
+	}
+
+	/* active code => add bit */
+	if (ir->active) {
+		/* only if in the code (otherwise spurious IRQ or timer
+		   late) */
+		if (ir->last_bit < 28) {
+			ir->last_bit = (gap - ir_rc5_remote_gap / 2) /
+			    ir_rc5_remote_gap;
+			ir->code |= 1 << ir->last_bit;
+		}
+		/* starting new code */
+	} else {
+		ir->active = 1;
+		ir->code = 0;
+		ir->base_time = tv;
+		ir->last_bit = 0;
+
+		timeout = current_jiffies + (500 + 30 * HZ) / 1000;
+		mod_timer(&ir->timer_end, timeout);
+	}
+
+	return 1;
 }
 
 /* ----------------------------------------------------------------------

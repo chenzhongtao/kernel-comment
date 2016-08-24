@@ -1,33 +1,19 @@
 /*
- * Copyright (c) 2000-2001 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2001,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef	__XFS_BUF_ITEM_H__
 #define	__XFS_BUF_ITEM_H__
@@ -35,23 +21,7 @@
 /*
  * This is the structure used to lay out a buf log item in the
  * log.  The data map describes which 128 byte chunks of the buffer
- * have been logged.  This structure works only on buffers that
- * reside up to the first TB in the filesystem.  These buffers are
- * generated only by pre-6.2 systems and are known as XFS_LI_6_1_BUF.
- */
-typedef struct xfs_buf_log_format_v1 {
-	unsigned short	blf_type;	/* buf log item type indicator */
-	unsigned short	blf_size;	/* size of this item */
-	__int32_t	blf_blkno;	/* starting blkno of this buf */
-	ushort		blf_flags;	/* misc state */
-	ushort		blf_len;	/* number of blocks in this buf */
-	unsigned int	blf_map_size;	/* size of data bitmap in words */
-	unsigned int	blf_data_map[1];/* variable size bitmap of */
-					/*   regions of buffer in this item */
-} xfs_buf_log_format_v1_t;
-
-/*
- * This is a form of the above structure with a 64 bit blkno field.
+ * have been logged.
  * For 6.2 and beyond, this is XFS_LI_BUF.  We use this to log everything.
  */
 typedef struct xfs_buf_log_format_t {
@@ -80,7 +50,7 @@ typedef struct xfs_buf_log_format_t {
  * user or group dquots and may require special recovery handling.
  */
 #define	XFS_BLI_UDQUOT_BUF	0x4
-/* #define XFS_BLI_PDQUOT_BUF	0x8 */
+#define XFS_BLI_PDQUOT_BUF	0x8
 #define	XFS_BLI_GDQUOT_BUF	0x10
 
 #define	XFS_BLI_CHUNK		128

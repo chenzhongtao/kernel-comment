@@ -16,6 +16,7 @@
 #include <asm/uaccess.h>
 #include <linux/string.h>
 #include <linux/list.h>
+#include <linux/sched.h>
 
 #include <linux/coda.h>
 #include <linux/coda_linux.h>
@@ -42,17 +43,12 @@ void coda_cache_enter(struct inode *inode, int mask)
 void coda_cache_clear_inode(struct inode *inode)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-        cii->c_cached_perm = 0;
+	cii->c_cached_epoch = atomic_read(&permission_epoch) - 1;
 }
 
 /* remove all acl caches */
 void coda_cache_clear_all(struct super_block *sb)
 {
-        struct coda_sb_info *sbi;
-
-        sbi = coda_sbp(sb);
-        if (!sbi) BUG();
-
 	atomic_inc(&permission_epoch);
 }
 
@@ -93,7 +89,7 @@ static void coda_flag_children(struct dentry *parent, int flag)
 	spin_lock(&dcache_lock);
 	list_for_each(child, &parent->d_subdirs)
 	{
-		de = list_entry(child, struct dentry, d_child);
+		de = list_entry(child, struct dentry, d_u.d_child);
 		/* don't know what to do with negative dentries */
 		if ( ! de->d_inode ) 
 			continue;

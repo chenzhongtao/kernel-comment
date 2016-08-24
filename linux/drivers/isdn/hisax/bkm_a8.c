@@ -11,7 +11,6 @@
  */
 
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
@@ -21,13 +20,11 @@
 #include <linux/pci.h>
 #include "bkm_ax.h"
 
-#ifdef CONFIG_PCI
-
 #define	ATTEMPT_PCI_REMAPPING	/* Required for PLX rev 1 */
 
 extern const char *CardType[];
 
-const char sct_quadro_revision[] = "$Revision: 1.22.2.4 $";
+static const char sct_quadro_revision[] = "$Revision: 1.22.2.4 $";
 
 static const char *sct_quadro_subtypes[] =
 {
@@ -141,7 +138,7 @@ set_ipac_active(struct IsdnCardState *cs, u_int active)
 #include "hscx_irq.c"
 
 static irqreturn_t
-bkm_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
+bkm_interrupt_ipac(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char ista, val, icnt = 5;
@@ -193,7 +190,7 @@ bkm_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-void
+static void
 release_io_sct_quadro(struct IsdnCardState *cs)
 {
 	release_region(cs->hw.ax.base & 0xffffffc0, 128);
@@ -261,7 +258,7 @@ BKM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return (0);
 }
 
-int __init
+static int __devinit
 sct_alloc_io(u_int adr, u_int len)
 {
 	if (!request_region(adr, len, "scitel")) {
@@ -273,22 +270,18 @@ sct_alloc_io(u_int adr, u_int len)
 	return(0);
 }
 
-static struct pci_dev *dev_a8 __initdata = NULL;
-static u16  sub_vendor_id __initdata = 0;
-static u16  sub_sys_id __initdata = 0;
-static u_char pci_bus __initdata = 0;
-static u_char pci_device_fn __initdata = 0;
-static u_char pci_irq __initdata = 0;
+static struct pci_dev *dev_a8 __devinitdata = NULL;
+static u16  sub_vendor_id __devinitdata = 0;
+static u16  sub_sys_id __devinitdata = 0;
+static u_char pci_bus __devinitdata = 0;
+static u_char pci_device_fn __devinitdata = 0;
+static u_char pci_irq __devinitdata = 0;
 
-#endif /* CONFIG_PCI */
-
-int __init
+int __devinit
 setup_sct_quadro(struct IsdnCard *card)
 {
-#ifdef CONFIG_PCI
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
-	u_char pci_rev_id;
 	u_int found = 0;
 	u_int pci_ioaddr1, pci_ioaddr2, pci_ioaddr3, pci_ioaddr4, pci_ioaddr5;
 
@@ -336,8 +329,7 @@ setup_sct_quadro(struct IsdnCard *card)
 		}
 #ifdef ATTEMPT_PCI_REMAPPING
 /* HACK: PLX revision 1 bug: PLX address bit 7 must not be set */
-		pci_read_config_byte(dev_a8, PCI_REVISION_ID, &pci_rev_id);
-		if ((pci_ioaddr1 & 0x80) && (pci_rev_id == 1)) {
+		if ((pci_ioaddr1 & 0x80) && (dev_a8->revision == 1)) {
 			printk(KERN_WARNING "HiSax: %s (%s): PLX rev 1, remapping required!\n",
 				CardType[card->typ],
 				sct_quadro_subtypes[cs->subtyp]);
@@ -375,7 +367,7 @@ setup_sct_quadro(struct IsdnCard *card)
 	pci_ioaddr5 &= PCI_BASE_ADDRESS_IO_MASK;
 	/* Take over */
 	cs->irq = pci_irq;
-	cs->irq_flags |= SA_SHIRQ;
+	cs->irq_flags |= IRQF_SHARED;
 	/* pci_ioaddr1 is unique to all subdevices */
 	/* pci_ioaddr2 is for the fourth subdevice only */
 	/* pci_ioaddr3 is for the third subdevice only */
@@ -445,7 +437,4 @@ setup_sct_quadro(struct IsdnCard *card)
 		sct_quadro_subtypes[cs->subtyp],
 		readreg(cs->hw.ax.base, cs->hw.ax.data_adr, IPAC_ID));
 	return (1);
-#else
-	printk(KERN_ERR "HiSax: bkm_a8 only supported on PCI Systems\n");
-#endif /* CONFIG_PCI */
 }

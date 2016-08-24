@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/prpmc750_setup.c
- *
  * Board setup routines for Motorola PrPMC750
  *
  * Author: Matt Porter <mporter@mvista.com>
@@ -11,7 +9,6 @@
  * or implied.
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -24,11 +21,11 @@
 #include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/delay.h>
-#include <linux/irq.h>
 #include <linux/seq_file.h>
 #include <linux/ide.h>
 #include <linux/root_dev.h>
 #include <linux/slab.h>
+#include <linux/serial_reg.h>
 
 #include <asm/byteorder.h>
 #include <asm/system.h>
@@ -302,8 +299,8 @@ static void __init prpmc750_init_IRQ(void)
 static __inline__ void prpmc750_set_bat(void)
 {
 	mb();
-	mtspr(DBAT1U, 0xf0001ffe);
-	mtspr(DBAT1L, 0xf000002a);
+	mtspr(SPRN_DBAT1U, 0xf0001ffe);
+	mtspr(SPRN_DBAT1L, 0xf000002a);
 	mb();
 }
 

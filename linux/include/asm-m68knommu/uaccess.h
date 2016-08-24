@@ -15,17 +15,15 @@
 
 #define access_ok(type,addr,size)	_access_ok((unsigned long)(addr),(size))
 
+/*
+ * It is not enough to just have access_ok check for a real RAM address.
+ * This would disallow the case of code/ro-data running XIP in flash/rom.
+ * Ideally we would check the possible flash ranges too, but that is
+ * currently not so easy.
+ */
 static inline int _access_ok(unsigned long addr, unsigned long size)
 {
-	extern unsigned long memory_start, memory_end;
-
-	return (((addr >= memory_start) && (addr+size < memory_end)) ||
-		(is_in_rom(addr) && is_in_rom(addr+size)));
-}
-
-extern inline int verify_area(int type, const void * addr, unsigned long size)
-{
-	return access_ok(type,addr,size)?0:-EFAULT;
+	return 1;
 }
 
 /*
@@ -98,7 +96,7 @@ extern int __put_user_bad(void);
 #define get_user(x, ptr)					\
 ({								\
     int __gu_err = 0;						\
-    typeof(*(ptr)) __gu_val = 0;				\
+    typeof(x) __gu_val = 0;					\
     switch (sizeof(*(ptr))) {					\
     case 1:							\
 	__get_user_asm(__gu_err, __gu_val, ptr, b, "=d");	\
@@ -110,23 +108,23 @@ extern int __put_user_bad(void);
 	__get_user_asm(__gu_err, __gu_val, ptr, l, "=r");	\
 	break;							\
     case 8:							\
-	memcpy(&__gu_val, ptr, sizeof (*(ptr))); \
+	memcpy((void *) &__gu_val, ptr, sizeof (*(ptr)));	\
 	break;							\
     default:							\
 	__gu_val = 0;						\
 	__gu_err = __get_user_bad();				\
 	break;							\
     }								\
-    (x) = __gu_val;						\
+    (x) = (typeof(*(ptr))) __gu_val;				\
     __gu_err;							\
 })
 #define __get_user(x, ptr) get_user(x, ptr)
 
 extern int __get_user_bad(void);
 
-#define __get_user_asm(err,x,ptr,bwl,reg)	\
-	__asm__ ("move" #bwl " %1,%0"			\
-		 : "=d" (x)							\
+#define __get_user_asm(err,x,ptr,bwl,reg)			\
+	__asm__ ("move" #bwl " %1,%0"				\
+		 : "=d" (x)					\
 		 : "m" (*__ptr(ptr)))
 
 #define copy_from_user(to, from, n)		(memcpy(to, from, n), 0)
@@ -172,10 +170,12 @@ static inline long strnlen_user(const char *src, long n)
  */
 
 static inline unsigned long
-clear_user(void *to, unsigned long n)
+__clear_user(void *to, unsigned long n)
 {
 	memset(to, 0, n);
 	return 0;
 }
+
+#define	clear_user(to,n)	__clear_user(to,n)
 
 #endif /* _M68KNOMMU_UACCESS_H */

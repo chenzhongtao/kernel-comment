@@ -9,7 +9,6 @@
 #ifndef _ASM_SN_ADDRS_H
 #define _ASM_SN_ADDRS_H
 
-#include <linux/config.h>
 
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
@@ -27,13 +26,8 @@
 
 #ifndef __ASSEMBLY__
 
-#if defined(CONFIG_SGI_IO)	/* FIXME */
-#define PS_UINT_CAST		(__psunsigned_t)
-#define UINT64_CAST		(__uint64_t)
-#else	/* CONFIG_SGI_IO */
 #define PS_UINT_CAST		(unsigned long)
 #define UINT64_CAST		(unsigned long)
-#endif	/* CONFIG_SGI_IO */
 
 #define HUBREG_CAST		(volatile hubreg_t *)
 
@@ -56,7 +50,7 @@
 #define TO_NODE_ADDRSPACE(_pa)	(UINT64_CAST (_pa) & NODE_ADDRSPACE_MASK)
 
 #define CHANGE_ADDR_NASID(_pa, _nasid)	\
-		((UINT64_CAST (_pa) & ~NASID_MASK) | \
+		((UINT64_CAST(_pa) & ~NASID_MASK) | \
 		 (UINT64_CAST(_nasid) <<  NASID_SHFT))
 
 
@@ -81,7 +75,7 @@
 
 
 #define RAW_NODE_SWIN_BASE(nasid, widget)				\
-	(NODE_IO_BASE(nasid) + (UINT64_CAST (widget) << SWIN_SIZE_BITS))
+	(NODE_IO_BASE(nasid) + (UINT64_CAST(widget) << SWIN_SIZE_BITS))
 
 #define WIDGETID_GET(addr)	((unsigned char)((addr >> SWIN_SIZE_BITS) & 0xff))
 
@@ -198,31 +192,31 @@
 #define BDDIR_ENTRY_LO(_pa)	((HSPEC_BASE +				      \
 				  NODE_ADDRSPACE_SIZE * 3 / 4 +		      \
 				  0x200)				    | \
-				 UINT64_CAST (_pa)	 & NASID_MASK	    | \
-				 UINT64_CAST (_pa) >> 2 & BDDIR_UPPER_MASK  | \
-				 UINT64_CAST (_pa) >> 3 & 0x1f << 4)
+				 UINT64_CAST(_pa)	 & NASID_MASK	    | \
+				 UINT64_CAST(_pa) >> 2 & BDDIR_UPPER_MASK  | \
+				 UINT64_CAST(_pa) >> 3 & 0x1f << 4)
 
 #define BDDIR_ENTRY_HI(_pa)	((HSPEC_BASE +				      \
 				  NODE_ADDRSPACE_SIZE * 3 / 4 +		      \
 				  0x208)				    | \
-				 UINT64_CAST (_pa)	 & NASID_MASK	    | \
-				 UINT64_CAST (_pa) >> 2 & BDDIR_UPPER_MASK  | \
-				 UINT64_CAST (_pa) >> 3 & 0x1f << 4)
+				 UINT64_CAST(_pa)	 & NASID_MASK	    | \
+				 UINT64_CAST(_pa) >> 2 & BDDIR_UPPER_MASK  | \
+				 UINT64_CAST(_pa) >> 3 & 0x1f << 4)
 
 #define BDPRT_ENTRY(_pa, _rgn)	((HSPEC_BASE +				      \
 				  NODE_ADDRSPACE_SIZE * 3 / 4)		    | \
-				 UINT64_CAST (_pa)	 & NASID_MASK	    | \
-				 UINT64_CAST (_pa) >> 2 & BDDIR_UPPER_MASK  | \
+				 UINT64_CAST(_pa)	 & NASID_MASK	    | \
+				 UINT64_CAST(_pa) >> 2 & BDDIR_UPPER_MASK  | \
 				 (_rgn) << 3)
-#define BDPRT_ENTRY_ADDR(_pa,_rgn) (BDPRT_ENTRY((_pa),(_rgn)))
-#define BDPRT_ENTRY_S(_pa,_rgn,_val) (*(__psunsigned_t *)BDPRT_ENTRY((_pa),(_rgn))=(_val))
-#define BDPRT_ENTRY_L(_pa,_rgn)	(*(__psunsigned_t *)BDPRT_ENTRY((_pa),(_rgn)))
+#define BDPRT_ENTRY_ADDR(_pa, _rgn) (BDPRT_ENTRY((_pa), (_rgn)))
+#define BDPRT_ENTRY_S(_pa, _rgn, _val) (*(__psunsigned_t *)BDPRT_ENTRY((_pa), (_rgn))=(_val))
+#define BDPRT_ENTRY_L(_pa, _rgn)	(*(__psunsigned_t *)BDPRT_ENTRY((_pa), (_rgn)))
 
 #define BDECC_ENTRY(_pa)	((HSPEC_BASE +				      \
 				  NODE_ADDRSPACE_SIZE / 2)		    | \
-				 UINT64_CAST (_pa)	 & NASID_MASK	    | \
-				 UINT64_CAST (_pa) >> 2 & BDECC_UPPER_MASK  | \
-				 UINT64_CAST (_pa) >> 3 & 3)
+				 UINT64_CAST(_pa)	 & NASID_MASK	    | \
+				 UINT64_CAST(_pa) >> 2 & BDECC_UPPER_MASK  | \
+				 UINT64_CAST(_pa) >> 3 & 3)
 
 /*
  * Macro to convert a back door directory or protection address into the
@@ -231,16 +225,16 @@
 #define BDADDR_IS_DIR(_ba)	((UINT64_CAST  (_ba) & 0x200) != 0)
 #define BDADDR_IS_PRT(_ba)	((UINT64_CAST  (_ba) & 0x200) == 0)
 
-#define BDDIR_TO_MEM(_ba)	(UINT64_CAST  (_ba) & NASID_MASK            | \
-				 (UINT64_CAST (_ba) & BDDIR_UPPER_MASK)<<2  | \
-				 (UINT64_CAST (_ba) & 0x1f << 4) << 3)
+#define BDDIR_TO_MEM(_ba)	(UINT64_CAST (_ba) & NASID_MASK            | \
+				 (UINT64_CAST(_ba) & BDDIR_UPPER_MASK)<<2  | \
+				 (UINT64_CAST(_ba) & 0x1f << 4) << 3)
 
-#define BDPRT_TO_MEM(_ba) 	(UINT64_CAST  (_ba) & NASID_MASK	    | \
-				 (UINT64_CAST (_ba) & BDDIR_UPPER_MASK)<<2)
+#define BDPRT_TO_MEM(_ba) 	(UINT64_CAST (_ba) & NASID_MASK	    | \
+				 (UINT64_CAST(_ba) & BDDIR_UPPER_MASK)<<2)
 
-#define BDECC_TO_MEM(_ba)	(UINT64_CAST  (_ba) & NASID_MASK	    | \
-				 (UINT64_CAST (_ba) & BDECC_UPPER_MASK)<<2  | \
-				 (UINT64_CAST (_ba) & 3) << 3)
+#define BDECC_TO_MEM(_ba)	(UINT64_CAST (_ba) & NASID_MASK	    | \
+				 (UINT64_CAST(_ba) & BDECC_UPPER_MASK)<<2  | \
+				 (UINT64_CAST(_ba) & 3) << 3)
 #endif /* CONFIG_SGI_IP27 */
 
 
@@ -252,14 +246,6 @@
  * that the appropriate PI, MD, NI, or II register would be substituted
  * for _x.
  */
-
-#ifdef _STANDALONE
-
-/* DO NOT USE THESE DIRECTLY IN THE KERNEL. SEE BELOW. */
-#define LOCAL_HUB(_x)		(HUBREG_CAST (IALIAS_BASE + (_x)))
-#define REMOTE_HUB(_n, _x)	(HUBREG_CAST (NODE_SWIN_BASE(_n, 1) +	\
-					      0x800000 + (_x)))
-#endif /* _STANDALONE */
 
 /*
  * WARNING:
@@ -296,7 +282,7 @@
  * the base of the register space.
  */
 #define HUB_REG_PTR(_base, _off)	\
-	(HUBREG_CAST ((__psunsigned_t)(_base) + (__psunsigned_t)(_off)))
+	(HUBREG_CAST((__psunsigned_t)(_base) + (__psunsigned_t)(_off)))
 
 #define HUB_REG_PTR_L(_base, _off)	\
 	HUB_L(HUB_REG_PTR((_base), (_off)))
@@ -326,20 +312,6 @@
 #define ARCS_SPB_ADDR(nasid)						\
 	PHYS_TO_K0(NODE_OFFSET(nasid) | ARCS_SPB_OFFSET)
 #define ARCS_SPB_SIZE		0x0400
-
-#ifdef _STANDALONE
-
-#define ARCS_TVECTOR_OFFSET	0x2800
-#define ARCS_PVECTOR_OFFSET	0x2c00
-
-/*
- * These addresses are used by the master CPU to install the transfer
- * and private vectors.  All others use the SPB to find them.
- */
-#define TVADDR	(NODE_CAC_BASE(get_nasid()) + ARCS_TVECTOR_OFFSET)
-#define PVADDR	(NODE_CAC_BASE(get_nasid()) + ARCS_PVECTOR_OFFSET)
-
-#endif /* _STANDALONE */
 
 #define KLDIR_OFFSET		0x2000
 #define KLDIR_ADDR(nasid)						\

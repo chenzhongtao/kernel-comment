@@ -7,11 +7,9 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -193,7 +191,6 @@ static struct fb_ops hpfb_ops = {
 	.fb_fillrect	= hpfb_fillrect,
 	.fb_copyarea	= hpfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 	.fb_sync	= hpfb_sync,
 };
 
@@ -297,6 +294,8 @@ static int __init hpfb_init_one(unsigned long phys_base, unsigned long virt_base
 
 	if (register_framebuffer(&fb_info) < 0) {
 		fb_dealloc_cmap(&fb_info.cmap);
+		iounmap(fb_info.screen_base);
+		fb_info.screen_base = NULL;
 		return 1;
 	}
 
@@ -387,7 +386,9 @@ int __init hpfb_init(void)
 	if (fb_get_options("hpfb", NULL))
 		return -ENODEV;
 
-	dio_module_init(&hpfb_driver);
+	err = dio_register_driver(&hpfb_driver);
+	if (err)
+		return err;
 
 	fs = get_fs();
 	set_fs(KERNEL_DS);

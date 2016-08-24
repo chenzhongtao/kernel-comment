@@ -22,7 +22,7 @@
 #include <asm/irq.h>
 #include <asm/errno.h>
 
-#include <asm/asm-consts.h>
+#include <asm/asm-offsets.h>
 
 
 /* Make a slightly more convenient alias for C_SYMBOL_NAME.  */
@@ -195,7 +195,7 @@
 	sst.w	lp, PTO+PT_GPR(GPR_LP)[ep];				      \
 	type ## _STATE_SAVER
 /* Pop a register state pushed by PUSH_STATE, except for the stack pointer,
-   from the the stack.  */
+   from the stack.  */
 #define POP_STATE(type)							      \
 	mov	sp, ep;							      \
 	type ## _STATE_RESTORER;					      \
@@ -523,7 +523,7 @@ END(ret_from_trap)
 
 
 /* This the initial entry point for a new child thread, with an appropriate
-   stack in place that makes it look the the child is in the middle of an
+   stack in place that makes it look that the child is in the middle of an
    syscall.  This function is actually `returned to' from switch_thread
    (copy_thread makes ret_from_fork the return address in each new thread's
    saved context).  */

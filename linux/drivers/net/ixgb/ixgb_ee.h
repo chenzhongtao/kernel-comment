@@ -1,27 +1,27 @@
 /*******************************************************************************
 
-  
-  Copyright(c) 1999 - 2004 Intel Corporation. All rights reserved.
-  
-  This program is free software; you can redistribute it and/or modify it 
-  under the terms of the GNU General Public License as published by the Free 
-  Software Foundation; either version 2 of the License, or (at your option) 
-  any later version.
-  
-  This program is distributed in the hope that it will be useful, but WITHOUT 
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or 
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for 
+  Intel PRO/10GbE Linux driver
+  Copyright(c) 1999 - 2006 Intel Corporation.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms and conditions of the GNU General Public License,
+  version 2, as published by the Free Software Foundation.
+
+  This program is distributed in the hope it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
   more details.
-  
+
   You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc., 59 
-  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-  
-  The full GNU General Public License is included in this distribution in the
-  file called LICENSE.
-  
+  this program; if not, write to the Free Software Foundation, Inc.,
+  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+
+  The full GNU General Public License is included in this distribution in
+  the file called "COPYING".
+
   Contact Information:
   Linux NICS <linux.nics@intel.com>
+  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
 
 *******************************************************************************/
@@ -63,6 +63,7 @@
 
 #define EEPROM_ICW1_SIGNATURE_MASK  0xC000
 #define EEPROM_ICW1_SIGNATURE_VALID 0x4000
+#define EEPROM_ICW1_SIGNATURE_CLEAR 0x0000
 
 /* For checksumming, the sum of all words in the EEPROM should equal 0xBABA. */
 #define EEPROM_SUM 0xBABA
@@ -75,22 +76,22 @@
 /* EEPROM structure */
 struct ixgb_ee_map_type {
 	uint8_t mac_addr[IXGB_ETH_LENGTH_OF_ADDRESS];
-	uint16_t compatibility;
-	uint16_t reserved1[4];
-	uint32_t pba_number;
-	uint16_t init_ctrl_reg_1;
-	uint16_t subsystem_id;
-	uint16_t subvendor_id;
-	uint16_t device_id;
-	uint16_t vendor_id;
-	uint16_t init_ctrl_reg_2;
-	uint16_t oem_reserved[16];
-	uint16_t swdpins_reg;
-	uint16_t circuit_ctrl_reg;
+	__le16 compatibility;
+	__le16 reserved1[4];
+	__le32 pba_number;
+	__le16 init_ctrl_reg_1;
+	__le16 subsystem_id;
+	__le16 subvendor_id;
+	__le16 device_id;
+	__le16 vendor_id;
+	__le16 init_ctrl_reg_2;
+	__le16 oem_reserved[16];
+	__le16 swdpins_reg;
+	__le16 circuit_ctrl_reg;
 	uint8_t d3_power;
 	uint8_t d0_power;
-	uint16_t reserved2[28];
-	uint16_t checksum;
+	__le16 reserved2[28];
+	__le16 checksum;
 };
 
 /* EEPROM Functions */

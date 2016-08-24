@@ -1,27 +1,27 @@
 /*******************************************************************************
 
-  
-  Copyright(c) 1999 - 2004 Intel Corporation. All rights reserved.
-  
-  This program is free software; you can redistribute it and/or modify it 
-  under the terms of the GNU General Public License as published by the Free 
-  Software Foundation; either version 2 of the License, or (at your option) 
-  any later version.
-  
-  This program is distributed in the hope that it will be useful, but WITHOUT 
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or 
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for 
+  Intel PRO/10GbE Linux driver
+  Copyright(c) 1999 - 2006 Intel Corporation.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms and conditions of the GNU General Public License,
+  version 2, as published by the Free Software Foundation.
+
+  This program is distributed in the hope it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
   more details.
-  
+
   You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc., 59 
-  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-  
-  The full GNU General Public License is included in this distribution in the
-  file called LICENSE.
-  
+  this program; if not, write to the Free Software Foundation, Inc.,
+  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+
+  The full GNU General Public License is included in this distribution in
+  the file called "COPYING".
+
   Contact Information:
   Linux NICS <linux.nics@intel.com>
+  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
 
 *******************************************************************************/
@@ -57,6 +57,7 @@ typedef enum {
 typedef enum {
 	ixgb_media_type_unknown = 0,
 	ixgb_media_type_fiber = 1,
+	ixgb_media_type_copper = 2,
 	ixgb_num_media_types
 } ixgb_media_type;
 
@@ -710,7 +711,7 @@ struct ixgb_hw {
 	uint32_t bar2;
 	uint32_t bar3;
 	uint16_t pci_cmd_word;	/* PCI command register id from PCI configuration space */
-	uint16_t eeprom[IXGB_EEPROM_SIZE];	/* EEPROM contents read at init time  */
+	__le16 eeprom[IXGB_EEPROM_SIZE];	/* EEPROM contents read at init time  */
 	unsigned long io_base;	/* Our I/O mapped location */
 	uint32_t lastLFC;
 	uint32_t lastRFC;
@@ -784,23 +785,8 @@ struct ixgb_hw_stats {
 extern boolean_t ixgb_adapter_stop(struct ixgb_hw *hw);
 extern boolean_t ixgb_init_hw(struct ixgb_hw *hw);
 extern boolean_t ixgb_adapter_start(struct ixgb_hw *hw);
-extern void ixgb_init_rx_addrs(struct ixgb_hw *hw);
 extern void ixgb_check_for_link(struct ixgb_hw *hw);
 extern boolean_t ixgb_check_for_bad_link(struct ixgb_hw *hw);
-extern boolean_t ixgb_setup_fc(struct ixgb_hw *hw);
-extern void ixgb_clear_hw_cntrs(struct ixgb_hw *hw);
-extern boolean_t mac_addr_valid(uint8_t *mac_addr);
-
-extern uint16_t ixgb_read_phy_reg(struct ixgb_hw *hw,
-				uint32_t reg_addr,
-				uint32_t phy_addr,
-				uint32_t device_type);
-
-extern void ixgb_write_phy_reg(struct ixgb_hw *hw,
-				uint32_t reg_addr,
-				uint32_t phy_addr,
-				uint32_t device_type,
-				uint16_t data);
 
 extern void ixgb_rar_set(struct ixgb_hw *hw,
 				uint8_t *addr,
@@ -818,23 +804,12 @@ extern void ixgb_write_vfta(struct ixgb_hw *hw,
 				 uint32_t offset,
 				 uint32_t value);
 
-extern void ixgb_clear_vfta(struct ixgb_hw *hw);
-
 /* Access functions to eeprom data */
 void ixgb_get_ee_mac_addr(struct ixgb_hw *hw, uint8_t *mac_addr);
-uint16_t ixgb_get_ee_compatibility(struct ixgb_hw *hw);
 uint32_t ixgb_get_ee_pba_number(struct ixgb_hw *hw);
-uint16_t ixgb_get_ee_init_ctrl_reg_1(struct ixgb_hw *hw);
-uint16_t ixgb_get_ee_init_ctrl_reg_2(struct ixgb_hw *hw);
-uint16_t ixgb_get_ee_subsystem_id(struct ixgb_hw *hw);
-uint16_t ixgb_get_ee_subvendor_id(struct ixgb_hw *hw);
 uint16_t ixgb_get_ee_device_id(struct ixgb_hw *hw);
-uint16_t ixgb_get_ee_vendor_id(struct ixgb_hw *hw);
-uint16_t ixgb_get_ee_swdpins_reg(struct ixgb_hw *hw);
-uint8_t ixgb_get_ee_d3_power(struct ixgb_hw *hw);
-uint8_t ixgb_get_ee_d0_power(struct ixgb_hw *hw);
 boolean_t ixgb_get_eeprom_data(struct ixgb_hw *hw);
-uint16_t ixgb_get_eeprom_word(struct ixgb_hw *hw, uint16_t index);
+__le16 ixgb_get_eeprom_word(struct ixgb_hw *hw, uint16_t index);
 
 /* Everything else */
 void ixgb_led_on(struct ixgb_hw *hw);

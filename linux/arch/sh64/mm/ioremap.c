@@ -18,107 +18,16 @@
 #include <linux/vmalloc.h>
 #include <linux/sched.h>
 #include <linux/string.h>
-#include <asm/io.h>
-#include <asm/pgalloc.h>
-#include <asm/tlbflush.h>
+#include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/bootmem.h>
 #include <linux/proc_fs.h>
+#include <linux/module.h>
+#include <asm/pgalloc.h>
+#include <asm/tlbflush.h>
 
 static void shmedia_mapioaddr(unsigned long, unsigned long);
 static unsigned long shmedia_ioremap(struct resource *, u32, int);
-
-static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
-	unsigned long phys_addr, unsigned long flags)
-{
-	unsigned long end;
-	unsigned long pfn;
-	pgprot_t pgprot = __pgprot(_PAGE_PRESENT  | _PAGE_READ   |
-				   _PAGE_WRITE    | _PAGE_DIRTY  |
-				   _PAGE_ACCESSED | _PAGE_SHARED | flags);
-
-	address &= ~PMD_MASK;
-	end = address + size;
-	if (end > PMD_SIZE)
-		end = PMD_SIZE;
-	if (address >= end)
-		BUG();
-
-	pfn = phys_addr >> PAGE_SHIFT;
-
-	pr_debug("    %s: pte %p address %lx size %lx phys_addr %lx\n",
-		 __FUNCTION__,pte,address,size,phys_addr);
-
-	do {
-		if (!pte_none(*pte)) {
-			printk("remap_area_pte: page already exists\n");
-			BUG();
-		}
-
-		set_pte(pte, pfn_pte(pfn, pgprot));
-		address += PAGE_SIZE;
-		pfn++;
-		pte++;
-	} while (address && (address < end));
-}
-
-static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
-	unsigned long phys_addr, unsigned long flags)
-{
-	unsigned long end;
-
-	address &= ~PGDIR_MASK;
-	end = address + size;
-
-	if (end > PGDIR_SIZE)
-		end = PGDIR_SIZE;
-
-	phys_addr -= address;
-
-	if (address >= end)
-		BUG();
-
-	do {
-		pte_t * pte = pte_alloc_kernel(&init_mm, pmd, address);
-		if (!pte)
-			return -ENOMEM;
-		remap_area_pte(pte, address, end - address, address + phys_addr, flags);
-		address = (address + PMD_SIZE) & PMD_MASK;
-		pmd++;
-	} while (address && (address < end));
-	return 0;
-}
-
-static int remap_area_pages(unsigned long address, unsigned long phys_addr,
-				 unsigned long size, unsigned long flags)
-{
-	int error;
-	pgd_t * dir;
-	unsigned long end = address + size;
-
-	phys_addr -= address;
-	dir = pgd_offset_k(address);
-	flush_cache_all();
-	if (address >= end)
-		BUG();
-	spin_lock(&init_mm.page_table_lock);
-	do {
-		pmd_t *pmd = pmd_alloc(&init_mm, dir, address);
-		error = -ENOMEM;
-		if (!pmd)
-			break;
-		if (remap_area_pmd(pmd, address, end - address,
-				   phys_addr + address, flags)) {
-			 break;
-		}
-		error = 0;
-		address = (address + PGDIR_SIZE) & PGDIR_MASK;
-		dir++;
-	} while (address && (address < end));
-	spin_unlock(&init_mm.page_table_lock);
-	flush_tlb_all();
-	return 0;
-}
 
 /*
  * Generic mapping function (not visible outside):
@@ -138,11 +47,16 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	void * addr;
 	struct vm_struct * area;
 	unsigned long offset, last_addr;
+	pgprot_t pgprot;
 
 	/* Don't allow wraparound or zero size */
 	last_addr = phys_addr + size - 1;
 	if (!size || last_addr < phys_addr)
 		return NULL;
+
+	pgprot = __pgprot(_PAGE_PRESENT  | _PAGE_READ   |
+			  _PAGE_WRITE    | _PAGE_DIRTY  |
+			  _PAGE_ACCESSED | _PAGE_SHARED | flags);
 
 	/*
 	 * Mappings have to be page-aligned
@@ -160,12 +74,14 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 		return NULL;
 	area->phys_addr = phys_addr;
 	addr = area->addr;
-	if (remap_area_pages((unsigned long)addr, phys_addr, size, flags)) {
+	if (ioremap_page_range((unsigned long)addr, (unsigned long)addr + size,
+			       phys_addr, pgprot)) {
 		vunmap(addr);
 		return NULL;
 	}
 	return (void *) (offset + (char *)addr);
 }
+EXPORT_SYMBOL(__ioremap);
 
 void iounmap(void *addr)
 {
@@ -180,10 +96,11 @@ void iounmap(void *addr)
 
 	kfree(area);
 }
+EXPORT_SYMBOL(iounmap);
 
 static struct resource shmedia_iomap = {
-        .name	= "shmedia_iomap",
-	.start	= IOBASE_VADDR,
+	.name	= "shmedia_iomap",
+	.start	= IOBASE_VADDR + PAGE_SIZE,
 	.end	= IOBASE_END - 1,
 };
 
@@ -328,7 +245,7 @@ static void shmedia_free_io(struct resource *res)
 	release_resource(res);
 }
 
-static void *sh64_get_page(void)
+static __init_refok void *sh64_get_page(void)
 {
 	extern int after_bootmem;
 	void *page;
@@ -400,7 +317,7 @@ static void shmedia_unmapioaddr(unsigned long vaddr)
 		return;
 
 	clear_page((void *)ptep);
-	pte_clear(ptep);
+	pte_clear(&init_mm, vaddr, ptep);
 }
 
 unsigned long onchip_remap(unsigned long phys, unsigned long size, const char *name)
@@ -451,7 +368,9 @@ ioremap_proc_info(char *buf, char **start, off_t fpos, int length, int *eof,
 		if (p + 32 >= e)        /* Better than nothing */
 			break;
 		if ((nm = r->name) == 0) nm = "???";
-		p += sprintf(p, "%08lx-%08lx: %s\n", r->start, r->end, nm);
+		p += sprintf(p, "%08lx-%08lx: %s\n",
+			     (unsigned long)r->start,
+			     (unsigned long)r->end, nm);
 	}
 
 	return p-buf;

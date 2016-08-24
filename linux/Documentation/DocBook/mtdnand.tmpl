@@ -1,4 +1,6 @@
-<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V3.1//EN"[]>
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.1.2//EN"
+	"http://www.oasis-open.org/docbook/xml/4.1.2/docbookx.dtd" []>
 
 <book id="MTD-NAND-Guide">
  <bookinfo>
@@ -107,7 +109,7 @@
 		for most of the implementations. These functions can be replaced by the
 		board driver if neccecary. Those functions are called via pointers in the
 		NAND chip description structure. The board driver can set the functions which
-		should be replaced by board dependend functions before calling nand_scan().
+		should be replaced by board dependent functions before calling nand_scan().
 		If the function pointer is NULL on entry to nand_scan() then the pointer
 		is set to the default function which is suitable for the detected chip type.
 		</para></listitem>
@@ -131,7 +133,7 @@
 	  	[REPLACEABLE]</para><para>
 		Replaceable members hold hardware related functions which can be 
 		provided by the board driver. The board driver can set the functions which
-		should be replaced by board dependend functions before calling nand_scan().
+		should be replaced by board dependent functions before calling nand_scan().
 		If the function pointer is NULL on entry to nand_scan() then the pointer
 		is set to the default function which is suitable for the detected chip type.
 		</para></listitem>
@@ -154,9 +156,8 @@
      	<title>Basic board driver</title>
 	<para>
 		For most boards it will be sufficient to provide just the
-		basic functions and fill out some really board dependend
+		basic functions and fill out some really board dependent
 		members in the nand chip description structure.
-		See drivers/mtd/nand/skeleton for reference.
 	</para>
 	<sect1>
 		<title>Basic defines</title>
@@ -187,9 +188,9 @@ static unsigned long baseaddr;
 	<sect1>
 		<title>Partition defines</title>
 		<para>
-			If you want to divide your device into parititions, then
-			enable the configuration switch CONFIG_MTD_PARITIONS and define
-			a paritioning scheme suitable to your board.
+			If you want to divide your device into partitions, then
+			enable the configuration switch CONFIG_MTD_PARTITIONS and define
+			a partitioning scheme suitable to your board.
 		</para>
 		<programlisting>
 #define NUM_PARTITIONS 2
@@ -238,9 +239,9 @@ static void board_hwcontrol(struct mtd_info *mtd, int cmd)
 	struct nand_chip *this = (struct nand_chip *) mtd->priv;
 	switch(cmd){
 		case NAND_CTL_SETCLE: this->IO_ADDR_W |= CLE_ADRR_BIT;  break;
-		case NAND_CTL_CLRCLE: this->IO_ADDR_W &= ~CLE_ADRR_BIT; break;
+		case NAND_CTL_CLRCLE: this->IO_ADDR_W &amp;= ~CLE_ADRR_BIT; break;
 		case NAND_CTL_SETALE: this->IO_ADDR_W |= ALE_ADRR_BIT;  break;
-		case NAND_CTL_CLRALE: this->IO_ADDR_W &= ~ALE_ADRR_BIT; break;
+		case NAND_CTL_CLRALE: this->IO_ADDR_W &amp;= ~ALE_ADRR_BIT; break;
 	}
 }
 		</programlisting>
@@ -274,17 +275,14 @@ int __init board_init (void)
 	int err = 0;
 
 	/* Allocate memory for MTD device structure and private data */
-	board_mtd = kmalloc (sizeof(struct mtd_info) + sizeof (struct nand_chip), GFP_KERNEL);
+	board_mtd = kzalloc(sizeof(struct mtd_info) + sizeof(struct nand_chip), GFP_KERNEL);
 	if (!board_mtd) {
 		printk ("Unable to allocate NAND MTD device structure.\n");
 		err = -ENOMEM;
 		goto out;
 	}
 
-	/* Initialize structures */
-	memset ((char *) board_mtd, 0, sizeof(struct mtd_info) + sizeof(struct nand_chip));
-
-	/* map physical adress */
+	/* map physical address */
 	baseaddr = (unsigned long)ioremap(CHIP_PHYSICAL_ADDRESS, 1024);
 	if(!baseaddr){
 		printk("Ioremap to access NAND chip failed\n");
@@ -308,7 +306,7 @@ int __init board_init (void)
 	this->dev_ready = board_dev_ready;
 	this->eccmode = NAND_ECC_SOFT;
 
-	/* Scan to find existance of the device */
+	/* Scan to find existence of the device */
 	if (nand_scan (board_mtd, 1)) {
 		err = -ENXIO;
 		goto out_ior;
@@ -342,7 +340,7 @@ static void __exit board_cleanup (void)
 	/* Release resources, unregister device */
 	nand_release (board_mtd);
 
-	/* unmap physical adress */
+	/* unmap physical address */
 	iounmap((void *)baseaddr);
 	
 	/* Free the MTD device structure */
@@ -391,7 +389,7 @@ static void board_select_chip (struct mtd_info *mtd, int chip)
 	/* Deselect all chips, set all nCE pins high */
 	GPIO(BOARD_NAND_NCE) |= 0xff;	
 	if (chip >= 0)
-		GPIO(BOARD_NAND_NCE) &= ~ (1 << chip);	
+		GPIO(BOARD_NAND_NCE) &amp;= ~ (1 &lt;&lt; chip);
 }
 		</programlisting>
 		<para>
@@ -405,8 +403,8 @@ static void board_select_chip (struct mtd_info *mtd, int chip)
 	struct nand_chip *this = (struct nand_chip *) mtd->priv;
 	
 	/* Deselect all chips */
-	this->IO_ADDR_R &= ~BOARD_NAND_ADDR_MASK;
-	this->IO_ADDR_W &= ~BOARD_NAND_ADDR_MASK;
+	this->IO_ADDR_R &amp;= ~BOARD_NAND_ADDR_MASK;
+	this->IO_ADDR_W &amp;= ~BOARD_NAND_ADDR_MASK;
 	switch (chip) {
 	case 0:
 		this->IO_ADDR_R |= BOARD_NAND_ADDR_CHIP0;
@@ -1293,7 +1291,9 @@ in this page</entry>
      </para>
 !Idrivers/mtd/nand/nand_base.c
 !Idrivers/mtd/nand/nand_bbt.c
-!Idrivers/mtd/nand/nand_ecc.c
+<!-- No internal functions for kernel-doc:
+X!Idrivers/mtd/nand/nand_ecc.c
+-->
   </chapter>
 
   <chapter id="credits">

@@ -1,6 +1,4 @@
 /*
- *  arch/ppc/syslib/m8260_setup.c
- *
  *  Copyright (C) 1995  Linus Torvalds
  *  Adapted from 'alpha' version by Gary Thomas
  *  Modified by Cort Dougan (cort@cs.nmt.edu)
@@ -8,7 +6,6 @@
  *  Further modified for generic 8xx and 8260 by Dan.
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -24,17 +21,18 @@
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/mpc8260.h>
-#include <asm/immap_cpm2.h>
+#include <asm/cpm2.h>
 #include <asm/machdep.h>
 #include <asm/bootinfo.h>
 #include <asm/time.h>
+#include <asm/ppc_sys.h>
 
 #include "cpm2_pic.h"
 
 unsigned char __res[sizeof(bd_t)];
 
-extern void cpm2_reset(void);
-extern void m8260_find_bridges(void);
+extern void pq2_find_bridges(void);
+extern void pq2pci_init_irq(void);
 extern void idma_pci9_init(void);
 
 /* Place-holder for board-specific init */
@@ -56,12 +54,16 @@ m8260_setup_arch(void)
 	idma_pci9_init();
 #endif
 #ifdef CONFIG_PCI_8260
-	m8260_find_bridges();
+	pq2_find_bridges();
 #endif
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start)
 		ROOT_DEV = Root_RAM0;
 #endif
+
+	identify_ppc_sys_by_name_and_id(BOARD_CHIP_NAME,
+			in_be32((void *)CPM_MAP_ADDR + CPM_IMMR_OFFSET));
+
 	m82xx_board_setup();
 }
 
@@ -146,12 +148,12 @@ m8260_show_cpuinfo(struct seq_file *m)
 	seq_printf(m, "vendor\t\t: %s\n"
 		   "machine\t\t: %s\n"
 		   "\n"
-		   "mem size\t\t: 0x%08x\n"
-		   "console baud\t\t: %d\n"
+		   "mem size\t\t: 0x%08lx\n"
+		   "console baud\t\t: %ld\n"
 		   "\n"
-		   "core clock\t: %u MHz\n"
-		   "CPM  clock\t: %u MHz\n"
-		   "bus  clock\t: %u MHz\n",
+		   "core clock\t: %lu MHz\n"
+		   "CPM  clock\t: %lu MHz\n"
+		   "bus  clock\t: %lu MHz\n",
 		   CPUINFO_VENDOR, CPUINFO_MACHINE, bp->bi_memsize,
 		   bp->bi_baudrate, bp->bi_intfreq / 1000000,
 		   bp->bi_cpmfreq / 1000000, bp->bi_busfreq / 1000000);
@@ -167,18 +169,18 @@ m8260_show_cpuinfo(struct seq_file *m)
 static void __init
 m8260_init_IRQ(void)
 {
-	int i;
-
-        for ( i = 0 ; i < NR_SIU_INTS ; i++ )
-                irq_desc[i].handler = &cpm2_pic;
+	cpm2_init_IRQ();
 
 	/* Initialize the default interrupt mapping priorities,
 	 * in case the boot rom changed something on us.
 	 */
-	cpm2_immr->im_intctl.ic_sicr = 0;
 	cpm2_immr->im_intctl.ic_siprr = 0x05309770;
-	cpm2_immr->im_intctl.ic_scprrh = 0x05309770;
-	cpm2_immr->im_intctl.ic_scprrl = 0x05309770;
+
+#if defined(CONFIG_PCI) && (defined(CONFIG_ADS8272) || defined(CONFIG_PQ2FADS))
+ 	/* Initialize stuff for the 82xx CPLD IC and install demux  */
+ 	pq2pci_init_irq();
+#endif
+
 }
 
 /*

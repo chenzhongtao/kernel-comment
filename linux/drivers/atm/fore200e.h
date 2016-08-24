@@ -3,7 +3,6 @@
 #define _FORE200E_H
 
 #ifdef __KERNEL__
-#include <linux/config.h>
 
 /* rx buffer sizes */
 
@@ -841,7 +840,7 @@ typedef struct fore200e_vc_map {
 /* per-device data */
 
 typedef struct fore200e {
-    struct       fore200e*     next;                   /* next device                        */
+    struct       list_head     entry;                  /* next device                        */
     const struct fore200e_bus* bus;                    /* bus-dependent code and data        */
     union        fore200e_regs regs;                   /* bus-dependent registers            */
     struct       atm_dev*      atm_dev;                /* ATM device                         */
@@ -870,7 +869,7 @@ typedef struct fore200e {
 
     struct stats*              stats;                  /* last snapshot of the stats         */
     
-    struct semaphore           rate_sf;                /* protects rate reservation ops      */
+    struct mutex               rate_mtx;               /* protects rate reservation ops      */
     spinlock_t                 q_lock;                 /* protects queue ops                 */
 #ifdef FORE200E_USE_TASKLET
     struct tasklet_struct      tx_tasklet;             /* performs tx interrupt work         */

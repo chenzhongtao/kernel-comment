@@ -1,6 +1,4 @@
 /*
- * arch/ppc/boot/common/util.S
- *
  * Useful bootup functions, which are more easily done in asm than C.
  *
  * NOTE:  Be very very careful about the registers you use here.
@@ -47,23 +45,23 @@ disable_6xx_mmu:
 
 	/* Clear BATs */
 	li	r8,0
-	mtspr	DBAT0U,r8
-	mtspr	DBAT0L,r8
-	mtspr	DBAT1U,r8
-	mtspr	DBAT1L,r8
-	mtspr	DBAT2U,r8
-	mtspr	DBAT2L,r8
-	mtspr	DBAT3U,r8
-	mtspr	DBAT3L,r8
+	mtspr	SPRN_DBAT0U,r8
+	mtspr	SPRN_DBAT0L,r8
+	mtspr	SPRN_DBAT1U,r8
+	mtspr	SPRN_DBAT1L,r8
+	mtspr	SPRN_DBAT2U,r8
+	mtspr	SPRN_DBAT2L,r8
+	mtspr	SPRN_DBAT3U,r8
+	mtspr	SPRN_DBAT3L,r8
 .clearbats_601:
-	mtspr	IBAT0U,r8
-	mtspr	IBAT0L,r8
-	mtspr	IBAT1U,r8
-	mtspr	IBAT1L,r8
-	mtspr	IBAT2U,r8
-	mtspr	IBAT2L,r8
-	mtspr	IBAT3U,r8
-	mtspr	IBAT3L,r8
+	mtspr	SPRN_IBAT0U,r8
+	mtspr	SPRN_IBAT0L,r8
+	mtspr	SPRN_IBAT1U,r8
+	mtspr	SPRN_IBAT1L,r8
+	mtspr	SPRN_IBAT2U,r8
+	mtspr	SPRN_IBAT2L,r8
+	mtspr	SPRN_IBAT3U,r8
+	mtspr	SPRN_IBAT3L,r8
 	isync
 	sync
 	sync
@@ -84,14 +82,14 @@ disable_6xx_l1cache:
 	/* Enable, invalidate and then disable the L1 icache/dcache. */
 	li	r8,0
 	ori	r8,r8,(HID0_ICE|HID0_DCE|HID0_ICFI|HID0_DCI)
-	mfspr	r11,HID0
+	mfspr	r11,SPRN_HID0
 	or	r11,r11,r8
 	andc	r10,r11,r8
 	isync
-	mtspr	HID0,r8
+	mtspr	SPRN_HID0,r8
 	sync
 	isync
-	mtspr	HID0,r10
+	mtspr	SPRN_HID0,r10
 	sync
 	isync
 	blr
@@ -107,17 +105,17 @@ _setup_L2CR:
 	/* Invalidate/disable L2 cache */
 	sync
 	isync
-	mfspr	r8,L2CR
+	mfspr	r8,SPRN_L2CR
 	rlwinm	r8,r8,0,1,31
 	oris	r8,r8,L2CR_L2I@h
 	sync
 	isync
-	mtspr	L2CR,r8
+	mtspr	SPRN_L2CR,r8
 	sync
 	isync
 
 	/* Wait for the invalidation to complete */
-	mfspr   r8,PVR
+	mfspr   r8,SPRN_PVR
 	srwi    r8,r8,16
 	cmplwi	cr0,r8,0x8000			/* 7450 */
 	cmplwi	cr1,r8,0x8001			/* 7455 */
@@ -126,19 +124,19 @@ _setup_L2CR:
 	cror	4*cr0+eq,4*cr0+eq,4*cr2+eq
 	bne     2f
 
-1:	mfspr	r8,L2CR		/* On 745x, poll L2I bit (bit 10) */
+1:	mfspr	r8,SPRN_L2CR	/* On 745x, poll L2I bit (bit 10) */
 	rlwinm.	r9,r8,0,10,10
 	bne	1b
 	b	3f
 
-2:      mfspr   r8,L2CR		/* On 75x & 74[01]0, poll L2IP bit (bit 31) */
+2:      mfspr   r8,SPRN_L2CR	/* On 75x & 74[01]0, poll L2IP bit (bit 31) */
 	rlwinm. r9,r8,0,31,31
 	bne     2b
 
 3:	rlwinm	r8,r8,0,11,9	/* Turn off L2I bit */
 	sync
 	isync
-	mtspr	L2CR,r8
+	mtspr	SPRN_L2CR,r8
 	sync
 	isync
 	blr
@@ -148,24 +146,24 @@ _setup_L3CR:
 	/* Invalidate/disable L3 cache */
 	sync
 	isync
-	mfspr	r8,L3CR
+	mfspr	r8,SPRN_L3CR
 	rlwinm	r8,r8,0,1,31
 	ori	r8,r8,L3CR_L3I@l
 	sync
 	isync
-	mtspr	L3CR,r8
+	mtspr	SPRN_L3CR,r8
 	sync
 	isync
 
 	/* Wait for the invalidation to complete */
-1:	mfspr	r8,L3CR
+1:	mfspr	r8,SPRN_L3CR
 	rlwinm.	r9,r8,0,21,21
 	bne	1b
 
 	rlwinm	r8,r8,0,22,20		/* Turn off L3I bit */
 	sync
 	isync
-	mtspr	L3CR,r8
+	mtspr	SPRN_L3CR,r8
 	sync
 	isync
 	blr
@@ -190,7 +188,7 @@ timebase_period_ns:
  */
 	.globl	udelay
 udelay:
-	mfspr	r4,PVR
+	mfspr	r4,SPRN_PVR
 	srwi	r4,r4,16
 	cmpwi	0,r4,1		/* 601 ? */
 	bne	.udelay_not_601
@@ -234,17 +232,18 @@ udelay:
  * First, flush the data cache in case it was enabled and may be
  * holding instructions for copy back.
  */
-_GLOBAL(flush_instruction_cache)
+        .globl flush_instruction_cache
+flush_instruction_cache:        
 	mflr	r6
 	bl	flush_data_cache
 
 #ifdef CONFIG_8xx
 	lis	r3, IDC_INVALL@h
-	mtspr	IC_CST, r3
+	mtspr	SPRN_IC_CST, r3
 	lis	r3, IDC_ENABLE@h
-	mtspr	IC_CST, r3
+	mtspr	SPRN_IC_CST, r3
 	lis	r3, IDC_DISABLE@h
-	mtspr	DC_CST, r3
+	mtspr	SPRN_DC_CST, r3
 #elif CONFIG_4xx
 	lis	r3,start@h		# r9 = &_start
 	lis	r4,_etext@ha
@@ -252,20 +251,20 @@ _GLOBAL(flush_instruction_cache)
 1:	dcbf	r0,r3			# Flush the data cache
 	icbi	r0,r3			# Invalidate the instruction cache
 	addi	r3,r3,0x10		# Increment by one cache line
-	cmplwi	cr0,r3,r4		# Are we at the end yet?
+	cmplw	cr0,r3,r4		# Are we at the end yet?
 	blt	1b			# No, keep flushing and invalidating
 #else
 	/* Enable, invalidate and then disable the L1 icache/dcache. */
 	li	r3,0
 	ori	r3,r3,(HID0_ICE|HID0_DCE|HID0_ICFI|HID0_DCI)
-	mfspr	r4,HID0
+	mfspr	r4,SPRN_HID0
 	or	r5,r4,r3
 	isync
-	mtspr	HID0,r5
+	mtspr	SPRN_HID0,r5
 	sync
 	isync
 	ori	r5,r4,HID0_ICE	/* Enable cache */
-	mtspr	HID0,r5
+	mtspr	SPRN_HID0,r5
 	sync
 	isync
 #endif
@@ -279,7 +278,8 @@ _GLOBAL(flush_instruction_cache)
  * Flush data cache
  * Do this by just reading lots of stuff into the cache.
  */
-_GLOBAL(flush_data_cache)
+        .globl flush_data_cache
+flush_data_cache:       
 	lis	r3,cache_flush_buffer@h
 	ori	r3,r3,cache_flush_buffer@l
 	li	r4,NUM_CACHE_LINES

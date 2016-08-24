@@ -1,5 +1,5 @@
 /*
- * arch/sh/pci/dma-dreamcast.c
+ * arch/sh/drivers/pci/dma-dreamcast.c
  *
  * PCI DMA support for the Sega Dreamcast
  *
@@ -15,7 +15,6 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -33,7 +32,7 @@
 static int gapspci_dma_used = 0;
 
 void *dreamcast_consistent_alloc(struct device *dev, size_t size,
-				 dma_addr_t *dma_handle, int flag)
+				 dma_addr_t *dma_handle, gfp_t flag)
 {
 	unsigned long buf;
 
@@ -52,7 +51,7 @@ void *dreamcast_consistent_alloc(struct device *dev, size_t size,
 	buf = P2SEGADDR(buf);
 
 	/* Flush the dcache before we hand off the buffer */
-	dma_cache_wback_inv((void *)buf, size);
+	__flush_purge_region((void *)buf, size);
 
 	return (void *)buf;
 }

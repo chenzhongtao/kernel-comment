@@ -66,11 +66,11 @@ fail:
 	return err;
 }
 
-struct address_space_operations affs_symlink_aops = {
+const struct address_space_operations affs_symlink_aops = {
 	.readpage	= affs_symlink_readpage,
 };
 
-struct inode_operations affs_symlink_inode_operations = {
+const struct inode_operations affs_symlink_inode_operations = {
 	.readlink	= generic_readlink,
 	.follow_link	= page_follow_link_light,
 	.put_link	= page_put_link,

@@ -9,7 +9,6 @@
 #ifndef _ASM_DMA_H
 #define _ASM_DMA_H
 
-#include <linux/config.h>
 #include <asm/io.h>		/* need byte IO */
 #include <asm/system.h>	
 
@@ -18,10 +17,10 @@
 
 /*
 ** DMA_CHUNK_SIZE is used by the SCSI mid-layer to break up
-** (or rather not merge) DMA's into managable chunks.
+** (or rather not merge) DMAs into manageable chunks.
 ** On parisc, this is more of the software/tuning constraint
-** rather than the HW. I/O MMU allocation alogorithms can be
-** faster with smaller size is (to some degree).
+** rather than the HW. I/O MMU allocation algorithms can be
+** faster with smaller sizes (to some degree).
 */
 #define DMA_CHUNK_SIZE	(BITS_PER_LONG*PAGE_SIZE)
 
@@ -38,9 +37,11 @@
 ** won't compile :-(
 */
 #define MAX_DMA_CHANNELS 8
-#define DMA_MODE_READ    1
-#define DMA_MODE_WRITE   2
-#define DMA_AUTOINIT     0x10
+#define DMA_MODE_READ	0x44	/* I/O to memory, no autoinit, increment, single mode */
+#define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
+#define DMA_MODE_CASCADE 0xC0	/* pass thru DREQ->HRQ, DACK<-HLDA only */
+
+#define DMA_AUTOINIT	0x10
 
 /* 8237 DMA controllers */
 #define IO_DMA1_BASE	0x00	/* 8 bit slave DMA, channels 0..3 */
@@ -71,18 +72,13 @@
 #define DMA2_MASK_ALL_REG       0xDE    /* all-channels mask (w) */
 #define DMA2_EXT_MODE_REG	(0x400 | DMA2_MODE_REG)
 
-extern spinlock_t dma_spin_lock;
-
 static __inline__ unsigned long claim_dma_lock(void)
 {
-	unsigned long flags;
-	spin_lock_irqsave(&dma_spin_lock, flags);
-	return flags;
+	return 0;
 }
 
 static __inline__ void release_dma_lock(unsigned long flags)
 {
-	spin_unlock_irqrestore(&dma_spin_lock, flags);
 }
 
 

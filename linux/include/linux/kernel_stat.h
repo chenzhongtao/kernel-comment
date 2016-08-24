@@ -1,11 +1,11 @@
 #ifndef _LINUX_KERNEL_STAT_H
 #define _LINUX_KERNEL_STAT_H
 
-#include <linux/config.h>
 #include <asm/irq.h>
 #include <linux/smp.h>
 #include <linux/threads.h>
 #include <linux/percpu.h>
+#include <linux/cpumask.h>
 #include <asm/cputime.h>
 
 /*
@@ -23,6 +23,7 @@ struct cpu_usage_stat {
 	cputime64_t idle;
 	cputime64_t iowait;
 	cputime64_t steal;
+	cputime64_t guest;
 };
 
 struct kernel_stat {
@@ -43,17 +44,18 @@ extern unsigned long long nr_context_switches(void);
  */
 static inline int kstat_irqs(int irq)
 {
-	int i, sum=0;
+	int cpu, sum = 0;
 
-	for (i = 0; i < NR_CPUS; i++)
-		if (cpu_possible(i))
-			sum += kstat_cpu(i).irqs[irq];
+	for_each_possible_cpu(cpu)
+		sum += kstat_cpu(cpu).irqs[irq];
 
 	return sum;
 }
 
 extern void account_user_time(struct task_struct *, cputime_t);
+extern void account_user_time_scaled(struct task_struct *, cputime_t);
 extern void account_system_time(struct task_struct *, int, cputime_t);
+extern void account_system_time_scaled(struct task_struct *, cputime_t);
 extern void account_steal_time(struct task_struct *, cputime_t);
 
 #endif /* _LINUX_KERNEL_STAT_H */

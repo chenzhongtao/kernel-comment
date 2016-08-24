@@ -13,11 +13,6 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
-
-#ifndef MAX_HWIFS
-#define MAX_HWIFS	CONFIG_IDE_MAX_HWIFS
-#endif
 
 #define IDE_ARCH_OBSOLETE_DEFAULTS
 
@@ -45,7 +40,6 @@ static inline unsigned long ide_default_io_base(int index)
 	}
 }
 
-#define IDE_ARCH_OBSOLETE_INIT
 #define ide_default_io_ctl(base)	((base) + 0x206) /* obsolete */
 
 #ifdef CONFIG_PCI

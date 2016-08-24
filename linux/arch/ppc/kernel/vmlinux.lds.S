@@ -8,6 +8,7 @@ SECTIONS
   . = + SIZEOF_HEADERS;
   .interp : { *(.interp) }
   .hash          : { *(.hash)		}
+  .gnu.hash      : { *(.gnu.hash)	}
   .dynsym        : { *(.dynsym)		}
   .dynstr        : { *(.dynstr)		}
   .rel.text      : { *(.rel.text)		}
@@ -30,7 +31,8 @@ SECTIONS
   .plt : { *(.plt) }
   .text      :
   {
-    *(.text)
+    _text = .;
+    TEXT_TEXT
     SCHED_TEXT
     LOCK_TEXT
     *(.fixup)
@@ -65,7 +67,7 @@ SECTIONS
   . = ALIGN(4096);
   .data    :
   {
-    *(.data)
+    DATA_DATA
     *(.data1)
     *(.sdata)
     *(.sdata2)
@@ -73,6 +75,12 @@ SECTIONS
     *(.dynamic)
     CONSTRUCTORS
   }
+
+  . = ALIGN(4096);
+  __nosave_begin = .;
+  .data_nosave : { *(.data.nosave) }
+  . = ALIGN(4096);
+  __nosave_end = .;
 
   . = ALIGN(32);
   .data.cacheline_aligned : { *(.data.cacheline_aligned) }
@@ -83,6 +91,8 @@ SECTIONS
   . = ALIGN(8192);
   .data.init_task : { *(.data.init_task) }
 
+  NOTES
+
   . = ALIGN(4096);
   __init_begin = .;
   .init.text : {
@@ -90,6 +100,9 @@ SECTIONS
 	*(.init.text)
 	_einittext = .;
   }
+  /* .exit.text is discarded at runtime, not link time,
+     to deal with references from __bug_table */
+  .exit.text : { *(.exit.text) }
   .init.data : {
     *(.init.data);
     __vtop_table_begin = .;
@@ -105,13 +118,7 @@ SECTIONS
   __setup_end = .;
   __initcall_start = .;
   .initcall.init : {
-	*(.initcall1.init)
-	*(.initcall2.init)
-	*(.initcall3.init)
-	*(.initcall4.init)
-	*(.initcall5.init)
-	*(.initcall6.init)
-	*(.initcall7.init)
+	INITCALLS
   }
   __initcall_end = .;
 
@@ -125,46 +132,21 @@ SECTIONS
   __ftr_fixup : { *(__ftr_fixup) }
   __stop___ftr_fixup = .;
 
-  . = ALIGN(32);
-  __per_cpu_start = .;
-  .data.percpu  : { *(.data.percpu) }
-  __per_cpu_end = .;
+  PERCPU(4096)
 
+#ifdef CONFIG_BLK_DEV_INITRD
   . = ALIGN(4096);
   __initramfs_start = .;
   .init.ramfs : { *(.init.ramfs) }
   __initramfs_end = .;
+#endif
 
   . = ALIGN(4096);
   __init_end = .;
 
   . = ALIGN(4096);
-  __pmac_begin = .;
-  .pmac.text : { *(.pmac.text) }
-  .pmac.data : { *(.pmac.data) }
-  . = ALIGN(4096);
-  __pmac_end = .;
-
-  . = ALIGN(4096);
-  __prep_begin = .;
-  .prep.text : { *(.prep.text) }
-  .prep.data : { *(.prep.data) }
-  . = ALIGN(4096);
-  __prep_end = .;
-
-  . = ALIGN(4096);
-  __chrp_begin = .;
-  .chrp.text : { *(.chrp.text) }
-  .chrp.data : { *(.chrp.data) }
-  . = ALIGN(4096);
-  __chrp_end = .;
-
-  . = ALIGN(4096);
-  __openfirmware_begin = .;
-  .openfirmware.text : { *(.openfirmware.text) }
-  .openfirmware.data : { *(.openfirmware.data) }
-  . = ALIGN(4096);
-  __openfirmware_end = .;
+  _sextratext = .;
+  _eextratext = .;
 
   __bss_start = .;
   .bss       :
@@ -182,5 +164,6 @@ SECTIONS
   /* Sections to be discarded. */
   /DISCARD/ : {
     *(.exitcall.exit)
+    *(.exit.data)
   }
 }

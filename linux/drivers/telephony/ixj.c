@@ -41,9 +41,6 @@
  *
  ***************************************************************************/
 
-static char ixj_c_rcsid[] = "$Id: ixj.c,v 4.7 2001/08/13 06:19:33 craigs Exp $";
-static char ixj_c_revision[] = "$Revision: 4.7 $";
-
 /*
  * $Log: ixj.c,v $
  *
@@ -287,6 +284,14 @@ static int samplerate = 100;
 
 module_param(ixjdebug, int, 0);
 
+static struct pci_device_id ixj_pci_tbl[] __devinitdata = {
+	{ PCI_VENDOR_ID_QUICKNET, PCI_DEVICE_ID_QUICKNET_XJ,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{ }
+};
+
+MODULE_DEVICE_TABLE(pci, ixj_pci_tbl);
+
 /************************************************************************
 *
 * ixjdebug meanings are now bit mapped instead of level based
@@ -332,10 +337,8 @@ static IXJ *ixj_alloc()
 
 static void ixj_fsk_free(IXJ *j)
 {
-	if(j->fskdata != NULL) {
-		kfree(j->fskdata);
-		j->fskdata = NULL;
-	}
+	kfree(j->fskdata);
+	j->fskdata = NULL;
 }
 
 static void ixj_fsk_alloc(IXJ *j)
@@ -645,9 +648,9 @@ static inline BYTE SLIC_GetState(IXJ *j)
 	return j->pld_slicr.bits.state;
 }
 
-static BOOL SLIC_SetState(BYTE byState, IXJ *j)
+static bool SLIC_SetState(BYTE byState, IXJ *j)
 {
-	BOOL fRetVal = FALSE;
+	bool fRetVal = false;
 
 	if (j->cardtype == QTI_PHONECARD) {
 		if (j->flags.pcmciasct) {
@@ -656,14 +659,14 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			case PLD_SLIC_STATE_OC:
 				j->pslic.bits.powerdown = 1;
 				j->pslic.bits.ring0 = j->pslic.bits.ring1 = 0;
-				fRetVal = TRUE;
+				fRetVal = true;
 				break;
 			case PLD_SLIC_STATE_RINGING:
 				if (j->readers || j->writers) {
 					j->pslic.bits.powerdown = 0;
 					j->pslic.bits.ring0 = 1;
 					j->pslic.bits.ring1 = 0;
-					fRetVal = TRUE;
+					fRetVal = true;
 				}
 				break;
 			case PLD_SLIC_STATE_OHT:	/* On-hook transmit */
@@ -676,14 +679,14 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 					j->pslic.bits.powerdown = 1;
 				}
 				j->pslic.bits.ring0 = j->pslic.bits.ring1 = 0;
-				fRetVal = TRUE;
+				fRetVal = true;
 				break;
 			case PLD_SLIC_STATE_APR:	/* Active polarity reversal */
 
 			case PLD_SLIC_STATE_OHTPR:	/* OHT polarity reversal */
 
 			default:
-				fRetVal = FALSE;
+				fRetVal = false;
 				break;
 			}
 			j->psccr.bits.dev = 3;
@@ -700,7 +703,7 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 0;
 			j->pld_slicw.bits.b2en = 0;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		case PLD_SLIC_STATE_RINGING:
 			j->pld_slicw.bits.c1 = 1;
@@ -708,7 +711,7 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 0;
 			j->pld_slicw.bits.b2en = 1;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		case PLD_SLIC_STATE_ACTIVE:
 			j->pld_slicw.bits.c1 = 0;
@@ -716,7 +719,7 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 0;
 			j->pld_slicw.bits.b2en = 0;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		case PLD_SLIC_STATE_OHT:	/* On-hook transmit */
 
@@ -725,7 +728,7 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 0;
 			j->pld_slicw.bits.b2en = 0;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		case PLD_SLIC_STATE_TIPOPEN:
 			j->pld_slicw.bits.c1 = 0;
@@ -733,7 +736,7 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 1;
 			j->pld_slicw.bits.b2en = 0;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		case PLD_SLIC_STATE_STANDBY:
 			j->pld_slicw.bits.c1 = 1;
@@ -741,7 +744,7 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 1;
 			j->pld_slicw.bits.b2en = 1;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		case PLD_SLIC_STATE_APR:	/* Active polarity reversal */
 
@@ -750,7 +753,7 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 1;
 			j->pld_slicw.bits.b2en = 0;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		case PLD_SLIC_STATE_OHTPR:	/* OHT polarity reversal */
 
@@ -759,10 +762,10 @@ static BOOL SLIC_SetState(BYTE byState, IXJ *j)
 			j->pld_slicw.bits.c3 = 1;
 			j->pld_slicw.bits.b2en = 0;
 			outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
-			fRetVal = TRUE;
+			fRetVal = true;
 			break;
 		default:
-			fRetVal = FALSE;
+			fRetVal = false;
 			break;
 		}
 	}
@@ -779,10 +782,7 @@ static int ixj_wink(IXJ *j)
 	j->pots_winkstart = jiffies;
 	SLIC_SetState(PLD_SLIC_STATE_OC, j);
 
-	while (time_before(jiffies, j->pots_winkstart + j->winktime)) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+	msleep(jiffies_to_msecs(j->winktime));
 
 	SLIC_SetState(slicnow, j);
 	return 0;
@@ -1917,7 +1917,6 @@ static int ixj_pcmcia_cable_check(IXJ *j)
 
 static int ixj_hookstate(IXJ *j)
 {
-	unsigned long det;
 	int fOffHook = 0;
 
 	switch (j->cardtype) {
@@ -1948,11 +1947,7 @@ static int ixj_hookstate(IXJ *j)
 			    j->pld_slicr.bits.state == PLD_SLIC_STATE_STANDBY) {
 				if (j->flags.ringing || j->flags.cringing) {
 					if (!in_interrupt()) {
-						det = jiffies + (hertz / 50);
-						while (time_before(jiffies, det)) {
-							set_current_state(TASK_INTERRUPTIBLE);
-							schedule_timeout(1);
-						}
+						msleep(20);
 					}
 					SLIC_GetState(j);
 					if (j->pld_slicr.bits.state == PLD_SLIC_STATE_RINGING) {
@@ -2067,7 +2062,7 @@ static void ixj_ring_start(IXJ *j)
 static int ixj_ring(IXJ *j)
 {
 	char cntr;
-	unsigned long jif, det;
+	unsigned long jif;
 
 	j->flags.ringing = 1;
 	if (ixj_hookstate(j) & 1) {
@@ -2075,7 +2070,6 @@ static int ixj_ring(IXJ *j)
 		j->flags.ringing = 0;
 		return 1;
 	}
-	det = 0;
 	for (cntr = 0; cntr < j->maxrings; cntr++) {
 		jif = jiffies + (1 * hertz);
 		ixj_ring_on(j);
@@ -2085,8 +2079,7 @@ static int ixj_ring(IXJ *j)
 				j->flags.ringing = 0;
 				return 1;
 			}
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(1);
+			schedule_timeout_interruptible(1);
 			if (signal_pending(current))
 				break;
 		}
@@ -2094,20 +2087,13 @@ static int ixj_ring(IXJ *j)
 		ixj_ring_off(j);
 		while (time_before(jiffies, jif)) {
 			if (ixj_hookstate(j) & 1) {
-				det = jiffies + (hertz / 100);
-				while (time_before(jiffies, det)) {
-					set_current_state(TASK_INTERRUPTIBLE);
-					schedule_timeout(1);
-					if (signal_pending(current))
-						break;
-				}
+				msleep(10);
 				if (ixj_hookstate(j) & 1) {
 					j->flags.ringing = 0;
 					return 1;
 				}
 			}
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(1);
+			schedule_timeout_interruptible(1);
 			if (signal_pending(current))
 				break;
 		}
@@ -2173,10 +2159,8 @@ static int ixj_release(struct inode *inode, struct file *file_p)
 	 *    Set up locks to ensure that only one process is talking to the DSP at a time.
 	 *    This is necessary to keep the DSP from locking up.
 	 */
-	while(test_and_set_bit(board, (void *)&j->busyflags) != 0) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+	while(test_and_set_bit(board, (void *)&j->busyflags) != 0)
+		schedule_timeout_interruptible(1);
 	if (ixjdebug & 0x0002)
 		printk(KERN_INFO "Closing board %d\n", NUM(inode));
 
@@ -2763,7 +2747,7 @@ static void alaw2ulaw(unsigned char *buff, unsigned long len)
 static ssize_t ixj_read(struct file * file_p, char __user *buf, size_t length, loff_t * ppos)
 {
 	unsigned long i = *ppos;
-	IXJ * j = get_ixj(NUM(file_p->f_dentry->d_inode));
+	IXJ * j = get_ixj(NUM(file_p->f_path.dentry->d_inode));
 
 	DECLARE_WAITQUEUE(wait, current);
 
@@ -2820,7 +2804,7 @@ static ssize_t ixj_enhanced_read(struct file * file_p, char __user *buf, size_t 
 {
 	int pre_retval;
 	ssize_t read_retval = 0;
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
+	IXJ *j = get_ixj(NUM(file_p->f_path.dentry->d_inode));
 
 	pre_retval = ixj_PreRead(j, 0L);
 	switch (pre_retval) {
@@ -2899,7 +2883,7 @@ static ssize_t ixj_enhanced_write(struct file * file_p, const char __user *buf, 
 	int pre_retval;
 	ssize_t write_retval = 0;
 
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
+	IXJ *j = get_ixj(NUM(file_p->f_path.dentry->d_inode));
 
 	pre_retval = ixj_PreWrite(j, 0L);
 	switch (pre_retval) {
@@ -3306,14 +3290,10 @@ static void ixj_write_cidcw(IXJ *j)
 	ixj_play_tone(j, 23);
 
 	clear_bit(j->board, &j->busyflags);
-	while(j->tone_state) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
-	while(test_and_set_bit(j->board, (void *)&j->busyflags) != 0) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+	while(j->tone_state)
+		schedule_timeout_interruptible(1);
+	while(test_and_set_bit(j->board, (void *)&j->busyflags) != 0)
+		schedule_timeout_interruptible(1);
 	if(ixjdebug & 0x0200) {
 		printk("IXJ cidcw phone%d first tone end at %ld\n", j->board, jiffies);
 	}
@@ -3333,14 +3313,10 @@ static void ixj_write_cidcw(IXJ *j)
 	ixj_play_tone(j, 24);
 
 	clear_bit(j->board, &j->busyflags);
-	while(j->tone_state) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
-	while(test_and_set_bit(j->board, (void *)&j->busyflags) != 0) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+	while(j->tone_state)
+		schedule_timeout_interruptible(1);
+	while(test_and_set_bit(j->board, (void *)&j->busyflags) != 0)
+		schedule_timeout_interruptible(1);
 	if(ixjdebug & 0x0200) {
 		printk("IXJ cidcw phone%d sent second tone at %ld\n", j->board, jiffies);
 	}
@@ -3348,14 +3324,10 @@ static void ixj_write_cidcw(IXJ *j)
 	j->cidcw_wait = jiffies + ((50 * hertz) / 100);
 
 	clear_bit(j->board, &j->busyflags);
-	while(!j->flags.cidcw_ack && time_before(jiffies, j->cidcw_wait)) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
-	while(test_and_set_bit(j->board, (void *)&j->busyflags) != 0) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+	while(!j->flags.cidcw_ack && time_before(jiffies, j->cidcw_wait))
+		schedule_timeout_interruptible(1);
+	while(test_and_set_bit(j->board, (void *)&j->busyflags) != 0)
+		schedule_timeout_interruptible(1);
 	j->cidcw_wait = 0;
 	if(!j->flags.cidcw_ack) {
 		if(ixjdebug & 0x0200) {
@@ -3481,7 +3453,6 @@ static void ixj_write_frame(IXJ *j)
 {
 	int cnt, frame_count, dly;
 	IXJ_WORD dat;
-	BYTES blankword;
 
 	frame_count = 0;
 	if(j->flags.cidplay) {
@@ -3529,6 +3500,8 @@ static void ixj_write_frame(IXJ *j)
 		}
 		if (frame_count >= 1) {
 			if (j->ver.low == 0x12 && j->play_mode && j->flags.play_first_frame) {
+				BYTES blankword;
+
 				switch (j->play_mode) {
 				case PLAYBACK_MODE_ULAW:
 				case PLAYBACK_MODE_ALAW:
@@ -3536,6 +3509,7 @@ static void ixj_write_frame(IXJ *j)
 					break;
 				case PLAYBACK_MODE_8LINEAR:
 				case PLAYBACK_MODE_16LINEAR:
+				default:
 					blankword.low = blankword.high = 0x00;
 					break;
 				case PLAYBACK_MODE_8LINEAR_WSS:
@@ -3559,6 +3533,8 @@ static void ixj_write_frame(IXJ *j)
 				j->flags.play_first_frame = 0;
 			} else	if (j->play_codec == G723_63 && j->flags.play_first_frame) {
 				for (cnt = 0; cnt < 24; cnt++) {
+					BYTES blankword;
+
 					if(cnt == 12) {
 						blankword.low = 0x02;
 						blankword.high = 0x00;
@@ -3594,10 +3570,16 @@ static void ixj_write_frame(IXJ *j)
 				}
 			/* Add word 0 to G.729 frames for the 8021.  Right now we don't do VAD/CNG  */
 				if (j->play_codec == G729 && (cnt == 0 || cnt == 10 || cnt == 20)) {
-					if(j->write_buffer_rp + cnt == 0 && j->write_buffer_rp + cnt + 1 == 0 && j->write_buffer_rp + cnt + 2 == 0 &&
-					   j->write_buffer_rp + cnt + 3 == 0 && j->write_buffer_rp + cnt + 4 == 0 && j->write_buffer_rp + cnt + 5 == 0 &&
-					   j->write_buffer_rp + cnt + 6 == 0 && j->write_buffer_rp + cnt + 7 == 0 && j->write_buffer_rp + cnt + 8 == 0 &&
-					   j->write_buffer_rp + cnt + 9 == 0) {
+					if (j->write_buffer_rp[cnt] == 0 &&
+					    j->write_buffer_rp[cnt + 1] == 0 &&
+					    j->write_buffer_rp[cnt + 2] == 0 &&
+					    j->write_buffer_rp[cnt + 3] == 0 &&
+					    j->write_buffer_rp[cnt + 4] == 0 &&
+					    j->write_buffer_rp[cnt + 5] == 0 &&
+					    j->write_buffer_rp[cnt + 6] == 0 &&
+					    j->write_buffer_rp[cnt + 7] == 0 &&
+					    j->write_buffer_rp[cnt + 8] == 0 &&
+					    j->write_buffer_rp[cnt + 9] == 0) {
 					/* someone is trying to write silence lets make this a type 0 frame. */
 						outb_p(0x00, j->DSPbase + 0x0C);
 						outb_p(0x00, j->DSPbase + 0x0D);
@@ -3870,13 +3852,11 @@ static int set_rec_codec(IXJ *j, int rate)
 		j->rec_mode = 7;
 		break;
 	default:
+		kfree(j->read_buffer);
 		j->rec_frame_size = 0;
 		j->rec_mode = -1;
-		if (j->read_buffer) {
-			kfree(j->read_buffer);
-			j->read_buffer = NULL;
-			j->read_buffer_size = 0;
-		}
+		j->read_buffer = NULL;
+		j->read_buffer_size = 0;
 		retval = 1;
 		break;
 	}
@@ -3994,14 +3974,12 @@ static int ixj_record_start(IXJ *j)
 
 static void ixj_record_stop(IXJ *j)
 {
-	if(ixjdebug & 0x0002)
+	if (ixjdebug & 0x0002)
 		printk("IXJ %d Stopping Record Codec %d at %ld\n", j->board, j->rec_codec, jiffies);
 
-	if (j->read_buffer) {
-		kfree(j->read_buffer);
-		j->read_buffer = NULL;
-		j->read_buffer_size = 0;
-	}
+	kfree(j->read_buffer);
+	j->read_buffer = NULL;
+	j->read_buffer_size = 0;
 	if (j->rec_mode > -1) {
 		ixj_WriteDSPCommand(0x5120, j);
 		j->rec_mode = -1;
@@ -4452,13 +4430,11 @@ static int set_play_codec(IXJ *j, int rate)
 		j->play_mode = 5;
 		break;
 	default:
+		kfree(j->write_buffer);
 		j->play_frame_size = 0;
 		j->play_mode = -1;
-		if (j->write_buffer) {
-			kfree(j->write_buffer);
-			j->write_buffer = NULL;
-			j->write_buffer_size = 0;
-		}
+		j->write_buffer = NULL;
+		j->write_buffer_size = 0;
 		retval = 1;
 		break;
 	}
@@ -4581,14 +4557,12 @@ static int ixj_play_start(IXJ *j)
 
 static void ixj_play_stop(IXJ *j)
 {
-	if(ixjdebug & 0x0002)
+	if (ixjdebug & 0x0002)
 		printk("IXJ %d Stopping Play Codec %d at %ld\n", j->board, j->play_codec, jiffies);
 
-	if (j->write_buffer) {
-		kfree(j->write_buffer);
-		j->write_buffer = NULL;
-		j->write_buffer_size = 0;
-	}
+	kfree(j->write_buffer);
+	j->write_buffer = NULL;
+	j->write_buffer_size = 0;
 	if (j->play_mode > -1) {
 		ixj_WriteDSPCommand(0x5221, j);	/* Stop playback and flush buffers.  8022 reference page 9-40 */
 
@@ -4612,7 +4586,7 @@ static unsigned int ixj_poll(struct file *file_p, poll_table * wait)
 {
 	unsigned int mask = 0;
 
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
+	IXJ *j = get_ixj(NUM(file_p->f_path.dentry->d_inode));
 
 	poll_wait(file_p, &(j->poll_q), wait);
 	if (j->read_buffer_ready > 0)
@@ -4898,6 +4872,7 @@ static char daa_CR_read(IXJ *j, int cr)
 		bytes.high = 0xB0 + cr;
 		break;
 	case SOP_PU_PULSEDIALING:
+	default:
 		bytes.high = 0xF0 + cr;
 		break;
 	}
@@ -4999,7 +4974,8 @@ static int ixj_daa_cid_read(IXJ *j)
 {
 	int i;
 	BYTES bytes;
-	char CID[ALISDAA_CALLERID_SIZE], mContinue;
+	char CID[ALISDAA_CALLERID_SIZE];
+	bool mContinue;
 	char *pIn, *pOut;
 
 	if (!SCI_Prepare(j))
@@ -5043,7 +5019,7 @@ static int ixj_daa_cid_read(IXJ *j)
 
 	pIn = CID;
 	pOut = j->m_DAAShadowRegs.CAO_REGS.CAO.CallerID;
-	mContinue = 1;
+	mContinue = true;
 	while (mContinue) {
 		if ((pIn[1] & 0x03) == 0x01) {
 			pOut[0] = pIn[0];
@@ -5057,7 +5033,7 @@ static int ixj_daa_cid_read(IXJ *j)
 		if ((pIn[4] & 0xc0) == 0x40) {
 			pOut[3] = ((pIn[4] & 0x3f) << 2) | ((pIn[3] & 0xc0) >> 6);
 		} else {
-			mContinue = FALSE;
+			mContinue = false;
 		}
 		pIn += 5, pOut += 4;
 	}
@@ -5750,7 +5726,7 @@ static int ixj_daa_write(IXJ *j)
 	return 1;
 }
 
-int ixj_set_tone_off(unsigned short arg, IXJ *j)
+static int ixj_set_tone_off(unsigned short arg, IXJ *j)
 {
 	j->tone_off_time = arg;
 	if (ixj_WriteDSPCommand(0x6E05, j))		/* Set Tone Off Period */
@@ -5813,9 +5789,7 @@ static void ixj_cpt_stop(IXJ *j)
 		ixj_play_tone(j, 0);
 		j->tone_state = j->tone_cadence_state = 0;
 		if (j->cadence_t) {
-			if (j->cadence_t->ce) {
-				kfree(j->cadence_t->ce);
-			}
+			kfree(j->cadence_t->ce);
 			kfree(j->cadence_t);
 			j->cadence_t = NULL;
 		}
@@ -5949,10 +5923,10 @@ static int ixj_build_filter_cadence(IXJ *j, IXJ_FILTER_CADENCE __user * cp)
 	j->cadence_f[lcp->filter].off3 = lcp->off3;
 	j->cadence_f[lcp->filter].off3min = 0;
 	j->cadence_f[lcp->filter].off3max = 0;
-	kfree(lcp);
 	if(ixjdebug & 0x0002) {
 		printk(KERN_INFO "Cadence %d loaded\n", lcp->filter);
 	}
+	kfree(lcp);
 	return 0;
 }
 
@@ -6140,10 +6114,8 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 	 *    Set up locks to ensure that only one process is talking to the DSP at a time.
 	 *    This is necessary to keep the DSP from locking up.
 	 */
-	while(test_and_set_bit(board, (void *)&j->busyflags) != 0) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+	while(test_and_set_bit(board, (void *)&j->busyflags) != 0)
+		schedule_timeout_interruptible(1);
 	if (ixjdebug & 0x0040)
 		printk("phone%d ioctl, cmd: 0x%x, arg: 0x%lx\n", minor, cmd, arg);
 	if (minor >= IXJMAX) {
@@ -6172,8 +6144,14 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 		retval = j->serial;
 		break;
 	case IXJCTL_VERSION:
-		if (copy_to_user(argp, ixj_c_revision, strlen(ixj_c_revision))) 
-			retval = -EFAULT;
+		{
+			char arg_str[100];
+			snprintf(arg_str, sizeof(arg_str),
+				"\nDriver version %i.%i.%i", IXJ_VER_MAJOR,
+				IXJ_VER_MINOR, IXJ_BLD_VER);
+			if (copy_to_user(argp, arg_str, strlen(arg_str)))
+				retval = -EFAULT;
+		}
 		break;
 	case PHONE_RING_CADENCE:
 		j->ring_cadence = arg;
@@ -6685,12 +6663,12 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 
 static int ixj_fasync(int fd, struct file *file_p, int mode)
 {
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
+	IXJ *j = get_ixj(NUM(file_p->f_path.dentry->d_inode));
 
 	return fasync_helper(fd, file_p, mode, &j->async_queue);
 }
 
-static struct file_operations ixj_fops =
+static const struct file_operations ixj_fops =
 {
         .owner          = THIS_MODULE,
         .read           = ixj_enhanced_read,
@@ -6703,8 +6681,6 @@ static struct file_operations ixj_fops =
 
 static int ixj_linetest(IXJ *j)
 {
-	unsigned long jifwait;
-
 	j->flags.pstncheck = 1;	/* Testing */
 	j->flags.pstn_present = 0; /* Assume the line is not there */
 
@@ -6735,11 +6711,7 @@ static int ixj_linetest(IXJ *j)
 
 		outb_p(j->pld_scrw.byte, j->XILINXbase);
 		daa_set_mode(j, SOP_PU_CONVERSATION);
-		jifwait = jiffies + hertz;
-		while (time_before(jiffies, jifwait)) {
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(1);
-		}
+		msleep(1000);
 		daa_int_read(j);
 		daa_set_mode(j, SOP_PU_RESET);
 		if (j->m_DAAShadowRegs.XOP_REGS.XOP.xr0.bitreg.VDD_OK) {
@@ -6759,11 +6731,7 @@ static int ixj_linetest(IXJ *j)
 	j->pld_slicw.bits.rly3 = 0;
 	outb_p(j->pld_slicw.byte, j->XILINXbase + 0x01);
 	daa_set_mode(j, SOP_PU_CONVERSATION);
-	jifwait = jiffies + hertz;
-	while (time_before(jiffies, jifwait)) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+	msleep(1000);
 	daa_int_read(j);
 	daa_set_mode(j, SOP_PU_RESET);
 	if (j->m_DAAShadowRegs.XOP_REGS.XOP.xr0.bitreg.VDD_OK) {
@@ -6792,7 +6760,6 @@ static int ixj_linetest(IXJ *j)
 static int ixj_selfprobe(IXJ *j)
 {
 	unsigned short cmd;
-	unsigned long jif;
 	int cnt;
 	BYTES bytes;
 
@@ -6942,29 +6909,13 @@ static int ixj_selfprobe(IXJ *j)
 	} else {
 		if (j->cardtype == QTI_LINEJACK) {
 			LED_SetState(0x1, j);
-			jif = jiffies + (hertz / 10);
-			while (time_before(jiffies, jif)) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout(1);
-			}
+			msleep(100);
 			LED_SetState(0x2, j);
-			jif = jiffies + (hertz / 10);
-			while (time_before(jiffies, jif)) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout(1);
-			}
+			msleep(100);
 			LED_SetState(0x4, j);
-			jif = jiffies + (hertz / 10);
-			while (time_before(jiffies, jif)) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout(1);
-			}
+			msleep(100);
 			LED_SetState(0x8, j);
-			jif = jiffies + (hertz / 10);
-			while (time_before(jiffies, jif)) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout(1);
-			}
+			msleep(100);
 			LED_SetState(0x0, j);
 			daa_get_version(j);
 			if (ixjdebug & 0x0002)
@@ -7168,9 +7119,6 @@ static int ixj_get_status_proc(char *buf)
 	int cnt;
 	IXJ *j;
 	len = 0;
-	len += sprintf(buf + len, "%s", ixj_c_rcsid);
-	len += sprintf(buf + len, "\n%s", ixj_h_rcsid);
-	len += sprintf(buf + len, "\n%s", ixjuser_h_rcsid);
 	len += sprintf(buf + len, "\nDriver version %i.%i.%i", IXJ_VER_MAJOR, IXJ_VER_MINOR, IXJ_BLD_VER);
 	len += sprintf(buf + len, "\nsizeof IXJ struct %Zd bytes", sizeof(IXJ));
 	len += sprintf(buf + len, "\nsizeof DAA struct %Zd bytes", sizeof(DAA_REGS));
@@ -7497,10 +7445,8 @@ static void cleanup(void)
 					printk(KERN_INFO "IXJ: Releasing XILINX address for /dev/phone%d\n", cnt);
 				release_region(j->XILINXbase, 4);
 			}
-			if (j->read_buffer)
-				kfree(j->read_buffer);
-			if (j->write_buffer)
-				kfree(j->write_buffer);
+			kfree(j->read_buffer);
+			kfree(j->write_buffer);
 			if (j->dev)
 				pnp_device_detach(j->dev);
 			if (ixjdebug & 0x0002)
@@ -7558,7 +7504,7 @@ static BYTE PCIEE_ReadBit(WORD wEEPROMAddress, BYTE lastLCC)
 	return ((inb(wEEPROMAddress) >> 3) & 1);
 }
 
-static BOOL PCIEE_ReadWord(WORD wAddress, WORD wLoc, WORD * pwResult)
+static bool PCIEE_ReadWord(WORD wAddress, WORD wLoc, WORD * pwResult)
 {
 	BYTE lastLCC;
 	WORD wEEPROMAddress = wAddress + 3;
@@ -7751,7 +7697,8 @@ static int __init ixj_probe_pci(int *cnt)
 	IXJ *j = NULL;
 
 	for (i = 0; i < IXJMAX - *cnt; i++) {
-		pci = pci_find_device(0x15E2, 0x0500, pci);
+		pci = pci_get_device(PCI_VENDOR_ID_QUICKNET,
+				      PCI_DEVICE_ID_QUICKNET_XJ, pci);
 		if (!pci)
 			break;
 
@@ -7770,6 +7717,7 @@ static int __init ixj_probe_pci(int *cnt)
 			printk(KERN_INFO "ixj: found Internet PhoneJACK PCI at 0x%x\n", j->DSPbase);
 		++*cnt;
 	}
+	pci_dev_put(pci);
 	return probe;
 }
 
@@ -7790,7 +7738,7 @@ static int __init ixj_init(void)
 	if ((probe = ixj_probe_pci(&cnt)) < 0) {
 		return probe;
 	}
-	printk("%s\n", ixj_c_rcsid);
+	printk(KERN_INFO "ixj driver initialized.\n");
 	create_proc_read_entry ("ixj", 0, NULL, ixj_read_proc, NULL);
 	return probe;
 }

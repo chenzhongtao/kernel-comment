@@ -308,7 +308,7 @@ read_fifo(struct IsdnCardState *cs, u_char fifo, int trans_max)
 /******************************************/
 /* free hardware resources used by driver */
 /******************************************/
-void
+static void
 release_io_hfcsx(struct IsdnCardState *cs)
 {
 	cs->hw.hfcsx.int_m2 = 0;	/* interrupt output off ! */
@@ -472,7 +472,7 @@ receive_dmsg(struct IsdnCardState *cs)
 /**********************************/
 /* B-channel main receive routine */
 /**********************************/
-void
+static void
 main_rec_hfcsx(struct BCState *bcs)
 {
 	struct IsdnCardState *cs = bcs->cs;
@@ -691,7 +691,7 @@ receive_emsg(struct IsdnCardState *cs)
 /* Interrupt handler */
 /*********************/
 static irqreturn_t
-hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+hfcsx_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char exval;
@@ -970,7 +970,7 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 			break;
 		case (HW_TESTLOOP | REQUEST):
 			spin_lock_irqsave(&cs->lock, flags);
-			switch ((int) arg) {
+			switch ((long) arg) {
 				case (1):
 					Write_hfc(cs, HFCSX_B1_SSL, 0x80);	/* tx slot */
 					Write_hfc(cs, HFCSX_B1_RSL, 0x80);	/* rx slot */
@@ -986,7 +986,7 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 				default:
 					spin_unlock_irqrestore(&cs->lock, flags);
 					if (cs->debug & L1_DEB_WARN)
-						debugl1(cs, "hfcsx_l1hw loop invalid %4x", (int) arg);
+						debugl1(cs, "hfcsx_l1hw loop invalid %4lx", arg);
 					return;
 			}
 			cs->hw.hfcsx.trm |= 0x80;	/* enable IOM-loop */
@@ -1003,7 +1003,7 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 /***********************************************/
 /* called during init setting l1 stack pointer */
 /***********************************************/
-void
+static void
 setstack_hfcsx(struct PStack *st, struct IsdnCardState *cs)
 {
 	st->l1.l1hw = HFCSX_l1hw;
@@ -1027,7 +1027,7 @@ hfcsx_send_data(struct BCState *bcs)
 /***************************************************************/
 /* activate/deactivate hardware for selected channels and mode */
 /***************************************************************/
-void
+static void
 mode_hfcsx(struct BCState *bcs, int mode, int bc)
 {
 	struct IsdnCardState *cs = bcs->cs;
@@ -1251,8 +1251,10 @@ setstack_2b(struct PStack *st, struct BCState *bcs)
 /* handle L1 state changes */
 /***************************/
 static void
-hfcsx_bh(struct IsdnCardState *cs)
+hfcsx_bh(struct work_struct *work)
 {
+	struct IsdnCardState *cs =
+		container_of(work, struct IsdnCardState, tqueue);
 	u_long flags;
 
 	if (!cs)
@@ -1328,7 +1330,7 @@ hfcsx_bh(struct IsdnCardState *cs)
 /********************************/
 /* called for card init message */
 /********************************/
-void __devinit
+static void __devinit
 inithfcsx(struct IsdnCardState *cs)
 {
 	cs->setstack_d = setstack_hfcsx;
@@ -1382,14 +1384,14 @@ hfcsx_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 #ifdef __ISAPNP__
-static struct isapnp_device_id hfc_ids[] __initdata = {
+static struct isapnp_device_id hfc_ids[] __devinitdata = {
 	{ ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2620),
 	  ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2620), 
 	  (unsigned long) "Teles 16.3c2" },
 	{ 0, }
 };
 
-static struct isapnp_device_id *ipid __initdata = &hfc_ids[0];
+static struct isapnp_device_id *ipid __devinitdata = &hfc_ids[0];
 static struct pnp_card *pnp_c __devinitdata = NULL;
 #endif
 
@@ -1499,7 +1501,7 @@ setup_hfcsx(struct IsdnCard *card)
 	cs->dbusytimer.function = (void *) hfcsx_dbusy_timer;
 	cs->dbusytimer.data = (long) cs;
 	init_timer(&cs->dbusytimer);
-	INIT_WORK(&cs->tqueue, (void *)(void *) hfcsx_bh, cs);
+	INIT_WORK(&cs->tqueue, hfcsx_bh);
 	cs->readisac = NULL;
 	cs->writeisac = NULL;
 	cs->readisacfifo = NULL;

@@ -21,8 +21,8 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
-#include <linux/smp_lock.h>
 #include <linux/ptrace.h>
+#include <linux/signal.h>
 
 #include <asm/errno.h>
 #include <asm/ptrace.h>
@@ -57,7 +57,7 @@ static v850_reg_t *reg_save_addr (unsigned reg_offs, struct task_struct *t)
 		regs = thread_saved_regs (t);
 	else
 		/* Register saved during kernel entry (or not available).  */
-		regs = task_regs (t);
+		regs = task_pt_regs (t);
 
 	return (v850_reg_t *)((char *)regs + reg_offs);
 }
@@ -112,64 +112,21 @@ static int set_single_step (struct task_struct *t, int val)
 	return 1;
 }
 
-int sys_ptrace(long request, long pid, long addr, long data)
+long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 {
-	struct task_struct *child;
 	int rval;
 
-	lock_kernel();
-
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED) {
-			rval = -EPERM;
-			goto out;
-		}
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		rval = 0;
-		goto out;
-	}
-	rval = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-
-	rval = -EPERM;
-	if (pid == 1)		/* you may not mess with init */
-		goto out_tsk;
-
-	if (request == PTRACE_ATTACH) {
-		rval = ptrace_attach(child);
-		goto out_tsk;
-	}
-	rval = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (rval < 0)
-		goto out_tsk;
-
 	switch (request) {
-		unsigned long val, copied;
+		unsigned long val;
 
 	case PTRACE_PEEKTEXT: /* read word at location addr. */
 	case PTRACE_PEEKDATA:
-		copied = access_process_vm(child, addr, &val, sizeof(val), 0);
-		rval = -EIO;
-		if (copied != sizeof(val))
-			break;
-		rval = put_user(val, (unsigned long *)data);
+		rval = generic_ptrace_peekdata(child, addr, data);
 		goto out;
 
 	case PTRACE_POKETEXT: /* write the word at location addr. */
 	case PTRACE_POKEDATA:
-		rval = 0;
-		if (access_process_vm(child, addr, &data, sizeof(data), 1)
-		    == sizeof(data))
-			break;
-		rval = -EIO;
+		rval = generic_ptrace_pokedata(child, addr, data);
 		goto out;
 
 	/* Read/write the word at location ADDR in the registers.  */
@@ -208,7 +165,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	/* Execute a single instruction. */
 	case PTRACE_SINGLESTEP:
 		rval = -EIO;
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			break;
 
 		/* Turn CHILD's single-step flag on or off.  */
@@ -247,11 +204,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		rval = -EIO;
 		goto out;
 	}
-
-out_tsk:
-	put_task_struct(child);
-out:
-	unlock_kernel();
+ out:
 	return rval;
 }
 

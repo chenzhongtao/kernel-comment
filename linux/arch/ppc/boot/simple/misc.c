@@ -1,6 +1,4 @@
 /*
- * arch/ppc/simple/misc.c
- *
  * Misc. bootloader code for many machines.  This assumes you have are using
  * a 6xx/7xx/74xx CPU in your machine.  This assumes the chunk of memory
  * below 8MB is free.  Finally, it assumes you have a NS16550-style uart for
@@ -17,13 +15,12 @@
  */
 
 #include <linux/types.h>
-#include <linux/config.h>
 #include <linux/string.h>
 
 #include <asm/page.h>
 #include <asm/mmu.h>
 #include <asm/bootinfo.h>
-#ifdef CONFIG_44x
+#ifdef CONFIG_4xx
 #include <asm/ibm4xx.h>
 #endif
 #include <asm/reg.h>
@@ -45,14 +42,11 @@
 #endif
 
 /* Will / Can the user give input?
- * Val Henson has requested that Gemini doesn't wait for the
- * user to edit the cmdline or not.
  */
 #if (defined(CONFIG_SERIAL_8250_CONSOLE) \
 	|| defined(CONFIG_VGA_CONSOLE) \
 	|| defined(CONFIG_SERIAL_MPC52xx_CONSOLE) \
-	|| defined(CONFIG_SERIAL_MPSC_CONSOLE)) \
-	&& !defined(CONFIG_GEMINI)
+	|| defined(CONFIG_SERIAL_MPSC_CONSOLE))
 #define INTERACTIVE_CONSOLE	1
 #endif
 
@@ -88,6 +82,14 @@ get_mem_size(void)
 	return 0;
 }
 
+#if defined(CONFIG_40x)
+#define PPC4xx_EMAC0_MR0	EMAC0_BASE
+#endif
+
+#if defined(CONFIG_44x) && defined(PPC44x_EMAC0_MR0)
+#define PPC4xx_EMAC0_MR0	PPC44x_EMAC0_MR0
+#endif
+
 struct bi_record *
 decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum)
 {
@@ -103,13 +105,13 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum)
 	com_port = serial_init(0, NULL);
 #endif
 
-#if defined(CONFIG_44x) && defined(PPC44x_EMAC0_MR0)
+#if defined(PPC4xx_EMAC0_MR0)
 	/* Reset MAL */
 	mtdcr(DCRN_MALCR(DCRN_MAL_BASE), MALCR_MMSR);
 	/* Wait for reset */
 	while (mfdcr(DCRN_MALCR(DCRN_MAL_BASE)) & MALCR_MMSR) {};
 	/* Reset EMAC */
-	*(volatile unsigned long *)PPC44x_EMAC0_MR0 = 0x20000000;
+	*(volatile unsigned long *)PPC4xx_EMAC0_MR0 = 0x20000000;
 	__asm__ __volatile__("eieio");
 #endif
 
@@ -164,23 +166,15 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum)
 		puts(" "); puthex((unsigned long)(&__ramdisk_end));puts("\n");
 	}
 
+#ifndef CONFIG_40x /* don't overwrite the 40x image located at 0x00400000! */
 	avail_ram = (char *)0x00400000;
+#endif
 	end_avail = (char *)0x00800000;
 	puts("avail ram:     "); puthex((unsigned long)avail_ram); puts(" ");
 	puthex((unsigned long)end_avail); puts("\n");
 
 	if (keyb_present)
 		CRT_tstc();  /* Forces keyboard to be initialized */
-#ifdef CONFIG_GEMINI
-	/*
-	 * If cmd_line is empty and cmd_preset is not, copy cmd_preset
-	 * to cmd_line.  This way we can override cmd_preset with the
-	 * command line from Smon.
-	 */
-
-	if ( (cmd_line[0] == '\0') && (cmd_preset[0] != '\0'))
-		memcpy (cmd_line, cmd_preset, sizeof(cmd_preset));
-#endif
 
 	/* Display standard Linux/PPC boot prompt for kernel args */
 	puts("\nLinux/PPC load: ");
@@ -222,7 +216,7 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum)
 	puts("\n");
 
 	puts("Uncompressing Linux...");
-	gunzip(0x0, 0x400000, zimage_start, &zimage_size);
+	gunzip(NULL, 0x400000, zimage_start, &zimage_size);
 	puts("done.\n");
 
 	/* get the bi_rec address */

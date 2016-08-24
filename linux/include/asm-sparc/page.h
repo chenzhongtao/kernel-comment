@@ -8,7 +8,8 @@
 #ifndef _SPARC_PAGE_H
 #define _SPARC_PAGE_H
 
-#include <linux/config.h>
+#ifdef __KERNEL__
+
 #ifdef CONFIG_SUN4
 #define PAGE_SHIFT   13
 #else
@@ -21,8 +22,6 @@
 #define PAGE_SIZE    (1 << PAGE_SHIFT)
 #endif
 #define PAGE_MASK    (~(PAGE_SIZE-1))
-
-#ifdef __KERNEL__
 
 #include <asm/btfixup.h>
 
@@ -132,20 +131,6 @@ BTFIXUPDEF_SETHI(sparc_unmapped_base)
 
 #define TASK_UNMAPPED_BASE	BTFIXUP_SETHI(sparc_unmapped_base)
 
-/* Pure 2^n version of get_order */
-extern __inline__ int get_order(unsigned long size)
-{
-	int order;
-
-	size = (size-1) >> (PAGE_SHIFT-1);
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-	return order;
-}
-
 #else /* !(__ASSEMBLY__) */
 
 #define __pgprot(x)	(x)
@@ -166,8 +151,7 @@ extern unsigned long pfn_base;
 #define virt_to_phys		__pa
 #define phys_to_virt		__va
 
-#define pfn_to_page(pfn)	(mem_map + ((pfn)-(pfn_base)))
-#define page_to_pfn(page)	((unsigned long)(((page) - mem_map) + pfn_base))
+#define ARCH_PFN_OFFSET		(pfn_base)
 #define virt_to_page(kaddr)	(mem_map + ((((unsigned long)(kaddr)-PAGE_OFFSET)>>PAGE_SHIFT)))
 
 #define pfn_valid(pfn)		(((pfn) >= (pfn_base)) && (((pfn)-(pfn_base)) < max_mapnr))
@@ -175,6 +159,9 @@ extern unsigned long pfn_base;
 
 #define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
 				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
+
+#include <asm-generic/memory_model.h>
+#include <asm-generic/page.h>
 
 #endif /* __KERNEL__ */
 

@@ -15,15 +15,14 @@
 #include <net/arp.h>
 #include <linux/module.h>
 
-static int ebt_target_reply(struct sk_buff **pskb, unsigned int hooknr,
+static int ebt_target_reply(struct sk_buff *skb, unsigned int hooknr,
    const struct net_device *in, const struct net_device *out,
    const void *data, unsigned int datalen)
 {
 	struct ebt_arpreply_info *info = (struct ebt_arpreply_info *)data;
-	u32 _sip, *siptr, _dip, *diptr;
+	__be32 _sip, *siptr, _dip, *diptr;
 	struct arphdr _ah, *ap;
 	unsigned char _sha[ETH_ALEN], *shp;
-	struct sk_buff *skb = *pskb;
 
 	ap = skb_header_pointer(skb, 0, sizeof(_ah), &_ah);
 	if (ap == NULL)
@@ -51,7 +50,7 @@ static int ebt_target_reply(struct sk_buff **pskb, unsigned int hooknr,
 		return EBT_DROP;
 
 	arp_send(ARPOP_REPLY, ETH_P_ARP, *siptr, (struct net_device *)in,
-	         *diptr, shp, info->mac, shp);
+		 *diptr, shp, info->mac, shp);
 
 	return info->target;
 }
@@ -82,16 +81,16 @@ static struct ebt_target reply_target =
 	.me		= THIS_MODULE,
 };
 
-static int __init init(void)
+static int __init ebt_arpreply_init(void)
 {
 	return ebt_register_target(&reply_target);
 }
 
-static void __exit fini(void)
+static void __exit ebt_arpreply_fini(void)
 {
 	ebt_unregister_target(&reply_target);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ebt_arpreply_init);
+module_exit(ebt_arpreply_fini);
 MODULE_LICENSE("GPL");

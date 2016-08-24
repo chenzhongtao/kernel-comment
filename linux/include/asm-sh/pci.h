@@ -32,11 +32,39 @@ extern struct pci_channel board_pci_channels[];
 #define PCIBIOS_MIN_IO		board_pci_channels->io_resource->start
 #define PCIBIOS_MIN_MEM		board_pci_channels->mem_resource->start
 
+/*
+ * I/O routine helpers
+ */
+#if defined(CONFIG_CPU_SUBTYPE_SH7780) || defined(CONFIG_CPU_SUBTYPE_SH7785)
+#define PCI_IO_AREA		0xFE400000
+#define PCI_IO_SIZE		0x00400000
+#else
+#define PCI_IO_AREA		0xFE240000
+#define PCI_IO_SIZE		0X00040000
+#endif
+
+#define PCI_MEM_SIZE		0x01000000
+
+#define SH4_PCIIOBR_MASK	0xFFFC0000
+#define pci_ioaddr(addr)	(PCI_IO_AREA + (addr & ~SH4_PCIIOBR_MASK))
+
+#if defined(CONFIG_PCI)
+#define is_pci_ioaddr(port)		\
+	(((port) >= PCIBIOS_MIN_IO) &&	\
+	 ((port) < (PCIBIOS_MIN_IO + PCI_IO_SIZE)))
+#define is_pci_memaddr(port)		\
+	(((port) >= PCIBIOS_MIN_MEM) &&	\
+	 ((port) < (PCIBIOS_MIN_MEM + PCI_MEM_SIZE)))
+#else
+#define is_pci_ioaddr(port)	(0)
+#define is_pci_memaddr(port)	(0)
+#endif
+
 struct pci_dev;
 
 extern void pcibios_set_master(struct pci_dev *dev);
 
-static inline void pcibios_penalize_isa_irq(int irq)
+static inline void pcibios_penalize_isa_irq(int irq, int active)
 {
 	/* We don't do dynamic PCI IRQ allocation */
 }
@@ -82,31 +110,24 @@ static inline void pcibios_penalize_isa_irq(int irq)
 #define pci_unmap_len_set(PTR, LEN_NAME, VAL)	do { } while (0)
 #endif
 
-/* Not supporting more than 32-bit PCI bus addresses now, but
- * must satisfy references to this function.  Change if needed.
- */
-#define pci_dac_dma_supported(pci_dev, mask) (0)
-
-/* These macros should be used after a pci_map_sg call has been done
- * to get bus addresses of each of the SG entries and their lengths.
- * You should only work with the number of sg entries pci_map_sg
- * returns, or alternatively stop on the first sg_dma_len(sg) which
- * is 0.
- */
-#define sg_dma_address(sg)	(virt_to_bus((sg)->dma_address))
-#define sg_dma_len(sg)		((sg)->length)
-
-/* Board-specific fixup routines. */
-extern void pcibios_fixup(void);
-extern void pcibios_fixup_irqs(void);
-
-#ifdef CONFIG_PCI_AUTO
-extern int pciauto_assign_resources(int busno, struct pci_channel *hose);
+#ifdef CONFIG_PCI
+static inline void pci_dma_burst_advice(struct pci_dev *pdev,
+					enum pci_dma_burst_strategy *strat,
+					unsigned long *strategy_parameter)
+{
+	*strat = PCI_DMA_BURST_INFINITY;
+	*strategy_parameter = ~0UL;
+}
 #endif
 
-static inline void pcibios_add_platform_entries(struct pci_dev *dev)
-{
-}
+/* Board-specific fixup routines. */
+void pcibios_fixup(void);
+int pcibios_init_platform(void);
+int pcibios_map_platform_irq(struct pci_dev *dev, u8 slot, u8 pin);
+
+#ifdef CONFIG_PCI_AUTO
+int pciauto_assign_resources(int busno, struct pci_channel *hose);
+#endif
 
 #endif /* __KERNEL__ */
 

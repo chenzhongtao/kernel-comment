@@ -1,8 +1,8 @@
 /*
  * arch/v850/kernel/mb_a_pci.c -- PCI support for Midas lab RTE-MOTHER-A board
  *
- *  Copyright (C) 2001,02,03  NEC Electronics Corporation
- *  Copyright (C) 2001,02,03  Miles Bader <miles@gnu.org>
+ *  Copyright (C) 2001,02,03,05  NEC Electronics Corporation
+ *  Copyright (C) 2001,02,03,05  Miles Bader <miles@gnu.org>
  *
  * This file is subject to the terms and conditions of the GNU General
  * Public License.  See the file COPYING in the main directory of this
@@ -11,7 +11,6 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -71,8 +70,7 @@ static struct mb_pci_dev_irq mb_pci_dev_irqs[] = {
 	/* PCI slot 2 */
 	{ 9, 	IRQ_MB_A_PCI2(0),	1 }
 };
-#define NUM_MB_PCI_DEV_IRQS \
-  (sizeof mb_pci_dev_irqs / sizeof mb_pci_dev_irqs[0])
+#define NUM_MB_PCI_DEV_IRQS ARRAY_SIZE(mb_pci_dev_irqs)
 
 
 /* PCI configuration primitives.  */
@@ -181,7 +179,7 @@ static int __devinit pcibios_init (void)
 		   default uses.  */
 
 		/* Significant address bits used for decoding PCI GCS5 space
-		   accessess.  */
+		   accesses.  */
 		MB_A_PCI_DMRR = ~(MB_A_PCI_MEM_SIZE - 1);
 
 		/* I don't understand this, but the SolutionGear example code
@@ -329,7 +327,7 @@ void pcibios_fixup_bus(struct pci_bus *b)
 
 void
 pcibios_align_resource (void *data, struct resource *res,
-			unsigned long size, unsigned long align)
+			resource_size_t size, resource_size_t align)
 {
 }
 
@@ -366,7 +364,7 @@ static DEFINE_SPINLOCK(mb_sram_lock);
 static void *alloc_mb_sram (size_t size)
 {
 	struct mb_sram_free_area *prev, *fa;
-	int flags;
+	unsigned long flags;
 	void *mem = 0;
 
 	spin_lock_irqsave (mb_sram_lock, flags);
@@ -407,7 +405,7 @@ static void *alloc_mb_sram (size_t size)
 static void free_mb_sram (void *mem, size_t size)
 {
 	struct mb_sram_free_area *prev, *fa, *new_fa;
-	int flags;
+	unsigned long flags;
 	void *end = mem + size;
 
 	spin_lock_irqsave (mb_sram_lock, flags);
@@ -518,7 +516,7 @@ static DEFINE_SPINLOCK(dma_mappings_lock);
 
 static struct dma_mapping *new_dma_mapping (size_t size)
 {
-	int flags;
+	unsigned long flags;
 	struct dma_mapping *mapping;
 	void *mb_sram_block = alloc_mb_sram (size);
 
@@ -576,7 +574,7 @@ static struct dma_mapping *new_dma_mapping (size_t size)
 
 static struct dma_mapping *find_dma_mapping (void *mb_sram_addr)
 {
-	int flags;
+	unsigned long flags;
 	struct dma_mapping *mapping;
 
 	spin_lock_irqsave (dma_mappings_lock, flags);
@@ -593,7 +591,7 @@ static struct dma_mapping *find_dma_mapping (void *mb_sram_addr)
 
 static struct dma_mapping *deactivate_dma_mapping (void *mb_sram_addr)
 {
-	int flags;
+	unsigned long flags;
 	struct dma_mapping *mapping, *prev;
 
 	spin_lock_irqsave (dma_mappings_lock, flags);
@@ -623,7 +621,7 @@ static struct dma_mapping *deactivate_dma_mapping (void *mb_sram_addr)
 static inline void
 free_dma_mapping (struct dma_mapping *mapping)
 {
-	int flags;
+	unsigned long flags;
 
 	free_mb_sram (mapping->mb_sram_addr, mapping->size);
 
@@ -743,15 +741,17 @@ pci_unmap_sg (struct pci_dev *pdev, struct scatterlist *sg, int sg_len,int dir)
    for a scatter-gather list, same rules and usage.  */
 
 void
-pci_dma_sync_sg_for_cpu (struct pci_dev *dev, struct scatterlist *sg, int sg_len,
-		 int dir)
+pci_dma_sync_sg_for_cpu (struct pci_dev *dev,
+			 struct scatterlist *sg, int sg_len,
+			 int dir)
 {
 	BUG ();
 }
 
 void
-pci_dma_sync_sg_for_device (struct pci_dev *dev, struct scatterlist *sg, int sg_len,
-		 int dir)
+pci_dma_sync_sg_for_device (struct pci_dev *dev,
+			    struct scatterlist *sg, int sg_len,
+			    int dir)
 {
 	BUG ();
 }
@@ -775,7 +775,7 @@ pci_alloc_consistent (struct pci_dev *pdev, size_t size, dma_addr_t *dma_addr)
 /* Free and unmap a consistent DMA buffer.  CPU_ADDR and DMA_ADDR must
    be values that were returned from pci_alloc_consistent.  SIZE must be
    the same as what as passed into pci_alloc_consistent.  References to
-   the memory and mappings assosciated with CPU_ADDR or DMA_ADDR past
+   the memory and mappings associated with CPU_ADDR or DMA_ADDR past
    this call are illegal.  */
 void
 pci_free_consistent (struct pci_dev *pdev, size_t size, void *cpu_addr,
@@ -783,6 +783,27 @@ pci_free_consistent (struct pci_dev *pdev, size_t size, void *cpu_addr,
 {
 	void *mb_sram_mem = PCI_TO_MB_SRAM (dma_addr);
 	free_mb_sram (mb_sram_mem, size);
+}
+
+
+/* iomap/iomap */
+
+void __iomem *pci_iomap (struct pci_dev *dev, int bar, unsigned long max)
+{
+	unsigned long start = pci_resource_start (dev, bar);
+	unsigned long len = pci_resource_len (dev, bar);
+
+	if (!start || len == 0)
+		return 0;
+
+	/* None of the ioremap functions actually do anything, other than
+	   re-casting their argument, so don't bother differentiating them.  */
+	return ioremap (start, len);
+}
+
+void pci_iounmap (struct pci_dev *dev, void __iomem *addr)
+{
+	/* nothing */
 }
 
 
@@ -794,3 +815,5 @@ EXPORT_SYMBOL (pci_alloc_consistent);
 EXPORT_SYMBOL (pci_free_consistent);
 EXPORT_SYMBOL (pci_dma_sync_single_for_cpu);
 EXPORT_SYMBOL (pci_dma_sync_single_for_device);
+EXPORT_SYMBOL (pci_iomap);
+EXPORT_SYMBOL (pci_iounmap);

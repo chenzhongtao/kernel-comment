@@ -11,7 +11,6 @@
 #ifndef __ASM_ARM_FPSTATE_H
 #define __ASM_ARM_FPSTATE_H
 
-#include <linux/config.h>
 
 #ifndef __ASSEMBLY__
 
@@ -26,7 +25,9 @@
 
 struct vfp_hard_struct {
 	__u64 fpregs[16];
+#if __LINUX_ARM_ARCH__ < 6
 	__u32 fpmx_state;
+#endif
 	__u32 fpexc;
 	__u32 fpscr;
 	/*
@@ -34,6 +35,9 @@ struct vfp_hard_struct {
 	 */
 	__u32 fpinst;
 	__u32 fpinst2;
+#ifdef CONFIG_SMP
+	__u32 cpu;
+#endif
 };
 
 union vfp_state {
@@ -55,8 +59,10 @@ struct fp_soft_struct {
 	unsigned int save[FP_SOFT_SIZE];		/* undefined information */
 };
 
+#define IWMMXT_SIZE	0x98
+
 struct iwmmxt_struct {
-	unsigned int save[0x98/sizeof(int) + 1];
+	unsigned int save[IWMMXT_SIZE / sizeof(unsigned int)];
 };
 
 union fp_state {
@@ -68,6 +74,14 @@ union fp_state {
 };
 
 #define FP_SIZE (sizeof(union fp_state) / sizeof(int))
+
+struct crunch_state {
+	unsigned int	mvdx[16][2];
+	unsigned int	mvax[4][3];
+	unsigned int	dspsc[2];
+};
+
+#define CRUNCH_SIZE	sizeof(struct crunch_state)
 
 #endif
 

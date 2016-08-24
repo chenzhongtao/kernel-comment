@@ -1,5 +1,5 @@
 /*
- * linux/drivers/sound/soundcard.c
+ * linux/sound/oss/soundcard.c
  *
  * Sound card driver for Linux
  *
@@ -22,7 +22,6 @@
  * Christoph Hellwig : Some cleanup work (2000/03/01)
  */
 
-#include <linux/config.h>
 
 #include "sound_config.h"
 #include <linux/init.h>
@@ -33,17 +32,19 @@
 #include <linux/ctype.h>
 #include <linux/stddef.h>
 #include <linux/kmod.h>
+#include <linux/kernel.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <linux/wait.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/major.h>
 #include <linux/delay.h>
 #include <linux/proc_fs.h>
 #include <linux/smp_lock.h>
 #include <linux/module.h>
+#include <linux/mm.h>
+#include <linux/device.h>
 
 /*
  * This ought to be moved into include/asm/dma.h
@@ -73,7 +74,7 @@ static char     dma_alloc_map[MAX_DMA_CHANNELS];
 
 
 unsigned long seq_time = 0;	/* Time for /dev/sequencer */
-extern struct class_simple *sound_class;
+extern struct class *sound_class;
 
 /*
  * Table for configurable mixer volume handling
@@ -109,6 +110,7 @@ int *load_mixer_volumes(char *name, int *levels, int present)
 		mixer_vols[n].levels[i] = levels[i];
 	return mixer_vols[n].levels;
 }
+EXPORT_SYMBOL(load_mixer_volumes);
 
 static int set_mixer_levels(void __user * arg)
 {
@@ -141,7 +143,7 @@ static int get_mixer_levels(void __user * arg)
 
 static ssize_t sound_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	int dev = iminor(file->f_dentry->d_inode);
+	int dev = iminor(file->f_path.dentry->d_inode);
 	int ret = -EINVAL;
 
 	/*
@@ -174,7 +176,7 @@ static ssize_t sound_read(struct file *file, char __user *buf, size_t count, lof
 
 static ssize_t sound_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	int dev = iminor(file->f_dentry->d_inode);
+	int dev = iminor(file->f_path.dentry->d_inode);
 	int ret = -EINVAL;
 	
 	lock_kernel();
@@ -329,7 +331,7 @@ static int sound_mixer_ioctl(int mixdev, unsigned int cmd, void __user *arg)
 static int sound_ioctl(struct inode *inode, struct file *file,
 		       unsigned int cmd, unsigned long arg)
 {
-	int err, len = 0, dtype;
+	int len = 0, dtype;
 	int dev = iminor(inode);
 	void __user *p = (void __user *)arg;
 
@@ -341,11 +343,11 @@ static int sound_ioctl(struct inode *inode, struct file *file,
 		if (len < 1 || len > 65536 || !p)
 			return -EFAULT;
 		if (_SIOC_DIR(cmd) & _SIOC_WRITE)
-			if ((err = verify_area(VERIFY_READ, p, len)) < 0)
-				return err;
+			if (!access_ok(VERIFY_READ, p, len))
+				return -EFAULT;
 		if (_SIOC_DIR(cmd) & _SIOC_READ)
-			if ((err = verify_area(VERIFY_WRITE, p, len)) < 0)
-				return err;
+			if (!access_ok(VERIFY_WRITE, p, len))
+				return -EFAULT;
 	}
 	DEB(printk("sound_ioctl(dev=%d, cmd=0x%x, arg=0x%x)\n", dev, cmd, arg));
 	if (cmd == OSS_GETVERSION)
@@ -393,7 +395,7 @@ static int sound_ioctl(struct inode *inode, struct file *file,
 
 static unsigned int sound_poll(struct file *file, poll_table * wait)
 {
-	struct inode *inode = file->f_dentry->d_inode;
+	struct inode *inode = file->f_path.dentry->d_inode;
 	int dev = iminor(inode);
 
 	DEB(printk("sound_poll(dev=%d)\n", dev));
@@ -418,7 +420,7 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	int dev_class;
 	unsigned long size;
 	struct dma_buffparms *dmap = NULL;
-	int dev = iminor(file->f_dentry->d_inode);
+	int dev = iminor(file->f_path.dentry->d_inode);
 
 	dev_class = dev & 0x0f;
 	dev >>= 4;
@@ -482,7 +484,7 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	return 0;
 }
 
-struct file_operations oss_sound_fops = {
+const struct file_operations oss_sound_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.read		= sound_read,
@@ -543,12 +545,6 @@ static int __init oss_init(void)
 	int             err;
 	int i, j;
 	
-	/* drag in sound_syms.o */
-	{
-		extern char sound_syms_symbol;
-		sound_syms_symbol = 0;
-	}
-
 #ifdef CONFIG_PCI
 	if(dmabug)
 		isa_dma_bridge_buggy = dmabug;
@@ -563,27 +559,18 @@ static int __init oss_init(void)
 	/* Protecting the innocent */
 	sound_dmap_flag = (dmabuf > 0 ? 1 : 0);
 
-	for (i = 0; i < sizeof (dev_list) / sizeof *dev_list; i++) {
-		devfs_mk_cdev(MKDEV(SOUND_MAJOR, dev_list[i].minor),
-				S_IFCHR | dev_list[i].mode,
-				"sound/%s", dev_list[i].name);
-		class_simple_device_add(sound_class, 
-					MKDEV(SOUND_MAJOR, dev_list[i].minor),
-					NULL, "%s", dev_list[i].name);
+	for (i = 0; i < ARRAY_SIZE(dev_list); i++) {
+		device_create(sound_class, NULL,
+			      MKDEV(SOUND_MAJOR, dev_list[i].minor),
+			      "%s", dev_list[i].name);
 
 		if (!dev_list[i].num)
 			continue;
 
-		for (j = 1; j < *dev_list[i].num; j++) {
-			devfs_mk_cdev(MKDEV(SOUND_MAJOR,
-						dev_list[i].minor + (j*0x10)),
-					S_IFCHR | dev_list[i].mode,
-					"sound/%s%d", dev_list[i].name, j);
-			class_simple_device_add(sound_class,
-					MKDEV(SOUND_MAJOR, dev_list[i].minor + (j*0x10)),
-					NULL,
-					"%s%d", dev_list[i].name, j);
-		}
+		for (j = 1; j < *dev_list[i].num; j++)
+			device_create(sound_class, NULL,
+				      MKDEV(SOUND_MAJOR, dev_list[i].minor + (j*0x10)),
+				      "%s%d", dev_list[i].name, j);
 	}
 
 	if (sound_nblocks >= 1024)
@@ -596,15 +583,12 @@ static void __exit oss_cleanup(void)
 {
 	int i, j;
 
-	for (i = 0; i < sizeof (dev_list) / sizeof *dev_list; i++) {
-		devfs_remove("sound/%s", dev_list[i].name);
-		class_simple_device_remove(MKDEV(SOUND_MAJOR, dev_list[i].minor));
+	for (i = 0; i < ARRAY_SIZE(dev_list); i++) {
+		device_destroy(sound_class, MKDEV(SOUND_MAJOR, dev_list[i].minor));
 		if (!dev_list[i].num)
 			continue;
-		for (j = 1; j < *dev_list[i].num; j++) {
-			devfs_remove("sound/%s%d", dev_list[i].name, j);
-			class_simple_device_remove(MKDEV(SOUND_MAJOR, dev_list[i].minor + (j*0x10)));
-		}
+		for (j = 1; j < *dev_list[i].num; j++)
+			device_destroy(sound_class, MKDEV(SOUND_MAJOR, dev_list[i].minor + (j*0x10)));
 	}
 	
 	unregister_sound_special(1);
@@ -628,6 +612,8 @@ static void __exit oss_cleanup(void)
 module_init(oss_init);
 module_exit(oss_cleanup);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("OSS Sound subsystem");
+MODULE_AUTHOR("Hannu Savolainen, et al.");
 
 
 int sound_alloc_dma(int chn, char *deviceID)
@@ -641,6 +627,7 @@ int sound_alloc_dma(int chn, char *deviceID)
 
 	return 0;
 }
+EXPORT_SYMBOL(sound_alloc_dma);
 
 int sound_open_dma(int chn, char *deviceID)
 {
@@ -656,6 +643,7 @@ int sound_open_dma(int chn, char *deviceID)
 	dma_alloc_map[chn] = DMA_MAP_BUSY;
 	return 0;
 }
+EXPORT_SYMBOL(sound_open_dma);
 
 void sound_free_dma(int chn)
 {
@@ -666,6 +654,7 @@ void sound_free_dma(int chn)
 	free_dma(chn);
 	dma_alloc_map[chn] = DMA_MAP_UNAVAIL;
 }
+EXPORT_SYMBOL(sound_free_dma);
 
 void sound_close_dma(int chn)
 {
@@ -675,6 +664,7 @@ void sound_close_dma(int chn)
 	}
 	dma_alloc_map[chn] = DMA_MAP_FREE;
 }
+EXPORT_SYMBOL(sound_close_dma);
 
 static void do_sequencer_timer(unsigned long dummy)
 {
@@ -682,8 +672,7 @@ static void do_sequencer_timer(unsigned long dummy)
 }
 
 
-static struct timer_list seq_timer =
-		TIMER_INITIALIZER(do_sequencer_timer, 0, 0);
+static DEFINE_TIMER(seq_timer, do_sequencer_timer, 0, 0);
 
 void request_sound_timer(int count)
 {
@@ -729,6 +718,7 @@ void conf_printf(char *name, struct address_info *hw_config)
 	printk("\n");
 #endif
 }
+EXPORT_SYMBOL(conf_printf);
 
 void conf_printf2(char *name, int base, int irq, int dma, int dma2)
 {
@@ -749,3 +739,5 @@ void conf_printf2(char *name, int base, int irq, int dma, int dma2)
 	printk("\n");
 #endif
 }
+EXPORT_SYMBOL(conf_printf2);
+

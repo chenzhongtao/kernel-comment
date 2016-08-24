@@ -13,10 +13,10 @@
  * to ABI64 calling convention.  64-bit syscalls are also processed
  * here for now.
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <asm/asm.h>
 #include <asm/asmmacro.h>
+#include <asm/irqflags.h>
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
@@ -28,6 +28,7 @@
 NESTED(handle_sys, PT_SIZE, sp)
 	.set	noat
 	SAVE_SOME
+	TRACE_IRQS_ON_RELOAD
 	STI
 	.set	at
 	ld	t1, PT_EPC(sp)		# skip syscall on return
@@ -124,6 +125,8 @@ trace_a_syscall:
 	li	a1, 0
 	jal	do_syscall_trace
 
+	move	t0, s0
+	RESTORE_STATIC
 	ld	a0, PT_R4(sp)		# Restore argument registers
 	ld	a1, PT_R5(sp)
 	ld	a2, PT_R6(sp)
@@ -132,7 +135,7 @@ trace_a_syscall:
 	ld	a5, PT_R9(sp)
 	ld	a6, PT_R10(sp)
 	ld	a7, PT_R11(sp)		# For indirect syscalls
-	jalr	s0
+	jalr	t0
 
 	li	t0, -EMAXERRNO - 1	# error?
 	sltu	t0, t0, v0
@@ -207,7 +210,7 @@ sys_call_table:
 	PTR	sys_fork
 	PTR	sys_read
 	PTR	sys_write
-	PTR	sys_open			/* 4005 */
+	PTR	compat_sys_open			/* 4005 */
 	PTR	sys_close
 	PTR	sys_waitpid
 	PTR	sys_creat
@@ -223,7 +226,7 @@ sys_call_table:
 	PTR	sys_ni_syscall			/* was sys_stat */
 	PTR	sys_lseek
 	PTR	sys_getpid			/* 4020 */
-	PTR	sys_mount
+	PTR	compat_sys_mount
 	PTR	sys_oldumount
 	PTR	sys_setuid
 	PTR	sys_getuid
@@ -291,7 +294,7 @@ sys_call_table:
 	PTR	sys_uselib
 	PTR	sys_swapon
 	PTR	sys_reboot
-	PTR	sys32_readdir
+	PTR	compat_sys_old_readdir
 	PTR	old_mmap			/* 4090 */
 	PTR	sys_munmap
 	PTR	sys_truncate
@@ -304,7 +307,7 @@ sys_call_table:
 	PTR	compat_sys_statfs
 	PTR	compat_sys_fstatfs		/* 4100 */
 	PTR	sys_ni_syscall			/* sys_ioperm */
-	PTR	sys32_socketcall
+	PTR	compat_sys_socketcall
 	PTR	sys_syslog
 	PTR	compat_sys_setitimer
 	PTR	compat_sys_getitimer		/* 4105 */
@@ -316,17 +319,17 @@ sys_call_table:
 	PTR	sys_vhangup
 	PTR	sys_ni_syscall			/* was sys_idle	 */
 	PTR	sys_ni_syscall			/* sys_vm86 */
-	PTR	sys32_wait4
+	PTR	compat_sys_wait4
 	PTR	sys_swapoff			/* 4115 */
-	PTR	sys32_sysinfo
+	PTR	compat_sys_sysinfo
 	PTR	sys32_ipc
 	PTR	sys_fsync
 	PTR	sys32_sigreturn
-	PTR	sys_clone			/* 4120 */
+	PTR	sys32_clone			/* 4120 */
 	PTR	sys_setdomainname
 	PTR	sys32_newuname
 	PTR	sys_ni_syscall			/* sys_modify_ldt */
-	PTR	sys32_adjtimex
+	PTR	compat_sys_adjtimex
 	PTR	sys_mprotect			/* 4125 */
 	PTR	compat_sys_sigprocmask
 	PTR	sys_ni_syscall			/* was creat_module */
@@ -343,7 +346,7 @@ sys_call_table:
 	PTR	sys_setfsuid
 	PTR	sys_setfsgid
 	PTR	sys32_llseek			/* 4140 */
-	PTR	sys32_getdents
+	PTR	compat_sys_getdents
 	PTR	compat_sys_select
 	PTR	sys_flock
 	PTR	sys_msync
@@ -391,7 +394,7 @@ sys_call_table:
 	PTR	sys_getresuid
 	PTR	sys_ni_syscall			/* was query_module */
 	PTR	sys_poll
-	PTR	sys_nfsservctl
+	PTR	compat_sys_nfsservctl
 	PTR	sys_setresgid			/* 4190 */
 	PTR	sys_getresgid
 	PTR	sys_prctl
@@ -456,10 +459,10 @@ sys_call_table:
 	PTR	sys_remap_file_pages
 	PTR	sys_set_tid_address
 	PTR	sys_restart_syscall
-	PTR	sys_fadvise64_64
+	PTR	sys32_fadvise64_64
 	PTR	compat_sys_statfs64		/* 4255 */
 	PTR	compat_sys_fstatfs64
-	PTR	sys_timer_create
+	PTR	compat_sys_timer_create
 	PTR	compat_sys_timer_settime
 	PTR	compat_sys_timer_gettime
 	PTR	sys_timer_getoverrun		/* 4260 */
@@ -480,9 +483,47 @@ sys_call_table:
 	PTR	compat_sys_mq_notify		/* 4275 */
 	PTR	compat_sys_mq_getsetattr
 	PTR	sys_ni_syscall			/* sys_vserver */
-	PTR	sys_waitid
+	PTR	sys32_waitid
 	PTR	sys_ni_syscall			/* available, was setaltroot */
 	PTR	sys_add_key			/* 4280 */
 	PTR	sys_request_key
 	PTR	sys_keyctl
+	PTR	sys_set_thread_area
+	PTR	sys_inotify_init
+	PTR	sys_inotify_add_watch		/* 4285 */
+	PTR	sys_inotify_rm_watch
+	PTR	sys_migrate_pages
+	PTR	compat_sys_openat
+	PTR	sys_mkdirat
+	PTR	sys_mknodat			/* 4290 */
+	PTR	sys_fchownat
+	PTR	compat_sys_futimesat
+	PTR	sys_newfstatat
+	PTR	sys_unlinkat
+	PTR	sys_renameat			/* 4295 */
+	PTR	sys_linkat
+	PTR	sys_symlinkat
+	PTR	sys_readlinkat
+	PTR	sys_fchmodat
+	PTR	sys_faccessat			/* 4300 */
+	PTR	compat_sys_pselect6
+	PTR	sys_ppoll
+	PTR	sys_unshare
+	PTR	sys_splice
+	PTR	sys32_sync_file_range		/* 4305 */
+	PTR	sys_tee
+	PTR	sys_vmsplice
+	PTR	compat_sys_move_pages
+	PTR	compat_sys_set_robust_list
+	PTR	compat_sys_get_robust_list	/* 4310 */
+	PTR	compat_sys_kexec_load
+	PTR	sys_getcpu
+	PTR	compat_sys_epoll_pwait
+	PTR	sys_ioprio_set
+	PTR	sys_ioprio_get			/* 4315 */
+	PTR	compat_sys_utimensat
+	PTR	compat_sys_signalfd
+	PTR	compat_sys_timerfd
+	PTR	sys_eventfd
+	PTR	sys32_fallocate			/* 4320 */
 	.size	sys_call_table,.-sys_call_table

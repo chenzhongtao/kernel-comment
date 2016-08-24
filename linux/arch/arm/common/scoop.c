@@ -12,50 +12,71 @@
  */
 
 #include <linux/device.h>
+#include <linux/string.h>
+#include <linux/slab.h>
+#include <linux/platform_device.h>
 #include <asm/io.h>
 #include <asm/hardware/scoop.h>
 
-static void __iomem *scoop_io_base;
+/* PCMCIA to Scoop linkage
 
-#define SCOOP_REG(adr) (*(volatile unsigned short*)(scoop_io_base+(adr)))
+   There is no easy way to link multiple scoop devices into one
+   single entity for the pxa2xx_pcmcia device so this structure
+   is used which is setup by the platform code.
 
-void reset_scoop(void)
+   This file is never modular so this symbol is always
+   accessile to the board support files.
+*/
+struct scoop_pcmcia_config *platform_scoop_config;
+EXPORT_SYMBOL(platform_scoop_config);
+
+#define SCOOP_REG(d,adr) (*(volatile unsigned short*)(d +(adr)))
+
+struct  scoop_dev {
+	void  *base;
+	spinlock_t scoop_lock;
+	unsigned short suspend_clr;
+	unsigned short suspend_set;
+	u32 scoop_gpwr;
+};
+
+void reset_scoop(struct device *dev)
 {
-	SCOOP_REG(SCOOP_MCR) = 0x0100;	// 00
-	SCOOP_REG(SCOOP_CDR) = 0x0000;  // 04
-	SCOOP_REG(SCOOP_CPR) = 0x0000;  // 0C
-	SCOOP_REG(SCOOP_CCR) = 0x0000;  // 10
-	SCOOP_REG(SCOOP_IMR) = 0x0000;  // 18
-	SCOOP_REG(SCOOP_IRM) = 0x00FF;  // 14
-	SCOOP_REG(SCOOP_ISR) = 0x0000;  // 1C
-	SCOOP_REG(SCOOP_IRM) = 0x0000;
+	struct scoop_dev *sdev = dev_get_drvdata(dev);
+
+	SCOOP_REG(sdev->base,SCOOP_MCR) = 0x0100;  // 00
+	SCOOP_REG(sdev->base,SCOOP_CDR) = 0x0000;  // 04
+	SCOOP_REG(sdev->base,SCOOP_CCR) = 0x0000;  // 10
+	SCOOP_REG(sdev->base,SCOOP_IMR) = 0x0000;  // 18
+	SCOOP_REG(sdev->base,SCOOP_IRM) = 0x00FF;  // 14
+	SCOOP_REG(sdev->base,SCOOP_ISR) = 0x0000;  // 1C
+	SCOOP_REG(sdev->base,SCOOP_IRM) = 0x0000;
 }
 
-static DEFINE_SPINLOCK(scoop_lock);
-static u32 scoop_gpwr;
-
-unsigned short set_scoop_gpio(unsigned short bit)
+unsigned short set_scoop_gpio(struct device *dev, unsigned short bit)
 {
 	unsigned short gpio_bit;
 	unsigned long flag;
+	struct scoop_dev *sdev = dev_get_drvdata(dev);
 
-	spin_lock_irqsave(&scoop_lock, flag);
-	gpio_bit = SCOOP_REG(SCOOP_GPWR) | bit;
-	SCOOP_REG(SCOOP_GPWR) = gpio_bit;
-	spin_unlock_irqrestore(&scoop_lock, flag);
+	spin_lock_irqsave(&sdev->scoop_lock, flag);
+	gpio_bit = SCOOP_REG(sdev->base, SCOOP_GPWR) | bit;
+	SCOOP_REG(sdev->base, SCOOP_GPWR) = gpio_bit;
+	spin_unlock_irqrestore(&sdev->scoop_lock, flag);
 
 	return gpio_bit;
 }
 
-unsigned short reset_scoop_gpio(unsigned short bit)
+unsigned short reset_scoop_gpio(struct device *dev, unsigned short bit)
 {
 	unsigned short gpio_bit;
 	unsigned long flag;
+	struct scoop_dev *sdev = dev_get_drvdata(dev);
 
-	spin_lock_irqsave(&scoop_lock, flag);
-	gpio_bit = SCOOP_REG(SCOOP_GPWR) & ~bit;
-	SCOOP_REG(SCOOP_GPWR) = gpio_bit;
-	spin_unlock_irqrestore(&scoop_lock, flag);
+	spin_lock_irqsave(&sdev->scoop_lock, flag);
+	gpio_bit = SCOOP_REG(sdev->base, SCOOP_GPWR) & ~bit;
+	SCOOP_REG(sdev->base,SCOOP_GPWR) = gpio_bit;
+	spin_unlock_irqrestore(&sdev->scoop_lock, flag);
 
 	return gpio_bit;
 }
@@ -63,72 +84,120 @@ unsigned short reset_scoop_gpio(unsigned short bit)
 EXPORT_SYMBOL(set_scoop_gpio);
 EXPORT_SYMBOL(reset_scoop_gpio);
 
-unsigned short read_scoop_reg(unsigned short reg)
+unsigned short read_scoop_reg(struct device *dev, unsigned short reg)
 {
-	return SCOOP_REG(reg);
+	struct scoop_dev *sdev = dev_get_drvdata(dev);
+	return SCOOP_REG(sdev->base,reg);
 }
 
-void write_scoop_reg(unsigned short reg, unsigned short data)
+void write_scoop_reg(struct device *dev, unsigned short reg, unsigned short data)
 {
-	SCOOP_REG(reg)=data;
+	struct scoop_dev *sdev = dev_get_drvdata(dev);
+	SCOOP_REG(sdev->base,reg)=data;
 }
 
 EXPORT_SYMBOL(reset_scoop);
 EXPORT_SYMBOL(read_scoop_reg);
 EXPORT_SYMBOL(write_scoop_reg);
 
-static int scoop_suspend(struct device *dev, uint32_t state, uint32_t level)
+static void check_scoop_reg(struct scoop_dev *sdev)
 {
-	if (level == SUSPEND_POWER_DOWN) {
-		scoop_gpwr = SCOOP_REG(SCOOP_GPWR);
-		SCOOP_REG(SCOOP_GPWR) = 0;
-	}
+	unsigned short mcr;
+
+	mcr = SCOOP_REG(sdev->base, SCOOP_MCR);
+	if ((mcr & 0x100) == 0)
+		SCOOP_REG(sdev->base, SCOOP_MCR) = 0x0101;
+}
+
+#ifdef CONFIG_PM
+static int scoop_suspend(struct platform_device *dev, pm_message_t state)
+{
+	struct scoop_dev *sdev = platform_get_drvdata(dev);
+
+	check_scoop_reg(sdev);
+	sdev->scoop_gpwr = SCOOP_REG(sdev->base, SCOOP_GPWR);
+	SCOOP_REG(sdev->base, SCOOP_GPWR) = (sdev->scoop_gpwr & ~sdev->suspend_clr) | sdev->suspend_set;
+
 	return 0;
 }
 
-static int scoop_resume(struct device *dev, uint32_t level)
+static int scoop_resume(struct platform_device *dev)
 {
-	if (level == RESUME_POWER_ON) {
-		SCOOP_REG(SCOOP_GPWR) = scoop_gpwr;
-	}
+	struct scoop_dev *sdev = platform_get_drvdata(dev);
+
+	check_scoop_reg(sdev);
+	SCOOP_REG(sdev->base,SCOOP_GPWR) = sdev->scoop_gpwr;
+
 	return 0;
 }
+#else
+#define scoop_suspend	NULL
+#define scoop_resume	NULL
+#endif
 
-int __init scoop_probe(struct device *dev)
+int __init scoop_probe(struct platform_device *pdev)
 {
+	struct scoop_dev *devptr;
 	struct scoop_config *inf;
-	struct platform_device *pdev = to_platform_device(dev);
 	struct resource *mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 
 	if (!mem)
 		return -EINVAL;
 
-	inf = dev->platform_data;
-	scoop_io_base = ioremap(mem->start, 0x1000);
-	if (!scoop_io_base)
+	devptr = kzalloc(sizeof(struct scoop_dev), GFP_KERNEL);
+	if (!devptr)
 		return -ENOMEM;
 
-	SCOOP_REG(SCOOP_MCR) = 0x0140;
+	spin_lock_init(&devptr->scoop_lock);
 
-	reset_scoop();
+	inf = pdev->dev.platform_data;
+	devptr->base = ioremap(mem->start, mem->end - mem->start + 1);
 
-	SCOOP_REG(SCOOP_GPCR) = inf->io_dir & 0xffff;
-	SCOOP_REG(SCOOP_GPWR) = inf->io_out & 0xffff;
+	if (!devptr->base) {
+		kfree(devptr);
+		return -ENOMEM;
+	}
+
+	platform_set_drvdata(pdev, devptr);
+
+	printk("Sharp Scoop Device found at 0x%08x -> 0x%08x\n",(unsigned int)mem->start,(unsigned int)devptr->base);
+
+	SCOOP_REG(devptr->base, SCOOP_MCR) = 0x0140;
+	reset_scoop(&pdev->dev);
+	SCOOP_REG(devptr->base, SCOOP_CPR) = 0x0000;
+	SCOOP_REG(devptr->base, SCOOP_GPCR) = inf->io_dir & 0xffff;
+	SCOOP_REG(devptr->base, SCOOP_GPWR) = inf->io_out & 0xffff;
+
+	devptr->suspend_clr = inf->suspend_clr;
+	devptr->suspend_set = inf->suspend_set;
 
 	return 0;
 }
 
-static struct device_driver scoop_driver = {
-	.name		= "sharp-scoop",
-	.bus		= &platform_bus_type,
+static int scoop_remove(struct platform_device *pdev)
+{
+	struct scoop_dev *sdev = platform_get_drvdata(pdev);
+	if (sdev) {
+		iounmap(sdev->base);
+		kfree(sdev);
+		platform_set_drvdata(pdev, NULL);
+	}
+	return 0;
+}
+
+static struct platform_driver scoop_driver = {
 	.probe		= scoop_probe,
+	.remove 	= scoop_remove,
 	.suspend	= scoop_suspend,
 	.resume		= scoop_resume,
+	.driver		= {
+		.name	= "sharp-scoop",
+	},
 };
 
 int __init scoop_init(void)
 {
-	return driver_register(&scoop_driver);
+	return platform_driver_register(&scoop_driver);
 }
 
 subsys_initcall(scoop_init);

@@ -1,5 +1,5 @@
 /*
- * $Id: synclinkmp.c,v 4.29 2004/08/27 20:06:41 paulkf Exp $
+ * $Id: synclinkmp.c,v 4.38 2005/07/15 13:29:44 paulkf Exp $
  *
  * Device driver for Microgate SyncLink Multiport
  * high speed multiprotocol serial adapter.
@@ -34,7 +34,6 @@
 
 #define MAX_DEVICES 12
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
@@ -55,7 +54,6 @@
 #include <linux/netdevice.h>
 #include <linux/vmalloc.h>
 #include <linux/init.h>
-#include <asm/serial.h>
 #include <linux/delay.h>
 #include <linux/ioctl.h>
 
@@ -69,8 +67,10 @@
 #include <linux/workqueue.h>
 #include <linux/hdlc.h>
 
-#ifdef CONFIG_HDLC_MODULE
-#define CONFIG_HDLC 1
+#if defined(CONFIG_HDLC) || (defined(CONFIG_HDLC_MODULE) && defined(CONFIG_SYNCLINKMP_MODULE))
+#define SYNCLINK_GENERIC_HDLC 1
+#else
+#define SYNCLINK_GENERIC_HDLC 0
 #endif
 
 #define GET_USER(error,value,addr) error = get_user(value,addr)
@@ -134,8 +134,6 @@ typedef struct _SCADESC_EX
 #define BH_STATUS   4
 
 #define IO_PIN_SHUTDOWN_LIMIT 100
-
-#define RELEVANT_IFLAG(iflag) (iflag & (IGNBRK|BRKINT|IGNPAR|PARMRK|INPCK))
 
 struct	_input_signal_events {
 	int	ri_up;
@@ -282,7 +280,7 @@ typedef struct _synclinkmp_info {
 	int dosyncppp;
 	spinlock_t netlock;
 
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 	struct net_device *netdev;
 #endif
 
@@ -487,7 +485,7 @@ module_param_array(maxframe, int, NULL, 0);
 module_param_array(dosyncppp, int, NULL, 0);
 
 static char *driver_name = "SyncLink MultiPort driver";
-static char *driver_version = "$Revision: 4.29 $";
+static char *driver_version = "$Revision: 4.38 $";
 
 static int synclinkmp_init_one(struct pci_dev *dev,const struct pci_device_id *ent);
 static void synclinkmp_remove_one(struct pci_dev *dev);
@@ -519,7 +517,7 @@ static struct tty_driver *serial_driver;
 static int  open(struct tty_struct *tty, struct file * filp);
 static void close(struct tty_struct *tty, struct file * filp);
 static void hangup(struct tty_struct *tty);
-static void set_termios(struct tty_struct *tty, struct termios *old_termios);
+static void set_termios(struct tty_struct *tty, struct ktermios *old_termios);
 
 static int  write(struct tty_struct *tty, const unsigned char *buf, int count);
 static void put_char(struct tty_struct *tty, unsigned char ch);
@@ -538,7 +536,7 @@ static void throttle(struct tty_struct * tty);
 static void unthrottle(struct tty_struct * tty);
 static void set_break(struct tty_struct *tty, int break_state);
 
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 #define dev_to_port(D) (dev_to_hdlc(D)->priv)
 static void hdlcdev_tx_done(SLMP_INFO *info);
 static void hdlcdev_rx(SLMP_INFO *info, char *buf, int size);
@@ -556,7 +554,6 @@ static int  set_txidle(SLMP_INFO *info, int idle_mode);
 static int  tx_enable(SLMP_INFO *info, int enable);
 static int  tx_abort(SLMP_INFO *info);
 static int  rx_enable(SLMP_INFO *info, int enable);
-static int  map_status(int signals);
 static int  modem_input_wait(SLMP_INFO *info,int arg);
 static int  wait_mgsl_event(SLMP_INFO *info, int __user *mask_ptr);
 static int  tiocmget(struct tty_struct *tty, struct file *file);
@@ -605,7 +602,7 @@ static void enable_loopback(SLMP_INFO *info, int enable);
 static void set_rate(SLMP_INFO *info, u32 data_rate);
 
 static int  bh_action(SLMP_INFO *info);
-static void bh_handler(void* Context);
+static void bh_handler(struct work_struct *work);
 static void bh_receive(SLMP_INFO *info);
 static void bh_transmit(SLMP_INFO *info);
 static void bh_status(SLMP_INFO *info);
@@ -645,7 +642,7 @@ static unsigned char tx_active_fifo_level = 16;	// tx request FIFO activation le
 static unsigned char tx_negate_fifo_level = 32;	// tx request FIFO negation level in bytes
 
 static u32 misc_ctrl_value = 0x007e4040;
-static u32 lcr1_brdr_value = 0x00800029;
+static u32 lcr1_brdr_value = 0x00800028;
 
 static u32 read_ahead_count = 8;
 
@@ -919,7 +916,7 @@ static void hangup(struct tty_struct *tty)
 
 /* Set new termios settings
  */
-static void set_termios(struct tty_struct *tty, struct termios *old_termios)
+static void set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 {
 	SLMP_INFO *info = (SLMP_INFO *)tty->driver_data;
 	unsigned long flags;
@@ -927,12 +924,6 @@ static void set_termios(struct tty_struct *tty, struct termios *old_termios)
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):%s set_termios()\n", __FILE__,__LINE__,
 			tty->driver->name );
-
-	/* just return if nothing has changed */
-	if ((tty->termios->c_cflag == old_termios->c_cflag)
-	    && (RELEVANT_IFLAG(tty->termios->c_iflag)
-		== RELEVANT_IFLAG(old_termios->c_iflag)))
-	  return;
 
 	change_params(info);
 
@@ -990,7 +981,7 @@ static int write(struct tty_struct *tty,
 	if (sanity_check(info, tty->name, "write"))
 		goto cleanup;
 
-	if (!tty || !info->tx_buf)
+	if (!info->tx_buf)
 		goto cleanup;
 
 	if (info->params.mode == MGSL_MODE_HDLC) {
@@ -1069,7 +1060,7 @@ static void put_char(struct tty_struct *tty, unsigned char ch)
 	if (sanity_check(info, tty->name, "put_char"))
 		return;
 
-	if (!tty || !info->tx_buf)
+	if (!info->tx_buf)
 		return;
 
 	spin_lock_irqsave(&info->lock,flags);
@@ -1259,7 +1250,6 @@ static void flush_buffer(struct tty_struct *tty)
 	del_timer(&info->tx_timer);
 	spin_unlock_irqrestore(&info->lock,flags);
 
-	wake_up_interruptible(&tty->write_wait);
 	tty_wakeup(tty);
 }
 
@@ -1610,7 +1600,7 @@ static void set_break(struct tty_struct *tty, int break_state)
 	spin_unlock_irqrestore(&info->lock,flags);
 }
 
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 
 /**
  * called by generic HDLC layer when protocol selected (PPP, frame relay, etc.)
@@ -1652,7 +1642,7 @@ static int hdlcdev_attach(struct net_device *dev, unsigned short encoding,
 	}
 
 	info->params.encoding = new_encoding;
-	info->params.crc_type = new_crctype;;
+	info->params.crc_type = new_crctype;
 
 	/* if network interface up, reprogram hardware */
 	if (info->netcount)
@@ -1755,8 +1745,10 @@ static int hdlcdev_open(struct net_device *dev)
 	spin_lock_irqsave(&info->lock, flags);
 	get_signals(info);
 	spin_unlock_irqrestore(&info->lock, flags);
-	hdlc_set_carrier(info->serial_signals & SerialSignal_DCD, dev);
-
+	if (info->serial_signals & SerialSignal_DCD)
+		netif_carrier_on(dev);
+	else
+		netif_carrier_off(dev);
 	return 0;
 }
 
@@ -2064,9 +2056,9 @@ int bh_action(SLMP_INFO *info)
 
 /* Perform bottom half processing of work items queued by ISR.
  */
-void bh_handler(void* Context)
+void bh_handler(struct work_struct *work)
 {
-	SLMP_INFO *info = (SLMP_INFO*)Context;
+	SLMP_INFO *info = container_of(work, SLMP_INFO, task);
 	int action;
 
 	if (!info)
@@ -2126,10 +2118,8 @@ void bh_transmit(SLMP_INFO *info)
 		printk( "%s(%d):%s bh_transmit() entry\n",
 			__FILE__,__LINE__,info->device_name);
 
-	if (tty) {
+	if (tty)
 		tty_wakeup(tty);
-		wake_up_interruptible(&tty->write_wait);
-	}
 }
 
 void bh_status(SLMP_INFO *info)
@@ -2198,7 +2188,7 @@ void isr_rxint(SLMP_INFO * info)
 			if ( tty ) {
 				if (!(status & info->ignore_status_mask1)) {
 					if (info->read_status_mask1 & BRKD) {
-						*tty->flip.flag_buf_ptr = TTY_BREAK;
+						tty_insert_flip_char(tty, 0, TTY_BREAK);
 						if (info->flags & ASYNC_SAK)
 							do_SAK(tty);
 					}
@@ -2242,15 +2232,9 @@ void isr_rxrdy(SLMP_INFO * info)
 
 	while((status = read_reg(info,CST0)) & BIT0)
 	{
+		int flag = 0;
+		int over = 0;
 		DataByte = read_reg(info,TRB);
-
-		if ( tty ) {
-			if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-				continue;
-
-			*tty->flip.char_buf_ptr = DataByte;
-			*tty->flip.flag_buf_ptr = 0;
-		}
 
 		icount->rx++;
 
@@ -2274,46 +2258,38 @@ void isr_rxrdy(SLMP_INFO * info)
 
 			if ( tty ) {
 				if (status & PE)
-					*tty->flip.flag_buf_ptr = TTY_PARITY;
+					flag = TTY_PARITY;
 				else if (status & FRME)
-					*tty->flip.flag_buf_ptr = TTY_FRAME;
+					flag = TTY_FRAME;
 				if (status & OVRN) {
 					/* Overrun is special, since it's
 					 * reported immediately, and doesn't
 					 * affect the current character
 					 */
-					if (tty->flip.count < TTY_FLIPBUF_SIZE) {
-						tty->flip.count++;
-						tty->flip.flag_buf_ptr++;
-						tty->flip.char_buf_ptr++;
-						*tty->flip.flag_buf_ptr = TTY_OVERRUN;
-					}
+					over = 1;
 				}
 			}
 		}	/* end of if (error) */
 
 		if ( tty ) {
-			tty->flip.flag_buf_ptr++;
-			tty->flip.char_buf_ptr++;
-			tty->flip.count++;
+			tty_insert_flip_char(tty, DataByte, flag);
+			if (over)
+				tty_insert_flip_char(tty, 0, TTY_OVERRUN);
 		}
 	}
 
 	if ( debug_level >= DEBUG_LEVEL_ISR ) {
-		printk("%s(%d):%s isr_rxrdy() flip count=%d\n",
-			__FILE__,__LINE__,info->device_name,
-			tty ? tty->flip.count : 0);
 		printk("%s(%d):%s rx=%d brk=%d parity=%d frame=%d overrun=%d\n",
 			__FILE__,__LINE__,info->device_name,
 			icount->rx,icount->brk,icount->parity,
 			icount->frame,icount->overrun);
 	}
 
-	if ( tty && tty->flip.count )
+	if ( tty )
 		tty_flip_buffer_push(tty);
 }
 
-void isr_txeom(SLMP_INFO * info, unsigned char status)
+static void isr_txeom(SLMP_INFO * info, unsigned char status)
 {
 	if ( debug_level >= DEBUG_LEVEL_ISR )
 		printk("%s(%d):%s isr_txeom status=%02x\n",
@@ -2354,7 +2330,7 @@ void isr_txeom(SLMP_INFO * info, unsigned char status)
 			set_signals(info);
 		}
 
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 		if (info->netcount)
 			hdlcdev_tx_done(info);
 		else
@@ -2538,9 +2514,13 @@ void isr_io_pin( SLMP_INFO *info, u16 status )
 				info->input_signal_events.dcd_up++;
 			} else
 				info->input_signal_events.dcd_down++;
-#ifdef CONFIG_HDLC
-			if (info->netcount)
-				hdlc_set_carrier(status & SerialSignal_DCD, info->netdev);
+#if SYNCLINK_GENERIC_HDLC
+			if (info->netcount) {
+				if (status & SerialSignal_DCD)
+					netif_carrier_on(info->netdev);
+				else
+					netif_carrier_off(info->netdev);
+			}
 #endif
 		}
 		if (status & MISCSTATUS_CTS_LATCHED)
@@ -2607,8 +2587,7 @@ void isr_io_pin( SLMP_INFO *info, u16 status )
  * 	dev_id		device ID supplied during interrupt registration
  * 	regs		interrupted processor context
  */
-static irqreturn_t synclinkmp_interrupt(int irq, void *dev_id,
-					struct pt_regs *regs)
+static irqreturn_t synclinkmp_interrupt(int irq, void *dev_id)
 {
 	SLMP_INFO * info;
 	unsigned char status, status0, status1=0;
@@ -2740,7 +2719,7 @@ static int startup(SLMP_INFO * info)
 		return 0;
 
 	if (!info->tx_buf) {
-		info->tx_buf = (unsigned char *)kmalloc(info->max_frame_size, GFP_KERNEL);
+		info->tx_buf = kmalloc(info->max_frame_size, GFP_KERNEL);
 		if (!info->tx_buf) {
 			printk(KERN_ERR"%s(%d):%s can't allocate transmit buffer\n",
 				__FILE__,__LINE__,info->device_name);
@@ -2750,13 +2729,14 @@ static int startup(SLMP_INFO * info)
 
 	info->pending_bh = 0;
 
+	memset(&info->icount, 0, sizeof(info->icount));
+
 	/* program hardware for current parameters */
 	reset_port(info);
 
 	change_params(info);
 
-	info->status_timer.expires = jiffies + msecs_to_jiffies(10);
-	add_timer(&info->status_timer);
+	mod_timer(&info->status_timer, jiffies + msecs_to_jiffies(10));
 
 	if (info->tty)
 		clear_bit(TTY_IO_ERROR, &info->tty->flags);
@@ -2787,10 +2767,8 @@ static void shutdown(SLMP_INFO * info)
 	del_timer(&info->tx_timer);
 	del_timer(&info->status_timer);
 
-	if (info->tx_buf) {
-		kfree(info->tx_buf);
-		info->tx_buf = NULL;
-	}
+	kfree(info->tx_buf);
+	info->tx_buf = NULL;
 
 	spin_lock_irqsave(&info->lock,flags);
 
@@ -2953,12 +2931,12 @@ static int get_stats(SLMP_INFO * info, struct mgsl_icount __user *user_icount)
 		printk("%s(%d):%s get_params()\n",
 			 __FILE__,__LINE__, info->device_name);
 
-	COPY_TO_USER(err,user_icount, &info->icount, sizeof(struct mgsl_icount));
-	if (err) {
-		if ( debug_level >= DEBUG_LEVEL_INFO )
-			printk( "%s(%d):%s get_stats() user buffer copy failed\n",
-				__FILE__,__LINE__,info->device_name);
-		return -EFAULT;
+	if (!user_icount) {
+		memset(&info->icount, 0, sizeof(info->icount));
+	} else {
+		COPY_TO_USER(err, user_icount, &info->icount, sizeof(struct mgsl_icount));
+		if (err)
+			return -EFAULT;
 	}
 
 	return 0;
@@ -3109,16 +3087,6 @@ static int rx_enable(SLMP_INFO * info, int enable)
 	return 0;
 }
 
-static int map_status(int signals)
-{
-	/* Map status bits to API event bits */
-
-	return ((signals & SerialSignal_DSR) ? MgslEvent_DsrActive : MgslEvent_DsrInactive) +
-	       ((signals & SerialSignal_CTS) ? MgslEvent_CtsActive : MgslEvent_CtsInactive) +
-	       ((signals & SerialSignal_DCD) ? MgslEvent_DcdActive : MgslEvent_DcdInactive) +
-	       ((signals & SerialSignal_RI)  ? MgslEvent_RiActive : MgslEvent_RiInactive);
-}
-
 /* wait for specified event to occur
  */
 static int wait_mgsl_event(SLMP_INFO * info, int __user *mask_ptr)
@@ -3145,7 +3113,7 @@ static int wait_mgsl_event(SLMP_INFO * info, int __user *mask_ptr)
 
 	/* return immediately if state matches requested events */
 	get_signals(info);
-	s = map_status(info->serial_signals);
+	s = info->serial_signals;
 
 	events = mask &
 		( ((s & SerialSignal_DSR) ? MgslEvent_DsrActive:MgslEvent_DsrInactive) +
@@ -3620,8 +3588,7 @@ int alloc_tmp_rx_buf(SLMP_INFO *info)
 
 void free_tmp_rx_buf(SLMP_INFO *info)
 {
-	if (info->tmp_rx_buf)
-		kfree(info->tmp_rx_buf);
+	kfree(info->tmp_rx_buf);
 	info->tmp_rx_buf = NULL;
 }
 
@@ -3806,7 +3773,7 @@ void add_device(SLMP_INFO *info)
 		info->irq_level,
 		info->max_frame_size );
 
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 	hdlcdev_init(info);
 #endif
 }
@@ -3815,20 +3782,19 @@ void add_device(SLMP_INFO *info)
  *
  * Return Value:	pointer to SLMP_INFO if success, otherwise NULL
  */
-SLMP_INFO *alloc_dev(int adapter_num, int port_num, struct pci_dev *pdev)
+static SLMP_INFO *alloc_dev(int adapter_num, int port_num, struct pci_dev *pdev)
 {
 	SLMP_INFO *info;
 
-	info = (SLMP_INFO *)kmalloc(sizeof(SLMP_INFO),
+	info = kzalloc(sizeof(SLMP_INFO),
 		 GFP_KERNEL);
 
 	if (!info) {
 		printk("%s(%d) Error can't allocate device instance data for adapter %d, port %d\n",
 			__FILE__,__LINE__, adapter_num, port_num);
 	} else {
-		memset(info, 0, sizeof(SLMP_INFO));
 		info->magic = MGSL_MAGIC;
-		INIT_WORK(&info->task, bh_handler, info);
+		INIT_WORK(&info->task, bh_handler);
 		info->max_frame_size = 4096;
 		info->close_delay = 5*HZ/10;
 		info->closing_wait = 30*HZ;
@@ -3863,15 +3829,11 @@ SLMP_INFO *alloc_dev(int adapter_num, int port_num, struct pci_dev *pdev)
 		info->phys_statctrl_base &= ~(PAGE_SIZE-1);
 
 		info->bus_type = MGSL_BUS_TYPE_PCI;
-		info->irq_flags = SA_SHIRQ;
+		info->irq_flags = IRQF_SHARED;
 
-		init_timer(&info->tx_timer);
-		info->tx_timer.data = (unsigned long)info;
-		info->tx_timer.function = tx_timeout;
-
-		init_timer(&info->status_timer);
-		info->status_timer.data = (unsigned long)info;
-		info->status_timer.function = status_timeout;
+		setup_timer(&info->tx_timer, tx_timeout, (unsigned long)info);
+		setup_timer(&info->status_timer, status_timeout,
+				(unsigned long)info);
 
 		/* Store the PCI9050 misc control register value because a flaw
 		 * in the PCI9050 prevents LCR registers from being read if
@@ -3951,7 +3913,7 @@ void device_init(int adapter_num, struct pci_dev *pdev)
 	}
 }
 
-static struct tty_operations ops = {
+static const struct tty_operations ops = {
 	.open = open,
 	.close = close,
 	.write = write,
@@ -4000,7 +3962,7 @@ static void synclinkmp_cleanup(void)
 	/* release devices */
 	info = synclinkmp_device_list;
 	while(info) {
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 		hdlcdev_exit(info);
 #endif
 		free_dma_bufs(info);
@@ -4055,6 +4017,8 @@ static int __init synclinkmp_init(void)
 	serial_driver->init_termios = tty_std_termios;
 	serial_driver->init_termios.c_cflag =
 		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+	serial_driver->init_termios.c_ispeed = 9600;
+	serial_driver->init_termios.c_ospeed = 9600;
 	serial_driver->flags = TTY_DRIVER_REAL_RAW;
 	tty_set_operations(serial_driver, &ops);
 	if ((rc = tty_register_driver(serial_driver)) < 0) {
@@ -4313,8 +4277,8 @@ void tx_start(SLMP_INFO *info)
 			write_reg(info, TXDMA + DIR, 0x40);		/* enable Tx DMA interrupts (EOM) */
 			write_reg(info, TXDMA + DSR, 0xf2);		/* clear Tx DMA IRQs, enable Tx DMA */
 	
-			info->tx_timer.expires = jiffies + msecs_to_jiffies(5000);
-			add_timer(&info->tx_timer);
+			mod_timer(&info->tx_timer, jiffies +
+					msecs_to_jiffies(5000));
 		}
 		else {
 			tx_load_fifo(info);
@@ -4489,11 +4453,13 @@ void async_mode(SLMP_INFO *info)
 	/* MD2, Mode Register 2
 	 *
 	 * 07..02  Reserved, must be 0
-	 * 01..00  CNCT<1..0> Channel connection, 0=normal
+	 * 01..00  CNCT<1..0> Channel connection, 00=normal 11=local loopback
 	 *
 	 * 0000 0000
 	 */
 	RegValue = 0x00;
+	if (info->params.loopback)
+		RegValue |= (BIT1 + BIT0);
 	write_reg(info, MD2, RegValue);
 
 	/* RXS, Receive clock source
@@ -4528,7 +4494,7 @@ void async_mode(SLMP_INFO *info)
 	 * 07..05  Reserved, must be 0
 	 * 04..00  RRC<4..0> Rx FIFO trigger active 0x00 = 1 byte
 	 */
-	write_reg(info, TRC0, 0x00);
+	write_reg(info, RRC, 0x00);
 
 	/* TRC0 Transmit Ready Control 0
 	 *
@@ -4574,9 +4540,6 @@ void async_mode(SLMP_INFO *info)
 	write_reg(info, IE2, info->ie2_value);
 
 	set_rate( info, info->params.data_rate * 16 );
-
-	if (info->params.loopback)
-		enable_loopback(info,1);
 }
 
 /* Program the SCA for HDLC communications.
@@ -5003,7 +4966,7 @@ CheckAgain:
 			info->icount.rxcrc++;
 
 		framesize = 0;
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 		{
 			struct net_device_stats *stats = hdlc_stats(info->netdev);
 			stats->rx_errors++;
@@ -5044,7 +5007,7 @@ CheckAgain:
 					index = 0;
 			}
 
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 			if (info->netcount)
 				hdlcdev_rx(info,info->tmp_rx_buf,framesize);
 			else
@@ -5118,7 +5081,7 @@ void tx_load_dma_buffer(SLMP_INFO *info, const char *buf, unsigned int count)
 int register_test(SLMP_INFO *info)
 {
 	static unsigned char testval[] = {0x00, 0xff, 0xaa, 0x55, 0x69, 0x96};
-	static unsigned int count = sizeof(testval)/sizeof(unsigned char);
+	static unsigned int count = ARRAY_SIZE(testval);
 	unsigned int i;
 	int rc = TRUE;
 	unsigned long flags;
@@ -5205,7 +5168,7 @@ int irq_test(SLMP_INFO *info)
 
 /* initialize individual SCA device (2 ports)
  */
-int sca_init(SLMP_INFO *info)
+static int sca_init(SLMP_INFO *info)
 {
 	/* set wait controller to single mem partition (low), no wait states */
 	write_reg(info, PABR0, 0);	/* wait controller addr boundary 0 */
@@ -5436,7 +5399,7 @@ int memory_test(SLMP_INFO *info)
 {
 	static unsigned long testval[] = { 0x0, 0x55555555, 0xaaaaaaaa,
 		0x66666666, 0x99999999, 0xffffffff, 0x12345678 };
-	unsigned long count = sizeof(testval)/sizeof(unsigned long);
+	unsigned long count = ARRAY_SIZE(testval);
 	unsigned long i;
 	unsigned long limit = SCA_MEM_SIZE/sizeof(unsigned long);
 	unsigned long * addr = (unsigned long *)info->memory_base;
@@ -5555,7 +5518,7 @@ void tx_timeout(unsigned long context)
 
 	spin_unlock_irqrestore(&info->lock,flags);
 
-#ifdef CONFIG_HDLC
+#if SYNCLINK_GENERIC_HDLC
 	if (info->netcount)
 		hdlcdev_tx_done(info);
 	else
@@ -5597,10 +5560,7 @@ void status_timeout(unsigned long context)
 	if (status)
 		isr_io_pin(info,status);
 
-	info->status_timer.data = (unsigned long)info;
-	info->status_timer.function = status_timeout;
-	info->status_timer.expires = jiffies + msecs_to_jiffies(10);
-	add_timer(&info->status_timer);
+	mod_timer(&info->status_timer, jiffies + msecs_to_jiffies(10));
 }
 
 

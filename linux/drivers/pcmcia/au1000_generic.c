@@ -33,7 +33,6 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
-#include <linux/config.h>
 #include <linux/cpufreq.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
@@ -42,7 +41,7 @@
 #include <linux/notifier.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -156,15 +155,12 @@ static int au1x00_pcmcia_sock_init(struct pcmcia_socket *sock)
 static int au1x00_pcmcia_suspend(struct pcmcia_socket *sock)
 {
 	struct au1000_pcmcia_socket *skt = to_au1000_socket(sock);
-	int ret;
 
 	debug("suspending socket %u\n", skt->nr);
 
-	ret = au1x00_pcmcia_config_skt(skt, &dead_socket);
-	if (ret == 0)
-		skt->ops->socket_suspend(skt);
+	skt->ops->socket_suspend(skt);
 
-	return ret;
+	return 0;
 }
 
 static DEFINE_SPINLOCK(status_lock);
@@ -242,23 +238,6 @@ au1x00_pcmcia_get_status(struct pcmcia_socket *sock, unsigned int *status)
 	*status = skt->status;
 
 	return 0;
-}
-
-/* au1x00_pcmcia_get_socket()
- * Implements the get_socket() operation for the in-kernel PCMCIA
- * service (formerly SS_GetSocket in Card Services). Not a very
- * exciting routine.
- *
- * Returns: 0
- */
-static int
-au1x00_pcmcia_get_socket(struct pcmcia_socket *sock, socket_state_t *state)
-{
-  struct au1000_pcmcia_socket *skt = to_au1000_socket(sock);
-
-  debug("for sock %u\n", skt->nr);
-  *state = skt->cs_state;
-  return 0;
 }
 
 /* au1x00_pcmcia_set_socket()
@@ -355,7 +334,6 @@ static struct pccard_operations au1x00_pcmcia_operations = {
 	.init			= au1x00_pcmcia_sock_init,
 	.suspend		= au1x00_pcmcia_suspend,
 	.get_status		= au1x00_pcmcia_get_status,
-	.get_socket		= au1x00_pcmcia_get_socket,
 	.set_socket		= au1x00_pcmcia_set_socket,
 	.set_io_map		= au1x00_pcmcia_set_io_map,
 	.set_mem_map		= au1x00_pcmcia_set_mem_map,
@@ -373,27 +351,28 @@ struct skt_dev_info {
 int au1x00_pcmcia_socket_probe(struct device *dev, struct pcmcia_low_level *ops, int first, int nr)
 {
 	struct skt_dev_info *sinfo;
+	struct au1000_pcmcia_socket *skt;
 	int ret, i;
 
-	sinfo = kmalloc(sizeof(struct skt_dev_info), GFP_KERNEL);
+	sinfo = kzalloc(sizeof(struct skt_dev_info), GFP_KERNEL);
 	if (!sinfo) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	memset(sinfo, 0, sizeof(struct skt_dev_info));
 	sinfo->nskt = nr;
 
 	/*
 	 * Initialise the per-socket structure.
 	 */
 	for (i = 0; i < nr; i++) {
-		struct au1000_pcmcia_socket *skt = PCMCIA_SOCKET(i);
+		skt = PCMCIA_SOCKET(i);
 		memset(skt, 0, sizeof(*skt));
 
+		skt->socket.resource_ops = &pccard_static_ops;
 		skt->socket.ops = &au1x00_pcmcia_operations;
 		skt->socket.owner = ops->owner;
-		skt->socket.dev.dev = dev;
+		skt->socket.dev.parent = dev;
 
 		init_timer(&skt->poll_timer);
 		skt->poll_timer.function = au1x00_pcmcia_poll_event;
@@ -460,17 +439,29 @@ int au1x00_pcmcia_socket_probe(struct device *dev, struct pcmcia_low_level *ops,
 	dev_set_drvdata(dev, sinfo);
 	return 0;
 
-	do {
-		struct au1000_pcmcia_socket *skt = PCMCIA_SOCKET(i);
+
+out_err:
+	flush_scheduled_work();
+	ops->hw_shutdown(skt);
+	while (i-- > 0) {
+		skt = PCMCIA_SOCKET(i);
 
 		del_timer_sync(&skt->poll_timer);
 		pcmcia_unregister_socket(&skt->socket);
-out_err:
 		flush_scheduled_work();
+		if (i == 0) {
+			iounmap(skt->virt_io + (u32)mips_io_port_base);
+			skt->virt_io = NULL;
+		}
+#ifndef CONFIG_MIPS_XXS1500
+		else {
+			iounmap(skt->virt_io + (u32)mips_io_port_base);
+			skt->virt_io = NULL;
+		}
+#endif
 		ops->hw_shutdown(skt);
 
-		i--;
-	} while (i > 0);
+	}
 	kfree(sinfo);
 out:
 	return ret;
@@ -492,7 +483,7 @@ int au1x00_drv_pcmcia_remove(struct device *dev)
 		flush_scheduled_work();
 		skt->ops->hw_shutdown(skt);
 		au1x00_pcmcia_config_skt(skt, &dead_socket);
-		iounmap(skt->virt_io);
+		iounmap(skt->virt_io + (u32)mips_io_port_base);
 		skt->virt_io = NULL;
 	}
 
@@ -521,36 +512,15 @@ static int au1x00_drv_pcmcia_probe(struct device *dev)
 }
 
 
-static int au1x00_drv_pcmcia_suspend(struct device *dev, u32 state, u32 level)
-{
-	int ret = 0;
-	if (level == SUSPEND_SAVE_STATE)
-		ret = pcmcia_socket_dev_suspend(dev, state);
-	return ret;
-}
-
-static int au1x00_drv_pcmcia_resume(struct device *dev, u32 level)
-{
-	int ret = 0;
-	if (level == RESUME_RESTORE_STATE)
-		ret = pcmcia_socket_dev_resume(dev);
-	return ret;
-}
-
-
 static struct device_driver au1x00_pcmcia_driver = {
 	.probe		= au1x00_drv_pcmcia_probe,
 	.remove		= au1x00_drv_pcmcia_remove,
 	.name		= "au1x00-pcmcia",
 	.bus		= &platform_bus_type,
-	.suspend	= au1x00_drv_pcmcia_suspend,
-	.resume		= au1x00_drv_pcmcia_resume
+	.suspend	= pcmcia_socket_dev_suspend,
+	.resume		= pcmcia_socket_dev_resume,
 };
 
-static struct platform_device au1x00_device = {
-	.name = "au1x00-pcmcia",
-	.id = 0,
-};
 
 /* au1x00_pcmcia_init()
  *
@@ -564,7 +534,6 @@ static int __init au1x00_pcmcia_init(void)
 	int error = 0;
 	if ((error = driver_register(&au1x00_pcmcia_driver)))
 		return error;
-	platform_device_register(&au1x00_device);
 	return error;
 }
 
@@ -575,7 +544,6 @@ static int __init au1x00_pcmcia_init(void)
 static void __exit au1x00_pcmcia_exit(void)
 {
 	driver_unregister(&au1x00_pcmcia_driver);
-	platform_device_unregister(&au1x00_device);
 }
 
 module_init(au1x00_pcmcia_init);

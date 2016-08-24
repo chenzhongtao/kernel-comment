@@ -1,7 +1,7 @@
 /*
 	drivers/net/tulip/21142.c
 
-	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Maintained by Valerie Henson <val_henson@linux.intel.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
@@ -14,7 +14,6 @@
 
 */
 
-#include <linux/pci.h>
 #include <linux/delay.h>
 #include "tulip.h"
 
@@ -26,10 +25,11 @@ static u16 t21142_csr15[] = { 0x0008, 0x0006, 0x000E, 0x0008, 0x0008, };
 
 /* Handle the 21143 uniquely: do autoselect with NWay, not the EEPROM list
    of available transceivers.  */
-void t21142_timer(unsigned long data)
+void t21142_media_task(struct work_struct *work)
 {
-	struct net_device *dev = (struct net_device *)data;
-	struct tulip_private *tp = netdev_priv(dev);
+	struct tulip_private *tp =
+		container_of(work, struct tulip_private, media_work);
+	struct net_device *dev = tp->dev;
 	void __iomem *ioaddr = tp->base_addr;
 	int csr12 = ioread32(ioaddr + CSR12);
 	int next_tick = 60*HZ;
@@ -172,7 +172,7 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 			int i;
 			for (i = 0; i < tp->mtable->leafcount; i++)
 				if (tp->mtable->mleaf[i].media == dev->if_port) {
-					int startup = ! ((tp->chip_id == DC21143 && tp->revision == 65));
+					int startup = ! ((tp->chip_id == DC21143 && (tp->revision == 48 || tp->revision == 65)));
 					tp->cur_index = i;
 					tulip_select_media(dev, startup);
 					setup_done = 1;

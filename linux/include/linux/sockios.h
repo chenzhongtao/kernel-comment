@@ -7,7 +7,7 @@
  *
  * Version:	@(#)sockios.h	1.0.2	03/09/93
  *
- * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
+ * Authors:	Ross Biro
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
  *		This program is free software; you can redistribute it and/or
@@ -72,8 +72,8 @@
 #define SIOCGIFTXQLEN	0x8942		/* Get the tx queue length	*/
 #define SIOCSIFTXQLEN	0x8943		/* Set the tx queue length 	*/
 
-#define SIOCGIFDIVERT	0x8944		/* Frame diversion support */
-#define SIOCSIFDIVERT	0x8945		/* Set frame diversion options */
+/* SIOCGIFDIVERT was:	0x8944		Frame diversion support */
+/* SIOCSIFDIVERT was:	0x8945		Set frame diversion options */
 
 #define SIOCETHTOOL	0x8946		/* Ethtool interface		*/
 

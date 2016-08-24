@@ -6,11 +6,9 @@
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
@@ -204,7 +202,7 @@ struct Layer1 {
 	void *hardware;
 	struct BCState *bcs;
 	struct PStack **stlistp;
-	long Flags;
+	unsigned long Flags;
 	struct FsmInst l1m;
 	struct FsmTimer	timer;
 	void (*l1l2) (struct PStack *, int, void *);
@@ -217,7 +215,7 @@ struct Layer1 {
 #define GROUP_TEI	127
 #define TEI_SAPI	63
 #define CTRL_SAPI	0
-#define PACKET_NOACK	250
+#define PACKET_NOACK	7
 
 /* Layer2 Flags */
 
@@ -397,17 +395,17 @@ struct isar_hw {
 
 struct hdlc_stat_reg {
 #ifdef __BIG_ENDIAN
-	u_char fill __attribute__((packed));
-	u_char mode __attribute__((packed));
-	u_char xml  __attribute__((packed));
-	u_char cmd  __attribute__((packed));
+	u_char fill;
+	u_char mode;
+	u_char xml;
+	u_char cmd;
 #else
-	u_char cmd  __attribute__((packed));
-	u_char xml  __attribute__((packed));
-	u_char mode __attribute__((packed));
-	u_char fill __attribute__((packed));
+	u_char cmd;
+	u_char xml;
+	u_char mode;
+	u_char fill;
 #endif
-};
+} __attribute__((packed));
 
 struct hdlc_hw {
 	union {
@@ -797,19 +795,6 @@ struct w6692_hw {
 	struct timer_list timer;
 };
 
-#ifdef  CONFIG_HISAX_TESTEMU
-struct te_hw {
-	unsigned char *sfifo;
-	unsigned char *sfifo_w;
-	unsigned char *sfifo_r;
-	unsigned char *sfifo_e;
-	int sfifo_cnt;
-	unsigned int stat;
-	wait_queue_head_t rwaitq;
-	wait_queue_head_t swaitq;
-};
-#endif
-
 struct arcofi_msg {
 	struct arcofi_msg *next;
 	u_char receive;
@@ -918,9 +903,6 @@ struct IsdnCardState {
 		struct ix1_hw niccy;
 		struct isurf_hw isurf;
 		struct saphir_hw saphir;
-#ifdef CONFIG_HISAX_TESTEMU
-		struct te_hw te;
-#endif
 		struct bkm_hw ax;
 		struct gazel_hw gazel;
 		struct w6692_hw w6692;
@@ -943,7 +925,7 @@ struct IsdnCardState {
 	int		(*cardmsg) (struct IsdnCardState *, int, void *);
 	void		(*setstack_d) (struct PStack *, struct IsdnCardState *);
 	void		(*DC_Close) (struct IsdnCardState *);
-	int		(*irq_func) (int, void *, struct pt_regs *);
+	int		(*irq_func) (int, void *);
 	int		(*auxcmd) (struct IsdnCardState *, isdn_ctrl *);
 	struct Channel	channel[2+MAX_WAITING_CALLS];
 	struct BCState	bcs[2+MAX_WAITING_CALLS];
@@ -1141,12 +1123,6 @@ struct IsdnCardState {
 #define  CARD_HFC_SX 0
 #endif
 
-#ifdef  CONFIG_HISAX_AMD7930
-#define CARD_AMD7930 1
-#else
-#define CARD_AMD7930 0
-#endif
-
 #ifdef	CONFIG_HISAX_NICCY
 #define	CARD_NICCY 1
 #ifndef ISDN_CHIP_ISAC
@@ -1181,15 +1157,6 @@ struct IsdnCardState {
 #endif
 #else
 #define CARD_HSTSAPHIR 0
-#endif
-
-#ifdef	CONFIG_HISAX_TESTEMU
-#define	CARD_TESTEMU 1
-#define ISDN_CTYPE_TESTEMU 99
-#undef ISDN_CTYPE_COUNT
-#define  ISDN_CTYPE_COUNT ISDN_CTYPE_TESTEMU
-#else
-#define CARD_TESTEMU 0
 #endif
 
 #ifdef	CONFIG_HISAX_BKM_A4T
@@ -1242,6 +1209,8 @@ struct IsdnCardState {
 
 #ifdef CONFIG_HISAX_ENTERNOW_PCI
 #define CARD_FN_ENTERNOW_PCI 1
+#else
+#define CARD_FN_ENTERNOW_PCI 0
 #endif
 
 #define TEI_PER_CARD 1
@@ -1271,7 +1240,6 @@ extern void Logl2Frame(struct IsdnCardState *cs, struct sk_buff *skb, char *buf,
 void init_bcstate(struct IsdnCardState *cs, int bc);
 
 void setstack_HiSax(struct PStack *st, struct IsdnCardState *cs);
-unsigned int random_ri(void);
 void HiSax_addlist(struct IsdnCardState *sp, struct PStack *st);
 void HiSax_rmlist(struct IsdnCardState *sp, struct PStack *st);
 
@@ -1315,15 +1283,22 @@ int QuickHex(char *txt, u_char * p, int cnt);
 void LogFrame(struct IsdnCardState *cs, u_char * p, int size);
 void dlogframe(struct IsdnCardState *cs, struct sk_buff *skb, int dir);
 void iecpy(u_char * dest, u_char * iestart, int ieoffset);
-#ifdef ISDN_CHIP_ISAC
-void setstack_isac(struct PStack *st, struct IsdnCardState *cs);
-#endif	/* ISDN_CHIP_ISAC */
 #endif	/* __KERNEL__ */
 
-#define HZDELAY(jiffs) {int tout = jiffs; while (tout--) udelay(1000000/HZ);}
+/*
+ * Busywait delay for `jiffs' jiffies
+ */
+#define HZDELAY(jiffs) do {					\
+		int tout = jiffs;				\
+								\
+		while (tout--) {				\
+			int loops = USEC_PER_SEC / HZ;		\
+			while (loops--)				\
+				udelay(1);			\
+		}						\
+	} while (0)
 
 int ll_run(struct IsdnCardState *cs, int addfeatures);
-void ll_stop(struct IsdnCardState *cs);
 int CallcNew(void);
 void CallcFree(void);
 int CallcNewChan(struct IsdnCardState *cs);

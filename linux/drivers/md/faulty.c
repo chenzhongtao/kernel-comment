@@ -65,18 +65,16 @@
 #include <linux/raid/md.h>
 
 
-static int faulty_fail(struct bio *bio, unsigned int bytes_done, int error)
+static void faulty_fail(struct bio *bio, int error)
 {
 	struct bio *b = bio->bi_private;
 
 	b->bi_size = bio->bi_size;
 	b->bi_sector = bio->bi_sector;
 
-	if (bio->bi_size == 0)
-		bio_put(bio);
+	bio_put(bio);
 
-	clear_bit(BIO_UPTODATE, &b->bi_flags);
-	return (b->bi_end_io)(b, bytes_done, -EIO);
+	bio_io_error(b);
 }
 
 typedef struct faulty_conf {
@@ -167,19 +165,19 @@ static void add_sector(conf_t *conf, sector_t start, int mode)
 		conf->nfaults = n+1;
 }
 
-static int make_request(request_queue_t *q, struct bio *bio)
+static int make_request(struct request_queue *q, struct bio *bio)
 {
 	mddev_t *mddev = q->queuedata;
 	conf_t *conf = (conf_t*)mddev->private;
 	int failit = 0;
 
-	if (bio->bi_rw & 1) {
+	if (bio_data_dir(bio) == WRITE) {
 		/* write request */
 		if (atomic_read(&conf->counters[WriteAll])) {
 			/* special case - don't decrement, don't generic_make_request,
 			 * just fail immediately
 			 */
-			bio_endio(bio, bio->bi_size, -EIO);
+			bio_endio(bio, -EIO);
 			return 0;
 		}
 
@@ -316,9 +314,10 @@ static int stop(mddev_t *mddev)
 	return 0;
 }
 
-static mdk_personality_t faulty_personality =
+static struct mdk_personality faulty_personality =
 {
 	.name		= "faulty",
+	.level		= LEVEL_FAULTY,
 	.owner		= THIS_MODULE,
 	.make_request	= make_request,
 	.run		= run,
@@ -329,15 +328,17 @@ static mdk_personality_t faulty_personality =
 
 static int __init raid_init(void)
 {
-	return register_md_personality(FAULTY, &faulty_personality);
+	return register_md_personality(&faulty_personality);
 }
 
 static void raid_exit(void)
 {
-	unregister_md_personality(FAULTY);
+	unregister_md_personality(&faulty_personality);
 }
 
 module_init(raid_init);
 module_exit(raid_exit);
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("md-personality-10"); /* faulty */
+MODULE_ALIAS("md-faulty");
+MODULE_ALIAS("md-level--5");

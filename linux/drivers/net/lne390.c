@@ -111,8 +111,6 @@ static int __init do_lne390_probe(struct net_device *dev)
 	int mem_start = dev->mem_start;
 	int ret;
 
-	SET_MODULE_OWNER(dev);
-
 	if (ioaddr > 0x1ff) {		/* Check a single specified location. */
 		if (!request_region(ioaddr, LNE390_IO_EXTENT, DRV_NAME))
 			return -EBUSY;
@@ -145,13 +143,6 @@ static int __init do_lne390_probe(struct net_device *dev)
 	return -ENODEV;
 }
 
-static void cleanup_card(struct net_device *dev)
-{
-	free_irq(dev->irq, dev);
-	release_region(dev->base_addr, LNE390_IO_EXTENT);
-	iounmap(ei_status.mem);
-}
-
 #ifndef MODULE
 struct net_device * __init lne390_probe(int unit)
 {
@@ -167,12 +158,7 @@ struct net_device * __init lne390_probe(int unit)
 	err = do_lne390_probe(dev);
 	if (err)
 		goto out;
-	err = register_netdev(dev);
-	if (err)
-		goto out1;
 	return dev;
-out1:
-	cleanup_card(dev);
 out:
 	free_netdev(dev);
 	return ERR_PTR(err);
@@ -183,6 +169,7 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 {
 	int i, revision, ret;
 	unsigned long eisa_id;
+	DECLARE_MAC_BUF(mac);
 
 	if (inb_p(ioaddr + LNE390_ID_PORT) == 0xff) return -ENODEV;
 
@@ -200,7 +187,7 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	}
 
 	revision = (eisa_id >> 24) & 0x01;	/* 0 = rev A, 1 rev B */
-	
+
 #if 0
 /*	Check the Mylex vendor ID as well. Not really required. */
 	if (inb(ioaddr + LNE390_SA_PROM + 0) != LNE390_ADDR0
@@ -214,10 +201,12 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	}
 #endif
 
-	printk("lne390.c: LNE390%X in EISA slot %d, address", 0xa+revision, ioaddr/0x1000);
 	for(i = 0; i < ETHER_ADDR_LEN; i++)
-		printk(" %02x", (dev->dev_addr[i] = inb(ioaddr + LNE390_SA_PROM + i)));
-	printk(".\nlne390.c: ");
+		dev->dev_addr[i] = inb(ioaddr + LNE390_SA_PROM + i);
+	printk("lne390.c: LNE390%X in EISA slot %d, address %s.\n",
+	       0xa+revision, ioaddr/0x1000, print_mac(mac, dev->dev_addr));
+
+	printk("lne390.c: ");
 
 	/* Snarf the interrupt now. CFG file has them all listed as `edge' with share=NO */
 	if (dev->irq == 0) {
@@ -296,7 +285,14 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	dev->poll_controller = ei_poll;
 #endif
 	NS8390_init(dev, 0);
+
+	ret = register_netdev(dev);
+	if (ret)
+		goto unmap;
 	return 0;
+unmap:
+	if (ei_status.reg0)
+		iounmap(ei_status.mem);
 cleanup:
 	free_irq(dev->irq, dev);
 	return ret;
@@ -346,7 +342,7 @@ lne390_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_
 	hdr->count = (hdr->count + 3) & ~3;     /* Round up allocation. */
 }
 
-/*	
+/*
  *	Block input and output are easy on shared memory ethercards, the only
  *	complication is when the ring buffer wraps. The count will already
  *	be rounded up to a doubleword value via lne390_get_8390_hdr() above.
@@ -411,7 +407,7 @@ MODULE_PARM_DESC(mem, "memory base address(es)");
 MODULE_DESCRIPTION("Mylex LNE390A/B EISA Ethernet driver");
 MODULE_LICENSE("GPL");
 
-int init_module(void)
+int __init init_module(void)
 {
 	struct net_device *dev;
 	int this_dev, found = 0;
@@ -426,11 +422,8 @@ int init_module(void)
 		dev->base_addr = io[this_dev];
 		dev->mem_start = mem[this_dev];
 		if (do_lne390_probe(dev) == 0) {
-			if (register_netdev(dev) == 0) {
-				dev_lne[found++] = dev;
-				continue;
-			}
-			cleanup_card(dev);
+			dev_lne[found++] = dev;
+			continue;
 		}
 		free_netdev(dev);
 		printk(KERN_WARNING "lne390.c: No LNE390 card found (i/o = 0x%x).\n", io[this_dev]);
@@ -441,7 +434,14 @@ int init_module(void)
 	return -ENXIO;
 }
 
-void cleanup_module(void)
+static void cleanup_card(struct net_device *dev)
+{
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, LNE390_IO_EXTENT);
+	iounmap(ei_status.mem);
+}
+
+void __exit cleanup_module(void)
 {
 	int this_dev;
 

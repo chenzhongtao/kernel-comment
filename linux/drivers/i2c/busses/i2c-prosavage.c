@@ -54,7 +54,6 @@
  *    (Additional documentation needed :(
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -84,11 +83,6 @@ struct s_i2c_chip {
 /*
  * i2c configuration
  */
-#ifndef I2C_HW_B_S3VIA
-#define I2C_HW_B_S3VIA	0x18	/* S3VIA ProSavage adapter		*/
-#endif
-
-/* delays */
 #define CYCLE_DELAY	10
 #define TIMEOUT		(HZ / 2)
 
@@ -186,7 +180,6 @@ static int i2c_register_bus(struct pci_dev *dev, struct s_i2c_bus *p, void __iom
 	p->algo.getsda	  = bit_s3via_getsda;
 	p->algo.getscl	  = bit_s3via_getscl;
 	p->algo.udelay	  = CYCLE_DELAY;
-	p->algo.mdelay	  = CYCLE_DELAY;
 	p->algo.timeout	  = TIMEOUT;
 	p->algo.data	  = p;
 	p->mmvga	  = mmvga;
@@ -219,7 +212,7 @@ static void prosavage_remove(struct pci_dev *dev)
 		if (chip->i2c_bus[i].adap_ok == 0)
 			continue;
 
-		ret = i2c_bit_del_bus(&chip->i2c_bus[i].adap);
+		ret = i2c_del_adapter(&chip->i2c_bus[i].adap);
 	        if (ret) {
 			dev_err(&dev->dev, "%s not removed\n",
 				chip->i2c_bus[i].adap.name);
@@ -242,13 +235,11 @@ static int __devinit prosavage_probe(struct pci_dev *dev, const struct pci_devic
 	struct s_i2c_chip *chip;
 	struct s_i2c_bus  *bus;
 
-        pci_set_drvdata(dev, kmalloc(sizeof(struct s_i2c_chip), GFP_KERNEL)); 
+	pci_set_drvdata(dev, kzalloc(sizeof(struct s_i2c_chip), GFP_KERNEL));
 	chip = (struct s_i2c_chip *)pci_get_drvdata(dev);
 	if (chip == NULL) {
 		return -ENOMEM;
 	}
-
-	memset(chip, 0, sizeof(struct s_i2c_chip));
 
 	base = dev->resource[0].start & PCI_BASE_ADDRESS_MEM_MASK;
 	len  = dev->resource[0].end - base + 1;

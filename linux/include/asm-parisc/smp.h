@@ -1,7 +1,6 @@
 #ifndef __ASM_SMP_H
 #define __ASM_SMP_H
 
-#include <linux/config.h>
 
 #if defined(CONFIG_SMP)
 
@@ -29,6 +28,7 @@ extern cpumask_t cpu_online_map;
 #define cpu_logical_map(cpu)	(cpu)
 
 extern void smp_send_reschedule(int cpu);
+extern void smp_send_all_nop(void);
 
 #endif /* !ASSEMBLY */
 
@@ -41,19 +41,15 @@ extern void smp_send_reschedule(int cpu);
  
 #define PROC_CHANGE_PENALTY	15		/* Schedule penalty */
 
-#undef ENTRY_SYS_CPUS
-#ifdef ENTRY_SYS_CPUS
-#define STATE_RENDEZVOUS			0
-#define STATE_STOPPED 				1 
-#define STATE_RUNNING				2
-#define STATE_HALTED				3
-#endif
-
 extern unsigned long cpu_present_mask;
 
-#define smp_processor_id()	(current_thread_info()->cpu)
+#define raw_smp_processor_id()	(current_thread_info()->cpu)
 
-#endif /* CONFIG_SMP */
+#else /* CONFIG_SMP */
+
+static inline void smp_send_all_nop(void) { return; }
+
+#endif
 
 #define NO_PROC_ID		0xFF		/* No processor magic marker */
 #define ANY_PROC_ID		0xFF		/* Any processor magic marker */

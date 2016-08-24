@@ -1,6 +1,28 @@
 #ifndef _LINUX_VT_H
 #define _LINUX_VT_H
 
+#ifdef __KERNEL__
+struct notifier_block;
+
+struct vt_notifier_param {
+	struct vc_data *vc;	/* VC on which the update happened */
+	unsigned int c;		/* Printed char */
+};
+
+extern int register_vt_notifier(struct notifier_block *nb);
+extern int unregister_vt_notifier(struct notifier_block *nb);
+#endif
+
+/*
+ * These constants are also useful for user-level apps (e.g., VC
+ * resizing).
+ */
+#define MIN_NR_CONSOLES 1       /* must be at least 1 */
+#define MAX_NR_CONSOLES	63	/* serial lines start at 64 */
+#define MAX_NR_USER_CONSOLES 63	/* must be root to allocate above this */
+		/* Note: the ioctl VT_GETSTATE does not work for
+		   consoles 16 and higher (since it returns a short) */
+
 /* 0x56 is 'V', to avoid collision with termios and kd */
 
 #define VT_OPENQRY	0x5600	/* find available vt */
@@ -50,5 +72,6 @@ struct vt_consize {
 #define VT_RESIZEX      0x560A  /* set kernel's idea of screensize + more */
 #define VT_LOCKSWITCH   0x560B  /* disallow vt switching */
 #define VT_UNLOCKSWITCH 0x560C  /* allow vt switching */
+#define VT_GETHIFONTMASK 0x560D  /* return hi font mask */
 
 #endif /* _LINUX_VT_H */

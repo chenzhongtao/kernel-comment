@@ -5,13 +5,16 @@
  * Copyright (C) 1998-2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
- * 02/06/02 find_next_bit() and find_first_bit() added from Erich Focht's ia64 O(1)
- *	    scheduler patch
+ * 02/06/02 find_next_bit() and find_first_bit() added from Erich Focht's ia64
+ * O(1) scheduler patch
  */
+
+#ifndef _LINUX_BITOPS_H
+#error only <linux/bitops.h> can be included directly
+#endif
 
 #include <linux/compiler.h>
 #include <linux/types.h>
-#include <asm/bitops.h>
 #include <asm/intrinsics.h>
 
 /**
@@ -25,9 +28,9 @@
  * restricted to acting on a single-word quantity.
  *
  * The address must be (at least) "long" aligned.
- * Note that there are driver (e.g., eepro100) which use these operations to operate on
- * hw-defined data-structures, so we can't easily change these operations to force a
- * bigger alignment.
+ * Note that there are driver (e.g., eepro100) which use these operations to
+ * operate on hw-defined data-structures, so we can't easily change these
+ * operations to force a bigger alignment.
  *
  * bit 0 is the LSB of addr; bit 32 is the LSB of (addr+1).
  */
@@ -92,6 +95,49 @@ clear_bit (int nr, volatile void *addr)
 		old = *m;
 		new = old & mask;
 	} while (cmpxchg_acq(m, old, new) != old);
+}
+
+/**
+ * clear_bit_unlock - Clears a bit in memory with release
+ * @nr: Bit to clear
+ * @addr: Address to start counting from
+ *
+ * clear_bit_unlock() is atomic and may not be reordered.  It does
+ * contain a memory barrier suitable for unlock type operations.
+ */
+static __inline__ void
+clear_bit_unlock (int nr, volatile void *addr)
+{
+	__u32 mask, old, new;
+	volatile __u32 *m;
+	CMPXCHG_BUGCHECK_DECL
+
+	m = (volatile __u32 *) addr + (nr >> 5);
+	mask = ~(1 << (nr & 31));
+	do {
+		CMPXCHG_BUGCHECK(m);
+		old = *m;
+		new = old & mask;
+	} while (cmpxchg_rel(m, old, new) != old);
+}
+
+/**
+ * __clear_bit_unlock - Non-atomically clear a bit with release
+ *
+ * This is like clear_bit_unlock, but the implementation uses a store
+ * with release semantics. See also __raw_spin_unlock().
+ */
+static __inline__ void
+__clear_bit_unlock(int nr, volatile void *addr)
+{
+	__u32 mask, new;
+	volatile __u32 *m;
+
+	m = (volatile __u32 *)addr + (nr >> 5);
+	mask = ~(1 << (nr & 31));
+	new = *m & mask;
+	barrier();
+	ia64_st4_rel_nta(m, new);
 }
 
 /**
@@ -169,6 +215,15 @@ test_and_set_bit (int nr, volatile void *addr)
 	} while (cmpxchg_acq(m, old, new) != old);
 	return (old & bit) != 0;
 }
+
+/**
+ * test_and_set_bit_lock - Set a bit and return its old value for lock
+ * @nr: Bit to set
+ * @addr: Address to count from
+ *
+ * This is the same as test_and_set_bit on ia64
+ */
+#define test_and_set_bit_lock test_and_set_bit
 
 /**
  * __test_and_set_bit - Set a bit and return its old value
@@ -284,8 +339,8 @@ test_bit (int nr, const volatile void *addr)
  * ffz - find the first zero bit in a long word
  * @x: The long word to find the bit in
  *
- * Returns the bit-number (0..63) of the first (least significant) zero bit.  Undefined if
- * no zero exists, so code should check against ~0UL first...
+ * Returns the bit-number (0..63) of the first (least significant) zero bit.
+ * Undefined if no zero exists, so code should check against ~0UL first...
  */
 static inline unsigned long
 ffz (unsigned long x)
@@ -314,8 +369,8 @@ __ffs (unsigned long x)
 #ifdef __KERNEL__
 
 /*
- * find_last_zero_bit - find the last zero bit in a 64 bit quantity
- * @x: The value to search
+ * Return bit number of last (most-significant) bit set.  Undefined
+ * for x==0.  Bits are numbered from 0..63 (e.g., ia64_fls(9) == 3).
  */
 static inline unsigned long
 ia64_fls (unsigned long x)
@@ -327,17 +382,32 @@ ia64_fls (unsigned long x)
 	return exp - 0xffff;
 }
 
+/*
+ * Find the last (most significant) bit set.  Returns 0 for x==0 and
+ * bits are numbered from 1..32 (e.g., fls(9) == 4).
+ */
 static inline int
-fls (int x)
+fls (int t)
 {
-	return ia64_fls((unsigned int) x);
+	unsigned long x = t & 0xffffffffu;
+
+	if (!x)
+		return 0;
+	x |= x >> 1;
+	x |= x >> 2;
+	x |= x >> 4;
+	x |= x >> 8;
+	x |= x >> 16;
+	return ia64_popcnt(x);
 }
 
+#include <asm-generic/bitops/fls64.h>
+
 /*
- * ffs: find first bit set. This is defined the same way as the libc and compiler builtin
- * ffs routines, therefore differs in spirit from the above ffz (man ffs): it operates on
- * "int" values only and the result value is the bit number + 1.  ffs(0) is defined to
- * return zero.
+ * ffs: find first bit set. This is defined the same way as the libc and
+ * compiler builtin ffs routines, therefore differs in spirit from the above
+ * ffz (man ffs): it operates on "int" values only and the result value is the
+ * bit number + 1.  ffs(0) is defined to return zero.
  */
 #define ffs(x)	__builtin_ffs(x)
 
@@ -353,57 +423,23 @@ hweight64 (unsigned long x)
 	return result;
 }
 
-#define hweight32(x) hweight64 ((x) & 0xfffffffful)
-#define hweight16(x) hweight64 ((x) & 0xfffful)
-#define hweight8(x)  hweight64 ((x) & 0xfful)
+#define hweight32(x)	(unsigned int) hweight64((x) & 0xfffffffful)
+#define hweight16(x)	(unsigned int) hweight64((x) & 0xfffful)
+#define hweight8(x)	(unsigned int) hweight64((x) & 0xfful)
 
 #endif /* __KERNEL__ */
 
-extern int __find_next_zero_bit (const void *addr, unsigned long size,
-			unsigned long offset);
-extern int __find_next_bit(const void *addr, unsigned long size,
-			unsigned long offset);
-
-#define find_next_zero_bit(addr, size, offset) \
-			__find_next_zero_bit((addr), (size), (offset))
-#define find_next_bit(addr, size, offset) \
-			__find_next_bit((addr), (size), (offset))
-
-/*
- * The optimizer actually does good code for this case..
- */
-#define find_first_zero_bit(addr, size) find_next_zero_bit((addr), (size), 0)
-
-#define find_first_bit(addr, size) find_next_bit((addr), (size), 0)
+#include <asm-generic/bitops/find.h>
 
 #ifdef __KERNEL__
 
-#define __clear_bit(nr, addr)		clear_bit(nr, addr)
+#include <asm-generic/bitops/ext2-non-atomic.h>
 
-#define ext2_set_bit			test_and_set_bit
 #define ext2_set_bit_atomic(l,n,a)	test_and_set_bit(n,a)
-#define ext2_clear_bit			test_and_clear_bit
 #define ext2_clear_bit_atomic(l,n,a)	test_and_clear_bit(n,a)
-#define ext2_test_bit			test_bit
-#define ext2_find_first_zero_bit	find_first_zero_bit
-#define ext2_find_next_zero_bit		find_next_zero_bit
 
-/* Bitmap functions for the minix filesystem.  */
-#define minix_test_and_set_bit(nr,addr)		test_and_set_bit(nr,addr)
-#define minix_set_bit(nr,addr)			set_bit(nr,addr)
-#define minix_test_and_clear_bit(nr,addr)	test_and_clear_bit(nr,addr)
-#define minix_test_bit(nr,addr)			test_bit(nr,addr)
-#define minix_find_first_zero_bit(addr,size)	find_first_zero_bit(addr,size)
-
-static inline int
-sched_find_first_bit (unsigned long *b)
-{
-	if (unlikely(b[0]))
-		return __ffs(b[0]);
-	if (unlikely(b[1]))
-		return 64 + __ffs(b[1]);
-	return __ffs(b[2]) + 128;
-}
+#include <asm-generic/bitops/minix.h>
+#include <asm-generic/bitops/sched.h>
 
 #endif /* __KERNEL__ */
 

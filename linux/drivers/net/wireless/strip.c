@@ -81,7 +81,6 @@ static const char StripVersion[] = "1.3A-STUART.CHESHIRE";
 /************************************************************************/
 /* Header files								*/
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -108,11 +107,12 @@ static const char StripVersion[] = "1.3A-STUART.CHESHIRE";
 #include <linux/serialP.h>
 #include <linux/rcupdate.h>
 #include <net/arp.h>
+#include <net/net_namespace.h>
 
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/time.h>
-
+#include <linux/jiffies.h>
 
 /************************************************************************/
 /* Useful structures and definitions					*/
@@ -209,7 +209,7 @@ enum {
 	NoStructure = 0,	/* Really old firmware */
 	StructuredMessages = 1,	/* Parsable AT response msgs */
 	ChecksummedMessages = 2	/* Parsable AT response msgs with checksums */
-} FirmwareLevel;
+};
 
 struct strip {
 	int magic;
@@ -468,6 +468,7 @@ static int arp_query(unsigned char *haddr, u32 paddr,
 		     struct net_device *dev)
 {
 	struct neighbour *neighbor_entry;
+	int ret = 0;
 
 	neighbor_entry = neigh_lookup(&arp_tbl, &paddr, dev);
 
@@ -475,10 +476,11 @@ static int arp_query(unsigned char *haddr, u32 paddr,
 		neighbor_entry->used = jiffies;
 		if (neighbor_entry->nud_state & NUD_VALID) {
 			memcpy(haddr, neighbor_entry->ha, dev->addr_len);
-			return 1;
+			ret = 1;
 		}
+		neigh_release(neighbor_entry);
 	}
-	return 0;
+	return ret;
 }
 
 static void DumpData(char *msg, struct strip *strip_info, __u8 * ptr,
@@ -797,7 +799,7 @@ static unsigned int get_baud(struct tty_struct *tty)
  */
 static void set_baud(struct tty_struct *tty, unsigned int baudcode)
 {
-	struct termios old_termios = *(tty->termios);
+	struct ktermios old_termios = *(tty->termios);
 	tty->termios->c_cflag &= ~CBAUD;	/* Clear the old baud setting */
 	tty->termios->c_cflag |= baudcode;	/* Set the new baud setting */
 	tty->driver->set_termios(tty, &old_termios);
@@ -860,12 +862,9 @@ static int allocate_buffers(struct strip *strip_info, int mtu)
 		strip_info->mtu = dev->mtu = mtu;
 		return (1);
 	}
-	if (r)
-		kfree(r);
-	if (s)
-		kfree(s);
-	if (t)
-		kfree(t);
+	kfree(r);
+	kfree(s);
+	kfree(t);
 	return (0);
 }
 
@@ -876,7 +875,7 @@ static int allocate_buffers(struct strip *strip_info, int mtu)
  */
 static int strip_change_mtu(struct net_device *dev, int new_mtu)
 {
-	struct strip *strip_info = dev->priv;
+	struct strip *strip_info = netdev_priv(dev);
 	int old_mtu = strip_info->mtu;
 	unsigned char *orbuff = strip_info->rx_buff;
 	unsigned char *osbuff = strip_info->sx_buff;
@@ -922,13 +921,9 @@ static int strip_change_mtu(struct net_device *dev, int new_mtu)
 	printk(KERN_NOTICE "%s: strip MTU changed fom %d to %d.\n",
 	       strip_info->dev->name, old_mtu, strip_info->mtu);
 
-	if (orbuff)
-		kfree(orbuff);
-	if (osbuff)
-		kfree(osbuff);
-	if (otbuff)
-		kfree(otbuff);
-
+	kfree(orbuff);
+	kfree(osbuff);
+	kfree(otbuff);
 	return 0;
 }
 
@@ -1166,7 +1161,7 @@ static int strip_seq_open(struct inode *inode, struct file *file)
 	return seq_open(file, &strip_seq_ops);
 }
 
-static struct file_operations strip_seq_fops = {
+static const struct file_operations strip_seq_fops = {
 	.owner	 = THIS_MODULE,
 	.open    = strip_seq_open,
 	.read    = seq_read,
@@ -1348,11 +1343,11 @@ static unsigned char *strip_make_packet(unsigned char *buffer,
 	 * 'broadcast hub' radio (First byte of address being 0xFF means broadcast)
 	 */
 	if (haddr.c[0] == 0xFF) {
-		u32 brd = 0;
+		__be32 brd = 0;
 		struct in_device *in_dev;
 
 		rcu_read_lock();
-		in_dev = __in_dev_get(strip_info->dev);
+		in_dev = __in_dev_get_rcu(strip_info->dev);
 		if (in_dev == NULL) {
 			rcu_read_unlock();
 			return NULL;
@@ -1412,7 +1407,7 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 	int doreset = (long) jiffies - strip_info->watchdog_doreset >= 0;
 	int doprobe = (long) jiffies - strip_info->watchdog_doprobe >= 0
 	    && !doreset;
-	u32 addr, brd;
+	__be32 addr, brd;
 
 	/*
 	 * 1. If we have a packet, encapsulate it and put it in the buffer
@@ -1508,7 +1503,7 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 
 		brd = addr = 0;
 		rcu_read_lock();
-		in_dev = __in_dev_get(strip_info->dev);
+		in_dev = __in_dev_get_rcu(strip_info->dev);
 		if (in_dev) {
 			if (in_dev->ifa_list) {
 				brd = in_dev->ifa_list->ifa_broadcast;
@@ -1563,7 +1558,7 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 /* Encapsulate a datagram and kick it into a TTY queue. */
 static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct strip *strip_info = (struct strip *) (dev->priv);
+	struct strip *strip_info = netdev_priv(dev);
 
 	if (!netif_running(dev)) {
 		printk(KERN_ERR "%s: xmit call when iface is down\n",
@@ -1576,7 +1571,7 @@ static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
 	del_timer(&strip_info->idle_timer);
 
 
-	if (jiffies - strip_info->pps_timer > HZ) {
+	if (time_after(jiffies, strip_info->pps_timer + HZ)) {
 		unsigned long t = jiffies - strip_info->pps_timer;
 		unsigned long rx_pps_count = (strip_info->rx_pps_count * HZ * 8 + t / 2) / t;
 		unsigned long tx_pps_count = (strip_info->tx_pps_count * HZ * 8 + t / 2) / t;
@@ -1636,10 +1631,10 @@ static void strip_IdleTask(unsigned long parameter)
  */
 
 static int strip_header(struct sk_buff *skb, struct net_device *dev,
-			unsigned short type, void *daddr, void *saddr,
-			unsigned len)
+			unsigned short type, const void *daddr,
+			const void *saddr, unsigned len)
 {
-	struct strip *strip_info = (struct strip *) (dev->priv);
+	struct strip *strip_info = netdev_priv(dev);
 	STRIP_Header *header = (STRIP_Header *) skb_push(skb, sizeof(STRIP_Header));
 
 	/*printk(KERN_INFO "%s: strip_header 0x%04X %s\n", dev->name, type,
@@ -1648,7 +1643,7 @@ static int strip_header(struct sk_buff *skb, struct net_device *dev,
 	header->src_addr = strip_info->true_dev_addr;
 	header->protocol = htons(type);
 
-	/*HexDump("strip_header", (struct strip *)(dev->priv), skb->data, skb->data + skb->len); */
+	/*HexDump("strip_header", netdev_priv(dev), skb->data, skb->data + skb->len); */
 
 	if (!daddr)
 		return (-dev->hard_header_len);
@@ -1681,11 +1676,6 @@ static int strip_rebuild_header(struct sk_buff *skb)
 
 /************************************************************************/
 /* Receiving routines							*/
-
-static int strip_receive_room(struct tty_struct *tty)
-{
-	return 0x10000;		/* We can handle an infinite amount of data. :-) */
-}
 
 /*
  * This function parses the response to the ATS300? command,
@@ -1982,8 +1972,7 @@ static struct net_device *get_strip_dev(struct strip *strip_info)
 		      sizeof(zero_address))) {
 		struct net_device *dev;
 		read_lock_bh(&dev_base_lock);
-		dev = dev_base;
-		while (dev) {
+		for_each_netdev(&init_net, dev) {
 			if (dev->type == strip_info->dev->type &&
 			    !memcmp(dev->dev_addr,
 				    &strip_info->true_dev_addr,
@@ -1994,7 +1983,6 @@ static struct net_device *get_strip_dev(struct strip *strip_info)
 				read_unlock_bh(&dev_base_lock);
 				return (dev);
 			}
-			dev = dev->next;
 		}
 		read_unlock_bh(&dev_base_lock);
 	}
@@ -2020,7 +2008,7 @@ static void deliver_packet(struct strip *strip_info, STRIP_Header * header,
 		       packetlen);
 		skb->dev = get_strip_dev(strip_info);
 		skb->protocol = header->protocol;
-		skb->mac.raw = skb->data;
+		skb_reset_mac_header(skb);
 
 		/* Having put a fake header on the front of the sk_buff for the */
 		/* benefit of tools like tcpdump, skb_pull now 'consumes' that  */
@@ -2400,7 +2388,7 @@ static int set_mac_address(struct strip *strip_info,
 
 static int strip_set_mac_address(struct net_device *dev, void *addr)
 {
-	struct strip *strip_info = (struct strip *) (dev->priv);
+	struct strip *strip_info = netdev_priv(dev);
 	struct sockaddr *sa = addr;
 	printk(KERN_INFO "%s: strip_set_dev_mac_address called\n", dev->name);
 	set_mac_address(strip_info, (MetricomAddress *) sa->sa_data);
@@ -2409,8 +2397,8 @@ static int strip_set_mac_address(struct net_device *dev, void *addr)
 
 static struct net_device_stats *strip_get_stats(struct net_device *dev)
 {
+	struct strip *strip_info = netdev_priv(dev);
 	static struct net_device_stats stats;
-	struct strip *strip_info = (struct strip *) (dev->priv);
 
 	memset(&stats, 0, sizeof(struct net_device_stats));
 
@@ -2431,7 +2419,7 @@ static struct net_device_stats *strip_get_stats(struct net_device *dev)
 /*
  * Here's the order things happen:
  * When the user runs "slattach -p strip ..."
- *  1. The TTY module calls strip_open
+ *  1. The TTY module calls strip_open;;
  *  2. strip_open calls strip_alloc
  *  3.                  strip_alloc calls register_netdev
  *  4.                  register_netdev calls strip_dev_init
@@ -2454,7 +2442,7 @@ static struct net_device_stats *strip_get_stats(struct net_device *dev)
 
 static int strip_open_low(struct net_device *dev)
 {
-	struct strip *strip_info = (struct strip *) (dev->priv);
+	struct strip *strip_info = netdev_priv(dev);
 
 	if (strip_info->tty == NULL)
 		return (-ENODEV);
@@ -2487,7 +2475,7 @@ static int strip_open_low(struct net_device *dev)
 
 static int strip_close_low(struct net_device *dev)
 {
-	struct strip *strip_info = (struct strip *) (dev->priv);
+	struct strip *strip_info = netdev_priv(dev);
 
 	if (strip_info->tty == NULL)
 		return -EBUSY;
@@ -2498,21 +2486,21 @@ static int strip_close_low(struct net_device *dev)
 	/*
 	 * Free all STRIP frame buffers.
 	 */
-	if (strip_info->rx_buff) {
-		kfree(strip_info->rx_buff);
-		strip_info->rx_buff = NULL;
-	}
-	if (strip_info->sx_buff) {
-		kfree(strip_info->sx_buff);
-		strip_info->sx_buff = NULL;
-	}
-	if (strip_info->tx_buff) {
-		kfree(strip_info->tx_buff);
-		strip_info->tx_buff = NULL;
-	}
+	kfree(strip_info->rx_buff);
+	strip_info->rx_buff = NULL;
+	kfree(strip_info->sx_buff);
+	strip_info->sx_buff = NULL;
+	kfree(strip_info->tx_buff);
+	strip_info->tx_buff = NULL;
+
 	del_timer(&strip_info->idle_timer);
 	return 0;
 }
+
+static const struct header_ops strip_header_ops = {
+	.create = strip_header,
+	.rebuild = strip_rebuild_header,
+};
 
 /*
  * This routine is called by DDI when the
@@ -2524,8 +2512,6 @@ static void strip_dev_setup(struct net_device *dev)
 	/*
 	 * Finish setting up the DEVICE info.
 	 */
-
-	SET_MODULE_OWNER(dev);
 
 	dev->trans_start = 0;
 	dev->last_rx = 0;
@@ -2550,8 +2536,8 @@ static void strip_dev_setup(struct net_device *dev)
 	dev->open = strip_open_low;
 	dev->stop = strip_close_low;
 	dev->hard_start_xmit = strip_xmit;
-	dev->hard_header = strip_header;
-	dev->rebuild_header = strip_rebuild_header;
+	dev->header_ops = &strip_header_ops;
+
 	dev->set_mac_address = strip_set_mac_address;
 	dev->get_stats = strip_get_stats;
 	dev->change_mtu = strip_change_mtu;
@@ -2589,7 +2575,7 @@ static struct strip *strip_alloc(void)
 		return NULL;	/* If no more memory, return */
 
 
-	strip_info = dev->priv;
+	strip_info = netdev_priv(dev);
 	strip_info->dev = dev;
 
 	strip_info->magic = STRIP_MAGIC;
@@ -2664,6 +2650,8 @@ static int strip_open(struct tty_struct *tty)
 
 	strip_info->tty = tty;
 	tty->disc_data = strip_info;
+	tty->receive_room = 65536;
+
 	if (tty->driver->flush_buffer)
 		tty->driver->flush_buffer(tty);
 
@@ -2747,16 +2735,8 @@ static int strip_ioctl(struct tty_struct *tty, struct file *file,
 			return -EFAULT;
 		return set_mac_address(strip_info, &addr);
 	}
-	/*
-	 * Allow stty to read, but not set, the serial port
-	 */
-
-	case TCGETS:
-	case TCGETA:
-		return n_tty_ioctl(tty, file, cmd, arg);
-		break;
 	default:
-		return -ENOIOCTLCMD;
+		return tty_mode_ioctl(tty, file, cmd, arg);
 		break;
 	}
 	return 0;
@@ -2774,7 +2754,6 @@ static struct tty_ldisc strip_ldisc = {
 	.close = strip_close,
 	.ioctl = strip_ioctl,
 	.receive_buf = strip_receive_buf,
-	.receive_room = strip_receive_room,
 	.write_wakeup = strip_write_some_more,
 };
 
@@ -2804,7 +2783,7 @@ static int __init strip_init_driver(void)
 	/*
 	 * Register the status file with /proc
 	 */
-	proc_net_fops_create("strip", S_IFREG | S_IRUGO, &strip_seq_fops);
+	proc_net_fops_create(&init_net, "strip", S_IFREG | S_IRUGO, &strip_seq_fops);
 
 	return status;
 }
@@ -2826,9 +2805,9 @@ static void __exit strip_exit_driver(void)
 	}
 
 	/* Unregister with the /proc/net file here. */
-	proc_net_remove("strip");
+	proc_net_remove(&init_net, "strip");
 
-	if ((i = tty_register_ldisc(N_STRIP, NULL)))
+	if ((i = tty_unregister_ldisc(N_STRIP)))
 		printk(KERN_ERR "STRIP: can't unregister line discipline (err = %d)\n", i);
 
 	printk(signoff);

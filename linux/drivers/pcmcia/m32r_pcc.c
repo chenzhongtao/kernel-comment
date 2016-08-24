@@ -10,27 +10,24 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/timer.h>
-#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
 #include <linux/interrupt.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
+#include <linux/bitops.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <asm/bitops.h>
 #include <asm/system.h>
 #include <asm/addrspace.h>
 
-#include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
 #include <pcmcia/ss.h>
 #include <pcmcia/cs.h>
@@ -269,7 +266,7 @@ static pcc_t pcc[] = {
 	{ "xnux2", 0 }, { "xnux2", 0 },
 };
 
-static irqreturn_t pcc_interrupt(int, void *, struct pt_regs *);
+static irqreturn_t pcc_interrupt(int, void *);
 
 /*====================================================================*/
 
@@ -354,7 +351,7 @@ static void add_pcc_socket(ulong base, int irq, ulong mapaddr, kio_addr_t ioaddr
 
 /*====================================================================*/
 
-static irqreturn_t pcc_interrupt(int irq, void *dev, struct pt_regs *regs)
+static irqreturn_t pcc_interrupt(int irq, void *dev)
 {
 	int i, j, irc;
 	u_int events, active;
@@ -397,7 +394,7 @@ static irqreturn_t pcc_interrupt(int irq, void *dev, struct pt_regs *regs)
 
 static void pcc_interrupt_wrapper(u_long data)
 {
-	pcc_interrupt(0, NULL, NULL);
+	pcc_interrupt(0, NULL);
 	init_timer(&poll_timer);
 	poll_timer.expires = jiffies + poll_interval;
 	add_timer(&poll_timer);
@@ -427,16 +424,6 @@ static int _pcc_get_status(u_short sock, u_int *value)
 	debug(3, "m32r-pcc: GetStatus(%d) = %#4.4x\n", sock, *value);
 	return 0;
 } /* _get_status */
-
-/*====================================================================*/
-
-static int _pcc_get_socket(u_short sock, socket_state_t *state)
-{
-	debug(3, "m32r-pcc: GetSocket(%d) = flags %#3.3x, Vcc %d, Vpp %d, "
-		  "io_irq %d, csc_mask %#2.2x\n", sock, state->flags,
-		  state->Vcc, state->Vpp, state->io_irq, state->csc_mask);
-	return 0;
-} /* _get_socket */
 
 /*====================================================================*/
 
@@ -642,15 +629,6 @@ static int pcc_get_status(struct pcmcia_socket *s, u_int *value)
 	LOCKED(_pcc_get_status(sock, value));
 }
 
-static int pcc_get_socket(struct pcmcia_socket *s, socket_state_t *state)
-{
-	unsigned int sock = container_of(s, struct pcc_socket, socket)->number;
-
-	if (socket[sock].flags & IS_ALIVE)
-		return -EINVAL;
-	LOCKED(_pcc_get_socket(sock, state));
-}
-
 static int pcc_set_socket(struct pcmcia_socket *s, socket_state_t *state)
 {
 	unsigned int sock = container_of(s, struct pcc_socket, socket)->number;
@@ -685,16 +663,9 @@ static int pcc_init(struct pcmcia_socket *s)
 	return 0;
 }
 
-static int pcc_suspend(struct pcmcia_socket *sock)
-{
-	return pcc_set_socket(sock, &dead_socket);
-}
-
 static struct pccard_operations pcc_operations = {
 	.init			= pcc_init,
-	.suspend		= pcc_suspend,
 	.get_status		= pcc_get_status,
-	.get_socket		= pcc_get_socket,
 	.set_socket		= pcc_set_socket,
 	.set_io_map		= pcc_set_io_map,
 	.set_mem_map		= pcc_set_mem_map,
@@ -702,28 +673,11 @@ static struct pccard_operations pcc_operations = {
 
 /*====================================================================*/
 
-static int m32r_pcc_suspend(struct device *dev, u32 state, u32 level)
-{
-	int ret = 0;
-	if (level == SUSPEND_SAVE_STATE)
-		ret = pcmcia_socket_dev_suspend(dev, state);
-	return ret;
-}
-
-static int m32r_pcc_resume(struct device *dev, u32 level)
-{
-	int ret = 0;
-	if (level == RESUME_RESTORE_STATE)
-		ret = pcmcia_socket_dev_resume(dev);
-	return ret;
-}
-
-
 static struct device_driver pcc_driver = {
 	.name = "pcc",
 	.bus = &platform_bus_type,
-	.suspend = m32r_pcc_suspend,
-	.resume = m32r_pcc_resume,
+	.suspend = pcmcia_socket_dev_suspend,
+	.resume = pcmcia_socket_dev_resume,
 };
 
 static struct platform_device pcc_device = {
@@ -767,7 +721,7 @@ static int __init init_m32r_pcc(void)
 	/* Set up interrupt handler(s) */
 
 	for (i = 0 ; i < pcc_sockets ; i++) {
-		socket[i].socket.dev.dev = &pcc_device.dev;
+		socket[i].socket.dev.parent = &pcc_device.dev;
 		socket[i].socket.ops = &pcc_operations;
 		socket[i].socket.resource_ops = &pccard_static_ops;
 		socket[i].socket.owner = THIS_MODULE;

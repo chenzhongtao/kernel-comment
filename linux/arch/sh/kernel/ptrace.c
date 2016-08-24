@@ -1,5 +1,4 @@
-/* $Id: ptrace.c,v 1.15 2004/05/07 05:32:05 sugioka Exp $
- *
+/*
  * linux/arch/sh/kernel/ptrace.c
  *
  * Original x86 implementation:
@@ -9,20 +8,17 @@
  * SuperH version:   Copyright (C) 1999, 2000  Kaz Kojima & Niibe Yutaka
  *
  */
-
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/slab.h>
 #include <linux/security.h>
-
-#include <asm/io.h>
+#include <linux/signal.h>
+#include <linux/io.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
@@ -41,12 +37,7 @@ static inline int get_stack_long(struct task_struct *task, int offset)
 {
 	unsigned char *stack;
 
-	stack = (unsigned char *)
-		task->thread_info + THREAD_SIZE	- sizeof(struct pt_regs)
-#ifdef CONFIG_SH_DSP
-		- sizeof(struct pt_dspregs)
-#endif
-		- sizeof(unsigned long);
+	stack = (unsigned char *)task_pt_regs(task);
 	stack += offset;
 	return (*((int *)stack));
 }
@@ -59,15 +50,27 @@ static inline int put_stack_long(struct task_struct *task, int offset,
 {
 	unsigned char *stack;
 
-	stack = (unsigned char *)
-		task->thread_info + THREAD_SIZE - sizeof(struct pt_regs)
-#ifdef CONFIG_SH_DSP
-		- sizeof(struct pt_dspregs)
-#endif
-		- sizeof(unsigned long);
+	stack = (unsigned char *)task_pt_regs(task);
 	stack += offset;
 	*(unsigned long *) stack = data;
 	return 0;
+}
+
+static void ptrace_disable_singlestep(struct task_struct *child)
+{
+	clear_tsk_thread_flag(child, TIF_SINGLESTEP);
+
+	/*
+	 * Ensure the UBC is not programmed at the next context switch.
+	 *
+	 * Normally this is not needed but there are sequences such as
+	 * singlestep, signal delivery, and continue that leave the
+	 * ubc_pc non-zero leading to spurious SIGTRAPs.
+	 */
+	if (child->thread.ubc_pc != 0) {
+		ubc_usercnt -= 1;
+		child->thread.ubc_pc = 0;
+	}
 }
 
 /*
@@ -77,72 +80,27 @@ static inline int put_stack_long(struct task_struct *task, int offset,
  */
 void ptrace_disable(struct task_struct *child)
 {
-	/* nothing to do.. */
+	ptrace_disable_singlestep(child);
 }
 
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
+long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 {
-	struct task_struct *child;
 	struct user * dummy = NULL;
 	int ret;
 
-	lock_kernel();
-	ret = -EPERM;
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-		ret = security_ptrace(current->parent, current);
-		if (ret)
-			goto out;
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
-		goto out;
-	}
-	ret = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-
-	ret = -EPERM;
-	if (pid == 1)		/* you may not mess with init */
-		goto out_tsk;
-
-	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
-		goto out_tsk;
-	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret < 0)
-		goto out_tsk;
-
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
-	case PTRACE_PEEKDATA: {
-		unsigned long tmp;
-		int copied;
-
-		copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
-		ret = -EIO;
-		if (copied != sizeof(tmp))
-			break;
-		ret = put_user(tmp,(unsigned long *) data);
+	case PTRACE_PEEKTEXT: /* read word at location addr. */
+	case PTRACE_PEEKDATA:
+		ret = generic_ptrace_peekdata(child, addr, data);
 		break;
-	}
 
 	/* read the word at location addr in the USER area. */
 	case PTRACE_PEEKUSR: {
 		unsigned long tmp;
 
 		ret = -EIO;
-		if ((addr & 3) || addr < 0 || 
+		if ((addr & 3) || addr < 0 ||
 		    addr > sizeof(struct user) - 3)
 			break;
 
@@ -162,22 +120,19 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			tmp = !!tsk_used_math(child);
 		else
 			tmp = 0;
-		ret = put_user(tmp, (unsigned long *)data);
+		ret = put_user(tmp, (unsigned long __user *)data);
 		break;
 	}
 
 	/* when I and D space are separate, this will have to be fixed. */
 	case PTRACE_POKETEXT: /* write the word at location addr. */
 	case PTRACE_POKEDATA:
-		ret = 0;
-		if (access_process_vm(child, addr, &data, sizeof(data), 1) == sizeof(data))
-			break;
-		ret = -EIO;
+		ret = generic_ptrace_pokedata(child, addr, data);
 		break;
 
 	case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
 		ret = -EIO;
-		if ((addr & 3) || addr < 0 || 
+		if ((addr & 3) || addr < 0 ||
 		    addr > sizeof(struct user) - 3)
 			break;
 
@@ -198,12 +153,15 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 	case PTRACE_CONT: { /* restart after signal. */
 		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			break;
 		if (request == PTRACE_SYSCALL)
 			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		else
 			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+
+		ptrace_disable_singlestep(child);
+
 		child->exit_code = data;
 		wake_up_process(child);
 		ret = 0;
@@ -211,14 +169,15 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	}
 
 /*
- * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it wants to 
+ * make the child exit.  Best I can do is send it a sigkill.
+ * perhaps it should be put in the status that it wants to
  * exit.
  */
 	case PTRACE_KILL: {
 		ret = 0;
 		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
 			break;
+		ptrace_disable_singlestep(child);
 		child->exit_code = SIGKILL;
 		wake_up_process(child);
 		break;
@@ -226,10 +185,10 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 	case PTRACE_SINGLESTEP: {  /* set the trap flag. */
 		long pc;
-		struct pt_regs *dummy = NULL;
+		struct pt_regs *regs = NULL;
 
 		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			break;
 		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		if ((child->ptrace & PT_DTRACE) == 0) {
@@ -237,23 +196,20 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			child->ptrace |= PT_DTRACE;
 		}
 
-		pc = get_stack_long(child, (long)&dummy->pc);
+		pc = get_stack_long(child, (long)&regs->pc);
 
 		/* Next scheduling will set up UBC */
 		if (child->thread.ubc_pc == 0)
 			ubc_usercnt += 1;
 		child->thread.ubc_pc = pc;
 
+		set_tsk_thread_flag(child, TIF_SINGLESTEP);
 		child->exit_code = data;
 		/* give it a chance to run. */
 		wake_up_process(child);
 		ret = 0;
 		break;
 	}
-
-	case PTRACE_DETACH: /* detach a process that was attached. */
-		ret = ptrace_detach(child, data);
-		break;
 
 #ifdef CONFIG_SH_DSP
 	case PTRACE_GETDSPREGS: {
@@ -272,7 +228,6 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 	case PTRACE_SETDSPREGS: {
 		unsigned long dp;
-		int i;
 
 		ret = -EIO;
 		dp = ((unsigned long) child) + THREAD_SIZE -
@@ -289,10 +244,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		ret = ptrace_request(child, request, addr, data);
 		break;
 	}
-out_tsk:
-	put_task_struct(child);
-out:
-	unlock_kernel();
+
 	return ret;
 }
 
@@ -300,14 +252,15 @@ asmlinkage void do_syscall_trace(void)
 {
 	struct task_struct *tsk = current;
 
-	if (!test_thread_flag(TIF_SYSCALL_TRACE))
+	if (!test_thread_flag(TIF_SYSCALL_TRACE) &&
+	    !test_thread_flag(TIF_SINGLESTEP))
 		return;
 	if (!(tsk->ptrace & PT_PTRACED))
 		return;
 	/* the 0x80 provides a way for the tracing parent to distinguish
 	   between a syscall stop and SIGTRAP delivery */
-	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
-				 ? 0x80 : 0));
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD) &&
+				 !test_thread_flag(TIF_SINGLESTEP) ? 0x80 : 0));
 
 	/*
 	 * this isn't the same as continuing with a signal, but it will do

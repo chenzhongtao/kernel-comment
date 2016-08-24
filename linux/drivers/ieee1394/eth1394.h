@@ -25,27 +25,27 @@
 #define __ETH1394_H
 
 #include <linux/netdevice.h>
+#include <linux/skbuff.h>
+#include <asm/byteorder.h>
 
 #include "ieee1394.h"
+#include "ieee1394_types.h"
 
 /* Register for incoming packets. This is 4096 bytes, which supports up to
  * S3200 (per Table 16-3 of IEEE 1394b-2002). */
 #define ETHER1394_REGION_ADDR_LEN	4096
 
-#define ETHER1394_INVALID_ADDR		~0ULL
-
 /* GASP identifier numbers for IPv4 over IEEE 1394 */
 #define ETHER1394_GASP_SPECIFIER_ID	0x00005E
-#define ETHER1394_GASP_SPECIFIER_ID_HI	((ETHER1394_GASP_SPECIFIER_ID >> 8) & 0xffff)
-#define ETHER1394_GASP_SPECIFIER_ID_LO	(ETHER1394_GASP_SPECIFIER_ID & 0xff)
+#define ETHER1394_GASP_SPECIFIER_ID_HI	((0x00005E >> 8) & 0xffff)
+#define ETHER1394_GASP_SPECIFIER_ID_LO	(0x00005E & 0xff)
 #define ETHER1394_GASP_VERSION		1
 
-#define ETHER1394_GASP_OVERHEAD (2 * sizeof(quadlet_t))  /* GASP header overhead */
+#define ETHER1394_GASP_OVERHEAD	(2 * sizeof(quadlet_t))	/* for GASP header */
 
-#define ETHER1394_GASP_BUFFERS 16
+#define ETHER1394_GASP_BUFFERS	16
 
-/* Node set == 64 */
-#define NODE_SET			(ALL_NODES + 1)
+#define NODE_SET		(ALL_NODES + 1)		/* Node set == 64 */
 
 enum eth1394_bc_states { ETHER1394_BC_ERROR,
 			 ETHER1394_BC_RUNNING,
@@ -66,6 +66,10 @@ struct eth1394_priv {
 	int bc_dgl;			/* Outgoing broadcast datagram label */
 	struct list_head ip_node_list;	/* List of IP capable nodes	 */
 	struct unit_directory *ud_list[ALL_NODES]; /* Cached unit dir list */
+
+	struct work_struct wake;	/* Wake up after xmit failure	 */
+	struct net_device *wake_dev;	/* Stupid backlink for .wake	 */
+	nodeid_t wake_node;		/* Destination of failed xmit	 */
 };
 
 
@@ -81,19 +85,14 @@ struct eth1394hdr {
 	unsigned short	h_proto;		/* packet type ID field	*/
 }  __attribute__((packed));
 
-#ifdef __KERNEL__
-#include <linux/skbuff.h>
-
 static inline struct eth1394hdr *eth1394_hdr(const struct sk_buff *skb)
 {
-	return (struct eth1394hdr *)skb->mac.raw;
+	return (struct eth1394hdr *)skb_mac_header(skb);
 }
-#endif
 
 typedef enum {ETH1394_GASP, ETH1394_WRREQ} eth1394_tx_type;
 
 /* IP1394 headers */
-#include <asm/byteorder.h>
 
 /* Unfragmented */
 #if defined __BIG_ENDIAN_BITFIELD

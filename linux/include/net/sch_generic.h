@@ -1,15 +1,14 @@
 #ifndef __NET_SCHED_GENERIC_H
 #define __NET_SCHED_GENERIC_H
 
-#include <linux/config.h>
 #include <linux/netdevice.h>
 #include <linux/types.h>
 #include <linux/rcupdate.h>
 #include <linux/module.h>
-#include <linux/rtnetlink.h>
 #include <linux/pkt_sched.h>
 #include <linux/pkt_cls.h>
 #include <net/gen_stats.h>
+#include <net/rtnetlink.h>
 
 struct Qdisc_ops;
 struct qdisc_walker;
@@ -61,6 +60,7 @@ struct Qdisc_class_ops
 	int			(*graft)(struct Qdisc *, unsigned long cl,
 					struct Qdisc *, struct Qdisc **);
 	struct Qdisc *		(*leaf)(struct Qdisc *, unsigned long cl);
+	void			(*qlen_notify)(struct Qdisc *, unsigned long);
 
 	/* Class manipulation routines */
 	unsigned long		(*get)(struct Qdisc *, u32 classid);
@@ -145,7 +145,7 @@ struct tcf_proto
 	void			*root;
 	int			(*classify)(struct sk_buff*, struct tcf_proto*,
 					struct tcf_result *);
-	u32			protocol;
+	__be16			protocol;
 
 	/* All the rest */
 	u32			prio;
@@ -164,12 +164,170 @@ extern void qdisc_unlock_tree(struct net_device *dev);
 #define tcf_tree_lock(tp)	qdisc_lock_tree((tp)->q->dev)
 #define tcf_tree_unlock(tp)	qdisc_unlock_tree((tp)->q->dev)
 
-static inline void
-tcf_destroy(struct tcf_proto *tp)
+extern struct Qdisc noop_qdisc;
+extern struct Qdisc_ops noop_qdisc_ops;
+
+extern void dev_init_scheduler(struct net_device *dev);
+extern void dev_shutdown(struct net_device *dev);
+extern void dev_activate(struct net_device *dev);
+extern void dev_deactivate(struct net_device *dev);
+extern void qdisc_reset(struct Qdisc *qdisc);
+extern void qdisc_destroy(struct Qdisc *qdisc);
+extern void qdisc_tree_decrease_qlen(struct Qdisc *qdisc, unsigned int n);
+extern struct Qdisc *qdisc_alloc(struct net_device *dev, struct Qdisc_ops *ops);
+extern struct Qdisc *qdisc_create_dflt(struct net_device *dev,
+				       struct Qdisc_ops *ops, u32 parentid);
+extern void tcf_destroy(struct tcf_proto *tp);
+extern void tcf_destroy_chain(struct tcf_proto *fl);
+
+static inline int __qdisc_enqueue_tail(struct sk_buff *skb, struct Qdisc *sch,
+				       struct sk_buff_head *list)
 {
-	tp->ops->destroy(tp);
-	module_put(tp->ops->owner);
-	kfree(tp);
+	__skb_queue_tail(list, skb);
+	sch->qstats.backlog += skb->len;
+	sch->bstats.bytes += skb->len;
+	sch->bstats.packets++;
+
+	return NET_XMIT_SUCCESS;
 }
+
+static inline int qdisc_enqueue_tail(struct sk_buff *skb, struct Qdisc *sch)
+{
+	return __qdisc_enqueue_tail(skb, sch, &sch->q);
+}
+
+static inline struct sk_buff *__qdisc_dequeue_head(struct Qdisc *sch,
+						   struct sk_buff_head *list)
+{
+	struct sk_buff *skb = __skb_dequeue(list);
+
+	if (likely(skb != NULL))
+		sch->qstats.backlog -= skb->len;
+
+	return skb;
+}
+
+static inline struct sk_buff *qdisc_dequeue_head(struct Qdisc *sch)
+{
+	return __qdisc_dequeue_head(sch, &sch->q);
+}
+
+static inline struct sk_buff *__qdisc_dequeue_tail(struct Qdisc *sch,
+						   struct sk_buff_head *list)
+{
+	struct sk_buff *skb = __skb_dequeue_tail(list);
+
+	if (likely(skb != NULL))
+		sch->qstats.backlog -= skb->len;
+
+	return skb;
+}
+
+static inline struct sk_buff *qdisc_dequeue_tail(struct Qdisc *sch)
+{
+	return __qdisc_dequeue_tail(sch, &sch->q);
+}
+
+static inline int __qdisc_requeue(struct sk_buff *skb, struct Qdisc *sch,
+				  struct sk_buff_head *list)
+{
+	__skb_queue_head(list, skb);
+	sch->qstats.backlog += skb->len;
+	sch->qstats.requeues++;
+
+	return NET_XMIT_SUCCESS;
+}
+
+static inline int qdisc_requeue(struct sk_buff *skb, struct Qdisc *sch)
+{
+	return __qdisc_requeue(skb, sch, &sch->q);
+}
+
+static inline void __qdisc_reset_queue(struct Qdisc *sch,
+				       struct sk_buff_head *list)
+{
+	/*
+	 * We do not know the backlog in bytes of this list, it
+	 * is up to the caller to correct it
+	 */
+	skb_queue_purge(list);
+}
+
+static inline void qdisc_reset_queue(struct Qdisc *sch)
+{
+	__qdisc_reset_queue(sch, &sch->q);
+	sch->qstats.backlog = 0;
+}
+
+static inline unsigned int __qdisc_queue_drop(struct Qdisc *sch,
+					      struct sk_buff_head *list)
+{
+	struct sk_buff *skb = __qdisc_dequeue_tail(sch, list);
+
+	if (likely(skb != NULL)) {
+		unsigned int len = skb->len;
+		kfree_skb(skb);
+		return len;
+	}
+
+	return 0;
+}
+
+static inline unsigned int qdisc_queue_drop(struct Qdisc *sch)
+{
+	return __qdisc_queue_drop(sch, &sch->q);
+}
+
+static inline int qdisc_drop(struct sk_buff *skb, struct Qdisc *sch)
+{
+	kfree_skb(skb);
+	sch->qstats.drops++;
+
+	return NET_XMIT_DROP;
+}
+
+static inline int qdisc_reshape_fail(struct sk_buff *skb, struct Qdisc *sch)
+{
+	sch->qstats.drops++;
+
+#ifdef CONFIG_NET_CLS_ACT
+	if (sch->reshape_fail == NULL || sch->reshape_fail(skb, sch))
+		goto drop;
+
+	return NET_XMIT_SUCCESS;
+
+drop:
+#endif
+	kfree_skb(skb);
+	return NET_XMIT_DROP;
+}
+
+/* Length to Time (L2T) lookup in a qdisc_rate_table, to determine how
+   long it will take to send a packet given its size.
+ */
+static inline u32 qdisc_l2t(struct qdisc_rate_table* rtab, unsigned int pktlen)
+{
+	int slot = pktlen + rtab->rate.cell_align + rtab->rate.overhead;
+	if (slot < 0)
+		slot = 0;
+	slot >>= rtab->rate.cell_log;
+	if (slot > 255)
+		return (rtab->data[255]*(slot >> 8) + rtab->data[slot & 0xFF]);
+	return rtab->data[slot];
+}
+
+#ifdef CONFIG_NET_CLS_ACT
+static inline struct sk_buff *skb_act_clone(struct sk_buff *skb, gfp_t gfp_mask)
+{
+	struct sk_buff *n = skb_clone(skb, gfp_mask);
+
+	if (n) {
+		n->tc_verd = SET_TC_VERD(n->tc_verd, 0);
+		n->tc_verd = CLR_TC_OK2MUNGE(n->tc_verd);
+		n->tc_verd = CLR_TC_MUNGED(n->tc_verd);
+	}
+	return n;
+}
+#endif
 
 #endif

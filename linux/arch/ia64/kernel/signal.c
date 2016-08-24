@@ -7,7 +7,6 @@
  * Derived from i386 and Alpha versions.
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -15,7 +14,6 @@
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/tty.h>
 #include <linux/binfmts.h>
@@ -42,47 +40,6 @@
 # define GET_SIGSET(k,u)	__get_user((k)->sig[0], &(u)->sig[0])
 #endif
 
-long
-ia64_rt_sigsuspend (sigset_t __user *uset, size_t sigsetsize, struct sigscratch *scr)
-{
-	sigset_t oldset, set;
-
-	/* XXX: Don't preclude handling different sized sigset_t's.  */
-	if (sigsetsize != sizeof(sigset_t))
-		return -EINVAL;
-
-	if (!access_ok(VERIFY_READ, uset, sigsetsize))
-		return -EFAULT;
-
-	if (GET_SIGSET(&set, uset))
-		return -EFAULT;
-
-	sigdelsetmask(&set, ~_BLOCKABLE);
-
-	spin_lock_irq(&current->sighand->siglock);
-	{
-		oldset = current->blocked;
-		current->blocked = set;
-		recalc_sigpending();
-	}
-	spin_unlock_irq(&current->sighand->siglock);
-
-	/*
-	 * The return below usually returns to the signal handler.  We need to
-	 * pre-set the correct error code here to ensure that the right values
-	 * get saved in sigcontext by ia64_do_signal.
-	 */
-	scr->pt.r8 = EINTR;
-	scr->pt.r10 = -1;
-
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (ia64_do_signal(&oldset, scr, 1))
-			return -EINTR;
-	}
-}
-
 asmlinkage long
 sys_sigaltstack (const stack_t __user *uss, stack_t __user *uoss, long arg2,
 		 long arg3, long arg4, long arg5, long arg6, long arg7,
@@ -94,7 +51,7 @@ sys_sigaltstack (const stack_t __user *uss, stack_t __user *uoss, long arg2,
 static long
 restore_sigcontext (struct sigcontext __user *sc, struct sigscratch *scr)
 {
-	unsigned long ip, flags, nat, um, cfm;
+	unsigned long ip, flags, nat, um, cfm, rsc;
 	long err;
 
 	/* Always make any pending restarted system calls return -EINTR */
@@ -106,7 +63,7 @@ restore_sigcontext (struct sigcontext __user *sc, struct sigscratch *scr)
 	err |= __get_user(ip, &sc->sc_ip);			/* instruction pointer */
 	err |= __get_user(cfm, &sc->sc_cfm);
 	err |= __get_user(um, &sc->sc_um);			/* user mask */
-	err |= __get_user(scr->pt.ar_rsc, &sc->sc_ar_rsc);
+	err |= __get_user(rsc, &sc->sc_ar_rsc);
 	err |= __get_user(scr->pt.ar_unat, &sc->sc_ar_unat);
 	err |= __get_user(scr->pt.ar_fpsr, &sc->sc_ar_fpsr);
 	err |= __get_user(scr->pt.ar_pfs, &sc->sc_ar_pfs);
@@ -119,6 +76,7 @@ restore_sigcontext (struct sigcontext __user *sc, struct sigscratch *scr)
 	err |= __copy_from_user(&scr->pt.r15, &sc->sc_gr[15], 8);	/* r15 */
 
 	scr->pt.cr_ifs = cfm | (1UL << 63);
+	scr->pt.ar_rsc = rsc | (3 << 2); /* force PL3 */
 
 	/* establish new instruction pointer: */
 	scr->pt.cr_iip = ip & ~0x3UL;
@@ -140,8 +98,9 @@ restore_sigcontext (struct sigcontext __user *sc, struct sigscratch *scr)
 	if ((flags & IA64_SC_FLAG_FPH_VALID) != 0) {
 		struct ia64_psr *psr = ia64_psr(&scr->pt);
 
-		__copy_from_user(current->thread.fph, &sc->sc_fr[32], 96*16);
+		err |= __copy_from_user(current->thread.fph, &sc->sc_fr[32], 96*16);
 		psr->mfh = 0;	/* drop signal handler's fph contents... */
+		preempt_disable();
 		if (psr->dfh)
 			ia64_drop_fpu(current);
 		else {
@@ -149,6 +108,7 @@ restore_sigcontext (struct sigcontext __user *sc, struct sigscratch *scr)
 			__ia64_load_fpu(current->thread.fph);
 			ia64_set_local_fpu_owner(current);
 		}
+		preempt_enable();
 	}
 	return err;
 }
@@ -267,7 +227,7 @@ ia64_rt_sigreturn (struct sigscratch *scr)
 	si.si_signo = SIGSEGV;
 	si.si_errno = 0;
 	si.si_code = SI_KERNEL;
-	si.si_pid = current->pid;
+	si.si_pid = task_pid_vnr(current);
 	si.si_uid = current->uid;
 	si.si_addr = sc;
 	force_sig_info(SIGSEGV, &si, current);
@@ -284,7 +244,7 @@ static long
 setup_sigcontext (struct sigcontext __user *sc, sigset_t *mask, struct sigscratch *scr)
 {
 	unsigned long flags = 0, ifs, cfm, nat;
-	long err;
+	long err = 0;
 
 	ifs = scr->pt.cr_ifs;
 
@@ -297,12 +257,12 @@ setup_sigcontext (struct sigcontext __user *sc, sigset_t *mask, struct sigscratc
 	ia64_flush_fph(current);
 	if ((current->thread.flags & IA64_THREAD_FPH_VALID)) {
 		flags |= IA64_SC_FLAG_FPH_VALID;
-		__copy_to_user(&sc->sc_fr[32], current->thread.fph, 96*16);
+		err = __copy_to_user(&sc->sc_fr[32], current->thread.fph, 96*16);
 	}
 
 	nat = ia64_get_scratch_nat_bits(&scr->pt, scr->scratch_unat);
 
-	err  = __put_user(flags, &sc->sc_flags);
+	err |= __put_user(flags, &sc->sc_flags);
 	err |= __put_user(nat, &sc->sc_nat);
 	err |= PUT_SIGSET(mask, &sc->sc_mask);
 	err |= __put_user(cfm, &sc->sc_cfm);
@@ -320,15 +280,7 @@ setup_sigcontext (struct sigcontext __user *sc, sigset_t *mask, struct sigscratc
 	err |= __copy_to_user(&sc->sc_gr[15], &scr->pt.r15, 8);		/* r15 */
 	err |= __put_user(scr->pt.cr_iip + ia64_psr(&scr->pt)->ri, &sc->sc_ip);
 
-	if (flags & IA64_SC_FLAG_IN_SYSCALL) {
-		/* Clear scratch registers if the signal interrupted a system call. */
-		err |= __put_user(0, &sc->sc_ar_ccv);				/* ar.ccv */
-		err |= __put_user(0, &sc->sc_br[7]);				/* b7 */
-		err |= __put_user(0, &sc->sc_gr[14]);				/* r14 */
-		err |= __clear_user(&sc->sc_ar25, 2*8);			/* ar.csd & ar.ssd */
-		err |= __clear_user(&sc->sc_gr[2], 2*8);			/* r2-r3 */
-		err |= __clear_user(&sc->sc_gr[16], 16*8);			/* r16-r31 */
-	} else {
+	if (!(flags & IA64_SC_FLAG_IN_SYSCALL)) {
 		/* Copy scratch regs to sigcontext if the signal didn't interrupt a syscall. */
 		err |= __put_user(scr->pt.ar_ccv, &sc->sc_ar_ccv);		/* ar.ccv */
 		err |= __put_user(scr->pt.b7, &sc->sc_br[7]);			/* b7 */
@@ -372,7 +324,7 @@ force_sigsegv_info (int sig, void __user *addr)
 	si.si_signo = SIGSEGV;
 	si.si_errno = 0;
 	si.si_code = SI_KERNEL;
-	si.si_pid = current->pid;
+	si.si_pid = task_pid_vnr(current);
 	si.si_uid = current->uid;
 	si.si_addr = addr;
 	force_sig_info(SIGSEGV, &si, current);
@@ -384,15 +336,14 @@ setup_frame (int sig, struct k_sigaction *ka, siginfo_t *info, sigset_t *set,
 	     struct sigscratch *scr)
 {
 	extern char __kernel_sigtramp[];
-	unsigned long tramp_addr, new_rbs = 0;
+	unsigned long tramp_addr, new_rbs = 0, new_sp;
 	struct sigframe __user *frame;
 	long err;
 
-	frame = (void __user *) scr->pt.r12;
+	new_sp = scr->pt.r12;
 	tramp_addr = (unsigned long) __kernel_sigtramp;
-	if ((ka->sa.sa_flags & SA_ONSTACK) && sas_ss_flags((unsigned long) frame) == 0) {
-		frame = (void __user *) ((current->sas_ss_sp + current->sas_ss_size)
-					 & ~(STACK_ALIGN - 1));
+	if ((ka->sa.sa_flags & SA_ONSTACK) && sas_ss_flags(new_sp) == 0) {
+		new_sp = current->sas_ss_sp + current->sas_ss_size;
 		/*
 		 * We need to check for the register stack being on the signal stack
 		 * separately, because it's switched separately (memory stack is switched
@@ -401,7 +352,7 @@ setup_frame (int sig, struct k_sigaction *ka, siginfo_t *info, sigset_t *set,
 		if (!rbs_on_sig_stack(scr->pt.ar_bspstore))
 			new_rbs = (current->sas_ss_sp + sizeof(long) - 1) & ~(sizeof(long) - 1);
 	}
-	frame = (void __user *) frame - ((sizeof(*frame) + STACK_ALIGN - 1) & ~(STACK_ALIGN - 1));
+	frame = (void __user *) ((new_sp - sizeof(*frame)) & -STACK_ALIGN);
 
 	if (!access_ok(VERIFY_WRITE, frame, sizeof(*frame)))
 		return force_sigsegv_info(sig, frame);
@@ -464,15 +415,12 @@ handle_signal (unsigned long sig, struct k_sigaction *ka, siginfo_t *info, sigse
 		if (!setup_frame(sig, ka, info, oldset, scr))
 			return 0;
 
-	if (!(ka->sa.sa_flags & SA_NODEFER)) {
-		spin_lock_irq(&current->sighand->siglock);
-		{
-			sigorsets(&current->blocked, &current->blocked, &ka->sa.sa_mask);
-			sigaddset(&current->blocked, sig);
-			recalc_sigpending();
-		}
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	spin_lock_irq(&current->sighand->siglock);
+	sigorsets(&current->blocked, &current->blocked, &ka->sa.sa_mask);
+	if (!(ka->sa.sa_flags & SA_NODEFER))
+		sigaddset(&current->blocked, sig);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 	return 1;
 }
 
@@ -480,10 +428,11 @@ handle_signal (unsigned long sig, struct k_sigaction *ka, siginfo_t *info, sigse
  * Note that `init' is a special process: it doesn't get signals it doesn't want to
  * handle.  Thus you cannot kill init even with a SIGKILL even by mistake.
  */
-long
-ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
+void
+ia64_do_signal (struct sigscratch *scr, long in_syscall)
 {
 	struct k_sigaction ka;
+	sigset_t *oldset;
 	siginfo_t info;
 	long restart = in_syscall;
 	long errno = scr->pt.r8;
@@ -495,9 +444,11 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 	 * doing anything if so.
 	 */
 	if (!user_mode(&scr->pt))
-		return 0;
+		return;
 
-	if (!oldset)
+	if (test_thread_flag(TIF_RESTORE_SIGMASK))
+		oldset = &current->saved_sigmask;
+	else
 		oldset = &current->blocked;
 
 	/*
@@ -560,8 +511,15 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 		 * Whee!  Actually deliver the signal.  If the delivery failed, we need to
 		 * continue to iterate in this loop so we can deliver the SIGSEGV...
 		 */
-		if (handle_signal(signr, &ka, &info, oldset, scr))
-			return 1;
+		if (handle_signal(signr, &ka, &info, oldset, scr)) {
+			/* a signal was successfully delivered; the saved
+			 * sigmask will have been stored in the signal frame,
+			 * and will be restored by sigreturn, so we can simply
+			 * clear the TIF_RESTORE_SIGMASK flag */
+			if (test_thread_flag(TIF_RESTORE_SIGMASK))
+				clear_thread_flag(TIF_RESTORE_SIGMASK);
+			return;
+		}
 	}
 
 	/* Did we come from a system call? */
@@ -587,106 +545,11 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 			}
 		}
 	}
-	return 0;
-}
 
-/* Set a delayed signal that was detected in MCA/INIT/NMI/PMI context where it
- * could not be delivered.  It is important that the target process is not
- * allowed to do any more work in user space.  Possible cases for the target
- * process:
- *
- * - It is sleeping and will wake up soon.  Store the data in the current task,
- *   the signal will be sent when the current task returns from the next
- *   interrupt.
- *
- * - It is running in user context.  Store the data in the current task, the
- *   signal will be sent when the current task returns from the next interrupt.
- *
- * - It is running in kernel context on this or another cpu and will return to
- *   user context.  Store the data in the target task, the signal will be sent
- *   to itself when the target task returns to user space.
- *
- * - It is running in kernel context on this cpu and will sleep before
- *   returning to user context.  Because this is also the current task, the
- *   signal will not get delivered and the task could sleep indefinitely.
- *   Store the data in the idle task for this cpu, the signal will be sent
- *   after the idle task processes its next interrupt.
- *
- * To cover all cases, store the data in the target task, the current task and
- * the idle task on this cpu.  Whatever happens, the signal will be delivered
- * to the target task before it can do any useful user space work.  Multiple
- * deliveries have no unwanted side effects.
- *
- * Note: This code is executed in MCA/INIT/NMI/PMI context, with interrupts
- * disabled.  It must not take any locks nor use kernel structures or services
- * that require locks.
- */
-
-/* To ensure that we get the right pid, check its start time.  To avoid extra
- * include files in thread_info.h, convert the task start_time to unsigned long,
- * giving us a cycle time of > 580 years.
- */
-static inline unsigned long
-start_time_ul(const struct task_struct *t)
-{
-	return t->start_time.tv_sec * NSEC_PER_SEC + t->start_time.tv_nsec;
-}
-
-void
-set_sigdelayed(pid_t pid, int signo, int code, void __user *addr)
-{
-	struct task_struct *t;
-	unsigned long start_time =  0;
-	int i;
-
-	for (i = 1; i <= 3; ++i) {
-		switch (i) {
-		case 1:
-			t = find_task_by_pid(pid);
-			if (t)
-				start_time = start_time_ul(t);
-			break;
-		case 2:
-			t = current;
-			break;
-		default:
-			t = idle_task(smp_processor_id());
-			break;
-		}
-
-		if (!t)
-			return;
-		t->thread_info->sigdelayed.signo = signo;
-		t->thread_info->sigdelayed.code = code;
-		t->thread_info->sigdelayed.addr = addr;
-		t->thread_info->sigdelayed.start_time = start_time;
-		t->thread_info->sigdelayed.pid = pid;
-		wmb();
-		set_tsk_thread_flag(t, TIF_SIGDELAYED);
+	/* if there's no signal to deliver, we just put the saved sigmask
+	 * back */
+	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
+		clear_thread_flag(TIF_RESTORE_SIGMASK);
+		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
 	}
-}
-
-/* Called from entry.S when it detects TIF_SIGDELAYED, a delayed signal that
- * was detected in MCA/INIT/NMI/PMI context where it could not be delivered.
- */
-
-void
-do_sigdelayed(void)
-{
-	struct siginfo siginfo;
-	pid_t pid;
-	struct task_struct *t;
-
-	clear_thread_flag(TIF_SIGDELAYED);
-	memset(&siginfo, 0, sizeof(siginfo));
-	siginfo.si_signo = current_thread_info()->sigdelayed.signo;
-	siginfo.si_code = current_thread_info()->sigdelayed.code;
-	siginfo.si_addr = current_thread_info()->sigdelayed.addr;
-	pid = current_thread_info()->sigdelayed.pid;
-	t = find_task_by_pid(pid);
-	if (!t)
-		return;
-	if (current_thread_info()->sigdelayed.start_time != start_time_ul(t))
-		return;
-	force_sig_info(siginfo.si_signo, &siginfo, t);
 }

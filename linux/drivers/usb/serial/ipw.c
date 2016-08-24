@@ -46,9 +46,8 @@
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
-#include <linux/usb.h>
+#include <linux/usb/serial.h>
 #include <asm/uaccess.h>
-#include "usb-serial.h"
 
 /*
  * Version Information
@@ -153,27 +152,28 @@ static struct usb_device_id usb_ipw_ids[] = {
 MODULE_DEVICE_TABLE(usb, usb_ipw_ids);
 
 static struct usb_driver usb_ipw_driver = {
-	.owner =	THIS_MODULE,
 	.name =		"ipwtty",
 	.probe =	usb_serial_probe,
 	.disconnect =	usb_serial_disconnect,
 	.id_table =	usb_ipw_ids,
+	.no_dynamic_id = 	1,
 };
 
 static int debug;
 
-static void ipw_read_bulk_callback(struct urb *urb, struct pt_regs *regs)
+static void ipw_read_bulk_callback(struct urb *urb)
 {
 	struct usb_serial_port *port = urb->context;
 	unsigned char *data = urb->transfer_buffer;
 	struct tty_struct *tty;
-	int i;
 	int result;
+	int status = urb->status;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 
-	if (urb->status) {
-		dbg("%s - nonzero read bulk status received: %d", __FUNCTION__, urb->status);
+	if (status) {
+		dbg("%s - nonzero read bulk status received: %d",
+		    __FUNCTION__, status);
 		return;
 	}
 
@@ -181,14 +181,8 @@ static void ipw_read_bulk_callback(struct urb *urb, struct pt_regs *regs)
 
 	tty = port->tty;
 	if (tty && urb->actual_length) {
-		for (i = 0; i < urb->actual_length ; ++i) {
-			/* if we insert more than TTY_FLIPBUF_SIZE characters, we drop them. */
-			if(tty->flip.count >= TTY_FLIPBUF_SIZE) {
-				tty_flip_buffer_push(tty);
-			}
-			/* this doesn't actually push the data through unless tty->low_latency is set */
-			tty_insert_flip_char(tty, data[i], 0);
-		}
+		tty_buffer_request_room(tty, urb->actual_length);
+		tty_insert_flip_string(tty, data, urb->actual_length);
 		tty_flip_buffer_push(tty);
 	}
 
@@ -214,10 +208,9 @@ static int ipw_open(struct usb_serial_port *port, struct file *filp)
 
 	dbg("%s", __FUNCTION__);
 
-	buf_flow_init = kmalloc(16, GFP_KERNEL);
+	buf_flow_init = kmemdup(buf_flow_static, 16, GFP_KERNEL);
 	if (!buf_flow_init)
 		return -ENOMEM;
-	memcpy(buf_flow_init, buf_flow_static, 16);
 
 	if (port->tty)
 		port->tty->low_latency = 1;
@@ -232,9 +225,9 @@ static int ipw_open(struct usb_serial_port *port, struct file *filp)
 				 0, /* index */
 				 NULL,
 				 0,
-				 100*HZ);
+				 100000);
 	if (result < 0)
-		dev_err(&port->dev, "Init of modem failed (error = %d)", result);
+		dev_err(&port->dev, "Init of modem failed (error = %d)\n", result);
 
 	/* reset the bulk pipes */
 	usb_clear_halt(dev, usb_rcvbulkpipe(dev, port->bulk_in_endpointAddress));
@@ -260,9 +253,9 @@ static int ipw_open(struct usb_serial_port *port, struct file *filp)
 				 0, /* index */
 				 NULL,
 				 0,
-				 100*HZ);
+				 100000);
 	if (result < 0) 
-		dev_err(&port->dev, "Enabling bulk RxRead failed (error = %d)", result);
+		dev_err(&port->dev, "Enabling bulk RxRead failed (error = %d)\n", result);
 
 	/*--4: setup the initial flowcontrol */
 	dbg("%s:setting init flowcontrol (%s)",__FUNCTION__,buf_flow_init);
@@ -273,9 +266,9 @@ static int ipw_open(struct usb_serial_port *port, struct file *filp)
 				 0,
 				 buf_flow_init,
 				 0x10,
-				 200*HZ);
+				 200000);
 	if (result < 0)
-		dev_err(&port->dev, "initial flowcontrol failed (error = %d)", result);
+		dev_err(&port->dev, "initial flowcontrol failed (error = %d)\n", result);
 
 
 	/*--5: raise the dtr */
@@ -287,9 +280,9 @@ static int ipw_open(struct usb_serial_port *port, struct file *filp)
 				 0,
 				 NULL,
 				 0,
-				 200*HZ);
+				 200000);
 	if (result < 0)
-		dev_err(&port->dev, "setting dtr failed (error = %d)", result);
+		dev_err(&port->dev, "setting dtr failed (error = %d)\n", result);
 
 	/*--6: raise the rts */
 	dbg("%s:raising rts",__FUNCTION__);
@@ -300,9 +293,9 @@ static int ipw_open(struct usb_serial_port *port, struct file *filp)
 				 0,
 				 NULL,
 				 0,
-				 200*HZ);
+				 200000);
 	if (result < 0)
-		dev_err(&port->dev, "setting dtr failed (error = %d)", result);
+		dev_err(&port->dev, "setting dtr failed (error = %d)\n", result);
 	
 	kfree(buf_flow_init);
 	return 0;
@@ -327,9 +320,9 @@ static void ipw_close(struct usb_serial_port *port, struct file * filp)
 				 0,
 				 NULL,
 				 0,
-				 200*HZ);
+				 200000);
 	if (result < 0)
-		dev_err(&port->dev, "dropping dtr failed (error = %d)", result);
+		dev_err(&port->dev, "dropping dtr failed (error = %d)\n", result);
 
 	/*--2: drop the rts */
 	dbg("%s:dropping rts",__FUNCTION__);
@@ -339,9 +332,9 @@ static void ipw_close(struct usb_serial_port *port, struct file * filp)
 				 0,
 				 NULL,
 				 0,
-				 200*HZ);
+				 200000);
 	if (result < 0)
-		dev_err(&port->dev, "dropping rts failed (error = %d)", result);
+		dev_err(&port->dev, "dropping rts failed (error = %d)\n", result);
 
 
 	/*--3: purge */
@@ -352,9 +345,9 @@ static void ipw_close(struct usb_serial_port *port, struct file * filp)
 				 0,
 				 NULL,
 				 0,
-				 200*HZ);
+				 200000);
 	if (result < 0)
-		dev_err(&port->dev, "purge failed (error = %d)", result);
+		dev_err(&port->dev, "purge failed (error = %d)\n", result);
 
 
 	/* send RXBULK_off (tell modem to stop transmitting bulk data on rx chan) */
@@ -365,26 +358,30 @@ static void ipw_close(struct usb_serial_port *port, struct file * filp)
 				 0, /* index */
 				 NULL,
 				 0,
-				 100*HZ);
+				 100000);
 
 	if (result < 0)
-		dev_err(&port->dev, "Disabling bulk RxRead failed (error = %d)", result);
+		dev_err(&port->dev, "Disabling bulk RxRead failed (error = %d)\n", result);
 
 	/* shutdown any in-flight urbs that we know about */
 	usb_kill_urb(port->read_urb);
 	usb_kill_urb(port->write_urb);
 }
 
-static void ipw_write_bulk_callback(struct urb *urb, struct pt_regs *regs)
+static void ipw_write_bulk_callback(struct urb *urb)
 {
 	struct usb_serial_port *port = urb->context;
+	int status = urb->status;
 
 	dbg("%s", __FUNCTION__);
 
-	if (urb->status)
-		dbg("%s - nonzero write bulk status received: %d", __FUNCTION__, urb->status);
+	port->write_urb_busy = 0;
 
-	schedule_work(&port->work);
+	if (status)
+		dbg("%s - nonzero write bulk status received: %d",
+		    __FUNCTION__, status);
+
+	usb_serial_port_softint(port);
 }
 
 static int ipw_write(struct usb_serial_port *port, const unsigned char *buf, int count)
@@ -399,16 +396,21 @@ static int ipw_write(struct usb_serial_port *port, const unsigned char *buf, int
 		dbg("%s - write request of 0 bytes", __FUNCTION__);
 		return 0;
 	}
-	
-	/* Racy and broken, FIXME properly! */
-	if (port->write_urb->status == -EINPROGRESS)
+
+	spin_lock_bh(&port->lock);
+	if (port->write_urb_busy) {
+		spin_unlock_bh(&port->lock);
+		dbg("%s - already writing", __FUNCTION__);
 		return 0;
+	}
+	port->write_urb_busy = 1;
+	spin_unlock_bh(&port->lock);
 
 	count = min(count, port->bulk_out_size);
 	memcpy(port->bulk_out_buffer, buf, count);
 
 	dbg("%s count now:%d", __FUNCTION__, count);
-	
+
 	usb_fill_bulk_urb(port->write_urb, dev,
 			  usb_sndbulkpipe(dev, port->bulk_out_endpointAddress),
 			  port->write_urb->transfer_buffer,
@@ -418,6 +420,7 @@ static int ipw_write(struct usb_serial_port *port, const unsigned char *buf, int
 
 	ret = usb_submit_urb(port->write_urb, GFP_ATOMIC);
 	if (ret != 0) {
+		port->write_urb_busy = 0;
 		dbg("%s - usb_submit_urb(write bulk) failed with error = %d", __FUNCTION__, ret);
 		return ret;
 	}
@@ -437,10 +440,13 @@ static int ipw_disconnect(struct usb_serial_port *port)
 	return 0;
 }
 
-static struct usb_serial_device_type ipw_device = {
-	.owner =		THIS_MODULE,
-	.name =			"IPWireless converter",
-	.short_name =		"ipw",
+static struct usb_serial_driver ipw_device = {
+	.driver = {
+		.owner =	THIS_MODULE,
+		.name =		"ipw",
+	},
+	.description =		"IPWireless converter",
+	.usb_driver = 		&usb_ipw_driver,
 	.id_table =		usb_ipw_ids,
 	.num_interrupt_in =	NUM_DONT_CARE,
 	.num_bulk_in =		1,
@@ -457,7 +463,7 @@ static struct usb_serial_device_type ipw_device = {
 
 
 
-int usb_ipw_init(void)
+static int usb_ipw_init(void)
 {
 	int retval;
 
@@ -473,7 +479,7 @@ int usb_ipw_init(void)
 	return 0;
 }
 
-void usb_ipw_exit(void)
+static void usb_ipw_exit(void)
 {
 	usb_deregister(&usb_ipw_driver);
 	usb_serial_deregister(&ipw_device);

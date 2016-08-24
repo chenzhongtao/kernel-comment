@@ -76,7 +76,7 @@ typedef unsigned long sigLONG;
 #endif  /* aix */
 #endif
 /* For the Macintosh */
-#if STRUCTALIGNMENTSUPPORTED
+#ifdef STRUCTALIGNMENTSUPPORTED
 #pragma options align=mac68k
 #endif
 
@@ -145,8 +145,8 @@ typedef unsigned long sigLONG;
 #define FT_LOGGER       12      /* Event Logger */
 #define FT_INSTALL      13      /* An Install Program */
 #define FT_LIBRARY      14      /* Storage Manager Real-Mode Calls */
-#define FT_RESOURCE 	15 	/* Storage Manager Resource File */
-#define FT_MODEM_DB  	16  	/* Storage Manager Modem Database */
+#define FT_RESOURCE	15	/* Storage Manager Resource File */
+#define FT_MODEM_DB	16	/* Storage Manager Modem Database */
 
 /* Filetype flags - sigBYTE dsFiletypeFlags;    FLAG BITS */
 /* ------------------------------------------------------------------ */
@@ -332,7 +332,7 @@ typedef struct dpt_sig {
 #endif  /* aix */
 #endif
 /* For the Macintosh */
-#if STRUCTALIGNMENTSUPPORTED
+#ifdef STRUCTALIGNMENTSUPPORTED
 #pragma options align=reset
 #endif
 

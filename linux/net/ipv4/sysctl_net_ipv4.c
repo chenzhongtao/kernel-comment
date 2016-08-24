@@ -10,53 +10,28 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/sysctl.h>
-#include <linux/config.h>
+#include <linux/igmp.h>
+#include <linux/inetdevice.h>
+#include <linux/seqlock.h>
 #include <net/snmp.h>
+#include <net/icmp.h>
 #include <net/ip.h>
 #include <net/route.h>
 #include <net/tcp.h>
+#include <net/cipso_ipv4.h>
+#include <net/inet_frag.h>
 
 /* From af_inet.c */
 extern int sysctl_ip_nonlocal_bind;
 
-/* From icmp.c */
-extern int sysctl_icmp_echo_ignore_all;
-extern int sysctl_icmp_echo_ignore_broadcasts;
-extern int sysctl_icmp_ignore_bogus_error_responses;
-
-/* From ip_fragment.c */
-extern int sysctl_ipfrag_low_thresh;
-extern int sysctl_ipfrag_high_thresh; 
-extern int sysctl_ipfrag_time;
-extern int sysctl_ipfrag_secret_interval;
-
-/* From ip_output.c */
-extern int sysctl_ip_dynaddr;
-
-/* From icmp.c */
-extern int sysctl_icmp_ratelimit;
-extern int sysctl_icmp_ratemask;
-
-/* From igmp.c */
-extern int sysctl_igmp_max_memberships;
-extern int sysctl_igmp_max_msf;
-
-/* From inetpeer.c */
-extern int inet_peer_threshold;
-extern int inet_peer_minttl;
-extern int inet_peer_maxttl;
-extern int inet_peer_gc_mintime;
-extern int inet_peer_gc_maxtime;
-
 #ifdef CONFIG_SYSCTL
-static int tcp_retr1_max = 255; 
+static int zero;
+static int tcp_retr1_max = 255;
 static int ip_local_port_range_min[] = { 1, 1 };
 static int ip_local_port_range_max[] = { 65535, 65535 };
 #endif
 
 struct ipv4_config ipv4_config;
-
-extern ctl_table ipv4_route_table[];
 
 #ifdef CONFIG_SYSCTL
 
@@ -64,12 +39,12 @@ static
 int ipv4_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 			void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	int val = ipv4_devconf.forwarding;
+	int val = IPV4_DEVCONF_ALL(FORWARDING);
 	int ret;
 
 	ret = proc_dointvec(ctl, write, filp, buffer, lenp, ppos);
 
-	if (write && ipv4_devconf.forwarding != val)
+	if (write && IPV4_DEVCONF_ALL(FORWARDING) != val)
 		inet_forward_change();
 
 	return ret;
@@ -78,8 +53,7 @@ int ipv4_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 static int ipv4_sysctl_forward_strategy(ctl_table *table,
 			 int __user *name, int nlen,
 			 void __user *oldval, size_t __user *oldlenp,
-			 void __user *newval, size_t newlen, 
-			 void **context)
+			 void __user *newval, size_t newlen)
 {
 	int *valp = table->data;
 	int new;
@@ -117,8 +91,173 @@ static int ipv4_sysctl_forward_strategy(ctl_table *table,
 	return 1;
 }
 
+extern seqlock_t sysctl_port_range_lock;
+extern int sysctl_local_port_range[2];
+
+/* Update system visible IP port range */
+static void set_local_port_range(int range[2])
+{
+	write_seqlock(&sysctl_port_range_lock);
+	sysctl_local_port_range[0] = range[0];
+	sysctl_local_port_range[1] = range[1];
+	write_sequnlock(&sysctl_port_range_lock);
+}
+
+/* Validate changes from /proc interface. */
+static int ipv4_local_port_range(ctl_table *table, int write, struct file *filp,
+				 void __user *buffer,
+				 size_t *lenp, loff_t *ppos)
+{
+	int ret;
+	int range[2] = { sysctl_local_port_range[0],
+			 sysctl_local_port_range[1] };
+	ctl_table tmp = {
+		.data = &range,
+		.maxlen = sizeof(range),
+		.mode = table->mode,
+		.extra1 = &ip_local_port_range_min,
+		.extra2 = &ip_local_port_range_max,
+	};
+
+	ret = proc_dointvec_minmax(&tmp, write, filp, buffer, lenp, ppos);
+
+	if (write && ret == 0) {
+		if (range[1] < range[0])
+			ret = -EINVAL;
+		else
+			set_local_port_range(range);
+	}
+
+	return ret;
+}
+
+/* Validate changes from sysctl interface. */
+static int ipv4_sysctl_local_port_range(ctl_table *table, int __user *name,
+					 int nlen, void __user *oldval,
+					 size_t __user *oldlenp,
+					void __user *newval, size_t newlen)
+{
+	int ret;
+	int range[2] = { sysctl_local_port_range[0],
+			 sysctl_local_port_range[1] };
+	ctl_table tmp = {
+		.data = &range,
+		.maxlen = sizeof(range),
+		.mode = table->mode,
+		.extra1 = &ip_local_port_range_min,
+		.extra2 = &ip_local_port_range_max,
+	};
+
+	ret = sysctl_intvec(&tmp, name, nlen, oldval, oldlenp, newval, newlen);
+	if (ret == 0 && newval && newlen) {
+		if (range[1] < range[0])
+			ret = -EINVAL;
+		else
+			set_local_port_range(range);
+	}
+	return ret;
+}
+
+
+static int proc_tcp_congestion_control(ctl_table *ctl, int write, struct file * filp,
+				       void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	char val[TCP_CA_NAME_MAX];
+	ctl_table tbl = {
+		.data = val,
+		.maxlen = TCP_CA_NAME_MAX,
+	};
+	int ret;
+
+	tcp_get_default_congestion_control(val);
+
+	ret = proc_dostring(&tbl, write, filp, buffer, lenp, ppos);
+	if (write && ret == 0)
+		ret = tcp_set_default_congestion_control(val);
+	return ret;
+}
+
+static int sysctl_tcp_congestion_control(ctl_table *table, int __user *name,
+					 int nlen, void __user *oldval,
+					 size_t __user *oldlenp,
+					 void __user *newval, size_t newlen)
+{
+	char val[TCP_CA_NAME_MAX];
+	ctl_table tbl = {
+		.data = val,
+		.maxlen = TCP_CA_NAME_MAX,
+	};
+	int ret;
+
+	tcp_get_default_congestion_control(val);
+	ret = sysctl_string(&tbl, name, nlen, oldval, oldlenp, newval, newlen);
+	if (ret == 1 && newval && newlen)
+		ret = tcp_set_default_congestion_control(val);
+	return ret;
+}
+
+static int proc_tcp_available_congestion_control(ctl_table *ctl,
+						 int write, struct file * filp,
+						 void __user *buffer, size_t *lenp,
+						 loff_t *ppos)
+{
+	ctl_table tbl = { .maxlen = TCP_CA_BUF_MAX, };
+	int ret;
+
+	tbl.data = kmalloc(tbl.maxlen, GFP_USER);
+	if (!tbl.data)
+		return -ENOMEM;
+	tcp_get_available_congestion_control(tbl.data, TCP_CA_BUF_MAX);
+	ret = proc_dostring(&tbl, write, filp, buffer, lenp, ppos);
+	kfree(tbl.data);
+	return ret;
+}
+
+static int proc_allowed_congestion_control(ctl_table *ctl,
+					   int write, struct file * filp,
+					   void __user *buffer, size_t *lenp,
+					   loff_t *ppos)
+{
+	ctl_table tbl = { .maxlen = TCP_CA_BUF_MAX };
+	int ret;
+
+	tbl.data = kmalloc(tbl.maxlen, GFP_USER);
+	if (!tbl.data)
+		return -ENOMEM;
+
+	tcp_get_allowed_congestion_control(tbl.data, tbl.maxlen);
+	ret = proc_dostring(&tbl, write, filp, buffer, lenp, ppos);
+	if (write && ret == 0)
+		ret = tcp_set_allowed_congestion_control(tbl.data);
+	kfree(tbl.data);
+	return ret;
+}
+
+static int strategy_allowed_congestion_control(ctl_table *table, int __user *name,
+					       int nlen, void __user *oldval,
+					       size_t __user *oldlenp,
+					       void __user *newval,
+					       size_t newlen)
+{
+	ctl_table tbl = { .maxlen = TCP_CA_BUF_MAX };
+	int ret;
+
+	tbl.data = kmalloc(tbl.maxlen, GFP_USER);
+	if (!tbl.data)
+		return -ENOMEM;
+
+	tcp_get_available_congestion_control(tbl.data, tbl.maxlen);
+	ret = sysctl_string(&tbl, name, nlen, oldval, oldlenp, newval, newlen);
+	if (ret == 0 && newval && newlen)
+		ret = tcp_set_allowed_congestion_control(tbl.data);
+	kfree(tbl.data);
+
+	return ret;
+
+}
+
 ctl_table ipv4_table[] = {
-        {
+	{
 		.ctl_name	= NET_IPV4_TCP_TIMESTAMPS,
 		.procname	= "tcp_timestamps",
 		.data		= &sysctl_tcp_timestamps,
@@ -126,7 +265,7 @@ ctl_table ipv4_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
 	},
-        {
+	{
 		.ctl_name	= NET_IPV4_TCP_WINDOW_SCALING,
 		.procname	= "tcp_window_scaling",
 		.data		= &sysctl_tcp_window_scaling,
@@ -134,7 +273,7 @@ ctl_table ipv4_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
 	},
-        {
+	{
 		.ctl_name	= NET_IPV4_TCP_SACK,
 		.procname	= "tcp_sack",
 		.data		= &sysctl_tcp_sack,
@@ -142,7 +281,7 @@ ctl_table ipv4_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
 	},
-        {
+	{
 		.ctl_name	= NET_IPV4_TCP_RETRANS_COLLAPSE,
 		.procname	= "tcp_retrans_collapse",
 		.data		= &sysctl_tcp_retrans_collapse,
@@ -150,33 +289,25 @@ ctl_table ipv4_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
 	},
-        {
+	{
 		.ctl_name	= NET_IPV4_FORWARD,
 		.procname	= "ip_forward",
-		.data		= &ipv4_devconf.forwarding,
+		.data		= &IPV4_DEVCONF_ALL(FORWARDING),
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &ipv4_sysctl_forward,
 		.strategy	= &ipv4_sysctl_forward_strategy
 	},
-        {
+	{
 		.ctl_name	= NET_IPV4_DEFAULT_TTL,
 		.procname	= "ip_default_ttl",
- 		.data		= &sysctl_ip_default_ttl,
+		.data		= &sysctl_ip_default_ttl,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &ipv4_doint_and_flush,
 		.strategy	= &ipv4_doint_and_flush_strategy,
 	},
-        {
-		.ctl_name	= NET_IPV4_AUTOCONFIG,
-		.procname	= "ip_autoconfig",
-		.data		= &ipv4_config.autoconfig,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
-	},
-        {
+	{
 		.ctl_name	= NET_IPV4_NO_PMTU_DISC,
 		.procname	= "ip_no_pmtu_disc",
 		.data		= &ipv4_config.no_pmtu_disc,
@@ -219,7 +350,7 @@ ctl_table ipv4_table[] = {
 	{
 		.ctl_name	= NET_TCP_MAX_TW_BUCKETS,
 		.procname	= "tcp_max_tw_buckets",
-		.data		= &sysctl_tcp_max_tw_buckets,
+		.data		= &tcp_death_row.sysctl_max_tw_buckets,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
@@ -227,7 +358,7 @@ ctl_table ipv4_table[] = {
 	{
 		.ctl_name	= NET_IPV4_IPFRAG_HIGH_THRESH,
 		.procname	= "ipfrag_high_thresh",
-		.data		= &sysctl_ipfrag_high_thresh,
+		.data		= &ip4_frags_ctl.high_thresh,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
@@ -235,7 +366,7 @@ ctl_table ipv4_table[] = {
 	{
 		.ctl_name	= NET_IPV4_IPFRAG_LOW_THRESH,
 		.procname	= "ipfrag_low_thresh",
-		.data		= &sysctl_ipfrag_low_thresh,
+		.data		= &ip4_frags_ctl.low_thresh,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
@@ -251,7 +382,7 @@ ctl_table ipv4_table[] = {
 	{
 		.ctl_name	= NET_IPV4_IPFRAG_TIME,
 		.procname	= "ipfrag_time",
-		.data		= &sysctl_ipfrag_time,
+		.data		= &ip4_frags_ctl.timeout,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec_jiffies,
@@ -323,7 +454,7 @@ ctl_table ipv4_table[] = {
 	{
 		.ctl_name	= NET_TCP_TW_RECYCLE,
 		.procname	= "tcp_tw_recycle",
-		.data		= &sysctl_tcp_tw_recycle,
+		.data		= &tcp_death_row.sysctl_tw_recycle,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
@@ -366,10 +497,8 @@ ctl_table ipv4_table[] = {
 		.data		= &sysctl_local_port_range,
 		.maxlen		= sizeof(sysctl_local_port_range),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
-		.extra1		= ip_local_port_range_min,
-		.extra2		= ip_local_port_range_max
+		.proc_handler	= &ipv4_local_port_range,
+		.strategy	= &ipv4_sysctl_local_port_range,
 	},
 	{
 		.ctl_name	= NET_IPV4_ICMP_ECHO_IGNORE_ALL,
@@ -391,6 +520,14 @@ ctl_table ipv4_table[] = {
 		.ctl_name	= NET_IPV4_ICMP_IGNORE_BOGUS_ERROR_RESPONSES,
 		.procname	= "icmp_ignore_bogus_error_responses",
 		.data		= &sysctl_icmp_ignore_bogus_error_responses,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+	{
+		.ctl_name	= NET_IPV4_ICMP_ERRORS_USE_INBOUND_IFADDR,
+		.procname	= "icmp_errors_use_inbound_ifaddr",
+		.data		= &sysctl_icmp_errors_use_inbound_ifaddr,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
@@ -578,6 +715,14 @@ ctl_table ipv4_table[] = {
 		.proc_handler	= &proc_dointvec
 	},
 	{
+		.ctl_name	= NET_TCP_FRTO_RESPONSE,
+		.procname	= "tcp_frto_response",
+		.data		= &sysctl_tcp_frto_response,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+	{
 		.ctl_name	= NET_TCP_LOW_LATENCY,
 		.procname	= "tcp_low_latency",
 		.data		= &sysctl_tcp_low_latency,
@@ -588,80 +733,24 @@ ctl_table ipv4_table[] = {
 	{
 		.ctl_name	= NET_IPV4_IPFRAG_SECRET_INTERVAL,
 		.procname	= "ipfrag_secret_interval",
-		.data		= &sysctl_ipfrag_secret_interval,
+		.data		= &ip4_frags_ctl.secret_interval,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec_jiffies,
 		.strategy	= &sysctl_jiffies
 	},
 	{
+		.procname	= "ipfrag_max_dist",
+		.data		= &sysctl_ipfrag_max_dist,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.extra1		= &zero
+	},
+	{
 		.ctl_name	= NET_TCP_NO_METRICS_SAVE,
 		.procname	= "tcp_no_metrics_save",
 		.data		= &sysctl_tcp_nometrics_save,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_WESTWOOD, 
-		.procname	= "tcp_westwood",
-		.data		= &sysctl_tcp_westwood,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_VEGAS,
-		.procname	= "tcp_vegas_cong_avoid",
-		.data		= &sysctl_tcp_vegas_cong_avoid,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_VEGAS_ALPHA,
-		.procname	= "tcp_vegas_alpha",
-		.data		= &sysctl_tcp_vegas_alpha,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_VEGAS_BETA,
-		.procname	= "tcp_vegas_beta",
-		.data		= &sysctl_tcp_vegas_beta,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_VEGAS_GAMMA,
-		.procname	= "tcp_vegas_gamma",
-		.data		= &sysctl_tcp_vegas_gamma,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_BIC,
-		.procname	= "tcp_bic",
-		.data		= &sysctl_tcp_bic,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_BIC_FAST_CONVERGENCE,
-		.procname	= "tcp_bic_fast_convergence",
-		.data		= &sysctl_tcp_bic_fast_convergence,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec,
-	},
-	{
-		.ctl_name	= NET_TCP_BIC_LOW_WINDOW,
-		.procname	= "tcp_bic_low_window",
-		.data		= &sysctl_tcp_bic_low_window,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec,
@@ -683,9 +772,115 @@ ctl_table ipv4_table[] = {
 		.proc_handler	= &proc_dointvec,
 	},
 	{
-		.ctl_name	= NET_TCP_BIC_BETA,
-		.procname	= "tcp_bic_beta",
-		.data		= &sysctl_tcp_bic_beta,
+		.ctl_name	= NET_TCP_CONG_CONTROL,
+		.procname	= "tcp_congestion_control",
+		.mode		= 0644,
+		.maxlen		= TCP_CA_NAME_MAX,
+		.proc_handler	= &proc_tcp_congestion_control,
+		.strategy	= &sysctl_tcp_congestion_control,
+	},
+	{
+		.ctl_name	= NET_TCP_ABC,
+		.procname	= "tcp_abc",
+		.data		= &sysctl_tcp_abc,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= NET_TCP_MTU_PROBING,
+		.procname	= "tcp_mtu_probing",
+		.data		= &sysctl_tcp_mtu_probing,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= NET_TCP_BASE_MSS,
+		.procname	= "tcp_base_mss",
+		.data		= &sysctl_tcp_base_mss,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= NET_IPV4_TCP_WORKAROUND_SIGNED_WINDOWS,
+		.procname	= "tcp_workaround_signed_windows",
+		.data		= &sysctl_tcp_workaround_signed_windows,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+#ifdef CONFIG_NET_DMA
+	{
+		.ctl_name	= NET_TCP_DMA_COPYBREAK,
+		.procname	= "tcp_dma_copybreak",
+		.data		= &sysctl_tcp_dma_copybreak,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+#endif
+	{
+		.ctl_name	= NET_TCP_SLOW_START_AFTER_IDLE,
+		.procname	= "tcp_slow_start_after_idle",
+		.data		= &sysctl_tcp_slow_start_after_idle,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+#ifdef CONFIG_NETLABEL
+	{
+		.ctl_name	= NET_CIPSOV4_CACHE_ENABLE,
+		.procname	= "cipso_cache_enable",
+		.data		= &cipso_v4_cache_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= NET_CIPSOV4_CACHE_BUCKET_SIZE,
+		.procname	= "cipso_cache_bucket_size",
+		.data		= &cipso_v4_cache_bucketsize,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= NET_CIPSOV4_RBM_OPTFMT,
+		.procname	= "cipso_rbm_optfmt",
+		.data		= &cipso_v4_rbm_optfmt,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= NET_CIPSOV4_RBM_STRICTVALID,
+		.procname	= "cipso_rbm_strictvalid",
+		.data		= &cipso_v4_rbm_strictvalid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+#endif /* CONFIG_NETLABEL */
+	{
+		.procname	= "tcp_available_congestion_control",
+		.maxlen		= TCP_CA_BUF_MAX,
+		.mode		= 0444,
+		.proc_handler   = &proc_tcp_available_congestion_control,
+	},
+	{
+		.ctl_name	= NET_TCP_ALLOWED_CONG_CONTROL,
+		.procname	= "tcp_allowed_congestion_control",
+		.maxlen		= TCP_CA_BUF_MAX,
+		.mode		= 0644,
+		.proc_handler   = &proc_allowed_congestion_control,
+		.strategy	= &strategy_allowed_congestion_control,
+	},
+	{
+		.ctl_name	= NET_TCP_MAX_SSTHRESH,
+		.procname	= "tcp_max_ssthresh",
+		.data		= &sysctl_tcp_max_ssthresh,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec,

@@ -25,7 +25,6 @@
    SEGREL64LSB
  */
 
-#include <linux/config.h>
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -825,14 +824,16 @@ apply_relocate_add (Elf64_Shdr *sechdrs, const char *strtab, unsigned int symind
 		 * XXX Should have an arch-hook for running this after final section
 		 *     addresses have been selected...
 		 */
-		/* See if gp can cover the entire core module:  */
-		uint64_t gp = (uint64_t) mod->module_core + MAX_LTOFF / 2;
-		if (mod->core_size >= MAX_LTOFF)
+		uint64_t gp;
+		if (mod->core_size > MAX_LTOFF)
 			/*
 			 * This takes advantage of fact that SHF_ARCH_SMALL gets allocated
 			 * at the end of the module.
 			 */
-			gp = (uint64_t) mod->module_core + mod->core_size - MAX_LTOFF / 2;
+			gp = mod->core_size - MAX_LTOFF / 2;
+		else
+			gp = mod->core_size / 2;
+		gp = (uint64_t) mod->module_core + ((gp + 7) & -8);
 		mod->arch.gp = gp;
 		DEBUGP("%s: placing gp at 0x%lx\n", __FUNCTION__, gp);
 	}
@@ -860,7 +861,7 @@ apply_relocate (Elf64_Shdr *sechdrs, const char *strtab, unsigned int symindex,
 /*
  * Modules contain a single unwind table which covers both the core and the init text
  * sections but since the two are not contiguous, we need to split this table up such that
- * we can register (and unregister) each "segment" seperately.  Fortunately, this sounds
+ * we can register (and unregister) each "segment" separately.  Fortunately, this sounds
  * more complicated than it really is.
  */
 static void
@@ -945,8 +946,8 @@ void
 percpu_modcopy (void *pcpudst, const void *src, unsigned long size)
 {
 	unsigned int i;
-	for (i = 0; i < NR_CPUS; i++)
-		if (cpu_possible(i))
-			memcpy(pcpudst + __per_cpu_offset[i], src, size);
+	for_each_possible_cpu(i) {
+		memcpy(pcpudst + __per_cpu_offset[i], src, size);
+	}
 }
 #endif /* CONFIG_SMP */

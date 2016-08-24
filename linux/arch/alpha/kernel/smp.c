@@ -16,9 +16,9 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/err.h>
 #include <linux/threads.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -52,6 +52,7 @@
 
 /* A collection of per-processor data.  */
 struct cpuinfo_alpha cpu_data[NR_CPUS];
+EXPORT_SYMBOL(cpu_data);
 
 /* A collection of single bit ipi messages.  */
 static struct {
@@ -65,21 +66,16 @@ enum ipi_message_type {
 };
 
 /* Set to a secondary's cpuid when it comes online.  */
-static int smp_secondary_alive __initdata = 0;
+static int smp_secondary_alive __devinitdata = 0;
 
 /* Which cpus ids came online.  */
-cpumask_t cpu_present_mask;
 cpumask_t cpu_online_map;
 
 EXPORT_SYMBOL(cpu_online_map);
 
-/* cpus reported in the hwrpb */
-static unsigned long hwrpb_cpu_present_mask __initdata = 0;
-
 int smp_num_probed;		/* Internal processor count */
 int smp_num_cpus = 1;		/* Number that came online.  */
-cycles_t cacheflush_time;
-unsigned long cache_decay_ticks;
+EXPORT_SYMBOL(smp_num_cpus);
 
 extern void calibrate_delay(void);
 
@@ -177,59 +173,8 @@ smp_callin(void)
 	cpu_idle();
 }
 
-
-/*
- * Rough estimation for SMP scheduling, this is the number of cycles it
- * takes for a fully memory-limited process to flush the SMP-local cache.
- *
- * We are not told how much cache there is, so we have to guess.
- */
-static void __init
-smp_tune_scheduling (int cpuid)
-{
-	struct percpu_struct *cpu;
-	unsigned long on_chip_cache;	/* kB */
-	unsigned long freq;		/* Hz */
-	unsigned long bandwidth = 350;	/* MB/s */
-
-	cpu = (struct percpu_struct*)((char*)hwrpb + hwrpb->processor_offset
-				      + cpuid * hwrpb->processor_size);
-	switch (cpu->type)
-	{
-	case EV45_CPU:
-		on_chip_cache = 16 + 16;
-		break;
-
-	case EV5_CPU:
-	case EV56_CPU:
-		on_chip_cache = 8 + 8 + 96;
-		break;
-
-	case PCA56_CPU:
-		on_chip_cache = 16 + 8;
-		break;
-
-	case EV6_CPU:
-	case EV67_CPU:
-	default:
-		on_chip_cache = 64 + 64;
-		break;
-	}
-
-	freq = hwrpb->cycle_freq ? : est_cycle_freq;
-
-	cacheflush_time = (freq / 1000000) * (on_chip_cache << 10) / bandwidth;
-	cache_decay_ticks = cacheflush_time / (freq / 1000) * HZ / 1000;
-
-	printk("per-CPU timeslice cutoff: %ld.%02ld usecs.\n",
-	       cacheflush_time/(freq/1000000),
-	       (cacheflush_time*100/(freq/1000000)) % 100);
-	printk("task migration cache decay timeout: %ld msecs.\n",
-	       (cache_decay_ticks + 1) * 1000 / HZ);
-}
-
 /* Wait until hwrpb->txrdy is clear for cpu.  Return -1 on timeout.  */
-static int __init
+static int __devinit
 wait_for_txrdy (unsigned long cpumask)
 {
 	unsigned long timeout;
@@ -355,7 +300,7 @@ secondary_cpu_start(int cpuid, struct task_struct *idle)
 		 + hwrpb->processor_offset
 		 + cpuid * hwrpb->processor_size);
 	hwpcb = (struct pcb_struct *) cpu->hwpcb;
-	ipcb = &idle->thread_info->pcb;
+	ipcb = &task_thread_info(idle)->pcb;
 
 	/* Initialize the CPU's HWPCB to something just good enough for
 	   us to get started.  Immediately after starting, we'll swpctx
@@ -414,7 +359,7 @@ secondary_cpu_start(int cpuid, struct task_struct *idle)
 /*
  * Bring one cpu online.
  */
-static int __init
+static int __cpuinit
 smp_boot_one_cpu(int cpuid)
 {
 	struct task_struct *idle;
@@ -494,8 +439,7 @@ setup_smp(void)
 				((char *)cpubase + i*hwrpb->processor_size);
 			if ((cpu->flags & 0x1cc) == 0x1cc) {
 				smp_num_probed++;
-				/* Assume here that "whami" == index */
-				hwrpb_cpu_present_mask |= (1UL << i);
+				cpu_set(i, cpu_present_map);
 				cpu->pal_revision = boot_cpu_palrev;
 			}
 
@@ -506,12 +450,10 @@ setup_smp(void)
 		}
 	} else {
 		smp_num_probed = 1;
-		hwrpb_cpu_present_mask = (1UL << boot_cpuid);
 	}
-	cpu_present_mask = cpumask_of_cpu(boot_cpuid);
 
-	printk(KERN_INFO "SMP: %d CPUs probed -- cpu_present_mask = %lx\n",
-	       smp_num_probed, hwrpb_cpu_present_mask);
+	printk(KERN_INFO "SMP: %d CPUs probed -- cpu_present_map = %lx\n",
+	       smp_num_probed, cpu_present_map.bits[0]);
 }
 
 /*
@@ -520,52 +462,32 @@ setup_smp(void)
 void __init
 smp_prepare_cpus(unsigned int max_cpus)
 {
-	int cpu_count, i;
-
 	/* Take care of some initial bookkeeping.  */
 	memset(ipi_data, 0, sizeof(ipi_data));
 
 	current_thread_info()->cpu = boot_cpuid;
 
 	smp_store_cpu_info(boot_cpuid);
-	smp_tune_scheduling(boot_cpuid);
 	smp_setup_percpu_timer(boot_cpuid);
 
 	/* Nothing to do on a UP box, or when told not to.  */
 	if (smp_num_probed == 1 || max_cpus == 0) {
-		cpu_present_mask = cpumask_of_cpu(boot_cpuid);
+		cpu_present_map = cpumask_of_cpu(boot_cpuid);
 		printk(KERN_INFO "SMP mode deactivated.\n");
 		return;
 	}
 
 	printk(KERN_INFO "SMP starting up secondaries.\n");
 
-	cpu_count = 1;
-	for (i = 0; (i < NR_CPUS) && (cpu_count < max_cpus); i++) {
-		if (i == boot_cpuid)
-			continue;
-
-		if (((hwrpb_cpu_present_mask >> i) & 1) == 0)
-			continue;
-
-		cpu_set(i, cpu_possible_map);
-		cpu_count++;
-	}
-
-	smp_num_cpus = cpu_count;
+	smp_num_cpus = smp_num_probed;
 }
 
 void __devinit
 smp_prepare_boot_cpu(void)
 {
-	/*
-	 * Mark the boot cpu (current cpu) as both present and online
-	 */ 
-	cpu_set(smp_processor_id(), cpu_present_mask);
-	cpu_set(smp_processor_id(), cpu_online_map);
 }
 
-int __devinit
+int __cpuinit
 __cpu_up(unsigned int cpu)
 {
 	smp_boot_one_cpu(cpu);
@@ -594,12 +516,15 @@ smp_cpus_done(unsigned int max_cpus)
 void
 smp_percpu_timer_interrupt(struct pt_regs *regs)
 {
+	struct pt_regs *old_regs;
 	int cpu = smp_processor_id();
 	unsigned long user = user_mode(regs);
 	struct cpuinfo_alpha *data = &cpu_data[cpu];
 
+	old_regs = set_irq_regs(regs);
+
 	/* Record kernel PC.  */
-	profile_tick(CPU_PROFILING, regs);
+	profile_tick(CPU_PROFILING);
 
 	if (!--data->prof_counter) {
 		/* We need to make like a normal interrupt -- otherwise
@@ -613,9 +538,10 @@ smp_percpu_timer_interrupt(struct pt_regs *regs)
 
 		irq_exit();
 	}
+	set_irq_regs(old_regs);
 }
 
-int __init
+int
 setup_profiling_timer(unsigned int multiplier)
 {
 	return -EINVAL;
@@ -865,6 +791,7 @@ smp_call_function_on_cpu (void (*func) (void *info), void *info, int retry,
 
 	return 0;
 }
+EXPORT_SYMBOL(smp_call_function_on_cpu);
 
 int
 smp_call_function (void (*func) (void *info), void *info, int retry, int wait)
@@ -872,6 +799,7 @@ smp_call_function (void (*func) (void *info), void *info, int retry, int wait)
 	return smp_call_function_on_cpu (func, info, retry, wait,
 					 cpu_online_map);
 }
+EXPORT_SYMBOL(smp_call_function);
 
 static void
 ipi_imb(void *ignored)
@@ -886,6 +814,7 @@ smp_imb(void)
 	if (on_each_cpu(ipi_imb, NULL, 1, 1))
 		printk(KERN_CRIT "smp_imb: timed out\n");
 }
+EXPORT_SYMBOL(smp_imb);
 
 static void
 ipi_flush_tlb_all(void *ignored)
@@ -941,6 +870,7 @@ flush_tlb_mm(struct mm_struct *mm)
 
 	preempt_enable();
 }
+EXPORT_SYMBOL(flush_tlb_mm);
 
 struct flush_tlb_page_struct {
 	struct vm_area_struct *vma;
@@ -993,6 +923,7 @@ flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
 
 	preempt_enable();
 }
+EXPORT_SYMBOL(flush_tlb_page);
 
 void
 flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
@@ -1000,6 +931,7 @@ flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long e
 	/* On the Alpha we always flush the whole user tlb.  */
 	flush_tlb_mm(vma->vm_mm);
 }
+EXPORT_SYMBOL(flush_tlb_range);
 
 static void
 ipi_flush_icache_page(void *x)
@@ -1043,175 +975,3 @@ flush_icache_user_range(struct vm_area_struct *vma, struct page *page,
 
 	preempt_enable();
 }
-
-#ifdef CONFIG_DEBUG_SPINLOCK
-void
-_raw_spin_unlock(spinlock_t * lock)
-{
-	mb();
-	lock->lock = 0;
-
-	lock->on_cpu = -1;
-	lock->previous = NULL;
-	lock->task = NULL;
-	lock->base_file = "none";
-	lock->line_no = 0;
-}
-
-void
-debug_spin_lock(spinlock_t * lock, const char *base_file, int line_no)
-{
-	long tmp;
-	long stuck;
-	void *inline_pc = __builtin_return_address(0);
-	unsigned long started = jiffies;
-	int printed = 0;
-	int cpu = smp_processor_id();
-
-	stuck = 1L << 30;
- try_again:
-
-	/* Use sub-sections to put the actual loop at the end
-	   of this object file's text section so as to perfect
-	   branch prediction.  */
-	__asm__ __volatile__(
-	"1:	ldl_l	%0,%1\n"
-	"	subq	%2,1,%2\n"
-	"	blbs	%0,2f\n"
-	"	or	%0,1,%0\n"
-	"	stl_c	%0,%1\n"
-	"	beq	%0,3f\n"
-	"4:	mb\n"
-	".subsection 2\n"
-	"2:	ldl	%0,%1\n"
-	"	subq	%2,1,%2\n"
-	"3:	blt	%2,4b\n"
-	"	blbs	%0,2b\n"
-	"	br	1b\n"
-	".previous"
-	: "=r" (tmp), "=m" (lock->lock), "=r" (stuck)
-	: "1" (lock->lock), "2" (stuck) : "memory");
-
-	if (stuck < 0) {
-		printk(KERN_WARNING
-		       "%s:%d spinlock stuck in %s at %p(%d)"
-		       " owner %s at %p(%d) %s:%d\n",
-		       base_file, line_no,
-		       current->comm, inline_pc, cpu,
-		       lock->task->comm, lock->previous,
-		       lock->on_cpu, lock->base_file, lock->line_no);
-		stuck = 1L << 36;
-		printed = 1;
-		goto try_again;
-	}
-
-	/* Exiting.  Got the lock.  */
-	lock->on_cpu = cpu;
-	lock->previous = inline_pc;
-	lock->task = current;
-	lock->base_file = base_file;
-	lock->line_no = line_no;
-
-	if (printed) {
-		printk(KERN_WARNING
-		       "%s:%d spinlock grabbed in %s at %p(%d) %ld ticks\n",
-		       base_file, line_no, current->comm, inline_pc,
-		       cpu, jiffies - started);
-	}
-}
-
-int
-debug_spin_trylock(spinlock_t * lock, const char *base_file, int line_no)
-{
-	int ret;
-	if ((ret = !test_and_set_bit(0, lock))) {
-		lock->on_cpu = smp_processor_id();
-		lock->previous = __builtin_return_address(0);
-		lock->task = current;
-	} else {
-		lock->base_file = base_file;
-		lock->line_no = line_no;
-	}
-	return ret;
-}
-#endif /* CONFIG_DEBUG_SPINLOCK */
-
-#ifdef CONFIG_DEBUG_RWLOCK
-void _raw_write_lock(rwlock_t * lock)
-{
-	long regx, regy;
-	int stuck_lock, stuck_reader;
-	void *inline_pc = __builtin_return_address(0);
-
- try_again:
-
-	stuck_lock = 1<<30;
-	stuck_reader = 1<<30;
-
-	__asm__ __volatile__(
-	"1:	ldl_l	%1,%0\n"
-	"	blbs	%1,6f\n"
-	"	blt	%1,8f\n"
-	"	mov	1,%1\n"
-	"	stl_c	%1,%0\n"
-	"	beq	%1,6f\n"
-	"4:	mb\n"
-	".subsection 2\n"
-	"6:	blt	%3,4b	# debug\n"
-	"	subl	%3,1,%3	# debug\n"
-	"	ldl	%1,%0\n"
-	"	blbs	%1,6b\n"
-	"8:	blt	%4,4b	# debug\n"
-	"	subl	%4,1,%4	# debug\n"
-	"	ldl	%1,%0\n"
-	"	blt	%1,8b\n"
-	"	br	1b\n"
-	".previous"
-	: "=m" (*(volatile int *)lock), "=&r" (regx), "=&r" (regy),
-	  "=&r" (stuck_lock), "=&r" (stuck_reader)
-	: "0" (*(volatile int *)lock), "3" (stuck_lock), "4" (stuck_reader) : "memory");
-
-	if (stuck_lock < 0) {
-		printk(KERN_WARNING "write_lock stuck at %p\n", inline_pc);
-		goto try_again;
-	}
-	if (stuck_reader < 0) {
-		printk(KERN_WARNING "write_lock stuck on readers at %p\n",
-		       inline_pc);
-		goto try_again;
-	}
-}
-
-void _raw_read_lock(rwlock_t * lock)
-{
-	long regx;
-	int stuck_lock;
-	void *inline_pc = __builtin_return_address(0);
-
- try_again:
-
-	stuck_lock = 1<<30;
-
-	__asm__ __volatile__(
-	"1:	ldl_l	%1,%0;"
-	"	blbs	%1,6f;"
-	"	subl	%1,2,%1;"
-	"	stl_c	%1,%0;"
-	"	beq	%1,6f;"
-	"4:	mb\n"
-	".subsection 2\n"
-	"6:	ldl	%1,%0;"
-	"	blt	%2,4b	# debug\n"
-	"	subl	%2,1,%2	# debug\n"
-	"	blbs	%1,6b;"
-	"	br	1b\n"
-	".previous"
-	: "=m" (*(volatile int *)lock), "=&r" (regx), "=&r" (stuck_lock)
-	: "0" (*(volatile int *)lock), "2" (stuck_lock) : "memory");
-
-	if (stuck_lock < 0) {
-		printk(KERN_WARNING "read_lock stuck at %p\n", inline_pc);
-		goto try_again;
-	}
-}
-#endif /* CONFIG_DEBUG_RWLOCK */

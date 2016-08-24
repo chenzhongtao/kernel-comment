@@ -7,12 +7,11 @@
  * Taken from i386 version.
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
@@ -21,50 +20,61 @@
 #include <linux/mman.h>
 #include <linux/file.h>
 #include <linux/utsname.h>
+#include <linux/ipc.h>
 
 #include <asm/uaccess.h>
 #include <asm/cachectl.h>
 #include <asm/cacheflush.h>
-#include <asm/ipc.h>
+#include <asm/syscall.h>
+#include <asm/unistd.h>
 
 /*
  * sys_tas() - test-and-set
- * linuxthreads testing version
  */
-#ifndef CONFIG_SMP
-asmlinkage int sys_tas(int *addr)
-{
-	int oldval;
-	unsigned long flags;
-
-	if (!access_ok(VERIFY_WRITE, addr, sizeof (int)))
-		return -EFAULT;
-	local_irq_save(flags);
-	oldval = *addr;
-	*addr = 1;
-	local_irq_restore(flags);
-	return oldval;
-}
-#else /* CONFIG_SMP */
-#include <linux/spinlock.h>
-
-static DEFINE_SPINLOCK(tas_lock);
-
-asmlinkage int sys_tas(int *addr)
+asmlinkage int sys_tas(int __user *addr)
 {
 	int oldval;
 
 	if (!access_ok(VERIFY_WRITE, addr, sizeof (int)))
 		return -EFAULT;
 
-	_raw_spin_lock(&tas_lock);
-	oldval = *addr;
-	*addr = 1;
-	_raw_spin_unlock(&tas_lock);
+	/* atomic operation:
+	 *   oldval = *addr; *addr = 1;
+	 */
+	__asm__ __volatile__ (
+		DCACHE_CLEAR("%0", "r4", "%1")
+		"	.fillinsn\n"
+		"1:\n"
+		"	lock	%0, @%1	    ->	unlock	%2, @%1\n"
+		"2:\n"
+		/* NOTE:
+		 *   The m32r processor can accept interrupts only
+		 *   at the 32-bit instruction boundary.
+		 *   So, in the above code, the "unlock" instruction
+		 *   can be executed continuously after the "lock"
+		 *   instruction execution without any interruptions.
+		 */
+		".section .fixup,\"ax\"\n"
+		"	.balign 4\n"
+		"3:	ldi	%0, #%3\n"
+		"	seth	r14, #high(2b)\n"
+		"	or3	r14, r14, #low(2b)\n"
+		"	jmp	r14\n"
+		".previous\n"
+		".section __ex_table,\"a\"\n"
+		"	.balign 4\n"
+		"	.long 1b,3b\n"
+		".previous\n"
+		: "=&r" (oldval)
+		: "r" (addr), "r" (1), "i"(-EFAULT)
+		: "r14", "memory"
+#ifdef CONFIG_CHIP_M32700_TS1
+		  , "r4"
+#endif /* CONFIG_CHIP_M32700_TS1 */
+	);
 
 	return oldval;
 }
-#endif /* CONFIG_SMP */
 
 /*
  * sys_pipe() is the normal C calling standard for creating
@@ -80,7 +90,7 @@ sys_pipe(unsigned long r0, unsigned long r1, unsigned long r2,
 
 	error = do_pipe(fd);
 	if (!error) {
-		if (copy_to_user((void *)r0, (void *)fd, 2*sizeof(int)))
+		if (copy_to_user((void __user *)r0, fd, 2*sizeof(int)))
 			error = -EFAULT;
 	}
 	return error;
@@ -171,9 +181,9 @@ asmlinkage int sys_ipc(uint call, int first, int second,
 	case SHMAT: {
 		ulong raddr;
 
-		if ((ret = verify_area(VERIFY_WRITE, (ulong __user *) third,
-				      sizeof(ulong))))
-			return ret;
+		if (!access_ok(VERIFY_WRITE, (ulong __user *) third,
+				      sizeof(ulong)))
+			return -EFAULT;
 		ret = do_shmat (first, (char __user *) ptr, second, &raddr);
 		if (ret)
 			return ret;
@@ -191,20 +201,20 @@ asmlinkage int sys_ipc(uint call, int first, int second,
 	}
 }
 
-asmlinkage int sys_uname(struct old_utsname * name)
+asmlinkage int sys_uname(struct old_utsname __user * name)
 {
 	int err;
 	if (!name)
 		return -EFAULT;
 	down_read(&uts_sem);
-	err=copy_to_user(name, &system_utsname, sizeof (*name));
+	err = copy_to_user(name, utsname(), sizeof (*name));
 	up_read(&uts_sem);
 	return err?-EFAULT:0;
 }
 
 asmlinkage int sys_cacheflush(void *addr, int bytes, int cache)
 {
-	/* This should flush more selectivly ...  */
+	/* This should flush more selectively ...  */
 	_flush_cache_all();
 	return 0;
 }
@@ -215,3 +225,21 @@ asmlinkage int sys_cachectl(char *addr, int nbytes, int op)
 	return -ENOSYS;
 }
 
+/*
+ * Do a system call from kernel instead of calling sys_execve so we
+ * end up with proper pt_regs.
+ */
+int kernel_execve(const char *filename, char *const argv[], char *const envp[])
+{
+	register long __scno __asm__ ("r7") = __NR_execve;
+	register long __arg3 __asm__ ("r2") = (long)(envp);
+	register long __arg2 __asm__ ("r1") = (long)(argv);
+	register long __res __asm__ ("r0") = (long)(filename);
+	__asm__ __volatile__ (
+		"trap #" SYSCALL_VECTOR "|| nop"
+		: "=r" (__res)
+		: "r" (__scno), "0" (__res), "r" (__arg2),
+			"r" (__arg3)
+		: "memory");
+	return __res;
+}

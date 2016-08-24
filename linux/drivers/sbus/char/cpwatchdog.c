@@ -10,8 +10,6 @@
  * 			timer interrupts.  We use a timer to periodically 
  * 			reset 'stopped' watchdogs on affected platforms.
  *
- * TODO:	DevFS support (/dev/watchdogs/0 ... /dev/watchdogs/2)
- *
  * Copyright (c) 2000 Eric Brower (ebrower@usa.net)
  */
 
@@ -22,10 +20,11 @@
 #include <linux/major.h>
 #include <linux/init.h>
 #include <linux/miscdevice.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/timer.h>
+#include <linux/smp_lock.h>
+#include <linux/io.h>
 #include <asm/irq.h>
 #include <asm/ebus.h>
 #include <asm/oplib.h>
@@ -155,7 +154,7 @@ struct wd_device {
 };
 
 static struct wd_device wd_dev = { 
-		0, SPIN_LOCK_UNLOCKED, 0, 0, 0, 0,
+		0, __SPIN_LOCK_UNLOCKED(wd_dev.lock), 0, 0, 0, 0,
 };
 
 static struct timer_list wd_timer;
@@ -186,7 +185,7 @@ MODULE_SUPPORTED_DEVICE
 #ifdef WD_DEBUG
 static void wd_dumpregs(void);
 #endif
-static irqreturn_t wd_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t wd_interrupt(int irq, void *dev_id);
 static void wd_toggleintr(struct wd_timer* pTimer, int enable);
 static void wd_pingtimer(struct wd_timer* pTimer);
 static void wd_starttimer(struct wd_timer* pTimer);
@@ -300,11 +299,11 @@ static int wd_open(struct inode *inode, struct file *f)
 	{	
 		if (request_irq(wd_dev.irq, 
 						&wd_interrupt, 
-						SA_SHIRQ,
+						IRQF_SHARED,
 						WD_OBPNAME,
 						(void *)wd_dev.regs)) {
-			printk("%s: Cannot register IRQ %s\n", 
-				WD_OBPNAME, __irq_itoa(wd_dev.irq));
+			printk("%s: Cannot register IRQ %d\n", 
+				WD_OBPNAME, wd_dev.irq);
 			return(-EBUSY);
 		}
 		wd_dev.initialized = 1;
@@ -394,6 +393,28 @@ static int wd_ioctl(struct inode *inode, struct file *file,
 	return(0);
 }
 
+static long wd_compat_ioctl(struct file *file, unsigned int cmd,
+		unsigned long arg)
+{
+	int rval = -ENOIOCTLCMD;
+
+	switch (cmd) {
+	/* solaris ioctls are specific to this driver */
+	case WIOCSTART:
+	case WIOCSTOP:
+	case WIOCGSTAT:
+		lock_kernel();
+		rval = wd_ioctl(file->f_path.dentry->d_inode, file, cmd, arg);
+		unlock_kernel();
+		break;
+	/* everything else is handled by the generic compat layer */
+	default:
+		break;
+	}
+
+	return rval;
+}
+
 static ssize_t wd_write(struct file 	*file, 
 			const char	__user *buf, 
 			size_t 		count, 
@@ -423,7 +444,7 @@ static ssize_t wd_read(struct file * file, char __user *buffer,
 #endif /* ifdef WD_DEBUG */
 }
 
-static irqreturn_t wd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t wd_interrupt(int irq, void *dev_id)
 {
 	/* Only WD0 will interrupt-- others are NMI and we won't
 	 * see them here....
@@ -438,9 +459,10 @@ static irqreturn_t wd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-static struct file_operations wd_fops = {
+static const struct file_operations wd_fops = {
 	.owner =	THIS_MODULE,
 	.ioctl =	wd_ioctl,
+	.compat_ioctl =	wd_compat_ioctl,
 	.open =		wd_open,
 	.write =	wd_write,
 	.read =		wd_read,
@@ -731,7 +753,7 @@ static int __init wd_init(void)
 
 	for_each_ebus(ebus) {
 		for_each_ebusdev(edev, ebus) {
-			if (!strcmp(edev->prom_name, WD_OBPNAME))
+			if (!strcmp(edev->ofdev.node->name, WD_OBPNAME))
 				goto ebus_done;
 		}
 	}

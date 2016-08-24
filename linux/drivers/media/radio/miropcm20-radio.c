@@ -16,13 +16,14 @@
 
 /* What ever you think about the ACI, version 0x07 is not very well!
  * I can't get frequency, 'tuner status', 'tuner flags' or mute/mono
- * conditions...                Robert 
+ * conditions...                Robert
  */
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/videodev.h>
-#include "../../../sound/oss/aci.h"
+#include <media/v4l2-common.h>
+#include "oss/aci.h"
 #include "miropcm20-rds-core.h"
 
 static int radio_nr = -1;
@@ -75,9 +76,7 @@ static int pcm20_getflags(struct pcm20_device *dev, __u32 *flags, __u16 *signal)
 
 	if ((i=aci_rw_cmd(ACI_READ_TUNERSTATION, -1, -1))<0)
 		return i;
-#ifdef DEBUG
-	printk("check_sig: 0x%x\n", i);
-#endif
+	pr_debug("check_sig: 0x%x\n", i);
 	if (i & 0x80) {
 		/* no signal from tuner */
 		*flags=0;
@@ -107,9 +106,7 @@ static int pcm20_getflags(struct pcm20_device *dev, __u32 *flags, __u16 *signal)
 
 	if ((i=aci_rds_cmd(RDS_RXVALUE, &buf, 1))<0)
 		return i;
-#ifdef DEBUG
-	printk("rds-signal: %d\n", buf);
-#endif
+	pr_debug("rds-signal: %d\n", buf);
 	if (buf > 15) {
 		printk("miropcm20-radio: RX strengths unexpected high...\n");
 		buf=15;
@@ -127,7 +124,7 @@ static int pcm20_do_ioctl(struct inode *inode, struct file *file,
 	struct video_device *dev = video_devdata(file);
 	struct pcm20_device *pcm20 = dev->priv;
 	int i;
-	
+
 	switch(cmd)
 	{
 		case VIDIOCGCAP:
@@ -143,7 +140,7 @@ static int pcm20_do_ioctl(struct inode *inode, struct file *file,
 		case VIDIOCGTUNER:
 		{
 			struct video_tuner *v = arg;
-			if(v->tuner)	/* Only 1 tuner */ 
+			if(v->tuner)	/* Only 1 tuner */
 				return -EINVAL;
 			v->rangelow=87*16000;
 			v->rangehigh=108*16000;
@@ -172,13 +169,11 @@ static int pcm20_do_ioctl(struct inode *inode, struct file *file,
 			unsigned long *freq = arg;
 			pcm20->freq = *freq;
 			i=pcm20_setfreq(pcm20, pcm20->freq);
-#ifdef DEBUG
-			printk("First view (setfreq): 0x%x\n", i);
-#endif
+			pr_debug("First view (setfreq): 0x%x\n", i);
 			return i;
 		}
 		case VIDIOCGAUDIO:
-		{	
+		{
 			struct video_audio *v = arg;
 			memset(v,0, sizeof(*v));
 			v->flags=VIDEO_AUDIO_MUTABLE;
@@ -189,12 +184,12 @@ static int pcm20_do_ioctl(struct inode *inode, struct file *file,
 				v->mode|=VIDEO_SOUND_MONO;
 			/* v->step=2048; */
 			strcpy(v->name, "Radio");
-			return 0;			
+			return 0;
 		}
 		case VIDIOCSAUDIO:
 		{
 			struct video_audio *v = arg;
-			if(v->audio) 
+			if(v->audio)
 				return -EINVAL;
 
 			pcm20_mute(pcm20, !!(v->flags&VIDEO_AUDIO_MUTE));
@@ -221,11 +216,12 @@ static struct pcm20_device pcm20_unit = {
 	.muted  = 1,
 };
 
-static struct file_operations pcm20_fops = {
+static const struct file_operations pcm20_fops = {
 	.owner		= THIS_MODULE,
 	.open           = video_exclusive_open,
 	.release        = video_exclusive_release,
 	.ioctl		= pcm20_ioctl,
+	.compat_ioctl	= v4l_compat_ioctl32,
 	.llseek         = no_llseek,
 };
 
@@ -233,7 +229,6 @@ static struct video_device pcm20_radio = {
 	.owner		= THIS_MODULE,
 	.name		= "Miro PCM 20 radio",
 	.type		= VID_TYPE_TUNER,
-	.hardware	= VID_HARDWARE_RTRACK,
 	.fops           = &pcm20_fops,
 	.priv		= &pcm20_unit
 };
@@ -242,7 +237,7 @@ static int __init pcm20_init(void)
 {
 	if(video_register_device(&pcm20_radio, VFL_TYPE_RADIO, radio_nr)==-1)
 		goto video_register_device;
-		
+
 	if(attach_aci_rds()<0)
 		goto attach_aci_rds;
 

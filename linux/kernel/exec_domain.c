@@ -7,7 +7,6 @@
  * 2001-05-06	Complete rewrite,  Christoph Hellwig (hch@infradead.org)
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/kmod.h>
@@ -58,7 +57,7 @@ lookup_exec_domain(u_long personality)
 {
 	struct exec_domain *	ep;
 	u_long			pers = personality(personality);
-		
+
 	read_lock(&exec_domains_lock);
 	for (ep = exec_domains; ep; ep = ep->next) {
 		if (pers >= ep->pers_low && pers <= ep->pers_high)
@@ -140,6 +139,7 @@ __set_personality(u_long personality)
 	ep = lookup_exec_domain(personality);
 	if (ep == current_thread_info()->exec_domain) {
 		current->personality = personality;
+		module_put(ep->module);
 		return 0;
 	}
 

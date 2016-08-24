@@ -2,10 +2,10 @@
 #define __MEGARAID_H__
 
 #include <linux/spinlock.h>
-
+#include <linux/mutex.h>
 
 #define MEGARAID_VERSION	\
-	"v2.00.3 (Release Date: Wed Feb 19 08:51:30 EST 2003)\n"
+	"v2.00.4 (Release Date: Thu Feb 9 08:51:30 EST 2006)\n"
 
 /*
  * Driver features - change the values to enable or disable features in the
@@ -801,7 +801,8 @@ typedef struct {
 				   clustering is available */
 	u32	flag;
 
-	unsigned long	base;
+	unsigned long		base;
+	void __iomem		*mmio_base;
 
 	/* mbox64 with mbox not aligned on 16-byte boundry */
 	mbox64_t	*una_mbox64;
@@ -889,9 +890,9 @@ typedef struct {
 
 	scb_t			int_scb;
 	Scsi_Cmnd		int_scmd;
-	struct semaphore	int_mtx;	/* To synchronize the internal
+	struct mutex		int_mtx;	/* To synchronize the internal
 						commands */
-	wait_queue_head_t	int_waitq;	/* wait queue for internal
+	struct completion	int_waitq;	/* wait queue for internal
 						 cmds */
 
 	int	has_cluster;	/* cluster support on this HBA */
@@ -924,13 +925,6 @@ struct mega_hbas {
 #define MEGA_DMA_TYPE_NONE		0xFFFF
 #define MEGA_BULK_DATA			0x0001
 #define MEGA_SGLIST			0x0002
-
-/*
- * lockscope definitions, callers can specify the lock scope with this data
- * type. LOCK_INT would mean the caller has not acquired the lock before
- * making the call and LOCK_EXT would mean otherwise.
- */
-typedef enum { LOCK_INT, LOCK_EXT } lockscope_t;
 
 /*
  * Parameters for the io-mapped controllers
@@ -998,8 +992,8 @@ static scb_t * mega_build_cmd(adapter_t *, Scsi_Cmnd *, int *);
 static void __mega_runpendq(adapter_t *);
 static int issue_scb_block(adapter_t *, u_char *);
 
-static irqreturn_t megaraid_isr_memmapped(int, void *, struct pt_regs *);
-static irqreturn_t megaraid_isr_iomapped(int, void *, struct pt_regs *);
+static irqreturn_t megaraid_isr_memmapped(int, void *);
+static irqreturn_t megaraid_isr_iomapped(int, void *);
 
 static void mega_free_scb(adapter_t *, scb_t *);
 
@@ -1008,7 +1002,6 @@ static int megaraid_reset(Scsi_Cmnd *);
 static int megaraid_abort_and_reset(adapter_t *, Scsi_Cmnd *, int);
 static int megaraid_biosparam(struct scsi_device *, struct block_device *,
 		sector_t, int []);
-static int mega_print_inquiry(char *, char *);
 
 static int mega_build_sglist (adapter_t *adapter, scb_t *scb,
 			      u32 *buffer, u32 *length);
@@ -1030,6 +1023,7 @@ static int mega_init_scb (adapter_t *);
 static int mega_is_bios_enabled (adapter_t *);
 
 #ifdef CONFIG_PROC_FS
+static int mega_print_inquiry(char *, char *);
 static void mega_create_proc_entry(int, struct proc_dir_entry *);
 static int proc_read_config(char *, char **, off_t, int, int *, void *);
 static int proc_read_stat(char *, char **, off_t, int, int *, void *);
@@ -1046,10 +1040,10 @@ static int proc_rdrv_20(char *, char **, off_t, int, int *, void *);
 static int proc_rdrv_30(char *, char **, off_t, int, int *, void *);
 static int proc_rdrv_40(char *, char **, off_t, int, int *, void *);
 static int proc_rdrv(adapter_t *, char *, int, int);
-#endif
 
 static int mega_adapinq(adapter_t *, dma_addr_t);
 static int mega_internal_dev_inquiry(adapter_t *, u8, u8, dma_addr_t);
+#endif
 
 static int mega_support_ext_cdb(adapter_t *);
 static mega_passthru* mega_prepare_passthru(adapter_t *, scb_t *,
@@ -1062,8 +1056,7 @@ static int mega_support_random_del(adapter_t *);
 static int mega_del_logdrv(adapter_t *, int);
 static int mega_do_del_logdrv(adapter_t *, int);
 static void mega_get_max_sgl(adapter_t *);
-static int mega_internal_command(adapter_t *, lockscope_t, megacmd_t *,
-		mega_passthru *);
+static int mega_internal_command(adapter_t *, megacmd_t *, mega_passthru *);
 static void mega_internal_done(Scsi_Cmnd *);
 static int mega_support_cluster(adapter_t *);
 #endif

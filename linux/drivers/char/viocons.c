@@ -25,8 +25,6 @@
  * along with this program; if not, write to the Free Software Foundation,
  * Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
-#include <linux/config.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/proc_fs.h>
 #include <linux/errno.h>
@@ -44,12 +42,12 @@
 #include <linux/tty_flip.h>
 #include <linux/sysrq.h>
 
-#include <asm/iSeries/vio.h>
-
-#include <asm/iSeries/HvLpEvent.h>
-#include <asm/iSeries/HvCallEvent.h>
-#include <asm/iSeries/HvLpConfig.h>
-#include <asm/iSeries/HvCall.h>
+#include <asm/firmware.h>
+#include <asm/iseries/vio.h>
+#include <asm/iseries/hv_lp_event.h>
+#include <asm/iseries/hv_call_event.h>
+#include <asm/iseries/hv_lp_config.h>
+#include <asm/iseries/hv_call.h>
 
 #ifdef CONFIG_VT
 #error You must turn off CONFIG_VT to use CONFIG_VIOCONS
@@ -64,39 +62,7 @@
 static DEFINE_SPINLOCK(consolelock);
 static DEFINE_SPINLOCK(consoleloglock);
 
-#ifdef CONFIG_MAGIC_SYSRQ
 static int vio_sysrq_pressed;
-extern int sysrq_enabled;
-#endif
-
-/*
- * The structure of the events that flow between us and OS/400.  You can't
- * mess with this unless the OS/400 side changes too
- */
-struct viocharlpevent {
-	struct HvLpEvent event;
-	u32 reserved;
-	u16 version;
-	u16 subtype_result_code;
-	u8 virtual_device;
-	u8 len;
-	u8 data[VIOCHAR_MAX_DATA];
-};
-
-#define VIOCHAR_WINDOW		10
-#define VIOCHAR_HIGHWATERMARK	3
-
-enum viocharsubtype {
-	viocharopen = 0x0001,
-	viocharclose = 0x0002,
-	viochardata = 0x0003,
-	viocharack = 0x0004,
-	viocharconfig = 0x0005
-};
-
-enum viochar_rc {
-	viochar_rc_ebusy = 1
-};
 
 #define VIOCHAR_NUM_BUF		16
 
@@ -132,7 +98,7 @@ static void initDataEvent(struct viocharlpevent *viochar, HvLpIndex lp);
 
 static struct tty_driver *viotty_driver;
 
-void hvlog(char *fmt, ...)
+static void hvlog(char *fmt, ...)
 {
 	int i;
 	unsigned long flags;
@@ -148,7 +114,7 @@ void hvlog(char *fmt, ...)
 	spin_unlock_irqrestore(&consoleloglock, flags);
 }
 
-void hvlogOutput(const char *buf, int count)
+static void hvlogOutput(const char *buf, int count)
 {
 	unsigned long flags;
 	int begin;
@@ -477,19 +443,19 @@ static struct port_info *get_port_data(struct tty_struct *tty)
  */
 static void initDataEvent(struct viocharlpevent *viochar, HvLpIndex lp)
 {
+	struct HvLpEvent *hev = &viochar->event;
+
 	memset(viochar, 0, sizeof(struct viocharlpevent));
 
-	viochar->event.xFlags.xValid = 1;
-	viochar->event.xFlags.xFunction = HvLpEvent_Function_Int;
-	viochar->event.xFlags.xAckInd = HvLpEvent_AckInd_NoAck;
-	viochar->event.xFlags.xAckType = HvLpEvent_AckType_DeferredAck;
-	viochar->event.xType = HvLpEvent_Type_VirtualIo;
-	viochar->event.xSubtype = viomajorsubtype_chario | viochardata;
-	viochar->event.xSourceLp = HvLpConfig_getLpIndex();
-	viochar->event.xTargetLp = lp;
-	viochar->event.xSizeMinus1 = sizeof(struct viocharlpevent);
-	viochar->event.xSourceInstanceId = viopath_sourceinst(lp);
-	viochar->event.xTargetInstanceId = viopath_targetinst(lp);
+	hev->flags = HV_LP_EVENT_VALID | HV_LP_EVENT_DEFERRED_ACK |
+		HV_LP_EVENT_INT;
+	hev->xType = HvLpEvent_Type_VirtualIo;
+	hev->xSubtype = viomajorsubtype_chario | viochardata;
+	hev->xSourceLp = HvLpConfig_getLpIndex();
+	hev->xTargetLp = lp;
+	hev->xSizeMinus1 = sizeof(struct viocharlpevent);
+	hev->xSourceInstanceId = viopath_sourceinst(lp);
+	hev->xTargetInstanceId = viopath_targetinst(lp);
 }
 
 /*
@@ -753,7 +719,7 @@ static void vioHandleOpenEvent(struct HvLpEvent *event)
 	struct port_info *pi;
 	int reject = 0;
 
-	if (event->xFlags.xFunction == HvLpEvent_Function_Ack) {
+	if (hvlpevent_is_ack(event)) {
 		if (port >= VTTY_PORTS)
 			return;
 
@@ -789,7 +755,7 @@ static void vioHandleOpenEvent(struct HvLpEvent *event)
 	}
 
 	/* This had better require an ack, otherwise complain */
-	if (event->xFlags.xAckInd != HvLpEvent_AckInd_DoAck) {
+	if (!hvlpevent_need_ack(event)) {
 		printk(VIOCONS_KERN_WARN "viocharopen without ack bit!\n");
 		return;
 	}
@@ -857,7 +823,7 @@ static void vioHandleCloseEvent(struct HvLpEvent *event)
 	struct viocharlpevent *cevent = (struct viocharlpevent *)event;
 	u8 port = cevent->virtual_device;
 
-	if (event->xFlags.xFunction == HvLpEvent_Function_Int) {
+	if (hvlpevent_is_int(event)) {
 		if (port >= VTTY_PORTS) {
 			printk(VIOCONS_KERN_WARN
 					"close message from invalid virtual device.\n");
@@ -905,6 +871,7 @@ static void vioHandleData(struct HvLpEvent *event)
 	struct viocharlpevent *cevent = (struct viocharlpevent *)event;
 	struct port_info *pi;
 	int index;
+	int num_pushed;
 	u8 port = cevent->virtual_device;
 
 	if (port >= VTTY_PORTS) {
@@ -965,9 +932,12 @@ static void vioHandleData(struct HvLpEvent *event)
 	 * functionality will only work if built into the kernel and
 	 * then only if sysrq is enabled through the proc filesystem.
 	 */
+	num_pushed = 0;
 	for (index = 0; index < cevent->len; index++) {
-#ifdef CONFIG_MAGIC_SYSRQ
-		if (sysrq_enabled) {
+		/*
+		 * Will be optimized away if !CONFIG_MAGIC_SYSRQ:
+		 */
+		if (sysrq_on()) {
 			/* 0x0f is the ascii character for ^O */
 			if (cevent->data[index] == '\x0f') {
 				vio_sysrq_pressed = 1;
@@ -977,7 +947,7 @@ static void vioHandleData(struct HvLpEvent *event)
 				 */
 				continue;
 			} else if (vio_sysrq_pressed) {
-				handle_sysrq(cevent->data[index], NULL, tty);
+				handle_sysrq(cevent->data[index], tty);
 				vio_sysrq_pressed = 0;
 				/*
 				 * continue because we don't want to add
@@ -986,7 +956,6 @@ static void vioHandleData(struct HvLpEvent *event)
 				continue;
 			}
 		}
-#endif
 		/*
 		 * The sysrq sequence isn't included in this check if
 		 * sysrq is enabled and compiled into the kernel because
@@ -994,16 +963,14 @@ static void vioHandleData(struct HvLpEvent *event)
 		 * Don't attempt to copy more data into the buffer than we
 		 * have room for because it would fail without indication.
 		 */
-		if ((tty->flip.count + 1) > TTY_FLIPBUF_SIZE) {
+		if(tty_insert_flip_char(tty, cevent->data[index], TTY_NORMAL) == 0) {
 			printk(VIOCONS_KERN_WARN "input buffer overflow!\n");
 			break;
 		}
-		tty_insert_flip_char(tty, cevent->data[index], TTY_NORMAL);
+		num_pushed++;
 	}
 
-	/* if cevent->len == 0 then no data was added to the buffer and flip.count == 0 */
-	if (tty->flip.count)
-		/* The next call resets flip.count when the data is flushed. */
+	if (num_pushed)
 		tty_flip_buffer_push(tty);
 }
 
@@ -1057,8 +1024,7 @@ static void vioHandleCharEvent(struct HvLpEvent *event)
 		vioHandleConfig(event);
 		break;
 	default:
-		if ((event->xFlags.xFunction == HvLpEvent_Function_Int) &&
-		    (event->xFlags.xAckInd == HvLpEvent_AckInd_DoAck)) {
+		if (hvlpevent_is_int(event) && hvlpevent_need_ack(event)) {
 			event->xRc = HvLpEvent_Rc_InvalidSubtype;
 			HvCallEvent_ackLpEvent(event);
 		}
@@ -1080,7 +1046,7 @@ static int send_open(HvLpIndex remoteLp, void *sem)
 			0, 0, 0, 0);
 }
 
-static struct tty_operations serial_ops = {
+static const struct tty_operations serial_ops = {
 	.open = viotty_open,
 	.close = viotty_close,
 	.write = viotty_write,
@@ -1094,6 +1060,9 @@ static int __init viocons_init2(void)
 {
 	atomic_t wait_flag;
 	int rc;
+
+	if (!firmware_has_feature(FW_FEATURE_ISERIES))
+		return -ENODEV;
 
 	/* +2 for fudge */
 	rc = viopath_open(HvLpConfig_getPrimaryLpIndex(),
@@ -1154,7 +1123,6 @@ static int __init viocons_init2(void)
 	viotty_driver = alloc_tty_driver(VTTY_PORTS);
 	viotty_driver->owner = THIS_MODULE;
 	viotty_driver->driver_name = "vioconsole";
-	viotty_driver->devfs_name = "vcs/";
 	viotty_driver->name = "tty";
 	viotty_driver->name_base = 1;
 	viotty_driver->major = TTY_MAJOR;
@@ -1181,12 +1149,16 @@ static int __init viocons_init(void)
 {
 	int i;
 
+	if (!firmware_has_feature(FW_FEATURE_ISERIES))
+		return -ENODEV;
+
 	printk(VIOCONS_KERN_INFO "registering console\n");
 	for (i = 0; i < VTTY_PORTS; i++) {
 		port_info[i].lp = HvLpIndexInvalid;
 		port_info[i].magic = VIOTTY_MAGIC;
 	}
 	HvCall_setLogBufferFormatAndCodepage(HvCall_LogBuffer_ASCII, 437);
+	add_preferred_console("viocons", 0, NULL);
 	register_console(&viocons_early);
 	return 0;
 }

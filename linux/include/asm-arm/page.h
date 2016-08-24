@@ -10,19 +10,24 @@
 #ifndef _ASMARM_PAGE_H
 #define _ASMARM_PAGE_H
 
-#include <linux/config.h>
+
+#ifdef __KERNEL__
 
 /* PAGE_SHIFT determines the page size */
 #define PAGE_SHIFT		12
 #define PAGE_SIZE		(1UL << PAGE_SHIFT)
 #define PAGE_MASK		(~(PAGE_SIZE-1))
 
-#ifdef __KERNEL__
-
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
 #ifndef __ASSEMBLY__
+
+#ifndef CONFIG_MMU
+
+#include "page-nommu.h"
+
+#else
 
 #include <asm/glue.h>
 
@@ -40,6 +45,7 @@
  *	  v4wb		- ARMv4 with writeback cache, without minicache
  *	  v4_mc		- ARMv4 with minicache
  *	  xscale	- Xscale
+ *	  xsc3		- XScalev3
  */
 #undef _USER
 #undef MULTI_USER
@@ -84,6 +90,14 @@
 # endif
 #endif
 
+#ifdef CONFIG_CPU_XSC3
+# ifdef _USER
+#  define MULTI_USER 1
+# else
+#  define _USER xsc3_mc
+# endif
+#endif
+
 #ifdef CONFIG_CPU_COPY_V6
 # define MULTI_USER 1
 #endif
@@ -114,19 +128,8 @@ extern void __cpu_copy_user_page(void *to, const void *from,
 				 unsigned long user);
 #endif
 
-#define clear_user_page(addr,vaddr,pg)			\
-	do {						\
-		preempt_disable();			\
-		__cpu_clear_user_page(addr, vaddr);	\
-		preempt_enable();			\
-	} while (0)
-
-#define copy_user_page(to,from,vaddr,pg)		\
-	do {						\
-		preempt_disable();			\
-		__cpu_copy_user_page(to, from, vaddr);	\
-		preempt_enable();			\
-	} while (0)
+#define clear_user_page(addr,vaddr,pg)	 __cpu_clear_user_page(addr, vaddr)
+#define copy_user_page(to,from,vaddr,pg) __cpu_copy_user_page(to, from, vaddr)
 
 #define clear_page(page)	memzero((void *)(page), PAGE_SIZE)
 extern void copy_page(void *to, const void *from);
@@ -171,19 +174,7 @@ typedef unsigned long pgprot_t;
 
 #endif /* STRICT_MM_TYPECHECKS */
 
-/* Pure 2^n version of get_order */
-static inline int get_order(unsigned long size)
-{
-	int order;
-
-	size = (size-1) >> (PAGE_SHIFT-1);
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-	return order;
-}
+#endif /* CONFIG_MMU */
 
 #include <asm/memory.h>
 
@@ -191,6 +182,15 @@ static inline int get_order(unsigned long size)
 
 #define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
 				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
+
+/*
+ * With EABI on ARMv5 and above we must have 64-bit aligned slab pointers.
+ */
+#if defined(CONFIG_AEABI) && (__LINUX_ARM_ARCH__ >= 5)
+#define ARCH_SLAB_MINALIGN 8
+#endif
+
+#include <asm-generic/page.h>
 
 #endif /* __KERNEL__ */
 

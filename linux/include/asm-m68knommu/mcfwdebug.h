@@ -10,7 +10,6 @@
 #ifndef mcfdebug_h
 #define mcfdebug_h
 /****************************************************************************/
-#include <linux/config.h>
 
 /* Define the debug module registers */
 #define MCFDEBUG_CSR	0x0			/* Configuration status		*/
@@ -90,7 +89,7 @@
  * that the debug module instructions (2 longs) must be long word aligned and
  * some pointer fiddling is performed to ensure this.
  */
-extern inline void wdebug(int reg, unsigned long data) {
+static inline void wdebug(int reg, unsigned long data) {
 	unsigned short dbg_spc[6];
 	unsigned short *dbg;
 

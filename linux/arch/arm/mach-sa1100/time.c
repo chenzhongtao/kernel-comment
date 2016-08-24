@@ -11,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/timex.h>
 #include <linux/signal.h>
 
@@ -19,25 +20,6 @@
 
 #define RTC_DEF_DIVIDER		(32768 - 1)
 #define RTC_DEF_TRIM            0
-
-static unsigned long __init sa1100_get_rtc_time(void)
-{
-	/*
-	 * According to the manual we should be able to let RTTR be zero
-	 * and then a default diviser for a 32.768KHz clock is used.
-	 * Apparently this doesn't work, at least for my SA1110 rev 5.
-	 * If the clock divider is uninitialized then reset it to the
-	 * default value to get the 1Hz clock.
-	 */
-	if (RTTR == 0) {
-		RTTR = RTC_DEF_DIVIDER + (RTC_DEF_TRIM << 16);
-		printk(KERN_WARNING "Warning: uninitialized Real Time Clock\n");
-		/* The current RTC value probably doesn't make sense either */
-		RCNR = 0;
-		return 0;
-	}
-	return RCNR;
-}
 
 static int sa1100_set_rtc(void)
 {
@@ -70,24 +52,35 @@ static unsigned long sa1100_gettimeoffset (void)
 	return usec;
 }
 
-/*
- * We will be entered with IRQs enabled.
- *
- * Loop until we get ahead of the free running timer.
- * This ensures an exact clock tick count and time accuracy.
- * IRQs are disabled inside the loop to ensure coherence between
- * lost_ticks (updated in do_timer()) and the match reg value, so we
- * can use do_gettimeofday() from interrupt handlers.
- */
+#ifdef CONFIG_NO_IDLE_HZ
+static unsigned long initial_match;
+static int match_posponed;
+#endif
+
 static irqreturn_t
-sa1100_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+sa1100_timer_interrupt(int irq, void *dev_id)
 {
 	unsigned int next_match;
 
 	write_seqlock(&xtime_lock);
 
+#ifdef CONFIG_NO_IDLE_HZ
+	if (match_posponed) {
+		match_posponed = 0;
+		OSMR0 = initial_match;
+	}
+#endif
+
+	/*
+	 * Loop until we get ahead of the free running timer.
+	 * This ensures an exact clock tick count and time accuracy.
+	 * Since IRQs are disabled at this point, coherence between
+	 * lost_ticks(updated in do_timer()) and the match reg value is
+	 * ensured, hence we can use do_gettimeofday() from interrupt
+	 * handlers.
+	 */
 	do {
-		timer_tick(regs);
+		timer_tick();
 		OSSR = OSSR_M0;  /* Clear match on timer 0 */
 		next_match = (OSMR0 += LATCH);
 	} while ((signed long)(next_match - OSCR) <= 0);
@@ -99,26 +92,60 @@ sa1100_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 static struct irqaction sa1100_timer_irq = {
 	.name		= "SA11xx Timer Tick",
-	.flags		= SA_INTERRUPT,
-	.handler	= sa1100_timer_interrupt
+	.flags		= IRQF_DISABLED | IRQF_TIMER | IRQF_IRQPOLL,
+	.handler	= sa1100_timer_interrupt,
 };
 
 static void __init sa1100_timer_init(void)
 {
-	struct timespec tv;
+	unsigned long flags;
 
 	set_rtc = sa1100_set_rtc;
 
-	tv.tv_nsec = 0;
-	tv.tv_sec = sa1100_get_rtc_time();
-	do_settimeofday(&tv);
-
-	OSMR0 = 0;		/* set initial match at 0 */
+	OIER = 0;		/* disable any timer interrupts */
 	OSSR = 0xf;		/* clear status on all timers */
 	setup_irq(IRQ_OST0, &sa1100_timer_irq);
-	OIER |= OIER_E0;	/* enable match on timer 0 to cause interrupts */
-	OSCR = 0;		/* initialize free-running timer, force first match */
+	local_irq_save(flags);
+	OIER = OIER_E0;		/* enable match on timer 0 to cause interrupts */
+	OSMR0 = OSCR + LATCH;	/* set initial match */
+	local_irq_restore(flags);
 }
+
+#ifdef CONFIG_NO_IDLE_HZ
+static int sa1100_dyn_tick_enable_disable(void)
+{
+	/* nothing to do */
+	return 0;
+}
+
+static void sa1100_dyn_tick_reprogram(unsigned long ticks)
+{
+	if (ticks > 1) {
+		initial_match = OSMR0;
+		OSMR0 = initial_match + ticks * LATCH;
+		match_posponed = 1;
+	}
+}
+
+static irqreturn_t
+sa1100_dyn_tick_handler(int irq, void *dev_id)
+{
+	if (match_posponed) {
+		match_posponed = 0;
+		OSMR0 = initial_match;
+		if ((signed long)(initial_match - OSCR) <= 0)
+			return sa1100_timer_interrupt(irq, dev_id);
+	}
+	return IRQ_NONE;
+}
+
+static struct dyn_tick_timer sa1100_dyn_tick = {
+	.enable		= sa1100_dyn_tick_enable_disable,
+	.disable	= sa1100_dyn_tick_enable_disable,
+	.reprogram	= sa1100_dyn_tick_reprogram,
+	.handler	= sa1100_dyn_tick_handler,
+};
+#endif
 
 #ifdef CONFIG_PM
 unsigned long osmr[4], oier;
@@ -156,4 +183,7 @@ struct sys_timer sa1100_timer = {
 	.suspend	= sa1100_timer_suspend,
 	.resume		= sa1100_timer_resume,
 	.offset		= sa1100_gettimeoffset,
+#ifdef CONFIG_NO_IDLE_HZ
+	.dyn_tick	= &sa1100_dyn_tick,
+#endif
 };

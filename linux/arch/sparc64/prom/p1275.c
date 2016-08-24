@@ -16,6 +16,7 @@
 #include <asm/system.h>
 #include <asm/spitfire.h>
 #include <asm/pstate.h>
+#include <asm/ldc.h>
 
 struct {
 	long prom_callback;			/* 0x00 */
@@ -36,21 +37,15 @@ extern void prom_cif_callback(void);
  */
 DEFINE_SPINLOCK(prom_entry_lock);
 
-long p1275_cmd (char *service, long fmt, ...)
+long p1275_cmd(const char *service, long fmt, ...)
 {
 	char *p, *q;
 	unsigned long flags;
 	int nargs, nrets, i;
 	va_list list;
 	long attrs, x;
-	long ctx = 0;
 	
 	p = p1275buf.prom_buffer;
-	ctx = spitfire_get_primary_context ();
-	if (ctx) {
-		flushw_user ();
-		spitfire_set_primary_context (0);
-	}
 
 	spin_lock_irqsave(&prom_entry_lock, flags);
 
@@ -145,9 +140,6 @@ long p1275_cmd (char *service, long fmt, ...)
 	x = p1275buf.prom_args [nargs + 3];
 
 	spin_unlock_irqrestore(&prom_entry_lock, flags);
-
-	if (ctx)
-		spitfire_set_primary_context (ctx);
 
 	return x;
 }

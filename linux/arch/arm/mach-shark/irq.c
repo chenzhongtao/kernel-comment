@@ -10,7 +10,6 @@
 
 #include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/ptrace.h>
 #include <linux/interrupt.h>
 
 #include <asm/irq.h>
@@ -61,7 +60,7 @@ static void shark_enable_8259A_irq(unsigned int irq)
 
 static void shark_ack_8259A_irq(unsigned int irq){}
 
-static irqreturn_t bogus_int(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t bogus_int(int irq, void *dev_id)
 {
 	printk("Got interrupt %i!\n",irq);
 	return IRQ_NONE;
@@ -69,7 +68,8 @@ static irqreturn_t bogus_int(int irq, void *dev_id, struct pt_regs *regs)
 
 static struct irqaction cascade;
 
-static struct irqchip fb_chip = {
+static struct irq_chip fb_chip = {
+	.name	= "XT-PIC",
 	.ack	= shark_ack_8259A_irq,
 	.mask	= shark_disable_8259A_irq,
 	.unmask = shark_enable_8259A_irq,
@@ -81,7 +81,7 @@ void __init shark_init_irq(void)
 
 	for (irq = 0; irq < NR_IRQS; irq++) {
 		set_irq_chip(irq, &fb_chip);
-		set_irq_handler(irq, do_edge_IRQ);
+		set_irq_handler(irq, handle_edge_irq);
 		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
 	}
 

@@ -140,7 +140,8 @@ typedef volatile struct {
 
 struct neofb_par {
 	struct vgastate state;
-	atomic_t ref_count;
+	struct mutex open_lock;
+	unsigned int ref_count;
 
 	unsigned char MiscOutReg;	/* Misc */
 	unsigned char CRTC[25];		/* Crtc Controller */
@@ -159,6 +160,7 @@ struct neofb_par {
 	unsigned char PanelDispCntlReg1;
 	unsigned char PanelDispCntlReg2;
 	unsigned char PanelDispCntlReg3;
+	unsigned char PanelDispCntlRegRead;
 	unsigned char PanelVertCenterReg1;
 	unsigned char PanelVertCenterReg2;
 	unsigned char PanelVertCenterReg3;
@@ -196,6 +198,7 @@ struct neofb_par {
 	int internal_display;
 	int external_display;
 	int libretto;
+	u32 palette[16];
 };
 
 typedef struct {

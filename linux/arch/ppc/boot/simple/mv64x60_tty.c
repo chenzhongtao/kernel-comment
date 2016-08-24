@@ -1,6 +1,4 @@
 /*
- * arch/ppc/boot/simple/mv64x60_tty.c
- *
  * Bootloader version of the embedded MPSC/UART driver for the Marvell 64x60.
  * Note: Due to a GT64260A erratum, DMA will be used for UART input (via SDMA).
  *
@@ -14,40 +12,28 @@
 
 /* This code assumes that the data cache has been disabled (L1, L2, L3). */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/serial_reg.h>
 #include <asm/serial.h>
+#include <asm/io.h>
 #include <asm/mv64x60_defs.h>
 #include <mpsc_defs.h>
+
+#ifdef CONFIG_EV64360
+#include <platforms/ev64360.h>
+u32	mv64x60_console_baud = EV64360_DEFAULT_BAUD;
+u32	mv64x60_mpsc_clk_src = EV64360_MPSC_CLK_SRC; /* TCLK */
+u32	mv64x60_mpsc_clk_freq = EV64360_MPSC_CLK_FREQ;
+#else
+u32	mv64x60_console_baud = 9600;
+u32	mv64x60_mpsc_clk_src = 8; /* TCLK */
+u32	mv64x60_mpsc_clk_freq = 100000000;
+#endif
 
 extern void udelay(long);
 static void stop_dma(int chan);
 
-static u32	mv64x60_base = CONFIG_MV64X60_NEW_BASE;
-
-inline unsigned
-mv64x60_in_le32(volatile unsigned *addr)
-{
-	unsigned ret;
-
-	__asm__ __volatile__("lwbrx %0,0,%1; eieio" : "=r" (ret) :
-				"r" (addr), "m" (*addr));
-	return ret;
-}
-
-inline void
-mv64x60_out_le32(volatile unsigned *addr, int val)
-{
-	__asm__ __volatile__("stwbrx %1,0,%2; eieio" : "=m" (*addr) :
-				"r" (val), "r" (addr));
-}
-
-#define MV64x60_REG_READ(offs)						\
-	(mv64x60_in_le32((volatile uint *)(mv64x60_base + (offs))))
-#define MV64x60_REG_WRITE(offs, d)					\
-	(mv64x60_out_le32((volatile uint *)(mv64x60_base + (offs)), (int)(d)))
-
+static void __iomem *mv64x60_base = (void __iomem *)CONFIG_MV64X60_NEW_BASE;
 
 struct sdma_regs {
 	u32	sdc;
@@ -142,9 +128,6 @@ serial_init(int chan, void *ignored)
 {
 	u32		mpsc_routing_base, sdma_base, brg_bcr, cdv;
 	int		i;
-	extern long	mv64x60_console_baud;
-	extern long	mv64x60_mpsc_clk_src;
-	extern long	mv64x60_mpsc_clk_freq;
 
 	chan = (chan == 1); /* default to chan 0 if anything but 1 */
 
@@ -157,8 +140,7 @@ serial_init(int chan, void *ignored)
 		sdma_base = MV64x60_SDMA_0_OFFSET;
 		brg_bcr = MV64x60_BRG_0_OFFSET + BRG_BCR;
 		SDMA_REGS_INIT(&sdma_regs[0], MV64x60_SDMA_0_OFFSET);
-	}
-	else {
+	} else {
 		sdma_base = MV64x60_SDMA_1_OFFSET;
 		brg_bcr = MV64x60_BRG_1_OFFSET + BRG_BCR;
 		SDMA_REGS_INIT(&sdma_regs[0], MV64x60_SDMA_1_OFFSET);
@@ -186,10 +168,10 @@ serial_init(int chan, void *ignored)
 	td[chan][TX_NUM_DESC - 1].next_desc_ptr = (u32)&td[chan][0];
 
 	/* Set MPSC Routing */
-	MV64x60_REG_WRITE(mpsc_routing_base + MPSC_MRR, 0x3ffffe38);
+	out_le32(mv64x60_base + mpsc_routing_base + MPSC_MRR, 0x3ffffe38);
 
 #ifdef CONFIG_GT64260
-	MV64x60_REG_WRITE(GT64260_MPP_SERIAL_PORTS_MULTIPLEX, 0x00001102);
+	out_le32(mv64x60_base + GT64260_MPP_SERIAL_PORTS_MULTIPLEX, 0x00001102);
 #else /* Must be MV64360 or MV64460 */
 	{
 	u32	enables, prot_bits, v;
@@ -197,68 +179,70 @@ serial_init(int chan, void *ignored)
 	/* Set up comm unit to memory mapping windows */
 	/* Note: Assumes MV64x60_CPU2MEM_WINDOWS == 4 */
 
-	enables = MV64x60_REG_READ(MV64360_CPU_BAR_ENABLE) & 0xf;
+	enables = in_le32(mv64x60_base + MV64360_CPU_BAR_ENABLE) & 0xf;
 	prot_bits = 0;
 
 	for (i=0; i<MV64x60_CPU2MEM_WINDOWS; i++) {
 		if (!(enables & (1 << i))) {
-			v = MV64x60_REG_READ(cpu2mem_tab[i][0]);
+			v = in_le32(mv64x60_base + cpu2mem_tab[i][0]);
 			v = ((v & 0xffff) << 16) | (dram_selects[i] << 8);
-			MV64x60_REG_WRITE(com2mem_tab[i][0], v);
+			out_le32(mv64x60_base + com2mem_tab[i][0], v);
 
-			v = MV64x60_REG_READ(cpu2mem_tab[i][1]);
+			v = in_le32(mv64x60_base + cpu2mem_tab[i][1]);
 			v = (v & 0xffff) << 16;
-			MV64x60_REG_WRITE(com2mem_tab[i][1], v);
+			out_le32(mv64x60_base + com2mem_tab[i][1], v);
 
 			prot_bits |= (0x3 << (i << 1)); /* r/w access */
 		}
 	}
 
-	MV64x60_REG_WRITE(MV64360_MPSC_0_REMAP, 0);
-	MV64x60_REG_WRITE(MV64360_MPSC_1_REMAP, 0);
-	MV64x60_REG_WRITE(MV64360_MPSC2MEM_ACC_PROT_0, prot_bits);
-	MV64x60_REG_WRITE(MV64360_MPSC2MEM_ACC_PROT_1, prot_bits);
-	MV64x60_REG_WRITE(MV64360_MPSC2MEM_BAR_ENABLE, enables);
+	out_le32(mv64x60_base + MV64360_MPSC_0_REMAP, 0);
+	out_le32(mv64x60_base + MV64360_MPSC_1_REMAP, 0);
+	out_le32(mv64x60_base + MV64360_MPSC2MEM_ACC_PROT_0, prot_bits);
+	out_le32(mv64x60_base + MV64360_MPSC2MEM_ACC_PROT_1, prot_bits);
+	out_le32(mv64x60_base + MV64360_MPSC2MEM_BAR_ENABLE, enables);
 	}
 #endif
 
 	/* MPSC 0/1 Rx & Tx get clocks BRG0/1 */
-	MV64x60_REG_WRITE(mpsc_routing_base + MPSC_RCRR, 0x00000100);
-	MV64x60_REG_WRITE(mpsc_routing_base + MPSC_TCRR, 0x00000100);
+	out_le32(mv64x60_base + mpsc_routing_base + MPSC_RCRR, 0x00000100);
+	out_le32(mv64x60_base + mpsc_routing_base + MPSC_TCRR, 0x00000100);
 
 	/* clear pending interrupts */
-	MV64x60_REG_WRITE(MV64x60_SDMA_INTR_OFFSET + SDMA_INTR_MASK, 0);
+	out_le32(mv64x60_base + MV64x60_SDMA_INTR_OFFSET + SDMA_INTR_MASK, 0);
 
-	MV64x60_REG_WRITE(SDMA_SCRDP + sdma_base, &rd[chan][0]);
-	MV64x60_REG_WRITE(SDMA_SCTDP + sdma_base, &td[chan][TX_NUM_DESC - 1]);
-	MV64x60_REG_WRITE(SDMA_SFTDP + sdma_base, &td[chan][TX_NUM_DESC - 1]);
+	out_le32(mv64x60_base + SDMA_SCRDP + sdma_base, (int)&rd[chan][0]);
+	out_le32(mv64x60_base + SDMA_SCTDP + sdma_base,
+		(int)&td[chan][TX_NUM_DESC - 1]);
+	out_le32(mv64x60_base + SDMA_SFTDP + sdma_base,
+		(int)&td[chan][TX_NUM_DESC - 1]);
 
-	MV64x60_REG_WRITE(SDMA_SDC + sdma_base,
+	out_le32(mv64x60_base + SDMA_SDC + sdma_base,
 		SDMA_SDC_RFT | SDMA_SDC_SFM | SDMA_SDC_BLMR | SDMA_SDC_BLMT |
 		(3 << 12));
 
 	cdv = ((mv64x60_mpsc_clk_freq/(32*mv64x60_console_baud))-1);
-	MV64x60_REG_WRITE(brg_bcr,
+	out_le32(mv64x60_base + brg_bcr,
 		((mv64x60_mpsc_clk_src << 18) | (1 << 16) | cdv));
 
 	/* Put MPSC into UART mode, no null modem, 16x clock mode */
-	MV64x60_REG_WRITE(MPSC_MMCRL + mpsc_base[chan], 0x000004c4);
-	MV64x60_REG_WRITE(MPSC_MMCRH + mpsc_base[chan], 0x04400400);
+	out_le32(mv64x60_base + MPSC_MMCRL + mpsc_base[chan], 0x000004c4);
+	out_le32(mv64x60_base + MPSC_MMCRH + mpsc_base[chan], 0x04400400);
 
-	MV64x60_REG_WRITE(MPSC_CHR_1 + mpsc_base[chan], 0);
-	MV64x60_REG_WRITE(MPSC_CHR_9 + mpsc_base[chan], 0);
-	MV64x60_REG_WRITE(MPSC_CHR_10 + mpsc_base[chan], 0);
-	MV64x60_REG_WRITE(MPSC_CHR_3 + mpsc_base[chan], 4);
-	MV64x60_REG_WRITE(MPSC_CHR_4 + mpsc_base[chan], 0);
-	MV64x60_REG_WRITE(MPSC_CHR_5 + mpsc_base[chan], 0);
-	MV64x60_REG_WRITE(MPSC_CHR_6 + mpsc_base[chan], 0);
-	MV64x60_REG_WRITE(MPSC_CHR_7 + mpsc_base[chan], 0);
-	MV64x60_REG_WRITE(MPSC_CHR_8 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_1 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_9 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_10 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_3 + mpsc_base[chan], 4);
+	out_le32(mv64x60_base + MPSC_CHR_4 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_5 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_6 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_7 + mpsc_base[chan], 0);
+	out_le32(mv64x60_base + MPSC_CHR_8 + mpsc_base[chan], 0);
 
 	/* 8 data bits, 1 stop bit */
-	MV64x60_REG_WRITE(MPSC_MPCR + mpsc_base[chan], (3 << 12));
-	MV64x60_REG_WRITE(SDMA_SDCM + sdma_base, SDMA_SDCM_ERD);
-	MV64x60_REG_WRITE(MPSC_CHR_2 + mpsc_base[chan], MPSC_CHR_2_EH);
+	out_le32(mv64x60_base + MPSC_MPCR + mpsc_base[chan], (3 << 12));
+	out_le32(mv64x60_base + SDMA_SDCM + sdma_base, SDMA_SDCM_ERD);
+	out_le32(mv64x60_base + MPSC_CHR_2 + mpsc_base[chan], MPSC_CHR_2_EH);
 
 	udelay(100);
 
@@ -271,20 +255,19 @@ stop_dma(int chan)
 	int	i;
 
 	/* Abort MPSC Rx (aborting Tx messes things up) */
-	MV64x60_REG_WRITE(MPSC_CHR_2 + mpsc_base[chan], MPSC_CHR_2_RA);
+	out_le32(mv64x60_base + MPSC_CHR_2 + mpsc_base[chan], MPSC_CHR_2_RA);
 
 	/* Abort SDMA Rx, Tx */
-	MV64x60_REG_WRITE(sdma_regs[chan].sdcm, SDMA_SDCM_AR | SDMA_SDCM_STD);
+	out_le32(mv64x60_base + sdma_regs[chan].sdcm,
+		SDMA_SDCM_AR | SDMA_SDCM_STD);
 
 	for (i=0; i<MAX_RESET_WAIT; i++) {
-		if ((MV64x60_REG_READ(sdma_regs[chan].sdcm) &
+		if ((in_le32(mv64x60_base + sdma_regs[chan].sdcm) &
 				(SDMA_SDCM_AR | SDMA_SDCM_AT)) == 0)
 			break;
 
 		udelay(100);
 	}
-
-	return;
 }
 
 static int
@@ -293,7 +276,7 @@ wait_for_ownership(int chan)
 	int	i;
 
 	for (i=0; i<MAX_TX_WAIT; i++) {
-		if ((MV64x60_REG_READ(sdma_regs[chan].sdcm) &
+		if ((in_le32(mv64x60_base + sdma_regs[chan].sdcm) &
 				SDMA_SDCM_TXD) == 0)
 			break;
 
@@ -321,12 +304,11 @@ serial_putc(unsigned long com_port, unsigned char c)
 	tdp->cmd_stat = SDMA_DESC_CMDSTAT_L | SDMA_DESC_CMDSTAT_F |
 		SDMA_DESC_CMDSTAT_O;
 
-	MV64x60_REG_WRITE(sdma_regs[com_port].sctdp, tdp);
-	MV64x60_REG_WRITE(sdma_regs[com_port].sftdp, tdp);
-	MV64x60_REG_WRITE(sdma_regs[com_port].sdcm,
-		MV64x60_REG_READ(sdma_regs[com_port].sdcm) | SDMA_SDCM_TXD);
-
-	return;
+	out_le32(mv64x60_base + sdma_regs[com_port].sctdp, (int)tdp);
+	out_le32(mv64x60_base + sdma_regs[com_port].sftdp, (int)tdp);
+	out_le32(mv64x60_base + sdma_regs[com_port].sdcm,
+		in_le32(mv64x60_base + sdma_regs[com_port].sdcm) |
+			SDMA_SDCM_TXD);
 }
 
 unsigned char
@@ -356,7 +338,7 @@ serial_tstc(unsigned long com_port)
 
 	rdp = &rd[com_port][cur_rd[com_port]];
 
-	/* Go thru rcv desc's until empty looking for one with data (no error)*/
+	/* Go through rcv descs until empty looking for one with data (no error)*/
 	while (((rdp->cmd_stat & SDMA_DESC_CMDSTAT_O) == 0) &&
 		(loop_count++ < RX_NUM_DESC)) {
 
@@ -366,8 +348,7 @@ serial_tstc(unsigned long com_port)
 			if (++cur_rd[com_port] >= RX_NUM_DESC)
 				cur_rd[com_port] = 0;
 			rdp = (struct mv64x60_rx_desc *)rdp->next_desc_ptr;
-		}
-		else {
+		} else {
 			rc = 1;
 			break;
 		}
@@ -380,5 +361,4 @@ void
 serial_close(unsigned long com_port)
 {
 	stop_dma(com_port);
-	return;
 }

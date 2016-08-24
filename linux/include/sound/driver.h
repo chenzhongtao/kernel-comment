@@ -3,7 +3,7 @@
 
 /*
  *  Main header file for the ALSA driver
- *  Copyright (c) 1994-2000 by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) 1994-2000 by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -26,9 +26,13 @@
 #include "config.h"
 #endif
 
-#include <linux/config.h>
 
-#define SNDRV_CARDS		8	/* number of supported soundcards - don't change - minor numbers */
+/* number of supported soundcards */
+#ifdef CONFIG_SND_DYNAMIC_MINORS
+#define SNDRV_CARDS 32
+#else
+#define SNDRV_CARDS 8		/* don't change - minor numbers */
+#endif
 
 #ifndef CONFIG_SND_MAJOR	/* standard configuration */
 #define CONFIG_SND_MAJOR	116
@@ -43,22 +47,5 @@
 #endif
 
 #include <linux/module.h>
-
-/*
- *  ==========================================================================
- */
-
-#ifdef CONFIG_SND_DEBUG_MEMORY
-#include <linux/slab.h>
-#include <linux/vmalloc.h>
-void *snd_wrapper_kmalloc(size_t, int);
-#undef kmalloc
-void snd_wrapper_kfree(const void *);
-#undef kfree
-void *snd_wrapper_vmalloc(size_t);
-#undef vmalloc
-void snd_wrapper_vfree(void *);
-#undef vfree
-#endif
 
 #endif /* __SOUND_DRIVER_H */

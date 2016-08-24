@@ -1,6 +1,5 @@
 /* $Id: lmc_media.c,v 1.13 2000/04/11 05:25:26 asj Exp $ */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/timer.h>
@@ -9,7 +8,6 @@
 #include <linux/ioport.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
 #include <linux/in.h>
 #include <linux/if_arp.h>
 #include <linux/netdevice.h>
@@ -46,14 +44,6 @@
   * This software may be used and distributed according to the terms
   * of the GNU General Public License version 2, incorporated herein by reference.
   */
-
-/*
- * For lack of a better place, put the SSI cable stuff here.
- */
-char *lmc_t1_cables[] = {
-  "V.10/RS423", "EIA530A", "reserved", "X.21", "V.35",
-  "EIA449/EIA530/V.36", "V.28/EIA232", "none", NULL
-};
 
 /*
  * protocol independent method.
@@ -900,16 +890,8 @@ write_av9110 (lmc_softc_t * sc, u_int32_t n, u_int32_t m, u_int32_t v,
 static void
 lmc_ssi_watchdog (lmc_softc_t * const sc)
 {
-  u_int16_t mii17;
-  struct ssicsr2
-  {
-    unsigned short dtr:1, dsr:1, rts:1, cable:3, crc:1, led0:1, led1:1,
-      led2:1, led3:1, fifo:1, ll:1, rl:1, tm:1, loop:1;
-  };
-  struct ssicsr2 *ssicsr;
-  mii17 = lmc_mii_readreg (sc, 0, 17);
-  ssicsr = (struct ssicsr2 *) &mii17;
-  if (ssicsr->cable == 7)
+  u_int16_t mii17 = lmc_mii_readreg (sc, 0, 17);
+  if (((mii17 >> 3) & 7) == 7)
     {
       lmc_led_off (sc, LMC_MII16_LED2);
     }

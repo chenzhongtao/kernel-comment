@@ -53,12 +53,10 @@
 #ifndef _LINUX_TIMEX_H
 #define _LINUX_TIMEX_H
 
-#include <linux/config.h>
 #include <linux/compiler.h>
 #include <linux/time.h>
 
 #include <asm/param.h>
-#include <asm/timex.h>
 
 /*
  * SHIFT_KG and SHIFT_KF establish the damping of the PLL and are chosen
@@ -71,62 +69,29 @@
  * zero to MAXTC, the PLL will converge in 15 minutes to 16 hours,
  * respectively.
  */
-#define SHIFT_KG 6		/* phase factor (shift) */
-#define SHIFT_KF 16		/* PLL frequency factor (shift) */
-#define SHIFT_KH 2		/* FLL frequency factor (shift) */
-#define MAXTC 6			/* maximum time constant (shift) */
+#define SHIFT_PLL	4	/* PLL frequency factor (shift) */
+#define SHIFT_FLL	2	/* FLL frequency factor (shift) */
+#define MAXTC		10	/* maximum time constant (shift) */
 
 /*
- * The SHIFT_SCALE define establishes the decimal point of the time_phase
- * variable which serves as an extension to the low-order bits of the
- * system clock variable. The SHIFT_UPDATE define establishes the decimal
- * point of the time_offset variable which represents the current offset
- * with respect to standard time. The FINENSEC define represents 1 nsec in
- * scaled units.
+ * The SHIFT_UPDATE define establishes the decimal point of the
+ * time_offset variable which represents the current offset with
+ * respect to standard time.
  *
  * SHIFT_USEC defines the scaling (shift) of the time_freq and
  * time_tolerance variables, which represent the current frequency
  * offset and maximum frequency tolerance.
- *
- * FINENSEC is 1 ns in SHIFT_UPDATE units of the time_phase variable.
  */
-#define SHIFT_SCALE 22		/* phase scale (shift) */
-#define SHIFT_UPDATE (SHIFT_KG + MAXTC) /* time offset scale (shift) */
+#define SHIFT_UPDATE (SHIFT_HZ + 1) /* time offset scale (shift) */
 #define SHIFT_USEC 16		/* frequency offset scale (shift) */
-#define FINENSEC (1L << (SHIFT_SCALE - 10)) /* ~1 ns in phase units */
+#define SHIFT_NSEC 12		/* kernel frequency offset scale */
 
 #define MAXPHASE 512000L        /* max phase error (us) */
 #define MAXFREQ (512L << SHIFT_USEC)  /* max frequency error (ppm) */
-#define MAXTIME (200L << PPS_AVG) /* max PPS error (jitter) (200 us) */
-#define MINSEC 16L              /* min interval between updates (s) */
-#define MAXSEC 1200L            /* max interval between updates (s) */
+#define MAXFREQ_NSEC (512000L << SHIFT_NSEC) /* max frequency error (ppb) */
+#define MINSEC 256		/* min interval between updates (s) */
+#define MAXSEC 2048		/* max interval between updates (s) */
 #define	NTP_PHASE_LIMIT	(MAXPHASE << 5)	/* beyond max. dispersion */
-
-/*
- * The following defines are used only if a pulse-per-second (PPS)
- * signal is available and connected via a modem control lead, such as
- * produced by the optional ppsclock feature incorporated in the Sun
- * asynch driver. They establish the design parameters of the frequency-
- * lock loop used to discipline the CPU clock oscillator to the PPS
- * signal.
- *
- * PPS_AVG is the averaging factor for the frequency loop, as well as
- * the time and frequency dispersion.
- *
- * PPS_SHIFT and PPS_SHIFTMAX specify the minimum and maximum
- * calibration intervals, respectively, in seconds as a power of two.
- *
- * PPS_VALID is the maximum interval before the PPS signal is considered
- * invalid and protocol updates used directly instead.
- *
- * MAXGLITCH is the maximum interval before a time offset of more than
- * MAXTIME is believed.
- */
-#define PPS_AVG 2		/* pps averaging constant (shift) */
-#define PPS_SHIFT 2		/* min interval duration (s) (shift) */
-#define PPS_SHIFTMAX 8		/* max interval duration (s) (shift) */
-#define PPS_VALID 120		/* pps signal watchdog max (s) */
-#define MAXGLITCH 30		/* pps signal glitch max (s) */
 
 /*
  * syscall interface - used (mainly by NTP daemon)
@@ -172,6 +137,7 @@ struct timex {
 #define ADJ_TIMECONST		0x0020	/* pll time constant */
 #define ADJ_TICK		0x4000	/* tick value */
 #define ADJ_OFFSET_SINGLESHOT	0x8001	/* old-fashioned adjtime */
+#define ADJ_OFFSET_SS_READ	0xa001  /* read-only adjtime */
 
 /* xntp 3.4 compatibility names */
 #define MOD_OFFSET	ADJ_OFFSET
@@ -219,6 +185,8 @@ struct timex {
 #define TIME_BAD	TIME_ERROR /* bw compat */
 
 #ifdef __KERNEL__
+#include <asm/timex.h>
+
 /*
  * kernel variables
  * Note: maximum error = NTP synch distance = dispersion + delay / 2;
@@ -231,91 +199,50 @@ extern int tickadj;			/* amount of adjustment per tick */
 /*
  * phase-lock loop variables
  */
-extern int time_state;		/* clock status */
 extern int time_status;		/* clock synchronization status bits */
-extern long time_offset;	/* time adjustment (us) */
-extern long time_constant;	/* pll time constant */
-extern long time_tolerance;	/* frequency tolerance (ppm) */
-extern long time_precision;	/* clock precision (us) */
 extern long time_maxerror;	/* maximum error */
 extern long time_esterror;	/* estimated error */
 
-extern long time_phase;		/* phase offset (scaled us) */
 extern long time_freq;		/* frequency offset (scaled ppm) */
-extern long time_adj;		/* tick adjust (scaled 1 / HZ) */
-extern long time_reftime;	/* time at last adjustment (s) */
 
 extern long time_adjust;	/* The amount of adjtime left */
-extern long time_next_adjust;	/* Value for time_adjust at next tick */
 
-/* interface variables pps->timer interrupt */
-extern long pps_offset;		/* pps time offset (us) */
-extern long pps_jitter;		/* time dispersion (jitter) (us) */
-extern long pps_freq;		/* frequency offset (scaled ppm) */
-extern long pps_stabil;		/* frequency dispersion (scaled ppm) */
-extern long pps_valid;		/* pps signal watchdog counter */
+extern void ntp_clear(void);
 
-/* interface variables pps->adjtimex */
-extern int pps_shift;		/* interval duration (s) (shift) */
-extern long pps_jitcnt;		/* jitter limit exceeded */
-extern long pps_calcnt;		/* calibration intervals */
-extern long pps_errcnt;		/* calibration errors */
-extern long pps_stbcnt;		/* stability limit exceeded */
-
-#ifdef CONFIG_TIME_INTERPOLATION
-
-#define TIME_SOURCE_CPU 0
-#define TIME_SOURCE_MMIO64 1
-#define TIME_SOURCE_MMIO32 2
-#define TIME_SOURCE_FUNCTION 3
-
-/* For proper operations time_interpolator clocks must run slightly slower
- * than the standard clock since the interpolator may only correct by having
- * time jump forward during a tick. A slower clock is usually a side effect
- * of the integer divide of the nanoseconds in a second by the frequency.
- * The accuracy of the division can be increased by specifying a shift.
- * However, this may cause the clock not to be slow enough.
- * The interpolator will self-tune the clock by slowing down if no
- * resets occur or speeding up if the time jumps per analysis cycle
- * become too high.
+/**
+ * ntp_synced - Returns 1 if the NTP status is not UNSYNC
  *
- * Setting jitter compensates for a fluctuating timesource by comparing
- * to the last value read from the timesource to insure that an earlier value
- * is not returned by a later call. The price to pay
- * for the compensation is that the timer routines are not as scalable anymore.
  */
-
-struct time_interpolator {
-	u16 source;			/* time source flags */
-	u8 shift;			/* increases accuracy of multiply by shifting. */
-				/* Note that bits may be lost if shift is set too high */
-	u8 jitter;			/* if set compensate for fluctuations */
-	u32 nsec_per_cyc;		/* set by register_time_interpolator() */
-	void *addr;			/* address of counter or function */
-	u64 mask;			/* mask the valid bits of the counter */
-	unsigned long offset;		/* nsec offset at last update of interpolator */
-	u64 last_counter;		/* counter value in units of the counter at last update */
-	u64 last_cycle;			/* Last timer value if TIME_SOURCE_JITTER is set */
-	u64 frequency;			/* frequency in counts/second */
-	long drift;			/* drift in parts-per-million (or -1) */
-	unsigned long skips;		/* skips forward */
-	unsigned long ns_skipped;	/* nanoseconds skipped */
-	struct time_interpolator *next;
-};
-
-extern void register_time_interpolator(struct time_interpolator *);
-extern void unregister_time_interpolator(struct time_interpolator *);
-extern void time_interpolator_reset(void);
-extern unsigned long time_interpolator_get_offset(void);
-
-#else /* !CONFIG_TIME_INTERPOLATION */
-
-static inline void
-time_interpolator_reset(void)
+static inline int ntp_synced(void)
 {
+	return !(time_status & STA_UNSYNC);
 }
 
-#endif /* !CONFIG_TIME_INTERPOLATION */
+/* Required to safely shift negative values */
+#define shift_right(x, s) ({	\
+	__typeof__(x) __x = (x);	\
+	__typeof__(s) __s = (s);	\
+	__x < 0 ? -(-__x >> __s) : __x >> __s;	\
+})
+
+#define TICK_LENGTH_SHIFT	32
+
+#ifdef CONFIG_NO_HZ
+#define NTP_INTERVAL_FREQ  (2)
+#else
+#define NTP_INTERVAL_FREQ  (HZ)
+#endif
+#define NTP_INTERVAL_LENGTH (NSEC_PER_SEC/NTP_INTERVAL_FREQ)
+
+/* Returns how long ticks are at present, in ns / 2^(SHIFT_SCALE-10). */
+extern u64 current_tick_length(void);
+
+extern void second_overflow(void);
+extern void update_ntp_one_tick(void);
+extern int do_adjtimex(struct timex *);
+
+/* Don't use! Compatibility define for existing users. */
+#define tickadj	(500/HZ ? : 1)
 
 #endif /* KERNEL */
 

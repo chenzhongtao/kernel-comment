@@ -26,22 +26,20 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/i2c.h>
-#include <linux/i2c-sensor.h>
+#include <linux/mutex.h>
 
 /* Addresses to scan */
 static unsigned short normal_i2c[] = { 0x50, 0x51, 0x52, 0x53, 0x54,
 					0x55, 0x56, 0x57, I2C_CLIENT_END };
-static unsigned int normal_isa[] = { I2C_CLIENT_ISA_END };
 
 /* Insmod parameters */
-SENSORS_INSMOD_1(eeprom);
+I2C_CLIENT_INSMOD_1(eeprom);
 
 
 /* Size of EEPROM in bytes */
@@ -56,7 +54,7 @@ enum eeprom_nature {
 /* Each client has this additional data */
 struct eeprom_data {
 	struct i2c_client client;
-	struct semaphore update_lock;
+	struct mutex update_lock;
 	u8 valid;			/* bitfield, bit!=0 if slice is valid */
 	unsigned long last_updated[8];	/* In jiffies, 8 slices */
 	u8 data[EEPROM_SIZE];		/* Register values */
@@ -70,10 +68,10 @@ static int eeprom_detach_client(struct i2c_client *client);
 
 /* This is the driver that will be inserted */
 static struct i2c_driver eeprom_driver = {
-	.owner		= THIS_MODULE,
-	.name		= "eeprom",
+	.driver = {
+		.name	= "eeprom",
+	},
 	.id		= I2C_DRIVERID_EEPROM,
-	.flags		= I2C_DF_NOTIFY,
 	.attach_adapter	= eeprom_attach_adapter,
 	.detach_client	= eeprom_detach_client,
 };
@@ -83,16 +81,17 @@ static void eeprom_update_client(struct i2c_client *client, u8 slice)
 	struct eeprom_data *data = i2c_get_clientdata(client);
 	int i, j;
 
-	down(&data->update_lock);
+	mutex_lock(&data->update_lock);
 
 	if (!(data->valid & (1 << slice)) ||
-	    (jiffies - data->last_updated[slice] > 300 * HZ) ||
-	    (jiffies < data->last_updated[slice])) {
+	    time_after(jiffies, data->last_updated[slice] + 300 * HZ)) {
 		dev_dbg(&client->dev, "Starting eeprom update, slice %u\n", slice);
 
 		if (i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_READ_I2C_BLOCK)) {
-			for (i = slice << 5; i < (slice + 1) << 5; i += I2C_SMBUS_I2C_BLOCK_MAX)
-				if (i2c_smbus_read_i2c_block_data(client, i, data->data + i) != I2C_SMBUS_I2C_BLOCK_MAX)
+			for (i = slice << 5; i < (slice + 1) << 5; i += 32)
+				if (i2c_smbus_read_i2c_block_data(client, i,
+							32, data->data + i)
+							!= 32)
 					goto exit;
 		} else {
 			if (i2c_smbus_write_byte(client, slice << 5)) {
@@ -110,10 +109,11 @@ static void eeprom_update_client(struct i2c_client *client, u8 slice)
 		data->valid |= (1 << slice);
 	}
 exit:
-	up(&data->update_lock);
+	mutex_unlock(&data->update_lock);
 }
 
-static ssize_t eeprom_read(struct kobject *kobj, char *buf, loff_t off, size_t count)
+static ssize_t eeprom_read(struct kobject *kobj, struct bin_attribute *bin_attr,
+			   char *buf, loff_t off, size_t count)
 {
 	struct i2c_client *client = to_i2c_client(container_of(kobj, struct device, kobj));
 	struct eeprom_data *data = i2c_get_clientdata(client);
@@ -128,13 +128,20 @@ static ssize_t eeprom_read(struct kobject *kobj, char *buf, loff_t off, size_t c
 	for (slice = off >> 5; slice <= (off + count - 1) >> 5; slice++)
 		eeprom_update_client(client, slice);
 
-	/* Hide Vaio security settings to regular users (16 first bytes) */
-	if (data->nature == VAIO && off < 16 && !capable(CAP_SYS_ADMIN)) {
-		size_t in_row1 = 16 - off;
-		in_row1 = min(in_row1, count);
-		memset(buf, 0, in_row1);
-		if (count - in_row1 > 0)
-			memcpy(buf + in_row1, &data->data[16], count - in_row1);
+	/* Hide Vaio private settings to regular users:
+	   - BIOS passwords: bytes 0x00 to 0x0f
+	   - UUID: bytes 0x10 to 0x1f
+	   - Serial number: 0xc0 to 0xdf */
+	if (data->nature == VAIO && !capable(CAP_SYS_ADMIN)) {
+		int i;
+
+		for (i = 0; i < count; i++) {
+			if ((off + i <= 0x1f) ||
+			    (off + i >= 0xc0 && off + i <= 0xdf))
+				buf[i] = 0;
+			else
+				buf[i] = data->data[off + i];
+		}
 	} else {
 		memcpy(buf, &data->data[off], count);
 	}
@@ -146,7 +153,6 @@ static struct bin_attribute eeprom_attr = {
 	.attr = {
 		.name = "eeprom",
 		.mode = S_IRUGO,
-		.owner = THIS_MODULE,
 	},
 	.size = EEPROM_SIZE,
 	.read = eeprom_read,
@@ -154,11 +160,11 @@ static struct bin_attribute eeprom_attr = {
 
 static int eeprom_attach_adapter(struct i2c_adapter *adapter)
 {
-	return i2c_detect(adapter, &addr_data, eeprom_detect);
+	return i2c_probe(adapter, &addr_data, eeprom_detect);
 }
 
-/* This function is called by i2c_detect */
-int eeprom_detect(struct i2c_adapter *adapter, int address, int kind)
+/* This function is called by i2c_probe */
+static int eeprom_detect(struct i2c_adapter *adapter, int address, int kind)
 {
 	struct i2c_client *new_client;
 	struct eeprom_data *data;
@@ -174,14 +180,10 @@ int eeprom_detect(struct i2c_adapter *adapter, int address, int kind)
 					    | I2C_FUNC_SMBUS_BYTE))
 		goto exit;
 
-	/* OK. For now, we presume we have a valid client. We now create the
-	   client structure, even though we cannot fill it completely yet.
-	   But it allows us to access eeprom_{read,write}_value. */
-	if (!(data = kmalloc(sizeof(struct eeprom_data), GFP_KERNEL))) {
+	if (!(data = kzalloc(sizeof(struct eeprom_data), GFP_KERNEL))) {
 		err = -ENOMEM;
 		goto exit;
 	}
-	memset(data, 0, sizeof(struct eeprom_data));
 
 	new_client = &data->client;
 	memset(data->data, 0xff, EEPROM_SIZE);
@@ -191,13 +193,10 @@ int eeprom_detect(struct i2c_adapter *adapter, int address, int kind)
 	new_client->driver = &eeprom_driver;
 	new_client->flags = 0;
 
-	/* prevent 24RF08 corruption */
-	i2c_smbus_write_quick(new_client, 0);
-
 	/* Fill in the remaining client fields */
 	strlcpy(new_client->name, "eeprom", I2C_NAME_SIZE);
 	data->valid = 0;
-	init_MUTEX(&data->update_lock);
+	mutex_init(&data->update_lock);
 	data->nature = UNKNOWN;
 
 	/* Tell the I2C layer a new client has arrived */
@@ -205,22 +204,31 @@ int eeprom_detect(struct i2c_adapter *adapter, int address, int kind)
 		goto exit_kfree;
 
 	/* Detect the Vaio nature of EEPROMs.
-	   We use the "PCG-" prefix as the signature. */
+	   We use the "PCG-" or "VGN-" prefix as the signature. */
 	if (address == 0x57) {
-		if (i2c_smbus_read_byte_data(new_client, 0x80) == 'P'
-		 && i2c_smbus_read_byte(new_client) == 'C'
-		 && i2c_smbus_read_byte(new_client) == 'G'
-		 && i2c_smbus_read_byte(new_client) == '-')
+		char name[4];
+
+		name[0] = i2c_smbus_read_byte_data(new_client, 0x80);
+		name[1] = i2c_smbus_read_byte(new_client);
+		name[2] = i2c_smbus_read_byte(new_client);
+		name[3] = i2c_smbus_read_byte(new_client);
+
+		if (!memcmp(name, "PCG-", 4) || !memcmp(name, "VGN-", 4)) {
 			dev_info(&new_client->dev, "Vaio EEPROM detected, "
-				"enabling password protection\n");
+				 "enabling privacy protection\n");
 			data->nature = VAIO;
+		}
 	}
 
 	/* create the sysfs eeprom file */
-	sysfs_create_bin_file(&new_client->dev.kobj, &eeprom_attr);
+	err = sysfs_create_bin_file(&new_client->dev.kobj, &eeprom_attr);
+	if (err)
+		goto exit_detach;
 
 	return 0;
 
+exit_detach:
+	i2c_detach_client(new_client);
 exit_kfree:
 	kfree(data);
 exit:
@@ -231,11 +239,11 @@ static int eeprom_detach_client(struct i2c_client *client)
 {
 	int err;
 
+	sysfs_remove_bin_file(&client->dev.kobj, &eeprom_attr);
+
 	err = i2c_detach_client(client);
-	if (err) {
-		dev_err(&client->dev, "Client deregistration failed, client not detached.\n");
+	if (err)
 		return err;
-	}
 
 	kfree(i2c_get_clientdata(client));
 

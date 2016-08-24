@@ -1,5 +1,4 @@
 /*
-    $Id: btcx-risc.c,v 1.5 2004/12/10 12:33:39 kraxel Exp $
 
     btcx-risc.c
 
@@ -24,7 +23,6 @@
 */
 
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
@@ -38,7 +36,7 @@ MODULE_DESCRIPTION("some code shared by bttv and cx88xx drivers");
 MODULE_AUTHOR("Gerd Knorr");
 MODULE_LICENSE("GPL");
 
-static unsigned int debug = 0;
+static unsigned int debug;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug,"debug messages, default is 0 (no)");
 
@@ -52,12 +50,13 @@ void btcx_riscmem_free(struct pci_dev *pci,
 {
 	if (NULL == risc->cpu)
 		return;
-	pci_free_consistent(pci, risc->size, risc->cpu, risc->dma);
-	memset(risc,0,sizeof(*risc));
 	if (debug) {
 		memcnt--;
-		printk("btcx: riscmem free [%d]\n",memcnt);
+		printk("btcx: riscmem free [%d] dma=%lx\n",
+		       memcnt, (unsigned long)risc->dma);
 	}
+	pci_free_consistent(pci, risc->size, risc->cpu, risc->dma);
+	memset(risc,0,sizeof(*risc));
 }
 
 int btcx_riscmem_alloc(struct pci_dev *pci,
@@ -78,7 +77,8 @@ int btcx_riscmem_alloc(struct pci_dev *pci,
 		risc->size = size;
 		if (debug) {
 			memcnt++;
-			printk("btcx: riscmem alloc size=%d [%d]\n",size,memcnt);
+			printk("btcx: riscmem alloc [%d] dma=%lx cpu=%p size=%d\n",
+			       memcnt, (unsigned long)dma, cpu, size);
 		}
 	}
 	memset(risc->cpu,0,risc->size);

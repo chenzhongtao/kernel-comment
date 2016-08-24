@@ -1,4 +1,4 @@
-/* 
+/*
  * Copyright (C) 2000 - 2003 Jeff Dike (jdike@addtoit.com)
  * Licensed under the GPL
  */
@@ -13,20 +13,23 @@
 #include "asm/page.h"
 #include "asm/fixmap.h"
 #include "asm/pgalloc.h"
-#include "user_util.h"
 #include "kern_util.h"
+#include "as-layout.h"
 #include "kern.h"
 #include "mem_user.h"
-#include "uml_uaccess.h"
+#include "um_uaccess.h"
 #include "os.h"
+#include "linux/types.h"
+#include "linux/string.h"
+#include "init.h"
+#include "kern_constants.h"
 
-extern char __binary_start;
-
-/* Changed during early boot */
+/* allocated in paging_init, zeroed in mem_init, and unchanged thereafter */
 unsigned long *empty_zero_page = NULL;
+/* allocated in paging_init and unchanged thereafter */
 unsigned long *empty_bad_page = NULL;
 pgd_t swapper_pg_dir[PTRS_PER_PGD];
-unsigned long highmem;
+unsigned long long highmem;
 int kmalloc_ok = 0;
 
 static unsigned long brk_end;
@@ -53,21 +56,16 @@ static void setup_highmem(unsigned long highmem_start,
 	for(i = 0; i < highmem_len >> PAGE_SHIFT; i++){
 		page = &mem_map[highmem_pfn + i];
 		ClearPageReserved(page);
-		set_bit(PG_highmem, &page->flags);
-		set_page_count(page, 1);
+		init_page_count(page);
 		__free_page(page);
 	}
 }
 #endif
 
-void mem_init(void)
+void __init mem_init(void)
 {
-	unsigned long start;
-
-	max_low_pfn = (high_physmem - uml_physmem) >> PAGE_SHIFT;
-
-        /* clear the zero-page */
-        memset((void *) empty_zero_page, 0, PAGE_SIZE);
+	/* clear the zero-page */
+	memset((void *) empty_zero_page, 0, PAGE_SIZE);
 
 	/* Map in the area just after the brk now that kmalloc is about
 	 * to be turned on.
@@ -78,17 +76,13 @@ void mem_init(void)
 	free_bootmem(__pa(brk_end), uml_reserved - brk_end);
 	uml_reserved = brk_end;
 
-	/* Fill in any hole at the start of the binary */
-	start = (unsigned long) &__binary_start & PAGE_MASK;
-	if(uml_physmem != start){
-		map_memory(uml_physmem, __pa(uml_physmem), start - uml_physmem,
-			   1, 1, 0);
-	}
-
 	/* this will put all low memory onto the freelists */
 	totalram_pages = free_all_bootmem();
+	max_low_pfn = totalram_pages;
+#ifdef CONFIG_HIGHMEM
 	totalhigh_pages = highmem >> PAGE_SHIFT;
 	totalram_pages += totalhigh_pages;
+#endif
 	num_physpages = totalram_pages;
 	max_pfn = totalram_pages;
 	printk(KERN_INFO "Memory: %luk available\n", 
@@ -100,12 +94,37 @@ void mem_init(void)
 #endif
 }
 
+/*
+ * Create a page table and place a pointer to it in a middle page
+ * directory entry.
+ */
+static void __init one_page_table_init(pmd_t *pmd)
+{
+	if (pmd_none(*pmd)) {
+		pte_t *pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+		set_pmd(pmd, __pmd(_KERNPG_TABLE +
+					   (unsigned long) __pa(pte)));
+		if (pte != pte_offset_kernel(pmd, 0))
+			BUG();
+	}
+}
+
+static void __init one_md_table_init(pud_t *pud)
+{
+#ifdef CONFIG_3_LEVEL_PGTABLES
+	pmd_t *pmd_table = (pmd_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+	set_pud(pud, __pud(_KERNPG_TABLE + (unsigned long) __pa(pmd_table)));
+	if (pmd_table != pmd_offset(pud, 0))
+		BUG();
+#endif
+}
+
 static void __init fixrange_init(unsigned long start, unsigned long end, 
 				 pgd_t *pgd_base)
 {
 	pgd_t *pgd;
+	pud_t *pud;
 	pmd_t *pmd;
-	pte_t *pte;
 	int i, j;
 	unsigned long vaddr;
 
@@ -115,15 +134,12 @@ static void __init fixrange_init(unsigned long start, unsigned long end,
 	pgd = pgd_base + i;
 
 	for ( ; (i < PTRS_PER_PGD) && (vaddr < end); pgd++, i++) {
-		pmd = (pmd_t *)pgd;
+		pud = pud_offset(pgd, vaddr);
+		if (pud_none(*pud))
+			one_md_table_init(pud);
+		pmd = pmd_offset(pud, vaddr);
 		for (; (j < PTRS_PER_PMD) && (vaddr != end); pmd++, j++) {
-			if (pmd_none(*pmd)) {
-				pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
-				set_pmd(pmd, __pmd(_KERNPG_TABLE + 
-						   (unsigned long) __pa(pte)));
-				if (pte != pte_offset_kernel(pmd, 0))
-					BUG();
-			}
+			one_page_table_init(pmd);
 			vaddr += PMD_SIZE;
 		}
 		j = 0;
@@ -138,7 +154,7 @@ pgprot_t kmap_prot;
 	pte_offset_kernel(pmd_offset(pud_offset(pgd_offset_k(vaddr), (vaddr)),\
  			  (vaddr)), (vaddr))
 
-void __init kmap_init(void)
+static void __init kmap_init(void)
 {
 	unsigned long kmap_vstart;
 
@@ -149,7 +165,7 @@ void __init kmap_init(void)
 	kmap_prot = PAGE_KERNEL;
 }
 
-static void init_highmem(void)
+static void __init init_highmem(void)
 {
 	pgd_t *pgd;
 	pud_t *pud;
@@ -175,7 +191,7 @@ static void init_highmem(void)
 
 static void __init fixaddr_user_init( void)
 {
-#if CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA
+#ifdef CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA
 	long size = FIXADDR_USER_END - FIXADDR_USER_START;
 	pgd_t *pgd;
 	pud_t *pud;
@@ -200,17 +216,21 @@ static void __init fixaddr_user_init( void)
 #endif
 }
 
-void paging_init(void)
+void __init paging_init(void)
 {
 	unsigned long zones_size[MAX_NR_ZONES], vaddr;
 	int i;
 
 	empty_zero_page = (unsigned long *) alloc_bootmem_low_pages(PAGE_SIZE);
 	empty_bad_page = (unsigned long *) alloc_bootmem_low_pages(PAGE_SIZE);
-	for(i=0;i<sizeof(zones_size)/sizeof(zones_size[0]);i++) 
+	for(i = 0; i < ARRAY_SIZE(zones_size); i++)
 		zones_size[i] = 0;
-	zones_size[0] = (end_iomem >> PAGE_SHIFT) - (uml_physmem >> PAGE_SHIFT);
-	zones_size[2] = highmem >> PAGE_SHIFT;
+
+	zones_size[ZONE_NORMAL] = (end_iomem >> PAGE_SHIFT) -
+		(uml_physmem >> PAGE_SHIFT);
+#ifdef CONFIG_HIGHMEM
+	zones_size[ZONE_HIGHMEM] = highmem >> PAGE_SHIFT;
+#endif
 	free_area_init(zones_size);
 
 	/*
@@ -227,14 +247,16 @@ void paging_init(void)
 #endif
 }
 
-struct page *arch_validate(struct page *page, int mask, int order)
+struct page *arch_validate(struct page *page, gfp_t mask, int order)
 {
 	unsigned long addr, zero = 0;
 	int i;
 
  again:
-	if(page == NULL) return(page);
-	if(PageHighMem(page)) return(page);
+	if(page == NULL)
+		return page;
+	if(PageHighMem(page))
+		return page;
 
 	addr = (unsigned long) page_address(page);
 	for(i = 0; i < (1 << order); i++){
@@ -243,13 +265,15 @@ struct page *arch_validate(struct page *page, int mask, int order)
 				     sizeof(zero),
 				     &current->thread.fault_addr,
 				     &current->thread.fault_catcher)){
-			if(!(mask & __GFP_WAIT)) return(NULL);
+			if(!(mask & __GFP_WAIT))
+				return NULL;
 			else break;
 		}
 		addr += PAGE_SIZE;
 	}
 
-	if(i == (1 << order)) return(page);
+	if(i == (1 << order))
+		return page;
 	page = alloc_pages(mask, order);
 	goto again;
 }
@@ -263,7 +287,6 @@ void free_initmem(void)
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
-
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
 	if (start < end)
@@ -271,42 +294,41 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 			(end - start) >> 10);
 	for (; start < end; start += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(start));
-		set_page_count(virt_to_page(start), 1);
+		init_page_count(virt_to_page(start));
 		free_page(start);
 		totalram_pages++;
 	}
 }
-	
 #endif
 
 void show_mem(void)
 {
-        int pfn, total = 0, reserved = 0;
-        int shared = 0, cached = 0;
-        int highmem = 0;
+	int pfn, total = 0, reserved = 0;
+	int shared = 0, cached = 0;
+	int highmem = 0;
 	struct page *page;
 
-        printk("Mem-info:\n");
-        show_free_areas();
-        printk("Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
-        pfn = max_mapnr;
-        while(pfn-- > 0) {
+	printk("Mem-info:\n");
+	show_free_areas();
+	printk("Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
+	pfn = max_mapnr;
+	while(pfn-- > 0) {
 		page = pfn_to_page(pfn);
-                total++;
-                if(PageHighMem(page))
-                        highmem++;
-                if(PageReserved(page))
-                        reserved++;
-                else if(PageSwapCache(page))
-                        cached++;
-                else if(page_count(page))
-                        shared += page_count(page) - 1;
-        }
-        printk("%d pages of RAM\n", total);
-        printk("%d pages of HIGHMEM\n", highmem);
-        printk("%d reserved pages\n", reserved);
-        printk("%d pages shared\n", shared);
-        printk("%d pages swap cached\n", cached);
+		total++;
+		if(PageHighMem(page))
+			highmem++;
+		if(PageReserved(page))
+			reserved++;
+		else if(PageSwapCache(page))
+			cached++;
+		else if(page_count(page))
+			shared += page_count(page) - 1;
+	}
+	printk("%d pages of RAM\n", total);
+	printk("%d pages of HIGHMEM\n", highmem);
+	printk("%d reserved pages\n", reserved);
+	printk("%d pages shared\n", shared);
+	printk("%d pages swap cached\n", cached);
 }
 
 /*
@@ -342,18 +364,7 @@ pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
 struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 {
 	struct page *pte;
-   
+
 	pte = alloc_page(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO);
 	return pte;
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

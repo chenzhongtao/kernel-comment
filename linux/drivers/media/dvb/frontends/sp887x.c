@@ -5,28 +5,25 @@
 /*
  * This driver needs external firmware. Please use the command
  * "<kerneldir>/Documentation/dvb/get_dvb_firmware sp887x" to
- * download/extract it, and then copy it to /usr/lib/hotplug/firmware.
+ * download/extract it, and then copy it to /usr/lib/hotplug/firmware
+ * or /lib/firmware (depending on configuration of firmware hotplug).
  */
 #define SP887X_DEFAULT_FIRMWARE "dvb-fe-sp887x.fw"
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/device.h>
 #include <linux/firmware.h>
+#include <linux/string.h>
+#include <linux/slab.h>
 
 #include "dvb_frontend.h"
 #include "sp887x.h"
 
 
 struct sp887x_state {
-
 	struct i2c_adapter* i2c;
-
-	struct dvb_frontend_ops ops;
-
 	const struct sp887x_config* config;
-
 	struct dvb_frontend frontend;
 
 	/* demodulator private data */
@@ -82,7 +79,7 @@ static int sp887x_readreg (struct sp887x_state* state, u16 reg)
 	u8 b1 [2];
 	int ret;
 	struct i2c_msg msg[] = {{ .addr = state->config->demod_address, .flags = 0, .buf = b0, .len = 2 },
-		         { .addr = state->config->demod_address, .flags = I2C_M_RD, .buf = b1, .len = 2 }};
+			 { .addr = state->config->demod_address, .flags = I2C_M_RD, .buf = b1, .len = 2 }};
 
 	if ((ret = i2c_transfer(state->i2c, msg, 2)) != 2) {
 		printk("%s: readreg error (ret == %i)\n", __FUNCTION__, ret);
@@ -139,7 +136,7 @@ static void sp887x_setup_agc (struct sp887x_state* state)
  */
 static int sp887x_initial_setup (struct dvb_frontend* fe, const struct firmware *fw)
 {
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+	struct sp887x_state* state = fe->demodulator_priv;
 	u8 buf [BLOCKSIZE+2];
 	int i;
 	int fw_size = fw->size;
@@ -209,15 +206,6 @@ static int sp887x_initial_setup (struct dvb_frontend* fe, const struct firmware 
 	/* bit 0x010: enable data valid signal */
 	sp887x_writereg(state, 0xd00, 0x010);
 	sp887x_writereg(state, 0x0d1, 0x000);
-
-	/* setup the PLL */
-	if (state->config->pll_init) {
-		sp887x_writereg(state, 0x206, 0x001);
-		state->config->pll_init(fe);
-		sp887x_writereg(state, 0x206, 0x000);
-	}
-
-	printk ("done.\n");
 	return 0;
 };
 
@@ -315,8 +303,8 @@ static void divide (int n, int d, int *quotient_i, int *quotient_f)
 }
 
 static void sp887x_correct_offsets (struct sp887x_state* state,
-			     struct dvb_frontend_parameters *p,
-			     int actual_freq)
+				    struct dvb_frontend_parameters *p,
+				    int actual_freq)
 {
 	static const u32 srate_correction [] = { 1879617, 4544878, 8098561 };
 	int bw_index = p->u.ofdm.bandwidth - BANDWIDTH_8_MHZ;
@@ -345,23 +333,10 @@ static void sp887x_correct_offsets (struct sp887x_state* state,
 	sp887x_writereg(state, 0x30a, frequency_shift & 0xfff);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 static int sp887x_setup_frontend_parameters (struct dvb_frontend* fe,
-				      struct dvb_frontend_parameters *p)
+					     struct dvb_frontend_parameters *p)
 {
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+	struct sp887x_state* state = fe->demodulator_priv;
 	int actual_freq, err;
 	u16 val, reg0xc05;
 
@@ -376,9 +351,16 @@ static int sp887x_setup_frontend_parameters (struct dvb_frontend* fe,
 	sp887x_microcontroller_stop(state);
 
 	/* setup the PLL */
-	sp887x_writereg(state, 0x206, 0x001);
-	actual_freq = state->config->pll_set(fe, p);
-	sp887x_writereg(state, 0x206, 0x000);
+	if (fe->ops.tuner_ops.set_params) {
+		fe->ops.tuner_ops.set_params(fe, p);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
+	}
+	if (fe->ops.tuner_ops.get_frequency) {
+		fe->ops.tuner_ops.get_frequency(fe, &actual_freq);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
+	} else {
+		actual_freq = p->frequency;
+	}
 
 	/* read status reg in order to clear <pending irqs */
 	sp887x_readreg(state, 0x200);
@@ -421,116 +403,127 @@ static int sp887x_setup_frontend_parameters (struct dvb_frontend* fe,
 }
 
 static int sp887x_read_status(struct dvb_frontend* fe, fe_status_t* status)
-	{
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+{
+	struct sp887x_state* state = fe->demodulator_priv;
 	u16 snr12 = sp887x_readreg(state, 0xf16);
 	u16 sync0x200 = sp887x_readreg(state, 0x200);
 	u16 sync0xf17 = sp887x_readreg(state, 0xf17);
 
-		*status = 0;
+	*status = 0;
 
-		if (snr12 > 0x00f)
-			*status |= FE_HAS_SIGNAL;
+	if (snr12 > 0x00f)
+		*status |= FE_HAS_SIGNAL;
 
-		//if (sync0x200 & 0x004)
-		//	*status |= FE_HAS_SYNC | FE_HAS_CARRIER;
+	//if (sync0x200 & 0x004)
+	//	*status |= FE_HAS_SYNC | FE_HAS_CARRIER;
 
-		//if (sync0x200 & 0x008)
-		//	*status |= FE_HAS_VITERBI;
+	//if (sync0x200 & 0x008)
+	//	*status |= FE_HAS_VITERBI;
 
-		if ((sync0xf17 & 0x00f) == 0x002) {
-			*status |= FE_HAS_LOCK;
-			*status |= FE_HAS_VITERBI | FE_HAS_SYNC | FE_HAS_CARRIER;
-		}
-
-		if (sync0x200 & 0x001) {	/* tuner adjustment requested...*/
-			int steps = (sync0x200 >> 4) & 0x00f;
-			if (steps & 0x008)
-				steps = -steps;
-			dprintk("sp887x: implement tuner adjustment (%+i steps)!!\n",
-			       steps);
-		}
-
-	return 0;
+	if ((sync0xf17 & 0x00f) == 0x002) {
+		*status |= FE_HAS_LOCK;
+		*status |= FE_HAS_VITERBI | FE_HAS_SYNC | FE_HAS_CARRIER;
 	}
 
+	if (sync0x200 & 0x001) {	/* tuner adjustment requested...*/
+		int steps = (sync0x200 >> 4) & 0x00f;
+		if (steps & 0x008)
+			steps = -steps;
+		dprintk("sp887x: implement tuner adjustment (%+i steps)!!\n",
+		       steps);
+	}
+
+	return 0;
+}
+
 static int sp887x_read_ber(struct dvb_frontend* fe, u32* ber)
-	{
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+{
+	struct sp887x_state* state = fe->demodulator_priv;
 
 	*ber = (sp887x_readreg(state, 0xc08) & 0x3f) |
 	       (sp887x_readreg(state, 0xc07) << 6);
 	sp887x_writereg(state, 0xc08, 0x000);
 	sp887x_writereg(state, 0xc07, 0x000);
-		if (*ber >= 0x3fff0)
-			*ber = ~0;
+	if (*ber >= 0x3fff0)
+		*ber = ~0;
 
 	return 0;
-	}
+}
 
 static int sp887x_read_signal_strength(struct dvb_frontend* fe, u16* strength)
-	{
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+{
+	struct sp887x_state* state = fe->demodulator_priv;
 
 	u16 snr12 = sp887x_readreg(state, 0xf16);
-		u32 signal = 3 * (snr12 << 4);
+	u32 signal = 3 * (snr12 << 4);
 	*strength = (signal < 0xffff) ? signal : 0xffff;
 
 	return 0;
-	}
+}
 
 static int sp887x_read_snr(struct dvb_frontend* fe, u16* snr)
-	{
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+{
+	struct sp887x_state* state = fe->demodulator_priv;
 
 	u16 snr12 = sp887x_readreg(state, 0xf16);
 	*snr = (snr12 << 4) | (snr12 >> 8);
 
-	        return 0;
-	}
+	return 0;
+}
 
 static int sp887x_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
 {
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+	struct sp887x_state* state = fe->demodulator_priv;
 
 	*ucblocks = sp887x_readreg(state, 0xc0c);
 	if (*ucblocks == 0xfff)
 		*ucblocks = ~0;
 
-        return 0;
+	return 0;
+}
+
+static int sp887x_i2c_gate_ctrl(struct dvb_frontend* fe, int enable)
+{
+	struct sp887x_state* state = fe->demodulator_priv;
+
+	if (enable) {
+		return sp887x_writereg(state, 0x206, 0x001);
+	} else {
+		return sp887x_writereg(state, 0x206, 0x000);
+	}
 }
 
 static int sp887x_sleep(struct dvb_frontend* fe)
 {
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+	struct sp887x_state* state = fe->demodulator_priv;
 
 	/* tristate TS output and disable interface pins */
 	sp887x_writereg(state, 0xc18, 0x000);
 
 	return 0;
-	}
+}
 
 static int sp887x_init(struct dvb_frontend* fe)
 {
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
-        const struct firmware *fw = NULL;
+	struct sp887x_state* state = fe->demodulator_priv;
+	const struct firmware *fw = NULL;
 	int ret;
 
 	if (!state->initialised) {
-	/* request the firmware, this will block until someone uploads it */
+		/* request the firmware, this will block until someone uploads it */
 		printk("sp887x: waiting for firmware upload (%s)...\n", SP887X_DEFAULT_FIRMWARE);
 		ret = state->config->request_firmware(fe, &fw, SP887X_DEFAULT_FIRMWARE);
-	if (ret) {
-		printk("sp887x: no firmware upload (timeout or file not found?)\n");
+		if (ret) {
+			printk("sp887x: no firmware upload (timeout or file not found?)\n");
 			return ret;
-	}
+		}
 
 		ret = sp887x_initial_setup(fe, fw);
-	if (ret) {
-		printk("sp887x: writing firmware to device failed\n");
-			release_firmware(fw);
+		release_firmware(fw);
+		if (ret) {
+			printk("sp887x: writing firmware to device failed\n");
 			return ret;
-	}
+		}
 		printk("sp887x: firmware upload complete\n");
 		state->initialised = 1;
 	}
@@ -543,15 +536,15 @@ static int sp887x_init(struct dvb_frontend* fe)
 
 static int sp887x_get_tune_settings(struct dvb_frontend* fe, struct dvb_frontend_tune_settings* fesettings)
 {
-        fesettings->min_delay_ms = 350;
-        fesettings->step_size = 166666*2;
-        fesettings->max_drift = (166666*2)+1;
-        return 0;
+	fesettings->min_delay_ms = 350;
+	fesettings->step_size = 166666*2;
+	fesettings->max_drift = (166666*2)+1;
+	return 0;
 }
 
 static void sp887x_release(struct dvb_frontend* fe)
 {
-	struct sp887x_state* state = (struct sp887x_state*) fe->demodulator_priv;
+	struct sp887x_state* state = fe->demodulator_priv;
 	kfree(state);
 }
 
@@ -563,25 +556,24 @@ struct dvb_frontend* sp887x_attach(const struct sp887x_config* config,
 	struct sp887x_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = (struct sp887x_state*) kmalloc(sizeof(struct sp887x_state), GFP_KERNEL);
+	state = kmalloc(sizeof(struct sp887x_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */
 	state->config = config;
 	state->i2c = i2c;
-	memcpy(&state->ops, &sp887x_ops, sizeof(struct dvb_frontend_ops));
 	state->initialised = 0;
 
 	/* check if the demod is there */
 	if (sp887x_readreg(state, 0x0200) < 0) goto error;
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &sp887x_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
 
 error:
-	if (state) kfree(state);
+	kfree(state);
 	return NULL;
 }
 
@@ -596,13 +588,14 @@ static struct dvb_frontend_ops sp887x_ops = {
 		.caps = FE_CAN_FEC_1_2 | FE_CAN_FEC_2_3 | FE_CAN_FEC_3_4 |
 			FE_CAN_FEC_5_6 | FE_CAN_FEC_7_8 | FE_CAN_FEC_AUTO |
 			FE_CAN_QPSK | FE_CAN_QAM_16 | FE_CAN_QAM_64 |
-	                FE_CAN_RECOVER
+			FE_CAN_RECOVER
 	},
 
 	.release = sp887x_release,
 
 	.init = sp887x_init,
 	.sleep = sp887x_sleep,
+	.i2c_gate_ctrl = sp887x_i2c_gate_ctrl,
 
 	.set_frontend = sp887x_setup_frontend_parameters,
 	.get_tune_settings = sp887x_get_tune_settings,

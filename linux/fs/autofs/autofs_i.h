@@ -37,8 +37,6 @@
 #define DPRINTK(D) ((void)0)
 #endif
 
-#define AUTOFS_SUPER_MAGIC 0x0187
-
 /*
  * If the daemon returns a negative response (AUTOFS_IOC_FAIL) then the
  * kernel will keep the negative response cached for up to the time given
@@ -103,8 +101,9 @@ struct autofs_symlink {
 struct autofs_sb_info {
 	u32 magic;
 	struct file *pipe;
-	pid_t oz_pgrp;
+	struct pid *oz_pgrp;
 	int catatonic;
+	struct super_block *sb;
 	unsigned long exp_timeout;
 	ino_t next_dir_ino;
 	struct autofs_wait_queue *queues; /* Wait queue pointer */
@@ -123,7 +122,7 @@ static inline struct autofs_sb_info *autofs_sbi(struct super_block *sb)
    filesystem without "magic".) */
 
 static inline int autofs_oz_mode(struct autofs_sb_info *sbi) {
-	return sbi->catatonic || process_group(current) == sbi->oz_pgrp;
+	return sbi->catatonic || task_pgrp(current) == sbi->oz_pgrp;
 }
 
 /* Hash operations */
@@ -134,7 +133,7 @@ void autofs_hash_insert(struct autofs_dirhash *,struct autofs_dir_ent *);
 void autofs_hash_delete(struct autofs_dir_ent *);
 struct autofs_dir_ent *autofs_hash_enum(const struct autofs_dirhash *,off_t *,struct autofs_dir_ent *);
 void autofs_hash_dputall(struct autofs_dirhash *);
-void autofs_hash_nuke(struct autofs_dirhash *);
+void autofs_hash_nuke(struct autofs_sb_info *);
 
 /* Expiration-handling functions */
 
@@ -143,13 +142,14 @@ struct autofs_dir_ent *autofs_expire(struct super_block *,struct autofs_sb_info 
 
 /* Operations structures */
 
-extern struct inode_operations autofs_root_inode_operations;
-extern struct inode_operations autofs_symlink_inode_operations;
-extern struct file_operations autofs_root_operations;
+extern const struct inode_operations autofs_root_inode_operations;
+extern const struct inode_operations autofs_symlink_inode_operations;
+extern const struct file_operations autofs_root_operations;
 
 /* Initializing function */
 
 int autofs_fill_super(struct super_block *, void *, int);
+void autofs_kill_sb(struct super_block *sb);
 
 /* Queue management functions */
 

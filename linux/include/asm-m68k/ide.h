@@ -31,7 +31,6 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 
 #include <asm/setup.h>
 #include <asm/io.h>
@@ -124,7 +123,7 @@ static __inline__ void ide_release_lock (void)
 }
 
 static __inline__ void
-ide_get_lock(irqreturn_t (*handler)(int, void *, struct pt_regs *), void *data)
+ide_get_lock(irq_handler_t handler, void *data)
 {
 	if (MACH_IS_ATARI) {
 		if (falconide_intr_lock == 0) {
@@ -138,7 +137,7 @@ ide_get_lock(irqreturn_t (*handler)(int, void *, struct pt_regs *), void *data)
 #endif /* CONFIG_BLK_DEV_FALCON_IDE */
 
 #define IDE_ARCH_ACK_INTR
-#define ide_ack_intr(hwif)	((hwif)->hw.ack_intr ? (hwif)->hw.ack_intr(hwif) : 1)
+#define ide_ack_intr(hwif)	((hwif)->ack_intr ? (hwif)->ack_intr(hwif) : 1)
 
 #endif /* __KERNEL__ */
 #endif /* _M68K_IDE_H */

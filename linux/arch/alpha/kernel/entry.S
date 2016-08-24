@@ -4,8 +4,7 @@
  * Kernel entry-points.
  */
 
-#include <linux/config.h>
-#include <asm/asm_offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/thread_info.h>
 #include <asm/pal.h>
 #include <asm/errno.h>
@@ -196,6 +195,7 @@ entUna:
 	stq	$26, 208($sp)
 	stq	$27, 216($sp)
 	stq	$28, 224($sp)
+	mov	$sp, $19
 	stq	$gp, 232($sp)
 	lda	$8, 0x3fff
 	stq	$31, 248($sp)
@@ -391,11 +391,10 @@ $work_resched:
 	bne	$2, $work_resched
 
 $work_notifysig:
-	mov	$sp, $17
+	mov	$sp, $16
 	br	$1, do_switch_stack
-	mov	$5, $21
-	mov	$sp, $18
-	mov	$31, $16
+	mov	$sp, $17
+	mov	$5, $18
 	jsr	$26, do_notify_resume
 	bsr	$1, undo_switch_stack
 	br	restore_all
@@ -655,12 +654,12 @@ kernel_thread:
 .end kernel_thread
 
 /*
- * execve(path, argv, envp)
+ * kernel_execve(path, argv, envp)
  */
 	.align	4
-	.globl	execve
-	.ent	execve
-execve:
+	.globl	kernel_execve
+	.ent	kernel_execve
+kernel_execve:
 	/* We can be called from a module.  */
 	ldgp	$gp, 0($27)
 	lda	$sp, -(32+SIZEOF_PT_REGS+8)($sp)
@@ -704,7 +703,7 @@ execve:
 
 1:	lda	$sp, 32+SIZEOF_PT_REGS+8($sp)
 	ret
-.end execve
+.end kernel_execve
 
 
 /*
@@ -878,17 +877,19 @@ sys_getxpid:
 
 	/* See linux/kernel/timer.c sys_getppid for discussion
 	   about this loop.  */
-	ldq	$3, TASK_REAL_PARENT($2)
-1:	ldl	$1, TASK_TGID($3)
+	ldq	$3, TASK_GROUP_LEADER($2)
+	ldq	$4, TASK_REAL_PARENT($3)
+	ldl	$0, TASK_TGID($2)
+1:	ldl	$1, TASK_TGID($4)
 #ifdef CONFIG_SMP
-	mov	$3, $4
+	mov	$4, $5
 	mb
-	ldq	$3, TASK_REAL_PARENT($2)
-	cmpeq	$3, $4, $4
-	beq	$4, 1b
+	ldq	$3, TASK_GROUP_LEADER($2)
+	ldq	$4, TASK_REAL_PARENT($3)
+	cmpeq	$4, $5, $5
+	beq	$5, 1b
 #endif
 	stq	$1, 80($sp)
-	ldl	$0, TASK_TGID($2)
 	ret
 .end sys_getxpid
 
@@ -914,15 +915,6 @@ sys_pipe:
 1:	lda	$sp, 16($sp)
 	ret
 .end sys_pipe
-
-	.align	4
-	.globl	sys_ptrace
-	.ent	sys_ptrace
-sys_ptrace:
-	.prologue 0
-	mov	$sp, $20
-	jmp	$31, do_sys_ptrace
-.end sys_ptrace
 
 	.align	4
 	.globl	sys_execve

@@ -20,12 +20,14 @@
 
 #ifndef __ASSEMBLY__
 
-#include <linux/config.h>
 #include <linux/threads.h>
+#include <linux/bitops.h>
 #include <asm/processor.h>
 #include <asm/addrspace.h>
-#include <asm/bitops.h>
 #include <asm/page.h>
+
+struct mm_struct;
+struct vm_area_struct;
 
 extern pgd_t swapper_pg_dir[1024];
 extern void paging_init(void);
@@ -51,7 +53,7 @@ extern unsigned long empty_zero_page[1024];
 #define PGDIR_MASK	(~(PGDIR_SIZE - 1))
 
 #define USER_PTRS_PER_PGD	(TASK_SIZE / PGDIR_SIZE)
-#define FIRST_USER_PGD_NR	0
+#define FIRST_USER_ADDRESS	0
 
 #ifndef __ASSEMBLY__
 /* Just any arbitrary offset to the start of the vmalloc VM area: the
@@ -176,7 +178,7 @@ extern unsigned long empty_zero_page[1024];
 /* page table for 0-4MB for everybody */
 
 #define pte_present(x)	(pte_val(x) & (_PAGE_PRESENT | _PAGE_PROTNONE))
-#define pte_clear(xp)	do { set_pte(xp, __pte(0)); } while (0)
+#define pte_clear(mm,addr,xp)	do { set_pte_at(mm, addr, xp, __pte(0)); } while (0)
 
 #define pmd_none(x)	(!pmd_val(x))
 #define pmd_present(x)	(pmd_val(x) & _PAGE_PRESENT)
@@ -189,16 +191,6 @@ extern unsigned long empty_zero_page[1024];
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
  */
-static inline int pte_read(pte_t pte)
-{
-	return pte_val(pte) & _PAGE_READ;
-}
-
-static inline int pte_exec(pte_t pte)
-{
-	return pte_val(pte) & _PAGE_EXEC;
-}
-
 static inline int pte_dirty(pte_t pte)
 {
 	return pte_val(pte) & _PAGE_DIRTY;
@@ -222,18 +214,6 @@ static inline int pte_file(pte_t pte)
 	return pte_val(pte) & _PAGE_FILE;
 }
 
-static inline pte_t pte_rdprotect(pte_t pte)
-{
-	pte_val(pte) &= ~_PAGE_READ;
-	return pte;
-}
-
-static inline pte_t pte_exprotect(pte_t pte)
-{
-	pte_val(pte) &= ~_PAGE_EXEC;
-	return pte;
-}
-
 static inline pte_t pte_mkclean(pte_t pte)
 {
 	pte_val(pte) &= ~_PAGE_DIRTY;
@@ -249,18 +229,6 @@ static inline pte_t pte_mkold(pte_t pte)
 static inline pte_t pte_wrprotect(pte_t pte)
 {
 	pte_val(pte) &= ~_PAGE_WRITE;
-	return pte;
-}
-
-static inline pte_t pte_mkread(pte_t pte)
-{
-	pte_val(pte) |= _PAGE_READ;
-	return pte;
-}
-
-static inline pte_t pte_mkexec(pte_t pte)
-{
-	pte_val(pte) |= _PAGE_EXEC;
 	return pte;
 }
 
@@ -282,24 +250,14 @@ static inline pte_t pte_mkwrite(pte_t pte)
 	return pte;
 }
 
-static inline  int ptep_test_and_clear_dirty(pte_t *ptep)
-{
-	return test_and_clear_bit(_PAGE_BIT_DIRTY, ptep);
-}
-
-static inline  int ptep_test_and_clear_young(pte_t *ptep)
+static inline  int ptep_test_and_clear_young(struct vm_area_struct *vma, unsigned long addr, pte_t *ptep)
 {
 	return test_and_clear_bit(_PAGE_BIT_ACCESSED, ptep);
 }
 
-static inline void ptep_set_wrprotect(pte_t *ptep)
+static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
 	clear_bit(_PAGE_BIT_WRITE, ptep);
-}
-
-static inline void ptep_mkdirty(pte_t *ptep)
-{
-	set_bit(_PAGE_BIT_DIRTY, ptep);
 }
 
 /*
@@ -329,8 +287,6 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 	return pte;
 }
 
-#define page_pte(page)	page_pte_prot(page, __pgprot(0))
-
 /*
  * Conversion functions: convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
@@ -341,7 +297,7 @@ static inline void pmd_set(pmd_t * pmdp, pte_t * ptep)
 	pmd_val(*pmdp) = (((unsigned long) ptep) & PAGE_MASK);
 }
 
-#define pmd_page_kernel(pmd)	\
+#define pmd_page_vaddr(pmd)	\
 	((unsigned long) __va(pmd_val(pmd) & PAGE_MASK))
 
 #ifndef CONFIG_DISCONTIGMEM
@@ -363,7 +319,7 @@ static inline void pmd_set(pmd_t * pmdp, pte_t * ptep)
 #define pte_index(address)	\
 	(((address) >> PAGE_SHIFT) & (PTRS_PER_PTE - 1))
 #define pte_offset_kernel(dir, address)	\
-	((pte_t *)pmd_page_kernel(*(dir)) + pte_index(address))
+	((pte_t *)pmd_page_vaddr(*(dir)) + pte_index(address))
 #define pte_offset_map(dir, address)	\
 	((pte_t *)page_address(pmd_page(*(dir))) + pte_index(address))
 #define pte_offset_map_nested(dir, address)	pte_offset_map(dir, address)
@@ -371,7 +327,7 @@ static inline void pmd_set(pmd_t * pmdp, pte_t * ptep)
 #define pte_unmap_nested(pte)	do { } while (0)
 
 /* Encode and de-code a swap entry */
-#define __swp_type(x)			(((x).val >> 2) & 0x3f)
+#define __swp_type(x)			(((x).val >> 2) & 0x1f)
 #define __swp_offset(x)			((x).val >> 10)
 #define __swp_entry(type, offset)	\
 	((swp_entry_t) { ((type) << 2) | ((offset) << 10) })
@@ -383,14 +339,12 @@ static inline void pmd_set(pmd_t * pmdp, pte_t * ptep)
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define kern_addr_valid(addr)	(1)
 
-#define io_remap_page_range(vma, vaddr, paddr, size, prot)	\
-	remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
+#define io_remap_pfn_range(vma, vaddr, pfn, size, prot)	\
+		remap_pfn_range(vma, vaddr, pfn, size, prot)
 
 #define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
-#define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_DIRTY
 #define __HAVE_ARCH_PTEP_GET_AND_CLEAR
 #define __HAVE_ARCH_PTEP_SET_WRPROTECT
-#define __HAVE_ARCH_PTEP_MKDIRTY
 #define __HAVE_ARCH_PTE_SAME
 #include <asm-generic/pgtable.h>
 

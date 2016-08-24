@@ -18,7 +18,6 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/adb.h>
 #include <linux/cuda.h>
 #include <linux/delay.h>
@@ -63,10 +62,10 @@ static volatile unsigned char *via;
 
 #undef DEBUG_MACIISI_ADB
 
-static struct adb_request* current_req = NULL;
-static struct adb_request* last_req = NULL;
+static struct adb_request* current_req;
+static struct adb_request* last_req;
 static unsigned char maciisi_rbuf[16];
-static unsigned char *reply_ptr = NULL;
+static unsigned char *reply_ptr;
 static int data_index;
 static int reading_reply;
 static int reply_len;
@@ -84,8 +83,8 @@ static int maciisi_init(void);
 static int maciisi_send_request(struct adb_request* req, int sync);
 static void maciisi_sync(struct adb_request *req);
 static int maciisi_write(struct adb_request* req);
-static irqreturn_t maciisi_interrupt(int irq, void* arg, struct pt_regs* regs);
-static void maciisi_input(unsigned char *buf, int nb, struct pt_regs *regs);
+static irqreturn_t maciisi_interrupt(int irq, void* arg);
+static void maciisi_input(unsigned char *buf, int nb);
 static int maciisi_init_via(void);
 static void maciisi_poll(void);
 static int maciisi_start(void);
@@ -294,6 +293,24 @@ static void maciisi_sync(struct adb_request *req)
 		printk(KERN_ERR "maciisi_send_request: poll timed out!\n");
 }
 
+int
+maciisi_request(struct adb_request *req, void (*done)(struct adb_request *),
+	    int nbytes, ...)
+{
+	va_list list;
+	int i;
+
+	req->nbytes = nbytes;
+	req->done = done;
+	req->reply_expected = 0;
+	va_start(list, nbytes);
+	for (i = 0; i < nbytes; i++)
+		req->data[i++] = va_arg(list, int);
+	va_end(list);
+
+	return maciisi_send_request(req, 1);
+}
+
 /* Enqueue a request, and run the queue if possible */
 static int
 maciisi_write(struct adb_request* req)
@@ -308,7 +325,7 @@ maciisi_write(struct adb_request* req)
 		req->complete = 1;
 		return -EINVAL;
 	}
-	req->next = 0;
+	req->next = NULL;
 	req->sent = 0;
 	req->complete = 0;
 	req->reply_len = 0;
@@ -403,7 +420,7 @@ maciisi_poll(void)
 
 	local_irq_save(flags);
 	if (via[IFR] & SR_INT) {
-		maciisi_interrupt(0, 0, 0);
+		maciisi_interrupt(0, NULL);
 	}
 	else /* avoid calling this function too quickly in a loop */
 		udelay(ADB_DELAY);
@@ -415,7 +432,7 @@ maciisi_poll(void)
    register is either full or empty. In practice, I have no idea what
    it means :( */
 static irqreturn_t
-maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
+maciisi_interrupt(int irq, void* arg)
 {
 	int status;
 	struct adb_request *req;
@@ -594,7 +611,7 @@ maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
 			/* Obviously, we got it */
 			reading_reply = 0;
 		} else {
-			maciisi_input(maciisi_rbuf, reply_ptr - maciisi_rbuf, regs);
+			maciisi_input(maciisi_rbuf, reply_ptr - maciisi_rbuf);
 		}
 		maciisi_state = idle;
 		status = via[B] & (TIP|TREQ);
@@ -639,7 +656,7 @@ maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
 }
 
 static void
-maciisi_input(unsigned char *buf, int nb, struct pt_regs *regs)
+maciisi_input(unsigned char *buf, int nb)
 {
 #ifdef DEBUG_MACIISI_ADB
     int i;
@@ -647,7 +664,7 @@ maciisi_input(unsigned char *buf, int nb, struct pt_regs *regs)
 
     switch (buf[0]) {
     case ADB_PACKET:
-	    adb_input(buf+2, nb-2, regs, buf[1] & 0x40);
+	    adb_input(buf+2, nb-2, buf[1] & 0x40);
 	    break;
     default:
 #ifdef DEBUG_MACIISI_ADB

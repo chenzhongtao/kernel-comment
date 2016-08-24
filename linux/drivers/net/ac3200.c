@@ -45,7 +45,7 @@ static const char version[] =
 #define AC_NIC_BASE	0x00
 #define AC_SA_PROM	0x16			/* The station address PROM. */
 #define AC_ADDR0	0x00			/* Prefix station address values. */
-#define AC_ADDR1	0x40			
+#define AC_ADDR1	0x40
 #define AC_ADDR2	0x90
 #define AC_ID_PORT	0xC80
 #define AC_EISA_ID	0x0110d305
@@ -89,7 +89,7 @@ static void ac_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 					int ring_page);
 
 static int ac_close_card(struct net_device *dev);
-
+
 
 /*	Probe for the AC3200.
 
@@ -102,8 +102,6 @@ static int __init do_ac3200_probe(struct net_device *dev)
 	unsigned short ioaddr = dev->base_addr;
 	int irq = dev->irq;
 	int mem_start = dev->mem_start;
-
-	SET_MODULE_OWNER(dev);
 
 	if (ioaddr > 0x1ff)		/* Check a single specified location. */
 		return ac_probe1(ioaddr, dev);
@@ -123,14 +121,6 @@ static int __init do_ac3200_probe(struct net_device *dev)
 	return -ENODEV;
 }
 
-static void cleanup_card(struct net_device *dev)
-{
-	/* Someday free_irq may be in ac_close_card() */
-	free_irq(dev->irq, dev);
-	release_region(dev->base_addr, AC_IO_EXTENT);
-	iounmap(ei_status.mem);
-}
-
 #ifndef MODULE
 struct net_device * __init ac3200_probe(int unit)
 {
@@ -146,12 +136,7 @@ struct net_device * __init ac3200_probe(int unit)
 	err = do_ac3200_probe(dev);
 	if (err)
 		goto out;
-	err = register_netdev(dev);
-	if (err)
-		goto out1;
 	return dev;
-out1:
-	cleanup_card(dev);
 out:
 	free_netdev(dev);
 	return ERR_PTR(err);
@@ -161,6 +146,7 @@ out:
 static int __init ac_probe1(int ioaddr, struct net_device *dev)
 {
 	int i, retval;
+	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr, AC_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
@@ -182,10 +168,11 @@ static int __init ac_probe1(int ioaddr, struct net_device *dev)
 		   inb(ioaddr + AC_ID_PORT + 2), inb(ioaddr + AC_ID_PORT + 3));
 #endif
 
-	printk("AC3200 in EISA slot %d, node", ioaddr/0x1000);
-	for(i = 0; i < 6; i++)
-		printk(" %02x", dev->dev_addr[i] = inb(ioaddr + AC_SA_PROM + i));
+	for (i = 0; i < 6; i++)
+		dev->dev_addr[i] = inb(ioaddr + AC_SA_PROM + i);
 
+	printk(KERN_DEBUG "AC3200 in EISA slot %d, node %s",
+	       ioaddr/0x1000, print_mac(mac, dev->dev_addr));
 #if 0
 	/* Check the vendor ID/prefix. Redundant after checking the EISA ID */
 	if (inb(ioaddr + AC_SA_PROM + 0) != AC_ADDR0
@@ -230,7 +217,7 @@ static int __init ac_probe1(int ioaddr, struct net_device *dev)
 	dev->if_port = inb(ioaddr + AC_CONFIG) >> 6;
 	dev->mem_start = config2mem(inb(ioaddr + AC_CONFIG));
 
-	printk("%s: AC3200 at %#3x with %dkB memory at physical address %#lx.\n", 
+	printk("%s: AC3200 at %#3x with %dkB memory at physical address %#lx.\n",
 			dev->name, ioaddr, AC_STOP_PG/4, dev->mem_start);
 
 	/*
@@ -273,7 +260,14 @@ static int __init ac_probe1(int ioaddr, struct net_device *dev)
 	dev->poll_controller = ei_poll;
 #endif
 	NS8390_init(dev, 0);
+
+	retval = register_netdev(dev);
+	if (retval)
+		goto out2;
 	return 0;
+out2:
+	if (ei_status.reg0)
+		iounmap(ei_status.mem);
 out1:
 	free_irq(dev->irq, dev);
 out:
@@ -333,8 +327,7 @@ static void ac_block_input(struct net_device *dev, int count, struct sk_buff *sk
 		memcpy_fromio(skb->data + semi_count,
 				ei_status.mem + TX_PAGES*256, count);
 	} else {
-		/* Packet is in one chunk -- we can copy + cksum. */
-		eth_io_copy_and_sum(skb, start, count, 0);
+		memcpy_fromio(skb->data, start, count);
 	}
 }
 
@@ -376,8 +369,7 @@ MODULE_PARM_DESC(mem, "Memory base address(es)");
 MODULE_DESCRIPTION("Ansel AC3200 EISA ethernet driver");
 MODULE_LICENSE("GPL");
 
-int
-init_module(void)
+int __init init_module(void)
 {
 	struct net_device *dev;
 	int this_dev, found = 0;
@@ -392,11 +384,8 @@ init_module(void)
 		dev->base_addr = io[this_dev];
 		dev->mem_start = mem[this_dev];		/* Currently ignored by driver */
 		if (do_ac3200_probe(dev) == 0) {
-			if (register_netdev(dev) == 0) {
-				dev_ac32[found++] = dev;
-				continue;
-			}
-			cleanup_card(dev);
+			dev_ac32[found++] = dev;
+			continue;
 		}
 		free_netdev(dev);
 		printk(KERN_WARNING "ac3200.c: No ac3200 card found (i/o = 0x%x).\n", io[this_dev]);
@@ -407,7 +396,15 @@ init_module(void)
 	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	/* Someday free_irq may be in ac_close_card() */
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, AC_IO_EXTENT);
+	iounmap(ei_status.mem);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;

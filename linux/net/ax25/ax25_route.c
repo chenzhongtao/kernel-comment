@@ -11,6 +11,8 @@
  * Copyright (C) Hans-Joachim Hetscher DD8NE (dd8ne@bnv-bamberg.de)
  * Copyright (C) Frederic Rible F1OAT (frible@teaser.fr)
  */
+
+#include <linux/capability.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -39,8 +41,6 @@
 static ax25_route *ax25_route_list;
 static DEFINE_RWLOCK(ax25_route_lock);
 
-static ax25_route *ax25_get_route(ax25_address *, struct net_device *);
-
 void ax25_rt_device_down(struct net_device *dev)
 {
 	ax25_route *s, *t, *ax25_rt;
@@ -54,15 +54,13 @@ void ax25_rt_device_down(struct net_device *dev)
 		if (s->dev == dev) {
 			if (ax25_route_list == s) {
 				ax25_route_list = s->next;
-				if (s->digipeat != NULL)
-					kfree(s->digipeat);
+				kfree(s->digipeat);
 				kfree(s);
 			} else {
 				for (t = ax25_route_list; t != NULL; t = t->next) {
 					if (t->next == s) {
 						t->next = s->next;
-						if (s->digipeat != NULL)
-							kfree(s->digipeat);
+						kfree(s->digipeat);
 						kfree(s);
 						break;
 					}
@@ -73,7 +71,7 @@ void ax25_rt_device_down(struct net_device *dev)
 	write_unlock(&ax25_route_lock);
 }
 
-static int ax25_rt_add(struct ax25_routes_struct *route)
+static int __must_check ax25_rt_add(struct ax25_routes_struct *route)
 {
 	ax25_route *ax25_rt;
 	ax25_dev *ax25_dev;
@@ -89,11 +87,9 @@ static int ax25_rt_add(struct ax25_routes_struct *route)
 	ax25_rt = ax25_route_list;
 	while (ax25_rt != NULL) {
 		if (ax25cmp(&ax25_rt->callsign, &route->dest_addr) == 0 &&
-		            ax25_rt->dev == ax25_dev->dev) {
-			if (ax25_rt->digipeat != NULL) {
-				kfree(ax25_rt->digipeat);
-				ax25_rt->digipeat = NULL;
-			}
+			    ax25_rt->dev == ax25_dev->dev) {
+			kfree(ax25_rt->digipeat);
+			ax25_rt->digipeat = NULL;
 			if (route->digi_count != 0) {
 				if ((ax25_rt->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL) {
 					write_unlock(&ax25_route_lock);
@@ -117,7 +113,7 @@ static int ax25_rt_add(struct ax25_routes_struct *route)
 		return -ENOMEM;
 	}
 
-	atomic_set(&ax25_rt->ref, 0);
+	atomic_set(&ax25_rt->refcount, 1);
 	ax25_rt->callsign     = route->dest_addr;
 	ax25_rt->dev          = ax25_dev->dev;
 	ax25_rt->digipeat     = NULL;
@@ -142,24 +138,10 @@ static int ax25_rt_add(struct ax25_routes_struct *route)
 	return 0;
 }
 
-static void ax25_rt_destroy(ax25_route *ax25_rt)
+void __ax25_put_route(ax25_route *ax25_rt)
 {
-	if (atomic_read(&ax25_rt->ref) == 0) {
-		if (ax25_rt->digipeat != NULL)
-			kfree(ax25_rt->digipeat);
-		kfree(ax25_rt);
-		return;
-	}
-
-	/*
-	 * Uh...  Route is still in use; we can't yet destroy it.  Retry later.
-	 */
-	init_timer(&ax25_rt->timer);
-	ax25_rt->timer.data	= (unsigned long) ax25_rt;
-	ax25_rt->timer.function	= (void *) ax25_rt_destroy;
-	ax25_rt->timer.expires	= jiffies + 5 * HZ;
-
-	add_timer(&ax25_rt->timer);
+	kfree(ax25_rt->digipeat);
+	kfree(ax25_rt);
 }
 
 static int ax25_rt_del(struct ax25_routes_struct *route)
@@ -180,12 +162,12 @@ static int ax25_rt_del(struct ax25_routes_struct *route)
 		    ax25cmp(&route->dest_addr, &s->callsign) == 0) {
 			if (ax25_route_list == s) {
 				ax25_route_list = s->next;
-				ax25_rt_destroy(s);
+				ax25_put_route(s);
 			} else {
 				for (t = ax25_route_list; t != NULL; t = t->next) {
 					if (t->next == s) {
 						t->next = s->next;
-						ax25_rt_destroy(s);
+						ax25_put_route(s);
 						break;
 					}
 				}
@@ -270,8 +252,8 @@ static void *ax25_rt_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	struct ax25_route *ax25_rt;
 	int i = 1;
- 
- 	read_lock(&ax25_route_lock);
+
+	read_lock(&ax25_route_lock);
 	if (*pos == 0)
 		return SEQ_START_TOKEN;
 
@@ -287,7 +269,7 @@ static void *ax25_rt_seq_start(struct seq_file *seq, loff_t *pos)
 static void *ax25_rt_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	++*pos;
-	return (v == SEQ_START_TOKEN) ? ax25_route_list : 
+	return (v == SEQ_START_TOKEN) ? ax25_route_list :
 		((struct ax25_route *) v)->next;
 }
 
@@ -298,6 +280,8 @@ static void ax25_rt_seq_stop(struct seq_file *seq, void *v)
 
 static int ax25_rt_seq_show(struct seq_file *seq, void *v)
 {
+	char buf[11];
+
 	if (v == SEQ_START_TOKEN)
 		seq_puts(seq, "callsign  dev  mode digipeaters\n");
 	else {
@@ -308,7 +292,7 @@ static int ax25_rt_seq_show(struct seq_file *seq, void *v)
 		if (ax25cmp(&ax25_rt->callsign, &null_ax25_address) == 0)
 			callsign = "default";
 		else
-			callsign = ax2asc(&ax25_rt->callsign);
+			callsign = ax2asc(buf, &ax25_rt->callsign);
 
 		seq_printf(seq, "%-9s %-4s",
 			callsign,
@@ -328,14 +312,15 @@ static int ax25_rt_seq_show(struct seq_file *seq, void *v)
 
 		if (ax25_rt->digipeat != NULL)
 			for (i = 0; i < ax25_rt->digipeat->ndigi; i++)
-				seq_printf(seq, " %s", ax2asc(&ax25_rt->digipeat->calls[i]));
+				seq_printf(seq, " %s",
+				     ax2asc(buf, &ax25_rt->digipeat->calls[i]));
 
 		seq_puts(seq, "\n");
 	}
 	return 0;
 }
 
-static struct seq_operations ax25_rt_seqops = {
+static const struct seq_operations ax25_rt_seqops = {
 	.start = ax25_rt_seq_start,
 	.next = ax25_rt_seq_next,
 	.stop = ax25_rt_seq_stop,
@@ -347,7 +332,7 @@ static int ax25_rt_info_open(struct inode *inode, struct file *file)
 	return seq_open(file, &ax25_rt_seqops);
 }
 
-struct file_operations ax25_route_fops = {
+const struct file_operations ax25_route_fops = {
 	.owner = THIS_MODULE,
 	.open = ax25_rt_info_open,
 	.read = seq_read,
@@ -360,9 +345,9 @@ struct file_operations ax25_route_fops = {
 /*
  *	Find AX.25 route
  *
- *	Only routes with a refernce rout of zero can be destroyed.
+ *	Only routes with a reference count of zero can be destroyed.
  */
-static ax25_route *ax25_get_route(ax25_address *addr, struct net_device *dev)
+ax25_route *ax25_get_route(ax25_address *addr, struct net_device *dev)
 {
 	ax25_route *ax25_spe_rt = NULL;
 	ax25_route *ax25_def_rt = NULL;
@@ -392,7 +377,7 @@ static ax25_route *ax25_get_route(ax25_address *addr, struct net_device *dev)
 		ax25_rt = ax25_spe_rt;
 
 	if (ax25_rt != NULL)
-		atomic_inc(&ax25_rt->ref);
+		ax25_hold_route(ax25_rt);
 
 	read_unlock(&ax25_route_lock);
 
@@ -422,8 +407,8 @@ static inline void ax25_adjust_path(ax25_address *addr, ax25_digi *digipeat)
  */
 int ax25_rt_autobind(ax25_cb *ax25, ax25_address *addr)
 {
+	ax25_uid_assoc *user;
 	ax25_route *ax25_rt;
-	ax25_address *call;
 	int err;
 
 	if ((ax25_rt = ax25_get_route(addr, NULL)) == NULL)
@@ -434,28 +419,31 @@ int ax25_rt_autobind(ax25_cb *ax25, ax25_address *addr)
 		goto put;
 	}
 
-	if ((call = ax25_findbyuid(current->euid)) == NULL) {
+	user = ax25_findbyuid(current->euid);
+	if (user) {
+		ax25->source_addr = user->call;
+		ax25_uid_put(user);
+	} else {
 		if (ax25_uid_policy && !capable(CAP_NET_BIND_SERVICE)) {
 			err = -EPERM;
 			goto put;
 		}
-		call = (ax25_address *)ax25->ax25_dev->dev->dev_addr;
+		ax25->source_addr = *(ax25_address *)ax25->ax25_dev->dev->dev_addr;
 	}
 
-	ax25->source_addr = *call;
-
 	if (ax25_rt->digipeat != NULL) {
-		if ((ax25->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL) {
+		ax25->digipeat = kmemdup(ax25_rt->digipeat, sizeof(ax25_digi),
+					 GFP_ATOMIC);
+		if (ax25->digipeat == NULL) {
 			err = -ENOMEM;
 			goto put;
 		}
-		memcpy(ax25->digipeat, ax25_rt->digipeat, sizeof(ax25_digi));
 		ax25_adjust_path(addr, ax25->digipeat);
 	}
 
 	if (ax25->sk != NULL) {
 		bh_lock_sock(ax25->sk);
-		ax25->sk->sk_zapped = 0;
+		sock_reset_flag(ax25->sk, SOCK_ZAPPED);
 		bh_unlock_sock(ax25->sk);
 	}
 
@@ -463,24 +451,6 @@ put:
 	ax25_put_route(ax25_rt);
 
 	return 0;
-}
-
-ax25_route *ax25_rt_find_route(ax25_route * route, ax25_address *addr,
-	struct net_device *dev)
-{
-	ax25_route *ax25_rt;
-
-	if ((ax25_rt = ax25_get_route(addr, dev)))
-		return ax25_rt;
-
-	route->next     = NULL;
-	atomic_set(&route->ref, 1);
-	route->callsign = *addr;
-	route->dev      = dev;
-	route->digipeat = NULL;
-	route->ip_mode  = ' ';
-
-	return route;
 }
 
 struct sk_buff *ax25_rt_build_path(struct sk_buff *skb, ax25_address *src,
@@ -525,9 +495,7 @@ void __exit ax25_rt_free(void)
 		s       = ax25_rt;
 		ax25_rt = ax25_rt->next;
 
-		if (s->digipeat != NULL)
-			kfree(s->digipeat);
-
+		kfree(s->digipeat);
 		kfree(s);
 	}
 	write_unlock(&ax25_route_lock);

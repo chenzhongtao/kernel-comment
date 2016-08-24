@@ -34,6 +34,7 @@
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/wait.h>
 
 #include <asm/atari_stdma.h>
 #include <asm/atariints.h>
@@ -43,7 +44,7 @@
 
 static int stdma_locked;			/* the semaphore */
 						/* int func to be called */
-static irqreturn_t (*stdma_isr)(int, void *, struct pt_regs *);
+static irq_handler_t stdma_isr;
 static void *stdma_isr_data;			/* data passed to isr */
 static DECLARE_WAIT_QUEUE_HEAD(stdma_wait);	/* wait queue for ST-DMA */
 
@@ -52,7 +53,7 @@ static DECLARE_WAIT_QUEUE_HEAD(stdma_wait);	/* wait queue for ST-DMA */
 
 /***************************** Prototypes *****************************/
 
-static irqreturn_t stdma_int (int irq, void *dummy, struct pt_regs *fp);
+static irqreturn_t stdma_int (int irq, void *dummy);
 
 /************************* End of Prototypes **************************/
 
@@ -74,18 +75,16 @@ static irqreturn_t stdma_int (int irq, void *dummy, struct pt_regs *fp);
  *
  */
 
-void stdma_lock(irqreturn_t (*handler)(int, void *, struct pt_regs *),
-		void *data)
+void stdma_lock(irq_handler_t handler, void *data)
 {
 	unsigned long flags;
 
 	local_irq_save(flags);		/* protect lock */
 
-	while(stdma_locked)
-		/* Since the DMA is used for file system purposes, we
-		 have to sleep uninterruptible (there may be locked
-		 buffers) */
-		sleep_on(&stdma_wait);
+	/* Since the DMA is used for file system purposes, we
+	 have to sleep uninterruptible (there may be locked
+	 buffers) */
+	wait_event(stdma_wait, !stdma_locked);
 
 	stdma_locked   = 1;
 	stdma_isr      = handler;
@@ -175,7 +174,7 @@ int stdma_islocked(void)
 void __init stdma_init(void)
 {
 	stdma_isr = NULL;
-	request_irq(IRQ_MFP_FDC, stdma_int, IRQ_TYPE_SLOW,
+	request_irq(IRQ_MFP_FDC, stdma_int, IRQ_TYPE_SLOW | IRQF_SHARED,
 	            "ST-DMA: floppy/ACSI/IDE/Falcon-SCSI", stdma_int);
 }
 
@@ -188,9 +187,9 @@ void __init stdma_init(void)
  *
  */
 
-static irqreturn_t stdma_int(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t stdma_int(int irq, void *dummy)
 {
   if (stdma_isr)
-      (*stdma_isr)(irq, stdma_isr_data, fp);
+      (*stdma_isr)(irq, stdma_isr_data);
   return IRQ_HANDLED;
 }

@@ -10,7 +10,6 @@
  *		"A Kernel Model for Precision Timekeeping" by Dave Mills
  */
 
-#include <linux/config.h> /* CONFIG_HEARTBEAT */
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -26,19 +25,7 @@
 
 #include "mach.h"
 
-u64 jiffies_64 = INITIAL_JIFFIES;
-
-EXPORT_SYMBOL(jiffies_64);
-
 #define TICK_SIZE	(tick_nsec / 1000)
-
-/*
- * Scheduler clock - returns current time in nanosec units.
- */
-unsigned long long sched_clock(void)
-{
-	return (unsigned long long)jiffies * (1000000000 / HZ);
-}
 
 /*
  * timer_interrupt() needs to keep up the real-time clock,
@@ -55,7 +42,7 @@ static irqreturn_t timer_interrupt (int irq, void *dummy, struct pt_regs *regs)
 	if (mach_tick)
 	  mach_tick ();
 
-	do_timer (regs);
+	do_timer (1);
 #ifndef CONFIG_SMP
 	update_process_times(user_mode(regs));
 #endif
@@ -66,7 +53,7 @@ static irqreturn_t timer_interrupt (int irq, void *dummy, struct pt_regs *regs)
 	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
 	 * called as close as possible to 500 ms before the new second starts.
 	 */
-	if ((time_status & STA_UNSYNC) == 0 &&
+	if (ntp_synced() &&
 	    xtime.tv_sec > last_rtc_update + 660 &&
 	    (xtime.tv_nsec / 1000) >= 500000 - ((unsigned) TICK_SIZE) / 2 &&
 	    (xtime.tv_nsec / 1000) <= 500000 + ((unsigned) TICK_SIZE) / 2) {
@@ -103,92 +90,13 @@ static irqreturn_t timer_interrupt (int irq, void *dummy, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-/*
- * This version of gettimeofday has near microsecond resolution.
- */
-void do_gettimeofday (struct timeval *tv)
-{
-#if 0 /* DAVIDM later if possible */
-	extern volatile unsigned long lost_ticks;
-	unsigned long lost;
-#endif
-	unsigned long flags;
-	unsigned long usec, sec;
-	unsigned long seq;
-
-	do {
-		seq = read_seqbegin_irqsave(&xtime_lock, flags);
-
-#if 0
-		usec = mach_gettimeoffset ? mach_gettimeoffset () : 0;
-#else
-		usec = 0;
-#endif
-#if 0 /* DAVIDM later if possible */
-		lost = lost_ticks;
-		if (lost)
-			usec += lost * (1000000/HZ);
-#endif
-		sec = xtime.tv_sec;
-		usec += xtime.tv_nsec / 1000;
-	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
-
-	while (usec >= 1000000) {
-		usec -= 1000000;
-		sec++;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
-}
-
-EXPORT_SYMBOL(do_gettimeofday);
-
-int do_settimeofday(struct timespec *tv)
-{
-	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
-		return -EINVAL;
-
-	write_seqlock_irq (&xtime_lock);
-
-	/* This is revolting. We need to set the xtime.tv_nsec
-	 * correctly. However, the value in this location is
-	 * is value at the last tick.
-	 * Discover what correction gettimeofday
-	 * would have done, and then undo it!
-	 */
-#if 0
-	tv->tv_nsec -= mach_gettimeoffset() * 1000;
-#endif
-
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
-
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
-
-	time_adjust = 0;		/* stop active adjtime () */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
-
-	write_sequnlock_irq (&xtime_lock);
-	clock_was_set();
-	return 0;
-}
-
-EXPORT_SYMBOL(do_settimeofday);
-
 static int timer_dev_id;
 static struct irqaction timer_irqaction = {
-	timer_interrupt,
-	SA_INTERRUPT,
-	CPU_MASK_NONE,
-	"timer",
-	&timer_dev_id,
-	NULL
+	.handler = timer_interrupt,
+	.flags = IRQF_DISABLED,
+	.mask = CPU_MASK_NONE,
+	.name = "timer",
+	.dev_id = &timer_dev_id,
 };
 
 void time_init (void)

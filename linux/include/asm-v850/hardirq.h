@@ -1,9 +1,10 @@
 #ifndef __V850_HARDIRQ_H__
 #define __V850_HARDIRQ_H__
 
-#include <linux/config.h>
 #include <linux/threads.h>
 #include <linux/cache.h>
+
+#include <asm/irq.h>
 
 typedef struct {
 	unsigned int __softirq_pending;
@@ -21,5 +22,7 @@ typedef struct {
 #if (1 << HARDIRQ_BITS) < NR_IRQS
 # error HARDIRQ_BITS is too low!
 #endif
+
+void ack_bad_irq(unsigned int irq);
 
 #endif /* __V850_HARDIRQ_H__ */

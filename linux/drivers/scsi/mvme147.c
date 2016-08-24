@@ -1,8 +1,6 @@
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/blkdev.h>
-#include <linux/sched.h>
-#include <linux/version.h>
 #include <linux/interrupt.h>
 
 #include <asm/page.h>
@@ -21,7 +19,7 @@
 
 static struct Scsi_Host *mvme147_host = NULL;
 
-static irqreturn_t mvme147_intr (int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t mvme147_intr (int irq, void *dummy)
 {
     if (irq == MVME147_IRQ_SCSI_PORT)
 	wd33c93_intr (mvme147_host);
@@ -30,7 +28,7 @@ static irqreturn_t mvme147_intr (int irq, void *dummy, struct pt_regs *fp)
     return IRQ_HANDLED;
 }
 
-static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
+static int dma_setup(struct scsi_cmnd *cmd, int dir_in)
 {
     unsigned char flags = 0x01;
     unsigned long addr = virt_to_bus(cmd->SCp.ptr);
@@ -58,13 +56,13 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
     return 0;
 }
 
-static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
+static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
 		      int status)
 {
     m147_pcc->dma_cntrl = 0;
 }
 
-int mvme147_detect(Scsi_Host_Template *tpnt)
+int mvme147_detect(struct scsi_host_template *tpnt)
 {
     static unsigned char called = 0;
     wd33c93_regs regs;
@@ -113,10 +111,17 @@ int mvme147_detect(Scsi_Host_Template *tpnt)
     return 0;
 }
 
-static int mvme147_bus_reset(Scsi_Cmnd *cmd)
+static int mvme147_bus_reset(struct scsi_cmnd *cmd)
 {
 	/* FIXME perform bus-specific reset */
+
+	/* FIXME 2: kill this function, and let midlayer fallback to 
+	   the same result, calling wd33c93_host_reset() */
+
+	spin_lock_irq(cmd->device->host->host_lock);
 	wd33c93_host_reset(cmd);
+	spin_unlock_irq(cmd->device->host->host_lock);
+
 	return SUCCESS;
 }
 
@@ -124,7 +129,7 @@ static int mvme147_bus_reset(Scsi_Cmnd *cmd)
 
 #include "mvme147.h"
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "MVME147",
 	.name			= "MVME147 built-in SCSI",
 	.detect			= mvme147_detect,

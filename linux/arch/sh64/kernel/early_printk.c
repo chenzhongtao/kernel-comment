@@ -16,8 +16,6 @@
 #include <asm/io.h>
 #include <asm/hardware.h>
 
-extern void cpu_relax(void);
-
 #define SCIF_BASE_ADDR	0x01030000
 #define SCIF_ADDR_SH5	PHYS_PERIPHERAL_BLOCK+SCIF_BASE_ADDR
 
@@ -81,7 +79,7 @@ static struct console sh_console = {
 	.name		= "scifcon",
 	.write		= sh_console_write,
 	.setup		= sh_console_setup,
-	.flags		= CON_PRINTBUFFER,
+	.flags		= CON_PRINTBUFFER | CON_BOOT,
 	.index		= -1,
 };
 
@@ -99,9 +97,3 @@ void __init enable_early_printk(void)
 
 	register_console(&sh_console);
 }
-
-void disable_early_printk(void)
-{
-	unregister_console(&sh_console);
-}
-

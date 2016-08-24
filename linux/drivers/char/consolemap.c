@@ -11,7 +11,6 @@
  * Fix bug in inverse translation. Stanislav Voronyi <stas@cnti.uanet.kharkov.ua>, Dec 1998
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kd.h>
 #include <linux/errno.h>
@@ -178,6 +177,7 @@ struct uni_pagedir {
 	unsigned long	refcount;
 	unsigned long	sum;
 	unsigned char	*inverse_translations[4];
+	u16		*inverse_trans_unicode;
 	int		readonly;
 };
 
@@ -208,9 +208,44 @@ static void set_inverse_transl(struct vc_data *conp, struct uni_pagedir *p, int 
 	}
 }
 
-unsigned short *set_translate(int m,int currcons)
+static void set_inverse_trans_unicode(struct vc_data *conp,
+				      struct uni_pagedir *p)
 {
-	inv_translate[currcons] = m;
+	int i, j, k, glyph;
+	u16 **p1, *p2;
+	u16 *q;
+
+	if (!p) return;
+	q = p->inverse_trans_unicode;
+	if (!q) {
+		q = p->inverse_trans_unicode =
+			kmalloc(MAX_GLYPH * sizeof(u16), GFP_KERNEL);
+		if (!q)
+			return;
+	}
+	memset(q, 0, MAX_GLYPH * sizeof(u16));
+
+	for (i = 0; i < 32; i++) {
+		p1 = p->uni_pgdir[i];
+		if (!p1)
+			continue;
+		for (j = 0; j < 32; j++) {
+			p2 = p1[j];
+			if (!p2)
+				continue;
+			for (k = 0; k < 64; k++) {
+				glyph = p2[k];
+				if (glyph >= 0 && glyph < MAX_GLYPH
+					       && q[glyph] < 32)
+		  			q[glyph] = (i << 11) + (j << 6) + k;
+			}
+		}
+	}
+}
+
+unsigned short *set_translate(int m, struct vc_data *vc)
+{
+	inv_translate[vc->vc_num] = m;
 	return translations[m];
 }
 
@@ -218,19 +253,29 @@ unsigned short *set_translate(int m,int currcons)
  * Inverse translation is impossible for several reasons:
  * 1. The font<->character maps are not 1-1.
  * 2. The text may have been written while a different translation map
- *    was active, or using Unicode.
+ *    was active.
  * Still, it is now possible to a certain extent to cut and paste non-ASCII.
  */
-unsigned char inverse_translate(struct vc_data *conp, int glyph)
+u16 inverse_translate(struct vc_data *conp, int glyph, int use_unicode)
 {
 	struct uni_pagedir *p;
+	int m;
 	if (glyph < 0 || glyph >= MAX_GLYPH)
 		return 0;
-	else if (!(p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc) ||
-		 !p->inverse_translations[inv_translate[conp->vc_num]])
+	else if (!(p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc))
 		return glyph;
-	else
-		return p->inverse_translations[inv_translate[conp->vc_num]][glyph];
+	else if (use_unicode) {
+		if (!p->inverse_trans_unicode)
+			return glyph;
+		else
+			return p->inverse_trans_unicode[glyph];
+	} else {
+		m = inv_translate[conp->vc_num];
+		if (!p->inverse_translations[m])
+			return glyph;
+		else
+			return p->inverse_translations[m][glyph];
+	}
 }
 
 static void update_user_maps(void)
@@ -244,6 +289,7 @@ static void update_user_maps(void)
 		p = (struct uni_pagedir *)*vc_cons[i].d->vc_uni_pagedir_loc;
 		if (p && p != q) {
 			set_inverse_transl(vc_cons[i].d, p, USER_MAP);
+			set_inverse_trans_unicode(vc_cons[i].d, p);
 			q = p;
 		}
 	}
@@ -262,9 +308,8 @@ int con_set_trans_old(unsigned char __user * arg)
 	int i;
 	unsigned short *p = translations[USER_MAP];
 
-	i = verify_area(VERIFY_READ, arg, E_TABSZ);
-	if (i)
-		return i;
+	if (!access_ok(VERIFY_READ, arg, E_TABSZ))
+		return -EFAULT;
 
 	for (i=0; i<E_TABSZ ; i++) {
 		unsigned char uc;
@@ -281,9 +326,8 @@ int con_get_trans_old(unsigned char __user * arg)
 	int i, ch;
 	unsigned short *p = translations[USER_MAP];
 
-	i = verify_area(VERIFY_WRITE, arg, E_TABSZ);
-	if (i)
-		return i;
+	if (!access_ok(VERIFY_WRITE, arg, E_TABSZ))
+		return -EFAULT;
 
 	for (i=0; i<E_TABSZ ; i++)
 	  {
@@ -298,9 +342,8 @@ int con_set_trans_new(ushort __user * arg)
 	int i;
 	unsigned short *p = translations[USER_MAP];
 
-	i = verify_area(VERIFY_READ, arg, E_TABSZ*sizeof(unsigned short));
-	if (i)
-		return i;
+	if (!access_ok(VERIFY_READ, arg, E_TABSZ*sizeof(unsigned short)))
+		return -EFAULT;
 
 	for (i=0; i<E_TABSZ ; i++) {
 		unsigned short us;
@@ -317,9 +360,8 @@ int con_get_trans_new(ushort __user * arg)
 	int i;
 	unsigned short *p = translations[USER_MAP];
 
-	i = verify_area(VERIFY_WRITE, arg, E_TABSZ*sizeof(unsigned short));
-	if (i)
-		return i;
+	if (!access_ok(VERIFY_WRITE, arg, E_TABSZ*sizeof(unsigned short)))
+		return -EFAULT;
 
 	for (i=0; i<E_TABSZ ; i++)
 	  __put_user(p[i], arg+i);
@@ -349,28 +391,31 @@ static void con_release_unimap(struct uni_pagedir *p)
 	for (i = 0; i < 32; i++) {
 		if ((p1 = p->uni_pgdir[i]) != NULL) {
 			for (j = 0; j < 32; j++)
-				if (p1[j])
-					kfree(p1[j]);
+				kfree(p1[j]);
 			kfree(p1);
 		}
 		p->uni_pgdir[i] = NULL;
 	}
-	for (i = 0; i < 4; i++)
-		if (p->inverse_translations[i]) {
-			kfree(p->inverse_translations[i]);
-			p->inverse_translations[i] = NULL;
-		}
+	for (i = 0; i < 4; i++) {
+		kfree(p->inverse_translations[i]);
+		p->inverse_translations[i] = NULL;
+	}
+	if (p->inverse_trans_unicode) {
+		kfree(p->inverse_trans_unicode);
+		p->inverse_trans_unicode = NULL;
+	}
 }
 
-void con_free_unimap(int con)
+void con_free_unimap(struct vc_data *vc)
 {
 	struct uni_pagedir *p;
-	struct vc_data *conp = vc_cons[con].d;
-	
-	p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
-	if (!p) return;
-	*conp->vc_uni_pagedir_loc = 0;
-	if (--p->refcount) return;
+
+	p = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
+	if (!p)
+		return;
+	*vc->vc_uni_pagedir_loc = 0;
+	if (--p->refcount)
+		return;
 	con_release_unimap(p);
 	kfree(p);
 }
@@ -442,22 +487,20 @@ con_insert_unipair(struct uni_pagedir *p, u_short unicode, u_short fontpos)
 }
 
 /* ui is a leftover from using a hashtable, but might be used again */
-int con_clear_unimap(int con, struct unimapinit *ui)
+int con_clear_unimap(struct vc_data *vc, struct unimapinit *ui)
 {
 	struct uni_pagedir *p, *q;
-	struct vc_data *conp = vc_cons[con].d;
   
-	p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
+	p = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 	if (p && p->readonly) return -EIO;
 	if (!p || --p->refcount) {
-		q = (struct uni_pagedir *)kmalloc(sizeof(*p), GFP_KERNEL);
+		q = kzalloc(sizeof(*p), GFP_KERNEL);
 		if (!q) {
 			if (p) p->refcount++;
 			return -ENOMEM;
 		}
-		memset(q, 0, sizeof(*q));
 		q->refcount=1;
-		*conp->vc_uni_pagedir_loc = (unsigned long)q;
+		*vc->vc_uni_pagedir_loc = (unsigned long)q;
 	} else {
 		if (p == dflt) dflt = NULL;
 		p->refcount++;
@@ -467,14 +510,12 @@ int con_clear_unimap(int con, struct unimapinit *ui)
 	return 0;
 }
 
-int
-con_set_unimap(int con, ushort ct, struct unipair __user *list)
+int con_set_unimap(struct vc_data *vc, ushort ct, struct unipair __user *list)
 {
 	int err = 0, err1, i;
 	struct uni_pagedir *p, *q;
-	struct vc_data *conp = vc_cons[con].d;
 
-	p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
+	p = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 	if (p->readonly) return -EIO;
 	
 	if (!ct) return 0;
@@ -483,10 +524,10 @@ con_set_unimap(int con, ushort ct, struct unipair __user *list)
 		int j, k;
 		u16 **p1, *p2, l;
 		
-		err1 = con_clear_unimap(con, NULL);
+		err1 = con_clear_unimap(vc, NULL);
 		if (err1) return err1;
 		
-		q = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
+		q = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 		for (i = 0, l = 0; i < 32; i++)
 		if ((p1 = p->uni_pgdir[i]))
 			for (j = 0; j < 32; j++)
@@ -496,7 +537,7 @@ con_set_unimap(int con, ushort ct, struct unipair __user *list)
 					err1 = con_insert_unipair(q, l, p2[k]);
 					if (err1) {
 						p->refcount++;
-						*conp->vc_uni_pagedir_loc = (unsigned long)p;
+						*vc->vc_uni_pagedir_loc = (unsigned long)p;
 						con_release_unimap(q);
 						kfree(q);
 						return err1; 
@@ -515,11 +556,12 @@ con_set_unimap(int con, ushort ct, struct unipair __user *list)
 			list++;
 	}
 	
-	if (con_unify_unimap(conp, p))
+	if (con_unify_unimap(vc, p))
 		return err;
 
 	for (i = 0; i <= 3; i++)
-		set_inverse_transl(conp, p, i); /* Update all inverse translations */
+		set_inverse_transl(vc, p, i); /* Update all inverse translations */
+	set_inverse_trans_unicode(vc, p);
   
 	return err;
 }
@@ -529,20 +571,18 @@ con_set_unimap(int con, ushort ct, struct unipair __user *list)
    with.  This routine is executed at sys_setup time, and when the
    PIO_FONTRESET ioctl is called. */
 
-int
-con_set_default_unimap(int con)
+int con_set_default_unimap(struct vc_data *vc)
 {
 	int i, j, err = 0, err1;
 	u16 *q;
 	struct uni_pagedir *p;
-	struct vc_data *conp = vc_cons[con].d;
-	
+
 	if (dflt) {
-		p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
+		p = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 		if (p == dflt)
 			return 0;
 		dflt->refcount++;
-		*conp->vc_uni_pagedir_loc = (unsigned long)dflt;
+		*vc->vc_uni_pagedir_loc = (unsigned long)dflt;
 		if (p && --p->refcount) {
 			con_release_unimap(p);
 			kfree(p);
@@ -552,10 +592,10 @@ con_set_default_unimap(int con)
 	
 	/* The default font is always 256 characters */
 
-	err = con_clear_unimap(con,NULL);
+	err = con_clear_unimap(vc, NULL);
 	if (err) return err;
     
-	p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
+	p = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 	q = dfont_unitable;
 	
 	for (i = 0; i < 256; i++)
@@ -565,47 +605,43 @@ con_set_default_unimap(int con)
 				err = err1;
 		}
 			
-	if (con_unify_unimap(conp, p)) {
-		dflt = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
+	if (con_unify_unimap(vc, p)) {
+		dflt = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 		return err;
 	}
 
 	for (i = 0; i <= 3; i++)
-		set_inverse_transl(conp, p, i);	/* Update all inverse translations */
+		set_inverse_transl(vc, p, i);	/* Update all inverse translations */
+	set_inverse_trans_unicode(vc, p);
 	dflt = p;
 	return err;
 }
 EXPORT_SYMBOL(con_set_default_unimap);
 
-int
-con_copy_unimap(int dstcon, int srccon)
+int con_copy_unimap(struct vc_data *dst_vc, struct vc_data *src_vc)
 {
-	struct vc_data *sconp = vc_cons[srccon].d;
-	struct vc_data *dconp = vc_cons[dstcon].d;
 	struct uni_pagedir *q;
-	
-	if (!vc_cons_allocated(srccon) || !*sconp->vc_uni_pagedir_loc)
+
+	if (!*src_vc->vc_uni_pagedir_loc)
 		return -EINVAL;
-	if (*dconp->vc_uni_pagedir_loc == *sconp->vc_uni_pagedir_loc)
+	if (*dst_vc->vc_uni_pagedir_loc == *src_vc->vc_uni_pagedir_loc)
 		return 0;
-	con_free_unimap(dstcon);
-	q = (struct uni_pagedir *)*sconp->vc_uni_pagedir_loc;
+	con_free_unimap(dst_vc);
+	q = (struct uni_pagedir *)*src_vc->vc_uni_pagedir_loc;
 	q->refcount++;
-	*dconp->vc_uni_pagedir_loc = (long)q;
+	*dst_vc->vc_uni_pagedir_loc = (long)q;
 	return 0;
 }
 
-int
-con_get_unimap(int con, ushort ct, ushort __user *uct, struct unipair __user *list)
+int con_get_unimap(struct vc_data *vc, ushort ct, ushort __user *uct, struct unipair __user *list)
 {
 	int i, j, k, ect;
 	u16 **p1, *p2;
 	struct uni_pagedir *p;
-	struct vc_data *conp = vc_cons[con].d;
 
 	ect = 0;
-	if (*conp->vc_uni_pagedir_loc) {
-		p = (struct uni_pagedir *)*conp->vc_uni_pagedir_loc;
+	if (*vc->vc_uni_pagedir_loc) {
+		p = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 		for (i = 0; i < 32; i++)
 		if ((p1 = p->uni_pgdir[i]))
 			for (j = 0; j < 32; j++)
@@ -625,12 +661,35 @@ con_get_unimap(int con, ushort ct, ushort __user *uct, struct unipair __user *li
 	return ((ect <= ct) ? 0 : -ENOMEM);
 }
 
-void con_protect_unimap(int con, int rdonly)
+void con_protect_unimap(struct vc_data *vc, int rdonly)
 {
-	struct uni_pagedir *p = (struct uni_pagedir *)
-		*vc_cons[con].d->vc_uni_pagedir_loc;
+	struct uni_pagedir *p = (struct uni_pagedir *)*vc->vc_uni_pagedir_loc;
 	
-	if (p) p->readonly = rdonly;
+	if (p)
+		p->readonly = rdonly;
+}
+
+/*
+ * Always use USER_MAP. These functions are used by the keyboard,
+ * which shouldn't be affected by G0/G1 switching, etc.
+ * If the user map still contains default values, i.e. the
+ * direct-to-font mapping, then assume user is using Latin1.
+ */
+/* may be called during an interrupt */
+u32 conv_8bit_to_uni(unsigned char c)
+{
+	unsigned short uni = translations[USER_MAP][c];
+	return uni == (0xf000 | c) ? c : uni;
+}
+
+int conv_uni_to_8bit(u32 uni)
+{
+	int c;
+	for (c = 0; c < 0x100; c++)
+		if (translations[USER_MAP][c] == uni ||
+		   (translations[USER_MAP][c] == (c | 0xf000) && uni == c))
+			return c;
+	return -1;
 }
 
 int
@@ -642,10 +701,10 @@ conv_uni_to_pc(struct vc_data *conp, long ucs)
   
 	/* Only 16-bit codes supported at this time */
 	if (ucs > 0xffff)
-		ucs = 0xfffd;		/* U+FFFD: REPLACEMENT CHARACTER */
-	else if (ucs < 0x20 || ucs >= 0xfffe)
+		return -4;		/* Not found */
+	else if (ucs < 0x20)
 		return -1;		/* Not a printable character */
-	else if (ucs == 0xfeff || (ucs >= 0x200a && ucs <= 0x200f))
+	else if (ucs == 0xfeff || (ucs >= 0x200b && ucs <= 0x200f))
 		return -2;			/* Zero-width space */
 	/*
 	 * UNI_DIRECT_BASE indicates the start of the region in the User Zone
@@ -679,7 +738,7 @@ console_map_init(void)
 	
 	for (i = 0; i < MAX_NR_CONSOLES; i++)
 		if (vc_cons_allocated(i) && !*vc_cons[i].d->vc_uni_pagedir_loc)
-			con_set_default_unimap(i);
+			con_set_default_unimap(vc_cons[i].d);
 }
 
 EXPORT_SYMBOL(con_copy_unimap);

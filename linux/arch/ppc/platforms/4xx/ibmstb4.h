@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/4xx/ibmstb4.h
- *
  * Author: Armin Kuster <akuster@mvista.com>
  *
  * 2001 (c) MontaVista, Software, Inc.  This file is licensed under
@@ -13,7 +11,6 @@
 #ifndef __ASM_IBMSTB4_H__
 #define __ASM_IBMSTB4_H__
 
-#include <linux/config.h>
 
 /* serial port defines */
 #define STB04xxx_IO_BASE	((uint)0xe0000000)
@@ -73,9 +70,9 @@
 #define OPB0_BASE	0x40000000
 #define GPIO0_BASE	0x40060000
 
+#define USB0_BASE	0x40010000
+#define USB0_SIZE	0xA0
 #define USB0_IRQ	18
-#define USB0_BASE	STB04xxx_MAP_IO_ADDR(0x40010000)
-#define USB0_EXTENT 4096
 
 #define IIC_NUMS 2
 #define UART_NUMS	3

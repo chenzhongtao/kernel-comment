@@ -21,16 +21,15 @@ static u32 savagefb_rop[] = {
 
 int savagefb_sync(struct fb_info *info)
 {
-	struct savagefb_par *par = (struct savagefb_par *)info->par;
+	struct savagefb_par *par = info->par;
 
 	par->SavageWaitIdle(par);
 	return 0;
 }
-EXPORT_SYMBOL(savagefb_sync);
 
 void savagefb_copyarea(struct fb_info *info, const struct fb_copyarea *region)
 {
-	struct savagefb_par *par = (struct savagefb_par *)info->par;
+	struct savagefb_par *par = info->par;
 	int sx = region->sx, dx = region->dx;
 	int sy = region->sy, dy = region->dy;
 	int cmd;
@@ -61,11 +60,10 @@ void savagefb_copyarea(struct fb_info *info, const struct fb_copyarea *region)
 	BCI_SEND(BCI_X_Y(dx, dy));
 	BCI_SEND(BCI_W_H(region->width, region->height));
 }
-EXPORT_SYMBOL(savagefb_copyarea);
 
 void savagefb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
-	struct savagefb_par *par = (struct savagefb_par *)info->par;
+	struct savagefb_par *par = info->par;
 	int cmd, color;
 
 	if (!rect->width || !rect->height)
@@ -89,11 +87,10 @@ void savagefb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 	BCI_SEND( BCI_X_Y(rect->dx, rect->dy) );
 	BCI_SEND( BCI_W_H(rect->width, rect->height) );
 }
-EXPORT_SYMBOL(savagefb_fillrect);
 
 void savagefb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
-	struct savagefb_par *par = (struct savagefb_par *)info->par;
+	struct savagefb_par *par = info->par;
 	int fg, bg, size, i, width;
 	int cmd;
 	u32 *src = (u32 *) image->data;
@@ -135,6 +132,5 @@ void savagefb_imageblit(struct fb_info *info, const struct fb_image *image)
 	for (i = 0; i < size; i++)
 		BCI_SEND(src[i]);
 }
-EXPORT_SYMBOL(savagefb_imageblit);
 
 MODULE_LICENSE("GPL");

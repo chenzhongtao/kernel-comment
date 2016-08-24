@@ -33,7 +33,6 @@
  *		 for 68040
  */
 
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/entry.h>
 #include <asm/errno.h>
@@ -42,14 +41,14 @@
 #include <asm/traps.h>
 #include <asm/unistd.h>
 
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
 
-.globl system_call, buserr, trap
-.globl resume, ret_from_exception
-.globl ret_from_signal
-.globl inthandler, sys_call_table
+.globl system_call, buserr, trap, resume
+.globl sys_call_table
 .globl sys_fork, sys_clone, sys_vfork
 .globl ret_from_interrupt, bad_interrupt
+.globl auto_irqhandler_fixup
+.globl user_irqvec_fixup, user_irqhandler_fixup
 
 .text
 ENTRY(buserr)
@@ -58,7 +57,7 @@ ENTRY(buserr)
 	movel	%sp,%sp@-		| stack frame pointer argument
 	bsrl	buserr_c
 	addql	#4,%sp
-	jra	ret_from_exception
+	jra	.Lret_from_exception
 
 ENTRY(trap)
 	SAVE_ALL_INT
@@ -66,7 +65,7 @@ ENTRY(trap)
 	movel	%sp,%sp@-		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
-	jra	ret_from_exception
+	jra	.Lret_from_exception
 
 	| After a fork we jump here directly from resume,
 	| so that %d1 contains the previous task
@@ -75,30 +74,31 @@ ENTRY(ret_from_fork)
 	movel	%d1,%sp@-
 	jsr	schedule_tail
 	addql	#4,%sp
-	jra	ret_from_exception
+	jra	.Lret_from_exception
 
-badsys:
-	movel	#-ENOSYS,%sp@(PT_D0)
-	jra	ret_from_exception
-
-do_trace:
+do_trace_entry:
 	movel	#-ENOSYS,%sp@(PT_D0)	| needed for strace
 	subql	#4,%sp
 	SAVE_SWITCH_STACK
 	jbsr	syscall_trace
 	RESTORE_SWITCH_STACK
 	addql	#4,%sp
-	movel	%sp@(PT_ORIG_D0),%d1
-	movel	#-ENOSYS,%d0
-	cmpl	#NR_syscalls,%d1
-	jcc	1f
-	jbsr	@(sys_call_table,%d1:l:4)@(0)
-1:	movel	%d0,%sp@(PT_D0)		| save the return value
-	subql	#4,%sp			| dummy return address
+	movel	%sp@(PT_ORIG_D0),%d0
+	cmpl	#NR_syscalls,%d0
+	jcs	syscall
+badsys:
+	movel	#-ENOSYS,%sp@(PT_D0)
+	jra	ret_from_syscall
+
+do_trace_exit:
+	subql	#4,%sp
 	SAVE_SWITCH_STACK
 	jbsr	syscall_trace
+	RESTORE_SWITCH_STACK
+	addql	#4,%sp
+	jra	.Lret_from_exception
 
-ret_from_signal:
+ENTRY(ret_from_signal)
 	RESTORE_SWITCH_STACK
 	addql	#4,%sp
 /* on 68040 complete pending writebacks if any */
@@ -111,7 +111,7 @@ ret_from_signal:
 	addql	#4,%sp
 1:
 #endif
-	jra	ret_from_exception
+	jra	.Lret_from_exception
 
 ENTRY(system_call)
 	SAVE_ALL_SYS
@@ -120,30 +120,34 @@ ENTRY(system_call)
 	| save top of frame
 	movel	%sp,%curptr@(TASK_THREAD+THREAD_ESP0)
 
-	tstb	%curptr@(TASK_SYSCALL_TRACE)
-	jne	do_trace
+	| syscall trace?
+	tstb	%curptr@(TASK_INFO+TINFO_FLAGS+2)
+	jmi	do_trace_entry
 	cmpl	#NR_syscalls,%d0
 	jcc	badsys
+syscall:
 	jbsr	@(sys_call_table,%d0:l:4)@(0)
 	movel	%d0,%sp@(PT_D0)		| save the return value
-
+ret_from_syscall:
 	|oriw	#0x0700,%sr
-	movel	%curptr@(TASK_WORK),%d0
+	movew	%curptr@(TASK_INFO+TINFO_FLAGS+2),%d0
 	jne	syscall_exit_work
 1:	RESTORE_ALL
 
 syscall_exit_work:
 	btst	#5,%sp@(PT_SR)		| check if returning to kernel
 	bnes	1b			| if so, skip resched, signals
-	tstw	%d0
-	jeq	do_signal_return
-	tstb	%d0
-	jne	do_delayed_trace
-
+	lslw	#1,%d0
+	jcs	do_trace_exit
+	jmi	do_delayed_trace
+	lslw	#8,%d0
+	jmi	do_signal_return
 	pea	resume_userspace
-	jmp	schedule
+	jra	schedule
 
-ret_from_exception:
+
+ENTRY(ret_from_exception)
+.Lret_from_exception:
 	btst	#5,%sp@(PT_SR)		| check if returning to kernel
 	bnes	1f			| if so, skip resched, signals
 	| only allow interrupts when we are really the last one on the
@@ -152,19 +156,18 @@ ret_from_exception:
 	andw	#ALLOWINT,%sr
 
 resume_userspace:
-	movel	%curptr@(TASK_WORK),%d0
-	lsrl	#8,%d0
+	moveb	%curptr@(TASK_INFO+TINFO_FLAGS+3),%d0
 	jne	exit_work
 1:	RESTORE_ALL
 
 exit_work:
 	| save top of frame
 	movel	%sp,%curptr@(TASK_THREAD+THREAD_ESP0)
-	tstb	%d0
-	jeq	do_signal_return
-
+	lslb	#1,%d0
+	jmi	do_signal_return
 	pea	resume_userspace
-	jmp	schedule
+	jra	schedule
+
 
 do_signal_return:
 	|andw	#ALLOWINT,%sr
@@ -189,81 +192,75 @@ do_delayed_trace:
 	jbra	resume_userspace
 
 
-#if 0
-#ifdef CONFIG_AMIGA
-ami_inthandler:
-	addql	#1,irq_stat+CPUSTAT_LOCAL_IRQ_COUNT
+/* This is the main interrupt handler for autovector interrupts */
+
+ENTRY(auto_inthandler)
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-
-	bfextu	%sp@(PT_VECTOR){#4,#12},%d0
-	movel	%d0,%a0
-	addql	#1,%a0@(kstat+STAT_IRQ-VECOFF(VEC_SPUR))
-	movel	%a0@(autoirq_list-VECOFF(VEC_SPUR)),%a0
-
-| amiga vector int handler get the req mask instead of irq vector
-	lea	CUSTOMBASE,%a1
-	movew	%a1@(C_INTREQR),%d0
-	andw	%a1@(C_INTENAR),%d0
-
-| prepare stack (push frame pointer, dev_id & req mask)
-	pea	%sp@
-	movel	%a0@(IRQ_DEVID),%sp@-
-	movel	%d0,%sp@-
-	pea	%pc@(ret_from_interrupt:w)
-	jbra	@(IRQ_HANDLER,%a0)@(0)
-
-ENTRY(nmi_handler)
-	rte
-#endif
-#endif
-
-/*
-** This is the main interrupt handler, responsible for calling process_int()
-*/
-inthandler:
-	SAVE_ALL_INT
-	GET_CURRENT(%d0)
-	addqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+2)
+	addqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+1)
 					|  put exception # in d0
-	bfextu %sp@(PT_VECTOR){#4,#10},%d0
+	bfextu	%sp@(PT_VECTOR){#4,#10},%d0
+	subw	#VEC_SPUR,%d0
 
 	movel	%sp,%sp@-
 	movel	%d0,%sp@-		|  put vector # on stack
-#if defined(MACH_Q40_ONLY) && defined(CONFIG_BLK_DEV_FD)
-	btstb	#4,0xff000000		| Q40 floppy needs very special treatment ...
-	jbeq	1f
-	btstb	#3,0xff000004
-	jbeq	1f
-	jbsr	floppy_hardint
-	jbra	3f
-1:
-#endif
-	jbsr	process_int		|  process the IRQ
-3:	addql	#8,%sp			|  pop parameters off stack
+auto_irqhandler_fixup = . + 2
+	jsr	__m68k_handle_int	|  process the IRQ
+	addql	#8,%sp			|  pop parameters off stack
 
 ret_from_interrupt:
-	subqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+2)
-	jeq	1f
-2:
-	RESTORE_ALL
-1:
+	subqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+1)
+	jeq	ret_from_last_interrupt
+2:	RESTORE_ALL
+
+	ALIGN
+ret_from_last_interrupt:
 	moveq	#(~ALLOWINT>>8)&0xff,%d0
 	andb	%sp@(PT_SR),%d0
 	jne	2b
 
 	/* check if we need to do software interrupts */
 	tstl	irq_stat+CPUSTAT_SOFTIRQ_PENDING
-	jeq	ret_from_exception
+	jeq	.Lret_from_exception
 	pea	ret_from_exception
 	jra	do_softirq
 
+/* Handler for user defined interrupt vectors */
+
+ENTRY(user_inthandler)
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
+	addqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+1)
+					|  put exception # in d0
+	bfextu	%sp@(PT_VECTOR){#4,#10},%d0
+user_irqvec_fixup = . + 2
+	subw	#VEC_USER,%d0
+
+	movel	%sp,%sp@-
+	movel	%d0,%sp@-		|  put vector # on stack
+user_irqhandler_fixup = . + 2
+	jsr	__m68k_handle_int	|  process the IRQ
+	addql	#8,%sp			|  pop parameters off stack
+
+	subqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+1)
+	jeq	ret_from_last_interrupt
+	RESTORE_ALL
 
 /* Handler for uninitialized and spurious interrupts */
 
-bad_interrupt:
-	addql	#1,num_spurious
-	rte
+ENTRY(bad_inthandler)
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
+	addqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+1)
+
+	movel	%sp,%sp@-
+	jsr	handle_badint
+	addql	#4,%sp
+
+	subqb	#1,%curptr@(TASK_INFO+TINFO_PREEMPT+1)
+	jeq	ret_from_last_interrupt
+	RESTORE_ALL
+
 
 ENTRY(sys_fork)
 	SAVE_SWITCH_STACK
@@ -695,7 +692,7 @@ sys_call_table:
 	.long sys_tgkill	/* 265 */
 	.long sys_utimes
 	.long sys_fadvise64_64
-	.long sys_mbind	
+	.long sys_mbind
 	.long sys_get_mempolicy
 	.long sys_set_mempolicy	/* 270 */
 	.long sys_mq_open
@@ -709,4 +706,43 @@ sys_call_table:
 	.long sys_add_key
 	.long sys_request_key	/* 280 */
 	.long sys_keyctl
+	.long sys_ioprio_set
+	.long sys_ioprio_get
+	.long sys_inotify_init
+	.long sys_inotify_add_watch	/* 285 */
+	.long sys_inotify_rm_watch
+	.long sys_migrate_pages
+	.long sys_openat
+	.long sys_mkdirat
+	.long sys_mknodat		/* 290 */
+	.long sys_fchownat
+	.long sys_futimesat
+	.long sys_fstatat64
+	.long sys_unlinkat
+	.long sys_renameat		/* 295 */
+	.long sys_linkat
+	.long sys_symlinkat
+	.long sys_readlinkat
+	.long sys_fchmodat
+	.long sys_faccessat		/* 300 */
+	.long sys_ni_syscall		/* Reserved for pselect6 */
+	.long sys_ni_syscall		/* Reserved for ppoll */
+	.long sys_unshare
+	.long sys_set_robust_list
+	.long sys_get_robust_list	/* 305 */
+	.long sys_splice
+	.long sys_sync_file_range
+	.long sys_tee
+	.long sys_vmsplice
+	.long sys_move_pages		/* 310 */
+	.long sys_sched_setaffinity
+	.long sys_sched_getaffinity
+	.long sys_kexec_load
+	.long sys_getcpu
+	.long sys_epoll_pwait		/* 315 */
+	.long sys_utimensat
+	.long sys_signalfd
+	.long sys_timerfd
+	.long sys_eventfd
+	.long sys_fallocate		/* 320 */
 

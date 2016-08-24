@@ -6,7 +6,6 @@
 #include "cciss_cmd.h"
 
 
-#define NWD		16
 #define NWD_SHIFT	4
 #define MAX_PART	(1 << NWD_SHIFT)
 
@@ -27,14 +26,29 @@ typedef struct _drive_info_struct
 {
  	__u32   LunID;	
 	int 	usage_count;
+	struct request_queue *queue;
 	sector_t nr_blocks;
 	int	block_size;
 	int 	heads;
 	int	sectors;
 	int 	cylinders;
-	int	raid_level;
+	int	raid_level; /* set to -1 to indicate that
+			     * the drive is not in use/configured
+			    */
+	int	busy_configuring; /*This is set when the drive is being removed
+				   *to prevent it from being opened or it's queue
+				   *from being started.
+				  */
 } drive_info_struct;
 
+#ifdef CONFIG_CISS_SCSI_TAPE
+
+struct sendcmd_reject_list {
+	int ncompletions;
+	unsigned long *complete; /* array of NR_CMDS tags */
+};
+
+#endif
 struct ctlr_info 
 {
 	int	ctlr;
@@ -45,17 +59,27 @@ struct ctlr_info
 	__u32	board_id;
 	void __iomem *vaddr;
 	unsigned long paddr;
-	unsigned long io_mem_addr;
-	unsigned long io_mem_length;
+	int 	nr_cmds; /* Number of commands allowed on this controller */
 	CfgTable_struct __iomem *cfgtable;
-	unsigned int intr;
 	int	interrupts_enabled;
+	int	major;
 	int 	max_commands;
 	int	commands_outstanding;
 	int 	max_outstanding; /* Debug */ 
 	int	num_luns;
 	int 	highest_lun;
 	int	usage_count;  /* number of opens all all minor devices */
+#	define DOORBELL_INT	0
+#	define PERF_MODE_INT	1
+#	define SIMPLE_MODE_INT	2
+#	define MEMQ_MODE_INT	3
+	unsigned int intr[4];
+	unsigned int msix_vector;
+	unsigned int msi_vector;
+	int 	cciss_max_sectors;
+	BYTE	cciss_read;
+	BYTE	cciss_write;
+	BYTE	cciss_read_capacity;
 
 	// information about each logical volume
 	drive_info_struct drv[CISS_MAX_LUN];
@@ -69,7 +93,6 @@ struct ctlr_info
 	unsigned int maxQsinceinit;
 	unsigned int maxSG;
 	spinlock_t lock;
-	struct request_queue *queue;
 
 	//* pointers to command and error info pool */ 
 	CommandList_struct 	*cmd_pool;
@@ -80,12 +103,22 @@ struct ctlr_info
 	int			nr_allocs;
 	int			nr_frees; 
 	int			busy_configuring;
+	int			busy_initializing;
+
+	/* This element holds the zero based queue number of the last
+	 * queue to be started.  It is used for fairness.
+	*/
+	int			next_to_run;
 
 	// Disk structures we need to pass back
-	struct gendisk   *gendisk[NWD];
+	struct gendisk   *gendisk[CISS_MAX_LUN];
 #ifdef CONFIG_CISS_SCSI_TAPE
 	void *scsi_ctlr; /* ptr to structure containing scsi related stuff */
+	/* list of block side commands the scsi error handling sucked up */
+	/* and saved for later processing */
+	struct sendcmd_reject_list scsi_rejects;
 #endif
+	unsigned char alive;
 };
 
 /*  Defining the diffent access_menthods */
@@ -250,9 +283,10 @@ struct board_type {
 	__u32	board_id;
 	char	*product_name;
 	struct access_method *access;
+	int nr_cmds; /* Max cmds this kind of ctlr can handle. */
 };
 
-#define CCISS_LOCK(i)	(hba[i]->queue->queue_lock)
+#define CCISS_LOCK(i)	(&hba[i]->lock)
 
 #endif /* CCISS_H */
 

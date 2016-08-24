@@ -21,7 +21,7 @@ extern const char *CardType[];
 static const char *hfcs_revision = "$Revision: 1.10.2.4 $";
 
 static irqreturn_t
-hfcs_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+hfcs_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val, stat;
@@ -52,7 +52,7 @@ hfcs_Timer(struct IsdnCardState *cs)
 */
 }
 
-void
+static void
 release_io_hfcs(struct IsdnCardState *cs)
 {
 	release2bds0(cs);
@@ -118,8 +118,7 @@ hfcs_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 			return(0);
 		case CARD_INIT:
 			delay = (75*HZ)/100 +1;
-			cs->hw.hfcD.timer.expires = jiffies + delay;
-			add_timer(&cs->hw.hfcD.timer);
+			mod_timer(&cs->hw.hfcD.timer, jiffies + delay);
 			spin_lock_irqsave(&cs->lock, flags);
 			reset_hfcs(cs);
 			init2bds0(cs);
@@ -139,7 +138,7 @@ hfcs_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 #ifdef __ISAPNP__
-static struct isapnp_device_id hfc_ids[] __initdata = {
+static struct isapnp_device_id hfc_ids[] __devinitdata = {
 	{ ISAPNP_VENDOR('A', 'N', 'X'), ISAPNP_FUNCTION(0x1114),
 	  ISAPNP_VENDOR('A', 'N', 'X'), ISAPNP_FUNCTION(0x1114), 
 	  (unsigned long) "Acer P10" },
@@ -164,11 +163,11 @@ static struct isapnp_device_id hfc_ids[] __initdata = {
 	{ 0, }
 };
 
-static struct isapnp_device_id *ipid __initdata = &hfc_ids[0];
+static struct isapnp_device_id *ipid __devinitdata = &hfc_ids[0];
 static struct pnp_card *pnp_c __devinitdata = NULL;
 #endif
 
-int __init
+int __devinit
 setup_hfcs(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;

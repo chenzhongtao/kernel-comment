@@ -74,7 +74,7 @@ static void ultra32_block_output(struct net_device *dev, int count,
 				 const unsigned char *buf,
 				 const int start_page);
 static int ultra32_close(struct net_device *dev);
-
+
 #define ULTRA32_CMDREG	0	/* Offset to ASIC command register. */
 #define	 ULTRA32_RESET	0x80	/* Board reset, in ULTRA32_CMDREG. */
 #define	 ULTRA32_MEMENB	0x40	/* Enable the shared memory. */
@@ -104,6 +104,7 @@ static void cleanup_card(struct net_device *dev)
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET;
 	/* NB: ultra32_close_card() does free_irq */
 	release_region(ioaddr, ULTRA32_IO_EXTENT);
+	iounmap(ei_status.mem);
 }
 
 /*	Probe for the Ultra32.  This looks like a 8013 with the station
@@ -130,8 +131,6 @@ struct net_device * __init ultra32_probe(int unit)
 		sprintf(dev->name, "eth%d", unit);
 		netdev_boot_setup_check(dev);
 	}
-
-	SET_MODULE_OWNER(dev);
 
 	irq = dev->irq;
 
@@ -164,6 +163,7 @@ static int __init ultra32_probe1(struct net_device *dev, int ioaddr)
 	unsigned char idreg;
 	unsigned char reg4;
 	const char *ifmap[] = {"UTP No Link", "", "UTP/AUI", "UTP/BNC"};
+	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr, ULTRA32_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
@@ -204,10 +204,11 @@ static int __init ultra32_probe1(struct net_device *dev, int ioaddr)
 
 	model_name = "SMC Ultra32";
 
-	printk("%s: %s at 0x%X,", dev->name, model_name, ioaddr);
-
 	for (i = 0; i < 6; i++)
-		printk(" %2.2X", dev->dev_addr[i] = inb(ioaddr + 8 + i));
+		dev->dev_addr[i] = inb(ioaddr + 8 + i);
+
+	printk("%s: %s at 0x%X, %s",
+	       dev->name, model_name, ioaddr, print_mac(mac, dev->dev_addr));
 
 	/* Switch from the station address to the alternate register set and
 	   read the useful registers there. */
@@ -259,8 +260,13 @@ static int __init ultra32_probe1(struct net_device *dev, int ioaddr)
 	/* All Ultra32 cards have 32KB memory with an 8KB window. */
 	ei_status.stop_page = 128;
 
-	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
-	dev->mem_end = ei_status.rmem_end = dev->mem_start + 0x1fff;
+	ei_status.mem = ioremap(dev->mem_start, 0x2000);
+	if (!ei_status.mem) {
+		printk(", failed to ioremap.\n");
+		retval = -ENOMEM;
+		goto out;
+	}
+	dev->mem_end = dev->mem_start + 0x1fff;
 
 	printk(", IRQ %d, 32KB memory, 8KB window at 0x%lx-0x%lx.\n",
 	       dev->irq, dev->mem_start, dev->mem_end);
@@ -284,7 +290,7 @@ out:
 static int ultra32_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* ASIC addr */
-	int irq_flags = (inb(ioaddr + ULTRA32_CFG5) & 0x08) ? 0 : SA_SHIRQ;
+	int irq_flags = (inb(ioaddr + ULTRA32_CFG5) & 0x08) ? 0 : IRQF_SHARED;
 	int retval;
 
 	retval = request_irq(dev->irq, ei_interrupt, irq_flags, dev->name, dev);
@@ -308,7 +314,7 @@ static int ultra32_close(struct net_device *dev)
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* CMDREG */
 
 	netif_stop_queue(dev);
-	
+
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 
@@ -345,7 +351,7 @@ static void ultra32_get_8390_hdr(struct net_device *dev,
 				 struct e8390_pkt_hdr *hdr,
 				 int ring_page)
 {
-	unsigned long hdr_start = dev->mem_start + ((ring_page & 0x1f) << 8);
+	void __iomem *hdr_start = ei_status.mem + ((ring_page & 0x1f) << 8);
 	unsigned int RamReg = dev->base_addr - ULTRA32_NIC_OFFSET + ULTRA32_CFG3;
 
 	/* Select correct 8KB Window. */
@@ -354,10 +360,10 @@ static void ultra32_get_8390_hdr(struct net_device *dev,
 #ifdef __BIG_ENDIAN
 	/* Officially this is what we are doing, but the readl() is faster */
 	/* unfortunately it isn't endian aware of the struct               */
-	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = le16_to_cpu(hdr->count);
 #else
-	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
+	((unsigned int*)hdr)[0] = readl(hdr_start);
 #endif
 }
 
@@ -371,26 +377,25 @@ static void ultra32_block_input(struct net_device *dev,
 				struct sk_buff *skb,
 				int ring_offset)
 {
-	unsigned long xfer_start = dev->mem_start + (ring_offset & 0x1fff);
+	void __iomem *xfer_start = ei_status.mem + (ring_offset & 0x1fff);
 	unsigned int RamReg = dev->base_addr - ULTRA32_NIC_OFFSET + ULTRA32_CFG3;
 
 	if ((ring_offset & ~0x1fff) != ((ring_offset + count - 1) & ~0x1fff)) {
 		int semi_count = 8192 - (ring_offset & 0x1FFF);
-		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
+		memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
 		if (ring_offset < 96*256) {
 			/* Select next 8KB Window. */
 			ring_offset += semi_count;
 			outb(ei_status.reg0 | ((ring_offset & 0x6000) >> 13), RamReg);
-			isa_memcpy_fromio(skb->data + semi_count, dev->mem_start, count);
+			memcpy_fromio(skb->data + semi_count, ei_status.mem, count);
 		} else {
 			/* Select first 8KB Window. */
 			outb(ei_status.reg0, RamReg);
-			isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
+			memcpy_fromio(skb->data + semi_count, ei_status.mem + TX_PAGES * 256, count);
 		}
 	} else {
-		/* Packet is in one chunk -- we can copy + cksum. */
-		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		memcpy_fromio(skb->data, xfer_start, count);
 	}
 }
 
@@ -399,15 +404,15 @@ static void ultra32_block_output(struct net_device *dev,
 				 const unsigned char *buf,
 				 int start_page)
 {
-	unsigned long xfer_start = dev->mem_start + (start_page<<8);
+	void __iomem *xfer_start = ei_status.mem + (start_page<<8);
 	unsigned int RamReg = dev->base_addr - ULTRA32_NIC_OFFSET + ULTRA32_CFG3;
 
 	/* Select first 8KB Window. */
 	outb(ei_status.reg0, RamReg);
 
-	isa_memcpy_toio(xfer_start, buf, count);
+	memcpy_toio(xfer_start, buf, count);
 }
-
+
 #ifdef MODULE
 #define MAX_ULTRA32_CARDS   4	/* Max number of Ultra cards per module */
 static struct net_device *dev_ultra[MAX_ULTRA32_CARDS];
@@ -415,7 +420,7 @@ static struct net_device *dev_ultra[MAX_ULTRA32_CARDS];
 MODULE_DESCRIPTION("SMC Ultra32 EISA ethernet driver");
 MODULE_LICENSE("GPL");
 
-int init_module(void)
+int __init init_module(void)
 {
 	int this_dev, found = 0;
 
@@ -431,7 +436,7 @@ int init_module(void)
 	return -ENXIO;
 }
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
 	int this_dev;
 

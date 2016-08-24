@@ -20,7 +20,6 @@
  *    Add early SCIF console DTLB mapping.
  */
 
-#include <linux/config.h>
 
 #include <asm/page.h>
 #include <asm/mmu_context.h>
@@ -96,8 +95,8 @@ empty_zero_page:
 	.long	0		/* RAMDISK_FLAGS */
 	.long	0x0200		/* ORIG_ROOT_DEV */
 	.long	1		/* LOADER_TYPE */
-	.long	0x00360000	/* INITRD_START */
-	.long	0x000a0000	/* INITRD_SIZE */
+	.long	0x00800000	/* INITRD_START */
+	.long	0x00800000	/* INITRD_SIZE */
 	.long	0
 
 	.text
@@ -125,7 +124,7 @@ empty_bad_pte_table:
 fpu_in_use:	.quad	0
 
 
-	.section	.text, "ax"
+	.section	.text.head, "ax"
 	.balign L1_CACHE_BYTES
 /*
  * Condition at the entry of __stext:
@@ -310,7 +309,7 @@ hyperspace:			    /* ... that's the next instruction !  */
 	 */
 	movi fpu_in_use, r31	/* Temporary */
 
-#ifndef CONFIG_NOFPU_SUPPORT
+#ifdef CONFIG_SH_FPU
 	getcon	SR, r21
 	movi	SR_ENABLE_FPU, r22
 	and	r21, r22, r22

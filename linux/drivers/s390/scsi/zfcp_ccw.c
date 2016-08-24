@@ -1,16 +1,8 @@
 /*
- * linux/drivers/s390/scsi/zfcp_ccw.c
+ * This file is part of the zfcp device driver for
+ * FCP adapters for IBM System z9 and zSeries.
  *
- * FCP adapter driver for IBM eServer zSeries
- *
- * CCW driver related routines
- *
- * (C) Copyright IBM Corp. 2003, 2004
- *
- * Authors:
- *      Martin Peschke <mpeschke@de.ibm.com>
- *	Heiko Carstens <heiko.carstens@de.ibm.com>
- *      Andreas Herrmann <aherrman@de.ibm.com>
+ * (C) Copyright IBM Corp. 2002, 2006
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,8 +19,6 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#define ZFCP_CCW_C_REVISION "$Revision: 1.58 $"
-
 #include "zfcp_ext.h"
 
 #define ZFCP_LOG_AREA                   ZFCP_LOG_AREA_CONFIG
@@ -38,7 +28,7 @@ static void zfcp_ccw_remove(struct ccw_device *);
 static int zfcp_ccw_set_online(struct ccw_device *);
 static int zfcp_ccw_set_offline(struct ccw_device *);
 static int zfcp_ccw_notify(struct ccw_device *, int);
-static void zfcp_ccw_shutdown(struct device *);
+static void zfcp_ccw_shutdown(struct ccw_device *);
 
 static struct ccw_device_id zfcp_ccw_device_id[] = {
 	{CCW_DEVICE_DEVTYPE(ZFCP_CONTROL_UNIT_TYPE,
@@ -61,9 +51,7 @@ static struct ccw_driver zfcp_ccw_driver = {
 	.set_online  = zfcp_ccw_set_online,
 	.set_offline = zfcp_ccw_set_offline,
 	.notify      = zfcp_ccw_notify,
-	.driver      = {
-		.shutdown = zfcp_ccw_shutdown,
-	},
+	.shutdown    = zfcp_ccw_shutdown,
 };
 
 MODULE_DEVICE_TABLE(ccw, zfcp_ccw_device_id);
@@ -160,20 +148,22 @@ zfcp_ccw_set_online(struct ccw_device *ccw_device)
 	down(&zfcp_data.config_sema);
 	adapter = dev_get_drvdata(&ccw_device->dev);
 
-	retval = zfcp_adapter_debug_register(adapter);
-	if (retval)
-		goto out;
 	retval = zfcp_erp_thread_setup(adapter);
 	if (retval) {
 		ZFCP_LOG_INFO("error: start of error recovery thread for "
 			      "adapter %s failed\n",
 			      zfcp_get_busid_by_adapter(adapter));
-		goto out_erp_thread;
+		goto out;
 	}
 
 	retval = zfcp_adapter_scsi_register(adapter);
 	if (retval)
 		goto out_scsi_register;
+
+	/* initialize request counter */
+	BUG_ON(!zfcp_reqlist_isempty(adapter));
+	adapter->req_no = 0;
+
 	zfcp_erp_modify_adapter_status(adapter, ZFCP_STATUS_COMMON_RUNNING,
 				       ZFCP_SET);
 	zfcp_erp_adapter_reopen(adapter, ZFCP_STATUS_COMMON_ERP_FAILED);
@@ -182,8 +172,6 @@ zfcp_ccw_set_online(struct ccw_device *ccw_device)
 
  out_scsi_register:
 	zfcp_erp_thread_kill(adapter);
- out_erp_thread:
-	zfcp_adapter_debug_unregister(adapter);
  out:
 	up(&zfcp_data.config_sema);
 	return retval;
@@ -194,9 +182,7 @@ zfcp_ccw_set_online(struct ccw_device *ccw_device)
  * @ccw_device: pointer to belonging ccw device
  *
  * This function gets called by the common i/o layer and sets an adapter
- * into state offline. Setting an fcp device offline means that it will be
- * unregistered from the SCSI stack and that the adapter will be shut down
- * asynchronously.
+ * into state offline.
  */
 static int
 zfcp_ccw_set_offline(struct ccw_device *ccw_device)
@@ -207,9 +193,7 @@ zfcp_ccw_set_offline(struct ccw_device *ccw_device)
 	adapter = dev_get_drvdata(&ccw_device->dev);
 	zfcp_erp_adapter_shutdown(adapter, 0);
 	zfcp_erp_wait(adapter);
-	zfcp_adapter_scsi_unregister(adapter);
 	zfcp_erp_thread_kill(adapter);
-	zfcp_adapter_debug_unregister(adapter);
 	up(&zfcp_data.config_sema);
 	return 0;
 }
@@ -280,30 +264,17 @@ zfcp_ccw_register(void)
 }
 
 /**
- * zfcp_ccw_unregister - ccw unregister function
- *
- * Unregisters the driver from common i/o layer. Function will be called at
- * module unload/system shutdown.
- */
-void __exit
-zfcp_ccw_unregister(void)
-{
-	zfcp_sysfs_driver_remove_files(&zfcp_ccw_driver.driver);
-	ccw_driver_unregister(&zfcp_ccw_driver);
-}
-
-/**
  * zfcp_ccw_shutdown - gets called on reboot/shutdown
  *
  * Makes sure that QDIO queues are down when the system gets stopped.
  */
 static void
-zfcp_ccw_shutdown(struct device *dev)
+zfcp_ccw_shutdown(struct ccw_device *cdev)
 {
 	struct zfcp_adapter *adapter;
 
 	down(&zfcp_data.config_sema);
-	adapter = dev_get_drvdata(dev);
+	adapter = dev_get_drvdata(&cdev->dev);
 	zfcp_erp_adapter_shutdown(adapter, 0);
 	zfcp_erp_wait(adapter);
 	up(&zfcp_data.config_sema);

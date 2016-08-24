@@ -1,7 +1,7 @@
 /*
  * ether.c -- Ethernet gadget driver, with CDC and non-CDC options
  *
- * Copyright (C) 2003-2004 David Brownell
+ * Copyright (C) 2003-2005 David Brownell
  * Copyright (C) 2003-2004 Robert Schwebel, Benedikt Spranger
  *
  * This program is free software; you can redistribute it and/or modify
@@ -19,42 +19,18 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+/* #define VERBOSE_DEBUG */
 
-// #define DEBUG 1
-// #define VERBOSE
-
-#include <linux/config.h>
-#include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/delay.h>
-#include <linux/ioport.h>
-#include <linux/sched.h>
-#include <linux/slab.h>
-#include <linux/smp_lock.h>
-#include <linux/errno.h>
-#include <linux/init.h>
-#include <linux/timer.h>
-#include <linux/list.h>
-#include <linux/interrupt.h>
 #include <linux/utsname.h>
 #include <linux/device.h>
-#include <linux/moduleparam.h>
 #include <linux/ctype.h>
-
-#include <asm/byteorder.h>
-#include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
-#include <asm/unaligned.h>
-
-#include <linux/usb_ch9.h>
-#include <linux/usb_gadget.h>
-
-#include <linux/random.h>
-#include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
+
+#include <linux/usb/ch9.h>
+#include <linux/usb/cdc.h>
+#include <linux/usb/gadget.h>
 
 #include "gadget_chips.h"
 
@@ -72,9 +48,18 @@
  *
  * There's some hardware that can't talk CDC.  We make that hardware
  * implement a "minimalist" vendor-agnostic CDC core:  same framing, but
- * link-level setup only requires activating the configuration.
- * Linux supports it, but other host operating systems may not.
- * (This is a subset of CDC Ethernet.)
+ * link-level setup only requires activating the configuration.  Only the
+ * endpoint descriptors, and product/vendor IDs, are relevant; no control
+ * operations are available.  Linux supports it, but other host operating
+ * systems may not.  (This is a subset of CDC Ethernet.)
+ *
+ * It turns out that if you add a few descriptors to that "CDC Subset",
+ * (Windows) host side drivers from MCCI can treat it as one submode of
+ * a proprietary scheme called "SAFE" ... without needing to know about
+ * specific product/vendor IDs.  So we do that, making it easier to use
+ * those MS-Windows drivers.  Those added descriptors make it resemble a
+ * CDC MDLM device, but they don't change device behavior at all.  (See
+ * MCCI Engineering report 950198 "SAFE Networking Functions".)
  *
  * A third option is also in use.  Rather than CDC Ethernet, or something
  * simpler, Microsoft pushes their own approach: RNDIS.  The published
@@ -83,19 +68,27 @@
  */
 
 #define DRIVER_DESC		"Ethernet Gadget"
-#define DRIVER_VERSION		"Equinox 2004"
+#define DRIVER_VERSION		"May Day 2005"
 
 static const char shortname [] = "ether";
 static const char driver_desc [] = DRIVER_DESC;
 
 #define RX_EXTRA	20		/* guard against rx overflows */
 
-#ifdef	CONFIG_USB_ETH_RNDIS
 #include "rndis.h"
-#else
-#define rndis_init() 0
-#define rndis_exit() do{}while(0)
+
+#ifndef	CONFIG_USB_ETH_RNDIS
+#define rndis_uninit(x)		do{}while(0)
+#define rndis_deregister(c)	do{}while(0)
+#define rndis_exit()		do{}while(0)
 #endif
+
+/* CDC and RNDIS support the same host-chosen outgoing packet filters. */
+#define	DEFAULT_FILTER	(USB_CDC_PACKET_TYPE_BROADCAST \
+			|USB_CDC_PACKET_TYPE_ALL_MULTICAST \
+			|USB_CDC_PACKET_TYPE_PROMISCUOUS \
+			|USB_CDC_PACKET_TYPE_DIRECTED)
+
 
 /*-------------------------------------------------------------------------*/
 
@@ -103,11 +96,14 @@ struct eth_dev {
 	spinlock_t		lock;
 	struct usb_gadget	*gadget;
 	struct usb_request	*req;		/* for control responses */
+	struct usb_request	*stat_req;	/* for cdc & rndis status */
 
 	u8			config;
 	struct usb_ep		*in_ep, *out_ep, *status_ep;
 	const struct usb_endpoint_descriptor
 				*in, *out, *status;
+
+	spinlock_t		req_lock;
 	struct list_head	tx_reqs, rx_reqs;
 
 	struct net_device	*net;
@@ -131,9 +127,6 @@ struct eth_dev {
  * It also ASSUMES a self-powered device, without remote wakeup,
  * although remote wakeup support would make sense.
  */
-static const char *EP_IN_NAME;
-static const char *EP_OUT_NAME;
-static const char *EP_STATUS_NAME;
 
 /*-------------------------------------------------------------------------*/
 
@@ -175,33 +168,37 @@ static const char *EP_STATUS_NAME;
  * parameters are in UTF-8 (superset of ASCII's 7 bit characters).
  */
 
-static ushort __initdata idVendor;
+static ushort idVendor;
 module_param(idVendor, ushort, S_IRUGO);
 MODULE_PARM_DESC(idVendor, "USB Vendor ID");
 
-static ushort __initdata idProduct;
+static ushort idProduct;
 module_param(idProduct, ushort, S_IRUGO);
 MODULE_PARM_DESC(idProduct, "USB Product ID");
 
-static ushort __initdata bcdDevice;
+static ushort bcdDevice;
 module_param(bcdDevice, ushort, S_IRUGO);
 MODULE_PARM_DESC(bcdDevice, "USB Device version (BCD)");
 
-static char *__initdata iManufacturer;
+static char *iManufacturer;
 module_param(iManufacturer, charp, S_IRUGO);
 MODULE_PARM_DESC(iManufacturer, "USB Manufacturer string");
 
-static char *__initdata iProduct;
+static char *iProduct;
 module_param(iProduct, charp, S_IRUGO);
 MODULE_PARM_DESC(iProduct, "USB Product string");
 
+static char *iSerialNumber;
+module_param(iSerialNumber, charp, S_IRUGO);
+MODULE_PARM_DESC(iSerialNumber, "SerialNumber");
+
 /* initial value, changed by "ifconfig usb0 hw ether xx:xx:xx:xx:xx:xx" */
-static char *__initdata dev_addr;
+static char *dev_addr;
 module_param(dev_addr, charp, S_IRUGO);
-MODULE_PARM_DESC(iProduct, "Device Ethernet Address");
+MODULE_PARM_DESC(dev_addr, "Device Ethernet Address");
 
 /* this address is invisible to ifconfig */
-static char *__initdata host_addr;
+static char *host_addr;
 module_param(host_addr, charp, S_IRUGO);
 MODULE_PARM_DESC(host_addr, "Host Ethernet Address");
 
@@ -242,6 +239,29 @@ MODULE_PARM_DESC(host_addr, "Host Ethernet Address");
 #define DEV_CONFIG_CDC
 #endif
 
+#ifdef CONFIG_USB_GADGET_S3C2410
+#define DEV_CONFIG_CDC
+#endif
+
+#ifdef CONFIG_USB_GADGET_AT91
+#define DEV_CONFIG_CDC
+#endif
+
+#ifdef CONFIG_USB_GADGET_MUSBHSFC
+#define DEV_CONFIG_CDC
+#endif
+
+#ifdef CONFIG_USB_GADGET_MUSB_HDRC
+#define DEV_CONFIG_CDC
+#endif
+
+#ifdef CONFIG_USB_GADGET_ATMEL_USBA
+#define DEV_CONFIG_CDC
+#endif
+
+#ifdef CONFIG_USB_GADGET_FSL_USB2
+#define DEV_CONFIG_CDC
+#endif
 
 /* For CDC-incapable hardware, choose the simple cdc subset.
  * Anything that talks bulk (without notable bugs) can do this.
@@ -250,7 +270,7 @@ MODULE_PARM_DESC(host_addr, "Host Ethernet Address");
 #define	DEV_CONFIG_SUBSET
 #endif
 
-#ifdef CONFIG_USB_GADGET_SH
+#ifdef CONFIG_USB_GADGET_SUPERH
 #define	DEV_CONFIG_SUBSET
 #endif
 
@@ -259,12 +279,52 @@ MODULE_PARM_DESC(host_addr, "Host Ethernet Address");
 #define	DEV_CONFIG_SUBSET
 #endif
 
+#ifdef CONFIG_USB_GADGET_M66592
+#define DEV_CONFIG_CDC
+#endif
+
+#ifdef CONFIG_USB_GADGET_AMD5536UDC
+#define	DEV_CONFIG_CDC
+#endif
+
 
 /*-------------------------------------------------------------------------*/
 
+/* "main" config is either CDC, or its simple subset */
+static inline int is_cdc(struct eth_dev *dev)
+{
+#if	!defined(DEV_CONFIG_SUBSET)
+	return 1;		/* only cdc possible */
+#elif	!defined (DEV_CONFIG_CDC)
+	return 0;		/* only subset possible */
+#else
+	return dev->cdc;	/* depends on what hardware we found */
+#endif
+}
+
+/* "secondary" RNDIS config may sometimes be activated */
+static inline int rndis_active(struct eth_dev *dev)
+{
+#ifdef	CONFIG_USB_ETH_RNDIS
+	return dev->rndis;
+#else
+	return 0;
+#endif
+}
+
+#define	subset_active(dev)	(!is_cdc(dev) && !rndis_active(dev))
+#define	cdc_active(dev)		( is_cdc(dev) && !rndis_active(dev))
+
+
+
 #define DEFAULT_QLEN	2	/* double buffering by default */
 
+/* peak bulk transfer bits-per-second */
+#define	HS_BPS		(13 * 512 * 8 * 1000 * 8)
+#define	FS_BPS		(19 *  64 * 1 * 1000 * 8)
+
 #ifdef CONFIG_USB_GADGET_DUALSPEED
+#define	DEVSPEED	USB_SPEED_HIGH
 
 static unsigned qmult = 5;
 module_param (qmult, uint, S_IRUGO|S_IWUSR);
@@ -274,15 +334,23 @@ module_param (qmult, uint, S_IRUGO|S_IWUSR);
 #define qlen(gadget) \
 	(DEFAULT_QLEN*((gadget->speed == USB_SPEED_HIGH) ? qmult : 1))
 
-/* also defer IRQs on highspeed TX */
-#define TX_DELAY	qmult
-
-#define	BITRATE(g) ((g->speed == USB_SPEED_HIGH) ? 4800000 : 120000)
+static inline int BITRATE(struct usb_gadget *g)
+{
+	return (g->speed == USB_SPEED_HIGH) ? HS_BPS : FS_BPS;
+}
 
 #else	/* full speed (low speed doesn't do bulk) */
+
+#define qmult		1
+
+#define	DEVSPEED	USB_SPEED_FULL
+
 #define qlen(gadget) DEFAULT_QLEN
 
-#define	BITRATE(g)	(12000)
+static inline int BITRATE(struct usb_gadget *g)
+{
+	return FS_BPS;
+}
 #endif
 
 
@@ -300,7 +368,7 @@ module_param (qmult, uint, S_IRUGO|S_IWUSR);
 	do { } while (0)
 #endif /* DEBUG */
 
-#ifdef VERBOSE
+#ifdef VERBOSE_DEBUG
 #define VDEBUG	DEBUG
 #else
 #define VDEBUG(dev,fmt,args...) \
@@ -341,8 +409,10 @@ module_param (qmult, uint, S_IRUGO|S_IWUSR);
 #define STRING_CDC			7
 #define STRING_SUBSET			8
 #define STRING_RNDIS			9
+#define STRING_SERIALNUMBER		10
 
-#define USB_BUFSIZ	256		/* holds our biggest descriptor */
+/* holds our biggest descriptor (or RNDIS response) */
+#define USB_BUFSIZ	256
 
 /*
  * This device advertises one configuration, eth_config, unless RNDIS
@@ -398,7 +468,7 @@ eth_config = {
 };
 
 #ifdef	CONFIG_USB_ETH_RNDIS
-static struct usb_config_descriptor 
+static struct usb_config_descriptor
 rndis_config = {
 	.bLength =              sizeof rndis_config,
 	.bDescriptorType =      USB_DT_CONFIG,
@@ -418,8 +488,17 @@ rndis_config = {
  * endpoint.  Both have a "data" interface and two bulk endpoints.
  * There are also differences in how control requests are handled.
  *
- * RNDIS shares a lot with CDC-Ethernet, since it's a variant of
- * the CDC-ACM (modem) spec.
+ * RNDIS shares a lot with CDC-Ethernet, since it's a variant of the
+ * CDC-ACM (modem) spec.  Unfortunately MSFT's RNDIS driver is buggy; it
+ * may hang or oops.  Since bugfixes (or accurate specs, letting Linux
+ * work around those bugs) are unlikely to ever come from MSFT, you may
+ * wish to avoid using RNDIS.
+ *
+ * MCCI offers an alternative to RNDIS if you need to connect to Windows
+ * but have hardware that can't support CDC Ethernet.   We add descriptors
+ * to present the CDC Subset as a (nonconformant) CDC MDLM variant called
+ * "SAFE".  That borrows from both CDC Ethernet and CDC MDLM.  You can
+ * get those drivers from MCCI, or bundled with various products.
  */
 
 #ifdef	DEV_CONFIG_CDC
@@ -432,8 +511,8 @@ control_intf = {
 	/* status endpoint is optional; this may be patched later */
 	.bNumEndpoints =	1,
 	.bInterfaceClass =	USB_CLASS_COMM,
-	.bInterfaceSubClass =	6,	/* ethernet control model */
-	.bInterfaceProtocol =	0,
+	.bInterfaceSubClass =	USB_CDC_SUBCLASS_ETHERNET,
+	.bInterfaceProtocol =	USB_CDC_PROTO_NONE,
 	.iInterface =		STRING_CONTROL,
 };
 #endif
@@ -443,50 +522,30 @@ static const struct usb_interface_descriptor
 rndis_control_intf = {
 	.bLength =              sizeof rndis_control_intf,
 	.bDescriptorType =      USB_DT_INTERFACE,
-	  
+
 	.bInterfaceNumber =     0,
 	.bNumEndpoints =        1,
 	.bInterfaceClass =      USB_CLASS_COMM,
-	.bInterfaceSubClass =   2,	/* abstract control model */
-	.bInterfaceProtocol =   0xff,	/* vendor specific */
+	.bInterfaceSubClass =   USB_CDC_SUBCLASS_ACM,
+	.bInterfaceProtocol =   USB_CDC_ACM_PROTO_VENDOR,
 	.iInterface =           STRING_RNDIS_CONTROL,
 };
 #endif
 
-#if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
-
-/* "Header Functional Descriptor" from CDC spec  5.2.3.1 */
-struct header_desc {
-	u8	bLength;
-	u8	bDescriptorType;
-	u8	bDescriptorSubType;
-
-	u16	bcdCDC;
-} __attribute__ ((packed));
-
-static const struct header_desc header_desc = {
+static const struct usb_cdc_header_desc header_desc = {
 	.bLength =		sizeof header_desc,
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
-	.bDescriptorSubType =	0,
+	.bDescriptorSubType =	USB_CDC_HEADER_TYPE,
 
 	.bcdCDC =		__constant_cpu_to_le16 (0x0110),
 };
 
-/* "Union Functional Descriptor" from CDC spec 5.2.3.8 */
-struct union_desc {
-	u8	bLength;
-	u8	bDescriptorType;
-	u8	bDescriptorSubType;
+#if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
 
-	u8	bMasterInterface0;
-	u8	bSlaveInterface0;
-	/* ... and there could be other slave interfaces */
-} __attribute__ ((packed));
-
-static const struct union_desc union_desc = {
+static const struct usb_cdc_union_desc union_desc = {
 	.bLength =		sizeof union_desc,
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
-	.bDescriptorSubType =	6,
+	.bDescriptorSubType =	USB_CDC_UNION_TYPE,
 
 	.bMasterInterface0 =	0,	/* index of control interface */
 	.bSlaveInterface0 =	1,	/* index of DATA interface */
@@ -496,64 +555,64 @@ static const struct union_desc union_desc = {
 
 #ifdef	CONFIG_USB_ETH_RNDIS
 
-/* "Call Management Descriptor" from CDC spec  5.2.3.3 */
-struct call_mgmt_descriptor {
-	u8  bLength;
-	u8  bDescriptorType;
-	u8  bDescriptorSubType;
+static const struct usb_cdc_call_mgmt_descriptor call_mgmt_descriptor = {
+	.bLength =		sizeof call_mgmt_descriptor,
+	.bDescriptorType =	USB_DT_CS_INTERFACE,
+	.bDescriptorSubType =	USB_CDC_CALL_MANAGEMENT_TYPE,
 
-	u8  bmCapabilities;
-	u8  bDataInterface;
-} __attribute__ ((packed));
-
-static const struct call_mgmt_descriptor call_mgmt_descriptor = {
-	.bLength =  		sizeof call_mgmt_descriptor,
-	.bDescriptorType = 	USB_DT_CS_INTERFACE,
-	.bDescriptorSubType = 	0x01,
-
-	.bmCapabilities = 	0x00,
-	.bDataInterface = 	0x01,
+	.bmCapabilities =	0x00,
+	.bDataInterface =	0x01,
 };
 
+static const struct usb_cdc_acm_descriptor acm_descriptor = {
+	.bLength =		sizeof acm_descriptor,
+	.bDescriptorType =	USB_DT_CS_INTERFACE,
+	.bDescriptorSubType =	USB_CDC_ACM_TYPE,
 
-/* "Abstract Control Management Descriptor" from CDC spec  5.2.3.4 */
-struct acm_descriptor {
-	u8  bLength;
-	u8  bDescriptorType;
-	u8  bDescriptorSubType;
-
-	u8  bmCapabilities;
-} __attribute__ ((packed));
-
-static struct acm_descriptor acm_descriptor = {
-	.bLength =  		sizeof acm_descriptor,
-	.bDescriptorType = 	USB_DT_CS_INTERFACE,
-	.bDescriptorSubType = 	0x02,
-
-	.bmCapabilities = 	0X00,
+	.bmCapabilities =	0x00,
 };
 
 #endif
 
-#ifdef	DEV_CONFIG_CDC
+#ifndef DEV_CONFIG_CDC
 
-/* "Ethernet Networking Functional Descriptor" from CDC spec 5.2.3.16 */
-struct ether_desc {
-	u8	bLength;
-	u8	bDescriptorType;
-	u8	bDescriptorSubType;
+/* "SAFE" loosely follows CDC WMC MDLM, violating the spec in various
+ * ways:  data endpoints live in the control interface, there's no data
+ * interface, and it's not used to talk to a cell phone radio.
+ */
 
-	u8	iMACAddress;
-	u32	bmEthernetStatistics;
-	u16	wMaxSegmentSize;
-	u16	wNumberMCFilters;
-	u8	bNumberPowerFilters;
-} __attribute__ ((packed));
+static const struct usb_cdc_mdlm_desc mdlm_desc = {
+	.bLength =		sizeof mdlm_desc,
+	.bDescriptorType =	USB_DT_CS_INTERFACE,
+	.bDescriptorSubType =	USB_CDC_MDLM_TYPE,
 
-static const struct ether_desc ether_desc = {
+	.bcdVersion =		__constant_cpu_to_le16(0x0100),
+	.bGUID = {
+		0x5d, 0x34, 0xcf, 0x66, 0x11, 0x18, 0x11, 0xd6,
+		0xa2, 0x1a, 0x00, 0x01, 0x02, 0xca, 0x9a, 0x7f,
+	},
+};
+
+/* since "usb_cdc_mdlm_detail_desc" is a variable length structure, we
+ * can't really use its struct.  All we do here is say that we're using
+ * the submode of "SAFE" which directly matches the CDC Subset.
+ */
+static const u8 mdlm_detail_desc[] = {
+	6,
+	USB_DT_CS_INTERFACE,
+	USB_CDC_MDLM_DETAIL_TYPE,
+
+	0,	/* "SAFE" */
+	0,	/* network control capabilities (none) */
+	0,	/* network data capabilities ("raw" encapsulation) */
+};
+
+#endif
+
+static const struct usb_cdc_ether_desc ether_desc = {
 	.bLength =		sizeof ether_desc,
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
-	.bDescriptorSubType =	0x0f,
+	.bDescriptorSubType =	USB_CDC_ETHERNET_TYPE,
 
 	/* this descriptor actually adds value, surprise! */
 	.iMACAddress =		STRING_ETHADDR,
@@ -563,14 +622,12 @@ static const struct ether_desc ether_desc = {
 	.bNumberPowerFilters =	0,
 };
 
-#endif
 
 #if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
 
 /* include the status endpoint if we can, even where it's optional.
- * use small wMaxPacketSize, since many "interrupt" endpoints have
- * very small fifos and it's no big deal if CDC_NOTIFY_SPEED_CHANGE
- * takes two packets.  also default to a big transfer interval, to
+ * use wMaxPacketSize big enough to fit CDC_NOTIFY_SPEED_CHANGE in one
+ * packet, to simplify cancellation; and a big transfer interval, to
  * waste less bandwidth.
  *
  * some drivers (like Linux 2.4 cdc-ether!) "need" it to exist even
@@ -581,9 +638,9 @@ static const struct ether_desc ether_desc = {
  * RNDIS requires the status endpoint, since it uses that encapsulation
  * mechanism for its funky RPC scheme.
  */
- 
+
 #define LOG2_STATUS_INTERVAL_MSEC	5	/* 1 << 5 == 32 msec */
-#define STATUS_BYTECOUNT		8	/* 8 byte header + data */
+#define STATUS_BYTECOUNT		16	/* 8 byte header + data */
 
 static struct usb_endpoint_descriptor
 fs_status_desc = {
@@ -657,6 +714,9 @@ rndis_data_intf = {
 /*
  * "Simple" CDC-subset option is a simple vendor-neutral model that most
  * full speed controllers can handle:  one interface, two bulk endpoints.
+ *
+ * To assist host side drivers, we fancy it up a bit, and add descriptors
+ * so some host side drivers will understand it as a "SAFE" variant.
  */
 
 static const struct usb_interface_descriptor
@@ -667,8 +727,8 @@ subset_data_intf = {
 	.bInterfaceNumber =	0,
 	.bAlternateSetting =	0,
 	.bNumEndpoints =	2,
-	.bInterfaceClass =	USB_CLASS_VENDOR_SPEC,
-	.bInterfaceSubClass =	0,
+	.bInterfaceClass =      USB_CLASS_COMM,
+	.bInterfaceSubClass =	USB_CDC_SUBCLASS_MDLM,
 	.bInterfaceProtocol =	0,
 	.iInterface =		STRING_DATA,
 };
@@ -716,10 +776,15 @@ static const struct usb_descriptor_header *fs_eth_function [11] = {
 static inline void __init fs_subset_descriptors(void)
 {
 #ifdef DEV_CONFIG_SUBSET
+	/* behavior is "CDC Subset"; extra descriptors say "SAFE" */
 	fs_eth_function[1] = (struct usb_descriptor_header *) &subset_data_intf;
-	fs_eth_function[2] = (struct usb_descriptor_header *) &fs_source_desc;
-	fs_eth_function[3] = (struct usb_descriptor_header *) &fs_sink_desc;
-	fs_eth_function[4] = NULL;
+	fs_eth_function[2] = (struct usb_descriptor_header *) &header_desc;
+	fs_eth_function[3] = (struct usb_descriptor_header *) &mdlm_desc;
+	fs_eth_function[4] = (struct usb_descriptor_header *) &mdlm_detail_desc;
+	fs_eth_function[5] = (struct usb_descriptor_header *) &ether_desc;
+	fs_eth_function[6] = (struct usb_descriptor_header *) &fs_source_desc;
+	fs_eth_function[7] = (struct usb_descriptor_header *) &fs_sink_desc;
+	fs_eth_function[8] = NULL;
 #else
 	fs_eth_function[1] = NULL;
 #endif
@@ -742,8 +807,6 @@ static const struct usb_descriptor_header *fs_rndis_function [] = {
 	NULL,
 };
 #endif
-
-#ifdef	CONFIG_USB_GADGET_DUALSPEED
 
 /*
  * usb 2.0 devices need to expose both high speed and full speed
@@ -813,10 +876,15 @@ static const struct usb_descriptor_header *hs_eth_function [11] = {
 static inline void __init hs_subset_descriptors(void)
 {
 #ifdef DEV_CONFIG_SUBSET
+	/* behavior is "CDC Subset"; extra descriptors say "SAFE" */
 	hs_eth_function[1] = (struct usb_descriptor_header *) &subset_data_intf;
-	hs_eth_function[2] = (struct usb_descriptor_header *) &fs_source_desc;
-	hs_eth_function[3] = (struct usb_descriptor_header *) &fs_sink_desc;
-	hs_eth_function[4] = NULL;
+	hs_eth_function[2] = (struct usb_descriptor_header *) &header_desc;
+	hs_eth_function[3] = (struct usb_descriptor_header *) &mdlm_desc;
+	hs_eth_function[4] = (struct usb_descriptor_header *) &mdlm_detail_desc;
+	hs_eth_function[5] = (struct usb_descriptor_header *) &ether_desc;
+	hs_eth_function[6] = (struct usb_descriptor_header *) &hs_source_desc;
+	hs_eth_function[7] = (struct usb_descriptor_header *) &hs_sink_desc;
+	hs_eth_function[8] = NULL;
 #else
 	hs_eth_function[1] = NULL;
 #endif
@@ -842,18 +910,15 @@ static const struct usb_descriptor_header *hs_rndis_function [] = {
 
 
 /* maxpacket and other transfer characteristics vary by speed. */
-#define ep_desc(g,hs,fs) (((g)->speed==USB_SPEED_HIGH)?(hs):(fs))
-
-#else
-
-/* if there's no high speed support, maxpacket doesn't change. */
-#define ep_desc(g,hs,fs) fs
-
-static inline void __init hs_subset_descriptors(void)
+static inline struct usb_endpoint_descriptor *
+ep_desc(struct usb_gadget *g, struct usb_endpoint_descriptor *hs,
+		struct usb_endpoint_descriptor *fs)
 {
+	if (gadget_is_dualspeed(g) && g->speed == USB_SPEED_HIGH)
+		return hs;
+	return fs;
 }
 
-#endif	/* !CONFIG_USB_GADGET_DUALSPEED */
 
 /*-------------------------------------------------------------------------*/
 
@@ -861,20 +926,20 @@ static inline void __init hs_subset_descriptors(void)
 
 static char				manufacturer [50];
 static char				product_desc [40] = DRIVER_DESC;
+static char				serial_number [20];
 
-#ifdef	DEV_CONFIG_CDC
 /* address that the host will use ... usually assigned at random */
 static char				ethaddr [2 * ETH_ALEN + 1];
-#endif
 
 /* static strings, in UTF-8 */
 static struct usb_string		strings [] = {
 	{ STRING_MANUFACTURER,	manufacturer, },
 	{ STRING_PRODUCT,	product_desc, },
+	{ STRING_SERIALNUMBER,	serial_number, },
 	{ STRING_DATA,		"Ethernet Data", },
+	{ STRING_ETHADDR,	ethaddr, },
 #ifdef	DEV_CONFIG_CDC
 	{ STRING_CDC,		"CDC Ethernet", },
-	{ STRING_ETHADDR,	ethaddr, },
 	{ STRING_CONTROL,	"CDC Communications Control", },
 #endif
 #ifdef	DEV_CONFIG_SUBSET
@@ -897,22 +962,19 @@ static struct usb_gadget_strings	stringtab = {
  * complications: class descriptors, and an altsetting.
  */
 static int
-config_buf (enum usb_device_speed speed,
-	u8 *buf, u8 type,
-	unsigned index, int is_otg)
+config_buf(struct usb_gadget *g, u8 *buf, u8 type, unsigned index, int is_otg)
 {
 	int					len;
 	const struct usb_config_descriptor	*config;
 	const struct usb_descriptor_header	**function;
-#ifdef CONFIG_USB_GADGET_DUALSPEED
-	int				hs = (speed == USB_SPEED_HIGH);
+	int					hs = 0;
 
-	if (type == USB_DT_OTHER_SPEED_CONFIG)
-		hs = !hs;
+	if (gadget_is_dualspeed(g)) {
+		hs = (g->speed == USB_SPEED_HIGH);
+		if (type == USB_DT_OTHER_SPEED_CONFIG)
+			hs = !hs;
+	}
 #define which_fn(t)	(hs ? hs_ ## t ## _function : fs_ ## t ## _function)
-#else
-#define	which_fn(t)	(fs_ ## t ## _function)
-#endif
 
 	if (index >= device_desc.bNumConfigurations)
 		return -EINVAL;
@@ -944,13 +1006,36 @@ config_buf (enum usb_device_speed speed,
 
 /*-------------------------------------------------------------------------*/
 
-static void eth_start (struct eth_dev *dev, int gfp_flags);
-static int alloc_requests (struct eth_dev *dev, unsigned n, int gfp_flags);
+static void eth_start (struct eth_dev *dev, gfp_t gfp_flags);
+static int alloc_requests (struct eth_dev *dev, unsigned n, gfp_t gfp_flags);
 
-#ifdef	DEV_CONFIG_CDC
-static inline int ether_alt_ep_setup (struct eth_dev *dev, struct usb_ep *ep)
+static int
+set_ether_config (struct eth_dev *dev, gfp_t gfp_flags)
 {
-	const struct usb_endpoint_descriptor	*d;
+	int					result = 0;
+	struct usb_gadget			*gadget = dev->gadget;
+
+#if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
+	/* status endpoint used for RNDIS and (optionally) CDC */
+	if (!subset_active(dev) && dev->status_ep) {
+		dev->status = ep_desc (gadget, &hs_status_desc,
+						&fs_status_desc);
+		dev->status_ep->driver_data = dev;
+
+		result = usb_ep_enable (dev->status_ep, dev->status);
+		if (result != 0) {
+			DEBUG (dev, "enable %s --> %d\n",
+				dev->status_ep->name, result);
+			goto done;
+		}
+	}
+#endif
+
+	dev->in = ep_desc(gadget, &hs_source_desc, &fs_source_desc);
+	dev->in_ep->driver_data = dev;
+
+	dev->out = ep_desc(gadget, &hs_sink_desc, &fs_sink_desc);
+	dev->out_ep->driver_data = dev;
 
 	/* With CDC,  the host isn't allowed to use these two data
 	 * endpoints in the default altsetting for the interface.
@@ -960,153 +1045,41 @@ static inline int ether_alt_ep_setup (struct eth_dev *dev, struct usb_ep *ep)
 	 * a side effect of setting a packet filter.  Deactivation is
 	 * from REMOTE_NDIS_HALT_MSG, reset from REMOTE_NDIS_RESET_MSG.
 	 */
-
-	/* one endpoint writes data back IN to the host */
-	if (strcmp (ep->name, EP_IN_NAME) == 0) {
-		d = ep_desc (dev->gadget, &hs_source_desc, &fs_source_desc);
-		ep->driver_data = dev;
-		dev->in_ep = ep;
-		dev->in = d;
-
-	/* one endpoint just reads OUT packets */
-	} else if (strcmp (ep->name, EP_OUT_NAME) == 0) {
-		d = ep_desc (dev->gadget, &hs_sink_desc, &fs_sink_desc);
-		ep->driver_data = dev;
-		dev->out_ep = ep;
-		dev->out = d;
-
-	/* optional status/notification endpoint */
-	} else if (EP_STATUS_NAME &&
-			strcmp (ep->name, EP_STATUS_NAME) == 0) {
-		int			result;
-
-		d = ep_desc (dev->gadget, &hs_status_desc, &fs_status_desc);
-		result = usb_ep_enable (ep, d);
-		if (result < 0)
-			return result;
-
-		ep->driver_data = dev;
-		dev->status_ep = ep;
-		dev->status = d;
-	}
-	return 0;
-}
-#endif
-
-#if	defined(DEV_CONFIG_SUBSET) || defined(CONFIG_USB_ETH_RNDIS)
-static inline int ether_ep_setup (struct eth_dev *dev, struct usb_ep *ep)
-{
-	int					result;
-	const struct usb_endpoint_descriptor	*d;
-
-	/* CDC subset is simpler:  if the device is there,
-	 * it's live with rx and tx endpoints.
-	 *
-	 * Do this as a shortcut for RNDIS too.
-	 */
-
-	/* one endpoint writes data back IN to the host */
-	if (strcmp (ep->name, EP_IN_NAME) == 0) {
-		d = ep_desc (dev->gadget, &hs_source_desc, &fs_source_desc);
-		result = usb_ep_enable (ep, d);
-		if (result < 0)
-			return result;
-
-		ep->driver_data = dev;
-		dev->in_ep = ep;
-		dev->in = d;
-
-	/* one endpoint just reads OUT packets */
-	} else if (strcmp (ep->name, EP_OUT_NAME) == 0) {
-		d = ep_desc (dev->gadget, &hs_sink_desc, &fs_sink_desc);
-		result = usb_ep_enable (ep, d);
-		if (result < 0)
-			return result;
-
-		ep->driver_data = dev;
-		dev->out_ep = ep;
-		dev->out = d;
-	}
-
-	return 0;
-}
-#endif
-
-static int
-set_ether_config (struct eth_dev *dev, int gfp_flags)
-{
-	int			result = 0;
-	struct usb_ep		*ep;
-	struct usb_gadget	*gadget = dev->gadget;
-
-	gadget_for_each_ep (ep, gadget) {
-#ifdef	DEV_CONFIG_CDC
-		if (!dev->rndis && dev->cdc) {
-			result = ether_alt_ep_setup (dev, ep);
-			if (result == 0)
-				continue;
-		}
-#endif
-
-#ifdef	CONFIG_USB_ETH_RNDIS
-		if (dev->rndis && strcmp (ep->name, EP_STATUS_NAME) == 0) {
-			const struct usb_endpoint_descriptor	*d;
-			d = ep_desc (gadget, &hs_status_desc, &fs_status_desc);
-			result = usb_ep_enable (ep, d);
-			if (result == 0) {
-				ep->driver_data = dev;
-				dev->status_ep = ep;
-				dev->status = d;
-				continue;
-			}
-		} else
-#endif
-
-		{
-#if	defined(DEV_CONFIG_SUBSET) || defined(CONFIG_USB_ETH_RNDIS)
-			result = ether_ep_setup (dev, ep);
-			if (result == 0)
-				continue;
-#endif
+	if (!cdc_active(dev)) {
+		result = usb_ep_enable (dev->in_ep, dev->in);
+		if (result != 0) {
+			DEBUG(dev, "enable %s --> %d\n",
+				dev->in_ep->name, result);
+			goto done;
 		}
 
-		/* stop on error */
-		ERROR (dev, "can't enable %s, result %d\n", ep->name, result);
-		break;
+		result = usb_ep_enable (dev->out_ep, dev->out);
+		if (result != 0) {
+			DEBUG (dev, "enable %s --> %d\n",
+				dev->out_ep->name, result);
+			goto done;
+		}
 	}
-	if (!result && (!dev->in_ep || !dev->out_ep))
-		result = -ENODEV;
 
+done:
 	if (result == 0)
 		result = alloc_requests (dev, qlen (gadget), gfp_flags);
 
 	/* on error, disable any endpoints  */
 	if (result < 0) {
-#if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
-		if (dev->status_ep)
+		if (!subset_active(dev))
 			(void) usb_ep_disable (dev->status_ep);
-#endif
-		dev->status_ep = NULL;
 		dev->status = NULL;
-#if defined(DEV_CONFIG_SUBSET) || defined(CONFIG_USB_ETH_RNDIS)
-		if (dev->rndis || !dev->cdc) {
-			if (dev->in_ep)
-				(void) usb_ep_disable (dev->in_ep);
-			if (dev->out_ep)
-				(void) usb_ep_disable (dev->out_ep);
-		}
-#endif
-		dev->in_ep = NULL;
+		(void) usb_ep_disable (dev->in_ep);
+		(void) usb_ep_disable (dev->out_ep);
 		dev->in = NULL;
-		dev->out_ep = NULL;
 		dev->out = NULL;
 	} else
 
 	/* activate non-CDC configs right away
 	 * this isn't strictly according to the RNDIS spec
 	 */
-#if defined(DEV_CONFIG_SUBSET) || defined(CONFIG_USB_ETH_RNDIS)
-	if (dev->rndis || !dev->cdc) {
+	if (!cdc_active (dev)) {
 		netif_carrier_on (dev->net);
 		if (netif_running (dev->net)) {
 			spin_unlock (&dev->lock);
@@ -1114,7 +1087,6 @@ set_ether_config (struct eth_dev *dev, int gfp_flags)
 			spin_lock (&dev->lock);
 		}
 	}
-#endif
 
 	if (result == 0)
 		DEBUG (dev, "qlen %d\n", qlen (gadget));
@@ -1134,35 +1106,45 @@ static void eth_reset_config (struct eth_dev *dev)
 
 	netif_stop_queue (dev->net);
 	netif_carrier_off (dev->net);
+	rndis_uninit(dev->rndis_config);
 
 	/* disable endpoints, forcing (synchronous) completion of
 	 * pending i/o.  then free the requests.
 	 */
-	if (dev->in_ep) {
+	if (dev->in) {
 		usb_ep_disable (dev->in_ep);
+		spin_lock(&dev->req_lock);
 		while (likely (!list_empty (&dev->tx_reqs))) {
 			req = container_of (dev->tx_reqs.next,
 						struct usb_request, list);
 			list_del (&req->list);
+
+			spin_unlock(&dev->req_lock);
 			usb_ep_free_request (dev->in_ep, req);
+			spin_lock(&dev->req_lock);
 		}
-		dev->in_ep = NULL;
+		spin_unlock(&dev->req_lock);
 	}
-	if (dev->out_ep) {
+	if (dev->out) {
 		usb_ep_disable (dev->out_ep);
+		spin_lock(&dev->req_lock);
 		while (likely (!list_empty (&dev->rx_reqs))) {
 			req = container_of (dev->rx_reqs.next,
 						struct usb_request, list);
 			list_del (&req->list);
+
+			spin_unlock(&dev->req_lock);
 			usb_ep_free_request (dev->out_ep, req);
+			spin_lock(&dev->req_lock);
 		}
-		dev->out_ep = NULL;
+		spin_unlock(&dev->req_lock);
 	}
 
-	if (dev->status_ep) {
+	if (dev->status) {
 		usb_ep_disable (dev->status_ep);
-		dev->status_ep = NULL;
 	}
+	dev->rndis = 0;
+	dev->cdc_filter = 0;
 	dev->config = 0;
 }
 
@@ -1170,13 +1152,10 @@ static void eth_reset_config (struct eth_dev *dev)
  * that returns config descriptors, and altsetting code.
  */
 static int
-eth_set_config (struct eth_dev *dev, unsigned number, int gfp_flags)
+eth_set_config (struct eth_dev *dev, unsigned number, gfp_t gfp_flags)
 {
 	int			result = 0;
 	struct usb_gadget	*gadget = dev->gadget;
-
-	if (number == dev->config)
-		return 0;
 
 	if (gadget_is_sa1100 (gadget)
 			&& dev->config
@@ -1187,12 +1166,8 @@ eth_set_config (struct eth_dev *dev, unsigned number, int gfp_flags)
 	}
 	eth_reset_config (dev);
 
-	/* default:  pass all packets, no multicast filtering */
-	dev->cdc_filter = 0x000f;
-
 	switch (number) {
 	case DEV_CONFIG_VALUE:
-		dev->rndis = 0;
 		result = set_ether_config (dev, gfp_flags);
 		break;
 #ifdef	CONFIG_USB_ETH_RNDIS
@@ -1212,7 +1187,7 @@ eth_set_config (struct eth_dev *dev, unsigned number, int gfp_flags)
 		if (number)
 			eth_reset_config (dev);
 		usb_gadget_vbus_draw(dev->gadget,
-				dev->gadget->is_otg ? 8 : 100);
+				gadget_is_otg(dev->gadget) ? 8 : 100);
 	} else {
 		char *speed;
 		unsigned power;
@@ -1225,15 +1200,15 @@ eth_set_config (struct eth_dev *dev, unsigned number, int gfp_flags)
 #ifdef CONFIG_USB_GADGET_DUALSPEED
 		case USB_SPEED_HIGH:	speed = "high"; break;
 #endif
-		default: 		speed = "?"; break;
+		default:		speed = "?"; break;
 		}
 
 		dev->config = number;
 		INFO (dev, "%s speed config #%d: %d mA, %s, using %s\n",
 				speed, number, power, driver_desc,
-				dev->rndis
+				rndis_active(dev)
 					? "RNDIS"
-					: (dev->cdc
+					: (cdc_active(dev)
 						? "CDC Ethernet"
 						: "CDC Ethernet Subset"));
 	}
@@ -1242,68 +1217,52 @@ eth_set_config (struct eth_dev *dev, unsigned number, int gfp_flags)
 
 /*-------------------------------------------------------------------------*/
 
-/* section 3.8.2 table 11 of the CDC spec lists Ethernet notifications
- * section 3.6.2.1 table 5 specifies ACM notifications, accepted by RNDIS
- * and RNDIS also defines its own bit-incompatible notifications
- */
-#define CDC_NOTIFY_NETWORK_CONNECTION	0x00	/* required; 6.3.1 */
-#define CDC_NOTIFY_RESPONSE_AVAILABLE	0x01	/* optional; 6.3.2 */
-#define CDC_NOTIFY_SPEED_CHANGE		0x2a	/* required; 6.3.8 */
-
 #ifdef	DEV_CONFIG_CDC
 
-struct cdc_notification {
-	u8	bmRequestType;
-	u8	bNotificationType;
-	u16	wValue;
-	u16	wIndex;
-	u16	wLength;
-
-	/* SPEED_CHANGE data looks like this */
-	u32	data [2];
-};
+/* The interrupt endpoint is used in CDC networking models (Ethernet, ATM)
+ * only to notify the host about link status changes (which we support) or
+ * report completion of some encapsulated command (as used in RNDIS).  Since
+ * we want this CDC Ethernet code to be vendor-neutral, we don't use that
+ * command mechanism; and only one status request is ever queued.
+ */
 
 static void eth_status_complete (struct usb_ep *ep, struct usb_request *req)
 {
-	struct cdc_notification	*event = req->buf;
-	int			value = req->status;
-	struct eth_dev		*dev = ep->driver_data;
+	struct usb_cdc_notification	*event = req->buf;
+	int				value = req->status;
+	struct eth_dev			*dev = ep->driver_data;
 
 	/* issue the second notification if host reads the first */
-	if (event->bNotificationType == CDC_NOTIFY_NETWORK_CONNECTION
+	if (event->bNotificationType == USB_CDC_NOTIFY_NETWORK_CONNECTION
 			&& value == 0) {
+		__le32	*data = req->buf + sizeof *event;
+
 		event->bmRequestType = 0xA1;
-		event->bNotificationType = CDC_NOTIFY_SPEED_CHANGE;
+		event->bNotificationType = USB_CDC_NOTIFY_SPEED_CHANGE;
 		event->wValue = __constant_cpu_to_le16 (0);
 		event->wIndex = __constant_cpu_to_le16 (1);
 		event->wLength = __constant_cpu_to_le16 (8);
 
 		/* SPEED_CHANGE data is up/down speeds in bits/sec */
-		event->data [0] = event->data [1] =
-			(dev->gadget->speed == USB_SPEED_HIGH)
-				? (13 * 512 * 8 * 1000 * 8)
-				: (19 *  64 * 1 * 1000 * 8);
+		data [0] = data [1] = cpu_to_le32 (BITRATE (dev->gadget));
 
-		req->length = 16;
+		req->length = STATUS_BYTECOUNT;
 		value = usb_ep_queue (ep, req, GFP_ATOMIC);
 		DEBUG (dev, "send SPEED_CHANGE --> %d\n", value);
 		if (value == 0)
 			return;
-	} else
+	} else if (value != -ECONNRESET)
 		DEBUG (dev, "event %02x --> %d\n",
 			event->bNotificationType, value);
-
-	/* free when done */
-	usb_ep_free_buffer (ep, req->buf, req->dma, 16);
-	usb_ep_free_request (ep, req);
+	req->context = NULL;
 }
 
 static void issue_start_status (struct eth_dev *dev)
 {
-	struct usb_request	*req;
-	struct cdc_notification	*event;
-	int			value;
- 
+	struct usb_request		*req = dev->stat_req;
+	struct usb_cdc_notification	*event;
+	int				value;
+
 	DEBUG (dev, "%s, flush old status first\n", __FUNCTION__);
 
 	/* flush old status
@@ -1312,44 +1271,29 @@ static void issue_start_status (struct eth_dev *dev)
 	 * a "cancel the whole queue" primitive since any
 	 * unlink-one primitive has way too many error modes.
 	 * here, we "know" toggle is already clear...
+	 *
+	 * FIXME iff req->context != null just dequeue it
 	 */
 	usb_ep_disable (dev->status_ep);
 	usb_ep_enable (dev->status_ep, dev->status);
-
-	/* FIXME make these allocations static like dev->req */
-	req = usb_ep_alloc_request (dev->status_ep, GFP_ATOMIC);
-	if (req == 0) {
-		DEBUG (dev, "status ENOMEM\n");
-		return;
-	}
-	req->buf = usb_ep_alloc_buffer (dev->status_ep, 16,
-				&dev->req->dma, GFP_ATOMIC);
-	if (req->buf == 0) {
-		DEBUG (dev, "status buf ENOMEM\n");
-free_req:
-		usb_ep_free_request (dev->status_ep, req);
-		return;
-	}
 
 	/* 3.8.1 says to issue first NETWORK_CONNECTION, then
 	 * a SPEED_CHANGE.  could be useful in some configs.
 	 */
 	event = req->buf;
 	event->bmRequestType = 0xA1;
-	event->bNotificationType = CDC_NOTIFY_NETWORK_CONNECTION;
+	event->bNotificationType = USB_CDC_NOTIFY_NETWORK_CONNECTION;
 	event->wValue = __constant_cpu_to_le16 (1);	/* connected */
 	event->wIndex = __constant_cpu_to_le16 (1);
 	event->wLength = 0;
 
-	req->length = 8;
+	req->length = sizeof *event;
 	req->complete = eth_status_complete;
+	req->context = dev;
+
 	value = usb_ep_queue (dev->status_ep, req, GFP_ATOMIC);
-	if (value < 0) {
+	if (value < 0)
 		DEBUG (dev, "status buf queue --> %d\n", value);
-		usb_ep_free_buffer (dev->status_ep,
-				req->buf, dev->req->dma, 16);
-		goto free_req;
-	}
 }
 
 #endif
@@ -1364,26 +1308,6 @@ static void eth_setup_complete (struct usb_ep *ep, struct usb_request *req)
 				req->status, req->actual, req->length);
 }
 
-/* see section 3.8.2 table 10 of the CDC spec for more ethernet
- * requests, mostly for filters (multicast, pm) and statistics
- * section 3.6.2.1 table 4 has ACM requests; RNDIS requires the
- * encapsulated command mechanism.
- */
-#define CDC_SEND_ENCAPSULATED_COMMAND		0x00	/* optional */
-#define CDC_GET_ENCAPSULATED_RESPONSE		0x01	/* optional */
-#define CDC_SET_ETHERNET_MULTICAST_FILTERS	0x40	/* optional */
-#define CDC_SET_ETHERNET_PM_PATTERN_FILTER	0x41	/* optional */
-#define CDC_GET_ETHERNET_PM_PATTERN_FILTER	0x42	/* optional */
-#define CDC_SET_ETHERNET_PACKET_FILTER		0x43	/* required */
-#define CDC_GET_ETHERNET_STATISTIC		0x44	/* optional */
-
-/* table 62; bits in cdc_filter */
-#define	CDC_PACKET_TYPE_PROMISCUOUS		(1 << 0)
-#define	CDC_PACKET_TYPE_ALL_MULTICAST		(1 << 1) /* no filter */
-#define	CDC_PACKET_TYPE_DIRECTED		(1 << 2)
-#define	CDC_PACKET_TYPE_BROADCAST		(1 << 3)
-#define	CDC_PACKET_TYPE_MULTICAST		(1 << 4) /* filtered */
-
 #ifdef CONFIG_USB_ETH_RNDIS
 
 static void rndis_response_complete (struct usb_ep *ep, struct usb_request *req)
@@ -1393,15 +1317,15 @@ static void rndis_response_complete (struct usb_ep *ep, struct usb_request *req)
 			"rndis response complete --> %d, %d/%d\n",
 			req->status, req->actual, req->length);
 
-	/* done sending after CDC_GET_ENCAPSULATED_RESPONSE */
+	/* done sending after USB_CDC_GET_ENCAPSULATED_RESPONSE */
 }
 
 static void rndis_command_complete (struct usb_ep *ep, struct usb_request *req)
 {
 	struct eth_dev          *dev = ep->driver_data;
 	int			status;
-	
-	/* received RNDIS command from CDC_SEND_ENCAPSULATED_COMMAND */
+
+	/* received RNDIS command from USB_CDC_SEND_ENCAPSULATED_COMMAND */
 	spin_lock(&dev->lock);
 	status = rndis_msg_parser (dev->rndis_config, (u8 *) req->buf);
 	if (status < 0)
@@ -1426,6 +1350,9 @@ eth_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	struct eth_dev		*dev = get_gadget_data (gadget);
 	struct usb_request	*req = dev->req;
 	int			value = -EOPNOTSUPP;
+	u16			wIndex = le16_to_cpu(ctrl->wIndex);
+	u16			wValue = le16_to_cpu(ctrl->wValue);
+	u16			wLength = le16_to_cpu(ctrl->wLength);
 
 	/* descriptors just go into the pre-allocated ep0 buffer,
 	 * while config change events may enable network traffic.
@@ -1436,39 +1363,37 @@ eth_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	case USB_REQ_GET_DESCRIPTOR:
 		if (ctrl->bRequestType != USB_DIR_IN)
 			break;
-		switch (ctrl->wValue >> 8) {
+		switch (wValue >> 8) {
 
 		case USB_DT_DEVICE:
-			value = min (ctrl->wLength, (u16) sizeof device_desc);
+			value = min (wLength, (u16) sizeof device_desc);
 			memcpy (req->buf, &device_desc, value);
 			break;
-#ifdef CONFIG_USB_GADGET_DUALSPEED
 		case USB_DT_DEVICE_QUALIFIER:
-			if (!gadget->is_dualspeed)
+			if (!gadget_is_dualspeed(gadget))
 				break;
-			value = min (ctrl->wLength, (u16) sizeof dev_qualifier);
+			value = min (wLength, (u16) sizeof dev_qualifier);
 			memcpy (req->buf, &dev_qualifier, value);
 			break;
 
 		case USB_DT_OTHER_SPEED_CONFIG:
-			if (!gadget->is_dualspeed)
+			if (!gadget_is_dualspeed(gadget))
 				break;
 			// FALLTHROUGH
-#endif /* CONFIG_USB_GADGET_DUALSPEED */
 		case USB_DT_CONFIG:
-			value = config_buf (gadget->speed, req->buf,
-					ctrl->wValue >> 8,
-					ctrl->wValue & 0xff,
-					gadget->is_otg);
+			value = config_buf(gadget, req->buf,
+					wValue >> 8,
+					wValue & 0xff,
+					gadget_is_otg(gadget));
 			if (value >= 0)
-				value = min (ctrl->wLength, (u16) value);
+				value = min (wLength, (u16) value);
 			break;
 
 		case USB_DT_STRING:
 			value = usb_gadget_get_string (&stringtab,
-					ctrl->wValue & 0xff, req->buf);
+					wValue & 0xff, req->buf);
 			if (value >= 0)
-				value = min (ctrl->wLength, (u16) value);
+				value = min (wLength, (u16) value);
 			break;
 		}
 		break;
@@ -1481,22 +1406,22 @@ eth_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 		else if (gadget->a_alt_hnp_support)
 			DEBUG (dev, "HNP needs a different root port\n");
 		spin_lock (&dev->lock);
-		value = eth_set_config (dev, ctrl->wValue, GFP_ATOMIC);
+		value = eth_set_config (dev, wValue, GFP_ATOMIC);
 		spin_unlock (&dev->lock);
 		break;
 	case USB_REQ_GET_CONFIGURATION:
 		if (ctrl->bRequestType != USB_DIR_IN)
 			break;
 		*(u8 *)req->buf = dev->config;
-		value = min (ctrl->wLength, (u16) 1);
+		value = min (wLength, (u16) 1);
 		break;
 
 	case USB_REQ_SET_INTERFACE:
 		if (ctrl->bRequestType != USB_RECIP_INTERFACE
 				|| !dev->config
-				|| ctrl->wIndex > 1)
+				|| wIndex > 1)
 			break;
-		if (!dev->cdc && ctrl->wIndex != 0)
+		if (!cdc_active(dev) && wIndex != 0)
 			break;
 		spin_lock (&dev->lock);
 
@@ -1510,31 +1435,34 @@ eth_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 		}
 
 #ifdef DEV_CONFIG_CDC
-		switch (ctrl->wIndex) {
+		switch (wIndex) {
 		case 0:		/* control/master intf */
-			if (ctrl->wValue != 0)
+			if (wValue != 0)
 				break;
-			if (dev->status_ep) {
+			if (dev->status) {
 				usb_ep_disable (dev->status_ep);
 				usb_ep_enable (dev->status_ep, dev->status);
 			}
 			value = 0;
 			break;
 		case 1:		/* data intf */
-			if (ctrl->wValue > 1)
+			if (wValue > 1)
 				break;
 			usb_ep_disable (dev->in_ep);
 			usb_ep_disable (dev->out_ep);
 
 			/* CDC requires the data transfers not be done from
 			 * the default interface setting ... also, setting
-			 * the non-default interface clears filters etc.
+			 * the non-default interface resets filters etc.
 			 */
-			if (ctrl->wValue == 1) {
+			if (wValue == 1) {
+				if (!cdc_active (dev))
+					break;
 				usb_ep_enable (dev->in_ep, dev->in);
 				usb_ep_enable (dev->out_ep, dev->out);
+				dev->cdc_filter = DEFAULT_FILTER;
 				netif_carrier_on (dev->net);
-				if (dev->status_ep)
+				if (dev->status)
 					issue_start_status (dev);
 				if (netif_running (dev->net)) {
 					spin_unlock (&dev->lock);
@@ -1561,73 +1489,76 @@ done_set_intf:
 	case USB_REQ_GET_INTERFACE:
 		if (ctrl->bRequestType != (USB_DIR_IN|USB_RECIP_INTERFACE)
 				|| !dev->config
-				|| ctrl->wIndex > 1)
+				|| wIndex > 1)
 			break;
-		if (!(dev->cdc || dev->rndis) && ctrl->wIndex != 0)
+		if (!(cdc_active(dev) || rndis_active(dev)) && wIndex != 0)
 			break;
 
 		/* for CDC, iff carrier is on, data interface is active. */
-		if (dev->rndis || ctrl->wIndex != 1)
+		if (rndis_active(dev) || wIndex != 1)
 			*(u8 *)req->buf = 0;
 		else
 			*(u8 *)req->buf = netif_carrier_ok (dev->net) ? 1 : 0;
-		value = min (ctrl->wLength, (u16) 1);
+		value = min (wLength, (u16) 1);
 		break;
 
 #ifdef DEV_CONFIG_CDC
-	case CDC_SET_ETHERNET_PACKET_FILTER:
+	case USB_CDC_SET_ETHERNET_PACKET_FILTER:
 		/* see 6.2.30: no data, wIndex = interface,
 		 * wValue = packet filter bitmap
 		 */
 		if (ctrl->bRequestType != (USB_TYPE_CLASS|USB_RECIP_INTERFACE)
-				|| !dev->cdc
-				|| dev->rndis
-				|| ctrl->wLength != 0
-				|| ctrl->wIndex > 1)
+				|| !cdc_active(dev)
+				|| wLength != 0
+				|| wIndex > 1)
 			break;
-		DEBUG (dev, "NOP packet filter %04x\n", ctrl->wValue);
-		/* NOTE: table 62 has 5 filter bits to reduce traffic,
-		 * and we "must" support multicast and promiscuous.
-		 * this NOP implements a bad filter (always promisc)
-		 */
-		dev->cdc_filter = ctrl->wValue;
+		DEBUG (dev, "packet filter %02x\n", wValue);
+		dev->cdc_filter = wValue;
 		value = 0;
 		break;
+
+	/* and potentially:
+	 * case USB_CDC_SET_ETHERNET_MULTICAST_FILTERS:
+	 * case USB_CDC_SET_ETHERNET_PM_PATTERN_FILTER:
+	 * case USB_CDC_GET_ETHERNET_PM_PATTERN_FILTER:
+	 * case USB_CDC_GET_ETHERNET_STATISTIC:
+	 */
+
 #endif /* DEV_CONFIG_CDC */
 
-#ifdef CONFIG_USB_ETH_RNDIS		
+#ifdef CONFIG_USB_ETH_RNDIS
 	/* RNDIS uses the CDC command encapsulation mechanism to implement
 	 * an RPC scheme, with much getting/setting of attributes by OID.
 	 */
-	case CDC_SEND_ENCAPSULATED_COMMAND:
+	case USB_CDC_SEND_ENCAPSULATED_COMMAND:
 		if (ctrl->bRequestType != (USB_TYPE_CLASS|USB_RECIP_INTERFACE)
-				|| !dev->rndis
-				|| ctrl->wLength > USB_BUFSIZ
-				|| ctrl->wValue
+				|| !rndis_active(dev)
+				|| wLength > USB_BUFSIZ
+				|| wValue
 				|| rndis_control_intf.bInterfaceNumber
-					!= ctrl->wIndex)
+					!= wIndex)
 			break;
 		/* read the request, then process it */
-		value = ctrl->wLength;
+		value = wLength;
 		req->complete = rndis_command_complete;
 		/* later, rndis_control_ack () sends a notification */
 		break;
-		
-	case CDC_GET_ENCAPSULATED_RESPONSE:
+
+	case USB_CDC_GET_ENCAPSULATED_RESPONSE:
 		if ((USB_DIR_IN|USB_TYPE_CLASS|USB_RECIP_INTERFACE)
 					== ctrl->bRequestType
-				&& dev->rndis
-				// && ctrl->wLength >= 0x0400
-				&& !ctrl->wValue
+				&& rndis_active(dev)
+				// && wLength >= 0x0400
+				&& !wValue
 				&& rndis_control_intf.bInterfaceNumber
-					== ctrl->wIndex) {
+					== wIndex) {
 			u8 *buf;
+			u32 n;
 
 			/* return the result */
-			buf = rndis_get_next_response (dev->rndis_config,
-						       &value);
+			buf = rndis_get_next_response(dev->rndis_config, &n);
 			if (buf) {
-				memcpy (req->buf, buf, value);
+				memcpy(req->buf, buf, n);
 				req->complete = rndis_response_complete;
 				rndis_free_response(dev->rndis_config, buf);
 			}
@@ -1640,13 +1571,13 @@ done_set_intf:
 		VDEBUG (dev,
 			"unknown control req%02x.%02x v%04x i%04x l%d\n",
 			ctrl->bRequestType, ctrl->bRequest,
-			ctrl->wValue, ctrl->wIndex, ctrl->wLength);
+			wValue, wIndex, wLength);
 	}
 
 	/* respond with data transfer before status phase? */
 	if (value >= 0) {
 		req->length = value;
-		req->zero = value < ctrl->wLength
+		req->zero = value < wLength
 				&& (value % gadget->ep0->maxpacket) == 0;
 		value = usb_ep_queue (gadget->ep0, req, GFP_ATOMIC);
 		if (value < 0) {
@@ -1687,7 +1618,8 @@ static int eth_change_mtu (struct net_device *net, int new_mtu)
 {
 	struct eth_dev	*dev = netdev_priv(net);
 
-	// FIXME if rndis, don't change while link's live
+	if (dev->rndis)
+		return -EBUSY;
 
 	if (new_mtu <= ETH_HLEN || new_mtu > ETH_FRAME_LEN)
 		return -ERANGE;
@@ -1736,7 +1668,7 @@ static void defer_kevent (struct eth_dev *dev, int flag)
 static void rx_complete (struct usb_ep *ep, struct usb_request *req);
 
 static int
-rx_submit (struct eth_dev *dev, struct usb_request *req, int gfp_flags)
+rx_submit (struct eth_dev *dev, struct usb_request *req, gfp_t gfp_flags)
 {
 	struct sk_buff		*skb;
 	int			retval = -ENOMEM;
@@ -1755,16 +1687,21 @@ rx_submit (struct eth_dev *dev, struct usb_request *req, int gfp_flags)
 	 */
 	size = (sizeof (struct ethhdr) + dev->net->mtu + RX_EXTRA);
 	size += dev->out_ep->maxpacket - 1;
-#ifdef CONFIG_USB_ETH_RNDIS
-	if (dev->rndis)
+	if (rndis_active(dev))
 		size += sizeof (struct rndis_packet_msg_type);
-#endif	
 	size -= size % dev->out_ep->maxpacket;
 
-	if ((skb = alloc_skb (size, gfp_flags)) == 0) {
+	skb = alloc_skb(size + NET_IP_ALIGN, gfp_flags);
+	if (skb == NULL) {
 		DEBUG (dev, "no rx skb\n");
 		goto enomem;
 	}
+
+	/* Some platforms perform better when IP packets are aligned,
+	 * but on at least one, checksumming fails otherwise.  Note:
+	 * RNDIS headers involve variable numbers of LE32 values.
+	 */
+	skb_reserve(skb, NET_IP_ALIGN);
 
 	req->buf = skb->data;
 	req->length = size;
@@ -1777,10 +1714,11 @@ enomem:
 		defer_kevent (dev, WORK_RX_MEMORY);
 	if (retval) {
 		DEBUG (dev, "rx submit --> %d\n", retval);
-		dev_kfree_skb_any (skb);
-		spin_lock (&dev->lock);
+		if (skb)
+			dev_kfree_skb_any(skb);
+		spin_lock(&dev->req_lock);
 		list_add (&req->list, &dev->rx_reqs);
-		spin_unlock (&dev->lock);
+		spin_unlock(&dev->req_lock);
 	}
 	return retval;
 }
@@ -1796,19 +1734,18 @@ static void rx_complete (struct usb_ep *ep, struct usb_request *req)
 	/* normal completion */
 	case 0:
 		skb_put (skb, req->actual);
-#ifdef CONFIG_USB_ETH_RNDIS
 		/* we know MaxPacketsPerTransfer == 1 here */
-		if (dev->rndis)
-			rndis_rm_hdr (req->buf, &(skb->len));
-#endif
-		if (ETH_HLEN > skb->len || skb->len > ETH_FRAME_LEN) {
+		if (rndis_active(dev))
+			status = rndis_rm_hdr (skb);
+		if (status < 0
+				|| ETH_HLEN > skb->len
+				|| skb->len > ETH_FRAME_LEN) {
 			dev->stats.rx_errors++;
 			dev->stats.rx_length_errors++;
 			DEBUG (dev, "rx length %d\n", skb->len);
 			break;
 		}
 
-		skb->dev = dev->net;
 		skb->protocol = eth_type_trans (skb, dev->net);
 		dev->stats.rx_packets++;
 		dev->stats.rx_bytes += skb->len;
@@ -1838,7 +1775,7 @@ quiesce:
 	case -EOVERFLOW:
 		dev->stats.rx_over_errors++;
 		// FALLTHROUGH
-	    
+
 	default:
 		dev->stats.rx_errors++;
 		DEBUG (dev, "rx status %d\n", status);
@@ -1849,8 +1786,9 @@ quiesce:
 		dev_kfree_skb_any (skb);
 	if (!netif_running (dev->net)) {
 clean:
-		/* nobody reading rx_reqs, so no dev->lock */
+		spin_lock(&dev->req_lock);
 		list_add (&req->list, &dev->rx_reqs);
+		spin_unlock(&dev->req_lock);
 		req = NULL;
 	}
 	if (req)
@@ -1858,7 +1796,7 @@ clean:
 }
 
 static int prealloc (struct list_head *list, struct usb_ep *ep,
-			unsigned n, int gfp_flags)
+			unsigned n, gfp_t gfp_flags)
 {
 	unsigned		i;
 	struct usb_request	*req;
@@ -1897,56 +1835,55 @@ extra:
 	return 0;
 }
 
-static int alloc_requests (struct eth_dev *dev, unsigned n, int gfp_flags)
+static int alloc_requests (struct eth_dev *dev, unsigned n, gfp_t gfp_flags)
 {
 	int status;
 
+	spin_lock(&dev->req_lock);
 	status = prealloc (&dev->tx_reqs, dev->in_ep, n, gfp_flags);
 	if (status < 0)
 		goto fail;
 	status = prealloc (&dev->rx_reqs, dev->out_ep, n, gfp_flags);
 	if (status < 0)
 		goto fail;
-	return 0;
+	goto done;
 fail:
 	DEBUG (dev, "can't alloc requests\n");
+done:
+	spin_unlock(&dev->req_lock);
 	return status;
 }
 
-static void rx_fill (struct eth_dev *dev, int gfp_flags)
+static void rx_fill (struct eth_dev *dev, gfp_t gfp_flags)
 {
 	struct usb_request	*req;
 	unsigned long		flags;
 
-	clear_bit (WORK_RX_MEMORY, &dev->todo);
-
 	/* fill unused rxq slots with some skb */
-	spin_lock_irqsave (&dev->lock, flags);
+	spin_lock_irqsave(&dev->req_lock, flags);
 	while (!list_empty (&dev->rx_reqs)) {
 		req = container_of (dev->rx_reqs.next,
 				struct usb_request, list);
 		list_del_init (&req->list);
-		spin_unlock_irqrestore (&dev->lock, flags);
+		spin_unlock_irqrestore(&dev->req_lock, flags);
 
 		if (rx_submit (dev, req, gfp_flags) < 0) {
 			defer_kevent (dev, WORK_RX_MEMORY);
 			return;
 		}
 
-		spin_lock_irqsave (&dev->lock, flags);
+		spin_lock_irqsave(&dev->req_lock, flags);
 	}
-	spin_unlock_irqrestore (&dev->lock, flags);
+	spin_unlock_irqrestore(&dev->req_lock, flags);
 }
 
-static void eth_work (void *_dev)
+static void eth_work (struct work_struct *work)
 {
-	struct eth_dev		*dev = _dev;
+	struct eth_dev	*dev = container_of(work, struct eth_dev, work);
 
-	if (test_bit (WORK_RX_MEMORY, &dev->todo)) {
+	if (test_and_clear_bit (WORK_RX_MEMORY, &dev->todo)) {
 		if (netif_running (dev->net))
 			rx_fill (dev, GFP_KERNEL);
-		else
-			clear_bit (WORK_RX_MEMORY, &dev->todo);
 	}
 
 	if (dev->todo)
@@ -1971,14 +1908,22 @@ static void tx_complete (struct usb_ep *ep, struct usb_request *req)
 	}
 	dev->stats.tx_packets++;
 
-	spin_lock (&dev->lock);
+	spin_lock(&dev->req_lock);
 	list_add (&req->list, &dev->tx_reqs);
-	spin_unlock (&dev->lock);
+	spin_unlock(&dev->req_lock);
 	dev_kfree_skb_any (skb);
 
 	atomic_dec (&dev->tx_qlen);
 	if (netif_carrier_ok (dev->net))
 		netif_wake_queue (dev->net);
+}
+
+static inline int eth_is_promisc (struct eth_dev *dev)
+{
+	/* no filters for the CDC subset; always promisc */
+	if (subset_active (dev))
+		return 1;
+	return dev->cdc_filter & USB_CDC_PACKET_TYPE_PROMISCUOUS;
 }
 
 static int eth_start_xmit (struct sk_buff *skb, struct net_device *net)
@@ -1989,37 +1934,64 @@ static int eth_start_xmit (struct sk_buff *skb, struct net_device *net)
 	struct usb_request	*req = NULL;
 	unsigned long		flags;
 
-	/* FIXME check dev->cdc_filter to decide whether to send this,
-	 * instead of acting as if CDC_PACKET_TYPE_PROMISCUOUS were
-	 * always set.  RNDIS has the same kind of outgoing filter.
-	 */
+	/* apply outgoing CDC or RNDIS filters */
+	if (!eth_is_promisc (dev)) {
+		u8		*dest = skb->data;
 
-	spin_lock_irqsave (&dev->lock, flags);
+		if (is_multicast_ether_addr(dest)) {
+			u16	type;
+
+			/* ignores USB_CDC_PACKET_TYPE_MULTICAST and host
+			 * SET_ETHERNET_MULTICAST_FILTERS requests
+			 */
+			if (is_broadcast_ether_addr(dest))
+				type = USB_CDC_PACKET_TYPE_BROADCAST;
+			else
+				type = USB_CDC_PACKET_TYPE_ALL_MULTICAST;
+			if (!(dev->cdc_filter & type)) {
+				dev_kfree_skb_any (skb);
+				return 0;
+			}
+		}
+		/* ignores USB_CDC_PACKET_TYPE_DIRECTED */
+	}
+
+	spin_lock_irqsave(&dev->req_lock, flags);
+	/*
+	 * this freelist can be empty if an interrupt triggered disconnect()
+	 * and reconfigured the gadget (shutting down this queue) after the
+	 * network stack decided to xmit but before we got the spinlock.
+	 */
+	if (list_empty(&dev->tx_reqs)) {
+		spin_unlock_irqrestore(&dev->req_lock, flags);
+		return 1;
+	}
+
 	req = container_of (dev->tx_reqs.next, struct usb_request, list);
 	list_del (&req->list);
+
+	/* temporarily stop TX queue when the freelist empties */
 	if (list_empty (&dev->tx_reqs))
 		netif_stop_queue (net);
-	spin_unlock_irqrestore (&dev->lock, flags);
+	spin_unlock_irqrestore(&dev->req_lock, flags);
 
 	/* no buffer copies needed, unless the network stack did it
 	 * or the hardware can't use skb buffers.
 	 * or there's not enough space for any RNDIS headers we need
 	 */
-#ifdef CONFIG_USB_ETH_RNDIS
-	if (dev->rndis) {
+	if (rndis_active(dev)) {
 		struct sk_buff	*skb_rndis;
 
 		skb_rndis = skb_realloc_headroom (skb,
 				sizeof (struct rndis_packet_msg_type));
 		if (!skb_rndis)
 			goto drop;
-	
+
 		dev_kfree_skb_any (skb);
 		skb = skb_rndis;
 		rndis_add_hdr (skb);
 		length = skb->len;
 	}
-#endif
 	req->buf = skb->data;
 	req->context = skb;
 	req->complete = tx_complete;
@@ -2034,12 +2006,11 @@ static int eth_start_xmit (struct sk_buff *skb, struct net_device *net)
 
 	req->length = length;
 
-#ifdef	CONFIG_USB_GADGET_DUALSPEED
 	/* throttle highspeed IRQ rate back slightly */
-	req->no_interrupt = (dev->gadget->speed == USB_SPEED_HIGH)
-		? ((atomic_read (&dev->tx_qlen) % TX_DELAY) != 0)
-		: 0;
-#endif
+	if (gadget_is_dualspeed(dev->gadget))
+		req->no_interrupt = (dev->gadget->speed == USB_SPEED_HIGH)
+			? ((atomic_read(&dev->tx_qlen) % qmult) != 0)
+			: 0;
 
 	retval = usb_ep_queue (dev->in_ep, req, GFP_ATOMIC);
 	switch (retval) {
@@ -2052,16 +2023,14 @@ static int eth_start_xmit (struct sk_buff *skb, struct net_device *net)
 	}
 
 	if (retval) {
-#ifdef CONFIG_USB_ETH_RNDIS
 drop:
-#endif
 		dev->stats.tx_dropped++;
 		dev_kfree_skb_any (skb);
-		spin_lock_irqsave (&dev->lock, flags);
+		spin_lock_irqsave(&dev->req_lock, flags);
 		if (list_empty (&dev->tx_reqs))
 			netif_start_queue (net);
 		list_add (&req->list, &dev->tx_reqs);
-		spin_unlock_irqrestore (&dev->lock, flags);
+		spin_unlock_irqrestore(&dev->req_lock, flags);
 	}
 	return 0;
 }
@@ -2070,97 +2039,93 @@ drop:
 
 #ifdef CONFIG_USB_ETH_RNDIS
 
-static void rndis_send_media_state (struct eth_dev *dev, int connect)
-{
-	if (!dev)
-		return;
-	
-	if (connect) {
-		if (rndis_signal_connect (dev->rndis_config))
-			return;
-	} else {
-		if (rndis_signal_disconnect (dev->rndis_config))
-			return;
-	}
-}
+/* The interrupt endpoint is used in RNDIS to notify the host when messages
+ * other than data packets are available ... notably the REMOTE_NDIS_*_CMPLT
+ * messages, but also REMOTE_NDIS_INDICATE_STATUS_MSG and potentially even
+ * REMOTE_NDIS_KEEPALIVE_MSG.
+ *
+ * The RNDIS control queue is processed by GET_ENCAPSULATED_RESPONSE, and
+ * normally just one notification will be queued.
+ */
+
+static struct usb_request *eth_req_alloc (struct usb_ep *, unsigned, gfp_t);
+static void eth_req_free (struct usb_ep *ep, struct usb_request *req);
 
 static void
 rndis_control_ack_complete (struct usb_ep *ep, struct usb_request *req)
 {
+	struct eth_dev          *dev = ep->driver_data;
+
 	if (req->status || req->actual != req->length)
-		DEBUG ((struct eth_dev *) ep->driver_data,
+		DEBUG (dev,
 			"rndis control ack complete --> %d, %d/%d\n",
 			req->status, req->actual, req->length);
+	req->context = NULL;
 
-	usb_ep_free_buffer(ep, req->buf, req->dma, 8);
-	usb_ep_free_request(ep, req);
+	if (req != dev->stat_req)
+		eth_req_free(ep, req);
 }
 
 static int rndis_control_ack (struct net_device *net)
 {
 	struct eth_dev          *dev = netdev_priv(net);
-	u32                     length;
-	struct usb_request      *resp;
-	
+	int                     length;
+	struct usb_request      *resp = dev->stat_req;
+
 	/* in case RNDIS calls this after disconnect */
-	if (!dev->status_ep) {
+	if (!dev->status) {
 		DEBUG (dev, "status ENODEV\n");
 		return -ENODEV;
 	}
 
-	/* Allocate memory for notification ie. ACK */
-	resp = usb_ep_alloc_request (dev->status_ep, GFP_ATOMIC);
-	if (!resp) {
-		DEBUG (dev, "status ENOMEM\n");
-		return -ENOMEM;
+	/* in case queue length > 1 */
+	if (resp->context) {
+		resp = eth_req_alloc (dev->status_ep, 8, GFP_ATOMIC);
+		if (!resp)
+			return -ENOMEM;
 	}
-	
-	resp->buf = usb_ep_alloc_buffer (dev->status_ep, 8,
-					 &resp->dma, GFP_ATOMIC);
-	if (!resp->buf) {
-		DEBUG (dev, "status buf ENOMEM\n");
-		usb_ep_free_request (dev->status_ep, resp);
-		return -ENOMEM;
-	}
-	
+
 	/* Send RNDIS RESPONSE_AVAILABLE notification;
-	 * CDC_NOTIFY_RESPONSE_AVAILABLE should work too
+	 * USB_CDC_NOTIFY_RESPONSE_AVAILABLE should work too
 	 */
 	resp->length = 8;
 	resp->complete = rndis_control_ack_complete;
-	
-	*((u32 *) resp->buf) = __constant_cpu_to_le32 (1);
-	*((u32 *) resp->buf + 1) = __constant_cpu_to_le32 (0);
-	
+	resp->context = dev;
+
+	*((__le32 *) resp->buf) = __constant_cpu_to_le32 (1);
+	*((__le32 *) resp->buf + 1) = __constant_cpu_to_le32 (0);
+
 	length = usb_ep_queue (dev->status_ep, resp, GFP_ATOMIC);
 	if (length < 0) {
 		resp->status = 0;
 		rndis_control_ack_complete (dev->status_ep, resp);
 	}
-	
+
 	return 0;
 }
 
+#else
+
+#define	rndis_control_ack	NULL
+
 #endif	/* RNDIS */
 
-static void eth_start (struct eth_dev *dev, int gfp_flags)
+static void eth_start (struct eth_dev *dev, gfp_t gfp_flags)
 {
 	DEBUG (dev, "%s\n", __FUNCTION__);
 
 	/* fill the rx queue */
 	rx_fill (dev, gfp_flags);
 
-	/* and open the tx floodgates */ 
+	/* and open the tx floodgates */
 	atomic_set (&dev->tx_qlen, 0);
 	netif_wake_queue (dev->net);
-#ifdef CONFIG_USB_ETH_RNDIS
-	if (dev->rndis) {
+	if (rndis_active(dev)) {
 		rndis_set_param_medium (dev->rndis_config,
 					NDIS_MEDIUM_802_3,
-					BITRATE(dev->gadget));
-		rndis_send_media_state (dev, 1);
+					BITRATE(dev->gadget)/100);
+		(void) rndis_signal_connect (dev->rndis_config);
 	}
-#endif	
 }
 
 static int eth_open (struct net_device *net)
@@ -2181,7 +2146,7 @@ static int eth_stop (struct net_device *net)
 	netif_stop_queue (net);
 
 	DEBUG (dev, "stop stats: rx/tx %ld/%ld, errs %ld/%ld\n",
-		dev->stats.rx_packets, dev->stats.tx_packets, 
+		dev->stats.rx_packets, dev->stats.tx_packets,
 		dev->stats.rx_errors, dev->stats.tx_errors
 		);
 
@@ -2200,38 +2165,59 @@ static int eth_stop (struct net_device *net)
 			usb_ep_enable (dev->status_ep, dev->status);
 		}
 	}
-	
-#ifdef	CONFIG_USB_ETH_RNDIS
-	if (dev->rndis) {
-		rndis_set_param_medium (dev->rndis_config,
-					NDIS_MEDIUM_802_3, 0);
-		rndis_send_media_state (dev, 0);
+
+	if (rndis_active(dev)) {
+		rndis_set_param_medium(dev->rndis_config, NDIS_MEDIUM_802_3, 0);
+		(void) rndis_signal_disconnect (dev->rndis_config);
 	}
-#endif
 
 	return 0;
 }
 
 /*-------------------------------------------------------------------------*/
 
+static struct usb_request *
+eth_req_alloc (struct usb_ep *ep, unsigned size, gfp_t gfp_flags)
+{
+	struct usb_request	*req;
+
+	req = usb_ep_alloc_request (ep, gfp_flags);
+	if (!req)
+		return NULL;
+
+	req->buf = kmalloc (size, gfp_flags);
+	if (!req->buf) {
+		usb_ep_free_request (ep, req);
+		req = NULL;
+	}
+	return req;
+}
+
 static void
+eth_req_free (struct usb_ep *ep, struct usb_request *req)
+{
+	kfree (req->buf);
+	usb_ep_free_request (ep, req);
+}
+
+
+static void /* __init_or_exit */
 eth_unbind (struct usb_gadget *gadget)
 {
 	struct eth_dev		*dev = get_gadget_data (gadget);
 
 	DEBUG (dev, "unbind\n");
-#ifdef CONFIG_USB_ETH_RNDIS
 	rndis_deregister (dev->rndis_config);
 	rndis_exit ();
-#endif
 
 	/* we've already been disconnected ... no i/o is active */
 	if (dev->req) {
-		usb_ep_free_buffer (gadget->ep0,
-				dev->req->buf, dev->req->dma,
-				USB_BUFSIZ);
-		usb_ep_free_request (gadget->ep0, dev->req);
+		eth_req_free (gadget->ep0, dev->req);
 		dev->req = NULL;
+	}
+	if (dev->stat_req) {
+		eth_req_free (dev->status_ep, dev->stat_req);
+		dev->stat_req = NULL;
 	}
 
 	unregister_netdev (dev->net);
@@ -2242,7 +2228,7 @@ eth_unbind (struct usb_gadget *gadget)
 	set_gadget_data (gadget, NULL);
 }
 
-static u8 __init nibble (unsigned char c)
+static u8 __devinit nibble (unsigned char c)
 {
 	if (likely (isdigit (c)))
 		return c - '0';
@@ -2252,7 +2238,7 @@ static u8 __init nibble (unsigned char c)
 	return 0;
 }
 
-static void __init get_ether_addr (const char *str, u8 *dev_addr)
+static int __devinit get_ether_addr(const char *str, u8 *dev_addr)
 {
 	if (str) {
 		unsigned	i;
@@ -2267,19 +2253,21 @@ static void __init get_ether_addr (const char *str, u8 *dev_addr)
 			dev_addr [i] = num;
 		}
 		if (is_valid_ether_addr (dev_addr))
-			return;
+			return 0;
 	}
 	random_ether_addr(dev_addr);
+	return 1;
 }
 
-static int __init
+static int __devinit
 eth_bind (struct usb_gadget *gadget)
 {
 	struct eth_dev		*dev;
 	struct net_device	*net;
 	u8			cdc = 1, zlp = 1, rndis = 1;
-	struct usb_ep		*ep;
+	struct usb_ep		*in_ep, *out_ep, *status_ep = NULL;
 	int			status = -ENOMEM;
+	int			gcnum;
 
 	/* these flags are only ever cleared; compiler take note */
 #ifndef	DEV_CONFIG_CDC
@@ -2293,40 +2281,29 @@ eth_bind (struct usb_gadget *gadget)
 	 * standard protocol is _strongly_ preferred for interop purposes.
 	 * (By everyone except Microsoft.)
 	 */
-	if (gadget_is_net2280 (gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0201);
-	} else if (gadget_is_dummy (gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0202);
-	} else if (gadget_is_pxa (gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0203);
+	if (gadget_is_pxa (gadget)) {
 		/* pxa doesn't support altsettings */
 		cdc = 0;
+	} else if (gadget_is_musbhdrc(gadget)) {
+		/* reduce tx dma overhead by avoiding special cases */
+		zlp = 0;
 	} else if (gadget_is_sh(gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0204);
 		/* sh doesn't support multiple interfaces or configs */
 		cdc = 0;
 		rndis = 0;
 	} else if (gadget_is_sa1100 (gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0205);
 		/* hardware can't write zlps */
 		zlp = 0;
 		/* sa1100 CAN do CDC, without status endpoint ... we use
 		 * non-CDC to be compatible with ARM Linux-2.4 "usb-eth".
 		 */
 		cdc = 0;
-	} else if (gadget_is_goku (gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0206);
-	} else if (gadget_is_mq11xx (gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0207);
-	} else if (gadget_is_omap (gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0208);
-	} else if (gadget_is_lh7a40x(gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0209);
-	} else if (gadget_is_n9604(gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0210);
-	} else if (gadget_is_pxa27x(gadget)) {
-		device_desc.bcdDevice = __constant_cpu_to_le16 (0x0211);
-	} else {
+	}
+
+	gcnum = usb_gadget_controller_number (gadget);
+	if (gcnum >= 0)
+		device_desc.bcdDevice = cpu_to_le16 (0x0200 + gcnum);
+	else {
 		/* can't assume CDC works.  don't want to default to
 		 * anything less functional on CDC-capable hardware,
 		 * so we fail in this case.
@@ -2337,7 +2314,7 @@ eth_bind (struct usb_gadget *gadget)
 		return -ENODEV;
 	}
 	snprintf (manufacturer, sizeof manufacturer, "%s %s/%s",
-		system_utsname.sysname, system_utsname.release,
+		init_utsname()->sysname, init_utsname()->release,
 		gadget->name);
 
 	/* If there's an RNDIS configuration, that's what Windows wants to
@@ -2355,10 +2332,10 @@ eth_bind (struct usb_gadget *gadget)
 			"RNDIS/%s", driver_desc);
 
 	/* CDC subset ... recognized by Linux since 2.4.10, but Windows
-	 * drivers aren't widely available.
+	 * drivers aren't widely available.  (That may be improved by
+	 * supporting one submode of the "SAFE" variant of MDLM.)
 	 */
 	} else if (!cdc) {
-		device_desc.bDeviceClass = USB_CLASS_VENDOR_SPEC;
 		device_desc.idVendor =
 			__constant_cpu_to_le16(SIMPLE_VENDOR_NUM);
 		device_desc.idProduct =
@@ -2380,43 +2357,47 @@ eth_bind (struct usb_gadget *gadget)
 		strlcpy (manufacturer, iManufacturer, sizeof manufacturer);
 	if (iProduct)
 		strlcpy (product_desc, iProduct, sizeof product_desc);
+	if (iSerialNumber) {
+		device_desc.iSerialNumber = STRING_SERIALNUMBER,
+		strlcpy(serial_number, iSerialNumber, sizeof serial_number);
+	}
 
 	/* all we really need is bulk IN/OUT */
 	usb_ep_autoconfig_reset (gadget);
-	ep = usb_ep_autoconfig (gadget, &fs_source_desc);
-	if (!ep) {
+	in_ep = usb_ep_autoconfig (gadget, &fs_source_desc);
+	if (!in_ep) {
 autoconf_fail:
 		dev_err (&gadget->dev,
 			"can't autoconfigure on %s\n",
 			gadget->name);
 		return -ENODEV;
 	}
-	EP_IN_NAME = ep->name;
-	ep->driver_data = ep;	/* claim */
-	
-	ep = usb_ep_autoconfig (gadget, &fs_sink_desc);
-	if (!ep)
+	in_ep->driver_data = in_ep;	/* claim */
+
+	out_ep = usb_ep_autoconfig (gadget, &fs_sink_desc);
+	if (!out_ep)
 		goto autoconf_fail;
-	EP_OUT_NAME = ep->name;
-	ep->driver_data = ep;	/* claim */
+	out_ep->driver_data = out_ep;	/* claim */
 
 #if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
 	/* CDC Ethernet control interface doesn't require a status endpoint.
 	 * Since some hosts expect one, try to allocate one anyway.
 	 */
 	if (cdc || rndis) {
-		ep = usb_ep_autoconfig (gadget, &fs_status_desc);
-		if (ep) {
-			EP_STATUS_NAME = ep->name;
-			ep->driver_data = ep;	/* claim */
+		status_ep = usb_ep_autoconfig (gadget, &fs_status_desc);
+		if (status_ep) {
+			status_ep->driver_data = status_ep;	/* claim */
 		} else if (rndis) {
 			dev_err (&gadget->dev,
 				"can't run RNDIS on %s\n",
 				gadget->name);
 			return -ENODEV;
+#ifdef DEV_CONFIG_CDC
+		/* pxa25x only does CDC subset; often used with RNDIS */
 		} else if (cdc) {
 			control_intf.bNumEndpoints = 0;
 			/* FIXME remove endpoint from descriptor list */
+#endif
 		}
 	}
 #endif
@@ -2425,37 +2406,43 @@ autoconf_fail:
 	if (!cdc) {
 		eth_config.bNumInterfaces = 1;
 		eth_config.iConfiguration = STRING_SUBSET;
+
+		/* use functions to set these up, in case we're built to work
+		 * with multiple controllers and must override CDC Ethernet.
+		 */
 		fs_subset_descriptors();
 		hs_subset_descriptors();
 	}
+
+	device_desc.bMaxPacketSize0 = gadget->ep0->maxpacket;
+	usb_gadget_set_selfpowered (gadget);
 
 	/* For now RNDIS is always a second config */
 	if (rndis)
 		device_desc.bNumConfigurations = 2;
 
-#ifdef	CONFIG_USB_GADGET_DUALSPEED
-	if (rndis)
-		dev_qualifier.bNumConfigurations = 2;
-	else if (!cdc)
-		dev_qualifier.bDeviceClass = USB_CLASS_VENDOR_SPEC;
+	if (gadget_is_dualspeed(gadget)) {
+		if (rndis)
+			dev_qualifier.bNumConfigurations = 2;
+		else if (!cdc)
+			dev_qualifier.bDeviceClass = USB_CLASS_VENDOR_SPEC;
 
-	/* assumes ep0 uses the same value for both speeds ... */
-	dev_qualifier.bMaxPacketSize0 = device_desc.bMaxPacketSize0;
+		/* assumes ep0 uses the same value for both speeds ... */
+		dev_qualifier.bMaxPacketSize0 = device_desc.bMaxPacketSize0;
 
-	/* and that all endpoints are dual-speed */
-	hs_source_desc.bEndpointAddress = fs_source_desc.bEndpointAddress;
-	hs_sink_desc.bEndpointAddress = fs_sink_desc.bEndpointAddress;
+		/* and that all endpoints are dual-speed */
+		hs_source_desc.bEndpointAddress =
+				fs_source_desc.bEndpointAddress;
+		hs_sink_desc.bEndpointAddress =
+				fs_sink_desc.bEndpointAddress;
 #if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
-	if (EP_STATUS_NAME)
-		hs_status_desc.bEndpointAddress =
-				fs_status_desc.bEndpointAddress;
+		if (status_ep)
+			hs_status_desc.bEndpointAddress =
+					fs_status_desc.bEndpointAddress;
 #endif
-#endif	/* DUALSPEED */
+	}
 
-	device_desc.bMaxPacketSize0 = gadget->ep0->maxpacket;
-	usb_gadget_set_selfpowered (gadget);
-
-	if (gadget->is_otg) {
+	if (gadget_is_otg(gadget)) {
 		otg_descriptor.bmAttributes |= USB_OTG_HNP,
 		eth_config.bmAttributes |= USB_CONFIG_ATT_WAKEUP;
 		eth_config.bMaxPower = 4;
@@ -2465,36 +2452,42 @@ autoconf_fail:
 #endif
 	}
 
- 	net = alloc_etherdev (sizeof *dev);
- 	if (!net)
+	net = alloc_etherdev (sizeof *dev);
+	if (!net)
 		return status;
 	dev = netdev_priv(net);
 	spin_lock_init (&dev->lock);
-	INIT_WORK (&dev->work, eth_work, dev);
+	spin_lock_init (&dev->req_lock);
+	INIT_WORK (&dev->work, eth_work);
 	INIT_LIST_HEAD (&dev->tx_reqs);
 	INIT_LIST_HEAD (&dev->rx_reqs);
 
 	/* network device setup */
 	dev->net = net;
-	SET_MODULE_OWNER (net);
 	strcpy (net->name, "usb%d");
 	dev->cdc = cdc;
 	dev->zlp = zlp;
 
+	dev->in_ep = in_ep;
+	dev->out_ep = out_ep;
+	dev->status_ep = status_ep;
+
 	/* Module params for these addresses should come from ID proms.
 	 * The host side address is used with CDC and RNDIS, and commonly
-	 * ends up in a persistent config database.
+	 * ends up in a persistent config database.  It's not clear if
+	 * host side code for the SAFE thing cares -- its original BLAN
+	 * thing didn't, Sharp never assigned those addresses on Zaurii.
 	 */
-	get_ether_addr(dev_addr, net->dev_addr);
-	if (cdc || rndis) {
-		get_ether_addr(host_addr, dev->host_mac);
-#ifdef	DEV_CONFIG_CDC
-		snprintf (ethaddr, sizeof ethaddr, "%02X%02X%02X%02X%02X%02X",
-			dev->host_mac [0], dev->host_mac [1],
-			dev->host_mac [2], dev->host_mac [3],
-			dev->host_mac [4], dev->host_mac [5]);
-#endif
-	}
+	if (get_ether_addr(dev_addr, net->dev_addr))
+		dev_warn(&gadget->dev,
+			"using random %s ethernet address\n", "self");
+	if (get_ether_addr(host_addr, dev->host_mac))
+		dev_warn(&gadget->dev,
+			"using random %s ethernet address\n", "host");
+	snprintf (ethaddr, sizeof ethaddr, "%02X%02X%02X%02X%02X%02X",
+		dev->host_mac [0], dev->host_mac [1],
+		dev->host_mac [2], dev->host_mac [3],
+		dev->host_mac [4], dev->host_mac [5]);
 
 	if (rndis) {
 		status = rndis_init();
@@ -2514,23 +2507,30 @@ autoconf_fail:
 	// set_multicast_list
 	SET_ETHTOOL_OPS(net, &ops);
 
-	/* preallocate control response and buffer */
-	dev->req = usb_ep_alloc_request (gadget->ep0, GFP_KERNEL);
+	/* preallocate control message data and buffer */
+	dev->req = eth_req_alloc (gadget->ep0, USB_BUFSIZ, GFP_KERNEL);
 	if (!dev->req)
 		goto fail;
 	dev->req->complete = eth_setup_complete;
-	dev->req->buf = usb_ep_alloc_buffer (gadget->ep0, USB_BUFSIZ,
-				&dev->req->dma, GFP_KERNEL);
-	if (!dev->req->buf) {
-		usb_ep_free_request (gadget->ep0, dev->req);
-		goto fail;
+
+	/* ... and maybe likewise for status transfer */
+#if defined(DEV_CONFIG_CDC) || defined(CONFIG_USB_ETH_RNDIS)
+	if (dev->status_ep) {
+		dev->stat_req = eth_req_alloc (dev->status_ep,
+					STATUS_BYTECOUNT, GFP_KERNEL);
+		if (!dev->stat_req) {
+			eth_req_free (gadget->ep0, dev->req);
+			goto fail;
+		}
+		dev->stat_req->context = NULL;
 	}
+#endif
 
 	/* finish hookup to lower layer ... */
 	dev->gadget = gadget;
 	set_gadget_data (gadget, dev);
 	gadget->ep0->driver_data = dev;
-	
+
 	/* two kinds of host-initiated state changes:
 	 *  - iff DATA transfer is active, carrier is "on"
 	 *  - tx queueing enabled if open *and* carrier is "on"
@@ -2538,16 +2538,16 @@ autoconf_fail:
 	netif_stop_queue (dev->net);
 	netif_carrier_off (dev->net);
 
- 	// SET_NETDEV_DEV (dev->net, &gadget->dev);
- 	status = register_netdev (dev->net);
+	SET_NETDEV_DEV (dev->net, &gadget->dev);
+	status = register_netdev (dev->net);
 	if (status < 0)
 		goto fail1;
 
 	INFO (dev, "%s, version: " DRIVER_VERSION "\n", driver_desc);
 	INFO (dev, "using %s, OUT %s IN %s%s%s\n", gadget->name,
-		EP_OUT_NAME, EP_IN_NAME,
-		EP_STATUS_NAME ? " STATUS " : "",
-		EP_STATUS_NAME ? EP_STATUS_NAME : ""
+		out_ep->name, in_ep->name,
+		status_ep ? " STATUS " : "",
+		status_ep ? status_ep->name : ""
 		);
 	INFO (dev, "MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
 		net->dev_addr [0], net->dev_addr [1],
@@ -2560,12 +2560,11 @@ autoconf_fail:
 			dev->host_mac [2], dev->host_mac [3],
 			dev->host_mac [4], dev->host_mac [5]);
 
-#ifdef	CONFIG_USB_ETH_RNDIS
 	if (rndis) {
 		u32	vendorID = 0;
 
 		/* FIXME RNDIS vendor id == "vendor NIC code" == ? */
-		
+
 		dev->rndis_config = rndis_register (rndis_control_ack);
 		if (dev->rndis_config < 0) {
 fail0:
@@ -2573,22 +2572,20 @@ fail0:
 			status = -ENODEV;
 			goto fail;
 		}
-		
+
 		/* these set up a lot of the OIDs that RNDIS needs */
 		rndis_set_host_mac (dev->rndis_config, dev->host_mac);
 		if (rndis_set_param_dev (dev->rndis_config, dev->net,
-					 &dev->stats))
+					 &dev->stats, &dev->cdc_filter))
 			goto fail0;
-		if (rndis_set_param_vendor (dev->rndis_config, vendorID,
-					    manufacturer))
+		if (rndis_set_param_vendor(dev->rndis_config, vendorID,
+					manufacturer))
 			goto fail0;
-		if (rndis_set_param_medium (dev->rndis_config,
-					    NDIS_MEDIUM_802_3,
-					    0))
+		if (rndis_set_param_medium(dev->rndis_config,
+					NDIS_MEDIUM_802_3, 0))
 			goto fail0;
 		INFO (dev, "RNDIS ready\n");
 	}
-#endif	
 
 	return status;
 
@@ -2622,11 +2619,8 @@ eth_resume (struct usb_gadget *gadget)
 /*-------------------------------------------------------------------------*/
 
 static struct usb_gadget_driver eth_driver = {
-#ifdef CONFIG_USB_GADGET_DUALSPEED
-	.speed		= USB_SPEED_HIGH,
-#else
-	.speed		= USB_SPEED_FULL,
-#endif
+	.speed		= DEVSPEED,
+
 	.function	= (char *) driver_desc,
 	.bind		= eth_bind,
 	.unbind		= eth_unbind,
@@ -2637,11 +2631,9 @@ static struct usb_gadget_driver eth_driver = {
 	.suspend	= eth_suspend,
 	.resume		= eth_resume,
 
-	.driver 	= {
+	.driver	= {
 		.name		= (char *) shortname,
-		// .shutdown = ...
-		// .suspend = ...
-		// .resume = ...
+		.owner		= THIS_MODULE,
 	},
 };
 

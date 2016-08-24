@@ -8,7 +8,6 @@
  * This file initializes the trap entry points
  */
 
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
@@ -183,8 +182,9 @@ die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 #ifdef CONFIG_SMP
 	printk("CPU %d ", hard_smp_processor_id());
 #endif
-	printk("%s(%d): %s %ld\n", current->comm, current->pid, str, err);
+	printk("%s(%d): %s %ld\n", current->comm, task_pid_nr(current), str, err);
 	dik_show_regs(regs, r9_15);
+	add_taint(TAINT_DIE);
 	dik_show_trace((unsigned long *)(regs+1));
 	dik_show_code((unsigned int *)regs->pc);
 
@@ -240,7 +240,7 @@ do_entIF(unsigned long type, struct pt_regs *regs)
 	siginfo_t info;
 	int signo, code;
 
-	if (regs->ps == 0) {
+	if ((regs->ps & ~IPL_MAX) == 0) {
 		if (type == 1) {
 			const unsigned int *data
 			  = (const unsigned int *) regs->pc;
@@ -446,16 +446,15 @@ struct unaligned_stat {
 
 
 /* Macro for exception fixup code to access integer registers.  */
-#define una_reg(r)  (regs.regs[(r) >= 16 && (r) <= 18 ? (r)+19 : (r)])
+#define una_reg(r)  (regs->regs[(r) >= 16 && (r) <= 18 ? (r)+19 : (r)])
 
 
 asmlinkage void
 do_entUna(void * va, unsigned long opcode, unsigned long reg,
-	  unsigned long a3, unsigned long a4, unsigned long a5,
-	  struct allregs regs)
+	  struct allregs *regs)
 {
 	long error, tmp1, tmp2, tmp3, tmp4;
-	unsigned long pc = regs.pc - 4;
+	unsigned long pc = regs->pc - 4;
 	const struct exception_table_entry *fixup;
 
 	unaligned[0].count++;
@@ -636,7 +635,7 @@ got_exception:
 		printk("Forwarding unaligned exception at %lx (%lx)\n",
 		       pc, newpc);
 
-		(&regs)->pc = newpc;
+		regs->pc = newpc;
 		return;
 	}
 
@@ -647,10 +646,10 @@ got_exception:
 	lock_kernel();
 
 	printk("%s(%d): unhandled unaligned exception\n",
-	       current->comm, current->pid);
+	       current->comm, task_pid_nr(current));
 
 	printk("pc = [<%016lx>]  ra = [<%016lx>]  ps = %04lx\n",
-	       pc, una_reg(26), regs.ps);
+	       pc, una_reg(26), regs->ps);
 	printk("r0 = %016lx  r1 = %016lx  r2 = %016lx\n",
 	       una_reg(0), una_reg(1), una_reg(2));
 	printk("r3 = %016lx  r4 = %016lx  r5 = %016lx\n",
@@ -670,10 +669,10 @@ got_exception:
 	       una_reg(22), una_reg(23), una_reg(24));
 	printk("r25= %016lx  r27= %016lx  r28= %016lx\n",
 	       una_reg(25), una_reg(27), una_reg(28));
-	printk("gp = %016lx  sp = %p\n", regs.gp, &regs+1);
+	printk("gp = %016lx  sp = %p\n", regs->gp, regs+1);
 
 	dik_show_code((unsigned int *)pc);
-	dik_show_trace((unsigned long *)(&regs+1));
+	dik_show_trace((unsigned long *)(regs+1));
 
 	if (test_and_set_thread_flag (TIF_DIE_IF_KERNEL)) {
 		printk("die_if_kernel recursion detected.\n");
@@ -787,7 +786,7 @@ do_entUnaUser(void __user * va, unsigned long opcode,
 		}
 		if (++cnt < 5) {
 			printk("%s(%d): unaligned trap at %016lx: %p %lx %ld\n",
-			       current->comm, current->pid,
+			       current->comm, task_pid_nr(current),
 			       regs->pc - 4, va, opcode, reg);
 		}
 		last_time = jiffies;

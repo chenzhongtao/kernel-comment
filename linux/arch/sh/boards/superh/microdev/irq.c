@@ -9,16 +9,14 @@
  * License.  See linux/COPYING for more information.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/irq.h>
-
+#include <linux/interrupt.h>
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/mach/irq.h>
+#include <asm/microdev.h>
 
 #define NUM_EXTERNAL_IRQS 16	/* IRL0 .. IRL15 */
-
 
 static const struct {
 	unsigned char fpgaIrq;
@@ -83,71 +81,60 @@ static unsigned int startup_microdev_irq(unsigned int irq)
 }
 
 static struct hw_interrupt_type microdev_irq_type = {
-	"MicroDev-IRQ",
-	startup_microdev_irq,
-	shutdown_microdev_irq,
-	enable_microdev_irq,
-	disable_microdev_irq,
-	mask_and_ack_microdev,
-	end_microdev_irq
+	.typename = "MicroDev-IRQ",
+	.startup = startup_microdev_irq,
+	.shutdown = shutdown_microdev_irq,
+	.enable = enable_microdev_irq,
+	.disable = disable_microdev_irq,
+	.ack = mask_and_ack_microdev,
+	.end = end_microdev_irq
 };
 
 static void disable_microdev_irq(unsigned int irq)
 {
-	unsigned int flags;
 	unsigned int fpgaIrq;
 
-	if (irq >= NUM_EXTERNAL_IRQS) return;
-	if (!fpgaIrqTable[irq].mapped) return;
+	if (irq >= NUM_EXTERNAL_IRQS)
+		return;
+	if (!fpgaIrqTable[irq].mapped)
+		return;
 
 	fpgaIrq = fpgaIrqTable[irq].fpgaIrq;
 
-		/* disable interrupts */
-	local_irq_save(flags);
-
-		/* disable interupts on the FPGA INTC register */
+	/* disable interrupts on the FPGA INTC register */
 	ctrl_outl(MICRODEV_FPGA_INTC_MASK(fpgaIrq), MICRODEV_FPGA_INTDSB_REG);
-
-		/* restore interrupts */
-	local_irq_restore(flags);
 }
 
 static void enable_microdev_irq(unsigned int irq)
 {
 	unsigned long priorityReg, priorities, pri;
-	unsigned int flags;
 	unsigned int fpgaIrq;
 
-
-	if (irq >= NUM_EXTERNAL_IRQS) return;
-	if (!fpgaIrqTable[irq].mapped) return;
+	if (unlikely(irq >= NUM_EXTERNAL_IRQS))
+		return;
+	if (unlikely(!fpgaIrqTable[irq].mapped))
+		return;
 
 	pri = 15 - irq;
 
 	fpgaIrq = fpgaIrqTable[irq].fpgaIrq;
 	priorityReg = MICRODEV_FPGA_INTPRI_REG(fpgaIrq);
 
-		/* disable interrupts */
-	local_irq_save(flags);
-
-		/* set priority for the interrupt */
+	/* set priority for the interrupt */
 	priorities = ctrl_inl(priorityReg);
 	priorities &= ~MICRODEV_FPGA_INTPRI_MASK(fpgaIrq);
 	priorities |= MICRODEV_FPGA_INTPRI_LEVEL(fpgaIrq, pri);
 	ctrl_outl(priorities, priorityReg);
 
-		/* enable interupts on the FPGA INTC register */
+	/* enable interrupts on the FPGA INTC register */
 	ctrl_outl(MICRODEV_FPGA_INTC_MASK(fpgaIrq), MICRODEV_FPGA_INTENB_REG);
-
-		/* restore interrupts */
-	local_irq_restore(flags);
 }
 
 	/* This functions sets the desired irq handler to be a MicroDev type */
 static void __init make_microdev_irq(unsigned int irq)
 {
 	disable_irq_nosync(irq);
-	irq_desc[irq].handler = &microdev_irq_type;
+	irq_desc[irq].chip = &microdev_irq_type;
 	disable_microdev_irq(irq);
 }
 
@@ -159,22 +146,18 @@ static void mask_and_ack_microdev(unsigned int irq)
 static void end_microdev_irq(unsigned int irq)
 {
 	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-	{
 		enable_microdev_irq(irq);
-	}
 }
 
 extern void __init init_microdev_irq(void)
 {
 	int i;
 
-		/* disable interupts on the FPGA INTC register */
+		/* disable interrupts on the FPGA INTC register */
 	ctrl_outl(~0ul, MICRODEV_FPGA_INTDSB_REG);
 
 	for (i = 0; i < NUM_EXTERNAL_IRQS; i++)
-	{
 		make_microdev_irq(i);
-	}
 }
 
 extern void microdev_print_fpga_intc_status(void)

@@ -6,7 +6,6 @@
  * The motherboard routes/maps will disappear shortly. -- Cort
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
@@ -43,7 +42,7 @@ static unsigned long	*ProcInfo;
 /* Tables for known hardware */
 
 /* Motorola PowerStackII - Utah */
-static char Utah_pci_IRQ_map[23] __prepdata =
+static char Utah_pci_IRQ_map[23] =
 {
         0,   /* Slot 0  - unused */
         0,   /* Slot 1  - unused */
@@ -72,7 +71,7 @@ static char Utah_pci_IRQ_map[23] __prepdata =
         0,   /* Slot 22 - unused */
 };
 
-static char Utah_pci_IRQ_routes[] __prepdata =
+static char Utah_pci_IRQ_routes[] =
 {
         0,   /* Line 0 - Unused */
         9,   /* Line 1 */
@@ -84,7 +83,7 @@ static char Utah_pci_IRQ_routes[] __prepdata =
 
 /* Motorola PowerStackII - Omaha */
 /* no integrated SCSI or ethernet */
-static char Omaha_pci_IRQ_map[23] __prepdata =
+static char Omaha_pci_IRQ_map[23] =
 {
         0,   /* Slot 0  - unused */
         0,   /* Slot 1  - unused */
@@ -111,7 +110,7 @@ static char Omaha_pci_IRQ_map[23] __prepdata =
         0,
 };
 
-static char Omaha_pci_IRQ_routes[] __prepdata =
+static char Omaha_pci_IRQ_routes[] =
 {
         0,   /* Line 0 - Unused */
         9,   /* Line 1 */
@@ -121,7 +120,7 @@ static char Omaha_pci_IRQ_routes[] __prepdata =
 };
 
 /* Motorola PowerStack */
-static char Blackhawk_pci_IRQ_map[19] __prepdata =
+static char Blackhawk_pci_IRQ_map[19] =
 {
   	0,	/* Slot 0  - unused */
   	0,	/* Slot 1  - unused */
@@ -144,7 +143,7 @@ static char Blackhawk_pci_IRQ_map[19] __prepdata =
  	3,	/* Slot P5 */
 };
 
-static char Blackhawk_pci_IRQ_routes[] __prepdata =
+static char Blackhawk_pci_IRQ_routes[] =
 {
    	0,	/* Line 0 - Unused */
    	9,	/* Line 1 */
@@ -154,7 +153,7 @@ static char Blackhawk_pci_IRQ_routes[] __prepdata =
 };
 
 /* Motorola Mesquite */
-static char Mesquite_pci_IRQ_map[23] __prepdata =
+static char Mesquite_pci_IRQ_map[23] =
 {
 	0,	/* Slot 0  - unused */
 	0,	/* Slot 1  - unused */
@@ -182,7 +181,7 @@ static char Mesquite_pci_IRQ_map[23] __prepdata =
 };
 
 /* Motorola Sitka */
-static char Sitka_pci_IRQ_map[21] __prepdata =
+static char Sitka_pci_IRQ_map[21] =
 {
 	0,      /* Slot 0  - unused */
 	0,      /* Slot 1  - unused */
@@ -208,7 +207,7 @@ static char Sitka_pci_IRQ_map[21] __prepdata =
 };
 
 /* Motorola MTX */
-static char MTX_pci_IRQ_map[23] __prepdata =
+static char MTX_pci_IRQ_map[23] =
 {
 	0,	/* Slot 0  - unused */
 	0,	/* Slot 1  - unused */
@@ -237,7 +236,7 @@ static char MTX_pci_IRQ_map[23] __prepdata =
 
 /* Motorola MTX Plus */
 /* Secondary bus interrupt routing is not supported yet */
-static char MTXplus_pci_IRQ_map[23] __prepdata =
+static char MTXplus_pci_IRQ_map[23] =
 {
         0,      /* Slot 0  - unused */
         0,      /* Slot 1  - unused */
@@ -264,13 +263,13 @@ static char MTXplus_pci_IRQ_map[23] __prepdata =
         0,      /* Slot 22 - unused */
 };
 
-static char Raven_pci_IRQ_routes[] __prepdata =
+static char Raven_pci_IRQ_routes[] =
 {
    	0,	/* This is a dummy structure */
 };
 
 /* Motorola MVME16xx */
-static char Genesis_pci_IRQ_map[16] __prepdata =
+static char Genesis_pci_IRQ_map[16] =
 {
   	0,	/* Slot 0  - unused */
   	0,	/* Slot 1  - unused */
@@ -290,7 +289,7 @@ static char Genesis_pci_IRQ_map[16] __prepdata =
   	0,	/* Slot 15 - unused */
 };
 
-static char Genesis_pci_IRQ_routes[] __prepdata =
+static char Genesis_pci_IRQ_routes[] =
 {
    	0,	/* Line 0 - Unused */
    	10,	/* Line 1 */
@@ -299,7 +298,7 @@ static char Genesis_pci_IRQ_routes[] __prepdata =
    	15	/* Line 4 */
 };
 
-static char Genesis2_pci_IRQ_map[23] __prepdata =
+static char Genesis2_pci_IRQ_map[23] =
 {
 	0,	/* Slot 0  - unused */
 	0,	/* Slot 1  - unused */
@@ -327,7 +326,7 @@ static char Genesis2_pci_IRQ_map[23] __prepdata =
 };
 
 /* Motorola Series-E */
-static char Comet_pci_IRQ_map[23] __prepdata =
+static char Comet_pci_IRQ_map[23] =
 {
   	0,	/* Slot 0  - unused */
   	0,	/* Slot 1  - unused */
@@ -354,7 +353,7 @@ static char Comet_pci_IRQ_map[23] __prepdata =
 	0,
 };
 
-static char Comet_pci_IRQ_routes[] __prepdata =
+static char Comet_pci_IRQ_routes[] =
 {
    	0,	/* Line 0 - Unused */
    	10,	/* Line 1 */
@@ -364,7 +363,7 @@ static char Comet_pci_IRQ_routes[] __prepdata =
 };
 
 /* Motorola Series-EX */
-static char Comet2_pci_IRQ_map[23] __prepdata =
+static char Comet2_pci_IRQ_map[23] =
 {
 	0,	/* Slot 0  - unused */
 	0,	/* Slot 1  - unused */
@@ -391,7 +390,7 @@ static char Comet2_pci_IRQ_map[23] __prepdata =
 	0,
 };
 
-static char Comet2_pci_IRQ_routes[] __prepdata =
+static char Comet2_pci_IRQ_routes[] =
 {
 	0,	/* Line 0 - Unused */
 	10,	/* Line 1 */
@@ -405,7 +404,7 @@ static char Comet2_pci_IRQ_routes[] __prepdata =
  * This is actually based on the Carolina motherboard
  * -- Cort
  */
-static char ibm8xx_pci_IRQ_map[23] __prepdata = {
+static char ibm8xx_pci_IRQ_map[23] = {
         0, /* Slot 0  - unused */
         0, /* Slot 1  - unused */
         0, /* Slot 2  - unused */
@@ -431,7 +430,7 @@ static char ibm8xx_pci_IRQ_map[23] __prepdata = {
         2, /* Slot 22 - PCI slot 1 PCIINTx# (See below) */
 };
 
-static char ibm8xx_pci_IRQ_routes[] __prepdata = {
+static char ibm8xx_pci_IRQ_routes[] = {
         0,      /* Line 0 - unused */
         15,     /* Line 1 */
         15,     /* Line 2 */
@@ -443,7 +442,7 @@ static char ibm8xx_pci_IRQ_routes[] __prepdata = {
  * a 6015 ibm board
  * -- Cort
  */
-static char ibm6015_pci_IRQ_map[23] __prepdata = {
+static char ibm6015_pci_IRQ_map[23] = {
         0, /* Slot 0  - unused */
         0, /* Slot 1  - unused */
         0, /* Slot 2  - unused */
@@ -469,7 +468,7 @@ static char ibm6015_pci_IRQ_map[23] __prepdata = {
         2, /* Slot 22 -  */
 };
 
-static char ibm6015_pci_IRQ_routes[] __prepdata = {
+static char ibm6015_pci_IRQ_routes[] = {
         0,      /* Line 0 - unused */
         13,     /* Line 1 */
         15,     /* Line 2 */
@@ -479,7 +478,7 @@ static char ibm6015_pci_IRQ_routes[] __prepdata = {
 
 
 /* IBM Nobis and Thinkpad 850 */
-static char Nobis_pci_IRQ_map[23] __prepdata ={
+static char Nobis_pci_IRQ_map[23] ={
         0, /* Slot 0  - unused */
         0, /* Slot 1  - unused */
         0, /* Slot 2  - unused */
@@ -498,7 +497,7 @@ static char Nobis_pci_IRQ_map[23] __prepdata ={
         0, /* Slot 15 - unused */
 };
 
-static char Nobis_pci_IRQ_routes[] __prepdata = {
+static char Nobis_pci_IRQ_routes[] = {
         0, /* Line 0 - Unused */
         13, /* Line 1 */
         13, /* Line 2 */
@@ -510,7 +509,7 @@ static char Nobis_pci_IRQ_routes[] __prepdata = {
  * IBM RS/6000 43p/140  -- paulus
  * XXX we should get all this from the residual data
  */
-static char ibm43p_pci_IRQ_map[23] __prepdata = {
+static char ibm43p_pci_IRQ_map[23] = {
         0, /* Slot 0  - unused */
         0, /* Slot 1  - unused */
         0, /* Slot 2  - unused */
@@ -536,7 +535,7 @@ static char ibm43p_pci_IRQ_map[23] __prepdata = {
         1, /* Slot 22 - PCI slot 1 PCIINTx# (See below) */
 };
 
-static char ibm43p_pci_IRQ_routes[] __prepdata = {
+static char ibm43p_pci_IRQ_routes[] = {
         0,      /* Line 0 - unused */
         15,     /* Line 1 */
         15,     /* Line 2 */
@@ -559,7 +558,7 @@ struct powerplus_irq_list
  * are routed to OpenPIC inputs 5-8.  These values are offset by
  * 16 in the table to reflect the Linux kernel interrupt value.
  */
-struct powerplus_irq_list Powerplus_pci_IRQ_list __prepdata =
+struct powerplus_irq_list Powerplus_pci_IRQ_list =
 {
 	{25, 26, 27, 28},
 	{21, 22, 23, 24}
@@ -572,7 +571,7 @@ struct powerplus_irq_list Powerplus_pci_IRQ_list __prepdata =
  * are routed to OpenPIC inputs 12-15. These values are offset by
  * 16 in the table to reflect the Linux kernel interrupt value.
  */
-struct powerplus_irq_list Mesquite_pci_IRQ_list __prepdata =
+struct powerplus_irq_list Mesquite_pci_IRQ_list =
 {
 	{24, 25, 26, 27},
 	{28, 29, 30, 31}
@@ -582,7 +581,7 @@ struct powerplus_irq_list Mesquite_pci_IRQ_list __prepdata =
  * This table represents the standard PCI swizzle defined in the
  * PCI bus specification.
  */
-static unsigned char prep_pci_intpins[4][4] __prepdata =
+static unsigned char prep_pci_intpins[4][4] =
 {
 	{ 1, 2, 3, 4},  /* Buses 0, 4, 8, ... */
 	{ 2, 3, 4, 1},  /* Buses 1, 5, 9, ... */
@@ -590,9 +589,9 @@ static unsigned char prep_pci_intpins[4][4] __prepdata =
 	{ 4, 1, 2, 3},  /* Buses 3, 7, 11 ... */
 };
 
-/* We have to turn on LEVEL mode for changed IRQ's */
-/* All PCI IRQ's need to be level mode, so this should be something
- * other than hard-coded as well... IRQ's are individually mappable
+/* We have to turn on LEVEL mode for changed IRQs */
+/* All PCI IRQs need to be level mode, so this should be something
+ * other than hard-coded as well... IRQs are individually mappable
  * to either edge or level.
  */
 
@@ -622,7 +621,7 @@ static unsigned char prep_pci_intpins[4][4] __prepdata =
 #define MIN_DEVNR	11
 #define MAX_DEVNR	22
 
-static int __prep
+static int
 prep_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		 int len, u32 *val)
 {
@@ -652,7 +651,7 @@ prep_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int __prep
+static int
 prep_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		  int len, u32 val)
 {
@@ -804,7 +803,7 @@ struct mot_info {
 	void            (*map_non0_bus)(struct pci_dev *);      /* For boards with more than bus 0 devices. */
 	struct powerplus_irq_list *pci_irq_list; /* List of PCI MPIC inputs */
 	unsigned char   secondary_bridge_devfn; /* devfn of secondary bus transparent bridge */
-} mot_info[] __prepdata = {
+} mot_info[] = {
 	{0x300, 0x00, 0x00, "MVME 2400",			Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes, Powerplus_Map_Non0, &Powerplus_pci_IRQ_list, 0xFF},
 	{0x010, 0x00, 0x00, "Genesis",				Genesis_pci_IRQ_map,	Genesis_pci_IRQ_routes, Powerplus_Map_Non0, &Powerplus_pci_IRQ_list, 0x00},
 	{0x020, 0x00, 0x00, "Powerstack (Series E)",		Comet_pci_IRQ_map,	Comet_pci_IRQ_routes, NULL, NULL, 0x00},
@@ -924,8 +923,8 @@ prep_sandalfoot_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi)
 	Motherboard_map_name = "IBM 6015/7020 (Sandalfoot/Sandalbow)";
 	Motherboard_map = ibm6015_pci_IRQ_map;
 	Motherboard_routes = ibm6015_pci_IRQ_routes;
-	*irq_edge_mask_lo = 0x00; /* irq's 0-7 all edge-triggered */
-	*irq_edge_mask_hi = 0xA0; /* irq's 13, 15 level-triggered */
+	*irq_edge_mask_lo = 0x00; /* IRQs 0-7 all edge-triggered */
+	*irq_edge_mask_hi = 0xA0; /* IRQs 13, 15 level-triggered */
 }
 
 void __init
@@ -934,8 +933,8 @@ prep_thinkpad_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi)
 	Motherboard_map_name = "IBM Thinkpad 850/860";
 	Motherboard_map = Nobis_pci_IRQ_map;
 	Motherboard_routes = Nobis_pci_IRQ_routes;
-	*irq_edge_mask_lo = 0x00; /* irq's 0-7 all edge-triggered */
-	*irq_edge_mask_hi = 0xA0; /* irq's 13, 15 level-triggered */
+	*irq_edge_mask_lo = 0x00; /* IRQs 0-7 all edge-triggered */
+	*irq_edge_mask_hi = 0xA0; /* IRQs 13, 15 level-triggered */
 }
 
 void __init
@@ -944,8 +943,8 @@ prep_carolina_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi)
 	Motherboard_map_name = "IBM 7248, PowerSeries 830/850 (Carolina)";
 	Motherboard_map = ibm8xx_pci_IRQ_map;
 	Motherboard_routes = ibm8xx_pci_IRQ_routes;
-	*irq_edge_mask_lo = 0x00; /* irq's 0-7 all edge-triggered */
-	*irq_edge_mask_hi = 0xA4; /* irq's 10, 13, 15 level-triggered */
+	*irq_edge_mask_lo = 0x00; /* IRQs 0-7 all edge-triggered */
+	*irq_edge_mask_hi = 0xA4; /* IRQs 10, 13, 15 level-triggered */
 }
 
 void __init
@@ -955,8 +954,8 @@ prep_tiger1_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi)
 	Motherboard_map = ibm43p_pci_IRQ_map;
 	Motherboard_routes = ibm43p_pci_IRQ_routes;
 	Motherboard_non0 = ibm43p_pci_map_non0;
-	*irq_edge_mask_lo = 0x00; /* irq's 0-7 all edge-triggered */
-	*irq_edge_mask_hi = 0xA0; /* irq's 13, 15 level-triggered */
+	*irq_edge_mask_lo = 0x00; /* IRQs 0-7 all edge-triggered */
+	*irq_edge_mask_hi = 0xA0; /* IRQs 13, 15 level-triggered */
 }
 
 void __init
@@ -1245,8 +1244,13 @@ prep_pcibios_fixup(void)
 		pci_write_config_byte(dev, PCI_INTERRUPT_LINE, dev->irq);
 	}
 
-	/* Setup the Winbond or Via PIB */
-	prep_pib_init();
+	/* Setup the Winbond or Via PIB - prep_pib_init() is coded for
+	 * the non-openpic case, but it breaks (at least) the Utah
+	 * (Powerstack II Pro4000), so only call it if we have an
+	 * openpic.
+	 */
+	if (have_openpic)
+		prep_pib_init();
 }
 
 static void __init

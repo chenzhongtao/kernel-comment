@@ -6,14 +6,14 @@
  *
  *  J. Bruce Fields   <bfields@umich.edu>
  *
- *  Redistribution and use in source and binary forms, with or without 
+ *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions
  *  are met:
  *
  *  1. Redistributions of source code must retain the above copyright
  *     notice, this list of conditions and the following disclaimer.
  *  2. Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the 
+ *     notice, this list of conditions and the following disclaimer in the
  *     documentation and/or other materials provided with the distribution.
  *  3. Neither the name of the University nor the names of its
  *     contributors may be used to endorse or promote products derived
@@ -35,7 +35,6 @@
 
 #include <linux/types.h>
 #include <linux/slab.h>
-#include <linux/socket.h>
 #include <linux/module.h>
 #include <linux/sunrpc/msg_prot.h>
 #include <linux/sunrpc/gss_asn1.h>
@@ -61,8 +60,7 @@ gss_mech_free(struct gss_api_mech *gm)
 
 	for (i = 0; i < gm->gm_pf_num; i++) {
 		pf = &gm->gm_pfs[i];
-		if (pf->auth_domain_name)
-			kfree(pf->auth_domain_name);
+		kfree(pf->auth_domain_name);
 		pf->auth_domain_name = NULL;
 	}
 }
@@ -115,7 +113,7 @@ gss_mech_register(struct gss_api_mech *gm)
 	spin_lock(&registered_mechs_lock);
 	list_add(&gm->gm_list, &registered_mechs);
 	spin_unlock(&registered_mechs_lock);
-	dprintk("RPC:      registered gss mechanism %s\n", gm->gm_name);
+	dprintk("RPC:       registered gss mechanism %s\n", gm->gm_name);
 	return 0;
 }
 
@@ -127,7 +125,7 @@ gss_mech_unregister(struct gss_api_mech *gm)
 	spin_lock(&registered_mechs_lock);
 	list_del(&gm->gm_list);
 	spin_unlock(&registered_mechs_lock);
-	dprintk("RPC:      unregistered gss mechanism %s\n", gm->gm_name);
+	dprintk("RPC:       unregistered gss mechanism %s\n", gm->gm_name);
 	gss_mech_free(gm);
 }
 
@@ -143,7 +141,7 @@ gss_mech_get(struct gss_api_mech *gm)
 EXPORT_SYMBOL(gss_mech_get);
 
 struct gss_api_mech *
-gss_mech_get_by_name(char *name)
+gss_mech_get_by_name(const char *name)
 {
 	struct gss_api_mech	*pos, *gm = NULL;
 
@@ -196,6 +194,20 @@ gss_mech_get_by_pseudoflavor(u32 pseudoflavor)
 EXPORT_SYMBOL(gss_mech_get_by_pseudoflavor);
 
 u32
+gss_svc_to_pseudoflavor(struct gss_api_mech *gm, u32 service)
+{
+	int i;
+
+	for (i = 0; i < gm->gm_pf_num; i++) {
+		if (gm->gm_pfs[i].service == service) {
+			return gm->gm_pfs[i].pseudoflavor;
+		}
+	}
+	return RPC_AUTH_MAXFLAVOR; /* illegal value */
+}
+EXPORT_SYMBOL(gss_svc_to_pseudoflavor);
+
+u32
 gss_pseudoflavor_to_service(struct gss_api_mech *gm, u32 pseudoflavor)
 {
 	int i;
@@ -226,38 +238,36 @@ EXPORT_SYMBOL(gss_service_to_auth_domain_name);
 void
 gss_mech_put(struct gss_api_mech * gm)
 {
-	module_put(gm->gm_owner);
+	if (gm)
+		module_put(gm->gm_owner);
 }
 
 EXPORT_SYMBOL(gss_mech_put);
 
 /* The mech could probably be determined from the token instead, but it's just
  * as easy for now to pass it in. */
-u32
-gss_import_sec_context(struct xdr_netobj	*input_token,
+int
+gss_import_sec_context(const void *input_token, size_t bufsize,
 		       struct gss_api_mech	*mech,
 		       struct gss_ctx		**ctx_id)
 {
-	if (!(*ctx_id = kmalloc(sizeof(**ctx_id), GFP_KERNEL)))
+	if (!(*ctx_id = kzalloc(sizeof(**ctx_id), GFP_KERNEL)))
 		return GSS_S_FAILURE;
-	memset(*ctx_id, 0, sizeof(**ctx_id));
 	(*ctx_id)->mech_type = gss_mech_get(mech);
 
 	return mech->gm_ops
-		->gss_import_sec_context(input_token, *ctx_id);
+		->gss_import_sec_context(input_token, bufsize, *ctx_id);
 }
 
 /* gss_get_mic: compute a mic over message and return mic_token. */
 
 u32
 gss_get_mic(struct gss_ctx	*context_handle,
-	    u32			qop,
 	    struct xdr_buf	*message,
 	    struct xdr_netobj	*mic_token)
 {
 	 return context_handle->mech_type->gm_ops
 		->gss_get_mic(context_handle,
-			      qop,
 			      message,
 			      mic_token);
 }
@@ -267,15 +277,33 @@ gss_get_mic(struct gss_ctx	*context_handle,
 u32
 gss_verify_mic(struct gss_ctx		*context_handle,
 	       struct xdr_buf		*message,
-	       struct xdr_netobj	*mic_token,
-	       u32			*qstate)
+	       struct xdr_netobj	*mic_token)
 {
 	return context_handle->mech_type->gm_ops
 		->gss_verify_mic(context_handle,
 				 message,
-				 mic_token,
-				 qstate);
+				 mic_token);
 }
+
+u32
+gss_wrap(struct gss_ctx	*ctx_id,
+	 int		offset,
+	 struct xdr_buf	*buf,
+	 struct page	**inpages)
+{
+	return ctx_id->mech_type->gm_ops
+		->gss_wrap(ctx_id, offset, buf, inpages);
+}
+
+u32
+gss_unwrap(struct gss_ctx	*ctx_id,
+	   int			offset,
+	   struct xdr_buf	*buf)
+{
+	return ctx_id->mech_type->gm_ops
+		->gss_unwrap(ctx_id, offset, buf);
+}
+
 
 /* gss_delete_sec_context: free all resources associated with context_handle.
  * Note this differs from the RFC 2744-specified prototype in that we don't
@@ -284,7 +312,7 @@ gss_verify_mic(struct gss_ctx		*context_handle,
 u32
 gss_delete_sec_context(struct gss_ctx	**context_handle)
 {
-	dprintk("RPC:      gss_delete_sec_context deleting %p\n",
+	dprintk("RPC:       gss_delete_sec_context deleting %p\n",
 			*context_handle);
 
 	if (!*context_handle)
@@ -293,8 +321,7 @@ gss_delete_sec_context(struct gss_ctx	**context_handle)
 		(*context_handle)->mech_type->gm_ops
 			->gss_delete_sec_context((*context_handle)
 							->internal_ctx_id);
-	if ((*context_handle)->mech_type)
-		gss_mech_put((*context_handle)->mech_type);
+	gss_mech_put((*context_handle)->mech_type);
 	kfree(*context_handle);
 	*context_handle=NULL;
 	return GSS_S_COMPLETE;

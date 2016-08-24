@@ -12,14 +12,18 @@
 
 #ifdef __KERNEL__
 
+#include <linux/compiler.h>
 #include <asm/fpstate.h>
+
+#define THREAD_SIZE_ORDER	1
+#define THREAD_SIZE		8192
+#define THREAD_START_SP		(THREAD_SIZE - 8)
 
 #ifndef __ASSEMBLY__
 
 struct task_struct;
 struct exec_domain;
 
-#include <asm/ptrace.h>
 #include <asm/types.h>
 #include <asm/domain.h>
 
@@ -45,16 +49,18 @@ struct cpu_context_save {
  */
 struct thread_info {
 	unsigned long		flags;		/* low level flags */
-	__s32			preempt_count;	/* 0 => preemptable, <0 => bug */
+	int			preempt_count;	/* 0 => preemptable, <0 => bug */
 	mm_segment_t		addr_limit;	/* address limit */
 	struct task_struct	*task;		/* main task structure */
 	struct exec_domain	*exec_domain;	/* execution domain */
 	__u32			cpu;		/* cpu */
 	__u32			cpu_domain;	/* cpu domain */
 	struct cpu_context_save	cpu_context;	/* cpu context */
+	__u32			syscall;	/* syscall number */
 	__u8			used_cp[16];	/* thread used copro */
 	unsigned long		tp_value;
-	union fp_state		fpstate;
+	struct crunch_state	crunchstate;
+	union fp_state		fpstate __attribute__((aligned(8)));
 	union vfp_state		vfpstate;
 	struct restart_block	restart_block;
 };
@@ -77,8 +83,6 @@ struct thread_info {
 #define init_thread_info	(init_thread_union.thread_info)
 #define init_stack		(init_thread_union.stack)
 
-#define THREAD_SIZE		8192
-
 /*
  * how to get the thread information struct from C
  */
@@ -90,53 +94,65 @@ static inline struct thread_info *current_thread_info(void)
 	return (struct thread_info *)(sp & ~(THREAD_SIZE - 1));
 }
 
-extern struct thread_info *alloc_thread_info(struct task_struct *task);
-extern void free_thread_info(struct thread_info *);
+/* thread information allocation */
+#ifdef CONFIG_DEBUG_STACK_USAGE
+#define alloc_thread_info(tsk) \
+	((struct thread_info *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, \
+		THREAD_SIZE_ORDER))
+#else
+#define alloc_thread_info(tsk) \
+	((struct thread_info *)__get_free_pages(GFP_KERNEL, THREAD_SIZE_ORDER))
+#endif
 
-#define get_thread_info(ti)	get_task_struct((ti)->task)
-#define put_thread_info(ti)	put_task_struct((ti)->task)
+#define free_thread_info(info) \
+	free_pages((unsigned long)info, THREAD_SIZE_ORDER);
 
 #define thread_saved_pc(tsk)	\
-	((unsigned long)(pc_pointer((tsk)->thread_info->cpu_context.pc)))
+	((unsigned long)(pc_pointer(task_thread_info(tsk)->cpu_context.pc)))
 #define thread_saved_fp(tsk)	\
-	((unsigned long)((tsk)->thread_info->cpu_context.fp))
+	((unsigned long)(task_thread_info(tsk)->cpu_context.fp))
+
+extern void crunch_task_disable(struct thread_info *);
+extern void crunch_task_copy(struct thread_info *, void *);
+extern void crunch_task_restore(struct thread_info *, void *);
+extern void crunch_task_release(struct thread_info *);
 
 extern void iwmmxt_task_disable(struct thread_info *);
 extern void iwmmxt_task_copy(struct thread_info *, void *);
 extern void iwmmxt_task_restore(struct thread_info *, void *);
 extern void iwmmxt_task_release(struct thread_info *);
+extern void iwmmxt_task_switch(struct thread_info *);
 
 #endif
 
 /*
  * We use bit 30 of the preempt_count to indicate that kernel
- * preemption is occuring.  See include/asm-arm/hardirq.h.
+ * preemption is occurring.  See include/asm-arm/hardirq.h.
  */
 #define PREEMPT_ACTIVE	0x40000000
 
 /*
  * thread information flags:
  *  TIF_SYSCALL_TRACE	- syscall trace active
- *  TIF_NOTIFY_RESUME	- resumption notification requested
  *  TIF_SIGPENDING	- signal pending
  *  TIF_NEED_RESCHED	- rescheduling necessary
  *  TIF_USEDFPU		- FPU was used by this task this quantum (SMP)
  *  TIF_POLLING_NRFLAG	- true if poll_idle() is polling TIF_NEED_RESCHED
  */
-#define TIF_NOTIFY_RESUME	0
-#define TIF_SIGPENDING		1
-#define TIF_NEED_RESCHED	2
+#define TIF_SIGPENDING		0
+#define TIF_NEED_RESCHED	1
 #define TIF_SYSCALL_TRACE	8
 #define TIF_POLLING_NRFLAG	16
 #define TIF_USING_IWMMXT	17
 #define TIF_MEMDIE		18
+#define TIF_FREEZE		19
 
-#define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
 #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
 #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
 #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
 #define _TIF_POLLING_NRFLAG	(1 << TIF_POLLING_NRFLAG)
 #define _TIF_USING_IWMMXT	(1 << TIF_USING_IWMMXT)
+#define _TIF_FREEZE		(1 << TIF_FREEZE)
 
 /*
  * Change these and you break ASM code in entry-common.S

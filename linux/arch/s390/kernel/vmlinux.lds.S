@@ -2,10 +2,10 @@
  * Written by Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
 
+#include <asm/page.h>
 #include <asm-generic/vmlinux.lds.h>
-#include <linux/config.h>
 
-#ifndef CONFIG_ARCH_S390X
+#ifndef CONFIG_64BIT
 OUTPUT_FORMAT("elf32-s390", "elf32-s390", "elf32-s390")
 OUTPUT_ARCH(s390)
 ENTRY(_start)
@@ -19,112 +19,142 @@ jiffies = jiffies_64;
 
 SECTIONS
 {
-  . = 0x00000000;
-  _text = .;			/* Text and read-only data */
-  .text : {
-	*(.text)
-	SCHED_TEXT
-	LOCK_TEXT
-	*(.fixup)
-	*(.gnu.warning)
+	. = 0x00000000;
+	.text : {
+	_text = .;		/* Text and read-only data */
+		*(.text.head)
+	TEXT_TEXT
+		SCHED_TEXT
+		LOCK_TEXT
+		KPROBES_TEXT
+		*(.fixup)
+		*(.gnu.warning)
 	} = 0x0700
 
-  _etext = .;			/* End of text section */
+	_etext = .;		/* End of text section */
 
-  . = ALIGN(16);		/* Exception table */
-  __start___ex_table = .;
-  __ex_table : { *(__ex_table) }
-  __stop___ex_table = .;
-
-  RODATA
+	RODATA
 
 #ifdef CONFIG_SHARED_KERNEL
-  . = ALIGN(1048576);		/* VM shared segments are 1MB aligned */
-
-  _eshared = .;			/* End of shareable data */
+	. = ALIGN(0x100000);	/* VM shared segments are 1MB aligned */
 #endif
 
-  .data : {			/* Data */
-	*(.data)
-	CONSTRUCTORS
+	. = ALIGN(PAGE_SIZE);
+	_eshared = .;		/* End of shareable data */
+
+	. = ALIGN(16);		/* Exception table */
+	__ex_table : {
+		__start___ex_table = .;
+		*(__ex_table)
+		__stop___ex_table = .;
 	}
 
-  . = ALIGN(4096);
-  __nosave_begin = .;
-  .data_nosave : { *(.data.nosave) }
-  . = ALIGN(4096);
-  __nosave_end = .;
+	NOTES
+	BUG_TABLE
 
-  . = ALIGN(4096);
-  .data.page_aligned : { *(.data.idt) }
-
-  . = ALIGN(32);
-  .data.cacheline_aligned : { *(.data.cacheline_aligned) }
-
-  _edata = .;			/* End of data section */
-
-  . = ALIGN(8192);		/* init_task */
-  .data.init_task : { *(.data.init_task) }
-
-  /* will be freed after init */
-  . = ALIGN(4096);		/* Init code and data */
-  __init_begin = .;
-  .init.text : { 
-	_sinittext = .;
-	*(.init.text)
-	_einittext = .;
-  }
-  .init.data : { *(.init.data) }
-  . = ALIGN(256);
-  __setup_start = .;
-  .init.setup : { *(.init.setup) }
-  __setup_end = .;
-  __initcall_start = .;
-  .initcall.init : {
-	*(.initcall1.init) 
-	*(.initcall2.init) 
-	*(.initcall3.init) 
-	*(.initcall4.init) 
-	*(.initcall5.init) 
-	*(.initcall6.init) 
-	*(.initcall7.init)
-  }
-  __initcall_end = .;
-  __con_initcall_start = .;
-  .con_initcall.init : { *(.con_initcall.init) }
-  __con_initcall_end = .;
-  SECURITY_INIT
-  . = ALIGN(256);
-  __initramfs_start = .;
-  .init.ramfs : { *(.init.initramfs) }
-  . = ALIGN(2);
-  __initramfs_end = .;
-  . = ALIGN(256);
-  __per_cpu_start = .;
-  .data.percpu  : { *(.data.percpu) }
-  __per_cpu_end = .;
-  . = ALIGN(4096);
-  __init_end = .;
-  /* freed after init ends here */
-
-  __bss_start = .;		/* BSS */
-  .bss : { *(.bss) }
-  . = ALIGN(2);
-  __bss_stop = .;
-
-  _end = . ;
-
-  /* Sections to be discarded */
-  /DISCARD/ : {
-	*(.exitcall.exit)
+	.data : {		/* Data */
+		DATA_DATA
+		CONSTRUCTORS
 	}
 
-  /* Stabs debugging sections.  */
-  .stab 0 : { *(.stab) }
-  .stabstr 0 : { *(.stabstr) }
-  .stab.excl 0 : { *(.stab.excl) }
-  .stab.exclstr 0 : { *(.stab.exclstr) }
-  .stab.index 0 : { *(.stab.index) }
-  .stab.indexstr 0 : { *(.stab.indexstr) }
-  .comment 0 : { *(.comment) }
+	. = ALIGN(PAGE_SIZE);
+	.data_nosave : {
+	__nosave_begin = .;
+		*(.data.nosave)
+	}
+	. = ALIGN(PAGE_SIZE);
+	__nosave_end = .;
+
+	. = ALIGN(PAGE_SIZE);
+	.data.page_aligned : {
+		*(.data.idt)
+	}
+
+	. = ALIGN(0x100);
+	.data.cacheline_aligned : {
+		*(.data.cacheline_aligned)
+	}
+
+	. = ALIGN(0x100);
+	.data.read_mostly : {
+		*(.data.read_mostly)
+	}
+	_edata = .;		/* End of data section */
+
+	. = ALIGN(2 * PAGE_SIZE);	/* init_task */
+	.data.init_task : {
+		*(.data.init_task)
+	}
+
+	/* will be freed after init */
+	. = ALIGN(PAGE_SIZE);	/* Init code and data */
+	__init_begin = .;
+	.init.text : {
+		_sinittext = .;
+		*(.init.text)
+		_einittext = .;
+	}
+	/*
+	 * .exit.text is discarded at runtime, not link time,
+	 * to deal with references from __bug_table
+	*/
+	.exit.text : {
+		*(.exit.text)
+	}
+
+	.init.data : {
+		*(.init.data)
+	}
+	. = ALIGN(0x100);
+	.init.setup : {
+		__setup_start = .;
+		*(.init.setup)
+		__setup_end = .;
+	}
+	.initcall.init : {
+		__initcall_start = .;
+		INITCALLS
+		__initcall_end = .;
+	}
+
+	.con_initcall.init : {
+		__con_initcall_start = .;
+		*(.con_initcall.init)
+		__con_initcall_end = .;
+	}
+	SECURITY_INIT
+
+#ifdef CONFIG_BLK_DEV_INITRD
+	. = ALIGN(0x100);
+	.init.ramfs : {
+		__initramfs_start = .;
+		*(.init.ramfs)
+		. = ALIGN(2);
+		__initramfs_end = .;
+	}
+#endif
+
+	PERCPU(PAGE_SIZE)
+	. = ALIGN(PAGE_SIZE);
+	__init_end = .;		/* freed after init ends here */
+
+	/* BSS */
+	.bss : {
+		__bss_start = .;
+		*(.bss)
+		. = ALIGN(2);
+		__bss_stop = .;
+	}
+
+	_end = . ;
+
+	/* Sections to be discarded */
+	/DISCARD/ : {
+		*(.exit.data)
+		*(.exitcall.exit)
+	}
+
+	/* Debugging sections.	*/
+	STABS_DEBUG
+	DWARF_DEBUG
 }

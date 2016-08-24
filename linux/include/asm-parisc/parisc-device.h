@@ -1,17 +1,21 @@
+#ifndef _ASM_PARISC_PARISC_DEVICE_H_
+#define _ASM_PARISC_PARISC_DEVICE_H_
+
 #include <linux/device.h>
 
 struct parisc_device {
-	unsigned long   hpa;		/* Hard Physical Address */
+	struct resource hpa;		/* Hard Physical Address */
 	struct parisc_device_id id;
 	struct parisc_driver *driver;	/* Driver for this device */
 	char		name[80];	/* The hardware description */
 	int		irq;
+	int		aux_irq;	/* Some devices have a second IRQ */
 
 	char		hw_path;        /* The module number on this bus */
 	unsigned int	num_addrs;	/* some devices have additional address ranges. */
 	unsigned long	*addr;          /* which will be stored here */
  
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	/* parms for pdc_pat_cell_module() call */
 	unsigned long	pcell_loc;	/* Physical Cell location */
 	unsigned long	mod_index;	/* PAT specific - Misc Module info */
@@ -38,6 +42,11 @@ struct parisc_driver {
 #define to_parisc_driver(d)	container_of(d, struct parisc_driver, drv)
 #define parisc_parent(d)	to_parisc_device(d->dev.parent)
 
+static inline char *parisc_pathname(struct parisc_device *d)
+{
+	return d->dev.bus_id;
+}
+
 static inline void
 parisc_set_drvdata(struct parisc_device *d, void *p)
 {
@@ -51,3 +60,5 @@ parisc_get_drvdata(struct parisc_device *d)
 }
 
 extern struct bus_type parisc_bus_type;
+
+#endif /*_ASM_PARISC_PARISC_DEVICE_H_*/

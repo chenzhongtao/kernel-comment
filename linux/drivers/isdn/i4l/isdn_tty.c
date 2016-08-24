@@ -11,7 +11,6 @@
  */
 #undef ISDN_TTY_STAT_DEBUG
 
-#include <linux/config.h>
 #include <linux/isdn.h>
 #include <linux/delay.h>
 #include "isdn_common.h"
@@ -64,37 +63,44 @@ isdn_tty_try_read(modem_info * info, struct sk_buff *skb)
 	int c;
 	int len;
 	struct tty_struct *tty;
+	char last;
 
 	if (info->online) {
 		if ((tty = info->tty)) {
 			if (info->mcr & UART_MCR_RTS) {
-				c = TTY_FLIPBUF_SIZE - tty->flip.count;
 				len = skb->len
 #ifdef CONFIG_ISDN_AUDIO
 					+ ISDN_AUDIO_SKB_DLECOUNT(skb)
 #endif
 					;
+
+				c = tty_buffer_request_room(tty, len);
 				if (c >= len) {
 #ifdef CONFIG_ISDN_AUDIO
-					if (ISDN_AUDIO_SKB_DLECOUNT(skb))
-						while (skb->len--) {
-							if (*skb->data == DLE)
+					if (ISDN_AUDIO_SKB_DLECOUNT(skb)) {
+						int l = skb->len;
+						unsigned char *dp = skb->data;
+						while (--l) {
+							if (*dp == DLE)
 								tty_insert_flip_char(tty, DLE, 0);
-							tty_insert_flip_char(tty, *skb->data++, 0);
+							tty_insert_flip_char(tty, *dp++, 0);
+						}
+						if (*dp == DLE)
+							tty_insert_flip_char(tty, DLE, 0);
+						last = *dp;
 					} else {
 #endif
-						memcpy(tty->flip.char_buf_ptr,
-						       skb->data, len);
-						tty->flip.count += len;
-						tty->flip.char_buf_ptr += len;
-						memset(tty->flip.flag_buf_ptr, 0, len);
-						tty->flip.flag_buf_ptr += len;
+						if(len > 1)
+							tty_insert_flip_string(tty, skb->data, len - 1);
+						last = skb->data[len - 1];
 #ifdef CONFIG_ISDN_AUDIO
 					}
 #endif
 					if (info->emu.mdmreg[REG_CPPP] & BIT_CPPP)
-						tty->flip.flag_buf_ptr[len - 1] = 0xff;
-					schedule_delayed_work(&tty->flip.work, 1);
+						tty_insert_flip_char(tty, last, 0xFF);
+					else
+						tty_insert_flip_char(tty, last, TTY_NORMAL);
+					tty_flip_buffer_push(tty);
 					kfree_skb(skb);
 					return 1;
 				}
@@ -114,7 +120,6 @@ isdn_tty_readmodem(void)
 	int resched = 0;
 	int midx;
 	int i;
-	int c;
 	int r;
 	struct tty_struct *tty;
 	modem_info *info;
@@ -131,20 +136,13 @@ isdn_tty_readmodem(void)
 #endif
 				if ((tty = info->tty)) {
 					if (info->mcr & UART_MCR_RTS) {
-						c = TTY_FLIPBUF_SIZE - tty->flip.count;
-						if (c > 0) {
-							r = isdn_readbchan(info->isdn_driver, info->isdn_channel,
-									   tty->flip.char_buf_ptr,
-									   tty->flip.flag_buf_ptr, c, NULL);
-							/* CISCO AsyncPPP Hack */
-							if (!(info->emu.mdmreg[REG_CPPP] & BIT_CPPP))
-								memset(tty->flip.flag_buf_ptr, 0, r);
-							tty->flip.count += r;
-							tty->flip.flag_buf_ptr += r;
-							tty->flip.char_buf_ptr += r;
-							if (r)
-								schedule_delayed_work(&tty->flip.work, 1);
-						}
+						/* CISCO AsyncPPP Hack */
+						if (!(info->emu.mdmreg[REG_CPPP] & BIT_CPPP))
+							r = isdn_readbchan_tty(info->isdn_driver, info->isdn_channel, tty, 0);
+						else
+							r = isdn_readbchan_tty(info->isdn_driver, info->isdn_channel, tty, 1);
+						if (r)
+							tty_flip_buffer_push(tty);
 					} else
 						r = 1;
 				} else
@@ -249,7 +247,7 @@ isdn_tty_rcv_skb(int i, int di, int channel, struct sk_buff *skb)
 	}
 #endif
 #endif
-	/* Try to deliver directly via tty-flip-buf if queue is empty */
+	/* Try to deliver directly via tty-buf if queue is empty */
 	spin_lock_irqsave(&info->readlock, flags);
 	if (skb_queue_empty(&dev->drv[di]->rpqueue[channel]))
 		if (isdn_tty_try_read(info, skb)) {
@@ -273,7 +271,7 @@ isdn_tty_rcv_skb(int i, int di, int channel, struct sk_buff *skb)
 	return 1;
 }
 
-void
+static void
 isdn_tty_cleanup_xmit(modem_info * info)
 {
 	skb_queue_purge(&info->xmit_queue);
@@ -534,7 +532,7 @@ isdn_tty_senddown(modem_info * info)
 /* The next routine is called once from within timer-interrupt
  * triggered within isdn_tty_modem_ncarrier(). It calls
  * isdn_tty_modem_result() to stuff a "NO CARRIER" Message
- * into the tty's flip-buffer.
+ * into the tty's buffer.
  */
 static void
 isdn_tty_modem_do_ncarrier(unsigned long data)
@@ -560,7 +558,7 @@ isdn_tty_modem_ncarrier(modem_info * info)
 /*
  * return the usage calculated by si and layer 2 protocol
  */
-int
+static int
 isdn_calc_usage(int si, int l2)
 {
 	int usg = ISDN_USAGE_MODEM;
@@ -712,22 +710,14 @@ isdn_tty_modem_hup(modem_info * info, int local)
 #endif
 	info->emu.vpar[4] = 0;
 	info->emu.vpar[5] = 8;
-	if (info->dtmf_state) {
-		kfree(info->dtmf_state);
-		info->dtmf_state = NULL;
-	}
-	if (info->silence_state) {
-		kfree(info->silence_state);
-		info->silence_state = NULL;
-	}
-	if (info->adpcms) {
-		kfree(info->adpcms);
-		info->adpcms = NULL;
-	}
-	if (info->adpcmr) {
-		kfree(info->adpcmr);
-		info->adpcmr = NULL;
-	}
+	kfree(info->dtmf_state);
+	info->dtmf_state = NULL;
+	kfree(info->silence_state);
+	info->silence_state = NULL;
+	kfree(info->adpcms);
+	info->adpcms = NULL;
+	kfree(info->adpcmr);
+	info->adpcmr = NULL;
 #endif
 	if ((info->msr & UART_MSR_RI) &&
 		(info->emu.mdmreg[REG_RUNG] & BIT_RUNG))
@@ -1223,7 +1213,7 @@ isdn_tty_write(struct tty_struct *tty, const u_char * buf, int count)
 		total += c;
 	}
 	atomic_dec(&info->xmit_lock);
-	if ((info->xmit_count) || (skb_queue_len(&info->xmit_queue))) {
+	if ((info->xmit_count) || !skb_queue_empty(&info->xmit_queue)) {
 		if (m->mdmreg[REG_DXMT] & BIT_DXMT) {
 			isdn_tty_senddown(info);
 			isdn_tty_tint(info);
@@ -1273,7 +1263,6 @@ isdn_tty_flush_buffer(struct tty_struct *tty)
 	}
 	isdn_tty_cleanup_xmit(info);
 	info->xmit_count = 0;
-	wake_up_interruptible(&tty->write_wait);
 	tty_wakeup(tty);
 }
 
@@ -1284,7 +1273,7 @@ isdn_tty_flush_chars(struct tty_struct *tty)
 
 	if (isdn_tty_paranoia_check(info, tty->name, "isdn_tty_flush_chars"))
 		return;
-	if ((info->xmit_count) || (skb_queue_len(&info->xmit_queue)))
+	if ((info->xmit_count) || !skb_queue_empty(&info->xmit_queue))
 		isdn_timer_ctrl(ISDN_TIMER_MODEMXMIT, 1);
 }
 
@@ -1476,7 +1465,7 @@ isdn_tty_ioctl(struct tty_struct *tty, struct file *file,
 }
 
 static void
-isdn_tty_set_termios(struct tty_struct *tty, struct termios *old_termios)
+isdn_tty_set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 {
 	modem_info *info = (modem_info *) tty->driver_data;
 
@@ -1693,6 +1682,7 @@ isdn_tty_close(struct tty_struct *tty, struct file *filp)
 #ifdef ISDN_DEBUG_MODEM_OPEN
 		printk(KERN_DEBUG "isdn_tty_close after info->count != 0\n");
 #endif
+		module_put(info->owner);
 		return;
 	}
 	info->flags |= ISDN_ASYNC_CLOSING;
@@ -1721,8 +1711,7 @@ isdn_tty_close(struct tty_struct *tty, struct file *filp)
 		 */
 		timeout = jiffies + HZ;
 		while (!(info->lsr & UART_LSR_TEMT)) {
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(20);
+			schedule_timeout_interruptible(20);
 			if (time_after(jiffies,timeout))
 				break;
 		}
@@ -1872,7 +1861,7 @@ modem_write_profile(atemu * m)
 		send_sig(SIGIO, dev->profd, 1);
 }
 
-static struct tty_operations modem_ops = {
+static const struct tty_operations modem_ops = {
         .open = isdn_tty_open,
 	.close = isdn_tty_close,
 	.write = isdn_tty_write,
@@ -1901,14 +1890,13 @@ isdn_tty_modem_init(void)
 	if (!m->tty_modem)
 		return -ENOMEM;
 	m->tty_modem->name = "ttyI";
-	m->tty_modem->devfs_name = "isdn/ttyI";
 	m->tty_modem->major = ISDN_TTY_MAJOR;
 	m->tty_modem->minor_start = 0;
 	m->tty_modem->type = TTY_DRIVER_TYPE_SERIAL;
 	m->tty_modem->subtype = SERIAL_TYPE_NORMAL;
 	m->tty_modem->init_termios = tty_std_termios;
 	m->tty_modem->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	m->tty_modem->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS;
+	m->tty_modem->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
 	m->tty_modem->driver_name = "isdn_tty";
 	tty_set_operations(m->tty_modem, &modem_ops);
 	retval = tty_register_driver(m->tty_modem);
@@ -2356,11 +2344,15 @@ isdn_tty_at_cout(char *msg, modem_info * info)
 	u_long flags;
 	struct sk_buff *skb = NULL;
 	char *sp = NULL;
+	int l;
 
 	if (!msg) {
 		printk(KERN_WARNING "isdn_tty: Null-Message in isdn_tty_at_cout\n");
 		return;
 	}
+
+	l = strlen(msg);
+
 	spin_lock_irqsave(&info->readlock, flags);
 	tty = info->tty;
 	if ((info->flags & ISDN_ASYNC_CLOSING) || (!tty)) {
@@ -2368,16 +2360,16 @@ isdn_tty_at_cout(char *msg, modem_info * info)
 		return;
 	}
 
-	/* use queue instead of direct flip, if online and */
-	/* data is in queue or flip buffer is full */
-	if ((info->online) && (((tty->flip.count + strlen(msg)) >= TTY_FLIPBUF_SIZE) ||
-	    (!skb_queue_empty(&dev->drv[info->isdn_driver]->rpqueue[info->isdn_channel])))) {
-		skb = alloc_skb(strlen(msg), GFP_ATOMIC);
+	/* use queue instead of direct, if online and */
+	/* data is in queue or buffer is full */
+	if (info->online && ((tty_buffer_request_room(tty, l) < l) ||
+	    !skb_queue_empty(&dev->drv[info->isdn_driver]->rpqueue[info->isdn_channel]))) {
+		skb = alloc_skb(l, GFP_ATOMIC);
 		if (!skb) {
 			spin_unlock_irqrestore(&info->readlock, flags);
 			return;
 		}
-		sp = skb_put(skb, strlen(msg));
+		sp = skb_put(skb, l);
 #ifdef CONFIG_ISDN_AUDIO
 		ISDN_AUDIO_SKB_DLECOUNT(skb) = 0;
 		ISDN_AUDIO_SKB_LOCK(skb) = 0;
@@ -2401,9 +2393,8 @@ isdn_tty_at_cout(char *msg, modem_info * info)
 		if (skb) {
 			*sp++ = c;
 		} else {
-			if (tty->flip.count >= TTY_FLIPBUF_SIZE)
+			if(tty_insert_flip_char(tty, c, TTY_NORMAL) == 0)
 				break;
-			tty_insert_flip_char(tty, c, 0);
 		}
 	}
 	if (skb) {
@@ -2411,12 +2402,12 @@ isdn_tty_at_cout(char *msg, modem_info * info)
 		dev->drv[info->isdn_driver]->rcvcount[info->isdn_channel] += skb->len;
 		spin_unlock_irqrestore(&info->readlock, flags);
 		/* Schedule dequeuing */
-		if ((dev->modempoll) && (info->rcvsched))
+		if (dev->modempoll && info->rcvsched)
 			isdn_timer_ctrl(ISDN_TIMER_MODEMREAD, 1);
 
 	} else {
 		spin_unlock_irqrestore(&info->readlock, flags);
-		schedule_delayed_work(&tty->flip.work, 1);
+		tty_flip_buffer_push(tty);
 	}
 }
 
@@ -2656,7 +2647,12 @@ isdn_tty_modem_result(int code, modem_info * info)
 		if ((info->flags & ISDN_ASYNC_CLOSING) || (!info->tty)) {
 			return;
 		}
+#ifdef CONFIG_ISDN_AUDIO
+		if ( !info->vonline )
+			tty_ldisc_flush(info->tty);
+#else
 		tty_ldisc_flush(info->tty);
+#endif
 		if ((info->flags & ISDN_ASYNC_CHECK_CD) &&
 		    (!((info->flags & ISDN_ASYNC_CALLOUT_ACTIVE) &&
 		       (info->flags & ISDN_ASYNC_CALLOUT_NOHUP)))) {
@@ -2704,8 +2700,9 @@ isdn_tty_getdial(char *p, char *q,int cnt)
 	int limit = ISDN_MSNLEN - 1;	/* MUST match the size of interface var to avoid
 					buffer overflow */
 
-	while (strchr(" 0123456789,#.*WPTS-", *p) && *p && --cnt>0) {
+	while (strchr(" 0123456789,#.*WPTSR-", *p) && *p && --cnt>0) {
 		if ((*p >= '0' && *p <= '9') || ((*p == 'S') && first) ||
+		    ((*p == 'R') && first) ||
 		    (*p == '*') || (*p == '#')) {
 			*q++ = *p;
 			limit--;
@@ -2888,7 +2885,7 @@ isdn_tty_cmd_ATand(char **p, modem_info * info)
 			p[0]++;
 			i = 0;
 			while (*p[0] && (strchr("0123456789,-*[]?;", *p[0])) &&
-			       (i < ISDN_LMSNLEN))
+			       (i < ISDN_LMSNLEN - 1))
 				m->lmsn[i++] = *p[0]++;
 			m->lmsn[i] = '\0';
 			break;

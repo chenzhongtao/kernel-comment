@@ -1,4 +1,4 @@
-/* 
+/*
  *  adv7175 - adv7175a video encoder driver version 0.0.3
  *
  * Copyright (C) 1998 Dave Perks <dperks@ibm.net>
@@ -33,28 +33,24 @@
 #include <linux/major.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
-#include <linux/pci.h>
 #include <linux/signal.h>
+#include <linux/types.h>
+#include <linux/i2c.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-#include <linux/sched.h>
-#include <asm/segment.h>
-#include <linux/types.h>
+#include <asm/uaccess.h>
 
 #include <linux/videodev.h>
-#include <asm/uaccess.h>
+#include <linux/video_encoder.h>
 
 MODULE_DESCRIPTION("Analog Devices ADV7175 video encoder driver");
 MODULE_AUTHOR("Dave Perks");
 MODULE_LICENSE("GPL");
 
-#include <linux/i2c.h>
-#include <linux/i2c-dev.h>
 
 #define I2C_NAME(s) (s)->name
 
-#include <linux/video_encoder.h>
 
 static int debug = 0;
 module_param(debug, int, 0);
@@ -69,8 +65,6 @@ MODULE_PARM_DESC(debug, "Debug level (0-1)");
 /* ----------------------------------------------------------------------- */
 
 struct adv7175 {
-	unsigned char reg[128];
-
 	int norm;
 	int input;
 	int enable;
@@ -96,9 +90,6 @@ adv7175_write (struct i2c_client *client,
 	       u8                 reg,
 	       u8                 value)
 {
-	struct adv7175 *encoder = i2c_get_clientdata(client);
-
-	encoder->reg[reg] = value;
 	return i2c_smbus_write_byte_data(client, reg, value);
 }
 
@@ -121,25 +112,21 @@ adv7175_write_block (struct i2c_client *client,
 	 * the adapter understands raw I2C */
 	if (i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		/* do raw I2C, not smbus compatible */
-		struct adv7175 *encoder = i2c_get_clientdata(client);
-		struct i2c_msg msg;
 		u8 block_data[32];
+		int block_len;
 
-		msg.addr = client->addr;
-		msg.flags = 0;
 		while (len >= 2) {
-			msg.buf = (char *) block_data;
-			msg.len = 0;
-			block_data[msg.len++] = reg = data[0];
+			block_len = 0;
+			block_data[block_len++] = reg = data[0];
 			do {
-				block_data[msg.len++] =
-				    encoder->reg[reg++] = data[1];
+				block_data[block_len++] = data[1];
+				reg++;
 				len -= 2;
 				data += 2;
 			} while (len >= 2 && data[0] == reg &&
-				 msg.len < 32);
-			if ((ret = i2c_transfer(client->adapter,
-						&msg, 1)) < 0)
+				 block_len < 32);
+			if ((ret = i2c_master_send(client, block_data,
+						   block_len)) < 0)
 				break;
 		}
 	} else {
@@ -171,24 +158,6 @@ set_subcarrier_freq (struct i2c_client *client,
 	adv7175_write(client, 0x04, 0x55);
 	adv7175_write(client, 0x05, 0x25);
 }
-
-#ifdef ENCODER_DUMP
-static void
-dump (struct i2c_client *client)
-{
-	struct adv7175 *encoder = i2c_get_clientdata(client);
-	int i, j;
-
-	printk(KERN_INFO "%s: registry dump\n", I2C_NAME(client));
-	for (i = 0; i < 182 / 8; i++) {
-		printk("%s: 0x%02x -", I2C_NAME(client), i * 8);
-		for (j = 0; j < 8; j++) {
-			printk(" 0x%02x", encoder->reg[i * 8 + j]);
-		}
-		printk("\n");
-	}
-}
-#endif
 
 /* ----------------------------------------------------------------------- */
 // Output filter:  S-Video  Composite
@@ -262,7 +231,7 @@ adv7175_command (struct i2c_client *client,
 				    sizeof(init_common));
 		adv7175_write(client, 0x07, TR0MODE | TR0RST);
 		adv7175_write(client, 0x07, TR0MODE);
-	        break;
+		break;
 
 	case ENCODER_GET_CAPABILITIES:
 	{
@@ -408,14 +377,6 @@ adv7175_command (struct i2c_client *client,
 	}
 		break;
 
-#ifdef ENCODER_DUMP
-	case ENCODER_DUMP:
-	{
-		dump(client);
-	}
-		break;
-#endif
-
 	default:
 		return -EINVAL;
 	}
@@ -434,25 +395,15 @@ static unsigned short normal_i2c[] =
 	I2C_ADV7176 >> 1, (I2C_ADV7176 >> 1) + 1,
 	I2C_CLIENT_END
 };
-static unsigned short normal_i2c_range[] = { I2C_CLIENT_END };
 
-static unsigned short probe[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short probe_range[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short ignore[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short ignore_range[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short force[2] = { I2C_CLIENT_END , I2C_CLIENT_END };
-                                                                                
+static unsigned short ignore = I2C_CLIENT_END;
+
 static struct i2c_client_address_data addr_data = {
 	.normal_i2c		= normal_i2c,
-	.normal_i2c_range	= normal_i2c_range,
-	.probe			= probe,
-	.probe_range		= probe_range,
-	.ignore			= ignore,
-	.ignore_range		= ignore_range,
-	.force			= force
+	.probe			= &ignore,
+	.ignore			= &ignore,
 };
 
-static int adv7175_i2c_id = 0;
 static struct i2c_driver i2c_driver_adv7175;
 
 static int
@@ -474,15 +425,12 @@ adv7175_detect_client (struct i2c_adapter *adapter,
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return 0;
 
-	client = kmalloc(sizeof(struct i2c_client), GFP_KERNEL);
+	client = kzalloc(sizeof(struct i2c_client), GFP_KERNEL);
 	if (client == 0)
 		return -ENOMEM;
-	memset(client, 0, sizeof(struct i2c_client));
 	client->addr = address;
 	client->adapter = adapter;
 	client->driver = &i2c_driver_adv7175;
-	client->flags = I2C_CLIENT_ALLOW_USE;
-	client->id = adv7175_i2c_id++;
 	if ((client->addr == I2C_ADV7175 >> 1) ||
 	    (client->addr == (I2C_ADV7175 >> 1) + 1)) {
 		dname = adv7175_name;
@@ -494,15 +442,13 @@ adv7175_detect_client (struct i2c_adapter *adapter,
 		kfree(client);
 		return 0;
 	}
-	snprintf(I2C_NAME(client), sizeof(I2C_NAME(client)) - 1,
-		"%s[%d]", dname, client->id);
+	strlcpy(I2C_NAME(client), dname, sizeof(I2C_NAME(client)));
 
-	encoder = kmalloc(sizeof(struct adv7175), GFP_KERNEL);
+	encoder = kzalloc(sizeof(struct adv7175), GFP_KERNEL);
 	if (encoder == NULL) {
 		kfree(client);
 		return -ENOMEM;
 	}
-	memset(encoder, 0, sizeof(struct adv7175));
 	encoder->norm = VIDEO_MODE_PAL;
 	encoder->input = 0;
 	encoder->enable = 1;
@@ -561,11 +507,11 @@ adv7175_detach_client (struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static struct i2c_driver i2c_driver_adv7175 = {
-	.owner = THIS_MODULE,
-	.name = "adv7175",	/* name */
+	.driver = {
+		.name = "adv7175",	/* name */
+	},
 
 	.id = I2C_DRIVERID_ADV7175,
-	.flags = I2C_DF_NOTIFY,
 
 	.attach_adapter = adv7175_attach_adapter,
 	.detach_client = adv7175_detach_client,

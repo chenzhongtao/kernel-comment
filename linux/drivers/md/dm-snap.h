@@ -10,7 +10,9 @@
 #define DM_SNAPSHOT_H
 
 #include "dm.h"
+#include "dm-bio-list.h"
 #include <linux/blkdev.h>
+#include <linux/workqueue.h>
 
 struct exception_table {
 	uint32_t hash_mask;
@@ -28,7 +30,7 @@ typedef sector_t chunk_t;
  * An exception is used where an old chunk of data has been
  * replaced by a new one.
  */
-struct exception {
+struct dm_snap_exception {
 	struct list_head hash_list;
 
 	chunk_t old_chunk;
@@ -56,13 +58,13 @@ struct exception_store {
 	 * Find somewhere to store the next exception.
 	 */
 	int (*prepare_exception) (struct exception_store *store,
-				  struct exception *e);
+				  struct dm_snap_exception *e);
 
 	/*
 	 * Update the metadata with this exception.
 	 */
 	void (*commit_exception) (struct exception_store *store,
-				  struct exception *e,
+				  struct dm_snap_exception *e,
 				  void (*callback) (void *, int success),
 				  void *callback_context);
 
@@ -99,7 +101,9 @@ struct dm_snapshot {
 
 	/* You can't use a snapshot if this is 0 (e.g. if full) */
 	int valid;
-	int have_metadata;
+
+	/* Origin writes don't trigger exceptions until this is set */
+	int active;
 
 	/* Used for display of table */
 	char type;
@@ -110,10 +114,20 @@ struct dm_snapshot {
 	struct exception_table pending;
 	struct exception_table complete;
 
+	/*
+	 * pe_lock protects all pending_exception operations and access
+	 * as well as the snapshot_bios list.
+	 */
+	spinlock_t pe_lock;
+
 	/* The on disk metadata handler */
 	struct exception_store store;
 
 	struct kcopyd_client *kcopyd_client;
+
+	/* Queue of snapshot writes for ksnapd to flush */
+	struct bio_list queued_bios;
+	struct work_struct queued_bios_work;
 };
 
 /*
@@ -126,10 +140,9 @@ int dm_add_exception(struct dm_snapshot *s, chunk_t old, chunk_t new);
  * Constructor and destructor for the default persistent
  * store.
  */
-int dm_create_persistent(struct exception_store *store, uint32_t chunk_size);
+int dm_create_persistent(struct exception_store *store);
 
-int dm_create_transient(struct exception_store *store,
-			struct dm_snapshot *s, int blocksize);
+int dm_create_transient(struct exception_store *store);
 
 /*
  * Return the number of sectors in the device.

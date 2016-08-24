@@ -1,14 +1,13 @@
-/* 
+/*
    Common Flash Interface probe code.
    (C) 2000 Red Hat. GPL'd.
-   $Id: jedec_probe.c,v 1.61 2004/11/19 20:52:16 thayne Exp $
+   $Id: jedec_probe.c,v 1.66 2005/11/07 11:14:23 gleixner Exp $
    See JEDEC (http://www.jedec.org/) standard JESD21C (section 3.5)
    for the standard this probe goes back to.
 
    Occasionally maintained by Thayne Harbaugh tharbaugh at lnxi dot com
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/types.h>
@@ -18,7 +17,6 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/init.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
@@ -34,6 +32,7 @@
 #define MANUFACTURER_MACRONIX	0x00C2
 #define MANUFACTURER_NEC	0x0010
 #define MANUFACTURER_PMC	0x009D
+#define MANUFACTURER_SHARP	0x00b0
 #define MANUFACTURER_SST	0x00BF
 #define MANUFACTURER_ST		0x0020
 #define MANUFACTURER_TOSHIBA	0x0098
@@ -70,6 +69,7 @@
 
 /* Fujitsu */
 #define MBM29F040C	0x00A4
+#define MBM29F800BA	0x2258
 #define MBM29LV650UE	0x22D7
 #define MBM29LV320TE	0x22F6
 #define MBM29LV320BE	0x22F9
@@ -111,6 +111,7 @@
 #define MX29LV040C	0x004F
 #define MX29LV160T	0x22C4
 #define MX29LV160B	0x2249
+#define MX29F040	0x00A4
 #define MX29F016	0x00AD
 #define MX29F002T	0x00B0
 #define MX29F004T	0x0045
@@ -124,7 +125,11 @@
 #define PM49FL004	0x006E
 #define PM49FL008	0x006A
 
+/* Sharp */
+#define LH28F640BF	0x00b0
+
 /* ST - www.st.com */
+#define M29F800AB	0x0058
 #define M29W800DT	0x00D7
 #define M29W800DB	0x005B
 #define M29W160DT	0x22C4
@@ -142,6 +147,7 @@
 #define SST29LE512	0x003d
 #define SST39LF800	0x2781
 #define SST39LF160	0x2782
+#define SST39VF1601	0x234b
 #define SST39LF512	0x00D4
 #define SST39LF010	0x00D5
 #define SST39LF020	0x00D6
@@ -149,6 +155,7 @@
 #define SST39SF010A	0x00B5
 #define SST39SF020A	0x00B6
 #define SST49LF004B	0x0060
+#define SST49LF040B	0x0050
 #define SST49LF008A	0x005a
 #define SST49LF030A	0x001C
 #define SST49LF040A	0x0051
@@ -637,6 +644,23 @@ static const struct amd_flash_info jedec_table[] = {
 		.NumEraseRegions= 1,
 		.regions	= {
 			ERASEINFO(0x10000,8)
+		}
+	}, {
+		.mfr_id		= MANUFACTURER_FUJITSU,
+		.dev_id		= MBM29F800BA,
+		.name		= "Fujitsu MBM29F800BA",
+		.uaddr		= {
+			[0] = MTD_UADDR_0x0AAA_0x0555,  /* x8 */
+			[1] = MTD_UADDR_0x0555_0x02AA,  /* x16 */
+		},
+		.DevSize	= SIZE_1MiB,
+		.CmdSet		= P_ID_AMD_STD,
+		.NumEraseRegions= 4,
+		.regions	= {
+			ERASEINFO(0x04000,1),
+			ERASEINFO(0x02000,2),
+			ERASEINFO(0x08000,1),
+			ERASEINFO(0x10000,15),
 		}
 	}, {
 		.mfr_id		= MANUFACTURER_FUJITSU,
@@ -1168,6 +1192,19 @@ static const struct amd_flash_info jedec_table[] = {
 		}
 	}, {
 		.mfr_id		= MANUFACTURER_MACRONIX,
+		.dev_id		= MX29F040,
+		.name		= "Macronix MX29F040",
+		.uaddr		= {
+			[0] = MTD_UADDR_0x0555_0x02AA /* x8 */
+		},
+		.DevSize	= SIZE_512KiB,
+		.CmdSet		= P_ID_AMD_STD,
+		.NumEraseRegions= 1,
+		.regions	= {
+			ERASEINFO(0x10000,8),
+		}
+        }, {
+		.mfr_id		= MANUFACTURER_MACRONIX,
 		.dev_id		= MX29F016,
 		.name		= "Macronix MX29F016",
 		.uaddr		= {
@@ -1265,6 +1302,19 @@ static const struct amd_flash_info jedec_table[] = {
 		.NumEraseRegions= 1,
 		.regions	= {
 			ERASEINFO( 0x01000, 256 )
+		}
+	}, {
+		.mfr_id		= MANUFACTURER_SHARP,
+		.dev_id		= LH28F640BF,
+		.name		= "LH28F640BF",
+		.uaddr		= {
+			[0] = MTD_UADDR_UNNECESSARY,    /* x8 */
+		},
+		.DevSize	= SIZE_4MiB,
+		.CmdSet         = P_ID_INTEL_STD,
+		.NumEraseRegions= 1,
+		.regions        = {
+			ERASEINFO(0x40000,16),
 		}
         }, {
 		.mfr_id		= MANUFACTURER_SST,
@@ -1370,6 +1420,20 @@ static const struct amd_flash_info jedec_table[] = {
 		}
 	}, {
 		.mfr_id		= MANUFACTURER_SST,
+		.dev_id         = SST49LF040B,
+		.name           = "SST 49LF040B",
+		.uaddr          = {
+			[0] = MTD_UADDR_0x5555_0x2AAA /* x8 */
+		},
+		.DevSize        = SIZE_512KiB,
+		.CmdSet         = P_ID_AMD_STD,
+		.NumEraseRegions= 1,
+		.regions        = {
+			ERASEINFO(0x01000,128),
+		}
+	}, {
+
+		.mfr_id		= MANUFACTURER_SST,
 		.dev_id		= SST49LF004B,
 		.name		= "SST 49LF004B",
  		.uaddr		= {
@@ -1448,7 +1512,39 @@ static const struct amd_flash_info jedec_table[] = {
                        ERASEINFO(0x1000,256),
                        ERASEINFO(0x1000,256)
                }
+	}, {
+               .mfr_id         = MANUFACTURER_SST,     /* should be CFI */
+               .dev_id         = SST39VF1601,
+               .name           = "SST 39VF1601",
+               .uaddr          = {
+                       [0] = MTD_UADDR_0x5555_0x2AAA,  /* x8 */
+                       [1] = MTD_UADDR_0x5555_0x2AAA   /* x16 */
+               },
+               .DevSize        = SIZE_2MiB,
+               .CmdSet         = P_ID_AMD_STD,
+               .NumEraseRegions= 2,
+               .regions        = {
+                       ERASEINFO(0x1000,256),
+                       ERASEINFO(0x1000,256)
+               }
 
+	}, {
+		.mfr_id		= MANUFACTURER_ST,
+		.dev_id		= M29F800AB,
+		.name		= "ST M29F800AB",
+		.uaddr		= {
+			[0] = MTD_UADDR_0x0AAA_0x0555,  /* x8 */
+			[1] = MTD_UADDR_0x0555_0x02AA,  /* x16 */
+		},
+		.DevSize	= SIZE_1MiB,
+		.CmdSet		= P_ID_AMD_STD,
+		.NumEraseRegions= 4,
+		.regions	= {
+			ERASEINFO(0x04000,1),
+			ERASEINFO(0x02000,2),
+			ERASEINFO(0x08000,1),
+			ERASEINFO(0x10000,15),
+		}
        }, {
 		.mfr_id		= MANUFACTURER_ST,	/* FIXME - CFI device? */
 		.dev_id		= M29W800DT,
@@ -1703,7 +1799,7 @@ static int jedec_probe_chip(struct map_info *map, __u32 base,
 
 static struct mtd_info *jedec_probe(struct map_info *map);
 
-static inline u32 jedec_read_mfr(struct map_info *map, __u32 base, 
+static inline u32 jedec_read_mfr(struct map_info *map, __u32 base,
 	struct cfi_private *cfi)
 {
 	map_word result;
@@ -1714,7 +1810,7 @@ static inline u32 jedec_read_mfr(struct map_info *map, __u32 base,
 	return result.x[0] & mask;
 }
 
-static inline u32 jedec_read_id(struct map_info *map, __u32 base, 
+static inline u32 jedec_read_id(struct map_info *map, __u32 base,
 	struct cfi_private *cfi)
 {
 	map_word result;
@@ -1725,7 +1821,7 @@ static inline u32 jedec_read_id(struct map_info *map, __u32 base,
 	return result.x[0] & mask;
 }
 
-static inline void jedec_reset(u32 base, struct map_info *map, 
+static inline void jedec_reset(u32 base, struct map_info *map,
 	struct cfi_private *cfi)
 {
 	/* Reset */
@@ -1749,7 +1845,7 @@ static inline void jedec_reset(u32 base, struct map_info *map,
 	 * so ensure we're in read mode.  Send both the Intel and the AMD command
 	 * for this.  Intel uses 0xff for this, AMD uses 0xff for NOP, so
 	 * this should be safe.
-	 */ 
+	 */
 	cfi_send_gen_cmd(0xFF, 0, base, map, cfi, cfi->device_type, NULL);
 	/* FIXME - should have reset delay before continuing */
 }
@@ -1791,14 +1887,14 @@ static int cfi_jedec_setup(struct cfi_private *p_cfi, int index)
 	printk("Found: %s\n",jedec_table[index].name);
 
 	num_erase_regions = jedec_table[index].NumEraseRegions;
-	
+
 	p_cfi->cfiq = kmalloc(sizeof(struct cfi_ident) + num_erase_regions * 4, GFP_KERNEL);
 	if (!p_cfi->cfiq) {
 		//xx printk(KERN_WARNING "%s: kmalloc failed for CFI ident structure\n", map->name);
 		return 0;
 	}
 
-	memset(p_cfi->cfiq,0,sizeof(struct cfi_ident));	
+	memset(p_cfi->cfiq,0,sizeof(struct cfi_ident));
 
 	p_cfi->cfiq->P_ID = jedec_table[index].CmdSet;
 	p_cfi->cfiq->NumEraseRegions = jedec_table[index].NumEraseRegions;
@@ -1828,7 +1924,7 @@ static int cfi_jedec_setup(struct cfi_private *p_cfi, int index)
 
 
 /*
- * There is a BIG problem properly ID'ing the JEDEC devic and guaranteeing
+ * There is a BIG problem properly ID'ing the JEDEC device and guaranteeing
  * the mapped address, unlock addresses, and proper chip ID.  This function
  * attempts to minimize errors.  It is doubtfull that this probe will ever
  * be perfect - consequently there should be some module parameters that
@@ -1856,6 +1952,16 @@ static inline int jedec_match( __u32 base,
 	case CFI_DEVICETYPE_X8:
 		mfr = (__u8)finfo->mfr_id;
 		id = (__u8)finfo->dev_id;
+
+		/* bjd: it seems that if we do this, we can end up
+		 * detecting 16bit flashes as an 8bit device, even though
+		 * there aren't.
+		 */
+		if (finfo->dev_id > 0xff) {
+			DEBUG( MTD_DEBUG_LEVEL3, "%s(): ID is not 8bit\n",
+			       __func__);
+			goto match_done;
+		}
 		break;
 	case CFI_DEVICETYPE_X16:
 		mfr = (__u16)finfo->mfr_id;
@@ -1943,7 +2049,7 @@ static inline int jedec_match( __u32 base,
 	cfi_send_gen_cmd(0x90, cfi->addr_unlock1, base, map, cfi, cfi->device_type, NULL);
 	/* FIXME - should have a delay before continuing */
 
- match_done:	
+ match_done:
 	return rc;
 }
 
@@ -1972,23 +2078,23 @@ static int jedec_probe_chip(struct map_info *map, __u32 base,
 			"Probe at base(0x%08x) past the end of the map(0x%08lx)\n",
 			base, map->size -1);
 		return 0;
-		
+
 	}
 	/* Ensure the unlock addresses we try stay inside the map */
 	probe_offset1 = cfi_build_cmd_addr(
-		cfi->addr_unlock1, 
-		cfi_interleave(cfi), 
+		cfi->addr_unlock1,
+		cfi_interleave(cfi),
 		cfi->device_type);
 	probe_offset2 = cfi_build_cmd_addr(
-		cfi->addr_unlock1, 
-		cfi_interleave(cfi), 
+		cfi->addr_unlock1,
+		cfi_interleave(cfi),
 		cfi->device_type);
 	if (	((base + probe_offset1 + map_bankwidth(map)) >= map->size) ||
 		((base + probe_offset2 + map_bankwidth(map)) >= map->size))
 	{
 		goto retry;
 	}
-		
+
 	/* Reset */
 	jedec_reset(base, map, cfi);
 
@@ -2001,15 +2107,15 @@ static int jedec_probe_chip(struct map_info *map, __u32 base,
 	/* FIXME - should have a delay before continuing */
 
 	if (!cfi->numchips) {
-		/* This is the first time we're called. Set up the CFI 
+		/* This is the first time we're called. Set up the CFI
 		   stuff accordingly and return */
-		
+
 		cfi->mfr = jedec_read_mfr(map, base, cfi);
 		cfi->id = jedec_read_id(map, base, cfi);
 		DEBUG(MTD_DEBUG_LEVEL3,
-		      "Search for id:(%02x %02x) interleave(%d) type(%d)\n", 
+		      "Search for id:(%02x %02x) interleave(%d) type(%d)\n",
 			cfi->mfr, cfi->id, cfi_interleave(cfi), cfi->device_type);
-		for (i=0; i<sizeof(jedec_table)/sizeof(jedec_table[0]); i++) {
+		for (i = 0; i < ARRAY_SIZE(jedec_table); i++) {
 			if ( jedec_match( base, map, cfi, &jedec_table[i] ) ) {
 				DEBUG( MTD_DEBUG_LEVEL3,
 				       "MTD %s(): matched device 0x%x,0x%x unlock_addrs: 0x%.4x 0x%.4x\n",
@@ -2036,7 +2142,7 @@ static int jedec_probe_chip(struct map_info *map, __u32 base,
 			return 0;
 		}
 	}
-	
+
 	/* Check each previous chip locations to see if it's an alias */
 	for (i=0; i < (base >> cfi->chipshift); i++) {
 		unsigned long start;
@@ -2057,7 +2163,7 @@ static int jedec_probe_chip(struct map_info *map, __u32 base,
 				       map->name, base, start);
 				return 0;
 			}
-			
+
 			/* Yes, it's actually got the device IDs as data. Most
 			 * unfortunate. Stick the new chip in read mode
 			 * too and if it's the same, assume it's an alias. */
@@ -2071,20 +2177,20 @@ static int jedec_probe_chip(struct map_info *map, __u32 base,
 			}
 		}
 	}
-		
+
 	/* OK, if we got to here, then none of the previous chips appear to
 	   be aliases for the current one. */
 	set_bit((base >> cfi->chipshift), chip_map); /* Update chip map */
 	cfi->numchips++;
-		
+
 ok_out:
 	/* Put it back into Read Mode */
 	jedec_reset(base, map, cfi);
 
 	printk(KERN_INFO "%s: Found %d x%d devices at 0x%x in %d-bit bank\n",
-	       map->name, cfi_interleave(cfi), cfi->device_type*8, base, 
+	       map->name, cfi_interleave(cfi), cfi->device_type*8, base,
 	       map->bankwidth*8);
-	
+
 	return 1;
 }
 

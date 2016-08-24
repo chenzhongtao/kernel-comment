@@ -1,7 +1,7 @@
 /*
 	drivers/net/tulip/media.c
 
-	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Maintained by Valerie Henson <val_henson@linux.intel.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
@@ -44,8 +44,10 @@ static const unsigned char comet_miireg2offset[32] = {
 
 /* MII transceiver control section.
    Read and write the MII registers using software-generated serial
-   MDIO protocol.  See the MII specifications or DP83840A data sheet
-   for details. */
+   MDIO protocol.
+   See IEEE 802.3-2002.pdf (Section 2, Chapter "22.2.4 Management functions")
+   or DP83840A data sheet for more details.
+   */
 
 int tulip_mdio_read(struct net_device *dev, int phy_id, int location)
 {
@@ -81,25 +83,6 @@ int tulip_mdio_read(struct net_device *dev, int phy_id, int location)
 		return retval & 0xffff;
 	}
 
-	if(tp->chip_id == ULI526X && tp->revision >= 0x40) {
-		int value;
-		int i = 1000;
-		
-		value = ioread32(ioaddr + CSR9);
-		iowrite32(value & 0xFFEFFFFF, ioaddr + CSR9);
-		
-		value = (phy_id << 21) | (location << 16) | 0x80000000;
-		iowrite32(value, ioaddr + CSR10);
-		
-		while(--i > 0) {
-			mdio_delay();
-			if(ioread32(ioaddr + CSR10) & 0x10000000)
-				break;
-		}
-		retval = ioread32(ioaddr + CSR10);
-		spin_unlock_irqrestore(&tp->mii_lock, flags);
-		return retval & 0xFFFF;
-	}
 	/* Establish sync by sending at least 32 logic ones. */
 	for (i = 32; i >= 0; i--) {
 		iowrite32(MDIO_ENB | MDIO_DATA_WRITE1, mdio_addr);
@@ -159,23 +142,7 @@ void tulip_mdio_write(struct net_device *dev, int phy_id, int location, int val)
 		spin_unlock_irqrestore(&tp->mii_lock, flags);
 		return;
 	}
-	if (tp->chip_id == ULI526X && tp->revision >= 0x40) {
-		int value;
-		int i = 1000;
-		
-		value = ioread32(ioaddr + CSR9);
-		iowrite32(value & 0xFFEFFFFF, ioaddr + CSR9);
-		
-		value = (phy_id << 21) | (location << 16) | 0x40000000 | (val & 0xFFFF);
-		iowrite32(value, ioaddr + CSR10);
-		
-		while(--i > 0) {
-			if (ioread32(ioaddr + CSR10) & 0x10000000)
-				break;
-		}
-		spin_unlock_irqrestore(&tp->mii_lock, flags);
-	}
-		
+
 	/* Establish sync by sending 32 logic ones. */
 	for (i = 32; i >= 0; i--) {
 		iowrite32(MDIO_ENB | MDIO_DATA_WRITE1, mdio_addr);
@@ -296,24 +263,56 @@ void tulip_select_media(struct net_device *dev, int startup)
 				u16 *reset_sequence = &((u16*)(p+3))[init_length];
 				int reset_length = p[2 + init_length*2];
 				misc_info = reset_sequence + reset_length;
-				if (startup)
+				if (startup) {
+					int timeout = 10;	/* max 1 ms */
 					for (i = 0; i < reset_length; i++)
 						iowrite32(get_u16(&reset_sequence[i]) << 16, ioaddr + CSR15);
+
+					/* flush posted writes */
+					ioread32(ioaddr + CSR15);
+
+					/* Sect 3.10.3 in DP83840A.pdf (p39) */
+					udelay(500);
+
+					/* Section 4.2 in DP83840A.pdf (p43) */
+					/* and IEEE 802.3 "22.2.4.1.1 Reset" */
+					while (timeout-- &&
+						(tulip_mdio_read (dev, phy_num, MII_BMCR) & BMCR_RESET))
+						udelay(100);
+				}
 				for (i = 0; i < init_length; i++)
 					iowrite32(get_u16(&init_sequence[i]) << 16, ioaddr + CSR15);
+
+				ioread32(ioaddr + CSR15);	/* flush posted writes */
 			} else {
 				u8 *init_sequence = p + 2;
 				u8 *reset_sequence = p + 3 + init_length;
 				int reset_length = p[2 + init_length];
 				misc_info = (u16*)(reset_sequence + reset_length);
 				if (startup) {
+					int timeout = 10;	/* max 1 ms */
 					iowrite32(mtable->csr12dir | 0x100, ioaddr + CSR12);
 					for (i = 0; i < reset_length; i++)
 						iowrite32(reset_sequence[i], ioaddr + CSR12);
+
+					/* flush posted writes */
+					ioread32(ioaddr + CSR12);
+
+					/* Sect 3.10.3 in DP83840A.pdf (p39) */
+					udelay(500);
+
+					/* Section 4.2 in DP83840A.pdf (p43) */
+					/* and IEEE 802.3 "22.2.4.1.1 Reset" */
+					while (timeout-- &&
+						(tulip_mdio_read (dev, phy_num, MII_BMCR) & BMCR_RESET))
+						udelay(100);
 				}
 				for (i = 0; i < init_length; i++)
 					iowrite32(init_sequence[i], ioaddr + CSR12);
+
+				ioread32(ioaddr + CSR12);	/* flush posted writes */
 			}
+
 			tmp_info = get_u16(&misc_info[1]);
 			if (tmp_info)
 				tp->advertising[phy_num] = tmp_info | 1;
@@ -399,6 +398,9 @@ void tulip_select_media(struct net_device *dev, int startup)
 	}
 
 	tp->csr6 = new_csr6 | (tp->csr6 & 0xfdff) | (tp->full_duplex ? 0x0200 : 0);
+
+	mdelay(1);
+
 	return;
 }
 

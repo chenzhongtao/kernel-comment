@@ -37,7 +37,6 @@
  */
 #undef DEBUG
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -52,6 +51,7 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 
+#include <net/net_namespace.h>
 #include <net/syncppp.h>
 
 #include <asm/byteorder.h>
@@ -107,24 +107,24 @@
 struct ppp_header {
 	u8 address;
 	u8 control;
-	u16 protocol;
+	__be16 protocol;
 };
 #define PPP_HEADER_LEN          sizeof (struct ppp_header)
 
 struct lcp_header {
 	u8 type;
 	u8 ident;
-	u16 len;
+	__be16 len;
 };
 #define LCP_HEADER_LEN          sizeof (struct lcp_header)
 
 struct cisco_packet {
-	u32 type;
-	u32 par1;
-	u32 par2;
-	u16 rel;
-	u16 time0;
-	u16 time1;
+	__be32 type;
+	__be32 par1;
+	__be32 par2;
+	__be16 rel;
+	__be16 time0;
+	__be16 time1;
 };
 #define CISCO_PACKET_LEN 18
 #define CISCO_BIG_PACKET_LEN 20
@@ -139,7 +139,7 @@ static struct sk_buff_head tx_queue;
 static void sppp_keepalive (unsigned long dummy);
 static void sppp_cp_send (struct sppp *sp, u16 proto, u8 type,
 	u8 ident, u16 len, void *data);
-static void sppp_cisco_send (struct sppp *sp, int type, long par1, long par2);
+static void sppp_cisco_send (struct sppp *sp, int type, u32 par1, u32 par2);
 static void sppp_lcp_input (struct sppp *sp, struct sk_buff *m);
 static void sppp_cisco_input (struct sppp *sp, struct sk_buff *m);
 static void sppp_ipcp_input (struct sppp *sp, struct sk_buff *m);
@@ -221,14 +221,14 @@ static void sppp_clear_timeout(struct sppp *p)
  *	here.
  */
  
-void sppp_input (struct net_device *dev, struct sk_buff *skb)
+static void sppp_input (struct net_device *dev, struct sk_buff *skb)
 {
 	struct ppp_header *h;
 	struct sppp *sp = (struct sppp *)sppp_of(dev);
 	unsigned long flags;
 
 	skb->dev=dev;
-	skb->mac.raw=skb->data;
+	skb_reset_mac_header(skb);
 
 	if (dev->flags & IFF_RUNNING)
 	{
@@ -355,14 +355,14 @@ done:
 	return;
 }
 
-EXPORT_SYMBOL(sppp_input);
-
 /*
  *	Handle transmit packets.
  */
  
-static int sppp_hard_header(struct sk_buff *skb, struct net_device *dev, __u16 type,
-		void *daddr, void *saddr, unsigned int len)
+static int sppp_hard_header(struct sk_buff *skb,
+			    struct net_device *dev, __u16 type,
+			    const void *daddr, const void *saddr,
+			    unsigned int len)
 {
 	struct sppp *sp = (struct sppp *)sppp_of(dev);
 	struct ppp_header *h;
@@ -394,10 +394,9 @@ static int sppp_hard_header(struct sk_buff *skb, struct net_device *dev, __u16 t
 	return sizeof(struct ppp_header);
 }
 
-static int sppp_rebuild_header(struct sk_buff *skb)
-{
-	return 0;
-}
+static const struct header_ops sppp_header_ops = {
+	.create = sppp_hard_header,
+};
 
 /*
  * Send keepalive packets, every 10 seconds.
@@ -448,7 +447,7 @@ static void sppp_keepalive (unsigned long dummy)
 			sppp_cisco_send (sp, CISCO_KEEPALIVE_REQ, ++sp->pp_seq,
 				sp->pp_rseq);
 		else if (sp->lcp.state == LCP_STATE_OPENED) {
-			long nmagic = htonl (sp->lcp.magic);
+			__be32 nmagic = htonl (sp->lcp.magic);
 			sp->lcp.echoid = ++sp->pp_seq;
 			sppp_cp_send (sp, PPP_LCP, LCP_ECHO_REQ,
 				sp->lcp.echoid, 4, &nmagic);
@@ -472,7 +471,7 @@ static void sppp_lcp_input (struct sppp *sp, struct sk_buff *skb)
 	struct net_device *dev = sp->pp_if;
 	int len = skb->len;
 	u8 *p, opt[6];
-	u32 rmagic;
+	u32 rmagic = 0;
 
 	if (!pskb_may_pull(skb, sizeof(struct lcp_header))) {
 		if (sp->pp_flags & PP_DEBUG)
@@ -668,7 +667,7 @@ badreq:
 					dev->name, len);
 			break;
 		}
-		if (ntohl (*(long*)(h+1)) == sp->lcp.magic) {
+		if (ntohl (*(__be32*)(h+1)) == sp->lcp.magic) {
 			/* Line loopback mode detected. */
 			printk (KERN_WARNING "%s: loopback\n", dev->name);
 			if_down (dev);
@@ -681,7 +680,7 @@ badreq:
 			sppp_lcp_open (sp);
 			break;
 		}
-		*(long*)(h+1) = htonl (sp->lcp.magic);
+		*(__be32 *)(h+1) = htonl (sp->lcp.magic);
 		sppp_cp_send (sp, PPP_LCP, LCP_ECHO_REPLY, h->ident, len-4, h+1);
 		break;
 	case LCP_ECHO_REPLY:
@@ -693,7 +692,7 @@ badreq:
 					dev->name, len);
 			break;
 		}
-		if (ntohl (*(long*)(h+1)) != sp->lcp.magic)
+		if (ntohl(*(__be32 *)(h+1)) != sp->lcp.magic)
 		sp->pp_alivecnt = 0;
 		break;
 	}
@@ -766,10 +765,10 @@ static void sppp_cisco_input (struct sppp *sp, struct sk_buff *skb)
 		{
 		struct in_device *in_dev;
 		struct in_ifaddr *ifa;
-		u32 addr = 0, mask = ~0; /* FIXME: is the mask correct? */
+		__be32 addr = 0, mask = htonl(~0U); /* FIXME: is the mask correct? */
 #ifdef CONFIG_INET
 		rcu_read_lock();
-		if ((in_dev = __in_dev_get(dev)) != NULL)
+		if ((in_dev = __in_dev_get_rcu(dev)) != NULL)
 		{
 			for (ifa=in_dev->ifa_list; ifa != NULL;
 				ifa=ifa->ifa_next) {
@@ -783,8 +782,7 @@ static void sppp_cisco_input (struct sppp *sp, struct sk_buff *skb)
 		}
 		rcu_read_unlock();
 #endif		
-		/* I hope both addr and mask are in the net order */
-		sppp_cisco_send (sp, CISCO_ADDR_REPLY, addr, mask);
+		sppp_cisco_send (sp, CISCO_ADDR_REPLY, ntohl(addr), ntohl(mask));
 		break;
 		}
 	}
@@ -845,7 +843,7 @@ static void sppp_cp_send (struct sppp *sp, u16 proto, u8 type,
  * Send Cisco keepalive packet.
  */
 
-static void sppp_cisco_send (struct sppp *sp, int type, long par1, long par2)
+static void sppp_cisco_send (struct sppp *sp, int type, u32 par1, u32 par2)
 {
 	struct ppp_header *h;
 	struct cisco_packet *ch;
@@ -869,7 +867,7 @@ static void sppp_cisco_send (struct sppp *sp, int type, long par1, long par2)
 	ch->type = htonl (type);
 	ch->par1 = htonl (par1);
 	ch->par2 = htonl (par2);
-	ch->rel = -1;
+	ch->rel = htons(0xffff);
 	ch->time0 = htons ((u16) (t >> 16));
 	ch->time1 = htons ((u16) t);
 
@@ -990,15 +988,13 @@ EXPORT_SYMBOL(sppp_reopen);
  *	the mtu is out of range.
  */
  
-int sppp_change_mtu(struct net_device *dev, int new_mtu)
+static int sppp_change_mtu(struct net_device *dev, int new_mtu)
 {
 	if(new_mtu<128||new_mtu>PPP_MTU||(dev->flags&IFF_UP))
 		return -EINVAL;
 	dev->mtu=new_mtu;
 	return 0;
 }
-
-EXPORT_SYMBOL(sppp_change_mtu);
 
 /**
  *	sppp_do_ioctl - Ioctl handler for ppp/hdlc
@@ -1102,8 +1098,8 @@ void sppp_attach(struct ppp_device *pd)
 	 *	hard_start_xmit.
 	 */
 	 
-	dev->hard_header = sppp_hard_header;
-	dev->rebuild_header = sppp_rebuild_header;
+	dev->header_ops = &sppp_header_ops;
+
 	dev->tx_queue_len = 10;
 	dev->type = ARPHRD_HDLC;
 	dev->addr_len = 0;
@@ -1119,8 +1115,6 @@ void sppp_attach(struct ppp_device *pd)
 	dev->stop = sppp_close;
 #endif	
 	dev->change_mtu = sppp_change_mtu;
-	dev->hard_header_cache = NULL;
-	dev->header_cache_update = NULL;
 	dev->flags = IFF_MULTICAST|IFF_POINTOPOINT|IFF_NOARP;
 }
 
@@ -1440,6 +1434,7 @@ static void sppp_print_bytes (u_char *p, u16 len)
  *	@skb:	The buffer to process
  *	@dev:	The device it arrived on
  *	@p: Unused
+ *	@orig_dev: Unused
  *
  *	Protocol glue. This drives the deferred processing mode the poorer
  *	cards use. This can be called directly by cards that do not have
@@ -1447,15 +1442,20 @@ static void sppp_print_bytes (u_char *p, u16 len)
  *	after interrupt servicing to process frames queued via netif_rx.
  */
 
-static int sppp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *p)
+static int sppp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *p, struct net_device *orig_dev)
 {
+	if (dev->nd_net != &init_net) {
+		kfree_skb(skb);
+		return 0;
+	}
+
 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL)
 		return NET_RX_DROP;
 	sppp_input(dev,skb);
 	return 0;
 }
 
-struct packet_type sppp_packet_type = {
+static struct packet_type sppp_packet_type = {
 	.type	= __constant_htons(ETH_P_WAN_PPP),
 	.func	= sppp_rcv,
 };

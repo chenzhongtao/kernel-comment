@@ -3,14 +3,12 @@
 #
 config PCIEPORTBUS
 	bool "PCI Express support"
-	depends on PCI_GOMMCONFIG || PCI_GOANY
-	default n
-
-	---help---
-	This automatically enables PCI Express Port Bus support. Users can
-	choose Native Hot-Plug support, Advanced Error Reporting support,
-	Power Management Event support and Virtual Channel support to run
-	on PCI Express Ports (Root or Switch).
+	depends on PCI
+	help
+	  This automatically enables PCI Express Port Bus support. Users can
+	  choose Native Hot-Plug support, Advanced Error Reporting support,
+	  Power Management Event support and Virtual Channel support to run
+	  on PCI Express Ports (Root or Switch).
 
 #
 # Include service Kconfig here
@@ -27,12 +25,4 @@ config HOTPLUG_PCI_PCIE
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_PCIE_POLL_EVENT_MODE
-	bool "Use polling mechanism for hot-plug events (for testing purpose)"
-	depends on HOTPLUG_PCI_PCIE
-	help
-	  Say Y here if you want to use the polling mechanism for hot-plug 
-	  events for early platform testing.
-	   
-	  When in doubt, say N.
-
+source "drivers/pci/pcie/aer/Kconfig"

@@ -6,14 +6,22 @@
  * Copyright (C) 2002 Paul Mundt
  */
 
-#include <linux/config.h>
+#include <linux/irqflags.h>
+#include <linux/compiler.h>
+#include <linux/linkage.h>
+#include <asm/types.h>
+#include <asm/ptrace.h>
 
+struct task_struct *__switch_to(struct task_struct *prev,
+				struct task_struct *next);
+
+#define AT_VECTOR_SIZE_ARCH 1 /* entries in ARCH_DLINFO */
 /*
  *	switch_to() should switch tasks to task nr n, first
  */
 
 #define switch_to(prev, next, last) do {				\
- task_t *__last;							\
+ struct task_struct *__last;						\
  register unsigned long *__ts1 __asm__ ("r1") = &prev->thread.sp;	\
  register unsigned long *__ts2 __asm__ ("r2") = &prev->thread.pc;	\
  register unsigned long *__ts4 __asm__ ("r4") = (unsigned long *)prev;	\
@@ -57,27 +65,45 @@
 	last = __last;							\
 } while (0)
 
-#define nop() __asm__ __volatile__ ("nop")
-
-
-#define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
-
-static __inline__ unsigned long tas(volatile int *m)
-{ /* #define tas(ptr) (xchg((ptr),1)) */
-	unsigned long retval;
-
-	__asm__ __volatile__ ("tas.b	@%1\n\t"
-			      "movt	%0"
-			      : "=r" (retval): "r" (m): "t", "memory");
-	return retval;
+#ifdef CONFIG_CPU_SH4A
+#define __icbi()			\
+{					\
+	unsigned long __addr;		\
+	__addr = 0xa8000000;		\
+	__asm__ __volatile__(		\
+		"icbi   %0\n\t"		\
+		: /* no output */	\
+		: "m" (__m(__addr)));	\
 }
+#endif
 
-extern void __xchg_called_with_bad_pointer(void);
-
-#define mb()	__asm__ __volatile__ ("": : :"memory")
-#define rmb()	mb()
-#define wmb()	__asm__ __volatile__ ("": : :"memory")
+/*
+ * A brief note on ctrl_barrier(), the control register write barrier.
+ *
+ * Legacy SH cores typically require a sequence of 8 nops after
+ * modification of a control register in order for the changes to take
+ * effect. On newer cores (like the sh4a and sh5) this is accomplished
+ * with icbi.
+ *
+ * Also note that on sh4a in the icbi case we can forego a synco for the
+ * write barrier, as it's not necessary for control registers.
+ *
+ * Historically we have only done this type of barrier for the MMUCR, but
+ * it's also necessary for the CCR, so we make it generic here instead.
+ */
+#ifdef CONFIG_CPU_SH4A
+#define mb()		__asm__ __volatile__ ("synco": : :"memory")
+#define rmb()		mb()
+#define wmb()		__asm__ __volatile__ ("synco": : :"memory")
+#define ctrl_barrier()	__icbi()
 #define read_barrier_depends()	do { } while(0)
+#else
+#define mb()		__asm__ __volatile__ ("": : :"memory")
+#define rmb()		mb()
+#define wmb()		__asm__ __volatile__ ("": : :"memory")
+#define ctrl_barrier()	__asm__ __volatile__ ("nop;nop;nop;nop;nop;nop;nop;nop")
+#define read_barrier_depends()	do { } while(0)
+#endif
 
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
@@ -91,91 +117,7 @@ extern void __xchg_called_with_bad_pointer(void);
 #define smp_read_barrier_depends()	do { } while(0)
 #endif
 
-#define set_mb(var, value) do { xchg(&var, value); } while (0)
-#define set_wmb(var, value) do { var = value; wmb(); } while (0)
-
-/* Interrupt Control */
-static __inline__ void local_irq_enable(void)
-{
-	unsigned long __dummy0, __dummy1;
-
-	__asm__ __volatile__("stc	sr, %0\n\t"
-			     "and	%1, %0\n\t"
-			     "stc	r6_bank, %1\n\t"
-			     "or	%1, %0\n\t"
-			     "ldc	%0, sr"
-			     : "=&r" (__dummy0), "=r" (__dummy1)
-			     : "1" (~0x000000f0)
-			     : "memory");
-}
-
-static __inline__ void local_irq_disable(void)
-{
-	unsigned long __dummy;
-	__asm__ __volatile__("stc	sr, %0\n\t"
-			     "or	#0xf0, %0\n\t"
-			     "ldc	%0, sr"
-			     : "=&z" (__dummy)
-			     : /* no inputs */
-			     : "memory");
-}
-
-#define local_save_flags(x) \
-	__asm__("stc sr, %0; and #0xf0, %0" : "=&z" (x) :/**/: "memory" )
-
-#define irqs_disabled()			\
-({					\
-	unsigned long flags;		\
-	local_save_flags(flags);	\
-	(flags != 0);			\
-})
-
-static __inline__ unsigned long local_irq_save(void)
-{
-	unsigned long flags, __dummy;
-
-	__asm__ __volatile__("stc	sr, %1\n\t"
-			     "mov	%1, %0\n\t"
-			     "or	#0xf0, %0\n\t"
-			     "ldc	%0, sr\n\t"
-			     "mov	%1, %0\n\t"
-			     "and	#0xf0, %0"
-			     : "=&z" (flags), "=&r" (__dummy)
-			     :/**/
-			     : "memory" );
-	return flags;
-}
-
-#ifdef DEBUG_CLI_STI
-static __inline__ void  local_irq_restore(unsigned long x)
-{
-	if ((x & 0x000000f0) != 0x000000f0)
-		local_irq_enable();
-	else {
-		unsigned long flags;
-		local_save_flags(flags);
-
-		if (flags == 0) {
-			extern void dump_stack(void);
-			printk(KERN_ERR "BUG!\n");
-			dump_stack();
-			local_irq_disable();
-		}
-	}
-}
-#else
-#define local_irq_restore(x) do { 			\
-	if ((x & 0x000000f0) != 0x000000f0)		\
-		local_irq_enable();				\
-} while (0)
-#endif
-
-#define really_restore_flags(x) do { 			\
-	if ((x & 0x000000f0) != 0x000000f0)		\
-		local_irq_enable();				\
-	else						\
-		local_irq_disable();				\
-} while (0)
+#define set_mb(var, value) do { (void)xchg(&var, value); } while (0)
 
 /*
  * Jump to P2 area.
@@ -202,8 +144,8 @@ do {					\
 #define back_to_P1()					\
 do {							\
 	unsigned long __dummy;				\
+	ctrl_barrier();					\
 	__asm__ __volatile__(				\
-		"nop;nop;nop;nop;nop;nop;nop\n\t"	\
 		"mov.l	1f, %0\n\t"			\
 		"jmp	@%0\n\t"			\
 		" nop\n\t"				\
@@ -213,10 +155,7 @@ do {							\
 		: "=&r" (__dummy));			\
 } while (0)
 
-/* For spinlocks etc */
-#define local_irq_save(x)	x = local_irq_save()
-
-static __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
+static inline unsigned long xchg_u32(volatile u32 *m, unsigned long val)
 {
 	unsigned long flags, retval;
 
@@ -227,7 +166,7 @@ static __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
 	return retval;
 }
 
-static __inline__ unsigned long xchg_u8(volatile unsigned char * m, unsigned long val)
+static inline unsigned long xchg_u8(volatile u8 *m, unsigned long val)
 {
 	unsigned long flags, retval;
 
@@ -238,19 +177,87 @@ static __inline__ unsigned long xchg_u8(volatile unsigned char * m, unsigned lon
 	return retval;
 }
 
-static __inline__ unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
+extern void __xchg_called_with_bad_pointer(void);
+
+#define __xchg(ptr, x, size)				\
+({							\
+	unsigned long __xchg__res;			\
+	volatile void *__xchg_ptr = (ptr);		\
+	switch (size) {					\
+	case 4:						\
+		__xchg__res = xchg_u32(__xchg_ptr, x);	\
+		break;					\
+	case 1:						\
+		__xchg__res = xchg_u8(__xchg_ptr, x);	\
+		break;					\
+	default:					\
+		__xchg_called_with_bad_pointer();	\
+		__xchg__res = x;			\
+		break;					\
+	}						\
+							\
+	__xchg__res;					\
+})
+
+#define xchg(ptr,x)	\
+	((__typeof__(*(ptr)))__xchg((ptr),(unsigned long)(x), sizeof(*(ptr))))
+
+static inline unsigned long __cmpxchg_u32(volatile int * m, unsigned long old,
+	unsigned long new)
+{
+	__u32 retval;
+	unsigned long flags;
+
+	local_irq_save(flags);
+	retval = *m;
+	if (retval == old)
+		*m = new;
+	local_irq_restore(flags);       /* implies memory barrier  */
+	return retval;
+}
+
+/* This function doesn't exist, so you'll get a linker error
+ * if something tries to do an invalid cmpxchg(). */
+extern void __cmpxchg_called_with_bad_pointer(void);
+
+#define __HAVE_ARCH_CMPXCHG 1
+
+static inline unsigned long __cmpxchg(volatile void * ptr, unsigned long old,
+		unsigned long new, int size)
 {
 	switch (size) {
 	case 4:
-		return xchg_u32(ptr, x);
-		break;
-	case 1:
-		return xchg_u8(ptr, x);
-		break;
+		return __cmpxchg_u32(ptr, old, new);
 	}
-	__xchg_called_with_bad_pointer();
-	return x;
+	__cmpxchg_called_with_bad_pointer();
+	return old;
 }
+
+#define cmpxchg(ptr,o,n)						 \
+  ({									 \
+     __typeof__(*(ptr)) _o_ = (o);					 \
+     __typeof__(*(ptr)) _n_ = (n);					 \
+     (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,		 \
+				    (unsigned long)_n_, sizeof(*(ptr))); \
+  })
+
+extern void die(const char *str, struct pt_regs *regs, long err) __attribute__ ((noreturn));
+
+extern void *set_exception_table_vec(unsigned int vec, void *handler);
+
+static inline void *set_exception_table_evt(unsigned int evt, void *handler)
+{
+	return set_exception_table_vec(evt >> 5, handler);
+}
+
+/*
+ * SH-2A has both 16 and 32-bit opcodes, do lame encoding checks.
+ */
+#ifdef CONFIG_CPU_SH2A
+extern unsigned int instruction_size(unsigned int insn);
+#else
+#define instruction_size(insn)	(2)
+#endif
 
 /* XXX
  * disable hlt during certain critical i/o operations
@@ -258,5 +265,18 @@ static __inline__ unsigned long __xchg(unsigned long x, volatile void * ptr, int
 #define HAVE_DISABLE_HLT
 void disable_hlt(void);
 void enable_hlt(void);
+
+void default_idle(void);
+void per_cpu_trap_init(void);
+
+asmlinkage void break_point_trap(void);
+asmlinkage void debug_trap_handler(unsigned long r4, unsigned long r5,
+				   unsigned long r6, unsigned long r7,
+				   struct pt_regs __regs);
+asmlinkage void bug_trap_handler(unsigned long r4, unsigned long r5,
+				 unsigned long r6, unsigned long r7,
+				 struct pt_regs __regs);
+
+#define arch_align_stack(x) (x)
 
 #endif

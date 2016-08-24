@@ -1,9 +1,8 @@
 /*
     driver for LSI L64781 COFDM demodulator
 
-    Copyright (C) 2001 Holger Waechtler <holger@convergence.de>
-                       for Convergence Integrated Media GmbH
-                       Marko Kohtala <marko.kohtala@nokia.com>
+    Copyright (C) 2001 Holger Waechtler for Convergence Integrated Media GmbH
+		       Marko Kohtala <marko.kohtala@luukku.com>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,7 +23,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 #include "dvb_frontend.h"
@@ -32,17 +30,12 @@
 
 
 struct l64781_state {
-
 	struct i2c_adapter* i2c;
-
-	struct dvb_frontend_ops ops;
-
 	const struct l64781_config* config;
-
 	struct dvb_frontend frontend;
 
 	/* private demodulator data */
-   	int first:1;
+	unsigned int first:1;
 };
 
 #define dprintk(args...) \
@@ -126,7 +119,7 @@ static int reset_and_configure (struct l64781_state* state)
 
 static int apply_frontend_param (struct dvb_frontend* fe, struct dvb_frontend_parameters *param)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 	/* The coderates for FEC_NONE, FEC_4_5 and FEC_FEC_6_7 are arbitrary */
 	static const u8 fec_tab[] = { 7, 0, 1, 2, 9, 3, 10, 4 };
 	/* QPSK, QAM_16, QAM_64 */
@@ -146,7 +139,10 @@ static int apply_frontend_param (struct dvb_frontend* fe, struct dvb_frontend_pa
 	u8 val0x06;
 	int bw = p->bandwidth - BANDWIDTH_8_MHZ;
 
-	state->config->pll_set(fe, param);
+	if (fe->ops.tuner_ops.set_params) {
+		fe->ops.tuner_ops.set_params(fe, param);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
+	}
 
 	if (param->inversion != INVERSION_ON &&
 	    param->inversion != INVERSION_OFF)
@@ -239,7 +235,7 @@ static int apply_frontend_param (struct dvb_frontend* fe, struct dvb_frontend_pa
 
 static int get_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters* param)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 	int tmp;
 
 
@@ -357,7 +353,7 @@ static int get_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters*
 
 static int l64781_read_status(struct dvb_frontend* fe, fe_status_t* status)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 	int sync = l64781_readreg (state, 0x32);
 	int gain = l64781_readreg (state, 0x0e);
 
@@ -386,7 +382,7 @@ static int l64781_read_status(struct dvb_frontend* fe, fe_status_t* status)
 
 static int l64781_read_ber(struct dvb_frontend* fe, u32* ber)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 
 	/*   XXX FIXME: set up counting period (reg 0x26...0x28)
 	 */
@@ -398,7 +394,7 @@ static int l64781_read_ber(struct dvb_frontend* fe, u32* ber)
 
 static int l64781_read_signal_strength(struct dvb_frontend* fe, u16* signal_strength)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 
 	u8 gain = l64781_readreg (state, 0x0e);
 	*signal_strength = (gain << 8) | gain;
@@ -408,7 +404,7 @@ static int l64781_read_signal_strength(struct dvb_frontend* fe, u16* signal_stre
 
 static int l64781_read_snr(struct dvb_frontend* fe, u16* snr)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 
 	u8 avg_quality = 0xff - l64781_readreg (state, 0x33);
 	*snr = (avg_quality << 8) | avg_quality; /* not exact, but...*/
@@ -418,7 +414,7 @@ static int l64781_read_snr(struct dvb_frontend* fe, u16* snr)
 
 static int l64781_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 
 	*ucblocks = l64781_readreg (state, 0x37)
 	   | (l64781_readreg (state, 0x38) << 8);
@@ -428,7 +424,7 @@ static int l64781_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
 
 static int l64781_sleep(struct dvb_frontend* fe)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 
 	/* Power down */
 	return l64781_writereg (state, 0x3e, 0x5a);
@@ -436,9 +432,9 @@ static int l64781_sleep(struct dvb_frontend* fe)
 
 static int l64781_init(struct dvb_frontend* fe)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 
-        reset_and_configure (state);
+	reset_and_configure (state);
 
 	/* Power up */
 	l64781_writereg (state, 0x3e, 0xa5);
@@ -461,14 +457,12 @@ static int l64781_init(struct dvb_frontend* fe)
 	l64781_writereg (state, 0x0d, 0x8c);
 
 	/* With ppm=8000, it seems the DTR_SENSITIVITY will result in
-           value of 2 with all possible bandwidths and guard
-           intervals, which is the initial value anyway. */
-        /*l64781_writereg (state, 0x19, 0x92);*/
+	   value of 2 with all possible bandwidths and guard
+	   intervals, which is the initial value anyway. */
+	/*l64781_writereg (state, 0x19, 0x92);*/
 
 	/* Everything is two's complement, soft bit and CSI_OUT too */
 	l64781_writereg (state, 0x1e, 0x09);
-
-	if (state->config->pll_init) state->config->pll_init(fe);
 
 	/* delay a bit after first init attempt */
 	if (state->first) {
@@ -479,17 +473,18 @@ static int l64781_init(struct dvb_frontend* fe)
 	return 0;
 }
 
-static int l64781_get_tune_settings(struct dvb_frontend* fe, struct dvb_frontend_tune_settings* fesettings)
+static int l64781_get_tune_settings(struct dvb_frontend* fe,
+				    struct dvb_frontend_tune_settings* fesettings)
 {
-        fesettings->min_delay_ms = 200;
-        fesettings->step_size = 166667;
-        fesettings->max_drift = 166667*2;
-        return 0;
+	fesettings->min_delay_ms = 4000;
+	fesettings->step_size = 0;
+	fesettings->max_drift = 0;
+	return 0;
 }
 
 static void l64781_release(struct dvb_frontend* fe)
 {
-	struct l64781_state* state = (struct l64781_state*) fe->demodulator_priv;
+	struct l64781_state* state = fe->demodulator_priv;
 	kfree(state);
 }
 
@@ -506,13 +501,12 @@ struct dvb_frontend* l64781_attach(const struct l64781_config* config,
 			   { .addr = config->demod_address, .flags = I2C_M_RD, .buf = b1, .len = 1 } };
 
 	/* allocate memory for the internal state */
-	state = (struct l64781_state*) kmalloc(sizeof(struct l64781_state), GFP_KERNEL);
+	state = kmalloc(sizeof(struct l64781_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */
 	state->config = config;
 	state->i2c = i2c;
-	memcpy(&state->ops, &l64781_ops, sizeof(struct dvb_frontend_ops));
 	state->first = 1;
 
 	/**
@@ -526,7 +520,7 @@ struct dvb_frontend* l64781_attach(const struct l64781_config* config,
 
 	/* The chip always responds to reads */
 	if (i2c_transfer(state->i2c, msg, 2) != 2) {
-	        dprintk("No response to read on I2C bus\n");
+		dprintk("No response to read on I2C bus\n");
 		goto error;
 	}
 
@@ -535,7 +529,7 @@ struct dvb_frontend* l64781_attach(const struct l64781_config* config,
 
 	/* Reading the POWER_DOWN register always returns 0 */
 	if (reg0x3e != 0) {
-	        dprintk("Device doesn't look like L64781\n");
+		dprintk("Device doesn't look like L64781\n");
 		goto error;
 	}
 
@@ -544,7 +538,7 @@ struct dvb_frontend* l64781_attach(const struct l64781_config* config,
 
 	/* Responds to all reads with 0 */
 	if (l64781_readreg(state, 0x1a) != 0) {
- 	        dprintk("Read 1 returned unexpcted value\n");
+		dprintk("Read 1 returned unexpcted value\n");
 		goto error;
 	}
 
@@ -553,18 +547,19 @@ struct dvb_frontend* l64781_attach(const struct l64781_config* config,
 
 	/* Responds with register default value */
 	if (l64781_readreg(state, 0x1a) != 0xa1) {
- 	        dprintk("Read 2 returned unexpcted value\n");
+		dprintk("Read 2 returned unexpcted value\n");
 		goto error;
 	}
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &l64781_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
 
 error:
-	if (reg0x3e >= 0) l64781_writereg (state, 0x3e, reg0x3e);  /* restore reg 0x3e */
-	if (state) kfree(state);
+	if (reg0x3e >= 0)
+		l64781_writereg (state, 0x3e, reg0x3e);  /* restore reg 0x3e */
+	kfree(state);
 	return NULL;
 }
 
@@ -581,10 +576,10 @@ static struct dvb_frontend_ops l64781_ops = {
 		.caps = FE_CAN_FEC_1_2 | FE_CAN_FEC_2_3 | FE_CAN_FEC_3_4 |
 		      FE_CAN_FEC_5_6 | FE_CAN_FEC_7_8 |
 		      FE_CAN_QPSK | FE_CAN_QAM_16 | FE_CAN_QAM_64 |
-        	      FE_CAN_MUTE_TS
+		      FE_CAN_MUTE_TS
 	},
 
-     	.release = l64781_release,
+	.release = l64781_release,
 
 	.init = l64781_init,
 	.sleep = l64781_sleep,

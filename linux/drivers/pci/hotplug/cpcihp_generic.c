@@ -34,11 +34,11 @@
  * Send feedback to <scottm@somanetworks.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
+#include <linux/string.h>
 #include "cpci_hotplug.h"
 
 #define DRIVER_VERSION	"0.1"
@@ -84,7 +84,7 @@ static int __init validate_parameters(void)
 
 	if(!bridge) {
 		info("not configured, disabling.");
-		return 1;
+		return -EINVAL;
 	}
 	str = bridge;
 	if(!*str)
@@ -147,7 +147,7 @@ static int __init cpcihp_generic_init(void)
 
 	info(DRIVER_DESC " version: " DRIVER_VERSION);
 	status = validate_parameters();
-	if(status != 0)
+	if (status)
 		return status;
 
 	r = request_region(port, 1, "#ENUM hotswap signal register");

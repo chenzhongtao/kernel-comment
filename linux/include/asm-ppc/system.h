@@ -4,10 +4,8 @@
 #ifndef __PPC_SYSTEM_H
 #define __PPC_SYSTEM_H
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 
-#include <asm/atomic.h>
 #include <asm/hw_irq.h>
 
 /*
@@ -34,12 +32,12 @@
 #define read_barrier_depends()  do { } while(0)
 
 #define set_mb(var, value)	do { var = value; mb(); } while (0)
-#define set_wmb(var, value)	do { var = value; wmb(); } while (0)
 
+#define AT_VECTOR_SIZE_ARCH 6 /* entries in ARCH_DLINFO */
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
-#define smp_wmb()	wmb()
+#define smp_wmb()	__asm__ __volatile__ ("eieio" : : : "memory")
 #define smp_read_barrier_depends()	read_barrier_depends()
 #else
 #define smp_mb()	barrier()
@@ -57,6 +55,7 @@ extern void show_regs(struct pt_regs * regs);
 extern void flush_instruction_cache(void);
 extern void hard_reset_now(void);
 extern void poweroff_now(void);
+extern int set_dabr(unsigned long dabr);
 #ifdef CONFIG_6xx
 extern long _get_L2CR(void);
 extern long _get_L3CR(void);
@@ -70,23 +69,60 @@ extern void _set_L3CR(unsigned long);
 #endif
 extern void via_cuda_init(void);
 extern void pmac_nvram_init(void);
+extern void chrp_nvram_init(void);
 extern void read_rtc_time(void);
 extern void pmac_find_display(void);
 extern void giveup_fpu(struct task_struct *);
+extern void disable_kernel_fp(void);
 extern void enable_kernel_fp(void);
+extern void flush_fp_to_thread(struct task_struct *);
 extern void enable_kernel_altivec(void);
 extern void giveup_altivec(struct task_struct *);
 extern void load_up_altivec(struct task_struct *);
+extern int emulate_altivec(struct pt_regs *);
 extern void giveup_spe(struct task_struct *);
 extern void load_up_spe(struct task_struct *);
 extern int fix_alignment(struct pt_regs *);
-extern void cvt_fd(float *from, double *to, unsigned long *fpscr);
-extern void cvt_df(double *from, float *to, unsigned long *fpscr);
+extern void cvt_fd(float *from, double *to, struct thread_struct *thread);
+extern void cvt_df(double *from, float *to, struct thread_struct *thread);
+
+#ifndef CONFIG_SMP
+extern void discard_lazy_cpu_state(void);
+#else
+static inline void discard_lazy_cpu_state(void)
+{
+}
+#endif
+
+#ifdef CONFIG_ALTIVEC
+extern void flush_altivec_to_thread(struct task_struct *);
+#else
+static inline void flush_altivec_to_thread(struct task_struct *t)
+{
+}
+#endif
+
+#ifdef CONFIG_SPE
+extern void flush_spe_to_thread(struct task_struct *);
+#else
+static inline void flush_spe_to_thread(struct task_struct *t)
+{
+}
+#endif
+
 extern int call_rtas(const char *, int, int, unsigned long *, ...);
 extern void cacheable_memzero(void *p, unsigned int nb);
+extern void *cacheable_memcpy(void *, const void *, unsigned int);
 extern int do_page_fault(struct pt_regs *, unsigned long, unsigned long);
 extern void bad_page_fault(struct pt_regs *, unsigned long, int);
-extern void die(const char *, struct pt_regs *, long);
+extern int die(const char *, struct pt_regs *, long);
+extern void _exception(int, struct pt_regs *, int, unsigned long);
+void _nmask_and_or_msr(unsigned long nmask, unsigned long or_val);
+
+#ifdef CONFIG_BOOKE_WDT
+extern u32 booke_wdt_enabled;
+extern u32 booke_wdt_period;
+#endif /* CONFIG_BOOKE_WDT */
 
 struct device_node;
 extern void note_scsi_host(struct device_node *, void *);
@@ -125,7 +161,6 @@ xchg_u32(volatile void *p, unsigned long val)
 extern void __xchg_called_with_bad_pointer(void);
 
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
-#define tas(ptr) (xchg((ptr),1))
 
 static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
 {
@@ -152,9 +187,9 @@ extern inline void * xchg_ptr(void * m, void * val)
 #define __HAVE_ARCH_CMPXCHG	1
 
 static __inline__ unsigned long
-__cmpxchg_u32(volatile int *p, int old, int new)
+__cmpxchg_u32(volatile unsigned int *p, unsigned int old, unsigned int new)
 {
-	int prev;
+	unsigned int prev;
 
 	__asm__ __volatile__ ("\n\
 1:	lwarx	%0,0,%2 \n\
@@ -200,6 +235,8 @@ __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
      (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,		 \
 				    (unsigned long)_n_, sizeof(*(ptr))); \
   })
+
+#define arch_align_stack(x) (x)
 
 #endif /* __KERNEL__ */
 #endif /* __PPC_SYSTEM_H */

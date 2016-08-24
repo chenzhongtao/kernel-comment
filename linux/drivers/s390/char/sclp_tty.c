@@ -8,12 +8,11 @@
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kmod.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
-#include <linux/sched.h>
+#include <linux/tty_flip.h>
 #include <linux/wait.h>
 #include <linux/slab.h>
 #include <linux/err.h>
@@ -59,8 +58,6 @@ static unsigned char sclp_tty_chars[SCLP_TTY_BUF_SIZE];
 static unsigned short int sclp_tty_chars_count;
 
 struct tty_driver *sclp_tty_driver;
-
-extern struct termios  tty_std_termios;
 
 static struct sclp_ioctls sclp_ioctls;
 static struct sclp_ioctls sclp_ioctls_init =
@@ -496,25 +493,19 @@ sclp_tty_input(unsigned char* buf, unsigned int count)
 	case CTRLCHAR_SYSRQ:
 		break;
 	case CTRLCHAR_CTRL:
-		sclp_tty->flip.count++;
-		*sclp_tty->flip.flag_buf_ptr++ = TTY_NORMAL;
-		*sclp_tty->flip.char_buf_ptr++ = cchar;
+		tty_insert_flip_char(sclp_tty, cchar, TTY_NORMAL);
 		tty_flip_buffer_push(sclp_tty);
 		break;
 	case CTRLCHAR_NONE:
 		/* send (normal) input to line discipline */
-		memcpy(sclp_tty->flip.char_buf_ptr, buf, count);
 		if (count < 2 ||
-		    (strncmp ((const char *) buf + count - 2, "^n", 2) &&
-		     strncmp ((const char *) buf + count - 2, "\0252n", 2))) {
-			sclp_tty->flip.char_buf_ptr[count] = '\n';
-			count++;
+		    (strncmp((const char *) buf + count - 2, "^n", 2) &&
+		     strncmp((const char *) buf + count - 2, "\252n", 2))) {
+			/* add the auto \n */
+			tty_insert_flip_string(sclp_tty, buf, count);
+			tty_insert_flip_char(sclp_tty, '\n', TTY_NORMAL);
 		} else
-			count -= 2;
-		memset(sclp_tty->flip.flag_buf_ptr, TTY_NORMAL, count);
-		sclp_tty->flip.char_buf_ptr += count;
-		sclp_tty->flip.flag_buf_ptr += count;
-		sclp_tty->flip.count += count;
+			tty_insert_flip_string(sclp_tty, buf, count - 2);
 		tty_flip_buffer_push(sclp_tty);
 		break;
 	}
@@ -657,7 +648,7 @@ sclp_eval_textcmd(struct gds_subvector *start,
 	subvec = start;
 	while (subvec < end) {
 		subvec = find_gds_subvector(subvec, end,
-					    GDS_KEY_SelfDefTextMsg);
+					    GDS_KEY_SELFDEFTEXTMSG);
 		if (!subvec)
 			break;
 		sclp_eval_selfdeftextmsg((struct gds_subvector *)(subvec + 1),
@@ -673,7 +664,7 @@ sclp_eval_cpmsu(struct gds_vector *start, struct gds_vector *end)
 
 	vec = start;
 	while (vec < end) {
-		vec = find_gds_vector(vec, end, GDS_ID_TextCmd);
+		vec = find_gds_vector(vec, end, GDS_ID_TEXTCMD);
 		if (!vec)
 			break;
 		sclp_eval_textcmd((struct gds_subvector *)(vec + 1),
@@ -712,12 +703,12 @@ sclp_tty_state_change(struct sclp_register *reg)
 
 static struct sclp_register sclp_input_event =
 {
-	.receive_mask = EvTyp_OpCmd_Mask | EvTyp_PMsgCmd_Mask,
+	.receive_mask = EVTYP_OPCMD_MASK | EVTYP_PMSGCMD_MASK,
 	.state_change_fn = sclp_tty_state_change,
 	.receiver_fn = sclp_tty_receiver
 };
 
-static struct tty_operations sclp_ops = {
+static const struct tty_operations sclp_ops = {
 	.open = sclp_tty_open,
 	.close = sclp_tty_close,
 	.write = sclp_tty_write,
@@ -729,7 +720,7 @@ static struct tty_operations sclp_ops = {
 	.ioctl = sclp_tty_ioctl,
 };
 
-int __init
+static int __init
 sclp_tty_init(void)
 {
 	struct tty_driver *driver;

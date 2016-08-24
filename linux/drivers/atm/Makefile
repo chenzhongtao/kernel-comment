@@ -31,6 +31,7 @@ ifeq ($(CONFIG_ATM_IDT77252_USE_SUNI),y)
   obj-$(CONFIG_ATM_IDT77252)	+= suni.o
 endif
 
+obj-$(CONFIG_ATM_DUMMY)		+= adummy.o
 obj-$(CONFIG_ATM_TCP)		+= atmtcp.o
 obj-$(CONFIG_ATM_FIRESTREAM)	+= firestream.o
 obj-$(CONFIG_ATM_LANAI)		+= lanai.o
@@ -39,7 +40,8 @@ ifeq ($(CONFIG_ATM_FORE200E_PCA),y)
   fore_200e-objs		+= fore200e_pca_fw.o
   # guess the target endianess to choose the right PCA-200E firmware image
   ifeq ($(CONFIG_ATM_FORE200E_PCA_DEFAULT_FW),y)
-    CONFIG_ATM_FORE200E_PCA_FW = $(shell if test -n "`$(CC) -E -dM $(src)/../../include/asm/byteorder.h | grep ' __LITTLE_ENDIAN '`"; then echo $(obj)/pca200e.bin; else echo $(obj)/pca200e_ecd.bin2; fi)
+    byteorder.h			:= include$(if $(patsubst $(srctree),,$(objtree)),2)/asm/byteorder.h
+    CONFIG_ATM_FORE200E_PCA_FW	:= $(obj)/pca200e$(if $(shell $(CC) $(KBUILD_CPPFLAGS) -E -dM $(byteorder.h) | grep ' __LITTLE_ENDIAN '),.bin,_ecd.bin2)
   endif
 endif
 

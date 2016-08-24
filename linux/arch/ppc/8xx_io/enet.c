@@ -22,7 +22,6 @@
  * small packets.
  *
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
@@ -31,7 +30,6 @@
 #include <linux/ioport.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -46,6 +44,7 @@
 #include <asm/mpc8xx.h>
 #include <asm/uaccess.h>
 #include <asm/commproc.h>
+#include <asm/cacheflush.h>
 
 /*
  *				Theory of Operation
@@ -150,7 +149,7 @@ struct scc_enet_private {
 static int scc_enet_open(struct net_device *dev);
 static int scc_enet_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static int scc_enet_rx(struct net_device *dev);
-static void scc_enet_interrupt(void *dev_id, struct pt_regs *regs);
+static void scc_enet_interrupt(void *dev_id);
 static int scc_enet_close(struct net_device *dev);
 static struct net_device_stats *scc_enet_get_stats(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -306,7 +305,7 @@ scc_enet_timeout(struct net_device *dev)
  * This is called from the CPM handler, not the MPC core interrupt.
  */
 static void
-scc_enet_interrupt(void *dev_id, struct pt_regs *regs)
+scc_enet_interrupt(void *dev_id)
 {
 	struct	net_device *dev = dev_id;
 	volatile struct	scc_enet_private *cep;
@@ -507,11 +506,10 @@ for (;;) {
 			cep->stats.rx_dropped++;
 		}
 		else {
-			skb->dev = dev;
 			skb_put(skb,pkt_len-4);	/* Make room */
-			eth_copy_and_sum(skb,
+			skb_copy_to_linear_data(skb,
 				cep->rx_vaddr[bdp - cep->rx_bd_base],
-				pkt_len-4, 0);
+				pkt_len-4);
 			skb->protocol=eth_type_trans(skb,dev);
 			netif_rx(skb);
 		}
@@ -657,7 +655,7 @@ static int __init scc_enet_init(void)
 
 	cp = cpmp;	/* Get pointer to Communication Processor */
 
-	immap = (immap_t *)(mfspr(IMMR) & 0xFFFF0000);	/* and to internal registers */
+	immap = (immap_t *)(mfspr(SPRN_IMMR) & 0xFFFF0000);	/* and to internal registers */
 
 	bd = (bd_t *)__res;
 
@@ -714,16 +712,24 @@ static int __init scc_enet_init(void)
 	immap->im_ioport.iop_pcdat &= ~PC_ENET_LBK;	/* Disable Loopback */
 #endif	/* PC_ENET_LBK */
 
+#ifdef PE_ENET_TCLK
+	/* Configure port E for TCLK and RCLK.
+	*/
+	cp->cp_pepar |=  (PE_ENET_TCLK | PE_ENET_RCLK);
+	cp->cp_pedir &= ~(PE_ENET_TCLK | PE_ENET_RCLK);
+	cp->cp_peso  &= ~(PE_ENET_TCLK | PE_ENET_RCLK);
+#else
+	/* Configure port A for TCLK and RCLK.
+	*/
+	immap->im_ioport.iop_papar |=  (PA_ENET_TCLK | PA_ENET_RCLK);
+	immap->im_ioport.iop_padir &= ~(PA_ENET_TCLK | PA_ENET_RCLK);
+#endif
+
 	/* Configure port C pins to enable CLSN and RENA.
 	*/
 	immap->im_ioport.iop_pcpar &= ~(PC_ENET_CLSN | PC_ENET_RENA);
 	immap->im_ioport.iop_pcdir &= ~(PC_ENET_CLSN | PC_ENET_RENA);
 	immap->im_ioport.iop_pcso  |=  (PC_ENET_CLSN | PC_ENET_RENA);
-
-	/* Configure port A for TCLK and RCLK.
-	*/
-	immap->im_ioport.iop_papar |=  (PA_ENET_TCLK | PA_ENET_RCLK);
-	immap->im_ioport.iop_padir &= ~(PA_ENET_TCLK | PA_ENET_RCLK);
 
 	/* Configure Serial Interface clock routing.
 	 * First, clear all SCC bits to zero, then set the ones we want.
@@ -896,14 +902,18 @@ static int __init scc_enet_init(void)
 	/* It is now OK to enable the Ethernet transmitter.
 	 * Unfortunately, there are board implementation differences here.
 	 */
-#if   (!defined (PB_ENET_TENA) &&  defined (PC_ENET_TENA))
+#if   (!defined (PB_ENET_TENA) &&  defined (PC_ENET_TENA) && !defined (PE_ENET_TENA))
 	immap->im_ioport.iop_pcpar |=  PC_ENET_TENA;
 	immap->im_ioport.iop_pcdir &= ~PC_ENET_TENA;
-#elif ( defined (PB_ENET_TENA) && !defined (PC_ENET_TENA))
+#elif ( defined (PB_ENET_TENA) && !defined (PC_ENET_TENA) && !defined (PE_ENET_TENA))
 	cp->cp_pbpar |= PB_ENET_TENA;
 	cp->cp_pbdir |= PB_ENET_TENA;
+#elif ( !defined (PB_ENET_TENA) && !defined (PC_ENET_TENA) && defined (PE_ENET_TENA))
+	cp->cp_pepar |=  PE_ENET_TENA;
+	cp->cp_pedir &= ~PE_ENET_TENA;
+	cp->cp_peso  |=  PE_ENET_TENA;
 #else
-#error Configuration Error: define exactly ONE of PB_ENET_TENA, PC_ENET_TENA
+#error Configuration Error: define exactly ONE of PB_ENET_TENA, PC_ENET_TENA, PE_ENET_TENA
 #endif
 
 #if defined(CONFIG_RPXLITE) || defined(CONFIG_RPXCLASSIC)
@@ -934,6 +944,29 @@ static int __init scc_enet_init(void)
 	/* Enable the EEST PHY.
 	*/
 	*((volatile uint *)BCSR1) &= ~BCSR1_ETHEN;
+#endif
+
+#ifdef CONFIG_MPC885ADS
+
+	/* Deassert PHY reset and enable the PHY.
+	 */
+	{
+		volatile uint __iomem *bcsr = ioremap(BCSR_ADDR, BCSR_SIZE);
+		uint tmp;
+
+		tmp = in_be32(bcsr + 1 /* BCSR1 */);
+		tmp |= BCSR1_ETHEN;
+		out_be32(bcsr + 1, tmp);
+		tmp = in_be32(bcsr + 4 /* BCSR4 */);
+		tmp |= BCSR4_ETH10_RST;
+		out_be32(bcsr + 4, tmp);
+		iounmap(bcsr);
+	}
+
+	/* On MPC885ADS SCC ethernet PHY defaults to the full duplex mode
+	 * upon reset. SCC is set to half duplex by default. So this
+	 * inconsistency should be better fixed by the software.
+	 */
 #endif
 
 	dev->base_addr = (unsigned long)ep;
@@ -969,3 +1002,4 @@ static int __init scc_enet_init(void)
 }
 
 module_init(scc_enet_init);
+

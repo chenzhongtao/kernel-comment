@@ -57,7 +57,7 @@
 
 #define MB_CACHE_WRITER ((unsigned short)~0U >> 1)
 
-DECLARE_WAIT_QUEUE_HEAD(mb_cache_queue);
+static DECLARE_WAIT_QUEUE_HEAD(mb_cache_queue);
 		
 MODULE_AUTHOR("Andreas Gruenbacher <a.gruenbacher@computer.org>");
 MODULE_DESCRIPTION("Meta block cache (for extended attributes)");
@@ -85,7 +85,7 @@ struct mb_cache {
 #ifndef MB_CACHE_INDEXES_COUNT
 	int				c_indexes_count;
 #endif
-	kmem_cache_t			*c_entry_cache;
+	struct kmem_cache			*c_entry_cache;
 	struct list_head		*c_block_hash;
 	struct list_head		*c_indexes_hash[0];
 };
@@ -100,7 +100,6 @@ struct mb_cache {
 static LIST_HEAD(mb_cache_list);
 static LIST_HEAD(mb_cache_lru_list);
 static DEFINE_SPINLOCK(mb_cache_spinlock);
-static struct shrinker *mb_shrinker;
 
 static inline int
 mb_cache_indexes(struct mb_cache *cache)
@@ -116,8 +115,12 @@ mb_cache_indexes(struct mb_cache *cache)
  * What the mbcache registers as to get shrunk dynamically.
  */
 
-static int mb_cache_shrink_fn(int nr_to_scan, unsigned int gfp_mask);
+static int mb_cache_shrink_fn(int nr_to_scan, gfp_t gfp_mask);
 
+static struct shrinker mb_cache_shrinker = {
+	.shrink = mb_cache_shrink_fn,
+	.seeks = DEFAULT_SEEKS,
+};
 
 static inline int
 __mb_cache_entry_is_hashed(struct mb_cache_entry *ce)
@@ -126,7 +129,7 @@ __mb_cache_entry_is_hashed(struct mb_cache_entry *ce)
 }
 
 
-static inline void
+static void
 __mb_cache_entry_unhash(struct mb_cache_entry *ce)
 {
 	int n;
@@ -139,8 +142,8 @@ __mb_cache_entry_unhash(struct mb_cache_entry *ce)
 }
 
 
-static inline void
-__mb_cache_entry_forget(struct mb_cache_entry *ce, int gfp_mask)
+static void
+__mb_cache_entry_forget(struct mb_cache_entry *ce, gfp_t gfp_mask)
 {
 	struct mb_cache *cache = ce->e_cache;
 
@@ -158,8 +161,9 @@ __mb_cache_entry_forget(struct mb_cache_entry *ce, int gfp_mask)
 }
 
 
-static inline void
+static void
 __mb_cache_entry_release_unlock(struct mb_cache_entry *ce)
+	__releases(mb_cache_spinlock)
 {
 	/* Wake up all processes queuing for this cache entry. */
 	if (ce->e_queued)
@@ -193,7 +197,7 @@ forget:
  * Returns the number of objects which are present in the cache.
  */
 static int
-mb_cache_shrink_fn(int nr_to_scan, unsigned int gfp_mask)
+mb_cache_shrink_fn(int nr_to_scan, gfp_t gfp_mask)
 {
 	LIST_HEAD(free_list);
 	struct list_head *l, *ltmp;
@@ -225,7 +229,7 @@ mb_cache_shrink_fn(int nr_to_scan, unsigned int gfp_mask)
 						   e_lru_list), gfp_mask);
 	}
 out:
-	return count;
+	return (count / 100) * sysctl_vfs_cache_pressure;
 }
 
 
@@ -288,7 +292,7 @@ mb_cache_create(const char *name, struct mb_cache_op *cache_op,
 			INIT_LIST_HEAD(&cache->c_indexes_hash[m][n]);
 	}
 	cache->c_entry_cache = kmem_cache_create(name, entry_size, 0,
-		SLAB_RECLAIM_ACCOUNT, NULL, NULL);
+		SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD, NULL);
 	if (!cache->c_entry_cache)
 		goto fail;
 
@@ -301,8 +305,7 @@ fail:
 	if (cache) {
 		while (--m >= 0)
 			kfree(cache->c_indexes_hash[m]);
-		if (cache->c_block_hash)
-			kfree(cache->c_block_hash);
+		kfree(cache->c_block_hash);
 		kfree(cache);
 	}
 	return NULL;
@@ -312,15 +315,14 @@ fail:
 /*
  * mb_cache_shrink()
  *
- * Removes all cache entires of a device from the cache. All cache entries
+ * Removes all cache entries of a device from the cache. All cache entries
  * currently in use cannot be freed, and thus remain in the cache. All others
  * are freed.
  *
- * @cache: which cache to shrink
  * @bdev: which device's cache entries to shrink
  */
 void
-mb_cache_shrink(struct mb_cache *cache, struct block_device *bdev)
+mb_cache_shrink(struct block_device *bdev)
 {
 	LIST_HEAD(free_list);
 	struct list_head *l, *ltmp;
@@ -401,9 +403,9 @@ mb_cache_entry_alloc(struct mb_cache *cache)
 {
 	struct mb_cache_entry *ce;
 
-	atomic_inc(&cache->c_entry_count);
 	ce = kmem_cache_alloc(cache->c_entry_cache, GFP_KERNEL);
 	if (ce) {
+		atomic_inc(&cache->c_entry_count);
 		INIT_LIST_HEAD(&ce->e_lru_list);
 		INIT_LIST_HEAD(&ce->e_block_list);
 		ce->e_cache = cache;
@@ -663,13 +665,13 @@ mb_cache_entry_find_next(struct mb_cache_entry *prev, int index,
 
 static int __init init_mbcache(void)
 {
-	mb_shrinker = set_shrinker(DEFAULT_SEEKS, mb_cache_shrink_fn);
+	register_shrinker(&mb_cache_shrinker);
 	return 0;
 }
 
 static void __exit exit_mbcache(void)
 {
-	remove_shrinker(mb_shrinker);
+	unregister_shrinker(&mb_cache_shrinker);
 }
 
 module_init(init_mbcache)

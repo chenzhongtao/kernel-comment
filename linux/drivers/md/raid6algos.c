@@ -19,6 +19,7 @@
 #include "raid6.h"
 #ifndef __KERNEL__
 #include <sys/mman.h>
+#include <stdio.h>
 #endif
 
 struct raid6_calls raid6_call;
@@ -51,7 +52,7 @@ const struct raid6_calls * const raid6_algos[] = {
 	&raid6_intx16,
 	&raid6_intx32,
 #endif
-#if defined(__i386__)
+#if defined(__i386__) && !defined(__arch_um__)
 	&raid6_mmxx1,
 	&raid6_mmxx2,
 	&raid6_sse1x1,
@@ -59,7 +60,7 @@ const struct raid6_calls * const raid6_algos[] = {
 	&raid6_sse2x1,
 	&raid6_sse2x2,
 #endif
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(__arch_um__)
 	&raid6_sse2x1,
 	&raid6_sse2x2,
 	&raid6_sse2x4,
@@ -138,14 +139,13 @@ int __init raid6_select_algo(void)
 		}
 	}
 
-	if ( best )
+	if (best) {
 		printk("raid6: using algorithm %s (%ld MB/s)\n",
 		       best->name,
 		       (bestperf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2));
-	else
+		raid6_call = *best;
+	} else
 		printk("raid6: Yikes!  No algorithm found!\n");
-
-	raid6_call = *best;
 
 	free_pages((unsigned long)syndromes, 1);
 

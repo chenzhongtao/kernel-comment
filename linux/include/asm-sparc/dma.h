@@ -1,13 +1,11 @@
-/* $Id: dma.h,v 1.35 1999/12/27 06:37:09 anton Exp $
- * include/asm-sparc/dma.h
+/* include/asm-sparc/dma.h
  *
- * Copyright 1995 (C) David S. Miller (davem@caip.rutgers.edu)
+ * Copyright 1995 (C) David S. Miller (davem@davemloft.net)
  */
 
 #ifndef _ASM_SPARC_DMA_H
 #define _ASM_SPARC_DMA_H
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 
@@ -22,14 +20,14 @@
 struct page;
 extern spinlock_t  dma_spin_lock;
 
-static __inline__ unsigned long claim_dma_lock(void)
+static inline unsigned long claim_dma_lock(void)
 {
 	unsigned long flags;
 	spin_lock_irqsave(&dma_spin_lock, flags);
 	return flags;
 }
 
-static __inline__ void release_dma_lock(unsigned long flags)
+static inline void release_dma_lock(unsigned long flags)
 {
 	spin_unlock_irqrestore(&dma_spin_lock, flags);
 }
@@ -198,7 +196,7 @@ extern void dvma_init(struct sbus_bus *);
 /* Pause until counter runs out or BIT isn't set in the DMA condition
  * register.
  */
-extern __inline__ void sparc_dma_pause(struct sparc_dma_registers *regs,
+static inline void sparc_dma_pause(struct sparc_dma_registers *regs,
 				       unsigned long bit)
 {
 	int ctr = 50000;   /* Let's find some bugs ;) */

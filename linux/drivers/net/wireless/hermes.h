@@ -30,9 +30,8 @@
  * access to the hermes_t structure, and to the hardware
 */
 
-#include <linux/delay.h>
 #include <linux/if_ether.h>
-#include <asm/byteorder.h>
+#include <asm/io.h>
 
 /*
  * Limits and constants
@@ -192,13 +191,13 @@
 #define	HERMES_RXSTAT_WMP		(0x6000)	/* Wavelan-II Management Protocol frame */
 
 struct hermes_tx_descriptor {
-	u16 status;
-	u16 reserved1;
-	u16 reserved2;
-	u32 sw_support;
+	__le16 status;
+	__le16 reserved1;
+	__le16 reserved2;
+	__le32 sw_support;
 	u8 retry_count;
 	u8 tx_rate;
-	u16 tx_control;	
+	__le16 tx_control;	
 } __attribute__ ((packed));
 
 #define HERMES_TXSTAT_RETRYERR		(0x0001)
@@ -222,60 +221,60 @@ struct hermes_tx_descriptor {
 #define HERMES_INQ_SEC_STAT_AGERE	(0xF202)
 
 struct hermes_tallies_frame {
-	u16 TxUnicastFrames;
-	u16 TxMulticastFrames;
-	u16 TxFragments;
-	u16 TxUnicastOctets;
-	u16 TxMulticastOctets;
-	u16 TxDeferredTransmissions;
-	u16 TxSingleRetryFrames;
-	u16 TxMultipleRetryFrames;
-	u16 TxRetryLimitExceeded;
-	u16 TxDiscards;
-	u16 RxUnicastFrames;
-	u16 RxMulticastFrames;
-	u16 RxFragments;
-	u16 RxUnicastOctets;
-	u16 RxMulticastOctets;
-	u16 RxFCSErrors;
-	u16 RxDiscards_NoBuffer;
-	u16 TxDiscardsWrongSA;
-	u16 RxWEPUndecryptable;
-	u16 RxMsgInMsgFragments;
-	u16 RxMsgInBadMsgFragments;
+	__le16 TxUnicastFrames;
+	__le16 TxMulticastFrames;
+	__le16 TxFragments;
+	__le16 TxUnicastOctets;
+	__le16 TxMulticastOctets;
+	__le16 TxDeferredTransmissions;
+	__le16 TxSingleRetryFrames;
+	__le16 TxMultipleRetryFrames;
+	__le16 TxRetryLimitExceeded;
+	__le16 TxDiscards;
+	__le16 RxUnicastFrames;
+	__le16 RxMulticastFrames;
+	__le16 RxFragments;
+	__le16 RxUnicastOctets;
+	__le16 RxMulticastOctets;
+	__le16 RxFCSErrors;
+	__le16 RxDiscards_NoBuffer;
+	__le16 TxDiscardsWrongSA;
+	__le16 RxWEPUndecryptable;
+	__le16 RxMsgInMsgFragments;
+	__le16 RxMsgInBadMsgFragments;
 	/* Those last are probably not available in very old firmwares */
-	u16 RxDiscards_WEPICVError;
-	u16 RxDiscards_WEPExcluded;
+	__le16 RxDiscards_WEPICVError;
+	__le16 RxDiscards_WEPExcluded;
 } __attribute__ ((packed));
 
 /* Grabbed from wlan-ng - Thanks Mark... - Jean II
  * This is the result of a scan inquiry command */
 /* Structure describing info about an Access Point */
 struct prism2_scan_apinfo {
-	u16 channel;		/* Channel where the AP sits */
-	u16 noise;		/* Noise level */
-	u16 level;		/* Signal level */
+	__le16 channel;		/* Channel where the AP sits */
+	__le16 noise;		/* Noise level */
+	__le16 level;		/* Signal level */
 	u8 bssid[ETH_ALEN];	/* MAC address of the Access Point */
-	u16 beacon_interv;	/* Beacon interval */
-	u16 capabilities;	/* Capabilities */
-	u16 essid_len;		/* ESSID length */
+	__le16 beacon_interv;	/* Beacon interval */
+	__le16 capabilities;	/* Capabilities */
+	__le16 essid_len;	/* ESSID length */
 	u8 essid[32];		/* ESSID of the network */
 	u8 rates[10];		/* Bit rate supported */
-	u16 proberesp_rate;	/* Data rate of the response frame */
-	u16 atim;		/* ATIM window time, Kus (hostscan only) */
+	__le16 proberesp_rate;	/* Data rate of the response frame */
+	__le16 atim;		/* ATIM window time, Kus (hostscan only) */
 } __attribute__ ((packed));
 
 /* Same stuff for the Lucent/Agere card.
  * Thanks to h1kari <h1kari AT dachb0den.com> - Jean II */
 struct agere_scan_apinfo {
-	u16 channel;		/* Channel where the AP sits */
-	u16 noise;		/* Noise level */
-	u16 level;		/* Signal level */
+	__le16 channel;		/* Channel where the AP sits */
+	__le16 noise;		/* Noise level */
+	__le16 level;		/* Signal level */
 	u8 bssid[ETH_ALEN];	/* MAC address of the Access Point */
-	u16 beacon_interv;	/* Beacon interval */
-	u16 capabilities;	/* Capabilities */
+	__le16 beacon_interv;	/* Beacon interval */
+	__le16 capabilities;	/* Capabilities */
 	/* bits: 0-ess, 1-ibss, 4-privacy [wep] */
-	u16 essid_len;		/* ESSID length */
+	__le16 essid_len;	/* ESSID length */
 	u8 essid[32];		/* ESSID of the network */
 } __attribute__ ((packed));
 
@@ -283,16 +282,16 @@ struct agere_scan_apinfo {
 struct symbol_scan_apinfo {
 	u8 channel;		/* Channel where the AP sits */
 	u8 unknown1;		/* 8 in 2.9x and 3.9x f/w, 0 otherwise */
-	u16 noise;		/* Noise level */
-	u16 level;		/* Signal level */
+	__le16 noise;		/* Noise level */
+	__le16 level;		/* Signal level */
 	u8 bssid[ETH_ALEN];	/* MAC address of the Access Point */
-	u16 beacon_interv;	/* Beacon interval */
-	u16 capabilities;	/* Capabilities */
+	__le16 beacon_interv;	/* Beacon interval */
+	__le16 capabilities;	/* Capabilities */
 	/* bits: 0-ess, 1-ibss, 4-privacy [wep] */
-	u16 essid_len;		/* ESSID length */
+	__le16 essid_len;	/* ESSID length */
 	u8 essid[32];		/* ESSID of the network */
-    	u16 rates[5];		/* Bit rate supported */
-	u16 basic_rates;	/* Basic rates bitmask */
+    	__le16 rates[5];	/* Bit rate supported */
+	__le16 basic_rates;	/* Basic rates bitmask */
 	u8 unknown2[6];		/* Always FF:FF:FF:FF:00:00 */
 	u8 unknown3[8];		/* Always 0, appeared in f/w 3.91-68 */
 } __attribute__ ((packed));
@@ -312,7 +311,7 @@ union hermes_scan_info {
 #define HERMES_LINKSTATUS_ASSOC_FAILED    (0x0006)
   
 struct hermes_linkstatus {
-	u16 linkstatus;         /* Link status */
+	__le16 linkstatus;         /* Link status */
 } __attribute__ ((packed));
 
 struct hermes_response {
@@ -321,70 +320,44 @@ struct hermes_response {
 
 /* "ID" structure - used for ESSID and station nickname */
 struct hermes_idstring {
-	u16 len;
-	u16 val[16];
+	__le16 len;
+	__le16 val[16];
 } __attribute__ ((packed));
 
 struct hermes_multicast {
 	u8 addr[HERMES_MAX_MULTICAST][ETH_ALEN];
 } __attribute__ ((packed));
 
-// #define HERMES_DEBUG_BUFFER 1
-#define HERMES_DEBUG_BUFSIZE 4096
-struct hermes_debug_entry {
-	int bap;
-	u16 id, offset;
-	int cycles;
-};
-
-#ifdef __KERNEL__
-
 /* Timeouts */
-#define HERMES_BAP_BUSY_TIMEOUT (500) /* In iterations of ~1us */
+#define HERMES_BAP_BUSY_TIMEOUT (10000) /* In iterations of ~1us */
 
 /* Basic control structure */
 typedef struct hermes {
-	unsigned long iobase;
-	int io_space; /* 1 if we IO-mapped IO, 0 for memory-mapped IO? */
-#define HERMES_IO	1
-#define HERMES_MEM	0
+	void __iomem *iobase;
 	int reg_spacing;
 #define HERMES_16BIT_REGSPACING	0
 #define HERMES_32BIT_REGSPACING	1
-
 	u16 inten; /* Which interrupts should be enabled? */
-
-#ifdef HERMES_DEBUG_BUFFER
-	struct hermes_debug_entry dbuf[HERMES_DEBUG_BUFSIZE];
-	unsigned long dbufp;
-	unsigned long profile[HERMES_BAP_BUSY_TIMEOUT+1];
-#endif
 } hermes_t;
 
 /* Register access convenience macros */
-#define hermes_read_reg(hw, off) ((hw)->io_space ? \
-	inw((hw)->iobase + ( (off) << (hw)->reg_spacing )) : \
-	readw((hw)->iobase + ( (off) << (hw)->reg_spacing )))
-#define hermes_write_reg(hw, off, val) do { \
-	if ((hw)->io_space) \
-		outw_p((val), (hw)->iobase + ((off) << (hw)->reg_spacing)); \
-	else \
-		writew((val), (hw)->iobase + ((off) << (hw)->reg_spacing)); \
-	} while (0)
+#define hermes_read_reg(hw, off) \
+	(ioread16((hw)->iobase + ( (off) << (hw)->reg_spacing )))
+#define hermes_write_reg(hw, off, val) \
+	(iowrite16((val), (hw)->iobase + ((off) << (hw)->reg_spacing)))
 #define hermes_read_regn(hw, name) hermes_read_reg((hw), HERMES_##name)
 #define hermes_write_regn(hw, name, val) hermes_write_reg((hw), HERMES_##name, (val))
 
 /* Function prototypes */
-void hermes_struct_init(hermes_t *hw, ulong address, int io_space,
-			int reg_spacing);
+void hermes_struct_init(hermes_t *hw, void __iomem *address, int reg_spacing);
 int hermes_init(hermes_t *hw);
 int hermes_docmd_wait(hermes_t *hw, u16 cmd, u16 parm0,
 		      struct hermes_response *resp);
 int hermes_allocate(hermes_t *hw, u16 size, u16 *fid);
 
-int hermes_bap_pread(hermes_t *hw, int bap, void *buf, unsigned len,
+int hermes_bap_pread(hermes_t *hw, int bap, void *buf, int len,
 		       u16 id, u16 offset);
-int hermes_bap_pwrite(hermes_t *hw, int bap, const void *buf, unsigned len,
+int hermes_bap_pwrite(hermes_t *hw, int bap, const void *buf, int len,
 			u16 id, u16 offset);
 int hermes_read_ltv(hermes_t *hw, int bap, u16 rid, unsigned buflen,
 		    u16 *length, void *buf);
@@ -430,41 +403,16 @@ static inline int hermes_inquire(hermes_t *hw, u16 rid)
 static inline void hermes_read_words(struct hermes *hw, int off, void *buf, unsigned count)
 {
 	off = off << hw->reg_spacing;
-
-	if (hw->io_space) {
-		insw(hw->iobase + off, buf, count);
-	} else {
-		unsigned i;
-		u16 *p;
-
-		/* This needs to *not* byteswap (like insw()) but
-		 * readw() does byteswap hence the conversion.  I hope
-		 * gcc is smart enough to fold away the two swaps on
-		 * big-endian platforms. */
-		for (i = 0, p = buf; i < count; i++) {
-			*p++ = cpu_to_le16(readw(hw->iobase + off));
-		}
-	}
+	ioread16_rep(hw->iobase + off, buf, count);
 }
 
-static inline void hermes_write_words(struct hermes *hw, int off, const void *buf, unsigned count)
+static inline void hermes_write_bytes(struct hermes *hw, int off,
+				      const char *buf, unsigned count)
 {
 	off = off << hw->reg_spacing;
-
-	if (hw->io_space) {
-		outsw(hw->iobase + off, buf, count);
-	} else {
-		unsigned i;
-		const u16 *p;
-
-		/* This needs to *not* byteswap (like outsw()) but
-		 * writew() does byteswap hence the conversion.  I
-		 * hope gcc is smart enough to fold away the two swaps
-		 * on big-endian platforms. */
-		for (i = 0, p = buf; i < count; i++) {
-			writew(le16_to_cpu(*p++), hw->iobase + off);
-		}
-	}
+	iowrite16_rep(hw->iobase + off, buf, count >> 1);
+	if (unlikely(count & 1))
+		iowrite8(buf[count - 1], hw->iobase + off);
 }
 
 static inline void hermes_clear_words(struct hermes *hw, int off, unsigned count)
@@ -473,13 +421,8 @@ static inline void hermes_clear_words(struct hermes *hw, int off, unsigned count
 
 	off = off << hw->reg_spacing;
 
-	if (hw->io_space) {
-		for (i = 0; i < count; i++)
-			outw(0, hw->iobase + off);
-	} else {
-		for (i = 0; i < count; i++)
-			writew(0, hw->iobase + off);
-	}
+	for (i = 0; i < count; i++)
+		iowrite16(0, hw->iobase + off);
 }
 
 #define HERMES_READ_RECORD(hw, bap, rid, buf) \
@@ -489,7 +432,7 @@ static inline void hermes_clear_words(struct hermes *hw, int off, unsigned count
 
 static inline int hermes_read_wordrec(hermes_t *hw, int bap, u16 rid, u16 *word)
 {
-	u16 rec;
+	__le16 rec;
 	int err;
 
 	err = HERMES_READ_RECORD(hw, bap, rid, &rec);
@@ -499,25 +442,8 @@ static inline int hermes_read_wordrec(hermes_t *hw, int bap, u16 rid, u16 *word)
 
 static inline int hermes_write_wordrec(hermes_t *hw, int bap, u16 rid, u16 word)
 {
-	u16 rec = cpu_to_le16(word);
+	__le16 rec = cpu_to_le16(word);
 	return HERMES_WRITE_RECORD(hw, bap, rid, &rec);
 }
-
-#else /* ! __KERNEL__ */
-
-/* These are provided for the benefit of userspace drivers and testing programs
-   which use ioperm() or iopl() */
-
-#define hermes_read_reg(base, off) (inw((base) + (off)))
-#define hermes_write_reg(base, off, val) (outw((val), (base) + (off)))
-
-#define hermes_read_regn(base, name) (hermes_read_reg((base), HERMES_##name))
-#define hermes_write_regn(base, name, val) (hermes_write_reg((base), HERMES_##name, (val)))
-
-/* Note that for the next two, the count is in 16-bit words, not bytes */
-#define hermes_read_data(base, off, buf, count) (insw((base) + (off), (buf), (count)))
-#define hermes_write_data(base, off, buf, count) (outsw((base) + (off), (buf), (count)))
-
-#endif /* ! __KERNEL__ */
 
 #endif  /* _HERMES_H */

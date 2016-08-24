@@ -14,10 +14,10 @@
 	2) The existing myriad of other Linux 8390 drivers by Donald Becker.
 	3) Info for getting IRQ and sh-mem gleaned from the EISA cfg file
 
-	The NE3210 is an EISA shared memory NS8390 implementation.  Shared 
+	The NE3210 is an EISA shared memory NS8390 implementation.  Shared
 	memory address > 1MB should work with this driver.
 
-	Note that the .cfg file (3/11/93, v1.0) has AUI and BNC switched 
+	Note that the .cfg file (3/11/93, v1.0) has AUI and BNC switched
 	around (or perhaps there are some defective/backwards cards ???)
 
 	This driver WILL NOT WORK FOR THE NE3200 - it is completely different
@@ -25,9 +25,6 @@
 
 	Updated to EISA probing API 5/2003 by Marc Zyngier.
 */
-
-static const char *version =
-	"ne3210.c: Driver revision v0.03, 30/09/98\n";
 
 #include <linux/module.h>
 #include <linux/eisa.h>
@@ -39,6 +36,7 @@ static const char *version =
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/mm.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -101,6 +99,7 @@ static int __init ne3210_eisa_probe (struct device *device)
 	int i, retval, port_index;
 	struct eisa_device *edev = to_eisa_device (device);
 	struct net_device *dev;
+	DECLARE_MAC_BUF(mac);
 
 	/* Allocate dev->priv and fill in 8390 specific dev fields. */
 	if (!(dev = alloc_ei_netdev ())) {
@@ -108,7 +107,6 @@ static int __init ne3210_eisa_probe (struct device *device)
 		return -ENOMEM;
 	}
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, device);
 	device->driver_data = dev;
 	ioaddr = edev->base_addr;
@@ -130,17 +128,15 @@ static int __init ne3210_eisa_probe (struct device *device)
 		inb(ioaddr + NE3210_CFG1), inb(ioaddr + NE3210_CFG2));
 #endif
 
-
 	port_index = inb(ioaddr + NE3210_CFG2) >> 6;
-	printk("ne3210.c: NE3210 in EISA slot %d, media: %s, addr:",
-		edev->slot, ifmap[port_index]);
 	for(i = 0; i < ETHER_ADDR_LEN; i++)
-		printk(" %02x", (dev->dev_addr[i] = inb(ioaddr + NE3210_SA_PROM + i)));
-	
+		dev->dev_addr[i] = inb(ioaddr + NE3210_SA_PROM + i);
+	printk("ne3210.c: NE3210 in EISA slot %d, media: %s, addr: %s.\n",
+		edev->slot, ifmap[port_index], print_mac(mac, dev->dev_addr));
 
 	/* Snarf the interrupt now. CFG file has them all listed as `edge' with share=NO */
 	dev->irq = irq_map[(inb(ioaddr + NE3210_CFG2) >> 3) & 0x07];
-	printk(".\nne3210.c: using IRQ %d, ", dev->irq);
+	printk("ne3210.c: using IRQ %d, ", dev->irq);
 
 	retval = request_irq(dev->irq, ei_interrupt, 0, DRV_NAME, dev);
 	if (retval) {
@@ -164,13 +160,13 @@ static int __init ne3210_eisa_probe (struct device *device)
 			goto out3;
 		}
 	}
-	
+
 	if (!request_mem_region (phys_mem, NE3210_STOP_PG*0x100, DRV_NAME)) {
 		printk ("ne3210.c: Unable to request shared memory at physical address %#lx\n",
 			phys_mem);
 		goto out3;
 	}
-	
+
 	printk("%dkB memory at physical address %#lx\n",
 	       NE3210_STOP_PG/4, phys_mem);
 
@@ -197,7 +193,7 @@ static int __init ne3210_eisa_probe (struct device *device)
 	ei_status.priv = phys_mem;
 
 	if (ei_debug > 0)
-		printk(version);
+		printk("ne3210 loaded.\n");
 
 	ei_status.reset_8390 = &ne3210_reset_8390;
 	ei_status.block_input = &ne3210_block_input;
@@ -213,7 +209,7 @@ static int __init ne3210_eisa_probe (struct device *device)
 
 	if ((retval = register_netdev (dev)))
 		goto out5;
-		
+
 	NS8390_init(dev, 0);
 	return 0;
 
@@ -229,7 +225,7 @@ static int __init ne3210_eisa_probe (struct device *device)
 	release_region (ioaddr, NE3210_IO_EXTENT);
  out:
 	free_netdev (dev);
-	
+
 	return retval;
 }
 
@@ -292,7 +288,7 @@ ne3210_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_
 	hdr->count = (hdr->count + 3) & ~3;     /* Round up allocation. */
 }
 
-/*	
+/*
  *	Block input and output are easy on shared memory ethercards, the only
  *	complication is when the ring buffer wraps. The count will already
  *	be rounded up to a doubleword value via ne3210_get_8390_hdr() above.
@@ -346,6 +342,7 @@ static struct eisa_device_id ne3210_ids[] = {
 	{ "NVL1801" },
 	{ "" },
 };
+MODULE_DEVICE_TABLE(eisa, ne3210_ids);
 
 static struct eisa_driver ne3210_eisa_driver = {
 	.id_table = ne3210_ids,
@@ -358,13 +355,14 @@ static struct eisa_driver ne3210_eisa_driver = {
 
 MODULE_DESCRIPTION("NE3210 EISA Ethernet driver");
 MODULE_LICENSE("GPL");
+MODULE_DEVICE_TABLE(eisa, ne3210_ids);
 
-int ne3210_init(void)
+static int ne3210_init(void)
 {
 	return eisa_driver_register (&ne3210_eisa_driver);
 }
 
-void ne3210_cleanup(void)
+static void ne3210_cleanup(void)
 {
 	eisa_driver_unregister (&ne3210_eisa_driver);
 }

@@ -1,13 +1,9 @@
 #ifndef _ASM_M32R_PGALLOC_H
 #define _ASM_M32R_PGALLOC_H
 
-/* $Id$ */
-
-#include <linux/config.h>
 #include <linux/mm.h>
 
 #include <asm/io.h>
-#include <asm/pgtable.h>
 
 #define pmd_populate_kernel(mm, pmd, pte)	\
 	set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(pte)))
@@ -76,4 +72,3 @@ static __inline__ void pte_free(struct page *pte)
 #define check_pgt_cache()	do { } while (0)
 
 #endif /* _ASM_M32R_PGALLOC_H */
-

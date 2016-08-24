@@ -5,18 +5,18 @@
  * Collects accumulated network statistics (Packets received/transmitted,
  * dropped, errors, ...).
  *
- * Copyright (C) 2003 IBM Corporation, IBM Deutschland Entwicklung GmbH.
+ * Copyright (C) 2003,2006 IBM Corporation, IBM Deutschland Entwicklung GmbH.
  *
- * Author: Gerald Schaefer <geraldsc@de.ibm.com>
+ * Author: Gerald Schaefer <gerald.schaefer@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
 #include <linux/netdevice.h>
+#include <net/net_namespace.h>
 
 #include "appldata.h"
 
@@ -35,7 +35,7 @@
  * book:
  * http://oss.software.ibm.com/developerworks/opensource/linux390/index.shtml
  */
-struct appldata_net_sum_data {
+static struct appldata_net_sum_data {
 	u64 timestamp;
 	u32 sync_count_1;	/* after VM collected the record data, */
 	u32 sync_count_2;	/* sync_count_1 and sync_count_2 should be the
@@ -57,7 +57,7 @@ struct appldata_net_sum_data {
 	u64 rx_dropped;		/* no space in linux buffers     */
 	u64 tx_dropped;		/* no space available in linux   */
 	u64 collisions;		/* collisions while transmitting */
-} appldata_net_sum_data;
+} __attribute__((packed)) appldata_net_sum_data;
 
 
 static inline void appldata_print_debug(struct appldata_net_sum_data *net_data)
@@ -108,10 +108,7 @@ static void appldata_get_net_sum_data(void *data)
 	tx_dropped = 0;
 	collisions = 0;
 	read_lock(&dev_base_lock);
-	for (dev = dev_base; dev != NULL; dev = dev->next) {
-		if (dev->get_stats == NULL) {
-			continue;
-		}
+	for_each_netdev(&init_net, dev) {
 		stats = dev->get_stats(dev);
 		rx_packets += stats->rx_packets;
 		tx_packets += stats->tx_packets;
@@ -145,13 +142,13 @@ static void appldata_get_net_sum_data(void *data)
 
 
 static struct appldata_ops ops = {
-	.ctl_nr    = CTL_APPLDATA_NET_SUM,
 	.name	   = "net_sum",
 	.record_nr = APPLDATA_RECORD_NET_SUM_ID,
 	.size	   = sizeof(struct appldata_net_sum_data),
 	.callback  = &appldata_get_net_sum_data,
 	.data      = &appldata_net_sum_data,
 	.owner     = THIS_MODULE,
+	.mod_lvl   = {0xF0, 0xF0},		/* EBCDIC "00" */
 };
 
 

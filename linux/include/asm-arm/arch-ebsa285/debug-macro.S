@@ -23,31 +23,22 @@
 		orr	\rx, \rx, #0x000003f8
 		.endm
 
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
-		.endm
+#define UART_SHIFT	0
+#define FLOW_CONTROL
+#include <asm/hardware/debug-8250.S>
 
-		.macro	busyuart,rd,rx
-1002:		ldrb	\rd, [\rx, #0x5]
-		and	\rd, \rd, #0x60
-		teq	\rd, #0x60
-		bne	1002b
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldrb	\rd, [\rx, #0x6]
-		tst	\rd, #0x10
-		beq	1001b
-		.endm
 #else
 	/* For EBSA285 debugging */
 		.equ	dc21285_high, ARMCSR_BASE & 0xff000000
 		.equ	dc21285_low,  ARMCSR_BASE & 0x00ffffff
 
 		.macro	addruart,rx
-		mov	\rx, #dc21285_high
+		mrc	p15, 0, \rx, c1, c0
+		tst	\rx, #1			@ MMU enabled?
+		moveq	\rx, #0x42000000
+		movne	\rx, #dc21285_high
 		.if	dc21285_low
-		orr	\rx, \rx, #dc21285_low
+		orrne	\rx, \rx, #dc21285_low
 		.endif
 		.endm
 

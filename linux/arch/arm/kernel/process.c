@@ -10,14 +10,12 @@
  */
 #include <stdarg.h>
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
-#include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
@@ -26,14 +24,30 @@
 #include <linux/interrupt.h>
 #include <linux/kallsyms.h>
 #include <linux/init.h>
+#include <linux/cpu.h>
+#include <linux/elfcore.h>
+#include <linux/pm.h>
+#include <linux/tick.h>
+#include <linux/utsname.h>
 
-#include <asm/system.h>
-#include <asm/io.h>
 #include <asm/leds.h>
 #include <asm/processor.h>
+#include <asm/system.h>
+#include <asm/thread_notify.h>
 #include <asm/uaccess.h>
+#include <asm/mach/time.h>
 
-extern const char *processor_modes[];
+static const char *processor_modes[] = {
+  "USER_26", "FIQ_26" , "IRQ_26" , "SVC_26" , "UK4_26" , "UK5_26" , "UK6_26" , "UK7_26" ,
+  "UK8_26" , "UK9_26" , "UK10_26", "UK11_26", "UK12_26", "UK13_26", "UK14_26", "UK15_26",
+  "USER_32", "FIQ_32" , "IRQ_32" , "SVC_32" , "UK4_32" , "UK5_32" , "UK6_32" , "ABT_32" ,
+  "UK8_32" , "UK9_32" , "UK10_32", "UND_32" , "UK12_32", "UK13_32", "UK14_32", "SYS_32"
+};
+
+static const char *isa_modes[] = {
+  "ARM" , "Thumb" , "Jazelle", "ThumbEE"
+};
+
 extern void setup_mm_for_reboot(char mode);
 
 static volatile int hlt_counter;
@@ -69,8 +83,36 @@ static int __init hlt_setup(char *__unused)
 __setup("nohlt", nohlt_setup);
 __setup("hlt", hlt_setup);
 
+void arm_machine_restart(char mode)
+{
+	/*
+	 * Clean and disable cache, and turn off interrupts
+	 */
+	cpu_proc_fin();
+
+	/*
+	 * Tell the mm system that we are going to reboot -
+	 * we may need it to insert some 1:1 mappings so that
+	 * soft boot works.
+	 */
+	setup_mm_for_reboot(mode);
+
+	/*
+	 * Now call the architecture specific reboot code.
+	 */
+	arch_reset(mode);
+
+	/*
+	 * Whoops - the architecture was unable to reboot.
+	 * Tell the user!
+	 */
+	mdelay(1000);
+	printk("Reboot failed -- System halted\n");
+	while (1);
+}
+
 /*
- * The following aren't currently used.
+ * Function pointers to optional machine specific functions
  */
 void (*pm_idle)(void);
 EXPORT_SYMBOL(pm_idle);
@@ -78,16 +120,26 @@ EXPORT_SYMBOL(pm_idle);
 void (*pm_power_off)(void);
 EXPORT_SYMBOL(pm_power_off);
 
+void (*arm_pm_restart)(char str) = arm_machine_restart;
+EXPORT_SYMBOL_GPL(arm_pm_restart);
+
+
 /*
  * This is our default idle handler.  We need to disable
  * interrupts here to ensure we don't miss a wakeup call.
  */
-void default_idle(void)
+static void default_idle(void)
 {
-	local_irq_disable();
-	if (!need_resched() && !hlt_counter)
-		arch_idle();
-	local_irq_enable();
+	if (hlt_counter)
+		cpu_relax();
+	else {
+		local_irq_disable();
+		if (!need_resched()) {
+			timer_dyn_reprogram();
+			arch_idle();
+		}
+		local_irq_enable();
+	}
 }
 
 /*
@@ -102,15 +154,25 @@ void cpu_idle(void)
 	/* endless idle loop with no priority at all */
 	while (1) {
 		void (*idle)(void) = pm_idle;
+
+#ifdef CONFIG_HOTPLUG_CPU
+		if (cpu_is_offline(smp_processor_id())) {
+			leds_event(led_idle_start);
+			cpu_die();
+		}
+#endif
+
 		if (!idle)
 			idle = default_idle;
-		preempt_disable();
 		leds_event(led_idle_start);
+		tick_nohz_stop_sched_tick();
 		while (!need_resched())
 			idle();
 		leds_event(led_idle_end);
-		preempt_enable();
+		tick_nohz_restart_sched_tick();
+		preempt_enable_no_resched();
 		schedule();
+		preempt_disable();
 	}
 }
 
@@ -128,7 +190,6 @@ void machine_halt(void)
 {
 }
 
-EXPORT_SYMBOL(machine_halt);
 
 void machine_power_off(void)
 {
@@ -136,51 +197,26 @@ void machine_power_off(void)
 		pm_power_off();
 }
 
-EXPORT_SYMBOL(machine_power_off);
-
 void machine_restart(char * __unused)
 {
-	/*
-	 * Clean and disable cache, and turn off interrupts
-	 */
-	cpu_proc_fin();
-
-	/*
-	 * Tell the mm system that we are going to reboot -
-	 * we may need it to insert some 1:1 mappings so that
-	 * soft boot works.
-	 */
-	setup_mm_for_reboot(reboot_mode);
-
-	/*
-	 * Now call the architecture specific reboot code.
-	 */
-	arch_reset(reboot_mode);
-
-	/*
-	 * Whoops - the architecture was unable to reboot.
-	 * Tell the user!
-	 */
-	mdelay(1000);
-	printk("Reboot failed -- System halted\n");
-	while (1);
+	arm_pm_restart(reboot_mode);
 }
 
-EXPORT_SYMBOL(machine_restart);
-
-void show_regs(struct pt_regs * regs)
+void __show_regs(struct pt_regs *regs)
 {
 	unsigned long flags;
+	char buf[64];
 
-	flags = condition_codes(regs);
-
+	printk("CPU: %d    %s  (%s %.*s)\n",
+		smp_processor_id(), print_tainted(), init_utsname()->release,
+		(int)strcspn(init_utsname()->version, " "),
+		init_utsname()->version);
 	print_symbol("PC is at %s\n", instruction_pointer(regs));
 	print_symbol("LR is at %s\n", regs->ARM_lr);
-	printk("pc : [<%08lx>]    lr : [<%08lx>]    %s\n"
+	printk("pc : [<%08lx>]    lr : [<%08lx>]    psr: %08lx\n"
 	       "sp : %08lx  ip : %08lx  fp : %08lx\n",
-		instruction_pointer(regs),
-		regs->ARM_lr, print_tainted(), regs->ARM_sp,
-		regs->ARM_ip, regs->ARM_fp);
+		regs->ARM_pc, regs->ARM_lr, regs->ARM_cpsr,
+		regs->ARM_sp, regs->ARM_ip, regs->ARM_fp);
 	printk("r10: %08lx  r9 : %08lx  r8 : %08lx\n",
 		regs->ARM_r10, regs->ARM_r9,
 		regs->ARM_r8);
@@ -190,27 +226,48 @@ void show_regs(struct pt_regs * regs)
 	printk("r3 : %08lx  r2 : %08lx  r1 : %08lx  r0 : %08lx\n",
 		regs->ARM_r3, regs->ARM_r2,
 		regs->ARM_r1, regs->ARM_r0);
-	printk("Flags: %c%c%c%c",
-		flags & PSR_N_BIT ? 'N' : 'n',
-		flags & PSR_Z_BIT ? 'Z' : 'z',
-		flags & PSR_C_BIT ? 'C' : 'c',
-		flags & PSR_V_BIT ? 'V' : 'v');
-	printk("  IRQs o%s  FIQs o%s  Mode %s%s  Segment %s\n",
-		interrupts_enabled(regs) ? "n" : "ff",
+
+	flags = regs->ARM_cpsr;
+	buf[0] = flags & PSR_N_BIT ? 'N' : 'n';
+	buf[1] = flags & PSR_Z_BIT ? 'Z' : 'z';
+	buf[2] = flags & PSR_C_BIT ? 'C' : 'c';
+	buf[3] = flags & PSR_V_BIT ? 'V' : 'v';
+	buf[4] = '\0';
+
+	printk("Flags: %s  IRQs o%s  FIQs o%s  Mode %s  ISA %s  Segment %s\n",
+		buf, interrupts_enabled(regs) ? "n" : "ff",
 		fast_interrupts_enabled(regs) ? "n" : "ff",
 		processor_modes[processor_mode(regs)],
-		thumb_mode(regs) ? " (T)" : "",
+		isa_modes[isa_mode(regs)],
 		get_fs() == get_ds() ? "kernel" : "user");
+#ifdef CONFIG_CPU_CP15
 	{
-		unsigned int ctrl, transbase, dac;
-		  __asm__ (
-		"	mrc p15, 0, %0, c1, c0\n"
-		"	mrc p15, 0, %1, c2, c0\n"
-		"	mrc p15, 0, %2, c3, c0\n"
-		: "=r" (ctrl), "=r" (transbase), "=r" (dac));
-		printk("Control: %04X  Table: %08X  DAC: %08X\n",
-		  	ctrl, transbase, dac);
+		unsigned int ctrl;
+
+		buf[0] = '\0';
+#ifdef CONFIG_CPU_CP15_MMU
+		{
+			unsigned int transbase, dac;
+			asm("mrc p15, 0, %0, c2, c0\n\t"
+			    "mrc p15, 0, %1, c3, c0\n"
+			    : "=r" (transbase), "=r" (dac));
+			snprintf(buf, sizeof(buf), "  Table: %08x  DAC: %08x",
+			  	transbase, dac);
+		}
+#endif
+		asm("mrc p15, 0, %0, c1, c0\n" : "=r" (ctrl));
+
+		printk("Control: %08x%s\n", ctrl, buf);
 	}
+#endif
+}
+
+void show_regs(struct pt_regs * regs)
+{
+	printk("\n");
+	printk("Pid: %d, comm: %20s\n", task_pid_nr(current), current->comm);
+	__show_regs(regs);
+	__backtrace();
 }
 
 void show_fpregs(struct user_fp *regs)
@@ -243,70 +300,15 @@ void show_fpregs(struct user_fp *regs)
 }
 
 /*
- * Task structure and kernel stack allocation.
- */
-static unsigned long *thread_info_head;
-static unsigned int nr_thread_info;
-
-#define EXTRA_TASK_STRUCT	4
-#define ll_alloc_task_struct() ((struct thread_info *) __get_free_pages(GFP_KERNEL,1))
-#define ll_free_task_struct(p) free_pages((unsigned long)(p),1)
-
-struct thread_info *alloc_thread_info(struct task_struct *task)
-{
-	struct thread_info *thread = NULL;
-
-	if (EXTRA_TASK_STRUCT) {
-		unsigned long *p = thread_info_head;
-
-		if (p) {
-			thread_info_head = (unsigned long *)p[0];
-			nr_thread_info -= 1;
-		}
-		thread = (struct thread_info *)p;
-	}
-
-	if (!thread)
-		thread = ll_alloc_task_struct();
-
-#ifdef CONFIG_MAGIC_SYSRQ
-	/*
-	 * The stack must be cleared if you want SYSRQ-T to
-	 * give sensible stack usage information
-	 */
-	if (thread) {
-		char *p = (char *)thread;
-		memzero(p+KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
-	}
-#endif
-	return thread;
-}
-
-void free_thread_info(struct thread_info *thread)
-{
-	if (EXTRA_TASK_STRUCT && nr_thread_info < EXTRA_TASK_STRUCT) {
-		unsigned long *p = (unsigned long *)thread;
-		p[0] = (unsigned long)thread_info_head;
-		thread_info_head = p;
-		nr_thread_info += 1;
-	} else
-		ll_free_task_struct(thread);
-}
-
-/*
  * Free current thread data structures etc..
  */
 void exit_thread(void)
 {
 }
 
-static void default_fp_init(union fp_state *fp)
-{
-	memset(fp, 0, sizeof(union fp_state));
-}
+ATOMIC_NOTIFIER_HEAD(thread_notify_head);
 
-void (*fp_init)(union fp_state *) = default_fp_init;
-EXPORT_SYMBOL(fp_init);
+EXPORT_SYMBOL_GPL(thread_notify_head);
 
 void flush_thread(void)
 {
@@ -315,23 +317,16 @@ void flush_thread(void)
 
 	memset(thread->used_cp, 0, sizeof(thread->used_cp));
 	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
-#if defined(CONFIG_IWMMXT)
-	iwmmxt_task_release(thread);
-#endif
-	fp_init(&thread->fpstate);
-#if defined(CONFIG_VFP)
-	vfp_flush_thread(&thread->vfpstate);
-#endif
+	memset(&thread->fpstate, 0, sizeof(union fp_state));
+
+	thread_notify(THREAD_NOTIFY_FLUSH, thread);
 }
 
 void release_thread(struct task_struct *dead_task)
 {
-#if defined(CONFIG_VFP)
-	vfp_release_thread(&dead_task->thread_info->vfpstate);
-#endif
-#if defined(CONFIG_IWMMXT)
-	iwmmxt_task_release(dead_task->thread_info);
-#endif
+	struct thread_info *thread = task_thread_info(dead_task);
+
+	thread_notify(THREAD_NOTIFY_RELEASE, thread);
 }
 
 asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
@@ -340,10 +335,9 @@ int
 copy_thread(int nr, unsigned long clone_flags, unsigned long stack_start,
 	    unsigned long stk_sz, struct task_struct *p, struct pt_regs *regs)
 {
-	struct thread_info *thread = p->thread_info;
-	struct pt_regs *childregs;
+	struct thread_info *thread = task_thread_info(p);
+	struct pt_regs *childregs = task_pt_regs(p);
 
-	childregs = ((struct pt_regs *)((unsigned long)thread + THREAD_SIZE - 8)) - 1;
 	*childregs = *regs;
 	childregs->ARM_r0 = 0;
 	childregs->ARM_sp = stack_start;
@@ -440,15 +434,17 @@ EXPORT_SYMBOL(kernel_thread);
 unsigned long get_wchan(struct task_struct *p)
 {
 	unsigned long fp, lr;
-	unsigned long stack_page;
+	unsigned long stack_start, stack_end;
 	int count = 0;
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
-	stack_page = 4096 + (unsigned long)p->thread_info;
+	stack_start = (unsigned long)end_of_stack(p);
+	stack_end = (unsigned long)task_stack_page(p) + THREAD_SIZE;
+
 	fp = thread_saved_fp(p);
 	do {
-		if (fp < stack_page || fp > 4092+stack_page)
+		if (fp < stack_start || fp > stack_end)
 			return 0;
 		lr = pc_pointer (((unsigned long *)fp)[-1]);
 		if (!in_sched_functions(lr))
@@ -457,4 +453,3 @@ unsigned long get_wchan(struct task_struct *p)
 	} while (count ++ < 16);
 	return 0;
 }
-EXPORT_SYMBOL(get_wchan);

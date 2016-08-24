@@ -94,24 +94,27 @@
 #include <linux/string.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
-#include <linux/delay.h>
 #include <linux/blkdev.h>
 #include <linux/stat.h>
+#include <linux/delay.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
-#include "scsi.h"
-#include <scsi/scsi_host.h>
-#include "seagate.h"
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
+#include <scsi/scsi.h>
 
-#include <scsi/scsi_ioctl.h>
+#include <scsi/scsi_dbg.h>
+#include <scsi/scsi_host.h>
+
 
 #ifdef DEBUG
 #define DPRINTK( when, msg... ) do { if ( (DEBUG & (when)) == (when) ) printk( msg ); } while (0)
 #else
 #define DPRINTK( when, msg... ) do { } while (0)
+#define DEBUG 0
 #endif
 #define DANY( msg... ) DPRINTK( 0xffff, msg );
 
@@ -310,7 +313,7 @@ static Signature __initdata signatures[] = {
 	{"IBM F1 V1.2009/22/93", 5, 25, FD},
 };
 
-#define NUM_SIGNATURES (sizeof(signatures) / sizeof(Signature))
+#define NUM_SIGNATURES ARRAY_SIZE(signatures)
 #endif				/* n OVERRIDE */
 
 /*
@@ -318,8 +321,9 @@ static Signature __initdata signatures[] = {
  */
 
 static int hostno = -1;
-static void seagate_reconnect_intr (int, void *, struct pt_regs *);
-static irqreturn_t do_seagate_reconnect_intr (int, void *, struct pt_regs *);
+static void seagate_reconnect_intr (int, void *);
+static irqreturn_t do_seagate_reconnect_intr (int, void *);
+static int seagate_st0x_bus_reset(struct scsi_cmnd *);
 
 #ifdef FAST
 static int fast = 1;
@@ -416,7 +420,7 @@ static inline void borken_wait (void)
 #define ULOOP( i ) for (clock = i*8;;)
 #define TIMEOUT (!(clock--))
 
-int __init seagate_st0x_detect (Scsi_Host_Template * tpnt)
+static int __init seagate_st0x_detect (struct scsi_host_template * tpnt)
 {
 	struct Scsi_Host *instance;
 	int i, j;
@@ -455,7 +459,7 @@ int __init seagate_st0x_detect (Scsi_Host_Template * tpnt)
  * space for the on-board RAM instead.
  */
 
-		for (i = 0; i < (sizeof (seagate_bases) / sizeof (unsigned int)); ++i) {
+		for (i = 0; i < ARRAY_SIZE(seagate_bases); ++i) {
 			void __iomem *p = ioremap(seagate_bases[i], 0x2000);
 			if (!p)
 				continue;
@@ -495,7 +499,7 @@ int __init seagate_st0x_detect (Scsi_Host_Template * tpnt)
 		return 0;
 
 	hostno = instance->host_no;
-	if (request_irq (irq, do_seagate_reconnect_intr, SA_INTERRUPT, (controller_type == SEAGATE) ? "seagate" : "tmc-8xx", instance)) {
+	if (request_irq (irq, do_seagate_reconnect_intr, IRQF_DISABLED, (controller_type == SEAGATE) ? "seagate" : "tmc-8xx", instance)) {
 		printk(KERN_ERR "scsi%d : unable to allocate IRQ%d\n", hostno, irq);
 		return 0;
 	}
@@ -520,7 +524,7 @@ int __init seagate_st0x_detect (Scsi_Host_Template * tpnt)
 #ifdef ARBITRATE
 		" ARBITRATE"
 #endif
-#ifdef DEBUG
+#if DEBUG
 		" DEBUG"
 #endif
 #ifdef FAST
@@ -583,8 +587,8 @@ static int linked_connected = 0;
 static unsigned char linked_target, linked_lun;
 #endif
 
-static void (*done_fn) (Scsi_Cmnd *) = NULL;
-static Scsi_Cmnd *SCint = NULL;
+static void (*done_fn) (struct scsi_cmnd *) = NULL;
+static struct scsi_cmnd *SCint = NULL;
 
 /*
  * These control whether or not disconnect / reconnect will be attempted,
@@ -616,22 +620,21 @@ static int should_reconnect = 0;
  * asserting SEL.
  */
 
-static irqreturn_t do_seagate_reconnect_intr(int irq, void *dev_id,
-						struct pt_regs *regs)
+static irqreturn_t do_seagate_reconnect_intr(int irq, void *dev_id)
 {
 	unsigned long flags;
 	struct Scsi_Host *dev = dev_id;
 	
 	spin_lock_irqsave (dev->host_lock, flags);
-	seagate_reconnect_intr (irq, dev_id, regs);
+	seagate_reconnect_intr (irq, dev_id);
 	spin_unlock_irqrestore (dev->host_lock, flags);
 	return IRQ_HANDLED;
 }
 
-static void seagate_reconnect_intr (int irq, void *dev_id, struct pt_regs *regs)
+static void seagate_reconnect_intr (int irq, void *dev_id)
 {
 	int temp;
-	Scsi_Cmnd *SCtmp;
+	struct scsi_cmnd *SCtmp;
 
 	DPRINTK (PHASE_RESELECT, "scsi%d : seagate_reconnect_intr() called\n", hostno);
 
@@ -673,10 +676,11 @@ static void seagate_reconnect_intr (int irq, void *dev_id, struct pt_regs *regs)
 
 static int recursion_depth = 0;
 
-static int seagate_st0x_queue_command (Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
+static int seagate_st0x_queue_command(struct scsi_cmnd * SCpnt,
+				      void (*done) (struct scsi_cmnd *))
 {
 	int result, reconnect;
-	Scsi_Cmnd *SCtmp;
+	struct scsi_cmnd *SCtmp;
 
 	DANY ("seagate: que_command");
 	done_fn = done;
@@ -730,7 +734,7 @@ static int internal_command (unsigned char target, unsigned char lun,
 	unsigned char *data = NULL;
 	struct scatterlist *buffer = NULL;
 	int clock, temp, nobuffs = 0, done = 0, len = 0;
-#ifdef DEBUG
+#if DEBUG
 	int transfered = 0, phase = 0, newphase;
 #endif
 	register unsigned char status_read;
@@ -746,7 +750,7 @@ static int internal_command (unsigned char target, unsigned char lun,
 
 #if (DEBUG & PRINT_COMMAND)
 	printk("scsi%d : target = %d, command = ", hostno, target);
-	print_command((unsigned char *) cmnd);
+	__scsi_print_command((unsigned char *) cmnd);
 #endif
 
 #if (DEBUG & PHASE_RESELECT)
@@ -995,14 +999,14 @@ connect_loop:
 				for (i = 0; i < nobuffs; ++i)
 					printk("scsi%d : buffer %d address = %p length = %d\n",
 					     hostno, i,
-					     page_address(buffer[i].page) + buffer[i].offset,
+					     sg_virt(&buffer[i]),
 					     buffer[i].length);
 			}
 #endif
 
-			buffer = (struct scatterlist *) SCint->buffer;
+			buffer = (struct scatterlist *) SCint->request_buffer;
 			len = buffer->length;
-			data = page_address(buffer->page) + buffer->offset;
+			data = sg_virt(buffer);
 		} else {
 			DPRINTK (DEBUG_SG, "scsi%d : scatter gather not requested.\n", hostno);
 			buffer = NULL;
@@ -1235,7 +1239,7 @@ connect_loop:
 					--nobuffs;
 					++buffer;
 					len = buffer->length;
-					data = page_address(buffer->page) + buffer->offset;
+					data = sg_virt(buffer);
 					DPRINTK (DEBUG_SG,
 						 "scsi%d : next scatter-gather buffer len = %d address = %08x\n",
 						 hostno, len, data);
@@ -1392,7 +1396,7 @@ connect_loop:
 					--nobuffs;
 					++buffer;
 					len = buffer->length;
-					data = page_address(buffer->page) + buffer->offset;
+					data = sg_virt(buffer);
 					DPRINTK (DEBUG_SG, "scsi%d : next scatter-gather buffer len = %d address = %08x\n", hostno, len, data);
 				}
 				break;
@@ -1553,7 +1557,7 @@ connect_loop:
 	printk("\n");
 #endif
 	printk("scsi%d : status = ", hostno);
-	print_status(status);
+	scsi_print_status(status);
 	printk(" message = %02x\n", message);
 #endif
 
@@ -1607,7 +1611,7 @@ connect_loop:
 	return retcode (st0x_aborted);
 }				/* end of internal_command */
 
-static int seagate_st0x_abort (Scsi_Cmnd * SCpnt)
+static int seagate_st0x_abort(struct scsi_cmnd * SCpnt)
 {
 	st0x_aborted = DID_ABORT;
 	return SUCCESS;
@@ -1622,7 +1626,7 @@ static int seagate_st0x_abort (Scsi_Cmnd * SCpnt)
  * May be called with SCpnt = NULL
  */
 
-static int seagate_st0x_bus_reset(Scsi_Cmnd * SCpnt)
+static int seagate_st0x_bus_reset(struct scsi_cmnd * SCpnt)
 {
 	/* No timeouts - this command is going to fail because it was reset. */
 	DANY ("scsi%d: Reseting bus... ", hostno);
@@ -1630,23 +1634,13 @@ static int seagate_st0x_bus_reset(Scsi_Cmnd * SCpnt)
 	/* assert  RESET signal on SCSI bus.  */
 	WRITE_CONTROL (BASE_CMD | CMD_RST);
 
-	udelay (20 * 1000);
+	mdelay (20);
 
 	WRITE_CONTROL (BASE_CMD);
 	st0x_aborted = DID_RESET;
 
 	DANY ("done.\n");
 	return SUCCESS;
-}
-
-static int seagate_st0x_host_reset(Scsi_Cmnd *SCpnt)
-{
-	return FAILED;
-}
-
-static int seagate_st0x_device_reset(Scsi_Cmnd *SCpnt)
-{
-	return FAILED;
 }
 
 static int seagate_st0x_release(struct Scsi_Host *shost)
@@ -1657,15 +1651,13 @@ static int seagate_st0x_release(struct Scsi_Host *shost)
 	return 0;
 }
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.detect         	= seagate_st0x_detect,
 	.release        	= seagate_st0x_release,
 	.info           	= seagate_st0x_info,
 	.queuecommand   	= seagate_st0x_queue_command,
 	.eh_abort_handler	= seagate_st0x_abort,
 	.eh_bus_reset_handler	= seagate_st0x_bus_reset,
-	.eh_host_reset_handler	= seagate_st0x_host_reset,
-	.eh_device_reset_handler = seagate_st0x_device_reset,
 	.can_queue      	= 1,
 	.this_id        	= 7,
 	.sg_tablesize   	= SG_ALL,

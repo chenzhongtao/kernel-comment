@@ -1,7 +1,7 @@
 /*
  *  capcella.h, Include file for ZAO Networks Capcella.
  *
- *  Copyright (C) 2002-2004  Yoichi Yuasa <yuasa@hh.iij4u.or.jp>
+ *  Copyright (C) 2002-2004  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@
 #ifndef __ZAO_CAPCELLA_H
 #define __ZAO_CAPCELLA_H
 
-#include <asm/vr41xx/vr41xx.h>
+#include <asm/vr41xx/irq.h>
 
 /*
  * General-Purpose I/O Pin Number

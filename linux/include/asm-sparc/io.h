@@ -249,6 +249,51 @@ extern void __iomem *ioremap(unsigned long offset, unsigned long size);
 #define ioremap_nocache(X,Y)	ioremap((X),(Y))
 extern void iounmap(volatile void __iomem *addr);
 
+#define ioread8(X)			readb(X)
+#define ioread16(X)			readw(X)
+#define ioread32(X)			readl(X)
+#define iowrite8(val,X)			writeb(val,X)
+#define iowrite16(val,X)		writew(val,X)
+#define iowrite32(val,X)		writel(val,X)
+
+static inline void ioread8_rep(void __iomem *port, void *buf, unsigned long count)
+{
+	insb((unsigned long __force)port, buf, count);
+}
+static inline void ioread16_rep(void __iomem *port, void *buf, unsigned long count)
+{
+	insw((unsigned long __force)port, buf, count);
+}
+
+static inline void ioread32_rep(void __iomem *port, void *buf, unsigned long count)
+{
+	insl((unsigned long __force)port, buf, count);
+}
+
+static inline void iowrite8_rep(void __iomem *port, const void *buf, unsigned long count)
+{
+	outsb((unsigned long __force)port, buf, count);
+}
+
+static inline void iowrite16_rep(void __iomem *port, const void *buf, unsigned long count)
+{
+	outsw((unsigned long __force)port, buf, count);
+}
+
+static inline void iowrite32_rep(void __iomem *port, const void *buf, unsigned long count)
+{
+	outsl((unsigned long __force)port, buf, count);
+}
+
+/* Create a virtual mapping cookie for an IO port range */
+extern void __iomem *ioport_map(unsigned long port, unsigned int nr);
+extern void ioport_unmap(void __iomem *);
+
+/* Create a virtual mapping cookie for a PCI BAR (memory or IO) */
+struct pci_dev;
+extern void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long max);
+extern void pci_iounmap(struct pci_dev *dev, void __iomem *);
+
 /*
  * Bus number may be in res->flags... somewhere.
  */
@@ -265,13 +310,19 @@ extern void sbus_iounmap(volatile void __iomem *vaddr, unsigned long size);
 #define RTC_PORT(x)   (rtc_port + (x))
 #define RTC_ALWAYS_BCD  0
 
-/* Nothing to do */
-/* P3: Only IDE DMA may need these. XXX Verify that it still does... */
-
-#define dma_cache_inv(_start,_size)		do { } while (0)
-#define dma_cache_wback(_start,_size)		do { } while (0)
-#define dma_cache_wback_inv(_start,_size)	do { } while (0)
-
 #endif
+
+#define __ARCH_HAS_NO_PAGE_ZERO_MAPPED		1
+
+/*
+ * Convert a physical pointer to a virtual kernel pointer for /dev/mem
+ * access
+ */
+#define xlate_dev_mem_ptr(p)	__va(p)
+
+/*
+ * Convert a virtual cached pointer to an uncached pointer
+ */
+#define xlate_dev_kmem_ptr(p)	p
 
 #endif /* !(__SPARC_IO_H) */

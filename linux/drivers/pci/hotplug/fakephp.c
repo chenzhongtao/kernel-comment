@@ -32,12 +32,13 @@
  * Enabling PCI devices is left as an exercise for the reader...
  *
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/pci_hotplug.h>
 #include <linux/init.h>
-#include "pci_hotplug.h"
+#include <linux/string.h>
+#include <linux/slab.h>
 #include "../pci.h"
 
 #if !defined(MODULE)
@@ -93,15 +94,13 @@ static int add_slot(struct pci_dev *dev)
 	struct hotplug_slot *slot;
 	int retval = -ENOMEM;
 
-	slot = kmalloc(sizeof(struct hotplug_slot), GFP_KERNEL);
+	slot = kzalloc(sizeof(struct hotplug_slot), GFP_KERNEL);
 	if (!slot)
 		goto error;
-	memset(slot, 0, sizeof(*slot));
 
-	slot->info = kmalloc(sizeof(struct hotplug_slot_info), GFP_KERNEL);
+	slot->info = kzalloc(sizeof(struct hotplug_slot_info), GFP_KERNEL);
 	if (!slot->info)
 		goto error_slot;
-	memset(slot->info, 0, sizeof(struct hotplug_slot_info));
 
 	slot->info->power_status = 1;
 	slot->info->max_bus_speed = PCI_SPEED_UNKNOWN;
@@ -166,28 +165,36 @@ static void remove_slot(struct dummy_slot *dslot)
 }
 
 /**
- * Rescan slot.
- * Tries hard not to re-enable already existing devices
- * also handles scanning of subfunctions
+ * pci_rescan_slot - Rescan slot
+ * @temp: Device template. Should be set: bus and devfn.
  *
- * @param temp   Device template. Should be set: bus and devfn.
+ * Tries hard not to re-enable already existing devices;
+ * also handles scanning of subfunctions.
  */
 static void pci_rescan_slot(struct pci_dev *temp)
 {
 	struct pci_bus *bus = temp->bus;
 	struct pci_dev *dev;
 	int func;
+	int retval;
 	u8 hdr_type;
+
 	if (!pci_read_config_byte(temp, PCI_HEADER_TYPE, &hdr_type)) {
 		temp->hdr_type = hdr_type & 0x7f;
-		if (!pci_find_slot(bus->number, temp->devfn)) {
+		if ((dev = pci_get_slot(bus, temp->devfn)) != NULL)
+			pci_dev_put(dev);
+		else {
 			dev = pci_scan_single_device(bus, temp->devfn);
 			if (dev) {
 				dbg("New device on %s function %x:%x\n",
 					bus->name, temp->devfn >> 3,
 					temp->devfn & 7);
-				pci_bus_add_device(dev);
-				add_slot(dev);
+				retval = pci_bus_add_device(dev);
+				if (retval)
+					dev_err(&dev->dev, "error adding "
+						"device, continuing.\n");
+				else
+					add_slot(dev);
 			}
 		}
 		/* multifunction device? */
@@ -200,14 +207,20 @@ static void pci_rescan_slot(struct pci_dev *temp)
 				continue;
 			temp->hdr_type = hdr_type & 0x7f;
 
-			if (!pci_find_slot(bus->number, temp->devfn)) {
+			if ((dev = pci_get_slot(bus, temp->devfn)) != NULL)
+				pci_dev_put(dev);
+			else {
 				dev = pci_scan_single_device(bus, temp->devfn);
 				if (dev) {
 					dbg("New device on %s function %x:%x\n",
 						bus->name, temp->devfn >> 3,
 						temp->devfn & 7);
-					pci_bus_add_device(dev);
-					add_slot(dev);
+					retval = pci_bus_add_device(dev);
+					if (retval)
+						dev_err(&dev->dev, "error adding "
+							"device, continuing.\n");
+					else
+						add_slot(dev);
 				}
 			}
 		}
@@ -216,20 +229,19 @@ static void pci_rescan_slot(struct pci_dev *temp)
 
 
 /**
- * Rescan PCI bus.
- * call pci_rescan_slot for each possible function of the bus
+ * pci_rescan_bus - Rescan PCI bus
+ * @bus: the PCI bus to rescan
  *
- * @param bus
+ * Call pci_rescan_slot for each possible function of the bus.
  */
 static void pci_rescan_bus(const struct pci_bus *bus)
 {
 	unsigned int devfn;
 	struct pci_dev *dev;
-	dev = kmalloc(sizeof(struct pci_dev), GFP_KERNEL);
+	dev = alloc_pci_dev();
 	if (!dev)
 		return;
 
-	memset(dev, 0, sizeof(dev));
 	dev->bus = (struct pci_bus*)bus;
 	dev->sysdata = bus->sysdata;
 	for (devfn = 0; devfn < 0x100; devfn += 8) {
@@ -297,7 +309,7 @@ static int disable_slot(struct hotplug_slot *slot)
 	/* search for subfunctions and disable them first */
 	if (!(dslot->dev->devfn & 7)) {
 		for (func = 1; func < 8; func++) {
-			dev = pci_find_slot(dslot->dev->bus->number,
+			dev = pci_get_slot(dslot->dev->bus,
 					dslot->dev->devfn + func);
 			if (dev) {
 				hslot = get_slot_from_dev(dev);
@@ -307,6 +319,7 @@ static int disable_slot(struct hotplug_slot *slot)
 					err("Hotplug slot not found for subfunction of PCI device\n");
 					return -ENODEV;
 				}
+				pci_dev_put(dev);
 			} else
 				dbg("No device in slot found\n");
 		}

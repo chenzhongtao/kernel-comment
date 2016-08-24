@@ -1,5 +1,5 @@
 /*
- * $Id: wr_sbc82xx_flash.c,v 1.7 2004/11/04 13:24:15 gleixner Exp $
+ * $Id: wr_sbc82xx_flash.c,v 1.8 2005/11/07 11:14:29 gleixner Exp $
  *
  * Map for flash chips on Wind River PowerQUICC II SBC82xx board.
  *
@@ -17,7 +17,6 @@
 #include <asm/io.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
-#include <linux/config.h>
 #include <linux/mtd/partitions.h>
 
 #include <asm/immap_cpm2.h>
@@ -163,10 +162,10 @@ static void __exit cleanup_sbc82xx_flash(void)
 			del_mtd_partitions(sbcmtd[i]);
 		else
 			del_mtd_device(sbcmtd[i]);
-			
+
 		kfree(sbcmtd_parts[i]);
 		map_destroy(sbcmtd[i]);
-		
+
 		iounmap((void *)sbc82xx_flash_map[i].virt);
 		sbc82xx_flash_map[i].virt = 0;
 	}

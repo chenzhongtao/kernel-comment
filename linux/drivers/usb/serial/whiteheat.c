@@ -65,7 +65,6 @@
  * 
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -75,12 +74,13 @@
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <asm/uaccess.h>
 #include <asm/termbits.h>
 #include <linux/usb.h>
 #include <linux/serial_reg.h>
 #include <linux/serial.h>
-#include "usb-serial.h"
+#include <linux/usb/serial.h>
 #include "whiteheat_fw.h"		/* firmware for the ConnectTech WhiteHEAT device */
 #include "whiteheat.h"			/* WhiteHEAT specific commands */
 
@@ -127,11 +127,11 @@ static struct usb_device_id id_table_combined [] = {
 MODULE_DEVICE_TABLE (usb, id_table_combined);
 
 static struct usb_driver whiteheat_driver = {
-	.owner =	THIS_MODULE,
 	.name =		"whiteheat",
 	.probe =	usb_serial_probe,
 	.disconnect =	usb_serial_disconnect,
 	.id_table =	id_table_combined,
+	.no_dynamic_id = 	1,
 };
 
 /* function prototypes for the Connect Tech WhiteHEAT prerenumeration device */
@@ -146,20 +146,23 @@ static void whiteheat_close		(struct usb_serial_port *port, struct file *filp);
 static int  whiteheat_write		(struct usb_serial_port *port, const unsigned char *buf, int count);
 static int  whiteheat_write_room	(struct usb_serial_port *port);
 static int  whiteheat_ioctl		(struct usb_serial_port *port, struct file * file, unsigned int cmd, unsigned long arg);
-static void whiteheat_set_termios	(struct usb_serial_port *port, struct termios * old);
+static void whiteheat_set_termios	(struct usb_serial_port *port, struct ktermios * old);
 static int  whiteheat_tiocmget		(struct usb_serial_port *port, struct file *file);
 static int  whiteheat_tiocmset		(struct usb_serial_port *port, struct file *file, unsigned int set, unsigned int clear);
 static void whiteheat_break_ctl		(struct usb_serial_port *port, int break_state);
 static int  whiteheat_chars_in_buffer	(struct usb_serial_port *port);
 static void whiteheat_throttle		(struct usb_serial_port *port);
 static void whiteheat_unthrottle	(struct usb_serial_port *port);
-static void whiteheat_read_callback	(struct urb *urb, struct pt_regs *regs);
-static void whiteheat_write_callback	(struct urb *urb, struct pt_regs *regs);
+static void whiteheat_read_callback	(struct urb *urb);
+static void whiteheat_write_callback	(struct urb *urb);
 
-static struct usb_serial_device_type whiteheat_fake_device = {
-	.owner =		THIS_MODULE,
-	.name =			"Connect Tech - WhiteHEAT - (prerenumeration)",
-	.short_name =		"whiteheatnofirm",
+static struct usb_serial_driver whiteheat_fake_device = {
+	.driver = {
+		.owner =	THIS_MODULE,
+		.name =		"whiteheatnofirm",
+	},
+	.description =		"Connect Tech - WhiteHEAT - (prerenumeration)",
+	.usb_driver =		&whiteheat_driver,
 	.id_table =		id_table_prerenumeration,
 	.num_interrupt_in =	NUM_DONT_CARE,
 	.num_bulk_in =		NUM_DONT_CARE,
@@ -169,10 +172,13 @@ static struct usb_serial_device_type whiteheat_fake_device = {
 	.attach =		whiteheat_firmware_attach,
 };
 
-static struct usb_serial_device_type whiteheat_device = {
-	.owner =		THIS_MODULE,
-	.name =			"Connect Tech - WhiteHEAT",
-	.short_name =		"whiteheat",
+static struct usb_serial_driver whiteheat_device = {
+	.driver = {
+		.owner =	THIS_MODULE,
+		.name =		"whiteheat",
+	},
+	.description =		"Connect Tech - WhiteHEAT",
+	.usb_driver =		&whiteheat_driver,
 	.id_table =		id_table_std,
 	.num_interrupt_in =	NUM_DONT_CARE,
 	.num_bulk_in =		NUM_DONT_CARE,
@@ -198,7 +204,7 @@ static struct usb_serial_device_type whiteheat_device = {
 
 
 struct whiteheat_command_private {
-	spinlock_t		lock;
+	struct mutex		mutex;
 	__u8			port_running;
 	__u8			command_finished;
 	wait_queue_head_t	wait_command;	/* for handling sleeping while waiting for a command to finish */
@@ -224,21 +230,23 @@ struct whiteheat_private {
 	struct list_head	rx_urbs_submitted;
 	struct list_head	rx_urb_q;
 	struct work_struct	rx_work;
+	struct usb_serial_port	*port;
 	struct list_head	tx_urbs_free;
 	struct list_head	tx_urbs_submitted;
+	struct mutex		deathwarrant;
 };
 
 
 /* local function prototypes */
 static int start_command_port(struct usb_serial *serial);
 static void stop_command_port(struct usb_serial *serial);
-static void command_port_write_callback(struct urb *urb, struct pt_regs *regs);
-static void command_port_read_callback(struct urb *urb, struct pt_regs *regs);
+static void command_port_write_callback(struct urb *urb);
+static void command_port_read_callback(struct urb *urb);
 
 static int start_port_read(struct usb_serial_port *port);
 static struct whiteheat_urb_wrap *urb_to_wrap(struct urb *urb, struct list_head *head);
 static struct list_head *list_first(struct list_head *head);
-static void rx_data_softint(void *private);
+static void rx_data_softint(struct work_struct *work);
 
 static int firm_send_command(struct usb_serial_port *port, __u8 command, __u8 *data, __u8 datasize);
 static int firm_open(struct usb_serial_port *port);
@@ -254,6 +262,7 @@ static int firm_report_tx_done(struct usb_serial_port *port);
 
 #define COMMAND_PORT		4
 #define COMMAND_TIMEOUT		(2*HZ)	/* 2 second timeout for a command */
+#define	COMMAND_TIMEOUT_MS	2000
 #define CLOSING_DELAY		(30 * HZ)
 
 
@@ -379,48 +388,50 @@ static int whiteheat_attach (struct usb_serial *serial)
          * unlinking bug in disguise. Same for the call below.
          */
 	usb_clear_halt(serial->dev, pipe);
-	ret = usb_bulk_msg (serial->dev, pipe, command, 2, &alen, COMMAND_TIMEOUT);
+	ret = usb_bulk_msg (serial->dev, pipe, command, 2, &alen, COMMAND_TIMEOUT_MS);
 	if (ret) {
-		err("%s: Couldn't send command [%d]", serial->type->name, ret);
+		err("%s: Couldn't send command [%d]", serial->type->description, ret);
 		goto no_firmware;
-	} else if (alen != sizeof(command)) {
-		err("%s: Send command incomplete [%d]", serial->type->name, alen);
+	} else if (alen != 2) {
+		err("%s: Send command incomplete [%d]", serial->type->description, alen);
 		goto no_firmware;
 	}
 
 	pipe = usb_rcvbulkpipe (serial->dev, command_port->bulk_in_endpointAddress);
 	/* See the comment on the usb_clear_halt() above */
 	usb_clear_halt(serial->dev, pipe);
-	ret = usb_bulk_msg (serial->dev, pipe, result, sizeof(*hw_info) + 1, &alen, COMMAND_TIMEOUT);
+	ret = usb_bulk_msg (serial->dev, pipe, result, sizeof(*hw_info) + 1, &alen, COMMAND_TIMEOUT_MS);
 	if (ret) {
-		err("%s: Couldn't get results [%d]", serial->type->name, ret);
+		err("%s: Couldn't get results [%d]", serial->type->description, ret);
 		goto no_firmware;
-	} else if (alen != sizeof(result)) {
-		err("%s: Get results incomplete [%d]", serial->type->name, alen);
+	} else if (alen != sizeof(*hw_info) + 1) {
+		err("%s: Get results incomplete [%d]", serial->type->description, alen);
 		goto no_firmware;
 	} else if (result[0] != command[0]) {
-		err("%s: Command failed [%d]", serial->type->name, result[0]);
+		err("%s: Command failed [%d]", serial->type->description, result[0]);
 		goto no_firmware;
 	}
 
 	hw_info = (struct whiteheat_hw_info *)&result[1];
 
-	info("%s: Driver %s: Firmware v%d.%02d", serial->type->name,
+	info("%s: Driver %s: Firmware v%d.%02d", serial->type->description,
 	     DRIVER_VERSION, hw_info->sw_major_rev, hw_info->sw_minor_rev);
 
 	for (i = 0; i < serial->num_ports; i++) {
 		port = serial->port[i];
 
-		info = (struct whiteheat_private *)kmalloc(sizeof(struct whiteheat_private), GFP_KERNEL);
+		info = kmalloc(sizeof(struct whiteheat_private), GFP_KERNEL);
 		if (info == NULL) {
-			err("%s: Out of memory for port structures\n", serial->type->name);
+			err("%s: Out of memory for port structures\n", serial->type->description);
 			goto no_private;
 		}
 
 		spin_lock_init(&info->lock);
+		mutex_init(&info->deathwarrant);
 		info->flags = 0;
 		info->mcr = 0;
-		INIT_WORK(&info->rx_work, rx_data_softint, port);
+		INIT_WORK(&info->rx_work, rx_data_softint);
+		info->port = port;
 
 		INIT_LIST_HEAD(&info->rx_urbs_free);
 		INIT_LIST_HEAD(&info->rx_urbs_submitted);
@@ -481,13 +492,13 @@ static int whiteheat_attach (struct usb_serial *serial)
 		usb_set_serial_port_data(port, info);
 	}
 
-	command_info = (struct whiteheat_command_private *)kmalloc(sizeof(struct whiteheat_command_private), GFP_KERNEL);
+	command_info = kmalloc(sizeof(struct whiteheat_command_private), GFP_KERNEL);
 	if (command_info == NULL) {
-		err("%s: Out of memory for port structures\n", serial->type->name);
+		err("%s: Out of memory for port structures\n", serial->type->description);
 		goto no_command_private;
 	}
 
-	spin_lock_init(&command_info->lock);
+	mutex_init(&command_info->mutex);
 	command_info->port_running = 0;
 	init_waitqueue_head(&command_info->wait_command);
 	usb_set_serial_port_data(command_port, command_info);
@@ -500,9 +511,10 @@ static int whiteheat_attach (struct usb_serial *serial)
 
 no_firmware:
 	/* Firmware likely not running */
-	err("%s: Unable to retrieve firmware version, try replugging\n", serial->type->name);
-	err("%s: If the firmware is not running (status led not blinking)\n", serial->type->name);
-	err("%s: please contact support@connecttech.com\n", serial->type->name);
+	err("%s: Unable to retrieve firmware version, try replugging\n", serial->type->description);
+	err("%s: If the firmware is not running (status led not blinking)\n", serial->type->description);
+	err("%s: please contact support@connecttech.com\n", serial->type->description);
+	kfree(result);
 	return -ENODEV;
 
 no_command_private:
@@ -590,7 +602,7 @@ static void whiteheat_shutdown (struct usb_serial *serial)
 static int whiteheat_open (struct usb_serial_port *port, struct file *filp)
 {
 	int		retval = 0;
-	struct termios	old_term;
+	struct ktermios	old_term;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 
@@ -645,7 +657,6 @@ static void whiteheat_close(struct usb_serial_port *port, struct file * filp)
 	struct urb *urb;
 	struct list_head *tmp;
 	struct list_head *tmp2;
-	unsigned long flags;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 	
@@ -674,27 +685,32 @@ static void whiteheat_close(struct usb_serial_port *port, struct file * filp)
 
 	firm_close(port);
 
+printk(KERN_ERR"Before processing rx_urbs_submitted.\n");
 	/* shutdown our bulk reads and writes */
-	spin_lock_irqsave(&info->lock, flags);
+	mutex_lock(&info->deathwarrant);
+	spin_lock_irq(&info->lock);
 	list_for_each_safe(tmp, tmp2, &info->rx_urbs_submitted) {
 		wrap = list_entry(tmp, struct whiteheat_urb_wrap, list);
 		urb = wrap->urb;
+		list_del(tmp);
+		spin_unlock_irq(&info->lock);
 		usb_kill_urb(urb);
-		list_del(tmp);
+		spin_lock_irq(&info->lock);
 		list_add(tmp, &info->rx_urbs_free);
 	}
-	list_for_each_safe(tmp, tmp2, &info->rx_urb_q) {
-		list_del(tmp);
-		list_add(tmp, &info->rx_urbs_free);
-	}
+	list_for_each_safe(tmp, tmp2, &info->rx_urb_q)
+		list_move(tmp, &info->rx_urbs_free);
 	list_for_each_safe(tmp, tmp2, &info->tx_urbs_submitted) {
 		wrap = list_entry(tmp, struct whiteheat_urb_wrap, list);
 		urb = wrap->urb;
-		usb_kill_urb(urb);
 		list_del(tmp);
+		spin_unlock_irq(&info->lock);
+		usb_kill_urb(urb);
+		spin_lock_irq(&info->lock);
 		list_add(tmp, &info->tx_urbs_free);
 	}
-	spin_unlock_irqrestore(&info->lock, flags);
+	spin_unlock_irq(&info->lock);
+	mutex_unlock(&info->deathwarrant);
 
 	stop_command_port(port->serial);
 
@@ -866,28 +882,10 @@ static int whiteheat_ioctl (struct usb_serial_port *port, struct file * file, un
 }
 
 
-static void whiteheat_set_termios (struct usb_serial_port *port, struct termios *old_termios)
+static void whiteheat_set_termios(struct usb_serial_port *port, struct ktermios *old_termios)
 {
 	dbg("%s -port %d", __FUNCTION__, port->number);
-
-	if ((!port->tty) || (!port->tty->termios)) {
-		dbg("%s - no tty structures", __FUNCTION__);
-		goto exit;
-	}
-	
-	/* check that they really want us to change something */
-	if (old_termios) {
-		if ((port->tty->termios->c_cflag == old_termios->c_cflag) &&
-		    (port->tty->termios->c_iflag == old_termios->c_iflag)) {
-			dbg("%s - nothing to change...", __FUNCTION__);
-			goto exit;
-		}
-	}
-
 	firm_setup_port(port);
-
-exit:
-	return;
 }
 
 
@@ -914,7 +912,7 @@ static int whiteheat_chars_in_buffer(struct usb_serial_port *port)
 	spin_unlock_irqrestore(&info->lock, flags);
 
 	dbg ("%s - returns %d", __FUNCTION__, chars);
-	return (chars);
+	return chars;
 }
 
 
@@ -947,7 +945,7 @@ static void whiteheat_unthrottle (struct usb_serial_port *port)
 	spin_unlock_irqrestore(&info->lock, flags);
 
 	if (actually_throttled)
-		rx_data_softint(port);
+		rx_data_softint(&info->rx_work);
 
 	return;
 }
@@ -956,54 +954,57 @@ static void whiteheat_unthrottle (struct usb_serial_port *port)
 /*****************************************************************************
  * Connect Tech's White Heat callback routines
  *****************************************************************************/
-static void command_port_write_callback (struct urb *urb, struct pt_regs *regs)
+static void command_port_write_callback(struct urb *urb)
 {
+	int status = urb->status;
+
 	dbg("%s", __FUNCTION__);
 
-	if (urb->status) {
-		dbg ("nonzero urb status: %d", urb->status);
+	if (status) {
+		dbg("nonzero urb status: %d", status);
 		return;
 	}
 }
 
 
-static void command_port_read_callback (struct urb *urb, struct pt_regs *regs)
+static void command_port_read_callback(struct urb *urb)
 {
 	struct usb_serial_port *command_port = (struct usb_serial_port *)urb->context;
 	struct whiteheat_command_private *command_info;
+	int status = urb->status;
 	unsigned char *data = urb->transfer_buffer;
 	int result;
-	unsigned long flags;
 
 	dbg("%s", __FUNCTION__);
-
-	if (urb->status) {
-		dbg("%s - nonzero urb status: %d", __FUNCTION__, urb->status);
-		return;
-	}
-
-	usb_serial_debug_data(debug, &command_port->dev, __FUNCTION__, urb->actual_length, data);
 
 	command_info = usb_get_serial_port_data(command_port);
 	if (!command_info) {
 		dbg ("%s - command_info is NULL, exiting.", __FUNCTION__);
 		return;
 	}
-	spin_lock_irqsave(&command_info->lock, flags);
+	if (status) {
+		dbg("%s - nonzero urb status: %d", __FUNCTION__, status);
+		if (status != -ENOENT)
+			command_info->command_finished = WHITEHEAT_CMD_FAILURE;
+		wake_up(&command_info->wait_command);
+		return;
+	}
+
+	usb_serial_debug_data(debug, &command_port->dev, __FUNCTION__, urb->actual_length, data);
 
 	if (data[0] == WHITEHEAT_CMD_COMPLETE) {
 		command_info->command_finished = WHITEHEAT_CMD_COMPLETE;
-		wake_up_interruptible(&command_info->wait_command);
+		wake_up(&command_info->wait_command);
 	} else if (data[0] == WHITEHEAT_CMD_FAILURE) {
 		command_info->command_finished = WHITEHEAT_CMD_FAILURE;
-		wake_up_interruptible(&command_info->wait_command);
+		wake_up(&command_info->wait_command);
 	} else if (data[0] == WHITEHEAT_EVENT) {
 		/* These are unsolicited reports from the firmware, hence no waiting command to wakeup */
 		dbg("%s - event received", __FUNCTION__);
 	} else if (data[0] == WHITEHEAT_GET_DTR_RTS) {
 		memcpy(command_info->result_buffer, &data[1], urb->actual_length - 1);
 		command_info->command_finished = WHITEHEAT_CMD_COMPLETE;
-		wake_up_interruptible(&command_info->wait_command);
+		wake_up(&command_info->wait_command);
 	} else {
 		dbg("%s - bad reply from firmware", __FUNCTION__);
 	}
@@ -1011,18 +1012,18 @@ static void command_port_read_callback (struct urb *urb, struct pt_regs *regs)
 	/* Continue trying to always read */
 	command_port->read_urb->dev = command_port->serial->dev;
 	result = usb_submit_urb(command_port->read_urb, GFP_ATOMIC);
-	spin_unlock_irqrestore(&command_info->lock, flags);
 	if (result)
 		dbg("%s - failed resubmitting read urb, error %d", __FUNCTION__, result);
 }
 
 
-static void whiteheat_read_callback(struct urb *urb, struct pt_regs *regs)
+static void whiteheat_read_callback(struct urb *urb)
 {
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
 	struct whiteheat_urb_wrap *wrap;
 	unsigned char *data = urb->transfer_buffer;
 	struct whiteheat_private *info = usb_get_serial_port_data(port);
+	int status = urb->status;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 
@@ -1036,8 +1037,9 @@ static void whiteheat_read_callback(struct urb *urb, struct pt_regs *regs)
 	list_del(&wrap->list);
 	spin_unlock(&info->lock);
 
-	if (urb->status) {
-		dbg("%s - nonzero read bulk status received: %d", __FUNCTION__, urb->status);
+	if (status) {
+		dbg("%s - nonzero read bulk status received: %d",
+		    __FUNCTION__, status);
 		spin_lock(&info->lock);
 		list_add(&wrap->list, &info->rx_urbs_free);
 		spin_unlock(&info->lock);
@@ -1059,11 +1061,12 @@ static void whiteheat_read_callback(struct urb *urb, struct pt_regs *regs)
 }
 
 
-static void whiteheat_write_callback(struct urb *urb, struct pt_regs *regs)
+static void whiteheat_write_callback(struct urb *urb)
 {
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
 	struct whiteheat_private *info = usb_get_serial_port_data(port);
 	struct whiteheat_urb_wrap *wrap;
+	int status = urb->status;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 
@@ -1074,59 +1077,56 @@ static void whiteheat_write_callback(struct urb *urb, struct pt_regs *regs)
 		err("%s - Not my urb!", __FUNCTION__);
 		return;
 	}
-	list_del(&wrap->list);
-	list_add(&wrap->list, &info->tx_urbs_free);
+	list_move(&wrap->list, &info->tx_urbs_free);
 	spin_unlock(&info->lock);
 
-	if (urb->status) {
-		dbg("%s - nonzero write bulk status received: %d", __FUNCTION__, urb->status);
+	if (status) {
+		dbg("%s - nonzero write bulk status received: %d",
+		    __FUNCTION__, status);
 		return;
 	}
 
-	usb_serial_port_softint((void *)port);
-
-	schedule_work(&port->work);
+	usb_serial_port_softint(port);
 }
 
 
 /*****************************************************************************
  * Connect Tech's White Heat firmware interface
  *****************************************************************************/
-static int firm_send_command (struct usb_serial_port *port, __u8 command, __u8 *data, __u8 datasize)
+static int firm_send_command(struct usb_serial_port *port, __u8 command, __u8 *data, __u8 datasize)
 {
 	struct usb_serial_port *command_port;
 	struct whiteheat_command_private *command_info;
 	struct whiteheat_private *info;
 	__u8 *transfer_buffer;
 	int retval = 0;
-	unsigned long flags;
+	int t;
 
 	dbg("%s - command %d", __FUNCTION__, command);
 
 	command_port = port->serial->port[COMMAND_PORT];
 	command_info = usb_get_serial_port_data(command_port);
-	spin_lock_irqsave(&command_info->lock, flags);
-	command_info->command_finished = FALSE;
+	mutex_lock(&command_info->mutex);
+	command_info->command_finished = false;
 	
 	transfer_buffer = (__u8 *)command_port->write_urb->transfer_buffer;
 	transfer_buffer[0] = command;
 	memcpy (&transfer_buffer[1], data, datasize);
 	command_port->write_urb->transfer_buffer_length = datasize + 1;
 	command_port->write_urb->dev = port->serial->dev;
-	retval = usb_submit_urb (command_port->write_urb, GFP_KERNEL);
+	retval = usb_submit_urb (command_port->write_urb, GFP_NOIO);
 	if (retval) {
 		dbg("%s - submit urb failed", __FUNCTION__);
 		goto exit;
 	}
-	spin_unlock_irqrestore(&command_info->lock, flags);
 
 	/* wait for the command to complete */
-	wait_event_interruptible_timeout(command_info->wait_command, 
-		(command_info->command_finished != FALSE), COMMAND_TIMEOUT);
+	t = wait_event_timeout(command_info->wait_command,
+		(bool)command_info->command_finished, COMMAND_TIMEOUT);
+	if (!t)
+		usb_kill_urb(command_port->write_urb);
 
-	spin_lock_irqsave(&command_info->lock, flags);
-
-	if (command_info->command_finished == FALSE) {
+	if (command_info->command_finished == false) {
 		dbg("%s - command timed out.", __FUNCTION__);
 		retval = -ETIMEDOUT;
 		goto exit;
@@ -1149,7 +1149,7 @@ static int firm_send_command (struct usb_serial_port *port, __u8 command, __u8 *
 	}
 
 exit:
-	spin_unlock_irqrestore(&command_info->lock, flags);
+	mutex_unlock(&command_info->mutex);
 	return retval;
 }
 
@@ -1235,6 +1235,8 @@ static int firm_setup_port(struct usb_serial_port *port) {
 	port_settings.baud = tty_get_baud_rate(port->tty);
 	dbg("%s - baud rate = %d", __FUNCTION__, port_settings.baud);
 
+	/* fixme: should set validated settings */
+	tty_encode_baud_rate(port->tty, port_settings.baud, port_settings.baud);
 	/* handle any settings that aren't specified in the tty structure */
 	port_settings.lloop = 0;
 	
@@ -1302,12 +1304,11 @@ static int start_command_port(struct usb_serial *serial)
 {
 	struct usb_serial_port *command_port;
 	struct whiteheat_command_private *command_info;
-	unsigned long flags;
 	int retval = 0;
 	
 	command_port = serial->port[COMMAND_PORT];
 	command_info = usb_get_serial_port_data(command_port);
-	spin_lock_irqsave(&command_info->lock, flags);
+	mutex_lock(&command_info->mutex);
 	if (!command_info->port_running) {
 		/* Work around HCD bugs */
 		usb_clear_halt(serial->dev, command_port->read_urb->pipe);
@@ -1322,7 +1323,7 @@ static int start_command_port(struct usb_serial *serial)
 	command_info->port_running++;
 
 exit:
-	spin_unlock_irqrestore(&command_info->lock, flags);
+	mutex_unlock(&command_info->mutex);
 	return retval;
 }
 
@@ -1331,15 +1332,14 @@ static void stop_command_port(struct usb_serial *serial)
 {
 	struct usb_serial_port *command_port;
 	struct whiteheat_command_private *command_info;
-	unsigned long flags;
 
 	command_port = serial->port[COMMAND_PORT];
 	command_info = usb_get_serial_port_data(command_port);
-	spin_lock_irqsave(&command_info->lock, flags);
+	mutex_lock(&command_info->mutex);
 	command_info->port_running--;
 	if (!command_info->port_running)
 		usb_kill_urb(command_port->read_urb);
-	spin_unlock_irqrestore(&command_info->lock, flags);
+	mutex_unlock(&command_info->mutex);
 }
 
 
@@ -1360,18 +1360,23 @@ static int start_port_read(struct usb_serial_port *port)
 		wrap = list_entry(tmp, struct whiteheat_urb_wrap, list);
 		urb = wrap->urb;
 		urb->dev = port->serial->dev;
+		spin_unlock_irqrestore(&info->lock, flags);
 		retval = usb_submit_urb(urb, GFP_KERNEL);
 		if (retval) {
+			spin_lock_irqsave(&info->lock, flags);
 			list_add(tmp, &info->rx_urbs_free);
 			list_for_each_safe(tmp, tmp2, &info->rx_urbs_submitted) {
 				wrap = list_entry(tmp, struct whiteheat_urb_wrap, list);
 				urb = wrap->urb;
-				usb_kill_urb(urb);
 				list_del(tmp);
+				spin_unlock_irqrestore(&info->lock, flags);
+				usb_kill_urb(urb);
+				spin_lock_irqsave(&info->lock, flags);
 				list_add(tmp, &info->rx_urbs_free);
 			}
 			break;
 		}
+		spin_lock_irqsave(&info->lock, flags);
 		list_add(tmp, &info->rx_urbs_submitted);
 	}
 
@@ -1402,10 +1407,11 @@ static struct list_head *list_first(struct list_head *head)
 }
 
 
-static void rx_data_softint(void *private)
+static void rx_data_softint(struct work_struct *work)
 {
-	struct usb_serial_port *port = (struct usb_serial_port *)private;
-	struct whiteheat_private *info = usb_get_serial_port_data(port);
+	struct whiteheat_private *info =
+		container_of(work, struct whiteheat_private, rx_work);
+	struct usb_serial_port *port = info->port;
 	struct tty_struct *tty = port->tty;
 	struct whiteheat_urb_wrap *wrap;
 	struct urb *urb;
@@ -1429,7 +1435,9 @@ static void rx_data_softint(void *private)
 		urb = wrap->urb;
 
 		if (tty && urb->actual_length) {
-			if (urb->actual_length > TTY_FLIPBUF_SIZE - tty->flip.count) {
+			int len = tty_buffer_request_room(tty, urb->actual_length);
+			/* This stuff can go away now I suspect */
+			if (unlikely(len < urb->actual_length)) {
 				spin_lock_irqsave(&info->lock, flags);
 				list_add(tmp, &info->rx_urb_q);
 				spin_unlock_irqrestore(&info->lock, flags);
@@ -1437,11 +1445,8 @@ static void rx_data_softint(void *private)
 				schedule_work(&info->rx_work);
 				return;
 			}
-
-			memcpy(tty->flip.char_buf_ptr, urb->transfer_buffer, urb->actual_length);
-			tty->flip.char_buf_ptr += urb->actual_length;
-			tty->flip.count += urb->actual_length;
-			sent += urb->actual_length;
+			tty_insert_flip_string(tty, urb->transfer_buffer, len);
+			sent += len;
 		}
 
 		urb->dev = port->serial->dev;

@@ -1,8 +1,8 @@
 /*
  * arch/v850/kernel/setup.c -- Arch-dependent initialization functions
  *
- *  Copyright (C) 2001,02,03  NEC Electronics Corporation
- *  Copyright (C) 2001,02,03  Miles Bader <miles@gnu.org>
+ *  Copyright (C) 2001,02,03,05,06  NEC Electronics Corporation
+ *  Copyright (C) 2001,02,03,05,06  Miles Bader <miles@gnu.org>
  *
  * This file is subject to the terms and conditions of the GNU General
  * Public License.  See the file COPYING in the main directory of this
@@ -42,7 +42,7 @@ extern char _root_fs_image_start __attribute__ ((__weak__));
 extern char _root_fs_image_end __attribute__ ((__weak__));
 
 
-char command_line[COMMAND_LINE_SIZE];
+char __initdata command_line[COMMAND_LINE_SIZE];
 
 /* Memory not used by the kernel.  */
 static unsigned long total_ram_pages;
@@ -64,8 +64,8 @@ void __init setup_arch (char **cmdline)
 {
 	/* Keep a copy of command line */
 	*cmdline = command_line;
-	memcpy (saved_command_line, command_line, COMMAND_LINE_SIZE);
-	saved_command_line[COMMAND_LINE_SIZE - 1] = '\0';
+	memcpy (boot_command_line, command_line, COMMAND_LINE_SIZE);
+	boot_command_line[COMMAND_LINE_SIZE - 1] = '\0';
 
 	console_verbose ();
 
@@ -98,10 +98,20 @@ void __init trap_init (void)
 }
 
 #ifdef CONFIG_MTD
+
+/* From drivers/mtd/devices/slram.c */
+#define SLRAM_BLK_SZ 0x4000
+
 /* Set the root filesystem to be the given memory region.
    Some parameter may be appended to CMD_LINE.  */
 void set_mem_root (void *addr, size_t len, char *cmd_line)
 {
+	/* Some sort of idiocy in MTD means we must supply a length that's
+	   a multiple of SLRAM_BLK_SZ.  We just round up the real length,
+	   as the file system shouldn't attempt to access anything beyond
+	   the end of the image anyway.  */
+	len = (((len - 1) + SLRAM_BLK_SZ) / SLRAM_BLK_SZ) * SLRAM_BLK_SZ;
+
 	/* The only way to pass info to the MTD slram driver is via
 	   the command line.  */
 	if (*cmd_line) {
@@ -128,13 +138,13 @@ static void nmi_end (unsigned irq)
 }
 
 static struct hw_interrupt_type nmi_irq_type = {
-	"NMI",
-	irq_zero,		/* startup */
-	irq_nop,		/* shutdown */
-	irq_nop,		/* enable */
-	irq_nop,		/* disable */
-	irq_nop,		/* ack */
-	nmi_end,		/* end */
+	.typename = "NMI",
+	.startup = irq_zero,		/* startup */
+	.shutdown = irq_nop,		/* shutdown */
+	.enable = irq_nop,		/* enable */
+	.disable = irq_nop,		/* disable */
+	.ack = irq_nop,		/* ack */
+	.end = nmi_end,		/* end */
 };
 
 void __init init_IRQ (void)
@@ -180,7 +190,7 @@ void free_initmem (void)
 		for (addr = start; addr < end; addr += PAGE_SIZE) {
 			struct page *page = virt_to_page (addr);
 			ClearPageReserved (page);
-			set_page_count (page, 1);
+			init_page_count (page);
 			__free_page (page);
 			total_ram_pages++;
 		}
@@ -283,5 +293,34 @@ init_mem_alloc (unsigned long ram_start, unsigned long ram_len)
 	NODE_DATA(0)->node_mem_map = NULL;
 	free_area_init_node (0, NODE_DATA(0), zones_size,
 			     ADDR_TO_PAGE (PAGE_OFFSET), 0);
-	mem_map = NODE_DATA(0)->node_mem_map;
+}
+
+
+
+/* Taken from m68knommu */
+void show_mem(void)
+{
+    unsigned long i;
+    int free = 0, total = 0, reserved = 0, shared = 0;
+    int cached = 0;
+
+    printk(KERN_INFO "\nMem-info:\n");
+    show_free_areas();
+    i = max_mapnr;
+    while (i-- > 0) {
+	total++;
+	if (PageReserved(mem_map+i))
+	    reserved++;
+	else if (PageSwapCache(mem_map+i))
+	    cached++;
+	else if (!page_count(mem_map+i))
+	    free++;
+	else
+	    shared += page_count(mem_map+i) - 1;
+    }
+    printk(KERN_INFO "%d pages of RAM\n",total);
+    printk(KERN_INFO "%d free pages\n",free);
+    printk(KERN_INFO "%d reserved pages\n",reserved);
+    printk(KERN_INFO "%d pages shared\n",shared);
+    printk(KERN_INFO "%d pages swap cached\n",cached);
 }

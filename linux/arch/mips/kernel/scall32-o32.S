@@ -3,14 +3,14 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 96, 97, 98, 99, 2000, 01, 02 by Ralf Baechle
+ * Copyright (C) 1995-99, 2000- 02, 06 Ralf Baechle <ralf@linux-mips.org>
  * Copyright (C) 2001 MIPS Technologies, Inc.
  * Copyright (C) 2004 Thiemo Seufer
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <asm/asm.h>
 #include <asm/asmmacro.h>
+#include <asm/irqflags.h>
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
@@ -19,7 +19,7 @@
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
 #include <asm/war.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 
 /* Highest syscall used of any syscall flavour */
 #define MAX_SYSCALL_NO	__NR_O32_Linux + __NR_O32_Linux_syscalls
@@ -28,6 +28,7 @@
 NESTED(handle_sys, PT_SIZE, sp)
 	.set	noat
 	SAVE_SOME
+	TRACE_IRQS_ON_RELOAD
 	STI
 	.set	at
 
@@ -94,11 +95,13 @@ syscall_trace_entry:
 	li	a1, 0
 	jal	do_syscall_trace
 
+	move	t0, s0
+	RESTORE_STATIC
 	lw	a0, PT_R4(sp)		# Restore argument registers
 	lw	a1, PT_R5(sp)
 	lw	a2, PT_R6(sp)
 	lw	a3, PT_R7(sp)
-	jalr	s0
+	jalr	t0
 
 	li	t0, -EMAXERRNO - 1	# error?
 	sltu	t0, t0, v0
@@ -241,19 +244,7 @@ illegal_syscall:
 	sw	zero, PT_R7(sp)		# success
 	sw	v0, PT_R2(sp)		# result
 
-	/* Success, so skip usual error handling garbage.  */
-	lw	a2, TI_FLAGS($28)	# syscall tracing enabled?
-	li	t0, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
-	and	t0, a2, t0
-	bnez	t0, 1f
-
-	j	o32_syscall_exit
-
-1:	SAVE_STATIC
-	move	a0, sp
-	li	a1, 1
-	jal	do_syscall_trace
-	j	syscall_exit
+	j	o32_syscall_exit	# continue like a normal syscall
 
 no_mem:	li	v0, -ENOMEM
 	jr	ra
@@ -507,7 +498,7 @@ einval:	li	v0, -EINVAL
 	sys	sys_sched_get_priority_min 1
 	sys	sys_sched_rr_get_interval 2	/* 4165 */
 	sys	sys_nanosleep,		2
-	sys	sys_mremap,		4
+	sys	sys_mremap,		5
 	sys	sys_accept		3
 	sys	sys_bind		3
 	sys	sys_connect		3	/* 4170 */
@@ -578,16 +569,27 @@ einval:	li	v0, -EINVAL
 	sys	sys_fremovexattr	2	/* 4235 */
 	sys	sys_tkill		2
 	sys	sys_sendfile64		5
-	sys	sys_futex		2
+	sys	sys_futex		6
+#ifdef CONFIG_MIPS_MT_FPAFF
+	/*
+	 * For FPU affinity scheduling on MIPS MT processors, we need to
+	 * intercept sys_sched_xxxaffinity() calls until we get a proper hook
+	 * in kernel/sched.c.  Considered only temporary we only support these
+	 * hooks for the 32-bit kernel - there is no MIPS64 MT processor atm.
+	 */
+	sys	mipsmt_sys_sched_setaffinity	3
+	sys	mipsmt_sys_sched_getaffinity	3
+#else
 	sys	sys_sched_setaffinity	3
 	sys	sys_sched_getaffinity	3	/* 4240 */
+#endif /* CONFIG_MIPS_MT_FPAFF */
 	sys	sys_io_setup		2
 	sys	sys_io_destroy		1
 	sys	sys_io_getevents	5
 	sys	sys_io_submit		3
 	sys	sys_io_cancel		3	/* 4245 */
 	sys	sys_exit_group		1
-	sys	sys_lookup_dcookie	3
+	sys	sys_lookup_dcookie	4
 	sys	sys_epoll_create	1
 	sys	sys_epoll_ctl		4
 	sys	sys_epoll_wait		3	/* 4250 */
@@ -618,12 +620,49 @@ einval:	li	v0, -EINVAL
 	sys	sys_mq_notify		2	/* 4275 */
 	sys	sys_mq_getsetattr	3
 	sys	sys_ni_syscall		0	/* sys_vserver */
-	sys	sys_waitid		4
+	sys	sys_waitid		5
 	sys	sys_ni_syscall		0	/* available, was setaltroot */
-	sys	sys_add_key		5
+	sys	sys_add_key		5	/* 4280 */
 	sys	sys_request_key		4
 	sys	sys_keyctl		5
-
+	sys	sys_set_thread_area	1
+	sys	sys_inotify_init	0
+	sys	sys_inotify_add_watch	3	/* 4285 */
+	sys	sys_inotify_rm_watch	2
+	sys	sys_migrate_pages	4
+	sys	sys_openat		4
+	sys	sys_mkdirat		3
+	sys	sys_mknodat		4	/* 4290 */
+	sys	sys_fchownat		5
+	sys	sys_futimesat		3
+	sys	sys_fstatat64		4
+	sys	sys_unlinkat		3
+	sys	sys_renameat		4	/* 4295 */
+	sys	sys_linkat		5
+	sys	sys_symlinkat		3
+	sys	sys_readlinkat		4
+	sys	sys_fchmodat		3
+	sys	sys_faccessat		3	/* 4300 */
+	sys	sys_pselect6		6
+	sys	sys_ppoll		5
+	sys	sys_unshare		1
+	sys	sys_splice		4
+	sys	sys_sync_file_range	7	/* 4305 */
+	sys	sys_tee			4
+	sys	sys_vmsplice		4
+	sys	sys_move_pages		6
+	sys	sys_set_robust_list	2
+	sys	sys_get_robust_list	3	/* 4310 */
+	sys	sys_kexec_load		4
+	sys	sys_getcpu		3
+	sys	sys_epoll_pwait		6
+	sys	sys_ioprio_set		3
+	sys	sys_ioprio_get		2	/* 4315 */
+	sys	sys_utimensat		4
+	sys	sys_signalfd		3
+	sys	sys_timerfd		4
+	sys	sys_eventfd		1
+	sys	sys_fallocate		6	/* 4320 */
 	.endm
 
 	/* We pre-compute the number of _instruction_ bytes needed to

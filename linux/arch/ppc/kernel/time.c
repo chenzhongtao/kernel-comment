@@ -42,7 +42,6 @@
  *             "A Kernel Model for Precision Timekeeping" by Dave Mills
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -58,19 +57,14 @@
 #include <linux/init.h>
 #include <linux/profile.h>
 
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <asm/nvram.h>
 #include <asm/cache.h>
 #include <asm/8xx_immap.h>
 #include <asm/machdep.h>
+#include <asm/irq_regs.h>
 
 #include <asm/time.h>
-
-/* XXX false sharing with below? */
-u64 jiffies_64 = INITIAL_JIFFIES;
-
-EXPORT_SYMBOL(jiffies_64);
 
 unsigned long disarm_decr[NR_CPUS];
 
@@ -87,9 +81,8 @@ unsigned tb_to_us;
 unsigned tb_last_stamp;
 unsigned long tb_to_ns_scale;
 
-extern unsigned long wall_jiffies;
-
-static long time_offset;
+/* used for timezone offset */
+static long timezone_offset;
 
 DEFINE_SPINLOCK(rtc_lock);
 
@@ -121,6 +114,15 @@ unsigned long profile_pc(struct pt_regs *regs)
 EXPORT_SYMBOL(profile_pc);
 #endif
 
+void wakeup_decrementer(void)
+{
+	set_dec(tb_ticks_per_jiffy);
+	/* No currently-supported powerbook has a 601,
+	 * so use get_tbl, not native
+	 */
+	last_jiffy_stamp(0) = tb_last_stamp = get_tbl();
+}
+
 /*
  * timer_interrupt - gets called when the decrementer overflows,
  * with interrupts disabled.
@@ -128,6 +130,7 @@ EXPORT_SYMBOL(profile_pc);
  */
 void timer_interrupt(struct pt_regs * regs)
 {
+	struct pt_regs *old_regs;
 	int next_dec;
 	unsigned long cpu = smp_processor_id();
 	unsigned jiffy_stamp = last_jiffy_stamp(cpu);
@@ -136,12 +139,13 @@ void timer_interrupt(struct pt_regs * regs)
 	if (atomic_read(&ppc_n_lost_interrupts) != 0)
 		do_IRQ(regs);
 
+	old_regs = set_irq_regs(regs);
 	irq_enter();
 
 	while ((next_dec = tb_ticks_per_jiffy - tb_delta(&jiffy_stamp)) <= 0) {
 		jiffy_stamp += tb_ticks_per_jiffy;
 		
-		profile_tick(CPU_PROFILING, regs);
+		profile_tick(CPU_PROFILING);
 		update_process_times(user_mode(regs));
 
 	  	if (smp_processor_id())
@@ -150,7 +154,7 @@ void timer_interrupt(struct pt_regs * regs)
 		/* We are in an interrupt, no need to save/restore flags */
 		write_seqlock(&xtime_lock);
 		tb_last_stamp = jiffy_stamp;
-		do_timer(regs);
+		do_timer(1);
 
 		/*
 		 * update the rtc when needed, this should be performed on the
@@ -168,11 +172,10 @@ void timer_interrupt(struct pt_regs * regs)
 		 * We should have an rtc call that only sets the minutes and
 		 * seconds like on Intel to avoid problems with non UTC clocks.
 		 */
-		if ( ppc_md.set_rtc_time && (time_status & STA_UNSYNC) == 0 &&
+		if ( ppc_md.set_rtc_time && ntp_synced() &&
 		     xtime.tv_sec - last_rtc_update >= 659 &&
-		     abs((xtime.tv_nsec / 1000) - (1000000-1000000/HZ)) < 500000/HZ &&
-		     jiffies - wall_jiffies == 1) {
-		  	if (ppc_md.set_rtc_time(xtime.tv_sec+1 + time_offset) == 0)
+		     abs((xtime.tv_nsec / 1000) - (1000000-1000000/HZ)) < 500000/HZ) {
+		  	if (ppc_md.set_rtc_time(xtime.tv_sec+1 + timezone_offset) == 0)
 				last_rtc_update = xtime.tv_sec+1;
 			else
 				/* Try again one minute later */
@@ -188,6 +191,7 @@ void timer_interrupt(struct pt_regs * regs)
 		ppc_md.heartbeat();
 
 	irq_exit();
+	set_irq_regs(old_regs);
 }
 
 /*
@@ -197,7 +201,7 @@ void do_gettimeofday(struct timeval *tv)
 {
 	unsigned long flags;
 	unsigned long seq;
-	unsigned delta, lost_ticks, usec, sec;
+	unsigned delta, usec, sec;
 
 	do {
 		seq = read_seqbegin_irqsave(&xtime_lock, flags);
@@ -211,10 +215,9 @@ void do_gettimeofday(struct timeval *tv)
 		if (!smp_tb_synchronized)
 			delta = 0;
 #endif /* CONFIG_SMP */
-		lost_ticks = jiffies - wall_jiffies;
 	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
 
-	usec += mulhwu(tb_to_us, tb_ticks_per_jiffy * lost_ticks + delta);
+	usec += mulhwu(tb_to_us, delta);
 	while (usec >= 1000000) {
 	  	sec++;
 		usec -= 1000000;
@@ -255,7 +258,6 @@ int do_settimeofday(struct timespec *tv)
 	 * still reasonable when gettimeofday resolution is 1 jiffy.
 	 */
 	tb_delta = tb_ticks_since(last_jiffy_stamp(smp_processor_id()));
-	tb_delta += (jiffies - wall_jiffies) * tb_ticks_per_jiffy;
 
 	new_nsec -= 1000 * mulhwu(tb_to_us, tb_delta);
 
@@ -270,11 +272,7 @@ int do_settimeofday(struct timespec *tv)
 	 */
 	last_rtc_update = new_sec - 658;
 
-	time_adjust = 0;                /* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_state = TIME_ERROR;        /* p. 24, (a) */
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
+	ntp_clear();
 	write_sequnlock_irqrestore(&xtime_lock, flags);
 	clock_was_set();
 	return 0;
@@ -289,7 +287,7 @@ void __init time_init(void)
 	unsigned old_stamp, stamp, elapsed;
 
         if (ppc_md.time_init != NULL)
-                time_offset = ppc_md.time_init();
+                timezone_offset = ppc_md.time_init();
 
 	if (__USE_RTC()) {
 		/* 601 processor: dec counts down by 128 every 128ns */
@@ -334,10 +332,10 @@ void __init time_init(void)
 	set_dec(tb_ticks_per_jiffy);
 
 	/* If platform provided a timezone (pmac), we correct the time */
-        if (time_offset) {
-		sys_tz.tz_minuteswest = -time_offset / 60;
+        if (timezone_offset) {
+		sys_tz.tz_minuteswest = -timezone_offset / 60;
 		sys_tz.tz_dsttime = 0;
-		xtime.tv_sec -= time_offset;
+		xtime.tv_sec -= timezone_offset;
         }
         set_normalized_timespec(&wall_to_monotonic,
                                 -xtime.tv_sec, -xtime.tv_nsec);

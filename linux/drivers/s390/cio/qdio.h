@@ -1,19 +1,16 @@
 #ifndef _CIO_QDIO_H
 #define _CIO_QDIO_H
 
-#define VERSION_CIO_QDIO_H "$Revision: 1.26 $"
+#include <asm/page.h>
+
+#include "schid.h"
 
 #ifdef CONFIG_QDIO_DEBUG
 #define QDIO_VERBOSE_LEVEL 9
 #else /* CONFIG_QDIO_DEBUG */
 #define QDIO_VERBOSE_LEVEL 5
 #endif /* CONFIG_QDIO_DEBUG */
-
 #define QDIO_USE_PROCESSING_STATE
-
-#ifdef CONFIG_QDIO_PERF_STATS
-#define QDIO_PERFORMANCE_STATS
-#endif /* CONFIG_QDIO_PERF_STATS */
 
 #define QDIO_MINIMAL_BH_RELIEF_TIME 16
 #define QDIO_TIMER_POLL_VALUE 1
@@ -42,7 +39,7 @@
 
 #define QDIO_Q_LAPS 5
 
-#define QDIO_STORAGE_KEY 0
+#define QDIO_STORAGE_KEY PAGE_DEFAULT_KEY
 
 #define L2_CACHELINE_SIZE 256
 #define INDICATORS_PER_CACHELINE (L2_CACHELINE_SIZE/sizeof(__u32))
@@ -63,6 +60,7 @@
 #define QDIO_ACTIVATE_TIMEOUT ((5*HZ)>>10)
 #define QDIO_CLEANUP_CLEAR_TIMEOUT (20*HZ)
 #define QDIO_CLEANUP_HALT_TIMEOUT (10*HZ)
+#define QDIO_FORCE_CHECK_TIMEOUT (10*HZ)
 
 enum qdio_irq_states {
 	QDIO_IRQ_STATE_INACTIVE,
@@ -130,7 +128,7 @@ enum qdio_irq_states {
 
 #define QDIO_DBF_SETUP_NAME "qdio_setup"
 #define QDIO_DBF_SETUP_LEN 8
-#define QDIO_DBF_SETUP_INDEX 2
+#define QDIO_DBF_SETUP_PAGES 4
 #define QDIO_DBF_SETUP_NR_AREAS 1
 #ifdef CONFIG_QDIO_DEBUG
 #define QDIO_DBF_SETUP_LEVEL 6
@@ -140,7 +138,7 @@ enum qdio_irq_states {
 
 #define QDIO_DBF_SBAL_NAME "qdio_labs" /* sbal */
 #define QDIO_DBF_SBAL_LEN 256
-#define QDIO_DBF_SBAL_INDEX 2
+#define QDIO_DBF_SBAL_PAGES 4
 #define QDIO_DBF_SBAL_NR_AREAS 2
 #ifdef CONFIG_QDIO_DEBUG
 #define QDIO_DBF_SBAL_LEVEL 6
@@ -152,16 +150,16 @@ enum qdio_irq_states {
 #define QDIO_DBF_TRACE_LEN 8
 #define QDIO_DBF_TRACE_NR_AREAS 2
 #ifdef CONFIG_QDIO_DEBUG
-#define QDIO_DBF_TRACE_INDEX 4
+#define QDIO_DBF_TRACE_PAGES 16
 #define QDIO_DBF_TRACE_LEVEL 4 /* -------- could be even more verbose here */
 #else /* CONFIG_QDIO_DEBUG */
-#define QDIO_DBF_TRACE_INDEX 2
+#define QDIO_DBF_TRACE_PAGES 4
 #define QDIO_DBF_TRACE_LEVEL 2
 #endif /* CONFIG_QDIO_DEBUG */
 
 #define QDIO_DBF_SENSE_NAME "qdio_sense"
 #define QDIO_DBF_SENSE_LEN 64
-#define QDIO_DBF_SENSE_INDEX 1
+#define QDIO_DBF_SENSE_PAGES 2
 #define QDIO_DBF_SENSE_NR_AREAS 1
 #ifdef CONFIG_QDIO_DEBUG
 #define QDIO_DBF_SENSE_LEVEL 6
@@ -174,13 +172,13 @@ enum qdio_irq_states {
 
 #define QDIO_DBF_SLSB_OUT_NAME "qdio_slsb_out"
 #define QDIO_DBF_SLSB_OUT_LEN QDIO_MAX_BUFFERS_PER_Q
-#define QDIO_DBF_SLSB_OUT_INDEX 8
+#define QDIO_DBF_SLSB_OUT_PAGES 256
 #define QDIO_DBF_SLSB_OUT_NR_AREAS 1
 #define QDIO_DBF_SLSB_OUT_LEVEL 6
 
 #define QDIO_DBF_SLSB_IN_NAME "qdio_slsb_in"
 #define QDIO_DBF_SLSB_IN_LEN QDIO_MAX_BUFFERS_PER_Q
-#define QDIO_DBF_SLSB_IN_INDEX 8
+#define QDIO_DBF_SLSB_IN_PAGES 256
 #define QDIO_DBF_SLSB_IN_NR_AREAS 1
 #define QDIO_DBF_SLSB_IN_LEVEL 6
 #endif /* CONFIG_QDIO_DEBUG */
@@ -190,52 +188,52 @@ enum qdio_irq_states {
 #if QDIO_VERBOSE_LEVEL>8
 #define QDIO_PRINT_STUPID(x...) printk( KERN_DEBUG QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_STUPID(x...)
+#define QDIO_PRINT_STUPID(x...) do { } while (0)
 #endif
 
 #if QDIO_VERBOSE_LEVEL>7
 #define QDIO_PRINT_ALL(x...) printk( QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_ALL(x...)
+#define QDIO_PRINT_ALL(x...) do { } while (0)
 #endif
 
 #if QDIO_VERBOSE_LEVEL>6
 #define QDIO_PRINT_INFO(x...) printk( QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_INFO(x...)
+#define QDIO_PRINT_INFO(x...) do { } while (0)
 #endif
 
 #if QDIO_VERBOSE_LEVEL>5
 #define QDIO_PRINT_WARN(x...) printk( QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_WARN(x...)
+#define QDIO_PRINT_WARN(x...) do { } while (0)
 #endif
 
 #if QDIO_VERBOSE_LEVEL>4
 #define QDIO_PRINT_ERR(x...) printk( QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_ERR(x...)
+#define QDIO_PRINT_ERR(x...) do { } while (0)
 #endif
 
 #if QDIO_VERBOSE_LEVEL>3
 #define QDIO_PRINT_CRIT(x...) printk( QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_CRIT(x...)
+#define QDIO_PRINT_CRIT(x...) do { } while (0)
 #endif
 
 #if QDIO_VERBOSE_LEVEL>2
 #define QDIO_PRINT_ALERT(x...) printk( QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_ALERT(x...)
+#define QDIO_PRINT_ALERT(x...) do { } while (0)
 #endif
 
 #if QDIO_VERBOSE_LEVEL>1
 #define QDIO_PRINT_EMERG(x...) printk( QDIO_PRINTK_HEADER x)
 #else
-#define QDIO_PRINT_EMERG(x...)
+#define QDIO_PRINT_EMERG(x...) do { } while (0)
 #endif
 
-#define HEXDUMP16(importance,header,ptr) \
+#define QDIO_HEXDUMP16(importance,header,ptr) \
 QDIO_PRINT_##importance(header "%02x %02x %02x %02x  " \
 			"%02x %02x %02x %02x  %02x %02x %02x %02x  " \
 			"%02x %02x %02x %02x\n",*(((char*)ptr)), \
@@ -263,165 +261,124 @@ QDIO_PRINT_##importance(header "%02x %02x %02x %02x  %02x %02x %02x %02x  " \
 /*
  * Some instructions as assembly
  */
-extern __inline__ int 
-do_siga_sync(unsigned int irq, unsigned int mask1, unsigned int mask2)
+
+static inline int
+do_sqbs(unsigned long sch, unsigned char state, int queue,
+       unsigned int *start, unsigned int *count)
 {
+#ifdef CONFIG_64BIT
+       register unsigned long _ccq asm ("0") = *count;
+       register unsigned long _sch asm ("1") = sch;
+       unsigned long _queuestart = ((unsigned long)queue << 32) | *start;
+
+       asm volatile(
+	       "	.insn	rsy,0xeb000000008A,%1,0,0(%2)"
+	       : "+d" (_ccq), "+d" (_queuestart)
+	       : "d" ((unsigned long)state), "d" (_sch)
+	       : "memory", "cc");
+       *count = _ccq & 0xff;
+       *start = _queuestart & 0xff;
+
+       return (_ccq >> 32) & 0xff;
+#else
+       return 0;
+#endif
+}
+
+static inline int
+do_eqbs(unsigned long sch, unsigned char *state, int queue,
+	unsigned int *start, unsigned int *count)
+{
+#ifdef CONFIG_64BIT
+	register unsigned long _ccq asm ("0") = *count;
+	register unsigned long _sch asm ("1") = sch;
+	unsigned long _queuestart = ((unsigned long)queue << 32) | *start;
+	unsigned long _state = 0;
+
+	asm volatile(
+		"	.insn	rrf,0xB99c0000,%1,%2,0,0"
+		: "+d" (_ccq), "+d" (_queuestart), "+d" (_state)
+		: "d" (_sch)
+		: "memory", "cc" );
+	*count = _ccq & 0xff;
+	*start = _queuestart & 0xff;
+	*state = _state & 0xff;
+
+	return (_ccq >> 32) & 0xff;
+#else
+	return 0;
+#endif
+}
+
+
+static inline int
+do_siga_sync(struct subchannel_id schid, unsigned int mask1, unsigned int mask2)
+{
+	register unsigned long reg0 asm ("0") = 2;
+	register struct subchannel_id reg1 asm ("1") = schid;
+	register unsigned long reg2 asm ("2") = mask1;
+	register unsigned long reg3 asm ("3") = mask2;
 	int cc;
 
-#ifndef CONFIG_ARCH_S390X
-	asm volatile (
-		"lhi	0,2	\n\t"
-		"lr	1,%1	\n\t"
-		"lr	2,%2	\n\t"
-		"lr	3,%3	\n\t"
-		"siga   0	\n\t"
-		"ipm	%0	\n\t"
-		"srl	%0,28	\n\t"
+	asm volatile(
+		"	siga	0\n"
+		"	ipm	%0\n"
+		"	srl	%0,28\n"
 		: "=d" (cc)
-		: "d" (0x10000|irq), "d" (mask1), "d" (mask2)
-		: "cc", "0", "1", "2", "3"
-		);
-#else /* CONFIG_ARCH_S390X */
-	asm volatile (
-		"lghi	0,2	\n\t"
-		"llgfr	1,%1	\n\t"
-		"llgfr	2,%2	\n\t"
-		"llgfr	3,%3	\n\t"
-		"siga   0	\n\t"
-		"ipm	%0	\n\t"
-		"srl	%0,28	\n\t"
-		: "=d" (cc)
-		: "d" (0x10000|irq), "d" (mask1), "d" (mask2)
-		: "cc", "0", "1", "2", "3"
-		);
-#endif /* CONFIG_ARCH_S390X */
+		: "d" (reg0), "d" (reg1), "d" (reg2), "d" (reg3) : "cc");
 	return cc;
 }
 
-extern __inline__ int
-do_siga_input(unsigned int irq, unsigned int mask)
+static inline int
+do_siga_input(struct subchannel_id schid, unsigned int mask)
 {
+	register unsigned long reg0 asm ("0") = 1;
+	register struct subchannel_id reg1 asm ("1") = schid;
+	register unsigned long reg2 asm ("2") = mask;
 	int cc;
 
-#ifndef CONFIG_ARCH_S390X
-	asm volatile (
-		"lhi	0,1	\n\t"
-		"lr	1,%1	\n\t"
-		"lr	2,%2	\n\t"
-		"siga   0	\n\t"
-		"ipm	%0	\n\t"
-		"srl	%0,28	\n\t"
+	asm volatile(
+		"	siga	0\n"
+		"	ipm	%0\n"
+		"	srl	%0,28\n"
 		: "=d" (cc)
-		: "d" (0x10000|irq), "d" (mask)
-		: "cc", "0", "1", "2", "memory"
-		);
-#else /* CONFIG_ARCH_S390X */
-	asm volatile (
-		"lghi	0,1	\n\t"
-		"llgfr	1,%1	\n\t"
-		"llgfr	2,%2	\n\t"
-		"siga   0	\n\t"
-		"ipm	%0	\n\t"
-		"srl	%0,28	\n\t"
-		: "=d" (cc)
-		: "d" (0x10000|irq), "d" (mask)
-		: "cc", "0", "1", "2", "memory"
-		);
-#endif /* CONFIG_ARCH_S390X */
-	
+		: "d" (reg0), "d" (reg1), "d" (reg2) : "cc", "memory");
 	return cc;
 }
 
-extern __inline__ int
-do_siga_output(unsigned long irq, unsigned long mask, __u32 *bb)
+static inline int
+do_siga_output(unsigned long schid, unsigned long mask, __u32 *bb,
+	       unsigned int fc)
 {
+	register unsigned long __fc asm("0") = fc;
+	register unsigned long __schid asm("1") = schid;
+	register unsigned long __mask asm("2") = mask;
 	int cc;
-	__u32 busy_bit;
 
-#ifndef CONFIG_ARCH_S390X
-	asm volatile (
-		"lhi	0,0	\n\t"
-		"lr	1,%2	\n\t"
-		"lr	2,%3	\n\t"
-		"siga	0	\n\t"
-		"0:"
-		"ipm	%0	\n\t"
-		"srl	%0,28	\n\t"
-		"srl	0,31	\n\t"
-		"lr	%1,0	\n\t"
-		"1:	\n\t"
-		".section .fixup,\"ax\"\n\t"
-		"2:	\n\t"
-		"lhi	%0,%4	\n\t"
-		"bras	1,3f	\n\t"
-		".long 1b	\n\t"
-		"3:	\n\t"
-		"l	1,0(1)	\n\t"
-		"br	1	\n\t"
-		".previous	\n\t"
-		".section __ex_table,\"a\"\n\t"
-		".align 4	\n\t"
-		".long	0b,2b	\n\t"
-		".previous	\n\t"
-		: "=d" (cc), "=d" (busy_bit)
-		: "d" (0x10000|irq), "d" (mask),
-		"i" (QDIO_SIGA_ERROR_ACCESS_EXCEPTION)
-		: "cc", "0", "1", "2", "memory"
-		);
-#else /* CONFIG_ARCH_S390X */
-	asm volatile (
-		"lghi	0,0	\n\t"
-		"llgfr	1,%2	\n\t"
-		"llgfr	2,%3	\n\t"
-		"siga	0	\n\t"
-		"0:"
-		"ipm	%0	\n\t"
-		"srl	%0,28	\n\t"
-		"srl	0,31	\n\t"
-		"llgfr	%1,0	\n\t"
-		"1:	\n\t"
-		".section .fixup,\"ax\"\n\t"
-		"lghi	%0,%4	\n\t"
-		"jg	1b	\n\t"
-		".previous\n\t"
-		".section __ex_table,\"a\"\n\t"
-		".align 8	\n\t"
-		".quad	0b,1b	\n\t"
-		".previous	\n\t"
-		: "=d" (cc), "=d" (busy_bit)
-		: "d" (0x10000|irq), "d" (mask),
-		"i" (QDIO_SIGA_ERROR_ACCESS_EXCEPTION)
-		: "cc", "0", "1", "2", "memory"
-		);
-#endif /* CONFIG_ARCH_S390X */
-	
-	(*bb) = busy_bit;
+	asm volatile(
+		"	siga	0\n"
+		"0:	ipm	%0\n"
+		"	srl	%0,28\n"
+		"1:\n"
+		EX_TABLE(0b,1b)
+		: "=d" (cc), "+d" (__fc), "+d" (__schid), "+d" (__mask)
+		: "0" (QDIO_SIGA_ERROR_ACCESS_EXCEPTION)
+		: "cc", "memory");
+	(*bb) = ((unsigned int) __fc) >> 31;
 	return cc;
 }
 
-extern __inline__ unsigned long
+static inline unsigned long
 do_clear_global_summary(void)
 {
+	register unsigned long __fn asm("1") = 3;
+	register unsigned long __tmp asm("2");
+	register unsigned long __time asm("3");
 
-	unsigned long time;
-
-#ifndef CONFIG_ARCH_S390X
-	asm volatile (
-		"lhi	1,3	\n\t"
-		".insn	rre,0xb2650000,2,0	\n\t"
-		"lr	%0,3	\n\t"
-		: "=d" (time) : : "cc", "1", "2", "3"
-		);
-#else /* CONFIG_ARCH_S390X */
-	asm volatile (
-		"lghi	1,3	\n\t"
-		".insn	rre,0xb2650000,2,0	\n\t"
-		"lgr	%0,3	\n\t"
-		: "=d" (time) : : "cc", "1", "2", "3"
-		);
-#endif /* CONFIG_ARCH_S390X */
-	
-	return time;
+	asm volatile(
+		"	.insn	rre,0xb2650000,2,0"
+		: "+d" (__fn), "=d" (__tmp), "=d" (__time));
+	return __time;
 }
 	
 /*
@@ -449,27 +406,45 @@ do_clear_global_summary(void)
 #define CHSC_FLAG_SIGA_SYNC_DONE_ON_THININTS 0x08
 #define CHSC_FLAG_SIGA_SYNC_DONE_ON_OUTB_PCIS 0x04
 
-#ifdef QDIO_PERFORMANCE_STATS
 struct qdio_perf_stats {
-	unsigned int tl_runs;
+#ifdef CONFIG_64BIT
+	atomic64_t tl_runs;
+	atomic64_t outbound_tl_runs;
+	atomic64_t outbound_tl_runs_resched;
+	atomic64_t inbound_tl_runs;
+	atomic64_t inbound_tl_runs_resched;
+	atomic64_t inbound_thin_tl_runs;
+	atomic64_t inbound_thin_tl_runs_resched;
 
-	unsigned int siga_outs;
-	unsigned int siga_ins;
-	unsigned int siga_syncs;
-	unsigned int pcis;
-	unsigned int thinints;
-	unsigned int fast_reqs;
+	atomic64_t siga_outs;
+	atomic64_t siga_ins;
+	atomic64_t siga_syncs;
+	atomic64_t pcis;
+	atomic64_t thinints;
+	atomic64_t fast_reqs;
 
-	__u64 start_time_outbound;
-	unsigned int outbound_cnt;
-	unsigned int outbound_time;
-	__u64 start_time_inbound;
-	unsigned int inbound_cnt;
-	unsigned int inbound_time;
+	atomic64_t outbound_cnt;
+	atomic64_t inbound_cnt;
+#else /* CONFIG_64BIT */
+	atomic_t tl_runs;
+	atomic_t outbound_tl_runs;
+	atomic_t outbound_tl_runs_resched;
+	atomic_t inbound_tl_runs;
+	atomic_t inbound_tl_runs_resched;
+	atomic_t inbound_thin_tl_runs;
+	atomic_t inbound_thin_tl_runs_resched;
+
+	atomic_t siga_outs;
+	atomic_t siga_ins;
+	atomic_t siga_syncs;
+	atomic_t pcis;
+	atomic_t thinints;
+	atomic_t fast_reqs;
+
+	atomic_t outbound_cnt;
+	atomic_t inbound_cnt;
+#endif /* CONFIG_64BIT */
 };
-#endif /* QDIO_PERFORMANCE_STATS */
-
-#define atomic_swap(a,b) xchg((int*)a.counter,b)
 
 /* unlikely as the later the better */
 #define SYNC_MEMORY if (unlikely(q->siga_sync)) qdio_siga_sync_q(q)
@@ -486,42 +461,21 @@ struct qdio_perf_stats {
 
 #define MY_MODULE_STRING(x) #x
 
-#ifdef CONFIG_ARCH_S390X
+#ifdef CONFIG_64BIT
 #define QDIO_GET_ADDR(x) ((__u32)(unsigned long)x)
-#else /* CONFIG_ARCH_S390X */
+#else /* CONFIG_64BIT */
 #define QDIO_GET_ADDR(x) ((__u32)(long)x)
-#endif /* CONFIG_ARCH_S390X */
-
-#ifdef CONFIG_QDIO_DEBUG
-#define set_slsb(x,y) \
-  if(q->queue_type==QDIO_TRACE_QTYPE) { \
-        if(q->is_input_q) { \
-            QDIO_DBF_HEX2(0,slsb_in,&q->slsb,QDIO_MAX_BUFFERS_PER_Q); \
-        } else { \
-            QDIO_DBF_HEX2(0,slsb_out,&q->slsb,QDIO_MAX_BUFFERS_PER_Q); \
-        } \
-  } \
-  qdio_set_slsb(x,y); \
-  if(q->queue_type==QDIO_TRACE_QTYPE) { \
-        if(q->is_input_q) { \
-            QDIO_DBF_HEX2(0,slsb_in,&q->slsb,QDIO_MAX_BUFFERS_PER_Q); \
-        } else { \
-            QDIO_DBF_HEX2(0,slsb_out,&q->slsb,QDIO_MAX_BUFFERS_PER_Q); \
-        } \
-  }
-#else /* CONFIG_QDIO_DEBUG */
-#define set_slsb(x,y) qdio_set_slsb(x,y)
-#endif /* CONFIG_QDIO_DEBUG */
+#endif /* CONFIG_64BIT */
 
 struct qdio_q {
 	volatile struct slsb slsb;
 
 	char unused[QDIO_MAX_BUFFERS_PER_Q];
 
-	__u32 * volatile dev_st_chg_ind;
+	__u32 * dev_st_chg_ind;
 
 	int is_input_q;
-	int irq;
+	struct subchannel_id schid;
 	struct ccw_device *cdev;
 
 	unsigned int is_iqdio_q;
@@ -558,13 +512,14 @@ struct qdio_q {
 
 	void *irq_ptr;
 
-#ifdef QDIO_USE_TIMERS_FOR_POLLING
 	struct timer_list timer;
+#ifdef QDIO_USE_TIMERS_FOR_POLLING
 	atomic_t timer_already_set;
 	spinlock_t timer_lock;
 #else /* QDIO_USE_TIMERS_FOR_POLLING */
 	struct tasklet_struct tasklet;
 #endif /* QDIO_USE_TIMERS_FOR_POLLING */
+
 
 	enum qdio_irq_states state;
 
@@ -604,6 +559,7 @@ struct qdio_q {
 	} timing;
 	atomic_t busy_siga_counter;
         unsigned int queue_type;
+	unsigned int is_pci_out;
 
 	/* leave this member at the end. won't be cleared in qdio_fill_qs */
 	struct slib *slib; /* a page is allocated under this pointer,
@@ -615,12 +571,16 @@ struct qdio_irq {
 	__u32 * volatile dev_st_chg_ind;
 
 	unsigned long int_parm;
-	int irq;
+	struct subchannel_id schid;
 
 	unsigned int is_iqdio_irq;
 	unsigned int is_thinint_irq;
 	unsigned int hydra_gives_outbound_pcis;
 	unsigned int sync_done_on_outb_pcis;
+
+	/* QEBSM facility */
+	unsigned int is_qebsm;
+	unsigned long sch_token;
 
 	enum qdio_irq_states state;
 

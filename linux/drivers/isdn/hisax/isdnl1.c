@@ -151,7 +151,7 @@ l1m_debug(struct FsmInst *fi, char *fmt, ...)
 	va_end(args);
 }
 
-void
+static void
 L1activated(struct IsdnCardState *cs)
 {
 	struct PStack *st;
@@ -166,7 +166,7 @@ L1activated(struct IsdnCardState *cs)
 	}
 }
 
-void
+static void
 L1deactivated(struct IsdnCardState *cs)
 {
 	struct PStack *st;
@@ -279,7 +279,8 @@ BChannel_proc_xmt(struct BCState *bcs)
 	if (test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags))
 		st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
 	if (!test_bit(BC_FLG_ACTIV, &bcs->Flag)) {
-		if (!test_bit(BC_FLG_BUSY, &bcs->Flag) && (!skb_queue_len(&bcs->squeue))) {
+		if (!test_bit(BC_FLG_BUSY, &bcs->Flag) &&
+		    skb_queue_empty(&bcs->squeue)) {
 			st->l2.l2l1(st, PH_DEACTIVATE | CONFIRM, NULL);
 		}
 	}
@@ -314,8 +315,10 @@ BChannel_proc_ack(struct BCState *bcs)
 }
 
 void
-BChannel_bh(struct BCState *bcs)
+BChannel_bh(struct work_struct *work)
 {
+	struct BCState *bcs = container_of(work, struct BCState, tqueue);
+
 	if (!bcs)
 		return;
 	if (test_and_clear_bit(B_RCVBUFREADY, &bcs->event))
@@ -361,7 +364,7 @@ init_bcstate(struct IsdnCardState *cs, int bc)
 
 	bcs->cs = cs;
 	bcs->channel = bc;
-	INIT_WORK(&bcs->tqueue, (void *)(void *) BChannel_bh, bcs);
+	INIT_WORK(&bcs->tqueue, BChannel_bh);
 	spin_lock_init(&bcs->aclock);
 	bcs->BC_SetStack = NULL;
 	bcs->BC_Close = NULL;
@@ -370,7 +373,7 @@ init_bcstate(struct IsdnCardState *cs, int bc)
 
 #ifdef L2FRAME_DEBUG		/* psa */
 
-char *
+static char *
 l2cmd(u_char cmd)
 {
 	switch (cmd & ~0x10) {
@@ -404,7 +407,7 @@ l2cmd(u_char cmd)
 
 static char tmpdeb[32];
 
-char *
+static char *
 l2frames(u_char * ptr)
 {
 	switch (ptr[2] & ~0x10) {

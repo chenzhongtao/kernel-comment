@@ -1,27 +1,27 @@
 /*******************************************************************************
 
-  
-  Copyright(c) 1999 - 2004 Intel Corporation. All rights reserved.
-  
-  This program is free software; you can redistribute it and/or modify it 
-  under the terms of the GNU General Public License as published by the Free 
-  Software Foundation; either version 2 of the License, or (at your option) 
-  any later version.
-  
-  This program is distributed in the hope that it will be useful, but WITHOUT 
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or 
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for 
+  Intel PRO/100 Linux driver
+  Copyright(c) 1999 - 2006 Intel Corporation.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms and conditions of the GNU General Public License,
+  version 2, as published by the Free Software Foundation.
+
+  This program is distributed in the hope it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
   more details.
-  
+
   You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc., 59 
-  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-  
-  The full GNU General Public License is included in this distribution in the
-  file called LICENSE.
-  
+  this program; if not, write to the Free Software Foundation, Inc.,
+  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+
+  The full GNU General Public License is included in this distribution in
+  the file called "COPYING".
+
   Contact Information:
   Linux NICS <linux.nics@intel.com>
+  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
 
 *******************************************************************************/
@@ -132,9 +132,12 @@
  * 	TODO:
  * 	o several entry points race with dev->close
  * 	o check for tx-no-resources/stop Q races with tx clean/wake Q
+ *
+ *	FIXES:
+ * 2005/12/02 - Michael O'Donnell <Michael.ODonnell at stratus dot com>
+ *	- Stratus87247: protect MDI control register manipulations
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -143,6 +146,7 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/mii.h>
@@ -154,10 +158,10 @@
 
 
 #define DRV_NAME		"e100"
-#define DRV_EXT		"-NAPI"
-#define DRV_VERSION		"3.3.6-k2"DRV_EXT
+#define DRV_EXT			"-NAPI"
+#define DRV_VERSION		"3.5.23-k4"DRV_EXT
 #define DRV_DESCRIPTION		"Intel(R) PRO/100 Network Driver"
-#define DRV_COPYRIGHT		"Copyright(c) 1999-2004 Intel Corporation"
+#define DRV_COPYRIGHT		"Copyright(c) 1999-2006 Intel Corporation"
 #define PFX			DRV_NAME ": "
 
 #define E100_WATCHDOG_PERIOD	(2 * HZ)
@@ -169,8 +173,14 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
 
 static int debug = 3;
+static int eeprom_bad_csum_allow = 0;
+static int use_io = 0;
 module_param(debug, int, 0);
+module_param(eeprom_bad_csum_allow, int, 0);
+module_param(use_io, int, 0);
 MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
+MODULE_PARM_DESC(eeprom_bad_csum_allow, "Allow bad eeprom checksums");
+MODULE_PARM_DESC(use_io, "Force use of i/o access mode");
 #define DPRINTK(nlevel, klevel, fmt, args...) \
 	(void)((NETIF_MSG_##nlevel & nic->msg_enable) && \
 	printk(KERN_##klevel PFX "%s: %s: " fmt, nic->netdev->name, \
@@ -210,11 +220,17 @@ static struct pci_device_id e100_id_table[] = {
 	INTEL_8255X_ETHERNET_DEVICE(0x1069, 6),
 	INTEL_8255X_ETHERNET_DEVICE(0x106A, 6),
 	INTEL_8255X_ETHERNET_DEVICE(0x106B, 6),
+	INTEL_8255X_ETHERNET_DEVICE(0x1091, 7),
+	INTEL_8255X_ETHERNET_DEVICE(0x1092, 7),
+	INTEL_8255X_ETHERNET_DEVICE(0x1093, 7),
+	INTEL_8255X_ETHERNET_DEVICE(0x1094, 7),
+	INTEL_8255X_ETHERNET_DEVICE(0x1095, 7),
 	INTEL_8255X_ETHERNET_DEVICE(0x1209, 0),
 	INTEL_8255X_ETHERNET_DEVICE(0x1229, 0),
 	INTEL_8255X_ETHERNET_DEVICE(0x2449, 2),
 	INTEL_8255X_ETHERNET_DEVICE(0x2459, 2),
 	INTEL_8255X_ETHERNET_DEVICE(0x245D, 2),
+	INTEL_8255X_ETHERNET_DEVICE(0x27DC, 7),
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, e100_id_table);
@@ -269,6 +285,12 @@ enum scb_status {
 	rus_mask         = 0x3C,
 };
 
+enum ru_state  {
+	RU_SUSPENDED = 0,
+	RU_RUNNING	 = 1,
+	RU_UNINITIALIZED = -1,
+};
+
 enum scb_stat_ack {
 	stat_ack_not_ours    = 0x00,
 	stat_ack_sw_gen      = 0x04,
@@ -303,7 +325,7 @@ enum cuc_dump {
 	cuc_dump_complete       = 0x0000A005,
 	cuc_dump_reset_complete = 0x0000A007,
 };
-		
+
 enum port {
 	software_reset  = 0x0000,
 	selftest        = 0x0001,
@@ -510,13 +532,14 @@ struct nic {
 	struct rx *rx_to_use;
 	struct rx *rx_to_clean;
 	struct rfd blank_rfd;
-	int ru_running;
+	enum ru_state ru_running;
 
 	spinlock_t cb_lock			____cacheline_aligned;
 	spinlock_t cmd_lock;
 	struct csr __iomem *csr;
 	enum scb_cmd_lo cuc_cmd;
 	unsigned int cbs_avail;
+	struct napi_struct napi;
 	struct cb *cbs;
 	struct cb *cb_to_use;
 	struct cb *cb_to_send;
@@ -535,10 +558,10 @@ struct nic {
 	enum mac mac;
 	enum phy phy;
 	struct params params;
-	struct net_device_stats net_stats;
 	struct timer_list watchdog;
 	struct timer_list blink_timer;
 	struct mii_if_info mii;
+	struct work_struct tx_timeout_task;
 	enum loopback loopback;
 
 	struct mem *mem;
@@ -560,48 +583,48 @@ struct nic {
 	u32 rx_tco_frames;
 	u32 rx_over_length_errors;
 
-	u8 rev_id;
 	u16 leds;
 	u16 eeprom_wc;
 	u16 eeprom[256];
+	spinlock_t mdio_lock;
 };
 
 static inline void e100_write_flush(struct nic *nic)
 {
 	/* Flush previous PCI writes through intermediate bridges
 	 * by doing a benign read */
-	(void)readb(&nic->csr->scb.status);
+	(void)ioread8(&nic->csr->scb.status);
 }
 
-static inline void e100_enable_irq(struct nic *nic)
+static void e100_enable_irq(struct nic *nic)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&nic->cmd_lock, flags);
-	writeb(irq_mask_none, &nic->csr->scb.cmd_hi);
-	spin_unlock_irqrestore(&nic->cmd_lock, flags);
+	iowrite8(irq_mask_none, &nic->csr->scb.cmd_hi);
 	e100_write_flush(nic);
+	spin_unlock_irqrestore(&nic->cmd_lock, flags);
 }
 
-static inline void e100_disable_irq(struct nic *nic)
+static void e100_disable_irq(struct nic *nic)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&nic->cmd_lock, flags);
-	writeb(irq_mask_all, &nic->csr->scb.cmd_hi);
-	spin_unlock_irqrestore(&nic->cmd_lock, flags);
+	iowrite8(irq_mask_all, &nic->csr->scb.cmd_hi);
 	e100_write_flush(nic);
+	spin_unlock_irqrestore(&nic->cmd_lock, flags);
 }
 
 static void e100_hw_reset(struct nic *nic)
 {
 	/* Put CU and RU into idle with a selective reset to get
 	 * device off of PCI bus */
-	writel(selective_reset, &nic->csr->port);
+	iowrite32(selective_reset, &nic->csr->port);
 	e100_write_flush(nic); udelay(20);
 
 	/* Now fully reset device */
-	writel(software_reset, &nic->csr->port);
+	iowrite32(software_reset, &nic->csr->port);
 	e100_write_flush(nic); udelay(20);
 
 	/* Mask off our interrupt line - it's unmasked after reset */
@@ -618,7 +641,7 @@ static int e100_self_test(struct nic *nic)
 	nic->mem->selftest.signature = 0;
 	nic->mem->selftest.result = 0xFFFFFFFF;
 
-	writel(selftest | dma_addr, &nic->csr->port);
+	iowrite32(selftest | dma_addr, &nic->csr->port);
 	e100_write_flush(nic);
 	/* Wait 10 msec for self-test to complete */
 	msleep(10);
@@ -656,23 +679,23 @@ static void e100_eeprom_write(struct nic *nic, u16 addr_len, u16 addr, u16 data)
 	for(j = 0; j < 3; j++) {
 
 		/* Chip select */
-		writeb(eecs | eesk, &nic->csr->eeprom_ctrl_lo);
+		iowrite8(eecs | eesk, &nic->csr->eeprom_ctrl_lo);
 		e100_write_flush(nic); udelay(4);
 
 		for(i = 31; i >= 0; i--) {
 			ctrl = (cmd_addr_data[j] & (1 << i)) ?
 				eecs | eedi : eecs;
-			writeb(ctrl, &nic->csr->eeprom_ctrl_lo);
+			iowrite8(ctrl, &nic->csr->eeprom_ctrl_lo);
 			e100_write_flush(nic); udelay(4);
 
-			writeb(ctrl | eesk, &nic->csr->eeprom_ctrl_lo);
+			iowrite8(ctrl | eesk, &nic->csr->eeprom_ctrl_lo);
 			e100_write_flush(nic); udelay(4);
 		}
 		/* Wait 10 msec for cmd to complete */
 		msleep(10);
 
 		/* Chip deselect */
-		writeb(0, &nic->csr->eeprom_ctrl_lo);
+		iowrite8(0, &nic->csr->eeprom_ctrl_lo);
 		e100_write_flush(nic); udelay(4);
 	}
 };
@@ -688,31 +711,31 @@ static u16 e100_eeprom_read(struct nic *nic, u16 *addr_len, u16 addr)
 	cmd_addr_data = ((op_read << *addr_len) | addr) << 16;
 
 	/* Chip select */
-	writeb(eecs | eesk, &nic->csr->eeprom_ctrl_lo);
+	iowrite8(eecs | eesk, &nic->csr->eeprom_ctrl_lo);
 	e100_write_flush(nic); udelay(4);
 
 	/* Bit-bang to read word from eeprom */
 	for(i = 31; i >= 0; i--) {
 		ctrl = (cmd_addr_data & (1 << i)) ? eecs | eedi : eecs;
-		writeb(ctrl, &nic->csr->eeprom_ctrl_lo);
+		iowrite8(ctrl, &nic->csr->eeprom_ctrl_lo);
 		e100_write_flush(nic); udelay(4);
-		
-		writeb(ctrl | eesk, &nic->csr->eeprom_ctrl_lo);
+
+		iowrite8(ctrl | eesk, &nic->csr->eeprom_ctrl_lo);
 		e100_write_flush(nic); udelay(4);
-		
+
 		/* Eeprom drives a dummy zero to EEDO after receiving
 		 * complete address.  Use this to adjust addr_len. */
-		ctrl = readb(&nic->csr->eeprom_ctrl_lo);
+		ctrl = ioread8(&nic->csr->eeprom_ctrl_lo);
 		if(!(ctrl & eedo) && i > 16) {
 			*addr_len -= (i - 16);
 			i = 17;
 		}
-		
+
 		data = (data << 1) | (ctrl & eedo ? 1 : 0);
 	}
 
 	/* Chip deselect */
-	writeb(0, &nic->csr->eeprom_ctrl_lo);
+	iowrite8(0, &nic->csr->eeprom_ctrl_lo);
 	e100_write_flush(nic); udelay(4);
 
 	return le16_to_cpu(data);
@@ -738,7 +761,8 @@ static int e100_eeprom_load(struct nic *nic)
 	checksum = le16_to_cpu(0xBABA - checksum);
 	if(checksum != nic->eeprom[nic->eeprom_wc - 1]) {
 		DPRINTK(PROBE, ERR, "EEPROM corrupted\n");
-		return -EAGAIN;
+		if (!eeprom_bad_csum_allow)
+			return -EAGAIN;
 	}
 
 	return 0;
@@ -770,8 +794,9 @@ static int e100_eeprom_save(struct nic *nic, u16 start, u16 count)
 	return 0;
 }
 
-#define E100_WAIT_SCB_TIMEOUT 40
-static inline int e100_exec_cmd(struct nic *nic, u8 cmd, dma_addr_t dma_addr)
+#define E100_WAIT_SCB_TIMEOUT 20000 /* we might have to wait 100ms!!! */
+#define E100_WAIT_SCB_FAST 20       /* delay like the old code */
+static int e100_exec_cmd(struct nic *nic, u8 cmd, dma_addr_t dma_addr)
 {
 	unsigned long flags;
 	unsigned int i;
@@ -781,10 +806,10 @@ static inline int e100_exec_cmd(struct nic *nic, u8 cmd, dma_addr_t dma_addr)
 
 	/* Previous command is accepted when SCB clears */
 	for(i = 0; i < E100_WAIT_SCB_TIMEOUT; i++) {
-		if(likely(!readb(&nic->csr->scb.cmd_lo)))
+		if(likely(!ioread8(&nic->csr->scb.cmd_lo)))
 			break;
 		cpu_relax();
-		if(unlikely(i > (E100_WAIT_SCB_TIMEOUT >> 1)))
+		if(unlikely(i > E100_WAIT_SCB_FAST))
 			udelay(5);
 	}
 	if(unlikely(i == E100_WAIT_SCB_TIMEOUT)) {
@@ -793,8 +818,8 @@ static inline int e100_exec_cmd(struct nic *nic, u8 cmd, dma_addr_t dma_addr)
 	}
 
 	if(unlikely(cmd != cuc_resume))
-		writel(dma_addr, &nic->csr->scb.gen_ptr);
-	writeb(cmd, &nic->csr->scb.cmd_lo);
+		iowrite32(dma_addr, &nic->csr->scb.gen_ptr);
+	iowrite8(cmd, &nic->csr->scb.cmd_lo);
 
 err_unlock:
 	spin_unlock_irqrestore(&nic->cmd_lock, flags);
@@ -802,7 +827,7 @@ err_unlock:
 	return err;
 }
 
-static inline int e100_exec_cb(struct nic *nic, struct sk_buff *skb,
+static int e100_exec_cb(struct nic *nic, struct sk_buff *skb,
 	void (*cb_prepare)(struct nic *, struct cb *, struct sk_buff *))
 {
 	struct cb *cb;
@@ -840,6 +865,10 @@ static inline int e100_exec_cb(struct nic *nic, struct sk_buff *skb,
 			 * because the controller is too busy, so
 			 * let's just queue the command and try again
 			 * when another command is scheduled. */
+			if(err == -ENOSPC) {
+				//request a reset
+				schedule_work(&nic->tx_timeout_task);
+			}
 			break;
 		} else {
 			nic->cuc_cmd = cuc_resume;
@@ -857,15 +886,35 @@ static u16 mdio_ctrl(struct nic *nic, u32 addr, u32 dir, u32 reg, u16 data)
 {
 	u32 data_out = 0;
 	unsigned int i;
+	unsigned long flags;
 
-	writel((reg << 16) | (addr << 21) | dir | data, &nic->csr->mdi_ctrl);
 
-	for(i = 0; i < 100; i++) {
+	/*
+	 * Stratus87247: we shouldn't be writing the MDI control
+	 * register until the Ready bit shows True.  Also, since
+	 * manipulation of the MDI control registers is a multi-step
+	 * procedure it should be done under lock.
+	 */
+	spin_lock_irqsave(&nic->mdio_lock, flags);
+	for (i = 100; i; --i) {
+		if (ioread32(&nic->csr->mdi_ctrl) & mdi_ready)
+			break;
 		udelay(20);
-		if((data_out = readl(&nic->csr->mdi_ctrl)) & mdi_ready)
+	}
+	if (unlikely(!i)) {
+		printk("e100.mdio_ctrl(%s) won't go Ready\n",
+			nic->netdev->name );
+		spin_unlock_irqrestore(&nic->mdio_lock, flags);
+		return 0;		/* No way to indicate timeout error */
+	}
+	iowrite32((reg << 16) | (addr << 21) | dir | data, &nic->csr->mdi_ctrl);
+
+	for (i = 0; i < 100; i++) {
+		udelay(20);
+		if ((data_out = ioread32(&nic->csr->mdi_ctrl)) & mdi_ready)
 			break;
 	}
-
+	spin_unlock_irqrestore(&nic->mdio_lock, flags);
 	DPRINTK(HW, DEBUG,
 		"%s:addr=%d, reg=%d, data_in=0x%04X, data_out=0x%04X\n",
 		dir == mdi_read ? "READ" : "WRITE", addr, reg, data, data_out);
@@ -884,12 +933,11 @@ static void mdio_write(struct net_device *netdev, int addr, int reg, int data)
 
 static void e100_get_defaults(struct nic *nic)
 {
-	struct param_range rfds = { .min = 64, .max = 256, .count = 64 };
-	struct param_range cbs  = { .min = 64, .max = 256, .count = 64 };
+	struct param_range rfds = { .min = 16, .max = 256, .count = 256 };
+	struct param_range cbs  = { .min = 64, .max = 256, .count = 128 };
 
-	pci_read_config_byte(nic->pdev, PCI_REVISION_ID, &nic->rev_id);
 	/* MAC type is encoded as rev ID; exception: ICH is treated as 82559 */
-	nic->mac = (nic->flags & ich) ? mac_82559_D101M : nic->rev_id;
+	nic->mac = (nic->flags & ich) ? mac_82559_D101M : nic->pdev->revision;
 	if(nic->mac == mac_unknown)
 		nic->mac = mac_82557_D100_A;
 
@@ -899,8 +947,9 @@ static void e100_get_defaults(struct nic *nic)
 	/* Quadwords to DMA into FIFO before starting frame transmit */
 	nic->tx_threshold = 0xE0;
 
-	nic->tx_command = cpu_to_le16(cb_tx | cb_i | cb_tx_sf |
-		((nic->mac >= mac_82558_D101_A4) ? cb_cid : 0));
+	/* no interrupt for every tx completion, delay = 256us if not 557*/
+	nic->tx_command = cpu_to_le16(cb_tx | cb_tx_sf |
+		((nic->mac >= mac_82558_D101_A4) ? cb_cid : cb_i));
 
 	/* Template for a freshly allocated RFD */
 	nic->blank_rfd.command = cpu_to_le16(cb_el);
@@ -964,7 +1013,8 @@ static void e100_configure(struct nic *nic, struct cb *cb, struct sk_buff *skb)
 	if(nic->flags & multicast_all)
 		config->multicast_all = 0x1;		/* 1=accept, 0=no */
 
-	if(!(nic->flags & wol_magic))
+	/* disable WoL when up */
+	if(netif_running(nic->netdev) || !(nic->flags & wol_magic))
 		config->magic_packet_disable = 0x1;	/* 1=off, 0=on */
 
 	if(nic->mac >= mac_82558_D101_A4) {
@@ -972,10 +1022,16 @@ static void e100_configure(struct nic *nic, struct cb *cb, struct sk_buff *skb)
 		config->mwi_enable = 0x1;	/* 1=enable, 0=disable */
 		config->standard_tcb = 0x0;	/* 1=standard, 0=extended */
 		config->rx_long_ok = 0x1;	/* 1=VLANs ok, 0=standard */
-		if(nic->mac >= mac_82559_D101M)
+		if (nic->mac >= mac_82559_D101M) {
 			config->tno_intr = 0x1;		/* TCO stats enable */
-		else
+			/* Enable TCO in extended config */
+			if (nic->mac >= mac_82551_10) {
+				config->byte_count = 0x20; /* extended bytes */
+				config->rx_d102_mode = 0x1; /* GMRC for TCO */
+			}
+		} else {
 			config->standard_stat_counter = 0x0;
+		}
 	}
 
 	DPRINTK(HW, DEBUG, "[00-07]=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
@@ -986,25 +1042,298 @@ static void e100_configure(struct nic *nic, struct cb *cb, struct sk_buff *skb)
 		c[16], c[17], c[18], c[19], c[20], c[21], c[22], c[23]);
 }
 
-static void e100_load_ucode(struct nic *nic, struct cb *cb, struct sk_buff *skb)
-{
-	int i;
-	static const u32 ucode[UCODE_SIZE] = {
-		/* NFS packets are misinterpreted as TCO packets and
-		 * incorrectly routed to the BMC over SMBus.  This
-		 * microcode patch checks the fragmented IP bit in the
-		 * NFS/UDP header to distinguish between NFS and TCO. */
-		0x0EF70E36, 0x1FFF1FFF, 0x1FFF1FFF, 0x1FFF1FFF, 0x1FFF1FFF,
-		0x1FFF1FFF, 0x00906E41, 0x00800E3C, 0x00E00E39, 0x00000000,
-		0x00906EFD, 0x00900EFD,	0x00E00EF8,
-	};
+/********************************************************/
+/*  Micro code for 8086:1229 Rev 8                      */
+/********************************************************/
 
-	if(nic->mac == mac_82551_F || nic->mac == mac_82551_10) {
-		for(i = 0; i < UCODE_SIZE; i++)
+/*  Parameter values for the D101M B-step  */
+#define D101M_CPUSAVER_TIMER_DWORD		78
+#define D101M_CPUSAVER_BUNDLE_DWORD		65
+#define D101M_CPUSAVER_MIN_SIZE_DWORD		126
+
+#define D101M_B_RCVBUNDLE_UCODE \
+{\
+0x00550215, 0xFFFF0437, 0xFFFFFFFF, 0x06A70789, 0xFFFFFFFF, 0x0558FFFF, \
+0x000C0001, 0x00101312, 0x000C0008, 0x00380216, \
+0x0010009C, 0x00204056, 0x002380CC, 0x00380056, \
+0x0010009C, 0x00244C0B, 0x00000800, 0x00124818, \
+0x00380438, 0x00000000, 0x00140000, 0x00380555, \
+0x00308000, 0x00100662, 0x00100561, 0x000E0408, \
+0x00134861, 0x000C0002, 0x00103093, 0x00308000, \
+0x00100624, 0x00100561, 0x000E0408, 0x00100861, \
+0x000C007E, 0x00222C21, 0x000C0002, 0x00103093, \
+0x00380C7A, 0x00080000, 0x00103090, 0x00380C7A, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x0010009C, 0x00244C2D, 0x00010004, 0x00041000, \
+0x003A0437, 0x00044010, 0x0038078A, 0x00000000, \
+0x00100099, 0x00206C7A, 0x0010009C, 0x00244C48, \
+0x00130824, 0x000C0001, 0x00101213, 0x00260C75, \
+0x00041000, 0x00010004, 0x00130826, 0x000C0006, \
+0x002206A8, 0x0013C926, 0x00101313, 0x003806A8, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00080600, 0x00101B10, 0x00050004, 0x00100826, \
+0x00101210, 0x00380C34, 0x00000000, 0x00000000, \
+0x0021155B, 0x00100099, 0x00206559, 0x0010009C, \
+0x00244559, 0x00130836, 0x000C0000, 0x00220C62, \
+0x000C0001, 0x00101B13, 0x00229C0E, 0x00210C0E, \
+0x00226C0E, 0x00216C0E, 0x0022FC0E, 0x00215C0E, \
+0x00214C0E, 0x00380555, 0x00010004, 0x00041000, \
+0x00278C67, 0x00040800, 0x00018100, 0x003A0437, \
+0x00130826, 0x000C0001, 0x00220559, 0x00101313, \
+0x00380559, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00130831, 0x0010090B, 0x00124813, \
+0x000CFF80, 0x002606AB, 0x00041000, 0x00010004, \
+0x003806A8, 0x00000000, 0x00000000, 0x00000000, \
+}
+
+/********************************************************/
+/*  Micro code for 8086:1229 Rev 9                      */
+/********************************************************/
+
+/*  Parameter values for the D101S  */
+#define D101S_CPUSAVER_TIMER_DWORD		78
+#define D101S_CPUSAVER_BUNDLE_DWORD		67
+#define D101S_CPUSAVER_MIN_SIZE_DWORD		128
+
+#define D101S_RCVBUNDLE_UCODE \
+{\
+0x00550242, 0xFFFF047E, 0xFFFFFFFF, 0x06FF0818, 0xFFFFFFFF, 0x05A6FFFF, \
+0x000C0001, 0x00101312, 0x000C0008, 0x00380243, \
+0x0010009C, 0x00204056, 0x002380D0, 0x00380056, \
+0x0010009C, 0x00244F8B, 0x00000800, 0x00124818, \
+0x0038047F, 0x00000000, 0x00140000, 0x003805A3, \
+0x00308000, 0x00100610, 0x00100561, 0x000E0408, \
+0x00134861, 0x000C0002, 0x00103093, 0x00308000, \
+0x00100624, 0x00100561, 0x000E0408, 0x00100861, \
+0x000C007E, 0x00222FA1, 0x000C0002, 0x00103093, \
+0x00380F90, 0x00080000, 0x00103090, 0x00380F90, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x0010009C, 0x00244FAD, 0x00010004, 0x00041000, \
+0x003A047E, 0x00044010, 0x00380819, 0x00000000, \
+0x00100099, 0x00206FFD, 0x0010009A, 0x0020AFFD, \
+0x0010009C, 0x00244FC8, 0x00130824, 0x000C0001, \
+0x00101213, 0x00260FF7, 0x00041000, 0x00010004, \
+0x00130826, 0x000C0006, 0x00220700, 0x0013C926, \
+0x00101313, 0x00380700, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00080600, 0x00101B10, 0x00050004, 0x00100826, \
+0x00101210, 0x00380FB6, 0x00000000, 0x00000000, \
+0x002115A9, 0x00100099, 0x002065A7, 0x0010009A, \
+0x0020A5A7, 0x0010009C, 0x002445A7, 0x00130836, \
+0x000C0000, 0x00220FE4, 0x000C0001, 0x00101B13, \
+0x00229F8E, 0x00210F8E, 0x00226F8E, 0x00216F8E, \
+0x0022FF8E, 0x00215F8E, 0x00214F8E, 0x003805A3, \
+0x00010004, 0x00041000, 0x00278FE9, 0x00040800, \
+0x00018100, 0x003A047E, 0x00130826, 0x000C0001, \
+0x002205A7, 0x00101313, 0x003805A7, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00130831, \
+0x0010090B, 0x00124813, 0x000CFF80, 0x00260703, \
+0x00041000, 0x00010004, 0x00380700  \
+}
+
+/********************************************************/
+/*  Micro code for the 8086:1229 Rev F/10               */
+/********************************************************/
+
+/*  Parameter values for the D102 E-step  */
+#define D102_E_CPUSAVER_TIMER_DWORD		42
+#define D102_E_CPUSAVER_BUNDLE_DWORD		54
+#define D102_E_CPUSAVER_MIN_SIZE_DWORD		46
+
+#define     D102_E_RCVBUNDLE_UCODE \
+{\
+0x007D028F, 0x0E4204F9, 0x14ED0C85, 0x14FA14E9, 0x0EF70E36, 0x1FFF1FFF, \
+0x00E014B9, 0x00000000, 0x00000000, 0x00000000, \
+0x00E014BD, 0x00000000, 0x00000000, 0x00000000, \
+0x00E014D5, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00E014C1, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00E014C8, 0x00000000, 0x00000000, 0x00000000, \
+0x00200600, 0x00E014EE, 0x00000000, 0x00000000, \
+0x0030FF80, 0x00940E46, 0x00038200, 0x00102000, \
+0x00E00E43, 0x00000000, 0x00000000, 0x00000000, \
+0x00300006, 0x00E014FB, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00906E41, 0x00800E3C, 0x00E00E39, 0x00000000, \
+0x00906EFD, 0x00900EFD, 0x00E00EF8, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+0x00000000, 0x00000000, 0x00000000, 0x00000000, \
+}
+
+static void e100_setup_ucode(struct nic *nic, struct cb *cb, struct sk_buff *skb)
+{
+/* *INDENT-OFF* */
+	static struct {
+		u32 ucode[UCODE_SIZE + 1];
+		u8 mac;
+		u8 timer_dword;
+		u8 bundle_dword;
+		u8 min_size_dword;
+	} ucode_opts[] = {
+		{ D101M_B_RCVBUNDLE_UCODE,
+		  mac_82559_D101M,
+		  D101M_CPUSAVER_TIMER_DWORD,
+		  D101M_CPUSAVER_BUNDLE_DWORD,
+		  D101M_CPUSAVER_MIN_SIZE_DWORD },
+		{ D101S_RCVBUNDLE_UCODE,
+		  mac_82559_D101S,
+		  D101S_CPUSAVER_TIMER_DWORD,
+		  D101S_CPUSAVER_BUNDLE_DWORD,
+		  D101S_CPUSAVER_MIN_SIZE_DWORD },
+		{ D102_E_RCVBUNDLE_UCODE,
+		  mac_82551_F,
+		  D102_E_CPUSAVER_TIMER_DWORD,
+		  D102_E_CPUSAVER_BUNDLE_DWORD,
+		  D102_E_CPUSAVER_MIN_SIZE_DWORD },
+		{ D102_E_RCVBUNDLE_UCODE,
+		  mac_82551_10,
+		  D102_E_CPUSAVER_TIMER_DWORD,
+		  D102_E_CPUSAVER_BUNDLE_DWORD,
+		  D102_E_CPUSAVER_MIN_SIZE_DWORD },
+		{ {0}, 0, 0, 0, 0}
+	}, *opts;
+/* *INDENT-ON* */
+
+/*************************************************************************
+*  CPUSaver parameters
+*
+*  All CPUSaver parameters are 16-bit literals that are part of a
+*  "move immediate value" instruction.  By changing the value of
+*  the literal in the instruction before the code is loaded, the
+*  driver can change the algorithm.
+*
+*  INTDELAY - This loads the dead-man timer with its initial value.
+*    When this timer expires the interrupt is asserted, and the
+*    timer is reset each time a new packet is received.  (see
+*    BUNDLEMAX below to set the limit on number of chained packets)
+*    The current default is 0x600 or 1536.  Experiments show that
+*    the value should probably stay within the 0x200 - 0x1000.
+*
+*  BUNDLEMAX -
+*    This sets the maximum number of frames that will be bundled.  In
+*    some situations, such as the TCP windowing algorithm, it may be
+*    better to limit the growth of the bundle size than let it go as
+*    high as it can, because that could cause too much added latency.
+*    The default is six, because this is the number of packets in the
+*    default TCP window size.  A value of 1 would make CPUSaver indicate
+*    an interrupt for every frame received.  If you do not want to put
+*    a limit on the bundle size, set this value to xFFFF.
+*
+*  BUNDLESMALL -
+*    This contains a bit-mask describing the minimum size frame that
+*    will be bundled.  The default masks the lower 7 bits, which means
+*    that any frame less than 128 bytes in length will not be bundled,
+*    but will instead immediately generate an interrupt.  This does
+*    not affect the current bundle in any way.  Any frame that is 128
+*    bytes or large will be bundled normally.  This feature is meant
+*    to provide immediate indication of ACK frames in a TCP environment.
+*    Customers were seeing poor performance when a machine with CPUSaver
+*    enabled was sending but not receiving.  The delay introduced when
+*    the ACKs were received was enough to reduce total throughput, because
+*    the sender would sit idle until the ACK was finally seen.
+*
+*    The current default is 0xFF80, which masks out the lower 7 bits.
+*    This means that any frame which is x7F (127) bytes or smaller
+*    will cause an immediate interrupt.  Because this value must be a
+*    bit mask, there are only a few valid values that can be used.  To
+*    turn this feature off, the driver can write the value xFFFF to the
+*    lower word of this instruction (in the same way that the other
+*    parameters are used).  Likewise, a value of 0xF800 (2047) would
+*    cause an interrupt to be generated for every frame, because all
+*    standard Ethernet frames are <= 2047 bytes in length.
+*************************************************************************/
+
+/* if you wish to disable the ucode functionality, while maintaining the
+ * workarounds it provides, set the following defines to:
+ * BUNDLESMALL 0
+ * BUNDLEMAX 1
+ * INTDELAY 1
+ */
+#define BUNDLESMALL 1
+#define BUNDLEMAX (u16)6
+#define INTDELAY (u16)1536 /* 0x600 */
+
+	/* do not load u-code for ICH devices */
+	if (nic->flags & ich)
+		goto noloaducode;
+
+	/* Search for ucode match against h/w revision */
+	for (opts = ucode_opts; opts->mac; opts++) {
+		int i;
+		u32 *ucode = opts->ucode;
+		if (nic->mac != opts->mac)
+			continue;
+
+		/* Insert user-tunable settings */
+		ucode[opts->timer_dword] &= 0xFFFF0000;
+		ucode[opts->timer_dword] |= INTDELAY;
+		ucode[opts->bundle_dword] &= 0xFFFF0000;
+		ucode[opts->bundle_dword] |= BUNDLEMAX;
+		ucode[opts->min_size_dword] &= 0xFFFF0000;
+		ucode[opts->min_size_dword] |= (BUNDLESMALL) ? 0xFFFF : 0xFF80;
+
+		for (i = 0; i < UCODE_SIZE; i++)
 			cb->u.ucode[i] = cpu_to_le32(ucode[i]);
-		cb->command = cpu_to_le16(cb_ucode);
-	} else
-		cb->command = cpu_to_le16(cb_nop);
+		cb->command = cpu_to_le16(cb_ucode | cb_el);
+		return;
+	}
+
+noloaducode:
+	cb->command = cpu_to_le16(cb_nop | cb_el);
+}
+
+static inline int e100_exec_cb_wait(struct nic *nic, struct sk_buff *skb,
+	void (*cb_prepare)(struct nic *, struct cb *, struct sk_buff *))
+{
+	int err = 0, counter = 50;
+	struct cb *cb = nic->cb_to_clean;
+
+	if ((err = e100_exec_cb(nic, NULL, e100_setup_ucode)))
+		DPRINTK(PROBE,ERR, "ucode cmd failed with error %d\n", err);
+
+	/* must restart cuc */
+	nic->cuc_cmd = cuc_start;
+
+	/* wait for completion */
+	e100_write_flush(nic);
+	udelay(10);
+
+	/* wait for possibly (ouch) 500ms */
+	while (!(cb->status & cpu_to_le16(cb_complete))) {
+		msleep(10);
+		if (!--counter) break;
+	}
+
+	/* ack any interrupts, something could have been set */
+	iowrite8(~0, &nic->csr->scb.stat_ack);
+
+	/* if the command failed, or is not OK, notify and return */
+	if (!counter || !(cb->status & cpu_to_le16(cb_ok))) {
+		DPRINTK(PROBE,ERR, "ucode load failed\n");
+		err = -EPERM;
+	}
+
+	return err;
 }
 
 static void e100_setup_iaaddr(struct nic *nic, struct cb *cb,
@@ -1072,12 +1401,13 @@ static int e100_phy_init(struct nic *nic)
 		mdio_write(netdev, nic->mii.phy_id, MII_NSC_CONG, cong);
 	}
 
-	if((nic->mac >= mac_82550_D102) || ((nic->flags & ich) && 
-		(mdio_read(netdev, nic->mii.phy_id, MII_TPISTATUS) & 0x8000) && 
-		(nic->eeprom[eeprom_cnfg_mdix] & eeprom_mdix_enabled)))
-		/* enable/disable MDI/MDI-X auto-switching */
+	if((nic->mac >= mac_82550_D102) || ((nic->flags & ich) &&
+	   (mdio_read(netdev, nic->mii.phy_id, MII_TPISTATUS) & 0x8000) &&
+		!(nic->eeprom[eeprom_cnfg_mdix] & eeprom_mdix_enabled))) {
+		/* enable/disable MDI/MDI-X auto-switching. */
 		mdio_write(netdev, nic->mii.phy_id, MII_NCONFIG,
-			nic->mii.force_media ? 0 : NCONFIG_AUTO_SWITCH);
+				nic->mii.force_media ? 0 : NCONFIG_AUTO_SWITCH);
+	}
 
 	return 0;
 }
@@ -1098,7 +1428,7 @@ static int e100_hw_init(struct nic *nic)
 		return err;
 	if((err = e100_exec_cmd(nic, ruc_load_base, 0)))
 		return err;
-	if((err = e100_exec_cb(nic, NULL, e100_load_ucode)))
+	if ((err = e100_exec_cb_wait(nic, NULL, e100_setup_ucode)))
 		return err;
 	if((err = e100_exec_cb(nic, NULL, e100_configure)))
 		return err;
@@ -1152,7 +1482,8 @@ static void e100_set_multicast_list(struct net_device *netdev)
 
 static void e100_update_stats(struct nic *nic)
 {
-	struct net_device_stats *ns = &nic->net_stats;
+	struct net_device *dev = nic->netdev;
+	struct net_device_stats *ns = &dev->stats;
 	struct stats *s = &nic->mem->stats;
 	u32 *complete = (nic->mac < mac_82558_D101_A4) ? &s->fc_xmt_pause :
 		(nic->mac < mac_82559_D101M) ? (u32 *)&s->xmt_tco_frames :
@@ -1173,13 +1504,13 @@ static void e100_update_stats(struct nic *nic)
 		ns->collisions += nic->tx_collisions;
 		ns->tx_errors += le32_to_cpu(s->tx_max_collisions) +
 			le32_to_cpu(s->tx_lost_crs);
-		ns->rx_dropped += le32_to_cpu(s->rx_resource_errors);
 		ns->rx_length_errors += le32_to_cpu(s->rx_short_frame_errors) +
 			nic->rx_over_length_errors;
 		ns->rx_crc_errors += le32_to_cpu(s->rx_crc_errors);
 		ns->rx_frame_errors += le32_to_cpu(s->rx_alignment_errors);
 		ns->rx_over_errors += le32_to_cpu(s->rx_overrun_errors);
 		ns->rx_fifo_errors += le32_to_cpu(s->rx_overrun_errors);
+		ns->rx_missed_errors += le32_to_cpu(s->rx_resource_errors);
 		ns->rx_errors += le32_to_cpu(s->rx_crc_errors) +
 			le32_to_cpu(s->rx_alignment_errors) +
 			le32_to_cpu(s->rx_short_frame_errors) +
@@ -1203,7 +1534,9 @@ static void e100_update_stats(struct nic *nic)
 		}
 	}
 
-	e100_exec_cmd(nic, cuc_dump_reset, 0);
+
+	if(e100_exec_cmd(nic, cuc_dump_reset, 0))
+		DPRINTK(TX_ERR, DEBUG, "exec cuc_dump_reset failed\n");
 }
 
 static void e100_adjust_adaptive_ifs(struct nic *nic, int speed, int duplex)
@@ -1250,14 +1583,14 @@ static void e100_watchdog(unsigned long data)
 	mii_check_link(&nic->mii);
 
 	/* Software generated interrupt to recover from (rare) Rx
-	* allocation failure.
-	* Unfortunately have to use a spinlock to not re-enable interrupts
-	* accidentally, due to hardware that shares a register between the
-	* interrupt mask bit and the SW Interrupt generation bit */
+	 * allocation failure.
+	 * Unfortunately have to use a spinlock to not re-enable interrupts
+	 * accidentally, due to hardware that shares a register between the
+	 * interrupt mask bit and the SW Interrupt generation bit */
 	spin_lock_irq(&nic->cmd_lock);
-	writeb(readb(&nic->csr->scb.cmd_hi) | irq_sw_gen,&nic->csr->scb.cmd_hi);
-	spin_unlock_irq(&nic->cmd_lock);
+	iowrite8(ioread8(&nic->csr->scb.cmd_hi) | irq_sw_gen,&nic->csr->scb.cmd_hi);
 	e100_write_flush(nic);
+	spin_unlock_irq(&nic->cmd_lock);
 
 	e100_update_stats(nic);
 	e100_adjust_adaptive_ifs(nic, cmd.speed, cmd.duplex);
@@ -1272,19 +1605,24 @@ static void e100_watchdog(unsigned long data)
 	else
 		nic->flags &= ~ich_10h_workaround;
 
-	mod_timer(&nic->watchdog, jiffies + E100_WATCHDOG_PERIOD);
+	mod_timer(&nic->watchdog,
+		  round_jiffies(jiffies + E100_WATCHDOG_PERIOD));
 }
 
-static inline void e100_xmit_prepare(struct nic *nic, struct cb *cb,
+static void e100_xmit_prepare(struct nic *nic, struct cb *cb,
 	struct sk_buff *skb)
 {
 	cb->command = nic->tx_command;
+	/* interrupt every 16 packets regardless of delay */
+	if((nic->cbs_avail & ~15) == nic->cbs_avail)
+		cb->command |= cpu_to_le16(cb_i);
 	cb->u.tcb.tbd_array = cb->dma_addr + offsetof(struct cb, u.tcb.tbd);
 	cb->u.tcb.tcb_byte_count = 0;
 	cb->u.tcb.threshold = nic->tx_threshold;
 	cb->u.tcb.tbd_count = 1;
 	cb->u.tcb.tbd.buf_addr = cpu_to_le32(pci_map_single(nic->pdev,
 		skb->data, skb->len, PCI_DMA_TODEVICE));
+	/* check for mapping failure? */
 	cb->u.tcb.tbd.size = cpu_to_le16(skb->len);
 }
 
@@ -1297,7 +1635,8 @@ static int e100_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 		/* SW workaround for ICH[x] 10Mbps/half duplex Tx hang.
 		   Issue a NOP command followed by a 1us delay before
 		   issuing the Tx command. */
-		e100_exec_cmd(nic, cuc_nop, 0);
+		if(e100_exec_cmd(nic, cuc_nop, 0))
+			DPRINTK(TX_ERR, DEBUG, "exec cuc_nop failed\n");
 		udelay(1);
 	}
 
@@ -1320,23 +1659,25 @@ static int e100_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	return 0;
 }
 
-static inline int e100_tx_clean(struct nic *nic)
+static int e100_tx_clean(struct nic *nic)
 {
+	struct net_device *dev = nic->netdev;
 	struct cb *cb;
 	int tx_cleaned = 0;
 
 	spin_lock(&nic->cb_lock);
 
-	DPRINTK(TX_DONE, DEBUG, "cb->status = 0x%04X\n",
-		nic->cb_to_clean->status);
-
 	/* Clean CBs marked complete */
 	for(cb = nic->cb_to_clean;
 	    cb->status & cpu_to_le16(cb_complete);
 	    cb = nic->cb_to_clean = cb->next) {
+		DPRINTK(TX_DONE, DEBUG, "cb[%d]->status = 0x%04X\n",
+		        (int)(((void*)cb - (void*)nic->cbs)/sizeof(struct cb)),
+		        cb->status);
+
 		if(likely(cb->skb != NULL)) {
-			nic->net_stats.tx_packets++;
-			nic->net_stats.tx_bytes += cb->skb->len;
+			dev->stats.tx_packets++;
+			dev->stats.tx_bytes += cb->skb->len;
 
 			pci_unmap_single(nic->pdev,
 				le32_to_cpu(cb->u.tcb.tbd.buf_addr),
@@ -1415,27 +1756,39 @@ static int e100_alloc_cbs(struct nic *nic)
 	return 0;
 }
 
-static inline void e100_start_receiver(struct nic *nic)
+static inline void e100_start_receiver(struct nic *nic, struct rx *rx)
 {
+	if(!nic->rxs) return;
+	if(RU_SUSPENDED != nic->ru_running) return;
+
+	/* handle init time starts */
+	if(!rx) rx = nic->rxs;
+
 	/* (Re)start RU if suspended or idle and RFA is non-NULL */
-	if(!nic->ru_running && nic->rx_to_clean->skb) {
-		e100_exec_cmd(nic, ruc_start, nic->rx_to_clean->dma_addr);
-		nic->ru_running = 1;
+	if(rx->skb) {
+		e100_exec_cmd(nic, ruc_start, rx->dma_addr);
+		nic->ru_running = RU_RUNNING;
 	}
 }
 
 #define RFD_BUF_LEN (sizeof(struct rfd) + VLAN_ETH_FRAME_LEN)
-static inline int e100_rx_alloc_skb(struct nic *nic, struct rx *rx)
+static int e100_rx_alloc_skb(struct nic *nic, struct rx *rx)
 {
-	if(!(rx->skb = dev_alloc_skb(RFD_BUF_LEN + NET_IP_ALIGN)))
+	if(!(rx->skb = netdev_alloc_skb(nic->netdev, RFD_BUF_LEN + NET_IP_ALIGN)))
 		return -ENOMEM;
 
 	/* Align, init, and map the RFD. */
-	rx->skb->dev = nic->netdev;
 	skb_reserve(rx->skb, NET_IP_ALIGN);
-	memcpy(rx->skb->data, &nic->blank_rfd, sizeof(struct rfd));
+	skb_copy_to_linear_data(rx->skb, &nic->blank_rfd, sizeof(struct rfd));
 	rx->dma_addr = pci_map_single(nic->pdev, rx->skb->data,
 		RFD_BUF_LEN, PCI_DMA_BIDIRECTIONAL);
+
+	if(pci_dma_mapping_error(rx->dma_addr)) {
+		dev_kfree_skb_any(rx->skb);
+		rx->skb = NULL;
+		rx->dma_addr = 0;
+		return -ENOMEM;
+	}
 
 	/* Link the RFD to end of RFA by linking previous RFD to
 	 * this one, and clearing EL bit of previous.  */
@@ -1452,9 +1805,10 @@ static inline int e100_rx_alloc_skb(struct nic *nic, struct rx *rx)
 	return 0;
 }
 
-static inline int e100_rx_indicate(struct nic *nic, struct rx *rx,
+static int e100_rx_indicate(struct nic *nic, struct rx *rx,
 	unsigned int *work_done, unsigned int work_to_do)
 {
+	struct net_device *dev = nic->netdev;
 	struct sk_buff *skb = rx->skb;
 	struct rfd *rfd = (struct rfd *)skb->data;
 	u16 rfd_status, actual_size;
@@ -1471,7 +1825,7 @@ static inline int e100_rx_indicate(struct nic *nic, struct rx *rx,
 
 	/* If data isn't ready, nothing to indicate */
 	if(unlikely(!(rfd_status & cb_complete)))
-		return -EAGAIN;
+		return -ENODATA;
 
 	/* Get actual data size */
 	actual_size = le16_to_cpu(rfd->actual_size) & 0x3FFF;
@@ -1482,6 +1836,10 @@ static inline int e100_rx_indicate(struct nic *nic, struct rx *rx,
 	pci_unmap_single(nic->pdev, rx->dma_addr,
 		RFD_BUF_LEN, PCI_DMA_FROMDEVICE);
 
+	/* this allows for a fast restart without re-enabling interrupts */
+	if(le16_to_cpu(rfd->command) & cb_el)
+		nic->ru_running = RU_SUSPENDED;
+
 	/* Pull off the RFD and put the actual data (minus eth hdr) */
 	skb_reserve(skb, sizeof(struct rfd));
 	skb_put(skb, actual_size);
@@ -1489,16 +1847,14 @@ static inline int e100_rx_indicate(struct nic *nic, struct rx *rx,
 
 	if(unlikely(!(rfd_status & cb_ok))) {
 		/* Don't indicate if hardware indicates errors */
-		nic->net_stats.rx_dropped++;
 		dev_kfree_skb_any(skb);
-	} else if(actual_size > nic->netdev->mtu + VLAN_ETH_HLEN) {
+	} else if(actual_size > ETH_DATA_LEN + VLAN_ETH_HLEN) {
 		/* Don't indicate oversized frames */
 		nic->rx_over_length_errors++;
-		nic->net_stats.rx_dropped++;
 		dev_kfree_skb_any(skb);
 	} else {
-		nic->net_stats.rx_packets++;
-		nic->net_stats.rx_bytes += actual_size;
+		dev->stats.rx_packets++;
+		dev->stats.rx_bytes += actual_size;
 		nic->netdev->last_rx = jiffies;
 		netif_receive_skb(skb);
 		if(work_done)
@@ -1510,16 +1866,35 @@ static inline int e100_rx_indicate(struct nic *nic, struct rx *rx,
 	return 0;
 }
 
-static inline void e100_rx_clean(struct nic *nic, unsigned int *work_done,
+static void e100_rx_clean(struct nic *nic, unsigned int *work_done,
 	unsigned int work_to_do)
 {
 	struct rx *rx;
+	int restart_required = 0;
+	struct rx *rx_to_start = NULL;
+
+	/* are we already rnr? then pay attention!!! this ensures that
+	 * the state machine progression never allows a start with a
+	 * partially cleaned list, avoiding a race between hardware
+	 * and rx_to_clean when in NAPI mode */
+	if(RU_SUSPENDED == nic->ru_running)
+		restart_required = 1;
 
 	/* Indicate newly arrived packets */
 	for(rx = nic->rx_to_clean; rx->skb; rx = nic->rx_to_clean = rx->next) {
-		if(e100_rx_indicate(nic, rx, work_done, work_to_do))
+		int err = e100_rx_indicate(nic, rx, work_done, work_to_do);
+		if(-EAGAIN == err) {
+			/* hit quota so have more work to do, restart once
+			 * cleanup is complete */
+			restart_required = 0;
+			break;
+		} else if(-ENODATA == err)
 			break; /* No more to clean */
 	}
+
+	/* save our starting point as the place we'll restart the receiver */
+	if(restart_required)
+		rx_to_start = nic->rx_to_clean;
 
 	/* Alloc new skbs to refill list */
 	for(rx = nic->rx_to_use; !rx->skb; rx = nic->rx_to_use = rx->next) {
@@ -1527,13 +1902,21 @@ static inline void e100_rx_clean(struct nic *nic, unsigned int *work_done,
 			break; /* Better luck next time (see watchdog) */
 	}
 
-	e100_start_receiver(nic);
+	if(restart_required) {
+		// ack the rnr?
+		writeb(stat_ack_rnr, &nic->csr->scb.stat_ack);
+		e100_start_receiver(nic, rx_to_start);
+		if(work_done)
+			(*work_done)++;
+	}
 }
 
 static void e100_rx_clean_list(struct nic *nic)
 {
 	struct rx *rx;
 	unsigned int i, count = nic->params.rfds.count;
+
+	nic->ru_running = RU_UNINITIALIZED;
 
 	if(nic->rxs) {
 		for(rx = nic->rxs, i = 0; i < count; rx++, i++) {
@@ -1548,7 +1931,6 @@ static void e100_rx_clean_list(struct nic *nic)
 	}
 
 	nic->rx_to_use = nic->rx_to_clean = NULL;
-	nic->ru_running = 0;
 }
 
 static int e100_rx_alloc_list(struct nic *nic)
@@ -1557,10 +1939,10 @@ static int e100_rx_alloc_list(struct nic *nic)
 	unsigned int i, count = nic->params.rfds.count;
 
 	nic->rx_to_use = nic->rx_to_clean = NULL;
+	nic->ru_running = RU_UNINITIALIZED;
 
-	if(!(nic->rxs = kmalloc(sizeof(struct rx) * count, GFP_ATOMIC)))
+	if(!(nic->rxs = kcalloc(count, sizeof(struct rx), GFP_ATOMIC)))
 		return -ENOMEM;
-	memset(nic->rxs, 0, sizeof(struct rx) * count);
 
 	for(rx = nic->rxs, i = 0; i < count; rx++, i++) {
 		rx->next = (i + 1 < count) ? rx + 1 : nic->rxs;
@@ -1572,15 +1954,16 @@ static int e100_rx_alloc_list(struct nic *nic)
 	}
 
 	nic->rx_to_use = nic->rx_to_clean = nic->rxs;
+	nic->ru_running = RU_SUSPENDED;
 
 	return 0;
 }
 
-static irqreturn_t e100_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t e100_intr(int irq, void *dev_id)
 {
 	struct net_device *netdev = dev_id;
 	struct nic *nic = netdev_priv(netdev);
-	u8 stat_ack = readb(&nic->csr->scb.stat_ack);
+	u8 stat_ack = ioread8(&nic->csr->scb.stat_ack);
 
 	DPRINTK(INTR, DEBUG, "stat_ack = 0x%02X\n", stat_ack);
 
@@ -1589,57 +1972,49 @@ static irqreturn_t e100_intr(int irq, void *dev_id, struct pt_regs *regs)
 		return IRQ_NONE;
 
 	/* Ack interrupt(s) */
-	writeb(stat_ack, &nic->csr->scb.stat_ack);
+	iowrite8(stat_ack, &nic->csr->scb.stat_ack);
 
 	/* We hit Receive No Resource (RNR); restart RU after cleaning */
 	if(stat_ack & stat_ack_rnr)
-		nic->ru_running = 0;
+		nic->ru_running = RU_SUSPENDED;
 
-	e100_disable_irq(nic);
-	netif_rx_schedule(netdev);
+	if(likely(netif_rx_schedule_prep(netdev, &nic->napi))) {
+		e100_disable_irq(nic);
+		__netif_rx_schedule(netdev, &nic->napi);
+	}
 
 	return IRQ_HANDLED;
 }
 
-static int e100_poll(struct net_device *netdev, int *budget)
+static int e100_poll(struct napi_struct *napi, int budget)
 {
-	struct nic *nic = netdev_priv(netdev);
-	unsigned int work_to_do = min(netdev->quota, *budget);
+	struct nic *nic = container_of(napi, struct nic, napi);
+	struct net_device *netdev = nic->netdev;
 	unsigned int work_done = 0;
-	int tx_cleaned;
 
-	e100_rx_clean(nic, &work_done, work_to_do);
-	tx_cleaned = e100_tx_clean(nic);
+	e100_rx_clean(nic, &work_done, budget);
+	e100_tx_clean(nic);
 
-	/* If no Rx and Tx cleanup work was done, exit polling mode. */
-	if((!tx_cleaned && (work_done == 0)) || !netif_running(netdev)) {
-		netif_rx_complete(netdev);
+	/* If budget not fully consumed, exit the polling mode */
+	if (work_done < budget) {
+		netif_rx_complete(netdev, napi);
 		e100_enable_irq(nic);
-		return 0;
 	}
 
-	*budget -= work_done;
-	netdev->quota -= work_done;
-
-	return 1;
+	return work_done;
 }
 
 #ifdef CONFIG_NET_POLL_CONTROLLER
 static void e100_netpoll(struct net_device *netdev)
 {
 	struct nic *nic = netdev_priv(netdev);
+
 	e100_disable_irq(nic);
-	e100_intr(nic->pdev->irq, netdev, NULL);
+	e100_intr(nic->pdev->irq, netdev);
 	e100_tx_clean(nic);
 	e100_enable_irq(nic);
 }
 #endif
-
-static struct net_device_stats *e100_get_stats(struct net_device *netdev)
-{
-	struct nic *nic = netdev_priv(netdev);
-	return &nic->net_stats;
-}
 
 static int e100_set_mac_address(struct net_device *netdev, void *p)
 {
@@ -1683,13 +2058,16 @@ static int e100_up(struct nic *nic)
 	if((err = e100_hw_init(nic)))
 		goto err_clean_cbs;
 	e100_set_multicast_list(nic->netdev);
-	e100_start_receiver(nic);
+	e100_start_receiver(nic, NULL);
 	mod_timer(&nic->watchdog, jiffies);
-	if((err = request_irq(nic->pdev->irq, e100_intr, SA_SHIRQ,
+	if((err = request_irq(nic->pdev->irq, e100_intr, IRQF_SHARED,
 		nic->netdev->name, nic->netdev)))
 		goto err_no_irq;
-	e100_enable_irq(nic);
 	netif_wake_queue(nic->netdev);
+	napi_enable(&nic->napi);
+	/* enable ints _after_ enabling poll, preventing a race between
+	 * disable ints+schedule */
+	e100_enable_irq(nic);
 	return 0;
 
 err_no_irq:
@@ -1703,11 +2081,13 @@ err_rx_clean_list:
 
 static void e100_down(struct nic *nic)
 {
+	/* wait here for poll to complete */
+	napi_disable(&nic->napi);
+	netif_stop_queue(nic->netdev);
 	e100_hw_reset(nic);
 	free_irq(nic->pdev->irq, nic->netdev);
 	del_timer_sync(&nic->watchdog);
 	netif_carrier_off(nic->netdev);
-	netif_stop_queue(nic->netdev);
 	e100_clean_cbs(nic);
 	e100_rx_clean_list(nic);
 }
@@ -1716,8 +2096,18 @@ static void e100_tx_timeout(struct net_device *netdev)
 {
 	struct nic *nic = netdev_priv(netdev);
 
+	/* Reset outside of interrupt context, to avoid request_irq
+	 * in interrupt context */
+	schedule_work(&nic->tx_timeout_task);
+}
+
+static void e100_tx_timeout_task(struct work_struct *work)
+{
+	struct nic *nic = container_of(work, struct nic, tx_timeout_task);
+	struct net_device *netdev = nic->netdev;
+
 	DPRINTK(TX_ERR, DEBUG, "scb.status=0x%02X\n",
-		readb(&nic->csr->scb.status));
+		ioread8(&nic->csr->scb.status));
 	e100_down(netdev_priv(netdev));
 	e100_up(netdev_priv(netdev));
 }
@@ -1749,9 +2139,9 @@ static int e100_loopback_test(struct nic *nic, enum loopback loopback_mode)
 		mdio_write(nic->netdev, nic->mii.phy_id, MII_BMCR,
 			BMCR_LOOPBACK);
 
-	e100_start_receiver(nic);
+	e100_start_receiver(nic, NULL);
 
-	if(!(skb = dev_alloc_skb(ETH_DATA_LEN))) {
+	if(!(skb = netdev_alloc_skb(nic->netdev, ETH_DATA_LEN))) {
 		err = -ENOMEM;
 		goto err_loopback_none;
 	}
@@ -1761,6 +2151,9 @@ static int e100_loopback_test(struct nic *nic, enum loopback loopback_mode)
 
 	msleep(10);
 
+	pci_dma_sync_single_for_cpu(nic->pdev, nic->rx_to_clean->dma_addr,
+			RFD_BUF_LEN, PCI_DMA_FROMDEVICE);
+
 	if(memcmp(nic->rx_to_clean->skb->data + sizeof(struct rfd),
 	   skb->data, ETH_DATA_LEN))
 		err = -EAGAIN;
@@ -1768,8 +2161,8 @@ static int e100_loopback_test(struct nic *nic, enum loopback loopback_mode)
 err_loopback_none:
 	mdio_write(nic->netdev, nic->mii.phy_id, MII_BMCR, 0);
 	nic->loopback = lb_none;
-	e100_hw_init(nic);
 	e100_clean_cbs(nic);
+	e100_hw_reset(nic);
 err_clean_rx:
 	e100_rx_clean_list(nic);
 	return err;
@@ -1820,13 +2213,11 @@ static void e100_get_drvinfo(struct net_device *netdev,
 	strcpy(info->bus_info, pci_name(nic->pdev));
 }
 
+#define E100_PHY_REGS 0x1C
 static int e100_get_regs_len(struct net_device *netdev)
 {
 	struct nic *nic = netdev_priv(netdev);
-#define E100_PHY_REGS		0x1C
-#define E100_REGS_LEN		1 + E100_PHY_REGS + \
-	sizeof(nic->mem->dump_buf) / sizeof(u32)
-	return E100_REGS_LEN * sizeof(u32);
+	return 1 + E100_PHY_REGS + sizeof(nic->mem->dump_buf);
 }
 
 static void e100_get_regs(struct net_device *netdev,
@@ -1836,10 +2227,10 @@ static void e100_get_regs(struct net_device *netdev,
 	u32 *buff = p;
 	int i;
 
-	regs->version = (1 << 24) | nic->rev_id;
-	buff[0] = readb(&nic->csr->scb.cmd_hi) << 24 |
-		readb(&nic->csr->scb.cmd_lo) << 16 |
-		readw(&nic->csr->scb.status);
+	regs->version = (1 << 24) | nic->pdev->revision;
+	buff[0] = ioread8(&nic->csr->scb.cmd_hi) << 24 |
+		ioread8(&nic->csr->scb.cmd_lo) << 16 |
+		ioread16(&nic->csr->scb.status);
 	for(i = E100_PHY_REGS; i >= 0; i--)
 		buff[1 + E100_PHY_REGS - i] =
 			mdio_read(netdev, nic->mii.phy_id, i);
@@ -1869,7 +2260,6 @@ static int e100_set_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
 	else
 		nic->flags &= ~wol_magic;
 
-	pci_enable_wake(nic->pdev, 0, nic->flags & (wol_magic | e100_asf(nic)));
 	e100_exec_cb(nic, NULL, e100_configure);
 
 	return 0;
@@ -1955,7 +2345,7 @@ static int e100_set_ringparam(struct net_device *netdev,
 	struct param_range *rfds = &nic->params.rfds;
 	struct param_range *cbs = &nic->params.cbs;
 
-	if ((ring->rx_mini_pending) || (ring->rx_jumbo_pending)) 
+	if ((ring->rx_mini_pending) || (ring->rx_jumbo_pending))
 		return -EINVAL;
 
 	if(netif_running(netdev))
@@ -1980,11 +2370,6 @@ static const char e100_gstrings_test[][ETH_GSTRING_LEN] = {
 	"Phy loopback     (offline)",
 };
 #define E100_TEST_LEN	sizeof(e100_gstrings_test) / ETH_GSTRING_LEN
-
-static int e100_diag_test_count(struct net_device *netdev)
-{
-	return E100_TEST_LEN;
-}
 
 static void e100_diag_test(struct net_device *netdev,
 	struct ethtool_test *test, u64 *data)
@@ -2015,6 +2400,8 @@ static void e100_diag_test(struct net_device *netdev,
 	}
 	for(i = 0; i < E100_TEST_LEN; i++)
 		test->flags |= data[i] ? ETH_TEST_FL_FAILED : 0;
+
+	msleep_interruptible(4 * 1000);
 }
 
 static int e100_phys_id(struct net_device *netdev, u32 data)
@@ -2046,9 +2433,16 @@ static const char e100_gstrings_stats[][ETH_GSTRING_LEN] = {
 #define E100_NET_STATS_LEN	21
 #define E100_STATS_LEN	sizeof(e100_gstrings_stats) / ETH_GSTRING_LEN
 
-static int e100_get_stats_count(struct net_device *netdev)
+static int e100_get_sset_count(struct net_device *netdev, int sset)
 {
-	return E100_STATS_LEN;
+	switch (sset) {
+	case ETH_SS_TEST:
+		return E100_TEST_LEN;
+	case ETH_SS_STATS:
+		return E100_STATS_LEN;
+	default:
+		return -EOPNOTSUPP;
+	}
 }
 
 static void e100_get_ethtool_stats(struct net_device *netdev,
@@ -2058,7 +2452,7 @@ static void e100_get_ethtool_stats(struct net_device *netdev,
 	int i;
 
 	for(i = 0; i < E100_NET_STATS_LEN; i++)
-		data[i] = ((unsigned long *)&nic->net_stats)[i];
+		data[i] = ((unsigned long *)&netdev->stats)[i];
 
 	data[i++] = nic->tx_deferred;
 	data[i++] = nic->tx_single_collisions;
@@ -2082,7 +2476,7 @@ static void e100_get_strings(struct net_device *netdev, u32 stringset, u8 *data)
 	}
 }
 
-static struct ethtool_ops e100_ethtool_ops = {
+static const struct ethtool_ops e100_ethtool_ops = {
 	.get_settings		= e100_get_settings,
 	.set_settings		= e100_set_settings,
 	.get_drvinfo		= e100_get_drvinfo,
@@ -2099,12 +2493,11 @@ static struct ethtool_ops e100_ethtool_ops = {
 	.set_eeprom		= e100_set_eeprom,
 	.get_ringparam		= e100_get_ringparam,
 	.set_ringparam		= e100_set_ringparam,
-	.self_test_count	= e100_diag_test_count,
 	.self_test		= e100_diag_test,
 	.get_strings		= e100_get_strings,
 	.phys_id		= e100_phys_id,
-	.get_stats_count	= e100_get_stats_count,
 	.get_ethtool_stats	= e100_get_ethtool_stats,
+	.get_sset_count		= e100_get_sset_count,
 };
 
 static int e100_do_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
@@ -2153,6 +2546,7 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 	struct net_device *netdev;
 	struct nic *nic;
 	int err;
+	DECLARE_MAC_BUF(mac);
 
 	if(!(netdev = alloc_etherdev(sizeof(struct nic)))) {
 		if(((1 << debug) - 1) & NETIF_MSG_PROBE)
@@ -2163,7 +2557,6 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 	netdev->open = e100_open;
 	netdev->stop = e100_close;
 	netdev->hard_start_xmit = e100_xmit_frame;
-	netdev->get_stats = e100_get_stats;
 	netdev->set_multicast_list = e100_set_multicast_list;
 	netdev->set_mac_address = e100_set_mac_address;
 	netdev->change_mtu = e100_change_mtu;
@@ -2171,14 +2564,13 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 	SET_ETHTOOL_OPS(netdev, &e100_ethtool_ops);
 	netdev->tx_timeout = e100_tx_timeout;
 	netdev->watchdog_timeo = E100_WATCHDOG_PERIOD;
-	netdev->poll = e100_poll;
-	netdev->weight = E100_NAPI_WEIGHT;
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	netdev->poll_controller = e100_netpoll;
 #endif
-	strcpy(netdev->name, pci_name(pdev));
+	strncpy(netdev->name, pci_name(pdev), sizeof(netdev->name) - 1);
 
 	nic = netdev_priv(netdev);
+	netif_napi_add(netdev, &nic->napi, e100_poll, E100_NAPI_WEIGHT);
 	nic->netdev = netdev;
 	nic->pdev = pdev;
 	nic->msg_enable = (1 << debug) - 1;
@@ -2201,15 +2593,17 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 		goto err_out_disable_pdev;
 	}
 
-	if((err = pci_set_dma_mask(pdev, 0xFFFFFFFFULL))) {
+	if((err = pci_set_dma_mask(pdev, DMA_32BIT_MASK))) {
 		DPRINTK(PROBE, ERR, "No usable DMA configuration, aborting.\n");
 		goto err_out_free_res;
 	}
 
-	SET_MODULE_OWNER(netdev);
 	SET_NETDEV_DEV(netdev, &pdev->dev);
 
-	nic->csr = ioremap(pci_resource_start(pdev, 0), sizeof(struct csr));
+	if (use_io)
+		DPRINTK(PROBE, INFO, "using i/o access mode\n");
+
+	nic->csr = pci_iomap(pdev, (use_io ? 1 : 0), sizeof(struct csr));
 	if(!nic->csr) {
 		DPRINTK(PROBE, ERR, "Cannot map device registers, aborting.\n");
 		err = -ENOMEM;
@@ -2223,8 +2617,10 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 
 	e100_get_defaults(nic);
 
+	/* locks must be initialized before calling hw_reset */
 	spin_lock_init(&nic->cb_lock);
 	spin_lock_init(&nic->cmd_lock);
+	spin_lock_init(&nic->mdio_lock);
 
 	/* Reset the device before pci_set_master() in case device is in some
 	 * funky state and has an interrupt pending - hint: we don't have the
@@ -2240,22 +2636,30 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 	nic->blink_timer.function = e100_blink_led;
 	nic->blink_timer.data = (unsigned long)nic;
 
+	INIT_WORK(&nic->tx_timeout_task, e100_tx_timeout_task);
+
 	if((err = e100_alloc(nic))) {
 		DPRINTK(PROBE, ERR, "Cannot alloc driver memory, aborting.\n");
 		goto err_out_iounmap;
 	}
 
-	e100_phy_init(nic);
-
 	if((err = e100_eeprom_load(nic)))
 		goto err_out_free;
 
+	e100_phy_init(nic);
+
 	memcpy(netdev->dev_addr, nic->eeprom, ETH_ALEN);
-	if(!is_valid_ether_addr(netdev->dev_addr)) {
-		DPRINTK(PROBE, ERR, "Invalid MAC address from "
-			"EEPROM, aborting.\n");
-		err = -EAGAIN;
-		goto err_out_free;
+	memcpy(netdev->perm_addr, nic->eeprom, ETH_ALEN);
+	if (!is_valid_ether_addr(netdev->perm_addr)) {
+		if (!eeprom_bad_csum_allow) {
+			DPRINTK(PROBE, ERR, "Invalid MAC address from "
+			        "EEPROM, aborting.\n");
+			err = -EAGAIN;
+			goto err_out_free;
+		} else {
+			DPRINTK(PROBE, ERR, "Invalid MAC address from EEPROM, "
+			        "you MUST configure one.\n");
+		}
 	}
 
 	/* Wol magic packet can be enabled from eeprom */
@@ -2263,7 +2667,10 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 	   (nic->eeprom[eeprom_id] & eeprom_id_wol))
 		nic->flags |= wol_magic;
 
-	pci_enable_wake(pdev, 0, nic->flags & (wol_magic | e100_asf(nic)));
+	/* ack any pending wake events, disable PME */
+	err = pci_enable_wake(pdev, 0, 0);
+	if (err)
+		DPRINTK(PROBE, ERR, "Error clearing wake event\n");
 
 	strcpy(netdev->name, "eth%d");
 	if((err = register_netdev(netdev))) {
@@ -2271,18 +2678,16 @@ static int __devinit e100_probe(struct pci_dev *pdev,
 		goto err_out_free;
 	}
 
-	DPRINTK(PROBE, INFO, "addr 0x%lx, irq %d, "
-		"MAC addr %02X:%02X:%02X:%02X:%02X:%02X\n",
-		pci_resource_start(pdev, 0), pdev->irq,
-		netdev->dev_addr[0], netdev->dev_addr[1], netdev->dev_addr[2],
-		netdev->dev_addr[3], netdev->dev_addr[4], netdev->dev_addr[5]);
+	DPRINTK(PROBE, INFO, "addr 0x%llx, irq %d, MAC addr %s\n",
+		(unsigned long long)pci_resource_start(pdev, use_io ? 1 : 0),
+		pdev->irq, print_mac(mac, netdev->dev_addr));
 
 	return 0;
 
 err_out_free:
 	e100_free(nic);
 err_out_iounmap:
-	iounmap(nic->csr);
+	pci_iounmap(pdev, nic->csr);
 err_out_free_res:
 	pci_release_regions(pdev);
 err_out_disable_pdev:
@@ -2310,20 +2715,31 @@ static void __devexit e100_remove(struct pci_dev *pdev)
 }
 
 #ifdef CONFIG_PM
-static int e100_suspend(struct pci_dev *pdev, u32 state)
+static int e100_suspend(struct pci_dev *pdev, pm_message_t state)
 {
 	struct net_device *netdev = pci_get_drvdata(pdev);
 	struct nic *nic = netdev_priv(netdev);
 
-	if(netif_running(netdev))
-		e100_down(nic);
-	e100_hw_reset(nic);
+	if (netif_running(netdev))
+		napi_disable(&nic->napi);
+	del_timer_sync(&nic->watchdog);
+	netif_carrier_off(nic->netdev);
 	netif_device_detach(netdev);
 
 	pci_save_state(pdev);
-	pci_enable_wake(pdev, state, nic->flags & (wol_magic | e100_asf(nic)));
+
+	if ((nic->flags & wol_magic) | e100_asf(nic)) {
+		pci_enable_wake(pdev, PCI_D3hot, 1);
+		pci_enable_wake(pdev, PCI_D3cold, 1);
+	} else {
+		pci_enable_wake(pdev, PCI_D3hot, 0);
+		pci_enable_wake(pdev, PCI_D3cold, 0);
+	}
+
+	free_irq(pdev->irq, netdev);
+
 	pci_disable_device(pdev);
-	pci_set_power_state(pdev, pci_choose_state(pdev, state));
+	pci_set_power_state(pdev, PCI_D3hot);
 
 	return 0;
 }
@@ -2335,15 +2751,117 @@ static int e100_resume(struct pci_dev *pdev)
 
 	pci_set_power_state(pdev, PCI_D0);
 	pci_restore_state(pdev);
-	e100_hw_init(nic);
+	/* ack any pending wake events, disable PME */
+	pci_enable_wake(pdev, 0, 0);
 
 	netif_device_attach(netdev);
-	if(netif_running(netdev))
+	if (netif_running(netdev))
 		e100_up(nic);
 
 	return 0;
 }
-#endif
+#endif /* CONFIG_PM */
+
+static void e100_shutdown(struct pci_dev *pdev)
+{
+	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct nic *nic = netdev_priv(netdev);
+
+	if (netif_running(netdev))
+		napi_disable(&nic->napi);
+	del_timer_sync(&nic->watchdog);
+	netif_carrier_off(nic->netdev);
+
+	if ((nic->flags & wol_magic) | e100_asf(nic)) {
+		pci_enable_wake(pdev, PCI_D3hot, 1);
+		pci_enable_wake(pdev, PCI_D3cold, 1);
+	} else {
+		pci_enable_wake(pdev, PCI_D3hot, 0);
+		pci_enable_wake(pdev, PCI_D3cold, 0);
+	}
+
+	free_irq(pdev->irq, netdev);
+
+	pci_disable_device(pdev);
+	pci_set_power_state(pdev, PCI_D3hot);
+}
+
+/* ------------------ PCI Error Recovery infrastructure  -------------- */
+/**
+ * e100_io_error_detected - called when PCI error is detected.
+ * @pdev: Pointer to PCI device
+ * @state: The current pci conneection state
+ */
+static pci_ers_result_t e100_io_error_detected(struct pci_dev *pdev, pci_channel_state_t state)
+{
+	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct nic *nic = netdev_priv(netdev);
+
+	/* Similar to calling e100_down(), but avoids adpater I/O. */
+	netdev->stop(netdev);
+
+	/* Detach; put netif into state similar to hotplug unplug. */
+	napi_enable(&nic->napi);
+	netif_device_detach(netdev);
+	pci_disable_device(pdev);
+
+	/* Request a slot reset. */
+	return PCI_ERS_RESULT_NEED_RESET;
+}
+
+/**
+ * e100_io_slot_reset - called after the pci bus has been reset.
+ * @pdev: Pointer to PCI device
+ *
+ * Restart the card from scratch.
+ */
+static pci_ers_result_t e100_io_slot_reset(struct pci_dev *pdev)
+{
+	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct nic *nic = netdev_priv(netdev);
+
+	if (pci_enable_device(pdev)) {
+		printk(KERN_ERR "e100: Cannot re-enable PCI device after reset.\n");
+		return PCI_ERS_RESULT_DISCONNECT;
+	}
+	pci_set_master(pdev);
+
+	/* Only one device per card can do a reset */
+	if (0 != PCI_FUNC(pdev->devfn))
+		return PCI_ERS_RESULT_RECOVERED;
+	e100_hw_reset(nic);
+	e100_phy_init(nic);
+
+	return PCI_ERS_RESULT_RECOVERED;
+}
+
+/**
+ * e100_io_resume - resume normal operations
+ * @pdev: Pointer to PCI device
+ *
+ * Resume normal operations after an error recovery
+ * sequence has been completed.
+ */
+static void e100_io_resume(struct pci_dev *pdev)
+{
+	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct nic *nic = netdev_priv(netdev);
+
+	/* ack any pending wake events, disable PME */
+	pci_enable_wake(pdev, 0, 0);
+
+	netif_device_attach(netdev);
+	if (netif_running(netdev)) {
+		e100_open(netdev);
+		mod_timer(&nic->watchdog, jiffies);
+	}
+}
+
+static struct pci_error_handlers e100_err_handler = {
+	.error_detected = e100_io_error_detected,
+	.slot_reset = e100_io_slot_reset,
+	.resume = e100_io_resume,
+};
 
 static struct pci_driver e100_driver = {
 	.name =         DRV_NAME,
@@ -2351,9 +2869,12 @@ static struct pci_driver e100_driver = {
 	.probe =        e100_probe,
 	.remove =       __devexit_p(e100_remove),
 #ifdef CONFIG_PM
+	/* Power Management hooks */
 	.suspend =      e100_suspend,
 	.resume =       e100_resume,
 #endif
+	.shutdown =     e100_shutdown,
+	.err_handler = &e100_err_handler,
 };
 
 static int __init e100_init_module(void)
@@ -2362,7 +2883,7 @@ static int __init e100_init_module(void)
 		printk(KERN_INFO PFX "%s, %s\n", DRV_DESCRIPTION, DRV_VERSION);
 		printk(KERN_INFO PFX "%s\n", DRV_COPYRIGHT);
 	}
-	return pci_module_init(&e100_driver);
+	return pci_register_driver(&e100_driver);
 }
 
 static void __exit e100_cleanup_module(void)

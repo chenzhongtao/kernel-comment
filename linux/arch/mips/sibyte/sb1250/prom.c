@@ -16,7 +16,6 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -24,6 +23,7 @@
 #include <linux/bootmem.h>
 #include <linux/smp.h>
 #include <linux/initrd.h>
+#include <linux/pm.h>
 
 #include <asm/bootinfo.h>
 #include <asm/reboot.h>
@@ -66,7 +66,7 @@ static void prom_linux_exit(void)
 {
 #ifdef CONFIG_SMP
 	if (smp_processor_id()) {
-		smp_call_function(prom_cpu0_exit,NULL,1,1);
+		smp_call_function(prom_cpu0_exit, NULL, 1, 1);
 	}
 #endif
 	while(1);
@@ -79,18 +79,16 @@ void __init prom_init(void)
 {
 	_machine_restart   = (void (*)(char *))prom_linux_exit;
 	_machine_halt      = prom_linux_exit;
-	_machine_power_off = prom_linux_exit;
+	pm_power_off = prom_linux_exit;
 
 	strcpy(arcs_cmdline, "root=/dev/ram0 ");
 
-	mips_machgroup = MACH_GROUP_SIBYTE;
 	prom_meminit();
 }
 
-unsigned long __init prom_free_prom_memory(void)
+void __init prom_free_prom_memory(void)
 {
 	/* Not sure what I'm supposed to do here.  Nothing, I think */
-	return 0;
 }
 
 void prom_putchar(char c)

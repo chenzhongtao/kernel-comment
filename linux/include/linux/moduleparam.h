@@ -10,8 +10,21 @@
 #ifdef MODULE
 #define MODULE_PARAM_PREFIX /* empty */
 #else
-#define MODULE_PARAM_PREFIX __stringify(KBUILD_MODNAME) "."
+#define MODULE_PARAM_PREFIX KBUILD_MODNAME "."
 #endif
+
+#ifdef MODULE
+#define ___module_cat(a,b) __mod_ ## a ## b
+#define __module_cat(a,b) ___module_cat(a,b)
+#define __MODULE_INFO(tag, name, info)					  \
+static const char __module_cat(name,__LINE__)[]				  \
+  __attribute_used__							  \
+  __attribute__((section(".modinfo"),unused)) = __stringify(tag) "=" info
+#else  /* !MODULE */
+#define __MODULE_INFO(tag, name, info)
+#endif
+#define __MODULE_PARM_TYPE(name, _type)					  \
+  __MODULE_INFO(parmtype, name##type, #name ":" _type)
 
 struct kernel_param;
 
@@ -25,7 +38,11 @@ struct kernel_param {
 	unsigned int perm;
 	param_set_fn set;
 	param_get_fn get;
-	void *arg;
+	union {
+		void *arg;
+		const struct kparam_string *str;
+		const struct kparam_array *arr;
+	};
 };
 
 /* Special one for strings we want to copy into */
@@ -46,15 +63,18 @@ struct kparam_array
 };
 
 /* This is the fundamental function for registering boot/module
-   parameters.  perm sets the visibility in driverfs: 000 means it's
+   parameters.  perm sets the visibility in sysfs: 000 means it's
    not there, read bits mean it's readable, write bits mean it's
    writable. */
 #define __module_param_call(prefix, name, set, get, arg, perm)		\
-	static char __param_str_##name[] = prefix #name;		\
+	/* Default value instead of permissions? */			\
+	static int __param_perm_check_##name __attribute__((unused)) =	\
+	BUILD_BUG_ON_ZERO((perm) < 0 || (perm) > 0777 || ((perm) & 2));	\
+	static const char __param_str_##name[] = prefix #name;		\
 	static struct kernel_param const __param_##name			\
 	__attribute_used__						\
     __attribute__ ((unused,__section__ ("__param"),aligned(sizeof(void *)))) \
-	= { __param_str_##name, perm, set, get, arg }
+	= { __param_str_##name, perm, set, get, { arg } }
 
 #define module_param_call(name, set, get, arg, perm)			      \
 	__module_param_call(MODULE_PARAM_PREFIX, name, set, get, arg, perm)
@@ -65,18 +85,18 @@ struct kparam_array
 #define module_param_named(name, value, type, perm)			   \
 	param_check_##type(name, &(value));				   \
 	module_param_call(name, param_set_##type, param_get_##type, &value, perm); \
-	__MODULE_INFO(parmtype, name##type, #name ":" #type)
+	__MODULE_PARM_TYPE(name, #type)
 
 #define module_param(name, type, perm)				\
 	module_param_named(name, name, type, perm)
 
 /* Actually copy string: maxlen param is usually sizeof(string). */
 #define module_param_string(name, string, len, perm)			\
-	static struct kparam_string __param_string_##name		\
+	static const struct kparam_string __param_string_##name		\
 		= { len, string };					\
 	module_param_call(name, param_set_copystring, param_get_string,	\
-		   &__param_string_##name, perm);			\
-	__MODULE_INFO(parmtype, name##type, #name ":string")
+			  .str = &__param_string_##name, perm);		\
+	__MODULE_PARM_TYPE(name, "string")
 
 /* Called on module insert or kernel boot */
 extern int parse_args(const char *name,
@@ -133,12 +153,12 @@ extern int param_get_invbool(char *buffer, struct kernel_param *kp);
 
 /* Comma-separated array: *nump is set to number they actually specified. */
 #define module_param_array_named(name, array, type, nump, perm)		\
-	static struct kparam_array __param_arr_##name			\
+	static const struct kparam_array __param_arr_##name		\
 	= { ARRAY_SIZE(array), nump, param_set_##type, param_get_##type,\
 	    sizeof(array[0]), array };					\
 	module_param_call(name, param_array_set, param_array_get, 	\
-			  &__param_arr_##name, perm);			\
-	__MODULE_INFO(parmtype, name##type, #name ":array of " #type)
+			  .arr = &__param_arr_##name, perm);		\
+	__MODULE_PARM_TYPE(name, "array of " #type)
 
 #define module_param_array(name, type, nump, perm)		\
 	module_param_array_named(name, name, type, nump, perm)
@@ -149,21 +169,26 @@ extern int param_array_get(char *buffer, struct kernel_param *kp);
 extern int param_set_copystring(const char *val, struct kernel_param *kp);
 extern int param_get_string(char *buffer, struct kernel_param *kp);
 
-int param_array(const char *name,
-		const char *val,
-		unsigned int min, unsigned int max,
-		void *elem, int elemsize,
-		int (*set)(const char *, struct kernel_param *kp),
-		int *num);
-
 /* for exporting parameters in /sys/parameters */
 
 struct module;
 
+#if defined(CONFIG_SYSFS) && defined(CONFIG_MODULES)
 extern int module_param_sysfs_setup(struct module *mod,
 				    struct kernel_param *kparam,
 				    unsigned int num_params);
 
 extern void module_param_sysfs_remove(struct module *mod);
+#else
+static inline int module_param_sysfs_setup(struct module *mod,
+			     struct kernel_param *kparam,
+			     unsigned int num_params)
+{
+	return 0;
+}
+
+static inline void module_param_sysfs_remove(struct module *mod)
+{ }
+#endif
 
 #endif /* _LINUX_MODULE_PARAMS_H */

@@ -90,7 +90,7 @@ static volatile unsigned char cmd_buffer[16];
 				 */
 
 /***************************************************************** Detection */
-int __init blz2060_esp_detect(Scsi_Host_Template *tpnt)
+int __init blz2060_esp_detect(struct scsi_host_template *tpnt)
 {
 	struct NCR_ESP *esp;
 	struct zorro_dev *z = NULL;
@@ -100,7 +100,7 @@ int __init blz2060_esp_detect(Scsi_Host_Template *tpnt)
 	    unsigned long board = z->resource.start;
 	    if (request_mem_region(board+BLZ2060_ESP_ADDR,
 				   sizeof(struct ESP_regs), "NCR53C9x")) {
-		esp = esp_allocate(tpnt, (void *)board+BLZ2060_ESP_ADDR);
+		esp = esp_allocate(tpnt, (void *)board + BLZ2060_ESP_ADDR, 0);
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -146,7 +146,7 @@ int __init blz2060_esp_detect(Scsi_Host_Template *tpnt)
 		esp->esp_command_dvma = virt_to_bus((void *)cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
+		request_irq(IRQ_AMIGA_PORTS, esp_intr, IRQF_SHARED,
 			    "Blizzard 2060 SCSI", esp->ehost);
 
 		/* Figure out our scsi ID on the bus */
@@ -190,7 +190,7 @@ static int dma_can_transfer(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 static void dma_dump_state(struct NCR_ESP *esp)
 {
 	ESPLOG(("intreq:<%04x>, intena:<%04x>\n",
-		custom.intreqr, custom.intenar));
+		amiga_custom.intreqr, amiga_custom.intenar));
 }
 
 static void dma_init_read(struct NCR_ESP *esp, __u32 addr, int length)
@@ -251,7 +251,7 @@ static void dma_led_on(struct NCR_ESP *esp)
 
 static int dma_ports_p(struct NCR_ESP *esp)
 {
-	return ((custom.intenar) & IF_PORTS);
+	return ((amiga_custom.intenar) & IF_PORTS);
 }
 
 static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
@@ -282,7 +282,7 @@ int blz2060_esp_release(struct Scsi_Host *instance)
 }
 
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "esp-blz2060",
 	.proc_info		= esp_proc_info,
 	.name			= "Blizzard2060 SCSI",

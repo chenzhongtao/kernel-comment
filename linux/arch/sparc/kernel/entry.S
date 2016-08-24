@@ -1,14 +1,12 @@
-/* $Id: entry.S,v 1.170 2001/11/13 00:57:05 davem Exp $
- * arch/sparc/kernel/entry.S:  Sparc trap low-level entry points.
+/* arch/sparc/kernel/entry.S:  Sparc trap low-level entry points.
  *
- * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1995, 2007 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1996 Eddie C. Dost   (ecd@skynet.be)
  * Copyright (C) 1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
  * Copyright (C) 1996-1999 Jakub Jelinek   (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1997 Anton Blanchard (anton@progsoc.uts.edu.au)
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 
 #include <asm/head.h>
@@ -17,7 +15,7 @@
 #include <asm/kgdb.h>
 #include <asm/contregs.h>
 #include <asm/ptrace.h>
-#include <asm/asm_offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/psr.h>
 #include <asm/vaddrs.h>
 #include <asm/memreg.h>
@@ -33,12 +31,11 @@
 #include <asm/mxcc.h>
 #include <asm/thread_info.h>
 #include <asm/param.h>
+#include <asm/unistd.h>
 
 #include <asm/asmmacro.h>
 
 #define curptr      g6
-
-#define NR_SYSCALLS 284      /* Each OS is different... */
 
 /* These are just handy. */
 #define _SV	save	%sp, -STACKFRAME_SZ, %sp
@@ -131,7 +128,7 @@ trap_low:
 	RESTORE_ALL
 #endif
 
-#ifdef CONFIG_BLK_DEV_FD
+#if defined(CONFIG_BLK_DEV_FD) || defined(CONFIG_BLK_DEV_FD_MODULE)
 	.text
 	.align	4
 	.globl	floppy_hardint
@@ -1277,62 +1274,6 @@ sys_sigstack:
 	 mov	%l5, %o7
 
 	.align	4
-	.globl	sys_sigpause
-sys_sigpause:
-	/* Note: %o0 already has correct value... */
-	call	do_sigpause
-	 add	%sp, STACKFRAME_SZ, %o1
-
-	ld	[%curptr + TI_FLAGS], %l5
-	andcc	%l5, _TIF_SYSCALL_TRACE, %g0
-	be	1f
-	 nop
-
-	call	syscall_trace
-	 nop
-
-1:
-	/* We are returning to a signal handler. */
-	RESTORE_ALL
-
-	.align	4
-	.globl	sys_sigsuspend
-sys_sigsuspend:
-	call	do_sigsuspend
-	 add	%sp, STACKFRAME_SZ, %o0
-
-	ld	[%curptr + TI_FLAGS], %l5
-	andcc	%l5, _TIF_SYSCALL_TRACE, %g0
-	be	1f
-	 nop
-
-	call	syscall_trace
-	 nop
-
-1:
-	/* We are returning to a signal handler. */
-	RESTORE_ALL
-
-	.align	4
-	.globl	sys_rt_sigsuspend
-sys_rt_sigsuspend:
-	/* Note: %o0, %o1 already have correct value... */
-	call	do_rt_sigsuspend
-	 add	%sp, STACKFRAME_SZ, %o2
-
-	ld	[%curptr + TI_FLAGS], %l5
-	andcc	%l5, _TIF_SYSCALL_TRACE, %g0
-	be	1f
-	 nop
-
-	call	syscall_trace
-	 nop
-
-1:
-	/* We are returning to a signal handler. */
-	RESTORE_ALL
-
-	.align	4
 	.globl	sys_sigreturn
 sys_sigreturn:
 	call	do_sigreturn
@@ -1807,8 +1748,8 @@ fpload:
 __ndelay:
 	save	%sp, -STACKFRAME_SZ, %sp
 	mov	%i0, %o0
-	call	.umul
-	 mov	0x1ad, %o1		! 2**32 / (1 000 000 000 / HZ)
+	call	.umul			! round multiplier up so large ns ok
+	 mov	0x1ae, %o1		! 2**32 / (1 000 000 000 / HZ)
 	call	.umul
 	 mov	%i1, %o1		! udelay_val
 	ba	delay_continue
@@ -1818,11 +1759,17 @@ __ndelay:
 __udelay:
 	save	%sp, -STACKFRAME_SZ, %sp
 	mov	%i0, %o0
-	sethi	%hi(0x10c6), %o1
+	sethi	%hi(0x10c7), %o1	! round multiplier up so large us ok
 	call	.umul
-	 or	%o1, %lo(0x10c6), %o1	! 2**32 / 1 000 000
+	 or	%o1, %lo(0x10c7), %o1	! 2**32 / 1 000 000
 	call	.umul
 	 mov	%i1, %o1		! udelay_val
+	sethi	%hi(0x028f4b62), %l0	! Add in rounding constant * 2**32,
+	or	%g0, %lo(0x028f4b62), %l0
+	addcc	%o0, %l0, %o0		! 2**32 * 0.009 999
+	bcs,a	3f
+	 add	%o1, 0x01, %o1
+3:
 	call	.umul
 	 mov	HZ, %o0			! >>32 earlier for wider range
 

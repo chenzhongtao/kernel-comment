@@ -24,6 +24,7 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
   */
 
+
 #include <linux/module.h>
 #include <linux/ioctl.h>
 #include <linux/i2c.h>
@@ -34,7 +35,7 @@ static int debug = 0;		/* insmod parameter */
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "Turn on/off device debugging (default:off).");
 #define dprintk(args...) \
-            do { if (debug) { printk("%s: %s()[%d]: ",__stringify(KBUILD_MODNAME), __FUNCTION__, __LINE__); printk(args); } } while (0)
+	    do { if (debug) { printk("%s: %s()[%d]: ", KBUILD_MODNAME, __FUNCTION__, __LINE__); printk(args); } } while (0)
 
 #define	SWITCH		0x00
 #define	LEVEL_ADJUST	0x02
@@ -42,17 +43,13 @@ MODULE_PARM_DESC(debug, "Turn on/off device debugging (default:off).");
 #define	TEST		0x04
 
 /* addresses to scan, found only at 0x42 (7-Bit) */
-static unsigned short normal_i2c[] = { I2C_TDA9840, I2C_CLIENT_END };
-static unsigned short normal_i2c_range[] = { I2C_CLIENT_END };
+static unsigned short normal_i2c[] = { I2C_ADDR_TDA9840, I2C_CLIENT_END };
 
 /* magic definition of all other variables and things */
 I2C_CLIENT_INSMOD;
 
 static struct i2c_driver driver;
 static struct i2c_client client_template;
-
-/* unique ID allocation */
-static int tda9840_id = 0;
 
 static int command(struct i2c_client *client, unsigned int cmd, void *arg)
 {
@@ -120,7 +117,8 @@ static int command(struct i2c_client *client, unsigned int cmd, void *arg)
 			dprintk("i2c_smbus_write_byte() failed, ret:%d\n", result);
 		break;
 
-	case TDA9840_DETECT:
+	case TDA9840_DETECT: {
+		int *ret = (int *)arg;
 
 		byte = i2c_smbus_read_byte_data(client, STEREO_ADJUST);
 		if (byte == -1) {
@@ -134,8 +132,10 @@ static int command(struct i2c_client *client, unsigned int cmd, void *arg)
 		}
 
 		dprintk("TDA9840_DETECT: byte: 0x%02x\n", byte);
-		return ((byte & 0x60) >> 5);
-
+		*ret = ((byte & 0x60) >> 5);
+		result = 0;
+		break;
+	}
 	case TDA9840_TEST:
 		dprintk("TDA9840_TEST: 0x%02x\n", byte);
 
@@ -179,7 +179,6 @@ static int detect(struct i2c_adapter *adapter, int address, int kind)
 
 	/* fill client structure */
 	memcpy(client, &client_template, sizeof(struct i2c_client));
-	client->id = tda9840_id++;
 	client->addr = address;
 	client->adapter = adapter;
 
@@ -207,7 +206,7 @@ static int detect(struct i2c_adapter *adapter, int address, int kind)
 static int attach(struct i2c_adapter *adapter)
 {
 	/* let's see whether this is a know adapter we can attach to */
-	if (adapter->id != I2C_ALGO_SAA7146) {
+	if (adapter->id != I2C_HW_SAA7146) {
 		dprintk("refusing to probe on unknown adapter [name='%s',id=0x%x]\n", adapter->name, adapter->id);
 		return -ENODEV;
 	}
@@ -223,17 +222,17 @@ static int detach(struct i2c_client *client)
 }
 
 static struct i2c_driver driver = {
-	.owner	= THIS_MODULE,
-	.name	= "tda9840",
+	.driver = {
+		.name = "tda9840",
+	},
 	.id	= I2C_DRIVERID_TDA9840,
-	.flags	= I2C_DF_NOTIFY,
 	.attach_adapter	= attach,
 	.detach_client	= detach,
 	.command	= command,
 };
 
 static struct i2c_client client_template = {
-	I2C_DEVNAME("tda9840"),
+	.name = "tda9840",
 	.driver = &driver,
 };
 

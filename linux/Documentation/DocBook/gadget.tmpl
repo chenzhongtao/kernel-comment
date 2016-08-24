@@ -1,4 +1,7 @@
-<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V3.1//EN"[]>
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.1.2//EN"
+	"http://www.oasis-open.org/docbook/xml/4.1.2/docbookx.dtd" []>
+
 <book id="USB-Gadget-API">
   <bookinfo>
     <title>USB Gadget API for Linux</title>
@@ -49,7 +52,7 @@
 
 <toc></toc>
 
-<chapter><title>Introduction</title>
+<chapter id="intro"><title>Introduction</title>
 
 <para>This document presents a Linux-USB "Gadget"
 kernel mode
@@ -141,7 +144,7 @@ with the lowest level (which directly handles hardware).
 	<para>This is the lowest software level.
 	It is the only layer that talks to hardware,
 	through registers, fifos, dma, irqs, and the like.
-	The <filename>&lt;linux/usb_gadget.h&gt;</filename> API abstracts
+	The <filename>&lt;linux/usb/gadget.h&gt;</filename> API abstracts
 	the peripheral controller endpoint hardware.
 	That hardware is exposed through endpoint objects, which accept
 	streams of IN/OUT buffers, and through callbacks that interact
@@ -479,19 +482,19 @@ slightly.
 <para>Gadget drivers
 rely on common USB structures and constants
 defined in the
-<filename>&lt;linux/usb_ch9.h&gt;</filename>
+<filename>&lt;linux/usb/ch9.h&gt;</filename>
 header file, which is standard in Linux 2.6 kernels.
 These are the same types and constants used by host
 side drivers (and usbcore).
 </para>
 
-!Iinclude/linux/usb_ch9.h
+!Iinclude/linux/usb/ch9.h
 </sect1>
 
 <sect1 id="core"><title>Core Objects and Methods</title>
 
 <para>These are declared in
-<filename>&lt;linux/usb_gadget.h&gt;</filename>,
+<filename>&lt;linux/usb/gadget.h&gt;</filename>,
 and are used by gadget drivers to interact with
 USB peripheral controller drivers.
 </para>
@@ -506,7 +509,7 @@ USB peripheral controller drivers.
 	     unless the explanations are trivial.
 	  -->
 
-!Iinclude/linux/usb_gadget.h
+!Iinclude/linux/usb/gadget.h
 </sect1>
 
 <sect1 id="utils"><title>Optional Utilities</title>

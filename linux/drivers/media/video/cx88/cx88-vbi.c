@@ -1,5 +1,4 @@
 /*
- * $Id: cx88-vbi.c,v 1.14 2004/11/07 13:17:15 kraxel Exp $
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -21,9 +20,11 @@ MODULE_PARM_DESC(vbi_debug,"enable debug messages [vbi]");
 
 /* ------------------------------------------------------------------ */
 
-void cx8800_vbi_fmt(struct cx8800_dev *dev, struct v4l2_format *f)
+int cx8800_vbi_fmt (struct file *file, void *priv,
+					struct v4l2_format *f)
 {
-	memset(&f->fmt.vbi,0,sizeof(f->fmt.vbi));
+	struct cx8800_fh  *fh   = priv;
+	struct cx8800_dev *dev  = fh->dev;
 
 	f->fmt.vbi.samples_per_line = VBI_LINE_LENGTH;
 	f->fmt.vbi.sample_format = V4L2_PIX_FMT_GREY;
@@ -31,21 +32,22 @@ void cx8800_vbi_fmt(struct cx8800_dev *dev, struct v4l2_format *f)
 	f->fmt.vbi.count[0] = VBI_LINE_COUNT;
 	f->fmt.vbi.count[1] = VBI_LINE_COUNT;
 
-	if (dev->core->tvnorm->id & V4L2_STD_525_60) {
+	if (dev->core->tvnorm & V4L2_STD_525_60) {
 		/* ntsc */
 		f->fmt.vbi.sampling_rate = 28636363;
-		f->fmt.vbi.start[0] = 10 -1;
-		f->fmt.vbi.start[1] = 273 -1;
+		f->fmt.vbi.start[0] = 10;
+		f->fmt.vbi.start[1] = 273;
 
-	} else if (dev->core->tvnorm->id & V4L2_STD_625_50) {
+	} else if (dev->core->tvnorm & V4L2_STD_625_50) {
 		/* pal */
 		f->fmt.vbi.sampling_rate = 35468950;
 		f->fmt.vbi.start[0] = 7 -1;
 		f->fmt.vbi.start[1] = 319 -1;
 	}
+	return 0;
 }
 
-int cx8800_start_vbi_dma(struct cx8800_dev    *dev,
+static int cx8800_start_vbi_dma(struct cx8800_dev    *dev,
 			 struct cx88_dmaqueue *q,
 			 struct cx88_buffer   *buf)
 {
@@ -64,7 +66,7 @@ int cx8800_start_vbi_dma(struct cx8800_dev    *dev,
 	q->count = 1;
 
 	/* enable irqs */
-	cx_set(MO_PCI_INTMSK, 0x00fc01);
+	cx_set(MO_PCI_INTMSK, core->pci_irqmask | PCI_INT_VIDINT);
 	cx_set(MO_VID_INTMSK, 0x0f0088);
 
 	/* enable capture */
@@ -88,7 +90,7 @@ int cx8800_stop_vbi_dma(struct cx8800_dev *dev)
 	cx_clear(VID_CAPTURE_CONTROL,0x18);
 
 	/* disable irqs */
-	cx_clear(MO_PCI_INTMSK, 0x000001);
+	cx_clear(MO_PCI_INTMSK, PCI_INT_VIDINT);
 	cx_clear(MO_VID_INTMSK, 0x0f0088);
 	return 0;
 }
@@ -97,7 +99,6 @@ int cx8800_restart_vbi_queue(struct cx8800_dev    *dev,
 			     struct cx88_dmaqueue *q)
 {
 	struct cx88_buffer *buf;
-	struct list_head *item;
 
 	if (list_empty(&q->active))
 		return 0;
@@ -106,10 +107,8 @@ int cx8800_restart_vbi_queue(struct cx8800_dev    *dev,
 	dprintk(2,"restart_queue [%p/%d]: restart dma\n",
 		buf, buf->vb.i);
 	cx8800_start_vbi_dma(dev, q, buf);
-	list_for_each(item,&q->active) {
-		buf = list_entry(item, struct cx88_buffer, vb.queue);
+	list_for_each_entry(buf, &q->active, vb.queue)
 		buf->count = q->count++;
-	}
 	mod_timer(&q->timeout, jiffies+BUFFER_TIMEOUT);
 	return 0;
 }
@@ -170,15 +169,16 @@ vbi_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
 		return -EINVAL;
 
 	if (STATE_NEEDS_INIT == buf->vb.state) {
+		struct videobuf_dmabuf *dma=videobuf_to_dma(&buf->vb);
 		buf->vb.width  = VBI_LINE_LENGTH;
 		buf->vb.height = VBI_LINE_COUNT;
 		buf->vb.size   = size;
 		buf->vb.field  = V4L2_FIELD_SEQ_TB;
 
-		if (0 != (rc = videobuf_iolock(dev->pci,&buf->vb,NULL)))
+		if (0 != (rc = videobuf_iolock(q,&buf->vb,NULL)))
 			goto fail;
 		cx88_risc_buffer(dev->pci, &buf->risc,
-				 buf->vb.dma.sglist,
+				 dma->sglist,
 				 0, buf->vb.width * buf->vb.height,
 				 buf->vb.width, 0,
 				 buf->vb.height);
@@ -187,7 +187,7 @@ vbi_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
 	return 0;
 
  fail:
-	cx88_free_buffer(dev->pci,buf);
+	cx88_free_buffer(q,buf);
 	return rc;
 }
 
@@ -227,9 +227,8 @@ vbi_queue(struct videobuf_queue *vq, struct videobuf_buffer *vb)
 static void vbi_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
 {
 	struct cx88_buffer *buf = container_of(vb,struct cx88_buffer,vb);
-	struct cx8800_fh   *fh  = q->priv_data;
 
-	cx88_free_buffer(fh->dev->pci,buf);
+	cx88_free_buffer(q,buf);
 }
 
 struct videobuf_queue_ops cx8800_vbi_qops = {

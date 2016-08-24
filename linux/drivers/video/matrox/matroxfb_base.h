@@ -25,13 +25,11 @@
 /* Guard accelerator accesses with spin_lock_irqsave... */
 #undef MATROXFB_USE_SPINLOCKS
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
@@ -49,8 +47,6 @@
 #ifdef CONFIG_MTRR
 #include <asm/mtrr.h>
 #endif
-
-#include "../console/fbcon.h"
 
 #if defined(CONFIG_PPC_PMAC)
 #include <asm/prom.h>
@@ -272,10 +268,6 @@ struct matrox_DAC1064_features {
 	u_int8_t	xmiscctrl;
 };
 
-struct matrox_accel_features {
-	int		has_cacheflush;
-};
-
 /* current hardware status */
 struct mavenregs {
 	u_int8_t regs[256];
@@ -355,8 +347,6 @@ struct matrox_bios {
 		      } output;
 };
 
-extern struct display fb_display[];
-
 struct matrox_switch;
 struct matroxfb_driver;
 struct matroxfb_dh_fb_info;
@@ -434,13 +424,13 @@ struct matrox_fb_info {
 		      } mmio;
 
 	unsigned int	max_pixel_clock;
+	unsigned int	max_pixel_clock_panellink;
 
 	struct matrox_switch*	hw_switch;
 
 	struct {
 		struct matrox_pll_features pll;
 		struct matrox_DAC1064_features DAC1064;
-		struct matrox_accel_features accel;
 			      } features;
 	struct {
 		spinlock_t	DAC;
@@ -529,7 +519,7 @@ struct matrox_fb_info {
 					dll:1;
 				      } memory;
 			      } values;
-	u_int32_t cmap[17];
+	u_int32_t cmap[16];
 };
 
 #define info2minfo(info) container_of(info, struct matrox_fb_info, fbcon)
@@ -681,6 +671,8 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 
 #define M_SEQ_INDEX	0x1FC4
 #define M_SEQ_DATA	0x1FC5
+#define     M_SEQ1		0x01
+#define        M_SEQ1_SCROFF		0x20
 
 #define M_MISC_REG_READ	0x1FCC
 
@@ -764,7 +756,6 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 #define matroxfb_DAC_unlock_irqrestore(flags) spin_unlock_irqrestore(&ACCESS_FBINFO(lock.DAC),flags)
 extern void matroxfb_DAC_out(CPMINFO int reg, int val);
 extern int matroxfb_DAC_in(CPMINFO int reg);
-extern struct list_head matroxfb_list;
 extern void matroxfb_var2my(struct fb_var_screeninfo* fvsi, struct my_timming* mt);
 extern int matroxfb_wait_for_sync(WPMINFO u_int32_t crtc);
 extern int matroxfb_enable_irq(WPMINFO int reenable);

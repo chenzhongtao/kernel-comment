@@ -21,30 +21,25 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * Send feedback to <greg@kroah.com>
- *
- * Filesystem portion based on work done by Pat Mochel on ddfs/driverfs
+ * Send feedback to <kristen.c.accardi@intel.com>
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/list.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 #include <linux/pagemap.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/pci.h>
+#include <linux/pci_hotplug.h>
 #include <asm/uaccess.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
-#include "pci_hotplug.h"
-
 
 #define MY_NAME	"pci_hotplug"
 
@@ -66,14 +61,14 @@ static int debug;
 
 static LIST_HEAD(pci_hotplug_slot_list);
 
-struct subsystem pci_hotplug_slots_subsys;
+struct kset pci_hotplug_slots_subsys;
 
 static ssize_t hotplug_slot_attr_show(struct kobject *kobj,
 		struct attribute *attr, char *buf)
 {
 	struct hotplug_slot *slot = to_hotplug_slot(kobj);
 	struct hotplug_slot_attribute *attribute = to_hotplug_attr(attr);
-	return attribute->show ? attribute->show(slot, buf) : 0;
+	return attribute->show ? attribute->show(slot, buf) : -EIO;
 }
 
 static ssize_t hotplug_slot_attr_store(struct kobject *kobj,
@@ -81,7 +76,7 @@ static ssize_t hotplug_slot_attr_store(struct kobject *kobj,
 {
 	struct hotplug_slot *slot = to_hotplug_slot(kobj);
 	struct hotplug_slot_attribute *attribute = to_hotplug_attr(attr);
-	return attribute->store ? attribute->store(slot, buf, len) : 0;
+	return attribute->store ? attribute->store(slot, buf, len) : -EIO;
 }
 
 static struct sysfs_ops hotplug_slot_sysfs_ops = {
@@ -483,31 +478,95 @@ static int has_test_file (struct hotplug_slot *slot)
 
 static int fs_add_slot (struct hotplug_slot *slot)
 {
-	if (has_power_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_power.attr);
+	int retval = 0;
 
-	if (has_attention_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_attention.attr);
+	if (has_power_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj, &hotplug_slot_attr_power.attr);
+		if (retval)
+			goto exit_power;
+	}
 
-	if (has_latch_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_latch.attr);
+	if (has_attention_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj,
+					   &hotplug_slot_attr_attention.attr);
+		if (retval)
+			goto exit_attention;
+	}
 
-	if (has_adapter_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_presence.attr);
+	if (has_latch_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj,
+					   &hotplug_slot_attr_latch.attr);
+		if (retval)
+			goto exit_latch;
+	}
 
-	if (has_address_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_address.attr);
+	if (has_adapter_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj,
+					   &hotplug_slot_attr_presence.attr);
+		if (retval)
+			goto exit_adapter;
+	}
 
-	if (has_max_bus_speed_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_max_bus_speed.attr);
+	if (has_address_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj,
+					   &hotplug_slot_attr_address.attr);
+		if (retval)
+			goto exit_address;
+	}
 
+	if (has_max_bus_speed_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj,
+					   &hotplug_slot_attr_max_bus_speed.attr);
+		if (retval)
+			goto exit_max_speed;
+	}
+
+	if (has_cur_bus_speed_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj,
+					   &hotplug_slot_attr_cur_bus_speed.attr);
+		if (retval)
+			goto exit_cur_speed;
+	}
+
+	if (has_test_file(slot) == 0) {
+		retval = sysfs_create_file(&slot->kobj,
+					   &hotplug_slot_attr_test.attr);
+		if (retval)
+			goto exit_test;
+	}
+
+	goto exit;
+
+exit_test:
 	if (has_cur_bus_speed_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_cur_bus_speed.attr);
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_cur_bus_speed.attr);
 
-	if (has_test_file(slot) == 0)
-		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_test.attr);
+exit_cur_speed:
+	if (has_max_bus_speed_file(slot) == 0)
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_max_bus_speed.attr);
 
-	return 0;
+exit_max_speed:
+	if (has_address_file(slot) == 0)
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_address.attr);
+
+exit_address:
+	if (has_adapter_file(slot) == 0)
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_presence.attr);
+
+exit_adapter:
+	if (has_latch_file(slot) == 0)
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_latch.attr);
+
+exit_latch:
+	if (has_attention_file(slot) == 0)
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_attention.attr);
+
+exit_attention:
+	if (has_power_file(slot) == 0)
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_power.attr);
+exit_power:
+exit:
+	return retval;
 }
 
 static void fs_remove_slot (struct hotplug_slot *slot)
@@ -567,6 +626,11 @@ int pci_hp_register (struct hotplug_slot *slot)
 		return -ENODEV;
 	if ((slot->info == NULL) || (slot->ops == NULL))
 		return -EINVAL;
+	if (slot->release == NULL) {
+		dbg("Why are you trying to register a hotplug slot"
+		    "without a proper release function?\n");
+		return -EINVAL;
+	}
 
 	kobject_set_name(&slot->kobj, "%s", slot->name);
 	kobj_set_kset_s(slot, pci_hotplug_slots_subsys);
@@ -622,42 +686,11 @@ int pci_hp_deregister (struct hotplug_slot *slot)
  *
  * Returns 0 if successful, anything else for an error.
  */
-int pci_hp_change_slot_info (struct hotplug_slot *slot, struct hotplug_slot_info *info)
+int __must_check pci_hp_change_slot_info(struct hotplug_slot *slot,
+					 struct hotplug_slot_info *info)
 {
 	if ((slot == NULL) || (info == NULL))
 		return -ENODEV;
-
-	/*
-	* check all fields in the info structure, and update timestamps
-	* for the files referring to the fields that have now changed.
-	*/
-	if ((has_power_file(slot) == 0) &&
-	    (slot->info->power_status != info->power_status))
-		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_power.attr);
-
-	if ((has_attention_file(slot) == 0) &&
-	    (slot->info->attention_status != info->attention_status))
-		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_attention.attr);
-
-	if ((has_latch_file(slot) == 0) &&
-	    (slot->info->latch_status != info->latch_status))
-		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_latch.attr);
-
-	if ((has_adapter_file(slot) == 0) &&
-	    (slot->info->adapter_status != info->adapter_status))
-		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_presence.attr);
-
-	if ((has_address_file(slot) == 0) &&
-	    (slot->info->address != info->address))
-		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_address.attr);
-
-	if ((has_max_bus_speed_file(slot) == 0) &&
-	    (slot->info->max_bus_speed != info->max_bus_speed))
-		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_max_bus_speed.attr);
-
-	if ((has_cur_bus_speed_file(slot) == 0) &&
-	    (slot->info->cur_bus_speed != info->cur_bus_speed))
-		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_cur_bus_speed.attr);
 
 	memcpy (slot->info, info, sizeof (struct hotplug_slot_info));
 
@@ -668,7 +701,7 @@ static int __init pci_hotplug_init (void)
 {
 	int result;
 
-	kset_set_kset_s(&pci_hotplug_slots_subsys, pci_bus_type.subsys);
+	kobj_set_kset_s(&pci_hotplug_slots_subsys, pci_bus_type.subsys);
 	result = subsystem_register(&pci_hotplug_slots_subsys);
 	if (result) {
 		err("Register subsys with error %d\n", result);

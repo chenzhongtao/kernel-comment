@@ -1,7 +1,8 @@
 #ifndef NET_COMPAT_H
 #define NET_COMPAT_H
 
-#include <linux/config.h>
+
+struct sock;
 
 #if defined(CONFIG_COMPAT)
 
@@ -23,6 +24,9 @@ struct compat_cmsghdr {
 	compat_int_t	cmsg_type;
 };
 
+extern int compat_sock_get_timestamp(struct sock *, struct timeval __user *);
+extern int compat_sock_get_timestampns(struct sock *, struct timespec __user *);
+
 #else /* defined(CONFIG_COMPAT) */
 #define compat_msghdr	msghdr		/* to avoid compiler warnings */
 #endif /* defined(CONFIG_COMPAT) */
@@ -33,7 +37,7 @@ extern asmlinkage long compat_sys_sendmsg(int,struct compat_msghdr __user *,unsi
 extern asmlinkage long compat_sys_recvmsg(int,struct compat_msghdr __user *,unsigned);
 extern asmlinkage long compat_sys_getsockopt(int, int, int, char __user *, int __user *);
 extern int put_cmsg_compat(struct msghdr*, int, int, int, void *);
-extern int cmsghdr_from_user_compat_to_kern(struct msghdr *, unsigned char *,
-		int);
+
+extern int cmsghdr_from_user_compat_to_kern(struct msghdr *, struct sock *, unsigned char *, int);
 
 #endif /* NET_COMPAT_H */

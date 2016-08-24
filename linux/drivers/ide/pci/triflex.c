@@ -27,7 +27,6 @@
  *	Not publically available.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -41,7 +40,7 @@
 #include <linux/ide.h>
 #include <linux/init.h>
 
-static int triflex_tune_chipset(ide_drive_t *drive, u8 xferspeed)
+static void triflex_set_mode(ide_drive_t *drive, const u8 speed)
 {
 	ide_hwif_t *hwif = HWIF(drive);
 	struct pci_dev *dev = hwif->pci_dev;
@@ -49,7 +48,6 @@ static int triflex_tune_chipset(ide_drive_t *drive, u8 xferspeed)
 	u16 timing = 0;
 	u32 triflex_timings = 0;
 	u8 unit = (drive->select.b.unit & 0x01);
-	u8 speed = ide_rate_filter(0, xferspeed);
 	
 	pci_read_config_dword(dev, channel_offset, &triflex_timings);
 	
@@ -84,75 +82,34 @@ static int triflex_tune_chipset(ide_drive_t *drive, u8 xferspeed)
 			timing = 0x0808;
 			break;
 		default:
-			return -1;
+			return;
 	}
 
 	triflex_timings &= ~(0xFFFF << (16 * unit));
 	triflex_timings |= (timing << (16 * unit));
 	
 	pci_write_config_dword(dev, channel_offset, triflex_timings);
-	
-	return (ide_config_drive_speed(drive, speed));
 }
 
-static void triflex_tune_drive(ide_drive_t *drive, u8 pio)
+static void triflex_set_pio_mode(ide_drive_t *drive, const u8 pio)
 {
-	int use_pio = ide_get_best_pio_mode(drive, pio, 4, NULL);
-	(void) triflex_tune_chipset(drive, (XFER_PIO_0 + use_pio));
+	triflex_set_mode(drive, XFER_PIO_0 + pio);
 }
 
-static int triflex_config_drive_for_dma(ide_drive_t *drive)
+static void __devinit init_hwif_triflex(ide_hwif_t *hwif)
 {
-	int speed = ide_dma_speed(drive, 0); /* No ultra speeds */
-
-	if (!speed) { 
-		u8 pspeed = ide_get_best_pio_mode(drive, 255, 4, NULL);
-		speed = XFER_PIO_0 + pspeed;
-	}
-	
-	(void) triflex_tune_chipset(drive, speed);
-	 return ide_dma_enable(drive);
+	hwif->set_pio_mode = &triflex_set_pio_mode;
+	hwif->set_dma_mode = &triflex_set_mode;
 }
 
-static int triflex_config_drive_xfer_rate(ide_drive_t *drive)
-{
-	ide_hwif_t *hwif	= HWIF(drive);
-	struct hd_driveid *id	= drive->id;
-
-	if ((id->capability & 1) && drive->autodma) {
-		if (ide_use_dma(drive)) {
-			if (triflex_config_drive_for_dma(drive))
-				return hwif->ide_dma_on(drive);
-		}
-	}
-
-	hwif->tuneproc(drive, 255);
-	return hwif->ide_dma_off_quietly(drive);
-}
-
-static void __init init_hwif_triflex(ide_hwif_t *hwif)
-{
-	hwif->tuneproc = &triflex_tune_drive;
-	hwif->speedproc = &triflex_tune_chipset;
-
-	hwif->atapi_dma  = 1;
-	hwif->mwdma_mask = 0x07;
-	hwif->swdma_mask = 0x07;
-	hwif->ide_dma_check = &triflex_config_drive_xfer_rate;
-	
-	if (!noautodma)
-		hwif->autodma = 1;
-	hwif->drives[0].autodma = hwif->autodma;
-	hwif->drives[1].autodma = hwif->autodma;
-}
-
-static ide_pci_device_t triflex_device __devinitdata = {
+static const struct ide_port_info triflex_device __devinitdata = {
 	.name		= "TRIFLEX",
 	.init_hwif	= init_hwif_triflex,
-	.channels	= 2,
-	.autodma	= AUTODMA,
 	.enablebits	= {{0x80, 0x01, 0x01}, {0x80, 0x02, 0x02}},
-	.bootable	= ON_BOARD,
+	.host_flags	= IDE_HFLAG_BOOTABLE,
+	.pio_mask	= ATA_PIO4,
+	.swdma_mask	= ATA_SWDMA2,
+	.mwdma_mask	= ATA_MWDMA2,
 };
 
 static int __devinit triflex_init_one(struct pci_dev *dev, 
@@ -161,9 +118,8 @@ static int __devinit triflex_init_one(struct pci_dev *dev,
 	return ide_setup_pci_device(dev, &triflex_device);
 }
 
-static struct pci_device_id triflex_pci_tbl[] = {
-	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_TRIFLEX_IDE,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+static const struct pci_device_id triflex_pci_tbl[] = {
+	{ PCI_VDEVICE(COMPAQ, PCI_DEVICE_ID_COMPAQ_TRIFLEX_IDE), 0 },
 	{ 0, },
 };
 MODULE_DEVICE_TABLE(pci, triflex_pci_tbl);
@@ -174,7 +130,7 @@ static struct pci_driver driver = {
 	.probe		= triflex_init_one,
 };
 
-static int triflex_ide_init(void)
+static int __init triflex_ide_init(void)
 {
 	return ide_pci_register_driver(&driver);
 }

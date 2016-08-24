@@ -4,7 +4,6 @@
  * Written by Cort Dougan (cort@cs.nmt.edu)
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/module.h>
@@ -130,7 +129,7 @@ void _raw_read_lock(rwlock_t *rw)
 		while (!read_can_lock(rw)) {
 			if (--stuck == 0) {
 				printk("_read_lock(%p) CPU#%d lock %d\n",
-				       rw, _smp_processor_id(), rw->lock);
+				       rw, raw_smp_processor_id(), rw->lock);
 				stuck = INIT_STUCK;
 			}
 		}
@@ -158,7 +157,7 @@ void _raw_write_lock(rwlock_t *rw)
 		while (!write_can_lock(rw)) {
 			if (--stuck == 0) {
 				printk("write_lock(%p) CPU#%d lock %d)\n",
-				       rw, _smp_processor_id(), rw->lock);
+				       rw, raw_smp_processor_id(), rw->lock);
 				stuck = INIT_STUCK;
 			}
 		}

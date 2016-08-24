@@ -11,7 +11,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
@@ -21,7 +20,7 @@
 #include <linux/pci.h>
 
 extern const char *CardType[];
-const char *gazel_revision = "$Revision: 2.19.2.4 $";
+static const char *gazel_revision = "$Revision: 2.19.2.4 $";
 
 #define R647      1
 #define R685      2
@@ -244,7 +243,7 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 #include "hscx_irq.c"
 
 static irqreturn_t
-gazel_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+gazel_interrupt(int intno, void *dev_id)
 {
 #define MAXCOUNT 5
 	struct IsdnCardState *cs = dev_id;
@@ -275,7 +274,7 @@ gazel_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 
 
 static irqreturn_t
-gazel_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
+gazel_interrupt_ipac(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char ista, val;
@@ -317,7 +316,8 @@ gazel_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
 	spin_unlock_irqrestore(&cs->lock, flags);
 	return IRQ_HANDLED;
 }
-void
+
+static void
 release_io_gazel(struct IsdnCardState *cs)
 {
 	unsigned int i;
@@ -484,7 +484,7 @@ reserve_regions(struct IsdnCard *card, struct IsdnCardState *cs)
 	return 1;
 }
 
-static int __init
+static int __devinit
 setup_gazelisa(struct IsdnCard *card, struct IsdnCardState *cs)
 {
 	printk(KERN_INFO "Gazel: ISA PnP card automatic recognition\n");
@@ -532,9 +532,10 @@ setup_gazelisa(struct IsdnCard *card, struct IsdnCardState *cs)
 	return (0);
 }
 
-static struct pci_dev *dev_tel __initdata = NULL;
+#ifdef CONFIG_PCI_LEGACY
+static struct pci_dev *dev_tel __devinitdata = NULL;
 
-static int __init
+static int __devinit
 setup_gazelpci(struct IsdnCardState *cs)
 {
 	u_int pci_ioaddr0 = 0, pci_ioaddr1 = 0;
@@ -545,8 +546,9 @@ setup_gazelpci(struct IsdnCardState *cs)
 
 	found = 0;
 	seekcard = PCI_DEVICE_ID_PLX_R685;
-	for (nbseek = 0; nbseek < 3; nbseek++) {
-		if ((dev_tel = pci_find_device(PCI_VENDOR_ID_PLX, seekcard, dev_tel))) {
+	for (nbseek = 0; nbseek < 4; nbseek++) {
+		if ((dev_tel = pci_find_device(PCI_VENDOR_ID_PLX,
+					seekcard, dev_tel))) {
 			if (pci_enable_device(dev_tel))
 				return 1;
 			pci_irq = dev_tel->irq;
@@ -563,6 +565,9 @@ setup_gazelpci(struct IsdnCardState *cs)
 					break;
 				case PCI_DEVICE_ID_PLX_R753:
 					seekcard = PCI_DEVICE_ID_PLX_DJINN_ITOO;
+					break;
+				case PCI_DEVICE_ID_PLX_DJINN_ITOO:
+					seekcard = PCI_DEVICE_ID_PLX_OLITEC;
 					break;
 			}
 		}
@@ -588,7 +593,7 @@ setup_gazelpci(struct IsdnCardState *cs)
 	cs->hw.gazel.hscxfifo[0] = cs->hw.gazel.hscx[0];
 	cs->hw.gazel.hscxfifo[1] = cs->hw.gazel.hscx[1];
 	cs->irq = pci_irq;
-	cs->irq_flags |= SA_SHIRQ;
+	cs->irq_flags |= IRQF_SHARED;
 
 	switch (seekcard) {
 		case PCI_DEVICE_ID_PLX_R685:
@@ -604,6 +609,7 @@ setup_gazelpci(struct IsdnCardState *cs)
 			break;
 		case PCI_DEVICE_ID_PLX_R753:
 		case PCI_DEVICE_ID_PLX_DJINN_ITOO:
+		case PCI_DEVICE_ID_PLX_OLITEC:
 			printk(KERN_INFO "Gazel: Card PCI R753 found\n");
 			cs->subtyp = R753;
 			test_and_set_bit(HW_IPAC, &cs->HW_Flags);
@@ -615,8 +621,9 @@ setup_gazelpci(struct IsdnCardState *cs)
 
 	return (0);
 }
+#endif /* CONFIG_PCI_LEGACY */
 
-int __init
+int __devinit
 setup_gazel(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
@@ -634,7 +641,7 @@ setup_gazel(struct IsdnCard *card)
 			return (0);
 	} else {
 
-#ifdef CONFIG_PCI
+#ifdef CONFIG_PCI_LEGACY
 		if (setup_gazelpci(cs))
 			return (0);
 #else

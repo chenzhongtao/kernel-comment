@@ -3,7 +3,6 @@
 
 #include <asm-generic/4level-fixup.h>
 
-#include <linux/config.h>
 #include <asm/setup.h>
 
 #ifndef __ASSEMBLY__
@@ -26,6 +25,7 @@
 	do{							\
 		*(pteptr) = (pteval);				\
 	} while(0)
+#define set_pte_at(mm,addr,ptep,pteval) set_pte(ptep,pteval)
 
 
 /* PMD_SHIFT determines the size of the area a second-level page table can map */
@@ -60,7 +60,7 @@
 #define PTRS_PER_PGD	128
 #endif
 #define USER_PTRS_PER_PGD	(TASK_SIZE/PGDIR_SIZE)
-#define FIRST_USER_PGD_NR	0
+#define FIRST_USER_ADDRESS	0
 
 /* Virtual address region for use by kernel_map() */
 #ifdef CONFIG_SUN3
@@ -107,22 +107,7 @@ extern void *empty_zero_page;
 /* 64-bit machines, beware!  SRB. */
 #define SIZEOF_PTR_LOG2			       2
 
-/*
- * Check if the addr/len goes up to the end of a physical
- * memory chunk.  Used for DMA functions.
- */
-#ifdef CONFIG_SINGLE_MEMORY_CHUNK
-/*
- * It makes no sense to consider whether we cross a memory boundary if
- * we support just one physical chunk of memory.
- */
-static inline int mm_end_of_chunk(unsigned long addr, int len)
-{
-	return 0;
-}
-#else
-int mm_end_of_chunk (unsigned long addr, int len);
-#endif
+#define mm_end_of_chunk(addr, len)	0
 
 extern void kernel_set_cachemode(void *addr, unsigned long size, int cmode);
 
@@ -140,8 +125,8 @@ static inline void update_mmu_cache(struct vm_area_struct *vma,
 
 #define kern_addr_valid(addr)	(1)
 
-#define io_remap_page_range(vma, vaddr, paddr, size, prot)		\
-		remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
+#define io_remap_pfn_range(vma, vaddr, pfn, size, prot)		\
+		remap_pfn_range(vma, vaddr, pfn, size, prot)
 
 /* MMU-specific headers */
 

@@ -12,7 +12,7 @@ struct pci_controller;
  * pci_io_base returns the memory address at which you can access
  * the I/O space for PCI bus number `bus' (or NULL on error).
  */
-extern void *pci_bus_io_base(unsigned int bus);
+extern void __iomem *pci_bus_io_base(unsigned int bus);
 extern unsigned long pci_bus_io_base_phys(unsigned int bus);
 extern unsigned long pci_bus_mem_base_phys(unsigned int bus);
 
@@ -20,8 +20,8 @@ extern unsigned long pci_bus_mem_base_phys(unsigned int bus);
 extern struct pci_controller* pcibios_alloc_controller(void);
 
 /* Helper function for setting up resources */
-extern void pci_init_resource(struct resource *res, unsigned long start,
-			      unsigned long end, int flags, char *name);
+extern void pci_init_resource(struct resource *res, resource_size_t start,
+			      resource_size_t end, int flags, char *name);
 
 /* Get the PCI host controller for a bus */
 extern struct pci_controller* pci_bus_to_hose(int bus);
@@ -43,18 +43,19 @@ struct pci_controller {
 	struct pci_controller *next;
         struct pci_bus *bus;
 	void *arch_data;
+	struct device *parent;
 
 	int first_busno;
 	int last_busno;
 	int bus_offset;
 
-	void *io_base_virt;
-	unsigned long io_base_phys;
+	void __iomem *io_base_virt;
+	resource_size_t io_base_phys;
 
 	/* Some machines (PReP) have a non 1:1 mapping of
 	 * the PCI memory space in the CPU bus space
 	 */
-	unsigned long pci_mem_offset;
+	resource_size_t pci_mem_offset;
 
 	struct pci_ops *ops;
 	volatile unsigned int __iomem *cfg_addr;
@@ -78,6 +79,11 @@ struct pci_controller {
 	struct resource io_space;
 	struct resource mem_space;
 };
+
+static inline struct pci_controller *pci_bus_to_host(struct pci_bus *bus)
+{
+	return bus->sysdata;
+}
 
 /* These are used for config access before all the PCI probing
    has been done. */
@@ -131,6 +137,15 @@ static inline unsigned char bridge_swizzle(unsigned char pin,
  * resources to all devices found.
  */
 extern int pciauto_bus_scan(struct pci_controller *, int);
+
+#ifdef CONFIG_PCI
+extern unsigned long pci_address_to_pio(phys_addr_t address);
+#else
+static inline unsigned long pci_address_to_pio(phys_addr_t address)
+{
+	return (unsigned long)-1;
+}
+#endif
 
 #endif
 #endif /* __KERNEL__ */

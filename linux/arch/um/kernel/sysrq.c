@@ -10,16 +10,15 @@
 #include "asm/page.h"
 #include "asm/processor.h"
 #include "sysrq.h"
-#include "user_util.h"
 
-void show_trace(unsigned long * stack)
+/* Catch non-i386 SUBARCH's. */
+#if !defined(CONFIG_UML_X86) || defined(CONFIG_64BIT)
+void show_trace(struct task_struct *task, unsigned long * stack)
 {
-	/* XXX: Copy the CONFIG_FRAME_POINTER stack-walking backtrace from
-	 * arch/i386/kernel/traps.c, and then move this to sys-i386/sysrq.c.*/
         unsigned long addr;
 
         if (!stack) {
-                stack = (unsigned long*) &stack;
+		stack = (unsigned long*) &stack;
 		WARN_ON(1);
 	}
 
@@ -35,6 +34,7 @@ void show_trace(unsigned long * stack)
         }
         printk("\n");
 }
+#endif
 
 /*
  * stack dumps generator - this is used by arch-independent code.
@@ -44,12 +44,12 @@ void dump_stack(void)
 {
 	unsigned long stack;
 
-	show_trace(&stack);
+	show_trace(current, &stack);
 }
 EXPORT_SYMBOL(dump_stack);
 
 /*Stolen from arch/i386/kernel/traps.c */
-static int kstack_depth_to_print = 24;
+static const int kstack_depth_to_print = 24;
 
 /* This recently started being used in arch-independent code too, as in
  * kernel/sched.c.*/
@@ -59,10 +59,8 @@ void show_stack(struct task_struct *task, unsigned long *esp)
 	int i;
 
 	if (esp == NULL) {
-		if (task != current) {
+		if (task != current && task != NULL) {
 			esp = (unsigned long *) KSTK_ESP(task);
-			/* Which one? No actual difference - just coding style.*/
-			//esp = (unsigned long *) PT_REGS_IP(&task->thread.regs);
 		} else {
 			esp = (unsigned long *) &esp;
 		}
@@ -77,5 +75,6 @@ void show_stack(struct task_struct *task, unsigned long *esp)
 		printk("%08lx ", *stack++);
 	}
 
-	show_trace(esp);
+	printk("Call Trace: \n");
+	show_trace(task, esp);
 }

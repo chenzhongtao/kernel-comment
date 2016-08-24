@@ -18,7 +18,12 @@
  * This file is licenced under the GPL.
  */
 
+#include <linux/platform_device.h>
+#include <linux/signal.h>
+
 #include <asm/mach-au1x00/au1000.h>
+
+#ifndef	CONFIG_SOC_AU1200
 
 #define USBH_ENABLE_BE (1<<0)
 #define USBH_ENABLE_C  (1<<1)
@@ -34,61 +39,109 @@
 #error not byte order defined
 #endif
 
+#else   /* Au1200 */
+
+#define USB_HOST_CONFIG    (USB_MSR_BASE + USB_MSR_MCFG)
+#define USB_MCFG_PFEN     (1<<31)
+#define USB_MCFG_RDCOMB   (1<<30)
+#define USB_MCFG_SSDEN    (1<<23)
+#define USB_MCFG_OHCCLKEN (1<<16)
+#define USB_MCFG_UCAM     (1<<7)
+#define USB_MCFG_OBMEN    (1<<1)
+#define USB_MCFG_OMEMEN   (1<<0)
+
+#define USBH_ENABLE_CE    USB_MCFG_OHCCLKEN
+#ifdef CONFIG_DMA_COHERENT
+#define USBH_ENABLE_INIT  (USB_MCFG_OHCCLKEN \
+                         | USB_MCFG_PFEN | USB_MCFG_RDCOMB \
+                         | USB_MCFG_SSDEN | USB_MCFG_UCAM \
+                         | USB_MCFG_OBMEN | USB_MCFG_OMEMEN)
+#else
+#define USBH_ENABLE_INIT  (USB_MCFG_OHCCLKEN \
+                         | USB_MCFG_PFEN | USB_MCFG_RDCOMB \
+                         | USB_MCFG_SSDEN \
+                         | USB_MCFG_OBMEN | USB_MCFG_OMEMEN)
+#endif
+#define USBH_DISABLE      (USB_MCFG_OBMEN | USB_MCFG_OMEMEN)
+
+#endif  /* Au1200 */
+
 extern int usb_disabled(void);
 
 /*-------------------------------------------------------------------------*/
 
-static void au1xxx_start_hc(struct platform_device *dev)
+static void au1xxx_start_ohc(struct platform_device *dev)
 {
 	printk(KERN_DEBUG __FILE__
 		": starting Au1xxx OHCI USB Controller\n");
 
 	/* enable host controller */
+
+#ifndef CONFIG_SOC_AU1200
+
 	au_writel(USBH_ENABLE_CE, USB_HOST_CONFIG);
 	udelay(1000);
 	au_writel(USBH_ENABLE_INIT, USB_HOST_CONFIG);
 	udelay(1000);
 
+#else   /* Au1200 */
+
+	/* write HW defaults again in case Yamon cleared them */
+	if (au_readl(USB_HOST_CONFIG) == 0) {
+		au_writel(0x00d02000, USB_HOST_CONFIG);
+		au_readl(USB_HOST_CONFIG);
+		udelay(1000);
+	}
+	au_writel(USBH_ENABLE_CE | au_readl(USB_HOST_CONFIG), USB_HOST_CONFIG);
+	au_readl(USB_HOST_CONFIG);
+	udelay(1000);
+	au_writel(USBH_ENABLE_INIT | au_readl(USB_HOST_CONFIG), USB_HOST_CONFIG);
+	au_readl(USB_HOST_CONFIG);
+	udelay(1000);
+
+#endif  /* Au1200 */
+
+#ifndef CONFIG_SOC_AU1200
 	/* wait for reset complete (read register twice; see au1500 errata) */
 	while (au_readl(USB_HOST_CONFIG),
 		!(au_readl(USB_HOST_CONFIG) & USBH_ENABLE_RD))
+#endif
 		udelay(1000);
 
 	printk(KERN_DEBUG __FILE__
 	": Clock to USB host has been enabled \n");
 }
 
-static void au1xxx_stop_hc(struct platform_device *dev)
+static void au1xxx_stop_ohc(struct platform_device *dev)
 {
 	printk(KERN_DEBUG __FILE__
 	       ": stopping Au1xxx OHCI USB Controller\n");
 
+#ifndef CONFIG_SOC_AU1200
+
 	/* Disable clock */
-	au_writel(readl((void *)USB_HOST_CONFIG) & ~USBH_ENABLE_CE, USB_HOST_CONFIG);
+	au_writel(au_readl(USB_HOST_CONFIG) & ~USBH_ENABLE_CE, USB_HOST_CONFIG);
+
+#else   /* Au1200 */
+
+	/* Disable mem */
+	au_writel(~USBH_DISABLE & au_readl(USB_HOST_CONFIG), USB_HOST_CONFIG);
+	udelay(1000);
+	/* Disable clock */
+	au_writel(~USBH_ENABLE_CE & au_readl(USB_HOST_CONFIG), USB_HOST_CONFIG);
+	au_readl(USB_HOST_CONFIG);
+#endif  /* Au1200 */
 }
 
 
 /*-------------------------------------------------------------------------*/
-
-
-static irqreturn_t usb_hcd_au1xxx_hcim_irq (int irq, void *__hcd,
-					     struct pt_regs * r)
-{
-	struct usb_hcd *hcd = __hcd;
-
-	return usb_hcd_irq(irq, hcd, r);
-}
-
-/*-------------------------------------------------------------------------*/
-
-void usb_hcd_au1xxx_remove (struct usb_hcd *, struct platform_device *);
 
 /* configure so an HC device and id are always provided */
 /* always called with process context; sleeping is OK */
 
 
 /**
- * usb_hcd_au1xxx_probe - initialize Au1xxx-based HCDs
+ * usb_ohci_au1xxx_probe - initialize Au1xxx-based HCDs
  * Context: !in_interrupt()
  *
  * Allocates basic resources for this USB host controller, and
@@ -96,91 +149,60 @@ void usb_hcd_au1xxx_remove (struct usb_hcd *, struct platform_device *);
  * through the hotplug entry's driver_data.
  *
  */
-int usb_hcd_au1xxx_probe (const struct hc_driver *driver,
-			  struct usb_hcd **hcd_out,
+static int usb_ohci_au1xxx_probe(const struct hc_driver *driver,
 			  struct platform_device *dev)
 {
 	int retval;
-	struct usb_hcd *hcd = 0;
+	struct usb_hcd *hcd;
 
-	unsigned int *addr = NULL;
+#if defined(CONFIG_SOC_AU1200) && defined(CONFIG_DMA_COHERENT)
+	/* Au1200 AB USB does not support coherent memory */
+	if (!(read_c0_prid() & 0xff)) {
+		pr_info("%s: this is chip revision AB !!\n",
+			dev->name);
+		pr_info("%s: update your board or re-configure the kernel\n",
+			dev->name);
+		return -ENODEV;
+	}
+#endif
 
-	if (!request_mem_region(dev->resource[0].start,
-				dev->resource[0].end
-				- dev->resource[0].start + 1, hcd_name)) {
-		pr_debug("request_mem_region failed");
-		return -EBUSY;
+	if (dev->resource[1].flags != IORESOURCE_IRQ) {
+		pr_debug("resource[1] is not IORESOURCE_IRQ\n");
+		return -ENOMEM;
 	}
 
-	au1xxx_start_hc(dev);
+	hcd = usb_create_hcd(driver, &dev->dev, "au1xxx");
+	if (!hcd)
+		return -ENOMEM;
+	hcd->rsrc_start = dev->resource[0].start;
+	hcd->rsrc_len = dev->resource[0].end - dev->resource[0].start + 1;
 
-	addr = ioremap(dev->resource[0].start,
-		       dev->resource[0].end
-		       - dev->resource[0].start + 1);
-	if (!addr) {
-		pr_debug("ioremap failed");
-		retval = -ENOMEM;
+	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len, hcd_name)) {
+		pr_debug("request_mem_region failed\n");
+		retval = -EBUSY;
 		goto err1;
 	}
 
-	if(dev->resource[1].flags != IORESOURCE_IRQ) {
-		pr_debug ("resource[1] is not IORESOURCE_IRQ");
+	hcd->regs = ioremap(hcd->rsrc_start, hcd->rsrc_len);
+	if (!hcd->regs) {
+		pr_debug("ioremap failed\n");
 		retval = -ENOMEM;
-		goto err1;
-	}
-
-	hcd = usb_create_hcd(driver);
-	if (hcd == NULL) {
-		pr_debug ("usb_create_hcd failed");
-		retval = -ENOMEM;
-		goto err1;
-	}
-	ohci_hcd_init(hcd_to_ohci(hcd));
-
-	hcd->irq = dev->resource[1].start;
-	hcd->regs = addr;
-	hcd->self.controller = &dev->dev;
-
-	retval = hcd_buffer_create (hcd);
-	if (retval != 0) {
-		pr_debug ("pool alloc fail");
 		goto err2;
 	}
 
-	retval = request_irq (hcd->irq, usb_hcd_au1xxx_hcim_irq, SA_INTERRUPT,
-			      hcd->driver->description, hcd);
-	if (retval != 0) {
-		pr_debug("request_irq failed");
-		retval = -EBUSY;
-		goto err3;
-	}
+	au1xxx_start_ohc(dev);
+	ohci_hcd_init(hcd_to_ohci(hcd));
 
-	pr_debug ("%s (Au1xxx) at 0x%p, irq %d",
-	     hcd->driver->description, hcd->regs, hcd->irq);
-
-	hcd->self.bus_name = "au1xxx";
-
-	usb_register_bus (&hcd->self);
-
-	if ((retval = driver->start (hcd)) < 0)
-	{
-		usb_hcd_au1xxx_remove(hcd, dev);
-		printk("bad driver->start\n");
+	retval = usb_add_hcd(hcd, dev->resource[1].start, IRQF_DISABLED | IRQF_SHARED);
+	if (retval == 0)
 		return retval;
-	}
 
-	*hcd_out = hcd;
-	return 0;
-
- err3:
-	hcd_buffer_destroy (hcd);
+	au1xxx_stop_ohc(dev);
+	iounmap(hcd->regs);
  err2:
-	usb_put_hcd(hcd);
+	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
  err1:
-	au1xxx_stop_hc(dev);
-	release_mem_region(dev->resource[0].start,
-				dev->resource[0].end
-			   - dev->resource[0].start + 1);
+	usb_put_hcd(hcd);
 	return retval;
 }
 
@@ -198,30 +220,13 @@ int usb_hcd_au1xxx_probe (const struct hc_driver *driver,
  * context, normally "rmmod", "apmd", or something similar.
  *
  */
-void usb_hcd_au1xxx_remove (struct usb_hcd *hcd, struct platform_device *dev)
+static void usb_ohci_au1xxx_remove(struct usb_hcd *hcd, struct platform_device *dev)
 {
-	pr_debug ("remove: %s, state %x", hcd->self.bus_name, hcd->state);
-
-	if (in_interrupt ())
-		BUG ();
-
-	hcd->state = USB_STATE_QUIESCING;
-
-	pr_debug ("%s: roothub graceful disconnect", hcd->self.bus_name);
-	usb_disconnect (&hcd->self.root_hub);
-
-	hcd->driver->stop (hcd);
-	hcd->state = USB_STATE_HALT;
-
-	free_irq (hcd->irq, hcd);
-	hcd_buffer_destroy (hcd);
-
-	usb_deregister_bus (&hcd->self);
-
-	au1xxx_stop_hc(dev);
-	release_mem_region(dev->resource[0].start,
-			   dev->resource[0].end
-			   - dev->resource[0].start + 1);
+	usb_remove_hcd(hcd);
+	au1xxx_stop_ohc(dev);
+	iounmap(hcd->regs);
+	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
+	usb_put_hcd(hcd);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -257,17 +262,14 @@ static const struct hc_driver ohci_au1xxx_hc_driver = {
 	 * generic hardware linkage
 	 */
 	.irq =			ohci_irq,
-	.flags =		HCD_USB11,
+	.flags =		HCD_USB11 | HCD_MEMORY,
 
 	/*
 	 * basic lifecycle operations
 	 */
 	.start =		ohci_au1xxx_start,
-#ifdef	CONFIG_PM
-	/* suspend:		ohci_au1xxx_suspend,  -- tbd */
-	/* resume:		ohci_au1xxx_resume,   -- tbd */
-#endif /*CONFIG_PM*/
 	.stop =			ohci_stop,
+	.shutdown =		ohci_shutdown,
 
 	/*
 	 * managing i/o requests and associated device resources
@@ -286,14 +288,18 @@ static const struct hc_driver ohci_au1xxx_hc_driver = {
 	 */
 	.hub_status_data =	ohci_hub_status_data,
 	.hub_control =		ohci_hub_control,
+	.hub_irq_enable =	ohci_rhsc_enable,
+#ifdef	CONFIG_PM
+	.bus_suspend =		ohci_bus_suspend,
+	.bus_resume =		ohci_bus_resume,
+#endif
+	.start_port_reset =	ohci_start_port_reset,
 };
 
 /*-------------------------------------------------------------------------*/
 
-static int ohci_hcd_au1xxx_drv_probe(struct device *dev)
+static int ohci_hcd_au1xxx_drv_probe(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct usb_hcd *hcd = NULL;
 	int ret;
 
 	pr_debug ("In ohci_hcd_au1xxx_drv_probe");
@@ -301,62 +307,41 @@ static int ohci_hcd_au1xxx_drv_probe(struct device *dev)
 	if (usb_disabled())
 		return -ENODEV;
 
-	ret = usb_hcd_au1xxx_probe(&ohci_au1xxx_hc_driver, &hcd, pdev);
-
-	if (ret == 0)
-		dev_set_drvdata(dev, hcd);
-
+	ret = usb_ohci_au1xxx_probe(&ohci_au1xxx_hc_driver, pdev);
 	return ret;
 }
 
-static int ohci_hcd_au1xxx_drv_remove(struct device *dev)
+static int ohci_hcd_au1xxx_drv_remove(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct usb_hcd *hcd = dev_get_drvdata(dev);
+	struct usb_hcd *hcd = platform_get_drvdata(pdev);
 
-	usb_hcd_au1xxx_remove(hcd, pdev);
-	dev_set_drvdata(dev, NULL);
+	usb_ohci_au1xxx_remove(hcd, pdev);
 	return 0;
 }
 	/*TBD*/
-/*static int ohci_hcd_au1xxx_drv_suspend(struct device *dev)
+/*static int ohci_hcd_au1xxx_drv_suspend(struct platform_device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct usb_hcd *hcd = dev_get_drvdata(dev);
+	struct usb_hcd *hcd = platform_get_drvdata(dev);
 
 	return 0;
 }
-static int ohci_hcd_au1xxx_drv_resume(struct device *dev)
+static int ohci_hcd_au1xxx_drv_resume(struct platform_device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct usb_hcd *hcd = dev_get_drvdata(dev);
+	struct usb_hcd *hcd = platform_get_drvdata(dev);
 
 	return 0;
 }
 */
 
-static struct device_driver ohci_hcd_au1xxx_driver = {
-	.name		= "au1xxx-ohci",
-	.bus		= &platform_bus_type,
+static struct platform_driver ohci_hcd_au1xxx_driver = {
 	.probe		= ohci_hcd_au1xxx_drv_probe,
 	.remove		= ohci_hcd_au1xxx_drv_remove,
+	.shutdown	= usb_hcd_platform_shutdown,
 	/*.suspend	= ohci_hcd_au1xxx_drv_suspend, */
 	/*.resume	= ohci_hcd_au1xxx_drv_resume, */
+	.driver		= {
+		.name	= "au1xxx-ohci",
+		.owner	= THIS_MODULE,
+	},
 };
 
-static int __init ohci_hcd_au1xxx_init (void)
-{
-	pr_debug (DRIVER_INFO " (Au1xxx)");
-	pr_debug ("block sizes: ed %d td %d\n",
-		sizeof (struct ed), sizeof (struct td));
-
-	return driver_register(&ohci_hcd_au1xxx_driver);
-}
-
-static void __exit ohci_hcd_au1xxx_cleanup (void)
-{
-	driver_unregister(&ohci_hcd_au1xxx_driver);
-}
-
-module_init (ohci_hcd_au1xxx_init);
-module_exit (ohci_hcd_au1xxx_cleanup);

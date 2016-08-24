@@ -1,6 +1,5 @@
 #define VMLINUX_SYMBOL(_sym_) _##_sym_
 #include <asm-generic/vmlinux.lds.h>
-#include <linux/config.h>
 
 /* target memory map */
 #ifdef CONFIG_H8300H_GENERIC
@@ -71,11 +70,12 @@ SECTIONS
 #endif
         .text :
 	{
+	_text = .;
 #if defined(CONFIG_ROMKERNEL)
 	*(.int_redirect)
 #endif
 	__stext = . ;
-        	*(.text)
+	TEXT_TEXT
 	SCHED_TEXT
 	LOCK_TEXT
 	__etext = . ;
@@ -103,7 +103,7 @@ SECTIONS
 	. = ALIGN(0x2000) ;
 		*(.data.init_task)
 	. = ALIGN(0x4) ;
-		*(.data)
+		DATA_DATA
 	. = ALIGN(0x4) ;
 		*(.data.*)	
 
@@ -119,23 +119,19 @@ SECTIONS
 	. = ALIGN(0x4) ;
 	___setup_end = .;
 	___initcall_start = .;
-		*(.initcall1.init)
-		*(.initcall2.init)
-		*(.initcall3.init)
-		*(.initcall4.init)
-		*(.initcall5.init)
-		*(.initcall6.init)
-		*(.initcall7.init)
+		INITCALLS
 	___initcall_end = .;
 	___con_initcall_start = .;
 		*(.con_initcall.init)
 	___con_initcall_end = .;
 		*(.exit.text)
 		*(.exit.data)
+#if defined(CONFIG_BLK_DEV_INITRD)
 		. = ALIGN(4);
 	___initramfs_start = .;
   		*(.init.ramfs)
   	___initramfs_end = .;
+#endif
 	. = ALIGN(0x4) ;
 	___init_end = .;
 	__edata = . ;

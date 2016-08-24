@@ -41,6 +41,7 @@ void autofs_catatonic_mode(struct autofs_sb_info *sbi)
 		wq = nwq;
 	}
 	fput(sbi->pipe);	/* Close the pipe */
+	sbi->pipe = NULL;
 	autofs_hash_dputall(&sbi->dirhash); /* Remove all dentry pointers */
 }
 
@@ -150,10 +151,8 @@ int autofs_wait(struct autofs_sb_info *sbi, struct qstr *name)
 	if ( sbi->catatonic ) {
 		/* We might have slept, so check again for catatonic mode */
 		wq->status = -ENOENT;
-		if ( wq->name ) {
-			kfree(wq->name);
-			wq->name = NULL;
-		}
+		kfree(wq->name);
+		wq->name = NULL;
 	}
 
 	if ( wq->name ) {
@@ -183,7 +182,7 @@ int autofs_wait_release(struct autofs_sb_info *sbi, autofs_wqt_t wait_queue_toke
 {
 	struct autofs_wait_queue *wq, **wql;
 
-	for ( wql = &sbi->queues ; (wq = *wql) != 0 ; wql = &wq->next ) {
+	for (wql = &sbi->queues; (wq = *wql) != NULL; wql = &wq->next) {
 		if ( wq->wait_queue_token == wait_queue_token )
 			break;
 	}

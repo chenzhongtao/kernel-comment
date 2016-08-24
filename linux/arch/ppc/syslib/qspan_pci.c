@@ -15,7 +15,6 @@
  * we have switched the chip select.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
@@ -94,7 +93,7 @@
 #define mk_config_type1(bus, dev, offset) \
 	mk_config_addr(bus, dev, offset) | 1;
 
-static spinlock_t pcibios_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(pcibios_lock);
 
 int qspan_pcibios_read_config_byte(unsigned char bus, unsigned char dev_fn,
 				  unsigned char offset, unsigned char *val)
@@ -366,13 +365,13 @@ int qspan_pcibios_find_class(unsigned int class_code, unsigned short index,
 }
 
 void __init
-m8xx_pcibios_fixup(void))
+m8xx_pcibios_fixup(void)
 {
    /* Lots to do here, all board and configuration specific. */
 }
 
 void __init
-m8xx_setup_pci_ptrs(void))
+m8xx_setup_pci_ptrs(void)
 {
 	set_config_access_method(qspan);
 

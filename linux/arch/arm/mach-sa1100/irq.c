@@ -11,12 +11,12 @@
  */
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/ioport.h>
-#include <linux/ptrace.h>
 #include <linux/sysdev.h>
 
 #include <asm/hardware.h>
-#include <asm/irq.h>
 #include <asm/mach/irq.h>
 
 #include "generic.h"
@@ -94,12 +94,13 @@ static int sa1100_low_gpio_wake(unsigned int irq, unsigned int on)
 	return 0;
 }
 
-static struct irqchip sa1100_low_gpio_chip = {
+static struct irq_chip sa1100_low_gpio_chip = {
+	.name		= "GPIO-l",
 	.ack		= sa1100_low_gpio_ack,
 	.mask		= sa1100_low_gpio_mask,
 	.unmask		= sa1100_low_gpio_unmask,
-	.type		= sa1100_gpio_type,
-	.wake		= sa1100_low_gpio_wake,
+	.set_type	= sa1100_gpio_type,
+	.set_wake	= sa1100_low_gpio_wake,
 };
 
 /*
@@ -108,8 +109,7 @@ static struct irqchip sa1100_low_gpio_chip = {
  * and call the handler.
  */
 static void
-sa1100_high_gpio_handler(unsigned int irq, struct irqdesc *desc,
-			 struct pt_regs *regs)
+sa1100_high_gpio_handler(unsigned int irq, struct irq_desc *desc)
 {
 	unsigned int mask;
 
@@ -126,7 +126,7 @@ sa1100_high_gpio_handler(unsigned int irq, struct irqdesc *desc,
 		mask >>= 11;
 		do {
 			if (mask & 1)
-				desc->handle(irq, desc, regs);
+				desc_handle_irq(irq, desc);
 			mask >>= 1;
 			irq++;
 			desc++;
@@ -177,12 +177,13 @@ static int sa1100_high_gpio_wake(unsigned int irq, unsigned int on)
 	return 0;
 }
 
-static struct irqchip sa1100_high_gpio_chip = {
+static struct irq_chip sa1100_high_gpio_chip = {
+	.name		= "GPIO-h",
 	.ack		= sa1100_high_gpio_ack,
 	.mask		= sa1100_high_gpio_mask,
 	.unmask		= sa1100_high_gpio_unmask,
-	.type		= sa1100_gpio_type,
-	.wake		= sa1100_high_gpio_wake,
+	.set_type	= sa1100_gpio_type,
+	.set_wake	= sa1100_high_gpio_wake,
 };
 
 /*
@@ -199,10 +200,27 @@ static void sa1100_unmask_irq(unsigned int irq)
 	ICMR |= (1 << irq);
 }
 
-static struct irqchip sa1100_normal_chip = {
+/*
+ * Apart form GPIOs, only the RTC alarm can be a wakeup event.
+ */
+static int sa1100_set_wake(unsigned int irq, unsigned int on)
+{
+	if (irq == IRQ_RTCAlrm) {
+		if (on)
+			PWER |= PWER_RTC;
+		else
+			PWER &= ~PWER_RTC;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static struct irq_chip sa1100_normal_chip = {
+	.name		= "SC",
 	.ack		= sa1100_mask_irq,
 	.mask		= sa1100_mask_irq,
 	.unmask		= sa1100_unmask_irq,
+	.set_wake	= sa1100_set_wake,
 };
 
 static struct resource irq_resource = {
@@ -218,7 +236,7 @@ static struct sa1100irq_state {
 	unsigned int	iccr;
 } sa1100irq_state;
 
-static int sa1100irq_suspend(struct sys_device *dev, u32 state)
+static int sa1100irq_suspend(struct sys_device *dev, pm_message_t state)
 {
 	struct sa1100irq_state *st = &sa1100irq_state;
 
@@ -308,19 +326,19 @@ void __init sa1100_init_irq(void)
 
 	for (irq = 0; irq <= 10; irq++) {
 		set_irq_chip(irq, &sa1100_low_gpio_chip);
-		set_irq_handler(irq, do_edge_IRQ);
+		set_irq_handler(irq, handle_edge_irq);
 		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
 	}
 
 	for (irq = 12; irq <= 31; irq++) {
 		set_irq_chip(irq, &sa1100_normal_chip);
-		set_irq_handler(irq, do_level_IRQ);
+		set_irq_handler(irq, handle_level_irq);
 		set_irq_flags(irq, IRQF_VALID);
 	}
 
 	for (irq = 32; irq <= 48; irq++) {
 		set_irq_chip(irq, &sa1100_high_gpio_chip);
-		set_irq_handler(irq, do_edge_IRQ);
+		set_irq_handler(irq, handle_edge_irq);
 		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
 	}
 

@@ -15,6 +15,7 @@
 #include <linux/pci.h>
 
 #include "STG4000Reg.h"
+#include "STG4000Interface.h"
 
 /* SDRAM fixed settings */
 #define SDRAM_CFG_0   0x49A1
@@ -79,8 +80,8 @@ volatile u32 i,count=0; \
     for(i=0;i<X;i++) count++; \
 }
 
-u32 InitSDRAMRegisters(volatile STG4000REG __iomem *pSTGReg, u32 dwSubSysID,
-			 u32 dwRevID)
+static u32 InitSDRAMRegisters(volatile STG4000REG __iomem *pSTGReg,
+			      u32 dwSubSysID, u32 dwRevID)
 {
 	u32 adwSDRAMArgCfg0[] = { 0xa0, 0x80, 0xa0, 0xa0, 0xa0 };
 	u32 adwSDRAMCfg1[] = { 0x8732, 0x8732, 0xa732, 0xa732, 0x8732 };
@@ -246,7 +247,6 @@ int SetCoreClockPLL(volatile STG4000REG __iomem *pSTGReg, struct pci_dev *pDev)
 	u32 ulCoreClock;
 	u32 tmp;
 	u32 ulChipSpeed;
-	u8 rev;
 
 	STG_WRITE_REG(IntMask, 0xFFFF);
 
@@ -275,9 +275,9 @@ int SetCoreClockPLL(volatile STG4000REG __iomem *pSTGReg, struct pci_dev *pDev)
 		      PMX2_SOFTRESET_ROM_RST);
 
 	pci_read_config_word(pDev, PCI_CONFIG_SUBSYS_ID, &sub);
-	pci_read_config_byte(pDev, PCI_REVISION_ID, &rev);
 
-	ulChipSpeed = InitSDRAMRegisters(pSTGReg, (u32)sub, (u32)rev);
+	ulChipSpeed = InitSDRAMRegisters(pSTGReg, (u32)sub,
+		                         (u32)pDev->revision);
 
 	if (ulChipSpeed == 0)
 		return -EINVAL;

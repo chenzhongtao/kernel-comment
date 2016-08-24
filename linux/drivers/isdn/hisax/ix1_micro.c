@@ -25,7 +25,7 @@
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *ix1_revision = "$Revision: 2.12.2.4 $";
+static const char *ix1_revision = "$Revision: 2.12.2.4 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -125,7 +125,7 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 #include "hscx_irq.c"
 
 static irqreturn_t
-ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+ix1micro_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
@@ -162,7 +162,7 @@ ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-void
+static void
 release_io_ix1micro(struct IsdnCardState *cs)
 {
 	if (cs->hw.ix1.cfg_reg)
@@ -210,7 +210,7 @@ ix1_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 #ifdef __ISAPNP__
-static struct isapnp_device_id itk_ids[] __initdata = {
+static struct isapnp_device_id itk_ids[] __devinitdata = {
 	{ ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25),
 	  ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25), 
 	  (unsigned long) "ITK micro 2" },
@@ -220,12 +220,12 @@ static struct isapnp_device_id itk_ids[] __initdata = {
 	{ 0, }
 };
 
-static struct isapnp_device_id *ipid __initdata = &itk_ids[0];
+static struct isapnp_device_id *ipid __devinitdata = &itk_ids[0];
 static struct pnp_card *pnp_c __devinitdata = NULL;
 #endif
 
 
-int __init
+int __devinit
 setup_ix1micro(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;

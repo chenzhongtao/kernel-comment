@@ -1,6 +1,4 @@
 /*
- *  arch/ppc/mm/fault.c
- *
  *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
@@ -15,7 +13,6 @@
  *  2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -99,6 +96,7 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
 	struct mm_struct *mm = current->mm;
 	siginfo_t info;
 	int code = SEGV_MAPERR;
+	int fault;
 #if defined(CONFIG_4xx) || defined (CONFIG_BOOKE)
 	int is_write = error_code & ESR_DST;
 #else
@@ -204,6 +202,7 @@ good_area:
 	/* an exec  - 4xx/Book-E allows for per-page execute permission */
 	} else if (TRAP(regs) == 0x400) {
 		pte_t *ptep;
+		pmd_t *pmdp;
 
 #if 0
 		/* It would be nice to actually enforce the VM execute
@@ -217,28 +216,31 @@ good_area:
 		/* Since 4xx/Book-E supports per-page execute permission,
 		 * we lazily flush dcache to icache. */
 		ptep = NULL;
-		if (get_pteptr(mm, address, &ptep) && pte_present(*ptep)) {
-			struct page *page = pte_page(*ptep);
+		if (get_pteptr(mm, address, &ptep, &pmdp)) {
+			spinlock_t *ptl = pte_lockptr(mm, pmdp);
+			spin_lock(ptl);
+			if (pte_present(*ptep)) {
+				struct page *page = pte_page(*ptep);
 
-			if (! test_bit(PG_arch_1, &page->flags)) {
-				flush_dcache_icache_page(page);
-				set_bit(PG_arch_1, &page->flags);
+				if (!test_bit(PG_arch_1, &page->flags)) {
+					flush_dcache_icache_page(page);
+					set_bit(PG_arch_1, &page->flags);
+				}
+				pte_update(ptep, 0, _PAGE_HWEXEC);
+				_tlbie(address, mm->context.id);
+				pte_unmap_unlock(ptep, ptl);
+				up_read(&mm->mmap_sem);
+				return 0;
 			}
-			pte_update(ptep, 0, _PAGE_HWEXEC);
-			_tlbie(address);
-			pte_unmap(ptep);
-			up_read(&mm->mmap_sem);
-			return 0;
+			pte_unmap_unlock(ptep, ptl);
 		}
-		if (ptep != NULL)
-			pte_unmap(ptep);
 #endif
 	/* a read */
 	} else {
 		/* protection fault */
 		if (error_code & 0x08000000)
 			goto bad_area;
-		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
+		if (!(vma->vm_flags & (VM_READ | VM_EXEC | VM_WRITE)))
 			goto bad_area;
 	}
 
@@ -248,20 +250,18 @@ good_area:
 	 * the fault.
 	 */
  survive:
-        switch (handle_mm_fault(mm, vma, address, is_write)) {
-        case VM_FAULT_MINOR:
-                current->min_flt++;
-                break;
-        case VM_FAULT_MAJOR:
-                current->maj_flt++;
-                break;
-        case VM_FAULT_SIGBUS:
-                goto do_sigbus;
-        case VM_FAULT_OOM:
-                goto out_of_memory;
-	default:
+	fault = handle_mm_fault(mm, vma, address, is_write);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto do_sigbus;
 		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 
 	up_read(&mm->mmap_sem);
 	/*
@@ -278,11 +278,7 @@ bad_area:
 
 	/* User mode accesses cause a SIGSEGV */
 	if (user_mode(regs)) {
-		info.si_signo = SIGSEGV;
-		info.si_errno = 0;
-		info.si_code = code;
-		info.si_addr = (void __user *) address;
-		force_sig_info(SIGSEGV, &info, current);
+		_exception(SIGSEGV, regs, code, address);
 		return 0;
 	}
 
@@ -294,14 +290,14 @@ bad_area:
  */
 out_of_memory:
 	up_read(&mm->mmap_sem);
-	if (current->pid == 1) {
+	if (is_global_init(current)) {
 		yield();
 		down_read(&mm->mmap_sem);
 		goto survive;
 	}
 	printk("VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
-		do_exit(SIGKILL);
+		do_group_exit(SIGKILL);
 	return SIGKILL;
 
 do_sigbus:

@@ -17,6 +17,7 @@
 #include <linux/pagemap.h>
 #include <linux/smp_lock.h>
 #include <linux/net.h>
+#include <linux/aio.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -102,7 +103,7 @@ static int
 smb_readpage(struct file *file, struct page *page)
 {
 	int		error;
-	struct dentry  *dentry = file->f_dentry;
+	struct dentry  *dentry = file->f_path.dentry;
 
 	page_cache_get(page);
 	error = smb_readpage_sync(dentry, page);
@@ -178,11 +179,9 @@ smb_writepage(struct page *page, struct writeback_control *wbc)
 	unsigned offset = PAGE_CACHE_SIZE;
 	int err;
 
-	if (!mapping)
-		BUG();
+	BUG_ON(!mapping);
 	inode = mapping->host;
-	if (!inode)
-		BUG();
+	BUG_ON(!inode);
 
 	end_index = inode->i_size >> PAGE_CACHE_SHIFT;
 
@@ -207,22 +206,24 @@ static int
 smb_updatepage(struct file *file, struct page *page, unsigned long offset,
 	       unsigned int count)
 {
-	struct dentry *dentry = file->f_dentry;
+	struct dentry *dentry = file->f_path.dentry;
 
-	DEBUG1("(%s/%s %d@%ld)\n", DENTRY_PATH(dentry), 
-	       count, (page->index << PAGE_CACHE_SHIFT)+offset);
+	DEBUG1("(%s/%s %d@%lld)\n", DENTRY_PATH(dentry), count,
+		((unsigned long long)page->index << PAGE_CACHE_SHIFT) + offset);
 
 	return smb_writepage_sync(dentry->d_inode, page, offset, count);
 }
 
 static ssize_t
-smb_file_read(struct file * file, char __user * buf, size_t count, loff_t *ppos)
+smb_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
+			unsigned long nr_segs, loff_t pos)
 {
-	struct dentry * dentry = file->f_dentry;
+	struct file * file = iocb->ki_filp;
+	struct dentry * dentry = file->f_path.dentry;
 	ssize_t	status;
 
 	VERBOSE("file %s/%s, count=%lu@%lu\n", DENTRY_PATH(dentry),
-		(unsigned long) count, (unsigned long) *ppos);
+		(unsigned long) iocb->ki_left, (unsigned long) pos);
 
 	status = smb_revalidate_inode(dentry);
 	if (status) {
@@ -233,9 +234,9 @@ smb_file_read(struct file * file, char __user * buf, size_t count, loff_t *ppos)
 
 	VERBOSE("before read, size=%ld, flags=%x, atime=%ld\n",
 		(long)dentry->d_inode->i_size,
-		dentry->d_inode->i_flags, dentry->d_inode->i_atime);
+		dentry->d_inode->i_flags, dentry->d_inode->i_atime.tv_sec);
 
-	status = generic_file_read(file, buf, count, ppos);
+	status = generic_file_aio_read(iocb, iov, nr_segs, pos);
 out:
 	return status;
 }
@@ -243,7 +244,7 @@ out:
 static int
 smb_file_mmap(struct file * file, struct vm_area_struct * vma)
 {
-	struct dentry * dentry = file->f_dentry;
+	struct dentry * dentry = file->f_path.dentry;
 	int	status;
 
 	VERBOSE("file %s/%s, address %lu - %lu\n",
@@ -261,13 +262,14 @@ out:
 }
 
 static ssize_t
-smb_file_sendfile(struct file *file, loff_t *ppos,
-		  size_t count, read_actor_t actor, void *target)
+smb_file_splice_read(struct file *file, loff_t *ppos,
+		     struct pipe_inode_info *pipe, size_t count,
+		     unsigned int flags)
 {
-	struct dentry *dentry = file->f_dentry;
+	struct dentry *dentry = file->f_path.dentry;
 	ssize_t status;
 
-	VERBOSE("file %s/%s, pos=%Ld, count=%d\n",
+	VERBOSE("file %s/%s, pos=%Ld, count=%lu\n",
 		DENTRY_PATH(dentry), *ppos, count);
 
 	status = smb_revalidate_inode(dentry);
@@ -276,7 +278,7 @@ smb_file_sendfile(struct file *file, loff_t *ppos,
 			 DENTRY_PATH(dentry), status);
 		goto out;
 	}
-	status = generic_file_sendfile(file, ppos, count, actor, target);
+	status = generic_file_splice_read(file, ppos, pipe, count, flags);
 out:
 	return status;
 }
@@ -290,43 +292,61 @@ out:
  * If the writer ends up delaying the write, the writer needs to
  * increment the page use counts until he is done with the page.
  */
-static int smb_prepare_write(struct file *file, struct page *page, 
-			     unsigned offset, unsigned to)
+static int smb_write_begin(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned flags,
+			struct page **pagep, void **fsdata)
 {
+	pgoff_t index = pos >> PAGE_CACHE_SHIFT;
+	*pagep = __grab_cache_page(mapping, index);
+	if (!*pagep)
+		return -ENOMEM;
 	return 0;
 }
 
-static int smb_commit_write(struct file *file, struct page *page,
-			    unsigned offset, unsigned to)
+static int smb_write_end(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned copied,
+			struct page *page, void *fsdata)
 {
 	int status;
+	unsigned offset = pos & (PAGE_CACHE_SIZE - 1);
 
-	status = -EFAULT;
 	lock_kernel();
-	status = smb_updatepage(file, page, offset, to-offset);
+	status = smb_updatepage(file, page, offset, copied);
 	unlock_kernel();
+
+	if (!status) {
+		if (!PageUptodate(page) && copied == PAGE_CACHE_SIZE)
+			SetPageUptodate(page);
+		status = copied;
+	}
+
+	unlock_page(page);
+	page_cache_release(page);
+
 	return status;
 }
 
-struct address_space_operations smb_file_aops = {
+const struct address_space_operations smb_file_aops = {
 	.readpage = smb_readpage,
 	.writepage = smb_writepage,
-	.prepare_write = smb_prepare_write,
-	.commit_write = smb_commit_write
+	.write_begin = smb_write_begin,
+	.write_end = smb_write_end,
 };
 
 /* 
  * Write to a file (through the page cache).
  */
 static ssize_t
-smb_file_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+smb_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
+			       unsigned long nr_segs, loff_t pos)
 {
-	struct dentry * dentry = file->f_dentry;
+	struct file * file = iocb->ki_filp;
+	struct dentry * dentry = file->f_path.dentry;
 	ssize_t	result;
 
 	VERBOSE("file %s/%s, count=%lu@%lu\n",
 		DENTRY_PATH(dentry),
-		(unsigned long) count, (unsigned long) *ppos);
+		(unsigned long) iocb->ki_left, (unsigned long) pos);
 
 	result = smb_revalidate_inode(dentry);
 	if (result) {
@@ -339,11 +359,12 @@ smb_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 	if (result)
 		goto out;
 
-	if (count > 0) {
-		result = generic_file_write(file, buf, count, ppos);
+	if (iocb->ki_left > 0) {
+		result = generic_file_aio_write(iocb, iov, nr_segs, pos);
 		VERBOSE("pos=%ld, size=%ld, mtime=%ld, atime=%ld\n",
 			(long) file->f_pos, (long) dentry->d_inode->i_size,
-			dentry->d_inode->i_mtime, dentry->d_inode->i_atime);
+			dentry->d_inode->i_mtime.tv_sec,
+			dentry->d_inode->i_atime.tv_sec);
 	}
 out:
 	return result;
@@ -353,7 +374,7 @@ static int
 smb_file_open(struct inode *inode, struct file * file)
 {
 	int result;
-	struct dentry *dentry = file->f_dentry;
+	struct dentry *dentry = file->f_path.dentry;
 	int smb_mode = (file->f_mode & O_ACCMODE) - 1;
 
 	lock_kernel();
@@ -374,8 +395,7 @@ smb_file_release(struct inode *inode, struct file * file)
 		/* We must flush any dirty pages now as we won't be able to
 		   write anything after close. mmap can trigger this.
 		   "openers" should perhaps include mmap'ers ... */
-		filemap_fdatawrite(inode->i_mapping);
-		filemap_fdatawait(inode->i_mapping);
+		filemap_write_and_wait(inode->i_mapping);
 		smb_close(inode);
 	}
 	unlock_kernel();
@@ -402,20 +422,22 @@ smb_file_permission(struct inode *inode, int mask, struct nameidata *nd)
 	return error;
 }
 
-struct file_operations smb_file_operations =
+const struct file_operations smb_file_operations =
 {
 	.llseek		= remote_llseek,
-	.read		= smb_file_read,
-	.write		= smb_file_write,
+	.read		= do_sync_read,
+	.aio_read	= smb_file_aio_read,
+	.write		= do_sync_write,
+	.aio_write	= smb_file_aio_write,
 	.ioctl		= smb_ioctl,
 	.mmap		= smb_file_mmap,
 	.open		= smb_file_open,
 	.release	= smb_file_release,
 	.fsync		= smb_fsync,
-	.sendfile	= smb_file_sendfile,
+	.splice_read	= smb_file_splice_read,
 };
 
-struct inode_operations smb_file_inode_operations =
+const struct inode_operations smb_file_inode_operations =
 {
 	.permission	= smb_file_permission,
 	.getattr	= smb_getattr,

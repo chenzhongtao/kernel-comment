@@ -1,7 +1,6 @@
-/* $Id: sun4c.c,v 1.212 2001/12/21 04:56:15 davem Exp $
- * sun4c.c: Doing in software what should be done in hardware.
+/* sun4c.c: Doing in software what should be done in hardware.
  *
- * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1996 Eddie C. Dost (ecd@skynet.be)
  * Copyright (C) 1996 Andrew Tridgell (Andrew.Tridgell@anu.edu.au)
  * Copyright (C) 1997-2000 Anton Blanchard (anton@samba.org)
@@ -10,7 +9,6 @@
 
 #define NR_TASK_BUCKETS 512
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/init.h>
@@ -18,8 +16,8 @@
 #include <linux/highmem.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/scatterlist.h>
 
-#include <asm/scatterlist.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
@@ -269,7 +267,6 @@ static inline void sun4c_init_clean_mmu(unsigned long kernel_end)
 	unsigned char savectx, ctx;
 
 	savectx = sun4c_get_context();
-	kernel_end = SUN4C_REAL_PGDIR_ALIGN(kernel_end);
 	for (ctx = 0; ctx < num_contexts; ctx++) {
 		sun4c_set_context(ctx);
 		for (vaddr = 0; vaddr < 0x20000000; vaddr += SUN4C_REAL_PGDIR_SIZE)
@@ -497,7 +494,7 @@ static void __init sun4c_probe_mmu(void)
 	patch_kernel_fault_handler();
 }
 
-volatile unsigned long *sun4c_memerr_reg = NULL;
+volatile unsigned long __iomem *sun4c_memerr_reg = NULL;
 
 void __init sun4c_probe_memerr_reg(void)
 {
@@ -721,7 +718,7 @@ static void add_ring(struct sun4c_mmu_ring *ring,
 	ring->num_entries++;
 }
 
-static __inline__ void add_lru(struct sun4c_mmu_entry *entry)
+static inline void add_lru(struct sun4c_mmu_entry *entry)
 {
 	struct sun4c_mmu_ring *ring = &sun4c_ulru_ring;
 	struct sun4c_mmu_entry *head = &ring->ringhd;
@@ -748,7 +745,7 @@ static void add_ring_ordered(struct sun4c_mmu_ring *ring,
 	add_lru(entry);
 }
 
-static __inline__ void remove_ring(struct sun4c_mmu_ring *ring,
+static inline void remove_ring(struct sun4c_mmu_ring *ring,
 				   struct sun4c_mmu_entry *entry)
 {
 	struct sun4c_mmu_entry *next = entry->next;
@@ -1230,8 +1227,9 @@ static void sun4c_get_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_bus *
 {
 	while (sz != 0) {
 		--sz;
-		sg[sz].dvma_address = (__u32)sun4c_lockarea(page_address(sg[sz].page) + sg[sz].offset, sg[sz].length);
-		sg[sz].dvma_length = sg[sz].length;
+		sg->dvma_address = (__u32)sun4c_lockarea(sg_virt(sg), sg->length);
+		sg->dvma_length = sg->length;
+		sg = sg_next(sg);
 	}
 }
 
@@ -1246,7 +1244,8 @@ static void sun4c_release_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_b
 {
 	while (sz != 0) {
 		--sz;
-		sun4c_unlockarea((char *)sg[sz].dvma_address, sg[sz].length);
+		sun4c_unlockarea((char *)sg->dvma_address, sg->length);
+		sg = sg_next(sg);
 	}
 }
 
@@ -1589,7 +1588,10 @@ static void sun4c_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 
 static inline void sun4c_mapioaddr(unsigned long physaddr, unsigned long virt_addr)
 {
-	unsigned long page_entry;
+	unsigned long page_entry, pg_iobits;
+
+	pg_iobits = _SUN4C_PAGE_PRESENT | _SUN4C_READABLE | _SUN4C_WRITEABLE |
+		    _SUN4C_PAGE_IO | _SUN4C_PAGE_NOCACHE;
 
 	page_entry = ((physaddr >> PAGE_SHIFT) & SUN4C_PFN_MASK);
 	page_entry |= ((pg_iobits | _SUN4C_PAGE_PRIV) & ~(_SUN4C_PAGE_PRESENT));
@@ -1833,7 +1835,7 @@ static unsigned long sun4c_pte_to_pgoff(pte_t pte)
 }
 
 
-static __inline__ unsigned long sun4c_pmd_page_v(pmd_t pmd)
+static inline unsigned long sun4c_pmd_page_v(pmd_t pmd)
 {
 	return (pmd_val(pmd) & PAGE_MASK);
 }
@@ -1919,7 +1921,7 @@ static void sun4c_free_pgd_fast(pgd_t *pgd)
 }
 
 
-static __inline__ pte_t *
+static inline pte_t *
 sun4c_pte_alloc_one_fast(struct mm_struct *mm, unsigned long address)
 {
 	unsigned long *ret;
@@ -1953,7 +1955,7 @@ static struct page *sun4c_pte_alloc_one(struct mm_struct *mm, unsigned long addr
 	return virt_to_page(pte);
 }
 
-static __inline__ void sun4c_free_pte_fast(pte_t *pte)
+static inline void sun4c_free_pte_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
@@ -1996,6 +1998,9 @@ void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, p
 {
 	unsigned long flags;
 	int pseg;
+
+	if (vma->vm_mm->context == NO_CONTEXT)
+		return;
 
 	local_irq_save(flags);
 	address &= PAGE_MASK;
@@ -2059,7 +2064,6 @@ void __init sun4c_paging_init(void)
 	unsigned long end_pfn, pages_avail;
 
 	kernel_end = (unsigned long) &end;
-	kernel_end += (SUN4C_REAL_PGDIR_SIZE * 4);
 	kernel_end = SUN4C_REAL_PGDIR_ALIGN(kernel_end);
 
 	pages_avail = 0;
@@ -2117,7 +2121,6 @@ void __init sun4c_paging_init(void)
 
 		free_area_init_node(0, &contig_page_data, zones_size,
 				    pfn_base, zholes_size);
-		mem_map = contig_page_data.node_mem_map;
 	}
 
 	cnt = 0;
@@ -2128,6 +2131,13 @@ void __init sun4c_paging_init(void)
 	max_user_taken_entries = num_segmaps - cnt - 40 - 1;
 
 	printk("SUN4C: %d mmu entries for the kernel\n", cnt);
+}
+
+static pgprot_t sun4c_pgprot_noncached(pgprot_t prot)
+{
+	prot |= __pgprot(_SUN4C_PAGE_IO | _SUN4C_PAGE_NOCACHE);
+
+	return prot;
 }
 
 /* Load up routines and constants for sun4c mmu */
@@ -2147,15 +2157,14 @@ void __init ld_mmu_sun4c(void)
 	BTFIXUPSET_SIMM13(user_ptrs_per_pgd, KERNBASE / SUN4C_PGDIR_SIZE);
 
 	BTFIXUPSET_INT(page_none, pgprot_val(SUN4C_PAGE_NONE));
-	BTFIXUPSET_INT(page_shared, pgprot_val(SUN4C_PAGE_SHARED));
+	PAGE_SHARED = pgprot_val(SUN4C_PAGE_SHARED);
 	BTFIXUPSET_INT(page_copy, pgprot_val(SUN4C_PAGE_COPY));
 	BTFIXUPSET_INT(page_readonly, pgprot_val(SUN4C_PAGE_READONLY));
 	BTFIXUPSET_INT(page_kernel, pgprot_val(SUN4C_PAGE_KERNEL));
 	page_kernel = pgprot_val(SUN4C_PAGE_KERNEL);
-	pg_iobits = _SUN4C_PAGE_PRESENT | _SUN4C_READABLE | _SUN4C_WRITEABLE |
-		    _SUN4C_PAGE_IO | _SUN4C_PAGE_NOCACHE;
 
 	/* Functions */
+	BTFIXUPSET_CALL(pgprot_noncached, sun4c_pgprot_noncached, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(___xchg32, ___xchg32_sun4c, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(do_check_pgt_cache, sun4c_check_pgt_cache, BTFIXUPCALL_NORM);
 	
@@ -2226,7 +2235,6 @@ void __init ld_mmu_sun4c(void)
 	BTFIXUPSET_CALL(free_pgd_fast, sun4c_free_pgd_fast, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(get_pgd_fast, sun4c_get_pgd_fast, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_HALF(pte_readi, _SUN4C_PAGE_READ);
 	BTFIXUPSET_HALF(pte_writei, _SUN4C_PAGE_WRITE);
 	BTFIXUPSET_HALF(pte_dirtyi, _SUN4C_PAGE_MODIFIED);
 	BTFIXUPSET_HALF(pte_youngi, _SUN4C_PAGE_ACCESSED);
@@ -2268,5 +2276,5 @@ void __init ld_mmu_sun4c(void)
 
 	/* These should _never_ get called with two level tables. */
 	BTFIXUPSET_CALL(pgd_set, sun4c_pgd_set, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(pgd_page, sun4c_pgd_page, BTFIXUPCALL_RETO0);
+	BTFIXUPSET_CALL(pgd_page_vaddr, sun4c_pgd_page, BTFIXUPCALL_RETO0);
 }

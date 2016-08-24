@@ -11,6 +11,7 @@
 #define _LINUX_SERIAL_H
 
 #ifdef __KERNEL__
+#include <linux/types.h>
 #include <asm/page.h>
 
 /*
@@ -174,15 +175,7 @@ struct serial_icounter_struct {
 
 
 #ifdef __KERNEL__
-/* Export to allow PCMCIA to use this - Dave Hinds */
-extern int register_serial(struct serial_struct *req);
-extern void unregister_serial(int line);
-
-/* Allow architectures to override entries in serial8250_ports[] at run time: */
-struct uart_port;	/* forward declaration */
-extern int early_serial_setup(struct uart_port *port);
-extern int early_serial_console_init(char *options);
-extern int serial8250_start_console(struct uart_port *port, char *options);
+#include <linux/compiler.h>
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

@@ -20,13 +20,10 @@ actually has a head for each physical device in the logical RAID device.
 However, setting the antic_expire (see tunable parameters below) produces
 very similar behavior to the deadline IO scheduler.
 
-
 Selecting IO schedulers
 -----------------------
-To choose IO schedulers at boot time, use the argument 'elevator=deadline'.
-'noop' and 'as' (the default) are also available. IO schedulers are assigned
-globally at boot time only presently.
-
+Refer to Documentation/block/switching-sched.txt for information on
+selecting an io scheduler on a per-device basis.
 
 Anticipatory IO scheduler Policies
 ----------------------------------
@@ -99,8 +96,8 @@ contrast, many write requests may be dispatched to the disk controller
 at a time during a write batch.  It is this characteristic that can make
 the anticipatory scheduler perform anomalously with controllers supporting
 TCQ, or with hardware striped RAID devices. Setting the antic_expire
-queue paramter (see below) to zero disables this behavior, and the anticipatory
-scheduler behaves essentially like the deadline scheduler.
+queue parameter (see below) to zero disables this behavior, and the 
+anticipatory scheduler behaves essentially like the deadline scheduler.
 
 When read anticipation is enabled (antic_expire is not zero), reads
 are dispatched to the disk controller one at a time.
@@ -113,7 +110,7 @@ statistics (average think time, average seek distance) on the process
 that submitted the just completed request are examined.  If it seems
 likely that that process will submit another request soon, and that
 request is likely to be near the just completed request, then the IO
-scheduler will stop dispatching more read requests for up time (antic_expire)
+scheduler will stop dispatching more read requests for up to (antic_expire)
 milliseconds, hoping that process will submit a new request near the one
 that just completed.  If such a request is made, then it is dispatched
 immediately.  If the antic_expire wait time expires, then the IO scheduler
@@ -162,4 +159,14 @@ The parameters are:
     or some processes will not be "anticipated" at all. Should be a bit higher
     for big seek time devices though not a linear correspondence - most
     processes have only a few ms thinktime.
+
+In addition to the tunables above there is a read-only file named est_time
+which, when read, will show:
+
+    - The probability of a task exiting without a cooperating task
+      submitting an anticipated IO.
+
+    - The current mean think time.
+
+    - The seek distance used to determine if an incoming IO is better.
 

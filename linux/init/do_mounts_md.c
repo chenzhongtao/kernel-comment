@@ -17,10 +17,10 @@ static int __initdata raid_noautodetect, raid_autopart;
 static struct {
 	int minor;
 	int partitioned;
-	int pers;
+	int level;
 	int chunk;
 	char *device_names;
-} md_setup_args[MAX_MD_DEVS] __initdata;
+} md_setup_args[256] __initdata;
 
 static int md_setup_ents __initdata;
 
@@ -47,7 +47,7 @@ extern int mdp_major;
  */
 static int __init md_setup(char *str)
 {
-	int minor, level, factor, fault, pers, partitioned = 0;
+	int minor, level, factor, fault, partitioned = 0;
 	char *pername = "";
 	char *str1;
 	int ent;
@@ -61,10 +61,6 @@ static int __init md_setup(char *str)
 		return 0;
 	}
 	str1 = str;
-	if (minor >= MAX_MD_DEVS) {
-		printk(KERN_WARNING "md: md=%d, Minor device number too high.\n", minor);
-		return 0;
-	}
 	for (ent=0 ; ent< md_setup_ents ; ent++)
 		if (md_setup_args[ent].minor == minor &&
 		    md_setup_args[ent].partitioned == partitioned) {
@@ -72,13 +68,13 @@ static int __init md_setup(char *str)
 			       "Replacing previous definition.\n", partitioned?"d":"", minor);
 			break;
 		}
-	if (ent >= MAX_MD_DEVS) {
+	if (ent >= ARRAY_SIZE(md_setup_args)) {
 		printk(KERN_WARNING "md: md=%s%d - too many md initialisations\n", partitioned?"d":"", minor);
 		return 0;
 	}
 	if (ent >= md_setup_ents)
 		md_setup_ents++;
-	switch (get_option(&str, &level)) {	/* RAID Personality */
+	switch (get_option(&str, &level)) {	/* RAID level */
 	case 2: /* could be 0 or -1.. */
 		if (level == 0 || level == LEVEL_LINEAR) {
 			if (get_option(&str, &factor) != 2 ||	/* Chunk Size */
@@ -86,16 +82,12 @@ static int __init md_setup(char *str)
 				printk(KERN_WARNING "md: Too few arguments supplied to md=.\n");
 				return 0;
 			}
-			md_setup_args[ent].pers = level;
+			md_setup_args[ent].level = level;
 			md_setup_args[ent].chunk = 1 << (factor+12);
-			if (level ==  LEVEL_LINEAR) {
-				pers = LINEAR;
+			if (level ==  LEVEL_LINEAR)
 				pername = "linear";
-			} else {
-				pers = RAID0;
+			else
 				pername = "raid0";
-			}
-			md_setup_args[ent].pers = pers;
 			break;
 		}
 		/* FALL THROUGH */
@@ -103,7 +95,7 @@ static int __init md_setup(char *str)
 		str = str1;
 		/* FALL THROUGH */
 	case 0:
-		md_setup_args[ent].pers = 0;
+		md_setup_args[ent].level = LEVEL_NONE;
 		pername="super-block";
 	}
 
@@ -129,19 +121,18 @@ static void __init md_setup_drive(void)
 		int err = 0;
 		char *devname;
 		mdu_disk_info_t dinfo;
-		char name[16], devfs_name[16];
+		char name[16];
 
 		minor = md_setup_args[ent].minor;
 		partitioned = md_setup_args[ent].partitioned;
 		devname = md_setup_args[ent].device_names;
 
 		sprintf(name, "/dev/md%s%d", partitioned?"_d":"", minor);
-		sprintf(devfs_name, "/dev/md/%s%d", partitioned?"d":"", minor);
 		if (partitioned)
 			dev = MKDEV(mdp_major, minor << MdpMinorShift);
 		else
 			dev = MKDEV(MD_MAJOR, minor);
-		create_dev(name, dev, devfs_name);
+		create_dev(name, dev);
 		for (i = 0; i < MD_SB_DISKS && devname != 0; i++) {
 			char *p;
 			char comp_name[64];
@@ -190,10 +181,10 @@ static void __init md_setup_drive(void)
 			continue;
 		}
 
-		if (md_setup_args[ent].pers) {
+		if (md_setup_args[ent].level != LEVEL_NONE) {
 			/* non-persistent */
 			mdu_array_info_t ainfo;
-			ainfo.level = pers_to_level(md_setup_args[ent].pers);
+			ainfo.level = md_setup_args[ent].level;
 			ainfo.size = 0;
 			ainfo.nr_disks =0;
 			ainfo.raid_disks =0;
@@ -276,7 +267,7 @@ __setup("md=", md_setup);
 
 void __init md_run_setup(void)
 {
-	create_dev("/dev/md0", MKDEV(MD_MAJOR, 0), "md/0");
+	create_dev("/dev/md0", MKDEV(MD_MAJOR, 0));
 	if (raid_noautodetect)
 		printk(KERN_INFO "md: Skipping autodetection of RAID arrays. (raid=noautodetect)\n");
 	else {

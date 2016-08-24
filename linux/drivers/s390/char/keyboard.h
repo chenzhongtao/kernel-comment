@@ -25,9 +25,9 @@ struct kbd_data {
 	unsigned short **key_maps;
 	char **func_table;
 	fn_handler_fn **fn_handler;
-	struct kbdiacr *accent_table;
+	struct kbdiacruc *accent_table;
 	unsigned int accent_table_size;
-	unsigned char diacr;
+	unsigned int diacr;
 	unsigned short sysrq;
 };
 
@@ -41,14 +41,14 @@ int kbd_ioctl(struct kbd_data *, struct file *, unsigned int, unsigned long);
 /*
  * Helper Functions.
  */
-extern inline void
+static inline void
 kbd_put_queue(struct tty_struct *tty, int ch)
 {
 	tty_insert_flip_char(tty, ch, 0);
 	tty_schedule_flip(tty);
 }
 
-extern inline void
+static inline void
 kbd_puts_queue(struct tty_struct *tty, char *cp)
 {
 	while (*cp)

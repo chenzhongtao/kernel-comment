@@ -4,8 +4,8 @@
 
 
 #include <linux/module.h>
-#include <linux/sched.h>
 #include <linux/atmdev.h>
+#include <linux/capability.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
 #include <linux/mm.h>
@@ -13,34 +13,30 @@
 #include "common.h"
 #include "protocols.h"
 
-
-#if 0
-#define DPRINTK(format,args...) printk(KERN_DEBUG format,##args)
-#else
-#define DPRINTK(format,args...)
-#endif
-
-
 /*
  * SKB == NULL indicates that the link is being closed
  */
 
-void atm_push_raw(struct atm_vcc *vcc,struct sk_buff *skb)
+static void atm_push_raw(struct atm_vcc *vcc,struct sk_buff *skb)
 {
 	if (skb) {
-		skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
-		vcc->sk->sk_data_ready(vcc->sk, skb->len);
+		struct sock *sk = sk_atm(vcc);
+
+		skb_queue_tail(&sk->sk_receive_queue, skb);
+		sk->sk_data_ready(sk, skb->len);
 	}
 }
 
 
 static void atm_pop_raw(struct atm_vcc *vcc,struct sk_buff *skb)
 {
-	DPRINTK("APopR (%d) %d -= %d\n", vcc->vci, vcc->sk->sk_wmem_alloc,
-		skb->truesize);
-	atomic_sub(skb->truesize, &vcc->sk->sk_wmem_alloc);
+	struct sock *sk = sk_atm(vcc);
+
+	pr_debug("APopR (%d) %d -= %d\n", vcc->vci,
+		atomic_read(&sk->sk_wmem_alloc), skb->truesize);
+	atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
 	dev_kfree_skb_any(skb);
-	vcc->sk->sk_write_space(vcc->sk);
+	sk->sk_write_space(sk);
 }
 
 
@@ -51,12 +47,12 @@ static int atm_send_aal0(struct atm_vcc *vcc,struct sk_buff *skb)
 	 * still work
 	 */
 	if (!capable(CAP_NET_ADMIN) &&
-            (((u32 *) skb->data)[0] & (ATM_HDR_VPI_MASK | ATM_HDR_VCI_MASK)) !=
-            ((vcc->vpi << ATM_HDR_VPI_SHIFT) | (vcc->vci << ATM_HDR_VCI_SHIFT)))
+	    (((u32 *) skb->data)[0] & (ATM_HDR_VPI_MASK | ATM_HDR_VCI_MASK)) !=
+	    ((vcc->vpi << ATM_HDR_VPI_SHIFT) | (vcc->vci << ATM_HDR_VCI_SHIFT)))
 	    {
 		kfree_skb(skb);
 		return -EADDRNOTAVAIL;
-        }
+	}
 	return vcc->dev->ops->send(vcc,skb);
 }
 

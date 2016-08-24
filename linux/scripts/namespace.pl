@@ -66,8 +66,8 @@ require 5;	# at least perl 5
 use strict;
 use File::Find;
 
-my $nm = "/usr/bin/nm -p";
-my $objdump = "/usr/bin/objdump -s -j .comment";
+my $nm = ($ENV{'NM'} || "nm") . " -p";
+my $objdump = ($ENV{'OBJDUMP'} || "objdump") . " -s -j .comment";
 my $srctree = "";
 my $objtree = "";
 $srctree = "$ENV{'srctree'}/" if (exists($ENV{'srctree'}));
@@ -105,7 +105,7 @@ sub linux_objects
 	if (/.*\.o$/ &&
 		! (
 		m:/built-in.o$:
-		|| m:arch/i386/kernel/vsyscall-syms.o$:
+		|| m:arch/x86/kernel/vsyscall-syms.o$:
 		|| m:arch/ia64/ia32/ia32.o$:
 		|| m:arch/ia64/kernel/gate-syms.o$:
 		|| m:arch/ia64/lib/__divdi3.o$:
@@ -328,9 +328,9 @@ sub list_multiply_defined
 			}
 			# Special case for i386 entry code
 			if ($#{$def{$name}} == 1 && $name =~ /^__kernel_/ &&
-			    $def{$name}[0] eq "arch/i386/kernel/vsyscall-int80.o" &&
-			    $def{$name}[1] eq "arch/i386/kernel/vsyscall-sysenter.o") {
-				&drop_def("arch/i386/kernel/vsyscall-sysenter.o", $name);
+			    $def{$name}[0] eq "arch/x86/kernel/vsyscall-int80_32.o" &&
+			    $def{$name}[1] eq "arch/x86/kernel/vsyscall-sysenter_32.o") {
+				&drop_def("arch/x86/kernel/vsyscall-sysenter_32.o", $name);
 				next;
 			}
 			printf "$name is multiply defined in :-\n";
@@ -406,6 +406,11 @@ sub resolve_external_references
 					&& $name !~ /^__.*per_cpu_end/
 					&& $name !~ /^__alt_instructions/
 					&& $name !~ /^__setup_/
+					&& $name !~ /^jiffies/
+					&& $name !~ /^__mod_timer/
+					&& $name !~ /^__mod_page_state/
+					&& $name !~ /^init_module/
+					&& $name !~ /^cleanup_module/
 				) {
 					printf "Cannot resolve ";
 					printf "weak " if ($type eq "w");

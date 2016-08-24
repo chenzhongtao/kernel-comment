@@ -263,14 +263,63 @@
 #define __NR_add_key			1271
 #define __NR_request_key		1272
 #define __NR_keyctl			1273
+#define __NR_ioprio_set			1274
+#define __NR_ioprio_get			1275
+#define __NR_move_pages			1276
+#define __NR_inotify_init		1277
+#define __NR_inotify_add_watch		1278
+#define __NR_inotify_rm_watch		1279
+#define __NR_migrate_pages		1280
+#define __NR_openat			1281
+#define __NR_mkdirat			1282
+#define __NR_mknodat			1283
+#define __NR_fchownat			1284
+#define __NR_futimesat			1285
+#define __NR_newfstatat			1286
+#define __NR_unlinkat			1287
+#define __NR_renameat			1288
+#define __NR_linkat			1289
+#define __NR_symlinkat			1290
+#define __NR_readlinkat			1291
+#define __NR_fchmodat			1292
+#define __NR_faccessat			1293
+#define __NR_pselect6			1294
+#define __NR_ppoll			1295
+#define __NR_unshare			1296
+#define __NR_splice			1297
+#define __NR_set_robust_list		1298
+#define __NR_get_robust_list		1299
+#define __NR_sync_file_range		1300
+#define __NR_tee			1301
+#define __NR_vmsplice			1302
+#define __NR_fallocate			1303
+#define __NR_getcpu			1304
+#define __NR_epoll_pwait		1305
+#define __NR_utimensat			1306
+#define __NR_signalfd			1307
+#define __NR_timerfd			1308
+#define __NR_eventfd			1309
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 
-#define NR_syscalls			256 /* length of syscall table */
+#define NR_syscalls			286 /* length of syscall table */
+
+/*
+ * The following defines stop scripts/checksyscalls.sh from complaining about
+ * unimplemented system calls.  Glibc provides for each of these by using
+ * more modern equivalent system calls.
+ */
+#define __IGNORE_fork		/* clone() */
+#define __IGNORE_time		/* gettimeofday() */
+#define __IGNORE_alarm		/* setitimer(ITIMER_REAL, ... */
+#define __IGNORE_pause		/* rt_sigprocmask(), rt_sigsuspend() */
+#define __IGNORE_utime		/* utimes() */
+#define __IGNORE_getpgrp	/* getpgid() */
+#define __IGNORE_vfork		/* clone() */
 
 #define __ARCH_WANT_SYS_RT_SIGACTION
+#define __ARCH_WANT_SYS_RT_SIGSUSPEND
 
 #ifdef CONFIG_IA32_SUPPORT
 # define __ARCH_WANT_SYS_FADVISE64
@@ -281,6 +330,7 @@
 # define __ARCH_WANT_SYS_OLDUMOUNT
 # define __ARCH_WANT_SYS_SIGPENDING
 # define __ARCH_WANT_SYS_SIGPROCMASK
+# define __ARCH_WANT_COMPAT_SYS_RT_SIGSUSPEND
 # define __ARCH_WANT_COMPAT_SYS_TIME
 #endif
 
@@ -291,78 +341,6 @@
 #include <linux/compiler.h>
 
 extern long __ia64_syscall (long a0, long a1, long a2, long a3, long a4, long nr);
-
-#ifdef __KERNEL_SYSCALLS__
-
-#include <linux/compiler.h>
-#include <linux/string.h>
-#include <linux/signal.h>
-#include <asm/ptrace.h>
-#include <linux/stringify.h>
-#include <linux/syscalls.h>
-
-static inline long
-open (const char * name, int mode, int flags)
-{
-	return sys_open(name, mode, flags);
-}
-
-static inline long
-dup (int fd)
-{
-	return sys_dup(fd);
-}
-
-static inline long
-close (int fd)
-{
-	return sys_close(fd);
-}
-
-static inline off_t
-lseek (int fd, off_t off, int whence)
-{
-	return sys_lseek(fd, off, whence);
-}
-
-static inline void
-_exit (int value)
-{
-	sys_exit(value);
-}
-
-#define exit(x) _exit(x)
-
-static inline long
-write (int fd, const char * buf, size_t nr)
-{
-	return sys_write(fd, buf, nr);
-}
-
-static inline long
-read (int fd, char * buf, size_t nr)
-{
-	return sys_read(fd, buf, nr);
-}
-
-
-static inline long
-setsid (void)
-{
-	return sys_setsid();
-}
-
-static inline pid_t
-waitpid (int pid, int * wait_stat, int flags)
-{
-	return sys_wait4(pid, wait_stat, flags, NULL);
-}
-
-
-extern int execve (const char *filename, char *const av[], char *const ep[]);
-extern pid_t clone (unsigned long flags, void *sp);
-
-#endif /* __KERNEL_SYSCALLS__ */
 
 asmlinkage unsigned long sys_mmap(
 				unsigned long addr, unsigned long len,
@@ -377,8 +355,6 @@ struct sigaction;
 long sys_execve(char __user *filename, char __user * __user *argv,
 			   char __user * __user *envp, struct pt_regs *regs);
 asmlinkage long sys_pipe(void);
-asmlinkage long sys_ptrace(long request, pid_t pid,
-			   unsigned long addr, unsigned long data);
 asmlinkage long sys_rt_sigaction(int sig,
 				 const struct sigaction __user *act,
 				 struct sigaction __user *oact,
@@ -392,7 +368,7 @@ asmlinkage long sys_rt_sigaction(int sig,
  * proper prototype, but we can't use __typeof__ either, because not all cond_syscall()
  * declarations have prototypes at the moment.
  */
-#define cond_syscall(x) asmlinkage long x (void) __attribute__((weak,alias("sys_ni_syscall")));
+#define cond_syscall(x) asmlinkage long x (void) __attribute__((weak,alias("sys_ni_syscall")))
 
 #endif /* !__ASSEMBLY__ */
 #endif /* __KERNEL__ */

@@ -8,15 +8,15 @@
 #ifndef __SPARC64_EBUS_H
 #define __SPARC64_EBUS_H
 
-#include <asm/pbm.h>
 #include <asm/oplib.h>
+#include <asm/prom.h>
+#include <asm/of_device.h>
 
 struct linux_ebus_child {
 	struct linux_ebus_child		*next;
 	struct linux_ebus_device	*parent;
 	struct linux_ebus		*bus;
-	int				 prom_node;
-	char				 prom_name[64];
+	struct device_node		*prom_node;
 	struct resource			 resource[PROMREG_MAX];
 	int				 num_addrs;
 	unsigned int			 irqs[PROMINTR_MAX];
@@ -24,32 +24,28 @@ struct linux_ebus_child {
 };
 
 struct linux_ebus_device {
+	struct of_device		ofdev;
 	struct linux_ebus_device	*next;
 	struct linux_ebus_child		*children;
 	struct linux_ebus		*bus;
-	int				 prom_node;
-	char				 prom_name[64];
+	struct device_node		*prom_node;
 	struct resource			 resource[PROMREG_MAX];
 	int				 num_addrs;
 	unsigned int			 irqs[PROMINTR_MAX];
 	int				 num_irqs;
 };
+#define to_ebus_device(d) container_of(d, struct linux_ebus_device, ofdev.dev)
 
 struct linux_ebus {
+	struct of_device		ofdev;
 	struct linux_ebus		*next;
 	struct linux_ebus_device	*devices;
-	struct pci_pbm_info		*parent;
 	struct pci_dev			*self;
 	int				 index;
 	int				 is_rio;
-	int				 prom_node;
-	char				 prom_name[64];
-	struct linux_prom_ebus_ranges	 ebus_ranges[PROMREG_MAX];
-	int				 num_ebus_ranges;
-	struct linux_prom_ebus_intmap	 ebus_intmap[PROMREG_MAX];
-	int				 num_ebus_intmap;
-	struct linux_prom_ebus_intmask	 ebus_intmask;
+	struct device_node		*prom_node;
 };
+#define to_ebus(d) container_of(d, struct linux_ebus, ofdev.dev)
 
 struct ebus_dma_info {
 	spinlock_t	lock;
@@ -79,6 +75,7 @@ extern int ebus_dma_request(struct ebus_dma_info *p, dma_addr_t bus_addr,
 			    size_t len);
 extern void ebus_dma_prepare(struct ebus_dma_info *p, int write);
 extern unsigned int ebus_dma_residue(struct ebus_dma_info *p);
+extern unsigned int ebus_dma_addr(struct ebus_dma_info *p);
 extern void ebus_dma_enable(struct ebus_dma_info *p, int on);
 
 extern struct linux_ebus		*ebus_chain;

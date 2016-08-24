@@ -26,10 +26,13 @@ static void __init free(void *where)
 
 /* link hash */
 
+#define N_ALIGN(len) ((((len) + 1) & ~3) + 2)
+
 static __initdata struct hash {
 	int ino, minor, major;
+	mode_t mode;
 	struct hash *next;
-	char *name;
+	char name[N_ALIGN(PATH_MAX)];
 } *head[32];
 
 static inline int hash(int major, int minor, int ino)
@@ -39,7 +42,8 @@ static inline int hash(int major, int minor, int ino)
 	return tmp & 31;
 }
 
-static char __init *find_link(int major, int minor, int ino, char *name)
+static char __init *find_link(int major, int minor, int ino,
+			      mode_t mode, char *name)
 {
 	struct hash **p, *q;
 	for (p = head + hash(major, minor, ino); *p; p = &(*p)->next) {
@@ -49,15 +53,18 @@ static char __init *find_link(int major, int minor, int ino, char *name)
 			continue;
 		if ((*p)->major != major)
 			continue;
+		if (((*p)->mode ^ mode) & S_IFMT)
+			continue;
 		return (*p)->name;
 	}
 	q = (struct hash *)malloc(sizeof(struct hash));
 	if (!q)
 		panic("can't allocate link hash entry");
-	q->ino = ino;
-	q->minor = minor;
 	q->major = major;
-	q->name = name;
+	q->minor = minor;
+	q->ino = ino;
+	q->mode = mode;
+	strcpy(q->name, name);
 	q->next = NULL;
 	*p = q;
 	return NULL;
@@ -126,14 +133,12 @@ static __initdata loff_t this_header, next_header;
 
 static __initdata int dry_run;
 
-static inline void eat(unsigned n)
+static inline void __init eat(unsigned n)
 {
 	victim += n;
 	this_header += n;
 	count -= n;
 }
-
-#define N_ALIGN(len) ((((len) + 1) & ~3) + 2)
 
 static __initdata char *collected;
 static __initdata int remains;
@@ -177,6 +182,10 @@ static int __init do_collect(void)
 
 static int __init do_header(void)
 {
+	if (memcmp(collected, "070707", 6)==0) {
+		error("incorrect cpio method used: use -H newc option");
+		return 1;
+	}
 	if (memcmp(collected, "070701", 6)) {
 		error("no cpio magic");
 		return 1;
@@ -229,11 +238,23 @@ static int __init do_reset(void)
 static int __init maybe_link(void)
 {
 	if (nlink >= 2) {
-		char *old = find_link(major, minor, ino, collected);
+		char *old = find_link(major, minor, ino, mode, collected);
 		if (old)
 			return (sys_link(old, collected) < 0) ? -1 : 1;
 	}
 	return 0;
+}
+
+static void __init clean_path(char *path, mode_t mode)
+{
+	struct stat st;
+
+	if (!sys_newlstat(path, &st) && (st.st_mode^mode) & S_IFMT) {
+		if (S_ISDIR(st.st_mode))
+			sys_rmdir(path);
+		else
+			sys_unlink(path);
+	}
 }
 
 static __initdata int wfd;
@@ -248,9 +269,15 @@ static int __init do_name(void)
 	}
 	if (dry_run)
 		return 0;
+	clean_path(collected, mode);
 	if (S_ISREG(mode)) {
-		if (maybe_link() >= 0) {
-			wfd = sys_open(collected, O_WRONLY|O_CREAT, mode);
+		int ml = maybe_link();
+		if (ml >= 0) {
+			int openflags = O_WRONLY|O_CREAT;
+			if (ml != 1)
+				openflags |= O_TRUNC;
+			wfd = sys_open(collected, openflags, mode);
+
 			if (wfd >= 0) {
 				sys_fchown(wfd, uid, gid);
 				sys_fchmod(wfd, mode);
@@ -291,6 +318,7 @@ static int __init do_copy(void)
 static int __init do_symlink(void)
 {
 	collected[N_ALIGN(name_len) + body_len] = '\0';
+	clean_path(collected, 0);
 	sys_symlink(collected + N_ALIGN(name_len), collected);
 	sys_lchown(collected, uid, gid);
 	state = SkipIt;
@@ -463,12 +491,57 @@ static char * __init unpack_to_rootfs(char *buf, unsigned len, int check_only)
 	return message;
 }
 
+static int __initdata do_retain_initrd;
+
+static int __init retain_initrd_param(char *str)
+{
+	if (*str)
+		return 0;
+	do_retain_initrd = 1;
+	return 1;
+}
+__setup("retain_initrd", retain_initrd_param);
+
 extern char __initramfs_start[], __initramfs_end[];
 #ifdef CONFIG_BLK_DEV_INITRD
 #include <linux/initrd.h>
+#include <linux/kexec.h>
+
+static void __init free_initrd(void)
+{
+#ifdef CONFIG_KEXEC
+	unsigned long crashk_start = (unsigned long)__va(crashk_res.start);
+	unsigned long crashk_end   = (unsigned long)__va(crashk_res.end);
+#endif
+	if (do_retain_initrd)
+		goto skip;
+
+#ifdef CONFIG_KEXEC
+	/*
+	 * If the initrd region is overlapped with crashkernel reserved region,
+	 * free only memory that is not part of crashkernel region.
+	 */
+	if (initrd_start < crashk_end && initrd_end > crashk_start) {
+		/*
+		 * Initialize initrd memory region since the kexec boot does
+		 * not do.
+		 */
+		memset((void *)initrd_start, 0, initrd_end - initrd_start);
+		if (initrd_start < crashk_start)
+			free_initrd_mem(initrd_start, crashk_start);
+		if (initrd_end > crashk_end)
+			free_initrd_mem(crashk_end, initrd_end);
+	} else
+#endif
+		free_initrd_mem(initrd_start, initrd_end);
+skip:
+	initrd_start = 0;
+	initrd_end = 0;
+}
+
 #endif
 
-void __init populate_rootfs(void)
+static int __init populate_rootfs(void)
 {
 	char *err = unpack_to_rootfs(__initramfs_start,
 			 __initramfs_end - __initramfs_start, 0);
@@ -476,6 +549,7 @@ void __init populate_rootfs(void)
 		panic(err);
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start) {
+#ifdef CONFIG_BLK_DEV_RAM
 		int fd;
 		printk(KERN_INFO "checking if image is initramfs...");
 		err = unpack_to_rootfs((char *)initrd_start,
@@ -484,17 +558,28 @@ void __init populate_rootfs(void)
 			printk(" it is\n");
 			unpack_to_rootfs((char *)initrd_start,
 				initrd_end - initrd_start, 0);
-			free_initrd_mem(initrd_start, initrd_end);
-			return;
+			free_initrd();
+			return 0;
 		}
 		printk("it isn't (%s); looks like an initrd\n", err);
-		fd = sys_open("/initrd.image", O_WRONLY|O_CREAT, 700);
+		fd = sys_open("/initrd.image", O_WRONLY|O_CREAT, 0700);
 		if (fd >= 0) {
 			sys_write(fd, (char *)initrd_start,
 					initrd_end - initrd_start);
 			sys_close(fd);
-			free_initrd_mem(initrd_start, initrd_end);
+			free_initrd();
 		}
+#else
+		printk(KERN_INFO "Unpacking initramfs...");
+		err = unpack_to_rootfs((char *)initrd_start,
+			initrd_end - initrd_start, 0);
+		if (err)
+			panic(err);
+		printk(" done\n");
+		free_initrd();
+#endif
 	}
 #endif
+	return 0;
 }
+rootfs_initcall(populate_rootfs);

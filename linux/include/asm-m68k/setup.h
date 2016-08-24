@@ -23,7 +23,6 @@
 #ifndef _M68K_SETUP_H
 #define _M68K_SETUP_H
 
-#include <linux/config.h>
 
 
     /*
@@ -42,7 +41,11 @@
 #define MACH_Q40     10
 #define MACH_SUN3X   11
 
+#define COMMAND_LINE_SIZE 256
+
 #ifdef __KERNEL__
+
+#define CL_SIZE COMMAND_LINE_SIZE
 
 #ifndef __ASSEMBLY__
 extern unsigned long m68k_machtype;
@@ -356,18 +359,16 @@ extern int m68k_is040or060;
      */
 
 #define NUM_MEMINFO	4
-#define CL_SIZE		256
-#define COMMAND_LINE_SIZE	CL_SIZE
 
 #ifndef __ASSEMBLY__
-extern int m68k_num_memory;		/* # of memory blocks found (and used) */
-extern int m68k_realnum_memory;		/* real # of memory blocks found */
-extern struct mem_info m68k_memory[NUM_MEMINFO];/* memory description */
-
 struct mem_info {
 	unsigned long addr;		/* physical address of memory chunk */
 	unsigned long size;		/* length of memory chunk (in bytes) */
 };
+
+extern int m68k_num_memory;		/* # of memory blocks found (and used) */
+extern int m68k_realnum_memory;		/* real # of memory blocks found */
+extern struct mem_info m68k_memory[NUM_MEMINFO];/* memory description */
 #endif
 
 #endif /* __KERNEL__ */

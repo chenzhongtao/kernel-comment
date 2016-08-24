@@ -56,14 +56,15 @@
 #define DRIVER_PATCHLEVEL	0
 
 typedef struct drm_i810_buf_priv {
-   	u32 *in_use;
-   	int my_use_idx;
+	u32 *in_use;
+	int my_use_idx;
 	int currently_mapped;
 	void *virtual;
 	void *kernel_virtual;
+	drm_local_map_t map;
 } drm_i810_buf_priv_t;
 
-typedef struct _drm_i810_ring_buffer{
+typedef struct _drm_i810_ring_buffer {
 	int tail_mask;
 	unsigned long Start;
 	unsigned long End;
@@ -72,22 +73,22 @@ typedef struct _drm_i810_ring_buffer{
 	int head;
 	int tail;
 	int space;
+	drm_local_map_t map;
 } drm_i810_ring_buffer_t;
 
 typedef struct drm_i810_private {
-	drm_map_t *sarea_map;
-	drm_map_t *mmio_map;
+	struct drm_map *sarea_map;
+	struct drm_map *mmio_map;
 
 	drm_i810_sarea_t *sarea_priv;
-   	drm_i810_ring_buffer_t ring;
+	drm_i810_ring_buffer_t ring;
 
-      	void *hw_status_page;
-   	unsigned long counter;
+	void *hw_status_page;
+	unsigned long counter;
 
 	dma_addr_t dma_status_page;
 
-	drm_buf_t *mmap_buffer;
-
+	struct drm_buf *mmap_buffer;
 
 	u32 front_di1, back_di1, zi1;
 
@@ -97,7 +98,7 @@ typedef struct drm_i810_private {
 	int overlay_physical;
 	int w, h;
 	int pitch;
-  	int back_pitch;
+	int back_pitch;
 	int depth_pitch;
 
 	int do_boxes;
@@ -107,64 +108,26 @@ typedef struct drm_i810_private {
 	int page_flipping;
 
 	wait_queue_head_t irq_queue;
-   	atomic_t irq_received;
-   	atomic_t irq_emitted;
-  
-        int front_offset;
+	atomic_t irq_received;
+	atomic_t irq_emitted;
+
+	int front_offset;
 } drm_i810_private_t;
 
 				/* i810_dma.c */
-extern int  i810_dma_schedule(drm_device_t *dev, int locked);
-extern int  i810_getbuf(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-extern int  i810_dma_init(struct inode *inode, struct file *filp,
-			  unsigned int cmd, unsigned long arg);
-extern int  i810_dma_cleanup(drm_device_t *dev);
-extern int  i810_flush_ioctl(struct inode *inode, struct file *filp,
-			     unsigned int cmd, unsigned long arg);
-extern void i810_reclaim_buffers(drm_device_t *dev, struct file *filp);
-extern int  i810_getage(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-extern int i810_mmap_buffers(struct file *filp, struct vm_area_struct *vma);
+extern int i810_driver_dma_quiescent(struct drm_device * dev);
+extern void i810_driver_reclaim_buffers_locked(struct drm_device * dev,
+					       struct drm_file *file_priv);
+extern int i810_driver_load(struct drm_device *, unsigned long flags);
+extern void i810_driver_lastclose(struct drm_device * dev);
+extern void i810_driver_preclose(struct drm_device * dev,
+				 struct drm_file *file_priv);
+extern void i810_driver_reclaim_buffers_locked(struct drm_device * dev,
+					       struct drm_file *file_priv);
+extern int i810_driver_device_is_agp(struct drm_device * dev);
 
-/* Obsolete:
- */
-extern int i810_copybuf(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-/* Obsolete:
- */
-extern int i810_docopy(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
-
-extern int i810_rstatus(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-extern int i810_ov0_info(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-extern int i810_fstatus(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-extern int i810_ov0_flip(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-extern int i810_dma_mc(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-
-
-extern void i810_dma_quiescent(drm_device_t *dev);
-
-extern int i810_dma_vertex(struct inode *inode, struct file *filp,
-		    unsigned int cmd, unsigned long arg);
-
-extern int i810_swap_bufs(struct inode *inode, struct file *filp,
-		   unsigned int cmd, unsigned long arg);
-
-extern int i810_clear_bufs(struct inode *inode, struct file *filp,
-		    unsigned int cmd, unsigned long arg);
-
-extern int i810_flip_bufs(struct inode *inode, struct file *filp,
-		   unsigned int cmd, unsigned long arg);
-
-extern int i810_driver_dma_quiescent(drm_device_t *dev);
-extern void i810_driver_release(drm_device_t *dev, struct file *filp);
-extern void i810_driver_pretakedown(drm_device_t *dev);
+extern struct drm_ioctl_desc i810_ioctls[];
+extern int i810_max_ioctl;
 
 #define I810_BASE(reg)		((unsigned long) \
 				dev_priv->mmio_map->handle)
@@ -213,7 +176,6 @@ extern void i810_driver_pretakedown(drm_device_t *dev);
 #define INST_PARSER_CLIENT   0x00000000
 #define INST_OP_FLUSH        0x02000000
 #define INST_FLUSH_MAP_CACHE 0x00000001
-
 
 #define BB1_START_ADDR_MASK   (~0x7)
 #define BB1_PROTECTED         (1<<0)
@@ -273,8 +235,8 @@ extern void i810_driver_pretakedown(drm_device_t *dev);
 #define BR00_OP_SRC_COPY_BLT 0x10C00000
 #define BR13_SOLID_PATTERN   0x80000000
 
-#define WAIT_FOR_PLANE_A_SCANLINES (1<<1) 
-#define WAIT_FOR_PLANE_A_FLIP      (1<<2) 
+#define WAIT_FOR_PLANE_A_SCANLINES (1<<1)
+#define WAIT_FOR_PLANE_A_FLIP      (1<<2)
 #define WAIT_FOR_VBLANK (1<<3)
 
 #endif

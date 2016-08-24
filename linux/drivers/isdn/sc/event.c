@@ -20,9 +20,6 @@
 #include "message.h"
 #include "card.h"
 
-extern int cinst;
-extern board *sc_adapter[];
-
 #ifdef DEBUG
 static char *events[] = { "ISDN_STAT_STAVAIL",
 			  "ISDN_STAT_ICALL",
@@ -45,8 +42,10 @@ int indicate_status(int card, int event,ulong Channel,char *Data)
 {
 	isdn_ctrl cmd;
 
+#ifdef DEBUG
 	pr_debug("%s: Indicating event %s on Channel %d\n",
 		sc_adapter[card]->devicename, events[event-256], Channel);
+#endif
 	if (Data != NULL){
 		pr_debug("%s: Event data: %s\n", sc_adapter[card]->devicename,
 			Data);

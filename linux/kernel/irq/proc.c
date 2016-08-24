@@ -10,25 +10,34 @@
 #include <linux/proc_fs.h>
 #include <linux/interrupt.h>
 
-static struct proc_dir_entry *root_irq_dir, *irq_dir[NR_IRQS];
+#include "internals.h"
+
+static struct proc_dir_entry *root_irq_dir;
 
 #ifdef CONFIG_SMP
-
-/*
- * The /proc/irq/<irq>/smp_affinity values:
- */
-static struct proc_dir_entry *smp_affinity_entry[NR_IRQS];
 
 static int irq_affinity_read_proc(char *page, char **start, off_t off,
 				  int count, int *eof, void *data)
 {
-	int len = cpumask_scnprintf(page, count, irq_affinity[(long)data]);
+	struct irq_desc *desc = irq_desc + (long)data;
+	cpumask_t *mask = &desc->affinity;
+	int len;
+
+#ifdef CONFIG_GENERIC_PENDING_IRQ
+	if (desc->status & IRQ_MOVE_PENDING)
+		mask = &desc->pending_mask;
+#endif
+	len = cpumask_scnprintf(page, count, *mask);
 
 	if (count - len < 2)
 		return -EINVAL;
 	len += sprintf(page + len, "\n");
 	return len;
 }
+
+#ifndef is_affinity_mask_valid
+#define is_affinity_mask_valid(val) 1
+#endif
 
 int no_irq_affinity;
 static int irq_affinity_write_proc(struct file *file, const char __user *buffer,
@@ -37,12 +46,16 @@ static int irq_affinity_write_proc(struct file *file, const char __user *buffer,
 	unsigned int irq = (int)(long)data, full_count = count, err;
 	cpumask_t new_value, tmp;
 
-	if (!irq_desc[irq].handler->set_affinity || no_irq_affinity)
+	if (!irq_desc[irq].chip->set_affinity || no_irq_affinity ||
+	    irq_balancing_disabled(irq))
 		return -EIO;
 
-	err = cpumask_parse(buffer, count, new_value);
+	err = cpumask_parse_user(buffer, count, new_value);
 	if (err)
 		return err;
+
+	if (!is_affinity_mask_valid(new_value))
+		return -EINVAL;
 
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
@@ -51,10 +64,11 @@ static int irq_affinity_write_proc(struct file *file, const char __user *buffer,
 	 */
 	cpus_and(tmp, new_value, cpu_online_map);
 	if (cpus_empty(tmp))
-		return -EINVAL;
+		/* Special case for empty set - allow the architecture
+		   code to set default SMP affinity. */
+		return select_smp_affinity(irq) ? -EINVAL : full_count;
 
-	irq_affinity[irq] = new_value;
-	irq_desc[irq].handler->set_affinity(irq, new_value);
+	irq_set_affinity(irq, new_value);
 
 	return full_count;
 }
@@ -67,19 +81,26 @@ static int name_unique(unsigned int irq, struct irqaction *new_action)
 {
 	struct irq_desc *desc = irq_desc + irq;
 	struct irqaction *action;
+	unsigned long flags;
+	int ret = 1;
 
-	for (action = desc->action ; action; action = action->next)
+	spin_lock_irqsave(&desc->lock, flags);
+	for (action = desc->action ; action; action = action->next) {
 		if ((action != new_action) && action->name &&
-				!strcmp(new_action->name, action->name))
-			return 0;
-	return 1;
+				!strcmp(new_action->name, action->name)) {
+			ret = 0;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
 }
 
 void register_handler_proc(unsigned int irq, struct irqaction *action)
 {
 	char name [MAX_NAMELEN];
 
-	if (!irq_dir[irq] || action->dir || !action->name ||
+	if (!irq_desc[irq].dir || action->dir || !action->name ||
 					!name_unique(irq, action))
 		return;
 
@@ -87,7 +108,7 @@ void register_handler_proc(unsigned int irq, struct irqaction *action)
 	snprintf(name, MAX_NAMELEN, "%s", action->name);
 
 	/* create /proc/irq/1234/handler/ */
-	action->dir = proc_mkdir(name, irq_dir[irq]);
+	action->dir = proc_mkdir(name, irq_desc[irq].dir);
 }
 
 #undef MAX_NAMELEN
@@ -99,30 +120,28 @@ void register_irq_proc(unsigned int irq)
 	char name [MAX_NAMELEN];
 
 	if (!root_irq_dir ||
-		(irq_desc[irq].handler == &no_irq_type) ||
-			irq_dir[irq])
+		(irq_desc[irq].chip == &no_irq_chip) ||
+			irq_desc[irq].dir)
 		return;
 
 	memset(name, 0, MAX_NAMELEN);
 	sprintf(name, "%d", irq);
 
 	/* create /proc/irq/1234 */
-	irq_dir[irq] = proc_mkdir(name, root_irq_dir);
+	irq_desc[irq].dir = proc_mkdir(name, root_irq_dir);
 
 #ifdef CONFIG_SMP
 	{
 		struct proc_dir_entry *entry;
 
 		/* create /proc/irq/<irq>/smp_affinity */
-		entry = create_proc_entry("smp_affinity", 0600, irq_dir[irq]);
+		entry = create_proc_entry("smp_affinity", 0600, irq_desc[irq].dir);
 
 		if (entry) {
-			entry->nlink = 1;
 			entry->data = (void *)(long)irq;
 			entry->read_proc = irq_affinity_read_proc;
 			entry->write_proc = irq_affinity_write_proc;
 		}
-		smp_affinity_entry[irq] = entry;
 	}
 #endif
 }
@@ -132,7 +151,7 @@ void register_irq_proc(unsigned int irq)
 void unregister_handler_proc(unsigned int irq, struct irqaction *action)
 {
 	if (action->dir)
-		remove_proc_entry(action->dir->name, irq_dir[irq]);
+		remove_proc_entry(action->dir->name, irq_desc[irq].dir);
 }
 
 void init_irq_proc(void)

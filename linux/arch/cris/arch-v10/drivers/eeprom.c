@@ -1,7 +1,7 @@
 /*!*****************************************************************************
 *!
-*!  Implements an interface for i2c compatible eeproms to run under linux.
-*!  Supports 2k, 8k(?) and 16k. Uses adaptive timing adjustents by
+*!  Implements an interface for i2c compatible eeproms to run under Linux.
+*!  Supports 2k, 8k(?) and 16k. Uses adaptive timing adjustments by
 *!  Johan.Adolfsson@axis.com
 *!
 *!  Probing results:
@@ -20,6 +20,12 @@
 *!                                  in the spin-lock.
 *!
 *!  $Log: eeprom.c,v $
+*!  Revision 1.12  2005/06/19 17:06:46  starvik
+*!  Merge of Linux 2.6.12.
+*!
+*!  Revision 1.11  2005/01/26 07:14:46  starvik
+*!  Applied diff from kernel janitors (Nish Aravamudan).
+*!
 *!  Revision 1.10  2003/09/11 07:29:48  starvik
 *!  Merge of Linux 2.6.0-test5
 *!
@@ -45,7 +51,7 @@
 *!  Revision 1.8  2001/06/15 13:24:29  jonashg
 *!  * Added verification of pointers from userspace in read and write.
 *!  * Made busy counter volatile.
-*!  * Added define for inital write delay.
+*!  * Added define for initial write delay.
 *!  * Removed warnings by using loff_t instead of unsigned long.
 *!
 *!  Revision 1.7  2001/06/14 15:26:54  jonashg
@@ -87,13 +93,13 @@
 *!        (c) 1999 Axis Communications AB, Lund, Sweden
 *!*****************************************************************************/
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/wait.h>
 #include <asm/uaccess.h>
 #include "i2c.h"
 
@@ -166,7 +172,7 @@ static const char eeprom_name[] = "eeprom";
 static struct eeprom_type eeprom;
 
 /* This is the exported file-operations structure for this device. */
-struct file_operations eeprom_fops =
+const struct file_operations eeprom_fops =
 {
   .llseek  = eeprom_lseek,
   .read    = eeprom_read,
@@ -444,9 +450,9 @@ int __init eeprom_init(void)
 static int eeprom_open(struct inode * inode, struct file * file)
 {
 
-  if(MINOR(inode->i_rdev) != EEPROM_MINOR_NR)
+  if(iminor(inode) != EEPROM_MINOR_NR)
      return -ENXIO;
-  if(MAJOR(inode->i_rdev) != EEPROM_MAJOR_NR)
+  if(imajor(inode) != EEPROM_MAJOR_NR)
      return -ENXIO;
 
   if( eeprom.size > 0 )
@@ -526,15 +532,10 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
     return -EFAULT;
   }
   
-  while(eeprom.busy)
-  {
-    interruptible_sleep_on(&eeprom.wait_q);
+  wait_event_interruptible(eeprom.wait_q, !eeprom.busy);
+  if (signal_pending(current))
+    return -EINTR;
 
-    /* bail out if we get interrupted */
-    if (signal_pending(current))
-      return -EINTR;
-    
-  }
   eeprom.busy++;
 
   page = (unsigned char) (p >> 8);
@@ -599,18 +600,15 @@ static ssize_t eeprom_write(struct file * file, const char * buf, size_t count,
   int i, written, restart=1;
   unsigned long p;
 
-  if (verify_area(VERIFY_READ, buf, count))
+  if (!access_ok(VERIFY_READ, buf, count))
   {
     return -EFAULT;
   }
 
-  while(eeprom.busy)
-  {
-    interruptible_sleep_on(&eeprom.wait_q);
-    /* bail out if we get interrupted */
-    if (signal_pending(current))
-      return -EINTR;
-  }
+  wait_event_interruptible(eeprom.wait_q, !eeprom.busy);
+  /* bail out if we get interrupted */
+  if (signal_pending(current))
+    return -EINTR;
   eeprom.busy++;
   for(i = 0; (i < EEPROM_RETRIES) && (restart > 0); i++)
   {

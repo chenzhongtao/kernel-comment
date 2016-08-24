@@ -100,6 +100,9 @@
 #include <linux/smp_lock.h>
 #include <linux/ac97_codec.h>
 #include <linux/bitops.h>
+#include <linux/mutex.h>
+#include <linux/mm.h>
+
 #include <asm/uaccess.h>
 
 #define DRIVER_VERSION "1.01"
@@ -312,7 +315,8 @@ static struct pci_device_id i810_pci_tbl [] = {
 	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, INTELICH4},
 	{PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_ICH6_18,
 	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, INTELICH4},
-
+	{PCI_VENDOR_ID_NVIDIA,  PCI_DEVICE_ID_NVIDIA_CK804_AUDIO,
+	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, NVIDIA_NFORCE},
 	{0,}
 };
 
@@ -330,7 +334,7 @@ struct i810_state {
 	struct i810_card *card;	/* Card info */
 
 	/* single open lock mechanism, only used for recording */
-	struct semaphore open_sem;
+	struct mutex open_mutex;
 	wait_queue_head_t open_wait;
 
 	/* file mode */
@@ -1520,9 +1524,9 @@ static void i810_channel_interrupt(struct i810_card *card)
 #endif
 }
 
-static irqreturn_t i810_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i810_interrupt(int irq, void *dev_id)
 {
-	struct i810_card *card = (struct i810_card *)dev_id;
+	struct i810_card *card = dev_id;
 	u32 status;
 
 	spin_lock(&card->lock);
@@ -2576,10 +2580,9 @@ static int i810_open(struct inode *inode, struct file *file)
 		for (i = 0; i < NR_HW_CH && card && !card->initializing; i++) {
 			if (card->states[i] == NULL) {
 				state = card->states[i] = (struct i810_state *)
-					kmalloc(sizeof(struct i810_state), GFP_KERNEL);
+					kzalloc(sizeof(struct i810_state), GFP_KERNEL);
 				if (state == NULL)
 					return -ENOMEM;
-				memset(state, 0, sizeof(struct i810_state));
 				dmabuf = &state->dmabuf;
 				goto found_virt;
 			}
@@ -2596,7 +2599,7 @@ found_virt:
 	state->card = card;
 	state->magic = I810_STATE_MAGIC;
 	init_waitqueue_head(&dmabuf->wait);
-	init_MUTEX(&state->open_sem);
+	mutex_init(&state->open_mutex);
 	file->private_data = state;
 	dmabuf->trigger = 0;
 
@@ -3201,10 +3204,9 @@ static void __devinit i810_configure_clocking (void)
 	 */
 	if(card != NULL) {
 		state = card->states[0] = (struct i810_state *)
-					kmalloc(sizeof(struct i810_state), GFP_KERNEL);
+					kzalloc(sizeof(struct i810_state), GFP_KERNEL);
 		if (state == NULL)
 			return;
-		memset(state, 0, sizeof(struct i810_state));
 		dmabuf = &state->dmabuf;
 
 		dmabuf->write_channel = card->alloc_pcm_channel(card);
@@ -3212,7 +3214,7 @@ static void __devinit i810_configure_clocking (void)
 		state->card = card;
 		state->magic = I810_STATE_MAGIC;
 		init_waitqueue_head(&dmabuf->wait);
-		init_MUTEX(&state->open_sem);
+		mutex_init(&state->open_mutex);
 		dmabuf->fmt = I810_FMT_STEREO | I810_FMT_16BIT;
 		dmabuf->trigger = PCM_ENABLE_OUTPUT;
 		i810_set_spdif_output(state, -1, 0);
@@ -3269,11 +3271,10 @@ static int __devinit i810_probe(struct pci_dev *pci_dev, const struct pci_device
 		return -ENODEV;
 	}
 	
-	if ((card = kmalloc(sizeof(struct i810_card), GFP_KERNEL)) == NULL) {
+	if ((card = kzalloc(sizeof(struct i810_card), GFP_KERNEL)) == NULL) {
 		printk(KERN_ERR "i810_audio: out of memory\n");
 		return -ENOMEM;
 	}
-	memset(card, 0, sizeof(*card));
 
 	card->initializing = 1;
 	card->pci_dev = pci_dev;
@@ -3359,12 +3360,6 @@ static int __devinit i810_probe(struct pci_dev *pci_dev, const struct pci_device
 		goto out_region2;
 	}
 
-	if (request_irq(card->irq, &i810_interrupt, SA_SHIRQ,
-			card_names[pci_id->driver_data], card)) {
-		printk(KERN_ERR "i810_audio: unable to allocate irq %d\n", card->irq);
-		goto out_pio;
-	}
-
 	if (card->use_mmio) {
 		if (request_mem_region(card->ac97base_mmio_phys, 512, "ich_audio MMBAR")) {
 			if ((card->ac97base_mmio = ioremap(card->ac97base_mmio_phys, 512))) { /*@FIXME can ioremap fail? don't know (jsaw) */
@@ -3395,10 +3390,8 @@ static int __devinit i810_probe(struct pci_dev *pci_dev, const struct pci_device
 	}
 
 	/* initialize AC97 codec and register /dev/mixer */
-	if (i810_ac97_init(card) <= 0) {
-		free_irq(card->irq, card);
+	if (i810_ac97_init(card) <= 0)
 		goto out_iospace;
-	}
 	pci_set_drvdata(pci_dev, card);
 
 	if(clocking == 0) {
@@ -3410,7 +3403,6 @@ static int __devinit i810_probe(struct pci_dev *pci_dev, const struct pci_device
 	if ((card->dev_audio = register_sound_dsp(&i810_audio_fops, -1)) < 0) {
 		int i;
 		printk(KERN_ERR "i810_audio: couldn't register DSP device!\n");
-		free_irq(card->irq, card);
 		for (i = 0; i < NR_AC97; i++)
 		if (card->ac97_codec[i] != NULL) {
 			unregister_sound_mixer(card->ac97_codec[i]->dev_mixer);
@@ -3418,6 +3410,13 @@ static int __devinit i810_probe(struct pci_dev *pci_dev, const struct pci_device
 		}
 		goto out_iospace;
 	}
+
+	if (request_irq(card->irq, &i810_interrupt, IRQF_SHARED,
+			card_names[pci_id->driver_data], card)) {
+		printk(KERN_ERR "i810_audio: unable to allocate irq %d\n", card->irq);
+		goto out_iospace;
+	}
+
 
  	card->initializing = 0;
 	return 0;
@@ -3429,10 +3428,9 @@ out_iospace:
 		release_mem_region(card->ac97base_mmio_phys, 512);
 		release_mem_region(card->iobase_mmio_phys, 256);
 	}
-out_pio:	
-	release_region(card->iobase, 64);
-out_region2:
 	release_region(card->ac97base, 256);
+out_region2:
+	release_region(card->iobase, 64);
 out_region1:
 	pci_free_consistent(pci_dev, sizeof(struct i810_channel)*NR_HW_CH,
 	    card->channel, card->chandma);
@@ -3470,7 +3468,7 @@ static void __devexit i810_remove(struct pci_dev *pci_dev)
 }
 
 #ifdef CONFIG_PM
-static int i810_pm_suspend(struct pci_dev *dev, u32 pm_state)
+static int i810_pm_suspend(struct pci_dev *dev, pm_message_t pm_state)
 {
         struct i810_card *card = pci_get_drvdata(dev);
         struct i810_state *state;

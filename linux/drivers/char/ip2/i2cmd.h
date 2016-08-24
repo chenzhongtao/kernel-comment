@@ -64,16 +64,6 @@ typedef struct _cmdSyntax
 						// directly from user-level
 #define VAR 0x10        // This command is of variable length!
 
-//-----------------------------------
-// External declarations for i2cmd.c
-//-----------------------------------
-// Routine to set up parameters for the "define hot-key sequence" command. Since
-// there is more than one parameter to assign, we must use a function rather
-// than a macro (used usually).
-//
-extern cmdSyntaxPtr i2cmdUnixFlags(USHORT iflag,USHORT cflag,USHORT lflag);
-extern cmdSyntaxPtr i2cmdBaudDef(int which, USHORT rate);
-
 // Declarations for the global arrays used to bear the commands and their
 // arguments.
 //
@@ -377,11 +367,6 @@ static UCHAR cc02[];
 #define CSE_NULL  3  // Replace with a null
 #define CSE_MARK  4  // Replace with a 3-character sequence (as Unix)
 
-#define  CMD_SET_REPLACEMENT(arg,ch)   \
-			(((cmdSyntaxPtr)(ct36a))->cmd[1] = (arg), \
-			(((cmdSyntaxPtr)(ct36a))->cmd[2] = (ch),  \
-			(cmdSyntaxPtr)(ct36a))
-
 #define CSE_REPLACE  0x8	// Replace the errored character with the
 							// replacement character defined here
 
@@ -433,6 +418,7 @@ static UCHAR cc02[];
 #define CMD_HOT_ENAB (cmdSyntaxPtr)(ct45) // Enable Hot-key checking
 #define CMD_HOT_DSAB (cmdSyntaxPtr)(ct46) // Disable Hot-key checking
 
+#if 0
 // COMMAND 47: Send Protocol info via Unix flags:
 // iflag = Unix tty t_iflag
 // cflag = Unix tty t_cflag
@@ -441,6 +427,7 @@ static UCHAR cc02[];
 // within these flags
 //
 #define CMD_UNIX_FLAGS(iflag,cflag,lflag) i2cmdUnixFlags(iflag,cflag,lflag)
+#endif  /*  0  */
 
 #define CMD_DSRFL_ENAB  (cmdSyntaxPtr)(ct48) // Enable  DSR receiver ctrl
 #define CMD_DSRFL_DSAB  (cmdSyntaxPtr)(ct49) // Disable DSR receiver ctrl

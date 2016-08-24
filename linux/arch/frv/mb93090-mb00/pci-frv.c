@@ -31,7 +31,7 @@ pcibios_update_resource(struct pci_dev *dev, struct resource *root,
 	if (resource < 6) {
 		reg = PCI_BASE_ADDRESS_0 + 4*resource;
 	} else if (resource == PCI_ROM_RESOURCE) {
-		res->flags |= PCI_ROM_ADDRESS_ENABLE;
+		res->flags |= IORESOURCE_ROM_ENABLE;
 		new |= PCI_ROM_ADDRESS_ENABLE;
 		reg = dev->rom_base_reg;
 	} else {
@@ -43,7 +43,7 @@ pcibios_update_resource(struct pci_dev *dev, struct resource *root,
 	pci_read_config_dword(dev, reg, &check);
 	if ((new ^ check) & ((new & PCI_BASE_ADDRESS_SPACE_IO) ? PCI_BASE_ADDRESS_IO_MASK : PCI_BASE_ADDRESS_MEM_MASK)) {
 		printk(KERN_ERR "PCI: Error while updating region "
-		       "%s/%d (%08x != %08x)\n", dev->slot_name, resource,
+		       "%s/%d (%08x != %08x)\n", pci_name(dev), resource,
 		       new, check);
 	}
 }
@@ -64,10 +64,10 @@ pcibios_update_resource(struct pci_dev *dev, struct resource *root,
  */
 void
 pcibios_align_resource(void *data, struct resource *res,
-		       unsigned long size, unsigned long align)
+		       resource_size_t size, resource_size_t align)
 {
 	if (res->flags & IORESOURCE_IO) {
-		unsigned long start = res->start;
+		resource_size_t start = res->start;
 
 		if (start & 0x300) {
 			start = (start + 0x3ff) & ~0x3ff;
@@ -128,7 +128,7 @@ static void __init pcibios_allocate_bus_resources(struct list_head *bus_list)
 					continue;
 				pr = pci_find_parent_resource(dev, r);
 				if (!pr || request_resource(pr, r) < 0)
-					printk(KERN_ERR "PCI: Cannot allocate resource region %d of bridge %s\n", idx, dev->slot_name);
+					printk(KERN_ERR "PCI: Cannot allocate resource region %d of bridge %s\n", idx, pci_name(dev));
 			}
 		}
 		pcibios_allocate_bus_resources(&bus->children);
@@ -142,9 +142,7 @@ static void __init pcibios_allocate_resources(int pass)
 	u16 command;
 	struct resource *r, *pr;
 
-	while (dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev),
-	       dev != NULL
-	       ) {
+	for_each_pci_dev(dev) {
 		pci_read_config_word(dev, PCI_COMMAND, &command);
 		for(idx = 0; idx < 6; idx++) {
 			r = &dev->resource[idx];
@@ -170,11 +168,11 @@ static void __init pcibios_allocate_resources(int pass)
 		}
 		if (!pass) {
 			r = &dev->resource[PCI_ROM_RESOURCE];
-			if (r->flags & PCI_ROM_ADDRESS_ENABLE) {
+			if (r->flags & IORESOURCE_ROM_ENABLE) {
 				/* Turn the ROM off, leave the resource region, but keep it unregistered. */
 				u32 reg;
 				DBG("PCI: Switching off ROM of %s\n", pci_name(dev));
-				r->flags &= ~PCI_ROM_ADDRESS_ENABLE;
+				r->flags &= ~IORESOURCE_ROM_ENABLE;
 				pci_read_config_dword(dev, dev->rom_base_reg, &reg);
 				pci_write_config_dword(dev, dev->rom_base_reg, reg & ~PCI_ROM_ADDRESS_ENABLE);
 			}
@@ -188,9 +186,7 @@ static void __init pcibios_assign_resources(void)
 	int idx;
 	struct resource *r;
 
-	while (dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev),
-	       dev != NULL
-	       ) {
+	for_each_pci_dev(dev) {
 		int class = dev->class >> 8;
 
 		/* Don't touch classless devices and host bridges */

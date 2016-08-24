@@ -1,21 +1,17 @@
 #
 # Makefile for ALSA
-# Copyright (c) 1999,2001 by Jaroslav Kysela <perex@suse.cz>
+# Copyright (c) 1999,2001 by Jaroslav Kysela <perex@perex.cz>
 #
 
-snd-objs     := sound.o init.o memory.o info.o control.o misc.o \
-                device.o wrappers.o
-ifeq ($(CONFIG_ISA),y)
-snd-objs     += isadma.o
-endif
-ifeq ($(CONFIG_SND_OSSEMUL),y)
-snd-objs     += sound_oss.o info_oss.o
-endif
+snd-y     := sound.o init.o memory.o info.o control.o misc.o device.o
+snd-$(CONFIG_ISA_DMA_API) += isadma.o
+snd-$(CONFIG_SND_OSSEMUL) += sound_oss.o info_oss.o
 
 snd-pcm-objs := pcm.o pcm_native.o pcm_lib.o pcm_timer.o pcm_misc.o \
 		pcm_memory.o
 
-snd-page-alloc-objs := memalloc.o sgbuf.o
+snd-page-alloc-y := memalloc.o
+snd-page-alloc-$(CONFIG_HAS_DMA) += sgbuf.o
 
 snd-rawmidi-objs  := rawmidi.o
 snd-timer-objs    := timer.o
@@ -31,4 +27,3 @@ obj-$(CONFIG_SND_RAWMIDI)	+= snd-rawmidi.o
 
 obj-$(CONFIG_SND_OSSEMUL)	+= oss/
 obj-$(CONFIG_SND_SEQUENCER)	+= seq/
-obj-$(CONFIG_SND_BIT32_EMUL) += ioctl32/

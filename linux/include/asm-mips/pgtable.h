@@ -8,17 +8,18 @@
 #ifndef _ASM_PGTABLE_H
 #define _ASM_PGTABLE_H
 
-#include <asm-generic/4level-fixup.h>
-
-#include <linux/config.h>
-#ifdef CONFIG_MIPS32
+#ifdef CONFIG_32BIT
 #include <asm/pgtable-32.h>
 #endif
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 #include <asm/pgtable-64.h>
 #endif
 
+#include <asm/io.h>
 #include <asm/pgtable-bits.h>
+
+struct mm_struct;
+struct vm_area_struct;
 
 #define PAGE_NONE	__pgprot(_PAGE_PRESENT | _CACHE_CACHABLE_NONCOHERENT)
 #define PAGE_SHARED	__pgprot(_PAGE_PRESENT | _PAGE_READ | _PAGE_WRITE | \
@@ -66,7 +67,7 @@ extern unsigned long empty_zero_page;
 extern unsigned long zero_page_mask;
 
 #define ZERO_PAGE(vaddr) \
-	(virt_to_page(empty_zero_page + (((unsigned long)(vaddr)) & zero_page_mask)))
+	(virt_to_page((void *)(empty_zero_page + (((unsigned long)(vaddr)) & zero_page_mask))))
 
 extern void paging_init(void);
 
@@ -74,15 +75,15 @@ extern void paging_init(void);
  * Conversion functions: convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
-#define page_pte(page)		page_pte_prot(page, __pgprot(0))
-#define pmd_phys(pmd)		(pmd_val(pmd) - PAGE_OFFSET)
+#define pmd_phys(pmd)		virt_to_phys((void *)pmd_val(pmd))
 #define pmd_page(pmd)		(pfn_to_page(pmd_phys(pmd) >> PAGE_SHIFT))
-#define pmd_page_kernel(pmd)	pmd_val(pmd)
+#define pmd_page_vaddr(pmd)	pmd_val(pmd)
 
-#define pte_none(pte)		(!(pte_val(pte) & ~_PAGE_GLOBAL))
-#define pte_present(pte)	(pte_val(pte) & _PAGE_PRESENT)
+#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32_R1)
 
-#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32)
+#define pte_none(pte)		(!(((pte).pte_low | (pte).pte_high) & ~_PAGE_GLOBAL))
+#define pte_present(pte)	((pte).pte_low & _PAGE_PRESENT)
+
 static inline void set_pte(pte_t *ptep, pte_t pte)
 {
 	ptep->pte_high = pte.pte_high;
@@ -90,26 +91,35 @@ static inline void set_pte(pte_t *ptep, pte_t pte)
 	ptep->pte_low = pte.pte_low;
 	//printk("pte_high %x pte_low %x\n", ptep->pte_high, ptep->pte_low);
 
-	if (pte_val(pte) & _PAGE_GLOBAL) {
+	if (pte.pte_low & _PAGE_GLOBAL) {
 		pte_t *buddy = ptep_buddy(ptep);
 		/*
 		 * Make sure the buddy is global too (if it's !none,
 		 * it better already be global)
 		 */
-		if (pte_none(*buddy))
-			buddy->pte_low |= _PAGE_GLOBAL;
+		if (pte_none(*buddy)) {
+			buddy->pte_low  |= _PAGE_GLOBAL;
+			buddy->pte_high |= _PAGE_GLOBAL;
+		}
 	}
 }
+#define set_pte_at(mm, addr, ptep, pteval) set_pte(ptep, pteval)
 
-static inline void pte_clear(pte_t *ptep)
+static inline void pte_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
+	pte_t null = __pte(0);
+
 	/* Preserve global status for the pair */
-	if (pte_val(*ptep_buddy(ptep)) & _PAGE_GLOBAL)
-		set_pte(ptep, __pte(_PAGE_GLOBAL));
-	else
-		set_pte(ptep, __pte(0));
+	if (ptep_buddy(ptep)->pte_low & _PAGE_GLOBAL)
+		null.pte_low = null.pte_high = _PAGE_GLOBAL;
+
+	set_pte_at(mm, addr, ptep, null);
 }
 #else
+
+#define pte_none(pte)		(!(pte_val(pte) & ~_PAGE_GLOBAL))
+#define pte_present(pte)	(pte_val(pte) & _PAGE_PRESENT)
+
 /*
  * Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
@@ -130,111 +140,104 @@ static inline void set_pte(pte_t *ptep, pte_t pteval)
 	}
 #endif
 }
+#define set_pte_at(mm, addr, ptep, pteval) set_pte(ptep, pteval)
 
-static inline void pte_clear(pte_t *ptep)
+static inline void pte_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
 #if !defined(CONFIG_CPU_R3000) && !defined(CONFIG_CPU_TX39XX)
 	/* Preserve global status for the pair */
 	if (pte_val(*ptep_buddy(ptep)) & _PAGE_GLOBAL)
-		set_pte(ptep, __pte(_PAGE_GLOBAL));
+		set_pte_at(mm, addr, ptep, __pte(_PAGE_GLOBAL));
 	else
 #endif
-		set_pte(ptep, __pte(0));
+		set_pte_at(mm, addr, ptep, __pte(0));
 }
 #endif
 
 /*
- * (pmds are folded into pgds so this doesn't get actually called,
+ * (pmds are folded into puds so this doesn't get actually called,
  * but the define is needed for a generic inline function.)
  */
 #define set_pmd(pmdptr, pmdval) do { *(pmdptr) = (pmdval); } while(0)
-#define set_pgd(pgdptr, pgdval) do { *(pgdptr) = (pgdval); } while(0)
 
-#define PGD_T_LOG2	ffz(~sizeof(pgd_t))
-#define PMD_T_LOG2	ffz(~sizeof(pmd_t))
-#define PTE_T_LOG2	ffz(~sizeof(pte_t))
+#ifdef CONFIG_64BIT
+/*
+ * (puds are folded into pgds so this doesn't get actually called,
+ * but the define is needed for a generic inline function.)
+ */
+#define set_pud(pudptr, pudval) do { *(pudptr) = (pudval); } while(0)
+#endif
 
-extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
+#define PGD_T_LOG2	(__builtin_ffs(sizeof(pgd_t)) - 1)
+#define PMD_T_LOG2	(__builtin_ffs(sizeof(pmd_t)) - 1)
+#define PTE_T_LOG2	(__builtin_ffs(sizeof(pte_t)) - 1)
+
+/*
+ * We used to declare this array with size but gcc 3.3 and older are not able
+ * to find that this expression is a constant, so the size is dropped.
+ */
+extern pgd_t swapper_pg_dir[];
 
 /*
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
  */
-static inline int pte_user(pte_t pte)	{ BUG(); return 0; }
-#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32)
-static inline int pte_read(pte_t pte)	{ return (pte).pte_low & _PAGE_READ; }
-static inline int pte_write(pte_t pte)	{ return (pte).pte_low & _PAGE_WRITE; }
-static inline int pte_dirty(pte_t pte)	{ return (pte).pte_low & _PAGE_MODIFIED; }
-static inline int pte_young(pte_t pte)	{ return (pte).pte_low & _PAGE_ACCESSED; }
-static inline int pte_file(pte_t pte)	{ return (pte).pte_low & _PAGE_FILE; }
+#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32_R1)
+static inline int pte_write(pte_t pte)	{ return pte.pte_low & _PAGE_WRITE; }
+static inline int pte_dirty(pte_t pte)	{ return pte.pte_low & _PAGE_MODIFIED; }
+static inline int pte_young(pte_t pte)	{ return pte.pte_low & _PAGE_ACCESSED; }
+static inline int pte_file(pte_t pte)	{ return pte.pte_low & _PAGE_FILE; }
+
 static inline pte_t pte_wrprotect(pte_t pte)
 {
-	(pte).pte_low &= ~(_PAGE_WRITE | _PAGE_SILENT_WRITE);
-	(pte).pte_high &= ~_PAGE_SILENT_WRITE;
-	return pte;
-}
-
-static inline pte_t pte_rdprotect(pte_t pte)
-{
-	(pte).pte_low &= ~(_PAGE_READ | _PAGE_SILENT_READ);
-	(pte).pte_high &= ~_PAGE_SILENT_READ;
+	pte.pte_low  &= ~(_PAGE_WRITE | _PAGE_SILENT_WRITE);
+	pte.pte_high &= ~_PAGE_SILENT_WRITE;
 	return pte;
 }
 
 static inline pte_t pte_mkclean(pte_t pte)
 {
-	(pte).pte_low &= ~(_PAGE_MODIFIED|_PAGE_SILENT_WRITE);
-	(pte).pte_high &= ~_PAGE_SILENT_WRITE;
+	pte.pte_low  &= ~(_PAGE_MODIFIED | _PAGE_SILENT_WRITE);
+	pte.pte_high &= ~_PAGE_SILENT_WRITE;
 	return pte;
 }
 
 static inline pte_t pte_mkold(pte_t pte)
 {
-	(pte).pte_low &= ~(_PAGE_ACCESSED|_PAGE_SILENT_READ);
-	(pte).pte_high &= ~_PAGE_SILENT_READ;
+	pte.pte_low  &= ~(_PAGE_ACCESSED | _PAGE_SILENT_READ);
+	pte.pte_high &= ~_PAGE_SILENT_READ;
 	return pte;
 }
 
 static inline pte_t pte_mkwrite(pte_t pte)
 {
-	(pte).pte_low |= _PAGE_WRITE;
-	if ((pte).pte_low & _PAGE_MODIFIED) {
-		(pte).pte_low |= _PAGE_SILENT_WRITE;
-		(pte).pte_high |= _PAGE_SILENT_WRITE;
-	}
-	return pte;
-}
-
-static inline pte_t pte_mkread(pte_t pte)
-{
-	(pte).pte_low |= _PAGE_READ;
-	if ((pte).pte_low & _PAGE_ACCESSED) {
-		(pte).pte_low |= _PAGE_SILENT_READ;
-		(pte).pte_high |= _PAGE_SILENT_READ;
+	pte.pte_low |= _PAGE_WRITE;
+	if (pte.pte_low & _PAGE_MODIFIED) {
+		pte.pte_low  |= _PAGE_SILENT_WRITE;
+		pte.pte_high |= _PAGE_SILENT_WRITE;
 	}
 	return pte;
 }
 
 static inline pte_t pte_mkdirty(pte_t pte)
 {
-	(pte).pte_low |= _PAGE_MODIFIED;
-	if ((pte).pte_low & _PAGE_WRITE) {
-		(pte).pte_low |= _PAGE_SILENT_WRITE;
-		(pte).pte_high |= _PAGE_SILENT_WRITE;
+	pte.pte_low |= _PAGE_MODIFIED;
+	if (pte.pte_low & _PAGE_WRITE) {
+		pte.pte_low  |= _PAGE_SILENT_WRITE;
+		pte.pte_high |= _PAGE_SILENT_WRITE;
 	}
 	return pte;
 }
 
 static inline pte_t pte_mkyoung(pte_t pte)
 {
-	(pte).pte_low |= _PAGE_ACCESSED;
-	if ((pte).pte_low & _PAGE_READ)
-		(pte).pte_low |= _PAGE_SILENT_READ;
-		(pte).pte_high |= _PAGE_SILENT_READ;
+	pte.pte_low |= _PAGE_ACCESSED;
+	if (pte.pte_low & _PAGE_READ)
+		pte.pte_low  |= _PAGE_SILENT_READ;
+		pte.pte_high |= _PAGE_SILENT_READ;
 	return pte;
 }
 #else
-static inline int pte_read(pte_t pte)	{ return pte_val(pte) & _PAGE_READ; }
 static inline int pte_write(pte_t pte)	{ return pte_val(pte) & _PAGE_WRITE; }
 static inline int pte_dirty(pte_t pte)	{ return pte_val(pte) & _PAGE_MODIFIED; }
 static inline int pte_young(pte_t pte)	{ return pte_val(pte) & _PAGE_ACCESSED; }
@@ -243,12 +246,6 @@ static inline int pte_file(pte_t pte)	{ return pte_val(pte) & _PAGE_FILE; }
 static inline pte_t pte_wrprotect(pte_t pte)
 {
 	pte_val(pte) &= ~(_PAGE_WRITE | _PAGE_SILENT_WRITE);
-	return pte;
-}
-
-static inline pte_t pte_rdprotect(pte_t pte)
-{
-	pte_val(pte) &= ~(_PAGE_READ | _PAGE_SILENT_READ);
 	return pte;
 }
 
@@ -269,14 +266,6 @@ static inline pte_t pte_mkwrite(pte_t pte)
 	pte_val(pte) |= _PAGE_WRITE;
 	if (pte_val(pte) & _PAGE_MODIFIED)
 		pte_val(pte) |= _PAGE_SILENT_WRITE;
-	return pte;
-}
-
-static inline pte_t pte_mkread(pte_t pte)
-{
-	pte_val(pte) |= _PAGE_READ;
-	if (pte_val(pte) & _PAGE_ACCESSED)
-		pte_val(pte) |= _PAGE_SILENT_READ;
 	return pte;
 }
 
@@ -320,11 +309,12 @@ static inline pgprot_t pgprot_noncached(pgprot_t _prot)
  */
 #define mk_pte(page, pgprot)	pfn_pte(page_to_pfn(page), (pgprot))
 
-#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32)
+#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32_R1)
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
-	pte.pte_low &= _PAGE_CHG_MASK;
-	pte.pte_low |= pgprot_val(newprot);
+	pte.pte_low  &= _PAGE_CHG_MASK;
+	pte.pte_high &= ~0x3f;
+	pte.pte_low  |= pgprot_val(newprot);
 	pte.pte_high |= pgprot_val(newprot) & 0x3f;
 	return pte;
 }
@@ -348,26 +338,23 @@ static inline void update_mmu_cache(struct vm_area_struct *vma,
 	__update_cache(vma, address, pte);
 }
 
-#ifndef CONFIG_DISCONTIGMEM
 #define kern_addr_valid(addr)	(1)
-#endif
 
 #ifdef CONFIG_64BIT_PHYS_ADDR
-extern phys_t fixup_bigphys_addr(phys_t phys_addr, phys_t size);
 extern int remap_pfn_range(struct vm_area_struct *vma, unsigned long from, unsigned long pfn, unsigned long size, pgprot_t prot);
 
-static inline int io_remap_page_range(struct vm_area_struct *vma,
+static inline int io_remap_pfn_range(struct vm_area_struct *vma,
 		unsigned long vaddr,
-		unsigned long paddr,
+		unsigned long pfn,
 		unsigned long size,
 		pgprot_t prot)
 {
-	phys_t phys_addr_high = fixup_bigphys_addr(paddr, size);
+	phys_t phys_addr_high = fixup_bigphys_addr(pfn << PAGE_SHIFT, size);
 	return remap_pfn_range(vma, vaddr, phys_addr_high >> PAGE_SHIFT, size, prot);
 }
 #else
-#define io_remap_page_range(vma, vaddr, paddr, size, prot)		\
-	remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
+#define io_remap_pfn_range(vma, vaddr, pfn, size, prot)		\
+		remap_pfn_range(vma, vaddr, pfn, size, prot)
 #endif
 
 #include <asm-generic/pgtable.h>

@@ -21,6 +21,8 @@
 #ifndef _LINUX_IF_ETHER_H
 #define _LINUX_IF_ETHER_H
 
+#include <linux/types.h>
+
 /*
  *	IEEE 802.3 Ethernet magic constants.  The frame sizes omit the preamble
  *	and FCS/CRC (frame check sequence). 
@@ -31,6 +33,7 @@
 #define ETH_ZLEN	60		/* Min. octets in frame sans FCS */
 #define ETH_DATA_LEN	1500		/* Max. octets in payload	 */
 #define ETH_FRAME_LEN	1514		/* Max. octets in frame sans FCS */
+#define ETH_FCS_LEN	4		/* Octets in the FCS		 */
 
 /*
  *	These are the defined Ethernet Protocol ID's.
@@ -59,6 +62,8 @@
 #define ETH_P_8021Q	0x8100          /* 802.1Q VLAN Extended Header  */
 #define ETH_P_IPX	0x8137		/* IPX over DIX			*/
 #define ETH_P_IPV6	0x86DD		/* IPv6 over bluebook		*/
+#define ETH_P_PAUSE	0x8808		/* IEEE Pause frames. See 802.3 31B */
+#define ETH_P_SLOW	0x8809		/* Slow Protocol. See 802.3ad 43B */
 #define ETH_P_WCCP	0x883E		/* Web-cache coordination protocol
 					 * defined in draft-wilson-wrec-wccp-v2-00.txt */
 #define ETH_P_PPP_DISC	0x8863		/* PPPoE discovery messages     */
@@ -70,6 +75,7 @@
 					 * over Ethernet
 					 */
 #define ETH_P_AOE	0x88A2		/* ATA over Ethernet		*/
+#define ETH_P_TIPC	0x88CA		/* TIPC 			*/
 
 /*
  *	Non DIX types. Won't clash for 1500 types.
@@ -100,7 +106,7 @@
 struct ethhdr {
 	unsigned char	h_dest[ETH_ALEN];	/* destination eth addr	*/
 	unsigned char	h_source[ETH_ALEN];	/* source ether addr	*/
-	unsigned short	h_proto;		/* packet type ID field	*/
+	__be16		h_proto;		/* packet type ID field	*/
 } __attribute__((packed));
 
 #ifdef __KERNEL__
@@ -108,8 +114,22 @@ struct ethhdr {
 
 static inline struct ethhdr *eth_hdr(const struct sk_buff *skb)
 {
-	return (struct ethhdr *)skb->mac.raw;
+	return (struct ethhdr *)skb_mac_header(skb);
 }
+
+int eth_header_parse(const struct sk_buff *skb, unsigned char *haddr);
+
+#ifdef CONFIG_SYSCTL
+extern struct ctl_table ether_table[];
+#endif
+
+/*
+ *	Display a 6 byte device address (MAC) in a readable format.
+ */
+#define MAC_FMT "%02x:%02x:%02x:%02x:%02x:%02x"
+extern char *print_mac(char *buf, const u8 *addr);
+#define DECLARE_MAC_BUF(var) char var[18] __maybe_unused
+
 #endif
 
 #endif	/* _LINUX_IF_ETHER_H */

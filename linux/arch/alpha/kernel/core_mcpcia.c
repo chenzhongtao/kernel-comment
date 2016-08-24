@@ -40,8 +40,6 @@
 # define DBG_CFG(args)
 #endif
 
-#define MCPCIA_MAX_HOSES 4
-
 /*
  * Given a bus, device, and function number, compute resulting
  * configuration space address and setup the MCPCIA_HAXR2 register
@@ -572,8 +570,7 @@ mcpcia_print_system_area(unsigned long la_ptr)
 }
 
 void
-mcpcia_machine_check(unsigned long vector, unsigned long la_ptr,
-		     struct pt_regs * regs)
+mcpcia_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	struct el_common *mchk_header;
 	struct el_MCPCIA_uncorrected_frame_mcheck *mchk_logout;
@@ -610,7 +607,7 @@ mcpcia_machine_check(unsigned long vector, unsigned long la_ptr,
 	wrmces(0x7);
 	mb();
 
-	process_mcheck_info(vector, la_ptr, regs, "MCPCIA", expected != 0);
+	process_mcheck_info(vector, la_ptr, "MCPCIA", expected != 0);
 	if (!expected && vector != 0x620 && vector != 0x630) {
 		mcpcia_print_uncorrectable(mchk_logout);
 		mcpcia_print_system_area(la_ptr);

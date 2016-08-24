@@ -79,24 +79,20 @@
 
 /* ---------- Headers, macros, data structures ---------- */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
 #include <linux/fs.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/netdevice.h>
 #include <linux/spinlock.h>
-#include <linux/smp_lock.h>
 #include <linux/device.h>
 
 #undef COSA_SLOW_IO	/* for testing purposes only */
-#undef REALLY_SLOW_IO
 
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -158,8 +154,8 @@ struct cosa_data {
 	int nchannels;			/* # of channels on this card */
 	int driver_status;		/* For communicating with firmware */
 	int firmware_status;		/* Downloaded, reseted, etc. */
-	long int rxbitmap, txbitmap;	/* Bitmap of channels who are willing to send/receive data */
-	long int rxtx;			/* RX or TX in progress? */
+	unsigned long rxbitmap, txbitmap;/* Bitmap of channels who are willing to send/receive data */
+	unsigned long rxtx;		/* RX or TX in progress? */
 	int enabled;
 	int usage;				/* usage count */
 	int txchan, txsize, rxsize;
@@ -235,7 +231,7 @@ static int dma[MAX_CARDS+1];
 static int irq[MAX_CARDS+1] = { -1, -1, -1, -1, -1, -1, 0, };
 
 /* for class stuff*/
-static struct class_simple *cosa_class;
+static struct class *cosa_class;
 
 #ifdef MODULE
 module_param_array(io, int, NULL, 0);
@@ -313,7 +309,7 @@ static int cosa_chardev_ioctl(struct inode *inode, struct file *file,
 static int cosa_fasync(struct inode *inode, struct file *file, int on);
 #endif
 
-static struct file_operations cosa_fops = {
+static const struct file_operations cosa_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.read		= cosa_read,
@@ -347,7 +343,7 @@ static void put_driver_status(struct cosa_data *cosa);
 static void put_driver_status_nolock(struct cosa_data *cosa);
 
 /* Interrupt handling */
-static irqreturn_t cosa_interrupt(int irq, void *cosa, struct pt_regs *regs);
+static irqreturn_t cosa_interrupt(int irq, void *cosa);
 
 /* I/O ops debugging */
 #ifdef DEBUG_IO
@@ -393,22 +389,14 @@ static int __init cosa_init(void)
 		err = -ENODEV;
 		goto out;
 	}
-	devfs_mk_dir("cosa");
-	cosa_class = class_simple_create(THIS_MODULE, "cosa");
+	cosa_class = class_create(THIS_MODULE, "cosa");
 	if (IS_ERR(cosa_class)) {
 		err = PTR_ERR(cosa_class);
 		goto out_chrdev;
 	}
 	for (i=0; i<nr_cards; i++) {
-		class_simple_device_add(cosa_class, MKDEV(cosa_major, i),
+		class_device_create(cosa_class, NULL, MKDEV(cosa_major, i),
 				NULL, "cosa%d", i);
-		err = devfs_mk_cdev(MKDEV(cosa_major, i),
-				S_IFCHR|S_IRUSR|S_IWUSR,
-				"cosa/%d", i);
-		if (err) {
-			class_simple_device_remove(MKDEV(cosa_major, i));
-			goto out_chrdev;		
-		}
 	}
 	err = 0;
 	goto out;
@@ -426,12 +414,9 @@ static void __exit cosa_exit(void)
 	int i;
 	printk(KERN_INFO "Unloading the cosa module\n");
 
-	for (i=0; i<nr_cards; i++) {
-		class_simple_device_remove(MKDEV(cosa_major, i));
-		devfs_remove("cosa/%d", i);
-	}
-	class_simple_destroy(cosa_class);
-	devfs_remove("cosa");
+	for (i=0; i<nr_cards; i++)
+		class_device_destroy(cosa_class, MKDEV(cosa_major, i));
+	class_destroy(cosa_class);
 	for (cosa=cosa_cards; nr_cards--; cosa++) {
 		/* Clean up the per-channel data */
 		for (i=0; i<cosa->nchannels; i++) {
@@ -543,7 +528,7 @@ static int cosa_probe(int base, int irq, int dma)
 		 * FIXME: When this code is not used as module, we should
 		 * probably call udelay() instead of the interruptible sleep.
 		 */
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		cosa_putstatus(cosa, SR_TX_INT_ENA);
 		schedule_timeout(30);
 		irq = probe_irq_off(irqs);
@@ -587,13 +572,11 @@ static int cosa_probe(int base, int irq, int dma)
 	sprintf(cosa->name, "cosa%d", cosa->num);
 
 	/* Initialize the per-channel data */
-	cosa->chan = kmalloc(sizeof(struct channel_data)*cosa->nchannels,
-			     GFP_KERNEL);
+	cosa->chan = kcalloc(cosa->nchannels, sizeof(struct channel_data), GFP_KERNEL);
 	if (!cosa->chan) {
 	        err = -ENOMEM;
 		goto err_out3;
 	}
-	memset(cosa->chan, 0, sizeof(struct channel_data)*cosa->nchannels);
 	for (i=0; i<cosa->nchannels; i++) {
 		cosa->chan[i].cosa = cosa;
 		cosa->chan[i].num = i;
@@ -787,7 +770,7 @@ static int sppp_rx_done(struct channel_data *chan)
 	}
 	chan->rx_skb->protocol = htons(ETH_P_WAN_PPP);
 	chan->rx_skb->dev = chan->pppdev.dev;
-	chan->rx_skb->mac.raw = chan->rx_skb->data;
+	skb_reset_mac_header(chan->rx_skb);
 	chan->stats.rx_packets++;
 	chan->stats.rx_bytes += chan->cosa->rxsize;
 	netif_rx(chan->rx_skb);
@@ -987,12 +970,12 @@ static int cosa_open(struct inode *inode, struct file *file)
 	unsigned long flags;
 	int n;
 
-	if ((n=iminor(file->f_dentry->d_inode)>>CARD_MINOR_BITS)
+	if ((n=iminor(file->f_path.dentry->d_inode)>>CARD_MINOR_BITS)
 		>= nr_cards)
 		return -ENODEV;
 	cosa = cosa_cards+n;
 
-	if ((n=iminor(file->f_dentry->d_inode)
+	if ((n=iminor(file->f_path.dentry->d_inode)
 		& ((1<<CARD_MINOR_BITS)-1)) >= cosa->nchannels)
 		return -ENODEV;
 	chan = cosa->chan + n;
@@ -1564,8 +1547,7 @@ static int cosa_reset_and_read_id(struct cosa_data *cosa, char *idstring)
 	cosa_getdata8(cosa);
 	cosa_putstatus(cosa, SR_RST);
 #ifdef MODULE
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(HZ/2);
+	msleep(500);
 #else
 	udelay(5*100000);
 #endif
@@ -1618,8 +1600,7 @@ static int get_wait_data(struct cosa_data *cosa)
 			return r;
 		}
 		/* sleep if not ready to read */
-		current->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(1);
+		schedule_timeout_interruptible(1);
 	}
 	printk(KERN_INFO "cosa: timeout in get_wait_data (status 0x%x)\n",
 		cosa_getstatus(cosa));
@@ -1645,8 +1626,7 @@ static int put_wait_data(struct cosa_data *cosa, int data)
 		}
 #if 0
 		/* sleep if not ready to read */
-		current->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(1);
+		schedule_timeout_interruptible(1);
 #endif
 	}
 	printk(KERN_INFO "cosa%d: timeout in put_wait_data (status 0x%x)\n",
@@ -1988,7 +1968,7 @@ out:
 	spin_unlock_irqrestore(&cosa->lock, flags);
 }
 
-static irqreturn_t cosa_interrupt(int irq, void *cosa_, struct pt_regs *regs)
+static irqreturn_t cosa_interrupt(int irq, void *cosa_)
 {
 	unsigned status;
 	int count = 0;

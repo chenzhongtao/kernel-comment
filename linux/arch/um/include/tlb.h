@@ -6,18 +6,10 @@
 #ifndef __TLB_H__
 #define __TLB_H__
 
-extern void mprotect_kernel_vm(int w);
+#include "um_mmu.h"
+
 extern void force_flush_all(void);
+extern int flush_tlb_kernel_range_common(unsigned long start,
+					 unsigned long end);
 
 #endif
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

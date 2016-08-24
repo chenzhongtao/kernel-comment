@@ -11,7 +11,6 @@
 #define _LINUX_HFSPLUS_FS_H
 
 #include <linux/fs.h>
-#include <linux/version.h>
 #include <linux/buffer_head.h>
 #include "hfsplus_raw.h"
 
@@ -37,7 +36,7 @@
 #define HFSPLUS_TYPE_DATA 0x00
 #define HFSPLUS_TYPE_RSRC 0xFF
 
-typedef int (*btree_keycmp)(hfsplus_btree_key *, hfsplus_btree_key *);
+typedef int (*btree_keycmp)(const hfsplus_btree_key *, const hfsplus_btree_key *);
 
 #define NODE_HASH_SIZE	256
 
@@ -114,6 +113,7 @@ struct hfsplus_sb_info {
 	struct hfs_btree *attr_tree;
 	struct inode *alloc_file;
 	struct inode *hidden_dir;
+	struct nls_table *nls;
 
 	/* Runtime variables */
 	u32 blockoffset;
@@ -143,13 +143,14 @@ struct hfsplus_sb_info {
 
 	unsigned long flags;
 
-	atomic_t inode_cnt;
-	u32 last_inode_cnt;
-
 	struct hlist_head rsrc_inodes;
 };
 
 #define HFSPLUS_SB_WRITEBACKUP	0x0001
+#define HFSPLUS_SB_NODECOMPOSE	0x0002
+#define HFSPLUS_SB_FORCE	0x0004
+#define HFSPLUS_SB_HFSX		0x0008
+#define HFSPLUS_SB_CASEFOLD	0x0010
 
 
 struct hfsplus_inode_info {
@@ -166,6 +167,7 @@ struct hfsplus_inode_info {
 	struct inode *rsrc_inode;
 	unsigned long flags;
 
+	__be32 create_date;
 	/* Device number in hfsplus_permissions in catalog */
 	u32 dev;
 	/* BSD system and user file flags */
@@ -230,9 +232,6 @@ struct hfsplus_readdir_data {
 #define hfs_brec_keylen hfsplus_brec_keylen
 #define hfs_brec_insert hfsplus_brec_insert
 #define hfs_brec_remove hfsplus_brec_remove
-#define hfs_bnode_split hfsplus_bnode_split
-#define hfs_brec_update_parent hfsplus_brec_update_parent
-#define hfs_btree_inc_height hfsplus_btree_inc_height
 #define hfs_find_init hfsplus_find_init
 #define hfs_find_exit hfsplus_find_exit
 #define __hfs_brec_find __hplusfs_brec_find
@@ -248,12 +247,8 @@ struct hfsplus_readdir_data {
 
 /* ext2 ioctls (EXT2_IOC_GETFLAGS and EXT2_IOC_SETFLAGS) to support
  * chattr/lsattr */
-#define HFSPLUS_IOC_EXT2_GETFLAGS	_IOR('f', 1, long)
-#define HFSPLUS_IOC_EXT2_SETFLAGS	_IOW('f', 2, long)
-
-#define EXT2_FLAG_IMMUTABLE		0x00000010 /* Immutable file */
-#define EXT2_FLAG_APPEND		0x00000020 /* writes to file may only append */
-#define EXT2_FLAG_NODUMP		0x00000040 /* do not dump file */
+#define HFSPLUS_IOC_EXT2_GETFLAGS	FS_IOC_GETFLAGS
+#define HFSPLUS_IOC_EXT2_SETFLAGS	FS_IOC_SETFLAGS
 
 
 /*
@@ -297,9 +292,6 @@ u16 hfs_brec_lenoff(struct hfs_bnode *, u16, u16 *);
 u16 hfs_brec_keylen(struct hfs_bnode *, u16);
 int hfs_brec_insert(struct hfs_find_data *, void *, int);
 int hfs_brec_remove(struct hfs_find_data *);
-struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *);
-int hfs_brec_update_parent(struct hfs_find_data *);
-int hfs_btree_inc_height(struct hfs_btree *);
 
 /* bfind.c */
 int hfs_find_init(struct hfs_btree *, struct hfs_find_data *);
@@ -310,8 +302,9 @@ int hfs_brec_read(struct hfs_find_data *, void *, int);
 int hfs_brec_goto(struct hfs_find_data *, int);
 
 /* catalog.c */
-int hfsplus_cat_cmp_key(hfsplus_btree_key *, hfsplus_btree_key *);
-void hfsplus_cat_build_key(hfsplus_btree_key *, u32, struct qstr *);
+int hfsplus_cat_case_cmp_key(const hfsplus_btree_key *, const hfsplus_btree_key *);
+int hfsplus_cat_bin_cmp_key(const hfsplus_btree_key *, const hfsplus_btree_key *);
+void hfsplus_cat_build_key(struct super_block *sb, hfsplus_btree_key *, u32, struct qstr *);
 int hfsplus_find_cat(struct super_block *, u32, struct hfs_find_data *);
 int hfsplus_create_cat(u32, struct inode *, struct qstr *, struct inode *);
 int hfsplus_delete_cat(u32, struct inode *, struct qstr *);
@@ -319,8 +312,7 @@ int hfsplus_rename_cat(u32, struct inode *, struct qstr *,
 		       struct inode *, struct qstr *);
 
 /* extents.c */
-int hfsplus_ext_cmp_key(hfsplus_btree_key *, hfsplus_btree_key *);
-void hfsplus_ext_build_key(hfsplus_btree_key *, u32, u32, u8);
+int hfsplus_ext_cmp_key(const hfsplus_btree_key *, const hfsplus_btree_key *);
 void hfsplus_ext_write_extent(struct inode *);
 int hfsplus_get_block(struct inode *, sector_t, struct buffer_head *, int);
 int hfsplus_free_fork(struct super_block *, u32, struct hfsplus_fork_raw *, int);
@@ -328,8 +320,9 @@ int hfsplus_file_extend(struct inode *);
 void hfsplus_file_truncate(struct inode *);
 
 /* inode.c */
-extern struct address_space_operations hfsplus_aops;
-extern struct address_space_operations hfsplus_btree_aops;
+extern const struct address_space_operations hfsplus_aops;
+extern const struct address_space_operations hfsplus_btree_aops;
+extern struct dentry_operations hfsplus_dentry_operations;
 
 void hfsplus_inode_read_fork(struct inode *, struct hfsplus_fork_raw *);
 void hfsplus_inode_write_fork(struct inode *, struct hfsplus_fork_raw *);
@@ -348,16 +341,22 @@ ssize_t hfsplus_getxattr(struct dentry *dentry, const char *name,
 ssize_t hfsplus_listxattr(struct dentry *dentry, char *buffer, size_t size);
 
 /* options.c */
-int parse_options(char *, struct hfsplus_sb_info *);
-void fill_defaults(struct hfsplus_sb_info *);
+int hfsplus_parse_options(char *, struct hfsplus_sb_info *);
+void hfsplus_fill_defaults(struct hfsplus_sb_info *);
+int hfsplus_show_options(struct seq_file *, struct vfsmount *);
 
 /* tables.c */
-extern u16 case_fold_table[];
+extern u16 hfsplus_case_fold_table[];
+extern u16 hfsplus_decompose_table[];
+extern u16 hfsplus_compose_table[];
 
 /* unicode.c */
-int hfsplus_unistrcmp(const struct hfsplus_unistr *, const struct hfsplus_unistr *);
-int hfsplus_uni2asc(const struct hfsplus_unistr *, char *, int *);
-int hfsplus_asc2uni(struct hfsplus_unistr *, const char *, int);
+int hfsplus_strcasecmp(const struct hfsplus_unistr *, const struct hfsplus_unistr *);
+int hfsplus_strcmp(const struct hfsplus_unistr *, const struct hfsplus_unistr *);
+int hfsplus_uni2asc(struct super_block *, const struct hfsplus_unistr *, char *, int *);
+int hfsplus_asc2uni(struct super_block *, struct hfsplus_unistr *, const char *, int);
+int hfsplus_hash_dentry(struct dentry *dentry, struct qstr *str);
+int hfsplus_compare_dentry(struct dentry *dentry, struct qstr *s1, struct qstr *s2);
 
 /* wrapper.c */
 int hfsplus_read_wrapper(struct super_block *);

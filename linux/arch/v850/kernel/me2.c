@@ -11,7 +11,6 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mm.h>
@@ -45,7 +44,7 @@ static struct v850e_intc_irq_init irq_inits[] = {
 	{ "UBTITO", IRQ_INTUBTITO(0), IRQ_INTUBTITO_NUM, 5, 4 },
 	{ 0 }
 };
-#define NUM_IRQ_INITS ((sizeof irq_inits / sizeof irq_inits[0]) - 1)
+#define NUM_IRQ_INITS (ARRAY_SIZE(irq_inits) - 1)
 
 static struct hw_interrupt_type hw_itypes[NUM_IRQ_INITS];
 
@@ -59,13 +58,13 @@ void __init me2_init_irqs (void)
 void me2_uart_pre_configure (unsigned chan, unsigned cflags, unsigned baud)
 {
 	if (chan == 0) {
-		/* Specify that the relevent pins on the chip should do
+		/* Specify that the relevant pins on the chip should do
 		   serial I/O, not direct I/O.  */
 		ME2_PORT1_PMC |= 0xC;
 		/* Specify that we're using the UART, not the CSI device. */
 		ME2_PORT1_PFC |= 0xC;
 	} else if (chan == 1) {
-		/* Specify that the relevent pins on the chip should do
+		/* Specify that the relevant pins on the chip should do
 		   serial I/O, not direct I/O.  */
 		ME2_PORT2_PMC |= 0x6;
 		/* Specify that we're using the UART, not the CSI device. */

@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/lopec.c
- *
  * Setup routines for the Motorola LoPEC.
  *
  * Author: Dan Cox
@@ -12,7 +10,6 @@
  * or implied.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/pci_ids.h>
@@ -144,15 +141,6 @@ lopec_show_cpuinfo(struct seq_file *m)
 	return 0;
 }
 
-static u32
-lopec_irq_canonicalize(u32 irq)
-{
-	if (irq == 2)
-		return 9;
-	else
-		return irq;
-}
-
 static void
 lopec_restart(char *cmd)
 {
@@ -276,15 +264,11 @@ lopec_init_IRQ(void)
 	openpic_hookup_cascade(NUM_8259_INTERRUPTS, "82c59 cascade",
 			&i8259_irq);
 
-	/* Map i8259 interrupts */
-	for(i = 0; i < NUM_8259_INTERRUPTS; i++)
-		irq_desc[i].handler = &i8259_pic;
-
 	/*
 	 * The EPIC allows for a read in the range of 0xFEF00000 ->
 	 * 0xFEFFFFFF to generate a PCI interrupt-acknowledge transaction.
 	 */
-	i8259_init(0xfef00000);
+	i8259_init(0xfef00000, 0);
 }
 
 static int __init
@@ -319,8 +303,8 @@ static __inline__ void
 lopec_set_bat(void)
 {
 	mb();
-	mtspr(DBAT1U, 0xf8000ffe);
-	mtspr(DBAT1L, 0xf800002a);
+	mtspr(SPRN_DBAT1U, 0xf8000ffe);
+	mtspr(SPRN_DBAT1L, 0xf800002a);
 	mb();
 }
 
@@ -360,7 +344,7 @@ lopec_setup_arch(void)
 		 if (bootargs != NULL) {
 			 strcpy(cmd_line, bootargs);
 			 /* again.. */
-			 strcpy(saved_command_line, cmd_line);
+			 strcpy(boot_command_line, cmd_line);
 		}
 	}
 #endif
@@ -379,10 +363,10 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ISA_DMA_THRESHOLD = 0x00ffffff;
 	DMA_MODE_READ = 0x44;
 	DMA_MODE_WRITE = 0x48;
+	ppc_do_canonicalize_irqs = 1;
 
 	ppc_md.setup_arch = lopec_setup_arch;
 	ppc_md.show_cpuinfo = lopec_show_cpuinfo;
-	ppc_md.irq_canonicalize = lopec_irq_canonicalize;
 	ppc_md.init_IRQ = lopec_init_IRQ;
 	ppc_md.get_irq = openpic_get_irq;
 

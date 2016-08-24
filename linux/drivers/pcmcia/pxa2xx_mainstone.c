@@ -17,7 +17,7 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 
 #include <pcmcia/ss.h>
 
@@ -43,24 +43,6 @@ static int mst_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 	 * Setup default state of GPIO outputs
 	 * before we enable them as outputs.
 	 */
-	GPSR(GPIO48_nPOE) =
-		GPIO_bit(GPIO48_nPOE) |
-		GPIO_bit(GPIO49_nPWE) |
-		GPIO_bit(GPIO50_nPIOR) |
-		GPIO_bit(GPIO51_nPIOW) |
-		GPIO_bit(GPIO85_nPCE_1) |
-		GPIO_bit(GPIO54_nPCE_2);
-
-	pxa_gpio_mode(GPIO48_nPOE_MD);
-	pxa_gpio_mode(GPIO49_nPWE_MD);
-	pxa_gpio_mode(GPIO50_nPIOR_MD);
-	pxa_gpio_mode(GPIO51_nPIOW_MD);
-	pxa_gpio_mode(GPIO85_nPCE_1_MD);
-	pxa_gpio_mode(GPIO54_nPCE_2_MD);
-	pxa_gpio_mode(GPIO79_pSKTSEL_MD);
-	pxa_gpio_mode(GPIO55_nPREG_MD);
-	pxa_gpio_mode(GPIO56_nPWAIT_MD);
-	pxa_gpio_mode(GPIO57_nIOIS16_MD);
 
 	skt->irq = (skt->nr == 0) ? MAINSTONE_S0_IRQ : MAINSTONE_S1_IRQ;
 	return soc_pcmcia_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
@@ -171,32 +153,27 @@ static int __init mst_pcmcia_init(void)
 {
 	int ret;
 
-	mst_pcmcia_device = kmalloc(sizeof(*mst_pcmcia_device), GFP_KERNEL);
+	mst_pcmcia_device = platform_device_alloc("pxa2xx-pcmcia", -1);
 	if (!mst_pcmcia_device)
 		return -ENOMEM;
-	memset(mst_pcmcia_device, 0, sizeof(*mst_pcmcia_device));
-	mst_pcmcia_device->name = "pxa2xx-pcmcia";
+
 	mst_pcmcia_device->dev.platform_data = &mst_pcmcia_ops;
 
-	ret = platform_device_register(mst_pcmcia_device);
+	ret = platform_device_add(mst_pcmcia_device);
+
 	if (ret)
-		kfree(mst_pcmcia_device);
+		platform_device_put(mst_pcmcia_device);
 
 	return ret;
 }
 
 static void __exit mst_pcmcia_exit(void)
 {
-	/*
-	 * This call is supposed to free our mst_pcmcia_device.
-	 * Unfortunately platform_device don't have a free method, and
-	 * we can't assume it's free of any reference at this point so we
-	 * can't free it either.
-	 */
 	platform_device_unregister(mst_pcmcia_device);
 }
 
-module_init(mst_pcmcia_init);
+fs_initcall(mst_pcmcia_init);
 module_exit(mst_pcmcia_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:pxa2xx-pcmcia");

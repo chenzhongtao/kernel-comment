@@ -55,7 +55,6 @@
  * Add adapter resets
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -124,11 +123,13 @@ static int blacklist[] = {
 
 /* If force_addr is set to anything different from 0, we forcibly enable
    the device at the given address. */
-static u16 force_addr = 0;
+static u16 force_addr;
 module_param(force_addr, ushort, 0);
 MODULE_PARM_DESC(force_addr, "Initialize the base address of the i2c controller");
 
-static unsigned short sis5595_base = 0;
+static struct pci_driver sis5595_driver;
+static unsigned short sis5595_base;
+static struct pci_dev *sis5595_pdev;
 
 static u8 sis5595_read(u8 reg)
 {
@@ -173,7 +174,8 @@ static int sis5595_setup(struct pci_dev *SIS5595_dev)
 
 	/* NB: We grab just the two SMBus registers here, but this may still
 	 * interfere with ACPI :-(  */
-	if (!request_region(sis5595_base + SMB_INDEX, 2, "sis5595-smbus")) {
+	if (!request_region(sis5595_base + SMB_INDEX, 2,
+			    sis5595_driver.name)) {
 		dev_err(&SIS5595_dev->dev, "SMBus registers 0x%04x-0x%04x already in use!\n",
 			sis5595_base + SMB_INDEX, sis5595_base + SMB_INDEX + 1);
 		return -ENODEV;
@@ -229,7 +231,7 @@ static int sis5595_transaction(struct i2c_adapter *adap)
 	/* Make sure the SMBus host is ready to start transmitting */
 	temp = sis5595_read(SMB_STS_LO) + (sis5595_read(SMB_STS_HI) << 8);
 	if (temp != 0x00) {
-		dev_dbg(&adap->dev, "SMBus busy (%04x). Resetting... \n", temp);
+		dev_dbg(&adap->dev, "SMBus busy (%04x). Resetting...\n", temp);
 		sis5595_write(SMB_STS_LO, temp & 0xff);
 		sis5595_write(SMB_STS_HI, temp >> 8);
 		if ((temp = sis5595_read(SMB_STS_LO) + (sis5595_read(SMB_STS_HI) << 8)) != 0x00) {
@@ -357,17 +359,15 @@ static u32 sis5595_func(struct i2c_adapter *adapter)
 	    I2C_FUNC_SMBUS_PROC_CALL;
 }
 
-static struct i2c_algorithm smbus_algorithm = {
-	.name		= "Non-I2C SMBus adapter",
-	.id		= I2C_ALGO_SMBUS,
+static const struct i2c_algorithm smbus_algorithm = {
 	.smbus_xfer	= sis5595_access,
 	.functionality	= sis5595_func,
 };
 
 static struct i2c_adapter sis5595_adapter = {
 	.owner		= THIS_MODULE,
+	.id		= I2C_HW_SMBUS_SIS5595,
 	.class          = I2C_CLASS_HWMON,
-	.name		= "unset",
 	.algo		= &smbus_algorithm,
 };
 
@@ -380,30 +380,36 @@ MODULE_DEVICE_TABLE (pci, sis5595_ids);
 
 static int __devinit sis5595_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
+	int err;
+
 	if (sis5595_setup(dev)) {
 		dev_err(&dev->dev, "SIS5595 not detected, module not inserted.\n");
 		return -ENODEV;
 	}
 
-	/* set up the driverfs linkage to our parent device */
+	/* set up the sysfs linkage to our parent device */
 	sis5595_adapter.dev.parent = &dev->dev;
 
 	sprintf(sis5595_adapter.name, "SMBus SIS5595 adapter at %04x",
 		sis5595_base + SMB_INDEX);
-	return i2c_add_adapter(&sis5595_adapter);
-}
+	err = i2c_add_adapter(&sis5595_adapter);
+	if (err) {
+		release_region(sis5595_base + SMB_INDEX, 2);
+		return err;
+	}
 
-static void __devexit sis5595_remove(struct pci_dev *dev)
-{
-	i2c_del_adapter(&sis5595_adapter);
-	release_region(sis5595_base + SMB_INDEX, 2);
+	/* Always return failure here.  This is to allow other drivers to bind
+	 * to this pci device.  We don't really want to have control over the
+	 * pci device, we only wanted to read as few register values from it.
+	 */
+	sis5595_pdev =  pci_dev_get(dev);
+	return -ENODEV;
 }
 
 static struct pci_driver sis5595_driver = {
 	.name		= "sis5595_smbus",
 	.id_table	= sis5595_ids,
 	.probe		= sis5595_probe,
-	.remove		= __devexit_p(sis5595_remove),
 };
 
 static int __init i2c_sis5595_init(void)
@@ -414,6 +420,12 @@ static int __init i2c_sis5595_init(void)
 static void __exit i2c_sis5595_exit(void)
 {
 	pci_unregister_driver(&sis5595_driver);
+	if (sis5595_pdev) {
+		i2c_del_adapter(&sis5595_adapter);
+		release_region(sis5595_base + SMB_INDEX, 2);
+		pci_dev_put(sis5595_pdev);
+		sis5595_pdev = NULL;
+	}
 }
 
 MODULE_AUTHOR("Frodo Looijaard <frodol@dds.nl>");

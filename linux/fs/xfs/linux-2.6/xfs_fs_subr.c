@@ -1,124 +1,95 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2002,2005-2006 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
+#include "xfs_vnodeops.h"
 
 /*
- * Stub for no-op vnode operations that return error status.
+ * The following six includes are needed so that we can include
+ * xfs_inode.h.  What a mess..
  */
-int
-fs_noerr(void)
-{
-	return 0;
-}
+#include "xfs_bmap_btree.h"
+#include "xfs_inum.h"
+#include "xfs_dir2.h"
+#include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
+#include "xfs_dinode.h"
 
-/*
- * Operation unsupported under this file system.
- */
-int
-fs_nosys(void)
-{
-	return ENOSYS;
-}
+#include "xfs_inode.h"
 
-/*
- * Stub for inactive, strategy, and read/write lock/unlock.  Does nothing.
- */
-/* ARGSUSED */
+int  fs_noerr(void) { return 0; }
+int  fs_nosys(void) { return ENOSYS; }
+void fs_noval(void) { return; }
+
 void
-fs_noval(void)
-{
-}
-
-/*
- * vnode pcache layer for vnode_tosspages.
- * 'last' parameter unused but left in for IRIX compatibility
- */
-void
-fs_tosspages(
-	bhv_desc_t	*bdp,
+xfs_tosspages(
+	xfs_inode_t	*ip,
 	xfs_off_t	first,
 	xfs_off_t	last,
 	int		fiopt)
 {
-	vnode_t		*vp = BHV_TO_VNODE(bdp);
-	struct inode	*ip = LINVFS_GET_IP(vp);
+	bhv_vnode_t	*vp = XFS_ITOV(ip);
+	struct inode	*inode = vn_to_inode(vp);
 
 	if (VN_CACHED(vp))
-		truncate_inode_pages(ip->i_mapping, first);
+		truncate_inode_pages(inode->i_mapping, first);
 }
 
-
-/*
- * vnode pcache layer for vnode_flushinval_pages.
- * 'last' parameter unused but left in for IRIX compatibility
- */
-void
-fs_flushinval_pages(
-	bhv_desc_t	*bdp,
+int
+xfs_flushinval_pages(
+	xfs_inode_t	*ip,
 	xfs_off_t	first,
 	xfs_off_t	last,
 	int		fiopt)
 {
-	vnode_t		*vp = BHV_TO_VNODE(bdp);
-	struct inode	*ip = LINVFS_GET_IP(vp);
+	bhv_vnode_t	*vp = XFS_ITOV(ip);
+	struct inode	*inode = vn_to_inode(vp);
+	int		ret = 0;
 
 	if (VN_CACHED(vp)) {
-		filemap_fdatawrite(ip->i_mapping);
-		filemap_fdatawait(ip->i_mapping);
-
-		truncate_inode_pages(ip->i_mapping, first);
+		xfs_iflags_clear(ip, XFS_ITRUNCATED);
+		ret = filemap_write_and_wait(inode->i_mapping);
+		if (!ret)
+			truncate_inode_pages(inode->i_mapping, first);
 	}
+	return ret;
 }
 
-/*
- * vnode pcache layer for vnode_flush_pages.
- * 'last' parameter unused but left in for IRIX compatibility
- */
 int
-fs_flush_pages(
-	bhv_desc_t	*bdp,
+xfs_flush_pages(
+	xfs_inode_t	*ip,
 	xfs_off_t	first,
 	xfs_off_t	last,
 	uint64_t	flags,
 	int		fiopt)
 {
-	vnode_t		*vp = BHV_TO_VNODE(bdp);
-	struct inode	*ip = LINVFS_GET_IP(vp);
+	bhv_vnode_t	*vp = XFS_ITOV(ip);
+	struct inode	*inode = vn_to_inode(vp);
+	int		ret = 0;
+	int		ret2;
 
-	if (VN_CACHED(vp)) {
-		filemap_fdatawrite(ip->i_mapping);
-		filemap_fdatawait(ip->i_mapping);
+	if (VN_DIRTY(vp)) {
+		xfs_iflags_clear(ip, XFS_ITRUNCATED);
+		ret = filemap_fdatawrite(inode->i_mapping);
+		if (flags & XFS_B_ASYNC)
+			return ret;
+		ret2 = filemap_fdatawait(inode->i_mapping);
+		if (!ret)
+			ret = ret2;
 	}
-
-	return 0;
+	return ret;
 }

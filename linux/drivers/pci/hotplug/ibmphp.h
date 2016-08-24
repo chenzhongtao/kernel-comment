@@ -30,7 +30,7 @@
  *
  */
 
-#include "pci_hotplug.h"
+#include <linux/pci_hotplug.h>
 
 extern int ibmphp_debug;
 
@@ -196,7 +196,7 @@ struct ebda_hpc_bus {
 
 
 /********************************************************************
-*   THREE TYPE OF HOT PLUG CONTROLER                                *
+*   THREE TYPE OF HOT PLUG CONTROLLER                                *
 ********************************************************************/
 
 struct isa_ctlr_access {
@@ -406,8 +406,6 @@ extern void ibmphp_hpc_stop_poll_thread (void);
 //----------------------------------------------------------------------------
 // HPC return codes
 //----------------------------------------------------------------------------
-#define FALSE				0x00
-#define TRUE				0x01
 #define HPC_ERROR			0xFF
 
 //-----------------------------------------------------------------------------

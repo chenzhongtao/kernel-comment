@@ -86,7 +86,6 @@
 #include <linux/module.h>
 
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -97,12 +96,13 @@
 #include <asm/amigahw.h>
 #include <linux/zorro.h>
 #include <asm/irq.h>
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
 
 #include <linux/delay.h>
 
 #include <linux/serial.h>
 #include <linux/generic_serial.h>
+#include <linux/tty_flip.h>
 
 #include "ser_a2232.h"
 #include "ser_a2232fw.h"
@@ -110,7 +110,7 @@
 
 /***************************** Prototypes ***************************/
 /* The interrupt service routine */
-static irqreturn_t a2232_vbl_inter(int irq, void *data, struct pt_regs *fp);
+static irqreturn_t a2232_vbl_inter(int irq, void *data);
 /* Initialize the port structures */
 static void a2232_init_portstructs(void);
 /* Initialize and register TTY drivers. */
@@ -194,11 +194,6 @@ static inline void a2232_receive_char(struct a2232_port *port, int ch, int err)
 */
 	struct tty_struct *tty = port->gs.tty;
 
-	if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-		return;
-
-	tty->flip.count++;
-
 #if 0
 	switch(err) {
 	case TTY_BREAK:
@@ -212,8 +207,7 @@ static inline void a2232_receive_char(struct a2232_port *port, int ch, int err)
 	}
 #endif
 
-	*tty->flip.flag_buf_ptr++ = err;
-	*tty->flip.char_buf_ptr++ = ch;
+	tty_insert_flip_char(tty, ch, err);
 	tty_flip_buffer_push(tty);
 }
 
@@ -509,7 +503,7 @@ static int  a2232_open(struct tty_struct * tty, struct file * filp)
 }
 /*** END OF FUNCTIONS EXPECTED BY TTY DRIVER STRUCTS ***/
 
-static irqreturn_t a2232_vbl_inter(int irq, void *data, struct pt_regs *fp)
+static irqreturn_t a2232_vbl_inter(int irq, void *data)
 {
 #if A2232_IOBUFLEN != 256
 #error "Re-Implement a2232_vbl_inter()!"
@@ -659,14 +653,14 @@ static void a2232_init_portstructs(void)
 		port->gs.closing_wait = 30 * HZ;
 		port->gs.rd = &a2232_real_driver;
 #ifdef NEW_WRITE_LOCKING
-		init_MUTEX(&(port->gs.port_write_sem));
+		init_MUTEX(&(port->gs.port_write_mutex));
 #endif
 		init_waitqueue_head(&port->gs.open_wait);
 		init_waitqueue_head(&port->gs.close_wait);
 	}
 }
 
-static struct tty_operations a2232_ops = {
+static const struct tty_operations a2232_ops = {
 	.open = a2232_open,
 	.close = gs_close,
 	.write = gs_write,
@@ -700,6 +694,8 @@ static int a2232_init_drivers(void)
 	a2232_driver->init_termios = tty_std_termios;
 	a2232_driver->init_termios.c_cflag =
 		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+	a2232_driver->init_termios.c_ispeed = 9600;
+	a2232_driver->init_termios.c_ospeed = 9600;
 	a2232_driver->flags = TTY_DRIVER_REAL_RAW;
 	tty_set_operations(a2232_driver, &a2232_ops);
 	if ((error = tty_register_driver(a2232_driver))) {
@@ -790,7 +786,7 @@ static int __init a2232board_init(void)
 
 	}	
 
-	printk("Total: %d A2232 boards initialized.\n.", nr_a2232); /* Some status report if no card was found */
+	printk("Total: %d A2232 boards initialized.\n", nr_a2232); /* Some status report if no card was found */
 
 	a2232_init_portstructs();
 

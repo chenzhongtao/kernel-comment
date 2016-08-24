@@ -15,6 +15,7 @@
 struct kyrofb_info {
 	void __iomem *regbase;
 
+	u32 palette[16];
 	u32 HTot;	/* Hor Total Time    */
 	u32 HFP;	/* Hor Front Porch   */
 	u32 HST;	/* Hor Sync Time     */
@@ -49,9 +50,7 @@ extern void *kyro_dev_virtual_regs_ptr(void);
 extern unsigned int kyro_dev_fb_size(void);
 extern unsigned int kyro_dev_regs_size(void);
 
-extern int kyro_dev_overlay_create(u32 width, u32 height, int bLinear);
 extern u32 kyro_dev_overlay_offset(void);
-extern int kyro_dev_overlay_viewport_set(u32 x, u32 y, u32 width, u32 height);
 
 /*
  * benedict.gaster@superh.com

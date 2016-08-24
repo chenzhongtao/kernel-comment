@@ -1034,7 +1034,7 @@ static void rx_schedule (hrz_dev * dev, int irq) {
 	  struct atm_vcc * vcc = ATM_SKB(skb)->vcc;
 	  // VC layer stats
 	  atomic_inc(&vcc->stats->rx);
-	  do_gettimeofday(&skb->stamp);
+	  __net_timestamp(skb);
 	  // end of our responsability
 	  vcc->push (vcc, skb);
 	}
@@ -1382,23 +1382,13 @@ static inline void rx_data_av_handler (hrz_dev * dev) {
 
 /********** interrupt handler **********/
 
-static irqreturn_t interrupt_handler(int irq, void *dev_id,
-					struct pt_regs *pt_regs) {
-  hrz_dev * dev = (hrz_dev *) dev_id;
+static irqreturn_t interrupt_handler(int irq, void *dev_id)
+{
+  hrz_dev *dev = dev_id;
   u32 int_source;
   unsigned int irq_ok;
-  (void) pt_regs;
   
   PRINTD (DBG_FLOW, "interrupt_handler: %p", dev_id);
-  
-  if (!dev_id) {
-    PRINTD (DBG_IRQ|DBG_ERR, "irq with NULL dev_id: %d", irq);
-    return IRQ_NONE;
-  }
-  if (irq != dev->irq) {
-    PRINTD (DBG_IRQ|DBG_ERR, "irq mismatch: %d", irq);
-    return IRQ_NONE;
-  }
   
   // definitely for us
   irq_ok = 0;
@@ -1511,8 +1501,8 @@ static inline short setup_idle_tx_channel (hrz_dev * dev, hrz_vcc * vcc) {
     // a.k.a. prepare the channel and remember that we have done so.
     
     tx_ch_desc * tx_desc = &memmap->tx_descs[tx_channel];
-    u16 rd_ptr;
-    u16 wr_ptr;
+    u32 rd_ptr;
+    u32 wr_ptr;
     u16 channel = vcc->channel;
     
     unsigned long flags;
@@ -1800,7 +1790,7 @@ static inline void CLOCK_IT (const hrz_dev *dev, u32 ctrl)
 	WRITE_IT_WAIT(dev, ctrl | SEEPROM_SK);
 }
 
-static u16 __init read_bia (const hrz_dev * dev, u16 addr)
+static u16 __devinit read_bia (const hrz_dev * dev, u16 addr)
 {
   u32 ctrl = rd_regl (dev, CONTROL_0_REG);
   
@@ -1856,7 +1846,7 @@ static u16 __init read_bia (const hrz_dev * dev, u16 addr)
 
 /********** initialise a card **********/
 
-static int __init hrz_init (hrz_dev * dev) {
+static int __devinit hrz_init (hrz_dev * dev) {
   int onefivefive;
   
   u16 chan;
@@ -2719,7 +2709,7 @@ static int __devinit hrz_probe(struct pci_dev *pci_dev, const struct pci_device_
 		goto out_disable;
 	}
 
-	dev = kmalloc(sizeof(hrz_dev), GFP_KERNEL);
+	dev = kzalloc(sizeof(hrz_dev), GFP_KERNEL);
 	if (!dev) {
 		// perhaps we should be nice: deregister all adapters and abort?
 		PRINTD(DBG_ERR, "out of memory");
@@ -2727,15 +2717,13 @@ static int __devinit hrz_probe(struct pci_dev *pci_dev, const struct pci_device_
 		goto out_release;
 	}
 
-	memset(dev, 0, sizeof(hrz_dev));
-
 	pci_set_drvdata(pci_dev, dev);
 
 	// grab IRQ and install handler - move this someplace more sensible
 	irq = pci_dev->irq;
 	if (request_irq(irq,
 			interrupt_handler,
-			SA_SHIRQ, /* irqflags guess */
+			IRQF_SHARED, /* irqflags guess */
 			DEV_LABEL, /* name guess */
 			dev)) {
 		PRINTD(DBG_WARN, "request IRQ failed!");
@@ -2938,15 +2926,15 @@ static int __init hrz_module_init (void) {
   hrz_check_args();
   
   // get the juice
-  return pci_module_init(&hrz_driver);
+  return pci_register_driver(&hrz_driver);
 }
 
 /********** module exit **********/
 
 static void __exit hrz_module_exit (void) {
   PRINTD (DBG_FLOW, "cleanup_module");
-  
-  return pci_unregister_driver(&hrz_driver);
+
+  pci_unregister_driver(&hrz_driver);
 }
 
 module_init(hrz_module_init);

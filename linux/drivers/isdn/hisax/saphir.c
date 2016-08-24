@@ -117,7 +117,7 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 #include "hscx_irq.c"
 
 static irqreturn_t
-saphir_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+saphir_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
@@ -171,7 +171,7 @@ SaphirWatchDog(struct IsdnCardState *cs)
 	mod_timer(&cs->hw.saphir.timer, jiffies+1*HZ);
 }
 
-void
+static void
 release_io_saphir(struct IsdnCardState *cs)
 {
 	byteout(cs->hw.saphir.cfg_reg + IRQ_REG, 0xff);
@@ -241,7 +241,7 @@ saphir_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 
-int __init
+int __devinit
 setup_saphir(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;

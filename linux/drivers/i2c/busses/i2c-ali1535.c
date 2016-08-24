@@ -53,18 +53,15 @@
 
 /* Note: we assume there can only be one ALI1535, with one SMBus interface */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
-#include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <asm/io.h>
-#include <asm/semaphore.h>
 
 
 /* ALI1535 SMBus address offsets */
@@ -135,9 +132,8 @@
 					/*  -> Read  = 1		*/
 #define	ALI1535_SMBIO_EN	0x04	/* SMB I/O Space enable		*/
 
-
+static struct pci_driver ali1535_driver;
 static unsigned short ali1535_smba;
-static DECLARE_MUTEX(i2c_ali1535_sem);
 
 /* Detect whether a ALI1535 can be found, and initialize it, where necessary.
    Note the differences between kernels with the old PCI BIOS interface and
@@ -163,7 +159,8 @@ static int ali1535_setup(struct pci_dev *dev)
 		goto exit;
 	}
 
-	if (!request_region(ali1535_smba, ALI1535_SMB_IOSIZE, "ali1535-smb")) {
+	if (!request_region(ali1535_smba, ALI1535_SMB_IOSIZE,
+			    ali1535_driver.name)) {
 		dev_err(&dev->dev, "ALI1535_smb region 0x%x already in use!\n",
 			ali1535_smba);
 		goto exit;
@@ -345,7 +342,6 @@ static s32 ali1535_access(struct i2c_adapter *adap, u16 addr,
 	int timeout;
 	s32 result = 0;
 
-	down(&i2c_ali1535_sem);
 	/* make sure SMBus is idle */
 	temp = inb_p(SMBHSTSTS);
 	for (timeout = 0;
@@ -460,7 +456,6 @@ static s32 ali1535_access(struct i2c_adapter *adap, u16 addr,
 		break;
 	}
 EXIT:
-	up(&i2c_ali1535_sem);
 	return result;
 }
 
@@ -472,18 +467,16 @@ static u32 ali1535_func(struct i2c_adapter *adapter)
 	    I2C_FUNC_SMBUS_BLOCK_DATA;
 }
 
-static struct i2c_algorithm smbus_algorithm = {
-	.name		= "Non-i2c SMBus adapter",
-	.id		= I2C_ALGO_SMBUS,
+static const struct i2c_algorithm smbus_algorithm = {
 	.smbus_xfer	= ali1535_access,
 	.functionality	= ali1535_func,
 };
 
 static struct i2c_adapter ali1535_adapter = {
 	.owner		= THIS_MODULE,
+	.id		= I2C_HW_SMBUS_ALI1535,
 	.class          = I2C_CLASS_HWMON,
 	.algo		= &smbus_algorithm,
-	.name		= "unset",
 };
 
 static struct pci_device_id ali1535_ids[] = {
@@ -501,10 +494,10 @@ static int __devinit ali1535_probe(struct pci_dev *dev, const struct pci_device_
 		return -ENODEV;
 	}
 
-	/* set up the driverfs linkage to our parent device */
+	/* set up the sysfs linkage to our parent device */
 	ali1535_adapter.dev.parent = &dev->dev;
 
-	snprintf(ali1535_adapter.name, I2C_NAME_SIZE, 
+	snprintf(ali1535_adapter.name, sizeof(ali1535_adapter.name),
 		"SMBus ALI1535 adapter at %04x", ali1535_smba);
 	return i2c_add_adapter(&ali1535_adapter);
 }

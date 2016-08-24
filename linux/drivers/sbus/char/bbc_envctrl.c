@@ -4,15 +4,12 @@
  * Copyright (C) 2001 David S. Miller (davem@redhat.com)
  */
 
-#include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/slab.h>
+#include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/kmod.h>
+#include <linux/reboot.h>
 #include <asm/oplib.h>
 #include <asm/ebus.h>
-#define __KERNEL_SYSCALLS__
-static int errno;
-#include <asm/unistd.h>
 
 #include "bbc_i2c.h"
 #include "max1617.h"
@@ -174,8 +171,6 @@ static void get_current_temps(struct bbc_cpu_temperature *tp)
 static void do_envctrl_shutdown(struct bbc_cpu_temperature *tp)
 {
 	static int shutting_down = 0;
-	static char *envp[] = { "HOME=/", "TERM=linux", "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
-	char *argv[] = { "/sbin/shutdown", "-h", "now", NULL };
 	char *type = "???";
 	s8 val = -1;
 
@@ -199,7 +194,7 @@ static void do_envctrl_shutdown(struct bbc_cpu_temperature *tp)
 	printk(KERN_CRIT "kenvctrld: Shutting down the system now.\n");
 
 	shutting_down = 1;
-	if (execve("/sbin/shutdown", argv, envp) < 0)
+	if (orderly_poweroff(true) < 0)
 		printk(KERN_CRIT "envctrl: shutdown execution failed\n");
 }
 
@@ -458,10 +453,6 @@ static struct task_struct *kenvctrld_task;
 
 static int kenvctrld(void *__unused)
 {
-	daemonize("kenvctrld");
-	allow_signal(SIGKILL);
-	kenvctrld_task = current;
-
 	printk(KERN_INFO "bbc_envctrl: kenvctrld starting...\n");
 	last_warning_jiffies = jiffies - WARN_INTERVAL;
 	for (;;) {
@@ -469,7 +460,7 @@ static int kenvctrld(void *__unused)
 		struct bbc_fan_control *fp;
 
 		msleep_interruptible(POLL_INTERVAL);
-		if (signal_pending(current))
+		if (kthread_should_stop())
 			break;
 
 		for (tp = all_bbc_temps; tp; tp = tp->next) {
@@ -488,11 +479,12 @@ static int kenvctrld(void *__unused)
 
 static void attach_one_temp(struct linux_ebus_child *echild, int temp_idx)
 {
-	struct bbc_cpu_temperature *tp = kmalloc(sizeof(*tp), GFP_KERNEL);
+	struct bbc_cpu_temperature *tp;
 
+	tp = kzalloc(sizeof(*tp), GFP_KERNEL);
 	if (!tp)
 		return;
-	memset(tp, 0, sizeof(*tp));
+
 	tp->client = bbc_i2c_attach(echild);
 	if (!tp->client) {
 		kfree(tp);
@@ -534,11 +526,12 @@ static void attach_one_temp(struct linux_ebus_child *echild, int temp_idx)
 
 static void attach_one_fan(struct linux_ebus_child *echild, int fan_idx)
 {
-	struct bbc_fan_control *fp = kmalloc(sizeof(*fp), GFP_KERNEL);
+	struct bbc_fan_control *fp;
 
+	fp = kzalloc(sizeof(*fp), GFP_KERNEL);
 	if (!fp)
 		return;
-	memset(fp, 0, sizeof(*fp));
+
 	fp->client = bbc_i2c_attach(echild);
 	if (!fp->client) {
 		kfree(fp);
@@ -576,17 +569,20 @@ int bbc_envctrl_init(void)
 	int temp_index = 0;
 	int fan_index = 0;
 	int devidx = 0;
-	int err = 0;
 
 	while ((echild = bbc_i2c_getdev(devidx++)) != NULL) {
-		if (!strcmp(echild->prom_name, "temperature"))
+		if (!strcmp(echild->prom_node->name, "temperature"))
 			attach_one_temp(echild, temp_index++);
-		if (!strcmp(echild->prom_name, "fan-control"))
+		if (!strcmp(echild->prom_node->name, "fan-control"))
 			attach_one_fan(echild, fan_index++);
 	}
-	if (temp_index != 0 && fan_index != 0)
-		err = kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
-	return err;
+	if (temp_index != 0 && fan_index != 0) {
+		kenvctrld_task = kthread_run(kenvctrld, NULL, "kenvctrld");
+		if (IS_ERR(kenvctrld_task))
+			return PTR_ERR(kenvctrld_task);
+	}
+
+	return 0;
 }
 
 static void destroy_one_temp(struct bbc_cpu_temperature *tp)
@@ -606,26 +602,7 @@ void bbc_envctrl_cleanup(void)
 	struct bbc_cpu_temperature *tp;
 	struct bbc_fan_control *fp;
 
-	if (kenvctrld_task != NULL) {
-		force_sig(SIGKILL, kenvctrld_task);
-		for (;;) {
-			struct task_struct *p;
-			int found = 0;
-
-			read_lock(&tasklist_lock);
-			for_each_process(p) {
-				if (p == kenvctrld_task) {
-					found = 1;
-					break;
-				}
-			}
-			read_unlock(&tasklist_lock);
-			if (!found)
-				break;
-			msleep(1000);
-		}
-		kenvctrld_task = NULL;
-	}
+	kthread_stop(kenvctrld_task);
 
 	tp = all_bbc_temps;
 	while (tp != NULL) {

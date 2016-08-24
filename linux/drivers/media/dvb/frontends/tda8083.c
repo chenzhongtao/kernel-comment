@@ -27,22 +27,17 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/jiffies.h>
 #include "dvb_frontend.h"
 #include "tda8083.h"
 
 
 struct tda8083_state {
-
 	struct i2c_adapter* i2c;
-
-	struct dvb_frontend_ops ops;
-
 	/* configuration settings */
 	const struct tda8083_config* config;
-
 	struct dvb_frontend frontend;
 };
 
@@ -69,15 +64,14 @@ static int tda8083_writereg (struct tda8083_state* state, u8 reg, u8 data)
 	u8 buf [] = { reg, data };
 	struct i2c_msg msg = { .addr = state->config->demod_address, .flags = 0, .buf = buf, .len = 2 };
 
-        ret = i2c_transfer(state->i2c, &msg, 1);
+	ret = i2c_transfer(state->i2c, &msg, 1);
 
-        if (ret != 1)
-                dprintk ("%s: writereg error (reg %02x, ret == %i)\n",
+	if (ret != 1)
+		dprintk ("%s: writereg error (reg %02x, ret == %i)\n",
 			__FUNCTION__, reg, ret);
 
-        return (ret != 1) ? -1 : 0;
+	return (ret != 1) ? -1 : 0;
 }
-
 
 static int tda8083_readregs (struct tda8083_state* state, u8 reg1, u8 *b, u8 len)
 {
@@ -91,9 +85,8 @@ static int tda8083_readregs (struct tda8083_state* state, u8 reg1, u8 *b, u8 len
 		dprintk ("%s: readreg error (reg %02x, ret == %i)\n",
 			__FUNCTION__, reg1, ret);
 
-        return ret == 2 ? 0 : -1;
+	return ret == 2 ? 0 : -1;
 }
-
 
 static inline u8 tda8083_readreg (struct tda8083_state* state, u8 reg)
 {
@@ -104,8 +97,6 @@ static inline u8 tda8083_readreg (struct tda8083_state* state, u8 reg)
 	return val;
 }
 
-
-
 static int tda8083_set_inversion (struct tda8083_state* state, fe_spectral_inversion_t inversion)
 {
 	/*  XXX FIXME: implement other modes than FEC_AUTO */
@@ -114,7 +105,6 @@ static int tda8083_set_inversion (struct tda8083_state* state, fe_spectral_inver
 
 	return -EINVAL;
 }
-
 
 static int tda8083_set_fec (struct tda8083_state* state, fe_code_rate_t fec)
 {
@@ -127,7 +117,6 @@ static int tda8083_set_fec (struct tda8083_state* state, fe_code_rate_t fec)
 	return -EINVAL;
 }
 
-
 static fe_code_rate_t tda8083_get_fec (struct tda8083_state* state)
 {
 	u8 index;
@@ -139,17 +128,16 @@ static fe_code_rate_t tda8083_get_fec (struct tda8083_state* state)
 	return fec_tab [index];
 }
 
-
 static int tda8083_set_symbolrate (struct tda8083_state* state, u32 srate)
 {
-        u32 ratio;
+	u32 ratio;
 	u32 tmp;
 	u8 filter;
 
 	if (srate > 32000000)
-                srate = 32000000;
-        if (srate < 500000)
-                srate = 500000;
+		srate = 32000000;
+	if (srate < 500000)
+		srate = 500000;
 
 	filter = 0;
 	if (srate < 24000000)
@@ -179,13 +167,12 @@ static int tda8083_set_symbolrate (struct tda8083_state* state, u32 srate)
 	return 1;
 }
 
-
 static void tda8083_wait_diseqc_fifo (struct tda8083_state* state, int timeout)
 {
 	unsigned long start = jiffies;
 
 	while (jiffies - start < timeout &&
-               !(tda8083_readreg(state, 0x02) & 0x80))
+	       !(tda8083_readreg(state, 0x02) & 0x80))
 	{
 		msleep(50);
 	};
@@ -204,7 +191,6 @@ static int tda8083_set_tone (struct tda8083_state* state, fe_sec_tone_mode_t ton
 		return -EINVAL;
 	};
 }
-
 
 static int tda8083_set_voltage (struct tda8083_state* state, fe_sec_voltage_t voltage)
 {
@@ -236,31 +222,10 @@ static int tda8083_send_diseqc_burst (struct tda8083_state* state, fe_sec_mini_c
 	return 0;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 static int tda8083_send_diseqc_msg (struct dvb_frontend* fe,
 				    struct dvb_diseqc_master_cmd *m)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 	int i;
 
 	tda8083_writereg (state, 0x29, (m->msg_len - 3) | (1 << 2)); /* enable */
@@ -277,7 +242,7 @@ static int tda8083_send_diseqc_msg (struct dvb_frontend* fe,
 
 static int tda8083_read_status(struct dvb_frontend* fe, fe_status_t* status)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	u8 signal = ~tda8083_readreg (state, 0x01);
 	u8 sync = tda8083_readreg (state, 0x02);
@@ -296,15 +261,32 @@ static int tda8083_read_status(struct dvb_frontend* fe, fe_status_t* status)
 	if (sync & 0x10)
 		*status |= FE_HAS_SYNC;
 
+	if (sync & 0x20) /* frontend can not lock */
+		*status |= FE_TIMEDOUT;
+
 	if ((sync & 0x1f) == 0x1f)
 		*status |= FE_HAS_LOCK;
 
 	return 0;
 }
 
+static int tda8083_read_ber(struct dvb_frontend* fe, u32* ber)
+{
+	struct tda8083_state* state = fe->demodulator_priv;
+	int ret;
+	u8 buf[3];
+
+	if ((ret = tda8083_readregs(state, 0x0b, buf, sizeof(buf))))
+		return ret;
+
+	*ber = ((buf[0] & 0x1f) << 16) | (buf[1] << 8) | buf[2];
+
+	return 0;
+}
+
 static int tda8083_read_signal_strength(struct dvb_frontend* fe, u16* strength)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	u8 signal = ~tda8083_readreg (state, 0x01);
 	*strength = (signal << 8) | signal;
@@ -314,7 +296,7 @@ static int tda8083_read_signal_strength(struct dvb_frontend* fe, u16* strength)
 
 static int tda8083_read_snr(struct dvb_frontend* fe, u16* snr)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	u8 _snr = tda8083_readreg (state, 0x08);
 	*snr = (_snr << 8) | _snr;
@@ -322,11 +304,26 @@ static int tda8083_read_snr(struct dvb_frontend* fe, u16* snr)
 	return 0;
 }
 
+static int tda8083_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
+{
+	struct tda8083_state* state = fe->demodulator_priv;
+
+	*ucblocks = tda8083_readreg(state, 0x0f);
+	if (*ucblocks == 0xff)
+		*ucblocks = 0xffffffff;
+
+	return 0;
+}
+
 static int tda8083_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters *p)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
-	state->config->pll_set(fe, p);
+	if (fe->ops.tuner_ops.set_params) {
+		fe->ops.tuner_ops.set_params(fe, p);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
+	}
+
 	tda8083_set_inversion (state, p->inversion);
 	tda8083_set_fec (state, p->u.qpsk.fec_inner);
 	tda8083_set_symbolrate (state, p->u.qpsk.symbol_rate);
@@ -339,7 +336,7 @@ static int tda8083_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 
 static int tda8083_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters *p)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	/*  FIXME: get symbolrate & frequency offset...*/
 	/*p->frequency = ???;*/
@@ -353,7 +350,7 @@ static int tda8083_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 
 static int tda8083_sleep(struct dvb_frontend* fe)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	tda8083_writereg (state, 0x00, 0x02);
 	return 0;
@@ -361,13 +358,11 @@ static int tda8083_sleep(struct dvb_frontend* fe)
 
 static int tda8083_init(struct dvb_frontend* fe)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 	int i;
 
 	for (i=0; i<44; i++)
 		tda8083_writereg (state, i, tda8083_init_tab[i]);
-
-	if (state->config->pll_init) state->config->pll_init(fe);
 
 	tda8083_writereg (state, 0x00, 0x3c);
 	tda8083_writereg (state, 0x00, 0x04);
@@ -377,7 +372,7 @@ static int tda8083_init(struct dvb_frontend* fe)
 
 static int tda8083_diseqc_send_burst(struct dvb_frontend* fe, fe_sec_mini_cmd_t burst)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	tda8083_send_diseqc_burst (state, burst);
 	tda8083_writereg (state, 0x00, 0x3c);
@@ -388,7 +383,7 @@ static int tda8083_diseqc_send_burst(struct dvb_frontend* fe, fe_sec_mini_cmd_t 
 
 static int tda8083_diseqc_set_tone(struct dvb_frontend* fe, fe_sec_tone_mode_t tone)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	tda8083_set_tone (state, tone);
 	tda8083_writereg (state, 0x00, 0x3c);
@@ -399,7 +394,7 @@ static int tda8083_diseqc_set_tone(struct dvb_frontend* fe, fe_sec_tone_mode_t t
 
 static int tda8083_diseqc_set_voltage(struct dvb_frontend* fe, fe_sec_voltage_t voltage)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 
 	tda8083_set_voltage (state, voltage);
 	tda8083_writereg (state, 0x00, 0x3c);
@@ -410,7 +405,7 @@ static int tda8083_diseqc_set_voltage(struct dvb_frontend* fe, fe_sec_voltage_t 
 
 static void tda8083_release(struct dvb_frontend* fe)
 {
-	struct tda8083_state* state = (struct tda8083_state*) fe->demodulator_priv;
+	struct tda8083_state* state = fe->demodulator_priv;
 	kfree(state);
 }
 
@@ -422,24 +417,23 @@ struct dvb_frontend* tda8083_attach(const struct tda8083_config* config,
 	struct tda8083_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = (struct tda8083_state*) kmalloc(sizeof(struct tda8083_state), GFP_KERNEL);
+	state = kmalloc(sizeof(struct tda8083_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */
 	state->config = config;
 	state->i2c = i2c;
-	memcpy(&state->ops, &tda8083_ops, sizeof(struct dvb_frontend_ops));
 
 	/* check if the demod is there */
 	if ((tda8083_readreg(state, 0x00)) != 0x05) goto error;
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &tda8083_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
 
 error:
-	if (state) kfree(state);
+	kfree(state);
 	return NULL;
 }
 
@@ -448,12 +442,12 @@ static struct dvb_frontend_ops tda8083_ops = {
 	.info = {
 		.name			= "Philips TDA8083 DVB-S",
 		.type			= FE_QPSK,
-		.frequency_min		= 950000,     /* FIXME: guessed! */
-		.frequency_max		= 1400000,    /* FIXME: guessed! */
+		.frequency_min		= 920000,     /* TDA8060 */
+		.frequency_max		= 2200000,    /* TDA8060 */
 		.frequency_stepsize	= 125,   /* kHz for QPSK frontends */
 	/*      .frequency_tolerance	= ???,*/
-		.symbol_rate_min	= 1000000,   /* FIXME: guessed! */
-		.symbol_rate_max	= 45000000,  /* FIXME: guessed! */
+		.symbol_rate_min	= 12000000,
+		.symbol_rate_max	= 30000000,
 	/*      .symbol_rate_tolerance	= ???,*/
 		.caps = FE_CAN_INVERSION_AUTO |
 			FE_CAN_FEC_1_2 | FE_CAN_FEC_2_3 | FE_CAN_FEC_3_4 |
@@ -473,11 +467,13 @@ static struct dvb_frontend_ops tda8083_ops = {
 	.read_status = tda8083_read_status,
 	.read_signal_strength = tda8083_read_signal_strength,
 	.read_snr = tda8083_read_snr,
+	.read_ber = tda8083_read_ber,
+	.read_ucblocks = tda8083_read_ucblocks,
 
 	.diseqc_send_master_cmd = tda8083_send_diseqc_msg,
-     	.diseqc_send_burst = tda8083_diseqc_send_burst,
-     	.set_tone = tda8083_diseqc_set_tone,
-     	.set_voltage = tda8083_diseqc_set_voltage,
+	.diseqc_send_burst = tda8083_diseqc_send_burst,
+	.set_tone = tda8083_diseqc_set_tone,
+	.set_voltage = tda8083_diseqc_set_voltage,
 };
 
 module_param(debug, int, 0644);

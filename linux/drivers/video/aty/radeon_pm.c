@@ -20,14 +20,110 @@
 #include <linux/agp_backend.h>
 
 #ifdef CONFIG_PPC_PMAC
-#include <asm/processor.h>
+#include <asm/machdep.h>
 #include <asm/prom.h>
 #include <asm/pmac_feature.h>
 #endif
 
 #include "ati_ids.h"
 
-void radeon_pm_disable_dynamic_mode(struct radeonfb_info *rinfo)
+/*
+ * Workarounds for bugs in PC laptops:
+ * - enable D2 sleep in some IBM Thinkpads
+ * - special case for Samsung P35
+ *
+ * Whitelist by subsystem vendor/device because
+ * its the subsystem vendor's fault!
+ */
+
+#if defined(CONFIG_PM) && defined(CONFIG_X86)
+static void radeon_reinitialize_M10(struct radeonfb_info *rinfo);
+
+struct radeon_device_id {
+        const char *ident;                     /* (arbitrary) Name */
+        const unsigned short subsystem_vendor; /* Subsystem Vendor ID */
+        const unsigned short subsystem_device; /* Subsystem Device ID */
+	const enum radeon_pm_mode pm_mode_modifier; /* modify pm_mode */
+	const reinit_function_ptr new_reinit_func;   /* changed reinit_func */
+};
+
+#define BUGFIX(model, sv, sd, pm, fn) { \
+	.ident = model, \
+	.subsystem_vendor = sv, \
+	.subsystem_device = sd, \
+	.pm_mode_modifier = pm, \
+	.new_reinit_func  = fn  \
+}
+
+static struct radeon_device_id radeon_workaround_list[] = {
+	BUGFIX("IBM Thinkpad R32",
+	       PCI_VENDOR_ID_IBM, 0x1905,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad R40",
+	       PCI_VENDOR_ID_IBM, 0x0526,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad R40",
+	       PCI_VENDOR_ID_IBM, 0x0527,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad R50/R51/T40/T41",
+	       PCI_VENDOR_ID_IBM, 0x0531,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad R51/T40/T41/T42",
+	       PCI_VENDOR_ID_IBM, 0x0530,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad T30",
+	       PCI_VENDOR_ID_IBM, 0x0517,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad T40p",
+	       PCI_VENDOR_ID_IBM, 0x054d,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad T42",
+	       PCI_VENDOR_ID_IBM, 0x0550,
+	       radeon_pm_d2, NULL),
+	BUGFIX("IBM Thinkpad X31/X32",
+	       PCI_VENDOR_ID_IBM, 0x052f,
+	       radeon_pm_d2, NULL),
+	BUGFIX("Samsung P35",
+	       PCI_VENDOR_ID_SAMSUNG, 0xc00c,
+	       radeon_pm_off, radeon_reinitialize_M10),
+	BUGFIX("Acer Aspire 2010",
+	       PCI_VENDOR_ID_AI, 0x0061,
+	       radeon_pm_off, radeon_reinitialize_M10),
+	{ .ident = NULL }
+};
+
+static int radeon_apply_workarounds(struct radeonfb_info *rinfo)
+{
+	struct radeon_device_id *id;
+
+	for (id = radeon_workaround_list; id->ident != NULL; id++ )
+		if ((id->subsystem_vendor == rinfo->pdev->subsystem_vendor ) &&
+		    (id->subsystem_device == rinfo->pdev->subsystem_device )) {
+
+			/* we found a device that requires workaround */
+			printk(KERN_DEBUG "radeonfb: %s detected"
+			       ", enabling workaround\n", id->ident);
+
+			rinfo->pm_mode |= id->pm_mode_modifier;
+
+			if (id->new_reinit_func != NULL)
+				rinfo->reinit_func = id->new_reinit_func;
+
+			return 1;
+		}
+	return 0;  /* not found */
+}
+
+#else  /* defined(CONFIG_PM) && defined(CONFIG_X86) */
+static inline int radeon_apply_workarounds(struct radeonfb_info *rinfo)
+{
+        return 0;
+}
+#endif /* defined(CONFIG_PM) && defined(CONFIG_X86) */
+
+
+
+static void radeon_pm_disable_dynamic_mode(struct radeonfb_info *rinfo)
 {
 	u32 tmp;
 
@@ -62,9 +158,9 @@ void radeon_pm_disable_dynamic_mode(struct radeonfb_info *rinfo)
                 OUTPLL(pllSCLK_CNTL, tmp);
 		return;
 	}
-	/* RV350 (M10) */
+	/* RV350 (M10/M11) */
 	if (rinfo->family == CHIP_FAMILY_RV350) {
-                /* for RV350/M10, no delays are required. */
+                /* for RV350/M10/M11, no delays are required. */
                 tmp = INPLL(pllSCLK_CNTL2);
                 tmp |= (SCLK_CNTL2__R300_FORCE_TCL |
                         SCLK_CNTL2__R300_FORCE_GA  |
@@ -229,7 +325,7 @@ void radeon_pm_disable_dynamic_mode(struct radeonfb_info *rinfo)
 	radeon_msleep(16);
 }
 
-void radeon_pm_enable_dynamic_mode(struct radeonfb_info *rinfo)
+static void radeon_pm_enable_dynamic_mode(struct radeonfb_info *rinfo)
 {
 	u32 tmp;
 
@@ -248,7 +344,7 @@ void radeon_pm_enable_dynamic_mode(struct radeonfb_info *rinfo)
 		return;
 	}
 
-	/* M10 */
+	/* M10/M11 */
 	if (rinfo->family == CHIP_FAMILY_RV350) {
 		tmp = INPLL(pllSCLK_CNTL2);
 		tmp &= ~(SCLK_CNTL2__R300_FORCE_TCL |
@@ -852,18 +948,26 @@ static void radeon_pm_setup_for_suspend(struct radeonfb_info *rinfo)
 	/* because both INPLL and OUTPLL take the same lock, that's why. */
 	tmp = INPLL( pllMCLK_MISC) | MCLK_MISC__EN_MCLK_TRISTATE_IN_SUSPEND;
 	OUTPLL( pllMCLK_MISC, tmp);
-	
-	/* AGP PLL control */
-	if (rinfo->family <= CHIP_FAMILY_RV280) {
-		OUTREG(BUS_CNTL1, INREG(BUS_CNTL1) |  BUS_CNTL1__AGPCLK_VALID);
 
-		OUTREG(BUS_CNTL1,
-		       (INREG(BUS_CNTL1) & ~BUS_CNTL1__MOBILE_PLATFORM_SEL_MASK)
-		       | (2<<BUS_CNTL1__MOBILE_PLATFORM_SEL__SHIFT));	// 440BX
-	} else {
-		OUTREG(BUS_CNTL1, INREG(BUS_CNTL1));
-		OUTREG(BUS_CNTL1, (INREG(BUS_CNTL1) & ~0x4000) | 0x8000);
+	/* BUS_CNTL1__MOBILE_PLATORM_SEL setting is northbridge chipset
+	 * and radeon chip dependent. Thus we only enable it on Mac for
+	 * now (until we get more info on how to compute the correct
+	 * value for various X86 bridges).
+	 */
+#ifdef CONFIG_PPC_PMAC
+	if (machine_is(powermac)) {
+		/* AGP PLL control */
+		if (rinfo->family <= CHIP_FAMILY_RV280) {
+			OUTREG(BUS_CNTL1, INREG(BUS_CNTL1) |  BUS_CNTL1__AGPCLK_VALID);
+			OUTREG(BUS_CNTL1,
+			       (INREG(BUS_CNTL1) & ~BUS_CNTL1__MOBILE_PLATFORM_SEL_MASK)
+			       | (2<<BUS_CNTL1__MOBILE_PLATFORM_SEL__SHIFT));	// 440BX
+		} else {
+			OUTREG(BUS_CNTL1, INREG(BUS_CNTL1));
+			OUTREG(BUS_CNTL1, (INREG(BUS_CNTL1) & ~0x4000) | 0x8000);
+		}
 	}
+#endif
 
 	OUTREG(CRTC_OFFSET_CNTL, (INREG(CRTC_OFFSET_CNTL)
 				  & ~CRTC_OFFSET_CNTL__CRTC_STEREO_SYNC_OUT_EN));
@@ -1155,10 +1259,10 @@ static void radeon_pm_full_reset_sdram(struct radeonfb_info *rinfo)
 	OUTREG( CRTC_GEN_CNTL,  (crtcGenCntl | CRTC_GEN_CNTL__CRTC_DISP_REQ_EN_B) );
 	OUTREG( CRTC2_GEN_CNTL, (crtcGenCntl2 | CRTC2_GEN_CNTL__CRTC2_DISP_REQ_EN_B) );
   
-	/* This is the code for the Aluminium PowerBooks M10 */
+	/* This is the code for the Aluminium PowerBooks M10 / iBooks M11 */
 	if (rinfo->family == CHIP_FAMILY_RV350) {
 		u32 sdram_mode_reg = rinfo->save_regs[35];
-		static u32 default_mrtable[] =
+		static const u32 default_mrtable[] =
 			{ 0x21320032,
 			  0x21321000, 0xa1321000, 0x21321000, 0xffffffff,
 			  0x21320032, 0xa1320032, 0x21320032, 0xffffffff,
@@ -1167,7 +1271,7 @@ static void radeon_pm_full_reset_sdram(struct radeonfb_info *rinfo)
 			  0x21320032, 0xa1320032, 0x21320032, 0xffffffff,
 			  0x31320032 };
 
-		u32 *mrtable = default_mrtable;
+		const u32 *mrtable = default_mrtable;
 		int i, mrtable_size = ARRAY_SIZE(default_mrtable);
 
 		mdelay(30);
@@ -1186,7 +1290,7 @@ static void radeon_pm_full_reset_sdram(struct radeonfb_info *rinfo)
 		if (rinfo->of_node != NULL) {
 			int size;
 
-			mrtable = (u32 *)get_property(rinfo->of_node, "ATY,MRT", &size);
+			mrtable = of_get_property(rinfo->of_node, "ATY,MRT", &size);
 			if (mrtable)
 				mrtable_size = size >> 2;
 			else
@@ -1321,8 +1425,6 @@ static void radeon_pm_full_reset_sdram(struct radeonfb_info *rinfo)
 	mdelay( 15);
 }
 
-#ifdef CONFIG_PPC_OF
-
 static void radeon_pm_reset_pad_ctlr_strength(struct radeonfb_info *rinfo)
 {
 	u32 tmp, tmp2;
@@ -1373,7 +1475,9 @@ static void radeon_pm_start_mclk_sclk(struct radeonfb_info *rinfo)
 	/* Reconfigure SPLL charge pump, VCO gain, duty cycle */
 	tmp = INPLL(pllSPLL_CNTL);
 	OUTREG8(CLOCK_CNTL_INDEX, pllSPLL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA + 1, (tmp >> 8) & 0xff);
+	radeon_pll_errata_after_data(rinfo);
 
 	/* Set SPLL feedback divider */
 	tmp = INPLL(pllM_SPLL_REF_FB_DIV);
@@ -1406,7 +1510,9 @@ static void radeon_pm_start_mclk_sclk(struct radeonfb_info *rinfo)
 	/* Reconfigure MPLL charge pump, VCO gain, duty cycle */
 	tmp = INPLL(pllMPLL_CNTL);
 	OUTREG8(CLOCK_CNTL_INDEX, pllMPLL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA + 1, (tmp >> 8) & 0xff);
+	radeon_pll_errata_after_data(rinfo);
 
 	/* Set MPLL feedback divider */
 	tmp = INPLL(pllM_SPLL_REF_FB_DIV);
@@ -1525,7 +1631,9 @@ static void radeon_pm_restore_pixel_pll(struct radeonfb_info *rinfo)
 	u32 tmp;
 
 	OUTREG8(CLOCK_CNTL_INDEX, pllHTOTAL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA, 0);
+	radeon_pll_errata_after_data(rinfo);
 
 	tmp = INPLL(pllVCLK_ECP_CNTL);
 	OUTPLL(pllVCLK_ECP_CNTL, tmp | 0x80);
@@ -1541,11 +1649,9 @@ static void radeon_pm_restore_pixel_pll(struct radeonfb_info *rinfo)
 	 */
 	tmp = INPLL(pllPPLL_CNTL);
 	OUTREG8(CLOCK_CNTL_INDEX, pllSPLL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA + 1, (tmp >> 8) & 0xff);
-
-	/* Not sure what was intended here ... */
-	tmp = INREG(CLOCK_CNTL_INDEX);
-	OUTREG(CLOCK_CNTL_INDEX, tmp);
+	radeon_pll_errata_after_data(rinfo);
 
 	/* Restore our "reference" PPLL divider set by firmware
 	 * according to proper spread spectrum calculations
@@ -1570,6 +1676,8 @@ static void radeon_pm_restore_pixel_pll(struct radeonfb_info *rinfo)
 
 	/* Switch pixel clock to firmware default div 0 */
 	OUTREG8(CLOCK_CNTL_INDEX+1, 0);
+	radeon_pll_errata_after_index(rinfo);
+	radeon_pll_errata_after_data(rinfo);
 }
 
 static void radeon_pm_m10_reconfigure_mc(struct radeonfb_info *rinfo)
@@ -1830,6 +1938,8 @@ static void radeon_reinitialize_M10(struct radeonfb_info *rinfo)
 	radeon_pm_m10_enable_lvds_spread_spectrum(rinfo);
 }
 
+#ifdef CONFIG_PPC_OF
+
 static void radeon_pm_m9p_reconfigure_mc(struct radeonfb_info *rinfo)
 {
 	OUTREG(MC_CNTL, rinfo->save_regs[46]);
@@ -2074,7 +2184,7 @@ static void radeon_reinitialize_M9P(struct radeonfb_info *rinfo)
 	OUTREG(0x2ec, 0x6332a3f0);
 	mdelay(17);
 
-	OUTPLL(pllPPLL_REF_DIV, rinfo->pll.ref_div);;
+	OUTPLL(pllPPLL_REF_DIV, rinfo->pll.ref_div);
 	OUTPLL(pllPPLL_DIV_0, rinfo->save_regs[92]);
 
 	mdelay(40);
@@ -2157,7 +2267,9 @@ static void radeon_reinitialize_QW(struct radeonfb_info *rinfo)
 
 	tmp = INPLL(MPLL_CNTL);
 	OUTREG8(CLOCK_CNTL_INDEX, MPLL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA + 1, (tmp >> 8) & 0xff);
+	radeon_pll_errata_after_data(rinfo);
 
 	tmp = INPLL(M_SPLL_REF_FB_DIV);
 	OUTPLL(M_SPLL_REF_FB_DIV, tmp | 0x5900);
@@ -2178,7 +2290,9 @@ static void radeon_reinitialize_QW(struct radeonfb_info *rinfo)
 
 	tmp = INPLL(SPLL_CNTL);
 	OUTREG8(CLOCK_CNTL_INDEX, SPLL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA + 1, (tmp >> 8) & 0xff);
+	radeon_pll_errata_after_data(rinfo);
 
 	tmp = INPLL(M_SPLL_REF_FB_DIV);
 	OUTPLL(M_SPLL_REF_FB_DIV, tmp | 0x780000);
@@ -2306,7 +2420,9 @@ static void radeon_reinitialize_QW(struct radeonfb_info *rinfo)
 	OUTREG(CRTC_H_SYNC_STRT_WID, 0x008e0580);
 	OUTREG(CRTC_H_TOTAL_DISP, 0x009f00d2);
 	OUTREG8(CLOCK_CNTL_INDEX, HTOTAL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA, 0);
+	radeon_pll_errata_after_data(rinfo);
 	OUTREG(CRTC_V_SYNC_STRT_WID, 0x00830403);
 	OUTREG(CRTC_V_TOTAL_DISP, 0x03ff0429);
 	OUTREG(FP_CRTC_H_TOTAL_DISP, 0x009f0033);
@@ -2328,10 +2444,15 @@ static void radeon_reinitialize_QW(struct radeonfb_info *rinfo)
 	INPLL(PPLL_REF_DIV);
 
 	OUTREG8(CLOCK_CNTL_INDEX, PPLL_CNTL + PLL_WR_EN);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG8(CLOCK_CNTL_DATA + 1, 0xbc);
+	radeon_pll_errata_after_data(rinfo);
 
 	tmp = INREG(CLOCK_CNTL_INDEX);
+	radeon_pll_errata_after_index(rinfo);
 	OUTREG(CLOCK_CNTL_INDEX, tmp & 0xff);
+	radeon_pll_errata_after_index(rinfo);
+	radeon_pll_errata_after_data(rinfo);
 
 	OUTPLL(PPLL_DIV_0, 0x48090);
 
@@ -2400,7 +2521,8 @@ static void radeon_set_suspend(struct radeonfb_info *rinfo, int suspend)
 	 * including PCI config registers, clocks, AGP conf, ...)
 	 */
 	if (suspend) {
-		printk(KERN_DEBUG "radeonfb: switching to D2 state...\n");
+		printk(KERN_DEBUG "radeonfb (%s): switching to D2 state...\n",
+		       pci_name(rinfo->pdev));
 
 		/* Disable dynamic power management of clocks for the
 		 * duration of the suspend/resume process
@@ -2453,7 +2575,8 @@ static void radeon_set_suspend(struct radeonfb_info *rinfo, int suspend)
 			mdelay(500);
 		}
 	} else {
-		printk(KERN_DEBUG "radeonfb: switching to D0 state...\n");
+		printk(KERN_DEBUG "radeonfb (%s): switching to D0 state...\n",
+		       pci_name(rinfo->pdev));
 
 		/* Switch back PCI powermanagment to D0 */
 		mdelay(200);
@@ -2501,29 +2624,26 @@ static int radeon_restore_pci_cfg(struct radeonfb_info *rinfo)
 }
 
 
-static/*extern*/ int susdisking = 0;
-
-int radeonfb_pci_suspend(struct pci_dev *pdev, u32 state)
+int radeonfb_pci_suspend(struct pci_dev *pdev, pm_message_t mesg)
 {
         struct fb_info *info = pci_get_drvdata(pdev);
         struct radeonfb_info *rinfo = info->par;
 	int i;
 
-	if (state == pdev->dev.power.power_state)
+	if (mesg.event == pdev->dev.power.power_state.event)
 		return 0;
 
-	printk(KERN_DEBUG "radeonfb (%s): suspending to state: %d...\n",
-	       pci_name(pdev), state);
+	printk(KERN_DEBUG "radeonfb (%s): suspending for event: %d...\n",
+	       pci_name(pdev), mesg.event);
 
 	/* For suspend-to-disk, we cheat here. We don't suspend anything and
 	 * let fbcon continue drawing until we are all set. That shouldn't
 	 * really cause any problem at this point, provided that the wakeup
 	 * code knows that any state in memory may not match the HW
 	 */
-	if (state != PM_SUSPEND_MEM)
-		goto done;
-	if (susdisking) {
-		printk("suspending to disk but state = %d\n", state);
+	switch (mesg.event) {
+	case PM_EVENT_FREEZE:		/* about to take snapshot */
+	case PM_EVENT_PRETHAW:		/* before restoring snapshot */
 		goto done;
 	}
 
@@ -2545,6 +2665,14 @@ int radeonfb_pci_suspend(struct pci_dev *pdev, u32 state)
 	rinfo->asleep = 1;
 	rinfo->lock_blank = 1;
 	del_timer_sync(&rinfo->lvds_timer);
+
+#ifdef CONFIG_PPC_PMAC
+	/* On powermac, we have hooks to properly suspend/resume AGP now,
+	 * use them here. We'll ultimately need some generic support here,
+	 * but the generic code isn't quite ready for that yet
+	 */
+	pmac_suspend_agp_for_card(pdev);
+#endif /* CONFIG_PPC_PMAC */
 
 	/* If we support wakeup from poweroff, we save all regs we can including cfg
 	 * space
@@ -2569,12 +2697,11 @@ int radeonfb_pci_suspend(struct pci_dev *pdev, u32 state)
 			OUTREG(LVDS_PLL_CNTL, (INREG(LVDS_PLL_CNTL) & ~30000) | 0x20000);
 			mdelay(20);
 			OUTREG(LVDS_GEN_CNTL, INREG(LVDS_GEN_CNTL) & ~(LVDS_DIGON));
-
-			// FIXME: Use PCI layer
-			for (i = 0; i < 64; ++i)
-				pci_read_config_dword(rinfo->pdev, i * 4,
-						      &rinfo->cfg_save[i]);
 		}
+		// FIXME: Use PCI layer
+		for (i = 0; i < 64; ++i)
+			pci_read_config_dword(pdev, i * 4, &rinfo->cfg_save[i]);
+		pci_disable_device(pdev);
 	}
 	/* If we support D2, we go to it (should be fixed later with a flag forcing
 	 * D3 only for some laptops)
@@ -2585,7 +2712,7 @@ int radeonfb_pci_suspend(struct pci_dev *pdev, u32 state)
 	release_console_sem();
 
  done:
-	pdev->dev.power.power_state = state;
+	pdev->dev.power.power_state = mesg;
 
 	return 0;
 }
@@ -2596,7 +2723,7 @@ int radeonfb_pci_resume(struct pci_dev *pdev)
         struct radeonfb_info *rinfo = info->par;
 	int rc = 0;
 
-	if (pdev->dev.power.power_state == 0)
+	if (pdev->dev.power.power_state.event == PM_EVENT_ON)
 		return 0;
 
 	if (rinfo->no_schedule) {
@@ -2606,7 +2733,7 @@ int radeonfb_pci_resume(struct pci_dev *pdev)
 		acquire_console_sem();
 
 	printk(KERN_DEBUG "radeonfb (%s): resuming from state: %d...\n",
-	       pci_name(pdev), pdev->dev.power.power_state);
+	       pci_name(pdev), pdev->dev.power.power_state.event);
 
 
 	if (pci_enable_device(pdev)) {
@@ -2617,7 +2744,7 @@ int radeonfb_pci_resume(struct pci_dev *pdev)
 	}
 	pci_set_master(pdev);
 
-	if (pdev->dev.power.power_state == PM_SUSPEND_MEM) {
+	if (pdev->dev.power.power_state.event == PM_EVENT_SUSPEND) {
 		/* Wakeup chip. Check from config space if we were powered off
 		 * (todo: additionally, check CLK_PIN_CNTL too)
 		 */
@@ -2657,13 +2784,22 @@ int radeonfb_pci_resume(struct pci_dev *pdev)
 	rinfo->lock_blank = 0;
 	radeon_screen_blank(rinfo, FB_BLANK_UNBLANK, 1);
 
+#ifdef CONFIG_PPC_PMAC
+	/* On powermac, we have hooks to properly suspend/resume AGP now,
+	 * use them here. We'll ultimately need some generic support here,
+	 * but the generic code isn't quite ready for that yet
+	 */
+	pmac_resume_agp_for_card(pdev);
+#endif /* CONFIG_PPC_PMAC */
+
+
 	/* Check status of dynclk */
 	if (rinfo->dynclk == 1)
 		radeon_pm_enable_dynamic_mode(rinfo);
 	else if (rinfo->dynclk == 0)
 		radeon_pm_disable_dynamic_mode(rinfo);
 
-	pdev->dev.power.power_state = 0;
+	pdev->dev.power.power_state = PMSG_ON;
 
  bail:
 	release_console_sem();
@@ -2684,37 +2820,44 @@ static void radeonfb_early_resume(void *data)
 
 #endif /* CONFIG_PM */
 
-void radeonfb_pm_init(struct radeonfb_info *rinfo, int dynclk)
+void radeonfb_pm_init(struct radeonfb_info *rinfo, int dynclk, int ignore_devlist, int force_sleep)
 {
 	/* Find PM registers in config space if any*/
 	rinfo->pm_reg = pci_find_capability(rinfo->pdev, PCI_CAP_ID_PM);
 
 	/* Enable/Disable dynamic clocks: TODO add sysfs access */
-	rinfo->dynclk = dynclk;
-	if (dynclk == 1) {
+	if (rinfo->family == CHIP_FAMILY_RS480)
+		rinfo->dynclk = -1;
+	else
+		rinfo->dynclk = dynclk;
+
+	if (rinfo->dynclk == 1) {
 		radeon_pm_enable_dynamic_mode(rinfo);
 		printk("radeonfb: Dynamic Clock Power Management enabled\n");
-	} else if (dynclk == 0) {
+	} else if (rinfo->dynclk == 0) {
 		radeon_pm_disable_dynamic_mode(rinfo);
 		printk("radeonfb: Dynamic Clock Power Management disabled\n");
 	}
 
+#if defined(CONFIG_PM)
+#if defined(CONFIG_PPC_PMAC)
 	/* Check if we can power manage on suspend/resume. We can do
 	 * D2 on M6, M7 and M9, and we can resume from D3 cold a few other
 	 * "Mac" cards, but that's all. We need more infos about what the
 	 * BIOS does tho. Right now, all this PM stuff is pmac-only for that
 	 * reason. --BenH
 	 */
-#if defined(CONFIG_PM) && defined(CONFIG_PPC_OF)
-	if (_machine == _MACH_Pmac && rinfo->of_node) {
+	if (machine_is(powermac) && rinfo->of_node) {
 		if (rinfo->is_mobility && rinfo->pm_reg &&
 		    rinfo->family <= CHIP_FAMILY_RV250)
 			rinfo->pm_mode |= radeon_pm_d2;
 
 		/* We can restart Jasper (M10 chip in albooks), BlueStone (7500 chip
-		 * in some desktop G4s), and Via (M9+ chip on iBook G4)
+		 * in some desktop G4s), Via (M9+ chip on iBook G4) and
+		 * Snowy (M11 chip on iBook G4 manufactured after July 2005)
 		 */
-		if (!strcmp(rinfo->of_node->name, "ATY,JasperParent")) {
+		if (!strcmp(rinfo->of_node->name, "ATY,JasperParent") ||
+		    !strcmp(rinfo->of_node->name, "ATY,SnowyParent")) {
 			rinfo->reinit_func = radeon_reinitialize_M10;
 			rinfo->pm_mode |= radeon_pm_off;
 		}
@@ -2727,8 +2870,6 @@ void radeonfb_pm_init(struct radeonfb_info *rinfo, int dynclk)
 		if (!strcmp(rinfo->of_node->name, "ATY,ViaParent")) {
 			rinfo->reinit_func = radeon_reinitialize_M9P;
 			rinfo->pm_mode |= radeon_pm_off;
-			/* Workaround not used for now */
-			rinfo->m9p_workaround = 1;
 		}
 
 		/* If any of the above is set, we assume the machine can sleep/resume.
@@ -2749,12 +2890,25 @@ void radeonfb_pm_init(struct radeonfb_info *rinfo, int dynclk)
 		OUTREG(TV_DAC_CNTL, INREG(TV_DAC_CNTL) | 0x07000000);
 #endif
 	}
-#endif /* defined(CONFIG_PM) && defined(CONFIG_PPC_OF) */
+#endif /* defined(CONFIG_PPC_PMAC) */
+#endif /* defined(CONFIG_PM) */
+
+	if (ignore_devlist)
+		printk(KERN_DEBUG
+		       "radeonfb: skipping test for device workarounds\n");
+	else
+		radeon_apply_workarounds(rinfo);
+
+	if (force_sleep) {
+		printk(KERN_DEBUG
+		       "radeonfb: forcefully enabling D2 sleep mode\n");
+		rinfo->pm_mode |= radeon_pm_d2;
+	}
 }
 
 void radeonfb_pm_exit(struct radeonfb_info *rinfo)
 {
-#if defined(CONFIG_PM) && defined(CONFIG_PPC_OF)
+#if defined(CONFIG_PM) && defined(CONFIG_PPC_PMAC)
 	if (rinfo->pm_mode != radeon_pm_none)
 		pmac_set_early_video_resume(NULL, NULL);
 #endif

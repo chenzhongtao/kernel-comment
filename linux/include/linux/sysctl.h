@@ -6,10 +6,17 @@
  ****************************************************************
  ****************************************************************
  **
+ **  WARNING:
  **  The values in this file are exported to user space via 
- **  the sysctl() binary interface.  However this interface
- **  is unstable and deprecated and will be removed in the future. 
- **  For a stable interface use /proc/sys.
+ **  the sysctl() binary interface.  Do *NOT* change the
+ **  numbering of any existing values here, and do not change
+ **  any numbers within any one set of values.  If you have to
+ **  redefine an existing interface, use a new number for it.
+ **  The kernel will then return -ENOTDIR to any application using
+ **  the old binary interface.
+ **
+ **  For new interfaces unless you really need a binary number
+ **  please use CTL_UNNUMBERED.
  **
  ****************************************************************
  ****************************************************************
@@ -20,10 +27,10 @@
 
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/list.h>
 #include <linux/compiler.h>
 
 struct file;
+struct completion;
 
 #define CTL_MAXNAME 10		/* how many path components do we allow in a
 				   call to sysctl?   In other words, what is
@@ -46,8 +53,8 @@ struct __sysctl_args {
 
 /* For internal pattern-matching use only: */
 #ifdef __KERNEL__
-#define CTL_ANY		-1	/* Matches any name */
 #define CTL_NONE	0
+#define CTL_UNNUMBERED	CTL_NONE	/* sysctl without a binary number */
 #endif
 
 enum
@@ -55,19 +62,32 @@ enum
 	CTL_KERN=1,		/* General kernel info and control */
 	CTL_VM=2,		/* VM management */
 	CTL_NET=3,		/* Networking */
-	CTL_PROC=4,		/* Process info */
+	CTL_PROC=4,		/* removal breaks strace(1) compilation */
 	CTL_FS=5,		/* Filesystems */
 	CTL_DEBUG=6,		/* Debugging */
 	CTL_DEV=7,		/* Devices */
 	CTL_BUS=8,		/* Busses */
 	CTL_ABI=9,		/* Binary emulation */
-	CTL_CPU=10		/* CPU stuff (speed scaling, etc) */
+	CTL_CPU=10,		/* CPU stuff (speed scaling, etc) */
+	CTL_ARLAN=254,		/* arlan wireless driver */
+	CTL_S390DBF=5677,	/* s390 debug */
+	CTL_SUNRPC=7249,	/* sunrpc debug */
+	CTL_PM=9899,		/* frv power management */
+	CTL_FRV=9898,		/* frv specific sysctls */
 };
 
 /* CTL_BUS names: */
 enum
 {
 	CTL_BUS_ISA=1		/* ISA */
+};
+
+/* /proc/sys/fs/inotify/ */
+enum
+{
+	INOTIFY_MAX_USER_INSTANCES=1,	/* max instances per user */
+	INOTIFY_MAX_USER_WATCHES=2,	/* max watches per user */
+	INOTIFY_MAX_QUEUED_EVENTS=3	/* max queued events per instance */
 };
 
 /* CTL_KERN names: */
@@ -116,7 +136,7 @@ enum
 	KERN_OVERFLOWUID=46,	/* int: overflow UID */
 	KERN_OVERFLOWGID=47,	/* int: overflow GID */
 	KERN_SHMPATH=48,	/* string: path to shm fs */
-	KERN_HOTPLUG=49,	/* string: path to hotplug policy agent */
+	KERN_HOTPLUG=49,	/* string: path to uevent helper (deprecated) */
 	KERN_IEEE_EMULATION_WARNINGS=50, /* int: unimplemented ieee instructions */
 	KERN_S390_USER_DEBUG_LOGGING=51,  /* int: dumps of user faults */
 	KERN_CORE_USES_PID=52,		/* int: use core or core.%pid */
@@ -135,7 +155,17 @@ enum
 	KERN_HZ_TIMER=65,	/* int: hz timer on or off */
 	KERN_UNKNOWN_NMI_PANIC=66, /* int: unknown nmi panic flag */
 	KERN_BOOTLOADER_TYPE=67, /* int: boot loader type */
+	KERN_RANDOMIZE=68, /* int: randomize virtual address space */
+	KERN_SETUID_DUMPABLE=69, /* int: behaviour of dumps for setuid core */
+	KERN_SPIN_RETRY=70,	/* int: number of spinlock retries */
+	KERN_ACPI_VIDEO_FLAGS=71, /* int: flags for setting up video after ACPI sleep */
+	KERN_IA64_UNALIGNED=72, /* int: ia64 unaligned userland trap enable */
+	KERN_COMPAT_LOG=73,	/* int: print compat layer  messages */
+	KERN_MAX_LOCK_DEPTH=74,
+	KERN_NMI_WATCHDOG=75, /* int: enable/disable nmi watchdog */
+	KERN_PANIC_ON_NMI=76, /* int: whether we will panic on an unrecovered */
 };
+
 
 
 /* CTL_VM names: */
@@ -169,6 +199,13 @@ enum
 	VM_VFS_CACHE_PRESSURE=26, /* dcache/icache reclaim pressure */
 	VM_LEGACY_VA_LAYOUT=27, /* legacy/compatibility virtual address space layout */
 	VM_SWAP_TOKEN_TIMEOUT=28, /* default time for token time out */
+	VM_DROP_PAGECACHE=29,	/* int: nuke lots of pagecache */
+	VM_PERCPU_PAGELIST_FRACTION=30,/* int: fraction of pages in each percpu_pagelist */
+	VM_ZONE_RECLAIM_MODE=31, /* reclaim local zone memory before going off node */
+	VM_MIN_UNMAPPED=32,	/* Set min percent of unmapped pages */
+	VM_PANIC_ON_OOM=33,	/* panic at out-of-memory */
+	VM_VDSO_ENABLED=34,	/* map VDSO into new processes? */
+	VM_MIN_SLAB=35,		 /* Percent pages ignored by zone reclaim */
 };
 
 
@@ -191,7 +228,11 @@ enum
 	NET_TR=14,
 	NET_DECNET=15,
 	NET_ECONET=16,
-	NET_SCTP=17, 
+	NET_SCTP=17,
+	NET_LLC=18,
+	NET_NETFILTER=19,
+	NET_DCCP=20,
+	NET_IRDA=412,
 };
 
 /* /proc/sys/kernel/random */
@@ -241,6 +282,10 @@ enum
 	NET_CORE_MOD_CONG=16,
 	NET_CORE_DEV_WEIGHT=17,
 	NET_CORE_SOMAXCONN=18,
+	NET_CORE_BUDGET=19,
+	NET_CORE_AEVENT_ETIME=20,
+	NET_CORE_AEVENT_RSEQTH=21,
+	NET_CORE_WARNINGS=22,
 };
 
 /* /proc/sys/net/ethernet */
@@ -254,6 +299,43 @@ enum
 	NET_UNIX_DESTROY_DELAY=1,
 	NET_UNIX_DELETE_DELAY=2,
 	NET_UNIX_MAX_DGRAM_QLEN=3,
+};
+
+/* /proc/sys/net/netfilter */
+enum
+{
+	NET_NF_CONNTRACK_MAX=1,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_SYN_SENT=2,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_SYN_RECV=3,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_ESTABLISHED=4,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_FIN_WAIT=5,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_CLOSE_WAIT=6,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_LAST_ACK=7,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_TIME_WAIT=8,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_CLOSE=9,
+	NET_NF_CONNTRACK_UDP_TIMEOUT=10,
+	NET_NF_CONNTRACK_UDP_TIMEOUT_STREAM=11,
+	NET_NF_CONNTRACK_ICMP_TIMEOUT=12,
+	NET_NF_CONNTRACK_GENERIC_TIMEOUT=13,
+	NET_NF_CONNTRACK_BUCKETS=14,
+	NET_NF_CONNTRACK_LOG_INVALID=15,
+	NET_NF_CONNTRACK_TCP_TIMEOUT_MAX_RETRANS=16,
+	NET_NF_CONNTRACK_TCP_LOOSE=17,
+	NET_NF_CONNTRACK_TCP_BE_LIBERAL=18,
+	NET_NF_CONNTRACK_TCP_MAX_RETRANS=19,
+	NET_NF_CONNTRACK_SCTP_TIMEOUT_CLOSED=20,
+	NET_NF_CONNTRACK_SCTP_TIMEOUT_COOKIE_WAIT=21,
+	NET_NF_CONNTRACK_SCTP_TIMEOUT_COOKIE_ECHOED=22,
+	NET_NF_CONNTRACK_SCTP_TIMEOUT_ESTABLISHED=23,
+	NET_NF_CONNTRACK_SCTP_TIMEOUT_SHUTDOWN_SENT=24,
+	NET_NF_CONNTRACK_SCTP_TIMEOUT_SHUTDOWN_RECD=25,
+	NET_NF_CONNTRACK_SCTP_TIMEOUT_SHUTDOWN_ACK_SENT=26,
+	NET_NF_CONNTRACK_COUNT=27,
+	NET_NF_CONNTRACK_ICMPV6_TIMEOUT=28,
+	NET_NF_CONNTRACK_FRAG6_TIMEOUT=29,
+	NET_NF_CONNTRACK_FRAG6_LOW_THRESH=30,
+	NET_NF_CONNTRACK_FRAG6_HIGH_THRESH=31,
+	NET_NF_CONNTRACK_CHECKSUM=32,
 };
 
 /* /proc/sys/net/ipv4 */
@@ -331,20 +413,29 @@ enum
 	NET_TCP_FRTO=92,
 	NET_TCP_LOW_LATENCY=93,
 	NET_IPV4_IPFRAG_SECRET_INTERVAL=94,
-	NET_TCP_WESTWOOD=95,
 	NET_IPV4_IGMP_MAX_MSF=96,
 	NET_TCP_NO_METRICS_SAVE=97,
-	NET_TCP_VEGAS=98,
-	NET_TCP_VEGAS_ALPHA=99,
-	NET_TCP_VEGAS_BETA=100,
-	NET_TCP_VEGAS_GAMMA=101,
- 	NET_TCP_BIC=102,
- 	NET_TCP_BIC_FAST_CONVERGENCE=103,
-	NET_TCP_BIC_LOW_WINDOW=104,
 	NET_TCP_DEFAULT_WIN_SCALE=105,
 	NET_TCP_MODERATE_RCVBUF=106,
 	NET_TCP_TSO_WIN_DIVISOR=107,
 	NET_TCP_BIC_BETA=108,
+	NET_IPV4_ICMP_ERRORS_USE_INBOUND_IFADDR=109,
+	NET_TCP_CONG_CONTROL=110,
+	NET_TCP_ABC=111,
+	NET_IPV4_IPFRAG_MAX_DIST=112,
+ 	NET_TCP_MTU_PROBING=113,
+	NET_TCP_BASE_MSS=114,
+	NET_IPV4_TCP_WORKAROUND_SIGNED_WINDOWS=115,
+	NET_TCP_DMA_COPYBREAK=116,
+	NET_TCP_SLOW_START_AFTER_IDLE=117,
+	NET_CIPSOV4_CACHE_ENABLE=118,
+	NET_CIPSOV4_CACHE_BUCKET_SIZE=119,
+	NET_CIPSOV4_RBM_OPTFMT=120,
+	NET_CIPSOV4_RBM_STRICTVALID=121,
+	NET_TCP_AVAIL_CONG_CONTROL=122,
+	NET_TCP_ALLOWED_CONG_CONTROL=123,
+	NET_TCP_MAX_SSTHRESH=124,
+	NET_TCP_FRTO_RESPONSE=125,
 };
 
 enum {
@@ -398,6 +489,9 @@ enum
 	NET_IPV4_CONF_FORCE_IGMP_VERSION=17,
 	NET_IPV4_CONF_ARP_ANNOUNCE=18,
 	NET_IPV4_CONF_ARP_IGNORE=19,
+	NET_IPV4_CONF_PROMOTE_SECONDARIES=20,
+	NET_IPV4_CONF_ARP_ACCEPT=21,
+	__NET_IPV4_CONF_MAX
 };
 
 /* /proc/sys/net/ipv4/netfilter */
@@ -430,6 +524,7 @@ enum
  	NET_IPV4_NF_CONNTRACK_SCTP_TIMEOUT_SHUTDOWN_RECD=25,
  	NET_IPV4_NF_CONNTRACK_SCTP_TIMEOUT_SHUTDOWN_ACK_SENT=26,
 	NET_IPV4_NF_CONNTRACK_COUNT=27,
+	NET_IPV4_NF_CONNTRACK_CHECKSUM=28,
 };
  
 /* /proc/sys/net/ipv6 */
@@ -455,7 +550,8 @@ enum {
 	NET_IPV6_ROUTE_GC_INTERVAL=6,
 	NET_IPV6_ROUTE_GC_ELASTICITY=7,
 	NET_IPV6_ROUTE_MTU_EXPIRES=8,
-	NET_IPV6_ROUTE_MIN_ADVMSS=9
+	NET_IPV6_ROUTE_MIN_ADVMSS=9,
+	NET_IPV6_ROUTE_GC_MIN_INTERVAL_MS=10
 };
 
 enum {
@@ -475,7 +571,15 @@ enum {
 	NET_IPV6_REGEN_MAX_RETRY=14,
 	NET_IPV6_MAX_DESYNC_FACTOR=15,
 	NET_IPV6_MAX_ADDRESSES=16,
-	NET_IPV6_FORCE_MLD_VERSION=17
+	NET_IPV6_FORCE_MLD_VERSION=17,
+	NET_IPV6_ACCEPT_RA_DEFRTR=18,
+	NET_IPV6_ACCEPT_RA_PINFO=19,
+	NET_IPV6_ACCEPT_RA_RTR_PREF=20,
+	NET_IPV6_RTR_PROBE_INTERVAL=21,
+	NET_IPV6_ACCEPT_RA_RT_INFO_MAX_PLEN=22,
+	NET_IPV6_PROXY_NDP=23,
+	NET_IPV6_ACCEPT_SOURCE_ROUTE=25,
+	__NET_IPV6_MAX
 };
 
 /* /proc/sys/net/ipv6/icmp */
@@ -500,7 +604,15 @@ enum {
 	NET_NEIGH_GC_INTERVAL=13,
 	NET_NEIGH_GC_THRESH1=14,
 	NET_NEIGH_GC_THRESH2=15,
-	NET_NEIGH_GC_THRESH3=16
+	NET_NEIGH_GC_THRESH3=16,
+	NET_NEIGH_RETRANS_TIME_MS=17,
+	NET_NEIGH_REACHABLE_TIME_MS=18,
+	__NET_NEIGH_MAX
+};
+
+/* /proc/sys/net/dccp */
+enum {
+	NET_DCCP_DEFAULT=1,
 };
 
 /* /proc/sys/net/ipx */
@@ -509,6 +621,29 @@ enum {
 	NET_IPX_FORWARDING=2
 };
 
+/* /proc/sys/net/llc */
+enum {
+	NET_LLC2=1,
+	NET_LLC_STATION=2,
+};
+
+/* /proc/sys/net/llc/llc2 */
+enum {
+	NET_LLC2_TIMEOUT=1,
+};
+
+/* /proc/sys/net/llc/station */
+enum {
+	NET_LLC_STATION_ACK_TIMEOUT=1,
+};
+
+/* /proc/sys/net/llc/llc2/timeout */
+enum {
+	NET_LLC2_ACK_TIMEOUT=1,
+	NET_LLC2_P_TIMEOUT=2,
+	NET_LLC2_REJ_TIMEOUT=3,
+	NET_LLC2_BUSY_TIMEOUT=4,
+};
 
 /* /proc/sys/net/appletalk */
 enum {
@@ -531,7 +666,8 @@ enum {
 	NET_NETROM_TRANSPORT_REQUESTED_WINDOW_SIZE=8,
 	NET_NETROM_TRANSPORT_NO_ACTIVITY_TIMEOUT=9,
 	NET_NETROM_ROUTING_CONTROL=10,
-	NET_NETROM_LINK_FAILS_COUNT=11
+	NET_NETROM_LINK_FAILS_COUNT=11,
+	NET_NETROM_RESET=12
 };
 
 /* /proc/sys/net/ax25 */
@@ -572,7 +708,8 @@ enum {
 	NET_X25_CALL_REQUEST_TIMEOUT=2,
 	NET_X25_RESET_REQUEST_TIMEOUT=3,
 	NET_X25_CLEAR_REQUEST_TIMEOUT=4,
-	NET_X25_ACK_HOLD_BACK_TIMEOUT=5
+	NET_X25_ACK_HOLD_BACK_TIMEOUT=5,
+	NET_X25_FORWARD=6
 };
 
 /* /proc/sys/net/token-ring */
@@ -594,6 +731,9 @@ enum {
 	NET_DECNET_DST_GC_INTERVAL = 9,
 	NET_DECNET_CONF = 10,
 	NET_DECNET_NO_FC_MAX_CWND = 11,
+	NET_DECNET_MEM = 12,
+	NET_DECNET_RMEM = 13,
+	NET_DECNET_WMEM = 14,
 	NET_DECNET_DEBUG_LEVEL = 255
 };
 
@@ -636,6 +776,9 @@ enum {
 	NET_SCTP_MAX_BURST               = 12,
 	NET_SCTP_ADDIP_ENABLE		 = 13,
 	NET_SCTP_PRSCTP_ENABLE		 = 14,
+	NET_SCTP_SNDBUF_POLICY		 = 15,
+	NET_SCTP_SACK_TIMEOUT		 = 16,
+	NET_SCTP_RCVBUF_POLICY		 = 17,
 };
 
 /* /proc/sys/net/bridge */
@@ -644,9 +787,27 @@ enum {
 	NET_BRIDGE_NF_CALL_IPTABLES = 2,
 	NET_BRIDGE_NF_CALL_IP6TABLES = 3,
 	NET_BRIDGE_NF_FILTER_VLAN_TAGGED = 4,
+	NET_BRIDGE_NF_FILTER_PPPOE_TAGGED = 5,
 };
 
-/* CTL_PROC names: */
+/* proc/sys/net/irda */
+enum {
+	NET_IRDA_DISCOVERY=1,
+	NET_IRDA_DEVNAME=2,
+	NET_IRDA_DEBUG=3,
+	NET_IRDA_FAST_POLL=4,
+	NET_IRDA_DISCOVERY_SLOTS=5,
+	NET_IRDA_DISCOVERY_TIMEOUT=6,
+	NET_IRDA_SLOT_TIMEOUT=7,
+	NET_IRDA_MAX_BAUD_RATE=8,
+	NET_IRDA_MIN_TX_TURN_TIME=9,
+	NET_IRDA_MAX_TX_DATA_SIZE=10,
+	NET_IRDA_MAX_TX_WINDOW=11,
+	NET_IRDA_MAX_NOREPLY_TIME=12,
+	NET_IRDA_WARN_NOREPLY_TIME=13,
+	NET_IRDA_LAP_KEEPALIVE_TIME=14,
+};
+
 
 /* CTL_FS names: */
 enum
@@ -670,6 +831,8 @@ enum
 	FS_XFS=17,	/* struct: control xfs parameters */
 	FS_AIO_NR=18,	/* current system-wide number of aio requests */
 	FS_AIO_MAX_NR=19,	/* system-wide maximum number of aio requests */
+	FS_INOTIFY=20,	/* inotify submenu */
+	FS_OCFS2=988,	/* ocfs2 */
 };
 
 /* /proc/sys/fs/quota/ */
@@ -695,6 +858,7 @@ enum {
 	DEV_RAID=4,
 	DEV_MAC_HID=5,
 	DEV_SCSI=6,
+	DEV_IPMI=7,
 };
 
 /* /proc/sys/dev/cdrom */
@@ -760,6 +924,11 @@ enum {
 	DEV_SCSI_LOGGING_LEVEL=1,
 };
 
+/* /proc/sys/dev/ipmi */
+enum {
+	DEV_IPMI_POWEROFF_POWERCYCLE=1,
+};
+
 /* /proc/sys/abi */
 enum
 {
@@ -772,47 +941,52 @@ enum
 };
 
 #ifdef __KERNEL__
+#include <linux/list.h>
 
-extern void sysctl_init(void);
+/* For the /proc/sys support */
+struct ctl_table;
+extern struct ctl_table_header *sysctl_head_next(struct ctl_table_header *prev);
+extern void sysctl_head_finish(struct ctl_table_header *prev);
+extern int sysctl_perm(struct ctl_table *table, int op);
 
 typedef struct ctl_table ctl_table;
 
-typedef int ctl_handler (ctl_table *table, int __user *name, int nlen,
+typedef int ctl_handler (struct ctl_table *table, int __user *name, int nlen,
 			 void __user *oldval, size_t __user *oldlenp,
-			 void __user *newval, size_t newlen, 
-			 void **context);
+			 void __user *newval, size_t newlen);
 
-typedef int proc_handler (ctl_table *ctl, int write, struct file * filp,
+typedef int proc_handler (struct ctl_table *ctl, int write, struct file * filp,
 			  void __user *buffer, size_t *lenp, loff_t *ppos);
 
-extern int proc_dostring(ctl_table *, int, struct file *,
+extern int proc_dostring(struct ctl_table *, int, struct file *,
 			 void __user *, size_t *, loff_t *);
-extern int proc_dointvec(ctl_table *, int, struct file *,
+extern int proc_dointvec(struct ctl_table *, int, struct file *,
 			 void __user *, size_t *, loff_t *);
-extern int proc_dointvec_bset(ctl_table *, int, struct file *,
+extern int proc_dointvec_bset(struct ctl_table *, int, struct file *,
 			      void __user *, size_t *, loff_t *);
-extern int proc_dointvec_minmax(ctl_table *, int, struct file *,
+extern int proc_dointvec_minmax(struct ctl_table *, int, struct file *,
 				void __user *, size_t *, loff_t *);
-extern int proc_dointvec_jiffies(ctl_table *, int, struct file *,
+extern int proc_dointvec_jiffies(struct ctl_table *, int, struct file *,
 				 void __user *, size_t *, loff_t *);
-extern int proc_dointvec_userhz_jiffies(ctl_table *, int, struct file *,
+extern int proc_dointvec_userhz_jiffies(struct ctl_table *, int, struct file *,
 					void __user *, size_t *, loff_t *);
-extern int proc_dointvec_ms_jiffies(ctl_table *, int, struct file *,
+extern int proc_dointvec_ms_jiffies(struct ctl_table *, int, struct file *,
 				    void __user *, size_t *, loff_t *);
-extern int proc_doulongvec_minmax(ctl_table *, int, struct file *,
+extern int proc_doulongvec_minmax(struct ctl_table *, int, struct file *,
 				  void __user *, size_t *, loff_t *);
-extern int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int,
+extern int proc_doulongvec_ms_jiffies_minmax(struct ctl_table *table, int,
 				      struct file *, void __user *, size_t *, loff_t *);
 
 extern int do_sysctl (int __user *name, int nlen,
 		      void __user *oldval, size_t __user *oldlenp,
 		      void __user *newval, size_t newlen);
 
-extern int do_sysctl_strategy (ctl_table *table, 
+extern int do_sysctl_strategy (struct ctl_table *table,
 			       int __user *name, int nlen,
 			       void __user *oldval, size_t __user *oldlenp,
-			       void __user *newval, size_t newlen, void ** context);
+			       void __user *newval, size_t newlen);
 
+extern ctl_handler sysctl_data;
 extern ctl_handler sysctl_string;
 extern ctl_handler sysctl_intvec;
 extern ctl_handler sysctl_jiffies;
@@ -821,9 +995,9 @@ extern ctl_handler sysctl_ms_jiffies;
 
 /*
  * Register a set of sysctl names by calling register_sysctl_table
- * with an initialised array of ctl_table's.  An entry with zero
- * ctl_name terminates the table.  table->de will be set up by the
- * registration and need not be initialised in advance.
+ * with an initialised array of struct ctl_table's.  An entry with zero
+ * ctl_name and NULL procname terminates the table.  table->de will be
+ * set up by the registration and need not be initialised in advance.
  *
  * sysctl names can be mirrored automatically under /proc/sys.  The
  * procname supplied controls /proc naming.
@@ -834,7 +1008,10 @@ extern ctl_handler sysctl_ms_jiffies;
  * Leaf nodes in the sysctl tree will be represented by a single file
  * under /proc; non-leaf nodes will be represented by directories.  A
  * null procname disables /proc mirroring at this node.
- * 
+ *
+ * sysctl entries with a zero ctl_name will not be available through
+ * the binary sysctl interface.
+ *
  * sysctl(2) can automatically manage read and write requests through
  * the sysctl table.  The data and maxlen fields of the ctl_table
  * struct enable minimal validation of the values being written to be
@@ -864,25 +1041,28 @@ struct ctl_table
 	void *data;
 	int maxlen;
 	mode_t mode;
-	ctl_table *child;
+	struct ctl_table *child;
+	struct ctl_table *parent;	/* Automatically set */
 	proc_handler *proc_handler;	/* Callback for text formatting */
 	ctl_handler *strategy;		/* Callback function for all r/w */
-	struct proc_dir_entry *de;	/* /proc control block */
 	void *extra1;
 	void *extra2;
 };
 
 /* struct ctl_table_header is used to maintain dynamic lists of
-   ctl_table trees. */
+   struct ctl_table trees. */
 struct ctl_table_header
 {
-	ctl_table *ctl_table;
+	struct ctl_table *ctl_table;
 	struct list_head ctl_entry;
+	int used;
+	struct completion *unregistering;
 };
 
-struct ctl_table_header * register_sysctl_table(ctl_table * table, 
-						int insert_at_head);
+struct ctl_table_header *register_sysctl_table(struct ctl_table * table);
+
 void unregister_sysctl_table(struct ctl_table_header * table);
+int sysctl_check_table(struct ctl_table *table);
 
 #else /* __KERNEL__ */
 

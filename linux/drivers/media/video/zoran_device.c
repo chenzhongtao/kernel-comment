@@ -4,7 +4,7 @@
  * Media Labs LML33/LML33R10.
  *
  * This part handles device access (PCI/I2C/codec/...)
- * 
+ *
  * Copyright (C) 2000 Serguei Miridonov <mirsev@cicese.mx>
  *
  * Currently maintained by:
@@ -27,7 +27,6 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -46,26 +45,20 @@
 #include <linux/video_decoder.h>
 #include <linux/video_encoder.h>
 #include <linux/delay.h>
+#include <linux/wait.h>
 
 #include <asm/io.h>
 
 #include "videocodec.h"
 #include "zoran.h"
 #include "zoran_device.h"
+#include "zoran_card.h"
 
 #define IRQ_MASK ( ZR36057_ISR_GIRQ0 | \
 		   ZR36057_ISR_GIRQ1 | \
 		   ZR36057_ISR_JPEGRepIRQ )
 
 extern const struct zoran_format zoran_formats[];
-
-extern int *zr_debug;
-
-#define dprintk(num, format, args...) \
-	do { \
-		if (*zr_debug >= num) \
-			printk(format, ##args); \
-	} while (0)
 
 static int lml33dpath = 0;	/* 1 will use digital path in capture
 				 * mode instead of analog. It can be
@@ -76,7 +69,7 @@ static int lml33dpath = 0;	/* 1 will use digital path in capture
 				 * load on Bt819 input, there will be
 				 * some image imperfections */
 
-module_param(lml33dpath, bool, 0);
+module_param(lml33dpath, bool, 0644);
 MODULE_PARM_DESC(lml33dpath,
 		 "Use digital path capture mode (on LML33 cards)");
 
@@ -174,7 +167,7 @@ post_office_read (struct zoran *zr,
 static void
 dump_guests (struct zoran *zr)
 {
-	if (*zr_debug > 2) {
+	if (zr36067_debug > 2) {
 		int i, guest[8];
 
 		for (i = 1; i < 8; i++) {	// Don't read jpeg codec here
@@ -429,8 +422,6 @@ zr36057_set_vfe (struct zoran              *zr,
 	reg |= (HorDcm << ZR36057_VFESPFR_HorDcm);
 	reg |= (VerDcm << ZR36057_VFESPFR_VerDcm);
 	reg |= (DispMode << ZR36057_VFESPFR_DispMode);
-	if (format->palette != VIDEO_PALETTE_YUV422)
-		reg |= ZR36057_VFESPFR_LittleEndian;
 	/* RJ: I don't know, why the following has to be the opposite
 	 * of the corresponding ZR36060 setting, but only this way
 	 * we get the correct colors when uncompressing to the screen  */
@@ -439,35 +430,6 @@ zr36057_set_vfe (struct zoran              *zr,
 	if (zr->norm != VIDEO_MODE_NTSC)
 		reg |= ZR36057_VFESPFR_ExtFl;	// NEEDED!!!!!!! Wolfgang
 	reg |= ZR36057_VFESPFR_TopField;
-	switch (format->palette) {
-
-	case VIDEO_PALETTE_YUV422:
-		reg |= ZR36057_VFESPFR_YUV422;
-		break;
-
-	case VIDEO_PALETTE_RGB555:
-		reg |= ZR36057_VFESPFR_RGB555 | ZR36057_VFESPFR_ErrDif;
-		break;
-
-	case VIDEO_PALETTE_RGB565:
-		reg |= ZR36057_VFESPFR_RGB565 | ZR36057_VFESPFR_ErrDif;
-		break;
-
-	case VIDEO_PALETTE_RGB24:
-		reg |= ZR36057_VFESPFR_RGB888 | ZR36057_VFESPFR_Pack24;
-		break;
-
-	case VIDEO_PALETTE_RGB32:
-		reg |= ZR36057_VFESPFR_RGB888;
-		break;
-
-	default:
-		dprintk(1,
-			KERN_INFO "%s: set_vfe() - unknown color_fmt=%x\n",
-			ZR_DEVNAME(zr), format->palette);
-		return;
-
-	}
 	if (HorDcm >= 48) {
 		reg |= 3 << ZR36057_VFESPFR_HFilter;	/* 5 tap filter */
 	} else if (HorDcm >= 32) {
@@ -475,6 +437,7 @@ zr36057_set_vfe (struct zoran              *zr,
 	} else if (HorDcm >= 16) {
 		reg |= 1 << ZR36057_VFESPFR_HFilter;	/* 3 tap filter */
 	}
+	reg |= format->vfespfr;
 	btwrite(reg, ZR36057_VFESPFR);
 
 	/* display configuration */
@@ -491,7 +454,7 @@ zr36057_set_vfe (struct zoran              *zr,
 	/* (Ronald) don't write this if overlay_mask = NULL */
 	if (zr->overlay_mask) {
 		/* Write overlay clipping mask data, but don't enable overlay clipping */
-		/* RJ: since this makes only sense on the screen, we use 
+		/* RJ: since this makes only sense on the screen, we use
 		 * zr->overlay_settings.width instead of video_width */
 
 		mask_line_size = (BUZ_MAX_WIDTH + 31) / 32;
@@ -535,7 +498,7 @@ zr36057_overlay (struct zoran *zr,
 		 * All error messages are internal driver checking only! */
 
 		/* video display top and bottom registers */
-		reg = (u32) zr->buffer.base +
+		reg = (long) zr->buffer.base +
 		    zr->overlay_settings.x *
 		    ((zr->overlay_settings.format->depth + 7) / 8) +
 		    zr->overlay_settings.y *
@@ -650,11 +613,17 @@ zr36057_set_memgrab (struct zoran *zr,
 		     int           mode)
 {
 	if (mode) {
-		if (btread(ZR36057_VSSFGR) &
-		    (ZR36057_VSSFGR_SnapShot | ZR36057_VSSFGR_FrameGrab))
+		/* We only check SnapShot and not FrameGrab here.  SnapShot==1
+		 * means a capture is already in progress, but FrameGrab==1
+		 * doesn't necessary mean that.  It's more correct to say a 1
+		 * to 0 transition indicates a capture completed.  If a
+		 * capture is pending when capturing is tuned off, FrameGrab
+		 * will be stuck at 1 until capturing is turned back on.
+		 */
+		if (btread(ZR36057_VSSFGR) & ZR36057_VSSFGR_SnapShot)
 			dprintk(1,
 				KERN_WARNING
-				"%s: zr36057_set_memgrab(1) with SnapShot or FrameGrab on!?\n",
+				"%s: zr36057_set_memgrab(1) with SnapShot on!?\n",
 				ZR_DEVNAME(zr));
 
 		/* switch on VSync interrupts */
@@ -671,10 +640,11 @@ zr36057_set_memgrab (struct zoran *zr,
 
 		zr->v4l_memgrab_active = 1;
 	} else {
-		zr->v4l_memgrab_active = 0;
-
 		/* switch off VSync interrupts */
 		btand(~zr->card.vsync_int, ZR36057_ICR);	// SW
+
+		zr->v4l_memgrab_active = 0;
+		zr->v4l_grab_frame = NO_GRAB_ACTIVE;
 
 		/* reenable grabbing to screen if it was running */
 		if (zr->v4l_overlay_active) {
@@ -696,11 +666,10 @@ wait_grab_pending (struct zoran *zr)
 	if (!zr->v4l_memgrab_active)
 		return 0;
 
-	while (zr->v4l_pend_tail != zr->v4l_pend_head) {
-		interruptible_sleep_on(&zr->v4l_capq);
-		if (signal_pending(current))
-			return -ERESTARTSYS;
-	}
+	wait_event_interruptible(zr->v4l_capq,
+			(zr->v4l_pend_tail == zr->v4l_pend_head));
+	if (signal_pending(current))
+		return -ERESTARTSYS;
 
 	spin_lock_irqsave(&zr->spinlock, flags);
 	zr36057_set_memgrab(zr, 0);
@@ -819,12 +788,12 @@ zr36057_set_jpg (struct zoran          *zr,
 	if (zr->card.vfe_pol.hsync_pol)
 		btor(ZR36057_VFEHCR_HSPol, ZR36057_VFEHCR);
 	else
-		btand(~ZR36057_VFEHCR_HSPol, ZR36057_VFEHCR);		
+		btand(~ZR36057_VFEHCR_HSPol, ZR36057_VFEHCR);
 	reg = ((tvn->HSyncStart) << ZR36057_HSP_HsyncStart) |
 	      (tvn->Wt << ZR36057_HSP_LineTot);
 	btwrite(reg, ZR36057_HSP);
 	reg = ((zr->jpg_settings.img_x +
-	        tvn->HStart + 4) << ZR36057_FHAP_NAX) |
+		tvn->HStart + 4) << ZR36057_FHAP_NAX) |
 	      (zr->jpg_settings.img_width << ZR36057_FHAP_PAX);
 	btwrite(reg, ZR36057_FHAP);
 
@@ -1272,15 +1241,15 @@ error_handler (struct zoran *zr,
 	if (zr->JPEG_error != 1) {
 		/*
 		 * First entry: error just happened during normal operation
-		 * 
+		 *
 		 * In BUZ_MODE_MOTION_COMPRESS:
-		 * 
+		 *
 		 * Possible glitch in TV signal. In this case we should
 		 * stop the codec and wait for good quality signal before
 		 * restarting it to avoid further problems
-		 * 
+		 *
 		 * In BUZ_MODE_MOTION_DECOMPRESS:
-		 * 
+		 *
 		 * Bad JPEG frame: we have to mark it as processed (codec crashed
 		 * and was not able to do it itself), and to remove it from queue.
 		 */
@@ -1295,7 +1264,7 @@ error_handler (struct zoran *zr,
 		zr->num_errors++;
 
 		/* Report error */
-		if (*zr_debug > 1 && zr->num_errors <= 8) {
+		if (zr36067_debug > 1 && zr->num_errors <= 8) {
 			long frame;
 			frame =
 			    zr->jpg_pend[zr->jpg_dma_tail & BUZ_MASK_FRAME];
@@ -1409,15 +1378,14 @@ error_handler (struct zoran *zr,
 
 irqreturn_t
 zoran_irq (int             irq,
-	   void           *dev_id,
-	   struct pt_regs *regs)
+	   void           *dev_id)
 {
 	u32 stat, astat;
 	int count;
 	struct zoran *zr;
 	unsigned long flags;
 
-	zr = (struct zoran *) dev_id;
+	zr = dev_id;
 	count = 0;
 
 	if (zr->testing) {
@@ -1556,7 +1524,7 @@ zoran_irq (int             irq,
 
 			if (zr->codec_mode == BUZ_MODE_MOTION_DECOMPRESS ||
 			    zr->codec_mode == BUZ_MODE_MOTION_COMPRESS) {
-				if (*zr_debug > 1 &&
+				if (zr36067_debug > 1 &&
 				    (!zr->frame_num || zr->JPEG_error)) {
 					printk(KERN_INFO
 					       "%s: first frame ready: state=0x%08x odd_even=%d field_per_buff=%d delay=%d\n",
@@ -1593,7 +1561,7 @@ zoran_irq (int             irq,
 						    zr->JPEG_missed;
 				}
 
-				if (*zr_debug > 2 && zr->frame_num < 6) {
+				if (zr36067_debug > 2 && zr->frame_num < 6) {
 					int i;
 					printk("%s: seq=%ld stat_com:",
 					       ZR_DEVNAME(zr), zr->jpg_seq_num);

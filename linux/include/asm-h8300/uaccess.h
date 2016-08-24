@@ -24,11 +24,6 @@ static inline int __access_ok(unsigned long addr, unsigned long size)
 	return(RANGE_CHECK_OK(addr, size, 0L, (unsigned long)&_ramend));
 }
 
-static inline int verify_area(int type, const void *addr, unsigned long size)
-{
-	return access_ok(type,addr,size)?0:-EFAULT;
-}
-
 /*
  * The exception table consists of pairs of addresses: the first is the
  * address of an instruction that is allowed to fault, and the second is

@@ -29,10 +29,11 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/shm.h>
-#include <linux/smp_lock.h>
 #include <linux/syscalls.h>
+#include <linux/utsname.h>
+#include <linux/personality.h>
 
-int sys_pipe(int *fildes)
+int sys_pipe(int __user *fildes)
 {
 	int fd[2];
 	int error;
@@ -104,6 +105,11 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 {
 	if (len > TASK_SIZE)
 		return -ENOMEM;
+	/* Might want to check for cache aliasing issues for MAP_FIXED case
+	 * like ARM or MIPS ??? --BenH.
+	 */
+	if (flags & MAP_FIXED)
+		return addr;
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
@@ -161,21 +167,10 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 	}
 }
 
-long sys_shmat_wrapper(int shmid, char *shmaddr, int shmflag)
-{
-	unsigned long raddr;
-	int r;
-
-	r = do_shmat(shmid, shmaddr, shmflag, &raddr);
-	if (r < 0)
-		return r;
-	return raddr;
-}
-
 /* Fucking broken ABI */
 
-#ifdef CONFIG_PARISC64
-asmlinkage long parisc_truncate64(const char * path,
+#ifdef CONFIG_64BIT
+asmlinkage long parisc_truncate64(const char __user * path,
 					unsigned int high, unsigned int low)
 {
 	return sys_truncate(path, (long)high << 32 | low);
@@ -189,7 +184,7 @@ asmlinkage long parisc_ftruncate64(unsigned int fd,
 
 /* stubs for the benefit of the syscall_table since truncate64 and truncate 
  * are identical on LP64 */
-asmlinkage long sys_truncate64(const char * path, unsigned long length)
+asmlinkage long sys_truncate64(const char __user * path, unsigned long length)
 {
 	return sys_truncate(path, length);
 }
@@ -203,7 +198,7 @@ asmlinkage long sys_fcntl64(unsigned int fd, unsigned int cmd, unsigned long arg
 }
 #else
 
-asmlinkage long parisc_truncate64(const char * path,
+asmlinkage long parisc_truncate64(const char __user * path,
 					unsigned int high, unsigned int low)
 {
 	return sys_truncate64(path, (loff_t)high << 32 | low);
@@ -216,13 +211,13 @@ asmlinkage long parisc_ftruncate64(unsigned int fd,
 }
 #endif
 
-asmlinkage ssize_t parisc_pread64(unsigned int fd, char *buf, size_t count,
+asmlinkage ssize_t parisc_pread64(unsigned int fd, char __user *buf, size_t count,
 					unsigned int high, unsigned int low)
 {
 	return sys_pread64(fd, buf, count, (loff_t)high << 32 | low);
 }
 
-asmlinkage ssize_t parisc_pwrite64(unsigned int fd, const char *buf,
+asmlinkage ssize_t parisc_pwrite64(unsigned int fd, const char __user *buf,
 			size_t count, unsigned int high, unsigned int low)
 {
 	return sys_pwrite64(fd, buf, count, (loff_t)high << 32 | low);
@@ -242,6 +237,14 @@ asmlinkage long parisc_fadvise64_64(int fd,
 			(loff_t)high_len << 32 | low_len, advice);
 }
 
+asmlinkage long parisc_sync_file_range(int fd,
+			u32 hi_off, u32 lo_off, u32 hi_nbytes, u32 lo_nbytes,
+			unsigned int flags)
+{
+	return sys_sync_file_range(fd, (loff_t)hi_off << 32 | lo_off,
+			(loff_t)hi_nbytes << 32 | lo_nbytes, flags);
+}
+
 asmlinkage unsigned long sys_alloc_hugepages(int key, unsigned long addr, unsigned long len, int prot, int flag)
 {
 	return -ENOMEM;
@@ -250,4 +253,34 @@ asmlinkage unsigned long sys_alloc_hugepages(int key, unsigned long addr, unsign
 asmlinkage int sys_free_hugepages(unsigned long addr)
 {
 	return -EINVAL;
+}
+
+long parisc_personality(unsigned long personality)
+{
+	long err;
+
+	if (personality(current->personality) == PER_LINUX32
+	    && personality == PER_LINUX)
+		personality = PER_LINUX32;
+
+	err = sys_personality(personality);
+	if (err == PER_LINUX32)
+		err = PER_LINUX;
+
+	return err;
+}
+
+long parisc_newuname(struct new_utsname __user *name)
+{
+	int err = sys_newuname(name);
+
+#ifdef CONFIG_COMPAT
+	if (!err && personality(current->personality) == PER_LINUX32) {
+		if (__put_user(0, name->machine + 6) ||
+		    __put_user(0, name->machine + 7))
+			err = -EFAULT;
+	}
+#endif
+
+	return err;
 }

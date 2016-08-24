@@ -6,7 +6,6 @@
  * Dynamic registration, added aarp entries. (5/30/97 Chris Horn)
  */
 
-#include <linux/config.h>
 #include <linux/sysctl.h>
 #include <net/sock.h>
 #include <linux/atalk.h>
@@ -74,7 +73,7 @@ static struct ctl_table_header *atalk_table_header;
 
 void atalk_register_sysctl(void)
 {
-	atalk_table_header = register_sysctl_table(atalk_root_table, 1);
+	atalk_table_header = register_sysctl_table(atalk_root_table);
 }
 
 void atalk_unregister_sysctl(void)

@@ -35,7 +35,6 @@
  */
 
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -47,8 +46,8 @@
 #include <linux/spinlock.h>
 #include <asm/uaccess.h>
 #include <linux/usb.h>
+#include <linux/usb/serial.h>
 #include <linux/ioctl.h>
-#include "usb-serial.h"
 #include "kobil_sct.h"
 
 static int debug;
@@ -81,8 +80,9 @@ static int  kobil_ioctl(struct usb_serial_port *port, struct file *file,
 static int  kobil_tiocmget(struct usb_serial_port *port, struct file *file);
 static int  kobil_tiocmset(struct usb_serial_port *port, struct file *file,
 			   unsigned int set, unsigned int clear);
-static void kobil_read_int_callback( struct urb *urb, struct pt_regs *regs );
-static void kobil_write_callback( struct urb *purb, struct pt_regs *regs );
+static void kobil_read_int_callback( struct urb *urb );
+static void kobil_write_callback( struct urb *purb );
+static void kobil_set_termios(struct usb_serial_port *port, struct ktermios *old);
 
 
 static struct usb_device_id id_table [] = {
@@ -97,17 +97,21 @@ static struct usb_device_id id_table [] = {
 MODULE_DEVICE_TABLE (usb, id_table);
 
 static struct usb_driver kobil_driver = {
-	.owner =	THIS_MODULE,
 	.name =		"kobil",
 	.probe =	usb_serial_probe,
 	.disconnect =	usb_serial_disconnect,
 	.id_table =	id_table,
+	.no_dynamic_id = 	1,
 };
 
 
-static struct usb_serial_device_type kobil_device = {
-	.owner =		THIS_MODULE,
-	.name =			"KOBIL USB smart card terminal",
+static struct usb_serial_driver kobil_device = {
+	.driver = {
+		.owner =	THIS_MODULE,
+		.name =		"kobil",
+	},
+	.description =		"KOBIL USB smart card terminal",
+	.usb_driver = 		&kobil_driver,
 	.id_table =		id_table,
 	.num_interrupt_in =	NUM_DONT_CARE,
 	.num_bulk_in =		0,
@@ -116,6 +120,7 @@ static struct usb_serial_device_type kobil_device = {
 	.attach =		kobil_startup,
 	.shutdown =		kobil_shutdown,
 	.ioctl =		kobil_ioctl,
+	.set_termios =		kobil_set_termios,
 	.tiocmget =		kobil_tiocmget,
 	.tiocmset =		kobil_tiocmset,
 	.open =			kobil_open,
@@ -134,7 +139,6 @@ struct kobil_private {
 	int cur_pos; // index of the next char to send in buf
 	__u16 device_type;
 	int line_state;
-	struct termios internal_termios;
 };
 
 
@@ -183,13 +187,11 @@ static int kobil_startup (struct usb_serial *serial)
   
  	for (i = 0; i < altsetting->desc.bNumEndpoints; i++) {
 		endpoint = &altsetting->endpoint[i];
-		if (((endpoint->desc.bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_OUT) && 
- 		    ((endpoint->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT)) {
+		if (usb_endpoint_is_int_out(&endpoint->desc)) {
 		 	dbg("%s Found interrupt out endpoint. Address: %d", __FUNCTION__, endpoint->desc.bEndpointAddress);
 		 	priv->write_int_endpoint_address = endpoint->desc.bEndpointAddress;
  		}
- 		if (((endpoint->desc.bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_IN) && 
- 		    ((endpoint->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT)) {
+		if (usb_endpoint_is_int_in(&endpoint->desc)) {
 		 	dbg("%s Found interrupt in  endpoint. Address: %d", __FUNCTION__, endpoint->desc.bEndpointAddress);
 		 	priv->read_int_endpoint_address = endpoint->desc.bEndpointAddress;
 	 	}
@@ -215,7 +217,7 @@ static void kobil_shutdown (struct usb_serial *serial)
 
 static int kobil_open (struct usb_serial_port *port, struct file *filp)
 {
-	int i, result = 0;
+	int result = 0;
 	struct kobil_private *priv;
 	unsigned char *transfer_buffer;
 	int transfer_buffer_length = 8;
@@ -241,22 +243,10 @@ static int kobil_open (struct usb_serial_port *port, struct file *filp)
 	port->tty->termios->c_iflag = IGNBRK | IGNPAR | IXOFF;
 	port->tty->termios->c_oflag &= ~ONLCR; // do NOT translate CR to CR-NL (0x0A -> 0x0A 0x0D)
 	
-	// set up internal termios structure 
-	priv->internal_termios.c_iflag = port->tty->termios->c_iflag;
-	priv->internal_termios.c_oflag = port->tty->termios->c_oflag;
-	priv->internal_termios.c_cflag = port->tty->termios->c_cflag;
-	priv->internal_termios.c_lflag = port->tty->termios->c_lflag;
-
-	for (i=0; i<NCCS; i++) {
-		priv->internal_termios.c_cc[i] = port->tty->termios->c_cc[i];
-	}
-	
 	// allocate memory for transfer buffer
-	transfer_buffer = (unsigned char *) kmalloc(transfer_buffer_length, GFP_KERNEL);  
+	transfer_buffer = kzalloc(transfer_buffer_length, GFP_KERNEL);
 	if (! transfer_buffer) {
 		return -ENOMEM;
-	} else {
-		memset(transfer_buffer, 0, transfer_buffer_length);
 	}
 	
 	// allocate write_urb
@@ -271,7 +261,7 @@ static int kobil_open (struct usb_serial_port *port, struct file *filp)
 	}
 
 	// allocate memory for write_urb transfer buffer
-	port->write_urb->transfer_buffer = (unsigned char *) kmalloc(write_urb_transfer_buffer_length, GFP_KERNEL);
+	port->write_urb->transfer_buffer = kmalloc(write_urb_transfer_buffer_length, GFP_KERNEL);
 	if (! port->write_urb->transfer_buffer) {
 		kfree(transfer_buffer);
 		usb_free_urb(port->write_urb);
@@ -355,37 +345,36 @@ static void kobil_close (struct usb_serial_port *port, struct file *filp)
 		usb_free_urb( port->write_urb );
 		port->write_urb = NULL;
 	}
-	if (port->interrupt_in_urb)
-		usb_kill_urb(port->interrupt_in_urb);
+	usb_kill_urb(port->interrupt_in_urb);
 }
 
 
-static void kobil_read_int_callback( struct urb *purb, struct pt_regs *regs)
+static void kobil_read_int_callback(struct urb *urb)
 {
-	int i;
 	int result;
-	struct usb_serial_port *port = (struct usb_serial_port *) purb->context;
+	struct usb_serial_port *port = urb->context;
 	struct tty_struct *tty;
-	unsigned char *data = purb->transfer_buffer;
+	unsigned char *data = urb->transfer_buffer;
+	int status = urb->status;
 //	char *dbg_data;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 
-	if (purb->status) {
-		dbg("%s - port %d Read int status not zero: %d", __FUNCTION__, port->number, purb->status);
+	if (status) {
+		dbg("%s - port %d Read int status not zero: %d",
+		    __FUNCTION__, port->number, status);
 		return;
 	}
-	
-	tty = port->tty; 
-	if (purb->actual_length) {
-		
+
+	tty = port->tty;
+	if (urb->actual_length) {
+
 		// BEGIN DEBUG
 		/*
-		  dbg_data = (unsigned char *) kmalloc((3 *  purb->actual_length + 10) * sizeof(char), GFP_KERNEL);
+		  dbg_data = kzalloc((3 *  purb->actual_length + 10) * sizeof(char), GFP_KERNEL);
 		  if (! dbg_data) {
 		  return;
 		  }
-		  memset(dbg_data, 0, (3 *  purb->actual_length + 10));
 		  for (i = 0; i < purb->actual_length; i++) { 
 		  sprintf(dbg_data +3*i, "%02X ", data[i]); 
 		  }
@@ -394,26 +383,20 @@ static void kobil_read_int_callback( struct urb *purb, struct pt_regs *regs)
 		*/
 		// END DEBUG
 
-		for (i = 0; i < purb->actual_length; ++i) {
-			// if we insert more than TTY_FLIPBUF_SIZE characters, we drop them.
-			if(tty->flip.count >= TTY_FLIPBUF_SIZE) {
-				tty_flip_buffer_push(tty);
-			}
-			// this doesn't actually push the data through unless tty->low_latency is set
-			tty_insert_flip_char(tty, data[i], 0);
-		}
+		tty_buffer_request_room(tty, urb->actual_length);
+		tty_insert_flip_string(tty, data, urb->actual_length);
 		tty_flip_buffer_push(tty);
 	}
 
 	// someone sets the dev to 0 if the close method has been called
 	port->interrupt_in_urb->dev = port->serial->dev;
 
-	result = usb_submit_urb( port->interrupt_in_urb, GFP_ATOMIC ); 
+	result = usb_submit_urb(port->interrupt_in_urb, GFP_ATOMIC);
 	dbg("%s - port %d Send read URB returns: %i", __FUNCTION__, port->number, result);
 }
 
 
-static void kobil_write_callback( struct urb *purb, struct pt_regs *regs )
+static void kobil_write_callback( struct urb *purb )
 {
 }
 
@@ -522,11 +505,10 @@ static int kobil_tiocmget(struct usb_serial_port *port, struct file *file)
 	}
 
 	// allocate memory for transfer buffer
-	transfer_buffer = (unsigned char *) kmalloc(transfer_buffer_length, GFP_KERNEL);  
+	transfer_buffer = kzalloc(transfer_buffer_length, GFP_KERNEL);
 	if (!transfer_buffer) {
 		return -ENOMEM;
 	}
-	memset(transfer_buffer, 0, transfer_buffer_length);
 
 	result = usb_control_msg( port->serial->dev, 
 				  usb_rcvctrlpipe(port->serial->dev, 0 ), 
@@ -568,11 +550,10 @@ static int  kobil_tiocmset(struct usb_serial_port *port, struct file *file,
 	}
 
 	// allocate memory for transfer buffer
-	transfer_buffer = (unsigned char *) kmalloc(transfer_buffer_length, GFP_KERNEL);
+	transfer_buffer = kzalloc(transfer_buffer_length, GFP_KERNEL);
 	if (! transfer_buffer) {
 		return -ENOMEM;
 	}
-	memset(transfer_buffer, 0, transfer_buffer_length);
 
 	if (set & TIOCM_RTS)
 		rts = 1;
@@ -617,105 +598,82 @@ static int  kobil_tiocmset(struct usb_serial_port *port, struct file *file,
 	return (result < 0) ? result : 0;
 }
 
-
-static int  kobil_ioctl(struct usb_serial_port *port, struct file *file,
-			unsigned int cmd, unsigned long arg)
+static void kobil_set_termios(struct usb_serial_port *port, struct ktermios *old)
 {
 	struct kobil_private * priv;
 	int result;
 	unsigned short urb_val = 0;
-	unsigned char *transfer_buffer;
-	int transfer_buffer_length = 8;
-	char *settings;
-	void __user *user_arg = (void __user *)arg;
+	int c_cflag = port->tty->termios->c_cflag;
+	speed_t speed;
+	void * settings;
 
 	priv = usb_get_serial_port_data(port);
-	if ((priv->device_type == KOBIL_USBTWIN_PRODUCT_ID) || (priv->device_type == KOBIL_KAAN_SIM_PRODUCT_ID)) {
+	if (priv->device_type == KOBIL_USBTWIN_PRODUCT_ID || priv->device_type == KOBIL_KAAN_SIM_PRODUCT_ID)
+		// This device doesn't support ioctl calls
+		return;
+
+	switch (speed = tty_get_baud_rate(port->tty)) {
+		case 1200:
+			urb_val = SUSBCR_SBR_1200;
+			break;
+		default:
+			speed = 9600;
+		case 9600:
+			urb_val = SUSBCR_SBR_9600;
+			break;
+	}
+	urb_val |= (c_cflag & CSTOPB) ? SUSBCR_SPASB_2StopBits : SUSBCR_SPASB_1StopBit;
+
+	settings = kzalloc(50, GFP_KERNEL);
+	if (! settings)
+		return;
+
+	sprintf(settings, "%d ", speed);
+
+	if (c_cflag & PARENB) {
+		if  (c_cflag & PARODD) {
+			urb_val |= SUSBCR_SPASB_OddParity;
+			strcat(settings, "Odd Parity");
+		} else {
+			urb_val |= SUSBCR_SPASB_EvenParity;
+			strcat(settings, "Even Parity");
+		}
+	} else {
+		urb_val |= SUSBCR_SPASB_NoParity;
+		strcat(settings, "No Parity");
+	}
+	port->tty->termios->c_cflag &= ~CMSPAR;
+	tty_encode_baud_rate(port->tty, speed, speed);
+
+	result = usb_control_msg( port->serial->dev,
+				  usb_rcvctrlpipe(port->serial->dev, 0 ),
+				  SUSBCRequest_SetBaudRateParityAndStopBits,
+				  USB_TYPE_VENDOR | USB_RECIP_ENDPOINT | USB_DIR_OUT,
+				  urb_val,
+				  0,
+				  settings,
+				  0,
+				  KOBIL_TIMEOUT
+		);
+	kfree(settings);
+}
+
+static int kobil_ioctl(struct usb_serial_port *port, struct file * file, unsigned int cmd, unsigned long arg)
+{
+	struct kobil_private * priv = usb_get_serial_port_data(port);
+	unsigned char *transfer_buffer;
+	int transfer_buffer_length = 8;
+	int result;
+
+	if (priv->device_type == KOBIL_USBTWIN_PRODUCT_ID || priv->device_type == KOBIL_KAAN_SIM_PRODUCT_ID)
 		// This device doesn't support ioctl calls
 		return 0;
-	}
 
 	switch (cmd) {
-	case TCGETS:   // 0x5401
-		result = verify_area(VERIFY_WRITE, user_arg, sizeof(struct termios));
-		if (result) {
-			dbg("%s - port %d Error in verify_area", __FUNCTION__, port->number);
-			return(result);
-		}
-		if (kernel_termios_to_user_termios((struct termios __user *)arg,
-						   &priv->internal_termios))
-			return -EFAULT;
-		return 0;
-
-	case TCSETS:   // 0x5402
-		if (!(port->tty->termios)) {
-			dbg("%s - port %d Error: port->tty->termios is NULL", __FUNCTION__, port->number);
-			return -ENOTTY;
-		}
-		result = verify_area(VERIFY_READ, user_arg, sizeof(struct termios));
-		if (result) {
-			dbg("%s - port %d Error in verify_area", __FUNCTION__, port->number);
-			return result;
-		}
-		if (user_termios_to_kernel_termios(&priv->internal_termios,
-						   (struct termios __user *)arg))
-			return -EFAULT;
-		
-		settings = (unsigned char *) kmalloc(50, GFP_KERNEL);  
-		if (! settings) {
-			return -ENOBUFS;
-		}
-		memset(settings, 0, 50);
-
-		switch (priv->internal_termios.c_cflag & CBAUD) {
-		case B1200:
-			urb_val = SUSBCR_SBR_1200;
-			strcat(settings, "1200 ");
-			break;
-		case B9600:
-		default:
-			urb_val = SUSBCR_SBR_9600;
-			strcat(settings, "9600 ");
-			break;
-		}
-
-		urb_val |= (priv->internal_termios.c_cflag & CSTOPB) ? SUSBCR_SPASB_2StopBits : SUSBCR_SPASB_1StopBit;
-		strcat(settings, (priv->internal_termios.c_cflag & CSTOPB) ? "2 StopBits " : "1 StopBit ");
-
-		if (priv->internal_termios.c_cflag & PARENB) {
-			if  (priv->internal_termios.c_cflag & PARODD) {
-				urb_val |= SUSBCR_SPASB_OddParity;
-				strcat(settings, "Odd Parity");
-			} else {
-				urb_val |= SUSBCR_SPASB_EvenParity;
-				strcat(settings, "Even Parity");
-			}
-		} else {
-			urb_val |= SUSBCR_SPASB_NoParity;
-			strcat(settings, "No Parity");
-		}
-		dbg("%s - port %d setting port to: %s", __FUNCTION__, port->number, settings );
-
-		result = usb_control_msg( port->serial->dev, 
-					  usb_rcvctrlpipe(port->serial->dev, 0 ), 
-					  SUSBCRequest_SetBaudRateParityAndStopBits,
-					  USB_TYPE_VENDOR | USB_RECIP_ENDPOINT | USB_DIR_OUT,
-					  urb_val,
-					  0,
-					  settings,
-					  0,
-					  KOBIL_TIMEOUT
-			);
-
-		dbg("%s - port %d Send set_baudrate URB returns: %i", __FUNCTION__, port->number, result);
-		kfree(settings);
-		return 0;
-
 	case TCFLSH:   // 0x540B
-		transfer_buffer = (unsigned char *) kmalloc(transfer_buffer_length, GFP_KERNEL);
-		if (! transfer_buffer) {
+		transfer_buffer = kmalloc(transfer_buffer_length, GFP_KERNEL);
+		if (! transfer_buffer)
 		 	return -ENOBUFS;
-		}
 
 		result = usb_control_msg( port->serial->dev, 
 		 			  usb_rcvctrlpipe(port->serial->dev, 0 ), 
@@ -729,14 +687,12 @@ static int  kobil_ioctl(struct usb_serial_port *port, struct file *file,
 			);
 		
 		dbg("%s - port %d Send reset_all_queues (FLUSH) URB returns: %i", __FUNCTION__, port->number, result);
-
 		kfree(transfer_buffer);
-		return ((result < 0) ? -EFAULT : 0);
-
+		return (result < 0) ? -EFAULT : 0;
+	default:
+		return -ENOIOCTLCMD;
 	}
-	return -ENOIOCTLCMD;
 }
-
 
 static int __init kobil_init (void)
 {

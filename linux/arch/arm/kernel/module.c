@@ -2,6 +2,7 @@
  *  linux/arch/arm/kernel/module.c
  *
  *  Copyright (C) 2002 Russell King.
+ *  Modified for nommu by Hyok S. Choi
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -9,8 +10,8 @@
  *
  * Module allocation method suggested by Andi Kleen.
  */
-#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/moduleloader.h>
 #include <linux/kernel.h>
 #include <linux/elf.h>
 #include <linux/vmalloc.h>
@@ -32,48 +33,27 @@ extern void _etext;
 #define MODULE_START	(((unsigned long)&_etext + ~PGDIR_MASK) & PGDIR_MASK)
 #endif
 
+#ifdef CONFIG_MMU
 void *module_alloc(unsigned long size)
 {
 	struct vm_struct *area;
-	struct page **pages;
-	unsigned int array_size, i;
 
 	size = PAGE_ALIGN(size);
 	if (!size)
-		goto out_null;
+		return NULL;
 
 	area = __get_vm_area(size, VM_ALLOC, MODULE_START, MODULE_END);
 	if (!area)
-		goto out_null;
+		return NULL;
 
-	area->nr_pages = size >> PAGE_SHIFT;
-	array_size = area->nr_pages * sizeof(struct page *);
-	area->pages = pages = kmalloc(array_size, GFP_KERNEL);
-	if (!area->pages) {
-		remove_vm_area(area->addr);
-		kfree(area);
-		goto out_null;
-	}
-
-	memset(pages, 0, array_size);
-
-	for (i = 0; i < area->nr_pages; i++) {
-		pages[i] = alloc_page(GFP_KERNEL);
-		if (unlikely(!pages[i])) {
-			area->nr_pages = i;
-			goto out_no_pages;
-		}
-	}
-
-	if (map_vm_area(area, PAGE_KERNEL, &pages))
-		goto out_no_pages;
-	return area->addr;
-
- out_no_pages:
-	vfree(area->addr);
- out_null:
-	return NULL;
+	return __vmalloc_area(area, GFP_KERNEL, PAGE_KERNEL);
 }
+#else /* CONFIG_MMU */
+void *module_alloc(unsigned long size)
+{
+	return size == 0 ? NULL : vmalloc(size);
+}
+#endif /* !CONFIG_MMU */
 
 void module_free(struct module *module, void *region)
 {
@@ -128,14 +108,16 @@ apply_relocate(Elf32_Shdr *sechdrs, const char *strtab, unsigned int symindex,
 			break;
 
 		case R_ARM_PC24:
+		case R_ARM_CALL:
+		case R_ARM_JUMP24:
 			offset = (*(u32 *)loc & 0x00ffffff) << 2;
 			if (offset & 0x02000000)
 				offset -= 0x04000000;
 
 			offset += sym->st_value - loc;
 			if (offset & 3 ||
-			    offset <= (s32)0xfc000000 ||
-			    offset >= (s32)0x04000000) {
+			    offset <= (s32)0xfe000000 ||
+			    offset >= (s32)0x02000000) {
 				printk(KERN_ERR
 				       "%s: relocation out of range, section "
 				       "%d reloc %d sym '%s'\n", module->name,

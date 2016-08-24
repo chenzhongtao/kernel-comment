@@ -1,5 +1,5 @@
 /* 
- * Copyright (C) 2000, 2001, 2002 Jeff Dike (jdike@karaya.com)
+ * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
@@ -10,45 +10,33 @@ struct pt_regs;
 
 struct task_struct;
 
-#include "linux/config.h"
 #include "asm/ptrace.h"
-#include "choose-mode.h"
+#include "registers.h"
+#include "sysdep/archsetjmp.h"
 
 struct mm_struct;
 
-#define cpu_relax()   barrier()
-
 struct thread_struct {
+	struct task_struct *saved_task;
+	/*
+	 * This flag is set to 1 before calling do_fork (and analyzed in
+	 * copy_thread) to mark that we are begin called from userspace (fork /
+	 * vfork / clone), and reset to 0 after. It is left to 0 when called
+	 * from kernelspace (i.e. kernel_thread() or fork_idle(),
+	 * as of 2.6.11).
+	 */
 	int forking;
 	int nsyscalls;
 	struct pt_regs regs;
-	unsigned long cr2;
-	int err;
-	unsigned long trap_no;
 	int singlestep_syscall;
 	void *fault_addr;
-	void *fault_catcher;
+	jmp_buf *fault_catcher;
 	struct task_struct *prev_sched;
 	unsigned long temp_stack;
-	void *exec_buf;
+	jmp_buf *exec_buf;
 	struct arch_thread arch;
-	union {
-#ifdef CONFIG_MODE_TT
-		struct {
-			int extern_pid;
-			int tracing;
-			int switch_pipe[2];
-			int vm_seq;
-		} tt;
-#endif
-#ifdef CONFIG_MODE_SKAS
-		struct {
-			void *switch_buf;
-			void *fork_buf;
-			int mm_count;
-		} skas;
-#endif
-	} mode;
+	jmp_buf switch_buf;
+	int mm_count;
 	struct {
 		int op;
 		union {
@@ -71,9 +59,7 @@ struct thread_struct {
 { \
 	.forking		= 0, \
 	.nsyscalls		= 0, \
-        .regs		   	= EMPTY_REGS, \
-	.cr2			= 0, \
-	.err			= 0, \
+	.regs		   	= EMPTY_REGS,	\
 	.fault_addr		= NULL, \
 	.prev_sched		= NULL, \
 	.temp_stack		= 0, \
@@ -88,10 +74,16 @@ typedef struct {
 
 extern struct task_struct *alloc_task_struct(void);
 
-extern void release_thread(struct task_struct *);
+static inline void release_thread(struct task_struct *task)
+{
+}
+
 extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
-extern void dump_thread(struct pt_regs *regs, struct user *u);
-extern void prepare_to_copy(struct task_struct *tsk);
+
+static inline void prepare_to_copy(struct task_struct *tsk)
+{
+}
+
 
 extern unsigned long thread_saved_pc(struct task_struct *t);
 
@@ -134,19 +126,8 @@ extern struct cpuinfo_um cpu_data[];
 #define current_cpu_data boot_cpu_data
 #endif
 
-#define KSTK_EIP(tsk) (PT_REGS_IP(&tsk->thread.regs))
-#define KSTK_ESP(tsk) (PT_REGS_SP(&tsk->thread.regs))
+
+#define KSTK_REG(tsk, reg) get_thread_reg(reg, &tsk->thread.switch_buf)
 #define get_wchan(p) (0)
 
 #endif
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

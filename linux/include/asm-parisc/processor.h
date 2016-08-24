@@ -9,11 +9,10 @@
 #define __ASM_PARISC_PROCESSOR_H
 
 #ifndef __ASSEMBLY__
-#include <linux/config.h>
 #include <linux/threads.h>
 
+#include <asm/prefetch.h>
 #include <asm/hardware.h>
-#include <asm/page.h>
 #include <asm/pdc.h>
 #include <asm/ptrace.h>
 #include <asm/types.h>
@@ -26,14 +25,12 @@
  * Default implementation of macro that returns current
  * instruction pointer ("program counter").
  */
-
-/* We cannot use MFIA as it was added for PA2.0 - prumpf
-
-   At one point there were no "0f/0b" type local symbols in gas for
-   PA-RISC.  This is no longer true, but this still seems like the
-   nicest way to implement this. */
-
-#define current_text_addr() ({ void *pc; __asm__("\n\tblr 0,%0\n\tnop":"=r" (pc)); pc; })
+#ifdef CONFIG_PA20
+#define current_ia(x)	__asm__("mfia %0" : "=r"(x))
+#else /* mfia added in pa2.0 */
+#define current_ia(x)	__asm__("blr 0,%0\n\tnop" : "=r"(x))
+#endif
+#define current_text_addr() ({ void *pc; current_ia(pc); pc; })
 
 #define TASK_SIZE               (current->thread.task_size)
 #define TASK_UNMAPPED_BASE      (current->thread.map_base)
@@ -41,7 +38,7 @@
 #define DEFAULT_TASK_SIZE32	(0xFFF00000UL)
 #define DEFAULT_MAP_BASE32	(0x40000000UL)
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 #define DEFAULT_TASK_SIZE       (MAX_ADDRESS-0xf000000)
 #define DEFAULT_MAP_BASE        (0x200000000UL)
 #else
@@ -72,8 +69,8 @@ struct system_cpuinfo_parisc {
 		char   sys_model_name[81]; /* PDC-ROM returnes this model name */
 	} pdc;
 
-	char		*cpu_name;	/* e.g. "PA7300LC (PCX-L2)" */
-	char		*family_name;	/* e.g. "1.1e" */
+	const char	*cpu_name;	/* e.g. "PA7300LC (PCX-L2)" */
+	const char	*family_name;	/* e.g. "1.1e" */
 };
 
 
@@ -87,7 +84,6 @@ struct cpuinfo_parisc {
 	unsigned long hpa;          /* Host Physical address */
 	unsigned long txn_addr;     /* MMIO addr of EIR or id_eid */
 #ifdef CONFIG_SMP
-	spinlock_t lock;            /* synchronization for ipi's */
 	unsigned long pending_ipi;  /* bitmap of type ipi_message_type */
 	unsigned long ipi_count;    /* number ipi Interrupts */
 #endif
@@ -121,19 +117,38 @@ struct thread_struct {
 }; 
 
 /* Thread struct flags. */
+#define PARISC_UAC_NOPRINT	(1UL << 0)	/* see prctl and unaligned.c */
+#define PARISC_UAC_SIGBUS	(1UL << 1)
 #define PARISC_KERNEL_DEATH	(1UL << 31)	/* see die_if_kernel()... */
 
+#define PARISC_UAC_SHIFT	0
+#define PARISC_UAC_MASK		(PARISC_UAC_NOPRINT|PARISC_UAC_SIGBUS)
+
+#define SET_UNALIGN_CTL(task,value)                                       \
+        ({                                                                \
+        (task)->thread.flags = (((task)->thread.flags & ~PARISC_UAC_MASK) \
+                                | (((value) << PARISC_UAC_SHIFT) &        \
+                                   PARISC_UAC_MASK));                     \
+        0;                                                                \
+        })
+
+#define GET_UNALIGN_CTL(task,addr)                                        \
+        ({                                                                \
+        put_user(((task)->thread.flags & PARISC_UAC_MASK)                 \
+                 >> PARISC_UAC_SHIFT, (int __user *) (addr));             \
+        })
+
 #define INIT_THREAD { \
-	regs:	{	gr: { 0, }, \
-			fr: { 0, }, \
-			sr: { 0, }, \
-			iasq: { 0, }, \
-			iaoq: { 0, }, \
-			cr27: 0, \
+	.regs = {	.gr	= { 0, }, \
+			.fr	= { 0, }, \
+			.sr	= { 0, }, \
+			.iasq	= { 0, }, \
+			.iaoq	= { 0, }, \
+			.cr27	= 0, \
 		}, \
-	task_size:      DEFAULT_TASK_SIZE, \
-	map_base:       DEFAULT_MAP_BASE, \
-	flags:          0 \
+	.task_size	= DEFAULT_TASK_SIZE, \
+	.map_base	= DEFAULT_MAP_BASE, \
+	.flags		= 0 \
 	}
 
 /*
@@ -258,8 +273,8 @@ on downward growing arches, it looks like this:
  * it in here from the current->personality
  */
 
-#ifdef __LP64__
-#define USER_WIDE_MODE	(personality(current->personality) == PER_LINUX)
+#ifdef CONFIG_64BIT
+#define USER_WIDE_MODE	(!test_thread_flag(TIF_32BIT))
 #else
 #define USER_WIDE_MODE	0
 #endif
@@ -311,33 +326,20 @@ extern unsigned long get_wchan(struct task_struct *p);
 #define KSTK_EIP(tsk)	((tsk)->thread.regs.iaoq[0])
 #define KSTK_ESP(tsk)	((tsk)->thread.regs.gr[30])
 
-
-/*
- * PA 2.0 defines data prefetch instructions on page 6-11 of the Kane book.
- * In addition, many implementations do hardware prefetching of both
- * instructions and data.
- *
- * PA7300LC (page 14-4 of the ERS) also implements prefetching by a load
- * to gr0 but not in a way that Linux can use.  If the load would cause an
- * interruption (eg due to prefetching 0), it is suppressed on PA2.0
- * processors, but not on 7300LC.
- */
-#ifdef  CONFIG_PREFETCH
-#define ARCH_HAS_PREFETCH
-#define ARCH_HAS_PREFETCHW
-
-extern inline void prefetch(const void *addr)
-{
-	__asm__("ldw 0(%0), %%r0" : : "r" (addr));
-}
-
-extern inline void prefetchw(const void *addr)
-{
-	__asm__("ldd 0(%0), %%r0" : : "r" (addr));
-}
-#endif
-
 #define cpu_relax()	barrier()
+
+/* Used as a macro to identify the combined VIPT/PIPT cached
+ * CPUs which require a guarantee of coherency (no inequivalent
+ * aliases with different data, whether clean or not) to operate */
+static inline int parisc_requires_coherency(void)
+{
+#ifdef CONFIG_PA8X00
+	return (boot_cpu_data.cpu_type == mako) ||
+		(boot_cpu_data.cpu_type == mako2);
+#else
+	return 0;
+#endif
+}
 
 #endif /* __ASSEMBLY__ */
 

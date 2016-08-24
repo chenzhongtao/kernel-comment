@@ -1,50 +1,29 @@
 /*
- * Copyright (c) 2000-2001 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2001,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
-/*
- * This file contains the implementation of the xfs_efi_log_item
- * and xfs_efd_log_item items.
- */
-
 #include "xfs.h"
-
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
 #include "xfs_log.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
 #include "xfs_buf_item.h"
 #include "xfs_sb.h"
-#include "xfs_dir.h"
+#include "xfs_ag.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
 #include "xfs_trans_priv.h"
@@ -55,10 +34,19 @@ kmem_zone_t	*xfs_efi_zone;
 kmem_zone_t	*xfs_efd_zone;
 
 STATIC void	xfs_efi_item_unlock(xfs_efi_log_item_t *);
-STATIC void	xfs_efi_item_abort(xfs_efi_log_item_t *);
-STATIC void	xfs_efd_item_abort(xfs_efd_log_item_t *);
 
+void
+xfs_efi_item_free(xfs_efi_log_item_t *efip)
+{
+	int nexts = efip->efi_format.efi_nextents;
 
+	if (nexts > XFS_EFI_MAX_FAST_EXTENTS) {
+		kmem_free(efip, sizeof(xfs_efi_log_item_t) +
+				(nexts - 1) * sizeof(xfs_extent_t));
+	} else {
+		kmem_zone_free(xfs_efi_zone, efip);
+	}
+}
 
 /*
  * This returns the number of iovecs needed to log the given efi item.
@@ -95,6 +83,7 @@ xfs_efi_item_format(xfs_efi_log_item_t	*efip,
 
 	log_vector->i_addr = (xfs_caddr_t)&(efip->efi_format);
 	log_vector->i_len = size;
+	XLOG_VEC_SET_TYPE(log_vector, XLOG_REG_TYPE_EFI_FORMAT);
 	ASSERT(size >= sizeof(xfs_efi_log_format_t));
 }
 
@@ -120,8 +109,6 @@ xfs_efi_item_pin(xfs_efi_log_item_t *efip)
 STATIC void
 xfs_efi_item_unpin(xfs_efi_log_item_t *efip, int stale)
 {
-	int		nexts;
-	int		size;
 	xfs_mount_t	*mp;
 	SPLDECL(s);
 
@@ -132,21 +119,11 @@ xfs_efi_item_unpin(xfs_efi_log_item_t *efip, int stale)
 		 * xfs_trans_delete_ail() drops the AIL lock.
 		 */
 		xfs_trans_delete_ail(mp, (xfs_log_item_t *)efip, s);
-
-		nexts = efip->efi_format.efi_nextents;
-		if (nexts > XFS_EFI_MAX_FAST_EXTENTS) {
-			size = sizeof(xfs_efi_log_item_t);
-			size += (nexts - 1) * sizeof(xfs_extent_t);
-			kmem_free(efip, size);
-		} else {
-			kmem_zone_free(xfs_efi_zone, efip);
-		}
+		xfs_efi_item_free(efip);
 	} else {
 		efip->efi_flags |= XFS_EFI_COMMITTED;
 		AIL_UNLOCK(mp, s);
 	}
-
-	return;
 }
 
 /*
@@ -159,8 +136,6 @@ xfs_efi_item_unpin(xfs_efi_log_item_t *efip, int stale)
 STATIC void
 xfs_efi_item_unpin_remove(xfs_efi_log_item_t *efip, xfs_trans_t *tp)
 {
-	int		nexts;
-	int		size;
 	xfs_mount_t	*mp;
 	xfs_log_item_desc_t	*lidp;
 	SPLDECL(s);
@@ -178,23 +153,11 @@ xfs_efi_item_unpin_remove(xfs_efi_log_item_t *efip, xfs_trans_t *tp)
 		 * xfs_trans_delete_ail() drops the AIL lock.
 		 */
 		xfs_trans_delete_ail(mp, (xfs_log_item_t *)efip, s);
-		/*
-		 * now free the item itself
-		 */
-		nexts = efip->efi_format.efi_nextents;
-		if (nexts > XFS_EFI_MAX_FAST_EXTENTS) {
-			size = sizeof(xfs_efi_log_item_t);
-			size += (nexts - 1) * sizeof(xfs_extent_t);
-			kmem_free(efip, size);
-		} else {
-			kmem_zone_free(xfs_efi_zone, efip);
-		}
+		xfs_efi_item_free(efip);
 	} else {
 		efip->efi_flags |= XFS_EFI_COMMITTED;
 		AIL_UNLOCK(mp, s);
 	}
-
-	return;
 }
 
 /*
@@ -219,7 +182,7 @@ STATIC void
 xfs_efi_item_unlock(xfs_efi_log_item_t *efip)
 {
 	if (efip->efi_item.li_flags & XFS_LI_ABORTED)
-		xfs_efi_item_abort(efip);
+		xfs_efi_item_free(efip);
 	return;
 }
 
@@ -234,29 +197,6 @@ STATIC xfs_lsn_t
 xfs_efi_item_committed(xfs_efi_log_item_t *efip, xfs_lsn_t lsn)
 {
 	return lsn;
-}
-
-/*
- * This is called when the transaction logging the EFI is aborted.
- * Free up the EFI and return.  No need to clean up the slot for
- * the item in the transaction.  That was done by the unpin code
- * which is called prior to this routine in the abort/fs-shutdown path.
- */
-STATIC void
-xfs_efi_item_abort(xfs_efi_log_item_t *efip)
-{
-	int	nexts;
-	int	size;
-
-	nexts = efip->efi_format.efi_nextents;
-	if (nexts > XFS_EFI_MAX_FAST_EXTENTS) {
-		size = sizeof(xfs_efi_log_item_t);
-		size += (nexts - 1) * sizeof(xfs_extent_t);
-		kmem_free(efip, size);
-	} else {
-		kmem_zone_free(xfs_efi_zone, efip);
-	}
-	return;
 }
 
 /*
@@ -288,7 +228,7 @@ xfs_efi_item_committing(xfs_efi_log_item_t *efip, xfs_lsn_t lsn)
 /*
  * This is the ops vector shared by all efi log items.
  */
-struct xfs_item_ops xfs_efi_item_ops = {
+static struct xfs_item_ops xfs_efi_item_ops = {
 	.iop_size	= (uint(*)(xfs_log_item_t*))xfs_efi_item_size,
 	.iop_format	= (void(*)(xfs_log_item_t*, xfs_log_iovec_t*))
 					xfs_efi_item_format,
@@ -301,7 +241,6 @@ struct xfs_item_ops xfs_efi_item_ops = {
 	.iop_committed	= (xfs_lsn_t(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_efi_item_committed,
 	.iop_push	= (void(*)(xfs_log_item_t*))xfs_efi_item_push,
-	.iop_abort	= (void(*)(xfs_log_item_t*))xfs_efi_item_abort,
 	.iop_pushbuf	= NULL,
 	.iop_committing = (void(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_efi_item_committing
@@ -339,6 +278,62 @@ xfs_efi_init(xfs_mount_t	*mp,
 }
 
 /*
+ * Copy an EFI format buffer from the given buf, and into the destination
+ * EFI format structure.
+ * The given buffer can be in 32 bit or 64 bit form (which has different padding),
+ * one of which will be the native format for this kernel.
+ * It will handle the conversion of formats if necessary.
+ */
+int
+xfs_efi_copy_format(xfs_log_iovec_t *buf, xfs_efi_log_format_t *dst_efi_fmt)
+{
+	xfs_efi_log_format_t *src_efi_fmt = (xfs_efi_log_format_t *)buf->i_addr;
+	uint i;
+	uint len = sizeof(xfs_efi_log_format_t) + 
+		(src_efi_fmt->efi_nextents - 1) * sizeof(xfs_extent_t);  
+	uint len32 = sizeof(xfs_efi_log_format_32_t) + 
+		(src_efi_fmt->efi_nextents - 1) * sizeof(xfs_extent_32_t);  
+	uint len64 = sizeof(xfs_efi_log_format_64_t) + 
+		(src_efi_fmt->efi_nextents - 1) * sizeof(xfs_extent_64_t);  
+
+	if (buf->i_len == len) {
+		memcpy((char *)dst_efi_fmt, (char*)src_efi_fmt, len);
+		return 0;
+	} else if (buf->i_len == len32) {
+		xfs_efi_log_format_32_t *src_efi_fmt_32 =
+			(xfs_efi_log_format_32_t *)buf->i_addr;
+
+		dst_efi_fmt->efi_type     = src_efi_fmt_32->efi_type;
+		dst_efi_fmt->efi_size     = src_efi_fmt_32->efi_size;
+		dst_efi_fmt->efi_nextents = src_efi_fmt_32->efi_nextents;
+		dst_efi_fmt->efi_id       = src_efi_fmt_32->efi_id;
+		for (i = 0; i < dst_efi_fmt->efi_nextents; i++) {
+			dst_efi_fmt->efi_extents[i].ext_start =
+				src_efi_fmt_32->efi_extents[i].ext_start;
+			dst_efi_fmt->efi_extents[i].ext_len =
+				src_efi_fmt_32->efi_extents[i].ext_len;
+		}
+		return 0;
+	} else if (buf->i_len == len64) {
+		xfs_efi_log_format_64_t *src_efi_fmt_64 =
+			(xfs_efi_log_format_64_t *)buf->i_addr;
+
+		dst_efi_fmt->efi_type     = src_efi_fmt_64->efi_type;
+		dst_efi_fmt->efi_size     = src_efi_fmt_64->efi_size;
+		dst_efi_fmt->efi_nextents = src_efi_fmt_64->efi_nextents;
+		dst_efi_fmt->efi_id       = src_efi_fmt_64->efi_id;
+		for (i = 0; i < dst_efi_fmt->efi_nextents; i++) {
+			dst_efi_fmt->efi_extents[i].ext_start =
+				src_efi_fmt_64->efi_extents[i].ext_start;
+			dst_efi_fmt->efi_extents[i].ext_len =
+				src_efi_fmt_64->efi_extents[i].ext_len;
+		}
+		return 0;
+	}
+	return EFSCORRUPTED;
+}
+
+/*
  * This is called by the efd item code below to release references to
  * the given efi item.  Each efd calls this with the number of
  * extents that it has logged, and when the sum of these reaches
@@ -355,8 +350,6 @@ xfs_efi_release(xfs_efi_log_item_t	*efip,
 {
 	xfs_mount_t	*mp;
 	int		extents_left;
-	uint		size;
-	int		nexts;
 	SPLDECL(s);
 
 	mp = efip->efi_item.li_mountp;
@@ -372,64 +365,24 @@ xfs_efi_release(xfs_efi_log_item_t	*efip,
 		 * xfs_trans_delete_ail() drops the AIL lock.
 		 */
 		xfs_trans_delete_ail(mp, (xfs_log_item_t *)efip, s);
+		xfs_efi_item_free(efip);
 	} else {
 		AIL_UNLOCK(mp, s);
 	}
-
-	if (extents_left == 0) {
-		nexts = efip->efi_format.efi_nextents;
-		if (nexts > XFS_EFI_MAX_FAST_EXTENTS) {
-			size = sizeof(xfs_efi_log_item_t);
-			size += (nexts - 1) * sizeof(xfs_extent_t);
-			kmem_free(efip, size);
-		} else {
-			kmem_zone_free(xfs_efi_zone, efip);
-		}
-	}
 }
 
-/*
- * This is called when the transaction that should be committing the
- * EFD corresponding to the given EFI is aborted.  The committed and
- * canceled flags are used to coordinate the freeing of the EFI and
- * the references by the transaction that committed it.
- */
 STATIC void
-xfs_efi_cancel(
-	xfs_efi_log_item_t	*efip)
+xfs_efd_item_free(xfs_efd_log_item_t *efdp)
 {
-	int		nexts;
-	int		size;
-	xfs_mount_t	*mp;
-	SPLDECL(s);
+	int nexts = efdp->efd_format.efd_nextents;
 
-	mp = efip->efi_item.li_mountp;
-	AIL_LOCK(mp, s);
-	if (efip->efi_flags & XFS_EFI_COMMITTED) {
-		/*
-		 * xfs_trans_delete_ail() drops the AIL lock.
-		 */
-		xfs_trans_delete_ail(mp, (xfs_log_item_t *)efip, s);
-
-		nexts = efip->efi_format.efi_nextents;
-		if (nexts > XFS_EFI_MAX_FAST_EXTENTS) {
-			size = sizeof(xfs_efi_log_item_t);
-			size += (nexts - 1) * sizeof(xfs_extent_t);
-			kmem_free(efip, size);
-		} else {
-			kmem_zone_free(xfs_efi_zone, efip);
-		}
+	if (nexts > XFS_EFD_MAX_FAST_EXTENTS) {
+		kmem_free(efdp, sizeof(xfs_efd_log_item_t) +
+				(nexts - 1) * sizeof(xfs_extent_t));
 	} else {
-		efip->efi_flags |= XFS_EFI_CANCELED;
-		AIL_UNLOCK(mp, s);
+		kmem_zone_free(xfs_efd_zone, efdp);
 	}
-
-	return;
 }
-
-
-
-
 
 /*
  * This returns the number of iovecs needed to log the given efd item.
@@ -466,6 +419,7 @@ xfs_efd_item_format(xfs_efd_log_item_t	*efdp,
 
 	log_vector->i_addr = (xfs_caddr_t)&(efdp->efd_format);
 	log_vector->i_len = size;
+	XLOG_VEC_SET_TYPE(log_vector, XLOG_REG_TYPE_EFD_FORMAT);
 	ASSERT(size >= sizeof(xfs_efd_log_format_t));
 }
 
@@ -518,7 +472,7 @@ STATIC void
 xfs_efd_item_unlock(xfs_efd_log_item_t *efdp)
 {
 	if (efdp->efd_item.li_flags & XFS_LI_ABORTED)
-		xfs_efd_item_abort(efdp);
+		xfs_efd_item_free(efdp);
 	return;
 }
 
@@ -533,9 +487,6 @@ xfs_efd_item_unlock(xfs_efd_log_item_t *efdp)
 STATIC xfs_lsn_t
 xfs_efd_item_committed(xfs_efd_log_item_t *efdp, xfs_lsn_t lsn)
 {
-	uint	size;
-	int	nexts;
-
 	/*
 	 * If we got a log I/O error, it's always the case that the LR with the
 	 * EFI got unpinned and freed before the EFD got aborted.
@@ -543,48 +494,8 @@ xfs_efd_item_committed(xfs_efd_log_item_t *efdp, xfs_lsn_t lsn)
 	if ((efdp->efd_item.li_flags & XFS_LI_ABORTED) == 0)
 		xfs_efi_release(efdp->efd_efip, efdp->efd_format.efd_nextents);
 
-	nexts = efdp->efd_format.efd_nextents;
-	if (nexts > XFS_EFD_MAX_FAST_EXTENTS) {
-		size = sizeof(xfs_efd_log_item_t);
-		size += (nexts - 1) * sizeof(xfs_extent_t);
-		kmem_free(efdp, size);
-	} else {
-		kmem_zone_free(xfs_efd_zone, efdp);
-	}
-
+	xfs_efd_item_free(efdp);
 	return (xfs_lsn_t)-1;
-}
-
-/*
- * The transaction of which this EFD is a part has been aborted.
- * Inform its companion EFI of this fact and then clean up after
- * ourselves.  No need to clean up the slot for the item in the
- * transaction.  That was done by the unpin code which is called
- * prior to this routine in the abort/fs-shutdown path.
- */
-STATIC void
-xfs_efd_item_abort(xfs_efd_log_item_t *efdp)
-{
-	int	nexts;
-	int	size;
-
-	/*
-	 * If we got a log I/O error, it's always the case that the LR with the
-	 * EFI got unpinned and freed before the EFD got aborted. So don't
-	 * reference the EFI at all in that case.
-	 */
-	if ((efdp->efd_item.li_flags & XFS_LI_ABORTED) == 0)
-		xfs_efi_cancel(efdp->efd_efip);
-
-	nexts = efdp->efd_format.efd_nextents;
-	if (nexts > XFS_EFD_MAX_FAST_EXTENTS) {
-		size = sizeof(xfs_efd_log_item_t);
-		size += (nexts - 1) * sizeof(xfs_extent_t);
-		kmem_free(efdp, size);
-	} else {
-		kmem_zone_free(xfs_efd_zone, efdp);
-	}
-	return;
 }
 
 /*
@@ -615,7 +526,7 @@ xfs_efd_item_committing(xfs_efd_log_item_t *efip, xfs_lsn_t lsn)
 /*
  * This is the ops vector shared by all efd log items.
  */
-struct xfs_item_ops xfs_efd_item_ops = {
+static struct xfs_item_ops xfs_efd_item_ops = {
 	.iop_size	= (uint(*)(xfs_log_item_t*))xfs_efd_item_size,
 	.iop_format	= (void(*)(xfs_log_item_t*, xfs_log_iovec_t*))
 					xfs_efd_item_format,
@@ -628,7 +539,6 @@ struct xfs_item_ops xfs_efd_item_ops = {
 	.iop_committed	= (xfs_lsn_t(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_efd_item_committed,
 	.iop_push	= (void(*)(xfs_log_item_t*))xfs_efd_item_push,
-	.iop_abort	= (void(*)(xfs_log_item_t*))xfs_efd_item_abort,
 	.iop_pushbuf	= NULL,
 	.iop_committing = (void(*)(xfs_log_item_t*, xfs_lsn_t))
 					xfs_efd_item_committing

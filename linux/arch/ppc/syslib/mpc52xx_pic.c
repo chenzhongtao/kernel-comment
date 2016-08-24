@@ -1,6 +1,4 @@
 /*
- * arch/ppc/syslib/mpc52xx_pic.c
- *
  * Programmable Interrupt Controller functions for the Freescale MPC52xx 
  * embedded CPU.
  *
@@ -33,8 +31,8 @@
 #include <asm/mpc52xx.h>
 
 
-static struct mpc52xx_intr *intr;
-static struct mpc52xx_sdma *sdma;
+static struct mpc52xx_intr __iomem *intr;
+static struct mpc52xx_sdma __iomem *sdma;
 
 static void
 mpc52xx_ic_disable(unsigned int irq)
@@ -166,14 +164,11 @@ mpc52xx_ic_end(unsigned int irq)
 }
 
 static struct hw_interrupt_type mpc52xx_ic = {
-	"MPC52xx",
-	NULL,				/* startup(irq) */
-	NULL,				/* shutdown(irq) */
-	mpc52xx_ic_enable,		/* enable(irq) */
-	mpc52xx_ic_disable,		/* disable(irq) */
-	mpc52xx_ic_disable_and_ack,	/* disable_and_ack(irq) */
-	mpc52xx_ic_end,			/* end(irq) */
-	0				/* set_affinity(irq, cpumask) SMP. */
+	.typename	= " MPC52xx  ",
+	.enable		= mpc52xx_ic_enable,
+	.disable	= mpc52xx_ic_disable,
+	.ack		= mpc52xx_ic_disable_and_ack,
+	.end		= mpc52xx_ic_end,
 };
 
 void __init
@@ -183,10 +178,8 @@ mpc52xx_init_irq(void)
 	u32 intr_ctrl;
 
 	/* Remap the necessary zones */
-	intr = (struct mpc52xx_intr *)
-		ioremap(MPC52xx_INTR, sizeof(struct mpc52xx_intr));
-	sdma = (struct mpc52xx_sdma *)
-		ioremap(MPC52xx_SDMA, sizeof(struct mpc52xx_sdma));
+	intr = ioremap(MPC52xx_PA(MPC52xx_INTR_OFFSET), MPC52xx_INTR_SIZE);
+	sdma = ioremap(MPC52xx_PA(MPC52xx_SDMA_OFFSET), MPC52xx_SDMA_SIZE);
 
 	if ((intr==NULL) || (sdma==NULL))
 		panic("Can't ioremap PIC/SDMA register for init_irq !");
@@ -211,9 +204,9 @@ mpc52xx_init_irq(void)
 	out_be32(&intr->main_pri1, 0);
 	out_be32(&intr->main_pri2, 0);
 
-	/* Initialize irq_desc[i].handler's with mpc52xx_ic. */
+	/* Initialize irq_desc[i].chip's with mpc52xx_ic. */
 	for (i = 0; i < NR_IRQS; i++) {
-		irq_desc[i].handler = &mpc52xx_ic;
+		irq_desc[i].chip = &mpc52xx_ic;
 		irq_desc[i].status = IRQ_LEVEL;
 	}
 
@@ -227,7 +220,7 @@ mpc52xx_init_irq(void)
 }
 
 int
-mpc52xx_get_irq(struct pt_regs *regs)
+mpc52xx_get_irq(void)
 {
 	u32 status;
 	int irq = -1;

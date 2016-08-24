@@ -41,45 +41,6 @@
 #define PCI_CLASS_SUBCLASS_MASK		0xffff
 #endif
 
-/* in recent 2.5 interrupt handlers have non-void return value */
-#ifndef IRQ_RETVAL
-typedef void irqreturn_t;
-#define IRQ_NONE
-#define IRQ_HANDLED
-#define IRQ_RETVAL(x)
-#endif
-
-/* some stuff need to check kernelversion. Not all 2.5 stuff was present
- * in early 2.5.x - the test is merely to separate 2.4 from 2.5
- */
-#include <linux/version.h>
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
-
-/* PDE() introduced in 2.5.4 */
-#ifdef CONFIG_PROC_FS
-#define PDE(inode) ((inode)->u.generic_ip)
-#endif
-
-/* irda crc16 calculation exported in 2.5.42 */
-#define irda_calc_crc16(fcs,buf,len)	(GOOD_FCS)
-
-/* we use this for unified pci device name access */
-#define PCIDEV_NAME(pdev)	((pdev)->name)
-
-#else /* 2.5 or later */
-
-/* recent 2.5/2.6 stores pci device names at varying places ;-) */
-#ifdef CONFIG_PCI_NAMES
-/* human readable name */
-#define PCIDEV_NAME(pdev)	((pdev)->pretty_name)
-#else
-/* whatever we get from the associated struct device - bus:slot:dev.fn id */
-#define PCIDEV_NAME(pdev)	(pci_name(pdev))
-#endif
-
-#endif
-
 /* ================================================================ */
 
 /* non-standard PCI registers */
@@ -576,15 +537,15 @@ calc_width_bits(unsigned baudrate, unsigned widthselect, unsigned clockselect)
  */
 
 struct ring_descr_hw {
-	volatile u16	rd_count;	/* tx/rx count [11:0] */
-	u16		reserved;
+	volatile __le16	rd_count;	/* tx/rx count [11:0] */
+	__le16		reserved;
 	union {
-		u32	addr;		/* [23:0] of the buffer's busaddress */
+		__le32	addr;		/* [23:0] of the buffer's busaddress */
 		struct {
 			u8		addr_res[3];
 			volatile u8	status;		/* descriptor status */
-		} rd_s __attribute__((packed));
-	} rd_u __attribute((packed));
+		} __attribute__((packed)) rd_s;
+	} __attribute((packed)) rd_u;
 } __attribute__ ((packed));
 
 #define rd_addr		rd_u.addr
@@ -656,7 +617,7 @@ static inline void rd_set_addr_status(struct ring_descr *rd, dma_addr_t a, u8 s)
 	 */
 
 	if ((a & ~DMA_MASK_MSTRPAGE)>>24 != MSTRPAGE_VALUE) {
-		ERROR("%s: pci busaddr inconsistency!\n", __FUNCTION__);
+		IRDA_ERROR("%s: pci busaddr inconsistency!\n", __FUNCTION__);
 		dump_stack();
 		return;
 	}
@@ -767,7 +728,7 @@ typedef struct vlsi_irda_dev {
 	struct timeval		last_rx;
 
 	spinlock_t		lock;
-	struct semaphore	sem;
+	struct mutex		mtx;
 
 	u8			resume_ok;	
 	struct proc_dir_entry	*proc_entry;

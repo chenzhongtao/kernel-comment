@@ -60,13 +60,15 @@
 #define TAG_MASK		0xf8
 #endif /* __KERNEL__ */
 
+#include <linux/types.h>
+
 /*
  * Command Header sizes for IOCTL commands
  */
 
-#define HDIO_DRIVE_CMD_HDR_SIZE		(4 * sizeof(u8))
-#define HDIO_DRIVE_HOB_HDR_SIZE		(8 * sizeof(u8))
-#define HDIO_DRIVE_TASK_HDR_SIZE	(8 * sizeof(u8))
+#define HDIO_DRIVE_CMD_HDR_SIZE		(4 * sizeof(__u8))
+#define HDIO_DRIVE_HOB_HDR_SIZE		(8 * sizeof(__u8))
+#define HDIO_DRIVE_TASK_HDR_SIZE	(8 * sizeof(__u8))
 
 #define IDE_DRIVE_TASK_INVALID		-1
 #define IDE_DRIVE_TASK_NO_DATA		0
@@ -80,10 +82,12 @@
 /*
  * Define standard taskfile in/out register
  */
-#define IDE_TASKFILE_STD_OUT_FLAGS	0xFE
 #define IDE_TASKFILE_STD_IN_FLAGS	0xFE
-#define IDE_HOB_STD_OUT_FLAGS		0x3C
 #define IDE_HOB_STD_IN_FLAGS		0x3C
+#ifndef __KERNEL__
+#define IDE_TASKFILE_STD_OUT_FLAGS	0xFE
+#define IDE_HOB_STD_OUT_FLAGS		0x3C
+#endif
 
 typedef unsigned char task_ioreg_t;
 typedef unsigned long sata_ioreg_t;

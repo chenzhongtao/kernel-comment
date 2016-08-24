@@ -3,14 +3,13 @@
  *    character device frontend for tape device driver
  *
  *  S390 and zSeries version
- *    Copyright (C) 2001,2002 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 2001,2006
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *		 Michael Holzheu <holzheu@de.ibm.com>
  *		 Tuan Ngo-Anh <ngoanh@de.ibm.com>
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/proc_fs.h>
@@ -37,13 +36,16 @@ static int tapechar_open(struct inode *,struct file *);
 static int tapechar_release(struct inode *,struct file *);
 static int tapechar_ioctl(struct inode *, struct file *, unsigned int,
 			  unsigned long);
+static long tapechar_compat_ioctl(struct file *, unsigned int,
+			  unsigned long);
 
-static struct file_operations tape_fops =
+static const struct file_operations tape_fops =
 {
 	.owner = THIS_MODULE,
 	.read = tapechar_read,
 	.write = tapechar_write,
 	.ioctl = tapechar_ioctl,
+	.compat_ioctl = tapechar_compat_ioctl,
 	.open = tapechar_open,
 	.release = tapechar_release,
 };
@@ -87,22 +89,7 @@ tapechar_cleanup_device(struct tape_device *device)
 	device->nt = NULL;
 }
 
-/*
- * Terminate write command (we write two TMs and skip backward over last)
- * This ensures that the tape is always correctly terminated.
- * When the user writes afterwards a new file, he will overwrite the
- * second TM and therefore one TM will remain to separate the
- * two files on the tape...
- */
-static inline void
-tapechar_terminate_write(struct tape_device *device)
-{
-	if (tape_mtop(device, MTWEOF, 1) == 0 &&
-	    tape_mtop(device, MTWEOF, 1) == 0)
-		tape_mtop(device, MTBSR, 1);
-}
-
-static inline int
+static int
 tapechar_check_idalbuffer(struct tape_device *device, size_t block_size)
 {
 	struct idal_buffer *new;
@@ -135,7 +122,7 @@ tapechar_check_idalbuffer(struct tape_device *device, size_t block_size)
 /*
  * Tape device read function
  */
-ssize_t
+static ssize_t
 tapechar_read(struct file *filp, char __user *data, size_t count, loff_t *ppos)
 {
 	struct tape_device *device;
@@ -199,7 +186,7 @@ tapechar_read(struct file *filp, char __user *data, size_t count, loff_t *ppos)
 /*
  * Tape device write function
  */
-ssize_t
+static ssize_t
 tapechar_write(struct file *filp, const char __user *data, size_t count, loff_t *ppos)
 {
 	struct tape_device *device;
@@ -289,20 +276,20 @@ tapechar_write(struct file *filp, const char __user *data, size_t count, loff_t 
 /*
  * Character frontend tape device open function.
  */
-int
+static int
 tapechar_open (struct inode *inode, struct file *filp)
 {
 	struct tape_device *device;
 	int minor, rc;
 
 	DBF_EVENT(6, "TCHAR:open: %i:%i\n",
-		imajor(filp->f_dentry->d_inode),
-		iminor(filp->f_dentry->d_inode));
+		imajor(filp->f_path.dentry->d_inode),
+		iminor(filp->f_path.dentry->d_inode));
 
-	if (imajor(filp->f_dentry->d_inode) != tapechar_major)
+	if (imajor(filp->f_path.dentry->d_inode) != tapechar_major)
 		return -ENODEV;
 
-	minor = iminor(filp->f_dentry->d_inode);
+	minor = iminor(filp->f_path.dentry->d_inode);
 	device = tape_get_device(minor / TAPE_MINORS_PER_DEV);
 	if (IS_ERR(device)) {
 		DBF_EVENT(3, "TCHAR:open: tape_get_device() failed\n");
@@ -324,7 +311,7 @@ tapechar_open (struct inode *inode, struct file *filp)
  * Character frontend tape device release function.
  */
 
-int
+static int
 tapechar_release(struct inode *inode, struct file *filp)
 {
 	struct tape_device *device;
@@ -461,6 +448,23 @@ tapechar_ioctl(struct inode *inp, struct file *filp,
 	if (device->discipline->ioctl_fn == NULL)
 		return -EINVAL;
 	return device->discipline->ioctl_fn(device, no, data);
+}
+
+static long
+tapechar_compat_ioctl(struct file *filp, unsigned int no, unsigned long data)
+{
+	struct tape_device *device = filp->private_data;
+	int rval = -ENOIOCTLCMD;
+
+	if (device->discipline->ioctl_fn) {
+		lock_kernel();
+		rval = device->discipline->ioctl_fn(device, no, data);
+		unlock_kernel();
+		if (rval == -EINVAL)
+			rval = -ENOIOCTLCMD;
+	}
+
+	return rval;
 }
 
 /*

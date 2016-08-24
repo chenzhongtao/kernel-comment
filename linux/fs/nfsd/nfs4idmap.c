@@ -34,7 +34,6 @@
  *  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 
@@ -47,11 +46,9 @@
 #include <linux/nfs4.h>
 #include <linux/nfs_fs.h>
 #include <linux/nfs_page.h>
-#include <linux/smp_lock.h>
 #include <linux/sunrpc/cache.h>
 #include <linux/nfsd_idmap.h>
 #include <linux/list.h>
-#include <linux/sched.h>
 #include <linux/time.h>
 #include <linux/seq_file.h>
 #include <linux/sunrpc/svcauth.h>
@@ -76,21 +73,18 @@ struct ent {
 	char              authname[IDMAP_NAMESZ];
 };
 
-#define DefineSimpleCacheLookupMap(STRUCT, FUNC)			\
-        DefineCacheLookup(struct STRUCT, h, FUNC##_lookup,		\
-        (struct STRUCT *item, int set), /*no setup */,			\
-	& FUNC##_cache, FUNC##_hash(item), FUNC##_match(item, tmp),	\
-	STRUCT##_init(new, item), STRUCT##_update(tmp, item), 0)
-
 /* Common entry handling */
 
 #define ENT_HASHBITS          8
 #define ENT_HASHMAX           (1 << ENT_HASHBITS)
 #define ENT_HASHMASK          (ENT_HASHMAX - 1)
 
-static inline void
-ent_init(struct ent *new, struct ent *itm)
+static void
+ent_init(struct cache_head *cnew, struct cache_head *citm)
 {
+	struct ent *new = container_of(cnew, struct ent, h);
+	struct ent *itm = container_of(citm, struct ent, h);
+
 	new->id = itm->id;
 	new->type = itm->type;
 
@@ -98,19 +92,21 @@ ent_init(struct ent *new, struct ent *itm)
 	strlcpy(new->authname, itm->authname, sizeof(new->name));
 }
 
-static inline void
-ent_update(struct ent *new, struct ent *itm)
+static void
+ent_put(struct kref *ref)
 {
-	ent_init(new, itm);
+	struct ent *map = container_of(ref, struct ent, h.ref);
+	kfree(map);
 }
 
-void
-ent_put(struct cache_head *ch, struct cache_detail *cd)
+static struct cache_head *
+ent_alloc(void)
 {
-	if (cache_put(ch, cd)) {
-		struct ent *map = container_of(ch, struct ent, h);
-		kfree(map);
-	}
+	struct ent *e = kmalloc(sizeof(*e), GFP_KERNEL);
+	if (e)
+		return &e->h;
+	else
+		return NULL;
 }
 
 /*
@@ -142,16 +138,19 @@ idtoname_request(struct cache_detail *cd, struct cache_head *ch, char **bpp,
 	char idstr[11];
 
 	qword_add(bpp, blen, ent->authname);
-	snprintf(idstr, sizeof(idstr), "%d", ent->id);
+	snprintf(idstr, sizeof(idstr), "%u", ent->id);
 	qword_add(bpp, blen, ent->type == IDMAP_TYPE_GROUP ? "group" : "user");
 	qword_add(bpp, blen, idstr);
 
 	(*bpp)[-1] = '\n';
 }
 
-static inline int
-idtoname_match(struct ent *a, struct ent *b)
+static int
+idtoname_match(struct cache_head *ca, struct cache_head *cb)
 {
+	struct ent *a = container_of(ca, struct ent, h);
+	struct ent *b = container_of(cb, struct ent, h);
+
 	return (a->id == b->id && a->type == b->type &&
 	    strcmp(a->authname, b->authname) == 0);
 }
@@ -166,7 +165,7 @@ idtoname_show(struct seq_file *m, struct cache_detail *cd, struct cache_head *h)
 		return 0;
 	}
 	ent = container_of(h, struct ent, h);
-	seq_printf(m, "%s %s %d", ent->authname,
+	seq_printf(m, "%s %s %u", ent->authname,
 			ent->type == IDMAP_TYPE_GROUP ? "group" : "user",
 			ent->id);
 	if (test_bit(CACHE_VALID, &h->flags))
@@ -184,9 +183,11 @@ warn_no_idmapd(struct cache_detail *detail)
 
 
 static int         idtoname_parse(struct cache_detail *, char *, int);
-static struct ent *idtoname_lookup(struct ent *, int);
+static struct ent *idtoname_lookup(struct ent *);
+static struct ent *idtoname_update(struct ent *, struct ent *);
 
-struct cache_detail idtoname_cache = {
+static struct cache_detail idtoname_cache = {
+	.owner		= THIS_MODULE,
 	.hash_size	= ENT_HASHMAX,
 	.hash_table	= idtoname_table,
 	.name		= "nfs4.idtoname",
@@ -195,6 +196,10 @@ struct cache_detail idtoname_cache = {
 	.cache_parse	= idtoname_parse,
 	.cache_show	= idtoname_show,
 	.warn_no_listener = warn_no_idmapd,
+	.match		= idtoname_match,
+	.init		= ent_init,
+	.update		= ent_init,
+	.alloc		= ent_alloc,
 };
 
 int
@@ -202,6 +207,7 @@ idtoname_parse(struct cache_detail *cd, char *buf, int buflen)
 {
 	struct ent ent, *res;
 	char *buf1, *bp;
+	int len;
 	int error = -EINVAL;
 
 	if (buf[buflen - 1] != '\n')
@@ -237,11 +243,17 @@ idtoname_parse(struct cache_detail *cd, char *buf, int buflen)
 	if (ent.h.expiry_time == 0)
 		goto out;
 
-	/* Name */
-	error = qword_get(&buf, buf1, PAGE_SIZE);
-	if (error == -EINVAL)
+	error = -ENOMEM;
+	res = idtoname_lookup(&ent);
+	if (!res)
 		goto out;
-	if (error == -ENOENT)
+
+	/* Name */
+	error = -EINVAL;
+	len = qword_get(&buf, buf1, PAGE_SIZE);
+	if (len < 0)
+		goto out;
+	if (len == 0)
 		set_bit(CACHE_NEGATIVE, &ent.h.flags);
 	else {
 		if (error >= IDMAP_NAMESZ) {
@@ -251,10 +263,11 @@ idtoname_parse(struct cache_detail *cd, char *buf, int buflen)
 		memcpy(ent.name, buf1, sizeof(ent.name));
 	}
 	error = -ENOMEM;
-	if ((res = idtoname_lookup(&ent, 1)) == NULL)
+	res = idtoname_update(&ent, res);
+	if (res == NULL)
 		goto out;
 
-	ent_put(&res->h, &idtoname_cache);
+	cache_put(&res->h, &idtoname_cache);
 
 	error = 0;
 out:
@@ -263,7 +276,31 @@ out:
 	return error;
 }
 
-static DefineSimpleCacheLookupMap(ent, idtoname);
+
+static struct ent *
+idtoname_lookup(struct ent *item)
+{
+	struct cache_head *ch = sunrpc_cache_lookup(&idtoname_cache,
+						    &item->h,
+						    idtoname_hash(item));
+	if (ch)
+		return container_of(ch, struct ent, h);
+	else
+		return NULL;
+}
+
+static struct ent *
+idtoname_update(struct ent *new, struct ent *old)
+{
+	struct cache_head *ch = sunrpc_cache_update(&idtoname_cache,
+						    &new->h, &old->h,
+						    idtoname_hash(new));
+	if (ch)
+		return container_of(ch, struct ent, h);
+	else
+		return NULL;
+}
+
 
 /*
  * Name -> ID cache
@@ -277,7 +314,7 @@ nametoid_hash(struct ent *ent)
 	return hash_str(ent->name, ENT_HASHBITS);
 }
 
-void
+static void
 nametoid_request(struct cache_detail *cd, struct cache_head *ch, char **bpp,
     int *blen)
 {
@@ -290,9 +327,12 @@ nametoid_request(struct cache_detail *cd, struct cache_head *ch, char **bpp,
 	(*bpp)[-1] = '\n';
 }
 
-static inline int
-nametoid_match(struct ent *a, struct ent *b)
+static int
+nametoid_match(struct cache_head *ca, struct cache_head *cb)
 {
+	struct ent *a = container_of(ca, struct ent, h);
+	struct ent *b = container_of(cb, struct ent, h);
+
 	return (a->type == b->type && strcmp(a->name, b->name) == 0 &&
 	    strcmp(a->authname, b->authname) == 0);
 }
@@ -311,15 +351,17 @@ nametoid_show(struct seq_file *m, struct cache_detail *cd, struct cache_head *h)
 			ent->type == IDMAP_TYPE_GROUP ? "group" : "user",
 			ent->name);
 	if (test_bit(CACHE_VALID, &h->flags))
-		seq_printf(m, " %d", ent->id);
+		seq_printf(m, " %u", ent->id);
 	seq_printf(m, "\n");
 	return 0;
 }
 
-static struct ent *nametoid_lookup(struct ent *, int);
-int                nametoid_parse(struct cache_detail *, char *, int);
+static struct ent *nametoid_lookup(struct ent *);
+static struct ent *nametoid_update(struct ent *, struct ent *);
+static int         nametoid_parse(struct cache_detail *, char *, int);
 
-struct cache_detail nametoid_cache = {
+static struct cache_detail nametoid_cache = {
+	.owner		= THIS_MODULE,
 	.hash_size	= ENT_HASHMAX,
 	.hash_table	= nametoid_table,
 	.name		= "nfs4.nametoid",
@@ -328,9 +370,13 @@ struct cache_detail nametoid_cache = {
 	.cache_parse	= nametoid_parse,
 	.cache_show	= nametoid_show,
 	.warn_no_listener = warn_no_idmapd,
+	.match		= nametoid_match,
+	.init		= ent_init,
+	.update		= ent_init,
+	.alloc		= ent_alloc,
 };
 
-int
+static int
 nametoid_parse(struct cache_detail *cd, char *buf, int buflen)
 {
 	struct ent ent, *res;
@@ -377,10 +423,14 @@ nametoid_parse(struct cache_detail *cd, char *buf, int buflen)
 		set_bit(CACHE_NEGATIVE, &ent.h.flags);
 
 	error = -ENOMEM;
-	if ((res = nametoid_lookup(&ent, 1)) == NULL)
+	res = nametoid_lookup(&ent);
+	if (res == NULL)
+		goto out;
+	res = nametoid_update(&ent, res);
+	if (res == NULL)
 		goto out;
 
-	ent_put(&res->h, &nametoid_cache);
+	cache_put(&res->h, &nametoid_cache);
 	error = 0;
 out:
 	kfree(buf1);
@@ -388,7 +438,30 @@ out:
 	return (error);
 }
 
-static DefineSimpleCacheLookupMap(ent, nametoid);
+
+static struct ent *
+nametoid_lookup(struct ent *item)
+{
+	struct cache_head *ch = sunrpc_cache_lookup(&nametoid_cache,
+						    &item->h,
+						    nametoid_hash(item));
+	if (ch)
+		return container_of(ch, struct ent, h);
+	else
+		return NULL;
+}
+
+static struct ent *
+nametoid_update(struct ent *new, struct ent *old)
+{
+	struct cache_head *ch = sunrpc_cache_update(&nametoid_cache,
+						    &new->h, &old->h,
+						    nametoid_hash(new));
+	if (ch)
+		return container_of(ch, struct ent, h);
+	else
+		return NULL;
+}
 
 /*
  * Exported API
@@ -404,8 +477,10 @@ nfsd_idmap_init(void)
 void
 nfsd_idmap_shutdown(void)
 {
-	cache_unregister(&idtoname_cache);
-	cache_unregister(&nametoid_cache);
+	if (cache_unregister(&idtoname_cache))
+		printk(KERN_ERR "nfsd: failed to unregister idtoname cache\n");
+	if (cache_unregister(&nametoid_cache))
+		printk(KERN_ERR "nfsd: failed to unregister nametoid cache\n");
 }
 
 /*
@@ -454,24 +529,24 @@ idmap_defer(struct cache_req *req)
 }
 
 static inline int
-do_idmap_lookup(struct ent *(*lookup_fn)(struct ent *, int), struct ent *key,
+do_idmap_lookup(struct ent *(*lookup_fn)(struct ent *), struct ent *key,
 		struct cache_detail *detail, struct ent **item,
 		struct idmap_defer_req *mdr)
 {
-	*item = lookup_fn(key, 0);
+	*item = lookup_fn(key);
 	if (!*item)
 		return -ENOMEM;
 	return cache_check(detail, &(*item)->h, &mdr->req);
 }
 
 static inline int
-do_idmap_lookup_nowait(struct ent *(*lookup_fn)(struct ent *, int),
+do_idmap_lookup_nowait(struct ent *(*lookup_fn)(struct ent *),
 			struct ent *key, struct cache_detail *detail,
 			struct ent **item)
 {
 	int ret = -ENOMEM;
 
-	*item = lookup_fn(key, 0);
+	*item = lookup_fn(key);
 	if (!*item)
 		goto out_err;
 	ret = -ETIMEDOUT;
@@ -484,7 +559,7 @@ do_idmap_lookup_nowait(struct ent *(*lookup_fn)(struct ent *, int),
 		goto out_put;
 	return 0;
 out_put:
-	ent_put(&(*item)->h, detail);
+	cache_put(&(*item)->h, detail);
 out_err:
 	*item = NULL;
 	return ret;
@@ -492,16 +567,15 @@ out_err:
 
 static int
 idmap_lookup(struct svc_rqst *rqstp,
-		struct ent *(*lookup_fn)(struct ent *, int), struct ent *key,
+		struct ent *(*lookup_fn)(struct ent *), struct ent *key,
 		struct cache_detail *detail, struct ent **item)
 {
 	struct idmap_defer_req *mdr;
 	int ret;
 
-	mdr = kmalloc(sizeof(*mdr), GFP_KERNEL);
+	mdr = kzalloc(sizeof(*mdr), GFP_KERNEL);
 	if (!mdr)
 		return -ENOMEM;
-	memset(mdr, 0, sizeof(*mdr));
 	atomic_set(&mdr->count, 1);
 	init_waitqueue_head(&mdr->waitq);
 	mdr->req.defer = idmap_defer;
@@ -513,6 +587,15 @@ idmap_lookup(struct svc_rqst *rqstp,
 	}
 	put_mdr(mdr);
 	return ret;
+}
+
+static char *
+rqst_authname(struct svc_rqst *rqstp)
+{
+	struct auth_domain *clp;
+
+	clp = rqstp->rq_gssclient ? rqstp->rq_gssclient : rqstp->rq_client;
+	return clp->name;
 }
 
 static int
@@ -528,14 +611,14 @@ idmap_name_to_id(struct svc_rqst *rqstp, int type, const char *name, u32 namelen
 		return -EINVAL;
 	memcpy(key.name, name, namelen);
 	key.name[namelen] = '\0';
-	strlcpy(key.authname, rqstp->rq_client->name, sizeof(key.authname));
+	strlcpy(key.authname, rqst_authname(rqstp), sizeof(key.authname));
 	ret = idmap_lookup(rqstp, nametoid_lookup, &key, &nametoid_cache, &item);
 	if (ret == -ENOENT)
 		ret = -ESRCH; /* nfserr_badname */
 	if (ret)
 		return ret;
 	*id = item->id;
-	ent_put(&item->h, &nametoid_cache);
+	cache_put(&item->h, &nametoid_cache);
 	return 0;
 }
 
@@ -548,7 +631,7 @@ idmap_id_to_name(struct svc_rqst *rqstp, int type, uid_t id, char *name)
 	};
 	int ret;
 
-	strlcpy(key.authname, rqstp->rq_client->name, sizeof(key.authname));
+	strlcpy(key.authname, rqst_authname(rqstp), sizeof(key.authname));
 	ret = idmap_lookup(rqstp, idtoname_lookup, &key, &idtoname_cache, &item);
 	if (ret == -ENOENT)
 		return sprintf(name, "%u", id);
@@ -557,7 +640,7 @@ idmap_id_to_name(struct svc_rqst *rqstp, int type, uid_t id, char *name)
 	ret = strlen(item->name);
 	BUG_ON(ret > IDMAP_NAMESZ);
 	memcpy(name, item->name, ret);
-	ent_put(&item->h, &idtoname_cache);
+	cache_put(&item->h, &idtoname_cache);
 	return ret;
 }
 

@@ -60,11 +60,6 @@
 #define access_ok(type,addr,size) (__range_ok(addr,size) == 0)
 #define __access_ok(addr,size) (__range_ok(addr,size) == 0)
 
-extern inline int verify_area(int type, const void __user * addr, unsigned long size)
-{
-	return access_ok(type,addr,size) ? 0 : -EFAULT;
-}
-
 /*
  * Uh, these should become the main single-value transfer routines ...
  * They automatically use the right size if we just have the right
@@ -133,25 +128,20 @@ do {								\
 
 #define __get_user_nocheck(x,ptr,size)				\
 ({								\
-	long __gu_addr = (long)(ptr);				\
-	long __gu_err;						\
-	__typeof(*(ptr)) __gu_val;				\
-	__asm__ ("":"=r" (__gu_val));				\
-	__asm__ ("":"=r" (__gu_err));				\
-	__get_user_size((void *)&__gu_val, __gu_addr, (size), __gu_err); \
-	(x) = (__typeof__(*(ptr))) __gu_val;			\
+	long __gu_err, __gu_val;				\
+	__get_user_size((void *)&__gu_val, (long)(ptr),		\
+			(size), __gu_err);			\
+	(x) = (__typeof__(*(ptr)))__gu_val;			\
 	__gu_err;						\
 })
 
 #define __get_user_check(x,ptr,size)				\
 ({								\
 	long __gu_addr = (long)(ptr);				\
-	long __gu_err = -EFAULT;				\
-	__typeof(*(ptr)) __gu_val;				\
-	__asm__ ("":"=r" (__gu_val));				\
-	__asm__ ("":"=r" (__gu_err));				\
+	long __gu_err = -EFAULT, __gu_val;			\
 	if (__access_ok(__gu_addr, (size)))			\
-		__get_user_size((void *)&__gu_val, __gu_addr, (size), __gu_err); \
+		__get_user_size((void *)&__gu_val, __gu_addr,	\
+				(size), __gu_err);		\
 	(x) = (__typeof__(*(ptr))) __gu_val;			\
 	__gu_err;						\
 })
@@ -292,7 +282,7 @@ __sfu_res = __strncpy_from_user((unsigned long) (dest), __sfu_src, __sfu_count);
  */
 extern long __strnlen_user(const char *__s, long __n);
 
-extern __inline__ long strnlen_user(const char *s, long n)
+static inline long strnlen_user(const char *s, long n)
 {
 	if (!__addr_ok(s))
 		return 0;
@@ -312,6 +302,12 @@ struct exception_table_entry
    becomes BYTE_PER_WORD i.e. only 4 (since sizeof(long)==sizeof(void*)==4 on
    sh64 at the moment). */
 #define ARCH_KMALLOC_MINALIGN 8
+
+/*
+ * We want 8-byte alignment for the slab caches as well, otherwise we have
+ * the same BYTES_PER_WORD (sizeof(void *)) min align in kmem_cache_create().
+ */
+#define ARCH_SLAB_MINALIGN 8
 
 /* Returns 0 if exception not found and fixup.unit otherwise.  */
 extern unsigned long search_exception_table(unsigned long addr);

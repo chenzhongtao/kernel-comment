@@ -23,7 +23,6 @@
 #include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
-#include <linux/i2c-dev.h>
 #include <linux/slab.h>
 #include <sound/core.h>
 #include "pmac.h"
@@ -32,7 +31,7 @@
  * we have to keep a static variable here since i2c attach_adapter
  * callback cannot pass a private data.
  */
-static pmac_keywest_t *keywest_ctx;
+static struct pmac_keywest *keywest_ctx;
 
 
 #define I2C_DRIVERID_KEYWEST	0xFEBA
@@ -41,9 +40,10 @@ static int keywest_attach_adapter(struct i2c_adapter *adapter);
 static int keywest_detach_client(struct i2c_client *client);
 
 struct i2c_driver keywest_driver = {  
-	.name = "PMac Keywest Audio",
+	.driver = {
+		.name = "PMac Keywest Audio",
+	},
 	.id = I2C_DRIVERID_KEYWEST,
-	.flags = I2C_DF_NOTIFY,
 	.attach_adapter = &keywest_attach_adapter,
 	.detach_client = &keywest_detach_client,
 };
@@ -64,11 +64,10 @@ static int keywest_attach_adapter(struct i2c_adapter *adapter)
 	if (strncmp(i2c_device_name(adapter), "mac-io", 6))
 		return 0; /* ignored */
 
-	new_client = kmalloc(sizeof(struct i2c_client), GFP_KERNEL);
+	new_client = kzalloc(sizeof(struct i2c_client), GFP_KERNEL);
 	if (! new_client)
 		return -ENOMEM;
 
-	memset(new_client, 0, sizeof(*new_client));
 	new_client->addr = keywest_ctx->addr;
 	i2c_set_clientdata(new_client, keywest_ctx);
 	new_client->adapter = adapter;
@@ -76,8 +75,6 @@ static int keywest_attach_adapter(struct i2c_adapter *adapter)
 	new_client->flags = 0;
 
 	strcpy(i2c_device_name(new_client), keywest_ctx->name);
-
-	new_client->id = keywest_ctx->id++; /* Automatically unique */
 	keywest_ctx->client = new_client;
 	
 	/* Tell the i2c layer a new client has arrived */
@@ -108,7 +105,7 @@ static int keywest_detach_client(struct i2c_client *client)
 }
 
 /* exported */
-void snd_pmac_keywest_cleanup(pmac_keywest_t *i2c)
+void snd_pmac_keywest_cleanup(struct pmac_keywest *i2c)
 {
 	if (keywest_ctx && keywest_ctx == i2c) {
 		i2c_del_driver(&keywest_driver);
@@ -120,6 +117,9 @@ int __init snd_pmac_tumbler_post_init(void)
 {
 	int err;
 	
+	if (!keywest_ctx || !keywest_ctx->client)
+		return -ENXIO;
+
 	if ((err = keywest_ctx->init_client(keywest_ctx)) < 0) {
 		snd_printk(KERN_ERR "tumbler: %i :cannot initialize the MCS\n", err);
 		return err;
@@ -128,7 +128,7 @@ int __init snd_pmac_tumbler_post_init(void)
 }
 
 /* exported */
-int __init snd_pmac_keywest_init(pmac_keywest_t *i2c)
+int __init snd_pmac_keywest_init(struct pmac_keywest *i2c)
 {
 	int err;
 

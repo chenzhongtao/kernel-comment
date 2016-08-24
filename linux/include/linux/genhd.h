@@ -9,13 +9,9 @@
  *		<drew@colorado.edu>
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
-#include <linux/major.h>
-#include <linux/device.h>
-#include <linux/smp.h>
-#include <linux/string.h>
-#include <linux/fs.h>
+
+#ifdef CONFIG_BLOCK
 
 enum {
 /* These three have identical behaviour; use the second one if DOS FDISK gets
@@ -24,7 +20,11 @@ enum {
 	LINUX_EXTENDED_PARTITION = 0x85,
 	WIN98_EXTENDED_PARTITION = 0x0f,
 
+	SUN_WHOLE_DISK = DOS_EXTENDED_PARTITION,
+
 	LINUX_SWAP_PARTITION = 0x82,
+	LINUX_DATA_PARTITION = 0x83,
+	LINUX_LVM_PARTITION = 0x8e,
 	LINUX_RAID_PARTITION = 0xfd,	/* autodetect RAID partition */
 
 	SOLARIS_X86_PARTITION =	LINUX_SWAP_PARTITION,
@@ -61,6 +61,13 @@ struct partition {
 #endif
 
 #ifdef __KERNEL__
+#include <linux/major.h>
+#include <linux/device.h>
+#include <linux/smp.h>
+#include <linux/string.h>
+#include <linux/fs.h>
+#include <linux/workqueue.h>
+
 struct partition {
 	unsigned char boot_ind;		/* 0x80 - active */
 	unsigned char head;		/* starting head */
@@ -78,23 +85,29 @@ struct hd_struct {
 	sector_t start_sect;
 	sector_t nr_sects;
 	struct kobject kobj;
-	unsigned reads, read_sectors, writes, write_sectors;
+	struct kobject *holder_dir;
+	unsigned ios[2], sectors[2];	/* READs and WRITEs */
 	int policy, partno;
+#ifdef CONFIG_FAIL_MAKE_REQUEST
+	int make_it_fail;
+#endif
 };
 
 #define GENHD_FL_REMOVABLE			1
 #define GENHD_FL_DRIVERFS			2
+#define GENHD_FL_MEDIA_CHANGE_NOTIFY		4
 #define GENHD_FL_CD				8
 #define GENHD_FL_UP				16
 #define GENHD_FL_SUPPRESS_PARTITION_INFO	32
+#define GENHD_FL_FAIL				64
 
 struct disk_stats {
-	unsigned read_sectors, write_sectors;
-	unsigned reads, writes;
-	unsigned read_merges, write_merges;
-	unsigned read_ticks, write_ticks;
-	unsigned io_ticks;
-	unsigned time_in_queue;
+	unsigned long sectors[2];	/* READs and WRITEs */
+	unsigned long ios[2];
+	unsigned long merges[2];
+	unsigned long ticks[2];
+	unsigned long io_ticks;
+	unsigned long time_in_queue;
 };
 	
 struct gendisk {
@@ -104,34 +117,37 @@ struct gendisk {
                                          * disks that can't be partitioned. */
 	char disk_name[32];		/* name of major driver */
 	struct hd_struct **part;	/* [indexed by minor] */
+	int part_uevent_suppress;
 	struct block_device_operations *fops;
 	struct request_queue *queue;
 	void *private_data;
 	sector_t capacity;
 
 	int flags;
-	char devfs_name[64];		/* devfs crap */
-	int number;			/* more of the same */
 	struct device *driverfs_dev;
 	struct kobject kobj;
+	struct kobject *holder_dir;
+	struct kobject *slave_dir;
 
 	struct timer_rand_state *random;
 	int policy;
 
 	atomic_t sync_io;		/* RAID */
-	unsigned long stamp, stamp_idle;
+	unsigned long stamp;
 	int in_flight;
 #ifdef	CONFIG_SMP
 	struct disk_stats *dkstats;
 #else
 	struct disk_stats dkstats;
 #endif
+	struct work_struct async_notify;
 };
 
 /* Structure for sysfs attributes on block devices */
 struct disk_attribute {
 	struct attribute attr;
 	ssize_t (*show)(struct gendisk *, char *);
+	ssize_t (*store)(struct gendisk *, const char *, size_t);
 };
 
 /* 
@@ -148,22 +164,16 @@ struct disk_attribute {
 ({									\
 	typeof(gendiskp->dkstats->field) res = 0;			\
 	int i;								\
-	for (i=0; i < NR_CPUS; i++) {					\
-		if (!cpu_possible(i))					\
-			continue;					\
+	for_each_possible_cpu(i)					\
 		res += per_cpu_ptr(gendiskp->dkstats, i)->field;	\
-	}								\
 	res;								\
 })
 
 static inline void disk_stat_set_all(struct gendisk *gendiskp, int value)	{
 	int i;
-	for (i=0; i < NR_CPUS; i++) {
-		if (cpu_possible(i)) {
-			memset(per_cpu_ptr(gendiskp->dkstats, i), value,	
-					sizeof (struct disk_stats));
-		}
-	}
+	for_each_possible_cpu(i)
+		memset(per_cpu_ptr(gendiskp->dkstats, i), value,
+				sizeof (struct disk_stats));
 }		
 				
 #else
@@ -224,7 +234,7 @@ static inline void free_disk_stats(struct gendisk *disk)
 extern void disk_round_stats(struct gendisk *disk);
 
 /* drivers/block/genhd.c */
-extern int get_blkdev_list(char *);
+extern int get_blkdev_list(char *, int);
 extern void add_disk(struct gendisk *disk);
 extern void del_gendisk(struct gendisk *gp);
 extern void unlink_gendisk(struct gendisk *gp);
@@ -254,7 +264,7 @@ static inline void set_capacity(struct gendisk *disk, sector_t size)
 
 #ifdef CONFIG_SOLARIS_X86_PARTITION
 
-#define SOLARIS_X86_NUMSLICE	8
+#define SOLARIS_X86_NUMSLICE	16
 #define SOLARIS_X86_VTOC_SANE	(0x600DDEEEUL)
 
 struct solaris_x86_slice {
@@ -397,16 +407,22 @@ struct unixware_disklabel {
 
 #ifdef __KERNEL__
 
+#define ADDPART_FLAG_NONE	0
+#define ADDPART_FLAG_RAID	1
+#define ADDPART_FLAG_WHOLEDISK	2
+
 char *disk_name (struct gendisk *hd, int part, char *buf);
 
 extern int rescan_partitions(struct gendisk *disk, struct block_device *bdev);
-extern void add_partition(struct gendisk *, int, sector_t, sector_t);
+extern void add_partition(struct gendisk *, int, sector_t, sector_t, int);
 extern void delete_partition(struct gendisk *, int);
+extern void printk_all_partitions(void);
 
+extern struct gendisk *alloc_disk_node(int minors, int node_id);
 extern struct gendisk *alloc_disk(int minors);
 extern struct kobject *get_disk(struct gendisk *disk);
 extern void put_disk(struct gendisk *disk);
-
+extern void genhd_media_change_notify(struct gendisk *disk);
 extern void blk_register_region(dev_t dev, unsigned long range,
 			struct module *module,
 			struct kobject *(*probe)(dev_t, int *, void *),
@@ -420,5 +436,11 @@ static inline struct block_device *bdget_disk(struct gendisk *disk, int index)
 }
 
 #endif
+
+#else /* CONFIG_BLOCK */
+
+static inline void printk_all_partitions(void) { }
+
+#endif /* CONFIG_BLOCK */
 
 #endif

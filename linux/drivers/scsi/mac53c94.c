@@ -60,8 +60,8 @@ struct fsc_state {
 
 static void mac53c94_init(struct fsc_state *);
 static void mac53c94_start(struct fsc_state *);
-static void mac53c94_interrupt(int, void *, struct pt_regs *);
-static irqreturn_t do_mac53c94_interrupt(int, void *, struct pt_regs *);
+static void mac53c94_interrupt(int, void *);
+static irqreturn_t do_mac53c94_interrupt(int, void *);
 static void cmd_done(struct fsc_state *, int result);
 static void set_dma_cmds(struct fsc_state *, struct scsi_cmnd *);
 
@@ -77,7 +77,7 @@ static int mac53c94_queue(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *
 		for (i = 0; i < cmd->cmd_len; ++i)
 			printk(" %.2x", cmd->cmnd[i]);
 		printk("\n" KERN_DEBUG "use_sg=%d request_bufflen=%d request_buffer=%p\n",
-		       cmd->use_sg, cmd->request_bufflen, cmd->request_buffer);
+		       scsi_sg_count(cmd), scsi_bufflen(cmd), scsi_sglist(cmd));
 	}
 #endif
 
@@ -98,16 +98,14 @@ static int mac53c94_queue(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *
 	return 0;
 }
 
-static int mac53c94_abort(struct scsi_cmnd *cmd)
-{
-	return FAILED;
-}
-
 static int mac53c94_host_reset(struct scsi_cmnd *cmd)
 {
 	struct fsc_state *state = (struct fsc_state *) cmd->device->host->hostdata;
 	struct mac53c94_regs __iomem *regs = state->regs;
 	struct dbdma_regs __iomem *dma = state->dma;
+	unsigned long flags;
+
+	spin_lock_irqsave(cmd->device->host->host_lock, flags);
 
 	writel((RUN|PAUSE|FLUSH|WAKE) << 16, &dma->control);
 	writeb(CMD_SCSI_RESET, &regs->command);	/* assert RST */
@@ -116,6 +114,8 @@ static int mac53c94_host_reset(struct scsi_cmnd *cmd)
 	udelay(20);
 	mac53c94_init(state);
 	writeb(CMD_NOP, &regs->command);
+
+	spin_unlock_irqrestore(cmd->device->host->host_lock, flags);
 	return SUCCESS;
 }
 
@@ -173,22 +173,21 @@ static void mac53c94_start(struct fsc_state *state)
 	writeb(CMD_SELECT, &regs->command);
 	state->phase = selecting;
 
-	if (cmd->use_sg > 0 || cmd->request_bufflen != 0)
-		set_dma_cmds(state, cmd);
+	set_dma_cmds(state, cmd);
 }
 
-static irqreturn_t do_mac53c94_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
+static irqreturn_t do_mac53c94_interrupt(int irq, void *dev_id)
 {
 	unsigned long flags;
 	struct Scsi_Host *dev = ((struct fsc_state *) dev_id)->current_req->device->host;
 	
 	spin_lock_irqsave(dev->host_lock, flags);
-	mac53c94_interrupt(irq, dev_id, ptregs);
+	mac53c94_interrupt(irq, dev_id);
 	spin_unlock_irqrestore(dev->host_lock, flags);
 	return IRQ_HANDLED;
 }
 
-static void mac53c94_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
+static void mac53c94_interrupt(int irq, void *dev_id)
 {
 	struct fsc_state *state = (struct fsc_state *) dev_id;
 	struct mac53c94_regs __iomem *regs = state->regs;
@@ -262,7 +261,7 @@ static void mac53c94_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 		writeb(CMD_NOP, &regs->command);
 		/* set DMA controller going if any data to transfer */
 		if ((stat & (STAT_MSG|STAT_CD)) == 0
-		    && (cmd->use_sg > 0 || cmd->request_bufflen != 0)) {
+		    && (scsi_sg_count(cmd) > 0 || scsi_bufflen(cmd))) {
 			nb = cmd->SCp.this_residual;
 			if (nb > 0xfff0)
 				nb = 0xfff0;
@@ -310,14 +309,7 @@ static void mac53c94_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 			printk(KERN_DEBUG "intr %x before data xfer complete\n", intr);
 		}
 		writel(RUN << 16, &dma->control);	/* stop dma */
-		if (cmd->use_sg != 0) {
-			pci_unmap_sg(state->pdev,
-				(struct scatterlist *)cmd->request_buffer,
-				cmd->use_sg, cmd->sc_data_direction);
-		} else {
-			pci_unmap_single(state->pdev, state->dma_addr,
-				cmd->request_bufflen, cmd->sc_data_direction);
-		}
+		scsi_dma_unmap(cmd);
 		/* should check dma status */
 		writeb(CMD_I_COMPLETE, &regs->command);
 		state->phase = completing;
@@ -365,47 +357,35 @@ static void cmd_done(struct fsc_state *state, int result)
  */
 static void set_dma_cmds(struct fsc_state *state, struct scsi_cmnd *cmd)
 {
-	int i, dma_cmd, total;
+	int i, dma_cmd, total, nseg;
 	struct scatterlist *scl;
 	struct dbdma_cmd *dcmds;
 	dma_addr_t dma_addr;
 	u32 dma_len;
 
+	nseg = scsi_dma_map(cmd);
+	BUG_ON(nseg < 0);
+	if (!nseg)
+		return;
+
 	dma_cmd = cmd->sc_data_direction == DMA_TO_DEVICE ?
 			OUTPUT_MORE : INPUT_MORE;
 	dcmds = state->dma_cmds;
-	if (cmd->use_sg > 0) {
-		int nseg;
+	total = 0;
 
-		total = 0;
-		scl = (struct scatterlist *) cmd->buffer;
-		nseg = pci_map_sg(state->pdev, scl, cmd->use_sg,
-				cmd->sc_data_direction);
-		for (i = 0; i < nseg; ++i) {
-			dma_addr = sg_dma_address(scl);
-			dma_len = sg_dma_len(scl);
-			if (dma_len > 0xffff)
-				panic("mac53c94: scatterlist element >= 64k");
-			total += dma_len;
-			st_le16(&dcmds->req_count, dma_len);
-			st_le16(&dcmds->command, dma_cmd);
-			st_le32(&dcmds->phy_addr, dma_addr);
-			dcmds->xfer_status = 0;
-			++scl;
-			++dcmds;
-		}
-	} else {
-		total = cmd->request_bufflen;
-		if (total > 0xffff)
-			panic("mac53c94: transfer size >= 64k");
-		dma_addr = pci_map_single(state->pdev, cmd->request_buffer,
-					  total, cmd->sc_data_direction);
-		state->dma_addr = dma_addr;
-		st_le16(&dcmds->req_count, total);
+	scsi_for_each_sg(cmd, scl, nseg, i) {
+		dma_addr = sg_dma_address(scl);
+		dma_len = sg_dma_len(scl);
+		if (dma_len > 0xffff)
+			panic("mac53c94: scatterlist element >= 64k");
+		total += dma_len;
+		st_le16(&dcmds->req_count, dma_len);
+		st_le16(&dcmds->command, dma_cmd);
 		st_le32(&dcmds->phy_addr, dma_addr);
 		dcmds->xfer_status = 0;
 		++dcmds;
 	}
+
 	dma_cmd += OUTPUT_LAST - OUTPUT_MORE;
 	st_le16(&dcmds[-1].command, dma_cmd);
 	st_le16(&dcmds->command, DBDMA_STOP);
@@ -416,28 +396,29 @@ static struct scsi_host_template mac53c94_template = {
 	.proc_name	= "53c94",
 	.name		= "53C94",
 	.queuecommand	= mac53c94_queue,
-	.eh_abort_handler = mac53c94_abort,
 	.eh_host_reset_handler = mac53c94_host_reset,
 	.can_queue	= 1,
 	.this_id	= 7,
 	.sg_tablesize	= SG_ALL,
 	.cmd_per_lun	= 1,
 	.use_clustering	= DISABLE_CLUSTERING,
+	.use_sg_chaining = ENABLE_SG_CHAINING,
 };
 
-static int mac53c94_probe(struct macio_dev *mdev, const struct of_match *match)
+static int mac53c94_probe(struct macio_dev *mdev, const struct of_device_id *match)
 {
 	struct device_node *node = macio_get_of_node(mdev);
 	struct pci_dev *pdev = macio_get_pci_dev(mdev);
 	struct fsc_state *state;
 	struct Scsi_Host *host;
 	void *dma_cmd_space;
-	unsigned char *clkprop;
-	int proplen;
+	const unsigned char *clkprop;
+	int proplen, rc = -ENODEV;
 
 	if (macio_resource_count(mdev) != 2 || macio_irq_count(mdev) != 2) {
-		printk(KERN_ERR "mac53c94: expected 2 addrs and intrs (got %d/%d)\n",
-		       node->n_addrs, node->n_intrs);
+		printk(KERN_ERR "mac53c94: expected 2 addrs and intrs"
+		       " (got %d/%d)\n",
+		       macio_resource_count(mdev), macio_irq_count(mdev));
 		return -ENODEV;
 	}
 
@@ -449,6 +430,7 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_match *match)
        	host = scsi_host_alloc(&mac53c94_template, sizeof(struct fsc_state));
 	if (host == NULL) {
 		printk(KERN_ERR "mac53c94: couldn't register host");
+		rc = -ENOMEM;
 		goto out_release;
 	}
 
@@ -470,7 +452,7 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_match *match)
 		goto out_free;
 	}
 
-       	clkprop = get_property(node, "clock-frequency", &proplen);
+	clkprop = of_get_property(node, "clock-frequency", &proplen);
        	if (clkprop == NULL || proplen != sizeof(int)) {
        		printk(KERN_ERR "%s: can't get clock frequency, "
        		       "assuming 25MHz\n", node->full_name);
@@ -487,6 +469,7 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_match *match)
        	if (dma_cmd_space == 0) {
        		printk(KERN_ERR "mac53c94: couldn't allocate dma "
        		       "command space for %s\n", node->full_name);
+		rc = -ENOMEM;
        		goto out_free;
        	}
 	state->dma_cmds = (struct dbdma_cmd *)DBDMA_ALIGN(dma_cmd_space);
@@ -496,18 +479,21 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_match *match)
 
 	mac53c94_init(state);
 
-	if (request_irq(state->intr, do_mac53c94_interrupt, 0, "53C94", state)) {
+	if (request_irq(state->intr, do_mac53c94_interrupt, 0, "53C94",state)) {
 		printk(KERN_ERR "mac53C94: can't get irq %d for %s\n",
 		       state->intr, node->full_name);
 		goto out_free_dma;
 	}
 
-	/* XXX FIXME: handle failure */
-	scsi_add_host(host, &mdev->ofdev.dev);
-	scsi_scan_host(host);
+	rc = scsi_add_host(host, &mdev->ofdev.dev);
+	if (rc != 0)
+		goto out_release_irq;
 
+	scsi_scan_host(host);
 	return 0;
 
+ out_release_irq:
+	free_irq(state->intr, state);
  out_free_dma:
 	kfree(state->dma_cmd_space);
  out_free:
@@ -519,7 +505,7 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_match *match)
  out_release:
 	macio_release_resources(mdev);
 
-	return  -ENODEV;
+	return rc;
 }
 
 static int mac53c94_remove(struct macio_dev *mdev)
@@ -532,9 +518,9 @@ static int mac53c94_remove(struct macio_dev *mdev)
 	free_irq(fp->intr, fp);
 
 	if (fp->regs)
-		iounmap((void *) fp->regs);
+		iounmap(fp->regs);
 	if (fp->dma)
-		iounmap((void *) fp->dma);
+		iounmap(fp->dma);
 	kfree(fp->dma_cmd_space);
 
 	scsi_host_put(host);
@@ -545,15 +531,14 @@ static int mac53c94_remove(struct macio_dev *mdev)
 }
 
 
-static struct of_match mac53c94_match[] = 
+static struct of_device_id mac53c94_match[] = 
 {
 	{
 	.name 		= "53c94",
-	.type		= OF_ANY_MATCH,
-	.compatible	= OF_ANY_MATCH
 	},
 	{},
 };
+MODULE_DEVICE_TABLE (of, mac53c94_match);
 
 static struct macio_driver mac53c94_driver = 
 {

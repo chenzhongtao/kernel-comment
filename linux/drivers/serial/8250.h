@@ -15,12 +15,7 @@
  *  $Id: 8250.h,v 1.8 2002/07/21 21:32:30 rmk Exp $
  */
 
-#include <linux/config.h>
-
-int serial8250_register_port(struct uart_port *);
-void serial8250_unregister_port(int line);
-void serial8250_suspend_port(int line);
-void serial8250_resume_port(int line);
+#include <linux/serial_8250.h>
 
 struct old_serial_port {
 	unsigned int uart;
@@ -49,18 +44,11 @@ struct serial8250_config {
 #define UART_CAP_EFR	(1 << 9)	/* UART has EFR */
 #define UART_CAP_SLEEP	(1 << 10)	/* UART has IER sleep */
 #define UART_CAP_AFE	(1 << 11)	/* MCR-based hw flow control */
+#define UART_CAP_UUE	(1 << 12)	/* UART needs IER bit 6 set (Xscale) */
 
-#undef SERIAL_DEBUG_PCI
-
-#if defined(__i386__) && (defined(CONFIG_M386) || defined(CONFIG_M486))
-#define SERIAL_INLINE
-#endif
-  
-#ifdef SERIAL_INLINE
-#define _INLINE_ inline
-#else
-#define _INLINE_
-#endif
+#define UART_BUG_QUOT	(1 << 0)	/* UART has buggy quot LSB */
+#define UART_BUG_TXEN	(1 << 1)	/* UART has buggy TX IIR status */
+#define UART_BUG_NOMSR	(1 << 2)	/* UART has buggy MSR status bits (Au1x00) */
 
 #define PROBE_RSA	(1 << 0)
 #define PROBE_ANY	(~0)
@@ -80,6 +68,13 @@ struct serial8250_config {
  * is cleared, the machine locks up with endless interrupts.
  */
 #define ALPHA_KLUDGE_MCR  (UART_MCR_OUT2 | UART_MCR_OUT1)
+#elif defined(CONFIG_SBC8560)
+/*
+ * WindRiver did something similarly broken on their SBC8560 board. The
+ * UART tristates its IRQ output while OUT2 is clear, but they pulled
+ * the interrupt line _up_ instead of down, so if we register the IRQ
+ * while the UART is in that state, we die in an IRQ storm. */
+#define ALPHA_KLUDGE_MCR (UART_MCR_OUT2)
 #else
 #define ALPHA_KLUDGE_MCR 0
 #endif

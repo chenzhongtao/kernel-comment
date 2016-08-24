@@ -27,11 +27,9 @@
  */
 
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/string.h>
 #include <linux/kd.h>
@@ -198,7 +196,7 @@ static int __init mdacon_setup(char *str)
 __setup("mdacon=", mdacon_setup);
 #endif
 
-static int __init mda_detect(void)
+static int mda_detect(void)
 {
 	int count=0;
 	u16 *p, p_save;
@@ -283,7 +281,7 @@ static int __init mda_detect(void)
 	return 1;
 }
 
-static void __init mda_initialize(void)
+static void mda_initialize(void)
 {
 	write_mda_b(97, 0x00);		/* horizontal total */
 	write_mda_b(80, 0x01);		/* horizontal displayed */
@@ -308,13 +306,13 @@ static void __init mda_initialize(void)
 	outb_p(0x00, mda_gfx_port);
 }
 
-static const char __init *mdacon_startup(void)
+static const char *mdacon_startup(void)
 {
 	mda_num_columns = 80;
 	mda_num_lines   = 25;
 
-	mda_vram_base = VGA_MAP_MEM(0xb0000);
 	mda_vram_len  = 0x01000;
+	mda_vram_base = VGA_MAP_MEM(0xb0000, mda_vram_len);
 
 	mda_index_port  = 0x3b4;
 	mda_value_port  = 0x3b5;
@@ -351,10 +349,9 @@ static void mdacon_init(struct vc_data *c, int init)
 	if (init) {
 		c->vc_cols = mda_num_columns;
 		c->vc_rows = mda_num_lines;
-	} else {
-		vc_resize(c->vc_num, mda_num_columns, mda_num_lines);
-        }
-	
+	} else
+		vc_resize(c, mda_num_columns, mda_num_lines);
+
 	/* make the first MDA console visible */
 
 	if (mda_display_fg == NULL)
@@ -387,7 +384,7 @@ static inline u16 mda_convert_attr(u16 ch)
 }
 
 static u8 mdacon_build_attr(struct vc_data *c, u8 color, u8 intensity, 
-			    u8 blink, u8 underline, u8 reverse)
+			    u8 blink, u8 underline, u8 reverse, u8 italic)
 {
 	/* The attribute is just a bit vector:
 	 *
@@ -400,6 +397,7 @@ static u8 mdacon_build_attr(struct vc_data *c, u8 color, u8 intensity,
 	return (intensity & 3) |
 		((underline & 1) << 2) |
 		((reverse   & 1) << 3) |
+		(!!italic << 4) |
 		((blink     & 1) << 7);
 }
 
@@ -565,7 +563,7 @@ static int mdacon_scroll(struct vc_data *c, int t, int b, int dir, int lines)
  *  The console `switch' structure for the MDA based console
  */
 
-const struct consw mda_con = {
+static const struct consw mda_con = {
 	.owner =		THIS_MODULE,
 	.con_startup =		mdacon_startup,
 	.con_init =		mdacon_init,
@@ -592,7 +590,7 @@ int __init mda_console_init(void)
 	return take_over_console(&mda_con, mda_first_vc-1, mda_last_vc-1, 0);
 }
 
-void __exit mda_console_exit(void)
+static void __exit mda_console_exit(void)
 {
 	give_up_console(&mda_con);
 }

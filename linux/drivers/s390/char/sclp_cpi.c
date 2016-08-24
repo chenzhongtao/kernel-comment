@@ -5,7 +5,6 @@
  * SCLP Control-Program Identification.
  */
 
-#include <linux/config.h>
 #include <linux/version.h>
 #include <linux/kmod.h>
 #include <linux/module.h>
@@ -47,8 +46,10 @@ struct cpi_sccb {
 /* Event type structure for write message and write priority message */
 static struct sclp_register sclp_cpi_event =
 {
-	.send_mask = EvTyp_CtlProgIdent_Mask
+	.send_mask = EVTYP_CTLPROGIDENT_MASK
 };
+
+MODULE_LICENSE("GPL");
 
 MODULE_AUTHOR(
 	"Martin Peschke, IBM Deutschland Entwicklung GmbH "
@@ -128,7 +129,7 @@ cpi_prepare_req(void)
 	struct cpi_sccb *sccb;
 	struct cpi_evbuf *evb;
 
-	req = (struct sclp_req *) kmalloc(sizeof(struct sclp_req), GFP_KERNEL);
+	req = kmalloc(sizeof(struct sclp_req), GFP_KERNEL);
 	if (req == NULL)
 		return ERR_PTR(-ENOMEM);
 	sccb = (struct cpi_sccb *) __get_free_page(GFP_KERNEL | GFP_DMA);
@@ -156,7 +157,7 @@ cpi_prepare_req(void)
 	sclp_ascebc_str(evb->system_name, CPI_LENGTH_SYSTEM_NAME);
 	EBC_TOUPPER(evb->system_name, CPI_LENGTH_SYSTEM_NAME);
 
-	/* set sytem level */
+	/* set system level */
 	evb->system_level = LINUX_VERSION_CODE;
 
 	/* set sysplex name */
@@ -168,7 +169,7 @@ cpi_prepare_req(void)
 	}
 
 	/* prepare request data structure presented to SCLP driver */
-	req->command = SCLP_CMDW_WRITEDATA;
+	req->command = SCLP_CMDW_WRITE_EVENT_DATA;
 	req->sccb = sccb;
 	req->status = SCLP_REQ_FILLED;
 	req->callback = cpi_callback;
@@ -200,11 +201,11 @@ cpi_module_init(void)
 		       "console.\n");
 		return -EINVAL;
 	}
-	if (!(sclp_cpi_event.sclp_send_mask & EvTyp_CtlProgIdent_Mask)) {
+	if (!(sclp_cpi_event.sclp_send_mask & EVTYP_CTLPROGIDENT_MASK)) {
 		printk(KERN_WARNING "cpi: no control program identification "
 		       "support\n");
 		sclp_unregister(&sclp_cpi_event);
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 
 	req = cpi_prepare_req();

@@ -1,4 +1,3 @@
-/* $Id: unistd.h,v 1.50 2002/02/08 03:57:18 davem Exp $ */
 #ifndef _SPARC64_UNISTD_H
 #define _SPARC64_UNISTD_H
 
@@ -9,7 +8,7 @@
  * think of right now to force the arguments into fixed registers
  * before the trap into the system call with gcc 'asm' statements.
  *
- * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1995, 2007 David S. Miller (davem@davemloft.net)
  *
  * SunOS compatibility based upon preliminary work which is:
  *
@@ -41,7 +40,7 @@
 #define __NR_capset		 22 /* Linux Specific				   */
 #define __NR_setuid              23 /* Implemented via setreuid in SunOS           */
 #define __NR_getuid              24 /* Common                                      */
-/* #define __NR_time alias	 25    ENOSYS under SunOS			   */
+#define __NR_vmsplice	         25 /* ENOSYS under SunOS			   */
 #define __NR_ptrace              26 /* Common                                      */
 #define __NR_alarm               27 /* Implemented via setitimer in SunOS          */
 #define __NR_sigaltstack	 28 /* Common					   */
@@ -79,7 +78,7 @@
 #define __NR_umask               60 /* Common                                      */
 #define __NR_chroot              61 /* Common                                      */
 #define __NR_fstat               62 /* Common                                      */
-/* #define __NR_fstat64          63    Linux sparc32 Specific                      */
+#define __NR_fstat64             63 /* Linux Specific                              */
 #define __NR_getpagesize         64 /* Common                                      */
 #define __NR_msync               65 /* Common in newer 1.3.x revs...               */
 #define __NR_vfork               66 /* Common                                      */
@@ -148,14 +147,14 @@
 #define __NR_truncate           129 /* Common                                      */
 #define __NR_ftruncate          130 /* Common                                      */
 #define __NR_flock              131 /* Common                                      */
-/* #define __NR_lstat64		132    Linux sparc32 Specific                      */
+#define __NR_lstat64		132 /* Linux Specific                              */
 #define __NR_sendto             133 /* Common                                      */
 #define __NR_shutdown           134 /* Common                                      */
 #define __NR_socketpair         135 /* Common                                      */
 #define __NR_mkdir              136 /* Common                                      */
 #define __NR_rmdir              137 /* Common                                      */
 #define __NR_utimes             138 /* SunOS Specific                              */
-/* #define __NR_stat64		139    Linux sparc32 Specific			   */
+#define __NR_stat64		139 /* Linux Specific			           */
 #define __NR_sendfile64         140 /* adjtime under SunOS                         */
 #define __NR_getpeername        141 /* Common                                      */
 #define __NR_futex              142 /* gethostid under SunOS                       */
@@ -167,12 +166,12 @@
 #define __NR_pciconfig_read	148 /* ENOSYS under SunOS                          */
 #define __NR_pciconfig_write	149 /* ENOSYS under SunOS                          */
 #define __NR_getsockname        150 /* Common                                      */
-/* #define __NR_getmsg          151    SunOS Specific                              */
-/* #define __NR_putmsg          152    SunOS Specific                              */
+#define __NR_inotify_init       151 /* Linux specific                              */
+#define __NR_inotify_add_watch  152 /* Linux specific                              */
 #define __NR_poll               153 /* Common                                      */
 #define __NR_getdents64		154 /* Linux specific				   */
 /* #define __NR_fcntl64         155    Linux sparc32 Specific                      */
-/* #define __NR_getdirentries   156    SunOS Specific                              */
+#define __NR_inotify_rm_watch   156 /* Linux specific				   */
 #define __NR_statfs             157 /* Common                                      */
 #define __NR_fstatfs            158 /* Common                                      */
 #define __NR_umount             159 /* Common                                      */
@@ -212,7 +211,7 @@
 #define __NR_epoll_create       193 /* Linux Specific                              */
 #define __NR_epoll_ctl          194 /* Linux Specific                              */
 #define __NR_epoll_wait         195 /* Linux Specific                              */
-/* #define __NR_ulimit          196    Linux Specific                              */
+#define __NR_ioprio_set         196 /* Linux Specific                              */
 #define __NR_getppid            197 /* Linux Specific                              */
 #define __NR_sigaction          198 /* Linux Specific                              */
 #define __NR_sgetmask           199 /* Linux Specific                              */
@@ -234,7 +233,7 @@
 #define __NR_ipc                215 /* Linux Specific                              */
 #define __NR_sigreturn          216 /* Linux Specific                              */
 #define __NR_clone              217 /* Linux Specific                              */
-/* #define __NR_modify_ldt      218    Linux Specific - i386 specific, unused      */
+#define __NR_ioprio_get         218 /* Linux Specific                              */
 #define __NR_adjtimex           219 /* Linux Specific                              */
 #define __NR_sigprocmask        220 /* Linux Specific                              */
 #define __NR_create_module      221 /* Linux Specific                              */
@@ -250,7 +249,7 @@
 #ifdef __KERNEL__
 #define __NR_time		231 /* Linux sparc32                               */
 #endif
-/* #define __NR_oldstat         232    Linux Specific                              */
+#define __NR_splice             232 /* Linux Specific                              */
 #define __NR_stime              233 /* Linux Specific                              */
 #define __NR_statfs64           234 /* Linux Specific                              */
 #define __NR_fstatfs64          235 /* Linux Specific                              */
@@ -273,7 +272,7 @@
 #define __NR_getsid             252
 #define __NR_fdatasync          253
 #define __NR_nfsservctl         254
-#define __NR_aplib              255
+#define __NR_sync_file_range	255
 #define __NR_clock_settime	256
 #define __NR_clock_gettime	257
 #define __NR_clock_getres	258
@@ -298,176 +297,43 @@
 #define __NR_mq_notify		277
 #define __NR_mq_getsetattr	278
 #define __NR_waitid		279
-/*#define __NR_sys_setaltroot	280 available (was setaltroot) */
+#define __NR_tee		280
 #define __NR_add_key		281
 #define __NR_request_key	282
 #define __NR_keyctl		283
+#define __NR_openat		284
+#define __NR_mkdirat		285
+#define __NR_mknodat		286
+#define __NR_fchownat		287
+#define __NR_futimesat		288
+#define __NR_fstatat64		289
+#define __NR_unlinkat		290
+#define __NR_renameat		291
+#define __NR_linkat		292
+#define __NR_symlinkat		293
+#define __NR_readlinkat		294
+#define __NR_fchmodat		295
+#define __NR_faccessat		296
+#define __NR_pselect6		297
+#define __NR_ppoll		298
+#define __NR_unshare		299
+#define __NR_set_robust_list	300
+#define __NR_get_robust_list	301
+#define __NR_migrate_pages	302
+#define __NR_mbind		303
+#define __NR_get_mempolicy	304
+#define __NR_set_mempolicy	305
+#define __NR_kexec_load		306
+#define __NR_move_pages		307
+#define __NR_getcpu		308
+#define __NR_epoll_pwait	309
+#define __NR_utimensat		310
+#define __NR_signalfd		311
+#define __NR_timerfd		312
+#define __NR_eventfd		313
+#define __NR_fallocate		314
 
-/* WARNING: You MAY NOT add syscall numbers larger than 283, since
- *          all of the syscall tables in the Sparc kernel are
- *          sized to have 283 entries (starting at zero).  Therefore
- *          find a free slot in the 0-282 range.
- */
-
-#define _syscall0(type,name) \
-type name(void) \
-{ \
-long __res; \
-register long __g1 __asm__ ("g1") = __NR_##name; \
-__asm__ __volatile__ ("t 0x6d\n\t" \
-		      "sub %%g0, %%o0, %0\n\t" \
-		      "movcc %%xcc, %%o0, %0\n\t" \
-		      : "=r" (__res)\
-		      : "r" (__g1) \
-		      : "o0", "cc"); \
-if (__res >= 0) \
-    return (type) __res; \
-errno = -__res; \
-return -1; \
-}
-
-#define _syscall1(type,name,type1,arg1) \
-type name(type1 arg1) \
-{ \
-long __res; \
-register long __g1 __asm__ ("g1") = __NR_##name; \
-register long __o0 __asm__ ("o0") = (long)(arg1); \
-__asm__ __volatile__ ("t 0x6d\n\t" \
-		      "sub %%g0, %%o0, %0\n\t" \
-		      "movcc %%xcc, %%o0, %0\n\t" \
-		      : "=r" (__res), "=&r" (__o0) \
-		      : "1" (__o0), "r" (__g1) \
-		      : "cc"); \
-if (__res >= 0) \
-	return (type) __res; \
-errno = -__res; \
-return -1; \
-}
-
-#define _syscall2(type,name,type1,arg1,type2,arg2) \
-type name(type1 arg1,type2 arg2) \
-{ \
-long __res; \
-register long __g1 __asm__ ("g1") = __NR_##name; \
-register long __o0 __asm__ ("o0") = (long)(arg1); \
-register long __o1 __asm__ ("o1") = (long)(arg2); \
-__asm__ __volatile__ ("t 0x6d\n\t" \
-		      "sub %%g0, %%o0, %0\n\t" \
-		      "movcc %%xcc, %%o0, %0\n\t" \
-		      : "=r" (__res), "=&r" (__o0) \
-		      : "1" (__o0), "r" (__o1), "r" (__g1) \
-		      : "cc"); \
-if (__res >= 0) \
-	return (type) __res; \
-errno = -__res; \
-return -1; \
-}
-
-#define _syscall3(type,name,type1,arg1,type2,arg2,type3,arg3) \
-type name(type1 arg1,type2 arg2,type3 arg3) \
-{ \
-long __res; \
-register long __g1 __asm__ ("g1") = __NR_##name; \
-register long __o0 __asm__ ("o0") = (long)(arg1); \
-register long __o1 __asm__ ("o1") = (long)(arg2); \
-register long __o2 __asm__ ("o2") = (long)(arg3); \
-__asm__ __volatile__ ("t 0x6d\n\t" \
-		      "sub %%g0, %%o0, %0\n\t" \
-		      "movcc %%xcc, %%o0, %0\n\t" \
-		      : "=r" (__res), "=&r" (__o0) \
-		      : "1" (__o0), "r" (__o1), "r" (__o2), "r" (__g1) \
-		      : "cc"); \
-if (__res>=0) \
-	return (type) __res; \
-errno = -__res; \
-return -1; \
-}
-
-#define _syscall4(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4) \
-type name (type1 arg1, type2 arg2, type3 arg3, type4 arg4) \
-{ \
-long __res; \
-register long __g1 __asm__ ("g1") = __NR_##name; \
-register long __o0 __asm__ ("o0") = (long)(arg1); \
-register long __o1 __asm__ ("o1") = (long)(arg2); \
-register long __o2 __asm__ ("o2") = (long)(arg3); \
-register long __o3 __asm__ ("o3") = (long)(arg4); \
-__asm__ __volatile__ ("t 0x6d\n\t" \
-		      "sub %%g0, %%o0, %0\n\t" \
-		      "movcc %%xcc, %%o0, %0\n\t" \
-		      : "=r" (__res), "=&r" (__o0) \
-		      : "1" (__o0), "r" (__o1), "r" (__o2), "r" (__o3), "r" (__g1) \
-		      : "cc"); \
-if (__res>=0) \
-	return (type) __res; \
-errno = -__res; \
-return -1; \
-} 
-
-#define _syscall5(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4, \
-	  type5,arg5) \
-type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5) \
-{ \
-long __res; \
-register long __g1 __asm__ ("g1") = __NR_##name; \
-register long __o0 __asm__ ("o0") = (long)(arg1); \
-register long __o1 __asm__ ("o1") = (long)(arg2); \
-register long __o2 __asm__ ("o2") = (long)(arg3); \
-register long __o3 __asm__ ("o3") = (long)(arg4); \
-register long __o4 __asm__ ("o4") = (long)(arg5); \
-__asm__ __volatile__ ("t 0x6d\n\t" \
-		      "sub %%g0, %%o0, %0\n\t" \
-		      "movcc %%xcc, %%o0, %0\n\t" \
-		      : "=r" (__res), "=&r" (__o0) \
-		      : "1" (__o0), "r" (__o1), "r" (__o2), "r" (__o3), "r" (__o4), "r" (__g1) \
-		      : "cc"); \
-if (__res>=0) \
-	return (type) __res; \
-errno = -__res; \
-return -1; \
-}
-#ifdef __KERNEL_SYSCALLS__
-
-#include <linux/compiler.h>
-#include <linux/types.h>
-
-/*
- * we need this inline - forking from kernel space will result
- * in NO COPY ON WRITE (!!!), until an execve is executed. This
- * is no problem, but for the stack. This is handled by not letting
- * main() use the stack at all after fork(). Thus, no function
- * calls - which means inline code for fork too, as otherwise we
- * would use the stack upon exit from 'fork()'.
- *
- * Actually only pause and fork are needed inline, so that there
- * won't be any messing with the stack from main(), but we define
- * some others too.
- */
-#define __NR__exit __NR_exit
-static __inline__ _syscall0(pid_t,setsid)
-static __inline__ _syscall3(int,write,int,fd,__const__ char *,buf,off_t,count)
-static __inline__ _syscall3(int,read,int,fd,char *,buf,off_t,count)
-static __inline__ _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
-static __inline__ _syscall1(int,dup,int,fd)
-static __inline__ _syscall3(int,execve,__const__ char *,file,char **,argv,char **,envp)
-static __inline__ _syscall3(int,open,__const__ char *,file,int,flag,int,mode)
-static __inline__ _syscall1(int,close,int,fd)
-static __inline__ _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-
-#include <linux/linkage.h>
-
-asmlinkage unsigned long sys_mmap(
-				unsigned long addr, unsigned long len,
-				unsigned long prot, unsigned long flags,
-				unsigned long fd, unsigned long off);
-struct sigaction;
-asmlinkage long sys_rt_sigaction(int sig,
-				const struct sigaction __user *act,
-				struct sigaction __user *oact,
-				void __user *restorer,
-				size_t sigsetsize);
-
-#endif /* __KERNEL_SYSCALLS__ */
+#define NR_SYSCALLS		315
 
 #ifdef __KERNEL__
 /* sysconf options, for SunOS compatibility */
@@ -497,11 +363,11 @@ asmlinkage long sys_rt_sigaction(int sig,
 #define __ARCH_WANT_SYS_GETPGRP
 #define __ARCH_WANT_SYS_LLSEEK
 #define __ARCH_WANT_SYS_NICE
-#define __ARCH_WANT_SYS_OLD_GETRLIMIT
 #define __ARCH_WANT_SYS_OLDUMOUNT
 #define __ARCH_WANT_SYS_SIGPENDING
 #define __ARCH_WANT_SYS_SIGPROCMASK
-#endif
+#define __ARCH_WANT_SYS_RT_SIGSUSPEND
+#define __ARCH_WANT_COMPAT_SYS_RT_SIGSUSPEND
 
 /*
  * "Conditional" syscalls
@@ -509,6 +375,7 @@ asmlinkage long sys_rt_sigaction(int sig,
  * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
  * but it doesn't work on all toolchains, so we just do it by hand
  */
-#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall")
 
+#endif /* __KERNEL__ */
 #endif /* _SPARC64_UNISTD_H */

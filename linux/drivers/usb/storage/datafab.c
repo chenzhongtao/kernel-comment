@@ -50,16 +50,15 @@
  * in that routine.
  */
 
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 
+#include "usb.h"
 #include "transport.h"
 #include "protocol.h"
-#include "usb.h"
 #include "debug.h"
 #include "datafab.h"
 
@@ -99,7 +98,8 @@ static int datafab_read_data(struct us_data *us,
 	unsigned char  thistime;
 	unsigned int totallen, alloclen;
 	int len, result;
-	unsigned int sg_idx = 0, sg_offset = 0;
+	unsigned int sg_offset = 0;
+	struct scatterlist *sg = NULL;
 
 	// we're working in LBA mode.  according to the ATA spec, 
 	// we can support up to 28-bit addressing.  I don't know if Datafab
@@ -156,7 +156,7 @@ static int datafab_read_data(struct us_data *us,
 
 		// Store the data in the transfer buffer
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				 &sg_idx, &sg_offset, TO_XFER_BUF);
+				 &sg, &sg_offset, TO_XFER_BUF);
 
 		sector += thistime;
 		totallen -= len;
@@ -182,7 +182,8 @@ static int datafab_write_data(struct us_data *us,
 	unsigned char thistime;
 	unsigned int totallen, alloclen;
 	int len, result;
-	unsigned int sg_idx = 0, sg_offset = 0;
+	unsigned int sg_offset = 0;
+	struct scatterlist *sg = NULL;
 
 	// we're working in LBA mode.  according to the ATA spec, 
 	// we can support up to 28-bit addressing.  I don't know if Datafab
@@ -218,7 +219,7 @@ static int datafab_write_data(struct us_data *us,
 
 		// Get the data from the transfer buffer
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				&sg_idx, &sg_offset, FROM_XFER_BUF);
+				&sg, &sg_offset, FROM_XFER_BUF);
 
 		command[0] = 0;
 		command[1] = thistime;
@@ -512,13 +513,12 @@ int datafab_transport(struct scsi_cmnd * srb, struct us_data *us)
 	};
 
 	if (!us->extra) {
-		us->extra = kmalloc(sizeof(struct datafab_info), GFP_NOIO);
+		us->extra = kzalloc(sizeof(struct datafab_info), GFP_NOIO);
 		if (!us->extra) {
 			US_DEBUGP("datafab_transport:  Gah! "
 				  "Can't allocate storage for Datafab info struct!\n");
 			return USB_STOR_TRANSPORT_ERROR;
 		}
-		memset(us->extra, 0, sizeof(struct datafab_info));
 		us->extra_destructor = datafab_info_destructor;
   		((struct datafab_info *)us->extra)->lun = -1;
 	}

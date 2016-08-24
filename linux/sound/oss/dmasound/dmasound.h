@@ -13,7 +13,6 @@
 #define _dmasound_h_
 
 #include <linux/types.h>
-#include <linux/config.h>
 
 #define SND_NDEVS	256	/* Number of supported devices */
 #define SND_DEV_CTL	0	/* Control port /dev/mixer */
@@ -60,7 +59,6 @@ static inline int ioctl_return(int __user *addr, int value)
      */
 
 #undef HAS_8BIT_TABLES
-#undef HAS_RECORD
 
 #if defined(CONFIG_DMASOUND_ATARI) || defined(CONFIG_DMASOUND_ATARI_MODULE) ||\
     defined(CONFIG_DMASOUND_PAULA) || defined(CONFIG_DMASOUND_PAULA_MODULE) ||\
@@ -83,10 +81,6 @@ static inline int ioctl_return(int __user *addr, int value)
 
 #define DEFAULT_N_BUFFERS 4
 #define DEFAULT_BUFF_SIZE (1<<15)
-
-#if defined(CONFIG_DMASOUND_PMAC) || defined(CONFIG_DMASOUND_PMAC_MODULE)
-#define HAS_RECORD
-#endif
 
     /*
      *  Initialization
@@ -116,7 +110,7 @@ typedef struct {
     const char *name;
     const char *name2;
     struct module *owner;
-    void *(*dma_alloc)(unsigned int, int);
+    void *(*dma_alloc)(unsigned int, gfp_t);
     void (*dma_free)(void *, unsigned int);
     int (*irqinit)(void);
 #ifdef MODULE
@@ -169,9 +163,6 @@ struct sound_settings {
     SETTINGS soft;	/* software settings */
     SETTINGS dsp;	/* /dev/dsp default settings */
     TRANS *trans_write;	/* supported translations */
-#ifdef HAS_RECORD
-    TRANS *trans_read;	/* supported translations */
-#endif
     int volume_left;	/* volume (range is machine dependent) */
     int volume_right;
     int bass;		/* tone (range is machine dependent) */
@@ -254,11 +245,6 @@ struct sound_queue {
 extern struct sound_queue dmasound_write_sq;
 #define write_sq	dmasound_write_sq
 
-#ifdef HAS_RECORD
-extern struct sound_queue dmasound_read_sq;
-#define read_sq		dmasound_read_sq
-#endif
-
 extern int dmasound_catchRadius;
 #define catchRadius	dmasound_catchRadius
 
@@ -270,7 +256,6 @@ extern int dmasound_catchRadius;
 #define SW_INPUT_VOLUME_SCALE	4
 #define SW_INPUT_VOLUME_DEFAULT	(128 / SW_INPUT_VOLUME_SCALE)
 
-extern int expand_bal;	/* Balance factor for expanding (not volume!) */
 extern int expand_read_bal;	/* Balance factor for reading */
 extern uint software_input_volume; /* software implemented recording volume! */
 

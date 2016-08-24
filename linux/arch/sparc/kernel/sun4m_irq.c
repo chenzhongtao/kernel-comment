@@ -9,7 +9,6 @@
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
 #include <linux/kernel_stat.h>
@@ -39,10 +38,84 @@
 #include <asm/sbus.h>
 #include <asm/cacheflush.h>
 
+#include "irq.h"
+
+/* On the sun4m, just like the timers, we have both per-cpu and master
+ * interrupt registers.
+ */
+
+/* These registers are used for sending/receiving irqs from/to
+ * different cpu's.
+ */
+struct sun4m_intreg_percpu {
+	unsigned int tbt;        /* Interrupts still pending for this cpu. */
+
+	/* These next two registers are WRITE-ONLY and are only
+	 * "on bit" sensitive, "off bits" written have NO affect.
+	 */
+	unsigned int clear;  /* Clear this cpus irqs here. */
+	unsigned int set;    /* Set this cpus irqs here. */
+	unsigned char space[PAGE_SIZE - 12];
+};
+
+/*
+ * djhr
+ * Actually the clear and set fields in this struct are misleading..
+ * according to the SLAVIO manual (and the same applies for the SEC)
+ * the clear field clears bits in the mask which will ENABLE that IRQ
+ * the set field sets bits in the mask to DISABLE the IRQ.
+ *
+ * Also the undirected_xx address in the SLAVIO is defined as
+ * RESERVED and write only..
+ *
+ * DAVEM_NOTE: The SLAVIO only specifies behavior on uniprocessor
+ *             sun4m machines, for MP the layout makes more sense.
+ */
+struct sun4m_intregs {
+	struct sun4m_intreg_percpu cpu_intregs[SUN4M_NCPUS];
+	unsigned int tbt;                /* IRQ's that are still pending. */
+	unsigned int irqs;               /* Master IRQ bits. */
+
+	/* Again, like the above, two these registers are WRITE-ONLY. */
+	unsigned int clear;              /* Clear master IRQ's by setting bits here. */
+	unsigned int set;                /* Set master IRQ's by setting bits here. */
+
+	/* This register is both READ and WRITE. */
+	unsigned int undirected_target;  /* Which cpu gets undirected irqs. */
+};
+
 static unsigned long dummy;
 
 struct sun4m_intregs *sun4m_interrupts;
 unsigned long *irq_rcvreg = &dummy;
+
+/* Dave Redman (djhr@tadpole.co.uk)
+ * The sun4m interrupt registers.
+ */
+#define SUN4M_INT_ENABLE  	0x80000000
+#define SUN4M_INT_E14     	0x00000080
+#define SUN4M_INT_E10     	0x00080000
+
+#define SUN4M_HARD_INT(x)	(0x000000001 << (x))
+#define SUN4M_SOFT_INT(x)	(0x000010000 << (x))
+
+#define	SUN4M_INT_MASKALL	0x80000000	  /* mask all interrupts */
+#define	SUN4M_INT_MODULE_ERR	0x40000000	  /* module error */
+#define	SUN4M_INT_M2S_WRITE	0x20000000	  /* write buffer error */
+#define	SUN4M_INT_ECC		0x10000000	  /* ecc memory error */
+#define	SUN4M_INT_FLOPPY	0x00400000	  /* floppy disk */
+#define	SUN4M_INT_MODULE	0x00200000	  /* module interrupt */
+#define	SUN4M_INT_VIDEO		0x00100000	  /* onboard video */
+#define	SUN4M_INT_REALTIME	0x00080000	  /* system timer */
+#define	SUN4M_INT_SCSI		0x00040000	  /* onboard scsi */
+#define	SUN4M_INT_AUDIO		0x00020000	  /* audio/isdn */
+#define	SUN4M_INT_ETHERNET	0x00010000	  /* onboard ethernet */
+#define	SUN4M_INT_SERIAL	0x00008000	  /* serial ports */
+#define	SUN4M_INT_KBDMS		0x00004000	  /* keyboard/mouse */
+#define	SUN4M_INT_SBUSBITS	0x00003F80	  /* sbus int bits */
+
+#define SUN4M_INT_SBUS(x)	(1 << (x+7))
+#define SUN4M_INT_VME(x)	(1 << (x))
 
 /* These tables only apply for interrupts greater than 15..
  * 
@@ -229,14 +302,7 @@ static void sun4m_load_profile_irq(int cpu, unsigned int limit)
 	sun4m_timers->cpu_timers[cpu].l14_timer_limit = limit;
 }
 
-char *sun4m_irq_itoa(unsigned int irq)
-{
-	static char buff[16];
-	sprintf(buff, "%d", irq);
-	return buff;
-}
-
-static void __init sun4m_init_timers(irqreturn_t (*counter_fn)(int, void *, struct pt_regs *))
+static void __init sun4m_init_timers(irq_handler_t counter_fn)
 {
 	int reg_count, irq, cpu;
 	struct linux_prom_registers cnt_regs[PROMREG_MAX];
@@ -286,7 +352,7 @@ static void __init sun4m_init_timers(irqreturn_t (*counter_fn)(int, void *, stru
 
 	irq = request_irq(TIMER_IRQ,
 			  counter_fn,
-			  (SA_INTERRUPT | SA_STATIC_ALLOC),
+			  (IRQF_DISABLED | SA_STATIC_ALLOC),
 			  "timer", NULL);
 	if (irq) {
 		prom_printf("time_init: unable to attach IRQ%d\n",TIMER_IRQ);
@@ -307,7 +373,7 @@ static void __init sun4m_init_timers(irqreturn_t (*counter_fn)(int, void *, stru
 		struct tt_entry *trap_table = &sparc_ttable[SP_TRAP_IRQ1 + (14 - 1)];
 
 		/* For SMP we use the level 14 ticker, however the bootup code
-		 * has copied the firmwares level 14 vector into boot cpu's
+		 * has copied the firmware's level 14 vector into the boot cpu's
 		 * trap table, we must fix this now or we get squashed.
 		 */
 		local_irq_save(flags);
@@ -388,7 +454,6 @@ void __init sun4m_init_IRQ(void)
 	BTFIXUPSET_CALL(clear_clock_irq, sun4m_clear_clock_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(clear_profile_irq, sun4m_clear_profile_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(load_profile_irq, sun4m_load_profile_irq, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(__irq_itoa, sun4m_irq_itoa, BTFIXUPCALL_NORM);
 	sparc_init_timers = sun4m_init_timers;
 #ifdef CONFIG_SMP
 	BTFIXUPSET_CALL(set_cpu_int, sun4m_send_ipi, BTFIXUPCALL_NORM);

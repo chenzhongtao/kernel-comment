@@ -21,7 +21,7 @@
 #define __NR_time		 13
 #define __NR_mknod		 14
 #define __NR_chmod		 15
-#define __NR_chown		 16
+#define __NR_lchown		 16
 #define __NR_break		 17
 #define __NR_oldstat		 18
 #define __NR_lseek		 19
@@ -115,10 +115,10 @@
 #define __NR_lstat		107
 #define __NR_fstat		108
 #define __NR_olduname		109
-#define __NR_iopl		/* 110 */ not supported
+#define __NR_iopl		110
 #define __NR_vhangup		111
-#define __NR_idle		/* 112 */ Obsolete
-#define __NR_vm86		/* 113 */ not supported
+#define __NR_idle		112
+#define __NR_vm86old		113
 #define __NR_wait4		114
 #define __NR_swapoff		115
 #define __NR_sysinfo		116
@@ -128,7 +128,7 @@
 #define __NR_clone		120
 #define __NR_setdomainname	121
 #define __NR_uname		122
-#define __NR_cacheflush		123
+#define __NR_modify_ldt		123
 #define __NR_adjtimex		124
 #define __NR_mprotect		125
 #define __NR_sigprocmask	126
@@ -171,7 +171,7 @@
 #define __NR_mremap		163
 #define __NR_setresuid		164
 #define __NR_getresuid		165
-#define __NR_getpagesize	166
+#define __NR_vm86		166
 #define __NR_query_module	167
 #define __NR_poll		168
 #define __NR_nfsservctl		169
@@ -187,7 +187,7 @@
 #define __NR_rt_sigsuspend	179
 #define __NR_pread64		180
 #define __NR_pwrite64		181
-#define __NR_lchown		182
+#define __NR_chown		182
 #define __NR_getcwd		183
 #define __NR_capget		184
 #define __NR_capset		185
@@ -203,7 +203,7 @@
 #define __NR_stat64		195
 #define __NR_lstat64		196
 #define __NR_fstat64		197
-#define __NR_chown32		198
+#define __NR_lchown32		198
 #define __NR_getuid32		199
 #define __NR_getgid32		200
 #define __NR_geteuid32		201
@@ -217,15 +217,18 @@
 #define __NR_getresuid32	209
 #define __NR_setresgid32	210
 #define __NR_getresgid32	211
-#define __NR_lchown32		212
+#define __NR_chown32		212
 #define __NR_setuid32		213
 #define __NR_setgid32		214
 #define __NR_setfsuid32		215
 #define __NR_setfsgid32		216
 #define __NR_pivot_root		217
+#define __NR_mincore		218
+#define __NR_madvise		219
+#define __NR_madvise1		219
 #define __NR_getdents64		220
 #define __NR_fcntl64		221
-#define __NR_security		223
+/* 223 is unused */
 #define __NR_gettid		224
 #define __NR_readahead		225
 #define __NR_setxattr		226
@@ -252,13 +255,13 @@
 #define __NR_io_getevents	247
 #define __NR_io_submit		248
 #define __NR_io_cancel		249
-#define __NR_alloc_hugepages	250
-#define __NR_free_hugepages	251
+#define __NR_fadvise64		250
+/* 251 is available for reuse (was briefly sys_set_zone_reclaim) */
 #define __NR_exit_group		252
 #define __NR_lookup_dcookie	253
-#define __NR_sys_epoll_create	254
-#define __NR_sys_epoll_ctl	255
-#define __NR_sys_epoll_wait	256
+#define __NR_epoll_create	254
+#define __NR_epoll_ctl		255
+#define __NR_epoll_wait		256
 #define __NR_remap_file_pages	257
 #define __NR_set_tid_address	258
 #define __NR_timer_create	259
@@ -285,190 +288,48 @@
 #define __NR_mq_timedreceive	(__NR_mq_open+3)
 #define __NR_mq_notify		(__NR_mq_open+4)
 #define __NR_mq_getsetattr	(__NR_mq_open+5)
-#define __NR_sys_kexec_load	283
+#define __NR_kexec_load		283
 #define __NR_waitid		284
 /* #define __NR_sys_setaltroot	285 */
 #define __NR_add_key		286
 #define __NR_request_key	287
 #define __NR_keyctl		288
-
-#define NR_syscalls 289
-
-
-/* user-visible error numbers are in the range -1 - -122: see
-   <asm-m68k/errno.h> */
-
-#define __syscall_return(type, res) \
-do { \
-	if ((unsigned long)(res) >= (unsigned long)(-125)) { \
-	/* avoid using res which is declared to be in register d0; \
-	   errno might expand to a function call and clobber it.  */ \
-		int __err = -(res); \
-		errno = __err; \
-		res = -1; \
-	} \
-	return (type) (res); \
-} while (0)
-
-#define _syscall0(type, name)							\
-type name(void)									\
-{										\
-  register long __res __asm__("er0");						\
-  __asm__ __volatile__ ("mov.l	%1,er0\n\t"					\
-  			"trapa	#0\n\t"						\
-			: "=r" (__res)						\
-			: "ir" (__NR_##name)					\
-			: "cc");						\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;								\
-    __res = -1;									\
-  }										\
-  return (type)__res;								\
-}
-
-#define _syscall1(type, name, atype, a)						\
-type name(atype a)								\
-{										\
-  register long __res __asm__("er0");						\
-  __asm__ __volatile__ ("mov.l	%2, er1\n\t"					\
-  			"mov.l	%1, er0\n\t"					\
-  			"trapa	#0\n\t"						\
-			: "=r" (__res)						\
-			: "ir" (__NR_##name),					\
-			  "g" ((long)a)						\
-			: "cc", "er1");					\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;								\
-    __res = -1;									\
-  }										\
-  return (type)__res;								\
-}
-
-#define _syscall2(type, name, atype, a, btype, b)				\
-type name(atype a, btype b)							\
-{										\
-  register long __res __asm__("er0");						\
-  __asm__ __volatile__ ("mov.l	%3, er2\n\t"					\
-  			"mov.l	%2, er1\n\t"					\
-			"mov.l	%1, er0\n\t"					\
-  			"trapa	#0\n\t"						\
-			: "=r" (__res)						\
-			: "ir" (__NR_##name),					\
-			  "g" ((long)a),					\
-			  "g" ((long)b)						\
-			: "cc", "er1", "er2"); 				\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;								\
-    __res = -1;									\
-  }										\
-  return (type)__res;								\
-}
-
-#define _syscall3(type, name, atype, a, btype, b, ctype, c)			\
-type name(atype a, btype b, ctype c)						\
-{										\
-  register long __res __asm__("er0");						\
-  __asm__ __volatile__ ("mov.l	%4, er3\n\t"					\
-			"mov.l	%3, er2\n\t"					\
-  			"mov.l	%2, er1\n\t"					\
-			"mov.l	%1, er0\n\t"					\
-  			"trapa	#0\n\t"						\
-			: "=r" (__res)						\
-			: "ir" (__NR_##name),					\
-			  "g" ((long)a),					\
-			  "g" ((long)b),					\
-			  "g" ((long)c)						\
-			: "cc", "er1", "er2", "er3");  			\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;								\
-    __res = -1;									\
-  }										\
-  return (type)__res;								\
-}
-
-#define _syscall4(type, name, atype, a, btype, b, ctype, c, dtype, d)		\
-type name(atype a, btype b, ctype c, dtype d)					\
-{										\
-  register long __res __asm__("er0");						\
-  __asm__ __volatile__ ("mov.l	%5, er4\n\t"					\
-			"mov.l	%4, er3\n\t"					\
-			"mov.l	%3, er2\n\t"					\
-  			"mov.l	%2, er1\n\t"					\
-			"mov.l	%1, er0\n\t"					\
-  			"trapa	#0\n\t"						\
-			: "=r" (__res)						\
-			: "ir" (__NR_##name),					\
-			  "g" ((long)a),					\
-			  "g" ((long)b),					\
-			  "g" ((long)c),					\
-			  "g" ((long)d)						\
-			: "cc", "er1", "er2", "er3", "er4");			\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;								\
-    __res = -1;									\
-  }										\
-  return (type)__res;								\
-}
-
-#define _syscall5(type, name, atype, a, btype, b, ctype, c, dtype, d, etype, e)	\
-type name(atype a, btype b, ctype c, dtype d, etype e)				\
-{										\
-  register long __res __asm__("er0");						\
-  __asm__ __volatile__ ("mov.l	%6, er5\n\t"					\
-			"mov.l	%5, er4\n\t"					\
-			"mov.l	%4, er3\n\t"					\
-			"mov.l	%3, er2\n\t"					\
-  			"mov.l	%2, er1\n\t"					\
-			"mov.l	%1, er0\n\t"					\
-  			"trapa	#0\n\t"						\
-			: "=r" (__res)						\
-			: "ir" (__NR_##name),					\
-			  "g" ((long)a),					\
-			  "g" ((long)b),					\
-			  "g" ((long)c),					\
-			  "g" ((long)d),					\
-			  "m" ((long)e)						\
-			: "cc", "er1", "er2", "er3", "er4", "er5");		\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {		       	\
-    errno = -__res;								\
-    __res = -1;									\
-  }										\
-  return (type)__res;								\
-}
-		
-#define _syscall6(type, name, atype, a, btype, b, ctype, c, dtype, d,           \
-                              etype, e, ftype, f)	                        \
-type name(atype a, btype b, ctype c, dtype d, etype e, ftype f)			\
-{										\
-  register long __res __asm__("er0");						\
-  __asm__ __volatile__ ("mov.l	er6,@-sp\n\t"					\
-                        "mov.l	%7, er6\n\t"					\
-                        "mov.l	%6, er5\n\t"					\
-			"mov.l	%5, er4\n\t"					\
-			"mov.l	%4, er3\n\t"					\
-			"mov.l	%3, er2\n\t"					\
-  			"mov.l	%2, er1\n\t"					\
-			"mov.l	%1, er0\n\t"					\
-  			"trapa	#0\n\t"						\
-  			"mov.l	@sp+,er6"					\
-			: "=r" (__res)						\
-			: "ir" (__NR_##name),					\
-			  "g" ((long)a),					\
-			  "g" ((long)b),					\
-			  "g" ((long)c),					\
-			  "g" ((long)d),					\
-			  "m" ((long)e),					\
-			  "m" ((long)e)						\
-			: "cc", "er1", "er2", "er3", "er4", "er5");		\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {		       	\
-    errno = -__res;								\
-    __res = -1;									\
-  }										\
-  return (type)__res;								\
-}
-		
+#define __NR_ioprio_set		289
+#define __NR_ioprio_get		290
+#define __NR_inotify_init	291
+#define __NR_inotify_add_watch	292
+#define __NR_inotify_rm_watch	293
+#define __NR_migrate_pages	294
+#define __NR_openat		295
+#define __NR_mkdirat		296
+#define __NR_mknodat		297
+#define __NR_fchownat		298
+#define __NR_futimesat		299
+#define __NR_fstatat64		300
+#define __NR_unlinkat		301
+#define __NR_renameat		302
+#define __NR_linkat		303
+#define __NR_symlinkat		304
+#define __NR_readlinkat		305
+#define __NR_fchmodat		306
+#define __NR_faccessat		307
+#define __NR_pselect6		308
+#define __NR_ppoll		309
+#define __NR_unshare		310
+#define __NR_set_robust_list	311
+#define __NR_get_robust_list	312
+#define __NR_splice		313
+#define __NR_sync_file_range	314
+#define __NR_tee		315
+#define __NR_vmsplice		316
+#define __NR_move_pages		317
+#define __NR_getcpu		318
+#define __NR_epoll_pwait	319
 
 #ifdef __KERNEL__
+
+#define NR_syscalls 320
+
 #define __ARCH_WANT_IPC_PARSE_VERSION
 #define __ARCH_WANT_OLD_READDIR
 #define __ARCH_WANT_OLD_STAT
@@ -491,59 +352,6 @@ type name(atype a, btype b, ctype c, dtype d, etype e, ftype f)			\
 #define __ARCH_WANT_SYS_SIGPENDING
 #define __ARCH_WANT_SYS_SIGPROCMASK
 #define __ARCH_WANT_SYS_RT_SIGACTION
-#endif
-
-#ifdef __KERNEL_SYSCALLS__
-
-#include <linux/compiler.h>
-#include <linux/types.h>
-
-/*
- * we need this inline - forking from kernel space will result
- * in NO COPY ON WRITE (!!!), until an execve is executed. This
- * is no problem, but for the stack. This is handled by not letting
- * main() use the stack at all after fork(). Thus, no function
- * calls - which means inline code for fork too, as otherwise we
- * would use the stack upon exit from 'fork()'.
- *
- * Actually only pause and fork are needed inline, so that there
- * won't be any messing with the stack from main(), but we define
- * some others too.
- */
-#define __NR__exit __NR_exit
-static inline _syscall0(int,pause)
-static inline _syscall0(int,sync)
-static inline _syscall0(pid_t,setsid)
-static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
-static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
-static inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
-static inline _syscall1(int,dup,int,fd)
-static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
-static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
-static inline _syscall1(int,close,int,fd)
-static inline _syscall1(int,_exit,int,exitcode)
-static inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-static inline _syscall1(int,delete_module,const char *,name)
-
-static inline pid_t wait(int * wait_stat)
-{
-	return waitpid(-1,wait_stat,0);
-}
-
-asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
-			unsigned long prot, unsigned long flags,
-			unsigned long fd, unsigned long pgoff);
-asmlinkage int sys_execve(char *name, char **argv, char **envp,
-			int dummy, ...);
-asmlinkage int sys_pipe(unsigned long *fildes);
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data);
-struct sigaction;
-asmlinkage long sys_rt_sigaction(int sig,
-				const struct sigaction __user *act,
-				struct sigaction __user *oact,
-				size_t sigsetsize);
-
-#endif
 
 /*
  * "Conditional" syscalls
@@ -552,4 +360,5 @@ asmlinkage long sys_rt_sigaction(int sig,
   asm (".weak\t_" #name "\n"				\
        ".set\t_" #name ",_sys_ni_syscall");
 
+#endif /* __KERNEL__ */
 #endif /* _ASM_H8300_UNISTD_H_ */

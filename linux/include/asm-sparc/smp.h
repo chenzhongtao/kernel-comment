@@ -6,7 +6,6 @@
 #ifndef _SPARC_SMP_H
 #define _SPARC_SMP_H
 
-#include <linux/config.h>
 #include <linux/threads.h>
 #include <asm/head.h>
 #include <asm/btfixup.h>
@@ -60,40 +59,33 @@ BTFIXUPDEF_BLACKBOX(load_current)
 #define smp_cross_call(func,arg1,arg2,arg3,arg4,arg5) BTFIXUP_CALL(smp_cross_call)(func,arg1,arg2,arg3,arg4,arg5)
 #define smp_message_pass(target,msg,data,wait) BTFIXUP_CALL(smp_message_pass)(target,msg,data,wait)
 
-extern __inline__ void xc0(smpfunc_t func) { smp_cross_call(func, 0, 0, 0, 0, 0); }
-extern __inline__ void xc1(smpfunc_t func, unsigned long arg1)
+static inline void xc0(smpfunc_t func) { smp_cross_call(func, 0, 0, 0, 0, 0); }
+static inline void xc1(smpfunc_t func, unsigned long arg1)
 { smp_cross_call(func, arg1, 0, 0, 0, 0); }
-extern __inline__ void xc2(smpfunc_t func, unsigned long arg1, unsigned long arg2)
+static inline void xc2(smpfunc_t func, unsigned long arg1, unsigned long arg2)
 { smp_cross_call(func, arg1, arg2, 0, 0, 0); }
-extern __inline__ void xc3(smpfunc_t func, unsigned long arg1, unsigned long arg2,
+static inline void xc3(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 			   unsigned long arg3)
 { smp_cross_call(func, arg1, arg2, arg3, 0, 0); }
-extern __inline__ void xc4(smpfunc_t func, unsigned long arg1, unsigned long arg2,
+static inline void xc4(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 			   unsigned long arg3, unsigned long arg4)
 { smp_cross_call(func, arg1, arg2, arg3, arg4, 0); }
-extern __inline__ void xc5(smpfunc_t func, unsigned long arg1, unsigned long arg2,
+static inline void xc5(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 			   unsigned long arg3, unsigned long arg4, unsigned long arg5)
 { smp_cross_call(func, arg1, arg2, arg3, arg4, arg5); }
 
-extern __inline__ int smp_call_function(void (*func)(void *info), void *info, int nonatomic, int wait)
+static inline int smp_call_function(void (*func)(void *info), void *info, int nonatomic, int wait)
 {
 	xc1((smpfunc_t)func, (unsigned long)info);
 	return 0;
 }
 
-extern __volatile__ int __cpu_number_map[NR_CPUS];
-extern __volatile__ int __cpu_logical_map[NR_CPUS];
-
-extern __inline__ int cpu_logical_map(int cpu)
+static inline int cpu_logical_map(int cpu)
 {
-	return __cpu_logical_map[cpu];
-}
-extern __inline__ int cpu_number_map(int cpu)
-{
-	return __cpu_number_map[cpu];
+	return cpu;
 }
 
-extern __inline__ int hard_smp4m_processor_id(void)
+static inline int hard_smp4m_processor_id(void)
 {
 	int cpuid;
 
@@ -104,7 +96,7 @@ extern __inline__ int hard_smp4m_processor_id(void)
 	return cpuid;
 }
 
-extern __inline__ int hard_smp4d_processor_id(void)
+static inline int hard_smp4d_processor_id(void)
 {
 	int cpuid;
 
@@ -114,7 +106,7 @@ extern __inline__ int hard_smp4d_processor_id(void)
 }
 
 #ifndef MODULE
-extern __inline__ int hard_smp_processor_id(void)
+static inline int hard_smp_processor_id(void)
 {
 	int cpuid;
 
@@ -136,7 +128,7 @@ extern __inline__ int hard_smp_processor_id(void)
 	return cpuid;
 }
 #else
-extern __inline__ int hard_smp_processor_id(void)
+static inline int hard_smp_processor_id(void)
 {
 	int cpuid;
 	
@@ -148,10 +140,12 @@ extern __inline__ int hard_smp_processor_id(void)
 }
 #endif
 
-#define smp_processor_id()	(current_thread_info()->cpu)
+#define raw_smp_processor_id()		(current_thread_info()->cpu)
 
 #define prof_multiplier(__cpu)		cpu_data(__cpu).multiplier
 #define prof_counter(__cpu)		cpu_data(__cpu).counter
+
+void smp_setup_cpu_possible_map(void);
 
 #endif /* !(__ASSEMBLY__) */
 
@@ -169,7 +163,12 @@ extern __inline__ int hard_smp_processor_id(void)
 #define MBOX_IDLECPU2         0xFD
 #define MBOX_STOPCPU2         0xFE
 
-#endif /* SMP */
+#else /* SMP */
+
+#define hard_smp_processor_id()		0
+#define smp_setup_cpu_possible_map() do { } while (0)
+
+#endif /* !(SMP) */
 
 #define NO_PROC_ID            0xFF
 

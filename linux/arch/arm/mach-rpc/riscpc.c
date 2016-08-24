@@ -17,6 +17,7 @@
 #include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/serial_8250.h>
+#include <linux/pata_platform.h>
 
 #include <asm/elf.h>
 #include <asm/io.h>
@@ -32,10 +33,7 @@
 
 extern void rpc_init_irq(void);
 
-extern unsigned int vram_size;
-
-#if 0
-
+unsigned int vram_size;
 unsigned int memc_ctrl_reg;
 unsigned int number_mfm_drives;
 
@@ -63,12 +61,23 @@ static int __init parse_tag_acorn(const struct tag *tag)
 
 __tagtable(ATAG_ACORN, parse_tag_acorn);
 
-#endif
-
 static struct map_desc rpc_io_desc[] __initdata = {
- { SCREEN_BASE,	SCREEN_START,	2*1048576, MT_DEVICE }, /* VRAM		*/
- { IO_BASE,	IO_START,	IO_SIZE	 , MT_DEVICE }, /* IO space	*/
- { EASI_BASE,	EASI_START,	EASI_SIZE, MT_DEVICE }  /* EASI space	*/
+ 	{	/* VRAM		*/
+		.virtual	=  SCREEN_BASE,
+		.pfn		= __phys_to_pfn(SCREEN_START),
+		.length		= 	2*1048576,
+		.type		= MT_DEVICE
+	}, {	/* IO space	*/
+		.virtual	=  (u32)IO_BASE,
+		.pfn		= __phys_to_pfn(IO_START),
+		.length		= 	IO_SIZE	 ,
+		.type		= MT_DEVICE
+	}, {	/* EASI space	*/
+		.virtual	= EASI_BASE,
+		.pfn		= __phys_to_pfn(EASI_START),
+		.length		= EASI_SIZE,
+		.type		= MT_DEVICE
+	}
 };
 
 static void __init rpc_map_io(void)
@@ -78,7 +87,7 @@ static void __init rpc_map_io(void)
 	/*
 	 * Turn off floppy.
 	 */
-	outb(0xc, 0x3f2);
+	writeb(0xc, PCIO_BASE + (0x3f2 << 2));
 
 	/*
 	 * RiscPC can't handle half-word loads and stores
@@ -145,9 +154,42 @@ static struct plat_serial8250_port serial_platform_data[] = {
 
 static struct platform_device serial_device = {
 	.name			= "serial8250",
-	.id			= 0,
+	.id			= PLAT8250_DEV_PLATFORM,
 	.dev			= {
 		.platform_data	= serial_platform_data,
+	},
+};
+
+static struct pata_platform_info pata_platform_data = {
+	.ioport_shift		= 2,
+};
+
+static struct resource pata_resources[] = {
+	[0] = {
+		.start		= 0x030107c0,
+		.end		= 0x030107df,
+		.flags		= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start		= 0x03010fd8,
+		.end		= 0x03010fdb,
+		.flags		= IORESOURCE_MEM,
+	},
+	[2] = {
+		.start		= IRQ_HARDDISK,
+		.end		= IRQ_HARDDISK,
+		.flags		= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device pata_device = {
+	.name			= "pata_platform",
+	.id			= -1,
+	.num_resources		= ARRAY_SIZE(pata_resources),
+	.resource		= pata_resources,
+	.dev			= {
+		.platform_data	= &pata_platform_data,
+		.coherent_dma_mask = ~0,	/* grumble */
 	},
 };
 
@@ -156,6 +198,7 @@ static struct platform_device *devs[] __initdata = {
 	&kbd_device,
 	&serial_device,
 	&acornfb_device,
+	&pata_device,
 };
 
 static int __init rpc_init(void)
@@ -168,12 +211,13 @@ arch_initcall(rpc_init);
 extern struct sys_timer ioc_timer;
 
 MACHINE_START(RISCPC, "Acorn-RiscPC")
-	MAINTAINER("Russell King")
-	BOOT_MEM(0x10000000, 0x03000000, 0xe0000000)
-	BOOT_PARAMS(0x10000100)
-	DISABLE_PARPORT(0)
-	DISABLE_PARPORT(1)
-	MAPIO(rpc_map_io)
-	INITIRQ(rpc_init_irq)
+	/* Maintainer: Russell King */
+	.phys_io	= 0x03000000,
+	.io_pg_offst	= ((0xe0000000) >> 18) & 0xfffc,
+	.boot_params	= 0x10000100,
+	.reserve_lp0	= 1,
+	.reserve_lp1	= 1,
+	.map_io		= rpc_map_io,
+	.init_irq	= rpc_init_irq,
 	.timer		= &ioc_timer,
 MACHINE_END

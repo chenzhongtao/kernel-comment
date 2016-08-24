@@ -39,13 +39,11 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
@@ -53,7 +51,6 @@
 #include <linux/fb.h>
 #include <linux/selection.h>
 #include <linux/init.h>
-#include <linux/pci.h>
 #include <linux/nvram.h>
 #include <linux/adb.h>
 #include <linux/cuda.h>
@@ -135,7 +132,6 @@ static struct fb_ops valkyriefb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 /* Sets the video mode according to info->var */
@@ -287,7 +283,7 @@ static void __init valkyrie_choose_mode(struct fb_info_valkyrie *p)
 	printk(KERN_INFO "Monitor sense value = 0x%x\n", p->sense);
 
 	/* Try to pick a video mode out of NVRAM if we have one. */
-#ifndef CONFIG_MAC
+#if !defined(CONFIG_MAC) && defined(CONFIG_NVRAM)
 	if (default_vmode == VMODE_NVRAM) {
 		default_vmode = nvram_read_byte(NV_VMODE);
 		if (default_vmode <= 0
@@ -300,7 +296,7 @@ static void __init valkyrie_choose_mode(struct fb_info_valkyrie *p)
 		default_vmode = mac_map_monitor_sense(p->sense);
 	if (!valkyrie_reg_init[default_vmode - 1])
 		default_vmode = VMODE_640_480_67;
-#ifndef CONFIG_MAC
+#if !defined(CONFIG_MAC) && defined(CONFIG_NVRAM)
 	if (default_cmode == CMODE_NVRAM)
 		default_cmode = nvram_read_byte(NV_CMODE);
 #endif
@@ -343,27 +339,26 @@ int __init valkyriefb_init(void)
 #else /* ppc (!CONFIG_MAC) */
 	{
 		struct device_node *dp;
+		struct resource r;
 
-		dp = find_devices("valkyrie");
+		dp = of_find_node_by_name(NULL, "valkyrie");
 		if (dp == 0)
 			return 0;
 
-		if (dp->n_addrs != 1) {
-			printk(KERN_ERR "expecting 1 address for valkyrie (got %d)\n",
-			       dp->n_addrs);
+		if (of_address_to_resource(dp, 0, &r)) {
+			printk(KERN_ERR "can't find address for valkyrie\n");
 			return 0;
 		}
 
-		frame_buffer_phys = dp->addrs[0].address;
-		cmap_regs_phys = dp->addrs[0].address+0x304000;
+		frame_buffer_phys = r.start;
+		cmap_regs_phys = r.start + 0x304000;
 		flags = _PAGE_WRITETHRU;
 	}
 #endif /* ppc (!CONFIG_MAC) */
 
-	p = kmalloc(sizeof(*p), GFP_ATOMIC);
+	p = kzalloc(sizeof(*p), GFP_ATOMIC);
 	if (p == 0)
 		return -ENOMEM;
-	memset(p, 0, sizeof(*p));
 
 	/* Map in frame buffer and registers */
 	if (!request_mem_region(frame_buffer_phys, 0x100000, "valkyriefb")) {

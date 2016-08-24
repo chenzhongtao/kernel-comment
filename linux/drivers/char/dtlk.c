@@ -52,7 +52,7 @@
 #define KERNEL
 #include <linux/types.h>
 #include <linux/fs.h>
-#include <linux/mm.h>		/* for verify_area */
+#include <linux/mm.h>
 #include <linux/errno.h>	/* for -EBUSY */
 #include <linux/ioport.h>	/* for request_region */
 #include <linux/delay.h>	/* for loops_per_jiffy */
@@ -62,8 +62,6 @@
 #include <linux/init.h>		/* for __init, module_{init,exit} */
 #include <linux/poll.h>		/* for POLLIN, etc. */
 #include <linux/dtlk.h>		/* local header file for DoubleTalk values */
-#include <linux/devfs_fs_kernel.h>
-#include <linux/smp_lock.h>
 
 #ifdef TRACING
 #define TRACE_TEXT(str) printk(str);
@@ -73,6 +71,7 @@
 #define TRACE_RET ((void) 0)
 #endif				/* TRACING */
 
+static void dtlk_timer_tick(unsigned long data);
 
 static int dtlk_major;
 static int dtlk_port_lpc;
@@ -82,7 +81,7 @@ static int dtlk_has_indexing;
 static unsigned int dtlk_portlist[] =
 {0x25e, 0x29e, 0x2de, 0x31e, 0x35e, 0x39e, 0};
 static wait_queue_head_t dtlk_process_list;
-static struct timer_list dtlk_timer;
+static DEFINE_TIMER(dtlk_timer, dtlk_timer_tick, 0, 0);
 
 /* prototypes for file_operations struct */
 static ssize_t dtlk_read(struct file *, char __user *,
@@ -95,7 +94,7 @@ static int dtlk_release(struct inode *, struct file *);
 static int dtlk_ioctl(struct inode *inode, struct file *file,
 		      unsigned int cmd, unsigned long arg);
 
-static struct file_operations dtlk_fops =
+static const struct file_operations dtlk_fops =
 {
 	.owner		= THIS_MODULE,
 	.read		= dtlk_read,
@@ -118,12 +117,11 @@ static char dtlk_write_tts(char);
 /*
    static void dtlk_handle_error(char, char, unsigned int);
  */
-static void dtlk_timer_tick(unsigned long data);
 
 static ssize_t dtlk_read(struct file *file, char __user *buf,
 			 size_t count, loff_t * ppos)
 {
-	unsigned int minor = iminor(file->f_dentry->d_inode);
+	unsigned int minor = iminor(file->f_path.dentry->d_inode);
 	char ch;
 	int i = 0, retries;
 
@@ -175,7 +173,7 @@ static ssize_t dtlk_write(struct file *file, const char __user *buf,
 	}
 #endif
 
-	if (iminor(file->f_dentry->d_inode) != DTLK_MINOR)
+	if (iminor(file->f_path.dentry->d_inode) != DTLK_MINOR)
 		return -EINVAL;
 
 	while (1) {
@@ -319,29 +317,30 @@ static int dtlk_release(struct inode *inode, struct file *file)
 	}
 	TRACE_RET;
 	
-	del_timer(&dtlk_timer);
+	del_timer_sync(&dtlk_timer);
 
 	return 0;
 }
 
 static int __init dtlk_init(void)
 {
+	int err;
+
 	dtlk_port_lpc = 0;
 	dtlk_port_tts = 0;
 	dtlk_busy = 0;
 	dtlk_major = register_chrdev(0, "dtlk", &dtlk_fops);
-	if (dtlk_major == 0) {
+	if (dtlk_major < 0) {
 		printk(KERN_ERR "DoubleTalk PC - cannot register device\n");
-		return 0;
+		return dtlk_major;
 	}
-	if (dtlk_dev_probe() == 0)
-		printk(", MAJOR %d\n", dtlk_major);
+	err = dtlk_dev_probe();
+	if (err) {
+		unregister_chrdev(dtlk_major, "dtlk");
+		return err;
+	}
+	printk(", MAJOR %d\n", dtlk_major);
 
-	devfs_mk_cdev(MKDEV(dtlk_major, DTLK_MINOR),
-		       S_IFCHR | S_IRUSR | S_IWUSR, "dtlk");
-
-	init_timer(&dtlk_timer);
-	dtlk_timer.function = dtlk_timer_tick;
 	init_waitqueue_head(&dtlk_process_list);
 
 	return 0;
@@ -357,7 +356,6 @@ static void __exit dtlk_cleanup (void)
 
 	dtlk_write_tts(DTLK_CLEAR);
 	unregister_chrdev(dtlk_major, "dtlk");
-	devfs_remove("dtlk");
 	release_region(dtlk_port_lpc, DTLK_IO_EXTENT);
 }
 
@@ -490,7 +488,7 @@ for (i = 0; i < 10; i++)			\
 		release_region(dtlk_portlist[i], DTLK_IO_EXTENT);
 	}
 
-	printk(KERN_INFO "\nDoubleTalk PC - not found\n");
+	printk(KERN_INFO "DoubleTalk PC - not found\n");
 	return -ENODEV;
 }
 

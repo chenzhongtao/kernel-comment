@@ -16,20 +16,8 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 
-/*
- * NOTE: Macro/functions in this file depends on threads_info.h implementation.
- * Assumes:
- * TI_FLAGS == 8
- * TIF_USERSPACE == 31
- * USER_ADDR_LIMIT == 0x80000000
- */
-
 #define VERIFY_READ    0
 #define VERIFY_WRITE   1
-
-typedef struct {
-	unsigned int is_user_space;
-} mm_segment_t;
 
 /*
  * The fs value determines whether argument validity checking should be
@@ -40,16 +28,18 @@ typedef struct {
  */
 
 #define MAKE_MM_SEG(s)	((mm_segment_t) { (s) })
-#define segment_eq(a,b)	((a).is_user_space == (b).is_user_space)
 
-#define USER_ADDR_LIMIT	0x80000000
+#define KERNEL_DS	MAKE_MM_SEG(0xFFFFFFFFUL)
+#define USER_DS		MAKE_MM_SEG(PAGE_OFFSET)
 
-#define KERNEL_DS	MAKE_MM_SEG(0)
-#define USER_DS		MAKE_MM_SEG(1)
+#define segment_eq(a,b)	((a).seg == (b).seg)
 
 #define get_ds()	(KERNEL_DS)
 
 #if !defined(CONFIG_MMU)
+/* NOMMU is always true */
+#define __addr_ok(addr) (1)
+
 static inline mm_segment_t get_fs(void)
 {
 	return USER_DS;
@@ -71,72 +61,38 @@ static inline void set_fs(mm_segment_t s)
  */
 static inline int __access_ok(unsigned long addr, unsigned long size)
 {
-	extern unsigned long memory_start, memory_end;
-
 	return ((addr >= memory_start) && ((addr + size) < memory_end));
 }
 #else /* CONFIG_MMU */
-static inline mm_segment_t get_fs(void)
-{
-	return MAKE_MM_SEG(test_thread_flag(TIF_USERSPACE));
-}
+#define __addr_ok(addr) \
+	((unsigned long)(addr) < (current_thread_info()->addr_limit.seg))
 
-static inline void set_fs(mm_segment_t s)
-{
-	unsigned long ti, flag;
-	__asm__ __volatile__(
-		"stc	r7_bank, %0\n\t"
-		"mov.l	@(8,%0), %1\n\t"
-		"shal	%1\n\t"
-		"cmp/pl	%2\n\t"
-		"rotcr	%1\n\t"
-		"mov.l	%1, @(8,%0)"
-		: "=&r" (ti), "=&r" (flag)
-		: "r" (s.is_user_space)
-		: "t");
-/****
-	if (s.is_user_space)
-		set_thread_flag(TIF_USERSPACE);
-	else
-		clear_thread_flag(TIF_USERSPACE);
-****/
-}
+#define get_fs()	(current_thread_info()->addr_limit)
+#define set_fs(x)	(current_thread_info()->addr_limit = (x))
 
 /*
  * __access_ok: Check if address with size is OK or not.
  *
- * We do three checks:
- * (1) is it user space? 
- * (2) addr + size --> carry?
- * (3) addr + size >= 0x80000000  (USER_ADDR_LIMIT)
+ * Uhhuh, this needs 33-bit arithmetic. We have a carry..
  *
- * (1) (2) (3) | RESULT
- *  0   0   0  |  ok
- *  0   0   1  |  ok
- *  0   1   0  |  bad
- *  0   1   1  |  bad
- *  1   0   0  |  ok
- *  1   0   1  |  bad
- *  1   1   0  |  bad
- *  1   1   1  |  bad
+ * sum := addr + size;  carry? --> flag = true;
+ * if (sum >= addr_limit) flag = true;
  */
 static inline int __access_ok(unsigned long addr, unsigned long size)
 {
-	unsigned long flag, tmp;
+	unsigned long flag, sum;
 
-	__asm__("stc	r7_bank, %0\n\t"
-		"mov.l	@(8,%0), %0\n\t"
-		"clrt\n\t"
-		"addc	%2, %1\n\t"
-		"and	%1, %0\n\t"
-		"rotcl	%0\n\t"
-		"rotcl	%0\n\t"
-		"and	#3, %0"
-		: "=&z" (flag), "=r" (tmp)
-		: "r" (addr), "1" (size)
-		: "t");
-
+	__asm__("clrt\n\t"
+		"addc	%3, %1\n\t"
+		"movt	%0\n\t"
+		"cmp/hi	%4, %1\n\t"
+		"rotcl	%0"
+		:"=&r" (flag), "=r" (sum)
+		:"1" (addr), "r" (size),
+		 "r" (current_thread_info()->addr_limit.seg)
+		:"t");
 	return flag == 0;
+
 }
 #endif /* CONFIG_MMU */
 
@@ -144,11 +100,6 @@ static inline int access_ok(int type, const void __user *p, unsigned long size)
 {
 	unsigned long addr = (unsigned long)p;
 	return __access_ok(addr, size);
-}
-
-static inline int verify_area(int type, const void __user * addr, unsigned long size)
-{
-	return access_ok(type,addr,size) ? 0 : -EFAULT;
 }
 
 /*
@@ -177,11 +128,12 @@ static inline int verify_area(int type, const void __user * addr, unsigned long 
   __get_user_nocheck((x),(ptr),sizeof(*(ptr)))
 
 struct __large_struct { unsigned long buf[100]; };
-#define __m(x) (*(struct __large_struct *)(x))
+#define __m(x) (*(struct __large_struct __user *)(x))
 
 #define __get_user_size(x,ptr,size,retval)			\
 do {								\
 	retval = 0;						\
+	__chk_user_ptr(ptr);					\
 	switch (size) {						\
 	case 1:							\
 		__get_user_asm(x, ptr, retval, "b");		\
@@ -206,9 +158,11 @@ do {								\
 	__gu_err;						\
 })
 
+#ifdef CONFIG_MMU
 #define __get_user_check(x,ptr,size)				\
 ({								\
 	long __gu_err, __gu_val;				\
+	__chk_user_ptr(ptr);					\
 	switch (size) {						\
 	case 1:							\
 		__get_user_1(__gu_val, (ptr), __gu_err);	\
@@ -295,6 +249,18 @@ __asm__("stc	r7_bank, %1\n\t"		\
 	: "r" (addr)				\
 	: "t");					\
 })
+#else /* CONFIG_MMU */
+#define __get_user_check(x,ptr,size)					\
+({									\
+	long __gu_err, __gu_val;					\
+	if (__access_ok((unsigned long)(ptr), (size))) {		\
+		__get_user_size(__gu_val, (ptr), (size), __gu_err);	\
+		(x) = (__typeof__(*(ptr)))__gu_val;			\
+	} else								\
+		__gu_err = -EFAULT;					\
+	__gu_err;							\
+})
+#endif
 
 #define __get_user_asm(x, addr, err, insn) \
 ({ \
@@ -322,6 +288,7 @@ extern void __get_user_unknown(void);
 #define __put_user_size(x,ptr,size,retval)		\
 do {							\
 	retval = 0;					\
+	__chk_user_ptr(ptr);				\
 	switch (size) {					\
 	case 1:						\
 		__put_user_asm(x, ptr, retval, "b");	\
@@ -350,7 +317,7 @@ do {							\
 #define __put_user_check(x,ptr,size)				\
 ({								\
 	long __pu_err = -EFAULT;				\
-	__typeof__(*(ptr)) *__pu_addr = (ptr);			\
+	__typeof__(*(ptr)) __user *__pu_addr = (ptr);		\
 								\
 	if (__access_ok((unsigned long)__pu_addr,size))		\
 		__put_user_size((x),__pu_addr,(size),__pu_err);	\
@@ -428,10 +395,10 @@ __asm__ __volatile__( \
 #endif
 
 extern void __put_user_unknown(void);
-
+
 /* Generic arbitrary sized copy.  */
 /* Return the number of bytes NOT copied */
-extern __kernel_size_t __copy_user(void *to, const void *from, __kernel_size_t n);
+__kernel_size_t __copy_user(void *to, const void *from, __kernel_size_t n);
 
 #define copy_to_user(to,from,n) ({ \
 void *__copy_to = (void *) (to); \
@@ -441,14 +408,6 @@ if(__copy_size && __access_ok((unsigned long)__copy_to, __copy_size)) { \
 __copy_res = __copy_user(__copy_to, (void *) (from), __copy_size); \
 } else __copy_res = __copy_size; \
 __copy_res; })
-
-#define __copy_to_user(to,from,n)		\
-	__copy_user((void *)(to),		\
-		    (void *)(from), n)
-
-#define __copy_to_user_inatomic __copy_to_user
-#define __copy_from_user_inatomic __copy_from_user
-
 
 #define copy_from_user(to,from,n) ({ \
 void *__copy_to = (void *) (to); \
@@ -460,9 +419,20 @@ __copy_res = __copy_user(__copy_to, __copy_from, __copy_size); \
 } else __copy_res = __copy_size; \
 __copy_res; })
 
-#define __copy_from_user(to,from,n)		\
-	__copy_user((void *)(to),		\
-		    (void *)(from), n)
+static __always_inline unsigned long
+__copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	return __copy_user(to, (__force void *)from, n);
+}
+
+static __always_inline unsigned long __must_check
+__copy_to_user(void __user *to, const void *from, unsigned long n)
+{
+	return __copy_user((__force void *)to, from, n);
+}
+
+#define __copy_to_user_inatomic __copy_to_user
+#define __copy_from_user_inatomic __copy_from_user
 
 /*
  * Clear the area and return remaining number of bytes
@@ -546,7 +516,7 @@ static __inline__ long __strnlen_user(const char __user *__s, long __n)
 		"3:\n\t"
 		"mov.l	4f, %1\n\t"
 		"jmp	@%1\n\t"
-		" mov	%5, %0\n"
+		" mov	#0, %0\n"
 		".balign 4\n"
 		"4:	.long 2b\n"
 		".previous\n"
@@ -555,26 +525,20 @@ static __inline__ long __strnlen_user(const char __user *__s, long __n)
 		"	.long 1b,3b\n"
 		".previous"
 		: "=z" (res), "=&r" (__dummy)
-		: "0" (0), "r" (__s), "r" (__n), "i" (-EFAULT)
+		: "0" (0), "r" (__s), "r" (__n)
 		: "t");
 	return res;
 }
 
 static __inline__ long strnlen_user(const char __user *s, long n)
 {
-	if (!access_ok(VERIFY_READ, s, n))
+	if (!__addr_ok(s))
 		return 0;
 	else
 		return __strnlen_user(s, n);
 }
 
-static __inline__ long strlen_user(const char __user *s)
-{
-	if (!access_ok(VERIFY_READ, s, 0))
-		return 0;
-	else
-		return __strnlen_user(s, ~0UL >> 1);
-}
+#define strlen_user(str)	strnlen_user(str, ~0UL >> 1)
 
 /*
  * The exception table consists of pairs of addresses: the first is the

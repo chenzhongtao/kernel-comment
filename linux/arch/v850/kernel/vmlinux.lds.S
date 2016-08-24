@@ -1,8 +1,8 @@
 /*
  * arch/v850/vmlinux.lds.S -- kernel linker script for v850 platforms
  *
- *  Copyright (C) 2002,03,04  NEC Electronics Corporation
- *  Copyright (C) 2002,03,04  Miles Bader <miles@gnu.org>
+ *  Copyright (C) 2002,03,04,05  NEC Electronics Corporation
+ *  Copyright (C) 2002,03,04,05  Miles Bader <miles@gnu.org>
  *
  * This file is subject to the terms and conditions of the GNU General
  * Public License.  See the file COPYING in the main directory of this
@@ -11,7 +11,7 @@
  * Written by Miles Bader <miles@gnu.org>
  */
 
-#include <linux/config.h>
+
 #define VMLINUX_SYMBOL(_sym_) _##_sym_
 #include <asm-generic/vmlinux.lds.h>
 
@@ -42,6 +42,19 @@
 			*(.rodata) *(.rodata.*)				      \
 			*(__vermagic)		/* Kernel version magic */    \
 			*(.rodata1)					      \
+		/* PCI quirks */					      \
+		___start_pci_fixups_early = . ;				      \
+			*(.pci_fixup_early)				      \
+		___end_pci_fixups_early = . ;				      \
+		___start_pci_fixups_header = . ;			      \
+			*(.pci_fixup_header)				      \
+		___end_pci_fixups_header = . ;				      \
+		___start_pci_fixups_final = . ;				      \
+			*(.pci_fixup_final)				      \
+		___end_pci_fixups_final = . ;				      \
+		___start_pci_fixups_enable = . ;			      \
+			*(.pci_fixup_enable)				      \
+		___end_pci_fixups_enable = . ;				      \
 		/* Kernel symbol table: Normal symbols */		      \
 		___start___ksymtab = .;					      \
 			*(__ksymtab)					      \
@@ -50,6 +63,10 @@
 		___start___ksymtab_gpl = .;				      \
 			*(__ksymtab_gpl)				      \
 		___stop___ksymtab_gpl = .;				      \
+		/* Kernel symbol table: GPL-future symbols */		      \
+		___start___ksymtab_gpl_future = .;			      \
+			*(__ksymtab_gpl_future)				      \
+		___stop___ksymtab_gpl_future = .;			      \
 		/* Kernel symbol table: strings */			      \
 			*(__ksymtab_strings)				      \
 		/* Kernel symbol table: Normal symbols */		      \
@@ -60,7 +77,12 @@
 		___start___kcrctab_gpl = .;				      \
 			*(__kcrctab_gpl)				      \
 		___stop___kcrctab_gpl = .;				      \
+		/* Kernel symbol table: GPL-future symbols */		      \
+		___start___kcrctab_gpl_future = .;			      \
+			*(__kcrctab_gpl_future)				      \
+		___stop___kcrctab_gpl_future = .;			      \
 		/* Built-in module parameters */			      \
+		. = ALIGN (4) ;						      \
 		___start___param = .;					      \
 		*(__param)						      \
 		___stop___param = .;
@@ -68,8 +90,9 @@
 
 /* Kernel text segment, and some constant data areas.  */
 #define TEXT_CONTENTS							      \
+		_text = .;						      \
 		__stext = . ;						      \
-        	*(.text)						      \
+		TEXT_TEXT						      \
 		SCHED_TEXT						      \
 			*(.exit.text)	/* 2.5 convention */		      \
 			*(.text.exit)	/* 2.4 convention */		      \
@@ -90,7 +113,7 @@
 /* Kernel data segment.  */
 #define DATA_CONTENTS							      \
 		__sdata = . ;						      \
-        	*(.data)						      \
+		DATA_DATA						      \
 			*(.exit.data)	/* 2.5 convention */		      \
 			*(.data.exit)	/* 2.4 convention */		      \
 		. = ALIGN (16) ;					      \
@@ -118,13 +141,7 @@
 		___setup_end = . ;					      \
 		___initcall_start = . ;					      \
 			*(.initcall.init)				      \
-			*(.initcall1.init)				      \
-			*(.initcall2.init)				      \
-			*(.initcall3.init)				      \
-			*(.initcall4.init)				      \
-			*(.initcall5.init)				      \
-			*(.initcall6.init)				      \
-			*(.initcall7.init)				      \
+			INITCALLS					      \
 		. = ALIGN (4) ;						      \
 		___initcall_end = . ;					      \
 		___con_initcall_start = .;				      \
@@ -173,12 +190,16 @@
 		__root_fs_image_start = . ;				      \
 		*(.root)						      \
 		__root_fs_image_end = . ;
+
+#ifdef CONFIG_BLK_DEV_INITRD
 /* The initramfs archive.  */
 #define INITRAMFS_CONTENTS						      \
 		. = ALIGN (4) ;						      \
 		___initramfs_start = . ;				      \
 			*(.init.ramfs)					      \
 		___initramfs_end = . ;
+#endif
+
 /* Where the initial bootmap (bitmap for the boot-time memory allocator) 
    should be place.  */
 #define BOOTMAP_CONTENTS						      \

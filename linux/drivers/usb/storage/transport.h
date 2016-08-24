@@ -41,41 +41,7 @@
 #ifndef _TRANSPORT_H_
 #define _TRANSPORT_H_
 
-#include <linux/config.h>
 #include <linux/blkdev.h>
-#include "usb.h"
-
-struct scsi_cmnd;
-
-/* Protocols */
-
-#define US_PR_CBI	0x00		/* Control/Bulk/Interrupt */
-#define US_PR_CB	0x01		/* Control/Bulk w/o interrupt */
-#define US_PR_BULK	0x50		/* bulk only */
-#ifdef CONFIG_USB_STORAGE_HP8200e
-#define US_PR_SCM_ATAPI	0x80		/* SCM-ATAPI bridge */
-#endif
-#ifdef CONFIG_USB_STORAGE_SDDR09
-#define US_PR_EUSB_SDDR09	0x81	/* SCM-SCSI bridge for SDDR-09 */
-#endif
-#ifdef CONFIG_USB_STORAGE_SDDR55
-#define US_PR_SDDR55	0x82		/* SDDR-55 (made up) */
-#endif
-#define US_PR_DPCM_USB  0xf0		/* Combination CB/SDDR09 */
-
-#ifdef CONFIG_USB_STORAGE_FREECOM
-#define US_PR_FREECOM   0xf1		/* Freecom */
-#endif
-
-#ifdef CONFIG_USB_STORAGE_DATAFAB
-#define US_PR_DATAFAB   0xf2		/* Datafab chipsets */
-#endif
-
-#ifdef CONFIG_USB_STORAGE_JUMPSHOT
-#define US_PR_JUMPSHOT  0xf3		/* Lexar Jumpshot */
-#endif
-
-#define US_PR_DEVICE	0xff		/* Use device's value */
 
 /*
  * Bulk only data structures
@@ -108,8 +74,6 @@ struct bulk_cs_wrap {
 
 #define US_BULK_CS_WRAP_LEN	13
 #define US_BULK_CS_SIGN		0x53425355	/* spells out 'USBS' */
-/* This is for Olympus Camedia digital cameras */
-#define US_BULK_CS_OLYMPUS_SIGN		0x55425355	/* spells out 'USBU' */
 #define US_BULK_STAT_OK		0
 #define US_BULK_STAT_FAIL	1
 #define US_BULK_STAT_PHASE	2
@@ -171,14 +135,10 @@ extern int usb_stor_clear_halt(struct us_data *us, unsigned int pipe);
 extern int usb_stor_ctrl_transfer(struct us_data *us, unsigned int pipe,
 		u8 request, u8 requesttype, u16 value, u16 index,
 		void *data, u16 size);
-extern int usb_stor_intr_transfer(struct us_data *us, void *buf,
-		unsigned int length);
 extern int usb_stor_bulk_transfer_buf(struct us_data *us, unsigned int pipe,
 		void *buf, unsigned int length, unsigned int *act_len);
-extern int usb_stor_bulk_transfer_sglist(struct us_data *us, unsigned int pipe,
-		struct scatterlist *sg, int num_sg, unsigned int length,
-		unsigned int *act_len);
 extern int usb_stor_bulk_transfer_sg(struct us_data *us, unsigned int pipe,
 		void *buf, unsigned int length, int use_sg, int *residual);
 
+extern int usb_stor_port_reset(struct us_data *us);
 #endif

@@ -35,9 +35,12 @@
 #include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/page-flags.h>
+#include <linux/mm.h>
 
 #include <asm/intrinsics.h>
 #include <asm/pgtable.h>
+#include <asm/io.h>
 
 /*
  * For historical reasons, the following macros are grossly misnamed:
@@ -68,12 +71,6 @@
 	     || likely(REGION_OFFSET((unsigned long) (addr)) < RGN_MAP_LIMIT)));	\
 })
 #define access_ok(type, addr, size)	__access_ok((addr), (size), get_fs())
-
-static inline int
-verify_area (int type, const void __user *addr, unsigned long size)
-{
-	return access_ok(type, addr, size) ? 0 : -EFAULT;
-}
 
 /*
  * These are the main single-value transfer routines.  They automatically
@@ -190,8 +187,8 @@ extern void __get_user_unknown (void);
 ({											\
 	const __typeof__(*(ptr)) __user *__gu_ptr = (ptr);				\
 	__typeof__ (size) __gu_size = (size);						\
-	long __gu_err = -EFAULT, __gu_val = 0;						\
-											\
+	long __gu_err = -EFAULT;							\
+	unsigned long __gu_val = 0;							\
 	if (!check || __access_ok(__gu_ptr, size, segment))				\
 		switch (__gu_size) {							\
 		      case 1: __get_user_size(__gu_val, __gu_ptr, 1, __gu_err); break;	\
@@ -243,13 +240,13 @@ extern unsigned long __must_check __copy_user (void __user *to, const void __use
 static inline unsigned long
 __copy_to_user (void __user *to, const void *from, unsigned long count)
 {
-	return __copy_user(to, (void __user *) from, count);
+	return __copy_user(to, (__force void __user *) from, count);
 }
 
 static inline unsigned long
 __copy_from_user (void *to, const void __user *from, unsigned long count)
 {
-	return __copy_user((void __user *) to, from, count);
+	return __copy_user((__force void __user *) to, from, count);
 }
 
 #define __copy_to_user_inatomic		__copy_to_user
@@ -261,7 +258,7 @@ __copy_from_user (void *to, const void __user *from, unsigned long count)
 	long __cu_len = (n);								\
 											\
 	if (__access_ok(__cu_to, __cu_len, get_fs()))					\
-		__cu_len = __copy_user(__cu_to, (void __user *) __cu_from, __cu_len);	\
+		__cu_len = __copy_user(__cu_to, (__force void __user *) __cu_from, __cu_len);	\
 	__cu_len;									\
 })
 
@@ -273,7 +270,7 @@ __copy_from_user (void *to, const void __user *from, unsigned long count)
 											\
 	__chk_user_ptr(__cu_from);							\
 	if (__access_ok(__cu_from, __cu_len, get_fs()))					\
-		__cu_len = __copy_user((void __user *) __cu_to, __cu_from, __cu_len);	\
+		__cu_len = __copy_user((__force void __user *) __cu_to, __cu_from, __cu_len);	\
 	__cu_len;									\
 })
 
@@ -365,6 +362,40 @@ ia64_done_with_exception (struct pt_regs *regs)
 		return 1;
 	}
 	return 0;
+}
+
+#define ARCH_HAS_TRANSLATE_MEM_PTR	1
+static __inline__ char *
+xlate_dev_mem_ptr (unsigned long p)
+{
+	struct page *page;
+	char * ptr;
+
+	page = pfn_to_page(p >> PAGE_SHIFT);
+	if (PageUncached(page))
+		ptr = (char *)p + __IA64_UNCACHED_OFFSET;
+	else
+		ptr = __va(p);
+
+	return ptr;
+}
+
+/*
+ * Convert a virtual cached kernel memory pointer to an uncached pointer
+ */
+static __inline__ char *
+xlate_dev_kmem_ptr (char * p)
+{
+	struct page *page;
+	char * ptr;
+
+	page = virt_to_page((unsigned long)p);
+	if (PageUncached(page))
+		ptr = (char *)__pa(p) + __IA64_UNCACHED_OFFSET;
+	else
+		ptr = p;
+
+	return ptr;
 }
 
 #endif /* _ASM_IA64_UACCESS_H */

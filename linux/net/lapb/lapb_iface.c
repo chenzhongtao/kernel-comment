@@ -14,7 +14,7 @@
  *	LAPB 002	Jonathan Naylor	New timer architecture.
  *	2000-10-29	Henner Eisen	lapb_data_indication() return status.
  */
- 
+
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -43,7 +43,7 @@ static struct list_head lapb_list = LIST_HEAD_INIT(lapb_list);
 static DEFINE_RWLOCK(lapb_list_lock);
 
 /*
- *	Free an allocated lapb control block. 
+ *	Free an allocated lapb control block.
  */
 static void lapb_free_cb(struct lapb_cb *lapb)
 {
@@ -115,13 +115,11 @@ static struct lapb_cb *lapb_devtostruct(struct net_device *dev)
  */
 static struct lapb_cb *lapb_create_cb(void)
 {
-	struct lapb_cb *lapb = kmalloc(sizeof(*lapb), GFP_ATOMIC);
+	struct lapb_cb *lapb = kzalloc(sizeof(*lapb), GFP_ATOMIC);
 
 
 	if (!lapb)
 		goto out;
-
-	memset(lapb, 0x00, sizeof(*lapb));
 
 	skb_queue_head_init(&lapb->write_queue);
 	skb_queue_head_init(&lapb->ack_queue);
@@ -240,11 +238,13 @@ int lapb_setparms(struct net_device *dev, struct lapb_parms_struct *parms)
 		goto out_put;
 
 	if (lapb->state == LAPB_STATE_0) {
-		if (((parms->mode & LAPB_EXTENDED) &&
-		     (parms->window < 1 || parms->window > 127)) ||
-		    (parms->window < 1 || parms->window > 7))
-			goto out_put;
-
+		if (parms->mode & LAPB_EXTENDED) {
+			if (parms->window < 1 || parms->window > 127)
+				goto out_put;
+		} else {
+			if (parms->window < 1 || parms->window > 7)
+				goto out_put;
+		}
 		lapb->mode    = parms->mode;
 		lapb->window  = parms->window;
 	}
@@ -407,7 +407,7 @@ int lapb_data_indication(struct lapb_cb *lapb, struct sk_buff *skb)
 		return lapb->callbacks.data_indication(lapb->dev, skb);
 
 	kfree_skb(skb);
-	return NET_RX_CN_HIGH; /* For now; must be != NET_RX_DROP */ 
+	return NET_RX_CN_HIGH; /* For now; must be != NET_RX_DROP */
 }
 
 int lapb_data_transmit(struct lapb_cb *lapb, struct sk_buff *skb)

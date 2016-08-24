@@ -1,53 +1,38 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2002,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
+#include "xfs_bit.h"
 #include "xfs_log.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
 #include "xfs_sb.h"
-#include "xfs_dir.h"
+#include "xfs_ag.h"
 #include "xfs_dir2.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
 #include "xfs_bmap_btree.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
 #include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
 #include "xfs_dinode.h"
-#include "xfs_inode_item.h"
 #include "xfs_inode.h"
+#include "xfs_inode_item.h"
 #include "xfs_bmap.h"
 #include "xfs_error.h"
 #include "xfs_quota.h"
@@ -64,42 +49,33 @@
  */
 int
 xfs_get_dir_entry(
-	vname_t		*dentry,
+	bhv_vname_t	*dentry,
 	xfs_inode_t	**ipp)
 {
-	vnode_t		*vp;
-	bhv_desc_t	*bdp;
+	bhv_vnode_t	*vp;
 
 	vp = VNAME_TO_VNODE(dentry);
-	bdp = vn_bhv_lookup_unlocked(VN_BHV_HEAD(vp), &xfs_vnodeops);
-	if (!bdp) {
-		*ipp = NULL;
+
+	*ipp = xfs_vtoi(vp);
+	if (!*ipp)
 		return XFS_ERROR(ENOENT);
-	}
 	VN_HOLD(vp);
-	*ipp = XFS_BHVTOI(bdp);
 	return 0;
 }
 
 int
 xfs_dir_lookup_int(
-	bhv_desc_t	*dir_bdp,
+	xfs_inode_t	*dp,
 	uint		lock_mode,
-	vname_t		*dentry,
+	bhv_vname_t	*dentry,
 	xfs_ino_t	*inum,
 	xfs_inode_t	**ipp)
 {
-	vnode_t		*dir_vp;
-	xfs_inode_t	*dp;
 	int		error;
 
-	dir_vp = BHV_TO_VNODE(dir_bdp);
-	vn_trace_entry(dir_vp, __FUNCTION__, (inst_t *)__return_address);
+	vn_trace_entry(dp, __FUNCTION__, (inst_t *)__return_address);
 
-	dp = XFS_BHVTOI(dir_bdp);
-
-	error = XFS_DIR_LOOKUP(dp->i_mount, NULL, dp,
-				VNAME(dentry), VNAMELEN(dentry), inum);
+	error = xfs_dir_lookup(NULL, dp, VNAME(dentry), VNAMELEN(dentry), inum);
 	if (!error) {
 		/*
 		 * Unlock the directory. We do this because we can't
@@ -147,7 +123,7 @@ xfs_dir_ialloc(
 	xfs_inode_t	*dp,		/* directory within whose allocate
 					   the inode. */
 	mode_t		mode,
-	nlink_t		nlink,
+	xfs_nlink_t	nlink,
 	xfs_dev_t	rdev,
 	cred_t		*credp,
 	prid_t		prid,		/* project id */
@@ -241,7 +217,7 @@ xfs_dir_ialloc(
 		}
 
 		ntp = xfs_trans_dup(tp);
-		code = xfs_trans_commit(tp, 0, NULL);
+		code = xfs_trans_commit(tp, 0);
 		tp = ntp;
 		if (committed != NULL) {
 			*committed = 1;
@@ -428,7 +404,7 @@ xfs_truncate_file(
 		if (ip->i_ino != mp->m_sb.sb_uquotino)
 			ASSERT(ip->i_udquot);
 	}
-	if (XFS_IS_GQUOTA_ON(mp)) {
+	if (XFS_IS_OQUOTA_ON(mp)) {
 		if (ip->i_ino != mp->m_sb.sb_gquotino)
 			ASSERT(ip->i_gdquot);
 	}
@@ -439,7 +415,11 @@ xfs_truncate_file(
 	 * in a transaction.
 	 */
 	xfs_ilock(ip, XFS_IOLOCK_EXCL);
-	xfs_itruncate_start(ip, XFS_ITRUNC_DEFINITE, (xfs_fsize_t)0);
+	error = xfs_itruncate_start(ip, XFS_ITRUNC_DEFINITE, (xfs_fsize_t)0);
+	if (error) {
+		xfs_iunlock(ip, XFS_IOLOCK_EXCL);
+		return error;
+	}
 
 	tp = xfs_trans_alloc(mp, XFS_TRANS_TRUNCATE_FILE);
 	if ((error = xfs_trans_reserve(tp, 0, XFS_ITRUNCATE_LOG_RES(mp), 0,
@@ -479,8 +459,7 @@ xfs_truncate_file(
 				 XFS_TRANS_ABORT);
 	} else {
 		xfs_ichgtime(ip, XFS_ICHGTIME_MOD | XFS_ICHGTIME_CHG);
-		error = xfs_trans_commit(tp, XFS_TRANS_RELEASE_LOG_RES,
-					 NULL);
+		error = xfs_trans_commit(tp, XFS_TRANS_RELEASE_LOG_RES);
 	}
 	xfs_iunlock(ip, XFS_ILOCK_EXCL | XFS_IOLOCK_EXCL);
 

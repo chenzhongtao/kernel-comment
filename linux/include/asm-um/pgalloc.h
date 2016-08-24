@@ -8,7 +8,6 @@
 #ifndef __UM_PGALLOC_H
 #define __UM_PGALLOC_H
 
-#include "linux/config.h"
 #include "linux/mm.h"
 #include "asm/fixmap.h"
 
@@ -42,11 +41,13 @@ static inline void pte_free(struct page *pte)
 #define __pte_free_tlb(tlb,pte) tlb_remove_page((tlb),(pte))
 
 #ifdef CONFIG_3_LEVEL_PGTABLES
-/*
- * In the 3-level case we free the pmds as part of the pgd.
- */
-#define pmd_free(x)			do { } while (0)
-#define __pmd_free_tlb(tlb,x)		do { } while (0)
+
+static inline void pmd_free(pmd_t *pmd)
+{
+	free_page((unsigned long)pmd);
+}
+
+#define __pmd_free_tlb(tlb,x)   tlb_remove_page((tlb),virt_to_page(x))
 #endif
 
 #define check_pgt_cache()	do { } while (0)

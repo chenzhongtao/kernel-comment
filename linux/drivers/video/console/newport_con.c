@@ -12,7 +12,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/tty.h>
 #include <linux/kd.h>
 #include <linux/selection.h>
 #include <linux/console.h>
@@ -32,7 +31,6 @@
 #include <linux/font.h>
 
 
-extern struct font_desc font_vga_8x16;
 extern unsigned long sgi_gfxaddr;
 
 #define FONT_DATA ((unsigned char *)font_vga_8x16.data)
@@ -52,6 +50,7 @@ static int topscan;
 static int xcurs_correction = 29;
 static int newport_xsize;
 static int newport_ysize;
+static int newport_has_init;
 
 static int newport_set_def_font(int unit, struct console_font *op);
 
@@ -99,13 +98,18 @@ static inline void newport_init_cmap(void)
 	}
 }
 
-static void newport_show_logo(void)
+static const struct linux_logo *newport_show_logo(void)
 {
 #ifdef CONFIG_LOGO_SGI_CLUT224
 	const struct linux_logo *logo = fb_find_logo(8);
-	const unsigned char *clut = logo->clut;
-	const unsigned char *data = logo->data;
+	const unsigned char *clut;
+	const unsigned char *data;
 	unsigned long i;
+
+	if (!logo)
+		return NULL;
+	clut = logo->clut;
+	data = logo->data;
 
 	for (i = 0; i < logo->clutsize; i++) {
 		newport_bfwait(npregs);
@@ -124,6 +128,8 @@ static void newport_show_logo(void)
 
 	for (i = 0; i < logo->width*logo->height; i++)
 		npregs->go.hostrw0 = *data++ << 24;
+
+	return logo;
 #endif /* CONFIG_LOGO_SGI_CLUT224 */
 }
 
@@ -150,7 +156,7 @@ static inline void newport_clear_lines(int ystart, int yend, int ci)
 	newport_clear_screen(0, ystart, 1280 + 63, yend, ci);
 }
 
-void newport_reset(void)
+static void newport_reset(void)
 {
 	unsigned short treg;
 	int i;
@@ -194,7 +200,7 @@ void newport_reset(void)
  * calculate the actual screen size by reading
  * the video timing out of the VC2
  */
-void newport_get_screensize(void)
+static void newport_get_screensize(void)
 {
 	int i, cols;
 	unsigned short ventry, treg;
@@ -284,6 +290,15 @@ static void newport_get_revisions(void)
 		xcurs_correction = 21;
 }
 
+static void newport_exit(void)
+{
+	int i;
+
+	/* free memory used by user font */
+	for (i = 0; i < MAX_NR_CONSOLES; i++)
+		newport_set_def_font(i, NULL);
+}
+
 /* Can't be __init, take_over_console may call it later */
 static const char *newport_startup(void)
 {
@@ -291,8 +306,10 @@ static const char *newport_startup(void)
 
 	if (!sgi_gfxaddr)
 		return NULL;
-	npregs = (struct newport_regs *)	/* ioremap cannot fail */
-		 ioremap(sgi_gfxaddr, sizeof(struct newport_regs));
+
+	if (!npregs)
+		npregs = (struct newport_regs *)/* ioremap cannot fail */
+			ioremap(sgi_gfxaddr, sizeof(struct newport_regs));
 	npregs->cset.config = NPORT_CFG_GD0;
 
 	if (newport_wait(npregs))
@@ -308,11 +325,11 @@ static const char *newport_startup(void)
 	newport_reset();
 	newport_get_revisions();
 	newport_get_screensize();
+	newport_has_init = 1;
 
 	return "SGI Newport";
 
 out_unmap:
-	iounmap((void *)npregs);
 	return NULL;
 }
 
@@ -325,11 +342,10 @@ static void newport_init(struct vc_data *vc, int init)
 
 static void newport_deinit(struct vc_data *c)
 {
-	int i;
-
-	/* free memory used by user font */
-	for (i = 0; i < MAX_NR_CONSOLES; i++)
-		newport_set_def_font(i, NULL);
+	if (!con_is_bound(&newport_con) && newport_has_init) {
+		newport_exit();
+		newport_has_init = 0;
+	}
 }
 
 static void newport_clear(struct vc_data *vc, int sy, int sx, int height,
@@ -456,9 +472,10 @@ static int newport_switch(struct vc_data *vc)
 	npregs->cset.topscan = 0x3ff;
 
 	if (!logo_drawn) {
-		newport_show_logo();
-		logo_drawn = 1;
-		logo_active = 1;
+		if (newport_show_logo()) {
+			logo_drawn = 1;
+			logo_active = 1;
+		}
 	}
 
 	return 1;
@@ -729,16 +746,22 @@ const struct consw newport_con = {
 #ifdef MODULE
 static int __init newport_console_init(void)
 {
+	if (!sgi_gfxaddr)
+		return 0;
+
+	if (!npregs)
+		npregs = (struct newport_regs *)/* ioremap cannot fail */
+			ioremap(sgi_gfxaddr, sizeof(struct newport_regs));
+
 	return take_over_console(&newport_con, 0, MAX_NR_CONSOLES - 1, 1);
 }
+module_init(newport_console_init);
 
 static void __exit newport_console_exit(void)
 {
 	give_up_console(&newport_con);
 	iounmap((void *)npregs);
 }
-
-module_init(newport_console_init);
 module_exit(newport_console_exit);
 #endif
 

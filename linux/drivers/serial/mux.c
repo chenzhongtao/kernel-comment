@@ -16,7 +16,6 @@
 **
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/tty.h>
 #include <linux/ioport.h>
@@ -27,6 +26,7 @@
 #include <linux/delay.h> /* for udelay */
 #include <linux/device.h>
 #include <asm/io.h>
+#include <asm/irq.h>
 #include <asm/parisc-device.h>
 
 #ifdef CONFIG_MAGIC_SYSRQ
@@ -50,8 +50,12 @@
 #define MUX_BREAK(status) ((status & 0xF000) == 0x2000)
 
 #define MUX_NR 256
-static unsigned int port_cnt = 0;
-static struct uart_port mux_ports[MUX_NR];
+static unsigned int port_cnt __read_mostly;
+struct mux_port {
+	struct uart_port port;
+	int enabled;
+};
+static struct mux_port mux_ports[MUX_NR];
 
 static struct uart_driver mux_driver = {
 	.owner = THIS_MODULE,
@@ -64,9 +68,38 @@ static struct uart_driver mux_driver = {
 
 static struct timer_list mux_timer;
 
-#define UART_PUT_CHAR(p, c) __raw_writel((c), (unsigned long)(p)->membase + IO_DATA_REG_OFFSET)
-#define UART_GET_FIFO_CNT(p) __raw_readl((unsigned long)(p)->membase + IO_DCOUNT_REG_OFFSET)
-#define GET_MUX_PORTS(iodc_data) ((((iodc_data)[4] & 0xf0) >> 4) * 8) + 8
+#define UART_PUT_CHAR(p, c) __raw_writel((c), (p)->membase + IO_DATA_REG_OFFSET)
+#define UART_GET_FIFO_CNT(p) __raw_readl((p)->membase + IO_DCOUNT_REG_OFFSET)
+
+/**
+ * get_mux_port_count - Get the number of available ports on the Mux.
+ * @dev: The parisc device.
+ *
+ * This function is used to determine the number of ports the Mux
+ * supports.  The IODC data reports the number of ports the Mux
+ * can support, but there are cases where not all the Mux ports
+ * are connected.  This function can override the IODC and
+ * return the true port count.
+ */
+static int __init get_mux_port_count(struct parisc_device *dev)
+{
+	int status;
+	u8 iodc_data[32];
+	unsigned long bytecnt;
+
+	/* If this is the built-in Mux for the K-Class (Eole CAP/MUX),
+	 * we only need to allocate resources for 1 port since the
+	 * other 7 ports are not connected.
+	 */
+	if(dev->id.hversion == 0x15)
+		return 1;
+
+	status = pdc_iodc_read(&bytecnt, dev->hpa.start, 0, iodc_data, 32);
+	BUG_ON(status != PDC_OK);
+
+	/* Return the number of ports specified in the iodc data. */
+	return ((((iodc_data)[4] & 0xf0) >> 4) * 8) + 8;
+}
 
 /**
  * mux_tx_empty - Check if the transmitter fifo is empty.
@@ -78,10 +111,7 @@ static struct timer_list mux_timer;
  */
 static unsigned int mux_tx_empty(struct uart_port *port)
 {
-	unsigned int cnt = __raw_readl((unsigned long)port->membase 
-				+ IO_DCOUNT_REG_OFFSET);
-
-	return cnt ? 0 : TIOCSER_TEMT;
+	return UART_GET_FIFO_CNT(port) ? 0 : TIOCSER_TEMT;
 } 
 
 /**
@@ -111,22 +141,20 @@ static unsigned int mux_get_mctrl(struct uart_port *port)
 /**
  * mux_stop_tx - Stop transmitting characters.
  * @port: Ptr to the uart_port.
- * @tty_stop: tty layer issue this command?
  *
  * The Serial MUX does not support this function.
  */
-static void mux_stop_tx(struct uart_port *port, unsigned int tty_stop)
+static void mux_stop_tx(struct uart_port *port)
 {
 }
 
 /**
  * mux_start_tx - Start transmitting characters.
  * @port: Ptr to the uart_port.
- * @tty_start: tty layer issue this command?
  *
  * The Serial Mux does not support this function.
  */
-static void mux_start_tx(struct uart_port *port, unsigned int tty_start)
+static void mux_start_tx(struct uart_port *port)
 {
 }
 
@@ -181,7 +209,7 @@ static void mux_write(struct uart_port *port)
 	}
 
 	if(uart_circ_empty(xmit) || uart_tx_stopped(port)) {
-		mux_stop_tx(port, 0);
+		mux_stop_tx(port);
 		return;
 	}
 
@@ -202,7 +230,7 @@ static void mux_write(struct uart_port *port)
 		uart_write_wakeup(port);
 
 	if (uart_circ_empty(xmit))
-		mux_stop_tx(port, 0);
+		mux_stop_tx(port);
 }
 
 /**
@@ -219,8 +247,7 @@ static void mux_read(struct uart_port *port)
 	__u32 start_count = port->icount.rx;
 
 	while(1) {
-		data = __raw_readl((unsigned long)port->membase
-						+ IO_DATA_REG_OFFSET);
+		data = __raw_readl(port->membase + IO_DATA_REG_OFFSET);
 
 		if (MUX_STATUS(data))
 			continue;
@@ -228,11 +255,6 @@ static void mux_read(struct uart_port *port)
 		if (MUX_EOFIFO(data))
 			break;
 
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-			continue;
-
-		*tty->flip.char_buf_ptr = data & 0xffu;
-		*tty->flip.flag_buf_ptr = TTY_NORMAL;
 		port->icount.rx++;
 
 		if (MUX_BREAK(data)) {
@@ -241,12 +263,10 @@ static void mux_read(struct uart_port *port)
 				continue;
 		}
 
-		if (uart_handle_sysrq_char(port, data & 0xffu, NULL))
+		if (uart_handle_sysrq_char(port, data & 0xffu))
 			continue;
 
-		tty->flip.flag_buf_ptr++;
-		tty->flip.char_buf_ptr++;
-		tty->flip.count++;
+		tty_insert_flip_char(tty, data & 0xFF, TTY_NORMAL);
 	}
 	
 	if (start_count != port->icount.rx) {
@@ -263,7 +283,7 @@ static void mux_read(struct uart_port *port)
  */
 static int mux_startup(struct uart_port *port)
 {
-	mod_timer(&mux_timer, jiffies + MUX_POLL_DELAY);
+	mux_ports[port->line].enabled = 1;
 	return 0;
 }
 
@@ -275,6 +295,7 @@ static int mux_startup(struct uart_port *port)
  */
 static void mux_shutdown(struct uart_port *port)
 {
+	mux_ports[port->line].enabled = 0;
 }
 
 /**
@@ -286,8 +307,8 @@ static void mux_shutdown(struct uart_port *port)
  * The Serial Mux does not support this function.
  */
 static void
-mux_set_termios(struct uart_port *port, struct termios *termios,
-	        struct termios *old)
+mux_set_termios(struct uart_port *port, struct ktermios *termios,
+	        struct ktermios *old)
 {
 }
 
@@ -332,7 +353,7 @@ static int mux_request_port(struct uart_port *port)
  * @port: Ptr to the uart_port.
  * @type: Bitmask of required configurations.
  *
- * Perform any autoconfiguration steps for the port.  This functino is
+ * Perform any autoconfiguration steps for the port.  This function is
  * called if the UPF_BOOT_AUTOCONF flag is specified for the port.
  * [Note: This is required for now because of a bug in the Serial core.
  *  rmk has already submitted a patch to linus, should be available for
@@ -370,11 +391,11 @@ static void mux_poll(unsigned long unused)
 	int i;
 
 	for(i = 0; i < port_cnt; ++i) {
-		if(!mux_ports[i].info)
+		if(!mux_ports[i].enabled)
 			continue;
 
-		mux_read(&mux_ports[i]);
-		mux_write(&mux_ports[i]);
+		mux_read(&mux_ports[i].port);
+		mux_write(&mux_ports[i].port);
 	}
 
 	mod_timer(&mux_timer, jiffies + MUX_POLL_DELAY);
@@ -384,8 +405,17 @@ static void mux_poll(unsigned long unused)
 #ifdef CONFIG_SERIAL_MUX_CONSOLE
 static void mux_console_write(struct console *co, const char *s, unsigned count)
 {
-        while(count--)
-                pdc_iodc_putc(*s++);
+	/* Wait until the FIFO drains. */
+	while(UART_GET_FIFO_CNT(&mux_ports[0].port))
+		udelay(1);
+
+	while(count--) {
+		if(*s == '\n') {
+			UART_PUT_CHAR(&mux_ports[0].port, '\r');
+		}
+		UART_PUT_CHAR(&mux_ports[0].port, *s++);
+	}
+
 }
 
 static int mux_console_setup(struct console *co, char *options)
@@ -404,7 +434,7 @@ static struct console mux_console = {
 	.write =	mux_console_write,
 	.device =	mux_console_device,
 	.setup =	mux_console_setup,
-	.flags =	CON_BOOT|CON_PRINTBUFFER|CON_ENABLED,
+	.flags =	CON_ENABLED | CON_PRINTBUFFER,
 	.index =	0,
 };
 
@@ -441,19 +471,14 @@ static struct uart_ops mux_pops = {
  */
 static int __init mux_probe(struct parisc_device *dev)
 {
-	int i, status, ports;
-	u8 iodc_data[32];
-	unsigned long bytecnt;
-	struct uart_port *port;
+	int i, status;
 
-	status = pdc_iodc_read(&bytecnt, dev->hpa, 0, iodc_data, 32);
-	if(status != PDC_OK) {
-		printk(KERN_ERR "Serial mux: Unable to read IODC.\n");
-		return 1;
-	}
+	int port_count = get_mux_port_count(dev);
+	printk(KERN_INFO "Serial mux driver (%d ports) Revision: 0.6\n", port_count);
 
-	ports = GET_MUX_PORTS(iodc_data);
- 	printk(KERN_INFO "Serial mux driver (%d ports) Revision: 0.3\n", ports);
+	dev_set_drvdata(&dev->dev, (void *)(long)port_count);
+	request_mem_region(dev->hpa.start + MUX_OFFSET,
+                           port_count * MUX_LINE_OFFSET, "Mux");
 
 	if(!port_cnt) {
 		mux_driver.cons = MUX_CONSOLE;
@@ -463,45 +488,97 @@ static int __init mux_probe(struct parisc_device *dev)
 			printk(KERN_ERR "Serial mux: Unable to register driver.\n");
 			return 1;
 		}
-
-		init_timer(&mux_timer);
-		mux_timer.function = mux_poll;
 	}
 
-	for(i = 0; i < ports; ++i, ++port_cnt) {
-		port = &mux_ports[port_cnt];
+	for(i = 0; i < port_count; ++i, ++port_cnt) {
+		struct uart_port *port = &mux_ports[port_cnt].port;
 		port->iobase	= 0;
-		port->mapbase	= dev->hpa + MUX_OFFSET + (i * MUX_LINE_OFFSET);
-		port->membase	= ioremap(port->mapbase, MUX_LINE_OFFSET);
-		port->iotype	= SERIAL_IO_MEM;
+		port->mapbase	= dev->hpa.start + MUX_OFFSET +
+						(i * MUX_LINE_OFFSET);
+		port->membase	= ioremap_nocache(port->mapbase, MUX_LINE_OFFSET);
+		port->iotype	= UPIO_MEM;
 		port->type	= PORT_MUX;
-		port->irq	= SERIAL_IRQ_NONE;
+		port->irq	= NO_IRQ;
 		port->uartclk	= 0;
 		port->fifosize	= MUX_FIFO_SIZE;
 		port->ops	= &mux_pops;
 		port->flags	= UPF_BOOT_AUTOCONF;
 		port->line	= port_cnt;
+
+		/* The port->timeout needs to match what is present in
+		 * uart_wait_until_sent in serial_core.c.  Otherwise
+		 * the time spent in msleep_interruptable will be very
+		 * long, causing the appearance of a console hang.
+		 */
+		port->timeout   = HZ / 50;
+		spin_lock_init(&port->lock);
+
 		status = uart_add_one_port(&mux_driver, port);
 		BUG_ON(status);
 	}
 
-#ifdef CONFIG_SERIAL_MUX_CONSOLE
-        register_console(&mux_console);
-#endif
 	return 0;
 }
+
+static int __devexit mux_remove(struct parisc_device *dev)
+{
+	int i, j;
+	int port_count = (long)dev_get_drvdata(&dev->dev);
+
+	/* Find Port 0 for this card in the mux_ports list. */
+	for(i = 0; i < port_cnt; ++i) {
+		if(mux_ports[i].port.mapbase == dev->hpa.start + MUX_OFFSET)
+			break;
+	}
+	BUG_ON(i + port_count > port_cnt);
+
+	/* Release the resources associated with each port on the device. */
+	for(j = 0; j < port_count; ++j, ++i) {
+		struct uart_port *port = &mux_ports[i].port;
+
+		uart_remove_one_port(&mux_driver, port);
+		if(port->membase)
+			iounmap(port->membase);
+	}
+
+	release_mem_region(dev->hpa.start + MUX_OFFSET, port_count * MUX_LINE_OFFSET);
+	return 0;
+}
+
+/* Hack.  This idea was taken from the 8250_gsc.c on how to properly order
+ * the serial port detection in the proper order.   The idea is we always
+ * want the builtin mux to be detected before addin mux cards, so we
+ * specifically probe for the builtin mux cards first.
+ *
+ * This table only contains the parisc_device_id of known builtin mux
+ * devices.  All other mux cards will be detected by the generic mux_tbl.
+ */
+static struct parisc_device_id builtin_mux_tbl[] = {
+	{ HPHW_A_DIRECT, HVERSION_REV_ANY_ID, 0x15, 0x0000D }, /* All K-class */
+	{ HPHW_A_DIRECT, HVERSION_REV_ANY_ID, 0x44, 0x0000D }, /* E35, E45, and E55 */
+	{ 0, }
+};
 
 static struct parisc_device_id mux_tbl[] = {
 	{ HPHW_A_DIRECT, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x0000D },
 	{ 0, }
 };
 
+MODULE_DEVICE_TABLE(parisc, builtin_mux_tbl);
 MODULE_DEVICE_TABLE(parisc, mux_tbl);
 
+static struct parisc_driver builtin_serial_mux_driver = {
+	.name =		"builtin_serial_mux",
+	.id_table =	builtin_mux_tbl,
+	.probe =	mux_probe,
+	.remove =       __devexit_p(mux_remove),
+};
+
 static struct parisc_driver serial_mux_driver = {
-	.name =		"Serial MUX",
+	.name =		"serial_mux",
 	.id_table =	mux_tbl,
 	.probe =	mux_probe,
+	.remove =       __devexit_p(mux_remove),
 };
 
 /**
@@ -511,7 +588,21 @@ static struct parisc_driver serial_mux_driver = {
  */
 static int __init mux_init(void)
 {
-	return register_parisc_driver(&serial_mux_driver);
+	register_parisc_driver(&builtin_serial_mux_driver);
+	register_parisc_driver(&serial_mux_driver);
+
+	if(port_cnt > 0) {
+		/* Start the Mux timer */
+		init_timer(&mux_timer);
+		mux_timer.function = mux_poll;
+		mod_timer(&mux_timer, jiffies + MUX_POLL_DELAY);
+
+#ifdef CONFIG_SERIAL_MUX_CONSOLE
+	        register_console(&mux_console);
+#endif
+	}
+
+	return 0;
 }
 
 /**
@@ -521,12 +612,16 @@ static int __init mux_init(void)
  */
 static void __exit mux_exit(void)
 {
-	int i;
-
-	for (i = 0; i < port_cnt; i++) {
-		uart_remove_one_port(&mux_driver, &mux_ports[i]);
+	/* Delete the Mux timer. */
+	if(port_cnt > 0) {
+		del_timer(&mux_timer);
+#ifdef CONFIG_SERIAL_MUX_CONSOLE
+		unregister_console(&mux_console);
+#endif
 	}
 
+	unregister_parisc_driver(&builtin_serial_mux_driver);
+	unregister_parisc_driver(&serial_mux_driver);
 	uart_unregister_driver(&mux_driver);
 }
 

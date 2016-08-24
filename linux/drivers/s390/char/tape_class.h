@@ -1,6 +1,6 @@
 /*
  * (C) Copyright IBM Corp. 2004   All Rights Reserved.
- * tape_class.h ($Revision: 1.4 $)
+ * tape_class.h
  *
  * Tape class device support
  *
@@ -24,8 +24,8 @@
 #define TAPECLASS_NAME_LEN	32
 
 struct tape_class_device {
-	struct cdev *		char_device;
-	struct class_device *	class_device;
+	struct cdev		*char_device;
+	struct device		*class_device;
 	char			device_name[TAPECLASS_NAME_LEN];
 	char			mode_name[TAPECLASS_NAME_LEN];
 };
@@ -52,7 +52,7 @@ struct tape_class_device {
 struct tape_class_device *register_tape_dev(
 	struct device *		device,
 	dev_t			dev,
-	struct file_operations *fops,
+	const struct file_operations *fops,
 	char *			device_name,
 	char *			node_name
 );

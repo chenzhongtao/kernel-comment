@@ -18,14 +18,32 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+
+#include "base.h"
 
 /* This is a private structure used to tie the classdev and the
  * container .. it should never be visible outside this file */
 struct internal_container {
-	struct list_head node;
+	struct klist_node node;
 	struct attribute_container *cont;
 	struct class_device classdev;
 };
+
+static void internal_container_klist_get(struct klist_node *n)
+{
+	struct internal_container *ic =
+		container_of(n, struct internal_container, node);
+	class_device_get(&ic->classdev);
+}
+
+static void internal_container_klist_put(struct klist_node *n)
+{
+	struct internal_container *ic =
+		container_of(n, struct internal_container, node);
+	class_device_put(&ic->classdev);
+}
+
 
 /**
  * attribute_container_classdev_to_container - given a classdev, return the container
@@ -45,7 +63,7 @@ EXPORT_SYMBOL_GPL(attribute_container_classdev_to_container);
 
 static struct list_head attribute_container_list;
 
-static DECLARE_MUTEX(attribute_container_mutex);
+static DEFINE_MUTEX(attribute_container_mutex);
 
 /**
  * attribute_container_register - register an attribute container
@@ -57,11 +75,12 @@ int
 attribute_container_register(struct attribute_container *cont)
 {
 	INIT_LIST_HEAD(&cont->node);
-	INIT_LIST_HEAD(&cont->containers);
+	klist_init(&cont->containers,internal_container_klist_get,
+		   internal_container_klist_put);
 		
-	down(&attribute_container_mutex);
+	mutex_lock(&attribute_container_mutex);
 	list_add_tail(&cont->node, &attribute_container_list);
-	up(&attribute_container_mutex);
+	mutex_unlock(&attribute_container_mutex);
 
 	return 0;
 }
@@ -76,13 +95,15 @@ int
 attribute_container_unregister(struct attribute_container *cont)
 {
 	int retval = -EBUSY;
-	down(&attribute_container_mutex);
-	if (!list_empty(&cont->containers))
+	mutex_lock(&attribute_container_mutex);
+	spin_lock(&cont->containers.k_lock);
+	if (!list_empty(&cont->containers.k_list))
 		goto out;
 	retval = 0;
 	list_del(&cont->node);
  out:
-	up(&attribute_container_mutex);
+	spin_unlock(&cont->containers.k_lock);
+	mutex_unlock(&attribute_container_mutex);
 	return retval;
 		
 }
@@ -125,7 +146,7 @@ attribute_container_add_device(struct device *dev,
 {
 	struct attribute_container *cont;
 
-	down(&attribute_container_mutex);
+	mutex_lock(&attribute_container_mutex);
 	list_for_each_entry(cont, &attribute_container_list, node) {
 		struct internal_container *ic;
 
@@ -134,13 +155,13 @@ attribute_container_add_device(struct device *dev,
 
 		if (!cont->match(cont, dev))
 			continue;
-		ic = kmalloc(sizeof(struct internal_container), GFP_KERNEL);
+
+		ic = kzalloc(sizeof(*ic), GFP_KERNEL);
 		if (!ic) {
 			dev_printk(KERN_ERR, dev, "failed to allocate class container\n");
 			continue;
 		}
-		memset(ic, 0, sizeof(struct internal_container));
-		INIT_LIST_HEAD(&ic->node);
+
 		ic->cont = cont;
 		class_device_initialize(&ic->classdev);
 		ic->classdev.dev = get_device(dev);
@@ -151,10 +172,21 @@ attribute_container_add_device(struct device *dev,
 			fn(cont, dev, &ic->classdev);
 		else
 			attribute_container_add_class_device(&ic->classdev);
-		list_add_tail(&ic->node, &cont->containers);
+		klist_add_tail(&ic->node, &cont->containers);
 	}
-	up(&attribute_container_mutex);
+	mutex_unlock(&attribute_container_mutex);
 }
+
+/* FIXME: can't break out of this unless klist_iter_exit is also
+ * called before doing the break
+ */
+#define klist_for_each_entry(pos, head, member, iter) \
+	for (klist_iter_init(head, iter); (pos = ({ \
+		struct klist_node *n = klist_next(iter); \
+		n ? container_of(n, typeof(*pos), member) : \
+			({ klist_iter_exit(iter) ; NULL; }); \
+	}) ) != NULL; )
+			
 
 /**
  * attribute_container_remove_device - make device eligible for removal.
@@ -180,19 +212,21 @@ attribute_container_remove_device(struct device *dev,
 {
 	struct attribute_container *cont;
 
-	down(&attribute_container_mutex);
+	mutex_lock(&attribute_container_mutex);
 	list_for_each_entry(cont, &attribute_container_list, node) {
-		struct internal_container *ic, *tmp;
+		struct internal_container *ic;
+		struct klist_iter iter;
 
 		if (attribute_container_no_classdevs(cont))
 			continue;
 
 		if (!cont->match(cont, dev))
 			continue;
-		list_for_each_entry_safe(ic, tmp, &cont->containers, node) {
+
+		klist_for_each_entry(ic, &cont->containers, node, &iter) {
 			if (dev != ic->classdev.dev)
 				continue;
-			list_del(&ic->node);
+			klist_del(&ic->node);
 			if (fn)
 				fn(cont, dev, &ic->classdev);
 			else {
@@ -201,9 +235,8 @@ attribute_container_remove_device(struct device *dev,
 			}
 		}
 	}
-	up(&attribute_container_mutex);
+	mutex_unlock(&attribute_container_mutex);
 }
-EXPORT_SYMBOL_GPL(attribute_container_remove_device);
 
 /**
  * attribute_container_device_trigger - execute a trigger for each matching classdev
@@ -223,21 +256,26 @@ attribute_container_device_trigger(struct device *dev,
 {
 	struct attribute_container *cont;
 
-	down(&attribute_container_mutex);
+	mutex_lock(&attribute_container_mutex);
 	list_for_each_entry(cont, &attribute_container_list, node) {
-		struct internal_container *ic, *tmp;
+		struct internal_container *ic;
+		struct klist_iter iter;
 
 		if (!cont->match(cont, dev))
 			continue;
 
-		list_for_each_entry_safe(ic, tmp, &cont->containers, node) {
+		if (attribute_container_no_classdevs(cont)) {
+			fn(cont, dev, NULL);
+			continue;
+		}
+
+		klist_for_each_entry(ic, &cont->containers, node, &iter) {
 			if (dev == ic->classdev.dev)
 				fn(cont, dev, &ic->classdev);
 		}
 	}
-	up(&attribute_container_mutex);
+	mutex_unlock(&attribute_container_mutex);
 }
-EXPORT_SYMBOL_GPL(attribute_container_device_trigger);
 
 /**
  * attribute_container_trigger - trigger a function for each matching container
@@ -258,14 +296,13 @@ attribute_container_trigger(struct device *dev,
 {
 	struct attribute_container *cont;
 
-	down(&attribute_container_mutex);
+	mutex_lock(&attribute_container_mutex);
 	list_for_each_entry(cont, &attribute_container_list, node) {
 		if (cont->match(cont, dev))
 			fn(cont, dev);
 	}
-	up(&attribute_container_mutex);
+	mutex_unlock(&attribute_container_mutex);
 }
-EXPORT_SYMBOL_GPL(attribute_container_trigger);
 
 /**
  * attribute_container_add_attrs - add attributes
@@ -294,7 +331,6 @@ attribute_container_add_attrs(struct class_device *classdev)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(attribute_container_add_attrs);
 
 /**
  * attribute_container_add_class_device - same function as class_device_add
@@ -313,7 +349,6 @@ attribute_container_add_class_device(struct class_device *classdev)
 		return error;
 	return attribute_container_add_attrs(classdev);
 }
-EXPORT_SYMBOL_GPL(attribute_container_add_class_device);
 
 /**
  * attribute_container_add_class_device_adapter - simple adapter for triggers
@@ -328,7 +363,6 @@ attribute_container_add_class_device_adapter(struct attribute_container *cont,
 {
 	return attribute_container_add_class_device(classdev);
 }
-EXPORT_SYMBOL_GPL(attribute_container_add_class_device_adapter);
 
 /**
  * attribute_container_remove_attrs - remove any attribute files
@@ -350,7 +384,6 @@ attribute_container_remove_attrs(struct class_device *classdev)
 	for (i = 0; attrs[i]; i++)
 		class_device_remove_file(classdev, attrs[i]);
 }
-EXPORT_SYMBOL_GPL(attribute_container_remove_attrs);
 
 /**
  * attribute_container_class_device_del - equivalent of class_device_del
@@ -366,7 +399,36 @@ attribute_container_class_device_del(struct class_device *classdev)
 	attribute_container_remove_attrs(classdev);
 	class_device_del(classdev);
 }
-EXPORT_SYMBOL_GPL(attribute_container_class_device_del);
+
+/**
+ * attribute_container_find_class_device - find the corresponding class_device
+ *
+ * @cont:	the container
+ * @dev:	the generic device
+ *
+ * Looks up the device in the container's list of class devices and returns
+ * the corresponding class_device.
+ */
+struct class_device *
+attribute_container_find_class_device(struct attribute_container *cont,
+				      struct device *dev)
+{
+	struct class_device *cdev = NULL;
+	struct internal_container *ic;
+	struct klist_iter iter;
+
+	klist_for_each_entry(ic, &cont->containers, node, &iter) {
+		if (ic->classdev.dev == dev) {
+			cdev = &ic->classdev;
+			/* FIXME: must exit iterator then break */
+			klist_iter_exit(&iter);
+			break;
+		}
+	}
+
+	return cdev;
+}
+EXPORT_SYMBOL_GPL(attribute_container_find_class_device);
 
 int __init
 attribute_container_init(void)

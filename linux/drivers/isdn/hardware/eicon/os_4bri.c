@@ -16,6 +16,7 @@
 #include "diva_pci.h"
 #include "mi_pc.h"
 #include "dsrv4bri.h"
+#include "helpers.h"
 
 static void *diva_xdiLoadFileFile = NULL;
 static dword diva_xdiLoadFileLength = 0;
@@ -463,7 +464,7 @@ int diva_4bri_init_card(diva_os_xdi_adapter_t * a)
 
 /*
 **  Cleanup function will be called for master adapter only
-**  this is garanteed by design: cleanup callback is set
+**  this is guaranteed by design: cleanup callback is set
 **  by master adapter only
 */
 static int diva_4bri_cleanup_adapter(diva_os_xdi_adapter_t * a)
@@ -815,7 +816,7 @@ diva_4bri_cmd_card_proc(struct _diva_os_xdi_adapter *a,
 	return (ret);
 }
 
-void *xdiLoadFile(char *FileName, unsigned long *FileLength,
+void *xdiLoadFile(char *FileName, dword *FileLength,
 		  unsigned long lim)
 {
 	void *ret = diva_xdiLoadFileFile;

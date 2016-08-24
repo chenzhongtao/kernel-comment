@@ -60,28 +60,36 @@ static int zorro_device_probe(struct device *dev)
 }
 
 
+static int zorro_device_remove(struct device *dev)
+{
+	struct zorro_dev *z = to_zorro_dev(dev);
+	struct zorro_driver *drv = to_zorro_driver(dev->driver);
+
+	if (drv) {
+		if (drv->remove)
+			drv->remove(z);
+		z->driver = NULL;
+	}
+	return 0;
+}
+
+
     /**
      *  zorro_register_driver - register a new Zorro driver
      *  @drv: the driver structure to register
      *
      *  Adds the driver structure to the list of registered drivers
-     *  Returns the number of Zorro devices which were claimed by the driver
-     *  during registration.  The driver remains registered even if the
-     *  return value is zero.
+     *  Returns zero or a negative error value.
      */
 
 int zorro_register_driver(struct zorro_driver *drv)
 {
-	int count = 0;
-
 	/* initialize common driver fields */
 	drv->driver.name = drv->name;
 	drv->driver.bus = &zorro_bus_type;
-	drv->driver.probe = zorro_device_probe;
 
 	/* register with core */
-	count = driver_register(&drv->driver);
-	return count ? count : 1;
+	return driver_register(&drv->driver);
 }
 
 
@@ -132,7 +140,9 @@ static int zorro_bus_match(struct device *dev, struct device_driver *drv)
 
 struct bus_type zorro_bus_type = {
 	.name	= "zorro",
-	.match	= zorro_bus_match
+	.match	= zorro_bus_match,
+	.probe	= zorro_device_probe,
+	.remove	= zorro_device_remove,
 };
 
 

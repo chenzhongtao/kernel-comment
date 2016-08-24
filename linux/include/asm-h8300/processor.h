@@ -17,7 +17,7 @@
  */
 #define current_text_addr() ({ __label__ _l; _l: &&_l;})
 
-#include <linux/config.h>
+#include <linux/compiler.h>
 #include <asm/segment.h>
 #include <asm/fpu.h>
 #include <asm/ptrace.h>
@@ -78,7 +78,7 @@ struct thread_struct {
 do {							        \
 	set_fs(USER_DS);           /* reads from user space */  \
   	(_regs)->pc = (_pc);				        \
-	(_regs)->ccr &= 0x00;	   /* clear kernel flag */      \
+	(_regs)->ccr = 0x00;	   /* clear all flags */        \
 	(_regs)->er5 = current->mm->start_data;	/* GOT base */  \
 	wrusp((unsigned long)(_usp) - sizeof(unsigned long)*3);	\
 } while(0)
@@ -130,6 +130,6 @@ unsigned long get_wchan(struct task_struct *p);
 	eip; })
 #define	KSTK_ESP(tsk)	((tsk) == current ? rdusp() : (tsk)->thread.usp)
 
-#define cpu_relax()    do { } while (0)
+#define cpu_relax()    barrier()
 
 #endif

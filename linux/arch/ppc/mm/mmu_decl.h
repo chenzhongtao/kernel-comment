@@ -43,21 +43,23 @@ extern int mem_init_done;
 extern PTE *Hash, *Hash_end;
 extern unsigned long Hash_size, Hash_mask;
 
+extern unsigned int num_tlbcam_entries;
+
 /* ...and now those things that may be slightly different between processor
  * architectures.  -- Dan
  */
 #if defined(CONFIG_8xx)
-#define flush_HPTE(X, va, pg)	_tlbie(va)
+#define flush_HPTE(X, va, pg)	_tlbie(va, 0 /* 8xx doesn't care about PID */)
 #define MMU_init_hw()		do { } while(0)
 #define mmu_mapin_ram()		(0UL)
 
 #elif defined(CONFIG_4xx)
-#define flush_HPTE(X, va, pg)	_tlbie(va)
+#define flush_HPTE(pid, va, pg)	_tlbie(va, pid)
 extern void MMU_init_hw(void);
 extern unsigned long mmu_mapin_ram(void);
 
 #elif defined(CONFIG_FSL_BOOKE)
-#define flush_HPTE(X, va, pg)	_tlbie(va)
+#define flush_HPTE(pid, va, pg)	_tlbie(va, pid)
 extern void MMU_init_hw(void);
 extern unsigned long mmu_mapin_ram(void);
 extern void adjust_total_lowmem(void);
@@ -75,7 +77,7 @@ static inline void flush_HPTE(unsigned context, unsigned long va,
 			      unsigned long pdval)
 {
 	if ((Hash != 0) &&
-	    (cur_cpu_spec[0]->cpu_features & CPU_FTR_HPTE_TABLE))
+	    cpu_has_feature(CPU_FTR_HPTE_TABLE))
 		flush_hash_pages(0, va, pdval, 1);
 	else
 		_tlbie(va);

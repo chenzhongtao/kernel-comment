@@ -7,6 +7,7 @@
  * to continually duplicate across every architecture.
  */
 
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
@@ -16,6 +17,9 @@
 #include <linux/smp_lock.h>
 #include <linux/ptrace.h>
 #include <linux/security.h>
+#include <linux/signal.h>
+#include <linux/audit.h>
+#include <linux/pid_namespace.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -26,16 +30,15 @@
  *
  * Must be called with the tasklist lock write-held.
  */
-void __ptrace_link(task_t *child, task_t *new_parent)
+void __ptrace_link(struct task_struct *child, struct task_struct *new_parent)
 {
-	if (!list_empty(&child->ptrace_list))
-		BUG();
+	BUG_ON(!list_empty(&child->ptrace_list));
 	if (child->parent == new_parent)
 		return;
 	list_add(&child->ptrace_list, &child->parent->ptrace_children);
-	REMOVE_LINKS(child);
+	remove_parent(child);
 	child->parent = new_parent;
-	SET_LINKS(child);
+	add_parent(child);
 }
  
 /*
@@ -45,7 +48,7 @@ void __ptrace_link(task_t *child, task_t *new_parent)
  * TASK_TRACED, resume it now.
  * Requires that irqs be disabled.
  */
-void ptrace_untrace(task_t *child)
+void ptrace_untrace(struct task_struct *child)
 {
 	spin_lock(&child->sighand->siglock);
 	if (child->state == TASK_TRACED) {
@@ -64,16 +67,16 @@ void ptrace_untrace(task_t *child)
  *
  * Must be called with the tasklist lock write-held.
  */
-void __ptrace_unlink(task_t *child)
+void __ptrace_unlink(struct task_struct *child)
 {
-	if (!child->ptrace)
-		BUG();
+	BUG_ON(!child->ptrace);
+
 	child->ptrace = 0;
 	if (!list_empty(&child->ptrace_list)) {
 		list_del_init(&child->ptrace_list);
-		REMOVE_LINKS(child);
+		remove_parent(child);
 		child->parent = child->real_parent;
-		SET_LINKS(child);
+		add_parent(child);
 	}
 
 	if (child->state == TASK_TRACED)
@@ -117,31 +120,83 @@ int ptrace_check_attach(struct task_struct *child, int kill)
 	return ret;
 }
 
+int __ptrace_may_attach(struct task_struct *task)
+{
+	/* May we inspect the given task?
+	 * This check is used both for attaching with ptrace
+	 * and for allowing access to sensitive information in /proc.
+	 *
+	 * ptrace_attach denies several cases that /proc allows
+	 * because setting up the necessary parent/child relationship
+	 * or halting the specified task is impossible.
+	 */
+	int dumpable = 0;
+	/* Don't let security modules deny introspection */
+	if (task == current)
+		return 0;
+	if (((current->uid != task->euid) ||
+	     (current->uid != task->suid) ||
+	     (current->uid != task->uid) ||
+	     (current->gid != task->egid) ||
+	     (current->gid != task->sgid) ||
+	     (current->gid != task->gid)) && !capable(CAP_SYS_PTRACE))
+		return -EPERM;
+	smp_rmb();
+	if (task->mm)
+		dumpable = get_dumpable(task->mm);
+	if (!dumpable && !capable(CAP_SYS_PTRACE))
+		return -EPERM;
+
+	return security_ptrace(current, task);
+}
+
+int ptrace_may_attach(struct task_struct *task)
+{
+	int err;
+	task_lock(task);
+	err = __ptrace_may_attach(task);
+	task_unlock(task);
+	return !err;
+}
+
 int ptrace_attach(struct task_struct *task)
 {
 	int retval;
-	task_lock(task);
+	unsigned long flags;
+
+	audit_ptrace(task);
+
 	retval = -EPERM;
 	if (task->pid <= 1)
-		goto bad;
-	if (task == current)
-		goto bad;
+		goto out;
+	if (same_thread_group(task, current))
+		goto out;
+
+repeat:
+	/*
+	 * Nasty, nasty.
+	 *
+	 * We want to hold both the task-lock and the
+	 * tasklist_lock for writing at the same time.
+	 * But that's against the rules (tasklist_lock
+	 * is taken for reading by interrupts on other
+	 * cpu's that may have task_lock).
+	 */
+	task_lock(task);
+	if (!write_trylock_irqsave(&tasklist_lock, flags)) {
+		task_unlock(task);
+		do {
+			cpu_relax();
+		} while (!write_can_lock(&tasklist_lock));
+		goto repeat;
+	}
+
 	if (!task->mm)
-		goto bad;
-	if(((current->uid != task->euid) ||
-	    (current->uid != task->suid) ||
-	    (current->uid != task->uid) ||
- 	    (current->gid != task->egid) ||
- 	    (current->gid != task->sgid) ||
- 	    (current->gid != task->gid)) && !capable(CAP_SYS_PTRACE))
-		goto bad;
-	rmb();
-	if (!task->mm->dumpable && !capable(CAP_SYS_PTRACE))
 		goto bad;
 	/* the same process cannot be attached many times */
 	if (task->ptrace & PT_PTRACED)
 		goto bad;
-	retval = security_ptrace(current, task);
+	retval = __ptrace_may_attach(task);
 	if (retval)
 		goto bad;
 
@@ -150,93 +205,44 @@ int ptrace_attach(struct task_struct *task)
 				      ? PT_ATTACHED : 0);
 	if (capable(CAP_SYS_PTRACE))
 		task->ptrace |= PT_PTRACE_CAP;
-	task_unlock(task);
 
-	write_lock_irq(&tasklist_lock);
 	__ptrace_link(task, current);
-	write_unlock_irq(&tasklist_lock);
 
 	force_sig_specific(SIGSTOP, task);
-	return 0;
 
 bad:
+	write_unlock_irqrestore(&tasklist_lock, flags);
 	task_unlock(task);
+out:
 	return retval;
 }
 
-int ptrace_detach(struct task_struct *child, unsigned int data)
+static inline void __ptrace_detach(struct task_struct *child, unsigned int data)
 {
-	if ((unsigned long) data > _NSIG)
-		return	-EIO;
-
-	/* Architecture-specific hardware disable .. */
-	ptrace_disable(child);
-
-	/* .. re-parent .. */
 	child->exit_code = data;
-
-	write_lock_irq(&tasklist_lock);
+	/* .. re-parent .. */
 	__ptrace_unlink(child);
 	/* .. and wake it up. */
 	if (child->exit_state != EXIT_ZOMBIE)
 		wake_up_process(child);
+}
+
+int ptrace_detach(struct task_struct *child, unsigned int data)
+{
+	if (!valid_signal(data))
+		return -EIO;
+
+	/* Architecture-specific hardware disable .. */
+	ptrace_disable(child);
+	clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+
+	write_lock_irq(&tasklist_lock);
+	/* protect against de_thread()->release_task() */
+	if (child->ptrace)
+		__ptrace_detach(child, data);
 	write_unlock_irq(&tasklist_lock);
 
 	return 0;
-}
-
-/*
- * Access another process' address space.
- * Source/target buffer must be kernel space, 
- * Do not walk the page table directly, use get_user_pages
- */
-
-int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, int len, int write)
-{
-	struct mm_struct *mm;
-	struct vm_area_struct *vma;
-	struct page *page;
-	void *old_buf = buf;
-
-	mm = get_task_mm(tsk);
-	if (!mm)
-		return 0;
-
-	down_read(&mm->mmap_sem);
-	/* ignore errors, just check how much was sucessfully transfered */
-	while (len) {
-		int bytes, ret, offset;
-		void *maddr;
-
-		ret = get_user_pages(tsk, mm, addr, 1,
-				write, 1, &page, &vma);
-		if (ret <= 0)
-			break;
-
-		bytes = len;
-		offset = addr & (PAGE_SIZE-1);
-		if (bytes > PAGE_SIZE-offset)
-			bytes = PAGE_SIZE-offset;
-
-		maddr = kmap(page);
-		if (write) {
-			copy_to_user_page(vma, page, addr,
-					  maddr + offset, buf, bytes);
-			set_page_dirty_lock(page);
-		} else {
-			copy_from_user_page(vma, page, addr,
-					    buf, maddr + offset, bytes);
-		}
-		kunmap(page);
-		page_cache_release(page);
-		len -= bytes;
-		buf += bytes;
-		addr += bytes;
-	}
-	up_read(&mm->mmap_sem);
-	mmput(mm);
-	
-	return buf - old_buf;
 }
 
 int ptrace_readdata(struct task_struct *tsk, unsigned long src, char __user *dst, int len)
@@ -381,9 +387,140 @@ int ptrace_request(struct task_struct *child, long request,
 	case PTRACE_SETSIGINFO:
 		ret = ptrace_setsiginfo(child, (siginfo_t __user *) data);
 		break;
+	case PTRACE_DETACH:	 /* detach a process that was attached. */
+		ret = ptrace_detach(child, data);
+		break;
 	default:
 		break;
 	}
 
 	return ret;
+}
+
+/**
+ * ptrace_traceme  --  helper for PTRACE_TRACEME
+ *
+ * Performs checks and sets PT_PTRACED.
+ * Should be used by all ptrace implementations for PTRACE_TRACEME.
+ */
+int ptrace_traceme(void)
+{
+	int ret = -EPERM;
+
+	/*
+	 * Are we already being traced?
+	 */
+	task_lock(current);
+	if (!(current->ptrace & PT_PTRACED)) {
+		ret = security_ptrace(current->parent, current);
+		/*
+		 * Set the ptrace bit in the process ptrace flags.
+		 */
+		if (!ret)
+			current->ptrace |= PT_PTRACED;
+	}
+	task_unlock(current);
+	return ret;
+}
+
+/**
+ * ptrace_get_task_struct  --  grab a task struct reference for ptrace
+ * @pid:       process id to grab a task_struct reference of
+ *
+ * This function is a helper for ptrace implementations.  It checks
+ * permissions and then grabs a task struct for use of the actual
+ * ptrace implementation.
+ *
+ * Returns the task_struct for @pid or an ERR_PTR() on failure.
+ */
+struct task_struct *ptrace_get_task_struct(pid_t pid)
+{
+	struct task_struct *child;
+
+	/*
+	 * Tracing init is not allowed.
+	 */
+	if (pid == 1)
+		return ERR_PTR(-EPERM);
+
+	read_lock(&tasklist_lock);
+	child = find_task_by_vpid(pid);
+	if (child)
+		get_task_struct(child);
+
+	read_unlock(&tasklist_lock);
+	if (!child)
+		return ERR_PTR(-ESRCH);
+	return child;
+}
+
+#ifndef arch_ptrace_attach
+#define arch_ptrace_attach(child)	do { } while (0)
+#endif
+
+#ifndef __ARCH_SYS_PTRACE
+asmlinkage long sys_ptrace(long request, long pid, long addr, long data)
+{
+	struct task_struct *child;
+	long ret;
+
+	/*
+	 * This lock_kernel fixes a subtle race with suid exec
+	 */
+	lock_kernel();
+	if (request == PTRACE_TRACEME) {
+		ret = ptrace_traceme();
+		goto out;
+	}
+
+	child = ptrace_get_task_struct(pid);
+	if (IS_ERR(child)) {
+		ret = PTR_ERR(child);
+		goto out;
+	}
+
+	if (request == PTRACE_ATTACH) {
+		ret = ptrace_attach(child);
+		/*
+		 * Some architectures need to do book-keeping after
+		 * a ptrace attach.
+		 */
+		if (!ret)
+			arch_ptrace_attach(child);
+		goto out_put_task_struct;
+	}
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL);
+	if (ret < 0)
+		goto out_put_task_struct;
+
+	ret = arch_ptrace(child, request, addr, data);
+	if (ret < 0)
+		goto out_put_task_struct;
+
+ out_put_task_struct:
+	put_task_struct(child);
+ out:
+	unlock_kernel();
+	return ret;
+}
+#endif /* __ARCH_SYS_PTRACE */
+
+int generic_ptrace_peekdata(struct task_struct *tsk, long addr, long data)
+{
+	unsigned long tmp;
+	int copied;
+
+	copied = access_process_vm(tsk, addr, &tmp, sizeof(tmp), 0);
+	if (copied != sizeof(tmp))
+		return -EIO;
+	return put_user(tmp, (unsigned long __user *)data);
+}
+
+int generic_ptrace_pokedata(struct task_struct *tsk, long addr, long data)
+{
+	int copied;
+
+	copied = access_process_vm(tsk, addr, &data, sizeof(data), 1);
+	return (copied == sizeof(data)) ? 0 : -EIO;
 }

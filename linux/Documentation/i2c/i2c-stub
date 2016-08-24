@@ -6,10 +6,14 @@ This module is a very simple fake I2C/SMBus driver.  It implements four
 types of SMBus commands: write quick, (r/w) byte, (r/w) byte data, and
 (r/w) word data.
 
+You need to provide chip addresses as a module parameter when loading this
+driver, which will then only react to SMBus commands to these addresses.
+
 No hardware is needed nor associated with this module.  It will accept write
-quick commands to all addresses; it will respond to the other commands (also
-to all addresses) by reading from or writing to an array in memory.  It will
-also spam the kernel logs for every command it handles.
+quick commands to the specified addresses; it will respond to the other
+commands (also to the specified addresses) by reading from or writing to
+arrays in memory.  It will also spam the kernel logs for every command it
+handles.
 
 A pointer register with auto-increment is implemented for all byte
 operations.  This allows for continuous byte reads like those supported by
@@ -20,6 +24,11 @@ The typical use-case is like this:
 	2. use i2cset (from lm_sensors project) to pre-load some data
 	3. load the target sensors chip driver module
 	4. observe its behavior in the kernel log
+
+PARAMETERS:
+
+int chip_addr[10]:
+	The SMBus addresses to emulate chips at.
 
 CAVEATS:
 

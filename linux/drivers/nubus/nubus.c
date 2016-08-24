@@ -7,7 +7,6 @@
  *      and others.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -467,9 +466,8 @@ static struct nubus_dev* __init
 		       parent->base, dir.base);
 
 	/* Actually we should probably panic if this fails */
-	if ((dev = kmalloc(sizeof(*dev), GFP_ATOMIC)) == NULL)
+	if ((dev = kzalloc(sizeof(*dev), GFP_ATOMIC)) == NULL)
 		return NULL;	
-	memset(dev, 0, sizeof(*dev));
 	dev->resid = parent->type;
 	dev->directory = dir.base;
 	dev->board = board;
@@ -801,9 +799,8 @@ static struct nubus_board* __init nubus_add_board(int slot, int bytelanes)
 	nubus_rewind(&rp, FORMAT_BLOCK_SIZE, bytelanes);
 
 	/* Actually we should probably panic if this fails */
-	if ((board = kmalloc(sizeof(*board), GFP_ATOMIC)) == NULL)
+	if ((board = kzalloc(sizeof(*board), GFP_ATOMIC)) == NULL)
 		return NULL;	
-	memset(board, 0, sizeof(*board));
 	board->fblock = rp;
 
 	/* Dump the format block for debugging purposes */

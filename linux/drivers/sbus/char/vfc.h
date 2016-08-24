@@ -1,8 +1,6 @@
 #ifndef _LINUX_VFC_H_
 #define _LINUX_VFC_H_
 
-#include <linux/devfs_fs_kernel.h>
-
 /*
  * The control register for the vfc is at offset 0x4000
  * The first field ram bank is located at offset 0x5000
@@ -125,12 +123,10 @@ struct vfc_regs {
 
 
 struct vfc_dev {
-	volatile struct vfc_regs *regs;
+	volatile struct vfc_regs __iomem *regs;
 	struct vfc_regs *phys_regs;
 	unsigned int control_reg;
-	struct semaphore device_lock_sem;
-	struct timer_list poll_timer;
-	wait_queue_head_t poll_wait;
+	struct mutex device_lock_mtx;
 	int instance;
 	int busy;
 	unsigned long which_io;

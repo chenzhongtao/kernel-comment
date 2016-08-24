@@ -10,7 +10,6 @@
 
 #include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/major.h>
 #include <linux/blkdev.h>
 #include <linux/module.h>
@@ -19,6 +18,7 @@
 #include <linux/uio.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/mutex.h>
 
 #include <asm/uaccess.h>
 
@@ -27,10 +27,10 @@ struct raw_device_data {
 	int inuse;
 };
 
-static struct class_simple *raw_class;
+static struct class *raw_class;
 static struct raw_device_data raw_devices[MAX_RAW_MINORS];
-static DECLARE_MUTEX(raw_mutex);
-static struct file_operations raw_ctl_fops;	     /* forward declaration */
+static DEFINE_MUTEX(raw_mutex);
+static const struct file_operations raw_ctl_fops; /* forward declaration */
 
 /*
  * Open/close code for raw IO.
@@ -53,7 +53,7 @@ static int raw_open(struct inode *inode, struct file *filp)
 		return 0;
 	}
 
-	down(&raw_mutex);
+	mutex_lock(&raw_mutex);
 
 	/*
 	 * All we need to do on open is check that the device is bound.
@@ -75,10 +75,10 @@ static int raw_open(struct inode *inode, struct file *filp)
 	filp->f_flags |= O_DIRECT;
 	filp->f_mapping = bdev->bd_inode->i_mapping;
 	if (++raw_devices[minor].inuse == 1)
-		filp->f_dentry->d_inode->i_mapping =
+		filp->f_path.dentry->d_inode->i_mapping =
 			bdev->bd_inode->i_mapping;
 	filp->private_data = bdev;
-	up(&raw_mutex);
+	mutex_unlock(&raw_mutex);
 	return 0;
 
 out2:
@@ -86,7 +86,7 @@ out2:
 out1:
 	blkdev_put(bdev);
 out:
-	up(&raw_mutex);
+	mutex_unlock(&raw_mutex);
 	return err;
 }
 
@@ -99,14 +99,14 @@ static int raw_release(struct inode *inode, struct file *filp)
 	const int minor= iminor(inode);
 	struct block_device *bdev;
 
-	down(&raw_mutex);
+	mutex_lock(&raw_mutex);
 	bdev = raw_devices[minor].binding;
 	if (--raw_devices[minor].inuse == 0) {
 		/* Here  inode->i_mapping == bdev->bd_inode->i_mapping  */
 		inode->i_mapping = &inode->i_data;
 		inode->i_mapping->backing_dev_info = &default_backing_dev_info;
 	}
-	up(&raw_mutex);
+	mutex_unlock(&raw_mutex);
 
 	bd_release(bdev);
 	blkdev_put(bdev);
@@ -122,14 +122,14 @@ raw_ioctl(struct inode *inode, struct file *filp,
 {
 	struct block_device *bdev = filp->private_data;
 
-	return blkdev_ioctl(bdev->bd_inode, filp, command, arg);
+	return blkdev_ioctl(bdev->bd_inode, NULL, command, arg);
 }
 
 static void bind_device(struct raw_config_request *rq)
 {
-	class_simple_device_remove(MKDEV(RAW_MAJOR, rq->raw_minor));
-	class_simple_device_add(raw_class, MKDEV(RAW_MAJOR, rq->raw_minor),
-				      NULL, "raw%d", rq->raw_minor);
+	device_destroy(raw_class, MKDEV(RAW_MAJOR, rq->raw_minor));
+	device_create(raw_class, NULL, MKDEV(RAW_MAJOR, rq->raw_minor),
+		      "raw%d", rq->raw_minor);
 }
 
 /*
@@ -154,7 +154,7 @@ static int raw_ctl_ioctl(struct inode *inode, struct file *filp,
 			goto out;
 		}
 
-		if (rq.raw_minor < 0 || rq.raw_minor >= MAX_RAW_MINORS) {
+		if (rq.raw_minor <= 0 || rq.raw_minor >= MAX_RAW_MINORS) {
 			err = -EINVAL;
 			goto out;
 		}
@@ -187,9 +187,9 @@ static int raw_ctl_ioctl(struct inode *inode, struct file *filp,
 				goto out;
 			}
 
-			down(&raw_mutex);
+			mutex_lock(&raw_mutex);
 			if (rawdev->inuse) {
-				up(&raw_mutex);
+				mutex_unlock(&raw_mutex);
 				err = -EBUSY;
 				goto out;
 			}
@@ -200,8 +200,8 @@ static int raw_ctl_ioctl(struct inode *inode, struct file *filp,
 			if (rq.block_major == 0 && rq.block_minor == 0) {
 				/* unbind */
 				rawdev->binding = NULL;
-				class_simple_device_remove(MKDEV(RAW_MAJOR,
-								rq.raw_minor));
+				device_destroy(raw_class,
+						MKDEV(RAW_MAJOR, rq.raw_minor));
 			} else {
 				rawdev->binding = bdget(dev);
 				if (rawdev->binding == NULL)
@@ -211,11 +211,11 @@ static int raw_ctl_ioctl(struct inode *inode, struct file *filp,
 					bind_device(&rq);
 				}
 			}
-			up(&raw_mutex);
+			mutex_unlock(&raw_mutex);
 		} else {
 			struct block_device *bdev;
 
-			down(&raw_mutex);
+			mutex_lock(&raw_mutex);
 			bdev = rawdev->binding;
 			if (bdev) {
 				rq.block_major = MAJOR(bdev->bd_dev);
@@ -223,7 +223,7 @@ static int raw_ctl_ioctl(struct inode *inode, struct file *filp,
 			} else {
 				rq.block_major = rq.block_minor = 0;
 			}
-			up(&raw_mutex);
+			mutex_unlock(&raw_mutex);
 			if (copy_to_user((void __user *)arg, &rq, sizeof(rq))) {
 				err = -EFAULT;
 				goto out;
@@ -238,101 +238,62 @@ out:
 	return err;
 }
 
-static ssize_t raw_file_write(struct file *file, const char __user *buf,
-				   size_t count, loff_t *ppos)
-{
-	struct iovec local_iov = {
-		.iov_base = (char __user *)buf,
-		.iov_len = count
-	};
-
-	return generic_file_write_nolock(file, &local_iov, 1, ppos);
-}
-
-static ssize_t raw_file_aio_write(struct kiocb *iocb, const char __user *buf,
-					size_t count, loff_t pos)
-{
-	struct iovec local_iov = {
-		.iov_base = (char __user *)buf,
-		.iov_len = count
-	};
-
-	return generic_file_aio_write_nolock(iocb, &local_iov, 1, &iocb->ki_pos);
-}
-
-
-static struct file_operations raw_fops = {
-	.read	=	generic_file_read,
+static const struct file_operations raw_fops = {
+	.read	=	do_sync_read,
 	.aio_read = 	generic_file_aio_read,
-	.write	=	raw_file_write,
-	.aio_write = 	raw_file_aio_write,
+	.write	=	do_sync_write,
+	.aio_write = 	generic_file_aio_write_nolock,
 	.open	=	raw_open,
 	.release=	raw_release,
 	.ioctl	=	raw_ioctl,
-	.readv	= 	generic_file_readv,
-	.writev	= 	generic_file_writev,
 	.owner	=	THIS_MODULE,
 };
 
-static struct file_operations raw_ctl_fops = {
+static const struct file_operations raw_ctl_fops = {
 	.ioctl	=	raw_ctl_ioctl,
 	.open	=	raw_open,
 	.owner	=	THIS_MODULE,
 };
 
-static struct cdev raw_cdev = {
-	.kobj	=	{.name = "raw", },
-	.owner	=	THIS_MODULE,
-};
+static struct cdev raw_cdev;
 
 static int __init raw_init(void)
 {
-	int i;
 	dev_t dev = MKDEV(RAW_MAJOR, 0);
+	int ret;
 
-	if (register_chrdev_region(dev, MAX_RAW_MINORS, "raw"))
+	ret = register_chrdev_region(dev, MAX_RAW_MINORS, "raw");
+	if (ret)
 		goto error;
 
 	cdev_init(&raw_cdev, &raw_fops);
-	if (cdev_add(&raw_cdev, dev, MAX_RAW_MINORS)) {
+	ret = cdev_add(&raw_cdev, dev, MAX_RAW_MINORS);
+	if (ret) {
 		kobject_put(&raw_cdev.kobj);
-		unregister_chrdev_region(dev, MAX_RAW_MINORS);
-		goto error;
+		goto error_region;
 	}
 
-	raw_class = class_simple_create(THIS_MODULE, "raw");
+	raw_class = class_create(THIS_MODULE, "raw");
 	if (IS_ERR(raw_class)) {
 		printk(KERN_ERR "Error creating raw class.\n");
 		cdev_del(&raw_cdev);
-		unregister_chrdev_region(dev, MAX_RAW_MINORS);
-		goto error;
+		ret = PTR_ERR(raw_class);
+		goto error_region;
 	}
-	class_simple_device_add(raw_class, MKDEV(RAW_MAJOR, 0), NULL, "rawctl");
+	device_create(raw_class, NULL, MKDEV(RAW_MAJOR, 0), "rawctl");
 
-	devfs_mk_cdev(MKDEV(RAW_MAJOR, 0),
-		      S_IFCHR | S_IRUGO | S_IWUGO,
-		      "raw/rawctl");
-	for (i = 1; i < MAX_RAW_MINORS; i++)
-		devfs_mk_cdev(MKDEV(RAW_MAJOR, i),
-			      S_IFCHR | S_IRUGO | S_IWUGO,
-			      "raw/raw%d", i);
 	return 0;
 
+error_region:
+	unregister_chrdev_region(dev, MAX_RAW_MINORS);
 error:
-	printk(KERN_ERR "error register raw device\n");
-	return 1;
+	return ret;
 }
 
 static void __exit raw_exit(void)
 {
-	int i;
-
-	for (i = 1; i < MAX_RAW_MINORS; i++)
-		devfs_remove("raw/raw%d", i);
-	devfs_remove("raw/rawctl");
-	devfs_remove("raw");
-	class_simple_device_remove(MKDEV(RAW_MAJOR, 0));
-	class_simple_destroy(raw_class);
+	device_destroy(raw_class, MKDEV(RAW_MAJOR, 0));
+	class_destroy(raw_class);
 	cdev_del(&raw_cdev);
 	unregister_chrdev_region(MKDEV(RAW_MAJOR, 0), MAX_RAW_MINORS);
 }

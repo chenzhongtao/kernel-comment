@@ -93,18 +93,6 @@
 #define R_390_NUM	61
 
 /*
- * ELF register definitions..
- */
-
-#include <asm/ptrace.h>
-#include <asm/user.h>
-#include <asm/system.h>		/* for save_access_regs */
-
-
-typedef s390_fp_regs elf_fpregset_t;
-typedef s390_regs elf_gregset_t;
-
-/*
  * These are used to set parameters in the core dumps.
  */
 #ifndef __s390x__
@@ -114,6 +102,20 @@ typedef s390_regs elf_gregset_t;
 #endif /* __s390x__ */
 #define ELF_DATA	ELFDATA2MSB
 #define ELF_ARCH	EM_S390
+
+/*
+ * ELF register definitions..
+ */
+
+#include <asm/ptrace.h>
+#include <asm/user.h>
+
+typedef s390_fp_regs elf_fpregset_t;
+typedef s390_regs elf_gregset_t;
+
+#ifdef __KERNEL__
+#include <linux/sched.h>	/* for task_struct */
+#include <asm/system.h>		/* for save_access_regs */
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -162,7 +164,7 @@ static inline int dump_regs(struct pt_regs *ptregs, elf_gregset_t *regs)
 
 static inline int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
 {
-	struct pt_regs *ptregs = __KSTK_PTREGS(tsk);
+	struct pt_regs *ptregs = task_pt_regs(tsk);
 	memcpy(&regs->psw, &ptregs->psw, sizeof(regs->psw)+sizeof(regs->gprs));
 	memcpy(regs->acrs, tsk->thread.acrs, sizeof(regs->acrs));
 	regs->orig_gpr2 = ptregs->orig_gpr2;
@@ -186,7 +188,8 @@ static inline int dump_task_fpu(struct task_struct *tsk, elf_fpregset_t *fpregs)
 /* This yields a mask that user programs can use to figure out what
    instruction set this CPU supports. */
 
-#define ELF_HWCAP (0)
+extern unsigned long elf_hwcap;
+#define ELF_HWCAP (elf_hwcap)
 
 /* This yields a string that ld.so will use to load implementation
    specific libraries for optimization.  This is more specific in
@@ -195,9 +198,10 @@ static inline int dump_task_fpu(struct task_struct *tsk, elf_fpregset_t *fpregs)
    For the moment, we have only optimizations for the Intel generations,
    but that could change... */
 
-#define ELF_PLATFORM (NULL)
+#define ELF_PLATFORM_SIZE 8
+extern char elf_platform[];
+#define ELF_PLATFORM (elf_platform)
 
-#ifdef __KERNEL__
 #ifndef __s390x__
 #define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #else /* __s390x__ */

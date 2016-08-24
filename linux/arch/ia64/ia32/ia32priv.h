@@ -1,7 +1,6 @@
 #ifndef _ASM_IA64_IA32_PRIV_H
 #define _ASM_IA64_IA32_PRIV_H
 
-#include <linux/config.h>
 
 #include <asm/ia32.h>
 
@@ -26,26 +25,26 @@
  * partially mapped pages provide precise accounting of which 4k sub pages
  * are mapped and which ones are not, thereby improving IA-32 compatibility.
  */
-struct partial_page {
-	struct partial_page	*next; /* linked list, sorted by address */
+struct ia64_partial_page {
+	struct ia64_partial_page *next; /* linked list, sorted by address */
 	struct rb_node		pp_rb;
-	/* 64K is the largest "normal" page supported by ia64 ABI. So 4K*32
+	/* 64K is the largest "normal" page supported by ia64 ABI. So 4K*64
 	 * should suffice.*/
-	unsigned int		bitmap;
+	unsigned long		bitmap;
 	unsigned int		base;
 };
 
-struct partial_page_list {
-	struct partial_page	*pp_head; /* list head, points to the lowest
+struct ia64_partial_page_list {
+	struct ia64_partial_page *pp_head; /* list head, points to the lowest
 					   * addressed partial page */
 	struct rb_root		ppl_rb;
-	struct partial_page	*pp_hint; /* pp_hint->next is the last
+	struct ia64_partial_page *pp_hint; /* pp_hint->next is the last
 					   * accessed partial page */
 	atomic_t		pp_count; /* reference count */
 };
 
 #if PAGE_SHIFT > IA32_PAGE_SHIFT
-struct partial_page_list* ia32_init_pp_list (void);
+struct ia64_partial_page_list* ia32_init_pp_list (void);
 #else
 # define ia32_init_pp_list()	0
 #endif
@@ -225,13 +224,6 @@ struct stat64 {
 	unsigned int	st_ino_hi;
 };
 
-typedef union sigval32 {
-	int sival_int;
-	unsigned int sival_ptr;
-} sigval_t32;
-
-#define SIGEV_PAD_SIZE32 ((SIGEV_MAX_SIZE/sizeof(int)) - 3)
-
 typedef struct compat_siginfo {
 	int si_signo;
 	int si_errno;
@@ -248,10 +240,10 @@ typedef struct compat_siginfo {
 
 		/* POSIX.1b timers */
 		struct {
-			timer_t _tid;		/* timer id */
+			compat_timer_t _tid;		/* timer id */
 			int _overrun;		/* overrun count */
 			char _pad[sizeof(unsigned int) - sizeof(int)];
-			sigval_t32 _sigval;	/* same as below */
+			compat_sigval_t _sigval;	/* same as below */
 			int _sys_private;       /* not to be passed to user */
 		} _timer;
 
@@ -259,7 +251,7 @@ typedef struct compat_siginfo {
 		struct {
 			unsigned int _pid;	/* sender's pid */
 			unsigned int _uid;	/* sender's uid */
-			sigval_t32 _sigval;
+			compat_sigval_t _sigval;
 		} _rt;
 
 		/* SIGCHLD */
@@ -284,19 +276,6 @@ typedef struct compat_siginfo {
 	} _sifields;
 } compat_siginfo_t;
 
-typedef struct sigevent32 {
-	sigval_t32 sigev_value;
-	int sigev_signo;
-	int sigev_notify;
-	union {
-		int _pad[SIGEV_PAD_SIZE32];
-		struct {
-			u32 _function;
-			u32 _attribute; /* really pthread_attr_t */
-		} _sigev_thread;
-	} _sigev_un;
-} sigevent_t32;
-
 struct old_linux32_dirent {
 	u32	d_ino;
 	u32	d_offset;
@@ -311,7 +290,6 @@ struct old_linux32_dirent {
 #define _ASM_IA64_ELF_H		/* Don't include elf.h */
 
 #include <linux/sched.h>
-#include <asm/processor.h>
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -325,7 +303,6 @@ struct old_linux32_dirent {
 #define ELF_DATA	ELFDATA2LSB
 #define ELF_ARCH	EM_386
 
-#define IA32_PAGE_OFFSET	0xc0000000
 #define IA32_STACK_TOP		IA32_PAGE_OFFSET
 #define IA32_GATE_OFFSET	IA32_PAGE_OFFSET
 #define IA32_GATE_END		IA32_PAGE_OFFSET + PAGE_SIZE
@@ -351,8 +328,6 @@ struct old_linux32_dirent {
 
 void ia64_elf32_init(struct pt_regs *regs);
 #define ELF_PLAT_INIT(_r, load_addr)	ia64_elf32_init(_r)
-
-#define elf_addr_t	u32
 
 /* This macro yields a bitmask that programs can use to figure out
    what instruction set this CPU supports.  */

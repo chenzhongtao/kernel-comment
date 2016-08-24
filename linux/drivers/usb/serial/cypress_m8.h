@@ -13,10 +13,15 @@
 /* DeLorme Earthmate USB - a GPS device */
 #define	VENDOR_ID_DELORME		 0x1163
 #define PRODUCT_ID_EARTHMATEUSB		 0x0100
+#define PRODUCT_ID_EARTHMATEUSB_LT20	 0x0200
 
 /* Cypress HID->COM RS232 Adapter */
 #define VENDOR_ID_CYPRESS		 0x04b4
 #define PRODUCT_ID_CYPHIDCOM		 0x5500
+
+/* Nokia CA-42 USB to serial cable */
+#define VENDOR_ID_DAZZLE		0x07d0
+#define PRODUCT_ID_CA42			0x4101
 /* End of device listing */
 
 /* Used for setting / requesting serial line settings */
@@ -33,6 +38,7 @@
 
 #define CT_EARTHMATE	0x01
 #define CT_CYPHIDCOM	0x02
+#define CT_CA42V2	0x03
 #define CT_GENERIC	0x0F
 /* End of chiptype definitions */
 

@@ -12,7 +12,6 @@
  * Copyright (C) 2002 Stuart Menefy
  */
 
-#include <linux/config.h>
 #include <asm/irq.h>
 #include <asm/page.h>
 #include <asm/io.h>
@@ -30,13 +29,13 @@ unsigned long epld_virt;
 /* Note the SMSC SuperIO chip and SMSC LAN chip interrupts are all muxed onto
    the same SH-5 interrupt */
 
-static irqreturn_t cayman_interrupt_smsc(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t cayman_interrupt_smsc(int irq, void *dev_id)
 {
         printk(KERN_INFO "CAYMAN: spurious SMSC interrupt\n");
 	return IRQ_NONE;
 }
 
-static irqreturn_t cayman_interrupt_pci2(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t cayman_interrupt_pci2(int irq, void *dev_id)
 {
         printk(KERN_INFO "CAYMAN: spurious PCI interrupt, IRQ %d\n", irq);
 	return IRQ_NONE;
@@ -45,13 +44,13 @@ static irqreturn_t cayman_interrupt_pci2(int irq, void *dev_id, struct pt_regs *
 static struct irqaction cayman_action_smsc = {
 	.name		= "Cayman SMSC Mux",
 	.handler	= cayman_interrupt_smsc,
-	.flags		= SA_INTERRUPT,
+	.flags		= IRQF_DISABLED,
 };
 
 static struct irqaction cayman_action_pci2 = {
 	.name		= "Cayman PCI2 Mux",
 	.handler	= cayman_interrupt_pci2,
-	.flags		= SA_INTERRUPT,
+	.flags		= IRQF_DISABLED,
 };
 
 static void enable_cayman_irq(unsigned int irq)
@@ -64,11 +63,11 @@ static void enable_cayman_irq(unsigned int irq)
 	irq -= START_EXT_IRQS;
 	reg = EPLD_MASK_BASE + ((irq / 8) << 2);
 	bit = 1<<(irq % 8);
-	save_and_cli(flags);
+	local_irq_save(flags);
 	mask = ctrl_inl(reg);
 	mask |= bit;
 	ctrl_outl(mask, reg);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 void disable_cayman_irq(unsigned int irq)
@@ -81,11 +80,11 @@ void disable_cayman_irq(unsigned int irq)
 	irq -= START_EXT_IRQS;
 	reg = EPLD_MASK_BASE + ((irq / 8) << 2);
 	bit = 1<<(irq % 8);
-	save_and_cli(flags);
+	local_irq_save(flags);
 	mask = ctrl_inl(reg);
 	mask &= ~bit;
 	ctrl_outl(mask, reg);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static void ack_cayman_irq(unsigned int irq)
@@ -187,7 +186,7 @@ void init_cayman_irq(void)
 	}
 
 	for (i=0; i<NR_EXT_IRQS; i++) {
-		irq_desc[START_EXT_IRQS + i].handler = &cayman_irq_type;
+		irq_desc[START_EXT_IRQS + i].chip = &cayman_irq_type;
 	}
 
 	/* Setup the SMSC interrupt */

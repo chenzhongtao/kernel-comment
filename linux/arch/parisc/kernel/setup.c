@@ -27,7 +27,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/initrd.h>
 #include <linux/init.h>
@@ -46,13 +45,22 @@
 #include <asm/io.h>
 #include <asm/setup.h>
 
-char	command_line[COMMAND_LINE_SIZE];
+static char __initdata command_line[COMMAND_LINE_SIZE];
 
 /* Intended for ccio/sba/cpu statistics under /proc/bus/{runway|gsc} */
-struct proc_dir_entry * proc_runway_root = NULL;
-struct proc_dir_entry * proc_gsc_root = NULL;
-struct proc_dir_entry * proc_mckinley_root = NULL;
+struct proc_dir_entry * proc_runway_root __read_mostly = NULL;
+struct proc_dir_entry * proc_gsc_root __read_mostly = NULL;
+struct proc_dir_entry * proc_mckinley_root __read_mostly = NULL;
 
+#if !defined(CONFIG_PA20) && (defined(CONFIG_IOMMU_CCIO) || defined(CONFIG_IOMMU_SBA))
+int parisc_bus_is_phys __read_mostly = 1;	/* Assume no IOMMU is present */
+EXPORT_SYMBOL(parisc_bus_is_phys);
+#endif
+
+/* This sets the vmerge boundary and size, it's here because it has to
+ * be available on all platforms (zero means no-virtual merging) */
+unsigned long parisc_vmerge_boundary = 0;
+unsigned long parisc_vmerge_max_size = 0;
 
 void __init setup_cmdline(char **cmdline_p)
 {
@@ -63,9 +71,9 @@ void __init setup_cmdline(char **cmdline_p)
 	/* boot_args[0] is free-mem start, boot_args[1] is ptr to command line */
 	if (boot_args[0] < 64) {
 		/* called from hpux boot loader */
-		saved_command_line[0] = '\0';
+		boot_command_line[0] = '\0';
 	} else {
-		strcpy(saved_command_line, (char *)__va(boot_args[1]));
+		strcpy(boot_command_line, (char *)__va(boot_args[1]));
 
 #ifdef CONFIG_BLK_DEV_INITRD
 		if (boot_args[2] != 0) /* did palo pass us a ramdisk? */
@@ -76,7 +84,7 @@ void __init setup_cmdline(char **cmdline_p)
 #endif
 	}
 
-	strcpy(command_line, saved_command_line);
+	strcpy(command_line, boot_command_line);
 	*cmdline_p = command_line;
 }
 
@@ -112,9 +120,13 @@ extern void collect_boot_cpu_data(void);
 
 void __init setup_arch(char **cmdline_p)
 {
+#ifdef CONFIG_64BIT
+	extern int parisc_narrow_firmware;
+#endif
+
 	init_per_cpu(smp_processor_id());	/* Set Modes & Enable FP */
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	printk(KERN_INFO "The 64-bit Kernel has started...\n");
 #else
 	printk(KERN_INFO "The 32-bit Kernel has started...\n");
@@ -122,8 +134,7 @@ void __init setup_arch(char **cmdline_p)
 
 	pdc_console_init();
 
-#ifdef __LP64__
-	extern int parisc_narrow_firmware;
+#ifdef CONFIG_64BIT
 	if(parisc_narrow_firmware) {
 		printk(KERN_INFO "Kernel is using PDC in 32-bit mode.\n");
 	}
@@ -151,7 +162,7 @@ void __init setup_arch(char **cmdline_p)
 }
 
 /*
- * Display cpu info for all cpu's.
+ * Display CPU info for all CPUs.
  * for parisc this is in processor.c
  */
 extern int show_cpuinfo (struct seq_file *m, void *v);
@@ -199,7 +210,7 @@ static void __init parisc_proc_mkdir(void)
 	case pcxl2:
 		if (NULL == proc_gsc_root)
 		{
-			proc_gsc_root = proc_mkdir("bus/gsc", 0);
+			proc_gsc_root = proc_mkdir("bus/gsc", NULL);
 		}
 		break;
         case pcxt_:
@@ -210,13 +221,14 @@ static void __init parisc_proc_mkdir(void)
         case pcxw2:
                 if (NULL == proc_runway_root)
                 {
-                        proc_runway_root = proc_mkdir("bus/runway", 0);
+                        proc_runway_root = proc_mkdir("bus/runway", NULL);
                 }
                 break;
 	case mako:
+	case mako2:
                 if (NULL == proc_mckinley_root)
                 {
-                        proc_mckinley_root = proc_mkdir("bus/mckinley", 0);
+                        proc_mckinley_root = proc_mkdir("bus/mckinley", NULL);
                 }
                 break;
 	default:
@@ -291,6 +303,8 @@ extern void eisa_init(void);
 
 static int __init parisc_init(void)
 {
+	u32 osid = (OS_ID_LINUX << 16);
+
 	parisc_proc_mkdir();
 	parisc_init_resources();
 	do_device_inventory();                  /* probe for hardware */
@@ -299,6 +313,9 @@ static int __init parisc_init(void)
 	
 	/* set up a new led state on systems shipped LED State panel */
 	pdc_chassis_send_status(PDC_CHASSIS_DIRECT_BSTART);
+
+	/* tell PDC we're Linux. Nevermind failure. */
+	pdc_stable_write(0x40, &osid, sizeof(osid));
 	
 	processor_init();
 	printk(KERN_INFO "CPU(s): %d x %s at %d.%06d MHz\n",

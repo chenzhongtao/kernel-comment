@@ -22,7 +22,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp.h>
+#include <net/tcp_states.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
@@ -38,12 +38,12 @@ static void nr_idletimer_expiry(unsigned long);
 
 void nr_init_timers(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	init_timer(&nr->t1timer);
 	nr->t1timer.data     = (unsigned long)sk;
 	nr->t1timer.function = &nr_t1timer_expiry;
-	
+
 	init_timer(&nr->t2timer);
 	nr->t2timer.data     = (unsigned long)sk;
 	nr->t2timer.function = &nr_t2timer_expiry;
@@ -63,28 +63,28 @@ void nr_init_timers(struct sock *sk)
 
 void nr_start_t1timer(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	mod_timer(&nr->t1timer, jiffies + nr->t1);
 }
 
 void nr_start_t2timer(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	mod_timer(&nr->t2timer, jiffies + nr->t2);
 }
 
 void nr_start_t4timer(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	mod_timer(&nr->t4timer, jiffies + nr->t4);
 }
 
 void nr_start_idletimer(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	if (nr->idle > 0)
 		mod_timer(&nr->idletimer, jiffies + nr->idle);
@@ -128,7 +128,7 @@ int nr_t1timer_running(struct sock *sk)
 static void nr_heartbeat_expiry(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	bh_lock_sock(sk);
 	switch (nr->state) {
@@ -138,8 +138,8 @@ static void nr_heartbeat_expiry(unsigned long param)
 		if (sock_flag(sk, SOCK_DESTROY) ||
 		    (sk->sk_state == TCP_LISTEN && sock_flag(sk, SOCK_DEAD))) {
 			sock_hold(sk);
-			nr_destroy_socket(sk);
 			bh_unlock_sock(sk);
+			nr_destroy_socket(sk);
 			sock_put(sk);
 			return;
 		}
@@ -167,7 +167,7 @@ static void nr_heartbeat_expiry(unsigned long param)
 static void nr_t2timer_expiry(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	bh_lock_sock(sk);
 	if (nr->condition & NR_COND_ACK_PENDING) {
@@ -189,7 +189,7 @@ static void nr_t4timer_expiry(unsigned long param)
 static void nr_idletimer_expiry(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	bh_lock_sock(sk);
 
@@ -217,7 +217,7 @@ static void nr_idletimer_expiry(unsigned long param)
 static void nr_t1timer_expiry(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	bh_lock_sock(sk);
 	switch (nr->state) {

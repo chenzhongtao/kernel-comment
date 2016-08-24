@@ -7,17 +7,15 @@
     *  manipulating the SB1250's Synchronous Serial
     *
     *  SB1250 specification level:  User's manual 1/02/02
-    *  
-    *  Author:  Mitch Lichtenberg
     *
     *********************************************************************
     *
     *  Copyright 2000,2001,2002,2003
     *  Broadcom Corporation. All rights reserved.
-    *  
-    *  This program is free software; you can redistribute it and/or 
-    *  modify it under the terms of the GNU General Public License as 
-    *  published by the Free Software Foundation; either version 2 of 
+    *
+    *  This program is free software; you can redistribute it and/or
+    *  modify it under the terms of the GNU General Public License as
+    *  published by the Free Software Foundation; either version 2 of
     *  the License, or (at your option) any later version.
     *
     *  This program is distributed in the hope that it will be useful,
@@ -27,7 +25,7 @@
     *
     *  You should have received a copy of the GNU General Public License
     *  along with this program; if not, write to the Free Software
-    *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, 
+    *  Foundation, Inc., 59 Temple Place, Suite 330, Boston,
     *  MA 02111-1307 USA
     ********************************************************************* */
 
@@ -45,8 +43,8 @@
 #define M_SYNCSER_MSB_FIRST                _SB_MAKEMASK1(1)
 
 #define S_SYNCSER_FLAG_NUM                 2
-#define M_SYNCSER_FLAG_NUM                 _SB_MAKEMASK(4,S_SYNCSER_FLAG_NUM)
-#define V_SYNCSER_FLAG_NUM                 _SB_MAKEVALUE(x,S_SYNCSER_FLAG_NUM)
+#define M_SYNCSER_FLAG_NUM                 _SB_MAKEMASK(4, S_SYNCSER_FLAG_NUM)
+#define V_SYNCSER_FLAG_NUM                 _SB_MAKEVALUE(x, S_SYNCSER_FLAG_NUM)
 
 #define M_SYNCSER_FLAG_EN                  _SB_MAKEMASK1(6)
 #define M_SYNCSER_HDLC_EN                  _SB_MAKEMASK1(7)
@@ -61,8 +59,8 @@
 #define M_SYNCSER_RXCLK_EXT                _SB_MAKEMASK1(1)
 
 #define S_SYNCSER_RXSYNC_DLY               2
-#define M_SYNCSER_RXSYNC_DLY               _SB_MAKEMASK(2,S_SYNCSER_RXSYNC_DLY)
-#define V_SYNCSER_RXSYNC_DLY(x)            _SB_MAKEVALUE(x,S_SYNCSER_RXSYNC_DLY)
+#define M_SYNCSER_RXSYNC_DLY               _SB_MAKEMASK(2, S_SYNCSER_RXSYNC_DLY)
+#define V_SYNCSER_RXSYNC_DLY(x)            _SB_MAKEVALUE(x, S_SYNCSER_RXSYNC_DLY)
 
 #define M_SYNCSER_RXSYNC_LOW               _SB_MAKEMASK1(4)
 #define M_SYNCSER_RXSTRB_LOW               _SB_MAKEMASK1(5)
@@ -74,8 +72,8 @@
 #define M_SYNCSER_TXCLK_EXT                _SB_MAKEMASK1(9)
 
 #define S_SYNCSER_TXSYNC_DLY               10
-#define M_SYNCSER_TXSYNC_DLY               _SB_MAKEMASK(2,S_SYNCSER_TXSYNC_DLY)
-#define V_SYNCSER_TXSYNC_DLY(x)            _SB_MAKEVALUE(x,S_SYNCSER_TXSYNC_DLY)
+#define M_SYNCSER_TXSYNC_DLY               _SB_MAKEMASK(2, S_SYNCSER_TXSYNC_DLY)
+#define V_SYNCSER_TXSYNC_DLY(x)            _SB_MAKEVALUE(x, S_SYNCSER_TXSYNC_DLY)
 
 #define M_SYNCSER_TXSYNC_LOW               _SB_MAKEMASK1(12)
 #define M_SYNCSER_TXSTRB_LOW               _SB_MAKEMASK1(13)
@@ -139,8 +137,8 @@
 #define M_SYNCSER_SEQ_BYTE                 _SB_MAKEMASK1(1)
 
 #define S_SYNCSER_SEQ_COUNT                2
-#define M_SYNCSER_SEQ_COUNT                _SB_MAKEMASK(4,S_SYNCSER_SEQ_COUNT)
-#define V_SYNCSER_SEQ_COUNT(x)             _SB_MAKEVALUE(x,S_SYNCSER_SEQ_COUNT)
+#define M_SYNCSER_SEQ_COUNT                _SB_MAKEMASK(4, S_SYNCSER_SEQ_COUNT)
+#define V_SYNCSER_SEQ_COUNT(x)             _SB_MAKEVALUE(x, S_SYNCSER_SEQ_COUNT)
 
 #define M_SYNCSER_SEQ_ENABLE               _SB_MAKEMASK1(6)
 #define M_SYNCSER_SEQ_STROBE               _SB_MAKEMASK1(7)

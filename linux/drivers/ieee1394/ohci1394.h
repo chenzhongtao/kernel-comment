@@ -190,22 +190,9 @@ struct ti_ohci {
 	unsigned long ir_multichannel_used; /* ditto */
         spinlock_t IR_channel_lock;
 
-	/* iso receive (legacy API) */
-	u64 ir_legacy_channels; /* note: this differs from ISO_channel_usage;
-				   it only accounts for channels listened to
-				   by the legacy API, so that we can know when
-				   it is safe to free the legacy API context */
-
-	struct dma_rcv_ctx ir_legacy_context;
-	struct ohci1394_iso_tasklet ir_legacy_tasklet;
-
         /* iso transmit */
 	int nb_iso_xmit_ctx;
 	unsigned long it_ctx_usage; /* use test_and_set_bit() for atomicity */
-
-	/* iso transmit (legacy API) */
-	struct dma_trm_ctx it_legacy_context;
-	struct ohci1394_iso_tasklet it_legacy_tasklet;
 
         u64 ISO_channel_usage;
 
@@ -219,9 +206,8 @@ struct ti_ohci {
 
 	int self_id_errors;
 
-	/* Tasklets for iso receive and transmit, used by video1394,
-	 * amdtp and dv1394 */
-
+	/* Tasklets for iso receive and transmit, used by video1394
+	 * and dv1394 */
 	struct list_head iso_tasklet_list;
 	spinlock_t iso_tasklet_list_lock;
 
@@ -236,6 +222,9 @@ struct ti_ohci {
 
 static inline int cross_bound(unsigned long addr, unsigned int size)
 {
+	if (size == 0)
+		return 0;
+
 	if (size > PAGE_SIZE)
 		return 1;
 
@@ -440,6 +429,16 @@ static inline u32 reg_read(const struct ti_ohci *ohci, int offset)
 
 #define OHCI1394_TCODE_PHY               0xE
 
+/* Node offset map (phys DMA area, posted write area).
+ * The value of OHCI1394_PHYS_UPPER_BOUND_PROGRAMMED may be modified but must
+ * be lower than OHCI1394_MIDDLE_ADDRESS_SPACE.
+ * OHCI1394_PHYS_UPPER_BOUND_FIXED and OHCI1394_MIDDLE_ADDRESS_SPACE are
+ * constants given by the OHCI spec.
+ */
+#define OHCI1394_PHYS_UPPER_BOUND_FIXED		0x000100000000ULL /* 4 GB */
+#define OHCI1394_PHYS_UPPER_BOUND_PROGRAMMED	0x010000000000ULL /* 1 TB */
+#define OHCI1394_MIDDLE_ADDRESS_SPACE		0xffff00000000ULL
+
 void ohci1394_init_iso_tasklet(struct ohci1394_iso_tasklet *tasklet,
 			       int type,
 			       void (*func)(unsigned long),
@@ -448,9 +447,7 @@ int ohci1394_register_iso_tasklet(struct ti_ohci *ohci,
 				  struct ohci1394_iso_tasklet *tasklet);
 void ohci1394_unregister_iso_tasklet(struct ti_ohci *ohci,
 				     struct ohci1394_iso_tasklet *tasklet);
-
-/* returns zero if successful, one if DMA context is locked up */
-int ohci1394_stop_context      (struct ti_ohci *ohci, int reg, char *msg);
+int ohci1394_stop_context(struct ti_ohci *ohci, int reg, char *msg);
 struct ti_ohci *ohci1394_get_struct(int card_num);
 
 #endif

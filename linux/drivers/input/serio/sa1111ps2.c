@@ -20,7 +20,6 @@
 #include <linux/spinlock.h>
 
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/system.h>
 
 #include <asm/hardware/sa1111.h>
@@ -41,7 +40,7 @@ struct ps2if {
  * at the most one, but we loop for safety.  If there was a
  * framing error, we have to manually clear the status.
  */
-static irqreturn_t ps2_rxint(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ps2_rxint(int irq, void *dev_id)
 {
 	struct ps2if *ps2if = dev_id;
 	unsigned int scancode, flag, status;
@@ -59,7 +58,7 @@ static irqreturn_t ps2_rxint(int irq, void *dev_id, struct pt_regs *regs)
 		if (hweight8(scancode) & 1)
 			flag ^= SERIO_PARITY;
 
-		serio_interrupt(ps2if->io, scancode, flag, regs);
+		serio_interrupt(ps2if->io, scancode, flag);
 
 		status = sa1111_readl(ps2if->base + SA1111_PS2STAT);
         }
@@ -70,7 +69,7 @@ static irqreturn_t ps2_rxint(int irq, void *dev_id, struct pt_regs *regs)
 /*
  * Completion of ps2 write
  */
-static irqreturn_t ps2_txint(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ps2_txint(int irq, void *dev_id)
 {
 	struct ps2if *ps2if = dev_id;
 	unsigned int status;
@@ -171,7 +170,7 @@ static void ps2_close(struct serio *io)
 /*
  * Clear the input buffer.
  */
-static void __init ps2_clear_input(struct ps2if *ps2if)
+static void __devinit ps2_clear_input(struct ps2if *ps2if)
 {
 	int maxread = 100;
 
@@ -229,23 +228,21 @@ static int __init ps2_test(struct ps2if *ps2if)
 /*
  * Add one device to this driver.
  */
-static int ps2_probe(struct sa1111_dev *dev)
+static int __devinit ps2_probe(struct sa1111_dev *dev)
 {
 	struct ps2if *ps2if;
 	struct serio *serio;
 	int ret;
 
-	ps2if = kmalloc(sizeof(struct ps2if), GFP_KERNEL);
-	serio = kmalloc(sizeof(struct serio), GFP_KERNEL);
+	ps2if = kzalloc(sizeof(struct ps2if), GFP_KERNEL);
+	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!ps2if || !serio) {
 		ret = -ENOMEM;
 		goto free;
 	}
 
-	memset(ps2if, 0, sizeof(struct ps2if));
-	memset(serio, 0, sizeof(struct serio));
 
-	serio->type		= SERIO_8042;
+	serio->id.type		= SERIO_8042;
 	serio->write		= ps2_write;
 	serio->open		= ps2_open;
 	serio->close		= ps2_close;

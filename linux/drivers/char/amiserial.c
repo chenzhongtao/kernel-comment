@@ -31,7 +31,6 @@
  * 		ever possible.
  */
 
-#include <linux/config.h>
 #include <linux/delay.h>
 
 #undef SERIAL_PARANOIA_CHECK
@@ -46,8 +45,6 @@
 
 /* Sanity checks */
 
-#define SERIAL_INLINE
-  
 #if defined(MODULE) && defined(SERIAL_DEBUG_MCOUNT)
 #define DBG_CNT(s) printk("(%s): [%x] refc=%d, serc=%d, ttyc=%d -> %s\n", \
  tty->name, (info->flags), serial_driver->refcount,info->count,tty->count,s)
@@ -95,10 +92,7 @@ static char *serial_version = "4.30";
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 
-#ifdef SERIAL_INLINE
-#define _INLINE_ inline
-#endif
-
+#define custom amiga_custom
 static char *serial_name = "Amiga-builtin serial driver";
 
 static struct tty_driver *serial_driver;
@@ -110,25 +104,13 @@ static struct async_struct *IRQ_ports;
 
 static unsigned char current_ctl_bits;
 
-static void change_speed(struct async_struct *info, struct termios *old);
+static void change_speed(struct async_struct *info, struct ktermios *old);
 static void rs_wait_until_sent(struct tty_struct *tty, int timeout);
 
 
 static struct serial_state rs_table[1];
 
-#define NR_PORTS	(sizeof(rs_table)/sizeof(struct serial_state))
-
-/*
- * tmp_buf is used as a temporary buffer by serial_write.  We need to
- * lock it in case the copy_from_user blocks while swapping in a page,
- * and some other program tries to do a serial write at the same time.
- * Since the lock will only come under contention when the system is
- * swapping and available memory is low, it makes sense to share one
- * buffer across all the serial ports, since it significantly saves
- * memory if large numbers of serial ports are open.
- */
-static unsigned char *tmp_buf;
-static DECLARE_MUTEX(tmp_buf_sem);
+#define NR_PORTS ARRAY_SIZE(rs_table)
 
 #include <asm/uaccess.h>
 
@@ -253,20 +235,21 @@ static void rs_start(struct tty_struct *tty)
  * This routine is used by the interrupt handler to schedule
  * processing in the software interrupt portion of the driver.
  */
-static _INLINE_ void rs_sched_event(struct async_struct *info,
-				  int event)
+static void rs_sched_event(struct async_struct *info,
+			   int event)
 {
 	info->event |= 1 << event;
 	tasklet_schedule(&info->tlet);
 }
 
-static _INLINE_ void receive_chars(struct async_struct *info)
+static void receive_chars(struct async_struct *info)
 {
         int status;
 	int serdatr;
 	struct tty_struct *tty = info->tty;
-	unsigned char ch;
+	unsigned char ch, flag;
 	struct	async_icount *icount;
+	int oe = 0;
 
 	icount = &info->state->icount;
 
@@ -282,15 +265,12 @@ static _INLINE_ void receive_chars(struct async_struct *info)
 	    status |= UART_LSR_OE;
 
 	ch = serdatr & 0xff;
-	if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-	  goto ignore_char;
-	*tty->flip.char_buf_ptr = ch;
 	icount->rx++;
 
 #ifdef SERIAL_DEBUG_INTR
 	printk("DR%02x:%02x...", ch, status);
 #endif
-	*tty->flip.flag_buf_ptr = 0;
+	flag = TTY_NORMAL;
 
 	/*
 	 * We don't handle parity or frame errors - but I have left
@@ -319,7 +299,7 @@ static _INLINE_ void receive_chars(struct async_struct *info)
 	   * should be ignored.
 	   */
 	  if (status & info->ignore_status_mask)
-	    goto ignore_char;
+	    goto out;
 
 	  status &= info->read_status_mask;
 
@@ -327,36 +307,31 @@ static _INLINE_ void receive_chars(struct async_struct *info)
 #ifdef SERIAL_DEBUG_INTR
 	    printk("handling break....");
 #endif
-	    *tty->flip.flag_buf_ptr = TTY_BREAK;
+	    flag = TTY_BREAK;
 	    if (info->flags & ASYNC_SAK)
 	      do_SAK(tty);
 	  } else if (status & UART_LSR_PE)
-	    *tty->flip.flag_buf_ptr = TTY_PARITY;
+	    flag = TTY_PARITY;
 	  else if (status & UART_LSR_FE)
-	    *tty->flip.flag_buf_ptr = TTY_FRAME;
+	    flag = TTY_FRAME;
 	  if (status & UART_LSR_OE) {
 	    /*
 	     * Overrun is special, since it's
 	     * reported immediately, and doesn't
 	     * affect the current character
 	     */
-	    if (tty->flip.count < TTY_FLIPBUF_SIZE) {
-	      tty->flip.count++;
-	      tty->flip.flag_buf_ptr++;
-	      tty->flip.char_buf_ptr++;
-	      *tty->flip.flag_buf_ptr = TTY_OVERRUN;
-	    }
+	     oe = 1;
 	  }
 	}
-	tty->flip.flag_buf_ptr++;
-	tty->flip.char_buf_ptr++;
-	tty->flip.count++;
- ignore_char:
-
+	tty_insert_flip_char(tty, ch, flag);
+	if (oe == 1)
+		tty_insert_flip_char(tty, 0, TTY_OVERRUN);
 	tty_flip_buffer_push(tty);
+out:
+	return;
 }
 
-static _INLINE_ void transmit_chars(struct async_struct *info)
+static void transmit_chars(struct async_struct *info)
 {
 	custom.intreq = IF_TBE;
 	mb();
@@ -396,7 +371,7 @@ static _INLINE_ void transmit_chars(struct async_struct *info)
 	}
 }
 
-static _INLINE_ void check_modem_status(struct async_struct *info)
+static void check_modem_status(struct async_struct *info)
 {
 	unsigned char status = ciab.pra & (SER_DCD | SER_CTS | SER_DSR);
 	unsigned char dstatus;
@@ -472,7 +447,7 @@ static _INLINE_ void check_modem_status(struct async_struct *info)
 	}
 }
 
-static irqreturn_t ser_vbl_int( int irq, void *data, struct pt_regs *regs)
+static irqreturn_t ser_vbl_int( int irq, void *data)
 {
         /* vbl is just a periodic interrupt we tie into to update modem status */
 	struct async_struct * info = IRQ_ports;
@@ -485,7 +460,7 @@ static irqreturn_t ser_vbl_int( int irq, void *data, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t ser_rx_int(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t ser_rx_int(int irq, void *dev_id)
 {
 	struct async_struct * info;
 
@@ -505,7 +480,7 @@ static irqreturn_t ser_rx_int(int irq, void *dev_id, struct pt_regs * regs)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t ser_tx_int(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t ser_tx_int(int irq, void *dev_id)
 {
 	struct async_struct * info;
 
@@ -552,10 +527,8 @@ static void do_softint(unsigned long private_)
 	if (!tty)
 		return;
 
-	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event))
 		tty_wakeup(tty);
-		wake_up_interruptible(&tty->write_wait);
-	}
 }
 
 /*
@@ -719,7 +692,7 @@ static void shutdown(struct async_struct * info)
  * the specified baud rate for a serial port.
  */
 static void change_speed(struct async_struct *info,
-			 struct termios *old_termios)
+			 struct ktermios *old_termios)
 {
 	int	quot = 0, baud_base, baud;
 	unsigned cflag, cval = 0;
@@ -765,6 +738,7 @@ static void change_speed(struct async_struct *info,
 	}
 	/* If the quotient is zero refuse the change */
 	if (!quot && old_termios) {
+		/* FIXME: Will need updating for new tty in the end */
 		info->tty->termios->c_cflag &= ~CBAUD;
 		info->tty->termios->c_cflag |= (old_termios->c_cflag & CBAUD);
 		baud = tty_get_baud_rate(info->tty);
@@ -810,7 +784,6 @@ static void change_speed(struct async_struct *info,
 	/*
 	 * Set up parity check flag
 	 */
-#define RELEVANT_IFLAG(iflag) (iflag & (IGNBRK|BRKINT|IGNPAR|PARMRK|INPCK))
 
 	info->read_status_mask = UART_LSR_OE | UART_LSR_DR;
 	if (I_INPCK(info->tty))
@@ -861,13 +834,18 @@ static void change_speed(struct async_struct *info,
 
 static void rs_put_char(struct tty_struct *tty, unsigned char ch)
 {
-	struct async_struct *info = (struct async_struct *)tty->driver_data;
+	struct async_struct *info;
 	unsigned long flags;
+
+	if (!tty)
+		return;
+
+	info = tty->driver_data;
 
 	if (serial_paranoia_check(info, tty->name, "rs_put_char"))
 		return;
 
-	if (!tty || !info->xmit.buf)
+	if (!info->xmit.buf)
 		return;
 
 	local_irq_save(flags);
@@ -910,17 +888,21 @@ static void rs_flush_chars(struct tty_struct *tty)
 static int rs_write(struct tty_struct * tty, const unsigned char *buf, int count)
 {
 	int	c, ret = 0;
-	struct async_struct *info = (struct async_struct *)tty->driver_data;
+	struct async_struct *info;
 	unsigned long flags;
+
+	if (!tty)
+		return 0;
+
+	info = tty->driver_data;
 
 	if (serial_paranoia_check(info, tty->name, "rs_write"))
 		return 0;
 
-	if (!tty || !info->xmit.buf || !tmp_buf)
+	if (!info->xmit.buf)
 		return 0;
 
-	local_save_flags(flags);
-	local_irq_disable();
+	local_irq_save(flags);
 	while (1) {
 		c = CIRC_SPACE_TO_END(info->xmit.head,
 				      info->xmit.tail,
@@ -983,7 +965,6 @@ static void rs_flush_buffer(struct tty_struct *tty)
 	local_irq_save(flags);
 	info->xmit.head = info->xmit.tail = 0;
 	local_irq_restore(flags);
-	wake_up_interruptible(&tty->write_wait);
 	tty_wakeup(tty);
 }
 
@@ -1085,7 +1066,7 @@ static void rs_unthrottle(struct tty_struct * tty)
  */
 
 static int get_serial_info(struct async_struct * info,
-			   struct serial_struct * retinfo)
+			   struct serial_struct __user * retinfo)
 {
 	struct serial_struct tmp;
 	struct serial_state *state = info->state;
@@ -1109,7 +1090,7 @@ static int get_serial_info(struct async_struct * info,
 }
 
 static int set_serial_info(struct async_struct * info,
-			   struct serial_struct * new_info)
+			   struct serial_struct __user * new_info)
 {
 	struct serial_struct new_serial;
  	struct serial_state old_state, *state;
@@ -1190,7 +1171,7 @@ check_and_exit:
  * 	    transmit holding register is empty.  This functionality
  * 	    allows an RS485 driver to be written in user space. 
  */
-static int get_lsr_info(struct async_struct * info, unsigned int *value)
+static int get_lsr_info(struct async_struct * info, unsigned int __user *value)
 {
 	unsigned char status;
 	unsigned int result;
@@ -1281,6 +1262,7 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 	struct async_struct * info = (struct async_struct *)tty->driver_data;
 	struct async_icount cprev, cnow;	/* kernel counter temps */
 	struct serial_icounter_struct icount;
+	void __user *argp = (void __user *)arg;
 	unsigned long flags;
 
 	if (serial_paranoia_check(info, tty->name, "rs_ioctl"))
@@ -1295,19 +1277,17 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 
 	switch (cmd) {
 		case TIOCGSERIAL:
-			return get_serial_info(info,
-					       (struct serial_struct *) arg);
+			return get_serial_info(info, argp);
 		case TIOCSSERIAL:
-			return set_serial_info(info,
-					       (struct serial_struct *) arg);
+			return set_serial_info(info, argp);
 		case TIOCSERCONFIG:
 			return 0;
 
 		case TIOCSERGETLSR: /* Get line status register */
-			return get_lsr_info(info, (unsigned int *) arg);
+			return get_lsr_info(info, argp);
 
 		case TIOCSERGSTRUCT:
-			if (copy_to_user((struct async_struct *) arg,
+			if (copy_to_user(argp,
 					 info, sizeof(struct async_struct)))
 				return -EFAULT;
 			return 0;
@@ -1366,7 +1346,7 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 			icount.brk = cnow.brk;
 			icount.buf_overrun = cnow.buf_overrun;
 
-			if (copy_to_user((void *)arg, &icount, sizeof(icount)))
+			if (copy_to_user(argp, &icount, sizeof(icount)))
 				return -EFAULT;
 			return 0;
 		case TIOCSERGWILD:
@@ -1381,16 +1361,11 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 	return 0;
 }
 
-static void rs_set_termios(struct tty_struct *tty, struct termios *old_termios)
+static void rs_set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 {
 	struct async_struct *info = (struct async_struct *)tty->driver_data;
 	unsigned long flags;
 	unsigned int cflag = tty->termios->c_cflag;
-
-	if (   (cflag == old_termios->c_cflag)
-	    && (   RELEVANT_IFLAG(tty->termios->c_iflag) 
-		== RELEVANT_IFLAG(old_termios->c_iflag)))
-	  return;
 
 	change_speed(info, old_termios);
 
@@ -1594,7 +1569,7 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 		if (timeout && time_after(jiffies, orig_jiffies + timeout))
 			break;
 	}
-	current->state = TASK_RUNNING;
+	__set_current_state(TASK_RUNNING);
 #ifdef SERIAL_DEBUG_RS_WAIT_UNTIL_SENT
 	printk("lsr = %d (jiff=%lu)...done\n", lsr, jiffies);
 #endif
@@ -1720,7 +1695,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 #endif
 		schedule();
 	}
-	current->state = TASK_RUNNING;
+	__set_current_state(TASK_RUNNING);
 	remove_wait_queue(&info->open_wait, &wait);
 	if (extra_count)
 		state->count++;
@@ -1746,12 +1721,11 @@ static int get_async_struct(int line, struct async_struct **ret_info)
 		*ret_info = sstate->info;
 		return 0;
 	}
-	info = kmalloc(sizeof(struct async_struct), GFP_KERNEL);
+	info = kzalloc(sizeof(struct async_struct), GFP_KERNEL);
 	if (!info) {
 		sstate->count--;
 		return -ENOMEM;
 	}
-	memset(info, 0, sizeof(struct async_struct));
 #ifdef DECLARE_WAITQUEUE
 	init_waitqueue_head(&info->open_wait);
 	init_waitqueue_head(&info->close_wait);
@@ -1783,7 +1757,6 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 {
 	struct async_struct	*info;
 	int 			retval, line;
-	unsigned long		page;
 
 	line = tty->index;
 	if ((line < 0) || (line >= NR_PORTS)) {
@@ -1802,17 +1775,6 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	printk("rs_open %s, count = %d\n", tty->name, info->state->count);
 #endif
 	info->tty->low_latency = (info->flags & ASYNC_LOW_LATENCY) ? 1 : 0;
-
-	if (!tmp_buf) {
-		page = get_zeroed_page(GFP_KERNEL);
-		if (!page) {
-			return -ENOMEM;
-		}
-		if (tmp_buf)
-			free_page(page);
-		else
-			tmp_buf = (unsigned char *) page;
-	}
 
 	/*
 	 * If the port is the middle of closing, bail out now
@@ -1957,17 +1919,13 @@ done:
  * number, and identifies which options were configured into this
  * driver.
  */
-static _INLINE_ void show_serial_version(void)
+static void show_serial_version(void)
 {
  	printk(KERN_INFO "%s version %s\n", serial_name, serial_version);
 }
 
 
-int register_serial(struct serial_struct *req);
-void unregister_serial(int line);
-
-
-static struct tty_operations serial_ops = {
+static const struct tty_operations serial_ops = {
 	.open = rs_open,
 	.close = rs_close,
 	.write = rs_write,
@@ -2047,10 +2005,6 @@ static int __init rs_init(void)
 	state->icount.rx = state->icount.tx = 0;
 	state->icount.frame = state->icount.parity = 0;
 	state->icount.overrun = state->icount.brk = 0;
-	/*
-	if(state->port && check_region(state->port,REGION_LENGTH(state)))
-	  continue;
-	*/
 
 	printk(KERN_INFO "ttyS%d is the amiga builtin serial port\n",
 		       state->line);
@@ -2064,7 +2018,7 @@ static int __init rs_init(void)
 
 	/* set ISRs, and then disable the rx interrupts */
 	request_irq(IRQ_AMIGA_TBE, ser_tx_int, 0, "serial TX", state);
-	request_irq(IRQ_AMIGA_RBF, ser_rx_int, SA_INTERRUPT, "serial RX", state);
+	request_irq(IRQ_AMIGA_RBF, ser_rx_int, IRQF_DISABLED, "serial RX", state);
 
 	/* turn off Rx and Tx interrupts */
 	custom.intena = IF_RBF | IF_TBE;
@@ -2101,11 +2055,6 @@ static __exit void rs_exit(void)
 	if (info) {
 	  rs_table[0].info = NULL;
 	  kfree(info);
-	}
-
-	if (tmp_buf) {
-		free_page((unsigned long) tmp_buf);
-		tmp_buf = NULL;
 	}
 
 	release_mem_region(CUSTOM_PHYSADDR+0x30, 4);

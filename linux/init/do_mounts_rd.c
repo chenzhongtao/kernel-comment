@@ -57,7 +57,7 @@ identify_ramdisk_image(int fd, int start_block)
 	unsigned char *buf;
 
 	buf = kmalloc(size, GFP_KERNEL);
-	if (buf == 0)
+	if (!buf)
 		return -1;
 
 	minixsb = (struct minix_super_block *) buf;
@@ -145,7 +145,7 @@ int __init rd_load_image(char *from)
 	int nblocks, i, disk;
 	char *buf = NULL;
 	unsigned short rotate = 0;
-#if !defined(CONFIG_ARCH_S390) && !defined(CONFIG_PPC_ISERIES)
+#if !defined(CONFIG_S390) && !defined(CONFIG_PPC_ISERIES)
 	char rotator[4] = { '|' , '/' , '-' , '\\' };
 #endif
 
@@ -237,7 +237,7 @@ int __init rd_load_image(char *from)
 		}
 		sys_read(in_fd, buf, BLOCK_SIZE);
 		sys_write(out_fd, buf, BLOCK_SIZE);
-#if !defined(CONFIG_ARCH_S390) && !defined(CONFIG_PPC_ISERIES)
+#if !defined(CONFIG_S390) && !defined(CONFIG_PPC_ISERIES)
 		if (!(i % 16)) {
 			printk("%c\b", rotator[rotate & 0x3]);
 			rotate++;
@@ -262,8 +262,8 @@ int __init rd_load_disk(int n)
 {
 	if (rd_prompt)
 		change_floppy("root floppy disk to be loaded into RAM disk");
-	create_dev("/dev/root", ROOT_DEV, root_device_name);
-	create_dev("/dev/ram", MKDEV(RAMDISK_MAJOR, n), NULL);
+	create_dev("/dev/root", ROOT_DEV);
+	create_dev("/dev/ram", MKDEV(RAMDISK_MAJOR, n));
 	return rd_load_image("/dev/root");
 }
 
@@ -407,12 +407,12 @@ static int __init crd_load(int in_fd, int out_fd)
 	crd_infd = in_fd;
 	crd_outfd = out_fd;
 	inbuf = kmalloc(INBUFSIZ, GFP_KERNEL);
-	if (inbuf == 0) {
+	if (!inbuf) {
 		printk(KERN_ERR "RAMDISK: Couldn't allocate gzip buffer\n");
 		return -1;
 	}
 	window = kmalloc(WSIZE, GFP_KERNEL);
-	if (window == 0) {
+	if (!window) {
 		printk(KERN_ERR "RAMDISK: Couldn't allocate gzip window\n");
 		kfree(inbuf);
 		return -1;

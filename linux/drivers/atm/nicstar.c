@@ -36,7 +36,6 @@
 /* Header files ***************************************************************/
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
 #include <linux/atmdev.h>
@@ -214,9 +213,8 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev);
 static void __devinit ns_init_card_error(ns_dev *card, int error);
 static scq_info *get_scq(int size, u32 scd);
 static void free_scq(scq_info *scq, struct atm_vcc *vcc);
-static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
-                       u32 handle2, u32 addr2);
-static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs);
+static void push_rxbufs(ns_dev *, struct sk_buff *);
+static irqreturn_t ns_irq_handler(int irq, void *dev_id);
 static int ns_open(struct atm_vcc *vcc);
 static void ns_close(struct atm_vcc *vcc);
 static void fill_tst(ns_dev *card, int n, vc_map *vc);
@@ -350,7 +348,7 @@ static void __devexit nicstar_remove_one(struct pci_dev *pcidev)
    kfree(card->rsq.org);
    kfree(card->tsq.org);
    free_irq(card->pcidev->irq, card);
-   iounmap((void *) card->membase);
+   iounmap(card->membase);
    kfree(card);
 }
 
@@ -381,7 +379,7 @@ static int __init nicstar_init(void)
 
    XPRINTK("nicstar: nicstar_init() called.\n");
 
-   error = pci_module_init(&nicstar_driver);
+   error = pci_register_driver(&nicstar_driver);
    
    TXPRINTK("nicstar: TX debug enabled.\n");
    RXPRINTK("nicstar: RX debug enabled.\n");
@@ -627,14 +625,6 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev)
    if (mac[i] == NULL)
       nicstar_init_eprom(card->membase);
 
-   if (request_irq(pcidev->irq, &ns_irq_handler, SA_INTERRUPT | SA_SHIRQ, "nicstar", card) != 0)
-   {
-      printk("nicstar%d: can't allocate IRQ %d.\n", i, pcidev->irq);
-      error = 9;
-      ns_init_card_error(card, error);
-      return error;
-   }
-
    /* Set the VPI/VCI MSb mask to zero so we can receive OAM cells */
    writel(0x00000000, card->membase + VPM);
       
@@ -676,10 +666,10 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev)
    PRINTK("nicstar%d: RSQ base at 0x%x.\n", i, (u32) card->rsq.base);
       
    /* Initialize SCQ0, the only VBR SCQ used */
-   card->scq1 = (scq_info *) NULL;
-   card->scq2 = (scq_info *) NULL;
+   card->scq1 = NULL;
+   card->scq2 = NULL;
    card->scq0 = get_scq(VBR_SCQSIZE, NS_VRSCD0);
-   if (card->scq0 == (scq_info *) NULL)
+   if (card->scq0 == NULL)
    {
       printk("nicstar%d: can't get SCQ0.\n", i);
       error = 12;
@@ -766,6 +756,7 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev)
          ns_init_card_error(card, error);
 	 return error;
       }
+      NS_SKB_CB(hb)->buf_type = BUF_NONE;
       skb_queue_tail(&card->hbpool.queue, hb);
       card->hbpool.count++;
    }
@@ -786,9 +777,10 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev)
          ns_init_card_error(card, error);
 	 return error;
       }
+      NS_SKB_CB(lb)->buf_type = BUF_LG;
       skb_queue_tail(&card->lbpool.queue, lb);
       skb_reserve(lb, NS_SMBUFSIZE);
-      push_rxbufs(card, BUF_LG, (u32) lb, (u32) virt_to_bus(lb->data), 0, 0);
+      push_rxbufs(card, lb);
       /* Due to the implementation of push_rxbufs() this is 1, not 0 */
       if (j == 1)
       {
@@ -822,9 +814,10 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev)
          ns_init_card_error(card, error);
 	 return error;
       }
+      NS_SKB_CB(sb)->buf_type = BUF_SM;
       skb_queue_tail(&card->sbpool.queue, sb);
       skb_reserve(sb, NS_AAL0_HEADER);
-      push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data), 0, 0);
+      push_rxbufs(card, sb);
    }
    /* Test for strange behaviour which leads to crashes */
    if ((bcount = ns_stat_sfbqc_get(readl(card->membase + STAT))) < card->sbnr.min)
@@ -852,11 +845,10 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev)
          ns_init_card_error(card, error);
 	 return error;
       }
+      NS_SKB_CB(iovb)->buf_type = BUF_NONE;
       skb_queue_tail(&card->iovpool.queue, iovb);
       card->iovpool.count++;
    }
-
-   card->intcnt = 0;
 
    /* Configure NICStAR */
    if (card->rct_size == 4096)
@@ -865,6 +857,15 @@ static int __devinit ns_init_card(int i, struct pci_dev *pcidev)
       ns_cfg_rctsize = NS_CFG_RCTSIZE_16384_ENTRIES;
 
    card->efbie = 1;
+
+   card->intcnt = 0;
+   if (request_irq(pcidev->irq, &ns_irq_handler, IRQF_DISABLED | IRQF_SHARED, "nicstar", card) != 0)
+   {
+      printk("nicstar%d: can't allocate IRQ %d.\n", i, pcidev->irq);
+      error = 9;
+      ns_init_card_error(card, error);
+      return error;
+   }
 
    /* Register device */
    card->atmdev = atm_dev_register("nicstar", &atm_ops, -1, NULL);
@@ -976,7 +977,7 @@ static void __devinit ns_init_card_error(ns_dev *card, int error)
    }
    if (error >= 4)
    {
-      iounmap((void *) card->membase);
+      iounmap(card->membase);
    }
    if (error >= 3)
    {
@@ -993,24 +994,24 @@ static scq_info *get_scq(int size, u32 scd)
    int i;
 
    if (size != VBR_SCQSIZE && size != CBR_SCQSIZE)
-      return (scq_info *) NULL;
+      return NULL;
 
-   scq = (scq_info *) kmalloc(sizeof(scq_info), GFP_KERNEL);
-   if (scq == (scq_info *) NULL)
-      return (scq_info *) NULL;
+   scq = kmalloc(sizeof(scq_info), GFP_KERNEL);
+   if (scq == NULL)
+      return NULL;
    scq->org = kmalloc(2 * size, GFP_KERNEL);
    if (scq->org == NULL)
    {
       kfree(scq);
-      return (scq_info *) NULL;
+      return NULL;
    }
-   scq->skb = (struct sk_buff **) kmalloc(sizeof(struct sk_buff *) *
+   scq->skb = kmalloc(sizeof(struct sk_buff *) *
                                           (size / NS_SCQE_SIZE), GFP_KERNEL);
-   if (scq->skb == (struct sk_buff **) NULL)
+   if (scq->skb == NULL)
    {
       kfree(scq->org);
       kfree(scq);
-      return (scq_info *) NULL;
+      return NULL;
    }
    scq->num_entries = size / NS_SCQE_SIZE;
    scq->base = (ns_scqe *) ALIGN_ADDRESS(scq->org, size);
@@ -1078,12 +1079,18 @@ static void free_scq(scq_info *scq, struct atm_vcc *vcc)
 
 /* The handles passed must be pointers to the sk_buff containing the small
    or large buffer(s) cast to u32. */
-static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
-                       u32 handle2, u32 addr2)
+static void push_rxbufs(ns_dev *card, struct sk_buff *skb)
 {
+   struct ns_skb_cb *cb = NS_SKB_CB(skb);
+   u32 handle1, addr1;
+   u32 handle2, addr2;
    u32 stat;
    unsigned long flags;
    
+   /* *BARF* */
+   handle2 = addr2 = 0;
+   handle1 = (u32)skb;
+   addr1 = (u32)virt_to_bus(skb->data);
 
 #ifdef GENERAL_DEBUG
    if (!addr1)
@@ -1093,7 +1100,7 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
    stat = readl(card->membase + STAT);
    card->sbfqc = ns_stat_sfbqc_get(stat);
    card->lbfqc = ns_stat_lfbqc_get(stat);
-   if (type == BUF_SM)
+   if (cb->buf_type == BUF_SM)
    {
       if (!addr2)
       {
@@ -1111,7 +1118,7 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
 	 }
       }      
    }
-   else /* type == BUF_LG */
+   else /* buf_type == BUF_LG */
    {
       if (!addr2)
       {
@@ -1132,26 +1139,26 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
 
    if (addr2)
    {
-      if (type == BUF_SM)
+      if (cb->buf_type == BUF_SM)
       {
          if (card->sbfqc >= card->sbnr.max)
          {
-            skb_unlink((struct sk_buff *) handle1);
+            skb_unlink((struct sk_buff *) handle1, &card->sbpool.queue);
             dev_kfree_skb_any((struct sk_buff *) handle1);
-            skb_unlink((struct sk_buff *) handle2);
+            skb_unlink((struct sk_buff *) handle2, &card->sbpool.queue);
             dev_kfree_skb_any((struct sk_buff *) handle2);
             return;
          }
 	 else
             card->sbfqc += 2;
       }
-      else /* (type == BUF_LG) */
+      else /* (buf_type == BUF_LG) */
       {
          if (card->lbfqc >= card->lbnr.max)
          {
-            skb_unlink((struct sk_buff *) handle1);
+            skb_unlink((struct sk_buff *) handle1, &card->lbpool.queue);
             dev_kfree_skb_any((struct sk_buff *) handle1);
-            skb_unlink((struct sk_buff *) handle2);
+            skb_unlink((struct sk_buff *) handle2, &card->lbpool.queue);
             dev_kfree_skb_any((struct sk_buff *) handle2);
             return;
          }
@@ -1166,12 +1173,12 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
       writel(handle2, card->membase + DR2);
       writel(addr1, card->membase + DR1);
       writel(handle1, card->membase + DR0);
-      writel(NS_CMD_WRITE_FREEBUFQ | (u32) type, card->membase + CMD);
+      writel(NS_CMD_WRITE_FREEBUFQ | cb->buf_type, card->membase + CMD);
  
       spin_unlock_irqrestore(&card->res_lock, flags);
 
       XPRINTK("nicstar%d: Pushing %s buffers at 0x%x and 0x%x.\n", card->index,
-              (type == BUF_SM ? "small" : "large"), addr1, addr2);
+              (cb->buf_type == BUF_SM ? "small" : "large"), addr1, addr2);
    }
 
    if (!card->efbie && card->sbfqc >= card->sbnr.min &&
@@ -1186,7 +1193,7 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
 
 
 
-static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ns_irq_handler(int irq, void *dev_id)
 {
    u32 stat_r;
    ns_dev *card;
@@ -1322,9 +1329,10 @@ static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
             card->efbie = 0;
             break;
          }
+         NS_SKB_CB(sb)->buf_type = BUF_SM;
          skb_queue_tail(&card->sbpool.queue, sb);
          skb_reserve(sb, NS_AAL0_HEADER);
-         push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data), 0, 0);
+         push_rxbufs(card, sb);
       }
       card->sbfqc = i;
       process_rsq(card);
@@ -1348,9 +1356,10 @@ static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
             card->efbie = 0;
             break;
          }
+         NS_SKB_CB(lb)->buf_type = BUF_LG;
          skb_queue_tail(&card->lbpool.queue, lb);
          skb_reserve(lb, NS_SMBUFSIZE);
-         push_rxbufs(card, BUF_LG, (u32) lb, (u32) virt_to_bus(lb->data), 0, 0);
+         push_rxbufs(card, lb);
       }
       card->lbfqc = i;
       process_rsq(card);
@@ -1498,7 +1507,7 @@ static int ns_open(struct atm_vcc *vcc)
          vc->cbr_scd = NS_FRSCD + frscdi * NS_FRSCD_SIZE;
 
          scq = get_scq(CBR_SCQSIZE, vc->cbr_scd);
-         if (scq == (scq_info *) NULL)
+         if (scq == NULL)
          {
             PRINTK("nicstar%d: can't get fixed rate SCQ.\n", card->index);
             card->scd2vc[frscdi] = NULL;
@@ -2115,8 +2124,7 @@ static void process_rsq(ns_dev *card)
 
    if (!ns_rsqe_valid(card->rsq.next))
       return;
-   while (ns_rsqe_valid(card->rsq.next))
-   {
+   do {
       dequeue_rx(card, card->rsq.next);
       ns_rsqe_init(card->rsq.next);
       previous = card->rsq.next;
@@ -2124,7 +2132,7 @@ static void process_rsq(ns_dev *card)
          card->rsq.next = card->rsq.base;
       else
          card->rsq.next++;
-   }
+   } while (ns_rsqe_valid(card->rsq.next));
    writel((((u32) previous) - ((u32) card->rsq.base)),
           card->membase + RSQH);
 }
@@ -2199,10 +2207,10 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          if (i == 1 && ns_rsqe_eopdu(rsqe))
             *((u32 *) sb->data) |= 0x00000002;
          skb_put(sb, NS_AAL0_HEADER);
-         memcpy(sb->tail, cell, ATM_CELL_PAYLOAD);
+         memcpy(skb_tail_pointer(sb), cell, ATM_CELL_PAYLOAD);
          skb_put(sb, ATM_CELL_PAYLOAD);
          ATM_SKB(sb)->vcc = vcc;
-         do_gettimeofday(&sb->stamp);
+	 __net_timestamp(sb);
          vcc->push(vcc, sb);
          atomic_inc(&vcc->stats->rx);
          cell += ATM_CELL_PAYLOAD;
@@ -2227,6 +2235,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             recycle_rx_buf(card, skb);
             return;
 	 }
+         NS_SKB_CB(iovb)->buf_type = BUF_NONE;
       }
       else
          if (--card->iovpool.count < card->iovnr.min)
@@ -2234,6 +2243,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 	    struct sk_buff *new_iovb;
 	    if ((new_iovb = alloc_skb(NS_IOVBUFSIZE, GFP_ATOMIC)) != NULL)
 	    {
+               NS_SKB_CB(iovb)->buf_type = BUF_NONE;
                skb_queue_tail(&card->iovpool.queue, new_iovb);
                card->iovpool.count++;
 	    }
@@ -2241,7 +2251,8 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
       vc->rx_iov = iovb;
       NS_SKB(iovb)->iovcnt = 0;
       iovb->len = 0;
-      iovb->tail = iovb->data = iovb->head;
+      iovb->data = iovb->head;
+      skb_reset_tail_pointer(iovb);
       NS_SKB(iovb)->vcc = vcc;
       /* IMPORTANT: a pointer to the sk_buff containing the small or large
                     buffer is stored as iovec base, NOT a pointer to the 
@@ -2254,7 +2265,8 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
       recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data, NS_MAX_IOVECS);
       NS_SKB(iovb)->iovcnt = 0;
       iovb->len = 0;
-      iovb->tail = iovb->data = iovb->head;
+      iovb->data = iovb->head;
+      skb_reset_tail_pointer(iovb);
       NS_SKB(iovb)->vcc = vcc;
    }
    iov = &((struct iovec *) iovb->data)[NS_SKB(iovb)->iovcnt++];
@@ -2264,7 +2276,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 
    if (NS_SKB(iovb)->iovcnt == 1)
    {
-      if (skb->list != &card->sbpool.queue)
+      if (NS_SKB_CB(skb)->buf_type != BUF_SM)
       {
          printk("nicstar%d: Expected a small buffer, and this is not one.\n",
 	        card->index);
@@ -2278,7 +2290,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
    }
    else /* NS_SKB(iovb)->iovcnt >= 2 */
    {
-      if (skb->list != &card->lbpool.queue)
+      if (NS_SKB_CB(skb)->buf_type != BUF_LG)
       {
          printk("nicstar%d: Expected a large buffer, and this is not one.\n",
 	        card->index);
@@ -2322,8 +2334,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          /* skb points to a small buffer */
          if (!atm_charge(vcc, skb->truesize))
          {
-            push_rxbufs(card, BUF_SM, (u32) skb, (u32) virt_to_bus(skb->data),
-                        0, 0);
+            push_rxbufs(card, skb);
             atomic_inc(&vcc->stats->rx_drop);
          }
          else
@@ -2334,7 +2345,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             skb->destructor = ns_sb_destructor;
 #endif /* NS_USE_DESTRUCTORS */
             ATM_SKB(skb)->vcc = vcc;
-            do_gettimeofday(&skb->stamp);
+	    __net_timestamp(skb);
             vcc->push(vcc, skb);
             atomic_inc(&vcc->stats->rx);
          }
@@ -2350,8 +2361,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 	 {
             if (!atm_charge(vcc, sb->truesize))
             {
-               push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data),
-                           0, 0);
+               push_rxbufs(card, sb);
                atomic_inc(&vcc->stats->rx_drop);
             }
             else
@@ -2362,21 +2372,19 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                sb->destructor = ns_sb_destructor;
 #endif /* NS_USE_DESTRUCTORS */
                ATM_SKB(sb)->vcc = vcc;
-               do_gettimeofday(&sb->stamp);
+	       __net_timestamp(sb);
                vcc->push(vcc, sb);
                atomic_inc(&vcc->stats->rx);
             }
 
-            push_rxbufs(card, BUF_LG, (u32) skb,
-	                   (u32) virt_to_bus(skb->data), 0, 0);
+            push_rxbufs(card, skb);
 
 	 }
 	 else			/* len > NS_SMBUFSIZE, the usual case */
 	 {
             if (!atm_charge(vcc, skb->truesize))
             {
-               push_rxbufs(card, BUF_LG, (u32) skb,
-                           (u32) virt_to_bus(skb->data), 0, 0);
+               push_rxbufs(card, skb);
                atomic_inc(&vcc->stats->rx_drop);
             }
             else
@@ -2386,16 +2394,15 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                skb->destructor = ns_lb_destructor;
 #endif /* NS_USE_DESTRUCTORS */
                skb_push(skb, NS_SMBUFSIZE);
-               memcpy(skb->data, sb->data, NS_SMBUFSIZE);
+               skb_copy_from_linear_data(sb, skb->data, NS_SMBUFSIZE);
                skb_put(skb, len - NS_SMBUFSIZE);
                ATM_SKB(skb)->vcc = vcc;
-               do_gettimeofday(&skb->stamp);
+	       __net_timestamp(skb);
                vcc->push(vcc, skb);
                atomic_inc(&vcc->stats->rx);
             }
 
-            push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data),
-                        0, 0);
+            push_rxbufs(card, sb);
 
          }
 	 
@@ -2430,6 +2437,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                   card->hbpool.count++;
                }
             }
+            NS_SKB_CB(hb)->buf_type = BUF_NONE;
 	 }
 	 else
          if (--card->hbpool.count < card->hbnr.min)
@@ -2437,6 +2445,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             struct sk_buff *new_hb;
             if ((new_hb = dev_alloc_skb(NS_HBUFSIZE)) != NULL)
             {
+               NS_SKB_CB(new_hb)->buf_type = BUF_NONE;
                skb_queue_tail(&card->hbpool.queue, new_hb);
                card->hbpool.count++;
             }
@@ -2444,6 +2453,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 	    {
                if ((new_hb = dev_alloc_skb(NS_HBUFSIZE)) != NULL)
                {
+                  NS_SKB_CB(new_hb)->buf_type = BUF_NONE;
                   skb_queue_tail(&card->hbpool.queue, new_hb);
                   card->hbpool.count++;
                }
@@ -2468,25 +2478,23 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 	 {
             /* Copy the small buffer to the huge buffer */
             sb = (struct sk_buff *) iov->iov_base;
-            memcpy(hb->data, sb->data, iov->iov_len);
+            skb_copy_from_linear_data(sb, hb->data, iov->iov_len);
             skb_put(hb, iov->iov_len);
             remaining = len - iov->iov_len;
             iov++;
             /* Free the small buffer */
-            push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data),
-                        0, 0);
+            push_rxbufs(card, sb);
 
             /* Copy all large buffers to the huge buffer and free them */
             for (j = 1; j < NS_SKB(iovb)->iovcnt; j++)
             {
                lb = (struct sk_buff *) iov->iov_base;
                tocopy = min_t(int, remaining, iov->iov_len);
-               memcpy(hb->tail, lb->data, tocopy);
+               skb_copy_from_linear_data(lb, skb_tail_pointer(hb), tocopy);
                skb_put(hb, tocopy);
                iov++;
                remaining -= tocopy;
-               push_rxbufs(card, BUF_LG, (u32) lb,
-                           (u32) virt_to_bus(lb->data), 0, 0);
+               push_rxbufs(card, lb);
             }
 #ifdef EXTRA_DEBUG
             if (remaining != 0 || hb->len != len)
@@ -2496,7 +2504,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 #ifdef NS_USE_DESTRUCTORS
             hb->destructor = ns_hb_destructor;
 #endif /* NS_USE_DESTRUCTORS */
-            do_gettimeofday(&hb->stamp);
+	    __net_timestamp(hb);
             vcc->push(vcc, hb);
             atomic_inc(&vcc->stats->rx);
          }
@@ -2527,9 +2535,10 @@ static void ns_sb_destructor(struct sk_buff *sb)
       sb = __dev_alloc_skb(NS_SMSKBSIZE, GFP_KERNEL);
       if (sb == NULL)
          break;
+      NS_SKB_CB(sb)->buf_type = BUF_SM;
       skb_queue_tail(&card->sbpool.queue, sb);
       skb_reserve(sb, NS_AAL0_HEADER);
-      push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data), 0, 0);
+      push_rxbufs(card, sb);
    } while (card->sbfqc < card->sbnr.min);
 }
 
@@ -2550,9 +2559,10 @@ static void ns_lb_destructor(struct sk_buff *lb)
       lb = __dev_alloc_skb(NS_LGSKBSIZE, GFP_KERNEL);
       if (lb == NULL)
          break;
+      NS_SKB_CB(lb)->buf_type = BUF_LG;
       skb_queue_tail(&card->lbpool.queue, lb);
       skb_reserve(lb, NS_SMBUFSIZE);
-      push_rxbufs(card, BUF_LG, (u32) lb, (u32) virt_to_bus(lb->data), 0, 0);
+      push_rxbufs(card, lb);
    } while (card->lbfqc < card->lbnr.min);
 }
 
@@ -2569,6 +2579,7 @@ static void ns_hb_destructor(struct sk_buff *hb)
       hb = __dev_alloc_skb(NS_HBUFSIZE, GFP_KERNEL);
       if (hb == NULL)
          break;
+      NS_SKB_CB(hb)->buf_type = BUF_NONE;
       skb_queue_tail(&card->hbpool.queue, hb);
       card->hbpool.count++;
    }
@@ -2577,43 +2588,23 @@ static void ns_hb_destructor(struct sk_buff *hb)
 #endif /* NS_USE_DESTRUCTORS */
 
 
-
 static void recycle_rx_buf(ns_dev *card, struct sk_buff *skb)
 {
-   if (skb->list == &card->sbpool.queue)
-      push_rxbufs(card, BUF_SM, (u32) skb, (u32) virt_to_bus(skb->data), 0, 0);
-   else if (skb->list == &card->lbpool.queue)
-      push_rxbufs(card, BUF_LG, (u32) skb, (u32) virt_to_bus(skb->data), 0, 0);
-   else
-   {
-      printk("nicstar%d: What kind of rx buffer is this?\n", card->index);
-      dev_kfree_skb_any(skb);
-   }
-}
+	struct ns_skb_cb *cb = NS_SKB_CB(skb);
 
+	if (unlikely(cb->buf_type == BUF_NONE)) {
+		printk("nicstar%d: What kind of rx buffer is this?\n", card->index);
+		dev_kfree_skb_any(skb);
+	} else
+		push_rxbufs(card, skb);
+}
 
 
 static void recycle_iovec_rx_bufs(ns_dev *card, struct iovec *iov, int count)
 {
-   struct sk_buff *skb;
-
-   for (; count > 0; count--)
-   {
-      skb = (struct sk_buff *) (iov++)->iov_base;
-      if (skb->list == &card->sbpool.queue)
-         push_rxbufs(card, BUF_SM, (u32) skb, (u32) virt_to_bus(skb->data),
-	             0, 0);
-      else if (skb->list == &card->lbpool.queue)
-         push_rxbufs(card, BUF_LG, (u32) skb, (u32) virt_to_bus(skb->data),
-	             0, 0);
-      else
-      {
-         printk("nicstar%d: What kind of rx buffer is this?\n", card->index);
-         dev_kfree_skb_any(skb);
-      }
-   }
+	while (count-- > 0)
+		recycle_rx_buf(card, (struct sk_buff *) (iov++)->iov_base);
 }
-
 
 
 static void recycle_iov_buf(ns_dev *card, struct sk_buff *iovb)
@@ -2631,7 +2622,7 @@ static void recycle_iov_buf(ns_dev *card, struct sk_buff *iovb)
 
 static void dequeue_sm_buf(ns_dev *card, struct sk_buff *sb)
 {
-   skb_unlink(sb);
+   skb_unlink(sb, &card->sbpool.queue);
 #ifdef NS_USE_DESTRUCTORS
    if (card->sbfqc < card->sbnr.min)
 #else
@@ -2640,10 +2631,10 @@ static void dequeue_sm_buf(ns_dev *card, struct sk_buff *sb)
       struct sk_buff *new_sb;
       if ((new_sb = dev_alloc_skb(NS_SMSKBSIZE)) != NULL)
       {
+         NS_SKB_CB(new_sb)->buf_type = BUF_SM;
          skb_queue_tail(&card->sbpool.queue, new_sb);
          skb_reserve(new_sb, NS_AAL0_HEADER);
-         push_rxbufs(card, BUF_SM, (u32) new_sb,
-                     (u32) virt_to_bus(new_sb->data), 0, 0);
+         push_rxbufs(card, new_sb);
       }
    }
    if (card->sbfqc < card->sbnr.init)
@@ -2652,10 +2643,10 @@ static void dequeue_sm_buf(ns_dev *card, struct sk_buff *sb)
       struct sk_buff *new_sb;
       if ((new_sb = dev_alloc_skb(NS_SMSKBSIZE)) != NULL)
       {
+         NS_SKB_CB(new_sb)->buf_type = BUF_SM;
          skb_queue_tail(&card->sbpool.queue, new_sb);
          skb_reserve(new_sb, NS_AAL0_HEADER);
-         push_rxbufs(card, BUF_SM, (u32) new_sb,
-                     (u32) virt_to_bus(new_sb->data), 0, 0);
+         push_rxbufs(card, new_sb);
       }
    }
 }
@@ -2664,7 +2655,7 @@ static void dequeue_sm_buf(ns_dev *card, struct sk_buff *sb)
 
 static void dequeue_lg_buf(ns_dev *card, struct sk_buff *lb)
 {
-   skb_unlink(lb);
+   skb_unlink(lb, &card->lbpool.queue);
 #ifdef NS_USE_DESTRUCTORS
    if (card->lbfqc < card->lbnr.min)
 #else
@@ -2673,10 +2664,10 @@ static void dequeue_lg_buf(ns_dev *card, struct sk_buff *lb)
       struct sk_buff *new_lb;
       if ((new_lb = dev_alloc_skb(NS_LGSKBSIZE)) != NULL)
       {
+         NS_SKB_CB(new_lb)->buf_type = BUF_LG;
          skb_queue_tail(&card->lbpool.queue, new_lb);
          skb_reserve(new_lb, NS_SMBUFSIZE);
-         push_rxbufs(card, BUF_LG, (u32) new_lb,
-                     (u32) virt_to_bus(new_lb->data), 0, 0);
+         push_rxbufs(card, new_lb);
       }
    }
    if (card->lbfqc < card->lbnr.init)
@@ -2685,10 +2676,10 @@ static void dequeue_lg_buf(ns_dev *card, struct sk_buff *lb)
       struct sk_buff *new_lb;
       if ((new_lb = dev_alloc_skb(NS_LGSKBSIZE)) != NULL)
       {
+         NS_SKB_CB(new_lb)->buf_type = BUF_LG;
          skb_queue_tail(&card->lbpool.queue, new_lb);
          skb_reserve(new_lb, NS_SMBUFSIZE);
-         push_rxbufs(card, BUF_LG, (u32) new_lb,
-                     (u32) virt_to_bus(new_lb->data), 0, 0);
+         push_rxbufs(card, new_lb);
       }
    }
 }
@@ -2769,7 +2760,7 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
 {
    ns_dev *card;
    pool_levels pl;
-   int btype;
+   long btype;
    unsigned long flags;
 
    card = dev->dev_data;
@@ -2869,7 +2860,7 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
       case NS_ADJBUFLEV:
          if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
-         btype = (int) arg;	/* an int is the same size as a pointer */
+         btype = (long) arg;	/* a long is the same size as a pointer or bigger */
          switch (btype)
 	 {
 	    case NS_BUFTYPE_SMALL:
@@ -2880,9 +2871,10 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
                   sb = __dev_alloc_skb(NS_SMSKBSIZE, GFP_KERNEL);
                   if (sb == NULL)
                      return -ENOMEM;
+                  NS_SKB_CB(sb)->buf_type = BUF_SM;
                   skb_queue_tail(&card->sbpool.queue, sb);
                   skb_reserve(sb, NS_AAL0_HEADER);
-                  push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data), 0, 0);
+                  push_rxbufs(card, sb);
 	       }
 	       break;
 
@@ -2894,9 +2886,10 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
                   lb = __dev_alloc_skb(NS_LGSKBSIZE, GFP_KERNEL);
                   if (lb == NULL)
                      return -ENOMEM;
+                  NS_SKB_CB(lb)->buf_type = BUF_LG;
                   skb_queue_tail(&card->lbpool.queue, lb);
                   skb_reserve(lb, NS_SMBUFSIZE);
-                  push_rxbufs(card, BUF_LG, (u32) lb, (u32) virt_to_bus(lb->data), 0, 0);
+                  push_rxbufs(card, lb);
 	       }
 	       break;
 
@@ -2923,6 +2916,7 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
                   hb = __dev_alloc_skb(NS_HBUFSIZE, GFP_KERNEL);
                   if (hb == NULL)
                      return -ENOMEM;
+                  NS_SKB_CB(hb)->buf_type = BUF_NONE;
                   ns_grab_int_lock(card, flags);
                   skb_queue_tail(&card->hbpool.queue, hb);
                   card->hbpool.count++;
@@ -2953,6 +2947,7 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
                   iovb = alloc_skb(NS_IOVBUFSIZE, GFP_KERNEL);
                   if (iovb == NULL)
                      return -ENOMEM;
+                  NS_SKB_CB(iovb)->buf_type = BUF_NONE;
                   ns_grab_int_lock(card, flags);
                   skb_queue_tail(&card->iovpool.queue, iovb);
                   card->iovpool.count++;
@@ -2979,15 +2974,10 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
 }
 
 
-
 static void which_list(ns_dev *card, struct sk_buff *skb)
 {
-   printk("It's a %s buffer.\n", skb->list == &card->sbpool.queue ?
-          "small" : skb->list == &card->lbpool.queue ? "large" :
-	  skb->list == &card->hbpool.queue ? "huge" :
-	  skb->list == &card->iovpool.queue ? "iovec" : "unknown");
+	printk("skb buf_type: 0x%08x\n", NS_SKB_CB(skb)->buf_type);
 }
-
 
 
 static void ns_poll(unsigned long arg)

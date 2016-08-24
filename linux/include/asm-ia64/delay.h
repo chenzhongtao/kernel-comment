@@ -12,7 +12,6 @@
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/compiler.h>
@@ -84,14 +83,6 @@ __delay (unsigned long loops)
 	ia64_delay_loop (loops - 1);
 }
 
-static __inline__ void
-udelay (unsigned long usecs)
-{
-	unsigned long start = ia64_get_itc();
-	unsigned long cycles = usecs*local_cpu_data->cyc_per_usec;
-
-	while (ia64_get_itc() - start < cycles)
-		cpu_relax();
-}
+extern void udelay (unsigned long usecs);
 
 #endif /* _ASM_IA64_DELAY_H */

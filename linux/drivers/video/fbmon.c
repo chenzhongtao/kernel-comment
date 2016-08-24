@@ -26,15 +26,14 @@
  * for more details.
  *
  */
-#include <linux/tty.h>
 #include <linux/fb.h>
 #include <linux/module.h>
-#ifdef CONFIG_PPC_OF
 #include <linux/pci.h>
+#include <video/edid.h>
+#ifdef CONFIG_PPC_OF
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #endif
-#include <video/edid.h>
 #include "edid.h"
 
 /* 
@@ -49,8 +48,9 @@
 #define DPRINTK(fmt, args...)
 #endif
 
-#define FBMON_FIX_HEADER 1
-#define FBMON_FIX_INPUT  2
+#define FBMON_FIX_HEADER  1
+#define FBMON_FIX_INPUT   2
+#define FBMON_FIX_TIMINGS 3
 
 #ifdef CONFIG_FB_MODE_HELPERS
 struct broken_edid {
@@ -59,7 +59,7 @@ struct broken_edid {
 	u32 fix;
 };
 
-static struct broken_edid brokendb[] = {
+static const struct broken_edid brokendb[] = {
 	/* DEC FR-PCXAV-YZ */
 	{
 		.manufacturer = "DEC",
@@ -72,12 +72,17 @@ static struct broken_edid brokendb[] = {
 		.model        = 0x5a44,
 		.fix          = FBMON_FIX_INPUT,
 	},
+	/* Sharp UXGA? */
+	{
+		.manufacturer = "SHP",
+		.model        = 0x138e,
+		.fix          = FBMON_FIX_TIMINGS,
+	},
 };
 
-const unsigned char edid_v1_header[] = { 0x00, 0xff, 0xff, 0xff,
+static const unsigned char edid_v1_header[] = { 0x00, 0xff, 0xff, 0xff,
 	0xff, 0xff, 0xff, 0x00
 };
-const unsigned char edid_v1_descriptor_flag[] = { 0x00, 0x00 };
 
 static void copy_string(unsigned char *c, unsigned char *s)
 {
@@ -87,6 +92,55 @@ static void copy_string(unsigned char *c, unsigned char *s)
     *(s++) = *(c++);
   *s = 0;
   while (i-- && (*--s == 0x20)) *s = 0;
+}
+
+static int edid_is_serial_block(unsigned char *block)
+{
+	if ((block[0] == 0x00) && (block[1] == 0x00) &&
+	    (block[2] == 0x00) && (block[3] == 0xff) &&
+	    (block[4] == 0x00))
+		return 1;
+	else
+		return 0;
+}
+
+static int edid_is_ascii_block(unsigned char *block)
+{
+	if ((block[0] == 0x00) && (block[1] == 0x00) &&
+	    (block[2] == 0x00) && (block[3] == 0xfe) &&
+	    (block[4] == 0x00))
+		return 1;
+	else
+		return 0;
+}
+
+static int edid_is_limits_block(unsigned char *block)
+{
+	if ((block[0] == 0x00) && (block[1] == 0x00) &&
+	    (block[2] == 0x00) && (block[3] == 0xfd) &&
+	    (block[4] == 0x00))
+		return 1;
+	else
+		return 0;
+}
+
+static int edid_is_monitor_block(unsigned char *block)
+{
+	if ((block[0] == 0x00) && (block[1] == 0x00) &&
+	    (block[2] == 0x00) && (block[3] == 0xfc) &&
+	    (block[4] == 0x00))
+		return 1;
+	else
+		return 0;
+}
+
+static int edid_is_timing_block(unsigned char *block)
+{
+	if ((block[0] != 0x00) || (block[1] != 0x00) ||
+	    (block[2] != 0x00) || (block[4] != 0x00))
+		return 1;
+	else
+		return 0;
 }
 
 static int check_edid(unsigned char *edid)
@@ -106,9 +160,6 @@ static int check_edid(unsigned char *edid)
 	for (i = 0; i < ARRAY_SIZE(brokendb); i++) {
 		if (!strncmp(manufacturer, brokendb[i].manufacturer, 4) &&
 			brokendb[i].model == model) {
-			printk("fbmon: The EDID Block of "
-			       "Manufacturer: %s Model: 0x%x is known to "
-			       "be broken,\n",  manufacturer, model);
  			fix = brokendb[i].fix;
  			break;
 		}
@@ -117,8 +168,10 @@ static int check_edid(unsigned char *edid)
 	switch (fix) {
 	case FBMON_FIX_HEADER:
 		for (i = 0; i < 8; i++) {
-			if (edid[i] != edid_v1_header[i])
+			if (edid[i] != edid_v1_header[i]) {
 				ret = fix;
+				break;
+			}
 		}
 		break;
 	case FBMON_FIX_INPUT:
@@ -128,14 +181,34 @@ static int check_edid(unsigned char *edid)
 		if (b[4] & 0x01 && b[0] & 0x80)
 			ret = fix;
 		break;
+	case FBMON_FIX_TIMINGS:
+		b = edid + DETAILED_TIMING_DESCRIPTIONS_START;
+		ret = fix;
+
+		for (i = 0; i < 4; i++) {
+			if (edid_is_limits_block(b)) {
+				ret = 0;
+				break;
+			}
+
+			b += DETAILED_TIMING_DESCRIPTION_SIZE;
+		}
+
+		break;
 	}
+
+	if (ret)
+		printk("fbmon: The EDID Block of "
+		       "Manufacturer: %s Model: 0x%x is known to "
+		       "be broken,\n",  manufacturer, model);
 
 	return ret;
 }
 
 static void fix_edid(unsigned char *edid, int fix)
 {
-	unsigned char *b;
+	int i;
+	unsigned char *b, csum = 0;
 
 	switch (fix) {
 	case FBMON_FIX_HEADER:
@@ -147,6 +220,37 @@ static void fix_edid(unsigned char *edid, int fix)
 		b = edid + EDID_STRUCT_DISPLAY;
 		b[0] &= ~0x80;
 		edid[127] += 0x80;
+		break;
+	case FBMON_FIX_TIMINGS:
+		printk("fbmon: trying to fix monitor timings\n");
+		b = edid + DETAILED_TIMING_DESCRIPTIONS_START;
+		for (i = 0; i < 4; i++) {
+			if (!(edid_is_serial_block(b) ||
+			      edid_is_ascii_block(b) ||
+			      edid_is_monitor_block(b) ||
+			      edid_is_timing_block(b))) {
+				b[0] = 0x00;
+				b[1] = 0x00;
+				b[2] = 0x00;
+				b[3] = 0xfd;
+				b[4] = 0x00;
+				b[5] = 60;   /* vfmin */
+				b[6] = 60;   /* vfmax */
+				b[7] = 30;   /* hfmin */
+				b[8] = 75;   /* hfmax */
+				b[9] = 17;   /* pixclock - 170 MHz*/
+				b[10] = 0;   /* GTF */
+				break;
+			}
+
+			b += DETAILED_TIMING_DESCRIPTION_SIZE;
+		}
+
+		for (i = 0; i < EDID_LENGTH - 1; i++)
+			csum += edid[i];
+
+		edid[127] = 256 - csum;
+		break;
 	}
 }
 
@@ -275,67 +379,32 @@ static void get_chroma(unsigned char *block, struct fb_monspecs *specs)
 	DPRINTK("WhiteY:   0.%03d\n", specs->chroma.whitey);
 }
 
-static int edid_is_serial_block(unsigned char *block)
+static void calc_mode_timings(int xres, int yres, int refresh,
+			      struct fb_videomode *mode)
 {
-	if ((block[0] == 0x00) && (block[1] == 0x00) && 
-	    (block[2] == 0x00) && (block[3] == 0xff) &&
-	    (block[4] == 0x00))
-		return 1;
-	else
-		return 0;
-}
-
-static int edid_is_ascii_block(unsigned char *block)
-{
-	if ((block[0] == 0x00) && (block[1] == 0x00) && 
-	    (block[2] == 0x00) && (block[3] == 0xfe) &&
-	    (block[4] == 0x00))
-		return 1;
-	else
-		return 0;
-}
-
-static int edid_is_limits_block(unsigned char *block)
-{
-	if ((block[0] == 0x00) && (block[1] == 0x00) && 
-	    (block[2] == 0x00) && (block[3] == 0xfd) &&
-	    (block[4] == 0x00))
-		return 1;
-	else
-		return 0;
-}
-
-static int edid_is_monitor_block(unsigned char *block)
-{
-	if ((block[0] == 0x00) && (block[1] == 0x00) && 
-	    (block[2] == 0x00) && (block[3] == 0xfc) &&
-	    (block[4] == 0x00))
-		return 1;
-	else
-		return 0;
-}
-
-static void calc_mode_timings(int xres, int yres, int refresh, struct fb_videomode *mode)
-{
-	struct fb_var_screeninfo var;
-	struct fb_info info;
+	struct fb_var_screeninfo *var;
 	
-	var.xres = xres;
-	var.yres = yres;
-	fb_get_mode(FB_VSYNCTIMINGS | FB_IGNOREMON, 
-		    refresh, &var, &info);
-	mode->xres = xres;
-	mode->yres = yres;
-	mode->pixclock = var.pixclock;
-	mode->refresh = refresh;
-	mode->left_margin = var.left_margin;
-	mode->right_margin = var.right_margin;
-	mode->upper_margin = var.upper_margin;
-	mode->lower_margin = var.lower_margin;
-	mode->hsync_len = var.hsync_len;
-	mode->vsync_len = var.vsync_len;
-	mode->vmode = 0;
-	mode->sync = 0;
+	var = kzalloc(sizeof(struct fb_var_screeninfo), GFP_KERNEL);
+
+	if (var) {
+		var->xres = xres;
+		var->yres = yres;
+		fb_get_mode(FB_VSYNCTIMINGS | FB_IGNOREMON,
+			    refresh, var, NULL);
+		mode->xres = xres;
+		mode->yres = yres;
+		mode->pixclock = var->pixclock;
+		mode->refresh = refresh;
+		mode->left_margin = var->left_margin;
+		mode->right_margin = var->right_margin;
+		mode->upper_margin = var->upper_margin;
+		mode->lower_margin = var->lower_margin;
+		mode->hsync_len = var->hsync_len;
+		mode->vsync_len = var->vsync_len;
+		mode->vmode = 0;
+		mode->sync = 0;
+		kfree(var);
+	}
 }
 
 static int get_est_timing(unsigned char *block, struct fb_videomode *mode)
@@ -518,16 +587,15 @@ static void get_detailed_timing(unsigned char *block,
  * This function builds a mode database using the contents of the EDID
  * data
  */
-struct fb_videomode *fb_create_modedb(unsigned char *edid, int *dbsize)
+static struct fb_videomode *fb_create_modedb(unsigned char *edid, int *dbsize)
 {
 	struct fb_videomode *mode, *m;
 	unsigned char *block;
-	int num = 0, i;
+	int num = 0, i, first = 1;
 
-	mode = kmalloc(50 * sizeof(struct fb_videomode), GFP_KERNEL);
+	mode = kzalloc(50 * sizeof(struct fb_videomode), GFP_KERNEL);
 	if (mode == NULL)
 		return NULL;
-	memset(mode, 0, 50 * sizeof(struct fb_videomode));
 
 	if (edid == NULL || !edid_checksum(edid) || 
 	    !edid_check_header(edid)) {
@@ -537,25 +605,10 @@ struct fb_videomode *fb_create_modedb(unsigned char *edid, int *dbsize)
 
 	*dbsize = 0;
 
-	DPRINTK("   Supported VESA Modes\n");
-	block = edid + ESTABLISHED_TIMING_1;
-	num += get_est_timing(block, &mode[num]);
-
-	DPRINTK("   Standard Timings\n");
-	block = edid + STD_TIMING_DESCRIPTIONS_START;
-	for (i = 0; i < STD_TIMING; i++, block += STD_TIMING_DESCRIPTION_SIZE) 
-		num += get_std_timing(block, &mode[num]);
-
 	DPRINTK("   Detailed Timings\n");
 	block = edid + DETAILED_TIMING_DESCRIPTIONS_START;
 	for (i = 0; i < 4; i++, block+= DETAILED_TIMING_DESCRIPTION_SIZE) {
-	        int first = 1;
-
-		if (block[0] == 0x00 && block[1] == 0x00) {
-			if (block[3] == 0xfa) {
-				num += get_dst_timing(block + 5, &mode[num]);
-			}
-		} else  {
+		if (!(block[0] == 0x00 && block[1] == 0x00)) {
 			get_detailed_timing(block, &mode[num]);
 			if (first) {
 			        mode[num].flag |= FB_MODE_IS_FIRST;
@@ -563,6 +616,21 @@ struct fb_videomode *fb_create_modedb(unsigned char *edid, int *dbsize)
 			}
 			num++;
 		}
+	}
+
+	DPRINTK("   Supported VESA Modes\n");
+	block = edid + ESTABLISHED_TIMING_1;
+	num += get_est_timing(block, &mode[num]);
+
+	DPRINTK("   Standard Timings\n");
+	block = edid + STD_TIMING_DESCRIPTIONS_START;
+	for (i = 0; i < STD_TIMING; i++, block += STD_TIMING_DESCRIPTION_SIZE)
+		num += get_std_timing(block, &mode[num]);
+
+	block = edid + DETAILED_TIMING_DESCRIPTIONS_START;
+	for (i = 0; i < 4; i++, block+= DETAILED_TIMING_DESCRIPTION_SIZE) {
+		if (block[0] == 0x00 && block[1] == 0x00 && block[3] == 0xfa)
+			num += get_dst_timing(block + 5, &mode[num]);
 	}
 	
 	/* Yikes, EDID data is totally useless */
@@ -589,11 +657,10 @@ struct fb_videomode *fb_create_modedb(unsigned char *edid, int *dbsize)
  */
 void fb_destroy_modedb(struct fb_videomode *modedb)
 {
-	if (modedb)
-		kfree(modedb);
+	kfree(modedb);
 }
 
-int fb_get_monitor_limits(unsigned char *edid, struct fb_monspecs *specs)
+static int fb_get_monitor_limits(unsigned char *edid, struct fb_monspecs *specs)
 {
 	int i, retval = 1;
 	unsigned char *block;
@@ -601,6 +668,7 @@ int fb_get_monitor_limits(unsigned char *edid, struct fb_monspecs *specs)
 	block = edid + DETAILED_TIMING_DESCRIPTIONS_START;
 
 	DPRINTK("      Monitor Operating Limits: ");
+
 	for (i = 0; i < 4; i++, block += DETAILED_TIMING_DESCRIPTION_SIZE) {
 		if (edid_is_limits_block(block)) {
 			specs->hfmin = H_MIN_RATE * 1000;
@@ -614,11 +682,12 @@ int fb_get_monitor_limits(unsigned char *edid, struct fb_monspecs *specs)
 			break;
 		}
 	}
-	
+
 	/* estimate monitor limits based on modes supported */
 	if (retval) {
-		struct fb_videomode *modes;
+		struct fb_videomode *modes, *mode;
 		int num_modes, i, hz, hscan, pixclock;
+		int vtotal, htotal;
 
 		modes = fb_create_modedb(edid, &num_modes);
 		if (!modes) {
@@ -628,20 +697,38 @@ int fb_get_monitor_limits(unsigned char *edid, struct fb_monspecs *specs)
 
 		retval = 0;
 		for (i = 0; i < num_modes; i++) {
-			hz = modes[i].refresh;
+			mode = &modes[i];
 			pixclock = PICOS2KHZ(modes[i].pixclock) * 1000;
-			hscan = (modes[i].yres * 105 * hz + 5000)/100;
+			htotal = mode->xres + mode->right_margin + mode->hsync_len
+				+ mode->left_margin;
+			vtotal = mode->yres + mode->lower_margin + mode->vsync_len
+				+ mode->upper_margin;
+
+			if (mode->vmode & FB_VMODE_INTERLACED)
+				vtotal /= 2;
+
+			if (mode->vmode & FB_VMODE_DOUBLE)
+				vtotal *= 2;
+
+			hscan = (pixclock + htotal / 2) / htotal;
+			hscan = (hscan + 500) / 1000 * 1000;
+			hz = (hscan + vtotal / 2) / vtotal;
 			
 			if (specs->dclkmax == 0 || specs->dclkmax < pixclock)
 				specs->dclkmax = pixclock;
+
 			if (specs->dclkmin == 0 || specs->dclkmin > pixclock)
 				specs->dclkmin = pixclock;
+
 			if (specs->hfmax == 0 || specs->hfmax < hscan)
 				specs->hfmax = hscan;
+
 			if (specs->hfmin == 0 || specs->hfmin > hscan)
 				specs->hfmin = hscan;
+
 			if (specs->vfmax == 0 || specs->vfmax < hz)
 				specs->vfmax = hz;
+
 			if (specs->vfmin == 0 || specs->vfmin > hz)
 				specs->vfmin = hz;
 		}
@@ -772,15 +859,6 @@ static void get_monspecs(unsigned char *edid, struct fb_monspecs *specs)
 	}
 }
 
-static int edid_is_timing_block(unsigned char *block)
-{
-	if ((block[0] != 0x00) || (block[1] != 0x00) ||
-	    (block[2] != 0x00) || (block[4] != 0x00))
-		return 1;
-	else
-		return 0;
-}
-
 int fb_parse_edid(unsigned char *edid, struct fb_var_screeninfo *var)
 {
 	int i;
@@ -827,7 +905,7 @@ int fb_parse_edid(unsigned char *edid, struct fb_var_screeninfo *var)
 void fb_edid_to_monspecs(unsigned char *edid, struct fb_monspecs *specs)
 {
 	unsigned char *block;
-	int i;
+	int i, found = 0;
 
 	if (edid == NULL)
 		return;
@@ -869,19 +947,23 @@ void fb_edid_to_monspecs(unsigned char *edid, struct fb_monspecs *specs)
 	get_monspecs(edid, specs);
 
 	specs->modedb = fb_create_modedb(edid, &specs->modedb_len);
+
+	/*
+	 * Workaround for buggy EDIDs that sets that the first
+	 * detailed timing is preferred but has not detailed
+	 * timing specified
+	 */
+	for (i = 0; i < specs->modedb_len; i++) {
+		if (specs->modedb[i].flag & FB_MODE_IS_DETAILED) {
+			found = 1;
+			break;
+		}
+	}
+
+	if (!found)
+		specs->misc &= ~FB_MISC_1ST_DETAIL;
+
 	DPRINTK("========================================\n");
-}
-
-char *get_EDID_from_firmware(struct device *dev)
-{
-	unsigned char *pedid = NULL;
-
-#if defined(CONFIG_EDID_FIRMWARE) && defined(CONFIG_X86)
-	pedid = edid_info.dummy;
-	if (!pedid)
-		return NULL;
-#endif
-	return pedid;
 }
 
 /* 
@@ -1099,15 +1181,21 @@ static void fb_timings_dclk(struct __fb_timings *timings)
  */ 
 int fb_get_mode(int flags, u32 val, struct fb_var_screeninfo *var, struct fb_info *info)
 {
-	struct __fb_timings timings;
+	struct __fb_timings *timings;
 	u32 interlace = 1, dscan = 1;
-	u32 hfmin, hfmax, vfmin, vfmax, dclkmin, dclkmax;
+	u32 hfmin, hfmax, vfmin, vfmax, dclkmin, dclkmax, err = 0;
+
+
+	timings = kzalloc(sizeof(struct __fb_timings), GFP_KERNEL);
+
+	if (!timings)
+		return -ENOMEM;
 
 	/* 
 	 * If monspecs are invalid, use values that are enough
 	 * for 640x480@60
 	 */
-	if (!info->monspecs.hfmax || !info->monspecs.vfmax ||
+	if (!info || !info->monspecs.hfmax || !info->monspecs.vfmax ||
 	    !info->monspecs.dclkmax ||
 	    info->monspecs.hfmax < info->monspecs.hfmin ||
 	    info->monspecs.vfmax < info->monspecs.vfmin ||
@@ -1124,65 +1212,66 @@ int fb_get_mode(int flags, u32 val, struct fb_var_screeninfo *var, struct fb_inf
 		dclkmax = info->monspecs.dclkmax;
 	}
 
-	memset(&timings, 0, sizeof(struct __fb_timings));
-	timings.hactive = var->xres;
-	timings.vactive = var->yres;
+	timings->hactive = var->xres;
+	timings->vactive = var->yres;
 	if (var->vmode & FB_VMODE_INTERLACED) { 
-		timings.vactive /= 2;
+		timings->vactive /= 2;
 		interlace = 2;
 	}
 	if (var->vmode & FB_VMODE_DOUBLE) {
-		timings.vactive *= 2;
+		timings->vactive *= 2;
 		dscan = 2;
 	}
 
 	switch (flags & ~FB_IGNOREMON) {
 	case FB_MAXTIMINGS: /* maximize refresh rate */
-		timings.hfreq = hfmax;
-		fb_timings_hfreq(&timings);
-		if (timings.vfreq > vfmax) {
-			timings.vfreq = vfmax;
-			fb_timings_vfreq(&timings);
+		timings->hfreq = hfmax;
+		fb_timings_hfreq(timings);
+		if (timings->vfreq > vfmax) {
+			timings->vfreq = vfmax;
+			fb_timings_vfreq(timings);
 		}
-		if (timings.dclk > dclkmax) {
-			timings.dclk = dclkmax;
-			fb_timings_dclk(&timings);
+		if (timings->dclk > dclkmax) {
+			timings->dclk = dclkmax;
+			fb_timings_dclk(timings);
 		}
 		break;
 	case FB_VSYNCTIMINGS: /* vrefresh driven */
-		timings.vfreq = val;
-		fb_timings_vfreq(&timings);
+		timings->vfreq = val;
+		fb_timings_vfreq(timings);
 		break;
 	case FB_HSYNCTIMINGS: /* hsync driven */
-		timings.hfreq = val;
-		fb_timings_hfreq(&timings);
+		timings->hfreq = val;
+		fb_timings_hfreq(timings);
 		break;
 	case FB_DCLKTIMINGS: /* pixelclock driven */
-		timings.dclk = PICOS2KHZ(val) * 1000;
-		fb_timings_dclk(&timings);
+		timings->dclk = PICOS2KHZ(val) * 1000;
+		fb_timings_dclk(timings);
 		break;
 	default:
-		return -EINVAL;
+		err = -EINVAL;
 		
 	} 
 	
-	if (!(flags & FB_IGNOREMON) && 
-	    (timings.vfreq < vfmin || timings.vfreq > vfmax || 
-	     timings.hfreq < hfmin || timings.hfreq > hfmax ||
-	     timings.dclk < dclkmin || timings.dclk > dclkmax))
-		return -EINVAL;
-
-	var->pixclock = KHZ2PICOS(timings.dclk/1000);
-	var->hsync_len = (timings.htotal * 8)/100;
-	var->right_margin = (timings.hblank/2) - var->hsync_len;
-	var->left_margin = timings.hblank - var->right_margin - var->hsync_len;
+	if (err || (!(flags & FB_IGNOREMON) &&
+	    (timings->vfreq < vfmin || timings->vfreq > vfmax ||
+	     timings->hfreq < hfmin || timings->hfreq > hfmax ||
+	     timings->dclk < dclkmin || timings->dclk > dclkmax))) {
+		err = -EINVAL;
+	} else {
+		var->pixclock = KHZ2PICOS(timings->dclk/1000);
+		var->hsync_len = (timings->htotal * 8)/100;
+		var->right_margin = (timings->hblank/2) - var->hsync_len;
+		var->left_margin = timings->hblank - var->right_margin -
+			var->hsync_len;
+		var->vsync_len = (3 * interlace)/dscan;
+		var->lower_margin = (1 * interlace)/dscan;
+		var->upper_margin = (timings->vblank * interlace)/dscan -
+			(var->vsync_len + var->lower_margin);
+	}
 	
-	var->vsync_len = (3 * interlace)/dscan;
-	var->lower_margin = (1 * interlace)/dscan;
-	var->upper_margin = (timings.vblank * interlace)/dscan - 
-		(var->vsync_len + var->lower_margin);
-	
-	return 0;
+	kfree(timings);
+	return err;
 }
 #else
 int fb_parse_edid(unsigned char *edid, struct fb_var_screeninfo *var)
@@ -1193,20 +1282,8 @@ void fb_edid_to_monspecs(unsigned char *edid, struct fb_monspecs *specs)
 {
 	specs = NULL;
 }
-char *get_EDID_from_firmware(struct device *dev)
-{
-	return NULL;
-}
-struct fb_videomode *fb_create_modedb(unsigned char *edid, int *dbsize)
-{
-	return NULL;
-}
 void fb_destroy_modedb(struct fb_videomode *modedb)
 {
-}
-int fb_get_monitor_limits(unsigned char *edid, struct fb_monspecs *specs)
-{
-	return 1;
 }
 int fb_get_mode(int flags, u32 val, struct fb_var_screeninfo *var,
 		struct fb_info *info)
@@ -1268,6 +1345,8 @@ int fb_validate_mode(const struct fb_var_screeninfo *var, struct fb_info *info)
 		vtotal *= 2;
 
 	hfreq = pixclock/htotal;
+	hfreq = (hfreq + 500) / 1000 * 1000;
+
 	vfreq = hfreq/vtotal;
 
 	return (vfreq < vfmin || vfreq > vfmax || 
@@ -1276,12 +1355,40 @@ int fb_validate_mode(const struct fb_var_screeninfo *var, struct fb_info *info)
 		-EINVAL : 0;
 }
 
+#if defined(CONFIG_FIRMWARE_EDID) && defined(CONFIG_X86)
+
+/*
+ * We need to ensure that the EDID block is only returned for
+ * the primary graphics adapter.
+ */
+
+const unsigned char *fb_firmware_edid(struct device *device)
+{
+	struct pci_dev *dev = NULL;
+	struct resource *res = NULL;
+	unsigned char *edid = NULL;
+
+	if (device)
+		dev = to_pci_dev(device);
+
+	if (dev)
+		res = &dev->resource[PCI_ROM_RESOURCE];
+
+	if (res && res->flags & IORESOURCE_ROM_SHADOW)
+		edid = edid_info.dummy;
+
+	return edid;
+}
+#else
+const unsigned char *fb_firmware_edid(struct device *device)
+{
+	return NULL;
+}
+#endif
+EXPORT_SYMBOL(fb_firmware_edid);
+
 EXPORT_SYMBOL(fb_parse_edid);
 EXPORT_SYMBOL(fb_edid_to_monspecs);
-EXPORT_SYMBOL(get_EDID_from_firmware);
-
 EXPORT_SYMBOL(fb_get_mode);
 EXPORT_SYMBOL(fb_validate_mode);
-EXPORT_SYMBOL(fb_create_modedb);
 EXPORT_SYMBOL(fb_destroy_modedb);
-EXPORT_SYMBOL(fb_get_monitor_limits);

@@ -8,11 +8,11 @@
  * Author: Manish Lachwani (lachwani@pmc-sierra.com)
  * Copyright (C) 2004 Ralf Baechle
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
+#include <linux/pm.h>
 #include <linux/smp.h>
 
 #include <asm/io.h>
@@ -34,7 +34,7 @@ extern void prom_grab_secondary(void);
 struct callvectors *debug_vectors;
 
 extern unsigned long yosemite_base;
-extern unsigned long cpu_clock;
+extern unsigned long cpu_clock_freq;
 
 const char *get_system_type(void)
 {
@@ -92,7 +92,7 @@ void __init prom_init(void)
 	/* Callbacks for halt, restart */
 	_machine_restart = (void (*)(char *)) prom_exit;
 	_machine_halt = prom_halt;
-	_machine_power_off = prom_halt;
+	pm_power_off = prom_halt;
 
 	debug_vectors = cv;
 	arcs_cmdline[0] = '\0';
@@ -119,14 +119,13 @@ void __init prom_init(void)
 					  16);
 
 		if (strncmp("cpuclock", *env, strlen("cpuclock")) == 0)
-			cpu_clock =
+			cpu_clock_freq =
 			    simple_strtol(*env + strlen("cpuclock="), NULL,
 					  10);
 
 		env++;
 	}
 
-	mips_machgroup = MACH_GROUP_TITAN;
 	mips_machtype = MACH_TITAN_YOSEMITE;
 
 	prom_grab_secondary();

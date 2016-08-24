@@ -1,3 +1,31 @@
+SPIN_LOCK_UNLOCKED and RW_LOCK_UNLOCKED defeat lockdep state tracking and
+are hence deprecated.
+
+Please use DEFINE_SPINLOCK()/DEFINE_RWLOCK() or
+__SPIN_LOCK_UNLOCKED()/__RW_LOCK_UNLOCKED() as appropriate for static
+initialization.
+
+Dynamic initialization, when necessary, may be performed as
+demonstrated below.
+
+   spinlock_t xxx_lock;
+   rwlock_t xxx_rw_lock;
+
+   static int __init xxx_init(void)
+   {
+   	spin_lock_init(&xxx_lock);
+	rwlock_init(&xxx_rw_lock);
+	...
+   }
+
+   module_init(xxx_init);
+
+The following discussion is still valid, however, with the dynamic
+initialization of spinlocks or with DEFINE_SPINLOCK, etc., used
+instead of SPIN_LOCK_UNLOCKED.
+
+-----------------------
+
 On Fri, 2 Jan 1998, Doug Ledford wrote:
 > 
 > I'm working on making the aic7xxx driver more SMP friendly (as well as

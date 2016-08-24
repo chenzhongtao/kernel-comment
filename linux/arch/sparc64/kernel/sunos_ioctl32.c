@@ -11,6 +11,7 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/termios.h>
+#include <linux/tty.h>
 #include <linux/ioctl.h>
 #include <linux/route.h>
 #include <linux/sockios.h>
@@ -21,10 +22,8 @@
 #include <linux/file.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/syscalls.h>
 #include <linux/compat.h>
-#include <asm/kbio.h>
 
 #define SUNOS_NR_OPEN	256
 
@@ -152,11 +151,12 @@ asmlinkage int sunos_ioctl (int fd, u32 cmd, u32 arg)
 		ret = compat_sys_ioctl(fd, SIOCGIFCONF, arg);
 		goto out;
 
-	case _IOW('i', 21, struct ifreq): /* SIOCSIFMTU */
-		ret = sys_ioctl(fd, SIOCSIFMTU, arg);
+	case _IOW('i', 21, struct ifreq32):
+		ret = compat_sys_ioctl(fd, SIOCSIFMTU, arg);
 		goto out;
-	case _IOWR('i', 22, struct ifreq): /* SIOCGIFMTU */
-		ret = sys_ioctl(fd, SIOCGIFMTU, arg);
+
+	case _IOWR('i', 22, struct ifreq32):
+		ret = compat_sys_ioctl(fd, SIOCGIFMTU, arg);
 		goto out;
 
 	case _IOWR('i', 23, struct ifreq32):

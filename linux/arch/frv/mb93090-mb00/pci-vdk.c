@@ -9,7 +9,6 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -294,7 +293,7 @@ static void __init pci_fixup_umc_ide(struct pci_dev *d)
 	 */
 	int i;
 
-	printk("PCI: Fixing base address flags for device %s\n", d->slot_name);
+	printk("PCI: Fixing base address flags for device %s\n", pci_name(d));
 	for(i=0; i<4; i++)
 		d->resource[i].flags |= PCI_BASE_ADDRESS_SPACE_IO;
 }
@@ -308,7 +307,7 @@ static void __init pci_fixup_ide_bases(struct pci_dev *d)
 	 */
 	if ((d->class >> 8) != PCI_CLASS_STORAGE_IDE)
 		return;
-	printk("PCI: IDE base address fixup for %s\n", d->slot_name);
+	printk("PCI: IDE base address fixup for %s\n", pci_name(d));
 	for(i=0; i<4; i++) {
 		struct resource *r = &d->resource[i];
 		if ((r->start & ~0x80) == 0x374) {
@@ -326,7 +325,7 @@ static void __init pci_fixup_ide_trash(struct pci_dev *d)
 	 * There exist PCI IDE controllers which have utter garbage
 	 * in first four base registers. Ignore that.
 	 */
-	printk("PCI: IDE base address trash cleared for %s\n", d->slot_name);
+	printk("PCI: IDE base address trash cleared for %s\n", pci_name(d));
 	for(i=0; i<4; i++)
 		d->resource[i].start = d->resource[i].end = d->resource[i].flags = 0;
 }
@@ -401,13 +400,16 @@ int __init pcibios_init(void)
 	__reg_MB86943_pci_sl_mem_base	= __region_CS2 + 0x08000000;
 	mb();
 
-	*(volatile unsigned long *)(__region_CS2+0x01300014) == 1;
+	/* enable PCI arbitration */
+	__reg_MB86943_pci_arbiter	= MB86943_PCIARB_EN;
 
 	ioport_resource.start	= (__reg_MB86943_sl_pci_io_base << 9) & 0xfffffc00;
 	ioport_resource.end	= (__reg_MB86943_sl_pci_io_range << 9) | 0x3ff;
 	ioport_resource.end	+= ioport_resource.start;
 
-	printk("PCI IO window:  %08lx-%08lx\n", ioport_resource.start, ioport_resource.end);
+	printk("PCI IO window:  %08llx-%08llx\n",
+	       (unsigned long long) ioport_resource.start,
+	       (unsigned long long) ioport_resource.end);
 
 	iomem_resource.start	= (__reg_MB86943_sl_pci_mem_base << 9) & 0xfffffc00;
 
@@ -417,8 +419,11 @@ int __init pcibios_init(void)
 	iomem_resource.end	= (__reg_MB86943_sl_pci_mem_range << 9) | 0x3ff;
 	iomem_resource.end	+= iomem_resource.start;
 
-	printk("PCI MEM window: %08lx-%08lx\n", iomem_resource.start, iomem_resource.end);
-	printk("PCI DMA memory: %08lx-%08lx\n", dma_coherent_mem_start, dma_coherent_mem_end);
+	printk("PCI MEM window: %08llx-%08llx\n",
+	       (unsigned long long) iomem_resource.start,
+	       (unsigned long long) iomem_resource.end);
+	printk("PCI DMA memory: %08lx-%08lx\n",
+	       dma_coherent_mem_start, dma_coherent_mem_end);
 
 	if (!pci_probe)
 		return -ENXIO;
@@ -462,6 +467,7 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 
 	if ((err = pcibios_enable_resources(dev, mask)) < 0)
 		return err;
-	pcibios_enable_irq(dev);
+	if (!dev->msi_enabled)
+		pcibios_enable_irq(dev);
 	return 0;
 }

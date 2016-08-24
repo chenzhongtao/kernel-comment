@@ -1,9 +1,9 @@
 /*
  *  arch/s390/kernel/irq.c
  *
- *  S390 version
- *    Copyright (C) 2004 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 2004,2007
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
+ *		 Thomas Spatzier (tspat@de.ibm.com)
  *
  * This file contains interrupt related functions.
  */
@@ -14,6 +14,8 @@
 #include <linux/interrupt.h>
 #include <linux/seq_file.h>
 #include <linux/cpu.h>
+#include <linux/proc_fs.h>
+#include <linux/profile.h>
 
 /*
  * show_interrupts is needed by /proc/interrupts.
@@ -25,9 +27,8 @@ int show_interrupts(struct seq_file *p, void *v)
 
 	if (i == 0) {
 		seq_puts(p, "           ");
-		for (j=0; j<NR_CPUS; j++)
-			if (cpu_online(j))
-				seq_printf(p, "CPU%d       ",j);
+		for_each_online_cpu(j)
+			seq_printf(p, "CPU%d       ",j);
 		seq_putc(p, '\n');
 	}
 
@@ -36,9 +37,8 @@ int show_interrupts(struct seq_file *p, void *v)
 #ifndef CONFIG_SMP
 		seq_printf(p, "%10u ", kstat_irqs(i));
 #else
-		for (j = 0; j < NR_CPUS; j++)
-			if (cpu_online(j))
-				seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
+		for_each_online_cpu(j)
+			seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
 #endif
                 seq_putc(p, '\n');
 
@@ -71,10 +71,6 @@ asmlinkage void do_softirq(void)
 
 	local_irq_save(flags);
 
-	account_system_vtime(current);
-
-	local_bh_disable();
-
 	if (local_softirq_pending()) {
 		/* Get current stack pointer. */
 		asm volatile("la %0,0(15)" : "=a" (old));
@@ -97,11 +93,13 @@ asmlinkage void do_softirq(void)
 			__do_softirq();
 	}
 
-	account_system_vtime(current);
-
-	__local_bh_enable();
-
 	local_irq_restore(flags);
 }
 
-EXPORT_SYMBOL(do_softirq);
+void init_irq_proc(void)
+{
+	struct proc_dir_entry *root_irq_dir;
+
+	root_irq_dir = proc_mkdir("irq", NULL);
+	create_prof_cpu_mask(root_irq_dir);
+}

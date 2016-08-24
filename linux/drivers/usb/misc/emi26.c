@@ -1,7 +1,7 @@
 /* 
  * Emagic EMI 2|6 usb audio interface firmware loader.
  * Copyright (C) 2002
- * 	Tapio Laxström (tapio.laxstrom@iptime.fi)
+ * 	Tapio LaxstrÃ¶m (tapio.laxstrom@iptime.fi)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, as published by
@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/usb.h>
+#include <linux/delay.h>
 
 #define MAX_INTEL_HEX_RECORD_LENGTH 16
 typedef struct _INTEL_HEX_RECORD
@@ -30,6 +31,7 @@ typedef struct _INTEL_HEX_RECORD
 
 #define EMI26_VENDOR_ID 		0x086a  /* Emagic Soft-und Hardware GmBH */
 #define EMI26_PRODUCT_ID		0x0100	/* EMI 2|6 without firmware */
+#define EMI26B_PRODUCT_ID		0x0102	/* EMI 2|6 without firmware */
 
 #define ANCHOR_LOAD_INTERNAL	0xA0	/* Vendor specific request code for Anchor Upload/Download (This one is implemented in the core) */
 #define ANCHOR_LOAD_EXTERNAL	0xA3	/* This command is not implemented in the core. Requires firmware */
@@ -51,13 +53,12 @@ static void __exit emi26_exit (void);
 static int emi26_writememory (struct usb_device *dev, int address, unsigned char *data, int length, __u8 request)
 {
 	int result;
-	unsigned char *buffer =  kmalloc (length, GFP_KERNEL);
+	unsigned char *buffer =  kmemdup(data, length, GFP_KERNEL);
 
 	if (!buffer) {
 		err("emi26: kmalloc(%d) failed.", length);
 		return -ENOMEM;
 	}
-	memcpy (buffer, data, length);
 	/* Note: usb_control_msg returns negative value on error or length of the
 	 * 		 data that was written! */
 	result = usb_control_msg (dev, usb_sndctrlpipe(dev, 0), request, 0x40, address, 0, buffer, length, 300);
@@ -113,6 +114,11 @@ static int emi26_load_firmware (struct usb_device *dev)
 
 	/* De-assert reset (let the CPU run) */
 	err = emi26_set_reset(dev,0);
+	if (err < 0) {
+		err("%s - error loading firmware: error = %d", __FUNCTION__, err);
+		goto wraperr;
+	}
+	msleep(250);	/* let device settle */
 
 	/* 2. We upload the FPGA firmware into the EMI
 	 * Note: collect up to 1023 (yes!) bytes and send them with
@@ -149,6 +155,7 @@ static int emi26_load_firmware (struct usb_device *dev)
 			goto wraperr;
 		}
 	}
+	msleep(250);	/* let device settle */
 
 	/* De-assert reset (let the CPU run) */
 	err = emi26_set_reset(dev,0);
@@ -191,6 +198,7 @@ static int emi26_load_firmware (struct usb_device *dev)
 		err("%s - error loading firmware: error = %d", __FUNCTION__, err);
 		goto wraperr;
 	}
+	msleep(250);	/* let device settle */
 
 	/* return 1 to fail the driver inialization
 	 * and give real driver change to load */
@@ -203,6 +211,7 @@ wraperr:
 
 static struct usb_device_id id_table [] = {
 	{ USB_DEVICE(EMI26_VENDOR_ID, EMI26_PRODUCT_ID) },
+	{ USB_DEVICE(EMI26_VENDOR_ID, EMI26B_PRODUCT_ID) },
 	{ }                                             /* Terminating entry */
 };
 
@@ -225,7 +234,6 @@ static void emi26_disconnect(struct usb_interface *intf)
 }
 
 static struct usb_driver emi26_driver = {
-	.owner		= THIS_MODULE,
 	.name		= "emi26 - firmware loader",
 	.probe		= emi26_probe,
 	.disconnect	= emi26_disconnect,
@@ -245,7 +253,7 @@ static void __exit emi26_exit (void)
 module_init(emi26_init);
 module_exit(emi26_exit);
 
-MODULE_AUTHOR("tapio laxström");
+MODULE_AUTHOR("Tapio LaxstrÃ¶m");
 MODULE_DESCRIPTION("Emagic EMI 2|6 firmware loader.");
 MODULE_LICENSE("GPL");
 

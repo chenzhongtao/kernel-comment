@@ -8,7 +8,6 @@
  * Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 2002 MIPS Technologies, Inc.  All rights reserved.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -57,7 +56,7 @@ void local_flush_tlb_mm(struct mm_struct *mm)
 	int cpu = smp_processor_id();
 
 	if (cpu_context(cpu, mm) != 0)
-		drop_mmu_context(mm,cpu);
+		drop_mmu_context(mm, cpu);
 }
 
 void local_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,

@@ -20,7 +20,6 @@
 * Dec 13, 1996	Gene Kozin	Initial version (based on Sangoma's WANPIPE)
 *****************************************************************************/
 
-#include <linux/config.h>
 #include <linux/init.h>		/* __initfunc et al. */
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
@@ -30,6 +29,7 @@
 #include <linux/seq_file.h>
 #include <linux/smp_lock.h>
 
+#include <net/net_namespace.h>
 #include <asm/io.h>
 
 #define PROC_STATS_FORMAT "%30s: %12lu\n"
@@ -38,10 +38,10 @@
 
 #define PROT_DECODE(prot) ((prot == WANCONFIG_FR) ? " FR" :\
 			      (prot == WANCONFIG_X25) ? " X25" : \
-			         (prot == WANCONFIG_PPP) ? " PPP" : \
+				 (prot == WANCONFIG_PPP) ? " PPP" : \
 				    (prot == WANCONFIG_CHDLC) ? " CHDLC": \
 				       (prot == WANCONFIG_MPPP) ? " MPPP" : \
-				           " Unknown" )
+					   " Unknown" )
 
 /****** Function Prototypes *************************************************/
 
@@ -165,14 +165,14 @@ static int status_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static struct seq_operations config_op = {
+static const struct seq_operations config_op = {
 	.start	= r_start,
 	.next	= r_next,
 	.stop	= r_stop,
 	.show	= config_show,
 };
 
-static struct seq_operations status_op = {
+static const struct seq_operations status_op = {
 	.start	= r_start,
 	.next	= r_next,
 	.stop	= r_stop,
@@ -189,7 +189,7 @@ static int status_open(struct inode *inode, struct file *file)
 	return seq_open(file, &status_op);
 }
 
-static struct file_operations config_fops = {
+static const struct file_operations config_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = config_open,
 	.read	 = seq_read,
@@ -197,7 +197,7 @@ static struct file_operations config_fops = {
 	.release = seq_release,
 };
 
-static struct file_operations status_fops = {
+static const struct file_operations status_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = status_open,
 	.read	 = seq_read,
@@ -272,7 +272,7 @@ static int wandev_open(struct inode *inode, struct file *file)
 	return single_open(file, wandev_show, PDE(inode)->data);
 }
 
-static struct file_operations wandev_fops = {
+static const struct file_operations wandev_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = wandev_open,
 	.read	 = seq_read,
@@ -288,7 +288,7 @@ static struct file_operations wandev_fops = {
 int __init wanrouter_proc_init(void)
 {
 	struct proc_dir_entry *p;
-	proc_router = proc_mkdir(ROUTER_NAME, proc_net);
+	proc_router = proc_mkdir(ROUTER_NAME, init_net.proc_net);
 	if (!proc_router)
 		goto fail;
 
@@ -304,7 +304,7 @@ int __init wanrouter_proc_init(void)
 fail_stat:
 	remove_proc_entry("config", proc_router);
 fail_config:
-	remove_proc_entry(ROUTER_NAME, proc_net);
+	remove_proc_entry(ROUTER_NAME, init_net.proc_net);
 fail:
 	return -ENOMEM;
 }
@@ -317,7 +317,7 @@ void wanrouter_proc_cleanup(void)
 {
 	remove_proc_entry("config", proc_router);
 	remove_proc_entry("status", proc_router);
-	remove_proc_entry(ROUTER_NAME, proc_net);
+	remove_proc_entry(ROUTER_NAME, init_net.proc_net);
 }
 
 /*

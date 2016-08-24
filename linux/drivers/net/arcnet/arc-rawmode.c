@@ -42,7 +42,7 @@ static int build_header(struct sk_buff *skb, struct net_device *dev,
 static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		      int bufnum);
 
-struct ArcProto rawmode_proto =
+static struct ArcProto rawmode_proto =
 {
 	.suffix		= 'r',
 	.mtu		= XMTU,
@@ -87,14 +87,14 @@ MODULE_LICENSE("GPL");
 static void rx(struct net_device *dev, int bufnum,
 	       struct archdr *pkthdr, int length)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	struct sk_buff *skb;
 	struct archdr *pkt = pkthdr;
 	int ofs;
 
 	BUGMSG(D_DURING, "it's a raw packet (length=%d)\n", length);
 
-	if (length >= MinTU)
+	if (length > MTU)
 		ofs = 512 - length;
 	else
 		ofs = 256 - length;
@@ -110,7 +110,7 @@ static void rx(struct net_device *dev, int bufnum,
 
 	pkt = (struct archdr *) skb->data;
 
-	skb->mac.raw = skb->data;
+	skb_reset_mac_header(skb);
 	skb_pull(skb, ARC_HDR_SIZE);
 
 	/* up to sizeof(pkt->soft) has already been copied from the card */
@@ -168,7 +168,7 @@ static int build_header(struct sk_buff *skb, struct net_device *dev,
 static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		      int bufnum)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = dev->priv;
 	struct arc_hardware *hard = &pkt->hard;
 	int ofs;
 
@@ -183,7 +183,7 @@ static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		       length, XMTU);
 		length = XMTU;
 	}
-	if (length > MinTU) {
+	if (length >= MinTU) {
 		hard->offset[0] = 0;
 		hard->offset[1] = ofs = 512 - length;
 	} else if (length > MTU) {

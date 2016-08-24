@@ -1,5 +1,5 @@
 /*
- * linux/include/asm/qdio.h
+ * linux/include/asm-s390/qdio.h
  *
  * Linux for S/390 QDIO base support, Hipersocket base support
  * version 2
@@ -10,8 +10,6 @@
  */
 #ifndef __QDIO_H__
 #define __QDIO_H__
-
-#define VERSION_QDIO_H "$Revision: 1.57 $"
 
 /* note, that most of the typedef's are from ingo. */
 
@@ -36,6 +34,7 @@
 #define QDIO_QETH_QFMT 0
 #define QDIO_ZFCP_QFMT 1
 #define QDIO_IQDIO_QFMT 2
+#define QDIO_IQDIO_QFMT_ASYNCH 3
 
 struct qdio_buffer_element{
 	unsigned int flags;
@@ -121,6 +120,7 @@ extern unsigned long qdio_get_status(int irq);
 #define QDIO_FLAG_NO_INPUT_INTERRUPT_CONTEXT 0x08 /* no effect on
 						     adapter interrupts */
 #define QDIO_FLAG_DONT_SIGA 0x10
+#define QDIO_FLAG_PCI_OUT   0x20
 
 extern int do_QDIO(struct ccw_device*, unsigned int flags, 
 		   unsigned int queue_number,
@@ -195,12 +195,14 @@ struct qdr {
 /*
  * queue information block (QIB)
  */
-#define QIB_AC_INBOUND_PCI_SUPPORTED 0x80
-#define QIB_AC_OUTBOUND_PCI_SUPPORTED 0x40
+#define QIB_AC_INBOUND_PCI_SUPPORTED 	0x80
+#define QIB_AC_OUTBOUND_PCI_SUPPORTED 	0x40
+#define QIB_RFLAGS_ENABLE_QEBSM		0x80
+
 struct qib {
 	unsigned int  qfmt    :  8;     /* queue format */
 	unsigned int  pfmt    :  8;     /* impl. dep. parameter format */
-	unsigned int  res1    :  8;     /* reserved */
+	unsigned int  rflags  :  8;	/* QEBSM */
 	unsigned int  ac      :  8;     /* adapter characteristics */
 	unsigned int  res2;             /* reserved */
 #ifdef QDIO_32_BIT

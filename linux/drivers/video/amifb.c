@@ -45,16 +45,14 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
-#include <linux/config.h>
 #include <linux/interrupt.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/amigahw.h>
@@ -114,7 +112,7 @@
    +----------+---------------------------------------------+----------+-------+
    |          |                ^                            |          |       |
    |          |                |upper_margin                |          |       |
-   |          |                ¥                            |          |       |
+   |          |                v                            |          |       |
    +----------###############################################----------+-------+
    |          #                ^                            #          |       |
    |          #                |                            #          |       |
@@ -135,15 +133,15 @@
    |          #                |                            #          |       |
    |          #                |                            #          |       |
    |          #                |                            #          |       |
-   |          #                ¥                            #          |       |
+   |          #                v                            #          |       |
    +----------###############################################----------+-------+
    |          |                ^                            |          |       |
    |          |                |lower_margin                |          |       |
-   |          |                ¥                            |          |       |
+   |          |                v                            |          |       |
    +----------+---------------------------------------------+----------+-------+
    |          |                ^                            |          |       |
    |          |                |vsync_len                   |          |       |
-   |          |                ¥                            |          |       |
+   |          |                v                            |          |       |
    +----------+---------------------------------------------+----------+-------+
 
 
@@ -327,7 +325,7 @@
    CCIR -> PAL
    -----------
 
-      - a scanline is 64 µs long, of which 52.48 µs are visible. This is about
+      - a scanline is 64 Âµs long, of which 52.48 Âµs are visible. This is about
         736 visible 70 ns pixels per line.
       - we have 625 scanlines, of which 575 are visible (interlaced); after
         rounding this becomes 576.
@@ -335,7 +333,7 @@
    RETMA -> NTSC
    -------------
 
-      - a scanline is 63.5 µs long, of which 53.5 µs are visible.  This is about
+      - a scanline is 63.5 Âµs long, of which 53.5 Âµs are visible.  This is about
         736 visible 70 ns pixels per line.
       - we have 525 scanlines, of which 485 are visible (interlaced); after
         rounding this becomes 484.
@@ -590,6 +588,8 @@ static u_short maxfmode, chipset;
 #define highw(x)	((u_long)(x)>>16 & 0xffff)
 #define loww(x)		((u_long)(x) & 0xffff)
 
+#define custom		amiga_custom
+
 #define VBlankOn()	custom.intena = IF_SETCLR|IF_COPER
 #define VBlankOff()	custom.intena = IF_COPER
 
@@ -802,7 +802,7 @@ static u_short ecs_palette[32];
 
 static u_short do_vmode_full = 0;	/* Change the Video Mode */
 static u_short do_vmode_pan = 0;	/* Update the Video Mode */
-static short do_blank = 0;		/* (Un)Blank the Screen (±1) */
+static short do_blank = 0;		/* (Un)Blank the Screen (Â±1) */
 static u_short do_cursor = 0;		/* Move the Cursor */
 
 
@@ -1129,9 +1129,7 @@ static void amifb_copyarea(struct fb_info *info,
 			   const struct fb_copyarea *region);
 static void amifb_imageblit(struct fb_info *info,
 			    const struct fb_image *image);
-static int amifb_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, unsigned long arg,
-		       struct fb_info *info);
+static int amifb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg);
 
 
 	/*
@@ -1146,7 +1144,7 @@ static void amifb_deinit(void);
 	 */
 
 static int flash_cursor(void);
-static irqreturn_t amifb_interrupt(int irq, void *dev_id, struct pt_regs *fp);
+static irqreturn_t amifb_interrupt(int irq, void *dev_id);
 static u_long chipalloc(u_long size);
 static void chipfree(void);
 
@@ -1164,8 +1162,8 @@ static void ami_update_display(void);
 static void ami_init_display(void);
 static void ami_do_blank(void);
 static int ami_get_fix_cursorinfo(struct fb_fix_cursorinfo *fix);
-static int ami_get_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data);
-static int ami_set_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data);
+static int ami_get_var_cursorinfo(struct fb_var_cursorinfo *var, u_char __user *data);
+static int ami_set_var_cursorinfo(struct fb_var_cursorinfo *var, u_char __user *data);
 static int ami_get_cursorstate(struct fb_cursorstate *state);
 static int ami_set_cursorstate(struct fb_cursorstate *state);
 static void ami_set_sprite(void);
@@ -1185,7 +1183,6 @@ static struct fb_ops amifb_ops = {
 	.fb_fillrect	= amifb_fillrect,
 	.fb_copyarea	= amifb_copyarea,
 	.fb_imageblit	= amifb_imageblit,
-	.fb_cursor	= soft_cursor,
 	.fb_ioctl	= amifb_ioctl,
 };
 
@@ -2171,15 +2168,15 @@ static void amifb_imageblit(struct fb_info *info, const struct fb_image *image)
 	 * Amiga Frame Buffer Specific ioctls
 	 */
 
-static int amifb_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, unsigned long arg,
-		       struct fb_info *info)
+static int amifb_ioctl(struct fb_info *info,
+		       unsigned int cmd, unsigned long arg)
 {
 	union {
 		struct fb_fix_cursorinfo fix;
 		struct fb_var_cursorinfo var;
 		struct fb_cursorstate state;
 	} crsr;
+	void __user *argp = (void __user *)arg;
 	int i;
 
 	switch (cmd) {
@@ -2187,33 +2184,32 @@ static int amifb_ioctl(struct inode *inode, struct file *file,
 			i = ami_get_fix_cursorinfo(&crsr.fix);
 			if (i)
 				return i;
-			return copy_to_user((void *)arg, &crsr.fix,
+			return copy_to_user(argp, &crsr.fix,
 					    sizeof(crsr.fix)) ? -EFAULT : 0;
 
 		case FBIOGET_VCURSORINFO:
 			i = ami_get_var_cursorinfo(&crsr.var,
-				((struct fb_var_cursorinfo *)arg)->data);
+				((struct fb_var_cursorinfo __user *)arg)->data);
 			if (i)
 				return i;
-			return copy_to_user((void *)arg, &crsr.var,
+			return copy_to_user(argp, &crsr.var,
 					    sizeof(crsr.var)) ? -EFAULT : 0;
 
 		case FBIOPUT_VCURSORINFO:
-			if (copy_from_user(&crsr.var, (void *)arg,
-					   sizeof(crsr.var)))
+			if (copy_from_user(&crsr.var, argp, sizeof(crsr.var)))
 				return -EFAULT;
 			return ami_set_var_cursorinfo(&crsr.var,
-				((struct fb_var_cursorinfo *)arg)->data);
+				((struct fb_var_cursorinfo __user *)arg)->data);
 
 		case FBIOGET_CURSORSTATE:
 			i = ami_get_cursorstate(&crsr.state);
 			if (i)
 				return i;
-			return copy_to_user((void *)arg, &crsr.state,
+			return copy_to_user(argp, &crsr.state,
 					    sizeof(crsr.state)) ? -EFAULT : 0;
 
 		case FBIOPUT_CURSORSTATE:
-			if (copy_from_user(&crsr.state, (void *)arg,
+			if (copy_from_user(&crsr.state, argp,
 					   sizeof(crsr.state)))
 				return -EFAULT;
 			return ami_set_cursorstate(&crsr.state);
@@ -2411,10 +2407,10 @@ default_chipset:
 						   fb_info.fix.smem_len);
 	if (!videomemory) {
 		printk("amifb: WARNING! unable to map videomem cached writethrough\n");
-		videomemory = ZTWO_VADDR(fb_info.fix.smem_start);
-	}
+		fb_info.screen_base = (char *)ZTWO_VADDR(fb_info.fix.smem_start);
+	} else
+		fb_info.screen_base = (char *)videomemory;
 
-	fb_info.screen_base = (char *)videomemory;
 	memset(dummysprite, 0, DUMMYSPRITEMEMSIZE);
 
 	/*
@@ -2457,6 +2453,8 @@ static void amifb_deinit(void)
 {
 	fb_dealloc_cmap(&fb_info.cmap);
 	chipfree();
+	if (videomemory)
+		iounmap((void*)videomemory);
 	release_mem_region(CUSTOM_PHYSADDR+0xe0, 0x120);
 	custom.dmacon = DMAF_ALL | DMAF_MASTER;
 }
@@ -2496,7 +2494,7 @@ static int flash_cursor(void)
 	 * VBlank Display Interrupt
 	 */
 
-static irqreturn_t amifb_interrupt(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t amifb_interrupt(int irq, void *dev_id)
 {
 	if (do_vmode_pan || do_vmode_full)
 		ami_update_display();
@@ -2908,14 +2906,6 @@ static int ami_decode_var(struct fb_var_screeninfo *var,
 	par->crsr.spot_x = par->crsr.spot_y = 0;
 	par->crsr.height = par->crsr.width = 0;
 
-#if 0	/* fbmon not done.  uncomment for 2.5.x -brad */
-	if (!fbmon_valid_timings(pixclock[clk_shift], htotal, vtotal,
-				 &fb_info)) {
-		DPRINTK("mode doesn't fit for monitor\n");
-		return -EINVAL;
-	}
-#endif
-
 	return 0;
 }
 
@@ -3326,7 +3316,7 @@ static int ami_get_fix_cursorinfo(struct fb_fix_cursorinfo *fix)
 	return 0;
 }
 
-static int ami_get_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
+static int ami_get_var_cursorinfo(struct fb_var_cursorinfo *var, u_char __user *data)
 {
 	struct amifb_par *par = &currentpar;
 	register u_short *lspr, *sspr;
@@ -3338,7 +3328,7 @@ static int ami_get_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
 	register short delta;
 	register u_char color;
 	short height, width, bits, words;
-	int i, size, alloc;
+	int size, alloc;
 
 	size = par->crsr.height*par->crsr.width;
 	alloc = var->height*var->width;
@@ -3348,14 +3338,14 @@ static int ami_get_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
 	var->yspot = par->crsr.spot_y;
 	if (size > var->height*var->width)
 		return -ENAMETOOLONG;
-	if ((i = verify_area(VERIFY_WRITE, (void *)data, size)))
-		return i;
+	if (!access_ok(VERIFY_WRITE, data, size))
+		return -EFAULT;
 	delta = 1<<par->crsr.fmode;
 	lspr = lofsprite + (delta<<1);
 	if (par->bplcon0 & BPC0_LACE)
 		sspr = shfsprite + (delta<<1);
 	else
-		sspr = 0;
+		sspr = NULL;
 	for (height = (short)var->height-1; height >= 0; height--) {
 		bits = 0; words = delta; datawords = 0;
 		for (width = (short)var->width-1; width >= 0; width--) {
@@ -3401,7 +3391,7 @@ static int ami_get_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
 	return 0;
 }
 
-static int ami_set_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
+static int ami_set_var_cursorinfo(struct fb_var_cursorinfo *var, u_char __user *data)
 {
 	struct amifb_par *par = &currentpar;
 	register u_short *lspr, *sspr;
@@ -3413,7 +3403,6 @@ static int ami_set_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
 	register short delta;
 	u_short fmode;
 	short height, width, bits, words;
-	int i;
 
 	if (!var->width)
 		return -EINVAL;
@@ -3429,8 +3418,8 @@ static int ami_set_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
 		return -EINVAL;
 	if (!var->height)
 		return -EINVAL;
-	if ((i = verify_area(VERIFY_READ, (void *)data, var->width*var->height)))
-		return i;
+	if (!access_ok(VERIFY_READ, data, var->width*var->height))
+		return -EFAULT;
 	delta = 1<<fmode;
 	lofsprite = shfsprite = (u_short *)spritememory;
 	lspr = lofsprite + (delta<<1);
@@ -3444,13 +3433,13 @@ static int ami_set_var_cursorinfo(struct fb_var_cursorinfo *var, u_char *data)
 		if (((var->height+2)<<fmode<<2) > SPRITEMEMSIZE)
 			return -EINVAL;
 		memset(lspr, 0, (var->height+2)<<fmode<<2);
-		sspr = 0;
+		sspr = NULL;
 	}
 	for (height = (short)var->height-1; height >= 0; height--) {
 		bits = 16; words = delta; datawords = 0;
 		for (width = (short)var->width-1; width >= 0; width--) {
 			unsigned long tdata = 0;
-			get_user(tdata, (char *)data);
+			get_user(tdata, data);
 			data++;
 #ifdef __mc68000__
 			asm volatile (

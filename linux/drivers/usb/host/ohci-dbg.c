@@ -16,15 +16,15 @@
 	case PIPE_CONTROL:	temp = "ctrl"; break; \
 	case PIPE_BULK:		temp = "bulk"; break; \
 	case PIPE_INTERRUPT:	temp = "intr"; break; \
-	default: 		temp = "isoc"; break; \
+	default:		temp = "isoc"; break; \
 	}; temp;})
 #define pipestring(pipe) edstring(usb_pipetype(pipe))
 
 /* debug| print the main components of an URB
  * small: 0) header + data packets 1) just header
  */
-static void __attribute__((unused))
-urb_print (struct urb * urb, char * str, int small)
+static void __maybe_unused
+urb_print(struct urb * urb, char * str, int small, int status)
 {
 	unsigned int pipe= urb->pipe;
 
@@ -34,7 +34,7 @@ urb_print (struct urb * urb, char * str, int small)
 	}
 
 #ifndef	OHCI_VERBOSE_DEBUG
-	if (urb->status != 0)
+	if (status != 0)
 #endif
 	dbg("%s %p dev=%d ep=%d%s-%s flags=%x len=%d/%d stat=%d",
 		    str,
@@ -46,7 +46,7 @@ urb_print (struct urb * urb, char * str, int small)
 		    urb->transfer_flags,
 		    urb->actual_length,
 		    urb->transfer_buffer_length,
-		    urb->status);
+		    status);
 
 #ifdef	OHCI_VERBOSE_DEBUG
 	if (!small) {
@@ -66,7 +66,7 @@ urb_print (struct urb * urb, char * str, int small)
 						urb->transfer_buffer_length: urb->actual_length;
 			for (i = 0; i < 16 && i < len; i++)
 				printk (" %02x", ((__u8 *) urb->transfer_buffer) [i]);
-			printk ("%s stat:%d\n", i < len? "...": "", urb->status);
+			printk ("%s stat:%d\n", i < len? "...": "", status);
 		}
 	}
 #endif
@@ -74,7 +74,7 @@ urb_print (struct urb * urb, char * str, int small)
 
 #define ohci_dbg_sw(ohci, next, size, format, arg...) \
 	do { \
-	if (next) { \
+	if (next != NULL) { \
 		unsigned s_len; \
 		s_len = scnprintf (*next, *size, format, ## arg ); \
 		*size -= s_len; *next += s_len; \
@@ -138,7 +138,7 @@ ohci_dump_status (struct ohci_hcd *controller, char **next, unsigned *size)
 	ohci_dbg_sw (controller, next, size,
 		"OHCI %d.%d, %s legacy support registers\n",
 		0x03 & (temp >> 4), (temp & 0x0f),
-		(temp & 0x10) ? "with" : "NO");
+		(temp & 0x0100) ? "with" : "NO");
 
 	temp = ohci_readl (controller, &regs->control);
 	ohci_dbg_sw (controller, next, size,
@@ -205,13 +205,13 @@ ohci_dump_status (struct ohci_hcd *controller, char **next, unsigned *size)
 		(temp & RH_PS_PSSC) ? " PSSC" : "", \
 		(temp & RH_PS_PESC) ? " PESC" : "", \
 		(temp & RH_PS_CSC) ? " CSC" : "", \
- 		\
+		\
 		(temp & RH_PS_LSDA) ? " LSDA" : "", \
 		(temp & RH_PS_PPS) ? " PPS" : "", \
 		(temp & RH_PS_PRS) ? " PRS" : "", \
 		(temp & RH_PS_POCI) ? " POCI" : "", \
 		(temp & RH_PS_PSS) ? " PSS" : "", \
- 		\
+		\
 		(temp & RH_PS_PES) ? " PES" : "", \
 		(temp & RH_PS_CCS) ? " CCS" : "" \
 		);
@@ -224,23 +224,22 @@ ohci_dump_roothub (
 	char **next,
 	unsigned *size)
 {
-	u32			temp, ndp, i;
+	u32			temp, i;
 
 	temp = roothub_a (controller);
 	if (temp == ~(u32)0)
 		return;
-	ndp = (temp & RH_A_NDP);
 
 	if (verbose) {
 		ohci_dbg_sw (controller, next, size,
-			"roothub.a %08x POTPGT=%d%s%s%s%s%s NDP=%d\n", temp,
+			"roothub.a %08x POTPGT=%d%s%s%s%s%s NDP=%d(%d)\n", temp,
 			((temp & RH_A_POTPGT) >> 24) & 0xff,
 			(temp & RH_A_NOCP) ? " NOCP" : "",
 			(temp & RH_A_OCPM) ? " OCPM" : "",
 			(temp & RH_A_DT) ? " DT" : "",
 			(temp & RH_A_NPS) ? " NPS" : "",
 			(temp & RH_A_PSM) ? " PSM" : "",
-			ndp
+			(temp & RH_A_NDP), controller->num_ports
 			);
 		temp = roothub_b (controller);
 		ohci_dbg_sw (controller, next, size,
@@ -262,7 +261,7 @@ ohci_dump_roothub (
 			);
 	}
 
-	for (i = 0; i < ndp; i++) {
+	for (i = 0; i < controller->num_ports; i++) {
 		temp = roothub_portstatus (controller, i);
 		dbg_port_sw (controller, i, temp, next, size);
 	}
@@ -328,7 +327,7 @@ static void ohci_dump_td (const struct ohci_hcd *ohci, const char *label,
 			hc32_to_cpup (ohci, &td->hwCBP) & ~0x0fff,
 			hc32_to_cpup (ohci, &td->hwBE));
 		for (i = 0; i < MAXPSW; i++) {
-			u16	psw = hc16_to_cpup (ohci, &td->hwPSW [i]);
+			u16	psw = ohci_hwPSW (ohci, td, i);
 			int	cc = (psw >> 12) & 0x0f;
 			ohci_dbg (ohci, "    psw [%d] = %2x, CC=%x %s=%d\n", i,
 				psw, cc,
@@ -339,7 +338,7 @@ static void ohci_dump_td (const struct ohci_hcd *ohci, const char *label,
 }
 
 /* caller MUST own hcd spinlock if verbose is set! */
-static void __attribute__((unused))
+static void __maybe_unused
 ohci_dump_ed (const struct ohci_hcd *ohci, const char *label,
 		const struct ed *ed, int verbose)
 {
@@ -477,8 +476,8 @@ show_async (struct class_device *class_dev, char *buf)
 	size_t			temp;
 	unsigned long		flags;
 
-	bus = to_usb_bus(class_dev);
-	hcd = bus->hcpriv;
+	bus = class_get_devdata(class_dev);
+	hcd = bus_to_hcd(bus);
 	ohci = hcd_to_ohci(hcd);
 
 	/* display control and bulk lists together, for simplicity */
@@ -506,12 +505,12 @@ show_periodic (struct class_device *class_dev, char *buf)
 	char			*next;
 	unsigned		i;
 
-	if (!(seen = kmalloc (DBG_SCHED_LIMIT * sizeof *seen, SLAB_ATOMIC)))
+	if (!(seen = kmalloc (DBG_SCHED_LIMIT * sizeof *seen, GFP_ATOMIC)))
 		return 0;
 	seen_count = 0;
 
-	bus = to_usb_bus(class_dev);
-	hcd = bus->hcpriv;
+	bus = class_get_devdata(class_dev);
+	hcd = bus_to_hcd(bus);
 	ohci = hcd_to_ohci(hcd);
 	next = buf;
 	size = PAGE_SIZE;
@@ -564,7 +563,7 @@ show_periodic (struct class_device *class_dev, char *buf)
 					(info & ED_SKIP) ? " K" : "",
 					(ed->hwHeadP &
 						cpu_to_hc32(ohci, ED_H)) ?
- 							" H" : "");
+							" H" : "");
 				size -= temp;
 				next += temp;
 
@@ -607,8 +606,8 @@ show_registers (struct class_device *class_dev, char *buf)
 	char			*next;
 	u32			rdata;
 
-	bus = to_usb_bus(class_dev);
-	hcd = bus->hcpriv;
+	bus = class_get_devdata(class_dev);
+	hcd = bus_to_hcd(bus);
 	ohci = hcd_to_ohci(hcd);
 	regs = ohci->regs;
 	next = buf;
@@ -620,12 +619,14 @@ show_registers (struct class_device *class_dev, char *buf)
 
 	ohci_dbg_sw (ohci, &next, &size,
 		"bus %s, device %s\n"
+		"%s\n"
 		"%s version " DRIVER_VERSION "\n",
 		hcd->self.controller->bus->name,
 		hcd->self.controller->bus_id,
+		hcd->product_desc,
 		hcd_name);
 
-	if (bus->controller->power.power_state) {
+	if (bus->controller->power.power_state.event) {
 		size -= scnprintf (next, size,
 			"SUSPENDED (no register access)\n");
 		goto done;
@@ -666,6 +667,11 @@ show_registers (struct class_device *class_dev, char *buf)
 	size -= temp;
 	next += temp;
 
+	temp = scnprintf (next, size, "hub poll timer %s\n",
+			ohci_to_hcd(ohci)->poll_rh ? "ON" : "off");
+	size -= temp;
+	next += temp;
+
 	/* roothub */
 	ohci_dump_roothub (ohci, 1, &next, &size);
 
@@ -678,17 +684,18 @@ static CLASS_DEVICE_ATTR (registers, S_IRUGO, show_registers, NULL);
 
 static inline void create_debug_files (struct ohci_hcd *ohci)
 {
-	struct class_device *cldev = &ohci_to_hcd(ohci)->self.class_dev;
+	struct class_device *cldev = ohci_to_hcd(ohci)->self.class_dev;
+	int retval;
 
-	class_device_create_file(cldev, &class_device_attr_async);
-	class_device_create_file(cldev, &class_device_attr_periodic);
-	class_device_create_file(cldev, &class_device_attr_registers);
+	retval = class_device_create_file(cldev, &class_device_attr_async);
+	retval = class_device_create_file(cldev, &class_device_attr_periodic);
+	retval = class_device_create_file(cldev, &class_device_attr_registers);
 	ohci_dbg (ohci, "created debug files\n");
 }
 
 static inline void remove_debug_files (struct ohci_hcd *ohci)
 {
-	struct class_device *cldev = &ohci_to_hcd(ohci)->self.class_dev;
+	struct class_device *cldev = ohci_to_hcd(ohci)->self.class_dev;
 
 	class_device_remove_file(cldev, &class_device_attr_async);
 	class_device_remove_file(cldev, &class_device_attr_periodic);

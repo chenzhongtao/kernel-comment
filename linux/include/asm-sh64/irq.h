@@ -12,7 +12,6 @@
  *
  */
 
-#include <linux/config.h>
 
 /*
  * Encoded IRQs are not considered worth to be supported.
@@ -83,10 +82,11 @@
 #define IRQ_P2INTC      (START_EXT_IRQS + (3*8) + 2)
 #define IRQ_P2INTD      (START_EXT_IRQS + (3*8) + 3)
 
-#define START_EXT_IRQS  64
-
 #define I8042_KBD_IRQ	(START_EXT_IRQS + 2)
 #define I8042_AUX_IRQ	(START_EXT_IRQS + 6)
+
+#define IRQ_CFCARD	(START_EXT_IRQS + 7)
+#define IRQ_PCMCIA	(0)
 
 #else
 #define NR_EXT_IRQS	0
@@ -113,10 +113,6 @@
 #define INTA_PRIORITY	12
 #define	IRL0_PRIORITY	13
 #define TOP_PRIORITY	15
-
-extern void disable_irq(unsigned int);
-extern void disable_irq_nosync(unsigned int);
-extern void enable_irq(unsigned int);
 
 extern int intc_evt_to_irq[(0xE20/0x20)+1];
 int intc_irq_describe(char* p, int irq);

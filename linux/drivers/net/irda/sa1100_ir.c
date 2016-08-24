@@ -18,7 +18,6 @@
  *	power_leve:level	- set the transmitter power level
  *	tx_lpm:0|1		- set transmit low power mode
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/types.h>
@@ -29,7 +28,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 
 #include <net/irda/irda.h>
@@ -291,12 +290,12 @@ static void sa1100_irda_shutdown(struct sa1100_irda *si)
 /*
  * Suspend the IrDA interface.
  */
-static int sa1100_irda_suspend(struct device *_dev, u32 state, u32 level)
+static int sa1100_irda_suspend(struct platform_device *pdev, pm_message_t state)
 {
-	struct net_device *dev = dev_get_drvdata(_dev);
+	struct net_device *dev = platform_get_drvdata(pdev);
 	struct sa1100_irda *si;
 
-	if (!dev || level != SUSPEND_DISABLE)
+	if (!dev)
 		return 0;
 
 	si = dev->priv;
@@ -316,12 +315,12 @@ static int sa1100_irda_suspend(struct device *_dev, u32 state, u32 level)
 /*
  * Resume the IrDA interface.
  */
-static int sa1100_irda_resume(struct device *_dev, u32 level)
+static int sa1100_irda_resume(struct platform_device *pdev)
 {
-	struct net_device *dev = dev_get_drvdata(_dev);
+	struct net_device *dev = platform_get_drvdata(pdev);
 	struct sa1100_irda *si;
 
-	if (!dev || level != RESUME_ENABLE)
+	if (!dev)
 		return 0;
 
 	si = dev->priv;
@@ -505,7 +504,7 @@ static void sa1100_irda_fir_error(struct sa1100_irda *si, struct net_device *dev
 
 		skb_put(skb, len);
 		skb->dev = dev;
-		skb->mac.raw = skb->data;
+		skb_reset_mac_header(skb);
 		skb->protocol = htons(ETH_P_IRDA);
 		si->stats.rx_packets++;
 		si->stats.rx_bytes += len;
@@ -580,7 +579,7 @@ static void sa1100_irda_fir_irq(struct net_device *dev)
 	sa1100_irda_rx_dma_start(si);
 }
 
-static irqreturn_t sa1100_irda_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sa1100_irda_irq(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	if (IS_FIR(((struct sa1100_irda *)dev->priv)))
@@ -695,8 +694,7 @@ static int sa1100_irda_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 		/*
 		 * We must not be transmitting...
 		 */
-		if (si->txskb)
-			BUG();
+		BUG_ON(si->txskb);
 
 		netif_stop_queue(dev);
 
@@ -886,9 +884,8 @@ static int sa1100_irda_init_iobuf(iobuff_t *io, int size)
 	return io->head ? 0 : -ENOMEM;
 }
 
-static int sa1100_irda_probe(struct device *_dev)
+static int sa1100_irda_probe(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(_dev);
 	struct net_device *dev;
 	struct sa1100_irda *si;
 	unsigned int baudrate_mask;
@@ -967,7 +964,7 @@ static int sa1100_irda_probe(struct device *_dev)
 
 	err = register_netdev(dev);
 	if (err == 0)
-		dev_set_drvdata(&pdev->dev, dev);
+		platform_set_drvdata(pdev, dev);
 
 	if (err) {
  err_mem_5:
@@ -985,9 +982,9 @@ static int sa1100_irda_probe(struct device *_dev)
 	return err;
 }
 
-static int sa1100_irda_remove(struct device *_dev)
+static int sa1100_irda_remove(struct platform_device *pdev)
 {
-	struct net_device *dev = dev_get_drvdata(_dev);
+	struct net_device *dev = platform_get_drvdata(pdev);
 
 	if (dev) {
 		struct sa1100_irda *si = dev->priv;
@@ -1004,13 +1001,14 @@ static int sa1100_irda_remove(struct device *_dev)
 	return 0;
 }
 
-static struct device_driver sa1100ir_driver = {
-	.name		= "sa11x0-ir",
-	.bus		= &platform_bus_type,
+static struct platform_driver sa1100ir_driver = {
 	.probe		= sa1100_irda_probe,
 	.remove		= sa1100_irda_remove,
 	.suspend	= sa1100_irda_suspend,
 	.resume		= sa1100_irda_resume,
+	.driver		= {
+		.name	= "sa11x0-ir",
+	},
 };
 
 static int __init sa1100_irda_init(void)
@@ -1023,12 +1021,12 @@ static int __init sa1100_irda_init(void)
 	if (power_level > 3)
 		power_level = 3;
 
-	return driver_register(&sa1100ir_driver);
+	return platform_driver_register(&sa1100ir_driver);
 }
 
 static void __exit sa1100_irda_exit(void)
 {
-	driver_unregister(&sa1100ir_driver);
+	platform_driver_unregister(&sa1100ir_driver);
 }
 
 module_init(sa1100_irda_init);

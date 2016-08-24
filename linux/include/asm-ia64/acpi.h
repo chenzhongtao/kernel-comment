@@ -30,6 +30,8 @@
 
 #ifdef __KERNEL__
 
+#include <acpi/pdc_intel.h>
+
 #include <linux/init.h>
 #include <linux/numa.h>
 #include <asm/system.h>
@@ -82,30 +84,48 @@ ia64_acpi_release_global_lock (unsigned int *lock)
 	return old & 0x1;
 }
 
-#define ACPI_ACQUIRE_GLOBAL_LOCK(GLptr, Acq)				\
-	((Acq) = ia64_acpi_acquire_global_lock((unsigned int *) GLptr))
+#define ACPI_ACQUIRE_GLOBAL_LOCK(facs, Acq)				\
+	((Acq) = ia64_acpi_acquire_global_lock(&facs->global_lock))
 
-#define ACPI_RELEASE_GLOBAL_LOCK(GLptr, Acq)				\
-	((Acq) = ia64_acpi_release_global_lock((unsigned int *) GLptr))
+#define ACPI_RELEASE_GLOBAL_LOCK(facs, Acq)				\
+	((Acq) = ia64_acpi_release_global_lock(&facs->global_lock))
 
 #define acpi_disabled 0	/* ACPI always enabled on IA64 */
 #define acpi_noirq 0	/* ACPI always enabled on IA64 */
 #define acpi_pci_disabled 0 /* ACPI PCI always enabled on IA64 */
 #define acpi_strict 1	/* no ACPI spec workarounds on IA64 */
+#define acpi_processor_cstate_check(x) (x) /* no idle limits on IA64 :) */
 static inline void disable_acpi(void) { }
 
 const char *acpi_get_sysname (void);
 int acpi_request_vector (u32 int_type);
 int acpi_gsi_to_irq (u32 gsi, unsigned int *irq);
 
+/* routines for saving/restoring kernel state */
+extern int acpi_save_state_mem(void);
+extern void acpi_restore_state_mem(void);
+extern unsigned long acpi_wakeup_address;
+
+/*
+ * Record the cpei override flag and current logical cpu. This is
+ * useful for CPU removal.
+ */
+extern unsigned int can_cpei_retarget(void);
+extern unsigned int is_cpu_cpei_target(unsigned int cpu);
+extern void set_cpei_target_cpu(unsigned int cpu);
+extern unsigned int get_cpei_target_cpu(void);
+extern void prefill_possible_map(void);
+extern int additional_cpus;
+
 #ifdef CONFIG_ACPI_NUMA
-/* Proximity bitmap length; _PXM is at most 255 (8 bit)*/
+#if MAX_NUMNODES > 256
+#define MAX_PXM_DOMAINS MAX_NUMNODES
+#else
 #define MAX_PXM_DOMAINS (256)
+#endif
 extern int __devinitdata pxm_to_nid_map[MAX_PXM_DOMAINS];
 extern int __initdata nid_to_pxm_map[MAX_NUMNODES];
 #endif
-
-extern u16 ia64_acpiid_to_sapicid[];
 
 #endif /*__KERNEL__*/
 

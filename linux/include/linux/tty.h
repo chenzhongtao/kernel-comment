@@ -5,24 +5,14 @@
  * 'tty.h' defines some structures used by tty_io.c and some defines.
  */
 
-/*
- * These constants are also useful for user-level apps (e.g., VC
- * resizing).
- */
-#define MIN_NR_CONSOLES 1       /* must be at least 1 */
-#define MAX_NR_CONSOLES	63	/* serial lines start at 64 */
-#define MAX_NR_USER_CONSOLES 63	/* must be root to allocate above this */
-		/* Note: the ioctl VT_GETSTATE does not work for
-		   consoles 16 and higher (since it returns a short) */
-
 #ifdef __KERNEL__
-#include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/major.h>
 #include <linux/termios.h>
 #include <linux/workqueue.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_ldisc.h>
+#include <linux/mutex.h>
 
 #include <asm/system.h>
 
@@ -31,80 +21,29 @@
  * (Note: the *_driver.minor_start values 1, 64, 128, 192 are
  * hardcoded at present.)
  */
-#define NR_PTYS	CONFIG_LEGACY_PTY_COUNT   /* Number of legacy ptys */
 #define NR_UNIX98_PTY_DEFAULT	4096      /* Default maximum for Unix98 ptys */
 #define NR_UNIX98_PTY_MAX	(1 << MINORBITS) /* Absolute limit */
-#define NR_LDISCS		16
+#define NR_LDISCS		17
 
-/*
- * These are set up by the setup-routine at boot-time:
- */
-
-struct screen_info {
-	u8  orig_x;		/* 0x00 */
-	u8  orig_y;		/* 0x01 */
-	u16 dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
-	u16 orig_video_page;	/* 0x04 */
-	u8  orig_video_mode;	/* 0x06 */
-	u8  orig_video_cols;	/* 0x07 */
-	u16 unused2;		/* 0x08 */
-	u16 orig_video_ega_bx;	/* 0x0a */
-	u16 unused3;		/* 0x0c */
-	u8  orig_video_lines;	/* 0x0e */
-	u8  orig_video_isVGA;	/* 0x0f */
-	u16 orig_video_points;	/* 0x10 */
-
-	/* VESA graphic mode -- linear frame buffer */
-	u16 lfb_width;		/* 0x12 */
-	u16 lfb_height;		/* 0x14 */
-	u16 lfb_depth;		/* 0x16 */
-	u32 lfb_base;		/* 0x18 */
-	u32 lfb_size;		/* 0x1c */
-	u16 dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
-	u16 lfb_linelength;	/* 0x24 */
-	u8  red_size;		/* 0x26 */
-	u8  red_pos;		/* 0x27 */
-	u8  green_size;		/* 0x28 */
-	u8  green_pos;		/* 0x29 */
-	u8  blue_size;		/* 0x2a */
-	u8  blue_pos;		/* 0x2b */
-	u8  rsvd_size;		/* 0x2c */
-	u8  rsvd_pos;		/* 0x2d */
-	u16 vesapm_seg;		/* 0x2e */
-	u16 vesapm_off;		/* 0x30 */
-	u16 pages;		/* 0x32 */
-	u16 vesa_attributes;	/* 0x34 */
-				/* 0x36 -- 0x3f reserved for future expansion */
-};
-
-extern struct screen_info screen_info;
-
-#define ORIG_X			(screen_info.orig_x)
-#define ORIG_Y			(screen_info.orig_y)
-#define ORIG_VIDEO_MODE		(screen_info.orig_video_mode)
-#define ORIG_VIDEO_COLS 	(screen_info.orig_video_cols)
-#define ORIG_VIDEO_EGA_BX	(screen_info.orig_video_ega_bx)
-#define ORIG_VIDEO_LINES	(screen_info.orig_video_lines)
-#define ORIG_VIDEO_ISVGA	(screen_info.orig_video_isVGA)
-#define ORIG_VIDEO_POINTS       (screen_info.orig_video_points)
-
-#define VIDEO_TYPE_MDA		0x10	/* Monochrome Text Display	*/
-#define VIDEO_TYPE_CGA		0x11	/* CGA Display 			*/
-#define VIDEO_TYPE_EGAM		0x20	/* EGA/VGA in Monochrome Mode	*/
-#define VIDEO_TYPE_EGAC		0x21	/* EGA in Color Mode		*/
-#define VIDEO_TYPE_VGAC		0x22	/* VGA+ in Color Mode		*/
-#define VIDEO_TYPE_VLFB		0x23	/* VESA VGA in graphic mode	*/
-
-#define VIDEO_TYPE_PICA_S3	0x30	/* ACER PICA-61 local S3 video	*/
-#define VIDEO_TYPE_MIPS_G364	0x31    /* MIPS Magnum 4000 G364 video  */
-#define VIDEO_TYPE_SGI          0x33    /* Various SGI graphics hardware */
-
-#define VIDEO_TYPE_TGAC		0x40	/* DEC TGA */
-
-#define VIDEO_TYPE_SUN          0x50    /* Sun frame buffer. */
-#define VIDEO_TYPE_SUNPCI       0x51    /* Sun PCI based frame buffer. */
-
-#define VIDEO_TYPE_PMAC		0x60	/* PowerMacintosh frame buffer. */
+/* line disciplines */
+#define N_TTY		0
+#define N_SLIP		1
+#define N_MOUSE		2
+#define N_PPP		3
+#define N_STRIP		4
+#define N_AX25		5
+#define N_X25		6	/* X.25 async */
+#define N_6PACK		7
+#define N_MASC		8	/* Reserved for Mobitex module <kaz@cafe.net> */
+#define N_R3964		9	/* Reserved for Simatic R3964 module */
+#define N_PROFIBUS_FDL	10	/* Reserved for Profibus <Dave@mvhi.com> */
+#define N_IRDA		11	/* Linux IrDa - http://irda.sourceforge.net/ */
+#define N_SMSBLOCK	12	/* SMS block mode - for talking to GSM data */
+				/* cards about SMS messages */
+#define N_HDLC		13	/* synchronous HDLC */
+#define N_SYNC_PPP	14	/* synchronous PPP */
+#define N_HCI		15	/* Bluetooth HCI UART */
+#define N_GIGASET_M101	16	/* Siemens Gigaset M101 serial DECT adapter */
 
 /*
  * This character is the same as _POSIX_VDISABLE: it cannot be used as
@@ -120,22 +59,27 @@ extern struct screen_info screen_info;
  */
 #define TTY_FLIPBUF_SIZE 512
 
-struct tty_flip_buffer {
-	struct work_struct		work;
-	struct semaphore pty_sem;
-	char		*char_buf_ptr;
-	unsigned char	*flag_buf_ptr;
-	int		count;
-	int		buf_num;
-	unsigned char	char_buf[2*TTY_FLIPBUF_SIZE];
-	char		flag_buf[2*TTY_FLIPBUF_SIZE];
-	unsigned char	slop[4]; /* N.B. bug overwrites buffer by 1 */
+struct tty_buffer {
+	struct tty_buffer *next;
+	char *char_buf_ptr;
+	unsigned char *flag_buf_ptr;
+	int used;
+	int size;
+	int commit;
+	int read;
+	/* Data points here */
+	unsigned long data[0];
 };
-/*
- * The pty uses char_buf and flag_buf as a contiguous buffer
- */
-#define PTY_BUF_SIZE	4*TTY_FLIPBUF_SIZE
 
+struct tty_bufhead {
+	struct delayed_work work;
+	struct semaphore pty_sem;
+	spinlock_t lock;
+	struct tty_buffer *head;	/* Queue head */
+	struct tty_buffer *tail;	/* Active buffer */
+	struct tty_buffer *free;	/* Free queue head */
+	int memory_used;		/* Buffer space used excluding free queue */
+};
 /*
  * When a break, frame error, or parity error happens, these codes are
  * stuffed into the flags buffer.
@@ -228,6 +172,7 @@ struct tty_flip_buffer {
 #define L_IEXTEN(tty)	_L_FLAG((tty),IEXTEN)
 
 struct device;
+struct signal_struct;
 /*
  * Where all of the state associated with a tty is kept while the tty
  * is open.  Since the termios state should be kept even if the tty
@@ -244,22 +189,22 @@ struct tty_struct {
 	struct tty_driver *driver;
 	int index;
 	struct tty_ldisc ldisc;
-	struct semaphore termios_sem;
-	struct termios *termios, *termios_locked;
+	struct mutex termios_mutex;
+	struct ktermios *termios, *termios_locked;
 	char name[64];
-	int pgrp;
-	int session;
+	struct pid *pgrp;
+	struct pid *session;
 	unsigned long flags;
 	int count;
 	struct winsize winsize;
 	unsigned char stopped:1, hw_stopped:1, flow_stopped:1, packet:1;
 	unsigned char low_latency:1, warned:1;
 	unsigned char ctrl_status;
+	unsigned int receive_room;	/* Bytes free for queue */
 
 	struct tty_struct *link;
 	struct fasync_struct *fasync;
-	struct tty_flip_buffer flip;
-	int max_flip_cnt;
+	struct tty_bufhead buf;
 	int alt_speed;		/* For magic substitution of 38400 bps */
 	wait_queue_head_t write_wait;
 	wait_queue_head_t read_wait;
@@ -289,8 +234,8 @@ struct tty_struct {
 	int canon_data;
 	unsigned long canon_head;
 	unsigned int canon_column;
-	struct semaphore atomic_read;
-	struct semaphore atomic_write;
+	struct mutex atomic_read_lock;
+	struct mutex atomic_write_lock;
 	unsigned char *write_buf;
 	int write_cnt;
 	spinlock_t read_lock;
@@ -317,20 +262,20 @@ struct tty_struct {
 #define TTY_DO_WRITE_WAKEUP 	5	/* Call write_wakeup after queuing new */
 #define TTY_PUSH 		6	/* n_tty private */
 #define TTY_CLOSING 		7	/* ->close() in progress */
-#define TTY_DONT_FLIP 		8	/* Defer buffer flip */
 #define TTY_LDISC 		9	/* Line discipline attached */
 #define TTY_HW_COOK_OUT 	14	/* Hardware can do output cooking */
 #define TTY_HW_COOK_IN 		15	/* Hardware can do input cooking */
 #define TTY_PTY_LOCK 		16	/* pty private */
 #define TTY_NO_WRITE_SPLIT 	17	/* Preserve write boundaries to driver */
 #define TTY_HUPPED 		18	/* Post driver->hangup() */
+#define TTY_FLUSHING		19	/* Flushing to ldisc in progress */
+#define TTY_FLUSHPENDING	20	/* Queued buffer flush pending */
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
 extern void tty_write_flush(struct tty_struct *);
 
-extern struct termios tty_std_termios;
-extern int fg_console, last_console, want_console;
+extern struct ktermios tty_std_termios;
 
 extern int kmsg_redirect;
 
@@ -345,26 +290,36 @@ extern int tty_check_change(struct tty_struct * tty);
 extern void stop_tty(struct tty_struct * tty);
 extern void start_tty(struct tty_struct * tty);
 extern int tty_register_ldisc(int disc, struct tty_ldisc *new_ldisc);
+extern int tty_unregister_ldisc(int disc);
 extern int tty_register_driver(struct tty_driver *driver);
 extern int tty_unregister_driver(struct tty_driver *driver);
-extern void tty_register_device(struct tty_driver *driver, unsigned index, struct device *dev);
+extern struct device *tty_register_device(struct tty_driver *driver,
+					  unsigned index, struct device *dev);
 extern void tty_unregister_device(struct tty_driver *driver, unsigned index);
 extern int tty_read_raw_data(struct tty_struct *tty, unsigned char *bufp,
 			     int buflen);
 extern void tty_write_message(struct tty_struct *tty, char *msg);
 
-extern int is_orphaned_pgrp(int pgrp);
+extern int is_current_pgrp_orphaned(void);
 extern int is_ignored(int sig);
 extern int tty_signal(int sig, struct tty_struct *tty);
 extern void tty_hangup(struct tty_struct * tty);
 extern void tty_vhangup(struct tty_struct * tty);
 extern void tty_unhangup(struct file *filp);
 extern int tty_hung_up_p(struct file * filp);
+extern int is_tty(struct file *filp);
 extern void do_SAK(struct tty_struct *tty);
+extern void __do_SAK(struct tty_struct *tty);
 extern void disassociate_ctty(int priv);
+extern void no_tty(void);
 extern void tty_flip_buffer_push(struct tty_struct *tty);
-extern int tty_get_baud_rate(struct tty_struct *tty);
-extern int tty_termios_baud_rate(struct termios *termios);
+extern speed_t tty_get_baud_rate(struct tty_struct *tty);
+extern speed_t tty_termios_baud_rate(struct ktermios *termios);
+extern speed_t tty_termios_input_baud_rate(struct ktermios *termios);
+extern void tty_termios_encode_baud_rate(struct ktermios *termios, speed_t ibaud, speed_t obaud);
+extern void tty_encode_baud_rate(struct tty_struct *tty, speed_t ibaud, speed_t obaud);
+extern void tty_termios_copy_hw(struct ktermios *new, struct ktermios *old);
+extern int tty_termios_hw_change(struct ktermios *a, struct ktermios *b);
 
 extern struct tty_ldisc *tty_ldisc_ref(struct tty_struct *);
 extern void tty_ldisc_deref(struct tty_ldisc *);
@@ -376,11 +331,56 @@ extern void tty_ldisc_put(int);
 extern void tty_wakeup(struct tty_struct *tty);
 extern void tty_ldisc_flush(struct tty_struct *tty);
 
-struct semaphore;
-extern struct semaphore tty_sem;
+extern int tty_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
+		     unsigned long arg);
+extern int tty_mode_ioctl(struct tty_struct *tty, struct file *file,
+			unsigned int cmd, unsigned long arg);
+extern int tty_perform_flush(struct tty_struct *tty, unsigned long arg);
+extern dev_t tty_devnum(struct tty_struct *tty);
+extern void proc_clear_tty(struct task_struct *p);
+extern struct tty_struct *get_current_tty(void);
+
+extern struct mutex tty_mutex;
+
+extern void tty_write_unlock(struct tty_struct *tty);
+extern int tty_write_lock(struct tty_struct *tty, int ndelay);
+#define tty_is_writelocked(tty)  (mutex_is_locked(&tty->atomic_write_lock))
+
+
 
 /* n_tty.c */
 extern struct tty_ldisc tty_ldisc_N_TTY;
+
+/* tty_audit.c */
+#ifdef CONFIG_AUDIT
+extern void tty_audit_add_data(struct tty_struct *tty, unsigned char *data,
+			       size_t size);
+extern void tty_audit_exit(void);
+extern void tty_audit_fork(struct signal_struct *sig);
+extern void tty_audit_push(struct tty_struct *tty);
+extern void tty_audit_push_task(struct task_struct *tsk, uid_t loginuid);
+extern void tty_audit_opening(void);
+#else
+static inline void tty_audit_add_data(struct tty_struct *tty,
+				      unsigned char *data, size_t size)
+{
+}
+static inline void tty_audit_exit(void)
+{
+}
+static inline void tty_audit_fork(struct signal_struct *sig)
+{
+}
+static inline void tty_audit_push(struct tty_struct *tty)
+{
+}
+static inline void tty_audit_push_task(struct task_struct *tsk, uid_t loginuid)
+{
+}
+static inline void tty_audit_opening(void)
+{
+}
+#endif
 
 /* tty_ioctl.c */
 extern int n_tty_ioctl(struct tty_struct * tty, struct file * file,
@@ -402,11 +402,6 @@ extern void console_print(const char *);
 
 extern int vt_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg);
-
-static inline dev_t tty_devnum(struct tty_struct *tty)
-{
-	return MKDEV(tty->driver->major, tty->driver->minor_start) + tty->index;
-}
 
 #endif /* __KERNEL__ */
 #endif

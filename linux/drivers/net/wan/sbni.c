@@ -37,7 +37,6 @@
  *	Known problem: this driver wasn't tested on multiprocessor machine.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
@@ -55,6 +54,7 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 
+#include <net/net_namespace.h>
 #include <net/arp.h>
 
 #include <asm/io.h>
@@ -120,7 +120,7 @@ static int  sbni_ioctl( struct net_device *, struct ifreq *, int );
 static struct net_device_stats  *sbni_get_stats( struct net_device * );
 static void  set_multicast_list( struct net_device * );
 
-static irqreturn_t sbni_interrupt( int, void *, struct pt_regs * );
+static irqreturn_t sbni_interrupt( int, void * );
 static void  handle_channel( struct net_device * );
 static int   recv_frame( struct net_device * );
 static void  send_frame( struct net_device * );
@@ -176,7 +176,7 @@ static u32	mac[  SBNI_MAX_NUM_CARDS ] __initdata;
 
 #ifndef MODULE
 typedef u32  iarr[];
-static iarr  *dest[5] = { &io, &irq, &baud, &rxl, &mac };
+static iarr __initdata *dest[5] = { &io, &irq, &baud, &rxl, &mac };
 #endif
 
 /* A zero-terminated list of I/O addresses to be probed on ISA bus */
@@ -216,8 +216,6 @@ static void __init sbni_devsetup(struct net_device *dev)
 	dev->get_stats		= &sbni_get_stats;
 	dev->set_multicast_list	= &set_multicast_list;
 	dev->do_ioctl		= &sbni_ioctl;
-
-	SET_MODULE_OWNER( dev );
 }
 
 int __init sbni_probe(int unit)
@@ -502,10 +500,10 @@ sbni_start_xmit( struct sk_buff  *skb,  struct net_device  *dev )
  */ 
 
 static irqreturn_t
-sbni_interrupt( int  irq,  void  *dev_id,  struct pt_regs  *regs )
+sbni_interrupt( int  irq,  void  *dev_id )
 {
-	struct net_device	  *dev = (struct net_device *) dev_id;
-	struct net_local  *nl  = (struct net_local *) dev->priv;
+	struct net_device	  *dev = dev_id;
+	struct net_local  *nl  = dev->priv;
 	int	repeat;
 
 	spin_lock( &nl->lock );
@@ -596,8 +594,8 @@ recv_frame( struct net_device  *dev )
 
 	u32  crc = CRC32_INITIAL;
 
-	unsigned  framelen, frameno, ack;
-	unsigned  is_first, frame_ok;
+	unsigned  framelen = 0, frameno, ack;
+	unsigned  is_first, frame_ok = 0;
 
 	if( check_fhdr( ioaddr, &framelen, &frameno, &ack, &is_first, &crc ) ) {
 		frame_ok = framelen > 4
@@ -605,8 +603,7 @@ recv_frame( struct net_device  *dev )
 			:  skip_tail( ioaddr, framelen, crc );
 		if( frame_ok )
 			interpret_ack( dev, ack );
-	} else
-		frame_ok = 0;
+	}
 
 	outb( inb( ioaddr + CSR0 ) ^ CT_ZER, ioaddr + CSR0 );
 	if( frame_ok ) {
@@ -1000,11 +997,6 @@ get_rx_buf( struct net_device  *dev )
 	if( !skb )
 		return  NULL;
 
-#ifdef CONFIG_SBNI_MULTILINE
-	skb->dev = ((struct net_local *) dev->priv)->master;
-#else
-	skb->dev = dev;
-#endif
 	skb_reserve( skb, 2 );		/* Align IP on longword boundaries */
 	return  skb;
 }
@@ -1193,7 +1185,7 @@ sbni_open( struct net_device  *dev )
 			}
 	}
 
-	if( request_irq(dev->irq, sbni_interrupt, SA_SHIRQ, dev->name, dev) ) {
+	if( request_irq(dev->irq, sbni_interrupt, IRQF_SHARED, dev->name, dev) ) {
 		printk( KERN_ERR "%s: unable to get IRQ %d.\n",
 			dev->name, dev->irq );
 		return  -EAGAIN;
@@ -1368,7 +1360,7 @@ sbni_ioctl( struct net_device  *dev,  struct ifreq  *ifr,  int  cmd )
 
 		if (copy_from_user( slave_name, ifr->ifr_data, sizeof slave_name ))
 			return -EFAULT;
-		slave_dev = dev_get_by_name( slave_name );
+		slave_dev = dev_get_by_name(&init_net, slave_name );
 		if( !slave_dev  ||  !(slave_dev->flags & IFF_UP) ) {
 			printk( KERN_ERR "%s: trying to enslave non-active "
 				"device %s\n", dev->name, slave_name );
@@ -1495,8 +1487,7 @@ module_param(skip_pci_probe, bool, 0);
 MODULE_LICENSE("GPL");
 
 
-int
-init_module( void )
+int __init init_module( void )
 {
 	struct net_device  *dev;
 	int err;

@@ -3,7 +3,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996, 1999, 2001 Ralf Baechle
+ * Copyright (C) 1995, 96, 99, 2001, 06 Ralf Baechle
  * Copyright (C) 1999 Silicon Graphics, Inc.
  * Copyright (C) 2001 MIPS Technologies, Inc.
  */
@@ -13,14 +13,8 @@
 #include <linux/posix_types.h>
 
 typedef unsigned char cc_t;
-#if (_MIPS_SZLONG == 32)
-typedef unsigned long speed_t;
-typedef unsigned long tcflag_t;
-#endif
-#if (_MIPS_SZLONG == 64)
-typedef __u32 speed_t;
-typedef __u32 tcflag_t;
-#endif
+typedef unsigned int speed_t;
+typedef unsigned int tcflag_t;
 
 /*
  * The ABI says nothing about NCC but seems to use NCCS as
@@ -34,6 +28,28 @@ struct termios {
 	tcflag_t c_lflag;		/* local mode flags */
 	cc_t c_line;			/* line discipline */
 	cc_t c_cc[NCCS];		/* control characters */
+};
+
+struct termios2 {
+	tcflag_t c_iflag;		/* input mode flags */
+	tcflag_t c_oflag;		/* output mode flags */
+	tcflag_t c_cflag;		/* control mode flags */
+	tcflag_t c_lflag;		/* local mode flags */
+	cc_t c_line;			/* line discipline */
+	cc_t c_cc[NCCS];		/* control characters */
+	speed_t c_ispeed;		/* input speed */
+	speed_t c_ospeed;		/* output speed */
+};
+
+struct ktermios {
+	tcflag_t c_iflag;		/* input mode flags */
+	tcflag_t c_oflag;		/* output mode flags */
+	tcflag_t c_cflag;		/* control mode flags */
+	tcflag_t c_lflag;		/* local mode flags */
+	cc_t c_line;			/* line discipline */
+	cc_t c_cc[NCCS];		/* control characters */
+	speed_t c_ispeed;		/* input speed */
+	speed_t c_ospeed;		/* output speed */
 };
 
 /* c_cc characters */
@@ -77,7 +93,7 @@ struct termios {
 #define IXANY	0004000		/* Any character will restart after stop.  */
 #define IXOFF	0010000		/* Enable start/stop input control.  */
 #define IMAXBEL	0020000		/* Ring bell when input queue is full.  */
-#define IUTF8	0040000		/* Input is UTF8 */
+#define IUTF8	0040000		/* Input is UTF-8 */
 
 /* c_oflag bits */
 #define OPOST	0000001		/* Perform output processing.  */
@@ -148,6 +164,7 @@ struct termios {
 #define HUPCL	0002000		/* Hang up on last close.  */
 #define CLOCAL	0004000		/* Ignore modem status lines.  */
 #define CBAUDEX 0010000
+#define    BOTHER 0010000
 #define    B57600 0010001
 #define   B115200 0010002
 #define   B230400 0010003
@@ -163,9 +180,11 @@ struct termios {
 #define  B3000000 0010015
 #define  B3500000 0010016
 #define  B4000000 0010017
-#define CIBAUD	  002003600000	/* input baud rate (not used) */
+#define CIBAUD	  002003600000	/* input baud rate */
 #define CMSPAR    010000000000	/* mark or space (stick) parity */
-#define CRTSCTS	  020000000000		/* flow control */
+#define CRTSCTS	  020000000000	/* flow control */
+
+#define IBSHIFT	16		/* Shift from CBAUD to CIBAUD */
 
 /* c_lflag bits */
 #define ISIG	0000001		/* Enable signals.  */

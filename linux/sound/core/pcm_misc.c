@@ -1,6 +1,6 @@
 /*
  *  PCM Interface - misc routines
- *  Copyright (c) 1998 by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) 1998 by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -207,6 +207,8 @@ int snd_pcm_format_signed(snd_pcm_format_t format)
 	return val;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_signed);
+
 /**
  * snd_pcm_format_unsigned - Check the PCM format is unsigned linear
  * @format: the format to check
@@ -224,6 +226,8 @@ int snd_pcm_format_unsigned(snd_pcm_format_t format)
 	return !val;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_unsigned);
+
 /**
  * snd_pcm_format_linear - Check the PCM format is linear
  * @format: the format to check
@@ -234,6 +238,8 @@ int snd_pcm_format_linear(snd_pcm_format_t format)
 {
 	return snd_pcm_format_signed(format) >= 0;
 }
+
+EXPORT_SYMBOL(snd_pcm_format_linear);
 
 /**
  * snd_pcm_format_little_endian - Check the PCM format is little-endian
@@ -252,6 +258,8 @@ int snd_pcm_format_little_endian(snd_pcm_format_t format)
 	return val;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_little_endian);
+
 /**
  * snd_pcm_format_big_endian - Check the PCM format is big-endian
  * @format: the format to check
@@ -269,21 +277,7 @@ int snd_pcm_format_big_endian(snd_pcm_format_t format)
 	return !val;
 }
 
-/**
- * snd_pcm_format_cpu_endian - Check the PCM format is CPU-endian
- * @format: the format to check
- *
- * Returns 1 if the given PCM format is CPU-endian, 0 if
- * opposite, or a negative error code if endian not specified.
- */
-int snd_pcm_format_cpu_endian(snd_pcm_format_t format)
-{
-#ifdef SNDRV_LITTLE_ENDIAN
-	return snd_pcm_format_little_endian(format);
-#else
-	return snd_pcm_format_big_endian(format);
-#endif
-}
+EXPORT_SYMBOL(snd_pcm_format_big_endian);
 
 /**
  * snd_pcm_format_width - return the bit-width of the format
@@ -302,6 +296,8 @@ int snd_pcm_format_width(snd_pcm_format_t format)
 	return val;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_width);
+
 /**
  * snd_pcm_format_physical_width - return the physical bit-width of the format
  * @format: the format to check
@@ -319,6 +315,8 @@ int snd_pcm_format_physical_width(snd_pcm_format_t format)
 	return val;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_physical_width);
+
 /**
  * snd_pcm_format_size - return the byte size of samples on the given format
  * @format: the format to check
@@ -334,6 +332,8 @@ ssize_t snd_pcm_format_size(snd_pcm_format_t format, size_t samples)
 	return samples * phys_width / 8;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_size);
+
 /**
  * snd_pcm_format_silence_64 - return the silent data in 8 bytes array
  * @format: the format to check
@@ -348,6 +348,8 @@ const unsigned char *snd_pcm_format_silence_64(snd_pcm_format_t format)
 		return NULL;
 	return pcm_formats[format].silence;
 }
+
+EXPORT_SYMBOL(snd_pcm_format_silence_64);
 
 /**
  * snd_pcm_format_set_silence - set the silence data on the buffer
@@ -418,35 +420,7 @@ int snd_pcm_format_set_silence(snd_pcm_format_t format, void *data, unsigned int
 	return 0;
 }
 
-/* [width][unsigned][bigendian] */
-static int linear_formats[4][2][2] = {
-	{{ SNDRV_PCM_FORMAT_S8, SNDRV_PCM_FORMAT_S8},
-	 { SNDRV_PCM_FORMAT_U8, SNDRV_PCM_FORMAT_U8}},
-	{{SNDRV_PCM_FORMAT_S16_LE, SNDRV_PCM_FORMAT_S16_BE},
-	 {SNDRV_PCM_FORMAT_U16_LE, SNDRV_PCM_FORMAT_U16_BE}},
-	{{SNDRV_PCM_FORMAT_S24_LE, SNDRV_PCM_FORMAT_S24_BE},
-	 {SNDRV_PCM_FORMAT_U24_LE, SNDRV_PCM_FORMAT_U24_BE}},
-	{{SNDRV_PCM_FORMAT_S32_LE, SNDRV_PCM_FORMAT_S32_BE},
-	 {SNDRV_PCM_FORMAT_U32_LE, SNDRV_PCM_FORMAT_U32_BE}}
-};
-
-/**
- * snd_pcm_build_linear_format - return the suitable linear format for the given condition
- * @width: the bit-width
- * @unsignd: 1 if unsigned, 0 if signed.
- * @big_endian: 1 if big-endian, 0 if little-endian
- *
- * Returns the suitable linear format for the given condition.
- */
-snd_pcm_format_t snd_pcm_build_linear_format(int width, int unsignd, int big_endian)
-{
-	if (width & 7)
-		return SND_PCM_FORMAT_UNKNOWN;
-	width = (width / 8) - 1;
-	if (width < 0 || width >= 4)
-		return SND_PCM_FORMAT_UNKNOWN;
-	return linear_formats[width][!!unsignd][!!big_endian];
-}
+EXPORT_SYMBOL(snd_pcm_format_set_silence);
 
 /**
  * snd_pcm_limit_hw_rates - determine rate_min/rate_max fields
@@ -457,25 +431,40 @@ snd_pcm_format_t snd_pcm_build_linear_format(int width, int unsignd, int big_end
  *
  * Returns zero if successful.
  */
-int snd_pcm_limit_hw_rates(snd_pcm_runtime_t *runtime)
+int snd_pcm_limit_hw_rates(struct snd_pcm_runtime *runtime)
 {
-	static unsigned rates[] = {
-		/* ATTENTION: these values depend on the definition in pcm.h! */
-		5512, 8000, 11025, 16000, 22050, 32000, 44100, 48000,
-		64000, 88200, 96000, 176400, 192000
-	};
 	int i;
-	for (i = 0; i < (int)ARRAY_SIZE(rates); i++) {
+	for (i = 0; i < (int)snd_pcm_known_rates.count; i++) {
 		if (runtime->hw.rates & (1 << i)) {
-			runtime->hw.rate_min = rates[i];
+			runtime->hw.rate_min = snd_pcm_known_rates.list[i];
 			break;
 		}
 	}
-	for (i = (int)ARRAY_SIZE(rates) - 1; i >= 0; i--) {
+	for (i = (int)snd_pcm_known_rates.count - 1; i >= 0; i--) {
 		if (runtime->hw.rates & (1 << i)) {
-			runtime->hw.rate_max = rates[i];
+			runtime->hw.rate_max = snd_pcm_known_rates.list[i];
 			break;
 		}
 	}
 	return 0;
 }
+
+EXPORT_SYMBOL(snd_pcm_limit_hw_rates);
+
+/**
+ * snd_pcm_rate_to_rate_bit - converts sample rate to SNDRV_PCM_RATE_xxx bit
+ * @rate: the sample rate to convert
+ *
+ * Returns the SNDRV_PCM_RATE_xxx flag that corresponds to the given rate, or
+ * SNDRV_PCM_RATE_KNOT for an unknown rate.
+ */
+unsigned int snd_pcm_rate_to_rate_bit(unsigned int rate)
+{
+	unsigned int i;
+
+	for (i = 0; i < snd_pcm_known_rates.count; i++)
+		if (snd_pcm_known_rates.list[i] == rate)
+			return 1u << i;
+	return SNDRV_PCM_RATE_KNOT;
+}
+EXPORT_SYMBOL(snd_pcm_rate_to_rate_bit);

@@ -2,6 +2,8 @@
  *  linux/arch/arm/kernel/head.S
  *
  *  Copyright (C) 1994-2002 Russell King
+ *  Copyright (c) 2003 ARM Limited
+ *  All Rights Reserved
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -9,71 +11,52 @@
  *
  *  Kernel startup code for all 32-bit CPUs
  */
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <linux/init.h>
 
 #include <asm/assembler.h>
 #include <asm/domain.h>
-#include <asm/mach-types.h>
-#include <asm/procinfo.h>
 #include <asm/ptrace.h>
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
+#include <asm/memory.h>
+#include <asm/thread_info.h>
 #include <asm/system.h>
 
-#define PROCINFO_MMUFLAGS	8
-#define PROCINFO_INITFUNC	12
+#if (PHYS_OFFSET & 0x001fffff)
+#error "PHYS_OFFSET must be at an even 2MiB boundary!"
+#endif
 
-#define MACHINFO_PHYSRAM	4
-#define MACHINFO_PHYSIO		8
-#define MACHINFO_PGOFFIO	12
+#define KERNEL_RAM_VADDR	(PAGE_OFFSET + TEXT_OFFSET)
+#define KERNEL_RAM_PADDR	(PHYS_OFFSET + TEXT_OFFSET)
 
-#ifndef CONFIG_XIP_KERNEL
+#define ATAG_CORE 0x54410001
+#define ATAG_CORE_SIZE ((2*4 + 3*4) >> 2)
+
+
 /*
- * We place the page tables 16K below TEXTADDR.  Therefore, we must make sure
- * that TEXTADDR is correctly set.  Currently, we expect the least significant
- * 16 bits to be 0x8000, but we could probably relax this restriction to
- * TEXTADDR >= PAGE_OFFSET + 0x4000
- *
- * Note that swapper_pg_dir is the virtual address of the page tables, and
- * pgtbl gives us a position-independent reference to these tables.  We can
- * do this because stext == TEXTADDR
+ * swapper_pg_dir is the virtual address of the initial page table.
+ * We place the page tables 16K below KERNEL_RAM_VADDR.  Therefore, we must
+ * make sure that KERNEL_RAM_VADDR is correctly set.  Currently, we expect
+ * the least significant 16 bits to be 0x8000, but we could probably
+ * relax this restriction to KERNEL_RAM_VADDR >= PAGE_OFFSET + 0x4000.
  */
-#if (TEXTADDR & 0xffff) != 0x8000
-#error TEXTADDR must start at 0xXXXX8000
+#if (KERNEL_RAM_VADDR & 0xffff) != 0x8000
+#error KERNEL_RAM_VADDR must start at 0xXXXX8000
 #endif
 
 	.globl	swapper_pg_dir
-	.equ	swapper_pg_dir, TEXTADDR - 0x4000
+	.equ	swapper_pg_dir, KERNEL_RAM_VADDR - 0x4000
 
-	.macro	pgtbl, rd, phys
-	adr	\rd, stext
-	sub	\rd, \rd, #0x4000
+	.macro	pgtbl, rd
+	ldr	\rd, =(KERNEL_RAM_PADDR - 0x4000)
 	.endm
+
+#ifdef CONFIG_XIP_KERNEL
+#define KERNEL_START	XIP_VIRT_ADDR(CONFIG_XIP_PHYS_ADDR)
+#define KERNEL_END	_edata_loc
 #else
-/*
- * XIP Kernel:
- *
- * We place the page tables 16K below DATAADDR.  Therefore, we must make sure
- * that DATAADDR is correctly set.  Currently, we expect the least significant
- * 16 bits to be 0x8000, but we could probably relax this restriction to
- * DATAADDR >= PAGE_OFFSET + 0x4000
- *
- * Note that pgtbl is meant to return the physical address of swapper_pg_dir.
- * We can't make it relative to the kernel position in this case since
- * the kernel can physically be anywhere.
- */
-#if (DATAADDR & 0xffff) != 0x8000
-#error DATAADDR must start at 0xXXXX8000
-#endif
-
-	.globl	swapper_pg_dir
-	.equ	swapper_pg_dir, DATAADDR - 0x4000
-
-	.macro	pgtbl, rd, phys
-	ldr	\rd, =((DATAADDR - 0x4000) - VIRT_OFFSET)
-	add	\rd, \rd, \phys
-	.endm
+#define KERNEL_START	KERNEL_RAM_VADDR
+#define KERNEL_END	_end
 #endif
 
 /*
@@ -82,7 +65,7 @@
  *
  * This is normally called from the decompressor code.  The requirements
  * are: MMU = off, D-cache = off, I-cache = dont care, r0 = 0,
- * r1 = machine nr.
+ * r1 = machine nr, r2 = atags pointer.
  *
  * This code is mostly position independent, so if you link the kernel at
  * 0xc0008000, you call this at __pa(0xc0008000).
@@ -94,19 +77,19 @@
  * crap here - that's what the boot loader (or in extreme, well justified
  * circumstances, zImage) is for.
  */
-	__INIT
+	.section ".text.head", "ax"
 	.type	stext, %function
 ENTRY(stext)
-	msr	cpsr_c, #PSR_F_BIT | PSR_I_BIT | MODE_SVC @ ensure svc mode
+	msr	cpsr_c, #PSR_F_BIT | PSR_I_BIT | SVC_MODE @ ensure svc mode
 						@ and irqs disabled
+	mrc	p15, 0, r9, c0, c0		@ get processor id
 	bl	__lookup_processor_type		@ r5=procinfo r9=cpuid
 	movs	r10, r5				@ invalid processor (r5=0)?
-	moveq	r0, #'p'			@ yes, error 'p'
-	beq	__error
+	beq	__error_p			@ yes, error 'p'
 	bl	__lookup_machine_type		@ r5=machinfo
 	movs	r8, r5				@ invalid machine (r5=0)?
-	moveq	r0, #'a'			@ yes, error 'a'
-	beq	__error
+	beq	__error_a			@ yes, error 'a'
+	bl	__vet_atags
 	bl	__create_page_tables
 
 	/*
@@ -121,48 +104,48 @@ ENTRY(stext)
 	adr	lr, __enable_mmu		@ return (PIC) address
 	add	pc, r10, #PROCINFO_INITFUNC
 
-	.type	__switch_data, %object
-__switch_data:
-	.long	__mmap_switched
-	.long	__data_loc			@ r4
-	.long	__data_start			@ r5
-	.long	__bss_start			@ r6
-	.long	_end				@ r7
-	.long	processor_id			@ r4
-	.long	__machine_arch_type		@ r5
-	.long	cr_alignment			@ r6
-	.long	init_thread_union+8192		@ sp
+#if defined(CONFIG_SMP)
+	.type   secondary_startup, #function
+ENTRY(secondary_startup)
+	/*
+	 * Common entry point for secondary CPUs.
+	 *
+	 * Ensure that we're in SVC mode, and IRQs are disabled.  Lookup
+	 * the processor type - there is no need to check the machine type
+	 * as it has already been validated by the primary processor.
+	 */
+	msr	cpsr_c, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
+	mrc	p15, 0, r9, c0, c0		@ get processor id
+	bl	__lookup_processor_type
+	movs	r10, r5				@ invalid processor?
+	moveq	r0, #'p'			@ yes, error 'p'
+	beq	__error
 
-/*
- * The following fragment of code is executed with the MMU on, and uses
- * absolute addresses; this is not position independent.
- *
- *  r0  = cp#15 control register
- *  r1  = machine ID
- *  r9  = processor ID
- */
-	.type	__mmap_switched, %function
-__mmap_switched:
-	adr	r3, __switch_data + 4
+	/*
+	 * Use the page tables supplied from  __cpu_up.
+	 */
+	adr	r4, __secondary_data
+	ldmia	r4, {r5, r7, r13}		@ address to jump to after
+	sub	r4, r4, r5			@ mmu has been enabled
+	ldr	r4, [r7, r4]			@ get secondary_data.pgdir
+	adr	lr, __enable_mmu		@ return address
+	add	pc, r10, #PROCINFO_INITFUNC	@ initialise processor
+						@ (return control reg)
 
-	ldmia	r3!, {r4, r5, r6, r7}
-	cmp	r4, r5				@ Copy data segment if needed
-1:	cmpne	r5, r6
-	ldrne	fp, [r4], #4
-	strne	fp, [r5], #4
-	bne	1b
+	/*
+	 * r6  = &secondary_data
+	 */
+ENTRY(__secondary_switched)
+	ldr	sp, [r7, #4]			@ get secondary_data.stack
+	mov	fp, #0
+	b	secondary_start_kernel
 
-	mov	fp, #0				@ Clear BSS (and zero fp)
-1:	cmp	r6, r7
-	strcc	fp, [r6],#4
-	bcc	1b
-
-	ldmia	r3, {r4, r5, r6, sp}
-	str	r9, [r4]			@ Save processor ID
-	str	r1, [r5]			@ Save machine type
-	bic	r4, r0, #CR_A			@ Clear 'A' bit
-	stmia	r6, {r0, r4}			@ Save control register values
-	b	start_kernel
+	.type	__secondary_data, %object
+__secondary_data:
+	.long	.
+	.long	secondary_data
+	.long	__secondary_switched
+#endif /* defined(CONFIG_SMP) */
 
 
 
@@ -228,13 +211,12 @@ __turn_mmu_on:
  * r10 = procinfo
  *
  * Returns:
- *  r0, r3, r5, r6, r7 corrupted
+ *  r0, r3, r6, r7 corrupted
  *  r4 = physical page table address
  */
 	.type	__create_page_tables, %function
 __create_page_tables:
-	ldr	r5, [r8, #MACHINFO_PHYSRAM]	@ physram
-	pgtbl	r4, r5				@ page table address
+	pgtbl	r4				@ page table address
 
 	/*
 	 * Clear the 16K level 1 swapper page table
@@ -249,7 +231,7 @@ __create_page_tables:
 	teq	r0, r6
 	bne	1b
 
-	ldr	r7, [r10, #PROCINFO_MMUFLAGS]	@ mmuflags
+	ldr	r7, [r10, #PROCINFO_MM_MMUFLAGS] @ mm_mmuflags
 
 	/*
 	 * Create identity mapping for first MB of kernel to
@@ -263,45 +245,49 @@ __create_page_tables:
 
 	/*
 	 * Now setup the pagetables for our kernel direct
-	 * mapped region.  We round TEXTADDR down to the
-	 * nearest megabyte boundary.  It is assumed that
-	 * the kernel fits within 4 contigous 1MB sections.
+	 * mapped region.
 	 */
-	add	r0, r4,  #(TEXTADDR & 0xff000000) >> 18	@ start of kernel
-	str	r3, [r0, #(TEXTADDR & 0x00f00000) >> 18]!
+	add	r0, r4,  #(KERNEL_START & 0xff000000) >> 18
+	str	r3, [r0, #(KERNEL_START & 0x00f00000) >> 18]!
+	ldr	r6, =(KERNEL_END - 1)
+	add	r0, r0, #4
+	add	r6, r4, r6, lsr #18
+1:	cmp	r0, r6
 	add	r3, r3, #1 << 20
-	str	r3, [r0, #4]!			@ KERNEL + 1MB
-	add	r3, r3, #1 << 20
-	str	r3, [r0, #4]!			@ KERNEL + 2MB
-	add	r3, r3, #1 << 20
-	str	r3, [r0, #4]			@ KERNEL + 3MB
-
-	/*
-	 * Then map first 1MB of ram in case it contains our boot params.
-	 */
-	add	r0, r4, #VIRT_OFFSET >> 18
-	orr	r6, r5, r7
-	str	r6, [r0]
+	strls	r3, [r0], #4
+	bls	1b
 
 #ifdef CONFIG_XIP_KERNEL
 	/*
 	 * Map some ram to cover our .data and .bss areas.
-	 * Mapping 3MB should be plenty.
 	 */
-	sub	r3, r4, r5
-	mov	r3, r3, lsr #20
-	add	r0, r0, r3, lsl #2
-	add	r6, r6, r3, lsl #20
-	str	r6, [r0], #4
-	add	r6, r6, #(1 << 20)
-	str	r6, [r0], #4
-	add	r6, r6, #(1 << 20)
-	str	r6, [r0]
+	orr	r3, r7, #(KERNEL_RAM_PADDR & 0xff000000)
+	.if	(KERNEL_RAM_PADDR & 0x00f00000)
+	orr	r3, r3, #(KERNEL_RAM_PADDR & 0x00f00000)
+	.endif
+	add	r0, r4,  #(KERNEL_RAM_VADDR & 0xff000000) >> 18
+	str	r3, [r0, #(KERNEL_RAM_VADDR & 0x00f00000) >> 18]!
+	ldr	r6, =(_end - 1)
+	add	r0, r0, #4
+	add	r6, r4, r6, lsr #18
+1:	cmp	r0, r6
+	add	r3, r3, #1 << 20
+	strls	r3, [r0], #4
+	bls	1b
 #endif
 
-	bic	r7, r7, #0x0c			@ turn off cacheable
-						@ and bufferable bits
+	/*
+	 * Then map first 1MB of ram in case it contains our boot params.
+	 */
+	add	r0, r4, #PAGE_OFFSET >> 18
+	orr	r6, r7, #(PHYS_OFFSET & 0xff000000)
+	.if	(PHYS_OFFSET & 0x00f00000)
+	orr	r6, r6, #(PHYS_OFFSET & 0x00f00000)
+	.endif
+	str	r6, [r0]
+
 #ifdef CONFIG_DEBUG_LL
+	ldr	r7, [r10, #PROCINFO_IO_MMUFLAGS] @ io_mmuflags
 	/*
 	 * Map in IO space for serial debugging.
 	 * This allows debug messages to be output
@@ -321,20 +307,12 @@ __create_page_tables:
 	bne	1b
 #if defined(CONFIG_ARCH_NETWINDER) || defined(CONFIG_ARCH_CATS)
 	/*
-	 * If we're using the NetWinder, we need to map in
-	 * the 16550-type serial port for the debug messages
+	 * If we're using the NetWinder or CATS, we also need to map
+	 * in the 16550-type serial port for the debug messages
 	 */
-	teq	r1, #MACH_TYPE_NETWINDER
-	teqne	r1, #MACH_TYPE_CATS
-	bne	1f
-	add	r0, r4, #0x3fc0			@ ff000000
-	mov	r3, #0x7c000000
-	orr	r3, r3, r7
-	str	r3, [r0], #4
-	add	r3, r3, #1 << 20
-	str	r3, [r0], #4
-1:
-#endif
+	add	r0, r4, #0xff000000 >> 18
+	orr	r3, r7, #0x7c000000
+	str	r3, [r0]
 #endif
 #ifdef CONFIG_ARCH_RPC
 	/*
@@ -342,144 +320,14 @@ __create_page_tables:
 	 * Similar reasons here - for debug.  This is
 	 * only for Acorn RiscPC architectures.
 	 */
-	add	r0, r4, #0x80			@ 02000000
-	mov	r3, #0x02000000
-	orr	r3, r3, r7
+	add	r0, r4, #0x02000000 >> 18
+	orr	r3, r7, #0x02000000
 	str	r3, [r0]
-	add	r0, r4, #0x3600			@ d8000000
+	add	r0, r4, #0xd8000000 >> 18
 	str	r3, [r0]
+#endif
 #endif
 	mov	pc, lr
 	.ltorg
 
-
-
-/*
- * Exception handling.  Something went wrong and we can't proceed.  We
- * ought to tell the user, but since we don't have any guarantee that
- * we're even running on the right architecture, we do virtually nothing.
- *
- * r0 = ascii error character:
- *	a = invalid architecture
- *	p = invalid processor
- *	i = invalid calling convention
- *
- * Generally, only serious errors cause this.
- */
-	.type	__error, %function
-__error:
-#ifdef CONFIG_DEBUG_LL
-	mov	r8, r0				@ preserve r0
-	adr	r0, err_str
-	bl	printascii
-	mov	r0, r8
-	bl	printch
-#endif
-#ifdef CONFIG_ARCH_RPC
-/*
- * Turn the screen red on a error - RiscPC only.
- */
-	mov	r0, #0x02000000
-	mov	r3, #0x11
-	orr	r3, r3, r3, lsl #8
-	orr	r3, r3, r3, lsl #16
-	str	r3, [r0], #4
-	str	r3, [r0], #4
-	str	r3, [r0], #4
-	str	r3, [r0], #4
-#endif
-1:	mov	r0, r0
-	b	1b
-
-#ifdef CONFIG_DEBUG_LL
-	.type	err_str, %object
-err_str:
-	.asciz	"\nError: "
-	.align
-#endif
-
-/*
- * Read processor ID register (CP#15, CR0), and look up in the linker-built
- * supported processor list.  Note that we can't use the absolute addresses
- * for the __proc_info lists since we aren't running with the MMU on
- * (and therefore, we are not in the correct address space).  We have to
- * calculate the offset.
- *
- * Returns:
- *	r3, r4, r6 corrupted
- *	r5 = proc_info pointer in physical address space
- *	r9 = cpuid
- */
-	.type	__lookup_processor_type, %function
-__lookup_processor_type:
-	adr	r3, 3f
-	ldmda	r3, {r5, r6, r9}
-	sub	r3, r3, r9			@ get offset between virt&phys
-	add	r5, r5, r3			@ convert virt addresses to
-	add	r6, r6, r3			@ physical address space
-	mrc	p15, 0, r9, c0, c0		@ get processor id
-1:	ldmia	r5, {r3, r4}			@ value, mask
-	and	r4, r4, r9			@ mask wanted bits
-	teq	r3, r4
-	beq	2f
-	add	r5, r5, #PROC_INFO_SZ		@ sizeof(proc_info_list)
-	cmp	r5, r6
-	blt	1b
-	mov	r5, #0				@ unknown processor
-2:	mov	pc, lr
-
-/*
- * This provides a C-API version of the above function.
- */
-ENTRY(lookup_processor_type)
-	stmfd	sp!, {r4 - r6, r9, lr}
-	bl	__lookup_processor_type
-	mov	r0, r5
-	ldmfd	sp!, {r4 - r6, r9, pc}
-
-/*
- * Look in include/asm-arm/procinfo.h and arch/arm/kernel/arch.[ch] for
- * more information about the __proc_info and __arch_info structures.
- */
-	.long	__proc_info_begin
-	.long	__proc_info_end
-3:	.long	.
-	.long	__arch_info_begin
-	.long	__arch_info_end
-
-/*
- * Lookup machine architecture in the linker-build list of architectures.
- * Note that we can't use the absolute addresses for the __arch_info
- * lists since we aren't running with the MMU on (and therefore, we are
- * not in the correct address space).  We have to calculate the offset.
- *
- *  r1 = machine architecture number
- * Returns:
- *  r3, r4, r6 corrupted
- *  r5 = mach_info pointer in physical address space
- */
-	.type	__lookup_machine_type, %function
-__lookup_machine_type:
-	adr	r3, 3b
-	ldmia	r3, {r4, r5, r6}
-	sub	r3, r3, r4			@ get offset between virt&phys
-	add	r5, r5, r3			@ convert virt addresses to
-	add	r6, r6, r3			@ physical address space
-1:	ldr	r3, [r5]			@ get machine type
-	teq	r3, r1				@ matches loader number?
-	beq	2f				@ found
-	add	r5, r5, #SIZEOF_MACHINE_DESC	@ next machine_desc
-	cmp	r5, r6
-	blt	1b
-	mov	r5, #0				@ unknown machine
-2:	mov	pc, lr
-
-/*
- * This provides a C-API version of the above function.
- */
-ENTRY(lookup_machine_type)
-	stmfd	sp!, {r4 - r6, lr}
-	mov	r1, r0
-	bl	__lookup_machine_type
-	mov	r0, r5
-	ldmfd	sp!, {r4 - r6, pc}
+#include "head-common.S"

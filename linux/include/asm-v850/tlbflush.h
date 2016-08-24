@@ -56,13 +56,7 @@ static inline void flush_tlb_range(struct vm_area_struct *vma,
 	BUG ();
 }
 
-extern inline void flush_tlb_kernel_page(unsigned long addr)
-{
-	BUG ();
-}
-
-extern inline void flush_tlb_pgtables(struct mm_struct *mm,
-				      unsigned long start, unsigned long end)
+static inline void flush_tlb_kernel_page(unsigned long addr)
 {
 	BUG ();
 }

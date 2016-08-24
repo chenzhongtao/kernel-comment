@@ -87,11 +87,11 @@ typedef struct
 	{
 	USHORT		 ports[13];
 	OUR_DEVICE	 device[8];
-	Scsi_Cmnd	*pSCmnd;
+	struct scsi_cmnd *pSCmnd;
 	IDE_STRUCT	 ide;
 	ULONG		 startSector;
 	USHORT		 sectorCount;
-	Scsi_Cmnd	*SCpnt;
+	struct scsi_cmnd *SCpnt;
 	VOID		*buffer;
 	USHORT		 expectingIRQ;
 	}	ADAPTER240I, *PADAPTER240I;
@@ -247,19 +247,18 @@ static ULONG DecodeError (struct Scsi_Host *pshost, UCHAR status)
  *
  *	Parameters:		irq		- Hardware IRQ number.
  *					dev_id	-
- *					regs	-
  *
  *	Returns:		TRUE if drive is not ready in time.
  *
  ****************************************************************/
-static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
+static void Irq_Handler (int irq, void *dev_id)
 	{
-	struct Scsi_Host   *shost;			// Pointer to host data block
-	PADAPTER240I		padapter;		// Pointer to adapter control structure
-	USHORT		 	   *pports;			// I/O port array
-	Scsi_Cmnd		   *SCpnt;
-	UCHAR				status;
-	int					z;
+	struct Scsi_Host *shost;	// Pointer to host data block
+	PADAPTER240I padapter;		// Pointer to adapter control structure
+	USHORT *pports;			// I/O port array
+	struct scsi_cmnd *SCpnt;
+	UCHAR status;
+	int z;
 
 	DEB(printk ("\npsi240i received interrupt\n"));
 
@@ -329,7 +328,7 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 				pinquiryData->AdditionalLength = 35 - 4;
 
 				// Fill in vendor identification fields.
-				for ( z = 0;  z < 20;  z += 2 )
+				for ( z = 0;  z < 8;  z += 2 )
 					{
 					pinquiryData->VendorId[z]	  = ((UCHAR *)identifyData.ModelNumber)[z + 1];
 					pinquiryData->VendorId[z + 1] = ((UCHAR *)identifyData.ModelNumber)[z];
@@ -368,13 +367,13 @@ irqerror:;
 	SCpnt->scsi_done (SCpnt);
 	}
 
-static irqreturn_t do_Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t do_Irq_Handler (int irq, void *dev_id)
 {
 	unsigned long flags;
 	struct Scsi_Host *dev = dev_id;
 	
 	spin_lock_irqsave(dev->host_lock, flags);
-	Irq_Handler(irq, dev_id, regs);
+	Irq_Handler(irq, dev_id);
 	spin_unlock_irqrestore(dev->host_lock, flags);
 	return IRQ_HANDLED;
 }
@@ -390,12 +389,17 @@ static irqreturn_t do_Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
  *	Returns:		Status code.
  *
  ****************************************************************/
-int Psi240i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
+static int Psi240i_QueueCommand(struct scsi_cmnd *SCpnt,
+				void (*done)(struct scsi_cmnd *))
 	{
-	UCHAR		   *cdb = (UCHAR *)SCpnt->cmnd;					// Pointer to SCSI CDB
-	PADAPTER240I	padapter = HOSTDATA (SCpnt->device->host); 			// Pointer to adapter control structure
-	POUR_DEVICE 		pdev	 = &padapter->device [SCpnt->device->id];// Pointer to device information
-	UCHAR			rc;											// command return code
+	UCHAR *cdb = (UCHAR *)SCpnt->cmnd;
+	// Pointer to SCSI CDB
+	PADAPTER240I padapter = HOSTDATA (SCpnt->device->host);
+	// Pointer to adapter control structure
+	POUR_DEVICE pdev = &padapter->device [SCpnt->device->id];
+	// Pointer to device information
+	UCHAR rc;
+	// command return code
 
 	SCpnt->scsi_done = done;
 	padapter->ide.ide.ides.spigot = pdev->spigot;
@@ -509,7 +513,7 @@ int Psi240i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
  *	Returns:		Nothing.
  *
  **************************************************************************/
-void ReadChipMemory (void *pdata, USHORT base, USHORT length, USHORT port)
+static void ReadChipMemory (void *pdata, USHORT base, USHORT length, USHORT port)
 	{
 	USHORT	z, zz;
 	UCHAR	*pd = (UCHAR *)pdata;
@@ -538,7 +542,7 @@ void ReadChipMemory (void *pdata, USHORT base, USHORT length, USHORT port)
  *	Returns:		Number of adapters found.
  *
  ****************************************************************/
-int Psi240i_Detect (Scsi_Host_Template *tpnt)
+static int Psi240i_Detect (struct scsi_host_template *tpnt)
 	{
 	int					board;
 	int					count = 0;
@@ -654,12 +658,12 @@ static int Psi240i_Release(struct Scsi_Host *shost)
  *	Returns:		zero.
  *
  ****************************************************************/
-int Psi240i_BiosParam (struct scsi_device *sdev, struct block_device *dev,
+static int Psi240i_BiosParam (struct scsi_device *sdev, struct block_device *dev,
 		sector_t capacity, int geom[])
 	{
 	POUR_DEVICE	pdev;
 
-	pdev = &(HOSTDATA(sdev->host)->device[sdev->id]);
+	pdev = &(HOSTDATA(sdev->host)->device[sdev_id(sdev)]);
 
 	geom[0] = pdev->heads;
 	geom[1] = pdev->sectors;
@@ -669,7 +673,7 @@ int Psi240i_BiosParam (struct scsi_device *sdev, struct block_device *dev,
 
 MODULE_LICENSE("GPL");
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "psi240i", 
 	.name			= "PSI-240I EIDE Disk Controller",
 	.detect			= Psi240i_Detect,

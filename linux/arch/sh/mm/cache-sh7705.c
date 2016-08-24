@@ -9,7 +9,6 @@
  * for more details.
  *
  */
-
 #include <linux/init.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
@@ -25,21 +24,17 @@
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
 
-/* The 32KB cache on the SH7705 suffers from the same synonym problem
- * as SH4 CPUs */
-
-#define __pte_offset(address) \
-		((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1))
-#define pte_offset(dir, address) ((pte_t *) pmd_page_kernel(*(dir)) + \
-		__pte_offset(address))
-
+/*
+ * The 32KB cache on the SH7705 suffers from the same synonym problem
+ * as SH4 CPUs
+ */
 static inline void cache_wback_all(void)
 {
 	unsigned long ways, waysize, addrstart;
 
-	ways = cpu_data->dcache.ways;
-	waysize = cpu_data->dcache.sets;
-	waysize <<= cpu_data->dcache.entry_shift;
+	ways = current_cpu_data.dcache.ways;
+	waysize = current_cpu_data.dcache.sets;
+	waysize <<= current_cpu_data.dcache.entry_shift;
 
 	addrstart = CACHE_OC_ADDRESS_ARRAY;
 
@@ -48,7 +43,7 @@ static inline void cache_wback_all(void)
 
 		for (addr = addrstart;
 		     addr < addrstart + waysize;
-		     addr += cpu_data->dcache.linesz) {
+		     addr += current_cpu_data.dcache.linesz) {
 			unsigned long data;
 			int v = SH_CACHE_UPDATED | SH_CACHE_VALID;
 
@@ -59,7 +54,7 @@ static inline void cache_wback_all(void)
 
 		}
 
-		addrstart += cpu_data->dcache.way_incr;
+		addrstart += current_cpu_data.dcache.way_incr;
 	} while (--ways);
 }
 
@@ -72,7 +67,6 @@ void flush_icache_range(unsigned long start, unsigned long end)
 {
 	__flush_wback_region((void *)start, end - start);
 }
-
 
 /*
  * Writeback&Invalidate the D-cache of the page
@@ -100,9 +94,9 @@ static void __flush_dcache_page(unsigned long phys)
 	local_irq_save(flags);
 	jump_to_P2();
 
-	ways = cpu_data->dcache.ways;
-	waysize = cpu_data->dcache.sets;
-	waysize <<= cpu_data->dcache.entry_shift;
+	ways = current_cpu_data.dcache.ways;
+	waysize = current_cpu_data.dcache.sets;
+	waysize <<= current_cpu_data.dcache.entry_shift;
 
 	addrstart = CACHE_OC_ADDRESS_ARRAY;
 
@@ -111,7 +105,7 @@ static void __flush_dcache_page(unsigned long phys)
 
 		for (addr = addrstart;
 		     addr < addrstart + waysize;
-		     addr += cpu_data->dcache.linesz) {
+		     addr += current_cpu_data.dcache.linesz) {
 			unsigned long data;
 
 			data = ctrl_inl(addr) & (0x1ffffC00 | SH_CACHE_VALID);
@@ -121,13 +115,12 @@ static void __flush_dcache_page(unsigned long phys)
 			}
 		}
 
-		addrstart += cpu_data->dcache.way_incr;
+		addrstart += current_cpu_data.dcache.way_incr;
 	} while (--ways);
 
 	back_to_P1();
 	local_irq_restore(flags);
 }
-
 
 /*
  * Write back & invalidate the D-cache of the page.
@@ -186,25 +179,10 @@ void flush_cache_range(struct vm_area_struct *vma, unsigned long start,
  *
  * ADDRESS: Virtual Address (U0 address)
  */
-void flush_cache_page(struct vm_area_struct *vma, unsigned long address)
+void flush_cache_page(struct vm_area_struct *vma, unsigned long address,
+		      unsigned long pfn)
 {
-	pgd_t *dir;
-	pmd_t *pmd;
-	pte_t *pte;
-	pte_t entry;
-	unsigned long phys;
-
-	dir = pgd_offset(vma->vm_mm, address);
-	pmd = pmd_offset(dir, address);
-	if (pmd_none(*pmd) || pmd_bad(*pmd))
-		return;
-	pte = pte_offset(pmd, address);
-	entry = *pte;
-	if (pte_none(entry) || !pte_present(entry))
-		return;
-
-	phys = pte_val(entry)&PTE_PHYS_MASK;
-	__flush_dcache_page(phys);
+	__flush_dcache_page(pfn << PAGE_SHIFT);
 }
 
 /*
@@ -219,4 +197,3 @@ void flush_icache_page(struct vm_area_struct *vma, struct page *page)
 {
 	__flush_purge_region(page_address(page), PAGE_SIZE);
 }
-

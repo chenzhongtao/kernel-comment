@@ -23,7 +23,7 @@
 
 extern const char *CardType[];
 
-const char *teles0_revision = "$Revision: 2.15.2.4 $";
+static const char *teles0_revision = "$Revision: 2.15.2.4 $";
 
 #define TELES_IOMEM_SIZE	0x400
 #define byteout(addr,val) outb(val,addr)
@@ -144,7 +144,7 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 #include "hscx_irq.c"
 
 static irqreturn_t
-teles0_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+teles0_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
@@ -183,7 +183,7 @@ teles0_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-void
+static void
 release_io_teles0(struct IsdnCardState *cs)
 {
 	if (cs->hw.teles0.cfg_reg)
@@ -265,7 +265,7 @@ Teles_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-int __init
+int __devinit
 setup_teles0(struct IsdnCard *card)
 {
 	u_char val;

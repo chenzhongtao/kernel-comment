@@ -43,17 +43,18 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/inet.h>
-#include <linux/tcp.h>
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/poll.h>
 #include <linux/highmem.h>
+#include <linux/spinlock.h>
 
 #include <net/protocol.h>
 #include <linux/skbuff.h>
-#include <net/sock.h>
-#include <net/checksum.h>
 
+#include <net/checksum.h>
+#include <net/sock.h>
+#include <net/tcp_states.h>
 
 /*
  *	Is a socket 'connection oriented' ?
@@ -115,10 +116,10 @@ out_noerr:
 
 /**
  *	skb_recv_datagram - Receive a datagram skbuff
- *	@sk - socket
- *	@flags - MSG_ flags
- *	@noblock - blocking operation?
- *	@err - error code returned
+ *	@sk: socket
+ *	@flags: MSG_ flags
+ *	@noblock: blocking operation?
+ *	@err: error code returned
  *
  *	Get a datagram skbuff, understands the peeking, nonblocking wakeups
  *	and possible races. This replaces identical code in packet, raw and
@@ -200,11 +201,46 @@ void skb_free_datagram(struct sock *sk, struct sk_buff *skb)
 }
 
 /**
+ *	skb_kill_datagram - Free a datagram skbuff forcibly
+ *	@sk: socket
+ *	@skb: datagram skbuff
+ *	@flags: MSG_ flags
+ *
+ *	This function frees a datagram skbuff that was received by
+ *	skb_recv_datagram.  The flags argument must match the one
+ *	used for skb_recv_datagram.
+ *
+ *	If the MSG_PEEK flag is set, and the packet is still on the
+ *	receive queue of the socket, it will be taken off the queue
+ *	before it is freed.
+ *
+ *	This function currently only disables BH when acquiring the
+ *	sk_receive_queue lock.  Therefore it must not be used in a
+ *	context where that lock is acquired in an IRQ context.
+ */
+
+void skb_kill_datagram(struct sock *sk, struct sk_buff *skb, unsigned int flags)
+{
+	if (flags & MSG_PEEK) {
+		spin_lock_bh(&sk->sk_receive_queue.lock);
+		if (skb == skb_peek(&sk->sk_receive_queue)) {
+			__skb_unlink(skb, &sk->sk_receive_queue);
+			atomic_dec(&skb->users);
+		}
+		spin_unlock_bh(&sk->sk_receive_queue.lock);
+	}
+
+	kfree_skb(skb);
+}
+
+EXPORT_SYMBOL(skb_kill_datagram);
+
+/**
  *	skb_copy_datagram_iovec - Copy a datagram to an iovec.
- *	@skb - buffer to copy
- *	@offset - offset in the buffer to start copying from
- *	@iovec - io vector to copy to
- *	@len - amount of data to copy from buffer to iovec
+ *	@skb: buffer to copy
+ *	@offset: offset in the buffer to start copying from
+ *	@to: io vector to copy to
+ *	@len: amount of data to copy from buffer to iovec
  *
  *	Note: the iovec is modified during the copy.
  */
@@ -285,7 +321,7 @@ fault:
 
 static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 				      u8 __user *to, int len,
-				      unsigned int *csump)
+				      __wsum *csump)
 {
 	int start = skb_headlen(skb);
 	int pos = 0;
@@ -314,7 +350,7 @@ static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 
 		end = start + skb_shinfo(skb)->frags[i].size;
 		if ((copy = end - offset) > 0) {
-			unsigned int csum2;
+			__wsum csum2;
 			int err = 0;
 			u8  *vaddr;
 			skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
@@ -350,7 +386,7 @@ static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 
 			end = start + list->len;
 			if ((copy = end - offset) > 0) {
-				unsigned int csum2 = 0;
+				__wsum csum2 = 0;
 				if (copy > len)
 					copy = len;
 				if (skb_copy_and_csum_datagram(list,
@@ -375,12 +411,32 @@ fault:
 	return -EFAULT;
 }
 
+__sum16 __skb_checksum_complete_head(struct sk_buff *skb, int len)
+{
+	__sum16 sum;
+
+	sum = csum_fold(skb_checksum(skb, 0, len, skb->csum));
+	if (likely(!sum)) {
+		if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE))
+			netdev_rx_csum_fault(skb->dev);
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+	}
+	return sum;
+}
+EXPORT_SYMBOL(__skb_checksum_complete_head);
+
+__sum16 __skb_checksum_complete(struct sk_buff *skb)
+{
+	return __skb_checksum_complete_head(skb, skb->len);
+}
+EXPORT_SYMBOL(__skb_checksum_complete);
+
 /**
  *	skb_copy_and_csum_datagram_iovec - Copy and checkum skb to user iovec.
- *	@skb - skbuff
- *	@hlen - hardware length
- *	@iovec - io vector
- * 
+ *	@skb: skbuff
+ *	@hlen: hardware length
+ *	@iov: io vector
+ *
  *	Caller _must_ check that skb will fit to this iovec.
  *
  *	Returns: 0       - success.
@@ -388,11 +444,14 @@ fault:
  *		 -EFAULT - fault during copy. Beware, in this case iovec
  *			   can be modified!
  */
-int skb_copy_and_csum_datagram_iovec(const struct sk_buff *skb,
+int skb_copy_and_csum_datagram_iovec(struct sk_buff *skb,
 				     int hlen, struct iovec *iov)
 {
-	unsigned int csum;
+	__wsum csum;
 	int chunk = skb->len - hlen;
+
+	if (!chunk)
+		return 0;
 
 	/* Skip filled elements.
 	 * Pretty silly, look at memcpy_toiovec, though 8)
@@ -401,8 +460,7 @@ int skb_copy_and_csum_datagram_iovec(const struct sk_buff *skb,
 		iov++;
 
 	if (iov->iov_len < chunk) {
-		if ((unsigned short)csum_fold(skb_checksum(skb, 0, chunk + hlen,
-							   skb->csum)))
+		if (__skb_checksum_complete(skb))
 			goto csum_error;
 		if (skb_copy_datagram_iovec(skb, hlen, iov, chunk))
 			goto fault;
@@ -411,8 +469,10 @@ int skb_copy_and_csum_datagram_iovec(const struct sk_buff *skb,
 		if (skb_copy_and_csum_datagram(skb, hlen, iov->iov_base,
 					       chunk, &csum))
 			goto fault;
-		if ((unsigned short)csum_fold(csum))
+		if (csum_fold(csum))
 			goto csum_error;
+		if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE))
+			netdev_rx_csum_fault(skb->dev);
 		iov->iov_len -= chunk;
 		iov->iov_base += chunk;
 	}
@@ -425,9 +485,9 @@ fault:
 
 /**
  * 	datagram_poll - generic datagram poll
- *	@file - file struct
- *	@sock - socket
- *	@wait - poll table
+ *	@file: file struct
+ *	@sock: socket
+ *	@wait: poll table
  *
  *	Datagram poll: Again totally generic. This also handles
  *	sequenced packet sockets providing the socket receive queue
@@ -449,6 +509,8 @@ unsigned int datagram_poll(struct file *file, struct socket *sock,
 	/* exceptional events? */
 	if (sk->sk_err || !skb_queue_empty(&sk->sk_error_queue))
 		mask |= POLLERR;
+	if (sk->sk_shutdown & RCV_SHUTDOWN)
+		mask |= POLLRDHUP;
 	if (sk->sk_shutdown == SHUTDOWN_MASK)
 		mask |= POLLHUP;
 

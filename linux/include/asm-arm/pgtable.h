@@ -11,10 +11,34 @@
 #define _ASMARM_PGTABLE_H
 
 #include <asm-generic/4level-fixup.h>
+#include <asm/proc-fns.h>
+
+#ifndef CONFIG_MMU
+
+#include "pgtable-nommu.h"
+
+#else
 
 #include <asm/memory.h>
-#include <asm/proc-fns.h>
 #include <asm/arch/vmalloc.h>
+#include <asm/pgtable-hwdef.h>
+
+/*
+ * Just any arbitrary offset to the start of the vmalloc VM area: the
+ * current 8MB value just means that there will be a 8MB "hole" after the
+ * physical memory until the kernel virtual memory starts.  That means that
+ * any out-of-bounds memory accesses will hopefully be caught.
+ * The vmalloc() routines leaves a hole of 4kB between each vmalloced
+ * area for the same reason. ;)
+ *
+ * Note that platforms may override VMALLOC_START, but they must provide
+ * VMALLOC_END.  VMALLOC_END defines the (exclusive) limit of this space,
+ * which may not overlap IO space.
+ */
+#ifndef VMALLOC_START
+#define VMALLOC_OFFSET		(8*1024*1024)
+#define VMALLOC_START		(((unsigned long)high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
+#endif
 
 /*
  * Hardware-wise, we have a two level page table structure, where the first
@@ -59,14 +83,14 @@
  * means that a write to a clean page will cause a permission fault, and
  * the Linux MM layer will mark the page dirty via handle_pte_fault().
  * For the hardware to notice the permission change, the TLB entry must
- * be flushed, and ptep_establish() does that for us.
+ * be flushed, and ptep_set_access_flags() does that for us.
  *
  * The "accessed" or "young" bit is emulated by a similar method; we only
  * allow accesses to the page if the "young" bit is set.  Accesses to the
  * page will cause a fault, and handle_pte_fault() will set the young bit
  * for us as long as the page is marked present in the corresponding Linux
- * PTE entry.  Again, ptep_establish() will ensure that the TLB is up to
- * date.
+ * PTE entry.  Again, ptep_set_access_flags() will ensure that the TLB is
+ * up to date.
  *
  * However, when the "young" bit is cleared, we deny access to the page
  * by clearing the hardware PTE.  Currently Linux does not flush the TLB
@@ -102,75 +126,29 @@ extern void __pgd_error(const char *file, int line, unsigned long val);
 #define PGDIR_SIZE		(1UL << PGDIR_SHIFT)
 #define PGDIR_MASK		(~(PGDIR_SIZE-1))
 
+/*
+ * This is the lowest virtual address we can permit any user space
+ * mapping to be mapped at.  This is particularly important for
+ * non-high vector CPUs.
+ */
+#define FIRST_USER_ADDRESS	PAGE_SIZE
+
 #define FIRST_USER_PGD_NR	1
 #define USER_PTRS_PER_PGD	((TASK_SIZE/PGDIR_SIZE) - FIRST_USER_PGD_NR)
 
 /*
- * Hardware page table definitions.
- *
- * + Level 1 descriptor (PMD)
- *   - common
+ * section address mask and size definitions.
  */
-#define PMD_TYPE_MASK		(3 << 0)
-#define PMD_TYPE_FAULT		(0 << 0)
-#define PMD_TYPE_TABLE		(1 << 0)
-#define PMD_TYPE_SECT		(2 << 0)
-#define PMD_BIT4		(1 << 4)
-#define PMD_DOMAIN(x)		((x) << 5)
-#define PMD_PROTECTION		(1 << 9)	/* v5 */
-/*
- *   - section
- */
-#define PMD_SECT_BUFFERABLE	(1 << 2)
-#define PMD_SECT_CACHEABLE	(1 << 3)
-#define PMD_SECT_AP_WRITE	(1 << 10)
-#define PMD_SECT_AP_READ	(1 << 11)
-#define PMD_SECT_TEX(x)		((x) << 12)	/* v5 */
-#define PMD_SECT_APX		(1 << 15)	/* v6 */
-#define PMD_SECT_S		(1 << 16)	/* v6 */
-#define PMD_SECT_nG		(1 << 17)	/* v6 */
-
-#define PMD_SECT_UNCACHED	(0)
-#define PMD_SECT_BUFFERED	(PMD_SECT_BUFFERABLE)
-#define PMD_SECT_WT		(PMD_SECT_CACHEABLE)
-#define PMD_SECT_WB		(PMD_SECT_CACHEABLE | PMD_SECT_BUFFERABLE)
-#define PMD_SECT_MINICACHE	(PMD_SECT_TEX(1) | PMD_SECT_CACHEABLE)
-#define PMD_SECT_WBWA		(PMD_SECT_TEX(1) | PMD_SECT_CACHEABLE | PMD_SECT_BUFFERABLE)
+#define SECTION_SHIFT		20
+#define SECTION_SIZE		(1UL << SECTION_SHIFT)
+#define SECTION_MASK		(~(SECTION_SIZE-1))
 
 /*
- *   - coarse table (not used)
+ * ARMv6 supersection address mask and size definitions.
  */
-
-/*
- * + Level 2 descriptor (PTE)
- *   - common
- */
-#define PTE_TYPE_MASK		(3 << 0)
-#define PTE_TYPE_FAULT		(0 << 0)
-#define PTE_TYPE_LARGE		(1 << 0)
-#define PTE_TYPE_SMALL		(2 << 0)
-#define PTE_TYPE_EXT		(3 << 0)	/* v5 */
-#define PTE_BUFFERABLE		(1 << 2)
-#define PTE_CACHEABLE		(1 << 3)
-
-/*
- *   - extended small page/tiny page
- */
-#define PTE_EXT_AP_MASK		(3 << 4)
-#define PTE_EXT_AP_UNO_SRO	(0 << 4)
-#define PTE_EXT_AP_UNO_SRW	(1 << 4)
-#define PTE_EXT_AP_URO_SRW	(2 << 4)
-#define PTE_EXT_AP_URW_SRW	(3 << 4)
-#define PTE_EXT_TEX(x)		((x) << 6)	/* v5 */
-
-/*
- *   - small page
- */
-#define PTE_SMALL_AP_MASK	(0xff << 4)
-#define PTE_SMALL_AP_UNO_SRO	(0x00 << 4)
-#define PTE_SMALL_AP_UNO_SRW	(0x55 << 4)
-#define PTE_SMALL_AP_URO_SRW	(0xaa << 4)
-#define PTE_SMALL_AP_URW_SRW	(0xff << 4)
+#define SUPERSECTION_SHIFT	24
+#define SUPERSECTION_SIZE	(1UL << SUPERSECTION_SHIFT)
+#define SUPERSECTION_MASK	(~(SUPERSECTION_SIZE-1))
 
 /*
  * "Linux" PTE definitions.
@@ -192,27 +170,33 @@ extern void __pgd_error(const char *file, int line, unsigned long val);
 #define L_PTE_WRITE		(1 << 5)
 #define L_PTE_EXEC		(1 << 6)
 #define L_PTE_DIRTY		(1 << 7)
+#define L_PTE_SHARED		(1 << 10)	/* shared(v6), coherent(xsc3) */
 
 #ifndef __ASSEMBLY__
 
-#include <asm/domain.h>
-
-#define _PAGE_USER_TABLE	(PMD_TYPE_TABLE | PMD_BIT4 | PMD_DOMAIN(DOMAIN_USER))
-#define _PAGE_KERNEL_TABLE	(PMD_TYPE_TABLE | PMD_BIT4 | PMD_DOMAIN(DOMAIN_KERNEL))
-
 /*
- * The following macros handle the cache and bufferable bits...
+ * The pgprot_* and protection_map entries will be fixed up in runtime
+ * to include the cachable and bufferable bits based on memory policy,
+ * as well as any architecture dependent bits like global/ASID and SMP
+ * shared mapping bits.
  */
 #define _L_PTE_DEFAULT	L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_CACHEABLE | L_PTE_BUFFERABLE
 #define _L_PTE_READ	L_PTE_USER | L_PTE_EXEC
 
+extern pgprot_t		pgprot_user;
 extern pgprot_t		pgprot_kernel;
 
-#define PAGE_NONE       __pgprot(_L_PTE_DEFAULT)
-#define PAGE_COPY       __pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
-#define PAGE_SHARED     __pgprot(_L_PTE_DEFAULT | _L_PTE_READ | L_PTE_WRITE)
-#define PAGE_READONLY   __pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
+#define PAGE_NONE	pgprot_user
+#define PAGE_COPY	__pgprot(pgprot_val(pgprot_user) | _L_PTE_READ)
+#define PAGE_SHARED	__pgprot(pgprot_val(pgprot_user) | _L_PTE_READ | \
+				 L_PTE_WRITE)
+#define PAGE_READONLY	__pgprot(pgprot_val(pgprot_user) | _L_PTE_READ)
 #define PAGE_KERNEL	pgprot_kernel
+
+#define __PAGE_NONE	__pgprot(_L_PTE_DEFAULT)
+#define __PAGE_COPY	__pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
+#define __PAGE_SHARED	__pgprot(_L_PTE_DEFAULT | _L_PTE_READ | L_PTE_WRITE)
+#define __PAGE_READONLY	__pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
 
 #endif /* __ASSEMBLY__ */
 
@@ -224,23 +208,23 @@ extern pgprot_t		pgprot_kernel;
  *  2) If we could do execute protection, then read is implied
  *  3) write implies read permissions
  */
-#define __P000  PAGE_NONE
-#define __P001  PAGE_READONLY
-#define __P010  PAGE_COPY
-#define __P011  PAGE_COPY
-#define __P100  PAGE_READONLY
-#define __P101  PAGE_READONLY
-#define __P110  PAGE_COPY
-#define __P111  PAGE_COPY
+#define __P000  __PAGE_NONE
+#define __P001  __PAGE_READONLY
+#define __P010  __PAGE_COPY
+#define __P011  __PAGE_COPY
+#define __P100  __PAGE_READONLY
+#define __P101  __PAGE_READONLY
+#define __P110  __PAGE_COPY
+#define __P111  __PAGE_COPY
 
-#define __S000  PAGE_NONE
-#define __S001  PAGE_READONLY
-#define __S010  PAGE_SHARED
-#define __S011  PAGE_SHARED
-#define __S100  PAGE_READONLY
-#define __S101  PAGE_READONLY
-#define __S110  PAGE_SHARED
-#define __S111  PAGE_SHARED
+#define __S000  __PAGE_NONE
+#define __S001  __PAGE_READONLY
+#define __S010  __PAGE_SHARED
+#define __S011  __PAGE_SHARED
+#define __S100  __PAGE_READONLY
+#define __S101  __PAGE_READONLY
+#define __S110  __PAGE_SHARED
+#define __S111  __PAGE_SHARED
 
 #ifndef __ASSEMBLY__
 /*
@@ -254,24 +238,26 @@ extern struct page *empty_zero_page;
 #define pfn_pte(pfn,prot)	(__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot)))
 
 #define pte_none(pte)		(!pte_val(pte))
-#define pte_clear(ptep)		set_pte((ptep), __pte(0))
+#define pte_clear(mm,addr,ptep)	set_pte_ext(ptep, __pte(0), 0)
 #define pte_page(pte)		(pfn_to_page(pte_pfn(pte)))
-#define pte_offset_kernel(dir,addr)	(pmd_page_kernel(*(dir)) + __pte_index(addr))
-#define pte_offset_map(dir,addr)	(pmd_page_kernel(*(dir)) + __pte_index(addr))
-#define pte_offset_map_nested(dir,addr)	(pmd_page_kernel(*(dir)) + __pte_index(addr))
+#define pte_offset_kernel(dir,addr)	(pmd_page_vaddr(*(dir)) + __pte_index(addr))
+#define pte_offset_map(dir,addr)	(pmd_page_vaddr(*(dir)) + __pte_index(addr))
+#define pte_offset_map_nested(dir,addr)	(pmd_page_vaddr(*(dir)) + __pte_index(addr))
 #define pte_unmap(pte)		do { } while (0)
 #define pte_unmap_nested(pte)	do { } while (0)
 
-#define set_pte(ptep, pte)	cpu_set_pte(ptep,pte)
+#define set_pte_ext(ptep,pte,ext) cpu_set_pte_ext(ptep,pte,ext)
+
+#define set_pte_at(mm,addr,ptep,pteval) do { \
+	set_pte_ext(ptep, pteval, (addr) >= TASK_SIZE ? 0 : PTE_EXT_NG); \
+ } while (0)
 
 /*
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
  */
 #define pte_present(pte)	(pte_val(pte) & L_PTE_PRESENT)
-#define pte_read(pte)		(pte_val(pte) & L_PTE_USER)
 #define pte_write(pte)		(pte_val(pte) & L_PTE_WRITE)
-#define pte_exec(pte)		(pte_val(pte) & L_PTE_EXEC)
 #define pte_dirty(pte)		(pte_val(pte) & L_PTE_DIRTY)
 #define pte_young(pte)		(pte_val(pte) & L_PTE_YOUNG)
 
@@ -287,12 +273,8 @@ extern struct page *empty_zero_page;
 #define PTE_BIT_FUNC(fn,op) \
 static inline pte_t pte_##fn(pte_t pte) { pte_val(pte) op; return pte; }
 
-/*PTE_BIT_FUNC(rdprotect, &= ~L_PTE_USER);*/
-/*PTE_BIT_FUNC(mkread,    |= L_PTE_USER);*/
 PTE_BIT_FUNC(wrprotect, &= ~L_PTE_WRITE);
 PTE_BIT_FUNC(mkwrite,   |= L_PTE_WRITE);
-PTE_BIT_FUNC(exprotect, &= ~L_PTE_EXEC);
-PTE_BIT_FUNC(mkexec,    |= L_PTE_EXEC);
 PTE_BIT_FUNC(mkclean,   &= ~L_PTE_DIRTY);
 PTE_BIT_FUNC(mkdirty,   |= L_PTE_DIRTY);
 PTE_BIT_FUNC(mkold,     &= ~L_PTE_YOUNG);
@@ -308,12 +290,6 @@ PTE_BIT_FUNC(mkyoung,   |= L_PTE_YOUNG);
 #define pmd_present(pmd)	(pmd_val(pmd))
 #define pmd_bad(pmd)		(pmd_val(pmd) & 2)
 
-#define set_pmd(pmdp,pmd)		\
-	do {				\
-		*(pmdp) = pmd;		\
-		flush_pmd_entry(pmdp);	\
-	} while (0)
-
 #define copy_pmd(pmdpd,pmdps)		\
 	do {				\
 		pmdpd[0] = pmdps[0];	\
@@ -328,7 +304,7 @@ PTE_BIT_FUNC(mkyoung,   |= L_PTE_YOUNG);
 		clean_pmd_entry(pmdp);	\
 	} while (0)
 
-static inline pte_t *pmd_page_kernel(pmd_t pmd)
+static inline pte_t *pmd_page_vaddr(pmd_t pmd)
 {
 	unsigned long ptr;
 
@@ -361,9 +337,6 @@ static inline pte_t *pmd_page_kernel(pmd_t pmd)
 #define pgd_present(pgd)	(1)
 #define pgd_clear(pgdp)		do { } while (0)
 #define set_pgd(pgd,pgdp)	do { } while (0)
-
-#define page_pte_prot(page,prot)	mk_pte(page, prot)
-#define page_pte(page)		mk_pte(page, __pgprot(0))
 
 /* to find an entry in a page-table-directory */
 #define pgd_index(addr)		((addr) >> PGDIR_SHIFT)
@@ -410,14 +383,16 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 #define HAVE_ARCH_UNMAPPED_AREA
 
 /*
- * remap a physical address `phys' of size `size' with page protection `prot'
+ * remap a physical page `pfn' of size `size' with page protection `prot'
  * into virtual address `from'
  */
-#define io_remap_page_range(vma,from,phys,size,prot) \
-		remap_pfn_range(vma, from, (phys) >> PAGE_SHIFT, size, prot)
+#define io_remap_pfn_range(vma,from,pfn,size,prot) \
+		remap_pfn_range(vma, from, pfn, size, prot)
 
 #define pgtable_cache_init() do { } while (0)
 
 #endif /* !__ASSEMBLY__ */
+
+#endif /* CONFIG_MMU */
 
 #endif /* _ASMARM_PGTABLE_H */

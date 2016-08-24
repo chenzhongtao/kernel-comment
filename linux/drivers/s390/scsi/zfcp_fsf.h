@@ -1,40 +1,28 @@
-/* 
- * 
- * linux/drivers/s390/scsi/zfcp_fsf.h
- * 
- * FCP adapter driver for IBM eServer zSeries 
- * 
- * (C) Copyright IBM Corp. 2002, 2004
+/*
+ * This file is part of the zfcp device driver for
+ * FCP adapters for IBM System z9 and zSeries.
  *
- * Author(s): Martin Peschke <mpeschke@de.ibm.com> 
- *            Raimund Schroeder <raimund.schroeder@de.ibm.com> 
- *            Aron Zeh
- *            Wolfgang Taphorn
- *            Stefan Bader <stefan.bader@de.ibm.com> 
- *            Heiko Carstens <heiko.carstens@de.ibm.com>
- *            Andreas Herrmann <aherrman@de.ibm.com>
- *            Volker Sameske <sameske@de.ibm.com>
- * 
- * This program is free software; you can redistribute it and/or modify 
- * it under the terms of the GNU General Public License as published by 
- * the Free Software Foundation; either version 2, or (at your option) 
- * any later version. 
- * 
- * This program is distributed in the hope that it will be useful, 
- * but WITHOUT ANY WARRANTY; without even the implied warranty of 
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the 
- * GNU General Public License for more details. 
- * 
- * You should have received a copy of the GNU General Public License 
- * along with this program; if not, write to the Free Software 
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * (C) Copyright IBM Corp. 2002, 2006
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef FSF_H
 #define FSF_H
 
-#define FSF_QTCB_VERSION1			0x00000001
-#define FSF_QTCB_CURRENT_VERSION		FSF_QTCB_VERSION1
+#define FSF_QTCB_CURRENT_VERSION		0x00000001
 
 /* FSF commands */
 #define	FSF_QTCB_FCP_CMND			0x00000001
@@ -64,7 +52,7 @@
 #define FSF_CFDC_OPTION_FULL_ACCESS		0x00000002
 #define FSF_CFDC_OPTION_RESTRICTED_ACCESS	0x00000004
 
-/* FSF protocol stati */
+/* FSF protocol states */
 #define FSF_PROT_GOOD				0x00000001
 #define FSF_PROT_QTCB_VERSION_ERROR		0x00000010
 #define FSF_PROT_SEQ_NUMB_ERROR			0x00000020
@@ -76,7 +64,7 @@
 #define FSF_PROT_REEST_QUEUE                    0x00000800
 #define FSF_PROT_ERROR_STATE			0x01000000
 
-/* FSF stati */
+/* FSF states */
 #define FSF_GOOD				0x00000000
 #define FSF_PORT_ALREADY_OPEN			0x00000001
 #define FSF_LUN_ALREADY_OPEN			0x00000002
@@ -116,6 +104,7 @@
 #define FSF_INVALID_COMMAND_OPTION              0x000000E5
 /* #define FSF_ERROR                             0x000000FF  */
 
+#define FSF_PROT_STATUS_QUAL_SIZE		16
 #define FSF_STATUS_QUALIFIER_SIZE		16
 
 /* FSF status qualifier, recommendations */
@@ -129,6 +118,7 @@
 #define FSF_SQ_NO_RETRY_POSSIBLE		0x07
 
 /* FSF status qualifier for CFDC commands */
+#define FSF_SQ_CFDC_HARDENED_ON_SE		0x00000000
 #define FSF_SQ_CFDC_COULD_NOT_HARDEN_ON_SE	0x00000001
 #define FSF_SQ_CFDC_COULD_NOT_HARDEN_ON_SE2	0x00000002
 /* CFDC subtable codes */
@@ -138,9 +128,18 @@
 #define FSF_SQ_CFDC_SUBTABLE_LUN		0x0004
 
 /* FSF status qualifier (most significant 4 bytes), local link down */
-#define FSF_PSQ_LINK_NOLIGHT			0x00000004
-#define FSF_PSQ_LINK_WRAPPLUG			0x00000008
-#define FSF_PSQ_LINK_NOFCP			0x00000010
+#define FSF_PSQ_LINK_NO_LIGHT			0x00000004
+#define FSF_PSQ_LINK_WRAP_PLUG			0x00000008
+#define FSF_PSQ_LINK_NO_FCP			0x00000010
+#define FSF_PSQ_LINK_FIRMWARE_UPDATE		0x00000020
+#define FSF_PSQ_LINK_INVALID_WWPN		0x00000100
+#define FSF_PSQ_LINK_NO_NPIV_SUPPORT		0x00000200
+#define FSF_PSQ_LINK_NO_FCP_RESOURCES		0x00000400
+#define FSF_PSQ_LINK_NO_FABRIC_RESOURCES	0x00000800
+#define FSF_PSQ_LINK_FABRIC_LOGIN_UNABLE	0x00001000
+#define FSF_PSQ_LINK_WWPN_ASSIGNMENT_CORRUPTED	0x00002000
+#define FSF_PSQ_LINK_MODE_TABLE_CURRUPTED	0x00004000
+#define FSF_PSQ_LINK_NO_WWPN_ASSIGNMENT		0x00008000
 
 /* payload size in status read buffer */
 #define FSF_STATUS_READ_PAYLOAD_SIZE		4032
@@ -153,14 +152,31 @@
 #define FSF_STATUS_READ_INCOMING_ELS		0x00000002
 #define FSF_STATUS_READ_SENSE_DATA_AVAIL        0x00000003
 #define FSF_STATUS_READ_BIT_ERROR_THRESHOLD	0x00000004
-#define FSF_STATUS_READ_LINK_DOWN		0x00000005 /* FIXME: really? */
+#define FSF_STATUS_READ_LINK_DOWN		0x00000005
 #define FSF_STATUS_READ_LINK_UP          	0x00000006
+#define FSF_STATUS_READ_NOTIFICATION_LOST	0x00000009
 #define FSF_STATUS_READ_CFDC_UPDATED		0x0000000A
 #define FSF_STATUS_READ_CFDC_HARDENED		0x0000000B
+#define FSF_STATUS_READ_FEATURE_UPDATE_ALERT	0x0000000C
 
 /* status subtypes in status read buffer */
 #define FSF_STATUS_READ_SUB_CLOSE_PHYS_PORT	0x00000001
 #define FSF_STATUS_READ_SUB_ERROR_PORT		0x00000002
+
+/* status subtypes for link down */
+#define FSF_STATUS_READ_SUB_NO_PHYSICAL_LINK	0x00000000
+#define FSF_STATUS_READ_SUB_FDISC_FAILED	0x00000001
+#define FSF_STATUS_READ_SUB_FIRMWARE_UPDATE	0x00000002
+
+/* status subtypes for unsolicited status notification lost */
+#define FSF_STATUS_READ_SUB_INCOMING_ELS	0x00000001
+#define FSF_STATUS_READ_SUB_SENSE_DATA		0x00000002
+#define FSF_STATUS_READ_SUB_LINK_STATUS		0x00000004
+#define FSF_STATUS_READ_SUB_PORT_CLOSED		0x00000008
+#define FSF_STATUS_READ_SUB_BIT_ERROR_THRESHOLD	0x00000010
+#define FSF_STATUS_READ_SUB_ACT_UPDATED		0x00000020
+#define FSF_STATUS_READ_SUB_ACT_HARDENED	0x00000040
+#define FSF_STATUS_READ_SUB_FEATURE_UPDATE_ALERT 0x00000080
 
 /* status subtypes for CFDC */
 #define FSF_STATUS_READ_SUB_CFDC_HARDENED_ON_SE	0x00000002
@@ -171,7 +187,6 @@
 #define FSF_TOPO_P2P				0x00000001
 #define FSF_TOPO_FABRIC				0x00000002
 #define FSF_TOPO_AL				0x00000003
-#define FSF_TOPO_FABRIC_VIRT			0x00000004
 
 /* data direction for FCP commands */
 #define FSF_DATADIR_WRITE			0x00000001
@@ -192,11 +207,16 @@
 #define FSF_QTCB_LOG_SIZE			1024
 
 /* channel features */
-#define FSF_FEATURE_QTCB_SUPPRESSION            0x00000001
 #define FSF_FEATURE_CFDC			0x00000002
 #define FSF_FEATURE_LUN_SHARING			0x00000004
+#define FSF_FEATURE_NOTIFICATION_LOST		0x00000008
 #define FSF_FEATURE_HBAAPI_MANAGEMENT           0x00000010
 #define FSF_FEATURE_ELS_CT_CHAINED_SBALS        0x00000020
+#define FSF_FEATURE_UPDATE_ALERT		0x00000100
+
+/* host connection features */
+#define FSF_FEATURE_NPIV_MODE			0x00000001
+#define FSF_FEATURE_VM_ASSIGNED_WWPN		0x00000002
 
 /* option */
 #define FSF_OPEN_LUN_SUPPRESS_BOXING		0x00000001
@@ -236,20 +256,6 @@
 #define FSF_UNIT_ACCESS_OPEN_LUN_ALLOWED	0x01000000
 #define FSF_UNIT_ACCESS_EXCLUSIVE		0x02000000
 #define FSF_UNIT_ACCESS_OUTBOUND_TRANSFER	0x10000000
-
-struct fsf_queue_designator;
-struct fsf_status_read_buffer;
-struct fsf_port_closed_payload;
-struct fsf_bit_error_payload;
-union  fsf_prot_status_qual;
-struct fsf_qual_version_error;
-struct fsf_qual_sequence_error;
-struct fsf_qtcb_prefix;
-struct fsf_qtcb_header;
-struct fsf_qtcb_bottom_config;
-struct fsf_qtcb_bottom_support;
-struct fsf_qtcb_bottom_io;
-union  fsf_qtcb_bottom;
 
 struct fsf_queue_designator {
 	u8  cssid;
@@ -304,15 +310,23 @@ struct fsf_qual_sequence_error {
 	u32 res1[3];
 } __attribute__ ((packed));
 
-struct fsf_qual_locallink_error {
-	u32 code;
-	u32 res1[3];
+struct fsf_link_down_info {
+	u32 error_code;
+	u32 res1;
+	u8 res2[2];
+	u8 primary_status;
+	u8 ioerr_code;
+	u8 action_code;
+	u8 reason_code;
+	u8 explanation_code;
+	u8 vendor_specific_code;
 } __attribute__ ((packed));
 
 union fsf_prot_status_qual {
+	u64 doubleword[FSF_PROT_STATUS_QUAL_SIZE / sizeof(u64)];
 	struct fsf_qual_version_error   version_error;
 	struct fsf_qual_sequence_error  sequence_error;
-	struct fsf_qual_locallink_error locallink_error;
+	struct fsf_link_down_info link_down_info;
 } __attribute__ ((packed));
 
 struct fsf_qtcb_prefix {
@@ -330,7 +344,9 @@ union fsf_status_qual {
 	u8  byte[FSF_STATUS_QUALIFIER_SIZE];
 	u16 halfword[FSF_STATUS_QUALIFIER_SIZE / sizeof (u16)];
 	u32 word[FSF_STATUS_QUALIFIER_SIZE / sizeof (u32)];
+	u64 doubleword[FSF_STATUS_QUALIFIER_SIZE / sizeof(u64)];
 	struct fsf_queue_designator fsf_queue_designator;
+	struct fsf_link_down_info link_down_info;
 } __attribute__ ((packed));
 
 struct fsf_qtcb_header {
@@ -357,7 +373,6 @@ struct fsf_nport_serv_param {
 	u8  class3_serv_param[16];
 	u8  class4_serv_param[16];
 	u8  vendor_version_level[16];
-	u8  res1[16];
 } __attribute__ ((packed));
 
 struct fsf_plogi {
@@ -406,8 +421,8 @@ struct fsf_qtcb_bottom_config {
 	u32 low_qtcb_version;
 	u32 max_qtcb_size;
 	u32 max_data_transfer_size;
-	u32 supported_features;
-	u8  res1[4];
+	u32 adapter_features;
+	u32 connection_features;
 	u32 fc_topology;
 	u32 fc_link_speed;
 	u32 adapter_type;
@@ -415,15 +430,17 @@ struct fsf_qtcb_bottom_config {
 	u8 res2[12];
 	u32 s_id;
 	struct fsf_nport_serv_param nport_serv_param;
+	u8 reserved_nport_serv_param[16];
 	u8 res3[8];
 	u32 adapter_ports;
 	u32 hardware_version;
 	u8 serial_number[32];
-	u8 res4[272];
+	struct fsf_nport_serv_param plogi_payload;
+	u8 res4[160];
 } __attribute__ ((packed));
 
 struct fsf_qtcb_bottom_port {
-	u8 res1[8];
+	u64 wwpn;
 	u32 fc_port_id;
 	u32 port_type;
 	u32 port_state;

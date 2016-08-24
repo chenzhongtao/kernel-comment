@@ -54,13 +54,11 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
@@ -68,14 +66,12 @@
 #include <linux/init.h>
 #ifdef CONFIG_TOSHIBA
 #include <linux/toshiba.h>
-extern int tosh_smm(SMMRegisters *regs);
 #endif
 
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
-#include <asm/uaccess.h>
 
 #ifdef CONFIG_MTRR
 #include <asm/mtrr.h>
@@ -93,7 +89,7 @@ static int external;
 static int libretto;
 static int nostretch;
 static int nopciburst;
-static char *mode_option __initdata = NULL;
+static char *mode_option __devinitdata = NULL;
 
 #ifdef MODULE
 
@@ -165,20 +161,20 @@ static int neoFindMode(int xres, int yres, int depth)
 
 	switch (depth) {
 	case 8:
-		size = sizeof(bios8) / sizeof(biosMode);
+		size = ARRAY_SIZE(bios8);
 		mode = bios8;
 		break;
 	case 16:
-		size = sizeof(bios16) / sizeof(biosMode);
+		size = ARRAY_SIZE(bios16);
 		mode = bios16;
 		break;
 	case 24:
-		size = sizeof(bios24) / sizeof(biosMode);
+		size = ARRAY_SIZE(bios24);
 		mode = bios24;
 		break;
 #ifdef NO_32BIT_SUPPORT_YET
 	case 32:
-		size = sizeof(bios32) / sizeof(biosMode);
+		size = ARRAY_SIZE(bios32);
 		mode = bios32;
 		break;
 #endif
@@ -400,21 +396,21 @@ static void neoUnlock(void)
  */
 static int paletteEnabled = 0;
 
-inline void VGAenablePalette(void)
+static inline void VGAenablePalette(void)
 {
 	vga_r(NULL, VGA_IS1_RC);
 	vga_w(NULL, VGA_ATT_W, 0x00);
 	paletteEnabled = 1;
 }
 
-inline void VGAdisablePalette(void)
+static inline void VGAdisablePalette(void)
 {
 	vga_r(NULL, VGA_IS1_RC);
 	vga_w(NULL, VGA_ATT_W, 0x20);
 	paletteEnabled = 0;
 }
 
-inline void VGAwATTR(u8 index, u8 value)
+static inline void VGAwATTR(u8 index, u8 value)
 {
 	if (paletteEnabled)
 		index &= ~0x20;
@@ -425,7 +421,7 @@ inline void VGAwATTR(u8 index, u8 value)
 	vga_wattr(NULL, index, value);
 }
 
-void vgaHWProtect(int on)
+static void vgaHWProtect(int on)
 {
 	unsigned char tmp;
 
@@ -485,11 +481,9 @@ static void vgaHWRestore(const struct fb_info *info,
  */
 static inline int neo2200_sync(struct fb_info *info)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
-	int waitcycles;
+	struct neofb_par *par = info->par;
 
-	while (readl(&par->neo2200->bltStat) & 1)
-		waitcycles++;
+	while (readl(&par->neo2200->bltStat) & 1);
 	return 0;
 }
 
@@ -525,7 +519,7 @@ static inline void neo2200_wait_fifo(struct fb_info *info,
 static inline void neo2200_accel_init(struct fb_info *info,
 				      struct fb_var_screeninfo *var)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	Neo2200 __iomem *neo2200 = par->neo2200;
 	u32 bltMod, pitch;
 
@@ -560,37 +554,43 @@ static inline void neo2200_accel_init(struct fb_info *info,
 static int
 neofb_open(struct fb_info *info, int user)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
-	int cnt = atomic_read(&par->ref_count);
+	struct neofb_par *par = info->par;
 
-	if (!cnt) {
+	mutex_lock(&par->open_lock);
+	if (!par->ref_count) {
 		memset(&par->state, 0, sizeof(struct vgastate));
 		par->state.flags = VGA_SAVE_MODE | VGA_SAVE_FONTS;
 		save_vga(&par->state);
 	}
-	atomic_inc(&par->ref_count);
+	par->ref_count++;
+	mutex_unlock(&par->open_lock);
+
 	return 0;
 }
 
 static int
 neofb_release(struct fb_info *info, int user)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
-	int cnt = atomic_read(&par->ref_count);
+	struct neofb_par *par = info->par;
 
-	if (!cnt)
+	mutex_lock(&par->open_lock);
+	if (!par->ref_count) {
+		mutex_unlock(&par->open_lock);
 		return -EINVAL;
-	if (cnt == 1) {
+	}
+	if (par->ref_count == 1) {
 		restore_vga(&par->state);
 	}
-	atomic_dec(&par->ref_count);
+	par->ref_count--;
+	mutex_unlock(&par->open_lock);
+
 	return 0;
 }
 
 static int
 neofb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	unsigned int pixclock = var->pixclock;
 	struct xtimings timings;
 	int memlen, vramlen;
@@ -664,6 +664,7 @@ neofb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 	var->red.msb_right = 0;
 	var->green.msb_right = 0;
 	var->blue.msb_right = 0;
+	var->transp.msb_right = 0;
 
 	switch (var->bits_per_pixel) {
 	case 8:		/* PSEUDOCOLOUR, 256 */
@@ -757,7 +758,7 @@ neofb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 
 static int neofb_set_par(struct fb_info *info)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	struct xtimings timings;
 	unsigned char temp;
 	int i, clock_hi = 0;
@@ -843,6 +844,9 @@ static int neofb_set_par(struct fb_info *info)
 
 	par->SysIfaceCntl2 = 0xc0;	/* VESA Bios sets this to 0x80! */
 
+	/* Initialize: by default, we want display config register to be read */
+	par->PanelDispCntlRegRead = 1;
+
 	/* Enable any user specified display devices. */
 	par->PanelDispCntlReg1 = 0x00;
 	if (par->internal_display)
@@ -853,7 +857,7 @@ static int neofb_set_par(struct fb_info *info)
 	/* If the user did not specify any display devices, then... */
 	if (par->PanelDispCntlReg1 == 0x00) {
 		/* Default to internal (i.e., LCD) only. */
-		par->PanelDispCntlReg1 |= 0x02;
+		par->PanelDispCntlReg1 = vga_rgfx(NULL, 0x20) & 0x03;
 	}
 
 	/* If we are using a fixed mode, then tell the chip we are. */
@@ -1216,7 +1220,7 @@ static int neofb_set_par(struct fb_info *info)
 static void neofb_update_start(struct fb_info *info,
 			       struct fb_var_screeninfo *var)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	struct vgastate *state = &par->state;
 	int oldExtCRTDispAddr;
 	int Base;
@@ -1281,41 +1285,43 @@ static int neofb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	if (regno >= fb->cmap.len || regno > 255)
 		return -EINVAL;
 
-	switch (fb->var.bits_per_pixel) {
-	case 8:
+	if (fb->var.bits_per_pixel <= 8) {
 		outb(regno, 0x3c8);
 
 		outb(red >> 10, 0x3c9);
 		outb(green >> 10, 0x3c9);
 		outb(blue >> 10, 0x3c9);
-		break;
-	case 16:
-		((u32 *) fb->pseudo_palette)[regno] =
+	} else if (regno < 16) {
+		switch (fb->var.bits_per_pixel) {
+		case 16:
+			((u32 *) fb->pseudo_palette)[regno] =
 				((red & 0xf800)) | ((green & 0xfc00) >> 5) |
 				((blue & 0xf800) >> 11);
-		break;
-	case 24:
-		((u32 *) fb->pseudo_palette)[regno] =
+			break;
+		case 24:
+			((u32 *) fb->pseudo_palette)[regno] =
 				((red & 0xff00) << 8) | ((green & 0xff00)) |
 				((blue & 0xff00) >> 8);
-		break;
+			break;
 #ifdef NO_32BIT_SUPPORT_YET
-	case 32:
-		((u32 *) fb->pseudo_palette)[regno] =
+		case 32:
+			((u32 *) fb->pseudo_palette)[regno] =
 				((transp & 0xff00) << 16) | ((red & 0xff00) << 8) |
 				((green & 0xff00)) | ((blue & 0xff00) >> 8);
-		break;
+			break;
 #endif
-	default:
-		return 1;
+		default:
+			return 1;
+		}
 	}
+
 	return 0;
 }
 
 /*
  *    (Un)Blank the display.
  */
-int neofb_blank(int blank_mode, struct fb_info *info)
+static int neofb_blank(int blank_mode, struct fb_info *info)
 {
 	/*
 	 *  Blank the screen if blank_mode != 0, else unblank.
@@ -1331,8 +1337,25 @@ int neofb_blank(int blank_mode, struct fb_info *info)
 	 *  wms...Enable VESA DPMS compatible powerdown mode
 	 *  run "setterm -powersave powerdown" to take advantage
 	 */
-	struct neofb_par *par = (struct neofb_par *)info->par;
-	int seqflags, lcdflags, dpmsflags, reg;
+	struct neofb_par *par = info->par;
+	int seqflags, lcdflags, dpmsflags, reg, tmpdisp;
+
+	/*
+	 * Read back the register bits related to display configuration. They might
+	 * have been changed underneath the driver via Fn key stroke.
+	 */
+	neoUnlock();
+	tmpdisp = vga_rgfx(NULL, 0x20) & 0x03;
+	neoLock(&par->state);
+
+	/* In case we blank the screen, we want to store the possibly new
+	 * configuration in the driver. During un-blank, we re-apply this setting,
+	 * since the LCD bit will be cleared in order to switch off the backlight.
+	 */
+	if (par->PanelDispCntlRegRead) {
+		par->PanelDispCntlReg1 = tmpdisp;
+	}
+	par->PanelDispCntlRegRead = !blank_mode;
 
 	switch (blank_mode) {
 	case FB_BLANK_POWERDOWN:	/* powerdown - both sync lines down */
@@ -1365,12 +1388,21 @@ int neofb_blank(int blank_mode, struct fb_info *info)
 		break;
 	case FB_BLANK_NORMAL:		/* just blank screen (backlight stays on) */
 		seqflags = VGA_SR01_SCREEN_OFF;	/* Disable sequencer */
-		lcdflags = par->PanelDispCntlReg1 & 0x02; /* LCD normal */
-		dpmsflags = 0;			/* no hsync/vsync suppression */
+		/*
+		 * During a blank operation with the LID shut, we might store "LCD off"
+		 * by mistake. Due to timing issues, the BIOS may switch the lights
+		 * back on, and we turn it back off once we "unblank".
+		 *
+		 * So here is an attempt to implement ">=" - if we are in the process
+		 * of unblanking, and the LCD bit is unset in the driver but set in the
+		 * register, we must keep it.
+		 */
+		lcdflags = ((par->PanelDispCntlReg1 | tmpdisp) & 0x02); /* LCD normal */
+		dpmsflags = 0x00;	/* no hsync/vsync suppression */
 		break;
 	case FB_BLANK_UNBLANK:		/* unblank */
 		seqflags = 0;			/* Enable sequencer */
-		lcdflags = par->PanelDispCntlReg1 & 0x02; /* LCD normal */
+		lcdflags = ((par->PanelDispCntlReg1 | tmpdisp) & 0x02); /* LCD normal */
 		dpmsflags = 0x00;	/* no hsync/vsync suppression */
 #ifdef CONFIG_TOSHIBA
 		/* Do we still need this ? */
@@ -1404,7 +1436,7 @@ int neofb_blank(int blank_mode, struct fb_info *info)
 static void
 neo2200_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	u_long dst, rop;
 
 	dst = rect->dx + rect->dy * info->var.xres_virtual;
@@ -1440,7 +1472,7 @@ static void
 neo2200_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
 	u32 sx = area->sx, sy = area->sy, dx = area->dx, dy = area->dy;
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	u_long src, dst, bltCntl;
 
 	bltCntl = NEO_BC3_FIFO_EN | NEO_BC3_SKIP_MAPPING | 0x0C0000;
@@ -1472,7 +1504,7 @@ neo2200_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 static void
 neo2200_imageblit(struct fb_info *info, const struct fb_image *image)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	int s_pitch = (image->width * image->depth + 7) >> 3;
 	int scan_align = info->pixmap.scan_align - 1;
 	int buf_align = info->pixmap.buf_align - 1;
@@ -1665,7 +1697,6 @@ static struct fb_ops neofb_ops = {
 	.fb_fillrect	= neofb_fillrect,
 	.fb_copyarea	= neofb_copyarea,
 	.fb_imageblit	= neofb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 /* --------------------------------------------------------------------- */
@@ -1687,11 +1718,31 @@ static struct fb_videomode __devinitdata mode800x480 = {
 static int __devinit neo_map_mmio(struct fb_info *info,
 				  struct pci_dev *dev)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 
 	DBG("neo_map_mmio");
 
-	info->fix.mmio_start = pci_resource_start(dev, 1);
+	switch (info->fix.accel) {
+		case FB_ACCEL_NEOMAGIC_NM2070:
+			info->fix.mmio_start = pci_resource_start(dev, 0)+
+				0x100000;
+			break;
+		case FB_ACCEL_NEOMAGIC_NM2090:
+		case FB_ACCEL_NEOMAGIC_NM2093:
+			info->fix.mmio_start = pci_resource_start(dev, 0)+
+				0x200000;
+			break;
+		case FB_ACCEL_NEOMAGIC_NM2160:
+		case FB_ACCEL_NEOMAGIC_NM2097:
+		case FB_ACCEL_NEOMAGIC_NM2200:
+		case FB_ACCEL_NEOMAGIC_NM2230:
+		case FB_ACCEL_NEOMAGIC_NM2360:
+		case FB_ACCEL_NEOMAGIC_NM2380:
+			info->fix.mmio_start = pci_resource_start(dev, 1);
+			break;
+		default:
+			info->fix.mmio_start = pci_resource_start(dev, 0);
+	}
 	info->fix.mmio_len = MMIO_SIZE;
 
 	if (!request_mem_region
@@ -1714,7 +1765,7 @@ static int __devinit neo_map_mmio(struct fb_info *info,
 
 static void neo_unmap_mmio(struct fb_info *info)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 
 	DBG("neo_unmap_mmio");
 
@@ -1777,7 +1828,7 @@ static void neo_unmap_video(struct fb_info *info)
 
 #ifdef CONFIG_MTRR
 	{
-		struct neofb_par *par = (struct neofb_par *) info->par;
+		struct neofb_par *par = info->par;
 
 		mtrr_del(par->mtrr, info->fix.smem_start,
 			 info->fix.smem_len);
@@ -1792,7 +1843,7 @@ static void neo_unmap_video(struct fb_info *info)
 
 static int __devinit neo_scan_monitor(struct fb_info *info)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	unsigned char type, display;
 	int w;
 
@@ -1871,7 +1922,7 @@ static int __devinit neo_scan_monitor(struct fb_info *info)
 
 static int __devinit neo_init_hw(struct fb_info *info)
 {
-	struct neofb_par *par = (struct neofb_par *) info->par;
+	struct neofb_par *par = info->par;
 	int videoRam = 896;
 	int maxClock = 65000;
 	int CursorMem = 1024;
@@ -1888,7 +1939,7 @@ static int __devinit neo_init_hw(struct fb_info *info)
 	printk(KERN_DEBUG "--- Neo extended register dump ---\n");
 	for (int w = 0; w < 0x85; w++)
 		printk(KERN_DEBUG "CR %p: %p\n", (void *) w,
-		       (void *) vga_rcrt(NULL, w);
+		       (void *) vga_rcrt(NULL, w));
 	for (int w = 0; w < 0xC7; w++)
 		printk(KERN_DEBUG "GR %p: %p\n", (void *) w,
 		       (void *) vga_rgfx(NULL, w));
@@ -1995,7 +2046,7 @@ static struct fb_info *__devinit neo_alloc_fb_info(struct pci_dev *dev, const st
 	struct fb_info *info;
 	struct neofb_par *par;
 
-	info = framebuffer_alloc(sizeof(struct neofb_par) + sizeof(u32) * 256, &dev->dev);
+	info = framebuffer_alloc(sizeof(struct neofb_par), &dev->dev);
 
 	if (!info)
 		return NULL;
@@ -2004,12 +2055,14 @@ static struct fb_info *__devinit neo_alloc_fb_info(struct pci_dev *dev, const st
 
 	info->fix.accel = id->driver_data;
 
+	mutex_init(&par->open_lock);
 	par->pci_burst = !nopciburst;
 	par->lcd_stretch = !nostretch;
 	par->libretto = libretto;
 
 	par->internal_display = internal;
 	par->external_display = external;
+	info->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_YPAN;
 
 	switch (info->fix.accel) {
 	case FB_ACCEL_NEOMAGIC_NM2070:
@@ -2029,15 +2082,27 @@ static struct fb_info *__devinit neo_alloc_fb_info(struct pci_dev *dev, const st
 		break;
 	case FB_ACCEL_NEOMAGIC_NM2200:
 		sprintf(info->fix.id, "MagicGraph 256AV");
+		info->flags |= FBINFO_HWACCEL_IMAGEBLIT |
+		               FBINFO_HWACCEL_COPYAREA |
+                	       FBINFO_HWACCEL_FILLRECT;
 		break;
 	case FB_ACCEL_NEOMAGIC_NM2230:
 		sprintf(info->fix.id, "MagicGraph 256AV+");
+		info->flags |= FBINFO_HWACCEL_IMAGEBLIT |
+		               FBINFO_HWACCEL_COPYAREA |
+                	       FBINFO_HWACCEL_FILLRECT;
 		break;
 	case FB_ACCEL_NEOMAGIC_NM2360:
 		sprintf(info->fix.id, "MagicGraph 256ZX");
+		info->flags |= FBINFO_HWACCEL_IMAGEBLIT |
+		               FBINFO_HWACCEL_COPYAREA |
+                	       FBINFO_HWACCEL_FILLRECT;
 		break;
 	case FB_ACCEL_NEOMAGIC_NM2380:
 		sprintf(info->fix.id, "MagicGraph 256XL+");
+		info->flags |= FBINFO_HWACCEL_IMAGEBLIT |
+		               FBINFO_HWACCEL_COPYAREA |
+                	       FBINFO_HWACCEL_FILLRECT;
 		break;
 	}
 
@@ -2049,10 +2114,7 @@ static struct fb_info *__devinit neo_alloc_fb_info(struct pci_dev *dev, const st
 	info->fix.accel = id->driver_data;
 
 	info->fbops = &neofb_ops;
-	info->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_YPAN |
-		FBINFO_HWACCEL_IMAGEBLIT | FBINFO_HWACCEL_COPYAREA |
-		FBINFO_HWACCEL_COPYAREA;
-	info->pseudo_palette = (void *) (par + 1);
+	info->pseudo_palette = par->palette;
 	return info;
 }
 
@@ -2230,7 +2292,8 @@ static struct pci_driver neofb_driver = {
 
 /* ************************* init in-kernel code ************************** */
 
-int __init neofb_setup(char *options)
+#ifndef MODULE
+static int __init neofb_setup(char *options)
 {
 	char *this_opt;
 
@@ -2258,8 +2321,9 @@ int __init neofb_setup(char *options)
 	}
 	return 0;
 }
+#endif  /*  MODULE  */
 
-int __init neofb_init(void)
+static int __init neofb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;

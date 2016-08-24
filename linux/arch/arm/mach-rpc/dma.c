@@ -13,7 +13,7 @@
 #include <linux/mman.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
+#include <linux/dma-mapping.h>
 
 #include <asm/page.h>
 #include <asm/dma.h>
@@ -83,7 +83,7 @@ static void iomd_get_next_sg(struct scatterlist *sg, dma_t *dma)
 	sg->length |= flags;
 }
 
-static irqreturn_t iomd_dma_handle(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t iomd_dma_handle(int irq, void *dev_id)
 {
 	dma_t *dma = (dma_t *)dev_id;
 	unsigned long base = dma->dma_base;
@@ -128,7 +128,7 @@ static irqreturn_t iomd_dma_handle(int irq, void *dev_id, struct pt_regs *regs)
 static int iomd_request_dma(dmach_t channel, dma_t *dma)
 {
 	return request_irq(dma->dma_irq, iomd_dma_handle,
-			   SA_INTERRUPT, dma->device_id, dma);
+			   IRQF_DISABLED, dma->device_id, dma);
 }
 
 static void iomd_free_dma(dmach_t channel, dma_t *dma)
@@ -148,11 +148,14 @@ static void iomd_enable_dma(dmach_t channel, dma_t *dma)
 		 * Cope with ISA-style drivers which expect cache
 		 * coherence.
 		 */
-		if (!dma->using_sg) {
-			dma->buf.dma_address = pci_map_single(NULL,
-				dma->buf.__address, dma->buf.length,
+		if (!dma->sg) {
+			dma->sg = &dma->buf;
+			dma->sgcount = 1;
+			dma->buf.length = dma->count;
+			dma->buf.dma_address = dma_map_single(NULL,
+				dma->addr, dma->count,
 				dma->dma_mode == DMA_MODE_READ ?
-				PCI_DMA_FROMDEVICE : PCI_DMA_TODEVICE);
+				DMA_FROM_DEVICE : DMA_TO_DEVICE);
 		}
 
 		iomd_writeb(DMA_CR_C, dma_base + CR);
@@ -239,7 +242,7 @@ static void floppy_enable_dma(dmach_t channel, dma_t *dma)
 	unsigned int fiqhandler_length;
 	struct pt_regs regs;
 
-	if (dma->using_sg)
+	if (dma->sg)
 		BUG();
 
 	if (dma->dma_mode == DMA_MODE_READ) {
@@ -252,9 +255,9 @@ static void floppy_enable_dma(dmach_t channel, dma_t *dma)
 		fiqhandler_length = &floppy_fiqout_end - &floppy_fiqout_start;
 	}
 
-	regs.ARM_r9  = dma->buf.length;
-	regs.ARM_r10 = (unsigned long)dma->buf.__address;
-	regs.ARM_fp  = FLOPPYDMA_BASE;
+	regs.ARM_r9  = dma->count;
+	regs.ARM_r10 = (unsigned long)dma->addr;
+	regs.ARM_fp  = (unsigned long)FLOPPYDMA_BASE;
 
 	if (claim_fiq(&fh)) {
 		printk("floppydma: couldn't claim FIQ.\n");

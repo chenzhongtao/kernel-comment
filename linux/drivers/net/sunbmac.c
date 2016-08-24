@@ -37,8 +37,18 @@
 
 #include "sunbmac.h"
 
-static char version[] __initdata =
-        "sunbmac.c:v2.0 24/Nov/03 David S. Miller (davem@redhat.com)\n";
+#define DRV_NAME	"sunbmac"
+#define DRV_VERSION	"2.0"
+#define DRV_RELDATE	"11/24/03"
+#define DRV_AUTHOR	"David S. Miller (davem@redhat.com)"
+
+static char version[] =
+	DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " " DRV_AUTHOR "\n";
+
+MODULE_VERSION(DRV_VERSION);
+MODULE_AUTHOR(DRV_AUTHOR);
+MODULE_DESCRIPTION("Sun BigMAC 100baseT ethernet driver");
+MODULE_LICENSE("GPL");
 
 #undef DEBUG_PROBE
 #undef DEBUG_TX
@@ -61,8 +71,6 @@ static char version[] __initdata =
 #else
 #define DIRQ(x)
 #endif
-
-static struct bigmac *root_bigmac_dev;
 
 #define DEFAULT_JAMSIZE    4 /* Toe jam */
 
@@ -204,7 +212,8 @@ static void bigmac_init_rings(struct bigmac *bp, int from_irq)
 {
 	struct bmac_init_block *bb = bp->bmac_block;
 	struct net_device *dev = bp->dev;
-	int i, gfp_flags = GFP_KERNEL;
+	int i;
+	gfp_t gfp_flags = GFP_KERNEL;
 
 	if (from_irq || in_interrupt())
 		gfp_flags = GFP_ATOMIC;
@@ -480,7 +489,7 @@ static void bigmac_tcvr_init(struct bigmac *bp)
 	}
 }
 
-static int bigmac_init(struct bigmac *, int);
+static int bigmac_init_hw(struct bigmac *, int);
 
 static int try_next_permutation(struct bigmac *bp, void __iomem *tregs)
 {
@@ -540,7 +549,7 @@ static void bigmac_timer(unsigned long data)
 				if (ret == -1) {
 					printk(KERN_ERR "%s: Link down, cable problem?\n",
 					       bp->dev->name);
-					ret = bigmac_init(bp, 0);
+					ret = bigmac_init_hw(bp, 0);
 					if (ret) {
 						printk(KERN_ERR "%s: Error, cannot re-init the "
 						       "BigMAC.\n", bp->dev->name);
@@ -610,7 +619,7 @@ static void bigmac_begin_auto_negotiation(struct bigmac *bp)
 	add_timer(&bp->bigmac_timer);
 }
 
-static int bigmac_init(struct bigmac *bp, int from_irq)
+static int bigmac_init_hw(struct bigmac *bp, int from_irq)
 {
 	void __iomem *gregs        = bp->gregs;
 	void __iomem *cregs        = bp->creg;
@@ -741,7 +750,7 @@ static void bigmac_is_medium_rare(struct bigmac *bp, u32 qec_status, u32 bmac_st
 	}
 
 	printk(" RESET\n");
-	bigmac_init(bp, 1);
+	bigmac_init_hw(bp, 1);
 }
 
 /* BigMAC transmit complete service routines. */
@@ -846,13 +855,12 @@ static void bigmac_rx(struct bigmac *bp)
 				drops++;
 				goto drop_it;
 			}
-			copy_skb->dev = bp->dev;
 			skb_reserve(copy_skb, 2);
 			skb_put(copy_skb, len);
 			sbus_dma_sync_single_for_cpu(bp->bigmac_sdev,
 						     this->rx_addr, len,
 						     SBUS_DMA_FROMDEVICE);
-			eth_copy_and_sum(copy_skb, (unsigned char *)skb->data, len, 0);
+			skb_copy_to_linear_data(copy_skb, (unsigned char *)skb->data, len);
 			sbus_dma_sync_single_for_device(bp->bigmac_sdev,
 							this->rx_addr, len,
 							SBUS_DMA_FROMDEVICE);
@@ -879,7 +887,7 @@ static void bigmac_rx(struct bigmac *bp)
 		printk(KERN_NOTICE "%s: Memory squeeze, deferring packet.\n", bp->dev->name);
 }
 
-static irqreturn_t bigmac_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t bigmac_interrupt(int irq, void *dev_id)
 {
 	struct bigmac *bp = (struct bigmac *) dev_id;
 	u32 qec_status, bmac_status;
@@ -909,13 +917,13 @@ static int bigmac_open(struct net_device *dev)
 	struct bigmac *bp = (struct bigmac *) dev->priv;
 	int ret;
 
-	ret = request_irq(dev->irq, &bigmac_interrupt, SA_SHIRQ, dev->name, bp);
+	ret = request_irq(dev->irq, &bigmac_interrupt, IRQF_SHARED, dev->name, bp);
 	if (ret) {
 		printk(KERN_ERR "BIGMAC: Can't order irq %d to go.\n", dev->irq);
 		return ret;
 	}
 	init_timer(&bp->bigmac_timer);
-	ret = bigmac_init(bp, 0);
+	ret = bigmac_init_hw(bp, 0);
 	if (ret)
 		free_irq(dev->irq, bp);
 	return ret;
@@ -939,7 +947,7 @@ static void bigmac_tx_timeout(struct net_device *dev)
 {
 	struct bigmac *bp = (struct bigmac *) dev->priv;
 
-	bigmac_init(bp, 0);
+	bigmac_init_hw(bp, 0);
 	netif_wake_queue(dev);
 }
 
@@ -1062,7 +1070,7 @@ static u32 bigmac_get_link(struct net_device *dev)
 	return (bp->sw_bmsr & BMSR_LSTATUS);
 }
 
-static struct ethtool_ops bigmac_ethtool_ops = {
+static const struct ethtool_ops bigmac_ethtool_ops = {
 	.get_drvinfo		= bigmac_get_drvinfo,
 	.get_link		= bigmac_get_link,
 };
@@ -1074,12 +1082,12 @@ static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 	struct bigmac *bp;
 	u8 bsizes, bsizes_more;
 	int i;
+	DECLARE_MAC_BUF(mac);
 
 	/* Get a new device struct for this interface. */
 	dev = alloc_etherdev(sizeof(struct bigmac));
 	if (!dev)
 		return -ENOMEM;
-	SET_MODULE_OWNER(dev);
 
 	if (version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
@@ -1092,6 +1100,8 @@ static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 	bp = dev->priv;
 	bp->qec_sdev = qec_sdev;
 	bp->bigmac_sdev = qec_sdev->child;
+
+	SET_NETDEV_DEV(dev, &bp->bigmac_sdev->ofdev.dev);
 
 	spin_lock_init(&bp->lock);
 
@@ -1215,17 +1225,10 @@ static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 		goto fail_and_cleanup;
 	}
 
-	/* Put us into the list of instances attached for later driver
-	 * exit.
-	 */
-	bp->next_module = root_bigmac_dev;
-	root_bigmac_dev = bp;
+	dev_set_drvdata(&bp->bigmac_sdev->ofdev.dev, bp);
 
-	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet ", dev->name);
-	for (i = 0; i < 6; i++)
-		printk("%2.2x%c", dev->dev_addr[i],
-		       i == 5 ? ' ' : ':');
-	printk("\n");
+	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet %s\n",
+	       dev->name, print_mac(mac, dev->dev_addr));
 
 	return 0;
 
@@ -1255,70 +1258,68 @@ fail_and_cleanup:
 /* QEC can be the parent of either QuadEthernet or
  * a BigMAC.  We want the latter.
  */
-static int __init bigmac_match(struct sbus_dev *sdev)
+static int __devinit bigmac_sbus_probe(struct of_device *dev, const struct of_device_id *match)
 {
-	struct sbus_dev *child = sdev->child;
+	struct sbus_dev *sdev = to_sbus_device(&dev->dev);
+	struct device_node *dp = dev->node;
 
-	if (strcmp(sdev->prom_name, "qec") != 0)
-		return 0;
+	if (!strcmp(dp->name, "be"))
+		sdev = sdev->parent;
 
-	if (child == NULL)
-		return 0;
-
-	if (strcmp(child->prom_name, "be") != 0)
-		return 0;
-
-	return 1;
+	return bigmac_ether_init(sdev);
 }
 
-static int __init bigmac_probe(void)
+static int __devexit bigmac_sbus_remove(struct of_device *dev)
 {
-	struct sbus_bus *sbus;
-	struct sbus_dev *sdev = NULL;
-	static int called;
-	int cards = 0, v;
+	struct bigmac *bp = dev_get_drvdata(&dev->dev);
+	struct net_device *net_dev = bp->dev;
 
-	root_bigmac_dev = NULL;
+	unregister_netdevice(net_dev);
 
-	if (called)
-		return -ENODEV;
-	called++;
+	sbus_iounmap(bp->gregs, GLOB_REG_SIZE);
+	sbus_iounmap(bp->creg, CREG_REG_SIZE);
+	sbus_iounmap(bp->bregs, BMAC_REG_SIZE);
+	sbus_iounmap(bp->tregs, TCVR_REG_SIZE);
+	sbus_free_consistent(bp->bigmac_sdev,
+			     PAGE_SIZE,
+			     bp->bmac_block,
+			     bp->bblock_dvma);
 
-	for_each_sbus(sbus) {
-		for_each_sbusdev(sdev, sbus) {
-			if (bigmac_match(sdev)) {
-				cards++;
-				if ((v = bigmac_ether_init(sdev)))
-					return v;
-			}
-		}
-	}
-	if (!cards)
-		return -ENODEV;
+	free_netdev(net_dev);
+
+	dev_set_drvdata(&dev->dev, NULL);
+
 	return 0;
 }
 
-static void __exit bigmac_cleanup(void)
+static struct of_device_id bigmac_sbus_match[] = {
+	{
+		.name = "qec",
+	},
+	{
+		.name = "be",
+	},
+	{},
+};
+
+MODULE_DEVICE_TABLE(of, bigmac_sbus_match);
+
+static struct of_platform_driver bigmac_sbus_driver = {
+	.name		= "sunbmac",
+	.match_table	= bigmac_sbus_match,
+	.probe		= bigmac_sbus_probe,
+	.remove		= __devexit_p(bigmac_sbus_remove),
+};
+
+static int __init bigmac_init(void)
 {
-	while (root_bigmac_dev) {
-		struct bigmac *bp = root_bigmac_dev;
-		struct bigmac *bp_nxt = root_bigmac_dev->next_module;
-
-		sbus_iounmap(bp->gregs, GLOB_REG_SIZE);
-		sbus_iounmap(bp->creg, CREG_REG_SIZE);
-		sbus_iounmap(bp->bregs, BMAC_REG_SIZE);
-		sbus_iounmap(bp->tregs, TCVR_REG_SIZE);
-		sbus_free_consistent(bp->bigmac_sdev,
-				     PAGE_SIZE,
-				     bp->bmac_block,
-				     bp->bblock_dvma);
-
-		unregister_netdev(bp->dev);
-		free_netdev(bp->dev);
-		root_bigmac_dev = bp_nxt;
-	}
+	return of_register_driver(&bigmac_sbus_driver, &sbus_bus_type);
 }
 
-module_init(bigmac_probe);
-module_exit(bigmac_cleanup);
-MODULE_LICENSE("GPL");
+static void __exit bigmac_exit(void)
+{
+	of_unregister_driver(&bigmac_sbus_driver);
+}
+
+module_init(bigmac_init);
+module_exit(bigmac_exit);

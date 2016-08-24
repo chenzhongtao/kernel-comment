@@ -47,44 +47,12 @@
 #include <linux/highmem.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
-#include "protocol.h"
+
 #include "usb.h"
+#include "protocol.h"
 #include "debug.h"
 #include "scsiglue.h"
 #include "transport.h"
-
-/***********************************************************************
- * Helper routines
- ***********************************************************************/
-
-/*
- * Fix-up the return data from a READ CAPACITY command. My Feiya reader
- * returns a value that is 1 too large.
- */
-static void fix_read_capacity(struct scsi_cmnd *srb)
-{
-	unsigned int index, offset;
-	__be32 c;
-	unsigned long capacity;
-
-	/* verify that it's a READ CAPACITY command */
-	if (srb->cmnd[0] != READ_CAPACITY)
-		return;
-
-	index = offset = 0;
-	if (usb_stor_access_xfer_buf((unsigned char *) &c, 4, srb,
-			&index, &offset, FROM_XFER_BUF) != 4)
-		return;
-
-	capacity = be32_to_cpu(c);
-	US_DEBUGP("US: Fixing capacity: from %ld to %ld\n",
-	       capacity+1, capacity);
-	c = cpu_to_be32(capacity - 1);
-
-	index = offset = 0;
-	usb_stor_access_xfer_buf((unsigned char *) &c, 4, srb,
-			&index, &offset, TO_XFER_BUF);
-}
 
 /***********************************************************************
  * Protocol routines
@@ -174,12 +142,6 @@ void usb_stor_transparent_scsi_command(struct scsi_cmnd *srb,
 {
 	/* send the command to the transport layer */
 	usb_stor_invoke_transport(srb, us);
-
-	if (srb->result == SAM_STAT_GOOD) {
-		/* Fix the READ CAPACITY result if necessary */
-		if (us->flags & US_FL_FIX_CAPACITY)
-			fix_read_capacity(srb);
-	}
 }
 
 /***********************************************************************
@@ -195,7 +157,7 @@ void usb_stor_transparent_scsi_command(struct scsi_cmnd *srb,
  * pick up from where this one left off. */
 
 unsigned int usb_stor_access_xfer_buf(unsigned char *buffer,
-	unsigned int buflen, struct scsi_cmnd *srb, unsigned int *index,
+	unsigned int buflen, struct scsi_cmnd *srb, struct scatterlist **sgptr,
 	unsigned int *offset, enum xfer_buf_dir dir)
 {
 	unsigned int cnt;
@@ -222,17 +184,18 @@ unsigned int usb_stor_access_xfer_buf(unsigned char *buffer,
 	 * located in high memory -- then kmap() will map it to a temporary
 	 * position in the kernel's virtual address space. */
 	} else {
-		struct scatterlist *sg =
-				(struct scatterlist *) srb->request_buffer
-				+ *index;
+		struct scatterlist *sg = *sgptr;
+
+		if (!sg)
+			sg = (struct scatterlist *) srb->request_buffer;
 
 		/* This loop handles a single s-g list entry, which may
 		 * include multiple pages.  Find the initial page structure
 		 * and the starting offset within the page, and update
 		 * the *offset and *index values for the next loop. */
 		cnt = 0;
-		while (cnt < buflen && *index < srb->use_sg) {
-			struct page *page = sg->page +
+		while (cnt < buflen) {
+			struct page *page = sg_page(sg) +
 					((sg->offset + *offset) >> PAGE_SHIFT);
 			unsigned int poff =
 					(sg->offset + *offset) & (PAGE_SIZE-1);
@@ -247,8 +210,7 @@ unsigned int usb_stor_access_xfer_buf(unsigned char *buffer,
 
 				/* Transfer continues to next s-g entry */
 				*offset = 0;
-				++*index;
-				++sg;
+				sg = sg_next(sg);
 			}
 
 			/* Transfer the data for all the pages in this
@@ -272,6 +234,7 @@ unsigned int usb_stor_access_xfer_buf(unsigned char *buffer,
 				sglen -= plen;
 			}
 		}
+		*sgptr = sg;
 	}
 
 	/* Return the amount actually transferred */
@@ -283,9 +246,10 @@ unsigned int usb_stor_access_xfer_buf(unsigned char *buffer,
 void usb_stor_set_xfer_buf(unsigned char *buffer,
 	unsigned int buflen, struct scsi_cmnd *srb)
 {
-	unsigned int index = 0, offset = 0;
+	unsigned int offset = 0;
+	struct scatterlist *sg = NULL;
 
-	usb_stor_access_xfer_buf(buffer, buflen, srb, &index, &offset,
+	usb_stor_access_xfer_buf(buffer, buflen, srb, &sg, &offset,
 			TO_XFER_BUF);
 	if (buflen < srb->request_bufflen)
 		srb->resid = srb->request_bufflen - buflen;

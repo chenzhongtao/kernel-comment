@@ -51,7 +51,6 @@
  * 
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -63,7 +62,7 @@
 #include <linux/spinlock.h>
 #include <asm/uaccess.h>
 #include <linux/usb.h>
-#include "usb-serial.h"
+#include <linux/usb/serial.h>
 
 static int debug;
 
@@ -93,9 +92,9 @@ static int  empeg_ioctl			(struct usb_serial_port *port,
 					struct file * file,
 					unsigned int cmd,
 					unsigned long arg);
-static void empeg_set_termios		(struct usb_serial_port *port, struct termios *old_termios);
-static void empeg_write_bulk_callback	(struct urb *urb, struct pt_regs *regs);
-static void empeg_read_bulk_callback	(struct urb *urb, struct pt_regs *regs);
+static void empeg_set_termios		(struct usb_serial_port *port, struct ktermios *old_termios);
+static void empeg_write_bulk_callback	(struct urb *urb);
+static void empeg_read_bulk_callback	(struct urb *urb);
 
 static struct usb_device_id id_table [] = {
 	{ USB_DEVICE(EMPEG_VENDOR_ID, EMPEG_PRODUCT_ID) },
@@ -105,17 +104,20 @@ static struct usb_device_id id_table [] = {
 MODULE_DEVICE_TABLE (usb, id_table);
 
 static struct usb_driver empeg_driver = {
-	.owner =	THIS_MODULE,
 	.name =		"empeg",
 	.probe =	usb_serial_probe,
 	.disconnect =	usb_serial_disconnect,
 	.id_table =	id_table,
+	.no_dynamic_id = 	1,
 };
 
-static struct usb_serial_device_type empeg_device = {
-	.owner =		THIS_MODULE,
-	.name =			"Empeg",
+static struct usb_serial_driver empeg_device = {
+	.driver = {
+		.owner =	THIS_MODULE,
+		.name =		"empeg",
+	},
 	.id_table =		id_table,
+	.usb_driver = 		&empeg_driver,
 	.num_interrupt_in =	0,
 	.num_bulk_in =		1,
 	.num_bulk_out =		1,
@@ -322,33 +324,36 @@ static int empeg_chars_in_buffer (struct usb_serial_port *port)
 }
 
 
-static void empeg_write_bulk_callback (struct urb *urb, struct pt_regs *regs)
+static void empeg_write_bulk_callback (struct urb *urb)
 {
-	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
+	struct usb_serial_port *port = urb->context;
+	int status = urb->status;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 
-	if (urb->status) {
-		dbg("%s - nonzero write bulk status received: %d", __FUNCTION__, urb->status);
+	if (status) {
+		dbg("%s - nonzero write bulk status received: %d",
+		    __FUNCTION__, status);
 		return;
 	}
 
-	schedule_work(&port->work);
+	usb_serial_port_softint(port);
 }
 
 
-static void empeg_read_bulk_callback (struct urb *urb, struct pt_regs *regs)
+static void empeg_read_bulk_callback (struct urb *urb)
 {
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
 	struct tty_struct *tty;
 	unsigned char *data = urb->transfer_buffer;
-	int i;
 	int result;
+	int status = urb->status;
 
 	dbg("%s - port %d", __FUNCTION__, port->number);
 
-	if (urb->status) {
-		dbg("%s - nonzero read bulk status received: %d", __FUNCTION__, urb->status);
+	if (status) {
+		dbg("%s - nonzero read bulk status received: %d",
+		    __FUNCTION__, status);
 		return;
 	}
 
@@ -357,19 +362,8 @@ static void empeg_read_bulk_callback (struct urb *urb, struct pt_regs *regs)
 	tty = port->tty;
 
 	if (urb->actual_length) {
-		for (i = 0; i < urb->actual_length ; ++i) {
-			/* gb - 2000/11/13
-			 * If we insert too many characters we'll overflow the buffer.
-			 * This means we'll lose bytes - Decidedly bad.
-			 */
-			if(tty->flip.count >= TTY_FLIPBUF_SIZE) {
-				tty_flip_buffer_push(tty);
-				}
-			tty_insert_flip_char(tty, data[i], 0);
-		}
-		/* gb - 2000/11/13
-		 * Goes straight through instead of scheduling - if tty->low_latency is set.
-		 */
+		tty_buffer_request_room(tty, urb->actual_length);
+		tty_insert_flip_string(tty, data, urb->actual_length);
 		tty_flip_buffer_push(tty);
 		bytes_in += urb->actual_length;
 	}
@@ -453,15 +447,10 @@ static int empeg_ioctl (struct usb_serial_port *port, struct file * file, unsign
 }
 
 
-static void empeg_set_termios (struct usb_serial_port *port, struct termios *old_termios)
+static void empeg_set_termios (struct usb_serial_port *port, struct ktermios *old_termios)
 {
-
+	struct ktermios *termios = port->tty->termios;
 	dbg("%s - port %d", __FUNCTION__, port->number);
-
-	if ((!port->tty) || (!port->tty->termios)) {
-		dbg("%s - no tty structures", __FUNCTION__);
-		return;
-	}
 
 	/*
          * The empeg-car player wants these particular tty settings.
@@ -472,7 +461,7 @@ static void empeg_set_termios (struct usb_serial_port *port, struct termios *old
          *
          * The default requirements for this device are:
          */
-	port->tty->termios->c_iflag
+	termios->c_iflag
 		&= ~(IGNBRK	/* disable ignore break */
 		| BRKINT	/* disable break causes interrupt */
 		| PARMRK	/* disable mark parity errors */
@@ -482,24 +471,23 @@ static void empeg_set_termios (struct usb_serial_port *port, struct termios *old
 		| ICRNL		/* disable translate CR to NL */
 		| IXON);	/* disable enable XON/XOFF flow control */
 
-	port->tty->termios->c_oflag
+	termios->c_oflag
 		&= ~OPOST;	/* disable postprocess output characters */
 
-	port->tty->termios->c_lflag
+	termios->c_lflag
 		&= ~(ECHO	/* disable echo input characters */
 		| ECHONL	/* disable echo new line */
 		| ICANON	/* disable erase, kill, werase, and rprnt special characters */
 		| ISIG		/* disable interrupt, quit, and suspend special characters */
 		| IEXTEN);	/* disable non-POSIX special characters */
 
-	port->tty->termios->c_cflag
+	termios->c_cflag
 		&= ~(CSIZE	/* no size */
 		| PARENB	/* disable parity bit */
 		| CBAUD);	/* clear current baud rate */
 
-	port->tty->termios->c_cflag
-		|= (CS8		/* character size 8 bits */
-		| B115200);	/* baud rate 115200 */
+	termios->c_cflag
+		|= CS8;		/* character size 8 bits */
 
 	/*
 	 * Force low_latency on; otherwise the pushes are scheduled;
@@ -507,8 +495,7 @@ static void empeg_set_termios (struct usb_serial_port *port, struct termios *old
 	 * on the floor.  We don't want to drop bytes on the floor. :)
 	 */
 	port->tty->low_latency = 1;
-
-	return;
+	tty_encode_baud_rate(port->tty, 115200, 115200);
 }
 
 
@@ -550,8 +537,7 @@ failed_usb_register:
 failed_usb_serial_register:
 	for (i = 0; i < NUM_URBS; ++i) {
 		if (write_urb_pool[i]) {
-			if (write_urb_pool[i]->transfer_buffer)
-				kfree(write_urb_pool[i]->transfer_buffer);
+			kfree(write_urb_pool[i]->transfer_buffer);
 			usb_free_urb(write_urb_pool[i]);
 		}
 	}
@@ -575,8 +561,7 @@ static void __exit empeg_exit (void)
 			 * the host controllers get fixed to set urb->dev = NULL after
 			 * the urb is finished.  Otherwise this call oopses. */
 			/* usb_kill_urb(write_urb_pool[i]); */
-			if (write_urb_pool[i]->transfer_buffer)
-				kfree(write_urb_pool[i]->transfer_buffer);
+			kfree(write_urb_pool[i]->transfer_buffer);
 			usb_free_urb (write_urb_pool[i]);
 		}
 	}

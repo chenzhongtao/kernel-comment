@@ -4,6 +4,7 @@
  * Copyright (C) 2001-2003 Andreas Gruenbacher, <agruen@suse.de>
  */
 
+#include <linux/capability.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -88,8 +89,8 @@ ext2_acl_to_disk(const struct posix_acl *acl, size_t *size)
 	size_t n;
 
 	*size = ext2_acl_size(acl->a_count);
-	ext_acl = (ext2_acl_header *)kmalloc(sizeof(ext2_acl_header) +
-		acl->a_count * sizeof(ext2_acl_entry), GFP_KERNEL);
+	ext_acl = kmalloc(sizeof(ext2_acl_header) + acl->a_count *
+			sizeof(ext2_acl_entry), GFP_KERNEL);
 	if (!ext_acl)
 		return ERR_PTR(-ENOMEM);
 	ext_acl->a_version = cpu_to_le32(EXT2_ACL_VERSION);
@@ -149,7 +150,7 @@ ext2_iset_acl(struct inode *inode, struct posix_acl **i_acl,
 }
 
 /*
- * inode->i_sem: don't care
+ * inode->i_mutex: don't care
  */
 static struct posix_acl *
 ext2_get_acl(struct inode *inode, int type)
@@ -194,8 +195,7 @@ ext2_get_acl(struct inode *inode, int type)
 		acl = NULL;
 	else
 		acl = ERR_PTR(retval);
-	if (value)
-		kfree(value);
+	kfree(value);
 
 	if (!IS_ERR(acl)) {
 		switch(type) {
@@ -212,7 +212,7 @@ ext2_get_acl(struct inode *inode, int type)
 }
 
 /*
- * inode->i_sem: down
+ * inode->i_mutex: down
  */
 static int
 ext2_set_acl(struct inode *inode, int type, struct posix_acl *acl)
@@ -220,7 +220,7 @@ ext2_set_acl(struct inode *inode, int type, struct posix_acl *acl)
 	struct ext2_inode_info *ei = EXT2_I(inode);
 	int name_index;
 	void *value = NULL;
-	size_t size;
+	size_t size = 0;
 	int error;
 
 	if (S_ISLNK(inode->i_mode))
@@ -262,8 +262,7 @@ ext2_set_acl(struct inode *inode, int type, struct posix_acl *acl)
 
 	error = ext2_xattr_set(inode, name_index, "", value, size, 0);
 
-	if (value)
-		kfree(value);
+	kfree(value);
 	if (!error) {
 		switch(type) {
 			case ACL_TYPE_ACCESS:
@@ -283,6 +282,8 @@ ext2_check_acl(struct inode *inode, int mask)
 {
 	struct posix_acl *acl = ext2_get_acl(inode, ACL_TYPE_ACCESS);
 
+	if (IS_ERR(acl))
+		return PTR_ERR(acl);
 	if (acl) {
 		int error = posix_acl_permission(inode, acl, mask);
 		posix_acl_release(acl);
@@ -301,8 +302,8 @@ ext2_permission(struct inode *inode, int mask, struct nameidata *nd)
 /*
  * Initialize the ACLs of a new inode. Called from ext2_new_inode.
  *
- * dir->i_sem: down
- * inode->i_sem: up (access to inode is still exclusive)
+ * dir->i_mutex: down
+ * inode->i_mutex: up (access to inode is still exclusive)
  */
 int
 ext2_init_acl(struct inode *inode, struct inode *dir)
@@ -361,7 +362,7 @@ cleanup:
  * for directories) are added. There are no more bits available in the
  * file mode.
  *
- * inode->i_sem: down
+ * inode->i_mutex: down
  */
 int
 ext2_acl_chmod(struct inode *inode)
@@ -394,12 +395,12 @@ static size_t
 ext2_xattr_list_acl_access(struct inode *inode, char *list, size_t list_size,
 			   const char *name, size_t name_len)
 {
-	const size_t size = sizeof(XATTR_NAME_ACL_ACCESS);
+	const size_t size = sizeof(POSIX_ACL_XATTR_ACCESS);
 
 	if (!test_opt(inode->i_sb, POSIX_ACL))
 		return 0;
 	if (list && size <= list_size)
-		memcpy(list, XATTR_NAME_ACL_ACCESS, size);
+		memcpy(list, POSIX_ACL_XATTR_ACCESS, size);
 	return size;
 }
 
@@ -407,12 +408,12 @@ static size_t
 ext2_xattr_list_acl_default(struct inode *inode, char *list, size_t list_size,
 			    const char *name, size_t name_len)
 {
-	const size_t size = sizeof(XATTR_NAME_ACL_DEFAULT);
+	const size_t size = sizeof(POSIX_ACL_XATTR_DEFAULT);
 
 	if (!test_opt(inode->i_sb, POSIX_ACL))
 		return 0;
 	if (list && size <= list_size)
-		memcpy(list, XATTR_NAME_ACL_DEFAULT, size);
+		memcpy(list, POSIX_ACL_XATTR_DEFAULT, size);
 	return size;
 }
 
@@ -463,7 +464,7 @@ ext2_xattr_set_acl(struct inode *inode, int type, const void *value,
 
 	if (!test_opt(inode->i_sb, POSIX_ACL))
 		return -EOPNOTSUPP;
-	if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
+	if (!is_owner_or_cap(inode))
 		return -EPERM;
 
 	if (value) {
@@ -504,14 +505,14 @@ ext2_xattr_set_acl_default(struct inode *inode, const char *name,
 }
 
 struct xattr_handler ext2_xattr_acl_access_handler = {
-	.prefix	= XATTR_NAME_ACL_ACCESS,
+	.prefix	= POSIX_ACL_XATTR_ACCESS,
 	.list	= ext2_xattr_list_acl_access,
 	.get	= ext2_xattr_get_acl_access,
 	.set	= ext2_xattr_set_acl_access,
 };
 
 struct xattr_handler ext2_xattr_acl_default_handler = {
-	.prefix	= XATTR_NAME_ACL_DEFAULT,
+	.prefix	= POSIX_ACL_XATTR_DEFAULT,
 	.list	= ext2_xattr_list_acl_default,
 	.get	= ext2_xattr_get_acl_default,
 	.set	= ext2_xattr_set_acl_default,

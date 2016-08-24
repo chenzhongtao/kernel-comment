@@ -15,9 +15,9 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/config.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/irq.h>
 #include <linux/delay.h>
 
 #include <asm/mach/pci.h>
@@ -27,19 +27,10 @@
 
 void __init ixdp425_pci_preinit(void)
 {
-	gpio_line_config(IXDP425_PCI_INTA_PIN,
-				IXP4XX_GPIO_IN | IXP4XX_GPIO_ACTIVE_LOW);
-	gpio_line_config(IXDP425_PCI_INTB_PIN, 
-				IXP4XX_GPIO_IN | IXP4XX_GPIO_ACTIVE_LOW);
-	gpio_line_config(IXDP425_PCI_INTC_PIN, 
-				IXP4XX_GPIO_IN | IXP4XX_GPIO_ACTIVE_LOW);
-	gpio_line_config(IXDP425_PCI_INTD_PIN, 
-				IXP4XX_GPIO_IN | IXP4XX_GPIO_ACTIVE_LOW);
-
-	gpio_line_isr_clear(IXDP425_PCI_INTA_PIN);
-	gpio_line_isr_clear(IXDP425_PCI_INTB_PIN);
-	gpio_line_isr_clear(IXDP425_PCI_INTC_PIN);
-	gpio_line_isr_clear(IXDP425_PCI_INTD_PIN);
+	set_irq_type(IRQ_IXDP425_PCI_INTA, IRQT_LOW);
+	set_irq_type(IRQ_IXDP425_PCI_INTB, IRQT_LOW);
+	set_irq_type(IRQ_IXDP425_PCI_INTC, IRQT_LOW);
+	set_irq_type(IRQ_IXDP425_PCI_INTD, IRQT_LOW);
 
 	ixp4xx_pci_preinit();
 }
@@ -75,7 +66,7 @@ struct hw_pci ixdp425_pci __initdata = {
 int __init ixdp425_pci_init(void)
 {
 	if (machine_is_ixdp425() || machine_is_ixcdp1100() ||
-			machine_is_avila() || machine_is_ixdp465())
+			machine_is_ixdp465() || machine_is_kixrp435())
 		pci_common_init(&ixdp425_pci);
 	return 0;
 }

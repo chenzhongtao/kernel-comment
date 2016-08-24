@@ -9,7 +9,11 @@ config MMU
 	bool
 	default y
 
-config UID16
+config ZONE_DMA
+	bool
+	default y
+
+config NO_DMA
 	bool
 	default y
 
@@ -20,9 +24,32 @@ config RWSEM_GENERIC_SPINLOCK
 config RWSEM_XCHGADD_ALGORITHM
 	bool
 
+config ARCH_HAS_ILOG2_U32
+	bool
+	default n
+
+config ARCH_HAS_ILOG2_U64
+	bool
+	default n
+
+config GENERIC_FIND_NEXT_BIT
+	bool
+	default y
+
+config GENERIC_HWEIGHT
+	bool
+	default y
+
 config GENERIC_CALIBRATE_DELAY
 	bool
 	default y
+
+config IRQ_PER_CPU
+	bool
+	default y
+
+config NO_IOPORT
+	def_bool y
 
 config CRIS
 	bool
@@ -33,6 +60,10 @@ source "init/Kconfig"
 menu "General setup"
 
 source "fs/Kconfig.binfmt"
+
+config GENERIC_HARDIRQS
+	bool
+	default y
 
 config ETRAX_CMDLINE
 	string "Kernel command line"
@@ -73,6 +104,8 @@ config PREEMPT
 
 	  Say Y here if you are building a kernel for a desktop, embedded
 	  or real-time system.  Say N if you are unsure.
+
+source mm/Kconfig
 
 endmenu
 
@@ -120,9 +153,12 @@ source arch/cris/arch-v10/Kconfig
 
 endmenu
 
+source "net/Kconfig"
+
 # bring in ETRAX built-in drivers
 menu "Drivers for built-in interfaces"
-source arch/cris/arch-v10/drivers/Kconfig
+# arch/cris/arch is a symlink to correct arch (arch-v10 or arch-v32)
+source arch/cris/arch/drivers/Kconfig
 
 endmenu
 
@@ -147,13 +183,15 @@ source "drivers/ieee1394/Kconfig"
 
 source "drivers/message/i2o/Kconfig"
 
-source "net/Kconfig"
+source "drivers/net/Kconfig"
 
 source "drivers/isdn/Kconfig"
 
 source "drivers/telephony/Kconfig"
 
-source "drivers/cdrom/Kconfig"
+source "drivers/i2c/Kconfig"
+
+source "drivers/rtc/Kconfig"
 
 #
 # input before char - char/joystick depends on it. As does USB.
@@ -169,7 +207,13 @@ source "fs/Kconfig"
 
 source "sound/Kconfig"
 
+source "drivers/pcmcia/Kconfig"
+
+source "drivers/pci/Kconfig"
+
 source "drivers/usb/Kconfig"
+
+source "kernel/Kconfig.instrumentation"
 
 source "arch/cris/Kconfig.debug"
 

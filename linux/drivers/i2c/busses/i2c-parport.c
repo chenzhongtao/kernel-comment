@@ -1,13 +1,13 @@
 /* ------------------------------------------------------------------------ *
  * i2c-parport.c I2C bus over parallel port                                 *
  * ------------------------------------------------------------------------ *
-   Copyright (C) 2003-2004 Jean Delvare <khali@linux-fr.org>
+   Copyright (C) 2003-2007 Jean Delvare <khali@linux-fr.org>
    
    Based on older i2c-philips-par.c driver
    Copyright (C) 1995-2000 Simon G. Vogl
    With some changes from:
    Frodo Looijaard <frodol@dds.nl>
-   Kyösti Mälkki <kmalkki@cc.hut.fi>
+   KyÃ¶sti MÃ¤lkki <kmalkki@cc.hut.fi>
    
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -24,7 +24,6 @@
    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  * ------------------------------------------------------------------------ */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -131,37 +130,28 @@ static int parport_getsda(void *data)
 /* Encapsulate the functions above in the correct structure.
    Note that this is only a template, from which the real structures are
    copied. The attaching code will set getscl to NULL for adapters that
-   cannot read SCL back, and will also make the the data field point to
+   cannot read SCL back, and will also make the data field point to
    the parallel port structure. */
 static struct i2c_algo_bit_data parport_algo_data = {
 	.setsda		= parport_setsda,
 	.setscl		= parport_setscl,
 	.getsda		= parport_getsda,
 	.getscl		= parport_getscl,
-	.udelay		= 60,
-	.mdelay		= 60,
+	.udelay		= 10, /* ~50 kbps */
 	.timeout	= HZ,
 }; 
 
 /* ----- I2c and parallel port call-back functions and structures --------- */
 
-static struct i2c_adapter parport_adapter = {
-	.owner		= THIS_MODULE,
-	.class		= I2C_CLASS_HWMON,
-	.id		= I2C_HW_B_LP,
-	.name		= "Parallel port adapter",
-};
-
 static void i2c_parport_attach (struct parport *port)
 {
 	struct i2c_par *adapter;
 	
-	adapter = kmalloc(sizeof(struct i2c_par), GFP_KERNEL);
+	adapter = kzalloc(sizeof(struct i2c_par), GFP_KERNEL);
 	if (adapter == NULL) {
-		printk(KERN_ERR "i2c-parport: Failed to kmalloc\n");
+		printk(KERN_ERR "i2c-parport: Failed to kzalloc\n");
 		return;
 	}
-	memset(adapter, 0x00, sizeof(struct i2c_par));
 
 	pr_debug("i2c-parport: attaching to %s\n", port->name);
 	adapter->pdev = parport_register_device(port, "i2c-parport",
@@ -172,12 +162,20 @@ static void i2c_parport_attach (struct parport *port)
 	}
 
 	/* Fill the rest of the structure */
-	adapter->adapter = parport_adapter;
+	adapter->adapter.owner = THIS_MODULE;
+	adapter->adapter.class = I2C_CLASS_HWMON;
+	adapter->adapter.id = I2C_HW_B_LP;
+	strlcpy(adapter->adapter.name, "Parallel port adapter",
+		sizeof(adapter->adapter.name));
 	adapter->algo_data = parport_algo_data;
-	if (!adapter_parm[type].getscl.val)
+	/* Slow down if we can't sense SCL */
+	if (!adapter_parm[type].getscl.val) {
 		adapter->algo_data.getscl = NULL;
+		adapter->algo_data.udelay = 50; /* ~10 kbps */
+	}
 	adapter->algo_data.data = port;
 	adapter->adapter.algo_data = &adapter->algo_data;
+	adapter->adapter.dev.parent = port->physport->dev;
 
 	if (parport_claim_or_block(adapter->pdev) < 0) {
 		printk(KERN_ERR "i2c-parport: Could not claim parallel port\n");
@@ -217,11 +215,12 @@ static void i2c_parport_detach (struct parport *port)
 	for (prev = NULL, adapter = adapter_list; adapter;
 	     prev = adapter, adapter = adapter->next) {
 		if (adapter->pdev->port == port) {
+			i2c_del_adapter(&adapter->adapter);
+
 			/* Un-init if needed (power off...) */
 			if (adapter_parm[type].init.val)
 				line_set(port, 0, &adapter_parm[type].init);
 				
-			i2c_bit_del_bus(&adapter->adapter);
 			parport_unregister_device(adapter->pdev);
 			if (prev)
 				prev->next = adapter->next;
@@ -233,7 +232,7 @@ static void i2c_parport_detach (struct parport *port)
 	}
 }
 
-static struct parport_driver i2c_driver = {
+static struct parport_driver i2c_parport_driver = {
 	.name	= "i2c-parport",
 	.attach	= i2c_parport_attach,
 	.detach	= i2c_parport_detach,
@@ -243,20 +242,22 @@ static struct parport_driver i2c_driver = {
 
 static int __init i2c_parport_init(void)
 {
-	int type_count;
-
-	type_count = sizeof(adapter_parm)/sizeof(struct adapter_parm);
-	if (type < 0 || type >= type_count) {
-		printk(KERN_WARNING "i2c-parport: invalid type (%d)\n", type);
-		type = 0;
+	if (type < 0) {
+		printk(KERN_WARNING "i2c-parport: adapter type unspecified\n");
+		return -ENODEV;
 	}
-	
-	return parport_register_driver(&i2c_driver);
+
+	if (type >= ARRAY_SIZE(adapter_parm)) {
+		printk(KERN_WARNING "i2c-parport: invalid type (%d)\n", type);
+		return -ENODEV;
+	}
+
+	return parport_register_driver(&i2c_parport_driver);
 }
 
 static void __exit i2c_parport_exit(void)
 {
-	parport_unregister_driver(&i2c_driver);
+	parport_unregister_driver(&i2c_parport_driver);
 }
 
 MODULE_AUTHOR("Jean Delvare <khali@linux-fr.org>");

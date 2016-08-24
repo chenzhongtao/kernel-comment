@@ -20,19 +20,11 @@
 #include "message.h"
 #include "card.h"
 
-extern board *sc_adapter[];
-
-extern void flushreadfifo(int);
-extern int  startproc(int);
-extern int  indicate_status(int, int, unsigned long, char *);
-extern int  sendmessage(int, unsigned int, unsigned int, unsigned int,
-        unsigned int, unsigned int, unsigned int, unsigned int *);
-
 
 /*
  * Write the proper values into the I/O ports following a reset
  */
-void setup_ports(int card)
+static void setup_ports(int card)
 {
 
 	outb((sc_adapter[card]->rambase >> 12), sc_adapter[card]->ioport[EXP_BASE]);
@@ -51,7 +43,7 @@ void setup_ports(int card)
  * Then, check to see if the signate has been set. Next, set the
  * signature to a known value and issue a startproc if needed.
  */
-void check_reset(unsigned long data)
+void sc_check_reset(unsigned long data)
 {
 	unsigned long flags;
 	unsigned long sig;
@@ -76,7 +68,7 @@ void check_reset(unsigned long data)
 		if (sc_adapter[card]->StartOnReset)
 			startproc(card);
 	} else  {
-		pr_debug("%s: No signature yet, waiting another %d jiffies.\n", 
+		pr_debug("%s: No signature yet, waiting another %lu jiffies.\n",
 			sc_adapter[card]->devicename, CHECKRESET_TIME);
 		mod_timer(&sc_adapter[card]->reset_timer, jiffies+CHECKRESET_TIME);
 		spin_unlock_irqrestore(&sc_adapter[card]->lock, flags);
@@ -129,19 +121,3 @@ void check_phystat(unsigned long data)
 		ceReqPhyStatus,0,0,NULL);
 }
 
-/*
- * When in trace mode, this callback is used to swap the working shared
- * RAM page to the trace page(s) and process all received messages. It
- * must be called often enough to get all of the messages out of RAM before
- * it loops around.
- * Trace messages are \n terminated strings.
- * We output the messages in 64 byte chunks through readstat. Each chunk
- * is scanned for a \n followed by a time stamp. If the timerstamp is older
- * than the current time, scanning stops and the page and offset are recorded
- * as the starting point the next time the trace timer is called. The final
- * step is to restore the working page and reset the timer.
- */
-void trace_timer(unsigned long data)
-{
-	/* not implemented */
-}

@@ -1,5 +1,5 @@
 /*
- * arch/arch/mach-ixp4xx/ixdpg425-pci.c
+ * arch/arm/mach-ixp4xx/ixdpg425-pci.c
  *
  * PCI setup routines for Intel IXDPG425 Platform
  *
@@ -16,24 +16,17 @@
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/irq.h>
 
 #include <asm/mach-types.h>
 #include <asm/hardware.h>
-#include <asm/irq.h>
 
 #include <asm/mach/pci.h>
 
-extern void ixp4xx_pci_preinit(void);
-extern int ixp4xx_setup(int nr, struct pci_sys_data *sys);
-extern struct pci_bus *ixp4xx_scan_bus(int nr, struct pci_sys_data *sys);
-
 void __init ixdpg425_pci_preinit(void)
 {
-	gpio_line_config(6, IXP4XX_GPIO_IN | IXP4XX_GPIO_ACTIVE_LOW);
-	gpio_line_config(7, IXP4XX_GPIO_IN | IXP4XX_GPIO_ACTIVE_LOW);
-
-	gpio_line_isr_clear(6);
-	gpio_line_isr_clear(7);
+	set_irq_type(IRQ_IXP4XX_GPIO6, IRQT_LOW);
+	set_irq_type(IRQ_IXP4XX_GPIO7, IRQT_LOW);
 
 	ixp4xx_pci_preinit();
 }

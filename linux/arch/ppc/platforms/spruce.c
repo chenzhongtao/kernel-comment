@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/spruce.c
- *
  * Board and PCI setup routines for IBM Spruce
  *
  * Author: MontaVista Software <source@mvista.com>
@@ -11,7 +9,6 @@
  * or implied.
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -30,6 +27,7 @@
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/serial_core.h>
+#include <linux/serial_8250.h>
 
 #include <asm/system.h>
 #include <asm/pgtable.h>
@@ -176,8 +174,8 @@ spruce_early_serial_map(void)
 	memset(&serial_req, 0, sizeof(serial_req));
 	serial_req.uartclk = uart_clk;
 	serial_req.irq = UART0_INT;
-	serial_req.flags = ASYNC_BOOT_AUTOCONF;
-	serial_req.iotype = SERIAL_IO_MEM;
+	serial_req.flags = UPF_BOOT_AUTOCONF;
+	serial_req.iotype = UPIO_MEM;
 	serial_req.membase = (u_char *)UART0_IO_BASE;
 	serial_req.regshift = 0;
 
@@ -278,8 +276,8 @@ static __inline__ void
 spruce_set_bat(void)
 {
 	mb();
-	mtspr(DBAT1U, 0xf8000ffe);
-	mtspr(DBAT1L, 0xf800002a);
+	mtspr(SPRN_DBAT1U, 0xf8000ffe);
+	mtspr(SPRN_DBAT1L, 0xf800002a);
 	mb();
 }
 

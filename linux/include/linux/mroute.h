@@ -128,6 +128,18 @@ struct igmpmsg
 #ifdef __KERNEL__
 #include <net/sock.h>
 
+#ifdef CONFIG_IP_MROUTE
+static inline int ip_mroute_opt(int opt)
+{
+	return (opt >= MRT_BASE) && (opt <= MRT_BASE + 10);
+}
+#else
+static inline int ip_mroute_opt(int opt)
+{
+	return 0;
+}
+#endif
+
 extern int ip_mroute_setsockopt(struct sock *, int, char __user *, int);
 extern int ip_mroute_getsockopt(struct sock *, int, char __user *, int __user *);
 extern int ipmr_ioctl(struct sock *sk, int cmd, void __user *arg);
@@ -142,7 +154,7 @@ struct vif_device
 	unsigned long	rate_limit;		/* Traffic shaping (NI) 	*/
 	unsigned char	threshold;		/* TTL threshold 		*/
 	unsigned short	flags;			/* Control flags 		*/
-	__u32		local,remote;		/* Addresses(remote for tunnels)*/
+	__be32		local,remote;		/* Addresses(remote for tunnels)*/
 	int		link;			/* Physical interface index	*/
 };
 
@@ -151,8 +163,8 @@ struct vif_device
 struct mfc_cache 
 {
 	struct mfc_cache *next;			/* Next entry on cache line 	*/
-	__u32 mfc_mcastgrp;			/* Group the entry belongs to 	*/
-	__u32 mfc_origin;			/* Source of packet 		*/
+	__be32 mfc_mcastgrp;			/* Group the entry belongs to 	*/
+	__be32 mfc_origin;			/* Source of packet 		*/
 	vifi_t mfc_parent;			/* Source interface		*/
 	int mfc_flags;				/* Flags on line		*/
 
@@ -179,9 +191,9 @@ struct mfc_cache
 #define MFC_LINES		64
 
 #ifdef __BIG_ENDIAN
-#define MFC_HASH(a,b)	((((a)>>24)^((b)>>26))&(MFC_LINES-1))
+#define MFC_HASH(a,b)	(((((__force u32)(__be32)a)>>24)^(((__force u32)(__be32)b)>>26))&(MFC_LINES-1))
 #else
-#define MFC_HASH(a,b)	(((a)^((b)>>2))&(MFC_LINES-1))
+#define MFC_HASH(a,b)	((((__force u32)(__be32)a)^(((__force u32)(__be32)b)>>2))&(MFC_LINES-1))
 #endif		
 
 #endif
@@ -213,8 +225,8 @@ struct pimreghdr
 {
 	__u8	type;
 	__u8	reserved;
-	__u16	csum;
-	__u32	flags;
+	__be16	csum;
+	__be32	flags;
 };
 
 extern int pim_rcv_v1(struct sk_buff *);

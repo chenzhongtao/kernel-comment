@@ -6,7 +6,6 @@
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
-#include <linux/config.h>
 
 #include <linux/mm.h>
 
@@ -28,9 +27,11 @@ extern void local_flush_tlb_all (void);
 #ifdef CONFIG_SMP
   extern void smp_flush_tlb_all (void);
   extern void smp_flush_tlb_mm (struct mm_struct *mm);
+  extern void smp_flush_tlb_cpumask (cpumask_t xcpumask);
 # define flush_tlb_all()	smp_flush_tlb_all()
 #else
 # define flush_tlb_all()	local_flush_tlb_all()
+# define smp_flush_tlb_cpumask(m) local_flush_tlb_all()
 #endif
 
 static inline void
@@ -51,6 +52,7 @@ flush_tlb_mm (struct mm_struct *mm)
 	if (!mm)
 		return;
 
+	set_bit(mm->context, ia64_ctx.flushmap);
 	mm->context = 0;
 
 	if (atomic_read(&mm->mm_users) == 0)
@@ -82,18 +84,18 @@ flush_tlb_page (struct vm_area_struct *vma, unsigned long addr)
 }
 
 /*
- * Flush the TLB entries mapping the virtually mapped linear page
- * table corresponding to address range [START-END).
+ * Flush the local TLB. Invoked from another cpu using an IPI.
  */
-static inline void
-flush_tlb_pgtables (struct mm_struct *mm, unsigned long start, unsigned long end)
-{
-	/*
-	 * Deprecated.  The virtual page table is now flushed via the normal gather/flush
-	 * interface (see tlb.h).
-	 */
-}
+#ifdef CONFIG_SMP
+void smp_local_flush_tlb(void);
+#else
+#define smp_local_flush_tlb()
+#endif
 
-#define flush_tlb_kernel_range(start, end)	flush_tlb_all()	/* XXX fix me */
+static inline void flush_tlb_kernel_range(unsigned long start,
+					  unsigned long end)
+{
+	flush_tlb_all();	/* XXX fix me */
+}
 
 #endif /* _ASM_IA64_TLBFLUSH_H */

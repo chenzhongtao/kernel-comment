@@ -1,51 +1,34 @@
 /*
- * Copyright (c) 2000-2001 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2001,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
 #include "xfs.h"
-
-#include "xfs_macros.h"
+#include "xfs_fs.h"
 #include "xfs_types.h"
-#include "xfs_inum.h"
 #include "xfs_log.h"
-#include "xfs_sb.h"
+#include "xfs_inum.h"
 #include "xfs_trans.h"
-#include "xfs_dir.h"
+#include "xfs_sb.h"
+#include "xfs_ag.h"
 #include "xfs_dir2.h"
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
 #include "xfs_bmap_btree.h"
-#include "xfs_attr_sf.h"
-#include "xfs_dir_sf.h"
 #include "xfs_dir2_sf.h"
+#include "xfs_attr_sf.h"
 #include "xfs_dinode.h"
 #include "xfs_inode.h"
 #include "xfs_utils.h"
@@ -70,7 +53,6 @@ xfs_error_trap(int e)
 		if (e != xfs_etrap[i])
 			continue;
 		cmn_err(CE_NOTE, "xfs_error_trap: error %d", e);
-		debug_stop_all_cpus((void *)-1LL);
 		BUG();
 		break;
 	}
@@ -99,7 +81,7 @@ xfs_error_test(int error_tag, int *fsidp, char *expression,
 	int i;
 	int64_t fsid;
 
-	if (random() % randfactor)
+	if (random32() % randfactor)
 		return 0;
 
 	memcpy(&fsid, fsidp, sizeof(xfs_fsid_t));
@@ -151,36 +133,14 @@ xfs_errortag_add(int error_tag, xfs_mount_t *mp)
 }
 
 int
-xfs_errortag_clear(int error_tag, xfs_mount_t *mp)
+xfs_errortag_clearall(xfs_mount_t *mp, int loud)
 {
-	int i;
 	int64_t fsid;
+	int cleared = 0;
+	int i;
 
 	memcpy(&fsid, mp->m_fixedfsid, sizeof(xfs_fsid_t));
 
-	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++) {
-		if (xfs_etest_fsid[i] == fsid && xfs_etest[i] == error_tag) {
-			xfs_etest[i] = 0;
-			xfs_etest_fsid[i] = 0LL;
-			kmem_free(xfs_etest_fsname[i],
-				  strlen(xfs_etest_fsname[i]) + 1);
-			xfs_etest_fsname[i] = NULL;
-			cmn_err(CE_WARN, "Cleared XFS error tag #%d",
-				error_tag);
-			return 0;
-		}
-	}
-
-	cmn_err(CE_WARN, "XFS error tag %d not on", error_tag);
-
-	return 1;
-}
-
-int
-xfs_errortag_clearall_umount(int64_t fsid, char *fsname, int loud)
-{
-	int i;
-	int cleared = 0;
 
 	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++) {
 		if ((fsid == 0LL || xfs_etest_fsid[i] == fsid) &&
@@ -199,19 +159,9 @@ xfs_errortag_clearall_umount(int64_t fsid, char *fsname, int loud)
 	if (loud || cleared)
 		cmn_err(CE_WARN,
 			"Cleared all XFS error tags for filesystem \"%s\"",
-			fsname);
+			mp->m_fsname);
 
 	return 0;
-}
-
-int
-xfs_errortag_clearall(xfs_mount_t *mp)
-{
-	int64_t fsid;
-
-	memcpy(&fsid, mp->m_fixedfsid, sizeof(xfs_fsid_t));
-
-	return xfs_errortag_clearall_umount(fsid, mp->m_fsname, 1);
 }
 #endif /* DEBUG || INDUCE_IO_ERROR */
 
@@ -280,7 +230,7 @@ xfs_error_report(
 	}
 }
 
-void
+STATIC void
 xfs_hex_dump(void *p, int length)
 {
 	__uint8_t *uip = (__uint8_t*)p;

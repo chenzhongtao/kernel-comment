@@ -116,17 +116,50 @@
  *  attach a request to an active stripe (add_stripe_bh())
  *     lockdev attach-buffer unlockdev
  *  handle a stripe (handle_stripe())
- *     lockstripe clrSTRIPE_HANDLE ... (lockdev check-buffers unlockdev) .. change-state .. record io needed unlockstripe schedule io
+ *     lockstripe clrSTRIPE_HANDLE ...
+ *		(lockdev check-buffers unlockdev) ..
+ *		change-state ..
+ *		record io/ops needed unlockstripe schedule io/ops
  *  release an active stripe (release_stripe())
  *     lockdev if (!--cnt) { if  STRIPE_HANDLE, add to handle_list else add to inactive-list } unlockdev
  *
  * The refcount counts each thread that have activated the stripe,
  * plus raid5d if it is handling it, plus one for each active request
- * on a cached buffer.
+ * on a cached buffer, and plus one if the stripe is undergoing stripe
+ * operations.
+ *
+ * Stripe operations are performed outside the stripe lock,
+ * the stripe operations are:
+ * -copying data between the stripe cache and user application buffers
+ * -computing blocks to save a disk access, or to recover a missing block
+ * -updating the parity on a write operation (reconstruct write and
+ *  read-modify-write)
+ * -checking parity correctness
+ * -running i/o to disk
+ * These operations are carried out by raid5_run_ops which uses the async_tx
+ * api to (optionally) offload operations to dedicated hardware engines.
+ * When requesting an operation handle_stripe sets the pending bit for the
+ * operation and increments the count.  raid5_run_ops is then run whenever
+ * the count is non-zero.
+ * There are some critical dependencies between the operations that prevent some
+ * from being requested while another is in flight.
+ * 1/ Parity check operations destroy the in cache version of the parity block,
+ *    so we prevent parity dependent operations like writes and compute_blocks
+ *    from starting while a check is in progress.  Some dma engines can perform
+ *    the check without damaging the parity block, in these cases the parity
+ *    block is re-marked up to date (assuming the check was successful) and is
+ *    not re-read from disk.
+ * 2/ When a write operation is requested we immediately lock the affected
+ *    blocks, and mark them as not up to date.  This causes new read requests
+ *    to be held off, as well as parity checks and compute block operations.
+ * 3/ Once a compute block operation has been requested handle_stripe treats
+ *    that block as if it is up to date.  raid5_run_ops guaruntees that any
+ *    operation that is dependent on the compute block result is initiated after
+ *    the compute block completes.
  */
 
 struct stripe_head {
-	struct stripe_head	*hash_next, **hash_pprev; /* hash pointers */
+	struct hlist_node	hash;
 	struct list_head	lru;			/* inactive_list or handle_list */
 	struct raid5_private_data	*raid_conf;
 	sector_t		sector;			/* sector of this row */
@@ -134,15 +167,48 @@ struct stripe_head {
 	unsigned long		state;			/* state flags */
 	atomic_t		count;			/* nr of active thread/requests */
 	spinlock_t		lock;
+	int			bm_seq;	/* sequence number for bitmap flushes */
+	int			disks;			/* disks in stripe */
+	/* stripe_operations
+	 * @pending - pending ops flags (set for request->issue->complete)
+	 * @ack - submitted ops flags (set for issue->complete)
+	 * @complete - completed ops flags (set for complete)
+	 * @target - STRIPE_OP_COMPUTE_BLK target
+	 * @count - raid5_runs_ops is set to run when this is non-zero
+	 */
+	struct stripe_operations {
+		unsigned long	   pending;
+		unsigned long	   ack;
+		unsigned long	   complete;
+		int		   target;
+		int		   count;
+		u32		   zero_sum_result;
+	} ops;
 	struct r5dev {
 		struct bio	req;
 		struct bio_vec	vec;
 		struct page	*page;
-		struct bio	*toread, *towrite, *written;
+		struct bio	*toread, *read, *towrite, *written;
 		sector_t	sector;			/* sector of this page */
 		unsigned long	flags;
 	} dev[1]; /* allocated with extra space depending of RAID geometry */
 };
+
+/* stripe_head_state - collects and tracks the dynamic state of a stripe_head
+ *     for handle_stripe.  It is only valid under spin_lock(sh->lock);
+ */
+struct stripe_head_state {
+	int syncing, expanding, expanded;
+	int locked, uptodate, to_read, to_write, failed, written;
+	int to_fill, compute, req_compute, non_overwrite;
+	int failed_num;
+};
+
+/* r6_state - extra state data only relevant to r6 */
+struct r6_state {
+	int p_failed, q_failed, qd_idx, failed_num[2];
+};
+
 /* Flags */
 #define	R5_UPTODATE	0	/* page contains current data */
 #define	R5_LOCKED	1	/* IO has been submitted on "req" */
@@ -151,9 +217,20 @@ struct stripe_head {
 #define	R5_Insync	3	/* rdev && rdev->in_sync at start */
 #define	R5_Wantread	4	/* want to schedule a read */
 #define	R5_Wantwrite	5
-#define	R5_Syncio	6	/* this io need to be accounted as resync io */
 #define	R5_Overlap	7	/* There is a pending overlapping request on this block */
+#define	R5_ReadError	8	/* seen a read error here recently */
+#define	R5_ReWrite	9	/* have tried to over-write the readerror */
 
+#define	R5_Expanded	10	/* This block now has post-expand data */
+#define	R5_Wantcompute	11 /* compute_block in progress treat as
+				    * uptodate
+				    */
+#define	R5_Wantfill	12 /* dev->toread contains a bio that needs
+				    * filling
+				    */
+#define	R5_Wantprexor	13 /* distinguish blocks ready for rmw from
+				    * other "towrites"
+				    */
 /*
  * Write method
  */
@@ -165,12 +242,33 @@ struct stripe_head {
 /*
  * Stripe state
  */
-#define STRIPE_ERROR		1
 #define STRIPE_HANDLE		2
 #define	STRIPE_SYNCING		3
 #define	STRIPE_INSYNC		4
 #define	STRIPE_PREREAD_ACTIVE	5
 #define	STRIPE_DELAYED		6
+#define	STRIPE_DEGRADED		7
+#define	STRIPE_BIT_DELAY	8
+#define	STRIPE_EXPANDING	9
+#define	STRIPE_EXPAND_SOURCE	10
+#define	STRIPE_EXPAND_READY	11
+/*
+ * Operations flags (in issue order)
+ */
+#define STRIPE_OP_BIOFILL	0
+#define STRIPE_OP_COMPUTE_BLK	1
+#define STRIPE_OP_PREXOR	2
+#define STRIPE_OP_BIODRAIN	3
+#define STRIPE_OP_POSTXOR	4
+#define STRIPE_OP_CHECK	5
+#define STRIPE_OP_IO		6
+
+/* modifiers to the base operations
+ * STRIPE_OP_MOD_REPAIR_PD - compute the parity block and write it back
+ * STRIPE_OP_MOD_DMA_CHECK - parity is not corrupted by the check
+ */
+#define STRIPE_OP_MOD_REPAIR_PD 7
+#define STRIPE_OP_MOD_DMA_CHECK 8
 
 /*
  * Plugging:
@@ -188,8 +286,9 @@ struct stripe_head {
  * it to the count of prereading stripes.
  * When write is initiated, or the stripe refcnt == 0 (just in case) we
  * clear the PREREAD_ACTIVE flag and decrement the count
- * Whenever the delayed queue is empty and the device is not plugged, we
- * move any strips from delayed to handle and clear the DELAYED flag and set PREREAD_ACTIVE.
+ * Whenever the 'handle' queue is empty and the device is not plugged, we
+ * move any strips from delayed to handle and clear the DELAYED flag and set
+ * PREREAD_ACTIVE.
  * In stripe_handle, if we find pre-reading is necessary, we do it if
  * PREREAD_ACTIVE is set, else we set DELAYED which will send it to the delayed queue.
  * HANDLE gets cleared if stripe_handle leave nothing locked.
@@ -201,19 +300,47 @@ struct disk_info {
 };
 
 struct raid5_private_data {
-	struct stripe_head	**stripe_hashtbl;
+	struct hlist_head	*stripe_hashtbl;
 	mddev_t			*mddev;
 	struct disk_info	*spare;
 	int			chunk_size, level, algorithm;
-	int			raid_disks, working_disks, failed_disks;
+	int			max_degraded;
+	int			raid_disks;
 	int			max_nr_stripes;
+
+	/* used during an expand */
+	sector_t		expand_progress;	/* MaxSector when no expand happening */
+	sector_t		expand_lo; /* from here up to expand_progress it out-of-bounds
+					    * as we haven't flushed the metadata yet
+					    */
+	int			previous_raid_disks;
 
 	struct list_head	handle_list; /* stripes needing handling */
 	struct list_head	delayed_list; /* stripes that have plugged requests */
+	struct list_head	bitmap_list; /* stripes delaying awaiting bitmap update */
+	struct bio		*retry_read_aligned; /* currently retrying aligned bios   */
+	struct bio		*retry_read_aligned_list; /* aligned bios retry list  */
 	atomic_t		preread_active_stripes; /* stripes with scheduled io */
+	atomic_t		active_aligned_reads;
 
-	char			cache_name[20];
-	kmem_cache_t		*slab_cache; /* for allocating stripes */
+	atomic_t		reshape_stripes; /* stripes with pending writes for reshape */
+	/* unfortunately we need two cache names as we temporarily have
+	 * two caches.
+	 */
+	int			active_name;
+	char			cache_name[2][20];
+	struct kmem_cache		*slab_cache; /* for allocating stripes */
+
+	int			seq_flush, seq_write;
+	int			quiesce;
+
+	int			fullsync;  /* set to 1 if a full sync is needed,
+					    * (fresh device added).
+					    * Cleared when a sync completes.
+					    */
+
+	struct page 		*spare_page; /* Used when checking P/Q in raid6 */
+
 	/*
 	 * Free stripes pool
 	 */
@@ -223,9 +350,10 @@ struct raid5_private_data {
 	wait_queue_head_t	wait_for_overlap;
 	int			inactive_blocked;	/* release of inactive stripes blocked,
 							 * waiting for 25% to be free
-							 */        
+							 */
+	int			pool_size; /* number of disks in stripeheads in pool */
 	spinlock_t		device_lock;
-	struct disk_info	disks[0];
+	struct disk_info	*disks;
 };
 
 typedef struct raid5_private_data raid5_conf_t;

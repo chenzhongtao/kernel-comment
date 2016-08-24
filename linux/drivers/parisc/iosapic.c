@@ -50,12 +50,12 @@
 **
 ** PA Firmware
 ** -----------
-** PA-RISC platforms have two fundementally different types of firmware.
+** PA-RISC platforms have two fundamentally different types of firmware.
 ** For PCI devices, "Legacy" PDC initializes the "INTERRUPT_LINE" register
 ** and BARs similar to a traditional PC BIOS.
 ** The newer "PAT" firmware supports PDC calls which return tables.
-** PAT firmware only initializes PCI Console and Boot interface.
-** With these tables, the OS can progam all other PCI devices.
+** PAT firmware only initializes the PCI Console and Boot interface.
+** With these tables, the OS can program all other PCI devices.
 **
 ** One such PAT PDC call returns the "Interrupt Routing Table" (IRT).
 ** The IRT maps each PCI slot's INTA-D "output" line to an I/O SAPIC
@@ -146,7 +146,7 @@
 #include <asm/superio.h>
 #endif
 
-#include <asm/iosapic.h>
+#include <asm/ropes.h>
 #include "./iosapic_private.h"
 
 #define MODULE_NAME "iosapic"
@@ -158,31 +158,9 @@
 
 
 #ifdef DEBUG_IOSAPIC
-static char assert_buf[128];
-
-static int
-assert_failed (char *a, char *f, int l)
-{
-        sprintf(assert_buf,
-			"ASSERT(%s) failed!\nline %d in %s\n",
-			a,      /* assertion text */
-			l,      /* line number */
-			f);     /* file name */
-        panic(assert_buf);
-	return 0;
-}
-
-#undef ASSERT
-#define ASSERT(EX) { if (!(EX)) assert_failed(# EX, __FILE__, __LINE__); }
-
 #define DBG(x...) printk(x)
-
 #else /* DEBUG_IOSAPIC */
-
 #define DBG(x...)
-#undef	ASSERT
-#define ASSERT(EX)
-
 #endif /* DEBUG_IOSAPIC */
 
 #ifdef DEBUG_IOSAPIC_IRT
@@ -191,6 +169,12 @@ assert_failed (char *a, char *f, int l)
 #define DBG_IRT(x...)
 #endif
 
+#ifdef CONFIG_64BIT
+#define COMPARE_IRTE_ADDR(irte, hpa)	((irte)->dest_iosapic_addr == (hpa))
+#else
+#define COMPARE_IRTE_ADDR(irte, hpa)	\
+		((irte)->dest_iosapic_addr == ((hpa) | 0xffffffff00000000ULL))
+#endif
 
 #define IOSAPIC_REG_SELECT              0x00
 #define IOSAPIC_REG_WINDOW              0x10
@@ -201,32 +185,17 @@ assert_failed (char *a, char *f, int l)
 #define IOSAPIC_IRDT_ENTRY(idx)		(0x10+(idx)*2)
 #define IOSAPIC_IRDT_ENTRY_HI(idx)	(0x11+(idx)*2)
 
-static inline unsigned int iosapic_read(unsigned long iosapic, unsigned int reg)
+static inline unsigned int iosapic_read(void __iomem *iosapic, unsigned int reg)
 {
 	writel(reg, iosapic + IOSAPIC_REG_SELECT);
 	return readl(iosapic + IOSAPIC_REG_WINDOW);
 }
 
-static inline void iosapic_write(unsigned long iosapic, unsigned int reg, u32 val)
+static inline void iosapic_write(void __iomem *iosapic, unsigned int reg, u32 val)
 {
 	writel(reg, iosapic + IOSAPIC_REG_SELECT);
 	writel(val, iosapic + IOSAPIC_REG_WINDOW);
 }
-
-/*
-**     GFP_KERNEL includes __GFP_WAIT flag and that may not
-**     be acceptable. Since this is boot time, we shouldn't have
-**     to wait ever and this code should (will?) never get called
-**     from the interrrupt context.
-*/
-#define	IOSAPIC_KALLOC(a_type, cnt) \
-			(a_type *) kmalloc(sizeof(a_type)*(cnt), GFP_KERNEL)
-#define IOSAPIC_FREE(addr, f_type, cnt) kfree((void *)addr)
-
-
-#define	IOSAPIC_LOCK(lck)	spin_lock_irqsave(lck, irqflags)
-#define	IOSAPIC_UNLOCK(lck)	spin_unlock_irqrestore(lck, irqflags)
-
 
 #define IOSAPIC_VERSION_MASK	0x000000ff
 #define	IOSAPIC_VERSION(ver)	((int) (ver & IOSAPIC_VERSION_MASK))
@@ -246,7 +215,7 @@ static inline void iosapic_write(unsigned long iosapic, unsigned int reg, u32 va
 #define IOSAPIC_IRDT_ID_EID_SHIFT              0x10
 
 
-static spinlock_t iosapic_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(iosapic_lock);
 
 static inline void iosapic_eoi(void __iomem *addr, unsigned int data)
 {
@@ -265,52 +234,64 @@ static inline void iosapic_eoi(void __iomem *addr, unsigned int data)
 static struct irt_entry *irt_cell;
 static size_t irt_num_entry;
 
+static struct irt_entry *iosapic_alloc_irt(int num_entries)
+{
+	unsigned long a;
+
+	/* The IRT needs to be 8-byte aligned for the PDC call. 
+	 * Normally kmalloc would guarantee larger alignment, but
+	 * if CONFIG_DEBUG_SLAB is enabled, then we can get only
+	 * 4-byte alignment on 32-bit kernels
+	 */
+	a = (unsigned long)kmalloc(sizeof(struct irt_entry) * num_entries + 8, GFP_KERNEL);
+	a = (a + 7UL) & ~7UL;
+	return (struct irt_entry *)a;
+}
+
+/**
+ * iosapic_load_irt - Fill in the interrupt routing table
+ * @cell_num: The cell number of the CPU we're currently executing on
+ * @irt: The address to place the new IRT at
+ * @return The number of entries found
+ *
+ * The "Get PCI INT Routing Table Size" option returns the number of 
+ * entries in the PCI interrupt routing table for the cell specified 
+ * in the cell_number argument.  The cell number must be for a cell 
+ * within the caller's protection domain.
+ *
+ * The "Get PCI INT Routing Table" option returns, for the cell 
+ * specified in the cell_number argument, the PCI interrupt routing 
+ * table in the caller allocated memory pointed to by mem_addr.
+ * We assume the IRT only contains entries for I/O SAPIC and
+ * calculate the size based on the size of I/O sapic entries.
+ *
+ * The PCI interrupt routing table entry format is derived from the
+ * IA64 SAL Specification 2.4.   The PCI interrupt routing table defines
+ * the routing of PCI interrupt signals between the PCI device output
+ * "pins" and the IO SAPICs' input "lines" (including core I/O PCI
+ * devices).  This table does NOT include information for devices/slots
+ * behind PCI to PCI bridges. See PCI to PCI Bridge Architecture Spec.
+ * for the architected method of routing of IRQ's behind PPB's.
+ */
 
 
-/*
-** iosapic_load_irt
-**
-** The "Get PCI INT Routing Table Size" option returns the number of 
-** entries in the PCI interrupt routing table for the cell specified 
-** in the cell_number argument.  The cell number must be for a cell 
-** within the caller's protection domain.
-**
-** The "Get PCI INT Routing Table" option returns, for the cell 
-** specified in the cell_number argument, the PCI interrupt routing 
-** table in the caller allocated memory pointed to by mem_addr.
-** We assume the IRT only contains entries for I/O SAPIC and
-** calculate the size based on the size of I/O sapic entries.
-**
-** The PCI interrupt routing table entry format is derived from the
-** IA64 SAL Specification 2.4.   The PCI interrupt routing table defines
-** the routing of PCI interrupt signals between the PCI device output
-** "pins" and the IO SAPICs' input "lines" (including core I/O PCI
-** devices).  This table does NOT include information for devices/slots
-** behind PCI to PCI bridges. See PCI to PCI Bridge Architecture Spec.
-** for the architected method of routing of IRQ's behind PPB's.
-*/
-
-
-static int __init /* return number of entries as success/fail flag */
+static int __init
 iosapic_load_irt(unsigned long cell_num, struct irt_entry **irt)
 {
 	long status;              /* PDC return value status */
 	struct irt_entry *table;  /* start of interrupt routing tbl */
 	unsigned long num_entries = 0UL;
 
-	ASSERT(NULL != irt);
+	BUG_ON(!irt);
 
 	if (is_pdc_pat()) {
-
 		/* Use pat pdc routine to get interrupt routing table size */
 		DBG("calling get_irt_size (cell %ld)\n", cell_num);
 		status = pdc_pat_get_irt_size(&num_entries, cell_num);
 		DBG("get_irt_size: %ld\n", status);
 
-		ASSERT(status == PDC_OK);
-
-		/* save the number of entries in the table */
-		ASSERT(0UL != num_entries);
+		BUG_ON(status != PDC_OK);
+		BUG_ON(num_entries == 0);
 
 		/*
 		** allocate memory for interrupt routing table
@@ -318,45 +299,47 @@ iosapic_load_irt(unsigned long cell_num, struct irt_entry **irt)
 		** the contents of the table are exclusively
 		** for I/O sapic devices.
 		*/
-		table = IOSAPIC_KALLOC(struct irt_entry, num_entries);
+		table = iosapic_alloc_irt(num_entries);
 		if (table == NULL) {
-			printk(KERN_WARNING MODULE_NAME ": read_irt : can not alloc mem for IRT\n");
+			printk(KERN_WARNING MODULE_NAME ": read_irt : can "
+					"not alloc mem for IRT\n");
 			return 0;
 		}
 
 		/* get PCI INT routing table */
 		status = pdc_pat_get_irt(table, cell_num);
 		DBG("pdc_pat_get_irt: %ld\n", status);
-		ASSERT(status == PDC_OK);
+		WARN_ON(status != PDC_OK);
 	} else {
 		/*
 		** C3000/J5000 (and similar) platforms with Sprockets PDC
 		** will return exactly one IRT for all iosapics.
 		** So if we have one, don't need to get it again.
 		*/
-		if (NULL != irt_cell)
+		if (irt_cell)
 			return 0;
 
 		/* Should be using the Elroy's HPA, but it's ignored anyway */
 		status = pdc_pci_irt_size(&num_entries, 0);
 		DBG("pdc_pci_irt_size: %ld\n", status);
 
-		if (PDC_OK != status) {
+		if (status != PDC_OK) {
 			/* Not a "legacy" system with I/O SAPIC either */
 			return 0;
 		}
 
-		ASSERT(0UL != num_entries);
+		BUG_ON(num_entries == 0);
 
-		table = IOSAPIC_KALLOC(struct irt_entry, num_entries);
-		if (table == NULL) {
-			printk(KERN_WARNING MODULE_NAME ": read_irt : can not alloc mem for IRT\n");
+		table = iosapic_alloc_irt(num_entries);
+		if (!table) {
+			printk(KERN_WARNING MODULE_NAME ": read_irt : can "
+					"not alloc mem for IRT\n");
 			return 0;
 		}
 
 		/* HPA ignored by this call too. */
 		status = pdc_pci_irt(num_entries, 0, table);
-		ASSERT(PDC_OK == status);
+		BUG_ON(status != PDC_OK);
 	}
 
 	/* return interrupt table address */
@@ -390,15 +373,9 @@ iosapic_load_irt(unsigned long cell_num, struct irt_entry **irt)
 
 
 
-void __init
-iosapic_init(void)
+void __init iosapic_init(void)
 {
 	unsigned long cell = 0;
-
-	/* init global data */
-	spin_lock_init(&iosapic_lock);
-        iosapic_list = (struct iosapic_info *) NULL;
-	iosapic_count = 0;
 
 	DBG("iosapic_init()\n");
 
@@ -414,11 +391,9 @@ iosapic_init(void)
 	}
 #endif
 
-	/*
-	**  get IRT for this cell.
-	*/
-	irt_num_entry =  iosapic_load_irt(cell, &irt_cell);
-	if (0 == irt_num_entry)
+	/* get interrupt routing table for this cell */
+	irt_num_entry = iosapic_load_irt(cell, &irt_cell);
+	if (irt_num_entry == 0)
 		irt_cell = NULL;	/* old PDC w/o iosapic */
 }
 
@@ -459,10 +434,7 @@ irt_find_irqline(struct iosapic_info *isi, u8 slot, u8 intr_pin)
 			continue;
 		}
 
-		/*
-		** Compare: dest_iosapic_addr, src_bus_irq_devno
-		*/
-		if (i->dest_iosapic_addr != (u64) ((long) isi->isi_hpa))
+		if (!COMPARE_IRTE_ADDR(i, isi->isi_hpa))
 			continue;
 
 		if ((i->src_bus_irq_devno & IRT_IRQ_DEVNO_MASK) != irq_devno)
@@ -506,10 +478,10 @@ iosapic_xlate_pin(struct iosapic_info *isi, struct pci_dev *pcidev)
 
 	pci_read_config_byte(pcidev, PCI_INTERRUPT_PIN, &intr_pin);
 
-	DBG_IRT("iosapic_xlate_pin() SLOT %d pin %d\n",
-		PCI_SLOT(pcidev->devfn), intr_pin);
+	DBG_IRT("iosapic_xlate_pin(%s) SLOT %d pin %d\n",
+		pcidev->slot_name, PCI_SLOT(pcidev->devfn), intr_pin);
 
-	if (0 == intr_pin) {
+	if (intr_pin == 0) {
 		/* The device does NOT support/use IRQ lines.  */
 		return NULL;
 	}
@@ -606,7 +578,6 @@ iosapic_set_irt_data( struct vector_info *vi, u32 *dp0, u32 *dp1)
 {
 	u32 mode = 0;
 	struct irt_entry *p = vi->irte;
-	ASSERT(NULL != vi->irte);
 
 	if ((p->polarity_trigger & IRT_PO_MASK) == IRT_ACTIVE_LO)
 		mode |= IOSAPIC_IRDT_PO_LOW;
@@ -619,7 +590,6 @@ iosapic_set_irt_data( struct vector_info *vi, u32 *dp0, u32 *dp1)
 	** PA doesn't support EXTINT or LPRIO bits.
 	*/
 
-	ASSERT(vi->txn_data);
 	*dp0 = mode | (u32) vi->txn_data;
 
 	/*
@@ -649,7 +619,7 @@ iosapic_set_irt_data( struct vector_info *vi, u32 *dp0, u32 *dp1)
 
 static struct vector_info *iosapic_get_vector(unsigned int irq)
 {
-	return irq_desc[irq].handler_data;
+	return irq_desc[irq].chip_data;
 }
 
 static void iosapic_disable_irq(unsigned int irq)
@@ -722,6 +692,7 @@ static void iosapic_end_irq(unsigned int irq)
 	DBG(KERN_DEBUG "end_irq(%d): eoi(%p, 0x%x)\n", irq,
 			vi->eoi_addr, vi->eoi_data);
 	iosapic_eoi(vi->eoi_addr, vi->eoi_data);
+	cpu_end_irq(irq);
 }
 
 static unsigned int iosapic_startup_irq(unsigned int irq)
@@ -730,15 +701,39 @@ static unsigned int iosapic_startup_irq(unsigned int irq)
 	return 0;
 }
 
+#ifdef CONFIG_SMP
+static void iosapic_set_affinity_irq(unsigned int irq, cpumask_t dest)
+{
+	struct vector_info *vi = iosapic_get_vector(irq);
+	u32 d0, d1, dummy_d0;
+	unsigned long flags;
+
+	if (cpu_check_affinity(irq, &dest))
+		return;
+
+	vi->txn_addr = txn_affinity_addr(irq, first_cpu(dest));
+
+	spin_lock_irqsave(&iosapic_lock, flags);
+	/* d1 contains the destination CPU, so only want to set that
+	 * entry */
+	iosapic_rd_irt_entry(vi, &d0, &d1);
+	iosapic_set_irt_data(vi, &dummy_d0, &d1);
+	iosapic_wr_irt_entry(vi, d0, d1);
+	spin_unlock_irqrestore(&iosapic_lock, flags);
+}
+#endif
+
 static struct hw_interrupt_type iosapic_interrupt_type = {
 	.typename =	"IO-SAPIC-level",
 	.startup =	iosapic_startup_irq,
 	.shutdown =	iosapic_disable_irq,
 	.enable =	iosapic_enable_irq,
 	.disable =	iosapic_disable_irq,
-	.ack =		no_ack_irq,
+	.ack =		cpu_ack_irq,
 	.end =		iosapic_end_irq,
-//	.set_affinity =	iosapic_set_affinity_irq,
+#ifdef CONFIG_SMP
+	.set_affinity =	iosapic_set_affinity_irq,
+#endif
 };
 
 int iosapic_fixup_irq(void *isi_obj, struct pci_dev *pcidev)
@@ -802,22 +797,23 @@ int iosapic_fixup_irq(void *isi_obj, struct pci_dev *pcidev)
 
 	vi->irte = irte;
 
-	/* Allocate processor IRQ */
-	vi->txn_irq = txn_alloc_irq();
-
 	/*
+	 * Allocate processor IRQ
+	 *
 	 * XXX/FIXME The txn_alloc_irq() code and related code should be
 	 * moved to enable_irq(). That way we only allocate processor IRQ
 	 * bits for devices that actually have drivers claiming them.
 	 * Right now we assign an IRQ to every PCI device present,
 	 * regardless of whether it's used or not.
 	 */
+	vi->txn_irq = txn_alloc_irq(8);
+
 	if (vi->txn_irq < 0)
 		panic("I/O sapic: couldn't get TXN IRQ\n");
 
 	/* enable_irq() will use txn_* to program IRdT */
 	vi->txn_addr = txn_alloc_addr(vi->txn_irq);
-	vi->txn_data = txn_alloc_data(vi->txn_irq, 8);
+	vi->txn_data = txn_alloc_data(vi->txn_irq);
 
 	vi->eoi_addr = isi->addr + IOSAPIC_REG_EOI;
 	vi->eoi_data = cpu_to_le32(vi->txn_data);
@@ -841,10 +837,7 @@ int iosapic_fixup_irq(void *isi_obj, struct pci_dev *pcidev)
 static unsigned int
 iosapic_rd_version(struct iosapic_info *isi)
 {
-	ASSERT(isi);
-	ASSERT(isi->isi_hpa);
-
-	return iosapic_read(isi->isi_hpa, IOSAPIC_REG_VERSION);
+	return iosapic_read(isi->addr, IOSAPIC_REG_VERSION);
 }
 
 
@@ -866,48 +859,38 @@ void *iosapic_register(unsigned long hpa)
 	int cnt;	/* track how many entries we've looked at */
 
 	/*
-	** Astro based platforms can't support PCI OLARD if they
-	** implement the legacy PDC (not PAT). Though Legacy PDC
-	** supports an IRT, LBA's with no device under them
-	** are *not* listed in the IRT.
-	** Search the IRT and ignore iosapic's which aren't
-	** in the IRT.
-	*/
-	ASSERT(NULL != irte);	/* always have built-in devices */
+	 * Astro based platforms can only support PCI OLARD if they implement
+	 * PAT PDC.  Legacy PDC omits LBAs with no PCI devices from the IRT.
+	 * Search the IRT and ignore iosapic's which aren't in the IRT.
+	 */
 	for (cnt=0; cnt < irt_num_entry; cnt++, irte++) {
-		ASSERT(IRT_IOSAPIC_TYPE == irte->entry_type);
-		/*
-		** We need sign extension of the hpa on 32-bit kernels.
-		** The address in the IRT is *always* 64 bit and really
-		** is an unsigned quantity (like all physical addresses).
-		*/ 
-		if (irte->dest_iosapic_addr == (s64) ((long) hpa))
+		WARN_ON(IRT_IOSAPIC_TYPE != irte->entry_type);
+		if (COMPARE_IRTE_ADDR(irte, hpa))
 			break;
 	}
 
-	if (cnt  >= irt_num_entry)
-		return (NULL);
-
-	if ((isi = IOSAPIC_KALLOC(struct iosapic_info, 1)) == NULL) {
-		BUG();
-		return (NULL);
-	}
-
-	memset(isi, 0, sizeof(struct iosapic_info));
-
-	isi->isi_hpa         = hpa;
-	isi->isi_version     = iosapic_rd_version(isi);
-	isi->isi_num_vectors = IOSAPIC_IRDT_MAX_ENTRY(isi->isi_version) + 1;
-
-	vip = isi->isi_vector =
-		 IOSAPIC_KALLOC(struct vector_info, isi->isi_num_vectors);
-
-	if (vip == NULL) {
-		IOSAPIC_FREE(isi, struct iosapic_info, 1);
+	if (cnt >= irt_num_entry) {
+		DBG("iosapic_register() ignoring 0x%lx (NOT FOUND)\n", hpa);
 		return NULL;
 	}
 
-	memset(vip, 0, sizeof(struct vector_info) * isi->isi_num_vectors);
+	isi = kzalloc(sizeof(struct iosapic_info), GFP_KERNEL);
+	if (!isi) {
+		BUG();
+		return NULL;
+	}
+
+	isi->addr = ioremap_nocache(hpa, 4096);
+	isi->isi_hpa = hpa;
+	isi->isi_version = iosapic_rd_version(isi);
+	isi->isi_num_vectors = IOSAPIC_IRDT_MAX_ENTRY(isi->isi_version) + 1;
+
+	vip = isi->isi_vector = (struct vector_info *)
+		kzalloc(sizeof(struct vector_info) * isi->isi_num_vectors, GFP_KERNEL);
+	if (vip == NULL) {
+		kfree(isi);
+		return NULL;
+	}
 
 	for (cnt=0; cnt < isi->isi_num_vectors; cnt++, vip++) {
 		vip->irqline = (unsigned char) cnt;
@@ -924,7 +907,6 @@ iosapic_prt_irt(void *irt, long num_entry)
 {
 	unsigned int i, *irp = (unsigned int *) irt;
 
-	ASSERT(NULL != irt);
 
 	printk(KERN_DEBUG MODULE_NAME ": Interrupt Routing Table (%lx entries)\n", num_entry);
 
@@ -938,8 +920,6 @@ iosapic_prt_irt(void *irt, long num_entry)
 static void
 iosapic_prt_vi(struct vector_info *vi)
 {
-	ASSERT(NULL != vi);
-
 	printk(KERN_DEBUG MODULE_NAME ": vector_info[%d] is at %p\n", vi->irqline, vi);
 	printk(KERN_DEBUG "\t\tstatus:	 %.4x\n", vi->status);
 	printk(KERN_DEBUG "\t\ttxn_irq:  %d\n",  vi->txn_irq);
@@ -953,10 +933,9 @@ iosapic_prt_vi(struct vector_info *vi)
 static void
 iosapic_prt_isi(struct iosapic_info *isi)
 {
-	ASSERT(NULL != isi);
 	printk(KERN_DEBUG MODULE_NAME ": io_sapic_info at %p\n", isi);
 	printk(KERN_DEBUG "\t\tisi_hpa:       %lx\n", isi->isi_hpa);
-	printk(KERN_DEBUG "\t\tisi_status:     %x\n", isi->isi_status);
+	printk(KERN_DEBUG "\t\tisi_status:    %x\n", isi->isi_status);
 	printk(KERN_DEBUG "\t\tisi_version:   %x\n", isi->isi_version);
 	printk(KERN_DEBUG "\t\tisi_vector:    %p\n", isi->isi_vector);
 }

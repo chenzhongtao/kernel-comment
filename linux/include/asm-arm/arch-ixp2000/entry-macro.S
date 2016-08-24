@@ -7,16 +7,22 @@
  * License version 2. This program is licensed "as is" without any
  * warranty of any kind, whether express or implied.
  */
+#include <asm/arch/irqs.h>
 
 		.macro  disable_fiq
+		.endm
+
+		.macro  get_irqnr_preamble, base, tmp
+		.endm
+
+		.macro  arch_ret_to_user, tmp1, tmp2
 		.endm
 
 		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
 
 		mov	\irqnr, #0x0              @clear out irqnr as default
                 mov	\base, #0xfe000000
-		orr	\base, \base, #0x00ff0000
-		orr	\base, \base, #0x0000a000
+		orr	\base, \base, #0x00e00000
 		orr	\base, \base, #0x08
 		ldr	\irqstat, [\base]         @ get interrupts
 
@@ -35,8 +41,8 @@
 		bne	1001f
 
 		mov	\base, #0xfe000000
-		orr	\base, \base, #0x00fd0000
-		orr	\base, \base, #0x0000e100
+		orr	\base, \base, #0x00c00000
+		orr	\base, \base, #0x00000100
 		orr	\base, \base, #0x00000058
 		ldr	\irqstat, [\base]
 

@@ -44,10 +44,7 @@
 #ifndef _DEBUG_H_
 #define _DEBUG_H_
 
-#include <linux/config.h>
 #include <linux/kernel.h>
-
-struct scsi_cmnd;
 
 #define USB_STORAGE "usb-storage: "
 

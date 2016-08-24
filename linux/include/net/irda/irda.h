@@ -17,7 +17,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *     
@@ -26,7 +26,6 @@
 #ifndef NET_IRDA_H
 #define NET_IRDA_H
 
-#include <linux/config.h>
 #include <linux/skbuff.h>		/* struct sk_buff */
 #include <linux/kernel.h>
 #include <linux/if.h>			/* sa_family_t in <linux/irda.h> */
@@ -66,22 +65,25 @@ extern unsigned int irda_debug;
 /* use 0 for production, 1 for verification, >2 for debug */
 #define IRDA_DEBUG_LEVEL 0
 
-#define IRDA_DEBUG(n, args...) (irda_debug >= (n)) ? (printk(KERN_DEBUG args)) : 0
-#define ASSERT(expr, func) \
-if(!(expr)) { \
-        printk( "Assertion failed! %s:%s:%d %s\n", \
-        __FILE__,__FUNCTION__,__LINE__,(#expr));  \
-        func }
+#define IRDA_DEBUG(n, args...) \
+do {	if (irda_debug >= (n)) \
+		printk(KERN_DEBUG args); \
+} while (0)
+#define IRDA_ASSERT(expr, func) \
+do { if(!(expr)) { \
+	printk( "Assertion failed! %s:%s:%d %s\n", \
+		__FILE__,__FUNCTION__,__LINE__,(#expr) ); \
+	func } } while (0)
+#define IRDA_ASSERT_LABEL(label)	label
 #else
-#define IRDA_DEBUG(n, args...)
-#define ASSERT(expr, func) \
-if(!(expr)) do { \
-        func } while (0)
+#define IRDA_DEBUG(n, args...) do { } while (0)
+#define IRDA_ASSERT(expr, func) do { (void)(expr); } while (0)
+#define IRDA_ASSERT_LABEL(label)
 #endif /* CONFIG_IRDA_DEBUG */
 
-#define WARNING(args...) printk(KERN_WARNING args)
-#define MESSAGE(args...) printk(KERN_INFO args)
-#define ERROR(args...)   printk(KERN_ERR args)
+#define IRDA_WARNING(args...) do { if (net_ratelimit()) printk(KERN_WARNING args); } while (0)
+#define IRDA_MESSAGE(args...) do { if (net_ratelimit()) printk(KERN_INFO args); } while (0)
+#define IRDA_ERROR(args...)   do { if (net_ratelimit()) printk(KERN_ERR args); } while (0)
 
 /*
  *  Magic numbers used by Linux-IrDA. Random numbers which must be unique to 
@@ -110,5 +112,24 @@ if(!(expr)) do { \
 #define IAS_IRLAN_ID  0x34234
 #define IAS_IRCOMM_ID 0x2343
 #define IAS_IRLPT_ID  0x9876
+
+struct net_device;
+struct packet_type;
+
+extern void irda_proc_register(void);
+extern void irda_proc_unregister(void);
+
+extern int irda_sysctl_register(void);
+extern void irda_sysctl_unregister(void);
+
+extern int irsock_init(void);
+extern void irsock_cleanup(void);
+
+extern int irda_nl_register(void);
+extern void irda_nl_unregister(void);
+
+extern int irlap_driver_rcv(struct sk_buff *skb, struct net_device *dev,
+			    struct packet_type *ptype,
+			    struct net_device *orig_dev);
 
 #endif /* NET_IRDA_H */

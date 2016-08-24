@@ -40,7 +40,6 @@
 * 1998/08/08	acme		Initial version.
 */
 
-#include <linux/config.h>	/* OS configuration options */
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
 #include <linux/string.h>	/* inline memset(), etc. */
@@ -75,7 +74,7 @@ static int cycx_wan_setup(struct wan_device *wandev, wandev_conf_t *conf);
 static int cycx_wan_shutdown(struct wan_device *wandev);
 
 /* Miscellaneous functions */
-static irqreturn_t cycx_isr(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t cycx_isr(int irq, void *dev_id);
 
 /* Global Data
  * Note: All data must be explicitly initialized!!!
@@ -103,7 +102,7 @@ static struct cycx_device *cycx_card_array;	/* adapter data space */
  *		< 0	error.
  * Context:	process
  */
-int __init cycx_init(void)
+static int __init cycx_init(void)
 {
 	int cnt, err = -ENOMEM;
 
@@ -114,12 +113,10 @@ int __init cycx_init(void)
 	/* Verify number of cards and allocate adapter data space */
 	cycx_ncards = min_t(int, cycx_ncards, CYCX_MAX_CARDS);
 	cycx_ncards = max_t(int, cycx_ncards, 1);
-	cycx_card_array = kmalloc(sizeof(struct cycx_device) * cycx_ncards,
-				  GFP_KERNEL);
+	cycx_card_array = kcalloc(cycx_ncards, sizeof(struct cycx_device), GFP_KERNEL);
 	if (!cycx_card_array)
 		goto out;
 
-	memset(cycx_card_array, 0, sizeof(struct cycx_device) * cycx_ncards);
 
 	/* Register adapters with WAN router */
 	for (cnt = 0; cnt < cycx_ncards; ++cnt) {
@@ -302,11 +299,11 @@ out:	return ret;
  * o acknowledge Cyclom 2X hardware interrupt.
  * o call protocol-specific interrupt service routine, if any.
  */
-static irqreturn_t cycx_isr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t cycx_isr(int irq, void *dev_id)
 {
-	struct cycx_device *card = (struct cycx_device *)dev_id;
+	struct cycx_device *card = dev_id;
 
-	if (!card || card->wandev.state == WAN_UNCONFIGURED)
+	if (card->wandev.state == WAN_UNCONFIGURED)
 		goto out;
 
 	if (card->in_isr) {

@@ -19,7 +19,7 @@
 #include <linux/interrupt.h>
 
 
-int __init
+int
 JadeVersion(struct IsdnCardState *cs, char *s)
 {
     int ver,i;
@@ -74,7 +74,7 @@ jade_write_indirect(struct IsdnCardState *cs, u_char reg, u_char value)
 
 
 
-void
+static void
 modejade(struct BCState *bcs, int mode, int bc)
 {
     struct IsdnCardState *cs = bcs->cs;
@@ -190,19 +190,15 @@ jade_l2l1(struct PStack *st, int pr, void *arg)
     }
 }
 
-void
+static void
 close_jadestate(struct BCState *bcs)
 {
     modejade(bcs, 0, bcs->channel);
     if (test_and_clear_bit(BC_FLG_INIT, &bcs->Flag)) {
-	if (bcs->hw.hscx.rcvbuf) {
-		kfree(bcs->hw.hscx.rcvbuf);
-		bcs->hw.hscx.rcvbuf = NULL;
-	}
-	if (bcs->blog) {
-		kfree(bcs->blog);
-		bcs->blog = NULL;
-	}
+	kfree(bcs->hw.hscx.rcvbuf);
+	bcs->hw.hscx.rcvbuf = NULL;
+	kfree(bcs->blog);
+	bcs->blog = NULL;
 	skb_queue_purge(&bcs->rqueue);
 	skb_queue_purge(&bcs->squeue);
 	if (bcs->tx_skb) {
@@ -243,7 +239,7 @@ open_jadestate(struct IsdnCardState *cs, struct BCState *bcs)
 }
 
 
-int
+static int
 setstack_jade(struct PStack *st, struct BCState *bcs)
 {
 	bcs->channel = st->l1.bc;
@@ -257,7 +253,7 @@ setstack_jade(struct PStack *st, struct BCState *bcs)
 	return (0);
 }
 
-void __init
+void
 clear_pending_jade_ints(struct IsdnCardState *cs)
 {
 	int val;
@@ -283,7 +279,7 @@ clear_pending_jade_ints(struct IsdnCardState *cs)
 	cs->BC_Write_Reg(cs, 1, jade_HDLC_IMR, 0xF8);
 }
 
-void __init
+void
 initjade(struct IsdnCardState *cs)
 {
 	cs->bcs[0].BC_SetStack = setstack_jade;
@@ -308,7 +304,7 @@ initjade(struct IsdnCardState *cs)
 	cs->BC_Write_Reg(cs, 1, jade_HDLC_IMR,  0x00);
 	/* Setup host access to hdlc controller */
 	jade_write_indirect(cs, jade_HDLCCNTRACCESS, (jadeINDIRECT_HAH1|jadeINDIRECT_HAH2));
-	/* Unmask HDLC int (don´t forget DSP int later on)*/
+	/* Unmask HDLC int (don't forget DSP int later on)*/
 	cs->BC_Write_Reg(cs, -1,jade_INT, (jadeINT_HDLC1|jadeINT_HDLC2));
 
 	/* once again TRANSPARENT */	

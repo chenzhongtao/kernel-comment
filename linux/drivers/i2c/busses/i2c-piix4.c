@@ -22,20 +22,19 @@
 /*
    Supports:
 	Intel PIIX4, 440MX
-	Serverworks OSB4, CSB5, CSB6
+	Serverworks OSB4, CSB5, CSB6, HT-1000
+	ATI IXP200, IXP300, IXP400, SB600, SB700, SB800
 	SMSC Victory66
 
    Note: we assume there can only be one device, with one SMBus interface.
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/stddef.h>
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
@@ -91,28 +90,22 @@ struct sd {
 
 /* If force is set to anything different from 0, we forcibly enable the
    PIIX4. DANGEROUS! */
-static int force = 0;
+static int force;
 module_param (force, int, 0);
 MODULE_PARM_DESC(force, "Forcibly enable the PIIX4. DANGEROUS!");
 
 /* If force_addr is set to anything different from 0, we forcibly enable
    the PIIX4 at the given address. VERY DANGEROUS! */
-static int force_addr = 0;
+static int force_addr;
 module_param (force_addr, int, 0);
 MODULE_PARM_DESC(force_addr,
 		 "Forcibly enable the PIIX4 at the given address. "
 		 "EXTREMELY DANGEROUS!");
 
-/* If fix_hstcfg is set to anything different from 0, we reset one of the
-   registers to be a valid value. */
-static int fix_hstcfg = 0;
-module_param (fix_hstcfg, int, 0);
-MODULE_PARM_DESC(fix_hstcfg,
-		"Fix config register. Needed on some boards (Force CPCI735).");
-
 static int piix4_transaction(void);
 
-static unsigned short piix4_smba = 0;
+static unsigned short piix4_smba;
+static struct pci_driver piix4_driver;
 static struct i2c_adapter piix4_adapter;
 
 static struct dmi_system_id __devinitdata piix4_dmi_table[] = {
@@ -137,7 +130,7 @@ static int __devinit piix4_setup(struct pci_dev *PIIX4_dev,
 	/* Don't access SMBus on IBM systems which get corrupted eeproms */
 	if (dmi_check_system(piix4_dmi_table) &&
 			PIIX4_dev->vendor == PCI_VENDOR_ID_INTEL) {
-		dev_err(&PIIX4_dev->dev, "IBM Laptop detected; this module "
+		dev_err(&PIIX4_dev->dev, "IBM system detected; this module "
 			"may corrupt your serial eeprom! Refusing to load "
 			"module!\n");
 		return -EPERM;
@@ -158,7 +151,7 @@ static int __devinit piix4_setup(struct pci_dev *PIIX4_dev,
 		}
 	}
 
-	if (!request_region(piix4_smba, SMBIOSIZE, "piix4-smbus")) {
+	if (!request_region(piix4_smba, SMBIOSIZE, piix4_driver.name)) {
 		dev_err(&PIIX4_dev->dev, "SMB region 0x%x already in use!\n",
 			piix4_smba);
 		return -ENODEV;
@@ -166,22 +159,6 @@ static int __devinit piix4_setup(struct pci_dev *PIIX4_dev,
 
 	pci_read_config_byte(PIIX4_dev, SMBHSTCFG, &temp);
 
-	/* Some BIOS will set up the chipset incorrectly and leave a register
-	   in an undefined state (causing I2C to act very strangely). */
-	if (temp & 0x02) {
-		if (fix_hstcfg) {
-			dev_info(&PIIX4_dev->dev, "Working around buggy BIOS "
-					"(I2C)\n");
-			temp &= 0xfd;
-			pci_write_config_byte(PIIX4_dev, SMBHSTCFG, temp);
-		} else {
-			dev_info(&PIIX4_dev->dev, "Unusual config register "
-					"value\n");
-			dev_info(&PIIX4_dev->dev, "Try using fix_hstcfg=1 if "
-					"you experience problems\n");
-		}
-	}
- 
 	/* If force_addr is set, we program the new address here. Just to make
 	   sure, we disable the PIIX4 first. */
 	if (force_addr) {
@@ -214,7 +191,7 @@ static int __devinit piix4_setup(struct pci_dev *PIIX4_dev,
 		}
 	}
 
-	if ((temp & 0x0E) == 8)
+	if (((temp & 0x0E) == 8) || ((temp & 0x0E) == 2))
 		dev_dbg(&PIIX4_dev->dev, "Using Interrupt 9 for SMBus.\n");
 	else if ((temp & 0x0E) == 0)
 		dev_dbg(&PIIX4_dev->dev, "Using Interrupt SMI# for SMBus.\n");
@@ -244,7 +221,7 @@ static int piix4_transaction(void)
 	/* Make sure the SMBus host is ready to start transmitting */
 	if ((temp = inb_p(SMBHSTSTS)) != 0x00) {
 		dev_dbg(&piix4_adapter.dev, "SMBus busy (%02x). "
-			"Resetting... \n", temp);
+			"Resetting...\n", temp);
 		outb_p(temp, SMBHSTSTS);
 		if ((temp = inb_p(SMBHSTSTS)) != 0x00) {
 			dev_err(&piix4_adapter.dev, "Failed! (%02x)\n", temp);
@@ -399,28 +376,36 @@ static u32 piix4_func(struct i2c_adapter *adapter)
 	    I2C_FUNC_SMBUS_BLOCK_DATA;
 }
 
-static struct i2c_algorithm smbus_algorithm = {
-	.name		= "Non-I2C SMBus adapter",
-	.id		= I2C_ALGO_SMBUS,
+static const struct i2c_algorithm smbus_algorithm = {
 	.smbus_xfer	= piix4_access,
 	.functionality	= piix4_func,
 };
 
 static struct i2c_adapter piix4_adapter = {
 	.owner		= THIS_MODULE,
+	.id		= I2C_HW_SMBUS_PIIX4,
 	.class		= I2C_CLASS_HWMON,
 	.algo		= &smbus_algorithm,
-	.name		= "unset",
 };
 
 static struct pci_device_id piix4_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371AB_3),
 	  .driver_data = 3 },
+	{ PCI_DEVICE(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP200_SMBUS),
+	  .driver_data = 0 },
+	{ PCI_DEVICE(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP300_SMBUS),
+	  .driver_data = 0 },
+	{ PCI_DEVICE(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP400_SMBUS),
+	  .driver_data = 0 },
+	{ PCI_DEVICE(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_SBX00_SMBUS),
+	  .driver_data = 0 },
 	{ PCI_DEVICE(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_OSB4),
 	  .driver_data = 0 },
 	{ PCI_DEVICE(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_CSB5),
 	  .driver_data = 0 },
 	{ PCI_DEVICE(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_CSB6),
+	  .driver_data = 0 },
+	{ PCI_DEVICE(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_HT1000SB),
 	  .driver_data = 0 },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82443MX_3),
 	  .driver_data = 3 },
@@ -440,10 +425,10 @@ static int __devinit piix4_probe(struct pci_dev *dev,
 	if (retval)
 		return retval;
 
-	/* set up the driverfs linkage to our parent device */
+	/* set up the sysfs linkage to our parent device */
 	piix4_adapter.dev.parent = &dev->dev;
 
-	snprintf(piix4_adapter.name, I2C_NAME_SIZE,
+	snprintf(piix4_adapter.name, sizeof(piix4_adapter.name),
 		"SMBus PIIX4 adapter at %04x", piix4_smba);
 
 	if ((retval = i2c_add_adapter(&piix4_adapter))) {

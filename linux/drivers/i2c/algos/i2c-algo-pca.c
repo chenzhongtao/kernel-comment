@@ -34,7 +34,7 @@
 #define DEB2(fmt, args...) do { if (i2c_debug>=2) printk(fmt, ## args); } while(0)
 #define DEB3(fmt, args...) do { if (i2c_debug>=3) printk(fmt, ## args); } while(0)
 
-static int i2c_debug=0;
+static int i2c_debug;
 
 #define pca_outw(adap, reg, val) adap->write_byte(adap, reg, val)
 #define pca_inw(adap, reg) adap->read_byte(adap, reg)
@@ -49,7 +49,7 @@ static int i2c_debug=0;
 /*
  * Generate a start condition on the i2c bus.
  *
- * returns after the start condition has occured
+ * returns after the start condition has occurred
  */
 static void pca_start(struct i2c_algo_pca_data *adap)
 {
@@ -62,9 +62,9 @@ static void pca_start(struct i2c_algo_pca_data *adap)
 }
 
 /*
- * Generate a repeated start condition on the i2c bus 
+ * Generate a repeated start condition on the i2c bus
  *
- * return after the repeated start condition has occured
+ * return after the repeated start condition has occurred
  */
 static void pca_repeated_start(struct i2c_algo_pca_data *adap)
 {
@@ -82,7 +82,7 @@ static void pca_repeated_start(struct i2c_algo_pca_data *adap)
  * returns after the stop condition has been generated
  *
  * STOPs do not generate an interrupt or set the SI flag, since the
- * part returns the the idle state (0xf8). Hence we don't need to
+ * part returns the idle state (0xf8). Hence we don't need to
  * pca_wait here.
  */
 static void pca_stop(struct i2c_algo_pca_data *adap)
@@ -178,7 +178,7 @@ static void pca_reset(struct i2c_algo_pca_data *adap)
 }
 
 static int pca_xfer(struct i2c_adapter *i2c_adap,
-                    struct i2c_msg msgs[],
+                    struct i2c_msg *msgs,
                     int num)
 {
         struct i2c_algo_pca_data *adap = i2c_adap->algo_data;
@@ -186,12 +186,15 @@ static int pca_xfer(struct i2c_adapter *i2c_adap,
         int curmsg;
 	int numbytes = 0;
 	int state;
+	int ret;
+	int timeout = 100;
 
-	state = pca_status(adap);
-	if ( state != 0xF8 ) {
-		dev_dbg(&i2c_adap->dev, "bus is not idle. status is %#04x\n", state );
-		/* FIXME: what to do. Force stop ? */
-		return -EREMOTEIO;
+	while ((state = pca_status(adap)) != 0xf8 && timeout--) {
+		msleep(10);
+	}
+	if (state != 0xf8) {
+		dev_dbg(&i2c_adap->dev, "bus is not idle. status is %#04x\n", state);
+		return -EIO;
 	}
 
 	DEB1("{{{ XFER %d messages\n", num);
@@ -218,6 +221,7 @@ static int pca_xfer(struct i2c_adapter *i2c_adap,
 	}
 
 	curmsg = 0;
+	ret = -EREMOTEIO;
 	while (curmsg < num) {
 		state = pca_status(adap);
 
@@ -251,7 +255,7 @@ static int pca_xfer(struct i2c_adapter *i2c_adap,
 		case 0x20: /* SLA+W has been transmitted; NOT ACK has been received */
 			DEB2("NOT ACK received after SLA+W\n");
 			pca_stop(adap);
-			return -EREMOTEIO;
+			goto out;
 
 		case 0x40: /* SLA+R has been transmitted; ACK has been received */
 			pca_rx_ack(adap, msg->len > 1);
@@ -263,7 +267,7 @@ static int pca_xfer(struct i2c_adapter *i2c_adap,
 				numbytes++;
 				pca_rx_ack(adap, numbytes < msg->len - 1);
 				break;
-			} 
+			}
 			curmsg++; numbytes = 0;
 			if (curmsg == num)
 				pca_stop(adap);
@@ -274,15 +278,15 @@ static int pca_xfer(struct i2c_adapter *i2c_adap,
 		case 0x48: /* SLA+R has been transmitted; NOT ACK has been received */
 			DEB2("NOT ACK received after SLA+R\n");
 			pca_stop(adap);
-			return -EREMOTEIO;
+			goto out;
 
 		case 0x30: /* Data byte in I2CDAT has been transmitted; NOT ACK has been received */
 			DEB2("NOT ACK received after data byte\n");
-			return -EREMOTEIO;
+			goto out;
 
 		case 0x38: /* Arbitration lost during SLA+W, SLA+R or data bytes */
 			DEB2("Arbitration lost\n");
-			return -EREMOTEIO;
+			goto out;
 			
 		case 0x58: /* Data byte has been received; NOT ACK has been returned */
 			if ( numbytes == msg->len - 1 ) {
@@ -297,21 +301,21 @@ static int pca_xfer(struct i2c_adapter *i2c_adap,
 				     "Not final byte. numbytes %d. len %d\n",
 				     numbytes, msg->len);
 				pca_stop(adap);
-				return -EREMOTEIO;
+				goto out;
 			}
 			break;
 		case 0x70: /* Bus error - SDA stuck low */
 			DEB2("BUS ERROR - SDA Stuck low\n");
 			pca_reset(adap);
-			return -EREMOTEIO;
+			goto out;
 		case 0x90: /* Bus error - SCL stuck low */
 			DEB2("BUS ERROR - SCL Stuck low\n");
 			pca_reset(adap);
-			return -EREMOTEIO;
+			goto out;
 		case 0x00: /* Bus error during master or slave mode due to illegal START or STOP condition */
 			DEB2("BUS ERROR - Illegal START or STOP\n");
 			pca_reset(adap);
-			return -EREMOTEIO;
+			goto out;
 		default:
 			printk(KERN_ERR DRIVER ": unhandled SIO state 0x%02x\n", state);
 			break;
@@ -319,11 +323,13 @@ static int pca_xfer(struct i2c_adapter *i2c_adap,
 		
 	}
 
-	DEB1(KERN_CRIT "}}} transfered %d messages. "
+	ret = curmsg;
+ out:
+	DEB1(KERN_CRIT "}}} transfered %d/%d messages. "
 	     "status is %#04x. control is %#04x\n", 
-	     num, pca_status(adap),
+	     curmsg, num, pca_status(adap),
 	     pca_get_con(adap));
-	return curmsg;
+	return ret;
 }
 
 static u32 pca_func(struct i2c_adapter *adap)
@@ -344,14 +350,12 @@ static int pca_init(struct i2c_algo_pca_data *adap)
 	pca_outw(adap, I2C_PCA_ADR, own << 1);
 
 	pca_set_con(adap, I2C_PCA_CON_ENSIO | clock);
-	udelay(500); /* 500 µs for oscilator to stabilise */
+	udelay(500); /* 500 Âµs for oscilator to stabilise */
 
 	return 0;
 }
 
-static struct i2c_algorithm pca_algo = {
-	.name		= "PCA9564 algorithm",
-	.id		= I2C_ALGO_PCA,
+static const struct i2c_algorithm pca_algo = {
 	.master_xfer	= pca_xfer,
 	.functionality	= pca_func,
 };
@@ -365,28 +369,19 @@ int i2c_pca_add_bus(struct i2c_adapter *adap)
 	int rval;
 
 	/* register new adapter to i2c module... */
-
-	adap->id |= pca_algo.id;
 	adap->algo = &pca_algo;
 
 	adap->timeout = 100;		/* default values, should	*/
 	adap->retries = 3;		/* be replaced by defines	*/
 
-	rval = pca_init(pca_adap);
+	if ((rval = pca_init(pca_adap)))
+		return rval;
 
-	if (!rval)
-		i2c_add_adapter(adap);
+	rval = i2c_add_adapter(adap);
 
 	return rval;
 }
-
-int i2c_pca_del_bus(struct i2c_adapter *adap)
-{
-	return i2c_del_adapter(adap);
-}
-
 EXPORT_SYMBOL(i2c_pca_add_bus);
-EXPORT_SYMBOL(i2c_pca_del_bus);
 
 MODULE_AUTHOR("Ian Campbell <icampbell@arcom.com>");
 MODULE_DESCRIPTION("I2C-Bus PCA9564 algorithm");

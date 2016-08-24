@@ -1,10 +1,9 @@
 /*
- * linux/arch/sparc/sys_solaris.c
+ * linux/arch/sparc/kernel/sys_solaris.c
  *
  * Copyright (C) 1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -13,7 +12,6 @@
 #include <linux/ptrace.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/module.h>
 
 asmlinkage int

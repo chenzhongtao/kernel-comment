@@ -9,17 +9,16 @@
 #ifndef _ASM_SIM_H
 #define _ASM_SIM_H
 
-#include <linux/config.h>
 
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 
 #define __str2(x) #x
 #define __str(x) __str2(x)
 
-#ifdef CONFIG_MIPS32
+#ifdef CONFIG_32BIT
 
 #define save_static_function(symbol)					\
-__asm__ (								\
+__asm__(								\
 	".text\n\t"							\
 	".globl\t" #symbol "\n\t"					\
 	".align\t2\n\t"							\
@@ -42,12 +41,12 @@ __asm__ (								\
 
 #define nabi_no_regargs
 
-#endif /* CONFIG_MIPS32 */
+#endif /* CONFIG_32BIT */
 
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 
 #define save_static_function(symbol)					\
-__asm__ (								\
+__asm__(								\
 	".text\n\t"							\
 	".globl\t" #symbol "\n\t"					\
 	".align\t2\n\t"							\
@@ -78,6 +77,6 @@ __asm__ (								\
 	unsigned long __dummy6,						\
 	unsigned long __dummy7,
 
-#endif /* CONFIG_MIPS64 */
+#endif /* CONFIG_64BIT */
 
 #endif /* _ASM_SIM_H */

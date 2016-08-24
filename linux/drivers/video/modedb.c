@@ -12,9 +12,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/tty.h>
 #include <linux/fb.h>
-#include <linux/sched.h>
 
 #undef DEBUG
 
@@ -29,13 +27,11 @@
 #define DPRINTK(fmt, args...)
 #endif
 
-const char *global_mode_option;
+const char *fb_mode_option;
 
     /*
      *  Standard video mode definitions (taken from XFree86)
      */
-
-#define DEFAULT_MODEDB_INDEX	0
 
 static const struct fb_videomode modedb[] = {
     {
@@ -76,7 +72,7 @@ static const struct fb_videomode modedb[] = {
 	0, FB_VMODE_NONINTERLACED
     }, {
 	/* 1152x864 @ 89 Hz interlaced, 44 kHz hsync */
-	NULL, 69, 1152, 864, 15384, 96, 16, 110, 1, 216, 10,
+	NULL, 89, 1152, 864, 15384, 96, 16, 110, 1, 216, 10,
 	0, FB_VMODE_INTERLACED
     }, {
 	/* 800x600 @ 72 Hz, 48.0 kHz hsync */
@@ -124,11 +120,11 @@ static const struct fb_videomode modedb[] = {
 	0, FB_VMODE_NONINTERLACED
     }, {
 	/* 1400x1050 @ 60Hz, 63.9 kHz hsync */
-	NULL, 68, 1400, 1050, 9259, 136, 40, 13, 1, 112, 3,
+	NULL, 60, 1400, 1050, 9259, 136, 40, 13, 1, 112, 3,
 	0, FB_VMODE_NONINTERLACED   	
     }, {
 	/* 1400x1050 @ 75,107 Hz, 82,392 kHz +hsync +vsync*/
-	NULL, 75, 1400, 1050, 9271, 120, 56, 13, 0, 112, 3,
+	NULL, 75, 1400, 1050, 7190, 120, 56, 23, 10, 112, 13,
 	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
     }, {
 	/* 1400x1050 @ 60 Hz, ? kHz +hsync +vsync*/
@@ -181,6 +177,10 @@ static const struct fb_videomode modedb[] = {
     }, {
 	/* 1600x1200 @ 75 Hz, 93.75 kHz hsync */
 	NULL, 75, 1600, 1200, 4938, 304, 64, 46, 1, 192, 3,
+	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
+    }, {
+	/* 1680x1050 @ 60 Hz, 65.191 kHz hsync */
+	NULL, 60, 1680, 1050, 6848, 280, 104, 30, 3, 176, 6,
 	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
     }, {
 	/* 1600x1200 @ 85 Hz, 105.77 kHz hsync */
@@ -246,6 +246,23 @@ static const struct fb_videomode modedb[] = {
 	/* 480x300 @ 72 Hz, 48.0 kHz hsync */
 	NULL, 72, 480, 300, 33386, 40, 24, 11, 19, 80, 3,
 	0, FB_VMODE_DOUBLE
+    }, {
+	/* 1920x1200 @ 60 Hz, 74.5 Khz hsync */
+	NULL, 60, 1920, 1200, 5177, 128, 336, 1, 38, 208, 3,
+	FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
+	FB_VMODE_NONINTERLACED
+    }, {
+	/* 1152x768, 60 Hz, PowerBook G4 Titanium I and II */
+	NULL, 60, 1152, 768, 14047, 158, 26, 29, 3, 136, 6,
+	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
+    }, {
+	/* 1366x768, 60 Hz, 47.403 kHz hsync, WXGA 16:9 aspect ratio */
+	NULL, 60, 1366, 768, 13806, 120, 10, 14, 3, 32, 5,
+	0, FB_VMODE_NONINTERLACED
+   }, {
+	/* 1280x800, 60 Hz, 47.403 kHz hsync, WXGA 16:10 aspect ratio */
+	NULL, 60, 1280, 800, 12048, 200, 64, 24, 1, 136, 3,
+	0, FB_VMODE_NONINTERLACED
     },
 };
 
@@ -293,7 +310,7 @@ const struct fb_videomode vesa_modes[] = {
 	  FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
 	  FB_VMODE_NONINTERLACED, FB_MODE_IS_VESA },
         /* 12 1024x768i-43 VESA */
-	{ NULL, 53, 1024, 768, 22271, 56, 8, 41, 0, 176, 8,
+	{ NULL, 43, 1024, 768, 22271, 56, 8, 41, 0, 176, 8,
 	  FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
 	  FB_VMODE_INTERLACED, FB_MODE_IS_VESA },
 	/* 13 1024x768-60 VESA */
@@ -370,7 +387,7 @@ const struct fb_videomode vesa_modes[] = {
 	{ NULL, 60, 1920, 1440, 4273, 344, 128, 56, 1, 200, 3,
 	  FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED, FB_MODE_IS_VESA },
 	/* 33 1920x1440-75 VESA */
-	{ NULL, 60, 1920, 1440, 3367, 352, 144, 56, 1, 224, 3,
+	{ NULL, 75, 1920, 1440, 3367, 352, 144, 56, 1, 224, 3,
 	  FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED, FB_MODE_IS_VESA },
 };
 EXPORT_SYMBOL(vesa_modes);
@@ -382,7 +399,7 @@ static int my_atoi(const char *name)
 
     for (;; name++) {
 	switch (*name) {
-	    case '0'...'9':
+	    case '0' ... '9':
 		val = 10*val+(*name-'0');
 		break;
 	    default:
@@ -404,8 +421,8 @@ static int my_atoi(const char *name)
  *
  */
 
-int fb_try_mode(struct fb_var_screeninfo *var, struct fb_info *info,
-		const struct fb_videomode *mode, unsigned int bpp)
+static int fb_try_mode(struct fb_var_screeninfo *var, struct fb_info *info,
+		       const struct fb_videomode *mode, unsigned int bpp)
 {
     int err = 0;
 
@@ -451,11 +468,21 @@ int fb_try_mode(struct fb_var_screeninfo *var, struct fb_info *info,
  *
  *	Valid mode specifiers for @mode_option:
  *
- *	<xres>x<yres>[-<bpp>][@<refresh>] or
+ *	<xres>x<yres>[M][R][-<bpp>][@<refresh>][i][m] or
  *	<name>[-<bpp>][@<refresh>]
  *
  *	with <xres>, <yres>, <bpp> and <refresh> decimal numbers and
  *	<name> a string.
+ *
+ *      If 'M' is present after yres (and before refresh/bpp if present),
+ *      the function will compute the timings using VESA(tm) Coordinated
+ *      Video Timings (CVT).  If 'R' is present after 'M', will compute with
+ *      reduced blanking (for flatpanels).  If 'i' is present, compute
+ *      interlaced mode.  If 'm' is present, add margins equal to 1.8%
+ *      of xres rounded down to 8 pixels, and 1.8% of yres. The char
+ *      'i' and 'm' must be after 'M' and 'R'. Example:
+ *
+ *      1024x768MR-8@60m - Reduced blank with margins at 60Hz.
  *
  *	NOTE: The passed struct @var is _not_ cleared!  This allows you
  *	to supply values for e.g. the grayscale and accel_flags fields.
@@ -477,20 +504,24 @@ int fb_find_mode(struct fb_var_screeninfo *var,
     /* Set up defaults */
     if (!db) {
 	db = modedb;
-	dbsize = sizeof(modedb)/sizeof(*modedb);
+	dbsize = ARRAY_SIZE(modedb);
     }
+
     if (!default_mode)
-	default_mode = &modedb[DEFAULT_MODEDB_INDEX];
+	default_mode = &db[0];
+
     if (!default_bpp)
 	default_bpp = 8;
 
     /* Did the user specify a video mode? */
-    if (mode_option || (mode_option = global_mode_option)) {
+    if (!mode_option)
+	mode_option = fb_mode_option;
+    if (mode_option) {
 	const char *name = mode_option;
 	unsigned int namelen = strlen(name);
 	int res_specified = 0, bpp_specified = 0, refresh_specified = 0;
 	unsigned int xres = 0, yres = 0, bpp = default_bpp, refresh = 0;
-	int yres_specified = 0;
+	int yres_specified = 0, cvt = 0, rb = 0, interlace = 0, margins = 0;
 	u32 best, diff;
 
 	for (i = namelen-1; i >= 0; i--) {
@@ -501,6 +532,8 @@ int fb_find_mode(struct fb_var_screeninfo *var,
 			!yres_specified) {
 			refresh = my_atoi(&name[i+1]);
 			refresh_specified = 1;
+			if (cvt || rb)
+			    cvt = 0;
 		    } else
 			goto done;
 		    break;
@@ -509,6 +542,8 @@ int fb_find_mode(struct fb_var_screeninfo *var,
 		    if (!bpp_specified && !yres_specified) {
 			bpp = my_atoi(&name[i+1]);
 			bpp_specified = 1;
+			if (cvt || rb)
+			    cvt = 0;
 		    } else
 			goto done;
 		    break;
@@ -519,7 +554,23 @@ int fb_find_mode(struct fb_var_screeninfo *var,
 		    } else
 			goto done;
 		    break;
-		case '0'...'9':
+		case '0' ... '9':
+		    break;
+		case 'M':
+		    if (!yres_specified)
+			cvt = 1;
+		    break;
+		case 'R':
+		    if (!cvt)
+			rb = 1;
+		    break;
+		case 'm':
+		    if (!cvt)
+			margins = 1;
+		    break;
+		case 'i':
+		    if (!cvt)
+			interlace = 1;
 		    break;
 		default:
 		    goto done;
@@ -530,31 +581,74 @@ int fb_find_mode(struct fb_var_screeninfo *var,
 	    res_specified = 1;
 	}
 done:
+	if (cvt) {
+	    struct fb_videomode cvt_mode;
+	    int ret;
+
+	    DPRINTK("CVT mode %dx%d@%dHz%s%s%s\n", xres, yres,
+		    (refresh) ? refresh : 60, (rb) ? " reduced blanking" :
+		    "", (margins) ? " with margins" : "", (interlace) ?
+		    " interlaced" : "");
+
+	    cvt_mode.xres = xres;
+	    cvt_mode.yres = yres;
+	    cvt_mode.refresh = (refresh) ? refresh : 60;
+
+	    if (interlace)
+		cvt_mode.vmode |= FB_VMODE_INTERLACED;
+	    else
+		cvt_mode.vmode &= ~FB_VMODE_INTERLACED;
+
+	    ret = fb_find_mode_cvt(&cvt_mode, margins, rb);
+
+	    if (!ret && !fb_try_mode(var, info, &cvt_mode, bpp)) {
+		DPRINTK("modedb CVT: CVT mode ok\n");
+		return 1;
+	    }
+
+	    DPRINTK("CVT mode invalid, getting mode from database\n");
+	}
+
 	DPRINTK("Trying specified video mode%s %ix%i\n",
 	    refresh_specified ? "" : " (ignoring refresh rate)", xres, yres);
 
-	diff = refresh;
+	if (!refresh_specified) {
+		/*
+		 * If the caller has provided a custom mode database and a
+		 * valid monspecs structure, we look for the mode with the
+		 * highest refresh rate.  Otherwise we play it safe it and
+		 * try to find a mode with a refresh rate closest to the
+		 * standard 60 Hz.
+		 */
+		if (db != modedb &&
+		    info->monspecs.vfmin && info->monspecs.vfmax &&
+		    info->monspecs.hfmin && info->monspecs.hfmax &&
+		    info->monspecs.dclkmax) {
+			refresh = 1000;
+		} else {
+			refresh = 60;
+		}
+	}
+
+	diff = -1;
 	best = -1;
 	for (i = 0; i < dbsize; i++) {
-		if ((name_matches(db[i], name, namelen) &&
-			!fb_try_mode(var, info, &db[i], bpp)))
-			return 1;
-		if (res_specified && res_matches(db[i], xres, yres)) {
-			if(!fb_try_mode(var, info, &db[i], bpp)) {
-				if(!refresh_specified || db[i].refresh == refresh)
-					return 1;
-				else {
-					if(diff > abs(db[i].refresh - refresh)) {
-						diff = abs(db[i].refresh - refresh);
-						best = i;
-					}
+		if ((name_matches(db[i], name, namelen) ||
+		    (res_specified && res_matches(db[i], xres, yres))) &&
+		    !fb_try_mode(var, info, &db[i], bpp)) {
+			if (refresh_specified && db[i].refresh == refresh) {
+				return 1;
+			} else {
+				if (abs(db[i].refresh - refresh) < diff) {
+					diff = abs(db[i].refresh - refresh);
+					best = i;
 				}
 			}
 		}
 	}
 	if (best != -1) {
 		fb_try_mode(var, info, &db[best], bpp);
-		return 2;
+		return (refresh_specified) ? 2 : 1;
 	}
 
 	diff = xres + yres;
@@ -596,7 +690,7 @@ done:
  * @var: pointer to struct fb_var_screeninfo
  */
 void fb_var_to_videomode(struct fb_videomode *mode,
-			 struct fb_var_screeninfo *var)
+			 const struct fb_var_screeninfo *var)
 {
 	u32 pixclock, hfreq, htotal, vtotal;
 
@@ -613,6 +707,8 @@ void fb_var_to_videomode(struct fb_videomode *mode,
 	mode->sync = var->sync;
 	mode->vmode = var->vmode & FB_VMODE_MASK;
 	mode->flag = FB_MODE_IS_FROM_VAR;
+	mode->refresh = 0;
+
 	if (!var->pixclock)
 		return;
 
@@ -638,17 +734,21 @@ void fb_var_to_videomode(struct fb_videomode *mode,
  * @mode: pointer to struct fb_videomode
  */
 void fb_videomode_to_var(struct fb_var_screeninfo *var,
-			       struct fb_videomode *mode)
+			 const struct fb_videomode *mode)
 {
 	var->xres = mode->xres;
 	var->yres = mode->yres;
+	var->xres_virtual = mode->xres;
+	var->yres_virtual = mode->yres;
+	var->xoffset = 0;
+	var->yoffset = 0;
 	var->pixclock = mode->pixclock;
 	var->left_margin = mode->left_margin;
-	var->hsync_len = mode->hsync_len;
-	var->vsync_len = mode->vsync_len;
 	var->right_margin = mode->right_margin;
 	var->upper_margin = mode->upper_margin;
 	var->lower_margin = mode->lower_margin;
+	var->hsync_len = mode->hsync_len;
+	var->vsync_len = mode->vsync_len;
 	var->sync = mode->sync;
 	var->vmode = mode->vmode & FB_VMODE_MASK;
 }
@@ -661,8 +761,8 @@ void fb_videomode_to_var(struct fb_var_screeninfo *var,
  * RETURNS:
  * 1 if equal, 0 if not
  */
-int fb_mode_is_equal(struct fb_videomode *mode1,
-		     struct fb_videomode *mode2)
+int fb_mode_is_equal(const struct fb_videomode *mode1,
+		     const struct fb_videomode *mode2)
 {
 	return (mode1->xres         == mode2->xres &&
 		mode1->yres         == mode2->yres &&
@@ -694,8 +794,8 @@ int fb_mode_is_equal(struct fb_videomode *mode1,
  * var->xres and var->yres.  If more than 1 videomode is found, will return
  * the videomode with the highest refresh rate
  */
-struct fb_videomode *fb_find_best_mode(struct fb_var_screeninfo *var,
-				       struct list_head *head)
+const struct fb_videomode *fb_find_best_mode(const struct fb_var_screeninfo *var,
+					     struct list_head *head)
 {
 	struct list_head *pos;
 	struct fb_modelist *modelist;
@@ -714,10 +814,52 @@ struct fb_videomode *fb_find_best_mode(struct fb_var_screeninfo *var,
 			if (diff > d) {
 				diff = d;
 				best = mode;
-			} else if (diff == d && mode->refresh > best->refresh)
-			    best = mode;
+			} else if (diff == d && best &&
+				   mode->refresh > best->refresh)
+				best = mode;
 		}
 	}
+	return best;
+}
+
+/**
+ * fb_find_nearest_mode - find closest videomode
+ *
+ * @mode: pointer to struct fb_videomode
+ * @head: pointer to modelist
+ *
+ * Finds best matching videomode, smaller or greater in dimension.
+ * If more than 1 videomode is found, will return the videomode with
+ * the closest refresh rate.
+ */
+const struct fb_videomode *fb_find_nearest_mode(const struct fb_videomode *mode,
+					        struct list_head *head)
+{
+	struct list_head *pos;
+	struct fb_modelist *modelist;
+	struct fb_videomode *cmode, *best = NULL;
+	u32 diff = -1, diff_refresh = -1;
+
+	list_for_each(pos, head) {
+		u32 d;
+
+		modelist = list_entry(pos, struct fb_modelist, list);
+		cmode = &modelist->mode;
+
+		d = abs(cmode->xres - mode->xres) +
+			abs(cmode->yres - mode->yres);
+		if (diff > d) {
+			diff = d;
+			best = cmode;
+		} else if (diff == d) {
+			d = abs(cmode->refresh - mode->refresh);
+			if (diff_refresh > d) {
+				diff_refresh = d;
+				best = cmode;
+			}
+		}
+	}
+
 	return best;
 }
 
@@ -729,8 +871,8 @@ struct fb_videomode *fb_find_best_mode(struct fb_var_screeninfo *var,
  * RETURNS:
  * struct fb_videomode, NULL if none found
  */
-struct fb_videomode *fb_match_mode(struct fb_var_screeninfo *var,
-				   struct list_head *head)
+const struct fb_videomode *fb_match_mode(const struct fb_var_screeninfo *var,
+					 struct list_head *head)
 {
 	struct list_head *pos;
 	struct fb_modelist *modelist;
@@ -754,7 +896,7 @@ struct fb_videomode *fb_match_mode(struct fb_var_screeninfo *var,
  * NOTES:
  * Will only add unmatched mode entries
  */
-int fb_add_videomode(struct fb_videomode *mode, struct list_head *head)
+int fb_add_videomode(const struct fb_videomode *mode, struct list_head *head)
 {
 	struct list_head *pos;
 	struct fb_modelist *modelist;
@@ -789,7 +931,8 @@ int fb_add_videomode(struct fb_videomode *mode, struct list_head *head)
  * NOTES:
  * Will remove all matching mode entries
  */
-void fb_delete_videomode(struct fb_videomode *mode, struct list_head *head)
+void fb_delete_videomode(const struct fb_videomode *mode,
+			 struct list_head *head)
 {
 	struct list_head *pos, *n;
 	struct fb_modelist *modelist;
@@ -818,6 +961,7 @@ void fb_destroy_modelist(struct list_head *head)
 		kfree(pos);
 	}
 }
+EXPORT_SYMBOL_GPL(fb_destroy_modelist);
 
 /**
  * fb_videomode_to_modelist: convert mode array to mode list
@@ -825,7 +969,7 @@ void fb_destroy_modelist(struct list_head *head)
  * @num: number of entries in array
  * @head: struct list_head of modelist
  */
-void fb_videomode_to_modelist(struct fb_videomode *modedb, int num,
+void fb_videomode_to_modelist(const struct fb_videomode *modedb, int num,
 			      struct list_head *head)
 {
 	int i;
@@ -838,13 +982,72 @@ void fb_videomode_to_modelist(struct fb_videomode *modedb, int num,
 	}
 }
 
+const struct fb_videomode *fb_find_best_display(const struct fb_monspecs *specs,
+					        struct list_head *head)
+{
+	struct list_head *pos;
+	struct fb_modelist *modelist;
+	const struct fb_videomode *m, *m1 = NULL, *md = NULL, *best = NULL;
+	int first = 0;
+
+	if (!head->prev || !head->next || list_empty(head))
+		goto finished;
+
+	/* get the first detailed mode and the very first mode */
+	list_for_each(pos, head) {
+		modelist = list_entry(pos, struct fb_modelist, list);
+		m = &modelist->mode;
+
+		if (!first) {
+			m1 = m;
+			first = 1;
+		}
+
+		if (m->flag & FB_MODE_IS_FIRST) {
+ 			md = m;
+			break;
+		}
+	}
+
+	/* first detailed timing is preferred */
+	if (specs->misc & FB_MISC_1ST_DETAIL) {
+		best = md;
+		goto finished;
+	}
+
+	/* find best mode based on display width and height */
+	if (specs->max_x && specs->max_y) {
+		struct fb_var_screeninfo var;
+
+		memset(&var, 0, sizeof(struct fb_var_screeninfo));
+		var.xres = (specs->max_x * 7200)/254;
+		var.yres = (specs->max_y * 7200)/254;
+		m = fb_find_best_mode(&var, head);
+		if (m) {
+			best = m;
+			goto finished;
+		}
+	}
+
+	/* use first detailed mode */
+	if (md) {
+		best = md;
+		goto finished;
+	}
+
+	/* last resort, use the very first mode */
+	best = m1;
+finished:
+	return best;
+}
+EXPORT_SYMBOL(fb_find_best_display);
+
 EXPORT_SYMBOL(fb_videomode_to_var);
 EXPORT_SYMBOL(fb_var_to_videomode);
 EXPORT_SYMBOL(fb_mode_is_equal);
 EXPORT_SYMBOL(fb_add_videomode);
-EXPORT_SYMBOL(fb_delete_videomode);
-EXPORT_SYMBOL(fb_destroy_modelist);
 EXPORT_SYMBOL(fb_match_mode);
 EXPORT_SYMBOL(fb_find_best_mode);
+EXPORT_SYMBOL(fb_find_nearest_mode);
 EXPORT_SYMBOL(fb_videomode_to_modelist);
 EXPORT_SYMBOL(fb_find_mode);

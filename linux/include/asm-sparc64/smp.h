@@ -6,7 +6,6 @@
 #ifndef _SPARC64_SMP_H
 #define _SPARC64_SMP_H
 
-#include <linux/config.h>
 #include <linux/threads.h>
 #include <asm/asi.h>
 #include <asm/starfire.h>
@@ -27,51 +26,36 @@
  *	Private routines/data
  */
  
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <asm/atomic.h>
+#include <asm/percpu.h>
 
-extern unsigned char boot_cpu_id;
-
-extern cpumask_t phys_cpu_present_map;
-#define cpu_possible_map phys_cpu_present_map
+DECLARE_PER_CPU(cpumask_t, cpu_sibling_map);
+extern cpumask_t cpu_core_map[NR_CPUS];
+extern int sparc64_multi_core;
 
 /*
  *	General functions that each host system must provide.
  */
 
-static __inline__ int hard_smp_processor_id(void)
-{
-	if (tlb_type == cheetah || tlb_type == cheetah_plus) {
-		unsigned long cfg, ver;
-		__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
-		if ((ver >> 32) == 0x003e0016) {
-			__asm__ __volatile__("ldxa [%%g0] %1, %0"
-					     : "=r" (cfg)
-					     : "i" (ASI_JBUS_CONFIG));
-			return ((cfg >> 17) & 0x1f);
-		} else {
-			__asm__ __volatile__("ldxa [%%g0] %1, %0"
-					     : "=r" (cfg)
-					     : "i" (ASI_SAFARI_CONFIG));
-			return ((cfg >> 17) & 0x3ff);
-		}
-	} else if (this_is_starfire != 0) {
-		return starfire_hard_smp_processor_id();
-	} else {
-		unsigned long upaconfig;
-		__asm__ __volatile__("ldxa	[%%g0] %1, %0"
-				     : "=r" (upaconfig)
-				     : "i" (ASI_UPA_CONFIG));
-		return ((upaconfig >> 17) & 0x1f);
-	}
-}
+extern int hard_smp_processor_id(void);
+#define raw_smp_processor_id() (current_thread_info()->cpu)
 
-#define smp_processor_id() (current_thread_info()->cpu)
+extern void smp_fill_in_sib_core_maps(void);
+extern void cpu_play_dead(void);
+
+#ifdef CONFIG_HOTPLUG_CPU
+extern int __cpu_disable(void);
+extern void __cpu_die(unsigned int cpu);
+#endif
 
 #endif /* !(__ASSEMBLY__) */
 
-#endif /* !(CONFIG_SMP) */
+#else
 
-#define NO_PROC_ID		0xFF
+#define hard_smp_processor_id()		0
+#define smp_fill_in_sib_core_maps() do { } while (0)
+
+#endif /* !(CONFIG_SMP) */
 
 #endif /* !(_SPARC64_SMP_H) */

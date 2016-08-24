@@ -1,14 +1,13 @@
 /* Minimal serial functions needed to send messages out the serial
  * port on the MBX console.
  *
- * The MBX uxes SMC1 for the serial port.  We reset the port and use
+ * The MBX uses SMC1 for the serial port.  We reset the port and use
  * only the first BD that EPPC-Bug set up as a character FIFO.
  *
  * Later versions (at least 1.4, maybe earlier) of the MBX EPPC-Bug
  * use COM1 instead of SMC1 as the console port.  This kinda sucks
  * for the rest of the kernel, so here we force the use of SMC1 again.
  */
-#include <linux/config.h>
 #include <linux/types.h>
 #include <asm/uaccess.h>
 #include <asm/mpc8xx.h>

@@ -10,6 +10,8 @@ typedef unsigned long cputime_t;
 #define cputime_max			((~0UL >> 1) - 1)
 #define cputime_add(__a, __b)		((__a) +  (__b))
 #define cputime_sub(__a, __b)		((__a) -  (__b))
+#define cputime_div(__a, __n)		((__a) /  (__n))
+#define cputime_halve(__a)		((__a) >> 1)
 #define cputime_eq(__a, __b)		((__a) == (__b))
 #define cputime_gt(__a, __b)		((__a) >  (__b))
 #define cputime_ge(__a, __b)		((__a) >= (__b))
@@ -22,7 +24,9 @@ typedef u64 cputime64_t;
 
 #define cputime64_zero (0ULL)
 #define cputime64_add(__a, __b)		((__a) + (__b))
+#define cputime64_sub(__a, __b)		((__a) - (__b))
 #define cputime64_to_jiffies64(__ct)	(__ct)
+#define jiffies64_to_cputime64(__jif)	(__jif)
 #define cputime_to_cputime64(__ct)	((u64) __ct)
 
 

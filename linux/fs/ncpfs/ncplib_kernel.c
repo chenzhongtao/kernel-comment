@@ -10,7 +10,6 @@
  */
 
 
-#include <linux/config.h>
 
 #include "ncplib_kernel.h"
 
@@ -291,7 +290,7 @@ ncp_make_closed(struct inode *inode)
 	int err;
 
 	err = 0;
-	down(&NCP_FINFO(inode)->open_sem);	
+	mutex_lock(&NCP_FINFO(inode)->open_mutex);
 	if (atomic_read(&NCP_FINFO(inode)->opened) == 1) {
 		atomic_set(&NCP_FINFO(inode)->opened, 0);
 		err = ncp_close_file(NCP_SERVER(inode), NCP_FINFO(inode)->file_handle);
@@ -301,7 +300,7 @@ ncp_make_closed(struct inode *inode)
 				NCP_FINFO(inode)->volNumber,
 				NCP_FINFO(inode)->dirEntNum, err);
 	}
-	up(&NCP_FINFO(inode)->open_sem);
+	mutex_unlock(&NCP_FINFO(inode)->open_mutex);
 	return err;
 }
 
@@ -727,9 +726,6 @@ ncp_del_file_or_subdir2(struct ncp_server *server,
 	__le32 dirent;
 
 	if (!inode) {
-#ifdef CONFIG_NCPFS_DEBUGDENTRY
-		PRINTK("ncpfs: ncpdel2: dentry->d_inode == NULL\n");
-#endif
 		return 0xFF;	/* Any error */
 	}
 	volnum = NCP_FINFO(inode)->volNumber;
@@ -845,46 +841,6 @@ out:
 	return result;
 }
 
-/* Search for everything */
-int ncp_search_for_file_or_subdir(struct ncp_server *server,
-				  struct nw_search_sequence *seq,
-				  struct nw_info_struct *target)
-{
-	int result;
-
-	ncp_init_request(server);
-	ncp_add_byte(server, 3);	/* subfunction */
-	ncp_add_byte(server, server->name_space[seq->volNumber]);
-	ncp_add_byte(server, 0);	/* data stream (???) */
-	ncp_add_word(server, cpu_to_le16(0x8006));	/* Search attribs */
-	ncp_add_dword(server, RIM_ALL);		/* return info mask */
-	ncp_add_mem(server, seq, 9);
-#ifdef CONFIG_NCPFS_NFS_NS
-	if (server->name_space[seq->volNumber] == NW_NS_NFS) {
-		ncp_add_byte(server, 0);	/* 0 byte pattern */
-	} else 
-#endif
-	{
-		ncp_add_byte(server, 2);	/* 2 byte pattern */
-		ncp_add_byte(server, 0xff);	/* following is a wildcard */
-		ncp_add_byte(server, '*');
-	}
-	
-	if ((result = ncp_request(server, 87)) != 0)
-		goto out;
-	memcpy(seq, ncp_reply_data(server, 0), sizeof(*seq));
-	ncp_extract_file_info(ncp_reply_data(server, 10), target);
-
-	ncp_unlock_server(server);
-	
-	result = ncp_obtain_nfs_info(server, target);
-	return result;
-
-out:
-	ncp_unlock_server(server);
-	return result;
-}
-
 int ncp_search_for_fileset(struct ncp_server *server,
 			   struct nw_search_sequence *seq,
 			   int* more,
@@ -933,7 +889,7 @@ int ncp_search_for_fileset(struct ncp_server *server,
 	return 0;
 }
 
-int
+static int
 ncp_RenameNSEntry(struct ncp_server *server,
 		  struct inode *old_dir, char *old_name, __le16 old_type,
 		  struct inode *new_dir, char *new_name)

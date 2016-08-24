@@ -1,6 +1,4 @@
 /*
- * arch/ppc/kernel/ppc4xx_dma.c
- *
  * IBM PPC4xx DMA engine core library
  *
  * Copyright 2000-2004 MontaVista Software Inc.
@@ -21,7 +19,6 @@
  * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/miscdevice.h>
@@ -30,6 +27,7 @@
 
 #include <asm/system.h>
 #include <asm/io.h>
+#include <asm/dma.h>
 #include <asm/ppc4xx_dma.h>
 
 ppc_dma_ch_t dma_channels[MAX_PPC4xx_DMA_CHANNELS];
@@ -243,7 +241,7 @@ ppc4xx_set_dma_count(unsigned int dmanr, unsigned int count)
 }
 
 /*
- *   Returns the number of bytes left to be transfered.
+ *   Returns the number of bytes left to be transferred.
  *   After a DMA transfer, this should return zero.
  *   Reading this while a DMA transfer is still in progress will return
  *   unpredictable results.
@@ -620,6 +618,7 @@ ppc4xx_clr_dma_status(unsigned int dmanr)
 	return DMA_STATUS_GOOD;
 }
 
+#ifdef CONFIG_PPC4xx_EDMA
 /*
  * Enables the burst on the channel (BTEN bit in the control/count register)
  * Note:
@@ -685,6 +684,11 @@ ppc4xx_set_burst_size(unsigned int dmanr, unsigned int bsize)
 	return DMA_STATUS_GOOD;
 }
 
+EXPORT_SYMBOL(ppc4xx_enable_burst);
+EXPORT_SYMBOL(ppc4xx_disable_burst);
+EXPORT_SYMBOL(ppc4xx_set_burst_size);
+#endif /* CONFIG_PPC4xx_EDMA */
+
 EXPORT_SYMBOL(ppc4xx_init_dma_channel);
 EXPORT_SYMBOL(ppc4xx_get_channel_config);
 EXPORT_SYMBOL(ppc4xx_set_channel_priority);
@@ -703,6 +707,4 @@ EXPORT_SYMBOL(ppc4xx_enable_dma_interrupt);
 EXPORT_SYMBOL(ppc4xx_disable_dma_interrupt);
 EXPORT_SYMBOL(ppc4xx_get_dma_status);
 EXPORT_SYMBOL(ppc4xx_clr_dma_status);
-EXPORT_SYMBOL(ppc4xx_enable_burst);
-EXPORT_SYMBOL(ppc4xx_disable_burst);
-EXPORT_SYMBOL(ppc4xx_set_burst_size);
+

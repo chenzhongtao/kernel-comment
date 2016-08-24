@@ -10,7 +10,6 @@
 #ifndef _ASM_ADDRSPACE_H
 #define _ASM_ADDRSPACE_H
 
-#include <linux/config.h>
 #include <spaces.h>
 
 /*
@@ -20,10 +19,16 @@
 #define _ATYPE_
 #define _ATYPE32_
 #define _ATYPE64_
+#define _CONST64_(x)	x
 #else
 #define _ATYPE_		__PTRDIFF_TYPE__
 #define _ATYPE32_	int
-#define _ATYPE64_	long long
+#define _ATYPE64_	__s64
+#ifdef CONFIG_64BIT
+#define _CONST64_(x)	x ## L
+#else
+#define _CONST64_(x)	x ## LL
+#endif
 #endif
 
 /*
@@ -45,24 +50,25 @@
 /*
  * Returns the physical address of a CKSEGx / XKPHYS address
  */
-#define CPHYSADDR(a)		((_ACAST32_ (a)) & 0x1fffffff)
-#define XPHYSADDR(a)            ((_ACAST64_ (a)) & 0x000000ffffffffff)
+#define CPHYSADDR(a)		((_ACAST32_(a)) & 0x1fffffff)
+#define XPHYSADDR(a)            ((_ACAST64_(a)) &			\
+				 _CONST64_(0x000000ffffffffff))
 
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 
 /*
  * Memory segments (64bit kernel mode addresses)
  * The compatibility segments use the full 64-bit sign extended value.  Note
  * the R8000 doesn't have them so don't reference these in generic MIPS code.
  */
-#define XKUSEG			0x0000000000000000
-#define XKSSEG			0x4000000000000000
-#define XKPHYS			0x8000000000000000
-#define XKSEG			0xc000000000000000
-#define CKSEG0			0xffffffff80000000
-#define CKSEG1			0xffffffffa0000000
-#define CKSSEG			0xffffffffc0000000
-#define CKSEG3			0xffffffffe0000000
+#define XKUSEG			_CONST64_(0x0000000000000000)
+#define XKSSEG			_CONST64_(0x4000000000000000)
+#define XKPHYS			_CONST64_(0x8000000000000000)
+#define XKSEG			_CONST64_(0xc000000000000000)
+#define CKSEG0			_CONST64_(0xffffffff80000000)
+#define CKSEG1			_CONST64_(0xffffffffa0000000)
+#define CKSSEG			_CONST64_(0xffffffffc0000000)
+#define CKSEG3			_CONST64_(0xffffffffe0000000)
 
 #define CKSEG0ADDR(a)		(CPHYSADDR(a) | CKSEG0)
 #define CKSEG1ADDR(a)		(CPHYSADDR(a) | CKSEG1)
@@ -117,57 +123,18 @@
 /*
  * 64-bit address conversions
  */
-#define PHYS_TO_XKSEG_UNCACHED(p)	PHYS_TO_XKPHYS(K_CALG_UNCACHED,(p))
-#define PHYS_TO_XKSEG_CACHED(p)		PHYS_TO_XKPHYS(K_CALG_COH_SHAREABLE,(p))
+#define PHYS_TO_XKSEG_UNCACHED(p)	PHYS_TO_XKPHYS(K_CALG_UNCACHED, (p))
+#define PHYS_TO_XKSEG_CACHED(p)		PHYS_TO_XKPHYS(K_CALG_COH_SHAREABLE, (p))
 #define XKPHYS_TO_PHYS(p)		((p) & TO_PHYS_MASK)
-#define PHYS_TO_XKPHYS(cm,a)		(0x8000000000000000 | ((cm)<<59) | (a))
-
-#if defined (CONFIG_CPU_R4300)						\
-    || defined (CONFIG_CPU_R4X00)					\
-    || defined (CONFIG_CPU_R5000)					\
-    || defined (CONFIG_CPU_NEVADA)					\
-    || defined (CONFIG_CPU_TX49XX)					\
-    || defined (CONFIG_CPU_MIPS64)
-#define	KUSIZE			0x0000010000000000	/* 2^^40 */
-#define	KUSIZE_64		0x0000010000000000	/* 2^^40 */
-#define	K0SIZE			0x0000001000000000	/* 2^^36 */
-#define	K1SIZE			0x0000001000000000	/* 2^^36 */
-#define	K2SIZE			0x000000ff80000000
-#define	KSEGSIZE		0x000000ff80000000	/* max syssegsz */
-#define TO_PHYS_MASK		0x0000000fffffffff	/* 2^^36 - 1 */
-#endif
-
-#if defined (CONFIG_CPU_R8000)
-/* We keep KUSIZE consistent with R4000 for now (2^^40) instead of (2^^48) */
-#define	KUSIZE			0x0000010000000000	/* 2^^40 */
-#define	KUSIZE_64		0x0000010000000000	/* 2^^40 */
-#define	K0SIZE			0x0000010000000000	/* 2^^40 */
-#define	K1SIZE			0x0000010000000000	/* 2^^40 */
-#define	K2SIZE			0x0001000000000000
-#define	KSEGSIZE		0x0000010000000000	/* max syssegsz */
-#define TO_PHYS_MASK		0x000000ffffffffff	/* 2^^40 - 1 */
-#endif
-
-#if defined (CONFIG_CPU_R10000)
-#define	KUSIZE			0x0000010000000000	/* 2^^40 */
-#define	KUSIZE_64		0x0000010000000000	/* 2^^40 */
-#define	K0SIZE			0x0000010000000000	/* 2^^40 */
-#define	K1SIZE			0x0000010000000000	/* 2^^40 */
-#define	K2SIZE			0x00000fff80000000
-#define	KSEGSIZE		0x00000fff80000000	/* max syssegsz */
-#define TO_PHYS_MASK		0x000000ffffffffff	/* 2^^40 - 1 */
-#endif
+#define PHYS_TO_XKPHYS(cm, a)		(_CONST64_(0x8000000000000000) | \
+					 ((cm)<<59) | (a))
 
 /*
- * Further names for SGI source compatibility.  These are stolen from
- * IRIX's <sys/mips_addrspace.h>.
+ * The ultimate limited of the 64-bit MIPS architecture:  2 bits for selecting
+ * the region, 3 bits for the CCA mode.  This leaves 59 bits of which the
+ * R8000 implements most with its 48-bit physical address space.
  */
-#define KUBASE			0
-#define KUSIZE_32		0x0000000080000000	/* KUSIZE
-							   for a 32 bit proc */
-#define K0BASE_EXL_WR		0xa800000000000000	/* exclusive on write */
-#define K0BASE_NONCOH		0x9800000000000000	/* noncoherent */
-#define K0BASE_EXL		0xa000000000000000	/* exclusive */
+#define TO_PHYS_MASK	_CONST64_(0x07ffffffffffffff)	/* 2^^59 - 1 */
 
 #ifndef CONFIG_CPU_R8000
 
@@ -176,7 +143,7 @@
  * in order to catch bugs in the source code.
  */
 
-#define COMPAT_K1BASE32		0xffffffffa0000000
+#define COMPAT_K1BASE32		_CONST64_(0xffffffffa0000000)
 #define PHYS_TO_COMPATK1(x)	((x) | COMPAT_K1BASE32) /* 32-bit compat k1 */
 
 #endif

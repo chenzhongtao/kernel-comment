@@ -1,5 +1,5 @@
 /*
- * sound/v_midi.c
+ * sound/oss/v_midi.c
  *
  * The low level driver for the Sound Blaster DS chips.
  *
@@ -38,8 +38,6 @@ static void *midi_mem = NULL;
  * future version of this driver.
  */
 
-
-void            (*midi_input_intr) (int dev, unsigned char data);
 
 static int v_midi_open (int dev, int mode,
 	      void            (*input) (int dev, unsigned char data),
@@ -185,7 +183,7 @@ static void __init attach_v_midi (struct address_info *hw_config)
 		return;
 	}
 	
-	m=(struct vmidi_memory *)kmalloc(sizeof(struct vmidi_memory), GFP_KERNEL);
+	m = kmalloc(sizeof(struct vmidi_memory), GFP_KERNEL);
 	if (m == NULL)
 	{
 		printk(KERN_WARNING "Loopback MIDI: Failed to allocate memory\n");

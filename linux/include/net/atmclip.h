@@ -7,7 +7,6 @@
 #define _ATMCLIP_H
 
 #include <linux/netdevice.h>
-#include <linux/skbuff.h>
 #include <linux/atm.h>
 #include <linux/atmdev.h>
 #include <linux/atmarp.h>
@@ -18,6 +17,7 @@
 #define CLIP_VCC(vcc) ((struct clip_vcc *) ((vcc)->user_back))
 #define NEIGH2ENTRY(neigh) ((struct atmarp_entry *) (neigh)->primary_key)
 
+struct sk_buff;
 
 struct clip_vcc {
 	struct atm_vcc	*vcc;		/* VCC descriptor */
@@ -36,7 +36,7 @@ struct clip_vcc {
 
 
 struct atmarp_entry {
-	u32		ip;		/* IP address */
+	__be32		ip;		/* IP address */
 	struct clip_vcc	*vccs;		/* active VCCs; NULL if resolution is
 					   pending */
 	unsigned long	expires;	/* entry expiration time */

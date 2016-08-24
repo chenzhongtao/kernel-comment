@@ -93,7 +93,7 @@ irnet_ctrl_write(irnet_socket *	ap,
 
       /* Check if we recognised one of the known command
        * We can't use "switch" with strings, so hack with "continue" */
-      
+
       /* First command : name -> Requested IrDA nickname */
       if(!strncmp(start, "name", 4))
 	{
@@ -171,18 +171,44 @@ irnet_ctrl_write(irnet_socket *	ap,
 #ifdef INITIAL_DISCOVERY
 /*------------------------------------------------------------------*/
 /*
- * Function irnet_read_discovery_log (self)
+ * Function irnet_get_discovery_log (self)
+ *
+ *    Query the content on the discovery log if not done
+ *
+ * This function query the current content of the discovery log
+ * at the startup of the event channel and save it in the internal struct.
+ */
+static void
+irnet_get_discovery_log(irnet_socket *	ap)
+{
+  __u16		mask = irlmp_service_to_hint(S_LAN);
+
+  /* Ask IrLMP for the current discovery log */
+  ap->discoveries = irlmp_get_discoveries(&ap->disco_number, mask,
+					  DISCOVERY_DEFAULT_SLOTS);
+
+  /* Check if the we got some results */
+  if(ap->discoveries == NULL)
+    ap->disco_number = -1;
+
+  DEBUG(CTRL_INFO, "Got the log (0x%p), size is %d\n",
+	ap->discoveries, ap->disco_number);
+}
+
+/*------------------------------------------------------------------*/
+/*
+ * Function irnet_read_discovery_log (self, event)
  *
  *    Read the content on the discovery log
  *
  * This function dump the current content of the discovery log
  * at the startup of the event channel.
- * Return 1 if written on the control channel...
+ * Return 1 if wrote an event on the control channel...
  *
  * State of the ap->disco_XXX variables :
- *	at socket creation :	disco_index = 0 ; disco_number = 0
- *	while reading :		disco_index = X ; disco_number = Y
- *	After reading :		disco_index = Y ; disco_number = -1
+ * Socket creation :  discoveries = NULL ; disco_index = 0 ; disco_number = 0
+ * While reading :    discoveries = ptr  ; disco_index = X ; disco_number = Y
+ * After reading :    discoveries = NULL ; disco_index = Y ; disco_number = -1
  */
 static inline int
 irnet_read_discovery_log(irnet_socket *	ap,
@@ -201,19 +227,8 @@ irnet_read_discovery_log(irnet_socket *	ap,
     }
 
   /* Test if it's the first time and therefore we need to get the log */
-  if(ap->disco_index == 0)
-    {
-      __u16		mask = irlmp_service_to_hint(S_LAN);
-
-      /* Ask IrLMP for the current discovery log */
-      ap->discoveries = irlmp_get_discoveries(&ap->disco_number, mask,
-					      DISCOVERY_DEFAULT_SLOTS);
-      /* Check if the we got some results */
-      if(ap->discoveries == NULL)
-	ap->disco_number = -1;
-      DEBUG(CTRL_INFO, "Got the log (0x%p), size is %d\n",
-	    ap->discoveries, ap->disco_number);
-    }
+  if(ap->discoveries == NULL)
+    irnet_get_discovery_log(ap);
 
   /* Check if we have more item to dump */
   if(ap->disco_index < ap->disco_number)
@@ -417,7 +432,14 @@ irnet_ctrl_poll(irnet_socket *	ap,
     mask |= POLLIN | POLLRDNORM;
 #ifdef INITIAL_DISCOVERY
   if(ap->disco_number != -1)
-    mask |= POLLIN | POLLRDNORM;
+    {
+      /* Test if it's the first time and therefore we need to get the log */
+      if(ap->discoveries == NULL)
+	irnet_get_discovery_log(ap);
+      /* Recheck */
+      if(ap->disco_number != -1)
+	mask |= POLLIN | POLLRDNORM;
+    }
 #endif /* INITIAL_DISCOVERY */
 
   DEXIT(CTRL_TRACE, " - mask=0x%X\n", mask);
@@ -454,11 +476,10 @@ dev_irnet_open(struct inode *	inode,
 #endif /* SECURE_DEVIRNET */
 
   /* Allocate a private structure for this IrNET instance */
-  ap = kmalloc(sizeof(*ap), GFP_KERNEL);
+  ap = kzalloc(sizeof(*ap), GFP_KERNEL);
   DABORT(ap == NULL, -ENOMEM, FS_ERROR, "Can't allocate struct irnet...\n");
 
   /* initialize the irnet structure */
-  memset(ap, 0, sizeof(*ap));
   ap->file = file;
 
   /* PPP channel setup */
@@ -710,20 +731,30 @@ dev_irnet_ioctl(struct inode *	inode,
       /* Get termios */
     case TCGETS:
       DEBUG(FS_INFO, "Get termios.\n");
+#ifndef TCGETS2
       if(kernel_termios_to_user_termios((struct termios __user *)argp, &ap->termios))
 	break;
+#else
+      if(kernel_termios_to_user_termios_1((struct termios __user *)argp, &ap->termios))
+	break;
+#endif
       err = 0;
       break;
       /* Set termios */
     case TCSETSF:
       DEBUG(FS_INFO, "Set termios.\n");
+#ifndef TCGETS2
       if(user_termios_to_kernel_termios(&ap->termios, (struct termios __user *)argp))
 	break;
+#else
+      if(user_termios_to_kernel_termios_1(&ap->termios, (struct termios __user *)argp))
+	break;
+#endif
       err = 0;
       break;
 
       /* Set DTR/RTS */
-    case TIOCMBIS: 
+    case TIOCMBIS:
     case TIOCMBIC:
       /* Set exclusive/non-exclusive mode */
     case TIOCEXCL:
@@ -920,7 +951,7 @@ ppp_irnet_send(struct ppp_channel *	chan,
   ret = irttp_data_request(self->tsap, skb);
   if(ret < 0)
     {
-      /*   
+      /*
        * > IrTTPs tx queue is full, so we just have to
        * > drop the frame! You might think that we should
        * > just return -1 and don't deallocate the frame,
@@ -928,7 +959,7 @@ ppp_irnet_send(struct ppp_channel *	chan,
        * > we have replaced the original skb with a new
        * > one with larger headroom, and that would really
        * > confuse do_dev_queue_xmit() in dev.c! I have
-       * > tried :-) DB 
+       * > tried :-) DB
        * Correction : we verify the flow control above (self->tx_flow),
        * so we come here only if IrTTP doesn't like the packet (empty,
        * too large, IrTTP not connected). In those rare cases, it's ok
@@ -1085,7 +1116,7 @@ ppp_irnet_cleanup(void)
 /*
  * Module main entry point
  */
-int __init
+static int __init
 irnet_init(void)
 {
   int err;
@@ -1115,6 +1146,6 @@ irnet_cleanup(void)
 module_init(irnet_init);
 module_exit(irnet_cleanup);
 MODULE_AUTHOR("Jean Tourrilhes <jt@hpl.hp.com>");
-MODULE_DESCRIPTION("IrNET : Synchronous PPP over IrDA"); 
+MODULE_DESCRIPTION("IrNET : Synchronous PPP over IrDA");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_CHARDEV(10, 187);

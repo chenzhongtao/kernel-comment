@@ -1,8 +1,6 @@
 #ifndef _PARISC_PDC_H
 #define _PARISC_PDC_H
 
-#include <linux/config.h>
-
 /*
  *	PDC return values ...
  *	All PDC calls return a subset of these errors. 
@@ -20,7 +18,6 @@
 #define PDC_INVALID_ARG		-10	/* Called with an invalid argument */
 #define PDC_BUS_POW_WARN	-12	/* Call could not complete in allowed power budget */
 #define PDC_NOT_NARROW		-17	/* Narrow mode not supported	*/
-
 
 /*
  *	PDC entry points...
@@ -51,6 +48,12 @@
 #define PDC_MODEL_DISPEC	5	/* disable specific option	*/
 #define PDC_MODEL_CPU_ID	6	/* returns cpu-id (only newer machines!) */
 #define PDC_MODEL_CAPABILITIES	7	/* returns OS32/OS64-flags	*/
+/* Values for PDC_MODEL_CAPABILITIES non-equivalent virtual aliasing support */
+#define  PDC_MODEL_IOPDIR_FDC		(1 << 2)
+#define  PDC_MODEL_NVA_MASK		(3 << 4)
+#define  PDC_MODEL_NVA_SUPPORTED	(0 << 4)
+#define  PDC_MODEL_NVA_SLOW		(1 << 4)
+#define  PDC_MODEL_NVA_UNSUPPORTED	(3 << 4)
 #define PDC_MODEL_GET_BOOT__OP	8	/* returns boot test options	*/
 #define PDC_MODEL_SET_BOOT__OP	9	/* set boot test options	*/
 
@@ -92,7 +95,7 @@
 #define PDC_TOD		9		/* time-of-day clock (TOD)	*/
 #define PDC_TOD_READ		0	/* read TOD			*/
 #define PDC_TOD_WRITE		1	/* write TOD			*/
-#define PDC_TOD_ITIMER		2	/* calibrate Interval Timer (CR16) */
+
 
 #define PDC_STABLE	10		/* stable storage (sprockets)	*/
 #define PDC_STABLE_READ		0
@@ -143,15 +146,6 @@
 #define PDC_MEM_RET_BUF_SIZE_SMALL	1
 #define PDC_MEM_RET_PDT_FULL		-11
 #define PDC_MEM_RET_INVALID_PHYSICAL_LOCATION ~0ULL
-
-#ifndef __ASSEMBLY__
-typedef struct {
-    unsigned long long	baseAddr;
-    unsigned int	pages;
-    unsigned int	reserved;
-} MemAddrTable_t;
-#endif
-
 
 #define PDC_PSW		21		/* Get/Set default System Mask  */
 #define PDC_PSW_MASK		0	/* Return mask                  */
@@ -275,16 +269,52 @@ typedef struct {
 #define PDC_LINK_PCI_ENTRY_POINTS	0  /* list (Arg1) = 0 */
 #define PDC_LINK_USB_ENTRY_POINTS	1  /* list (Arg1) = 1 */
 
+/* cl_class
+ * page 3-33 of IO-Firmware ARS
+ * IODC ENTRY_INIT(Search first) RET[1]
+ */
+#define	CL_NULL		0	/* invalid */
+#define	CL_RANDOM	1	/* random access (as disk) */
+#define	CL_SEQU		2	/* sequential access (as tape) */
+#define	CL_DUPLEX	7	/* full-duplex point-to-point (RS-232, Net) */
+#define	CL_KEYBD	8	/* half-duplex console (HIL Keyboard) */
+#define	CL_DISPL	9	/* half-duplex console (display) */
+#define	CL_FC		10	/* FiberChannel access media */
+
+/* IODC ENTRY_INIT() */
+#define ENTRY_INIT_SRCH_FRST	2
+#define ENTRY_INIT_SRCH_NEXT	3
+#define ENTRY_INIT_MOD_DEV	4
+#define ENTRY_INIT_DEV		5
+#define ENTRY_INIT_MOD		6
+#define ENTRY_INIT_MSG		9
+
+/* IODC ENTRY_IO() */
+#define ENTRY_IO_BOOTIN		0
+#define ENTRY_IO_BOOTOUT	1
+#define ENTRY_IO_CIN		2
+#define ENTRY_IO_COUT		3
+#define ENTRY_IO_CLOSE		4
+#define ENTRY_IO_GETMSG		9
+#define ENTRY_IO_BBLOCK_IN	16
+#define ENTRY_IO_BBLOCK_OUT	17
+
+/* IODC ENTRY_SPA() */
+
+/* IODC ENTRY_CONFIG() */
+
+/* IODC ENTRY_TEST() */
+
+/* IODC ENTRY_TLB() */
 
 /* constants for OS (NVM...) */
 #define OS_ID_NONE		0	/* Undefined OS ID	*/
 #define OS_ID_HPUX		1	/* HP-UX OS		*/
-#define OS_ID_LINUX		OS_ID_HPUX /* just use the same value as hpux */
 #define OS_ID_MPEXL		2	/* MPE XL OS		*/
 #define OS_ID_OSF		3	/* OSF OS		*/
 #define OS_ID_HPRT		4	/* HP-RT OS		*/
 #define OS_ID_NOVEL		5	/* NOVELL OS		*/
-#define OS_ID_NT		6	/* NT OS		*/
+#define OS_ID_LINUX		6	/* Linux		*/
 
 
 /* constants for PDC_CHASSIS */
@@ -297,7 +327,13 @@ typedef struct {
 #define OSTAT_RUN		6
 #define OSTAT_ON		7
 
-#ifndef __ASSEMBLY__
+/* Page Zero constant offsets used by the HPMC handler */
+#define BOOT_CONSOLE_HPA_OFFSET  0x3c0
+#define BOOT_CONSOLE_SPA_OFFSET  0x3c4
+#define BOOT_CONSOLE_PATH_OFFSET 0x3a8
+
+#if !defined(__ASSEMBLY__)
+#ifdef __KERNEL__
 
 #include <linux/types.h>
 
@@ -333,17 +369,9 @@ struct pdc_model {		/* for PDC_MODEL */
 	unsigned long curr_key;
 };
 
-/* Values for PDC_MODEL_CAPABILITES non-equivalent virtual aliasing support */
-
-#define PDC_MODEL_IOPDIR_FDC            (1 << 2)        /* see sba_iommu.c */
-#define PDC_MODEL_NVA_MASK		(3 << 4)
-#define PDC_MODEL_NVA_SUPPORTED		(0 << 4)
-#define PDC_MODEL_NVA_SLOW		(1 << 4)
-#define PDC_MODEL_NVA_UNSUPPORTED	(3 << 4)
-
 struct pdc_cache_cf {		/* for PDC_CACHE  (I/D-caches) */
     unsigned long
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 		cc_padW:32,
 #endif
 		cc_alias: 4,	/* alias boundaries for virtual addresses   */
@@ -353,13 +381,13 @@ struct pdc_cache_cf {		/* for PDC_CACHE  (I/D-caches) */
 		cc_wt	: 1,	/* 0 = WT-Dcache, 1 = WB-Dcache */
 		cc_sh	: 2,	/* 0 = separate I/D-cache, else shared I/D-cache */
 		cc_cst  : 3,	/* 0 = incoherent D-cache, 1=coherent D-cache */
-		cc_pad1 : 5,	/* reserved */
-		cc_assoc: 8;	/* associativity of I/D-cache */
+		cc_pad1 : 10,	/* reserved */
+		cc_hv   : 3;	/* hversion dependent */
 };
 
 struct pdc_tlb_cf {		/* for PDC_CACHE (I/D-TLB's) */
     unsigned long tc_pad0:12,	/* reserved */
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 		tc_padW:32,
 #endif
 		tc_sh	: 2,	/* 0 = separate I/D-TLB, else shared I/D-TLB */
@@ -447,7 +475,7 @@ struct pdc_btlb_info {	/* PDC_BLOCK_TLB, return of PDC_BTLB_INFO */
 
 #endif /* !CONFIG_PA20 */
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 struct pdc_memory_table_raddr { /* PDC_MEM/PDC_MEM_TABLE (return info) */
 	unsigned long entries_returned;
 	unsigned long entries_total;
@@ -458,7 +486,7 @@ struct pdc_memory_table {       /* PDC_MEM/PDC_MEM_TABLE (arguments) */
 	unsigned int  pages;
 	unsigned int  reserved;
 };
-#endif /* __LP64__ */
+#endif /* CONFIG_64BIT */
 
 struct pdc_system_map_mod_info { /* PDC_SYSTEM_MAP/FIND_MODULE */
 	unsigned long mod_addr;
@@ -560,14 +588,95 @@ struct pdc_hpmc_pim_20 { /* PDC_PIM */
 	__u64 fr[32];
 };
 
-#endif /* __ASSEMBLY__ */
+void pdc_console_init(void);	/* in pdc_console.c */
+void pdc_console_restart(void);
 
-/* flags of the device_path (see below) */
+void setup_pdc(void);		/* in inventory.c */
+
+/* wrapper-functions from pdc.c */
+
+int pdc_add_valid(unsigned long address);
+int pdc_chassis_info(struct pdc_chassis_info *chassis_info, void *led_info, unsigned long len);
+int pdc_chassis_disp(unsigned long disp);
+int pdc_chassis_warn(unsigned long *warn);
+int pdc_coproc_cfg(struct pdc_coproc_cfg *pdc_coproc_info);
+int pdc_iodc_read(unsigned long *actcnt, unsigned long hpa, unsigned int index,
+		  void *iodc_data, unsigned int iodc_data_size);
+int pdc_system_map_find_mods(struct pdc_system_map_mod_info *pdc_mod_info,
+			     struct pdc_module_path *mod_path, long mod_index);
+int pdc_system_map_find_addrs(struct pdc_system_map_addr_info *pdc_addr_info,
+			      long mod_index, long addr_index);
+int pdc_model_info(struct pdc_model *model);
+int pdc_model_sysmodel(char *name);
+int pdc_model_cpuid(unsigned long *cpu_id);
+int pdc_model_versions(unsigned long *versions, int id);
+int pdc_model_capabilities(unsigned long *capabilities);
+int pdc_cache_info(struct pdc_cache_info *cache);
+int pdc_spaceid_bits(unsigned long *space_bits);
+#ifndef CONFIG_PA20
+int pdc_btlb_info(struct pdc_btlb_info *btlb);
+int pdc_mem_map_hpa(struct pdc_memory_map *r_addr, struct pdc_module_path *mod_path);
+#endif /* !CONFIG_PA20 */
+int pdc_lan_station_id(char *lan_addr, unsigned long net_hpa);
+
+int pdc_stable_read(unsigned long staddr, void *memaddr, unsigned long count);
+int pdc_stable_write(unsigned long staddr, void *memaddr, unsigned long count);
+int pdc_stable_get_size(unsigned long *size);
+int pdc_stable_verify_contents(void);
+int pdc_stable_initialize(void);
+
+int pdc_pci_irt_size(unsigned long *num_entries, unsigned long hpa);
+int pdc_pci_irt(unsigned long num_entries, unsigned long hpa, void *tbl);
+
+int pdc_get_initiator(struct hardware_path *, struct pdc_initiator *);
+int pdc_tod_read(struct pdc_tod *tod);
+int pdc_tod_set(unsigned long sec, unsigned long usec);
+
+#ifdef CONFIG_64BIT
+int pdc_mem_mem_table(struct pdc_memory_table_raddr *r_addr,
+		struct pdc_memory_table *tbl, unsigned long entries);
+#endif
+
+void set_firmware_width(void);
+int pdc_do_firm_test_reset(unsigned long ftc_bitmap);
+int pdc_do_reset(void);
+int pdc_soft_power_info(unsigned long *power_reg);
+int pdc_soft_power_button(int sw_control);
+void pdc_io_reset(void);
+void pdc_io_reset_devices(void);
+int pdc_iodc_getc(void);
+int pdc_iodc_print(unsigned char *str, unsigned count);
+void pdc_printf(const char *fmt, ...);
+
+void pdc_emergency_unlock(void);
+int pdc_sti_call(unsigned long func, unsigned long flags,
+                 unsigned long inptr, unsigned long outputr,
+                 unsigned long glob_cfg);
+
+static inline char * os_id_to_string(u16 os_id) {
+	switch(os_id) {
+	case OS_ID_NONE:	return "No OS";
+	case OS_ID_HPUX:	return "HP-UX";
+	case OS_ID_MPEXL:	return "MPE-iX";
+	case OS_ID_OSF:		return "OSF";
+	case OS_ID_HPRT:	return "HP-RT";
+	case OS_ID_NOVEL:	return "Novell Netware";
+	case OS_ID_LINUX:	return "Linux";
+	default:	return "Unknown";
+	}
+}
+
+#endif /* __KERNEL__ */
+
+#define PAGE0   ((struct zeropage *)__PAGE_OFFSET)
+
+/* DEFINITION OF THE ZERO-PAGE (PAG0) */
+/* based on work by Jason Eckhardt (jason@equator.com) */
+
+/* flags of the device_path */
 #define	PF_AUTOBOOT	0x80
 #define	PF_AUTOSEARCH	0x40
 #define	PF_TIMER	0x0F
-
-#ifndef __ASSEMBLY__
 
 struct device_path {		/* page 1-69 */
 	unsigned char flags;	/* flags see above! */
@@ -587,63 +696,6 @@ struct pz_device {
 	short	pad;		/* reserved */
 	unsigned short cl_class;/* see below */
 } __attribute__((aligned(8))) ;
-
-#endif /* __ASSEMBLY__ */
-
-/* cl_class
- * page 3-33 of IO-Firmware ARS
- * IODC ENTRY_INIT(Search first) RET[1]
- */
-#define	CL_NULL		0	/* invalid */
-#define	CL_RANDOM	1	/* random access (as disk) */
-#define	CL_SEQU		2	/* sequential access (as tape) */
-#define	CL_DUPLEX	7	/* full-duplex point-to-point (RS-232, Net) */
-#define	CL_KEYBD	8	/* half-duplex console (HIL Keyboard) */
-#define	CL_DISPL	9	/* half-duplex console (display) */
-#define	CL_FC		10	/* FiberChannel access media */
-
-#if 0
-/* FIXME: DEVCLASS_* duplicates CL_* (above).  Delete DEVCLASS_*? */
-#define DEVCLASS_RANDOM		1
-#define DEVCLASS_SEQU		2
-#define DEVCLASS_DUPLEX		7
-#define DEVCLASS_KEYBD		8
-#define DEVCLASS_DISP		9
-#endif
-
-/* IODC ENTRY_INIT() */
-#define ENTRY_INIT_SRCH_FRST	2
-#define ENTRY_INIT_SRCH_NEXT	3
-#define ENTRY_INIT_MOD_DEV	4
-#define ENTRY_INIT_DEV		5
-#define ENTRY_INIT_MOD		6
-#define ENTRY_INIT_MSG		9
-
-/* IODC ENTRY_IO() */
-#define ENTRY_IO_BOOTIN		0
-#define ENTRY_IO_BOOTOUT	1
-#define ENTRY_IO_CIN		2
-#define ENTRY_IO_COUT		3
-#define ENTRY_IO_CLOSE		4
-#define ENTRY_IO_GETMSG		9
-#define ENTRY_IO_BBLOCK_IN	16
-#define ENTRY_IO_BBLOCK_OUT	17
-
-/* IODC ENTRY_SPA() */
-
-/* IODC ENTRY_CONFIG() */
-
-/* IODC ENTRY_TEST() */
-
-/* IODC ENTRY_TLB() */
-
-
-/* DEFINITION OF THE ZERO-PAGE (PAG0) */
-/* based on work by Jason Eckhardt (jason@equator.com) */
-
-#ifndef __ASSEMBLY__
-
-#define PAGE0   ((struct zeropage *)__PAGE_OFFSET)
 
 struct zeropage {
 	/* [0x000] initialize vectors (VEC) */
@@ -701,81 +753,6 @@ struct zeropage {
 	__u32	pad608[126];
 };
 
-#endif /* __ASSEMBLY__ */
-
-/* Page Zero constant offsets used by the HPMC handler */
-
-#define BOOT_CONSOLE_HPA_OFFSET  0x3c0
-#define BOOT_CONSOLE_SPA_OFFSET  0x3c4
-#define BOOT_CONSOLE_PATH_OFFSET 0x3a8
-
-#ifndef __ASSEMBLY__
-void pdc_console_init(void);	/* in pdc_console.c */
-void pdc_console_restart(void);
-
-void setup_pdc(void);		/* in inventory.c */
-
-/* wrapper-functions from pdc.c */
-
-int pdc_add_valid(unsigned long address);
-int pdc_chassis_info(struct pdc_chassis_info *chassis_info, void *led_info, unsigned long len);
-int pdc_chassis_disp(unsigned long disp);
-int pdc_coproc_cfg(struct pdc_coproc_cfg *pdc_coproc_info);
-int pdc_iodc_read(unsigned long *actcnt, unsigned long hpa, unsigned int index,
-		  void *iodc_data, unsigned int iodc_data_size);
-int pdc_system_map_find_mods(struct pdc_system_map_mod_info *pdc_mod_info,
-			     struct pdc_module_path *mod_path, long mod_index);
-int pdc_system_map_find_addrs(struct pdc_system_map_addr_info *pdc_addr_info, 
-			      long mod_index, long addr_index);
-int pdc_model_info(struct pdc_model *model);
-int pdc_model_sysmodel(char *name);
-int pdc_model_cpuid(unsigned long *cpu_id);
-int pdc_model_versions(unsigned long *versions, int id);
-int pdc_model_capabilities(unsigned long *capabilities);
-int pdc_cache_info(struct pdc_cache_info *cache);
-#ifndef CONFIG_PA20
-int pdc_btlb_info(struct pdc_btlb_info *btlb);
-int pdc_mem_map_hpa(struct pdc_memory_map *r_addr, struct pdc_module_path *mod_path);
-#endif /* !CONFIG_PA20 */
-int pdc_lan_station_id(char *lan_addr, unsigned long net_hpa);
-
-int pdc_stable_read(unsigned long staddr, void *memaddr, unsigned long count);
-int pdc_stable_write(unsigned long staddr, void *memaddr, unsigned long count);
-int pdc_stable_get_size(unsigned long *size);
-int pdc_stable_verify_contents(void);
-int pdc_stable_initialize(void);
-
-int pdc_pci_irt_size(unsigned long *num_entries, unsigned long hpa);
-int pdc_pci_irt(unsigned long num_entries, unsigned long hpa, void *tbl);
-
-int pdc_get_initiator(struct hardware_path *, struct pdc_initiator *);
-int pdc_tod_read(struct pdc_tod *tod);
-int pdc_tod_set(unsigned long sec, unsigned long usec);
-
-#ifdef __LP64__
-int pdc_mem_mem_table(struct pdc_memory_table_raddr *r_addr,
-		struct pdc_memory_table *tbl, unsigned long entries);
-#endif
-
-void set_firmware_width(void);
-int pdc_do_firm_test_reset(unsigned long ftc_bitmap);
-int pdc_do_reset(void);
-int pdc_soft_power_info(unsigned long *power_reg);
-int pdc_soft_power_button(int sw_control);
-void pdc_io_reset(void);
-void pdc_io_reset_devices(void);
-int pdc_iodc_getc(void);
-void pdc_iodc_putc(unsigned char c);
-void pdc_iodc_outc(unsigned char c);
-void pdc_printf(const char *fmt, ...);
-
-void pdc_emergency_unlock(void);
-int pdc_sti_call(unsigned long func, unsigned long flags,
-                 unsigned long inptr, unsigned long outputr,
-                 unsigned long glob_cfg);
-
-extern void pdc_init(void);
-
-#endif /* __ASSEMBLY__ */
+#endif /* !defined(__ASSEMBLY__) */
 
 #endif /* _PARISC_PDC_H */

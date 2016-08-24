@@ -1,114 +1,130 @@
-/* $Id: traps.c,v 1.17 2004/05/02 01:46:30 sugioka Exp $
- *
- *  linux/arch/sh/traps.c
+/*
+ * 'traps.c' handles hardware traps and faults after we have saved some
+ * state in 'entry.S'.
  *
  *  SuperH version: Copyright (C) 1999 Niibe Yutaka
  *                  Copyright (C) 2000 Philipp Rumpf
  *                  Copyright (C) 2000 David Howells
- *                  Copyright (C) 2002, 2003 Paul Mundt
+ *                  Copyright (C) 2002 - 2007 Paul Mundt
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
  */
-
-/*
- * 'Traps.c' handles hardware traps and faults after we have saved some
- * state in 'entry.S'.
- */
-#include <linux/config.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
-#include <linux/string.h>
-#include <linux/errno.h>
 #include <linux/ptrace.h>
-#include <linux/timer.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
-#include <linux/delay.h>
 #include <linux/spinlock.h>
 #include <linux/module.h>
 #include <linux/kallsyms.h>
-
+#include <linux/io.h>
+#include <linux/bug.h>
+#include <linux/debug_locks.h>
+#include <linux/kdebug.h>
+#include <linux/kexec.h>
+#include <linux/limits.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <asm/io.h>
-#include <asm/atomic.h>
-#include <asm/processor.h>
-#include <asm/sections.h>
 
 #ifdef CONFIG_SH_KGDB
 #include <asm/kgdb.h>
-#define CHK_REMOTE_DEBUG(regs)                                               \
-{                                                                            \
-  if ((kgdb_debug_hook != (kgdb_debug_hook_t *) NULL) && (!user_mode(regs))) \
-  {                                                                          \
-    (*kgdb_debug_hook)(regs);                                                \
-  }                                                                          \
+#define CHK_REMOTE_DEBUG(regs)			\
+{						\
+	if (kgdb_debug_hook && !user_mode(regs))\
+		(*kgdb_debug_hook)(regs);       \
 }
 #else
 #define CHK_REMOTE_DEBUG(regs)
 #endif
 
-#define DO_ERROR(trapnr, signr, str, name, tsk)				\
-asmlinkage void do_##name(unsigned long r4, unsigned long r5,		\
-			  unsigned long r6, unsigned long r7,		\
-			  struct pt_regs regs)				\
-{									\
-	unsigned long error_code;					\
- 									\
-	/* Check if it's a DSP instruction */				\
- 	if (is_dsp_inst(&regs)) {					\
-		/* Enable DSP mode, and restart instruction. */		\
-		regs.sr |= SR_DSP;					\
-		return;							\
-	}								\
-									\
-	asm volatile("stc	r2_bank, %0": "=r" (error_code));	\
-	local_irq_enable();						\
-	tsk->thread.error_code = error_code;				\
-	tsk->thread.trap_no = trapnr;					\
-        CHK_REMOTE_DEBUG(&regs);					\
-	force_sig(signr, tsk);						\
-	die_if_no_fixup(str,&regs,error_code);				\
-}
-
 #ifdef CONFIG_CPU_SH2
-#define TRAP_RESERVED_INST	4
-#define TRAP_ILLEGAL_SLOT_INST	6
+# define TRAP_RESERVED_INST	4
+# define TRAP_ILLEGAL_SLOT_INST	6
+# define TRAP_ADDRESS_ERROR	9
+# ifdef CONFIG_CPU_SH2A
+#  define TRAP_DIVZERO_ERROR	17
+#  define TRAP_DIVOVF_ERROR	18
+# endif
 #else
 #define TRAP_RESERVED_INST	12
 #define TRAP_ILLEGAL_SLOT_INST	13
 #endif
 
-/*
- * These constants are for searching for possible module text
- * segments.  VMALLOC_OFFSET comes from mm/vmalloc.c; MODULE_RANGE is
- * a guess of how much space is likely to be vmalloced.
- */
-#define VMALLOC_OFFSET (8*1024*1024)
-#define MODULE_RANGE (8*1024*1024)
+static void dump_mem(const char *str, unsigned long bottom, unsigned long top)
+{
+	unsigned long p;
+	int i;
 
-spinlock_t die_lock;
+	printk("%s(0x%08lx to 0x%08lx)\n", str, bottom, top);
+
+	for (p = bottom & ~31; p < top; ) {
+		printk("%04lx: ", p & 0xffff);
+
+		for (i = 0; i < 8; i++, p += 4) {
+			unsigned int val;
+
+			if (p < bottom || p >= top)
+				printk("         ");
+			else {
+				if (__get_user(val, (unsigned int __user *)p)) {
+					printk("\n");
+					return;
+				}
+				printk("%08x ", val);
+			}
+		}
+		printk("\n");
+	}
+}
+
+static DEFINE_SPINLOCK(die_lock);
 
 void die(const char * str, struct pt_regs * regs, long err)
 {
 	static int die_counter;
 
+	oops_enter();
+
 	console_verbose();
 	spin_lock_irq(&die_lock);
+	bust_spinlocks(1);
+
 	printk("%s: %04lx [#%d]\n", str, err & 0xffff, ++die_counter);
+
 	CHK_REMOTE_DEBUG(regs);
+	print_modules();
 	show_regs(regs);
+
+	printk("Process: %s (pid: %d, stack limit = %p)\n", current->comm,
+			task_pid_nr(current), task_stack_page(current) + 1);
+
+	if (!user_mode(regs) || in_interrupt())
+		dump_mem("Stack: ", regs->regs[15], THREAD_SIZE +
+			 (unsigned long)task_stack_page(current));
+
+	bust_spinlocks(0);
+	add_taint(TAINT_DIE);
 	spin_unlock_irq(&die_lock);
+
+	if (kexec_should_crash(current))
+		crash_kexec(regs);
+
+	if (in_interrupt())
+		panic("Fatal exception in interrupt");
+
+	if (panic_on_oops)
+		panic("Fatal exception");
+
+	oops_exit();
 	do_exit(SIGSEGV);
 }
 
-static inline void die_if_kernel(const char * str, struct pt_regs * regs, long err)
+static inline void die_if_kernel(const char *str, struct pt_regs *regs,
+				 long err)
 {
 	if (!user_mode(regs))
 		die(str, regs, err);
 }
-
-static int handle_unaligned_notify_count = 10;
 
 /*
  * try and fix up kernelspace address errors
@@ -119,8 +135,7 @@ static int handle_unaligned_notify_count = 10;
  */
 static int die_if_no_fixup(const char * str, struct pt_regs * regs, long err)
 {
-	if (!user_mode(regs))
-	{
+	if (!user_mode(regs)) {
 		const struct exception_table_entry *fixup;
 		fixup = search_exception_tables(regs->pc);
 		if (fixup) {
@@ -205,7 +220,7 @@ static int handle_unaligned_ins(u16 instruction, struct pt_regs *regs)
 		if (copy_to_user(dst,src,4))
 			goto fetch_fault;
 		ret = 0;
- 		break;
+		break;
 
 	case 2: /* mov.[bwl] to memory, possibly with pre-decrement */
 		if (instruction & 4)
@@ -229,7 +244,7 @@ static int handle_unaligned_ins(u16 instruction, struct pt_regs *regs)
 		if (copy_from_user(dst,src,4))
 			goto fetch_fault;
 		ret = 0;
- 		break;
+		break;
 
 	case 6:	/* mov.[bwl] from memory, possibly with post-increment */
 		src = (unsigned char*) *rm;
@@ -237,7 +252,7 @@ static int handle_unaligned_ins(u16 instruction, struct pt_regs *regs)
 			*rm += count;
 		dst = (unsigned char*) rn;
 		*(unsigned long*)dst = 0;
-		
+
 #ifdef __LITTLE_ENDIAN__
 		if (copy_from_user(dst, src, count))
 			goto fetch_fault;
@@ -248,7 +263,7 @@ static int handle_unaligned_ins(u16 instruction, struct pt_regs *regs)
 		}
 #else
 		dst += 4-count;
-		
+
 		if (copy_from_user(dst, src, count))
 			goto fetch_fault;
 
@@ -327,7 +342,8 @@ static inline int handle_unaligned_delayslot(struct pt_regs *regs)
 			return -EFAULT;
 
 		/* kernel */
-		die("delay-slot-insn faulting in handle_unaligned_delayslot", regs, 0);
+		die("delay-slot-insn faulting in handle_unaligned_delayslot",
+		    regs, 0);
 	}
 
 	return handle_unaligned_ins(instruction,regs);
@@ -349,6 +365,13 @@ static inline int handle_unaligned_delayslot(struct pt_regs *regs)
 #define SH_PC_8BIT_OFFSET(instr) ((((signed char)(instr))*2) + 4)
 #define SH_PC_12BIT_OFFSET(instr) ((((signed short)(instr<<4))>>3) + 4)
 
+/*
+ * XXX: SH-2A needs this too, but it needs an overhaul thanks to mixed 32-bit
+ * opcodes..
+ */
+#ifndef CONFIG_CPU_SH2A
+static int handle_unaligned_notify_count = 10;
+
 static int handle_unaligned_access(u16 instruction, struct pt_regs *regs)
 {
 	u_int rm;
@@ -361,8 +384,10 @@ static int handle_unaligned_access(u16 instruction, struct pt_regs *regs)
 	if (user_mode(regs) && handle_unaligned_notify_count>0) {
 		handle_unaligned_notify_count--;
 
-		printk("Fixing up unaligned userspace access in \"%s\" pid=%d pc=0x%p ins=0x%04hx\n",
-		       current->comm,current->pid,(u16*)regs->pc,instruction);
+		printk(KERN_NOTICE "Fixing up unaligned userspace access "
+		       "in \"%s\" pid=%d pc=0x%p ins=0x%04hx\n",
+		       current->comm, task_pid_nr(current),
+		       (u16 *)regs->pc, instruction);
 	}
 
 	ret = -EFAULT;
@@ -482,35 +507,61 @@ static int handle_unaligned_access(u16 instruction, struct pt_regs *regs)
  simple:
 	ret = handle_unaligned_ins(instruction,regs);
 	if (ret==0)
-		regs->pc += 2;
+		regs->pc += instruction_size(instruction);
 	return ret;
 }
+#endif /* CONFIG_CPU_SH2A */
+
+#ifdef CONFIG_CPU_HAS_SR_RB
+#define lookup_exception_vector(x)	\
+	__asm__ __volatile__ ("stc r2_bank, %0\n\t" : "=r" ((x)))
+#else
+#define lookup_exception_vector(x)	\
+	__asm__ __volatile__ ("mov r4, %0\n\t" : "=r" ((x)))
+#endif
 
 /*
- * Handle various address error exceptions
+ * Handle various address error exceptions:
+ *  - instruction address error:
+ *       misaligned PC
+ *       PC >= 0x80000000 in user mode
+ *  - data address error (read and write)
+ *       misaligned data access
+ *       access to >= 0x80000000 is user mode
+ * Unfortuntaly we can't distinguish between instruction address error
+ * and data address errors caused by read accesses.
  */
-asmlinkage void do_address_error(struct pt_regs *regs, 
+asmlinkage void do_address_error(struct pt_regs *regs,
 				 unsigned long writeaccess,
 				 unsigned long address)
 {
-	unsigned long error_code;
+	unsigned long error_code = 0;
 	mm_segment_t oldfs;
+	siginfo_t info;
+#ifndef CONFIG_CPU_SH2A
 	u16 instruction;
 	int tmp;
+#endif
 
-	asm volatile("stc       r2_bank,%0": "=r" (error_code));
+	/* Intentional ifdef */
+#ifdef CONFIG_CPU_HAS_SR_RB
+	lookup_exception_vector(error_code);
+#endif
 
 	oldfs = get_fs();
 
 	if (user_mode(regs)) {
+		int si_code = BUS_ADRERR;
+
 		local_irq_enable();
-		current->thread.error_code = error_code;
-		current->thread.trap_no = (writeaccess) ? 8 : 7;
 
 		/* bad PC is not something we can fix */
-		if (regs->pc & 1)
+		if (regs->pc & 1) {
+			si_code = BUS_ADRALN;
 			goto uspace_segv;
+		}
 
+#ifndef CONFIG_CPU_SH2A
 		set_fs(USER_DS);
 		if (copy_from_user(&instruction, (u16 *)(regs->pc), 2)) {
 			/* Argh. Fault on the instruction itself.
@@ -525,14 +576,23 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 
 		if (tmp==0)
 			return; /* sorted */
+#endif
 
-	uspace_segv:
-		printk(KERN_NOTICE "Killing process \"%s\" due to unaligned access\n", current->comm);
-		force_sig(SIGSEGV, current);
+uspace_segv:
+		printk(KERN_NOTICE "Sending SIGBUS to \"%s\" due to unaligned "
+		       "access (PC %lx PR %lx)\n", current->comm, regs->pc,
+		       regs->pr);
+
+		info.si_signo = SIGBUS;
+		info.si_errno = 0;
+		info.si_code = si_code;
+		info.si_addr = (void __user *)address;
+		force_sig_info(SIGBUS, &info, current);
 	} else {
 		if (regs->pc & 1)
 			die("unaligned program counter", regs, error_code);
 
+#ifndef CONFIG_CPU_SH2A
 		set_fs(KERNEL_DS);
 		if (copy_from_user(&instruction, (u16 *)(regs->pc), 2)) {
 			/* Argh. Fault on the instruction itself.
@@ -544,6 +604,12 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 
 		handle_unaligned_access(instruction, regs);
 		set_fs(oldfs);
+#else
+		printk(KERN_NOTICE "Killing process \"%s\" due to unaligned "
+		       "access\n", current->comm);
+
+		force_sig(SIGSEGV, current);
+#endif
 	}
 }
 
@@ -553,13 +619,13 @@ asmlinkage void do_address_error(struct pt_regs *regs,
  */
 int is_dsp_inst(struct pt_regs *regs)
 {
-	unsigned short inst;
+	unsigned short inst = 0;
 
-	/* 
+	/*
 	 * Safe guard if DSP mode is already enabled or we're lacking
 	 * the DSP altogether.
 	 */
-	if (!(cpu_data->flags & CPU_HAS_DSP) || (regs->sr & SR_DSP))
+	if (!(current_cpu_data.flags & CPU_HAS_DSP) || (regs->sr & SR_DSP))
 		return 0;
 
 	get_user(inst, ((unsigned short *) regs->pc));
@@ -576,16 +642,150 @@ int is_dsp_inst(struct pt_regs *regs)
 #define is_dsp_inst(regs)	(0)
 #endif /* CONFIG_SH_DSP */
 
-DO_ERROR(TRAP_RESERVED_INST, SIGILL, "reserved instruction", reserved_inst, current)
-DO_ERROR(TRAP_ILLEGAL_SLOT_INST, SIGILL, "illegal slot instruction", illegal_slot_inst, current)
+#ifdef CONFIG_CPU_SH2A
+asmlinkage void do_divide_error(unsigned long r4, unsigned long r5,
+				unsigned long r6, unsigned long r7,
+				struct pt_regs __regs)
+{
+	siginfo_t info;
+
+	switch (r4) {
+	case TRAP_DIVZERO_ERROR:
+		info.si_code = FPE_INTDIV;
+		break;
+	case TRAP_DIVOVF_ERROR:
+		info.si_code = FPE_INTOVF;
+		break;
+	}
+
+	force_sig_info(SIGFPE, &info, current);
+}
+#endif
+
+/* arch/sh/kernel/cpu/sh4/fpu.c */
+extern int do_fpu_inst(unsigned short, struct pt_regs *);
+extern asmlinkage void do_fpu_state_restore(unsigned long r4, unsigned long r5,
+		unsigned long r6, unsigned long r7, struct pt_regs __regs);
+
+asmlinkage void do_reserved_inst(unsigned long r4, unsigned long r5,
+				unsigned long r6, unsigned long r7,
+				struct pt_regs __regs)
+{
+	struct pt_regs *regs = RELOC_HIDE(&__regs, 0);
+	unsigned long error_code;
+	struct task_struct *tsk = current;
+
+#ifdef CONFIG_SH_FPU_EMU
+	unsigned short inst = 0;
+	int err;
+
+	get_user(inst, (unsigned short*)regs->pc);
+
+	err = do_fpu_inst(inst, regs);
+	if (!err) {
+		regs->pc += instruction_size(inst);
+		return;
+	}
+	/* not a FPU inst. */
+#endif
+
+#ifdef CONFIG_SH_DSP
+	/* Check if it's a DSP instruction */
+	if (is_dsp_inst(regs)) {
+		/* Enable DSP mode, and restart instruction. */
+		regs->sr |= SR_DSP;
+		return;
+	}
+#endif
+
+	lookup_exception_vector(error_code);
+
+	local_irq_enable();
+	CHK_REMOTE_DEBUG(regs);
+	force_sig(SIGILL, tsk);
+	die_if_no_fixup("reserved instruction", regs, error_code);
+}
+
+#ifdef CONFIG_SH_FPU_EMU
+static int emulate_branch(unsigned short inst, struct pt_regs* regs)
+{
+	/*
+	 * bfs: 8fxx: PC+=d*2+4;
+	 * bts: 8dxx: PC+=d*2+4;
+	 * bra: axxx: PC+=D*2+4;
+	 * bsr: bxxx: PC+=D*2+4  after PR=PC+4;
+	 * braf:0x23: PC+=Rn*2+4;
+	 * bsrf:0x03: PC+=Rn*2+4 after PR=PC+4;
+	 * jmp: 4x2b: PC=Rn;
+	 * jsr: 4x0b: PC=Rn      after PR=PC+4;
+	 * rts: 000b: PC=PR;
+	 */
+	if ((inst & 0xfd00) == 0x8d00) {
+		regs->pc += SH_PC_8BIT_OFFSET(inst);
+		return 0;
+	}
+
+	if ((inst & 0xe000) == 0xa000) {
+		regs->pc += SH_PC_12BIT_OFFSET(inst);
+		return 0;
+	}
+
+	if ((inst & 0xf0df) == 0x0003) {
+		regs->pc += regs->regs[(inst & 0x0f00) >> 8] + 4;
+		return 0;
+	}
+
+	if ((inst & 0xf0df) == 0x400b) {
+		regs->pc = regs->regs[(inst & 0x0f00) >> 8];
+		return 0;
+	}
+
+	if ((inst & 0xffff) == 0x000b) {
+		regs->pc = regs->pr;
+		return 0;
+	}
+
+	return 1;
+}
+#endif
+
+asmlinkage void do_illegal_slot_inst(unsigned long r4, unsigned long r5,
+				unsigned long r6, unsigned long r7,
+				struct pt_regs __regs)
+{
+	struct pt_regs *regs = RELOC_HIDE(&__regs, 0);
+	unsigned long error_code;
+	struct task_struct *tsk = current;
+#ifdef CONFIG_SH_FPU_EMU
+	unsigned short inst = 0;
+
+	get_user(inst, (unsigned short *)regs->pc + 1);
+	if (!do_fpu_inst(inst, regs)) {
+		get_user(inst, (unsigned short *)regs->pc);
+		if (!emulate_branch(inst, regs))
+			return;
+		/* fault in branch.*/
+	}
+	/* not a FPU inst. */
+#endif
+
+	lookup_exception_vector(error_code);
+
+	local_irq_enable();
+	CHK_REMOTE_DEBUG(regs);
+	force_sig(SIGILL, tsk);
+	die_if_no_fixup("illegal slot instruction", regs, error_code);
+}
 
 asmlinkage void do_exception_error(unsigned long r4, unsigned long r5,
 				   unsigned long r6, unsigned long r7,
-				   struct pt_regs regs)
+				   struct pt_regs __regs)
 {
+	struct pt_regs *regs = RELOC_HIDE(&__regs, 0);
 	long ex;
-	asm volatile("stc	r2_bank, %0" : "=r" (ex));
-	die_if_kernel("exception", &regs, ex);
+
+	lookup_exception_vector(ex);
+	die_if_kernel("exception", regs, ex);
 }
 
 #if defined(CONFIG_SH_STANDARD_BIOS)
@@ -608,12 +808,13 @@ static inline void __init gdb_vbr_init(void)
 }
 #endif
 
-void __init per_cpu_trap_init(void)
+void __cpuinit per_cpu_trap_init(void)
 {
 	extern void *vbr_base;
 
 #ifdef CONFIG_SH_STANDARD_BIOS
-	gdb_vbr_init();
+	if (raw_smp_processor_id() == 0)
+		gdb_vbr_init();
 #endif
 
 	/* NOTE: The VBR value should be at P1
@@ -626,83 +827,117 @@ void __init per_cpu_trap_init(void)
 		     : "memory");
 }
 
-void __init trap_init(void)
+void *set_exception_table_vec(unsigned int vec, void *handler)
 {
 	extern void *exception_handling_table[];
+	void *old_handler;
 
-	exception_handling_table[TRAP_RESERVED_INST]
-		= (void *)do_reserved_inst;
-	exception_handling_table[TRAP_ILLEGAL_SLOT_INST]
-		= (void *)do_illegal_slot_inst;
+	old_handler = exception_handling_table[vec];
+	exception_handling_table[vec] = handler;
+	return old_handler;
+}
 
-#ifdef CONFIG_CPU_SH4
-	if (!(cpu_data->flags & CPU_HAS_FPU)) {
-		/* For SH-4 lacking an FPU, treat floating point instructions
-		   as reserved. */
-		/* entry 64 corresponds to EXPEVT=0x800 */
-		exception_handling_table[64] = (void *)do_reserved_inst;
-		exception_handling_table[65] = (void *)do_illegal_slot_inst;
-	}
+extern asmlinkage void address_error_handler(unsigned long r4, unsigned long r5,
+					     unsigned long r6, unsigned long r7,
+					     struct pt_regs __regs);
+
+void __init trap_init(void)
+{
+	set_exception_table_vec(TRAP_RESERVED_INST, do_reserved_inst);
+	set_exception_table_vec(TRAP_ILLEGAL_SLOT_INST, do_illegal_slot_inst);
+
+#if defined(CONFIG_CPU_SH4) && !defined(CONFIG_SH_FPU) || \
+    defined(CONFIG_SH_FPU_EMU)
+	/*
+	 * For SH-4 lacking an FPU, treat floating point instructions as
+	 * reserved. They'll be handled in the math-emu case, or faulted on
+	 * otherwise.
+	 */
+	set_exception_table_evt(0x800, do_reserved_inst);
+	set_exception_table_evt(0x820, do_illegal_slot_inst);
+#elif defined(CONFIG_SH_FPU)
+#ifdef CONFIG_CPU_SUBTYPE_SHX3
+	set_exception_table_evt(0xd80, do_fpu_state_restore);
+	set_exception_table_evt(0xda0, do_fpu_state_restore);
+#else
+	set_exception_table_evt(0x800, do_fpu_state_restore);
+	set_exception_table_evt(0x820, do_fpu_state_restore);
 #endif
-		
+#endif
+
+#ifdef CONFIG_CPU_SH2
+	set_exception_table_vec(TRAP_ADDRESS_ERROR, address_error_handler);
+#endif
+#ifdef CONFIG_CPU_SH2A
+	set_exception_table_vec(TRAP_DIVZERO_ERROR, do_divide_error);
+	set_exception_table_vec(TRAP_DIVOVF_ERROR, do_divide_error);
+#endif
+
 	/* Setup VBR for boot cpu */
 	per_cpu_trap_init();
 }
 
-void show_stack(struct task_struct *tsk, unsigned long *sp)
+#ifdef CONFIG_BUG
+void handle_BUG(struct pt_regs *regs)
 {
-	unsigned long *stack, addr;
-	unsigned long module_start = VMALLOC_START;
-	unsigned long module_end = VMALLOC_END;
-	int i = 1;
-
-	if (tsk && !sp) {
-		sp = (unsigned long *)tsk->thread.sp;
+	enum bug_trap_type tt;
+	tt = report_bug(regs->pc, regs);
+	if (tt == BUG_TRAP_TYPE_WARN) {
+		regs->pc += 2;
+		return;
 	}
 
-	if (!sp) {
-		__asm__ __volatile__ (
-			"mov r15, %0\n\t"
-			"stc r7_bank, %1\n\t"
-			: "=r" (module_start),
-			  "=r" (module_end)
-		);
-		
-		sp = (unsigned long *)module_start;
-	}
+	die("Kernel BUG", regs, TRAPA_BUG_OPCODE & 0xff);
+}
 
-	stack = sp;
+int is_valid_bugaddr(unsigned long addr)
+{
+	return addr >= PAGE_OFFSET;
+}
+#endif
+
+void show_trace(struct task_struct *tsk, unsigned long *sp,
+		struct pt_regs *regs)
+{
+	unsigned long addr;
+
+	if (regs && user_mode(regs))
+		return;
 
 	printk("\nCall trace: ");
 #ifdef CONFIG_KALLSYMS
 	printk("\n");
 #endif
 
-	while (!kstack_end(stack)) {
-		addr = *stack++;
-		if (((addr >= (unsigned long)_text) &&
-		     (addr <= (unsigned long)_etext)) ||
-		    ((addr >= module_start) && (addr <= module_end))) {
-			/*
-			 * For 80-columns display, 6 entry is maximum.
-			 * NOTE: '[<8c00abcd>] ' consumes 13 columns .
-			 */
-#ifndef CONFIG_KALLSYMS
-			if (i && ((i % 6) == 0))
-				printk("\n       ");
-#endif
-			printk("[<%08lx>] ", addr);
-			print_symbol("%s\n", addr);
-			i++;
-		}
+	while (!kstack_end(sp)) {
+		addr = *sp++;
+		if (kernel_text_address(addr))
+			print_ip_sym(addr);
 	}
 
 	printk("\n");
+
+	if (!tsk)
+		tsk = current;
+
+	debug_show_held_locks(tsk);
 }
 
-void show_task(unsigned long *sp)
+void show_stack(struct task_struct *tsk, unsigned long *sp)
 {
-	show_stack(NULL, sp);
+	unsigned long stack;
+
+	if (!tsk)
+		tsk = current;
+	if (tsk == current)
+		sp = (unsigned long *)current_stack_pointer;
+	else
+		sp = (unsigned long *)tsk->thread.sp;
+
+	stack = (unsigned long)sp;
+	dump_mem("Stack: ", stack, THREAD_SIZE +
+		 (unsigned long)task_stack_page(tsk));
+	show_trace(tsk, sp, NULL);
 }
 
 void dump_stack(void)

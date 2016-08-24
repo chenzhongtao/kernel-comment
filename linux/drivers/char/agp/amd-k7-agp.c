@@ -43,7 +43,7 @@ static int amd_create_page_map(struct amd_page_map *page_map)
 
 	SetPageReserved(virt_to_page(page_map->real));
 	global_cache_flush();
-	page_map->remapped = ioremap_nocache(virt_to_phys(page_map->real),
+	page_map->remapped = ioremap_nocache(virt_to_gart(page_map->real),
 					    PAGE_SIZE);
 	if (page_map->remapped == NULL) {
 		ClearPageReserved(virt_to_page(page_map->real));
@@ -94,25 +94,22 @@ static int amd_create_gatt_pages(int nr_tables)
 	int retval = 0;
 	int i;
 
-	tables = kmalloc((nr_tables + 1) * sizeof(struct amd_page_map *),
-			 GFP_KERNEL);
+	tables = kzalloc((nr_tables + 1) * sizeof(struct amd_page_map *),GFP_KERNEL);
 	if (tables == NULL)
 		return -ENOMEM;
 
-	memset (tables, 0, sizeof(struct amd_page_map *) * (nr_tables + 1));
 	for (i = 0; i < nr_tables; i++) {
-		entry = kmalloc(sizeof(struct amd_page_map), GFP_KERNEL);
+		entry = kzalloc(sizeof(struct amd_page_map), GFP_KERNEL);
+		tables[i] = entry;
 		if (entry == NULL) {
 			retval = -ENOMEM;
 			break;
 		}
-		memset (entry, 0, sizeof(struct amd_page_map));
-		tables[i] = entry;
 		retval = amd_create_page_map(entry);
 		if (retval != 0)
 			break;
 	}
-	amd_irongate_private.num_tables = nr_tables;
+	amd_irongate_private.num_tables = i;
 	amd_irongate_private.gatt_pages = tables;
 
 	if (retval != 0)
@@ -121,7 +118,7 @@ static int amd_create_gatt_pages(int nr_tables)
 	return retval;
 }
 
-/* Since we don't need contigious memory we just try
+/* Since we don't need contiguous memory we just try
  * to get the gatt table once
  */
 
@@ -132,7 +129,7 @@ static int amd_create_gatt_pages(int nr_tables)
 #define GET_GATT(addr) (amd_irongate_private.gatt_pages[\
 	GET_PAGE_DIR_IDX(addr)]->remapped)
 
-static int amd_create_gatt_table(void)
+static int amd_create_gatt_table(struct agp_bridge_data *bridge)
 {
 	struct aper_size_info_lvl2 *value;
 	struct amd_page_map page_dir;
@@ -154,7 +151,7 @@ static int amd_create_gatt_table(void)
 
 	agp_bridge->gatt_table_real = (u32 *)page_dir.real;
 	agp_bridge->gatt_table = (u32 __iomem *)page_dir.remapped;
-	agp_bridge->gatt_bus_addr = virt_to_phys(page_dir.real);
+	agp_bridge->gatt_bus_addr = virt_to_gart(page_dir.real);
 
 	/* Get the address for the gart region.
 	 * This is a bus address even on the alpha, b/c its
@@ -167,7 +164,7 @@ static int amd_create_gatt_table(void)
 
 	/* Calculate the agp offset */
 	for (i = 0; i < value->num_entries / 1024; i++, addr += 0x00400000) {
-		writel(virt_to_phys(amd_irongate_private.gatt_pages[i]->real) | 1,
+		writel(virt_to_gart(amd_irongate_private.gatt_pages[i]->real) | 1,
 			page_dir.remapped+GET_PAGE_DIR_OFF(addr));
 		readl(page_dir.remapped+GET_PAGE_DIR_OFF(addr));	/* PCI Posting. */
 	}
@@ -175,7 +172,7 @@ static int amd_create_gatt_table(void)
 	return 0;
 }
 
-static int amd_free_gatt_table(void)
+static int amd_free_gatt_table(struct agp_bridge_data *bridge)
 {
 	struct amd_page_map page_dir;
 
@@ -221,6 +218,8 @@ static int amd_irongate_configure(void)
 	pci_read_config_dword(agp_bridge->dev, AMD_MMBASE, &temp);
 	temp = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 	amd_irongate_private.registers = (volatile u8 __iomem *) ioremap(temp, 4096);
+	if (!amd_irongate_private.registers)
+		return -ENOMEM;
 
 	/* Write out the address of the gatt table */
 	writel(agp_bridge->gatt_bus_addr, amd_irongate_private.registers+AMD_ATTBASE);
@@ -314,7 +313,8 @@ static int amd_insert_memory(struct agp_memory *mem, off_t pg_start, int type)
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
 		addr = (j * PAGE_SIZE) + agp_bridge->gart_bus_addr;
 		cur_gatt = GET_GATT(addr);
-		writel(agp_generic_mask_memory(mem->memory[i], mem->type), cur_gatt+GET_GATT_OFF(addr));
+		writel(agp_generic_mask_memory(agp_bridge,
+			mem->memory[i], mem->type), cur_gatt+GET_GATT_OFF(addr));
 		readl(cur_gatt+GET_GATT_OFF(addr));	/* PCI Posting. */
 	}
 	amd_irongate_tlbflush(mem);
@@ -341,7 +341,7 @@ static int amd_remove_memory(struct agp_memory *mem, off_t pg_start, int type)
 	return 0;
 }
 
-static struct aper_size_info_lvl2 amd_irongate_sizes[7] =
+static const struct aper_size_info_lvl2 amd_irongate_sizes[7] =
 {
 	{2048, 524288, 0x0000000c},
 	{1024, 262144, 0x0000000a},
@@ -352,12 +352,12 @@ static struct aper_size_info_lvl2 amd_irongate_sizes[7] =
 	{32, 8192, 0x00000000}
 };
 
-static struct gatt_mask amd_irongate_masks[] =
+static const struct gatt_mask amd_irongate_masks[] =
 {
 	{.mask = 1, .type = 0}
 };
 
-struct agp_bridge_driver amd_irongate_driver = {
+static const struct agp_bridge_driver amd_irongate_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= amd_irongate_sizes,
 	.size_type		= LVL2_APER_SIZE,
@@ -378,6 +378,7 @@ struct agp_bridge_driver amd_irongate_driver = {
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
 static struct agp_device_ids amd_agp_device_ids[] __devinitdata =
@@ -420,6 +421,51 @@ static int __devinit agp_amdk7_probe(struct pci_dev *pdev,
 	bridge->dev_private_data = &amd_irongate_private,
 	bridge->dev = pdev;
 	bridge->capndx = cap_ptr;
+
+	/* 751 Errata (22564_B-1.PDF)
+	   erratum 20: strobe glitch with Nvidia NV10 GeForce cards.
+	   system controller may experience noise due to strong drive strengths
+	 */
+	if (agp_bridge->dev->device == PCI_DEVICE_ID_AMD_FE_GATE_7006) {
+		u8 cap_ptr=0;
+		struct pci_dev *gfxcard=NULL;
+		while (!cap_ptr) {
+			gfxcard = pci_get_class(PCI_CLASS_DISPLAY_VGA<<8, gfxcard);
+			if (!gfxcard) {
+				printk (KERN_INFO PFX "Couldn't find an AGP VGA controller.\n");
+				return -ENODEV;
+			}
+			cap_ptr = pci_find_capability(gfxcard, PCI_CAP_ID_AGP);
+			if (!cap_ptr) {
+				pci_dev_put(gfxcard);
+				continue;
+			}
+		}
+
+		/* With so many variants of NVidia cards, it's simpler just
+		   to blacklist them all, and then whitelist them as needed
+		   (if necessary at all). */
+		if (gfxcard->vendor == PCI_VENDOR_ID_NVIDIA) {
+			agp_bridge->flags |= AGP_ERRATA_1X;
+			printk (KERN_INFO PFX "AMD 751 chipset with NVidia GeForce detected. Forcing to 1X due to errata.\n");
+		}
+		pci_dev_put(gfxcard);
+	}
+
+	/* 761 Errata (23613_F.pdf)
+	 * Revisions B0/B1 were a disaster.
+	 * erratum 44: SYSCLK/AGPCLK skew causes 2X failures -- Force mode to 1X
+	 * erratum 45: Timing problem prevents fast writes -- Disable fast write.
+	 * erratum 46: Setup violation on AGP SBA pins - Disable side band addressing.
+	 * With this lot disabled, we should prevent lockups. */
+	if (agp_bridge->dev->device == PCI_DEVICE_ID_AMD_FE_GATE_700E) {
+		if (pdev->revision == 0x10 || pdev->revision == 0x11) {
+			agp_bridge->flags = AGP_ERRATA_FASTWRITES;
+			agp_bridge->flags |= AGP_ERRATA_SBA;
+			agp_bridge->flags |= AGP_ERRATA_1X;
+			printk (KERN_INFO PFX "AMD 761 chipset with errata detected - disabling AGP fast writes & SBA and forcing to 1X.\n");
+		}
+	}
 
 	/* Fill in the mode register */
 	pci_read_config_dword(pdev,
@@ -480,7 +526,7 @@ static int __init agp_amdk7_init(void)
 {
 	if (agp_off)
 		return -EINVAL;
-	return pci_module_init(&agp_amdk7_pci_driver);
+	return pci_register_driver(&agp_amdk7_pci_driver);
 }
 
 static void __exit agp_amdk7_cleanup(void)

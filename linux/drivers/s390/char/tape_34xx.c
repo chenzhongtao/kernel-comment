@@ -2,14 +2,12 @@
  *  drivers/s390/char/tape_34xx.c
  *    tape device discipline for 3480/3490 tapes.
  *
- *  S390 and zSeries version
- *    Copyright (C) 2001,2002 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) IBM Corp. 2001,2006
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *		 Tuan Ngo-Anh <ngoanh@de.ibm.com>
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/bio.h>
@@ -27,11 +25,6 @@
  */
 debug_info_t *TAPE_DBF_AREA = NULL;
 EXPORT_SYMBOL(TAPE_DBF_AREA);
-
-enum tape_34xx_type {
-	tape_3480,
-	tape_3490,
-};
 
 #define TAPE34XX_FMT_3480	0
 #define TAPE34XX_FMT_3480_2_XF	1
@@ -102,6 +95,12 @@ tape_34xx_medium_sense(struct tape_device *device)
 	return rc;
 }
 
+struct tape_34xx_work {
+	struct tape_device	*device;
+	enum tape_op		 op;
+	struct work_struct	 work;
+};
+
 /*
  * These functions are currently used only to schedule a medium_sense for
  * later execution. This is because we get an interrupt whenever a medium
@@ -110,13 +109,10 @@ tape_34xx_medium_sense(struct tape_device *device)
  * interrupt handler.
  */
 static void
-tape_34xx_work_handler(void *data)
+tape_34xx_work_handler(struct work_struct *work)
 {
-	struct {
-		struct tape_device	*device;
-		enum tape_op		 op;
-		struct work_struct	 work;
-	} *p = data;
+	struct tape_34xx_work *p =
+		container_of(work, struct tape_34xx_work, work);
 
 	switch(p->op) {
 		case TO_MSEN:
@@ -133,17 +129,12 @@ tape_34xx_work_handler(void *data)
 static int
 tape_34xx_schedule_work(struct tape_device *device, enum tape_op op)
 {
-	struct {
-		struct tape_device	*device;
-		enum tape_op		 op;
-		struct work_struct	 work;
-	} *p;
+	struct tape_34xx_work *p;
 
-	if ((p = kmalloc(sizeof(*p), GFP_ATOMIC)) == NULL)
+	if ((p = kzalloc(sizeof(*p), GFP_ATOMIC)) == NULL)
 		return -ENOMEM;
 
-	memset(p, 0, sizeof(*p));
-	INIT_WORK(&p->work, tape_34xx_work_handler, p);
+	INIT_WORK(&p->work, tape_34xx_work_handler);
 
 	p->device = tape_get_device_reference(device);
 	p->op     = op;
@@ -1143,21 +1134,18 @@ tape_34xx_bread(struct tape_device *device, struct request *req)
 {
 	struct tape_request *request;
 	struct ccw1 *ccw;
-	int count = 0, i;
+	int count = 0;
 	unsigned off;
 	char *dst;
 	struct bio_vec *bv;
-	struct bio *bio;
+	struct req_iterator iter;
 	struct tape_34xx_block_id *	start_block;
 
 	DBF_EVENT(6, "xBREDid:");
 
 	/* Count the number of blocks for the request. */
-	rq_for_each_bio(bio, req) {
-		bio_for_each_segment(bv, bio, i) {
-			count += bv->bv_len >> (TAPEBLOCK_HSEC_S2B + 9);
-		}
-	}
+	rq_for_each_segment(bv, req, iter)
+		count += bv->bv_len >> (TAPEBLOCK_HSEC_S2B + 9);
 
 	/* Allocate the ccw request. */
 	request = tape_alloc_request(3+count+1, 8);
@@ -1184,18 +1172,15 @@ tape_34xx_bread(struct tape_device *device, struct request *req)
 	ccw = tape_ccw_cc(ccw, NOP, 0, NULL);
 	ccw = tape_ccw_cc(ccw, NOP, 0, NULL);
 
-	rq_for_each_bio(bio, req) {
-		bio_for_each_segment(bv, bio, i) {
-			dst = kmap(bv->bv_page) + bv->bv_offset;
-			for (off = 0; off < bv->bv_len;
-			     off += TAPEBLOCK_HSEC_SIZE) {
-				ccw->flags = CCW_FLAG_CC;
-				ccw->cmd_code = READ_FORWARD;
-				ccw->count = TAPEBLOCK_HSEC_SIZE;
-				set_normalized_cda(ccw, (void*) __pa(dst));
-				ccw++;
-				dst += TAPEBLOCK_HSEC_SIZE;
-			}
+	rq_for_each_segment(bv, req, iter) {
+		dst = kmap(bv->bv_page) + bv->bv_offset;
+		for (off = 0; off < bv->bv_len; off += TAPEBLOCK_HSEC_SIZE) {
+			ccw->flags = CCW_FLAG_CC;
+			ccw->cmd_code = READ_FORWARD;
+			ccw->count = TAPEBLOCK_HSEC_SIZE;
+			set_normalized_cda(ccw, (void*) __pa(dst));
+			ccw++;
+			dst += TAPEBLOCK_HSEC_SIZE;
 		}
 	}
 
@@ -1316,9 +1301,9 @@ static struct tape_discipline tape_discipline_34xx = {
 };
 
 static struct ccw_device_id tape_34xx_ids[] = {
-	{ CCW_DEVICE_DEVTYPE(0x3480, 0, 0x3480, 0), driver_info: tape_3480},
-	{ CCW_DEVICE_DEVTYPE(0x3490, 0, 0x3490, 0), driver_info: tape_3490},
-	{ /* end of list */ }
+	{ CCW_DEVICE_DEVTYPE(0x3480, 0, 0x3480, 0), .driver_info = tape_3480},
+	{ CCW_DEVICE_DEVTYPE(0x3490, 0, 0x3490, 0), .driver_info = tape_3490},
+	{ /* end of list */ },
 };
 
 static int
@@ -1351,13 +1336,13 @@ tape_34xx_init (void)
 {
 	int rc;
 
-	TAPE_DBF_AREA = debug_register ( "tape_34xx", 1, 2, 4*sizeof(long));
+	TAPE_DBF_AREA = debug_register ( "tape_34xx", 2, 2, 4*sizeof(long));
 	debug_register_view(TAPE_DBF_AREA, &debug_sprintf_view);
 #ifdef DBF_LIKE_HELL
 	debug_set_level(TAPE_DBF_AREA, 6);
 #endif
 
-	DBF_EVENT(3, "34xx init: $Revision: 1.21 $\n");
+	DBF_EVENT(3, "34xx init\n");
 	/* Register driver for 3480/3490 tapes. */
 	rc = ccw_driver_register(&tape_34xx_driver);
 	if (rc)
@@ -1377,8 +1362,7 @@ tape_34xx_exit(void)
 
 MODULE_DEVICE_TABLE(ccw, tape_34xx_ids);
 MODULE_AUTHOR("(C) 2001-2002 IBM Deutschland Entwicklung GmbH");
-MODULE_DESCRIPTION("Linux on zSeries channel attached 3480 tape "
-		   "device driver ($Revision: 1.21 $)");
+MODULE_DESCRIPTION("Linux on zSeries channel attached 3480 tape device driver");
 MODULE_LICENSE("GPL");
 
 module_init(tape_34xx_init);

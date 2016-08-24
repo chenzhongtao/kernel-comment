@@ -23,7 +23,7 @@ static struct ebt_entries initial_chain = {
 	.policy		= EBT_ACCEPT,
 };
 
-static struct ebt_replace initial_table =
+static struct ebt_replace_kernel initial_table =
 {
 	.name		= "broute",
 	.valid_hooks	= 1 << NF_BR_BROUTING,
@@ -51,18 +51,18 @@ static struct ebt_table broute_table =
 	.me		= THIS_MODULE,
 };
 
-static int ebt_broute(struct sk_buff **pskb)
+static int ebt_broute(struct sk_buff *skb)
 {
 	int ret;
 
-	ret = ebt_do_table(NF_BR_BROUTING, pskb, (*pskb)->dev, NULL,
+	ret = ebt_do_table(NF_BR_BROUTING, skb, skb->dev, NULL,
 	   &broute_table);
 	if (ret == NF_DROP)
 		return 1; /* route it */
 	return 0; /* bridge it */
 }
 
-static int __init init(void)
+static int __init ebtable_broute_init(void)
 {
 	int ret;
 
@@ -70,17 +70,17 @@ static int __init init(void)
 	if (ret < 0)
 		return ret;
 	/* see br_input.c */
-	br_should_route_hook = ebt_broute;
+	rcu_assign_pointer(br_should_route_hook, ebt_broute);
 	return ret;
 }
 
-static void __exit fini(void)
+static void __exit ebtable_broute_fini(void)
 {
-	br_should_route_hook = NULL;
+	rcu_assign_pointer(br_should_route_hook, NULL);
 	synchronize_net();
 	ebt_unregister_table(&broute_table);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(ebtable_broute_init);
+module_exit(ebtable_broute_fini);
 MODULE_LICENSE("GPL");

@@ -29,6 +29,7 @@
 #include <linux/ioport.h>
 #include <net/arp.h>
 
+#include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/byteorder.h>
@@ -58,7 +59,7 @@ static void hostess_input(struct z8530_channel *c, struct sk_buff *skb)
 	/* Drop the CRC - it's not a good idea to try and negotiate it ;) */
 	skb_trim(skb, skb->len-2);
 	skb->protocol=__constant_htons(ETH_P_WAN_PPP);
-	skb->mac.raw=skb->data;
+	skb_reset_mac_header(skb);
 	skb->dev=c->netdevice;
 	/*
 	 *	Send it to the PPP layer. We don't have time to process
@@ -230,18 +231,15 @@ static struct sv11_device *sv11_init(int iobase, int irq)
 		return NULL;
 	}
 	
-	sv=(struct sv11_device *)kmalloc(sizeof(struct sv11_device), GFP_KERNEL);
+	sv = kzalloc(sizeof(struct sv11_device), GFP_KERNEL);
 	if(!sv)
 		goto fail3;
 			
-	memset(sv, 0, sizeof(*sv));
 	sv->if_ptr=&sv->netdev;
 	
 	sv->netdev.dev = alloc_netdev(0, "hdlc%d", sv11_setup);
 	if(!sv->netdev.dev)
 		goto fail2;
-
-	SET_MODULE_OWNER(sv->netdev.dev);
 
 	dev=&sv->sync;
 	
@@ -263,7 +261,7 @@ static struct sv11_device *sv11_init(int iobase, int irq)
 	/* We want a fast IRQ for this device. Actually we'd like an even faster
 	   IRQ ;) - This is one driver RtLinux is made for */
 	   
-	if(request_irq(irq, &z8530_interrupt, SA_INTERRUPT, "Hostess SV11", dev)<0)
+	if(request_irq(irq, &z8530_interrupt, IRQF_DISABLED, "Hostess SV11", dev)<0)
 	{
 		printk(KERN_WARNING "hostess: IRQ %d already in use.\n", irq);
 		goto fail1;

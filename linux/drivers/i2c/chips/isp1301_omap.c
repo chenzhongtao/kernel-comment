@@ -18,20 +18,17 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#undef	DEBUG
-#undef	VERBOSE
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/device.h>
-#include <linux/usb_ch9.h>
-#include <linux/usb_gadget.h>
+#include <linux/platform_device.h>
+#include <linux/usb/ch9.h>
+#include <linux/usb/gadget.h>
 #include <linux/usb.h>
-#include <linux/usb_otg.h>
+#include <linux/usb/otg.h>
 #include <linux/i2c.h>
 #include <linux/workqueue.h>
 
@@ -45,7 +42,7 @@
 
 
 #define	DRIVER_VERSION	"24 August 2004"
-#define	DRIVER_NAME	(isp1301_driver.name)
+#define	DRIVER_NAME	(isp1301_driver.driver.name)
 
 MODULE_DESCRIPTION("ISP1301 USB OTG Transceiver Driver");
 MODULE_LICENSE("GPL");
@@ -56,6 +53,7 @@ struct isp1301 {
 	void			(*i2c_release)(struct device *dev);
 
 	int			irq;
+	int			irq_type;
 
 	u32			last_otg_ctrl;
 	unsigned		working:1;
@@ -64,7 +62,7 @@ struct isp1301 {
 
 	/* use keventd context to change the state for us */
 	struct work_struct	work;
-	
+
 	unsigned long		todo;
 #		define WORK_UPDATE_ISP	0	/* update ISP from OTG */
 #		define WORK_UPDATE_OTG	1	/* update OTG from ISP */
@@ -95,7 +93,7 @@ struct isp1301 {
 
 /* board-specific PM hooks */
 
-#include <asm/arch/gpio.h>
+#include <asm/gpio.h>
 #include <asm/arch/mux.h>
 #include <asm/mach-types.h>
 
@@ -145,7 +143,6 @@ static inline void notresponding(struct isp1301 *isp)
 static unsigned short normal_i2c[] = {
 	ISP_BASE, ISP_BASE + 1,
 	I2C_CLIENT_END };
-static unsigned short normal_i2c_range[] = { I2C_CLIENT_END };
 
 I2C_CLIENT_INSMOD;
 
@@ -293,7 +290,7 @@ static void power_up(struct isp1301 *isp)
 {
 	// isp1301_clear_bits(isp, ISP1301_MODE_CONTROL_2, MC2_GLOBAL_PWR_DN);
 	isp1301_clear_bits(isp, ISP1301_MODE_CONTROL_1, MC1_SUSPEND_REG);
-	
+
 	/* do this only when cpu is driving transceiver,
 	 * so host won't see a low speed device...
 	 */
@@ -671,7 +668,7 @@ pulldown:
 	dump_regs(isp, "otg->isp1301");
 }
 
-static irqreturn_t omap_otg_irq(int irq, void *_isp, struct pt_regs *regs)
+static irqreturn_t omap_otg_irq(int irq, void *_isp)
 {
 	u16		otg_irq = OTG_IRQ_SRC_REG;
 	u32		otg_ctrl;
@@ -801,7 +798,7 @@ static irqreturn_t omap_otg_irq(int irq, void *_isp, struct pt_regs *regs)
 		/* role is host */
 		} else {
 			if (!(otg_ctrl & OTG_ID)) {
-		 		otg_ctrl &= OTG_CTRL_MASK & ~OTG_XCEIV_INPUTS;
+				otg_ctrl &= OTG_CTRL_MASK & ~OTG_XCEIV_INPUTS;
 				OTG_CTRL_REG = otg_ctrl | OTG_A_BUSREQ;
 			}
 
@@ -874,25 +871,27 @@ static int otg_init(struct isp1301 *isp)
 	return 0;
 }
 
-static int otg_probe(struct device *dev)
+static int otg_probe(struct platform_device *dev)
 {
 	// struct omap_usb_config *config = dev->platform_data;
 
-	otg_dev = to_platform_device(dev);
+	otg_dev = dev;
 	return 0;
 }
 
-static int otg_remove(struct device *dev)
+static int otg_remove(struct platform_device *dev)
 {
 	otg_dev = 0;
 	return 0;
 }
 
-struct device_driver omap_otg_driver = {
-	.name		= "omap_otg",
-	.bus		= &platform_bus_type,
+struct platform_driver omap_otg_driver = {
 	.probe		= otg_probe,
-	.remove		= otg_remove,	
+	.remove		= otg_remove,
+	.driver		= {
+		.owner	= THIS_MODULE,
+		.name	= "omap_otg",
+	},
 };
 
 static int otg_bind(struct isp1301 *isp)
@@ -902,18 +901,18 @@ static int otg_bind(struct isp1301 *isp)
 	if (otg_dev)
 		return -EBUSY;
 
-	status = driver_register(&omap_otg_driver);
+	status = platform_driver_register(&omap_otg_driver);
 	if (status < 0)
 		return status;
 
 	if (otg_dev)
 		status = request_irq(otg_dev->resource[1].start, omap_otg_irq,
-				SA_INTERRUPT, DRIVER_NAME, isp);
+				IRQF_DISABLED, DRIVER_NAME, isp);
 	else
 		status = -ENODEV;
 
 	if (status < 0)
-		driver_unregister(&omap_otg_driver);
+		platform_driver_unregister(&omap_otg_driver);
 	return status;
 }
 
@@ -1100,9 +1099,9 @@ static u8 isp1301_clear_latch(struct isp1301 *isp)
 }
 
 static void
-isp1301_work(void *data)
+isp1301_work(struct work_struct *work)
 {
-	struct isp1301	*isp = data;
+	struct isp1301	*isp = container_of(work, struct isp1301, work);
 	int		stop;
 
 	/* implicit lock:  we're the only task using this device */
@@ -1181,7 +1180,7 @@ isp1301_work(void *data)
 	isp->working = 0;
 }
 
-static irqreturn_t isp1301_irq(int irq, void *isp, struct pt_regs *regs)
+static irqreturn_t isp1301_irq(int irq, void *isp)
 {
 	isp1301_defer_work(isp, WORK_UPDATE_OTG);
 	return IRQ_HANDLED;
@@ -1244,7 +1243,7 @@ static int isp1301_detach_client(struct i2c_client *i2c)
  *  - DEVICE mode, for when there's a B/Mini-B (device) connector
  *
  * As a rule, you won't have an isp1301 chip unless it's there to
- * support the OTG mode.  Other modes help testing USB controllers 
+ * support the OTG mode.  Other modes help testing USB controllers
  * in isolation from (full) OTG support, or maybe so later board
  * revisions can help to support those feature.
  */
@@ -1260,9 +1259,9 @@ static int isp1301_otg_enable(struct isp1301 *isp)
 	 * a few more interrupts than are strictly needed.
 	 */
 	isp1301_set_bits(isp, ISP1301_INTERRUPT_RISING,
-	 	INTR_VBUS_VLD | INTR_SESS_VLD | INTR_ID_GND);
+		INTR_VBUS_VLD | INTR_SESS_VLD | INTR_ID_GND);
 	isp1301_set_bits(isp, ISP1301_INTERRUPT_FALLING,
-	 	INTR_VBUS_VLD | INTR_SESS_VLD | INTR_ID_GND);
+		INTR_VBUS_VLD | INTR_SESS_VLD | INTR_ID_GND);
 
 	dev_info(&isp->client.dev, "ready for dual-role USB ...\n");
 
@@ -1306,9 +1305,9 @@ isp1301_set_host(struct otg_transceiver *otg, struct usb_bus *host)
 
 	dev_info(&isp->client.dev, "A-Host sessions ok\n");
 	isp1301_set_bits(isp, ISP1301_INTERRUPT_RISING,
-	 	INTR_ID_GND);
+		INTR_ID_GND);
 	isp1301_set_bits(isp, ISP1301_INTERRUPT_FALLING,
-	 	INTR_ID_GND);
+		INTR_ID_GND);
 
 	/* If this has a Mini-AB connector, this mode is highly
 	 * nonstandard ... but can be handy for testing, especially with
@@ -1368,9 +1367,9 @@ isp1301_set_peripheral(struct otg_transceiver *otg, struct usb_gadget *gadget)
 		isp1301_set_bits(isp, ISP1301_MODE_CONTROL_1, MC1_DAT_SE0);
 
 	isp1301_set_bits(isp, ISP1301_INTERRUPT_RISING,
-	 	INTR_SESS_VLD);
+		INTR_SESS_VLD);
 	isp1301_set_bits(isp, ISP1301_INTERRUPT_FALLING,
-	 	INTR_VBUS_VLD);
+		INTR_VBUS_VLD);
 	dev_info(&isp->client.dev, "B-Peripheral sessions ok\n");
 	dump_regs(isp, __FUNCTION__);
 
@@ -1490,11 +1489,11 @@ static int isp1301_probe(struct i2c_adapter *bus, int address, int kind)
 	if (the_transceiver)
 		return 0;
 
-	isp = kcalloc(1, sizeof *isp, GFP_KERNEL);
+	isp = kzalloc(sizeof *isp, GFP_KERNEL);
 	if (!isp)
 		return 0;
 
-	INIT_WORK(&isp->work, isp1301_work, isp);
+	INIT_WORK(&isp->work, isp1301_work);
 	init_timer(&isp->timer);
 	isp->timer.function = isp1301_timer;
 	isp->timer.data = (unsigned long) isp;
@@ -1503,7 +1502,6 @@ static int isp1301_probe(struct i2c_adapter *bus, int address, int kind)
 	isp->client.addr = address;
 	i2c_set_clientdata(&isp->client, isp);
 	isp->client.adapter = bus;
-	isp->client.id = 1301;
 	isp->client.driver = &isp1301_driver;
 	strlcpy(isp->client.name, DRIVER_NAME, I2C_NAME_SIZE);
 	i2c = &isp->client;
@@ -1573,13 +1571,14 @@ fail1:
 		/* IRQ wired at M14 */
 		omap_cfg_reg(M14_1510_GPIO2);
 		isp->irq = OMAP_GPIO_IRQ(2);
-		omap_request_gpio(2);
-		omap_set_gpio_direction(2, 1);
-		omap_set_gpio_edge_ctrl(2, OMAP_GPIO_FALLING_EDGE);
+		if (gpio_request(2, "isp1301") == 0)
+			gpio_direction_input(2);
+		isp->irq_type = IRQF_TRIGGER_FALLING;
 	}
 
+	isp->irq_type |= IRQF_SAMPLE_RANDOM;
 	status = request_irq(isp->irq, isp1301_irq,
-			SA_SAMPLE_RANDOM, DRIVER_NAME, isp);
+			isp->irq_type, DRIVER_NAME, isp);
 	if (status < 0) {
 		dev_dbg(&i2c->dev, "can't get IRQ %d, err %d\n",
 				isp->irq, status);
@@ -1632,11 +1631,9 @@ static int isp1301_scan_bus(struct i2c_adapter *bus)
 }
 
 static struct i2c_driver isp1301_driver = {
-	.owner		= THIS_MODULE,
-	.name		= "isp1301_omap",
-	.id		= 1301,		/* FIXME "official", i2c-ids.h */
-	.class		= I2C_CLASS_HWMON,
-	.flags		= I2C_DF_NOTIFY,
+	.driver = {
+		.name	= "isp1301_omap",
+	},
 	.attach_adapter	= isp1301_scan_bus,
 	.detach_client	= isp1301_detach_client,
 };

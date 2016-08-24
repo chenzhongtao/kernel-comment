@@ -30,7 +30,6 @@
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  *
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -39,7 +38,6 @@
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <linux/module.h>
 #include <asm/system.h>
 #include <asm/mach-au1x00/au1000.h>
 #include <asm/mach-au1x00/au1000_dma.h>
@@ -162,7 +160,7 @@ void dump_au1000_dma_channel(unsigned int dmanr)
  * Requests the DMA done IRQ if irqhandler != NULL.
  */
 int request_au1000_dma(int dev_id, const char *dev_str,
-		       irqreturn_t (*irqhandler)(int, void *, struct pt_regs *),
+		       irq_handler_t irqhandler,
 		       unsigned long irqflags,
 		       void *irq_dev_id)
 {
@@ -175,7 +173,7 @@ int request_au1000_dma(int dev_id, const char *dev_str,
 		return -EINVAL;
 #else
  	if (dev_id < 0 || dev_id >= DMA_NUM_DEV)
- 		return -EINVAL;
+		return -EINVAL;
 #endif
 
 	for (i = 0; i < NUM_AU1000_DMA_CHANNELS; i++) {

@@ -10,11 +10,9 @@
  *  2000-06-20  Pentium III FXSR, SSE support by Gareth Hughes
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
@@ -22,7 +20,7 @@
 #include <linux/unistd.h>
 #include <linux/stddef.h>
 #include <linux/personality.h>
-#include <linux/suspend.h>
+#include <linux/freezer.h>
 #include <asm/cacheflush.h>
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
@@ -34,11 +32,11 @@
 int do_signal(struct pt_regs *, sigset_t *);
 
 asmlinkage int
-sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize,
+sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize,
 		  unsigned long r2, unsigned long r3, unsigned long r4,
-		  unsigned long r5, unsigned long r6, struct pt_regs regs)
+		  unsigned long r5, unsigned long r6, struct pt_regs *regs)
 {
-	sigset_t saveset, newset;
+	sigset_t newset;
 
 	/* XXX: Don't preclude handling different sized sigset_t's.  */
 	if (sigsetsize != sizeof(sigset_t))
@@ -46,29 +44,26 @@ sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize,
 
 	if (copy_from_user(&newset, unewset, sizeof(newset)))
 		return -EFAULT;
-	sigdelsetmask(&newset, ~_BLOCKABLE);
+	sigdelsetmask(&newset, sigmask(SIGKILL)|sigmask(SIGSTOP));
 
 	spin_lock_irq(&current->sighand->siglock);
-	saveset = current->blocked;
+	current->saved_sigmask = current->blocked;
 	current->blocked = newset;
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	regs.r0 = -EINTR;
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (do_signal(&regs, &saveset))
-			return regs.r0;
-	}
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	set_thread_flag(TIF_RESTORE_SIGMASK);
+	return -ERESTARTNOHAND;
 }
 
 asmlinkage int
 sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss,
 		unsigned long r2, unsigned long r3, unsigned long r4,
-		unsigned long r5, unsigned long r6, struct pt_regs regs)
+		unsigned long r5, unsigned long r6, struct pt_regs *regs)
 {
-	return do_sigaltstack(uss, uoss, regs.spu);
+	return do_sigaltstack(uss, uoss, regs->spu);
 }
 
 
@@ -79,8 +74,8 @@ sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss,
 struct rt_sigframe
 {
 	int sig;
-	struct siginfo *pinfo;
-	void *puc;
+	struct siginfo __user *pinfo;
+	void __user *puc;
 	struct siginfo info;
 	struct ucontext uc;
 //	struct _fpstate fpstate;
@@ -110,17 +105,10 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc,
 	COPY(r10);
 	COPY(r11);
 	COPY(r12);
-#if defined(CONFIG_ISA_M32R2) && defined(CONFIG_ISA_DSP_LEVEL2)
 	COPY(acc0h);
 	COPY(acc0l);
-	COPY(acc1h);
-	COPY(acc1l);
-#elif defined(CONFIG_ISA_M32R2) || defined(CONFIG_ISA_M32R)
-	COPY(acch);
-	COPY(accl);
-#else
-#error unknown isa configuration
-#endif
+	COPY(acc1h);		/* ISA_DSP_LEVEL2 only */
+	COPY(acc1l);		/* ISA_DSP_LEVEL2 only */
 	COPY(psw);
 	COPY(bpc);
 	COPY(bbpsw);
@@ -140,14 +128,13 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc,
 asmlinkage int
 sys_rt_sigreturn(unsigned long r0, unsigned long r1,
 		 unsigned long r2, unsigned long r3, unsigned long r4,
-		 unsigned long r5, unsigned long r6, struct pt_regs regs)
+		 unsigned long r5, unsigned long r6, struct pt_regs *regs)
 {
-	struct rt_sigframe __user *frame = (struct rt_sigframe __user *)regs.spu;
+	struct rt_sigframe __user *frame = (struct rt_sigframe __user *)regs->spu;
 	sigset_t set;
-	stack_t st;
 	int result;
 
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;
@@ -158,14 +145,11 @@ sys_rt_sigreturn(unsigned long r0, unsigned long r1,
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	if (restore_sigcontext(&regs, &frame->uc.uc_mcontext, &result))
+	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, &result))
 		goto badframe;
 
-	if (__copy_from_user(&st, &frame->uc.uc_stack, sizeof(st)))
+	if (do_sigaltstack(&frame->uc.uc_stack, NULL, regs->spu) == -EFAULT)
 		goto badframe;
-	/* It is more difficult to avoid calling this function than to
-	   call it and ignore errors.  */
-	do_sigaltstack(&st, NULL, regs.spu);
 
 	return result;
 
@@ -199,17 +183,10 @@ setup_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs,
 	COPY(r10);
 	COPY(r11);
 	COPY(r12);
-#if defined(CONFIG_ISA_M32R2) && defined(CONFIG_ISA_DSP_LEVEL2)
 	COPY(acc0h);
 	COPY(acc0l);
-	COPY(acc1h);
-	COPY(acc1l);
-#elif defined(CONFIG_ISA_M32R2) || defined(CONFIG_ISA_M32R)
-	COPY(acch);
-	COPY(accl);
-#else
-#error unknown isa configuration
-#endif
+	COPY(acc1h);		/* ISA_DSP_LEVEL2 only */
+	COPY(acc1l);		/* ISA_DSP_LEVEL2 only */
 	COPY(psw);
 	COPY(bpc);
 	COPY(bbpsw);
@@ -341,13 +318,12 @@ handle_signal(unsigned long sig, struct k_sigaction *ka, siginfo_t *info,
 	/* Set up the stack frame */
 	setup_rt_frame(sig, ka, info, oldset, regs);
 
-	if (!(ka->sa.sa_flags & SA_NODEFER)) {
-		spin_lock_irq(&current->sighand->siglock);
-		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	spin_lock_irq(&current->sighand->siglock);
+	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	if (!(ka->sa.sa_flags & SA_NODEFER))
 		sigaddset(&current->blocked,sig);
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 }
 
 /*
@@ -371,17 +347,15 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
 	if (!user_mode(regs))
 		return 1;
 
-	if (current->flags & PF_FREEZE) {
-		refrigerator(0);
+	if (try_to_freeze()) 
 		goto no_signal;
-	}
 
 	if (!oldset)
 		oldset = &current->blocked;
 
 	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 	if (signr > 0) {
-		/* Reenable any watchpoints before delivering the
+		/* Re-enable any watchpoints before delivering the
 		 * signal to user space. The processor register will
 		 * have been cleared if the watchpoint triggered
 		 * inside the kernel.

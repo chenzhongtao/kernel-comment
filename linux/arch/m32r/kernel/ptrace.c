@@ -14,16 +14,17 @@
  *   Copyright (C) 2000 Russell King
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/err.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/string.h>
+#include <linux/signal.h>
 
 #include <asm/cacheflush.h>
 #include <asm/io.h>
@@ -34,23 +35,6 @@
 #include <asm/mmu_context.h>
 
 /*
- * Get the address of the live pt_regs for the specified task.
- * These are saved onto the top kernel stack when the process
- * is not running.
- *
- * Note: if a user thread is execve'd from kernel space, the
- * kernel stack will not be empty on entry to the kernel, so
- * ptracing these tasks will fail.
- */
-static inline struct pt_regs *
-get_user_regs(struct task_struct *task)
-{
-        return (struct pt_regs *)
-                ((unsigned long)task->thread_info + THREAD_SIZE
-                 - sizeof(struct pt_regs));
-}
-
-/*
  * This routine will get a word off of the process kernel stack.
  */
 static inline unsigned long int
@@ -58,7 +42,7 @@ get_stack_long(struct task_struct *task, int offset)
 {
 	unsigned long *stack;
 
-	stack = (unsigned long *)get_user_regs(task);
+	stack = (unsigned long *)task_pt_regs(task);
 
 	return stack[offset];
 }
@@ -71,7 +55,7 @@ put_stack_long(struct task_struct *task, int offset, unsigned long data)
 {
 	unsigned long *stack;
 
-	stack = (unsigned long *)get_user_regs(task);
+	stack = (unsigned long *)task_pt_regs(task);
 	stack[offset] = data;
 
 	return 0;
@@ -207,7 +191,7 @@ static int ptrace_write_user(struct task_struct *tsk, unsigned long off,
  */
 static int ptrace_getregs(struct task_struct *tsk, void __user *uregs)
 {
-	struct pt_regs *regs = get_user_regs(tsk);
+	struct pt_regs *regs = task_pt_regs(tsk);
 
 	return copy_to_user(uregs, regs, sizeof(struct pt_regs)) ? -EFAULT : 0;
 }
@@ -222,7 +206,7 @@ static int ptrace_setregs(struct task_struct *tsk, void __user *uregs)
 
 	ret = -EFAULT;
 	if (copy_from_user(&newregs, uregs, sizeof(struct pt_regs)) == 0) {
-		struct pt_regs *regs = get_user_regs(tsk);
+		struct pt_regs *regs = task_pt_regs(tsk);
 		*regs = newregs;
 		ret = 0;
 	}
@@ -586,7 +570,7 @@ withdraw_debug_trap(struct pt_regs *regs)
 	}
 }
 
-static void
+void
 init_debug_traps(struct task_struct *child)
 {
 	struct debug_trap *p = &child->thread.debug_trap;
@@ -609,10 +593,9 @@ void ptrace_disable(struct task_struct *child)
 	/* nothing to do.. */
 }
 
-static int
-do_ptrace(long request, struct task_struct *child, long addr, long data)
+long
+arch_ptrace(struct task_struct *child, long request, long addr, long data)
 {
-	unsigned long tmp;
 	int ret;
 
 	switch (request) {
@@ -621,11 +604,7 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 	 */
 	case PTRACE_PEEKTEXT:
 	case PTRACE_PEEKDATA:
-		ret = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
-		if (ret == sizeof(tmp))
-			ret = put_user(tmp,(unsigned long __user *) data);
-		else
-			ret = -EIO;
+		ret = generic_ptrace_peekdata(child, addr, data);
 		break;
 
 	/*
@@ -641,15 +620,9 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 	 */
 	case PTRACE_POKETEXT:
 	case PTRACE_POKEDATA:
-		ret = access_process_vm(child, addr, &data, sizeof(data), 1);
-		if (ret == sizeof(data)) {
-			ret = 0;
-			if (request == PTRACE_POKETEXT) {
-				invalidate_cache();
-			}
-		} else {
-			ret = -EIO;
-		}
+		ret = generic_ptrace_pokedata(child, addr, data);
+		if (ret == 0 && request == PTRACE_POKETEXT)
+			invalidate_cache();
 		break;
 
 	/*
@@ -665,7 +638,7 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 	case PTRACE_SYSCALL:
 	case PTRACE_CONT:
 		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			break;
 		if (request == PTRACE_SYSCALL)
 			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
@@ -700,7 +673,7 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 		unsigned long pc, insn;
 
 		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
+		if (!valid_signal(data))
 			break;
 		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		if ((child->ptrace & PT_DTRACE) == 0) {
@@ -731,14 +704,6 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 		break;
 	}
 
-	/*
-	 * detach a process that was attached.
-	 */
-	case PTRACE_DETACH:
-		ret = 0;
-		ret = ptrace_detach(child, data);
-		break;
-
 	case PTRACE_GETREGS:
 		ret = ptrace_getregs(child, (void __user *)data);
 		break;
@@ -751,54 +716,6 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 		ret = ptrace_request(child, request, addr, data);
 		break;
 	}
-
-	return ret;
-}
-
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
-{
-	struct task_struct *child;
-	int ret;
-
-	lock_kernel();
-	ret = -EPERM;
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
-		goto out;
-	}
-	ret = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-
-	ret = -EPERM;
-	if (pid == 1)		/* you may not mess with init */
-		goto out;
-
-	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
-		if (ret == 0)
-			init_debug_traps(child);
-		goto out_tsk;
-	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret == 0)
-		ret = do_ptrace(request, child, addr, data);
-
-out_tsk:
-	put_task_struct(child);
-out:
-	unlock_kernel();
 
 	return ret;
 }

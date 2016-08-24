@@ -6,7 +6,6 @@
  * Copyright (C) 1996,1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -15,16 +14,40 @@
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/system.h>
+#include <asm/ldc.h>
+
+int prom_service_exists(const char *service_name)
+{
+	int err = p1275_cmd("test", P1275_ARG(0, P1275_ARG_IN_STRING) |
+			    P1275_INOUT(1, 1), service_name);
+
+	if (err)
+		return 0;
+	return 1;
+}
+
+void prom_sun4v_guest_soft_state(void)
+{
+	const char *svc = "SUNW,soft-state-supported";
+
+	if (!prom_service_exists(svc))
+		return;
+	p1275_cmd(svc, P1275_INOUT(0, 0));
+}
 
 /* Reset and reboot the machine with the command 'bcommand'. */
-void prom_reboot(char *bcommand)
+void prom_reboot(const char *bcommand)
 {
+#ifdef CONFIG_SUN_LDOMS
+	if (ldom_domaining_enabled)
+		ldom_reboot(bcommand);
+#endif
 	p1275_cmd("boot", P1275_ARG(0, P1275_ARG_IN_STRING) |
 		  P1275_INOUT(1, 0), bcommand);
 }
 
 /* Forth evaluate the expression contained in 'fstring'. */
-void prom_feval(char *fstring)
+void prom_feval(const char *fstring)
 {
 	if (!fstring || fstring[0] == 0)
 		return;
@@ -49,7 +72,7 @@ void prom_cmdline(void)
 
 	local_irq_save(flags);
 
-	if (!serial_console && prom_palette)
+	if (prom_palette)
 		prom_palette(1);
 
 #ifdef CONFIG_SMP
@@ -62,24 +85,20 @@ void prom_cmdline(void)
 	smp_release();
 #endif
 
-	if (!serial_console && prom_palette)
+	if (prom_palette)
 		prom_palette(0);
 
 	local_irq_restore(flags);
 }
-
-#ifdef CONFIG_SMP
-extern void smp_promstop_others(void);
-#endif
 
 /* Drop into the prom, but completely terminate the program.
  * No chance of continuing.
  */
 void prom_halt(void)
 {
-#ifdef CONFIG_SMP
-	smp_promstop_others();
-	udelay(8000);
+#ifdef CONFIG_SUN_LDOMS
+	if (ldom_domaining_enabled)
+		ldom_power_off();
 #endif
 again:
 	p1275_cmd("exit", P1275_INOUT(0, 0));
@@ -88,9 +107,9 @@ again:
 
 void prom_halt_power_off(void)
 {
-#ifdef CONFIG_SMP
-	smp_promstop_others();
-	udelay(8000);
+#ifdef CONFIG_SUN_LDOMS
+	if (ldom_domaining_enabled)
+		ldom_power_off();
 #endif
 	p1275_cmd("SUNW,power-off", P1275_INOUT(0, 0));
 
@@ -124,45 +143,19 @@ unsigned char prom_get_idprom(char *idbuf, int num_bytes)
 	return 0xff;
 }
 
-/* Get the major prom version number. */
-int prom_version(void)
-{
-	return PROM_P1275;
-}
-
-/* Get the prom plugin-revision. */
-int prom_getrev(void)
-{
-	return prom_rev;
-}
-
-/* Get the prom firmware print revision. */
-int prom_getprev(void)
-{
-	return prom_prev;
-}
-
-/* Install Linux trap table so PROM uses that instead of its own. */
-void prom_set_trap_table(unsigned long tba)
-{
-	p1275_cmd("SUNW,set-trap-table", P1275_INOUT(1, 0), tba);
-}
-
-int mmu_ihandle_cache = 0;
-
 int prom_get_mmu_ihandle(void)
 {
 	int node, ret;
 
-	if (mmu_ihandle_cache != 0)
-		return mmu_ihandle_cache;
+	if (prom_mmu_ihandle_cache != 0)
+		return prom_mmu_ihandle_cache;
 
-	node = prom_finddevice("/chosen");
-	ret = prom_getint(node, "mmu");
+	node = prom_finddevice(prom_chosen_path);
+	ret = prom_getint(node, prom_mmu_name);
 	if (ret == -1 || ret == 0)
-		mmu_ihandle_cache = -1;
+		prom_mmu_ihandle_cache = -1;
 	else
-		mmu_ihandle_cache = ret;
+		prom_mmu_ihandle_cache = ret;
 
 	return ret;
 }
@@ -190,7 +183,7 @@ long prom_itlb_load(unsigned long index,
 		    unsigned long tte_data,
 		    unsigned long vaddr)
 {
-	return p1275_cmd("call-method",
+	return p1275_cmd(prom_callmethod_name,
 			 (P1275_ARG(0, P1275_ARG_IN_STRING) |
 			  P1275_ARG(2, P1275_ARG_IN_64B) |
 			  P1275_ARG(3, P1275_ARG_IN_64B) |
@@ -207,7 +200,7 @@ long prom_dtlb_load(unsigned long index,
 		    unsigned long tte_data,
 		    unsigned long vaddr)
 {
-	return p1275_cmd("call-method",
+	return p1275_cmd(prom_callmethod_name,
 			 (P1275_ARG(0, P1275_ARG_IN_STRING) |
 			  P1275_ARG(2, P1275_ARG_IN_64B) |
 			  P1275_ARG(3, P1275_ARG_IN_64B) |
@@ -223,13 +216,13 @@ long prom_dtlb_load(unsigned long index,
 int prom_map(int mode, unsigned long size,
 	     unsigned long vaddr, unsigned long paddr)
 {
-	int ret = p1275_cmd("call-method",
+	int ret = p1275_cmd(prom_callmethod_name,
 			    (P1275_ARG(0, P1275_ARG_IN_STRING) |
 			     P1275_ARG(3, P1275_ARG_IN_64B) |
 			     P1275_ARG(4, P1275_ARG_IN_64B) |
 			     P1275_ARG(6, P1275_ARG_IN_64B) |
 			     P1275_INOUT(7, 1)),
-			    "map",
+			    prom_map_name,
 			    prom_get_mmu_ihandle(),
 			    mode,
 			    size,
@@ -244,12 +237,12 @@ int prom_map(int mode, unsigned long size,
 
 void prom_unmap(unsigned long size, unsigned long vaddr)
 {
-	p1275_cmd("call-method",
+	p1275_cmd(prom_callmethod_name,
 		  (P1275_ARG(0, P1275_ARG_IN_STRING) |
 		   P1275_ARG(2, P1275_ARG_IN_64B) |
 		   P1275_ARG(3, P1275_ARG_IN_64B) |
 		   P1275_INOUT(4, 0)),
-		  "unmap",
+		  prom_unmap_name,
 		  prom_get_mmu_ihandle(),
 		  size,
 		  vaddr);
@@ -258,7 +251,7 @@ void prom_unmap(unsigned long size, unsigned long vaddr)
 /* Set aside physical memory which is not touched or modified
  * across soft resets.
  */
-unsigned long prom_retain(char *name,
+unsigned long prom_retain(const char *name,
 			  unsigned long pa_low, unsigned long pa_high,
 			  long size, long align)
 {
@@ -290,7 +283,7 @@ int prom_getunumber(int syndrome_code,
 		    unsigned long phys_addr,
 		    char *buf, int buflen)
 {
-	return p1275_cmd("call-method",
+	return p1275_cmd(prom_callmethod_name,
 			 (P1275_ARG(0, P1275_ARG_IN_STRING)	|
 			  P1275_ARG(3, P1275_ARG_OUT_BUF)	|
 			  P1275_ARG(6, P1275_ARG_IN_64B)	|
@@ -317,9 +310,21 @@ int prom_wakeupsystem(void)
 }
 
 #ifdef CONFIG_SMP
-void prom_startcpu(int cpunode, unsigned long pc, unsigned long o0)
+void prom_startcpu(int cpunode, unsigned long pc, unsigned long arg)
 {
-	p1275_cmd("SUNW,start-cpu", P1275_INOUT(3, 0), cpunode, pc, o0);
+	p1275_cmd("SUNW,start-cpu", P1275_INOUT(3, 0), cpunode, pc, arg);
+}
+
+void prom_startcpu_cpuid(int cpuid, unsigned long pc, unsigned long arg)
+{
+	p1275_cmd("SUNW,start-cpu-by-cpuid", P1275_INOUT(3, 0),
+		  cpuid, pc, arg);
+}
+
+void prom_stopcpu_cpuid(int cpuid)
+{
+	p1275_cmd("SUNW,stop-cpu-by-cpuid", P1275_INOUT(1, 0),
+		  cpuid);
 }
 
 void prom_stopself(void)

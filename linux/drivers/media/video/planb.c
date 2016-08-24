@@ -1,4 +1,4 @@
-/* 
+/*
     planb - PlanB frame grabber driver
 
     PlanB is used in the 7x00/8x00 series of PowerMacintosh
@@ -40,6 +40,8 @@
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/videodev.h>
+#include <media/v4l2-common.h>
+#include <linux/wait.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/prom.h>
@@ -47,7 +49,7 @@
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/irq.h>
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
 
 #include "planb.h"
 #include "saa7196.h"
@@ -75,9 +77,9 @@ static volatile struct planb_registers *planb_regs;
 static int def_norm = PLANB_DEF_NORM;	/* default norm */
 static int video_nr = -1;
 
-MODULE_PARM(def_norm, "i");
+module_param(def_norm, int, 0);
 MODULE_PARM_DESC(def_norm, "Default startup norm (0=PAL, 1=NTSC, 2=SECAM)");
-MODULE_PARM(video_nr,"i");
+module_param(video_nr, int, 0);
 MODULE_LICENSE("GPL");
 
 
@@ -89,7 +91,6 @@ static void planb_close(struct video_device *);
 static int planb_ioctl(struct video_device *, unsigned int, void *);
 static int planb_init_done(struct video_device *);
 static int planb_mmap(struct video_device *, const char *, unsigned long);
-static void planb_irq(int, void *, struct pt_regs *);
 static void release_planb(void);
 int init_planbs(struct video_init *);
 
@@ -136,7 +137,7 @@ static int grabbuf_alloc(struct planb *pb)
 		+ MAX_LNUM
 #endif /* PLANB_GSCANLINE */
 		);
-	if ((pb->rawbuf = (unsigned char**) kmalloc (npage
+	if ((pb->rawbuf = kmalloc(npage
 				* sizeof(unsigned long), GFP_KERNEL)) == 0)
 		return -ENOMEM;
 	for (i = 0; i < npage; i++) {
@@ -328,12 +329,12 @@ static volatile struct dbdma_cmd *cmd_geo_setup(
 
 static inline void planb_lock(struct planb *pb)
 {
-	down(&pb->lock);
+	mutex_lock(&pb->lock);
 }
 
 static inline void planb_unlock(struct planb *pb)
 {
-	up(&pb->lock);
+	mutex_unlock(&pb->lock);
 }
 
 /***************/
@@ -351,9 +352,8 @@ static int planb_prepare_open(struct planb *pb)
 		* PLANB_DUMMY)*sizeof(struct dbdma_cmd)
 		+(PLANB_MAXLINES*((PLANB_MAXPIXELS+7)& ~7))/8
 		+MAX_GBUFFERS*sizeof(unsigned int);
-	if ((pb->priv_space = kmalloc (size, GFP_KERNEL)) == 0)
+	if ((pb->priv_space = kzalloc (size, GFP_KERNEL)) == 0)
 		return -ENOMEM;
-	memset ((void *) pb->priv_space, 0, size);
 	pb->overlay_last1 = pb->ch1_cmd = (volatile struct dbdma_cmd *)
 						DBDMA_ALIGN (pb->priv_space);
 	pb->overlay_last2 = pb->ch2_cmd = pb->ch1_cmd + pb->tab_size;
@@ -420,6 +420,16 @@ static void planb_prepare_close(struct planb *pb)
 /*****************************/
 /* overlay support functions */
 /*****************************/
+
+static inline int overlay_is_active(struct planb *pb)
+{
+	unsigned int size = pb->tab_size * sizeof(struct dbdma_cmd);
+	unsigned int caddr = (unsigned)in_le32(&pb->planb_base->ch1.cmdptr);
+
+	return (in_le32(&pb->overlay_last1->cmd_dep) == pb->ch1_cmd_phys)
+			&& (caddr < (pb->ch1_cmd_phys + size))
+			&& (caddr >= (unsigned)pb->ch1_cmd_phys);
+}
 
 static void overlay_start(struct planb *pb)
 {
@@ -573,7 +583,7 @@ finish:
 	wake_up_interruptible(&pb->suspendq);
 }
 
-static void add_clip(struct planb *pb, struct video_clip *clip) 
+static void add_clip(struct planb *pb, struct video_clip *clip)
 {
 	volatile unsigned char	*base;
 	int	xc = clip->x, yc = clip->y;
@@ -747,7 +757,7 @@ static void cmd_buff(struct planb *pb)
 							PLANB_SET(CH_SYNC));
 	tab_cmd_store(c1++, (unsigned)(&pb->planb_base_phys->ch1.br_sel),
 							PLANB_SET(DMA_ABORT));
-	
+
 	/* odd field data: */
 	jump = virt_to_bus(c1 + nlines / 2);
 	for (i=1; i < nlines; i += stepsize, c1++)
@@ -833,34 +843,24 @@ cmd_tab_mask_end:
 /*********************************/
 
 static int palette2fmt[] = {
-       0,
-       PLANB_GRAY,
-       0,
-       0,
-       0,
-       PLANB_COLOUR32,
-       PLANB_COLOUR15,
-       0,
-       0,
-       0,
-       0,
-       0,
-       0,
-       0,
-       0,
+	0,
+	PLANB_GRAY,
+	0,
+	0,
+	0,
+	PLANB_COLOUR32,
+	PLANB_COLOUR15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
 };
 
 #define PLANB_PALETTE_MAX 15
-
-static inline int overlay_is_active(struct planb *pb)
-{
-	unsigned int size = pb->tab_size * sizeof(struct dbdma_cmd);
-	unsigned int caddr = (unsigned)in_le32(&pb->planb_base->ch1.cmdptr);
-
-	return (in_le32(&pb->overlay_last1->cmd_dep) == pb->ch1_cmd_phys)
-			&& (caddr < (pb->ch1_cmd_phys + size))
-			&& (caddr >= (unsigned)pb->ch1_cmd_phys);
-}
 
 static int vgrab(struct planb *pb, struct video_mmap *mp)
 {
@@ -1246,7 +1246,7 @@ static volatile struct dbdma_cmd *setup_grab_cmd(int fr, struct planb *pb)
 	tab_cmd_dbdma(c1, DBDMA_NOP | BR_IFCLR, virt_to_bus(c1-3)); c1++;
 	tab_cmd_store(c1++, (unsigned)(&pb->planb_base_phys->ch1.br_sel),
 		PLANB_SET(DMA_ABORT));
-	
+
 	/* odd field data: */
 	jump_addr = c1 + TAB_FACTOR * nlines / 2;
 	jump = virt_to_bus(jump_addr);
@@ -1314,7 +1314,7 @@ cmd_tab_data_end:
 	return c1;
 }
 
-static void planb_irq(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t planb_irq(int irq, void *dev_id)
 {
 	unsigned int stat, astat;
 	struct planb *pb = (struct planb *)dev_id;
@@ -1357,13 +1357,14 @@ static void planb_irq(int irq, void *dev_id, struct pt_regs * regs)
 		pb->frame_stat[fr] = GBUFFER_DONE;
 		pb->grabbing--;
 		wake_up_interruptible(&pb->capq);
-		return;
+		return IRQ_HANDLED;
 	}
 	/* incorrect interrupts? */
 	pb->intr_mask = PLANB_CLR_IRQ;
 	out_le32(&pb->planb_base->intr_stat, PLANB_CLR_IRQ);
 	printk(KERN_ERR "PlanB: IRQ lockup, cleared intrrupts"
 							" unconditionally\n");
+	return IRQ_HANDLED;
 }
 
 /*******************************
@@ -1382,7 +1383,7 @@ static int planb_open(struct video_device *dev, int mode)
 	pb->user++;
 
 	DEBUG("PlanB: device opened\n");
-	return 0;   
+	return 0;
 }
 
 static void planb_close(struct video_device *dev)
@@ -1423,9 +1424,9 @@ static long planb_write(struct video_device *v, const char *buf,
 static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 {
 	struct planb *pb=(struct planb *)dev;
-  	
+
 	switch (cmd)
-	{	
+	{
 		case VIDIOCGCAP:
 		{
 			struct video_capability b;
@@ -1439,26 +1440,26 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			b.channels = 2;	/* composite & svhs */
 			b.audios = 0;
 			b.maxwidth = PLANB_MAXPIXELS;
-                        b.maxheight = PLANB_MAXLINES;
-                        b.minwidth = 32; /* wild guess */
-                        b.minheight = 32;
-                        if (copy_to_user(arg,&b,sizeof(b)))
-                                return -EFAULT;
+			b.maxheight = PLANB_MAXLINES;
+			b.minwidth = 32; /* wild guess */
+			b.minheight = 32;
+			if (copy_to_user(arg,&b,sizeof(b)))
+				return -EFAULT;
 			return 0;
 		}
 		case VIDIOCSFBUF:
 		{
-                        struct video_buffer v;
+			struct video_buffer v;
 			unsigned short bpp;
 			unsigned int fmt;
 
 			DEBUG("PlanB: IOCTL VIDIOCSFBUF\n");
 
-                        if (!capable(CAP_SYS_ADMIN)
+			if (!capable(CAP_SYS_ADMIN)
 			|| !capable(CAP_SYS_RAWIO))
-                                return -EPERM;
-                        if (copy_from_user(&v, arg,sizeof(v)))
-                                return -EFAULT;
+				return -EPERM;
+			if (copy_from_user(&v, arg,sizeof(v)))
+				return -EFAULT;
 			planb_lock(pb);
 			switch(v.depth) {
 			case 8:
@@ -1477,7 +1478,7 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				break;
 			default:
 				planb_unlock(pb);
-                                return -EINVAL;
+				return -EINVAL;
 			}
 			if (bpp * v.width > v.bytesperline) {
 				planb_unlock(pb);
@@ -1492,7 +1493,7 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			pb->win.bpl = pb->win.bpp * pb->win.swidth;
 			pb->win.pad = v.bytesperline - pb->win.bpl;
 
-                        DEBUG("PlanB: Display at %p is %d by %d, bytedepth %d,"
+			DEBUG("PlanB: Display at %p is %d by %d, bytedepth %d,"
 				" bpl %d (+ %d)\n", v.base, v.width,v.height,
 				pb->win.bpp, pb->win.bpl, pb->win.pad);
 
@@ -1503,11 +1504,11 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				resume_overlay(pb);
 			}
 			planb_unlock(pb);
-			return 0;		
+			return 0;
 		}
 		case VIDIOCGFBUF:
 		{
-                        struct video_buffer v;
+			struct video_buffer v;
 
 			DEBUG("PlanB: IOCTL VIDIOCGFBUF\n");
 
@@ -1517,15 +1518,15 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			v.depth = pb->win.depth;
 			v.bytesperline = pb->win.bpl + pb->win.pad;
 			if (copy_to_user(arg, &v, sizeof(v)))
-                                return -EFAULT;
+				return -EFAULT;
 			return 0;
 		}
 		case VIDIOCCAPTURE:
 		{
 			int i;
 
-                        if(copy_from_user(&i, arg, sizeof(i)))
-                                return -EFAULT;
+			if(copy_from_user(&i, arg, sizeof(i)))
+				return -EFAULT;
 			if(i==0) {
 				DEBUG("PlanB: IOCTL VIDIOCCAPTURE Stop\n");
 
@@ -1609,8 +1610,7 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				}
 				planb_lock(pb);
 				/* empty the grabbing queue */
-				while(pb->grabbing)
-					interruptible_sleep_on(&pb->capq);
+				wait_event(pb->capq, !pb->grabbing);
 				pb->maxlines = maxlines;
 				pb->win.norm = v.norm;
 				/* Stop overlay if running */
@@ -1695,7 +1695,7 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			struct video_window	vw;
 			struct video_clip	clip;
 			int 			i;
-			
+
 			DEBUG("PlanB: IOCTL VIDIOCSWIN\n");
 
 			if(copy_from_user(&vw,arg,sizeof(vw)))
@@ -1749,7 +1749,7 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				return -EFAULT;
 			return 0;
 		}
-	        case VIDIOCSYNC: {
+		case VIDIOCSYNC: {
 			int i;
 
 			IDEBUG("PlanB: IOCTL VIDIOCSYNC\n");
@@ -1759,42 +1759,42 @@ static int planb_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 
 			IDEBUG("PlanB: sync to frame %d\n", i);
 
-                        if(i > (MAX_GBUFFERS - 1) || i < 0)
-                                return -EINVAL;
+			if(i > (MAX_GBUFFERS - 1) || i < 0)
+				return -EINVAL;
 chk_grab:
-                        switch (pb->frame_stat[i]) {
-                        case GBUFFER_UNUSED:
-                                return -EINVAL;
+			switch (pb->frame_stat[i]) {
+			case GBUFFER_UNUSED:
+				return -EINVAL;
 			case GBUFFER_GRABBING:
 				IDEBUG("PlanB: waiting for grab"
 							" done (%d)\n", i);
- 			        interruptible_sleep_on(&pb->capq);
+				interruptible_sleep_on(&pb->capq);
 				if(signal_pending(current))
 					return -EINTR;
 				goto chk_grab;
-                        case GBUFFER_DONE:
-                                pb->frame_stat[i] = GBUFFER_UNUSED;
-                                break;
-                        }
-                        return 0;
+			case GBUFFER_DONE:
+				pb->frame_stat[i] = GBUFFER_UNUSED;
+				break;
+			}
+			return 0;
 		}
 
-	        case VIDIOCMCAPTURE:
+		case VIDIOCMCAPTURE:
 		{
-                        struct video_mmap vm;
+			struct video_mmap vm;
 			volatile unsigned int status;
 
 			IDEBUG("PlanB: IOCTL VIDIOCMCAPTURE\n");
 
 			if(copy_from_user((void *) &vm,(void *)arg,sizeof(vm)))
 				return -EFAULT;
-                        status = pb->frame_stat[vm.frame];
-                        if (status != GBUFFER_UNUSED)
-                                return -EBUSY;
+			status = pb->frame_stat[vm.frame];
+			if (status != GBUFFER_UNUSED)
+				return -EBUSY;
 
-		        return vgrab(pb, &vm);
+			return vgrab(pb, &vm);
 		}
-		
+
 		case VIDIOCGMBUF:
 		{
 			int i;
@@ -1811,7 +1811,7 @@ chk_grab:
 				return -EFAULT;
 			return 0;
 		}
-		
+
 		case PLANBIOCGSAAREGS:
 		{
 			struct planb_saa_regs preg;
@@ -1828,7 +1828,7 @@ chk_grab:
 				return -EFAULT;
 			return 0;
 		}
-		
+
 		case PLANBIOCSSAAREGS:
 		{
 			struct planb_saa_regs preg;
@@ -1842,7 +1842,7 @@ chk_grab:
 			saa_set (preg.addr, preg.val, pb);
 			return 0;
 		}
-		
+
 		case PLANBIOCGSTAT:
 		{
 			struct planb_stat_regs pstat;
@@ -1859,7 +1859,7 @@ chk_grab:
 				return -EFAULT;
 			return 0;
 		}
-		
+
 		case PLANBIOCSMODE: {
 			int v;
 
@@ -1985,10 +1985,10 @@ static int planb_mmap(struct vm_area_struct *vma, struct video_device *dev, cons
 {
 	int i;
 	struct planb *pb = (struct planb *)dev;
-        unsigned long start = (unsigned long)adr;
+	unsigned long start = (unsigned long)adr;
 
 	if (size > MAX_GBUFFERS * PLANB_MAX_FBUF)
-	        return -EINVAL;
+		return -EINVAL;
 	if (!pb->rawbuf) {
 		int err;
 		if((err=grabbuf_alloc(pb)))
@@ -2013,7 +2013,6 @@ static struct video_device planb_template=
 	.owner		= THIS_MODULE,
 	.name		= PLANB_DEVICE_NAME,
 	.type		= VID_TYPE_OVERLAY,
-	.hardware	= VID_HARDWARE_PLANB,
 	.open		= planb_open,
 	.close		= planb_close,
 	.read		= planb_read,
@@ -2067,7 +2066,7 @@ static int init_planb(struct planb *pb)
 #endif
 	pb->tab_size = PLANB_MAXLINES + 40;
 	pb->suspend = 0;
-	init_MUTEX(&pb->lock);
+	mutex_init(&pb->lock);
 	pb->ch1_cmd = 0;
 	pb->ch2_cmd = 0;
 	pb->mask = 0;
@@ -2091,10 +2090,10 @@ static int init_planb(struct planb *pb)
 	/* clear interrupt mask */
 	pb->intr_mask = PLANB_CLR_IRQ;
 
-        result = request_irq(pb->irq, planb_irq, 0, "PlanB", (void *)pb);
-        if (result < 0) {
-	        if (result==-EINVAL)
-	                printk(KERN_ERR "PlanB: Bad irq number (%d) "
+	result = request_irq(pb->irq, planb_irq, 0, "PlanB", pb);
+	if (result < 0) {
+		if (result==-EINVAL)
+			printk(KERN_ERR "PlanB: Bad irq number (%d) "
 						"or handler\n", (int)pb->irq);
 		else if (result==-EBUSY)
 			printk(KERN_ERR "PlanB: I don't know why, "
@@ -2102,7 +2101,7 @@ static int init_planb(struct planb *pb)
 		return result;
 	}
 	disable_irq(pb->irq);
-        
+
 	/* Now add the template and register the device unit. */
 	memcpy(&pb->video_dev,&planb_template,sizeof(planb_template));
 
@@ -2143,7 +2142,7 @@ static int init_planb(struct planb *pb)
 }
 
 /*
- *	Scan for a PlanB controller, request the irq and map the io memory 
+ *	Scan for a PlanB controller, request the irq and map the io memory
  */
 
 static int find_planb(void)
@@ -2156,10 +2155,10 @@ static int find_planb(void)
 	struct pci_dev 		*pdev;
 	int rc;
 
-	if (_machine != _MACH_Pmac)
+	if (!machine_is(powermac))
 		return 0;
 
-	planb_devices = find_devices("planb");
+	planb_devices = of_find_node_by_name(NULL, "planb");
 	if (planb_devices == 0) {
 		planb_num=0;
 		printk(KERN_WARNING "PlanB: no device found!\n");
@@ -2171,15 +2170,17 @@ static int find_planb(void)
 	pb = &planbs[0];
 	planb_num = 1;
 
-        if (planb_devices->n_addrs != 1) {
-                printk (KERN_WARNING "PlanB: expecting 1 address for planb "
-                	"(got %d)", planb_devices->n_addrs);
+	if (planb_devices->n_addrs != 1) {
+		printk (KERN_WARNING "PlanB: expecting 1 address for planb "
+			"(got %d)", planb_devices->n_addrs);
+		of_node_put(planb_devices);
 		return 0;
 	}
 
 	if (planb_devices->n_intrs == 0) {
 		printk(KERN_WARNING "PlanB: no intrs for device %s\n",
 		       planb_devices->full_name);
+		of_node_put(planb_devices);
 		return 0;
 	} else {
 		irq = planb_devices->intrs[0].line;
@@ -2201,12 +2202,13 @@ static int find_planb(void)
 	confreg = planb_devices->addrs[0].space & 0xff;
 	old_base = planb_devices->addrs[0].address;
 	new_base = 0xf1000000;
+	of_node_put(planb_devices);
 
 	DEBUG("PlanB: Found on bus %d, dev %d, func %d, "
 		"membase 0x%x (base reg. 0x%x)\n",
 		bus, PCI_SLOT(dev_fn), PCI_FUNC(dev_fn), old_base, confreg);
 
-	pdev = pci_find_slot (bus, dev_fn);
+	pdev = pci_get_bus_and_slot(bus, dev_fn);
 	if (!pdev) {
 		printk(KERN_ERR "planb: cannot find slot\n");
 		goto err_out;
@@ -2236,13 +2238,15 @@ static int find_planb(void)
 	pb->planb_base = planb_regs;
 	pb->planb_base_phys = (struct planb_registers *)new_base;
 	pb->irq	= irq;
-	
+	pb->dev = pdev;
+
 	return planb_num;
 
 err_out_disable:
 	pci_disable_device(pdev);
 err_out:
 	/* FIXME handle error */   /* comment moved from pci_find_slot, above */
+	pci_dev_put(pdev);
 	return 0;
 }
 
@@ -2251,7 +2255,7 @@ static void release_planb(void)
 	int i;
 	struct planb *pb;
 
-	for (i=0;i<planb_num; i++) 
+	for (i=0;i<planb_num; i++)
 	{
 		pb=&planbs[i];
 
@@ -2270,6 +2274,8 @@ static void release_planb(void)
 		printk(KERN_INFO "PlanB: unregistering with v4l\n");
 		video_unregister_device(&pb->video_dev);
 
+		pci_dev_put(pb->dev);
+
 		/* note that iounmap() does nothing on the PPC right now */
 		iounmap ((void *)pb->planb_base);
 	}
@@ -2278,7 +2284,7 @@ static void release_planb(void)
 static int __init init_planbs(void)
 {
 	int i;
-  
+
 	if (find_planb()<=0)
 		return -EIO;
 
@@ -2288,9 +2294,9 @@ static int __init init_planbs(void)
 							" with v4l\n", i);
 			release_planb();
 			return -EIO;
-		} 
+		}
 		printk(KERN_INFO "PlanB: registered device %d with v4l\n", i);
-	}  
+	}
 	return 0;
 }
 

@@ -10,6 +10,8 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/signal.h>	/* for SIGBUS */
+#include <linux/sched.h>	/* schow_regs(), force_sig() */
 
 #include <asm/module.h>
 #include <asm/sn/addrs.h>
@@ -18,9 +20,6 @@
 #include <asm/tlbdebug.h>
 #include <asm/traps.h>
 #include <asm/uaccess.h>
-
-extern void dump_tlb_addr(unsigned long addr);
-extern void dump_tlb_all(void);
 
 static void dump_hub_information(unsigned long errst0, unsigned long errst1)
 {

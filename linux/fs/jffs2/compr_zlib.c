@@ -1,13 +1,11 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright (C) 2001-2003 Red Hat, Inc.
+ * Copyright © 2001-2007 Red Hat, Inc.
  *
  * Created by David Woodhouse <dwmw2@infradead.org>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
- *
- * $Id: compr_zlib.c,v 1.29 2004/11/16 20:36:11 dwmw2 Exp $
  *
  */
 
@@ -15,31 +13,30 @@
 #error "The userspace support got too messy and was removed. Update your mkfs.jffs2"
 #endif
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/zlib.h>
 #include <linux/zutil.h>
-#include <asm/semaphore.h>
 #include "nodelist.h"
 #include "compr.h"
 
-	/* Plan: call deflate() with avail_in == *sourcelen, 
-		avail_out = *dstlen - 12 and flush == Z_FINISH. 
+	/* Plan: call deflate() with avail_in == *sourcelen,
+		avail_out = *dstlen - 12 and flush == Z_FINISH.
 		If it doesn't manage to finish,	call it again with
 		avail_in == 0 and avail_out set to the remaining 12
-		bytes for it to clean up. 
+		bytes for it to clean up.
 	   Q: Is 12 bytes sufficient?
 	*/
 #define STREAM_END_SPACE 12
 
-static DECLARE_MUTEX(deflate_sem);
-static DECLARE_MUTEX(inflate_sem);
+static DEFINE_MUTEX(deflate_mutex);
+static DEFINE_MUTEX(inflate_mutex);
 static z_stream inf_strm, def_strm;
 
 #ifdef __KERNEL__ /* Linux-only */
 #include <linux/vmalloc.h>
 #include <linux/init.h>
+#include <linux/mutex.h>
 
 static int __init alloc_workspaces(void)
 {
@@ -69,25 +66,27 @@ static void free_workspaces(void)
 #define free_workspaces() do { } while(0)
 #endif /* __KERNEL__ */
 
-int jffs2_zlib_compress(unsigned char *data_in, unsigned char *cpage_out, 
-		   uint32_t *sourcelen, uint32_t *dstlen, void *model)
+static int jffs2_zlib_compress(unsigned char *data_in,
+			       unsigned char *cpage_out,
+			       uint32_t *sourcelen, uint32_t *dstlen,
+			       void *model)
 {
 	int ret;
 
 	if (*dstlen <= STREAM_END_SPACE)
 		return -1;
 
-	down(&deflate_sem);
+	mutex_lock(&deflate_mutex);
 
 	if (Z_OK != zlib_deflateInit(&def_strm, 3)) {
 		printk(KERN_WARNING "deflateInit failed\n");
-		up(&deflate_sem);
+		mutex_unlock(&deflate_mutex);
 		return -1;
 	}
 
 	def_strm.next_in = data_in;
 	def_strm.total_in = 0;
-	
+
 	def_strm.next_out = cpage_out;
 	def_strm.total_out = 0;
 
@@ -97,12 +96,12 @@ int jffs2_zlib_compress(unsigned char *data_in, unsigned char *cpage_out,
 		D1(printk(KERN_DEBUG "calling deflate with avail_in %d, avail_out %d\n",
 			  def_strm.avail_in, def_strm.avail_out));
 		ret = zlib_deflate(&def_strm, Z_PARTIAL_FLUSH);
-		D1(printk(KERN_DEBUG "deflate returned with avail_in %d, avail_out %d, total_in %ld, total_out %ld\n", 
+		D1(printk(KERN_DEBUG "deflate returned with avail_in %d, avail_out %d, total_in %ld, total_out %ld\n",
 			  def_strm.avail_in, def_strm.avail_out, def_strm.total_in, def_strm.total_out));
 		if (ret != Z_OK) {
 			D1(printk(KERN_DEBUG "deflate in loop returned %d\n", ret));
 			zlib_deflateEnd(&def_strm);
-			up(&deflate_sem);
+			mutex_unlock(&deflate_mutex);
 			return -1;
 		}
 	}
@@ -131,22 +130,24 @@ int jffs2_zlib_compress(unsigned char *data_in, unsigned char *cpage_out,
 	*sourcelen = def_strm.total_in;
 	ret = 0;
  out:
-	up(&deflate_sem);
+	mutex_unlock(&deflate_mutex);
 	return ret;
 }
 
-int jffs2_zlib_decompress(unsigned char *data_in, unsigned char *cpage_out,
-		      uint32_t srclen, uint32_t destlen, void *model)
+static int jffs2_zlib_decompress(unsigned char *data_in,
+				 unsigned char *cpage_out,
+				 uint32_t srclen, uint32_t destlen,
+				 void *model)
 {
 	int ret;
 	int wbits = MAX_WBITS;
 
-	down(&inflate_sem);
+	mutex_lock(&inflate_mutex);
 
 	inf_strm.next_in = data_in;
 	inf_strm.avail_in = srclen;
 	inf_strm.total_in = 0;
-	
+
 	inf_strm.next_out = cpage_out;
 	inf_strm.avail_out = destlen;
 	inf_strm.total_out = 0;
@@ -169,7 +170,7 @@ int jffs2_zlib_decompress(unsigned char *data_in, unsigned char *cpage_out,
 
 	if (Z_OK != zlib_inflateInit2(&inf_strm, wbits)) {
 		printk(KERN_WARNING "inflateInit failed\n");
-		up(&inflate_sem);
+		mutex_unlock(&inflate_mutex);
 		return 1;
 	}
 
@@ -179,8 +180,8 @@ int jffs2_zlib_decompress(unsigned char *data_in, unsigned char *cpage_out,
 		printk(KERN_NOTICE "inflate returned %d\n", ret);
 	}
 	zlib_inflateEnd(&inf_strm);
-	up(&inflate_sem);
-        return 0;
+	mutex_unlock(&inflate_mutex);
+	return 0;
 }
 
 static struct jffs2_compressor jffs2_zlib_comp = {
@@ -202,11 +203,11 @@ int __init jffs2_zlib_init(void)
 
     ret = alloc_workspaces();
     if (ret)
-        return ret;
+	    return ret;
 
     ret = jffs2_register_compressor(&jffs2_zlib_comp);
     if (ret)
-        free_workspaces();
+	    free_workspaces();
 
     return ret;
 }

@@ -34,6 +34,7 @@
  *
  */
 
+#include <linux/err.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/types.h>
@@ -49,150 +50,106 @@
 # define RPCDBG_FACILITY	RPCDBG_AUTH
 #endif
 
-static inline int
-get_bytes(char **ptr, const char *end, void *res, int len)
+static const void *
+simple_get_bytes(const void *p, const void *end, void *res, int len)
 {
-	char *p, *q;
-	p = *ptr;
-	q = p + len;
-	if (q > end || q < p)
-		return -1;
+	const void *q = (const void *)((const char *)p + len);
+	if (unlikely(q > end || q < p))
+		return ERR_PTR(-EFAULT);
 	memcpy(res, p, len);
-	*ptr = q;
-	return 0;
+	return q;
 }
 
-static inline int
-get_netobj(char **ptr, const char *end, struct xdr_netobj *res)
+static const void *
+simple_get_netobj(const void *p, const void *end, struct xdr_netobj *res)
 {
-	char *p, *q;
-	p = *ptr;
-	if (get_bytes(&p, end, &res->len, sizeof(res->len)))
-		return -1;
-	q = p + res->len;
-	if(res->len == 0)
-		goto out_nocopy;
-	if (q > end || q < p)
-		return -1;
-	if (!(res->data = kmalloc(res->len, GFP_KERNEL)))
-		return -1;
-	memcpy(res->data, p, res->len);
-out_nocopy:
-	*ptr = q;
-	return 0;
+	const void *q;
+	unsigned int len;
+	p = simple_get_bytes(p, end, &len, sizeof(len));
+	if (IS_ERR(p))
+		return p;
+	res->len = len;
+	if (len == 0) {
+		res->data = NULL;
+		return p;
+	}
+	q = (const void *)((const char *)p + len);
+	if (unlikely(q > end || q < p))
+		return ERR_PTR(-EFAULT);
+	res->data = kmemdup(p, len, GFP_KERNEL);
+	if (unlikely(res->data == NULL))
+		return ERR_PTR(-ENOMEM);
+	return q;
 }
 
-static inline int
-get_key(char **p, char *end, struct crypto_tfm **res, int *resalg)
-{
-	struct xdr_netobj	key = {
-		.len = 0,
-		.data = NULL,
-	};
-	int			alg_mode,setkey = 0;
-	char			*alg_name;
-
-	if (get_bytes(p, end, resalg, sizeof(int)))
-		goto out_err;
-	if ((get_netobj(p, end, &key)))
-		goto out_err;
-
-	switch (*resalg) {
-		case NID_des_cbc:
-			alg_name = "des";
-			alg_mode = CRYPTO_TFM_MODE_CBC;
-			setkey = 1;
-			break;
-		case NID_md5:
-			if (key.len == 0) {
-				dprintk("RPC: SPKM3 get_key: NID_md5 zero Key length\n");
-			}
-			alg_name = "md5";
-			alg_mode = 0;
-			setkey = 0;
-			break;
-		case NID_cast5_cbc:
-			dprintk("RPC: SPKM3 get_key: case cast5_cbc, UNSUPPORTED \n");
-			goto out_err;
-			break;
-		default:
-			dprintk("RPC: SPKM3 get_key: unsupported algorithm %d", *resalg);
-			goto out_err_free_key;
-	}
-	if (!(*res = crypto_alloc_tfm(alg_name, alg_mode)))
-		goto out_err_free_key;
-	if (setkey) {
-		if (crypto_cipher_setkey(*res, key.data, key.len))
-			goto out_err_free_tfm;
-	}
-
-	if(key.len > 0)
-		kfree(key.data);
-	return 0;
-
-out_err_free_tfm:
-	crypto_free_tfm(*res);
-out_err_free_key:
-	if(key.len > 0)
-		kfree(key.data);
-out_err:
-	return -1;
-}
-
-static u32
-gss_import_sec_context_spkm3(struct xdr_netobj *inbuf,
+static int
+gss_import_sec_context_spkm3(const void *p, size_t len,
 				struct gss_ctx *ctx_id)
 {
-	char	*p = inbuf->data;
-	char	*end = inbuf->data + inbuf->len;
+	const void *end = (const void *)((const char *)p + len);
 	struct	spkm3_ctx *ctx;
+	int	version;
 
-	if (!(ctx = kmalloc(sizeof(*ctx), GFP_KERNEL)))
+	if (!(ctx = kzalloc(sizeof(*ctx), GFP_KERNEL)))
 		goto out_err;
-	memset(ctx, 0, sizeof(*ctx));
 
-	if (get_netobj(&p, end, &ctx->ctx_id))
+	p = simple_get_bytes(p, end, &version, sizeof(version));
+	if (IS_ERR(p))
+		goto out_err_free_ctx;
+	if (version != 1) {
+		dprintk("RPC:       unknown spkm3 token format: "
+				"obsolete nfs-utils?\n");
+		goto out_err_free_ctx;
+	}
+
+	p = simple_get_netobj(p, end, &ctx->ctx_id);
+	if (IS_ERR(p))
 		goto out_err_free_ctx;
 
-	if (get_bytes(&p, end, &ctx->qop, sizeof(ctx->qop)))
+	p = simple_get_bytes(p, end, &ctx->endtime, sizeof(ctx->endtime));
+	if (IS_ERR(p))
 		goto out_err_free_ctx_id;
 
-	if (get_netobj(&p, end, &ctx->mech_used))
+	p = simple_get_netobj(p, end, &ctx->mech_used);
+	if (IS_ERR(p))
+		goto out_err_free_ctx_id;
+
+	p = simple_get_bytes(p, end, &ctx->ret_flags, sizeof(ctx->ret_flags));
+	if (IS_ERR(p))
 		goto out_err_free_mech;
 
-	if (get_bytes(&p, end, &ctx->ret_flags, sizeof(ctx->ret_flags)))
+	p = simple_get_netobj(p, end, &ctx->conf_alg);
+	if (IS_ERR(p))
 		goto out_err_free_mech;
 
-	if (get_bytes(&p, end, &ctx->req_flags, sizeof(ctx->req_flags)))
-		goto out_err_free_mech;
+	p = simple_get_netobj(p, end, &ctx->derived_conf_key);
+	if (IS_ERR(p))
+		goto out_err_free_conf_alg;
 
-	if (get_netobj(&p, end, &ctx->share_key))
-		goto out_err_free_s_key;
+	p = simple_get_netobj(p, end, &ctx->intg_alg);
+	if (IS_ERR(p))
+		goto out_err_free_conf_key;
 
-	if (get_key(&p, end, &ctx->derived_conf_key, &ctx->conf_alg)) {
-		dprintk("RPC: SPKM3 confidentiality key will be NULL\n");
-	}
-
-	if (get_key(&p, end, &ctx->derived_integ_key, &ctx->intg_alg)) {
-		dprintk("RPC: SPKM3 integrity key will be NULL\n");
-	}
-
-	if (get_bytes(&p, end, &ctx->owf_alg, sizeof(ctx->owf_alg)))
-		goto out_err_free_s_key;
-
-	if (get_bytes(&p, end, &ctx->owf_alg, sizeof(ctx->owf_alg)))
-		goto out_err_free_s_key;
+	p = simple_get_netobj(p, end, &ctx->derived_integ_key);
+	if (IS_ERR(p))
+		goto out_err_free_intg_alg;
 
 	if (p != end)
-		goto out_err_free_s_key;
+		goto out_err_free_intg_key;
 
 	ctx_id->internal_ctx_id = ctx;
 
-	dprintk("Succesfully imported new spkm context.\n");
+	dprintk("RPC:       Successfully imported new spkm context.\n");
 	return 0;
 
-out_err_free_s_key:
-	kfree(ctx->share_key.data);
+out_err_free_intg_key:
+	kfree(ctx->derived_integ_key.data);
+out_err_free_intg_alg:
+	kfree(ctx->intg_alg.data);
+out_err_free_conf_key:
+	kfree(ctx->derived_conf_key.data);
+out_err_free_conf_alg:
+	kfree(ctx->conf_alg.data);
 out_err_free_mech:
 	kfree(ctx->mech_used.data);
 out_err_free_ctx_id:
@@ -200,60 +157,52 @@ out_err_free_ctx_id:
 out_err_free_ctx:
 	kfree(ctx);
 out_err:
-	return GSS_S_FAILURE;
+	return PTR_ERR(p);
 }
 
 static void
-gss_delete_sec_context_spkm3(void *internal_ctx) {
+gss_delete_sec_context_spkm3(void *internal_ctx)
+{
 	struct spkm3_ctx *sctx = internal_ctx;
 
-	if(sctx->derived_integ_key)
-		crypto_free_tfm(sctx->derived_integ_key);
-	if(sctx->derived_conf_key)
-		crypto_free_tfm(sctx->derived_conf_key);
-	if(sctx->share_key.data)
-		kfree(sctx->share_key.data);
-	if(sctx->mech_used.data)
-		kfree(sctx->mech_used.data);
+	kfree(sctx->derived_integ_key.data);
+	kfree(sctx->intg_alg.data);
+	kfree(sctx->derived_conf_key.data);
+	kfree(sctx->conf_alg.data);
+	kfree(sctx->mech_used.data);
+	kfree(sctx->ctx_id.data);
 	kfree(sctx);
 }
 
 static u32
 gss_verify_mic_spkm3(struct gss_ctx		*ctx,
 			struct xdr_buf		*signbuf,
-			struct xdr_netobj	*checksum,
-			u32		*qstate) {
+			struct xdr_netobj	*checksum)
+{
 	u32 maj_stat = 0;
-	int qop_state = 0;
 	struct spkm3_ctx *sctx = ctx->internal_ctx_id;
 
-	dprintk("RPC: gss_verify_mic_spkm3 calling spkm3_read_token\n");
-	maj_stat = spkm3_read_token(sctx, checksum, signbuf, &qop_state,
-				   SPKM_MIC_TOK);
+	maj_stat = spkm3_read_token(sctx, checksum, signbuf, SPKM_MIC_TOK);
 
-	if (!maj_stat && qop_state)
-	    *qstate = qop_state;
-
-	dprintk("RPC: gss_verify_mic_spkm3 returning %d\n", maj_stat);
+	dprintk("RPC:       gss_verify_mic_spkm3 returning %d\n", maj_stat);
 	return maj_stat;
 }
 
 static u32
 gss_get_mic_spkm3(struct gss_ctx	*ctx,
-		     u32		qop,
 		     struct xdr_buf	*message_buffer,
-		     struct xdr_netobj	*message_token) {
+		     struct xdr_netobj	*message_token)
+{
 	u32 err = 0;
 	struct spkm3_ctx *sctx = ctx->internal_ctx_id;
 
-	dprintk("RPC: gss_get_mic_spkm3\n");
-
-	err = spkm3_make_token(sctx, qop, message_buffer,
-			      message_token, SPKM_MIC_TOK);
+	err = spkm3_make_token(sctx, message_buffer,
+				message_token, SPKM_MIC_TOK);
+	dprintk("RPC:       gss_get_mic_spkm3 returning %d\n", err);
 	return err;
 }
 
-static struct gss_api_ops gss_spkm3_ops = {
+static const struct gss_api_ops gss_spkm3_ops = {
 	.gss_import_sec_context	= gss_import_sec_context_spkm3,
 	.gss_get_mic		= gss_get_mic_spkm3,
 	.gss_verify_mic		= gss_verify_mic_spkm3,
@@ -261,13 +210,14 @@ static struct gss_api_ops gss_spkm3_ops = {
 };
 
 static struct pf_desc gss_spkm3_pfs[] = {
-	{RPC_AUTH_GSS_SPKM, 0, RPC_GSS_SVC_NONE, "spkm3"},
-	{RPC_AUTH_GSS_SPKMI, 0, RPC_GSS_SVC_INTEGRITY, "spkm3i"},
+	{RPC_AUTH_GSS_SPKM, RPC_GSS_SVC_NONE, "spkm3"},
+	{RPC_AUTH_GSS_SPKMI, RPC_GSS_SVC_INTEGRITY, "spkm3i"},
 };
 
 static struct gss_api_mech gss_spkm3_mech = {
 	.gm_name	= "spkm3",
 	.gm_owner	= THIS_MODULE,
+	.gm_oid		= {7, "\053\006\001\005\005\001\003"},
 	.gm_ops		= &gss_spkm3_ops,
 	.gm_pf_num	= ARRAY_SIZE(gss_spkm3_pfs),
 	.gm_pfs		= gss_spkm3_pfs,
@@ -280,7 +230,7 @@ static int __init init_spkm3_module(void)
 	status = gss_mech_register(&gss_spkm3_mech);
 	if (status)
 		printk("Failed to register spkm3 gss mechanism!\n");
-	return 0;
+	return status;
 }
 
 static void __exit cleanup_spkm3_module(void)

@@ -19,9 +19,9 @@ typedef unsigned short __u16;
 typedef __signed__ int __s32;
 typedef unsigned int __u32;
 
-#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
-typedef __signed__ long long __s64;
-typedef unsigned long long __u64;
+#if defined(__GNUC__)
+__extension__ typedef __signed__ long long __s64;
+__extension__ typedef unsigned long long __u64;
 #endif
 
 #endif /* __ASSEMBLY__ */
@@ -35,7 +35,6 @@ typedef unsigned long long __u64;
 
 #ifndef __ASSEMBLY__
 
-#include <linux/config.h>
 
 typedef __signed__ char s8;
 typedef unsigned char u8;
@@ -52,13 +51,6 @@ typedef unsigned long long u64;
 /* Dma addresses are 32-bits wide.  */
 
 typedef u32 dma_addr_t;
-
-#ifdef CONFIG_LBD
-typedef u64 sector_t;
-#define HAVE_SECTOR_T
-#endif
-
-typedef unsigned int kmem_bufctl_t;
 
 #endif /* __ASSEMBLY__ */
 

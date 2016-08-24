@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/mvme5100.c
- *
  * Board setup routines for the Motorola MVME5100.
  *
  * Author: Matt Porter <mporter@mvista.com>
@@ -11,7 +9,6 @@
  * or implied.
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -20,7 +17,6 @@
 #include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/delay.h>
-#include <linux/irq.h>
 #include <linux/ide.h>
 #include <linux/seq_file.h>
 #include <linux/kdev_t.h>
@@ -224,11 +220,7 @@ mvme5100_init_IRQ(void)
 	openpic_hookup_cascade(NUM_8259_INTERRUPTS, "82c59 cascade",
 			&i8259_irq);
 
-	/* Map i8259 interrupts. */
-	for (i = 0; i < NUM_8259_INTERRUPTS; i++)
-		irq_desc[i].handler = &i8259_pic;
-
-	i8259_init(0);
+	i8259_init(0, 0);
 #else
 	openpic_init(0);
 #endif
@@ -246,8 +238,8 @@ static __inline__ void
 mvme5100_set_bat(void)
 {
 	mb();
-	mtspr(DBAT1U, 0xf0001ffe);
-	mtspr(DBAT1L, 0xf000002a);
+	mtspr(SPRN_DBAT1U, 0xf0001ffe);
+	mtspr(SPRN_DBAT1L, 0xf000002a);
 	mb();
 }
 

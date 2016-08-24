@@ -29,7 +29,9 @@
 
 #define VELOCITY_NAME          "via-velocity"
 #define VELOCITY_FULL_DRV_NAM  "VIA Networking Velocity Family Gigabit Ethernet Adapter Driver"
-#define VELOCITY_VERSION       "1.13"
+#define VELOCITY_VERSION       "1.14"
+
+#define VELOCITY_IO_SIZE	256
 
 #define PKT_BUF_SZ          1540
 
@@ -244,7 +246,7 @@ struct tdesc1 {
 struct td_buf {
 	u32 pa_low;
 	u16 pa_high;
-	u16 bufsize:14;	
+	u16 bufsize:14;
 	u16 reserved:1;
 	u16 queue:1;
 } __attribute__ ((__packed__));
@@ -259,25 +261,6 @@ struct velocity_rd_info {
 	struct sk_buff *skb;
 	dma_addr_t skb_dma;
 };
-
-/**
- *	alloc_rd_info		-	allocate an rd info block
- *
- *	Alocate and initialize a receive info structure used for keeping
- *	track of kernel side information related to each receive
- *	descriptor we are using
- */
-
-static inline struct velocity_rd_info *alloc_rd_info(void)
-{
-	struct velocity_rd_info *ptr;
-	if ((ptr = kmalloc(sizeof(struct velocity_rd_info), GFP_ATOMIC)) == NULL)
-		return NULL;
-	else {
-		memset(ptr, 0, sizeof(struct velocity_rd_info));
-		return ptr;
-	}
-}
 
 /*
  *	Used to track transmit side buffers.
@@ -307,7 +290,7 @@ enum  velocity_owner {
 #define TX_QUEUE_NO         4
 
 #define MAX_HW_MIB_COUNTER  32
-#define VELOCITY_MIN_MTU    (1514-14)
+#define VELOCITY_MIN_MTU    (64)
 #define VELOCITY_MAX_MTU    (9000)
 
 /*
@@ -1190,8 +1173,7 @@ enum chip_type {
 
 struct velocity_info_tbl {
 	enum chip_type chip_id;
-	char *name;
-	int io_size;
+	const char *name;
 	int txqueue;
 	u32 flags;
 };
@@ -1211,14 +1193,6 @@ struct velocity_info_tbl {
 #define mac_write_int_mask(mask, regs) 	writel((mask),&((regs)->IMR));
 #define mac_disable_int(regs)       	writel(CR0_GINTMSK1,&((regs)->CR0Clr))
 #define mac_enable_int(regs)    	writel(CR0_GINTMSK1,&((regs)->CR0Set))
-
-#define mac_hw_mibs_read(regs, MIBs) {\
-	int i;\
-	BYTE_REG_BITS_ON(MIBCR_MPTRINI,&((regs)->MIBCR));\
-	for (i=0;i<HW_MIB_SIZE;i++) {\
-		(MIBs)[i]=readl(&((regs)->MIBData));\
-	}\
-}
 
 #define mac_set_dma_length(regs, n) {\
 	BYTE_REG_BITS_SET((n),0x07,&((regs)->DCFG));\
@@ -1244,194 +1218,16 @@ struct velocity_info_tbl {
 	writew(TRDCSR_WAK<<(n*4),&((regs)->TDCSRSet));\
 }
 
-#define mac_eeprom_reload(regs) {\
-	int i=0;\
-	BYTE_REG_BITS_ON(EECSR_RELOAD,&((regs)->EECSR));\
-	do {\
-		udelay(10);\
-		if (i++>0x1000) {\
-			break;\
-		}\
-	}while (BYTE_REG_BITS_IS_ON(EECSR_RELOAD,&((regs)->EECSR)));\
+static inline void mac_eeprom_reload(struct mac_regs __iomem * regs) {
+	int i=0;
+
+	BYTE_REG_BITS_ON(EECSR_RELOAD,&(regs->EECSR));
+	do {
+		udelay(10);
+		if (i++>0x1000)
+			break;
+	} while (BYTE_REG_BITS_IS_ON(EECSR_RELOAD,&(regs->EECSR)));
 }
-
-enum velocity_cam_type {
-	VELOCITY_VLAN_ID_CAM = 0,
-	VELOCITY_MULTICAST_CAM
-};
-
-/**
- *	mac_get_cam_mask	-	Read a CAM mask
- *	@regs: register block for this velocity
- *	@mask: buffer to store mask
- *	@cam_type: CAM to fetch
- *
- *	Fetch the mask bits of the selected CAM and store them into the
- *	provided mask buffer.
- */
-
-static inline void mac_get_cam_mask(struct mac_regs __iomem * regs, u8 * mask, enum velocity_cam_type cam_type)
-{
-	int i;
-	/* Select CAM mask */
-	BYTE_REG_BITS_SET(CAMCR_PS_CAM_MASK, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-
-	if (cam_type == VELOCITY_VLAN_ID_CAM)
-		writeb(CAMADDR_VCAMSL, &regs->CAMADDR);
-	else
-		writeb(0, &regs->CAMADDR);
-
-	/* read mask */
-	for (i = 0; i < 8; i++)
-		*mask++ = readb(&(regs->MARCAM[i]));
-
-	/* disable CAMEN */
-	writeb(0, &regs->CAMADDR);
-
-	/* Select mar */
-	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-
-}
-
-/**
- *	mac_set_cam_mask	-	Set a CAM mask
- *	@regs: register block for this velocity
- *	@mask: CAM mask to load
- *	@cam_type: CAM to store
- *
- *	Store a new mask into a CAM
- */
-
-static inline void mac_set_cam_mask(struct mac_regs __iomem * regs, u8 * mask, enum velocity_cam_type cam_type)
-{
-	int i;
-	/* Select CAM mask */
-	BYTE_REG_BITS_SET(CAMCR_PS_CAM_MASK, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-
-	if (cam_type == VELOCITY_VLAN_ID_CAM)
-		writeb(CAMADDR_CAMEN | CAMADDR_VCAMSL, &regs->CAMADDR);
-	else
-		writeb(CAMADDR_CAMEN, &regs->CAMADDR);
-
-	for (i = 0; i < 8; i++) {
-		writeb(*mask++, &(regs->MARCAM[i]));
-	}
-	/* disable CAMEN */
-	writeb(0, &regs->CAMADDR);
-
-	/* Select mar */
-	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-}
-
-/**
- *	mac_set_cam	-	set CAM data
- *	@regs: register block of this velocity
- *	@idx: Cam index
- *	@addr: 2 or 6 bytes of CAM data
- *	@cam_type: CAM to load
- *
- *	Load an address or vlan tag into a CAM
- */
-
-static inline void mac_set_cam(struct mac_regs __iomem * regs, int idx, u8 *addr, enum velocity_cam_type cam_type)
-{
-	int i;
-
-	/* Select CAM mask */
-	BYTE_REG_BITS_SET(CAMCR_PS_CAM_DATA, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-
-	idx &= (64 - 1);
-
-	if (cam_type == VELOCITY_VLAN_ID_CAM)
-		writeb(CAMADDR_CAMEN | CAMADDR_VCAMSL | idx, &regs->CAMADDR);
-	else
-		writeb(CAMADDR_CAMEN | idx, &regs->CAMADDR);
-
-	if (cam_type == VELOCITY_VLAN_ID_CAM)
-		writew(*((u16 *) addr), &regs->MARCAM[0]);
-	else {
-		for (i = 0; i < 6; i++) {
-			writeb(*addr++, &(regs->MARCAM[i]));
-		}
-	}
-	BYTE_REG_BITS_ON(CAMCR_CAMWR, &regs->CAMCR);
-
-	udelay(10);
-
-	writeb(0, &regs->CAMADDR);
-
-	/* Select mar */
-	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-}
-
-/**
- *	mac_get_cam	-	fetch CAM data
- *	@regs: register block of this velocity
- *	@idx: Cam index
- *	@addr: buffer to hold up to 6 bytes of CAM data
- *	@cam_type: CAM to load
- *
- *	Load an address or vlan tag from a CAM into the buffer provided by
- *	the caller. VLAN tags are 2 bytes the address cam entries are 6.
- */
-
-static inline void mac_get_cam(struct mac_regs __iomem * regs, int idx, u8 *addr, enum velocity_cam_type cam_type)
-{
-	int i;
-
-	/* Select CAM mask */
-	BYTE_REG_BITS_SET(CAMCR_PS_CAM_DATA, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-
-	idx &= (64 - 1);
-
-	if (cam_type == VELOCITY_VLAN_ID_CAM)
-		writeb(CAMADDR_CAMEN | CAMADDR_VCAMSL | idx, &regs->CAMADDR);
-	else
-		writeb(CAMADDR_CAMEN | idx, &regs->CAMADDR);
-
-	BYTE_REG_BITS_ON(CAMCR_CAMRD, &regs->CAMCR);
-
-	udelay(10);
-
-	if (cam_type == VELOCITY_VLAN_ID_CAM)
-		*((u16 *) addr) = readw(&(regs->MARCAM[0]));
-	else
-		for (i = 0; i < 6; i++, addr++)
-			*((u8 *) addr) = readb(&(regs->MARCAM[i]));
-
-	writeb(0, &regs->CAMADDR);
-
-	/* Select mar */
-	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
-}
-
-/**
- *	mac_wol_reset	-	reset WOL after exiting low power
- *	@regs: register block of this velocity
- *
- *	Called after we drop out of wake on lan mode in order to
- *	reset the Wake on lan features. This function doesn't restore
- *	the rest of the logic from the result of sleep/wakeup
- */
-
-inline static void mac_wol_reset(struct mac_regs __iomem * regs)
-{
-
-	/* Turn off SWPTAG right after leaving power mode */
-	BYTE_REG_BITS_OFF(STICKHW_SWPTAG, &regs->STICKHW);
-	/* clear sticky bits */
-	BYTE_REG_BITS_OFF((STICKHW_DS1 | STICKHW_DS0), &regs->STICKHW);
-
-	BYTE_REG_BITS_OFF(CHIPGCR_FCGMII, &regs->CHIPGCR);
-	BYTE_REG_BITS_OFF(CHIPGCR_FCMODE, &regs->CHIPGCR);
-	/* disable force PME-enable */
-	writeb(WOLCFG_PMEOVR, &regs->WOLCFGClr);
-	/* disable power-event config bit */
-	writew(0xFFFF, &regs->WOLCRClr);
-	/* clear power status */
-	writew(0xFFFF, &regs->WOLSRClr);
-}
-
 
 /*
  * Header for WOL definitions. Used to compute hashes
@@ -1719,7 +1515,7 @@ struct velocity_opt {
 	int numrx;			/* Number of RX descriptors */
 	int numtx;			/* Number of TX descriptors */
 	enum speed_opt spd_dpx;		/* Media link mode */
-	int vid;			/* vlan id */
+
 	int DMA_length;			/* DMA length */
 	int rx_thresh;			/* RX_THRESH */
 	int flow_cntl;
@@ -1745,13 +1541,13 @@ struct velocity_info {
 	dma_addr_t tx_bufs_dma;
 	u8 *tx_bufs;
 
+	struct vlan_group    *vlgrp;
 	u8 ip_addr[4];
 	enum chip_type chip_id;
 
 	struct mac_regs __iomem * mac_regs;
 	unsigned long memaddr;
 	unsigned long ioaddr;
-	u32 io_size;
 
 	u8 rev_id;
 
@@ -1811,7 +1607,7 @@ struct velocity_info {
  *	CHECK ME: locking
  */
 
-inline static int velocity_get_ip(struct velocity_info *vptr)
+static inline int velocity_get_ip(struct velocity_info *vptr)
 {
 	struct in_device *in_dev = (struct in_device *) vptr->dev->ip_ptr;
 	struct in_ifaddr *ifa;

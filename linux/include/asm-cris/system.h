@@ -8,7 +8,6 @@
  */
 
 extern struct task_struct *resume(struct task_struct *prev, struct task_struct *next, int);
-#define prepare_to_switch()     do { } while(0)
 #define switch_to(prev,next,last) last = resume(prev,next, \
 					 (int)&((struct task_struct *)0)->thread)
 
@@ -18,7 +17,6 @@ extern struct task_struct *resume(struct task_struct *prev, struct task_struct *
 #define wmb() mb()
 #define read_barrier_depends() do { } while(0)
 #define set_mb(var, value)  do { var = value; mb(); } while (0)
-#define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
 #ifdef CONFIG_SMP
 #define smp_mb()        mb()
@@ -41,13 +39,12 @@ extern struct task_struct *resume(struct task_struct *prev, struct task_struct *
 void disable_hlt(void);
 void enable_hlt(void);
 
-extern inline unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
+static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
 {
   /* since Etrax doesn't have any atomic xchg instructions, we need to disable
      irq's (if enabled) and do it with move.d's */
   unsigned long flags,temp;
-  local_save_flags(flags); /* save flags, including irq enable bit */
-  local_irq_disable();             /* shut off irq's */
+  local_irq_save(flags); /* save flags, including irq enable bit and shut off irqs */
   switch (size) {
   case 1:
     *((unsigned char *)&temp) = x;
@@ -68,5 +65,9 @@ extern inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
   local_irq_restore(flags); /* restore irq enable bit */
   return x;
 }
+
+#define arch_align_stack(x) (x)
+
+void default_idle(void);
 
 #endif

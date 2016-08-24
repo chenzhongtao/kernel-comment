@@ -5,7 +5,6 @@
 #ifndef _ASM_MMZONE_H_
 #define _ASM_MMZONE_H_
 
-#include <linux/config.h>
 #include <asm/smp.h>
 
 struct bootmem_data_t; /* stupid forward decl. */
@@ -57,11 +56,7 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
  * Given a kernel address, find the home node of the underlying memory.
  */
 #define kvaddr_to_nid(kaddr)	pa_to_nid(__pa(kaddr))
-#define node_mem_map(nid)	(NODE_DATA(nid)->node_mem_map)
 #define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
-
-#define local_mapnr(kvaddr) \
-      ((__pa(kvaddr) >> PAGE_SHIFT) - node_start_pfn(kvaddr_to_nid(kvaddr)))
 
 /*
  * Given a kaddr, LOCAL_BASE_ADDR finds the owning node of the memory
@@ -80,6 +75,7 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
 #define VALID_PAGE(page)	(((page) - mem_map) < max_mapnr)
 
 #define pmd_page(pmd)		(pfn_to_page(pmd_val(pmd) >> 32))
+#define pgd_page(pgd)		(pfn_to_page(pgd_val(pgd) >> 32))
 #define pte_pfn(pte)		(pte_val(pte) >> 32)
 
 #define mk_pte(page, pgprot)						     \
@@ -87,8 +83,7 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
 	pte_t pte;                                                           \
 	unsigned long pfn;                                                   \
 									     \
-	pfn = ((unsigned long)((page)-page_zone(page)->zone_mem_map)) << 32; \
-	pfn += page_zone(page)->zone_start_pfn << 32;			     \
+	pfn = page_to_pfn(page) << 32; \
 	pte_val(pte) = pfn | pgprot_val(pgprot);			     \
 									     \
 	pte;								     \
@@ -105,19 +100,8 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
 	__xx;                                                           \
 })
 
-#define pfn_to_page(pfn)						\
-({									\
- 	unsigned long kaddr = (unsigned long)__va((pfn) << PAGE_SHIFT);	\
-	(node_mem_map(kvaddr_to_nid(kaddr)) + local_mapnr(kaddr));	\
-})
-
-#define page_to_pfn(page)						\
-	((page) - page_zone(page)->zone_mem_map +			\
-	 (page_zone(page)->zone_start_pfn))
-
 #define page_to_pa(page)						\
-	((( (page) - page_zone(page)->zone_mem_map )			\
-	+ page_zone(page)->zone_start_pfn) << PAGE_SHIFT)
+	(page_to_pfn(page) << PAGE_SHIFT)
 
 #define pfn_to_nid(pfn)		pa_to_nid(((u64)(pfn) << PAGE_SHIFT))
 #define pfn_valid(pfn)							\

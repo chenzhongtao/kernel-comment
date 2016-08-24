@@ -1,5 +1,5 @@
 /*
- * include/asm-arm/arch-footbridge/entry-macro.S
+ * include/asm-arm/arch-ebsa285/entry-macro.S
  *
  * Low-level IRQ helper macros for footbridge-based platforms
  *
@@ -7,20 +7,28 @@
  * License version 2. This program is licensed "as is" without any
  * warranty of any kind, whether express or implied.
  */
+#include <asm/hardware.h>
+#include <asm/arch/irqs.h>
 #include <asm/hardware/dec21285.h>
-
-		.macro	disable_fiq
-		.endm
 
 		.equ	dc21285_high, ARMCSR_BASE & 0xff000000
 		.equ	dc21285_low, ARMCSR_BASE & 0x00ffffff
 
-		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
-		mov	r4, #dc21285_high
+		.macro	disable_fiq
+		.endm
+
+		.macro  get_irqnr_preamble, base, tmp
+		mov	\base, #dc21285_high
 		.if	dc21285_low
-		orr	r4, r4, #dc21285_low
+		orr	\base, \base, #dc21285_low
 		.endif
-		ldr	\irqstat, [r4, #0x180]		@ get interrupts
+		.endm
+
+		.macro  arch_ret_to_user, tmp1, tmp2
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\irqstat, [\base, #0x180]	@ get interrupts
 
 		mov	\irqnr, #IRQ_SDRAMPARITY
 		tst	\irqstat, #IRQ_MASK_SDRAMPARITY

@@ -8,24 +8,24 @@
  * This file will soon be removed in favor of an uinput userspace tool.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 #include <linux/sysctl.h>
 #include <linux/input.h>
 #include <linux/module.h>
+#include <linux/kbd_kern.h>
 
 
-static struct input_dev emumousebtn;
-static void emumousebtn_input_register(void);
-static int mouse_emulate_buttons = 0;
+static struct input_dev *emumousebtn;
+static int emumousebtn_input_register(void);
+static int mouse_emulate_buttons;
 static int mouse_button2_keycode = KEY_RIGHTCTRL;	/* right control key */
 static int mouse_button3_keycode = KEY_RIGHTALT;	/* right option key */
-static int mouse_last_keycode = 0;
+static int mouse_last_keycode;
 
 #if defined(CONFIG_SYSCTL)
 /* file(s) in /proc/sys/dev/mac_hid */
-ctl_table mac_hid_files[] = {
+static ctl_table mac_hid_files[] = {
 	{
 		.ctl_name	= DEV_MAC_HID_MOUSE_BUTTON_EMULATION,
 		.procname	= "mouse_button_emulation",
@@ -54,7 +54,7 @@ ctl_table mac_hid_files[] = {
 };
 
 /* dir in /proc/sys/dev */
-ctl_table mac_hid_dir[] = {
+static ctl_table mac_hid_dir[] = {
 	{
 		.ctl_name	= DEV_MAC_HID,
 		.procname	= "mac_hid",
@@ -66,7 +66,7 @@ ctl_table mac_hid_dir[] = {
 };
 
 /* /proc/sys/dev itself, in case that is not there yet */
-ctl_table mac_hid_root_dir[] = {
+static ctl_table mac_hid_root_dir[] = {
 	{
 		.ctl_name	= CTL_DEV,
 		.procname	= "dev",
@@ -90,10 +90,10 @@ int mac_hid_mouse_emulate_buttons(int caller, unsigned int keycode, int down)
 		    && (keycode == mouse_button2_keycode
 			|| keycode == mouse_button3_keycode)) {
 			if (mouse_emulate_buttons == 1) {
-			 	input_report_key(&emumousebtn,
+				input_report_key(emumousebtn,
 						 keycode == mouse_button2_keycode ? BTN_MIDDLE : BTN_RIGHT,
 						 down);
-				input_sync(&emumousebtn);
+				input_sync(emumousebtn);
 				return 1;
 			}
 			mouse_last_keycode = down ? keycode : 0;
@@ -103,35 +103,42 @@ int mac_hid_mouse_emulate_buttons(int caller, unsigned int keycode, int down)
 	return 0;
 }
 
-EXPORT_SYMBOL(mac_hid_mouse_emulate_buttons);
-
-static void emumousebtn_input_register(void)
+static int emumousebtn_input_register(void)
 {
-	emumousebtn.name = "Macintosh mouse button emulation";
+	int ret;
 
-	init_input_dev(&emumousebtn);
+	emumousebtn = input_allocate_device();
+	if (!emumousebtn)
+		return -ENOMEM;
 
-	emumousebtn.evbit[0] = BIT(EV_KEY) | BIT(EV_REL);
-	emumousebtn.keybit[LONG(BTN_MOUSE)] = BIT(BTN_LEFT) | BIT(BTN_MIDDLE) | BIT(BTN_RIGHT);
-	emumousebtn.relbit[0] = BIT(REL_X) | BIT(REL_Y);
+	emumousebtn->name = "Macintosh mouse button emulation";
+	emumousebtn->id.bustype = BUS_ADB;
+	emumousebtn->id.vendor = 0x0001;
+	emumousebtn->id.product = 0x0001;
+	emumousebtn->id.version = 0x0100;
 
-	emumousebtn.id.bustype = BUS_ADB;
-	emumousebtn.id.vendor = 0x0001;
-	emumousebtn.id.product = 0x0001;
-	emumousebtn.id.version = 0x0100;
+	emumousebtn->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
+	emumousebtn->keybit[BIT_WORD(BTN_MOUSE)] = BIT_MASK(BTN_LEFT) |
+		BIT_MASK(BTN_MIDDLE) | BIT_MASK(BTN_RIGHT);
+	emumousebtn->relbit[0] = BIT_MASK(REL_X) | BIT_MASK(REL_Y);
 
-	input_register_device(&emumousebtn);
+	ret = input_register_device(emumousebtn);
+	if (ret)
+		input_free_device(emumousebtn);
 
-	printk(KERN_INFO "input: Macintosh mouse button emulation\n");
+	return ret;
 }
 
-int __init mac_hid_init(void)
+static int __init mac_hid_init(void)
 {
+	int err;
 
-	emumousebtn_input_register();
+	err = emumousebtn_input_register();
+	if (err)
+		return err;
 
 #if defined(CONFIG_SYSCTL)
-	mac_hid_sysctl_header = register_sysctl_table(mac_hid_root_dir, 1);
+	mac_hid_sysctl_header = register_sysctl_table(mac_hid_root_dir);
 #endif /* CONFIG_SYSCTL */
 
 	return 0;

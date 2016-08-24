@@ -112,7 +112,7 @@ static inline int dump_regs32(struct pt_regs *ptregs, elf_gregset_t *regs)
 
 static inline int dump_task_regs32(struct task_struct *tsk, elf_gregset_t *regs)
 {
-	struct pt_regs *ptregs = __KSTK_PTREGS(tsk);
+	struct pt_regs *ptregs = task_pt_regs(tsk);
 	int i;
 
 	memcpy(&regs->psw.mask, &ptregs->psw.mask, 4);
@@ -135,7 +135,6 @@ static inline int dump_task_fpu(struct task_struct *tsk, elf_fpregset_t *fpregs)
 
 #include <asm/processor.h>
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/elfcore.h>
 #include <linux/binfmts.h>
 #include <linux/compat.h>
@@ -177,12 +176,6 @@ struct elf_prpsinfo32
 
 #include <linux/highuid.h>
 
-#undef NEW_TO_OLD_UID
-#undef NEW_TO_OLD_GID
-#define NEW_TO_OLD_UID(uid) ((uid) > 65535) ? (u16)overflowuid : (u16)(uid)
-#define NEW_TO_OLD_GID(gid) ((gid) > 65535) ? (u16)overflowgid : (u16)(gid) 
-
-#define elf_addr_t	u32
 /*
 #define init_elf_binfmt init_elf32_binfmt
 */
@@ -199,7 +192,7 @@ MODULE_AUTHOR("Gerhard Tonn <ton@de.ibm.com>");
 
 #undef cputime_to_timeval
 #define cputime_to_timeval cputime_to_compat_timeval
-static __inline__ void
+static inline void
 cputime_to_compat_timeval(const cputime_t cputime, struct compat_timeval *value)
 {
 	value->tv_usec = cputime % 1000000;

@@ -2,7 +2,7 @@
 #define __LINUX_SEQLOCK_H
 /*
  * Reader/writer consistent mechanism without starving writers. This type of
- * lock for data where the reader wants a consitent set of information
+ * lock for data where the reader wants a consistent set of information
  * and is willing to retry if the information changes.  Readers never
  * block but they may have to retry if a writer is in
  * progress. Writers do not wait for readers. 
@@ -26,7 +26,6 @@
  * by Keith Owens and Andrea Arcangeli
  */
 
-#include <linux/config.h>
 #include <linux/spinlock.h>
 #include <linux/preempt.h>
 
@@ -39,9 +38,20 @@ typedef struct {
  * These macros triggered gcc-3.x compile-time problems.  We think these are
  * OK now.  Be cautious.
  */
-#define SEQLOCK_UNLOCKED { 0, SPIN_LOCK_UNLOCKED }
-#define seqlock_init(x)	do { *(x) = (seqlock_t) SEQLOCK_UNLOCKED; } while (0)
+#define __SEQLOCK_UNLOCKED(lockname) \
+		 { 0, __SPIN_LOCK_UNLOCKED(lockname) }
 
+#define SEQLOCK_UNLOCKED \
+		 __SEQLOCK_UNLOCKED(old_style_seqlock_init)
+
+#define seqlock_init(x)					\
+	do {						\
+		(x)->sequence = 0;			\
+		spin_lock_init(&(x)->lock);		\
+	} while (0)
+
+#define DEFINE_SEQLOCK(x) \
+		seqlock_t x = __SEQLOCK_UNLOCKED(x)
 
 /* Lock out other writers and update the count.
  * Acts like a normal spin_lock/unlock.
@@ -51,10 +61,10 @@ static inline void write_seqlock(seqlock_t *sl)
 {
 	spin_lock(&sl->lock);
 	++sl->sequence;
-	smp_wmb();			
-}	
+	smp_wmb();
+}
 
-static inline void write_sequnlock(seqlock_t *sl) 
+static inline void write_sequnlock(seqlock_t *sl)
 {
 	smp_wmb();
 	sl->sequence++;
@@ -67,13 +77,13 @@ static inline int write_tryseqlock(seqlock_t *sl)
 
 	if (ret) {
 		++sl->sequence;
-		smp_wmb();			
+		smp_wmb();
 	}
 	return ret;
 }
 
 /* Start of read calculation -- fetch last complete writer token */
-static inline unsigned read_seqbegin(const seqlock_t *sl)
+static __always_inline unsigned read_seqbegin(const seqlock_t *sl)
 {
 	unsigned ret = sl->sequence;
 	smp_rmb();
@@ -88,7 +98,7 @@ static inline unsigned read_seqbegin(const seqlock_t *sl)
  *    
  * Using xor saves one conditional branch.
  */
-static inline int read_seqretry(const seqlock_t *sl, unsigned iv)
+static __always_inline int read_seqretry(const seqlock_t *sl, unsigned iv)
 {
 	smp_rmb();
 	return (iv & 1) | (sl->sequence ^ iv);

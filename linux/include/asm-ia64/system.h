@@ -12,25 +12,27 @@
  * Copyright (C) 1999 Asit Mallick <asit.k.mallick@intel.com>
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  */
-#include <linux/config.h>
 
 #include <asm/kregs.h>
 #include <asm/page.h>
 #include <asm/pal.h>
 #include <asm/percpu.h>
 
-#define GATE_ADDR		__IA64_UL_CONST(0xa000000000000000)
+#define GATE_ADDR		RGN_BASE(RGN_GATE)
+
 /*
  * 0xa000000000000000+2*PERCPU_PAGE_SIZE
  * - 0xa000000000000000+3*PERCPU_PAGE_SIZE remain unmapped (guard page)
  */
-#define KERNEL_START		 __IA64_UL_CONST(0xa000000100000000)
+#define KERNEL_START		 (GATE_ADDR+__IA64_UL_CONST(0x100000000))
 #define PERCPU_ADDR		(-PERCPU_PAGE_SIZE)
 
 #ifndef __ASSEMBLY__
 
 #include <linux/kernel.h>
 #include <linux/types.h>
+
+#define AT_VECTOR_SIZE_ARCH 2 /* entries in ARCH_DLINFO */
 
 struct pci_vector_struct {
 	__u16 segment;	/* PCI Segment number */
@@ -98,12 +100,11 @@ extern struct ia64_boot_param {
 #endif
 
 /*
- * XXX check on these---I suspect what Linus really wants here is
+ * XXX check on this ---I suspect what Linus really wants here is
  * acquire vs release semantics but we can't discuss this stuff with
  * Linus just yet.  Grrr...
  */
 #define set_mb(var, value)	do { (var) = (value); mb(); } while (0)
-#define set_wmb(var, value)	do { (var) = (value); mb(); } while (0)
 
 #define safe_halt()         ia64_pal_halt_light()    /* PAL_HALT_LIGHT */
 
@@ -183,8 +184,6 @@ do {								\
 
 #ifdef __KERNEL__
 
-#define prepare_to_switch()    do { } while(0)
-
 #ifdef CONFIG_IA32_SUPPORT
 # define IS_IA32_PROCESS(regs)	(ia64_psr(regs)->is != 0)
 #else
@@ -220,14 +219,14 @@ extern void ia64_load_extra (struct task_struct *task);
 
 #define IA64_HAS_EXTRA_STATE(t)							\
 	((t)->thread.flags & (IA64_THREAD_DBG_VALID|IA64_THREAD_PM_VALID)	\
-	 || IS_IA32_PROCESS(ia64_task_regs(t)) || PERFMON_IS_SYSWIDE())
+	 || IS_IA32_PROCESS(task_pt_regs(t)) || PERFMON_IS_SYSWIDE())
 
 #define __switch_to(prev,next,last) do {							 \
 	if (IA64_HAS_EXTRA_STATE(prev))								 \
 		ia64_save_extra(prev);								 \
 	if (IA64_HAS_EXTRA_STATE(next))								 \
 		ia64_load_extra(next);								 \
-	ia64_psr(ia64_task_regs(next))->dfh = !ia64_is_local_fpu_owner(next);			 \
+	ia64_psr(task_pt_regs(next))->dfh = !ia64_is_local_fpu_owner(next);			 \
 	(last) = ia64_switch_to((next));							 \
 } while (0)
 
@@ -239,52 +238,34 @@ extern void ia64_load_extra (struct task_struct *task);
  * the latest fph state from another CPU.  In other words: eager save, lazy restore.
  */
 # define switch_to(prev,next,last) do {						\
-	if (ia64_psr(ia64_task_regs(prev))->mfh && ia64_is_local_fpu_owner(prev)) {				\
-		ia64_psr(ia64_task_regs(prev))->mfh = 0;			\
+	if (ia64_psr(task_pt_regs(prev))->mfh && ia64_is_local_fpu_owner(prev)) {				\
+		ia64_psr(task_pt_regs(prev))->mfh = 0;			\
 		(prev)->thread.flags |= IA64_THREAD_FPH_VALID;			\
 		__ia64_save_fpu((prev)->thread.fph);				\
 	}									\
 	__switch_to(prev, next, last);						\
+	/* "next" in old context is "current" in new context */			\
+	if (unlikely((current->thread.flags & IA64_THREAD_MIGRATION) &&	       \
+		     (task_cpu(current) !=				       \
+		      		      task_thread_info(current)->last_cpu))) { \
+		platform_migrate(current);				       \
+		task_thread_info(current)->last_cpu = task_cpu(current);       \
+	}								       \
 } while (0)
 #else
 # define switch_to(prev,next,last)	__switch_to(prev, next, last)
 #endif
 
-/*
- * On IA-64, we don't want to hold the runqueue's lock during the low-level context-switch,
- * because that could cause a deadlock.  Here is an example by Erich Focht:
- *
- * Example:
- * CPU#0:
- * schedule()
- *    -> spin_lock_irq(&rq->lock)
- *    -> context_switch()
- *       -> wrap_mmu_context()
- *          -> read_lock(&tasklist_lock)
- *
- * CPU#1:
- * sys_wait4() or release_task() or forget_original_parent()
- *    -> write_lock(&tasklist_lock)
- *    -> do_notify_parent()
- *       -> wake_up_parent()
- *          -> try_to_wake_up()
- *             -> spin_lock_irq(&parent_rq->lock)
- *
- * If the parent's rq happens to be on CPU#0, we'll wait for the rq->lock
- * of that CPU which will not be released, because there we wait for the
- * tasklist_lock to become available.
- */
-#define prepare_arch_switch(rq, next)		\
-do {						\
-	spin_lock(&(next)->switch_lock);	\
-	spin_unlock(&(rq)->lock);		\
-} while (0)
-#define finish_arch_switch(rq, prev)	spin_unlock_irq(&(prev)->switch_lock)
-#define task_running(rq, p) 		((rq)->curr == (p) || spin_is_locked(&(p)->switch_lock))
-
+#define __ARCH_WANT_UNLOCKED_CTXSW
+#define ARCH_HAS_PREFETCH_SWITCH_STACK
 #define ia64_platform_is(x) (strcmp(x, platform_name) == 0)
 
 void cpu_idle_wait(void);
+
+#define arch_align_stack(x) (x)
+
+void default_idle(void);
+
 #endif /* __KERNEL__ */
 
 #endif /* __ASSEMBLY__ */

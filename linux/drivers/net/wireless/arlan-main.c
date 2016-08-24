@@ -5,7 +5,6 @@
  * This module provides support for the Arlan 655 card made by Aironet
  */
 
-#include <linux/config.h>
 #include "arlan.h"
 
 #if BITS_PER_LONG != 32
@@ -33,8 +32,6 @@ static int arlan_EEPROM_bad;
 
 #ifdef ARLAN_DEBUGGING
 
-static int arlan_entry_debug;
-static int arlan_exit_debug;
 static int testMemory = testMemoryUNKNOWN;
 static int irq = irqUNKNOWN;
 static int txScrambled = 1;
@@ -43,15 +40,13 @@ static int mdebug;
 module_param(irq, int, 0);
 module_param(mdebug, int, 0);
 module_param(testMemory, int, 0);
-module_param(arlan_entry_debug, int, 0);
-module_param(arlan_exit_debug, int, 0);
 module_param(txScrambled, int, 0);
 MODULE_PARM_DESC(irq, "(unused)");
 MODULE_PARM_DESC(testMemory, "(unused)");
 MODULE_PARM_DESC(mdebug, "Arlan multicast debugging (0-1)");
 #endif
 
-module_param(arlan_debug, int, 0);
+module_param_named(debug, arlan_debug, int, 0);
 module_param(spreadingCode, int, 0);
 module_param(channelNumber, int, 0);
 module_param(channelSet, int, 0);
@@ -63,17 +58,19 @@ module_param(keyStart, int, 0);
 module_param(tx_delay_ms, int, 0);
 module_param(retries, int, 0);
 module_param(tx_queue_len, int, 0);
-module_param(arlan_EEPROM_bad, int, 0);
-MODULE_PARM_DESC(arlan_debug, "Arlan debug enable (0-1)");
+module_param_named(EEPROM_bad, arlan_EEPROM_bad, int, 0);
+MODULE_PARM_DESC(debug, "Arlan debug enable (0-1)");
 MODULE_PARM_DESC(retries, "Arlan maximum packet retransmisions");
 #ifdef ARLAN_ENTRY_EXIT_DEBUGGING
-MODULE_PARM_DESC(arlan_entry_debug, "Arlan driver function entry debugging");
-MODULE_PARM_DESC(arlan_exit_debug, "Arlan driver function exit debugging");
-MODULE_PARM_DESC(arlan_entry_and_exit_debug, "Arlan driver function entry and exit debugging");
-#else
-MODULE_PARM_DESC(arlan_entry_debug, "(ignored)");
-MODULE_PARM_DESC(arlan_exit_debug, "(ignored)");
-MODULE_PARM_DESC(arlan_entry_and_exit_debug, "(ignored)");
+static int arlan_entry_debug;
+static int arlan_exit_debug;
+static int arlan_entry_and_exit_debug;
+module_param_named(entry_debug, arlan_entry_debug, int, 0);
+module_param_named(exit_debug, arlan_exit_debug, int, 0);
+module_param_named(entry_and_exit_debug, arlan_entry_and_exit_debug, int, 0);
+MODULE_PARM_DESC(entry_debug, "Arlan driver function entry debugging");
+MODULE_PARM_DESC(exit_debug, "Arlan driver function exit debugging");
+MODULE_PARM_DESC(entry_and_exit_debug, "Arlan driver function entry and exit debugging");
 #endif
 
 struct arlan_conf_stru arlan_conf[MAX_ARLANS];
@@ -81,7 +78,7 @@ static int arlans_found;
 
 static  int 	arlan_open(struct net_device *dev);
 static  int 	arlan_tx(struct sk_buff *skb, struct net_device *dev);
-static  irqreturn_t arlan_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static  irqreturn_t arlan_interrupt(int irq, void *dev_id);
 static  int 	arlan_close(struct net_device *dev);
 static  struct net_device_stats *
 		arlan_statistics		(struct net_device *dev);
@@ -1472,10 +1469,10 @@ static void arlan_rx_interrupt(struct net_device *dev, u_char rxStatus, u_short 
 					while (dmi)
 					{							if (dmi->dmi_addrlen == 6)
 						{
+							DECLARE_MAC_BUF(mac);
 							if (arlan_debug & ARLAN_DEBUG_HEADER_DUMP)
-								printk(KERN_ERR "%s mcl %2x:%2x:%2x:%2x:%2x:%2x \n", dev->name,
-										 dmi->dmi_addr[0], dmi->dmi_addr[1], dmi->dmi_addr[2],
-										 dmi->dmi_addr[3], dmi->dmi_addr[4], dmi->dmi_addr[5]);
+								printk(KERN_ERR "%s mcl %s\n",
+								       dev->name, print_mac(mac, dmi->dmi_addr));
 							for (i = 0; i < 6; i++)
 								if (dmi->dmi_addr[i] != hw_dst_addr[i])
 									break;
@@ -1503,7 +1500,6 @@ static void arlan_rx_interrupt(struct net_device *dev, u_char rxStatus, u_short 
 				break;
 			}
 			skb_reserve(skb, 2);
-			skb->dev = dev;
 			skbtmp = skb_put(skb, pkt_len);
 
 			memcpy_fromio(skbtmp + ARLAN_FAKE_HDR_LEN, ((char __iomem *) arlan) + rxOffset, pkt_len - ARLAN_FAKE_HDR_LEN);
@@ -1516,17 +1512,18 @@ static void arlan_rx_interrupt(struct net_device *dev, u_char rxStatus, u_short 
 			{
 				char immedDestAddress[6];
 				char immedSrcAddress[6];
+				DECLARE_MAC_BUF(mac);
+				DECLARE_MAC_BUF(mac2);
+				DECLARE_MAC_BUF(mac3);
+				DECLARE_MAC_BUF(mac4);
 				memcpy_fromio(immedDestAddress, arlan->immedDestAddress, 6);
 				memcpy_fromio(immedSrcAddress, arlan->immedSrcAddress, 6);
 
-				printk(KERN_WARNING "%s t %2x:%2x:%2x:%2x:%2x:%2x f %2x:%2x:%2x:%2x:%2x:%2x imd %2x:%2x:%2x:%2x:%2x:%2x ims %2x:%2x:%2x:%2x:%2x:%2x\n", dev->name,
-					(unsigned char) skbtmp[0], (unsigned char) skbtmp[1], (unsigned char) skbtmp[2], (unsigned char) skbtmp[3],
-					(unsigned char) skbtmp[4], (unsigned char) skbtmp[5], (unsigned char) skbtmp[6], (unsigned char) skbtmp[7],
-					(unsigned char) skbtmp[8], (unsigned char) skbtmp[9], (unsigned char) skbtmp[10], (unsigned char) skbtmp[11],
-					immedDestAddress[0], immedDestAddress[1], immedDestAddress[2],
-					immedDestAddress[3], immedDestAddress[4], immedDestAddress[5],
-					immedSrcAddress[0], immedSrcAddress[1], immedSrcAddress[2],
-					immedSrcAddress[3], immedSrcAddress[4], immedSrcAddress[5]);
+				printk(KERN_WARNING "%s t %s f %s imd %s ims %s\n",
+				       dev->name, print_mac(mac, skbtmp),
+				       print_mac(mac2, &skbtmp[6]),
+				       print_mac(mac3, immedDestAddress),
+				       print_mac(mac4, immedSrcAddress));
 			}
 			skb->protocol = eth_type_trans(skb, dev);
 			IFDEBUG(ARLAN_DEBUG_HEADER_DUMP)
@@ -1654,7 +1651,7 @@ end_int_process:
 	return;
 }
 
-static irqreturn_t arlan_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t arlan_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct arlan_private *priv = netdev_priv(dev);
@@ -1796,8 +1793,6 @@ struct net_device * __init arlan_probe(int unit)
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	SET_MODULE_OWNER(dev);
-
 	if (unit >= 0) {
 		sprintf(dev->name, "eth%d", unit);
 		netdev_boot_setup_check(dev);
@@ -1840,7 +1835,7 @@ struct net_device * __init arlan_probe(int unit)
 }
 
 #ifdef  MODULE
-int init_module(void)
+int __init init_module(void)
 {
 	int i = 0;
 
@@ -1862,7 +1857,7 @@ int init_module(void)
 }
 
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
 	int i = 0;
 	struct net_device *dev;

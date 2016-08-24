@@ -4,7 +4,7 @@
   (C) 2001 Andreas Gruenbacher, <a.gruenbacher@computer.org>
 */
 
-#include <linux/xattr_acl.h>
+#include <linux/posix_acl_xattr.h>
 
 #define EXT3_ACL_VERSION	0x0001
 
@@ -61,9 +61,6 @@ static inline int ext3_acl_count(size_t size)
 extern int ext3_permission (struct inode *, int, struct nameidata *);
 extern int ext3_acl_chmod (struct inode *);
 extern int ext3_init_acl (handle_t *, struct inode *, struct inode *);
-
-extern int init_ext3_acl(void);
-extern void exit_ext3_acl(void);
 
 #else  /* CONFIG_EXT3_FS_POSIX_ACL */
 #include <linux/sched.h>

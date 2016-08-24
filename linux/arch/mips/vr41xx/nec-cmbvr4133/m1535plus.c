@@ -14,7 +14,6 @@
  * Support for NEC-CMBVR4133 in 2.6
  * Author: Manish Lachwani (mlachwani@mvista.com)
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/serial.h>
@@ -39,7 +38,7 @@
 		outb_p((dev_no), DATA_PORT(port));	\
 	} while(0)
 
-#define WRITE_CONFIG_DATA(port,index,data)		\
+#define WRITE_CONFIG_DATA(port, index, data)		\
 	do {						\
 		outb_p((index), INDEX_PORT(port));	\
 		outb_p((data), DATA_PORT(port));	\
@@ -207,8 +206,8 @@ static inline u16 ali_config_readw(u8 reg, int devfn)
 int vr4133_rockhopper = 0;
 void __init ali_m5229_preinit(void)
 {
-	if (ali_config_readw(PCI_VENDOR_ID,16) == PCI_VENDOR_ID_AL &&
-	    ali_config_readw(PCI_DEVICE_ID,16) == PCI_DEVICE_ID_AL_M1533) {
+	if (ali_config_readw(PCI_VENDOR_ID, 16) == PCI_VENDOR_ID_AL &&
+	    ali_config_readw(PCI_DEVICE_ID, 16) == PCI_DEVICE_ID_AL_M1533) {
 		printk(KERN_INFO "Found an NEC Rockhopper \n");
 		vr4133_rockhopper = 1;
 		/*

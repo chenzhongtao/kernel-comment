@@ -18,25 +18,6 @@
  * The full GNU General Public License is included in this distribution in the
  * file called LICENSE.
  *
- *
- * Changes:
- *
- * 2003/06/25 - Shmulik Hen <shmulik.hen at intel dot com>
- *	- Fixed signed/unsigned calculation errors that caused load sharing
- *	  to collapse to one slave under very heavy UDP Tx stress.
- *
- * 2003/08/06 - Amir Noam <amir.noam at intel dot com>
- *	- Add support for setting bond's MAC address with special
- *	  handling required for ALB/TLB.
- *
- * 2003/12/01 - Shmulik Hen <shmulik.hen at intel dot com>
- *	- Code cleanup and style changes
- *
- * 2003/12/30 - Amir Noam <amir.noam at intel dot com>
- *	- Fixed: Cannot remove and re-enslave the original active slave.
- *
- * 2004/01/14 - Shmulik Hen <shmulik.hen at intel dot com>
- *	- Add capability to tag self generated packets in ALB/TLB modes.
  */
 
 //#define BONDING_DEBUG 1
@@ -54,6 +35,7 @@
 #include <linux/if_ether.h>
 #include <linux/if_bonding.h>
 #include <linux/if_vlan.h>
+#include <linux/in.h>
 #include <net/ipx.h>
 #include <net/arp.h>
 #include <asm/byteorder.h>
@@ -105,27 +87,32 @@ static const int alb_delta_in_ticks = HZ / ALB_TIMER_TICKS_PER_SEC;
 struct learning_pkt {
 	u8 mac_dst[ETH_ALEN];
 	u8 mac_src[ETH_ALEN];
-	u16 type;
+	__be16 type;
 	u8 padding[ETH_ZLEN - ETH_HLEN];
 };
 
 struct arp_pkt {
-	u16     hw_addr_space;
-	u16     prot_addr_space;
+	__be16  hw_addr_space;
+	__be16  prot_addr_space;
 	u8      hw_addr_len;
 	u8      prot_addr_len;
-	u16     op_code;
+	__be16  op_code;
 	u8      mac_src[ETH_ALEN];	/* sender hardware address */
-	u32     ip_src;			/* sender IP address */
+	__be32  ip_src;			/* sender IP address */
 	u8      mac_dst[ETH_ALEN];	/* target hardware address */
-	u32     ip_dst;			/* target IP address */
+	__be32  ip_dst;			/* target IP address */
 };
 #pragma pack()
+
+static inline struct arp_pkt *arp_pkt(const struct sk_buff *skb)
+{
+	return (struct arp_pkt *)skb_network_header(skb);
+}
 
 /* Forward declaration */
 static void alb_send_learning_packets(struct slave *slave, u8 mac_addr[]);
 
-static inline u8 _simple_hash(u8 *hash_start, int hash_size)
+static inline u8 _simple_hash(const u8 *hash_start, int hash_size)
 {
 	int i;
 	u8 hash = 0;
@@ -141,12 +128,12 @@ static inline u8 _simple_hash(u8 *hash_start, int hash_size)
 
 static inline void _lock_tx_hashtbl(struct bonding *bond)
 {
-	spin_lock(&(BOND_ALB_INFO(bond).tx_hashtbl_lock));
+	spin_lock_bh(&(BOND_ALB_INFO(bond).tx_hashtbl_lock));
 }
 
 static inline void _unlock_tx_hashtbl(struct bonding *bond)
 {
-	spin_unlock(&(BOND_ALB_INFO(bond).tx_hashtbl_lock));
+	spin_unlock_bh(&(BOND_ALB_INFO(bond).tx_hashtbl_lock));
 }
 
 /* Caller must hold tx_hashtbl lock */
@@ -187,9 +174,9 @@ static void tlb_clear_slave(struct bonding *bond, struct slave *slave, int save_
 		index = next_index;
 	}
 
-	_unlock_tx_hashtbl(bond);
-
 	tlb_init_slave(slave);
+
+	_unlock_tx_hashtbl(bond);
 }
 
 /* Must be called before starting the monitor timer */
@@ -197,22 +184,21 @@ static int tlb_initialize(struct bonding *bond)
 {
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
 	int size = TLB_HASH_TABLE_SIZE * sizeof(struct tlb_client_info);
+	struct tlb_client_info *new_hashtbl;
 	int i;
 
 	spin_lock_init(&(bond_info->tx_hashtbl_lock));
 
-	_lock_tx_hashtbl(bond);
-
-	bond_info->tx_hashtbl = kmalloc(size, GFP_KERNEL);
-	if (!bond_info->tx_hashtbl) {
+	new_hashtbl = kzalloc(size, GFP_KERNEL);
+	if (!new_hashtbl) {
 		printk(KERN_ERR DRV_NAME
-		       ": Error: %s: Failed to allocate TLB hash table\n",
+		       ": %s: Error: Failed to allocate TLB hash table\n",
 		       bond->dev->name);
-		_unlock_tx_hashtbl(bond);
 		return -1;
 	}
+	_lock_tx_hashtbl(bond);
 
-	memset(bond_info->tx_hashtbl, 0, size);
+	bond_info->tx_hashtbl = new_hashtbl;
 
 	for (i = 0; i < TLB_HASH_TABLE_SIZE; i++) {
 		tlb_init_table_entry(&bond_info->tx_hashtbl[i], 1);
@@ -275,7 +261,7 @@ static struct slave *tlb_get_least_loaded_slave(struct bonding *bond)
 }
 
 /* Caller must hold bond lock for read */
-struct slave *tlb_choose_channel(struct bonding *bond, u32 hash_index, u32 skb_len)
+static struct slave *tlb_choose_channel(struct bonding *bond, u32 hash_index, u32 skb_len)
 {
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
 	struct tlb_client_info *hash_table;
@@ -319,12 +305,12 @@ struct slave *tlb_choose_channel(struct bonding *bond, u32 hash_index, u32 skb_l
 /*********************** rlb specific functions ***************************/
 static inline void _lock_rx_hashtbl(struct bonding *bond)
 {
-	spin_lock(&(BOND_ALB_INFO(bond).rx_hashtbl_lock));
+	spin_lock_bh(&(BOND_ALB_INFO(bond).rx_hashtbl_lock));
 }
 
 static inline void _unlock_rx_hashtbl(struct bonding *bond)
 {
-	spin_unlock(&(BOND_ALB_INFO(bond).rx_hashtbl_lock));
+	spin_unlock_bh(&(BOND_ALB_INFO(bond).rx_hashtbl_lock));
 }
 
 /* when an ARP REPLY is received from a client update its info
@@ -353,15 +339,17 @@ static void rlb_update_entry_from_arp(struct bonding *bond, struct arp_pkt *arp)
 	_unlock_rx_hashtbl(bond);
 }
 
-static int rlb_arp_recv(struct sk_buff *skb, struct net_device *bond_dev, struct packet_type *ptype)
+static int rlb_arp_recv(struct sk_buff *skb, struct net_device *bond_dev, struct packet_type *ptype, struct net_device *orig_dev)
 {
 	struct bonding *bond = bond_dev->priv;
 	struct arp_pkt *arp = (struct arp_pkt *)skb->data;
 	int res = NET_RX_DROP;
 
-	if (!(bond_dev->flags & IFF_MASTER)) {
+	if (bond_dev->nd_net != &init_net)
 		goto out;
-	}
+
+	if (!(bond_dev->flags & IFF_MASTER))
+		goto out;
 
 	if (!arp) {
 		dprintk("Packet has no ARP data\n");
@@ -484,13 +472,13 @@ static void rlb_clear_slave(struct bonding *bond, struct slave *slave)
 
 	_unlock_rx_hashtbl(bond);
 
-	write_lock(&bond->curr_slave_lock);
+	write_lock_bh(&bond->curr_slave_lock);
 
 	if (slave != bond->curr_active_slave) {
 		rlb_teach_disabled_mac_on_primary(bond, slave->dev->dev_addr);
 	}
 
-	write_unlock(&bond->curr_slave_lock);
+	write_unlock_bh(&bond->curr_slave_lock);
 }
 
 static void rlb_update_client(struct rlb_client_info *client_info)
@@ -513,7 +501,8 @@ static void rlb_update_client(struct rlb_client_info *client_info)
 				 client_info->mac_dst);
 		if (!skb) {
 			printk(KERN_ERR DRV_NAME
-			       ": Error: failed to create an ARP packet\n");
+			       ": %s: Error: failed to create an ARP packet\n",
+			       client_info->slave->dev->master->name);
 			continue;
 		}
 
@@ -523,7 +512,8 @@ static void rlb_update_client(struct rlb_client_info *client_info)
 			skb = vlan_put_tag(skb, client_info->vlan_id);
 			if (!skb) {
 				printk(KERN_ERR DRV_NAME
-				       ": Error: failed to insert VLAN tag\n");
+				       ": %s: Error: failed to insert VLAN tag\n",
+				       client_info->slave->dev->master->name);
 				continue;
 			}
 		}
@@ -592,7 +582,7 @@ static void rlb_req_update_slave_clients(struct bonding *bond, struct slave *sla
 }
 
 /* mark all clients using src_ip to be updated */
-static void rlb_req_update_subnet_clients(struct bonding *bond, u32 src_ip)
+static void rlb_req_update_subnet_clients(struct bonding *bond, __be32 src_ip)
 {
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
 	struct rlb_client_info *client_info;
@@ -606,8 +596,9 @@ static void rlb_req_update_subnet_clients(struct bonding *bond, u32 src_ip)
 
 		if (!client_info->slave) {
 			printk(KERN_ERR DRV_NAME
-			       ": Error: found a client with no channel in "
-			       "the client's hash table\n");
+			       ": %s: Error: found a client with no channel in "
+			       "the client's hash table\n",
+			       bond->dev->name);
 			continue;
 		}
 		/*update all clients using this src_ip, that are not assigned
@@ -627,10 +618,10 @@ static void rlb_req_update_subnet_clients(struct bonding *bond, u32 src_ip)
 }
 
 /* Caller must hold both bond and ptr locks for read */
-struct slave *rlb_choose_channel(struct sk_buff *skb, struct bonding *bond)
+static struct slave *rlb_choose_channel(struct sk_buff *skb, struct bonding *bond)
 {
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
-	struct arp_pkt *arp = (struct arp_pkt *)skb->nh.raw;
+	struct arp_pkt *arp = arp_pkt(skb);
 	struct slave *assigned_slave;
 	struct rlb_client_info *client_info;
 	u32 hash_index = 0;
@@ -718,7 +709,7 @@ struct slave *rlb_choose_channel(struct sk_buff *skb, struct bonding *bond)
  */
 static struct slave *rlb_arp_xmit(struct sk_buff *skb, struct bonding *bond)
 {
-	struct arp_pkt *arp = (struct arp_pkt *)skb->nh.raw;
+	struct arp_pkt *arp = arp_pkt(skb);
 	struct slave *tx_slave = NULL;
 
 	if (arp->op_code == __constant_htons(ARPOP_REPLY)) {
@@ -797,21 +788,22 @@ static int rlb_initialize(struct bonding *bond)
 {
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
 	struct packet_type *pk_type = &(BOND_ALB_INFO(bond).rlb_pkt_type);
+	struct rlb_client_info	*new_hashtbl;
 	int size = RLB_HASH_TABLE_SIZE * sizeof(struct rlb_client_info);
 	int i;
 
 	spin_lock_init(&(bond_info->rx_hashtbl_lock));
 
-	_lock_rx_hashtbl(bond);
-
-	bond_info->rx_hashtbl = kmalloc(size, GFP_KERNEL);
-	if (!bond_info->rx_hashtbl) {
+	new_hashtbl = kmalloc(size, GFP_KERNEL);
+	if (!new_hashtbl) {
 		printk(KERN_ERR DRV_NAME
-		       ": Error: %s: Failed to allocate RLB hash table\n",
+		       ": %s: Error: Failed to allocate RLB hash table\n",
 		       bond->dev->name);
-		_unlock_rx_hashtbl(bond);
 		return -1;
 	}
+	_lock_rx_hashtbl(bond);
+
+	bond_info->rx_hashtbl = new_hashtbl;
 
 	bond_info->rx_hashtbl_head = RLB_NULL_INDEX;
 
@@ -906,8 +898,8 @@ static void alb_send_learning_packets(struct slave *slave, u8 mac_addr[])
 		data = skb_put(skb, size);
 		memcpy(data, &pkt, size);
 
-		skb->mac.raw = data;
-		skb->nh.raw = data + ETH_HLEN;
+		skb_reset_mac_header(skb);
+		skb->network_header = skb->mac_header + ETH_HLEN;
 		skb->protocol = pkt.type;
 		skb->priority = TC_PRIO_CONTROL;
 		skb->dev = slave->dev;
@@ -927,7 +919,8 @@ static void alb_send_learning_packets(struct slave *slave, u8 mac_addr[])
 			skb = vlan_put_tag(skb, vlan->vlan_id);
 			if (!skb) {
 				printk(KERN_ERR DRV_NAME
-				       ": Error: failed to insert VLAN tag\n");
+				       ": %s: Error: failed to insert VLAN tag\n",
+				       bond->dev->name);
 				continue;
 			}
 		}
@@ -954,30 +947,47 @@ static int alb_set_slave_mac_addr(struct slave *slave, u8 addr[], int hw)
 	/* each slave will receive packets destined to a different mac */
 	memcpy(s_addr.sa_data, addr, dev->addr_len);
 	s_addr.sa_family = dev->type;
-	if (dev->set_mac_address(dev, &s_addr)) {
+	if (dev_set_mac_address(dev, &s_addr)) {
 		printk(KERN_ERR DRV_NAME
-		       ": Error: dev->set_mac_address of dev %s failed! ALB "
+		       ": %s: Error: dev_set_mac_address of dev %s failed! ALB "
 		       "mode requires that the base driver support setting "
 		       "the hw address also when the network device's "
 		       "interface is open\n",
-		       dev->name);
+		       dev->master->name, dev->name);
 		return -EOPNOTSUPP;
 	}
 	return 0;
 }
 
-/* Caller must hold bond lock for write or curr_slave_lock for write*/
+/*
+ * Swap MAC addresses between two slaves.
+ *
+ * Called with RTNL held, and no other locks.
+ *
+ */
+
 static void alb_swap_mac_addr(struct bonding *bond, struct slave *slave1, struct slave *slave2)
 {
-	struct slave *disabled_slave = NULL;
 	u8 tmp_mac_addr[ETH_ALEN];
-	int slaves_state_differ;
-
-	slaves_state_differ = (SLAVE_IS_OK(slave1) != SLAVE_IS_OK(slave2));
 
 	memcpy(tmp_mac_addr, slave1->dev->dev_addr, ETH_ALEN);
 	alb_set_slave_mac_addr(slave1, slave2->dev->dev_addr, bond->alb_info.rlb_enabled);
 	alb_set_slave_mac_addr(slave2, tmp_mac_addr, bond->alb_info.rlb_enabled);
+
+}
+
+/*
+ * Send learning packets after MAC address swap.
+ *
+ * Called with RTNL and no other locks
+ */
+static void alb_fasten_mac_swap(struct bonding *bond, struct slave *slave1,
+				struct slave *slave2)
+{
+	int slaves_state_differ = (SLAVE_IS_OK(slave1) != SLAVE_IS_OK(slave2));
+	struct slave *disabled_slave = NULL;
+
+	ASSERT_RTNL();
 
 	/* fasten the change in the switch */
 	if (SLAVE_IS_OK(slave1)) {
@@ -1023,7 +1033,7 @@ static void alb_swap_mac_addr(struct bonding *bond, struct slave *slave1, struct
  * a slave that has @slave's permanet address as its current address.
  * We'll make sure that that slave no longer uses @slave's permanent address.
  *
- * Caller must hold bond lock
+ * Caller must hold RTNL and no other locks
  */
 static void alb_change_hw_addr_on_detach(struct bonding *bond, struct slave *slave)
 {
@@ -1051,7 +1061,9 @@ static void alb_change_hw_addr_on_detach(struct bonding *bond, struct slave *sla
 		}
 
 		if (found) {
+			/* locking: needs RTNL and nothing else */
 			alb_swap_mac_addr(bond, slave, tmp_slave);
+			alb_fasten_mac_swap(bond, slave, tmp_slave);
 		}
 	}
 }
@@ -1105,18 +1117,13 @@ static int alb_handle_addr_collision_on_attach(struct bonding *bond, struct slav
 			}
 		}
 
-		if (found) {
-			/* a slave was found that is using the mac address
-			 * of the new slave
-			 */
-			printk(KERN_ERR DRV_NAME
-			       ": Error: the hw address of slave %s is not "
-			       "unique - cannot enslave it!",
-			       slave->dev->name);
-			return -EINVAL;
-		}
+		if (!found)
+			return 0;
 
-		return 0;
+		/* Try setting slave mac to bond address and fall-through
+		   to code handling that situation below... */
+		alb_set_slave_mac_addr(slave, bond->dev->dev_addr,
+				       bond->alb_info.rlb_enabled);
 	}
 
 	/* The slave's address is equal to the address of the bond.
@@ -1158,16 +1165,16 @@ static int alb_handle_addr_collision_on_attach(struct bonding *bond, struct slav
 				       bond->alb_info.rlb_enabled);
 
 		printk(KERN_WARNING DRV_NAME
-		       ": Warning: the hw address of slave %s is in use by "
+		       ": %s: Warning: the hw address of slave %s is in use by "
 		       "the bond; giving it the hw address of %s\n",
-		       slave->dev->name, free_mac_slave->dev->name);
+		       bond->dev->name, slave->dev->name, free_mac_slave->dev->name);
 
 	} else if (has_bond_addr) {
 		printk(KERN_ERR DRV_NAME
-		       ": Error: the hw address of slave %s is in use by the "
+		       ": %s: Error: the hw address of slave %s is in use by the "
 		       "bond; couldn't find a slave with a free hw address to "
 		       "give it (this should not have happened)\n",
-		       slave->dev->name);
+		       bond->dev->name, slave->dev->name);
 		return -EFAULT;
 	}
 
@@ -1209,7 +1216,7 @@ static int alb_set_mac_address(struct bonding *bond, void *addr)
 		/* save net_device's current hw address */
 		memcpy(tmp_addr, slave->dev->dev_addr, ETH_ALEN);
 
-		res = slave->dev->set_mac_address(slave->dev, addr);
+		res = dev_set_mac_address(slave->dev, addr);
 
 		/* restore net_device's hw address */
 		memcpy(slave->dev->dev_addr, tmp_addr, ETH_ALEN);
@@ -1229,7 +1236,7 @@ unwind:
 	stop_at = slave;
 	bond_for_each_slave_from_to(bond, slave, i, bond->first_slave, stop_at) {
 		memcpy(tmp_addr, slave->dev->dev_addr, ETH_ALEN);
-		slave->dev->set_mac_address(slave->dev, &sa);
+		dev_set_mac_address(slave->dev, &sa);
 		memcpy(slave->dev->dev_addr, tmp_addr, ETH_ALEN);
 	}
 
@@ -1255,6 +1262,8 @@ int bond_alb_initialize(struct bonding *bond, int rlb_enabled)
 			tlb_deinitialize(bond);
 			return res;
 		}
+	} else {
+		bond->alb_info.rlb_enabled = 0;
 	}
 
 	return 0;
@@ -1277,14 +1286,14 @@ int bond_alb_xmit(struct sk_buff *skb, struct net_device *bond_dev)
 	struct ethhdr *eth_data;
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
 	struct slave *tx_slave = NULL;
-	static u32 ip_bcast = 0xffffffff;
+	static const __be32 ip_bcast = htonl(0xffffffff);
 	int hash_size = 0;
 	int do_tx_balance = 1;
 	u32 hash_index = 0;
-	u8 *hash_start = NULL;
+	const u8 *hash_start = NULL;
 	int res = 1;
 
-	skb->mac.raw = (unsigned char *)skb->data;
+	skb_reset_mac_header(skb);
 	eth_data = eth_hdr(skb);
 
 	/* make sure that the curr_active_slave and the slaves list do
@@ -1298,14 +1307,18 @@ int bond_alb_xmit(struct sk_buff *skb, struct net_device *bond_dev)
 	}
 
 	switch (ntohs(skb->protocol)) {
-	case ETH_P_IP:
+	case ETH_P_IP: {
+		const struct iphdr *iph = ip_hdr(skb);
+
 		if ((memcmp(eth_data->h_dest, mac_bcast, ETH_ALEN) == 0) ||
-		    (skb->nh.iph->daddr == ip_bcast)) {
+		    (iph->daddr == ip_bcast) ||
+		    (iph->protocol == IPPROTO_IGMP)) {
 			do_tx_balance = 0;
 			break;
 		}
-		hash_start = (char*)&(skb->nh.iph->daddr);
-		hash_size = sizeof(skb->nh.iph->daddr);
+		hash_start = (char *)&(iph->daddr);
+		hash_size = sizeof(iph->daddr);
+	}
 		break;
 	case ETH_P_IPV6:
 		if (memcmp(eth_data->h_dest, mac_bcast, ETH_ALEN) == 0) {
@@ -1313,12 +1326,11 @@ int bond_alb_xmit(struct sk_buff *skb, struct net_device *bond_dev)
 			break;
 		}
 
-		hash_start = (char*)&(skb->nh.ipv6h->daddr);
-		hash_size = sizeof(skb->nh.ipv6h->daddr);
+		hash_start = (char *)&(ipv6_hdr(skb)->daddr);
+		hash_size = sizeof(ipv6_hdr(skb)->daddr);
 		break;
 	case ETH_P_IPX:
-		if (ipx_hdr(skb)->ipx_checksum !=
-		    __constant_htons(IPX_NO_CHECKSUM)) {
+		if (ipx_hdr(skb)->ipx_checksum != IPX_NO_CHECKSUM) {
 			/* something is wrong with this packet */
 			do_tx_balance = 0;
 			break;
@@ -1382,8 +1394,10 @@ out:
 	return 0;
 }
 
-void bond_alb_monitor(struct bonding *bond)
+void bond_alb_monitor(struct work_struct *work)
 {
+	struct bonding *bond = container_of(work, struct bonding,
+					    alb_work.work);
 	struct alb_bond_info *bond_info = &(BOND_ALB_INFO(bond));
 	struct slave *slave;
 	int i;
@@ -1413,7 +1427,7 @@ void bond_alb_monitor(struct bonding *bond)
 		read_lock(&bond->curr_slave_lock);
 
 		bond_for_each_slave(bond, slave, i) {
-			alb_send_learning_packets(slave,slave->dev->dev_addr);
+			alb_send_learning_packets(slave, slave->dev->dev_addr);
 		}
 
 		read_unlock(&bond->curr_slave_lock);
@@ -1443,15 +1457,15 @@ void bond_alb_monitor(struct bonding *bond)
 
 	/* handle rlb stuff */
 	if (bond_info->rlb_enabled) {
-		/* the following code changes the promiscuity of the
-		 * the curr_active_slave. It needs to be locked with a
-		 * write lock to protect from other code that also
-		 * sets the promiscuity.
-		 */
-		write_lock(&bond->curr_slave_lock);
-
 		if (bond_info->primary_is_promisc &&
 		    (++bond_info->rlb_promisc_timeout_counter >= RLB_PROMISC_TIMEOUT)) {
+
+			/*
+			 * dev_set_promiscuity requires rtnl and
+			 * nothing else.
+			 */
+			read_unlock(&bond->lock);
+			rtnl_lock();
 
 			bond_info->rlb_promisc_timeout_counter = 0;
 
@@ -1461,9 +1475,10 @@ void bond_alb_monitor(struct bonding *bond)
 			 */
 			dev_set_promiscuity(bond->curr_active_slave->dev, -1);
 			bond_info->primary_is_promisc = 0;
-		}
 
-		write_unlock(&bond->curr_slave_lock);
+			rtnl_unlock();
+			read_lock(&bond->lock);
+		}
 
 		if (bond_info->rlb_rebalance) {
 			bond_info->rlb_rebalance = 0;
@@ -1486,7 +1501,7 @@ void bond_alb_monitor(struct bonding *bond)
 	}
 
 re_arm:
-	mod_timer(&(bond_info->alb_timer), jiffies + alb_delta_in_ticks);
+	queue_delayed_work(bond->wq, &bond->alb_work, alb_delta_in_ticks);
 out:
 	read_unlock(&bond->lock);
 }
@@ -1507,11 +1522,11 @@ int bond_alb_init_slave(struct bonding *bond, struct slave *slave)
 	/* caller must hold the bond lock for write since the mac addresses
 	 * are compared and may be swapped.
 	 */
-	write_lock_bh(&bond->lock);
+	read_lock(&bond->lock);
 
 	res = alb_handle_addr_collision_on_attach(bond, slave);
 
-	write_unlock_bh(&bond->lock);
+	read_unlock(&bond->lock);
 
 	if (res) {
 		return res;
@@ -1529,7 +1544,12 @@ int bond_alb_init_slave(struct bonding *bond, struct slave *slave)
 	return 0;
 }
 
-/* Caller must hold bond lock for write */
+/*
+ * Remove slave from tlb and rlb hash tables, and fix up MAC addresses
+ * if necessary.
+ *
+ * Caller must hold RTNL and no other locks
+ */
 void bond_alb_deinit_slave(struct bonding *bond, struct slave *slave)
 {
 	if (bond->slave_cnt > 1) {
@@ -1576,7 +1596,12 @@ void bond_alb_handle_link_change(struct bonding *bond, struct slave *slave, char
  * Set the bond->curr_active_slave to @new_slave and handle
  * mac address swapping and promiscuity changes as needed.
  *
- * Caller must hold bond curr_slave_lock for write (or bond lock for write)
+ * If new_slave is NULL, caller must hold curr_slave_lock or
+ * bond->lock for write.
+ *
+ * If new_slave is not NULL, caller must hold RTNL, bond->lock for
+ * read and curr_slave_lock for write.  Processing here may sleep, so
+ * no other locks may be held.
  */
 void bond_alb_handle_active_change(struct bonding *bond, struct slave *new_slave)
 {
@@ -1615,6 +1640,21 @@ void bond_alb_handle_active_change(struct bonding *bond, struct slave *new_slave
 		}
 	}
 
+	/*
+	 * Arrange for swap_slave and new_slave to temporarily be
+	 * ignored so we can mess with their MAC addresses without
+	 * fear of interference from transmit activity.
+	 */
+	if (swap_slave) {
+		tlb_clear_slave(bond, swap_slave, 1);
+	}
+	tlb_clear_slave(bond, new_slave, 1);
+
+	write_unlock_bh(&bond->curr_slave_lock);
+	read_unlock(&bond->lock);
+
+	ASSERT_RTNL();
+
 	/* curr_active_slave must be set before calling alb_swap_mac_addr */
 	if (swap_slave) {
 		/* swap mac address */
@@ -1623,11 +1663,22 @@ void bond_alb_handle_active_change(struct bonding *bond, struct slave *new_slave
 		/* set the new_slave to the bond mac address */
 		alb_set_slave_mac_addr(new_slave, bond->dev->dev_addr,
 				       bond->alb_info.rlb_enabled);
-		/* fasten bond mac on new current slave */
+	}
+
+	if (swap_slave) {
+		alb_fasten_mac_swap(bond, swap_slave, new_slave);
+		read_lock(&bond->lock);
+	} else {
+		read_lock(&bond->lock);
 		alb_send_learning_packets(new_slave, bond->dev->dev_addr);
 	}
+
+	write_lock_bh(&bond->curr_slave_lock);
 }
 
+/*
+ * Called with RTNL
+ */
 int bond_alb_set_mac_address(struct net_device *bond_dev, void *addr)
 {
 	struct bonding *bond = bond_dev->priv;
@@ -1664,8 +1715,12 @@ int bond_alb_set_mac_address(struct net_device *bond_dev, void *addr)
 		}
 	}
 
+	write_unlock_bh(&bond->curr_slave_lock);
+	read_unlock(&bond->lock);
+
 	if (swap_slave) {
 		alb_swap_mac_addr(bond, swap_slave, bond->curr_active_slave);
+		alb_fasten_mac_swap(bond, swap_slave, bond->curr_active_slave);
 	} else {
 		alb_set_slave_mac_addr(bond->curr_active_slave, bond_dev->dev_addr,
 				       bond->alb_info.rlb_enabled);
@@ -1676,6 +1731,9 @@ int bond_alb_set_mac_address(struct net_device *bond_dev, void *addr)
 			rlb_req_update_slave_clients(bond, bond->curr_active_slave);
 		}
 	}
+
+	read_lock(&bond->lock);
+	write_lock_bh(&bond->curr_slave_lock);
 
 	return 0;
 }

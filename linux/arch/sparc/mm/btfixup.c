@@ -1,12 +1,10 @@
-/* $Id: btfixup.c,v 1.10 2000/05/09 17:40:13 davem Exp $
- * btfixup.c: Boot time code fixup and relocator, so that
+/* btfixup.c: Boot time code fixup and relocator, so that
  * we can get rid of most indirect calls to achieve single
  * image sun4c and srmmu kernel.
  *
  * Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <asm/btfixup.h>
@@ -70,7 +68,7 @@ static void __init set_addr(unsigned int *addr, unsigned int q1, int fmangled, u
 	}
 }
 #else
-static __inline__ void set_addr(unsigned int *addr, unsigned int q1, int fmangled, unsigned int value)
+static inline void set_addr(unsigned int *addr, unsigned int q1, int fmangled, unsigned int value)
 {
 	*addr = value;
 }

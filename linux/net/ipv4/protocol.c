@@ -7,7 +7,7 @@
  *
  * Version:	$Id: protocol.c,v 1.14 2001/05/18 02:25:49 davem Exp $
  *
- * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
+ * Authors:	Ross Biro
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
  * Fixes:
@@ -30,9 +30,7 @@
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/config.h>
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/inet.h>
@@ -40,7 +38,6 @@
 #include <linux/timer.h>
 #include <net/ip.h>
 #include <net/protocol.h>
-#include <net/tcp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <net/icmp.h>
@@ -48,7 +45,7 @@
 #include <net/ipip.h>
 #include <linux/igmp.h>
 
-struct net_protocol *inet_protos[MAX_INET_PROTOS];
+struct net_protocol *inet_protos[MAX_INET_PROTOS] ____cacheline_aligned_in_smp;
 static DEFINE_SPINLOCK(inet_proto_lock);
 
 /*
@@ -76,7 +73,7 @@ int inet_add_protocol(struct net_protocol *prot, unsigned char protocol)
 /*
  *	Remove a protocol from the hash tables.
  */
- 
+
 int inet_del_protocol(struct net_protocol *prot, unsigned char protocol)
 {
 	int hash, ret;

@@ -1,13 +1,11 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright (C) 2001-2003 Red Hat, Inc.
+ * Copyright © 2001-2007 Red Hat, Inc.
  *
  * Created by David Woodhouse <dwmw2@infradead.org>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
- *
- * $Id: background.c,v 1.50 2004/11/16 20:36:10 dwmw2 Exp $
  *
  */
 
@@ -15,6 +13,8 @@
 #include <linux/jffs2.h>
 #include <linux/mtd/mtd.h>
 #include <linux/completion.h>
+#include <linux/sched.h>
+#include <linux/freezer.h>
 #include "nodelist.h"
 
 
@@ -23,8 +23,8 @@ static int jffs2_garbage_collect_thread(void *);
 void jffs2_garbage_collect_trigger(struct jffs2_sb_info *c)
 {
 	spin_lock(&c->erase_completion_lock);
-        if (c->gc_task && jffs2_thread_should_wake(c))
-                send_sig(SIGHUP, c->gc_task, 1);
+	if (c->gc_task && jffs2_thread_should_wake(c))
+		send_sig(SIGHUP, c->gc_task, 1);
 	spin_unlock(&c->erase_completion_lock);
 }
 
@@ -34,10 +34,9 @@ int jffs2_start_garbage_collect_thread(struct jffs2_sb_info *c)
 	pid_t pid;
 	int ret = 0;
 
-	if (c->gc_task)
-		BUG();
+	BUG_ON(c->gc_task);
 
-	init_MUTEX_LOCKED(&c->gc_thread_start);
+	init_completion(&c->gc_thread_start);
 	init_completion(&c->gc_thread_exit);
 
 	pid = kernel_thread(jffs2_garbage_collect_thread, c, CLONE_FS|CLONE_FILES);
@@ -48,21 +47,24 @@ int jffs2_start_garbage_collect_thread(struct jffs2_sb_info *c)
 	} else {
 		/* Wait for it... */
 		D1(printk(KERN_DEBUG "JFFS2: Garbage collect thread is pid %d\n", pid));
-		down(&c->gc_thread_start);
+		wait_for_completion(&c->gc_thread_start);
 	}
- 
+
 	return ret;
 }
 
 void jffs2_stop_garbage_collect_thread(struct jffs2_sb_info *c)
 {
+	int wait = 0;
 	spin_lock(&c->erase_completion_lock);
 	if (c->gc_task) {
 		D1(printk(KERN_DEBUG "jffs2: Killing GC task %d\n", c->gc_task->pid));
 		send_sig(SIGKILL, c->gc_task, 1);
+		wait = 1;
 	}
 	spin_unlock(&c->erase_completion_lock);
-	wait_for_completion(&c->gc_thread_exit);
+	if (wait)
+		wait_for_completion(&c->gc_thread_exit);
 }
 
 static int jffs2_garbage_collect_thread(void *_c)
@@ -75,13 +77,14 @@ static int jffs2_garbage_collect_thread(void *_c)
 	allow_signal(SIGCONT);
 
 	c->gc_task = current;
-	up(&c->gc_thread_start);
+	complete(&c->gc_thread_start);
 
 	set_user_nice(current, 10);
 
+	set_freezable();
 	for (;;) {
 		allow_signal(SIGHUP);
-
+	again:
 		if (!jffs2_thread_should_wake(c)) {
 			set_current_state (TASK_INTERRUPTIBLE);
 			D1(printk(KERN_DEBUG "jffs2_garbage_collect_thread sleeping...\n"));
@@ -92,16 +95,22 @@ static int jffs2_garbage_collect_thread(void *_c)
 			schedule();
 		}
 
-		if (try_to_freeze(0))
-			continue;
+		/* This thread is purely an optimisation. But if it runs when
+		   other things could be running, it actually makes things a
+		   lot worse. Use yield() and put it at the back of the runqueue
+		   every time. Especially during boot, pulling an inode in
+		   with read_inode() is much preferable to having the GC thread
+		   get there first. */
+		yield();
 
-		cond_resched();
-
-		/* Put_super will send a SIGKILL and then wait on the sem. 
+		/* Put_super will send a SIGKILL and then wait on the sem.
 		 */
-		while (signal_pending(current)) {
+		while (signal_pending(current) || freezing(current)) {
 			siginfo_t info;
 			unsigned long signr;
+
+			if (try_to_freeze())
+				goto again;
 
 			signr = dequeue_signal_lock(current, &current->blocked, &info);
 

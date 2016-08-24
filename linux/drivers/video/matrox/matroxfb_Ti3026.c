@@ -72,14 +72,12 @@
  *     (c) 1998 Gerd Knorr <kraxel@cs.tu-berlin.de>
  *
  * (following author is not in any relation with this code, but his ideas
- *  were used when writting this driver)
+ *  were used when writing this driver)
  *
  *		 FreeVBE/AF (Matrox), "Shawn Hargreaves" <shawn@talula.demon.co.uk>
  *
  */
 
-/* make checkconfig does not verify included files... */
-#include <linux/config.h>
 
 #include "matroxfb_Ti3026.h"
 #include "matroxfb_misc.h"

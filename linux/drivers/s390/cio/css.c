@@ -1,12 +1,11 @@
 /*
  *  drivers/s390/cio/css.c
  *  driver for channel subsystem
- *   $Revision: 1.84 $
  *
  *    Copyright (C) 2002 IBM Deutschland Entwicklung GmbH,
  *			 IBM Corporation
  *    Author(s): Arnd Bergmann (arndb@de.ibm.com)
- *		 Cornelia Huck (cohuck@de.ibm.com)
+ *		 Cornelia Huck (cornelia.huck@de.ibm.com)
  */
 #include <linux/module.h>
 #include <linux/init.h>
@@ -14,26 +13,46 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/list.h>
+#include <linux/reboot.h>
 
 #include "css.h"
 #include "cio.h"
 #include "cio_debug.h"
 #include "ioasm.h"
 #include "chsc.h"
+#include "device.h"
+#include "idset.h"
+#include "chp.h"
 
-unsigned int highest_subchannel;
-int need_rescan = 0;
 int css_init_done = 0;
+static int need_reprobe = 0;
+static int max_ssid = 0;
 
-struct pgid global_pgid;
+struct channel_subsystem *channel_subsystems[__MAX_CSSID + 1];
+
 int css_characteristics_avail = 0;
 
-struct device css_bus_device = {
-	.bus_id = "css0",
-};
+int
+for_each_subchannel(int(*fn)(struct subchannel_id, void *), void *data)
+{
+	struct subchannel_id schid;
+	int ret;
+
+	init_subchannel_id(&schid);
+	ret = -ENODEV;
+	do {
+		do {
+			ret = fn(schid, data);
+			if (ret)
+				break;
+		} while (schid.sch_no++ < __MAX_SUBCHANNEL);
+		schid.sch_no = 0;
+	} while (schid.ssid++ < max_ssid);
+	return ret;
+}
 
 static struct subchannel *
-css_alloc_subchannel(int irq)
+css_alloc_subchannel(struct subchannel_id schid)
 {
 	struct subchannel *sch;
 	int ret;
@@ -41,13 +60,11 @@ css_alloc_subchannel(int irq)
 	sch = kmalloc (sizeof (*sch), GFP_KERNEL | GFP_DMA);
 	if (sch == NULL)
 		return ERR_PTR(-ENOMEM);
-	ret = cio_validate_subchannel (sch, irq);
+	ret = cio_validate_subchannel (sch, schid);
 	if (ret < 0) {
 		kfree(sch);
 		return ERR_PTR(ret);
 	}
-	if (irq > highest_subchannel)
-		highest_subchannel = irq;
 
 	if (sch->st != SUBCHANNEL_TYPE_IO) {
 		/* For now we ignore all non-io subchannels. */
@@ -63,6 +80,7 @@ css_alloc_subchannel(int irq)
 	sch->schib.pmcw.intparm = (__u32)(unsigned long)sch;
 	ret = cio_modify(sch);
 	if (ret) {
+		kfree(sch->lock);
 		kfree(sch);
 		return ERR_PTR(ret);
 	}
@@ -76,9 +94,9 @@ css_free_subchannel(struct subchannel *sch)
 		/* Reset intparm to zeroes. */
 		sch->schib.pmcw.intparm = 0;
 		cio_modify(sch);
+		kfree(sch->lock);
 		kfree(sch);
 	}
-	
 }
 
 static void
@@ -87,39 +105,109 @@ css_subchannel_release(struct device *dev)
 	struct subchannel *sch;
 
 	sch = to_subchannel(dev);
-	if (!cio_is_console(sch->irq))
+	if (!cio_is_console(sch->schid)) {
+		kfree(sch->lock);
 		kfree(sch);
+	}
 }
 
-extern int css_get_ssd_info(struct subchannel *sch);
+static int css_sch_device_register(struct subchannel *sch)
+{
+	int ret;
 
-static int
-css_register_subchannel(struct subchannel *sch)
+	mutex_lock(&sch->reg_mutex);
+	ret = device_register(&sch->dev);
+	mutex_unlock(&sch->reg_mutex);
+	return ret;
+}
+
+void css_sch_device_unregister(struct subchannel *sch)
+{
+	mutex_lock(&sch->reg_mutex);
+	device_unregister(&sch->dev);
+	mutex_unlock(&sch->reg_mutex);
+}
+
+static void ssd_from_pmcw(struct chsc_ssd_info *ssd, struct pmcw *pmcw)
+{
+	int i;
+	int mask;
+
+	memset(ssd, 0, sizeof(struct chsc_ssd_info));
+	ssd->path_mask = pmcw->pim;
+	for (i = 0; i < 8; i++) {
+		mask = 0x80 >> i;
+		if (pmcw->pim & mask) {
+			chp_id_init(&ssd->chpid[i]);
+			ssd->chpid[i].id = pmcw->chpid[i];
+		}
+	}
+}
+
+static void ssd_register_chpids(struct chsc_ssd_info *ssd)
+{
+	int i;
+	int mask;
+
+	for (i = 0; i < 8; i++) {
+		mask = 0x80 >> i;
+		if (ssd->path_mask & mask)
+			if (!chp_is_registered(ssd->chpid[i]))
+				chp_new(ssd->chpid[i]);
+	}
+}
+
+void css_update_ssd_info(struct subchannel *sch)
+{
+	int ret;
+
+	if (cio_is_console(sch->schid)) {
+		/* Console is initialized too early for functions requiring
+		 * memory allocation. */
+		ssd_from_pmcw(&sch->ssd_info, &sch->schib.pmcw);
+	} else {
+		ret = chsc_get_ssd_info(sch->schid, &sch->ssd_info);
+		if (ret)
+			ssd_from_pmcw(&sch->ssd_info, &sch->schib.pmcw);
+		ssd_register_chpids(&sch->ssd_info);
+	}
+}
+
+static int css_register_subchannel(struct subchannel *sch)
 {
 	int ret;
 
 	/* Initialize the subchannel structure */
-	sch->dev.parent = &css_bus_device;
+	sch->dev.parent = &channel_subsystems[0]->device;
 	sch->dev.bus = &css_bus_type;
 	sch->dev.release = &css_subchannel_release;
-	
+	sch->dev.groups = subch_attr_groups;
+	/*
+	 * We don't want to generate uevents for I/O subchannels that don't
+	 * have a working ccw device behind them since they will be
+	 * unregistered before they can be used anyway, so we delay the add
+	 * uevent until after device recognition was successful.
+	 */
+	if (!cio_is_console(sch->schid))
+		/* Console is special, no need to suppress. */
+		sch->dev.uevent_suppress = 1;
+	css_update_ssd_info(sch);
 	/* make it known to the system */
-	ret = device_register(&sch->dev);
-	if (ret)
-		printk (KERN_WARNING "%s: could not register %s\n",
-			__func__, sch->dev.bus_id);
-	else
-		css_get_ssd_info(sch);
+	ret = css_sch_device_register(sch);
+	if (ret) {
+		CIO_MSG_EVENT(0, "Could not register sch 0.%x.%04x: %d\n",
+			      sch->schid.ssid, sch->schid.sch_no, ret);
+		return ret;
+	}
 	return ret;
 }
 
-int
-css_probe_device(int irq)
+static int css_probe_device(struct subchannel_id schid)
 {
 	int ret;
 	struct subchannel *sch;
 
-	sch = css_alloc_subchannel(irq);
+	sch = css_alloc_subchannel(schid);
 	if (IS_ERR(sch))
 		return PTR_ERR(sch);
 	ret = css_register_subchannel(sch);
@@ -128,271 +216,455 @@ css_probe_device(int irq)
 	return ret;
 }
 
-struct subchannel *
-get_subchannel_by_schid(int irq)
+static int
+check_subchannel(struct device * dev, void * data)
 {
 	struct subchannel *sch;
-	struct list_head *entry;
-	struct device *dev;
+	struct subchannel_id *schid = data;
 
-	if (!get_bus(&css_bus_type))
-		return NULL;
-	down_read(&css_bus_type.subsys.rwsem);
-	sch = NULL;
-	list_for_each(entry, &css_bus_type.devices.list) {
-		dev = get_device(container_of(entry,
-					      struct device, bus_list));
-		if (!dev)
-			continue;
-		sch = to_subchannel(dev);
-		if (sch->irq == irq)
-			break;
-		put_device(dev);
-		sch = NULL;
-	}
-	up_read(&css_bus_type.subsys.rwsem);
-	put_bus(&css_bus_type);
-
-	return sch;
+	sch = to_subchannel(dev);
+	return schid_equal(&sch->schid, schid);
 }
 
-static inline int
-css_get_subchannel_status(struct subchannel *sch, int schid)
+struct subchannel *
+get_subchannel_by_schid(struct subchannel_id schid)
+{
+	struct device *dev;
+
+	dev = bus_find_device(&css_bus_type, NULL,
+			      &schid, check_subchannel);
+
+	return dev ? to_subchannel(dev) : NULL;
+}
+
+static int css_get_subchannel_status(struct subchannel *sch)
 {
 	struct schib schib;
-	int cc;
 
-	cc = stsch(schid, &schib);
-	if (cc)
+	if (stsch(sch->schid, &schib) || !schib.pmcw.dnv)
 		return CIO_GONE;
-	if (!schib.pmcw.dnv)
-		return CIO_GONE;
-	if (sch && sch->schib.pmcw.dnv &&
-	    (schib.pmcw.dev != sch->schib.pmcw.dev))
+	if (sch->schib.pmcw.dnv && (schib.pmcw.dev != sch->schib.pmcw.dev))
 		return CIO_REVALIDATE;
-	if (sch && !sch->lpm)
+	if (!sch->lpm)
 		return CIO_NO_PATH;
 	return CIO_OPER;
 }
-	
-static int
-css_evaluate_subchannel(int irq, int slow)
+
+static int css_evaluate_known_subchannel(struct subchannel *sch, int slow)
 {
 	int event, ret, disc;
-	struct subchannel *sch;
+	unsigned long flags;
+	enum { NONE, UNREGISTER, UNREGISTER_PROBE, REPROBE } action;
 
-	sch = get_subchannel_by_schid(irq);
-	disc = sch ? device_is_disconnected(sch) : 0;
+	spin_lock_irqsave(sch->lock, flags);
+	disc = device_is_disconnected(sch);
 	if (disc && slow) {
-		if (sch)
-			put_device(&sch->dev);
-		return 0; /* Already processed. */
+		/* Disconnected devices are evaluated directly only.*/
+		spin_unlock_irqrestore(sch->lock, flags);
+		return 0;
 	}
-	/*
-	 * We've got a machine check, so running I/O won't get an interrupt.
-	 * Kill any pending timers.
-	 */
-	if (sch)
-		device_kill_pending_timer(sch);
+	/* No interrupt after machine check - kill pending timers. */
+	device_kill_pending_timer(sch);
 	if (!disc && !slow) {
-		if (sch)
-			put_device(&sch->dev);
-		return -EAGAIN; /* Will be done on the slow path. */
+		/* Non-disconnected devices are evaluated on the slow path. */
+		spin_unlock_irqrestore(sch->lock, flags);
+		return -EAGAIN;
 	}
-	event = css_get_subchannel_status(sch, irq);
-	CIO_MSG_EVENT(4, "Evaluating schid %04x, event %d, %s, %s path.\n",
-		      irq, event, sch?(disc?"disconnected":"normal"):"unknown",
-		      slow?"slow":"fast");
+	event = css_get_subchannel_status(sch);
+	CIO_MSG_EVENT(4, "Evaluating schid 0.%x.%04x, event %d, %s, %s path.\n",
+		      sch->schid.ssid, sch->schid.sch_no, event,
+		      disc ? "disconnected" : "normal",
+		      slow ? "slow" : "fast");
+	/* Analyze subchannel status. */
+	action = NONE;
 	switch (event) {
 	case CIO_NO_PATH:
+		if (disc) {
+			/* Check if paths have become available. */
+			action = REPROBE;
+			break;
+		}
+		/* fall through */
 	case CIO_GONE:
-		if (!sch) {
-			/* Never used this subchannel. Ignore. */
-			ret = 0;
-			break;
-		}
-		if (disc && (event == CIO_NO_PATH)) {
-			/*
-			 * Uargh, hack again. Because we don't get a machine
-			 * check on configure on, our path bookkeeping can
-			 * be out of date here (it's fine while we only do
-			 * logical varying or get chsc machine checks). We
-			 * need to force reprobing or we might miss devices
-			 * coming operational again. It won't do harm in real
-			 * no path situations.
-			 */
-			device_trigger_reprobe(sch);
-			ret = 0;
-			break;
-		}
-		if (sch->driver && sch->driver->notify &&
-		    sch->driver->notify(&sch->dev, event)) {
-			cio_disable_subchannel(sch);
-			device_set_disconnected(sch);
-			ret = 0;
-			break;
-		}
-		/*
-		 * Unregister subchannel.
-		 * The device will be killed automatically.
-		 */
+		/* Prevent unwanted effects when opening lock. */
 		cio_disable_subchannel(sch);
-		device_unregister(&sch->dev);
-		/* Reset intparm to zeroes. */
-		sch->schib.pmcw.intparm = 0;
-		cio_modify(sch);
-		put_device(&sch->dev);
-		ret = 0;
+		device_set_disconnected(sch);
+		/* Ask driver what to do with device. */
+		action = UNREGISTER;
+		if (sch->driver && sch->driver->notify) {
+			spin_unlock_irqrestore(sch->lock, flags);
+			ret = sch->driver->notify(&sch->dev, event);
+			spin_lock_irqsave(sch->lock, flags);
+			if (ret)
+				action = NONE;
+		}
 		break;
 	case CIO_REVALIDATE:
-		/* 
-		 * Revalidation machine check. Sick.
-		 * We don't notify the driver since we have to throw the device
-		 * away in any case.
-		 */
-		if (!disc) {
-			device_unregister(&sch->dev);
-			/* Reset intparm to zeroes. */
-			sch->schib.pmcw.intparm = 0;
-			cio_modify(sch);
-			put_device(&sch->dev);
-			ret = css_probe_device(irq);
-		} else {
-			/*
-			 * We can't immediately deregister the disconnected
-			 * device since it might block.
-			 */
-			device_trigger_reprobe(sch);
-			ret = 0;
-		}
+		/* Device will be removed, so no notify necessary. */
+		if (disc)
+			/* Reprobe because immediate unregister might block. */
+			action = REPROBE;
+		else
+			action = UNREGISTER_PROBE;
 		break;
 	case CIO_OPER:
 		if (disc)
 			/* Get device operational again. */
-			device_trigger_reprobe(sch);
-		ret = sch ? 0 : css_probe_device(irq);
+			action = REPROBE;
+		break;
+	}
+	/* Perform action. */
+	ret = 0;
+	switch (action) {
+	case UNREGISTER:
+	case UNREGISTER_PROBE:
+		/* Unregister device (will use subchannel lock). */
+		spin_unlock_irqrestore(sch->lock, flags);
+		css_sch_device_unregister(sch);
+		spin_lock_irqsave(sch->lock, flags);
+
+		/* Reset intparm to zeroes. */
+		sch->schib.pmcw.intparm = 0;
+		cio_modify(sch);
+		break;
+	case REPROBE:
+		device_trigger_reprobe(sch);
 		break;
 	default:
-		BUG();
-		ret = 0;
+		break;
 	}
+	spin_unlock_irqrestore(sch->lock, flags);
+	/* Probe if necessary. */
+	if (action == UNREGISTER_PROBE)
+		ret = css_probe_device(sch->schid);
+
 	return ret;
 }
 
-static void
-css_rescan_devices(void)
+static int css_evaluate_new_subchannel(struct subchannel_id schid, int slow)
 {
-	int irq, ret;
+	struct schib schib;
 
-	for (irq = 0; irq < __MAX_SUBCHANNELS; irq++) {
-		ret = css_evaluate_subchannel(irq, 1);
-		/* No more memory. It doesn't make sense to continue. No
-		 * panic because this can happen in midflight and just
-		 * because we can't use a new device is no reason to crash
-		 * the system. */
-		if (ret == -ENOMEM)
-			break;
-		/* -ENXIO indicates that there are no more subchannels. */
-		if (ret == -ENXIO)
-			break;
+	if (!slow) {
+		/* Will be done on the slow path. */
+		return -EAGAIN;
 	}
+	if (stsch_err(schid, &schib) || !schib.pmcw.dnv) {
+		/* Unusable - ignore. */
+		return 0;
+	}
+	CIO_MSG_EVENT(4, "Evaluating schid 0.%x.%04x, event %d, unknown, "
+			 "slow path.\n", schid.ssid, schid.sch_no, CIO_OPER);
+
+	return css_probe_device(schid);
 }
 
-struct slow_subchannel {
-	struct list_head slow_list;
-	unsigned long schid;
-};
-
-static LIST_HEAD(slow_subchannels_head);
-static DEFINE_SPINLOCK(slow_subchannel_lock);
-
-static void
-css_trigger_slow_path(void)
+static void css_evaluate_subchannel(struct subchannel_id schid, int slow)
 {
-	CIO_TRACE_EVENT(4, "slowpath");
+	struct subchannel *sch;
+	int ret;
 
-	if (need_rescan) {
-		need_rescan = 0;
-		css_rescan_devices();
-		return;
+	sch = get_subchannel_by_schid(schid);
+	if (sch) {
+		ret = css_evaluate_known_subchannel(sch, slow);
+		put_device(&sch->dev);
+	} else
+		ret = css_evaluate_new_subchannel(schid, slow);
+	if (ret == -EAGAIN)
+		css_schedule_eval(schid);
+}
+
+static struct idset *slow_subchannel_set;
+static spinlock_t slow_subchannel_lock;
+
+static int __init slow_subchannel_init(void)
+{
+	spin_lock_init(&slow_subchannel_lock);
+	slow_subchannel_set = idset_sch_new();
+	if (!slow_subchannel_set) {
+		CIO_MSG_EVENT(0, "could not allocate slow subchannel set\n");
+		return -ENOMEM;
 	}
+	return 0;
+}
 
+static void css_slow_path_func(struct work_struct *unused)
+{
+	struct subchannel_id schid;
+
+	CIO_TRACE_EVENT(4, "slowpath");
 	spin_lock_irq(&slow_subchannel_lock);
-	while (!list_empty(&slow_subchannels_head)) {
-		struct slow_subchannel *slow_sch =
-			list_entry(slow_subchannels_head.next,
-				   struct slow_subchannel, slow_list);
-
-		list_del_init(slow_subchannels_head.next);
+	init_subchannel_id(&schid);
+	while (idset_sch_get_first(slow_subchannel_set, &schid)) {
+		idset_sch_del(slow_subchannel_set, schid);
 		spin_unlock_irq(&slow_subchannel_lock);
-		css_evaluate_subchannel(slow_sch->schid, 1);
+		css_evaluate_subchannel(schid, 1);
 		spin_lock_irq(&slow_subchannel_lock);
-		kfree(slow_sch);
 	}
 	spin_unlock_irq(&slow_subchannel_lock);
 }
 
-typedef void (*workfunc)(void *);
-DECLARE_WORK(slow_path_work, (workfunc)css_trigger_slow_path, NULL);
+static DECLARE_WORK(slow_path_work, css_slow_path_func);
 struct workqueue_struct *slow_path_wq;
 
-/*
- * Rescan for new devices. FIXME: This is slow.
- * This function is called when we have lost CRWs due to overflows and we have
- * to do subchannel housekeeping.
- */
-void
-css_reiterate_subchannels(void)
+void css_schedule_eval(struct subchannel_id schid)
 {
-	css_clear_subchannel_slow_list();
-	need_rescan = 1;
+	unsigned long flags;
+
+	spin_lock_irqsave(&slow_subchannel_lock, flags);
+	idset_sch_add(slow_subchannel_set, schid);
+	queue_work(slow_path_wq, &slow_path_work);
+	spin_unlock_irqrestore(&slow_subchannel_lock, flags);
 }
+
+void css_schedule_eval_all(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&slow_subchannel_lock, flags);
+	idset_fill(slow_subchannel_set);
+	queue_work(slow_path_wq, &slow_path_work);
+	spin_unlock_irqrestore(&slow_subchannel_lock, flags);
+}
+
+/* Reprobe subchannel if unregistered. */
+static int reprobe_subchannel(struct subchannel_id schid, void *data)
+{
+	struct subchannel *sch;
+	int ret;
+
+	CIO_MSG_EVENT(6, "cio: reprobe 0.%x.%04x\n",
+		      schid.ssid, schid.sch_no);
+	if (need_reprobe)
+		return -EAGAIN;
+
+	sch = get_subchannel_by_schid(schid);
+	if (sch) {
+		/* Already known. */
+		put_device(&sch->dev);
+		return 0;
+	}
+
+	ret = css_probe_device(schid);
+	switch (ret) {
+	case 0:
+		break;
+	case -ENXIO:
+	case -ENOMEM:
+	case -EIO:
+		/* These should abort looping */
+		break;
+	default:
+		ret = 0;
+	}
+
+	return ret;
+}
+
+/* Work function used to reprobe all unregistered subchannels. */
+static void reprobe_all(struct work_struct *unused)
+{
+	int ret;
+
+	CIO_MSG_EVENT(2, "reprobe start\n");
+
+	need_reprobe = 0;
+	/* Make sure initial subchannel scan is done. */
+	wait_event(ccw_device_init_wq,
+		   atomic_read(&ccw_device_init_count) == 0);
+	ret = for_each_subchannel(reprobe_subchannel, NULL);
+
+	CIO_MSG_EVENT(2, "reprobe done (rc=%d, need_reprobe=%d)\n", ret,
+		      need_reprobe);
+}
+
+static DECLARE_WORK(css_reprobe_work, reprobe_all);
+
+/* Schedule reprobing of all unregistered subchannels. */
+void css_schedule_reprobe(void)
+{
+	need_reprobe = 1;
+	queue_work(slow_path_wq, &css_reprobe_work);
+}
+
+EXPORT_SYMBOL_GPL(css_schedule_reprobe);
 
 /*
  * Called from the machine check handler for subchannel report words.
  */
-int
-css_process_crw(int irq)
+void css_process_crw(int rsid1, int rsid2)
 {
-	int ret;
+	struct subchannel_id mchk_schid;
 
-	CIO_CRW_EVENT(2, "source is subchannel %04X\n", irq);
+	CIO_CRW_EVENT(2, "source is subchannel %04X, subsystem id %x\n",
+		      rsid1, rsid2);
+	init_subchannel_id(&mchk_schid);
+	mchk_schid.sch_no = rsid1;
+	if (rsid2 != 0)
+		mchk_schid.ssid = (rsid2 >> 8) & 3;
 
-	if (need_rescan)
-		/* We need to iterate all subchannels anyway. */
-		return -EAGAIN;
 	/* 
 	 * Since we are always presented with IPI in the CRW, we have to
 	 * use stsch() to find out if the subchannel in question has come
 	 * or gone.
 	 */
-	ret = css_evaluate_subchannel(irq, 0);
-	if (ret == -EAGAIN) {
-		if (css_enqueue_subchannel_slow(irq)) {
-			css_clear_subchannel_slow_list();
-			need_rescan = 1;
+	css_evaluate_subchannel(mchk_schid, 0);
+}
+
+static int __init
+__init_channel_subsystem(struct subchannel_id schid, void *data)
+{
+	struct subchannel *sch;
+	int ret;
+
+	if (cio_is_console(schid))
+		sch = cio_get_console_subchannel();
+	else {
+		sch = css_alloc_subchannel(schid);
+		if (IS_ERR(sch))
+			ret = PTR_ERR(sch);
+		else
+			ret = 0;
+		switch (ret) {
+		case 0:
+			break;
+		case -ENOMEM:
+			panic("Out of memory in init_channel_subsystem\n");
+		/* -ENXIO: no more subchannels. */
+		case -ENXIO:
+			return ret;
+		/* -EIO: this subchannel set not supported. */
+		case -EIO:
+			return ret;
+		default:
+			return 0;
 		}
 	}
-	return ret;
+	/*
+	 * We register ALL valid subchannels in ioinfo, even those
+	 * that have been present before init_channel_subsystem.
+	 * These subchannels can't have been registered yet (kmalloc
+	 * not working) so we do it now. This is true e.g. for the
+	 * console subchannel.
+	 */
+	css_register_subchannel(sch);
+	return 0;
 }
 
 static void __init
-css_generate_pgid(void)
+css_generate_pgid(struct channel_subsystem *css, u32 tod_high)
 {
-	/* Let's build our path group ID here. */
-	if (css_characteristics_avail && css_general_characteristics.mcss)
-		global_pgid.cpu_addr = 0x8000;
-	else {
+	if (css_characteristics_avail && css_general_characteristics.mcss) {
+		css->global_pgid.pgid_high.ext_cssid.version = 0x80;
+		css->global_pgid.pgid_high.ext_cssid.cssid = css->cssid;
+	} else {
 #ifdef CONFIG_SMP
-		global_pgid.cpu_addr = hard_smp_processor_id();
+		css->global_pgid.pgid_high.cpu_addr = hard_smp_processor_id();
 #else
-		global_pgid.cpu_addr = 0;
+		css->global_pgid.pgid_high.cpu_addr = 0;
 #endif
 	}
-	global_pgid.cpu_id = ((cpuid_t *) __LC_CPUID)->ident;
-	global_pgid.cpu_model = ((cpuid_t *) __LC_CPUID)->machine;
-	global_pgid.tod_high = (__u32) (get_clock() >> 32);
+	css->global_pgid.cpu_id = ((cpuid_t *) __LC_CPUID)->ident;
+	css->global_pgid.cpu_model = ((cpuid_t *) __LC_CPUID)->machine;
+	css->global_pgid.tod_high = tod_high;
+
 }
+
+static void
+channel_subsystem_release(struct device *dev)
+{
+	struct channel_subsystem *css;
+
+	css = to_css(dev);
+	mutex_destroy(&css->mutex);
+	kfree(css);
+}
+
+static ssize_t
+css_cm_enable_show(struct device *dev, struct device_attribute *attr,
+		   char *buf)
+{
+	struct channel_subsystem *css = to_css(dev);
+
+	if (!css)
+		return 0;
+	return sprintf(buf, "%x\n", css->cm_enabled);
+}
+
+static ssize_t
+css_cm_enable_store(struct device *dev, struct device_attribute *attr,
+		    const char *buf, size_t count)
+{
+	struct channel_subsystem *css = to_css(dev);
+	int ret;
+
+	switch (buf[0]) {
+	case '0':
+		ret = css->cm_enabled ? chsc_secm(css, 0) : 0;
+		break;
+	case '1':
+		ret = css->cm_enabled ? 0 : chsc_secm(css, 1);
+		break;
+	default:
+		ret = -EINVAL;
+	}
+	return ret < 0 ? ret : count;
+}
+
+static DEVICE_ATTR(cm_enable, 0644, css_cm_enable_show, css_cm_enable_store);
+
+static int __init setup_css(int nr)
+{
+	u32 tod_high;
+	int ret;
+	struct channel_subsystem *css;
+
+	css = channel_subsystems[nr];
+	memset(css, 0, sizeof(struct channel_subsystem));
+	css->pseudo_subchannel =
+		kzalloc(sizeof(*css->pseudo_subchannel), GFP_KERNEL);
+	if (!css->pseudo_subchannel)
+		return -ENOMEM;
+	css->pseudo_subchannel->dev.parent = &css->device;
+	css->pseudo_subchannel->dev.release = css_subchannel_release;
+	sprintf(css->pseudo_subchannel->dev.bus_id, "defunct");
+	ret = cio_create_sch_lock(css->pseudo_subchannel);
+	if (ret) {
+		kfree(css->pseudo_subchannel);
+		return ret;
+	}
+	mutex_init(&css->mutex);
+	css->valid = 1;
+	css->cssid = nr;
+	sprintf(css->device.bus_id, "css%x", nr);
+	css->device.release = channel_subsystem_release;
+	tod_high = (u32) (get_clock() >> 32);
+	css_generate_pgid(css, tod_high);
+	return 0;
+}
+
+static int css_reboot_event(struct notifier_block *this,
+			    unsigned long event,
+			    void *ptr)
+{
+	int ret, i;
+
+	ret = NOTIFY_DONE;
+	for (i = 0; i <= __MAX_CSSID; i++) {
+		struct channel_subsystem *css;
+
+		css = channel_subsystems[i];
+		if (css->cm_enabled)
+			if (chsc_secm(css, 0))
+				ret = NOTIFY_BAD;
+	}
+
+	return ret;
+}
+
+static struct notifier_block css_reboot_notifier = {
+	.notifier_call = css_reboot_event,
+};
 
 /*
  * Now that the driver core is running, we can setup our channel subsystem.
@@ -402,57 +674,109 @@ css_generate_pgid(void)
 static int __init
 init_channel_subsystem (void)
 {
-	int ret, irq;
+	int ret, i;
 
-	if (chsc_determine_css_characteristics() == 0)
+	ret = chsc_determine_css_characteristics();
+	if (ret == -ENOMEM)
+		goto out; /* No need to continue. */
+	if (ret == 0)
 		css_characteristics_avail = 1;
 
-	css_generate_pgid();
+	ret = chsc_alloc_sei_area();
+	if (ret)
+		goto out;
+
+	ret = slow_subchannel_init();
+	if (ret)
+		goto out;
 
 	if ((ret = bus_register(&css_bus_type)))
 		goto out;
-	if ((ret = device_register (&css_bus_device)))
-		goto out_bus;
 
+	/* Try to enable MSS. */
+	ret = chsc_enable_facility(CHSC_SDA_OC_MSS);
+	switch (ret) {
+	case 0: /* Success. */
+		max_ssid = __MAX_SSID;
+		break;
+	case -ENOMEM:
+		goto out_bus;
+	default:
+		max_ssid = 0;
+	}
+	/* Setup css structure. */
+	for (i = 0; i <= __MAX_CSSID; i++) {
+		struct channel_subsystem *css;
+
+		css = kmalloc(sizeof(struct channel_subsystem), GFP_KERNEL);
+		if (!css) {
+			ret = -ENOMEM;
+			goto out_unregister;
+		}
+		channel_subsystems[i] = css;
+		ret = setup_css(i);
+		if (ret)
+			goto out_free;
+		ret = device_register(&css->device);
+		if (ret)
+			goto out_free_all;
+		if (css_characteristics_avail &&
+		    css_chsc_characteristics.secm) {
+			ret = device_create_file(&css->device,
+						 &dev_attr_cm_enable);
+			if (ret)
+				goto out_device;
+		}
+		ret = device_register(&css->pseudo_subchannel->dev);
+		if (ret)
+			goto out_file;
+	}
+	ret = register_reboot_notifier(&css_reboot_notifier);
+	if (ret)
+		goto out_pseudo;
 	css_init_done = 1;
 
 	ctl_set_bit(6, 28);
 
-	for (irq = 0; irq < __MAX_SUBCHANNELS; irq++) {
-		struct subchannel *sch;
-
-		if (cio_is_console(irq))
-			sch = cio_get_console_subchannel();
-		else {
-			sch = css_alloc_subchannel(irq);
-			if (IS_ERR(sch))
-				ret = PTR_ERR(sch);
-			else
-				ret = 0;
-			if (ret == -ENOMEM)
-				panic("Out of memory in "
-				      "init_channel_subsystem\n");
-			/* -ENXIO: no more subchannels. */
-			if (ret == -ENXIO)
-				break;
-			if (ret)
-				continue;
-		}
-		/*
-		 * We register ALL valid subchannels in ioinfo, even those
-		 * that have been present before init_channel_subsystem.
-		 * These subchannels can't have been registered yet (kmalloc
-		 * not working) so we do it now. This is true e.g. for the
-		 * console subchannel.
-		 */
-		css_register_subchannel(sch);
-	}
+	for_each_subchannel(__init_channel_subsystem, NULL);
 	return 0;
+out_pseudo:
+	device_unregister(&channel_subsystems[i]->pseudo_subchannel->dev);
+out_file:
+	device_remove_file(&channel_subsystems[i]->device,
+			   &dev_attr_cm_enable);
+out_device:
+	device_unregister(&channel_subsystems[i]->device);
+out_free_all:
+	kfree(channel_subsystems[i]->pseudo_subchannel->lock);
+	kfree(channel_subsystems[i]->pseudo_subchannel);
+out_free:
+	kfree(channel_subsystems[i]);
+out_unregister:
+	while (i > 0) {
+		struct channel_subsystem *css;
 
+		i--;
+		css = channel_subsystems[i];
+		device_unregister(&css->pseudo_subchannel->dev);
+		if (css_characteristics_avail && css_chsc_characteristics.secm)
+			device_remove_file(&css->device,
+					   &dev_attr_cm_enable);
+		device_unregister(&css->device);
+	}
 out_bus:
 	bus_unregister(&css_bus_type);
 out:
+	chsc_free_sei_area();
+	kfree(slow_subchannel_set);
+	printk(KERN_WARNING"cio: failed to initialize css driver (%d)!\n",
+	       ret);
 	return ret;
+}
+
+int sch_is_pseudo_sch(struct subchannel *sch)
+{
+	return sch == to_css(sch->dev.parent)->pseudo_subchannel;
 }
 
 /*
@@ -472,96 +796,45 @@ css_bus_match (struct device *dev, struct device_driver *drv)
 	return 0;
 }
 
+static int
+css_probe (struct device *dev)
+{
+	struct subchannel *sch;
+
+	sch = to_subchannel(dev);
+	sch->driver = container_of (dev->driver, struct css_driver, drv);
+	return (sch->driver->probe ? sch->driver->probe(sch) : 0);
+}
+
+static int
+css_remove (struct device *dev)
+{
+	struct subchannel *sch;
+
+	sch = to_subchannel(dev);
+	return (sch->driver->remove ? sch->driver->remove(sch) : 0);
+}
+
+static void
+css_shutdown (struct device *dev)
+{
+	struct subchannel *sch;
+
+	sch = to_subchannel(dev);
+	if (sch->driver->shutdown)
+		sch->driver->shutdown(sch);
+}
+
 struct bus_type css_bus_type = {
-	.name  = "css",
-	.match = &css_bus_match,
+	.name     = "css",
+	.match    = css_bus_match,
+	.probe    = css_probe,
+	.remove   = css_remove,
+	.shutdown = css_shutdown,
 };
 
 subsys_initcall(init_channel_subsystem);
 
-/*
- * Register root devices for some drivers. The release function must not be
- * in the device drivers, so we do it here.
- */
-static void
-s390_root_dev_release(struct device *dev)
-{
-	kfree(dev);
-}
-
-struct device *
-s390_root_dev_register(const char *name)
-{
-	struct device *dev;
-	int ret;
-
-	if (!strlen(name))
-		return ERR_PTR(-EINVAL);
-	dev = kmalloc(sizeof(struct device), GFP_KERNEL);
-	if (!dev)
-		return ERR_PTR(-ENOMEM);
-	memset(dev, 0, sizeof(struct device));
-	strncpy(dev->bus_id, name, min(strlen(name), (size_t)BUS_ID_SIZE));
-	dev->release = s390_root_dev_release;
-	ret = device_register(dev);
-	if (ret) {
-		kfree(dev);
-		return ERR_PTR(ret);
-	}
-	return dev;
-}
-
-void
-s390_root_dev_unregister(struct device *dev)
-{
-	if (dev)
-		device_unregister(dev);
-}
-
-int
-css_enqueue_subchannel_slow(unsigned long schid)
-{
-	struct slow_subchannel *new_slow_sch;
-	unsigned long flags;
-
-	new_slow_sch = kmalloc(sizeof(struct slow_subchannel), GFP_ATOMIC);
-	if (!new_slow_sch)
-		return -ENOMEM;
-	memset(new_slow_sch, 0, sizeof(struct slow_subchannel));
-	new_slow_sch->schid = schid;
-	spin_lock_irqsave(&slow_subchannel_lock, flags);
-	list_add_tail(&new_slow_sch->slow_list, &slow_subchannels_head);
-	spin_unlock_irqrestore(&slow_subchannel_lock, flags);
-	return 0;
-}
-
-void
-css_clear_subchannel_slow_list(void)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&slow_subchannel_lock, flags);
-	while (!list_empty(&slow_subchannels_head)) {
-		struct slow_subchannel *slow_sch =
-			list_entry(slow_subchannels_head.next,
-				   struct slow_subchannel, slow_list);
-
-		list_del_init(slow_subchannels_head.next);
-		kfree(slow_sch);
-	}
-	spin_unlock_irqrestore(&slow_subchannel_lock, flags);
-}
-
-
-
-int
-css_slow_subchannels_exist(void)
-{
-	return (!list_empty(&slow_subchannels_head));
-}
-
 MODULE_LICENSE("GPL");
 EXPORT_SYMBOL(css_bus_type);
-EXPORT_SYMBOL(s390_root_dev_register);
-EXPORT_SYMBOL(s390_root_dev_unregister);
 EXPORT_SYMBOL_GPL(css_characteristics_avail);

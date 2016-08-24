@@ -17,14 +17,21 @@
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
+#include <asm/assembler.h>
 #include <asm/vfpmacros.h>
 
 	.globl	do_vfp
 do_vfp:
+	enable_irq
  	ldr	r4, .LCvfp
+	ldr	r11, [r10, #TI_CPU]	@ CPU number
 	add	r10, r10, #TI_VFPSTATE	@ r10 = workspace
 	ldr	pc, [r4]		@ call VFP entry point
+
+ENTRY(vfp_null_entry)
+	mov	pc, lr
+ENDPROC(vfp_null_entry)
 
 .LCvfp:
 	.word	vfp_vector

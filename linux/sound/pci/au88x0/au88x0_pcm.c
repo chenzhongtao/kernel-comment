@@ -20,7 +20,7 @@
  * Supports ADB and WT DMA. Unfortunately, WT channels do not run yet.
  * It remains stuck,and DMA transfers do not happen. 
  */
-
+#include <sound/asoundef.h>
 #include <sound/driver.h>
 #include <linux/time.h>
 #include <sound/core.h>
@@ -31,9 +31,9 @@
 #define VORTEX_PCM_TYPE(x) (x->name[40])
 
 /* hardware definition */
-static snd_pcm_hardware_t snd_vortex_playback_hw_adb = {
+static struct snd_pcm_hardware snd_vortex_playback_hw_adb = {
 	.info =
-	    (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_RESUME |
+	    (SNDRV_PCM_INFO_MMAP | /* SNDRV_PCM_INFO_RESUME | */
 	     SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_INTERLEAVED |
 	     SNDRV_PCM_INFO_MMAP_VALID),
 	.formats =
@@ -56,9 +56,9 @@ static snd_pcm_hardware_t snd_vortex_playback_hw_adb = {
 };
 
 #ifndef CHIP_AU8820
-static snd_pcm_hardware_t snd_vortex_playback_hw_a3d = {
+static struct snd_pcm_hardware snd_vortex_playback_hw_a3d = {
 	.info =
-	    (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_RESUME |
+	    (SNDRV_PCM_INFO_MMAP | /* SNDRV_PCM_INFO_RESUME | */
 	     SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_INTERLEAVED |
 	     SNDRV_PCM_INFO_MMAP_VALID),
 	.formats =
@@ -76,9 +76,9 @@ static snd_pcm_hardware_t snd_vortex_playback_hw_a3d = {
 	.periods_max = 64,
 };
 #endif
-static snd_pcm_hardware_t snd_vortex_playback_hw_spdif = {
+static struct snd_pcm_hardware snd_vortex_playback_hw_spdif = {
 	.info =
-	    (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_RESUME |
+	    (SNDRV_PCM_INFO_MMAP | /* SNDRV_PCM_INFO_RESUME | */
 	     SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_INTERLEAVED |
 	     SNDRV_PCM_INFO_MMAP_VALID),
 	.formats =
@@ -99,7 +99,7 @@ static snd_pcm_hardware_t snd_vortex_playback_hw_spdif = {
 };
 
 #ifndef CHIP_AU8810
-static snd_pcm_hardware_t snd_vortex_playback_hw_wt = {
+static struct snd_pcm_hardware snd_vortex_playback_hw_wt = {
 	.info = (SNDRV_PCM_INFO_MMAP |
 		 SNDRV_PCM_INFO_INTERLEAVED |
 		 SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID),
@@ -117,10 +117,10 @@ static snd_pcm_hardware_t snd_vortex_playback_hw_wt = {
 };
 #endif
 /* open callback */
-static int snd_vortex_pcm_open(snd_pcm_substream_t * substream)
+static int snd_vortex_pcm_open(struct snd_pcm_substream *substream)
 {
 	vortex_t *vortex = snd_pcm_substream_chip(substream);
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	int err;
 	
 	/* Force equal size periods */
@@ -169,7 +169,7 @@ static int snd_vortex_pcm_open(snd_pcm_substream_t * substream)
 }
 
 /* close callback */
-static int snd_vortex_pcm_close(snd_pcm_substream_t * substream)
+static int snd_vortex_pcm_close(struct snd_pcm_substream *substream)
 {
 	//vortex_t *chip = snd_pcm_substream_chip(substream);
 	stream_t *stream = (stream_t *) substream->runtime->private_data;
@@ -185,12 +185,12 @@ static int snd_vortex_pcm_close(snd_pcm_substream_t * substream)
 
 /* hw_params callback */
 static int
-snd_vortex_pcm_hw_params(snd_pcm_substream_t * substream,
-			 snd_pcm_hw_params_t * hw_params)
+snd_vortex_pcm_hw_params(struct snd_pcm_substream *substream,
+			 struct snd_pcm_hw_params *hw_params)
 {
 	vortex_t *chip = snd_pcm_substream_chip(substream);
 	stream_t *stream = (stream_t *) (substream->runtime->private_data);
-	snd_pcm_sgbuf_t *sgbuf;
+	struct snd_sg_buf *sgbuf;
 	int err;
 
 	// Alloc buffer memory.
@@ -200,7 +200,7 @@ snd_vortex_pcm_hw_params(snd_pcm_substream_t * substream,
 		printk(KERN_ERR "Vortex: pcm page alloc failed!\n");
 		return err;
 	}
-	//sgbuf = (snd_pcm_sgbuf_t *) substream->runtime->dma_private;
+	//sgbuf = (struct snd_sg_buf *) substream->runtime->dma_private;
 	sgbuf = snd_pcm_substream_sgbuf(substream);
 	/*
 	   printk(KERN_INFO "Vortex: periods %d, period_bytes %d, channels = %d\n", params_periods(hw_params),
@@ -220,8 +220,10 @@ snd_vortex_pcm_hw_params(snd_pcm_substream_t * substream,
 		    vortex_adb_allocroute(chip, -1,
 					  params_channels(hw_params),
 					  substream->stream, type);
-		if (dma < 0)
+		if (dma < 0) {
+			spin_unlock_irq(&chip->lock);
 			return dma;
+		}
 		stream = substream->runtime->private_data = &chip->dma_adb[dma];
 		stream->substream = substream;
 		/* Setup Buffers. */
@@ -249,7 +251,7 @@ snd_vortex_pcm_hw_params(snd_pcm_substream_t * substream,
 }
 
 /* hw_free callback */
-static int snd_vortex_pcm_hw_free(snd_pcm_substream_t * substream)
+static int snd_vortex_pcm_hw_free(struct snd_pcm_substream *substream)
 {
 	vortex_t *chip = snd_pcm_substream_chip(substream);
 	stream_t *stream = (stream_t *) (substream->runtime->private_data);
@@ -275,10 +277,10 @@ static int snd_vortex_pcm_hw_free(snd_pcm_substream_t * substream)
 }
 
 /* prepare callback */
-static int snd_vortex_pcm_prepare(snd_pcm_substream_t * substream)
+static int snd_vortex_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	vortex_t *chip = snd_pcm_substream_chip(substream);
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	stream_t *stream = (stream_t *) substream->runtime->private_data;
 	int dma = stream->dma, fmt, dir;
 
@@ -308,7 +310,7 @@ static int snd_vortex_pcm_prepare(snd_pcm_substream_t * substream)
 }
 
 /* trigger callback */
-static int snd_vortex_pcm_trigger(snd_pcm_substream_t * substream, int cmd)
+static int snd_vortex_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	vortex_t *chip = snd_pcm_substream_chip(substream);
 	stream_t *stream = (stream_t *) substream->runtime->private_data;
@@ -372,7 +374,7 @@ static int snd_vortex_pcm_trigger(snd_pcm_substream_t * substream, int cmd)
 }
 
 /* pointer callback */
-static snd_pcm_uframes_t snd_vortex_pcm_pointer(snd_pcm_substream_t * substream)
+static snd_pcm_uframes_t snd_vortex_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	vortex_t *chip = snd_pcm_substream_chip(substream);
 	stream_t *stream = (stream_t *) substream->runtime->private_data;
@@ -393,13 +395,13 @@ static snd_pcm_uframes_t snd_vortex_pcm_pointer(snd_pcm_substream_t * substream)
 
 /* Page callback. */
 /*
-static struct page *snd_pcm_sgbuf_ops_page(snd_pcm_substream_t *substream, unsigned long offset) {
+static struct page *snd_pcm_sgbuf_ops_page(struct snd_pcm_substream *substream, unsigned long offset) {
 	
 	
 }
 */
 /* operators */
-static snd_pcm_ops_t snd_vortex_playback_ops = {
+static struct snd_pcm_ops snd_vortex_playback_ops = {
 	.open = snd_vortex_pcm_open,
 	.close = snd_vortex_pcm_close,
 	.ioctl = snd_pcm_lib_ioctl,
@@ -431,64 +433,80 @@ static char *vortex_pcm_name[VORTEX_PCM_LAST] = {
 };
 
 /* SPDIF kcontrol */
-static int
-snd_vortex_spdif_info(snd_kcontrol_t * kcontrol, snd_ctl_elem_info_t * uinfo)
-{
-	static char *texts[] = { "32000", "44100", "48000" };
 
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
+static int snd_vortex_spdif_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_IEC958;
 	uinfo->count = 1;
-	uinfo->value.enumerated.items = 3;
-	if (uinfo->value.enumerated.item >= uinfo->value.enumerated.items)
-		uinfo->value.enumerated.item =
-		    uinfo->value.enumerated.items - 1;
-	strcpy(uinfo->value.enumerated.name,
-	       texts[uinfo->value.enumerated.item]);
 	return 0;
 }
-static int
-snd_vortex_spdif_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
-{
-	vortex_t *vortex = snd_kcontrol_chip(kcontrol);
 
-	if (vortex->spdif_sr == 32000)
-		ucontrol->value.enumerated.item[0] = 0;
-	if (vortex->spdif_sr == 44100)
-		ucontrol->value.enumerated.item[0] = 1;
-	if (vortex->spdif_sr == 48000)
-		ucontrol->value.enumerated.item[0] = 2;
+static int snd_vortex_spdif_mask_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.iec958.status[0] = 0xff;
+	ucontrol->value.iec958.status[1] = 0xff;
+	ucontrol->value.iec958.status[2] = 0xff;
+	ucontrol->value.iec958.status[3] = IEC958_AES3_CON_FS;
 	return 0;
 }
-static int
-snd_vortex_spdif_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+
+static int snd_vortex_spdif_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
 	vortex_t *vortex = snd_kcontrol_chip(kcontrol);
-	static unsigned int sr[3] = { 32000, 44100, 48000 };
+	ucontrol->value.iec958.status[0] = 0x00;
+	ucontrol->value.iec958.status[1] = IEC958_AES1_CON_ORIGINAL|IEC958_AES1_CON_DIGDIGCONV_ID;
+	ucontrol->value.iec958.status[2] = 0x00;
+	switch (vortex->spdif_sr) {
+	case 32000: ucontrol->value.iec958.status[3] = IEC958_AES3_CON_FS_32000; break;
+	case 44100: ucontrol->value.iec958.status[3] = IEC958_AES3_CON_FS_44100; break;
+	case 48000: ucontrol->value.iec958.status[3] = IEC958_AES3_CON_FS_48000; break;
+	}
+	return 0;
+}
 
-	//printk("vortex: spdif sr = %d\n", ucontrol->value.enumerated.item[0]);
-	vortex->spdif_sr = sr[ucontrol->value.enumerated.item[0] % 3];
-	vortex_spdif_init(vortex,
-			  sr[ucontrol->value.enumerated.item[0] % 3], 1);
+static int snd_vortex_spdif_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+{
+	vortex_t *vortex = snd_kcontrol_chip(kcontrol);
+	int spdif_sr = 48000;
+	switch (ucontrol->value.iec958.status[3] & IEC958_AES3_CON_FS) {
+	case IEC958_AES3_CON_FS_32000: spdif_sr = 32000; break;
+	case IEC958_AES3_CON_FS_44100: spdif_sr = 44100; break;
+	case IEC958_AES3_CON_FS_48000: spdif_sr = 48000; break;
+	}
+	if (spdif_sr == vortex->spdif_sr)
+		return 0;
+	vortex->spdif_sr = spdif_sr;
+	vortex_spdif_init(vortex, vortex->spdif_sr, 1);
 	return 1;
 }
-static snd_kcontrol_new_t vortex_spdif_kcontrol __devinitdata = {
-	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-	.name = "SPDIF SR",
-	.index = 0,
-	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
-	.private_value = 0,
-	.info = snd_vortex_spdif_info,
-	.get = snd_vortex_spdif_get,
-	.put = snd_vortex_spdif_put
+
+/* spdif controls */
+static struct snd_kcontrol_new snd_vortex_mixer_spdif[] __devinitdata = {
+	{
+		.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
+		.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT),
+		.info =		snd_vortex_spdif_info,
+		.get =		snd_vortex_spdif_get,
+		.put =		snd_vortex_spdif_put,
+	},
+	{
+		.access =	SNDRV_CTL_ELEM_ACCESS_READ,
+		.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
+		.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,CON_MASK),
+		.info =		snd_vortex_spdif_info,
+		.get =		snd_vortex_spdif_mask_get
+	},
 };
 
 /* create a pcm device */
 static int __devinit snd_vortex_new_pcm(vortex_t * chip, int idx, int nr)
 {
-	snd_pcm_t *pcm;
+	struct snd_pcm *pcm;
+	struct snd_kcontrol *kctl;
+	int i;
 	int err, nr_capt;
 
-	if ((chip == 0) || (idx < 0) || (idx > VORTEX_PCM_LAST))
+	if ((chip == 0) || (idx < 0) || (idx >= VORTEX_PCM_LAST))
 		return -ENODEV;
 
 	/* idx indicates which kind of PCM device. ADB, SPDIF, I2S and A3D share the 
@@ -520,13 +538,13 @@ static int __devinit snd_vortex_new_pcm(vortex_t * chip, int idx, int nr)
 					      0x10000, 0x10000);
 
 	if (VORTEX_PCM_TYPE(pcm) == VORTEX_PCM_SPDIF) {
-		snd_kcontrol_t *kcontrol;
-
-		if ((kcontrol =
-		     snd_ctl_new1(&vortex_spdif_kcontrol, chip)) == NULL)
-			return -ENOMEM;
-		if ((err = snd_ctl_add(chip->card, kcontrol)) < 0)
-			return err;
+		for (i = 0; i < ARRAY_SIZE(snd_vortex_mixer_spdif); i++) {
+			kctl = snd_ctl_new1(&snd_vortex_mixer_spdif[i], chip);
+			if (!kctl)
+				return -ENOMEM;
+			if ((err = snd_ctl_add(chip->card, kctl)) < 0)
+				return err;
+		}
 	}
 	return 0;
 }

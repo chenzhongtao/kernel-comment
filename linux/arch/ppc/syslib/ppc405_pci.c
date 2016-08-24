@@ -89,13 +89,6 @@ ppc4xx_find_bridges(void)
 	isa_mem_base = 0;
 	pci_dram_offset = 0;
 
-#if  (PSR_PCI_ARBIT_EN > 1)
-	/* Check if running in slave mode */
-	if ((mfdcr(DCRN_CHPSR) & PSR_PCI_ARBIT_EN) == 0) {
-		printk("Running as PCI slave, kernel PCI disabled !\n");
-		return;
-	}
-#endif
 	/* Setup PCI32 hose */
 	hose_a = pcibios_alloc_controller();
 	if (!hose_a)
@@ -144,7 +137,7 @@ ppc4xx_find_bridges(void)
 	hose_a->pci_mem_offset = 0;
 
 	/* Setup bridge memory/IO ranges & resources
-	 * TODO: Handle firmwares setting up a legacy ISA mem base
+	 * TODO: Handle firmware setting up a legacy ISA mem base
 	 */
 	hose_a->io_space.start = PPC405_PCI_LOWER_IO;
 	hose_a->io_space.end = PPC405_PCI_UPPER_IO;

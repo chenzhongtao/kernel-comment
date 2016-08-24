@@ -13,7 +13,6 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -29,6 +28,7 @@
 #include <linux/a.out.h>
 #include <linux/interrupt.h>
 #include <linux/reboot.h>
+#include <linux/fs.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -39,17 +39,27 @@
 
 asmlinkage void ret_from_fork(void);
 
+/*
+ * The following aren't currently used.
+ */
+void (*pm_idle)(void);
+EXPORT_SYMBOL(pm_idle);
+
+void (*pm_power_off)(void);
+EXPORT_SYMBOL(pm_power_off);
 
 /*
  * The idle loop on an m68knommu..
  */
-void default_idle(void)
+static void default_idle(void)
 {
-	while(1) {
-		if (need_resched())
-			__asm__("stop #0x2000" : : : "cc");
-		schedule();
+	local_irq_disable();
+ 	while (!need_resched()) {
+		/* This stop will re-enable interrupts */
+ 		__asm__("stop #0x2000" : : : "cc");
+		local_irq_disable();
 	}
+	local_irq_enable();
 }
 
 void (*idle)(void) = default_idle;
@@ -63,7 +73,12 @@ void (*idle)(void) = default_idle;
 void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	idle();
+	while (1) {
+		idle();
+		preempt_enable_no_resched();
+		schedule();
+		preempt_disable();
+	}
 }
 
 void machine_restart(char * __unused)
@@ -73,8 +88,6 @@ void machine_restart(char * __unused)
 	for (;;);
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_halt(void)
 {
 	if (mach_halt)
@@ -82,16 +95,12 @@ void machine_halt(void)
 	for (;;);
 }
 
-EXPORT_SYMBOL(machine_halt);
-
 void machine_power_off(void)
 {
 	if (mach_power_off)
 		mach_power_off();
 	for (;;);
 }
-
-EXPORT_SYMBOL(machine_power_off);
 
 void show_regs(struct pt_regs * regs)
 {
@@ -197,10 +206,9 @@ int copy_thread(int nr, unsigned long clone_flags,
 {
 	struct pt_regs * childregs;
 	struct switch_stack * childstack, *stack;
-	unsigned long stack_offset, *retp;
+	unsigned long *retp;
 
-	stack_offset = THREAD_SIZE - sizeof(struct pt_regs);
-	childregs = (struct pt_regs *) ((unsigned long) p->thread_info + stack_offset);
+	childregs = (struct pt_regs *) (task_stack_page(p) + THREAD_SIZE) - 1;
 
 	*childregs = *regs;
 	childregs->d0 = 0;
@@ -275,52 +283,6 @@ int dump_fpu(struct pt_regs *regs, struct user_m68kfp_struct *fpu)
 }
 
 /*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-	struct switch_stack *sw;
-
-	/* changed the size calculations - should hopefully work better. lbt */
-	dump->magic = CMAGIC;
-	dump->start_code = 0;
-	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
-	dump->u_tsize = ((unsigned long) current->mm->end_code) >> PAGE_SHIFT;
-	dump->u_dsize = ((unsigned long) (current->mm->brk +
-					  (PAGE_SIZE-1))) >> PAGE_SHIFT;
-	dump->u_dsize -= dump->u_tsize;
-	dump->u_ssize = 0;
-
-	if (dump->start_stack < TASK_SIZE)
-		dump->u_ssize = ((unsigned long) (TASK_SIZE - dump->start_stack)) >> PAGE_SHIFT;
-
-	dump->u_ar0 = (struct user_regs_struct *)((int)&dump->regs - (int)dump);
-	sw = ((struct switch_stack *)regs) - 1;
-	dump->regs.d1 = regs->d1;
-	dump->regs.d2 = regs->d2;
-	dump->regs.d3 = regs->d3;
-	dump->regs.d4 = regs->d4;
-	dump->regs.d5 = regs->d5;
-	dump->regs.d6 = sw->d6;
-	dump->regs.d7 = sw->d7;
-	dump->regs.a0 = regs->a0;
-	dump->regs.a1 = regs->a1;
-	dump->regs.a2 = regs->a2;
-	dump->regs.a3 = sw->a3;
-	dump->regs.a4 = sw->a4;
-	dump->regs.a5 = sw->a5;
-	dump->regs.a6 = sw->a6;
-	dump->regs.d0 = regs->d0;
-	dump->regs.orig_d0 = regs->orig_d0;
-	dump->regs.stkadj = regs->stkadj;
-	dump->regs.sr = regs->sr;
-	dump->regs.pc = regs->pc;
-	dump->regs.fmtvec = (regs->format << 12) | regs->vector;
-	/* dump floating point stuff */
-	dump->u_fpvalid = dump_fpu (regs, &dump->m68kfp);
-}
-
-/*
  *	Generic dumping code. Used for panic and debug.
  */
 void dump(struct pt_regs *fp)
@@ -329,7 +291,7 @@ void dump(struct pt_regs *fp)
 	unsigned char	*tp;
 	int		i;
 
-	printk(KERN_EMERG "\nCURRENT PROCESS:\n\n");
+	printk(KERN_EMERG "\n" KERN_EMERG "CURRENT PROCESS:\n" KERN_EMERG "\n");
 	printk(KERN_EMERG "COMM=%s PID=%d\n", current->comm, current->pid);
 
 	if (current->mm) {
@@ -340,7 +302,8 @@ void dump(struct pt_regs *fp)
 			(int) current->mm->end_data,
 			(int) current->mm->end_data,
 			(int) current->mm->brk);
-		printk(KERN_EMERG "USER-STACK=%08x  KERNEL-STACK=%08x\n\n",
+		printk(KERN_EMERG "USER-STACK=%08x KERNEL-STACK=%08x\n"
+			KERN_EMERG "\n",
 			(int) current->mm->start_stack,
 			(int)(((unsigned long) current) + THREAD_SIZE));
 	}
@@ -351,36 +314,35 @@ void dump(struct pt_regs *fp)
 		fp->d0, fp->d1, fp->d2, fp->d3);
 	printk(KERN_EMERG "d4: %08lx    d5: %08lx    a0: %08lx    a1: %08lx\n",
 		fp->d4, fp->d5, fp->a0, fp->a1);
-	printk(KERN_EMERG "\nUSP: %08x   TRAPFRAME: %08x\n", (unsigned int) rdusp(),
-		(unsigned int) fp);
+	printk(KERN_EMERG "\n" KERN_EMERG "USP: %08x   TRAPFRAME: %08x\n",
+		(unsigned int) rdusp(), (unsigned int) fp);
 
-	printk(KERN_EMERG "\nCODE:");
+	printk(KERN_EMERG "\n" KERN_EMERG "CODE:");
 	tp = ((unsigned char *) fp->pc) - 0x20;
 	for (sp = (unsigned long *) tp, i = 0; (i < 0x40);  i += 4) {
 		if ((i % 0x10) == 0)
-			printk(KERN_EMERG "\n%08x: ", (int) (tp + i));
-		printk(KERN_EMERG "%08x ", (int) *sp++);
+			printk("\n" KERN_EMERG "%08x: ", (int) (tp + i));
+		printk("%08x ", (int) *sp++);
 	}
-	printk(KERN_EMERG "\n");
+	printk("\n" KERN_EMERG "\n");
 
-	printk(KERN_EMERG "\nKERNEL STACK:");
+	printk(KERN_EMERG "KERNEL STACK:");
 	tp = ((unsigned char *) fp) - 0x40;
 	for (sp = (unsigned long *) tp, i = 0; (i < 0xc0); i += 4) {
 		if ((i % 0x10) == 0)
-			printk(KERN_EMERG "\n%08x: ", (int) (tp + i));
-		printk(KERN_EMERG "%08x ", (int) *sp++);
+			printk("\n" KERN_EMERG "%08x: ", (int) (tp + i));
+		printk("%08x ", (int) *sp++);
 	}
-	printk(KERN_EMERG "\n");
-	printk(KERN_EMERG "\n");
+	printk("\n" KERN_EMERG "\n");
 
-	printk(KERN_EMERG "\nUSER STACK:");
+	printk(KERN_EMERG "USER STACK:");
 	tp = (unsigned char *) (rdusp() - 0x10);
 	for (sp = (unsigned long *) tp, i = 0; (i < 0x80); i += 4) {
 		if ((i % 0x10) == 0)
-			printk(KERN_EMERG "\n%08x: ", (int) (tp + i));
-		printk(KERN_EMERG "%08x ", (int) *sp++);
+			printk("\n" KERN_EMERG "%08x: ", (int) (tp + i));
+		printk("%08x ", (int) *sp++);
 	}
-	printk(KERN_EMERG "\n\n");
+	printk("\n" KERN_EMERG "\n");
 }
 
 /*
@@ -416,7 +378,7 @@ unsigned long get_wchan(struct task_struct *p)
 	fp = ((struct switch_stack *)p->thread.ksp)->a6;
 	do {
 		if (fp < stack_page+sizeof(struct thread_info) ||
-		    fp >= 8184+stack_page)
+		    fp >= THREAD_SIZE-8+stack_page)
 			return 0;
 		pc = ((unsigned long *)fp)[1];
 		if (!in_sched_functions(pc))

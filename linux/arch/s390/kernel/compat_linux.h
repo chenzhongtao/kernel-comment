@@ -1,7 +1,6 @@
 #ifndef _ASM_S390X_S390_H
 #define _ASM_S390X_S390_H
 
-#include <linux/config.h>
 #include <linux/compat.h>
 #include <linux/socket.h>
 #include <linux/syscalls.h>
@@ -29,11 +28,6 @@ struct old_sigaction32 {
        __u32			sa_restorer;	/* Another 32 bit pointer */
 };
  
-typedef union sigval32 {
-        int     sival_int;
-        __u32   sival_ptr;
-} sigval_t32;
-                 
 typedef struct compat_siginfo {
 	int	si_signo;
 	int	si_errno;
@@ -50,9 +44,9 @@ typedef struct compat_siginfo {
 
 		/* POSIX.1b timers */
 		struct {
-			timer_t _tid;		/* timer id */
+			compat_timer_t _tid;		/* timer id */
 			int _overrun;		/* overrun count */
-			sigval_t _sigval;	/* same as below */
+			compat_sigval_t _sigval;	/* same as below */
 			int _sys_private;       /* not to be passed to user */
 		} _timer;
 
@@ -60,7 +54,7 @@ typedef struct compat_siginfo {
 		struct {
 			pid_t			_pid;	/* sender's pid */
 			uid_t			_uid;	/* sender's uid */
-			sigval_t32		_sigval;
+			compat_sigval_t		_sigval;
 		} _rt;
 
 		/* SIGCHLD */
@@ -121,37 +115,6 @@ typedef struct
         __u32	addr;
 } _psw_t32 __attribute__ ((aligned(8)));
 
-#define PSW32_MASK_PER		0x40000000UL
-#define PSW32_MASK_DAT		0x04000000UL
-#define PSW32_MASK_IO		0x02000000UL
-#define PSW32_MASK_EXT		0x01000000UL
-#define PSW32_MASK_KEY		0x00F00000UL
-#define PSW32_MASK_MCHECK	0x00040000UL
-#define PSW32_MASK_WAIT		0x00020000UL
-#define PSW32_MASK_PSTATE	0x00010000UL
-#define PSW32_MASK_ASC		0x0000C000UL
-#define PSW32_MASK_CC		0x00003000UL
-#define PSW32_MASK_PM		0x00000f00UL
-
-#define PSW32_ADDR_AMODE31	0x80000000UL
-#define PSW32_ADDR_INSN		0x7FFFFFFFUL
-
-#define PSW32_BASE_BITS		0x00080000UL
-
-#define PSW32_ASC_PRIMARY	0x00000000UL
-#define PSW32_ASC_ACCREG	0x00004000UL
-#define PSW32_ASC_SECONDARY	0x00008000UL
-#define PSW32_ASC_HOME		0x0000C000UL
-
-#define PSW32_USER_BITS	(PSW32_BASE_BITS | PSW32_MASK_DAT | PSW32_ASC_HOME | \
-			 PSW32_MASK_IO | PSW32_MASK_EXT | PSW32_MASK_MCHECK | \
-			 PSW32_MASK_PSTATE)
-
-#define PSW32_MASK_MERGE(CURRENT,NEW) \
-        (((CURRENT) & ~(PSW32_MASK_CC|PSW32_MASK_PM)) | \
-         ((NEW) & (PSW32_MASK_CC|PSW32_MASK_PM)))
-
-
 typedef struct
 {
 	_psw_t32	psw;
@@ -197,24 +160,6 @@ struct ucontext32 {
 	stack_t32		uc_stack;
 	_sigregs32		uc_mcontext;
 	compat_sigset_t		uc_sigmask;	/* mask last for extensibility */
-};
-
-#define SIGEV_PAD_SIZE32 ((SIGEV_MAX_SIZE/sizeof(int)) - 3)
-struct sigevent32 {
-	union {
-		int sival_int;
-		u32 sival_ptr;
-	} sigev_value;
-	int sigev_signo;
-	int sigev_notify;
-	union {
-		int _pad[SIGEV_PAD_SIZE32];
-		int _tid;
-		struct {
-			u32 *_function;
-			u32 *_attribute;
-		} _sigev_thread;
-	} _sigev_un;
 };
 
 #endif /* _ASM_S390X_S390_H */

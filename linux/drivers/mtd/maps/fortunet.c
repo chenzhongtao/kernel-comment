@@ -1,16 +1,19 @@
 /* fortunet.c memory map
  *
- * $Id: fortunet.c,v 1.9 2004/11/04 13:24:14 gleixner Exp $
+ * $Id: fortunet.c,v 1.11 2005/11/07 11:14:27 gleixner Exp $
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/string.h>
+
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
+
+#include <asm/io.h>
 
 #define MAX_NUM_REGIONS		4
 #define MAX_NUM_PARTITIONS	8
@@ -209,14 +212,17 @@ int __init init_fortunet(void)
 
 			map_regions[ix].map_info.phys =	map_regions[ix].window_addr_physical,
 
-			map_regions[ix].map_info.virt = 
+			map_regions[ix].map_info.virt =
 				ioremap_nocache(
 				map_regions[ix].window_addr_physical,
 				map_regions[ix].map_info.size);
 			if(!map_regions[ix].map_info.virt)
 			{
+				int j = 0;
 				printk(MTD_FORTUNET_PK "%s flash failed to ioremap!\n",
 					map_regions[ix].map_info.name);
+				for (j = 0 ; j < ix; j++)
+					iounmap(map_regions[j].map_info.virt);
 				return -ENXIO;
 			}
 			simple_map_init(&map_regions[ix].map_info);

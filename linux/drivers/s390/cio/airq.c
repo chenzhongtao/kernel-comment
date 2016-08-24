@@ -2,12 +2,10 @@
  *  drivers/s390/cio/airq.c
  *   S/390 common I/O routines -- support for adapter interruptions
  *
- *   $Revision: 1.12 $
- *
  *    Copyright (C) 1999-2002 IBM Deutschland Entwicklung GmbH,
  *			      IBM Corporation
  *    Author(s): Ingo Adlung (adlung@de.ibm.com)
- *		 Cornelia Huck (cohuck@de.ibm.com)
+ *		 Cornelia Huck (cornelia.huck@de.ibm.com)
  *		 Arnd Bergmann (arndb@de.ibm.com)
  */
 
@@ -45,7 +43,7 @@ s390_register_adapter_interrupt (adapter_int_handler_t handler)
 	else
 		ret = (cmpxchg(&adapter_handler, NULL, handler) ? -EBUSY : 0);
 	if (!ret)
-		synchronize_kernel();
+		synchronize_sched();  /* Allow interrupts to complete. */
 
 	sprintf (dbf_txt, "ret:%d", ret);
 	CIO_TRACE_EVENT (4, dbf_txt);
@@ -65,7 +63,7 @@ s390_unregister_adapter_interrupt (adapter_int_handler_t handler)
 		ret = -EINVAL;
 	else {
 		adapter_handler = NULL;
-		synchronize_kernel();
+		synchronize_sched();  /* Allow interrupts to complete. */
 		ret = 0;
 	}
 	sprintf (dbf_txt, "ret:%d", ret);

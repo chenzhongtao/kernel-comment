@@ -1,6 +1,4 @@
 /*
- * arch/ppc/platforms/prpmc800.c
- *
  * Author: Dale Farnsworth <dale.farnsworth@mvista.com>
  *
  * 2001-2004 (c) MontaVista, Software, Inc.  This file is licensed under
@@ -9,7 +7,6 @@
  * or implied.
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -22,7 +19,6 @@
 #include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/delay.h>
-#include <linux/irq.h>
 #include <linux/seq_file.h>
 #include <linux/ide.h>
 #include <linux/root_dev.h>
@@ -419,8 +415,8 @@ static void __init prpmc800_init_IRQ(void)
 static __inline__ void prpmc800_set_bat(void)
 {
 	mb();
-	mtspr(DBAT1U, 0xf0001ffe);
-	mtspr(DBAT1L, 0xf000002a);
+	mtspr(SPRN_DBAT1U, 0xf0001ffe);
+	mtspr(SPRN_DBAT1L, 0xf000002a);
 	mb();
 }
 

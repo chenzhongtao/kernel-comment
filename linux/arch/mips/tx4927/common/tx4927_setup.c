@@ -24,7 +24,6 @@
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
@@ -50,77 +49,28 @@
 
 #undef DEBUG
 
-void __init tx4927_time_init(void);
-void __init tx4927_timer_setup(struct irqaction *irq);
 void dump_cp0(char *key);
 
 
-void (*__wbflush) (void);
-
-static void tx4927_write_buffer_flush(void)
+void __init plat_mem_setup(void)
 {
-	__asm__ __volatile__
-	    ("sync\n\t" "nop\n\t" "loop: bc0f loop\n\t" "nop\n\t");
-}
-
-
-static void __init tx4927_setup(void)
-{
-	board_time_init = tx4927_time_init;
-	board_timer_setup = tx4927_timer_setup;
-	__wbflush = tx4927_write_buffer_flush;
-
 #ifdef CONFIG_TOSHIBA_RBTX4927
 	{
 		extern void toshiba_rbtx4927_setup(void);
 		toshiba_rbtx4927_setup();
 	}
 #endif
-
-	return;
 }
 
-early_initcall(tx4927_setup);
-
-void __init tx4927_time_init(void)
+void __init plat_time_init(void)
 {
-
 #ifdef CONFIG_TOSHIBA_RBTX4927
 	{
 		extern void toshiba_rbtx4927_time_init(void);
 		toshiba_rbtx4927_time_init();
 	}
 #endif
-
-	return;
 }
-
-
-void __init tx4927_timer_setup(struct irqaction *irq)
-{
-	u32 count;
-	u32 c1;
-	u32 c2;
-
-	setup_irq(TX4927_IRQ_CPU_TIMER, irq);
-
-	/* to generate the first timer interrupt */
-	c1 = read_c0_count();
-	count = c1 + (mips_hpt_frequency / HZ);
-	write_c0_compare(count);
-	c2 = read_c0_count();
-
-#ifdef CONFIG_TOSHIBA_RBTX4927
-	{
-		extern void toshiba_rbtx4927_timer_setup(struct irqaction
-							 *irq);
-		toshiba_rbtx4927_timer_setup(irq);
-	}
-#endif
-
-	return;
-}
-
 
 #ifdef DEBUG
 void print_cp0(char *key, int num, char *name, u32 val)
@@ -128,8 +78,6 @@ void print_cp0(char *key, int num, char *name, u32 val)
 	printk("%s cp0:%02d:%s=0x%08x\n", key, num, name, val);
 	return;
 }
-
-indent: Standard input:25: Error:Unexpected end of file
 
 void
 dump_cp0(char *key)
@@ -152,11 +100,11 @@ dump_cp0(char *key)
 	print_cp0(key, 16, "CONFIG  ", read_c0_config());
 	return;
 }
-	
-void print_pic(char *key, u32 reg, char *name)
+
+void print_pic(char *key, unsigned long reg, char *name)
 {
-	printk("%s pic:0x%08x:%s=0x%08x\n", key, reg, name,
-	       TX4927_RD(reg));
+	printk(KERN_INFO "%s pic:0x%08lx:%s=0x%08x\n", key, reg, name,
+	       __raw_readl((void __iomem *)reg));
 	return;
 }
 
@@ -195,9 +143,10 @@ void dump_pic(char *key)
 }
 
 
-void print_addr(char *hdr, char *key, u32 addr)
+void print_addr(char *hdr, char *key, unsigned long addr)
 {
-	printk("%s %s:0x%08x=0x%08x\n", hdr, key, addr, TX4927_RD(addr));
+	printk(KERN_INFO "%s %s:0x%08lx=0x%08x\n", hdr, key, addr,
+	       __raw_readl((void __iomem *)addr));
 	return;
 }
 

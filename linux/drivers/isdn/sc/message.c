@@ -16,21 +16,11 @@
  *     +1 (416) 297-8565
  *     +1 (416) 297-6433 Facsimile
  */
-
+#include <linux/sched.h>
 #include "includes.h"
 #include "hardware.h"
 #include "message.h"
 #include "card.h"
-
-extern board *sc_adapter[];
-extern unsigned int cinst;
-
-/*
- * Obligatory function prototypes
- */
-extern int indicate_status(int,ulong,char*);
-extern int scm_command(isdn_ctrl *);
-
 
 /*
  * receive a message from the board
@@ -208,8 +198,7 @@ int send_and_receive(int card,
 	tries = 0;
 	/* wait for the response */
 	while (tries < timeout) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(1);
+		schedule_timeout_interruptible(1);
 		
 		pr_debug("SAR waiting..\n");
 

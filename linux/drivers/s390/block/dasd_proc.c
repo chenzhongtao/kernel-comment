@@ -9,13 +9,12 @@
  *
  * /proc interface for the dasd driver.
  *
- * $Revision: 1.30 $
  */
 
-#include <linux/config.h>
 #include <linux/ctype.h>
 #include <linux/seq_file.h>
 #include <linux/vmalloc.h>
+#include <linux/proc_fs.h>
 
 #include <asm/debug.h>
 #include <asm/uaccess.h>
@@ -29,7 +28,8 @@ static struct proc_dir_entry *dasd_proc_root_entry = NULL;
 static struct proc_dir_entry *dasd_devices_entry = NULL;
 static struct proc_dir_entry *dasd_statistics_entry = NULL;
 
-static inline char *
+#ifdef CONFIG_DASD_PROFILE
+static char *
 dasd_get_user_string(const char __user *user_buf, size_t user_len)
 {
 	char *buffer;
@@ -48,6 +48,7 @@ dasd_get_user_string(const char __user *user_buf, size_t user_len)
 		buffer[user_len] = 0;
 	return buffer;
 }
+#endif /* CONFIG_DASD_PROFILE */
 
 static int
 dasd_devices_show(struct seq_file *m, void *v)
@@ -77,7 +78,7 @@ dasd_devices_show(struct seq_file *m, void *v)
 	else
 		seq_printf(m, " is ????????");
 	/* Print devices features. */
-	substr = test_bit(DASD_FLAG_RO, &device->flags) ? "(ro)" : " ";
+	substr = (device->features & DASD_FEATURE_READONLY) ? "(ro)" : " ";
 	seq_printf(m, "%4s: ", substr);
 	/* Print device status information. */
 	switch ((device != NULL) ? device->state : -1) {
@@ -92,6 +93,9 @@ dasd_devices_show(struct seq_file *m, void *v)
 		break;
 	case DASD_STATE_BASIC:
 		seq_printf(m, "basic");
+		break;
+	case DASD_STATE_UNFMT:
+		seq_printf(m, "unformatted");
 		break;
 	case DASD_STATE_READY:
 	case DASD_STATE_ONLINE:
@@ -145,14 +149,14 @@ static int dasd_devices_open(struct inode *inode, struct file *file)
 	return seq_open(file, &dasd_devices_seq_ops);
 }
 
-static struct file_operations dasd_devices_file_ops = {
+static const struct file_operations dasd_devices_file_ops = {
 	.open		= dasd_devices_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= seq_release,
 };
 
-static inline int
+static int
 dasd_calc_metrics(char *page, char **start, off_t off,
 		  int count, int *eof, int len)
 {
@@ -165,8 +169,9 @@ dasd_calc_metrics(char *page, char **start, off_t off,
 	return len;
 }
 
-static inline char *
-dasd_statistics_array(char *str, int *array, int shift)
+#ifdef CONFIG_DASD_PROFILE
+static char *
+dasd_statistics_array(char *str, unsigned int *array, int shift)
 {
 	int i;
 
@@ -178,6 +183,7 @@ dasd_statistics_array(char *str, int *array, int shift)
 	str += sprintf(str,"\n");
 	return str;
 }
+#endif /* CONFIG_DASD_PROFILE */
 
 static int
 dasd_statistics_read(char *page, char **start, off_t off,
@@ -291,23 +297,40 @@ out_error:
 #endif				/* CONFIG_DASD_PROFILE */
 }
 
+/*
+ * Create dasd proc-fs entries.
+ * In case creation failed, cleanup and return -ENOENT.
+ */
 int
 dasd_proc_init(void)
 {
 	dasd_proc_root_entry = proc_mkdir("dasd", &proc_root);
+	if (!dasd_proc_root_entry)
+		goto out_nodasd;
 	dasd_proc_root_entry->owner = THIS_MODULE;
 	dasd_devices_entry = create_proc_entry("devices",
 					       S_IFREG | S_IRUGO | S_IWUSR,
 					       dasd_proc_root_entry);
+	if (!dasd_devices_entry)
+		goto out_nodevices;
 	dasd_devices_entry->proc_fops = &dasd_devices_file_ops;
 	dasd_devices_entry->owner = THIS_MODULE;
 	dasd_statistics_entry = create_proc_entry("statistics",
 						  S_IFREG | S_IRUGO | S_IWUSR,
 						  dasd_proc_root_entry);
+	if (!dasd_statistics_entry)
+		goto out_nostatistics;
 	dasd_statistics_entry->read_proc = dasd_statistics_read;
 	dasd_statistics_entry->write_proc = dasd_statistics_write;
 	dasd_statistics_entry->owner = THIS_MODULE;
 	return 0;
+
+ out_nostatistics:
+	remove_proc_entry("devices", dasd_proc_root_entry);
+ out_nodevices:
+	remove_proc_entry("dasd", &proc_root);
+ out_nodasd:
+	return -ENOENT;
 }
 
 void

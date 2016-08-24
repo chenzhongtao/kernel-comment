@@ -60,8 +60,6 @@
 #define	ID_OLV_274xD	0x04907783 /* Olivetti OEM (Differential) */
 
 static int aic7770_chip_init(struct ahc_softc *ahc);
-static int aic7770_suspend(struct ahc_softc *ahc);
-static int aic7770_resume(struct ahc_softc *ahc);
 static int aha2840_load_seeprom(struct ahc_softc *ahc);
 static ahc_device_setup_t ahc_aic7770_VL_setup;
 static ahc_device_setup_t ahc_aic7770_EISA_setup;
@@ -107,7 +105,7 @@ struct aic7770_identity aic7770_ident_table[] =
 		ahc_aic7770_EISA_setup
 	}
 };
-const int ahc_num_aic7770_devs = NUM_ELEMENTS(aic7770_ident_table);
+const int ahc_num_aic7770_devs = ARRAY_SIZE(aic7770_ident_table);
 
 struct aic7770_identity *
 aic7770_find_device(uint32_t id)
@@ -126,7 +124,6 @@ aic7770_find_device(uint32_t id)
 int
 aic7770_config(struct ahc_softc *ahc, struct aic7770_identity *entry, u_int io)
 {
-	u_long	l;
 	int	error;
 	int	have_seeprom;
 	u_int	hostconf;
@@ -156,8 +153,6 @@ aic7770_config(struct ahc_softc *ahc, struct aic7770_identity *entry, u_int io)
 		return (error);
 
 	ahc->bus_chip_init = aic7770_chip_init;
-	ahc->bus_suspend = aic7770_suspend;
-	ahc->bus_resume = aic7770_resume;
 
 	error = ahc_reset(ahc, /*reinit*/FALSE);
 	if (error != 0)
@@ -254,19 +249,12 @@ aic7770_config(struct ahc_softc *ahc, struct aic7770_identity *entry, u_int io)
 	if (error != 0)
 		return (error);
 
-	ahc_list_lock(&l);
-	/*
-	 * Link this softc in with all other ahc instances.
-	 */
-	ahc_softc_insert(ahc);
+	ahc->init_level++;
 
 	/*
 	 * Enable the board's BUS drivers
 	 */
 	ahc_outb(ahc, BCTL, ENABLE);
-
-	ahc_list_unlock(&l);
-
 	return (0);
 }
 
@@ -278,18 +266,6 @@ aic7770_chip_init(struct ahc_softc *ahc)
 	ahc_outb(ahc, SBLKCTL, ahc_inb(ahc, SBLKCTL) & ~AUTOFLUSHDIS);
 	ahc_outb(ahc, BCTL, ENABLE);
 	return (ahc_chip_init(ahc));
-}
-
-static int
-aic7770_suspend(struct ahc_softc *ahc)
-{
-	return (ahc_suspend(ahc));
-}
-
-static int
-aic7770_resume(struct ahc_softc *ahc)
-{
-	return (ahc_resume(ahc));
 }
 
 /*

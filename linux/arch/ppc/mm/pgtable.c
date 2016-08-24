@@ -20,7 +20,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/types.h>
@@ -39,7 +38,7 @@ unsigned long ioremap_base;
 unsigned long ioremap_bot;
 int io_bat_index;
 
-#if defined(CONFIG_6xx) || defined(CONFIG_POWER3)
+#if defined(CONFIG_6xx)
 #define HAVE_BATS	1
 #endif
 
@@ -66,7 +65,6 @@ void setbat(int index, unsigned long virt, unsigned long phys,
 
 #ifdef HAVE_TLBCAM
 extern unsigned int tlbcam_index;
-extern unsigned int num_tlbcam_entries;
 extern unsigned long v_mapped_by_tlbcam(unsigned long va);
 extern unsigned long p_mapped_by_tlbcam(unsigned long pa);
 #else /* !HAVE_TLBCAM */
@@ -74,7 +72,7 @@ extern unsigned long p_mapped_by_tlbcam(unsigned long pa);
 #define p_mapped_by_tlbcam(x)	(0UL)
 #endif /* HAVE_TLBCAM */
 
-#ifdef CONFIG_44x
+#ifdef CONFIG_PTE_64BIT
 /* 44x uses an 8kB pgdir because it has 8-byte Linux PTEs. */
 #define PGDIR_ORDER	1
 #else
@@ -94,7 +92,7 @@ void pgd_free(pgd_t *pgd)
 	free_pages((unsigned long)pgd, PGDIR_ORDER);
 }
 
-pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
+__init_refok pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
 {
 	pte_t *pte;
 	extern int mem_init_done;
@@ -102,11 +100,6 @@ pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
 
 	if (mem_init_done) {
 		pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO);
-		if (pte) {
-			struct page *ptepage = virt_to_page(pte);
-			ptepage->mapping = (void *) mm;
-			ptepage->index = address & PMD_MASK;
-		}
 	} else {
 		pte = (pte_t *)early_get_page();
 		if (pte)
@@ -120,17 +113,14 @@ struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 	struct page *ptepage;
 
 #ifdef CONFIG_HIGHPTE
-	int flags = GFP_KERNEL | __GFP_HIGHMEM | __GFP_REPEAT;
+	gfp_t flags = GFP_KERNEL | __GFP_HIGHMEM | __GFP_REPEAT;
 #else
-	int flags = GFP_KERNEL | __GFP_REPEAT;
+	gfp_t flags = GFP_KERNEL | __GFP_REPEAT;
 #endif
 
 	ptepage = alloc_pages(flags, 0);
-	if (ptepage) {
-		ptepage->mapping = (void *) mm;
-		ptepage->index = address & PMD_MASK;
+	if (ptepage)
 		clear_highpage(ptepage);
-	}
 	return ptepage;
 }
 
@@ -139,7 +129,6 @@ void pte_free_kernel(pte_t *pte)
 #ifdef CONFIG_SMP
 	hash_page_sync();
 #endif
-	virt_to_page(pte)->mapping = NULL;
 	free_page((unsigned long)pte);
 }
 
@@ -148,17 +137,16 @@ void pte_free(struct page *ptepage)
 #ifdef CONFIG_SMP
 	hash_page_sync();
 #endif
-	ptepage->mapping = NULL;
 	__free_page(ptepage);
 }
 
-#ifndef CONFIG_44x
+#ifndef CONFIG_PHYS_64BIT
 void __iomem *
 ioremap(phys_addr_t addr, unsigned long size)
 {
 	return __ioremap(addr, size, _PAGE_NO_CACHE);
 }
-#else /* CONFIG_44x */
+#else /* CONFIG_PHYS_64BIT */
 void __iomem *
 ioremap64(unsigned long long addr, unsigned long size)
 {
@@ -172,7 +160,7 @@ ioremap(phys_addr_t addr, unsigned long size)
 
 	return ioremap64(addr64, size);
 }
-#endif /* CONFIG_44x */
+#endif /* CONFIG_PHYS_64BIT */
 
 void __iomem *
 __ioremap(phys_addr_t addr, unsigned long size, unsigned long flags)
@@ -203,7 +191,7 @@ __ioremap(phys_addr_t addr, unsigned long size, unsigned long flags)
 	 */
 	if ( mem_init_done && (p < virt_to_phys(high_memory)) )
 	{
-		printk("__ioremap(): phys addr "PTE_FMT" is RAM lr %p\n", p,
+		printk("__ioremap(): phys addr "PHYS_FMT" is RAM lr %p\n", p,
 		       __builtin_return_address(0));
 		return NULL;
 	}
@@ -291,18 +279,16 @@ map_page(unsigned long va, phys_addr_t pa, int flags)
 	pte_t *pg;
 	int err = -ENOMEM;
 
-	spin_lock(&init_mm.page_table_lock);
 	/* Use upper 10 bits of VA to index the first level map */
 	pd = pmd_offset(pgd_offset_k(va), va);
 	/* Use middle 10 bits of VA to index the second-level map */
-	pg = pte_alloc_kernel(&init_mm, pd, va);
+	pg = pte_alloc_kernel(pd, va);
 	if (pg != 0) {
 		err = 0;
-		set_pte(pg, pfn_pte(pa >> PAGE_SHIFT, __pgprot(flags)));
+		set_pte_at(&init_mm, va, pg, pfn_pte(pa >> PAGE_SHIFT, __pgprot(flags)));
 		if (mem_init_done)
 			flush_HPTE(0, va, pmd_val(*pd));
 	}
-	spin_unlock(&init_mm.page_table_lock);
 	return err;
 }
 
@@ -327,11 +313,8 @@ void __init mapin_ram(void)
 	}
 }
 
-/* is x a power of 2? */
-#define is_power_of_2(x)	((x) != 0 && (((x) & ((x) - 1)) == 0))
-
 /* is x a power of 4? */
-#define is_power_of_4(x)	((x) != 0 && (((x) & (x-1)) == 0) && (ffs(x) & 1))
+#define is_power_of_4(x)	is_power_of_2(x) && (ffs(x) & 1)
 
 /*
  * Set up a mapping for a block of I/O.
@@ -381,7 +364,7 @@ void __init io_block_mapping(unsigned long virt, phys_addr_t phys,
  * the PTE pointer is unmodified if PTE is not found.
  */
 int
-get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep)
+get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep, pmd_t **pmdp)
 {
         pgd_t	*pgd;
         pmd_t	*pmd;
@@ -396,6 +379,8 @@ get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep)
                         if (pte) {
 				retval = 1;
 				*ptep = pte;
+				if (pmdp)
+					*pmdp = pmd;
 				/* XXX caller needs to do pte_unmap, yuck */
                         }
                 }
@@ -433,49 +418,11 @@ unsigned long iopa(unsigned long addr)
 		mm = &init_mm;
 
 	pa = 0;
-	if (get_pteptr(mm, addr, &pte)) {
+	if (get_pteptr(mm, addr, &pte, NULL)) {
 		pa = (pte_val(*pte) & PAGE_MASK) | (addr & ~PAGE_MASK);
 		pte_unmap(pte);
 	}
 
 	return(pa);
-}
-
-/* This is will find the virtual address for a physical one....
- * Swiped from APUS, could be dangerous :-).
- * This is only a placeholder until I really find a way to make this
- * work.  -- Dan
- */
-unsigned long
-mm_ptov (unsigned long paddr)
-{
-	unsigned long ret;
-#if 0
-	if (paddr < 16*1024*1024)
-		ret = ZTWO_VADDR(paddr);
-	else {
-		int i;
-
-		for (i = 0; i < kmap_chunk_count;){
-			unsigned long phys = kmap_chunks[i++];
-			unsigned long size = kmap_chunks[i++];
-			unsigned long virt = kmap_chunks[i++];
-			if (paddr >= phys
-			    && paddr < (phys + size)){
-				ret = virt + paddr - phys;
-				goto exit;
-			}
-		}
-	
-		ret = (unsigned long) __va(paddr);
-	}
-exit:
-#ifdef DEBUGPV
-	printk ("PTOV(%lx)=%lx\n", paddr, ret);
-#endif
-#else
-	ret = (unsigned long)paddr + KERNELBASE;
-#endif
-	return ret;
 }
 

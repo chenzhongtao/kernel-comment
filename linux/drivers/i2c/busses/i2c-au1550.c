@@ -27,7 +27,6 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -35,8 +34,7 @@
 #include <linux/errno.h>
 #include <linux/i2c.h>
 
-#include <asm/mach-au1x00/au1000.h>
-#include <asm/mach-pb1x00/pb1550.h>
+#include <asm/mach-au1x00/au1xxx.h>
 #include <asm/mach-au1x00/au1xxx_psc.h>
 
 #include "i2c-au1550.h"
@@ -50,17 +48,14 @@ wait_xfer_done(struct i2c_au1550_data *adap)
 
 	sp = (volatile psc_smb_t *)(adap->psc_base);
 
-	/* Wait for Tx FIFO Underflow.
+	/* Wait for Tx Buffer Empty
 	*/
 	for (i = 0; i < adap->xfer_timeout; i++) {
-		stat = sp->psc_smbevnt;
+		stat = sp->psc_smbstat;
 		au_sync();
-		if ((stat & PSC_SMBEVNT_TU) != 0) {
-			/* Clear it.  */
-			sp->psc_smbevnt = PSC_SMBEVNT_TU;
-			au_sync();
+		if ((stat & PSC_SMBSTAT_TE) != 0)
 			return 0;
-		}
+
 		udelay(1);
 	}
 
@@ -119,13 +114,19 @@ do_address(struct i2c_au1550_data *adap, unsigned int addr, int rd)
 
 	/* Reset the FIFOs, clear events.
 	*/
-	sp->psc_smbpcr = PSC_SMBPCR_DC;
+	stat = sp->psc_smbstat;
 	sp->psc_smbevnt = PSC_SMBEVNT_ALLCLR;
 	au_sync();
-	do {
-		stat = sp->psc_smbpcr;
+
+	if (!(stat & PSC_SMBSTAT_TE) || !(stat & PSC_SMBSTAT_RE)) {
+		sp->psc_smbpcr = PSC_SMBPCR_DC;
 		au_sync();
-	} while ((stat & PSC_SMBPCR_DC) != 0);
+		do {
+			stat = sp->psc_smbpcr;
+			au_sync();
+		} while ((stat & PSC_SMBPCR_DC) != 0);
+		udelay(50);
+	}
 
 	/* Write out the i2c chip address and specify operation
 	*/
@@ -253,7 +254,7 @@ i2c_write(struct i2c_au1550_data *adap, unsigned char *buf,
 }
 
 static int
-au1550_xfer(struct i2c_adapter *i2c_adap, struct i2c_msg msgs[], int num)
+au1550_xfer(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs, int num)
 {
 	struct i2c_au1550_data *adap = i2c_adap->algo_data;
 	struct i2c_msg *p;
@@ -280,12 +281,10 @@ au1550_xfer(struct i2c_adapter *i2c_adap, struct i2c_msg msgs[], int num)
 static u32
 au1550_func(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_I2C;
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
 }
 
-static struct i2c_algorithm au1550_algo = {
-	.name		= "Au1550 algorithm",
-	.id		= I2C_ALGO_AU1550,
+static const struct i2c_algorithm au1550_algo = {
 	.master_xfer	= au1550_xfer,
 	.functionality	= au1550_func,
 };

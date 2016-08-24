@@ -31,9 +31,9 @@
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 
+#include "usb.h"
 #include "transport.h"
 #include "protocol.h"
-#include "usb.h"
 #include "debug.h"
 #include "sddr55.h"
 
@@ -119,10 +119,8 @@ static int sddr55_status(struct us_data *us)
 	/* expect to get short transfer if no card fitted */
 	if (result == USB_STOR_XFER_SHORT || result == USB_STOR_XFER_STALLED) {
 		/* had a short transfer, no card inserted, free map memory */
-		if (info->lba_to_pba)
-			kfree(info->lba_to_pba);
-		if (info->pba_to_lba)
-			kfree(info->pba_to_lba);
+		kfree(info->lba_to_pba);
+		kfree(info->pba_to_lba);
 		info->lba_to_pba = NULL;
 		info->pba_to_lba = NULL;
 
@@ -169,7 +167,8 @@ static int sddr55_read_data(struct us_data *us,
 	unsigned long address;
 
 	unsigned short pages;
-	unsigned int len, index, offset;
+	unsigned int len, offset;
+	struct scatterlist *sg;
 
 	// Since we only read in one block at a time, we have to create
 	// a bounce buffer and move the data a piece at a time between the
@@ -180,7 +179,8 @@ static int sddr55_read_data(struct us_data *us,
 	buffer = kmalloc(len, GFP_NOIO);
 	if (buffer == NULL)
 		return USB_STOR_TRANSPORT_ERROR; /* out of memory */
-	index = offset = 0;
+	offset = 0;
+	sg = NULL;
 
 	while (sectors>0) {
 
@@ -257,7 +257,7 @@ static int sddr55_read_data(struct us_data *us,
 
 		// Store the data in the transfer buffer
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				&index, &offset, TO_XFER_BUF);
+				&sg, &offset, TO_XFER_BUF);
 
 		page = 0;
 		lba++;
@@ -289,7 +289,8 @@ static int sddr55_write_data(struct us_data *us,
 
 	unsigned short pages;
 	int i;
-	unsigned int len, index, offset;
+	unsigned int len, offset;
+	struct scatterlist *sg;
 
 	/* check if we are allowed to write */
 	if (info->read_only || info->force_read_only) {
@@ -306,7 +307,8 @@ static int sddr55_write_data(struct us_data *us,
 	buffer = kmalloc(len, GFP_NOIO);
 	if (buffer == NULL)
 		return USB_STOR_TRANSPORT_ERROR;
-	index = offset = 0;
+	offset = 0;
+	sg = NULL;
 
 	while (sectors > 0) {
 
@@ -324,7 +326,7 @@ static int sddr55_write_data(struct us_data *us,
 
 		// Get the data from the transfer buffer
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				&index, &offset, FROM_XFER_BUF);
+				&sg, &offset, FROM_XFER_BUF);
 
 		US_DEBUGP("Write %02X pages, to PBA %04X"
 			" (LBA %04X) page %02X\n",
@@ -649,18 +651,14 @@ static int sddr55_read_map(struct us_data *us) {
 		return -1;
 	}
 
-	if (info->lba_to_pba)
-		kfree(info->lba_to_pba);
-	if (info->pba_to_lba)
-		kfree(info->pba_to_lba);
+	kfree(info->lba_to_pba);
+	kfree(info->pba_to_lba);
 	info->lba_to_pba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
 	info->pba_to_lba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
 
 	if (info->lba_to_pba == NULL || info->pba_to_lba == NULL) {
-		if (info->lba_to_pba != NULL)
-			kfree(info->lba_to_pba);
-		if (info->pba_to_lba != NULL)
-			kfree(info->pba_to_lba);
+		kfree(info->lba_to_pba);
+		kfree(info->pba_to_lba);
 		info->lba_to_pba = NULL;
 		info->pba_to_lba = NULL;
 		kfree(buffer);
@@ -728,10 +726,8 @@ static void sddr55_card_info_destructor(void *extra) {
 	if (!extra)
 		return;
 
-	if (info->lba_to_pba)
-		kfree(info->lba_to_pba);
-	if (info->pba_to_lba)
-		kfree(info->pba_to_lba);
+	kfree(info->lba_to_pba);
+	kfree(info->pba_to_lba);
 }
 
 
@@ -759,11 +755,10 @@ int sddr55_transport(struct scsi_cmnd *srb, struct us_data *us)
 	struct sddr55_card_info *info;
 
 	if (!us->extra) {
-		us->extra = kmalloc(
+		us->extra = kzalloc(
 			sizeof(struct sddr55_card_info), GFP_NOIO);
 		if (!us->extra)
 			return USB_STOR_TRANSPORT_ERROR;
-		memset(us->extra, 0, sizeof(struct sddr55_card_info));
 		us->extra_destructor = sddr55_card_info_destructor;
 	}
 

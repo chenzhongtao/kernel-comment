@@ -33,7 +33,7 @@ static void alloc_cpupda(cpuid_t cpu, int cpunum)
 	nasid_t nasid = COMPACT_TO_NASID_NODEID(node);
 
 	cputonasid(cpunum) = nasid;
-	cpu_data[cpunum].p_nodeid = node;
+	sn_cpu_info[cpunum].p_nodeid = node;
 	cputoslice(cpunum) = get_cpu_slice(cpu);
 }
 
@@ -127,37 +127,28 @@ void cpu_node_probe(void)
 	printk("Discovered %d cpus on %d nodes\n", highest + 1, num_online_nodes());
 }
 
-static void intr_clear_bits(nasid_t nasid, volatile hubreg_t *pend,
-	int base_level)
+static __init void intr_clear_all(nasid_t nasid)
 {
-	volatile hubreg_t bits;
 	int i;
 
-	/* Check pending interrupts */
-	if ((bits = HUB_L(pend)) != 0)
-		for (i = 0; i < N_INTPEND_BITS; i++)
-			if (bits & (1 << i))
-				LOCAL_HUB_CLR_INTR(base_level + i);
-}
-
-static void intr_clear_all(nasid_t nasid)
-{
 	REMOTE_HUB_S(nasid, PI_INT_MASK0_A, 0);
 	REMOTE_HUB_S(nasid, PI_INT_MASK0_B, 0);
 	REMOTE_HUB_S(nasid, PI_INT_MASK1_A, 0);
 	REMOTE_HUB_S(nasid, PI_INT_MASK1_B, 0);
-	intr_clear_bits(nasid, REMOTE_HUB_ADDR(nasid, PI_INT_PEND0),
-	                INT_PEND0_BASELVL);
-	intr_clear_bits(nasid, REMOTE_HUB_ADDR(nasid, PI_INT_PEND1),
-	                INT_PEND1_BASELVL);
+
+	for (i = 0; i < 128; i++)
+		REMOTE_HUB_CLR_INTR(nasid, i);
 }
 
-void __init prom_prepare_cpus(unsigned int max_cpus)
+void __init plat_smp_setup(void)
 {
 	cnodeid_t	cnode;
 
-	for_each_online_node(cnode)
+	for_each_online_node(cnode) {
+		if (cnode == 0)
+			continue;
 		intr_clear_all(COMPACT_TO_NASID_NODEID(cnode));
+	}
 
 	replicate_kernel_text();
 
@@ -170,22 +161,27 @@ void __init prom_prepare_cpus(unsigned int max_cpus)
 	alloc_cpupda(0, 0);
 }
 
+void __init plat_prepare_cpus(unsigned int max_cpus)
+{
+	/* We already did everything necessary earlier */
+}
+
 /*
  * Launch a slave into smp_bootstrap().  It doesn't take an argument, and we
  * set sp to the kernel stack of the newly created idle process, gp to the proc
  * struct so that current_thread_info() will work.
  */
-void __init prom_boot_secondary(int cpu, struct task_struct *idle)
+void __cpuinit prom_boot_secondary(int cpu, struct task_struct *idle)
 {
-	unsigned long gp = (unsigned long) idle->thread_info;
-	unsigned long sp = gp + THREAD_SIZE - 32;
+	unsigned long gp = (unsigned long)task_thread_info(idle);
+	unsigned long sp = __KSTK_TOS(idle);
 
-	LAUNCH_SLAVE(cputonasid(cpu),cputoslice(cpu),
+	LAUNCH_SLAVE(cputonasid(cpu), cputoslice(cpu),
 		(launch_proc_t)MAPPED_KERN_RW_TO_K0(smp_bootstrap),
 		0, (void *) sp, (void *) gp);
 }
 
-void prom_init_secondary(void)
+void __cpuinit prom_init_secondary(void)
 {
 	per_cpu_init();
 	local_irq_enable();
@@ -195,7 +191,7 @@ void __init prom_cpus_done(void)
 {
 }
 
-void prom_smp_finish(void)
+void __cpuinit prom_smp_finish(void)
 {
 }
 

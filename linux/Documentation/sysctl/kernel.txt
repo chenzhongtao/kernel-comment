@@ -16,6 +16,7 @@ before actually making adjustments.
 
 Currently, these files might (depending on your configuration)
 show up in /proc/sys/kernel:
+- acpi_video_flags
 - acct
 - core_pattern
 - core_uses_pid
@@ -26,6 +27,7 @@ show up in /proc/sys/kernel:
 - hotplug
 - java-appletviewer           [ binfmt_java, obsolete ]
 - java-interpreter            [ binfmt_java, obsolete ]
+- kstack_depth_to_print       [ X86 only ]
 - l2cr                        [ PPC only ]
 - modprobe                    ==> Documentation/kmod.txt
 - msgmax
@@ -56,6 +58,15 @@ show up in /proc/sys/kernel:
 
 ==============================================================
 
+acpi_video_flags:
+
+flags
+
+See Doc*/kernel/power/video.txt, it allows mode of video boot to be
+set during run time.
+
+==============================================================
+
 acct:
 
 highwater lowwater frequency
@@ -76,7 +87,7 @@ valid for 30 seconds.
 core_pattern:
 
 core_pattern is used to specify a core dumpfile pattern name.
-. max length 64 characters; default value is "core"
+. max length 128 characters; default value is "core"
 . core_pattern is used as a pattern template for the output filename;
   certain string patterns (beginning with '%') are substituted with
   their actual values.
@@ -95,6 +106,9 @@ core_pattern is used to specify a core dumpfile pattern name.
 	%h	hostname
 	%e	executable filename
 	%<OTHER> both are dropped
+. If the first character of the pattern is a '|', the kernel will treat
+  the rest of the pattern as a command to run.  The core dump will be
+  written to the standard input of that program instead of to a file.
 
 ==============================================================
 
@@ -157,6 +171,13 @@ This flag controls the L2 cache of G3 processor boards. If
 
 ==============================================================
 
+kstack_depth_to_print: (X86 only)
+
+Controls the number of words to print when dumping the raw
+kernel stack.
+
+==============================================================
+
 osrelease, ostype & version:
 
 # cat osrelease
@@ -200,15 +221,14 @@ Controls the kernel's behaviour when an oops or BUG is encountered.
 
 0: try to continue operation
 
-1: delay a few seconds (to give klogd time to record the oops output) and
-   then panic.  If the `panic' sysctl is also non-zero then the machine will
-   be rebooted.
+1: panic immediately.  If the `panic' sysctl is also non-zero then the
+   machine will be rebooted.
 
 ==============================================================
 
 pid_max:
 
-PID allocation wrap value.  When the kenrel's next PID value
+PID allocation wrap value.  When the kernel's next PID value
 reaches this value, it wraps back to a minimum PID value.
 PIDs of value pid_max or larger are not allocated.
 
@@ -297,6 +317,14 @@ This value can be used to query and set the run time limit
 on the maximum shared memory segment size that can be created.
 Shared memory segments up to 1Gb are now supported in the 
 kernel.  This value defaults to SHMMAX.
+
+==============================================================
+
+softlockup_thresh:
+
+This value can be used to lower the softlockup tolerance
+threshold. The default threshold is 10s.  If a cpu is locked up
+for 10s, the kernel complains.  Valid values are 1-60s.
 
 ==============================================================
 

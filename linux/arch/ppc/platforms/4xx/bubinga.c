@@ -10,7 +10,6 @@
  * or implied.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/threads.h>
@@ -22,6 +21,7 @@
 #include <linux/tty.h>
 #include <linux/serial.h>
 #include <linux/serial_core.h>
+#include <linux/serial_8250.h>
 
 #include <asm/system.h>
 #include <asm/pci-bridge.h>
@@ -89,7 +89,7 @@ bubinga_early_serial_map(void)
           * by 16.
           */
 	uart_div = (mfdcr(DCRN_CPC0_UCR_BASE) & DCRN_CPC0_UCR_U0DIV);
-	uart_clock = __res.bi_pllouta_freq / uart_div;
+	uart_clock = __res.bi_procfreq / uart_div;
 
 	/* Setup serial port access */
 	memset(&port, 0, sizeof(port));
@@ -97,8 +97,8 @@ bubinga_early_serial_map(void)
 	port.irq = ACTING_UART0_INT;
 	port.uartclk = uart_clock;
 	port.regshift = 0;
-	port.iotype = SERIAL_IO_MEM;
-	port.flags = ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST;
+	port.iotype = UPIO_MEM;
+	port.flags = UPF_BOOT_AUTOCONF | UPF_SKIP_TEST;
 	port.line = 0;
 
 	if (early_serial_setup(&port) != 0) {
@@ -117,6 +117,7 @@ bubinga_early_serial_map(void)
 void __init
 bios_fixup(struct pci_controller *hose, struct pcil0_regs *pcip)
 {
+#ifdef CONFIG_PCI
 
 	unsigned int bar_response, bar;
 	/*
@@ -197,7 +198,7 @@ bios_fixup(struct pci_controller *hose, struct pcil0_regs *pcip)
 		    hose->first_busno, PCI_SLOT(hose->first_busno),
 		    PCI_FUNC(hose->first_busno), bar, bar_response);
 	}
-	/* end work arround */
+	/* end workaround */
 
 #ifdef DEBUG
 	printk("PCI bridge regs after fixup \n");
@@ -212,6 +213,7 @@ bios_fixup(struct pci_controller *hose, struct pcil0_regs *pcip)
 	printk(" ptm2ms\t0x%x\n", in_le32(&(pcip->ptm2ms)));
 	printk(" ptm2la\t0x%x\n", in_le32(&(pcip->ptm2la)));
 
+#endif
 #endif
 }
 

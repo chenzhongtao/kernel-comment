@@ -8,17 +8,73 @@
 #include <linux/mman.h>
 #include <linux/pagemap.h>
 #include <linux/syscalls.h>
+#include <linux/mempolicy.h>
 #include <linux/hugetlb.h>
+#include <linux/sched.h>
+
+/*
+ * Any behaviour which results in changes to the vma->vm_flags needs to
+ * take mmap_sem for writing. Others, which simply traverse vmas, need
+ * to only take it for reading.
+ */
+static int madvise_need_mmap_write(int behavior)
+{
+	switch (behavior) {
+	case MADV_REMOVE:
+	case MADV_WILLNEED:
+	case MADV_DONTNEED:
+		return 0;
+	default:
+		/* be safe, default to 1. list exceptions explicitly */
+		return 1;
+	}
+}
 
 /*
  * We can potentially split a vm area into separate
  * areas, each area with its own behavior.
  */
-static long madvise_behavior(struct vm_area_struct * vma, unsigned long start,
-			     unsigned long end, int behavior)
+static long madvise_behavior(struct vm_area_struct * vma,
+		     struct vm_area_struct **prev,
+		     unsigned long start, unsigned long end, int behavior)
 {
 	struct mm_struct * mm = vma->vm_mm;
 	int error = 0;
+	pgoff_t pgoff;
+	int new_flags = vma->vm_flags;
+
+	switch (behavior) {
+	case MADV_NORMAL:
+		new_flags = new_flags & ~VM_RAND_READ & ~VM_SEQ_READ;
+		break;
+	case MADV_SEQUENTIAL:
+		new_flags = (new_flags & ~VM_RAND_READ) | VM_SEQ_READ;
+		break;
+	case MADV_RANDOM:
+		new_flags = (new_flags & ~VM_SEQ_READ) | VM_RAND_READ;
+		break;
+	case MADV_DONTFORK:
+		new_flags |= VM_DONTCOPY;
+		break;
+	case MADV_DOFORK:
+		new_flags &= ~VM_DONTCOPY;
+		break;
+	}
+
+	if (new_flags == vma->vm_flags) {
+		*prev = vma;
+		goto out;
+	}
+
+	pgoff = vma->vm_pgoff + ((start - vma->vm_start) >> PAGE_SHIFT);
+	*prev = vma_merge(mm, *prev, start, end, new_flags, vma->anon_vma,
+				vma->vm_file, pgoff, vma_policy(vma));
+	if (*prev) {
+		vma = *prev;
+		goto success;
+	}
+
+	*prev = vma;
 
 	if (start != vma->vm_start) {
 		error = split_vma(mm, vma, start, 1);
@@ -32,21 +88,11 @@ static long madvise_behavior(struct vm_area_struct * vma, unsigned long start,
 			goto out;
 	}
 
+success:
 	/*
 	 * vm_flags is protected by the mmap_sem held in write mode.
 	 */
-	VM_ClearReadHint(vma);
-
-	switch (behavior) {
-	case MADV_SEQUENTIAL:
-		vma->vm_flags |= VM_SEQ_READ;
-		break;
-	case MADV_RANDOM:
-		vma->vm_flags |= VM_RAND_READ;
-		break;
-	default:
-		break;
-	}
+	vma->vm_flags = new_flags;
 
 out:
 	if (error == -ENOMEM)
@@ -58,6 +104,7 @@ out:
  * Schedule all required I/O operations.  Do not wait for completion.
  */
 static long madvise_willneed(struct vm_area_struct * vma,
+			     struct vm_area_struct ** prev,
 			     unsigned long start, unsigned long end)
 {
 	struct file *file = vma->vm_file;
@@ -65,6 +112,12 @@ static long madvise_willneed(struct vm_area_struct * vma,
 	if (!file)
 		return -EBADF;
 
+	if (file->f_mapping->a_ops->get_xip_page) {
+		/* no bad return value, but ignore advice */
+		return 0;
+	}
+
+	*prev = vma;
 	start = ((start - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
 	if (end > vma->vm_end)
 		end = vma->vm_end;
@@ -95,9 +148,11 @@ static long madvise_willneed(struct vm_area_struct * vma,
  * dirty pages is already available as msync(MS_INVALIDATE).
  */
 static long madvise_dontneed(struct vm_area_struct * vma,
+			     struct vm_area_struct ** prev,
 			     unsigned long start, unsigned long end)
 {
-	if ((vma->vm_flags & VM_LOCKED) || is_vm_hugetlb_page(vma))
+	*prev = vma;
+	if (vma->vm_flags & (VM_LOCKED|VM_HUGETLB|VM_PFNMAP))
 		return -EINVAL;
 
 	if (unlikely(vma->vm_flags & VM_NONLINEAR)) {
@@ -111,31 +166,82 @@ static long madvise_dontneed(struct vm_area_struct * vma,
 	return 0;
 }
 
-static long madvise_vma(struct vm_area_struct * vma, unsigned long start,
-			unsigned long end, int behavior)
+/*
+ * Application wants to free up the pages and associated backing store.
+ * This is effectively punching a hole into the middle of a file.
+ *
+ * NOTE: Currently, only shmfs/tmpfs is supported for this operation.
+ * Other filesystems return -ENOSYS.
+ */
+static long madvise_remove(struct vm_area_struct *vma,
+				struct vm_area_struct **prev,
+				unsigned long start, unsigned long end)
 {
-	long error = -EBADF;
+	struct address_space *mapping;
+	loff_t offset, endoff;
+	int error;
+
+	*prev = NULL;	/* tell sys_madvise we drop mmap_sem */
+
+	if (vma->vm_flags & (VM_LOCKED|VM_NONLINEAR|VM_HUGETLB))
+		return -EINVAL;
+
+	if (!vma->vm_file || !vma->vm_file->f_mapping
+		|| !vma->vm_file->f_mapping->host) {
+			return -EINVAL;
+	}
+
+	if ((vma->vm_flags & (VM_SHARED|VM_WRITE)) != (VM_SHARED|VM_WRITE))
+		return -EACCES;
+
+	mapping = vma->vm_file->f_mapping;
+
+	offset = (loff_t)(start - vma->vm_start)
+			+ ((loff_t)vma->vm_pgoff << PAGE_SHIFT);
+	endoff = (loff_t)(end - vma->vm_start - 1)
+			+ ((loff_t)vma->vm_pgoff << PAGE_SHIFT);
+
+	/* vmtruncate_range needs to take i_mutex and i_alloc_sem */
+	up_read(&current->mm->mmap_sem);
+	error = vmtruncate_range(mapping->host, offset, endoff);
+	down_read(&current->mm->mmap_sem);
+	return error;
+}
+
+static long
+madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
+		unsigned long start, unsigned long end, int behavior)
+{
+	long error;
 
 	switch (behavior) {
+	case MADV_DOFORK:
+		if (vma->vm_flags & VM_IO) {
+			error = -EINVAL;
+			break;
+		}
+	case MADV_DONTFORK:
 	case MADV_NORMAL:
 	case MADV_SEQUENTIAL:
 	case MADV_RANDOM:
-		error = madvise_behavior(vma, start, end, behavior);
+		error = madvise_behavior(vma, prev, start, end, behavior);
+		break;
+	case MADV_REMOVE:
+		error = madvise_remove(vma, prev, start, end);
 		break;
 
 	case MADV_WILLNEED:
-		error = madvise_willneed(vma, start, end);
+		error = madvise_willneed(vma, prev, start, end);
 		break;
 
 	case MADV_DONTNEED:
-		error = madvise_dontneed(vma, start, end);
+		error = madvise_dontneed(vma, prev, start, end);
 		break;
 
 	default:
 		error = -EINVAL;
 		break;
 	}
-		
 	return error;
 }
 
@@ -161,6 +267,8 @@ static long madvise_vma(struct vm_area_struct * vma, unsigned long start,
  *		some pages ahead.
  *  MADV_DONTNEED - the application is finished with the given range,
  *		so the kernel can free resources associated with it.
+ *  MADV_REMOVE - the application wants to free up the given range of
+ *		pages and associated backing store.
  *
  * return values:
  *  zero    - success
@@ -175,13 +283,18 @@ static long madvise_vma(struct vm_area_struct * vma, unsigned long start,
  */
 asmlinkage long sys_madvise(unsigned long start, size_t len_in, int behavior)
 {
-	unsigned long end;
-	struct vm_area_struct * vma;
+	unsigned long end, tmp;
+	struct vm_area_struct * vma, *prev;
 	int unmapped_error = 0;
 	int error = -EINVAL;
+	int write;
 	size_t len;
 
-	down_write(&current->mm->mmap_sem);
+	write = madvise_need_mmap_write(behavior);
+	if (write)
+		down_write(&current->mm->mmap_sem);
+	else
+		down_read(&current->mm->mmap_sem);
 
 	if (start & ~PAGE_MASK)
 		goto out;
@@ -202,41 +315,51 @@ asmlinkage long sys_madvise(unsigned long start, size_t len_in, int behavior)
 	/*
 	 * If the interval [start,end) covers some unmapped address
 	 * ranges, just ignore them, but return -ENOMEM at the end.
+	 * - different from the way of handling in mlock etc.
 	 */
-	vma = find_vma(current->mm, start);
+	vma = find_vma_prev(current->mm, start, &prev);
+	if (vma && start > vma->vm_start)
+		prev = vma;
+
 	for (;;) {
 		/* Still start < end. */
 		error = -ENOMEM;
 		if (!vma)
 			goto out;
 
-		/* Here start < vma->vm_end. */
+		/* Here start < (end|vma->vm_end). */
 		if (start < vma->vm_start) {
 			unmapped_error = -ENOMEM;
 			start = vma->vm_start;
+			if (start >= end)
+				goto out;
 		}
 
-		/* Here vma->vm_start <= start < vma->vm_end. */
-		if (end <= vma->vm_end) {
-			if (start < end) {
-				error = madvise_vma(vma, start, end,
-							behavior);
-				if (error)
-					goto out;
-			}
-			error = unmapped_error;
-			goto out;
-		}
+		/* Here vma->vm_start <= start < (end|vma->vm_end) */
+		tmp = vma->vm_end;
+		if (end < tmp)
+			tmp = end;
 
-		/* Here vma->vm_start <= start < vma->vm_end < end. */
-		error = madvise_vma(vma, start, vma->vm_end, behavior);
+		/* Here vma->vm_start <= start < tmp <= (end|vma->vm_end). */
+		error = madvise_vma(vma, &prev, start, tmp, behavior);
 		if (error)
 			goto out;
-		start = vma->vm_end;
-		vma = vma->vm_next;
+		start = tmp;
+		if (prev && start < prev->vm_end)
+			start = prev->vm_end;
+		error = unmapped_error;
+		if (start >= end)
+			goto out;
+		if (prev)
+			vma = prev->vm_next;
+		else	/* madvise_remove dropped mmap_sem */
+			vma = find_vma(current->mm, start);
 	}
-
 out:
-	up_write(&current->mm->mmap_sem);
+	if (write)
+		up_write(&current->mm->mmap_sem);
+	else
+		up_read(&current->mm->mmap_sem);
+
 	return error;
 }

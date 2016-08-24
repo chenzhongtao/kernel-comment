@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2001 by David Brownell
- * 
+ *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation; either version 2 of the License, or (at your
@@ -25,9 +25,9 @@
  *	- data used only by the HCD ... kmalloc is fine
  *	- async and periodic schedules, shared by HC and HCD ... these
  *	  need to use dma_pool or dma_alloc_coherent
- *	- driver buffers, read/written by HC ... single shot DMA mapped 
+ *	- driver buffers, read/written by HC ... single shot DMA mapped
  *
- * There's also PCI "register" data, which is memory mapped.
+ * There's also "register" data (e.g. PCI or SOC), which is memory mapped.
  * No memory seen by this driver is pageable.
  */
 
@@ -35,24 +35,25 @@
 
 /* Allocate the key transfer structures from the previously allocated pool */
 
-static inline void ehci_qtd_init (struct ehci_qtd *qtd, dma_addr_t dma)
+static inline void ehci_qtd_init(struct ehci_hcd *ehci, struct ehci_qtd *qtd,
+				  dma_addr_t dma)
 {
 	memset (qtd, 0, sizeof *qtd);
 	qtd->qtd_dma = dma;
 	qtd->hw_token = cpu_to_le32 (QTD_STS_HALT);
-	qtd->hw_next = EHCI_LIST_END;
-	qtd->hw_alt_next = EHCI_LIST_END;
+	qtd->hw_next = EHCI_LIST_END(ehci);
+	qtd->hw_alt_next = EHCI_LIST_END(ehci);
 	INIT_LIST_HEAD (&qtd->qtd_list);
 }
 
-static struct ehci_qtd *ehci_qtd_alloc (struct ehci_hcd *ehci, int flags)
+static struct ehci_qtd *ehci_qtd_alloc (struct ehci_hcd *ehci, gfp_t flags)
 {
 	struct ehci_qtd		*qtd;
 	dma_addr_t		dma;
 
 	qtd = dma_pool_alloc (ehci->qtd_pool, flags, &dma);
 	if (qtd != NULL) {
-		ehci_qtd_init (qtd, dma);
+		ehci_qtd_init(ehci, qtd, dma);
 	}
 	return qtd;
 }
@@ -63,9 +64,8 @@ static inline void ehci_qtd_free (struct ehci_hcd *ehci, struct ehci_qtd *qtd)
 }
 
 
-static void qh_destroy (struct kref *kref)
+static void qh_destroy(struct ehci_qh *qh)
 {
-	struct ehci_qh *qh = container_of(kref, struct ehci_qh, kref);
 	struct ehci_hcd *ehci = qh->ehci;
 
 	/* clean qtds first, and know this is not linked */
@@ -75,11 +75,10 @@ static void qh_destroy (struct kref *kref)
 	}
 	if (qh->dummy)
 		ehci_qtd_free (ehci, qh->dummy);
-	usb_put_dev (qh->dev);
 	dma_pool_free (ehci->qh_pool, qh, qh->qh_dma);
 }
 
-static struct ehci_qh *ehci_qh_alloc (struct ehci_hcd *ehci, int flags)
+static struct ehci_qh *ehci_qh_alloc (struct ehci_hcd *ehci, gfp_t flags)
 {
 	struct ehci_qh		*qh;
 	dma_addr_t		dma;
@@ -90,7 +89,7 @@ static struct ehci_qh *ehci_qh_alloc (struct ehci_hcd *ehci, int flags)
 		return qh;
 
 	memset (qh, 0, sizeof *qh);
-	kref_init(&qh->kref);
+	qh->refcount = 1;
 	qh->ehci = ehci;
 	qh->qh_dma = dma;
 	// INIT_LIST_HEAD (&qh->qh_list);
@@ -109,18 +108,20 @@ static struct ehci_qh *ehci_qh_alloc (struct ehci_hcd *ehci, int flags)
 /* to share a qh (cpu threads, or hc) */
 static inline struct ehci_qh *qh_get (struct ehci_qh *qh)
 {
-	kref_get(&qh->kref);
+	WARN_ON(!qh->refcount);
+	qh->refcount++;
 	return qh;
 }
 
 static inline void qh_put (struct ehci_qh *qh)
 {
-	kref_put(&qh->kref, qh_destroy);
+	if (!--qh->refcount)
+		qh_destroy(qh);
 }
 
 /*-------------------------------------------------------------------------*/
 
-/* The queue heads and transfer descriptors are managed from pools tied 
+/* The queue heads and transfer descriptors are managed from pools tied
  * to each of the "per device" structures.
  * This is the initialisation and cleanup code.
  */
@@ -156,18 +157,17 @@ static void ehci_mem_cleanup (struct ehci_hcd *ehci)
 	ehci->periodic = NULL;
 
 	/* shadow periodic table */
-	if (ehci->pshadow)
-		kfree (ehci->pshadow);
+	kfree(ehci->pshadow);
 	ehci->pshadow = NULL;
 }
 
 /* remember to add cleanup code (above) if you add anything here */
-static int ehci_mem_init (struct ehci_hcd *ehci, int flags)
+static int ehci_mem_init (struct ehci_hcd *ehci, gfp_t flags)
 {
 	int i;
 
 	/* QTDs for control/bulk/intr transfers */
-	ehci->qtd_pool = dma_pool_create ("ehci_qtd", 
+	ehci->qtd_pool = dma_pool_create ("ehci_qtd",
 			ehci_to_hcd(ehci)->self.controller,
 			sizeof (struct ehci_qtd),
 			32 /* byte alignment (for hw parts) */,
@@ -177,7 +177,7 @@ static int ehci_mem_init (struct ehci_hcd *ehci, int flags)
 	}
 
 	/* QHs for control/bulk/intr transfers */
-	ehci->qh_pool = dma_pool_create ("ehci_qh", 
+	ehci->qh_pool = dma_pool_create ("ehci_qh",
 			ehci_to_hcd(ehci)->self.controller,
 			sizeof (struct ehci_qh),
 			32 /* byte alignment (for hw parts) */,
@@ -191,7 +191,7 @@ static int ehci_mem_init (struct ehci_hcd *ehci, int flags)
 	}
 
 	/* ITD for high speed ISO transfers */
-	ehci->itd_pool = dma_pool_create ("ehci_itd", 
+	ehci->itd_pool = dma_pool_create ("ehci_itd",
 			ehci_to_hcd(ehci)->self.controller,
 			sizeof (struct ehci_itd),
 			32 /* byte alignment (for hw parts) */,
@@ -201,7 +201,7 @@ static int ehci_mem_init (struct ehci_hcd *ehci, int flags)
 	}
 
 	/* SITD for full/low speed split ISO transfers */
-	ehci->sitd_pool = dma_pool_create ("ehci_sitd", 
+	ehci->sitd_pool = dma_pool_create ("ehci_sitd",
 			ehci_to_hcd(ehci)->self.controller,
 			sizeof (struct ehci_sitd),
 			32 /* byte alignment (for hw parts) */,
@@ -219,16 +219,12 @@ static int ehci_mem_init (struct ehci_hcd *ehci, int flags)
 		goto fail;
 	}
 	for (i = 0; i < ehci->periodic_size; i++)
-		ehci->periodic [i] = EHCI_LIST_END;
+		ehci->periodic [i] = EHCI_LIST_END(ehci);
 
 	/* software shadow of hardware table */
-	ehci->pshadow = kmalloc (ehci->periodic_size * sizeof (void *), flags);
-	if (ehci->pshadow == NULL) {
-		goto fail;
-	}
-	memset (ehci->pshadow, 0, ehci->periodic_size * sizeof (void *));
-
-	return 0;
+	ehci->pshadow = kcalloc(ehci->periodic_size, sizeof(void *), flags);
+	if (ehci->pshadow != NULL)
+		return 0;
 
 fail:
 	ehci_dbg (ehci, "couldn't init memory\n");

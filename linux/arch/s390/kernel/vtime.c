@@ -7,7 +7,6 @@
  *    Author(s): Jan Glauber <jan.glauber@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/time.h>
@@ -19,20 +18,21 @@
 #include <linux/notifier.h>
 #include <linux/kernel_stat.h>
 #include <linux/rcupdate.h>
+#include <linux/posix-timers.h>
 
 #include <asm/s390_ext.h>
 #include <asm/timer.h>
+#include <asm/irq_regs.h>
 
-#define VTIMER_MAGIC (TIMER_MAGIC + 1)
 static ext_int_info_t ext_int_info_timer;
-DEFINE_PER_CPU(struct vtimer_queue, virt_cpu_timer);
+static DEFINE_PER_CPU(struct vtimer_queue, virt_cpu_timer);
 
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING
 /*
  * Update process times based on virtual cpu times stored by entry.S
  * to the lowcore fields user_timer, system_timer & steal_clock.
  */
-void account_user_vtime(struct task_struct *tsk)
+void account_process_tick(struct task_struct *tsk, int user_tick)
 {
 	cputime_t cputime;
 	__u64 timer, clock;
@@ -64,11 +64,31 @@ void account_user_vtime(struct task_struct *tsk)
 		S390_lowcore.steal_clock -= cputime << 12;
 		account_steal_time(tsk, cputime);
 	}
+}
 
-	run_local_timers();
-	if (rcu_pending(smp_processor_id()))
-		rcu_check_callbacks(smp_processor_id(), rcu_user_flag);
-	scheduler_tick();
+/*
+ * Update process times based on virtual cpu times stored by entry.S
+ * to the lowcore fields user_timer, system_timer & steal_clock.
+ */
+void account_vtime(struct task_struct *tsk)
+{
+	cputime_t cputime;
+	__u64 timer;
+
+	timer = S390_lowcore.last_update_timer;
+	asm volatile ("  STPT %0"    /* Store current cpu timer value */
+		      : "=m" (S390_lowcore.last_update_timer) );
+	S390_lowcore.system_timer += timer - S390_lowcore.last_update_timer;
+
+	cputime = S390_lowcore.user_timer >> 12;
+	S390_lowcore.user_timer -= cputime << 12;
+	S390_lowcore.steal_clock -= cputime << 12;
+	account_user_time(tsk, cputime);
+
+	cputime =  S390_lowcore.system_timer >> 12;
+	S390_lowcore.system_timer -= cputime << 12;
+	S390_lowcore.steal_clock -= cputime << 12;
+	account_system_time(tsk, 0, cputime);
 }
 
 /*
@@ -102,7 +122,7 @@ static inline void set_vtimer(__u64 expires)
 	S390_lowcore.last_update_timer = expires;
 
 	/* store expire time for this CPU timer */
-	per_cpu(virt_cpu_timer, smp_processor_id()).to_expire = expires;
+	__get_cpu_var(virt_cpu_timer).to_expire = expires;
 }
 #else
 static inline void set_vtimer(__u64 expires)
@@ -111,7 +131,7 @@ static inline void set_vtimer(__u64 expires)
 	asm volatile ("SPT %0" : : "m" (S390_lowcore.last_update_timer));
 
 	/* store expire time for this CPU timer */
-	per_cpu(virt_cpu_timer, smp_processor_id()).to_expire = expires;
+	__get_cpu_var(virt_cpu_timer).to_expire = expires;
 }
 #endif
 
@@ -119,16 +139,21 @@ static void start_cpu_timer(void)
 {
 	struct vtimer_queue *vt_list;
 
-	vt_list = &per_cpu(virt_cpu_timer, smp_processor_id());
-	set_vtimer(vt_list->idle);
+	vt_list = &__get_cpu_var(virt_cpu_timer);
+
+	/* CPU timer interrupt is pending, don't reprogramm it */
+	if (vt_list->idle & 1LL<<63)
+		return;
+
+	if (!list_empty(&vt_list->list))
+		set_vtimer(vt_list->idle);
 }
 
 static void stop_cpu_timer(void)
 {
-	__u64 done;
 	struct vtimer_queue *vt_list;
 
-	vt_list = &per_cpu(virt_cpu_timer, smp_processor_id());
+	vt_list = &__get_cpu_var(virt_cpu_timer);
 
 	/* nothing to do */
 	if (list_empty(&vt_list->list)) {
@@ -136,21 +161,17 @@ static void stop_cpu_timer(void)
 		goto fire;
 	}
 
-	/* store progress */
-	asm volatile ("STPT %0" : "=m" (done));
+	/* store the actual expire value */
+	asm volatile ("STPT %0" : "=m" (vt_list->idle));
 
 	/*
-	 * If done is negative we do not stop the CPU timer
-	 * because we will get instantly an interrupt that
-	 * will start the CPU timer again.
+	 * If the CPU timer is negative we don't reprogramm
+	 * it because we will get instantly an interrupt.
 	 */
-	if (done & 1LL<<63)
+	if (vt_list->idle & 1LL<<63)
 		return;
-	else
-		vt_list->offset += vt_list->to_expire - done;
 
-	/* save the actual expire value */
-	vt_list->idle = done;
+	vt_list->offset += vt_list->to_expire - vt_list->idle;
 
 	/*
 	 * We cannot halt the CPU timer, we just write a value that
@@ -182,22 +203,22 @@ static void list_add_sorted(struct vtimer_list *timer, struct list_head *head)
  * Do the callback functions of expired vtimer events.
  * Called from within the interrupt handler.
  */
-static void do_callbacks(struct list_head *cb_list, struct pt_regs *regs)
+static void do_callbacks(struct list_head *cb_list)
 {
 	struct vtimer_queue *vt_list;
 	struct vtimer_list *event, *tmp;
-	void (*fn)(unsigned long, struct pt_regs*);
+	void (*fn)(unsigned long);
 	unsigned long data;
 
 	if (list_empty(cb_list))
 		return;
 
-	vt_list = &per_cpu(virt_cpu_timer, smp_processor_id());
+	vt_list = &__get_cpu_var(virt_cpu_timer);
 
 	list_for_each_entry_safe(event, tmp, cb_list, entry) {
 		fn = event->function;
 		data = event->data;
-		fn(data, regs);
+		fn(data);
 
 		if (!event->interval)
 			/* delete one shot timer */
@@ -215,9 +236,8 @@ static void do_callbacks(struct list_head *cb_list, struct pt_regs *regs)
 /*
  * Handler for the virtual CPU timer.
  */
-static void do_cpu_timer_interrupt(struct pt_regs *regs, __u16 error_code)
+static void do_cpu_timer_interrupt(__u16 error_code)
 {
-	int cpu;
 	__u64 next, delta;
 	struct vtimer_queue *vt_list;
 	struct vtimer_list *event, *tmp;
@@ -226,8 +246,7 @@ static void do_cpu_timer_interrupt(struct pt_regs *regs, __u16 error_code)
 	struct list_head cb_list;
 
 	INIT_LIST_HEAD(&cb_list);
-	cpu = smp_processor_id();
-	vt_list = &per_cpu(virt_cpu_timer, cpu);
+	vt_list = &__get_cpu_var(virt_cpu_timer);
 
 	/* walk timer list, fire all expired events */
 	spin_lock(&vt_list->lock);
@@ -248,7 +267,7 @@ static void do_cpu_timer_interrupt(struct pt_regs *regs, __u16 error_code)
 		list_move_tail(&event->entry, &cb_list);
 	}
 	spin_unlock(&vt_list->lock);
-	do_callbacks(&cb_list, regs);
+	do_callbacks(&cb_list);
 
 	/* next event is first in list */
 	spin_lock(&vt_list->lock);
@@ -274,19 +293,11 @@ static void do_cpu_timer_interrupt(struct pt_regs *regs, __u16 error_code)
 
 void init_virt_timer(struct vtimer_list *timer)
 {
-	timer->magic = VTIMER_MAGIC;
 	timer->function = NULL;
 	INIT_LIST_HEAD(&timer->entry);
 	spin_lock_init(&timer->lock);
 }
 EXPORT_SYMBOL(init_virt_timer);
-
-static inline int check_vtimer(struct vtimer_list *timer)
-{
-	if (timer->magic != VTIMER_MAGIC)
-		return -EINVAL;
-	return 0;
-}
 
 static inline int vtimer_pending(struct vtimer_list *timer)
 {
@@ -337,13 +348,13 @@ static void internal_add_vtimer(struct vtimer_list *timer)
 
 	set_vtimer(event->expires);
 	spin_unlock_irqrestore(&vt_list->lock, flags);
-	/* release CPU aquired in prepare_vtimer or mod_virt_timer() */
+	/* release CPU acquired in prepare_vtimer or mod_virt_timer() */
 	put_cpu();
 }
 
 static inline int prepare_vtimer(struct vtimer_list *timer)
 {
-	if (check_vtimer(timer) || !timer->function) {
+	if (!timer->function) {
 		printk("add_virt_timer: uninitialized timer\n");
 		return -EINVAL;
 	}
@@ -398,7 +409,7 @@ EXPORT_SYMBOL(add_virt_timer_periodic);
 
 /*
  * If we change a pending timer the function must be called on the CPU
- * where the timer is running on, e.g. by smp_call_function_on()
+ * where the timer is running on, e.g. by smp_call_function_single()
  *
  * The original mod_timer adds the timer if it is not pending. For compatibility
  * we do the same. The timer will be added on the current CPU as a oneshot timer.
@@ -411,7 +422,7 @@ int mod_virt_timer(struct vtimer_list *timer, __u64 expires)
 	unsigned long flags;
 	int cpu;
 
-	if (check_vtimer(timer) || !timer->function) {
+	if (!timer->function) {
 		printk("mod_virt_timer: uninitialized timer\n");
 		return	-EINVAL;
 	}
@@ -478,11 +489,6 @@ int del_virt_timer(struct vtimer_list *timer)
 	unsigned long flags;
 	struct vtimer_queue *vt_list;
 
-	if (check_vtimer(timer)) {
-		printk("del_virt_timer: timer not initialized\n");
-		return -EINVAL;
-	}
-
 	/* check if timer is pending */
 	if (!vtimer_pending(timer))
 		return 0;
@@ -510,18 +516,17 @@ EXPORT_SYMBOL(del_virt_timer);
 void init_cpu_vtimer(void)
 {
 	struct vtimer_queue *vt_list;
-	unsigned long cr0;
 
 	/* kick the virtual timer */
 	S390_lowcore.exit_timer = VTIMER_MAX_SLICE;
 	S390_lowcore.last_update_timer = VTIMER_MAX_SLICE;
 	asm volatile ("SPT %0" : : "m" (S390_lowcore.last_update_timer));
 	asm volatile ("STCK %0" : "=m" (S390_lowcore.last_update_clock));
-	__ctl_store(cr0, 0, 0);
-	cr0 |= 0x400;
-	__ctl_load(cr0, 0, 0);
 
-	vt_list = &per_cpu(virt_cpu_timer, smp_processor_id());
+	/* enable cpu timer interrupts */
+	__ctl_set_bit(0,10);
+
+	vt_list = &__get_cpu_var(virt_cpu_timer);
 	INIT_LIST_HEAD(&vt_list->list);
 	spin_lock_init(&vt_list->lock);
 	vt_list->to_expire = 0;
@@ -534,10 +539,10 @@ static int vtimer_idle_notify(struct notifier_block *self,
 			      unsigned long action, void *hcpu)
 {
 	switch (action) {
-	case CPU_IDLE:
+	case S390_CPU_IDLE:
 		stop_cpu_timer();
 		break;
-	case CPU_NOT_IDLE:
+	case S390_CPU_NOT_IDLE:
 		start_cpu_timer();
 		break;
 	}
@@ -558,6 +563,7 @@ void __init vtime_init(void)
 	if (register_idle_notifier(&vtimer_idle_nb))
 		panic("Couldn't register idle notifier");
 
+	/* Enable cpu timer interrupts on the boot cpu. */
 	init_cpu_vtimer();
 }
 

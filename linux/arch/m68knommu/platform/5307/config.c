@@ -9,33 +9,32 @@
 
 /***************************************************************************/
 
-#include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/param.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <asm/irq.h>
 #include <asm/dma.h>
-#include <asm/traps.h>
 #include <asm/machdep.h>
 #include <asm/coldfire.h>
-#include <asm/mcftimer.h>
 #include <asm/mcfsim.h>
 #include <asm/mcfdma.h>
 #include <asm/mcfwdebug.h>
 
 /***************************************************************************/
 
-void coldfire_tick(void);
-void coldfire_timer_init(irqreturn_t (*handler)(int, void *, struct pt_regs *));
-unsigned long coldfire_timer_offset(void);
-void coldfire_trap_init(void);
 void coldfire_reset(void);
 
 extern unsigned int mcf_timervector;
 extern unsigned int mcf_profilevector;
 extern unsigned int mcf_timerlevel;
+
+/***************************************************************************/
+
+/*
+ *	Some platforms need software versions of the GPIO data registers.
+ */
+unsigned short ppdata;
+unsigned char ledbank = 0xff;
 
 /***************************************************************************/
 
@@ -104,10 +103,7 @@ void config_BSP(char *commandp, int size)
 {
 	mcf_setimr(MCFSIM_IMR_MASKALL);
 
-#if defined(CONFIG_BOOTPARAM)
-	strncpy(commandp, CONFIG_BOOTPARAM_STRING, size);
-	commandp[size-1] = 0;
-#elif defined(CONFIG_NETtel) || defined(CONFIG_eLIA) || \
+#if defined(CONFIG_NETtel) || defined(CONFIG_eLIA) || \
       defined(CONFIG_DISKtel) || defined(CONFIG_SECUREEDGEMP3) || \
       defined(CONFIG_CLEOPATRA)
 	/* Copy command line from FLASH to local buffer... */
@@ -117,14 +113,8 @@ void config_BSP(char *commandp, int size)
 	mcf_timervector = 30;
 	mcf_profilevector = 31;
 	mcf_timerlevel = 6;
-#else
-	memset(commandp, 0, size);
 #endif
 
-	mach_sched_init = coldfire_timer_init;
-	mach_tick = coldfire_tick;
-	mach_gettimeoffset = coldfire_timer_offset;
-	mach_trap_init = coldfire_trap_init;
 	mach_reset = coldfire_reset;
 
 #ifdef MCF_BDM_DISABLE

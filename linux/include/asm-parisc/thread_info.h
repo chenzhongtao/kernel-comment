@@ -12,7 +12,7 @@ struct thread_info {
 	unsigned long flags;		/* thread_info flags (see TIF_*) */
 	mm_segment_t addr_limit;	/* user-level address space limit */
 	__u32 cpu;			/* current CPU */
-	__s32 preempt_count;		/* 0=premptable, <0=BUG; will also serve as bh-counter */
+	int preempt_count;		/* 0=premptable, <0=BUG; will also serve as bh-counter */
 	struct restart_block restart_block;
 };
 
@@ -23,7 +23,7 @@ struct thread_info {
 	.flags		= 0,			\
 	.cpu		= 0,			\
 	.addr_limit	= KERNEL_DS,		\
-	.preempt_count	= 0,			\
+	.preempt_count	= 1,			\
   	.restart_block	= {			\
 		.fn = do_no_restart_syscall	\
 	}					\
@@ -43,37 +43,35 @@ struct thread_info {
 #define alloc_thread_info(tsk) ((struct thread_info *) \
 			__get_free_pages(GFP_KERNEL, THREAD_ORDER))
 #define free_thread_info(ti)    free_pages((unsigned long) (ti), THREAD_ORDER)
-#define get_thread_info(ti)     get_task_struct((ti)->task)
-#define put_thread_info(ti)     put_task_struct((ti)->task)
-
 
 /* how to get the thread information struct from C */
 #define current_thread_info()	((struct thread_info *)mfctl(30))
 
 #endif /* !__ASSEMBLY */
 
-#define PREEMPT_ACTIVE          0x4000000
+#define PREEMPT_ACTIVE_BIT	28
+#define PREEMPT_ACTIVE		(1 << PREEMPT_ACTIVE_BIT)
 
 /*
  * thread information flags
  */
 #define TIF_SYSCALL_TRACE	0	/* syscall trace active */
-#define TIF_NOTIFY_RESUME	1	/* resumption notification requested */
-#define TIF_SIGPENDING		2	/* signal pending */
-#define TIF_NEED_RESCHED	3	/* rescheduling necessary */
-#define TIF_POLLING_NRFLAG	4	/* true if poll_idle() is polling TIF_NEED_RESCHED */
-#define TIF_32BIT               5       /* 32 bit binary */
-#define TIF_MEMDIE		6
+#define TIF_SIGPENDING		1	/* signal pending */
+#define TIF_NEED_RESCHED	2	/* rescheduling necessary */
+#define TIF_POLLING_NRFLAG	3	/* true if poll_idle() is polling TIF_NEED_RESCHED */
+#define TIF_32BIT               4       /* 32 bit binary */
+#define TIF_MEMDIE		5
+#define TIF_RESTORE_SIGMASK	6	/* restore saved signal mask */
 
 #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
-#define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
 #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
 #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
 #define _TIF_POLLING_NRFLAG	(1 << TIF_POLLING_NRFLAG)
 #define _TIF_32BIT		(1 << TIF_32BIT)
+#define _TIF_RESTORE_SIGMASK	(1 << TIF_RESTORE_SIGMASK)
 
-#define _TIF_USER_WORK_MASK     (_TIF_NOTIFY_RESUME | _TIF_SIGPENDING | \
-                                 _TIF_NEED_RESCHED)
+#define _TIF_USER_WORK_MASK     (_TIF_SIGPENDING | \
+                                 _TIF_NEED_RESCHED | _TIF_RESTORE_SIGMASK)
 
 #endif /* __KERNEL__ */
 

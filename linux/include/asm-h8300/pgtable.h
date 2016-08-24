@@ -3,7 +3,6 @@
 
 #include <asm-generic/4level-fixup.h>
 
-#include <linux/config.h>
 #include <linux/slab.h>
 #include <asm/processor.h>
 #include <asm/page.h>
@@ -52,8 +51,9 @@ extern int is_in_rom(unsigned long);
  * No page table caches to initialise
  */
 #define pgtable_cache_init()   do { } while (0)
-#define io_remap_page_range(vma, vaddr, paddr, size, prot)		\
-		remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
+
+#define io_remap_pfn_range(vma, vaddr, pfn, size, prot)		\
+		remap_pfn_range(vma, vaddr, pfn, size, prot)
 
 /*
  * All 32bit addresses are effectively valid for vmalloc...
@@ -69,4 +69,5 @@ extern int is_in_rom(unsigned long);
 #define	VMALLOC_START	0
 #define	VMALLOC_END	0xffffffff
 
+#define arch_enter_lazy_cpu_mode()    do {} while (0)
 #endif /* _H8300_PGTABLE_H */

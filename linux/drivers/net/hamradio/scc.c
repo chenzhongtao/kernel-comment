@@ -148,7 +148,6 @@
 
 /* ----------------------------------------------------------------------- */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
@@ -175,6 +174,7 @@
 #include <linux/seq_file.h>
 #include <linux/bitops.h>
 
+#include <net/net_namespace.h>
 #include <net/ax25.h>
 
 #include <asm/irq.h>
@@ -201,7 +201,7 @@ static void z8530_init(void);
 
 static void init_channel(struct scc_channel *scc);
 static void scc_key_trx (struct scc_channel *scc, char tx);
-static irqreturn_t scc_isr(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t scc_isr(int irq, void *dev_id);
 static void scc_init_timer(struct scc_channel *scc);
 
 static int scc_net_alloc(const char *name, struct scc_channel *scc);
@@ -304,7 +304,7 @@ static inline void scc_discard_buffers(struct scc_channel *scc)
 		scc->tx_buff = NULL;
 	}
 	
-	while (skb_queue_len(&scc->tx_queue))
+	while (!skb_queue_empty(&scc->tx_queue))
 		dev_kfree_skb(skb_dequeue(&scc->tx_queue));
 
 	spin_unlock_irqrestore(&scc->lock, flags);
@@ -627,7 +627,7 @@ static void scc_isr_dispatch(struct scc_channel *scc, int vector)
 
 #define SCC_IRQTIMEOUT 30000
 
-static irqreturn_t scc_isr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t scc_isr(int irq, void *dev_id)
 {
 	unsigned char vector;	
 	struct scc_channel *scc;
@@ -1126,8 +1126,7 @@ static void t_dwait(unsigned long channel)
 	
 	if (scc->stat.tx_state == TXS_WAIT)	/* maxkeyup or idle timeout */
 	{
-		if (skb_queue_len(&scc->tx_queue) == 0)	/* nothing to send */
-		{
+		if (skb_queue_empty(&scc->tx_queue)) {	/* nothing to send */
 			scc->stat.tx_state = TXS_IDLE;
 			netif_wake_queue(scc->dev);	/* t_maxkeyup locked it. */
 			return;
@@ -1542,31 +1541,25 @@ static int scc_net_alloc(const char *name, struct scc_channel *scc)
 /* *			    Network driver methods		      * */
 /* ******************************************************************** */
 
-static unsigned char ax25_bcast[AX25_ADDR_LEN] =
-{'Q' << 1, 'S' << 1, 'T' << 1, ' ' << 1, ' ' << 1, ' ' << 1, '0' << 1};
-static unsigned char ax25_nocall[AX25_ADDR_LEN] =
-{'L' << 1, 'I' << 1, 'N' << 1, 'U' << 1, 'X' << 1, ' ' << 1, '1' << 1};
-
 /* ----> Initialize device <----- */
 
 static void scc_net_setup(struct net_device *dev)
 {
-	SET_MODULE_OWNER(dev);
 	dev->tx_queue_len    = 16;	/* should be enough... */
 
 	dev->open            = scc_net_open;
 	dev->stop	     = scc_net_close;
 
 	dev->hard_start_xmit = scc_net_tx;
-	dev->hard_header     = ax25_encapsulate;
-	dev->rebuild_header  = ax25_rebuild_header;
+	dev->header_ops      = &ax25_header_ops;
+
 	dev->set_mac_address = scc_net_set_mac_address;
 	dev->get_stats       = scc_net_get_stats;
 	dev->do_ioctl        = scc_net_ioctl;
 	dev->tx_timeout      = NULL;
 
-	memcpy(dev->broadcast, ax25_bcast,  AX25_ADDR_LEN);
-	memcpy(dev->dev_addr,  ax25_nocall, AX25_ADDR_LEN);
+	memcpy(dev->broadcast, &ax25_bcast,  AX25_ADDR_LEN);
+	memcpy(dev->dev_addr,  &ax25_defaddr, AX25_ADDR_LEN);
  
 	dev->flags      = 0;
 
@@ -1630,10 +1623,7 @@ static void scc_net_rx(struct scc_channel *scc, struct sk_buff *skb)
 	scc->dev_stat.rx_packets++;
 	scc->dev_stat.rx_bytes += skb->len;
 
-	skb->dev      = scc->dev;
-	skb->protocol = htons(ETH_P_AX25);
-	skb->mac.raw  = skb->data;
-	skb->pkt_type = PACKET_HOST;
+	skb->protocol = ax25_type_trans(skb, scc->dev);
 	
 	netif_rx(skb);
 	scc->dev->last_rx = jiffies;
@@ -1742,7 +1732,7 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 				
 			if (!Ivec[hwcfg.irq].used && hwcfg.irq)
 			{
-				if (request_irq(hwcfg.irq, scc_isr, SA_INTERRUPT, "AX.25 SCC", NULL))
+				if (request_irq(hwcfg.irq, scc_isr, IRQF_DISABLED, "AX.25 SCC", NULL))
 					printk(KERN_WARNING "z8530drv: warning, cannot get IRQ %d\n", hwcfg.irq);
 				else
 					Ivec[hwcfg.irq].used = 1;
@@ -2094,7 +2084,7 @@ static int scc_net_seq_open(struct inode *inode, struct file *file)
 	return seq_open(file, &scc_net_seq_ops);
 }
 
-static struct file_operations scc_net_seq_fops = {
+static const struct file_operations scc_net_seq_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = scc_net_seq_open,
 	.read	 = seq_read,
@@ -2125,7 +2115,7 @@ static int __init scc_init_driver (void)
 	}
 	rtnl_unlock();
 
-	proc_net_fops_create("z8530drv", 0, &scc_net_seq_fops);
+	proc_net_fops_create(&init_net, "z8530drv", 0, &scc_net_seq_fops);
 
 	return 0;
 }
@@ -2180,7 +2170,7 @@ static void __exit scc_cleanup_driver(void)
 	if (Vector_Latch)
 		release_region(Vector_Latch, 1);
 
-	proc_net_remove("z8530drv");
+	proc_net_remove(&init_net, "z8530drv");
 }
 
 MODULE_AUTHOR("Joerg Reuter <jreuter@yaina.de>");

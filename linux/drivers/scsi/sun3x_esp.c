@@ -23,8 +23,6 @@
 #include <asm/dvma.h>
 #include <asm/irq.h>
 
-extern struct NCR_ESP *espchain;
-
 static void dma_barrier(struct NCR_ESP *esp);
 static int  dma_bytes_sent(struct NCR_ESP *esp, int fifo_count);
 static int  dma_can_transfer(struct NCR_ESP *esp, Scsi_Cmnd *sp);
@@ -49,13 +47,13 @@ static void dma_advance_sg (Scsi_Cmnd *sp);
 /* Detecting ESP chips on the machine.  This is the simple and easy
  * version.
  */
-int sun3x_esp_detect(Scsi_Host_Template *tpnt)
+int sun3x_esp_detect(struct scsi_host_template *tpnt)
 {
 	struct NCR_ESP *esp;
 	struct ConfigDev *esp_dev;
 
 	esp_dev = 0;
-	esp = esp_allocate(tpnt, (void *) esp_dev);
+	esp = esp_allocate(tpnt, esp_dev, 0);
 
 	/* Do command transfer with DMA */
 	esp->do_pio_cmds = 0;
@@ -99,7 +97,7 @@ int sun3x_esp_detect(Scsi_Host_Template *tpnt)
 	esp->esp_command_dvma = dvma_vtob((unsigned long)esp->esp_command);
 
 	esp->irq = 2;
-	if (request_irq(esp->irq, esp_intr, SA_INTERRUPT, 
+	if (request_irq(esp->irq, esp_intr, IRQF_DISABLED,
 			"SUN3X SCSI", esp->ehost)) {
 		esp_deallocate(esp);
 		return 0;
@@ -334,11 +332,11 @@ static void dma_mmu_get_scsi_sgl (struct NCR_ESP *esp, Scsi_Cmnd *sp)
     struct scatterlist *sg = sp->SCp.buffer;
 
     while (sz >= 0) {
-	    sg[sz].dvma_address = dvma_map((unsigned long)page_address(sg[sz].page) +
-					   sg[sz].offset, sg[sz].length);
+	    sg[sz].dma_address = dvma_map((unsigned long)sg_virt(&sg[sz]),
+					  sg[sz].length);
 	    sz--;
     }
-    sp->SCp.ptr=(char *)((unsigned long)sp->SCp.buffer->dvma_address);
+    sp->SCp.ptr=(char *)((unsigned long)sp->SCp.buffer->dma_address);
 }
 
 static void dma_mmu_release_scsi_one (struct NCR_ESP *esp, Scsi_Cmnd *sp)
@@ -349,17 +347,17 @@ static void dma_mmu_release_scsi_one (struct NCR_ESP *esp, Scsi_Cmnd *sp)
 static void dma_mmu_release_scsi_sgl (struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
     int sz = sp->use_sg - 1;
-    struct scatterlist *sg = (struct scatterlist *)sp->buffer;
+    struct scatterlist *sg = (struct scatterlist *)sp->request_buffer;
                         
     while(sz >= 0) {
-        dvma_unmap((char *)sg[sz].dvma_address);
+        dvma_unmap((char *)sg[sz].dma_address);
         sz--;
     }
 }
 
 static void dma_advance_sg (Scsi_Cmnd *sp)
 {
-    sp->SCp.ptr = (char *)((unsigned long)sp->SCp.buffer->dvma_address);
+    sp->SCp.ptr = (char *)((unsigned long)sp->SCp.buffer->dma_address);
 }
 
 static int sun3x_esp_release(struct Scsi_Host *instance)
@@ -369,7 +367,7 @@ static int sun3x_esp_release(struct Scsi_Host *instance)
 
 }
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "sun3x_esp",
 	.proc_info		= &esp_proc_info,
 	.name			= "Sun ESP 100/100a/200",

@@ -17,9 +17,8 @@
 #include <asm/smp.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/delay.h>
-#include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 #include <linux/syscalls.h>
@@ -31,8 +30,9 @@
 #include <linux/console.h>
 #include <linux/spinlock.h>
 #include <linux/root_dev.h>
+#include <linux/cpu.h>
+#include <linux/kdebug.h>
 
-#include <asm/segment.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/processor.h>
@@ -41,7 +41,6 @@
 #include <asm/pgtable.h>
 #include <asm/traps.h>
 #include <asm/vaddrs.h>
-#include <asm/kdebug.h>
 #include <asm/mbus.h>
 #include <asm/idprom.h>
 #include <asm/machines.h>
@@ -104,7 +103,6 @@ void prom_sync_me(void)
 
 unsigned int boot_flags __initdata = 0;
 #define BOOTME_DEBUG  0x1
-#define BOOTME_SINGLE 0x2
 
 /* Exported for mm/init.c:paging_init. */
 unsigned long cmdline_memory_size __initdata = 0;
@@ -122,16 +120,6 @@ static struct console prom_debug_console = {
 	.index =	-1,
 };
 
-int obp_system_intr(void)
-{
-	if (boot_flags & BOOTME_DEBUG) {
-		printk("OBP: system interrupted\n");
-		prom_halt();
-		return 1;
-	}
-	return 0;
-}
-
 /* 
  * Process kernel command line switches that are specific to the
  * SPARC or that require special low-level processing.
@@ -143,7 +131,6 @@ static void __init process_switch(char c)
 		boot_flags |= BOOTME_DEBUG;
 		break;
 	case 's':
-		boot_flags |= BOOTME_SINGLE;
 		break;
 	case 'h':
 		prom_printf("boot_flags_init: Halt!\n");
@@ -157,31 +144,6 @@ static void __init process_switch(char c)
 		printk("Unknown boot switch (-%c)\n", c);
 		break;
 	}
-}
-
-static void __init process_console(char *commands)
-{
-	serial_console = 0;
-	commands += 8;
-	/* Linux-style serial */
-	if (!strncmp(commands, "ttyS", 4))
-		serial_console = simple_strtoul(commands + 4, NULL, 10) + 1;
-	else if (!strncmp(commands, "tty", 3)) {
-		char c = *(commands + 3);
-		/* Solaris-style serial */
-		if (c == 'a' || c == 'b')
-			serial_console = c - 'a' + 1;
-		/* else Linux-style fbcon, not serial */
-	}
-#if defined(CONFIG_PROM_CONSOLE)
-	if (!strncmp(commands, "prom", 4)) {
-		char *p;
-
-		for (p = commands - 8; *p && *p != ' '; p++)
-			*p = ' ';
-		conswitchp = &prom_con;
-	}
-#endif
 }
 
 static void __init boot_flags_init(char *commands)
@@ -200,9 +162,7 @@ static void __init boot_flags_init(char *commands)
 				process_switch(*commands++);
 			continue;
 		}
-		if (!strncmp(commands, "console=", 8)) {
-			process_console(commands);
-		} else if (!strncmp(commands, "mem=", 4)) {
+		if (!strncmp(commands, "mem=", 4)) {
 			/*
 			 * "mem=XXX[kKmM] overrides the PROM-reported
 			 * memory size.
@@ -250,8 +210,6 @@ struct tt_entry *sparc_ttable;
 
 struct pt_regs fake_swapper_regs;
 
-extern void paging_init(void);
-
 void __init setup_arch(char **cmdline_p)
 {
 	int i;
@@ -261,7 +219,7 @@ void __init setup_arch(char **cmdline_p)
 
 	/* Initialize PROM console and command line. */
 	*cmdline_p = prom_getbootargs();
-	strcpy(saved_command_line, *cmdline_p);
+	strcpy(boot_command_line, *cmdline_p);
 
 	/* Set sparc_cpu_model */
 	sparc_cpu_model = sun_unknown;
@@ -334,7 +292,7 @@ void __init setup_arch(char **cmdline_p)
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
 	ROOT_DEV = old_decode_dev(root_dev);
-#ifdef CONFIG_BLK_DEV_INITRD
+#ifdef CONFIG_BLK_DEV_RAM
 	rd_image_start = ram_flags & RAMDISK_IMAGE_START_MASK;
 	rd_prompt = ((ram_flags & RAMDISK_PROMPT_FLAG) != 0);
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
@@ -352,45 +310,14 @@ void __init setup_arch(char **cmdline_p)
 	init_task.thread.kregs = &fake_swapper_regs;
 
 	paging_init();
+
+	smp_setup_cpu_possible_map();
 }
-
-static int __init set_preferred_console(void)
-{
-	int idev, odev;
-
-	/* The user has requested a console so this is already set up. */
-	if (serial_console >= 0)
-		return -EBUSY;
-
-	idev = prom_query_input_device();
-	odev = prom_query_output_device();
-	if (idev == PROMDEV_IKBD && odev == PROMDEV_OSCREEN) {
-		serial_console = 0;
-	} else if (idev == PROMDEV_ITTYA && odev == PROMDEV_OTTYA) {
-		serial_console = 1;
-	} else if (idev == PROMDEV_ITTYB && odev == PROMDEV_OTTYB) {
-		serial_console = 2;
-	} else if (idev == PROMDEV_I_UNK && odev == PROMDEV_OTTYA) {
-		prom_printf("MrCoffee ttya\n");
-		serial_console = 1;
-	} else if (idev == PROMDEV_I_UNK && odev == PROMDEV_OSCREEN) {
-		serial_console = 0;
-		prom_printf("MrCoffee keyboard\n");
-	} else {
-		prom_printf("Confusing console (idev %d, odev %d)\n",
-		    idev, odev);
-		serial_console = 1;
-	}
-
-	if (serial_console)
-		return add_preferred_console("ttyS", serial_console - 1, NULL);
-
-	return -ENODEV;
-}
-console_initcall(set_preferred_console);
 
 extern char *sparc_cpu_type;
 extern char *sparc_fpu_type;
+
+static int ncpus_probed;
 
 static int show_cpuinfo(struct seq_file *m, void *__unused)
 {
@@ -414,7 +341,7 @@ static int show_cpuinfo(struct seq_file *m, void *__unused)
 		   romvec->pv_printrev >> 16,
 		   romvec->pv_printrev & 0xffff,
 		   &cputypval,
-		   num_possible_cpus(),
+		   ncpus_probed,
 		   num_online_cpus()
 #ifndef CONFIG_SMP
 		   , cpu_data(0).udelay_val/(500000/HZ),
@@ -452,7 +379,7 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start =c_start,
 	.next =	c_next,
 	.stop =	c_stop,
@@ -472,5 +399,31 @@ void sun_do_break(void)
 	prom_cmdline();
 }
 
-int serial_console = -1;
 int stop_a_enabled = 1;
+
+static int __init topology_init(void)
+{
+	int i, ncpus, err;
+
+	/* Count the number of physically present processors in
+	 * the machine, even on uniprocessor, so that /proc/cpuinfo
+	 * output is consistent with 2.4.x
+	 */
+	ncpus = 0;
+	while (!cpu_find_by_instance(ncpus, NULL, NULL))
+		ncpus++;
+	ncpus_probed = ncpus;
+
+	err = 0;
+	for_each_online_cpu(i) {
+		struct cpu *p = kzalloc(sizeof(*p), GFP_KERNEL);
+		if (!p)
+			err = -ENOMEM;
+		else
+			register_cpu(p, i);
+	}
+
+	return err;
+}
+
+subsys_initcall(topology_init);

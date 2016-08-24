@@ -4,6 +4,7 @@
  */
 
 #include <linux/fs.h>
+#include <linux/file.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
@@ -37,12 +38,12 @@ struct hppfs_inode_info {
 
 static inline struct hppfs_inode_info *HPPFS_I(struct inode *inode)
 {
-	return(list_entry(inode, struct hppfs_inode_info, vfs_inode));
+	return container_of(inode, struct hppfs_inode_info, vfs_inode);
 }
 
 #define HPPFS_SUPER_MAGIC 0xb00000ee
 
-static struct super_operations hppfs_sbops;
+static const struct super_operations hppfs_sbops;
 
 static int is_pid(struct dentry *dentry)
 {
@@ -151,7 +152,6 @@ static void hppfs_read_inode(struct inode *ino)
 	ino->i_mode = proc_ino->i_mode;
 	ino->i_nlink = proc_ino->i_nlink;
 	ino->i_size = proc_ino->i_size;
-	ino->i_blksize = proc_ino->i_blksize;
 	ino->i_blocks = proc_ino->i_blocks;
 }
 
@@ -170,12 +170,12 @@ static struct dentry *hppfs_lookup(struct inode *ino, struct dentry *dentry,
 
 	err = -ENOMEM;
 	parent = HPPFS_I(ino)->proc_dentry;
-	down(&parent->d_inode->i_sem);
+	mutex_lock(&parent->d_inode->i_mutex);
 	proc_dentry = d_lookup(parent, &dentry->d_name);
 	if(proc_dentry == NULL){
 		proc_dentry = d_alloc(parent, &dentry->d_name);
 		if(proc_dentry == NULL){
-			up(&parent->d_inode->i_sem);
+			mutex_unlock(&parent->d_inode->i_mutex);
 			goto out;
 		}
 		new = (*parent->d_inode->i_op->lookup)(parent->d_inode,
@@ -185,7 +185,7 @@ static struct dentry *hppfs_lookup(struct inode *ino, struct dentry *dentry,
 			proc_dentry = new;
 		}
 	}
-	up(&parent->d_inode->i_sem);
+	mutex_unlock(&parent->d_inode->i_mutex);
 
 	if(IS_ERR(proc_dentry))
 		return(proc_dentry);
@@ -212,16 +212,16 @@ static struct dentry *hppfs_lookup(struct inode *ino, struct dentry *dentry,
 	return(ERR_PTR(err));
 }
 
-static struct inode_operations hppfs_file_iops = {
+static const struct inode_operations hppfs_file_iops = {
 };
 
-static ssize_t read_proc(struct file *file, char *buf, ssize_t count,
+static ssize_t read_proc(struct file *file, char __user *buf, ssize_t count,
 			 loff_t *ppos, int is_user)
 {
-	ssize_t (*read)(struct file *, char *, size_t, loff_t *);
+	ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
 	ssize_t n;
 
-	read = file->f_dentry->d_inode->i_fop->read;
+	read = file->f_path.dentry->d_inode->i_fop->read;
 
 	if(!is_user)
 		set_fs(KERNEL_DS);
@@ -232,10 +232,10 @@ static ssize_t read_proc(struct file *file, char *buf, ssize_t count,
 		set_fs(USER_DS);
 
 	if(ppos) *ppos = file->f_pos;
-	return(n);
+	return n;
 }
 
-static ssize_t hppfs_read_file(int fd, char *buf, ssize_t count)
+static ssize_t hppfs_read_file(int fd, char __user *buf, ssize_t count)
 {
 	ssize_t n;
 	int cur, err;
@@ -253,7 +253,7 @@ static ssize_t hppfs_read_file(int fd, char *buf, ssize_t count)
 		err = os_read_file(fd, new_buf, cur);
 		if(err < 0){
 			printk("hppfs_read : read failed, errno = %d\n",
-			       count);
+			       err);
 			n = err;
 			goto out_free;
 		}
@@ -270,10 +270,10 @@ static ssize_t hppfs_read_file(int fd, char *buf, ssize_t count)
  out_free:
 	kfree(new_buf);
  out:
-	return(n);
+	return n;
 }
 
-static ssize_t hppfs_read(struct file *file, char *buf, size_t count,
+static ssize_t hppfs_read(struct file *file, char __user *buf, size_t count,
 			  loff_t *ppos)
 {
 	struct hppfs_private *hppfs = file->private_data;
@@ -312,15 +312,15 @@ static ssize_t hppfs_read(struct file *file, char *buf, size_t count,
 	return(count);
 }
 
-static ssize_t hppfs_write(struct file *file, const char *buf, size_t len,
+static ssize_t hppfs_write(struct file *file, const char __user *buf, size_t len,
 			   loff_t *ppos)
 {
 	struct hppfs_private *data = file->private_data;
 	struct file *proc_file = data->proc_file;
-	ssize_t (*write)(struct file *, const char *, size_t, loff_t *);
+	ssize_t (*write)(struct file *, const char __user *, size_t, loff_t *);
 	int err;
 
-	write = proc_file->f_dentry->d_inode->i_fop->write;
+	write = proc_file->f_path.dentry->d_inode->i_fop->write;
 
 	proc_file->f_pos = file->f_pos;
 	err = (*write)(proc_file, buf, len, &proc_file->f_pos);
@@ -464,7 +464,7 @@ static int hppfs_open(struct inode *inode, struct file *file)
 	if(data == NULL)
 		goto out;
 
-	host_file = dentry_name(file->f_dentry, strlen("/rw"));
+	host_file = dentry_name(file->f_path.dentry, strlen("/rw"));
 	if(host_file == NULL)
 		goto out_free2;
 
@@ -491,7 +491,7 @@ static int hppfs_open(struct inode *inode, struct file *file)
 		fd = open_host_sock(host_file, &filter);
 		if(fd > 0){
 			data->contents = hppfs_get_data(fd, filter,
-							&data->proc_file,
+							data->proc_file,
 							file, &data->len);
 			if(!IS_ERR(data->contents))
 				data->host_fd = fd;
@@ -543,11 +543,11 @@ static int hppfs_dir_open(struct inode *inode, struct file *file)
 static loff_t hppfs_llseek(struct file *file, loff_t off, int where)
 {
 	struct hppfs_private *data = file->private_data;
-	struct file *proc_file = &data->proc_file;
+	struct file *proc_file = data->proc_file;
 	loff_t (*llseek)(struct file *, loff_t, int);
 	loff_t ret;
 
-	llseek = proc_file->f_dentry->d_inode->i_fop->llseek;
+	llseek = proc_file->f_path.dentry->d_inode->i_fop->llseek;
 	if(llseek != NULL){
 		ret = (*llseek)(proc_file, off, where);
 		if(ret < 0)
@@ -557,7 +557,7 @@ static loff_t hppfs_llseek(struct file *file, loff_t off, int where)
 	return(default_llseek(file, off, where));
 }
 
-static struct file_operations hppfs_file_fops = {
+static const struct file_operations hppfs_file_fops = {
 	.owner		= NULL,
 	.llseek		= hppfs_llseek,
 	.read		= hppfs_read,
@@ -572,7 +572,7 @@ struct hppfs_dirent {
 };
 
 static int hppfs_filldir(void *d, const char *name, int size,
-			 loff_t offset, ino_t inode, unsigned int type)
+			 loff_t offset, u64 inode, unsigned int type)
 {
 	struct hppfs_dirent *dirent = d;
 
@@ -586,15 +586,15 @@ static int hppfs_filldir(void *d, const char *name, int size,
 static int hppfs_readdir(struct file *file, void *ent, filldir_t filldir)
 {
 	struct hppfs_private *data = file->private_data;
-	struct file *proc_file = &data->proc_file;
+	struct file *proc_file = data->proc_file;
 	int (*readdir)(struct file *, void *, filldir_t);
 	struct hppfs_dirent dirent = ((struct hppfs_dirent)
 		                      { .vfs_dirent  	= ent,
 					.filldir 	= filldir,
-					.dentry  	= file->f_dentry } );
+					.dentry  	= file->f_path.dentry } );
 	int err;
 
-	readdir = proc_file->f_dentry->d_inode->i_fop->readdir;
+	readdir = proc_file->f_path.dentry->d_inode->i_fop->readdir;
 
 	proc_file->f_pos = file->f_pos;
 	err = (*readdir)(proc_file, &dirent, hppfs_filldir);
@@ -608,14 +608,14 @@ static int hppfs_fsync(struct file *file, struct dentry *dentry, int datasync)
 	return(0);
 }
 
-static struct file_operations hppfs_dir_fops = {
+static const struct file_operations hppfs_dir_fops = {
 	.owner		= NULL,
 	.readdir	= hppfs_readdir,
 	.open		= hppfs_dir_open,
 	.fsync		= hppfs_fsync,
 };
 
-static int hppfs_statfs(struct super_block *sb, struct kstatfs *sf)
+static int hppfs_statfs(struct dentry *dentry, struct kstatfs *sf)
 {
 	sf->f_blocks = 0;
 	sf->f_bfree = 0;
@@ -649,7 +649,7 @@ static void hppfs_destroy_inode(struct inode *inode)
 	kfree(HPPFS_I(inode));
 }
 
-static struct super_operations hppfs_sbops = {
+static const struct super_operations hppfs_sbops = {
 	.alloc_inode	= hppfs_alloc_inode,
 	.destroy_inode	= hppfs_destroy_inode,
 	.read_inode	= hppfs_read_inode,
@@ -657,53 +657,47 @@ static struct super_operations hppfs_sbops = {
 	.statfs		= hppfs_statfs,
 };
 
-static int hppfs_readlink(struct dentry *dentry, char *buffer, int buflen)
+static int hppfs_readlink(struct dentry *dentry, char __user *buffer, int buflen)
 {
 	struct file *proc_file;
 	struct dentry *proc_dentry;
-	int (*readlink)(struct dentry *, char *, int);
-	int err, n;
+	int ret;
 
 	proc_dentry = HPPFS_I(dentry->d_inode)->proc_dentry;
 	proc_file = dentry_open(dget(proc_dentry), NULL, O_RDONLY);
-	err = PTR_ERR(proc_dentry);
-	if(IS_ERR(proc_dentry))
-		return(err);
+	if (IS_ERR(proc_file))
+		return PTR_ERR(proc_file);
 
-	readlink = proc_dentry->d_inode->i_op->readlink;
-	n = (*readlink)(proc_dentry, buffer, buflen);
+	ret = proc_dentry->d_inode->i_op->readlink(proc_dentry, buffer, buflen);
 
 	fput(proc_file);
 
-	return(n);
+	return ret;
 }
 
-static int hppfs_follow_link(struct dentry *dentry, struct nameidata *nd)
+static void* hppfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct file *proc_file;
 	struct dentry *proc_dentry;
-	int (*follow_link)(struct dentry *, struct nameidata *);
-	int err, n;
+	void *ret;
 
 	proc_dentry = HPPFS_I(dentry->d_inode)->proc_dentry;
 	proc_file = dentry_open(dget(proc_dentry), NULL, O_RDONLY);
-	err = PTR_ERR(proc_dentry);
-	if(IS_ERR(proc_dentry))
-		return(err);
+	if (IS_ERR(proc_file))
+		return proc_file;
 
-	follow_link = proc_dentry->d_inode->i_op->follow_link;
-	n = (*follow_link)(proc_dentry, nd);
+	ret = proc_dentry->d_inode->i_op->follow_link(proc_dentry, nd);
 
 	fput(proc_file);
 
-	return(n);
+	return ret;
 }
 
-static struct inode_operations hppfs_dir_iops = {
+static const struct inode_operations hppfs_dir_iops = {
 	.lookup		= hppfs_lookup,
 };
 
-static struct inode_operations hppfs_link_iops = {
+static const struct inode_operations hppfs_link_iops = {
 	.readlink	= hppfs_readlink,
 	.follow_link	= hppfs_follow_link,
 };
@@ -774,11 +768,11 @@ static int hppfs_fill_super(struct super_block *sb, void *d, int silent)
 	return(err);
 }
 
-static struct super_block *hppfs_read_super(struct file_system_type *type,
-					     int flags, const char *dev_name,
-					     void *data)
+static int hppfs_read_super(struct file_system_type *type,
+			    int flags, const char *dev_name,
+			    void *data, struct vfsmount *mnt)
 {
-	return(get_sb_nodev(type, flags, data, hppfs_fill_super));
+	return get_sb_nodev(type, flags, data, hppfs_fill_super, mnt);
 }
 
 static struct file_system_type hppfs_type = {

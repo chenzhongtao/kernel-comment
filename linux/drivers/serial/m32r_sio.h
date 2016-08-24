@@ -15,7 +15,6 @@
  * (at your option) any later version.
  */
 
-#include <linux/config.h>
 
 struct m32r_sio_probe {
 	struct module	*owner;
@@ -36,9 +35,8 @@ struct old_serial_port {
 	unsigned int port;
 	unsigned int irq;
 	unsigned int flags;
-	unsigned char hub6;
 	unsigned char io_type;
-	unsigned char *iomem_base;
+	unsigned char __iomem *iomem_base;
 	unsigned short iomem_reg_shift;
 };
 
@@ -48,9 +46,3 @@ struct old_serial_port {
 #define PROBE_ANY	(~0)
 
 #define HIGH_BITS_OFFSET ((sizeof(long)-sizeof(int))*8)
-
-#ifdef CONFIG_SERIAL_SIO_SHARE_IRQ
-#define M32R_SIO_SHARE_IRQS 1
-#else
-#define M32R_SIO_SHARE_IRQS 0
-#endif

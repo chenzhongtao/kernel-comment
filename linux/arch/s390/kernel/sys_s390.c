@@ -16,8 +16,8 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
@@ -26,12 +26,11 @@
 #include <linux/mman.h>
 #include <linux/file.h>
 #include <linux/utsname.h>
-#ifdef CONFIG_ARCH_S390X
 #include <linux/personality.h>
-#endif /* CONFIG_ARCH_S390X */
+#include <linux/unistd.h>
+#include <linux/ipc.h>
 
 #include <asm/uaccess.h>
-#include <asm/ipc.h>
 
 /*
  * sys_pipe() is the normal C calling standard for creating
@@ -121,11 +120,11 @@ out:
 	return error;
 }
 
-#ifndef CONFIG_ARCH_S390X
+#ifndef CONFIG_64BIT
 struct sel_arg_struct {
 	unsigned long n;
-	fd_set *inp, *outp, *exp;
-	struct timeval *tvp;
+	fd_set __user *inp, *outp, *exp;
+	struct timeval __user *tvp;
 };
 
 asmlinkage long old_select(struct sel_arg_struct __user *arg)
@@ -138,7 +137,7 @@ asmlinkage long old_select(struct sel_arg_struct __user *arg)
 	return sys_select(a.n, a.inp, a.outp, a.exp, a.tvp);
 
 }
-#endif /* CONFIG_ARCH_S390X */
+#endif /* CONFIG_64BIT */
 
 /*
  * sys_ipc() is the de-multiplexer for the SysV IPC calls..
@@ -211,7 +210,7 @@ asmlinkage long sys_ipc(uint call, int first, unsigned long second,
 	return -EINVAL;
 }
 
-#ifdef CONFIG_ARCH_S390X
+#ifdef CONFIG_64BIT
 asmlinkage long s390x_newuname(struct new_utsname __user *name)
 {
 	int ret = sys_newuname(name);
@@ -235,12 +234,12 @@ asmlinkage long s390x_personality(unsigned long personality)
 
 	return ret;
 }
-#endif /* CONFIG_ARCH_S390X */
+#endif /* CONFIG_64BIT */
 
 /*
  * Wrapper function for sys_fadvise64/fadvise64_64
  */
-#ifndef CONFIG_ARCH_S390X
+#ifndef CONFIG_64BIT
 
 asmlinkage long
 s390_fadvise64(int fd, u32 offset_high, u32 offset_low, size_t len, int advice)
@@ -268,3 +267,22 @@ s390_fadvise64_64(struct fadvise64_64_args __user *args)
 	return sys_fadvise64_64(a.fd, a.offset, a.len, a.advice);
 }
 
+#ifndef CONFIG_64BIT
+/*
+ * This is a wrapper to call sys_fallocate(). For 31 bit s390 the last
+ * 64 bit argument "len" is split into the upper and lower 32 bits. The
+ * system call wrapper in the user space loads the value to %r6/%r7.
+ * The code in entry.S keeps the values in %r2 - %r6 where they are and
+ * stores %r7 to 96(%r15). But the standard C linkage requires that
+ * the whole 64 bit value for len is stored on the stack and doesn't
+ * use %r6 at all. So s390_fallocate has to convert the arguments from
+ *   %r2: fd, %r3: mode, %r4/%r5: offset, %r6/96(%r15)-99(%r15): len
+ * to
+ *   %r2: fd, %r3: mode, %r4/%r5: offset, 96(%r15)-103(%r15): len
+ */
+asmlinkage long s390_fallocate(int fd, int mode, loff_t offset,
+			       u32 len_high, u32 len_low)
+{
+	return sys_fallocate(fd, mode, offset, ((u64)len_high << 32) | len_low);
+}
+#endif

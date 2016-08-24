@@ -15,11 +15,9 @@
  *     and Paul Mackerras (paulus@cs.anu.edu.au).
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/syscalls.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
@@ -32,8 +30,8 @@
 #include <linux/file.h>
 
 #include <asm/uaccess.h>
-#include <asm/ipc.h>
 #include <asm/semaphore.h>
+#include <asm/unistd.h>
 
 /*
  * sys_ipc() is the de-multiplexer for the SysV IPC calls..
@@ -62,7 +60,7 @@ sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
 
 		if (!ptr)
 			break;
-		if ((ret = verify_area (VERIFY_READ, ptr, sizeof(long)))
+		if ((ret = access_ok(VERIFY_READ, ptr, sizeof(long)) ? 0 : -EFAULT)
 		    || (ret = get_user(fourth.__pad, (void **)ptr)))
 			break;
 		ret = sys_semctl (first, second, third, fourth);
@@ -78,7 +76,7 @@ sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
 
 			if (!ptr)
 				break;
-			if ((ret = verify_area (VERIFY_READ, ptr, sizeof(tmp)))
+			if ((ret = access_ok(VERIFY_READ, ptr, sizeof(tmp)) ? 0 : -EFAULT)
 			    || (ret = copy_from_user(&tmp,
 						(struct ipc_kludge *) ptr,
 						sizeof (tmp))))
@@ -104,8 +102,8 @@ sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
 		default: {
 			ulong raddr;
 
-			if ((ret = verify_area(VERIFY_WRITE, (ulong*) third,
-					       sizeof(ulong))))
+			if ((ret = access_ok(VERIFY_WRITE, (ulong*) third,
+					       sizeof(ulong)) ? 0 : -EFAULT))
 				break;
 			ret = do_shmat (first, (char *) ptr, second, &raddr);
 			if (ret)
@@ -194,4 +192,23 @@ unsigned long sys_mmap (unsigned long addr, size_t len,
 	err = do_mmap2 (addr, len, prot, flags, fd, offset >> PAGE_SHIFT);
 out:
 	return err;
+}
+
+/*
+ * Do a system call from kernel instead of calling sys_execve so we
+ * end up with proper pt_regs.
+ */
+int kernel_execve(const char *filename, char *const argv[], char *const envp[])
+{
+	register char *__a __asm__ ("r6") = filename;
+	register void *__b __asm__ ("r7") = argv;
+	register void *__c __asm__ ("r8") = envp;
+	register unsigned long __syscall __asm__ ("r12") = __NR_execve;
+	register unsigned long __ret __asm__ ("r10");
+	__asm__ __volatile__ ("trap 0"
+			: "=r" (__ret), "=r" (__syscall)
+			: "1" (__syscall), "r" (__a), "r" (__b), "r" (__c)
+			: "r1", "r5", "r11", "r13", "r14",
+			  "r15", "r16", "r17", "r18", "r19");
+	return __ret;
 }

@@ -158,28 +158,6 @@ extern void prom_putchar(char character);
 extern void prom_printf(char *fmt, ...);
 extern void prom_write(const char *buf, unsigned int len);
 
-/* Query for input device type */
-
-enum prom_input_device {
-	PROMDEV_IKBD,			/* input from keyboard */
-	PROMDEV_ITTYA,			/* input from ttya */
-	PROMDEV_ITTYB,			/* input from ttyb */
-	PROMDEV_I_UNK,
-};
-
-extern enum prom_input_device prom_query_input_device(void);
-
-/* Query for output device type */
-
-enum prom_output_device {
-	PROMDEV_OSCREEN,		/* to screen */
-	PROMDEV_OTTYA,			/* to ttya */
-	PROMDEV_OTTYB,			/* to ttyb */
-	PROMDEV_O_UNK,
-};
-
-extern enum prom_output_device prom_query_output_device(void);
-
 /* Multiprocessor operations... */
 
 /* Start the CPU with the given device tree node, context table, and context
@@ -262,11 +240,6 @@ extern void prom_getstring(int node, char *prop, char *buf, int bufsize);
 
 /* Does the passed node have the given "name"? YES=1 NO=0 */
 extern int prom_nodematch(int thisnode, char *name);
-
-/* Puts in buffer a prom name in the form name@x,y or name (x for which_io 
- * and y for first regs phys address
- */
-extern int prom_getname(int node, char *buf, int buflen);
 
 /* Search all siblings starting at the passed node for "name" matching
  * the given string.  Returns the node on success, zero on failure.

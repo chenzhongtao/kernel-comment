@@ -1,7 +1,6 @@
 #ifndef _ASM_M32R_TLBFLUSH_H
 #define _ASM_M32R_TLBFLUSH_H
 
-#include <linux/config.h>
 #include <asm/m32r.h>
 
 /*
@@ -13,7 +12,6 @@
  *  - flush_tlb_page(vma, vmaddr) flushes one page
  *  - flush_tlb_range(vma, start, end) flushes a range of pages
  *  - flush_tlb_kernel_range(start, end) flushes a range of kernel pages
- *  - flush_tlb_pgtables(mm, start, end) flushes a range of page tables
  */
 
 extern void local_flush_tlb_all(void);
@@ -94,9 +92,6 @@ static __inline__ void __flush_tlb_all(void)
 	);
 }
 
-#define flush_tlb_pgtables(mm, start, end)	do { } while (0)
-
 extern void update_mmu_cache(struct vm_area_struct *, unsigned long, pte_t);
 
 #endif	/* _ASM_M32R_TLBFLUSH_H */
-

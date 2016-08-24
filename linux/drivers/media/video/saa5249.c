@@ -56,6 +56,9 @@
 #include <linux/i2c.h>
 #include <linux/videotext.h>
 #include <linux/videodev.h>
+#include <media/v4l2-common.h>
+#include <linux/mutex.h>
+
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -69,7 +72,7 @@
 #define NUM_BUFS 8
 #define IF_NAME "SAA5249"
 
-static const int disp_modes[8][3] = 
+static const int disp_modes[8][3] =
 {
 	{ 0x46, 0x03, 0x03 },	/* DISPOFF */
 	{ 0x46, 0xcc, 0xcc },	/* DISPNORM */
@@ -83,9 +86,9 @@ static const int disp_modes[8][3] =
 
 
 
-#define PAGE_WAIT (300*HZ/1000)			/* Time between requesting page and */
+#define PAGE_WAIT    msecs_to_jiffies(300)	/* Time between requesting page and */
 						/* checking status bits */
-#define PGBUF_EXPIRE (15*HZ)			/* Time to wait before retransmitting */
+#define PGBUF_EXPIRE msecs_to_jiffies(15000)	/* Time to wait before retransmitting */
 						/* page regardless of infobits */
 typedef struct {
 	u8 pgbuf[VTX_VIRTUALSIZE];		/* Page-buffer */
@@ -105,15 +108,15 @@ struct saa5249_device
 	int disp_mode;
 	int virtual_mode;
 	struct i2c_client *client;
-	struct semaphore lock;
+	struct mutex lock;
 };
 
 
 #define CCTWR 34		/* I²C write/read-address of vtx-chip */
 #define CCTRD 35
 #define NOACK_REPEAT 10		/* Retry access this many times on failure */
-#define CLEAR_DELAY (HZ/20)	/* Time required to clear a page */
-#define READY_TIMEOUT (30*HZ/1000)	/* Time to wait for ready signal of I²C-bus interface */
+#define CLEAR_DELAY   msecs_to_jiffies(50)	/* Time required to clear a page */
+#define READY_TIMEOUT msecs_to_jiffies(30)	/* Time to wait for ready signal of I2C-bus interface */
 #define INIT_DELAY 500		/* Time in usec to wait at initialization of CEA interface */
 #define START_DELAY 10		/* Time in usec to wait before starting write-cycle (CEA) */
 
@@ -121,30 +124,13 @@ struct saa5249_device
 
 /* General defines and debugging support */
 
-#ifndef FALSE
-#define FALSE 0
-#define TRUE 1
-#endif
-
 #define RESCHED do { cond_resched(); } while(0)
 
 static struct video_device saa_template;	/* Declared near bottom */
 
 /* Addresses to scan */
 static unsigned short normal_i2c[] = {34>>1,I2C_CLIENT_END};
-static unsigned short normal_i2c_range[] = {I2C_CLIENT_END};
-static unsigned short probe[2]        = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short probe_range[2]  = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short ignore[2]       = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short ignore_range[2] = { I2C_CLIENT_END, I2C_CLIENT_END };
-static unsigned short force[2]        = { I2C_CLIENT_END, I2C_CLIENT_END };
-
-static struct i2c_client_address_data addr_data = {
-	normal_i2c, normal_i2c_range, 
-	probe, probe_range, 
-	ignore, ignore_range, 
-	force
-};
+I2C_CLIENT_INSMOD;
 
 static struct i2c_client client_template;
 
@@ -160,24 +146,23 @@ static int saa5249_attach(struct i2c_adapter *adap, int addr, int kind)
 	client=kmalloc(sizeof(*client), GFP_KERNEL);
 	if(client==NULL)
 		return -ENOMEM;
-        client_template.adapter = adap;
-        client_template.addr = addr;
+	client_template.adapter = adap;
+	client_template.addr = addr;
 	memcpy(client, &client_template, sizeof(*client));
-	t = kmalloc(sizeof(*t), GFP_KERNEL);
+	t = kzalloc(sizeof(*t), GFP_KERNEL);
 	if(t==NULL)
 	{
 		kfree(client);
 		return -ENOMEM;
 	}
-	memset(t, 0, sizeof(*t));
 	strlcpy(client->name, IF_NAME, I2C_NAME_SIZE);
-	init_MUTEX(&t->lock);
-	
+	mutex_init(&t->lock);
+
 	/*
 	 *	Now create a video4linux device
 	 */
-	 
-	vd = (struct video_device *)kmalloc(sizeof(struct video_device), GFP_KERNEL);
+
+	vd = kmalloc(sizeof(struct video_device), GFP_KERNEL);
 	if(vd==NULL)
 	{
 		kfree(t);
@@ -186,20 +171,20 @@ static int saa5249_attach(struct i2c_adapter *adap, int addr, int kind)
 	}
 	i2c_set_clientdata(client, vd);
 	memcpy(vd, &saa_template, sizeof(*vd));
-		
-	for (pgbuf = 0; pgbuf < NUM_DAUS; pgbuf++) 
+
+	for (pgbuf = 0; pgbuf < NUM_DAUS; pgbuf++)
 	{
 		memset(t->vdau[pgbuf].pgbuf, ' ', sizeof(t->vdau[0].pgbuf));
 		memset(t->vdau[pgbuf].sregs, 0, sizeof(t->vdau[0].sregs));
 		memset(t->vdau[pgbuf].laststat, 0, sizeof(t->vdau[0].laststat));
 		t->vdau[pgbuf].expire = 0;
-		t->vdau[pgbuf].clrfound = TRUE;
-		t->vdau[pgbuf].stopped = TRUE;
-		t->is_searching[pgbuf] = FALSE;
+		t->vdau[pgbuf].clrfound = true;
+		t->vdau[pgbuf].stopped = true;
+		t->is_searching[pgbuf] = false;
 	}
-	vd->priv=t;	
-	 
-	
+	vd->priv=t;
+
+
 	/*
 	 *	Register it
 	 */
@@ -219,7 +204,7 @@ static int saa5249_attach(struct i2c_adapter *adap, int addr, int kind)
 /*
  *	We do most of the hard work when we become a device on the i2c.
  */
- 
+
 static int saa5249_probe(struct i2c_adapter *adap)
 {
 	if (adap->class & I2C_CLASS_TV_ANALOG)
@@ -238,27 +223,19 @@ static int saa5249_detach(struct i2c_client *client)
 	return 0;
 }
 
-static int saa5249_command(struct i2c_client *device,
-			     unsigned int cmd, void *arg)
-{
-	return -EINVAL;
-}
-
 /* new I2C driver support */
 
-static struct i2c_driver i2c_driver_videotext = 
+static struct i2c_driver i2c_driver_videotext =
 {
-	.owner 		= THIS_MODULE,
-	.name 		= IF_NAME,		/* name */
+	.driver = {
+		.name 	= IF_NAME,		/* name */
+	},
 	.id 		= I2C_DRIVERID_SAA5249, /* in i2c.h */
-	.flags 		= I2C_DF_NOTIFY,
 	.attach_adapter = saa5249_probe,
 	.detach_client  = saa5249_detach,
-	.command 	= saa5249_command
 };
 
 static struct i2c_client client_template = {
-	.id 		= -1,
 	.driver		= &i2c_driver_videotext,
 	.name		= "(unset)",
 };
@@ -268,7 +245,7 @@ static struct i2c_client client_template = {
  *	delay may be longer.
  */
 
-static void jdelay(unsigned long delay) 
+static void jdelay(unsigned long delay)
 {
 	sigset_t oldblocked = current->blocked;
 
@@ -288,14 +265,14 @@ static void jdelay(unsigned long delay)
 /*
  *	I2C interfaces
  */
- 
-static int i2c_sendbuf(struct saa5249_device *t, int reg, int count, u8 *data) 
+
+static int i2c_sendbuf(struct saa5249_device *t, int reg, int count, u8 *data)
 {
 	char buf[64];
-	
+
 	buf[0] = reg;
 	memcpy(buf+1, data, count);
-	
+
 	if(i2c_master_send(t->client, buf, count+1)==count+1)
 		return 0;
 	return -1;
@@ -305,22 +282,24 @@ static int i2c_senddata(struct saa5249_device *t, ...)
 {
 	unsigned char buf[64];
 	int v;
-	int ct=0;
+	int ct = 0;
 	va_list argp;
 	va_start(argp,t);
-	
-	while((v=va_arg(argp,int))!=-1)
-		buf[ct++]=v;
+
+	while ((v = va_arg(argp, int)) != -1)
+		buf[ct++] = v;
+
+	va_end(argp);
 	return i2c_sendbuf(t, buf[0], ct-1, buf+1);
 }
 
-/* Get count number of bytes from I²C-device at address adr, store them in buf. Start & stop
+/* Get count number of bytes from IÂ²C-device at address adr, store them in buf. Start & stop
  * handshaking is done by this routine, ack will be sent after the last byte to inhibit further
- * sending of data. If uaccess is TRUE, data is written to user-space with put_user.
- * Returns -1 if I²C-device didn't send acknowledge, 0 otherwise
+ * sending of data. If uaccess is 'true', data is written to user-space with put_user.
+ * Returns -1 if IÂ²C-device didn't send acknowledge, 0 otherwise
  */
 
-static int i2c_getdata(struct saa5249_device *t, int count, u8 *buf) 
+static int i2c_getdata(struct saa5249_device *t, int count, u8 *buf)
 {
 	if(i2c_master_recv(t->client, buf, count)!=count)
 		return -1;
@@ -335,13 +314,13 @@ static int i2c_getdata(struct saa5249_device *t, int count, u8 *buf)
 static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			    unsigned int cmd, void *arg)
 {
-	static int virtual_mode = FALSE;
+	static int virtual_mode = false;
 	struct video_device *vd = video_devdata(file);
 	struct saa5249_device *t=vd->priv;
 
-	switch(cmd) 
+	switch(cmd)
 	{
-		case VTXIOCGETINFO: 
+		case VTXIOCGETINFO:
 		{
 			vtx_info_t *info = arg;
 			info->version_major = VTX_VER_MAJ;
@@ -351,28 +330,28 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			return 0;
 		}
 
-		case VTXIOCCLRPAGE: 
+		case VTXIOCCLRPAGE:
 		{
 			vtx_pagereq_t *req = arg;
-      
+
 			if (req->pgbuf < 0 || req->pgbuf >= NUM_DAUS)
 				return -EINVAL;
 			memset(t->vdau[req->pgbuf].pgbuf, ' ', sizeof(t->vdau[0].pgbuf));
-			t->vdau[req->pgbuf].clrfound = TRUE;
+			t->vdau[req->pgbuf].clrfound = true;
 			return 0;
 		}
 
-		case VTXIOCCLRFOUND: 
+		case VTXIOCCLRFOUND:
 		{
 			vtx_pagereq_t *req = arg;
-      
+
 			if (req->pgbuf < 0 || req->pgbuf >= NUM_DAUS)
 				return -EINVAL;
-			t->vdau[req->pgbuf].clrfound = TRUE;
+			t->vdau[req->pgbuf].clrfound = true;
 			return 0;
 		}
 
-		case VTXIOCPAGEREQ: 
+		case VTXIOCPAGEREQ:
 		{
 			vtx_pagereq_t *req = arg;
 			if (!(req->pagemask & PGMASK_PAGE))
@@ -394,13 +373,13 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			t->vdau[req->pgbuf].sregs[4] = (req->pagemask & HR_UNIT ? 0x10 : 0) | (req->hour & 0xf);
 			t->vdau[req->pgbuf].sregs[5] = (req->pagemask & MIN_TEN ? 0x10 : 0) | (req->minute / 0x10);
 			t->vdau[req->pgbuf].sregs[6] = (req->pagemask & MIN_UNIT ? 0x10 : 0) | (req->minute & 0xf);
-			t->vdau[req->pgbuf].stopped = FALSE;
-			t->vdau[req->pgbuf].clrfound = TRUE;
-			t->is_searching[req->pgbuf] = TRUE;
+			t->vdau[req->pgbuf].stopped = false;
+			t->vdau[req->pgbuf].clrfound = true;
+			t->is_searching[req->pgbuf] = true;
 			return 0;
 		}
 
-		case VTXIOCGETSTAT: 
+		case VTXIOCGETSTAT:
 		{
 			vtx_pagereq_t *req = arg;
 			u8 infobits[10];
@@ -409,7 +388,7 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 
 			if (req->pgbuf < 0 || req->pgbuf >= NUM_DAUS)
 				return -EINVAL;
-			if (!t->vdau[req->pgbuf].stopped) 
+			if (!t->vdau[req->pgbuf].stopped)
 			{
 				if (i2c_senddata(t, 2, 0, -1) ||
 					i2c_sendbuf(t, 3, sizeof(t->vdau[0].sregs), t->vdau[req->pgbuf].sregs) ||
@@ -422,7 +401,7 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 					return -EIO;
 
 				if (!(infobits[8] & 0x10) && !(infobits[7] & 0xf0) &&	/* check FOUND-bit */
-					(memcmp(infobits, t->vdau[req->pgbuf].laststat, sizeof(infobits)) || 
+					(memcmp(infobits, t->vdau[req->pgbuf].laststat, sizeof(infobits)) ||
 					time_after_eq(jiffies, t->vdau[req->pgbuf].expire)))
 				{		/* check if new page arrived */
 					if (i2c_senddata(t, 8, 0, 0, 0, -1) ||
@@ -430,7 +409,7 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 						return -EIO;
 					t->vdau[req->pgbuf].expire = jiffies + PGBUF_EXPIRE;
 					memset(t->vdau[req->pgbuf].pgbuf + VTX_PAGESIZE, ' ', VTX_VIRTUALSIZE - VTX_PAGESIZE);
-					if (t->virtual_mode) 
+					if (t->virtual_mode)
 					{
 						/* Packet X/24 */
 						if (i2c_senddata(t, 8, 0, 0x20, 0, -1) ||
@@ -448,7 +427,7 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 							i2c_getdata(t, 40, t->vdau[req->pgbuf].pgbuf + VTX_PAGESIZE + 23 * 40))
 							return -EIO;
 					}
-					t->vdau[req->pgbuf].clrfound = FALSE;
+					t->vdau[req->pgbuf].clrfound = false;
 					memcpy(t->vdau[req->pgbuf].laststat, infobits, sizeof(infobits));
 				}
 				else
@@ -478,9 +457,9 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			info.notfound = !!(infobits[8] & 0x10);
 			info.pblf = !!(infobits[9] & 0x20);
 			info.hamming = 0;
-			for (a = 0; a <= 7; a++) 
+			for (a = 0; a <= 7; a++)
 			{
-				if (infobits[a] & 0xf0) 
+				if (infobits[a] & 0xf0)
 				{
 					info.hamming = 1;
 					break;
@@ -490,14 +469,14 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 				info.notfound = 1;
 			if(copy_to_user(req->buffer, &info, sizeof(vtx_pageinfo_t)))
 				return -EFAULT;
-			if (!info.hamming && !info.notfound) 
+			if (!info.hamming && !info.notfound)
 			{
-				t->is_searching[req->pgbuf] = FALSE;
+				t->is_searching[req->pgbuf] = false;
 			}
 			return 0;
 		}
 
-		case VTXIOCGETPAGE: 
+		case VTXIOCGETPAGE:
 		{
 			vtx_pagereq_t *req = arg;
 			int start, end;
@@ -507,15 +486,15 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 				return -EINVAL;
 			if(copy_to_user(req->buffer, &t->vdau[req->pgbuf].pgbuf[req->start], req->end - req->start + 1))
 				return -EFAULT;
-				
-			 /* 
+
+			 /*
 			  *	Always read the time directly from SAA5249
 			  */
-			  
-			if (req->start <= 39 && req->end >= 32) 
+
+			if (req->start <= 39 && req->end >= 32)
 			{
 				int len;
-				char buf[16];  
+				char buf[16];
 				start = max(req->start, 32);
 				end = min(req->end, 39);
 				len=end-start+1;
@@ -526,7 +505,7 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 					return -EFAULT;
 			}
 			/* Insert the current header if DAU is still searching for a page */
-			if (req->start <= 31 && req->end >= 7 && t->is_searching[req->pgbuf]) 
+			if (req->start <= 31 && req->end >= 7 && t->is_searching[req->pgbuf])
 			{
 				char buf[32];
 				int len;
@@ -542,23 +521,23 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			return 0;
 		}
 
-		case VTXIOCSTOPDAU: 
+		case VTXIOCSTOPDAU:
 		{
 			vtx_pagereq_t *req = arg;
 
 			if (req->pgbuf < 0 || req->pgbuf >= NUM_DAUS)
 				return -EINVAL;
-			t->vdau[req->pgbuf].stopped = TRUE;
-			t->is_searching[req->pgbuf] = FALSE;
+			t->vdau[req->pgbuf].stopped = true;
+			t->is_searching[req->pgbuf] = false;
 			return 0;
 		}
 
-		case VTXIOCPUTPAGE: 
-		case VTXIOCSETDISP: 
-		case VTXIOCPUTSTAT: 
+		case VTXIOCPUTPAGE:
+		case VTXIOCSETDISP:
+		case VTXIOCPUTSTAT:
 			return 0;
-			
-		case VTXIOCCLRCACHE: 
+
+		case VTXIOCCLRCACHE:
 		{
 			if (i2c_senddata(t, 0, NUM_DAUS, 0, 8, -1) || i2c_senddata(t, 11,
 				' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',
@@ -570,7 +549,7 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			return 0;
 		}
 
-		case VTXIOCSETVIRT: 
+		case VTXIOCSETVIRT:
 		{
 			/* The SAA5249 has virtual-row reception turned on always */
 			t->virtual_mode = (int)(long)arg;
@@ -631,22 +610,22 @@ static inline unsigned int vtx_fix_command(unsigned int cmd)
 /*
  *	Handle the locking
  */
- 
+
 static int saa5249_ioctl(struct inode *inode, struct file *file,
-			 unsigned int cmd, unsigned long arg) 
+			 unsigned int cmd, unsigned long arg)
 {
 	struct video_device *vd = video_devdata(file);
 	struct saa5249_device *t=vd->priv;
 	int err;
-	
+
 	cmd = vtx_fix_command(cmd);
-	down(&t->lock);
+	mutex_lock(&t->lock);
 	err = video_usercopy(inode,file,cmd,arg,do_saa5249_ioctl);
-	up(&t->lock);
+	mutex_unlock(&t->lock);
 	return err;
 }
 
-static int saa5249_open(struct inode *inode, struct file *file) 
+static int saa5249_open(struct inode *inode, struct file *file)
 {
 	struct video_device *vd = video_devdata(file);
 	struct saa5249_device *t=vd->priv;
@@ -655,7 +634,7 @@ static int saa5249_open(struct inode *inode, struct file *file)
 	err = video_exclusive_open(inode,file);
 	if (err < 0)
 		return err;
-	
+
 	if (t->client==NULL) {
 		err = -ENODEV;
 		goto fail;
@@ -666,23 +645,23 @@ static int saa5249_open(struct inode *inode, struct file *file)
 		i2c_senddata(t, 1, disp_modes[t->disp_mode][0], 0, -1) ||
 						/* Display TV-picture, no virtual rows */
 		i2c_senddata(t, 4, NUM_DAUS, disp_modes[t->disp_mode][1], disp_modes[t->disp_mode][2], 7, -1)) /* Set display to page 4 */
-	
+
 	{
 		err = -EIO;
 		goto fail;
 	}
 
-	for (pgbuf = 0; pgbuf < NUM_DAUS; pgbuf++) 
+	for (pgbuf = 0; pgbuf < NUM_DAUS; pgbuf++)
 	{
 		memset(t->vdau[pgbuf].pgbuf, ' ', sizeof(t->vdau[0].pgbuf));
 		memset(t->vdau[pgbuf].sregs, 0, sizeof(t->vdau[0].sregs));
 		memset(t->vdau[pgbuf].laststat, 0, sizeof(t->vdau[0].laststat));
 		t->vdau[pgbuf].expire = 0;
-		t->vdau[pgbuf].clrfound = TRUE;
-		t->vdau[pgbuf].stopped = TRUE;
-		t->is_searching[pgbuf] = FALSE;
+		t->vdau[pgbuf].clrfound = true;
+		t->vdau[pgbuf].stopped = true;
+		t->is_searching[pgbuf] = false;
 	}
-	t->virtual_mode=FALSE;
+	t->virtual_mode = false;
 	return 0;
 
  fail:
@@ -692,7 +671,7 @@ static int saa5249_open(struct inode *inode, struct file *file)
 
 
 
-static int saa5249_release(struct inode *inode, struct file *file) 
+static int saa5249_release(struct inode *inode, struct file *file)
 {
 	struct video_device *vd = video_devdata(file);
 	struct saa5249_device *t=vd->priv;
@@ -709,7 +688,7 @@ static int __init init_saa_5249 (void)
 	return i2c_add_driver(&i2c_driver_videotext);
 }
 
-static void __exit cleanup_saa_5249 (void) 
+static void __exit cleanup_saa_5249 (void)
 {
 	i2c_del_driver(&i2c_driver_videotext);
 }
@@ -717,11 +696,12 @@ static void __exit cleanup_saa_5249 (void)
 module_init(init_saa_5249);
 module_exit(cleanup_saa_5249);
 
-static struct file_operations saa_fops = {
+static const struct file_operations saa_fops = {
 	.owner		= THIS_MODULE,
 	.open		= saa5249_open,
 	.release       	= saa5249_release,
 	.ioctl          = saa5249_ioctl,
+	.compat_ioctl	= v4l_compat_ioctl32,
 	.llseek         = no_llseek,
 };
 
@@ -730,7 +710,6 @@ static struct video_device saa_template =
 	.owner		= THIS_MODULE,
 	.name		= IF_NAME,
 	.type		= VID_TYPE_TELETEXT,	/*| VID_TYPE_TUNER ?? */
-	.hardware	= VID_HARDWARE_SAA5249,
 	.fops           = &saa_fops,
 };
 

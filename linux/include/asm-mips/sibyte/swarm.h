@@ -18,7 +18,6 @@
 #ifndef __ASM_SIBYTE_SWARM_H
 #define __ASM_SIBYTE_SWARM_H
 
-#include <linux/config.h>
 #include <asm/sibyte/sb1250.h>
 #include <asm/sibyte/sb1250_int.h>
 
@@ -33,8 +32,20 @@
 #define SIBYTE_HAVE_IDE    1
 #define SIBYTE_DEFAULT_CONSOLE "ttyS0,115200"
 #endif
+#ifdef CONFIG_SIBYTE_PT1120
+#define SIBYTE_BOARD_NAME "PT1120"
+#define SIBYTE_HAVE_PCMCIA 1
+#define SIBYTE_HAVE_IDE    1
+#define SIBYTE_DEFAULT_CONSOLE "ttyS0,115200"
+#endif
+#ifdef CONFIG_SIBYTE_PT1125
+#define SIBYTE_BOARD_NAME "PT1125"
+#define SIBYTE_HAVE_PCMCIA 1
+#define SIBYTE_HAVE_IDE    1
+#define SIBYTE_DEFAULT_CONSOLE "ttyS0,115200"
+#endif
 #ifdef CONFIG_SIBYTE_LITTLESUR
-#define SIBYTE_BOARD_NAME "BCM1250C2 (LittleSur)"
+#define SIBYTE_BOARD_NAME "BCM91250C2 (LittleSur)"
 #define SIBYTE_HAVE_PCMCIA 0
 #define SIBYTE_HAVE_IDE    1
 #define SIBYTE_DEFAULT_CONSOLE "cfe0"

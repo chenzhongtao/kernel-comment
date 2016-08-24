@@ -40,6 +40,8 @@ enum
 	IPSTATS_MIB_FRAGCREATES,		/* FragCreates */
 	IPSTATS_MIB_INMCASTPKTS,		/* InMcastPkts */
 	IPSTATS_MIB_OUTMCASTPKTS,		/* OutMcastPkts */
+	IPSTATS_MIB_INBCASTPKTS,		/* InBcastPkts */
+	IPSTATS_MIB_OUTBCASTPKTS,		/* OutBcastPkts */
 	__IPSTATS_MIB_MAX
 };
 
@@ -80,6 +82,8 @@ enum
 	__ICMP_MIB_MAX
 };
 
+#define __ICMPMSG_MIB_MAX 512	/* Out+In for all 8-bit ICMP types */
+
 /* icmp6 mib definitions */
 /*
  * RFC 2466:  ICMPv6-MIB
@@ -89,34 +93,11 @@ enum
 	ICMP6_MIB_NUM = 0,
 	ICMP6_MIB_INMSGS,			/* InMsgs */
 	ICMP6_MIB_INERRORS,			/* InErrors */
-	ICMP6_MIB_INDESTUNREACHS,		/* InDestUnreachs */
-	ICMP6_MIB_INPKTTOOBIGS,			/* InPktTooBigs */
-	ICMP6_MIB_INTIMEEXCDS,			/* InTimeExcds */
-	ICMP6_MIB_INPARMPROBLEMS,		/* InParmProblems */
-	ICMP6_MIB_INECHOS,			/* InEchos */
-	ICMP6_MIB_INECHOREPLIES,		/* InEchoReplies */
-	ICMP6_MIB_INGROUPMEMBQUERIES,		/* InGroupMembQueries */
-	ICMP6_MIB_INGROUPMEMBRESPONSES,		/* InGroupMembResponses */
-	ICMP6_MIB_INGROUPMEMBREDUCTIONS,	/* InGroupMembReductions */
-	ICMP6_MIB_INROUTERSOLICITS,		/* InRouterSolicits */
-	ICMP6_MIB_INROUTERADVERTISEMENTS,	/* InRouterAdvertisements */
-	ICMP6_MIB_INNEIGHBORSOLICITS,		/* InNeighborSolicits */
-	ICMP6_MIB_INNEIGHBORADVERTISEMENTS,	/* InNeighborAdvertisements */
-	ICMP6_MIB_INREDIRECTS,			/* InRedirects */
 	ICMP6_MIB_OUTMSGS,			/* OutMsgs */
-	ICMP6_MIB_OUTDESTUNREACHS,		/* OutDestUnreachs */
-	ICMP6_MIB_OUTPKTTOOBIGS,		/* OutPktTooBigs */
-	ICMP6_MIB_OUTTIMEEXCDS,			/* OutTimeExcds */
-	ICMP6_MIB_OUTPARMPROBLEMS,		/* OutParmProblems */
-	ICMP6_MIB_OUTECHOREPLIES,		/* OutEchoReplies */
-	ICMP6_MIB_OUTROUTERSOLICITS,		/* OutRouterSolicits */
-	ICMP6_MIB_OUTNEIGHBORSOLICITS,		/* OutNeighborSolicits */
-	ICMP6_MIB_OUTNEIGHBORADVERTISEMENTS,	/* OutNeighborAdvertisements */
-	ICMP6_MIB_OUTREDIRECTS,			/* OutRedirects */
-	ICMP6_MIB_OUTGROUPMEMBRESPONSES,	/* OutGroupMembResponses */
-	ICMP6_MIB_OUTGROUPMEMBREDUCTIONS,	/* OutGroupMembReductions */
 	__ICMP6_MIB_MAX
 };
+
+#define __ICMP6MSG_MIB_MAX 512 /* Out+In for all 8-bit ICMPv6 types */
 
 /* tcp mib definitions */
 /*
@@ -155,40 +136,9 @@ enum
 	UDP_MIB_NOPORTS,			/* NoPorts */
 	UDP_MIB_INERRORS,			/* InErrors */
 	UDP_MIB_OUTDATAGRAMS,			/* OutDatagrams */
+	UDP_MIB_RCVBUFERRORS,			/* RcvbufErrors */
+	UDP_MIB_SNDBUFERRORS,			/* SndbufErrors */
 	__UDP_MIB_MAX
-};
-
-/* sctp mib definitions */
-/*
- * draft-ietf-sigtran-sctp-mib-07.txt
- */
-enum
-{
-	SCTP_MIB_NUM = 0,
-	SCTP_MIB_CURRESTAB,			/* CurrEstab */
-	SCTP_MIB_ACTIVEESTABS,			/* ActiveEstabs */
-	SCTP_MIB_PASSIVEESTABS,			/* PassiveEstabs */
-	SCTP_MIB_ABORTEDS,			/* Aborteds */
-	SCTP_MIB_SHUTDOWNS,			/* Shutdowns */
-	SCTP_MIB_OUTOFBLUES,			/* OutOfBlues */
-	SCTP_MIB_CHECKSUMERRORS,		/* ChecksumErrors */
-	SCTP_MIB_OUTCTRLCHUNKS,			/* OutCtrlChunks */
-	SCTP_MIB_OUTORDERCHUNKS,		/* OutOrderChunks */
-	SCTP_MIB_OUTUNORDERCHUNKS,		/* OutUnorderChunks */
-	SCTP_MIB_INCTRLCHUNKS,			/* InCtrlChunks */
-	SCTP_MIB_INORDERCHUNKS,			/* InOrderChunks */
-	SCTP_MIB_INUNORDERCHUNKS,		/* InUnorderChunks */
-	SCTP_MIB_FRAGUSRMSGS,			/* FragUsrMsgs */
-	SCTP_MIB_REASMUSRMSGS,			/* ReasmUsrMsgs */
-	SCTP_MIB_OUTSCTPPACKS,			/* OutSCTPPacks */
-	SCTP_MIB_INSCTPPACKS,			/* InSCTPPacks */
-	SCTP_MIB_RTOALGORITHM,			/* RtoAlgorithm */
-	SCTP_MIB_RTOMIN,			/* RtoMin */
-	SCTP_MIB_RTOMAX,			/* RtoMax */
-	SCTP_MIB_RTOINITIAL,			/* RtoInitial */
-	SCTP_MIB_VALCOOKIELIFE,			/* ValCookieLife */
-	SCTP_MIB_MAXINITRETR,			/* MaxInitRetr */
-	__SCTP_MIB_MAX
 };
 
 /* linux mib definitions */
@@ -260,6 +210,10 @@ enum
 	LINUX_MIB_TCPABORTONLINGER,		/* TCPAbortOnLinger */
 	LINUX_MIB_TCPABORTFAILED,		/* TCPAbortFailed */
 	LINUX_MIB_TCPMEMORYPRESSURES,		/* TCPMemoryPressures */
+	LINUX_MIB_TCPSACKDISCARD,		/* TCPSACKDiscard */
+	LINUX_MIB_TCPDSACKIGNOREDOLD,		/* TCPSACKIgnoredOld */
+	LINUX_MIB_TCPDSACKIGNOREDNOUNDO,	/* TCPSACKIgnoredNoUndo */
+	LINUX_MIB_TCPSPURIOUSRTOS,		/* TCPSpuriousRTOs */
 	__LINUX_MIB_MAX
 };
 

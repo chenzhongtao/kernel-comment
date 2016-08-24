@@ -3,8 +3,8 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <asm/compiler.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
@@ -91,6 +91,11 @@ static inline void * phys_to_virt(unsigned long address)
 
 #define page_to_phys(page)	page_to_pa(page)
 
+static inline dma_addr_t __deprecated isa_page_to_bus(struct page *page)
+{
+	return page_to_phys(page);
+}
+
 /* This depends on working iommu.  */
 #define BIO_VMERGE_BOUNDARY	(alpha_mv.mv_pci_tbi ? PAGE_SIZE : 0)
 
@@ -103,19 +108,20 @@ static inline void * phys_to_virt(unsigned long address)
  *
  * Note that this only works for a limited range of kernel addresses,
  * and very well may not span all memory.  Consider this interface 
- * deprecated in favour of the mapping functions in <asm/pci.h>.
+ * deprecated in favour of the DMA-mapping API.
  */
 extern unsigned long __direct_map_base;
 extern unsigned long __direct_map_size;
 
-static inline unsigned long virt_to_bus(void *address)
+static inline unsigned long __deprecated virt_to_bus(void *address)
 {
 	unsigned long phys = virt_to_phys(address);
 	unsigned long bus = phys + __direct_map_base;
 	return phys <= __direct_map_size ? bus : 0;
 }
+#define isa_virt_to_bus virt_to_bus
 
-static inline void *bus_to_virt(unsigned long address)
+static inline void * __deprecated bus_to_virt(unsigned long address)
 {
 	void *virt;
 
@@ -126,6 +132,7 @@ static inline void *bus_to_virt(unsigned long address)
 	virt = phys_to_virt(address);
 	return (long)address <= 0 ? NULL : virt;
 }
+#define isa_bus_to_virt bus_to_virt
 
 /*
  * There are different chipsets to interface the Alpha CPUs to the world.
@@ -526,112 +533,6 @@ extern void outsw (unsigned long port, const void *src, unsigned long count);
 extern void outsl (unsigned long port, const void *src, unsigned long count);
 
 /*
- * XXX - We don't have csum_partial_copy_fromio() yet, so we cheat here and 
- * just copy it. The net code will then do the checksum later. Presently 
- * only used by some shared memory 8390 Ethernet cards anyway.
- */
-
-#define eth_io_copy_and_sum(skb,src,len,unused) \
-  memcpy_fromio((skb)->data,src,len)
-
-#define isa_eth_io_copy_and_sum(skb,src,len,unused) \
-  isa_memcpy_fromio((skb)->data,src,len)
-
-static inline int
-check_signature(const volatile void __iomem *io_addr,
-		const unsigned char *signature, int length)
-{
-	do {
-		if (readb(io_addr) != *signature)
-			return 0;
-		io_addr++;
-		signature++;
-	} while (--length);
-	return 1;
-}
-
-
-/*
- * ISA space is mapped to some machine-specific location on Alpha.
- * Call into the existing hooks to get the address translated.
- */
-
-static inline u8
-isa_readb(unsigned long offset)
-{
-	void __iomem *addr = ioremap(offset, 1);
-	u8 ret = readb(addr);
-	iounmap(addr);
-	return ret;
-}
-
-static inline u16
-isa_readw(unsigned long offset)
-{
-	void __iomem *addr = ioremap(offset, 2);
-	u16 ret = readw(addr);
-	iounmap(addr);
-	return ret;
-}
-
-static inline u32
-isa_readl(unsigned long offset)
-{
-	void __iomem *addr = ioremap(offset, 2);
-	u32 ret = readl(addr);
-	iounmap(addr);
-	return ret;
-}
-
-static inline void
-isa_writeb(u8 b, unsigned long offset)
-{
-	void __iomem *addr = ioremap(offset, 2);
-	writeb(b, addr);
-	iounmap(addr);
-}
-
-static inline void
-isa_writew(u16 w, unsigned long offset)
-{
-	void __iomem *addr = ioremap(offset, 2);
-	writew(w, addr);
-	iounmap(addr);
-}
-
-static inline void
-isa_writel(u32 l, unsigned long offset)
-{
-	void __iomem *addr = ioremap(offset, 2);
-	writel(l, addr);
-	iounmap(addr);
-}
-
-static inline void
-isa_memset_io(unsigned long offset, u8 val, long n)
-{
-	void __iomem *addr = ioremap(offset, n);
-	memset_io(addr, val, n);
-	iounmap(addr);
-}
-
-static inline void
-isa_memcpy_fromio(void *dest, unsigned long offset, long n)
-{
-	void __iomem *addr = ioremap(offset, n);
-	memcpy_fromio(dest, addr, n);
-	iounmap(addr);
-}
-
-static inline void
-isa_memcpy_toio(unsigned long offset, const void *src, long n)
-{
-	void __iomem *addr = ioremap(offset, n);
-	memcpy_toio(addr, src, n);
-	iounmap(addr);
-}
-
-/*
  * The Alpha Jensen hardware for some rather strange reason puts
  * the RTC clock at 0x170 instead of 0x70. Probably due to some
  * misguided idea about using 0x70 for NMI stuff.
@@ -650,12 +551,6 @@ isa_memcpy_toio(unsigned long offset, const void *src, long n)
 #endif
 #define RTC_ALWAYS_BCD	0
 
-/* Nothing to do */
-
-#define dma_cache_inv(_start,_size)		do { } while (0)
-#define dma_cache_wback(_start,_size)		do { } while (0)
-#define dma_cache_wback_inv(_start,_size)	do { } while (0)
-
 /*
  * Some mucking forons use if[n]def writeq to check if platform has it.
  * It's a bloody bad idea and we probably want ARCH_HAS_WRITEQ for them
@@ -665,6 +560,17 @@ isa_memcpy_toio(unsigned long offset, const void *src, long n)
 
 #define writeq writeq
 #define readq readq
+
+/*
+ * Convert a physical pointer to a virtual kernel pointer for /dev/mem
+ * access
+ */
+#define xlate_dev_mem_ptr(p)	__va(p)
+
+/*
+ * Convert a virtual cached pointer to an uncached pointer
+ */
+#define xlate_dev_kmem_ptr(p)	p
 
 #endif /* __KERNEL__ */
 

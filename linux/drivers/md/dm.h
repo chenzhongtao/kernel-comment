@@ -2,7 +2,7 @@
  * Internal header file for device mapper
  *
  * Copyright (C) 2001, 2002 Sistina Software
- * Copyright (C) 2004 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004-2006 Red Hat, Inc. All rights reserved.
  *
  * This file is released under the LGPL.
  */
@@ -14,26 +14,74 @@
 #include <linux/device-mapper.h>
 #include <linux/list.h>
 #include <linux/blkdev.h>
+#include <linux/hdreg.h>
 
 #define DM_NAME "device-mapper"
-#define DMWARN(f, x...) printk(KERN_WARNING DM_NAME ": " f "\n" , ## x)
-#define DMERR(f, x...) printk(KERN_ERR DM_NAME ": " f "\n" , ## x)
-#define DMINFO(f, x...) printk(KERN_INFO DM_NAME ": " f "\n" , ## x)
+
+#define DMERR(f, arg...) \
+	printk(KERN_ERR DM_NAME ": " DM_MSG_PREFIX ": " f "\n", ## arg)
+#define DMERR_LIMIT(f, arg...) \
+	do { \
+		if (printk_ratelimit())	\
+			printk(KERN_ERR DM_NAME ": " DM_MSG_PREFIX ": " \
+			       f "\n", ## arg); \
+	} while (0)
+
+#define DMWARN(f, arg...) \
+	printk(KERN_WARNING DM_NAME ": " DM_MSG_PREFIX ": " f "\n", ## arg)
+#define DMWARN_LIMIT(f, arg...) \
+	do { \
+		if (printk_ratelimit())	\
+			printk(KERN_WARNING DM_NAME ": " DM_MSG_PREFIX ": " \
+			       f "\n", ## arg); \
+	} while (0)
+
+#define DMINFO(f, arg...) \
+	printk(KERN_INFO DM_NAME ": " DM_MSG_PREFIX ": " f "\n", ## arg)
+#define DMINFO_LIMIT(f, arg...) \
+	do { \
+		if (printk_ratelimit())	\
+			printk(KERN_INFO DM_NAME ": " DM_MSG_PREFIX ": " f \
+			       "\n", ## arg); \
+	} while (0)
+
+#ifdef CONFIG_DM_DEBUG
+#  define DMDEBUG(f, arg...) \
+	printk(KERN_DEBUG DM_NAME ": " DM_MSG_PREFIX " DEBUG: " f "\n", ## arg)
+#  define DMDEBUG_LIMIT(f, arg...) \
+	do { \
+		if (printk_ratelimit())	\
+			printk(KERN_DEBUG DM_NAME ": " DM_MSG_PREFIX ": " f \
+			       "\n", ## arg); \
+	} while (0)
+#else
+#  define DMDEBUG(f, arg...) do {} while (0)
+#  define DMDEBUG_LIMIT(f, arg...) do {} while (0)
+#endif
 
 #define DMEMIT(x...) sz += ((sz >= maxlen) ? \
 			  0 : scnprintf(result + sz, maxlen - sz, x))
 
-/*
- * FIXME: I think this should be with the definition of sector_t
- * in types.h.
- */
-#ifdef CONFIG_LBD
-#define SECTOR_FORMAT "%Lu"
-#else
-#define SECTOR_FORMAT "%lu"
-#endif
-
 #define SECTOR_SHIFT 9
+
+/*
+ * Definitions of return values from target end_io function.
+ */
+#define DM_ENDIO_INCOMPLETE	1
+#define DM_ENDIO_REQUEUE	2
+
+/*
+ * Definitions of return values from target map function.
+ */
+#define DM_MAPIO_SUBMITTED	0
+#define DM_MAPIO_REMAPPED	1
+#define DM_MAPIO_REQUEUE	DM_ENDIO_REQUEUE
+
+/*
+ * Suspend feature flags
+ */
+#define DM_SUSPEND_LOCKFS_FLAG		(1 << 0)
+#define DM_SUSPEND_NOFLUSH_FLAG		(1 << 1)
 
 /*
  * List of devices that a metadevice uses and should open/close.
@@ -44,83 +92,30 @@ struct dm_dev {
 	atomic_t count;
 	int mode;
 	struct block_device *bdev;
+	char name[16];
 };
 
 struct dm_table;
-struct mapped_device;
 
 /*-----------------------------------------------------------------
- * Functions for manipulating a struct mapped_device.
- * Drop the reference with dm_put when you finish with the object.
+ * Internal table functions.
  *---------------------------------------------------------------*/
-int dm_create(struct mapped_device **md);
-int dm_create_with_minor(unsigned int minor, struct mapped_device **md);
-void dm_set_mdptr(struct mapped_device *md, void *ptr);
-void *dm_get_mdptr(dev_t dev);
-
-/*
- * Reference counting for md.
- */
-void dm_get(struct mapped_device *md);
-void dm_put(struct mapped_device *md);
-
-/*
- * A device can still be used while suspended, but I/O is deferred.
- */
-int dm_suspend(struct mapped_device *md);
-int dm_resume(struct mapped_device *md);
-
-/*
- * The device must be suspended before calling this method.
- */
-int dm_swap_table(struct mapped_device *md, struct dm_table *t);
-
-/*
- * Drop a reference on the table when you've finished with the
- * result.
- */
-struct dm_table *dm_get_table(struct mapped_device *md);
-
-/*
- * Event functions.
- */
-uint32_t dm_get_event_nr(struct mapped_device *md);
-int dm_wait_event(struct mapped_device *md, int event_nr);
-
-/*
- * Info functions.
- */
-struct gendisk *dm_disk(struct mapped_device *md);
-int dm_suspended(struct mapped_device *md);
-
-/*-----------------------------------------------------------------
- * Functions for manipulating a table.  Tables are also reference
- * counted.
- *---------------------------------------------------------------*/
-int dm_table_create(struct dm_table **result, int mode, unsigned num_targets);
-
-void dm_table_get(struct dm_table *t);
-void dm_table_put(struct dm_table *t);
-
-int dm_table_add_target(struct dm_table *t, const char *type,
-			sector_t start,	sector_t len, char *params);
-int dm_table_complete(struct dm_table *t);
 void dm_table_event_callback(struct dm_table *t,
 			     void (*fn)(void *), void *context);
-void dm_table_event(struct dm_table *t);
-sector_t dm_table_get_size(struct dm_table *t);
 struct dm_target *dm_table_get_target(struct dm_table *t, unsigned int index);
 struct dm_target *dm_table_find_target(struct dm_table *t, sector_t sector);
 void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q);
-unsigned int dm_table_get_num_targets(struct dm_table *t);
 struct list_head *dm_table_get_devices(struct dm_table *t);
-int dm_table_get_mode(struct dm_table *t);
 void dm_table_presuspend_targets(struct dm_table *t);
 void dm_table_postsuspend_targets(struct dm_table *t);
-void dm_table_resume_targets(struct dm_table *t);
+int dm_table_resume_targets(struct dm_table *t);
 int dm_table_any_congested(struct dm_table *t, int bdi_bits);
 void dm_table_unplug_all(struct dm_table *t);
-int dm_table_flush_all(struct dm_table *t);
+
+/*
+ * To check the return value from dm_table_find_target().
+ */
+#define dm_target_is_valid(t) ((t)->table)
 
 /*-----------------------------------------------------------------
  * A registry of target types.
@@ -131,7 +126,6 @@ struct target_type *dm_get_target_type(const char *name);
 void dm_put_target_type(struct target_type *t);
 int dm_target_iterate(void (*iter_func)(struct target_type *tt,
 					void *param), void *param);
-
 
 /*-----------------------------------------------------------------
  * Useful inlines.
@@ -189,5 +183,10 @@ int dm_stripe_init(void);
 void dm_stripe_exit(void);
 
 void *dm_vcalloc(unsigned long nmemb, unsigned long elem_size);
+union map_info *dm_get_mapinfo(struct bio *bio);
+int dm_open_count(struct mapped_device *md);
+int dm_lock_for_deletion(struct mapped_device *md);
+
+void dm_kobject_uevent(struct mapped_device *md);
 
 #endif

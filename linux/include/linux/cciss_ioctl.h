@@ -11,6 +11,7 @@ typedef struct _cciss_pci_info_struct
 {
 	unsigned char 	bus;
 	unsigned char 	dev_fn;
+	unsigned short	domain;
 	__u32 		board_id;
 } cciss_pci_info_struct; 
 
@@ -79,7 +80,7 @@ typedef __u32 DriverVer_type;
 #define HWORD __u16
 #define DWORD __u32
 
-#define CISS_MAX_LUN	16	
+#define CISS_MAX_LUN	1024
 
 #define LEVEL2LUN   1   // index into Target(x) structure, due to byte swapping
 #define LEVEL3LUN   0

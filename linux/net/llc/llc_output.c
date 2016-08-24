@@ -30,7 +30,8 @@
  *	Fills MAC header fields, depending on MAC type. Returns 0, If MAC type
  *	is a valid type and initialization completes correctly 1, otherwise.
  */
-int llc_mac_hdr_init(struct sk_buff *skb, unsigned char *sa, unsigned char *da)
+int llc_mac_hdr_init(struct sk_buff *skb,
+		     const unsigned char *sa, const unsigned char *da)
 {
 	int rc = 0;
 
@@ -39,8 +40,9 @@ int llc_mac_hdr_init(struct sk_buff *skb, unsigned char *sa, unsigned char *da)
 	case ARPHRD_IEEE802_TR: {
 		struct net_device *dev = skb->dev;
 		struct trh_hdr *trh;
-		
-		skb->mac.raw = skb_push(skb, sizeof(*trh));
+
+		skb_push(skb, sizeof(*trh));
+		skb_reset_mac_header(skb);
 		trh = tr_hdr(skb);
 		trh->ac = AC;
 		trh->fc = LLC_FRAME;
@@ -51,7 +53,7 @@ int llc_mac_hdr_init(struct sk_buff *skb, unsigned char *sa, unsigned char *da)
 		if (da) {
 			memcpy(trh->daddr, da, dev->addr_len);
 			tr_source_route(skb, trh, dev);
-			skb->mac.raw = skb->data;
+			skb_reset_mac_header(skb);
 		}
 		break;
 	}
@@ -61,7 +63,8 @@ int llc_mac_hdr_init(struct sk_buff *skb, unsigned char *sa, unsigned char *da)
 		unsigned short len = skb->len;
 		struct ethhdr *eth;
 
-		skb->mac.raw = skb_push(skb, sizeof(*eth));
+		skb_push(skb, sizeof(*eth));
+		skb_reset_mac_header(skb);
 		eth = eth_hdr(skb);
 		eth->h_proto = htons(len);
 		memcpy(eth->h_dest, da, ETH_ALEN);
@@ -98,7 +101,7 @@ int llc_build_and_send_ui_pkt(struct llc_sap *sap, struct sk_buff *skb,
 			    dsap, LLC_PDU_CMD);
 	llc_pdu_init_as_ui_cmd(skb);
 	rc = llc_mac_hdr_init(skb, skb->dev->dev_addr, dmac);
-	if (!rc)
+	if (likely(!rc))
 		rc = dev_queue_xmit(skb);
 	return rc;
 }

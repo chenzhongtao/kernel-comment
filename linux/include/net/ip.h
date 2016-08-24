@@ -7,7 +7,7 @@
  *
  * Version:	@(#)ip.h	1.0.2	05/07/93
  *
- * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
+ * Authors:	Ross Biro
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Alan Cox, <gw4pts@gw4pts.ampr.org>
  *
@@ -22,16 +22,12 @@
 #ifndef _IP_H
 #define _IP_H
 
-#include <linux/config.h>
 #include <linux/types.h>
-#include <linux/socket.h>
 #include <linux/ip.h>
 #include <linux/in.h>
-#include <linux/netdevice.h>
-#include <linux/inetdevice.h>
-#include <linux/in_route.h>
-#include <net/route.h>
-#include <net/arp.h>
+#include <linux/skbuff.h>
+
+#include <net/inet_sock.h>
 #include <net/snmp.h>
 
 struct sock;
@@ -41,15 +37,21 @@ struct inet_skb_parm
 	struct ip_options	opt;		/* Compiled IP options		*/
 	unsigned char		flags;
 
-#define IPSKB_MASQUERADED	1
-#define IPSKB_TRANSLATED	2
-#define IPSKB_FORWARDED		4
-#define IPSKB_XFRM_TUNNEL_SIZE	8
+#define IPSKB_FORWARDED		1
+#define IPSKB_XFRM_TUNNEL_SIZE	2
+#define IPSKB_XFRM_TRANSFORMED	4
+#define IPSKB_FRAG_COMPLETE	8
+#define IPSKB_REROUTED		16
 };
+
+static inline unsigned int ip_hdrlen(const struct sk_buff *skb)
+{
+	return ip_hdr(skb)->ihl * 4;
+}
 
 struct ipcm_cookie
 {
-	u32			addr;
+	__be32			addr;
 	int			oif;
 	struct ip_options	*opt;
 };
@@ -74,6 +76,12 @@ extern rwlock_t ip_ra_lock;
 
 #define IP_FRAG_TIME	(30 * HZ)		/* fragment lifetime	*/
 
+struct msghdr;
+struct net_device;
+struct packet_type;
+struct rtable;
+struct sockaddr;
+
 extern void		ip_mc_dropsocket(struct sock *);
 extern void		ip_mc_dropdevice(struct net_device *dev);
 extern int		igmp_mc_proc_init(void);
@@ -83,15 +91,15 @@ extern int		igmp_mc_proc_init(void);
  */
 
 extern int		ip_build_and_send_pkt(struct sk_buff *skb, struct sock *sk,
-					      u32 saddr, u32 daddr,
+					      __be32 saddr, __be32 daddr,
 					      struct ip_options *opt);
 extern int		ip_rcv(struct sk_buff *skb, struct net_device *dev,
-			       struct packet_type *pt);
+			       struct packet_type *pt, struct net_device *orig_dev);
 extern int		ip_local_deliver(struct sk_buff *skb);
 extern int		ip_mr_input(struct sk_buff *skb);
 extern int		ip_output(struct sk_buff *skb);
 extern int		ip_mc_output(struct sk_buff *skb);
-extern int		ip_fragment(struct sk_buff *skb, int (*out)(struct sk_buff*));
+extern int		ip_fragment(struct sk_buff *skb, int (*output)(struct sk_buff *));
 extern int		ip_do_nat(struct sk_buff *skb);
 extern void		ip_send_check(struct iphdr *ip);
 extern int		ip_queue_xmit(struct sk_buff *skb, int ipfragok);
@@ -120,7 +128,7 @@ extern int		ip4_datagram_connect(struct sock *sk,
  *      multicast packets.
  */
 
-static inline void ip_tr_mc_map(u32 addr, char *buf)
+static inline void ip_tr_mc_map(__be32 addr, char *buf)
 {
 	buf[0]=0xC0;
 	buf[1]=0x00;
@@ -132,20 +140,18 @@ static inline void ip_tr_mc_map(u32 addr, char *buf)
 
 struct ip_reply_arg {
 	struct kvec iov[1];   
-	u32 	    csum; 
+	__wsum 	    csum;
 	int	    csumoffset; /* u16 offset of csum in iov[0].iov_base */
 				/* -1 if not needed */ 
+	int	    bound_dev_if;
 }; 
 
 void ip_send_reply(struct sock *sk, struct sk_buff *skb, struct ip_reply_arg *arg,
 		   unsigned int len); 
 
-extern int ip_finish_output(struct sk_buff *skb);
-
 struct ipv4_config
 {
 	int	log_martians;
-	int	autoconfig;
 	int	no_pmtu_disc;
 };
 
@@ -154,6 +160,7 @@ DECLARE_SNMP_STAT(struct ipstats_mib, ip_statistics);
 #define IP_INC_STATS(field)		SNMP_INC_STATS(ip_statistics, field)
 #define IP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ip_statistics, field)
 #define IP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ip_statistics, field)
+#define IP_ADD_STATS_BH(field, val)	SNMP_ADD_STATS_BH(ip_statistics, field, val)
 DECLARE_SNMP_STAT(struct linux_mib, net_statistics);
 #define NET_INC_STATS(field)		SNMP_INC_STATS(net_statistics, field)
 #define NET_INC_STATS_BH(field)		SNMP_INC_STATS_BH(net_statistics, field)
@@ -161,18 +168,43 @@ DECLARE_SNMP_STAT(struct linux_mib, net_statistics);
 #define NET_ADD_STATS_BH(field, adnd)	SNMP_ADD_STATS_BH(net_statistics, field, adnd)
 #define NET_ADD_STATS_USER(field, adnd)	SNMP_ADD_STATS_USER(net_statistics, field, adnd)
 
-extern int sysctl_local_port_range[2];
+extern unsigned long snmp_fold_field(void *mib[], int offt);
+extern int snmp_mib_init(void *ptr[2], size_t mibsize, size_t mibalign);
+extern void snmp_mib_free(void *ptr[2]);
+
+extern void inet_get_local_port_range(int *low, int *high);
+
 extern int sysctl_ip_default_ttl;
+extern int sysctl_ip_nonlocal_bind;
+
+/* From ip_fragment.c */
+struct inet_frags_ctl;
+extern struct inet_frags_ctl ip4_frags_ctl;
+extern int sysctl_ipfrag_max_dist;
+
+/* From inetpeer.c */
+extern int inet_peer_threshold;
+extern int inet_peer_minttl;
+extern int inet_peer_maxttl;
+extern int inet_peer_gc_mintime;
+extern int inet_peer_gc_maxtime;
+
+/* From ip_output.c */
+extern int sysctl_ip_dynaddr;
+
+extern void ipfrag_init(void);
 
 #ifdef CONFIG_INET
+#include <net/dst.h>
+
 /* The function in 2.2 was invalid, producing wrong result for
  * check=0xFEFF. It was noticed by Arthur Skawina _year_ ago. --ANK(000625) */
 static inline
 int ip_decrease_ttl(struct iphdr *iph)
 {
-	u32 check = iph->check;
-	check += htons(0x0100);
-	iph->check = check + (check>=0xFFFF);
+	u32 check = (__force u32)iph->check;
+	check += (__force u32)htons(0x0100);
+	iph->check = (__force __sum16)(check + (check>=0xFFFF));
 	return --iph->ttl;
 }
 
@@ -216,9 +248,9 @@ static inline void ip_select_ident_more(struct iphdr *iph, struct dst_entry *dst
  *	Map a multicast IP onto multicast MAC for type ethernet.
  */
 
-static inline void ip_eth_mc_map(u32 addr, char *buf)
+static inline void ip_eth_mc_map(__be32 naddr, char *buf)
 {
-	addr=ntohl(addr);
+	__u32 addr=ntohl(naddr);
 	buf[0]=0x01;
 	buf[1]=0x00;
 	buf[2]=0x5e;
@@ -234,13 +266,14 @@ static inline void ip_eth_mc_map(u32 addr, char *buf)
  *	Leave P_Key as 0 to be filled in by driver.
  */
 
-static inline void ip_ib_mc_map(u32 addr, char *buf)
+static inline void ip_ib_mc_map(__be32 naddr, char *buf)
 {
+	__u32 addr;
 	buf[0]  = 0;		/* Reserved */
 	buf[1]  = 0xff;		/* Multicast QPN */
 	buf[2]  = 0xff;
 	buf[3]  = 0xff;
-	addr    = ntohl(addr);
+	addr    = ntohl(naddr);
 	buf[4]  = 0xff;
 	buf[5]  = 0x12;		/* link local scope */
 	buf[6]  = 0x40;		/* IPv4 signature */
@@ -293,15 +326,14 @@ enum ip_defrag_users
 	IP_DEFRAG_CALL_RA_CHAIN,
 	IP_DEFRAG_CONNTRACK_IN,
 	IP_DEFRAG_CONNTRACK_OUT,
-	IP_DEFRAG_NAT_OUT,
 	IP_DEFRAG_VS_IN,
 	IP_DEFRAG_VS_OUT,
 	IP_DEFRAG_VS_FWD
 };
 
-struct sk_buff *ip_defrag(struct sk_buff *skb, u32 user);
-extern int ip_frag_nqueues;
-extern atomic_t ip_frag_mem;
+int ip_defrag(struct sk_buff *skb, u32 user);
+int ip_frag_mem(void);
+int ip_frag_nqueues(void);
 
 /*
  *	Functions provided by ip_forward.c
@@ -314,11 +346,14 @@ extern int ip_net_unreachable(struct sk_buff *skb);
  *	Functions provided by ip_options.c
  */
  
-extern void ip_options_build(struct sk_buff *skb, struct ip_options *opt, u32 daddr, struct rtable *rt, int is_frag);
+extern void ip_options_build(struct sk_buff *skb, struct ip_options *opt, __be32 daddr, struct rtable *rt, int is_frag);
 extern int ip_options_echo(struct ip_options *dopt, struct sk_buff *skb);
 extern void ip_options_fragment(struct sk_buff *skb);
 extern int ip_options_compile(struct ip_options *opt, struct sk_buff *skb);
-extern int ip_options_get(struct ip_options **optp, unsigned char *data, int optlen, int user);
+extern int ip_options_get(struct ip_options **optp,
+			  unsigned char *data, int optlen);
+extern int ip_options_get_from_user(struct ip_options **optp,
+				    unsigned char __user *data, int optlen);
 extern void ip_options_undo(struct ip_options * opt);
 extern void ip_forward_options(struct sk_buff *skb);
 extern int ip_options_rcv_srr(struct sk_buff *skb);
@@ -331,12 +366,16 @@ extern void	ip_cmsg_recv(struct msghdr *msg, struct sk_buff *skb);
 extern int	ip_cmsg_send(struct msghdr *msg, struct ipcm_cookie *ipc);
 extern int	ip_setsockopt(struct sock *sk, int level, int optname, char __user *optval, int optlen);
 extern int	ip_getsockopt(struct sock *sk, int level, int optname, char __user *optval, int __user *optlen);
+extern int	compat_ip_setsockopt(struct sock *sk, int level,
+			int optname, char __user *optval, int optlen);
+extern int	compat_ip_getsockopt(struct sock *sk, int level,
+			int optname, char __user *optval, int __user *optlen);
 extern int	ip_ra_control(struct sock *sk, unsigned char on, void (*destructor)(struct sock *));
 
 extern int 	ip_recv_error(struct sock *sk, struct msghdr *msg, int len);
 extern void	ip_icmp_error(struct sock *sk, struct sk_buff *skb, int err, 
-			      u16 port, u32 info, u8 *payload);
-extern void	ip_local_error(struct sock *sk, int err, u32 daddr, u16 dport,
+			      __be16 port, u32 info, u8 *payload);
+extern void	ip_local_error(struct sock *sk, int err, __be32 daddr, __be16 dport,
 			       u32 info);
 
 /* sysctl helpers - any sysctl which holds a value that ends up being
@@ -347,7 +386,11 @@ int ipv4_doint_and_flush(ctl_table *ctl, int write,
 			 size_t *lenp, loff_t *ppos);
 int ipv4_doint_and_flush_strategy(ctl_table *table, int __user *name, int nlen,
 				  void __user *oldval, size_t __user *oldlenp,
-				  void __user *newval, size_t newlen, 
-				  void **context);
+				  void __user *newval, size_t newlen);
+#ifdef CONFIG_PROC_FS
+extern int ip_misc_proc_init(void);
+#endif
+
+extern struct ctl_table ipv4_table[];
 
 #endif	/* _IP_H */

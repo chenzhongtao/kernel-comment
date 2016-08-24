@@ -7,14 +7,8 @@
 #ifndef _ASM_SERIAL_H
 #define _ASM_SERIAL_H
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 
-#ifdef CONFIG_SH_EC3104
-#include <asm/serial-ec3104.h>
-#elif defined (CONFIG_SH_BIGSUR)
-#include <asm/serial-bigsur.h>
-#else
 /*
  * This assumes you have a 1.8432 MHz clock for your UART.
  *
@@ -29,20 +23,14 @@
 #ifdef CONFIG_HD64465
 #include <asm/hd64465.h>
 
-#define STD_SERIAL_PORT_DEFNS                   \
+#define SERIAL_PORT_DFNS                   \
         /* UART CLK   PORT IRQ     FLAGS        */                      \
         { 0, BASE_BAUD, 0x3F8, HD64465_IRQ_UART, STD_COM_FLAGS }  /* ttyS0 */
 
 #else
 
-#define STD_SERIAL_PORT_DEFNS			\
-	/* UART CLK   PORT IRQ     FLAGS        */			\
-	{ 0, BASE_BAUD, 0x3F8, 4, STD_COM_FLAGS },	/* ttyS0 */	\
-	{ 0, BASE_BAUD, 0x2F8, 3, STD_COM_FLAGS }	/* ttyS1 */
+#define SERIAL_PORT_DFNS
 
 #endif
 
-#define SERIAL_PORT_DFNS STD_SERIAL_PORT_DEFNS
-
-#endif
 #endif /* _ASM_SERIAL_H */

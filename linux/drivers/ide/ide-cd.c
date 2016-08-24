@@ -120,7 +120,7 @@
  *                       Reformat to match kernel tabbing style.
  *                       Add CDROM_GET_UPC ioctl.
  * 3.10  Apr 10, 1996 -- Fix compilation error with STANDARD_ATAPI.
- * 3.11  Apr 29, 1996 -- Patch from Heiko Eissfeldt <heiko@colossus.escape.de>
+ * 3.11  Apr 29, 1996 -- Patch from Heiko Eißfeldt <heiko@colossus.escape.de>
  *                       to remove redundant verify_area calls.
  * 3.12  May  7, 1996 -- Rudimentary changer support.  Based on patches
  *                        from Gerhard Zuber <zuber@berlin.snafu.de>.
@@ -256,7 +256,7 @@
  *			- Minimize the TOC reading - only do it when we
  *			  know a media change has occurred.
  *			- Moved all the CDROMREADx ioctls to the Uniform layer.
- *			- Heiko Eissfeldt <heiko@colossus.escape.de> supplied
+ *			- Heiko Eißfeldt <heiko@colossus.escape.de> supplied
  *			  some fixes for CDI.
  *			- CD-ROM leaving door locked fix from Andries
  *			  Brouwer <Andries.Brouwer@cwi.nl>
@@ -301,7 +301,6 @@
  
 #define IDECD_VERSION "4.61"
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -313,6 +312,7 @@
 #include <linux/cdrom.h>
 #include <linux/ide.h>
 #include <linux/completion.h>
+#include <linux/mutex.h>
 
 #include <scsi/scsi.h>	/* For SCSI -> ATAPI command conversion */
 
@@ -323,6 +323,34 @@
 #include <asm/unaligned.h>
 
 #include "ide-cd.h"
+
+static DEFINE_MUTEX(idecd_ref_mutex);
+
+#define to_ide_cd(obj) container_of(obj, struct cdrom_info, kref) 
+
+#define ide_cd_g(disk) \
+	container_of((disk)->private_data, struct cdrom_info, driver)
+
+static struct cdrom_info *ide_cd_get(struct gendisk *disk)
+{
+	struct cdrom_info *cd = NULL;
+
+	mutex_lock(&idecd_ref_mutex);
+	cd = ide_cd_g(disk);
+	if (cd)
+		kref_get(&cd->kref);
+	mutex_unlock(&idecd_ref_mutex);
+	return cd;
+}
+
+static void ide_cd_release(struct kref *);
+
+static void ide_cd_put(struct cdrom_info *cd)
+{
+	mutex_lock(&idecd_ref_mutex);
+	kref_put(&cd->kref, ide_cd_release);
+	mutex_unlock(&idecd_ref_mutex);
+}
 
 /****************************************************************************
  * Generic packet command support and error handling routines.
@@ -344,7 +372,7 @@ static int cdrom_log_sense(ide_drive_t *drive, struct request *rq,
 {
 	int log = 0;
 
-	if (!sense || !rq || (rq->flags & REQ_QUIET))
+	if (!sense || !rq || (rq->cmd_flags & REQ_QUIET))
 		return 0;
 
 	switch (sense->sense_key) {
@@ -366,7 +394,8 @@ static int cdrom_log_sense(ide_drive_t *drive, struct request *rq,
 			 * we cannot reliably check if drive can auto-close
 			 */
 			if (rq->cmd[0] == GPCMD_START_STOP_UNIT && sense->asc == 0x24)
-				log = 0;
+				break;
+			log = 1;
 			break;
 		case UNIT_ATTENTION:
 			/*
@@ -388,6 +417,11 @@ void cdrom_analyze_sense_data(ide_drive_t *drive,
 			      struct request *failed_command,
 			      struct request_sense *sense)
 {
+	unsigned long sector;
+	unsigned long bio_sectors;
+	unsigned long valid;
+	struct cdrom_info *info = drive->driver_data;
+
 	if (!cdrom_log_sense(drive, failed_command, sense))
 		return;
 
@@ -400,10 +434,41 @@ void cdrom_analyze_sense_data(ide_drive_t *drive,
 		if (sense->sense_key == 0x05 && sense->asc == 0x24)
 			return;
 
+ 	if (sense->error_code == 0x70) {	/* Current Error */
+ 		switch(sense->sense_key) {
+		case MEDIUM_ERROR:
+		case VOLUME_OVERFLOW:
+		case ILLEGAL_REQUEST:
+			if (!sense->valid)
+				break;
+			if (failed_command == NULL ||
+					!blk_fs_request(failed_command))
+				break;
+			sector = (sense->information[0] << 24) |
+				 (sense->information[1] << 16) |
+				 (sense->information[2] <<  8) |
+				 (sense->information[3]);
+
+			bio_sectors = bio_sectors(failed_command->bio);
+			if (bio_sectors < 4)
+				bio_sectors = 4;
+			if (drive->queue->hardsect_size == 2048)
+				sector <<= 2;	/* Device sector size is 2K */
+			sector &= ~(bio_sectors -1);
+			valid = (sector - failed_command->sector) << 9;
+
+			if (valid < 0)
+				valid = 0;
+			if (sector < get_capacity(info->disk) &&
+				drive->probed_capacity - sector < 4 * 75) {
+				set_capacity(info->disk, sector);
+			}
+ 		}
+ 	}
 #if VERBOSE_IDE_CD_ERRORS
 	{
 		int i;
-		const char *s;
+		const char *s = "bad sense key!";
 		char buf[80];
 
 		printk ("ATAPI device %s:\n", drive->name);
@@ -416,10 +481,8 @@ void cdrom_analyze_sense_data(ide_drive_t *drive,
 		else
 			printk("  Unknown Error Type: ");
 
-		if (sense->sense_key < ARY_LEN(sense_key_texts))
+		if (sense->sense_key < ARRAY_SIZE(sense_key_texts))
 			s = sense_key_texts[sense->sense_key];
-		else
-			s = "bad sense key!";
 
 		printk("%s -- (Sense key=0x%02x)\n", s, sense->sense_key);
 
@@ -428,7 +491,7 @@ void cdrom_analyze_sense_data(ide_drive_t *drive,
 				 sense->ascq);
 			s = buf;
 		} else {
-			int lo = 0, mid, hi = ARY_LEN(sense_data_texts);
+			int lo = 0, mid, hi = ARRAY_SIZE(sense_data_texts);
 			unsigned long key = (sense->sense_key << 16);
 			key |= (sense->asc << 8);
 			if (!(sense->ascq >= 0x80 && sense->ascq <= 0xdd))
@@ -461,7 +524,7 @@ void cdrom_analyze_sense_data(ide_drive_t *drive,
 
 		if (failed_command != NULL) {
 
-			int lo=0, mid, hi= ARY_LEN (packet_command_texts);
+			int lo=0, mid, hi= ARRAY_SIZE(packet_command_texts);
 			s = NULL;
 
 			while (hi > lo) {
@@ -529,10 +592,13 @@ void cdrom_analyze_sense_data(ide_drive_t *drive,
 /*
  * Initialize a ide-cd packet command request
  */
-static void cdrom_prepare_request(struct request *rq)
+static void cdrom_prepare_request(ide_drive_t *drive, struct request *rq)
 {
+	struct cdrom_info *cd = drive->driver_data;
+
 	ide_init_drive_cmd(rq);
-	rq->flags = REQ_PC;
+	rq->cmd_type = REQ_TYPE_ATA_PC;
+	rq->rq_disk = cd->disk;
 }
 
 static void cdrom_queue_request_sense(ide_drive_t *drive, void *sense,
@@ -545,13 +611,13 @@ static void cdrom_queue_request_sense(ide_drive_t *drive, void *sense,
 		sense = &info->sense_data;
 
 	/* stuff the sense request in front of our current request */
-	cdrom_prepare_request(rq);
+	cdrom_prepare_request(drive, rq);
 
 	rq->data = sense;
 	rq->cmd[0] = GPCMD_REQUEST_SENSE;
 	rq->cmd[4] = rq->data_len = 18;
 
-	rq->flags = REQ_SENSE;
+	rq->cmd_type = REQ_TYPE_SENSE;
 
 	/* NOTE! Save the failed command in "rq->buffer" */
 	rq->buffer = (void *) failed_command;
@@ -564,10 +630,10 @@ static void cdrom_end_request (ide_drive_t *drive, int uptodate)
 	struct request *rq = HWGROUP(drive)->rq;
 	int nsectors = rq->hard_cur_sectors;
 
-	if ((rq->flags & REQ_SENSE) && uptodate) {
+	if (blk_sense_request(rq) && uptodate) {
 		/*
-		 * For REQ_SENSE, "rq->buffer" points to the original failed
-		 * request
+		 * For REQ_TYPE_SENSE, "rq->buffer" points to the original
+		 * failed request
 		 */
 		struct request *failed = (struct request *) rq->buffer;
 		struct cdrom_info *info = drive->driver_data;
@@ -579,17 +645,23 @@ static void cdrom_end_request (ide_drive_t *drive, int uptodate)
 				sense = failed->sense;
 				failed->sense_len = rq->sense_len;
 			}
-
+			cdrom_analyze_sense_data(drive, failed, sense);
 			/*
 			 * now end failed request
 			 */
-			spin_lock_irqsave(&ide_lock, flags);
-			end_that_request_chunk(failed, 0, failed->data_len);
-			end_that_request_last(failed);
-			spin_unlock_irqrestore(&ide_lock, flags);
-		}
-
-		cdrom_analyze_sense_data(drive, failed, sense);
+			if (blk_fs_request(failed)) {
+				if (ide_end_dequeued_request(drive, failed, 0,
+						failed->hard_nr_sectors))
+					BUG();
+			} else {
+				spin_lock_irqsave(&ide_lock, flags);
+				end_that_request_chunk(failed, 0,
+							failed->data_len);
+				end_that_request_last(failed, 0);
+				spin_unlock_irqrestore(&ide_lock, flags);
+			}
+		} else
+			cdrom_analyze_sense_data(drive, NULL, sense);
 	}
 
 	if (!rq->current_nr_sectors && blk_fs_request(rq))
@@ -601,6 +673,13 @@ static void cdrom_end_request (ide_drive_t *drive, int uptodate)
 		nsectors = 1;
 
 	ide_end_request(drive, uptodate, nsectors);
+}
+
+static void ide_dump_status_no_sense(ide_drive_t *drive, const char *msg, u8 stat)
+{
+	if (stat & 0x80)
+		return;
+	ide_dump_status(drive, msg, stat);
 }
 
 /* Returns 0 if the request should be continued.
@@ -627,17 +706,17 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 		return 1;
 	}
 
-	if (rq->flags & REQ_SENSE) {
+	if (blk_sense_request(rq)) {
 		/* We got an error trying to get sense info
 		   from the drive (probably while trying
 		   to recover from a former error).  Just give up. */
 
-		rq->flags |= REQ_FAILED;
+		rq->cmd_flags |= REQ_FAILED;
 		cdrom_end_request(drive, 0);
 		ide_error(drive, "request sense failure", stat);
 		return 1;
 
-	} else if (rq->flags & (REQ_PC | REQ_BLOCK_PC)) {
+	} else if (blk_pc_request(rq) || rq->cmd_type == REQ_TYPE_ATA_PC) {
 		/* All other functions, except for READ. */
 		unsigned long flags;
 
@@ -645,7 +724,7 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 		 * if we have an error, pass back CHECK_CONDITION as the
 		 * scsi status byte
 		 */
-		if ((rq->flags & REQ_BLOCK_PC) && !rq->errors)
+		if (blk_pc_request(rq) && !rq->errors)
 			rq->errors = SAM_STAT_CHECK_CONDITION;
 
 		/* Check for tray open. */
@@ -656,12 +735,21 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 			cdrom_saw_media_change (drive);
 			/*printk("%s: media changed\n",drive->name);*/
 			return 0;
-		} else if (!(rq->flags & REQ_QUIET)) {
+ 		} else if ((sense_key == ILLEGAL_REQUEST) &&
+ 			   (rq->cmd[0] == GPCMD_START_STOP_UNIT)) {
+ 			/*
+ 			 * Don't print error message for this condition--
+ 			 * SFF8090i indicates that 5/24/00 is the correct
+ 			 * response to a request to close the tray if the
+ 			 * drive doesn't have that capability.
+ 			 * cdrom_log_sense() knows this!
+ 			 */
+		} else if (!(rq->cmd_flags & REQ_QUIET)) {
 			/* Otherwise, print an error. */
 			ide_dump_status(drive, "packet command error", stat);
 		}
 		
-		rq->flags |= REQ_FAILED;
+		rq->cmd_flags |= REQ_FAILED;
 
 		/*
 		 * instead of playing games with moving completions around,
@@ -731,16 +819,16 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 			   sense_key == DATA_PROTECT) {
 			/* No point in retrying after an illegal
 			   request or data protect error.*/
-			ide_dump_status (drive, "command error", stat);
+			ide_dump_status_no_sense (drive, "command error", stat);
 			do_end_request = 1;
 		} else if (sense_key == MEDIUM_ERROR) {
 			/* No point in re-trying a zillion times on a bad 
 			 * sector...  If we got here the error is not correctable */
-			ide_dump_status (drive, "media error (bad sector)", stat);
+			ide_dump_status_no_sense (drive, "media error (bad sector)", stat);
 			do_end_request = 1;
 		} else if (sense_key == BLANK_CHECK) {
 			/* Disk appears blank ?? */
-			ide_dump_status (drive, "media error (blank)", stat);
+			ide_dump_status_no_sense (drive, "media error (blank)", stat);
 			do_end_request = 1;
 		} else if ((err & ~ABRT_ERR) != 0) {
 			/* Go to the default handler
@@ -752,13 +840,27 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 			do_end_request = 1;
 		}
 
-		if (do_end_request)
-			cdrom_end_request(drive, 0);
+		/* End a request through request sense analysis when we have
+		   sense data. We need this in order to perform end of media
+		   processing */
 
-		/* If we got a CHECK_CONDITION status,
-		   queue a request sense command. */
-		if ((stat & ERR_STAT) != 0)
-			cdrom_queue_request_sense(drive, NULL, NULL);
+		if (do_end_request) {
+			if (stat & ERR_STAT) {
+				unsigned long flags;
+				spin_lock_irqsave(&ide_lock, flags);
+				blkdev_dequeue_request(rq);
+				HWGROUP(drive)->rq = NULL;
+				spin_unlock_irqrestore(&ide_lock, flags);
+
+				cdrom_queue_request_sense(drive, rq->sense, rq);
+			} else
+				cdrom_end_request(drive, 0);
+		} else {
+			/* If we got a CHECK_CONDITION status,
+			   queue a request sense command. */
+			if (stat & ERR_STAT)
+				cdrom_queue_request_sense(drive, NULL, NULL);
+		}
 	} else {
 		blk_dump_rq_flags(rq, "ide-cd: bad rq");
 		cdrom_end_request(drive, 0);
@@ -788,7 +890,7 @@ static int cdrom_timer_expiry(ide_drive_t *drive)
 			wait = ATAPI_WAIT_PC;
 			break;
 		default:
-			if (!(rq->flags & REQ_QUIET))
+			if (!(rq->cmd_flags & REQ_QUIET))
 				printk(KERN_INFO "ide-cd: cmd 0x%x timed out\n", rq->cmd[0]);
 			wait = 0;
 			break;
@@ -830,6 +932,10 @@ static ide_startstop_t cdrom_start_packet_command(ide_drive_t *drive,
 		HWIF(drive)->OUTB(drive->ctl, IDE_CONTROL_REG);
  
 	if (CDROM_CONFIG_FLAGS (drive)->drq_interrupt) {
+		/* waiting for CDB interrupt, not DMA yet. */
+		if (info->dma)
+			drive->waiting_for_dma = 0;
+
 		/* packet command */
 		ide_execute_command(drive, WIN_PACKETCMD, handler, ATAPI_WAIT_PC, cdrom_timer_expiry);
 		return ide_started;
@@ -872,6 +978,10 @@ static ide_startstop_t cdrom_transfer_packet_command (ide_drive_t *drive,
 		/* Check for errors. */
 		if (cdrom_decode_status(drive, DRQ_STAT, NULL))
 			return ide_stopped;
+
+		/* Ok, next interrupt will be DMA interrupt. */
+		if (info->dma)
+			drive->waiting_for_dma = 1;
 	} else {
 		/* Otherwise, we must wait for DRQ to get set. */
 		if (ide_wait_stat(&startstop, drive, DRQ_STAT,
@@ -951,15 +1061,15 @@ static void cdrom_buffer_sectors (ide_drive_t *drive, unsigned long sector,
  * and attempt to recover if there are problems.  Returns  0 if everything's
  * ok; nonzero if the request has been terminated.
  */
-static inline
+static
 int cdrom_read_check_ireason (ide_drive_t *drive, int len, int ireason)
 {
 	if (ireason == 2)
 		return 0;
 	else if (ireason == 0) {
 		/* Whoops... The drive is expecting to receive data from us! */
-		printk(KERN_ERR "%s: read_intr: Drive wants to transfer data the "
-						"wrong way!\n", drive->name);
+		printk(KERN_ERR "%s: %s: wrong transfer direction!\n",
+				drive->name, __FUNCTION__);
 
 		/* Throw some data at the drive so it doesn't hang
 		   and quit this request. */
@@ -976,8 +1086,8 @@ int cdrom_read_check_ireason (ide_drive_t *drive, int len, int ireason)
 		return 0;
 	} else {
 		/* Drive wants a command packet, or invalid ireason... */
-		printk(KERN_ERR "%s: read_intr: bad interrupt reason %x\n", drive->name,
-								ireason);
+		printk(KERN_ERR "%s: %s: bad interrupt reason 0x%02x\n",
+				drive->name, __FUNCTION__, ireason);
 	}
 
 	cdrom_end_request(drive, 0);
@@ -1002,8 +1112,11 @@ static ide_startstop_t cdrom_read_intr (ide_drive_t *drive)
 	 */
 	if (dma) {
 		info->dma = 0;
-		if ((dma_error = HWIF(drive)->ide_dma_end(drive)))
-			__ide_dma_off(drive);
+		dma_error = HWIF(drive)->ide_dma_end(drive);
+		if (dma_error) {
+			printk(KERN_ERR "%s: DMA read error\n", drive->name);
+			ide_dma_off(drive);
+		}
 	}
 
 	if (cdrom_decode_status(drive, 0, &stat))
@@ -1031,7 +1144,7 @@ static ide_startstop_t cdrom_read_intr (ide_drive_t *drive)
 		if (rq->current_nr_sectors > 0) {
 			printk (KERN_ERR "%s: cdrom_read_intr: data underrun (%d blocks)\n",
 				drive->name, rq->current_nr_sectors);
-			rq->flags |= REQ_FAILED;
+			rq->cmd_flags |= REQ_FAILED;
 			cdrom_end_request(drive, 0);
 		} else
 			cdrom_end_request(drive, 1);
@@ -1263,7 +1376,6 @@ static ide_startstop_t cdrom_start_seek (ide_drive_t *drive, unsigned int block)
 	struct cdrom_info *info = drive->driver_data;
 
 	info->dma = 0;
-	info->cmd = 0;
 	info->start_seek = jiffies;
 	return cdrom_start_packet_command(drive, 0, cdrom_start_seek_continuation);
 }
@@ -1304,8 +1416,6 @@ static ide_startstop_t cdrom_start_read (ide_drive_t *drive, unsigned int block)
 	if (cdrom_read_from_buffer(drive))
 		return ide_stopped;
 
-	blk_attempt_remerge(drive->queue, rq);
-
 	/* Clear the local sector buffer. */
 	info->nsectors_buffered = 0;
 
@@ -1314,8 +1424,6 @@ static ide_startstop_t cdrom_start_read (ide_drive_t *drive, unsigned int block)
 	if ((rq->sector & (sectors_per_frame - 1)) ||
 	    (rq->nr_sectors & (sectors_per_frame - 1)))
 		info->dma = 0;
-
-	info->cmd = READ;
 
 	/* Start sending the read request to the drive. */
 	return cdrom_start_packet_command(drive, 32768, cdrom_start_read_continuation);
@@ -1338,7 +1446,7 @@ static ide_startstop_t cdrom_pc_intr (ide_drive_t *drive)
 		return ide_stopped;
 
 	/* Read the interrupt reason and the transfer length. */
-	ireason = HWIF(drive)->INB(IDE_IREASON_REG);
+	ireason = HWIF(drive)->INB(IDE_IREASON_REG) & 0x3;
 	lowcyl  = HWIF(drive)->INB(IDE_BCOUNTL_REG);
 	highcyl = HWIF(drive)->INB(IDE_BCOUNTH_REG);
 
@@ -1368,7 +1476,7 @@ static ide_startstop_t cdrom_pc_intr (ide_drive_t *drive)
 			printk ("%s: cdrom_pc_intr: data underrun %d\n",
 				drive->name, pc->buflen);
 			*/
-			rq->flags |= REQ_FAILED;
+			rq->cmd_flags |= REQ_FAILED;
 			cdrom_end_request(drive, 0);
 		}
 		return ide_stopped;
@@ -1379,7 +1487,7 @@ static ide_startstop_t cdrom_pc_intr (ide_drive_t *drive)
 	if (thislen > len) thislen = len;
 
 	/* The drive wants to be written to. */
-	if ((ireason & 3) == 0) {
+	if (ireason == 0) {
 		if (!rq->data) {
 			blk_dump_rq_flags(rq, "cdrom_pc_intr, write");
 			goto confused;
@@ -1401,9 +1509,9 @@ static ide_startstop_t cdrom_pc_intr (ide_drive_t *drive)
 	}
 
 	/* Same drill for reading. */
-	else if ((ireason & 3) == 2) {
+	else if (ireason == 2) {
 		if (!rq->data) {
-			blk_dump_rq_flags(rq, "cdrom_pc_intr, write");
+			blk_dump_rq_flags(rq, "cdrom_pc_intr, read");
 			goto confused;
 		}
 		/* Transfer the data. */
@@ -1421,14 +1529,17 @@ static ide_startstop_t cdrom_pc_intr (ide_drive_t *drive)
 		rq->data += thislen;
 		rq->data_len -= thislen;
 
-		if (rq->flags & REQ_SENSE)
+		if (blk_sense_request(rq))
 			rq->sense_len += thislen;
 	} else {
 confused:
 		printk (KERN_ERR "%s: cdrom_pc_intr: The drive "
-			"appears confused (ireason = 0x%02x)\n",
+			"appears confused (ireason = 0x%02x). "
+			"Trying to recover by ending request.\n",
 			drive->name, ireason);
-		rq->flags |= REQ_FAILED;
+		rq->cmd_flags |= REQ_FAILED;
+		cdrom_end_request(drive, 0);
+		return ide_stopped;
 	}
 
 	/* Now we wait for another interrupt. */
@@ -1455,8 +1566,7 @@ static ide_startstop_t cdrom_do_packet_command (ide_drive_t *drive)
 	struct cdrom_info *info = drive->driver_data;
 
 	info->dma = 0;
-	info->cmd = 0;
-	rq->flags &= ~REQ_FAILED;
+	rq->cmd_flags &= ~REQ_FAILED;
 	len = rq->data_len;
 
 	/* Start sending the command to the drive. */
@@ -1464,12 +1574,11 @@ static ide_startstop_t cdrom_do_packet_command (ide_drive_t *drive)
 }
 
 
-static
-int cdrom_queue_packet_command(ide_drive_t *drive, struct request *rq)
+static int cdrom_queue_packet_command(ide_drive_t *drive, struct request *rq)
 {
 	struct request_sense sense;
 	int retries = 10;
-	unsigned int flags = rq->flags;
+	unsigned int flags = rq->cmd_flags;
 
 	if (rq->sense == NULL)
 		rq->sense = &sense;
@@ -1478,14 +1587,14 @@ int cdrom_queue_packet_command(ide_drive_t *drive, struct request *rq)
 	do {
 		int error;
 		unsigned long time = jiffies;
-		rq->flags = flags;
+		rq->cmd_flags = flags;
 
 		error = ide_do_drive_cmd(drive, rq, ide_wait);
 		time = jiffies - time;
 
 		/* FIXME: we should probably abort/retry or something 
 		 * in case of failure */
-		if (rq->flags & REQ_FAILED) {
+		if (rq->cmd_flags & REQ_FAILED) {
 			/* The request failed.  Retry if it was due to a unit
 			   attention status
 			   (usually means media was changed). */
@@ -1507,16 +1616,16 @@ int cdrom_queue_packet_command(ide_drive_t *drive, struct request *rq)
 		}
 
 		/* End of retry loop. */
-	} while ((rq->flags & REQ_FAILED) && retries >= 0);
+	} while ((rq->cmd_flags & REQ_FAILED) && retries >= 0);
 
 	/* Return an error if the command failed. */
-	return (rq->flags & REQ_FAILED) ? -EIO : 0;
+	return (rq->cmd_flags & REQ_FAILED) ? -EIO : 0;
 }
 
 /*
  * Write handling
  */
-static inline int cdrom_write_check_ireason(ide_drive_t *drive, int len, int ireason)
+static int cdrom_write_check_ireason(ide_drive_t *drive, int len, int ireason)
 {
 	/* Two notes about IDE interrupt reason here - 0 means that
 	 * the drive wants to receive data from us, 2 means that
@@ -1526,8 +1635,8 @@ static inline int cdrom_write_check_ireason(ide_drive_t *drive, int len, int ire
 		return 0;
 	else if (ireason == 2) {
 		/* Whoops... The drive wants to send data. */
-		printk(KERN_ERR "%s: write_intr: wrong transfer direction!\n",
-							drive->name);
+		printk(KERN_ERR "%s: %s: wrong transfer direction!\n",
+				drive->name, __FUNCTION__);
 
 		while (len > 0) {
 			int dum = 0;
@@ -1536,37 +1645,12 @@ static inline int cdrom_write_check_ireason(ide_drive_t *drive, int len, int ire
 		}
 	} else {
 		/* Drive wants a command packet, or invalid ireason... */
-		printk(KERN_ERR "%s: write_intr: bad interrupt reason %x\n",
-							drive->name, ireason);
+		printk(KERN_ERR "%s: %s: bad interrupt reason 0x%02x\n",
+				drive->name, __FUNCTION__, ireason);
 	}
 
 	cdrom_end_request(drive, 0);
 	return 1;
-}
-
-static void post_transform_command(struct request *req)
-{
-	u8 *c = req->cmd;
-	char *ibuf;
-
-	if (!blk_pc_request(req))
-		return;
-
-	if (req->bio)
-		ibuf = bio_data(req->bio);
-	else
-		ibuf = req->data;
-
-	if (!ibuf)
-		return;
-
-	/*
-	 * set ansi-revision and response data as atapi
-	 */
-	if (c[0] == GPCMD_INQUIRY) {
-		ibuf[2] |= 2;
-		ibuf[3] = (ibuf[3] & 0xf0) | 2;
-	}
 }
 
 typedef void (xfer_func_t)(ide_drive_t *, void *, u32);
@@ -1603,7 +1687,7 @@ static ide_startstop_t cdrom_newpc_intr(ide_drive_t *drive)
 	if (dma) {
 		if (dma_error) {
 			printk(KERN_ERR "ide-cd: dma error\n");
-			__ide_dma_off(drive);
+			ide_dma_off(drive);
 			return ide_error(drive, "dma error", stat);
 		}
 
@@ -1698,19 +1782,15 @@ static ide_startstop_t cdrom_newpc_intr(ide_drive_t *drive)
 		}
 	}
 
-	if (HWGROUP(drive)->handler != NULL)
-		BUG();
+	BUG_ON(HWGROUP(drive)->handler != NULL);
 
 	ide_set_handler(drive, cdrom_newpc_intr, rq->timeout, NULL);
 	return ide_started;
 
 end_request:
-	if (!rq->data_len)
-		post_transform_command(rq);
-
 	spin_lock_irqsave(&ide_lock, flags);
 	blkdev_dequeue_request(rq);
-	end_that_request_last(rq);
+	end_that_request_last(rq, 1);
 	HWGROUP(drive)->rq = NULL;
 	spin_unlock_irqrestore(&ide_lock, flags);
 	return ide_stopped;
@@ -1728,9 +1808,10 @@ static ide_startstop_t cdrom_write_intr(ide_drive_t *drive)
 	/* Check for errors. */
 	if (dma) {
 		info->dma = 0;
-		if ((dma_error = HWIF(drive)->ide_dma_end(drive))) {
-			printk(KERN_ERR "ide-cd: write dma error\n");
-			__ide_dma_off(drive);
+		dma_error = HWIF(drive)->ide_dma_end(drive);
+		if (dma_error) {
+			printk(KERN_ERR "%s: DMA write error\n", drive->name);
+			ide_dma_off(drive);
 		}
 	}
 
@@ -1749,7 +1830,7 @@ static ide_startstop_t cdrom_write_intr(ide_drive_t *drive)
 	}
 
 	/* Read the interrupt reason and the transfer length. */
-	ireason = HWIF(drive)->INB(IDE_IREASON_REG);
+	ireason = HWIF(drive)->INB(IDE_IREASON_REG) & 0x3;
 	lowcyl  = HWIF(drive)->INB(IDE_BCOUNTL_REG);
 	highcyl = HWIF(drive)->INB(IDE_BCOUNTH_REG);
 
@@ -1762,8 +1843,9 @@ static ide_startstop_t cdrom_write_intr(ide_drive_t *drive)
 		 */
 		uptodate = 1;
 		if (rq->current_nr_sectors > 0) {
-			printk(KERN_ERR "%s: write_intr: data underrun (%d blocks)\n",
-			drive->name, rq->current_nr_sectors);
+			printk(KERN_ERR "%s: %s: data underrun (%d blocks)\n",
+					drive->name, __FUNCTION__,
+					rq->current_nr_sectors);
 			uptodate = 0;
 		}
 		cdrom_end_request(drive, uptodate);
@@ -1783,7 +1865,8 @@ static ide_startstop_t cdrom_write_intr(ide_drive_t *drive)
 		int this_transfer;
 
 		if (!rq->current_nr_sectors) {
-			printk(KERN_ERR "ide-cd: write_intr: oops\n");
+			printk(KERN_ERR "%s: %s: confused, missing data\n",
+					drive->name, __FUNCTION__);
 			break;
 		}
 
@@ -1829,7 +1912,7 @@ static ide_startstop_t cdrom_start_write_cont(ide_drive_t *drive)
 static ide_startstop_t cdrom_start_write(ide_drive_t *drive, struct request *rq)
 {
 	struct cdrom_info *info = drive->driver_data;
-	struct gendisk *g = drive->disk;
+	struct gendisk *g = info->disk;
 	unsigned short sectors_per_frame = queue_hardsect_size(drive->queue) >> SECTOR_BITS;
 
 	/*
@@ -1849,20 +1932,11 @@ static ide_startstop_t cdrom_start_write(ide_drive_t *drive, struct request *rq)
 		return ide_stopped;
 	}
 
-	/*
-	 * for dvd-ram and such media, it's a really big deal to get
-	 * big writes all the time. so scour the queue and attempt to
-	 * remerge requests, often the plugging will not have had time
-	 * to do this properly
-	 */
-	blk_attempt_remerge(drive->queue, rq);
-
 	info->nsectors_buffered = 0;
 
 	/* use dma, if possible. we don't need to check more, since we
 	 * know that the transfer is always (at least!) frame aligned */
 	info->dma = drive->using_dma ? 1 : 0;
-	info->cmd = WRITE;
 
 	info->devinfo.media_written = 1;
 
@@ -1884,10 +1958,9 @@ static ide_startstop_t cdrom_do_block_pc(ide_drive_t *drive, struct request *rq)
 {
 	struct cdrom_info *info = drive->driver_data;
 
-	rq->flags |= REQ_QUIET;
+	rq->cmd_flags |= REQ_QUIET;
 
 	info->dma = 0;
-	info->cmd = 0;
 
 	/*
 	 * sg request
@@ -1896,13 +1969,15 @@ static ide_startstop_t cdrom_do_block_pc(ide_drive_t *drive, struct request *rq)
 		int mask = drive->queue->dma_alignment;
 		unsigned long addr = (unsigned long) page_address(bio_page(rq->bio));
 
-		info->cmd = rq_data_dir(rq);
 		info->dma = drive->using_dma;
 
 		/*
 		 * check if dma is safe
+		 *
+		 * NOTE! The "len" and "addr" checks should possibly have
+		 * separate masks.
 		 */
-		if ((rq->data_len & mask) || (addr & mask))
+		if ((rq->data_len & 15) || (addr & mask))
 			info->dma = 0;
 	}
 
@@ -1943,11 +2018,12 @@ ide_do_rw_cdrom (ide_drive_t *drive, struct request *rq, sector_t block)
 		}
 		info->last_block = block;
 		return action;
-	} else if (rq->flags & (REQ_PC | REQ_SENSE)) {
+	} else if (rq->cmd_type == REQ_TYPE_SENSE ||
+		   rq->cmd_type == REQ_TYPE_ATA_PC) {
 		return cdrom_do_packet_command(drive);
-	} else if (rq->flags & REQ_BLOCK_PC) {
+	} else if (blk_pc_request(rq)) {
 		return cdrom_do_block_pc(drive, rq);
-	} else if (rq->flags & REQ_SPECIAL) {
+	} else if (blk_special_request(rq)) {
 		/*
 		 * right now this can only be a reset...
 		 */
@@ -2021,11 +2097,11 @@ static int cdrom_check_status(ide_drive_t *drive, struct request_sense *sense)
 	struct cdrom_info *info = drive->driver_data;
 	struct cdrom_device_info *cdi = &info->devinfo;
 
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 
 	req.sense = sense;
 	req.cmd[0] = GPCMD_TEST_UNIT_READY;
-	req.flags |= REQ_QUIET;
+	req.cmd_flags |= REQ_QUIET;
 
 #if ! STANDARD_ATAPI
         /* the Sanyo 3 CD changer uses byte 7 of TEST_UNIT_READY to 
@@ -2053,7 +2129,7 @@ cdrom_lockdoor(ide_drive_t *drive, int lockflag, struct request_sense *sense)
 	if (CDROM_CONFIG_FLAGS(drive)->no_doorlock) {
 		stat = 0;
 	} else {
-		cdrom_prepare_request(&req);
+		cdrom_prepare_request(drive, &req);
 		req.sense = sense;
 		req.cmd[0] = GPCMD_PREVENT_ALLOW_MEDIUM_REMOVAL;
 		req.cmd[4] = lockflag ? 1 : 0;
@@ -2097,7 +2173,7 @@ static int cdrom_eject(ide_drive_t *drive, int ejectflag,
 	if (CDROM_STATE_FLAGS(drive)->door_locked && ejectflag)
 		return 0;
 
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 
 	/* only tell drive to close tray if open, if it can do that */
 	if (ejectflag && !CDROM_CONFIG_FLAGS(drive)->close_tray)
@@ -2121,12 +2197,13 @@ static int cdrom_read_capacity(ide_drive_t *drive, unsigned long *capacity,
 	int stat;
 	struct request req;
 
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 
 	req.sense = sense;
 	req.cmd[0] = GPCMD_READ_CDVD_CAPACITY;
 	req.data = (char *)&capbuf;
 	req.data_len = sizeof(capbuf);
+	req.cmd_flags |= REQ_QUIET;
 
 	stat = cdrom_queue_packet_command(drive, &req);
 	if (stat == 0) {
@@ -2144,12 +2221,12 @@ static int cdrom_read_tocentry(ide_drive_t *drive, int trackno, int msf_flag,
 {
 	struct request req;
 
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 
 	req.sense = sense;
 	req.data =  buf;
 	req.data_len = buflen;
-	req.flags |= REQ_QUIET;
+	req.cmd_flags |= REQ_QUIET;
 	req.cmd[0] = GPCMD_READ_TOC_PMA_ATIP;
 	req.cmd[6] = trackno;
 	req.cmd[7] = (buflen >> 8);
@@ -2179,13 +2256,12 @@ static int cdrom_read_toc(ide_drive_t *drive, struct request_sense *sense)
 
 	if (toc == NULL) {
 		/* Try to allocate space. */
-		toc = (struct atapi_toc *) kmalloc (sizeof (struct atapi_toc),
-						    GFP_KERNEL);
-		info->toc = toc;
+		toc = kmalloc(sizeof(struct atapi_toc), GFP_KERNEL);
 		if (toc == NULL) {
 			printk (KERN_ERR "%s: No cdrom TOC buffer!\n", drive->name);
 			return -ENOMEM;
 		}
+		info->toc = toc;
 	}
 
 	/* Check to see if the existing data is still valid.
@@ -2201,14 +2277,18 @@ static int cdrom_read_toc(ide_drive_t *drive, struct request_sense *sense)
 	if (stat)
 		toc->capacity = 0x1fffff;
 
-	set_capacity(drive->disk, toc->capacity * sectors_per_frame);
+	set_capacity(info->disk, toc->capacity * sectors_per_frame);
+	/* Save a private copy of te TOC capacity for error handling */
+	drive->probed_capacity = toc->capacity * sectors_per_frame;
+
 	blk_queue_hardsect_size(drive->queue,
 				sectors_per_frame << SECTOR_BITS);
 
 	/* First read just the header, so we know how long the TOC is. */
 	stat = cdrom_read_tocentry(drive, 0, 1, 0, (char *) &toc->hdr,
 				    sizeof(struct atapi_toc_header), sense);
-	if (stat) return stat;
+	if (stat)
+		return stat;
 
 #if ! STANDARD_ATAPI
 	if (CDROM_CONFIG_FLAGS(drive)->toctracks_as_bcd) {
@@ -2239,7 +2319,7 @@ static int cdrom_read_toc(ide_drive_t *drive, struct request_sense *sense)
 		   If we get an error for the regular case, we assume
 		   a CDI without additional audio tracks. In this case
 		   the readable TOC is empty (CDI tracks are not included)
-		   and only holds the Leadout entry. Heiko Ei�feldt */
+		   and only holds the Leadout entry. Heiko Eißfeldt */
 		ntracks = 0;
 		stat = cdrom_read_tocentry(drive, CDROM_LEADOUT, 1, 0,
 					   (char *)&toc->hdr,
@@ -2292,7 +2372,8 @@ static int cdrom_read_toc(ide_drive_t *drive, struct request_sense *sense)
 		/* Read the multisession information. */
 		stat = cdrom_read_tocentry(drive, 0, 0, 1, (char *)&ms_tmp,
 					   sizeof(ms_tmp), sense);
-		if (stat) return stat;
+		if (stat)
+			return stat;
 
 		toc->last_session_lba = be32_to_cpu(ms_tmp.ent.addr.lba);
 	} else {
@@ -2321,7 +2402,8 @@ static int cdrom_read_toc(ide_drive_t *drive, struct request_sense *sense)
 	stat = cdrom_get_last_written(cdi, &last_written);
 	if (!stat && (last_written > toc->capacity)) {
 		toc->capacity = last_written;
-		set_capacity(drive->disk, toc->capacity * sectors_per_frame);
+		set_capacity(info->disk, toc->capacity * sectors_per_frame);
+		drive->probed_capacity = toc->capacity * sectors_per_frame;
 	}
 
 	/* Remember that we've read this stuff. */
@@ -2336,7 +2418,7 @@ static int cdrom_read_subchannel(ide_drive_t *drive, int format, char *buf,
 {
 	struct request req;
 
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 
 	req.sense = sense;
 	req.data = buf;
@@ -2356,7 +2438,7 @@ static int cdrom_select_speed(ide_drive_t *drive, int speed,
 			      struct request_sense *sense)
 {
 	struct request req;
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 
 	req.sense = sense;
 	if (speed == 0)
@@ -2386,7 +2468,7 @@ static int cdrom_play_audio(ide_drive_t *drive, int lba_start, int lba_end)
 	struct request_sense sense;
 	struct request req;
 
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 
 	req.sense = &sense;
 	req.cmd[0] = GPCMD_PLAY_AUDIO_MSF;
@@ -2428,7 +2510,7 @@ static int ide_cdrom_packet(struct cdrom_device_info *cdi,
 			    struct packet_command *cgc)
 {
 	struct request req;
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 
 	if (cgc->timeout <= 0)
 		cgc->timeout = ATAPI_WAIT_PC;
@@ -2436,7 +2518,7 @@ static int ide_cdrom_packet(struct cdrom_device_info *cdi,
 	/* here we queue the commands from the uniform CD-ROM
 	   layer. the packet must be complete, as we do not
 	   touch it at all. */
-	cdrom_prepare_request(&req);
+	cdrom_prepare_request(drive, &req);
 	memcpy(req.cmd, cgc->cmd, CDROM_PACKET_SIZE);
 	if (cgc->sense)
 		memset(cgc->sense, 0, sizeof(struct request_sense));
@@ -2445,7 +2527,7 @@ static int ide_cdrom_packet(struct cdrom_device_info *cdi,
 	req.timeout = cgc->timeout;
 
 	if (cgc->quiet)
-		req.flags |= REQ_QUIET;
+		req.cmd_flags |= REQ_QUIET;
 
 	req.sense = cgc->sense;
 	cgc->stat = cdrom_queue_packet_command(drive, &req);
@@ -2455,57 +2537,11 @@ static int ide_cdrom_packet(struct cdrom_device_info *cdi,
 }
 
 static
-int ide_cdrom_dev_ioctl (struct cdrom_device_info *cdi,
-			 unsigned int cmd, unsigned long arg)
-{
-	struct packet_command cgc;
-	char buffer[16];
-	int stat;
-
-	init_cdrom_command(&cgc, buffer, sizeof(buffer), CGC_DATA_UNKNOWN);
-
-	/* These will be moved into the Uniform layer shortly... */
-	switch (cmd) {
- 	case CDROMSETSPINDOWN: {
- 		char spindown;
- 
- 		if (copy_from_user(&spindown, (void __user *) arg, sizeof(char)))
-			return -EFAULT;
- 
-                if ((stat = cdrom_mode_sense(cdi, &cgc, GPMODE_CDROM_PAGE, 0)))
-			return stat;
-
- 		buffer[11] = (buffer[11] & 0xf0) | (spindown & 0x0f);
-
- 		return cdrom_mode_select(cdi, &cgc);
- 	} 
- 
- 	case CDROMGETSPINDOWN: {
- 		char spindown;
- 
-                if ((stat = cdrom_mode_sense(cdi, &cgc, GPMODE_CDROM_PAGE, 0)))
-			return stat;
- 
- 		spindown = buffer[11] & 0x0f;
- 
-		if (copy_to_user((void __user *) arg, &spindown, sizeof (char)))
-			return -EFAULT;
- 
- 		return 0;
- 	}
-  
-	default:
-		return -EINVAL;
-	}
-
-}
-
-static
 int ide_cdrom_audio_ioctl (struct cdrom_device_info *cdi,
 			   unsigned int cmd, void *arg)
 			   
 {
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	struct cdrom_info *info = drive->driver_data;
 	int stat;
 
@@ -2516,7 +2552,7 @@ int ide_cdrom_audio_ioctl (struct cdrom_device_info *cdi,
 	 */
 	case CDROMPLAYTRKIND: {
 		unsigned long lba_start, lba_end;
-		struct cdrom_ti *ti = (struct cdrom_ti *)arg;
+		struct cdrom_ti *ti = arg;
 		struct atapi_toc_entry *first_toc, *last_toc;
 
 		stat = cdrom_get_toc_entry(drive, ti->cdti_trk0, &first_toc);
@@ -2539,12 +2575,13 @@ int ide_cdrom_audio_ioctl (struct cdrom_device_info *cdi,
 	}
 
 	case CDROMREADTOCHDR: {
-		struct cdrom_tochdr *tochdr = (struct cdrom_tochdr *) arg;
+		struct cdrom_tochdr *tochdr = arg;
 		struct atapi_toc *toc;
 
 		/* Make sure our saved TOC is valid. */
 		stat = cdrom_read_toc(drive, NULL);
-		if (stat) return stat;
+		if (stat)
+			return stat;
 
 		toc = info->toc;
 		tochdr->cdth_trk0 = toc->hdr.first_track;
@@ -2554,11 +2591,12 @@ int ide_cdrom_audio_ioctl (struct cdrom_device_info *cdi,
 	}
 
 	case CDROMREADTOCENTRY: {
-		struct cdrom_tocentry *tocentry = (struct cdrom_tocentry*) arg;
+		struct cdrom_tocentry *tocentry = arg;
 		struct atapi_toc_entry *toce;
 
 		stat = cdrom_get_toc_entry(drive, tocentry->cdte_track, &toce);
-		if (stat) return stat;
+		if (stat)
+			return stat;
 
 		tocentry->cdte_ctrl = toce->control;
 		tocentry->cdte_adr  = toce->adr;
@@ -2581,13 +2619,14 @@ int ide_cdrom_audio_ioctl (struct cdrom_device_info *cdi,
 static
 int ide_cdrom_reset (struct cdrom_device_info *cdi)
 {
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	struct request_sense sense;
 	struct request req;
 	int ret;
 
-	cdrom_prepare_request(&req);
-	req.flags = REQ_SPECIAL | REQ_QUIET;
+	cdrom_prepare_request(drive, &req);
+	req.cmd_type = REQ_TYPE_SPECIAL;
+	req.cmd_flags = REQ_QUIET;
 	ret = ide_do_drive_cmd(drive, &req, ide_wait);
 
 	/*
@@ -2604,12 +2643,13 @@ int ide_cdrom_reset (struct cdrom_device_info *cdi)
 static
 int ide_cdrom_tray_move (struct cdrom_device_info *cdi, int position)
 {
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	struct request_sense sense;
 
 	if (position) {
 		int stat = cdrom_lockdoor(drive, 0, &sense);
-		if (stat) return stat;
+		if (stat)
+			return stat;
 	}
 
 	return cdrom_eject(drive, !position, &sense);
@@ -2618,21 +2658,68 @@ int ide_cdrom_tray_move (struct cdrom_device_info *cdi, int position)
 static
 int ide_cdrom_lock_door (struct cdrom_device_info *cdi, int lock)
 {
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	return cdrom_lockdoor(drive, lock, NULL);
+}
+
+static
+int ide_cdrom_get_capabilities(ide_drive_t *drive, struct atapi_capabilities_page *cap)
+{
+	struct cdrom_info *info = drive->driver_data;
+	struct cdrom_device_info *cdi = &info->devinfo;
+	struct packet_command cgc;
+	int stat, attempts = 3, size = sizeof(*cap);
+
+	/*
+	 * ACER50 (and others?) require the full spec length mode sense
+	 * page capabilities size, but older drives break.
+	 */
+	if (!(!strcmp(drive->id->model, "ATAPI CD ROM DRIVE 50X MAX") ||
+	    !strcmp(drive->id->model, "WPI CDS-32X")))
+		size -= sizeof(cap->pad);
+
+	init_cdrom_command(&cgc, cap, size, CGC_DATA_UNKNOWN);
+	do { /* we seem to get stat=0x01,err=0x00 the first time (??) */
+		stat = cdrom_mode_sense(cdi, &cgc, GPMODE_CAPABILITIES_PAGE, 0);
+		if (!stat)
+			break;
+	} while (--attempts);
+	return stat;
+}
+
+static
+void ide_cdrom_update_speed (ide_drive_t *drive, struct atapi_capabilities_page *cap)
+{
+	/* The ACER/AOpen 24X cdrom has the speed fields byte-swapped */
+	if (!drive->id->model[0] &&
+	    !strncmp(drive->id->fw_rev, "241N", 4)) {
+		CDROM_STATE_FLAGS(drive)->current_speed  =
+			(le16_to_cpu(cap->curspeed) + (176/2)) / 176;
+		CDROM_CONFIG_FLAGS(drive)->max_speed =
+			(le16_to_cpu(cap->maxspeed) + (176/2)) / 176;
+	} else {
+		CDROM_STATE_FLAGS(drive)->current_speed  =
+			(be16_to_cpu(cap->curspeed) + (176/2)) / 176;
+		CDROM_CONFIG_FLAGS(drive)->max_speed =
+			(be16_to_cpu(cap->maxspeed) + (176/2)) / 176;
+	}
 }
 
 static
 int ide_cdrom_select_speed (struct cdrom_device_info *cdi, int speed)
 {
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	struct request_sense sense;
+	struct atapi_capabilities_page cap;
 	int stat;
 
 	if ((stat = cdrom_select_speed(drive, speed, &sense)) < 0)
 		return stat;
 
-        cdi->speed = CDROM_STATE_FLAGS(drive)->current_speed;
+	if (!ide_cdrom_get_capabilities(drive, &cap)) {
+		ide_cdrom_update_speed(drive, &cap);
+		cdi->speed = CDROM_STATE_FLAGS(drive)->current_speed;
+	}
         return 0;
 }
 
@@ -2644,7 +2731,7 @@ int ide_cdrom_select_speed (struct cdrom_device_info *cdi, int speed)
 static
 int ide_cdrom_drive_status (struct cdrom_device_info *cdi, int slot_nr)
 {
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	struct media_event_desc med;
 	struct request_sense sense;
 	int stat;
@@ -2674,14 +2761,11 @@ int ide_cdrom_drive_status (struct cdrom_device_info *cdi, int slot_nr)
 	 * any other way to detect this...
 	 */
 	if (sense.sense_key == NOT_READY) {
-		if (sense.asc == 0x3a) {
-			if (sense.ascq == 1)
-				return CDS_NO_DISC;
-			else if (sense.ascq == 0 || sense.ascq == 2)
-				return CDS_TRAY_OPEN;
-		}
+		if (sense.asc == 0x3a && sense.ascq == 1)
+			return CDS_NO_DISC;
+		else
+			return CDS_TRAY_OPEN;
 	}
-
 	return CDS_DRIVE_NOT_READY;
 }
 
@@ -2690,7 +2774,7 @@ int ide_cdrom_get_last_session (struct cdrom_device_info *cdi,
 				struct cdrom_multisession *ms_info)
 {
 	struct atapi_toc *toc;
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	struct cdrom_info *info = drive->driver_data;
 	struct request_sense sense;
 	int ret;
@@ -2712,7 +2796,7 @@ int ide_cdrom_get_mcn (struct cdrom_device_info *cdi,
 {
 	int stat;
 	char mcnbuf[24];
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 
 /* get MCN */
 	if ((stat = cdrom_read_subchannel(drive, 2, mcnbuf, sizeof (mcnbuf), NULL)))
@@ -2736,7 +2820,7 @@ static
 int ide_cdrom_check_media_change_real (struct cdrom_device_info *cdi,
 				       int slot_nr)
 {
-	ide_drive_t *drive = (ide_drive_t*) cdi->handle;
+	ide_drive_t *drive = cdi->handle;
 	int retval;
 	
 	if (slot_nr == CDSL_CURRENT) {
@@ -2786,12 +2870,11 @@ static struct cdrom_device_ops ide_cdrom_dops = {
 	.get_mcn		= ide_cdrom_get_mcn,
 	.reset			= ide_cdrom_reset,
 	.audio_ioctl		= ide_cdrom_audio_ioctl,
-	.dev_ioctl		= ide_cdrom_dev_ioctl,
 	.capability		= CDC_CLOSE_TRAY | CDC_OPEN_TRAY | CDC_LOCK |
 				CDC_SELECT_SPEED | CDC_SELECT_DISC |
 				CDC_MULTI_SESSION | CDC_MCN |
 				CDC_MEDIA_CHANGED | CDC_PLAY_AUDIO | CDC_RESET |
-				CDC_IOCTLS | CDC_DRIVE_STATUS | CDC_CD_R |
+				CDC_DRIVE_STATUS | CDC_CD_R |
 				CDC_CD_RW | CDC_DVD | CDC_DVD_R| CDC_DVD_RAM |
 				CDC_GENERIC_PACKET | CDC_MO_DRIVE | CDC_MRW |
 				CDC_MRW_W | CDC_RAM,
@@ -2807,7 +2890,7 @@ static int ide_cdrom_register (ide_drive_t *drive, int nslots)
 	devinfo->mask = 0;
 	devinfo->speed = CDROM_STATE_FLAGS(drive)->current_speed;
 	devinfo->capacity = nslots;
-	devinfo->handle = (void *) drive;
+	devinfo->handle = drive;
 	strcpy(devinfo->name, drive->name);
 	
 	/* set capability mask to match the probe. */
@@ -2829,34 +2912,14 @@ static int ide_cdrom_register (ide_drive_t *drive, int nslots)
 		devinfo->mask |= CDC_CLOSE_TRAY;
 	if (!CDROM_CONFIG_FLAGS(drive)->mo_drive)
 		devinfo->mask |= CDC_MO_DRIVE;
+	if (!CDROM_CONFIG_FLAGS(drive)->ram)
+		devinfo->mask |= CDC_RAM;
 
-	devinfo->disk = drive->disk;
+	if (CDROM_CONFIG_FLAGS(drive)->no_speed_select)
+		devinfo->mask |= CDC_SELECT_SPEED;
+
+	devinfo->disk = info->disk;
 	return register_cdrom(devinfo);
-}
-
-static
-int ide_cdrom_get_capabilities(ide_drive_t *drive, struct atapi_capabilities_page *cap)
-{
-	struct cdrom_info *info = drive->driver_data;
-	struct cdrom_device_info *cdi = &info->devinfo;
-	struct packet_command cgc;
-	int stat, attempts = 3, size = sizeof(*cap);
-
-	/*
-	 * ACER50 (and others?) require the full spec length mode sense
-	 * page capabilities size, but older drives break.
-	 */
-	if (!(!strcmp(drive->id->model, "ATAPI CD ROM DRIVE 50X MAX") ||
-	    !strcmp(drive->id->model, "WPI CDS-32X")))
-		size -= sizeof(cap->pad);
-
-	init_cdrom_command(&cgc, cap, size, CGC_DATA_UNKNOWN);
-	do { /* we seem to get stat=0x01,err=0x00 the first time (??) */
-		stat = cdrom_mode_sense(cdi, &cgc, GPMODE_CAPABILITIES_PAGE, 0);
-		if (!stat)
-			break;
-	} while (--attempts);
-	return stat;
 }
 
 static
@@ -2888,7 +2951,7 @@ int ide_cdrom_probe_capabilities (ide_drive_t *drive)
 	 * registered with the Uniform layer yet, it can't do this.
 	 * Same goes for cdi->ops.
 	 */
-	cdi->handle = (ide_drive_t *) drive;
+	cdi->handle = drive;
 	cdi->ops = &ide_cdrom_dops;
 
 	if (ide_cdrom_get_capabilities(drive, &cap))
@@ -2944,20 +3007,7 @@ int ide_cdrom_probe_capabilities (ide_drive_t *drive)
 		}
 	}
 
-	/* The ACER/AOpen 24X cdrom has the speed fields byte-swapped */
-	if (!drive->id->model[0] &&
-	    !strncmp(drive->id->fw_rev, "241N", 4)) {
-		CDROM_STATE_FLAGS(drive)->current_speed  = 
-			(((unsigned int)cap.curspeed) + (176/2)) / 176;
-		CDROM_CONFIG_FLAGS(drive)->max_speed = 
-			(((unsigned int)cap.maxspeed) + (176/2)) / 176;
-	} else {
-		CDROM_STATE_FLAGS(drive)->current_speed  = 
-			(ntohs(cap.curspeed) + (176/2)) / 176;
-		CDROM_CONFIG_FLAGS(drive)->max_speed = 
-			(ntohs(cap.maxspeed) + (176/2)) / 176;
-	}
-
+	ide_cdrom_update_speed(drive, &cap);
 	/* don't print speed if the drive reported 0.
 	 */
 	printk(KERN_INFO "%s: ATAPI", drive->name);
@@ -2980,25 +3030,24 @@ int ide_cdrom_probe_capabilities (ide_drive_t *drive)
         else 	
         	printk(" drive");
 
-	printk(", %dkB Cache", be16_to_cpu(cap.buffer_size));
-
-	if (drive->using_dma)
-		ide_dma_verbose(drive);
-
-	printk("\n");
+	printk(KERN_CONT ", %dkB Cache\n", be16_to_cpu(cap.buffer_size));
 
 	return nslots;
 }
 
+#ifdef CONFIG_IDE_PROC_FS
 static void ide_cdrom_add_settings(ide_drive_t *drive)
 {
-	ide_add_setting(drive,	"dsc_overlap",		SETTING_RW, -1, -1, TYPE_BYTE, 0, 1, 1,	1, &drive->dsc_overlap, NULL);
+	ide_add_setting(drive, "dsc_overlap", SETTING_RW, TYPE_BYTE, 0, 1, 1, 1, &drive->dsc_overlap, NULL);
 }
+#else
+static inline void ide_cdrom_add_settings(ide_drive_t *drive) { ; }
+#endif
 
 /*
  * standard prep_rq_fn that builds 10 byte cmds
  */
-static int ide_cdrom_prep_fs(request_queue_t *q, struct request *rq)
+static int ide_cdrom_prep_fs(struct request_queue *q, struct request *rq)
 {
 	int hard_sect = queue_hardsect_size(q);
 	long block = (long)rq->hard_sector / (hard_sect >> 9);
@@ -3064,11 +3113,11 @@ static int ide_cdrom_prep_pc(struct request *rq)
 	return BLKPREP_OK;
 }
 
-static int ide_cdrom_prep_fn(request_queue_t *q, struct request *rq)
+static int ide_cdrom_prep_fn(struct request_queue *q, struct request *rq)
 {
-	if (rq->flags & REQ_CMD)
+	if (blk_fs_request(rq))
 		return ide_cdrom_prep_fs(q, rq);
-	else if (rq->flags & REQ_BLOCK_PC)
+	else if (blk_pc_request(rq))
 		return ide_cdrom_prep_pc(rq);
 
 	return 0;
@@ -3088,7 +3137,6 @@ int ide_cdrom_setup (ide_drive_t *drive)
 		drive->queue->unplug_delay = 1;
 
 	drive->special.all	= 0;
-	drive->ready_stat	= 0;
 
 	CDROM_STATE_FLAGS(drive)->media_changed = 1;
 	CDROM_STATE_FLAGS(drive)->toc_valid     = 0;
@@ -3122,7 +3170,7 @@ int ide_cdrom_setup (ide_drive_t *drive)
 		CDROM_CONFIG_FLAGS(drive)->limit_nframes = 1;
 	/* the 3231 model does not support the SET_CD_SPEED command */
 	else if (!strcmp(drive->id->model, "SAMSUNG CD-ROM SCR-3231"))
-		cdi->mask |= CDC_SELECT_SPEED;
+		CDROM_CONFIG_FLAGS(drive)->no_speed_select = 1;
 
 #if ! STANDARD_ATAPI
 	/* by default Sanyo 3 CD changer support is turned off and
@@ -3193,14 +3241,9 @@ int ide_cdrom_setup (ide_drive_t *drive)
 	 */
 	blk_queue_hardsect_size(drive->queue, CD_FRAMESIZE);
 
-#if 0
-	drive->dsc_overlap = (HWIF(drive)->no_dsc) ? 0 : 1;
-	if (HWIF(drive)->no_dsc) {
-		printk(KERN_INFO "ide-cd: %s: disabling DSC overlap\n",
-			drive->name);
-		drive->dsc_overlap = 0;
-	}
-#endif
+	if (drive->autotune == IDE_TUNE_DEFAULT ||
+	    drive->autotune == IDE_TUNE_AUTO)
+		drive->dsc_overlap = (drive->next != drive);
 
 	if (ide_cdrom_register(drive, nslots)) {
 		printk (KERN_ERR "%s: ide_cdrom_setup failed to register device with the cdrom driver.\n", drive->name);
@@ -3211,6 +3254,7 @@ int ide_cdrom_setup (ide_drive_t *drive)
 	return 0;
 }
 
+#ifdef CONFIG_IDE_PROC_FS
 static
 sector_t ide_cdrom_capacity (ide_drive_t *drive)
 {
@@ -3221,114 +3265,148 @@ sector_t ide_cdrom_capacity (ide_drive_t *drive)
 
 	return capacity * sectors_per_frame;
 }
+#endif
 
-static
-int ide_cdrom_cleanup(ide_drive_t *drive)
+static void ide_cd_remove(ide_drive_t *drive)
 {
 	struct cdrom_info *info = drive->driver_data;
-	struct cdrom_device_info *devinfo = &info->devinfo;
-	struct gendisk *g = drive->disk;
 
-	if (ide_unregister_subdriver(drive)) {
-		printk(KERN_ERR "%s: %s: failed to ide_unregister_subdriver\n",
-			__FUNCTION__, drive->name);
-		return 1;
-	}
-	if (info->buffer != NULL)
-		kfree(info->buffer);
-	if (info->toc != NULL)
-		kfree(info->toc);
-	if (info->changer_info != NULL)
-		kfree(info->changer_info);
+	ide_proc_unregister_driver(drive, info->driver);
+
+	del_gendisk(info->disk);
+
+	ide_cd_put(info);
+}
+
+static void ide_cd_release(struct kref *kref)
+{
+	struct cdrom_info *info = to_ide_cd(kref);
+	struct cdrom_device_info *devinfo = &info->devinfo;
+	ide_drive_t *drive = info->drive;
+	struct gendisk *g = info->disk;
+
+	kfree(info->buffer);
+	kfree(info->toc);
+	kfree(info->changer_info);
 	if (devinfo->handle == drive && unregister_cdrom(devinfo))
-		printk(KERN_ERR "%s: ide_cdrom_cleanup failed to unregister device from the cdrom driver.\n", drive->name);
-	kfree(info);
+		printk(KERN_ERR "%s: %s failed to unregister device from the cdrom "
+				"driver.\n", __FUNCTION__, drive->name);
+	drive->dsc_overlap = 0;
 	drive->driver_data = NULL;
 	blk_queue_prep_rq(drive->queue, NULL);
-	del_gendisk(g);
-	g->fops = ide_fops;
-	return 0;
+	g->private_data = NULL;
+	put_disk(g);
+	kfree(info);
 }
 
-static int ide_cdrom_attach (ide_drive_t *drive);
+static int ide_cd_probe(ide_drive_t *);
 
-/*
- * Power Management state machine.
- *
- * We don't do much for CDs right now.
- */
-
-static void ide_cdrom_complete_power_step (ide_drive_t *drive, struct request *rq, u8 stat, u8 error)
+#ifdef CONFIG_IDE_PROC_FS
+static int proc_idecd_read_capacity
+	(char *page, char **start, off_t off, int count, int *eof, void *data)
 {
+	ide_drive_t *drive = data;
+	int len;
+
+	len = sprintf(page,"%llu\n", (long long)ide_cdrom_capacity(drive));
+	PROC_IDE_READ_RETURN(page,start,off,count,eof,len);
 }
 
-static ide_startstop_t ide_cdrom_start_power_step (ide_drive_t *drive, struct request *rq)
-{
-	ide_task_t *args = rq->special;
-
-	memset(args, 0, sizeof(*args));
-
-	switch (rq->pm->pm_step) {
-	case ide_pm_state_start_suspend:
-		break;
-
-	case ide_pm_state_start_resume:	/* Resume step 1 (restore DMA) */
-		/*
-		 * Right now, all we do is call hwif->ide_dma_check(drive),
-		 * we could be smarter and check for current xfer_speed
-		 * in struct drive etc...
-		 * Also, this step could be implemented as a generic helper
-		 * as most subdrivers will use it.
-		 */
-		if ((drive->id->capability & 1) == 0)
-			break;
-		if (HWIF(drive)->ide_dma_check == NULL)
-			break;
-		HWIF(drive)->ide_dma_check(drive);
-		break;
-	}
-	rq->pm->pm_step = ide_pm_state_completed;
-	return ide_stopped;
-}
+static ide_proc_entry_t idecd_proc[] = {
+	{ "capacity", S_IFREG|S_IRUGO, proc_idecd_read_capacity, NULL },
+	{ NULL, 0, NULL, NULL }
+};
+#endif
 
 static ide_driver_t ide_cdrom_driver = {
-	.owner			= THIS_MODULE,
-	.name			= "ide-cdrom",
+	.gen_driver = {
+		.owner		= THIS_MODULE,
+		.name		= "ide-cdrom",
+		.bus		= &ide_bus_type,
+	},
+	.probe			= ide_cd_probe,
+	.remove			= ide_cd_remove,
 	.version		= IDECD_VERSION,
 	.media			= ide_cdrom,
-	.busy			= 0,
 	.supports_dsc_overlap	= 1,
-	.cleanup		= ide_cdrom_cleanup,
 	.do_request		= ide_do_rw_cdrom,
-	.capacity		= ide_cdrom_capacity,
-	.attach			= ide_cdrom_attach,
-	.drives			= LIST_HEAD_INIT(ide_cdrom_driver.drives),
-	.start_power_step	= ide_cdrom_start_power_step,
-	.complete_power_step	= ide_cdrom_complete_power_step,
+	.end_request		= ide_end_request,
+	.error			= __ide_error,
+	.abort			= __ide_abort,
+#ifdef CONFIG_IDE_PROC_FS
+	.proc			= idecd_proc,
+#endif
 };
 
 static int idecd_open(struct inode * inode, struct file * file)
 {
-	ide_drive_t *drive = inode->i_bdev->bd_disk->private_data;
-	struct cdrom_info *info = drive->driver_data;
+	struct gendisk *disk = inode->i_bdev->bd_disk;
+	struct cdrom_info *info;
 	int rc = -ENOMEM;
-	drive->usage++;
+
+	if (!(info = ide_cd_get(disk)))
+		return -ENXIO;
 
 	if (!info->buffer)
-		info->buffer = kmalloc(SECTOR_BUFFER_SIZE,
-					GFP_KERNEL|__GFP_REPEAT);
-        if (!info->buffer || (rc = cdrom_open(&info->devinfo, inode, file)))
-		drive->usage--;
+		info->buffer = kmalloc(SECTOR_BUFFER_SIZE, GFP_KERNEL|__GFP_REPEAT);
+
+	if (info->buffer)
+		rc = cdrom_open(&info->devinfo, inode, file);
+
+	if (rc < 0)
+		ide_cd_put(info);
+
 	return rc;
 }
 
 static int idecd_release(struct inode * inode, struct file * file)
 {
-	ide_drive_t *drive = inode->i_bdev->bd_disk->private_data;
-	struct cdrom_info *info = drive->driver_data;
+	struct gendisk *disk = inode->i_bdev->bd_disk;
+	struct cdrom_info *info = ide_cd_g(disk);
 
 	cdrom_release (&info->devinfo, file);
-	drive->usage--;
+
+	ide_cd_put(info);
+
+	return 0;
+}
+
+static int idecd_set_spindown(struct cdrom_device_info *cdi, unsigned long arg)
+{
+	struct packet_command cgc;
+	char buffer[16];
+	int stat;
+	char spindown;
+
+	if (copy_from_user(&spindown, (void __user *)arg, sizeof(char)))
+		return -EFAULT;
+
+	init_cdrom_command(&cgc, buffer, sizeof(buffer), CGC_DATA_UNKNOWN);
+
+	stat = cdrom_mode_sense(cdi, &cgc, GPMODE_CDROM_PAGE, 0);
+	if (stat)
+		return stat;
+
+	buffer[11] = (buffer[11] & 0xf0) | (spindown & 0x0f);
+	return cdrom_mode_select(cdi, &cgc);
+}
+
+static int idecd_get_spindown(struct cdrom_device_info *cdi, unsigned long arg)
+{
+	struct packet_command cgc;
+	char buffer[16];
+	int stat;
+ 	char spindown;
+
+	init_cdrom_command(&cgc, buffer, sizeof(buffer), CGC_DATA_UNKNOWN);
+
+	stat = cdrom_mode_sense(cdi, &cgc, GPMODE_CDROM_PAGE, 0);
+	if (stat)
+		return stat;
+
+	spindown = buffer[11] & 0x0f;
+	if (copy_to_user((void __user *)arg, &spindown, sizeof (char)))
+		return -EFAULT;
 	return 0;
 }
 
@@ -3336,27 +3414,36 @@ static int idecd_ioctl (struct inode *inode, struct file *file,
 			unsigned int cmd, unsigned long arg)
 {
 	struct block_device *bdev = inode->i_bdev;
-	ide_drive_t *drive = bdev->bd_disk->private_data;
-	int err = generic_ide_ioctl(file, bdev, cmd, arg);
-	if (err == -EINVAL) {
-		struct cdrom_info *info = drive->driver_data;
+	struct cdrom_info *info = ide_cd_g(bdev->bd_disk);
+	int err;
+
+	switch (cmd) {
+ 	case CDROMSETSPINDOWN:
+		return idecd_set_spindown(&info->devinfo, arg);
+ 	case CDROMGETSPINDOWN:
+		return idecd_get_spindown(&info->devinfo, arg);
+	default:
+		break;
+ 	}
+
+	err = generic_ide_ioctl(info->drive, file, bdev, cmd, arg);
+	if (err == -EINVAL)
 		err = cdrom_ioctl(file, &info->devinfo, inode, cmd, arg);
-	}
+
 	return err;
 }
 
 static int idecd_media_changed(struct gendisk *disk)
 {
-	ide_drive_t *drive = disk->private_data;
-	struct cdrom_info *info = drive->driver_data;
+	struct cdrom_info *info = ide_cd_g(disk);
 	return cdrom_media_changed(&info->devinfo);
 }
 
 static int idecd_revalidate_disk(struct gendisk *disk)
 {
-	ide_drive_t *drive = disk->private_data;
+	struct cdrom_info *info = ide_cd_g(disk);
 	struct request_sense sense;
-	cdrom_read_toc(drive, &sense);
+	cdrom_read_toc(info->drive, &sense);
 	return  0;
 }
 
@@ -3375,10 +3462,10 @@ static char *ignore = NULL;
 module_param(ignore, charp, 0400);
 MODULE_DESCRIPTION("ATAPI CD-ROM Driver");
 
-static int ide_cdrom_attach (ide_drive_t *drive)
+static int ide_cd_probe(ide_drive_t *drive)
 {
 	struct cdrom_info *info;
-	struct gendisk *g = drive->disk;
+	struct gendisk *g;
 	struct request_sense sense;
 
 	if (!strstr("ide-cdrom", drive->driver_req))
@@ -3398,63 +3485,62 @@ static int ide_cdrom_attach (ide_drive_t *drive)
 		printk(KERN_INFO "ide-cd: passing drive %s to ide-scsi emulation.\n", drive->name);
 		goto failed;
 	}
-	info = (struct cdrom_info *) kmalloc (sizeof (struct cdrom_info), GFP_KERNEL);
+	info = kzalloc(sizeof(struct cdrom_info), GFP_KERNEL);
 	if (info == NULL) {
 		printk(KERN_ERR "%s: Can't allocate a cdrom structure\n", drive->name);
 		goto failed;
 	}
-	if (ide_register_subdriver(drive, &ide_cdrom_driver)) {
-		printk(KERN_ERR "%s: Failed to register the driver with ide.c\n",
-			drive->name);
-		kfree(info);
-		goto failed;
-	}
-	memset(info, 0, sizeof (struct cdrom_info));
+
+	g = alloc_disk(1 << PARTN_BITS);
+	if (!g)
+		goto out_free_cd;
+
+	ide_init_disk(g, drive);
+
+	ide_proc_register_driver(drive, &ide_cdrom_driver);
+
+	kref_init(&info->kref);
+
+	info->drive = drive;
+	info->driver = &ide_cdrom_driver;
+	info->disk = g;
+
+	g->private_data = &info->driver;
+
 	drive->driver_data = info;
-	DRIVER(drive)->busy++;
+
 	g->minors = 1;
-	snprintf(g->devfs_name, sizeof(g->devfs_name),
-			"%s/cd", drive->devfs_name);
 	g->driverfs_dev = &drive->gendev;
 	g->flags = GENHD_FL_CD | GENHD_FL_REMOVABLE;
 	if (ide_cdrom_setup(drive)) {
-		struct cdrom_device_info *devinfo = &info->devinfo;
-		DRIVER(drive)->busy--;
-		ide_unregister_subdriver(drive);
-		if (info->buffer != NULL)
-			kfree(info->buffer);
-		if (info->toc != NULL)
-			kfree(info->toc);
-		if (info->changer_info != NULL)
-			kfree(info->changer_info);
-		if (devinfo->handle == drive && unregister_cdrom(devinfo))
-			printk (KERN_ERR "%s: ide_cdrom_cleanup failed to unregister device from the cdrom driver.\n", drive->name);
-		kfree(info);
-		drive->driver_data = NULL;
+		ide_proc_unregister_driver(drive, &ide_cdrom_driver);
+		ide_cd_release(&info->kref);
 		goto failed;
 	}
-	DRIVER(drive)->busy--;
 
 	cdrom_read_toc(drive, &sense);
 	g->fops = &idecd_ops;
 	g->flags |= GENHD_FL_REMOVABLE;
 	add_disk(g);
 	return 0;
+
+out_free_cd:
+	kfree(info);
 failed:
-	return 1;
+	return -ENODEV;
 }
 
 static void __exit ide_cdrom_exit(void)
 {
-	ide_unregister_driver(&ide_cdrom_driver);
-}
- 
-static int ide_cdrom_init(void)
-{
-	ide_register_driver(&ide_cdrom_driver);
-	return 0;
+	driver_unregister(&ide_cdrom_driver.gen_driver);
 }
 
+static int __init ide_cdrom_init(void)
+{
+	return driver_register(&ide_cdrom_driver.gen_driver);
+}
+
+MODULE_ALIAS("ide:*m-cdrom*");
 module_init(ide_cdrom_init);
 module_exit(ide_cdrom_exit);
 MODULE_LICENSE("GPL");

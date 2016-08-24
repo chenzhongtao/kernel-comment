@@ -2,7 +2,8 @@ Read the F-ing Papers!
 
 
 This document describes RCU-related publications, and is followed by
-the corresponding bibtex entries.
+the corresponding bibtex entries.  A number of the publications may
+be found at http://www.rdrop.com/users/paulmck/RCU/.
 
 The first thing resembling RCU was published in 1980, when Kung and Lehman
 [Kung80] recommended use of a garbage collector to defer destruction
@@ -89,16 +90,20 @@ at OLS.  The resulting abundance of RCU patches was presented the
 following year [McKenney02a], and use of RCU in dcache was first
 described that same year [Linder02a].
 
-Also in 2002, Michael [Michael02b,Michael02a] presented techniques
-that defer the destruction of data structures to simplify non-blocking
-synchronization (wait-free synchronization, lock-free synchronization,
-and obstruction-free synchronization are all examples of non-blocking
-synchronization).  In particular, this technique eliminates locking,
-reduces contention, reduces memory latency for readers, and parallelizes
-pipeline stalls and memory latency for writers.  However, these
-techniques still impose significant read-side overhead in the form of
-memory barriers.  Researchers at Sun worked along similar lines in the
-same timeframe [HerlihyLM02,HerlihyLMS03].
+Also in 2002, Michael [Michael02b,Michael02a] presented "hazard-pointer"
+techniques that defer the destruction of data structures to simplify
+non-blocking synchronization (wait-free synchronization, lock-free
+synchronization, and obstruction-free synchronization are all examples of
+non-blocking synchronization).  In particular, this technique eliminates
+locking, reduces contention, reduces memory latency for readers, and
+parallelizes pipeline stalls and memory latency for writers.  However,
+these techniques still impose significant read-side overhead in the
+form of memory barriers.  Researchers at Sun worked along similar lines
+in the same timeframe [HerlihyLM02,HerlihyLMS03].  These techniques
+can be thought of as inside-out reference counts, where the count is
+represented by the number of hazard pointers referencing a given data
+structure (rather than the more conventional counter field within the
+data structure itself).
 
 In 2003, the K42 group described how RCU could be used to create
 hot-pluggable implementations of operating-system functions.  Later that
@@ -108,9 +113,13 @@ year saw a paper describing an RCU implementation of System V IPC
 2004 has seen a Linux-Journal article on use of RCU in dcache
 [McKenney04a], a performance comparison of locking to RCU on several
 different CPUs [McKenney04b], a dissertation describing use of RCU in a
-number of operating-system kernels [PaulEdwardMcKenneyPhD], and a paper
-describing how to make RCU safe for soft-realtime applications [Sarma04c].
+number of operating-system kernels [PaulEdwardMcKenneyPhD], a paper
+describing how to make RCU safe for soft-realtime applications [Sarma04c],
+and a paper describing SELinux performance with RCU [JamesMorris04b].
 
+2005 has seen further adaptation of RCU to realtime use, permitting
+preemption of RCU realtime critical sections [PaulMcKenney05a,
+PaulMcKenney05b].
 
 Bibtex Entries
 
@@ -341,6 +350,17 @@ Dipankar Sarma"
 ,pages="18-26"
 }
 
+@techreport{Friedberg03a
+,author="Stuart A. Friedberg"
+,title="Lock-Free Wild Card Search Data Structure and Method"
+,institution="US Patent and Trademark Office"
+,address="Washington, DC"
+,year="2003"
+,number="US Patent 6,662,184 (contributed under GPL)"
+,month="December"
+,pages="112"
+}
+
 @article{McKenney04a
 ,author="Paul E. McKenney and Dipankar Sarma and Maneesh Soni"
 ,title="Scaling dcache with {RCU}"
@@ -373,6 +393,9 @@ in Operating System Kernels"
 ,school="OGI School of Science and Engineering at
 Oregon Health and Sciences University"
 ,year="2004"
+,note="Available:
+\url{http://www.rdrop.com/users/paulmck/RCU/RCUdissertation.2004.07.14e1.pdf}
+[Viewed October 15, 2004]"
 }
 
 @Conference{Sarma04c
@@ -384,4 +407,43 @@ Oregon Health and Sciences University"
 ,year="2004"
 ,month="June"
 ,pages="182-191"
+}
+
+@unpublished{JamesMorris04b
+,Author="James Morris"
+,Title="Recent Developments in {SELinux} Kernel Performance"
+,month="December"
+,year="2004"
+,note="Available:
+\url{http://www.livejournal.com/users/james_morris/2153.html}
+[Viewed December 10, 2004]"
+}
+
+@unpublished{PaulMcKenney05a
+,Author="Paul E. McKenney"
+,Title="{[RFC]} {RCU} and {CONFIG\_PREEMPT\_RT} progress"
+,month="May"
+,year="2005"
+,note="Available:
+\url{http://lkml.org/lkml/2005/5/9/185}
+[Viewed May 13, 2005]"
+,annotation="
+	First publication of working lock-based deferred free patches
+	for the CONFIG_PREEMPT_RT environment.
+"
+}
+
+@conference{PaulMcKenney05b
+,Author="Paul E. McKenney and Dipankar Sarma"
+,Title="Towards Hard Realtime Response from the Linux Kernel on SMP Hardware"
+,Booktitle="linux.conf.au 2005"
+,month="April"
+,year="2005"
+,address="Canberra, Australia"
+,note="Available:
+\url{http://www.rdrop.com/users/paulmck/RCU/realtimeRCU.2005.04.23a.pdf}
+[Viewed May 13, 2005]"
+,annotation="
+	Realtime turns into making RCU yet more realtime friendly.
+"
 }

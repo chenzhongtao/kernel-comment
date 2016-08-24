@@ -97,8 +97,9 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 	static int versionprinted;
 	struct net_device *dev;
 	struct net_local *tp;
-	int i, ret, pci_irq_line;
+	int ret, pci_irq_line;
 	unsigned long pci_ioaddr;
+	DECLARE_MAC_BUF(mac);
 	
 	if (versionprinted++ == 0)
 		printk("%s", version);
@@ -116,14 +117,12 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 	if (!dev)
 		return -ENOMEM;
 
-	SET_MODULE_OWNER(dev);
-
 	if (!request_region(pci_ioaddr, ABYSS_IO_EXTENT, dev->name)) {
 		ret = -EBUSY;
 		goto err_out_trdev;
 	}
 		
-	ret = request_irq(pdev->irq, tms380tr_interrupt, SA_SHIRQ,
+	ret = request_irq(pdev->irq, tms380tr_interrupt, IRQF_SHARED,
 			  dev->name, dev);
 	if (ret)
 		goto err_out_region;
@@ -139,7 +138,7 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 	 */
 	dev->base_addr += 0x10;
 		
-	ret = tmsdev_init(dev, PCI_MAX_ADDRESS, pdev);
+	ret = tmsdev_init(dev, &pdev->dev);
 	if (ret) {
 		printk("%s: unable to get memory for dev->priv.\n", 
 		       dev->name);
@@ -147,12 +146,9 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 	}
 
 	abyss_read_eeprom(dev);
-		
-	printk("%s:    Ring Station Address: ", dev->name);
-	printk("%2.2x", dev->dev_addr[0]);
-	for (i = 1; i < 6; i++)
-		printk(":%2.2x", dev->dev_addr[i]);
-	printk("\n");
+
+	printk("%s:    Ring Station Address: %s\n",
+	       dev->name, print_mac(mac, dev->dev_addr));
 
 	tp = netdev_priv(dev);
 	tp->setnselout = abyss_setnselout_pins;
@@ -438,8 +434,7 @@ static void __devexit abyss_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	
-	if (!dev)
-		BUG();
+	BUG_ON(!dev);
 	unregister_netdev(dev);
 	release_region(dev->base_addr-0x10, ABYSS_IO_EXTENT);
 	free_irq(dev->irq, dev);
@@ -468,14 +463,3 @@ static void __exit abyss_rmmod (void)
 module_init(abyss_init);
 module_exit(abyss_rmmod);
 
-
-/*
- * Local variables:
- *  compile-command: "gcc -DMODVERSIONS  -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c abyss.c"
- *  alt-compile-command: "gcc -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c abyss.c"
- *  c-set-style "K&R"
- *  c-indent-level: 8
- *  c-basic-offset: 8
- *  tab-width: 8
- * End:
- */

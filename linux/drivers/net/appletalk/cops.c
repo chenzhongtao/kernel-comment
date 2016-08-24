@@ -48,7 +48,6 @@ static const char *version =
  *	  the driver figure it out.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -65,7 +64,7 @@ static const char *version =
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
-#include <linux/if_ltalk.h>	/* For ltalk_setup() */
+#include <linux/if_ltalk.h>
 #include <linux/delay.h>	/* For udelay() */
 #include <linux/atalk.h>
 #include <linux/spinlock.h>
@@ -189,16 +188,12 @@ static void cops_reset (struct net_device *dev, int sleep);
 static void cops_load (struct net_device *dev);
 static int  cops_nodeid (struct net_device *dev, int nodeid);
 
-static irqreturn_t cops_interrupt (int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t cops_interrupt (int irq, void *dev_id);
 static void cops_poll (unsigned long ltdev);
 static void cops_timeout(struct net_device *dev);
 static void cops_rx (struct net_device *dev);
 static int  cops_send_packet (struct sk_buff *skb, struct net_device *dev);
 static void set_multicast_list (struct net_device *dev);
-static int  cops_hard_header (struct sk_buff *skb, struct net_device *dev,
-			      unsigned short type, void *daddr, void *saddr, 
-			      unsigned len);
-
 static int  cops_ioctl (struct net_device *dev, struct ifreq *rq, int cmd);
 static int  cops_close (struct net_device *dev);
 static struct net_device_stats *cops_get_stats (struct net_device *dev);
@@ -223,7 +218,7 @@ struct net_device * __init cops_probe(int unit)
 	int base_addr;
 	int err = 0;
 
-	dev = alloc_netdev(sizeof(struct cops_local), "lt%d", ltalk_setup);
+	dev = alloc_ltalkdev(sizeof(struct cops_local));
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -235,8 +230,6 @@ struct net_device * __init cops_probe(int unit)
 	} else {
 		base_addr = dev->base_addr = io;
 	}
-
-	SET_MODULE_OWNER(dev);
 
 	if (base_addr > 0x1ff) {    /* Check a single specified location. */
 		err = cops_probe1(dev, base_addr);
@@ -334,7 +327,6 @@ static int __init cops_probe1(struct net_device *dev, int ioaddr)
 	dev->base_addr = ioaddr;
 
         lp = netdev_priv(dev);
-        memset(lp, 0, sizeof(struct cops_local));
         spin_lock_init(&lp->lock);
 
 	/* Copy local board variable to lp struct. */
@@ -343,7 +335,7 @@ static int __init cops_probe1(struct net_device *dev, int ioaddr)
 	dev->hard_start_xmit    = cops_send_packet;
 	dev->tx_timeout		= cops_timeout;
 	dev->watchdog_timeo	= HZ * 2;
-	dev->hard_header	= cops_hard_header;
+
         dev->get_stats          = cops_get_stats;
 	dev->open               = cops_open;
         dev->stop               = cops_close;
@@ -722,7 +714,7 @@ static void cops_poll(unsigned long ltdev)
  *      The typical workload of the driver:
  *      Handle the network interface interrupts.
  */
-static irqreturn_t cops_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t cops_interrupt(int irq, void *dev_id)
 {
         struct net_device *dev = dev_id;
         struct cops_local *lp;
@@ -854,9 +846,9 @@ static void cops_rx(struct net_device *dev)
                 return;
         }
 
-        skb->mac.raw    = skb->data;    /* Point to entire packet. */
+        skb_reset_mac_header(skb);    /* Point to entire packet. */
         skb_pull(skb,3);
-        skb->h.raw      = skb->data;    /* Point to data (Skip header). */
+        skb_reset_transport_header(skb);    /* Point to data (Skip header). */
 
         /* Update the counters. */
         lp->stats.rx_packets++;
@@ -948,19 +940,6 @@ static void set_multicast_list(struct net_device *dev)
 }
 
 /*
- *      Another Dummy function to keep the Appletalk layer happy.
- */
- 
-static int cops_hard_header(struct sk_buff *skb, struct net_device *dev,
-			    unsigned short type, void *daddr, void *saddr, 
-			    unsigned len)
-{
-        if(cops_debug >= 3)
-                printk("%s: cops_hard_header executed. Wow!\n", dev->name);
-        return 0;
-}
-
-/*
  *      System ioctls for the COPS LocalTalk card.
  */
  
@@ -1031,7 +1010,7 @@ module_param(io, int, 0);
 module_param(irq, int, 0);
 module_param(board_type, int, 0);
 
-int init_module(void)
+int __init init_module(void)
 {
 	if (io == 0)
 		printk(KERN_WARNING "%s: You shouldn't autoprobe with insmod\n",
@@ -1042,7 +1021,7 @@ int init_module(void)
         return 0;
 }
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
 	unregister_netdev(cops_dev);
 	cleanup_card(cops_dev);

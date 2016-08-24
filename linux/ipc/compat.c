@@ -21,7 +21,6 @@
  *
  */
 #include <linux/compat.h>
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/highuid.h>
 #include <linux/init.h>
@@ -30,7 +29,7 @@
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
 #include <asm/uaccess.h>
 
 #include "util.h"
@@ -42,10 +41,10 @@ struct compat_msgbuf {
 
 struct compat_ipc_perm {
 	key_t key;
-	compat_uid_t uid;
-	compat_gid_t gid;
-	compat_uid_t cuid;
-	compat_gid_t cgid;
+	__compat_uid_t uid;
+	__compat_gid_t gid;
+	__compat_uid_t cuid;
+	__compat_gid_t cgid;
 	compat_mode_t mode;
 	unsigned short seq;
 };
@@ -116,7 +115,6 @@ struct compat_shm_info {
 
 extern int sem_ctls[];
 #define sc_semopm	(sem_ctls[2])
-#define MAXBUF (64*1024)
 
 static inline int compat_ipc_parse_version(int *cmd)
 {
@@ -174,8 +172,8 @@ static inline int __put_compat_ipc_perm(struct ipc64_perm *p,
 					struct compat_ipc_perm __user *up)
 {
 	int err;
-	compat_uid_t u;
-	compat_gid_t g;
+	__compat_uid_t u;
+	__compat_gid_t g;
 
 	err  = __put_user(p->key, &up->key);
 	SET_UID(u, p->uid);
@@ -227,7 +225,7 @@ static inline int put_compat_semid_ds(struct semid64_ds *s,
 	int err;
 
 	if (!access_ok (VERIFY_WRITE, up, sizeof(*up)))
-		err = -EFAULT;
+		return -EFAULT;
 	err  = __put_compat_ipc_perm(&s->sem_perm, &up->sem_perm);
 	err |= __put_user(s->sem_otime, &up->sem_otime);
 	err |= __put_user(s->sem_ctime, &up->sem_ctime);
@@ -308,35 +306,30 @@ long compat_sys_semctl(int first, int second, int third, void __user *uptr)
 
 long compat_sys_msgsnd(int first, int second, int third, void __user *uptr)
 {
-	struct msgbuf __user *p;
 	struct compat_msgbuf __user *up = uptr;
 	long type;
 
 	if (first < 0)
 		return -EINVAL;
-	if (second < 0 || (second >= MAXBUF - sizeof(struct msgbuf)))
+	if (second < 0)
 		return -EINVAL;
 
-	p = compat_alloc_user_space(second + sizeof(struct msgbuf));
-	if (get_user(type, &up->mtype) ||
-	    put_user(type, &p->mtype) ||
-	    copy_in_user(p->mtext, up->mtext, second))
+	if (get_user(type, &up->mtype))
 		return -EFAULT;
 
-	return sys_msgsnd(first, p, second, third);
+	return do_msgsnd(first, type, up->mtext, second, third);
 }
 
 long compat_sys_msgrcv(int first, int second, int msgtyp, int third,
 			   int version, void __user *uptr)
 {
-	struct msgbuf __user *p;
 	struct compat_msgbuf __user *up;
 	long type;
 	int err;
 
 	if (first < 0)
 		return -EINVAL;
-	if (second < 0 || (second >= MAXBUF - sizeof(struct msgbuf)))
+	if (second < 0)
 		return -EINVAL;
 
 	if (!version) {
@@ -350,14 +343,11 @@ long compat_sys_msgrcv(int first, int second, int msgtyp, int third,
 		uptr = compat_ptr(ipck.msgp);
 		msgtyp = ipck.msgtyp;
 	}
-	p = compat_alloc_user_space(second + sizeof(struct msgbuf));
-	err = sys_msgrcv(first, p, second, msgtyp, third);
+	up = uptr;
+	err = do_msgrcv(first, &type, up->mtext, second, msgtyp, third);
 	if (err < 0)
 		goto out;
-	up = uptr;
-	if (get_user(type, &p->mtype) ||
-	    put_user(type, &up->mtype) ||
-	    copy_in_user(up->mtext, p->mtext, err))
+	if (put_user(type, &up->mtype))
 		err = -EFAULT;
 out:
 	return err;
@@ -552,6 +542,8 @@ static inline int put_compat_shminfo64(struct shminfo64 *smi,
 
 	if (!access_ok(VERIFY_WRITE, up64, sizeof(*up64)))
 		return -EFAULT;
+	if (smi->shmmax > INT_MAX)
+		smi->shmmax = INT_MAX;
 	err  = __put_user(smi->shmmax, &up64->shmmax);
 	err |= __put_user(smi->shmmin, &up64->shmmin);
 	err |= __put_user(smi->shmmni, &up64->shmmni);
@@ -567,11 +559,14 @@ static inline int put_compat_shminfo(struct shminfo64 *smi,
 
 	if (!access_ok(VERIFY_WRITE, up, sizeof(*up)))
 		return -EFAULT;
+	if (smi->shmmax > INT_MAX)
+		smi->shmmax = INT_MAX;
 	err  = __put_user(smi->shmmax, &up->shmmax);
 	err |= __put_user(smi->shmmin, &up->shmmin);
 	err |= __put_user(smi->shmmni, &up->shmmni);
 	err |= __put_user(smi->shmseg, &up->shmseg);
 	err |= __put_user(smi->shmall, &up->shmall);
+	return err;
 }
 
 static inline int put_compat_shm_info(struct shm_info __user *ip,

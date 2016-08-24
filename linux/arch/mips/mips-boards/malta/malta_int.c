@@ -27,18 +27,20 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
+#include <linux/kernel.h>
 #include <linux/random.h>
 
 #include <asm/i8259.h>
+#include <asm/irq_cpu.h>
 #include <asm/io.h>
+#include <asm/irq_regs.h>
 #include <asm/mips-boards/malta.h>
 #include <asm/mips-boards/maltaint.h>
 #include <asm/mips-boards/piix4.h>
 #include <asm/gt64120.h>
 #include <asm/mips-boards/generic.h>
 #include <asm/mips-boards/msc01_pci.h>
-
-extern asmlinkage void mipsIRQ(void);
+#include <asm/msc01_ic.h>
 
 static DEFINE_SPINLOCK(mips_irq_lock);
 
@@ -51,23 +53,19 @@ static inline int mips_pcibios_iack(void)
 	 * Determine highest priority pending interrupt by performing
 	 * a PCI Interrupt Acknowledge cycle.
 	 */
-	switch(mips_revision_corid) {
-	case MIPS_REVISION_CORID_CORE_MSC:
-	case MIPS_REVISION_CORID_CORE_FPGA2:
-	case MIPS_REVISION_CORID_CORE_EMUL_MSC:
+	switch (mips_revision_sconid) {
+	case MIPS_REVISION_SCON_SOCIT:
+	case MIPS_REVISION_SCON_ROCIT:
+	case MIPS_REVISION_SCON_SOCITSC:
+	case MIPS_REVISION_SCON_SOCITSCP:
 	        MSC_READ(MSC01_PCI_IACK, irq);
 		irq &= 0xff;
 		break;
-	case MIPS_REVISION_CORID_QED_RM5261:
-	case MIPS_REVISION_CORID_CORE_LV:
-	case MIPS_REVISION_CORID_CORE_FPGA:
-	case MIPS_REVISION_CORID_CORE_FPGAR2:
+	case MIPS_REVISION_SCON_GT64120:
 		irq = GT_READ(GT_PCI0_IACK_OFS);
 		irq &= 0xff;
 		break;
-	case MIPS_REVISION_CORID_BONITO64:
-	case MIPS_REVISION_CORID_CORE_20K:
-	case MIPS_REVISION_CORID_CORE_EMUL_BON:
+	case MIPS_REVISION_SCON_BONITO:
 		/* The following will generate a PCI IACK cycle on the
 		 * Bonito controller. It's a little bit kludgy, but it
 		 * was the easiest way to implement it in hardware at
@@ -79,100 +77,98 @@ static inline int mips_pcibios_iack(void)
 		dummy = BONITO_PCIMAP_CFG;
 		iob();    /* sync */
 
-		irq = *(volatile u32 *)(_pcictrl_bonito_pcicfg);
+		irq = readl((u32 *)_pcictrl_bonito_pcicfg);
 		iob();    /* sync */
 		irq &= 0xff;
 		BONITO_PCIMAP_CFG = 0;
 		break;
 	default:
-	        printk("Unknown Core card, don't know the system controller.\n");
+	        printk("Unknown system controller.\n");
 		return -1;
 	}
 	return irq;
 }
 
-static inline int get_int(int *irq)
+static inline int get_int(void)
 {
 	unsigned long flags;
-
+	int irq;
 	spin_lock_irqsave(&mips_irq_lock, flags);
 
-	*irq = mips_pcibios_iack();
+	irq = mips_pcibios_iack();
 
 	/*
-	 * IRQ7 is used to detect spurious interrupts.
-	 * The interrupt acknowledge cycle returns IRQ7, if no
-	 * interrupts is requested.
-	 * We can differentiate between this situation and a
-	 * "Normal" IRQ7 by reading the ISR.
+	 * The only way we can decide if an interrupt is spurious
+	 * is by checking the 8259 registers.  This needs a spinlock
+	 * on an SMP system,  so leave it up to the generic code...
 	 */
-	if (*irq == 7)
-	{
-		outb(PIIX4_OCW3_SEL | PIIX4_OCW3_ISR,
-		     PIIX4_ICTLR1_OCW3);
-		if (!(inb(PIIX4_ICTLR1_OCW3) & (1 << 7))) {
-			spin_unlock_irqrestore(&mips_irq_lock, flags);
-			printk("We got a spurious interrupt from PIIX4.\n");
-			atomic_inc(&irq_err_count);
-			return -1;    /* Spurious interrupt. */
-		}
-	}
 
 	spin_unlock_irqrestore(&mips_irq_lock, flags);
 
-	return 0;
+	return irq;
 }
 
-void malta_hw0_irqdispatch(struct pt_regs *regs)
+static void malta_hw0_irqdispatch(void)
 {
 	int irq;
 
-	if (get_int(&irq))
-	        return;  /* interrupt has already been cleared */
+	irq = get_int();
+	if (irq < 0) {
+		return;  /* interrupt has already been cleared */
+	}
 
-	do_IRQ(irq, regs);
+	do_IRQ(MALTA_INT_BASE + irq);
 }
 
-void corehi_irqdispatch(struct pt_regs *regs)
+static void corehi_irqdispatch(void)
 {
-        unsigned int data,datahi;
-
-	/* Mask out corehi interrupt. */
-	clear_c0_status(IE_IRQ3);
+	unsigned int intedge, intsteer, pcicmd, pcibadaddr;
+        unsigned int pcimstat, intisr, inten, intpol;
+	unsigned int intrcause, datalo, datahi;
+	struct pt_regs *regs = get_irq_regs();
 
         printk("CoreHI interrupt, shouldn't happen, so we die here!!!\n");
-        printk("epc   : %08lx\nStatus: %08lx\nCause : %08lx\nbadVaddr : %08lx\n"
-, regs->cp0_epc, regs->cp0_status, regs->cp0_cause, regs->cp0_badvaddr);
-        switch(mips_revision_corid) {
-        case MIPS_REVISION_CORID_CORE_MSC:
-        case MIPS_REVISION_CORID_CORE_FPGA2:
-	case MIPS_REVISION_CORID_CORE_EMUL_MSC:
+        printk("epc   : %08lx\nStatus: %08lx\n"
+	       "Cause : %08lx\nbadVaddr : %08lx\n",
+	       regs->cp0_epc, regs->cp0_status,
+	       regs->cp0_cause, regs->cp0_badvaddr);
+
+	/* Read all the registers and then print them as there is a
+	   problem with interspersed printk's upsetting the Bonito controller.
+	   Do it for the others too.
+	*/
+
+	switch (mips_revision_sconid) {
+        case MIPS_REVISION_SCON_SOCIT:
+	case MIPS_REVISION_SCON_ROCIT:
+	case MIPS_REVISION_SCON_SOCITSC:
+	case MIPS_REVISION_SCON_SOCITSCP:
+                ll_msc_irq();
                 break;
-        case MIPS_REVISION_CORID_QED_RM5261:
-        case MIPS_REVISION_CORID_CORE_LV:
-        case MIPS_REVISION_CORID_CORE_FPGA:
-        case MIPS_REVISION_CORID_CORE_FPGAR2:
-                data = GT_READ(GT_INTRCAUSE_OFS);
-                printk("GT_INTRCAUSE = %08x\n", data);
-                data = GT_READ(GT_CPUERR_ADDRLO_OFS);
+        case MIPS_REVISION_SCON_GT64120:
+                intrcause = GT_READ(GT_INTRCAUSE_OFS);
+                datalo = GT_READ(GT_CPUERR_ADDRLO_OFS);
                 datahi = GT_READ(GT_CPUERR_ADDRHI_OFS);
-                printk("GT_CPUERR_ADDR = %02x%08x\n", datahi, data);
+                printk("GT_INTRCAUSE = %08x\n", intrcause);
+                printk("GT_CPUERR_ADDR = %02x%08x\n", datahi, datalo);
                 break;
-        case MIPS_REVISION_CORID_BONITO64:
-        case MIPS_REVISION_CORID_CORE_20K:
-        case MIPS_REVISION_CORID_CORE_EMUL_BON:
-                data = BONITO_INTISR;
-                printk("BONITO_INTISR = %08x\n", data);
-                data = BONITO_INTEN;
-                printk("BONITO_INTEN = %08x\n", data);
-                data = BONITO_INTPOL;
-                printk("BONITO_INTPOL = %08x\n", data);
-                data = BONITO_INTEDGE;
-                printk("BONITO_INTEDGE = %08x\n", data);
-                data = BONITO_INTSTEER;
-                printk("BONITO_INTSTEER = %08x\n", data);
-                data = BONITO_PCICMD;
-                printk("BONITO_PCICMD = %08x\n", data);
+        case MIPS_REVISION_SCON_BONITO:
+                pcibadaddr = BONITO_PCIBADADDR;
+                pcimstat = BONITO_PCIMSTAT;
+                intisr = BONITO_INTISR;
+                inten = BONITO_INTEN;
+                intpol = BONITO_INTPOL;
+                intedge = BONITO_INTEDGE;
+                intsteer = BONITO_INTSTEER;
+                pcicmd = BONITO_PCICMD;
+                printk("BONITO_INTISR = %08x\n", intisr);
+                printk("BONITO_INTEN = %08x\n", inten);
+                printk("BONITO_INTPOL = %08x\n", intpol);
+                printk("BONITO_INTEDGE = %08x\n", intedge);
+                printk("BONITO_INTSTEER = %08x\n", intsteer);
+                printk("BONITO_PCICMD = %08x\n", pcicmd);
+                printk("BONITO_PCIBADADDR = %08x\n", pcibadaddr);
+                printk("BONITO_PCIMSTAT = %08x\n", pcimstat);
                 break;
         }
 
@@ -180,8 +176,179 @@ void corehi_irqdispatch(struct pt_regs *regs)
         die("CoreHi interrupt", regs);
 }
 
+static inline int clz(unsigned long x)
+{
+	__asm__(
+	"	.set	push					\n"
+	"	.set	mips32					\n"
+	"	clz	%0, %1					\n"
+	"	.set	pop					\n"
+	: "=r" (x)
+	: "r" (x));
+
+	return x;
+}
+
+/*
+ * Version of ffs that only looks at bits 12..15.
+ */
+static inline unsigned int irq_ffs(unsigned int pending)
+{
+#if defined(CONFIG_CPU_MIPS32) || defined(CONFIG_CPU_MIPS64)
+	return -clz(pending) + 31 - CAUSEB_IP;
+#else
+	unsigned int a0 = 7;
+	unsigned int t0;
+
+	t0 = pending & 0xf000;
+	t0 = t0 < 1;
+	t0 = t0 << 2;
+	a0 = a0 - t0;
+	pending = pending << t0;
+
+	t0 = pending & 0xc000;
+	t0 = t0 < 1;
+	t0 = t0 << 1;
+	a0 = a0 - t0;
+	pending = pending << t0;
+
+	t0 = pending & 0x8000;
+	t0 = t0 < 1;
+	//t0 = t0 << 2;
+	a0 = a0 - t0;
+	//pending = pending << t0;
+
+	return a0;
+#endif
+}
+
+/*
+ * IRQs on the Malta board look basically (barring software IRQs which we
+ * don't use at all and all external interrupt sources are combined together
+ * on hardware interrupt 0 (MIPS IRQ 2)) like:
+ *
+ *	MIPS IRQ	Source
+ *      --------        ------
+ *             0	Software (ignored)
+ *             1        Software (ignored)
+ *             2        Combined hardware interrupt (hw0)
+ *             3        Hardware (ignored)
+ *             4        Hardware (ignored)
+ *             5        Hardware (ignored)
+ *             6        Hardware (ignored)
+ *             7        R4k timer (what we use)
+ *
+ * We handle the IRQ according to _our_ priority which is:
+ *
+ * Highest ----     R4k Timer
+ * Lowest  ----     Combined hardware interrupt
+ *
+ * then we just return, if multiple IRQs are pending then we will just take
+ * another exception, big deal.
+ */
+
+asmlinkage void plat_irq_dispatch(void)
+{
+	unsigned int pending = read_c0_cause() & read_c0_status() & ST0_IM;
+	int irq;
+
+	irq = irq_ffs(pending);
+
+	if (irq == MIPSCPU_INT_I8259A)
+		malta_hw0_irqdispatch();
+	else if (irq >= 0)
+		do_IRQ(MIPS_CPU_IRQ_BASE + irq);
+	else
+		spurious_interrupt();
+}
+
+static struct irqaction i8259irq = {
+	.handler = no_action,
+	.name = "XT-PIC cascade"
+};
+
+static struct irqaction corehi_irqaction = {
+	.handler = no_action,
+	.name = "CoreHi"
+};
+
+msc_irqmap_t __initdata msc_irqmap[] = {
+	{MSC01C_INT_TMR,		MSC01_IRQ_EDGE, 0},
+	{MSC01C_INT_PCI,		MSC01_IRQ_LEVEL, 0},
+};
+int __initdata msc_nr_irqs = ARRAY_SIZE(msc_irqmap);
+
+msc_irqmap_t __initdata msc_eicirqmap[] = {
+	{MSC01E_INT_SW0,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_SW1,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_I8259A,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_SMI,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_COREHI,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_CORELO,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_TMR,		MSC01_IRQ_EDGE, 0},
+	{MSC01E_INT_PCI,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_PERFCTR,		MSC01_IRQ_LEVEL, 0},
+	{MSC01E_INT_CPUCTR,		MSC01_IRQ_LEVEL, 0}
+};
+int __initdata msc_nr_eicirqs = ARRAY_SIZE(msc_eicirqmap);
+
 void __init arch_init_irq(void)
 {
-	set_except_vector(0, mipsIRQ);
 	init_i8259_irqs();
+
+	if (!cpu_has_veic)
+		mips_cpu_irq_init();
+
+        switch(mips_revision_sconid) {
+        case MIPS_REVISION_SCON_SOCIT:
+        case MIPS_REVISION_SCON_ROCIT:
+		if (cpu_has_veic)
+			init_msc_irqs(MIPS_MSC01_IC_REG_BASE, MSC01E_INT_BASE, msc_eicirqmap, msc_nr_eicirqs);
+		else
+			init_msc_irqs(MIPS_MSC01_IC_REG_BASE, MSC01C_INT_BASE, msc_irqmap, msc_nr_irqs);
+		break;
+
+        case MIPS_REVISION_SCON_SOCITSC:
+        case MIPS_REVISION_SCON_SOCITSCP:
+		if (cpu_has_veic)
+			init_msc_irqs(MIPS_SOCITSC_IC_REG_BASE, MSC01E_INT_BASE, msc_eicirqmap, msc_nr_eicirqs);
+		else
+			init_msc_irqs(MIPS_SOCITSC_IC_REG_BASE, MSC01C_INT_BASE, msc_irqmap, msc_nr_irqs);
+	}
+
+	if (cpu_has_veic) {
+		set_vi_handler(MSC01E_INT_I8259A, malta_hw0_irqdispatch);
+		set_vi_handler(MSC01E_INT_COREHI, corehi_irqdispatch);
+		setup_irq(MSC01E_INT_BASE+MSC01E_INT_I8259A, &i8259irq);
+		setup_irq(MSC01E_INT_BASE+MSC01E_INT_COREHI, &corehi_irqaction);
+	}
+	else if (cpu_has_vint) {
+		set_vi_handler(MIPSCPU_INT_I8259A, malta_hw0_irqdispatch);
+		set_vi_handler(MIPSCPU_INT_COREHI, corehi_irqdispatch);
+#ifdef CONFIG_MIPS_MT_SMTC
+		setup_irq_smtc(MIPS_CPU_IRQ_BASE+MIPSCPU_INT_I8259A, &i8259irq,
+			(0x100 << MIPSCPU_INT_I8259A));
+		setup_irq_smtc(MIPS_CPU_IRQ_BASE+MIPSCPU_INT_COREHI,
+			&corehi_irqaction, (0x100 << MIPSCPU_INT_COREHI));
+		/*
+		 * Temporary hack to ensure that the subsidiary device
+		 * interrupts coing in via the i8259A, but associated
+		 * with low IRQ numbers, will restore the Status.IM
+		 * value associated with the i8259A.
+		 */
+		{
+			int i;
+
+			for (i = 0; i < 16; i++)
+				irq_hwmask[i] = (0x100 << MIPSCPU_INT_I8259A);
+		}
+#else /* Not SMTC */
+		setup_irq(MIPS_CPU_IRQ_BASE+MIPSCPU_INT_I8259A, &i8259irq);
+		setup_irq(MIPS_CPU_IRQ_BASE+MIPSCPU_INT_COREHI, &corehi_irqaction);
+#endif /* CONFIG_MIPS_MT_SMTC */
+	}
+	else {
+		setup_irq(MIPS_CPU_IRQ_BASE+MIPSCPU_INT_I8259A, &i8259irq);
+		setup_irq(MIPS_CPU_IRQ_BASE+MIPSCPU_INT_COREHI, &corehi_irqaction);
+	}
 }

@@ -7,6 +7,7 @@
 
 struct fib_alias {
 	struct list_head	fa_list;
+	struct rcu_head rcu;
 	struct fib_info		*fa_info;
 	u8			fa_tos;
 	u8			fa_type;
@@ -19,20 +20,18 @@ struct fib_alias {
 /* Exported by fib_semantics.c */
 extern int fib_semantic_match(struct list_head *head,
 			      const struct flowi *flp,
-			      struct fib_result *res, int prefixlen);
+			      struct fib_result *res, __be32 zone, __be32 mask,
+				int prefixlen);
 extern void fib_release_info(struct fib_info *);
-extern struct fib_info *fib_create_info(const struct rtmsg *r,
-					struct kern_rta *rta,
-					const struct nlmsghdr *,
-					int *err);
-extern int fib_nh_match(struct rtmsg *r, struct nlmsghdr *,
-			struct kern_rta *rta, struct fib_info *fi);
+extern struct fib_info *fib_create_info(struct fib_config *cfg);
+extern int fib_nh_match(struct fib_config *cfg, struct fib_info *fi);
 extern int fib_dump_info(struct sk_buff *skb, u32 pid, u32 seq, int event,
-			 u8 tb_id, u8 type, u8 scope, void *dst,
-			 int dst_len, u8 tos, struct fib_info *fi);
-extern void rtmsg_fib(int event, u32 key, struct fib_alias *fa,
-		      int z, int tb_id,
-		      struct nlmsghdr *n, struct netlink_skb_parms *req);
+			 u32 tb_id, u8 type, u8 scope, __be32 dst,
+			 int dst_len, u8 tos, struct fib_info *fi,
+			 unsigned int);
+extern void rtmsg_fib(int event, __be32 key, struct fib_alias *fa,
+		      int dst_len, u32 tb_id, struct nl_info *info,
+		      unsigned int nlm_flags);
 extern struct fib_alias *fib_find_alias(struct list_head *fah,
 					u8 tos, u32 prio);
 extern int fib_detect_death(struct fib_info *fi, int order,

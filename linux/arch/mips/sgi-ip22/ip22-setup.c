@@ -4,7 +4,6 @@
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  * Copyright (C) 1997, 1998 Ralf Baechle (ralf@gnu.org)
  */
-#include <linux/config.h>
 #include <linux/ds1286.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -30,35 +29,16 @@
 #include <asm/sgi/ip22.h>
 
 unsigned long sgi_gfxaddr;
-
-/*
- * Stop-A is originally a Sun thing that isn't standard on IP22 so to avoid
- * accidents it's disabled by default on IP22.
- *
- * FIXME: provide a mechanism to change the value of stop_a_enabled.
- */
-int stop_a_enabled;
-
-void ip22_do_break(void)
-{
-	if (!stop_a_enabled)
-		return;
-
-	printk("\n");
-	ArcEnterInteractiveMode();
-}
-
-EXPORT_SYMBOL(ip22_do_break);
+EXPORT_SYMBOL_GPL(sgi_gfxaddr);
 
 extern void ip22_be_init(void) __init;
-extern void ip22_time_init(void) __init;
 
-static int __init ip22_setup(void)
+void __init plat_mem_setup(void)
 {
 	char *ctype;
+	char *cserial;
 
 	board_be_init = ip22_be_init;
-	ip22_time_init();
 
 	/* Init the INDY HPC I/O controller.  Need to call this before
 	 * fucking with the memory controller because it needs to know the
@@ -81,9 +61,14 @@ static int __init ip22_setup(void)
 	/* ARCS console environment variable is set to "g?" for
 	 * graphics console, it is set to "d" for the first serial
 	 * line and "d2" for the second serial line.
+	 *
+	 * Need to check if the case is 'g' but no keyboard:
+	 * (ConsoleIn/Out = serial)
 	 */
 	ctype = ArcGetEnvironmentVariable("console");
-	if (ctype && *ctype == 'd') {
+	cserial = ArcGetEnvironmentVariable("ConsoleOut");
+
+	if ((ctype && *ctype == 'd') || (cserial && *cserial == 's')) {
 		static char options[8];
 		char *baud = ArcGetEnvironmentVariable("dbaud");
 		if (baud)
@@ -91,7 +76,7 @@ static int __init ip22_setup(void)
 		add_preferred_console("ttyS", *(ctype + 1) == '2' ? 1 : 0,
 				      baud ? options : NULL);
 	} else if (!ctype || *ctype != 'g') {
-		/* Use ARC if we don't want serial ('d') or Newport ('g'). */
+		/* Use ARC if we don't want serial ('d') or graphics ('g'). */
 		prom_flags |= PROM_FLAG_USE_AS_CONSOLE;
 		add_preferred_console("arc", 0, NULL);
 	}
@@ -137,8 +122,4 @@ static int __init ip22_setup(void)
 		}
 	}
 #endif
-
-	return 0;
 }
-
-early_initcall(ip22_setup);

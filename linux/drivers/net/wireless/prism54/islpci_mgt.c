@@ -1,5 +1,4 @@
 /*
- *  
  *  Copyright (C) 2002 Intersil Americas Inc.
  *  Copyright 2004 Jens Maurer <Jens.Maurer@gmx.net>
  *
@@ -18,7 +17,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/netdevice.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -44,6 +42,7 @@ module_param(pc_debug, int, 0);
 /******************************************************************************
     Driver general functions
 ******************************************************************************/
+#if VERBOSE > SHOW_ERROR_MESSAGES
 void
 display_buffer(char *buffer, int length)
 {
@@ -58,6 +57,7 @@ display_buffer(char *buffer, int length)
 
 	printk("\n");
 }
+#endif
 
 /*****************************************************************************
     Queue handling for management frames
@@ -135,7 +135,7 @@ islpci_mgmt_rx_fill(struct net_device *ndev)
 						       PCI_DMA_FROMDEVICE);
 			if (!buf->pci_addr) {
 				printk(KERN_WARNING
-				       "Failed to make memory DMA'able\n.");
+				       "Failed to make memory DMA'able.\n");
 				return -ENOMEM;
 			}
 		}
@@ -386,7 +386,7 @@ islpci_mgt_receive(struct net_device *ndev)
 
 			/* Create work to handle trap out of interrupt
 			 * context. */
-			INIT_WORK(&frame->ws, prism54_process_trap, frame);
+			INIT_WORK(&frame->ws, prism54_process_trap);
 			schedule_work(&frame->ws);
 
 		} else {
@@ -453,7 +453,7 @@ islpci_mgt_transaction(struct net_device *ndev,
 		       struct islpci_mgmtframe **recvframe)
 {
 	islpci_private *priv = netdev_priv(ndev);
-	const long wait_cycle_jiffies = (ISL38XX_WAIT_CYCLE * 10 * HZ) / 1000;
+	const long wait_cycle_jiffies = msecs_to_jiffies(ISL38XX_WAIT_CYCLE * 10);
 	long timeout_left = ISL38XX_MAX_WAIT_CYCLES * wait_cycle_jiffies;
 	int err;
 	DEFINE_WAIT(wait);
@@ -473,8 +473,7 @@ islpci_mgt_transaction(struct net_device *ndev,
 		int timeleft;
 		struct islpci_mgmtframe *frame;
 
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		timeleft = schedule_timeout(wait_cycle_jiffies);
+		timeleft = schedule_timeout_uninterruptible(wait_cycle_jiffies);
 		frame = xchg(&priv->mgmt_received, NULL);
 		if (frame) {
 			if (frame->header->oid == oid) {
@@ -502,7 +501,7 @@ islpci_mgt_transaction(struct net_device *ndev,
 	printk(KERN_WARNING "%s: timeout waiting for mgmt response\n",
 	       ndev->name);
 
-	/* TODO: we should reset the device here */     
+	/* TODO: we should reset the device here */
  out:
 	finish_wait(&priv->mgmt_wqueue, &wait);
 	up(&priv->mgmt_sem);

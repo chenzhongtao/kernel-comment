@@ -7,7 +7,7 @@
  *	     used by other architectures		/Roman Zippel
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -59,7 +59,7 @@ static struct vm_struct *get_io_area(unsigned long size)
 	unsigned long addr;
 	struct vm_struct **p, *tmp, *area;
 
-	area = (struct vm_struct *)kmalloc(sizeof(*area), GFP_KERNEL);
+	area = kmalloc(sizeof(*area), GFP_KERNEL);
 	if (!area)
 		return NULL;
 	addr = KMAP_START;
@@ -102,7 +102,7 @@ static inline void free_io_area(void *addr)
  */
 /* Rewritten by Andreas Schwab to remove all races. */
 
-void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
+void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 {
 	struct vm_struct *area;
 	unsigned long virtaddr, retaddr;
@@ -121,7 +121,7 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 	if (MACH_IS_AMIGA) {
 		if ((physaddr >= 0x40000000) && (physaddr + size < 0x60000000)
 		    && (cacheflag == IOMAP_NOCACHE_SER))
-			return (void *)physaddr;
+			return (void __iomem *)physaddr;
 	}
 #endif
 
@@ -201,7 +201,7 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 			virtaddr += PTRTREESIZE;
 			size -= PTRTREESIZE;
 		} else {
-			pte_dir = pte_alloc_kernel(&init_mm, pmd_dir, virtaddr);
+			pte_dir = pte_alloc_kernel(pmd_dir, virtaddr);
 			if (!pte_dir) {
 				printk("ioremap: no mem for pte_dir\n");
 				return NULL;
@@ -218,23 +218,25 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 #endif
 	flush_tlb_all();
 
-	return (void *)retaddr;
+	return (void __iomem *)retaddr;
 }
+EXPORT_SYMBOL(__ioremap);
 
 /*
  * Unmap a ioremap()ed region again
  */
-void iounmap(void *addr)
+void iounmap(void __iomem *addr)
 {
 #ifdef CONFIG_AMIGA
 	if ((!MACH_IS_AMIGA) ||
 	    (((unsigned long)addr < 0x40000000) ||
 	     ((unsigned long)addr > 0x60000000)))
-			free_io_area(addr);
+			free_io_area((__force void *)addr);
 #else
-	free_io_area(addr);
+	free_io_area((__force void *)addr);
 #endif
 }
+EXPORT_SYMBOL(iounmap);
 
 /*
  * __iounmap unmaps nearly everything, so be careful
@@ -259,13 +261,15 @@ void __iounmap(void *addr, unsigned long size)
 
 		if (CPU_IS_020_OR_030) {
 			int pmd_off = (virtaddr/PTRTREESIZE) & 15;
+			int pmd_type = pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK;
 
-			if ((pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK) == _PAGE_PRESENT) {
+			if (pmd_type == _PAGE_PRESENT) {
 				pmd_dir->pmd[pmd_off] = 0;
 				virtaddr += PTRTREESIZE;
 				size -= PTRTREESIZE;
 				continue;
-			}
+			} else if (pmd_type == 0)
+				continue;
 		}
 
 		if (pmd_bad(*pmd_dir)) {
@@ -359,3 +363,4 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 
 	flush_tlb_all();
 }
+EXPORT_SYMBOL(kernel_set_cachemode);

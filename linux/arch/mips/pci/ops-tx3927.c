@@ -40,7 +40,6 @@
 
 #include <asm/addrspace.h>
 #include <asm/jmr3927/jmr3927.h>
-#include <asm/debug.h>
 
 static inline int mkaddr(unsigned char bus, unsigned char dev_fn,
 	unsigned char where)
@@ -72,13 +71,9 @@ static inline int check_abort(void)
 static int jmr3927_pci_read_config(struct pci_bus *bus, unsigned int devfn,
 	int where, int size, u32 * val)
 {
-	int ret, busno;
+	int ret;
 
-	/* check if the bus is top-level */
-	if (bus->parent != NULL)
-		busno = bus->number;
-
-	ret = mkaddr(busno, devfn, where);
+	ret = mkaddr(bus->number, devfn, where);
 	if (ret)
 		return ret;
 
@@ -102,15 +97,9 @@ static int jmr3927_pci_read_config(struct pci_bus *bus, unsigned int devfn,
 static int jmr3927_pci_write_config(struct pci_bus *bus, unsigned int devfn,
 	int where, int size, u32 val)
 {
-	int ret, busno;
+	int ret;
 
-	/* check if the bus is top-level */
-	if (bus->parent != NULL)
-		bus = bus->number;
-	else
-		bus = 0;
-
-	ret = mkaddr(busno, devfn, where);
+	ret = mkaddr(bus->number, devfn, where);
 	if (ret)
 		return ret;
 
@@ -120,7 +109,7 @@ static int jmr3927_pci_write_config(struct pci_bus *bus, unsigned int devfn,
 		break;
 
 	case 2:
-		*(volatile u16 *) (unsigned longulong) & tx3927_pcicptr->icd | (where & 2)) =
+		*(volatile u16 *) ((unsigned long) & tx3927_pcicptr->icd | (where & 2)) =
 	    cpu_to_le16(val);
 		break;
 
@@ -137,255 +126,6 @@ static int jmr3927_pci_write_config(struct pci_bus *bus, unsigned int devfn,
 }
 
 struct pci_ops jmr3927_pci_ops = {
-	jmr3927_pcibios_read_config,
-	jmr3927_pcibios_write_config,
+	jmr3927_pci_read_config,
+	jmr3927_pci_write_config,
 };
-
-
-#ifndef JMR3927_INIT_INDIRECT_PCI
-
-inline unsigned long tc_readl(volatile __u32 * addr)
-{
-	return readl(addr);
-}
-
-inline void tc_writel(unsigned long data, volatile __u32 * addr)
-{
-	writel(data, addr);
-}
-#else
-
-unsigned long tc_readl(volatile __u32 * addr)
-{
-	unsigned long val;
-
-	addr = PHYSADDR(addr);
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) addr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_MEMREAD << PCI_IPCIBE_ICMD_SHIFT) |
-	    PCI_IPCIBE_IBE_LONG;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	val =
-	    le32_to_cpu(*(volatile u32 *) (ulong) & tx3927_pcicptr->
-			ipcidata);
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-	return val;
-}
-
-void tc_writel(unsigned long data, volatile __u32 * addr)
-{
-	addr = PHYSADDR(addr);
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcidata =
-	    cpu_to_le32(data);
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) addr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_MEMWRITE << PCI_IPCIBE_ICMD_SHIFT) |
-	    PCI_IPCIBE_IBE_LONG;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-}
-
-unsigned char tx_ioinb(unsigned char *addr)
-{
-	unsigned long val;
-	__u32 ioaddr;
-	int offset;
-	int byte;
-
-	ioaddr = (unsigned long) addr;
-	offset = ioaddr & 0x3;
-	if (offset == 0)
-		byte = 0x7;
-	else if (offset == 1)
-		byte = 0xb;
-	else if (offset == 2)
-		byte = 0xd;
-	else if (offset == 3)
-		byte = 0xe;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) ioaddr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_IOREAD << PCI_IPCIBE_ICMD_SHIFT) | byte;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	val =
-	    le32_to_cpu(*(volatile u32 *) (ulong) & tx3927_pcicptr->
-			ipcidata);
-	val = val & 0xff;
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-	return val;
-}
-
-void tx_iooutb(unsigned long data, unsigned char *addr)
-{
-	__u32 ioaddr;
-	int offset;
-	int byte;
-
-	data = data | (data << 8) | (data << 16) | (data << 24);
-	ioaddr = (unsigned long) addr;
-	offset = ioaddr & 0x3;
-	if (offset == 0)
-		byte = 0x7;
-	else if (offset == 1)
-		byte = 0xb;
-	else if (offset == 2)
-		byte = 0xd;
-	else if (offset == 3)
-		byte = 0xe;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcidata = data;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) ioaddr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_IOWRITE << PCI_IPCIBE_ICMD_SHIFT) | byte;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-}
-
-unsigned short tx_ioinw(unsigned short *addr)
-{
-	unsigned long val;
-	__u32 ioaddr;
-	int offset;
-	int byte;
-
-	ioaddr = (unsigned long) addr;
-	offset = ioaddr & 0x3;
-	if (offset == 0)
-		byte = 0x3;
-	else if (offset == 2)
-		byte = 0xc;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) ioaddr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_IOREAD << PCI_IPCIBE_ICMD_SHIFT) | byte;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	val =
-	    le32_to_cpu(*(volatile u32 *) (ulong) & tx3927_pcicptr->
-			ipcidata);
-	val = val & 0xffff;
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-	return val;
-
-}
-
-void tx_iooutw(unsigned long data, unsigned short *addr)
-{
-	__u32 ioaddr;
-	int offset;
-	int byte;
-
-	data = data | (data << 16);
-	ioaddr = (unsigned long) addr;
-	offset = ioaddr & 0x3;
-	if (offset == 0)
-		byte = 0x3;
-	else if (offset == 2)
-		byte = 0xc;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcidata = data;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) ioaddr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_IOWRITE << PCI_IPCIBE_ICMD_SHIFT) | byte;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-}
-
-unsigned long tx_ioinl(unsigned int *addr)
-{
-	unsigned long val;
-	__u32 ioaddr;
-
-	ioaddr = (unsigned long) addr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) ioaddr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_IOREAD << PCI_IPCIBE_ICMD_SHIFT) |
-	    PCI_IPCIBE_IBE_LONG;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	val =
-	    le32_to_cpu(*(volatile u32 *) (ulong) & tx3927_pcicptr->
-			ipcidata);
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-	return val;
-}
-
-void tx_iooutl(unsigned long data, unsigned int *addr)
-{
-	__u32 ioaddr;
-
-	ioaddr = (unsigned long) addr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcidata =
-	    cpu_to_le32(data);
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipciaddr =
-	    (unsigned long) ioaddr;
-	*(volatile u32 *) (ulong) & tx3927_pcicptr->ipcibe =
-	    (PCI_IPCIBE_ICMD_IOWRITE << PCI_IPCIBE_ICMD_SHIFT) |
-	    PCI_IPCIBE_IBE_LONG;
-	while (!(tx3927_pcicptr->istat & PCI_ISTAT_IDICC));
-	/* clear by setting */
-	tx3927_pcicptr->istat |= PCI_ISTAT_IDICC;
-}
-
-void tx_insbyte(unsigned char *addr, void *buffer, unsigned int count)
-{
-	unsigned char *ptr = (unsigned char *) buffer;
-
-	while (count--) {
-		*ptr++ = tx_ioinb(addr);
-	}
-}
-
-void tx_insword(unsigned short *addr, void *buffer, unsigned int count)
-{
-	unsigned short *ptr = (unsigned short *) buffer;
-
-	while (count--) {
-		*ptr++ = tx_ioinw(addr);
-	}
-}
-
-void tx_inslong(unsigned int *addr, void *buffer, unsigned int count)
-{
-	unsigned long *ptr = (unsigned long *) buffer;
-
-	while (count--) {
-		*ptr++ = tx_ioinl(addr);
-	}
-}
-
-void tx_outsbyte(unsigned char *addr, void *buffer, unsigned int count)
-{
-	unsigned char *ptr = (unsigned char *) buffer;
-
-	while (count--) {
-		tx_iooutb(*ptr++, addr);
-	}
-}
-
-void tx_outsword(unsigned short *addr, void *buffer, unsigned int count)
-{
-	unsigned short *ptr = (unsigned short *) buffer;
-
-	while (count--) {
-		tx_iooutw(*ptr++, addr);
-	}
-}
-
-void tx_outslong(unsigned int *addr, void *buffer, unsigned int count)
-{
-	unsigned long *ptr = (unsigned long *) buffer;
-
-	while (count--) {
-		tx_iooutl(*ptr++, addr);
-	}
-}
-#endif

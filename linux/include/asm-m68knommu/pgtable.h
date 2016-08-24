@@ -7,7 +7,6 @@
  * (C) Copyright 2000-2002, Greg Ungerer <gerg@snapgear.com>
  */
 
-#include <linux/config.h>
 #include <linux/slab.h>
 #include <asm/processor.h>
 #include <asm/page.h>
@@ -50,14 +49,14 @@ static inline int pte_file(pte_t pte) { return 0; }
  * These would be in other places but having them here reduces the diffs.
  */
 extern unsigned int kobjsize(const void *objp);
-extern int is_in_rom(unsigned long);
 
 /*
  * No page table caches to initialise.
  */
 #define pgtable_cache_init()	do { } while (0)
-#define io_remap_page_range(vma, vaddr, paddr, size, prot)		\
-		remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
+
+#define io_remap_pfn_range(vma, vaddr, pfn, size, prot)		\
+		remap_pfn_range(vma, vaddr, pfn, size, prot)
 
 /*
  * All 32bit addresses are effectively valid for vmalloc...
@@ -65,5 +64,7 @@ extern int is_in_rom(unsigned long);
  */
 #define	VMALLOC_START	0
 #define	VMALLOC_END	0xffffffff
+
+#include <asm-generic/pgtable.h>
 
 #endif /* _M68KNOMMU_PGTABLE_H */

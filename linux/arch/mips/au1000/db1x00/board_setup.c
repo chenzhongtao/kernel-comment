@@ -27,7 +27,6 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
@@ -45,13 +44,12 @@
 #include <asm/mach-au1x00/au1000.h>
 #include <asm/mach-db1x00/db1x00.h>
 
-/* not correct for db1550 */
-static BCSR * const bcsr = (BCSR *)0xAE000000;
+static BCSR * const bcsr = (BCSR *)BCSR_KSEG1_ADDR;
 
-void board_reset (void)
+void board_reset(void)
 {
 	/* Hit BCSR.SYSTEM_CONTROL[SW_RST] */
-	au_writel(0x00000000, 0xAE00001C);
+	bcsr->swreset = 0x0000;
 }
 
 void __init board_setup(void)
@@ -60,11 +58,6 @@ void __init board_setup(void)
 
 	pin_func = 0;
 	/* not valid for 1550 */
-#ifdef CONFIG_AU1X00_USB_DEVICE
-	// 2nd USB port is USB device
-	pin_func = au_readl(SYS_PINFUNC) & (u32)(~0x8000);
-	au_writel(pin_func, SYS_PINFUNC);
-#endif
 
 #if defined(CONFIG_IRDA) && (defined(CONFIG_SOC_AU1000) || defined(CONFIG_SOC_AU1100))
 	/* set IRFIRSEL instead of GPIO15 */
@@ -75,7 +68,7 @@ void __init board_setup(void)
 	bcsr->resets |= BCSR_RESETS_IRDA_MODE_OFF;
 	au_sync();
 #endif
-	au_writel(0, 0xAE000010); /* turn off pcmcia power */
+	bcsr->pcmcia = 0x0000; /* turn off PCMCIA power */
 
 #ifdef CONFIG_MIPS_MIRAGE
 	/* enable GPIO[31:0] inputs */

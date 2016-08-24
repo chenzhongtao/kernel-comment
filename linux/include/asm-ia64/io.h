@@ -23,7 +23,7 @@
 #define __SLOW_DOWN_IO	do { } while (0)
 #define SLOW_DOWN_IO	do { } while (0)
 
-#define __IA64_UNCACHED_OFFSET	0xc000000000000000UL	/* region 6 */
+#define __IA64_UNCACHED_OFFSET	RGN_BASE(RGN_UNCACHED)
 
 /*
  * The legacy I/O space defined by the ia64 architecture supports only 65536 ports, but
@@ -32,7 +32,7 @@
  */
 #define IO_SPACE_LIMIT		0xffffffffffffffffUL
 
-#define MAX_IO_SPACES_BITS		4
+#define MAX_IO_SPACES_BITS		8
 #define MAX_IO_SPACES			(1UL << MAX_IO_SPACES_BITS)
 #define IO_SPACE_BITS			24
 #define IO_SPACE_SIZE			(1UL << IO_SPACE_BITS)
@@ -41,7 +41,7 @@
 #define IO_SPACE_BASE(space)		((space) << IO_SPACE_BITS)
 #define IO_SPACE_PORT(port)		((port) & (IO_SPACE_SIZE - 1))
 
-#define IO_SPACE_SPARSE_ENCODING(p)	((((p) >> 2) << 12) | (p & 0xfff))
+#define IO_SPACE_SPARSE_ENCODING(p)	((((p) >> 2) << 12) | ((p) & 0xfff))
 
 struct io_space {
 	unsigned long mmio_base;	/* base in MMIO space */
@@ -88,7 +88,9 @@ phys_to_virt (unsigned long address)
 }
 
 #define ARCH_HAS_VALID_PHYS_ADDR_RANGE
-extern int valid_phys_addr_range (unsigned long addr, size_t *count); /* efi.c */
+extern u64 kern_mem_attribute (unsigned long phys_addr, unsigned long size);
+extern int valid_phys_addr_range (unsigned long addr, size_t count); /* efi.c */
+extern int valid_mmap_phys_addr_range (unsigned long pfn, size_t count);
 
 /*
  * The following two macros are deprecated and scheduled for removal.
@@ -118,14 +120,6 @@ extern int valid_phys_addr_range (unsigned long addr, size_t *count); /* efi.c *
 static inline void ___ia64_mmiowb(void)
 {
 	ia64_mfa();
-}
-
-static inline const unsigned long
-__ia64_get_io_port_base (void)
-{
-	extern unsigned long ia64_iobase;
-
-	return ia64_iobase;
 }
 
 static inline void*
@@ -423,26 +417,16 @@ __writeq (unsigned long val, volatile void __iomem *addr)
 # define outl_p		outl
 #endif
 
-/*
- * An "address" in IO memory space is not clearly either an integer or a pointer. We will
- * accept both, thus the casts.
- *
- * On ia-64, we access the physical I/O memory space through the uncached kernel region.
- */
-static inline void __iomem *
-ioremap (unsigned long offset, unsigned long size)
-{
-	return (void __iomem *) (__IA64_UNCACHED_OFFSET | (offset));
-}
-
-static inline void
-iounmap (volatile void __iomem *addr)
-{
-}
-
-#define ioremap_nocache(o,s)	ioremap(o,s)
-
 # ifdef __KERNEL__
+
+extern void __iomem * ioremap(unsigned long offset, unsigned long size);
+extern void __iomem * ioremap_nocache (unsigned long offset, unsigned long size);
+extern void iounmap (volatile void __iomem *addr);
+
+/* Use normal IO mappings for DMI */
+#define dmi_ioremap ioremap
+#define dmi_iounmap(x,l) iounmap(x)
+#define dmi_alloc(l) kmalloc(l, GFP_ATOMIC)
 
 /*
  * String version of IO memory access ops:
@@ -450,10 +434,6 @@ iounmap (volatile void __iomem *addr)
 extern void memcpy_fromio(void *dst, const volatile void __iomem *src, long n);
 extern void memcpy_toio(volatile void __iomem *dst, const void *src, long n);
 extern void memset_io(volatile void __iomem *s, int c, long n);
-
-#define dma_cache_inv(_start,_size)             do { } while (0)
-#define dma_cache_wback(_start,_size)           do { } while (0)
-#define dma_cache_wback_inv(_start,_size)       do { } while (0)
 
 # endif /* __KERNEL__ */
 

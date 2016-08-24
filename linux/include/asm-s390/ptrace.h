@@ -181,10 +181,8 @@
 #define PTRACE_OLDSETOPTIONS         21
 
 #ifndef __ASSEMBLY__
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
-#include <asm/setup.h>
 
 typedef union
 {
@@ -235,6 +233,7 @@ typedef struct
 #define PSW_ADDR_INSN		0x7FFFFFFFUL
 
 #define PSW_BASE_BITS		0x00080000UL
+#define PSW_DEFAULT_KEY		(((unsigned long) PAGE_DEFAULT_ACC) << 20)
 
 #define PSW_ASC_PRIMARY		0x00000000UL
 #define PSW_ASC_ACCREG		0x00004000UL
@@ -260,22 +259,19 @@ typedef struct
 
 #define PSW_BASE_BITS		0x0000000180000000UL
 #define PSW_BASE32_BITS		0x0000000080000000UL
+#define PSW_DEFAULT_KEY		(((unsigned long) PAGE_DEFAULT_ACC) << 52)
 
 #define PSW_ASC_PRIMARY		0x0000000000000000UL
 #define PSW_ASC_ACCREG		0x0000400000000000UL
 #define PSW_ASC_SECONDARY	0x0000800000000000UL
 #define PSW_ASC_HOME		0x0000C00000000000UL
 
-#define PSW_USER32_BITS (PSW_BASE32_BITS | PSW_MASK_DAT | PSW_ASC_HOME | \
-			 PSW_MASK_IO | PSW_MASK_EXT | PSW_MASK_MCHECK | \
-			 PSW_MASK_PSTATE)
+extern long psw_user32_bits;
 
 #endif /* __s390x__ */
 
-#define PSW_KERNEL_BITS	(PSW_BASE_BITS | PSW_MASK_DAT | PSW_ASC_PRIMARY)
-#define PSW_USER_BITS	(PSW_BASE_BITS | PSW_MASK_DAT | PSW_ASC_HOME | \
-			 PSW_MASK_IO | PSW_MASK_EXT | PSW_MASK_MCHECK | \
-			 PSW_MASK_PSTATE)
+extern long psw_kernel_bits;
+extern long psw_user_bits;
 
 /* This macro merges a NEW PSW mask specified by the user into
    the currently active PSW mask CURRENT, modifying only those
@@ -297,6 +293,9 @@ typedef struct
 } s390_regs;
 
 #ifdef __KERNEL__
+#include <asm/setup.h>
+#include <asm/page.h>
+
 /*
  * The pt_regs struct defines the way the registers are stored on
  * the stack during a system call.
@@ -464,12 +463,14 @@ struct user_regs_struct
 };
 
 #ifdef __KERNEL__
+#define __ARCH_SYS_PTRACE	1
+
 #define user_mode(regs) (((regs)->psw.mask & PSW_MASK_PSTATE) != 0)
 #define instruction_pointer(regs) ((regs)->psw.addr & PSW_ADDR_INSN)
+#define regs_return_value(regs)((regs)->gprs[2])
 #define profile_pc(regs) instruction_pointer(regs)
 extern void show_regs(struct pt_regs * regs);
-#endif
-
+#endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */
 
 #endif /* _S390_PTRACE_H */

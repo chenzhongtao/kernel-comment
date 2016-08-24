@@ -58,7 +58,7 @@ struct pci_controller {
 
 extern void pcibios_set_master(struct pci_dev *dev);
 
-extern inline void pcibios_penalize_isa_irq(int irq)
+extern inline void pcibios_penalize_isa_irq(int irq, int active)
 {
 	/* We don't do dynamic PCI IRQ allocation */
 }
@@ -199,51 +199,56 @@ pci_dma_sync_sg_for_device(struct pci_dev *dev, struct scatterlist *sg,
 
 extern int pci_dma_supported(struct pci_dev *hwdev, u64 mask);
 
-/* True if the machine supports DAC addressing, and DEV can
-   make use of it given MASK.  */
-extern int pci_dac_dma_supported(struct pci_dev *hwdev, u64 mask);
-
-/* Convert to/from DAC dma address and struct page.  */
-extern dma64_addr_t pci_dac_page_to_dma(struct pci_dev *, struct page *,
-					unsigned long, int);
-extern struct page *pci_dac_dma_to_page(struct pci_dev *, dma64_addr_t);
-extern unsigned long pci_dac_dma_to_offset(struct pci_dev *, dma64_addr_t);
-
-static inline void
-pci_dac_dma_sync_single_for_cpu(struct pci_dev *pdev, dma64_addr_t dma_addr,
-				size_t len, int direction)
+#ifdef CONFIG_PCI
+static inline void pci_dma_burst_advice(struct pci_dev *pdev,
+					enum pci_dma_burst_strategy *strat,
+					unsigned long *strategy_parameter)
 {
-	/* Nothing to do. */
+	unsigned long cacheline_size;
+	u8 byte;
+
+	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &byte);
+	if (byte == 0)
+		cacheline_size = 1024;
+	else
+		cacheline_size = (int) byte * 4;
+
+	*strat = PCI_DMA_BURST_BOUNDARY;
+	*strategy_parameter = cacheline_size;
 }
+#endif
 
-static inline void
-pci_dac_dma_sync_single_for_device(struct pci_dev *pdev, dma64_addr_t dma_addr,
-				   size_t len, int direction)
+/* TODO: integrate with include/asm-generic/pci.h ? */
+static inline int pci_get_legacy_ide_irq(struct pci_dev *dev, int channel)
 {
-	/* Nothing to do. */
+	return channel ? 15 : 14;
 }
 
 extern void pcibios_resource_to_bus(struct pci_dev *, struct pci_bus_region *,
 				    struct resource *);
 
-#define pci_domain_nr(bus) ((struct pci_controller *)(bus)->sysdata)->index
+extern void pcibios_bus_to_resource(struct pci_dev *dev, struct resource *res,
+				    struct pci_bus_region *region);
 
-static inline int
-pci_name_bus(char *name, struct pci_bus *bus)
+static inline struct resource *
+pcibios_select_root(struct pci_dev *pdev, struct resource *res)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct resource *root = NULL;
 
-	if (likely(hose->need_domain_info == 0)) {
-		sprintf(name, "%02x", bus->number);
-	} else {
-		sprintf(name, "%04x:%02x", hose->index, bus->number);
-	}
-	return 0;
+	if (res->flags & IORESOURCE_IO)
+		root = &ioport_resource;
+	if (res->flags & IORESOURCE_MEM)
+		root = &iomem_resource;
+
+	return root;
 }
 
-static inline void
-pcibios_add_platform_entries(struct pci_dev *dev)
+#define pci_domain_nr(bus) ((struct pci_controller *)(bus)->sysdata)->index
+
+static inline int pci_proc_domain(struct pci_bus *bus)
 {
+	struct pci_controller *hose = bus->sysdata;
+	return hose->need_domain_info;
 }
 
 struct pci_dev *alpha_gendev_to_pci(struct device *dev);
@@ -258,5 +263,7 @@ struct pci_dev *alpha_gendev_to_pci(struct device *dev);
 #define IOBASE_DENSE_IO		4
 #define IOBASE_ROOT_BUS		5
 #define IOBASE_FROM_HOSE	0x10000
+
+extern struct pci_dev *isa_bridge;
 
 #endif /* __ALPHA_PCI_H */

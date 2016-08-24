@@ -316,14 +316,35 @@ static int __g450_setclk(WPMINFO unsigned int fout, unsigned int pll,
 		case M_PIXEL_PLL_B:
 		case M_PIXEL_PLL_C:
 			{
-				u_int8_t tmp;
+				u_int8_t tmp, xpwrctrl;
 				unsigned long flags;
 				
 				matroxfb_DAC_lock_irqsave(flags);
+
+				xpwrctrl = matroxfb_DAC_in(PMINFO M1064_XPWRCTRL);
+				matroxfb_DAC_out(PMINFO M1064_XPWRCTRL, xpwrctrl & ~M1064_XPWRCTRL_PANELPDN);
+				mga_outb(M_SEQ_INDEX, M_SEQ1);
+				mga_outb(M_SEQ_DATA, mga_inb(M_SEQ_DATA) | M_SEQ1_SCROFF);
 				tmp = matroxfb_DAC_in(PMINFO M1064_XPIXCLKCTRL);
+				tmp |= M1064_XPIXCLKCTRL_DIS;
 				if (!(tmp & M1064_XPIXCLKCTRL_PLL_UP)) {
-					matroxfb_DAC_out(PMINFO M1064_XPIXCLKCTRL, tmp | M1064_XPIXCLKCTRL_PLL_UP);
+					tmp |= M1064_XPIXCLKCTRL_PLL_UP;
 				}
+				matroxfb_DAC_out(PMINFO M1064_XPIXCLKCTRL, tmp);
+				/* DVI PLL preferred for frequencies up to
+				   panel link max, standard PLL otherwise */
+				if (fout >= MINFO->max_pixel_clock_panellink)
+					tmp = 0;
+				else tmp =
+					M1064_XDVICLKCTRL_DVIDATAPATHSEL |
+					M1064_XDVICLKCTRL_C1DVICLKSEL |
+					M1064_XDVICLKCTRL_C1DVICLKEN |
+					M1064_XDVICLKCTRL_DVILOOPCTL |
+					M1064_XDVICLKCTRL_P1LOOPBWDTCTL;
+				matroxfb_DAC_out(PMINFO M1064_XDVICLKCTRL,tmp);
+				matroxfb_DAC_out(PMINFO M1064_XPWRCTRL,
+						 xpwrctrl);
+
 				matroxfb_DAC_unlock_irqrestore(flags);
 			}
 			{
@@ -418,6 +439,15 @@ static int __g450_setclk(WPMINFO unsigned int fout, unsigned int pll,
 				   frequency to higher - with <= lowest wins, while
 				   with < highest one wins */
 				if (delta <= deltaarray[idx-1]) {
+					/* all else being equal except VCO,
+					 * choose VCO not near (within 1/16th or so) VCOmin
+					 * (freqs near VCOmin aren't as stable)
+					 */
+					if (delta == deltaarray[idx-1]
+					    && vco != g450_mnp2vco(PMINFO mnparray[idx-1])
+					    && vco < (pi->vcomin * 17 / 16)) {
+						break;
+					}
 					mnparray[idx] = mnparray[idx-1];
 					deltaarray[idx] = deltaarray[idx-1];
 				} else {

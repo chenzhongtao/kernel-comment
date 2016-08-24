@@ -1,8 +1,6 @@
 #ifndef _ASM_CRIS_UNISTD_H_
 #define _ASM_CRIS_UNISTD_H_
 
-#include <asm/arch/unistd.h>
-
 /*
  * This file contains the system call numbers, and stub macros for libc.
  */
@@ -257,6 +255,7 @@
 #define __NR_io_submit		248
 #define __NR_io_cancel		249
 #define __NR_fadvise64		250
+/* 251 is available for reuse (was briefly sys_set_zone_reclaim) */
 #define __NR_exit_group		252
 #define __NR_lookup_dcookie	253
 #define __NR_epoll_create	254
@@ -288,11 +287,55 @@
 #define __NR_mq_timedreceive	(__NR_mq_open+3)
 #define __NR_mq_notify		(__NR_mq_open+4)
 #define __NR_mq_getsetattr	(__NR_mq_open+5)
- 
-#define NR_syscalls 283
-
+#define __NR_kexec_load		283
+#define __NR_waitid		284
+/* #define __NR_sys_setaltroot	285 */
+#define __NR_add_key		286
+#define __NR_request_key	287
+#define __NR_keyctl		288
+#define __NR_ioprio_set		289
+#define __NR_ioprio_get		290
+#define __NR_inotify_init	291
+#define __NR_inotify_add_watch	292
+#define __NR_inotify_rm_watch	293
+#define __NR_migrate_pages	294
+#define __NR_openat		295
+#define __NR_mkdirat		296
+#define __NR_mknodat		297
+#define __NR_fchownat		298
+#define __NR_futimesat		299
+#define __NR_fstatat64		300
+#define __NR_unlinkat		301
+#define __NR_renameat		302
+#define __NR_linkat		303
+#define __NR_symlinkat		304
+#define __NR_readlinkat		305
+#define __NR_fchmodat		306
+#define __NR_faccessat		307
+#define __NR_pselect6		308
+#define __NR_ppoll		309
+#define __NR_unshare		310
+#define __NR_set_robust_list	311
+#define __NR_get_robust_list	312
+#define __NR_splice		313
+#define __NR_sync_file_range	314
+#define __NR_tee		315
+#define __NR_vmsplice		316
+#define __NR_move_pages		317
+#define __NR_getcpu		318
+#define __NR_epoll_pwait	319
+#define __NR_utimensat		320
+#define __NR_signalfd		321
+#define __NR_timerfd		322
+#define __NR_eventfd		323
+#define __NR_fallocate		324
 
 #ifdef __KERNEL__
+
+#define NR_syscalls 325
+
+#include <asm/arch/unistd.h>
+
 #define __ARCH_WANT_IPC_PARSE_VERSION
 #define __ARCH_WANT_OLD_READDIR
 #define __ARCH_WANT_OLD_STAT
@@ -315,71 +358,7 @@
 #define __ARCH_WANT_SYS_SIGPENDING
 #define __ARCH_WANT_SYS_SIGPROCMASK
 #define __ARCH_WANT_SYS_RT_SIGACTION
-#endif
-
-#ifdef __KERNEL_SYSCALLS__
-
-#include <linux/compiler.h>
-#include <linux/types.h>
-#include <linux/linkage.h>
-
-/*
- * we need this inline - forking from kernel space will result
- * in NO COPY ON WRITE (!!!), until an execve is executed. This
- * is no problem, but for the stack. This is handled by not letting
- * main() use the stack at all after fork(). Thus, no function
- * calls - which means inline code for fork too, as otherwise we
- * would use the stack upon exit from 'fork()'.
- *
- * Actually only pause and fork are needed inline, so that there
- * won't be any messing with the stack from main(), but we define
- * some others too.
- */
-#define __NR__exit __NR_exit
-extern inline _syscall0(pid_t,setsid)
-extern inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
-extern inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
-extern inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
-extern inline _syscall1(int,dup,int,fd)
-extern inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
-extern inline _syscall3(int,open,const char *,file,int,flag,int,mode)
-extern inline _syscall1(int,close,int,fd)
-
-struct pt_regs;
-asmlinkage long sys_mmap2(
-			unsigned long addr, unsigned long len,
-			unsigned long prot, unsigned long flags,
-			unsigned long fd, unsigned long pgoff);
-asmlinkage int sys_execve(const char *fname, char **argv, char **envp,
-			long r13, long mof, long srp, struct pt_regs *regs);
-asmlinkage int sys_clone(unsigned long newusp, unsigned long flags,
-			int* parent_tid, int* child_tid, long mof, long srp,
-			struct pt_regs *regs);
-asmlinkage int sys_fork(long r10, long r11, long r12, long r13,
-			long mof, long srp, struct pt_regs *regs);
-asmlinkage int sys_vfork(long r10, long r11, long r12, long r13,
-			long mof, long srp, struct pt_regs *regs);
-asmlinkage int sys_pipe(unsigned long __user *fildes);
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data);
-struct sigaction;
-asmlinkage long sys_rt_sigaction(int sig,
-				const struct sigaction __user *act,
-				struct sigaction __user *oact,
-				size_t sigsetsize);
-
-/*
- * Since we define it "external", it collides with the built-in
- * definition, which has the "noreturn" attribute and will cause
- * complaints.  We don't want to use -fno-builtin, so just use a
- * different name when in the kernel.
- */
-#ifdef __KERNEL__
-#define _exit kernel_syscall_exit
-#endif
-extern inline _syscall1(int,_exit,int,exitcode)
-extern inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-#endif
-
+#define __ARCH_WANT_SYS_RT_SIGSUSPEND
 
 /*
  * "Conditional" syscalls
@@ -387,6 +366,7 @@ extern inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
  * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
  * but it doesn't work on all toolchains, so we just do it by hand
  */
-#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall")
 
+#endif /* __KERNEL__ */
 #endif /* _ASM_CRIS_UNISTD_H_ */

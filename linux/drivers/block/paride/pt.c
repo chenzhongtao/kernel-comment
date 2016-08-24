@@ -141,33 +141,13 @@ static int (*drives[4])[6] = {&drive0, &drive1, &drive2, &drive3};
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/mtio.h>
 #include <linux/device.h>
+#include <linux/sched.h>	/* current, TASK_*, schedule_timeout() */
 
 #include <asm/uaccess.h>
-
-#ifndef MODULE
-
-#include "setup.h"
-
-static STT pt_stt[5] = {
-	{"drive0", 6, drive0},
-	{"drive1", 6, drive1},
-	{"drive2", 6, drive2},
-	{"drive3", 6, drive3},
-	{"disable", 1, &disable}
-};
-
-void
-pt_setup(char *str, int *ints)
-{
-	generic_setup(pt_stt, 5, str);
-}
-
-#endif
 
 module_param(verbose, bool, 0);
 module_param(major, int, 0);
@@ -246,13 +226,13 @@ struct pt_unit {
 
 static int pt_identify(struct pt_unit *tape);
 
-struct pt_unit pt[PT_UNITS];
+static struct pt_unit pt[PT_UNITS];
 
 static char pt_scratch[512];	/* scratch block buffer */
 
 /* kernel glue structures */
 
-static struct file_operations pt_fops = {
+static const struct file_operations pt_fops = {
 	.owner = THIS_MODULE,
 	.read = pt_read,
 	.write = pt_write,
@@ -262,7 +242,7 @@ static struct file_operations pt_fops = {
 };
 
 /* sysfs class support */
-static struct class_simple *pt_class;
+static struct class *pt_class;
 
 static inline int status_reg(struct pi_adapter *pi)
 {
@@ -403,8 +383,7 @@ static int pt_atapi(struct pt_unit *tape, char *cmd, int dlen, char *buf, char *
 
 static void pt_sleep(int cs)
 {
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(cs);
+	schedule_timeout_interruptible(cs);
 }
 
 static int pt_poll_dsc(struct pt_unit *tape, int pause, int tmo, char *msg)
@@ -685,7 +664,7 @@ static int pt_open(struct inode *inode, struct file *file)
 		goto out;
 
 	err = -EROFS;
-	if ((!tape->flags & PT_WRITE_OK) && (file->f_mode & 2))
+	if ((!(tape->flags & PT_WRITE_OK)) && (file->f_mode & 2))
 		goto out;
 
 	if (!(iminor(inode) & 128))
@@ -963,58 +942,43 @@ static ssize_t pt_write(struct file *filp, const char __user *buf, size_t count,
 
 static int __init pt_init(void)
 {
-	int unit, err = 0;
+	int unit;
+	int err;
 
 	if (disable) {
-		err = -1;
+		err = -EINVAL;
 		goto out;
 	}
 
 	if (pt_detect()) {
-		err = -1;
+		err = -ENODEV;
 		goto out;
 	}
 
-	if (register_chrdev(major, name, &pt_fops)) {
+	err = register_chrdev(major, name, &pt_fops);
+	if (err < 0) {
 		printk("pt_init: unable to get major number %d\n", major);
 		for (unit = 0; unit < PT_UNITS; unit++)
 			if (pt[unit].present)
 				pi_release(pt[unit].pi);
-		err = -1;
 		goto out;
 	}
-	pt_class = class_simple_create(THIS_MODULE, "pt");
+	major = err;
+	pt_class = class_create(THIS_MODULE, "pt");
 	if (IS_ERR(pt_class)) {
 		err = PTR_ERR(pt_class);
 		goto out_chrdev;
 	}
 
-	devfs_mk_dir("pt");
 	for (unit = 0; unit < PT_UNITS; unit++)
 		if (pt[unit].present) {
-			class_simple_device_add(pt_class, MKDEV(major, unit), 
+			class_device_create(pt_class, NULL, MKDEV(major, unit),
 					NULL, "pt%d", unit);
-			err = devfs_mk_cdev(MKDEV(major, unit),
-				      S_IFCHR | S_IRUSR | S_IWUSR,
-				      "pt/%d", unit);
-			if (err) {
-				class_simple_device_remove(MKDEV(major, unit));
-				goto out_class;
-			}
-			class_simple_device_add(pt_class, MKDEV(major, unit + 128),
+			class_device_create(pt_class, NULL, MKDEV(major, unit + 128),
 					NULL, "pt%dn", unit);
-			err = devfs_mk_cdev(MKDEV(major, unit + 128),
-				      S_IFCHR | S_IRUSR | S_IWUSR,
-				      "pt/%dn", unit);
-			if (err) {
-				class_simple_device_remove(MKDEV(major, unit + 128));
-				goto out_class;
-			}
 		}
 	goto out;
 
-out_class:
-	class_simple_destroy(pt_class);
 out_chrdev:
 	unregister_chrdev(major, "pt");
 out:
@@ -1026,13 +990,10 @@ static void __exit pt_exit(void)
 	int unit;
 	for (unit = 0; unit < PT_UNITS; unit++)
 		if (pt[unit].present) {
-			class_simple_device_remove(MKDEV(major, unit));
-			devfs_remove("pt/%d", unit);
-			class_simple_device_remove(MKDEV(major, unit + 128));
-			devfs_remove("pt/%dn", unit);
+			class_device_destroy(pt_class, MKDEV(major, unit));
+			class_device_destroy(pt_class, MKDEV(major, unit + 128));
 		}
-	class_simple_destroy(pt_class);
-	devfs_remove("pt");
+	class_destroy(pt_class);
 	unregister_chrdev(major, name);
 	for (unit = 0; unit < PT_UNITS; unit++)
 		if (pt[unit].present)

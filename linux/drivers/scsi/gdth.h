@@ -4,16 +4,15 @@
 /*
  * Header file for the GDT Disk Array/Storage RAID controllers driver for Linux
  * 
- * gdth.h Copyright (C) 1995-03 ICP vortex, Achim Leubner
+ * gdth.h Copyright (C) 1995-06 ICP vortex, Achim Leubner
  * See gdth.c for further informations and 
  * below for supported controller types
  *
  * <achim_leubner@adaptec.com>
  *
- * $Id: gdth.h,v 1.57 2004/03/31 11:52:09 achim Exp $
+ * $Id: gdth.h,v 1.58 2006/01/11 16:14:09 achim Exp $
  */
 
-#include <linux/version.h>
 #include <linux/types.h>
 
 #ifndef TRUE
@@ -26,9 +25,9 @@
 /* defines, macros */
 
 /* driver version */
-#define GDTH_VERSION_STR        "3.04"
+#define GDTH_VERSION_STR        "3.05"
 #define GDTH_VERSION            3
-#define GDTH_SUBVERSION         4
+#define GDTH_SUBVERSION         5
 
 /* protocol version */
 #define PROTOCOL_VERSION        1
@@ -304,15 +303,8 @@
 #define MAILBOXREG      0x0c90                  /* mailbox reg. (16 bytes) */
 #define EISAREG         0x0cc0                  /* EISA configuration */
 
-/* DMA memory mappings */
-#define GDTH_MAP_NONE   0
-#define GDTH_MAP_SINGLE 1
-#define GDTH_MAP_SG     2
-#define GDTH_MAP_IOCTL  3 
-
 /* other defines */
 #define LINUX_OS        8                       /* used for cache optim. */
-#define SCATTER_GATHER  1                       /* s/g feature */
 #define SECS32          0x1f                    /* round capacity */
 #define BIOS_ID_OFFS    0x10                    /* offset contr-ID in ISABIOS */
 #define LOCALBOARD      0                       /* board node always 0 */
@@ -845,11 +837,6 @@ typedef struct {
 /* PCI resources */
 typedef struct {
     struct pci_dev      *pdev;
-    ushort              vendor_id;              /* vendor (ICP, Intel, ..) */
-    ushort              device_id;              /* device ID (0,..,9) */
-    ushort              subdevice_id;           /* sub device ID */
-    unchar              bus;                    /* PCI bus */
-    unchar              device_fn;              /* PCI device/function no. */
     ulong               dpmem;                  /* DPRAM address */
     ulong               io;                     /* IO address */
     ulong               io_mm;                  /* IO address mem. mapped */
@@ -859,10 +846,12 @@ typedef struct {
 
 /* controller information structure */
 typedef struct {
+    struct Scsi_Host    *shost;
+    struct list_head    list;
+    ushort      	hanum;
     ushort              oem_id;                 /* OEM */
     ushort              type;                   /* controller class */
     ulong32             stype;                  /* subtype (PCI: device ID) */
-    ushort              subdevice_id;           /* sub device ID (PCI) */
     ushort              fw_vers;                /* firmware version */
     ushort              cache_feat;             /* feat. cache serv. (s/g,..)*/
     ushort              raw_feat;               /* feat. raw service (s/g,..)*/
@@ -871,6 +860,7 @@ typedef struct {
     void __iomem        *brd;                   /* DPRAM address */
     ulong32             brd_phys;               /* slot number/BIOS address */
     gdt6c_plx_regs      *plx;                   /* PLX regs (new PCI contr.) */
+    gdth_cmd_str        cmdext;
     gdth_cmd_str        *pccb;                  /* address command structure */
     ulong32             ccb_phys;               /* phys. address */
 #ifdef INT_COAL
@@ -922,6 +912,19 @@ typedef struct {
         Scsi_Cmnd       *cmnd;                  /* pending request */
         ushort          service;                /* service */
     } cmd_tab[GDTH_MAXCMDS];                    /* table of pend. requests */
+    struct gdth_cmndinfo {                      /* per-command private info */
+        int index;
+        int internal_command;                   /* don't call scsi_done */
+        dma_addr_t sense_paddr;                 /* sense dma-addr */
+        unchar priority;
+        int timeout;
+        volatile int wait_for_completion;
+        ushort status;
+        ulong32 info;
+        enum dma_data_direction dma_dir;
+        int phase;                              /* ???? */
+        int OpCode;
+    } cmndinfo[GDTH_MAXCMDS];                   /* index==0 is free */
     unchar              bus_cnt;                /* SCSI bus count */
     unchar              tid_cnt;                /* Target ID count */
     unchar              bus_id[MAXBUS];         /* IOP IDs */
@@ -936,33 +939,18 @@ typedef struct {
     gdth_binfo_str      binfo;                  /* controller info */
     gdth_evt_data       dvr;                    /* event structure */
     spinlock_t          smp_lock;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
     struct pci_dev      *pdev;
-#endif
     char                oem_name[8];
 #ifdef GDTH_DMA_STATISTICS
     ulong               dma32_cnt, dma64_cnt;   /* statistics: DMA buffer */
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
-    Scsi_Device         *sdev;
-#else
-    Scsi_Device         sdev;
-#endif
+    struct scsi_device         *sdev;
 } gdth_ha_str;
 
-/* structure for scsi_register(), SCSI bus != 0 */
-typedef struct {
-    ushort      hanum;
-    ushort      busnum;
-} gdth_num_str;
-
-/* structure for scsi_register() */
-typedef struct {
-    gdth_num_str        numext;                 /* must be the first element */
-    gdth_ha_str         haext;
-    gdth_cmd_str        cmdext;
-} gdth_ext_str;
-
+static inline struct gdth_cmndinfo *gdth_cmnd_priv(struct scsi_cmnd* cmd)
+{
+	return (struct gdth_cmndinfo *)cmd->host_scribble;
+}
 
 /* INQUIRY data format */
 typedef struct {
@@ -1029,51 +1017,6 @@ typedef struct {
 
 /* function prototyping */
 
-int gdth_detect(Scsi_Host_Template *);
-int gdth_release(struct Scsi_Host *);
-int gdth_queuecommand(Scsi_Cmnd *,void (*done)(Scsi_Cmnd *));
-const char *gdth_info(struct Scsi_Host *);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
-int gdth_bios_param(struct scsi_device *,struct block_device *,sector_t,int *);
 int gdth_proc_info(struct Scsi_Host *, char *,char **,off_t,int,int);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
-int gdth_bios_param(Disk *,kdev_t,int *);
-int gdth_proc_info(char *,char **,off_t,int,int,int);
-#else
-int gdth_bios_param(Disk *,kdev_t,int *);
-extern struct proc_dir_entry proc_scsi_gdth;
-int gdth_proc_info(char *,char **,off_t,int,int,int);
-int gdth_abort(Scsi_Cmnd *);
-int gdth_reset(Scsi_Cmnd *,unsigned int); 
-#define GDTH { proc_dir:        &proc_scsi_gdth,                 \
-               proc_info:       gdth_proc_info,                  \
-               name:            "GDT SCSI Disk Array Controller",\
-               detect:          gdth_detect,                     \
-               release:         gdth_release,                    \
-               info:            gdth_info,                       \
-               command:         NULL,                            \
-               queuecommand:    gdth_queuecommand,               \
-               eh_abort_handler: gdth_eh_abort,                  \
-               eh_device_reset_handler: gdth_eh_device_reset,    \
-               eh_bus_reset_handler: gdth_eh_bus_reset,          \
-               eh_host_reset_handler: gdth_eh_host_reset,        \
-               abort:           gdth_abort,                      \
-               reset:           gdth_reset,                      \
-               bios_param:      gdth_bios_param,                 \
-               can_queue:       GDTH_MAXCMDS,                    \
-               this_id:         -1,                              \
-               sg_tablesize:    GDTH_MAXSG,                      \
-               cmd_per_lun:     GDTH_MAXC_P_L,                   \
-               present:         0,                               \
-               unchecked_isa_dma: 1,                             \
-               use_clustering:  ENABLE_CLUSTERING,               \
-               use_new_eh_code: 1       /* use new error code */ }    
-#endif
-
-int gdth_eh_abort(Scsi_Cmnd *scp);
-int gdth_eh_device_reset(Scsi_Cmnd *scp);
-int gdth_eh_bus_reset(Scsi_Cmnd *scp);
-int gdth_eh_host_reset(Scsi_Cmnd *scp);
 
 #endif

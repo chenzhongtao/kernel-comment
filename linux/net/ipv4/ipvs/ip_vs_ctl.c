@@ -23,18 +23,21 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/types.h>
+#include <linux/capability.h>
 #include <linux/fs.h>
 #include <linux/sysctl.h>
 #include <linux/proc_fs.h>
-#include <linux/timer.h>
+#include <linux/workqueue.h>
 #include <linux/swap.h>
-#include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
+#include <linux/mutex.h>
 
+#include <net/net_namespace.h>
 #include <net/ip.h>
+#include <net/route.h>
 #include <net/sock.h>
 
 #include <asm/uaccess.h>
@@ -42,7 +45,7 @@
 #include <net/ip_vs.h>
 
 /* semaphore for IPVS sockopts. And, [gs]etsockopt may sleep. */
-static DECLARE_MUTEX(__ip_vs_mutex);
+static DEFINE_MUTEX(__ip_vs_mutex);
 
 /* lock for service table */
 static DEFINE_RWLOCK(__ip_vs_svc_lock);
@@ -90,7 +93,8 @@ int ip_vs_get_debug_level(void)
 #endif
 
 /*
- *	update_defense_level is called from timer bh and from sysctl.
+ *	update_defense_level is called from keventd and from sysctl,
+ *	so it needs to protect itself from softirqs
  */
 static void update_defense_level(void)
 {
@@ -109,6 +113,8 @@ static void update_defense_level(void)
 	/* availmem = availmem - (i.totalswap - i.freeswap); */
 
 	nomem = (availmem < sysctl_ip_vs_amemthresh);
+
+	local_bh_disable();
 
 	/* drop_entry */
 	spin_lock(&__ip_vs_dropentry_lock);
@@ -206,24 +212,26 @@ static void update_defense_level(void)
 	if (to_change >= 0)
 		ip_vs_protocol_timeout_change(sysctl_ip_vs_secure_tcp>1);
 	write_unlock(&__ip_vs_securetcp_lock);
+
+	local_bh_enable();
 }
 
 
 /*
  *	Timer for checking the defense
  */
-static struct timer_list defense_timer;
 #define DEFENSE_TIMER_PERIOD	1*HZ
+static void defense_work_handler(struct work_struct *work);
+static DECLARE_DELAYED_WORK(defense_work, defense_work_handler);
 
-static void defense_timer_handler(unsigned long data)
+static void defense_work_handler(struct work_struct *work)
 {
 	update_defense_level();
 	if (atomic_read(&ip_vs_dropentry))
 		ip_vs_random_dropentry();
 
-	mod_timer(&defense_timer, jiffies + DEFENSE_TIMER_PERIOD);
+	schedule_delayed_work(&defense_work, DEFENSE_TIMER_PERIOD);
 }
-
 
 int
 ip_vs_use_count_inc(void)
@@ -275,7 +283,7 @@ static atomic_t ip_vs_nullsvc_counter = ATOMIC_INIT(0);
  *	Returns hash value for virtual service
  */
 static __inline__ unsigned
-ip_vs_svc_hashkey(unsigned proto, __u32 addr, __u16 port)
+ip_vs_svc_hashkey(unsigned proto, __be32 addr, __be16 port)
 {
 	register unsigned porth = ntohs(port);
 
@@ -357,7 +365,7 @@ static int ip_vs_svc_unhash(struct ip_vs_service *svc)
  *	Get service by {proto,addr,port} in the service table.
  */
 static __inline__ struct ip_vs_service *
-__ip_vs_service_get(__u16 protocol, __u32 vaddr, __u16 vport)
+__ip_vs_service_get(__u16 protocol, __be32 vaddr, __be16 vport)
 {
 	unsigned hash;
 	struct ip_vs_service *svc;
@@ -402,7 +410,7 @@ static __inline__ struct ip_vs_service *__ip_vs_svc_fwm_get(__u32 fwmark)
 }
 
 struct ip_vs_service *
-ip_vs_service_get(__u32 fwmark, __u16 protocol, __u32 vaddr, __u16 vport)
+ip_vs_service_get(__u32 fwmark, __u16 protocol, __be32 vaddr, __be16 vport)
 {
 	struct ip_vs_service *svc;
 
@@ -442,7 +450,7 @@ ip_vs_service_get(__u32 fwmark, __u16 protocol, __u32 vaddr, __u16 vport)
   out:
 	read_unlock(&__ip_vs_svc_lock);
 
-	IP_VS_DBG(6, "lookup service: fwm %u %s %u.%u.%u.%u:%u %s\n",
+	IP_VS_DBG(9, "lookup service: fwm %u %s %u.%u.%u.%u:%u %s\n",
 		  fwmark, ip_vs_proto_name(protocol),
 		  NIPQUAD(vaddr), ntohs(vport),
 		  svc?"hit":"not hit");
@@ -472,7 +480,7 @@ __ip_vs_unbind_svc(struct ip_vs_dest *dest)
 /*
  *	Returns hash value for real service
  */
-static __inline__ unsigned ip_vs_rs_hashkey(__u32 addr, __u16 port)
+static __inline__ unsigned ip_vs_rs_hashkey(__be32 addr, __be16 port)
 {
 	register unsigned porth = ntohs(port);
 
@@ -523,7 +531,7 @@ static int ip_vs_rs_unhash(struct ip_vs_dest *dest)
  *	Lookup real service by <proto,addr,port> in the real service table.
  */
 struct ip_vs_dest *
-ip_vs_lookup_real_service(__u16 protocol, __u32 daddr, __u16 dport)
+ip_vs_lookup_real_service(__u16 protocol, __be32 daddr, __be16 dport)
 {
 	unsigned hash;
 	struct ip_vs_dest *dest;
@@ -554,7 +562,7 @@ ip_vs_lookup_real_service(__u16 protocol, __u32 daddr, __u16 dport)
  *	Lookup destination by {addr,port} in the given service
  */
 static struct ip_vs_dest *
-ip_vs_lookup_dest(struct ip_vs_service *svc, __u32 daddr, __u16 dport)
+ip_vs_lookup_dest(struct ip_vs_service *svc, __be32 daddr, __be16 dport)
 {
 	struct ip_vs_dest *dest;
 
@@ -571,6 +579,31 @@ ip_vs_lookup_dest(struct ip_vs_service *svc, __u32 daddr, __u16 dport)
 	return NULL;
 }
 
+/*
+ * Find destination by {daddr,dport,vaddr,protocol}
+ * Cretaed to be used in ip_vs_process_message() in
+ * the backup synchronization daemon. It finds the
+ * destination to be bound to the received connection
+ * on the backup.
+ *
+ * ip_vs_lookup_real_service() looked promissing, but
+ * seems not working as expected.
+ */
+struct ip_vs_dest *ip_vs_find_dest(__be32 daddr, __be16 dport,
+				    __be32 vaddr, __be16 vport, __u16 protocol)
+{
+	struct ip_vs_dest *dest;
+	struct ip_vs_service *svc;
+
+	svc = ip_vs_service_get(0, protocol, vaddr, vport);
+	if (!svc)
+		return NULL;
+	dest = ip_vs_lookup_dest(svc, daddr, dport);
+	if (dest)
+		atomic_inc(&dest->refcnt);
+	ip_vs_service_put(svc);
+	return dest;
+}
 
 /*
  *  Lookup dest by {svc,addr,port} in the destination trash.
@@ -583,7 +616,7 @@ ip_vs_lookup_dest(struct ip_vs_service *svc, __u32 daddr, __u16 dport)
  *  scheduling.
  */
 static struct ip_vs_dest *
-ip_vs_trash_get_dest(struct ip_vs_service *svc, __u32 daddr, __u16 dport)
+ip_vs_trash_get_dest(struct ip_vs_service *svc, __be32 daddr, __be16 dport)
 {
 	struct ip_vs_dest *dest, *nxt;
 
@@ -592,7 +625,7 @@ ip_vs_trash_get_dest(struct ip_vs_service *svc, __u32 daddr, __u16 dport)
 	 */
 	list_for_each_entry_safe(dest, nxt, &ip_vs_dest_trash, n_list) {
 		IP_VS_DBG(3, "Destination %u/%u.%u.%u.%u:%u still in trash, "
-			  "refcnt=%d\n",
+			  "dest->refcnt=%d\n",
 			  dest->vfwmark,
 			  NIPQUAD(dest->addr), ntohs(dest->port),
 			  atomic_read(&dest->refcnt));
@@ -727,12 +760,11 @@ ip_vs_new_dest(struct ip_vs_service *svc, struct ip_vs_dest_user *udest,
 	if (atype != RTN_LOCAL && atype != RTN_UNICAST)
 		return -EINVAL;
 
-	dest = kmalloc(sizeof(struct ip_vs_dest), GFP_ATOMIC);
+	dest = kzalloc(sizeof(struct ip_vs_dest), GFP_ATOMIC);
 	if (dest == NULL) {
 		IP_VS_ERR("ip_vs_new_dest: kmalloc failed.\n");
 		return -ENOMEM;
 	}
-	memset(dest, 0, sizeof(struct ip_vs_dest));
 
 	dest->protocol = svc->protocol;
 	dest->vaddr = svc->addr;
@@ -766,8 +798,8 @@ static int
 ip_vs_add_dest(struct ip_vs_service *svc, struct ip_vs_dest_user *udest)
 {
 	struct ip_vs_dest *dest;
-	__u32 daddr = udest->addr;
-	__u16 dport = udest->port;
+	__be32 daddr = udest->addr;
+	__be16 dport = udest->port;
 	int ret;
 
 	EnterFunction(2);
@@ -799,7 +831,7 @@ ip_vs_add_dest(struct ip_vs_service *svc, struct ip_vs_dest_user *udest)
 	dest = ip_vs_trash_get_dest(svc, daddr, dport);
 	if (dest != NULL) {
 		IP_VS_DBG(3, "Get destination %u.%u.%u.%u:%u from trash, "
-			  "refcnt=%d, service %u/%u.%u.%u.%u:%u\n",
+			  "dest->refcnt=%d, service %u/%u.%u.%u.%u:%u\n",
 			  NIPQUAD(daddr), ntohs(dport),
 			  atomic_read(&dest->refcnt),
 			  dest->vfwmark,
@@ -872,8 +904,8 @@ static int
 ip_vs_edit_dest(struct ip_vs_service *svc, struct ip_vs_dest_user *udest)
 {
 	struct ip_vs_dest *dest;
-	__u32 daddr = udest->addr;
-	__u16 dport = udest->port;
+	__be32 daddr = udest->addr;
+	__be16 dport = udest->port;
 
 	EnterFunction(2);
 
@@ -902,7 +934,7 @@ ip_vs_edit_dest(struct ip_vs_service *svc, struct ip_vs_dest_user *udest)
 	write_lock_bh(&__ip_vs_svc_lock);
 
 	/* Wait until all other svc users go away */
-	while (atomic_read(&svc->usecnt) > 1) {};
+	IP_VS_WAIT_WHILE(atomic_read(&svc->usecnt) > 1);
 
 	/* call the update_service, because server weight may be changed */
 	svc->scheduler->update_service(svc);
@@ -944,7 +976,8 @@ static void __ip_vs_del_dest(struct ip_vs_dest *dest)
 		atomic_dec(&dest->svc->refcnt);
 		kfree(dest);
 	} else {
-		IP_VS_DBG(3, "Moving dest %u.%u.%u.%u:%u into trash, refcnt=%d\n",
+		IP_VS_DBG(3, "Moving dest %u.%u.%u.%u:%u into trash, "
+			  "dest->refcnt=%d\n",
 			  NIPQUAD(dest->addr), ntohs(dest->port),
 			  atomic_read(&dest->refcnt));
 		list_add(&dest->n_list, &ip_vs_dest_trash);
@@ -983,8 +1016,8 @@ static int
 ip_vs_del_dest(struct ip_vs_service *svc,struct ip_vs_dest_user *udest)
 {
 	struct ip_vs_dest *dest;
-	__u32 daddr = udest->addr;
-	__u16 dport = udest->port;
+	__be32 daddr = udest->addr;
+	__be16 dport = udest->port;
 
 	EnterFunction(2);
 
@@ -1041,14 +1074,12 @@ ip_vs_add_service(struct ip_vs_service_user *u, struct ip_vs_service **svc_p)
 		goto out_mod_dec;
 	}
 
-	svc = (struct ip_vs_service *)
-		kmalloc(sizeof(struct ip_vs_service), GFP_ATOMIC);
+	svc = kzalloc(sizeof(struct ip_vs_service), GFP_ATOMIC);
 	if (svc == NULL) {
 		IP_VS_DBG(1, "ip_vs_add_service: kmalloc failed.\n");
 		ret = -ENOMEM;
 		goto out_err;
 	}
-	memset(svc, 0, sizeof(struct ip_vs_service));
 
 	/* I'm the first user of the service */
 	atomic_set(&svc->usecnt, 1);
@@ -1360,9 +1391,7 @@ proc_do_defense_mode(ctl_table *table, int write, struct file * filp,
 			/* Restore the correct value */
 			*valp = val;
 		} else {
-			local_bh_disable();
 			update_defense_level();
-			local_bh_enable();
 		}
 	}
 	return rc;
@@ -1395,7 +1424,6 @@ proc_do_sync_threshold(ctl_table *table, int write, struct file *filp,
 
 static struct ctl_table vs_vars[] = {
 	{
-		.ctl_name	= NET_IPV4_VS_AMEMTHRESH,
 		.procname	= "amemthresh",
 		.data		= &sysctl_ip_vs_amemthresh,
 		.maxlen		= sizeof(int),
@@ -1404,7 +1432,6 @@ static struct ctl_table vs_vars[] = {
 	},
 #ifdef CONFIG_IP_VS_DEBUG
 	{
-		.ctl_name	= NET_IPV4_VS_DEBUG_LEVEL,
 		.procname	= "debug_level",
 		.data		= &sysctl_ip_vs_debug_level,
 		.maxlen		= sizeof(int),
@@ -1413,7 +1440,6 @@ static struct ctl_table vs_vars[] = {
 	},
 #endif
 	{
-		.ctl_name	= NET_IPV4_VS_AMDROPRATE,
 		.procname	= "am_droprate",
 		.data		= &sysctl_ip_vs_am_droprate,
 		.maxlen		= sizeof(int),
@@ -1421,7 +1447,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_DROP_ENTRY,
 		.procname	= "drop_entry",
 		.data		= &sysctl_ip_vs_drop_entry,
 		.maxlen		= sizeof(int),
@@ -1429,7 +1454,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_do_defense_mode,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_DROP_PACKET,
 		.procname	= "drop_packet",
 		.data		= &sysctl_ip_vs_drop_packet,
 		.maxlen		= sizeof(int),
@@ -1437,7 +1461,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_do_defense_mode,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_SECURE_TCP,
 		.procname	= "secure_tcp",
 		.data		= &sysctl_ip_vs_secure_tcp,
 		.maxlen		= sizeof(int),
@@ -1446,7 +1469,6 @@ static struct ctl_table vs_vars[] = {
 	},
 #if 0
 	{
-		.ctl_name	= NET_IPV4_VS_TO_ES,
 		.procname	= "timeout_established",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_ESTABLISHED],
 		.maxlen		= sizeof(int),
@@ -1454,7 +1476,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_SS,
 		.procname	= "timeout_synsent",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_SYN_SENT],
 		.maxlen		= sizeof(int),
@@ -1462,7 +1483,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_SR,
 		.procname	= "timeout_synrecv",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_SYN_RECV],
 		.maxlen		= sizeof(int),
@@ -1470,7 +1490,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_FW,
 		.procname	= "timeout_finwait",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_FIN_WAIT],
 		.maxlen		= sizeof(int),
@@ -1478,7 +1497,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_TW,
 		.procname	= "timeout_timewait",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_TIME_WAIT],
 		.maxlen		= sizeof(int),
@@ -1486,7 +1504,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_CL,
 		.procname	= "timeout_close",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_CLOSE],
 		.maxlen		= sizeof(int),
@@ -1494,7 +1511,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_CW,
 		.procname	= "timeout_closewait",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_CLOSE_WAIT],
 		.maxlen		= sizeof(int),
@@ -1502,7 +1518,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_LA,
 		.procname	= "timeout_lastack",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_LAST_ACK],
 		.maxlen		= sizeof(int),
@@ -1510,7 +1525,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_LI,
 		.procname	= "timeout_listen",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_LISTEN],
 		.maxlen		= sizeof(int),
@@ -1518,7 +1532,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_SA,
 		.procname	= "timeout_synack",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_SYNACK],
 		.maxlen		= sizeof(int),
@@ -1526,7 +1539,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_UDP,
 		.procname	= "timeout_udp",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_UDP],
 		.maxlen		= sizeof(int),
@@ -1534,7 +1546,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec_jiffies,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_TO_ICMP,
 		.procname	= "timeout_icmp",
 		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_ICMP],
 		.maxlen		= sizeof(int),
@@ -1543,7 +1554,6 @@ static struct ctl_table vs_vars[] = {
 	},
 #endif
 	{
-		.ctl_name	= NET_IPV4_VS_CACHE_BYPASS,
 		.procname	= "cache_bypass",
 		.data		= &sysctl_ip_vs_cache_bypass,
 		.maxlen		= sizeof(int),
@@ -1551,7 +1561,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_EXPIRE_NODEST_CONN,
 		.procname	= "expire_nodest_conn",
 		.data		= &sysctl_ip_vs_expire_nodest_conn,
 		.maxlen		= sizeof(int),
@@ -1559,7 +1568,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_EXPIRE_QUIESCENT_TEMPLATE,
 		.procname	= "expire_quiescent_template",
 		.data		= &sysctl_ip_vs_expire_quiescent_template,
 		.maxlen		= sizeof(int),
@@ -1567,7 +1575,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_dointvec,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_SYNC_THRESHOLD,
 		.procname	= "sync_threshold",
 		.data		= &sysctl_ip_vs_sync_threshold,
 		.maxlen		= sizeof(sysctl_ip_vs_sync_threshold),
@@ -1575,7 +1582,6 @@ static struct ctl_table vs_vars[] = {
 		.proc_handler	= &proc_do_sync_threshold,
 	},
 	{
-		.ctl_name	= NET_IPV4_VS_NAT_ICMP_SEND,
 		.procname	= "nat_icmp_send",
 		.data		= &sysctl_ip_vs_nat_icmp_send,
 		.maxlen		= sizeof(int),
@@ -1587,7 +1593,6 @@ static struct ctl_table vs_vars[] = {
 
 static ctl_table vs_table[] = {
 	{
-		.ctl_name	= NET_IPV4_VS,
 		.procname	= "vs",
 		.mode		= 0555,
 		.child		= vs_vars
@@ -1595,7 +1600,7 @@ static ctl_table vs_table[] = {
 	{ .ctl_name = 0 }
 };
 
-static ctl_table ipv4_table[] = {
+static ctl_table ipvs_ipv4_table[] = {
 	{
 		.ctl_name	= NET_IPV4,
 		.procname	= "ipv4",
@@ -1610,7 +1615,7 @@ static ctl_table vs_root_table[] = {
 		.ctl_name	= CTL_NET,
 		.procname	= "net",
 		.mode		= 0555,
-		.child		= ipv4_table,
+		.child		= ipvs_ipv4_table,
 	},
 	{ .ctl_name = 0 }
 };
@@ -1779,7 +1784,7 @@ static int ip_vs_info_seq_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
-static struct seq_operations ip_vs_info_seq_ops = {
+static const struct seq_operations ip_vs_info_seq_ops = {
 	.start = ip_vs_info_seq_start,
 	.next  = ip_vs_info_seq_next,
 	.stop  = ip_vs_info_seq_stop,
@@ -1788,28 +1793,11 @@ static struct seq_operations ip_vs_info_seq_ops = {
 
 static int ip_vs_info_open(struct inode *inode, struct file *file)
 {
-	struct seq_file *seq;
-	int rc = -ENOMEM;
-	struct ip_vs_iter *s = kmalloc(sizeof(*s), GFP_KERNEL);
-
-	if (!s)
-		goto out;
-
-	rc = seq_open(file, &ip_vs_info_seq_ops);
-	if (rc)
-		goto out_kfree;
-
-	seq	     = file->private_data;
-	seq->private = s;
-	memset(s, 0, sizeof(*s));
-out:
-	return rc;
-out_kfree:
-	kfree(s);
-	goto out;
+	return seq_open_private(file, &ip_vs_info_seq_ops,
+			sizeof(struct ip_vs_iter));
 }
 
-static struct file_operations ip_vs_info_fops = {
+static const struct file_operations ip_vs_info_fops = {
 	.owner	 = THIS_MODULE,
 	.open    = ip_vs_info_open,
 	.read    = seq_read,
@@ -1856,7 +1844,7 @@ static int ip_vs_stats_seq_open(struct inode *inode, struct file *file)
 	return single_open(file, ip_vs_stats_show, NULL);
 }
 
-static struct file_operations ip_vs_stats_fops = {
+static const struct file_operations ip_vs_stats_fops = {
 	.owner = THIS_MODULE,
 	.open = ip_vs_stats_seq_open,
 	.read = seq_read,
@@ -1906,7 +1894,7 @@ static int ip_vs_set_timeout(struct ip_vs_timeout_user *u)
 #define DAEMON_ARG_LEN		(sizeof(struct ip_vs_daemon_user))
 #define MAX_ARG_LEN		SVCDEST_ARG_LEN
 
-static unsigned char set_arglen[SET_CMDID(IP_VS_SO_SET_MAX)+1] = {
+static const unsigned char set_arglen[SET_CMDID(IP_VS_SO_SET_MAX)+1] = {
 	[SET_CMDID(IP_VS_SO_SET_ADD)]		= SERVICE_ARG_LEN,
 	[SET_CMDID(IP_VS_SO_SET_EDIT)]		= SERVICE_ARG_LEN,
 	[SET_CMDID(IP_VS_SO_SET_DEL)]		= SERVICE_ARG_LEN,
@@ -1944,7 +1932,7 @@ do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 	/* increase the module use count */
 	ip_vs_use_count_inc();
 
-	if (down_interruptible(&__ip_vs_mutex)) {
+	if (mutex_lock_interruptible(&__ip_vs_mutex)) {
 		ret = -ERESTARTSYS;
 		goto out_dec;
 	}
@@ -2035,7 +2023,7 @@ do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 		ip_vs_service_put(svc);
 
   out_unlock:
-	up(&__ip_vs_mutex);
+	mutex_unlock(&__ip_vs_mutex);
   out_dec:
 	/* decrease the module use count */
 	ip_vs_use_count_dec();
@@ -2059,7 +2047,7 @@ ip_vs_copy_service(struct ip_vs_service_entry *dst, struct ip_vs_service *src)
 	dst->addr = src->addr;
 	dst->port = src->port;
 	dst->fwmark = src->fwmark;
-	strcpy(dst->sched_name, src->scheduler->name);
+	strlcpy(dst->sched_name, src->scheduler->name, sizeof(dst->sched_name));
 	dst->flags = src->flags;
 	dst->timeout = src->timeout / HZ;
 	dst->netmask = src->netmask;
@@ -2080,6 +2068,7 @@ __ip_vs_get_service_entries(const struct ip_vs_get_services *get,
 		list_for_each_entry(svc, &ip_vs_svc_table[idx], s_list) {
 			if (count >= get->num_services)
 				goto out;
+			memset(&entry, 0, sizeof(entry));
 			ip_vs_copy_service(&entry, svc);
 			if (copy_to_user(&uptr->entrytable[count],
 					 &entry, sizeof(entry))) {
@@ -2094,6 +2083,7 @@ __ip_vs_get_service_entries(const struct ip_vs_get_services *get,
 		list_for_each_entry(svc, &ip_vs_svc_fwm_table[idx], f_list) {
 			if (count >= get->num_services)
 				goto out;
+			memset(&entry, 0, sizeof(entry));
 			ip_vs_copy_service(&entry, svc);
 			if (copy_to_user(&uptr->entrytable[count],
 					 &entry, sizeof(entry))) {
@@ -2175,7 +2165,7 @@ __ip_vs_get_timeouts(struct ip_vs_timeout_user *u)
 #define GET_TIMEOUT_ARG_LEN	(sizeof(struct ip_vs_timeout_user))
 #define GET_DAEMON_ARG_LEN	(sizeof(struct ip_vs_daemon_user) * 2)
 
-static unsigned char get_arglen[GET_CMDID(IP_VS_SO_GET_MAX)+1] = {
+static const unsigned char get_arglen[GET_CMDID(IP_VS_SO_GET_MAX)+1] = {
 	[GET_CMDID(IP_VS_SO_GET_VERSION)]	= 64,
 	[GET_CMDID(IP_VS_SO_GET_INFO)]		= GET_INFO_ARG_LEN,
 	[GET_CMDID(IP_VS_SO_GET_SERVICES)]	= GET_SERVICES_ARG_LEN,
@@ -2203,7 +2193,7 @@ do_ip_vs_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 	if (copy_from_user(arg, user, get_arglen[GET_CMDID(cmd)]) != 0)
 		return -EFAULT;
 
-	if (down_interruptible(&__ip_vs_mutex))
+	if (mutex_lock_interruptible(&__ip_vs_mutex))
 		return -ERESTARTSYS;
 
 	switch (cmd) {
@@ -2304,12 +2294,12 @@ do_ip_vs_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 		memset(&d, 0, sizeof(d));
 		if (ip_vs_sync_state & IP_VS_STATE_MASTER) {
 			d[0].state = IP_VS_STATE_MASTER;
-			strcpy(d[0].mcast_ifn, ip_vs_master_mcast_ifn);
+			strlcpy(d[0].mcast_ifn, ip_vs_master_mcast_ifn, sizeof(d[0].mcast_ifn));
 			d[0].syncid = ip_vs_master_syncid;
 		}
 		if (ip_vs_sync_state & IP_VS_STATE_BACKUP) {
 			d[1].state = IP_VS_STATE_BACKUP;
-			strcpy(d[1].mcast_ifn, ip_vs_backup_mcast_ifn);
+			strlcpy(d[1].mcast_ifn, ip_vs_backup_mcast_ifn, sizeof(d[1].mcast_ifn));
 			d[1].syncid = ip_vs_backup_syncid;
 		}
 		if (copy_to_user(user, &d, sizeof(d)) != 0)
@@ -2322,7 +2312,7 @@ do_ip_vs_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 	}
 
   out:
-	up(&__ip_vs_mutex);
+	mutex_unlock(&__ip_vs_mutex);
 	return ret;
 }
 
@@ -2335,6 +2325,7 @@ static struct nf_sockopt_ops ip_vs_sockopts = {
 	.get_optmin	= IP_VS_BASE_CTL,
 	.get_optmax	= IP_VS_SO_GET_MAX+1,
 	.get		= do_ip_vs_get_ctl,
+	.owner		= THIS_MODULE,
 };
 
 
@@ -2351,10 +2342,10 @@ int ip_vs_control_init(void)
 		return ret;
 	}
 
-	proc_net_fops_create("ip_vs", 0, &ip_vs_info_fops);
-	proc_net_fops_create("ip_vs_stats",0, &ip_vs_stats_fops);
+	proc_net_fops_create(&init_net, "ip_vs", 0, &ip_vs_info_fops);
+	proc_net_fops_create(&init_net, "ip_vs_stats",0, &ip_vs_stats_fops);
 
-	sysctl_header = register_sysctl_table(vs_root_table, 0);
+	sysctl_header = register_sysctl_table(vs_root_table);
 
 	/* Initialize ip_vs_svc_table, ip_vs_svc_fwm_table, ip_vs_rtable */
 	for(idx = 0; idx < IP_VS_SVC_TAB_SIZE; idx++)  {
@@ -2370,10 +2361,7 @@ int ip_vs_control_init(void)
 	ip_vs_new_estimator(&ip_vs_stats);
 
 	/* Hook the defense timer */
-	init_timer(&defense_timer);
-	defense_timer.function = defense_timer_handler;
-	defense_timer.expires = jiffies + DEFENSE_TIMER_PERIOD;
-	add_timer(&defense_timer);
+	schedule_delayed_work(&defense_work, DEFENSE_TIMER_PERIOD);
 
 	LeaveFunction(2);
 	return 0;
@@ -2384,11 +2372,12 @@ void ip_vs_control_cleanup(void)
 {
 	EnterFunction(2);
 	ip_vs_trash_cleanup();
-	del_timer_sync(&defense_timer);
+	cancel_rearming_delayed_work(&defense_work);
+	cancel_work_sync(&defense_work.work);
 	ip_vs_kill_estimator(&ip_vs_stats);
 	unregister_sysctl_table(sysctl_header);
-	proc_net_remove("ip_vs_stats");
-	proc_net_remove("ip_vs");
+	proc_net_remove(&init_net, "ip_vs_stats");
+	proc_net_remove(&init_net, "ip_vs");
 	nf_unregister_sockopt(&ip_vs_sockopts);
 	LeaveFunction(2);
 }

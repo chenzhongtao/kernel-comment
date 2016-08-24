@@ -9,10 +9,9 @@
  * SMP- and interrupt-safe semaphores..
  *
  * Copyright (C) 1996  Linus Torvalds
- * Copyright (C) 2004  Hirokazu Takata <takata at linux-m32r.org>
+ * Copyright (C) 2004, 2006  Hirokazu Takata <takata at linux-m32r.org>
  */
 
-#include <linux/config.h>
 #include <linux/wait.h>
 #include <linux/rwsem.h>
 #include <asm/assembler.h>
@@ -32,14 +31,10 @@ struct semaphore {
 	.wait		= __WAIT_QUEUE_HEAD_INITIALIZER((name).wait)	\
 }
 
-#define __MUTEX_INITIALIZER(name) \
-	__SEMAPHORE_INITIALIZER(name,1)
-
 #define __DECLARE_SEMAPHORE_GENERIC(name,count) \
 	struct semaphore name = __SEMAPHORE_INITIALIZER(name,count)
 
 #define DECLARE_MUTEX(name) __DECLARE_SEMAPHORE_GENERIC(name,1)
-#define DECLARE_MUTEX_LOCKED(name) __DECLARE_SEMAPHORE_GENERIC(name,0)
 
 static inline void sema_init (struct semaphore *sem, int val)
 {
@@ -80,27 +75,8 @@ asmlinkage void __up(struct semaphore * sem);
  */
 static inline void down(struct semaphore * sem)
 {
-	unsigned long flags;
-	long count;
-
 	might_sleep();
-	local_irq_save(flags);
-	__asm__ __volatile__ (
-		"# down				\n\t"
-		DCACHE_CLEAR("%0", "r4", "%1")
-		M32R_LOCK" %0, @%1;		\n\t"
-		"addi	%0, #-1;		\n\t"
-		M32R_UNLOCK" %0, @%1;		\n\t"
-		: "=&r" (count)
-		: "r" (&sem->count)
-		: "memory"
-#ifdef CONFIG_CHIP_M32700_TS1
-		, "r4"
-#endif	/* CONFIG_CHIP_M32700_TS1 */
-	);
-	local_irq_restore(flags);
-
-	if (unlikely(count < 0))
+	if (unlikely(atomic_dec_return(&sem->count) < 0))
 		__down(sem);
 }
 
@@ -110,28 +86,10 @@ static inline void down(struct semaphore * sem)
  */
 static inline int down_interruptible(struct semaphore * sem)
 {
-	unsigned long flags;
-	long count;
 	int result = 0;
 
 	might_sleep();
-	local_irq_save(flags);
-	__asm__ __volatile__ (
-		"# down_interruptible		\n\t"
-		DCACHE_CLEAR("%0", "r4", "%1")
-		M32R_LOCK" %0, @%1;		\n\t"
-		"addi	%0, #-1;		\n\t"
-		M32R_UNLOCK" %0, @%1;		\n\t"
-		: "=&r" (count)
-		: "r" (&sem->count)
-		: "memory"
-#ifdef CONFIG_CHIP_M32700_TS1
-		, "r4"
-#endif	/* CONFIG_CHIP_M32700_TS1 */
-	);
-	local_irq_restore(flags);
-
-	if (unlikely(count < 0))
+	if (unlikely(atomic_dec_return(&sem->count) < 0))
 		result = __down_interruptible(sem);
 
 	return result;
@@ -177,26 +135,7 @@ static inline int down_trylock(struct semaphore * sem)
  */
 static inline void up(struct semaphore * sem)
 {
-	unsigned long flags;
-	long count;
-
-	local_irq_save(flags);
-	__asm__ __volatile__ (
-		"# up				\n\t"
-		DCACHE_CLEAR("%0", "r4", "%1")
-		M32R_LOCK" %0, @%1;		\n\t"
-		"addi	%0, #1;			\n\t"
-		M32R_UNLOCK" %0, @%1;		\n\t"
-		: "=&r" (count)
-		: "r" (&sem->count)
-		: "memory"
-#ifdef CONFIG_CHIP_M32700_TS1
-		, "r4"
-#endif	/* CONFIG_CHIP_M32700_TS1 */
-	);
-	local_irq_restore(flags);
-
-	if (unlikely(count <= 0))
+	if (unlikely(atomic_inc_return(&sem->count) <= 0))
 		__up(sem);
 }
 

@@ -1,11 +1,9 @@
 /*
- *  arch/ppc/4xx_io/serial_sicc.c
- *
  *  Driver for IBM STB3xxx SICC serial port
  *
  *  Based on drivers/char/serial_amba.c, by ARM Ltd.
  *
- *  Copyright 2001 IBM Crop.
+ *  Copyright 2001 IBM Corp.
  *  Author: IBM China Research Lab
  *            Yudong Yang <yangyud@cn.ibm.com>
  *            Yi Ge       <geyi@cn.ibm.com>
@@ -30,7 +28,6 @@
  * is compatible with normal ttyS* devices.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -47,6 +44,7 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/capability.h>
 #include <linux/circ_buf.h>
 #include <linux/serial.h>
 #include <linux/console.h>
@@ -157,16 +155,16 @@
 
 /* serial port transmit command register */
 
-#define _TxCR_ET_MASK   0x80           /* transmiter enable mask */
+#define _TxCR_ET_MASK   0x80           /* transmitter enable mask */
 #define _TxCR_DME_MASK  0x60           /* dma mode mask */
 #define _TxCR_TIE_MASK  0x10           /* empty interrupt enable mask */
 #define _TxCR_EIE_MASK  0x08           /* error interrupt enable mask */
 #define _TxCR_SPE_MASK  0x04           /* stop/pause mask */
 #define _TxCR_TB_MASK   0x02           /* transmit break mask */
 
-#define _TxCR_ET_ENABLE _TxCR_ET_MASK  /* transmiter enabled */
-#define _TxCR_DME_DISABLE 0x00         /* transmiter disabled, TBR intr disabled */
-#define _TxCR_DME_TBR   0x20           /* transmiter disabled, TBR intr enabled */
+#define _TxCR_ET_ENABLE _TxCR_ET_MASK  /* transmitter enabled */
+#define _TxCR_DME_DISABLE 0x00         /* transmitter disabled, TBR intr disabled */
+#define _TxCR_DME_TBR   0x20           /* transmitter disabled, TBR intr enabled */
 #define _TxCR_DME_CHAN_2 0x40          /* dma enabled, destination chann 2 */
 #define _TxCR_DME_CHAN_3 0x60          /* dma enabled, destination chann 3 */
 
@@ -214,7 +212,6 @@ static struct tty_driver *siccnormal_driver;
  * memory if large numbers of serial ports are open.
  */
 static u_char *tmp_buf;
-static DECLARE_MUTEX(tmp_buf_sem);
 
 #define HIGH_BITS_OFFSET    ((sizeof(long)-sizeof(int))*8)
 
@@ -417,7 +414,7 @@ static void siccuart_event(struct SICC_info *info, int event)
 }
 
 static void
-siccuart_rx_chars(struct SICC_info *info, struct pt_regs *regs)
+siccuart_rx_chars(struct SICC_info *info)
 {
     struct tty_struct *tty = info->tty;
     unsigned int status, ch, rsr, flg, ignored = 0;
@@ -444,7 +441,7 @@ siccuart_rx_chars(struct SICC_info *info, struct pt_regs *regs)
 #ifdef SUPPORT_SYSRQ
         if (info->sysrq) {
             if (ch && time_before(jiffies, info->sysrq)) {
-                handle_sysrq(ch, regs, NULL);
+                handle_sysrq(ch, NULL);
                 info->sysrq = 0;
                 goto ignore_char;
             }
@@ -556,15 +553,15 @@ static void siccuart_tx_chars(struct SICC_info *info)
 }
 
 
-static irqreturn_t siccuart_int_rx(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t siccuart_int_rx(int irq, void *dev_id)
 {
     struct SICC_info *info = dev_id;
-    siccuart_rx_chars(info, regs);
+    siccuart_rx_chars(info)
     return IRQ_HANDLED;
 }
 
 
-static irqreturn_t siccuart_int_tx(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t siccuart_int_tx(int irq, void *dev_id)
 {
     struct SICC_info *info = dev_id;
     siccuart_tx_chars(info);
@@ -1145,8 +1142,8 @@ static int set_serial_info(struct SICC_info *info,
     info->flags = ((state->flags & ~ASYNC_INTERNAL_FLAGS) |
                (info->flags & ASYNC_INTERNAL_FLAGS));
     state->custom_divisor = new_serial.custom_divisor;
-    state->close_delay = new_serial.close_delay * HZ / 100;
-    state->closing_wait = new_serial.closing_wait * HZ / 100;
+    state->close_delay = msecs_to_jiffies(10 * new_serial.close_delay);
+    state->closing_wait = msecs_to_jiffies(10 * new_serial.closing_wait);
     info->tty->low_latency = (info->flags & ASYNC_LOW_LATENCY) ? 1 : 0;
     port->fifosize = new_serial.xmit_fifo_size;
 
@@ -1465,10 +1462,8 @@ static void siccuart_close(struct tty_struct *tty, struct file *filp)
     info->event = 0;
     info->tty = NULL;
     if (info->blocked_open) {
-        if (info->state->close_delay) {
-            set_current_state(TASK_INTERRUPTIBLE);
-            schedule_timeout(info->state->close_delay);
-        }
+        if (info->state->close_delay)
+            schedule_timeout_interruptible(info->state->close_delay);
         wake_up_interruptible(&info->open_wait);
     }
     info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CLOSING);
@@ -1496,7 +1491,7 @@ static void siccuart_wait_until_sent(struct tty_struct *tty, int timeout)
      * Note: we have to use pretty tight timings here to satisfy
      * the NIST-PCTS.
      */
-    char_time = (info->timeout - HZ/50) / info->port->fifosize;
+    char_time = (info->timeout - msecs_to_jiffies(20)) / info->port->fifosize;
     char_time = char_time / 5;
     if (char_time == 0)
         char_time = 1;
@@ -1521,8 +1516,7 @@ static void siccuart_wait_until_sent(struct tty_struct *tty, int timeout)
            tty->index, jiffies,
            expire, char_time);
     while ((readb(info->port->uart_base + BL_SICC_LSR) & _LSR_TX_ALL) != _LSR_TX_ALL) {
-        set_current_state(TASK_INTERRUPTIBLE);
-        schedule_timeout(char_time);
+        schedule_timeout_interruptible(char_time);
         if (signal_pending(current))
             break;
         if (timeout && time_after(jiffies, expire))
@@ -1642,9 +1636,8 @@ static struct SICC_info *siccuart_get(int line)
     state->count++;
     if (state->info)
         return state->info;
-    info = kmalloc(sizeof(struct SICC_info), GFP_KERNEL);
+    info = kzalloc(sizeof(struct SICC_info), GFP_KERNEL);
     if (info) {
-        memset(info, 0, sizeof(struct SICC_info));
         init_waitqueue_head(&info->open_wait);
         init_waitqueue_head(&info->close_wait);
         init_waitqueue_head(&info->delta_msr_wait);
@@ -1727,7 +1720,7 @@ static int siccuart_open(struct tty_struct *tty, struct file *filp)
     return 0;
 }
 
-static struct tty_operations sicc_ops = {
+static const struct tty_operations sicc_ops = {
 	.open = siccuart_open,
 	.close = siccuart_close,
 	.write = siccuart_write,
@@ -1764,7 +1757,7 @@ int __init siccuart_init(void)
     siccnormal_driver->subtype = SERIAL_TYPE_NORMAL;
     siccnormal_driver->init_termios = tty_std_termios;
     siccnormal_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-    siccnormal_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS;
+    siccnormal_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
     tty_set_operations(siccnormal_driver, &sicc_ops);
 
     if (tty_register_driver(siccnormal_driver))
@@ -1773,7 +1766,7 @@ int __init siccuart_init(void)
     for (i = 0; i < SERIAL_SICC_NR; i++) {
         struct SICC_state *state = sicc_state + i;
         state->line     = i;
-        state->close_delay  = 5 * HZ / 10;
+        state->close_delay  = msecs_to_jiffies(500);
         state->closing_wait = 30 * HZ;
 	spin_lock_init(&state->sicc_lock);
     }

@@ -68,135 +68,71 @@
 #endif
 
 
-/* message_buffer is an input if toktype is MIC and an output if it is WRAP:
- * If toktype is MIC: read_token is a mic token, and message_buffer is the
- *   data that the mic was supposedly taken over.
- * If toktype is WRAP: read_token is a wrap token, and message_buffer is used
- *   to return the decrypted data.
- */
+/* read_token is a mic token, and message_buffer is the data that the mic was
+ * supposedly taken over. */
 
-/* XXX will need to change prototype and/or just split into a separate function
- * when we add privacy (because read_token will be in pages too). */
 u32
-krb5_read_token(struct krb5_ctx *ctx,
-		struct xdr_netobj *read_token,
-		struct xdr_buf *message_buffer,
-		int *qop_state, int toktype)
+gss_verify_mic_kerberos(struct gss_ctx *gss_ctx,
+		struct xdr_buf *message_buffer, struct xdr_netobj *read_token)
 {
+	struct krb5_ctx		*ctx = gss_ctx->internal_ctx_id;
 	int			signalg;
 	int			sealalg;
-	s32			checksum_type;
-	struct xdr_netobj	md5cksum = {.len = 0, .data = NULL};
+	char			cksumdata[16];
+	struct xdr_netobj	md5cksum = {.len = 0, .data = cksumdata};
 	s32			now;
 	int			direction;
 	s32			seqnum;
 	unsigned char		*ptr = (unsigned char *)read_token->data;
 	int			bodysize;
-	u32			ret = GSS_S_DEFECTIVE_TOKEN;
 
-	dprintk("RPC:      krb5_read_token\n");
+	dprintk("RPC:       krb5_read_token\n");
 
 	if (g_verify_token_header(&ctx->mech_used, &bodysize, &ptr,
 					read_token->len))
-		goto out;
+		return GSS_S_DEFECTIVE_TOKEN;
 
-	if ((*ptr++ != ((toktype>>8)&0xff)) || (*ptr++ != (toktype&0xff)))
-		goto out;
+	if ((*ptr++ != ((KG_TOK_MIC_MSG>>8)&0xff)) ||
+	    (*ptr++ != ( KG_TOK_MIC_MSG    &0xff))   )
+		return GSS_S_DEFECTIVE_TOKEN;
 
 	/* XXX sanity-check bodysize?? */
 
-	if (toktype == KG_TOK_WRAP_MSG) {
-		/* XXX gone */
-		goto out;
-	}
-
-	/* get the sign and seal algorithms */
-
 	signalg = ptr[0] + (ptr[1] << 8);
-	sealalg = ptr[2] + (ptr[3] << 8);
+	if (signalg != SGN_ALG_DES_MAC_MD5)
+		return GSS_S_DEFECTIVE_TOKEN;
 
-	/* Sanity checks */
+	sealalg = ptr[2] + (ptr[3] << 8);
+	if (sealalg != SEAL_ALG_NONE)
+		return GSS_S_DEFECTIVE_TOKEN;
 
 	if ((ptr[4] != 0xff) || (ptr[5] != 0xff))
-		goto out;
+		return GSS_S_DEFECTIVE_TOKEN;
 
-	if (((toktype != KG_TOK_WRAP_MSG) && (sealalg != 0xffff)) ||
-	    ((toktype == KG_TOK_WRAP_MSG) && (sealalg == 0xffff)))
-		goto out;
+	if (make_checksum("md5", ptr - 2, 8, message_buffer, 0, &md5cksum))
+		return GSS_S_FAILURE;
 
-	/* in the current spec, there is only one valid seal algorithm per
-	   key type, so a simple comparison is ok */
+	if (krb5_encrypt(ctx->seq, NULL, md5cksum.data, md5cksum.data, 16))
+		return GSS_S_FAILURE;
 
-	if ((toktype == KG_TOK_WRAP_MSG) && !(sealalg == ctx->sealalg))
-		goto out;
-
-	/* there are several mappings of seal algorithms to sign algorithms,
-	   but few enough that we can try them all. */
-
-	if ((ctx->sealalg == SEAL_ALG_NONE && signalg > 1) ||
-	    (ctx->sealalg == SEAL_ALG_1 && signalg != SGN_ALG_3) ||
-	    (ctx->sealalg == SEAL_ALG_DES3KD &&
-	     signalg != SGN_ALG_HMAC_SHA1_DES3_KD))
-		goto out;
-
-	/* compute the checksum of the message */
-
-	/* initialize the the cksum */
-	switch (signalg) {
-	case SGN_ALG_DES_MAC_MD5:
-		checksum_type = CKSUMTYPE_RSA_MD5;
-		break;
-	default:
-		ret = GSS_S_DEFECTIVE_TOKEN;
-		goto out;
-	}
-
-	switch (signalg) {
-	case SGN_ALG_DES_MAC_MD5:
-		ret = make_checksum(checksum_type, ptr - 2, 8,
-					 message_buffer, &md5cksum);
-		if (ret)
-			goto out;
-
-		ret = krb5_encrypt(ctx->seq, NULL, md5cksum.data,
-				   md5cksum.data, 16);
-		if (ret)
-			goto out;
-
-		if (memcmp(md5cksum.data + 8, ptr + 14, 8)) {
-			ret = GSS_S_BAD_SIG;
-			goto out;
-		}
-		break;
-	default:
-		ret = GSS_S_DEFECTIVE_TOKEN;
-		goto out;
-	}
+	if (memcmp(md5cksum.data + 8, ptr + 14, 8))
+		return GSS_S_BAD_SIG;
 
 	/* it got through unscathed.  Make sure the context is unexpired */
 
-	if (qop_state)
-		*qop_state = GSS_C_QOP_DEFAULT;
-
 	now = get_seconds();
 
-	ret = GSS_S_CONTEXT_EXPIRED;
 	if (now > ctx->endtime)
-		goto out;
+		return GSS_S_CONTEXT_EXPIRED;
 
 	/* do sequencing checks */
 
-	ret = GSS_S_BAD_SIG;
-	if ((ret = krb5_get_seq_num(ctx->seq, ptr + 14, ptr + 6, &direction,
-				    &seqnum)))
-		goto out;
+	if (krb5_get_seq_num(ctx->seq, ptr + 14, ptr + 6, &direction, &seqnum))
+		return GSS_S_FAILURE;
 
 	if ((ctx->initiate && direction != 0xff) ||
 	    (!ctx->initiate && direction != 0))
-		goto out;
+		return GSS_S_BAD_SIG;
 
-	ret = GSS_S_COMPLETE;
-out:
-	if (md5cksum.data) kfree(md5cksum.data);
-	return ret;
+	return GSS_S_COMPLETE;
 }

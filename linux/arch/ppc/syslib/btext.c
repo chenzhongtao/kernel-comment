@@ -3,11 +3,10 @@
  *
  * Benjamin Herrenschmidt <benh@kernel.crashing.org>
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <linux/version.h>
+#include <linux/utsrelease.h>
 
 #include <asm/sections.h>
 #include <asm/bootx.h>
@@ -53,8 +52,8 @@ extern char *klimit;
  * chrp only uses it during early boot.
  */
 #ifdef CONFIG_XMON
-#define BTEXT	__pmac
-#define BTDATA	__pmacdata
+#define BTEXT
+#define BTDATA
 #else
 #define BTEXT	__init
 #define BTDATA	__initdata
@@ -137,7 +136,7 @@ btext_prepare_BAT(void)
 		boot_text_mapped = 0;
 		return;
 	}
-	if (PVR_VER(mfspr(PVR)) != 1) {
+	if (PVR_VER(mfspr(SPRN_PVR)) != 1) {
 		/* 603, 604, G3, G4, ... */
 		lowbits = addr & ~0xFF000000UL;
 		addr &= 0xFF000000UL;
@@ -187,7 +186,7 @@ btext_setup_display(int width, int height, int depth, int pitch,
  *    changes.
  */
 
-void __openfirmware
+void
 map_boot_text(void)
 {
 	unsigned long base, offset, size;

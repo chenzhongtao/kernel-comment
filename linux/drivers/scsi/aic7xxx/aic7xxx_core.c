@@ -37,9 +37,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aic7xxx.c#134 $
- *
- * $FreeBSD$
+ * $Id: //depot/aic7xxx/aic7xxx/aic7xxx.c#155 $
  */
 
 #ifdef __linux__
@@ -51,9 +49,6 @@
 #include <dev/aic7xxx/aic7xxx_inline.h>
 #include <dev/aic7xxx/aicasm/aicasm_insformat.h>
 #endif
-
-/****************************** Softc Data ************************************/
-struct ahc_softc_tailq ahc_tailq = TAILQ_HEAD_INITIALIZER(ahc_tailq);
 
 /***************************** Lookup Tables **********************************/
 char *ahc_chip_names[] =
@@ -73,7 +68,7 @@ char *ahc_chip_names[] =
 	"aic7892",
 	"aic7899"
 };
-static const u_int num_chip_names = NUM_ELEMENTS(ahc_chip_names);
+static const u_int num_chip_names = ARRAY_SIZE(ahc_chip_names);
 
 /*
  * Hardware error codes.
@@ -93,7 +88,7 @@ static struct ahc_hard_error_entry ahc_hard_errors[] = {
 	{ PCIERRSTAT,	"PCI Error detected" },
 	{ CIOPARERR,	"CIOBUS Parity Error" },
 };
-static const u_int num_errors = NUM_ELEMENTS(ahc_hard_errors);
+static const u_int num_errors = ARRAY_SIZE(ahc_hard_errors);
 
 static struct ahc_phase_table_entry ahc_phase_table[] =
 {
@@ -113,7 +108,7 @@ static struct ahc_phase_table_entry ahc_phase_table[] =
  * In most cases we only wish to itterate over real phases, so
  * exclude the last element from the count.
  */
-static const u_int num_phases = NUM_ELEMENTS(ahc_phase_table) - 1;
+static const u_int num_phases = ARRAY_SIZE(ahc_phase_table) - 1;
 
 /*
  * Valid SCSIRATE values.  (p. 3-17)
@@ -290,10 +285,19 @@ ahc_restart(struct ahc_softc *ahc)
 		ahc_outb(ahc, SEQ_FLAGS2,
 			 ahc_inb(ahc, SEQ_FLAGS2) & ~SCB_DMA);
 	}
+
+	/*
+	 * Clear any pending sequencer interrupt.  It is no
+	 * longer relevant since we're resetting the Program
+	 * Counter.
+	 */
+	ahc_outb(ahc, CLRINT, CLRSEQINT);
+
 	ahc_outb(ahc, MWI_RESIDUAL, 0);
 	ahc_outb(ahc, SEQCTL, ahc->seqctl);
 	ahc_outb(ahc, SEQADDR0, 0);
 	ahc_outb(ahc, SEQADDR1, 0);
+
 	ahc_unpause(ahc);
 }
 
@@ -1177,19 +1181,20 @@ ahc_handle_scsiint(struct ahc_softc *ahc, u_int intstat)
 				       scb_index);
 			}
 #endif
-			/*
-			 * Force a renegotiation with this target just in
-			 * case the cable was pulled and will later be
-			 * re-attached.  The target may forget its negotiation
-			 * settings with us should it attempt to reselect
-			 * during the interruption.  The target will not issue
-			 * a unit attention in this case, so we must always
-			 * renegotiate.
-			 */
 			ahc_scb_devinfo(ahc, &devinfo, scb);
-			ahc_force_renegotiation(ahc, &devinfo);
 			ahc_set_transaction_status(scb, CAM_SEL_TIMEOUT);
 			ahc_freeze_devq(ahc, scb);
+
+			/*
+			 * Cancel any pending transactions on the device
+			 * now that it seems to be missing.  This will
+			 * also revert us to async/narrow transfers until
+			 * we can renegotiate with the device.
+			 */
+			ahc_handle_devreset(ahc, &devinfo,
+					    CAM_SEL_TIMEOUT,
+					    "Selection Timeout",
+					    /*verbose_level*/1);
 		}
 		ahc_outb(ahc, CLRINT, CLRSCSIINT);
 		ahc_restart(ahc);
@@ -1666,7 +1671,7 @@ ahc_devlimited_syncrate(struct ahc_softc *ahc,
 		transinfo = &tinfo->goal;
 	*ppr_options &= transinfo->ppr_options;
 	if (transinfo->width == MSG_EXT_WDTR_BUS_8_BIT) {
-		maxsync = MAX(maxsync, AHC_SYNCRATE_ULTRA2);
+		maxsync = max(maxsync, (u_int)AHC_SYNCRATE_ULTRA2);
 		*ppr_options &= ~MSG_EXT_PPR_DT_REQ;
 	}
 	if (transinfo->period == 0) {
@@ -1674,7 +1679,7 @@ ahc_devlimited_syncrate(struct ahc_softc *ahc,
 		*ppr_options = 0;
 		return (NULL);
 	}
-	*period = MAX(*period, transinfo->period);
+	*period = max(*period, (u_int)transinfo->period);
 	return (ahc_find_syncrate(ahc, period, ppr_options, maxsync));
 }
 
@@ -1696,7 +1701,16 @@ ahc_find_syncrate(struct ahc_softc *ahc, u_int *period,
 	if ((*ppr_options & MSG_EXT_PPR_DT_REQ) == 0
 	 && maxsync < AHC_SYNCRATE_ULTRA2)
 		maxsync = AHC_SYNCRATE_ULTRA2;
-	
+
+	/* Now set the maxsync based on the card capabilities
+	 * DT is already done above */
+	if ((ahc->features & (AHC_DT | AHC_ULTRA2)) == 0
+	    && maxsync < AHC_SYNCRATE_ULTRA)
+		maxsync = AHC_SYNCRATE_ULTRA;
+	if ((ahc->features & (AHC_DT | AHC_ULTRA2 | AHC_ULTRA)) == 0
+	    && maxsync < AHC_SYNCRATE_FAST)
+		maxsync = AHC_SYNCRATE_FAST;
+
 	for (syncrate = &ahc_syncrates[maxsync];
 	     syncrate->rate != NULL;
 	     syncrate++) {
@@ -1760,6 +1774,17 @@ ahc_find_period(struct ahc_softc *ahc, u_int scsirate, u_int maxsync)
 	else
 		scsirate &= SXFR;
 
+	/* now set maxsync based on card capabilities */
+	if ((ahc->features & AHC_DT) == 0 && maxsync < AHC_SYNCRATE_ULTRA2)
+		maxsync = AHC_SYNCRATE_ULTRA2;
+	if ((ahc->features & (AHC_DT | AHC_ULTRA2)) == 0
+	    && maxsync < AHC_SYNCRATE_ULTRA)
+		maxsync = AHC_SYNCRATE_ULTRA;
+	if ((ahc->features & (AHC_DT | AHC_ULTRA2 | AHC_ULTRA)) == 0
+	    && maxsync < AHC_SYNCRATE_FAST)
+		maxsync = AHC_SYNCRATE_FAST;
+
+
 	syncrate = &ahc_syncrates[maxsync];
 	while (syncrate->rate != NULL) {
 
@@ -1799,12 +1824,12 @@ ahc_validate_offset(struct ahc_softc *ahc,
 		else
 			maxoffset = MAX_OFFSET_8BIT;
 	}
-	*offset = MIN(*offset, maxoffset);
+	*offset = min(*offset, maxoffset);
 	if (tinfo != NULL) {
 		if (role == ROLE_TARGET)
-			*offset = MIN(*offset, tinfo->user.offset);
+			*offset = min(*offset, (u_int)tinfo->user.offset);
 		else
-			*offset = MIN(*offset, tinfo->goal.offset);
+			*offset = min(*offset, (u_int)tinfo->goal.offset);
 	}
 }
 
@@ -1830,9 +1855,9 @@ ahc_validate_width(struct ahc_softc *ahc, struct ahc_initiator_tinfo *tinfo,
 	}
 	if (tinfo != NULL) {
 		if (role == ROLE_TARGET)
-			*bus_width = MIN(tinfo->user.width, *bus_width);
+			*bus_width = min((u_int)tinfo->user.width, *bus_width);
 		else
-			*bus_width = MIN(tinfo->goal.width, *bus_width);
+			*bus_width = min((u_int)tinfo->goal.width, *bus_width);
 	}
 }
 
@@ -1981,7 +2006,7 @@ ahc_set_syncrate(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
 		tinfo->curr.ppr_options = ppr_options;
 
 		ahc_send_async(ahc, devinfo->channel, devinfo->target,
-			       CAM_LUN_WILDCARD, AC_TRANSFER_NEG, NULL);
+			       CAM_LUN_WILDCARD, AC_TRANSFER_NEG);
 		if (bootverbose) {
 			if (offset != 0) {
 				printf("%s: target %d synchronous at %sMHz%s, "
@@ -2051,7 +2076,7 @@ ahc_set_width(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
 		tinfo->curr.width = width;
 
 		ahc_send_async(ahc, devinfo->channel, devinfo->target,
-			       CAM_LUN_WILDCARD, AC_TRANSFER_NEG, NULL);
+			       CAM_LUN_WILDCARD, AC_TRANSFER_NEG);
 		if (bootverbose) {
 			printf("%s: target %d using %dbit transfers\n",
 			       ahc_name(ahc), devinfo->target,
@@ -2068,13 +2093,15 @@ ahc_set_width(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
 /*
  * Update the current state of tagged queuing for a given target.
  */
-void
-ahc_set_tags(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
-	     ahc_queue_alg alg)
+static void
+ahc_set_tags(struct ahc_softc *ahc, struct scsi_cmnd *cmd,
+	     struct ahc_devinfo *devinfo, ahc_queue_alg alg)
 {
- 	ahc_platform_set_tags(ahc, devinfo, alg);
+	struct scsi_device *sdev = cmd->device;
+
+ 	ahc_platform_set_tags(ahc, sdev, devinfo, alg);
  	ahc_send_async(ahc, devinfo->channel, devinfo->target,
- 		       devinfo->lun, AC_TRANSFER_NEG, &alg);
+ 		       devinfo->lun, AC_TRANSFER_NEG);
 }
 
 /*
@@ -2456,11 +2483,8 @@ ahc_construct_sdtr(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
 {
 	if (offset == 0)
 		period = AHC_ASYNC_XFER_PERIOD;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXTENDED;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXT_SDTR_LEN;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXT_SDTR;
-	ahc->msgout_buf[ahc->msgout_index++] = period;
-	ahc->msgout_buf[ahc->msgout_index++] = offset;
+	ahc->msgout_index += spi_populate_sync_msg(
+			ahc->msgout_buf + ahc->msgout_index, period, offset);
 	ahc->msgout_len += 5;
 	if (bootverbose) {
 		printf("(%s:%c:%d:%d): Sending SDTR period %x, offset %x\n",
@@ -2477,10 +2501,8 @@ static void
 ahc_construct_wdtr(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
 		   u_int bus_width)
 {
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXTENDED;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXT_WDTR_LEN;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXT_WDTR;
-	ahc->msgout_buf[ahc->msgout_index++] = bus_width;
+	ahc->msgout_index += spi_populate_width_msg(
+			ahc->msgout_buf + ahc->msgout_index, bus_width);
 	ahc->msgout_len += 4;
 	if (bootverbose) {
 		printf("(%s:%c:%d:%d): Sending WDTR %x\n",
@@ -2500,14 +2522,9 @@ ahc_construct_ppr(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
 {
 	if (offset == 0)
 		period = AHC_ASYNC_XFER_PERIOD;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXTENDED;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXT_PPR_LEN;
-	ahc->msgout_buf[ahc->msgout_index++] = MSG_EXT_PPR;
-	ahc->msgout_buf[ahc->msgout_index++] = period;
-	ahc->msgout_buf[ahc->msgout_index++] = 0;
-	ahc->msgout_buf[ahc->msgout_index++] = offset;
-	ahc->msgout_buf[ahc->msgout_index++] = bus_width;
-	ahc->msgout_buf[ahc->msgout_index++] = ppr_options;
+	ahc->msgout_index += spi_populate_ppr_msg(
+			ahc->msgout_buf + ahc->msgout_index, period, offset,
+			bus_width, ppr_options);
 	ahc->msgout_len += 8;
 	if (bootverbose) {
 		printf("(%s:%c:%d:%d): Sending PPR bus_width %x, period %x, "
@@ -3494,7 +3511,7 @@ ahc_handle_msg_reject(struct ahc_softc *ahc, struct ahc_devinfo *devinfo)
 			printf("(%s:%c:%d:%d): refuses tagged commands.  "
 			       "Performing non-tagged I/O\n", ahc_name(ahc),
 			       devinfo->channel, devinfo->target, devinfo->lun);
-			ahc_set_tags(ahc, devinfo, AHC_QUEUE_NONE);
+			ahc_set_tags(ahc, scb->io_ctx, devinfo, AHC_QUEUE_NONE);
 			mask = ~0x23;
 		} else {
 			printf("(%s:%c:%d:%d): refuses %s tagged commands.  "
@@ -3502,7 +3519,7 @@ ahc_handle_msg_reject(struct ahc_softc *ahc, struct ahc_devinfo *devinfo)
 			       ahc_name(ahc), devinfo->channel, devinfo->target,
 			       devinfo->lun, tag_type == MSG_ORDERED_TASK
 			       ? "ordered" : "head of queue");
-			ahc_set_tags(ahc, devinfo, AHC_QUEUE_BASIC);
+			ahc_set_tags(ahc, scb->io_ctx, devinfo, AHC_QUEUE_BASIC);
 			mask = ~0x03;
 		}
 
@@ -3766,8 +3783,9 @@ ahc_handle_devreset(struct ahc_softc *ahc, struct ahc_devinfo *devinfo,
 			 /*period*/0, /*offset*/0, /*ppr_options*/0,
 			 AHC_TRANS_CUR, /*paused*/TRUE);
 	
-	ahc_send_async(ahc, devinfo->channel, devinfo->target,
-		       CAM_LUN_WILDCARD, AC_SENT_BDR, NULL);
+	if (status != CAM_SEL_TIMEOUT)
+		ahc_send_async(ahc, devinfo->channel, devinfo->target,
+			       CAM_LUN_WILDCARD, AC_SENT_BDR);
 
 	if (message != NULL
 	 && (verbose_level <= bootverbose))
@@ -3876,78 +3894,6 @@ ahc_softc_init(struct ahc_softc *ahc)
 	}
 
 	return (0);
-}
-
-void
-ahc_softc_insert(struct ahc_softc *ahc)
-{
-	struct ahc_softc *list_ahc;
-
-#if AHC_PCI_CONFIG > 0
-	/*
-	 * Second Function PCI devices need to inherit some
-	 * settings from function 0.
-	 */
-	if ((ahc->chip & AHC_BUS_MASK) == AHC_PCI
-	 && (ahc->features & AHC_MULTI_FUNC) != 0) {
-		TAILQ_FOREACH(list_ahc, &ahc_tailq, links) {
-			ahc_dev_softc_t list_pci;
-			ahc_dev_softc_t pci;
-
-			list_pci = list_ahc->dev_softc;
-			pci = ahc->dev_softc;
-			if (ahc_get_pci_slot(list_pci) == ahc_get_pci_slot(pci)
-			 && ahc_get_pci_bus(list_pci) == ahc_get_pci_bus(pci)) {
-				struct ahc_softc *master;
-				struct ahc_softc *slave;
-
-				if (ahc_get_pci_function(list_pci) == 0) {
-					master = list_ahc;
-					slave = ahc;
-				} else {
-					master = ahc;
-					slave = list_ahc;
-				}
-				slave->flags &= ~AHC_BIOS_ENABLED; 
-				slave->flags |=
-				    master->flags & AHC_BIOS_ENABLED;
-				slave->flags &= ~AHC_PRIMARY_CHANNEL; 
-				slave->flags |=
-				    master->flags & AHC_PRIMARY_CHANNEL;
-				break;
-			}
-		}
-	}
-#endif
-
-	/*
-	 * Insertion sort into our list of softcs.
-	 */
-	list_ahc = TAILQ_FIRST(&ahc_tailq);
-	while (list_ahc != NULL
-	    && ahc_softc_comp(ahc, list_ahc) <= 0)
-		list_ahc = TAILQ_NEXT(list_ahc, links);
-	if (list_ahc != NULL)
-		TAILQ_INSERT_BEFORE(list_ahc, ahc, links);
-	else
-		TAILQ_INSERT_TAIL(&ahc_tailq, ahc, links);
-	ahc->init_level++;
-}
-
-/*
- * Verify that the passed in softc pointer is for a
- * controller that is still configured.
- */
-struct ahc_softc *
-ahc_find_softc(struct ahc_softc *ahc)
-{
-	struct ahc_softc *list_ahc;
-
-	TAILQ_FOREACH(list_ahc, &ahc_tailq, links) {
-		if (list_ahc == ahc)
-			return (ahc);
-	}
-	return (NULL);
 }
 
 void
@@ -4078,14 +4024,6 @@ ahc_reset(struct ahc_softc *ahc, int reinit)
 	 * to disturb the integrity of the bus.
 	 */
 	ahc_pause(ahc);
-	if ((ahc_inb(ahc, HCNTRL) & CHIPRST) != 0) {
-		/*
-		 * The chip has not been initialized since
-		 * PCI/EISA/VLB bus reset.  Don't trust
-		 * "left over BIOS data".
-		 */
-		ahc->flags |= AHC_NO_BIOS_INIT;
-	}
 	sxfrctl1_b = 0;
 	if ((ahc->chip & AHC_CHIPID_MASK) == AHC_AIC7770) {
 		u_int sblkctl;
@@ -4490,7 +4428,7 @@ ahc_alloc_scbs(struct ahc_softc *ahc)
 	physaddr = sg_map->sg_physaddr;
 
 	newcount = (PAGE_SIZE / (AHC_NSEG * sizeof(struct ahc_dma_seg)));
-	newcount = MIN(newcount, (AHC_SCB_MAX_ALLOC - scb_data->numscbs));
+	newcount = min(newcount, (AHC_SCB_MAX_ALLOC - scb_data->numscbs));
 	for (i = 0; i < newcount; i++) {
 		struct scb_platform_data *pdata;
 #ifndef __linux__
@@ -5111,14 +5049,23 @@ ahc_pause_and_flushwork(struct ahc_softc *ahc)
 	ahc->flags |= AHC_ALL_INTERRUPTS;
 	paused = FALSE;
 	do {
-		if (paused)
+		if (paused) {
 			ahc_unpause(ahc);
+			/*
+			 * Give the sequencer some time to service
+			 * any active selections.
+			 */
+			ahc_delay(500);
+		}
 		ahc_intr(ahc);
 		ahc_pause(ahc);
 		paused = TRUE;
 		ahc_outb(ahc, SCSISEQ, ahc_inb(ahc, SCSISEQ) & ~ENSELO);
-		ahc_clear_critical_section(ahc);
 		intstat = ahc_inb(ahc, INTSTAT);
+		if ((intstat & INT_PEND) == 0) {
+			ahc_clear_critical_section(ahc);
+			intstat = ahc_inb(ahc, INTSTAT);
+		}
 	} while (--maxloops
 	      && (intstat != 0xFF || (ahc->features & AHC_REMOVABLE) == 0)
 	      && ((intstat & INT_PEND) != 0
@@ -6093,7 +6040,7 @@ ahc_reset_channel(struct ahc_softc *ahc, char channel, int initiate_reset)
 #endif
 	/* Notify the XPT that a bus reset occurred */
 	ahc_send_async(ahc, devinfo.channel, CAM_TARGET_WILDCARD,
-		       CAM_LUN_WILDCARD, AC_BUS_RESET, NULL);
+		       CAM_LUN_WILDCARD, AC_BUS_RESET);
 
 	/*
 	 * Revert to async/narrow transfers until we renegotiate.
@@ -6442,7 +6389,7 @@ ahc_check_patch(struct ahc_softc *ahc, struct patch **start_patch,
 	struct	patch *last_patch;
 	u_int	num_patches;
 
-	num_patches = sizeof(patches)/sizeof(struct patch);
+	num_patches = ARRAY_SIZE(patches);
 	last_patch = &patches[num_patches];
 	cur_patch = *start_patch;
 
@@ -6517,7 +6464,7 @@ ahc_download_instr(struct ahc_softc *ahc, u_int instrptr, uint8_t *dconsts)
 			if (skip_addr > i) {
 				int end_addr;
 
-				end_addr = MIN(address, skip_addr);
+				end_addr = min(address, skip_addr);
 				address_offset += end_addr - i;
 				i = skip_addr;
 			} else {
@@ -6849,8 +6796,8 @@ ahc_find_tmode_devs(struct ahc_softc *ahc, struct cam_sim *sim, union ccb *ccb,
 	} else {
 		u_int max_id;
 
-		max_id = (ahc->features & AHC_WIDE) ? 15 : 7;
-		if (ccb->ccb_h.target_id > max_id)
+		max_id = (ahc->features & AHC_WIDE) ? 16 : 8;
+		if (ccb->ccb_h.target_id >= max_id)
 			return (CAM_TID_INVALID);
 
 		if (ccb->ccb_h.target_lun >= AHC_NUM_LUNS)

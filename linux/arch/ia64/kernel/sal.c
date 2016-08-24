@@ -6,7 +6,6 @@
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  */
-#include <linux/config.h>
 
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -14,6 +13,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 
+#include <asm/delay.h>
 #include <asm/page.h>
 #include <asm/sal.h>
 #include <asm/pal.h>
@@ -134,7 +134,7 @@ set_smp_redirect (int flag)
 	 * interrupt redirection. The reason is this would require that
 	 * All interrupts be stopped and hard bind the irq to a cpu.
 	 * Later when the interrupt is fired we need to set the redir hint
-	 * on again in the vector. This is combersome for something that the
+	 * on again in the vector. This is cumbersome for something that the
 	 * user mode irq balancer will solve anyways.
 	 */
 	no_int_routing=1;
@@ -194,9 +194,8 @@ static void __init
 chk_nointroute_opt(void)
 {
 	char *cp;
-	extern char saved_command_line[];
 
-	for (cp = saved_command_line; *cp; ) {
+	for (cp = boot_command_line; *cp; ) {
 		if (memcmp(cp, "nointroute", 10) == 0) {
 			no_int_routing = 1;
 			printk ("no_int_routing on\n");
@@ -213,6 +212,78 @@ chk_nointroute_opt(void)
 #else
 static void __init sal_desc_ap_wakeup(void *p) { }
 #endif
+
+/*
+ * HP rx5670 firmware polls for interrupts during SAL_CACHE_FLUSH by reading
+ * cr.ivr, but it never writes cr.eoi.  This leaves any interrupt marked as
+ * "in-service" and masks other interrupts of equal or lower priority.
+ *
+ * HP internal defect reports: F1859, F2775, F3031.
+ */
+static int sal_cache_flush_drops_interrupts;
+
+void __init
+check_sal_cache_flush (void)
+{
+	unsigned long flags;
+	int cpu;
+	u64 vector, cache_type = 3;
+	struct ia64_sal_retval isrv;
+
+	cpu = get_cpu();
+	local_irq_save(flags);
+
+	/*
+	 * Schedule a timer interrupt, wait until it's reported, and see if
+	 * SAL_CACHE_FLUSH drops it.
+	 */
+	ia64_set_itv(IA64_TIMER_VECTOR);
+	ia64_set_itm(ia64_get_itc() + 1000);
+
+	while (!ia64_get_irr(IA64_TIMER_VECTOR))
+		cpu_relax();
+
+	SAL_CALL(isrv, SAL_CACHE_FLUSH, cache_type, 0, 0, 0, 0, 0, 0);
+
+	if (isrv.status)
+		printk(KERN_ERR "SAL_CAL_FLUSH failed with %ld\n", isrv.status);
+
+	if (ia64_get_irr(IA64_TIMER_VECTOR)) {
+		vector = ia64_get_ivr();
+		ia64_eoi();
+		WARN_ON(vector != IA64_TIMER_VECTOR);
+	} else {
+		sal_cache_flush_drops_interrupts = 1;
+		printk(KERN_ERR "SAL: SAL_CACHE_FLUSH drops interrupts; "
+			"PAL_CACHE_FLUSH will be used instead\n");
+		ia64_eoi();
+	}
+
+	local_irq_restore(flags);
+	put_cpu();
+}
+
+s64
+ia64_sal_cache_flush (u64 cache_type)
+{
+	struct ia64_sal_retval isrv;
+
+	if (sal_cache_flush_drops_interrupts) {
+		unsigned long flags;
+		u64 progress;
+		s64 rc;
+
+		progress = 0;
+		local_irq_save(flags);
+		rc = ia64_pal_cache_flush(cache_type,
+			PAL_CACHE_FLUSH_INVALIDATE, &progress, NULL);
+		local_irq_restore(flags);
+		return rc;
+	}
+
+	SAL_CALL(isrv, SAL_CACHE_FLUSH, cache_type, 0, 0, 0, 0, 0, 0);
+	return isrv.status;
+}
 
 void __init
 ia64_sal_init (struct ia64_sal_systab *systab)
@@ -262,6 +333,7 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 		}
 		p += SAL_DESC_SIZE(*p);
 	}
+
 }
 
 int

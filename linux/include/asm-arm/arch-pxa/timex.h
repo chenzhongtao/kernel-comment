@@ -10,7 +10,6 @@
  * published by the Free Software Foundation.
  */
 
-#include <linux/config.h>
 
 #if defined(CONFIG_PXA25x)
 /* PXA250/210 timer base */
@@ -22,4 +21,6 @@
 #else
 #define CLOCK_TICK_RATE 3250000
 #endif
+#else
+#define CLOCK_TICK_RATE 3250000
 #endif

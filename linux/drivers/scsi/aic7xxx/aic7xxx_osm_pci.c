@@ -49,6 +49,8 @@ static int	ahc_linux_pci_reserve_io_region(struct ahc_softc *ahc,
 static int	ahc_linux_pci_reserve_mem_region(struct ahc_softc *ahc,
 						 u_long *bus_addr,
 						 uint8_t __iomem **maddr);
+static int	ahc_linux_pci_dev_suspend(struct pci_dev *pdev, pm_message_t mesg);
+static int	ahc_linux_pci_dev_resume(struct pci_dev *pdev);
 static void	ahc_linux_pci_dev_remove(struct pci_dev *pdev);
 
 /* Define the macro locally since it's different for different class of chips.
@@ -130,37 +132,91 @@ static struct pci_device_id ahc_linux_pci_id_table[] = {
 
 MODULE_DEVICE_TABLE(pci, ahc_linux_pci_id_table);
 
-struct pci_driver aic7xxx_pci_driver = {
+static struct pci_driver aic7xxx_pci_driver = {
 	.name		= "aic7xxx",
 	.probe		= ahc_linux_pci_dev_probe,
+#ifdef CONFIG_PM
+	.suspend	= ahc_linux_pci_dev_suspend,
+	.resume		= ahc_linux_pci_dev_resume,
+#endif
 	.remove		= ahc_linux_pci_dev_remove,
 	.id_table	= ahc_linux_pci_id_table
 };
 
+static int
+ahc_linux_pci_dev_suspend(struct pci_dev *pdev, pm_message_t mesg)
+{
+	struct ahc_softc *ahc = pci_get_drvdata(pdev);
+	int rc;
+
+	if ((rc = ahc_suspend(ahc)))
+		return rc;
+
+	pci_save_state(pdev);
+	pci_disable_device(pdev);
+
+	if (mesg.event == PM_EVENT_SUSPEND)
+		pci_set_power_state(pdev, PCI_D3hot);
+
+	return rc;
+}
+
+static int
+ahc_linux_pci_dev_resume(struct pci_dev *pdev)
+{
+	struct ahc_softc *ahc = pci_get_drvdata(pdev);
+	int rc;
+
+	pci_set_power_state(pdev, PCI_D0);
+	pci_restore_state(pdev);
+
+	if ((rc = pci_enable_device(pdev))) {
+		dev_printk(KERN_ERR, &pdev->dev,
+			   "failed to enable device after resume (%d)\n", rc);
+		return rc;
+	}
+
+	pci_set_master(pdev);
+
+	ahc_pci_resume(ahc);
+
+	return (ahc_resume(ahc));
+}
+
 static void
 ahc_linux_pci_dev_remove(struct pci_dev *pdev)
 {
-	struct ahc_softc *ahc;
-	u_long l;
+	struct ahc_softc *ahc = pci_get_drvdata(pdev);
+	u_long s;
 
-	/*
-	 * We should be able to just perform
-	 * the free directly, but check our
-	 * list for extra sanity.
-	 */
-	ahc_list_lock(&l);
-	ahc = ahc_find_softc((struct ahc_softc *)pci_get_drvdata(pdev));
-	if (ahc != NULL) {
-		u_long s;
+	if (ahc->platform_data && ahc->platform_data->host)
+			scsi_remove_host(ahc->platform_data->host);
 
-		TAILQ_REMOVE(&ahc_tailq, ahc, links);
-		ahc_list_unlock(&l);
-		ahc_lock(ahc, &s);
-		ahc_intr_enable(ahc, FALSE);
-		ahc_unlock(ahc, &s);
-		ahc_free(ahc);
-	} else
-		ahc_list_unlock(&l);
+	ahc_lock(ahc, &s);
+	ahc_intr_enable(ahc, FALSE);
+	ahc_unlock(ahc, &s);
+	ahc_free(ahc);
+}
+
+static void
+ahc_linux_pci_inherit_flags(struct ahc_softc *ahc)
+{
+	struct pci_dev *pdev = ahc->dev_softc, *master_pdev;
+	unsigned int master_devfn = PCI_DEVFN(PCI_SLOT(pdev->devfn), 0);
+
+	master_pdev = pci_get_slot(pdev->bus, master_devfn);
+	if (master_pdev) {
+		struct ahc_softc *master = pci_get_drvdata(master_pdev);
+		if (master) {
+			ahc->flags &= ~AHC_BIOS_ENABLED; 
+			ahc->flags |= master->flags & AHC_BIOS_ENABLED;
+
+			ahc->flags &= ~AHC_PRIMARY_CHANNEL; 
+			ahc->flags |= master->flags & AHC_PRIMARY_CHANNEL;
+		} else
+			printk(KERN_ERR "aic7xxx: no multichannel peer found!\n");
+		pci_dev_put(master_pdev);
+	} 
 }
 
 static int
@@ -173,22 +229,7 @@ ahc_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct		 ahc_pci_identity *entry;
 	char		*name;
 	int		 error;
-
-	/*
-	 * Some BIOSen report the same device multiple times.
-	 */
-	TAILQ_FOREACH(ahc, &ahc_tailq, links) {
-		struct pci_dev *probed_pdev;
-
-		probed_pdev = ahc->dev_softc;
-		if (probed_pdev->bus->number == pdev->bus->number
-		 && probed_pdev->devfn == pdev->devfn)
-			break;
-	}
-	if (ahc != NULL) {
-		/* Skip duplicate. */
-		return (-ENODEV);
-	}
+	struct device	*dev = &pdev->dev;
 
 	pci = pdev;
 	entry = ahc_find_pci_device(pci);
@@ -218,16 +259,16 @@ ahc_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	pci_set_master(pdev);
 
 	if (sizeof(dma_addr_t) > 4
-	 && ahc_linux_get_memsize() > 0x80000000
-	 && pci_set_dma_mask(pdev, mask_39bit) == 0) {
+	    && ahc->features & AHC_LARGE_SCBS
+	    && dma_set_mask(dev, mask_39bit) == 0
+	    && dma_get_required_mask(dev) > DMA_32BIT_MASK) {
 		ahc->flags |= AHC_39BIT_ADDRESSING;
-		ahc->platform_data->hw_dma_mask = mask_39bit;
 	} else {
-		if (pci_set_dma_mask(pdev, DMA_32BIT_MASK)) {
+		if (dma_set_mask(dev, DMA_32BIT_MASK)) {
+			ahc_free(ahc);
 			printk(KERN_WARNING "aic7xxx: No suitable DMA available.\n");
                 	return (-ENODEV);
 		}
-		ahc->platform_data->hw_dma_mask = DMA_32BIT_MASK;
 	}
 	ahc->dev_softc = pci;
 	error = ahc_pci_config(ahc, entry);
@@ -235,24 +276,23 @@ ahc_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		ahc_free(ahc);
 		return (-error);
 	}
+
+	/*
+	 * Second Function PCI devices need to inherit some
+	 * settings from function 0.
+	 */
+	if ((ahc->features & AHC_MULTI_FUNC) && PCI_FUNC(pdev->devfn) != 0)
+		ahc_linux_pci_inherit_flags(ahc);
+
 	pci_set_drvdata(pdev, ahc);
-	if (aic7xxx_detect_complete) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
-		ahc_linux_register_host(ahc, &aic7xxx_driver_template);
-#else
-		printf("aic7xxx: ignoring PCI device found after "
-		       "initialization\n");
-		return (-ENODEV);
-#endif
-	}
+	ahc_linux_register_host(ahc, &aic7xxx_driver_template);
 	return (0);
 }
 
 int
 ahc_linux_pci_init(void)
 {
-	/* Translate error or zero return into zero or one */
-	return pci_module_init(&aic7xxx_pci_driver) ? 0 : 1;
+	return pci_register_driver(&aic7xxx_pci_driver);
 }
 
 void
@@ -380,7 +420,7 @@ ahc_pci_map_int(struct ahc_softc *ahc)
 	int error;
 
 	error = request_irq(ahc->dev_softc->irq, ahc_linux_isr,
-			    SA_SHIRQ, "aic7xxx", ahc);
+			    IRQF_SHARED, "aic7xxx", ahc);
 	if (error == 0)
 		ahc->platform_data->irq = ahc->dev_softc->irq;
 	

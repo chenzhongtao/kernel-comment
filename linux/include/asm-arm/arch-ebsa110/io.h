@@ -27,9 +27,9 @@ void __outw(u16 val, unsigned int port);
 u32 __inl(unsigned int port);
 void __outl(u32 val, unsigned int port);
 
-u8  __readb(void __iomem *addr);
-u16 __readw(void __iomem *addr);
-u32 __readl(void __iomem *addr);
+u8  __readb(const volatile void __iomem *addr);
+u16 __readw(const volatile void __iomem *addr);
+u32 __readl(const volatile void __iomem *addr);
 
 void __writeb(u8  val, void __iomem *addr);
 void __writew(u16 val, void __iomem *addr);
@@ -64,8 +64,14 @@ void __writel(u32 val, void __iomem *addr);
 #define writew(v,b)		__writew(v,b)
 #define writel(v,b)		__writel(v,b)
 
-#define __arch_ioremap(cookie,sz,c,a)	((void __iomem *)(cookie))
-#define __arch_iounmap(cookie)		do { } while (0)
+static inline void __iomem *__arch_ioremap(unsigned long cookie, size_t size,
+					   unsigned int flags)
+{
+	return (void __iomem *)cookie;
+}
+
+#define __arch_ioremap		__arch_ioremap
+#define __arch_iounmap(cookie)	do { } while (0)
 
 extern void insb(unsigned int port, void *buf, int sz);
 extern void insw(unsigned int port, void *buf, int sz);
@@ -74,5 +80,13 @@ extern void insl(unsigned int port, void *buf, int sz);
 extern void outsb(unsigned int port, const void *buf, int sz);
 extern void outsw(unsigned int port, const void *buf, int sz);
 extern void outsl(unsigned int port, const void *buf, int sz);
+
+/* can't support writesb atm */
+extern void writesw(void __iomem *addr, const void *data, int wordlen);
+extern void writesl(void __iomem *addr, const void *data, int longlen);
+
+/* can't support readsb atm */
+extern void readsw(const void __iomem *addr, void *data, int wordlen);
+extern void readsl(const void __iomem *addr, void *data, int longlen);
 
 #endif

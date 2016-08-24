@@ -67,7 +67,7 @@
 /* each new release!!! */
 #define VERSION		"2.07"
 
-static const char *boot_msg = 
+static const char * const boot_msg = 
 	"SysKonnect FDDI PCI Adapter driver v" VERSION " for\n"
 	"  SK-55xx/SK-58xx adapters (SK-NET FDDI-FP/UP/LP)";
 
@@ -101,7 +101,7 @@ static const char *boot_msg =
 static int skfp_driver_init(struct net_device *dev);
 static int skfp_open(struct net_device *dev);
 static int skfp_close(struct net_device *dev);
-static irqreturn_t skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t skfp_interrupt(int irq, void *dev_id);
 static struct net_device_stats *skfp_ctl_get_stats(struct net_device *dev);
 static void skfp_ctl_set_multicast_list(struct net_device *dev);
 static void skfp_ctl_set_multicast_list_wo_lock(struct net_device *dev);
@@ -149,7 +149,6 @@ extern void hwm_rx_frag(struct s_smc *smc, char far * virt, u_long phys,
 extern void mac_drv_rx_mode(struct s_smc *smc, int mode);
 extern void mac_drv_clear_rx_queue(struct s_smc *smc);
 extern void enable_tx_irq(struct s_smc *smc, u_short queue);
-extern void mac_drv_clear_txd(struct s_smc *smc);
 
 static struct pci_device_id skfddi_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SK, PCI_DEVICE_ID_SK_FP, PCI_ANY_ID, PCI_ANY_ID, },
@@ -261,9 +260,7 @@ static int skfp_init_one(struct pci_dev *pdev,
 	dev->set_multicast_list = &skfp_ctl_set_multicast_list;
 	dev->set_mac_address = &skfp_ctl_set_mac_address;
 	dev->do_ioctl = &skfp_ioctl;
-	dev->header_cache_update = NULL;	/* not supported */
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	/* Initialize board structure with bus-specific info */
@@ -498,7 +495,7 @@ static int skfp_open(struct net_device *dev)
 
 	PRINTK(KERN_INFO "entering skfp_open\n");
 	/* Register IRQ - support shared interrupts by passing device ptr */
-	err = request_irq(dev->irq, (void *) skfp_interrupt, SA_SHIRQ,
+	err = request_irq(dev->irq, (void *) skfp_interrupt, IRQF_SHARED,
 			  dev->name, dev);
 	if (err)
 		return err;
@@ -594,7 +591,6 @@ static int skfp_close(struct net_device *dev)
  * Arguments:
  *   irq        - interrupt vector
  *   dev_id     - pointer to device information
- *       regs   - pointer to registers structure
  *
  * Functional Description:
  *   This routine calls the interrupt processing routine for this adapter.  It
@@ -616,16 +612,11 @@ static int skfp_close(struct net_device *dev)
  *   Interrupts are disabled, then reenabled at the adapter.
  */
 
-irqreturn_t skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t skfp_interrupt(int irq, void *dev_id)
 {
-	struct net_device *dev = (struct net_device *) dev_id;
+	struct net_device *dev = dev_id;
 	struct s_smc *smc;	/* private board structure pointer */
 	skfddi_priv *bp;
-
-	if (dev == NULL) {
-		printk("%s: irq %d for unknown device\n", dev->name, irq);
-		return IRQ_NONE;
-	}
 
 	smc = netdev_priv(dev);
 	bp = &smc->os;
@@ -1687,7 +1678,6 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 	rxd->rxd_os.skb = NULL;
 	skb_trim(skb, len);
 	skb->protocol = fddi_type_trans(skb, bp->dev);
-	skb->dev = bp->dev;	/* pass up device pointer */
 
 	netif_rx(skb);
 	bp->dev->last_rx = jiffies;
@@ -1945,7 +1935,7 @@ int mac_drv_rx_init(struct s_smc *smc, int len, int fc,
 	}
 	skb_reserve(skb, 3);
 	skb_put(skb, len);
-	memcpy(skb->data, look_ahead, len);
+	skb_copy_to_linear_data(skb, look_ahead, len);
 
 	// deliver frame to system
 	skb->protocol = fddi_type_trans(skb, smc->os.dev);
@@ -2281,7 +2271,7 @@ static struct pci_driver skfddi_pci_driver = {
 
 static int __init skfd_init(void)
 {
-	return pci_module_init(&skfddi_pci_driver);
+	return pci_register_driver(&skfddi_pci_driver);
 }
 
 static void __exit skfd_exit(void)

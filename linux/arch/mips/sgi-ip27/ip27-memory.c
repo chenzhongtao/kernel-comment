@@ -10,7 +10,6 @@
  * On SGI IP27 the ARC memory configuration data is completly bogus but
  * alternate easier to use mechanisms are available.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -19,7 +18,10 @@
 #include <linux/nodemask.h>
 #include <linux/swap.h>
 #include <linux/bootmem.h>
+#include <linux/pfn.h>
+#include <linux/highmem.h>
 #include <asm/page.h>
+#include <asm/pgalloc.h>
 #include <asm/sections.h>
 
 #include <asm/sn/arch.h>
@@ -27,8 +29,6 @@
 #include <asm/sn/klconfig.h>
 #include <asm/sn/sn_private.h>
 
-
-#define PFN_UP(x)		(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
 
 #define SLOT_PFNSHIFT           (SLOT_SHIFT - PAGE_SHIFT)
 #define PFN_NASIDSHFT           (NASID_SHFT - PAGE_SHIFT)
@@ -499,18 +499,16 @@ void __init prom_meminit(void)
 	}
 }
 
-unsigned long __init prom_free_prom_memory(void)
+void __init prom_free_prom_memory(void)
 {
 	/* We got nothing to free here ...  */
-	return 0;
 }
 
-extern void pagetable_init(void);
 extern unsigned long setup_zero_pages(void);
 
 void __init paging_init(void)
 {
-	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+	unsigned long zones_size[MAX_NR_ZONES] = {0, };
 	unsigned node;
 
 	pagetable_init();
@@ -519,7 +517,7 @@ void __init paging_init(void)
 		pfn_t start_pfn = slot_getbasepfn(node, 0);
 		pfn_t end_pfn = node_getmaxclick(node) + 1;
 
-		zones_size[ZONE_DMA] = end_pfn - start_pfn;
+		zones_size[ZONE_NORMAL] = end_pfn - start_pfn;
 		free_area_init_node(node, NODE_DATA(node),
 				zones_size, start_pfn, NULL);
 
@@ -538,10 +536,10 @@ void __init mem_init(void)
 	for_each_online_node(node) {
 		unsigned slot, numslots;
 		struct page *end, *p;
-	
+
 		/*
-	 	 * This will free up the bootmem, ie, slot 0 memory.
-	 	 */
+		 * This will free up the bootmem, ie, slot 0 memory.
+		 */
 		totalram_pages += free_all_bootmem_node(NODE_DATA(node));
 
 		/*
@@ -549,9 +547,8 @@ void __init mem_init(void)
 		 */
 		numslots = node_getlastslot(node);
 		for (slot = 1; slot <= numslots; slot++) {
-			p = NODE_DATA(node)->node_mem_map +
-				(slot_getbasepfn(node, slot) -
-				 slot_getbasepfn(node, 0));
+			p = nid_page_nr(node, slot_getbasepfn(node, slot) -
+					      slot_getbasepfn(node, 0));
 
 			/*
 			 * Free valid memory in current slot.
@@ -560,7 +557,7 @@ void __init mem_init(void)
 				/* if (!page_is_ram(pgnr)) continue; */
 				/* commented out until page_is_ram works */
 				ClearPageReserved(p);
-				set_page_count(p, 1);
+				init_page_count(p);
 				__free_page(p);
 				totalram_pages++;
 			}

@@ -23,7 +23,6 @@
 
 #include <linux/module.h>
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/types.h>
@@ -94,10 +93,12 @@ enum {
 };
 
 /* The master ring of all esp hosts we are managing in this driver. */
-struct NCR_ESP *espchain;
+static struct NCR_ESP *espchain;
 int nesps = 0, esps_in_use = 0, esps_running = 0;
+EXPORT_SYMBOL(nesps);
+EXPORT_SYMBOL(esps_running);
 
-irqreturn_t esp_intr(int irq, void *dev_id, struct pt_regs *pregs);
+irqreturn_t esp_intr(int irq, void *dev_id);
 
 /* Debugging routines */
 static struct esp_cmdstrings {
@@ -525,16 +526,21 @@ void esp_bootup_reset(struct NCR_ESP *esp, struct ESP_regs *eregs)
 	/* Eat any bitrot in the chip and we are done... */
 	trash = esp_read(eregs->esp_intrpt);
 }
+EXPORT_SYMBOL(esp_bootup_reset);
 
 /* Allocate structure and insert basic data such as SCSI chip frequency
  * data and a pointer to the device
  */
-struct NCR_ESP* esp_allocate(Scsi_Host_Template *tpnt, void *esp_dev)
+struct NCR_ESP* esp_allocate(struct scsi_host_template *tpnt, void *esp_dev,
+			     int hotplug)
 {
 	struct NCR_ESP *esp, *elink;
 	struct Scsi_Host *esp_host;
 
-	esp_host = scsi_register(tpnt, sizeof(struct NCR_ESP));
+	if (hotplug)
+		esp_host = scsi_host_alloc(tpnt, sizeof(struct NCR_ESP));
+	else
+		esp_host = scsi_register(tpnt, sizeof(struct NCR_ESP));
 	if(!esp_host)
 		panic("Cannot register ESP SCSI host");
 	esp = (struct NCR_ESP *) esp_host->hostdata;
@@ -769,6 +775,7 @@ const char *esp_info(struct Scsi_Host *host)
 		panic("Bogon ESP revision");
 	};
 }
+EXPORT_SYMBOL(esp_info);
 
 /* From Wolfgang Stanglmeier's NCR scsi driver. */
 struct info_str
@@ -899,6 +906,7 @@ int esp_proc_info(struct Scsi_Host *shost, char *buffer, char **start, off_t off
 		*start = buffer;
 	return esp_host_info(esp, buffer, offset, length);
 }
+EXPORT_SYMBOL(esp_proc_info);
 
 static void esp_get_dmabufs(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
@@ -912,14 +920,14 @@ static void esp_get_dmabufs(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 			sp->SCp.ptr =
 				(char *) virt_to_phys(sp->request_buffer);
 	} else {
-		sp->SCp.buffer = (struct scatterlist *) sp->buffer;
+		sp->SCp.buffer = (struct scatterlist *) sp->request_buffer;
 		sp->SCp.buffers_residual = sp->use_sg - 1;
 		sp->SCp.this_residual = sp->SCp.buffer->length;
 		if (esp->dma_mmu_get_scsi_sgl)
 			esp->dma_mmu_get_scsi_sgl(esp, sp);
 		else
 			sp->SCp.ptr =
-				(char *) virt_to_phys((page_address(sp->SCp.buffer->page) + sp->SCp.buffer->offset));
+				(char *) virt_to_phys(sg_virt(sp->SCp.buffer));
 	}
 }
 
@@ -936,7 +944,7 @@ static void esp_release_dmabufs(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 
 static void esp_restore_pointers(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
-	struct esp_pointers *ep = &esp->data_pointers[sp->device->id];
+	struct esp_pointers *ep = &esp->data_pointers[scmd_id(sp)];
 
 	sp->SCp.ptr = ep->saved_ptr;
 	sp->SCp.buffer = ep->saved_buffer;
@@ -946,7 +954,7 @@ static void esp_restore_pointers(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 
 static void esp_save_pointers(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
-	struct esp_pointers *ep = &esp->data_pointers[sp->device->id];
+	struct esp_pointers *ep = &esp->data_pointers[scmd_id(sp)];
 
 	ep->saved_ptr = sp->SCp.ptr;
 	ep->saved_buffer = sp->SCp.buffer;
@@ -1006,7 +1014,7 @@ static void esp_exec_cmd(struct NCR_ESP *esp)
 	struct ESP_regs *eregs = esp->eregs;
 	struct esp_device *esp_dev;
 	Scsi_Cmnd *SCptr;
-	Scsi_Device *SDptr;
+	struct scsi_device *SDptr;
 	volatile unchar *cmdp = esp->esp_command;
 	unsigned char the_esp_command;
 	int lun, target;
@@ -1377,7 +1385,7 @@ int esp_abort(Scsi_Cmnd *SCptr)
 				this->host_scribble = NULL;
 				esp_release_dmabufs(esp, this);
 				this->result = DID_ABORT << 16;
-				this->done(this);
+				this->scsi_done(this);
 				if(don)
 					esp->dma_ints_on(esp);
 				return SUCCESS;
@@ -1467,13 +1475,11 @@ int esp_reset(Scsi_Cmnd *SCptr)
 {
 	struct NCR_ESP *esp = (struct NCR_ESP *) SCptr->device->host->hostdata;
 
+	spin_lock_irq(esp->ehost->host_lock);
 	(void) esp_do_resetbus(esp, esp->eregs);
-
 	spin_unlock_irq(esp->ehost->host_lock);
 
 	wait_event(esp->reset_queue, (esp->resetting_bus == 0));
-
-	spin_lock_irq(esp->ehost->host_lock);
 
 	return SUCCESS;
 }
@@ -1689,19 +1695,19 @@ static inline int reconnect_lun(struct NCR_ESP *esp, struct ESP_regs *eregs)
 static inline void esp_connect(struct NCR_ESP *esp, struct ESP_regs *eregs,
 			       Scsi_Cmnd *sp)
 {
-	Scsi_Device *dp = sp->device;
+	struct scsi_device *dp = sp->device;
 	struct esp_device *esp_dev = dp->hostdata;
 
 	if(esp->prev_soff  != esp_dev->sync_max_offset ||
 	   esp->prev_stp   != esp_dev->sync_min_period ||
 	   (esp->erev > esp100a &&
-	    esp->prev_cfg3 != esp->config3[sp->device->id])) {
+	    esp->prev_cfg3 != esp->config3[scmd_id(sp)])) {
 		esp->prev_soff = esp_dev->sync_max_offset;
 		esp_write(eregs->esp_soff, esp->prev_soff);
 		esp->prev_stp = esp_dev->sync_min_period;
 		esp_write(eregs->esp_stp, esp->prev_stp);
 		if(esp->erev > esp100a) {
-			esp->prev_cfg3 = esp->config3[sp->device->id];
+			esp->prev_cfg3 = esp->config3[scmd_id(sp)];
 			esp_write(eregs->esp_cfg3, esp->prev_cfg3);
 		} 
 	}
@@ -1742,7 +1748,7 @@ static inline void advance_sg(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 	if (esp->dma_advance_sg)
 		esp->dma_advance_sg (sp);
 	else
-		sp->SCp.ptr = (char *) virt_to_phys((page_address(sp->SCp.buffer->page) + sp->SCp.buffer->offset));
+		sp->SCp.ptr = (char *) virt_to_phys(sg_virt(sp->SCp.buffer));
 
 }
 
@@ -1801,6 +1807,7 @@ static int esp_do_data(struct NCR_ESP *esp, struct ESP_regs *eregs)
 		 */
 		int oldphase, i = 0; /* or where we left off last time ?? esp->current_data ?? */
 		int fifocnt = 0;
+		unsigned char *p = phys_to_virt((unsigned long)SCptr->SCp.ptr);
 
 		oldphase = esp_read(eregs->esp_status) & ESP_STAT_PMASK;
 
@@ -1824,7 +1831,10 @@ static int esp_do_data(struct NCR_ESP *esp, struct ESP_regs *eregs)
 		/* loop */
 		while (hmuch) {
 			int j, fifo_stuck = 0, newphase;
-			unsigned long flags, timeout;
+			unsigned long timeout;
+#if 0
+			unsigned long flags;
+#endif
 #if 0
 			if ( i % 10 )
 				ESPDATA(("\r"));
@@ -1859,7 +1869,7 @@ static int esp_do_data(struct NCR_ESP *esp, struct ESP_regs *eregs)
 
 				/* read fifo */
 				for(j=0;j<fifocnt;j++)
-					SCptr->SCp.ptr[i++] = esp_read(eregs->esp_fdata);
+					p[i++] = esp_read(eregs->esp_fdata);
 
 				ESPDATA(("(%d) ", i));
 
@@ -1881,7 +1891,7 @@ static int esp_do_data(struct NCR_ESP *esp, struct ESP_regs *eregs)
 
 				/* fill fifo */
 				for(j=0;j<this_count;j++)
-					esp_write(eregs->esp_fdata, SCptr->SCp.ptr[i++]);
+					esp_write(eregs->esp_fdata, p[i++]);
 
 				/* how many left if this goes out ?? */
 				hmuch -= this_count;
@@ -2151,29 +2161,23 @@ static int esp_do_data_finale(struct NCR_ESP *esp,
  */
 static int esp_should_clear_sync(Scsi_Cmnd *sp)
 {
-	unchar cmd1 = sp->cmnd[0];
-	unchar cmd2 = sp->data_cmnd[0];
+	unchar cmd = sp->cmnd[0];
 
 	/* These cases are for spinning up a disk and
 	 * waiting for that spinup to complete.
 	 */
-	if(cmd1 == START_STOP ||
-	   cmd2 == START_STOP)
+	if(cmd == START_STOP)
 		return 0;
 
-	if(cmd1 == TEST_UNIT_READY ||
-	   cmd2 == TEST_UNIT_READY)
+	if(cmd == TEST_UNIT_READY)
 		return 0;
 
 	/* One more special case for SCSI tape drives,
 	 * this is what is used to probe the device for
 	 * completion of a rewind or tape load operation.
 	 */
-	if(sp->device->type == TYPE_TAPE) {
-		if(cmd1 == MODE_SENSE ||
-		   cmd2 == MODE_SENSE)
-			return 0;
-	}
+	if(sp->device->type == TYPE_TAPE && cmd == MODE_SENSE)
+		return 0;
 
 	return 1;
 }
@@ -2204,7 +2208,7 @@ static int esp_do_freebus(struct NCR_ESP *esp, struct ESP_regs *eregs)
 
 		if(SCptr->SCp.Status != GOOD &&
 		   SCptr->SCp.Status != CONDITION_GOOD &&
-		   ((1<<SCptr->device->id) & esp->targets_present) &&
+		   ((1<<scmd_id(SCptr)) & esp->targets_present) &&
 		   esp_dev->sync && esp_dev->sync_max_offset) {
 			/* SCSI standard says that the synchronous capabilities
 			 * should be renegotiated at this point.  Most likely
@@ -2596,7 +2600,7 @@ static int esp_select_complete(struct NCR_ESP *esp, struct ESP_regs *eregs)
 	 */
 	if(esp->ireg == (ESP_INTR_FDONE | ESP_INTR_BSERV)) {
 		/* target speaks... */
-		esp->targets_present |= (1<<SCptr->device->id);
+		esp->targets_present |= (1<<scmd_id(SCptr));
 
 		/* What if the target ignores the sdtr? */
 		if(esp->snip)
@@ -3063,7 +3067,7 @@ static int check_multibyte_msg(struct NCR_ESP *esp,
 			ESPSDTR(("soff=%2x stp=%2x cfg3=%2x\n",
 				esp_dev->sync_max_offset,
 				esp_dev->sync_min_period,
-				esp->config3[SCptr->device->id]));
+				esp->config3[scmd_id(SCptr)]));
 
 			esp->snip = 0;
 		} else if(esp_dev->sync_max_offset) {
@@ -3536,9 +3540,10 @@ state_machine:
 	if(esp->dma_irq_exit)
 		esp->dma_irq_exit(esp);
 }
+EXPORT_SYMBOL(esp_handle);
 
 #ifndef CONFIG_SMP
-irqreturn_t esp_intr(int irq, void *dev_id, struct pt_regs *pregs)
+irqreturn_t esp_intr(int irq, void *dev_id)
 {
 	struct NCR_ESP *esp;
 	unsigned long flags;
@@ -3575,7 +3580,7 @@ repeat:
 }
 #else
 /* For SMP we only service one ESP on the list list at our IRQ level! */
-irqreturn_t esp_intr(int irq, void *dev_id, struct pt_regs *pregs)
+irqreturn_t esp_intr(int irq, void *dev_id)
 {
 	struct NCR_ESP *esp;
 	unsigned long flags;
@@ -3604,23 +3609,22 @@ out:
 }
 #endif
 
-int esp_slave_alloc(Scsi_Device *SDptr)
+int esp_slave_alloc(struct scsi_device *SDptr)
 {
 	struct esp_device *esp_dev =
-		kmalloc(sizeof(struct esp_device), GFP_ATOMIC);
+		kzalloc(sizeof(struct esp_device), GFP_ATOMIC);
 
 	if (!esp_dev)
 		return -ENOMEM;
-	memset(esp_dev, 0, sizeof(struct esp_device));
 	SDptr->hostdata = esp_dev;
 	return 0;
 }
 
-void esp_slave_destroy(Scsi_Device *SDptr)
+void esp_slave_destroy(struct scsi_device *SDptr)
 {
 	struct NCR_ESP *esp = (struct NCR_ESP *) SDptr->host->hostdata;
 
-	esp->targets_present &= ~(1 << SDptr->id);
+	esp->targets_present &= ~(1 << sdev_id(SDptr));
 	kfree(SDptr->hostdata);
 	SDptr->hostdata = NULL;
 }
@@ -3633,6 +3637,7 @@ void esp_release(void)
 	esps_in_use--;
 	esps_running = esps_in_use;
 }
+EXPORT_SYMBOL(esp_release);
 #endif
 
 EXPORT_SYMBOL(esp_abort);

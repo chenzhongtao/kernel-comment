@@ -17,7 +17,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -74,17 +74,7 @@ struct irport_cb {
 	/* For piggyback drivers */
 	void *priv;                
 	void (*change_speed)(void *priv, __u32 speed);
-	int (*interrupt)(int irq, void *dev_id, struct pt_regs *regs);
+	irqreturn_t (*interrupt)(int irq, void *dev_id);
 };
-
-struct irport_cb *irport_open(int i, unsigned int iobase, unsigned int irq);
-int  irport_close(struct irport_cb *self);
-void irport_start(struct irport_cb *self);
-void irport_stop(struct irport_cb *self);
-void irport_change_speed(void *priv, __u32 speed);
-irqreturn_t irport_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-int  irport_hard_xmit(struct sk_buff *skb, struct net_device *dev);
-int  irport_net_open(struct net_device *dev);
-int  irport_net_close(struct net_device *dev);
 
 #endif /* IRPORT_H */

@@ -1,5 +1,5 @@
 /*
- * sound/midibuf.c
+ * sound/oss/midibuf.c
  *
  * Device file manager for /dev/midi#
  */
@@ -50,7 +50,7 @@ static struct midi_parms parms[MAX_MIDI_DEV];
 static void midi_poll(unsigned long dummy);
 
 
-static struct timer_list poll_timer = TIMER_INITIALIZER(midi_poll, 0, 0);
+static DEFINE_TIMER(poll_timer, midi_poll, 0, 0);
 
 static volatile int open_devs;
 static DEFINE_SPINLOCK(lock);
@@ -414,18 +414,11 @@ unsigned int MIDIbuf_poll(int dev, struct file *file, poll_table * wait)
 }
 
 
-void MIDIbuf_init(void)
-{
-	/* drag in midi_syms.o */
-	{
-		extern char midi_syms_symbol;
-		midi_syms_symbol = 0;
-	}
-}
-
 int MIDIbuf_avail(int dev)
 {
 	if (midi_in_buf[dev])
 		return DATA_AVAIL (midi_in_buf[dev]);
 	return 0;
 }
+EXPORT_SYMBOL(MIDIbuf_avail);
+

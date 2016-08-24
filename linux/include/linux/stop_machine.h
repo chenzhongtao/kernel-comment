@@ -4,11 +4,10 @@
    very heavy lock, which is equivalent to grabbing every spinlock
    (and more).  So the "read" side to such a lock is anything which
    diables preeempt. */
-#include <linux/config.h>
 #include <linux/cpu.h>
 #include <asm/system.h>
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_STOP_MACHINE) && defined(CONFIG_SMP)
 /**
  * stop_machine_run: freeze the machine on all CPUs and run this function
  * @fn: the function to run

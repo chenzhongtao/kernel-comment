@@ -24,10 +24,6 @@
 			 /*  dumped to the console via printk)          */
 
 
-/* Defines for parisc_acctyp()	*/
-#define READ		0
-#define WRITE		1
-
 /* Various important other fields */
 #define bit22set(x)		(x & 0x00000200)
 #define bits23_25set(x)		(x & 0x000001c0)
@@ -151,8 +147,9 @@ void do_page_fault(struct pt_regs *regs, unsigned long code,
 	struct mm_struct *mm = tsk->mm;
 	const struct exception_table_entry *fix;
 	unsigned long acc_type;
+	int fault;
 
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
 
 	down_read(&mm->mmap_sem);
@@ -177,23 +174,23 @@ good_area:
 	 * fault.
 	 */
 
-	switch (handle_mm_fault(mm, vma, address, (acc_type & VM_WRITE) != 0)) {
-	      case 1:
-		++current->min_flt;
-		break;
-	      case 2:
-		++current->maj_flt;
-		break;
-	      case 0:
+	fault = handle_mm_fault(mm, vma, address, (acc_type & VM_WRITE) != 0);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
 		/*
-		 * We ran out of memory, or some other thing happened
-		 * to us that made us unable to handle the page fault
-		 * gracefully.
+		 * We hit a shared mapping outside of the file, or some
+		 * other thing happened to us that made us unable to
+		 * handle the page fault gracefully.
 		 */
-		goto bad_area;
-	      default:
-		goto out_of_memory;
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto bad_area;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 	up_read(&mm->mmap_sem);
 	return;
 
@@ -214,7 +211,7 @@ bad_area:
 #ifdef PRINT_USER_FAULTS
 		printk(KERN_DEBUG "\n");
 		printk(KERN_DEBUG "do_page_fault() pid=%d command='%s' type=%lu address=0x%08lx\n",
-		    tsk->pid, tsk->comm, code, address);
+		    task_pid_nr(tsk), tsk->comm, code, address);
 		if (vma) {
 			printk(KERN_DEBUG "vm_start = 0x%08lx, vm_end = 0x%08lx\n",
 					vma->vm_start, vma->vm_end);
@@ -225,7 +222,7 @@ bad_area:
 		si.si_signo = SIGSEGV;
 		si.si_errno = 0;
 		si.si_code = SEGV_MAPERR;
-		si.si_addr = (void *) address;
+		si.si_addr = (void __user *) address;
 		force_sig_info(SIGSEGV, &si, current);
 		return;
 	}
@@ -266,6 +263,6 @@ no_context:
 	up_read(&mm->mmap_sem);
 	printk(KERN_CRIT "VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
-		do_exit(SIGKILL);
+		do_group_exit(SIGKILL);
 	goto no_context;
 }

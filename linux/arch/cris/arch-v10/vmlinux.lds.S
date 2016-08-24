@@ -8,9 +8,9 @@
  * the kernel has booted. 
  */	
 
-#include <linux/config.h>
 #include <asm-generic/vmlinux.lds.h>
-		
+#include <asm/page.h>
+
 jiffies = jiffies_64;
 SECTIONS
 {
@@ -24,7 +24,7 @@ SECTIONS
 	_stext = .;
 	__stext = .;
 	.text : {
-		*(.text)
+		TEXT_TEXT
 		SCHED_TEXT
 		LOCK_TEXT
 		*(.fixup)
@@ -45,15 +45,15 @@ SECTIONS
 	___data_start = . ;
 	__Sdata = . ;
 	.data : {                     /* Data */
-		*(.data)
+		DATA_DATA
 	}
 	__edata = . ;                 /* End of data section */
 	_edata = . ;
 
-	. = ALIGN(8192);              /* init_task and stack, must be aligned */
+	. = ALIGN(PAGE_SIZE);	/* init_task and stack, must be aligned */
   	.data.init_task : { *(.data.init_task) }
 
-  	. = ALIGN(8192);              /* Init code and data */
+	. = ALIGN(PAGE_SIZE);	/* Init code and data */
   	__init_begin = .;
 	.init.text : { 
 		   _sinittext = .;
@@ -67,13 +67,7 @@ SECTIONS
   	__setup_end = .;
   	.initcall.init : {
 		__initcall_start = .;
-		*(.initcall1.init);
-		*(.initcall2.init);
-		*(.initcall3.init);
-		*(.initcall4.init);
-		*(.initcall5.init);
-		*(.initcall6.init);
-		*(.initcall7.init);
+		INITCALLS
 		__initcall_end = .;	
 	}
 
@@ -83,20 +77,24 @@ SECTIONS
 		__con_initcall_end = .;
 	}	
 	SECURITY_INIT
-		
+
+#ifdef CONFIG_BLK_DEV_INITRD
 	.init.ramfs : {
 		__initramfs_start = .;
 		*(.init.ramfs)
 		__initramfs_end = .;
-		/* We fill to the next page, so we can discard all init
-		   pages without needing to consider what payload might be
-		   appended to the kernel image.  */
-		FILL (0); 
-		. = ALIGN (8192);
 	}
-	
+#endif
 	__vmlinux_end = .;            /* last address of the physical file */
-  	__init_end = .;
+
+	/*
+	 * We fill to the next page, so we can discard all init
+	 * pages without needing to consider what payload might be
+	 * appended to the kernel image.
+	 */
+	. = ALIGN(PAGE_SIZE);
+
+	__init_end = .;
 
 	__data_end = . ;              /* Move to _edata ? */
 	__bss_start = .;              /* BSS */

@@ -2,7 +2,6 @@
 #ifndef _PPC_PGALLOC_H
 #define _PPC_PGALLOC_H
 
-#include <linux/config.h>
 #include <linux/threads.h>
 
 extern void __bad_pte(pmd_t *pmd);
@@ -28,7 +27,7 @@ extern void pgd_free(pgd_t *pgd);
 #define pmd_populate_kernel(mm, pmd, pte)	\
 		(pmd_val(*(pmd)) = (unsigned long)pte | _PMD_PRESENT)
 #define pmd_populate(mm, pmd, pte)	\
-		(pmd_val(*(pmd)) = (unsigned long)page_to_virt(pte) | _PMD_PRESENT)
+		(pmd_val(*(pmd)) = (unsigned long)lowmem_page_address(pte) | _PMD_PRESENT)
 #endif
 
 extern pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long addr);

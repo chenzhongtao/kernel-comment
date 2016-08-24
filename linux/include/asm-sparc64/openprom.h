@@ -175,9 +175,9 @@ struct linux_nodeops {
 };
 
 /* More fun PROM structures for device probing. */
-#define PROMREG_MAX     16
+#define PROMREG_MAX     24
 #define PROMVADDR_MAX   16
-#define PROMINTR_MAX    15
+#define PROMINTR_MAX    32
 
 struct linux_prom_registers {
 	unsigned which_io;	/* hi part of physical address			*/
@@ -186,8 +186,8 @@ struct linux_prom_registers {
 };
 
 struct linux_prom64_registers {
-	long phys_addr;
-	long reg_size;
+	unsigned long phys_addr;
+	unsigned long reg_size;
 };
 
 struct linux_prom_irqs {

@@ -52,7 +52,7 @@ static char *radeon_get_mon_name(int type)
 }
 
 
-#ifdef CONFIG_PPC_OF
+#if defined(CONFIG_PPC_OF) || defined(CONFIG_SPARC)
 /*
  * Try to find monitor informations & EDID data out of the Open Firmware
  * device-tree. This also contains some "hacks" to work around a few machine
@@ -64,13 +64,13 @@ static int __devinit radeon_parse_montype_prop(struct device_node *dp, u8 **out_
 {
         static char *propnames[] = { "DFP,EDID", "LCD,EDID", "EDID",
 				     "EDID1", "EDID2",  NULL };
-	u8 *pedid = NULL;
-	u8 *pmt = NULL;
+	const u8 *pedid = NULL;
+	const u8 *pmt = NULL;
 	u8 *tmp;
         int i, mt = MT_NONE;  
 	
 	RTRACE("analyzing OF properties...\n");
-	pmt = (u8 *)get_property(dp, "display-type", NULL);
+	pmt = of_get_property(dp, "display-type", NULL);
 	if (!pmt)
 		return MT_NONE;
 	RTRACE("display-type: %s\n", pmt);
@@ -89,7 +89,7 @@ static int __devinit radeon_parse_montype_prop(struct device_node *dp, u8 **out_
 	}
 
 	for (i = 0; propnames[i] != NULL; ++i) {
-		pedid = (u8 *)get_property(dp, propnames[i], NULL);
+		pedid = of_get_property(dp, propnames[i], NULL);
 		if (pedid != NULL)
 			break;
 	}
@@ -98,16 +98,16 @@ static int __devinit radeon_parse_montype_prop(struct device_node *dp, u8 **out_
 	 * single-head cards have hdno == -1 and skip this step
 	 */
 	if (pedid == NULL && dp->parent && (hdno != -1))
-		pedid = get_property(dp->parent, (hdno == 0) ? "EDID1" : "EDID2", NULL);
+		pedid = of_get_property(dp->parent,
+				(hdno == 0) ? "EDID1" : "EDID2", NULL);
 	if (pedid == NULL && dp->parent && (hdno == 0))
-		pedid = get_property(dp->parent, "EDID", NULL);
+		pedid = of_get_property(dp->parent, "EDID", NULL);
 	if (pedid == NULL)
 		return mt;
 
-	tmp = (u8 *)kmalloc(EDID_LENGTH, GFP_KERNEL);
+	tmp = kmemdup(pedid, EDID_LENGTH, GFP_KERNEL);
 	if (!tmp)
 		return mt;
-	memcpy(tmp, pedid, EDID_LENGTH);
 	*out_EDID = tmp;
 	return mt;
 }
@@ -124,14 +124,14 @@ static int __devinit radeon_probe_OF_head(struct radeonfb_info *rinfo, int head_
 		return MT_NONE;
 
 	if (rinfo->has_CRTC2) {
-		char *pname;
+		const char *pname;
 		int len, second = 0;
 
 		dp = dp->child;
 		do {
 			if (!dp)
 				return MT_NONE;
-			pname = (char *)get_property(dp, "name", NULL);
+			pname = of_get_property(dp, "name", NULL);
 			if (!pname)
 				return MT_NONE;
 			len = strlen(pname);
@@ -157,7 +157,7 @@ static int __devinit radeon_probe_OF_head(struct radeonfb_info *rinfo, int head_
 	}
         return MT_NONE;
 }
-#endif /* CONFIG_PPC_OF */
+#endif /* CONFIG_PPC_OF || CONFIG_SPARC */
 
 
 static int __devinit radeon_get_panel_info_BIOS(struct radeonfb_info *rinfo)
@@ -396,6 +396,10 @@ static int __devinit radeon_parse_monitor_layout(struct radeonfb_info *rinfo,
 				s1[i] = *s;
 			i++;
 		}
+
+		if (i > 4)
+			i = 4;
+
 	} while (*s++);
 	if (second)
 		s2[i] = 0;
@@ -423,7 +427,7 @@ static int __devinit radeon_parse_monitor_layout(struct radeonfb_info *rinfo,
 /*
  * Probe display on both primary and secondary card's connector (if any)
  * by various available techniques (i2c, OF device tree, BIOS, ...) and
- * try to retreive EDID. The algorithm here comes from XFree's radeon
+ * try to retrieve EDID. The algorithm here comes from XFree's radeon
  * driver
  */
 void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
@@ -492,11 +496,11 @@ void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
 		 * Old single head cards
 		 */
 		if (!rinfo->has_CRTC2) {
-#ifdef CONFIG_PPC_OF
+#if defined(CONFIG_PPC_OF) || defined(CONFIG_SPARC)
 			if (rinfo->mon1_type == MT_NONE)
 				rinfo->mon1_type = radeon_probe_OF_head(rinfo, 0,
 									&rinfo->mon1_EDID);
-#endif /* CONFIG_PPC_OF */
+#endif /* CONFIG_PPC_OF || CONFIG_SPARC */
 #ifdef CONFIG_FB_RADEON_I2C
 			if (rinfo->mon1_type == MT_NONE)
 				rinfo->mon1_type =
@@ -541,11 +545,11 @@ void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
 		/*
 		 * Probe primary head (DVI or laptop internal panel)
 		 */
-#ifdef CONFIG_PPC_OF
+#if defined(CONFIG_PPC_OF) || defined(CONFIG_SPARC)
 		if (rinfo->mon1_type == MT_NONE)
 			rinfo->mon1_type = radeon_probe_OF_head(rinfo, 0,
 								&rinfo->mon1_EDID);
-#endif /* CONFIG_PPC_OF */
+#endif /* CONFIG_PPC_OF || CONFIG_SPARC */
 #ifdef CONFIG_FB_RADEON_I2C
 		if (rinfo->mon1_type == MT_NONE)
 			rinfo->mon1_type = radeon_probe_i2c_connector(rinfo, ddc_dvi,
@@ -569,11 +573,11 @@ void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
 		/*
 		 * Probe secondary head (mostly VGA, can be DVI)
 		 */
-#ifdef CONFIG_PPC_OF
+#if defined(CONFIG_PPC_OF) || defined(CONFIG_SPARC)
 		if (rinfo->mon2_type == MT_NONE)
 			rinfo->mon2_type = radeon_probe_OF_head(rinfo, 1,
 								&rinfo->mon2_EDID);
-#endif /* CONFIG_PPC_OF */
+#endif /* CONFIG_PPC_OF || defined(CONFIG_SPARC) */
 #ifdef CONFIG_FB_RADEON_I2C
 		if (rinfo->mon2_type == MT_NONE)
 			rinfo->mon2_type = radeon_probe_i2c_connector(rinfo, ddc_vga,
@@ -618,11 +622,9 @@ void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
 		}
 	}
 	if (ignore_edid) {
-		if (rinfo->mon1_EDID)
-			kfree(rinfo->mon1_EDID);
+		kfree(rinfo->mon1_EDID);
 		rinfo->mon1_EDID = NULL;
-		if (rinfo->mon2_EDID)
-			kfree(rinfo->mon2_EDID);
+		kfree(rinfo->mon2_EDID);
 		rinfo->mon2_EDID = NULL;
 	}
 
@@ -655,8 +657,11 @@ static void radeon_fixup_panel_info(struct radeonfb_info *rinfo)
 	 */
 	if (!rinfo->panel_info.use_bios_dividers && rinfo->mon1_type == MT_LCD
 	    && rinfo->is_mobility) {
-		int ppll_div_sel = INREG8(CLOCK_CNTL_INDEX + 1) & 0x3;
-		u32 ppll_divn = INPLL(PPLL_DIV_0 + ppll_div_sel);
+		int ppll_div_sel;
+		u32 ppll_divn;
+		ppll_div_sel = INREG8(CLOCK_CNTL_INDEX + 1) & 0x3;
+		radeon_pll_errata_after_index(rinfo);
+		ppll_divn = INPLL(PPLL_DIV_0 + ppll_div_sel);
 		rinfo->panel_info.ref_divider = rinfo->pll.ref_div;
 		rinfo->panel_info.fbk_divider = ppll_divn & 0x7ff;
 		rinfo->panel_info.post_divider = (ppll_divn >> 16) & 0x7;
@@ -900,7 +905,7 @@ void __devinit radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_
  */
 
 /*
- * This is used when looking for modes. We assign a "goodness" value
+ * This is used when looking for modes. We assign a "distance" value
  * to a mode in the modedb depending how "close" it is from what we
  * are looking for.
  * Currently, we don't compare that much, we could do better but
@@ -909,13 +914,11 @@ void __devinit radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_
 static int radeon_compare_modes(const struct fb_var_screeninfo *var,
 				const struct fb_videomode *mode)
 {
-	int goodness = 0;
+	int distance = 0;
 
-	if (var->yres == mode->yres)
-		goodness += 10;
-	if (var->xres == mode->xres)
-		goodness += 9;
-	return goodness;
+	distance = mode->yres - var->yres;
+	distance += (mode->xres - var->xres)/2;
+	return distance;
 }
 
 /*
@@ -937,7 +940,7 @@ int  radeon_match_mode(struct radeonfb_info *rinfo,
 	const struct fb_videomode	*db = vesa_modes;
 	int				i, dbsize = 34;
 	int				has_rmx, native_db = 0;
-	int				goodness = 0;
+	int				distance = INT_MAX;
 	const struct fb_videomode	*candidate = NULL;
 
 	/* Start with a copy of the requested mode */
@@ -973,19 +976,19 @@ int  radeon_match_mode(struct radeonfb_info *rinfo,
 	/* Now look for a mode in the database */
 	while (db) {
 		for (i = 0; i < dbsize; i++) {
-			int g;
+			int d;
 
 			if (db[i].yres < src->yres)
 				continue;	
 			if (db[i].xres < src->xres)
 				continue;
-			g = radeon_compare_modes(src, &db[i]);
+			d = radeon_compare_modes(src, &db[i]);
 			/* If the new mode is at least as good as the previous one,
 			 * then it's our new candidate
 			 */
-			if (g >= goodness) {
+			if (d < distance) {
 				candidate = &db[i];
-				goodness = g;
+				distance = d;
 			}
 		}
 		db = NULL;

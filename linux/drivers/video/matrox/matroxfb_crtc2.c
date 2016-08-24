@@ -15,7 +15,7 @@
 #include "matroxfb_misc.h"
 #include "matroxfb_DAC1064.h"
 #include <linux/matroxfb.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 /* **************************************************** */
 
@@ -161,11 +161,6 @@ static void matroxfb_dh_disable(struct matroxfb_dh_fb_info* m2info) {
 
 	mga_outl(0x3C10, 0x00000004);	/* disable CRTC2, CRTC1->DAC1, PLL as clock source */
 	ACCESS_FBINFO(hw).crtc2.ctl = 0x00000004;
-}
-
-static void matroxfb_dh_cfbX_init(struct matroxfb_dh_fb_info* m2info) {
-	/* no acceleration for secondary head... */
-	m2info->cmap[16] = 0xFFFFFFFF;
 }
 
 static void matroxfb_dh_pan_var(struct matroxfb_dh_fb_info* m2info,
@@ -385,7 +380,6 @@ static int matroxfb_dh_set_par(struct fb_info* info) {
 			}
 		}
 		up_read(&ACCESS_FBINFO(altout).lock);
-		matroxfb_dh_cfbX_init(m2info);
 	}
 	m2info->initialized = 1;
 	return 0;
@@ -419,11 +413,10 @@ static int matroxfb_dh_get_vblank(const struct matroxfb_dh_fb_info* m2info, stru
 	return 0;
 }
 
-static int matroxfb_dh_ioctl(struct inode* inode,
-		struct file* file,
+static int matroxfb_dh_ioctl(struct fb_info *info,
 		unsigned int cmd,
-		unsigned long arg,
-		struct fb_info* info) {
+		unsigned long arg)
+{
 #define m2info (container_of(info, struct matroxfb_dh_fb_info, fbcon))
 	MINFO_FROM(m2info->primary_dev);
 
@@ -457,7 +450,7 @@ static int matroxfb_dh_ioctl(struct inode* inode,
 		case MATROXFB_GET_OUTPUT_MODE:
 		case MATROXFB_GET_ALL_OUTPUTS:
 			{
-				return ACCESS_FBINFO(fbcon.fbops)->fb_ioctl(inode, file, cmd, arg, &ACCESS_FBINFO(fbcon));
+				return ACCESS_FBINFO(fbcon.fbops)->fb_ioctl(&ACCESS_FBINFO(fbcon), cmd, arg);
 			}
 		case MATROXFB_SET_OUTPUT_CONNECTION:
 			{
@@ -576,7 +569,6 @@ static struct fb_ops matroxfb_dh_ops = {
 	.fb_fillrect =	cfb_fillrect,
 	.fb_copyarea =	cfb_copyarea,
 	.fb_imageblit =	cfb_imageblit,
-	.fb_cursor =	soft_cursor,
 };
 
 static struct fb_var_screeninfo matroxfb_dh_defined = {
@@ -696,12 +688,11 @@ static void* matroxfb_crtc2_probe(struct matrox_fb_info* minfo) {
 	/* hardware is CRTC2 incapable... */
 	if (!ACCESS_FBINFO(devflags.crtc2))
 		return NULL;
-	m2info = (struct matroxfb_dh_fb_info*)kmalloc(sizeof(*m2info), GFP_KERNEL);
+	m2info = kzalloc(sizeof(*m2info), GFP_KERNEL);
 	if (!m2info) {
 		printk(KERN_ERR "matroxfb_crtc2: Not enough memory for CRTC2 control structs\n");
 		return NULL;
 	}
-	memset(m2info, 0, sizeof(*m2info));
 	m2info->primary_dev = MINFO;
 	if (matroxfb_dh_registerfb(m2info)) {
 		kfree(m2info);

@@ -22,6 +22,9 @@
 #include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <asm/nvram.h>
+#ifdef CONFIG_PPC_PMAC
+#include <asm/machdep.h>
+#endif
 
 #define NVRAM_SIZE	8192
 
@@ -51,7 +54,7 @@ static ssize_t read_nvram(struct file *file, char __user *buf,
 	unsigned int i;
 	char __user *p = buf;
 
-	if (verify_area(VERIFY_WRITE, buf, count))
+	if (!access_ok(VERIFY_WRITE, buf, count))
 		return -EFAULT;
 	if (*ppos >= NVRAM_SIZE)
 		return 0;
@@ -69,7 +72,7 @@ static ssize_t write_nvram(struct file *file, const char __user *buf,
 	const char __user *p = buf;
 	char c;
 
-	if (verify_area(VERIFY_READ, buf, count))
+	if (!access_ok(VERIFY_READ, buf, count))
 		return -EFAULT;
 	if (*ppos >= NVRAM_SIZE)
 		return 0;
@@ -92,7 +95,7 @@ static int nvram_ioctl(struct inode *inode, struct file *file,
 	case IOC_NVRAM_GET_OFFSET: {
 		int part, offset;
 
-		if (_machine != _MACH_Pmac)
+		if (!machine_is(powermac))
 			return -EINVAL;
 		if (copy_from_user(&part, (void __user*)arg, sizeof(part)) != 0)
 			return -EFAULT;
@@ -114,7 +117,7 @@ static int nvram_ioctl(struct inode *inode, struct file *file,
 	return 0;
 }
 
-struct file_operations nvram_fops = {
+const struct file_operations nvram_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= nvram_llseek,
 	.read		= read_nvram,

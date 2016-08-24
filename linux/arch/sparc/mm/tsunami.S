@@ -4,9 +4,8 @@
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <linux/config.h>
 #include <asm/ptrace.h>
-#include <asm/asm_offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/psr.h>
 #include <asm/asi.h>
 #include <asm/page.h>

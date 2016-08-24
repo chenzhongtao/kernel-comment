@@ -10,18 +10,15 @@
  * Released under the GPL
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -203,6 +200,39 @@ static void dm9161_shutdown(struct net_device *dev)
 
 #endif
 
+#ifdef CONFIG_FEC_8XX_LXT971_PHY
+
+/* Support for LXT971/972 PHY */
+
+#define MII_LXT971_PCR		16 /* Port Control Register */
+#define MII_LXT971_SR2		17 /* Status Register 2 */
+#define MII_LXT971_IER		18 /* Interrupt Enable Register */
+#define MII_LXT971_ISR		19 /* Interrupt Status Register */
+#define MII_LXT971_LCR		20 /* LED Control Register */
+#define MII_LXT971_TCR		30 /* Transmit Control Register */
+
+static void lxt971_startup(struct net_device *dev)
+{
+	struct fec_enet_private *fep = netdev_priv(dev);
+
+	fec_mii_write(dev, fep->mii_if.phy_id, MII_LXT971_IER, 0x00F2);
+}
+
+static void lxt971_ack_int(struct net_device *dev)
+{
+	struct fec_enet_private *fep = netdev_priv(dev);
+
+	fec_mii_read(dev, fep->mii_if.phy_id, MII_LXT971_ISR);
+}
+
+static void lxt971_shutdown(struct net_device *dev)
+{
+	struct fec_enet_private *fep = netdev_priv(dev);
+
+	fec_mii_write(dev, fep->mii_if.phy_id, MII_LXT971_IER, 0x0000);
+}
+#endif
+
 /**********************************************************************************/
 
 static const struct phy_info phy_info[] = {
@@ -214,6 +244,15 @@ static const struct phy_info phy_info[] = {
 	 .ack_int = dm9161_ack_int,
 	 .shutdown = dm9161_shutdown,
 	 },
+#endif
+#ifdef CONFIG_FEC_8XX_LXT971_PHY
+	{
+	 .id = 0x0001378e,
+	 .name = "LXT971/972",
+	 .startup = lxt971_startup,
+	 .ack_int = lxt971_ack_int,
+	 .shutdown = lxt971_shutdown,
+	},
 #endif
 #ifdef CONFIG_FEC_8XX_GENERIC_PHY
 	{
@@ -269,12 +308,11 @@ int fec_mii_phy_id_detect(struct net_device *dev)
 		return -1;
 	}
 
-	for (i = 0, phy = phy_info; i < sizeof(phy_info) / sizeof(phy_info[0]);
-	     i++, phy++)
+	for (i = 0, phy = phy_info; i < ARRAY_SIZE(phy_info); i++, phy++)
 		if (phy->id == (phy_hwid >> 4) || phy->id == 0)
 			break;
 
-	if (i >= sizeof(phy_info) / sizeof(phy_info[0])) {
+	if (i >= ARRAY_SIZE(phy_info)) {
 		printk(KERN_ERR DRV_MODULE_NAME
 		       ": %s PHY id 0x%08x is not supported!\n",
 		       dev->name, phy_hwid);

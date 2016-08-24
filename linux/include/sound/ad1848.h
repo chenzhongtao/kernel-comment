@@ -2,7 +2,7 @@
 #define __SOUND_AD1848_H
 
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Definitions for AD1847/AD1848/CS4248 chips
  *
  *
@@ -27,7 +27,7 @@
 
 /* IO ports */
 
-#define AD1848P( codec, x ) ( (chip) -> port + c_d_c_AD1848##x )
+#define AD1848P( chip, x ) ( (chip) -> port + c_d_c_AD1848##x )
 
 #define c_d_c_AD1848REGSEL	0
 #define c_d_c_AD1848REG		1
@@ -127,7 +127,7 @@
 #define AD1848_THINKPAD_CTL_PORT2		0x15e9
 #define AD1848_THINKPAD_CS4248_ENABLE_BIT	0x02
 
-struct _snd_ad1848 {
+struct snd_ad1848 {
 	unsigned long port;		/* i/o port */
 	struct resource *res_port;
 	int irq;			/* IRQ line */
@@ -137,10 +137,10 @@ struct _snd_ad1848 {
 	unsigned short hardware;	/* see to AD1848_HW_XXXX */
 	unsigned short single_dma:1;	/* forced single DMA mode (GUS 16-bit daughter board) or dma1 == dma2 */
 
-	snd_pcm_t *pcm;
-	snd_pcm_substream_t *playback_substream;
-	snd_pcm_substream_t *capture_substream;
-	snd_card_t *card;
+	struct snd_pcm *pcm;
+	struct snd_pcm_substream *playback_substream;
+	struct snd_pcm_substream *capture_substream;
+	struct snd_card *card;
 
 	unsigned char image[32];	/* SGalaxy needs an access to extended registers */
 	int mce_bit;
@@ -148,25 +148,27 @@ struct _snd_ad1848 {
 	int dma_size;
 	int thinkpad_flag;		/* Thinkpad CS4248 needs some extra help */
 
-	spinlock_t reg_lock;
-	struct semaphore open_mutex;
-};
+#ifdef CONFIG_PM
+	void (*suspend)(struct snd_ad1848 *chip);
+	void (*resume)(struct snd_ad1848 *chip);
+#endif
 
-typedef struct _snd_ad1848 ad1848_t;
+	spinlock_t reg_lock;
+};
 
 /* exported functions */
 
-void snd_ad1848_out(ad1848_t *chip, unsigned char reg, unsigned char value);
+void snd_ad1848_out(struct snd_ad1848 *chip, unsigned char reg, unsigned char value);
 
-int snd_ad1848_create(snd_card_t * card,
+int snd_ad1848_create(struct snd_card *card,
 		      unsigned long port,
 		      int irq, int dma,
 		      unsigned short hardware,
-		      ad1848_t ** chip);
+		      struct snd_ad1848 ** chip);
 
-int snd_ad1848_pcm(ad1848_t * chip, int device, snd_pcm_t **rpcm);
-const snd_pcm_ops_t *snd_ad1848_get_pcm_ops(int direction);
-int snd_ad1848_mixer(ad1848_t * chip);
+int snd_ad1848_pcm(struct snd_ad1848 * chip, int device, struct snd_pcm **rpcm);
+const struct snd_pcm_ops *snd_ad1848_get_pcm_ops(int direction);
+int snd_ad1848_mixer(struct snd_ad1848 * chip);
 
 /* exported mixer stuffs */
 enum { AD1848_MIX_SINGLE, AD1848_MIX_DOUBLE, AD1848_MIX_CAPTURE };
@@ -176,14 +178,13 @@ enum { AD1848_MIX_SINGLE, AD1848_MIX_DOUBLE, AD1848_MIX_CAPTURE };
 #define AD1848_MIXVAL_DOUBLE(left_reg, right_reg, shift_left, shift_right, mask, invert) \
 	((left_reg) | ((right_reg) << 8) | ((shift_left) << 16) | ((shift_right) << 19) | ((mask) << 24) | ((invert) << 22))
 
-int snd_ad1848_add_ctl(ad1848_t *chip, const char *name, int index, int type, unsigned long value);
-
 /* for ease of use */
 struct ad1848_mix_elem {
 	const char *name;
 	int index;
 	int type;
 	unsigned long private_value;
+	const unsigned int *tlv;
 };
 
 #define AD1848_SINGLE(xname, xindex, reg, shift, mask, invert) \
@@ -192,15 +193,26 @@ struct ad1848_mix_elem {
   .type = AD1848_MIX_SINGLE, \
   .private_value = AD1848_MIXVAL_SINGLE(reg, shift, mask, invert) }
 
+#define AD1848_SINGLE_TLV(xname, xindex, reg, shift, mask, invert, xtlv) \
+{ .name = xname, \
+  .index = xindex, \
+  .type = AD1848_MIX_SINGLE, \
+  .private_value = AD1848_MIXVAL_SINGLE(reg, shift, mask, invert), \
+  .tlv = xtlv }
+
 #define AD1848_DOUBLE(xname, xindex, left_reg, right_reg, shift_left, shift_right, mask, invert) \
 { .name = xname, \
   .index = xindex, \
   .type = AD1848_MIX_DOUBLE, \
   .private_value = AD1848_MIXVAL_DOUBLE(left_reg, right_reg, shift_left, shift_right, mask, invert) }
 
-static inline int snd_ad1848_add_ctl_elem(ad1848_t *chip, const struct ad1848_mix_elem *c)
-{
-	return snd_ad1848_add_ctl(chip, c->name, c->index, c->type, c->private_value);
-}
+#define AD1848_DOUBLE_TLV(xname, xindex, left_reg, right_reg, shift_left, shift_right, mask, invert, xtlv) \
+{ .name = xname, \
+  .index = xindex, \
+  .type = AD1848_MIX_DOUBLE, \
+  .private_value = AD1848_MIXVAL_DOUBLE(left_reg, right_reg, shift_left, shift_right, mask, invert), \
+  .tlv = xtlv }
+
+int snd_ad1848_add_ctl_elem(struct snd_ad1848 *chip, const struct ad1848_mix_elem *c);
 
 #endif /* __SOUND_AD1848_H */

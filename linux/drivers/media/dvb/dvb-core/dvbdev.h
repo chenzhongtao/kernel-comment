@@ -1,4 +1,4 @@
-/* 
+/*
  * dvbdev.h
  *
  * Copyright (C) 2000 Ralph Metzler & Marcus Metzler
@@ -27,7 +27,6 @@
 #include <linux/poll.h>
 #include <linux/fs.h>
 #include <linux/list.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/smp_lock.h>
 
 #define DVB_MAJOR 212
@@ -51,6 +50,8 @@ struct dvb_adapter {
 	u8 proposed_mac [6];
 	void* priv;
 
+	struct device *device;
+
 	struct module *module;
 };
 
@@ -58,9 +59,6 @@ struct dvb_adapter {
 struct dvb_device {
 	struct list_head list_head;
 	struct file_operations *fops;
- 
- 
- 
 	struct dvb_adapter *adapter;
 	int type;
 	u32 id;
@@ -71,19 +69,20 @@ struct dvb_device {
 	int writers;
 	int users;
 
-        /* don't really need those !? -- FIXME: use video_usercopy  */
-        int (*kernel_ioctl)(struct inode *inode, struct file *file,
+	wait_queue_head_t	  wait_queue;
+	/* don't really need those !? -- FIXME: use video_usercopy  */
+	int (*kernel_ioctl)(struct inode *inode, struct file *file,
 			    unsigned int cmd, void *arg);
 
 	void *priv;
 };
 
 
-extern int dvb_register_adapter (struct dvb_adapter **padap, const char *name, struct module *module);
+extern int dvb_register_adapter (struct dvb_adapter *adap, const char *name, struct module *module, struct device *device);
 extern int dvb_unregister_adapter (struct dvb_adapter *adap);
 
 extern int dvb_register_device (struct dvb_adapter *adap,
-				struct dvb_device **pdvbdev, 
+				struct dvb_device **pdvbdev,
 				const struct dvb_device *template,
 				void *priv,
 				int type);
@@ -100,9 +99,30 @@ we simply define out own dvb_usercopy(), which will hopefully become
 generic_usercopy()  someday... */
 
 extern int dvb_usercopy(struct inode *inode, struct file *file,
-	                    unsigned int cmd, unsigned long arg,
+			    unsigned int cmd, unsigned long arg,
 			    int (*func)(struct inode *inode, struct file *file,
 			    unsigned int cmd, void *arg));
 
-#endif /* #ifndef _DVBDEV_H_ */
+/** generic DVB attach function. */
+#ifdef CONFIG_DVB_CORE_ATTACH
+#define dvb_attach(FUNCTION, ARGS...) ({ \
+	void *__r = NULL; \
+	typeof(&FUNCTION) __a = symbol_request(FUNCTION); \
+	if (__a) { \
+		__r = (void *) __a(ARGS); \
+		if (__r == NULL) \
+			symbol_put(FUNCTION); \
+	} else { \
+		printk(KERN_ERR "DVB: Unable to find symbol "#FUNCTION"()\n"); \
+	} \
+	__r; \
+})
 
+#else
+#define dvb_attach(FUNCTION, ARGS...) ({ \
+	FUNCTION(ARGS); \
+})
+
+#endif
+
+#endif /* #ifndef _DVBDEV_H_ */

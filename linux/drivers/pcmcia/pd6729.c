@@ -8,7 +8,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -59,7 +58,7 @@ MODULE_AUTHOR("Jun Komuro <komurojun-mbn@nifty.com>");
 
 static int irq_mode = 1; /* 0 = ISA interrupt, 1 = PCI interrupt */
 static int irq_list[16];
-static int irq_list_count = 0;
+static unsigned int irq_list_count = 0;
 
 module_param(irq_mode, int, 0444);
 module_param_array(irq_list, int, &irq_list_count, 0444);
@@ -183,7 +182,7 @@ static void indirect_write16(struct pd6729_socket *socket, unsigned short reg,
 
 /* Interrupt handler functionality */
 
-static irqreturn_t pd6729_interrupt(int irq, void *dev, struct pt_regs *regs)
+static irqreturn_t pd6729_interrupt(int irq, void *dev)
 {
 	struct pd6729_socket *socket = (struct pd6729_socket *)dev;
 	int i;
@@ -250,7 +249,7 @@ static void pd6729_interrupt_wrapper(unsigned long data)
 {
 	struct pd6729_socket *socket = (struct pd6729_socket *) data;
 
-	pd6729_interrupt(0, (void *)socket, NULL);
+	pd6729_interrupt(0, (void *)socket);
 	mod_timer(&socket->poll_timer, jiffies + HZ);
 }
 
@@ -303,75 +302,6 @@ static int pd6729_get_status(struct pcmcia_socket *sock, u_int *value)
 	return 0;
 }
 
-
-static int pd6729_get_socket(struct pcmcia_socket *sock, socket_state_t *state)
-{
-	struct pd6729_socket *socket
-			= container_of(sock, struct pd6729_socket, socket);
-	unsigned char reg, vcc, vpp;
-
-	state->flags    = 0;
-	state->Vcc      = 0;
-	state->Vpp      = 0;
-	state->io_irq   = 0;
-	state->csc_mask = 0;
-
-	/* First the power status of the socket */
-	reg = indirect_read(socket, I365_POWER);
-
-	if (reg & I365_PWR_AUTO)
-		state->flags |= SS_PWR_AUTO;  /* Automatic Power Switch */
-
-	if (reg & I365_PWR_OUT)
-		state->flags |= SS_OUTPUT_ENA; /* Output signals are enabled */
-
-	vcc = reg & I365_VCC_MASK;    vpp = reg & I365_VPP1_MASK;
-
-	if (reg & I365_VCC_5V) {
-		state->Vcc = (indirect_read(socket, PD67_MISC_CTL_1) &
-			PD67_MC1_VCC_3V) ? 33 : 50;
-
-		if (vpp == I365_VPP1_5V) {
-			if (state->Vcc == 50)
-				state->Vpp = 50;
-			else
-				state->Vpp = 33;
-		}
-		if (vpp == I365_VPP1_12V)
-			state->Vpp = 120;
-	}
-
-	/* Now the IO card, RESET flags and IO interrupt */
-	reg = indirect_read(socket, I365_INTCTL);
-
-	if ((reg & I365_PC_RESET) == 0)
-		state->flags |= SS_RESET;
-	if (reg & I365_PC_IOCARD)
-		state->flags |= SS_IOCARD; /* This is an IO card */
-
-	/* Set the IRQ number */
-	state->io_irq = socket->card_irq;
-
-	/* Card status change */
-	reg = indirect_read(socket, I365_CSCINT);
-
-	if (reg & I365_CSC_DETECT)
-		state->csc_mask |= SS_DETECT; /* Card detect is enabled */
-
-	if (state->flags & SS_IOCARD) {/* IO Cards behave different */
-		if (reg & I365_CSC_STSCHG)
-			state->csc_mask |= SS_STSCHG;
-	} else {
-		if (reg & I365_CSC_BVD1)
-			state->csc_mask |= SS_BATDEAD;
-		if (reg & I365_CSC_BVD2)
-			state->csc_mask |= SS_BATWARN;
-		if (reg & I365_CSC_READY)
-			state->csc_mask |= SS_READY;
-	}
-
-	return 0;
-}
 
 static int pd6729_set_socket(struct pcmcia_socket *sock, socket_state_t *state)
 {
@@ -615,11 +545,6 @@ static int pd6729_set_mem_map(struct pcmcia_socket *sock,
 	return 0;
 }
 
-static int pd6729_suspend(struct pcmcia_socket *sock)
-{
-	return pd6729_set_socket(sock, &dead_socket);
-}
-
 static int pd6729_init(struct pcmcia_socket *sock)
 {
 	int i;
@@ -644,29 +569,27 @@ static int pd6729_init(struct pcmcia_socket *sock)
 /* the pccard structure and its functions */
 static struct pccard_operations pd6729_operations = {
 	.init 			= pd6729_init,
-	.suspend		= pd6729_suspend,
 	.get_status		= pd6729_get_status,
-	.get_socket		= pd6729_get_socket,
 	.set_socket		= pd6729_set_socket,
 	.set_io_map		= pd6729_set_io_map,
 	.set_mem_map		= pd6729_set_mem_map,
 };
 
-static irqreturn_t pd6729_test(int irq, void *dev, struct pt_regs *regs)
+static irqreturn_t pd6729_test(int irq, void *dev)
 {
 	dprintk("-> hit on irq %d\n", irq);
 	return IRQ_HANDLED;
 }
 
-static int pd6729_check_irq(int irq, int flags)
+static int pd6729_check_irq(int irq)
 {
-	if (request_irq(irq, pd6729_test, flags, "x", pd6729_test) != 0)
-		return -1;
+	if (request_irq(irq, pd6729_test, IRQF_PROBE_SHARED, "x", pd6729_test)
+		!= 0) return -1;
 	free_irq(irq, pd6729_test);
 	return 0;
 }
 
-static u_int __init pd6729_isa_scan(void)
+static u_int __devinit pd6729_isa_scan(void)
 {
 	u_int mask0, mask = 0;
 	int i;
@@ -687,7 +610,7 @@ static u_int __init pd6729_isa_scan(void)
 
 	/* just find interrupts that aren't in use */
 	for (i = 0; i < 16; i++)
-		if ((mask0 & (1 << i)) && (pd6729_check_irq(i, 0) == 0))
+		if ((mask0 & (1 << i)) && (pd6729_check_irq(i) == 0))
 			mask |= (1 << i);
 
 	printk(KERN_INFO "pd6729: ISA irqs = ");
@@ -710,18 +633,17 @@ static int __devinit pd6729_pci_probe(struct pci_dev *dev,
 	char configbyte;
 	struct pd6729_socket *socket;
 
-	socket = kmalloc(sizeof(struct pd6729_socket) * MAX_SOCKETS,
+	socket = kzalloc(sizeof(struct pd6729_socket) * MAX_SOCKETS,
 			 GFP_KERNEL);
 	if (!socket)
 		return -ENOMEM;
-
-	memset(socket, 0, sizeof(struct pd6729_socket) * MAX_SOCKETS);
 
 	if ((ret = pci_enable_device(dev)))
 		goto err_out_free_mem;
 
 	printk(KERN_INFO "pd6729: Cirrus PD6729 PCI to PCMCIA Bridge "
-		"at 0x%lx on irq %d\n",	pci_resource_start(dev, 0), dev->irq);
+		"at 0x%llx on irq %d\n",
+		(unsigned long long)pci_resource_start(dev, 0), dev->irq);
  	/*
 	 * Since we have no memory BARs some firmware may not
 	 * have had PCI_COMMAND_MEMORY enabled, yet the device needs it.
@@ -750,7 +672,7 @@ static int __devinit pd6729_pci_probe(struct pci_dev *dev,
 
 	for (i = 0; i < MAX_SOCKETS; i++) {
 		socket[i].io_base = pci_resource_start(dev, 0);
-		socket[i].socket.features |= SS_CAP_PCCARD;
+		socket[i].socket.features |= SS_CAP_PAGE_REGS | SS_CAP_PCCARD;
 		socket[i].socket.map_size = 0x1000;
 		socket[i].socket.irq_mask = mask;
 		socket[i].socket.pci_irq  = dev->irq;
@@ -760,14 +682,14 @@ static int __devinit pd6729_pci_probe(struct pci_dev *dev,
 
 		socket[i].socket.ops = &pd6729_operations;
 		socket[i].socket.resource_ops = &pccard_nonstatic_ops;
-		socket[i].socket.dev.dev = &dev->dev;
+		socket[i].socket.dev.parent = &dev->dev;
 		socket[i].socket.driver_data = &socket[i];
 	}
 
 	pci_set_drvdata(dev, socket);
 	if (irq_mode == 1) {
 		/* Register the interrupt handler */
-		if ((ret = request_irq(dev->irq, pd6729_interrupt, SA_SHIRQ,
+		if ((ret = request_irq(dev->irq, pd6729_interrupt, IRQF_SHARED,
 							"pd6729", socket))) {
 			printk(KERN_ERR "pd6729: Failed to register irq %d, "
 							"aborting\n", dev->irq);
@@ -833,7 +755,8 @@ static void __devexit pd6729_pci_remove(struct pci_dev *dev)
 	kfree(socket);
 }
 
-static int pd6729_socket_suspend(struct pci_dev *dev, u32 state)
+#ifdef CONFIG_PM
+static int pd6729_socket_suspend(struct pci_dev *dev, pm_message_t state)
 {
 	return pcmcia_socket_dev_suspend(&dev->dev, state);
 }
@@ -842,6 +765,7 @@ static int pd6729_socket_resume(struct pci_dev *dev)
 {
 	return pcmcia_socket_dev_resume(&dev->dev);
 }
+#endif
 
 static struct pci_device_id pd6729_pci_ids[] = {
 	{
@@ -859,13 +783,15 @@ static struct pci_driver pd6729_pci_drv = {
 	.id_table	= pd6729_pci_ids,
 	.probe		= pd6729_pci_probe,
 	.remove		= __devexit_p(pd6729_pci_remove),
+#ifdef CONFIG_PM
 	.suspend	= pd6729_socket_suspend,
 	.resume		= pd6729_socket_resume,
+#endif
 };
 
 static int pd6729_module_init(void)
 {
-	return pci_module_init(&pd6729_pci_drv);
+	return pci_register_driver(&pd6729_pci_drv);
 }
 
 static void pd6729_module_exit(void)

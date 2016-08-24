@@ -1,5 +1,5 @@
 /*
- * arch/sh/pci/ops-dreamcast.c
+ * arch/sh/drivers/pci/ops-dreamcast.c
  *
  * PCI operations for the Sega Dreamcast
  *
@@ -15,7 +15,6 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -58,7 +57,7 @@ struct pci_channel board_pci_channels[] = {
  *
  * Also, we could very easily support both Type 0 and Type 1 configurations
  * here, but since it doesn't seem that there is any such implementation in
- * existance, we don't bother.
+ * existence, we don't bother.
  *
  * I suppose if someone actually gets around to ripping the chip out of
  * the BBA and hanging some more devices off of it, then this might be

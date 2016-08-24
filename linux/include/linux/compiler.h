@@ -8,19 +8,21 @@
 # define __kernel	/* default address space */
 # define __safe		__attribute__((safe))
 # define __force	__attribute__((force))
+# define __nocast	__attribute__((nocast))
 # define __iomem	__attribute__((noderef, address_space(2)))
-# define __acquires(x)	__attribute__((context(0,1)))
-# define __releases(x)	__attribute__((context(1,0)))
-# define __acquire(x)	__context__(1)
-# define __release(x)	__context__(-1)
-# define __cond_lock(x)	((x) ? ({ __context__(1); 1; }) : 0)
-extern void __chk_user_ptr(void __user *);
-extern void __chk_io_ptr(void __iomem *);
+# define __acquires(x)	__attribute__((context(x,0,1)))
+# define __releases(x)	__attribute__((context(x,1,0)))
+# define __acquire(x)	__context__(x,1)
+# define __release(x)	__context__(x,-1)
+# define __cond_lock(x,c)	((c) ? ({ __acquire(x); 1; }) : 0)
+extern void __chk_user_ptr(const volatile void __user *);
+extern void __chk_io_ptr(const volatile void __iomem *);
 #else
 # define __user
 # define __kernel
 # define __safe
 # define __force
+# define __nocast
 # define __iomem
 # define __chk_user_ptr(x) (void)0
 # define __chk_io_ptr(x) (void)0
@@ -29,17 +31,15 @@ extern void __chk_io_ptr(void __iomem *);
 # define __releases(x)
 # define __acquire(x) (void)0
 # define __release(x) (void)0
-# define __cond_lock(x) (x)
+# define __cond_lock(x,c) (c)
 #endif
 
 #ifdef __KERNEL__
 
-#if __GNUC__ > 3
-# include <linux/compiler-gcc+.h>	/* catch-all for GCC 4, 5, etc. */
-#elif __GNUC__ == 3
+#if __GNUC__ >= 4
+# include <linux/compiler-gcc4.h>
+#elif __GNUC__ == 3 && __GNUC_MINOR__ >= 2
 # include <linux/compiler-gcc3.h>
-#elif __GNUC__ == 2
-# include <linux/compiler-gcc2.h>
 #else
 # error Sorry, your compiler is too old/not recognized.
 #endif
@@ -72,10 +72,11 @@ extern void __chk_io_ptr(void __iomem *);
     (typeof(ptr)) (__ptr + (off)); })
 #endif
 
-#endif /* __ASSEMBLY__ */
-
 #endif /* __KERNEL__ */
 
+#endif /* __ASSEMBLY__ */
+
+#ifdef __KERNEL__
 /*
  * Allow us to mark functions as 'deprecated' and have gcc emit a nice
  * warning for each use, in hopes of speeding the functions removal.
@@ -86,38 +87,66 @@ extern void __chk_io_ptr(void __iomem *);
 # define __deprecated		/* unimplemented */
 #endif
 
+#ifdef MODULE
+#define __deprecated_for_modules __deprecated
+#else
+#define __deprecated_for_modules
+#endif
+
 #ifndef __must_check
 #define __must_check
+#endif
+
+#ifndef CONFIG_ENABLE_MUST_CHECK
+#undef __must_check
+#define __must_check
+#endif
+#ifndef CONFIG_ENABLE_WARN_DEPRECATED
+#undef __deprecated
+#undef __deprecated_for_modules
+#define __deprecated
+#define __deprecated_for_modules
 #endif
 
 /*
  * Allow us to avoid 'defined but not used' warnings on functions and data,
  * as well as force them to be emitted to the assembly file.
  *
- * As of gcc 3.3, static functions that are not marked with attribute((used))
- * may be elided from the assembly file.  As of gcc 3.3, static data not so
+ * As of gcc 3.4, static functions that are not marked with attribute((used))
+ * may be elided from the assembly file.  As of gcc 3.4, static data not so
  * marked will not be elided, but this may change in a future gcc version.
+ *
+ * NOTE: Because distributions shipped with a backported unit-at-a-time
+ * compiler in gcc 3.3, we must define __used to be __attribute__((used))
+ * for gcc >=3.3 instead of 3.4.
  *
  * In prior versions of gcc, such functions and data would be emitted, but
  * would be warned about except with attribute((unused)).
+ *
+ * Mark functions that are referenced only in inline assembly as __used so
+ * the code is emitted even though it appears to be unreferenced.
  */
 #ifndef __attribute_used__
-# define __attribute_used__	/* unimplemented */
+# define __attribute_used__	/* deprecated */
 #endif
 
-/*
- * From the GCC manual:
- *
- * Many functions have no effects except the return value and their
- * return value depends only on the parameters and/or global
- * variables.  Such a function can be subject to common subexpression
- * elimination and loop optimization just as an arithmetic operator
- * would be.
- * [...]
- */
-#ifndef __attribute_pure__
-# define __attribute_pure__	/* unimplemented */
+#ifndef __used
+# define __used			/* unimplemented */
 #endif
+
+#ifndef __maybe_unused
+# define __maybe_unused		/* unimplemented */
+#endif
+
+#ifndef noinline
+#define noinline
+#endif
+
+#ifndef __always_inline
+#define __always_inline inline
+#endif
+
+#endif /* __KERNEL__ */
 
 /*
  * From the GCC manual:
@@ -137,12 +166,13 @@ extern void __chk_io_ptr(void __iomem *);
 # define __attribute_const__	/* unimplemented */
 #endif
 
-#ifndef noinline
-#define noinline
-#endif
+/*
+ * Tell gcc if a function is cold. The compiler will assume any path
+ * directly leading to the call is unlikely.
+ */
 
-#ifndef __always_inline
-#define __always_inline inline
+#ifndef __cold
+#define __cold
 #endif
 
 #endif /* __LINUX_COMPILER_H */

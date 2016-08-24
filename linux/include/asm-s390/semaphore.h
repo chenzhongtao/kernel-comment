@@ -29,18 +29,15 @@ struct semaphore {
 #define __SEMAPHORE_INITIALIZER(name,count) \
 	{ ATOMIC_INIT(count), __WAIT_QUEUE_HEAD_INITIALIZER((name).wait) }
 
-#define __MUTEX_INITIALIZER(name) \
-	__SEMAPHORE_INITIALIZER(name,1)
-
 #define __DECLARE_SEMAPHORE_GENERIC(name,count) \
 	struct semaphore name = __SEMAPHORE_INITIALIZER(name,count)
 
 #define DECLARE_MUTEX(name) __DECLARE_SEMAPHORE_GENERIC(name,1)
-#define DECLARE_MUTEX_LOCKED(name) __DECLARE_SEMAPHORE_GENERIC(name,0)
 
 static inline void sema_init (struct semaphore *sem, int val)
 {
-	*sem = (struct semaphore) __SEMAPHORE_INITIALIZER((*sem),val);
+	atomic_set(&sem->count, val);
+	init_waitqueue_head(&sem->wait);
 }
 
 static inline void init_MUTEX (struct semaphore *sem)
@@ -87,17 +84,17 @@ static inline int down_trylock(struct semaphore * sem)
 	 *       sem->count.counter = --new_val;
 	 * In the ppc code this is called atomic_dec_if_positive.
 	 */
-	__asm__ __volatile__ (
-		"   l    %0,0(%3)\n"
-		"0: ltr  %1,%0\n"
-		"   jle  1f\n"
-		"   ahi  %1,-1\n"
-		"   cs   %0,%1,0(%3)\n"
-		"   jl   0b\n"
+	asm volatile(
+		"	l	%0,0(%3)\n"
+		"0:	ltr	%1,%0\n"
+		"	jle	1f\n"
+		"	ahi	%1,-1\n"
+		"	cs	%0,%1,0(%3)\n"
+		"	jl	0b\n"
 		"1:"
 		: "=&d" (old_val), "=&d" (new_val), "=m" (sem->count.counter)
 		: "a" (&sem->count.counter), "m" (sem->count.counter)
-		: "cc", "memory" );
+		: "cc", "memory");
 	return old_val <= 0;
 }
 

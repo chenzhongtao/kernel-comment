@@ -26,21 +26,8 @@
 #include <linux/init.h>
 #include <linux/hash.h>
 #include <linux/highmem.h>
+#include <linux/blktrace_api.h>
 #include <asm/tlbflush.h>
-
-static mempool_t *page_pool, *isa_page_pool;
-
-static void *page_pool_alloc(int gfp_mask, void *data)
-{
-	int gfp = gfp_mask | (int) (long) data;
-
-	return alloc_page(gfp);
-}
-
-static void page_pool_free(void *page, void *data)
-{
-	__free_page(page);
-}
 
 /*
  * Virtual_count is not a pure "count".
@@ -51,6 +38,26 @@ static void page_pool_free(void *page, void *data)
  *  n means that there are (n-1) current users of it.
  */
 #ifdef CONFIG_HIGHMEM
+
+unsigned long totalhigh_pages __read_mostly;
+
+unsigned int nr_free_highpages (void)
+{
+	pg_data_t *pgdat;
+	unsigned int pages = 0;
+
+	for_each_online_pgdat(pgdat) {
+		pages += zone_page_state(&pgdat->node_zones[ZONE_HIGHMEM],
+			NR_FREE_PAGES);
+		if (zone_movable_is_highmem())
+			pages += zone_page_state(
+					&pgdat->node_zones[ZONE_MOVABLE],
+					NR_FREE_PAGES);
+	}
+
+	return pages;
+}
+
 static int pkmap_count[LAST_PKMAP];
 static unsigned int last_pkmap_nr;
 static  __cacheline_aligned_in_smp DEFINE_SPINLOCK(kmap_lock);
@@ -79,8 +86,7 @@ static void flush_all_zero_pkmaps(void)
 		pkmap_count[i] = 0;
 
 		/* sanity check */
-		if (pte_none(pkmap_page_table[i]))
-			BUG();
+		BUG_ON(pte_none(pkmap_page_table[i]));
 
 		/*
 		 * Don't need an atomic fetch-and-clear op here;
@@ -90,11 +96,21 @@ static void flush_all_zero_pkmaps(void)
 		 * So no dangers, even with speculative execution.
 		 */
 		page = pte_page(pkmap_page_table[i]);
-		pte_clear(&pkmap_page_table[i]);
+		pte_clear(&init_mm, (unsigned long)page_address(page),
+			  &pkmap_page_table[i]);
 
 		set_page_address(page, NULL);
 	}
 	flush_tlb_kernel_range(PKMAP_ADDR(0), PKMAP_ADDR(LAST_PKMAP));
+}
+
+/* Flush all unused kmap mappings in order to remove stray
+   mappings. */
+void kmap_flush_unused(void)
+{
+	spin_lock(&kmap_lock);
+	flush_all_zero_pkmaps();
+	spin_unlock(&kmap_lock);
 }
 
 static inline unsigned long map_new_virtual(struct page *page)
@@ -138,7 +154,8 @@ start:
 		}
 	}
 	vaddr = PKMAP_ADDR(last_pkmap_nr);
-	set_pte(&(pkmap_page_table[last_pkmap_nr]), mk_pte(page, kmap_prot));
+	set_pte_at(&init_mm, vaddr,
+		   &(pkmap_page_table[last_pkmap_nr]), mk_pte(page, kmap_prot));
 
 	pkmap_count[last_pkmap_nr] = 1;
 	set_page_address(page, (void *)vaddr);
@@ -161,8 +178,7 @@ void fastcall *kmap_high(struct page *page)
 	if (!vaddr)
 		vaddr = map_new_virtual(page);
 	pkmap_count[PKMAP_NR(vaddr)]++;
-	if (pkmap_count[PKMAP_NR(vaddr)] < 2)
-		BUG();
+	BUG_ON(pkmap_count[PKMAP_NR(vaddr)] < 2);
 	spin_unlock(&kmap_lock);
 	return (void*) vaddr;
 }
@@ -177,8 +193,7 @@ void fastcall kunmap_high(struct page *page)
 
 	spin_lock(&kmap_lock);
 	vaddr = (unsigned long)page_address(page);
-	if (!vaddr)
-		BUG();
+	BUG_ON(!vaddr);
 	nr = PKMAP_NR(vaddr);
 
 	/*
@@ -210,278 +225,7 @@ void fastcall kunmap_high(struct page *page)
 }
 
 EXPORT_SYMBOL(kunmap_high);
-
-#define POOL_SIZE	64
-
-static __init int init_emergency_pool(void)
-{
-	struct sysinfo i;
-	si_meminfo(&i);
-	si_swapinfo(&i);
-        
-	if (!i.totalhigh)
-		return 0;
-
-	page_pool = mempool_create(POOL_SIZE, page_pool_alloc, page_pool_free, NULL);
-	if (!page_pool)
-		BUG();
-	printk("highmem bounce pool size: %d pages\n", POOL_SIZE);
-
-	return 0;
-}
-
-__initcall(init_emergency_pool);
-
-/*
- * highmem version, map in to vec
- */
-static void bounce_copy_vec(struct bio_vec *to, unsigned char *vfrom)
-{
-	unsigned long flags;
-	unsigned char *vto;
-
-	local_irq_save(flags);
-	vto = kmap_atomic(to->bv_page, KM_BOUNCE_READ);
-	memcpy(vto + to->bv_offset, vfrom, to->bv_len);
-	kunmap_atomic(vto, KM_BOUNCE_READ);
-	local_irq_restore(flags);
-}
-
-#else /* CONFIG_HIGHMEM */
-
-#define bounce_copy_vec(to, vfrom)	\
-	memcpy(page_address((to)->bv_page) + (to)->bv_offset, vfrom, (to)->bv_len)
-
 #endif
-
-#define ISA_POOL_SIZE	16
-
-/*
- * gets called "every" time someone init's a queue with BLK_BOUNCE_ISA
- * as the max address, so check if the pool has already been created.
- */
-int init_emergency_isa_pool(void)
-{
-	if (isa_page_pool)
-		return 0;
-
-	isa_page_pool = mempool_create(ISA_POOL_SIZE, page_pool_alloc, page_pool_free, (void *) __GFP_DMA);
-	if (!isa_page_pool)
-		BUG();
-
-	printk("isa bounce pool size: %d pages\n", ISA_POOL_SIZE);
-	return 0;
-}
-
-/*
- * Simple bounce buffer support for highmem pages. Depending on the
- * queue gfp mask set, *to may or may not be a highmem page. kmap it
- * always, it will do the Right Thing
- */
-static void copy_to_high_bio_irq(struct bio *to, struct bio *from)
-{
-	unsigned char *vfrom;
-	struct bio_vec *tovec, *fromvec;
-	int i;
-
-	__bio_for_each_segment(tovec, to, i, 0) {
-		fromvec = from->bi_io_vec + i;
-
-		/*
-		 * not bounced
-		 */
-		if (tovec->bv_page == fromvec->bv_page)
-			continue;
-
-		/*
-		 * fromvec->bv_offset and fromvec->bv_len might have been
-		 * modified by the block layer, so use the original copy,
-		 * bounce_copy_vec already uses tovec->bv_len
-		 */
-		vfrom = page_address(fromvec->bv_page) + tovec->bv_offset;
-
-		flush_dcache_page(tovec->bv_page);
-		bounce_copy_vec(tovec, vfrom);
-	}
-}
-
-static void bounce_end_io(struct bio *bio, mempool_t *pool, int err)
-{
-	struct bio *bio_orig = bio->bi_private;
-	struct bio_vec *bvec, *org_vec;
-	int i;
-
-	if (test_bit(BIO_EOPNOTSUPP, &bio->bi_flags))
-		set_bit(BIO_EOPNOTSUPP, &bio_orig->bi_flags);
-
-	/*
-	 * free up bounce indirect pages used
-	 */
-	__bio_for_each_segment(bvec, bio, i, 0) {
-		org_vec = bio_orig->bi_io_vec + i;
-		if (bvec->bv_page == org_vec->bv_page)
-			continue;
-
-		mempool_free(bvec->bv_page, pool);	
-	}
-
-	bio_endio(bio_orig, bio_orig->bi_size, err);
-	bio_put(bio);
-}
-
-static int bounce_end_io_write(struct bio *bio, unsigned int bytes_done,int err)
-{
-	if (bio->bi_size)
-		return 1;
-
-	bounce_end_io(bio, page_pool, err);
-	return 0;
-}
-
-static int bounce_end_io_write_isa(struct bio *bio, unsigned int bytes_done, int err)
-{
-	if (bio->bi_size)
-		return 1;
-
-	bounce_end_io(bio, isa_page_pool, err);
-	return 0;
-}
-
-static void __bounce_end_io_read(struct bio *bio, mempool_t *pool, int err)
-{
-	struct bio *bio_orig = bio->bi_private;
-
-	if (test_bit(BIO_UPTODATE, &bio->bi_flags))
-		copy_to_high_bio_irq(bio_orig, bio);
-
-	bounce_end_io(bio, pool, err);
-}
-
-static int bounce_end_io_read(struct bio *bio, unsigned int bytes_done, int err)
-{
-	if (bio->bi_size)
-		return 1;
-
-	__bounce_end_io_read(bio, page_pool, err);
-	return 0;
-}
-
-static int bounce_end_io_read_isa(struct bio *bio, unsigned int bytes_done, int err)
-{
-	if (bio->bi_size)
-		return 1;
-
-	__bounce_end_io_read(bio, isa_page_pool, err);
-	return 0;
-}
-
-static void __blk_queue_bounce(request_queue_t *q, struct bio **bio_orig,
-			mempool_t *pool)
-{
-	struct page *page;
-	struct bio *bio = NULL;
-	int i, rw = bio_data_dir(*bio_orig);
-	struct bio_vec *to, *from;
-
-	bio_for_each_segment(from, *bio_orig, i) {
-		page = from->bv_page;
-
-		/*
-		 * is destination page below bounce pfn?
-		 */
-		if (page_to_pfn(page) < q->bounce_pfn)
-			continue;
-
-		/*
-		 * irk, bounce it
-		 */
-		if (!bio)
-			bio = bio_alloc(GFP_NOIO, (*bio_orig)->bi_vcnt);
-
-		to = bio->bi_io_vec + i;
-
-		to->bv_page = mempool_alloc(pool, q->bounce_gfp);
-		to->bv_len = from->bv_len;
-		to->bv_offset = from->bv_offset;
-
-		if (rw == WRITE) {
-			char *vto, *vfrom;
-
-			flush_dcache_page(from->bv_page);
-			vto = page_address(to->bv_page) + to->bv_offset;
-			vfrom = kmap(from->bv_page) + from->bv_offset;
-			memcpy(vto, vfrom, to->bv_len);
-			kunmap(from->bv_page);
-		}
-	}
-
-	/*
-	 * no pages bounced
-	 */
-	if (!bio)
-		return;
-
-	/*
-	 * at least one page was bounced, fill in possible non-highmem
-	 * pages
-	 */
-	__bio_for_each_segment(from, *bio_orig, i, 0) {
-		to = bio_iovec_idx(bio, i);
-		if (!to->bv_page) {
-			to->bv_page = from->bv_page;
-			to->bv_len = from->bv_len;
-			to->bv_offset = from->bv_offset;
-		}
-	}
-
-	bio->bi_bdev = (*bio_orig)->bi_bdev;
-	bio->bi_flags |= (1 << BIO_BOUNCED);
-	bio->bi_sector = (*bio_orig)->bi_sector;
-	bio->bi_rw = (*bio_orig)->bi_rw;
-
-	bio->bi_vcnt = (*bio_orig)->bi_vcnt;
-	bio->bi_idx = (*bio_orig)->bi_idx;
-	bio->bi_size = (*bio_orig)->bi_size;
-
-	if (pool == page_pool) {
-		bio->bi_end_io = bounce_end_io_write;
-		if (rw == READ)
-			bio->bi_end_io = bounce_end_io_read;
-	} else {
-		bio->bi_end_io = bounce_end_io_write_isa;
-		if (rw == READ)
-			bio->bi_end_io = bounce_end_io_read_isa;
-	}
-
-	bio->bi_private = *bio_orig;
-	*bio_orig = bio;
-}
-
-void blk_queue_bounce(request_queue_t *q, struct bio **bio_orig)
-{
-	mempool_t *pool;
-
-	/*
-	 * for non-isa bounce case, just check if the bounce pfn is equal
-	 * to or bigger than the highest pfn in the system -- in that case,
-	 * don't waste time iterating over bio segments
-	 */
-	if (!(q->bounce_gfp & GFP_DMA)) {
-		if (q->bounce_pfn >= blk_max_pfn)
-			return;
-		pool = page_pool;
-	} else {
-		BUG_ON(!isa_page_pool);
-		pool = isa_page_pool;
-	}
-
-	/*
-	 * slow path
-	 */
-	__blk_queue_bounce(q, bio_orig, pool);
-}
-
-EXPORT_SYMBOL(blk_queue_bounce);
 
 #if defined(HASHED_PAGE_VIRTUAL)
 

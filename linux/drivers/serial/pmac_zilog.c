@@ -42,7 +42,6 @@
 #undef DEBUG_HARD
 #undef USE_CTRL_O_SYSRQ
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/tty.h>
 
@@ -60,6 +59,7 @@
 #include <linux/pmu.h>
 #include <linux/bitops.h>
 #include <linux/sysrq.h>
+#include <linux/mutex.h>
 #include <asm/sections.h>
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -68,7 +68,6 @@
 #include <asm/pmac_feature.h>
 #include <asm/dbdma.h>
 #include <asm/macio.h>
-#include <asm/semaphore.h>
 
 #if defined (CONFIG_SERIAL_PMACZILOG_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #define SUPPORT_SYSRQ
@@ -89,6 +88,16 @@ MODULE_LICENSE("GPL");
 
 #define PWRDBG(fmt, arg...)	printk(KERN_DEBUG fmt , ## arg)
 
+#ifdef CONFIG_SERIAL_PMACZILOG_TTYS
+#define PMACZILOG_MAJOR		TTY_MAJOR
+#define PMACZILOG_MINOR		64
+#define PMACZILOG_NAME		"ttyS"
+#else
+#define PMACZILOG_MAJOR		204
+#define PMACZILOG_MINOR		192
+#define PMACZILOG_NAME		"ttyPZ"
+#endif
+
 
 /*
  * For the sake of early serial console, we can do a pre-probe
@@ -96,14 +105,14 @@ MODULE_LICENSE("GPL");
  */
 static struct uart_pmac_port	pmz_ports[MAX_ZS_PORTS];
 static int			pmz_ports_count;
-static DECLARE_MUTEX(pmz_irq_sem);
+static DEFINE_MUTEX(pmz_irq_mutex);
 
 static struct uart_driver pmz_uart_reg = {
 	.owner		=	THIS_MODULE,
-	.driver_name	=	"ttyS",
-	.devfs_name	=	"tts/",
-	.dev_name	=	"ttyS",
-	.major		=	TTY_MAJOR,
+	.driver_name	=	PMACZILOG_NAME,
+	.dev_name	=	PMACZILOG_NAME,
+	.major		=	PMACZILOG_MAJOR,
+	.minor		=	PMACZILOG_MINOR,
 };
 
 
@@ -206,14 +215,12 @@ static void pmz_maybe_update_regs(struct uart_pmac_port *uap)
 	}
 }
 
-static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap,
-					    struct pt_regs *regs)
+static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap)
 {
 	struct tty_struct *tty = NULL;
-	unsigned char ch, r1, drop, error;
+	unsigned char ch, r1, drop, error, flag;
 	int loops = 0;
 
- retry:
 	/* The interrupt can be enabled when the port isn't open, typically
 	 * that happens when using one port is open and the other closed (stale
 	 * interrupt) or when one port is used as a console.
@@ -246,20 +253,6 @@ static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap,
 		error = 0;
 		drop = 0;
 
-		if (unlikely(tty->flip.count >= TTY_FLIPBUF_SIZE)) {
-			/* Have to drop the lock here */
-			pmz_debug("pmz: flip overflow\n");
-			spin_unlock(&uap->port.lock);
-			tty->flip.work.func((void *)tty);
-			spin_lock(&uap->port.lock);
-			if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-				drop = 1;
-			if (ZS_IS_ASLEEP(uap))
-				return NULL;
-			if (!ZS_IS_OPEN(uap))
-				goto retry;
-		}
-
 		r1 = read_zsreg(uap, R1);
 		ch = read_zsdata(uap);
 
@@ -284,7 +277,7 @@ static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap,
 		if (uap->port.sysrq) {
 			int swallow;
 			spin_unlock(&uap->port.lock);
-			swallow = uart_handle_sysrq_char(&uap->port, ch, regs);
+			swallow = uart_handle_sysrq_char(&uap->port, ch);
 			spin_lock(&uap->port.lock);
 			if (swallow)
 				goto next_char;
@@ -295,8 +288,7 @@ static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap,
 		if (drop)
 			goto next_char;
 
-		*tty->flip.char_buf_ptr = ch;
-		*tty->flip.flag_buf_ptr = TTY_NORMAL;
+		flag = TTY_NORMAL;
 		uap->port.icount.rx++;
 
 		if (r1 & (PAR_ERR | Rx_OVR | CRC_ERR | BRK_ABRT)) {
@@ -316,26 +308,19 @@ static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap,
 				uap->port.icount.overrun++;
 			r1 &= uap->port.read_status_mask;
 			if (r1 & BRK_ABRT)
-				*tty->flip.flag_buf_ptr = TTY_BREAK;
+				flag = TTY_BREAK;
 			else if (r1 & PAR_ERR)
-				*tty->flip.flag_buf_ptr = TTY_PARITY;
+				flag = TTY_PARITY;
 			else if (r1 & CRC_ERR)
-				*tty->flip.flag_buf_ptr = TTY_FRAME;
+				flag = TTY_FRAME;
 		}
 
 		if (uap->port.ignore_status_mask == 0xff ||
 		    (r1 & uap->port.ignore_status_mask) == 0) {
-			tty->flip.flag_buf_ptr++;
-			tty->flip.char_buf_ptr++;
-			tty->flip.count++;
+		    	tty_insert_flip_char(tty, ch, flag);
 		}
-		if ((r1 & Rx_OVR) &&
-		    tty->flip.count < TTY_FLIPBUF_SIZE) {
-			*tty->flip.flag_buf_ptr = TTY_OVERRUN;
-			tty->flip.flag_buf_ptr++;
-			tty->flip.char_buf_ptr++;
-			tty->flip.count++;
-		}
+		if (r1 & Rx_OVR)
+			tty_insert_flip_char(tty, 0, TTY_OVERRUN);
 	next_char:
 		/* We can get stuck in an infinite loop getting char 0 when the
 		 * line is in a wrong HW state, we break that here.
@@ -360,7 +345,7 @@ static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap,
 	return tty;
 }
 
-static void pmz_status_handle(struct uart_pmac_port *uap, struct pt_regs *regs)
+static void pmz_status_handle(struct uart_pmac_port *uap)
 {
 	unsigned char status;
 
@@ -463,7 +448,7 @@ ack_tx_int:
 }
 
 /* Hrm... we register that twice, fixme later.... */
-static irqreturn_t pmz_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t pmz_interrupt(int irq, void *dev_id)
 {
 	struct uart_pmac_port *uap = dev_id;
 	struct uart_pmac_port *uap_a;
@@ -487,9 +472,9 @@ static irqreturn_t pmz_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		write_zsreg(uap_a, R0, RES_H_IUS);
 		zssync(uap_a);		
        		if (r3 & CHAEXT)
-       			pmz_status_handle(uap_a, regs);
+       			pmz_status_handle(uap_a);
 		if (r3 & CHARxIP)
-			tty = pmz_receive_chars(uap_a, regs);
+			tty = pmz_receive_chars(uap_a);
        		if (r3 & CHATxIP)
        			pmz_transmit_chars(uap_a);
 	        rc = IRQ_HANDLED;
@@ -507,9 +492,9 @@ static irqreturn_t pmz_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		write_zsreg(uap_b, R0, RES_H_IUS);
 		zssync(uap_b);
        		if (r3 & CHBEXT)
-       			pmz_status_handle(uap_b, regs);
+       			pmz_status_handle(uap_b);
        	       	if (r3 & CHBRxIP)
-       			tty = pmz_receive_chars(uap_b, regs);
+       			tty = pmz_receive_chars(uap_b);
        		if (r3 & CHBTxIP)
        			pmz_transmit_chars(uap_b);
 	       	rc = IRQ_HANDLED;
@@ -604,7 +589,7 @@ static void pmz_set_mctrl(struct uart_port *port, unsigned int mctrl)
 /* 
  * Get Modem Control bits (only the input ones, the core will
  * or that with a cached value of the control ones)
- * The port lock is not held.
+ * The port lock is held and interrupts are disabled.
  */
 static unsigned int pmz_get_mctrl(struct uart_port *port)
 {
@@ -615,7 +600,7 @@ static unsigned int pmz_get_mctrl(struct uart_port *port)
 	if (ZS_IS_ASLEEP(uap) || uap->node == NULL)
 		return 0;
 
-	status = pmz_peek_status(to_pmz(port));
+	status = read_zsreg(uap, R0);
 
 	ret = 0;
 	if (status & DCD)
@@ -630,11 +615,10 @@ static unsigned int pmz_get_mctrl(struct uart_port *port)
 
 /* 
  * Stop TX side. Dealt like sunzilog at next Tx interrupt,
- * though for DMA, we will have to do a bit more. What is
- * the meaning of the tty_stop bit ? XXX
+ * though for DMA, we will have to do a bit more.
  * The port lock is held and interrupts are disabled.
  */
-static void pmz_stop_tx(struct uart_port *port, unsigned int tty_stop)
+static void pmz_stop_tx(struct uart_port *port)
 {
 	to_pmz(port)->flags |= PMACZILOG_FLAG_TX_STOPPED;
 }
@@ -643,7 +627,7 @@ static void pmz_stop_tx(struct uart_port *port, unsigned int tty_stop)
  * Kick the Tx side.
  * The port lock is held and interrupts are disabled.
  */
-static void pmz_start_tx(struct uart_port *port, unsigned int tty_start)
+static void pmz_start_tx(struct uart_port *port)
 {
 	struct uart_pmac_port *uap = to_pmz(port);
 	unsigned char status;
@@ -946,7 +930,7 @@ static int pmz_startup(struct uart_port *port)
 	if (uap->node == NULL)
 		return -ENODEV;
 
-	down(&pmz_irq_sem);
+	mutex_lock(&pmz_irq_mutex);
 
 	uap->flags |= PMACZILOG_FLAG_IS_OPEN;
 
@@ -960,15 +944,15 @@ static int pmz_startup(struct uart_port *port)
 	}	
 
 	pmz_get_port_A(uap)->flags |= PMACZILOG_FLAG_IS_IRQ_ON;
-	if (request_irq(uap->port.irq, pmz_interrupt, SA_SHIRQ, "PowerMac Zilog", uap)) {
+	if (request_irq(uap->port.irq, pmz_interrupt, IRQF_SHARED, "PowerMac Zilog", uap)) {
 		dev_err(&uap->dev->ofdev.dev,
 			"Unable to register zs interrupt handler.\n");
 		pmz_set_scc_power(uap, 0);
-		up(&pmz_irq_sem);
+		mutex_unlock(&pmz_irq_mutex);
 		return -ENXIO;
 	}
 
-	up(&pmz_irq_sem);
+	mutex_unlock(&pmz_irq_mutex);
 
 	/* Right now, we deal with delay by blocking here, I'll be
 	 * smarter later on
@@ -1005,7 +989,7 @@ static void pmz_shutdown(struct uart_port *port)
 	if (uap->node == NULL)
 		return;
 
-	down(&pmz_irq_sem);
+	mutex_lock(&pmz_irq_mutex);
 
 	/* Release interrupt handler */
        	free_irq(uap->port.irq, uap);
@@ -1026,7 +1010,7 @@ static void pmz_shutdown(struct uart_port *port)
 
 	if (ZS_IS_CONS(uap) || ZS_IS_ASLEEP(uap)) {
 		spin_unlock_irqrestore(&port->lock, flags);
-		up(&pmz_irq_sem);
+		mutex_unlock(&pmz_irq_mutex);
 		return;
 	}
 
@@ -1043,7 +1027,7 @@ static void pmz_shutdown(struct uart_port *port)
 
 	spin_unlock_irqrestore(&port->lock, flags);
 
-	up(&pmz_irq_sem);
+	mutex_unlock(&pmz_irq_mutex);
 
 	pmz_debug("pmz: shutdown() done.\n");
 }
@@ -1289,8 +1273,8 @@ static void pmz_irda_setup(struct uart_pmac_port *uap, unsigned long *baud)
 }
 
 
-static void __pmz_set_termios(struct uart_port *port, struct termios *termios,
-			      struct termios *old)
+static void __pmz_set_termios(struct uart_port *port, struct ktermios *termios,
+			      struct ktermios *old)
 {
 	struct uart_pmac_port *uap = to_pmz(port);
 	unsigned long baud;
@@ -1300,7 +1284,7 @@ static void __pmz_set_termios(struct uart_port *port, struct termios *termios,
 	if (ZS_IS_ASLEEP(uap))
 		return;
 
-	memcpy(&uap->termios_cache, termios, sizeof(struct termios));
+	memcpy(&uap->termios_cache, termios, sizeof(struct ktermios));
 
 	/* XXX Check which revs of machines actually allow 1 and 4Mb speeds
 	 * on the IR dongle. Note that the IRTTY driver currently doesn't know
@@ -1340,8 +1324,8 @@ static void __pmz_set_termios(struct uart_port *port, struct termios *termios,
 }
 
 /* The port lock is not held.  */
-static void pmz_set_termios(struct uart_port *port, struct termios *termios,
-			    struct termios *old)
+static void pmz_set_termios(struct uart_port *port, struct ktermios *termios,
+			    struct ktermios *old)
 {
 	struct uart_pmac_port *uap = to_pmz(port);
 	unsigned long flags;
@@ -1426,17 +1410,20 @@ static struct uart_ops pmz_pops = {
 static int __init pmz_init_port(struct uart_pmac_port *uap)
 {
 	struct device_node *np = uap->node;
-	char *conn;
-	struct slot_names_prop {
+	const char *conn;
+	const struct slot_names_prop {
 		int	count;
 		char	name[1];
 	} *slots;
 	int len;
+	struct resource r_ports, r_rxdma, r_txdma;
 
 	/*
 	 * Request & map chip registers
 	 */
-	uap->port.mapbase = np->addrs[0].address;
+	if (of_address_to_resource(np, 0, &r_ports))
+		return -ENODEV;
+	uap->port.mapbase = r_ports.start;
 	uap->port.membase = ioremap(uap->port.mapbase, 0x1000);
       
 	uap->control_reg = uap->port.membase;
@@ -1446,38 +1433,42 @@ static int __init pmz_init_port(struct uart_pmac_port *uap)
 	 * Request & map DBDMA registers
 	 */
 #ifdef HAS_DBDMA
-	if (np->n_addrs >= 3 && np->n_intrs >= 3)
+	if (of_address_to_resource(np, 1, &r_txdma) == 0 &&
+	    of_address_to_resource(np, 2, &r_rxdma) == 0)
 		uap->flags |= PMACZILOG_FLAG_HAS_DMA;
+#else
+	memset(&r_txdma, 0, sizeof(struct resource));
+	memset(&r_rxdma, 0, sizeof(struct resource));
 #endif	
 	if (ZS_HAS_DMA(uap)) {
-		uap->tx_dma_regs = ioremap(np->addrs[np->n_addrs - 2].address, 0x1000);
+		uap->tx_dma_regs = ioremap(r_txdma.start, 0x100);
 		if (uap->tx_dma_regs == NULL) {	
 			uap->flags &= ~PMACZILOG_FLAG_HAS_DMA;
 			goto no_dma;
 		}
-		uap->rx_dma_regs = ioremap(np->addrs[np->n_addrs - 1].address, 0x1000);
+		uap->rx_dma_regs = ioremap(r_rxdma.start, 0x100);
 		if (uap->rx_dma_regs == NULL) {	
 			iounmap(uap->tx_dma_regs);
 			uap->tx_dma_regs = NULL;
 			uap->flags &= ~PMACZILOG_FLAG_HAS_DMA;
 			goto no_dma;
 		}
-		uap->tx_dma_irq = np->intrs[1].line;
-		uap->rx_dma_irq = np->intrs[2].line;
+		uap->tx_dma_irq = irq_of_parse_and_map(np, 1);
+		uap->rx_dma_irq = irq_of_parse_and_map(np, 2);
 	}
 no_dma:
 
 	/*
 	 * Detect port type
 	 */
-	if (device_is_compatible(np, "cobalt"))
+	if (of_device_is_compatible(np, "cobalt"))
 		uap->flags |= PMACZILOG_FLAG_IS_INTMODEM;
-	conn = get_property(np, "AAPL,connector", &len);
+	conn = of_get_property(np, "AAPL,connector", &len);
 	if (conn && (strcmp(conn, "infrared") == 0))
 		uap->flags |= PMACZILOG_FLAG_IS_IRDA;
 	uap->port_type = PMAC_SCC_ASYNC;
 	/* 1999 Powerbook G3 has slot-names property instead */
-	slots = (struct slot_names_prop *)get_property(np, "slot-names", &len);
+	slots = of_get_property(np, "slot-names", &len);
 	if (slots && slots->count > 0) {
 		if (strcmp(slots->name, "IrDA") == 0)
 			uap->flags |= PMACZILOG_FLAG_IS_IRDA;
@@ -1487,9 +1478,11 @@ no_dma:
 	if (ZS_IS_IRDA(uap))
 		uap->port_type = PMAC_SCC_IRDA;
 	if (ZS_IS_INTMODEM(uap)) {
-		struct device_node* i2c_modem = find_devices("i2c-modem");
+		struct device_node* i2c_modem =
+			of_find_node_by_name(NULL, "i2c-modem");
 		if (i2c_modem) {
-			char* mid = get_property(i2c_modem, "modem-id", NULL);
+			const char* mid =
+				of_get_property(i2c_modem, "modem-id", NULL);
 			if (mid) switch(*mid) {
 			case 0x04 :
 			case 0x05 :
@@ -1501,6 +1494,7 @@ no_dma:
 			}
 			printk(KERN_INFO "pmac_zilog: i2c-modem detected, id: %d\n",
 				mid ? (*mid) : 0);
+			of_node_put(i2c_modem);
 		} else {
 			printk(KERN_INFO "pmac_zilog: serial modem detected\n");
 		}
@@ -1509,8 +1503,8 @@ no_dma:
 	/*
 	 * Init remaining bits of "port" structure
 	 */
-	uap->port.iotype = SERIAL_IO_MEM;
-	uap->port.irq = np->intrs[0].line;
+	uap->port.iotype = UPIO_MEM;
+	uap->port.irq = irq_of_parse_and_map(np, 0);
 	uap->port.uartclk = ZS_CLOCK;
 	uap->port.fifosize = 1;
 	uap->port.ops = &pmz_pops;
@@ -1545,7 +1539,7 @@ static void pmz_dispose_port(struct uart_pmac_port *uap)
 /*
  * Called upon match with an escc node in the devive-tree.
  */
-static int pmz_attach(struct macio_dev *mdev, const struct of_match *match)
+static int pmz_attach(struct macio_dev *mdev, const struct of_device_id *match)
 {
 	int i;
 	
@@ -1590,7 +1584,7 @@ static int pmz_detach(struct macio_dev *mdev)
 }
 
 
-static int pmz_suspend(struct macio_dev *mdev, u32 pm_state)
+static int pmz_suspend(struct macio_dev *mdev, pm_message_t pm_state)
 {
 	struct uart_pmac_port *uap = dev_get_drvdata(&mdev->ofdev.dev);
 	struct uart_state *state;
@@ -1601,15 +1595,15 @@ static int pmz_suspend(struct macio_dev *mdev, u32 pm_state)
 		return 0;
 	}
 
-	if (pm_state == mdev->ofdev.dev.power.power_state || pm_state < 2)
+	if (pm_state.event == mdev->ofdev.dev.power.power_state.event)
 		return 0;
 
-	pmz_debug("suspend, switching to state %d\n", pm_state);
+	pmz_debug("suspend, switching to state %d\n", pm_state.event);
 
 	state = pmz_uart_reg.state + uap->port.line;
 
-	down(&pmz_irq_sem);
-	down(&state->sem);
+	mutex_lock(&pmz_irq_mutex);
+	mutex_lock(&state->mutex);
 
 	spin_lock_irqsave(&uap->port.lock, flags);
 
@@ -1640,8 +1634,8 @@ static int pmz_suspend(struct macio_dev *mdev, u32 pm_state)
 	/* Shut the chip down */
 	pmz_set_scc_power(uap, 0);
 
-	up(&state->sem);
-	up(&pmz_irq_sem);
+	mutex_unlock(&state->mutex);
+	mutex_unlock(&pmz_irq_mutex);
 
 	pmz_debug("suspend, switching complete\n");
 
@@ -1661,15 +1655,15 @@ static int pmz_resume(struct macio_dev *mdev)
 	if (uap == NULL)
 		return 0;
 
-	if (mdev->ofdev.dev.power.power_state == 0)
+	if (mdev->ofdev.dev.power.power_state.event == PM_EVENT_ON)
 		return 0;
 	
 	pmz_debug("resume, switching to state 0\n");
 
 	state = pmz_uart_reg.state + uap->port.line;
 
-	down(&pmz_irq_sem);
-	down(&state->sem);
+	mutex_lock(&pmz_irq_mutex);
+	mutex_lock(&state->mutex);
 
 	spin_lock_irqsave(&uap->port.lock, flags);
 	if (!ZS_IS_OPEN(uap) && !ZS_IS_CONS(uap)) {
@@ -1701,8 +1695,8 @@ static int pmz_resume(struct macio_dev *mdev)
 	}
 
  bail:
-	up(&state->sem);
-	up(&pmz_irq_sem);
+	mutex_unlock(&state->mutex);
+	mutex_unlock(&pmz_irq_mutex);
 
 	/* Right now, we deal with delay by blocking here, I'll be
 	 * smarter later on
@@ -1714,7 +1708,7 @@ static int pmz_resume(struct macio_dev *mdev)
 
 	pmz_debug("resume, switching complete\n");
 
-	mdev->ofdev.dev.power.power_state = 0;
+	mdev->ofdev.dev.power.power_state.event = PM_EVENT_ON;
 
 	return 0;
 }
@@ -1795,7 +1789,7 @@ static void pmz_console_write(struct console *con, const char *s, unsigned int c
 static int __init pmz_console_setup(struct console *co, char *options);
 
 static struct console pmz_console = {
-	.name	=	"ttyS",
+	.name	=	PMACZILOG_NAME,
 	.write	=	pmz_console_write,
 	.device	=	uart_console_device,
 	.setup	=	pmz_console_setup,
@@ -1819,7 +1813,6 @@ static int __init pmz_register(void)
 	
 	pmz_uart_reg.nr = pmz_ports_count;
 	pmz_uart_reg.cons = PMACZILOG_CONSOLE;
-	pmz_uart_reg.minor = 64;
 
 	/*
 	 * Register this driver with the serial core
@@ -1850,20 +1843,17 @@ err_out:
 	return rc;
 }
 
-static struct of_match pmz_match[] = 
+static struct of_device_id pmz_match[] = 
 {
 	{
 	.name 		= "ch-a",
-	.type		= OF_ANY_MATCH,
-	.compatible	= OF_ANY_MATCH
 	},
 	{
 	.name 		= "ch-b",
-	.type		= OF_ANY_MATCH,
-	.compatible	= OF_ANY_MATCH
 	},
 	{},
 };
+MODULE_DEVICE_TABLE (of, pmz_match);
 
 static struct macio_driver pmz_driver = 
 {
@@ -1936,6 +1926,16 @@ static void __exit exit_pmz(void)
 
 #ifdef CONFIG_SERIAL_PMACZILOG_CONSOLE
 
+static void pmz_console_putchar(struct uart_port *port, int ch)
+{
+	struct uart_pmac_port *uap = (struct uart_pmac_port *)port;
+
+	/* Wait for the transmit buffer to empty. */
+	while ((read_zsreg(uap, R0) & Tx_BUF_EMP) == 0)
+		udelay(5);
+	write_zsdata(uap, ch);
+}
+
 /*
  * Print a string to the serial port trying not to disturb
  * any possible real use of the port...
@@ -1944,7 +1944,6 @@ static void pmz_console_write(struct console *con, const char *s, unsigned int c
 {
 	struct uart_pmac_port *uap = &pmz_ports[con->index];
 	unsigned long flags;
-	int i;
 
 	if (ZS_IS_ASLEEP(uap))
 		return;
@@ -1954,17 +1953,7 @@ static void pmz_console_write(struct console *con, const char *s, unsigned int c
 	write_zsreg(uap, R1, uap->curregs[1] & ~TxINT_ENAB);
 	write_zsreg(uap, R5, uap->curregs[5] | TxENABLE | RTS | DTR);
 
-	for (i = 0; i < count; i++) {
-		/* Wait for the transmit buffer to empty. */
-		while ((read_zsreg(uap, R0) & Tx_BUF_EMP) == 0)
-			udelay(5);
-		write_zsdata(uap, s[i]);
-		if (s[i] == 10) {
-			while ((read_zsreg(uap, R0) & Tx_BUF_EMP) == 0)
-				udelay(5);
-			write_zsdata(uap, R13);
-		}
-	}
+	uart_console_write(&uap->port, s, count, pmz_console_putchar);
 
 	/* Restore the values in the registers. */
 	write_zsreg(uap, R1, uap->curregs[1]);

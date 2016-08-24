@@ -9,7 +9,7 @@
  *
  * Authors:	Original taken from Berkeley UNIX 4.3, (c) UCB 1986-1988
  *		Portions taken from the KA9Q/NOS (v2.00m PA0GRI) source.
- *		Ross Biro, <bir7@leland.Stanford.Edu>
+ *		Ross Biro
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Florian La Roche,
  *		Jonathan Layes <layes@loran.com>
@@ -84,6 +84,7 @@
 #define ARPHRD_IEEE802_TR 800		/* Magic type ident for TR	*/
 #define ARPHRD_IEEE80211 801		/* IEEE 802.11			*/
 #define ARPHRD_IEEE80211_PRISM 802	/* IEEE 802.11 + Prism2 header  */
+#define ARPHRD_IEEE80211_RADIOTAP 803	/* IEEE 802.11 + radiotap header */
 
 #define ARPHRD_VOID	  0xFFFF	/* Void type, nothing is known */
 #define ARPHRD_NONE	  0xFFFE	/* zero header length */
@@ -129,11 +130,11 @@ struct arpreq_old {
 
 struct arphdr
 {
-	unsigned short	ar_hrd;		/* format of hardware address	*/
-	unsigned short	ar_pro;		/* format of protocol address	*/
+	__be16		ar_hrd;		/* format of hardware address	*/
+	__be16		ar_pro;		/* format of protocol address	*/
 	unsigned char	ar_hln;		/* length of hardware address	*/
 	unsigned char	ar_pln;		/* length of protocol address	*/
-	unsigned short	ar_op;		/* ARP opcode (command)		*/
+	__be16		ar_op;		/* ARP opcode (command)		*/
 
 #if 0
 	 /*
@@ -146,5 +147,14 @@ struct arphdr
 #endif
 
 };
+
+#ifdef __KERNEL__
+#include <linux/skbuff.h>
+
+static inline struct arphdr *arp_hdr(const struct sk_buff *skb)
+{
+	return (struct arphdr *)skb_network_header(skb);
+}
+#endif
 
 #endif	/* _LINUX_IF_ARP_H */

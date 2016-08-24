@@ -57,12 +57,12 @@
  * be incorporated into the next SCTP release.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/wait.h>
 #include <linux/time.h>
 #include <linux/ip.h>
+#include <linux/capability.h>
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
@@ -107,17 +107,42 @@ static void sctp_sock_migrate(struct sock *, struct sock *,
 			      struct sctp_association *, sctp_socket_type_t);
 static char *sctp_hmac_alg = SCTP_COOKIE_HMAC_ALG;
 
-extern kmem_cache_t *sctp_bucket_cachep;
+extern struct kmem_cache *sctp_bucket_cachep;
+extern int sysctl_sctp_mem[3];
+extern int sysctl_sctp_rmem[3];
+extern int sysctl_sctp_wmem[3];
+
+static int sctp_memory_pressure;
+static atomic_t sctp_memory_allocated;
+static atomic_t sctp_sockets_allocated;
+
+static void sctp_enter_memory_pressure(void)
+{
+	sctp_memory_pressure = 1;
+}
+
 
 /* Get the sndbuf space available at the time on the association.  */
 static inline int sctp_wspace(struct sctp_association *asoc)
 {
-	struct sock *sk = asoc->base.sk;
-	int amt = 0;
+	int amt;
 
-	amt = sk->sk_sndbuf - asoc->sndbuf_used;
-	if (amt < 0)
-		amt = 0;
+	if (asoc->ep->sndbuf_policy)
+		amt = asoc->sndbuf_used;
+	else
+		amt = atomic_read(&asoc->base.sk->sk_wmem_alloc);
+
+	if (amt >= asoc->base.sk->sk_sndbuf) {
+		if (asoc->base.sk->sk_userlocks & SOCK_SNDBUF_LOCK)
+			amt = 0;
+		else {
+			amt = sk_stream_wspace(asoc->base.sk);
+			if (amt < 0)
+				amt = 0;
+		}
+	} else {
+		amt = asoc->base.sk->sk_sndbuf - amt;
+	}
 	return amt;
 }
 
@@ -138,12 +163,18 @@ static inline void sctp_set_owner_w(struct sctp_chunk *chunk)
 	/* The sndbuf space is tracked per association.  */
 	sctp_association_hold(asoc);
 
+	skb_set_owner_w(chunk->skb, sk);
+
 	chunk->skb->destructor = sctp_wfree;
 	/* Save the chunk pointer in skb for sctp_wfree to use later.  */
 	*((struct sctp_chunk **)(chunk->skb->cb)) = chunk;
 
-	asoc->sndbuf_used += SCTP_DATA_SNDSIZE(chunk);
-	sk->sk_wmem_queued += SCTP_DATA_SNDSIZE(chunk);
+	asoc->sndbuf_used += SCTP_DATA_SNDSIZE(chunk) +
+				sizeof(struct sk_buff) +
+				sizeof(struct sctp_chunk);
+
+	atomic_add(sizeof(struct sctp_chunk), &sk->sk_wmem_alloc);
+	sk_charge_skb(sk, chunk->skb);
 }
 
 /* Verify that this is a valid address. */
@@ -158,7 +189,7 @@ static inline int sctp_verify_addr(struct sock *sk, union sctp_addr *addr,
 		return -EINVAL;
 
 	/* Is this a valid SCTP address?  */
-	if (!af->addr_valid(addr, sctp_sk(sk)))
+	if (!af->addr_valid(addr, sctp_sk(sk), NULL))
 		return -EINVAL;
 
 	if (!sctp_sk(sk)->pf->send_verify(sctp_sk(sk), (addr)))
@@ -216,11 +247,9 @@ static struct sctp_transport *sctp_addr_id2transport(struct sock *sk,
 	struct sctp_transport *transport;
 	union sctp_addr *laddr = (union sctp_addr *)addr;
 
-	laddr->v4.sin_port = ntohs(laddr->v4.sin_port);
 	addr_asoc = sctp_endpoint_lookup_assoc(sctp_sk(sk)->ep,
-					       (union sctp_addr *)addr,
+					       laddr,
 					       &transport);
-	laddr->v4.sin_port = htons(laddr->v4.sin_port);
 
 	if (!addr_asoc)
 		return NULL;
@@ -245,18 +274,18 @@ static struct sctp_transport *sctp_addr_id2transport(struct sock *sk,
  *             sockaddr_in6 [RFC 2553]),
  *   addr_len - the size of the address structure.
  */
-SCTP_STATIC int sctp_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+SCTP_STATIC int sctp_bind(struct sock *sk, struct sockaddr *addr, int addr_len)
 {
 	int retval = 0;
 
 	sctp_lock_sock(sk);
 
-	SCTP_DEBUG_PRINTK("sctp_bind(sk: %p, uaddr: %p, addr_len: %d)\n",
-			  sk, uaddr, addr_len);
+	SCTP_DEBUG_PRINTK("sctp_bind(sk: %p, addr: %p, addr_len: %d)\n",
+			  sk, addr, addr_len);
 
 	/* Disallow binding twice. */
 	if (!sctp_sk(sk)->ep->base.bind_addr.port)
-		retval = sctp_do_bind(sk, (union sctp_addr *)uaddr,
+		retval = sctp_do_bind(sk, (union sctp_addr *)addr,
 				      addr_len);
 	else
 		retval = -EINVAL;
@@ -301,29 +330,40 @@ SCTP_STATIC int sctp_do_bind(struct sock *sk, union sctp_addr *addr, int len)
 	unsigned short snum;
 	int ret = 0;
 
-	SCTP_DEBUG_PRINTK("sctp_do_bind(sk: %p, newaddr: %p, len: %d)\n",
-			  sk, addr, len);
-
 	/* Common sockaddr verification. */
 	af = sctp_sockaddr_af(sp, addr, len);
-	if (!af)
+	if (!af) {
+		SCTP_DEBUG_PRINTK("sctp_do_bind(sk: %p, newaddr: %p, len: %d) EINVAL\n",
+				  sk, addr, len);
 		return -EINVAL;
+	}
+
+	snum = ntohs(addr->v4.sin_port);
+
+	SCTP_DEBUG_PRINTK_IPADDR("sctp_do_bind(sk: %p, new addr: ",
+				 ", port: %d, new port: %d, len: %d)\n",
+				 sk,
+				 addr,
+				 bp->port, snum,
+				 len);
 
 	/* PF specific bind() address verification. */
 	if (!sp->pf->bind_verify(sp, addr))
 		return -EADDRNOTAVAIL;
 
-	snum= ntohs(addr->v4.sin_port);
-
-	SCTP_DEBUG_PRINTK("sctp_do_bind: port: %d, new port: %d\n",
-			  bp->port, snum);
-
-	/* We must either be unbound, or bind to the same port.  */
-	if (bp->port && (snum != bp->port)) {
-		SCTP_DEBUG_PRINTK("sctp_do_bind:"
+	/* We must either be unbound, or bind to the same port.
+	 * It's OK to allow 0 ports if we are already bound.
+	 * We'll just inhert an already bound port in this case
+	 */
+	if (bp->port) {
+		if (!snum)
+			snum = bp->port;
+		else if (snum != bp->port) {
+			SCTP_DEBUG_PRINTK("sctp_do_bind:"
 				  " New port %d does not match existing port "
 				  "%d.\n", snum, bp->port);
-		return -EINVAL;
+			return -EINVAL;
+		}
 	}
 
 	if (snum && snum < PROT_SOCK && !capable(CAP_NET_BIND_SERVICE))
@@ -333,6 +373,7 @@ SCTP_STATIC int sctp_do_bind(struct sock *sk, union sctp_addr *addr, int len)
 	 * The function sctp_get_port_local() does duplicate address
 	 * detection.
 	 */
+	addr->v4.sin_port = htons(snum);
 	if ((ret = sctp_get_port_local(sk, addr))) {
 		if (ret == (long) sk) {
 			/* This endpoint has a conflicting address. */
@@ -346,16 +387,10 @@ SCTP_STATIC int sctp_do_bind(struct sock *sk, union sctp_addr *addr, int len)
 	if (!bp->port)
 		bp->port = inet_sk(sk)->num;
 
-	/* Add the address to the bind address list.  */
-	sctp_local_bh_disable();
-	sctp_write_lock(&ep->base.addr_lock);
-
-	/* Use GFP_ATOMIC since BHs are disabled.  */
-	addr->v4.sin_port = ntohs(addr->v4.sin_port);
-	ret = sctp_add_bind_addr(bp, addr, GFP_ATOMIC);
-	addr->v4.sin_port = htons(addr->v4.sin_port);
-	sctp_write_unlock(&ep->base.addr_lock);
-	sctp_local_bh_enable();
+	/* Add the address to the bind address list.
+	 * Use GFP_ATOMIC since BHs will be disabled.
+	 */
+	ret = sctp_add_bind_addr(bp, addr, 1, GFP_ATOMIC);
 
 	/* Copy back into socket for getsockname() use. */
 	if (!ret) {
@@ -368,12 +403,12 @@ SCTP_STATIC int sctp_do_bind(struct sock *sk, union sctp_addr *addr, int len)
 
  /* ADDIP Section 4.1.1 Congestion Control of ASCONF Chunks
  *
- * R1) One and only one ASCONF Chunk MAY be in transit and unacknowledged 
+ * R1) One and only one ASCONF Chunk MAY be in transit and unacknowledged
  * at any one time.  If a sender, after sending an ASCONF chunk, decides
- * it needs to transfer another ASCONF Chunk, it MUST wait until the 
+ * it needs to transfer another ASCONF Chunk, it MUST wait until the
  * ASCONF-ACK Chunk returns from the previous ASCONF Chunk before sending a
- * subsequent ASCONF. Note this restriction binds each side, so at any 
- * time two ASCONF may be in-transit on any given association (one sent 
+ * subsequent ASCONF. Note this restriction binds each side, so at any
+ * time two ASCONF may be in-transit on any given association (one sent
  * from each endpoint).
  */
 static int sctp_send_asconf(struct sctp_association *asoc,
@@ -383,10 +418,10 @@ static int sctp_send_asconf(struct sctp_association *asoc,
 
 	/* If there is an outstanding ASCONF chunk, queue it for later
 	 * transmission.
-	 */	
+	 */
 	if (asoc->addip_last_asconf) {
-		__skb_queue_tail(&asoc->addip_chunks, (struct sk_buff *)chunk);
-		goto out;	
+		list_add_tail(&chunk->list, &asoc->addip_chunk_list);
+		goto out;
 	}
 
 	/* Hold the chunk until an ASCONF_ACK is received. */
@@ -413,7 +448,7 @@ out:
  *
  * Only sctp_setsockopt_bindx() is supposed to call this function.
  */
-int sctp_bindx_add(struct sock *sk, struct sockaddr *addrs, int addrcnt)
+static int sctp_bindx_add(struct sock *sk, struct sockaddr *addrs, int addrcnt)
 {
 	int cnt;
 	int retval = 0;
@@ -436,7 +471,7 @@ int sctp_bindx_add(struct sock *sk, struct sockaddr *addrs, int addrcnt)
 			goto err_bindx_add;
 		}
 
-		retval = sctp_do_bind(sk, (union sctp_addr *)sa_addr, 
+		retval = sctp_do_bind(sk, (union sctp_addr *)sa_addr,
 				      af->sockaddr_len);
 
 		addr_buf += af->sockaddr_len;
@@ -457,13 +492,13 @@ err_bindx_add:
  * associations that are part of the endpoint indicating that a list of local
  * addresses are added to the endpoint.
  *
- * If any of the addresses is already in the bind address list of the 
+ * If any of the addresses is already in the bind address list of the
  * association, we do not send the chunk for that association.  But it will not
  * affect other associations.
  *
  * Only sctp_setsockopt_bindx() is supposed to call this function.
  */
-static int sctp_send_asconf_add_ip(struct sock		*sk, 
+static int sctp_send_asconf_add_ip(struct sock		*sk,
 				   struct sockaddr	*addrs,
 				   int 			addrcnt)
 {
@@ -474,6 +509,7 @@ static int sctp_send_asconf_add_ip(struct sock		*sk,
 	struct sctp_chunk		*chunk;
 	struct sctp_sockaddr_entry	*laddr;
 	union sctp_addr			*addr;
+	union sctp_addr			saveaddr;
 	void				*addr_buf;
 	struct sctp_af			*af;
 	struct list_head		*pos;
@@ -503,8 +539,8 @@ static int sctp_send_asconf_add_ip(struct sock		*sk,
 			continue;
 
 		/* Check if any address in the packed array of addresses is
-	         * in the bind address list of the association. If so, 
-		 * do not send the asconf chunk to its peer, but continue with 
+		 * in the bind address list of the association. If so,
+		 * do not send the asconf chunk to its peer, but continue with
 		 * other associations.
 		 */
 		addr_buf = addrs;
@@ -524,15 +560,12 @@ static int sctp_send_asconf_add_ip(struct sock		*sk,
 		if (i < addrcnt)
 			continue;
 
-		/* Use the first address in bind addr list of association as
-		 * Address Parameter of ASCONF CHUNK.
+		/* Use the first valid address in bind addr list of
+		 * association as Address Parameter of ASCONF CHUNK.
 		 */
-		sctp_read_lock(&asoc->base.addr_lock);
 		bp = &asoc->base.bind_addr;
 		p = bp->address_list.next;
 		laddr = list_entry(p, struct sctp_sockaddr_entry, list);
-		sctp_read_unlock(&asoc->base.addr_lock);
-
 		chunk = sctp_make_asconf_update_ip(asoc, &laddr->a, addrs,
 						   addrcnt, SCTP_PARAM_ADD_IP);
 		if (!chunk) {
@@ -541,14 +574,21 @@ static int sctp_send_asconf_add_ip(struct sock		*sk,
 		}
 
 		retval = sctp_send_asconf(asoc, chunk);
+		if (retval)
+			goto out;
 
-		/* FIXME: After sending the add address ASCONF chunk, we
-		 * cannot append the address to the association's binding
-		 * address list, because the new address may be used as the
-		 * source of a message sent to the peer before the ASCONF
-		 * chunk is received by the peer.  So we should wait until
-		 * ASCONF_ACK is received.
+		/* Add the new addresses to the bind address list with
+		 * use_as_src set to 0.
 		 */
+		addr_buf = addrs;
+		for (i = 0; i < addrcnt; i++) {
+			addr = (union sctp_addr *)addr_buf;
+			af = sctp_get_af_specific(addr->v4.sin_family);
+			memcpy(&saveaddr, addr, af->sockaddr_len);
+			retval = sctp_add_bind_addr(bp, &saveaddr, 0,
+						    GFP_ATOMIC);
+			addr_buf += af->sockaddr_len;
+		}
 	}
 
 out:
@@ -570,16 +610,15 @@ out:
  *
  * Only sctp_setsockopt_bindx() is supposed to call this function.
  */
-int sctp_bindx_rem(struct sock *sk, struct sockaddr *addrs, int addrcnt)
+static int sctp_bindx_rem(struct sock *sk, struct sockaddr *addrs, int addrcnt)
 {
 	struct sctp_sock *sp = sctp_sk(sk);
 	struct sctp_endpoint *ep = sp->ep;
 	int cnt;
 	struct sctp_bind_addr *bp = &ep->base.bind_addr;
 	int retval = 0;
-	union sctp_addr saveaddr;
 	void *addr_buf;
-	struct sockaddr *sa_addr;
+	union sctp_addr *sa_addr;
 	struct sctp_af *af;
 
 	SCTP_DEBUG_PRINTK("sctp_bindx_rem (sk: %p, addrs: %p, addrcnt: %d)\n",
@@ -597,19 +636,19 @@ int sctp_bindx_rem(struct sock *sk, struct sockaddr *addrs, int addrcnt)
 			goto err_bindx_rem;
 		}
 
-		/* The list may contain either IPv4 or IPv6 address;
-		 * determine the address length to copy the address to
-		 * saveaddr. 
-		 */
-		sa_addr = (struct sockaddr *)addr_buf;
-		af = sctp_get_af_specific(sa_addr->sa_family);
+		sa_addr = (union sctp_addr *)addr_buf;
+		af = sctp_get_af_specific(sa_addr->sa.sa_family);
 		if (!af) {
 			retval = -EINVAL;
 			goto err_bindx_rem;
 		}
-		memcpy(&saveaddr, sa_addr, af->sockaddr_len); 
-		saveaddr.v4.sin_port = ntohs(saveaddr.v4.sin_port);
-		if (saveaddr.v4.sin_port != bp->port) {
+
+		if (!af->addr_valid(sa_addr, sp, NULL)) {
+			retval = -EADDRNOTAVAIL;
+			goto err_bindx_rem;
+		}
+
+		if (sa_addr->v4.sin_port != htons(bp->port)) {
 			retval = -EINVAL;
 			goto err_bindx_rem;
 		}
@@ -621,13 +660,7 @@ int sctp_bindx_rem(struct sock *sk, struct sockaddr *addrs, int addrcnt)
 		 * socket routing and failover schemes. Refer to comments in
 		 * sctp_do_bind(). -daisy
 		 */
-		sctp_local_bh_disable();
-		sctp_write_lock(&ep->base.addr_lock);
-
-		retval = sctp_del_bind_addr(bp, &saveaddr);
-
-		sctp_write_unlock(&ep->base.addr_lock);
-		sctp_local_bh_enable();
+		retval = sctp_del_bind_addr(bp, sa_addr);
 
 		addr_buf += af->sockaddr_len;
 err_bindx_rem:
@@ -646,7 +679,7 @@ err_bindx_rem:
  * the associations that are part of the endpoint indicating that a list of
  * local addresses are removed from the endpoint.
  *
- * If any of the addresses is already in the bind address list of the 
+ * If any of the addresses is already in the bind address list of the
  * association, we do not send the chunk for that association.  But it will not
  * affect other associations.
  *
@@ -659,12 +692,14 @@ static int sctp_send_asconf_del_ip(struct sock		*sk,
 	struct sctp_sock	*sp;
 	struct sctp_endpoint	*ep;
 	struct sctp_association	*asoc;
+	struct sctp_transport	*transport;
 	struct sctp_bind_addr	*bp;
 	struct sctp_chunk	*chunk;
 	union sctp_addr		*laddr;
 	void			*addr_buf;
 	struct sctp_af		*af;
-	struct list_head	*pos;
+	struct list_head	*pos, *pos1;
+	struct sctp_sockaddr_entry *saddr;
 	int 			i;
 	int 			retval = 0;
 
@@ -690,7 +725,7 @@ static int sctp_send_asconf_del_ip(struct sock		*sk,
 			continue;
 
 		/* Check if any address in the packed array of addresses is
-	         * not present in the bind address list of the association.
+		 * not present in the bind address list of the association.
 		 * If so, do not send the asconf chunk to its peer, but
 		 * continue with other associations.
 		 */
@@ -716,14 +751,16 @@ static int sctp_send_asconf_del_ip(struct sock		*sk,
 		 * make sure that we do not delete all the addresses in the
 		 * association.
 		 */
-		sctp_read_lock(&asoc->base.addr_lock);
 		bp = &asoc->base.bind_addr;
 		laddr = sctp_find_unmatch_addr(bp, (union sctp_addr *)addrs,
 					       addrcnt, sp);
-		sctp_read_unlock(&asoc->base.addr_lock);
 		if (!laddr)
 			continue;
 
+		/* We do not need RCU protection throughout this loop
+		 * because this is done under a socket lock from the
+		 * setsockopt call.
+		 */
 		chunk = sctp_make_asconf_update_ip(asoc, laddr, addrs, addrcnt,
 						   SCTP_PARAM_DEL_IP);
 		if (!chunk) {
@@ -731,14 +768,33 @@ static int sctp_send_asconf_del_ip(struct sock		*sk,
 			goto out;
 		}
 
-		retval = sctp_send_asconf(asoc, chunk);
-
-		/* FIXME: After sending the delete address ASCONF chunk, we
-		 * cannot remove the addresses from the association's bind
-		 * address list, because there maybe some packet send to
-		 * the delete addresses, so we should wait until ASCONF_ACK
-		 * packet is received.
+		/* Reset use_as_src flag for the addresses in the bind address
+		 * list that are to be deleted.
 		 */
+		addr_buf = addrs;
+		for (i = 0; i < addrcnt; i++) {
+			laddr = (union sctp_addr *)addr_buf;
+			af = sctp_get_af_specific(laddr->v4.sin_family);
+			list_for_each_entry(saddr, &bp->address_list, list) {
+				if (sctp_cmp_addr_exact(&saddr->a, laddr))
+					saddr->use_as_src = 0;
+			}
+			addr_buf += af->sockaddr_len;
+		}
+
+		/* Update the route and saddr entries for all the transports
+		 * as some of the addresses in the bind address list are
+		 * about to be deleted and cannot be used as source addresses.
+		 */
+		list_for_each(pos1, &asoc->peer.transport_addr_list) {
+			transport = list_entry(pos1, struct sctp_transport,
+					       transports);
+			dst_release(transport->dst);
+			sctp_transport_route(transport, NULL,
+					     sctp_sk(asoc->base.sk));
+		}
+
+		retval = sctp_send_asconf(asoc, chunk);
 	}
 out:
 	return retval;
@@ -760,7 +816,7 @@ out:
  * addrs is a pointer to an array of one or more socket addresses. Each
  * address is contained in its appropriate structure (i.e. struct
  * sockaddr_in or struct sockaddr_in6) the family of the address type
- * must be used to distengish the address length (note that this
+ * must be used to distinguish the address length (note that this
  * representation is termed a "packed array" of addresses). The caller
  * specifies the number of addresses in the array with addrcnt.
  *
@@ -799,7 +855,8 @@ out:
  *
  * Basically do nothing but copying the addresses from user to kernel
  * land and invoking either sctp_bindx_add() or sctp_bindx_rem() on the sk.
- * This is used for tunneling the sctp_bindx() request through sctp_setsockopt() * from userspace.
+ * This is used for tunneling the sctp_bindx() request through sctp_setsockopt()
+ * from userspace.
  *
  * We don't use copy_from_user() for optimization: we first do the
  * sanity checks (buffer size -fast- and access check-healthy
@@ -842,7 +899,7 @@ SCTP_STATIC int sctp_setsockopt_bindx(struct sock* sk,
 		return -EFAULT;
 
 	/* Alloc space for the address array in kernel memory.  */
-	kaddrs = (struct sockaddr *)kmalloc(addrs_size, GFP_KERNEL);
+	kaddrs = kmalloc(addrs_size, GFP_KERNEL);
 	if (unlikely(!kaddrs))
 		return -ENOMEM;
 
@@ -851,7 +908,7 @@ SCTP_STATIC int sctp_setsockopt_bindx(struct sock* sk,
 		return -EFAULT;
 	}
 
-	/* Walk through the addrs buffer and count the number of addresses. */ 
+	/* Walk through the addrs buffer and count the number of addresses. */
 	addr_buf = kaddrs;
 	while (walk_size < addrs_size) {
 		sa_addr = (struct sockaddr *)addr_buf;
@@ -859,7 +916,7 @@ SCTP_STATIC int sctp_setsockopt_bindx(struct sock* sk,
 
 		/* If the address family is not supported or if this address
 		 * causes the address buffer to overflow return EINVAL.
-		 */ 
+		 */
 		if (!af || (walk_size + af->sockaddr_len) > addrs_size) {
 			kfree(kaddrs);
 			return -EINVAL;
@@ -888,11 +945,278 @@ SCTP_STATIC int sctp_setsockopt_bindx(struct sock* sk,
 	default:
 		err = -EINVAL;
 		break;
-        };
+	}
 
 out:
 	kfree(kaddrs);
 
+	return err;
+}
+
+/* __sctp_connect(struct sock* sk, struct sockaddr *kaddrs, int addrs_size)
+ *
+ * Common routine for handling connect() and sctp_connectx().
+ * Connect will come in with just a single address.
+ */
+static int __sctp_connect(struct sock* sk,
+			  struct sockaddr *kaddrs,
+			  int addrs_size)
+{
+	struct sctp_sock *sp;
+	struct sctp_endpoint *ep;
+	struct sctp_association *asoc = NULL;
+	struct sctp_association *asoc2;
+	struct sctp_transport *transport;
+	union sctp_addr to;
+	struct sctp_af *af;
+	sctp_scope_t scope;
+	long timeo;
+	int err = 0;
+	int addrcnt = 0;
+	int walk_size = 0;
+	union sctp_addr *sa_addr = NULL;
+	void *addr_buf;
+	unsigned short port;
+	unsigned int f_flags = 0;
+
+	sp = sctp_sk(sk);
+	ep = sp->ep;
+
+	/* connect() cannot be done on a socket that is already in ESTABLISHED
+	 * state - UDP-style peeled off socket or a TCP-style socket that
+	 * is already connected.
+	 * It cannot be done even on a TCP-style listening socket.
+	 */
+	if (sctp_sstate(sk, ESTABLISHED) ||
+	    (sctp_style(sk, TCP) && sctp_sstate(sk, LISTENING))) {
+		err = -EISCONN;
+		goto out_free;
+	}
+
+	/* Walk through the addrs buffer and count the number of addresses. */
+	addr_buf = kaddrs;
+	while (walk_size < addrs_size) {
+		sa_addr = (union sctp_addr *)addr_buf;
+		af = sctp_get_af_specific(sa_addr->sa.sa_family);
+		port = ntohs(sa_addr->v4.sin_port);
+
+		/* If the address family is not supported or if this address
+		 * causes the address buffer to overflow return EINVAL.
+		 */
+		if (!af || (walk_size + af->sockaddr_len) > addrs_size) {
+			err = -EINVAL;
+			goto out_free;
+		}
+
+		/* Save current address so we can work with it */
+		memcpy(&to, sa_addr, af->sockaddr_len);
+
+		err = sctp_verify_addr(sk, &to, af->sockaddr_len);
+		if (err)
+			goto out_free;
+
+		/* Make sure the destination port is correctly set
+		 * in all addresses.
+		 */
+		if (asoc && asoc->peer.port && asoc->peer.port != port)
+			goto out_free;
+
+
+		/* Check if there already is a matching association on the
+		 * endpoint (other than the one created here).
+		 */
+		asoc2 = sctp_endpoint_lookup_assoc(ep, &to, &transport);
+		if (asoc2 && asoc2 != asoc) {
+			if (asoc2->state >= SCTP_STATE_ESTABLISHED)
+				err = -EISCONN;
+			else
+				err = -EALREADY;
+			goto out_free;
+		}
+
+		/* If we could not find a matching association on the endpoint,
+		 * make sure that there is no peeled-off association matching
+		 * the peer address even on another socket.
+		 */
+		if (sctp_endpoint_is_peeled_off(ep, &to)) {
+			err = -EADDRNOTAVAIL;
+			goto out_free;
+		}
+
+		if (!asoc) {
+			/* If a bind() or sctp_bindx() is not called prior to
+			 * an sctp_connectx() call, the system picks an
+			 * ephemeral port and will choose an address set
+			 * equivalent to binding with a wildcard address.
+			 */
+			if (!ep->base.bind_addr.port) {
+				if (sctp_autobind(sk)) {
+					err = -EAGAIN;
+					goto out_free;
+				}
+			} else {
+				/*
+				 * If an unprivileged user inherits a 1-many
+				 * style socket with open associations on a
+				 * privileged port, it MAY be permitted to
+				 * accept new associations, but it SHOULD NOT
+				 * be permitted to open new associations.
+				 */
+				if (ep->base.bind_addr.port < PROT_SOCK &&
+				    !capable(CAP_NET_BIND_SERVICE)) {
+					err = -EACCES;
+					goto out_free;
+				}
+			}
+
+			scope = sctp_scope(&to);
+			asoc = sctp_association_new(ep, sk, scope, GFP_KERNEL);
+			if (!asoc) {
+				err = -ENOMEM;
+				goto out_free;
+			}
+		}
+
+		/* Prime the peer's transport structures.  */
+		transport = sctp_assoc_add_peer(asoc, &to, GFP_KERNEL,
+						SCTP_UNKNOWN);
+		if (!transport) {
+			err = -ENOMEM;
+			goto out_free;
+		}
+
+		addrcnt++;
+		addr_buf += af->sockaddr_len;
+		walk_size += af->sockaddr_len;
+	}
+
+	err = sctp_assoc_set_bind_addr_from_ep(asoc, GFP_KERNEL);
+	if (err < 0) {
+		goto out_free;
+	}
+
+	err = sctp_primitive_ASSOCIATE(asoc, NULL);
+	if (err < 0) {
+		goto out_free;
+	}
+
+	/* Initialize sk's dport and daddr for getpeername() */
+	inet_sk(sk)->dport = htons(asoc->peer.port);
+	af = sctp_get_af_specific(sa_addr->sa.sa_family);
+	af->to_sk_daddr(sa_addr, sk);
+	sk->sk_err = 0;
+
+	/* in-kernel sockets don't generally have a file allocated to them
+	 * if all they do is call sock_create_kern().
+	 */
+	if (sk->sk_socket->file)
+		f_flags = sk->sk_socket->file->f_flags;
+
+	timeo = sock_sndtimeo(sk, f_flags & O_NONBLOCK);
+
+	err = sctp_wait_for_connect(asoc, &timeo);
+
+	/* Don't free association on exit. */
+	asoc = NULL;
+
+out_free:
+
+	SCTP_DEBUG_PRINTK("About to exit __sctp_connect() free asoc: %p"
+			  " kaddrs: %p err: %d\n",
+			  asoc, kaddrs, err);
+	if (asoc)
+		sctp_association_free(asoc);
+	return err;
+}
+
+/* Helper for tunneling sctp_connectx() requests through sctp_setsockopt()
+ *
+ * API 8.9
+ * int sctp_connectx(int sd, struct sockaddr *addrs, int addrcnt);
+ *
+ * If sd is an IPv4 socket, the addresses passed must be IPv4 addresses.
+ * If the sd is an IPv6 socket, the addresses passed can either be IPv4
+ * or IPv6 addresses.
+ *
+ * A single address may be specified as INADDR_ANY or IN6ADDR_ANY, see
+ * Section 3.1.2 for this usage.
+ *
+ * addrs is a pointer to an array of one or more socket addresses. Each
+ * address is contained in its appropriate structure (i.e. struct
+ * sockaddr_in or struct sockaddr_in6) the family of the address type
+ * must be used to distengish the address length (note that this
+ * representation is termed a "packed array" of addresses). The caller
+ * specifies the number of addresses in the array with addrcnt.
+ *
+ * On success, sctp_connectx() returns 0. On failure, sctp_connectx() returns
+ * -1, and sets errno to the appropriate error code.
+ *
+ * For SCTP, the port given in each socket address must be the same, or
+ * sctp_connectx() will fail, setting errno to EINVAL.
+ *
+ * An application can use sctp_connectx to initiate an association with
+ * an endpoint that is multi-homed.  Much like sctp_bindx() this call
+ * allows a caller to specify multiple addresses at which a peer can be
+ * reached.  The way the SCTP stack uses the list of addresses to set up
+ * the association is implementation dependant.  This function only
+ * specifies that the stack will try to make use of all the addresses in
+ * the list when needed.
+ *
+ * Note that the list of addresses passed in is only used for setting up
+ * the association.  It does not necessarily equal the set of addresses
+ * the peer uses for the resulting association.  If the caller wants to
+ * find out the set of peer addresses, it must use sctp_getpaddrs() to
+ * retrieve them after the association has been set up.
+ *
+ * Basically do nothing but copying the addresses from user to kernel
+ * land and invoking either sctp_connectx(). This is used for tunneling
+ * the sctp_connectx() request through sctp_setsockopt() from userspace.
+ *
+ * We don't use copy_from_user() for optimization: we first do the
+ * sanity checks (buffer size -fast- and access check-healthy
+ * pointer); if all of those succeed, then we can alloc the memory
+ * (expensive operation) needed to copy the data to kernel. Then we do
+ * the copying without checking the user space area
+ * (__copy_from_user()).
+ *
+ * On exit there is no need to do sockfd_put(), sys_setsockopt() does
+ * it.
+ *
+ * sk        The sk of the socket
+ * addrs     The pointer to the addresses in user land
+ * addrssize Size of the addrs buffer
+ *
+ * Returns 0 if ok, <0 errno code on error.
+ */
+SCTP_STATIC int sctp_setsockopt_connectx(struct sock* sk,
+				      struct sockaddr __user *addrs,
+				      int addrs_size)
+{
+	int err = 0;
+	struct sockaddr *kaddrs;
+
+	SCTP_DEBUG_PRINTK("%s - sk %p addrs %p addrs_size %d\n",
+			  __FUNCTION__, sk, addrs, addrs_size);
+
+	if (unlikely(addrs_size <= 0))
+		return -EINVAL;
+
+	/* Check the user passed a healthy pointer.  */
+	if (unlikely(!access_ok(VERIFY_READ, addrs, addrs_size)))
+		return -EFAULT;
+
+	/* Alloc space for the address array in kernel memory.  */
+	kaddrs = kmalloc(addrs_size, GFP_KERNEL);
+	if (unlikely(!kaddrs))
+		return -ENOMEM;
+
+	if (__copy_from_user(kaddrs, addrs, addrs_size)) {
+		err = -EFAULT;
+	} else {
+		err = __sctp_connect(sk, kaddrs, addrs_size);
+	}
+
+	kfree(kaddrs);
 	return err;
 }
 
@@ -959,7 +1283,7 @@ SCTP_STATIC void sctp_close(struct sock *sk, long timeout)
 
 	ep = sctp_sk(sk)->ep;
 
-	/* Walk all associations on a socket, not on an endpoint.  */
+	/* Walk all associations on an endpoint.  */
 	list_for_each_safe(pos, temp, &ep->asocs) {
 		asoc = list_entry(pos, struct sctp_association, asocs);
 
@@ -972,12 +1296,16 @@ SCTP_STATIC void sctp_close(struct sock *sk, long timeout)
 			if (sctp_state(asoc, CLOSED)) {
 				sctp_unhash_established(asoc);
 				sctp_association_free(asoc);
+				continue;
+			}
+		}
 
-			} else if (sock_flag(sk, SOCK_LINGER) &&
-				   !sk->sk_lingertime)
-				sctp_primitive_ABORT(asoc, NULL);
-			else
-				sctp_primitive_SHUTDOWN(asoc, NULL);
+		if (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime) {
+			struct sctp_chunk *chunk;
+
+			chunk = sctp_make_abort_user(asoc, NULL, 0);
+			if (chunk)
+				sctp_primitive_ABORT(asoc, chunk);
 		} else
 			sctp_primitive_SHUTDOWN(asoc, NULL);
 	}
@@ -1078,7 +1406,7 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 	sp = sctp_sk(sk);
 	ep = sp->ep;
 
-	SCTP_DEBUG_PRINTK("Using endpoint: %s.\n", ep->debug_name);
+	SCTP_DEBUG_PRINTK("Using endpoint: %p.\n", ep);
 
 	/* We cannot send a message over a TCP-style listening socket. */
 	if (sctp_style(sk, TCP) && sctp_sstate(sk, LISTENING)) {
@@ -1110,11 +1438,6 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 		if (msg_namelen > sizeof(to))
 			msg_namelen = sizeof(to);
 		memcpy(&to, msg->msg_name, msg_namelen);
-		SCTP_DEBUG_PRINTK("Just memcpy'd. msg_name is "
-				  "0x%x:%u.\n",
-				  to.v4.sin_addr.s_addr, to.v4.sin_port);
-
-		to.v4.sin_port = ntohs(to.v4.sin_port);
 		msg_name = msg->msg_name;
 	}
 
@@ -1130,27 +1453,27 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 	SCTP_DEBUG_PRINTK("msg_len: %zu, sinfo_flags: 0x%x\n",
 			  msg_len, sinfo_flags);
 
-	/* MSG_EOF or MSG_ABORT cannot be set on a TCP-style socket. */
-	if (sctp_style(sk, TCP) && (sinfo_flags & (MSG_EOF | MSG_ABORT))) {
+	/* SCTP_EOF or SCTP_ABORT cannot be set on a TCP-style socket. */
+	if (sctp_style(sk, TCP) && (sinfo_flags & (SCTP_EOF | SCTP_ABORT))) {
 		err = -EINVAL;
 		goto out_nounlock;
 	}
 
-	/* If MSG_EOF is set, no data can be sent. Disallow sending zero
-	 * length messages when MSG_EOF|MSG_ABORT is not set.
-	 * If MSG_ABORT is set, the message length could be non zero with
+	/* If SCTP_EOF is set, no data can be sent. Disallow sending zero
+	 * length messages when SCTP_EOF|SCTP_ABORT is not set.
+	 * If SCTP_ABORT is set, the message length could be non zero with
 	 * the msg_iov set to the user abort reason.
- 	 */
-	if (((sinfo_flags & MSG_EOF) && (msg_len > 0)) ||
-	    (!(sinfo_flags & (MSG_EOF|MSG_ABORT)) && (msg_len == 0))) {
+	 */
+	if (((sinfo_flags & SCTP_EOF) && (msg_len > 0)) ||
+	    (!(sinfo_flags & (SCTP_EOF|SCTP_ABORT)) && (msg_len == 0))) {
 		err = -EINVAL;
 		goto out_nounlock;
 	}
 
-	/* If MSG_ADDR_OVER is set, there must be an address
+	/* If SCTP_ADDR_OVER is set, there must be an address
 	 * specified in msg_name.
 	 */
-	if ((sinfo_flags & MSG_ADDR_OVER) && (!msg->msg_name)) {
+	if ((sinfo_flags & SCTP_ADDR_OVER) && (!msg->msg_name)) {
 		err = -EINVAL;
 		goto out_nounlock;
 	}
@@ -1199,16 +1522,23 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 			goto out_unlock;
 		}
 
-		if (sinfo_flags & MSG_EOF) {
+		if (sinfo_flags & SCTP_EOF) {
 			SCTP_DEBUG_PRINTK("Shutting down association: %p\n",
 					  asoc);
 			sctp_primitive_SHUTDOWN(asoc, NULL);
 			err = 0;
 			goto out_unlock;
 		}
-		if (sinfo_flags & MSG_ABORT) {
+		if (sinfo_flags & SCTP_ABORT) {
+
+			chunk = sctp_make_abort_user(asoc, msg, msg_len);
+			if (!chunk) {
+				err = -ENOMEM;
+				goto out_unlock;
+			}
+
 			SCTP_DEBUG_PRINTK("Aborting association: %p\n", asoc);
-			sctp_primitive_ABORT(asoc, msg);
+			sctp_primitive_ABORT(asoc, chunk);
 			err = 0;
 			goto out_unlock;
 		}
@@ -1218,7 +1548,7 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 	if (!asoc) {
 		SCTP_DEBUG_PRINTK("There is no association yet.\n");
 
-		if (sinfo_flags & (MSG_EOF | MSG_ABORT)) {
+		if (sinfo_flags & (SCTP_EOF | SCTP_ABORT)) {
 			err = -EINVAL;
 			goto out_unlock;
 		}
@@ -1256,6 +1586,19 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 				err = -EAGAIN;
 				goto out_unlock;
 			}
+		} else {
+			/*
+			 * If an unprivileged user inherits a one-to-many
+			 * style socket with open associations on a privileged
+			 * port, it MAY be permitted to accept new associations,
+			 * but it SHOULD NOT be permitted to open new
+			 * associations.
+			 */
+			if (ep->base.bind_addr.port < PROT_SOCK &&
+			    !capable(CAP_NET_BIND_SERVICE)) {
+				err = -EACCES;
+				goto out_unlock;
+			}
 		}
 
 		scope = sctp_scope(&to);
@@ -1283,13 +1626,13 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 					= sinit->sinit_max_attempts;
 			}
 			if (sinit->sinit_max_init_timeo) {
-				asoc->max_init_timeo = 
+				asoc->max_init_timeo =
 				 msecs_to_jiffies(sinit->sinit_max_init_timeo);
 			}
 		}
 
 		/* Prime the peer's transport structures.  */
-		transport = sctp_assoc_add_peer(asoc, &to, GFP_KERNEL);
+		transport = sctp_assoc_add_peer(asoc, &to, GFP_KERNEL, SCTP_UNKNOWN);
 		if (!transport) {
 			err = -ENOMEM;
 			goto out_free;
@@ -1325,6 +1668,9 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 		goto out_free;
 	}
 
+	if (asoc->pmtu_pending)
+		sctp_assoc_pending_pmtu(asoc);
+
 	/* If fragmentation is disabled and the message length exceeds the
 	 * association fragmentation point, return EMSGSIZE.  The I-D
 	 * does not specify what this error is, but this looks like
@@ -1352,10 +1698,10 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 
 	/* If an address is passed with the sendto/sendmsg call, it is used
 	 * to override the primary destination address in the TCP model, or
-	 * when MSG_ADDR_OVER flag is set in the UDP model.
+	 * when SCTP_ADDR_OVER flag is set in the UDP model.
 	 */
 	if ((sctp_style(sk, TCP) && msg_name) ||
-	    (sinfo_flags & MSG_ADDR_OVER)) {
+	    (sinfo_flags & SCTP_ADDR_OVER)) {
 		chunk_tp = sctp_assoc_lookup_paddr(asoc, &to);
 		if (!chunk_tp) {
 			err = -EINVAL;
@@ -1647,7 +1993,6 @@ static int sctp_setsockopt_autoclose(struct sock *sk, char __user *optval,
 	if (copy_from_user(&sp->autoclose, optval, optlen))
 		return -EFAULT;
 
-	sp->ep->timeouts[SCTP_EVENT_TIMEOUT_AUTOCLOSE] = sp->autoclose * HZ;
 	return 0;
 }
 
@@ -1661,106 +2006,412 @@ static int sctp_setsockopt_autoclose(struct sock *sk, char __user *optval,
  * address's parameters:
  *
  *  struct sctp_paddrparams {
- *      sctp_assoc_t            spp_assoc_id;
- *      struct sockaddr_storage spp_address;
- *      uint32_t                spp_hbinterval;
- *      uint16_t                spp_pathmaxrxt;
- *  };
+ *     sctp_assoc_t            spp_assoc_id;
+ *     struct sockaddr_storage spp_address;
+ *     uint32_t                spp_hbinterval;
+ *     uint16_t                spp_pathmaxrxt;
+ *     uint32_t                spp_pathmtu;
+ *     uint32_t                spp_sackdelay;
+ *     uint32_t                spp_flags;
+ * };
  *
- *   spp_assoc_id    - (UDP style socket) This is filled in the application,
- *                     and identifies the association for this query.
+ *   spp_assoc_id    - (one-to-many style socket) This is filled in the
+ *                     application, and identifies the association for
+ *                     this query.
  *   spp_address     - This specifies which address is of interest.
  *   spp_hbinterval  - This contains the value of the heartbeat interval,
- *                     in milliseconds.  A value of 0, when modifying the
- *                     parameter, specifies that the heartbeat on this
- *                     address should be disabled. A value of UINT32_MAX
- *                     (4294967295), when modifying the parameter,
- *                     specifies that a heartbeat should be sent
- *                     immediately to the peer address, and the current
- *                     interval should remain unchanged.
+ *                     in milliseconds.  If a  value of zero
+ *                     is present in this field then no changes are to
+ *                     be made to this parameter.
  *   spp_pathmaxrxt  - This contains the maximum number of
  *                     retransmissions before this address shall be
- *                     considered unreachable.
+ *                     considered unreachable. If a  value of zero
+ *                     is present in this field then no changes are to
+ *                     be made to this parameter.
+ *   spp_pathmtu     - When Path MTU discovery is disabled the value
+ *                     specified here will be the "fixed" path mtu.
+ *                     Note that if the spp_address field is empty
+ *                     then all associations on this address will
+ *                     have this fixed path mtu set upon them.
+ *
+ *   spp_sackdelay   - When delayed sack is enabled, this value specifies
+ *                     the number of milliseconds that sacks will be delayed
+ *                     for. This value will apply to all addresses of an
+ *                     association if the spp_address field is empty. Note
+ *                     also, that if delayed sack is enabled and this
+ *                     value is set to 0, no change is made to the last
+ *                     recorded delayed sack timer value.
+ *
+ *   spp_flags       - These flags are used to control various features
+ *                     on an association. The flag field may contain
+ *                     zero or more of the following options.
+ *
+ *                     SPP_HB_ENABLE  - Enable heartbeats on the
+ *                     specified address. Note that if the address
+ *                     field is empty all addresses for the association
+ *                     have heartbeats enabled upon them.
+ *
+ *                     SPP_HB_DISABLE - Disable heartbeats on the
+ *                     speicifed address. Note that if the address
+ *                     field is empty all addresses for the association
+ *                     will have their heartbeats disabled. Note also
+ *                     that SPP_HB_ENABLE and SPP_HB_DISABLE are
+ *                     mutually exclusive, only one of these two should
+ *                     be specified. Enabling both fields will have
+ *                     undetermined results.
+ *
+ *                     SPP_HB_DEMAND - Request a user initiated heartbeat
+ *                     to be made immediately.
+ *
+ *                     SPP_HB_TIME_IS_ZERO - Specify's that the time for
+ *                     heartbeat delayis to be set to the value of 0
+ *                     milliseconds.
+ *
+ *                     SPP_PMTUD_ENABLE - This field will enable PMTU
+ *                     discovery upon the specified address. Note that
+ *                     if the address feild is empty then all addresses
+ *                     on the association are effected.
+ *
+ *                     SPP_PMTUD_DISABLE - This field will disable PMTU
+ *                     discovery upon the specified address. Note that
+ *                     if the address feild is empty then all addresses
+ *                     on the association are effected. Not also that
+ *                     SPP_PMTUD_ENABLE and SPP_PMTUD_DISABLE are mutually
+ *                     exclusive. Enabling both will have undetermined
+ *                     results.
+ *
+ *                     SPP_SACKDELAY_ENABLE - Setting this flag turns
+ *                     on delayed sack. The time specified in spp_sackdelay
+ *                     is used to specify the sack delay for this address. Note
+ *                     that if spp_address is empty then all addresses will
+ *                     enable delayed sack and take on the sack delay
+ *                     value specified in spp_sackdelay.
+ *                     SPP_SACKDELAY_DISABLE - Setting this flag turns
+ *                     off delayed sack. If the spp_address field is blank then
+ *                     delayed sack is disabled for the entire association. Note
+ *                     also that this field is mutually exclusive to
+ *                     SPP_SACKDELAY_ENABLE, setting both will have undefined
+ *                     results.
  */
-static int sctp_setsockopt_peer_addr_params(struct sock *sk,
-					    char __user *optval, int optlen)
+static int sctp_apply_peer_addr_params(struct sctp_paddrparams *params,
+				       struct sctp_transport   *trans,
+				       struct sctp_association *asoc,
+				       struct sctp_sock        *sp,
+				       int                      hb_change,
+				       int                      pmtud_change,
+				       int                      sackdelay_change)
 {
-	struct sctp_paddrparams params;
-	struct sctp_transport *trans;
 	int error;
 
-	if (optlen != sizeof(struct sctp_paddrparams))
-		return -EINVAL;
-	if (copy_from_user(&params, optval, optlen))
-		return -EFAULT;
-
-	/*
-	 * API 7. Socket Options (setting the default value for the endpoint)
-	 * All options that support specific settings on an association by
-	 * filling in either an association id variable or a sockaddr_storage
-	 * SHOULD also support setting of the same value for the entire endpoint
-	 * (i.e. future associations). To accomplish this the following logic is
-	 * used when setting one of these options:
-
-	 * c) If neither the sockaddr_storage or association identification is
-	 *    set i.e. the sockaddr_storage is set to all 0's (INADDR_ANY) and
-	 *    the association identification is 0, the settings are a default
-	 *    and to be applied to the endpoint (all future associations).
-	 */
-
-	/* update default value for endpoint (all future associations) */
-	if (!params.spp_assoc_id && 
-	    sctp_is_any(( union sctp_addr *)&params.spp_address)) {
-		/* Manual heartbeat on an endpoint is invalid. */
-		if (0xffffffff == params.spp_hbinterval)
-			return -EINVAL;
-		else if (params.spp_hbinterval)
-			sctp_sk(sk)->paddrparam.spp_hbinterval =
-						params.spp_hbinterval;
-		if (params.spp_pathmaxrxt)
-			sctp_sk(sk)->paddrparam.spp_pathmaxrxt =
-						params.spp_pathmaxrxt;
-		return 0;
-	}
-
-	trans = sctp_addr_id2transport(sk, &params.spp_address,
-				       params.spp_assoc_id);
-	if (!trans)
-		return -EINVAL;
-
-	/* Applications can enable or disable heartbeats for any peer address
-	 * of an association, modify an address's heartbeat interval, force a
-	 * heartbeat to be sent immediately, and adjust the address's maximum
-	 * number of retransmissions sent before an address is considered
-	 * unreachable.
-	 *
-	 * The value of the heartbeat interval, in milliseconds. A value of
-	 * UINT32_MAX (4294967295), when modifying the parameter, specifies
-	 * that a heartbeat should be sent immediately to the peer address,
-	 * and the current interval should remain unchanged.
-	 */
-	if (0xffffffff == params.spp_hbinterval) {
+	if (params->spp_flags & SPP_HB_DEMAND && trans) {
 		error = sctp_primitive_REQUESTHEARTBEAT (trans->asoc, trans);
 		if (error)
 			return error;
-	} else {
-	/* The value of the heartbeat interval, in milliseconds. A value of 0,
-	 * when modifying the parameter, specifies that the heartbeat on this
-	 * address should be disabled.
-	 */
-		if (params.spp_hbinterval) {
-			trans->hb_allowed = 1;
-			trans->hb_interval = 
-				msecs_to_jiffies(params.spp_hbinterval);
-		} else
-			trans->hb_allowed = 0;
 	}
 
-	/* spp_pathmaxrxt contains the maximum number of retransmissions
-	 * before this address shall be considered unreachable.
+	/* Note that unless the spp_flag is set to SPP_HB_ENABLE the value of
+	 * this field is ignored.  Note also that a value of zero indicates
+	 * the current setting should be left unchanged.
 	 */
-	if (params.spp_pathmaxrxt)
-		trans->max_retrans = params.spp_pathmaxrxt;
+	if (params->spp_flags & SPP_HB_ENABLE) {
+
+		/* Re-zero the interval if the SPP_HB_TIME_IS_ZERO is
+		 * set.  This lets us use 0 value when this flag
+		 * is set.
+		 */
+		if (params->spp_flags & SPP_HB_TIME_IS_ZERO)
+			params->spp_hbinterval = 0;
+
+		if (params->spp_hbinterval ||
+		    (params->spp_flags & SPP_HB_TIME_IS_ZERO)) {
+			if (trans) {
+				trans->hbinterval =
+				    msecs_to_jiffies(params->spp_hbinterval);
+			} else if (asoc) {
+				asoc->hbinterval =
+				    msecs_to_jiffies(params->spp_hbinterval);
+			} else {
+				sp->hbinterval = params->spp_hbinterval;
+			}
+		}
+	}
+
+	if (hb_change) {
+		if (trans) {
+			trans->param_flags =
+				(trans->param_flags & ~SPP_HB) | hb_change;
+		} else if (asoc) {
+			asoc->param_flags =
+				(asoc->param_flags & ~SPP_HB) | hb_change;
+		} else {
+			sp->param_flags =
+				(sp->param_flags & ~SPP_HB) | hb_change;
+		}
+	}
+
+	/* When Path MTU discovery is disabled the value specified here will
+	 * be the "fixed" path mtu (i.e. the value of the spp_flags field must
+	 * include the flag SPP_PMTUD_DISABLE for this field to have any
+	 * effect).
+	 */
+	if ((params->spp_flags & SPP_PMTUD_DISABLE) && params->spp_pathmtu) {
+		if (trans) {
+			trans->pathmtu = params->spp_pathmtu;
+			sctp_assoc_sync_pmtu(asoc);
+		} else if (asoc) {
+			asoc->pathmtu = params->spp_pathmtu;
+			sctp_frag_point(sp, params->spp_pathmtu);
+		} else {
+			sp->pathmtu = params->spp_pathmtu;
+		}
+	}
+
+	if (pmtud_change) {
+		if (trans) {
+			int update = (trans->param_flags & SPP_PMTUD_DISABLE) &&
+				(params->spp_flags & SPP_PMTUD_ENABLE);
+			trans->param_flags =
+				(trans->param_flags & ~SPP_PMTUD) | pmtud_change;
+			if (update) {
+				sctp_transport_pmtu(trans);
+				sctp_assoc_sync_pmtu(asoc);
+			}
+		} else if (asoc) {
+			asoc->param_flags =
+				(asoc->param_flags & ~SPP_PMTUD) | pmtud_change;
+		} else {
+			sp->param_flags =
+				(sp->param_flags & ~SPP_PMTUD) | pmtud_change;
+		}
+	}
+
+	/* Note that unless the spp_flag is set to SPP_SACKDELAY_ENABLE the
+	 * value of this field is ignored.  Note also that a value of zero
+	 * indicates the current setting should be left unchanged.
+	 */
+	if ((params->spp_flags & SPP_SACKDELAY_ENABLE) && params->spp_sackdelay) {
+		if (trans) {
+			trans->sackdelay =
+				msecs_to_jiffies(params->spp_sackdelay);
+		} else if (asoc) {
+			asoc->sackdelay =
+				msecs_to_jiffies(params->spp_sackdelay);
+		} else {
+			sp->sackdelay = params->spp_sackdelay;
+		}
+	}
+
+	if (sackdelay_change) {
+		if (trans) {
+			trans->param_flags =
+				(trans->param_flags & ~SPP_SACKDELAY) |
+				sackdelay_change;
+		} else if (asoc) {
+			asoc->param_flags =
+				(asoc->param_flags & ~SPP_SACKDELAY) |
+				sackdelay_change;
+		} else {
+			sp->param_flags =
+				(sp->param_flags & ~SPP_SACKDELAY) |
+				sackdelay_change;
+		}
+	}
+
+	/* Note that unless the spp_flag is set to SPP_PMTUD_ENABLE the value
+	 * of this field is ignored.  Note also that a value of zero
+	 * indicates the current setting should be left unchanged.
+	 */
+	if ((params->spp_flags & SPP_PMTUD_ENABLE) && params->spp_pathmaxrxt) {
+		if (trans) {
+			trans->pathmaxrxt = params->spp_pathmaxrxt;
+		} else if (asoc) {
+			asoc->pathmaxrxt = params->spp_pathmaxrxt;
+		} else {
+			sp->pathmaxrxt = params->spp_pathmaxrxt;
+		}
+	}
+
+	return 0;
+}
+
+static int sctp_setsockopt_peer_addr_params(struct sock *sk,
+					    char __user *optval, int optlen)
+{
+	struct sctp_paddrparams  params;
+	struct sctp_transport   *trans = NULL;
+	struct sctp_association *asoc = NULL;
+	struct sctp_sock        *sp = sctp_sk(sk);
+	int error;
+	int hb_change, pmtud_change, sackdelay_change;
+
+	if (optlen != sizeof(struct sctp_paddrparams))
+		return - EINVAL;
+
+	if (copy_from_user(&params, optval, optlen))
+		return -EFAULT;
+
+	/* Validate flags and value parameters. */
+	hb_change        = params.spp_flags & SPP_HB;
+	pmtud_change     = params.spp_flags & SPP_PMTUD;
+	sackdelay_change = params.spp_flags & SPP_SACKDELAY;
+
+	if (hb_change        == SPP_HB ||
+	    pmtud_change     == SPP_PMTUD ||
+	    sackdelay_change == SPP_SACKDELAY ||
+	    params.spp_sackdelay > 500 ||
+	    (params.spp_pathmtu
+	    && params.spp_pathmtu < SCTP_DEFAULT_MINSEGMENT))
+		return -EINVAL;
+
+	/* If an address other than INADDR_ANY is specified, and
+	 * no transport is found, then the request is invalid.
+	 */
+	if (!sctp_is_any(( union sctp_addr *)&params.spp_address)) {
+		trans = sctp_addr_id2transport(sk, &params.spp_address,
+					       params.spp_assoc_id);
+		if (!trans)
+			return -EINVAL;
+	}
+
+	/* Get association, if assoc_id != 0 and the socket is a one
+	 * to many style socket, and an association was not found, then
+	 * the id was invalid.
+	 */
+	asoc = sctp_id2assoc(sk, params.spp_assoc_id);
+	if (!asoc && params.spp_assoc_id && sctp_style(sk, UDP))
+		return -EINVAL;
+
+	/* Heartbeat demand can only be sent on a transport or
+	 * association, but not a socket.
+	 */
+	if (params.spp_flags & SPP_HB_DEMAND && !trans && !asoc)
+		return -EINVAL;
+
+	/* Process parameters. */
+	error = sctp_apply_peer_addr_params(&params, trans, asoc, sp,
+					    hb_change, pmtud_change,
+					    sackdelay_change);
+
+	if (error)
+		return error;
+
+	/* If changes are for association, also apply parameters to each
+	 * transport.
+	 */
+	if (!trans && asoc) {
+		struct list_head *pos;
+
+		list_for_each(pos, &asoc->peer.transport_addr_list) {
+			trans = list_entry(pos, struct sctp_transport,
+					   transports);
+			sctp_apply_peer_addr_params(&params, trans, asoc, sp,
+						    hb_change, pmtud_change,
+						    sackdelay_change);
+		}
+	}
+
+	return 0;
+}
+
+/* 7.1.23. Delayed Ack Timer (SCTP_DELAYED_ACK_TIME)
+ *
+ *   This options will get or set the delayed ack timer.  The time is set
+ *   in milliseconds.  If the assoc_id is 0, then this sets or gets the
+ *   endpoints default delayed ack timer value.  If the assoc_id field is
+ *   non-zero, then the set or get effects the specified association.
+ *
+ *   struct sctp_assoc_value {
+ *       sctp_assoc_t            assoc_id;
+ *       uint32_t                assoc_value;
+ *   };
+ *
+ *     assoc_id    - This parameter, indicates which association the
+ *                   user is preforming an action upon. Note that if
+ *                   this field's value is zero then the endpoints
+ *                   default value is changed (effecting future
+ *                   associations only).
+ *
+ *     assoc_value - This parameter contains the number of milliseconds
+ *                   that the user is requesting the delayed ACK timer
+ *                   be set to. Note that this value is defined in
+ *                   the standard to be between 200 and 500 milliseconds.
+ *
+ *                   Note: a value of zero will leave the value alone,
+ *                   but disable SACK delay. A non-zero value will also
+ *                   enable SACK delay.
+ */
+
+static int sctp_setsockopt_delayed_ack_time(struct sock *sk,
+					    char __user *optval, int optlen)
+{
+	struct sctp_assoc_value  params;
+	struct sctp_transport   *trans = NULL;
+	struct sctp_association *asoc = NULL;
+	struct sctp_sock        *sp = sctp_sk(sk);
+
+	if (optlen != sizeof(struct sctp_assoc_value))
+		return - EINVAL;
+
+	if (copy_from_user(&params, optval, optlen))
+		return -EFAULT;
+
+	/* Validate value parameter. */
+	if (params.assoc_value > 500)
+		return -EINVAL;
+
+	/* Get association, if assoc_id != 0 and the socket is a one
+	 * to many style socket, and an association was not found, then
+	 * the id was invalid.
+	 */
+	asoc = sctp_id2assoc(sk, params.assoc_id);
+	if (!asoc && params.assoc_id && sctp_style(sk, UDP))
+		return -EINVAL;
+
+	if (params.assoc_value) {
+		if (asoc) {
+			asoc->sackdelay =
+				msecs_to_jiffies(params.assoc_value);
+			asoc->param_flags =
+				(asoc->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_ENABLE;
+		} else {
+			sp->sackdelay = params.assoc_value;
+			sp->param_flags =
+				(sp->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_ENABLE;
+		}
+	} else {
+		if (asoc) {
+			asoc->param_flags =
+				(asoc->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_DISABLE;
+		} else {
+			sp->param_flags =
+				(sp->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_DISABLE;
+		}
+	}
+
+	/* If change is for association, also apply to each transport. */
+	if (asoc) {
+		struct list_head *pos;
+
+		list_for_each(pos, &asoc->peer.transport_addr_list) {
+			trans = list_entry(pos, struct sctp_transport,
+					   transports);
+			if (params.assoc_value) {
+				trans->sackdelay =
+					msecs_to_jiffies(params.assoc_value);
+				trans->param_flags =
+					(trans->param_flags & ~SPP_SACKDELAY) |
+					SPP_SACKDELAY_ENABLE;
+			} else {
+				trans->param_flags =
+					(trans->param_flags & ~SPP_SACKDELAY) |
+					SPP_SACKDELAY_DISABLE;
+			}
+		}
+	}
 
 	return 0;
 }
@@ -1787,13 +2438,13 @@ static int sctp_setsockopt_initmsg(struct sock *sk, char __user *optval, int opt
 		return -EFAULT;
 
 	if (sinit.sinit_num_ostreams)
-		sp->initmsg.sinit_num_ostreams = sinit.sinit_num_ostreams;	
+		sp->initmsg.sinit_num_ostreams = sinit.sinit_num_ostreams;
 	if (sinit.sinit_max_instreams)
-		sp->initmsg.sinit_max_instreams = sinit.sinit_max_instreams;	
+		sp->initmsg.sinit_max_instreams = sinit.sinit_max_instreams;
 	if (sinit.sinit_max_attempts)
-		sp->initmsg.sinit_max_attempts = sinit.sinit_max_attempts;	
+		sp->initmsg.sinit_max_attempts = sinit.sinit_max_attempts;
 	if (sinit.sinit_max_init_timeo)
-		sp->initmsg.sinit_max_init_timeo = sinit.sinit_max_init_timeo;	
+		sp->initmsg.sinit_max_init_timeo = sinit.sinit_max_init_timeo;
 
 	return 0;
 }
@@ -1924,7 +2575,7 @@ static int sctp_setsockopt_rtoinfo(struct sock *sk, char __user *optval, int opt
 
 	if (asoc) {
 		if (rtoinfo.srto_initial != 0)
-			asoc->rto_initial = 
+			asoc->rto_initial =
 				msecs_to_jiffies(rtoinfo.srto_initial);
 		if (rtoinfo.srto_max != 0)
 			asoc->rto_max = msecs_to_jiffies(rtoinfo.srto_max);
@@ -1951,7 +2602,7 @@ static int sctp_setsockopt_rtoinfo(struct sock *sk, char __user *optval, int opt
  *
  * 7.1.2 SCTP_ASSOCINFO
  *
- * This option is used to tune the the maximum retransmission attempts
+ * This option is used to tune the maximum retransmission attempts
  * of the association.
  * Returns an error if the new association retransmission value is
  * greater than the sum of the retransmission value  of the peer.
@@ -1976,8 +2627,32 @@ static int sctp_setsockopt_associnfo(struct sock *sk, char __user *optval, int o
 
 	/* Set the values to the specific association */
 	if (asoc) {
-		if (assocparams.sasoc_asocmaxrxt != 0)
+		if (assocparams.sasoc_asocmaxrxt != 0) {
+			__u32 path_sum = 0;
+			int   paths = 0;
+			struct list_head *pos;
+			struct sctp_transport *peer_addr;
+
+			list_for_each(pos, &asoc->peer.transport_addr_list) {
+				peer_addr = list_entry(pos,
+						struct sctp_transport,
+						transports);
+				path_sum += peer_addr->pathmaxrxt;
+				paths++;
+			}
+
+			/* Only validate asocmaxrxt if we have more then
+			 * one path/transport.  We do this because path
+			 * retransmissions are only counted when we have more
+			 * then one path.
+			 */
+			if (paths > 1 &&
+			    assocparams.sasoc_asocmaxrxt > path_sum)
+				return -EINVAL;
+
 			asoc->max_retrans = assocparams.sasoc_asocmaxrxt;
+		}
+
 		if (assocparams.sasoc_cookie_life != 0) {
 			asoc->cookie_life.tv_sec =
 					assocparams.sasoc_cookie_life / 1000;
@@ -2047,16 +2722,14 @@ static int sctp_setsockopt_maxseg(struct sock *sk, char __user *optval, int optl
 		return -EINVAL;
 	if (get_user(val, (int __user *)optval))
 		return -EFAULT;
-	if ((val < 8) || (val > SCTP_MAX_CHUNK_LEN))
+	if ((val != 0) && ((val < 8) || (val > SCTP_MAX_CHUNK_LEN)))
 		return -EINVAL;
 	sp->user_frag = val;
 
-	if (val) {
-		/* Update the frag_point of the existing associations. */
-		list_for_each(pos, &(sp->ep->asocs)) {
-			asoc = list_entry(pos, struct sctp_association, asocs);
-			asoc->frag_point = sctp_frag_point(sp, asoc->pmtu); 
-		}
+	/* Update the frag_point of the existing associations. */
+	list_for_each(pos, &(sp->ep->asocs)) {
+		asoc = list_entry(pos, struct sctp_association, asocs);
+		asoc->frag_point = sctp_frag_point(sp, asoc->pathmtu);
 	}
 
 	return 0;
@@ -2094,7 +2767,7 @@ static int sctp_setsockopt_peer_primary_addr(struct sock *sk, char __user *optva
 		return -EFAULT;
 
 	asoc = sctp_id2assoc(sk, prim.sspp_assoc_id);
-	if (!asoc) 
+	if (!asoc)
 		return -EINVAL;
 
 	if (!asoc->peer.asconf_capable)
@@ -2122,20 +2795,314 @@ static int sctp_setsockopt_peer_primary_addr(struct sock *sk, char __user *optva
 	return err;
 }
 
-static int sctp_setsockopt_adaption_layer(struct sock *sk, char __user *optval,
+static int sctp_setsockopt_adaptation_layer(struct sock *sk, char __user *optval,
 					  int optlen)
 {
-	__u32 val;
+	struct sctp_setadaptation adaptation;
 
-	if (optlen < sizeof(__u32))
+	if (optlen != sizeof(struct sctp_setadaptation))
 		return -EINVAL;
-	if (copy_from_user(&val, optval, sizeof(__u32)))
+	if (copy_from_user(&adaptation, optval, optlen))
 		return -EFAULT;
 
-	sctp_sk(sk)->adaption_ind = val;
+	sctp_sk(sk)->adaptation_ind = adaptation.ssb_adaptation_ind;
 
 	return 0;
 }
+
+/*
+ * 7.1.29.  Set or Get the default context (SCTP_CONTEXT)
+ *
+ * The context field in the sctp_sndrcvinfo structure is normally only
+ * used when a failed message is retrieved holding the value that was
+ * sent down on the actual send call.  This option allows the setting of
+ * a default context on an association basis that will be received on
+ * reading messages from the peer.  This is especially helpful in the
+ * one-2-many model for an application to keep some reference to an
+ * internal state machine that is processing messages on the
+ * association.  Note that the setting of this value only effects
+ * received messages from the peer and does not effect the value that is
+ * saved with outbound messages.
+ */
+static int sctp_setsockopt_context(struct sock *sk, char __user *optval,
+				   int optlen)
+{
+	struct sctp_assoc_value params;
+	struct sctp_sock *sp;
+	struct sctp_association *asoc;
+
+	if (optlen != sizeof(struct sctp_assoc_value))
+		return -EINVAL;
+	if (copy_from_user(&params, optval, optlen))
+		return -EFAULT;
+
+	sp = sctp_sk(sk);
+
+	if (params.assoc_id != 0) {
+		asoc = sctp_id2assoc(sk, params.assoc_id);
+		if (!asoc)
+			return -EINVAL;
+		asoc->default_rcv_context = params.assoc_value;
+	} else {
+		sp->default_rcv_context = params.assoc_value;
+	}
+
+	return 0;
+}
+
+/*
+ * 7.1.24.  Get or set fragmented interleave (SCTP_FRAGMENT_INTERLEAVE)
+ *
+ * This options will at a minimum specify if the implementation is doing
+ * fragmented interleave.  Fragmented interleave, for a one to many
+ * socket, is when subsequent calls to receive a message may return
+ * parts of messages from different associations.  Some implementations
+ * may allow you to turn this value on or off.  If so, when turned off,
+ * no fragment interleave will occur (which will cause a head of line
+ * blocking amongst multiple associations sharing the same one to many
+ * socket).  When this option is turned on, then each receive call may
+ * come from a different association (thus the user must receive data
+ * with the extended calls (e.g. sctp_recvmsg) to keep track of which
+ * association each receive belongs to.
+ *
+ * This option takes a boolean value.  A non-zero value indicates that
+ * fragmented interleave is on.  A value of zero indicates that
+ * fragmented interleave is off.
+ *
+ * Note that it is important that an implementation that allows this
+ * option to be turned on, have it off by default.  Otherwise an unaware
+ * application using the one to many model may become confused and act
+ * incorrectly.
+ */
+static int sctp_setsockopt_fragment_interleave(struct sock *sk,
+					       char __user *optval,
+					       int optlen)
+{
+	int val;
+
+	if (optlen != sizeof(int))
+		return -EINVAL;
+	if (get_user(val, (int __user *)optval))
+		return -EFAULT;
+
+	sctp_sk(sk)->frag_interleave = (val == 0) ? 0 : 1;
+
+	return 0;
+}
+
+/*
+ * 7.1.25.  Set or Get the sctp partial delivery point
+ *       (SCTP_PARTIAL_DELIVERY_POINT)
+ * This option will set or get the SCTP partial delivery point.  This
+ * point is the size of a message where the partial delivery API will be
+ * invoked to help free up rwnd space for the peer.  Setting this to a
+ * lower value will cause partial delivery's to happen more often.  The
+ * calls argument is an integer that sets or gets the partial delivery
+ * point.
+ */
+static int sctp_setsockopt_partial_delivery_point(struct sock *sk,
+						  char __user *optval,
+						  int optlen)
+{
+	u32 val;
+
+	if (optlen != sizeof(u32))
+		return -EINVAL;
+	if (get_user(val, (int __user *)optval))
+		return -EFAULT;
+
+	sctp_sk(sk)->pd_point = val;
+
+	return 0; /* is this the right error code? */
+}
+
+/*
+ * 7.1.28.  Set or Get the maximum burst (SCTP_MAX_BURST)
+ *
+ * This option will allow a user to change the maximum burst of packets
+ * that can be emitted by this association.  Note that the default value
+ * is 4, and some implementations may restrict this setting so that it
+ * can only be lowered.
+ *
+ * NOTE: This text doesn't seem right.  Do this on a socket basis with
+ * future associations inheriting the socket value.
+ */
+static int sctp_setsockopt_maxburst(struct sock *sk,
+				    char __user *optval,
+				    int optlen)
+{
+	int val;
+
+	if (optlen != sizeof(int))
+		return -EINVAL;
+	if (get_user(val, (int __user *)optval))
+		return -EFAULT;
+
+	if (val < 0)
+		return -EINVAL;
+
+	sctp_sk(sk)->max_burst = val;
+
+	return 0;
+}
+
+/*
+ * 7.1.18.  Add a chunk that must be authenticated (SCTP_AUTH_CHUNK)
+ *
+ * This set option adds a chunk type that the user is requesting to be
+ * received only in an authenticated way.  Changes to the list of chunks
+ * will only effect future associations on the socket.
+ */
+static int sctp_setsockopt_auth_chunk(struct sock *sk,
+				    char __user *optval,
+				    int optlen)
+{
+	struct sctp_authchunk val;
+
+	if (optlen != sizeof(struct sctp_authchunk))
+		return -EINVAL;
+	if (copy_from_user(&val, optval, optlen))
+		return -EFAULT;
+
+	switch (val.sauth_chunk) {
+		case SCTP_CID_INIT:
+		case SCTP_CID_INIT_ACK:
+		case SCTP_CID_SHUTDOWN_COMPLETE:
+		case SCTP_CID_AUTH:
+			return -EINVAL;
+	}
+
+	/* add this chunk id to the endpoint */
+	return sctp_auth_ep_add_chunkid(sctp_sk(sk)->ep, val.sauth_chunk);
+}
+
+/*
+ * 7.1.19.  Get or set the list of supported HMAC Identifiers (SCTP_HMAC_IDENT)
+ *
+ * This option gets or sets the list of HMAC algorithms that the local
+ * endpoint requires the peer to use.
+ */
+static int sctp_setsockopt_hmac_ident(struct sock *sk,
+				    char __user *optval,
+				    int optlen)
+{
+	struct sctp_hmacalgo *hmacs;
+	int err;
+
+	if (optlen < sizeof(struct sctp_hmacalgo))
+		return -EINVAL;
+
+	hmacs = kmalloc(optlen, GFP_KERNEL);
+	if (!hmacs)
+		return -ENOMEM;
+
+	if (copy_from_user(hmacs, optval, optlen)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	if (hmacs->shmac_num_idents == 0 ||
+	    hmacs->shmac_num_idents > SCTP_AUTH_NUM_HMACS) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	err = sctp_auth_ep_set_hmacs(sctp_sk(sk)->ep, hmacs);
+out:
+	kfree(hmacs);
+	return err;
+}
+
+/*
+ * 7.1.20.  Set a shared key (SCTP_AUTH_KEY)
+ *
+ * This option will set a shared secret key which is used to build an
+ * association shared key.
+ */
+static int sctp_setsockopt_auth_key(struct sock *sk,
+				    char __user *optval,
+				    int optlen)
+{
+	struct sctp_authkey *authkey;
+	struct sctp_association *asoc;
+	int ret;
+
+	if (optlen <= sizeof(struct sctp_authkey))
+		return -EINVAL;
+
+	authkey = kmalloc(optlen, GFP_KERNEL);
+	if (!authkey)
+		return -ENOMEM;
+
+	if (copy_from_user(authkey, optval, optlen)) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	asoc = sctp_id2assoc(sk, authkey->sca_assoc_id);
+	if (!asoc && authkey->sca_assoc_id && sctp_style(sk, UDP)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = sctp_auth_set_key(sctp_sk(sk)->ep, asoc, authkey);
+out:
+	kfree(authkey);
+	return ret;
+}
+
+/*
+ * 7.1.21.  Get or set the active shared key (SCTP_AUTH_ACTIVE_KEY)
+ *
+ * This option will get or set the active shared key to be used to build
+ * the association shared key.
+ */
+static int sctp_setsockopt_active_key(struct sock *sk,
+					char __user *optval,
+					int optlen)
+{
+	struct sctp_authkeyid val;
+	struct sctp_association *asoc;
+
+	if (optlen != sizeof(struct sctp_authkeyid))
+		return -EINVAL;
+	if (copy_from_user(&val, optval, optlen))
+		return -EFAULT;
+
+	asoc = sctp_id2assoc(sk, val.scact_assoc_id);
+	if (!asoc && val.scact_assoc_id && sctp_style(sk, UDP))
+		return -EINVAL;
+
+	return sctp_auth_set_active_key(sctp_sk(sk)->ep, asoc,
+					val.scact_keynumber);
+}
+
+/*
+ * 7.1.22.  Delete a shared key (SCTP_AUTH_DELETE_KEY)
+ *
+ * This set option will delete a shared secret key from use.
+ */
+static int sctp_setsockopt_del_key(struct sock *sk,
+					char __user *optval,
+					int optlen)
+{
+	struct sctp_authkeyid val;
+	struct sctp_association *asoc;
+
+	if (optlen != sizeof(struct sctp_authkeyid))
+		return -EINVAL;
+	if (copy_from_user(&val, optval, optlen))
+		return -EFAULT;
+
+	asoc = sctp_id2assoc(sk, val.scact_assoc_id);
+	if (!asoc && val.scact_assoc_id && sctp_style(sk, UDP))
+		return -EINVAL;
+
+	return sctp_auth_del_key_id(sctp_sk(sk)->ep, asoc,
+				    val.scact_keynumber);
+
+}
+
 
 /* API 6.2 setsockopt(), getsockopt()
  *
@@ -2191,6 +3158,12 @@ SCTP_STATIC int sctp_setsockopt(struct sock *sk, int level, int optname,
 					       optlen, SCTP_BINDX_REM_ADDR);
 		break;
 
+	case SCTP_SOCKOPT_CONNECTX:
+		/* 'optlen' is the size of the addresses buffer. */
+		retval = sctp_setsockopt_connectx(sk, (struct sockaddr __user *)optval,
+					       optlen);
+		break;
+
 	case SCTP_DISABLE_FRAGMENTS:
 		retval = sctp_setsockopt_disable_fragments(sk, optval, optlen);
 		break;
@@ -2205,6 +3178,13 @@ SCTP_STATIC int sctp_setsockopt(struct sock *sk, int level, int optname,
 
 	case SCTP_PEER_ADDR_PARAMS:
 		retval = sctp_setsockopt_peer_addr_params(sk, optval, optlen);
+		break;
+
+	case SCTP_DELAYED_ACK_TIME:
+		retval = sctp_setsockopt_delayed_ack_time(sk, optval, optlen);
+		break;
+	case SCTP_PARTIAL_DELIVERY_POINT:
+		retval = sctp_setsockopt_partial_delivery_point(sk, optval, optlen);
 		break;
 
 	case SCTP_INITMSG:
@@ -2235,14 +3215,37 @@ SCTP_STATIC int sctp_setsockopt(struct sock *sk, int level, int optname,
 	case SCTP_MAXSEG:
 		retval = sctp_setsockopt_maxseg(sk, optval, optlen);
 		break;
-	case SCTP_ADAPTION_LAYER:
-		retval = sctp_setsockopt_adaption_layer(sk, optval, optlen);
+	case SCTP_ADAPTATION_LAYER:
+		retval = sctp_setsockopt_adaptation_layer(sk, optval, optlen);
 		break;
-
+	case SCTP_CONTEXT:
+		retval = sctp_setsockopt_context(sk, optval, optlen);
+		break;
+	case SCTP_FRAGMENT_INTERLEAVE:
+		retval = sctp_setsockopt_fragment_interleave(sk, optval, optlen);
+		break;
+	case SCTP_MAX_BURST:
+		retval = sctp_setsockopt_maxburst(sk, optval, optlen);
+		break;
+	case SCTP_AUTH_CHUNK:
+		retval = sctp_setsockopt_auth_chunk(sk, optval, optlen);
+		break;
+	case SCTP_HMAC_IDENT:
+		retval = sctp_setsockopt_hmac_ident(sk, optval, optlen);
+		break;
+	case SCTP_AUTH_KEY:
+		retval = sctp_setsockopt_auth_key(sk, optval, optlen);
+		break;
+	case SCTP_AUTH_ACTIVE_KEY:
+		retval = sctp_setsockopt_active_key(sk, optval, optlen);
+		break;
+	case SCTP_AUTH_DELETE_KEY:
+		retval = sctp_setsockopt_del_key(sk, optval, optlen);
+		break;
 	default:
 		retval = -ENOPROTOOPT;
 		break;
-	};
+	}
 
 	sctp_release_sock(sk);
 
@@ -2266,112 +3269,29 @@ out_nounlock:
  *
  * len: the size of the address.
  */
-SCTP_STATIC int sctp_connect(struct sock *sk, struct sockaddr *uaddr,
+SCTP_STATIC int sctp_connect(struct sock *sk, struct sockaddr *addr,
 			     int addr_len)
 {
-	struct sctp_sock *sp;
-	struct sctp_endpoint *ep;
-	struct sctp_association *asoc;
-	struct sctp_transport *transport;
-	union sctp_addr to;
-	struct sctp_af *af;
-	sctp_scope_t scope;
-	long timeo;
 	int err = 0;
+	struct sctp_af *af;
 
 	sctp_lock_sock(sk);
 
-	SCTP_DEBUG_PRINTK("%s - sk: %p, sockaddr: %p, addr_len: %d)\n",
-			  __FUNCTION__, sk, uaddr, addr_len);
+	SCTP_DEBUG_PRINTK("%s - sk: %p, sockaddr: %p, addr_len: %d\n",
+			  __FUNCTION__, sk, addr, addr_len);
 
-	sp = sctp_sk(sk);
-	ep = sp->ep;
-
-	/* connect() cannot be done on a socket that is already in ESTABLISHED
-	 * state - UDP-style peeled off socket or a TCP-style socket that
-	 * is already connected.
-	 * It cannot be done even on a TCP-style listening socket.
-	 */
-	if (sctp_sstate(sk, ESTABLISHED) ||
-	    (sctp_style(sk, TCP) && sctp_sstate(sk, LISTENING))) {
-		err = -EISCONN;
-		goto out_unlock;
+	/* Validate addr_len before calling common connect/connectx routine. */
+	af = sctp_get_af_specific(addr->sa_family);
+	if (!af || addr_len < af->sockaddr_len) {
+		err = -EINVAL;
+	} else {
+		/* Pass correct addr len to common routine (so it knows there
+		 * is only one address being passed.
+		 */
+		err = __sctp_connect(sk, addr, af->sockaddr_len);
 	}
 
-	err = sctp_verify_addr(sk, (union sctp_addr *)uaddr, addr_len);
-	if (err)
-		goto out_unlock;
-
-	if (addr_len > sizeof(to))
-		addr_len = sizeof(to);
-	memcpy(&to, uaddr, addr_len);
-	to.v4.sin_port = ntohs(to.v4.sin_port);
-
-	asoc = sctp_endpoint_lookup_assoc(ep, &to, &transport);
-	if (asoc) {
-		if (asoc->state >= SCTP_STATE_ESTABLISHED)
-			err = -EISCONN;
-		else
-			err = -EALREADY;
-		goto out_unlock;
-	}
-
-	/* If we could not find a matching association on the endpoint,
-	 * make sure that there is no peeled-off association matching the
-	 * peer address even on another socket.
-	 */
-	if (sctp_endpoint_is_peeled_off(ep, &to)) {
-		err = -EADDRNOTAVAIL;
-		goto out_unlock;
-	}
-
-	/* If a bind() or sctp_bindx() is not called prior to a connect()
-	 * call, the system picks an ephemeral port and will choose an address
-	 * set equivalent to binding with a wildcard address.
-	 */
-	if (!ep->base.bind_addr.port) {
-		if (sctp_autobind(sk)) {
-			err = -EAGAIN;
-			goto out_unlock;
-		}
-	}
-
-	scope = sctp_scope(&to);
-	asoc = sctp_association_new(ep, sk, scope, GFP_KERNEL);
-	if (!asoc) {
-		err = -ENOMEM;
-		goto out_unlock;
-  	}
-
-	/* Prime the peer's transport structures.  */
-	transport = sctp_assoc_add_peer(asoc, &to, GFP_KERNEL);
-	if (!transport) {
-		sctp_association_free(asoc);
-		goto out_unlock;
-	}
-	err = sctp_assoc_set_bind_addr_from_ep(asoc, GFP_KERNEL);
-	if (err < 0) {
-		sctp_association_free(asoc);
-		goto out_unlock;
-	}
-
-	err = sctp_primitive_ASSOCIATE(asoc, NULL);
-	if (err < 0) {
-		sctp_association_free(asoc);
-		goto out_unlock;
-	}
-
-	/* Initialize sk's dport and daddr for getpeername() */
-	inet_sk(sk)->dport = htons(asoc->peer.port);
-	af = sctp_get_af_specific(to.sa.sa_family);
-	af->to_sk_daddr(&to, sk);
-
-	timeo = sock_sndtimeo(sk, sk->sk_socket->file->f_flags & O_NONBLOCK);
-	err = sctp_wait_for_connect(asoc, &timeo);
-
-out_unlock:
 	sctp_release_sock(sk);
-
 	return err;
 }
 
@@ -2412,7 +3332,7 @@ SCTP_STATIC struct sock *sctp_accept(struct sock *sk, int flags, int *err)
 		goto out;
 	}
 
-	timeo = sock_rcvtimeo(sk, sk->sk_socket->file->f_flags & O_NONBLOCK);
+	timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
 
 	error = sctp_wait_for_accept(sk, timeo);
 	if (error)
@@ -2436,7 +3356,7 @@ SCTP_STATIC struct sock *sctp_accept(struct sock *sk, int flags, int *err)
 
 out:
 	sctp_release_sock(sk);
- 	*err = error;
+	*err = error;
 	return newsk;
 }
 
@@ -2480,6 +3400,9 @@ SCTP_STATIC int sctp_init_sock(struct sock *sk)
 	sp->default_context = 0;
 	sp->default_timetolive = 0;
 
+	sp->default_rcv_context = 0;
+	sp->max_burst = sctp_max_burst;
+
 	/* Initialize default setup parameters. These parameters
 	 * can be modified with the SCTP_INITMSG socket option or
 	 * overridden by the SCTP_INIT CMSG.
@@ -2487,14 +3410,14 @@ SCTP_STATIC int sctp_init_sock(struct sock *sk)
 	sp->initmsg.sinit_num_ostreams   = sctp_max_outstreams;
 	sp->initmsg.sinit_max_instreams  = sctp_max_instreams;
 	sp->initmsg.sinit_max_attempts   = sctp_max_retrans_init;
-	sp->initmsg.sinit_max_init_timeo = jiffies_to_msecs(sctp_rto_max);
+	sp->initmsg.sinit_max_init_timeo = sctp_rto_max;
 
 	/* Initialize default RTO related parameters.  These parameters can
 	 * be modified for with the SCTP_RTOINFO socket option.
 	 */
-	sp->rtoinfo.srto_initial = jiffies_to_msecs(sctp_rto_initial);
-	sp->rtoinfo.srto_max     = jiffies_to_msecs(sctp_rto_max);
-	sp->rtoinfo.srto_min     = jiffies_to_msecs(sctp_rto_min);
+	sp->rtoinfo.srto_initial = sctp_rto_initial;
+	sp->rtoinfo.srto_max     = sctp_rto_max;
+	sp->rtoinfo.srto_min     = sctp_rto_min;
 
 	/* Initialize default association related parameters. These parameters
 	 * can be modified with the SCTP_ASSOCINFO socket option.
@@ -2503,27 +3426,31 @@ SCTP_STATIC int sctp_init_sock(struct sock *sk)
 	sp->assocparams.sasoc_number_peer_destinations = 0;
 	sp->assocparams.sasoc_peer_rwnd = 0;
 	sp->assocparams.sasoc_local_rwnd = 0;
-	sp->assocparams.sasoc_cookie_life = 
-		jiffies_to_msecs(sctp_valid_cookie_life);
+	sp->assocparams.sasoc_cookie_life = sctp_valid_cookie_life;
 
 	/* Initialize default event subscriptions. By default, all the
-	 * options are off. 
+	 * options are off.
 	 */
 	memset(&sp->subscribe, 0, sizeof(struct sctp_event_subscribe));
 
 	/* Default Peer Address Parameters.  These defaults can
 	 * be modified via SCTP_PEER_ADDR_PARAMS
 	 */
-	sp->paddrparam.spp_hbinterval = jiffies_to_msecs(sctp_hb_interval);
-	sp->paddrparam.spp_pathmaxrxt = sctp_max_retrans_path;
+	sp->hbinterval  = sctp_hb_interval;
+	sp->pathmaxrxt  = sctp_max_retrans_path;
+	sp->pathmtu     = 0; // allow default discovery
+	sp->sackdelay   = sctp_sack_timeout;
+	sp->param_flags = SPP_HB_ENABLE |
+			  SPP_PMTUD_ENABLE |
+			  SPP_SACKDELAY_ENABLE;
 
 	/* If enabled no SCTP message fragmentation will be performed.
 	 * Configure through SCTP_DISABLE_FRAGMENTS socket option.
 	 */
 	sp->disable_fragments = 0;
 
-	/* Turn on/off any Nagle-like algorithm.  */
-	sp->nodelay           = 1;
+	/* Enable Nagle algorithm by default.  */
+	sp->nodelay           = 0;
 
 	/* Enable by default. */
 	sp->v4mapped          = 1;
@@ -2538,13 +3465,14 @@ SCTP_STATIC int sctp_init_sock(struct sock *sk)
 	/* User specified fragmentation limit. */
 	sp->user_frag         = 0;
 
-	sp->adaption_ind = 0;
+	sp->adaptation_ind = 0;
 
 	sp->pf = sctp_get_pf_specific(sk->sk_family);
 
 	/* Control variables for partial data delivery. */
-	sp->pd_mode           = 0;
+	atomic_set(&sp->pd_mode, 0);
 	skb_queue_head_init(&sp->pd_lobby);
+	sp->frag_interleave = 0;
 
 	/* Create a per socket endpoint structure.  Even if we
 	 * change the data structure relationships, this may still
@@ -2558,6 +3486,7 @@ SCTP_STATIC int sctp_init_sock(struct sock *sk)
 	sp->hmac = NULL;
 
 	SCTP_DBG_OBJCNT_INC(sock);
+	atomic_inc(&sctp_sockets_allocated);
 	return 0;
 }
 
@@ -2571,7 +3500,7 @@ SCTP_STATIC int sctp_destroy_sock(struct sock *sk)
 	/* Release our hold on the endpoint. */
 	ep = sctp_sk(sk)->ep;
 	sctp_endpoint_free(ep);
-
+	atomic_dec(&sctp_sockets_allocated);
 	return 0;
 }
 
@@ -2626,12 +3555,13 @@ static int sctp_getsockopt_sctp_status(struct sock *sk, int len,
 	sctp_assoc_t associd;
 	int retval = 0;
 
-	if (len != sizeof(status)) {
+	if (len < sizeof(status)) {
 		retval = -EINVAL;
 		goto out;
 	}
 
-	if (copy_from_user(&status, optval, sizeof(status))) {
+	len = sizeof(status);
+	if (copy_from_user(&status, optval, len)) {
 		retval = -EFAULT;
 		goto out;
 	}
@@ -2655,16 +3585,19 @@ static int sctp_getsockopt_sctp_status(struct sock *sk, int len,
 	status.sstat_outstrms = asoc->c.sinit_num_ostreams;
 	status.sstat_fragmentation_point = asoc->frag_point;
 	status.sstat_primary.spinfo_assoc_id = sctp_assoc2id(transport->asoc);
-	memcpy(&status.sstat_primary.spinfo_address,
-	       &(transport->ipaddr), sizeof(union sctp_addr));
+	memcpy(&status.sstat_primary.spinfo_address, &transport->ipaddr,
+			transport->af_specific->sockaddr_len);
 	/* Map ipv4 address into v4-mapped-on-v6 address.  */
 	sctp_get_pf_specific(sk->sk_family)->addr_v4map(sctp_sk(sk),
 		(union sctp_addr *)&status.sstat_primary.spinfo_address);
-	status.sstat_primary.spinfo_state = transport->active;
+	status.sstat_primary.spinfo_state = transport->state;
 	status.sstat_primary.spinfo_cwnd = transport->cwnd;
 	status.sstat_primary.spinfo_srtt = transport->srtt;
 	status.sstat_primary.spinfo_rto = jiffies_to_msecs(transport->rto);
-	status.sstat_primary.spinfo_mtu = transport->pmtu;
+	status.sstat_primary.spinfo_mtu = transport->pathmtu;
+
+	if (status.sstat_primary.spinfo_state == SCTP_UNKNOWN)
+		status.sstat_primary.spinfo_state = SCTP_ACTIVE;
 
 	if (put_user(len, optlen)) {
 		retval = -EFAULT;
@@ -2700,12 +3633,13 @@ static int sctp_getsockopt_peer_addr_info(struct sock *sk, int len,
 	struct sctp_transport *transport;
 	int retval = 0;
 
-	if (len != sizeof(pinfo)) {
+	if (len < sizeof(pinfo)) {
 		retval = -EINVAL;
 		goto out;
 	}
 
-	if (copy_from_user(&pinfo, optval, sizeof(pinfo))) {
+	len = sizeof(pinfo);
+	if (copy_from_user(&pinfo, optval, len)) {
 		retval = -EFAULT;
 		goto out;
 	}
@@ -2716,11 +3650,14 @@ static int sctp_getsockopt_peer_addr_info(struct sock *sk, int len,
 		return -EINVAL;
 
 	pinfo.spinfo_assoc_id = sctp_assoc2id(transport->asoc);
-	pinfo.spinfo_state = transport->active;
+	pinfo.spinfo_state = transport->state;
 	pinfo.spinfo_cwnd = transport->cwnd;
 	pinfo.spinfo_srtt = transport->srtt;
 	pinfo.spinfo_rto = jiffies_to_msecs(transport->rto);
-	pinfo.spinfo_mtu = transport->pmtu;
+	pinfo.spinfo_mtu = transport->pathmtu;
+
+	if (pinfo.spinfo_state == SCTP_UNKNOWN)
+		pinfo.spinfo_state = SCTP_ACTIVE;
 
 	if (put_user(len, optlen)) {
 		retval = -EFAULT;
@@ -2768,8 +3705,11 @@ static int sctp_getsockopt_disable_fragments(struct sock *sk, int len,
 static int sctp_getsockopt_events(struct sock *sk, int len, char __user *optval,
 				  int __user *optlen)
 {
-	if (len != sizeof(struct sctp_event_subscribe))
+	if (len < sizeof(struct sctp_event_subscribe))
 		return -EINVAL;
+	len = sizeof(struct sctp_event_subscribe);
+	if (put_user(len, optlen))
+		return -EFAULT;
 	if (copy_to_user(optval, &sctp_sk(sk)->subscribe, len))
 		return -EFAULT;
 	return 0;
@@ -2791,9 +3731,12 @@ static int sctp_getsockopt_autoclose(struct sock *sk, int len, char __user *optv
 	/* Applicable to UDP-style socket only */
 	if (sctp_style(sk, TCP))
 		return -EOPNOTSUPP;
-	if (len != sizeof(int))
+	if (len < sizeof(int))
 		return -EINVAL;
-	if (copy_to_user(optval, &sctp_sk(sk)->autoclose, len))
+	len = sizeof(int);
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &sctp_sk(sk)->autoclose, sizeof(int)))
 		return -EFAULT;
 	return 0;
 }
@@ -2804,6 +3747,8 @@ SCTP_STATIC int sctp_do_peeloff(struct sctp_association *asoc,
 {
 	struct sock *sk = asoc->base.sk;
 	struct socket *sock;
+	struct inet_sock *inetsk;
+	struct sctp_af *af;
 	int err = 0;
 
 	/* An association cannot be branched off from an already peeled-off
@@ -2821,6 +3766,15 @@ SCTP_STATIC int sctp_do_peeloff(struct sctp_association *asoc,
 	 * asoc to the newsk.
 	 */
 	sctp_sock_migrate(sk, sock->sk, asoc, SCTP_SOCKET_UDP_HIGH_BANDWIDTH);
+
+	/* Make peeled-off sockets more like 1-1 accepted sockets.
+	 * Set the daddr and initialize id to something more random
+	 */
+	af = sctp_get_af_specific(asoc->peer.primary_addr.sa.sa_family);
+	af->to_sk_daddr(&asoc->peer.primary_addr, sk);
+	inetsk = inet_sk(sock->sk);
+	inetsk->id = asoc->next_tsn ^ jiffies;
+
 	*sockp = sock;
 
 	return err;
@@ -2833,8 +3787,9 @@ static int sctp_getsockopt_peeloff(struct sock *sk, int len, char __user *optval
 	int retval = 0;
 	struct sctp_association *asoc;
 
-	if (len != sizeof(sctp_peeloff_arg_t))
+	if (len < sizeof(sctp_peeloff_arg_t))
 		return -EINVAL;
+	len = sizeof(sctp_peeloff_arg_t);
 	if (copy_from_user(&peeloff, optval, len))
 		return -EFAULT;
 
@@ -2862,6 +3817,8 @@ static int sctp_getsockopt_peeloff(struct sock *sk, int len, char __user *optval
 
 	/* Return the fd mapped to the new socket.  */
 	peeloff.sd = retval;
+	if (put_user(len, optlen))
+		return -EFAULT;
 	if (copy_to_user(optval, &peeloff, len))
 		retval = -EFAULT;
 
@@ -2879,69 +3836,229 @@ out:
  * address's parameters:
  *
  *  struct sctp_paddrparams {
- *      sctp_assoc_t            spp_assoc_id;
- *      struct sockaddr_storage spp_address;
- *      uint32_t                spp_hbinterval;
- *      uint16_t                spp_pathmaxrxt;
- *  };
+ *     sctp_assoc_t            spp_assoc_id;
+ *     struct sockaddr_storage spp_address;
+ *     uint32_t                spp_hbinterval;
+ *     uint16_t                spp_pathmaxrxt;
+ *     uint32_t                spp_pathmtu;
+ *     uint32_t                spp_sackdelay;
+ *     uint32_t                spp_flags;
+ * };
  *
- *   spp_assoc_id    - (UDP style socket) This is filled in the application,
- *                     and identifies the association for this query.
+ *   spp_assoc_id    - (one-to-many style socket) This is filled in the
+ *                     application, and identifies the association for
+ *                     this query.
  *   spp_address     - This specifies which address is of interest.
  *   spp_hbinterval  - This contains the value of the heartbeat interval,
- *                     in milliseconds.  A value of 0, when modifying the
- *                     parameter, specifies that the heartbeat on this
- *                     address should be disabled. A value of UINT32_MAX
- *                     (4294967295), when modifying the parameter,
- *                     specifies that a heartbeat should be sent
- *                     immediately to the peer address, and the current
- *                     interval should remain unchanged.
+ *                     in milliseconds.  If a  value of zero
+ *                     is present in this field then no changes are to
+ *                     be made to this parameter.
  *   spp_pathmaxrxt  - This contains the maximum number of
  *                     retransmissions before this address shall be
- *                     considered unreachable.
+ *                     considered unreachable. If a  value of zero
+ *                     is present in this field then no changes are to
+ *                     be made to this parameter.
+ *   spp_pathmtu     - When Path MTU discovery is disabled the value
+ *                     specified here will be the "fixed" path mtu.
+ *                     Note that if the spp_address field is empty
+ *                     then all associations on this address will
+ *                     have this fixed path mtu set upon them.
+ *
+ *   spp_sackdelay   - When delayed sack is enabled, this value specifies
+ *                     the number of milliseconds that sacks will be delayed
+ *                     for. This value will apply to all addresses of an
+ *                     association if the spp_address field is empty. Note
+ *                     also, that if delayed sack is enabled and this
+ *                     value is set to 0, no change is made to the last
+ *                     recorded delayed sack timer value.
+ *
+ *   spp_flags       - These flags are used to control various features
+ *                     on an association. The flag field may contain
+ *                     zero or more of the following options.
+ *
+ *                     SPP_HB_ENABLE  - Enable heartbeats on the
+ *                     specified address. Note that if the address
+ *                     field is empty all addresses for the association
+ *                     have heartbeats enabled upon them.
+ *
+ *                     SPP_HB_DISABLE - Disable heartbeats on the
+ *                     speicifed address. Note that if the address
+ *                     field is empty all addresses for the association
+ *                     will have their heartbeats disabled. Note also
+ *                     that SPP_HB_ENABLE and SPP_HB_DISABLE are
+ *                     mutually exclusive, only one of these two should
+ *                     be specified. Enabling both fields will have
+ *                     undetermined results.
+ *
+ *                     SPP_HB_DEMAND - Request a user initiated heartbeat
+ *                     to be made immediately.
+ *
+ *                     SPP_PMTUD_ENABLE - This field will enable PMTU
+ *                     discovery upon the specified address. Note that
+ *                     if the address feild is empty then all addresses
+ *                     on the association are effected.
+ *
+ *                     SPP_PMTUD_DISABLE - This field will disable PMTU
+ *                     discovery upon the specified address. Note that
+ *                     if the address feild is empty then all addresses
+ *                     on the association are effected. Not also that
+ *                     SPP_PMTUD_ENABLE and SPP_PMTUD_DISABLE are mutually
+ *                     exclusive. Enabling both will have undetermined
+ *                     results.
+ *
+ *                     SPP_SACKDELAY_ENABLE - Setting this flag turns
+ *                     on delayed sack. The time specified in spp_sackdelay
+ *                     is used to specify the sack delay for this address. Note
+ *                     that if spp_address is empty then all addresses will
+ *                     enable delayed sack and take on the sack delay
+ *                     value specified in spp_sackdelay.
+ *                     SPP_SACKDELAY_DISABLE - Setting this flag turns
+ *                     off delayed sack. If the spp_address field is blank then
+ *                     delayed sack is disabled for the entire association. Note
+ *                     also that this field is mutually exclusive to
+ *                     SPP_SACKDELAY_ENABLE, setting both will have undefined
+ *                     results.
  */
 static int sctp_getsockopt_peer_addr_params(struct sock *sk, int len,
-						char __user *optval, int __user *optlen)
+					    char __user *optval, int __user *optlen)
 {
-	struct sctp_paddrparams params;
-	struct sctp_transport *trans;
+	struct sctp_paddrparams  params;
+	struct sctp_transport   *trans = NULL;
+	struct sctp_association *asoc = NULL;
+	struct sctp_sock        *sp = sctp_sk(sk);
 
-	if (len != sizeof(struct sctp_paddrparams))
+	if (len < sizeof(struct sctp_paddrparams))
 		return -EINVAL;
+	len = sizeof(struct sctp_paddrparams);
 	if (copy_from_user(&params, optval, len))
 		return -EFAULT;
 
-	/* If no association id is specified retrieve the default value
-	 * for the endpoint that will be used for all future associations
+	/* If an address other than INADDR_ANY is specified, and
+	 * no transport is found, then the request is invalid.
 	 */
-	if (!params.spp_assoc_id &&
-	    sctp_is_any(( union sctp_addr *)&params.spp_address)) {
-		params.spp_hbinterval = sctp_sk(sk)->paddrparam.spp_hbinterval;
-		params.spp_pathmaxrxt = sctp_sk(sk)->paddrparam.spp_pathmaxrxt;
-
-		goto done;
+	if (!sctp_is_any(( union sctp_addr *)&params.spp_address)) {
+		trans = sctp_addr_id2transport(sk, &params.spp_address,
+					       params.spp_assoc_id);
+		if (!trans) {
+			SCTP_DEBUG_PRINTK("Failed no transport\n");
+			return -EINVAL;
+		}
 	}
 
-	trans = sctp_addr_id2transport(sk, &params.spp_address,
-				       params.spp_assoc_id);
-	if (!trans)
+	/* Get association, if assoc_id != 0 and the socket is a one
+	 * to many style socket, and an association was not found, then
+	 * the id was invalid.
+	 */
+	asoc = sctp_id2assoc(sk, params.spp_assoc_id);
+	if (!asoc && params.spp_assoc_id && sctp_style(sk, UDP)) {
+		SCTP_DEBUG_PRINTK("Failed no association\n");
+		return -EINVAL;
+	}
+
+	if (trans) {
+		/* Fetch transport values. */
+		params.spp_hbinterval = jiffies_to_msecs(trans->hbinterval);
+		params.spp_pathmtu    = trans->pathmtu;
+		params.spp_pathmaxrxt = trans->pathmaxrxt;
+		params.spp_sackdelay  = jiffies_to_msecs(trans->sackdelay);
+
+		/*draft-11 doesn't say what to return in spp_flags*/
+		params.spp_flags      = trans->param_flags;
+	} else if (asoc) {
+		/* Fetch association values. */
+		params.spp_hbinterval = jiffies_to_msecs(asoc->hbinterval);
+		params.spp_pathmtu    = asoc->pathmtu;
+		params.spp_pathmaxrxt = asoc->pathmaxrxt;
+		params.spp_sackdelay  = jiffies_to_msecs(asoc->sackdelay);
+
+		/*draft-11 doesn't say what to return in spp_flags*/
+		params.spp_flags      = asoc->param_flags;
+	} else {
+		/* Fetch socket values. */
+		params.spp_hbinterval = sp->hbinterval;
+		params.spp_pathmtu    = sp->pathmtu;
+		params.spp_sackdelay  = sp->sackdelay;
+		params.spp_pathmaxrxt = sp->pathmaxrxt;
+
+		/*draft-11 doesn't say what to return in spp_flags*/
+		params.spp_flags      = sp->param_flags;
+	}
+
+	if (copy_to_user(optval, &params, len))
+		return -EFAULT;
+
+	if (put_user(len, optlen))
+		return -EFAULT;
+
+	return 0;
+}
+
+/* 7.1.23. Delayed Ack Timer (SCTP_DELAYED_ACK_TIME)
+ *
+ *   This options will get or set the delayed ack timer.  The time is set
+ *   in milliseconds.  If the assoc_id is 0, then this sets or gets the
+ *   endpoints default delayed ack timer value.  If the assoc_id field is
+ *   non-zero, then the set or get effects the specified association.
+ *
+ *   struct sctp_assoc_value {
+ *       sctp_assoc_t            assoc_id;
+ *       uint32_t                assoc_value;
+ *   };
+ *
+ *     assoc_id    - This parameter, indicates which association the
+ *                   user is preforming an action upon. Note that if
+ *                   this field's value is zero then the endpoints
+ *                   default value is changed (effecting future
+ *                   associations only).
+ *
+ *     assoc_value - This parameter contains the number of milliseconds
+ *                   that the user is requesting the delayed ACK timer
+ *                   be set to. Note that this value is defined in
+ *                   the standard to be between 200 and 500 milliseconds.
+ *
+ *                   Note: a value of zero will leave the value alone,
+ *                   but disable SACK delay. A non-zero value will also
+ *                   enable SACK delay.
+ */
+static int sctp_getsockopt_delayed_ack_time(struct sock *sk, int len,
+					    char __user *optval,
+					    int __user *optlen)
+{
+	struct sctp_assoc_value  params;
+	struct sctp_association *asoc = NULL;
+	struct sctp_sock        *sp = sctp_sk(sk);
+
+	if (len < sizeof(struct sctp_assoc_value))
+		return - EINVAL;
+
+	len = sizeof(struct sctp_assoc_value);
+
+	if (copy_from_user(&params, optval, len))
+		return -EFAULT;
+
+	/* Get association, if assoc_id != 0 and the socket is a one
+	 * to many style socket, and an association was not found, then
+	 * the id was invalid.
+	 */
+	asoc = sctp_id2assoc(sk, params.assoc_id);
+	if (!asoc && params.assoc_id && sctp_style(sk, UDP))
 		return -EINVAL;
 
-	/* The value of the heartbeat interval, in milliseconds. A value of 0,
-	 * when modifying the parameter, specifies that the heartbeat on this
-	 * address should be disabled.
-	 */
-	if (!trans->hb_allowed)
-		params.spp_hbinterval = 0;
-	else
-		params.spp_hbinterval = jiffies_to_msecs(trans->hb_interval);
+	if (asoc) {
+		/* Fetch association values. */
+		if (asoc->param_flags & SPP_SACKDELAY_ENABLE)
+			params.assoc_value = jiffies_to_msecs(
+				asoc->sackdelay);
+		else
+			params.assoc_value = 0;
+	} else {
+		/* Fetch socket values. */
+		if (sp->param_flags & SPP_SACKDELAY_ENABLE)
+			params.assoc_value  = sp->sackdelay;
+		else
+			params.assoc_value  = 0;
+	}
 
-	/* spp_pathmaxrxt contains the maximum number of retransmissions
-	 * before this address shall be considered unreachable.
-	 */
-	params.spp_pathmaxrxt = trans->max_retrans;
-
-done:
 	if (copy_to_user(optval, &params, len))
 		return -EFAULT;
 
@@ -2964,22 +4081,26 @@ done:
  */
 static int sctp_getsockopt_initmsg(struct sock *sk, int len, char __user *optval, int __user *optlen)
 {
-	if (len != sizeof(struct sctp_initmsg))
+	if (len < sizeof(struct sctp_initmsg))
 		return -EINVAL;
+	len = sizeof(struct sctp_initmsg);
+	if (put_user(len, optlen))
+		return -EFAULT;
 	if (copy_to_user(optval, &sctp_sk(sk)->initmsg, len))
 		return -EFAULT;
 	return 0;
 }
 
-static int sctp_getsockopt_peer_addrs_num(struct sock *sk, int len,
-					  char __user *optval, int __user *optlen)
+static int sctp_getsockopt_peer_addrs_num_old(struct sock *sk, int len,
+					      char __user *optval,
+					      int __user *optlen)
 {
 	sctp_assoc_t id;
 	struct sctp_association *asoc;
 	struct list_head *pos;
 	int cnt = 0;
 
-	if (len != sizeof(sctp_assoc_t))
+	if (len < sizeof(sctp_assoc_t))
 		return -EINVAL;
 
 	if (copy_from_user(&id, optval, sizeof(sctp_assoc_t)))
@@ -2997,23 +4118,30 @@ static int sctp_getsockopt_peer_addrs_num(struct sock *sk, int len,
 	return cnt;
 }
 
-static int sctp_getsockopt_peer_addrs(struct sock *sk, int len,
-				      char __user *optval, int __user *optlen)
+/*
+ * Old API for getting list of peer addresses. Does not work for 32-bit
+ * programs running on a 64-bit kernel
+ */
+static int sctp_getsockopt_peer_addrs_old(struct sock *sk, int len,
+					  char __user *optval,
+					  int __user *optlen)
 {
 	struct sctp_association *asoc;
 	struct list_head *pos;
 	int cnt = 0;
-	struct sctp_getaddrs getaddrs;
+	struct sctp_getaddrs_old getaddrs;
 	struct sctp_transport *from;
 	void __user *to;
 	union sctp_addr temp;
 	struct sctp_sock *sp = sctp_sk(sk);
 	int addrlen;
 
-	if (len != sizeof(struct sctp_getaddrs))
+	if (len < sizeof(struct sctp_getaddrs_old))
 		return -EINVAL;
 
-	if (copy_from_user(&getaddrs, optval, sizeof(struct sctp_getaddrs)))
+	len = sizeof(struct sctp_getaddrs_old);
+
+	if (copy_from_user(&getaddrs, optval, len))
 		return -EFAULT;
 
 	if (getaddrs.addr_num <= 0) return -EINVAL;
@@ -3029,7 +4157,6 @@ static int sctp_getsockopt_peer_addrs(struct sock *sk, int len,
 		memcpy(&temp, &from->ipaddr, sizeof(temp));
 		sctp_get_pf_specific(sk->sk_family)->addr_v4map(sp, &temp);
 		addrlen = sctp_get_af_specific(sk->sk_family)->sockaddr_len;
-		temp.v4.sin_port = htons(temp.v4.sin_port);
 		if (copy_to_user(to, &temp, addrlen))
 			return -EFAULT;
 		to += addrlen ;
@@ -3037,26 +4164,77 @@ static int sctp_getsockopt_peer_addrs(struct sock *sk, int len,
 		if (cnt >= getaddrs.addr_num) break;
 	}
 	getaddrs.addr_num = cnt;
-	if (copy_to_user(optval, &getaddrs, sizeof(struct sctp_getaddrs)))
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &getaddrs, len))
 		return -EFAULT;
 
 	return 0;
 }
 
-static int sctp_getsockopt_local_addrs_num(struct sock *sk, int len,
-						char __user *optval,
-						int __user *optlen)
+static int sctp_getsockopt_peer_addrs(struct sock *sk, int len,
+				      char __user *optval, int __user *optlen)
+{
+	struct sctp_association *asoc;
+	struct list_head *pos;
+	int cnt = 0;
+	struct sctp_getaddrs getaddrs;
+	struct sctp_transport *from;
+	void __user *to;
+	union sctp_addr temp;
+	struct sctp_sock *sp = sctp_sk(sk);
+	int addrlen;
+	size_t space_left;
+	int bytes_copied;
+
+	if (len < sizeof(struct sctp_getaddrs))
+		return -EINVAL;
+
+	if (copy_from_user(&getaddrs, optval, sizeof(struct sctp_getaddrs)))
+		return -EFAULT;
+
+	/* For UDP-style sockets, id specifies the association to query.  */
+	asoc = sctp_id2assoc(sk, getaddrs.assoc_id);
+	if (!asoc)
+		return -EINVAL;
+
+	to = optval + offsetof(struct sctp_getaddrs,addrs);
+	space_left = len - offsetof(struct sctp_getaddrs,addrs);
+
+	list_for_each(pos, &asoc->peer.transport_addr_list) {
+		from = list_entry(pos, struct sctp_transport, transports);
+		memcpy(&temp, &from->ipaddr, sizeof(temp));
+		sctp_get_pf_specific(sk->sk_family)->addr_v4map(sp, &temp);
+		addrlen = sctp_get_af_specific(sk->sk_family)->sockaddr_len;
+		if (space_left < addrlen)
+			return -ENOMEM;
+		if (copy_to_user(to, &temp, addrlen))
+			return -EFAULT;
+		to += addrlen;
+		cnt++;
+		space_left -= addrlen;
+	}
+
+	if (put_user(cnt, &((struct sctp_getaddrs __user *)optval)->addr_num))
+		return -EFAULT;
+	bytes_copied = ((char __user *)to) - optval;
+	if (put_user(bytes_copied, optlen))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int sctp_getsockopt_local_addrs_num_old(struct sock *sk, int len,
+					       char __user *optval,
+					       int __user *optlen)
 {
 	sctp_assoc_t id;
 	struct sctp_bind_addr *bp;
 	struct sctp_association *asoc;
-	struct list_head *pos;
 	struct sctp_sockaddr_entry *addr;
-	rwlock_t *addr_lock;
-	unsigned long flags;
 	int cnt = 0;
 
-	if (len != sizeof(sctp_assoc_t))
+	if (len < sizeof(sctp_assoc_t))
 		return -EINVAL;
 
 	if (copy_from_user(&id, optval, sizeof(sctp_assoc_t)))
@@ -3070,16 +4248,12 @@ static int sctp_getsockopt_local_addrs_num(struct sock *sk, int len,
 	 */
 	if (0 == id) {
 		bp = &sctp_sk(sk)->ep->base.bind_addr;
-		addr_lock = &sctp_sk(sk)->ep->base.addr_lock;
 	} else {
 		asoc = sctp_id2assoc(sk, id);
 		if (!asoc)
 			return -EINVAL;
 		bp = &asoc->base.bind_addr;
-		addr_lock = &asoc->base.addr_lock;
 	}
-
-	sctp_read_lock(addr_lock);
 
 	/* If the endpoint is bound to 0.0.0.0 or ::0, count the valid
 	 * addresses from the global local address list.
@@ -3088,91 +4262,133 @@ static int sctp_getsockopt_local_addrs_num(struct sock *sk, int len,
 		addr = list_entry(bp->address_list.next,
 				  struct sctp_sockaddr_entry, list);
 		if (sctp_is_any(&addr->a)) {
-			sctp_spin_lock_irqsave(&sctp_local_addr_lock, flags);
-			list_for_each(pos, &sctp_local_addr_list) {
-				addr = list_entry(pos,
-						  struct sctp_sockaddr_entry,
-						  list);
-				if ((PF_INET == sk->sk_family) && 
-				    (AF_INET6 == addr->a.sa.sa_family))	
+			rcu_read_lock();
+			list_for_each_entry_rcu(addr,
+						&sctp_local_addr_list, list) {
+				if (!addr->valid)
 					continue;
+
+				if ((PF_INET == sk->sk_family) &&
+				    (AF_INET6 == addr->a.sa.sa_family))
+					continue;
+
 				cnt++;
 			}
-			sctp_spin_unlock_irqrestore(&sctp_local_addr_lock,
-						    flags);
+			rcu_read_unlock();
 		} else {
 			cnt = 1;
 		}
 		goto done;
 	}
 
-	list_for_each(pos, &bp->address_list) {
+	/* Protection on the bound address list is not needed,
+	 * since in the socket option context we hold the socket lock,
+	 * so there is no way that the bound address list can change.
+	 */
+	list_for_each_entry(addr, &bp->address_list, list) {
 		cnt ++;
 	}
-
 done:
-	sctp_read_unlock(addr_lock);
 	return cnt;
 }
 
 /* Helper function that copies local addresses to user and returns the number
  * of addresses copied.
  */
-static int sctp_copy_laddrs_to_user(struct sock *sk, __u16 port, int max_addrs,
-				    void __user *to)
+static int sctp_copy_laddrs_old(struct sock *sk, __u16 port,
+					int max_addrs, void *to,
+					int *bytes_copied)
 {
-	struct list_head *pos;
 	struct sctp_sockaddr_entry *addr;
-	unsigned long flags;
 	union sctp_addr temp;
 	int cnt = 0;
 	int addrlen;
 
-	sctp_spin_lock_irqsave(&sctp_local_addr_lock, flags);
-	list_for_each(pos, &sctp_local_addr_list) {
-		addr = list_entry(pos, struct sctp_sockaddr_entry, list);
-		if ((PF_INET == sk->sk_family) && 
+	rcu_read_lock();
+	list_for_each_entry_rcu(addr, &sctp_local_addr_list, list) {
+		if (!addr->valid)
+			continue;
+
+		if ((PF_INET == sk->sk_family) &&
 		    (AF_INET6 == addr->a.sa.sa_family))
 			continue;
 		memcpy(&temp, &addr->a, sizeof(temp));
 		sctp_get_pf_specific(sk->sk_family)->addr_v4map(sctp_sk(sk),
 								&temp);
 		addrlen = sctp_get_af_specific(temp.sa.sa_family)->sockaddr_len;
-		temp.v4.sin_port = htons(port);
-		if (copy_to_user(to, &temp, addrlen)) {
-			sctp_spin_unlock_irqrestore(&sctp_local_addr_lock,
-						    flags);
-			return -EFAULT;
-		}
+		memcpy(to, &temp, addrlen);
+
 		to += addrlen;
+		*bytes_copied += addrlen;
 		cnt ++;
 		if (cnt >= max_addrs) break;
 	}
-	sctp_spin_unlock_irqrestore(&sctp_local_addr_lock, flags);
+	rcu_read_unlock();
 
 	return cnt;
 }
 
-static int sctp_getsockopt_local_addrs(struct sock *sk, int len,
-				       char __user *optval, int __user *optlen)
+static int sctp_copy_laddrs(struct sock *sk, __u16 port, void *to,
+			    size_t space_left, int *bytes_copied)
+{
+	struct sctp_sockaddr_entry *addr;
+	union sctp_addr temp;
+	int cnt = 0;
+	int addrlen;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(addr, &sctp_local_addr_list, list) {
+		if (!addr->valid)
+			continue;
+
+		if ((PF_INET == sk->sk_family) &&
+		    (AF_INET6 == addr->a.sa.sa_family))
+			continue;
+		memcpy(&temp, &addr->a, sizeof(temp));
+		sctp_get_pf_specific(sk->sk_family)->addr_v4map(sctp_sk(sk),
+								&temp);
+		addrlen = sctp_get_af_specific(temp.sa.sa_family)->sockaddr_len;
+		if (space_left < addrlen) {
+			cnt =  -ENOMEM;
+			break;
+		}
+		memcpy(to, &temp, addrlen);
+
+		to += addrlen;
+		cnt ++;
+		space_left -= addrlen;
+		*bytes_copied += addrlen;
+	}
+	rcu_read_unlock();
+
+	return cnt;
+}
+
+/* Old API for getting list of local addresses. Does not work for 32-bit
+ * programs running on a 64-bit kernel
+ */
+static int sctp_getsockopt_local_addrs_old(struct sock *sk, int len,
+					   char __user *optval, int __user *optlen)
 {
 	struct sctp_bind_addr *bp;
 	struct sctp_association *asoc;
-	struct list_head *pos;
 	int cnt = 0;
-	struct sctp_getaddrs getaddrs;
+	struct sctp_getaddrs_old getaddrs;
 	struct sctp_sockaddr_entry *addr;
 	void __user *to;
 	union sctp_addr temp;
 	struct sctp_sock *sp = sctp_sk(sk);
 	int addrlen;
-	rwlock_t *addr_lock;
 	int err = 0;
+	void *addrs;
+	void *buf;
+	int bytes_copied = 0;
 
-	if (len != sizeof(struct sctp_getaddrs))
+	if (len < sizeof(struct sctp_getaddrs_old))
 		return -EINVAL;
 
-	if (copy_from_user(&getaddrs, optval, sizeof(struct sctp_getaddrs)))
+	len = sizeof(struct sctp_getaddrs_old);
+	if (copy_from_user(&getaddrs, optval, len))
 		return -EFAULT;
 
 	if (getaddrs.addr_num <= 0) return -EINVAL;
@@ -3184,18 +4400,23 @@ static int sctp_getsockopt_local_addrs(struct sock *sk, int len,
 	 */
 	if (0 == getaddrs.assoc_id) {
 		bp = &sctp_sk(sk)->ep->base.bind_addr;
-		addr_lock = &sctp_sk(sk)->ep->base.addr_lock;
 	} else {
 		asoc = sctp_id2assoc(sk, getaddrs.assoc_id);
 		if (!asoc)
 			return -EINVAL;
 		bp = &asoc->base.bind_addr;
-		addr_lock = &asoc->base.addr_lock;
 	}
 
 	to = getaddrs.addrs;
 
-	sctp_read_lock(addr_lock);
+	/* Allocate space for a local instance of packed array to hold all
+	 * the data.  We store addresses here first and then put write them
+	 * to the user in one shot.
+	 */
+	addrs = kmalloc(sizeof(union sctp_addr) * getaddrs.addr_num,
+			GFP_KERNEL);
+	if (!addrs)
+		return -ENOMEM;
 
 	/* If the endpoint is bound to 0.0.0.0 or ::0, get the valid
 	 * addresses from the global local address list.
@@ -3204,38 +4425,142 @@ static int sctp_getsockopt_local_addrs(struct sock *sk, int len,
 		addr = list_entry(bp->address_list.next,
 				  struct sctp_sockaddr_entry, list);
 		if (sctp_is_any(&addr->a)) {
-			cnt = sctp_copy_laddrs_to_user(sk, bp->port,
-						       getaddrs.addr_num, to);
-			if (cnt < 0) {
-				err = cnt;
-				goto unlock;
-			}
-			goto copy_getaddrs;		
+			cnt = sctp_copy_laddrs_old(sk, bp->port,
+						   getaddrs.addr_num,
+						   addrs, &bytes_copied);
+			goto copy_getaddrs;
 		}
 	}
 
-	list_for_each(pos, &bp->address_list) {
-		addr = list_entry(pos, struct sctp_sockaddr_entry, list);
+	buf = addrs;
+	/* Protection on the bound address list is not needed since
+	 * in the socket option context we hold a socket lock and
+	 * thus the bound address list can't change.
+	 */
+	list_for_each_entry(addr, &bp->address_list, list) {
 		memcpy(&temp, &addr->a, sizeof(temp));
 		sctp_get_pf_specific(sk->sk_family)->addr_v4map(sp, &temp);
 		addrlen = sctp_get_af_specific(temp.sa.sa_family)->sockaddr_len;
-		temp.v4.sin_port = htons(temp.v4.sin_port);
-		if (copy_to_user(to, &temp, addrlen)) {
-			err = -EFAULT;
-			goto unlock;
-		}
-		to += addrlen;
+		memcpy(buf, &temp, addrlen);
+		buf += addrlen;
+		bytes_copied += addrlen;
 		cnt ++;
 		if (cnt >= getaddrs.addr_num) break;
 	}
 
 copy_getaddrs:
+	/* copy the entire address list into the user provided space */
+	if (copy_to_user(to, addrs, bytes_copied)) {
+		err = -EFAULT;
+		goto error;
+	}
+
+	/* copy the leading structure back to user */
 	getaddrs.addr_num = cnt;
-	if (copy_to_user(optval, &getaddrs, sizeof(struct sctp_getaddrs)))
+	if (copy_to_user(optval, &getaddrs, len))
 		err = -EFAULT;
 
-unlock:
-	sctp_read_unlock(addr_lock);
+error:
+	kfree(addrs);
+	return err;
+}
+
+static int sctp_getsockopt_local_addrs(struct sock *sk, int len,
+				       char __user *optval, int __user *optlen)
+{
+	struct sctp_bind_addr *bp;
+	struct sctp_association *asoc;
+	int cnt = 0;
+	struct sctp_getaddrs getaddrs;
+	struct sctp_sockaddr_entry *addr;
+	void __user *to;
+	union sctp_addr temp;
+	struct sctp_sock *sp = sctp_sk(sk);
+	int addrlen;
+	int err = 0;
+	size_t space_left;
+	int bytes_copied = 0;
+	void *addrs;
+	void *buf;
+
+	if (len < sizeof(struct sctp_getaddrs))
+		return -EINVAL;
+
+	if (copy_from_user(&getaddrs, optval, sizeof(struct sctp_getaddrs)))
+		return -EFAULT;
+
+	/*
+	 *  For UDP-style sockets, id specifies the association to query.
+	 *  If the id field is set to the value '0' then the locally bound
+	 *  addresses are returned without regard to any particular
+	 *  association.
+	 */
+	if (0 == getaddrs.assoc_id) {
+		bp = &sctp_sk(sk)->ep->base.bind_addr;
+	} else {
+		asoc = sctp_id2assoc(sk, getaddrs.assoc_id);
+		if (!asoc)
+			return -EINVAL;
+		bp = &asoc->base.bind_addr;
+	}
+
+	to = optval + offsetof(struct sctp_getaddrs,addrs);
+	space_left = len - offsetof(struct sctp_getaddrs,addrs);
+
+	addrs = kmalloc(space_left, GFP_KERNEL);
+	if (!addrs)
+		return -ENOMEM;
+
+	/* If the endpoint is bound to 0.0.0.0 or ::0, get the valid
+	 * addresses from the global local address list.
+	 */
+	if (sctp_list_single_entry(&bp->address_list)) {
+		addr = list_entry(bp->address_list.next,
+				  struct sctp_sockaddr_entry, list);
+		if (sctp_is_any(&addr->a)) {
+			cnt = sctp_copy_laddrs(sk, bp->port, addrs,
+						space_left, &bytes_copied);
+			if (cnt < 0) {
+				err = cnt;
+				goto out;
+			}
+			goto copy_getaddrs;
+		}
+	}
+
+	buf = addrs;
+	/* Protection on the bound address list is not needed since
+	 * in the socket option context we hold a socket lock and
+	 * thus the bound address list can't change.
+	 */
+	list_for_each_entry(addr, &bp->address_list, list) {
+		memcpy(&temp, &addr->a, sizeof(temp));
+		sctp_get_pf_specific(sk->sk_family)->addr_v4map(sp, &temp);
+		addrlen = sctp_get_af_specific(temp.sa.sa_family)->sockaddr_len;
+		if (space_left < addrlen) {
+			err =  -ENOMEM; /*fixme: right error?*/
+			goto out;
+		}
+		memcpy(buf, &temp, addrlen);
+		buf += addrlen;
+		bytes_copied += addrlen;
+		cnt ++;
+		space_left -= addrlen;
+	}
+
+copy_getaddrs:
+	if (copy_to_user(to, addrs, bytes_copied)) {
+		err = -EFAULT;
+		goto out;
+	}
+	if (put_user(cnt, &((struct sctp_getaddrs __user *)optval)->addr_num)) {
+		err = -EFAULT;
+		goto out;
+	}
+	if (put_user(bytes_copied, optlen))
+		err = -EFAULT;
+out:
+	kfree(addrs);
 	return err;
 }
 
@@ -3252,10 +4577,12 @@ static int sctp_getsockopt_primary_addr(struct sock *sk, int len,
 	struct sctp_association *asoc;
 	struct sctp_sock *sp = sctp_sk(sk);
 
-	if (len != sizeof(struct sctp_prim))
+	if (len < sizeof(struct sctp_prim))
 		return -EINVAL;
 
-	if (copy_from_user(&prim, optval, sizeof(struct sctp_prim)))
+	len = sizeof(struct sctp_prim);
+
+	if (copy_from_user(&prim, optval, len))
 		return -EFAULT;
 
 	asoc = sctp_id2assoc(sk, prim.ssp_assoc_id);
@@ -3264,43 +4591,44 @@ static int sctp_getsockopt_primary_addr(struct sock *sk, int len,
 
 	if (!asoc->peer.primary_path)
 		return -ENOTCONN;
-	
-	asoc->peer.primary_path->ipaddr.v4.sin_port =
-		htons(asoc->peer.primary_path->ipaddr.v4.sin_port);
+
 	memcpy(&prim.ssp_addr, &asoc->peer.primary_path->ipaddr,
-	       sizeof(union sctp_addr));
-	asoc->peer.primary_path->ipaddr.v4.sin_port =
-		ntohs(asoc->peer.primary_path->ipaddr.v4.sin_port);
+		asoc->peer.primary_path->af_specific->sockaddr_len);
 
 	sctp_get_pf_specific(sk->sk_family)->addr_v4map(sp,
 			(union sctp_addr *)&prim.ssp_addr);
 
-	if (copy_to_user(optval, &prim, sizeof(struct sctp_prim)))
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &prim, len))
 		return -EFAULT;
 
 	return 0;
 }
 
 /*
- * 7.1.11  Set Adaption Layer Indicator (SCTP_ADAPTION_LAYER)
+ * 7.1.11  Set Adaptation Layer Indicator (SCTP_ADAPTATION_LAYER)
  *
- * Requests that the local endpoint set the specified Adaption Layer
+ * Requests that the local endpoint set the specified Adaptation Layer
  * Indication parameter for all future INIT and INIT-ACK exchanges.
  */
-static int sctp_getsockopt_adaption_layer(struct sock *sk, int len,
+static int sctp_getsockopt_adaptation_layer(struct sock *sk, int len,
 				  char __user *optval, int __user *optlen)
 {
-	__u32 val;
+	struct sctp_setadaptation adaptation;
 
-	if (len < sizeof(__u32))
+	if (len < sizeof(struct sctp_setadaptation))
 		return -EINVAL;
 
-	len = sizeof(__u32);
-	val = sctp_sk(sk)->adaption_ind;
+	len = sizeof(struct sctp_setadaptation);
+
+	adaptation.ssb_adaptation_ind = sctp_sk(sk)->adaptation_ind;
+
 	if (put_user(len, optlen))
 		return -EFAULT;
-	if (copy_to_user(optval, &val, len))
+	if (copy_to_user(optval, &adaptation, len))
 		return -EFAULT;
+
 	return 0;
 }
 
@@ -3331,9 +4659,12 @@ static int sctp_getsockopt_default_send_param(struct sock *sk,
 	struct sctp_association *asoc;
 	struct sctp_sock *sp = sctp_sk(sk);
 
-	if (len != sizeof(struct sctp_sndrcvinfo))
+	if (len < sizeof(struct sctp_sndrcvinfo))
 		return -EINVAL;
-	if (copy_from_user(&info, optval, sizeof(struct sctp_sndrcvinfo)))
+
+	len = sizeof(struct sctp_sndrcvinfo);
+
+	if (copy_from_user(&info, optval, len))
 		return -EFAULT;
 
 	asoc = sctp_id2assoc(sk, info.sinfo_assoc_id);
@@ -3354,7 +4685,9 @@ static int sctp_getsockopt_default_send_param(struct sock *sk,
 		info.sinfo_timetolive = sp->default_timetolive;
 	}
 
-	if (copy_to_user(optval, &info, sizeof(struct sctp_sndrcvinfo)))
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &info, len))
 		return -EFAULT;
 
 	return 0;
@@ -3405,10 +4738,12 @@ static int sctp_getsockopt_rtoinfo(struct sock *sk, int len,
 	struct sctp_rtoinfo rtoinfo;
 	struct sctp_association *asoc;
 
-	if (len != sizeof (struct sctp_rtoinfo))
+	if (len < sizeof (struct sctp_rtoinfo))
 		return -EINVAL;
 
-	if (copy_from_user(&rtoinfo, optval, sizeof (struct sctp_rtoinfo)))
+	len = sizeof(struct sctp_rtoinfo);
+
+	if (copy_from_user(&rtoinfo, optval, len))
 		return -EFAULT;
 
 	asoc = sctp_id2assoc(sk, rtoinfo.srto_assoc_id);
@@ -3443,7 +4778,7 @@ static int sctp_getsockopt_rtoinfo(struct sock *sk, int len,
  *
  * 7.1.2 SCTP_ASSOCINFO
  *
- * This option is used to tune the the maximum retransmission attempts
+ * This option is used to tune the maximum retransmission attempts
  * of the association.
  * Returns an error if the new association retransmission value is
  * greater than the sum of the retransmission value  of the peer.
@@ -3460,11 +4795,12 @@ static int sctp_getsockopt_associnfo(struct sock *sk, int len,
 	struct list_head *pos;
 	int cnt = 0;
 
-	if (len != sizeof (struct sctp_assocparams))
+	if (len < sizeof (struct sctp_assocparams))
 		return -EINVAL;
 
-	if (copy_from_user(&assocparams, optval,
-			sizeof (struct sctp_assocparams)))
+	len = sizeof(struct sctp_assocparams);
+
+	if (copy_from_user(&assocparams, optval, len))
 		return -EFAULT;
 
 	asoc = sctp_id2assoc(sk, assocparams.sasoc_assoc_id);
@@ -3473,7 +4809,7 @@ static int sctp_getsockopt_associnfo(struct sock *sk, int len,
 		return -EINVAL;
 
 	/* Values correspoinding to the specific association */
-	if (assocparams.sasoc_assoc_id != 0) {
+	if (asoc) {
 		assocparams.sasoc_asocmaxrxt = asoc->max_retrans;
 		assocparams.sasoc_peer_rwnd = asoc->peer.rwnd;
 		assocparams.sasoc_local_rwnd = asoc->a_rwnd;
@@ -3540,6 +4876,44 @@ static int sctp_getsockopt_mappedv4(struct sock *sk, int len,
 }
 
 /*
+ * 7.1.29.  Set or Get the default context (SCTP_CONTEXT)
+ * (chapter and verse is quoted at sctp_setsockopt_context())
+ */
+static int sctp_getsockopt_context(struct sock *sk, int len,
+				   char __user *optval, int __user *optlen)
+{
+	struct sctp_assoc_value params;
+	struct sctp_sock *sp;
+	struct sctp_association *asoc;
+
+	if (len < sizeof(struct sctp_assoc_value))
+		return -EINVAL;
+
+	len = sizeof(struct sctp_assoc_value);
+
+	if (copy_from_user(&params, optval, len))
+		return -EFAULT;
+
+	sp = sctp_sk(sk);
+
+	if (params.assoc_id != 0) {
+		asoc = sctp_id2assoc(sk, params.assoc_id);
+		if (!asoc)
+			return -EINVAL;
+		params.assoc_value = asoc->default_rcv_context;
+	} else {
+		params.assoc_value = sp->default_rcv_context;
+	}
+
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &params, len))
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
  * 7.1.17 Set the maximum fragrmentation size (SCTP_MAXSEG)
  *
  * This socket option specifies the maximum size to put in any outgoing
@@ -3568,13 +4942,199 @@ static int sctp_getsockopt_maxseg(struct sock *sk, int len,
 	return 0;
 }
 
+/*
+ * 7.1.24.  Get or set fragmented interleave (SCTP_FRAGMENT_INTERLEAVE)
+ * (chapter and verse is quoted at sctp_setsockopt_fragment_interleave())
+ */
+static int sctp_getsockopt_fragment_interleave(struct sock *sk, int len,
+					       char __user *optval, int __user *optlen)
+{
+	int val;
+
+	if (len < sizeof(int))
+		return -EINVAL;
+
+	len = sizeof(int);
+
+	val = sctp_sk(sk)->frag_interleave;
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &val, len))
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
+ * 7.1.25.  Set or Get the sctp partial delivery point
+ * (chapter and verse is quoted at sctp_setsockopt_partial_delivery_point())
+ */
+static int sctp_getsockopt_partial_delivery_point(struct sock *sk, int len,
+						  char __user *optval,
+						  int __user *optlen)
+{
+	u32 val;
+
+	if (len < sizeof(u32))
+		return -EINVAL;
+
+	len = sizeof(u32);
+
+	val = sctp_sk(sk)->pd_point;
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &val, len))
+		return -EFAULT;
+
+	return -ENOTSUPP;
+}
+
+/*
+ * 7.1.28.  Set or Get the maximum burst (SCTP_MAX_BURST)
+ * (chapter and verse is quoted at sctp_setsockopt_maxburst())
+ */
+static int sctp_getsockopt_maxburst(struct sock *sk, int len,
+				    char __user *optval,
+				    int __user *optlen)
+{
+	int val;
+
+	if (len < sizeof(int))
+		return -EINVAL;
+
+	len = sizeof(int);
+
+	val = sctp_sk(sk)->max_burst;
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, &val, len))
+		return -EFAULT;
+
+	return -ENOTSUPP;
+}
+
+static int sctp_getsockopt_hmac_ident(struct sock *sk, int len,
+				    char __user *optval, int __user *optlen)
+{
+	struct sctp_hmac_algo_param *hmacs;
+	__u16 param_len;
+
+	hmacs = sctp_sk(sk)->ep->auth_hmacs_list;
+	param_len = ntohs(hmacs->param_hdr.length);
+
+	if (len < param_len)
+		return -EINVAL;
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, hmacs->hmac_ids, len))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int sctp_getsockopt_active_key(struct sock *sk, int len,
+				    char __user *optval, int __user *optlen)
+{
+	struct sctp_authkeyid val;
+	struct sctp_association *asoc;
+
+	if (len < sizeof(struct sctp_authkeyid))
+		return -EINVAL;
+	if (copy_from_user(&val, optval, sizeof(struct sctp_authkeyid)))
+		return -EFAULT;
+
+	asoc = sctp_id2assoc(sk, val.scact_assoc_id);
+	if (!asoc && val.scact_assoc_id && sctp_style(sk, UDP))
+		return -EINVAL;
+
+	if (asoc)
+		val.scact_keynumber = asoc->active_key_id;
+	else
+		val.scact_keynumber = sctp_sk(sk)->ep->active_key_id;
+
+	return 0;
+}
+
+static int sctp_getsockopt_peer_auth_chunks(struct sock *sk, int len,
+				    char __user *optval, int __user *optlen)
+{
+	struct sctp_authchunks __user *p = (void __user *)optval;
+	struct sctp_authchunks val;
+	struct sctp_association *asoc;
+	struct sctp_chunks_param *ch;
+	char __user *to;
+
+	if (len <= sizeof(struct sctp_authchunks))
+		return -EINVAL;
+
+	if (copy_from_user(&val, p, sizeof(struct sctp_authchunks)))
+		return -EFAULT;
+
+	to = p->gauth_chunks;
+	asoc = sctp_id2assoc(sk, val.gauth_assoc_id);
+	if (!asoc)
+		return -EINVAL;
+
+	ch = asoc->peer.peer_chunks;
+
+	/* See if the user provided enough room for all the data */
+	if (len < ntohs(ch->param_hdr.length))
+		return -EINVAL;
+
+	len = ntohs(ch->param_hdr.length);
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(to, ch->chunks, len))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int sctp_getsockopt_local_auth_chunks(struct sock *sk, int len,
+				    char __user *optval, int __user *optlen)
+{
+	struct sctp_authchunks __user *p = (void __user *)optval;
+	struct sctp_authchunks val;
+	struct sctp_association *asoc;
+	struct sctp_chunks_param *ch;
+	char __user *to;
+
+	if (len <= sizeof(struct sctp_authchunks))
+		return -EINVAL;
+
+	if (copy_from_user(&val, p, sizeof(struct sctp_authchunks)))
+		return -EFAULT;
+
+	to = p->gauth_chunks;
+	asoc = sctp_id2assoc(sk, val.gauth_assoc_id);
+	if (!asoc && val.gauth_assoc_id && sctp_style(sk, UDP))
+		return -EINVAL;
+
+	if (asoc)
+		ch = (struct sctp_chunks_param*)asoc->c.auth_chunks;
+	else
+		ch = sctp_sk(sk)->ep->auth_chunk_list;
+
+	if (len < ntohs(ch->param_hdr.length))
+		return -EINVAL;
+
+	len = ntohs(ch->param_hdr.length);
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(to, ch->chunks, len))
+		return -EFAULT;
+
+	return 0;
+}
+
 SCTP_STATIC int sctp_getsockopt(struct sock *sk, int level, int optname,
 				char __user *optval, int __user *optlen)
 {
 	int retval = 0;
 	int len;
 
-	SCTP_DEBUG_PRINTK("sctp_getsockopt(sk: %p, ...)\n", sk);
+	SCTP_DEBUG_PRINTK("sctp_getsockopt(sk: %p... optname: %d)\n",
+			  sk, optname);
 
 	/* I can hardly begin to describe how wrong this is.  This is
 	 * so broken as to be worse than useless.  The API draft
@@ -3615,15 +5175,27 @@ SCTP_STATIC int sctp_getsockopt(struct sock *sk, int level, int optname,
 		retval = sctp_getsockopt_peer_addr_params(sk, len, optval,
 							  optlen);
 		break;
+	case SCTP_DELAYED_ACK_TIME:
+		retval = sctp_getsockopt_delayed_ack_time(sk, len, optval,
+							  optlen);
+		break;
 	case SCTP_INITMSG:
 		retval = sctp_getsockopt_initmsg(sk, len, optval, optlen);
 		break;
-	case SCTP_GET_PEER_ADDRS_NUM:
-		retval = sctp_getsockopt_peer_addrs_num(sk, len, optval,
+	case SCTP_GET_PEER_ADDRS_NUM_OLD:
+		retval = sctp_getsockopt_peer_addrs_num_old(sk, len, optval,
+							    optlen);
+		break;
+	case SCTP_GET_LOCAL_ADDRS_NUM_OLD:
+		retval = sctp_getsockopt_local_addrs_num_old(sk, len, optval,
+							     optlen);
+		break;
+	case SCTP_GET_PEER_ADDRS_OLD:
+		retval = sctp_getsockopt_peer_addrs_old(sk, len, optval,
 							optlen);
 		break;
-	case SCTP_GET_LOCAL_ADDRS_NUM:
-		retval = sctp_getsockopt_local_addrs_num(sk, len, optval,
+	case SCTP_GET_LOCAL_ADDRS_OLD:
+		retval = sctp_getsockopt_local_addrs_old(sk, len, optval,
 							 optlen);
 		break;
 	case SCTP_GET_PEER_ADDRS:
@@ -3660,14 +5232,47 @@ SCTP_STATIC int sctp_getsockopt(struct sock *sk, int level, int optname,
 		retval = sctp_getsockopt_peer_addr_info(sk, len, optval,
 							optlen);
 		break;
-	case SCTP_ADAPTION_LAYER:
-		retval = sctp_getsockopt_adaption_layer(sk, len, optval,
+	case SCTP_ADAPTATION_LAYER:
+		retval = sctp_getsockopt_adaptation_layer(sk, len, optval,
+							optlen);
+		break;
+	case SCTP_CONTEXT:
+		retval = sctp_getsockopt_context(sk, len, optval, optlen);
+		break;
+	case SCTP_FRAGMENT_INTERLEAVE:
+		retval = sctp_getsockopt_fragment_interleave(sk, len, optval,
+							     optlen);
+		break;
+	case SCTP_PARTIAL_DELIVERY_POINT:
+		retval = sctp_getsockopt_partial_delivery_point(sk, len, optval,
+								optlen);
+		break;
+	case SCTP_MAX_BURST:
+		retval = sctp_getsockopt_maxburst(sk, len, optval, optlen);
+		break;
+	case SCTP_AUTH_KEY:
+	case SCTP_AUTH_CHUNK:
+	case SCTP_AUTH_DELETE_KEY:
+		retval = -EOPNOTSUPP;
+		break;
+	case SCTP_HMAC_IDENT:
+		retval = sctp_getsockopt_hmac_ident(sk, len, optval, optlen);
+		break;
+	case SCTP_AUTH_ACTIVE_KEY:
+		retval = sctp_getsockopt_active_key(sk, len, optval, optlen);
+		break;
+	case SCTP_PEER_AUTH_CHUNKS:
+		retval = sctp_getsockopt_peer_auth_chunks(sk, len, optval,
+							optlen);
+		break;
+	case SCTP_LOCAL_AUTH_CHUNKS:
+		retval = sctp_getsockopt_local_auth_chunks(sk, len, optval,
 							optlen);
 		break;
 	default:
 		retval = -ENOPROTOOPT;
 		break;
-	};
+	}
 
 	sctp_release_sock(sk);
 	return retval;
@@ -3702,33 +5307,24 @@ static long sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
 {
 	struct sctp_bind_hashbucket *head; /* hash list */
 	struct sctp_bind_bucket *pp; /* hash list port iterator */
+	struct hlist_node *node;
 	unsigned short snum;
 	int ret;
 
-	/* NOTE:  Remember to put this back to net order. */
-	addr->v4.sin_port = ntohs(addr->v4.sin_port);
-	snum = addr->v4.sin_port;
+	snum = ntohs(addr->v4.sin_port);
 
 	SCTP_DEBUG_PRINTK("sctp_get_port() begins, snum=%d\n", snum);
 	sctp_local_bh_disable();
 
 	if (snum == 0) {
-		/* Search for an available port.
-		 *
-		 * 'sctp_port_rover' was the last port assigned, so
-		 * we start to search from 'sctp_port_rover +
-		 * 1'. What we do is first check if port 'rover' is
-		 * already in the hash table; if not, we use that; if
-		 * it is, we try next.
-		 */
-		int low = sysctl_local_port_range[0];
-		int high = sysctl_local_port_range[1];
-		int remaining = (high - low) + 1;
-		int rover;
-		int index;
+		/* Search for an available port. */
+		int low, high, remaining, index;
+		unsigned int rover;
 
-		sctp_spin_lock(&sctp_port_alloc_lock);
-		rover = sctp_port_rover;
+		inet_get_local_port_range(&low, &high);
+		remaining = (high - low) + 1;
+		rover = net_random() % remaining + low;
+
 		do {
 			rover++;
 			if ((rover < low) || (rover > high))
@@ -3736,15 +5332,13 @@ static long sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
 			index = sctp_phashfn(rover);
 			head = &sctp_port_hashtable[index];
 			sctp_spin_lock(&head->lock);
-			for (pp = head->chain; pp; pp = pp->next)
+			sctp_for_each_hentry(pp, node, &head->chain)
 				if (pp->port == rover)
 					goto next;
 			break;
 		next:
 			sctp_spin_unlock(&head->lock);
 		} while (--remaining > 0);
-		sctp_port_rover = rover;
-		sctp_spin_unlock(&sctp_port_alloc_lock);
 
 		/* Exhausted local port range during search? */
 		ret = 1;
@@ -3765,7 +5359,7 @@ static long sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
 		 */
 		head = &sctp_port_hashtable[sctp_phashfn(snum)];
 		sctp_spin_lock(&head->lock);
-		for (pp = head->chain; pp; pp = pp->next) {
+		sctp_for_each_hentry(pp, node, &head->chain) {
 			if (pp->port == snum)
 				goto pp_found;
 		}
@@ -3784,7 +5378,8 @@ pp_found:
 		struct hlist_node *node;
 
 		SCTP_DEBUG_PRINTK("sctp_get_port() found a possible match\n");
-		if (pp->fastreuse && sk->sk_reuse)
+		if (pp->fastreuse && sk->sk_reuse &&
+			sk->sk_state != SCTP_SS_LISTENING)
 			goto success;
 
 		/* Run through the list of sockets bound to the port
@@ -3801,7 +5396,8 @@ pp_found:
 			struct sctp_endpoint *ep2;
 			ep2 = sctp_sk(sk2)->ep;
 
-			if (reuse && sk2->sk_reuse)
+			if (reuse && sk2->sk_reuse &&
+			    sk2->sk_state != SCTP_SS_LISTENING)
 				continue;
 
 			if (sctp_bind_addr_match(&ep2->base.bind_addr, addr,
@@ -3822,9 +5418,13 @@ pp_not_found:
 	 * if sk->sk_reuse is too (that is, if the caller requested
 	 * SO_REUSEADDR on this socket -sk-).
 	 */
-	if (hlist_empty(&pp->owner))
-		pp->fastreuse = sk->sk_reuse ? 1 : 0;
-	else if (pp->fastreuse && !sk->sk_reuse)
+	if (hlist_empty(&pp->owner)) {
+		if (sk->sk_reuse && sk->sk_state != SCTP_SS_LISTENING)
+			pp->fastreuse = 1;
+		else
+			pp->fastreuse = 0;
+	} else if (pp->fastreuse &&
+		(!sk->sk_reuse || sk->sk_state == SCTP_SS_LISTENING))
 		pp->fastreuse = 0;
 
 	/* We are set, so fill up all the data in the hash table
@@ -3832,8 +5432,8 @@ pp_not_found:
 	 * sockets FIXME: Blurry, NPI (ipg).
 	 */
 success:
-	inet_sk(sk)->num = snum;
 	if (!sctp_sk(sk)->bind_hash) {
+		inet_sk(sk)->num = snum;
 		sk_add_bind_node(sk, &pp->owner);
 		sctp_sk(sk)->bind_hash = pp;
 	}
@@ -3844,7 +5444,6 @@ fail_unlock:
 
 fail:
 	sctp_local_bh_enable();
-	addr->v4.sin_port = htons(addr->v4.sin_port);
 	return ret;
 }
 
@@ -3889,15 +5488,16 @@ SCTP_STATIC int sctp_seqpacket_listen(struct sock *sk, int backlog)
 	if (!backlog) {
 		if (sctp_sstate(sk, CLOSED))
 			return 0;
-		
+
 		sctp_unhash_endpoint(ep);
 		sk->sk_state = SCTP_SS_CLOSED;
+		return 0;
 	}
 
 	/* Return if we are already listening. */
 	if (sctp_sstate(sk, LISTENING))
 		return 0;
-		
+
 	/*
 	 * If a bind() or sctp_bindx() is not called prior to a listen()
 	 * call that allows new associations to be accepted, the system
@@ -3907,12 +5507,16 @@ SCTP_STATIC int sctp_seqpacket_listen(struct sock *sk, int backlog)
 	 * This is not currently spelled out in the SCTP sockets
 	 * extensions draft, but follows the practice as seen in TCP
 	 * sockets.
+	 *
+	 * Additionally, turn off fastreuse flag since we are not listening
 	 */
+	sk->sk_state = SCTP_SS_LISTENING;
 	if (!ep->base.bind_addr.port) {
 		if (sctp_autobind(sk))
 			return -EAGAIN;
-	}
-	sk->sk_state = SCTP_SS_LISTENING;
+	} else
+		sctp_sk(sk)->bind_hash->fastreuse = 0;
+
 	sctp_hash_endpoint(ep);
 	return 0;
 }
@@ -3932,9 +5536,10 @@ SCTP_STATIC int sctp_stream_listen(struct sock *sk, int backlog)
 	if (!backlog) {
 		if (sctp_sstate(sk, CLOSED))
 			return 0;
-		
+
 		sctp_unhash_endpoint(ep);
 		sk->sk_state = SCTP_SS_CLOSED;
+		return 0;
 	}
 
 	if (sctp_sstate(sk, LISTENING))
@@ -3950,11 +5555,13 @@ SCTP_STATIC int sctp_stream_listen(struct sock *sk, int backlog)
 	 * extensions draft, but follows the practice as seen in TCP
 	 * sockets.
 	 */
+	sk->sk_state = SCTP_SS_LISTENING;
 	if (!ep->base.bind_addr.port) {
 		if (sctp_autobind(sk))
 			return -EAGAIN;
-	}
-	sk->sk_state = SCTP_SS_LISTENING;
+	} else
+		sctp_sk(sk)->bind_hash->fastreuse = 0;
+
 	sk->sk_max_ack_backlog = backlog;
 	sctp_hash_endpoint(ep);
 	return 0;
@@ -3966,7 +5573,7 @@ SCTP_STATIC int sctp_stream_listen(struct sock *sk, int backlog)
 int sctp_inet_listen(struct socket *sock, int backlog)
 {
 	struct sock *sk = sock->sk;
-	struct crypto_tfm *tfm=NULL;
+	struct crypto_hash *tfm = NULL;
 	int err = -EINVAL;
 
 	if (unlikely(backlog < 0))
@@ -3979,8 +5586,13 @@ int sctp_inet_listen(struct socket *sock, int backlog)
 
 	/* Allocate HMAC for generating cookie. */
 	if (sctp_hmac_alg) {
-		tfm = sctp_crypto_alloc_tfm(sctp_hmac_alg, 0);
-		if (!tfm) {
+		tfm = crypto_alloc_hash(sctp_hmac_alg, 0, CRYPTO_ALG_ASYNC);
+		if (IS_ERR(tfm)) {
+			if (net_ratelimit()) {
+				printk(KERN_INFO
+				       "SCTP: failed to load transform for %s: %ld\n",
+					sctp_hmac_alg, PTR_ERR(tfm));
+			}
 			err = -ENOSYS;
 			goto out;
 		}
@@ -3995,7 +5607,8 @@ int sctp_inet_listen(struct socket *sock, int backlog)
 		break;
 	default:
 		break;
-	};
+	}
+
 	if (err)
 		goto cleanup;
 
@@ -4005,8 +5618,7 @@ out:
 	sctp_release_sock(sk);
 	return err;
 cleanup:
-	if (tfm)
-		sctp_crypto_free_tfm(tfm);
+	crypto_free_hash(tfm);
 	goto out;
 }
 
@@ -4015,7 +5627,7 @@ cleanup:
  * tcp_poll().  Note that, based on these implementations, we don't
  * lock the socket in this function, even though it seems that,
  * ideally, locking or some other mechanisms can be used to ensure
- * the integrity of the counters (sndbuf and wmem_queued) used
+ * the integrity of the counters (sndbuf and wmem_alloc) used
  * in this place.  We assume that we don't need locks either until proven
  * otherwise.
  *
@@ -4036,13 +5648,15 @@ unsigned int sctp_poll(struct file *file, struct socket *sock, poll_table *wait)
 	 */
 	if (sctp_style(sk, TCP) && sctp_sstate(sk, LISTENING))
 		return (!list_empty(&sp->ep->asocs)) ?
-		       	(POLLIN | POLLRDNORM) : 0;
+			(POLLIN | POLLRDNORM) : 0;
 
 	mask = 0;
 
 	/* Is there any exceptional events?  */
 	if (sk->sk_err || !skb_queue_empty(&sk->sk_error_queue))
 		mask |= POLLERR;
+	if (sk->sk_shutdown & RCV_SHUTDOWN)
+		mask |= POLLRDHUP;
 	if (sk->sk_shutdown == SHUTDOWN_MASK)
 		mask |= POLLHUP;
 
@@ -4083,16 +5697,13 @@ static struct sctp_bind_bucket *sctp_bucket_create(
 {
 	struct sctp_bind_bucket *pp;
 
-	pp = kmem_cache_alloc(sctp_bucket_cachep, SLAB_ATOMIC);
+	pp = kmem_cache_alloc(sctp_bucket_cachep, GFP_ATOMIC);
 	SCTP_DBG_OBJCNT_INC(bind_bucket);
 	if (pp) {
 		pp->port = snum;
 		pp->fastreuse = 0;
 		INIT_HLIST_HEAD(&pp->owner);
-		if ((pp->next = head->chain) != NULL)
-			pp->next->pprev = &pp->next;
-		head->chain = pp;
-		pp->pprev = &head->chain;
+		hlist_add_head(&pp->node, &head->chain);
 	}
 	return pp;
 }
@@ -4100,10 +5711,8 @@ static struct sctp_bind_bucket *sctp_bucket_create(
 /* Caller must hold hashbucket lock for this tb with local BH disabled */
 static void sctp_bucket_destroy(struct sctp_bind_bucket *pp)
 {
-	if (hlist_empty(&pp->owner)) {
-		if (pp->next)
-			pp->next->pprev = pp->pprev;
-		*(pp->pprev) = pp->next;
+	if (pp && hlist_empty(&pp->owner)) {
+		__hlist_del(&pp->node);
 		kmem_cache_free(sctp_bucket_cachep, pp);
 		SCTP_DBG_OBJCNT_DEC(bind_bucket);
 	}
@@ -4142,7 +5751,7 @@ static int sctp_autobind(struct sock *sk)
 {
 	union sctp_addr autoaddr;
 	struct sctp_af *af;
-	unsigned short port;
+	__be16 port;
 
 	/* Initialize a local sockaddr structure to INADDR_ANY. */
 	af = sctp_sk(sk)->pf->af;
@@ -4250,14 +5859,14 @@ SCTP_STATIC int sctp_msghdr_parse(const struct msghdr *msg,
 
 			/* Minimally, validate the sinfo_flags. */
 			if (cmsgs->info->sinfo_flags &
-			    ~(MSG_UNORDERED | MSG_ADDR_OVER |
-			      MSG_ABORT | MSG_EOF))
+			    ~(SCTP_UNORDERED | SCTP_ADDR_OVER |
+			      SCTP_ABORT | SCTP_EOF))
 				return -EINVAL;
 			break;
 
 		default:
 			return -EINVAL;
-		};
+		}
 	}
 	return 0;
 }
@@ -4332,11 +5941,6 @@ static struct sk_buff *sctp_skb_recv_datagram(struct sock *sk, int flags,
 	struct sk_buff *skb;
 	long timeo;
 
-	/* Caller is allowed not to check sk->sk_err before calling.  */
-	error = sock_error(sk);
-	if (error)
-		goto no_packet;
-
 	timeo = sock_rcvtimeo(sk, noblock);
 
 	SCTP_DEBUG_PRINTK("Timeout: timeo: %ld, MAX: %ld.\n",
@@ -4351,21 +5955,22 @@ static struct sk_buff *sctp_skb_recv_datagram(struct sock *sk, int flags,
 		 *  However, this function was corrent in any case. 8)
 		 */
 		if (flags & MSG_PEEK) {
-			unsigned long cpu_flags;
-
-			sctp_spin_lock_irqsave(&sk->sk_receive_queue.lock,
-					       cpu_flags);
+			spin_lock_bh(&sk->sk_receive_queue.lock);
 			skb = skb_peek(&sk->sk_receive_queue);
 			if (skb)
 				atomic_inc(&skb->users);
-			sctp_spin_unlock_irqrestore(&sk->sk_receive_queue.lock,
-						    cpu_flags);
+			spin_unlock_bh(&sk->sk_receive_queue.lock);
 		} else {
 			skb = skb_dequeue(&sk->sk_receive_queue);
 		}
 
 		if (skb)
 			return skb;
+
+		/* Caller is allowed not to check sk->sk_err before calling. */
+		error = sock_error(sk);
+		if (error)
+			goto no_packet;
 
 		if (sk->sk_shutdown & RCV_SHUTDOWN)
 			break;
@@ -4422,12 +6027,42 @@ static void sctp_wfree(struct sk_buff *skb)
 	chunk = *((struct sctp_chunk **)(skb->cb));
 	asoc = chunk->asoc;
 	sk = asoc->base.sk;
-	asoc->sndbuf_used -= SCTP_DATA_SNDSIZE(chunk);
-	sk->sk_wmem_queued -= SCTP_DATA_SNDSIZE(chunk);
+	asoc->sndbuf_used -= SCTP_DATA_SNDSIZE(chunk) +
+				sizeof(struct sk_buff) +
+				sizeof(struct sctp_chunk);
+
+	atomic_sub(sizeof(struct sctp_chunk), &sk->sk_wmem_alloc);
+
+	/*
+	 * This undoes what is done via sk_charge_skb
+	 */
+	sk->sk_wmem_queued   -= skb->truesize;
+	sk->sk_forward_alloc += skb->truesize;
+
+	sock_wfree(skb);
 	__sctp_write_space(asoc);
 
 	sctp_association_put(asoc);
 }
+
+/* Do accounting for the receive space on the socket.
+ * Accounting for the association is done in ulpevent.c
+ * We set this as a destructor for the cloned data skbs so that
+ * accounting is done at the correct time.
+ */
+void sctp_sock_rfree(struct sk_buff *skb)
+{
+	struct sock *sk = skb->sk;
+	struct sctp_ulpevent *event = sctp_skb2event(skb);
+
+	atomic_sub(event->rmem_len, &sk->sk_rmem_alloc);
+
+	/*
+	 * Mimic the behavior of sk_stream_rfree
+	 */
+	sk->sk_forward_alloc += event->rmem_len;
+}
+
 
 /* Helper function to wait for space in the sndbuf.  */
 static int sctp_wait_for_sndbuf(struct sctp_association *asoc, long *timeo_p,
@@ -4439,7 +6074,7 @@ static int sctp_wait_for_sndbuf(struct sctp_association *asoc, long *timeo_p,
 	DEFINE_WAIT(wait);
 
 	SCTP_DEBUG_PRINTK("wait_for_sndbuf: asoc=%p, timeo=%ld, msg_len=%zu\n",
-	                  asoc, (long)(*timeo_p), msg_len);
+			  asoc, (long)(*timeo_p), msg_len);
 
 	/* Increment the association's refcnt.  */
 	sctp_association_hold(asoc);
@@ -4463,6 +6098,7 @@ static int sctp_wait_for_sndbuf(struct sctp_association *asoc, long *timeo_p,
 		 */
 		sctp_release_sock(sk);
 		current_timeo = schedule_timeout(current_timeo);
+		BUG_ON(sk != asoc->base.sk);
 		sctp_lock_sock(sk);
 
 		*timeo_p = current_timeo;
@@ -4504,7 +6140,7 @@ void sctp_write_space(struct sock *sk)
 
 /* Is there any sndbuf space available on the socket?
  *
- * Note that wmem_queued is the sum of the send buffers on all of the
+ * Note that sk_wmem_alloc is the sum of the send buffers on all of the
  * associations on the same socket.  For a UDP-style socket with
  * multiple associations, it is possible for it to be "unwriteable"
  * prematurely.  I assume that this is acceptable because
@@ -4517,7 +6153,7 @@ static int sctp_writeable(struct sock *sk)
 {
 	int amt = 0;
 
-	amt = sk->sk_sndbuf - sk->sk_wmem_queued;
+	amt = sk->sk_sndbuf - atomic_read(&sk->sk_wmem_alloc);
 	if (amt < 0)
 		amt = 0;
 	return amt;
@@ -4574,8 +6210,7 @@ out:
 	return err;
 
 do_error:
-	if (asoc->counters[SCTP_COUNTER_INIT_ERROR] + 1 >=
-					 	asoc->max_init_attempts)
+	if (asoc->init_err_counter + 1 > asoc->max_init_attempts)
 		err = -ETIMEDOUT;
 	else
 		err = -ECONNREFUSED;
@@ -4631,7 +6266,7 @@ static int sctp_wait_for_accept(struct sock *sk, long timeo)
 	return err;
 }
 
-void sctp_wait_for_close(struct sock *sk, long timeout)
+static void sctp_wait_for_close(struct sock *sk, long timeout)
 {
 	DEFINE_WAIT(wait);
 
@@ -4647,6 +6282,36 @@ void sctp_wait_for_close(struct sock *sk, long timeout)
 	finish_wait(sk->sk_sleep, &wait);
 }
 
+static void sctp_sock_rfree_frag(struct sk_buff *skb)
+{
+	struct sk_buff *frag;
+
+	if (!skb->data_len)
+		goto done;
+
+	/* Don't forget the fragments. */
+	for (frag = skb_shinfo(skb)->frag_list; frag; frag = frag->next)
+		sctp_sock_rfree_frag(frag);
+
+done:
+	sctp_sock_rfree(skb);
+}
+
+static void sctp_skb_set_owner_r_frag(struct sk_buff *skb, struct sock *sk)
+{
+	struct sk_buff *frag;
+
+	if (!skb->data_len)
+		goto done;
+
+	/* Don't forget the fragments. */
+	for (frag = skb_shinfo(skb)->frag_list; frag; frag = frag->next)
+		sctp_skb_set_owner_r_frag(frag, sk);
+
+done:
+	sctp_skb_set_owner_r(skb, sk);
+}
+
 /* Populate the fields of the newsk from the oldsk and migrate the assoc
  * and its messages to the newsk.
  */
@@ -4660,6 +6325,7 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	struct sctp_endpoint *newep = newsp->ep;
 	struct sk_buff *skb, *tmp;
 	struct sctp_ulpevent *event;
+	struct sctp_bind_hashbucket *head;
 
 	/* Migrate socket buffer sizes and all the socket level options to the
 	 * new socket.
@@ -4676,10 +6342,21 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	newsp->hmac = NULL;
 
 	/* Hook this new socket in to the bind_hash list. */
+	head = &sctp_port_hashtable[sctp_phashfn(inet_sk(oldsk)->num)];
+	sctp_local_bh_disable();
+	sctp_spin_lock(&head->lock);
 	pp = sctp_sk(oldsk)->bind_hash;
 	sk_add_bind_node(newsk, &pp->owner);
 	sctp_sk(newsk)->bind_hash = pp;
 	inet_sk(newsk)->num = inet_sk(oldsk)->num;
+	sctp_spin_unlock(&head->lock);
+	sctp_local_bh_enable();
+
+	/* Copy the bind_addr list from the original endpoint to the new
+	 * endpoint so that we can handle restarts properly
+	 */
+	sctp_bind_addr_dup(&newsp->ep->base.bind_addr,
+				&oldsp->ep->base.bind_addr, GFP_KERNEL);
 
 	/* Move any messages in the old socket's receive queue that are for the
 	 * peeled off association to the new socket's receive queue.
@@ -4687,8 +6364,10 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	sctp_skb_for_each(skb, &oldsk->sk_receive_queue, tmp) {
 		event = sctp_skb2event(skb);
 		if (event->asoc == assoc) {
-			__skb_unlink(skb, skb->list);
+			sctp_sock_rfree_frag(skb);
+			__skb_unlink(skb, &oldsk->sk_receive_queue);
 			__skb_queue_tail(&newsk->sk_receive_queue, skb);
+			sctp_skb_set_owner_r_frag(skb, newsk);
 		}
 	}
 
@@ -4699,9 +6378,9 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	 * 3) Peeling off non-partial delivery; move pd_lobby to receive_queue.
 	 */
 	skb_queue_head_init(&newsp->pd_lobby);
-	sctp_sk(newsk)->pd_mode = assoc->ulpq.pd_mode;
+	atomic_set(&sctp_sk(newsk)->pd_mode, assoc->ulpq.pd_mode);
 
-	if (sctp_sk(oldsk)->pd_mode) {
+	if (atomic_read(&sctp_sk(oldsk)->pd_mode)) {
 		struct sk_buff_head *queue;
 
 		/* Decide which queue to move pd_lobby skbs to. */
@@ -4716,8 +6395,10 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 		sctp_skb_for_each(skb, &oldsp->pd_lobby, tmp) {
 			event = sctp_skb2event(skb);
 			if (event->asoc == assoc) {
-				__skb_unlink(skb, skb->list);
+				sctp_sock_rfree_frag(skb);
+				__skb_unlink(skb, &oldsp->pd_lobby);
 				__skb_queue_tail(queue, skb);
+				sctp_skb_set_owner_r_frag(skb, newsk);
 			}
 		}
 
@@ -4725,8 +6406,18 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 		 * delivery to finish.
 		 */
 		if (assoc->ulpq.pd_mode)
-			sctp_clear_pd(oldsk);
+			sctp_clear_pd(oldsk, NULL);
 
+	}
+
+	sctp_skb_for_each(skb, &assoc->ulpq.reasm, tmp) {
+		sctp_sock_rfree_frag(skb);
+		sctp_skb_set_owner_r_frag(skb, newsk);
+	}
+
+	sctp_skb_for_each(skb, &assoc->ulpq.lobby, tmp) {
+		sctp_sock_rfree_frag(skb);
+		sctp_skb_set_owner_r_frag(skb, newsk);
 	}
 
 	/* Set the type of socket to indicate that it is peeled off from the
@@ -4735,7 +6426,16 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	 */
 	newsp->type = type;
 
-	/* Migrate the association to the new socket. */
+	/* Mark the new socket "in-use" by the user so that any packets
+	 * that may arrive on the association after we've moved it are
+	 * queued to the backlog.  This prevents a potential race between
+	 * backlog processing on the old socket and new-packet processing
+	 * on the new socket.
+	 *
+	 * The caller has just allocated newsk so we can guarantee that other
+	 * paths won't try to lock it and then oldsk.
+	 */
+	lock_sock_nested(newsk, SINGLE_DEPTH_NESTING);
 	sctp_assoc_migrate(assoc, newsk);
 
 	/* If the association on the newsk is already closed before accept()
@@ -4745,7 +6445,11 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 		newsk->sk_shutdown |= RCV_SHUTDOWN;
 
 	newsk->sk_state = SCTP_SS_ESTABLISHED;
+	sctp_release_sock(newsk);
 }
+
+
+DEFINE_PROTO_INUSE(sctp)
 
 /* This proto struct describes the ULP interface for SCTP.  */
 struct proto sctp_prot = {
@@ -4768,10 +6472,19 @@ struct proto sctp_prot = {
 	.hash        =	sctp_hash,
 	.unhash      =	sctp_unhash,
 	.get_port    =	sctp_get_port,
-	.slab_obj_size = sizeof(struct sctp_sock),
+	.obj_size    =  sizeof(struct sctp_sock),
+	.sysctl_mem  =  sysctl_sctp_mem,
+	.sysctl_rmem =  sysctl_sctp_rmem,
+	.sysctl_wmem =  sysctl_sctp_wmem,
+	.memory_pressure = &sctp_memory_pressure,
+	.enter_memory_pressure = sctp_enter_memory_pressure,
+	.memory_allocated = &sctp_memory_allocated,
+	REF_PROTO_INUSE(sctp)
 };
 
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+DEFINE_PROTO_INUSE(sctpv6)
+
 struct proto sctpv6_prot = {
 	.name		= "SCTPv6",
 	.owner		= THIS_MODULE,
@@ -4792,6 +6505,13 @@ struct proto sctpv6_prot = {
 	.hash		= sctp_hash,
 	.unhash		= sctp_unhash,
 	.get_port	= sctp_get_port,
-	.slab_obj_size	= sizeof(struct sctp6_sock),
+	.obj_size	= sizeof(struct sctp6_sock),
+	.sysctl_mem	= sysctl_sctp_mem,
+	.sysctl_rmem	= sysctl_sctp_rmem,
+	.sysctl_wmem	= sysctl_sctp_wmem,
+	.memory_pressure = &sctp_memory_pressure,
+	.enter_memory_pressure = sctp_enter_memory_pressure,
+	.memory_allocated = &sctp_memory_allocated,
+	REF_PROTO_INUSE(sctpv6)
 };
 #endif /* defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE) */

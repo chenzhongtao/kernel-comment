@@ -8,7 +8,6 @@
  * Code supporting the ALCOR and XLT (XL-300/366/433).
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
@@ -101,7 +100,7 @@ static struct hw_interrupt_type alcor_irq_type = {
 };
 
 static void
-alcor_device_interrupt(unsigned long vector, struct pt_regs *regs)
+alcor_device_interrupt(unsigned long vector)
 {
 	unsigned long pld;
 	unsigned int i;
@@ -117,9 +116,9 @@ alcor_device_interrupt(unsigned long vector, struct pt_regs *regs)
 		i = ffz(~pld);
 		pld &= pld - 1; /* clear least bit set */
 		if (i == 31) {
-			isa_device_interrupt(vector, regs);
+			isa_device_interrupt(vector);
 		} else {
-			handle_irq(16 + i, regs);
+			handle_irq(16 + i);
 		}
 	}
 }
@@ -139,12 +138,12 @@ alcor_init_irq(void)
 
 	for (i = 16; i < 48; ++i) {
 		/* On Alcor, at least, lines 20..30 are not connected
-		   and can generate spurrious interrupts if we turn them
+		   and can generate spurious interrupts if we turn them
 		   on while IRQ probing.  */
 		if (i >= 16+20 && i <= 16+30)
 			continue;
 		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = &alcor_irq_type;
+		irq_desc[i].chip = &alcor_irq_type;
 	}
 	i8259a_irq_type.ack = alcor_isa_mask_and_ack_irq;
 
@@ -254,7 +253,7 @@ alcor_init_pci(void)
 	 * motherboard, by looking for a 21040 TULIP in slot 6, which is
 	 * built into XLT and BRET/MAVERICK, but not available on ALCOR.
 	 */
-	dev = pci_find_device(PCI_VENDOR_ID_DEC,
+	dev = pci_get_device(PCI_VENDOR_ID_DEC,
 			      PCI_DEVICE_ID_DEC_TULIP,
 			      NULL);
 	if (dev && dev->devfn == PCI_DEVFN(6,0)) {
@@ -262,6 +261,7 @@ alcor_init_pci(void)
 		printk(KERN_INFO "%s: Detected AS500 or XLT motherboard.\n",
 		       __FUNCTION__);
 	}
+	pci_dev_put(dev);
 }
 
 

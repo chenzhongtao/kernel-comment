@@ -8,6 +8,7 @@
 #include <linux/percpu.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
+#include <linux/preempt.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -18,51 +19,43 @@
 
 /* Heavily inspired by the ppc64 code.  */
 
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers) =
-	{ NULL, 0, 0, 0, 0, 0, { 0 }, { NULL }, };
+DEFINE_PER_CPU(struct mmu_gather, mmu_gathers) = { 0, };
 
 void flush_tlb_pending(void)
 {
 	struct mmu_gather *mp = &__get_cpu_var(mmu_gathers);
 
-	if (mp->tlb_nr) {
-		unsigned long context = mp->mm->context;
+	preempt_disable();
 
-		if (CTX_VALID(context)) {
+	if (mp->tlb_nr) {
+		flush_tsb_user(mp);
+
+		if (CTX_VALID(mp->mm->context)) {
 #ifdef CONFIG_SMP
 			smp_flush_tlb_pending(mp->mm, mp->tlb_nr,
 					      &mp->vaddrs[0]);
 #else
-			__flush_tlb_pending(CTX_HWBITS(context), mp->tlb_nr,
-					    &mp->vaddrs[0]);
+			__flush_tlb_pending(CTX_HWBITS(mp->mm->context),
+					    mp->tlb_nr, &mp->vaddrs[0]);
 #endif
 		}
 		mp->tlb_nr = 0;
 	}
+
+	preempt_enable();
 }
 
-void tlb_batch_add(pte_t *ptep, pte_t orig)
+void tlb_batch_add(struct mm_struct *mm, unsigned long vaddr, pte_t *ptep, pte_t orig)
 {
 	struct mmu_gather *mp = &__get_cpu_var(mmu_gathers);
-	struct page *ptepage;
-	struct mm_struct *mm;
-	unsigned long vaddr, nr;
+	unsigned long nr;
 
-	ptepage = virt_to_page(ptep);
-	mm = (struct mm_struct *) ptepage->mapping;
-
-	/* It is more efficient to let flush_tlb_kernel_range()
-	 * handle these cases.
-	 */
-	if (mm == &init_mm)
-		return;
-
-	vaddr = ptepage->index +
-		(((unsigned long)ptep & ~PAGE_MASK) * PTRS_PER_PTE);
+	vaddr &= PAGE_MASK;
 	if (pte_exec(orig))
 		vaddr |= 0x1UL;
 
-	if (pte_dirty(orig)) {
+	if (tlb_type != hypervisor &&
+	    pte_dirty(orig)) {
 		unsigned long paddr, pfn = pte_pfn(orig);
 		struct address_space *mapping;
 		struct page *page;
@@ -85,7 +78,8 @@ void tlb_batch_add(pte_t *ptep, pte_t orig)
 	}
 
 no_cache_flush:
-	if (mp->tlb_frozen)
+
+	if (mp->fullmm)
 		return;
 
 	nr = mp->tlb_nr;
@@ -102,55 +96,4 @@ no_cache_flush:
 	mp->tlb_nr = ++nr;
 	if (nr >= TLB_BATCH_NR)
 		flush_tlb_pending();
-}
-
-void flush_tlb_pgtables(struct mm_struct *mm, unsigned long start, unsigned long end)
-{
-	struct mmu_gather *mp = &__get_cpu_var(mmu_gathers);
-	unsigned long nr = mp->tlb_nr;
-	long s = start, e = end, vpte_base;
-
-	if (mp->tlb_frozen)
-		return;
-
-	/* Nobody should call us with start below VM hole and end above.
-	 * See if it is really true.
-	 */
-	BUG_ON(s > e);
-
-	s &= PMD_MASK;
-	e = (e + PMD_SIZE - 1) & PMD_MASK;
-
-	vpte_base = (tlb_type == spitfire ?
-		     VPTE_BASE_SPITFIRE :
-		     VPTE_BASE_CHEETAH);
-
-	if (unlikely(nr != 0 && mm != mp->mm)) {
-		flush_tlb_pending();
-		nr = 0;
-	}
-
-	if (nr == 0)
-		mp->mm = mm;
-
-	start = vpte_base + (s >> (PAGE_SHIFT - 3));
-	end = vpte_base + (e >> (PAGE_SHIFT - 3));
-	while (start < end) {
-		mp->vaddrs[nr] = start;
-		mp->tlb_nr = ++nr;
-		if (nr >= TLB_BATCH_NR) {
-			flush_tlb_pending();
-			nr = 0;
-		}
-		start += PAGE_SIZE;
-	}
-	if (nr)
-		flush_tlb_pending();
-}
-
-unsigned long __ptrs_per_pmd(void)
-{
-	if (test_thread_flag(TIF_32BIT))
-		return (1UL << (32 - (PAGE_SHIFT-3) - PAGE_SHIFT));
-	return REAL_PTRS_PER_PMD;
 }

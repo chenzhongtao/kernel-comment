@@ -18,7 +18,6 @@
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/init.h>
@@ -52,7 +51,7 @@ static int au1k_irda_start(struct net_device *);
 static int au1k_irda_stop(struct net_device *dev);
 static int au1k_irda_hard_xmit(struct sk_buff *, struct net_device *);
 static int au1k_irda_rx(struct net_device *);
-static void au1k_irda_interrupt(int, void *, struct pt_regs *);
+static void au1k_irda_interrupt(int, void *);
 static void au1k_tx_timeout(struct net_device *);
 static struct net_device_stats *au1k_irda_stats(struct net_device *);
 static int au1k_irda_ioctl(struct net_device *, struct ifreq *, int);
@@ -527,7 +526,7 @@ static int au1k_irda_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	
 	if (aup->speed == 4000000) {
 		/* FIR */
-		memcpy((void *)pDB->vaddr, skb->data, skb->len);
+		skb_copy_from_linear_data(skb, pDB->vaddr, skb->len);
 		ptxd->count_0 = skb->len & 0xff;
 		ptxd->count_1 = (skb->len >> 8) & 0xff;
 
@@ -605,9 +604,9 @@ static int au1k_irda_rx(struct net_device *dev)
 				skb_put(skb, count);
 			else
 				skb_put(skb, count-2);
-			memcpy(skb->data, (void *)pDB->vaddr, count-2);
+			skb_copy_to_linear_data(skb, pDB->vaddr, count - 2);
 			skb->dev = dev;
-			skb->mac.raw = skb->data;
+			skb_reset_mac_header(skb);
 			skb->protocol = htons(ETH_P_IRDA);
 			netif_rx(skb);
 			prxd->count_0 = 0;
@@ -628,19 +627,16 @@ static int au1k_irda_rx(struct net_device *dev)
 }
 
 
-void au1k_irda_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t au1k_irda_interrupt(int dummy, void *dev_id)
 {
-	struct net_device *dev = (struct net_device *) dev_id;
-
-	if (dev == NULL) {
-		printk(KERN_ERR "%s: isr: null dev ptr\n", dev->name);
-		return;
-	}
+	struct net_device *dev = dev_id;
 
 	writel(0, IR_INT_CLEAR); /* ack irda interrupts */
 
 	au1k_irda_rx(dev);
 	au1k_tx_ack(dev);
+
+	return IRQ_HANDLED;
 }
 
 

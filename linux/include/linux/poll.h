@@ -8,8 +8,20 @@
 #include <linux/compiler.h>
 #include <linux/wait.h>
 #include <linux/string.h>
-#include <linux/mm.h>
+#include <linux/fs.h>
+#include <linux/sched.h>
 #include <asm/uaccess.h>
+
+/* ~832 bytes of stack space used max in sys_select/sys_poll before allocating
+   additional memory. */
+#define MAX_STACK_ALLOC 832
+#define FRONTEND_STACK_ALLOC	256
+#define SELECT_STACK_ALLOC	FRONTEND_STACK_ALLOC
+#define POLL_STACK_ALLOC	FRONTEND_STACK_ALLOC
+#define WQUEUES_STACK_ALLOC	(MAX_STACK_ALLOC - FRONTEND_STACK_ALLOC)
+#define N_INLINE_POLL_ENTRIES	(WQUEUES_STACK_ALLOC / sizeof(struct poll_table_entry))
+
+#define DEFAULT_POLLMASK (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM)
 
 struct poll_table_struct;
 
@@ -33,6 +45,12 @@ static inline void init_poll_funcptr(poll_table *pt, poll_queue_proc qproc)
 	pt->qproc = qproc;
 }
 
+struct poll_table_entry {
+	struct file * filp;
+	wait_queue_t wait;
+	wait_queue_head_t * wait_address;
+};
+
 /*
  * Structures and helpers for sys_poll/sys_poll
  */
@@ -40,6 +58,8 @@ struct poll_wqueues {
 	poll_table pt;
 	struct poll_table_page * table;
 	int error;
+	int inline_index;
+	struct poll_table_entry inline_entries[N_INLINE_POLL_ENTRIES];
 };
 
 extern void poll_initwait(struct poll_wqueues *pwq);
@@ -71,13 +91,9 @@ static inline
 int get_fd_set(unsigned long nr, void __user *ufdset, unsigned long *fdset)
 {
 	nr = FDS_BYTES(nr);
-	if (ufdset) {
-		int error;
-		error = verify_area(VERIFY_WRITE, ufdset, nr);
-		if (!error && __copy_from_user(fdset, ufdset, nr))
-			error = -EFAULT;
-		return error;
-	}
+	if (ufdset)
+		return copy_from_user(fdset, ufdset, nr) ? -EFAULT : 0;
+
 	memset(fdset, 0, nr);
 	return 0;
 }
@@ -96,7 +112,11 @@ void zero_fd_set(unsigned long nr, unsigned long *fdset)
 	memset(fdset, 0, FDS_BYTES(nr));
 }
 
-extern int do_select(int n, fd_set_bits *fds, long *timeout);
+#define MAX_INT64_SECONDS (((s64)(~((u64)0)>>1)/HZ)-1)
+
+extern int do_select(int n, fd_set_bits *fds, s64 *timeout);
+extern int do_sys_poll(struct pollfd __user * ufds, unsigned int nfds,
+		       s64 *timeout);
 
 #endif /* KERNEL */
 

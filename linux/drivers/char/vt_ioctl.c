@@ -10,7 +10,6 @@
  *  Check put/get_user, cleanups - acme@conectiva.com.br - Jun 2001
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -24,6 +23,9 @@
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/console.h>
+#include <linux/consolemap.h>
+#include <linux/signal.h>
+#include <linux/timex.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -52,16 +54,11 @@ extern struct tty_driver *console_driver;
  * to the current console is done by the main ioctl code.
  */
 
-struct vt_struct *vt_cons[MAX_NR_CONSOLES];
-
-/* Keyboard type: Default is KB_101, but can be set by machine
- * specific code.
- */
-unsigned char keyboard_type = KB_101;
-
 #ifdef CONFIG_X86
 #include <linux/syscalls.h>
 #endif
+
+static void complete_change_console(struct vc_data *vc);
 
 /*
  * these are the valid i/o ports we're allowed to change. they map all the
@@ -83,6 +80,9 @@ do_kdsk_ioctl(int cmd, struct kbentry __user *user_kbe, int perm, struct kbd_str
 	if (copy_from_user(&tmp, user_kbe, sizeof(struct kbentry)))
 		return -EFAULT;
 
+	if (!capable(CAP_SYS_TTY_CONFIG))
+		perm = 0;
+
 	switch (cmd) {
 	case KDGKBENT:
 		key_map = key_maps[s];
@@ -97,7 +97,7 @@ do_kdsk_ioctl(int cmd, struct kbentry __user *user_kbe, int perm, struct kbd_str
 		if (!perm)
 			return -EPERM;
 		if (!i && v == K_NOSUCHMAP) {
-			/* disallocate map */
+			/* deallocate map */
 			key_map = key_maps[s];
 			if (s && key_map) {
 			    key_maps[s] = NULL;
@@ -130,7 +130,7 @@ do_kdsk_ioctl(int cmd, struct kbentry __user *user_kbe, int perm, struct kbd_str
 			    !capable(CAP_SYS_RESOURCE))
 				return -EPERM;
 
-			key_map = (ushort *) kmalloc(sizeof(plain_map),
+			key_map = kmalloc(sizeof(plain_map),
 						     GFP_KERNEL);
 			if (!key_map)
 				return -ENOMEM;
@@ -195,6 +195,9 @@ do_kdgkb_ioctl(int cmd, struct kbsentry __user *user_kdgkb, int perm)
 	int i, j, k;
 	int ret;
 
+	if (!capable(CAP_SYS_TTY_CONFIG))
+		perm = 0;
+
 	kbs = kmalloc(sizeof(*kbs), GFP_KERNEL);
 	if (!kbs) {
 		ret = -ENOMEM;
@@ -257,7 +260,7 @@ do_kdgkb_ioctl(int cmd, struct kbsentry __user *user_kdgkb, int perm)
 		    sz = 256;
 		    while (sz < funcbufsize - funcbufleft + delta)
 		      sz <<= 1;
-		    fnw = (char *) kmalloc(sz, GFP_KERNEL);
+		    fnw = kmalloc(sz, GFP_KERNEL);
 		    if(!fnw) {
 		      ret = -ENOMEM;
 		      goto reterr;
@@ -311,7 +314,7 @@ do_fontx_ioctl(int cmd, struct consolefontdesc __user *user_cfd, int perm, struc
 		op->height = cfdarg.charheight;
 		op->charcount = cfdarg.charcount;
 		op->data = cfdarg.chardata;
-		return con_font_op(fg_console, op);
+		return con_font_op(vc_cons[fg_console].d, op);
 	case GIO_FONTX: {
 		op->op = KD_FONT_OP_GET;
 		op->flags = KD_FONT_FLAG_OLD;
@@ -319,7 +322,7 @@ do_fontx_ioctl(int cmd, struct consolefontdesc __user *user_cfd, int perm, struc
 		op->height = cfdarg.charheight;
 		op->charcount = cfdarg.charcount;
 		op->data = cfdarg.chardata;
-		i = con_font_op(fg_console, op);
+		i = con_font_op(vc_cons[fg_console].d, op);
 		if (i)
 			return i;
 		cfdarg.charheight = op->height;
@@ -333,27 +336,25 @@ do_fontx_ioctl(int cmd, struct consolefontdesc __user *user_cfd, int perm, struc
 }
 
 static inline int 
-do_unimap_ioctl(int cmd, struct unimapdesc __user *user_ud, int perm, unsigned int console)
+do_unimap_ioctl(int cmd, struct unimapdesc __user *user_ud, int perm, struct vc_data *vc)
 {
 	struct unimapdesc tmp;
-	int i = 0; 
 
 	if (copy_from_user(&tmp, user_ud, sizeof tmp))
 		return -EFAULT;
-	if (tmp.entries) {
-		i = verify_area(VERIFY_WRITE, tmp.entries, 
-						tmp.entry_ct*sizeof(struct unipair));
-		if (i) return i;
-	}
+	if (tmp.entries)
+		if (!access_ok(VERIFY_WRITE, tmp.entries,
+				tmp.entry_ct*sizeof(struct unipair)))
+			return -EFAULT;
 	switch (cmd) {
 	case PIO_UNIMAP:
 		if (!perm)
 			return -EPERM;
-		return con_set_unimap(console, tmp.entry_ct, tmp.entries);
+		return con_set_unimap(vc, tmp.entry_ct, tmp.entries);
 	case GIO_UNIMAP:
-		if (!perm && fg_console != console)
+		if (!perm && fg_console != vc->vc_num)
 			return -EPERM;
-		return con_get_unimap(console, tmp.entry_ct, &(user_ud->entry_ct), tmp.entries);
+		return con_get_unimap(vc, tmp.entry_ct, &(user_ud->entry_ct), tmp.entries);
 	}
 	return 0;
 }
@@ -365,8 +366,7 @@ do_unimap_ioctl(int cmd, struct unimapdesc __user *user_ud, int perm, unsigned i
 int vt_ioctl(struct tty_struct *tty, struct file * file,
 	     unsigned int cmd, unsigned long arg)
 {
-	struct vt_struct *vt = (struct vt_struct *)tty->driver_data;
-	struct vc_data *vc = vc_cons[vt->vc_num].d;
+	struct vc_data *vc = (struct vc_data *)tty->driver_data;
 	struct console_font_op op;	/* used in multiple places here */
 	struct kbd_struct * kbd;
 	unsigned int console;
@@ -374,7 +374,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	void __user *up = (void __user *)arg;
 	int i, perm;
 	
-	console = vt->vc_num;
+	console = vc->vc_num;
 
 	if (!vc_cons_allocated(console)) 	/* impossible? */
 		return -ENOIOCTLCMD;
@@ -393,7 +393,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		if (!perm)
 			return -EPERM;
 		if (arg)
-			arg = 1193182 / arg;
+			arg = CLOCK_TICK_RATE / arg;
 		kd_mksound(arg, 0);
 		return 0;
 
@@ -410,7 +410,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ticks = HZ * ((arg >> 16) & 0xffff) / 1000;
 		count = ticks ? (arg & 0xffff) : 0;
 		if (count)
-			count = 1193182 / count;
+			count = CLOCK_TICK_RATE / count;
 		kd_mksound(count, ticks);
 		return 0;
 	}
@@ -419,7 +419,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		/*
 		 * this is naive.
 		 */
-		ucval = keyboard_type;
+		ucval = KB_101;
 		goto setchar;
 
 		/*
@@ -487,9 +487,9 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		default:
 			return -EINVAL;
 		}
-		if (vt_cons[console]->vc_mode == (unsigned char) arg)
+		if (vc->vc_mode == (unsigned char) arg)
 			return 0;
-		vt_cons[console]->vc_mode = (unsigned char) arg;
+		vc->vc_mode = (unsigned char) arg;
 		if (console != fg_console)
 			return 0;
 		/*
@@ -504,7 +504,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		return 0;
 
 	case KDGETMODE:
-		ucval = vt_cons[console]->vc_mode;
+		ucval = vc->vc_mode;
 		goto setint;
 
 	case KDMAPDISP:
@@ -583,10 +583,27 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case KDGKBDIACR:
 	{
 		struct kbdiacrs __user *a = up;
+		struct kbdiacr diacr;
+		int i;
 
 		if (put_user(accent_table_size, &a->kb_cnt))
 			return -EFAULT;
-		if (copy_to_user(a->kbdiacr, accent_table, accent_table_size*sizeof(struct kbdiacr)))
+		for (i = 0; i < accent_table_size; i++) {
+			diacr.diacr = conv_uni_to_8bit(accent_table[i].diacr);
+			diacr.base = conv_uni_to_8bit(accent_table[i].base);
+			diacr.result = conv_uni_to_8bit(accent_table[i].result);
+			if (copy_to_user(a->kbdiacr + i, &diacr, sizeof(struct kbdiacr)))
+				return -EFAULT;
+		}
+		return 0;
+	}
+	case KDGKBDIACRUC:
+	{
+		struct kbdiacrsuc __user *a = up;
+
+		if (put_user(accent_table_size, &a->kb_cnt))
+			return -EFAULT;
+		if (copy_to_user(a->kbdiacruc, accent_table, accent_table_size*sizeof(struct kbdiacruc)))
 			return -EFAULT;
 		return 0;
 	}
@@ -594,6 +611,30 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case KDSKBDIACR:
 	{
 		struct kbdiacrs __user *a = up;
+		struct kbdiacr diacr;
+		unsigned int ct;
+		int i;
+
+		if (!perm)
+			return -EPERM;
+		if (get_user(ct,&a->kb_cnt))
+			return -EFAULT;
+		if (ct >= MAX_DIACR)
+			return -EINVAL;
+		accent_table_size = ct;
+		for (i = 0; i < ct; i++) {
+			if (copy_from_user(&diacr, a->kbdiacr + i, sizeof(struct kbdiacr)))
+				return -EFAULT;
+			accent_table[i].diacr = conv_8bit_to_uni(diacr.diacr);
+			accent_table[i].base = conv_8bit_to_uni(diacr.base);
+			accent_table[i].result = conv_8bit_to_uni(diacr.result);
+		}
+		return 0;
+	}
+
+	case KDSKBDIACRUC:
+	{
+		struct kbdiacrsuc __user *a = up;
 		unsigned int ct;
 
 		if (!perm)
@@ -603,7 +644,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		if (ct >= MAX_DIACR)
 			return -EINVAL;
 		accent_table_size = ct;
-		if (copy_from_user(accent_table, a->kbdiacr, ct*sizeof(struct kbdiacr)))
+		if (copy_from_user(accent_table, a->kbdiacruc, ct*sizeof(struct kbdiacruc)))
 			return -EFAULT;
 		return 0;
 	}
@@ -646,13 +687,16 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	 */
 	case KDSIGACCEPT:
 	{
-		extern int spawnpid, spawnsig;
 		if (!perm || !capable(CAP_KILL))
 		  return -EPERM;
-		if (arg < 1 || arg > _NSIG || arg == SIGKILL)
+		if (!valid_signal(arg) || arg < 1 || arg == SIGKILL)
 		  return -EINVAL;
-		spawnpid = current->pid;
-		spawnsig = arg;
+
+		spin_lock_irq(&vt_spawn_con.lock);
+		put_pid(vt_spawn_con.pid);
+		vt_spawn_con.pid = get_pid(task_pid(current));
+		vt_spawn_con.sig = arg;
+		spin_unlock_irq(&vt_spawn_con.lock);
 		return 0;
 	}
 
@@ -667,12 +711,13 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		if (tmp.mode != VT_AUTO && tmp.mode != VT_PROCESS)
 			return -EINVAL;
 		acquire_console_sem();
-		vt_cons[console]->vt_mode = tmp;
+		vc->vt_mode = tmp;
 		/* the frsig is ignored, so we set it to 0 */
-		vt_cons[console]->vt_mode.frsig = 0;
-		vt_cons[console]->vt_pid = current->pid;
+		vc->vt_mode.frsig = 0;
+		put_pid(vc->vt_pid);
+		vc->vt_pid = get_pid(task_pid(current));
 		/* no switch is required -- saw@shade.msu.ru */
-		vt_cons[console]->vt_newvt = -1; 
+		vc->vt_newvt = -1;
 		release_console_sem();
 		return 0;
 	}
@@ -683,7 +728,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		int rc;
 
 		acquire_console_sem();
-		memcpy(&tmp, &vt_cons[console]->vt_mode, sizeof(struct vt_mode));
+		memcpy(&tmp, &vc->vt_mode, sizeof(struct vt_mode));
 		release_console_sem();
 
 		rc = copy_to_user(up, &tmp, sizeof(struct vt_mode));
@@ -761,31 +806,29 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case VT_RELDISP:
 		if (!perm)
 			return -EPERM;
-		if (vt_cons[console]->vt_mode.mode != VT_PROCESS)
+		if (vc->vt_mode.mode != VT_PROCESS)
 			return -EINVAL;
 
 		/*
 		 * Switching-from response
 		 */
-		if (vt_cons[console]->vt_newvt >= 0)
-		{
+		acquire_console_sem();
+		if (vc->vt_newvt >= 0) {
 			if (arg == 0)
 				/*
 				 * Switch disallowed, so forget we were trying
 				 * to do it.
 				 */
-				vt_cons[console]->vt_newvt = -1;
+				vc->vt_newvt = -1;
 
-			else
-			{
+			else {
 				/*
 				 * The current vt has been released, so
 				 * complete the switch.
 				 */
 				int newvt;
-				acquire_console_sem();
-				newvt = vt_cons[console]->vt_newvt;
-				vt_cons[console]->vt_newvt = -1;
+				newvt = vc->vt_newvt;
+				vc->vt_newvt = -1;
 				i = vc_allocate(newvt);
 				if (i) {
 					release_console_sem();
@@ -796,8 +839,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				 * make sure we are atomic with respect to
 				 * other console switches..
 				 */
-				complete_change_console(newvt);
-				release_console_sem();
+				complete_change_console(vc_cons[newvt].d);
 			}
 		}
 
@@ -809,9 +851,12 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 			/*
 			 * If it's just an ACK, ignore it
 			 */
-			if (arg != VT_ACKACQ)
+			if (arg != VT_ACKACQ) {
+				release_console_sem();
 				return -EINVAL;
+			}
 		}
+		release_console_sem();
 
 		return 0;
 
@@ -822,20 +867,20 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		if (arg > MAX_NR_CONSOLES)
 			return -ENXIO;
 		if (arg == 0) {
-		    /* disallocate all unused consoles, but leave 0 */
+		    /* deallocate all unused consoles, but leave 0 */
 			acquire_console_sem();
 			for (i=1; i<MAX_NR_CONSOLES; i++)
 				if (! VT_BUSY(i))
-					vc_disallocate(i);
+					vc_deallocate(i);
 			release_console_sem();
 		} else {
-			/* disallocate a single console, if possible */
+			/* deallocate a single console, if possible */
 			arg--;
 			if (VT_BUSY(arg))
 				return -EBUSY;
 			if (arg) {			      /* leave 0 */
 				acquire_console_sem();
-				vc_disallocate(arg);
+				vc_deallocate(arg);
 				release_console_sem();
 			}
 		}
@@ -844,17 +889,24 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case VT_RESIZE:
 	{
 		struct vt_sizes __user *vtsizes = up;
+		struct vc_data *vc;
+
 		ushort ll,cc;
 		if (!perm)
 			return -EPERM;
 		if (get_user(ll, &vtsizes->v_rows) ||
 		    get_user(cc, &vtsizes->v_cols))
 			return -EFAULT;
+
 		for (i = 0; i < MAX_NR_CONSOLES; i++) {
-			acquire_console_sem();
-                        vc_resize(i, cc, ll);
-			release_console_sem();
+			vc = vc_cons[i].d;
+
+			if (vc) {
+				vc->vc_resize_user = 1;
+				vc_lock_resize(vc_cons[i].d, cc, ll);
+			}
 		}
+
 		return 0;
 	}
 
@@ -864,7 +916,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ushort ll,cc,vlin,clin,vcol,ccol;
 		if (!perm)
 			return -EPERM;
-		if (verify_area(VERIFY_READ, vtconsize,
+		if (!access_ok(VERIFY_READ, vtconsize,
 				sizeof(struct vt_consize)))
 			return -EFAULT;
 		__get_user(ll, &vtconsize->v_rows);
@@ -900,7 +952,8 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				vc_cons[i].d->vc_scan_lines = vlin;
 			if (clin)
 				vc_cons[i].d->vc_font.height = clin;
-			vc_resize(i, cc, ll);
+			vc_cons[i].d->vc_resize_user = 1;
+			vc_resize(vc_cons[i].d, cc, ll);
 			release_console_sem();
 		}
   		return 0;
@@ -915,7 +968,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		op.height = 0;
 		op.charcount = 256;
 		op.data = up;
-		return con_font_op(fg_console, &op);
+		return con_font_op(vc_cons[fg_console].d, &op);
 	}
 
 	case GIO_FONT: {
@@ -925,7 +978,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		op.height = 32;
 		op.charcount = 256;
 		op.data = up;
-		return con_font_op(fg_console, &op);
+		return con_font_op(vc_cons[fg_console].d, &op);
 	}
 
 	case PIO_CMAP:
@@ -953,9 +1006,10 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		{
 		op.op = KD_FONT_OP_SET_DEFAULT;
 		op.data = NULL;
-		i = con_font_op(fg_console, &op);
-		if (i) return i;
-		con_set_default_unimap(fg_console);
+		i = con_font_op(vc_cons[fg_console].d, &op);
+		if (i)
+			return i;
+		con_set_default_unimap(vc_cons[fg_console].d);
 		return 0;
 		}
 #endif
@@ -966,7 +1020,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 			return -EFAULT;
 		if (!perm && op.op != KD_FONT_OP_GET)
 			return -EPERM;
-		i = con_font_op(console, &op);
+		i = con_font_op(vc, &op);
 		if (i) return i;
 		if (copy_to_user(up, &op, sizeof(op)))
 			return -EFAULT;
@@ -995,13 +1049,13 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 			return -EPERM;
 		i = copy_from_user(&ui, up, sizeof(struct unimapinit));
 		if (i) return -EFAULT;
-		con_clear_unimap(console, &ui);
+		con_clear_unimap(vc, &ui);
 		return 0;
 	      }
 
 	case PIO_UNIMAP:
 	case GIO_UNIMAP:
-		return do_unimap_ioctl(cmd, up, perm, console);
+		return do_unimap_ioctl(cmd, up, perm, vc);
 
 	case VT_LOCKSWITCH:
 		if (!capable(CAP_SYS_TTY_CONFIG))
@@ -1013,6 +1067,8 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		   return -EPERM;
 		vt_dont_switch = 0;
 		return 0;
+	case VT_GETHIFONTMASK:
+		return put_user(vc->vc_hi_font_mask, (unsigned short __user *)arg);
 	default:
 		return -ENOIOCTLCMD;
 	}
@@ -1029,7 +1085,7 @@ static DECLARE_WAIT_QUEUE_HEAD(vt_activate_queue);
 
 /*
  * Sleeps until a vt is activated, or the task is interrupted. Returns
- * 0 if activation, -EINTR if interrupted.
+ * 0 if activation, -EINTR if interrupted by a signal handler.
  */
 int vt_waitactive(int vt)
 {
@@ -1038,41 +1094,76 @@ int vt_waitactive(int vt)
 
 	add_wait_queue(&vt_activate_queue, &wait);
 	for (;;) {
-		set_current_state(TASK_INTERRUPTIBLE);
 		retval = 0;
-		if (vt == fg_console)
+
+		/*
+		 * Synchronize with redraw_screen(). By acquiring the console
+		 * semaphore we make sure that the console switch is completed
+		 * before we return. If we didn't wait for the semaphore, we
+		 * could return at a point where fg_console has already been
+		 * updated, but the console switch hasn't been completed.
+		 */
+		acquire_console_sem();
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (vt == fg_console) {
+			release_console_sem();
 			break;
-		retval = -EINTR;
+		}
+		release_console_sem();
+		retval = -ERESTARTNOHAND;
 		if (signal_pending(current))
 			break;
 		schedule();
 	}
 	remove_wait_queue(&vt_activate_queue, &wait);
-	current->state = TASK_RUNNING;
+	__set_current_state(TASK_RUNNING);
 	return retval;
 }
 
 #define vt_wake_waitactive() wake_up(&vt_activate_queue)
 
-void reset_vc(unsigned int new_console)
+void reset_vc(struct vc_data *vc)
 {
-	vt_cons[new_console]->vc_mode = KD_TEXT;
-	kbd_table[new_console].kbdmode = VC_XLATE;
-	vt_cons[new_console]->vt_mode.mode = VT_AUTO;
-	vt_cons[new_console]->vt_mode.waitv = 0;
-	vt_cons[new_console]->vt_mode.relsig = 0;
-	vt_cons[new_console]->vt_mode.acqsig = 0;
-	vt_cons[new_console]->vt_mode.frsig = 0;
-	vt_cons[new_console]->vt_pid = -1;
-	vt_cons[new_console]->vt_newvt = -1;
+	vc->vc_mode = KD_TEXT;
+	kbd_table[vc->vc_num].kbdmode = default_utf8 ? VC_UNICODE : VC_XLATE;
+	vc->vt_mode.mode = VT_AUTO;
+	vc->vt_mode.waitv = 0;
+	vc->vt_mode.relsig = 0;
+	vc->vt_mode.acqsig = 0;
+	vc->vt_mode.frsig = 0;
+	put_pid(vc->vt_pid);
+	vc->vt_pid = NULL;
+	vc->vt_newvt = -1;
 	if (!in_interrupt())    /* Via keyboard.c:SAK() - akpm */
-		reset_palette(new_console) ;
+		reset_palette(vc);
+}
+
+void vc_SAK(struct work_struct *work)
+{
+	struct vc *vc_con =
+		container_of(work, struct vc, SAK_work);
+	struct vc_data *vc;
+	struct tty_struct *tty;
+
+	acquire_console_sem();
+	vc = vc_con->d;
+	if (vc) {
+		tty = vc->vc_tty;
+		/*
+		 * SAK should also work in all raw modes and reset
+		 * them properly.
+		 */
+		if (tty)
+			__do_SAK(tty);
+		reset_vc(vc);
+	}
+	release_console_sem();
 }
 
 /*
  * Performs the back end of a vt switch
  */
-void complete_change_console(unsigned int new_console)
+static void complete_change_console(struct vc_data *vc)
 {
 	unsigned char old_vc_mode;
 
@@ -1083,11 +1174,11 @@ void complete_change_console(unsigned int new_console)
 	 * KD_TEXT mode or vice versa, which means we need to blank or
 	 * unblank the screen later.
 	 */
-	old_vc_mode = vt_cons[fg_console]->vc_mode;
-	switch_screen(new_console);
+	old_vc_mode = vc_cons[fg_console].d->vc_mode;
+	switch_screen(vc);
 
 	/*
-	 * This can't appear below a successful kill_proc().  If it did,
+	 * This can't appear below a successful kill_pid().  If it did,
 	 * then the *blank_screen operation could occur while X, having
 	 * received acqsig, is waking up on another processor.  This
 	 * condition can lead to overlapping accesses to the VGA range
@@ -1096,9 +1187,8 @@ void complete_change_console(unsigned int new_console)
 	 * To account for this we duplicate this code below only if the
 	 * controlling process is gone and we've called reset_vc.
 	 */
-	if (old_vc_mode != vt_cons[new_console]->vc_mode)
-	{
-		if (vt_cons[new_console]->vc_mode == KD_TEXT)
+	if (old_vc_mode != vc->vc_mode) {
+		if (vc->vc_mode == KD_TEXT)
 			do_unblank_screen(1);
 		else
 			do_blank_screen(1);
@@ -1109,17 +1199,13 @@ void complete_change_console(unsigned int new_console)
 	 * telling it that it has acquired. Also check if it has died and
 	 * clean up (similar to logic employed in change_console())
 	 */
-	if (vt_cons[new_console]->vt_mode.mode == VT_PROCESS)
-	{
+	if (vc->vt_mode.mode == VT_PROCESS) {
 		/*
-		 * Send the signal as privileged - kill_proc() will
+		 * Send the signal as privileged - kill_pid() will
 		 * tell us if the process has gone or something else
 		 * is awry
 		 */
-		if (kill_proc(vt_cons[new_console]->vt_pid,
-			      vt_cons[new_console]->vt_mode.acqsig,
-			      1) != 0)
-		{
+		if (kill_pid(vc->vt_pid, vc->vt_mode.acqsig, 1) != 0) {
 		/*
 		 * The controlling process has died, so we revert back to
 		 * normal operation. In this case, we'll also change back
@@ -1129,11 +1215,10 @@ void complete_change_console(unsigned int new_console)
 		 * this outside of VT_PROCESS but there is no single process
 		 * to account for and tracking tty count may be undesirable.
 		 */
-		        reset_vc(new_console);
+			reset_vc(vc);
 
-			if (old_vc_mode != vt_cons[new_console]->vc_mode)
-			{
-				if (vt_cons[new_console]->vc_mode == KD_TEXT)
+			if (old_vc_mode != vc->vc_mode) {
+				if (vc->vc_mode == KD_TEXT)
 					do_unblank_screen(1);
 				else
 					do_blank_screen(1);
@@ -1151,11 +1236,11 @@ void complete_change_console(unsigned int new_console)
 /*
  * Performs the front-end of a vt switch
  */
-void change_console(unsigned int new_console)
+void change_console(struct vc_data *new_vc)
 {
-        if ((new_console == fg_console) || (vt_dont_switch))
-                return;
-        if (!vc_cons_allocated(new_console))
+	struct vc_data *vc;
+
+	if (!new_vc || new_vc->vc_num == fg_console || vt_dont_switch)
 		return;
 
 	/*
@@ -1173,23 +1258,23 @@ void change_console(unsigned int new_console)
 	 * the user waits just the right amount of time :-) and revert the
 	 * vt to auto control.
 	 */
-	if (vt_cons[fg_console]->vt_mode.mode == VT_PROCESS)
-	{
+	vc = vc_cons[fg_console].d;
+	if (vc->vt_mode.mode == VT_PROCESS) {
 		/*
-		 * Send the signal as privileged - kill_proc() will
+		 * Send the signal as privileged - kill_pid() will
 		 * tell us if the process has gone or something else
-		 * is awry
+		 * is awry.
+		 *
+		 * We need to set vt_newvt *before* sending the signal or we
+		 * have a race.
 		 */
-		if (kill_proc(vt_cons[fg_console]->vt_pid,
-			      vt_cons[fg_console]->vt_mode.relsig,
-			      1) == 0)
-		{
+		vc->vt_newvt = new_vc->vc_num;
+		if (kill_pid(vc->vt_pid, vc->vt_mode.relsig, 1) == 0) {
 			/*
 			 * It worked. Mark the vt to switch to and
 			 * return. The process needs to send us a
 			 * VT_RELDISP ioctl to complete the switch.
 			 */
-			vt_cons[fg_console]->vt_newvt = new_console;
 			return;
 		}
 
@@ -1202,7 +1287,7 @@ void change_console(unsigned int new_console)
 		 * this outside of VT_PROCESS but there is no single process
 		 * to account for and tracking tty count may be undesirable.
 		 */
-		reset_vc(fg_console);
+		reset_vc(vc);
 
 		/*
 		 * Fall through to normal (VT_AUTO) handling of the switch...
@@ -1212,8 +1297,8 @@ void change_console(unsigned int new_console)
 	/*
 	 * Ignore all switches in KD_GRAPHICS+VT_AUTO mode
 	 */
-	if (vt_cons[fg_console]->vc_mode == KD_GRAPHICS)
+	if (vc->vc_mode == KD_GRAPHICS)
 		return;
 
-	complete_change_console(new_console);
+	complete_change_console(new_vc);
 }

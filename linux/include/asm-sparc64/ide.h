@@ -10,11 +10,11 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 #include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/page.h>
 #include <asm/spitfire.h>
+#include <asm/cacheflush.h>
+#include <asm/page.h>
 
 #ifndef MAX_HWIFS
 # ifdef CONFIG_BLK_DEV_IDEPCI
@@ -24,7 +24,6 @@
 # endif
 #endif
 
-#define IDE_ARCH_OBSOLETE_INIT
 #define ide_default_io_ctl(base)	((base) + 0x206) /* obsolete */
 
 #define __ide_insl(data_reg, buffer, wcount) \
@@ -51,7 +50,7 @@ static inline unsigned int inw_be(void __iomem *addr)
 
 static inline void __ide_insw(void __iomem *port, void *dst, u32 count)
 {
-#if (L1DCACHE_SIZE > PAGE_SIZE)		/* is there D$ aliasing problem */
+#ifdef DCACHE_ALIASING_POSSIBLE
 	unsigned long end = (unsigned long)dst + (count << 1);
 #endif
 	u16 *ps = dst;
@@ -74,7 +73,7 @@ static inline void __ide_insw(void __iomem *port, void *dst, u32 count)
 	if(count)
 		*ps++ = inw_be(port);
 
-#if (L1DCACHE_SIZE > PAGE_SIZE)		/* is there D$ aliasing problem */
+#ifdef DCACHE_ALIASING_POSSIBLE
 	__flush_dcache_range((unsigned long)dst, end);
 #endif
 }
@@ -88,7 +87,7 @@ static inline void outw_be(unsigned short w, void __iomem *addr)
 
 static inline void __ide_outsw(void __iomem *port, void *src, u32 count)
 {
-#if (L1DCACHE_SIZE > PAGE_SIZE)		/* is there D$ aliasing problem */
+#ifdef DCACHE_ALIASING_POSSIBLE
 	unsigned long end = (unsigned long)src + (count << 1);
 #endif
 	const u16 *ps = src;
@@ -111,7 +110,7 @@ static inline void __ide_outsw(void __iomem *port, void *src, u32 count)
 	if(count)
 		outw_be(*ps, port);
 
-#if (L1DCACHE_SIZE > PAGE_SIZE)		/* is there D$ aliasing problem */
+#ifdef DCACHE_ALIASING_POSSIBLE
 	__flush_dcache_range((unsigned long)src, end);
 #endif
 }

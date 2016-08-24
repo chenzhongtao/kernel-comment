@@ -15,10 +15,10 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/fb.h>
 #include <linux/string.h>
+#include <linux/module.h>
 
 #include "macmodes.h"
 
@@ -281,7 +281,7 @@ int mac_vmode_to_var(int vmode, int cmode, struct fb_var_screeninfo *var)
     var->vmode = mode->vmode;
     return 0;
 }
-
+EXPORT_SYMBOL(mac_vmode_to_var);
 
 /**
  *	mac_var_to_vmode - convert var structure to MacOS vmode/cmode pair
@@ -327,7 +327,6 @@ int mac_var_to_vmode(const struct fb_var_screeninfo *var, int *vmode,
     return -EINVAL;
 }
 
-
 /**
  *	mac_map_monitor_sense - Convert monitor sense to vmode
  *	@sense: Macintosh monitor sense number
@@ -348,7 +347,7 @@ int mac_map_monitor_sense(int sense)
 	    break;
     return map->vmode;
 }
-
+EXPORT_SYMBOL(mac_map_monitor_sense);
 
 /**
  *	mac_find_mode - find a video mode
@@ -370,8 +369,8 @@ int mac_map_monitor_sense(int sense)
  *
  */
 
-int __init mac_find_mode(struct fb_var_screeninfo *var, struct fb_info *info,
-			 const char *mode_option, unsigned int default_bpp)
+int mac_find_mode(struct fb_var_screeninfo *var, struct fb_info *info,
+		  const char *mode_option, unsigned int default_bpp)
 {
     const struct fb_videomode *db = NULL;
     unsigned int dbsize = 0;
@@ -379,8 +378,11 @@ int __init mac_find_mode(struct fb_var_screeninfo *var, struct fb_info *info,
     if (mode_option && !strncmp(mode_option, "mac", 3)) {
 	mode_option += 3;
 	db = mac_modedb;
-	dbsize = sizeof(mac_modedb)/sizeof(*mac_modedb);
+	dbsize = ARRAY_SIZE(mac_modedb);
     }
     return fb_find_mode(var, info, mode_option, db, dbsize,
 			&mac_modedb[DEFAULT_MODEDB_INDEX], default_bpp);
 }
+EXPORT_SYMBOL(mac_find_mode);
+
+MODULE_LICENSE("GPL");

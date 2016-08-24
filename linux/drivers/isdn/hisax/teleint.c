@@ -18,7 +18,7 @@
 
 extern const char *CardType[];
 
-const char *TeleInt_revision = "$Revision: 1.16.2.5 $";
+static const char *TeleInt_revision = "$Revision: 1.16.2.5 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -157,7 +157,7 @@ WriteHFC(struct IsdnCardState *cs, int data, u_char reg, u_char value)
 }
 
 static irqreturn_t
-TeleInt_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+TeleInt_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
@@ -203,7 +203,7 @@ TeleInt_Timer(struct IsdnCardState *cs)
 	add_timer(&cs->hw.hfc.timer);
 }
 
-void
+static void
 release_io_TeleInt(struct IsdnCardState *cs)
 {
 	del_timer(&cs->hw.hfc.timer);
@@ -261,7 +261,7 @@ TeleInt_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-int __init
+int __devinit
 setup_TeleInt(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;

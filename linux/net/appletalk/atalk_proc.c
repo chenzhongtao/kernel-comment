@@ -8,10 +8,10 @@
  *	Free Software Foundation, version 2.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <net/net_namespace.h>
 #include <net/sock.h>
 #include <linux/atalk.h>
 
@@ -205,21 +205,21 @@ out:
 	return 0;
 }
 
-static struct seq_operations atalk_seq_interface_ops = {
+static const struct seq_operations atalk_seq_interface_ops = {
 	.start  = atalk_seq_interface_start,
 	.next   = atalk_seq_interface_next,
 	.stop   = atalk_seq_interface_stop,
 	.show   = atalk_seq_interface_show,
 };
 
-static struct seq_operations atalk_seq_route_ops = {
+static const struct seq_operations atalk_seq_route_ops = {
 	.start  = atalk_seq_route_start,
 	.next   = atalk_seq_route_next,
 	.stop   = atalk_seq_route_stop,
 	.show   = atalk_seq_route_show,
 };
 
-static struct seq_operations atalk_seq_socket_ops = {
+static const struct seq_operations atalk_seq_socket_ops = {
 	.start  = atalk_seq_socket_start,
 	.next   = atalk_seq_socket_next,
 	.stop   = atalk_seq_socket_stop,
@@ -241,7 +241,7 @@ static int atalk_seq_socket_open(struct inode *inode, struct file *file)
 	return seq_open(file, &atalk_seq_socket_ops);
 }
 
-static struct file_operations atalk_seq_interface_fops = {
+static const struct file_operations atalk_seq_interface_fops = {
 	.owner		= THIS_MODULE,
 	.open		= atalk_seq_interface_open,
 	.read		= seq_read,
@@ -249,7 +249,7 @@ static struct file_operations atalk_seq_interface_fops = {
 	.release	= seq_release,
 };
 
-static struct file_operations atalk_seq_route_fops = {
+static const struct file_operations atalk_seq_route_fops = {
 	.owner		= THIS_MODULE,
 	.open		= atalk_seq_route_open,
 	.read		= seq_read,
@@ -257,7 +257,7 @@ static struct file_operations atalk_seq_route_fops = {
 	.release	= seq_release,
 };
 
-static struct file_operations atalk_seq_socket_fops = {
+static const struct file_operations atalk_seq_socket_fops = {
 	.owner		= THIS_MODULE,
 	.open		= atalk_seq_socket_open,
 	.read		= seq_read,
@@ -272,7 +272,7 @@ int __init atalk_proc_init(void)
 	struct proc_dir_entry *p;
 	int rc = -ENOMEM;
 
-	atalk_proc_dir = proc_mkdir("atalk", proc_net);
+	atalk_proc_dir = proc_mkdir("atalk", init_net.proc_net);
 	if (!atalk_proc_dir)
 		goto out;
 	atalk_proc_dir->owner = THIS_MODULE;
@@ -293,7 +293,7 @@ int __init atalk_proc_init(void)
 	p->proc_fops = &atalk_seq_socket_fops;
 
 	p = create_proc_entry("arp", S_IRUGO, atalk_proc_dir);
-	if (!p) 
+	if (!p)
 		goto out_arp;
 	p->proc_fops = &atalk_seq_arp_fops;
 
@@ -307,7 +307,7 @@ out_socket:
 out_route:
 	remove_proc_entry("interface", atalk_proc_dir);
 out_interface:
-	remove_proc_entry("atalk", proc_net);
+	remove_proc_entry("atalk", init_net.proc_net);
 	goto out;
 }
 
@@ -317,5 +317,5 @@ void __exit atalk_proc_exit(void)
 	remove_proc_entry("route", atalk_proc_dir);
 	remove_proc_entry("socket", atalk_proc_dir);
 	remove_proc_entry("arp", atalk_proc_dir);
-	remove_proc_entry("atalk", proc_net);
+	remove_proc_entry("atalk", init_net.proc_net);
 }

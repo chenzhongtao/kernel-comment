@@ -75,7 +75,7 @@ static void hp_init_card(struct net_device *dev);
 /* My default is IRQ5	             0  1  2  3  4  5  6  7  8  9 10 11 */
 static char irqmap[16] __initdata= { 0, 0, 4, 6, 8,10, 0,14, 0, 4, 2,12,0,0,0,0};
 
-
+
 /*	Probe for an HP LAN adaptor.
 	Also initialize the card and fill in STATION_ADDR with the station
 	address. */
@@ -85,8 +85,6 @@ static int __init do_hp_probe(struct net_device *dev)
 	int i;
 	int base_addr = dev->base_addr;
 	int irq = dev->irq;
-
-	SET_MODULE_OWNER(dev);
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return hp_probe1(dev, base_addr);
@@ -100,12 +98,6 @@ static int __init do_hp_probe(struct net_device *dev)
 	}
 
 	return -ENODEV;
-}
-
-static void cleanup_card(struct net_device *dev)
-{
-	free_irq(dev->irq, dev);
-	release_region(dev->base_addr - NIC_OFFSET, HP_IO_EXTENT);
 }
 
 #ifndef MODULE
@@ -123,12 +115,7 @@ struct net_device * __init hp_probe(int unit)
 	err = do_hp_probe(dev);
 	if (err)
 		goto out;
-	err = register_netdev(dev);
-	if (err)
-		goto out1;
 	return dev;
-out1:
-	cleanup_card(dev);
 out:
 	free_netdev(dev);
 	return ERR_PTR(err);
@@ -140,6 +127,7 @@ static int __init hp_probe1(struct net_device *dev, int ioaddr)
 	int i, retval, board_id, wordmode;
 	const char *name;
 	static unsigned version_printed;
+	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr, HP_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
@@ -171,7 +159,9 @@ static int __init hp_probe1(struct net_device *dev, int ioaddr)
 	printk("%s: %s (ID %02x) at %#3x,", dev->name, name, board_id, ioaddr);
 
 	for(i = 0; i < ETHER_ADDR_LEN; i++)
-		printk(" %2.2x", dev->dev_addr[i] = inb(ioaddr + i));
+		dev->dev_addr[i] = inb(ioaddr + i);
+
+	printk(" %s", print_mac(mac, dev->dev_addr));
 
 	/* Snarf the interrupt now.  Someday this could be moved to open(). */
 	if (dev->irq < 2) {
@@ -227,7 +217,12 @@ static int __init hp_probe1(struct net_device *dev, int ioaddr)
 	ei_status.block_output = &hp_block_output;
 	hp_init_card(dev);
 
+	retval = register_netdev(dev);
+	if (retval)
+		goto out1;
 	return 0;
+out1:
+	free_irq(dev->irq, dev);
 out:
 	release_region(ioaddr, HP_IO_EXTENT);
 	return retval;
@@ -390,7 +385,7 @@ hp_block_output(struct net_device *dev, int count,
 }
 
 /* This function resets the ethercard if something screws up. */
-static void
+static void __init
 hp_init_card(struct net_device *dev)
 {
 	int irq = dev->irq;
@@ -415,7 +410,7 @@ MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
-int
+int __init
 init_module(void)
 {
 	struct net_device *dev;
@@ -432,11 +427,8 @@ init_module(void)
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		if (do_hp_probe(dev) == 0) {
-			if (register_netdev(dev) == 0) {
-				dev_hp[found++] = dev;
-				continue;
-			}
-			cleanup_card(dev);
+			dev_hp[found++] = dev;
+			continue;
 		}
 		free_netdev(dev);
 		printk(KERN_WARNING "hp.c: No HP card found (i/o = 0x%x).\n", io[this_dev]);
@@ -447,7 +439,13 @@ init_module(void)
 	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr - NIC_OFFSET, HP_IO_EXTENT);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;

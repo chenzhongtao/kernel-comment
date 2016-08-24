@@ -15,14 +15,27 @@ This driver is known to work with the following cards:
 	* SA 6400 U320 Expansion Module
 	* SA 6i
 	* SA P600
+	* SA P800
+	* SA E400
+	* SA P400i
+	* SA E200
+	* SA E200i
+	* SA E500
+
+Detecting drive failures:
+-------------------------
+
+To get the status of logical volumes and to detect physical drive
+failures, you can use the cciss_vol_status program found here:
+http://cciss.sourceforge.net/#cciss_utils
+
+Device Naming:
+--------------
 
 If nodes are not already created in the /dev/cciss directory, run as root:
 
 # cd /dev
 # ./MAKEDEV cciss
-
-Device Naming:
---------------
 
 You need some entries in /dev for the cciss device.  The MAKEDEV script
 can make device nodes for you automatically.  Currently the device setup
@@ -74,7 +87,7 @@ the /proc filesystem entry which the "block" side of the driver creates as
 the SCSI core may not yet be initialized (because the driver is a block 
 driver) and attempting to register it with the SCSI core in such a case 
 would cause a hang.  This is best done via an initialization script 
-(typically in /etc/init.d, but could vary depending on distibution). 
+(typically in /etc/init.d, but could vary depending on distribution). 
 For example:
 
 	for x in /proc/driver/cciss/cciss[0-9]*
@@ -127,4 +140,33 @@ physical SCSI disk drives are controlled directly by the array controller
 hardware and it is important to prevent the kernel from attempting to directly
 access these devices too, as if the array controller were merely a SCSI 
 controller in the same way that we are allowing it to access SCSI tape drives.
+
+SCSI error handling for tape drives and medium changers
+-------------------------------------------------------
+
+The linux SCSI mid layer provides an error handling protocol which
+kicks into gear whenever a SCSI command fails to complete within a
+certain amount of time (which can vary depending on the command).
+The cciss driver participates in this protocol to some extent.  The
+normal protocol is a four step process.  First the device is told
+to abort the command.  If that doesn't work, the device is reset.
+If that doesn't work, the SCSI bus is reset.  If that doesn't work
+the host bus adapter is reset.  Because the cciss driver is a block
+driver as well as a SCSI driver and only the tape drives and medium
+changers are presented to the SCSI mid layer, and unlike more 
+straightforward SCSI drivers, disk i/o continues through the block
+side during the SCSI error recovery process, the cciss driver only
+implements the first two of these actions, aborting the command, and
+resetting the device.  Additionally, most tape drives will not oblige 
+in aborting commands, and sometimes it appears they will not even 
+obey a reset command, though in most circumstances they will.  In
+the case that the command cannot be aborted and the device cannot be 
+reset, the device will be set offline.
+
+In the event the error handling code is triggered and a tape drive is
+successfully reset or the tardy command is successfully aborted, the 
+tape drive may still not allow i/o to continue until some command
+is issued which positions the tape to a known position.  Typically you
+must rewind the tape (by issuing "mt -f /dev/st0 rewind" for example)
+before i/o can proceed again to a tape drive which was reset.
 

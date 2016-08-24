@@ -6,7 +6,7 @@
    		     Arnaldo Carvalho de Melo <acme@conectiva.com.br>
                      Brad Strand <linux@3ware.com>
 
-   Copyright (C) 1999-2004 3ware Inc.
+   Copyright (C) 1999-2007 3ware Inc.
 
    Kernel compatiblity By:	Andre Hedrick <andre@suse.com>
    Non-Copyright (C) 2000	Andre Hedrick <andre@suse.com>
@@ -54,7 +54,6 @@
 #ifndef _3W_XXXX_H
 #define _3W_XXXX_H
 
-#include <linux/version.h>
 #include <linux/types.h>
 
 /* AEN strings */
@@ -75,7 +74,7 @@ static char *tw_aen_string[] = {
 	[0x00D] = "ERROR: Logical unit deleted: Unit #",
 	[0x00F] = "WARNING: SMART threshold exceeded: Port #",
 	[0x021] = "WARNING: ATA UDMA downgrade: Port #",
-	[0x021] = "WARNING: ATA UDMA upgrade: Port #",
+	[0x022] = "WARNING: ATA UDMA upgrade: Port #",
 	[0x023] = "WARNING: Sector repair occurred: Port #",
 	[0x024] = "ERROR: SBUF integrity check failure",
 	[0x025] = "ERROR: Lost cached write: Port #",
@@ -227,6 +226,7 @@ static unsigned char tw_sense_table[][4] =
 #define TW_IN_RESET                           2
 #define TW_IN_CHRDEV_IOCTL                    3
 #define TW_MAX_SECTORS                        256
+#define TW_MAX_IOCTL_SECTORS		      512
 #define TW_AEN_WAIT_TIME                      1000
 #define TW_IOCTL_WAIT_TIME                    (1 * HZ) /* 1 second */
 #define TW_ISR_DONT_COMPLETE                  2
@@ -397,7 +397,6 @@ typedef struct TAG_TW_Device_Extension {
 	unsigned long		*alignment_virtual_address[TW_Q_LENGTH];
 	unsigned long		alignment_physical_address[TW_Q_LENGTH];
 	int			is_unit_present[TW_MAX_UNITS];
-	int			num_units;
 	unsigned long		*command_packet_virtual_address[TW_Q_LENGTH];
 	unsigned long		command_packet_physical_address[TW_Q_LENGTH];
 	struct pci_dev		*tw_pci_dev;
@@ -421,7 +420,7 @@ typedef struct TAG_TW_Device_Extension {
 	u32			max_sector_count;
 	u32			aen_count;
 	struct Scsi_Host	*host;
-	struct semaphore	ioctl_sem;
+	struct mutex		ioctl_lock;
 	unsigned short		aen_queue[TW_Q_LENGTH];
 	unsigned char		aen_head;
 	unsigned char		aen_tail;

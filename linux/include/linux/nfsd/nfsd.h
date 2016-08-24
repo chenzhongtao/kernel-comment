@@ -10,11 +10,11 @@
 #ifndef LINUX_NFSD_NFSD_H
 #define LINUX_NFSD_NFSD_H
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/unistd.h>
 #include <linux/dirent.h>
 #include <linux/fs.h>
+#include <linux/posix_acl.h>
 #include <linux/mount.h>
 
 #include <linux/nfsd/debug.h>
@@ -22,7 +22,6 @@
 #include <linux/nfsd/export.h>
 #include <linux/nfsd/auth.h>
 #include <linux/nfsd/stats.h>
-#include <linux/nfsd/interface.h>
 /*
  * nfsd version
  */
@@ -50,21 +49,19 @@
  * Callback function for readdir
  */
 struct readdir_cd {
-	int			err;	/* 0, nfserr, or nfserr_eof */
+	__be32			err;	/* 0, nfserr, or nfserr_eof */
 };
-typedef int		(*encode_dent_fn)(struct readdir_cd *, const char *,
-						int, loff_t, ino_t, unsigned int);
 typedef int (*nfsd_dirop_t)(struct inode *, struct dentry *, int, int);
 
 extern struct svc_program	nfsd_program;
 extern struct svc_version	nfsd_version2, nfsd_version3,
 				nfsd_version4;
-
+extern struct svc_serv		*nfsd_serv;
 /*
  * Function prototypes.
  */
 int		nfsd_svc(unsigned short port, int nrservs);
-int		nfsd_dispatch(struct svc_rqst *rqstp, u32 *statp);
+int		nfsd_dispatch(struct svc_rqst *rqstp, __be32 *statp);
 
 /* nfsd/vfs.c */
 int		fh_lock_parent(struct svc_fh *, struct dentry *);
@@ -72,72 +69,105 @@ int		nfsd_racache_init(int);
 void		nfsd_racache_shutdown(void);
 int		nfsd_cross_mnt(struct svc_rqst *rqstp, struct dentry **dpp,
 		                struct svc_export **expp);
-int		nfsd_lookup(struct svc_rqst *, struct svc_fh *,
+__be32		nfsd_lookup(struct svc_rqst *, struct svc_fh *,
 				const char *, int, struct svc_fh *);
-int		nfsd_setattr(struct svc_rqst *, struct svc_fh *,
+__be32		 nfsd_lookup_dentry(struct svc_rqst *, struct svc_fh *,
+				const char *, int,
+				struct svc_export **, struct dentry **);
+__be32		nfsd_setattr(struct svc_rqst *, struct svc_fh *,
 				struct iattr *, int, time_t);
 #ifdef CONFIG_NFSD_V4
-int             nfsd4_set_nfs4_acl(struct svc_rqst *, struct svc_fh *,
+__be32          nfsd4_set_nfs4_acl(struct svc_rqst *, struct svc_fh *,
                     struct nfs4_acl *);
 int             nfsd4_get_nfs4_acl(struct svc_rqst *, struct dentry *, struct nfs4_acl **);
 #endif /* CONFIG_NFSD_V4 */
-int		nfsd_create(struct svc_rqst *, struct svc_fh *,
+__be32		nfsd_create(struct svc_rqst *, struct svc_fh *,
 				char *name, int len, struct iattr *attrs,
 				int type, dev_t rdev, struct svc_fh *res);
 #ifdef CONFIG_NFSD_V3
-int		nfsd_access(struct svc_rqst *, struct svc_fh *, u32 *, u32 *);
-int		nfsd_create_v3(struct svc_rqst *, struct svc_fh *,
+__be32		nfsd_access(struct svc_rqst *, struct svc_fh *, u32 *, u32 *);
+__be32		nfsd_create_v3(struct svc_rqst *, struct svc_fh *,
 				char *name, int len, struct iattr *attrs,
 				struct svc_fh *res, int createmode,
-				u32 *verifier, int *truncp);
-int		nfsd_commit(struct svc_rqst *, struct svc_fh *,
+				u32 *verifier, int *truncp, int *created);
+__be32		nfsd_commit(struct svc_rqst *, struct svc_fh *,
 				loff_t, unsigned long);
 #endif /* CONFIG_NFSD_V3 */
-int		nfsd_open(struct svc_rqst *, struct svc_fh *, int,
+__be32		nfsd_open(struct svc_rqst *, struct svc_fh *, int,
 				int, struct file **);
 void		nfsd_close(struct file *);
-int		nfsd_read(struct svc_rqst *, struct svc_fh *,
-				loff_t, struct kvec *,int, unsigned long *);
-int		nfsd_write(struct svc_rqst *, struct svc_fh *,
+__be32 		nfsd_read(struct svc_rqst *, struct svc_fh *, struct file *,
+				loff_t, struct kvec *, int, unsigned long *);
+__be32 		nfsd_write(struct svc_rqst *, struct svc_fh *,struct file *,
 				loff_t, struct kvec *,int, unsigned long, int *);
-int		nfsd_readlink(struct svc_rqst *, struct svc_fh *,
+__be32		nfsd_readlink(struct svc_rqst *, struct svc_fh *,
 				char *, int *);
-int		nfsd_symlink(struct svc_rqst *, struct svc_fh *,
+__be32		nfsd_symlink(struct svc_rqst *, struct svc_fh *,
 				char *name, int len, char *path, int plen,
 				struct svc_fh *res, struct iattr *);
-int		nfsd_link(struct svc_rqst *, struct svc_fh *,
+__be32		nfsd_link(struct svc_rqst *, struct svc_fh *,
 				char *, int, struct svc_fh *);
-int		nfsd_rename(struct svc_rqst *,
+__be32		nfsd_rename(struct svc_rqst *,
 				struct svc_fh *, char *, int,
 				struct svc_fh *, char *, int);
-int		nfsd_remove(struct svc_rqst *,
+__be32		nfsd_remove(struct svc_rqst *,
 				struct svc_fh *, char *, int);
-int		nfsd_unlink(struct svc_rqst *, struct svc_fh *, int type,
+__be32		nfsd_unlink(struct svc_rqst *, struct svc_fh *, int type,
 				char *name, int len);
 int		nfsd_truncate(struct svc_rqst *, struct svc_fh *,
 				unsigned long size);
-int		nfsd_readdir(struct svc_rqst *, struct svc_fh *,
-			     loff_t *, struct readdir_cd *, encode_dent_fn);
-int		nfsd_statfs(struct svc_rqst *, struct svc_fh *,
+__be32		nfsd_readdir(struct svc_rqst *, struct svc_fh *,
+			     loff_t *, struct readdir_cd *, filldir_t);
+__be32		nfsd_statfs(struct svc_rqst *, struct svc_fh *,
 				struct kstatfs *);
 
 int		nfsd_notify_change(struct inode *, struct iattr *);
-int		nfsd_permission(struct svc_export *, struct dentry *, int);
+__be32		nfsd_permission(struct svc_rqst *, struct svc_export *,
+				struct dentry *, int);
+int		nfsd_sync_dir(struct dentry *dp);
 
+#if defined(CONFIG_NFSD_V2_ACL) || defined(CONFIG_NFSD_V3_ACL)
+#ifdef CONFIG_NFSD_V2_ACL
+extern struct svc_version nfsd_acl_version2;
+#else
+#define nfsd_acl_version2 NULL
+#endif
+#ifdef CONFIG_NFSD_V3_ACL
+extern struct svc_version nfsd_acl_version3;
+#else
+#define nfsd_acl_version3 NULL
+#endif
+struct posix_acl *nfsd_get_posix_acl(struct svc_fh *, int);
+int nfsd_set_posix_acl(struct svc_fh *, int, struct posix_acl *);
+#endif
+
+enum vers_op {NFSD_SET, NFSD_CLEAR, NFSD_TEST, NFSD_AVAIL };
+int nfsd_vers(int vers, enum vers_op change);
+void nfsd_reset_versions(void);
+int nfsd_create_serv(void);
+
+extern int nfsd_max_blksize;
 
 /* 
  * NFSv4 State
  */
 #ifdef CONFIG_NFSD_V4
-void nfs4_state_init(void);
+extern unsigned int max_delegations;
+int nfs4_state_init(void);
+void nfsd4_free_slabs(void);
+void nfs4_state_start(void);
 void nfs4_state_shutdown(void);
 time_t nfs4_lease_time(void);
 void nfs4_reset_lease(time_t leasetime);
+int nfs4_reset_recoverydir(char *recdir);
 #else
-void static inline nfs4_state_init(void){}
-void static inline nfs4_state_shutdown(void){}
-time_t static inline nfs4_lease_time(void){return 0;}
-void static inline nfs4_reset_lease(time_t leasetime){}
+static inline int nfs4_state_init(void) { return 0; }
+static inline void nfsd4_free_slabs(void) { }
+static inline void nfs4_state_start(void) { }
+static inline void nfs4_state_shutdown(void) { }
+static inline time_t nfs4_lease_time(void) { return 0; }
+static inline void nfs4_reset_lease(time_t leasetime) { }
+static inline int nfs4_reset_recoverydir(char *recdir) { return 0; }
 #endif
 
 /*
@@ -190,6 +220,7 @@ void		nfsd_lockd_shutdown(void);
 #define	nfserr_clid_inuse	__constant_htonl(NFSERR_CLID_INUSE)
 #define	nfserr_stale_clientid	__constant_htonl(NFSERR_STALE_CLIENTID)
 #define	nfserr_resource		__constant_htonl(NFSERR_RESOURCE)
+#define	nfserr_moved		__constant_htonl(NFSERR_MOVED)
 #define	nfserr_nofilehandle	__constant_htonl(NFSERR_NOFILEHANDLE)
 #define	nfserr_minor_vers_mismatch	__constant_htonl(NFSERR_MINOR_VERS_MISMATCH)
 #define nfserr_share_denied	__constant_htonl(NFSERR_SHARE_DENIED)
@@ -209,6 +240,10 @@ void		nfsd_lockd_shutdown(void);
 #define	nfserr_no_grace		__constant_htonl(NFSERR_NO_GRACE)
 #define	nfserr_reclaim_bad	__constant_htonl(NFSERR_RECLAIM_BAD)
 #define	nfserr_badname		__constant_htonl(NFSERR_BADNAME)
+#define	nfserr_cb_path_down	__constant_htonl(NFSERR_CB_PATH_DOWN)
+#define	nfserr_locked		__constant_htonl(NFSERR_LOCKED)
+#define	nfserr_wrongsec		__constant_htonl(NFSERR_WRONGSEC)
+#define	nfserr_replay_me	__constant_htonl(NFSERR_REPLAY_ME)
 
 /* error codes for internal use */
 /* if a request fails due to kmalloc failure, it gets dropped.
@@ -226,18 +261,6 @@ void		nfsd_lockd_shutdown(void);
  */
 extern struct timeval	nfssvc_boot;
 
-static inline int is_fsid(struct svc_fh *fh, struct knfsd_fh *reffh)
-{
-	if (fh->fh_export->ex_flags & NFSEXP_FSID) {
-		struct vfsmount *mnt = fh->fh_export->ex_mnt;
-		if (!old_valid_dev(mnt->mnt_sb->s_dev) ||
-		    (reffh->fh_version == 1 && reffh->fh_fsid_type == 1))
-			return 1;
-	}
-	return 0;
-}
-
-
 #ifdef CONFIG_NFSD_V4
 
 /* before processing a COMPOUND operation, we have to check that there
@@ -245,12 +268,12 @@ static inline int is_fsid(struct svc_fh *fh, struct knfsd_fh *reffh)
  * we might process an operation with side effects, and be unable to
  * tell the client that the operation succeeded.
  *
- * COMPOUND_SLACK_SPACE - this is the minimum amount of buffer space
+ * COMPOUND_SLACK_SPACE - this is the minimum bytes of buffer space
  * needed to encode an "ordinary" _successful_ operation.  (GETATTR,
  * READ, READDIR, and READLINK have their own buffer checks.)  if we
  * fall below this level, we fail the next operation with NFS4ERR_RESOURCE.
  *
- * COMPOUND_ERR_SLACK_SPACE - this is the minimum amount of buffer space
+ * COMPOUND_ERR_SLACK_SPACE - this is the minimum bytes of buffer space
  * needed to encode an operation which has failed with NFS4ERR_RESOURCE.
  * care is taken to ensure that we never fall below this level for any
  * reason.
@@ -264,7 +287,6 @@ static inline int is_fsid(struct svc_fh *fh, struct knfsd_fh *reffh)
 /*
  * The following attributes are currently not supported by the NFSv4 server:
  *    ARCHIVE       (deprecated anyway)
- *    FS_LOCATIONS  (will be supported eventually)
  *    HIDDEN        (unlikely to be supported any time soon)
  *    MIMETYPE      (unlikely to be supported any time soon)
  *    QUOTA_*       (will be supported in a forthcoming patch)
@@ -280,7 +302,7 @@ static inline int is_fsid(struct svc_fh *fh, struct knfsd_fh *reffh)
  | FATTR4_WORD0_ACLSUPPORT      | FATTR4_WORD0_CANSETTIME   | FATTR4_WORD0_CASE_INSENSITIVE \
  | FATTR4_WORD0_CASE_PRESERVING | FATTR4_WORD0_CHOWN_RESTRICTED                             \
  | FATTR4_WORD0_FILEHANDLE      | FATTR4_WORD0_FILEID       | FATTR4_WORD0_FILES_AVAIL      \
- | FATTR4_WORD0_FILES_FREE      | FATTR4_WORD0_FILES_TOTAL  | FATTR4_WORD0_HOMOGENEOUS      \
+ | FATTR4_WORD0_FILES_FREE      | FATTR4_WORD0_FILES_TOTAL  | FATTR4_WORD0_FS_LOCATIONS | FATTR4_WORD0_HOMOGENEOUS      \
  | FATTR4_WORD0_MAXFILESIZE     | FATTR4_WORD0_MAXLINK      | FATTR4_WORD0_MAXNAME          \
  | FATTR4_WORD0_MAXREAD         | FATTR4_WORD0_MAXWRITE     | FATTR4_WORD0_ACL)
 

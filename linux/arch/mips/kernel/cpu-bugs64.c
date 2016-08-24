@@ -1,12 +1,11 @@
 /*
- * Copyright (C) 2003, 2004  Maciej W. Rozycki
+ * Copyright (C) 2003, 2004, 2007  Maciej W. Rozycki
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
@@ -30,7 +29,7 @@ static inline void align_mod(const int align, const int mod)
 		".endr\n\t"
 		".set	pop"
 		:
-		: "n" (align), "n" (mod));
+		: GCC_IMM_ASM(align), GCC_IMM_ASM(mod));
 }
 
 static inline void mult_sh_align_mod(long *v1, long *v2, long *w,
@@ -137,7 +136,7 @@ static inline void check_mult_sh(void)
 	for (i = 0; i < 8; i++)
 		if (v1[i] != w[i])
 			bug = 1;
-		
+
 	if (bug == 0) {
 		printk("no.\n");
 		return;
@@ -149,7 +148,7 @@ static inline void check_mult_sh(void)
 	for (i = 0; i < 8; i++)
 		if (v2[i] != w[i])
 			fix = 0;
-		
+
 	if (fix == 1) {
 		printk("yes.\n");
 		return;
@@ -206,7 +205,7 @@ static inline void check_daddi(void)
 		"daddi	%0, %1, %3\n\t"
 		".set	pop"
 		: "=r" (v), "=&r" (tmp)
-		: "I" (0xffffffffffffdb9a), "I" (0x1234));
+		: "I" (0xffffffffffffdb9aUL), "I" (0x1234));
 	set_except_vector(12, handler);
 	local_irq_restore(flags);
 
@@ -224,7 +223,7 @@ static inline void check_daddi(void)
 		"dsrl	%1, %1, 1\n\t"
 		"daddi	%0, %1, %3"
 		: "=r" (v), "=&r" (tmp)
-		: "I" (0xffffffffffffdb9a), "I" (0x1234));
+		: "I" (0xffffffffffffdb9aUL), "I" (0x1234));
 	set_except_vector(12, handler);
 	local_irq_restore(flags);
 
@@ -280,7 +279,7 @@ static inline void check_daddiu(void)
 		"daddu	%1, %2\n\t"
 		".set	pop"
 		: "=&r" (v), "=&r" (w), "=&r" (tmp)
-		: "I" (0xffffffffffffdb9a), "I" (0x1234));
+		: "I" (0xffffffffffffdb9aUL), "I" (0x1234));
 
 	if (v == w) {
 		printk("no.\n");
@@ -296,7 +295,7 @@ static inline void check_daddiu(void)
 		"addiu	%1, $0, %4\n\t"
 		"daddu	%1, %2"
 		: "=&r" (v), "=&r" (w), "=&r" (tmp)
-		: "I" (0xffffffffffffdb9a), "I" (0x1234));
+		: "I" (0xffffffffffffdb9aUL), "I" (0x1234));
 
 	if (v == w) {
 		printk("yes.\n");

@@ -17,8 +17,8 @@
 /*
  * hfs_lookup()
  */
-struct dentry *hfs_lookup(struct inode *dir, struct dentry *dentry,
-			  struct nameidata *nd)
+static struct dentry *hfs_lookup(struct inode *dir, struct dentry *dentry,
+				 struct nameidata *nd)
 {
 	hfs_cat_rec rec;
 	struct hfs_find_data fd;
@@ -28,7 +28,7 @@ struct dentry *hfs_lookup(struct inode *dir, struct dentry *dentry,
 	dentry->d_op = &hfs_dentry_operations;
 
 	hfs_find_init(HFS_SB(dir->i_sb)->cat_tree, &fd);
-	hfs_cat_build_key(fd.search_key, dir->i_ino, &dentry->d_name);
+	hfs_cat_build_key(dir->i_sb, fd.search_key, dir->i_ino, &dentry->d_name);
 	res = hfs_brec_read(&fd, &rec, sizeof(rec));
 	if (res) {
 		hfs_find_exit(&fd);
@@ -51,12 +51,12 @@ done:
 /*
  * hfs_readdir
  */
-int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
+static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct inode *inode = filp->f_dentry->d_inode;
+	struct inode *inode = filp->f_path.dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
 	int len, err;
-	char strbuf[HFS_NAMELEN + 1];
+	char strbuf[HFS_MAX_NAMELEN];
 	union hfs_cat_rec entry;
 	struct hfs_find_data fd;
 	struct hfs_readdir_data *rd;
@@ -66,7 +66,7 @@ int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		return 0;
 
 	hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
-	hfs_cat_build_key(fd.search_key, inode->i_ino, NULL);
+	hfs_cat_build_key(sb, fd.search_key, inode->i_ino, NULL);
 	err = hfs_brec_find(&fd);
 	if (err)
 		goto out;
@@ -81,12 +81,12 @@ int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	case 1:
 		hfs_bnode_read(fd.bnode, &entry, fd.entryoffset, fd.entrylength);
 		if (entry.type != HFS_CDR_THD) {
-			printk("HFS: bad catalog folder thread\n");
+			printk(KERN_ERR "hfs: bad catalog folder thread\n");
 			err = -EIO;
 			goto out;
 		}
 		//if (fd.entrylength < HFS_MIN_THREAD_SZ) {
-		//	printk("HFS: truncated catalog thread\n");
+		//	printk(KERN_ERR "hfs: truncated catalog thread\n");
 		//	err = -EIO;
 		//	goto out;
 		//}
@@ -105,16 +105,16 @@ int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 
 	for (;;) {
 		if (be32_to_cpu(fd.key->cat.ParID) != inode->i_ino) {
-			printk("HFS: walked past end of dir\n");
+			printk(KERN_ERR "hfs: walked past end of dir\n");
 			err = -EIO;
 			goto out;
 		}
 		hfs_bnode_read(fd.bnode, &entry, fd.entryoffset, fd.entrylength);
 		type = entry.type;
-		len = hfs_mac2triv(strbuf, &fd.key->cat.CName);
+		len = hfs_mac2asc(sb, strbuf, &fd.key->cat.CName);
 		if (type == HFS_CDR_DIR) {
 			if (fd.entrylength < sizeof(struct hfs_cat_dir)) {
-				printk("HFS: small dir entry\n");
+				printk(KERN_ERR "hfs: small dir entry\n");
 				err = -EIO;
 				goto out;
 			}
@@ -123,7 +123,7 @@ int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				break;
 		} else if (type == HFS_CDR_FIL) {
 			if (fd.entrylength < sizeof(struct hfs_cat_file)) {
-				printk("HFS: small file entry\n");
+				printk(KERN_ERR "hfs: small file entry\n");
 				err = -EIO;
 				goto out;
 			}
@@ -131,7 +131,7 @@ int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				    be32_to_cpu(entry.file.FlNum), DT_REG))
 				break;
 		} else {
-			printk("HFS: bad catalog entry type %d\n", type);
+			printk(KERN_ERR "hfs: bad catalog entry type %d\n", type);
 			err = -EIO;
 			goto out;
 		}
@@ -177,8 +177,8 @@ static int hfs_dir_release(struct inode *inode, struct file *file)
  * a directory and return a corresponding inode, given the inode for
  * the directory and the name (and its length) of the new file.
  */
-int hfs_create(struct inode *dir, struct dentry *dentry, int mode,
-	       struct nameidata *nd)
+static int hfs_create(struct inode *dir, struct dentry *dentry, int mode,
+		      struct nameidata *nd)
 {
 	struct inode *inode;
 	int res;
@@ -207,7 +207,7 @@ int hfs_create(struct inode *dir, struct dentry *dentry, int mode,
  * in a directory, given the inode for the parent directory and the
  * name (and its length) of the new directory.
  */
-int hfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+static int hfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 {
 	struct inode *inode;
 	int res;
@@ -236,7 +236,7 @@ int hfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
  * file, given the inode for the parent directory and the name
  * (and its length) of the existing file.
  */
-int hfs_unlink(struct inode *dir, struct dentry *dentry)
+static int hfs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct inode *inode;
 	int res;
@@ -246,7 +246,7 @@ int hfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (res)
 		return res;
 
-	inode->i_nlink--;
+	drop_nlink(inode);
 	hfs_delete_inode(inode);
 	inode->i_ctime = CURRENT_TIME_SEC;
 	mark_inode_dirty(inode);
@@ -262,7 +262,7 @@ int hfs_unlink(struct inode *dir, struct dentry *dentry)
  * directory, given the inode for the parent directory and the name
  * (and its length) of the existing directory.
  */
-int hfs_rmdir(struct inode *dir, struct dentry *dentry)
+static int hfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	struct inode *inode;
 	int res;
@@ -273,7 +273,7 @@ int hfs_rmdir(struct inode *dir, struct dentry *dentry)
 	res = hfs_cat_delete(inode->i_ino, dir, &dentry->d_name);
 	if (res)
 		return res;
-	inode->i_nlink = 0;
+	clear_nlink(inode);
 	inode->i_ctime = CURRENT_TIME_SEC;
 	hfs_delete_inode(inode);
 	mark_inode_dirty(inode);
@@ -291,8 +291,8 @@ int hfs_rmdir(struct inode *dir, struct dentry *dentry)
  * new file/directory.
  * XXX: how do you handle must_be dir?
  */
-int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
-	       struct inode *new_dir, struct dentry *new_dentry)
+static int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+		      struct inode *new_dir, struct dentry *new_dentry)
 {
 	int res;
 
@@ -307,19 +307,20 @@ int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 			   old_dir, &old_dentry->d_name,
 			   new_dir, &new_dentry->d_name);
 	if (!res)
-		hfs_cat_build_key((btree_key *)&HFS_I(old_dentry->d_inode)->cat_key,
+		hfs_cat_build_key(old_dir->i_sb,
+				  (btree_key *)&HFS_I(old_dentry->d_inode)->cat_key,
 				  new_dir->i_ino, &new_dentry->d_name);
 	return res;
 }
 
-struct file_operations hfs_dir_operations = {
+const struct file_operations hfs_dir_operations = {
 	.read		= generic_read_dir,
 	.readdir	= hfs_readdir,
 	.llseek		= generic_file_llseek,
 	.release	= hfs_dir_release,
 };
 
-struct inode_operations hfs_dir_inode_operations = {
+const struct inode_operations hfs_dir_inode_operations = {
 	.create		= hfs_create,
 	.lookup		= hfs_lookup,
 	.unlink		= hfs_unlink,

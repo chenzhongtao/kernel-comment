@@ -24,12 +24,10 @@
 #ifndef __LH7A40X_H_
 #define __LH7A40X_H_
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/types.h>
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
@@ -51,8 +49,8 @@
 #include <asm/unaligned.h>
 #include <asm/hardware.h>
 
-#include <linux/usb_ch9.h>
-#include <linux/usb_gadget.h>
+#include <linux/usb/ch9.h>
+#include <linux/usb/gadget.h>
 
 /*
  * Memory map
