@@ -406,6 +406,9 @@ static twa_message_type twa_error_table[] = {
 #define TW_IOCTL_ERROR_STATUS_NO_MORE_EVENTS  0x1003 // No more events
 #define TW_IOCTL_ERROR_STATUS_AEN_CLOBBER     0x1004 // AEN clobber occurred
 #define TW_IOCTL_ERROR_OS_EFAULT	      -EFAULT // Bad address
+/**
+ * 当系统调用被信号打断时，返回-EINTR。
+ */
 #define TW_IOCTL_ERROR_OS_EINTR		      -EINTR  // Interrupted system call
 #define TW_IOCTL_ERROR_OS_EINVAL	      -EINVAL // Invalid argument
 #define TW_IOCTL_ERROR_OS_ENOMEM	      -ENOMEM // Out of memory

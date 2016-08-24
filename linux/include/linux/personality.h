@@ -79,6 +79,9 @@ enum {
  */
 typedef void (*handler_t)(int, struct pt_regs *);
 
+/**
+ * Ö´ĞĞÓòÃèÊö·û
+ */
 struct exec_domain {
 	const char		*name;		/* name of the execdomain */
 	handler_t		handler;	/* handler for syscalls */

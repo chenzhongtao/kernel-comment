@@ -276,6 +276,9 @@ int pcie_port_device_probe(struct pci_dev *dev)
 	return -ENODEV;
 }
 
+/**
+ * ×¢²áPCIÉè±¸Çı¶¯¡£
+ */
 int pcie_port_device_register(struct pci_dev *dev)
 {
 	int status, type, capabilities, irq_mode, i;

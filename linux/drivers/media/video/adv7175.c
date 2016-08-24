@@ -126,7 +126,7 @@ adv7175_write_block (struct i2c_client *client,
 		u8 block_data[32];
 
 		msg.addr = client->addr;
-		msg.flags = 0;
+		msg.flags = client->flags;
 		while (len >= 2) {
 			msg.buf = (char *) block_data;
 			msg.len = 0;

@@ -225,6 +225,9 @@ int blkdev_ioctl(struct inode *inode, struct file *file, unsigned cmd,
 /* Most of the generic ioctls are handled in the normal fallback path.
    This assumes the blkdev's low level compat_ioctl always returns
    ENOIOCTLCMD for unknown ioctls. */
+/**
+ * def_blk_fopsµÄcompat_ioctl·½·¨
+ */
 long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
 	struct block_device *bdev = file->f_dentry->d_inode->i_bdev;
@@ -237,5 +240,3 @@ long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	}
 	return ret;
 }
-
-EXPORT_SYMBOL_GPL(blkdev_ioctl);

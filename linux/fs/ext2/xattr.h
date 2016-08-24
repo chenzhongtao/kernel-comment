@@ -32,6 +32,9 @@ struct ext2_xattr_header {
 	__u32	h_reserved[4];	/* zero right now */
 };
 
+/**
+ * ext2索引节点增强属性。存放在单独的磁盘块首部中。
+ */
 struct ext2_xattr_entry {
 	__u8	e_name_len;	/* length of name */
 	__u8	e_name_index;	/* attribute name index */

@@ -1197,10 +1197,8 @@ static int rhine_open(struct net_device *dev)
 		       dev->name, rp->pdev->irq);
 
 	rc = alloc_ring(dev);
-	if (rc) {
-		free_irq(rp->pdev->irq, dev);
+	if (rc)
 		return rc;
-	}
 	alloc_rbufs(dev);
 	alloc_tbufs(dev);
 	rhine_chip_reset(dev);
@@ -1900,9 +1898,6 @@ static void rhine_shutdown (struct device *gendev)
 	struct net_device *dev = pci_get_drvdata(pdev);
 	struct rhine_private *rp = netdev_priv(dev);
 	void __iomem *ioaddr = rp->base;
-
-	if (!(rp->quirks & rqWOL))
-		return; /* Nothing to do for non-WOL adapters */
 
 	rhine_power_init(dev);
 

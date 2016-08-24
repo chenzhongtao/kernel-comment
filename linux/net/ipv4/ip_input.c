@@ -149,7 +149,9 @@
 /*
  *	SNMP management statistics
  */
-
+/**
+ * IPĞ­ÒéÍ³¼Æ¼ÆÊı¡£
+ */
 DEFINE_SNMP_STAT(struct ipstats_mib, ip_statistics);
 
 /*
@@ -196,14 +198,25 @@ int ip_call_ra_chain(struct sk_buff *skb)
 	return 0;
 }
 
+/**
+ * L3µ½L4µÄ´«µİ:Ö÷Òª¹¤×÷ÊÇ¸ù¾İÊäÈëIP°ü±¨Í·µÄ"Ğ­Òé"×Ö¶ÎÕÒ³öÕıÈ·µÄĞ­Òé´¦Àíº¯Êı£¬È»ºó°Ñ¸Ã°ü½»¸ø¸Ã´¦Àíº¯Êı¡£
+ * Í¬Ê±£¬ip_local_deliver_finish±ØĞë´¦ÀíRaw IP¡£´ËÍâ£¬Èç¹ûÓĞÅäÖÃ°²È«²ßÂÔ£¬¸Ãº¯ÊıÒ²ÒªÊ©¼Ó°²È«¼ì²é¡£
+ */
 static inline int ip_local_deliver_finish(struct sk_buff *skb)
 {
+	/**
+	 * skb->nhÊÇÔÚnetif_receive_skbÖĞ³õÊ¼»¯£¬À´Ö¸ÏòIP±¨Í·µÄ¿ª¶Ë¡£
+	 */
 	int ihl = skb->nh.iph->ihl*4;
 
 #ifdef CONFIG_NETFILTER_DEBUG
 	nf_debug_ip_local_deliver(skb);
 #endif /*CONFIG_NETFILTER_DEBUG*/
 
+	/**
+	 * ´ËÊ±ÄÚºË²»ÔÙĞèÒªIP±¨Í·ÁË£¬ÒòÎªIP²ãµÄÊÂÇéÒÑ¾­×öÍê£¬¶øÇÒ°üÒ²Òª´«¸øÏÂÒ»¸ö½Ï¸ß²ãÁË¡£
+	 * Òò´Ë£¬ÕâÀïËùÊ¾µÄ__skb_pullµ÷ÓÃ»á°Ñ°üµÄÊı¾İ²¿·ÖËõĞ¡À´ºöÂÔL3±¨Í·
+	 */
 	__skb_pull(skb, ihl);
 
 	/* Free reference early: we don't need it any more, and it may
@@ -211,11 +224,17 @@ static inline int ip_local_deliver_finish(struct sk_buff *skb)
 	nf_reset(skb);
 
         /* Point into the IP datagram, just past the header. */
+		/**
+		 * L4²ãÆğÊ¼µØÖ·¡£
+		 */
         skb->h.raw = skb->data;
 
 	rcu_read_lock();
 	{
 		/* Note: See raw.c and net/raw.h, RAWV4_HTABLE_SIZE==MAX_INET_PROTOS */
+		/**
+		 * Ğ­ÒéIDÊÇ´Óskb->nh.iph->protocol±äÁ¿£¨Ö¸ÏòIP±¨Í·µÄ"Ğ­Òé"×Ö¶Î£©È¡³öµÄ¡£
+		 */
 		int protocol = skb->nh.iph->protocol;
 		int hash;
 		struct sock *raw_sk;
@@ -223,38 +242,50 @@ static inline int ip_local_deliver_finish(struct sk_buff *skb)
 
 	resubmit:
 		hash = protocol & (MAX_INET_PROTOS - 1);
+		/**
+		 * Ğ­Òé¶ÔÓ¦µÄµÚÒ»¸öÔ­Ê¼Ì×¿Ú
+		 */
 		raw_sk = sk_head(&raw_v4_htable[hash]);
 
 		/* If there maybe a raw socket we must check - if not we
 		 * don't care less
 		 */
-		if (raw_sk)
+		if (raw_sk)/* ´æÔÚÔ­Ê¼Ì×¿Ú£¬µ÷ÓÃraw_v4_input´¦ÀíËüÃÇ¡£raw_v4_input»á¸´ÖÆÊı¾İ°ü¡£ */
 			raw_v4_input(skb, skb->nh.iph, hash);
 
+		/**
+		 * ²éÕÒÄÚºËÖĞ×¢²áµÄĞ­Òé´¦Àíº¯Êı¡£
+		 */
 		if ((ipprot = rcu_dereference(inet_protos[hash])) != NULL) {
 			int ret;
 
+			/**
+			 * Èç¹û´ËL4²ã´¦Àíº¯ÊıĞèÒª¼ì²éIPSEC²¢ÇÒÃ»ÓĞÍ¨¹ı¼ì²é£¬¾ÍÊÍ·Å°ü²¢ÍË³ö¡£
+			 */
 			if (!ipprot->no_policy &&
 			    !xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
 				kfree_skb(skb);
 				goto out;
 			}
+			/**
+			 * µ÷ÓÃL4²ã´¦Àíº¯Êı¡£
+			 */
 			ret = ipprot->handler(skb);
-			if (ret < 0) {
+			if (ret < 0) {/* ÕâÀïÓ¦¸ÃÊÇ´¦ÀíIPSEC */
 				protocol = -ret;
 				goto resubmit;
 			}
 			IP_INC_STATS_BH(IPSTATS_MIB_INDELIVERS);
 		} else {
-			if (!raw_sk) {
-				if (xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+			if (!raw_sk) {/* Ã»ÓĞL4²ã´¦Àíº¯Êı£¬Í¬Ê±Ã»ÓĞ¶ÔÓ¦µÄÔ­Ê¼Ì×½Ó×Ö´¦Àí¸Ã°ü¡£ */
+				if (xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {/* Èç¹ûIPSECÔÊĞí¶Ô¸Ã°ü·¢ËÍICMP£¬Ôò»ØËÍICMPÏûÏ¢¡£ */
 					IP_INC_STATS_BH(IPSTATS_MIB_INUNKNOWNPROTOS);
 					icmp_send(skb, ICMP_DEST_UNREACH,
 						  ICMP_PROT_UNREACH, 0);
 				}
 			} else
 				IP_INC_STATS_BH(IPSTATS_MIB_INDELIVERS);
-			kfree_skb(skb);
+			kfree_skb(skb);/* ÊÍ·Å°ü¡£ */
 		}
 	}
  out:
@@ -266,24 +297,46 @@ static inline int ip_local_deliver_finish(struct sk_buff *skb)
 /*
  * 	Deliver IP Packets to the higher protocol layers.
  */ 
+/**
+ * IPV4´¦Àí±¾µØ±¨ÎÄ½ÓÊÕ¡£
+ */
 int ip_local_deliver(struct sk_buff *skb)
 {
 	/*
 	 *	Reassemble IP fragments.
 	 */
-
+	/**
+	 * ºÍ×ª·¢£¨ÖØ×é»ù±¾ÉÏ¿ÉÒÔºöÂÔ£©Ïà·´µÄÊÇ£¬±¾µØ´«µİ±ØĞë×öºÜ¶à¹¤×÷À´´¦ÀíÖØ×é¹¤×÷¡£
+	 * ÔÚMF±êÖ¾»òÕßOFFSET²»Îª0£¬¶¼±íÊ¾ÊÇÒ»¸ö·ÖÆ¬¡£
+	 */
 	if (skb->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
+		/**
+		 * ÖØ×é¹¤×÷ÊÇÔÚip_defragº¯ÊıÄÚ½øĞĞµÄ¡£
+		 * µ±ip_defragÍê³ÉÖØ×é¹¤×÷Ê±£¬»á·µ»ØÒ»¸öÖ¸ÏòÔ­ÓĞ°üµÄÖ¸Õë£¬µ«ÊÇ£¬Èç¹û°ü»¹²»ÍêÕû£¬¾Í·µ»ØNULL¡£
+		 */
 		skb = ip_defrag(skb, IP_DEFRAG_LOCAL_DELIVER);
 		if (!skb)
 			return 0;
 	}
 
+	/**
+	 * Èç¹ûÍ¨¹ıÁËnetfilterµÄ¼ì²é£¬°ü±»ip_local_deliver_finish´«µİ¸øÉÏ²ãº¯Êı´¦Àí¡£
+	 */
 	return NF_HOOK(PF_INET, NF_IP_LOCAL_IN, skb, skb->dev, NULL,
 		       ip_local_deliver_finish);
 }
 
+/**
+ * ip_recvµÄÖ÷Òª´¦Àíº¯Êı¡£´ËÊ±£¬°üÒÑ¾­Í¨¹ıÁË»ù±¾µÄ½¡¿µ¼ì²é£¬ÒÔ¼°·À»ğÇ½Éó²é¡£±¾º¯ÊıµÄÖ÷Òª¹¤×÷ÓĞå£º
+ *		¾ö¶¨°üÊÇ·ñ±ØĞë±¾µØ´«µİ»òÕß×ª·¢¡£Èç¹ûĞèÒª×ª·¢£¬¾Í±ØĞëÕÒµ½³ö¿ÚÉè±¸ºÍÏÂÒ»¸öÌøµã¡£
+ *		·ÖÎöºÍ´¦ÀíÒ»Ğ©IPÑ¡Ïî¡£È»¶ø£¬¹Ø°­ËùÓĞIPÑ¡Ïî¶¼ÔÚ´Ë´¦Àí¡£
+ */
 static inline int ip_rcv_finish(struct sk_buff *skb)
 {
+	/**
+	 * skb->nh×Ö¶ÎÊÇÔÚnetif_receive_skbÀï³õÊ¼»¯µÄ¡£
+	 * µ±Ê±£¬»¹²»ÖªµÀL3Ğ­Òé£¬ËùÒÔ»áÊ¹ÓÃnh.raw×ö³õÊ¼»¯¡£ÏÖÔÚ£¬´Ëº¯Êı¿ÉÒÔÈ¡µÃÖ¸ÏòIP±¨Í·µÄÖ¸ÕëÁË¡£
+	 */
 	struct net_device *dev = skb->dev;
 	struct iphdr *iph = skb->nh.iph;
 
@@ -291,12 +344,23 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 	 *	Initialise the virtual path cache for the packet. It describes
 	 *	how the packet travels inside Linux networking.
 	 */ 
+	/**
+	 * skb->dst¿ÉÄÜ°üº¬°üÍ¨ÍùÆäÄ¿µÄµØµÄÂ·ÓÉĞÅÏ¢¡£
+	 * Èç¹ûÃ»ÓĞµÃÖª¸ÃÏûÏ¢£¬´Ëº¯Êı»áÑ¯ÎÊÂ·ÓÉ×ÓÏµÍ³¸Ã°Ñ°ü´«ËÍµ½ÄÄ¶ù.
+	 * ×¢:µ±°ü½øÈë´Ëº¯ÊıÊ±£¬Èç¹ûÊÇ»·»ØÉè±¸£¬dstÓ¦¸ÃÒÑ¾­×¼±¸ºÃÁË¡£
+	 */
 	if (skb->dst == NULL) {
+		/**
+		 * Èç¹ûÂ·ÓÉ×ÓÏµÍ³ËµÄ¿µÄµØÎŞ·¨µÖ´ï£¬Ôò¸Ã°ü»á±»¶ªÆú¡£
+		 */
 		if (ip_route_input(skb, iph->daddr, iph->saddr, iph->tos, dev))
 			goto drop; 
 	}
 
 #ifdef CONFIG_NET_CLS_ROUTE
+	/**
+	 * ¸üĞÂÒ»Ğ©QoSËùÓÃµÄÍ³¼ÆÊı¾İ¡£
+	 */
 	if (skb->dst->tclassid) {
 		struct ip_rt_acct *st = ip_rt_acct + 256*smp_processor_id();
 		u32 idx = skb->dst->tclassid;
@@ -307,6 +371,9 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 	}
 #endif
 
+	/**
+	 * µ±IP±¨Í·µÄ³¤¶È´óÓÚ20×Ö½Ú£¨5*32Î»£©£¬±íÊ¾ÓĞÒ»Ğ©Ñ¡ÏîĞèÒª´¦Àí¡£
+	 */
 	if (iph->ihl > 5) {
 		struct ip_options *opt;
 
@@ -318,19 +385,37 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 		                                      --ANK (980813)
 		*/
 
+		/**
+		 * skb_cow±»µ÷ÓÃ¡£Èç¹û»º³åÇøºÍ±ğÈË¹²Ïí£¬¾Í»á×ö³ö»º³åÇøµÄ¸±±¾.
+		 * ¶Ô»º³åÇø¾ßÓĞÅÅËûÓµÓĞÈ¨ÊÇ±ØÒªµÄ£¬ÒòÎªÎÒÃÇÒª´¦ÀíÄÇĞ©Ñ¡Ïî£¬¶øÇÒÓĞ¿ÉÄÜĞèÒªĞŞ¸ÄIP±¨Í·¡£
+		 */
 		if (skb_cow(skb, skb_headroom(skb))) {
 			IP_INC_STATS_BH(IPSTATS_MIB_INDISCARDS);
 			goto drop;
 		}
 		iph = skb->nh.iph;
 
+		/**
+		 * ip_option_compileÓÃÓÚ½â¶Á±¨Í·ÖĞËùĞ¯´øµÄIPÑ¡Ïî¡£
+		 * IP²ãÓÃcb×Ö¶Î´æ´¢IP±¨Í·Ñ¡Ïî·ÖÎö½á¹ûÒÔ¼°ÆäËûÒ»Ğ©Êı¾İ£¨Èç·Ö¶ÎÏà¹ØµÄĞÅÏ¢£©¡£
+		 * ´Ë½á¹û´¢´æÔÚÒ»¸östruct inet_skb_parmÀàĞÍµÄÊı¾İ½á¹¹£¨¶¨ÒåÔÚinclude/net/ip.hÖĞ£©£¬¶øÇÒ¿ÉÒÔÓÉºêIPCB´æÈ¡¡£
+		 */
 		if (ip_options_compile(NULL, skb))
-			goto inhdr_error;
+			goto inhdr_error;/* Èç¹ûÓĞÈÎºÎ´íÎóµÄÑ¡Ïî£¬°ü¾Í»á±»¶ªÆú¡£¶øÒ»ÌõÌØÊâµÄICMPÏûÏ¢¾Í»áËÍ»Ø¸ø´«ËÍÕßÀ´¸æÖªËù·¢ÉúµÄÎÊÌâ¡£ */
 
+		/**
+		 * ip_options_compile½«Ñ¡Ïî±£´æÔÚskb->cbÖĞ£¬´Ë´¦È¡³öÑ¡Ïî£¬½øĞĞ´¦Àí¡£
+		 */
 		opt = &(IPCB(skb)->opt);
+		/**
+		 * ´¦ÀíIPÔ´Â·ÓÉ
+		 */
 		if (opt->srr) {
 			struct in_device *in_dev = in_dev_get(dev);
 			if (in_dev) {
+				/**
+				 * ÅäÖÃ²»ÔÊĞí½øĞĞÔ´Â·ÓÉ¡£
+				 */
 				if (!IN_DEV_SOURCE_ROUTE(in_dev)) {
 					if (IN_DEV_LOG_MARTIANS(in_dev) && net_ratelimit())
 						printk(KERN_INFO "source route option %u.%u.%u.%u -> %u.%u.%u.%u\n",
@@ -340,11 +425,22 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 				}
 				in_dev_put(in_dev);
 			}
+			/**
+			 * ip_options_rcv_srr¸ù¾İÔ´Â·ÓÉÑ¡Ïî£¬È·¶¨Ê¹ÓÃÄÄ¸öÉè±¸°Ñ¸Ã°ü×ª·¢ÖÁÀ´Ô´µØÂ·ÓÉÁĞ±íÖĞµÄÏÂÒ»¸öÌøµã¡£
+			 * ip_options_rcv_srr»¹µÃ¿¼ÂÇ"ÏÂÒ»Ìøµã"ÊÇ±¾µØÖ÷»úµÄÒ»¸ö½Ó¿ÚµÄ¿ÉÄÜĞÔ¡£Èç¹û·¢ÉúÕâÖÖÊÂÇé£¬´Ëº¯Êı»á°Ñ¸ÃIPµØÖ·Ğ´ÈëIP±¨Í·µÄÄ¿µÄµØIPµØÖ·£¬È»ºó¼ÌĞø¼ì²éÀ´Ô´µØÂ·ÓÉÁĞ±íÖĞµÄÏÂÒ»¸öµØÖ·£¨Èç¹ûÓĞµÄ»°£©¡£ÔÚ³ÌĞòÖĞ£¬Õâ±»³ÆÎª"³¬¿ìÑ­»·×ª·¢"¡£
+			 * Ip_options_rcv_srr»á³ÖĞøä¯ÀÀIP±¨Í·À´Ô´µØÖ·Â·ÓÉÑ¡ÏîÇø¿éÖĞµÄÏÂÒ»¸öÌøµãÁĞ±í¡£Ö±µ½ÆäÕÒµ½Ò»¸ö²»ÊÇÖ÷»ú±¾µØµÄIPµØÖ·¡£Õı³£µÄËµ£¬¸ÃÁĞ±íÖĞ²»»áÓĞÒ»¸öÒÔÉÏµÄ±¾µØIPµØÖ·¡£È»¶ø£¬ÓĞÒ»¸öÒÔÉÏÒ²ÊÇºÏ·¨µÄ¡£
+			 */
 			if (ip_options_rcv_srr(skb))
 				goto drop;
 		}
 	}
 
+	/**
+	 * dst_inputÊµ¼ÊÉÏ»áµ÷ÓÃ´æ´¢ÓÚskb»º³åÇøµÄdst×Ö¶ÎµÄº¯Êı¡£
+	 * skb->dstµÄ³õÊ¼»¯²»ÊÇÔÚip_rcv_finishµÄ¿ª¶Ë£¬¾ÍÊÇÔÚip_options_rcv_srrµÄÎ²¶Ë¡£
+	 * skb->dst->input»áÉè³Éip_local_deliver»òip_forward£¬ÕâÈ¡¾öÓÚ°üµÄÄ¿µÄµØÖ·¡£
+	 * Òò´Ë£¬µ÷ÓÃdst_inputÊ±£¬¾Í¿ÉÒÔÍê³É°üµÄ´¦Àí¡£
+	 */
 	return dst_input(skb);
 
 inhdr_error:
@@ -357,6 +453,9 @@ drop:
 /*
  * 	Main IP Receive routine.
  */ 
+/**
+ * IPV4Èë°üÖ÷´¦Àíº¯Êı¡£
+ */
 int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 {
 	struct iphdr *iph;
@@ -364,19 +463,38 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 	/* When the interface is in promisc. mode, drop all the crap
 	 * that it receives, do not try to analyse it.
 	 */
+	/**
+	 * Êı¾İÖ¡µÄL2Ä¿µÄµØÖ·ºÍ½ÓÊÕ½Ó¿ÚµÄµØÖ·²»Í¬Ê±£¬skb->pkt_type¾Í»á±»ÉèÖÃ³ÉPACKET_OTHERHOST¡£Í¨³£ÕâĞ©°ü»á±»NIC±¾Éí¶ªÆú¡£
+	 * È»¶ø£¬Èç¹û¸Ã½Ó¿ÚÒÑ¾­½øÈë»ìÔÓÄ£Ê½£¬ÎŞÂÛÄ¿µÄµØL2µØÖ·ÎªºÎ£¬¶¼»á½ÓÊÕËùÓĞ°ü²¢½«Æä×ª¸ø½Ï¸ß²ã¡£
+	 * ÄÚºË»áµ÷ÓÃÄÇĞ©ÒªÇóÒª´æÈ¡ËùÓĞ°üµÄĞáÌ½Æ÷¡£µ«ÊÇip_rcvºÍ´«¸øÆäËûµØÖ·µÄÈë°üÎŞ¹Ø£¬¶øÖ»»á¼òµ¥µÄ¶ªÆúËüÃÇ¡£
+	 */
 	if (skb->pkt_type == PACKET_OTHERHOST)
 		goto drop;
 
 	IP_INC_STATS_BH(IPSTATS_MIB_INRECEIVES);
 
+	/**
+	 * Skb_share_check»á¼ì²é°üµÄÒıÓÃ¼ÆÊıÊÇ·ñ´óÓÚ1£¬´óÓÚ1Ôò±íÊ¾ÄÚºËµÄÆäËû²¿·ÖÓµÓĞ¶Ô¸Ã»º³åÇøµÄÒıÓÃ¡£
+	 * Èç¹ûÒıÓÃ¼ÆÊı´óÓÚ1£¬¾Í»á×Ô¼º½¨ÒéÒ»·İ»º³åÇø¸±±¾¡£
+	 */
 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL) {
+		/**
+		 * ÓÉÓÚÄÚ´æ²»×ã¶øÊ§°Ü¡£
+		 */
 		IP_INC_STATS_BH(IPSTATS_MIB_INDISCARDS);
 		goto out;
 	}
 
+	/**
+	 * pskb_may_pullµÄ¹¤×÷ÊÇÈ·±£skb->dataËùÇøÓò°üº¬µÄÊı¾İÇøÖÁÉÙºÍIP±¨Í·Ò»Ñù´ó£¬ÒòÎªÃ¿¸öIP°ü£¨°üÀ¨Æ¬¶Î£©±ØĞë°üº¬Ò»¸öÍêÕûµÄIP±¨Í·¡£
+	 * È±Ê§µÄ²¿·Ö¾Í»á´Ó´æ´¢ÔÚskb_shinfo(skb)->fragsÀïµÄÊı¾İÆ¬¶Î¸´ÖÆ¹ıÀ´¡£
+	 */
 	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 		goto inhdr_error;
 
+	/**
+	 * º¯Êı±ØĞëÔÙ´Î³õÊ¼»¯iph£¬ÒòÎªpskb_may_pull¿ÉÒÔ¸Ä±ä»º³åÇø½á¹¹¡£
+	 */
 	iph = skb->nh.iph;
 
 	/*
@@ -390,19 +508,39 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 	 *	4.	Doesn't have a bogus length
 	 */
 
+	/**
+	 * ½Ó×Å¶ÔIP±¨Í·×öÒ»Ğ©½¡¿µ¼ì²é¡£
+	 * »ù±¾IP±¨Í·µÄ³ß´çÊÇ20×Ö½Ú£¬ÒòÎª´æ´¢ÔÚ±¨Í·ÄÚµÄ³ß´çÊÇÒÔ32Î»£¨4×Ö½Ú£©µÄ±¶Êı±íÊ¾£¬Èç¹ûÆäÖµĞ¡ÓÚ5£¬Ôò±íÊ¾ÓĞ´íÎó¡£
+	 * ºó¼ì²éĞ­Òé°æ±¾ºÅÊÇÎªÁËĞ§ÂÊÔ­Òò¡£
+	 */
 	if (iph->ihl < 5 || iph->version != 4)
 		goto inhdr_error; 
 
+	/**
+	 * ÖØ¸´ÏÈÇ°×ö¹ıµÄÏàÍ¬¼ì²é£¬Ö»²»¹ıÕâÒ»´ÎÊ¹ÓÃµÄÊÇÍêÕûµÄIP±¨Í·³ß´ç£¨°üÀ¨Ñ¡Ïî£©¡£
+	 * Èç¹ûIP±¨Í·ÉùÃ÷ÁËiph->ihlµÄ³ß´ç£¬Ôò°üÓ¦¸ÃÖÁÉÙºÍiph->ihlÒ»Ñù³¤¡£
+	 * ÕâÏî¼ì²éÒ»Ö±µ½ÏÖÔÚ²Å×ö£¬ÊÇÒòÎª´Ëº¯Êı±ØĞëÏÈÈ·¶¨»ù±¾±¨Í·£¨¼´²»º¬Ñ¡ÏîµÄ±¨Í·£©Ã»ÓĞ±»½Ø¶Ï¡£
+	 * ¶øÇÒ´ÓÖĞ¶ÁÈ¡µÄ¶«Î÷ÒÑ¾­¾­¹ı»ù±¾½¡¿µ¼ì²é¡£
+	 */
 	if (!pskb_may_pull(skb, iph->ihl*4))
 		goto inhdr_error;
 
 	iph = skb->nh.iph;
 
+	/**
+	 * ´Ëº¯Êı±ØĞë¼ÆËãĞ£ÑéºÍ£¬È»ºó¿´¿´ÊÇ·ñºÍ±¨Í·ÖĞËùĞ¯´øµÄÎÇºÏ¡£Èç¹û²»ÎÇºÏ£¬¸Ã°ü¾Í»á±»¶ªÆú¡£
+	 */
 	if (ip_fast_csum((u8 *)iph, iph->ihl) != 0)
 		goto inhdr_error; 
 
 	{
 		__u32 len = ntohs(iph->tot_len); 
+		/**
+		 * »º³åÇø£¨¼´ÒÑ½ÓÊÕµÄ°ü£©³¤¶È´óÓÚ»òÕßµÈÓÚIP±¨Í·ÖĞ¼ÇÂ¼µÄ³¤¶È¡£
+		 *		ÕâÊÇÓÉÓÚL2Ğ­Òé£¨Èçethernet£©»áÌî³äÓĞĞ§¸ºÔØ£¬ËùÒÔ£¬ÔÚIPÓĞĞ§¸ºÔØÖ®ºó¿ÉÄÜÓĞ¶àÓàµÄ×Ö½Ú.
+		 * °üµÄ³ß´çÖÁÉÙºÍIP±¨Í·µÄ³ß´çÒ»Ñù´ó¡£
+		 *		ÕâÊÇÓÉÓÚIP±¨Í·²»ÄÜ·Ö¶ÎµÄÊÂÊµ¡£Òò´Ë£¬Ã¿¸öIPÆ¬¶Î±ØĞëÖÁÉÙ°üº¬Ò»¸öIP±¨Í·¡£
+		 */
 		if (skb->len < len || len < (iph->ihl<<2))
 			goto inhdr_error;
 
@@ -410,13 +548,25 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 		 * is IP we can trim to the true length of the frame.
 		 * Note this now means skb->len holds ntohs(iph->tot_len).
 		 */
+		/**
+		 * L2²ãÌî³äÁËÒ»Ğ©Êı¾İ±¨ÄÚÈİ¡£
+		 */
 		if (skb->len > len) {
+			/**
+			 * ½Ø¶ÏL2²ãÌî³äµÄÊı¾İ±¨ÄÚÈİ¡£
+			 */
 			__pskb_trim(skb, len);
+			/**
+			 * ÓÉÓÚ±¨ÎÄÄÚÈİ·¢ÉúÁË¸Ä±ä£¬¶øÓ²¼ş¼ÆËãµÄĞ£ÑéºÍ¿ÉÄÜÊÇ¼ÆËãÁËÌî³äµÄ±¨ÎÄ£¬´ËÊ±Ó¦µ±Ê§Ğ§¡£
+			 */
 			if (skb->ip_summed == CHECKSUM_HW)
 				skb->ip_summed = CHECKSUM_NONE;
 		}
 	}
 
+	/**
+	 * Èç¹ûÍ¨¹ıÁË·À»ğÇ½µÄ¼ì²â£¬ÄÇÃ´¾Íµ÷ÓÃip_rcv_finish½øĞĞÕæÕıµÄÂ·ÓÉ¾ö²ß¡£
+	 */
 	return NF_HOOK(PF_INET, NF_IP_PRE_ROUTING, skb, dev, NULL,
 		       ip_rcv_finish);
 

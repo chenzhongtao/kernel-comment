@@ -438,21 +438,13 @@ static void matroxfb_1bpp_imageblit(WPMINFO u_int32_t fgx, u_int32_t bgx,
 		} else if (step == 1) {
 			/* Special case for 1..8bit widths */
 			while (height--) {
-#if defined(__BIG_ENDIAN)
-				fb_writel((*chardata) << 24, mmio.vaddr);
-#else
-				fb_writel(*chardata, mmio.vaddr);
-#endif
+				mga_writel(mmio, 0, *chardata);
 				chardata++;
 			}
 		} else if (step == 2) {
 			/* Special case for 9..15bit widths */
 			while (height--) {
-#if defined(__BIG_ENDIAN)
-				fb_writel((*(u_int16_t*)chardata) << 16, mmio.vaddr);
-#else
-				fb_writel(*(u_int16_t*)chardata, mmio.vaddr);
-#endif
+				mga_writel(mmio, 0, *(u_int16_t*)chardata);
 				chardata += 2;
 			}
 		} else {
@@ -462,7 +454,7 @@ static void matroxfb_1bpp_imageblit(WPMINFO u_int32_t fgx, u_int32_t bgx,
 				
 				for (i = 0; i < step; i += 4) {
 					/* Hope that there are at least three readable bytes beyond the end of bitmap */
-					fb_writel(get_unaligned((u_int32_t*)(chardata + i)),mmio.vaddr);
+					mga_writel(mmio, 0, get_unaligned((u_int32_t*)(chardata + i)));
 				}
 				chardata += step;
 			}

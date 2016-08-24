@@ -1117,8 +1117,7 @@ static void snd_timer_user_append_to_tqueue(snd_timer_user_t *tu, snd_timer_trea
 	if (tu->qused >= tu->queue_size) {
 		tu->overrun++;
 	} else {
-		memcpy(&tu->tqueue[tu->qtail++], tread, sizeof(*tread));
-		tu->qtail %= tu->queue_size;
+		memcpy(&tu->queue[tu->qtail++], tread, sizeof(*tread));
 		tu->qused++;
 	}
 }
@@ -1141,8 +1140,6 @@ static void snd_timer_user_ccallback(snd_timer_instance_t *timeri,
 	spin_lock(&tu->qlock);
 	snd_timer_user_append_to_tqueue(tu, &r1);
 	spin_unlock(&tu->qlock);
-	kill_fasync(&tu->fasync, SIGIO, POLL_IN);
-	wake_up(&tu->qchange_sleep);
 }
 
 static void snd_timer_user_tinterrupt(snd_timer_instance_t *timeri,

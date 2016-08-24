@@ -1939,6 +1939,7 @@ struct tvcard bttv_tvcards[] = {
         .no_tda9875     = 1,
         .no_tda7432     = 1,
         .tuner_type     = TUNER_ABSENT,
+        .no_video       = 1,
 	.pll            = PLL_28,
 },{
 	.name           = "Teppro TEV-560/InterVision IV-560",
@@ -2716,6 +2717,8 @@ void __devinit bttv_init_card2(struct bttv *btv)
                 }
         }
 	btv->pll.pll_current = -1;
+
+	bttv_reset_audio(btv);
 
 	/* tuner configuration (from card list / autodetect / insmod option) */
  	if (UNSET != bttv_tvcards[btv->c.type].tuner_type)

@@ -1581,8 +1581,7 @@ vortex_up(struct net_device *dev)
 
 	if (VORTEX_PCI(vp)) {
 		pci_set_power_state(VORTEX_PCI(vp), PCI_D0);	/* Go active */
-		if (vp->pm_state_valid)
-			pci_restore_state(VORTEX_PCI(vp));
+		pci_restore_state(VORTEX_PCI(vp));
 		pci_enable_device(VORTEX_PCI(vp));
 	}
 
@@ -2156,10 +2155,16 @@ vortex_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		/* ... and the packet rounded to a doubleword. */
 		outsl(ioaddr + TX_FIFO, skb->data, (skb->len + 3) >> 2);
 		dev_kfree_skb (skb);
+		/**
+		 * 如果设备空闲内存超过一个帧大小，则允许发送帧。
+		 */
 		if (inw(ioaddr + TxFree) > 1536) {
 			netif_start_queue (dev);	/* AKPM: redundant? */
 		} else {
 			/* Interrupt us when the FIFO has room for max-sized packet. */
+			/**
+			 * 否则，停止在设备上发送帧。同时通知网卡，在设备内存超过1536时，向CPU发送中断。
+			 */
 			netif_stop_queue(dev);
 			outw(SetTxThreshold + (1536>>2), ioaddr + EL3_CMD);
 		}
@@ -2289,6 +2294,9 @@ boomerang_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * full_bus_master_tx == 0 && full_bus_master_rx == 0
  */
 
+/**
+ * 网卡中断处理函数。
+ */
 static irqreturn_t
 vortex_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
@@ -2302,11 +2310,19 @@ vortex_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	ioaddr = dev->base_addr;
 	spin_lock(&vp->lock);
 
+	/**
+	 * 驱动读取产生中断的原因，并且存储它到status中。
+	 * 网络设备会因为不同的原因产生一个中断，并且几个原因可能组合在一起，产生一个单一的中断。
+	 */
 	status = inw(ioaddr + EL3_STATUS);
 
 	if (vortex_debug > 6)
 		printk("vortex_interrupt(). status=0x%4x\n", status);
 
+	/**
+	 * 在执行vortex_rx的时候，设备中断被禁止。
+	 * 无论如何，驱动可以读取硬件寄存器，如果发现在这期间，发生了一个新的中断，那么IntLatch标志为true。
+	 */
 	if ((status & IntLatch) == 0)
 		goto handler_exit;		/* No interrupt: shared IRQs cause this */
 	handled = 1;
@@ -2323,25 +2339,48 @@ vortex_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		printk(KERN_DEBUG "%s: interrupt, status %4.4x, latency %d ticks.\n",
 			   dev->name, status, inb(ioaddr + Timer));
 
+	/**
+	 * 只要寄存器表示中断被挂起（IntLatch），vortex_interupt就一直处理入帧。
+	 * 这意味着：在一次中断期间，可能产生多次RxComplete。其他类型的中断，则可以等待。
+	 */
 	do {
 		if (vortex_debug > 5)
 				printk(KERN_DEBUG "%s: In interrupt loop, status %4.4x.\n",
 					   dev->name, status);
+		/**
+		 * 如果RxComplete（驱动可能定义了其他符号，但是其意思都是指接收到一个新的帧）是其中的一个原因
+		 * 代码就调用vortex_rx处理入帧。
+		 */
 		if (status & RxComplete)
 			vortex_rx(dev);
 
+		/**
+		 * 由于设备内存不足，驱动曾经关闭了设备上的发送队列。并设置:在内存超过一个帧大小时，向CPU发送一个中断。
+		 * 现在，设备内存已经可用了，调用netif_wake_queue，重新打开发送队列。
+		 */
 		if (status & TxAvailable) {
 			if (vortex_debug > 5)
 				printk(KERN_DEBUG "	TX room bit was handled.\n");
 			/* There's room in the FIFO for a full-sized packet. */
 			outw(AckIntr | TxAvailable, ioaddr + EL3_CMD);
+			/**
+			 * 重新使能出队列是netif_wake_queue而不是netif_start_queue。
+			 * 它不仅仅使能出队列，也检查队列中是否有需要发送的包。
+			 * 这是因为：在队列被禁止期间，可能有尝试发包的地方。在这种情况下，发包将失败，这些包将不能发送，它们将被放回出队列。
+			 */
 			netif_wake_queue (dev);
 		}
 
+		/**
+		 * DMA发送完成,通知驱动可以安全的释放sk_buff.
+		 */
 		if (status & DMADone) {
 			if (inw(ioaddr + Wn7_MasterStatus) & 0x1000) {
 				outw(0x1000, ioaddr + Wn7_MasterStatus); /* Ack the event. */
 				pci_unmap_single(VORTEX_PCI(vp), vp->tx_skb_dma, (vp->tx_skb->len + 3) & ~3, PCI_DMA_TODEVICE);
+				/**
+				 * 释放缓冲区，由于是在中断上下文，因此dev_kfree_skb_irq仅仅将待释放的缓冲区放到队列中。由软中断释放内存。
+				 */
 				dev_kfree_skb_irq(vp->tx_skb); /* Release the transferred buffer */
 				if (inw(ioaddr + TxFree) > 1536) {
 					/*
@@ -2363,6 +2402,10 @@ vortex_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			vortex_error(dev, status);
 		}
 
+		/**
+		 * 最后，当接收到一定数量的入包时，条件判断终止循环。这个阀值保存在work_done中。
+		 * 这个值的默认值是32，并可以在模块加载时调整。
+		 */
 		if (--work_done < 0) {
 			printk(KERN_WARNING "%s: Too much work in interrupt, status "
 				   "%4.4x.\n", dev->name, status);
@@ -2521,6 +2564,9 @@ handler_exit:
 	return IRQ_HANDLED;
 }
 
+/**
+ * 收包处理函数。
+ */
 static int vortex_rx(struct net_device *dev)
 {
 	struct vortex_private *vp = netdev_priv(dev);
@@ -2544,15 +2590,25 @@ static int vortex_rx(struct net_device *dev)
 			if (rx_error & 0x10)  vp->stats.rx_length_errors++;
 		} else {
 			/* The packet length: up to 4.5K!. */
+			/**
+			 * 从寄存器中(而不是帧头中)获得帧的长度。这样才能分配sk_buff。
+			 * 这里的上限4.5K并不是指以太网支持4.5K的帧。而是由于本网卡可以支持FDDI。
+			 */
 			int pkt_len = rx_status & 0x1fff;
 			struct sk_buff *skb;
 
+			/**
+			 * 分配skb
+			 */
 			skb = dev_alloc_skb(pkt_len + 5);
 			if (vortex_debug > 4)
 				printk(KERN_DEBUG "Receiving packet size %d status %4.4x.\n",
 					   pkt_len, rx_status);
 			if (skb != NULL) {
 				skb->dev = dev;
+				/**
+				 * 以太网帧头部是14个字节，后移2个字节后，紧跟在以太网头部之后的IP头部在缓冲区中存储时就可以在16字节的边界上对齐
+				 */
 				skb_reserve(skb, 2);	/* Align IP on 16 byte boundaries */
 				/* 'skb_put()' points to the start of sk_buff data area. */
 				if (vp->bus_master &&
@@ -2570,7 +2626,13 @@ static int vortex_rx(struct net_device *dev)
 						 (pkt_len + 3) >> 2);
 				}
 				outw(RxDiscard, ioaddr + EL3_CMD); /* Pop top Rx packet. */
+				/**
+				 * 初始化skb->protocol，它表示更高层的处理协议，在下一层处理前必须先设置。
+				 */
 				skb->protocol = eth_type_trans(skb, dev);
+				/**
+				 * 这里会触发软中断处理报文。
+				 */
 				netif_rx(skb);
 				dev->last_rx = jiffies;
 				vp->stats.rx_packets++;
@@ -2742,7 +2804,6 @@ vortex_down(struct net_device *dev, int final_down)
 		outl(0, ioaddr + DownListPtr);
 
 	if (final_down && VORTEX_PCI(vp)) {
-		vp->pm_state_valid = 1;
 		pci_save_state(VORTEX_PCI(vp));
 		acpi_set_WOL(dev);
 	}
@@ -3067,11 +3128,17 @@ static int vortex_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 /* Pre-Cyclone chips have no documented multicast filter, so the only
    multicast setting is to receive all multicast frames.  At least
    the chip has a very clean way to set the mode, unlike many others. */
+/**
+ * 根据flags中的标志位来设置不同接收模式
+ */
 static void set_rx_mode(struct net_device *dev)
 {
 	long ioaddr = dev->base_addr;
 	int new_mode;
 
+	/**
+	 * 如果设置了 IFF_PROMISC 标志，new_mode 变量会被初始化为接收发给本机的帧（RxStation），多播帧（RxMulticast），广播帧（RxBroadcast），和其他所有的帧（RxProm）。
+	 */
 	if (dev->flags & IFF_PROMISC) {
 		if (vortex_debug > 0)
 			printk(KERN_NOTICE "%s: Setting promiscuous mode.\n", dev->name);
@@ -3081,6 +3148,9 @@ static void set_rx_mode(struct net_device *dev)
 	} else
 		new_mode = SetRxFilter | RxStation | RxBroadcast;
 
+	/**
+	 * EL3_CMD是距离设备内存起始地址的偏移量，它是内核发送给设备的命令所存储的地址。
+	 */
 	outw(new_mode, ioaddr + EL3_CMD);
 }
 
@@ -3245,10 +3315,9 @@ static void acpi_set_WOL(struct net_device *dev)
 		outw(RxEnable, ioaddr + EL3_CMD);
 
 		pci_enable_wake(VORTEX_PCI(vp), 0, 1);
-
-		/* Change the power state to D3; RxEnable doesn't take effect. */
-		pci_set_power_state(VORTEX_PCI(vp), PCI_D3hot);
 	}
+	/* Change the power state to D3; RxEnable doesn't take effect. */
+	pci_set_power_state(VORTEX_PCI(vp), PCI_D3hot);
 }
 
 
