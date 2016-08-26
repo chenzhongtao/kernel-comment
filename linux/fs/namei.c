@@ -133,6 +133,11 @@ static inline int do_getname(const char __user *filename, char *page)
 	return retval;
 }
 
+// add by chenzhongtao
+/**
+ * 通过__getname()分配一个大小为PATH_MAX(4096B)的SLAB变量，最终调用函数
+ * strncpy_from_user()将用户空间的名字信息(此处为挂载目录名)
+ */
 char * getname(const char __user * filename)
 {
 	char *tmp, *result;

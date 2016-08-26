@@ -1103,6 +1103,9 @@ struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 	return dentry;
 }
 
+/**
+ * __d_lookup在目录项高速缓存中搜索分量的目录项对象.
+ */
 struct dentry * __d_lookup(struct dentry * parent, struct qstr * name)
 {
 	unsigned int len = name->len;

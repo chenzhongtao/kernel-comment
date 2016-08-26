@@ -1066,6 +1066,11 @@ exact_copy_from_user(void *to, const void __user *from, unsigned long n)
 	return n;
 }
 
+// add by chenzhongtao
+/**
+ * 分配一个页面，将用户空间的data所指内容拷贝至其中，之后再将未用到的
+ * 页面部分清0，使用函数exact_copy_from_user()进行拷贝
+ */
 int copy_mount_options(const void __user *data, unsigned long *where)
 {
 	int i;
@@ -1330,7 +1335,7 @@ asmlinkage long sys_mount(char __user * dev_name, char __user * dir_name,
 			  flags, (void*)data_page);
 	unlock_kernel();
 	free_page(data_page);
-
+   
 out3:
 	free_page(dev_page);
 out2:
