@@ -160,7 +160,7 @@ static inline void clear_in_cr4 (unsigned long mask)
 
 
 /*
- * User space process size. 47bits.
+ * User space process size. 47bits. 2 << 47
  */
 #define TASK_SIZE	(0x800000000000UL)
 
