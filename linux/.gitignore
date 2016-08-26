@@ -18,6 +18,18 @@
 *.lst
 *.symtypes
 
+# source insight
+*.IAB
+*.IAD
+*.IMB
+*.IMD
+*.PFI
+*.PO
+*.PR
+*.PRI
+*.PS
+*.WK3
+
 #
 # Top-level generic files
 #
@@ -28,6 +40,7 @@ vmlinux*
 System.map
 Module.symvers
 !.gitignore
+!.gitattribute
 
 #
 # Generated include files
