@@ -46,6 +46,8 @@
 
 #include "sbshc.h"
 
+#define PREFIX "ACPI: "
+
 #define ACPI_SBS_CLASS			"sbs"
 #define ACPI_AC_CLASS			"ac_adapter"
 #define ACPI_BATTERY_CLASS		"battery"
@@ -102,8 +104,8 @@ struct acpi_battery {
 	u16 cycle_count;
 	u16 temp_now;
 	u16 voltage_now;
-	s16 current_now;
-	s16 current_avg;
+	s16 rate_now;
+	s16 rate_avg;
 	u16 capacity_now;
 	u16 state_of_charge;
 	u16 state;
@@ -202,9 +204,9 @@ static int acpi_sbs_battery_get_property(struct power_supply *psy,
 		return -ENODEV;
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
-		if (battery->current_now < 0)
+		if (battery->rate_now < 0)
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		else if (battery->current_now > 0)
+		else if (battery->rate_now > 0)
 			val->intval = POWER_SUPPLY_STATUS_CHARGING;
 		else
 			val->intval = POWER_SUPPLY_STATUS_FULL;
@@ -224,11 +226,13 @@ static int acpi_sbs_battery_get_property(struct power_supply *psy,
 				acpi_battery_vscale(battery) * 1000;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
-		val->intval = abs(battery->current_now) *
+	case POWER_SUPPLY_PROP_POWER_NOW:
+		val->intval = abs(battery->rate_now) *
 				acpi_battery_ipscale(battery) * 1000;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_AVG:
-		val->intval = abs(battery->current_avg) *
+	case POWER_SUPPLY_PROP_POWER_AVG:
+		val->intval = abs(battery->rate_avg) *
 				acpi_battery_ipscale(battery) * 1000;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
@@ -293,6 +297,8 @@ static enum power_supply_property sbs_energy_battery_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_CURRENT_AVG,
+	POWER_SUPPLY_PROP_POWER_NOW,
+	POWER_SUPPLY_PROP_POWER_AVG,
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_FULL,
@@ -301,6 +307,7 @@ static enum power_supply_property sbs_energy_battery_props[] = {
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
 };
+
 #endif
 
 /* --------------------------------------------------------------------------
@@ -330,8 +337,8 @@ static struct acpi_battery_reader info_readers[] = {
 static struct acpi_battery_reader state_readers[] = {
 	{0x08, SMBUS_READ_WORD, offsetof(struct acpi_battery, temp_now)},
 	{0x09, SMBUS_READ_WORD, offsetof(struct acpi_battery, voltage_now)},
-	{0x0a, SMBUS_READ_WORD, offsetof(struct acpi_battery, current_now)},
-	{0x0b, SMBUS_READ_WORD, offsetof(struct acpi_battery, current_avg)},
+	{0x0a, SMBUS_READ_WORD, offsetof(struct acpi_battery, rate_now)},
+	{0x0b, SMBUS_READ_WORD, offsetof(struct acpi_battery, rate_avg)},
 	{0x0f, SMBUS_READ_WORD, offsetof(struct acpi_battery, capacity_now)},
 	{0x0e, SMBUS_READ_WORD, offsetof(struct acpi_battery, state_of_charge)},
 	{0x16, SMBUS_READ_WORD, offsetof(struct acpi_battery, state)},
@@ -463,7 +470,7 @@ static ssize_t acpi_battery_alarm_store(struct device *dev,
 }
 
 static struct device_attribute alarm_attr = {
-	.attr = {.name = "alarm", .mode = 0644, .owner = THIS_MODULE},
+	.attr = {.name = "alarm", .mode = 0644},
 	.show = acpi_battery_alarm_show,
 	.store = acpi_battery_alarm_store,
 };
@@ -479,49 +486,31 @@ static int
 acpi_sbs_add_fs(struct proc_dir_entry **dir,
 		struct proc_dir_entry *parent_dir,
 		char *dir_name,
-		struct file_operations *info_fops,
-		struct file_operations *state_fops,
-		struct file_operations *alarm_fops, void *data)
+		const struct file_operations *info_fops,
+		const struct file_operations *state_fops,
+		const struct file_operations *alarm_fops, void *data)
 {
-	struct proc_dir_entry *entry = NULL;
-
 	if (!*dir) {
 		*dir = proc_mkdir(dir_name, parent_dir);
 		if (!*dir) {
 			return -ENODEV;
 		}
-		(*dir)->owner = THIS_MODULE;
 	}
 
 	/* 'info' [R] */
-	if (info_fops) {
-		entry = create_proc_entry(ACPI_SBS_FILE_INFO, S_IRUGO, *dir);
-		if (entry) {
-			entry->proc_fops = info_fops;
-			entry->data = data;
-			entry->owner = THIS_MODULE;
-		}
-	}
+	if (info_fops)
+		proc_create_data(ACPI_SBS_FILE_INFO, S_IRUGO, *dir,
+				 info_fops, data);
 
 	/* 'state' [R] */
-	if (state_fops) {
-		entry = create_proc_entry(ACPI_SBS_FILE_STATE, S_IRUGO, *dir);
-		if (entry) {
-			entry->proc_fops = state_fops;
-			entry->data = data;
-			entry->owner = THIS_MODULE;
-		}
-	}
+	if (state_fops)
+		proc_create_data(ACPI_SBS_FILE_STATE, S_IRUGO, *dir,
+				 state_fops, data);
 
 	/* 'alarm' [R/W] */
-	if (alarm_fops) {
-		entry = create_proc_entry(ACPI_SBS_FILE_ALARM, S_IRUGO, *dir);
-		if (entry) {
-			entry->proc_fops = alarm_fops;
-			entry->data = data;
-			entry->owner = THIS_MODULE;
-		}
-	}
+	if (alarm_fops)
+		proc_create_data(ACPI_SBS_FILE_ALARM, S_IRUGO, *dir,
+				 alarm_fops, data);
 	return 0;
 }
 
@@ -606,9 +595,9 @@ static int acpi_battery_read_state(struct seq_file *seq, void *offset)
 	seq_printf(seq, "capacity state:          %s\n",
 		   (battery->state & 0x0010) ? "critical" : "ok");
 	seq_printf(seq, "charging state:          %s\n",
-		   (battery->current_now < 0) ? "discharging" :
-		   ((battery->current_now > 0) ? "charging" : "charged"));
-	rate = abs(battery->current_now) * acpi_battery_ipscale(battery);
+		   (battery->rate_now < 0) ? "discharging" :
+		   ((battery->rate_now > 0) ? "charging" : "charged"));
+	rate = abs(battery->rate_now) * acpi_battery_ipscale(battery);
 	rate *= (acpi_battery_mode(battery))?(battery->voltage_now *
 			acpi_battery_vscale(battery)/1000):1;
 	seq_printf(seq, "present rate:            %d%s\n", rate,
@@ -694,7 +683,7 @@ static int acpi_battery_alarm_open_fs(struct inode *inode, struct file *file)
 	return single_open(file, acpi_battery_read_alarm, PDE(inode)->data);
 }
 
-static struct file_operations acpi_battery_info_fops = {
+static const struct file_operations acpi_battery_info_fops = {
 	.open = acpi_battery_info_open_fs,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -702,7 +691,7 @@ static struct file_operations acpi_battery_info_fops = {
 	.owner = THIS_MODULE,
 };
 
-static struct file_operations acpi_battery_state_fops = {
+static const struct file_operations acpi_battery_state_fops = {
 	.open = acpi_battery_state_open_fs,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -710,7 +699,7 @@ static struct file_operations acpi_battery_state_fops = {
 	.owner = THIS_MODULE,
 };
 
-static struct file_operations acpi_battery_alarm_fops = {
+static const struct file_operations acpi_battery_alarm_fops = {
 	.open = acpi_battery_alarm_open_fs,
 	.read = seq_read,
 	.write = acpi_battery_write_alarm,
@@ -742,7 +731,7 @@ static int acpi_ac_state_open_fs(struct inode *inode, struct file *file)
 	return single_open(file, acpi_ac_read_state, PDE(inode)->data);
 }
 
-static struct file_operations acpi_ac_state_fops = {
+static const struct file_operations acpi_ac_state_fops = {
 	.open = acpi_ac_state_open_fs,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -827,7 +816,7 @@ static int acpi_battery_add(struct acpi_sbs *sbs, int id)
 #endif
 	printk(KERN_INFO PREFIX "%s [%s]: Battery Slot [%s] (battery %s)\n",
 	       ACPI_SBS_DEVICE_NAME, acpi_device_bid(sbs->device),
-	       battery->name, sbs->battery->present ? "present" : "absent");
+	       battery->name, battery->present ? "present" : "absent");
 	return result;
 }
 
@@ -888,7 +877,7 @@ static void acpi_charger_remove(struct acpi_sbs *sbs)
 #endif
 }
 
-void acpi_sbs_callback(void *context)
+static void acpi_sbs_callback(void *context)
 {
 	int id;
 	struct acpi_sbs *sbs = context;
@@ -948,7 +937,7 @@ static int acpi_sbs_add(struct acpi_device *device)
 	sbs->device = device;
 	strcpy(acpi_device_name(device), ACPI_SBS_DEVICE_NAME);
 	strcpy(acpi_device_class(device), ACPI_SBS_CLASS);
-	acpi_driver_data(device) = sbs;
+	device->driver_data = sbs;
 
 	result = acpi_charger_add(sbs);
 	if (result)

@@ -395,26 +395,28 @@ int __init igafb_init(void)
 	/* We leak a reference here but as it cannot be unloaded this is
 	   fine. If you write unload code remember to free it in unload */
 	
-	size = sizeof(struct fb_info) + sizeof(struct iga_par) + sizeof(u32)*16;
+	size = sizeof(struct iga_par) + sizeof(u32)*16;
 
-        info = kzalloc(size, GFP_ATOMIC);
+	info = framebuffer_alloc(size, &pdev->dev);
         if (!info) {
                 printk("igafb_init: can't alloc fb_info\n");
+		 pci_dev_put(pdev);
                 return -ENOMEM;
         }
 
-	par = (struct iga_par *) (info + 1);
-	
+	par = info->par;
 
 	if ((addr = pdev->resource[0].start) == 0) {
                 printk("igafb_init: no memory start\n");
 		kfree(info);
+		pci_dev_put(pdev);
 		return -ENXIO;
 	}
 
 	if ((info->screen_base = ioremap(addr, 1024*1024*2)) == 0) {
                 printk("igafb_init: can't remap %lx[2M]\n", addr);
 		kfree(info);
+		pci_dev_put(pdev);
 		return -ENXIO;
 	}
 
@@ -449,6 +451,7 @@ int __init igafb_init(void)
                 printk("igafb_init: can't remap %lx[4K]\n", igafb_fix.mmio_start);
 		iounmap((void *)info->screen_base);
 		kfree(info);
+		pci_dev_put(pdev);
 		return -ENXIO;
 	}
 
@@ -466,6 +469,7 @@ int __init igafb_init(void)
 		iounmap((void *)par->io_base);
 		iounmap(info->screen_base);
 		kfree(info);
+		pci_dev_put(pdev);
 		return -ENOMEM;
 	}
 
@@ -521,7 +525,6 @@ int __init igafb_init(void)
 	info->var = default_var;
 	info->fix = igafb_fix;
 	info->pseudo_palette = (void *)(par + 1);
-	info->device = &pdev->dev;
 
 	if (!iga_init(info, par)) {
 		iounmap((void *)par->io_base);

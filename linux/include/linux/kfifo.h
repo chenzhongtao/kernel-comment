@@ -21,8 +21,6 @@
 #ifndef _LINUX_KFIFO_H
 #define _LINUX_KFIFO_H
 
-#ifdef __KERNEL__
-
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
 
@@ -40,7 +38,7 @@ extern struct kfifo *kfifo_alloc(unsigned int size, gfp_t gfp_mask,
 				 spinlock_t *lock);
 extern void kfifo_free(struct kfifo *fifo);
 extern unsigned int __kfifo_put(struct kfifo *fifo,
-				unsigned char *buffer, unsigned int len);
+				const unsigned char *buffer, unsigned int len);
 extern unsigned int __kfifo_get(struct kfifo *fifo,
 				unsigned char *buffer, unsigned int len);
 
@@ -79,7 +77,7 @@ static inline void kfifo_reset(struct kfifo *fifo)
  * bytes copied.
  */
 static inline unsigned int kfifo_put(struct kfifo *fifo,
-				     unsigned char *buffer, unsigned int len)
+				const unsigned char *buffer, unsigned int len)
 {
 	unsigned long flags;
 	unsigned int ret;
@@ -151,7 +149,4 @@ static inline unsigned int kfifo_len(struct kfifo *fifo)
 	return ret;
 }
 
-#else
-#warning "don't include kernel headers in userspace"
-#endif /* __KERNEL__ */
 #endif

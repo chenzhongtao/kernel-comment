@@ -69,7 +69,6 @@
  */
 
 
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -228,12 +227,9 @@ struct rme32 {
 };
 
 static struct pci_device_id snd_rme32_ids[] = {
-	{PCI_VENDOR_ID_XILINX_RME, PCI_DEVICE_ID_RME_DIGI32,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0,},
-	{PCI_VENDOR_ID_XILINX_RME, PCI_DEVICE_ID_RME_DIGI32_8,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0,},
-	{PCI_VENDOR_ID_XILINX_RME, PCI_DEVICE_ID_RME_DIGI32_PRO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0,},
+	{PCI_VDEVICE(XILINX_RME, PCI_DEVICE_ID_RME_DIGI32), 0,},
+	{PCI_VDEVICE(XILINX_RME, PCI_DEVICE_ID_RME_DIGI32_8), 0,},
+	{PCI_VDEVICE(XILINX_RME, PCI_DEVICE_ID_RME_DIGI32_PRO), 0,},
 	{0,}
 };
 
@@ -1351,7 +1347,8 @@ static int __devinit snd_rme32_create(struct rme32 * rme32)
 		return err;
 	rme32->port = pci_resource_start(rme32->pci, 0);
 
-	if ((rme32->iobase = ioremap_nocache(rme32->port, RME32_IO_SIZE)) == 0) {
+	rme32->iobase = ioremap_nocache(rme32->port, RME32_IO_SIZE);
+	if (!rme32->iobase) {
 		snd_printk(KERN_ERR "unable to remap memory region 0x%lx-0x%lx\n",
 			   rme32->port, rme32->port + RME32_IO_SIZE - 1);
 		return -ENOMEM;
@@ -1941,9 +1938,10 @@ snd_rme32_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		return -ENOENT;
 	}
 
-	if ((card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-				 sizeof(struct rme32))) == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct rme32), &card);
+	if (err < 0)
+		return err;
 	card->private_free = snd_rme32_card_free;
 	rme32 = (struct rme32 *) card->private_data;
 	rme32->card = card;

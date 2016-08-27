@@ -113,6 +113,7 @@ struct pkt_ctrl_command {
 #include <linux/cdrom.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
+#include <linux/mempool.h>
 
 /* default bio write queue congestion marks */
 #define PKT_WRITE_CONGESTION_ON    10000
@@ -290,7 +291,7 @@ struct pktcdvd_device
 	int			write_congestion_off;
 	int			write_congestion_on;
 
-	struct class_device	*clsdev;	/* sysfs pktcdvd[0-7] class dev */
+	struct device		*dev;		/* sysfs pktcdvd[0-7] dev */
 	struct pktcdvd_kobj	*kobj_stat;	/* sysfs pktcdvd[0-7]/stat/     */
 	struct pktcdvd_kobj	*kobj_wqueue;	/* sysfs pktcdvd[0-7]/write_queue/ */
 

@@ -14,6 +14,8 @@
 #include <linux/ctype.h>
 #include <linux/power_supply.h>
 
+#include "power_supply.h"
+
 /*
  * This is because the name "current" breaks the device attr macro.
  * The "current" word resolves to "(get_current())" so instead of
@@ -28,7 +30,7 @@
 
 #define POWER_SUPPLY_ATTR(_name)					\
 {									\
-	.attr = { .name = #_name, .mode = 0444, .owner = THIS_MODULE },	\
+	.attr = { .name = #_name, .mode = 0444 },	\
 	.show = power_supply_show_property,				\
 	.store = NULL,							\
 }
@@ -41,12 +43,16 @@ static ssize_t power_supply_show_property(struct device *dev,
 	static char *status_text[] = {
 		"Unknown", "Charging", "Discharging", "Not charging", "Full"
 	};
+	static char *charge_type[] = {
+		"Unknown", "N/A", "Trickle", "Fast"
+	};
 	static char *health_text[] = {
 		"Unknown", "Good", "Overheat", "Dead", "Over voltage",
-		"Unspecified failure"
+		"Unspecified failure", "Cold",
 	};
 	static char *technology_text[] = {
-		"Unknown", "NiMH", "Li-ion", "Li-poly", "LiFe", "NiCd"
+		"Unknown", "NiMH", "Li-ion", "Li-poly", "LiFe", "NiCd",
+		"LiMn"
 	};
 	static char *capacity_level_text[] = {
 		"Unknown", "Critical", "Low", "Normal", "High", "Full"
@@ -67,13 +73,14 @@ static ssize_t power_supply_show_property(struct device *dev,
 
 	if (off == POWER_SUPPLY_PROP_STATUS)
 		return sprintf(buf, "%s\n", status_text[value.intval]);
+	else if (off == POWER_SUPPLY_PROP_CHARGE_TYPE)
+		return sprintf(buf, "%s\n", charge_type[value.intval]);
 	else if (off == POWER_SUPPLY_PROP_HEALTH)
 		return sprintf(buf, "%s\n", health_text[value.intval]);
 	else if (off == POWER_SUPPLY_PROP_TECHNOLOGY)
 		return sprintf(buf, "%s\n", technology_text[value.intval]);
 	else if (off == POWER_SUPPLY_PROP_CAPACITY_LEVEL)
-		return sprintf(buf, "%s\n",
-			       capacity_level_text[value.intval]);
+		return sprintf(buf, "%s\n", capacity_level_text[value.intval]);
 	else if (off >= POWER_SUPPLY_PROP_MODEL_NAME)
 		return sprintf(buf, "%s\n", value.strval);
 
@@ -84,22 +91,28 @@ static ssize_t power_supply_show_property(struct device *dev,
 static struct device_attribute power_supply_attrs[] = {
 	/* Properties of type `int' */
 	POWER_SUPPLY_ATTR(status),
+	POWER_SUPPLY_ATTR(charge_type),
 	POWER_SUPPLY_ATTR(health),
 	POWER_SUPPLY_ATTR(present),
 	POWER_SUPPLY_ATTR(online),
 	POWER_SUPPLY_ATTR(technology),
+	POWER_SUPPLY_ATTR(voltage_max),
+	POWER_SUPPLY_ATTR(voltage_min),
 	POWER_SUPPLY_ATTR(voltage_max_design),
 	POWER_SUPPLY_ATTR(voltage_min_design),
 	POWER_SUPPLY_ATTR(voltage_now),
 	POWER_SUPPLY_ATTR(voltage_avg),
 	POWER_SUPPLY_ATTR(current_now),
 	POWER_SUPPLY_ATTR(current_avg),
+	POWER_SUPPLY_ATTR(power_now),
+	POWER_SUPPLY_ATTR(power_avg),
 	POWER_SUPPLY_ATTR(charge_full_design),
 	POWER_SUPPLY_ATTR(charge_empty_design),
 	POWER_SUPPLY_ATTR(charge_full),
 	POWER_SUPPLY_ATTR(charge_empty),
 	POWER_SUPPLY_ATTR(charge_now),
 	POWER_SUPPLY_ATTR(charge_avg),
+	POWER_SUPPLY_ATTR(charge_counter),
 	POWER_SUPPLY_ATTR(energy_full_design),
 	POWER_SUPPLY_ATTR(energy_empty_design),
 	POWER_SUPPLY_ATTR(energy_full),
@@ -117,6 +130,7 @@ static struct device_attribute power_supply_attrs[] = {
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(model_name),
 	POWER_SUPPLY_ATTR(manufacturer),
+	POWER_SUPPLY_ATTR(serial_number),
 };
 
 static ssize_t power_supply_show_static_attrs(struct device *dev,
@@ -159,8 +173,7 @@ dynamics_failed:
 			   &power_supply_attrs[psy->properties[j]]);
 statics_failed:
 	while (i--)
-		device_remove_file(psy->dev,
-			   &power_supply_static_attrs[psy->properties[i]]);
+		device_remove_file(psy->dev, &power_supply_static_attrs[i]);
 succeed:
 	return rc;
 }
@@ -170,8 +183,7 @@ void power_supply_remove_attrs(struct power_supply *psy)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(power_supply_static_attrs); i++)
-		device_remove_file(psy->dev,
-			    &power_supply_static_attrs[i]);
+		device_remove_file(psy->dev, &power_supply_static_attrs[i]);
 
 	for (i = 0; i < psy->num_properties; i++)
 		device_remove_file(psy->dev,
@@ -204,7 +216,7 @@ int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 
 	dev_dbg(dev, "uevent\n");
 
-	if (!psy) {
+	if (!psy || !psy->dev) {
 		dev_dbg(dev, "No power supply yet\n");
 		return ret;
 	}

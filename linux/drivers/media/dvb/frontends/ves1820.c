@@ -65,8 +65,8 @@ static int ves1820_writereg(struct ves1820_state *state, u8 reg, u8 data)
 	ret = i2c_transfer(state->i2c, &msg, 1);
 
 	if (ret != 1)
-		printk("ves1820: %s(): writereg error (reg == 0x%02x,"
-			"val == 0x%02x, ret == %i)\n", __FUNCTION__, reg, data, ret);
+		printk("ves1820: %s(): writereg error (reg == 0x%02x, "
+			"val == 0x%02x, ret == %i)\n", __func__, reg, data, ret);
 
 	return (ret != 1) ? -EREMOTEIO : 0;
 }
@@ -84,8 +84,8 @@ static u8 ves1820_readreg(struct ves1820_state *state, u8 reg)
 	ret = i2c_transfer(state->i2c, msg, 2);
 
 	if (ret != 2)
-		printk("ves1820: %s(): readreg error (reg == 0x%02x,"
-		"ret == %i)\n", __FUNCTION__, reg, ret);
+		printk("ves1820: %s(): readreg error (reg == 0x%02x, "
+		"ret == %i)\n", __func__, reg, ret);
 
 	return b1[0];
 }
@@ -165,7 +165,7 @@ static int ves1820_set_symbolrate(struct ves1820_state *state, u32 symbolrate)
 	tmp = ((symbolrate << 4) % fin) << 8;
 	ratio = (ratio << 8) + tmp / fin;
 	tmp = (tmp % fin) << 8;
-	ratio = (ratio << 8) + (tmp + fin / 2) / fin;
+	ratio = (ratio << 8) + DIV_ROUND_CLOSEST(tmp, fin);
 
 	BDR = ratio;
 	BDRI = (((state->config->xin << 5) / symbolrate) + 1) / 2;
@@ -374,7 +374,7 @@ struct dvb_frontend* ves1820_attach(const struct ves1820_config* config,
 	struct ves1820_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = kmalloc(sizeof(struct ves1820_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct ves1820_state), GFP_KERNEL);
 	if (state == NULL)
 		goto error;
 

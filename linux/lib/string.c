@@ -246,13 +246,17 @@ EXPORT_SYMBOL(strlcat);
 #undef strcmp
 int strcmp(const char *cs, const char *ct)
 {
-	signed char __res;
+	unsigned char c1, c2;
 
 	while (1) {
-		if ((__res = *cs - *ct++) != 0 || !*cs++)
+		c1 = *cs++;
+		c2 = *ct++;
+		if (c1 != c2)
+			return c1 < c2 ? -1 : 1;
+		if (!c1)
 			break;
 	}
-	return __res;
+	return 0;
 }
 EXPORT_SYMBOL(strcmp);
 #endif
@@ -266,14 +270,18 @@ EXPORT_SYMBOL(strcmp);
  */
 int strncmp(const char *cs, const char *ct, size_t count)
 {
-	signed char __res = 0;
+	unsigned char c1, c2;
 
 	while (count) {
-		if ((__res = *cs - *ct++) != 0 || !*cs++)
+		c1 = *cs++;
+		c2 = *ct++;
+		if (c1 != c2)
+			return c1 < c2 ? -1 : 1;
+		if (!c1)
 			break;
 		count--;
 	}
-	return __res;
+	return 0;
 }
 EXPORT_SYMBOL(strncmp);
 #endif
@@ -492,6 +500,33 @@ char *strsep(char **s, const char *ct)
 }
 EXPORT_SYMBOL(strsep);
 #endif
+
+/**
+ * sysfs_streq - return true if strings are equal, modulo trailing newline
+ * @s1: one string
+ * @s2: another string
+ *
+ * This routine returns true iff two strings are equal, treating both
+ * NUL and newline-then-NUL as equivalent string terminations.  It's
+ * geared for use with sysfs input strings, which generally terminate
+ * with newlines but are compared against values without newlines.
+ */
+bool sysfs_streq(const char *s1, const char *s2)
+{
+	while (*s1 && *s1 == *s2) {
+		s1++;
+		s2++;
+	}
+
+	if (*s1 == *s2)
+		return true;
+	if (!*s1 && *s2 == '\n' && !s2[1])
+		return true;
+	if (*s1 == '\n' && !s1[1] && !*s2)
+		return true;
+	return false;
+}
+EXPORT_SYMBOL(sysfs_streq);
 
 #ifndef __HAVE_ARCH_MEMSET
 /**

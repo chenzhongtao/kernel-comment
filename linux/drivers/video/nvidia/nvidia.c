@@ -43,14 +43,14 @@
 #define NVTRACE          if (0) printk
 #endif
 
-#define NVTRACE_ENTER(...)  NVTRACE("%s START\n", __FUNCTION__)
-#define NVTRACE_LEAVE(...)  NVTRACE("%s END\n", __FUNCTION__)
+#define NVTRACE_ENTER(...)  NVTRACE("%s START\n", __func__)
+#define NVTRACE_LEAVE(...)  NVTRACE("%s END\n", __func__)
 
 #ifdef CONFIG_FB_NVIDIA_DEBUG
 #define assert(expr) \
 	if (!(expr)) { \
 	printk( "Assertion failed! %s,%s,%s,line=%d\n",\
-	#expr,__FILE__,__FUNCTION__,__LINE__); \
+	#expr,__FILE__,__func__,__LINE__); \
 	BUG(); \
 	}
 #else
@@ -849,9 +849,27 @@ static int nvidiafb_check_var(struct fb_var_screeninfo *var,
 	if (!mode_valid && info->monspecs.modedb_len)
 		return -EINVAL;
 
+	/*
+	 * If we're on a flat panel, check if the mode is outside of the
+	 * panel dimensions. If so, cap it and try for the next best mode
+	 * before bailing out.
+	 */
 	if (par->fpWidth && par->fpHeight && (par->fpWidth < var->xres ||
-					      par->fpHeight < var->yres))
-		return -EINVAL;
+					      par->fpHeight < var->yres)) {
+		const struct fb_videomode *mode;
+
+		var->xres = par->fpWidth;
+		var->yres = par->fpHeight;
+
+		mode = fb_find_best_mode(var, &info->modelist);
+		if (!mode) {
+			printk(KERN_ERR PFX "mode out of range of flat "
+			       "panel dimensions\n");
+			return -EINVAL;
+		}
+
+		fb_videomode_to_var(var, mode);
+	}
 
 	if (var->yres_virtual < var->yres)
 		var->yres_virtual = var->yres;
@@ -986,15 +1004,12 @@ static int nvidiafb_open(struct fb_info *info, int user)
 {
 	struct nvidia_par *par = info->par;
 
-	mutex_lock(&par->open_lock);
-
 	if (!par->open_count) {
 		save_vga_x86(par);
 		nvidia_save_vga(par, &par->initial_state);
 	}
 
 	par->open_count++;
-	mutex_unlock(&par->open_lock);
 	return 0;
 }
 
@@ -1002,8 +1017,6 @@ static int nvidiafb_release(struct fb_info *info, int user)
 {
 	struct nvidia_par *par = info->par;
 	int err = 0;
-
-	mutex_lock(&par->open_lock);
 
 	if (!par->open_count) {
 		err = -EINVAL;
@@ -1017,7 +1030,6 @@ static int nvidiafb_release(struct fb_info *info, int user)
 
 	par->open_count--;
 done:
-	mutex_unlock(&par->open_lock);
 	return err;
 }
 
@@ -1048,7 +1060,7 @@ static int nvidiafb_suspend(struct pci_dev *dev, pm_message_t mesg)
 	acquire_console_sem();
 	par->pm_state = mesg.event;
 
-	if (mesg.event == PM_EVENT_SUSPEND) {
+	if (mesg.event & PM_EVENT_SLEEP) {
 		fb_set_suspend(info, 1);
 		nvidiafb_blank(FB_BLANK_POWERDOWN, info);
 		nvidia_write_regs(par, &par->SavedReg);
@@ -1282,7 +1294,6 @@ static int __devinit nvidiafb_probe(struct pci_dev *pd,
 
 	par = info->par;
 	par->pci_dev = pd;
-	mutex_init(&par->open_lock);
 	info->pixmap.addr = kzalloc(8 * 1024, GFP_KERNEL);
 
 	if (info->pixmap.addr == NULL)
@@ -1541,7 +1552,6 @@ static int __devinit nvidiafb_init(void)
 
 module_init(nvidiafb_init);
 
-#ifdef MODULE
 static void __exit nvidiafb_exit(void)
 {
 	pci_unregister_driver(&nvidiafb_driver);
@@ -1597,5 +1607,3 @@ MODULE_PARM_DESC(nomtrr, "Disables MTRR support (0 or 1=disabled) "
 MODULE_AUTHOR("Antonino Daplas");
 MODULE_DESCRIPTION("Framebuffer driver for nVidia graphics chipset");
 MODULE_LICENSE("GPL");
-#endif				/* MODULE */
-

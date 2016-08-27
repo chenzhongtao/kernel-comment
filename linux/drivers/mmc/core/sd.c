@@ -18,7 +18,6 @@
 #include <linux/mmc/sd.h>
 
 #include "core.h"
-#include "sysfs.h"
 #include "bus.h"
 #include "mmc_ops.h"
 #include "sd_ops.h"
@@ -211,11 +210,11 @@ static int mmc_read_switch(struct mmc_card *card)
 
 	err = mmc_sd_switch(card, 0, 0, 1, status);
 	if (err) {
-		/*
-		 * We all hosts that cannot perform the command
-		 * to fail more gracefully
-		 */
-		if (err != -EINVAL)
+		/* If the host or the card can't do the switch,
+		 * fail more gracefully. */
+		if ((err != -EINVAL)
+		 && (err != -ENOSYS)
+		 && (err != -EFAULT))
 			goto out;
 
 		printk(KERN_WARNING "%s: problem reading switch "
@@ -283,10 +282,51 @@ out:
 	return err;
 }
 
+MMC_DEV_ATTR(cid, "%08x%08x%08x%08x\n", card->raw_cid[0], card->raw_cid[1],
+	card->raw_cid[2], card->raw_cid[3]);
+MMC_DEV_ATTR(csd, "%08x%08x%08x%08x\n", card->raw_csd[0], card->raw_csd[1],
+	card->raw_csd[2], card->raw_csd[3]);
+MMC_DEV_ATTR(scr, "%08x%08x\n", card->raw_scr[0], card->raw_scr[1]);
+MMC_DEV_ATTR(date, "%02d/%04d\n", card->cid.month, card->cid.year);
+MMC_DEV_ATTR(fwrev, "0x%x\n", card->cid.fwrev);
+MMC_DEV_ATTR(hwrev, "0x%x\n", card->cid.hwrev);
+MMC_DEV_ATTR(manfid, "0x%06x\n", card->cid.manfid);
+MMC_DEV_ATTR(name, "%s\n", card->cid.prod_name);
+MMC_DEV_ATTR(oemid, "0x%04x\n", card->cid.oemid);
+MMC_DEV_ATTR(serial, "0x%08x\n", card->cid.serial);
+
+
+static struct attribute *sd_std_attrs[] = {
+	&dev_attr_cid.attr,
+	&dev_attr_csd.attr,
+	&dev_attr_scr.attr,
+	&dev_attr_date.attr,
+	&dev_attr_fwrev.attr,
+	&dev_attr_hwrev.attr,
+	&dev_attr_manfid.attr,
+	&dev_attr_name.attr,
+	&dev_attr_oemid.attr,
+	&dev_attr_serial.attr,
+	NULL,
+};
+
+static struct attribute_group sd_std_attr_group = {
+	.attrs = sd_std_attrs,
+};
+
+static const struct attribute_group *sd_attr_groups[] = {
+	&sd_std_attr_group,
+	NULL,
+};
+
+static struct device_type sd_type = {
+	.groups = sd_attr_groups,
+};
+
 /*
  * Handle the detection and initialisation of a card.
  *
- * In the case of a resume, "curcard" will contain the card
+ * In the case of a resume, "oldcard" will contain the card
  * we're trying to reinitialise.
  */
 static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
@@ -323,15 +363,6 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 		goto err;
 
 	/*
-	 * For SPI, enable CRC as appropriate.
-	 */
-	if (mmc_host_is_spi(host)) {
-		err = mmc_spi_set_crc(host, use_spi_crc);
-		if (err)
-			goto err;
-	}
-
-	/*
 	 * Fetch CID from card.
 	 */
 	if (mmc_host_is_spi(host))
@@ -352,7 +383,7 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 		/*
 		 * Allocate card structure.
 		 */
-		card = mmc_alloc_card(host);
+		card = mmc_alloc_card(host, &sd_type);
 		if (IS_ERR(card)) {
 			err = PTR_ERR(card);
 			goto err;
@@ -418,6 +449,18 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 	}
 
 	/*
+	 * For SPI, enable CRC as appropriate.
+	 * This CRC enable is located AFTER the reading of the
+	 * card registers because some SDHC cards are not able
+	 * to provide valid CRCs for non-512-byte blocks.
+	 */
+	if (mmc_host_is_spi(host)) {
+		err = mmc_spi_set_crc(host, use_spi_crc);
+		if (err)
+			goto free_card;
+	}
+
+	/*
 	 * Attempt to change to high-speed (if supported)
 	 */
 	err = mmc_switch_hs(card);
@@ -454,13 +497,13 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 	 * Check if read-only switch is active.
 	 */
 	if (!oldcard) {
-		if (!host->ops->get_ro) {
+		if (!host->ops->get_ro || host->ops->get_ro(host) < 0) {
 			printk(KERN_WARNING "%s: host does not "
 				"support reading read-only "
 				"switch. assuming write-enable.\n",
 				mmc_hostname(host));
 		} else {
-			if (host->ops->get_ro(host))
+			if (host->ops->get_ro(host) > 0)
 				mmc_card_set_readonly(card);
 		}
 	}
@@ -518,61 +561,10 @@ static void mmc_sd_detect(struct mmc_host *host)
 	}
 }
 
-MMC_ATTR_FN(cid, "%08x%08x%08x%08x\n", card->raw_cid[0], card->raw_cid[1],
-	card->raw_cid[2], card->raw_cid[3]);
-MMC_ATTR_FN(csd, "%08x%08x%08x%08x\n", card->raw_csd[0], card->raw_csd[1],
-	card->raw_csd[2], card->raw_csd[3]);
-MMC_ATTR_FN(scr, "%08x%08x\n", card->raw_scr[0], card->raw_scr[1]);
-MMC_ATTR_FN(date, "%02d/%04d\n", card->cid.month, card->cid.year);
-MMC_ATTR_FN(fwrev, "0x%x\n", card->cid.fwrev);
-MMC_ATTR_FN(hwrev, "0x%x\n", card->cid.hwrev);
-MMC_ATTR_FN(manfid, "0x%06x\n", card->cid.manfid);
-MMC_ATTR_FN(name, "%s\n", card->cid.prod_name);
-MMC_ATTR_FN(oemid, "0x%04x\n", card->cid.oemid);
-MMC_ATTR_FN(serial, "0x%08x\n", card->cid.serial);
-
-static struct device_attribute mmc_sd_dev_attrs[] = {
-	MMC_ATTR_RO(cid),
-	MMC_ATTR_RO(csd),
-	MMC_ATTR_RO(scr),
-	MMC_ATTR_RO(date),
-	MMC_ATTR_RO(fwrev),
-	MMC_ATTR_RO(hwrev),
-	MMC_ATTR_RO(manfid),
-	MMC_ATTR_RO(name),
-	MMC_ATTR_RO(oemid),
-	MMC_ATTR_RO(serial),
-	__ATTR_NULL,
-};
-
-/*
- * Adds sysfs entries as relevant.
- */
-static int mmc_sd_sysfs_add(struct mmc_host *host, struct mmc_card *card)
-{
-	int ret;
-
-	ret = mmc_add_attrs(card, mmc_sd_dev_attrs);
-	if (ret < 0)
-		return ret;
-
-	return 0;
-}
-
-/*
- * Removes the sysfs entries added by mmc_sysfs_add().
- */
-static void mmc_sd_sysfs_remove(struct mmc_host *host, struct mmc_card *card)
-{
-	mmc_remove_attrs(card, mmc_sd_dev_attrs);
-}
-
-#ifdef CONFIG_MMC_UNSAFE_RESUME
-
 /*
  * Suspend callback from host.
  */
-static void mmc_sd_suspend(struct mmc_host *host)
+static int mmc_sd_suspend(struct mmc_host *host)
 {
 	BUG_ON(!host);
 	BUG_ON(!host->card);
@@ -582,6 +574,8 @@ static void mmc_sd_suspend(struct mmc_host *host)
 		mmc_deselect_cards(host);
 	host->card->state &= ~MMC_STATE_HIGHSPEED;
 	mmc_release_host(host);
+
+	return 0;
 }
 
 /*
@@ -590,7 +584,7 @@ static void mmc_sd_suspend(struct mmc_host *host)
  * This function tries to determine if the same card is still present
  * and, if so, restore all state to it.
  */
-static void mmc_sd_resume(struct mmc_host *host)
+static int mmc_sd_resume(struct mmc_host *host)
 {
 	int err;
 
@@ -601,31 +595,62 @@ static void mmc_sd_resume(struct mmc_host *host)
 	err = mmc_sd_init_card(host, host->ocr, host->card);
 	mmc_release_host(host);
 
-	if (err) {
-		mmc_sd_remove(host);
-
-		mmc_claim_host(host);
-		mmc_detach_bus(host);
-		mmc_release_host(host);
-	}
-
+	return err;
 }
 
-#else
+static void mmc_sd_power_restore(struct mmc_host *host)
+{
+	host->card->state &= ~MMC_STATE_HIGHSPEED;
+	mmc_claim_host(host);
+	mmc_sd_init_card(host, host->ocr, host->card);
+	mmc_release_host(host);
+}
 
-#define mmc_sd_suspend NULL
-#define mmc_sd_resume NULL
-
-#endif
+#ifdef CONFIG_MMC_UNSAFE_RESUME
 
 static const struct mmc_bus_ops mmc_sd_ops = {
 	.remove = mmc_sd_remove,
 	.detect = mmc_sd_detect,
-	.sysfs_add = mmc_sd_sysfs_add,
-	.sysfs_remove = mmc_sd_sysfs_remove,
 	.suspend = mmc_sd_suspend,
 	.resume = mmc_sd_resume,
+	.power_restore = mmc_sd_power_restore,
 };
+
+static void mmc_sd_attach_bus_ops(struct mmc_host *host)
+{
+	mmc_attach_bus(host, &mmc_sd_ops);
+}
+
+#else
+
+static const struct mmc_bus_ops mmc_sd_ops = {
+	.remove = mmc_sd_remove,
+	.detect = mmc_sd_detect,
+	.suspend = NULL,
+	.resume = NULL,
+	.power_restore = mmc_sd_power_restore,
+};
+
+static const struct mmc_bus_ops mmc_sd_ops_unsafe = {
+	.remove = mmc_sd_remove,
+	.detect = mmc_sd_detect,
+	.suspend = mmc_sd_suspend,
+	.resume = mmc_sd_resume,
+	.power_restore = mmc_sd_power_restore,
+};
+
+static void mmc_sd_attach_bus_ops(struct mmc_host *host)
+{
+	const struct mmc_bus_ops *bus_ops;
+
+	if (host->caps & MMC_CAP_NONREMOVABLE)
+		bus_ops = &mmc_sd_ops_unsafe;
+	else
+		bus_ops = &mmc_sd_ops;
+	mmc_attach_bus(host, bus_ops);
+}
+
+#endif
 
 /*
  * Starting point for SD card init.
@@ -637,7 +662,7 @@ int mmc_attach_sd(struct mmc_host *host, u32 ocr)
 	BUG_ON(!host);
 	WARN_ON(!host->claimed);
 
-	mmc_attach_bus(host, &mmc_sd_ops);
+	mmc_sd_attach_bus_ops(host);
 
 	/*
 	 * We need to get OCR a different way for SPI.

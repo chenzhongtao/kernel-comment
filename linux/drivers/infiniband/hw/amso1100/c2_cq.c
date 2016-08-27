@@ -133,7 +133,7 @@ static inline int c2_poll_one(struct c2_dev *c2dev,
 	struct c2_qp *qp;
 	int is_recv = 0;
 
-	ce = (struct c2wr_ce *) c2_mq_consume(&cq->mq);
+	ce = c2_mq_consume(&cq->mq);
 	if (!ce) {
 		return -EAGAIN;
 	}
@@ -146,7 +146,7 @@ static inline int c2_poll_one(struct c2_dev *c2dev,
 	while ((qp =
 		(struct c2_qp *) (unsigned long) ce->qp_user_context) == NULL) {
 		c2_mq_free(&cq->mq);
-		ce = (struct c2wr_ce *) c2_mq_consume(&cq->mq);
+		ce = c2_mq_consume(&cq->mq);
 		if (!ce)
 			return -EAGAIN;
 	}
@@ -422,8 +422,8 @@ void c2_free_cq(struct c2_dev *c2dev, struct c2_cq *cq)
 		goto bail1;
 
 	reply = (struct c2wr_cq_destroy_rep *) (unsigned long) (vq_req->reply_msg);
-
-	vq_repbuf_free(c2dev, reply);
+	if (reply)
+		vq_repbuf_free(c2dev, reply);
       bail1:
 	vq_req_free(c2dev, vq_req);
       bail0:

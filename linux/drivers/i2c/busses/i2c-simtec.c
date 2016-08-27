@@ -92,7 +92,7 @@ static int simtec_i2c_probe(struct platform_device *dev)
 		goto err;
 	}
 
-	size = (res->end-res->start)+1;
+	size = resource_size(res);
 
 	pd->ioarea = request_mem_region(res->start, size, dev->name);
 	if (pd->ioarea == NULL) {
@@ -158,6 +158,9 @@ static int simtec_i2c_remove(struct platform_device *dev)
 
 
 /* device driver */
+
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:simtec-i2c");
 
 static struct platform_driver simtec_i2c_driver = {
 	.driver		= {

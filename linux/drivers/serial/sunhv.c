@@ -17,11 +17,11 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/of_device.h>
 
 #include <asm/hypervisor.h>
 #include <asm/spitfire.h>
 #include <asm/prom.h>
-#include <asm/of_device.h>
 #include <asm/irq.h>
 
 #if defined(CONFIG_MAGIC_SYSRQ)
@@ -184,8 +184,8 @@ static struct tty_struct *receive_chars(struct uart_port *port)
 {
 	struct tty_struct *tty = NULL;
 
-	if (port->info != NULL)		/* Unopened serial console */
-		tty = port->info->tty;
+	if (port->state != NULL)		/* Unopened serial console */
+		tty = port->state->port.tty;
 
 	if (sunhv_ops->receive_chars(port, tty))
 		sun_do_break();
@@ -197,10 +197,10 @@ static void transmit_chars(struct uart_port *port)
 {
 	struct circ_buf *xmit;
 
-	if (!port->info)
+	if (!port->state)
 		return;
 
-	xmit = &port->info->xmit;
+	xmit = &port->state->xmit;
 	if (uart_circ_empty(xmit) || uart_tx_stopped(port))
 		return;
 
@@ -392,7 +392,7 @@ static struct uart_ops sunhv_pops = {
 
 static struct uart_driver sunhv_reg = {
 	.owner			= THIS_MODULE,
-	.driver_name		= "serial",
+	.driver_name		= "sunhv",
 	.dev_name		= "ttyS",
 	.major			= TTY_MAJOR,
 };
@@ -461,7 +461,7 @@ static void sunhv_console_write_paged(struct console *con, const char *s, unsign
 					break;
 				udelay(1);
 			}
-			if (limit <= 0)
+			if (limit < 0)
 				break;
 			page_bytes -= written;
 			ra += written;
@@ -499,7 +499,6 @@ static void sunhv_console_write_bychar(struct console *con, const char *s, unsig
 	} else
 		spin_lock(&port->lock);
 
-	spin_lock_irqsave(&port->lock, flags);
 	for (i = 0; i < n; i++) {
 		if (*s == '\n')
 			sunhv_console_putchar(port, '\r');
@@ -567,7 +566,7 @@ static int __devinit hv_probe(struct of_device *op, const struct of_device_id *m
 		goto out_free_con_read_page;
 
 	sunserial_console_match(&sunhv_console, op->node,
-				&sunhv_reg, port->line);
+				&sunhv_reg, port->line, false);
 
 	err = uart_add_one_port(&sunhv_reg, port);
 	if (err)
@@ -617,7 +616,7 @@ static int __devexit hv_remove(struct of_device *dev)
 	return 0;
 }
 
-static struct of_device_id hv_match[] = {
+static const struct of_device_id hv_match[] = {
 	{
 		.name = "console",
 		.compatible = "qcn",

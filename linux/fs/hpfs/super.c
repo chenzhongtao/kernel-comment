@@ -13,6 +13,7 @@
 #include <linux/statfs.h>
 #include <linux/magic.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 
 /* Mark the filesystem dirty, so that chkdsk checks it when os/2 booted */
 
@@ -99,11 +100,16 @@ int hpfs_stop_cycles(struct super_block *s, int key, int *c1, int *c2,
 static void hpfs_put_super(struct super_block *s)
 {
 	struct hpfs_sb_info *sbi = hpfs_sb(s);
+
+	lock_kernel();
+
 	kfree(sbi->sb_cp_table);
 	kfree(sbi->sb_bmp_dir);
 	unmark_dirty(s);
 	s->s_fs_info = NULL;
 	kfree(sbi);
+
+	unlock_kernel();
 }
 
 unsigned hpfs_count_one_bitmap(struct super_block *s, secno secno)
@@ -136,6 +142,7 @@ static int hpfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct super_block *s = dentry->d_sb;
 	struct hpfs_sb_info *sbi = hpfs_sb(s);
+	u64 id = huge_encode_dev(s->s_bdev->bd_dev);
 	lock_kernel();
 
 	/*if (sbi->sb_n_free == -1) {*/
@@ -149,6 +156,8 @@ static int hpfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_bavail = sbi->sb_n_free;
 	buf->f_files = sbi->sb_dirband_size / 4;
 	buf->f_ffree = sbi->sb_n_free_dnodes;
+	buf->f_fsid.val[0] = (u32)id;
+	buf->f_fsid.val[1] = (u32)(id >> 32);
 	buf->f_namelen = 254;
 
 	unlock_kernel();
@@ -173,7 +182,7 @@ static void hpfs_destroy_inode(struct inode *inode)
 	kmem_cache_free(hpfs_inode_cachep, hpfs_i(inode));
 }
 
-static void init_once(struct kmem_cache *cachep, void *foo)
+static void init_once(void *foo)
 {
 	struct hpfs_inode_info *ei = (struct hpfs_inode_info *) foo;
 
@@ -215,7 +224,7 @@ enum {
 	Opt_timeshift, Opt_err,
 };
 
-static match_table_t tokens = {
+static const match_table_t tokens = {
 	{Opt_help, "help"},
 	{Opt_uid, "uid=%u"},
 	{Opt_gid, "gid=%u"},
@@ -386,9 +395,12 @@ static int hpfs_remount_fs(struct super_block *s, int *flags, char *data)
 	int lowercase, conv, eas, chk, errs, chkdsk, timeshift;
 	int o;
 	struct hpfs_sb_info *sbi = hpfs_sb(s);
+	char *new_opts = kstrdup(data, GFP_KERNEL);
 	
 	*flags |= MS_NOATIME;
 	
+	lock_kernel();
+	lock_super(s);
 	uid = sbi->sb_uid; gid = sbi->sb_gid;
 	umask = 0777 & ~sbi->sb_mode;
 	lowercase = sbi->sb_lowercase; conv = sbi->sb_conv;
@@ -398,15 +410,15 @@ static int hpfs_remount_fs(struct super_block *s, int *flags, char *data)
 	if (!(o = parse_opts(data, &uid, &gid, &umask, &lowercase, &conv,
 	    &eas, &chk, &errs, &chkdsk, &timeshift))) {
 		printk("HPFS: bad mount options.\n");
-	    	return 1;
+		goto out_err;
 	}
 	if (o == 2) {
 		hpfs_help();
-		return 1;
+		goto out_err;
 	}
 	if (timeshift != sbi->sb_timeshift) {
 		printk("HPFS: timeshift can't be changed using remount.\n");
-		return 1;
+		goto out_err;
 	}
 
 	unmark_dirty(s);
@@ -419,7 +431,17 @@ static int hpfs_remount_fs(struct super_block *s, int *flags, char *data)
 
 	if (!(*flags & MS_RDONLY)) mark_dirty(s);
 
+	replace_mount_options(s, new_opts);
+
+	unlock_super(s);
+	unlock_kernel();
 	return 0;
+
+out_err:
+	unlock_super(s);
+	unlock_kernel();
+	kfree(new_opts);
+	return -EINVAL;
 }
 
 /* Super operations */
@@ -432,6 +454,7 @@ static const struct super_operations hpfs_sops =
 	.put_super	= hpfs_put_super,
 	.statfs		= hpfs_statfs,
 	.remount_fs	= hpfs_remount_fs,
+	.show_options	= generic_show_options,
 };
 
 static int hpfs_fill_super(struct super_block *s, void *options, int silent)
@@ -454,6 +477,8 @@ static int hpfs_fill_super(struct super_block *s, void *options, int silent)
 
 	int o;
 
+	save_mount_options(s, options);
+
 	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
 	if (!sbi)
 		return -ENOMEM;
@@ -464,9 +489,9 @@ static int hpfs_fill_super(struct super_block *s, void *options, int silent)
 
 	init_MUTEX(&sbi->hpfs_creation_de);
 
-	uid = current->uid;
-	gid = current->gid;
-	umask = current->fs->umask;
+	uid = current_uid();
+	gid = current_gid();
+	umask = current_umask();
 	lowercase = 0;
 	conv = CONV_BINARY;
 	eas = 2;

@@ -384,13 +384,13 @@ static inline void transmit_chars(struct IsdnCardState *cs, int *intr_done)
 }
 
 
-static void rs_interrupt_elsa(int irq, struct IsdnCardState *cs)
+static void rs_interrupt_elsa(struct IsdnCardState *cs)
 {
 	int status, iir, msr;
 	int pass_counter = 0;
 	
 #ifdef SERIAL_DEBUG_INTR
-	printk("rs_interrupt_single(%d)...", irq);
+	printk(KERN_DEBUG "rs_interrupt_single(%d)...", cs->irq);
 #endif
 
 	do {
@@ -477,62 +477,62 @@ static void
 modem_set_init(struct IsdnCardState *cs) {
 	int timeout;
 
-#define RCV_DELAY 20000	
+#define RCV_DELAY 20
 	modem_write_cmd(cs, MInit_1, strlen(MInit_1));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 	modem_write_cmd(cs, MInit_2, strlen(MInit_2));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 	modem_write_cmd(cs, MInit_3, strlen(MInit_3));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 	modem_write_cmd(cs, MInit_4, strlen(MInit_4));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY );
+	mdelay(RCV_DELAY);
 	modem_write_cmd(cs, MInit_5, strlen(MInit_5));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 	modem_write_cmd(cs, MInit_6, strlen(MInit_6));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 	modem_write_cmd(cs, MInit_7, strlen(MInit_7));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 }
 
 static void
 modem_set_dial(struct IsdnCardState *cs, int outgoing) {
 	int timeout;
-#define RCV_DELAY 20000	
+#define RCV_DELAY 20
 
 	modem_write_cmd(cs, MInit_speed28800, strlen(MInit_speed28800));
 	timeout = 1000;
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 	if (outgoing)
 		modem_write_cmd(cs, MInit_dialout, strlen(MInit_dialout));
 	else
@@ -541,7 +541,7 @@ modem_set_dial(struct IsdnCardState *cs, int outgoing) {
 	while(timeout-- && cs->hw.elsa.transcnt)
 		udelay(1000);
 	debugl1(cs, "msi tout=%d", timeout);
-	udelay(RCV_DELAY);
+	mdelay(RCV_DELAY);
 }
 
 static void

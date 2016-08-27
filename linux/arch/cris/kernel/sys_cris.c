@@ -15,7 +15,6 @@
 #include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
@@ -26,25 +25,6 @@
 
 #include <asm/uaccess.h>
 #include <asm/segment.h>
-
-/*
- * sys_pipe() is the normal C calling standard for creating
- * a pipe. It's not the way Unix traditionally does this, though.
- */
-asmlinkage int sys_pipe(unsigned long __user * fildes)
-{
-        int fd[2];
-        int error;
-
-        lock_kernel();
-        error = do_pipe(fd);
-        unlock_kernel();
-        if (!error) {
-                if (copy_to_user(fildes, fd, 2*sizeof(int)))
-                        error = -EFAULT;
-        }
-        return error;
-}
 
 /* common code for old and new mmaps */
 static inline long

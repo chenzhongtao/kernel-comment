@@ -27,6 +27,7 @@
 #include <linux/mount.h>
 #include <linux/key.h>
 #include <linux/seq_file.h>
+#include <linux/smp_lock.h>
 #include <linux/file.h>
 #include <linux/crypto.h>
 #include "ecryptfs_kernel.h"
@@ -76,7 +77,6 @@ static void ecryptfs_destroy_inode(struct inode *inode)
 	struct ecryptfs_inode_info *inode_info;
 
 	inode_info = ecryptfs_inode_to_private(inode);
-	mutex_lock(&inode_info->lower_file_mutex);
 	if (inode_info->lower_file) {
 		struct dentry *lower_dentry =
 			inode_info->lower_file->f_dentry;
@@ -88,7 +88,6 @@ static void ecryptfs_destroy_inode(struct inode *inode)
 			d_drop(lower_dentry);
 		}
 	}
-	mutex_unlock(&inode_info->lower_file_mutex);
 	ecryptfs_destroy_crypt_stat(&inode_info->crypt_stat);
 	kmem_cache_free(ecryptfs_inode_info_cache, inode_info);
 }
@@ -120,9 +119,13 @@ static void ecryptfs_put_super(struct super_block *sb)
 {
 	struct ecryptfs_sb_info *sb_info = ecryptfs_superblock_to_private(sb);
 
+	lock_kernel();
+
 	ecryptfs_destroy_mount_crypt_stat(&sb_info->mount_crypt_stat);
 	kmem_cache_free(ecryptfs_sb_info_cache, sb_info);
 	ecryptfs_set_superblock_private(sb, NULL);
+
+	unlock_kernel();
 }
 
 /**
@@ -156,32 +159,43 @@ static void ecryptfs_clear_inode(struct inode *inode)
 /**
  * ecryptfs_show_options
  *
- * Prints the directory we are currently mounted over.
- * Returns zero on success; non-zero otherwise
+ * Prints the mount options for a given superblock.
+ * Returns zero; does not fail.
  */
 static int ecryptfs_show_options(struct seq_file *m, struct vfsmount *mnt)
 {
 	struct super_block *sb = mnt->mnt_sb;
-	struct dentry *lower_root_dentry = ecryptfs_dentry_to_lower(sb->s_root);
-	struct vfsmount *lower_mnt = ecryptfs_dentry_to_lower_mnt(sb->s_root);
-	char *tmp_page;
-	char *path;
-	int rc = 0;
+	struct ecryptfs_mount_crypt_stat *mount_crypt_stat =
+		&ecryptfs_superblock_to_private(sb)->mount_crypt_stat;
+	struct ecryptfs_global_auth_tok *walker;
 
-	tmp_page = (char *)__get_free_page(GFP_KERNEL);
-	if (!tmp_page) {
-		rc = -ENOMEM;
-		goto out;
+	mutex_lock(&mount_crypt_stat->global_auth_tok_list_mutex);
+	list_for_each_entry(walker,
+			    &mount_crypt_stat->global_auth_tok_list,
+			    mount_crypt_stat_list) {
+		if (walker->flags & ECRYPTFS_AUTH_TOK_FNEK)
+			seq_printf(m, ",ecryptfs_fnek_sig=%s", walker->sig);
+		else
+			seq_printf(m, ",ecryptfs_sig=%s", walker->sig);
 	}
-	path = d_path(lower_root_dentry, lower_mnt, tmp_page, PAGE_SIZE);
-	if (IS_ERR(path)) {
-		rc = PTR_ERR(path);
-		goto out;
-	}
-	seq_printf(m, ",dir=%s", path);
-	free_page((unsigned long)tmp_page);
-out:
-	return rc;
+	mutex_unlock(&mount_crypt_stat->global_auth_tok_list_mutex);
+
+	seq_printf(m, ",ecryptfs_cipher=%s",
+		mount_crypt_stat->global_default_cipher_name);
+
+	if (mount_crypt_stat->global_default_cipher_key_size)
+		seq_printf(m, ",ecryptfs_key_bytes=%zd",
+			   mount_crypt_stat->global_default_cipher_key_size);
+	if (mount_crypt_stat->flags & ECRYPTFS_PLAINTEXT_PASSTHROUGH_ENABLED)
+		seq_printf(m, ",ecryptfs_passthrough");
+	if (mount_crypt_stat->flags & ECRYPTFS_XATTR_METADATA_ENABLED)
+		seq_printf(m, ",ecryptfs_xattr_metadata");
+	if (mount_crypt_stat->flags & ECRYPTFS_ENCRYPTED_VIEW_ENABLED)
+		seq_printf(m, ",ecryptfs_encrypted_view");
+	if (mount_crypt_stat->flags & ECRYPTFS_UNLINK_SIGS)
+		seq_printf(m, ",ecryptfs_unlink_sigs");
+
+	return 0;
 }
 
 const struct super_operations ecryptfs_sops = {

@@ -37,7 +37,12 @@
 #include <linux/init.h>
 #include <linux/mutex.h>
 #include <linux/sysfs.h>
-#include <asm/io.h>
+#include <linux/acpi.h>
+#include <linux/io.h>
+
+static unsigned short force_id;
+module_param(force_id, ushort, 0);
+MODULE_PARM_DESC(force_id, "Override the detected device ID");
 
 static struct platform_device *pdev;
 
@@ -81,6 +86,7 @@ superio_exit(void)
 #define SUPERIO_REG_ACT		0x30
 #define SUPERIO_REG_BASE	0x60
 #define SUPERIO_REG_DEVID	0x20
+#define SUPERIO_REG_DEVREV	0x21
 
 /* Logical device registers */
 
@@ -192,6 +198,14 @@ static ssize_t get_fan_div(struct device *dev, struct device_attribute
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
 	struct smsc47m1_data *data = smsc47m1_update_device(dev, 0);
 	return sprintf(buf, "%d\n", DIV_FROM_REG(data->fan_div[attr->index]));
+}
+
+static ssize_t get_fan_alarm(struct device *dev, struct device_attribute
+			     *devattr, char *buf)
+{
+	int bitnr = to_sensor_dev_attr(devattr)->index;
+	struct smsc47m1_data *data = smsc47m1_update_device(dev, 0);
+	return sprintf(buf, "%u\n", (data->alarms >> bitnr) & 1);
 }
 
 static ssize_t get_pwm(struct device *dev, struct device_attribute
@@ -343,6 +357,8 @@ static SENSOR_DEVICE_ATTR(fan##offset##_min, S_IRUGO | S_IWUSR,		\
 		get_fan_min, set_fan_min, offset - 1);			\
 static SENSOR_DEVICE_ATTR(fan##offset##_div, S_IRUGO | S_IWUSR,		\
 		get_fan_div, set_fan_div, offset - 1);			\
+static SENSOR_DEVICE_ATTR(fan##offset##_alarm, S_IRUGO, get_fan_alarm,	\
+		NULL, offset - 1);					\
 static SENSOR_DEVICE_ATTR(pwm##offset, S_IRUGO | S_IWUSR,		\
 		get_pwm, set_pwm, offset - 1);				\
 static SENSOR_DEVICE_ATTR(pwm##offset##_enable, S_IRUGO | S_IWUSR,	\
@@ -370,12 +386,15 @@ static struct attribute *smsc47m1_attributes[] = {
 	&sensor_dev_attr_fan1_input.dev_attr.attr,
 	&sensor_dev_attr_fan1_min.dev_attr.attr,
 	&sensor_dev_attr_fan1_div.dev_attr.attr,
+	&sensor_dev_attr_fan1_alarm.dev_attr.attr,
 	&sensor_dev_attr_fan2_input.dev_attr.attr,
 	&sensor_dev_attr_fan2_min.dev_attr.attr,
 	&sensor_dev_attr_fan2_div.dev_attr.attr,
+	&sensor_dev_attr_fan2_alarm.dev_attr.attr,
 	&sensor_dev_attr_fan3_input.dev_attr.attr,
 	&sensor_dev_attr_fan3_min.dev_attr.attr,
 	&sensor_dev_attr_fan3_div.dev_attr.attr,
+	&sensor_dev_attr_fan3_alarm.dev_attr.attr,
 
 	&sensor_dev_attr_pwm1.dev_attr.attr,
 	&sensor_dev_attr_pwm1_enable.dev_attr.attr,
@@ -399,7 +418,7 @@ static int __init smsc47m1_find(unsigned short *addr,
 	u8 val;
 
 	superio_enter();
-	val = superio_inb(SUPERIO_REG_DEVID);
+	val = force_id ? force_id : superio_inb(SUPERIO_REG_DEVID);
 
 	/*
 	 * SMSC LPC47M10x/LPC47M112/LPC47M13x (device id 0x59), LPC47M14x
@@ -411,6 +430,9 @@ static int __init smsc47m1_find(unsigned short *addr,
 	 * The LPC47M292 (device id 0x6B) is somewhat compatible, but it
 	 * supports a 3rd fan, and the pin configuration registers are
 	 * unfortunately different.
+	 * The LPC47M233 has the same device id (0x6B) but is not compatible.
+	 * We check the high bit of the device revision register to
+	 * differentiate them.
 	 */
 	switch (val) {
 	case 0x51:
@@ -430,6 +452,13 @@ static int __init smsc47m1_find(unsigned short *addr,
 		sio_data->type = smsc47m1;
 		break;
 	case 0x6B:
+		if (superio_inb(SUPERIO_REG_DEVREV) & 0x80) {
+			pr_debug(DRVNAME ": "
+				 "Found SMSC LPC47M233, unsupported\n");
+			superio_exit();
+			return -ENODEV;
+		}
+
 		pr_info(DRVNAME ": Found SMSC LPC47M292\n");
 		sio_data->type = smsc47m2;
 		break;
@@ -529,7 +558,9 @@ static int __devinit smsc47m1_probe(struct platform_device *pdev)
 		 || (err = device_create_file(dev,
 				&sensor_dev_attr_fan1_min.dev_attr))
 		 || (err = device_create_file(dev,
-				&sensor_dev_attr_fan1_div.dev_attr)))
+				&sensor_dev_attr_fan1_div.dev_attr))
+		 || (err = device_create_file(dev,
+				&sensor_dev_attr_fan1_alarm.dev_attr)))
 			goto error_remove_files;
 	} else
 		dev_dbg(dev, "Fan 1 not enabled by hardware, skipping\n");
@@ -540,7 +571,9 @@ static int __devinit smsc47m1_probe(struct platform_device *pdev)
 		 || (err = device_create_file(dev,
 				&sensor_dev_attr_fan2_min.dev_attr))
 		 || (err = device_create_file(dev,
-				&sensor_dev_attr_fan2_div.dev_attr)))
+				&sensor_dev_attr_fan2_div.dev_attr))
+		 || (err = device_create_file(dev,
+				&sensor_dev_attr_fan2_alarm.dev_attr)))
 			goto error_remove_files;
 	} else
 		dev_dbg(dev, "Fan 2 not enabled by hardware, skipping\n");
@@ -551,7 +584,9 @@ static int __devinit smsc47m1_probe(struct platform_device *pdev)
 		 || (err = device_create_file(dev,
 				&sensor_dev_attr_fan3_min.dev_attr))
 		 || (err = device_create_file(dev,
-				&sensor_dev_attr_fan3_div.dev_attr)))
+				&sensor_dev_attr_fan3_div.dev_attr))
+		 || (err = device_create_file(dev,
+				&sensor_dev_attr_fan3_alarm.dev_attr)))
 			goto error_remove_files;
 	} else if (data->type == smsc47m2)
 		dev_dbg(dev, "Fan 3 not enabled by hardware, skipping\n");
@@ -681,6 +716,10 @@ static int __init smsc47m1_device_add(unsigned short address,
 		.flags	= IORESOURCE_IO,
 	};
 	int err;
+
+	err = acpi_check_resource_conflict(&res);
+	if (err)
+		goto exit;
 
 	pdev = platform_device_alloc(DRVNAME, address);
 	if (!pdev) {

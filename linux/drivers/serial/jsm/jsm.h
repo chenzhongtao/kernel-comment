@@ -61,6 +61,7 @@ enum {
 	if ((DBG_##nlevel & jsm_debug))			\
 	dev_printk(KERN_##klevel, pdev->dev, fmt, ## args)
 
+#define	MAXLINES	256
 #define MAXPORTS	8
 #define MAX_STOPS_SENT	5
 
@@ -129,8 +130,6 @@ struct jsm_board
 	u8		rev;		/* PCI revision ID */
 	struct pci_dev	*pci_dev;
 	u32		maxports;	/* MAX ports this board can handle */
-
-	spinlock_t	bd_lock;	/* Used to protect board */
 
 	spinlock_t	bd_intr_lock;	/* Used to protect the poller tasklet and
 					 * the interrupt routine from each other.
@@ -373,6 +372,7 @@ struct neo_uart_struct {
 #define PCI_DEVICE_NEO_2DB9PRI_PCI_NAME		"Neo 2 - DB9 Universal PCI - Powered Ring Indicator"
 #define PCI_DEVICE_NEO_2RJ45_PCI_NAME		"Neo 2 - RJ45 Universal PCI"
 #define PCI_DEVICE_NEO_2RJ45PRI_PCI_NAME	"Neo 2 - RJ45 Universal PCI - Powered Ring Indicator"
+#define PCIE_DEVICE_NEO_IBM_PCI_NAME		"Neo 4 - PCI Express - IBM"
 
 /*
  * Our Global Variables.

@@ -14,6 +14,8 @@
  * bitmap_scnlistprintf() and bitmap_parselist(), also in bitmap.c.
  * For details of node_remap(), see bitmap_bitremap in lib/bitmap.c.
  * For details of nodes_remap(), see bitmap_remap in lib/bitmap.c.
+ * For details of nodes_onto(), see bitmap_onto in lib/bitmap.c.
+ * For details of nodes_fold(), see bitmap_fold in lib/bitmap.c.
  *
  * The available nodemask operations are:
  *
@@ -55,7 +57,9 @@
  * int nodelist_scnprintf(buf, len, mask) Format nodemask as list for printing
  * int nodelist_parse(buf, map)		Parse ascii string as nodelist
  * int node_remap(oldbit, old, new)	newbit = map(old, new)(oldbit)
- * int nodes_remap(dst, src, old, new)	*dst = map(old, new)(dst)
+ * void nodes_remap(dst, src, old, new)	*dst = map(old, new)(src)
+ * void nodes_onto(dst, orig, relmap)	*dst = orig relative to relmap
+ * void nodes_fold(dst, orig, sz)	dst bits = orig bits mod sz
  *
  * for_each_node_mask(node, mask)	for-loop node over mask
  *
@@ -78,6 +82,12 @@
  *    to generate slightly worse code.  So use a simple one-line #define
  *    for node_isset(), instead of wrapping an inline inside a macro, the
  *    way we do the other calls.
+ *
+ * NODEMASK_SCRATCH
+ * When doing above logical AND, OR, XOR, Remap operations the callers tend to
+ * need temporary nodemask_t's on the stack. But if NODES_SHIFT is large,
+ * nodemask_t's consume too much stack space.  NODEMASK_SCRATCH is a helper
+ * for such situations. See below and CPUMASK_ALLOC also.
  */
 
 #include <linux/kernel.h>
@@ -326,6 +336,22 @@ static inline void __nodes_remap(nodemask_t *dstp, const nodemask_t *srcp,
 	bitmap_remap(dstp->bits, srcp->bits, oldp->bits, newp->bits, nbits);
 }
 
+#define nodes_onto(dst, orig, relmap) \
+		__nodes_onto(&(dst), &(orig), &(relmap), MAX_NUMNODES)
+static inline void __nodes_onto(nodemask_t *dstp, const nodemask_t *origp,
+		const nodemask_t *relmapp, int nbits)
+{
+	bitmap_onto(dstp->bits, origp->bits, relmapp->bits, nbits);
+}
+
+#define nodes_fold(dst, orig, sz) \
+		__nodes_fold(&(dst), &(orig), sz, MAX_NUMNODES)
+static inline void __nodes_fold(nodemask_t *dstp, const nodemask_t *origp,
+		int sz, int nbits)
+{
+	bitmap_fold(dstp->bits, origp->bits, sz, nbits);
+}
+
 #if MAX_NUMNODES > 1
 #define for_each_node_mask(node, mask)			\
 	for ((node) = first_node(mask);			\
@@ -388,6 +414,19 @@ static inline int num_node_state(enum node_states state)
 #define next_online_node(nid)	next_node((nid), node_states[N_ONLINE])
 
 extern int nr_node_ids;
+extern int nr_online_nodes;
+
+static inline void node_set_online(int nid)
+{
+	node_set_state(nid, N_ONLINE);
+	nr_online_nodes = num_node_state(N_ONLINE);
+}
+
+static inline void node_set_offline(int nid)
+{
+	node_clear_state(nid, N_ONLINE);
+	nr_online_nodes = num_node_state(N_ONLINE);
+}
 #else
 
 static inline int node_state(int node, enum node_states state)
@@ -414,7 +453,10 @@ static inline int num_node_state(enum node_states state)
 #define first_online_node	0
 #define next_online_node(nid)	(MAX_NUMNODES)
 #define nr_node_ids		1
+#define nr_online_nodes		1
 
+#define node_set_online(node)	   node_set_state((node), N_ONLINE)
+#define node_set_offline(node)	   node_clear_state((node), N_ONLINE)
 #endif
 
 #define node_online_map 	node_states[N_ONLINE]
@@ -434,10 +476,29 @@ static inline int num_node_state(enum node_states state)
 #define node_online(node)	node_state((node), N_ONLINE)
 #define node_possible(node)	node_state((node), N_POSSIBLE)
 
-#define node_set_online(node)	   node_set_state((node), N_ONLINE)
-#define node_set_offline(node)	   node_clear_state((node), N_ONLINE)
-
 #define for_each_node(node)	   for_each_node_state(node, N_POSSIBLE)
 #define for_each_online_node(node) for_each_node_state(node, N_ONLINE)
+
+/*
+ * For nodemask scrach area.(See CPUMASK_ALLOC() in cpumask.h)
+ */
+
+#if NODES_SHIFT > 8 /* nodemask_t > 64 bytes */
+#define NODEMASK_ALLOC(x, m) struct x *m = kmalloc(sizeof(*m), GFP_KERNEL)
+#define NODEMASK_FREE(m) kfree(m)
+#else
+#define NODEMASK_ALLOC(x, m) struct x _m, *m = &_m
+#define NODEMASK_FREE(m)
+#endif
+
+/* A example struture for using NODEMASK_ALLOC, used in mempolicy. */
+struct nodemask_scratch {
+	nodemask_t	mask1;
+	nodemask_t	mask2;
+};
+
+#define NODEMASK_SCRATCH(x) NODEMASK_ALLOC(nodemask_scratch, x)
+#define NODEMASK_SCRATCH_FREE(x)  NODEMASK_FREE(x)
+
 
 #endif /* __LINUX_NODEMASK_H */

@@ -50,6 +50,10 @@
 #define SECCLASS_KEY                                     58
 #define SECCLASS_DCCP_SOCKET                             60
 #define SECCLASS_MEMPROTECT                              61
+#define SECCLASS_PEER                                    68
+#define SECCLASS_CAPABILITY2                             69
+#define SECCLASS_KERNEL_SERVICE                          74
+#define SECCLASS_TUN_SOCKET                              75
 
 /*
  * Security identifier indices for initial entities

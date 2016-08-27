@@ -110,9 +110,6 @@ static void start_adc(struct cs4297a_state *s);
 // rather than 64k as some of the games work more responsively.
 // log base 2( buff sz = 32k).
 
-//static unsigned long defaultorder = 3;
-//MODULE_PARM(defaultorder, "i");
-
 //
 // Turn on/off debugging compilation by commenting out "#define CSDEBUG"
 //
@@ -295,7 +292,7 @@ struct cs4297a_state {
 	struct mutex open_mutex;
 	struct mutex open_sem_adc;
 	struct mutex open_sem_dac;
-	mode_t open_mode;
+	fmode_t open_mode;
 	wait_queue_head_t open_wait;
 	wait_queue_head_t open_wait_adc;
 	wait_queue_head_t open_wait_dac;
@@ -1580,7 +1577,7 @@ static int cs4297a_ioctl_mixdev(struct inode *inode, struct file *file,
 // ******************************************************************************************
 //   Mixer file operations struct.
 // ******************************************************************************************
-static /*const */ struct file_operations cs4297a_mixer_fops = {
+static const struct file_operations cs4297a_mixer_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.ioctl		= cs4297a_ioctl_mixdev,
@@ -2200,7 +2197,9 @@ static int cs4297a_ioctl(struct inode *inode, struct file *file,
 				    sizeof(abinfo)) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_NONBLOCK:
+		spin_lock(&file->f_lock);
 		file->f_flags |= O_NONBLOCK;
+		spin_unlock(&file->f_lock);
 		return 0;
 
 	case SNDCTL_DSP_GETODELAY:
@@ -2491,7 +2490,7 @@ static int cs4297a_open(struct inode *inode, struct file *file)
 // ******************************************************************************************
 //   Wave (audio) file operations struct.
 // ******************************************************************************************
-static /*const */ struct file_operations cs4297a_audio_fops = {
+static const struct file_operations cs4297a_audio_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.read		= cs4297a_read,

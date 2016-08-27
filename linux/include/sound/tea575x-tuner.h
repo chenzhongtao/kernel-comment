@@ -22,26 +22,28 @@
  *
  */
 
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 #include <media/v4l2-dev.h>
+#include <media/v4l2-ioctl.h>
 
 struct snd_tea575x;
 
 struct snd_tea575x_ops {
 	void (*write)(struct snd_tea575x *tea, unsigned int val);
 	unsigned int (*read)(struct snd_tea575x *tea);
+	void (*mute)(struct snd_tea575x *tea, unsigned int mute);
 };
 
 struct snd_tea575x {
 	struct snd_card *card;
-	struct video_device vd;		/* video device */
-	struct file_operations fops;
+	struct video_device *vd;	/* video device */
 	int dev_nr;			/* requested device number + 1 */
-	int vd_registered;		/* video device is registered */
 	int tea5759;			/* 5759 chip is present */
+	int mute;			/* Device is muted? */
 	unsigned int freq_fixup;	/* crystal onboard */
 	unsigned int val;		/* hw value */
 	unsigned long freq;		/* frequency */
+	unsigned long in_use;		/* set if the device is in use */
 	struct snd_tea575x_ops *ops;
 	void *private_data;
 };

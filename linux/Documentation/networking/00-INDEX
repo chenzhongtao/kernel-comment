@@ -24,6 +24,8 @@ baycom.txt
 	- info on the driver for Baycom style amateur radio modems
 bridge.txt
 	- where to get user space programs for ethernet bridging with Linux.
+can.txt
+	- documentation on CAN protocol family.
 cops.txt
 	- info on the COPS LocalTalk Linux driver
 cs89x0.txt
@@ -58,6 +60,8 @@ framerelay.txt
 	- info on using Frame Relay/Data Link Connection Identifier (DLCI).
 generic_netlink.txt
 	- info on Generic Netlink
+ieee802154.txt
+	- Linux IEEE 802.15.4 implementation, API and drivers
 ip-sysctl.txt
 	- /proc/sys/net/ipv4/* variables
 ip_dynaddr.txt
@@ -82,11 +86,6 @@ policy-routing.txt
 	- IP policy-based routing
 ray_cs.txt
 	- Raylink Wireless LAN card driver info.
-shaper.txt
-	- info on the module that can shape/limit transmitted traffic.
-sk98lin.txt
-	- Marvell Yukon Chipset / SysKonnect SK-98xx compliant Gigabit
-	  Ethernet Adapter family driver info
 skfp.txt
 	- SysKonnect FDDI (SK-5xxx, Compaq Netelligent) driver info.
 smc9.txt
@@ -103,8 +102,6 @@ tuntap.txt
 	- TUN/TAP device driver, allowing user space Rx/Tx of packets.
 vortex.txt
 	- info on using 3Com Vortex (3c590, 3c592, 3c595, 3c597) Ethernet cards.
-wan-router.txt
-	- WAN router documentation
 wavelan.txt
 	- AT&T GIS (nee NCR) WaveLAN card: An Ethernet-like radio transceiver
 x25.txt

@@ -280,8 +280,8 @@ static int ipx_seq_socket_show(struct seq_file *seq, void *v)
 	}
 
 	seq_printf(seq, "%08X  %08X  %02X     %03d\n",
-		   atomic_read(&s->sk_wmem_alloc),
-		   atomic_read(&s->sk_rmem_alloc),
+		   sk_wmem_alloc_get(s),
+		   sk_rmem_alloc_get(s),
 		   s->sk_state, SOCK_INODE(s->sk_socket)->i_uid);
 out:
 	return 0;
@@ -358,21 +358,18 @@ int __init ipx_proc_init(void)
 
 	if (!ipx_proc_dir)
 		goto out;
-	p = create_proc_entry("interface", S_IRUGO, ipx_proc_dir);
+	p = proc_create("interface", S_IRUGO,
+			ipx_proc_dir, &ipx_seq_interface_fops);
 	if (!p)
 		goto out_interface;
 
-	p->proc_fops = &ipx_seq_interface_fops;
-	p = create_proc_entry("route", S_IRUGO, ipx_proc_dir);
+	p = proc_create("route", S_IRUGO, ipx_proc_dir, &ipx_seq_route_fops);
 	if (!p)
 		goto out_route;
 
-	p->proc_fops = &ipx_seq_route_fops;
-	p = create_proc_entry("socket", S_IRUGO, ipx_proc_dir);
+	p = proc_create("socket", S_IRUGO, ipx_proc_dir, &ipx_seq_socket_fops);
 	if (!p)
 		goto out_socket;
-
-	p->proc_fops = &ipx_seq_socket_fops;
 
 	rc = 0;
 out:

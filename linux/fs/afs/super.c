@@ -10,7 +10,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * Authors: David Howells <dhowells@redhat.com>
- *          David Woodhouse <dwmw2@redhat.com>
+ *          David Woodhouse <dwmw2@infradead.org>
  *
  */
 
@@ -18,6 +18,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/parser.h>
@@ -27,7 +28,7 @@
 
 #define AFS_FS_MAGIC 0x6B414653 /* 'kAFS' */
 
-static void afs_i_init_once(struct kmem_cache *cachep, void *foo);
+static void afs_i_init_once(void *foo);
 static int afs_get_sb(struct file_system_type *fs_type,
 		      int flags, const char *dev_name,
 		      void *data, struct vfsmount *mnt);
@@ -50,8 +51,8 @@ static const struct super_operations afs_super_ops = {
 	.write_inode	= afs_write_inode,
 	.destroy_inode	= afs_destroy_inode,
 	.clear_inode	= afs_clear_inode,
-	.umount_begin	= afs_umount_begin,
 	.put_super	= afs_put_super,
+	.show_options	= generic_show_options,
 };
 
 static struct kmem_cache *afs_inode_cachep;
@@ -64,7 +65,7 @@ enum {
 	afs_opt_vol,
 };
 
-static match_table_t afs_options_list = {
+static const match_table_t afs_options_list = {
 	{ afs_opt_cell,		"cell=%s"	},
 	{ afs_opt_rwpath,	"rwpath"	},
 	{ afs_opt_vol,		"vol=%s"	},
@@ -357,6 +358,7 @@ static int afs_get_sb(struct file_system_type *fs_type,
 	struct super_block *sb;
 	struct afs_volume *vol;
 	struct key *key;
+	char *new_opts = kstrdup(options, GFP_KERNEL);
 	int ret;
 
 	_enter(",,%s,%p", dev_name, options);
@@ -404,10 +406,10 @@ static int afs_get_sb(struct file_system_type *fs_type,
 		sb->s_flags = flags;
 		ret = afs_fill_super(sb, &params);
 		if (ret < 0) {
-			up_write(&sb->s_umount);
-			deactivate_super(sb);
+			deactivate_locked_super(sb);
 			goto error;
 		}
+		save_mount_options(sb, new_opts);
 		sb->s_flags |= MS_ACTIVE;
 	} else {
 		_debug("reuse");
@@ -417,6 +419,7 @@ static int afs_get_sb(struct file_system_type *fs_type,
 	simple_set_mnt(mnt, sb);
 	afs_put_volume(params.volume);
 	afs_put_cell(params.cell);
+	kfree(new_opts);
 	_leave(" = 0 [%p]", sb);
 	return 0;
 
@@ -424,6 +427,7 @@ error:
 	afs_put_volume(params.volume);
 	afs_put_cell(params.cell);
 	key_put(params.key);
+	kfree(new_opts);
 	_leave(" = %d", ret);
 	return ret;
 }
@@ -437,7 +441,11 @@ static void afs_put_super(struct super_block *sb)
 
 	_enter("");
 
+	lock_kernel();
+
 	afs_put_volume(as->volume);
+
+	unlock_kernel();
 
 	_leave("");
 }
@@ -445,7 +453,7 @@ static void afs_put_super(struct super_block *sb)
 /*
  * initialise an inode cache slab element prior to any use
  */
-static void afs_i_init_once(struct kmem_cache *cachep, void *_vnode)
+static void afs_i_init_once(void *_vnode)
 {
 	struct afs_vnode *vnode = _vnode;
 

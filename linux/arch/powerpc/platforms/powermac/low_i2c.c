@@ -540,8 +540,11 @@ static struct pmac_i2c_host_kw *__init kw_i2c_host_init(struct device_node *np)
 	/* Make sure IRQ is disabled */
 	kw_write_reg(reg_ier, 0);
 
-	/* Request chip interrupt */
-	if (request_irq(host->irq, kw_i2c_irq, 0, "keywest i2c", host))
+	/* Request chip interrupt. We set IRQF_TIMER because we don't
+	 * want that interrupt disabled between the 2 passes of driver
+	 * suspend or we'll have issues running the pfuncs
+	 */
+	if (request_irq(host->irq, kw_i2c_irq, IRQF_TIMER, "keywest i2c", host))
 		host->irq = NO_IRQ;
 
 	printk(KERN_INFO "KeyWest i2c @0x%08x irq %d %s\n",
@@ -585,8 +588,7 @@ static void __init kw_i2c_probe(void)
 	struct device_node *np, *child, *parent;
 
 	/* Probe keywest-i2c busses */
-	for (np = NULL;
-	     (np = of_find_compatible_node(np, "i2c","keywest-i2c")) != NULL;){
+	for_each_compatible_node(np, "i2c","keywest-i2c") {
 		struct pmac_i2c_host_kw *host;
 		int multibus, chans, i;
 
@@ -1462,9 +1464,6 @@ int __init pmac_i2c_init(void)
 		return 0;
 	i2c_inited = 1;
 
-	if (!machine_is(powermac))
-		return 0;
-
 	/* Probe keywest-i2c busses */
 	kw_i2c_probe();
 
@@ -1483,7 +1482,7 @@ int __init pmac_i2c_init(void)
 
 	return 0;
 }
-arch_initcall(pmac_i2c_init);
+machine_arch_initcall(powermac, pmac_i2c_init);
 
 /* Since pmac_i2c_init can be called too early for the platform device
  * registration, we need to do it at a later time. In our case, subsys
@@ -1515,4 +1514,4 @@ static int __init pmac_i2c_create_platform_devices(void)
 
 	return 0;
 }
-subsys_initcall(pmac_i2c_create_platform_devices);
+machine_subsys_initcall(powermac, pmac_i2c_create_platform_devices);

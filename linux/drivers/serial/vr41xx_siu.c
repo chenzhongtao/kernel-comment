@@ -1,7 +1,7 @@
 /*
  *  Driver for NEC VR4100 series Serial Interface Unit.
  *
- *  Copyright (C) 2004-2007  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
+ *  Copyright (C) 2004-2008  Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  Based on drivers/serial/8250.c, by Russell King.
  *
@@ -318,7 +318,7 @@ static inline void receive_chars(struct uart_port *port, uint8_t *status)
 	char flag;
 	int max_count = RX_MAX_COUNT;
 
-	tty = port->info->tty;
+	tty = port->state->port.tty;
 	lsr = *status;
 
 	do {
@@ -386,7 +386,7 @@ static inline void check_modem_status(struct uart_port *port)
 	if (msr & UART_MSR_DCTS)
 		uart_handle_cts_change(port, msr & UART_MSR_CTS);
 
-	wake_up_interruptible(&port->info->delta_msr_wait);
+	wake_up_interruptible(&port->state->port.delta_msr_wait);
 }
 
 static inline void transmit_chars(struct uart_port *port)
@@ -394,7 +394,7 @@ static inline void transmit_chars(struct uart_port *port)
 	struct circ_buf *xmit;
 	int max_count = TX_MAX_COUNT;
 
-	xmit = &port->info->xmit;
+	xmit = &port->state->xmit;
 
 	if (port->x_char) {
 		siu_write(port, UART_TX, port->x_char);
@@ -840,6 +840,19 @@ static int __devinit siu_console_init(void)
 
 console_initcall(siu_console_init);
 
+void __init vr41xx_siu_early_setup(struct uart_port *port)
+{
+	if (port->type == PORT_UNKNOWN)
+		return;
+
+	siu_uart_ports[port->line].line = port->line;
+	siu_uart_ports[port->line].type = port->type;
+	siu_uart_ports[port->line].uartclk = SIU_BAUD_BASE * 16;
+	siu_uart_ports[port->line].mapbase = port->mapbase;
+	siu_uart_ports[port->line].mapbase = port->mapbase;
+	siu_uart_ports[port->line].ops = &siu_uart_ops;
+}
+
 #define SERIAL_VR41XX_CONSOLE	&siu_console
 #else
 #define SERIAL_VR41XX_CONSOLE	NULL
@@ -960,3 +973,6 @@ static void __exit vr41xx_siu_exit(void)
 
 module_init(vr41xx_siu_init);
 module_exit(vr41xx_siu_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:SIU");

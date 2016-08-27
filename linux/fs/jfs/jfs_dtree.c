@@ -284,11 +284,11 @@ static struct dir_table_slot *find_index(struct inode *ip, u32 index,
 			release_metapage(*mp);
 			*mp = NULL;
 		}
-		if (*mp == 0) {
+		if (!(*mp)) {
 			*lblock = blkno;
 			*mp = read_index_page(ip, blkno);
 		}
-		if (*mp == 0) {
+		if (!(*mp)) {
 			jfs_err("free_index: error reading directory table");
 			return NULL;
 		}
@@ -381,10 +381,10 @@ static u32 add_index(tid_t tid, struct inode *ip, s64 bn, int slot)
 		 * It's time to move the inline table to an external
 		 * page and begin to build the xtree
 		 */
-		if (DQUOT_ALLOC_BLOCK(ip, sbi->nbperpage))
+		if (vfs_dq_alloc_block(ip, sbi->nbperpage))
 			goto clean_up;
 		if (dbAlloc(ip, 0, sbi->nbperpage, &xaddr)) {
-			DQUOT_FREE_BLOCK(ip, sbi->nbperpage);
+			vfs_dq_free_block(ip, sbi->nbperpage);
 			goto clean_up;
 		}
 
@@ -408,12 +408,13 @@ static u32 add_index(tid_t tid, struct inode *ip, s64 bn, int slot)
 			memcpy(&jfs_ip->i_dirtable, temp_table,
 			       sizeof (temp_table));
 			dbFree(ip, xaddr, sbi->nbperpage);
-			DQUOT_FREE_BLOCK(ip, sbi->nbperpage);
+			vfs_dq_free_block(ip, sbi->nbperpage);
 			goto clean_up;
 		}
 		ip->i_size = PSIZE;
 
-		if ((mp = get_index_page(ip, 0)) == 0) {
+		mp = get_index_page(ip, 0);
+		if (!mp) {
 			jfs_err("add_index: get_metapage failed!");
 			xtTruncate(tid, ip, 0, COMMIT_PWMAP);
 			memcpy(&jfs_ip->i_dirtable, temp_table,
@@ -461,7 +462,7 @@ static u32 add_index(tid_t tid, struct inode *ip, s64 bn, int slot)
 	} else
 		mp = read_index_page(ip, blkno);
 
-	if (mp == 0) {
+	if (!mp) {
 		jfs_err("add_index: get/read_metapage failed!");
 		goto clean_up;
 	}
@@ -499,7 +500,7 @@ static void free_index(tid_t tid, struct inode *ip, u32 index, u32 next)
 
 	dirtab_slot = find_index(ip, index, &mp, &lblock);
 
-	if (dirtab_slot == 0)
+	if (!dirtab_slot)
 		return;
 
 	dirtab_slot->flag = DIR_INDEX_FREE;
@@ -526,7 +527,7 @@ static void modify_index(tid_t tid, struct inode *ip, u32 index, s64 bn,
 
 	dirtab_slot = find_index(ip, index, mp, lblock);
 
-	if (dirtab_slot == 0)
+	if (!dirtab_slot)
 		return;
 
 	DTSaddress(dirtab_slot, bn);
@@ -552,7 +553,7 @@ static int read_index(struct inode *ip, u32 index,
 	struct dir_table_slot *slot;
 
 	slot = find_index(ip, index, &mp, &lblock);
-	if (slot == 0) {
+	if (!slot) {
 		return -EIO;
 	}
 
@@ -592,10 +593,8 @@ int dtSearch(struct inode *ip, struct component_name * key, ino_t * data,
 	struct component_name ciKey;
 	struct super_block *sb = ip->i_sb;
 
-	ciKey.name =
-	    (wchar_t *) kmalloc((JFS_NAME_MAX + 1) * sizeof(wchar_t),
-				GFP_NOFS);
-	if (ciKey.name == 0) {
+	ciKey.name = kmalloc((JFS_NAME_MAX + 1) * sizeof(wchar_t), GFP_NOFS);
+	if (!ciKey.name) {
 		rc = -ENOMEM;
 		goto dtSearch_Exit2;
 	}
@@ -957,10 +956,8 @@ static int dtSplitUp(tid_t tid,
 	smp = split->mp;
 	sp = DT_PAGE(ip, smp);
 
-	key.name =
-	    (wchar_t *) kmalloc((JFS_NAME_MAX + 2) * sizeof(wchar_t),
-				GFP_NOFS);
-	if (key.name == 0) {
+	key.name = kmalloc((JFS_NAME_MAX + 2) * sizeof(wchar_t), GFP_NOFS);
+	if (!key.name) {
 		DT_PUTPAGE(smp);
 		rc = -ENOMEM;
 		goto dtSplitUp_Exit;
@@ -1030,7 +1027,7 @@ static int dtSplitUp(tid_t tid,
 			n = xlen;
 
 		/* Allocate blocks to quota. */
-		if (DQUOT_ALLOC_BLOCK(ip, n)) {
+		if (vfs_dq_alloc_block(ip, n)) {
 			rc = -EDQUOT;
 			goto extendOut;
 		}
@@ -1311,7 +1308,7 @@ static int dtSplitUp(tid_t tid,
 
 	/* Rollback quota allocation */
 	if (rc && quota_allocation)
-		DQUOT_FREE_BLOCK(ip, quota_allocation);
+		vfs_dq_free_block(ip, quota_allocation);
 
       dtSplitUp_Exit:
 
@@ -1372,7 +1369,7 @@ static int dtSplitPage(tid_t tid, struct inode *ip, struct dtsplit * split,
 		return -EIO;
 
 	/* Allocate blocks to quota. */
-	if (DQUOT_ALLOC_BLOCK(ip, lengthPXD(pxd))) {
+	if (vfs_dq_alloc_block(ip, lengthPXD(pxd))) {
 		release_metapage(rmp);
 		return -EDQUOT;
 	}
@@ -1919,7 +1916,7 @@ static int dtSplitRoot(tid_t tid,
 	rp = rmp->data;
 
 	/* Allocate blocks to quota. */
-	if (DQUOT_ALLOC_BLOCK(ip, lengthPXD(pxd))) {
+	if (vfs_dq_alloc_block(ip, lengthPXD(pxd))) {
 		release_metapage(rmp);
 		return -EDQUOT;
 	}
@@ -2290,7 +2287,7 @@ static int dtDeleteUp(tid_t tid, struct inode *ip,
 	xlen = lengthPXD(&fp->header.self);
 
 	/* Free quota allocation. */
-	DQUOT_FREE_BLOCK(ip, xlen);
+	vfs_dq_free_block(ip, xlen);
 
 	/* free/invalidate its buffer page */
 	discard_metapage(fmp);
@@ -2366,7 +2363,7 @@ static int dtDeleteUp(tid_t tid, struct inode *ip,
 				xlen = lengthPXD(&p->header.self);
 
 				/* Free quota allocation */
-				DQUOT_FREE_BLOCK(ip, xlen);
+				vfs_dq_free_block(ip, xlen);
 
 				/* free/invalidate its buffer page */
 				discard_metapage(mp);

@@ -5,8 +5,6 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_fdb.c,v 1.6 2002/01/17 00:57:07 davem Exp $
- *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
  *	as published by the Free Software Foundation; either version
@@ -15,6 +13,7 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/rculist.h>
 #include <linux/spinlock.h>
 #include <linux/times.h>
 #include <linux/netdevice.h>
@@ -72,10 +71,17 @@ static inline int br_mac_hash(const unsigned char *mac)
 	return jhash_1word(key, fdb_salt) & (BR_HASH_SIZE - 1);
 }
 
+static void fdb_rcu_free(struct rcu_head *head)
+{
+	struct net_bridge_fdb_entry *ent
+		= container_of(head, struct net_bridge_fdb_entry, rcu);
+	kmem_cache_free(br_fdb_cache, ent);
+}
+
 static inline void fdb_delete(struct net_bridge_fdb_entry *f)
 {
 	hlist_del_rcu(&f->hlist);
-	br_fdb_put(f);
+	call_rcu(&f->rcu, fdb_rcu_free);
 }
 
 void br_fdb_changeaddr(struct net_bridge_port *p, const unsigned char *newaddr)
@@ -136,7 +142,7 @@ void br_fdb_cleanup(unsigned long _data)
 			this_timer = f->ageing_timer + delay;
 			if (time_before_eq(this_timer, jiffies))
 				fdb_delete(f);
-			else if (this_timer < next_timer)
+			else if (time_before(this_timer, next_timer))
 				next_timer = this_timer;
 		}
 	}
@@ -227,33 +233,26 @@ struct net_bridge_fdb_entry *__br_fdb_get(struct net_bridge *br,
 	return NULL;
 }
 
-/* Interface used by ATM hook that keeps a ref count */
-struct net_bridge_fdb_entry *br_fdb_get(struct net_bridge *br,
-					unsigned char *addr)
+#if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
+/* Interface used by ATM LANE hook to test
+ * if an addr is on some other bridge port */
+int br_fdb_test_addr(struct net_device *dev, unsigned char *addr)
 {
 	struct net_bridge_fdb_entry *fdb;
+	int ret;
+
+	if (!dev->br_port)
+		return 0;
 
 	rcu_read_lock();
-	fdb = __br_fdb_get(br, addr);
-	if (fdb && !atomic_inc_not_zero(&fdb->use_count))
-		fdb = NULL;
+	fdb = __br_fdb_get(dev->br_port->br, addr);
+	ret = fdb && fdb->dst->dev != dev &&
+		fdb->dst->state == BR_STATE_FORWARDING;
 	rcu_read_unlock();
-	return fdb;
-}
 
-static void fdb_rcu_free(struct rcu_head *head)
-{
-	struct net_bridge_fdb_entry *ent
-		= container_of(head, struct net_bridge_fdb_entry, rcu);
-	kmem_cache_free(br_fdb_cache, ent);
+	return ret;
 }
-
-/* Set entry up for deletion with RCU  */
-void br_fdb_put(struct net_bridge_fdb_entry *ent)
-{
-	if (atomic_dec_and_test(&ent->use_count))
-		call_rcu(&ent->rcu, fdb_rcu_free);
-}
+#endif /* CONFIG_ATM_LANE */
 
 /*
  * Fill buffer with forwarding table records in
@@ -285,7 +284,11 @@ int br_fdb_fillbuf(struct net_bridge *br, void *buf,
 
 			/* convert from internal format to API */
 			memcpy(fe->mac_addr, f->addr.addr, ETH_ALEN);
+
+			/* due to ABI compat need to split into hi/lo */
 			fe->port_no = f->dst->port_no;
+			fe->port_hi = f->dst->port_no >> 8;
+
 			fe->is_local = f->is_local;
 			if (!f->is_static)
 				fe->ageing_timer_value = jiffies_to_clock_t(jiffies - f->ageing_timer);
@@ -323,7 +326,6 @@ static struct net_bridge_fdb_entry *fdb_create(struct hlist_head *head,
 	fdb = kmem_cache_alloc(br_fdb_cache, GFP_ATOMIC);
 	if (fdb) {
 		memcpy(fdb->addr.addr, addr, ETH_ALEN);
-		atomic_set(&fdb->use_count, 1);
 		hlist_add_head_rcu(&fdb->hlist, head);
 
 		fdb->dst = source;
@@ -395,7 +397,7 @@ void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
 		if (unlikely(fdb->is_local)) {
 			if (net_ratelimit())
 				printk(KERN_WARNING "%s: received packet with "
-				       " own address as source address\n",
+				       "own address as source address\n",
 				       source->dev->name);
 		} else {
 			/* fastpath: update of existing entry */

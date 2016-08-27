@@ -15,6 +15,8 @@
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/sysdev.h>
+#include <linux/cpu.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/bitops.h>
@@ -27,8 +29,11 @@
 #include <asm/pgtable.h>
 #include <asm/mmu.h>
 #include <asm/io.h>
+#include <asm/mmu_context.h>
 
 #define NR_PMB_ENTRIES	16
+
+static void __pmb_unmap(struct pmb_entry *);
 
 static struct kmem_cache *pmb_cache;
 static unsigned long pmb_map;
@@ -162,18 +167,18 @@ repeat:
 	return 0;
 }
 
-int set_pmb_entry(struct pmb_entry *pmbe)
+int __uses_jump_to_uncached set_pmb_entry(struct pmb_entry *pmbe)
 {
 	int ret;
 
-	jump_to_P2();
+	jump_to_uncached();
 	ret = __set_pmb_entry(pmbe->vpn, pmbe->ppn, pmbe->flags, &pmbe->entry);
-	back_to_P1();
+	back_to_cached();
 
 	return ret;
 }
 
-void clear_pmb_entry(struct pmb_entry *pmbe)
+void __uses_jump_to_uncached clear_pmb_entry(struct pmb_entry *pmbe)
 {
 	unsigned int entry = pmbe->entry;
 	unsigned long addr;
@@ -187,7 +192,7 @@ void clear_pmb_entry(struct pmb_entry *pmbe)
 		     entry >= NR_PMB_ENTRIES))
 		return;
 
-	jump_to_P2();
+	jump_to_uncached();
 
 	/* Clear V-bit */
 	addr = mk_pmb_addr(entry);
@@ -196,7 +201,7 @@ void clear_pmb_entry(struct pmb_entry *pmbe)
 	addr = mk_pmb_data(entry);
 	ctrl_outl(ctrl_inl(addr) & ~PMB_V, addr);
 
-	back_to_P1();
+	back_to_cached();
 
 	clear_bit(entry, &pmb_map);
 }
@@ -215,9 +220,10 @@ static struct {
 long pmb_remap(unsigned long vaddr, unsigned long phys,
 	       unsigned long size, unsigned long flags)
 {
-	struct pmb_entry *pmbp;
+	struct pmb_entry *pmbp, *pmbe;
 	unsigned long wanted;
 	int pmb_flags, i;
+	long err;
 
 	/* Convert typical pgprot value to the PMB equivalent */
 	if (flags & _PAGE_CACHABLE) {
@@ -233,20 +239,22 @@ long pmb_remap(unsigned long vaddr, unsigned long phys,
 
 again:
 	for (i = 0; i < ARRAY_SIZE(pmb_sizes); i++) {
-		struct pmb_entry *pmbe;
 		int ret;
 
 		if (size < pmb_sizes[i].size)
 			continue;
 
 		pmbe = pmb_alloc(vaddr, phys, pmb_flags | pmb_sizes[i].flag);
-		if (IS_ERR(pmbe))
-			return PTR_ERR(pmbe);
+		if (IS_ERR(pmbe)) {
+			err = PTR_ERR(pmbe);
+			goto out;
+		}
 
 		ret = set_pmb_entry(pmbe);
 		if (ret != 0) {
 			pmb_free(pmbe);
-			return -EBUSY;
+			err = -EBUSY;
+			goto out;
 		}
 
 		phys	+= pmb_sizes[i].size;
@@ -261,12 +269,25 @@ again:
 			pmbp->link = pmbe;
 
 		pmbp = pmbe;
+
+		/*
+		 * Instead of trying smaller sizes on every iteration
+		 * (even if we succeed in allocating space), try using
+		 * pmb_sizes[i].size again.
+		 */
+		i--;
 	}
 
 	if (size >= 0x1000000)
 		goto again;
 
 	return wanted - size;
+
+out:
+	if (pmbp)
+		__pmb_unmap(pmbp);
+
+	return err;
 }
 
 void pmb_unmap(unsigned long addr)
@@ -280,19 +301,26 @@ void pmb_unmap(unsigned long addr)
 	if (unlikely(!pmbe))
 		return;
 
+	__pmb_unmap(pmbe);
+}
+
+static void __pmb_unmap(struct pmb_entry *pmbe)
+{
 	WARN_ON(!test_bit(pmbe->entry, &pmb_map));
 
 	do {
 		struct pmb_entry *pmblink = pmbe;
 
-		clear_pmb_entry(pmbe);
+		if (pmbe->entry != PMB_NO_ENTRY)
+			clear_pmb_entry(pmbe);
+
 		pmbe = pmblink->link;
 
 		pmb_free(pmblink);
 	} while (pmbe);
 }
 
-static void pmb_cache_ctor(struct kmem_cache *cachep, void *pmb)
+static void pmb_cache_ctor(void *pmb)
 {
 	struct pmb_entry *pmbe = pmb;
 
@@ -301,17 +329,17 @@ static void pmb_cache_ctor(struct kmem_cache *cachep, void *pmb)
 	pmbe->entry = PMB_NO_ENTRY;
 }
 
-static int __init pmb_init(void)
+static int __uses_jump_to_uncached pmb_init(void)
 {
 	unsigned int nr_entries = ARRAY_SIZE(pmb_init_map);
-	unsigned int entry;
+	unsigned int entry, i;
 
 	BUG_ON(unlikely(nr_entries >= NR_PMB_ENTRIES));
 
 	pmb_cache = kmem_cache_create("pmb", sizeof(struct pmb_entry), 0,
 				      SLAB_PANIC, pmb_cache_ctor);
 
-	jump_to_P2();
+	jump_to_uncached();
 
 	/*
 	 * Ordering is important, P2 must be mapped in the PMB before we
@@ -329,7 +357,12 @@ static int __init pmb_init(void)
 	/* PMB.SE and UB[7] */
 	ctrl_outl((1 << 31) | (1 << 7), PMB_PASCR);
 
-	back_to_P1();
+	/* Flush out the TLB */
+	i =  ctrl_inl(MMUCR);
+	i |= MMUCR_TI;
+	ctrl_outl(i, MMUCR);
+
+	back_to_cached();
 
 	return 0;
 }
@@ -379,7 +412,7 @@ static const struct file_operations pmb_debugfs_fops = {
 	.open		= pmb_debugfs_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
-	.release	= seq_release,
+	.release	= single_release,
 };
 
 static int __init pmb_debugfs_init(void)
@@ -387,10 +420,48 @@ static int __init pmb_debugfs_init(void)
 	struct dentry *dentry;
 
 	dentry = debugfs_create_file("pmb", S_IFREG | S_IRUGO,
-				     NULL, NULL, &pmb_debugfs_fops);
+				     sh_debugfs_root, NULL, &pmb_debugfs_fops);
+	if (!dentry)
+		return -ENOMEM;
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
 	return 0;
 }
 postcore_initcall(pmb_debugfs_init);
+
+#ifdef CONFIG_PM
+static int pmb_sysdev_suspend(struct sys_device *dev, pm_message_t state)
+{
+	static pm_message_t prev_state;
+
+	/* Restore the PMB after a resume from hibernation */
+	if (state.event == PM_EVENT_ON &&
+	    prev_state.event == PM_EVENT_FREEZE) {
+		struct pmb_entry *pmbe;
+		spin_lock_irq(&pmb_list_lock);
+		for (pmbe = pmb_list; pmbe; pmbe = pmbe->next)
+			set_pmb_entry(pmbe);
+		spin_unlock_irq(&pmb_list_lock);
+	}
+	prev_state = state;
+	return 0;
+}
+
+static int pmb_sysdev_resume(struct sys_device *dev)
+{
+	return pmb_sysdev_suspend(dev, PMSG_ON);
+}
+
+static struct sysdev_driver pmb_sysdev_driver = {
+	.suspend = pmb_sysdev_suspend,
+	.resume = pmb_sysdev_resume,
+};
+
+static int __init pmb_sysdev_init(void)
+{
+	return sysdev_driver_register(&cpu_sysdev_class, &pmb_sysdev_driver);
+}
+
+subsys_initcall(pmb_sysdev_init);
+#endif

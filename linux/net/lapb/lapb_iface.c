@@ -39,7 +39,7 @@
 #include <linux/init.h>
 #include <net/lapb.h>
 
-static struct list_head lapb_list = LIST_HEAD_INIT(lapb_list);
+static LIST_HEAD(lapb_list);
 static DEFINE_RWLOCK(lapb_list_lock);
 
 /*
@@ -407,7 +407,7 @@ int lapb_data_indication(struct lapb_cb *lapb, struct sk_buff *skb)
 		return lapb->callbacks.data_indication(lapb->dev, skb);
 
 	kfree_skb(skb);
-	return NET_RX_CN_HIGH; /* For now; must be != NET_RX_DROP */
+	return NET_RX_SUCCESS; /* For now; must be != NET_RX_DROP */
 }
 
 int lapb_data_transmit(struct lapb_cb *lapb, struct sk_buff *skb)

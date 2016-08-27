@@ -1,5 +1,5 @@
 /*
-	Copyright (C) 2004 - 2007 rt2x00 SourceForge Project
+	Copyright (C) 2004 - 2009 rt2x00 SourceForge Project
 	<http://rt2x00.serialmonkey.com>
 
 	This program is free software; you can redistribute it and/or modify
@@ -23,12 +23,6 @@
 	Abstract: rt2x00 firmware loading routines.
  */
 
-/*
- * Set enviroment defines for rt2x00.h
- */
-#define DRV_NAME "rt2x00lib"
-
-#include <linux/crc-itu-t.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 
@@ -41,8 +35,6 @@ static int rt2x00lib_request_firmware(struct rt2x00_dev *rt2x00dev)
 	const struct firmware *fw;
 	char *fw_name;
 	int retval;
-	u16 crc;
-	u16 tmp;
 
 	/*
 	 * Read correct firmware from harddisk.
@@ -68,24 +60,25 @@ static int rt2x00lib_request_firmware(struct rt2x00_dev *rt2x00dev)
 		return -ENOENT;
 	}
 
-	/*
-	 * Validate the firmware using 16 bit CRC.
-	 * The last 2 bytes of the firmware are the CRC
-	 * so substract those 2 bytes from the CRC checksum,
-	 * and set those 2 bytes to 0 when calculating CRC.
-	 */
-	tmp = 0;
-	crc = crc_itu_t(0, fw->data, fw->size - 2);
-	crc = crc_itu_t(crc, (u8 *)&tmp, 2);
-
-	if (crc != (fw->data[fw->size - 2] << 8 | fw->data[fw->size - 1])) {
-		ERROR(rt2x00dev, "Firmware CRC error.\n");
-		retval = -ENOENT;
-		goto exit;
-	}
-
 	INFO(rt2x00dev, "Firmware detected - version: %d.%d.\n",
 	     fw->data[fw->size - 4], fw->data[fw->size - 3]);
+
+	retval = rt2x00dev->ops->lib->check_firmware(rt2x00dev, fw->data, fw->size);
+	switch (retval) {
+	case FW_OK:
+		break;
+	case FW_BAD_CRC:
+		ERROR(rt2x00dev, "Firmware checksum error.\n");
+		goto exit;
+	case FW_BAD_LENGTH:
+		ERROR(rt2x00dev,
+		      "Invalid firmware file length (len=%zu)\n", fw->size);
+		goto exit;
+	case FW_BAD_VERSION:
+		ERROR(rt2x00dev,
+		      "Current firmware does not support detected chipset.\n");
+		goto exit;
+	};
 
 	rt2x00dev->fw = fw;
 
@@ -94,12 +87,15 @@ static int rt2x00lib_request_firmware(struct rt2x00_dev *rt2x00dev)
 exit:
 	release_firmware(fw);
 
-	return retval;
+	return -ENOENT;
 }
 
 int rt2x00lib_load_firmware(struct rt2x00_dev *rt2x00dev)
 {
 	int retval;
+
+	if (!test_bit(DRIVER_REQUIRE_FIRMWARE, &rt2x00dev->flags))
+		return 0;
 
 	if (!rt2x00dev->fw) {
 		retval = rt2x00lib_request_firmware(rt2x00dev);
@@ -113,6 +109,14 @@ int rt2x00lib_load_firmware(struct rt2x00_dev *rt2x00dev)
 	retval = rt2x00dev->ops->lib->load_firmware(rt2x00dev,
 						    rt2x00dev->fw->data,
 						    rt2x00dev->fw->size);
+
+	/*
+	 * When the firmware is uploaded to the hardware the LED
+	 * association status might have been triggered, for correct
+	 * LED handling it should now be reset.
+	 */
+	rt2x00leds_led_assoc(rt2x00dev, false);
+
 	return retval;
 }
 
@@ -121,4 +125,3 @@ void rt2x00lib_free_firmware(struct rt2x00_dev *rt2x00dev)
 	release_firmware(rt2x00dev->fw);
 	rt2x00dev->fw = NULL;
 }
-

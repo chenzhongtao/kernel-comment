@@ -51,7 +51,7 @@ struct rt_mutex_waiter {
 	struct rt_mutex		*lock;
 #ifdef CONFIG_DEBUG_RT_MUTEXES
 	unsigned long		ip;
-	pid_t			deadlock_task_pid;
+	struct pid		*deadlock_task_pid;
 	struct rt_mutex		*deadlock_lock;
 #endif
 };
@@ -120,6 +120,14 @@ extern void rt_mutex_init_proxy_locked(struct rt_mutex *lock,
 				       struct task_struct *proxy_owner);
 extern void rt_mutex_proxy_unlock(struct rt_mutex *lock,
 				  struct task_struct *proxy_owner);
+extern int rt_mutex_start_proxy_lock(struct rt_mutex *lock,
+				     struct rt_mutex_waiter *waiter,
+				     struct task_struct *task,
+				     int detect_deadlock);
+extern int rt_mutex_finish_proxy_lock(struct rt_mutex *lock,
+				      struct hrtimer_sleeper *to,
+				      struct rt_mutex_waiter *waiter,
+				      int detect_deadlock);
 
 #ifdef CONFIG_DEBUG_RT_MUTEXES
 # include "rtmutex-debug.h"

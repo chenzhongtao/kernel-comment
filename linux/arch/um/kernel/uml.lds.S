@@ -1,4 +1,5 @@
 #include <asm-generic/vmlinux.lds.h>
+#include <asm/page.h>
 
 OUTPUT_FORMAT(ELF_FORMAT)
 OUTPUT_ARCH(ELF_ARCH)
@@ -21,12 +22,8 @@ SECTIONS
   _text = .;
   _stext = .;
   __init_begin = .;
-  .init.text : {
-	_sinittext = .;
-	*(.init.text)
-	_einittext = .;
-  }
-  . = ALIGN(4096);
+  INIT_TEXT_SECTION(PAGE_SIZE)
+  . = ALIGN(PAGE_SIZE);
 
   .text      :
   {
@@ -39,7 +36,7 @@ SECTIONS
     *(.gnu.linkonce.t*)
   }
 
-  . = ALIGN(4096);
+  . = ALIGN(PAGE_SIZE);
   .syscall_stub : {
 	__syscall_stub_start = .;
 	*(.__syscall_stub*)
@@ -48,11 +45,10 @@ SECTIONS
 
   #include "asm/common.lds.S"
 
-  init.data : { *(init.data) }
+  init.data : { INIT_DATA }
   .data    :
   {
-    . = ALIGN(KERNEL_STACK_SIZE);		/* init_task */
-    *(.data.init_task)
+    INIT_TASK_DATA(KERNEL_STACK_SIZE)
     . = ALIGN(KERNEL_STACK_SIZE);
     *(.data.init_irqstack)
     DATA_DATA
@@ -79,24 +75,17 @@ SECTIONS
   .sdata     : { *(.sdata) }
   _edata  =  .;
   PROVIDE (edata = .);
-  . = ALIGN(0x1000);
-  .sbss      :
-  {
-   __bss_start = .;
-   PROVIDE(_bss_start = .);
-   *(.sbss)
-   *(.scommon)
-  }
-  .bss       :
-  {
-   *(.dynbss)
-   *(.bss)
-   *(COMMON)
-  }
+  . = ALIGN(PAGE_SIZE);
+  __bss_start = .;
+  PROVIDE(_bss_start = .);
+  SBSS(0)
+  BSS(0)
   _end = .;
   PROVIDE (end = .);
 
   STABS_DEBUG
 
   DWARF_DEBUG
+
+  DISCARDS
 }

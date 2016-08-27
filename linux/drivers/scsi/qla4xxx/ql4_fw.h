@@ -216,6 +216,7 @@ union external_hw_config_reg {
 #define MBOX_CMD_ABOUT_FW			0x0009
 #define MBOX_CMD_PING				0x000B
 #define MBOX_CMD_LUN_RESET			0x0016
+#define MBOX_CMD_TARGET_WARM_RESET		0x0017
 #define MBOX_CMD_GET_MANAGEMENT_DATA		0x001E
 #define MBOX_CMD_GET_FW_STATUS			0x001F
 #define MBOX_CMD_SET_ISNS_SERVICE		0x0021
@@ -571,6 +572,7 @@ struct conn_event_log_entry {
  *************************************************************************/
 #define IOCB_MAX_CDB_LEN	    16	/* Bytes in a CBD */
 #define IOCB_MAX_SENSEDATA_LEN	    32	/* Bytes of sense data */
+#define IOCB_MAX_EXT_SENSEDATA_LEN  60  /* Bytes of extended sense data */
 
 /* IOCB header structure */
 struct qla4_header {
@@ -677,7 +679,8 @@ struct qla4_marker_entry {
 	uint32_t system_defined; /* 04-07 */
 	uint16_t target;	/* 08-09 */
 	uint16_t modifier;	/* 0A-0B */
-#define MM_LUN_RESET	     0
+#define MM_LUN_RESET		0
+#define MM_TGT_WARM_RESET	1
 
 	uint16_t flags;		/* 0C-0D */
 	uint16_t reserved1;	/* 0E-0F */
@@ -729,6 +732,12 @@ struct status_entry {
 	uint32_t maxCmdSeqNum;	/* 1C-1F */
 	uint8_t senseData[IOCB_MAX_SENSEDATA_LEN];	/* 20-3F */
 
+};
+
+/* Status Continuation entry */
+struct status_cont_entry {
+       struct qla4_header hdr; /* 00-03 */
+       uint8_t ext_sense_data[IOCB_MAX_EXT_SENSEDATA_LEN]; /* 04-63 */
 };
 
 struct passthru0 {

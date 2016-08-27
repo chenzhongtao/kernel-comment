@@ -12,11 +12,13 @@ enum nf_nat_manip_type
 };
 
 /* SRC manip occurs POST_ROUTING or LOCAL_IN */
-#define HOOK2MANIP(hooknum) ((hooknum) != NF_IP_POST_ROUTING && (hooknum) != NF_IP_LOCAL_IN)
+#define HOOK2MANIP(hooknum) ((hooknum) != NF_INET_POST_ROUTING && \
+			     (hooknum) != NF_INET_LOCAL_IN)
 
 #define IP_NAT_RANGE_MAP_IPS 1
 #define IP_NAT_RANGE_PROTO_SPECIFIED 2
 #define IP_NAT_RANGE_PROTO_RANDOM 4
+#define IP_NAT_RANGE_PERSISTENT 8
 
 /* NAT sequence number modifications */
 struct nf_nat_seq {
@@ -79,7 +81,7 @@ struct nf_conn_nat
 /* Set up the info structure to map into this range. */
 extern unsigned int nf_nat_setup_info(struct nf_conn *ct,
 				      const struct nf_nat_range *range,
-				      unsigned int hooknum);
+				      enum nf_nat_manip_type maniptype);
 
 /* Is this tuple already taken? (not by us)*/
 extern int nf_nat_used_tuple(const struct nf_conntrack_tuple *tuple,

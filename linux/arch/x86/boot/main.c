@@ -2,6 +2,7 @@
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
+ *   Copyright 2009 Intel Corporation; author H. Peter Anvin
  *
  *   This file is part of the Linux kernel, and is made available under
  *   the terms of the GNU General Public License version 2.
@@ -9,8 +10,6 @@
  * ----------------------------------------------------------------------- */
 
 /*
- * arch/i386/boot/main.c
- *
  * Main module for the real-mode kernel code
  */
 
@@ -63,11 +62,10 @@ static void copy_boot_params(void)
  */
 static void keyboard_set_repeat(void)
 {
-	u16 ax = 0x0305;
-	u16 bx = 0;
-	asm volatile("int $0x16"
-		     : "+a" (ax), "+b" (bx)
-		     : : "ecx", "edx", "esi", "edi");
+	struct biosregs ireg;
+	initregs(&ireg);
+	ireg.ax = 0x0305;
+	intcall(0x16, &ireg, NULL);
 }
 
 /*
@@ -75,13 +73,22 @@ static void keyboard_set_repeat(void)
  */
 static void query_ist(void)
 {
-	asm("int $0x15"
-	    : "=a" (boot_params.ist_info.signature),
-	      "=b" (boot_params.ist_info.command),
-	      "=c" (boot_params.ist_info.event),
-	      "=d" (boot_params.ist_info.perf_level)
-	    : "a" (0x0000e980),	 /* IST Support */
-	      "d" (0x47534943)); /* Request value */
+	struct biosregs ireg, oreg;
+
+	/* Some older BIOSes apparently crash on this call, so filter
+	   it from machines too old to have SpeedStep at all. */
+	if (cpu.level < 6)
+		return;
+
+	initregs(&ireg);
+	ireg.ax  = 0xe980;	 /* IST Support */
+	ireg.edx = 0x47534943;	 /* Request value */
+	intcall(0x15, &ireg, &oreg);
+
+	boot_params.ist_info.signature  = oreg.eax;
+	boot_params.ist_info.command    = oreg.ebx;
+	boot_params.ist_info.event      = oreg.ecx;
+	boot_params.ist_info.perf_level = oreg.edx;
 }
 
 /*
@@ -90,14 +97,32 @@ static void query_ist(void)
 static void set_bios_mode(void)
 {
 #ifdef CONFIG_X86_64
-	u32 eax, ebx;
+	struct biosregs ireg;
 
-	eax = 0xec00;
-	ebx = 2;
-	asm volatile("int $0x15"
-		     : "+a" (eax), "+b" (ebx)
-		     : : "ecx", "edx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ax = 0xec00;
+	ireg.bx = 2;
+	intcall(0x15, &ireg, NULL);
 #endif
+}
+
+static void init_heap(void)
+{
+	char *stack_end;
+
+	if (boot_params.hdr.loadflags & CAN_USE_HEAP) {
+		asm("leal %P1(%%esp),%0"
+		    : "=r" (stack_end) : "i" (-STACK_SIZE));
+
+		heap_end = (char *)
+			((size_t)boot_params.hdr.heap_end_ptr + 0x200);
+		if (heap_end > stack_end)
+			heap_end = stack_end;
+	} else {
+		/* Boot protocol 2.00 only, no heap available */
+		puts("WARNING: Ancient bootloader, some functionality "
+		     "may be limited!\n");
+	}
 }
 
 void main(void)
@@ -106,14 +131,7 @@ void main(void)
 	copy_boot_params();
 
 	/* End of heap check */
-	if (boot_params.hdr.loadflags & CAN_USE_HEAP) {
-		heap_end = (char *)(boot_params.hdr.heap_end_ptr
-				    +0x200-STACK_SIZE);
-	} else {
-		/* Boot protocol 2.00 only, no heap available */
-		puts("WARNING: Ancient bootloader, some functionality "
-		     "may be limited!\n");
-	}
+	init_heap();
 
 	/* Make sure we have all the proper CPU support */
 	if (validate_cpu()) {
@@ -131,16 +149,8 @@ void main(void)
 	/* Set keyboard repeat rate (why?) */
 	keyboard_set_repeat();
 
-	/* Set the video mode */
-	set_video();
-
 	/* Query MCA information */
 	query_mca();
-
-	/* Voyager */
-#ifdef CONFIG_X86_VOYAGER
-	query_voyager();
-#endif
 
 	/* Query Intel SpeedStep (IST) information */
 	query_ist();
@@ -154,6 +164,14 @@ void main(void)
 #if defined(CONFIG_EDD) || defined(CONFIG_EDD_MODULE)
 	query_edd();
 #endif
+
+	/* Set the video mode */
+	set_video();
+
+	/* Parse command line for 'quiet' and pass it to decompressor. */
+	if (cmdline_find_option_bool("quiet"))
+		boot_params.hdr.loadflags |= QUIET_FLAG;
+
 	/* Do the last things and invoke protected mode */
 	go_to_protected_mode();
 }

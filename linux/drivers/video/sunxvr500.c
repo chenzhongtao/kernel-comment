@@ -9,10 +9,9 @@
 #include <linux/fb.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/of_device.h>
 
 #include <asm/io.h>
-#include <asm/prom.h>
-#include <asm/of_device.h>
 
 /* XXX This device has a 'dev-comm' property which aparently is
  * XXX a pointer into the openfirmware's address space which is
@@ -350,10 +349,13 @@ static int __devinit e3d_pci_register(struct pci_dev *pdev,
 	if (err < 0) {
 		printk(KERN_ERR "e3d: Could not register framebuffer %s\n",
 		       pci_name(pdev));
-		goto err_unmap_fb;
+		goto err_free_cmap;
 	}
 
 	return 0;
+
+err_free_cmap:
+	fb_dealloc_cmap(&info->cmap);
 
 err_unmap_fb:
 	iounmap(ep->fb_base);
@@ -390,6 +392,7 @@ static void __devexit e3d_pci_unregister(struct pci_dev *pdev)
 	pci_release_region(pdev, 0);
 	pci_release_region(pdev, 1);
 
+	fb_dealloc_cmap(&info->cmap);
         framebuffer_release(info);
 
 	pci_disable_device(pdev);

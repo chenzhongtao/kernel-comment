@@ -16,8 +16,6 @@
 #include "hfc_2bds0.h"
 #include "isdnl1.h"
 
-extern const char *CardType[];
-
 static const char *hfcs_revision = "$Revision: 1.10.2.4 $";
 
 static irqreturn_t
@@ -193,7 +191,7 @@ setup_hfcs(struct IsdnCard *card)
 					err = pnp_activate_dev(pnp_d);
 					if (err<0) {
 						printk(KERN_WARNING "%s: pnp_activate_dev ret(%d)\n",
-							__FUNCTION__, err);
+							__func__, err);
 						return(0);
 					}
 					card->para[1] = pnp_port_start(pnp_d, 0);

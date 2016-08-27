@@ -25,6 +25,7 @@
 #include <asm/unistd.h>
 
 #include "entry.h"
+#include "paravirt_inst.h"
 
 /*
  * See Documentation/ia64/fsys.txt for details on fsyscalls.
@@ -61,13 +62,29 @@ ENTRY(fsys_getpid)
 	.prologue
 	.altrp b6
 	.body
+	add r17=IA64_TASK_GROUP_LEADER_OFFSET,r16
+	;;
+	ld8 r17=[r17]				// r17 = current->group_leader
 	add r9=TI_FLAGS+IA64_TASK_SIZE,r16
 	;;
 	ld4 r9=[r9]
-	add r8=IA64_TASK_TGID_OFFSET,r16
+	add r17=IA64_TASK_TGIDLINK_OFFSET,r17
 	;;
 	and r9=TIF_ALLWORK_MASK,r9
-	ld4 r8=[r8]				// r8 = current->tgid
+	ld8 r17=[r17]				// r17 = current->group_leader->pids[PIDTYPE_PID].pid
+	;;
+	add r8=IA64_PID_LEVEL_OFFSET,r17
+	;;
+	ld4 r8=[r8]				// r8 = pid->level
+	add r17=IA64_PID_UPID_OFFSET,r17	// r17 = &pid->numbers[0]
+	;;
+	shl r8=r8,IA64_UPID_SHIFT
+	;;
+	add r17=r17,r8				// r17 = &pid->numbers[pid->level]
+	;;
+	ld4 r8=[r17]				// r8 = pid->numbers[pid->level].nr
+	;;
+	mov r17=0
 	;;
 	cmp.ne p8,p0=0,r9
 (p8)	br.spnt.many fsys_fallback_syscall
@@ -126,15 +143,25 @@ ENTRY(fsys_set_tid_address)
 	.altrp b6
 	.body
 	add r9=TI_FLAGS+IA64_TASK_SIZE,r16
+	add r17=IA64_TASK_TGIDLINK_OFFSET,r16
 	;;
 	ld4 r9=[r9]
 	tnat.z p6,p7=r32		// check argument register for being NaT
+	ld8 r17=[r17]				// r17 = current->pids[PIDTYPE_PID].pid
 	;;
 	and r9=TIF_ALLWORK_MASK,r9
-	add r8=IA64_TASK_PID_OFFSET,r16
+	add r8=IA64_PID_LEVEL_OFFSET,r17
 	add r18=IA64_TASK_CLEAR_CHILD_TID_OFFSET,r16
 	;;
-	ld4 r8=[r8]
+	ld4 r8=[r8]				// r8 = pid->level
+	add r17=IA64_PID_UPID_OFFSET,r17	// r17 = &pid->numbers[0]
+	;;
+	shl r8=r8,IA64_UPID_SHIFT
+	;;
+	add r17=r17,r8				// r17 = &pid->numbers[pid->level]
+	;;
+	ld4 r8=[r17]				// r8 = pid->numbers[pid->level].nr
+	;;
 	cmp.ne p8,p0=0,r9
 	mov r17=-1
 	;;
@@ -210,27 +237,25 @@ ENTRY(fsys_gettimeofday)
 	// Note that instructions are optimized for McKinley. McKinley can
 	// process two bundles simultaneously and therefore we continuously
 	// try to feed the CPU two bundles and then a stop.
-	//
-	// Additional note that code has changed a lot. Optimization is TBD.
-	// Comments begin with "?" are maybe outdated.
-	tnat.nz p6,p0 = r31	// ? branch deferred to fit later bundle
-	mov pr = r30,0xc000	// Set predicates according to function
+
 	add r2 = TI_FLAGS+IA64_TASK_SIZE,r16
+	tnat.nz p6,p0 = r31		// guard against Nat argument
+(p6)	br.cond.spnt.few .fail_einval
 	movl r20 = fsyscall_gtod_data // load fsyscall gettimeofday data address
 	;;
+	ld4 r2 = [r2]			// process work pending flags
 	movl r29 = itc_jitter_data	// itc_jitter
 	add r22 = IA64_GTOD_WALL_TIME_OFFSET,r20	// wall_time
-	ld4 r2 = [r2]		// process work pending flags
-	;;
-(p15)	add r22 = IA64_GTOD_MONO_TIME_OFFSET,r20	// monotonic_time
 	add r21 = IA64_CLKSRC_MMIO_OFFSET,r20
-	add r19 = IA64_ITC_LASTCYCLE_OFFSET,r29
-	and r2 = TIF_ALLWORK_MASK,r2
-(p6)    br.cond.spnt.few .fail_einval	// ? deferred branch
+	mov pr = r30,0xc000	// Set predicates according to function
 	;;
-	add r26 = IA64_CLKSRC_CYCLE_LAST_OFFSET,r20 // clksrc_cycle_last
+	and r2 = TIF_ALLWORK_MASK,r2
+	add r19 = IA64_ITC_LASTCYCLE_OFFSET,r29
+(p15)	add r22 = IA64_GTOD_MONO_TIME_OFFSET,r20	// monotonic_time
+	;;
+	add r26 = IA64_CLKSRC_CYCLE_LAST_OFFSET,r20	// clksrc_cycle_last
 	cmp.ne p6, p0 = 0, r2	// Fallback if work is scheduled
-(p6)    br.cond.spnt.many fsys_fallback_syscall
+(p6)	br.cond.spnt.many fsys_fallback_syscall
 	;;
 	// Begin critical section
 .time_redo:
@@ -255,10 +280,9 @@ ENTRY(fsys_gettimeofday)
 (p9)	cmp.eq p13,p0 = 0,r30	// if mmio_ptr, clear p13 jitter control
 	;;
 	.pred.rel.mutex p8,p9
-(p8)	mov r2 = ar.itc		// CPU_TIMER. 36 clocks latency!!!
+	MOV_FROM_ITC(p8, p6, r2, r10)	// CPU_TIMER. 36 clocks latency!!!
 (p9)	ld8 r2 = [r30]		// MMIO_TIMER. Could also have latency issues..
 (p13)	ld8 r25 = [r19]		// get itc_lastcycle value
-	;;		// ? could be removed by moving the last add upward
 	ld8 r9 = [r22],IA64_TIMESPEC_TV_NSEC_OFFSET	// tv_sec
 	;;
 	ld8 r8 = [r22],-IA64_TIMESPEC_TV_NSEC_OFFSET	// tv_nsec
@@ -285,13 +309,12 @@ ENTRY(fsys_gettimeofday)
 EX(.fail_efault, probe.w.fault r31, 3)
 	xmpy.l f8 = f8,f7	// nsec_per_cyc*(counter-last_counter)
 	;;
-	// ? simulate tbit.nz.or p7,p0 = r28,0
 	getf.sig r2 = f8
 	mf
 	;;
 	ld4 r10 = [r20]		// gtod_lock.sequence
 	shr.u r2 = r2,r23	// shift by factor
-	;;		// ? overloaded 3 bundles!
+	;;
 	add r8 = r8,r2		// Add xtime.nsecs
 	cmp4.ne p7,p0 = r28,r10
 (p7)	br.cond.dpnt.few .time_redo	// sequence number changed, redo
@@ -319,9 +342,9 @@ EX(.fail_efault, probe.w.fault r31, 3)
 EX(.fail_efault, probe.w.fault r23, 3)	// This also costs 5 cycles
 (p14)	xmpy.hu f8 = f8, f7		// xmpy has 5 cycles latency so use it
 	;;
-	mov r8 = r0
 (p14)	getf.sig r2 = f8
 	;;
+	mov r8 = r0
 (p14)	shr.u r21 = r2, 4
 	;;
 EX(.fail_efault, st8 [r31] = r9)
@@ -396,7 +419,7 @@ EX(.fail_efault, ld8 r14=[r33])			// r14 <- *set
 	mov r17=(1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1))
 	;;
 
-	rsm psr.i				// mask interrupt delivery
+	RSM_PSR_I(p0, r18, r19)			// mask interrupt delivery
 	mov ar.ccv=0
 	andcm r14=r14,r17			// filter out SIGKILL & SIGSTOP
 
@@ -469,7 +492,7 @@ EX(.fail_efault, ld8 r14=[r33])			// r14 <- *set
 #ifdef CONFIG_SMP
 	st4.rel [r31]=r0			// release the lock
 #endif
-	ssm psr.i
+	SSM_PSR_I(p0, p9, r31)
 	;;
 
 	srlz.d					// ensure psr.i is set again
@@ -491,7 +514,7 @@ EX(.fail_efault, (p15) st8 [r34]=r3)
 #ifdef CONFIG_SMP
 	st4.rel [r31]=r0			// release the lock
 #endif
-	ssm psr.i
+	SSM_PSR_I(p0, p9, r17)
 	;;
 	srlz.d
 	br.sptk.many fsys_fallback_syscall	// with signal pending, do the heavy-weight syscall
@@ -499,7 +522,7 @@ EX(.fail_efault, (p15) st8 [r34]=r3)
 #ifdef CONFIG_SMP
 .lock_contention:
 	/* Rather than spinning here, fall back on doing a heavy-weight syscall.  */
-	ssm psr.i
+	SSM_PSR_I(p0, p9, r17)
 	;;
 	srlz.d
 	br.sptk.many fsys_fallback_syscall
@@ -570,17 +593,17 @@ ENTRY(fsys_fallback_syscall)
 	adds r17=-1024,r15
 	movl r14=sys_call_table
 	;;
-	rsm psr.i
+	RSM_PSR_I(p0, r26, r27)
 	shladd r18=r17,3,r14
 	;;
 	ld8 r18=[r18]				// load normal (heavy-weight) syscall entry-point
-	mov r29=psr				// read psr (12 cyc load latency)
+	MOV_FROM_PSR(p0, r29, r26)		// read psr (12 cyc load latency)
 	mov r27=ar.rsc
 	mov r21=ar.fpsr
 	mov r26=ar.pfs
 END(fsys_fallback_syscall)
 	/* FALL THROUGH */
-GLOBAL_ENTRY(fsys_bubble_down)
+GLOBAL_ENTRY(paravirt_fsys_bubble_down)
 	.prologue
 	.altrp b6
 	.body
@@ -618,7 +641,7 @@ GLOBAL_ENTRY(fsys_bubble_down)
 	 *
 	 * PSR.BE : already is turned off in __kernel_syscall_via_epc()
 	 * PSR.AC : don't care (kernel normally turns PSR.AC on)
-	 * PSR.I  : already turned off by the time fsys_bubble_down gets
+	 * PSR.I  : already turned off by the time paravirt_fsys_bubble_down gets
 	 *	    invoked
 	 * PSR.DFL: always 0 (kernel never turns it on)
 	 * PSR.DFH: don't care --- kernel never touches f32-f127 on its own
@@ -628,7 +651,7 @@ GLOBAL_ENTRY(fsys_bubble_down)
 	 * PSR.DB : don't care --- kernel never enables kernel-level
 	 *	    breakpoints
 	 * PSR.TB : must be 0 already; if it wasn't zero on entry to
-	 *          __kernel_syscall_via_epc, the branch to fsys_bubble_down
+	 *          __kernel_syscall_via_epc, the branch to paravirt_fsys_bubble_down
 	 *          will trigger a taken branch; the taken-trap-handler then
 	 *          converts the syscall into a break-based system-call.
 	 */
@@ -660,7 +683,11 @@ GLOBAL_ENTRY(fsys_bubble_down)
 	nop.i 0
 	;;
 	mov ar.rsc=0				// M2   set enforced lazy mode, pl 0, LE, loadrs=0
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+	MOV_FROM_ITC(p0, p6, r30, r23)		// M    get cycle for accounting
+#else
 	nop.m 0
+#endif
 	nop.i 0
 	;;
 	mov r23=ar.bspstore			// M2 (12 cyc) save ar.bspstore
@@ -682,25 +709,47 @@ GLOBAL_ENTRY(fsys_bubble_down)
 	cmp.ne pKStk,pUStk=r0,r0		// A    set pKStk <- 0, pUStk <- 1
 	br.call.sptk.many b7=ia64_syscall_setup	// B
 	;;
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+	// mov.m r30=ar.itc is called in advance
+	add r16=TI_AC_STAMP+IA64_TASK_SIZE,r2
+	add r17=TI_AC_LEAVE+IA64_TASK_SIZE,r2
+	;;
+	ld8 r18=[r16],TI_AC_STIME-TI_AC_STAMP	// time at last check in kernel
+	ld8 r19=[r17],TI_AC_UTIME-TI_AC_LEAVE	// time at leave kernel
+	;;
+	ld8 r20=[r16],TI_AC_STAMP-TI_AC_STIME	// cumulated stime
+	ld8 r21=[r17]				// cumulated utime
+	sub r22=r19,r18				// stime before leave kernel
+	;;
+	st8 [r16]=r30,TI_AC_STIME-TI_AC_STAMP	// update stamp
+	sub r18=r30,r19				// elapsed time in user mode
+	;;
+	add r20=r20,r22				// sum stime
+	add r21=r21,r18				// sum utime
+	;;
+	st8 [r16]=r20				// update stime
+	st8 [r17]=r21				// update utime
+	;;
+#endif
 	mov ar.rsc=0x3				// M2   set eager mode, pl 0, LE, loadrs=0
 	mov rp=r14				// I0   set the real return addr
 	and r3=_TIF_SYSCALL_TRACEAUDIT,r3	// A
 	;;
-	ssm psr.i				// M2   we're on kernel stacks now, reenable irqs
+	SSM_PSR_I(p0, p6, r22)			// M2   we're on kernel stacks now, reenable irqs
 	cmp.eq p8,p0=r3,r0			// A
 (p10)	br.cond.spnt.many ia64_ret_from_syscall	// B    return if bad call-frame or r15 is a NaT
 
 	nop.m 0
 (p8)	br.call.sptk.many b6=b6			// B    (ignore return address)
 	br.cond.spnt ia64_trace_syscall		// B
-END(fsys_bubble_down)
+END(paravirt_fsys_bubble_down)
 
 	.rodata
 	.align 8
-	.globl fsyscall_table
+	.globl paravirt_fsyscall_table
 
-	data8 fsys_bubble_down
-fsyscall_table:
+	data8 paravirt_fsys_bubble_down
+paravirt_fsyscall_table:
 	data8 fsys_ni_syscall
 	data8 0				// exit			// 1025
 	data8 0				// read
@@ -985,4 +1034,4 @@ fsyscall_table:
 
 	// fill in zeros for the remaining entries
 	.zero:
-	.space fsyscall_table + 8*NR_syscalls - .zero, 0
+	.space paravirt_fsyscall_table + 8*NR_syscalls - .zero, 0

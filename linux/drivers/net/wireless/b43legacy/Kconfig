@@ -1,9 +1,8 @@
 config B43LEGACY
 	tristate "Broadcom 43xx-legacy wireless support (mac80211 stack)"
-	depends on SSB_POSSIBLE && MAC80211 && WLAN_80211
+	depends on SSB_POSSIBLE && MAC80211 && WLAN_80211 && HAS_DMA
 	select SSB
 	select FW_LOADER
-	select HW_RANDOM
 	---help---
 	  b43legacy is a driver for 802.11b devices from Broadcom (BCM4301 and
 	  BCM4303) and early model 802.11g chips (BCM4306 Ver. 2) used in the
@@ -25,6 +24,7 @@ config B43LEGACY_PCI_AUTOSELECT
 	bool
 	depends on B43LEGACY && SSB_PCIHOST_POSSIBLE
 	select SSB_PCIHOST
+	select SSB_B43_PCI_BRIDGE
 	default y
 
 # Auto-select SSB PCICORE driver, if possible
@@ -32,6 +32,21 @@ config B43LEGACY_PCICORE_AUTOSELECT
 	bool
 	depends on B43LEGACY && SSB_DRIVER_PCICORE_POSSIBLE
 	select SSB_DRIVER_PCICORE
+	default y
+
+# LED support
+# This config option automatically enables b43legacy LEDS support,
+# if it's possible.
+config B43LEGACY_LEDS
+	bool
+	depends on B43LEGACY && MAC80211_LEDS && (LEDS_CLASS = y || LEDS_CLASS = B43LEGACY)
+	default y
+
+# This config option automatically enables b43 HW-RNG support,
+# if the HW-RNG core is enabled.
+config B43LEGACY_HWRNG
+	bool
+	depends on B43LEGACY && (HW_RANDOM = y || HW_RANDOM = B43LEGACY)
 	default y
 
 config B43LEGACY_DEBUG

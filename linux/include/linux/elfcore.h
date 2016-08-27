@@ -4,7 +4,9 @@
 #include <linux/types.h>
 #include <linux/signal.h>
 #include <linux/time.h>
+#ifdef __KERNEL__
 #include <linux/user.h>
+#endif
 #include <linux/ptrace.h>
 
 struct elf_siginfo
@@ -14,7 +16,9 @@ struct elf_siginfo
 	int	si_errno;			/* errno */
 };
 
+#ifdef __KERNEL__
 #include <asm/elf.h>
+#endif
 
 #ifndef __KERNEL__
 typedef elf_greg_t greg_t;
@@ -107,11 +111,21 @@ static inline void elf_core_copy_regs(elf_gregset_t *elfregs, struct pt_regs *re
 #endif
 }
 
+static inline void elf_core_copy_kernel_regs(elf_gregset_t *elfregs, struct pt_regs *regs)
+{
+#ifdef ELF_CORE_COPY_KERNEL_REGS
+	ELF_CORE_COPY_KERNEL_REGS((*elfregs), regs);
+#else
+	elf_core_copy_regs(elfregs, regs);
+#endif
+}
+
 static inline int elf_core_copy_task_regs(struct task_struct *t, elf_gregset_t* elfregs)
 {
-#ifdef ELF_CORE_COPY_TASK_REGS
-	
+#if defined (ELF_CORE_COPY_TASK_REGS)
 	return ELF_CORE_COPY_TASK_REGS(t, elfregs);
+#elif defined (task_pt_regs)
+	elf_core_copy_regs(elfregs, task_pt_regs(t));
 #endif
 	return 0;
 }

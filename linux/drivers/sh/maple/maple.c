@@ -1,15 +1,10 @@
 /*
  * Core maple bus functionality
  *
- *  Copyright (C) 2007 Adrian McMenamin
- *
- * Based on 2.4 code by:
- *
- *  Copyright (C) 2000-2001 YAEGASHI Takeshi
+ *  Copyright (C) 2007 - 2009 Adrian McMenamin
+ *  Copyright (C) 2001 - 2008 Paul Mundt
+ *  Copyright (C) 2000 - 2001 YAEGASHI Takeshi
  *  Copyright (C) 2001 M. R. Brown
- *  Copyright (C) 2001 Paul Mundt
- *
- * and others.
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -18,21 +13,20 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
-#include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/list.h>
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/maple.h>
 #include <linux/dma-mapping.h>
+#include <linux/delay.h>
 #include <asm/cacheflush.h>
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/mach/dma.h>
-#include <asm/mach/sysasic.h>
-#include <asm/mach/maple.h>
+#include <mach/dma.h>
+#include <mach/sysasic.h>
 
-MODULE_AUTHOR("Yaegshi Takeshi, Paul Mundt, M.R. Brown, Adrian McMenamin");
+MODULE_AUTHOR("Adrian McMenamin <adrian@mcmen.demon.co.uk>");
 MODULE_DESCRIPTION("Maple bus driver for Dreamcast");
 MODULE_LICENSE("GPL v2");
 MODULE_SUPPORTED_DEVICE("{{SEGA, Dreamcast/Maple}}");
@@ -46,44 +40,74 @@ static DECLARE_WORK(maple_vblank_process, maple_vblank_handler);
 static LIST_HEAD(maple_waitq);
 static LIST_HEAD(maple_sentq);
 
-static DEFINE_MUTEX(maple_list_lock);
+/* mutex to protect queue of waiting packets */
+static DEFINE_MUTEX(maple_wlist_lock);
 
-static struct maple_driver maple_dummy_driver;
+static struct maple_driver maple_unsupported_device;
 static struct device maple_bus;
 static int subdevice_map[MAPLE_PORTS];
 static unsigned long *maple_sendbuf, *maple_sendptr, *maple_lastptr;
 static unsigned long maple_pnp_time;
-static int started, scanning, liststatus;
+static int started, scanning, fullscan;
 static struct kmem_cache *maple_queue_cache;
 
 struct maple_device_specify {
-       int port;
-       int unit;
+	int port;
+	int unit;
 };
 
+static bool checked[MAPLE_PORTS];
+static bool empty[MAPLE_PORTS];
+static struct maple_device *baseunits[MAPLE_PORTS];
+
 /**
- *  maple_driver_register - register a device driver
- *  automatically makes the driver bus a maple bus
- *  @drv: the driver to be registered
+ * maple_driver_register - register a maple driver
+ * @drv: maple driver to be registered.
+ *
+ * Registers the passed in @drv, while updating the bus type.
+ * Devices with matching function IDs will be automatically probed.
  */
-int maple_driver_register(struct device_driver *drv)
+int maple_driver_register(struct maple_driver *drv)
 {
-       if (!drv)
-               return -EINVAL;
-       drv->bus = &maple_bus_type;
-       return driver_register(drv);
+	if (!drv)
+		return -EINVAL;
+
+	drv->drv.bus = &maple_bus_type;
+
+	return driver_register(&drv->drv);
 }
 EXPORT_SYMBOL_GPL(maple_driver_register);
 
-/* set hardware registers to enable next round of dma */
-static void maplebus_dma_reset(void)
+/**
+ * maple_driver_unregister - unregister a maple driver.
+ * @drv: maple driver to unregister.
+ *
+ * Cleans up after maple_driver_register(). To be invoked in the exit
+ * path of any module drivers.
+ */
+void maple_driver_unregister(struct maple_driver *drv)
 {
-       ctrl_outl(MAPLE_MAGIC, MAPLE_RESET);
-       /* set trig type to 0 for software trigger, 1 for hardware (VBLANK) */
-       ctrl_outl(1, MAPLE_TRIGTYPE);
-       ctrl_outl(MAPLE_2MBPS | MAPLE_TIMEOUT(50000), MAPLE_SPEED);
-       ctrl_outl(PHYSADDR(maple_sendbuf), MAPLE_DMAADDR);
-       ctrl_outl(1, MAPLE_ENABLE);
+	driver_unregister(&drv->drv);
+}
+EXPORT_SYMBOL_GPL(maple_driver_unregister);
+
+/* set hardware registers to enable next round of dma */
+static void maple_dma_reset(void)
+{
+	ctrl_outl(MAPLE_MAGIC, MAPLE_RESET);
+	/* set trig type to 0 for software trigger, 1 for hardware (VBLANK) */
+	ctrl_outl(1, MAPLE_TRIGTYPE);
+	/*
+	* Maple system register
+	* bits 31 - 16	timeout in units of 20nsec
+	* bit 12	hard trigger - set 0 to keep responding to VBLANK
+	* bits 9 - 8	set 00 for 2 Mbps, 01 for 1 Mbps
+	* bits 3 - 0	delay (in 1.3ms) between VBLANK and start of DMA
+	* max delay is 11
+	*/
+	ctrl_outl(MAPLE_2MBPS | MAPLE_TIMEOUT(0xFFFF), MAPLE_SPEED);
+	ctrl_outl(PHYSADDR(maple_sendbuf), MAPLE_DMAADDR);
+	ctrl_outl(1, MAPLE_ENABLE);
 }
 
 /**
@@ -94,89 +118,126 @@ static void maplebus_dma_reset(void)
  * @function: the function code for the device
  */
 void maple_getcond_callback(struct maple_device *dev,
-                           void (*callback) (struct mapleq * mq),
-                           unsigned long interval, unsigned long function)
+			void (*callback) (struct mapleq *mq),
+			unsigned long interval, unsigned long function)
 {
-       dev->callback = callback;
-       dev->interval = interval;
-       dev->function = cpu_to_be32(function);
-       dev->when = jiffies;
+	dev->callback = callback;
+	dev->interval = interval;
+	dev->function = cpu_to_be32(function);
+	dev->when = jiffies;
 }
 EXPORT_SYMBOL_GPL(maple_getcond_callback);
 
 static int maple_dma_done(void)
 {
-       return (ctrl_inl(MAPLE_STATE) & 1) == 0;
+	return (ctrl_inl(MAPLE_STATE) & 1) == 0;
 }
 
 static void maple_release_device(struct device *dev)
 {
-       if (dev->type) {
-               kfree(dev->type->name);
-               kfree(dev->type);
-       }
+	struct maple_device *mdev;
+	struct mapleq *mq;
+
+	mdev = to_maple_dev(dev);
+	mq = mdev->mq;
+	kmem_cache_free(maple_queue_cache, mq->recvbuf);
+	kfree(mq);
+	kfree(mdev);
 }
 
 /**
- * maple_add_packet - add a single instruction to the queue
- * @mq: instruction to add to waiting queue
+ * maple_add_packet - add a single instruction to the maple bus queue
+ * @mdev: maple device
+ * @function: function on device being queried
+ * @command: maple command to add
+ * @length: length of command string (in 32 bit words)
+ * @data: remainder of command string
  */
-void maple_add_packet(struct mapleq *mq)
+int maple_add_packet(struct maple_device *mdev, u32 function, u32 command,
+	size_t length, void *data)
 {
-       mutex_lock(&maple_list_lock);
-       list_add(&mq->list, &maple_waitq);
-       mutex_unlock(&maple_list_lock);
+	int ret = 0;
+	void *sendbuf = NULL;
+
+	if (length) {
+		sendbuf = kzalloc(length * 4, GFP_KERNEL);
+		if (!sendbuf) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		((__be32 *)sendbuf)[0] = cpu_to_be32(function);
+	}
+
+	mdev->mq->command = command;
+	mdev->mq->length = length;
+	if (length > 1)
+		memcpy(sendbuf + 4, data, (length - 1) * 4);
+	mdev->mq->sendbuf = sendbuf;
+
+	mutex_lock(&maple_wlist_lock);
+	list_add_tail(&mdev->mq->list, &maple_waitq);
+	mutex_unlock(&maple_wlist_lock);
+out:
+	return ret;
 }
 EXPORT_SYMBOL_GPL(maple_add_packet);
 
-static struct mapleq *maple_allocq(struct maple_device *dev)
+static struct mapleq *maple_allocq(struct maple_device *mdev)
 {
-       struct mapleq *mq;
+	struct mapleq *mq;
 
-       mq = kmalloc(sizeof(*mq), GFP_KERNEL);
-       if (!mq)
-               return NULL;
+	mq = kzalloc(sizeof(*mq), GFP_KERNEL);
+	if (!mq)
+		goto failed_nomem;
 
-       mq->dev = dev;
-       mq->recvbufdcsp = kmem_cache_zalloc(maple_queue_cache, GFP_KERNEL);
-       mq->recvbuf = (void *) P2SEGADDR(mq->recvbufdcsp);
-       if (!mq->recvbuf) {
-               kfree(mq);
-               return NULL;
-       }
+	INIT_LIST_HEAD(&mq->list);
+	mq->dev = mdev;
+	mq->recvbuf = kmem_cache_zalloc(maple_queue_cache, GFP_KERNEL);
+	if (!mq->recvbuf)
+		goto failed_p2;
+	mq->recvbuf->buf = &((mq->recvbuf->bufx)[0]);
 
-       return mq;
+	return mq;
+
+failed_p2:
+	kfree(mq);
+failed_nomem:
+	dev_err(&mdev->dev, "could not allocate memory for device (%d, %d)\n",
+		mdev->port, mdev->unit);
+	return NULL;
 }
 
 static struct maple_device *maple_alloc_dev(int port, int unit)
 {
-       struct maple_device *dev;
+	struct maple_device *mdev;
 
-       dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-       if (!dev)
-               return NULL;
+	/* zero this out to avoid kobj subsystem
+	* thinking it has already been registered */
 
-       dev->port = port;
-       dev->unit = unit;
-       dev->mq = maple_allocq(dev);
+	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
+	if (!mdev)
+		return NULL;
 
-       if (!dev->mq) {
-               kfree(dev);
-               return NULL;
-       }
+	mdev->port = port;
+	mdev->unit = unit;
 
-       return dev;
+	mdev->mq = maple_allocq(mdev);
+
+	if (!mdev->mq) {
+		kfree(mdev);
+		return NULL;
+	}
+	mdev->dev.bus = &maple_bus_type;
+	mdev->dev.parent = &maple_bus;
+	init_waitqueue_head(&mdev->maple_wait);
+	return mdev;
 }
 
 static void maple_free_dev(struct maple_device *mdev)
 {
-       if (!mdev)
-               return;
-       if (mdev->mq) {
-               kmem_cache_free(maple_queue_cache, mdev->mq->recvbufdcsp);
-               kfree(mdev->mq);
-       }
-       kfree(mdev);
+	kmem_cache_free(maple_queue_cache, mdev->mq->recvbuf);
+	kfree(mdev->mq);
+	kfree(mdev);
 }
 
 /* process the command queue into a maple command block
@@ -184,153 +245,157 @@ static void maple_free_dev(struct maple_device *mdev)
  */
 static void maple_build_block(struct mapleq *mq)
 {
-       int port, unit, from, to, len;
-       unsigned long *lsendbuf = mq->sendbuf;
+	int port, unit, from, to, len;
+	unsigned long *lsendbuf = mq->sendbuf;
 
-       port = mq->dev->port & 3;
-       unit = mq->dev->unit;
-       len = mq->length;
-       from = port << 6;
-       to = (port << 6) | (unit > 0 ? (1 << (unit - 1)) & 0x1f : 0x20);
+	port = mq->dev->port & 3;
+	unit = mq->dev->unit;
+	len = mq->length;
+	from = port << 6;
+	to = (port << 6) | (unit > 0 ? (1 << (unit - 1)) & 0x1f : 0x20);
 
-       *maple_lastptr &= 0x7fffffff;
-       maple_lastptr = maple_sendptr;
+	*maple_lastptr &= 0x7fffffff;
+	maple_lastptr = maple_sendptr;
 
-       *maple_sendptr++ = (port << 16) | len | 0x80000000;
-       *maple_sendptr++ = PHYSADDR(mq->recvbuf);
-       *maple_sendptr++ =
-           mq->command | (to << 8) | (from << 16) | (len << 24);
-
-       while (len-- > 0)
-               *maple_sendptr++ = *lsendbuf++;
+	*maple_sendptr++ = (port << 16) | len | 0x80000000;
+	*maple_sendptr++ = PHYSADDR(mq->recvbuf->buf);
+	*maple_sendptr++ =
+	    mq->command | (to << 8) | (from << 16) | (len << 24);
+	while (len-- > 0)
+		*maple_sendptr++ = *lsendbuf++;
 }
 
 /* build up command queue */
 static void maple_send(void)
 {
-       int i;
-       int maple_packets;
-       struct mapleq *mq, *nmq;
+	int i, maple_packets = 0;
+	struct mapleq *mq, *nmq;
 
-       if (!list_empty(&maple_sentq))
-               return;
-       if (list_empty(&maple_waitq) || !maple_dma_done())
-               return;
-       maple_packets = 0;
-       maple_sendptr = maple_lastptr = maple_sendbuf;
-       list_for_each_entry_safe(mq, nmq, &maple_waitq, list) {
-               maple_build_block(mq);
-               list_move(&mq->list, &maple_sentq);
-               if (maple_packets++ > MAPLE_MAXPACKETS)
-                       break;
-       }
-       if (maple_packets > 0) {
-               for (i = 0; i < (1 << MAPLE_DMA_PAGES); i++)
-                       dma_cache_sync(0, maple_sendbuf + i * PAGE_SIZE,
-                                      PAGE_SIZE, DMA_BIDIRECTIONAL);
-       }
+	if (!maple_dma_done())
+		return;
+
+	/* disable DMA */
+	ctrl_outl(0, MAPLE_ENABLE);
+
+	if (!list_empty(&maple_sentq))
+		goto finish;
+
+	mutex_lock(&maple_wlist_lock);
+	if (list_empty(&maple_waitq)) {
+		mutex_unlock(&maple_wlist_lock);
+		goto finish;
+	}
+
+	maple_lastptr = maple_sendbuf;
+	maple_sendptr = maple_sendbuf;
+
+	list_for_each_entry_safe(mq, nmq, &maple_waitq, list) {
+		maple_build_block(mq);
+		list_del_init(&mq->list);
+		list_add_tail(&mq->list, &maple_sentq);
+		if (maple_packets++ > MAPLE_MAXPACKETS)
+			break;
+	}
+	mutex_unlock(&maple_wlist_lock);
+	if (maple_packets > 0) {
+		for (i = 0; i < (1 << MAPLE_DMA_PAGES); i++)
+			dma_cache_sync(0, maple_sendbuf + i * PAGE_SIZE,
+				       PAGE_SIZE, DMA_BIDIRECTIONAL);
+	}
+
+finish:
+	maple_dma_reset();
 }
 
-static int attach_matching_maple_driver(struct device_driver *driver,
-                                       void *devptr)
+/* check if there is a driver registered likely to match this device */
+static int maple_check_matching_driver(struct device_driver *driver,
+					void *devptr)
 {
-       struct maple_driver *maple_drv;
-       struct maple_device *mdev;
+	struct maple_driver *maple_drv;
+	struct maple_device *mdev;
 
-       mdev = devptr;
-       maple_drv = to_maple_driver(driver);
-       if (mdev->devinfo.function & be32_to_cpu(maple_drv->function)) {
-               if (maple_drv->connect(mdev) == 0) {
-                       mdev->driver = maple_drv;
-                       return 1;
-               }
-       }
-       return 0;
+	mdev = devptr;
+	maple_drv = to_maple_driver(driver);
+	if (mdev->devinfo.function & cpu_to_be32(maple_drv->function))
+		return 1;
+	return 0;
 }
 
 static void maple_detach_driver(struct maple_device *mdev)
 {
-       if (!mdev)
-               return;
-       if (mdev->driver) {
-               if (mdev->driver->disconnect)
-                       mdev->driver->disconnect(mdev);
-       }
-       mdev->driver = NULL;
-       if (mdev->registered) {
-               maple_release_device(&mdev->dev);
-               device_unregister(&mdev->dev);
-       }
-       mdev->registered = 0;
-       maple_free_dev(mdev);
+	device_unregister(&mdev->dev);
 }
 
 /* process initial MAPLE_COMMAND_DEVINFO for each device or port */
-static void maple_attach_driver(struct maple_device *dev)
+static void maple_attach_driver(struct maple_device *mdev)
 {
-       char *p;
+	char *p, *recvbuf;
+	unsigned long function;
+	int matched, error;
 
-       char *recvbuf;
-       unsigned long function;
-       int matched, retval;
+	recvbuf = mdev->mq->recvbuf->buf;
+	/* copy the data as individual elements in
+	* case of memory optimisation */
+	memcpy(&mdev->devinfo.function, recvbuf + 4, 4);
+	memcpy(&mdev->devinfo.function_data[0], recvbuf + 8, 12);
+	memcpy(&mdev->devinfo.area_code, recvbuf + 20, 1);
+	memcpy(&mdev->devinfo.connector_direction, recvbuf + 21, 1);
+	memcpy(&mdev->devinfo.product_name[0], recvbuf + 22, 30);
+	memcpy(&mdev->devinfo.standby_power, recvbuf + 112, 2);
+	memcpy(&mdev->devinfo.max_power, recvbuf + 114, 2);
+	memcpy(mdev->product_name, mdev->devinfo.product_name, 30);
+	mdev->product_name[30] = '\0';
+	memcpy(mdev->product_licence, mdev->devinfo.product_licence, 60);
+	mdev->product_licence[60] = '\0';
 
-       recvbuf = dev->mq->recvbuf;
-       memcpy(&dev->devinfo, recvbuf + 4, sizeof(dev->devinfo));
-       memcpy(dev->product_name, dev->devinfo.product_name, 30);
-       memcpy(dev->product_licence, dev->devinfo.product_licence, 60);
-       dev->product_name[30] = '\0';
-       dev->product_licence[60] = '\0';
+	for (p = mdev->product_name + 29; mdev->product_name <= p; p--)
+		if (*p == ' ')
+			*p = '\0';
+		else
+			break;
+	for (p = mdev->product_licence + 59; mdev->product_licence <= p; p--)
+		if (*p == ' ')
+			*p = '\0';
+		else
+			break;
 
-       for (p = dev->product_name + 29; dev->product_name <= p; p--)
-               if (*p == ' ')
-                       *p = '\0';
-               else
-                       break;
+	function = be32_to_cpu(mdev->devinfo.function);
 
-       for (p = dev->product_licence + 59; dev->product_licence <= p; p--)
-               if (*p == ' ')
-                       *p = '\0';
-               else
-                       break;
+	dev_info(&mdev->dev, "detected %s: function 0x%lX: at (%d, %d)\n",
+		mdev->product_name, function, mdev->port, mdev->unit);
 
-       function = be32_to_cpu(dev->devinfo.function);
+	if (function > 0x200) {
+		/* Do this silently - as not a real device */
+		function = 0;
+		mdev->driver = &maple_unsupported_device;
+		dev_set_name(&mdev->dev, "%d:0.port", mdev->port);
+	} else {
+		matched =
+			bus_for_each_drv(&maple_bus_type, NULL, mdev,
+				maple_check_matching_driver);
 
-       if (function > 0x200) {
-               /* Do this silently - as not a real device */
-               function = 0;
-               dev->driver = &maple_dummy_driver;
-               sprintf(dev->dev.bus_id, "%d:0.port", dev->port);
-       } else {
-               printk(KERN_INFO
-                      "Maple bus at (%d, %d): Connected function 0x%lX\n",
-                      dev->port, dev->unit, function);
+		if (matched == 0) {
+			/* Driver does not exist yet */
+			dev_info(&mdev->dev, "no driver found\n");
+			mdev->driver = &maple_unsupported_device;
+		}
+		dev_set_name(&mdev->dev, "%d:0%d.%lX", mdev->port,
+			     mdev->unit, function);
+	}
 
-               matched =
-                   bus_for_each_drv(&maple_bus_type, NULL, dev,
-                                    attach_matching_maple_driver);
+	mdev->function = function;
+	mdev->dev.release = &maple_release_device;
 
-               if (matched == 0) {
-                       /* Driver does not exist yet */
-                       printk(KERN_INFO
-                              "No maple driver found for this device\n");
-                       dev->driver = &maple_dummy_driver;
-               }
-
-               sprintf(dev->dev.bus_id, "%d:0%d.%lX", dev->port,
-                       dev->unit, function);
-       }
-       dev->function = function;
-       dev->dev.bus = &maple_bus_type;
-       dev->dev.parent = &maple_bus;
-       dev->dev.release = &maple_release_device;
-       retval = device_register(&dev->dev);
-       if (retval) {
-               printk(KERN_INFO
-                      "Maple bus: Attempt to register device (%x, %x) failed.\n",
-                      dev->port, dev->unit);
-               maple_free_dev(dev);
-       }
-       dev->registered = 1;
+	atomic_set(&mdev->busy, 0);
+	error = device_register(&mdev->dev);
+	if (error) {
+		dev_warn(&mdev->dev, "could not register device at"
+			" (%d, %d), with error 0x%X\n", mdev->unit,
+			mdev->port, error);
+		maple_free_dev(mdev);
+		mdev = NULL;
+		return;
+	}
 }
 
 /*
@@ -338,397 +403,490 @@ static void maple_attach_driver(struct maple_device *dev)
  * port and unit then return 1 - allows identification
  * of which devices need to be attached or detached
  */
-static int detach_maple_device(struct device *device, void *portptr)
+static int check_maple_device(struct device *device, void *portptr)
 {
-       struct maple_device_specify *ds;
-       struct maple_device *mdev;
+	struct maple_device_specify *ds;
+	struct maple_device *mdev;
 
-       ds = portptr;
-       mdev = to_maple_dev(device);
-       if (mdev->port == ds->port && mdev->unit == ds->unit)
-               return 1;
-       return 0;
+	ds = portptr;
+	mdev = to_maple_dev(device);
+	if (mdev->port == ds->port && mdev->unit == ds->unit)
+		return 1;
+	return 0;
 }
 
 static int setup_maple_commands(struct device *device, void *ignored)
 {
-       struct maple_device *maple_dev = to_maple_dev(device);
-
-       if ((maple_dev->interval > 0)
-           && time_after(jiffies, maple_dev->when)) {
-               maple_dev->when = jiffies + maple_dev->interval;
-               maple_dev->mq->command = MAPLE_COMMAND_GETCOND;
-               maple_dev->mq->sendbuf = &maple_dev->function;
-               maple_dev->mq->length = 1;
-               maple_add_packet(maple_dev->mq);
-               liststatus++;
-       } else {
-               if (time_after(jiffies, maple_pnp_time)) {
-                       maple_dev->mq->command = MAPLE_COMMAND_DEVINFO;
-                       maple_dev->mq->length = 0;
-                       maple_add_packet(maple_dev->mq);
-                       liststatus++;
-               }
-       }
-
-       return 0;
+	int add;
+	struct maple_device *mdev = to_maple_dev(device);
+	if (mdev->interval > 0 && atomic_read(&mdev->busy) == 0 &&
+		time_after(jiffies, mdev->when)) {
+		/* bounce if we cannot add */
+		add = maple_add_packet(mdev,
+			be32_to_cpu(mdev->devinfo.function),
+			MAPLE_COMMAND_GETCOND, 1, NULL);
+		if (!add)
+			mdev->when = jiffies + mdev->interval;
+	} else {
+		if (time_after(jiffies, maple_pnp_time))
+			/* Ensure we don't have block reads and devinfo
+			* calls interfering with one another - so flag the
+			* device as busy */
+			if (atomic_read(&mdev->busy) == 0) {
+				atomic_set(&mdev->busy, 1);
+				maple_add_packet(mdev, 0,
+					MAPLE_COMMAND_DEVINFO, 0, NULL);
+			}
+	}
+	return 0;
 }
 
 /* VBLANK bottom half - implemented via workqueue */
 static void maple_vblank_handler(struct work_struct *work)
 {
-       if (!maple_dma_done())
-               return;
-       if (!list_empty(&maple_sentq))
-               return;
-       ctrl_outl(0, MAPLE_ENABLE);
-       liststatus = 0;
-       bus_for_each_dev(&maple_bus_type, NULL, NULL,
-                        setup_maple_commands);
-       if (time_after(jiffies, maple_pnp_time))
-               maple_pnp_time = jiffies + MAPLE_PNP_INTERVAL;
-       if (liststatus && list_empty(&maple_sentq)) {
-               INIT_LIST_HEAD(&maple_sentq);
-               maple_send();
-       }
-       maplebus_dma_reset();
+	int x, locking;
+	struct maple_device *mdev;
+
+	if (!maple_dma_done())
+		return;
+
+	ctrl_outl(0, MAPLE_ENABLE);
+
+	if (!list_empty(&maple_sentq))
+		goto finish;
+
+	/*
+	* Set up essential commands - to fetch data and
+	* check devices are still present
+	*/
+	bus_for_each_dev(&maple_bus_type, NULL, NULL,
+		setup_maple_commands);
+
+	if (time_after(jiffies, maple_pnp_time)) {
+		/*
+		* Scan the empty ports - bus is flakey and may have
+		* mis-reported emptyness
+		*/
+		for (x = 0; x < MAPLE_PORTS; x++) {
+			if (checked[x] && empty[x]) {
+				mdev = baseunits[x];
+				if (!mdev)
+					break;
+				atomic_set(&mdev->busy, 1);
+				locking = maple_add_packet(mdev, 0,
+					MAPLE_COMMAND_DEVINFO, 0, NULL);
+				if (!locking)
+					break;
+				}
+			}
+
+		maple_pnp_time = jiffies + MAPLE_PNP_INTERVAL;
+	}
+
+finish:
+	maple_send();
 }
 
-/* handle devices added via hotplugs - placing them on queue for DEVINFO*/
+/* handle devices added via hotplugs - placing them on queue for DEVINFO */
 static void maple_map_subunits(struct maple_device *mdev, int submask)
 {
-       int retval, k, devcheck;
-       struct maple_device *mdev_add;
-       struct maple_device_specify ds;
+	int retval, k, devcheck;
+	struct maple_device *mdev_add;
+	struct maple_device_specify ds;
 
-       for (k = 0; k < 5; k++) {
-               ds.port = mdev->port;
-               ds.unit = k + 1;
-               retval =
-                   bus_for_each_dev(&maple_bus_type, NULL, &ds,
-                                    detach_maple_device);
-               if (retval) {
-                       submask = submask >> 1;
-                       continue;
-               }
-               devcheck = submask & 0x01;
-               if (devcheck) {
-                       mdev_add = maple_alloc_dev(mdev->port, k + 1);
-                       if (!mdev_add)
-                               return;
-                       mdev_add->mq->command = MAPLE_COMMAND_DEVINFO;
-                       mdev_add->mq->length = 0;
-                       maple_add_packet(mdev_add->mq);
-                       scanning = 1;
-               }
-               submask = submask >> 1;
-       }
+	ds.port = mdev->port;
+	for (k = 0; k < 5; k++) {
+		ds.unit = k + 1;
+		retval =
+		    bus_for_each_dev(&maple_bus_type, NULL, &ds,
+				     check_maple_device);
+		if (retval) {
+			submask = submask >> 1;
+			continue;
+		}
+		devcheck = submask & 0x01;
+		if (devcheck) {
+			mdev_add = maple_alloc_dev(mdev->port, k + 1);
+			if (!mdev_add)
+				return;
+			atomic_set(&mdev_add->busy, 1);
+			maple_add_packet(mdev_add, 0, MAPLE_COMMAND_DEVINFO,
+				0, NULL);
+			/* mark that we are checking sub devices */
+			scanning = 1;
+		}
+		submask = submask >> 1;
+	}
 }
 
 /* mark a device as removed */
 static void maple_clean_submap(struct maple_device *mdev)
 {
-       int killbit;
+	int killbit;
 
-       killbit = (mdev->unit > 0 ? (1 << (mdev->unit - 1)) & 0x1f : 0x20);
-       killbit = ~killbit;
-       killbit &= 0xFF;
-       subdevice_map[mdev->port] = subdevice_map[mdev->port] & killbit;
+	killbit = (mdev->unit > 0 ? (1 << (mdev->unit - 1)) & 0x1f : 0x20);
+	killbit = ~killbit;
+	killbit &= 0xFF;
+	subdevice_map[mdev->port] = subdevice_map[mdev->port] & killbit;
 }
 
 /* handle empty port or hotplug removal */
-static void maple_response_none(struct maple_device *mdev,
-                               struct mapleq *mq)
+static void maple_response_none(struct maple_device *mdev)
 {
-       if (mdev->unit != 0) {
-               list_del(&mq->list);
-               maple_clean_submap(mdev);
-               printk(KERN_INFO
-                      "Maple bus device detaching at (%d, %d)\n",
-                      mdev->port, mdev->unit);
-               maple_detach_driver(mdev);
-               return;
-       }
-       if (!started) {
-               printk(KERN_INFO "No maple devices attached to port %d\n",
-                      mdev->port);
-               return;
-       }
-       maple_clean_submap(mdev);
+	maple_clean_submap(mdev);
+
+	if (likely(mdev->unit != 0)) {
+		/*
+		* Block devices play up
+		* and give the impression they have
+		* been removed even when still in place or
+		* trip the mtd layer when they have
+		* really gone - this code traps that eventuality
+		* and ensures we aren't overloaded with useless
+		* error messages
+		*/
+		if (mdev->can_unload) {
+			if (!mdev->can_unload(mdev)) {
+				atomic_set(&mdev->busy, 2);
+				wake_up(&mdev->maple_wait);
+				return;
+			}
+		}
+
+		dev_info(&mdev->dev, "detaching device at (%d, %d)\n",
+			mdev->port, mdev->unit);
+		maple_detach_driver(mdev);
+		return;
+	} else {
+		if (!started || !fullscan) {
+			if (checked[mdev->port] == false) {
+				checked[mdev->port] = true;
+				empty[mdev->port] = true;
+				dev_info(&mdev->dev, "no devices"
+					" to port %d\n", mdev->port);
+			}
+			return;
+		}
+	}
+	/* Some hardware devices generate false detach messages on unit 0 */
+	atomic_set(&mdev->busy, 0);
 }
 
 /* preprocess hotplugs or scans */
 static void maple_response_devinfo(struct maple_device *mdev,
-                                  char *recvbuf)
+				   char *recvbuf)
 {
-       char submask;
-       if ((!started) || (scanning == 2)) {
-               maple_attach_driver(mdev);
-               return;
-       }
-       if (mdev->unit == 0) {
-               submask = recvbuf[2] & 0x1F;
-               if (submask ^ subdevice_map[mdev->port]) {
-                       maple_map_subunits(mdev, submask);
-                       subdevice_map[mdev->port] = submask;
-               }
-       }
+	char submask;
+	if (!started || (scanning == 2) || !fullscan) {
+		if ((mdev->unit == 0) && (checked[mdev->port] == false)) {
+			checked[mdev->port] = true;
+			maple_attach_driver(mdev);
+		} else {
+			if (mdev->unit != 0)
+				maple_attach_driver(mdev);
+			if (mdev->unit == 0) {
+				empty[mdev->port] = false;
+				maple_attach_driver(mdev);
+			}
+		}
+	}
+	if (mdev->unit == 0) {
+		submask = recvbuf[2] & 0x1F;
+		if (submask ^ subdevice_map[mdev->port]) {
+			maple_map_subunits(mdev, submask);
+			subdevice_map[mdev->port] = submask;
+		}
+	}
+}
+
+static void maple_response_fileerr(struct maple_device *mdev, void *recvbuf)
+{
+	if (mdev->fileerr_handler) {
+		mdev->fileerr_handler(mdev, recvbuf);
+		return;
+	} else
+		dev_warn(&mdev->dev, "device at (%d, %d) reports"
+			"file error 0x%X\n", mdev->port, mdev->unit,
+			((int *)recvbuf)[1]);
+}
+
+static void maple_port_rescan(void)
+{
+	int i;
+	struct maple_device *mdev;
+
+	fullscan = 1;
+	for (i = 0; i < MAPLE_PORTS; i++) {
+		if (checked[i] == false) {
+			fullscan = 0;
+			mdev = baseunits[i];
+			maple_add_packet(mdev, 0, MAPLE_COMMAND_DEVINFO,
+				0, NULL);
+		}
+	}
 }
 
 /* maple dma end bottom half - implemented via workqueue */
 static void maple_dma_handler(struct work_struct *work)
 {
-       struct mapleq *mq, *nmq;
-       struct maple_device *dev;
-       char *recvbuf;
-       enum maple_code code;
+	struct mapleq *mq, *nmq;
+	struct maple_device *mdev;
+	char *recvbuf;
+	enum maple_code code;
 
-       if (!maple_dma_done())
-               return;
-       ctrl_outl(0, MAPLE_ENABLE);
-       if (!list_empty(&maple_sentq)) {
-               list_for_each_entry_safe(mq, nmq, &maple_sentq, list) {
-                       recvbuf = mq->recvbuf;
-                       code = recvbuf[0];
-                       dev = mq->dev;
-                       switch (code) {
-                       case MAPLE_RESPONSE_NONE:
-                               maple_response_none(dev, mq);
-                               break;
+	if (!maple_dma_done())
+		return;
+	ctrl_outl(0, MAPLE_ENABLE);
+	if (!list_empty(&maple_sentq)) {
+		list_for_each_entry_safe(mq, nmq, &maple_sentq, list) {
+			mdev = mq->dev;
+			recvbuf = mq->recvbuf->buf;
+			dma_cache_sync(&mdev->dev, recvbuf, 0x400,
+				DMA_FROM_DEVICE);
+			code = recvbuf[0];
+			kfree(mq->sendbuf);
+			list_del_init(&mq->list);
+			switch (code) {
+			case MAPLE_RESPONSE_NONE:
+				maple_response_none(mdev);
+				break;
 
-                       case MAPLE_RESPONSE_DEVINFO:
-                               maple_response_devinfo(dev, recvbuf);
-                               break;
+			case MAPLE_RESPONSE_DEVINFO:
+				maple_response_devinfo(mdev, recvbuf);
+				atomic_set(&mdev->busy, 0);
+				break;
 
-                       case MAPLE_RESPONSE_DATATRF:
-                               if (dev->callback)
-                                       dev->callback(mq);
-                               break;
+			case MAPLE_RESPONSE_DATATRF:
+				if (mdev->callback)
+					mdev->callback(mq);
+				atomic_set(&mdev->busy, 0);
+				wake_up(&mdev->maple_wait);
+				break;
 
-                       case MAPLE_RESPONSE_FILEERR:
-                       case MAPLE_RESPONSE_AGAIN:
-                       case MAPLE_RESPONSE_BADCMD:
-                       case MAPLE_RESPONSE_BADFUNC:
-                               printk(KERN_DEBUG
-                                      "Maple non-fatal error 0x%X\n",
-                                      code);
-                               break;
+			case MAPLE_RESPONSE_FILEERR:
+				maple_response_fileerr(mdev, recvbuf);
+				atomic_set(&mdev->busy, 0);
+				wake_up(&mdev->maple_wait);
+				break;
 
-                       case MAPLE_RESPONSE_ALLINFO:
-                               printk(KERN_DEBUG
-                                      "Maple - extended device information not supported\n");
-                               break;
+			case MAPLE_RESPONSE_AGAIN:
+			case MAPLE_RESPONSE_BADCMD:
+			case MAPLE_RESPONSE_BADFUNC:
+				dev_warn(&mdev->dev, "non-fatal error"
+					" 0x%X at (%d, %d)\n", code,
+					mdev->port, mdev->unit);
+				atomic_set(&mdev->busy, 0);
+				break;
 
-                       case MAPLE_RESPONSE_OK:
-                               break;
+			case MAPLE_RESPONSE_ALLINFO:
+				dev_notice(&mdev->dev, "extended"
+				" device information request for (%d, %d)"
+				" but call is not supported\n", mdev->port,
+				mdev->unit);
+				atomic_set(&mdev->busy, 0);
+				break;
 
-                       default:
-                               break;
-                       }
-               }
-               INIT_LIST_HEAD(&maple_sentq);
-               if (scanning == 1) {
-                       maple_send();
-                       scanning = 2;
-               } else
-                       scanning = 0;
+			case MAPLE_RESPONSE_OK:
+				atomic_set(&mdev->busy, 0);
+				wake_up(&mdev->maple_wait);
+				break;
 
-               if (started == 0)
-                       started = 1;
-       }
-       maplebus_dma_reset();
+			default:
+				break;
+			}
+		}
+		/* if scanning is 1 then we have subdevices to check */
+		if (scanning == 1) {
+			maple_send();
+			scanning = 2;
+		} else
+			scanning = 0;
+		/*check if we have actually tested all ports yet */
+		if (!fullscan)
+			maple_port_rescan();
+		/* mark that we have been through the first scan */
+		started = 1;
+	}
+	maple_send();
 }
 
-static irqreturn_t maplebus_dma_interrupt(int irq, void *dev_id)
+static irqreturn_t maple_dma_interrupt(int irq, void *dev_id)
 {
-       /* Load everything into the bottom half */
-       schedule_work(&maple_dma_process);
-       return IRQ_HANDLED;
+	/* Load everything into the bottom half */
+	schedule_work(&maple_dma_process);
+	return IRQ_HANDLED;
 }
 
-static irqreturn_t maplebus_vblank_interrupt(int irq, void *dev_id)
+static irqreturn_t maple_vblank_interrupt(int irq, void *dev_id)
 {
-       schedule_work(&maple_vblank_process);
-       return IRQ_HANDLED;
+	schedule_work(&maple_vblank_process);
+	return IRQ_HANDLED;
 }
-
-static struct irqaction maple_dma_irq = {
-       .name = "maple bus DMA handler",
-       .handler = maplebus_dma_interrupt,
-       .flags = IRQF_SHARED,
-};
-
-static struct irqaction maple_vblank_irq = {
-       .name = "maple bus VBLANK handler",
-       .handler = maplebus_vblank_interrupt,
-       .flags = IRQF_SHARED,
-};
 
 static int maple_set_dma_interrupt_handler(void)
 {
-       return setup_irq(HW_EVENT_MAPLE_DMA, &maple_dma_irq);
+	return request_irq(HW_EVENT_MAPLE_DMA, maple_dma_interrupt,
+		IRQF_SHARED, "maple bus DMA", &maple_unsupported_device);
 }
 
 static int maple_set_vblank_interrupt_handler(void)
 {
-       return setup_irq(HW_EVENT_VSYNC, &maple_vblank_irq);
+	return request_irq(HW_EVENT_VSYNC, maple_vblank_interrupt,
+		IRQF_SHARED, "maple bus VBLANK", &maple_unsupported_device);
 }
 
 static int maple_get_dma_buffer(void)
 {
-       maple_sendbuf =
-           (void *) __get_free_pages(GFP_KERNEL | __GFP_ZERO,
-                                     MAPLE_DMA_PAGES);
-       if (!maple_sendbuf)
-               return -ENOMEM;
-       return 0;
+	maple_sendbuf =
+	    (void *) __get_free_pages(GFP_KERNEL | __GFP_ZERO,
+				      MAPLE_DMA_PAGES);
+	if (!maple_sendbuf)
+		return -ENOMEM;
+	return 0;
 }
 
-static int match_maple_bus_driver(struct device *devptr,
-                                 struct device_driver *drvptr)
+static int maple_match_bus_driver(struct device *devptr,
+				  struct device_driver *drvptr)
 {
-       struct maple_driver *maple_drv;
-       struct maple_device *maple_dev;
+	struct maple_driver *maple_drv = to_maple_driver(drvptr);
+	struct maple_device *maple_dev = to_maple_dev(devptr);
 
-       maple_drv = container_of(drvptr, struct maple_driver, drv);
-       maple_dev = container_of(devptr, struct maple_device, dev);
-       /* Trap empty port case */
-       if (maple_dev->devinfo.function == 0xFFFFFFFF)
-               return 0;
-       else if (maple_dev->devinfo.function &
-                be32_to_cpu(maple_drv->function))
-               return 1;
-       return 0;
+	/* Trap empty port case */
+	if (maple_dev->devinfo.function == 0xFFFFFFFF)
+		return 0;
+	else if (maple_dev->devinfo.function &
+		 cpu_to_be32(maple_drv->function))
+		return 1;
+	return 0;
 }
 
-static int maple_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int maple_bus_uevent(struct device *dev,
+			    struct kobj_uevent_env *env)
 {
-       return 0;
+	return 0;
 }
 
 static void maple_bus_release(struct device *dev)
 {
 }
 
-static struct maple_driver maple_dummy_driver = {
-       .drv = {
-               .name = "maple_dummy_driver",
-               .bus =  &maple_bus_type,
-       },
+static struct maple_driver maple_unsupported_device = {
+	.drv = {
+		.name = "maple_unsupported_device",
+		.bus = &maple_bus_type,
+	},
 };
-
+/*
+ * maple_bus_type - core maple bus structure
+ */
 struct bus_type maple_bus_type = {
-       .name =         "maple",
-       .match =        match_maple_bus_driver,
-       .uevent =       maple_bus_uevent,
+	.name = "maple",
+	.match = maple_match_bus_driver,
+	.uevent = maple_bus_uevent,
 };
 EXPORT_SYMBOL_GPL(maple_bus_type);
 
 static struct device maple_bus = {
-       .bus_id = "maple",
-       .release = maple_bus_release,
+	.init_name = "maple",
+	.release = maple_bus_release,
 };
 
 static int __init maple_bus_init(void)
 {
-       int retval, i;
-       struct maple_device *mdev[MAPLE_PORTS];
-       ctrl_outl(0, MAPLE_STATE);
+	int retval, i;
+	struct maple_device *mdev[MAPLE_PORTS];
 
-       retval = device_register(&maple_bus);
-       if (retval)
-               goto cleanup;
+	ctrl_outl(0, MAPLE_ENABLE);
 
-       retval = bus_register(&maple_bus_type);
-       if (retval)
-               goto cleanup_device;
+	retval = device_register(&maple_bus);
+	if (retval)
+		goto cleanup;
 
-       retval = driver_register(&maple_dummy_driver.drv);
+	retval = bus_register(&maple_bus_type);
+	if (retval)
+		goto cleanup_device;
 
-       if (retval)
-               goto cleanup_bus;
+	retval = driver_register(&maple_unsupported_device.drv);
+	if (retval)
+		goto cleanup_bus;
 
-       /* allocate memory for maple bus dma */
-       retval = maple_get_dma_buffer();
-       if (retval) {
-               printk(KERN_INFO
-                      "Maple bus: Failed to allocate Maple DMA buffers\n");
-               goto cleanup_basic;
-       }
+	/* allocate memory for maple bus dma */
+	retval = maple_get_dma_buffer();
+	if (retval) {
+		dev_err(&maple_bus, "failed to allocate DMA buffers\n");
+		goto cleanup_basic;
+	}
 
-       /* set up DMA interrupt handler */
-       retval = maple_set_dma_interrupt_handler();
-       if (retval) {
-               printk(KERN_INFO
-                      "Maple bus: Failed to grab maple DMA IRQ\n");
-               goto cleanup_dma;
-       }
+	/* set up DMA interrupt handler */
+	retval = maple_set_dma_interrupt_handler();
+	if (retval) {
+		dev_err(&maple_bus, "bus failed to grab maple "
+			"DMA IRQ\n");
+		goto cleanup_dma;
+	}
 
-       /* set up VBLANK interrupt handler */
-       retval = maple_set_vblank_interrupt_handler();
-       if (retval) {
-               printk(KERN_INFO "Maple bus: Failed to grab VBLANK IRQ\n");
-               goto cleanup_irq;
-       }
+	/* set up VBLANK interrupt handler */
+	retval = maple_set_vblank_interrupt_handler();
+	if (retval) {
+		dev_err(&maple_bus, "bus failed to grab VBLANK IRQ\n");
+		goto cleanup_irq;
+	}
 
-       maple_queue_cache =
-           kmem_cache_create("maple_queue_cache", 0x400, 0,
-                             SLAB_HWCACHE_ALIGN, NULL);
+	maple_queue_cache = KMEM_CACHE(maple_buffer, SLAB_HWCACHE_ALIGN);
 
-       if (!maple_queue_cache)
-               goto cleanup_bothirqs;
+	if (!maple_queue_cache)
+		goto cleanup_bothirqs;
 
-       /* setup maple ports */
-       for (i = 0; i < MAPLE_PORTS; i++) {
-               mdev[i] = maple_alloc_dev(i, 0);
-               if (!mdev[i]) {
-                       while (i-- > 0)
-                               maple_free_dev(mdev[i]);
-                       goto cleanup_cache;
-               }
-               mdev[i]->registered = 0;
-               mdev[i]->mq->command = MAPLE_COMMAND_DEVINFO;
-               mdev[i]->mq->length = 0;
-               maple_attach_driver(mdev[i]);
-               maple_add_packet(mdev[i]->mq);
-               subdevice_map[i] = 0;
-       }
+	INIT_LIST_HEAD(&maple_waitq);
+	INIT_LIST_HEAD(&maple_sentq);
 
-       /* setup maplebus hardware */
-       maplebus_dma_reset();
+	/* setup maple ports */
+	for (i = 0; i < MAPLE_PORTS; i++) {
+		checked[i] = false;
+		empty[i] = false;
+		mdev[i] = maple_alloc_dev(i, 0);
+		if (!mdev[i]) {
+			while (i-- > 0)
+				maple_free_dev(mdev[i]);
+			goto cleanup_cache;
+		}
+		baseunits[i] = mdev[i];
+		atomic_set(&mdev[i]->busy, 1);
+		maple_add_packet(mdev[i], 0, MAPLE_COMMAND_DEVINFO, 0, NULL);
+		subdevice_map[i] = 0;
+	}
 
-       /* initial detection */
-       maple_send();
+	maple_pnp_time = jiffies + HZ;
+	/* prepare initial queue */
+	maple_send();
+	dev_info(&maple_bus, "bus core now registered\n");
 
-       maple_pnp_time = jiffies;
-
-       printk(KERN_INFO "Maple bus core now registered.\n");
-
-       return 0;
+	return 0;
 
 cleanup_cache:
-       kmem_cache_destroy(maple_queue_cache);
+	kmem_cache_destroy(maple_queue_cache);
 
 cleanup_bothirqs:
-       free_irq(HW_EVENT_VSYNC, 0);
+	free_irq(HW_EVENT_VSYNC, 0);
 
 cleanup_irq:
-       free_irq(HW_EVENT_MAPLE_DMA, 0);
+	free_irq(HW_EVENT_MAPLE_DMA, 0);
 
 cleanup_dma:
-       free_pages((unsigned long) maple_sendbuf, MAPLE_DMA_PAGES);
+	free_pages((unsigned long) maple_sendbuf, MAPLE_DMA_PAGES);
 
 cleanup_basic:
-       driver_unregister(&maple_dummy_driver.drv);
+	driver_unregister(&maple_unsupported_device.drv);
 
 cleanup_bus:
-       bus_unregister(&maple_bus_type);
+	bus_unregister(&maple_bus_type);
 
 cleanup_device:
-       device_unregister(&maple_bus);
+	device_unregister(&maple_bus);
 
 cleanup:
-       printk(KERN_INFO "Maple bus registration failed\n");
-       return retval;
+	printk(KERN_ERR "Maple bus registration failed\n");
+	return retval;
 }
-subsys_initcall(maple_bus_init);
+/* Push init to later to ensure hardware gets detected */
+fs_initcall(maple_bus_init);

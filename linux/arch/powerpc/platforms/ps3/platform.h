@@ -64,8 +64,6 @@ int ps3_set_rtc_time(struct rtc_time *time);
 
 void __init ps3_os_area_save_params(void);
 void __init ps3_os_area_init(void);
-u64 ps3_os_area_get_rtc_diff(void);
-void ps3_os_area_set_rtc_diff(u64 rtc_diff);
 
 /* spu */
 
@@ -89,13 +87,11 @@ enum ps3_dev_type {
 	PS3_DEV_TYPE_STOR_ROM = TYPE_ROM,	/* 5 */
 	PS3_DEV_TYPE_SB_GPIO = 6,
 	PS3_DEV_TYPE_STOR_FLASH = TYPE_RBC,	/* 14 */
-	PS3_DEV_TYPE_STOR_DUMMY = 32,
-	PS3_DEV_TYPE_NOACCESS = 255,
 };
 
 int ps3_repository_read_bus_str(unsigned int bus_index, const char *bus_str,
 	u64 *value);
-int ps3_repository_read_bus_id(unsigned int bus_index, unsigned int *bus_id);
+int ps3_repository_read_bus_id(unsigned int bus_index, u64 *bus_id);
 int ps3_repository_read_bus_type(unsigned int bus_index,
 	enum ps3_bus_type *bus_type);
 int ps3_repository_read_bus_num_dev(unsigned int bus_index,
@@ -119,7 +115,7 @@ enum ps3_reg_type {
 int ps3_repository_read_dev_str(unsigned int bus_index,
 	unsigned int dev_index, const char *dev_str, u64 *value);
 int ps3_repository_read_dev_id(unsigned int bus_index, unsigned int dev_index,
-	unsigned int *dev_id);
+	u64 *dev_id);
 int ps3_repository_read_dev_type(unsigned int bus_index,
 	unsigned int dev_index, enum ps3_dev_type *dev_type);
 int ps3_repository_read_dev_intr(unsigned int bus_index,
@@ -138,21 +134,17 @@ int ps3_repository_read_dev_reg(unsigned int bus_index,
 /* repository bus enumerators */
 
 struct ps3_repository_device {
-	enum ps3_bus_type bus_type;
 	unsigned int bus_index;
-	unsigned int bus_id;
-	enum ps3_dev_type dev_type;
 	unsigned int dev_index;
-	unsigned int dev_id;
+	enum ps3_bus_type bus_type;
+	enum ps3_dev_type dev_type;
+	u64 bus_id;
+	u64 dev_id;
 };
 
-static inline struct ps3_repository_device *ps3_repository_bump_device(
-	struct ps3_repository_device *repo)
-{
-	repo->dev_index++;
-	return repo;
-}
 int ps3_repository_find_device(struct ps3_repository_device *repo);
+int ps3_repository_find_device_by_id(struct ps3_repository_device *repo,
+				     u64 bus_id, u64 dev_id);
 int ps3_repository_find_devices(enum ps3_bus_type bus_type,
 	int (*callback)(const struct ps3_repository_device *repo));
 int ps3_repository_find_bus(enum ps3_bus_type bus_type, unsigned int from,
@@ -186,10 +178,10 @@ int ps3_repository_read_stor_dev_region(unsigned int bus_index,
 	unsigned int dev_index, unsigned int region_index,
 	unsigned int *region_id, u64 *region_start, u64 *region_size);
 
-/* repository pu and memory info */
+/* repository logical pu and memory info */
 
-int ps3_repository_read_num_pu(unsigned int *num_pu);
-int ps3_repository_read_ppe_id(unsigned int *pu_index, unsigned int *ppe_id);
+int ps3_repository_read_num_pu(u64 *num_pu);
+int ps3_repository_read_pu_id(unsigned int pu_index, u64 *pu_id);
 int ps3_repository_read_rm_base(unsigned int ppe_id, u64 *rm_base);
 int ps3_repository_read_rm_size(unsigned int ppe_id, u64 *rm_size);
 int ps3_repository_read_region_total(u64 *region_total);
@@ -200,8 +192,14 @@ int ps3_repository_read_mm_info(u64 *rm_base, u64 *rm_size,
 
 int ps3_repository_read_num_be(unsigned int *num_be);
 int ps3_repository_read_be_node_id(unsigned int be_index, u64 *node_id);
+int ps3_repository_read_be_id(u64 node_id, u64 *be_id);
 int ps3_repository_read_tb_freq(u64 node_id, u64 *tb_freq);
 int ps3_repository_read_be_tb_freq(unsigned int be_index, u64 *tb_freq);
+
+/* repository performance monitor info */
+
+int ps3_repository_read_lpm_privileges(unsigned int be_index, u64 *lpar,
+	u64 *rights);
 
 /* repository 'Other OS' area */
 
@@ -233,15 +231,5 @@ int ps3_repository_read_spu_resource_id(unsigned int res_index,
 
 int ps3_repository_read_vuart_av_port(unsigned int *port);
 int ps3_repository_read_vuart_sysmgr_port(unsigned int *port);
-
-/* Page table entries */
-#define IOPTE_PP_W		0x8000000000000000ul /* protection: write */
-#define IOPTE_PP_R		0x4000000000000000ul /* protection: read */
-#define IOPTE_M			0x2000000000000000ul /* coherency required */
-#define IOPTE_SO_R		0x1000000000000000ul /* ordering: writes */
-#define IOPTE_SO_RW             0x1800000000000000ul /* ordering: r & w */
-#define IOPTE_RPN_Mask		0x07fffffffffff000ul /* RPN */
-#define IOPTE_H			0x0000000000000800ul /* cache hint */
-#define IOPTE_IOID_Mask		0x00000000000007fful /* ioid */
 
 #endif

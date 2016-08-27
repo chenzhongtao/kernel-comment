@@ -52,6 +52,7 @@ static int capifs_remount(struct super_block *s, int *flags, char *data)
 	gid_t gid = 0;
 	umode_t mode = 0600;
 	char *this_char;
+	char *new_opt = kstrdup(data, GFP_KERNEL);
 
 	this_char = NULL;
 	while ((this_char = strsep(&data, ",")) != NULL) {
@@ -68,22 +69,31 @@ static int capifs_remount(struct super_block *s, int *flags, char *data)
 		} else if (sscanf(this_char, "mode=%o%c", &n, &dummy) == 1)
 			mode = n & ~S_IFMT;
 		else {
+			kfree(new_opt);
 			printk("capifs: called with bogus options\n");
 			return -EINVAL;
 		}
 	}
+
+	mutex_lock(&s->s_root->d_inode->i_mutex);
+
+	replace_mount_options(s, new_opt);
 	config.setuid  = setuid;
 	config.setgid  = setgid;
 	config.uid     = uid;
 	config.gid     = gid;
 	config.mode    = mode;
+
+	mutex_unlock(&s->s_root->d_inode->i_mutex);
+
 	return 0;
 }
 
-static struct super_operations capifs_sops =
+static const struct super_operations capifs_sops =
 {
 	.statfs		= simple_statfs,
 	.remount_fs	= capifs_remount,
+	.show_options	= generic_show_options,
 };
 
 
@@ -103,8 +113,6 @@ capifs_fill_super(struct super_block *s, void *data, int silent)
 		goto fail;
 	inode->i_ino = 1;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	inode->i_blocks = 0;
-	inode->i_uid = inode->i_gid = 0;
 	inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO | S_IWUSR;
 	inode->i_op = &simple_dir_inode_operations;
 	inode->i_fop = &simple_dir_operations;
@@ -148,13 +156,16 @@ void capifs_new_ncci(unsigned int number, dev_t device)
 	if (!inode)
 		return;
 	inode->i_ino = number+2;
-	inode->i_uid = config.setuid ? config.uid : current->fsuid;
-	inode->i_gid = config.setgid ? config.gid : current->fsgid;
+
+	dentry = get_node(number);
+
+	/* config contents is protected by root's i_mutex */
+	inode->i_uid = config.setuid ? config.uid : current_fsuid();
+	inode->i_gid = config.setgid ? config.gid : current_fsgid();
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	init_special_inode(inode, S_IFCHR|config.mode, device);
 	//inode->i_op = &capifs_file_inode_operations;
 
-	dentry = get_node(number);
 	if (!IS_ERR(dentry) && !dentry->d_inode)
 		d_instantiate(dentry, inode);
 	mutex_unlock(&capifs_root->d_inode->i_mutex);
@@ -182,9 +193,9 @@ static int __init capifs_init(void)
 	char *p;
 	int err;
 
-	if ((p = strchr(revision, ':')) != 0 && p[1]) {
+	if ((p = strchr(revision, ':')) != NULL && p[1]) {
 		strlcpy(rev, p + 2, sizeof(rev));
-		if ((p = strchr(rev, '$')) != 0 && p > rev)
+		if ((p = strchr(rev, '$')) != NULL && p > rev)
 		   *(p-1) = 0;
 	} else
 		strcpy(rev, "1.0");

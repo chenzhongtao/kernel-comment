@@ -28,7 +28,6 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/pci.h>
 #include <linux/capability.h>
 #include <linux/delay.h>
@@ -488,7 +487,8 @@ static void snd_emu10k1_write_op(struct snd_emu10k1_fx8010_code *icode,
 				 u32 op, u32 r, u32 a, u32 x, u32 y)
 {
 	u_int32_t *code;
-	snd_assert(*ptr < 512, return);
+	if (snd_BUG_ON(*ptr >= 512))
+		return;
 	code = (u_int32_t __force *)icode->code + (*ptr) * 2;
 	set_bit(*ptr, icode->code_valid);
 	code[0] = ((x & 0x3ff) << 10) | (y & 0x3ff);
@@ -504,7 +504,8 @@ static void snd_emu10k1_audigy_write_op(struct snd_emu10k1_fx8010_code *icode,
 					u32 op, u32 r, u32 a, u32 x, u32 y)
 {
 	u_int32_t *code;
-	snd_assert(*ptr < 1024, return);
+	if (snd_BUG_ON(*ptr >= 1024))
+		return;
 	code = (u_int32_t __force *)icode->code + (*ptr) * 2;
 	set_bit(*ptr, icode->code_valid);
 	code[0] = ((x & 0x7ff) << 12) | (y & 0x7ff);
@@ -666,7 +667,7 @@ static unsigned int *copy_tlv(const unsigned int __user *_tlv)
 		return NULL;
 	if (data[1] >= MAX_TLV_SIZE)
 		return NULL;
-	tlv = kmalloc(data[1] * 4 + sizeof(data), GFP_KERNEL);
+	tlv = kmalloc(data[1] + sizeof(data), GFP_KERNEL);
 	if (!tlv)
 		return NULL;
 	memcpy(tlv, data, sizeof(data));
@@ -1262,7 +1263,7 @@ static int __devinit _snd_emu10k1_audigy_init_efx(struct snd_emu10k1 *emu)
 A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 
 	/* emu1212 DSP 0 and DSP 1 Capture */
-	if (emu->card_capabilities->emu1010) {
+	if (emu->card_capabilities->emu_model) {
 		if (emu->card_capabilities->ca0108_chip) {
 			/* Note:JCD:No longer bit shift lower 16bits to upper 16bits of 32bit value. */
 			A_OP(icode, &ptr, iMACINT0, A_GPR(tmp), A_C_00000000, A3_EMU32IN(0x0), A_C_00000001);
@@ -1516,9 +1517,9 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 
 	/* digital outputs */
 	/* A_PUT_STEREO_OUTPUT(A_EXTOUT_FRONT_L, A_EXTOUT_FRONT_R, playback + SND_EMU10K1_PLAYBACK_CHANNELS); */
-	if (emu->card_capabilities->emu1010) {
+	if (emu->card_capabilities->emu_model) {
 		/* EMU1010 Outputs from PCM Front, Rear, Center, LFE, Side */
-		snd_printk("EMU outputs on\n");
+		snd_printk(KERN_INFO "EMU outputs on\n");
 		for (z = 0; z < 8; z++) {
 			if (emu->card_capabilities->ca0108_chip) {
 				A_OP(icode, &ptr, iACC3, A3_EMU32OUT(z), A_GPR(playback + SND_EMU10K1_PLAYBACK_CHANNELS + z), A_C_00000000, A_C_00000000);
@@ -1564,9 +1565,9 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 	A_PUT_OUTPUT(A_EXTOUT_ADC_CAP_R, capture+1);
 #endif
 
-	if (emu->card_capabilities->emu1010) {
+	if (emu->card_capabilities->emu_model) {
 		if (emu->card_capabilities->ca0108_chip) {
-			snd_printk("EMU2 inputs on\n");
+			snd_printk(KERN_INFO "EMU2 inputs on\n");
 			for (z = 0; z < 0x10; z++) {
 				snd_emu10k1_audigy_dsp_convert_32_to_2x16( icode, &ptr, tmp, 
 									bit_shifter16,
@@ -1574,10 +1575,13 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 									A_FXBUS2(z*2) );
 			}
 		} else {
-			snd_printk("EMU inputs on\n");
+			snd_printk(KERN_INFO "EMU inputs on\n");
 			/* Capture 16 (originally 8) channels of S32_LE sound */
 
-			/* printk("emufx.c: gpr=0x%x, tmp=0x%x\n",gpr, tmp); */
+			/*
+			printk(KERN_DEBUG "emufx.c: gpr=0x%x, tmp=0x%x\n",
+			       gpr, tmp);
+			*/
 			/* For the EMU1010: How to get 32bit values from the DSP. High 16bits into L, low 16bits into R. */
 			/* A_P16VIN(0) is delayed by one sample,
 			 * so all other A_P16VIN channels will need to also be delayed
@@ -2489,24 +2493,17 @@ static int snd_emu10k1_fx8010_ioctl(struct snd_hwdep * hw, struct file *file, un
 	case SNDRV_EMU10K1_IOCTL_CODE_POKE:
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
-		icode = kmalloc(sizeof(*icode), GFP_KERNEL);
-		if (icode == NULL)
-			return -ENOMEM;
-		if (copy_from_user(icode, argp, sizeof(*icode))) {
-			kfree(icode);
-			return -EFAULT;
-		}
+
+		icode = memdup_user(argp, sizeof(*icode));
+		if (IS_ERR(icode))
+			return PTR_ERR(icode);
 		res = snd_emu10k1_icode_poke(emu, icode);
 		kfree(icode);
 		return res;
 	case SNDRV_EMU10K1_IOCTL_CODE_PEEK:
-		icode = kmalloc(sizeof(*icode), GFP_KERNEL);
-		if (icode == NULL)
-			return -ENOMEM;
-		if (copy_from_user(icode, argp, sizeof(*icode))) {
-			kfree(icode);
-			return -EFAULT;
-		}
+		icode = memdup_user(argp, sizeof(*icode));
+		if (IS_ERR(icode))
+			return PTR_ERR(icode);
 		res = snd_emu10k1_icode_peek(emu, icode);
 		if (res == 0 && copy_to_user(argp, icode, sizeof(*icode))) {
 			kfree(icode);
@@ -2515,24 +2512,16 @@ static int snd_emu10k1_fx8010_ioctl(struct snd_hwdep * hw, struct file *file, un
 		kfree(icode);
 		return res;
 	case SNDRV_EMU10K1_IOCTL_PCM_POKE:
-		ipcm = kmalloc(sizeof(*ipcm), GFP_KERNEL);
-		if (ipcm == NULL)
-			return -ENOMEM;
-		if (copy_from_user(ipcm, argp, sizeof(*ipcm))) {
-			kfree(ipcm);
-			return -EFAULT;
-		}
+		ipcm = memdup_user(argp, sizeof(*ipcm));
+		if (IS_ERR(ipcm))
+			return PTR_ERR(ipcm);
 		res = snd_emu10k1_ipcm_poke(emu, ipcm);
 		kfree(ipcm);
 		return res;
 	case SNDRV_EMU10K1_IOCTL_PCM_PEEK:
-		ipcm = kzalloc(sizeof(*ipcm), GFP_KERNEL);
-		if (ipcm == NULL)
-			return -ENOMEM;
-		if (copy_from_user(ipcm, argp, sizeof(*ipcm))) {
-			kfree(ipcm);
-			return -EFAULT;
-		}
+		ipcm = memdup_user(argp, sizeof(*ipcm));
+		if (IS_ERR(ipcm))
+			return PTR_ERR(ipcm);
 		res = snd_emu10k1_ipcm_peek(emu, ipcm);
 		if (res == 0 && copy_to_user(argp, ipcm, sizeof(*ipcm))) {
 			kfree(ipcm);

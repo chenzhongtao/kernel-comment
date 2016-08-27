@@ -6,7 +6,7 @@
  *                         Dwaine Garden <dwainegarden@rogers.com>
  *
  *
- * Report problems to v4l MailingList : http://www.redhat.com/mailman/listinfo/video4linux-list
+ * Report problems to v4l MailingList: linux-media@vger.kernel.org
  *
  * This module is part of usbvision driver project.
  * Updates to driver completed by Dwaine P. Garden
@@ -34,15 +34,12 @@
 #include <linux/list.h>
 #include <linux/usb.h>
 #include <linux/i2c.h>
-#include <media/v4l2-common.h>
+#include <linux/mutex.h>
+#include <media/v4l2-device.h>
 #include <media/tuner.h>
 #include <linux/videodev2.h>
 
 #define USBVISION_DEBUG		/* Turn on debug messages */
-
-#ifndef VID_HARDWARE_USBVISION
-	#define VID_HARDWARE_USBVISION 34   /* USBVision Video Grabber */
-#endif
 
 #define USBVISION_PWR_REG		0x00
 	#define USBVISION_SSPND_EN		(1 << 1)
@@ -360,25 +357,23 @@ extern struct usbvision_device_data_st usbvision_device_data[];
 extern struct usb_device_id usbvision_table[];
 
 struct usb_usbvision {
+	struct v4l2_device v4l2_dev;
 	struct video_device *vdev;         				/* Video Device */
 	struct video_device *rdev;               			/* Radio Device */
 	struct video_device *vbi; 					/* VBI Device   */
 
 	/* i2c Declaration Section*/
 	struct i2c_adapter i2c_adap;
-	struct i2c_client i2c_client;
 
 	struct urb *ctrlUrb;
 	unsigned char ctrlUrbBuffer[8];
 	int ctrlUrbBusy;
 	struct usb_ctrlrequest ctrlUrbSetup;
 	wait_queue_head_t ctrlUrb_wq;					// Processes waiting
-	struct semaphore ctrlUrbLock;
 
 	/* configuration part */
 	int have_tuner;
 	int tuner_type;
-	int tuner_addr;
 	int bridgeType;							// NT1003, NT1004, NT1005
 	int radio;
 	int video_inputs;						// # of inputs
@@ -396,7 +391,7 @@ struct usb_usbvision {
 	unsigned char iface;						/* Video interface number */
 	unsigned char ifaceAlt;			/* Alt settings */
 	unsigned char Vin_Reg2_Preset;
-	struct semaphore lock;
+	struct mutex               lock;
 	struct timer_list powerOffTimer;
 	struct work_struct powerOffWork;
 	int power;							/* is the device powered on? */
@@ -468,6 +463,8 @@ struct usb_usbvision {
 	int ComprBlockTypes[4];
 };
 
+#define call_all(usbvision, o, f, args...) \
+	v4l2_device_call_all(&usbvision->v4l2_dev, 0, o, f, ##args)
 
 /* --------------------------------------------------------------- */
 /* defined in usbvision-i2c.c                                      */
@@ -479,7 +476,6 @@ struct usb_usbvision {
 /* ----------------------------------------------------------------------- */
 int usbvision_i2c_register(struct usb_usbvision *usbvision);
 int usbvision_i2c_unregister(struct usb_usbvision *usbvision);
-void call_i2c_clients(struct usb_usbvision *usbvision, unsigned int cmd,void *arg);
 
 /* defined in usbvision-core.c                                      */
 int usbvision_read_reg(struct usb_usbvision *usbvision, unsigned char reg);

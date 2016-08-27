@@ -16,18 +16,26 @@ do { \
 	debug_event(lcs_dbf_##name,level,(void*)(addr),len); \
 } while (0)
 
+/* Allow to sort out low debug levels early to avoid wasted sprints */
+static inline int lcs_dbf_passes(debug_info_t *dbf_grp, int level)
+{
+	return (level <= dbf_grp->level);
+}
+
 #define LCS_DBF_TEXT_(level,name,text...) \
-do {                                       \
-	sprintf(debug_buffer, text);  \
-		debug_text_event(lcs_dbf_##name,level, debug_buffer);\
-} while (0)
+	do { \
+		if (lcs_dbf_passes(lcs_dbf_##name, level)) { \
+			sprintf(debug_buffer, text); \
+			debug_text_event(lcs_dbf_##name, level, debug_buffer); \
+		} \
+	} while (0)
 
 /**
  *	sysfs related stuff
  */
 #define CARD_FROM_DEV(cdev) \
-	(struct lcs_card *) \
-	((struct ccwgroup_device *)cdev->dev.driver_data)->dev.driver_data;
+	(struct lcs_card *) dev_get_drvdata( \
+		&((struct ccwgroup_device *)dev_get_drvdata(&cdev->dev))->dev);
 /**
  * CCW commands used in this driver
  */

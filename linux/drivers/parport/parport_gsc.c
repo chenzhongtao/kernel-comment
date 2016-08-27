@@ -352,8 +352,8 @@ static int __devinit parport_init_chip(struct parisc_device *dev)
 	unsigned long port;
 
 	if (!dev->irq) {
-		printk(KERN_WARNING "IRQ not found for parallel device at 0x%lx\n",
-			dev->hpa.start);
+		printk(KERN_WARNING "IRQ not found for parallel device at 0x%llx\n",
+			(unsigned long long)dev->hpa.start);
 		return -ENODEV;
 	}
 
@@ -365,25 +365,25 @@ static int __devinit parport_init_chip(struct parisc_device *dev)
 	if (boot_cpu_data.cpu_type > pcxt && !pdc_add_valid(port+4)) {
 
 		/* Initialize bidirectional-mode (0x10) & data-tranfer-mode #1 (0x20) */
-		printk("%s: initialize bidirectional-mode.\n", __FUNCTION__);
+		printk("%s: initialize bidirectional-mode.\n", __func__);
 		parport_writeb ( (0x10 + 0x20), port + 4);
 
 	} else {
-		printk("%s: enhanced parport-modes not supported.\n", __FUNCTION__);
+		printk("%s: enhanced parport-modes not supported.\n", __func__);
 	}
 	
 	p = parport_gsc_probe_port(port, 0, dev->irq,
 			/* PARPORT_IRQ_NONE */ PARPORT_DMA_NONE, NULL);
 	if (p)
 		parport_count++;
-	dev->dev.driver_data = p;
+	dev_set_drvdata(&dev->dev, p);
 
 	return 0;
 }
 
 static int __devexit parport_remove_chip(struct parisc_device *dev)
 {
-	struct parport *p = dev->dev.driver_data;
+	struct parport *p = dev_get_drvdata(&dev->dev);
 	if (p) {
 		struct parport_gsc_private *priv = p->private_data;
 		struct parport_operations *ops = p->ops;

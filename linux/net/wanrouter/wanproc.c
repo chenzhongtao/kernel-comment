@@ -80,6 +80,7 @@ static struct proc_dir_entry *proc_router;
  *	Iterator
  */
 static void *r_start(struct seq_file *m, loff_t *pos)
+	__acquires(kernel_lock)
 {
 	struct wan_device *wandev;
 	loff_t l = *pos;
@@ -101,6 +102,7 @@ static void *r_next(struct seq_file *m, void *v, loff_t *pos)
 }
 
 static void r_stop(struct seq_file *m, void *v)
+	__releases(kernel_lock)
 {
 	unlock_kernel();
 }
@@ -278,7 +280,7 @@ static const struct file_operations wandev_fops = {
 	.read	 = seq_read,
 	.llseek	 = seq_lseek,
 	.release = single_release,
-	.ioctl	 = wanrouter_ioctl,
+	.unlocked_ioctl  = wanrouter_ioctl,
 };
 
 /*
@@ -292,14 +294,12 @@ int __init wanrouter_proc_init(void)
 	if (!proc_router)
 		goto fail;
 
-	p = create_proc_entry("config", S_IRUGO, proc_router);
+	p = proc_create("config", S_IRUGO, proc_router, &config_fops);
 	if (!p)
 		goto fail_config;
-	p->proc_fops = &config_fops;
-	p = create_proc_entry("status", S_IRUGO, proc_router);
+	p = proc_create("status", S_IRUGO, proc_router, &status_fops);
 	if (!p)
 		goto fail_stat;
-	p->proc_fops = &status_fops;
 	return 0;
 fail_stat:
 	remove_proc_entry("config", proc_router);
@@ -329,10 +329,10 @@ int wanrouter_proc_add(struct wan_device* wandev)
 	if (wandev->magic != ROUTER_MAGIC)
 		return -EINVAL;
 
-	wandev->dent = create_proc_entry(wandev->name, S_IRUGO, proc_router);
+	wandev->dent = proc_create(wandev->name, S_IRUGO,
+				   proc_router, &wandev_fops);
 	if (!wandev->dent)
 		return -ENOMEM;
-	wandev->dent->proc_fops	= &wandev_fops;
 	wandev->dent->data	= wandev;
 	return 0;
 }

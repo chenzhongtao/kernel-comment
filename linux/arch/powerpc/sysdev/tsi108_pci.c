@@ -63,7 +63,7 @@ tsi108_direct_write_config(struct pci_bus *bus, unsigned int devfunc,
 			   int offset, int len, u32 val)
 {
 	volatile unsigned char *cfg_addr;
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 
 	if (ppc_md.pci_exclude_device)
 		if (ppc_md.pci_exclude_device(hose, bus->number, devfunc))
@@ -149,7 +149,7 @@ tsi108_direct_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 			  int len, u32 * val)
 {
 	volatile unsigned char *cfg_addr;
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 	u32 temp;
 
 	if (ppc_md.pci_exclude_device)
@@ -207,7 +207,7 @@ int __init tsi108_setup_pci(struct device_node *dev, u32 cfg_phys, int primary)
 	/* PCI Config mapping */
 	tsi108_pci_cfg_base = (u32)ioremap(cfg_phys, TSI108_PCI_CFG_SIZE);
 	tsi108_pci_cfg_phys = cfg_phys;
-	DBG("TSI_PCI: %s tsi108_pci_cfg_base=0x%x\n", __FUNCTION__,
+	DBG("TSI_PCI: %s tsi108_pci_cfg_base=0x%x\n", __func__,
 	    tsi108_pci_cfg_base);
 
 	/* Fetch host bridge registers address */
@@ -395,7 +395,7 @@ static int pci_irq_host_xlate(struct irq_host *h, struct device_node *ct,
 static int pci_irq_host_map(struct irq_host *h, unsigned int virq,
 			  irq_hw_number_t hw)
 {	unsigned int irq;
-	DBG("%s(%d, 0x%lx)\n", __FUNCTION__, virq, hw);
+	DBG("%s(%d, 0x%lx)\n", __func__, virq, hw);
 	if ((virq >= 1) && (virq <= 4)){
 		irq = virq + IRQ_PCI_INTAD_BASE - 1;
 		get_irq_desc(irq)->status |= IRQ_LEVEL;
@@ -426,11 +426,10 @@ void __init tsi108_pci_int_init(struct device_node *node)
 {
 	DBG("Tsi108_pci_int_init: initializing PCI interrupts\n");
 
-	pci_irq_host = irq_alloc_host(of_node_get(node), IRQ_HOST_MAP_LEGACY,
+	pci_irq_host = irq_alloc_host(node, IRQ_HOST_MAP_LEGACY,
 				      0, &pci_irq_host_ops, 0);
 	if (pci_irq_host == NULL) {
 		printk(KERN_ERR "pci_irq_host: failed to allocate irq host !\n");
-		of_node_put(node);
 		return;
 	}
 

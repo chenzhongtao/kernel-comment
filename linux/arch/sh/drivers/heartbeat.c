@@ -40,14 +40,19 @@ static inline void heartbeat_toggle_bit(struct heartbeat_data *hd,
 	if (inverted)
 		new = ~new;
 
+	new &= hd->mask;
+
 	switch (hd->regsize) {
 	case 32:
+		new |= ioread32(hd->base) & ~hd->mask;
 		iowrite32(new, hd->base);
 		break;
 	case 16:
+		new |= ioread16(hd->base) & ~hd->mask;
 		iowrite16(new, hd->base);
 		break;
 	default:
+		new |= ioread8(hd->base) & ~hd->mask;
 		iowrite8(new, hd->base);
 		break;
 	}
@@ -72,6 +77,7 @@ static int heartbeat_drv_probe(struct platform_device *pdev)
 {
 	struct resource *res;
 	struct heartbeat_data *hd;
+	int i;
 
 	if (unlikely(pdev->num_resources != 1)) {
 		dev_err(&pdev->dev, "invalid number of resources\n");
@@ -93,7 +99,7 @@ static int heartbeat_drv_probe(struct platform_device *pdev)
 	}
 
 	hd->base = ioremap_nocache(res->start, res->end - res->start + 1);
-	if (!unlikely(hd->base)) {
+	if (unlikely(!hd->base)) {
 		dev_err(&pdev->dev, "ioremap failed\n");
 
 		if (!pdev->dev.platform_data)
@@ -106,6 +112,10 @@ static int heartbeat_drv_probe(struct platform_device *pdev)
 		hd->bit_pos = default_bit_pos;
 		hd->nr_bits = ARRAY_SIZE(default_bit_pos);
 	}
+
+	hd->mask = 0;
+	for (i = 0; i < hd->nr_bits; i++)
+		hd->mask |= (1 << hd->bit_pos[i]);
 
 	if (!hd->regsize)
 		hd->regsize = 8;	/* default access size */
@@ -154,4 +164,4 @@ module_exit(heartbeat_exit);
 
 MODULE_VERSION(DRV_VERSION);
 MODULE_AUTHOR("Paul Mundt");
-MODULE_LICENSE("GPLv2");
+MODULE_LICENSE("GPL v2");

@@ -641,6 +641,12 @@ static int __devinit pd6729_pci_probe(struct pci_dev *dev,
 	if ((ret = pci_enable_device(dev)))
 		goto err_out_free_mem;
 
+	if (!pci_resource_start(dev, 0)) {
+		printk(KERN_INFO "pd6729: refusing to load the driver "
+				 "as the io_base is 0.\n");
+		goto err_out_free_mem;
+	}
+
 	printk(KERN_INFO "pd6729: Cirrus PD6729 PCI to PCMCIA Bridge "
 		"at 0x%llx on irq %d\n",
 		(unsigned long long)pci_resource_start(dev, 0), dev->irq);
@@ -758,7 +764,7 @@ static void __devexit pd6729_pci_remove(struct pci_dev *dev)
 #ifdef CONFIG_PM
 static int pd6729_socket_suspend(struct pci_dev *dev, pm_message_t state)
 {
-	return pcmcia_socket_dev_suspend(&dev->dev, state);
+	return pcmcia_socket_dev_suspend(&dev->dev);
 }
 
 static int pd6729_socket_resume(struct pci_dev *dev)
@@ -778,7 +784,7 @@ static struct pci_device_id pd6729_pci_ids[] = {
 };
 MODULE_DEVICE_TABLE(pci, pd6729_pci_ids);
 
-static struct pci_driver pd6729_pci_drv = {
+static struct pci_driver pd6729_pci_driver = {
 	.name		= "pd6729",
 	.id_table	= pd6729_pci_ids,
 	.probe		= pd6729_pci_probe,
@@ -791,12 +797,12 @@ static struct pci_driver pd6729_pci_drv = {
 
 static int pd6729_module_init(void)
 {
-	return pci_register_driver(&pd6729_pci_drv);
+	return pci_register_driver(&pd6729_pci_driver);
 }
 
 static void pd6729_module_exit(void)
 {
-	pci_unregister_driver(&pd6729_pci_drv);
+	pci_unregister_driver(&pd6729_pci_driver);
 }
 
 module_init(pd6729_module_init);

@@ -40,7 +40,7 @@ static struct net_device * ifname_to_netdev(struct net *net, struct genl_info *i
 
 	ifname = nla_data(info->attrs[IRDA_NL_ATTR_IFNAME]);
 
-	IRDA_DEBUG(5, "%s(): Looking for %s\n", __FUNCTION__, ifname);
+	IRDA_DEBUG(5, "%s(): Looking for %s\n", __func__, ifname);
 
 	return dev_get_by_name(net, ifname);
 }
@@ -56,7 +56,7 @@ static int irda_nl_set_mode(struct sk_buff *skb, struct genl_info *info)
 
 	mode = nla_get_u32(info->attrs[IRDA_NL_ATTR_MODE]);
 
-	IRDA_DEBUG(5, "%s(): Switching to mode: %d\n", __FUNCTION__, mode);
+	IRDA_DEBUG(5, "%s(): Switching to mode: %d\n", __func__, mode);
 
 	dev = ifname_to_netdev(&init_net, info);
 	if (!dev)
@@ -87,7 +87,7 @@ static int irda_nl_get_mode(struct sk_buff *skb, struct genl_info *info)
 	if (!dev)
 		return -ENODEV;
 
-	msg = nlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
+	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!msg) {
 		dev_put(dev);
 		return -ENOMEM;
@@ -101,8 +101,8 @@ static int irda_nl_get_mode(struct sk_buff *skb, struct genl_info *info)
 
 	hdr = genlmsg_put(msg, info->snd_pid, info->snd_seq,
 			  &irda_nl_family, 0,  IRDA_NL_CMD_GET_MODE);
-	if (IS_ERR(hdr)) {
-		ret = PTR_ERR(hdr);
+	if (hdr == NULL) {
+		ret = -EMSGSIZE;
 		goto err_out;
 	}
 
@@ -115,7 +115,7 @@ static int irda_nl_get_mode(struct sk_buff *skb, struct genl_info *info)
 
 	genlmsg_end(msg, hdr);
 
-	return genlmsg_unicast(msg, info->snd_pid);
+	return genlmsg_reply(msg, info);
 
  err_out:
 	nlmsg_free(msg);
@@ -148,21 +148,8 @@ static struct genl_ops irda_nl_ops[] = {
 
 int irda_nl_register(void)
 {
-	int err, i;
-
-	err = genl_register_family(&irda_nl_family);
-	if (err)
-		return err;
-
-	for (i = 0; i < ARRAY_SIZE(irda_nl_ops); i++) {
-		err = genl_register_ops(&irda_nl_family, &irda_nl_ops[i]);
-		if (err)
-			goto err_out;
-	}
-	return 0;
- err_out:
-	genl_unregister_family(&irda_nl_family);
-	return err;
+	return genl_register_family_with_ops(&irda_nl_family,
+		irda_nl_ops, ARRAY_SIZE(irda_nl_ops));
 }
 
 void irda_nl_unregister(void)

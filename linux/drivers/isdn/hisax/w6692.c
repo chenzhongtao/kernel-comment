@@ -38,8 +38,6 @@ static const PCI_ENTRY id_list[] =
 #define W6692_DYNALINK 1
 #define W6692_USR      2
 
-extern const char *CardType[];
-
 static const char *w6692_revision = "$Revision: 1.18.2.4 $";
 
 #define DBUSY_TIMER_VALUE 80
@@ -107,8 +105,6 @@ W6692_bh(struct work_struct *work)
 		container_of(work, struct IsdnCardState, tqueue);
 	struct PStack *stptr;
 
-	if (!cs)
-		return;
 	if (test_and_clear_bit(D_CLEARBUSY, &cs->event)) {
 		if (cs->debug)
 			debugl1(cs, "D-Channel Busy cleared");

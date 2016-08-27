@@ -1,7 +1,7 @@
 /*
  *  LEDs driver for the Cobalt Raq series.
  *
- *  Copyright (C) 2007  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
+ *  Copyright (C) 2007  Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@
  *
  *  You should have received a copy of the GNU General Public License
  *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #include <linux/init.h>
 #include <linux/io.h>
@@ -33,7 +33,7 @@ static u8 led_value;
 static DEFINE_SPINLOCK(led_value_lock);
 
 static void raq_web_led_set(struct led_classdev *led_cdev,
-                            enum led_brightness brightness)
+			    enum led_brightness brightness)
 {
 	unsigned long flags;
 
@@ -49,12 +49,12 @@ static void raq_web_led_set(struct led_classdev *led_cdev,
 }
 
 static struct led_classdev raq_web_led = {
-	.name		= "raq-web",
+	.name		= "raq::web",
 	.brightness_set	= raq_web_led_set,
 };
 
 static void raq_power_off_led_set(struct led_classdev *led_cdev,
-                                  enum led_brightness brightness)
+				  enum led_brightness brightness)
 {
 	unsigned long flags;
 
@@ -70,7 +70,7 @@ static void raq_power_off_led_set(struct led_classdev *led_cdev,
 }
 
 static struct led_classdev raq_power_off_led = {
-	.name			= "raq-power-off",
+	.name			= "raq::power-off",
 	.brightness_set		= raq_power_off_led_set,
 	.default_trigger	= "power-off",
 };

@@ -331,8 +331,8 @@ module_param(fs_keystream, int, 0);
 #define FS_DEBUG_QSIZE   0x00001000
 
 
-#define func_enter() fs_dprintk (FS_DEBUG_FLOW, "fs: enter %s\n", __FUNCTION__)
-#define func_exit()  fs_dprintk (FS_DEBUG_FLOW, "fs: exit  %s\n", __FUNCTION__)
+#define func_enter() fs_dprintk(FS_DEBUG_FLOW, "fs: enter %s\n", __func__)
+#define func_exit()  fs_dprintk(FS_DEBUG_FLOW, "fs: exit  %s\n", __func__)
 
 
 static struct fs_dev *fs_boards = NULL;
@@ -978,6 +978,7 @@ static int fs_open(struct atm_vcc *atm_vcc)
 		/* Docs are vague about this atm_hdr field. By the way, the FS
 		 * chip makes odd errors if lower bits are set.... -- REW */
 		tc->atm_hdr =  (vpi << 20) | (vci << 4); 
+		tmc0 = 0;
 		{
 			int pcr = atm_pcr_goal (txtp);
 
@@ -1243,7 +1244,7 @@ static int fs_getsockopt(struct atm_vcc *vcc,int level,int optname,
 
 
 static int fs_setsockopt(struct atm_vcc *vcc,int level,int optname,
-			 void __user *optval,int optlen)
+			 void __user *optval,unsigned int optlen)
 {
 	func_enter ();
 	func_exit ();
@@ -1689,17 +1690,17 @@ static int __devinit fs_init (struct fs_dev *dev)
 		  | (0 * SARMODE0_SHADEN) /* We don't use shadow registers. */
 		  | (1 * SARMODE0_INTMODE_READCLEAR)
 		  | (1 * SARMODE0_CWRE)
-		  | IS_FS50(dev)?SARMODE0_PRPWT_FS50_5: 
-		                 SARMODE0_PRPWT_FS155_3
+		  | (IS_FS50(dev) ? SARMODE0_PRPWT_FS50_5:
+			  SARMODE0_PRPWT_FS155_3)
 		  | (1 * SARMODE0_CALSUP_1)
-		  | IS_FS50 (dev)?(0
+		  | (IS_FS50(dev) ? (0
 				   | SARMODE0_RXVCS_32
 				   | SARMODE0_ABRVCS_32 
 				   | SARMODE0_TXVCS_32):
 		                  (0
 				   | SARMODE0_RXVCS_1k
 				   | SARMODE0_ABRVCS_1k 
-				   | SARMODE0_TXVCS_1k));
+				   | SARMODE0_TXVCS_1k)));
 
 	/* 10ms * 100 is 1 second. That should be enough, as AN3:9 says it takes
 	   1ms. */

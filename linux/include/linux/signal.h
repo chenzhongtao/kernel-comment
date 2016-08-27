@@ -233,14 +233,19 @@ static inline int valid_signal(unsigned long sig)
 }
 
 extern int next_signal(struct sigpending *pending, sigset_t *mask);
+extern int do_send_sig_info(int sig, struct siginfo *info,
+				struct task_struct *p, bool group);
 extern int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p);
 extern int __group_send_sig_info(int, struct siginfo *, struct task_struct *);
+extern long do_rt_tgsigqueueinfo(pid_t tgid, pid_t pid, int sig,
+				 siginfo_t *info);
 extern long do_sigpending(void __user *, unsigned long);
 extern int sigprocmask(int, sigset_t *, sigset_t *);
 extern int show_unhandled_signals;
 
 struct pt_regs;
 extern int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka, struct pt_regs *regs, void *cookie);
+extern void exit_signals(struct task_struct *tsk);
 
 extern struct kmem_cache *sighand_cachep;
 
@@ -361,8 +366,6 @@ int unhandled_signal(struct task_struct *tsk, int sig);
 #define sig_kernel_stop(sig) \
 	(((sig) < SIGRTMIN) && siginmask(sig, SIG_KERNEL_STOP_MASK))
 
-#define sig_needs_tasklist(sig)	((sig) == SIGCONT)
-
 #define sig_user_defined(t, signr) \
 	(((t)->sighand->action[(signr)-1].sa.sa_handler != SIG_DFL) &&	\
 	 ((t)->sighand->action[(signr)-1].sa.sa_handler != SIG_IGN))
@@ -370,6 +373,8 @@ int unhandled_signal(struct task_struct *tsk, int sig);
 #define sig_fatal(t, signr) \
 	(!siginmask(signr, SIG_KERNEL_IGNORE_MASK|SIG_KERNEL_STOP_MASK) && \
 	 (t)->sighand->action[(signr)-1].sa.sa_handler == SIG_DFL)
+
+void signals_init(void);
 
 #endif /* __KERNEL__ */
 

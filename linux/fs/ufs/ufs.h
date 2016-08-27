@@ -23,7 +23,7 @@ struct ufs_sb_info {
 struct ufs_inode_info {
 	union {
 		__fs32	i_data[15];
-		__u8	i_symlink[4*15];
+		__u8	i_symlink[2 * 4 * 15];
 		__fs64	u2_i_data[15];
 	} i_u1;
 	__u32	i_flags;
@@ -66,7 +66,7 @@ struct ufs_inode_info {
 #ifdef CONFIG_UFS_DEBUG
 #	define UFSD(f, a...)	{					\
 		printk ("UFSD (%s, %d): %s:",				\
-			__FILE__, __LINE__, __FUNCTION__);		\
+			__FILE__, __LINE__, __func__);		\
 		printk (f, ## a);					\
 	}
 #else
@@ -98,7 +98,6 @@ extern void ufs_set_link(struct inode *dir, struct ufs_dir_entry *de,
 /* file.c */
 extern const struct inode_operations ufs_file_inode_operations;
 extern const struct file_operations ufs_file_operations;
-
 extern const struct address_space_operations ufs_aops;
 
 /* ialloc.c */
@@ -106,8 +105,7 @@ extern void ufs_free_inode (struct inode *inode);
 extern struct inode * ufs_new_inode (struct inode *, int);
 
 /* inode.c */
-extern void ufs_read_inode (struct inode *);
-extern void ufs_put_inode (struct inode *);
+extern struct inode *ufs_iget(struct super_block *, unsigned long);
 extern int ufs_write_inode (struct inode *, int);
 extern int ufs_sync_inode (struct inode *);
 extern void ufs_delete_inode (struct inode *);

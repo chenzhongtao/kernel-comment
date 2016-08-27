@@ -1,12 +1,15 @@
-/*P:900 This is the Switcher: code which sits at 0xFFC00000 to do the low-level
- * Guest<->Host switch.  It is as simple as it can be made, but it's naturally
- * very specific to x86.
+/*P:900
+ * This is the Switcher: code which sits at 0xFFC00000 (or 0xFFE00000) astride
+ * both the Host and Guest to do the low-level Guest<->Host switch.  It is as
+ * simple as it can be made, but it's naturally very specific to x86.
  *
  * You have now completed Preparation.  If this has whet your appetite; if you
  * are feeling invigorated and refreshed then the next, more challenging stage
- * can be found in "make Guest". :*/
+ * can be found in "make Guest".
+ :*/
 
-/*M:012 Lguest is meant to be simple: my rule of thumb is that 1% more LOC must
+/*M:012
+ * Lguest is meant to be simple: my rule of thumb is that 1% more LOC must
  * gain at least 1% more performance.  Since neither LOC nor performance can be
  * measured beforehand, it generally means implementing a feature then deciding
  * if it's worth it.  And once it's implemented, who can say no?
@@ -31,11 +34,14 @@
  * Host (which is actually really easy).
  *
  * Two questions remain.  Would the performance gain outweigh the complexity?
- * And who would write the verse documenting it? :*/
+ * And who would write the verse documenting it?
+:*/
 
-/*M:011 Lguest64 handles NMI.  This gave me NMI envy (until I looked at their
+/*M:011
+ * Lguest64 handles NMI.  This gave me NMI envy (until I looked at their
  * code).  It's worth doing though, since it would let us use oprofile in the
- * Host when a Guest is running. :*/
+ * Host when a Guest is running.
+:*/
 
 /*S:100
  * Welcome to the Switcher itself!
@@ -189,7 +195,7 @@ ENTRY(switch_to_guest)
 	// Interrupts are turned back on: we are Guest.
 	iret
 
-// We treat two paths to switch back to the Host
+// We tread two paths to switch back to the Host
 // Yet both must save Guest state and restore Host
 // So we put the routine in a macro.
 #define SWITCH_TO_HOST							\

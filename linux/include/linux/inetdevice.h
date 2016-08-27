@@ -17,8 +17,6 @@ struct ipv4_devconf
 	DECLARE_BITMAP(state, __NET_IPV4_CONF_MAX - 1);
 };
 
-extern struct ipv4_devconf ipv4_devconf;
-
 struct in_device
 {
 	struct net_device	*dev;
@@ -27,6 +25,7 @@ struct in_device
 	struct in_ifaddr	*ifa_list;	/* IP ifaddr chain		*/
 	rwlock_t		mc_list_lock;
 	struct ip_mc_list	*mc_list;	/* IP multicast filter chain    */
+	int			mc_count;	          /* Number of installed mcasts	*/
 	spinlock_t		mc_tomb_lock;
 	struct ip_mc_list	*mc_tomb;
 	unsigned long		mr_v1_seen;
@@ -44,7 +43,8 @@ struct in_device
 };
 
 #define IPV4_DEVCONF(cnf, attr) ((cnf).data[NET_IPV4_CONF_ ## attr - 1])
-#define IPV4_DEVCONF_ALL(attr) IPV4_DEVCONF(ipv4_devconf, attr)
+#define IPV4_DEVCONF_ALL(net, attr) \
+	IPV4_DEVCONF((*(net)->ipv4.devconf_all), attr)
 
 static inline int ipv4_devconf_get(struct in_device *in_dev, int index)
 {
@@ -71,17 +71,18 @@ static inline void ipv4_devconf_setall(struct in_device *in_dev)
 	ipv4_devconf_set((in_dev), NET_IPV4_CONF_ ## attr, (val))
 
 #define IN_DEV_ANDCONF(in_dev, attr) \
-	(IPV4_DEVCONF_ALL(attr) && IN_DEV_CONF_GET((in_dev), attr))
+	(IPV4_DEVCONF_ALL(dev_net(in_dev->dev), attr) && \
+	 IN_DEV_CONF_GET((in_dev), attr))
 #define IN_DEV_ORCONF(in_dev, attr) \
-	(IPV4_DEVCONF_ALL(attr) || IN_DEV_CONF_GET((in_dev), attr))
+	(IPV4_DEVCONF_ALL(dev_net(in_dev->dev), attr) || \
+	 IN_DEV_CONF_GET((in_dev), attr))
 #define IN_DEV_MAXCONF(in_dev, attr) \
-	(max(IPV4_DEVCONF_ALL(attr), IN_DEV_CONF_GET((in_dev), attr)))
+	(max(IPV4_DEVCONF_ALL(dev_net(in_dev->dev), attr), \
+	     IN_DEV_CONF_GET((in_dev), attr)))
 
 #define IN_DEV_FORWARD(in_dev)		IN_DEV_CONF_GET((in_dev), FORWARDING)
-#define IN_DEV_MFORWARD(in_dev)		(IPV4_DEVCONF_ALL(MC_FORWARDING) && \
-					 IPV4_DEVCONF((in_dev)->cnf, \
-						      MC_FORWARDING))
-#define IN_DEV_RPFILTER(in_dev)		IN_DEV_ANDCONF((in_dev), RP_FILTER)
+#define IN_DEV_MFORWARD(in_dev)		IN_DEV_ANDCONF((in_dev), MC_FORWARDING)
+#define IN_DEV_RPFILTER(in_dev)		IN_DEV_MAXCONF((in_dev), RP_FILTER)
 #define IN_DEV_SOURCE_ROUTE(in_dev)	IN_DEV_ANDCONF((in_dev), \
 						       ACCEPT_SOURCE_ROUTE)
 #define IN_DEV_BOOTP_RELAY(in_dev)	IN_DEV_ANDCONF((in_dev), BOOTP_RELAY)
@@ -107,6 +108,7 @@ static inline void ipv4_devconf_setall(struct in_device *in_dev)
 #define IN_DEV_ARPFILTER(in_dev)	IN_DEV_ORCONF((in_dev), ARPFILTER)
 #define IN_DEV_ARP_ANNOUNCE(in_dev)	IN_DEV_MAXCONF((in_dev), ARP_ANNOUNCE)
 #define IN_DEV_ARP_IGNORE(in_dev)	IN_DEV_MAXCONF((in_dev), ARP_IGNORE)
+#define IN_DEV_ARP_NOTIFY(in_dev)	IN_DEV_MAXCONF((in_dev), ARP_NOTIFY)
 
 struct in_ifaddr
 {
@@ -117,7 +119,6 @@ struct in_ifaddr
 	__be32			ifa_address;
 	__be32			ifa_mask;
 	__be32			ifa_broadcast;
-	__be32			ifa_anycast;
 	unsigned char		ifa_scope;
 	unsigned char		ifa_flags;
 	unsigned char		ifa_prefixlen;
@@ -127,15 +128,14 @@ struct in_ifaddr
 extern int register_inetaddr_notifier(struct notifier_block *nb);
 extern int unregister_inetaddr_notifier(struct notifier_block *nb);
 
-extern struct net_device 	*ip_dev_find(__be32 addr);
+extern struct net_device *ip_dev_find(struct net *net, __be32 addr);
 extern int		inet_addr_onlink(struct in_device *in_dev, __be32 a, __be32 b);
-extern int		devinet_ioctl(unsigned int cmd, void __user *);
+extern int		devinet_ioctl(struct net *net, unsigned int cmd, void __user *);
 extern void		devinet_init(void);
-extern struct in_device	*inetdev_by_index(int);
+extern struct in_device	*inetdev_by_index(struct net *, int);
 extern __be32		inet_select_addr(const struct net_device *dev, __be32 dst, int scope);
-extern __be32		inet_confirm_addr(const struct net_device *dev, __be32 dst, __be32 local, int scope);
+extern __be32		inet_confirm_addr(struct in_device *in_dev, __be32 dst, __be32 local, int scope);
 extern struct in_ifaddr *inet_ifa_byprefix(struct in_device *in_dev, __be32 prefix, __be32 mask);
-extern void		inet_forward_change(void);
 
 static __inline__ int inet_ifa_match(__be32 addr, struct in_ifaddr *ifa)
 {

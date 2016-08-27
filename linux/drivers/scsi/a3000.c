@@ -25,6 +25,8 @@
 
 static struct Scsi_Host *a3000_host = NULL;
 
+static int a3000_release(struct Scsi_Host *instance);
+
 static irqreturn_t a3000_intr (int irq, void *dummy)
 {
 	unsigned long flags;
@@ -54,8 +56,7 @@ static int dma_setup(struct scsi_cmnd *cmd, int dir_in)
      * end of a physical memory chunk, then allocate a bounce
      * buffer
      */
-    if (addr & A3000_XFER_MASK ||
-	(!dir_in && mm_end_of_chunk (addr, cmd->SCp.this_residual)))
+    if (addr & A3000_XFER_MASK)
     {
 	HDATA(a3000_host)->dma_bounce_len = (cmd->SCp.this_residual + 511)
 	    & ~0x1ff;
@@ -70,12 +71,8 @@ static int dma_setup(struct scsi_cmnd *cmd, int dir_in)
 
 	if (!dir_in) {
 	    /* copy to bounce buffer for a write */
-	    if (cmd->use_sg) {
-		memcpy (HDATA(a3000_host)->dma_bounce_buffer,
-			cmd->SCp.ptr, cmd->SCp.this_residual);
-	    } else
-		memcpy (HDATA(a3000_host)->dma_bounce_buffer,
-			cmd->request_buffer, cmd->request_bufflen);
+	    memcpy (HDATA(a3000_host)->dma_bounce_buffer,
+		cmd->SCp.ptr, cmd->SCp.this_residual);
 	}
 
 	addr = virt_to_bus(HDATA(a3000_host)->dma_bounce_buffer);
@@ -146,7 +143,7 @@ static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
 
     /* copy from a bounce buffer, if necessary */
     if (status && HDATA(instance)->dma_bounce_buffer) {
-	if (SCpnt && SCpnt->use_sg) {
+	if (SCpnt) {
 	    if (HDATA(instance)->dma_dir && SCpnt)
 		memcpy (SCpnt->SCp.ptr,
 			HDATA(instance)->dma_bounce_buffer,
@@ -155,11 +152,6 @@ static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
 	    HDATA(instance)->dma_bounce_buffer = NULL;
 	    HDATA(instance)->dma_bounce_len = 0;
 	} else {
-	    if (HDATA(instance)->dma_dir && SCpnt)
-		memcpy (SCpnt->request_buffer,
-			HDATA(instance)->dma_bounce_buffer,
-			SCpnt->request_bufflen);
-
 	    kfree (HDATA(instance)->dma_bounce_buffer);
 	    HDATA(instance)->dma_bounce_buffer = NULL;
 	    HDATA(instance)->dma_bounce_len = 0;
@@ -167,7 +159,7 @@ static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
     }
 }
 
-int __init a3000_detect(struct scsi_host_template *tpnt)
+static int __init a3000_detect(struct scsi_host_template *tpnt)
 {
     wd33c93_regs regs;
 
@@ -188,6 +180,9 @@ int __init a3000_detect(struct scsi_host_template *tpnt)
     DMA(a3000_host)->DAWR = DAWR_A3000;
     regs.SASR = &(DMA(a3000_host)->SASR);
     regs.SCMD = &(DMA(a3000_host)->SCMD);
+    HDATA(a3000_host)->no_sync = 0xff;
+    HDATA(a3000_host)->fast = 0;
+    HDATA(a3000_host)->dma_mode = CTRL_DMA;
     wd33c93_init(a3000_host, regs, dma_setup, dma_stop, WD33C93_FS_12_15);
     if (request_irq(IRQ_AMIGA_PORTS, a3000_intr, IRQF_SHARED, "A3000 SCSI",
 		    a3000_intr))
@@ -239,7 +234,7 @@ static struct scsi_host_template driver_template = {
 
 #include "scsi_module.c"
 
-int a3000_release(struct Scsi_Host *instance)
+static int a3000_release(struct Scsi_Host *instance)
 {
     wd33c93_release();
     DMA(instance)->CNTR = 0;

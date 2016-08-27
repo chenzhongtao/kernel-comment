@@ -10,9 +10,8 @@
 #ifndef NFSD_EXPORT_H
 #define NFSD_EXPORT_H
 
-#include <asm/types.h>
-#ifdef __KERNEL__
 # include <linux/types.h>
+#ifdef __KERNEL__
 # include <linux/in.h>
 #endif
 
@@ -84,9 +83,8 @@ struct svc_export {
 	struct cache_head	h;
 	struct auth_domain *	ex_client;
 	int			ex_flags;
-	struct vfsmount *	ex_mnt;
-	struct dentry *		ex_dentry;
-	char *			ex_path;
+	struct path		ex_path;
+	char			*ex_pathname;
 	uid_t			ex_anon_uid;
 	gid_t			ex_anon_gid;
 	int			ex_fsid;
@@ -107,8 +105,7 @@ struct svc_expkey {
 	int			ek_fsidtype;
 	u32			ek_fsid[6];
 
-	struct vfsmount *	ek_mnt;
-	struct dentry *		ek_dentry;
+	struct path		ek_path;
 };
 
 #define EX_SECURE(exp)		(!((exp)->ex_flags & NFSEXP_INSECURE_PORT))
@@ -122,17 +119,15 @@ __be32 check_nfsd_access(struct svc_export *exp, struct svc_rqst *rqstp);
 /*
  * Function declarations
  */
-void			nfsd_export_init(void);
+int			nfsd_export_init(void);
 void			nfsd_export_shutdown(void);
 void			nfsd_export_flush(void);
 void			exp_readlock(void);
 void			exp_readunlock(void);
 struct svc_export *	rqst_exp_get_by_name(struct svc_rqst *,
-					     struct vfsmount *,
-					     struct dentry *);
+					     struct path *);
 struct svc_export *	rqst_exp_parent(struct svc_rqst *,
-					struct vfsmount *mnt,
-					struct dentry *dentry);
+					struct path *);
 int			exp_rootfh(struct auth_domain *, 
 					char *path, struct knfsd_fh *, int maxsize);
 __be32			exp_pseudoroot(struct svc_rqst *, struct svc_fh *);

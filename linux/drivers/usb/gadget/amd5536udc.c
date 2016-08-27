@@ -44,12 +44,10 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
-#include <linux/version.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/timer.h>
@@ -328,6 +326,7 @@ udc_ep_enable(struct usb_ep *usbep, const struct usb_endpoint_descriptor *desc)
 	u32			tmp;
 	unsigned long		iflags;
 	u8 udc_csr_epix;
+	unsigned		maxpacket;
 
 	if (!usbep
 			|| usbep->name == ep0_string
@@ -354,9 +353,10 @@ udc_ep_enable(struct usb_ep *usbep, const struct usb_endpoint_descriptor *desc)
 	writel(tmp, &dev->ep[ep->num].regs->ctl);
 
 	/* set max packet size */
+	maxpacket = le16_to_cpu(desc->wMaxPacketSize);
 	tmp = readl(&dev->ep[ep->num].regs->bufout_maxpkt);
-	tmp = AMD_ADDBITS(tmp, desc->wMaxPacketSize, UDC_EP_MAX_PKT_SIZE);
-	ep->ep.maxpacket = desc->wMaxPacketSize;
+	tmp = AMD_ADDBITS(tmp, maxpacket, UDC_EP_MAX_PKT_SIZE);
+	ep->ep.maxpacket = maxpacket;
 	writel(tmp, &dev->ep[ep->num].regs->bufout_maxpkt);
 
 	/* IN ep */
@@ -370,8 +370,8 @@ udc_ep_enable(struct usb_ep *usbep, const struct usb_endpoint_descriptor *desc)
 		/* double buffering: fifo size = 2 x max packet size */
 		tmp = AMD_ADDBITS(
 				tmp,
-				desc->wMaxPacketSize * UDC_EPIN_BUFF_SIZE_MULT
-						/ UDC_DWORD_BYTES,
+				maxpacket * UDC_EPIN_BUFF_SIZE_MULT
+					  / UDC_DWORD_BYTES,
 				UDC_EPIN_BUFF_SIZE);
 		writel(tmp, &dev->ep[ep->num].regs->bufin_framenum);
 
@@ -390,7 +390,7 @@ udc_ep_enable(struct usb_ep *usbep, const struct usb_endpoint_descriptor *desc)
 
 		/* set max packet size UDC CSR	*/
 		tmp = readl(&dev->csr->ne[ep->num - UDC_CSR_EP_OUT_IX_OFS]);
-		tmp = AMD_ADDBITS(tmp, desc->wMaxPacketSize,
+		tmp = AMD_ADDBITS(tmp, maxpacket,
 					UDC_CSR_NE_MAX_PKT);
 		writel(tmp, &dev->csr->ne[ep->num - UDC_CSR_EP_OUT_IX_OFS]);
 
@@ -407,7 +407,7 @@ udc_ep_enable(struct usb_ep *usbep, const struct usb_endpoint_descriptor *desc)
 	/* set ep values */
 	tmp = readl(&dev->csr->ne[udc_csr_epix]);
 	/* max packet */
-	tmp = AMD_ADDBITS(tmp, desc->wMaxPacketSize, UDC_CSR_NE_MAX_PKT);
+	tmp = AMD_ADDBITS(tmp, maxpacket, UDC_CSR_NE_MAX_PKT);
 	/* ep number */
 	tmp = AMD_ADDBITS(tmp, desc->bEndpointAddress, UDC_CSR_NE_NUM);
 	/* ep direction */
@@ -550,7 +550,7 @@ udc_alloc_request(struct usb_ep *usbep, gfp_t gfp)
 		dma_desc->status = AMD_ADDBITS(dma_desc->status,
 						UDC_DMA_STP_STS_BS_HOST_BUSY,
 						UDC_DMA_STP_STS_BS);
-		dma_desc->bufptr = __constant_cpu_to_le32(DMA_DONT_USE);
+		dma_desc->bufptr = cpu_to_le32(DMA_DONT_USE);
 		req->td_data = dma_desc;
 		req->td_data_last = NULL;
 		req->chain_len = 1;
@@ -1213,7 +1213,12 @@ udc_queue(struct usb_ep *usbep, struct usb_request *usbreq, gfp_t gfp)
 				tmp &= AMD_UNMASK_BIT(ep->num);
 				writel(tmp, &dev->regs->ep_irqmsk);
 			}
-		}
+		} else if (ep->in) {
+				/* enable ep irq */
+				tmp = readl(&dev->regs->ep_irqmsk);
+				tmp &= AMD_UNMASK_BIT(ep->num);
+				writel(tmp, &dev->regs->ep_irqmsk);
+			}
 
 	} else if (ep->dma) {
 
@@ -1244,7 +1249,7 @@ udc_queue(struct usb_ep *usbep, struct usb_request *usbreq, gfp_t gfp)
 		/* stop OUT naking */
 		if (!ep->in) {
 			if (!use_dma && udc_rxfifo_pending) {
-				DBG(dev, "udc_queue(): pending bytes in"
+				DBG(dev, "udc_queue(): pending bytes in "
 					"rxfifo after nyet\n");
 				/*
 				 * read pending bytes afer nyet:
@@ -2005,18 +2010,17 @@ __acquires(dev->lock)
 {
 	int tmp;
 
-	/* empty queues and init hardware */
-	udc_basic_init(dev);
-	for (tmp = 0; tmp < UDC_EP_NUM; tmp++) {
-		empty_req_queue(&dev->ep[tmp]);
-	}
-
 	if (dev->gadget.speed != USB_SPEED_UNKNOWN) {
 		spin_unlock(&dev->lock);
 		driver->disconnect(&dev->gadget);
 		spin_lock(&dev->lock);
 	}
-	/* init */
+
+	/* empty queues and init hardware */
+	udc_basic_init(dev);
+	for (tmp = 0; tmp < UDC_EP_NUM; tmp++)
+		empty_req_queue(&dev->ep[tmp]);
+
 	udc_setup_endpoints(dev);
 }
 
@@ -2038,6 +2042,7 @@ int usb_gadget_unregister_driver(struct usb_gadget_driver *driver)
 	spin_unlock_irqrestore(&dev->lock, flags);
 
 	driver->unbind(&dev->gadget);
+	dev->gadget.dev.driver = NULL;
 	dev->driver = NULL;
 
 	/* set SD */
@@ -2377,40 +2382,34 @@ static irqreturn_t udc_data_in_isr(struct udc *dev, int ep_ix)
 		if (!ep->cancel_transfer && !list_empty(&ep->queue)) {
 			req = list_entry(ep->queue.next,
 					struct udc_request, queue);
-			if (req) {
-				/*
-				 * length bytes transfered
-				 * check dma done of last desc. in PPBDU mode
-				 */
-				if (use_dma_ppb_du) {
-					td = udc_get_last_dma_desc(req);
-					if (td) {
-						dma_done =
-							AMD_GETBITS(td->status,
-							UDC_DMA_IN_STS_BS);
-						/* don't care DMA done */
-						req->req.actual =
-							req->req.length;
-					}
-				} else {
-					/* assume all bytes transferred */
+			/*
+			 * length bytes transfered
+			 * check dma done of last desc. in PPBDU mode
+			 */
+			if (use_dma_ppb_du) {
+				td = udc_get_last_dma_desc(req);
+				if (td) {
+					dma_done =
+						AMD_GETBITS(td->status,
+						UDC_DMA_IN_STS_BS);
+					/* don't care DMA done */
 					req->req.actual = req->req.length;
 				}
+			} else {
+				/* assume all bytes transferred */
+				req->req.actual = req->req.length;
+			}
 
-				if (req->req.actual == req->req.length) {
-					/* complete req */
-					complete_req(ep, req, 0);
-					req->dma_going = 0;
-					/* further request available ? */
-					if (list_empty(&ep->queue)) {
-						/* disable interrupt */
-						tmp = readl(
-							&dev->regs->ep_irqmsk);
-						tmp |= AMD_BIT(ep->num);
-						writel(tmp,
-							&dev->regs->ep_irqmsk);
-					}
-
+			if (req->req.actual == req->req.length) {
+				/* complete req */
+				complete_req(ep, req, 0);
+				req->dma_going = 0;
+				/* further request available ? */
+				if (list_empty(&ep->queue)) {
+					/* disable interrupt */
+					tmp = readl(&dev->regs->ep_irqmsk);
+					tmp |= AMD_BIT(ep->num);
+					writel(tmp, &dev->regs->ep_irqmsk);
 				}
 			}
 		}
@@ -2477,6 +2476,13 @@ static irqreturn_t udc_data_in_isr(struct udc *dev, int ep_ix)
 				}
 			}
 
+		} else if (!use_dma && ep->in) {
+			/* disable interrupt */
+			tmp = readl(
+				&dev->regs->ep_irqmsk);
+			tmp |= AMD_BIT(ep->num);
+			writel(tmp,
+				&dev->regs->ep_irqmsk);
 		}
 	}
 	/* clear status bits */
@@ -2831,7 +2837,7 @@ __acquires(dev->lock)
 		/* make usb request for gadget driver */
 		memset(&setup_data, 0 , sizeof(union udc_setup_data));
 		setup_data.request.bRequest = USB_REQ_SET_CONFIGURATION;
-		setup_data.request.wValue = dev->cur_config;
+		setup_data.request.wValue = cpu_to_le16(dev->cur_config);
 
 		/* programm the NE registers */
 		for (i = 0; i < UDC_EP_NUM; i++) {
@@ -2880,8 +2886,8 @@ __acquires(dev->lock)
 		memset(&setup_data, 0 , sizeof(union udc_setup_data));
 		setup_data.request.bRequest = USB_REQ_SET_INTERFACE;
 		setup_data.request.bRequestType = USB_RECIP_INTERFACE;
-		setup_data.request.wValue = dev->cur_alt;
-		setup_data.request.wIndex = dev->cur_intf;
+		setup_data.request.wValue = cpu_to_le16(dev->cur_alt);
+		setup_data.request.wIndex = cpu_to_le16(dev->cur_intf);
 
 		DBG(dev, "SET_INTERFACE interrupt: alt=%d intf=%d\n",
 				dev->cur_alt, dev->cur_intf);
@@ -3247,6 +3253,8 @@ static int udc_pci_probe(
 
 	/* pci setup */
 	if (pci_enable_device(pdev) < 0) {
+		kfree(dev);
+		dev = NULL;
 		retval = -ENODEV;
 		goto finished;
 	}
@@ -3258,6 +3266,8 @@ static int udc_pci_probe(
 
 	if (!request_mem_region(resource, len, name)) {
 		dev_dbg(&pdev->dev, "pci device used already\n");
+		kfree(dev);
+		dev = NULL;
 		retval = -EBUSY;
 		goto finished;
 	}
@@ -3266,18 +3276,35 @@ static int udc_pci_probe(
 	dev->virt_addr = ioremap_nocache(resource, len);
 	if (dev->virt_addr == NULL) {
 		dev_dbg(&pdev->dev, "start address cannot be mapped\n");
+		kfree(dev);
+		dev = NULL;
 		retval = -EFAULT;
 		goto finished;
 	}
 
 	if (!pdev->irq) {
 		dev_err(&dev->pdev->dev, "irq not set\n");
+		kfree(dev);
+		dev = NULL;
 		retval = -ENODEV;
 		goto finished;
 	}
 
+	spin_lock_init(&dev->lock);
+	/* udc csr registers base */
+	dev->csr = dev->virt_addr + UDC_CSR_ADDR;
+	/* dev registers base */
+	dev->regs = dev->virt_addr + UDC_DEVCFG_ADDR;
+	/* ep registers base */
+	dev->ep_regs = dev->virt_addr + UDC_EPREGS_ADDR;
+	/* fifo's base */
+	dev->rxfifo = (u32 __iomem *)(dev->virt_addr + UDC_RXFIFO_ADDR);
+	dev->txfifo = (u32 __iomem *)(dev->virt_addr + UDC_TXFIFO_ADDR);
+
 	if (request_irq(pdev->irq, udc_irq, IRQF_SHARED, name, dev) != 0) {
 		dev_dbg(&dev->pdev->dev, "request_irq(%d) fail\n", pdev->irq);
+		kfree(dev);
+		dev = NULL;
 		retval = -EBUSY;
 		goto finished;
 	}
@@ -3326,24 +3353,13 @@ static int udc_probe(struct udc *dev)
 	udc_pollstall_timer.data = 0;
 
 	/* device struct setup */
-	spin_lock_init(&dev->lock);
 	dev->gadget.ops = &udc_ops;
 
-	strcpy(dev->gadget.dev.bus_id, "gadget");
+	dev_set_name(&dev->gadget.dev, "gadget");
 	dev->gadget.dev.release = gadget_release;
 	dev->gadget.name = name;
 	dev->gadget.name = name;
 	dev->gadget.is_dualspeed = 1;
-
-	/* udc csr registers base */
-	dev->csr = dev->virt_addr + UDC_CSR_ADDR;
-	/* dev registers base */
-	dev->regs = dev->virt_addr + UDC_DEVCFG_ADDR;
-	/* ep registers base */
-	dev->ep_regs = dev->virt_addr + UDC_EPREGS_ADDR;
-	/* fifo's base */
-	dev->rxfifo = (u32 __iomem *)(dev->virt_addr + UDC_RXFIFO_ADDR);
-	dev->txfifo = (u32 __iomem *)(dev->virt_addr + UDC_TXFIFO_ADDR);
 
 	/* init registers, interrupts, ... */
 	startup_registers(dev);

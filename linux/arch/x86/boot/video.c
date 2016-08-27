@@ -2,6 +2,7 @@
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
+ *   Copyright 2009 Intel Corporation; author H. Peter Anvin
  *
  *   This file is part of the Linux kernel, and is made available under
  *   the terms of the GNU General Public License version 2.
@@ -9,8 +10,6 @@
  * ----------------------------------------------------------------------- */
 
 /*
- * arch/i386/boot/video.c
- *
  * Select video mode
  */
 
@@ -18,50 +17,31 @@
 #include "video.h"
 #include "vesa.h"
 
-/*
- * Mode list variables
- */
-static struct card_info cards[];    /* List of cards to probe for */
-
-/*
- * Common variables
- */
-int adapter;			/* 0=CGA/MDA/HGC, 1=EGA, 2=VGA+ */
-u16 video_segment;
-int force_x, force_y;	/* Don't query the BIOS for cols/rows */
-
-int do_restore = 0;	/* Screen contents changed during mode flip */
-int graphic_mode;	/* Graphic mode with linear frame buffer */
-
 static void store_cursor_position(void)
 {
-	u16 curpos;
-	u16 ax, bx;
+	struct biosregs ireg, oreg;
 
-	ax = 0x0300;
-	bx = 0;
-	asm(INT10
-	    : "=d" (curpos), "+a" (ax), "+b" (bx)
-	    : : "ecx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ah = 0x03;
+	intcall(0x10, &ireg, &oreg);
 
-	boot_params.screen_info.orig_x = curpos;
-	boot_params.screen_info.orig_y = curpos >> 8;
+	boot_params.screen_info.orig_x = oreg.dl;
+	boot_params.screen_info.orig_y = oreg.dh;
 }
 
 static void store_video_mode(void)
 {
-	u16 ax, page;
+	struct biosregs ireg, oreg;
 
 	/* N.B.: the saving of the video page here is a bit silly,
 	   since we pretty much assume page 0 everywhere. */
-	ax = 0x0f00;
-	asm(INT10
-	    : "+a" (ax), "=b" (page)
-	    : : "ecx", "edx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ah = 0x0f;
+	intcall(0x10, &ireg, &oreg);
 
 	/* Not all BIOSes are clean with respect to the top bit */
-	boot_params.screen_info.orig_video_mode = ax & 0x7f;
-	boot_params.screen_info.orig_video_page = page >> 8;
+	boot_params.screen_info.orig_video_mode = oreg.al & 0x7f;
+	boot_params.screen_info.orig_video_page = oreg.bh;
 }
 
 /*
@@ -105,147 +85,6 @@ static void store_mode_params(void)
 
 	boot_params.screen_info.orig_video_cols  = x;
 	boot_params.screen_info.orig_video_lines = y;
-}
-
-/* Probe the video drivers and have them generate their mode lists. */
-static void probe_cards(int unsafe)
-{
-	struct card_info *card;
-	static u8 probed[2];
-
-	if (probed[unsafe])
-		return;
-
-	probed[unsafe] = 1;
-
-	for (card = video_cards; card < video_cards_end; card++) {
-		if (card->unsafe == unsafe) {
-			if (card->probe)
-				card->nmodes = card->probe();
-			else
-				card->nmodes = 0;
-		}
-	}
-}
-
-/* Test if a mode is defined */
-int mode_defined(u16 mode)
-{
-	struct card_info *card;
-	struct mode_info *mi;
-	int i;
-
-	for (card = video_cards; card < video_cards_end; card++) {
-		mi = card->modes;
-		for (i = 0; i < card->nmodes; i++, mi++) {
-			if (mi->mode == mode)
-				return 1;
-		}
-	}
-
-	return 0;
-}
-
-/* Set mode (without recalc) */
-static int raw_set_mode(u16 mode, u16 *real_mode)
-{
-	int nmode, i;
-	struct card_info *card;
-	struct mode_info *mi;
-
-	/* Drop the recalc bit if set */
-	mode &= ~VIDEO_RECALC;
-
-	/* Scan for mode based on fixed ID, position, or resolution */
-	nmode = 0;
-	for (card = video_cards; card < video_cards_end; card++) {
-		mi = card->modes;
-		for (i = 0; i < card->nmodes; i++, mi++) {
-			int visible = mi->x || mi->y;
-
-			if ((mode == nmode && visible) ||
-			    mode == mi->mode ||
-			    mode == (mi->y << 8)+mi->x) {
-				*real_mode = mi->mode;
-				return card->set_mode(mi);
-			}
-
-			if (visible)
-				nmode++;
-		}
-	}
-
-	/* Nothing found?  Is it an "exceptional" (unprobed) mode? */
-	for (card = video_cards; card < video_cards_end; card++) {
-		if (mode >= card->xmode_first &&
-		    mode < card->xmode_first+card->xmode_n) {
-			struct mode_info mix;
-			*real_mode = mix.mode = mode;
-			mix.x = mix.y = 0;
-			return card->set_mode(&mix);
-		}
-	}
-
-	/* Otherwise, failure... */
-	return -1;
-}
-
-/*
- * Recalculate the vertical video cutoff (hack!)
- */
-static void vga_recalc_vertical(void)
-{
-	unsigned int font_size, rows;
-	u16 crtc;
-	u8 pt, ov;
-
-	set_fs(0);
-	font_size = rdfs8(0x485); /* BIOS: font size (pixels) */
-	rows = force_y ? force_y : rdfs8(0x484)+1; /* Text rows */
-
-	rows *= font_size;	/* Visible scan lines */
-	rows--;			/* ... minus one */
-
-	crtc = vga_crtc();
-
-	pt = in_idx(crtc, 0x11);
-	pt &= ~0x80;		/* Unlock CR0-7 */
-	out_idx(pt, crtc, 0x11);
-
-	out_idx((u8)rows, crtc, 0x12); /* Lower height register */
-
-	ov = in_idx(crtc, 0x07); /* Overflow register */
-	ov &= 0xbd;
-	ov |= (rows >> (8-1)) & 0x02;
-	ov |= (rows >> (9-6)) & 0x40;
-	out_idx(ov, crtc, 0x07);
-}
-
-/* Set mode (with recalc if specified) */
-static int set_mode(u16 mode)
-{
-	int rv;
-	u16 real_mode;
-
-	/* Very special mode numbers... */
-	if (mode == VIDEO_CURRENT_MODE)
-		return 0;	/* Nothing to do... */
-	else if (mode == NORMAL_VGA)
-		mode = VIDEO_80x25;
-	else if (mode == EXTENDED_VGA)
-		mode = VIDEO_8POINT;
-
-	rv = raw_set_mode(mode, &real_mode);
-	if (rv)
-		return rv;
-
-	if (mode & VIDEO_RECALC)
-		vga_recalc_vertical();
-
-	/* Save the canonical mode number for the kernel, not
-	   an alias, size specification or menu position */
-	boot_params.hdr.vid_mode = real_mode;
-	return 0;
 }
 
 static unsigned int get_entry(void)
@@ -293,13 +132,28 @@ static void display_menu(void)
 	struct mode_info *mi;
 	char ch;
 	int i;
+	int nmodes;
+	int modes_per_line;
+	int col;
 
-	puts("Mode:    COLSxROWS:\n");
+	nmodes = 0;
+	for (card = video_cards; card < video_cards_end; card++)
+		nmodes += card->nmodes;
 
+	modes_per_line = 1;
+	if (nmodes >= 20)
+		modes_per_line = 3;
+
+	for (col = 0; col < modes_per_line; col++)
+		puts("Mode: Resolution:  Type: ");
+	putchar('\n');
+
+	col = 0;
 	ch = '0';
 	for (card = video_cards; card < video_cards_end; card++) {
 		mi = card->modes;
 		for (i = 0; i < card->nmodes; i++, mi++) {
+			char resbuf[32];
 			int visible = mi->x && mi->y;
 			u16 mode_id = mi->mode ? mi->mode :
 				(mi->y << 8)+mi->x;
@@ -307,8 +161,18 @@ static void display_menu(void)
 			if (!visible)
 				continue; /* Hidden mode */
 
-			printf("%c  %04X  %3dx%-3d  %s\n",
-			       ch, mode_id, mi->x, mi->y, card->card_name);
+			if (mi->depth)
+				sprintf(resbuf, "%dx%d", mi->y, mi->depth);
+			else
+				sprintf(resbuf, "%d", mi->y);
+
+			printf("%c %03X %4dx%-7s %-6s",
+			       ch, mode_id, mi->x, resbuf, card->card_name);
+			col++;
+			if (col >= modes_per_line) {
+				putchar('\n');
+				col = 0;
+			}
 
 			if (ch == '9')
 				ch = 'a';
@@ -318,6 +182,8 @@ static void display_menu(void)
 				ch++;
 		}
 	}
+	if (col)
+		putchar('\n');
 }
 
 #define H(x)	((x)-'a'+10)
@@ -355,9 +221,8 @@ static unsigned int mode_menu(void)
 	}
 }
 
-#ifdef CONFIG_VIDEO_RETAIN
 /* Save screen content to the heap */
-struct saved_screen {
+static struct saved_screen {
 	int x, y;
 	int curx, cury;
 	u16 *data;
@@ -388,7 +253,7 @@ static void restore_screen(void)
 	int y;
 	addr_t dst = 0;
 	u16 *src = saved.data;
-	u16 ax, bx, dx;
+	struct biosregs ireg;
 
 	if (graphic_mode)
 		return;		/* Can't restore onto a graphic mode */
@@ -427,17 +292,12 @@ static void restore_screen(void)
 	}
 
 	/* Restore cursor position */
-	ax = 0x0200;		/* Set cursor position */
-	bx = 0;			/* Page number (<< 8) */
-	dx = (saved.cury << 8)+saved.curx;
-	asm volatile(INT10
-		     : "+a" (ax), "+b" (bx), "+d" (dx)
-		     : : "ecx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ah = 0x02;		/* Set cursor position */
+	ireg.dh = saved.cury;
+	ireg.dl = saved.curx;
+	intcall(0x10, &ireg, NULL);
 }
-#else
-#define save_screen()		((void)0)
-#define restore_screen()	((void)0)
-#endif
 
 void set_video(void)
 {
@@ -459,6 +319,7 @@ void set_video(void)
 		printf("Undefined video mode number: %x\n", mode);
 		mode = ASK_VGA;
 	}
+	boot_params.hdr.vid_mode = mode;
 	vesa_store_edid();
 	store_mode_params();
 

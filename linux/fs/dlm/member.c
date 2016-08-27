@@ -1,7 +1,7 @@
 /******************************************************************************
 *******************************************************************************
 **
-**  Copyright (C) 2005-2007 Red Hat, Inc.  All rights reserved.
+**  Copyright (C) 2005-2009 Red Hat, Inc.  All rights reserved.
 **
 **  This copyrighted material is made available to anyone wishing to use,
 **  modify, copy, or redistribute it subject to the terms and conditions
@@ -17,6 +17,7 @@
 #include "recover.h"
 #include "rcom.h"
 #include "config.h"
+#include "lowcomms.h"
 
 static void add_ordered_member(struct dlm_ls *ls, struct dlm_member *new)
 {
@@ -45,9 +46,9 @@ static void add_ordered_member(struct dlm_ls *ls, struct dlm_member *new)
 static int dlm_add_member(struct dlm_ls *ls, int nodeid)
 {
 	struct dlm_member *memb;
-	int w;
+	int w, error;
 
-	memb = kzalloc(sizeof(struct dlm_member), GFP_KERNEL);
+	memb = kzalloc(sizeof(struct dlm_member), ls->ls_allocation);
 	if (!memb)
 		return -ENOMEM;
 
@@ -55,6 +56,12 @@ static int dlm_add_member(struct dlm_ls *ls, int nodeid)
 	if (w < 0) {
 		kfree(memb);
 		return w;
+	}
+
+	error = dlm_lowcomms_connect_node(nodeid);
+	if (error < 0) {
+		kfree(memb);
+		return error;
 	}
 
 	memb->nodeid = nodeid;
@@ -70,7 +77,7 @@ static void dlm_remove_member(struct dlm_ls *ls, struct dlm_member *memb)
 	ls->ls_num_nodes--;
 }
 
-static int dlm_is_member(struct dlm_ls *ls, int nodeid)
+int dlm_is_member(struct dlm_ls *ls, int nodeid)
 {
 	struct dlm_member *memb;
 
@@ -136,7 +143,7 @@ static void make_member_array(struct dlm_ls *ls)
 
 	ls->ls_total_weight = total;
 
-	array = kmalloc(sizeof(int) * total, GFP_KERNEL);
+	array = kmalloc(sizeof(int) * total, ls->ls_allocation);
 	if (!array)
 		return;
 
@@ -208,6 +215,23 @@ int dlm_recover_members(struct dlm_ls *ls, struct dlm_recover *rv, int *neg_out)
 			dlm_remove_member(ls, memb);
 			log_debug(ls, "remove member %d", memb->nodeid);
 		}
+	}
+
+	/* Add an entry to ls_nodes_gone for members that were removed and
+	   then added again, so that previous state for these nodes will be
+	   cleared during recovery. */
+
+	for (i = 0; i < rv->new_count; i++) {
+		if (!dlm_is_member(ls, rv->new[i]))
+			continue;
+		log_debug(ls, "new nodeid %d is a re-added member", rv->new[i]);
+
+		memb = kzalloc(sizeof(struct dlm_member), ls->ls_allocation);
+		if (!memb)
+			return -ENOMEM;
+		memb->nodeid = rv->new[i];
+		list_add_tail(&memb->list, &ls->ls_nodes_gone);
+		neg++;
 	}
 
 	/* add new members to ls_nodes */
@@ -314,15 +338,16 @@ int dlm_ls_stop(struct dlm_ls *ls)
 int dlm_ls_start(struct dlm_ls *ls)
 {
 	struct dlm_recover *rv = NULL, *rv_old;
-	int *ids = NULL;
-	int error, count;
+	int *ids = NULL, *new = NULL;
+	int error, ids_count = 0, new_count = 0;
 
-	rv = kzalloc(sizeof(struct dlm_recover), GFP_KERNEL);
+	rv = kzalloc(sizeof(struct dlm_recover), ls->ls_allocation);
 	if (!rv)
 		return -ENOMEM;
 
-	error = count = dlm_nodeid_list(ls->ls_name, &ids);
-	if (error <= 0)
+	error = dlm_nodeid_list(ls->ls_name, &ids, &ids_count,
+				&new, &new_count);
+	if (error < 0)
 		goto fail;
 
 	spin_lock(&ls->ls_recover_lock);
@@ -337,14 +362,19 @@ int dlm_ls_start(struct dlm_ls *ls)
 	}
 
 	rv->nodeids = ids;
-	rv->node_count = count;
+	rv->node_count = ids_count;
+	rv->new = new;
+	rv->new_count = new_count;
 	rv->seq = ++ls->ls_recover_seq;
 	rv_old = ls->ls_recover_args;
 	ls->ls_recover_args = rv;
 	spin_unlock(&ls->ls_recover_lock);
 
 	if (rv_old) {
+		log_error(ls, "unused recovery %llx %d",
+			  (unsigned long long)rv_old->seq, rv_old->node_count);
 		kfree(rv_old->nodeids);
+		kfree(rv_old->new);
 		kfree(rv_old);
 	}
 
@@ -354,6 +384,7 @@ int dlm_ls_start(struct dlm_ls *ls)
  fail:
 	kfree(rv);
 	kfree(ids);
+	kfree(new);
 	return error;
 }
 

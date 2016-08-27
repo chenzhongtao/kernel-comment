@@ -20,70 +20,117 @@
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/init.h>
-#include <linux/interrupt.h>
-#include <asm/dma.h>
+#include <linux/io.h>
 #include <asm/machdep.h>
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
+#include <asm/mcfuart.h>
 #include <asm/mcfdma.h>
 #include <asm/mcfwdebug.h>
 
 /***************************************************************************/
 
-void coldfire_reset(void);
+static struct mcf_platform_uart m532x_uart_platform[] = {
+	{
+		.mapbase	= MCFUART_BASE1,
+		.irq		= MCFINT_VECBASE + MCFINT_UART0,
+	},
+	{
+		.mapbase 	= MCFUART_BASE2,
+		.irq		= MCFINT_VECBASE + MCFINT_UART1,
+	},
+	{
+		.mapbase 	= MCFUART_BASE3,
+		.irq		= MCFINT_VECBASE + MCFINT_UART2,
+	},
+	{ },
+};
 
-extern unsigned int mcf_timervector;
-extern unsigned int mcf_profilevector;
-extern unsigned int mcf_timerlevel;
+static struct platform_device m532x_uart = {
+	.name			= "mcfuart",
+	.id			= 0,
+	.dev.platform_data	= m532x_uart_platform,
+};
+
+static struct resource m532x_fec_resources[] = {
+	{
+		.start		= 0xfc030000,
+		.end		= 0xfc0307ff,
+		.flags		= IORESOURCE_MEM,
+	},
+	{
+		.start		= 64 + 36,
+		.end		= 64 + 36,
+		.flags		= IORESOURCE_IRQ,
+	},
+	{
+		.start		= 64 + 40,
+		.end		= 64 + 40,
+		.flags		= IORESOURCE_IRQ,
+	},
+	{
+		.start		= 64 + 42,
+		.end		= 64 + 42,
+		.flags		= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device m532x_fec = {
+	.name			= "fec",
+	.id			= 0,
+	.num_resources		= ARRAY_SIZE(m532x_fec_resources),
+	.resource		= m532x_fec_resources,
+};
+
+static struct platform_device *m532x_devices[] __initdata = {
+	&m532x_uart,
+	&m532x_fec,
+};
 
 /***************************************************************************/
 
-/*
- *	DMA channel base address table.
- */
-unsigned int dma_base_addr[MAX_M68K_DMA_CHANNELS] = { };
-unsigned int dma_device_address[MAX_M68K_DMA_CHANNELS];
-
-/***************************************************************************/
-
-void mcf_settimericr(unsigned int timer, unsigned int level)
+static void __init m532x_uart_init_line(int line, int irq)
 {
-	volatile unsigned char *icrp;
-	unsigned int icr;
-	unsigned char irq;
-
-	if (timer <= 2) {
-		switch (timer) {
-		case 2:  irq = 33; icr = MCFSIM_ICR_TIMER2; break;
-		default: irq = 32; icr = MCFSIM_ICR_TIMER1; break;
-		}
-		
-		icrp = (volatile unsigned char *) (MCF_MBAR + icr);
-		*icrp = level;
-		mcf_enable_irq0(irq);
+	if (line == 0) {
+		/* GPIO initialization */
+		MCF_GPIO_PAR_UART |= 0x000F;
+	} else if (line == 1) {
+		/* GPIO initialization */
+		MCF_GPIO_PAR_UART |= 0x0FF0;
 	}
+}
+
+static void __init m532x_uarts_init(void)
+{
+	const int nrlines = ARRAY_SIZE(m532x_uart_platform);
+	int line;
+
+	for (line = 0; (line < nrlines); line++)
+		m532x_uart_init_line(line, m532x_uart_platform[line].irq);
+}
+/***************************************************************************/
+
+static void __init m532x_fec_init(void)
+{
+	/* Set multi-function pins to ethernet mode for fec0 */
+	MCF_GPIO_PAR_FECI2C |= (MCF_GPIO_PAR_FECI2C_PAR_MDC_EMDC |
+		MCF_GPIO_PAR_FECI2C_PAR_MDIO_EMDIO);
+	MCF_GPIO_PAR_FEC = (MCF_GPIO_PAR_FEC_PAR_FEC_7W_FEC |
+		MCF_GPIO_PAR_FEC_PAR_FEC_MII_FEC);
 }
 
 /***************************************************************************/
 
-int mcf_timerirqpending(int timer)
+static void m532x_cpu_reset(void)
 {
-	unsigned int imr = 0;
-
-	switch (timer) {
-	case 1:  imr = 0x1; break;
-	case 2:  imr = 0x2; break;
-	default: break;
-	}
-	return (mcf_getiprh() & imr);
+	local_irq_disable();
+	__raw_writeb(MCF_RCR_SWRESET, MCF_RCR);
 }
 
 /***************************************************************************/
 
-void config_BSP(char *commandp, int size)
+void __init config_BSP(char *commandp, int size)
 {
-	mcf_setimr(MCFSIM_IMR_MASKALL);
-
 #if !defined(CONFIG_BOOTPARAM)
 	/* Copy command line from FLASH to local buffer... */
 	memcpy(commandp, (char *) 0x4000, 4);
@@ -95,11 +142,7 @@ void config_BSP(char *commandp, int size)
 	}
 #endif
 
-	mcf_timervector = 64+32;
-	mcf_profilevector = 64+33;
-	mach_reset = coldfire_reset;
-
-#ifdef MCF_BDM_DISABLE
+#ifdef CONFIG_BDM_DISABLE
 	/*
 	 * Disable the BDM clocking.  This also turns off most of the rest of
 	 * the BDM device.  This is good for EMC reasons. This option is not
@@ -110,9 +153,20 @@ void config_BSP(char *commandp, int size)
 }
 
 /***************************************************************************/
-/* Board initialization */
 
-/********************************************************************/
+static int __init init_BSP(void)
+{
+	m532x_uarts_init();
+	m532x_fec_init();
+	platform_add_devices(m532x_devices, ARRAY_SIZE(m532x_devices));
+	return 0;
+}
+
+arch_initcall(init_BSP);
+
+/***************************************************************************/
+/* Board initialization */
+/***************************************************************************/
 /* 
  * PLL min/max specifications
  */
@@ -337,8 +391,8 @@ void gpio_init(void)
 	/* Initialize TIN3 as a GPIO output to enable the write
 	   half of the latch */
 	MCF_GPIO_PAR_TIMER = 0x00;
-	MCF_GPIO_PDDR_TIMER = 0x08;
-	MCF_GPIO_PCLRR_TIMER = 0x0;
+	__raw_writeb(0x08, MCFGPIO_PDDR_TIMER);
+	__raw_writeb(0x00, MCFGPIO_PCLRR_TIMER);
 
 }
 

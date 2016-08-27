@@ -12,10 +12,9 @@
 #ifndef _JFFS2_FS_I
 #define _JFFS2_FS_I
 
-#include <linux/version.h>
 #include <linux/rbtree.h>
 #include <linux/posix_acl.h>
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
 
 struct jffs2_inode_info {
 	/* We need an internal mutex similar to inode->i_mutex.
@@ -24,7 +23,7 @@ struct jffs2_inode_info {
 	   before letting GC proceed. Or we'd have to put ugliness
 	   into the GC code so it didn't attempt to obtain the i_mutex
 	   for the inode(s) which are already locked */
-	struct semaphore sem;
+	struct mutex sem;
 
 	/* The highest (datanode) version number used for this ino */
 	uint32_t highest_version;
@@ -51,10 +50,6 @@ struct jffs2_inode_info {
 	uint16_t flags;
 	uint8_t usercompr;
 	struct inode vfs_inode;
-#ifdef CONFIG_JFFS2_FS_POSIX_ACL
-	struct posix_acl *i_acl_access;
-	struct posix_acl *i_acl_default;
-#endif
 };
 
 #endif /* _JFFS2_FS_I */

@@ -37,7 +37,6 @@
  *      - ported from alsa 0.5 to 1.0
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/parport.h>
@@ -747,10 +746,10 @@ static int __devinit snd_portman_probe(struct platform_device *pdev)
 	if ((err = snd_portman_probe_port(p)) < 0)
 		return err;
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL) {
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0) {
 		snd_printd("Cannot create card\n");
-		return -ENOMEM;
+		return err;
 	}
 	strcpy(card->driver, DRIVER_NAME);
 	strcpy(card->shortname, CARD_NAME);
@@ -796,6 +795,8 @@ static int __devinit snd_portman_probe(struct platform_device *pdev)
 		goto __err;
 
 	platform_set_drvdata(pdev, card);
+
+	snd_card_set_dev(card, &pdev->dev);
 
 	/* At this point card will be usable */
 	if ((err = snd_card_register(card)) < 0) {

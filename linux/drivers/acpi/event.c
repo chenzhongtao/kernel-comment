@@ -14,6 +14,8 @@
 #include <net/netlink.h>
 #include <net/genetlink.h>
 
+#include "internal.h"
+
 #define _COMPONENT		ACPI_SYSTEM_COMPONENT
 ACPI_MODULE_NAME("event");
 
@@ -102,12 +104,41 @@ static unsigned int acpi_system_poll_event(struct file *file, poll_table * wait)
 }
 
 static const struct file_operations acpi_system_event_ops = {
+	.owner = THIS_MODULE,
 	.open = acpi_system_open_event,
 	.read = acpi_system_read_event,
 	.release = acpi_system_close_event,
 	.poll = acpi_system_poll_event,
 };
 #endif	/* CONFIG_ACPI_PROC_EVENT */
+
+/* ACPI notifier chain */
+static BLOCKING_NOTIFIER_HEAD(acpi_chain_head);
+
+int acpi_notifier_call_chain(struct acpi_device *dev, u32 type, u32 data)
+{
+	struct acpi_bus_event event;
+
+	strcpy(event.device_class, dev->pnp.device_class);
+	strcpy(event.bus_id, dev->pnp.bus_id);
+	event.type = type;
+	event.data = data;
+	return (blocking_notifier_call_chain(&acpi_chain_head, 0, (void *)&event)
+                        == NOTIFY_BAD) ? -EINVAL : 0;
+}
+EXPORT_SYMBOL(acpi_notifier_call_chain);
+
+int register_acpi_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&acpi_chain_head, nb);
+}
+EXPORT_SYMBOL(register_acpi_notifier);
+
+int unregister_acpi_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&acpi_chain_head, nb);
+}
+EXPORT_SYMBOL(unregister_acpi_notifier);
 
 #ifdef CONFIG_NET
 static unsigned int acpi_event_seqnum;
@@ -206,11 +237,7 @@ int acpi_bus_generate_netlink_event(const char *device_class,
 		return result;
 	}
 
-	result =
-	    genlmsg_multicast(skb, 0, acpi_event_mcgrp.id, GFP_ATOMIC);
-	if (result)
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-				  "Failed to send a Genetlink message!\n"));
+	genlmsg_multicast(skb, 0, acpi_event_mcgrp.id, GFP_ATOMIC);
 	return 0;
 }
 
@@ -266,10 +293,9 @@ static int __init acpi_event_init(void)
 
 #ifdef CONFIG_ACPI_PROC_EVENT
 	/* 'event' [R] */
-	entry = create_proc_entry("event", S_IRUSR, acpi_root_dir);
-	if (entry)
-		entry->proc_fops = &acpi_system_event_ops;
-	else
+	entry = proc_create("event", S_IRUSR, acpi_root_dir,
+			    &acpi_system_event_ops);
+	if (!entry)
 		return -ENODEV;
 #endif
 

@@ -1,7 +1,7 @@
 /*
  *    pata_efar.c - EFAR PIIX clone controller driver
  *
- *	(C) 2005 Red Hat <alan@redhat.com>
+ *	(C) 2005 Red Hat
  *
  *    Some parts based on ata_piix.c by Jeff Garzik and others.
  *
@@ -22,7 +22,7 @@
 #include <linux/ata.h>
 
 #define DRV_NAME	"pata_efar"
-#define DRV_VERSION	"0.4.4"
+#define DRV_VERSION	"0.4.5"
 
 /**
  *	efar_pre_reset	-	Enable bits
@@ -45,20 +45,7 @@ static int efar_pre_reset(struct ata_link *link, unsigned long deadline)
 	if (!pci_test_config_bits(pdev, &efar_enable_bits[ap->port_no]))
 		return -ENOENT;
 
-	return ata_std_prereset(link, deadline);
-}
-
-/**
- *	efar_probe_reset - Probe specified port on PATA host controller
- *	@ap: Port to probe
- *
- *	LOCKING:
- *	None (inherited from caller).
- */
-
-static void efar_error_handler(struct ata_port *ap)
-{
-	ata_bmdma_drive_eh(ap, efar_pre_reset, ata_std_softreset, NULL, ata_std_postreset);
+	return ata_sff_prereset(link, deadline);
 }
 
 /**
@@ -111,18 +98,17 @@ static void efar_set_piomode (struct ata_port *ap, struct ata_device *adev)
 			    { 2, 1 },
 			    { 2, 3 }, };
 
-	if (pio > 2)
-		control |= 1;	/* TIME1 enable */
+	if (pio > 1)
+		control |= 1;	/* TIME */
 	if (ata_pio_need_iordy(adev))	/* PIO 3/4 require IORDY */
-		control |= 2;	/* IE enable */
-	/* Intel specifies that the PPE functionality is for disk only */
+		control |= 2;	/* IE */
+	/* Intel specifies that the prefetch/posting is for disk only */
 	if (adev->class == ATA_DEV_ATA)
-		control |= 4;	/* PPE enable */
+		control |= 4;	/* PPE */
 
 	pci_read_config_word(dev, idetm_port, &idetm_data);
 
-	/* Enable PPE, IE and TIME as appropriate */
-
+	/* Set PPE, IE, and TIME as appropriate */
 	if (adev->devno == 0) {
 		idetm_data &= 0xCCF0;
 		idetm_data |= control;
@@ -135,14 +121,14 @@ static void efar_set_piomode (struct ata_port *ap, struct ata_device *adev)
 		idetm_data &= 0xCC0F;
 		idetm_data |= (control << 4);
 
-		/* Slave timing in seperate register */
+		/* Slave timing in separate register */
 		pci_read_config_byte(dev, 0x44, &slave_data);
 		slave_data &= 0x0F << shift;
 		slave_data |= ((timings[pio][0] << 2) | timings[pio][1]) << shift;
 		pci_write_config_byte(dev, 0x44, slave_data);
 	}
 
-	idetm_data |= 0x4000;	/* Ensure SITRE is enabled */
+	idetm_data |= 0x4000;	/* Ensure SITRE is set */
 	pci_write_config_word(dev, idetm_port, idetm_data);
 }
 
@@ -233,53 +219,15 @@ static void efar_set_dmamode (struct ata_port *ap, struct ata_device *adev)
 }
 
 static struct scsi_host_template efar_sht = {
-	.module			= THIS_MODULE,
-	.name			= DRV_NAME,
-	.ioctl			= ata_scsi_ioctl,
-	.queuecommand		= ata_scsi_queuecmd,
-	.can_queue		= ATA_DEF_QUEUE,
-	.this_id		= ATA_SHT_THIS_ID,
-	.sg_tablesize		= LIBATA_MAX_PRD,
-	.cmd_per_lun		= ATA_SHT_CMD_PER_LUN,
-	.emulated		= ATA_SHT_EMULATED,
-	.use_clustering		= ATA_SHT_USE_CLUSTERING,
-	.proc_name		= DRV_NAME,
-	.dma_boundary		= ATA_DMA_BOUNDARY,
-	.slave_configure	= ata_scsi_slave_config,
-	.slave_destroy		= ata_scsi_slave_destroy,
-	.bios_param		= ata_std_bios_param,
+	ATA_BMDMA_SHT(DRV_NAME),
 };
 
-static const struct ata_port_operations efar_ops = {
+static struct ata_port_operations efar_ops = {
+	.inherits		= &ata_bmdma_port_ops,
+	.cable_detect		= efar_cable_detect,
 	.set_piomode		= efar_set_piomode,
 	.set_dmamode		= efar_set_dmamode,
-	.mode_filter		= ata_pci_default_filter,
-
-	.tf_load		= ata_tf_load,
-	.tf_read		= ata_tf_read,
-	.check_status		= ata_check_status,
-	.exec_command		= ata_exec_command,
-	.dev_select		= ata_std_dev_select,
-
-	.freeze			= ata_bmdma_freeze,
-	.thaw			= ata_bmdma_thaw,
-	.error_handler		= efar_error_handler,
-	.post_internal_cmd	= ata_bmdma_post_internal_cmd,
-	.cable_detect		= efar_cable_detect,
-
-	.bmdma_setup		= ata_bmdma_setup,
-	.bmdma_start		= ata_bmdma_start,
-	.bmdma_stop		= ata_bmdma_stop,
-	.bmdma_status		= ata_bmdma_status,
-	.qc_prep		= ata_qc_prep,
-	.qc_issue		= ata_qc_issue_prot,
-	.data_xfer		= ata_data_xfer,
-
-	.irq_handler		= ata_interrupt,
-	.irq_clear		= ata_bmdma_irq_clear,
-	.irq_on			= ata_irq_on,
-
-	.port_start		= ata_sff_port_start,
+	.prereset		= efar_pre_reset,
 };
 
 
@@ -301,11 +249,10 @@ static int efar_init_one (struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	static int printed_version;
 	static const struct ata_port_info info = {
-		.sht		= &efar_sht,
 		.flags		= ATA_FLAG_SLAVE_POSS,
-		.pio_mask	= 0x1f,	/* pio0-4 */
-		.mwdma_mask	= 0x07, /* mwdma1-2 */
-		.udma_mask 	= 0x0f, /* UDMA 66 */
+		.pio_mask	= ATA_PIO4,
+		.mwdma_mask	= ATA_MWDMA2,
+		.udma_mask 	= ATA_UDMA4,
 		.port_ops	= &efar_ops,
 	};
 	const struct ata_port_info *ppi[] = { &info, NULL };
@@ -314,7 +261,7 @@ static int efar_init_one (struct pci_dev *pdev, const struct pci_device_id *ent)
 		dev_printk(KERN_DEBUG, &pdev->dev,
 			   "version " DRV_VERSION "\n");
 
-	return ata_pci_init_one(pdev, ppi);
+	return ata_pci_sff_init_one(pdev, ppi, &efar_sht, NULL);
 }
 
 static const struct pci_device_id efar_pci_tbl[] = {

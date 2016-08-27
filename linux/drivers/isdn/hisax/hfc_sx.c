@@ -18,8 +18,6 @@
 #include <linux/interrupt.h>
 #include <linux/isapnp.h>
 
-extern const char *CardType[];
-
 static const char *hfcsx_revision = "$Revision: 1.12.2.5 $";
 
 /***************************************/
@@ -1257,8 +1255,6 @@ hfcsx_bh(struct work_struct *work)
 		container_of(work, struct IsdnCardState, tqueue);
 	u_long flags;
 
-	if (!cs)
-		return;
 	if (test_and_clear_bit(D_L1STATECHANGE, &cs->event)) {
 		if (!cs->hw.hfcsx.nt_mode)
 			switch (cs->dc.hfcsx.ph_state) {
@@ -1330,8 +1326,7 @@ hfcsx_bh(struct work_struct *work)
 /********************************/
 /* called for card init message */
 /********************************/
-static void __devinit
-inithfcsx(struct IsdnCardState *cs)
+static void inithfcsx(struct IsdnCardState *cs)
 {
 	cs->setstack_d = setstack_hfcsx;
 	cs->BC_Send_Data = &hfcsx_send_data;
@@ -1420,7 +1415,7 @@ setup_hfcsx(struct IsdnCard *card)
 					err = pnp_activate_dev(pnp_d);
 					if (err<0) {
 						printk(KERN_WARNING "%s: pnp_activate_dev ret(%d)\n",
-							__FUNCTION__, err);
+							__func__, err);
 						return(0);
 					}
 					card->para[1] = pnp_port_start(pnp_d, 0);

@@ -11,84 +11,105 @@
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/init.h>
-#include <linux/interrupt.h>
-#include <asm/dma.h>
+#include <linux/io.h>
 #include <asm/machdep.h>
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
-#include <asm/mcfdma.h>
+#include <asm/mcfuart.h>
 
 /***************************************************************************/
 
-void coldfire_reset(void);
-
-/***************************************************************************/
-
-/*
- *	DMA channel base address table.
- */
-unsigned int   dma_base_addr[MAX_M68K_DMA_CHANNELS] = {
-        MCF_MBAR + MCFDMA_BASE0,
-        MCF_MBAR + MCFDMA_BASE1,
-        MCF_MBAR + MCFDMA_BASE2,
-        MCF_MBAR + MCFDMA_BASE3,
+static struct mcf_platform_uart m5249_uart_platform[] = {
+	{
+		.mapbase	= MCF_MBAR + MCFUART_BASE1,
+		.irq		= 73,
+	},
+	{
+		.mapbase 	= MCF_MBAR + MCFUART_BASE2,
+		.irq		= 74,
+	},
+	{ },
 };
 
-unsigned int dma_device_address[MAX_M68K_DMA_CHANNELS];
+static struct platform_device m5249_uart = {
+	.name			= "mcfuart",
+	.id			= 0,
+	.dev.platform_data	= m5249_uart_platform,
+};
+
+static struct platform_device *m5249_devices[] __initdata = {
+	&m5249_uart,
+};
 
 /***************************************************************************/
 
-void mcf_autovector(unsigned int vec)
+static void __init m5249_uart_init_line(int line, int irq)
 {
-	volatile unsigned char  *mbar;
-
-	if ((vec >= 25) && (vec <= 31)) {
-		mbar = (volatile unsigned char *) MCF_MBAR;
-		vec = 0x1 << (vec - 24);
-		*(mbar + MCFSIM_AVR) |= vec;
-		mcf_setimr(mcf_getimr() & ~vec);
+	if (line == 0) {
+		writeb(MCFSIM_ICR_LEVEL6 | MCFSIM_ICR_PRI1, MCF_MBAR + MCFSIM_UART1ICR);
+		writeb(irq, MCF_MBAR + MCFUART_BASE1 + MCFUART_UIVR);
+		mcf_mapirq2imr(irq, MCFINTC_UART0);
+	} else if (line == 1) {
+		writeb(MCFSIM_ICR_LEVEL6 | MCFSIM_ICR_PRI2, MCF_MBAR + MCFSIM_UART2ICR);
+		writeb(irq, MCF_MBAR + MCFUART_BASE2 + MCFUART_UIVR);
+		mcf_mapirq2imr(irq, MCFINTC_UART1);
 	}
 }
 
-/***************************************************************************/
-
-void mcf_settimericr(unsigned int timer, unsigned int level)
+static void __init m5249_uarts_init(void)
 {
-	volatile unsigned char *icrp;
-	unsigned int icr, imr;
+	const int nrlines = ARRAY_SIZE(m5249_uart_platform);
+	int line;
 
-	if (timer <= 2) {
-		switch (timer) {
-		case 2:  icr = MCFSIM_TIMER2ICR; imr = MCFSIM_IMR_TIMER2; break;
-		default: icr = MCFSIM_TIMER1ICR; imr = MCFSIM_IMR_TIMER1; break;
-		}
-
-		icrp = (volatile unsigned char *) (MCF_MBAR + icr);
-		*icrp = MCFSIM_ICR_AUTOVEC | (level << 2) | MCFSIM_ICR_PRI3;
-		mcf_setimr(mcf_getimr() & ~imr);
-	}
+	for (line = 0; (line < nrlines); line++)
+		m5249_uart_init_line(line, m5249_uart_platform[line].irq);
 }
 
 /***************************************************************************/
 
-int mcf_timerirqpending(int timer)
+static void __init m5249_timers_init(void)
 {
-	unsigned int imr = 0;
+	/* Timer1 is always used as system timer */
+	writeb(MCFSIM_ICR_AUTOVEC | MCFSIM_ICR_LEVEL6 | MCFSIM_ICR_PRI3,
+		MCF_MBAR + MCFSIM_TIMER1ICR);
+	mcf_mapirq2imr(MCF_IRQ_TIMER, MCFINTC_TIMER1);
 
-	switch (timer) {
-	case 1:  imr = MCFSIM_IMR_TIMER1; break;
-	case 2:  imr = MCFSIM_IMR_TIMER2; break;
-	default: break;
-	}
-	return (mcf_getipr() & imr);
+#ifdef CONFIG_HIGHPROFILE
+	/* Timer2 is to be used as a high speed profile timer  */
+	writeb(MCFSIM_ICR_AUTOVEC | MCFSIM_ICR_LEVEL7 | MCFSIM_ICR_PRI3,
+		MCF_MBAR + MCFSIM_TIMER2ICR);
+	mcf_mapirq2imr(MCF_IRQ_PROFILER, MCFINTC_TIMER2);
+#endif
 }
 
 /***************************************************************************/
 
-void config_BSP(char *commandp, int size)
+void m5249_cpu_reset(void)
 {
-	mcf_setimr(MCFSIM_IMR_MASKALL);
-	mach_reset = coldfire_reset;
+	local_irq_disable();
+	/* Set watchdog to soft reset, and enabled */
+	__raw_writeb(0xc0, MCF_MBAR + MCFSIM_SYPCR);
+	for (;;)
+		/* wait for watchdog to timeout */;
 }
+
+/***************************************************************************/
+
+void __init config_BSP(char *commandp, int size)
+{
+	mach_reset = m5249_cpu_reset;
+	m5249_timers_init();
+	m5249_uarts_init();
+}
+
+/***************************************************************************/
+
+static int __init init_BSP(void)
+{
+	platform_add_devices(m5249_devices, ARRAY_SIZE(m5249_devices));
+	return 0;
+}
+
+arch_initcall(init_BSP);
 
 /***************************************************************************/

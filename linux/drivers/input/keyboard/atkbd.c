@@ -19,7 +19,6 @@
 
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -28,6 +27,7 @@
 #include <linux/workqueue.h>
 #include <linux/libps2.h>
 #include <linux/mutex.h>
+#include <linux/dmi.h>
 
 #define DRIVER_DESC	"AT and PS/2 keyboard driver"
 
@@ -65,10 +65,12 @@ MODULE_PARM_DESC(extra, "Enable extra LEDs and keys on IBM RapidAcces, EzKey and
 
 /*
  * Scancode to keycode tables. These are just the default setting, and
- * are loadable via an userland utility.
+ * are loadable via a userland utility.
  */
 
-static unsigned char atkbd_set2_keycode[512] = {
+#define ATKBD_KEYMAP_SIZE	512
+
+static const unsigned short atkbd_set2_keycode[ATKBD_KEYMAP_SIZE] = {
 
 #ifdef CONFIG_KEYBOARD_ATKBD_HP_KEYCODES
 
@@ -99,7 +101,7 @@ static unsigned char atkbd_set2_keycode[512] = {
 #endif
 };
 
-static unsigned char atkbd_set3_keycode[512] = {
+static const unsigned short atkbd_set3_keycode[ATKBD_KEYMAP_SIZE] = {
 
 	  0,  0,  0,  0,  0,  0,  0, 59,  1,138,128,129,130, 15, 41, 60,
 	131, 29, 42, 86, 58, 16,  2, 61,133, 56, 44, 31, 30, 17,  3, 62,
@@ -115,7 +117,7 @@ static unsigned char atkbd_set3_keycode[512] = {
 	148,149,147,140
 };
 
-static unsigned char atkbd_unxlate_table[128] = {
+static const unsigned short atkbd_unxlate_table[128] = {
           0,118, 22, 30, 38, 37, 46, 54, 61, 62, 70, 69, 78, 85,102, 13,
          21, 29, 36, 45, 44, 53, 60, 67, 68, 77, 84, 91, 90, 20, 28, 27,
          35, 43, 52, 51, 59, 66, 75, 76, 82, 14, 18, 93, 26, 34, 33, 42,
@@ -161,7 +163,7 @@ static unsigned char atkbd_unxlate_table[128] = {
 #define ATKBD_SCR_LEFT		249
 #define ATKBD_SCR_RIGHT		248
 
-#define ATKBD_SPECIAL		248
+#define ATKBD_SPECIAL		ATKBD_SCR_RIGHT
 
 #define ATKBD_LED_EVENT_BIT	0
 #define ATKBD_REP_EVENT_BIT	1
@@ -173,7 +175,7 @@ static unsigned char atkbd_unxlate_table[128] = {
 #define ATKBD_XL_HANGEUL	0x10
 #define ATKBD_XL_HANJA		0x20
 
-static struct {
+static const struct {
 	unsigned char keycode;
 	unsigned char set2;
 } atkbd_scroll_keys[] = {
@@ -200,7 +202,8 @@ struct atkbd {
 	char phys[32];
 
 	unsigned short id;
-	unsigned char keycode[512];
+	unsigned short keycode[ATKBD_KEYMAP_SIZE];
+	DECLARE_BITMAP(force_release_mask, ATKBD_KEYMAP_SIZE);
 	unsigned char set;
 	unsigned char translated;
 	unsigned char extra;
@@ -225,6 +228,13 @@ struct atkbd {
 	unsigned long event_mask;
 };
 
+/*
+ * System-specific keymap fixup routine
+ */
+static void (*atkbd_platform_fixup)(struct atkbd *, const void *data);
+static void *atkbd_platform_fixup_data;
+static unsigned int (*atkbd_platform_scancode_fixup)(struct atkbd *, unsigned int);
+
 static ssize_t atkbd_attr_show_helper(struct device *dev, char *buf,
 				ssize_t (*handler)(struct atkbd *, char *));
 static ssize_t atkbd_attr_set_helper(struct device *dev, const char *buf, size_t count,
@@ -246,6 +256,7 @@ static struct device_attribute atkbd_attr_##_name =				\
 	__ATTR(_name, S_IWUSR | S_IRUGO, atkbd_do_show_##_name, atkbd_do_set_##_name);
 
 ATKBD_DEFINE_ATTR(extra);
+ATKBD_DEFINE_ATTR(force_release);
 ATKBD_DEFINE_ATTR(scroll);
 ATKBD_DEFINE_ATTR(set);
 ATKBD_DEFINE_ATTR(softrepeat);
@@ -265,6 +276,7 @@ ATKBD_DEFINE_RO_ATTR(err_count);
 
 static struct attribute *atkbd_attributes[] = {
 	&atkbd_attr_extra.attr,
+	&atkbd_attr_force_release.attr,
 	&atkbd_attr_scroll.attr,
 	&atkbd_attr_set.attr,
 	&atkbd_attr_softrepeat.attr,
@@ -349,9 +361,9 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 	struct atkbd *atkbd = serio_get_drvdata(serio);
 	struct input_dev *dev = atkbd->dev;
 	unsigned int code = data;
-	int scroll = 0, hscroll = 0, click = -1, add_release_event = 0;
+	int scroll = 0, hscroll = 0, click = -1;
 	int value;
-	unsigned char keycode;
+	unsigned short keycode;
 
 #ifdef ATKBD_DEBUG
 	printk(KERN_DEBUG "atkbd.c: Received %02x flags %02x\n", data, flags);
@@ -381,6 +393,9 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 		goto out;
 
 	input_event(dev, EV_MSC, MSC_RAW, code);
+
+	if (atkbd_platform_scancode_fixup)
+		code = atkbd_platform_scancode_fixup(atkbd, code);
 
 	if (atkbd->translated) {
 
@@ -414,14 +429,6 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 				       "Some program might be trying access hardware directly.\n",
 				       data == ATKBD_RET_ACK ? "ACK" : "NAK", serio->phys);
 			goto out;
-		case ATKBD_RET_HANGEUL:
-		case ATKBD_RET_HANJA:
-			/*
-			 * These keys do not report release and thus need to be
-			 * flagged properly
-			 */
-			add_release_event = 1;
-			break;
 		case ATKBD_RET_ERR:
 			atkbd->err_count++;
 #ifdef ATKBD_DEBUG
@@ -491,7 +498,7 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 			input_event(dev, EV_KEY, keycode, value);
 			input_sync(dev);
 
-			if (value && add_release_event) {
+			if (value && test_bit(code, atkbd->force_release_mask)) {
 				input_report_key(dev, keycode, 0);
 				input_sync(dev);
 			}
@@ -571,11 +578,22 @@ static void atkbd_event_work(struct work_struct *work)
 
 	mutex_lock(&atkbd->event_mutex);
 
-	if (test_and_clear_bit(ATKBD_LED_EVENT_BIT, &atkbd->event_mask))
-		atkbd_set_leds(atkbd);
+	if (!atkbd->enabled) {
+		/*
+		 * Serio ports are resumed asynchronously so while driver core
+		 * thinks that device is already fully operational in reality
+		 * it may not be ready yet. In this case we need to keep
+		 * rescheduling till reconnect completes.
+		 */
+		schedule_delayed_work(&atkbd->event_work,
+					msecs_to_jiffies(100));
+	} else {
+		if (test_and_clear_bit(ATKBD_LED_EVENT_BIT, &atkbd->event_mask))
+			atkbd_set_leds(atkbd);
 
-	if (test_and_clear_bit(ATKBD_REP_EVENT_BIT, &atkbd->event_mask))
-		atkbd_set_repeat_rate(atkbd);
+		if (test_and_clear_bit(ATKBD_REP_EVENT_BIT, &atkbd->event_mask))
+			atkbd_set_repeat_rate(atkbd);
+	}
 
 	mutex_unlock(&atkbd->event_mutex);
 }
@@ -767,13 +785,13 @@ static int atkbd_select_set(struct atkbd *atkbd, int target_set, int allow_extra
 	return 3;
 }
 
-static int atkbd_activate(struct atkbd *atkbd)
+static int atkbd_reset_state(struct atkbd *atkbd)
 {
-	struct ps2dev *ps2dev = &atkbd->ps2dev;
+        struct ps2dev *ps2dev = &atkbd->ps2dev;
 	unsigned char param[1];
 
 /*
- * Set the LEDs to a defined state.
+ * Set the LEDs to a predefined state (all off).
  */
 
 	param[0] = 0;
@@ -787,6 +805,13 @@ static int atkbd_activate(struct atkbd *atkbd)
 	param[0] = 0;
 	if (ps2_command(ps2dev, param, ATKBD_CMD_SETREP))
 		return -1;
+
+	return 0;
+}
+
+static int atkbd_activate(struct atkbd *atkbd)
+{
+	struct ps2dev *ps2dev = &atkbd->ps2dev;
 
 /*
  * Enable the keyboard to receive keystrokes.
@@ -809,6 +834,8 @@ static int atkbd_activate(struct atkbd *atkbd)
 static void atkbd_cleanup(struct serio *serio)
 {
 	struct atkbd *atkbd = serio_get_drvdata(serio);
+
+	atkbd_disable(atkbd);
 	ps2_command(&atkbd->ps2dev, NULL, ATKBD_CMD_RESET_BAT);
 }
 
@@ -824,8 +851,7 @@ static void atkbd_disconnect(struct serio *serio)
 	atkbd_disable(atkbd);
 
 	/* make sure we don't have a command in flight */
-	synchronize_sched();  /* Allow atkbd_interrupt()s to complete. */
-	flush_scheduled_work();
+	cancel_delayed_work_sync(&atkbd->event_work);
 
 	sysfs_remove_group(&serio->dev.kobj, &atkbd_attribute_group);
 	input_unregister_device(atkbd->dev);
@@ -834,6 +860,87 @@ static void atkbd_disconnect(struct serio *serio)
 	kfree(atkbd);
 }
 
+/*
+ * generate release events for the keycodes given in data
+ */
+static void atkbd_apply_forced_release_keylist(struct atkbd* atkbd,
+						const void *data)
+{
+	const unsigned int *keys = data;
+	unsigned int i;
+
+	if (atkbd->set == 2)
+		for (i = 0; keys[i] != -1U; i++)
+			__set_bit(keys[i], atkbd->force_release_mask);
+}
+
+/*
+ * Most special keys (Fn+F?) on Dell laptops do not generate release
+ * events so we have to do it ourselves.
+ */
+static unsigned int atkbd_dell_laptop_forced_release_keys[] = {
+	0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8f, 0x93, -1U
+};
+
+/*
+ * Perform fixup for HP system that doesn't generate release
+ * for its video switch
+ */
+static unsigned int atkbd_hp_forced_release_keys[] = {
+	0x94, -1U
+};
+
+/*
+ * Samsung NC10,NC20 with Fn+F? key release not working
+ */
+static unsigned int atkbd_samsung_forced_release_keys[] = {
+	0x82, 0x83, 0x84, 0x86, 0x88, 0x89, 0xb3, 0xf7, 0xf9, -1U
+};
+
+/*
+ * Amilo Pi 3525 key release for Fn+Volume keys not working
+ */
+static unsigned int atkbd_amilo_pi3525_forced_release_keys[] = {
+	0x20, 0xa0, 0x2e, 0xae, 0x30, 0xb0, -1U
+};
+
+/*
+ * Amilo Xi 3650 key release for light touch bar not working
+ */
+static unsigned int atkbd_amilo_xi3650_forced_release_keys[] = {
+	0x67, 0xed, 0x90, 0xa2, 0x99, 0xa4, 0xae, 0xb0, -1U
+};
+
+/*
+ * Soltech TA12 system with broken key release on volume keys and mute key
+ */
+static unsigned int atkdb_soltech_ta12_forced_release_keys[] = {
+	0xa0, 0xae, 0xb0, -1U
+};
+
+/*
+ * Many notebooks don't send key release event for volume up/down
+ * keys, with key list below common among them
+ */
+static unsigned int atkbd_volume_forced_release_keys[] = {
+	0xae, 0xb0, -1U
+};
+
+/*
+ * OQO 01+ multimedia keys (64--66) generate e0 6x upon release whereas
+ * they should be generating e4-e6 (0x80 | code).
+ */
+static unsigned int atkbd_oqo_01plus_scancode_fixup(struct atkbd *atkbd,
+						    unsigned int code)
+{
+	if (atkbd->translated && atkbd->emul == 1 &&
+	    (code == 0x64 || code == 0x65 || code == 0x66)) {
+		atkbd->emul = 0;
+		code |= 0x80;
+	}
+
+	return code;
+}
 
 /*
  * atkbd_set_keycode_table() initializes keyboard's keycode table
@@ -842,17 +949,20 @@ static void atkbd_disconnect(struct serio *serio)
 
 static void atkbd_set_keycode_table(struct atkbd *atkbd)
 {
+	unsigned int scancode;
 	int i, j;
 
 	memset(atkbd->keycode, 0, sizeof(atkbd->keycode));
+	bitmap_zero(atkbd->force_release_mask, ATKBD_KEYMAP_SIZE);
 
 	if (atkbd->translated) {
 		for (i = 0; i < 128; i++) {
-			atkbd->keycode[i] = atkbd_set2_keycode[atkbd_unxlate_table[i]];
-			atkbd->keycode[i | 0x80] = atkbd_set2_keycode[atkbd_unxlate_table[i] | 0x80];
+			scancode = atkbd_unxlate_table[i];
+			atkbd->keycode[i] = atkbd_set2_keycode[scancode];
+			atkbd->keycode[i | 0x80] = atkbd_set2_keycode[scancode | 0x80];
 			if (atkbd->scroll)
 				for (j = 0; j < ARRAY_SIZE(atkbd_scroll_keys); j++)
-					if ((atkbd_unxlate_table[i] | 0x80) == atkbd_scroll_keys[j].set2)
+					if ((scancode | 0x80) == atkbd_scroll_keys[j].set2)
 						atkbd->keycode[i | 0x80] = atkbd_scroll_keys[j].keycode;
 		}
 	} else if (atkbd->set == 3) {
@@ -861,12 +971,29 @@ static void atkbd_set_keycode_table(struct atkbd *atkbd)
 		memcpy(atkbd->keycode, atkbd_set2_keycode, sizeof(atkbd->keycode));
 
 		if (atkbd->scroll)
-			for (i = 0; i < ARRAY_SIZE(atkbd_scroll_keys); i++)
-				atkbd->keycode[atkbd_scroll_keys[i].set2] = atkbd_scroll_keys[i].keycode;
+			for (i = 0; i < ARRAY_SIZE(atkbd_scroll_keys); i++) {
+				scancode = atkbd_scroll_keys[i].set2;
+				atkbd->keycode[scancode] = atkbd_scroll_keys[i].keycode;
+		}
 	}
 
-	atkbd->keycode[atkbd_compat_scancode(atkbd, ATKBD_RET_HANGEUL)] = KEY_HANGUEL;
-	atkbd->keycode[atkbd_compat_scancode(atkbd, ATKBD_RET_HANJA)] = KEY_HANJA;
+/*
+ * HANGEUL and HANJA keys do not send release events so we need to
+ * generate such events ourselves
+ */
+	scancode = atkbd_compat_scancode(atkbd, ATKBD_RET_HANGEUL);
+	atkbd->keycode[scancode] = KEY_HANGEUL;
+	__set_bit(scancode, atkbd->force_release_mask);
+
+	scancode = atkbd_compat_scancode(atkbd, ATKBD_RET_HANJA);
+	atkbd->keycode[scancode] = KEY_HANJA;
+	__set_bit(scancode, atkbd->force_release_mask);
+
+/*
+ * Perform additional fixups
+ */
+	if (atkbd_platform_fixup)
+		atkbd_platform_fixup(atkbd, atkbd_platform_fixup_data);
 }
 
 /*
@@ -926,16 +1053,16 @@ static void atkbd_set_device_attrs(struct atkbd *atkbd)
 		input_dev->evbit[0] |= BIT_MASK(EV_REL);
 		input_dev->relbit[0] = BIT_MASK(REL_WHEEL) |
 			BIT_MASK(REL_HWHEEL);
-		set_bit(BTN_MIDDLE, input_dev->keybit);
+		__set_bit(BTN_MIDDLE, input_dev->keybit);
 	}
 
 	input_dev->keycode = atkbd->keycode;
-	input_dev->keycodesize = sizeof(unsigned char);
+	input_dev->keycodesize = sizeof(unsigned short);
 	input_dev->keycodemax = ARRAY_SIZE(atkbd_set2_keycode);
 
-	for (i = 0; i < 512; i++)
+	for (i = 0; i < ATKBD_KEYMAP_SIZE; i++)
 		if (atkbd->keycode[i] && atkbd->keycode[i] < ATKBD_SPECIAL)
-			set_bit(atkbd->keycode[i], input_dev->keybit);
+			__set_bit(atkbd->keycode[i], input_dev->keybit);
 }
 
 /*
@@ -992,6 +1119,7 @@ static int atkbd_connect(struct serio *serio, struct serio_driver *drv)
 		}
 
 		atkbd->set = atkbd_select_set(atkbd, atkbd_set, atkbd_extra);
+		atkbd_reset_state(atkbd);
 		atkbd_activate(atkbd);
 
 	} else {
@@ -1047,13 +1175,17 @@ static int atkbd_reconnect(struct serio *serio)
 
 		atkbd_activate(atkbd);
 
-/*
- * Restore repeat rate and LEDs (that were reset by atkbd_activate)
- * to pre-resume state
- */
+		/*
+		 * Restore LED state and repeat rate. While input core
+		 * will do this for us at resume time reconnect may happen
+		 * because user requested it via sysfs or simply because
+		 * keyboard was unplugged and plugged in again so we need
+		 * to do it ourselves here.
+		 */
+		atkbd_set_leds(atkbd);
 		if (!atkbd->softrepeat)
 			atkbd_set_repeat_rate(atkbd);
-		atkbd_set_leds(atkbd);
+
 	}
 
 	atkbd_enable(atkbd);
@@ -1155,15 +1287,13 @@ static ssize_t atkbd_set_extra(struct atkbd *atkbd, const char *buf, size_t coun
 {
 	struct input_dev *old_dev, *new_dev;
 	unsigned long value;
-	char *rest;
 	int err;
 	unsigned char old_extra, old_set;
 
 	if (!atkbd->write)
 		return -EIO;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 1)
+	if (strict_strtoul(buf, 10, &value) || value > 1)
 		return -EINVAL;
 
 	if (atkbd->extra != value) {
@@ -1182,6 +1312,7 @@ static ssize_t atkbd_set_extra(struct atkbd *atkbd, const char *buf, size_t coun
 
 		atkbd->dev = new_dev;
 		atkbd->set = atkbd_select_set(atkbd, atkbd->set, value);
+		atkbd_reset_state(atkbd);
 		atkbd_activate(atkbd);
 		atkbd_set_keycode_table(atkbd);
 		atkbd_set_device_attrs(atkbd);
@@ -1203,6 +1334,33 @@ static ssize_t atkbd_set_extra(struct atkbd *atkbd, const char *buf, size_t coun
 	return count;
 }
 
+static ssize_t atkbd_show_force_release(struct atkbd *atkbd, char *buf)
+{
+	size_t len = bitmap_scnlistprintf(buf, PAGE_SIZE - 2,
+			atkbd->force_release_mask, ATKBD_KEYMAP_SIZE);
+
+	buf[len++] = '\n';
+	buf[len] = '\0';
+
+	return len;
+}
+
+static ssize_t atkbd_set_force_release(struct atkbd *atkbd,
+					const char *buf, size_t count)
+{
+	/* 64 bytes on stack should be acceptable */
+	DECLARE_BITMAP(new_mask, ATKBD_KEYMAP_SIZE);
+	int err;
+
+	err = bitmap_parselist(buf, new_mask, ATKBD_KEYMAP_SIZE);
+	if (err)
+		return err;
+
+	memcpy(atkbd->force_release_mask, new_mask, sizeof(atkbd->force_release_mask));
+	return count;
+}
+
+
 static ssize_t atkbd_show_scroll(struct atkbd *atkbd, char *buf)
 {
 	return sprintf(buf, "%d\n", atkbd->scroll ? 1 : 0);
@@ -1212,12 +1370,10 @@ static ssize_t atkbd_set_scroll(struct atkbd *atkbd, const char *buf, size_t cou
 {
 	struct input_dev *old_dev, *new_dev;
 	unsigned long value;
-	char *rest;
 	int err;
 	unsigned char old_scroll;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 1)
+	if (strict_strtoul(buf, 10, &value) || value > 1)
 		return -EINVAL;
 
 	if (atkbd->scroll != value) {
@@ -1258,15 +1414,13 @@ static ssize_t atkbd_set_set(struct atkbd *atkbd, const char *buf, size_t count)
 {
 	struct input_dev *old_dev, *new_dev;
 	unsigned long value;
-	char *rest;
 	int err;
 	unsigned char old_set, old_extra;
 
 	if (!atkbd->write)
 		return -EIO;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || (value != 2 && value != 3))
+	if (strict_strtoul(buf, 10, &value) || (value != 2 && value != 3))
 		return -EINVAL;
 
 	if (atkbd->set != value) {
@@ -1280,6 +1434,7 @@ static ssize_t atkbd_set_set(struct atkbd *atkbd, const char *buf, size_t count)
 
 		atkbd->dev = new_dev;
 		atkbd->set = atkbd_select_set(atkbd, value, atkbd->extra);
+		atkbd_reset_state(atkbd);
 		atkbd_activate(atkbd);
 		atkbd_set_keycode_table(atkbd);
 		atkbd_set_device_attrs(atkbd);
@@ -1309,15 +1464,13 @@ static ssize_t atkbd_set_softrepeat(struct atkbd *atkbd, const char *buf, size_t
 {
 	struct input_dev *old_dev, *new_dev;
 	unsigned long value;
-	char *rest;
 	int err;
 	unsigned char old_softrepeat, old_softraw;
 
 	if (!atkbd->write)
 		return -EIO;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 1)
+	if (strict_strtoul(buf, 10, &value) || value > 1)
 		return -EINVAL;
 
 	if (atkbd->softrepeat != value) {
@@ -1361,12 +1514,10 @@ static ssize_t atkbd_set_softraw(struct atkbd *atkbd, const char *buf, size_t co
 {
 	struct input_dev *old_dev, *new_dev;
 	unsigned long value;
-	char *rest;
 	int err;
 	unsigned char old_softraw;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 1)
+	if (strict_strtoul(buf, 10, &value) || value > 1)
 		return -EINVAL;
 
 	if (atkbd->softraw != value) {
@@ -1401,9 +1552,173 @@ static ssize_t atkbd_show_err_count(struct atkbd *atkbd, char *buf)
 	return sprintf(buf, "%lu\n", atkbd->err_count);
 }
 
+static int __init atkbd_setup_forced_release(const struct dmi_system_id *id)
+{
+	atkbd_platform_fixup = atkbd_apply_forced_release_keylist;
+	atkbd_platform_fixup_data = id->driver_data;
+
+	return 0;
+}
+
+static int __init atkbd_setup_scancode_fixup(const struct dmi_system_id *id)
+{
+	atkbd_platform_scancode_fixup = id->driver_data;
+
+	return 0;
+}
+
+static struct dmi_system_id atkbd_dmi_quirk_table[] __initdata = {
+	{
+		.ident = "Dell Laptop",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_MATCH(DMI_CHASSIS_TYPE, "8"), /* Portable */
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_dell_laptop_forced_release_keys,
+	},
+	{
+		.ident = "Dell Laptop",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
+			DMI_MATCH(DMI_CHASSIS_TYPE, "8"), /* Portable */
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_dell_laptop_forced_release_keys,
+	},
+	{
+		.ident = "HP 2133",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "HP 2133"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_hp_forced_release_keys,
+	},
+	{
+		.ident = "HP Pavilion ZV6100",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Pavilion ZV6100"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_volume_forced_release_keys,
+	},
+	{
+		.ident = "HP Presario R4000",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Presario R4000"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_volume_forced_release_keys,
+	},
+	{
+		.ident = "HP Presario R4100",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Presario R4100"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_volume_forced_release_keys,
+	},
+	{
+		.ident = "HP Presario R4200",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Presario R4200"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_volume_forced_release_keys,
+	},
+	{
+		.ident = "Inventec Symphony",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "INVENTEC"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "SYMPHONY 6.0/7.0"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_volume_forced_release_keys,
+	},
+	{
+		.ident = "Samsung NC10",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "SAMSUNG ELECTRONICS CO., LTD."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "NC10"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_samsung_forced_release_keys,
+	},
+	{
+		.ident = "Samsung NC20",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "SAMSUNG ELECTRONICS CO., LTD."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "NC20"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_samsung_forced_release_keys,
+	},
+	{
+		.ident = "Samsung SQ45S70S",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "SAMSUNG ELECTRONICS CO., LTD."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "SQ45S70S"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_samsung_forced_release_keys,
+	},
+	{
+		.ident = "Fujitsu Amilo PA 1510",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "AMILO Pa 1510"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_volume_forced_release_keys,
+	},
+	{
+		.ident = "Fujitsu Amilo Pi 3525",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "AMILO Pi 3525"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_amilo_pi3525_forced_release_keys,
+	},
+	{
+		.ident = "Fujitsu Amilo Xi 3650",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "AMILO Xi 3650"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkbd_amilo_xi3650_forced_release_keys,
+	},
+	{
+		.ident = "Soltech Corporation TA12",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Soltech Corporation"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "TA12"),
+		},
+		.callback = atkbd_setup_forced_release,
+		.driver_data = atkdb_soltech_ta12_forced_release_keys,
+	},
+	{
+		.ident = "OQO Model 01+",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "OQO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ZEPTO"),
+		},
+		.callback = atkbd_setup_scancode_fixup,
+		.driver_data = atkbd_oqo_01plus_scancode_fixup,
+	},
+	{ }
+};
 
 static int __init atkbd_init(void)
 {
+	dmi_check_system(atkbd_dmi_quirk_table);
+
 	return serio_register_driver(&atkbd_drv);
 }
 

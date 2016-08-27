@@ -22,7 +22,7 @@
 #ifndef __CONNECTOR_H
 #define __CONNECTOR_H
 
-#include <asm/types.h>
+#include <linux/types.h>
 
 #define CN_IDX_CONNECTOR		0xffffffff
 #define CN_VAL_CONNECTOR		0xffffffff
@@ -38,8 +38,13 @@
 #define CN_W1_VAL			0x1
 #define CN_IDX_V86D			0x4
 #define CN_VAL_V86D_UVESAFB		0x1
+#define CN_IDX_BB			0x5	/* BlackBoard, from the TSP GPL sampling framework */
+#define CN_DST_IDX			0x6
+#define CN_DST_VAL			0x1
+#define CN_IDX_DM			0x7	/* Device Mapper */
+#define CN_VAL_DM_USERSPACE_LOG		0x1
 
-#define CN_NETLINK_USERS		5
+#define CN_NETLINK_USERS		8
 
 /*
  * Maximum connector's message size.
@@ -108,11 +113,16 @@ struct cn_queue_dev {
 	unsigned char name[CN_CBQ_NAMELEN];
 
 	struct workqueue_struct *cn_queue;
+	/* Sent to kevent to create cn_queue only when needed */
+	struct work_struct wq_creation;
+	/* Tell if the wq_creation job is pending/completed */
+	atomic_t wq_requested;
+	/* Wait for cn_queue to be created */
+	wait_queue_head_t wq_created;
 
 	struct list_head queue_list;
 	spinlock_t queue_lock;
 
-	int netlink_groups;
 	struct sock *nls;
 };
 
@@ -122,26 +132,21 @@ struct cn_callback_id {
 };
 
 struct cn_callback_data {
-	void (*destruct_data) (void *);
-	void *ddata;
-	
-	void *callback_priv;
-	void (*callback) (void *);
+	struct sk_buff *skb;
+	void (*callback) (struct cn_msg *, struct netlink_skb_parms *);
 
 	void *free;
 };
 
 struct cn_callback_entry {
 	struct list_head callback_entry;
-	struct cn_callback *cb;
 	struct work_struct work;
 	struct cn_queue_dev *pdev;
 
 	struct cn_callback_id id;
 	struct cn_callback_data data;
 
-	int seq, group;
-	struct sock *nls;
+	u32 seq, group;
 };
 
 struct cn_ctl_entry {
@@ -159,12 +164,14 @@ struct cn_dev {
 	struct cn_queue_dev *cbdev;
 };
 
-int cn_add_callback(struct cb_id *, char *, void (*callback) (void *));
+int cn_add_callback(struct cb_id *, char *, void (*callback) (struct cn_msg *, struct netlink_skb_parms *));
 void cn_del_callback(struct cb_id *);
 int cn_netlink_send(struct cn_msg *, u32, gfp_t);
 
-int cn_queue_add_callback(struct cn_queue_dev *dev, char *name, struct cb_id *id, void (*callback)(void *));
+int cn_queue_add_callback(struct cn_queue_dev *dev, char *name, struct cb_id *id, void (*callback)(struct cn_msg *, struct netlink_skb_parms *));
 void cn_queue_del_callback(struct cn_queue_dev *dev, struct cb_id *id);
+
+int queue_cn_work(struct cn_callback_entry *cbq, struct work_struct *work);
 
 struct cn_queue_dev *cn_queue_alloc_dev(char *name, struct sock *);
 void cn_queue_free_dev(struct cn_queue_dev *dev);
@@ -172,8 +179,6 @@ void cn_queue_free_dev(struct cn_queue_dev *dev);
 int cn_cb_equal(struct cb_id *, struct cb_id *);
 
 void cn_queue_wrapper(struct work_struct *work);
-
-extern int cn_already_initialized;
 
 #endif				/* __KERNEL__ */
 #endif				/* __CONNECTOR_H */

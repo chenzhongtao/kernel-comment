@@ -30,8 +30,10 @@
 #include <linux/wait.h>
 #include <linux/compiler.h>
 #include <asm/uaccess.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
+#include <linux/smp_lock.h>
 
 #include <linux/device.h>
 #include <linux/moduleparam.h>
@@ -261,8 +263,6 @@ static const char *CHIP;
 
 #define ERROR(dev,fmt,args...) \
 	xprintk(dev , KERN_ERR , fmt , ## args)
-#define WARN(dev,fmt,args...) \
-	xprintk(dev , KERN_WARNING , fmt , ## args)
 #define INFO(dev,fmt,args...) \
 	xprintk(dev , KERN_INFO , fmt , ## args)
 
@@ -385,9 +385,8 @@ ep_read (struct file *fd, char __user *buf, size_t len, loff_t *ptr)
 		return value;
 
 	/* halt any endpoint by doing a "wrong direction" i/o call */
-	if (data->desc.bEndpointAddress & USB_DIR_IN) {
-		if ((data->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
-				== USB_ENDPOINT_XFER_ISOC)
+	if (usb_endpoint_dir_in(&data->desc)) {
+		if (usb_endpoint_xfer_isoc(&data->desc))
 			return -EINVAL;
 		DBG (data->dev, "%s halt\n", data->name);
 		spin_lock_irq (&data->dev->lock);
@@ -429,9 +428,8 @@ ep_write (struct file *fd, const char __user *buf, size_t len, loff_t *ptr)
 		return value;
 
 	/* halt any endpoint by doing a "wrong direction" i/o call */
-	if (!(data->desc.bEndpointAddress & USB_DIR_IN)) {
-		if ((data->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
-				== USB_ENDPOINT_XFER_ISOC)
+	if (!usb_endpoint_dir_in(&data->desc)) {
+		if (usb_endpoint_xfer_isoc(&data->desc))
 			return -EINVAL;
 		DBG (data->dev, "%s halt\n", data->name);
 		spin_lock_irq (&data->dev->lock);
@@ -483,8 +481,7 @@ ep_release (struct inode *inode, struct file *fd)
 	return 0;
 }
 
-static int ep_ioctl (struct inode *inode, struct file *fd,
-		unsigned code, unsigned long value)
+static long ep_ioctl(struct file *fd, unsigned code, unsigned long value)
 {
 	struct ep_data		*data = fd->private_data;
 	int			status;
@@ -693,7 +690,7 @@ ep_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	struct ep_data		*epdata = iocb->ki_filp->private_data;
 	char			*buf;
 
-	if (unlikely(epdata->desc.bEndpointAddress & USB_DIR_IN))
+	if (unlikely(usb_endpoint_dir_in(&epdata->desc)))
 		return -EINVAL;
 
 	buf = kmalloc(iocb->ki_left, GFP_KERNEL);
@@ -713,7 +710,7 @@ ep_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	size_t			len = 0;
 	int			i = 0;
 
-	if (unlikely(!(epdata->desc.bEndpointAddress & USB_DIR_IN)))
+	if (unlikely(!usb_endpoint_dir_in(&epdata->desc)))
 		return -EINVAL;
 
 	buf = kmalloc(iocb->ki_left, GFP_KERNEL);
@@ -740,7 +737,7 @@ static const struct file_operations ep_io_operations = {
 
 	.read =		ep_read,
 	.write =	ep_write,
-	.ioctl =	ep_ioctl,
+	.unlocked_ioctl = ep_ioctl,
 	.release =	ep_release,
 
 	.aio_read =	ep_aio_read,
@@ -1107,13 +1104,13 @@ scan:
 
 	switch (state) {
 	default:
-		DBG (dev, "fail %s, state %d\n", __FUNCTION__, state);
+		DBG (dev, "fail %s, state %d\n", __func__, state);
 		retval = -ESRCH;
 		break;
 	case STATE_DEV_UNCONNECTED:
 	case STATE_DEV_CONNECTED:
 		spin_unlock_irq (&dev->lock);
-		DBG (dev, "%s wait\n", __FUNCTION__);
+		DBG (dev, "%s wait\n", __func__);
 
 		/* wait for events */
 		retval = wait_event_interruptible (dev->wait,
@@ -1222,7 +1219,7 @@ ep0_write (struct file *fd, const char __user *buf, size_t len, loff_t *ptr)
 			DBG(dev, "bogus ep0out stall!\n");
 		}
 	} else
-		DBG (dev, "fail %s, state %d\n", __FUNCTION__, dev->state);
+		DBG (dev, "fail %s, state %d\n", __func__, dev->state);
 
 	spin_unlock_irq (&dev->lock);
 	return retval;
@@ -1233,7 +1230,7 @@ ep0_fasync (int f, struct file *fd, int on)
 {
 	struct dev_data		*dev = fd->private_data;
 	// caller must F_SETOWN before signal delivery happens
-	VDEBUG (dev, "%s %s\n", __FUNCTION__, on ? "on" : "off");
+	VDEBUG (dev, "%s %s\n", __func__, on ? "on" : "off");
 	return fasync_helper (f, fd, on, &dev->fasync);
 }
 
@@ -1253,7 +1250,6 @@ dev_release (struct inode *inode, struct file *fd)
 	 * alternatively, all host requests will time out.
 	 */
 
-	fasync_helper (-1, fd, 0, &dev->fasync);
 	kfree (dev->buf);
 	dev->buf = NULL;
 	put_dev (dev);
@@ -1294,15 +1290,18 @@ out:
        return mask;
 }
 
-static int dev_ioctl (struct inode *inode, struct file *fd,
-		unsigned code, unsigned long value)
+static long dev_ioctl (struct file *fd, unsigned code, unsigned long value)
 {
 	struct dev_data		*dev = fd->private_data;
 	struct usb_gadget	*gadget = dev->gadget;
+	long ret = -ENOTTY;
 
-	if (gadget->ops->ioctl)
-		return gadget->ops->ioctl (gadget, code, value);
-	return -ENOTTY;
+	if (gadget->ops->ioctl) {
+		lock_kernel();
+		ret = gadget->ops->ioctl (gadget, code, value);
+		unlock_kernel();
+	}
+	return ret;
 }
 
 /* used after device configuration */
@@ -1314,7 +1313,7 @@ static const struct file_operations ep0_io_operations = {
 	.write =	ep0_write,
 	.fasync =	ep0_fasync,
 	.poll =		ep0_poll,
-	.ioctl =	dev_ioctl,
+	.unlocked_ioctl =	dev_ioctl,
 	.release =	dev_release,
 };
 
@@ -1334,7 +1333,7 @@ static void make_qualifier (struct dev_data *dev)
 
 	qual.bLength = sizeof qual;
 	qual.bDescriptorType = USB_DT_DEVICE_QUALIFIER;
-	qual.bcdUSB = __constant_cpu_to_le16 (0x0200);
+	qual.bcdUSB = cpu_to_le16 (0x0200);
 
 	desc = dev->dev;
 	qual.bDeviceClass = desc->bDeviceClass;
@@ -1458,7 +1457,7 @@ gadgetfs_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	/* currently one config, two speeds */
 	case USB_REQ_SET_CONFIGURATION:
 		if (ctrl->bRequestType != 0)
-			break;
+			goto unrecognized;
 		if (0 == (u8) w_value) {
 			value = 0;
 			dev->current_config = 0;
@@ -1501,11 +1500,11 @@ gadgetfs_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 		}
 		break;
 
-#ifndef	CONFIG_USB_GADGET_PXA2XX
+#ifndef	CONFIG_USB_GADGET_PXA25X
 	/* PXA automagically handles this request too */
 	case USB_REQ_GET_CONFIGURATION:
 		if (ctrl->bRequestType != 0x80)
-			break;
+			goto unrecognized;
 		*(u8 *)req->buf = dev->current_config;
 		value = min (w_length, (u16) 1);
 		break;
@@ -1575,7 +1574,7 @@ static void destroy_ep_files (struct dev_data *dev)
 {
 	struct list_head	*entry, *tmp;
 
-	DBG (dev, "%s %d\n", __FUNCTION__, dev->state);
+	DBG (dev, "%s %d\n", __func__, dev->state);
 
 	/* dev->state must prevent interference */
 restart:
@@ -1662,7 +1661,7 @@ enomem1:
 	put_dev (dev);
 	kfree (data);
 enomem0:
-	DBG (dev, "%s enomem\n", __FUNCTION__);
+	DBG (dev, "%s enomem\n", __func__);
 	destroy_ep_files (dev);
 	return -ENOMEM;
 }
@@ -1672,7 +1671,7 @@ gadgetfs_unbind (struct usb_gadget *gadget)
 {
 	struct dev_data		*dev = get_gadget_data (gadget);
 
-	DBG (dev, "%s\n", __FUNCTION__);
+	DBG (dev, "%s\n", __func__);
 
 	spin_lock_irq (&dev->lock);
 	dev->state = STATE_DEV_UNBOUND;
@@ -1685,7 +1684,7 @@ gadgetfs_unbind (struct usb_gadget *gadget)
 	/* we've already been disconnected ... no i/o is active */
 	if (dev->req)
 		usb_ep_free_request (gadget->ep0, dev->req);
-	DBG (dev, "%s done\n", __FUNCTION__);
+	DBG (dev, "%s done\n", __func__);
 	put_dev (dev);
 }
 
@@ -1699,7 +1698,7 @@ gadgetfs_bind (struct usb_gadget *gadget)
 	if (!dev)
 		return -ESRCH;
 	if (0 != strcmp (CHIP, gadget->name)) {
-		printk (KERN_ERR "%s expected %s controller not %s\n",
+		pr_err("%s expected %s controller not %s\n",
 			shortname, CHIP, gadget->name);
 		return -ENODEV;
 	}
@@ -1908,7 +1907,7 @@ dev_config (struct file *fd, const char __user *buf, size_t len, loff_t *ptr)
 			|| dev->dev->bNumConfigurations != 1)
 		goto fail;
 	dev->dev->bNumConfigurations = 1;
-	dev->dev->bcdUSB = __constant_cpu_to_le16 (0x0200);
+	dev->dev->bcdUSB = cpu_to_le16 (0x0200);
 
 	/* triggers gadgetfs_bind(); then we can enumerate. */
 	spin_unlock_irq (&dev->lock);
@@ -1933,7 +1932,7 @@ dev_config (struct file *fd, const char __user *buf, size_t len, loff_t *ptr)
 
 fail:
 	spin_unlock_irq (&dev->lock);
-	pr_debug ("%s: %s fail %Zd, %p\n", shortname, __FUNCTION__, value, dev);
+	pr_debug ("%s: %s fail %Zd, %p\n", shortname, __func__, value, dev);
 	kfree (dev->buf);
 	dev->buf = NULL;
 	return value;
@@ -1964,7 +1963,7 @@ static const struct file_operations dev_init_operations = {
 	.open =		dev_open,
 	.write =	dev_config,
 	.fasync =	ep0_fasync,
-	.ioctl =	dev_ioctl,
+	.unlocked_ioctl = dev_ioctl,
 	.release =	dev_release,
 };
 
@@ -2001,7 +2000,6 @@ gadgetfs_make_inode (struct super_block *sb,
 		inode->i_mode = mode;
 		inode->i_uid = default_uid;
 		inode->i_gid = default_gid;
-		inode->i_blocks = 0;
 		inode->i_atime = inode->i_mtime = inode->i_ctime
 				= CURRENT_TIME;
 		inode->i_private = data;
@@ -2036,7 +2034,7 @@ gadgetfs_create_file (struct super_block *sb, char const *name,
 	return inode;
 }
 
-static struct super_operations gadget_fs_operations = {
+static const struct super_operations gadget_fs_operations = {
 	.statfs =	simple_statfs,
 	.drop_inode =	generic_delete_inode,
 };

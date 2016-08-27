@@ -17,7 +17,6 @@
 #include <linux/syscalls.h>
 #include <linux/mman.h>
 #include <linux/file.h>
-#include <linux/utsname.h>
 #include <linux/ipc.h>
 #include <linux/fs.h>
 
@@ -27,23 +26,6 @@
 #include <asm/traps.h>
 #include <asm/cacheflush.h>
 #include <asm/unistd.h>
-
-/*
- * sys_pipe() is the normal C calling standard for creating
- * a pipe. It's not the way unix traditionally does this, though.
- */
-asmlinkage int sys_pipe(unsigned long * fildes)
-{
-	int fd[2];
-	int error;
-
-	error = do_pipe(fd);
-	if (!error) {
-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
-			error = -EFAULT;
-	}
-	return error;
-}
 
 /* common code for old and new mmaps */
 static inline long do_mmap2(

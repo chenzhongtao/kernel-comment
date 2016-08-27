@@ -8,8 +8,8 @@
  *
  * Many modifications, and currently maintained, by
  *  Philip Blundell <philb@gnu.org>
- * Added the Compaq LTE  Alan Cox <alan@redhat.com>
- * Added MCA support Adam Fritzler <mid@auk.cx>
+ * Added the Compaq LTE  Alan Cox <alan@lxorguk.ukuu.org.uk>
+ * Added MCA support Adam Fritzler
  *
  * Note - this driver is experimental still - it has problems on faster
  * machines. Someone needs to sit down and go through it line by line with
@@ -202,7 +202,7 @@ static unsigned short start_code[] = {
 	0x0000,Cmd_MCast,
 	0x0076,                 /* link to next command */
 #define CONF_NR_MULTICAST 0x44
-	0x0000,                 /* number of multicast addresses */
+	0x0000,                 /* number of bytes in multicast address(es) */
 #define CONF_MULTICAST 0x46
 	0x0000, 0x0000, 0x0000, /* some addresses */
 	0x0000, 0x0000, 0x0000,
@@ -246,7 +246,8 @@ static char mca_irqmap[] = { 12, 9, 3, 4, 5, 10, 11, 15 };
 static int eexp_open(struct net_device *dev);
 static int eexp_close(struct net_device *dev);
 static void eexp_timeout(struct net_device *dev);
-static int eexp_xmit(struct sk_buff *buf, struct net_device *dev);
+static netdev_tx_t eexp_xmit(struct sk_buff *buf,
+			     struct net_device *dev);
 
 static irqreturn_t eexp_irq(int irq, void *dev_addr);
 static void eexp_set_multicast(struct net_device *dev);
@@ -456,8 +457,9 @@ static int eexp_open(struct net_device *dev)
 	if (!dev->irq || !irqrmap[dev->irq])
 		return -ENXIO;
 
-	ret = request_irq(dev->irq,&eexp_irq,0,dev->name,dev);
-	if (ret) return ret;
+	ret = request_irq(dev->irq, &eexp_irq, 0, dev->name, dev);
+	if (ret)
+		return ret;
 
 	if (!request_region(ioaddr, EEXP_IO_EXTENT, "EtherExpress")) {
 		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
@@ -649,7 +651,7 @@ static void eexp_timeout(struct net_device *dev)
  * Called to transmit a packet, or to allow us to right ourselves
  * if the kernel thinks we've died.
  */
-static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
+static netdev_tx_t eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 {
 	short length = buf->len;
 #ifdef CONFIG_SMP
@@ -663,7 +665,7 @@ static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 
 	if (buf->len < ETH_ZLEN) {
 		if (skb_padto(buf, ETH_ZLEN))
-			return 0;
+			return NETDEV_TX_OK;
 		length = ETH_ZLEN;
 	}
 
@@ -690,7 +692,7 @@ static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 	spin_unlock_irqrestore(&lp->lock, flags);
 #endif
 	enable_irq(dev->irq);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -768,7 +770,7 @@ static void eexp_cmd_clear(struct net_device *dev)
 	}
 }
 
-static irqreturn_t eexp_irq(int irq, void *dev_info)
+static irqreturn_t eexp_irq(int dummy, void *dev_info)
 {
 	struct net_device *dev = dev_info;
 	struct net_local *lp;
@@ -783,8 +785,7 @@ static irqreturn_t eexp_irq(int irq, void *dev_info)
 	old_read_ptr = inw(ioaddr+READ_PTR);
 	old_write_ptr = inw(ioaddr+WRITE_PTR);
 
-	outb(SIRQ_dis|irqrmap[irq],ioaddr+SET_IRQ);
-
+	outb(SIRQ_dis|irqrmap[dev->irq], ioaddr+SET_IRQ);
 
 	status = scb_status(dev);
 
@@ -851,7 +852,7 @@ static irqreturn_t eexp_irq(int irq, void *dev_info)
 
 	eexp_cmd_clear(dev);
 
-	outb(SIRQ_en|irqrmap[irq],ioaddr+SET_IRQ);
+	outb(SIRQ_en|irqrmap[dev->irq], ioaddr+SET_IRQ);
 
 #if NET_DEBUG > 6
 	printk("%s: leaving eexp_irq()\n", dev->name);
@@ -967,7 +968,6 @@ static void eexp_hw_rx_pio(struct net_device *dev)
 			        insw(ioaddr+DATAPORT, skb_put(skb,pkt_len),(pkt_len+1)>>1);
 				skb->protocol = eth_type_trans(skb,dev);
 				netif_rx(skb);
-				dev->last_rx = jiffies;
 				dev->stats.rx_packets++;
 				dev->stats.rx_bytes += pkt_len;
 			}
@@ -1044,10 +1044,21 @@ static void eexp_hw_tx_pio(struct net_device *dev, unsigned short *buf,
 	lp->last_tx = jiffies;
 }
 
+static const struct net_device_ops eexp_netdev_ops = {
+	.ndo_open 		= eexp_open,
+	.ndo_stop 		= eexp_close,
+	.ndo_start_xmit		= eexp_xmit,
+	.ndo_set_multicast_list = eexp_set_multicast,
+	.ndo_tx_timeout		= eexp_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 /*
  * Sanity check the suspected EtherExpress card
  * Read hardware address, reset card, size memory and initialize buffer
- * memory pointers. These are held in dev->priv, in case someone has more
+ * memory pointers. These are held in netdev_priv(), in case someone has more
  * than one card in a machine.
  */
 
@@ -1164,11 +1175,7 @@ static int __init eexp_hw_probe(struct net_device *dev, unsigned short ioaddr)
 	lp->rx_buf_start = TX_BUF_START + (lp->num_tx_bufs*TX_BUF_SIZE);
 	lp->width = buswidth;
 
-	dev->open = eexp_open;
-	dev->stop = eexp_close;
-	dev->hard_start_xmit = eexp_xmit;
-	dev->set_multicast_list = &eexp_set_multicast;
-	dev->tx_timeout = eexp_timeout;
+	dev->netdev_ops = &eexp_netdev_ops;
 	dev->watchdog_timeo = 2*HZ;
 
 	return register_netdev(dev);
@@ -1468,13 +1475,13 @@ static void eexp_hw_init586(struct net_device *dev)
 	outw(0x0000, ioaddr + 0x800c);
 	outw(0x0000, ioaddr + 0x800e);
 
-	for (i = 0; i < (sizeof(start_code)); i+=32) {
+	for (i = 0; i < ARRAY_SIZE(start_code) * 2; i+=32) {
 		int j;
 		outw(i, ioaddr + SM_PTR);
-		for (j = 0; j < 16; j+=2)
+		for (j = 0; j < 16 && (i+j)/2 < ARRAY_SIZE(start_code); j+=2)
 			outw(start_code[(i+j)/2],
 			     ioaddr+0x4000+j);
-		for (j = 0; j < 16; j+=2)
+		for (j = 0; j < 16 && (i+j+16)/2 < ARRAY_SIZE(start_code); j+=2)
 			outw(start_code[(i+j+16)/2],
 			     ioaddr+0x8000+j);
 	}
@@ -1569,7 +1576,7 @@ static void eexp_hw_init586(struct net_device *dev)
 
 static void eexp_setup_filter(struct net_device *dev)
 {
-	struct dev_mc_list *dmi = dev->mc_list;
+	struct dev_mc_list *dmi;
 	unsigned short ioaddr = dev->base_addr;
 	int count = dev->mc_count;
 	int i;
@@ -1580,9 +1587,9 @@ static void eexp_setup_filter(struct net_device *dev)
 	}
 
 	outw(CONF_NR_MULTICAST & ~31, ioaddr+SM_PTR);
-	outw(count, ioaddr+SHADOW(CONF_NR_MULTICAST));
-	for (i = 0; i < count; i++) {
-		unsigned short *data = (unsigned short *)dmi->dmi_addr;
+	outw(6*count, ioaddr+SHADOW(CONF_NR_MULTICAST));
+	for (i = 0, dmi = dev->mc_list; i < count; i++, dmi = dmi->next) {
+		unsigned short *data;
 		if (!dmi) {
 			printk(KERN_INFO "%s: too few multicast addresses\n", dev->name);
 			break;
@@ -1591,6 +1598,7 @@ static void eexp_setup_filter(struct net_device *dev)
 			printk(KERN_INFO "%s: invalid multicast address length given.\n", dev->name);
 			continue;
 		}
+		data = (unsigned short *)dmi->dmi_addr;
 		outw((CONF_MULTICAST+(6*i)) & ~31, ioaddr+SM_PTR);
 		outw(data[0], ioaddr+SHADOW(CONF_MULTICAST+(6*i)));
 		outw((CONF_MULTICAST+(6*i)+2) & ~31, ioaddr+SM_PTR);

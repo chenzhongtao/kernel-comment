@@ -1,30 +1,7 @@
 /*
- * File:         arch/blackfin/kernel/signal.c
- * Based on:
- * Author:
+ * Copyright 2004-2009 Analog Devices Inc.
  *
- * Created:
- * Description:
- *
- * Modified:
- *               Copyright 2004-2006 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later
  */
 
 #include <linux/signal.h>
@@ -38,8 +15,12 @@
 
 #include <asm/cacheflush.h>
 #include <asm/ucontext.h>
+#include <asm/fixed_code.h>
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
+
+/* Location of the trace bit in SYSCFG. */
+#define TRACE_BITS 0x0001
 
 struct fdpic_func_descriptor {
 	unsigned long	text;
@@ -50,18 +31,20 @@ struct rt_sigframe {
 	int sig;
 	struct siginfo *pinfo;
 	void *puc;
+	/* This is no longer needed by the kernel, but unfortunately userspace
+	 * code expects it to be there.  */
 	char retcode[8];
 	struct siginfo info;
 	struct ucontext uc;
 };
 
-asmlinkage int sys_sigaltstack(const stack_t * uss, stack_t * uoss)
+asmlinkage int sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss)
 {
 	return do_sigaltstack(uss, uoss, rdusp());
 }
 
 static inline int
-rt_restore_sigcontext(struct pt_regs *regs, struct sigcontext *sc, int *pr0)
+rt_restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc, int *pr0)
 {
 	unsigned long usp = 0;
 	int err = 0;
@@ -159,11 +142,6 @@ static inline int rt_setup_sigcontext(struct sigcontext *sc, struct pt_regs *reg
 	return err;
 }
 
-static inline void push_cache(unsigned long vaddr, unsigned int len)
-{
-	flush_icache_range(vaddr, vaddr + len);
-}
-
 static inline void *get_sigframe(struct k_sigaction *ka, struct pt_regs *regs,
 				 size_t frame_size)
 {
@@ -209,33 +187,33 @@ setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t * info,
 	err |= rt_setup_sigcontext(&frame->uc.uc_mcontext, regs);
 	err |= copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
 
-	/* Set up to return from userspace.  */
-	err |= __put_user(0x28, &(frame->retcode[0]));
-	err |= __put_user(0xe1, &(frame->retcode[1]));
-	err |= __put_user(0xad, &(frame->retcode[2]));
-	err |= __put_user(0x00, &(frame->retcode[3]));
-	err |= __put_user(0xa0, &(frame->retcode[4]));
-	err |= __put_user(0x00, &(frame->retcode[5]));
-
 	if (err)
 		goto give_sigsegv;
 
-	push_cache((unsigned long)&frame->retcode, sizeof(frame->retcode));
-
 	/* Set up registers for signal handler */
 	wrusp((unsigned long)frame);
-	if (get_personality & FDPIC_FUNCPTRS) {
+	if (current->personality & FDPIC_FUNCPTRS) {
 		struct fdpic_func_descriptor __user *funcptr =
 			(struct fdpic_func_descriptor *) ka->sa.sa_handler;
 		__get_user(regs->pc, &funcptr->text);
 		__get_user(regs->p3, &funcptr->GOT);
 	} else
 		regs->pc = (unsigned long)ka->sa.sa_handler;
-	regs->rets = (unsigned long)(frame->retcode);
+	regs->rets = SIGRETURN_STUB;
 
 	regs->r0 = frame->sig;
 	regs->r1 = (unsigned long)(&frame->info);
 	regs->r2 = (unsigned long)(&frame->uc);
+
+	/*
+	 * Clear the trace flag when entering the signal handler, but
+	 * notify any tracer that was single-stepping it. The tracer
+	 * may want to single-step inside the handler too.
+	 */
+	if (regs->syscfg & TRACE_BITS) {
+		regs->syscfg &= ~TRACE_BITS;
+		ptrace_notify(SIGTRAP);
+	}
 
 	return 0;
 

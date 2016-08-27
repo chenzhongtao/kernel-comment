@@ -20,7 +20,7 @@
 DECLARE_RWSEM(afs_proc_cells_sem);
 LIST_HEAD(afs_proc_cells);
 
-static struct list_head afs_cells = LIST_HEAD_INIT(afs_cells);
+static LIST_HEAD(afs_cells);
 static DEFINE_RWLOCK(afs_cells_lock);
 static DECLARE_RWSEM(afs_cells_sem); /* add/remove serialisation */
 static DECLARE_WAIT_QUEUE_HEAD(afs_cells_freeable_wq);
@@ -127,25 +127,31 @@ struct afs_cell *afs_cell_create(const char *name, char *vllist)
 
 	_enter("%s,%s", name, vllist);
 
+	down_write(&afs_cells_sem);
+	read_lock(&afs_cells_lock);
+	list_for_each_entry(cell, &afs_cells, link) {
+		if (strcasecmp(cell->name, name) == 0)
+			goto duplicate_name;
+	}
+	read_unlock(&afs_cells_lock);
+
 	cell = afs_cell_alloc(name, vllist);
 	if (IS_ERR(cell)) {
 		_leave(" = %ld", PTR_ERR(cell));
+		up_write(&afs_cells_sem);
 		return cell;
 	}
-
-	down_write(&afs_cells_sem);
 
 	/* add a proc directory for this cell */
 	ret = afs_proc_cell_setup(cell);
 	if (ret < 0)
 		goto error;
 
-#ifdef AFS_CACHING_SUPPORT
-	/* put it up for caching */
-	cachefs_acquire_cookie(afs_cache_netfs.primary_index,
-			       &afs_vlocation_cache_index_def,
-			       cell,
-			       &cell->cache);
+#ifdef CONFIG_AFS_FSCACHE
+	/* put it up for caching (this never returns an error) */
+	cell->cache = fscache_acquire_cookie(afs_cache_netfs.primary_index,
+					     &afs_cell_cache_index_def,
+					     cell);
 #endif
 
 	/* add to the cell lists */
@@ -167,6 +173,11 @@ error:
 	kfree(cell);
 	_leave(" = %d", ret);
 	return ERR_PTR(ret);
+
+duplicate_name:
+	read_unlock(&afs_cells_lock);
+	up_write(&afs_cells_sem);
+	return ERR_PTR(-EEXIST);
 }
 
 /*
@@ -350,10 +361,9 @@ static void afs_cell_destroy(struct afs_cell *cell)
 	list_del_init(&cell->proc_link);
 	up_write(&afs_proc_cells_sem);
 
-#ifdef AFS_CACHING_SUPPORT
-	cachefs_relinquish_cookie(cell->cache, 0);
+#ifdef CONFIG_AFS_FSCACHE
+	fscache_relinquish_cookie(cell->cache, 0);
 #endif
-
 	key_put(cell->anonymous_key);
 	kfree(cell);
 

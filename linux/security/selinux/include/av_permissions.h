@@ -79,6 +79,7 @@
 #define DIR__REPARENT                             0x00080000UL
 #define DIR__SEARCH                               0x00100000UL
 #define DIR__RMDIR                                0x00200000UL
+#define DIR__OPEN                                 0x00400000UL
 #define FILE__IOCTL                               0x00000001UL
 #define FILE__READ                                0x00000002UL
 #define FILE__WRITE                               0x00000004UL
@@ -99,6 +100,7 @@
 #define FILE__EXECUTE_NO_TRANS                    0x00020000UL
 #define FILE__ENTRYPOINT                          0x00040000UL
 #define FILE__EXECMOD                             0x00080000UL
+#define FILE__OPEN                                0x00100000UL
 #define LNK_FILE__IOCTL                           0x00000001UL
 #define LNK_FILE__READ                            0x00000002UL
 #define LNK_FILE__WRITE                           0x00000004UL
@@ -136,6 +138,7 @@
 #define CHR_FILE__EXECUTE_NO_TRANS                0x00020000UL
 #define CHR_FILE__ENTRYPOINT                      0x00040000UL
 #define CHR_FILE__EXECMOD                         0x00080000UL
+#define CHR_FILE__OPEN                            0x00100000UL
 #define BLK_FILE__IOCTL                           0x00000001UL
 #define BLK_FILE__READ                            0x00000002UL
 #define BLK_FILE__WRITE                           0x00000004UL
@@ -153,6 +156,7 @@
 #define BLK_FILE__SWAPON                          0x00004000UL
 #define BLK_FILE__QUOTAON                         0x00008000UL
 #define BLK_FILE__MOUNTON                         0x00010000UL
+#define BLK_FILE__OPEN                            0x00020000UL
 #define SOCK_FILE__IOCTL                          0x00000001UL
 #define SOCK_FILE__READ                           0x00000002UL
 #define SOCK_FILE__WRITE                          0x00000004UL
@@ -170,6 +174,7 @@
 #define SOCK_FILE__SWAPON                         0x00004000UL
 #define SOCK_FILE__QUOTAON                        0x00008000UL
 #define SOCK_FILE__MOUNTON                        0x00010000UL
+#define SOCK_FILE__OPEN                           0x00020000UL
 #define FIFO_FILE__IOCTL                          0x00000001UL
 #define FIFO_FILE__READ                           0x00000002UL
 #define FIFO_FILE__WRITE                          0x00000004UL
@@ -187,6 +192,7 @@
 #define FIFO_FILE__SWAPON                         0x00004000UL
 #define FIFO_FILE__QUOTAON                        0x00008000UL
 #define FIFO_FILE__MOUNTON                        0x00010000UL
+#define FIFO_FILE__OPEN                           0x00020000UL
 #define FD__USE                                   0x00000001UL
 #define SOCKET__IOCTL                             0x00000001UL
 #define SOCKET__READ                              0x00000002UL
@@ -292,6 +298,8 @@
 #define NODE__ENFORCE_DEST                        0x00000040UL
 #define NODE__DCCP_RECV                           0x00000080UL
 #define NODE__DCCP_SEND                           0x00000100UL
+#define NODE__RECVFROM                            0x00000200UL
+#define NODE__SENDTO                              0x00000400UL
 #define NETIF__TCP_RECV                           0x00000001UL
 #define NETIF__TCP_SEND                           0x00000002UL
 #define NETIF__UDP_RECV                           0x00000004UL
@@ -300,6 +308,8 @@
 #define NETIF__RAWIP_SEND                         0x00000020UL
 #define NETIF__DCCP_RECV                          0x00000040UL
 #define NETIF__DCCP_SEND                          0x00000080UL
+#define NETIF__INGRESS                            0x00000100UL
+#define NETIF__EGRESS                             0x00000200UL
 #define NETLINK_SOCKET__IOCTL                     0x00000001UL
 #define NETLINK_SOCKET__READ                      0x00000002UL
 #define NETLINK_SOCKET__WRITE                     0x00000004UL
@@ -413,6 +423,28 @@
 #define UNIX_DGRAM_SOCKET__RECV_MSG               0x00080000UL
 #define UNIX_DGRAM_SOCKET__SEND_MSG               0x00100000UL
 #define UNIX_DGRAM_SOCKET__NAME_BIND              0x00200000UL
+#define TUN_SOCKET__IOCTL                         0x00000001UL
+#define TUN_SOCKET__READ                          0x00000002UL
+#define TUN_SOCKET__WRITE                         0x00000004UL
+#define TUN_SOCKET__CREATE                        0x00000008UL
+#define TUN_SOCKET__GETATTR                       0x00000010UL
+#define TUN_SOCKET__SETATTR                       0x00000020UL
+#define TUN_SOCKET__LOCK                          0x00000040UL
+#define TUN_SOCKET__RELABELFROM                   0x00000080UL
+#define TUN_SOCKET__RELABELTO                     0x00000100UL
+#define TUN_SOCKET__APPEND                        0x00000200UL
+#define TUN_SOCKET__BIND                          0x00000400UL
+#define TUN_SOCKET__CONNECT                       0x00000800UL
+#define TUN_SOCKET__LISTEN                        0x00001000UL
+#define TUN_SOCKET__ACCEPT                        0x00002000UL
+#define TUN_SOCKET__GETOPT                        0x00004000UL
+#define TUN_SOCKET__SETOPT                        0x00008000UL
+#define TUN_SOCKET__SHUTDOWN                      0x00010000UL
+#define TUN_SOCKET__RECVFROM                      0x00020000UL
+#define TUN_SOCKET__SENDTO                        0x00040000UL
+#define TUN_SOCKET__RECV_MSG                      0x00080000UL
+#define TUN_SOCKET__SEND_MSG                      0x00100000UL
+#define TUN_SOCKET__NAME_BIND                     0x00200000UL
 #define PROCESS__FORK                             0x00000001UL
 #define PROCESS__TRANSITION                       0x00000002UL
 #define PROCESS__SIGCHLD                          0x00000004UL
@@ -498,6 +530,7 @@
 #define SYSTEM__SYSLOG_READ                       0x00000002UL
 #define SYSTEM__SYSLOG_MOD                        0x00000004UL
 #define SYSTEM__SYSLOG_CONSOLE                    0x00000008UL
+#define SYSTEM__MODULE_REQUEST                    0x00000010UL
 #define CAPABILITY__CHOWN                         0x00000001UL
 #define CAPABILITY__DAC_OVERRIDE                  0x00000002UL
 #define CAPABILITY__DAC_READ_SEARCH               0x00000004UL
@@ -529,6 +562,9 @@
 #define CAPABILITY__LEASE                         0x10000000UL
 #define CAPABILITY__AUDIT_WRITE                   0x20000000UL
 #define CAPABILITY__AUDIT_CONTROL                 0x40000000UL
+#define CAPABILITY__SETFCAP                       0x80000000UL
+#define CAPABILITY2__MAC_OVERRIDE                 0x00000001UL
+#define CAPABILITY2__MAC_ADMIN                    0x00000002UL
 #define NETLINK_ROUTE_SOCKET__IOCTL               0x00000001UL
 #define NETLINK_ROUTE_SOCKET__READ                0x00000002UL
 #define NETLINK_ROUTE_SOCKET__WRITE               0x00000004UL
@@ -695,6 +731,7 @@
 #define NETLINK_AUDIT_SOCKET__NLMSG_WRITE         0x00800000UL
 #define NETLINK_AUDIT_SOCKET__NLMSG_RELAY         0x01000000UL
 #define NETLINK_AUDIT_SOCKET__NLMSG_READPRIV      0x02000000UL
+#define NETLINK_AUDIT_SOCKET__NLMSG_TTY_AUDIT     0x04000000UL
 #define NETLINK_IP6FW_SOCKET__IOCTL               0x00000001UL
 #define NETLINK_IP6FW_SOCKET__READ                0x00000002UL
 #define NETLINK_IP6FW_SOCKET__WRITE               0x00000004UL
@@ -792,6 +829,10 @@
 #define PACKET__SEND                              0x00000001UL
 #define PACKET__RECV                              0x00000002UL
 #define PACKET__RELABELTO                         0x00000004UL
+#define PACKET__FLOW_IN                           0x00000008UL
+#define PACKET__FLOW_OUT                          0x00000010UL
+#define PACKET__FORWARD_IN                        0x00000020UL
+#define PACKET__FORWARD_OUT                       0x00000040UL
 #define KEY__VIEW                                 0x00000001UL
 #define KEY__READ                                 0x00000002UL
 #define KEY__WRITE                                0x00000004UL
@@ -824,3 +865,6 @@
 #define DCCP_SOCKET__NODE_BIND                    0x00400000UL
 #define DCCP_SOCKET__NAME_CONNECT                 0x00800000UL
 #define MEMPROTECT__MMAP_ZERO                     0x00000001UL
+#define PEER__RECV                                0x00000001UL
+#define KERNEL_SERVICE__USE_AS_OVERRIDE           0x00000001UL
+#define KERNEL_SERVICE__CREATE_FILES_AS           0x00000002UL

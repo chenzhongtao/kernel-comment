@@ -1,18 +1,18 @@
-/* SCTP kernel reference Implementation
+/* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
  * Copyright (c) 2001 Intel Corp.
  *
- * This file is part of the SCTP kernel reference Implementation
+ * This file is part of the SCTP kernel implementation
  *
- * The SCTP reference implementation is free software;
+ * This SCTP implementation is free software;
  * you can redistribute it and/or modify it under the terms of
  * the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
  *
- * The SCTP reference implementation is distributed in the hope that it
+ * This SCTP implementation is distributed in the hope that it
  * will be useful, but WITHOUT ANY WARRANTY; without even the implied
  *                 ************************
  * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -231,7 +231,7 @@ typedef enum {
 	SCTP_SS_LISTENING      = TCP_LISTEN,
 	SCTP_SS_ESTABLISHING   = TCP_SYN_SENT,
 	SCTP_SS_ESTABLISHED    = TCP_ESTABLISHED,
-	SCTP_SS_DISCONNECTING  = TCP_CLOSING,
+	SCTP_SS_CLOSING        = TCP_CLOSING,
 } sctp_sock_state_t;
 
 /* These functions map various type to printable names.  */
@@ -241,7 +241,9 @@ const char *sctp_tname(const sctp_subtype_t);	/* timeouts */
 const char *sctp_pname(const sctp_subtype_t);	/* primitives */
 
 /* This is a table of printable names of sctp_state_t's.  */
-extern const char *sctp_state_tbl[], *sctp_evttype_tbl[], *sctp_status_tbl[];
+extern const char *const sctp_state_tbl[];
+extern const char *const sctp_evttype_tbl[];
+extern const char *const sctp_status_tbl[];
 
 /* Maximum chunk length considering padding requirements. */
 enum { SCTP_MAX_CHUNK_LEN = ((1<<16) - sizeof(__u32)) };
@@ -261,7 +263,9 @@ enum { SCTP_ARBITRARY_COOKIE_ECHO_LEN = 200 };
  * must be less than 65535 (2^16 - 1), or we will have overflow
  * problems creating SACK's.
  */
-#define SCTP_TSN_MAP_SIZE 2048
+#define SCTP_TSN_MAP_INITIAL BITS_PER_LONG
+#define SCTP_TSN_MAP_INCREMENT SCTP_TSN_MAP_INITIAL
+#define SCTP_TSN_MAP_SIZE 4096
 #define SCTP_TSN_MAX_GAP  65535
 
 /* We will not record more than this many duplicate TSNs between two
@@ -359,42 +363,25 @@ typedef enum {
 	SCTP_SCOPE_UNUSABLE,		/* IPv4 unusable addresses */
 } sctp_scope_t;
 
+typedef enum {
+	SCTP_SCOPE_POLICY_DISABLE,	/* Disable IPv4 address scoping */
+	SCTP_SCOPE_POLICY_ENABLE,	/* Enable IPv4 address scoping */
+	SCTP_SCOPE_POLICY_PRIVATE,	/* Follow draft but allow IPv4 private addresses */
+	SCTP_SCOPE_POLICY_LINK,		/* Follow draft but allow IPv4 link local addresses */
+} sctp_scope_policy_t;
+
 /* Based on IPv4 scoping <draft-stewart-tsvwg-sctp-ipv4-00.txt>,
  * SCTP IPv4 unusable addresses: 0.0.0.0/8, 224.0.0.0/4, 198.18.0.0/24,
  * 192.88.99.0/24.
  * Also, RFC 8.4, non-unicast addresses are not considered valid SCTP
  * addresses.
  */
-#define IS_IPV4_UNUSABLE_ADDRESS(a) \
-	((htonl(INADDR_BROADCAST) == *a) || \
-	(MULTICAST(*a)) || \
-	(((unsigned char *)(a))[0] == 0) || \
-	((((unsigned char *)(a))[0] == 198) && \
-	(((unsigned char *)(a))[1] == 18) && \
-	(((unsigned char *)(a))[2] == 0)) || \
-	((((unsigned char *)(a))[0] == 192) && \
-	(((unsigned char *)(a))[1] == 88) && \
-	(((unsigned char *)(a))[2] == 99)))
-
-/* IPv4 Link-local addresses: 169.254.0.0/16.  */
-#define IS_IPV4_LINK_ADDRESS(a) \
-	((((unsigned char *)(a))[0] == 169) && \
-	(((unsigned char *)(a))[1] == 254))
-
-/* RFC 1918 "Address Allocation for Private Internets" defines the IPv4
- * private address space as the following:
- *
- * 10.0.0.0 - 10.255.255.255 (10/8 prefix)
- * 172.16.0.0.0 - 172.31.255.255 (172.16/12 prefix)
- * 192.168.0.0 - 192.168.255.255 (192.168/16 prefix)
- */
-#define IS_IPV4_PRIVATE_ADDRESS(a) \
-	((((unsigned char *)(a))[0] == 10) || \
-	((((unsigned char *)(a))[0] == 172) && \
-	(((unsigned char *)(a))[1] >= 16) && \
-	(((unsigned char *)(a))[1] < 32)) || \
-	((((unsigned char *)(a))[0] == 192) && \
-	(((unsigned char *)(a))[1] == 168)))
+#define IS_IPV4_UNUSABLE_ADDRESS(a)	    \
+	((htonl(INADDR_BROADCAST) == a) ||  \
+	 ipv4_is_multicast(a) ||	    \
+	 ipv4_is_zeronet(a) ||		    \
+	 ipv4_is_test_198(a) ||		    \
+	 ipv4_is_anycast_6to4(a))
 
 /* Flags used for the bind address copy functions.  */
 #define SCTP_ADDR6_ALLOWED	0x00000001	/* IPv6 address is allowed by

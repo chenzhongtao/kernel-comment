@@ -17,7 +17,7 @@
 	Annapolis MD 21403
 
     Fixed (again!) the missing interrupt locking on TX/RX shifting.
-    		Alan Cox <Alan.Cox@linux.org>
+	Alan Cox <alan@lxorguk.ukuu.org.uk>
 
     Removed calls to init_etherdev since they are no longer needed, and
     cleaned up modularization just a bit. The driver still allows only
@@ -29,16 +29,16 @@
     the board. Now getting 150K/second FTP with a 3c501 card. Still playing
     with a TX-TX optimisation to see if we can touch 180-200K/second as seems
     theoretically maximum.
-    		19950402 Alan Cox <Alan.Cox@linux.org>
+		19950402 Alan Cox <alan@lxorguk.ukuu.org.uk>
 
     Cleaned up for 2.3.x because we broke SMP now.
-    		20000208 Alan Cox <alan@redhat.com>
+		20000208 Alan Cox <alan@lxorguk.ukuu.org.uk>
 
     Check up pass for 2.5. Nothing significant changed
-    		20021009 Alan Cox <alan@redhat.com>
+		20021009 Alan Cox <alan@lxorguk.ukuu.org.uk>
 
     Fixed zero fill corner case
-    		20030104 Alan Cox <alan@redhat.com>
+		20030104 Alan Cox <alan@lxorguk.ukuu.org.uk>
 
 
    For the avoidance of doubt the "preferred form" of this code is one which
@@ -104,7 +104,7 @@
 
 
 static const char version[] =
-	DRV_NAME ".c: " DRV_VERSION " Alan Cox (alan@redhat.com).\n";
+	DRV_NAME ".c: " DRV_VERSION " Alan Cox (alan@lxorguk.ukuu.org.uk).\n";
 
 /*
  *	Braindamage remaining:
@@ -139,8 +139,8 @@ static const char version[] =
  *	The boilerplate probe code.
  */
 
-static int io=0x280;
-static int irq=5;
+static int io = 0x280;
+static int irq = 5;
 static int mem_start;
 
 /**
@@ -197,6 +197,17 @@ out:
 	return ERR_PTR(err);
 }
 
+static const struct net_device_ops el_netdev_ops = {
+	.ndo_open		= el_open,
+	.ndo_stop		= el1_close,
+	.ndo_start_xmit 	= el_start_xmit,
+	.ndo_tx_timeout		= el_timeout,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 /**
  *	el1_probe1:
  *	@dev: The device structure to use
@@ -229,8 +240,7 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 	 *	Read the station address PROM data from the special port.
 	 */
 
-	for (i = 0; i < 6; i++)
-	{
+	for (i = 0; i < 6; i++) {
 		outw(i, ioaddr + EL1_DATAPTR);
 		station_addr[i] = inb(ioaddr + EL1_SAPROM);
 	}
@@ -240,28 +250,24 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 	 */
 
 	if (station_addr[0] == 0x02  &&  station_addr[1] == 0x60
-		&& station_addr[2] == 0x8c)
-	{
+						&& station_addr[2] == 0x8c)
 		mname = "3c501";
-	} else if (station_addr[0] == 0x00  &&  station_addr[1] == 0x80
-	&& station_addr[2] == 0xC8)
-	{
+	else if (station_addr[0] == 0x00  &&  station_addr[1] == 0x80
+						&& station_addr[2] == 0xC8)
 		mname = "NP943";
-    	}
-    	else {
+	else {
 		release_region(ioaddr, EL1_IO_EXTENT);
 		return -ENODEV;
 	}
 
 	/*
-	 *	We auto-IRQ by shutting off the interrupt line and letting it float
-	 *	high.
+	 *	We auto-IRQ by shutting off the interrupt line and letting it
+	 *	float high.
 	 */
 
 	dev->irq = irq;
 
-	if (dev->irq < 2)
-	{
+	if (dev->irq < 2) {
 		unsigned long irq_mask;
 
 		irq_mask = probe_irq_on();
@@ -274,9 +280,8 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 		mdelay(20);
 		autoirq = probe_irq_off(irq_mask);
 
-		if (autoirq == 0)
-		{
-			printk(KERN_WARNING "%s probe at %#x failed to detect IRQ line.\n",
+		if (autoirq == 0) {
+			pr_warning("%s probe at %#x failed to detect IRQ line.\n",
 				mname, ioaddr);
 			release_region(ioaddr, EL1_IO_EXTENT);
 			return -EAGAIN;
@@ -292,30 +297,27 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 	if (autoirq)
 		dev->irq = autoirq;
 
-	printk(KERN_INFO "%s: %s EtherLink at %#lx, using %sIRQ %d.\n", dev->name, mname, dev->base_addr,
+	pr_info("%s: %s EtherLink at %#lx, using %sIRQ %d.\n",
+			dev->name, mname, dev->base_addr,
 			autoirq ? "auto":"assigned ", dev->irq);
 
 #ifdef CONFIG_IP_MULTICAST
-	printk(KERN_WARNING "WARNING: Use of the 3c501 in a multicast kernel is NOT recommended.\n");
+	pr_warning("WARNING: Use of the 3c501 in a multicast kernel is NOT recommended.\n");
 #endif
 
 	if (el_debug)
-		printk(KERN_DEBUG "%s", version);
+		pr_debug("%s", version);
 
-	memset(dev->priv, 0, sizeof(struct net_local));
 	lp = netdev_priv(dev);
+	memset(lp, 0, sizeof(struct net_local));
 	spin_lock_init(&lp->lock);
 
 	/*
 	 *	The EL1-specific entries in the device structure.
 	 */
 
-	dev->open = &el_open;
-	dev->hard_start_xmit = &el_start_xmit;
-	dev->tx_timeout = &el_timeout;
+	dev->netdev_ops = &el_netdev_ops;
 	dev->watchdog_timeo = HZ;
-	dev->stop = &el1_close;
-	dev->set_multicast_list = &set_multicast_list;
 	dev->ethtool_ops = &netdev_ethtool_ops;
 	return 0;
 }
@@ -341,9 +343,10 @@ static int el_open(struct net_device *dev)
 	unsigned long flags;
 
 	if (el_debug > 2)
-		printk(KERN_DEBUG "%s: Doing el_open()...", dev->name);
+		pr_debug("%s: Doing el_open()...\n", dev->name);
 
-	if ((retval = request_irq(dev->irq, &el_interrupt, 0, dev->name, dev)))
+	retval = request_irq(dev->irq, &el_interrupt, 0, dev->name, dev);
+	if (retval)
 		return retval;
 
 	spin_lock_irqsave(&lp->lock, flags);
@@ -371,8 +374,9 @@ static void el_timeout(struct net_device *dev)
 	int ioaddr = dev->base_addr;
 
 	if (el_debug)
-		printk (KERN_DEBUG "%s: transmit timed out, txsr %#2x axsr=%02x rxsr=%02x.\n",
-			dev->name, inb(TX_STATUS), inb(AX_STATUS), inb(RX_STATUS));
+		pr_debug("%s: transmit timed out, txsr %#2x axsr=%02x rxsr=%02x.\n",
+			dev->name, inb(TX_STATUS),
+			inb(AX_STATUS), inb(RX_STATUS));
 	dev->stats.tx_errors++;
 	outb(TX_NORM, TX_CMD);
 	outb(RX_NORM, RX_CMD);
@@ -405,7 +409,7 @@ static void el_timeout(struct net_device *dev)
  * no real choice.
  */
 
-static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
@@ -425,8 +429,7 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	netif_stop_queue(dev);
 
-	do
-	{
+	do {
 		int len = skb->len;
 		int pad = 0;
 		int gp_start;
@@ -435,10 +438,10 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (len < ETH_ZLEN)
 			pad = ETH_ZLEN - len;
 
-		gp_start = 0x800 - ( len + pad );
+		gp_start = 0x800 - (len + pad);
 
 		lp->tx_pkt_start = gp_start;
-    		lp->collisions = 0;
+		lp->collisions = 0;
 
 		dev->stats.tx_bytes += skb->len;
 
@@ -455,38 +458,40 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		lp->txing = 1;
 
 		/*
-		 *	Turn interrupts back on while we spend a pleasant afternoon
-		 *	loading bytes into the board
+		 *	Turn interrupts back on while we spend a pleasant
+		 *	afternoon loading bytes into the board
 		 */
 
 		spin_unlock_irqrestore(&lp->lock, flags);
 
-		outw(0x00, RX_BUF_CLR);		/* Set rx packet area to 0. */
-		outw(gp_start, GP_LOW);		/* aim - packet will be loaded into buffer start */
-		outsb(DATAPORT,buf,len);	/* load buffer (usual thing each byte increments the pointer) */
+		/* Set rx packet area to 0. */
+		outw(0x00, RX_BUF_CLR);
+		/* aim - packet will be loaded into buffer start */
+		outw(gp_start, GP_LOW);
+		/* load buffer (usual thing each byte increments the pointer) */
+		outsb(DATAPORT, buf, len);
 		if (pad) {
-			while(pad--)		/* Zero fill buffer tail */
+			while (pad--)		/* Zero fill buffer tail */
 				outb(0, DATAPORT);
 		}
-		outw(gp_start, GP_LOW);		/* the board reuses the same register */
+		/* the board reuses the same register */
+		outw(gp_start, GP_LOW);
 
-		if(lp->loading != 2)
-		{
-			outb(AX_XMIT, AX_CMD);		/* fire ... Trigger xmit.  */
-			lp->loading=0;
+		if (lp->loading != 2) {
+			/* fire ... Trigger xmit.  */
+			outb(AX_XMIT, AX_CMD);
+			lp->loading = 0;
 			dev->trans_start = jiffies;
 			if (el_debug > 2)
-				printk(KERN_DEBUG " queued xmit.\n");
-			dev_kfree_skb (skb);
-			return 0;
+				pr_debug(" queued xmit.\n");
+			dev_kfree_skb(skb);
+			return NETDEV_TX_OK;
 		}
 		/* A receive upset our load, despite our best efforts */
-		if(el_debug>2)
-			printk(KERN_DEBUG "%s: burped during tx load.\n", dev->name);
+		if (el_debug > 2)
+			pr_debug("%s: burped during tx load.\n", dev->name);
 		spin_lock_irqsave(&lp->lock, flags);
-	}
-	while(1);
-
+	} while (1);
 }
 
 /**
@@ -534,72 +539,65 @@ static irqreturn_t el_interrupt(int irq, void *dev_id)
 	 */
 
 	if (el_debug > 3)
-		printk(KERN_DEBUG "%s: el_interrupt() aux=%#02x", dev->name, axsr);
+		pr_debug("%s: el_interrupt() aux=%#02x\n", dev->name, axsr);
 
-        if(lp->loading==1 && !lp->txing)
-        	printk(KERN_WARNING "%s: Inconsistent state loading while not in tx\n",
-        		dev->name);
+	if (lp->loading == 1 && !lp->txing)
+		pr_warning("%s: Inconsistent state loading while not in tx\n",
+			dev->name);
 
-	if (lp->txing)
-	{
-
-    		/*
-    		 *	Board in transmit mode. May be loading. If we are
-    		 *	loading we shouldn't have got this.
-    		 */
-
+	if (lp->txing) {
+		/*
+		 *	Board in transmit mode. May be loading. If we are
+		 *	loading we shouldn't have got this.
+		 */
 		int txsr = inb(TX_STATUS);
 
-		if(lp->loading==1)
-		{
-			if(el_debug > 2)
-			{
-				printk(KERN_DEBUG "%s: Interrupt while loading [", dev->name);
-				printk(KERN_DEBUG " txsr=%02x gp=%04x rp=%04x]\n", txsr, inw(GP_LOW),inw(RX_LOW));
-			}
-			lp->loading=2;		/* Force a reload */
+		if (lp->loading == 1) {
+			if (el_debug > 2)
+				pr_debug("%s: Interrupt while loading [txsr=%02x gp=%04x rp=%04x]\n",
+					dev->name, txsr, inw(GP_LOW), inw(RX_LOW));
+
+			/* Force a reload */
+			lp->loading = 2;
 			spin_unlock(&lp->lock);
 			goto out;
 		}
-
 		if (el_debug > 6)
-			printk(KERN_DEBUG " txsr=%02x gp=%04x rp=%04x", txsr, inw(GP_LOW),inw(RX_LOW));
+			pr_debug("%s: txsr=%02x gp=%04x rp=%04x\n", dev->name,
+					txsr, inw(GP_LOW), inw(RX_LOW));
 
-		if ((axsr & 0x80) && (txsr & TX_READY) == 0)
-		{
+		if ((axsr & 0x80) && (txsr & TX_READY) == 0) {
 			/*
-			 *	FIXME: is there a logic to whether to keep on trying or
-			 *	reset immediately ?
+			 *	FIXME: is there a logic to whether to keep
+			 *	on trying or reset immediately ?
 			 */
-			if(el_debug>1)
-				printk(KERN_DEBUG "%s: Unusual interrupt during Tx, txsr=%02x axsr=%02x"
-			  		" gp=%03x rp=%03x.\n", dev->name, txsr, axsr,
-			inw(ioaddr + EL1_DATAPTR), inw(ioaddr + EL1_RXPTR));
+			if (el_debug > 1)
+				pr_debug("%s: Unusual interrupt during Tx, txsr=%02x axsr=%02x gp=%03x rp=%03x.\n",
+					dev->name, txsr, axsr,
+					inw(ioaddr + EL1_DATAPTR),
+					inw(ioaddr + EL1_RXPTR));
 			lp->txing = 0;
 			netif_wake_queue(dev);
-		}
-		else if (txsr & TX_16COLLISIONS)
-		{
+		} else if (txsr & TX_16COLLISIONS) {
 			/*
 			 *	Timed out
 			 */
 			if (el_debug)
-				printk (KERN_DEBUG "%s: Transmit failed 16 times, Ethernet jammed?\n",dev->name);
+				pr_debug("%s: Transmit failed 16 times, Ethernet jammed?\n", dev->name);
 			outb(AX_SYS, AX_CMD);
 			lp->txing = 0;
 			dev->stats.tx_aborted_errors++;
 			netif_wake_queue(dev);
-		}
-		else if (txsr & TX_COLLISION)
-		{
+		} else if (txsr & TX_COLLISION) {
 			/*
 			 *	Retrigger xmit.
 			 */
 
 			if (el_debug > 6)
-				printk(KERN_DEBUG " retransmitting after a collision.\n");
+				pr_debug("%s: retransmitting after a collision.\n", dev->name);
 			/*
-			 *	Poor little chip can't reset its own start pointer
+			 *	Poor little chip can't reset its own start
+			 *	pointer
 			 */
 
 			outb(AX_SYS, AX_CMD);
@@ -608,63 +606,54 @@ static irqreturn_t el_interrupt(int irq, void *dev_id)
 			dev->stats.collisions++;
 			spin_unlock(&lp->lock);
 			goto out;
-		}
-		else
-		{
+		} else {
 			/*
 			 *	It worked.. we will now fall through and receive
 			 */
 			dev->stats.tx_packets++;
 			if (el_debug > 6)
-				printk(KERN_DEBUG " Tx succeeded %s\n",
-		       			(txsr & TX_RDY) ? "." : "but tx is busy!");
+				pr_debug("%s: Tx succeeded %s\n", dev->name,
+					(txsr & TX_RDY) ? "." : "but tx is busy!");
 			/*
 			 *	This is safe the interrupt is atomic WRT itself.
 			 */
-
 			lp->txing = 0;
-			netif_wake_queue(dev);	/* In case more to transmit */
+			/* In case more to transmit */
+			netif_wake_queue(dev);
 		}
-	}
-	else
-	{
-    		/*
-    		 *	In receive mode.
-    		 */
+	} else {
+		/*
+		 *	In receive mode.
+		 */
 
 		int rxsr = inb(RX_STATUS);
 		if (el_debug > 5)
-			printk(KERN_DEBUG " rxsr=%02x txsr=%02x rp=%04x", rxsr, inb(TX_STATUS),inw(RX_LOW));
+			pr_debug("%s: rxsr=%02x txsr=%02x rp=%04x\n",
+				dev->name, rxsr, inb(TX_STATUS), inw(RX_LOW));
 		/*
 		 *	Just reading rx_status fixes most errors.
 		 */
 		if (rxsr & RX_MISSED)
 			dev->stats.rx_missed_errors++;
-		else if (rxsr & RX_RUNT)
-		{	/* Handled to avoid board lock-up. */
+		else if (rxsr & RX_RUNT) {
+			/* Handled to avoid board lock-up. */
 			dev->stats.rx_length_errors++;
 			if (el_debug > 5)
-				printk(KERN_DEBUG " runt.\n");
-		}
-		else if (rxsr & RX_GOOD)
-		{
+				pr_debug("%s: runt.\n", dev->name);
+		} else if (rxsr & RX_GOOD) {
 			/*
 			 *	Receive worked.
 			 */
 			el_receive(dev);
-		}
-		else
-		{
+		} else {
 			/*
 			 *	Nothing?  Something is broken!
 			 */
 			if (el_debug > 2)
-				printk(KERN_DEBUG "%s: No packet seen, rxsr=%02x **resetting 3c501***\n",
+				pr_debug("%s: No packet seen, rxsr=%02x **resetting 3c501***\n",
 					dev->name, rxsr);
 			el_reset(dev);
 		}
-		if (el_debug > 3)
-			printk(KERN_DEBUG ".\n");
 	}
 
 	/*
@@ -700,12 +689,12 @@ static void el_receive(struct net_device *dev)
 	pkt_len = inw(RX_LOW);
 
 	if (el_debug > 4)
-		printk(KERN_DEBUG " el_receive %d.\n", pkt_len);
+		pr_debug(" el_receive %d.\n", pkt_len);
 
-	if ((pkt_len < 60)  ||  (pkt_len > 1536))
-	{
+	if (pkt_len < 60 || pkt_len > 1536) {
 		if (el_debug)
-			printk(KERN_DEBUG "%s: bogus packet, length=%d\n", dev->name, pkt_len);
+			pr_debug("%s: bogus packet, length=%d\n",
+						dev->name, pkt_len);
 		dev->stats.rx_over_errors++;
 		return;
 	}
@@ -722,26 +711,22 @@ static void el_receive(struct net_device *dev)
 	 */
 
 	outw(0x00, GP_LOW);
-	if (skb == NULL)
-	{
-		printk(KERN_INFO "%s: Memory squeeze, dropping packet.\n", dev->name);
+	if (skb == NULL) {
+		pr_info("%s: Memory squeeze, dropping packet.\n", dev->name);
 		dev->stats.rx_dropped++;
 		return;
-	}
-	else
-	{
-    		skb_reserve(skb,2);	/* Force 16 byte alignment */
+	} else {
+		skb_reserve(skb, 2);	/* Force 16 byte alignment */
 		/*
 		 *	The read increments through the bytes. The interrupt
 		 *	handler will fix the pointer when it returns to
 		 *	receive mode.
 		 */
-		insb(DATAPORT, skb_put(skb,pkt_len), pkt_len);
-		skb->protocol=eth_type_trans(skb,dev);
+		insb(DATAPORT, skb_put(skb, pkt_len), pkt_len);
+		skb->protocol = eth_type_trans(skb, dev);
 		netif_rx(skb);
-		dev->last_rx = jiffies;
 		dev->stats.rx_packets++;
-		dev->stats.rx_bytes+=pkt_len;
+		dev->stats.rx_bytes += pkt_len;
 	}
 	return;
 }
@@ -760,10 +745,11 @@ static void  el_reset(struct net_device *dev)
 	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
-	if (el_debug> 2)
-		printk(KERN_INFO "3c501 reset...");
+	if (el_debug > 2)
+		pr_info("3c501 reset...\n");
 	outb(AX_RESET, AX_CMD);		/* Reset the chip */
-	outb(AX_LOOP, AX_CMD);		/* Aux control, irq and loopback enabled */
+	/* Aux control, irq and loopback enabled */
+	outb(AX_LOOP, AX_CMD);
 	{
 		int i;
 		for (i = 0; i < 6; i++)	/* Set the station address. */
@@ -794,7 +780,8 @@ static int el1_close(struct net_device *dev)
 	int ioaddr = dev->base_addr;
 
 	if (el_debug > 2)
-		printk(KERN_INFO "%s: Shutting down Ethernet card at %#x.\n", dev->name, ioaddr);
+		pr_info("%s: Shutting down Ethernet card at %#x.\n",
+						dev->name, ioaddr);
 
 	netif_stop_queue(dev);
 
@@ -822,18 +809,14 @@ static void set_multicast_list(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 
-	if(dev->flags&IFF_PROMISC)
-	{
+	if (dev->flags & IFF_PROMISC) {
 		outb(RX_PROM, RX_CMD);
 		inb(RX_STATUS);
-	}
-	else if (dev->mc_list || dev->flags&IFF_ALLMULTI)
-	{
-		outb(RX_MULT, RX_CMD);	/* Multicast or all multicast is the same */
+	} else if (dev->mc_list || dev->flags & IFF_ALLMULTI) {
+		/* Multicast or all multicast is the same */
+		outb(RX_MULT, RX_CMD);
 		inb(RX_STATUS);		/* Clear status. */
-	}
-	else
-	{
+	} else {
 		outb(RX_NORM, RX_CMD);
 		inb(RX_STATUS);
 	}

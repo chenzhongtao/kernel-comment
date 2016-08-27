@@ -1,5 +1,5 @@
 /*
- * Read-Copy Update mechanism for mutual exclusion 
+ * Read-Copy Update mechanism for mutual exclusion
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,10 +15,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * Copyright (C) IBM Corporation, 2001
+ * Copyright IBM Corporation, 2001
  *
  * Author: Dipankar Sarma <dipankar@in.ibm.com>
- * 
+ *
  * Based on the original work by Paul McKenney <paulmck@us.ibm.com>
  * and inputs from Rusty Russell, Andrea Arcangeli and Andi Kleen.
  * Papers:
@@ -26,22 +26,20 @@
  * http://lse.sourceforge.net/locking/rclock_OLS.2001.05.01c.sc.pdf (OLS2001)
  *
  * For detailed explanation of Read-Copy Update mechanism see -
- * 		http://lse.sourceforge.net/locking/rcupdate.html
+ *		http://lse.sourceforge.net/locking/rcupdate.html
  *
  */
 
 #ifndef __LINUX_RCUPDATE_H
 #define __LINUX_RCUPDATE_H
 
-#ifdef __KERNEL__
-
 #include <linux/cache.h>
 #include <linux/spinlock.h>
 #include <linux/threads.h>
-#include <linux/percpu.h>
 #include <linux/cpumask.h>
 #include <linux/seqlock.h>
 #include <linux/lockdep.h>
+#include <linux/completion.h>
 
 /**
  * struct rcu_head - callback structure for use with RCU
@@ -53,90 +51,42 @@ struct rcu_head {
 	void (*func)(struct rcu_head *head);
 };
 
-#define RCU_HEAD_INIT 	{ .next = NULL, .func = NULL }
+/* Exported common interfaces */
+#ifdef CONFIG_TREE_PREEMPT_RCU
+extern void synchronize_rcu(void);
+#else /* #ifdef CONFIG_TREE_PREEMPT_RCU */
+#define synchronize_rcu synchronize_sched
+#endif /* #else #ifdef CONFIG_TREE_PREEMPT_RCU */
+extern void synchronize_rcu_bh(void);
+extern void synchronize_sched(void);
+extern void rcu_barrier(void);
+extern void rcu_barrier_bh(void);
+extern void rcu_barrier_sched(void);
+extern void synchronize_sched_expedited(void);
+extern int sched_expedited_torture_stats(char *page);
+
+/* Internal to kernel */
+extern void rcu_init(void);
+extern void rcu_scheduler_starting(void);
+extern int rcu_needs_cpu(int cpu);
+extern int rcu_scheduler_active;
+
+#if defined(CONFIG_TREE_RCU) || defined(CONFIG_TREE_PREEMPT_RCU)
+#include <linux/rcutree.h>
+#else
+#error "Unknown RCU implementation specified to kernel configuration"
+#endif
+
+#define RCU_HEAD_INIT	{ .next = NULL, .func = NULL }
 #define RCU_HEAD(head) struct rcu_head head = RCU_HEAD_INIT
 #define INIT_RCU_HEAD(ptr) do { \
        (ptr)->next = NULL; (ptr)->func = NULL; \
 } while (0)
 
-
-
-/* Global control variables for rcupdate callback mechanism. */
-struct rcu_ctrlblk {
-	long	cur;		/* Current batch number.                      */
-	long	completed;	/* Number of the last completed batch         */
-	int	next_pending;	/* Is the next batch already waiting?         */
-
-	int	signaled;
-
-	spinlock_t	lock	____cacheline_internodealigned_in_smp;
-	cpumask_t	cpumask; /* CPUs that need to switch in order    */
-	                         /* for current batch to proceed.        */
-} ____cacheline_internodealigned_in_smp;
-
-/* Is batch a before batch b ? */
-static inline int rcu_batch_before(long a, long b)
-{
-        return (a - b) < 0;
-}
-
-/* Is batch a after batch b ? */
-static inline int rcu_batch_after(long a, long b)
-{
-        return (a - b) > 0;
-}
-
-/*
- * Per-CPU data for Read-Copy UPdate.
- * nxtlist - new callbacks are added here
- * curlist - current batch for which quiescent cycle started if any
- */
-struct rcu_data {
-	/* 1) quiescent state handling : */
-	long		quiescbatch;     /* Batch # for grace period */
-	int		passed_quiesc;	 /* User-mode/idle loop etc. */
-	int		qs_pending;	 /* core waits for quiesc state */
-
-	/* 2) batch handling */
-	long  	       	batch;           /* Batch # for current RCU batch */
-	struct rcu_head *nxtlist;
-	struct rcu_head **nxttail;
-	long            qlen; 	 	 /* # of queued callbacks */
-	struct rcu_head *curlist;
-	struct rcu_head **curtail;
-	struct rcu_head *donelist;
-	struct rcu_head **donetail;
-	long		blimit;		 /* Upper limit on a processed batch */
-	int cpu;
-	struct rcu_head barrier;
-};
-
-DECLARE_PER_CPU(struct rcu_data, rcu_data);
-DECLARE_PER_CPU(struct rcu_data, rcu_bh_data);
-
-/*
- * Increment the quiescent state counter.
- * The counter is a bit degenerated: We do not need to know
- * how many quiescent states passed, just if there was at least
- * one since the start of the grace period. Thus just a flag.
- */
-static inline void rcu_qsctr_inc(int cpu)
-{
-	struct rcu_data *rdp = &per_cpu(rcu_data, cpu);
-	rdp->passed_quiesc = 1;
-}
-static inline void rcu_bh_qsctr_inc(int cpu)
-{
-	struct rcu_data *rdp = &per_cpu(rcu_bh_data, cpu);
-	rdp->passed_quiesc = 1;
-}
-
-extern int rcu_pending(int cpu);
-extern int rcu_needs_cpu(int cpu);
-
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 extern struct lockdep_map rcu_lock_map;
-# define rcu_read_acquire()	lock_acquire(&rcu_lock_map, 0, 0, 2, 1, _THIS_IP_)
+# define rcu_read_acquire()	\
+			lock_acquire(&rcu_lock_map, 0, 0, 2, 1, NULL, _THIS_IP_)
 # define rcu_read_release()	lock_release(&rcu_lock_map, 1, _THIS_IP_)
 #else
 # define rcu_read_acquire()	do { } while (0)
@@ -172,24 +122,12 @@ extern struct lockdep_map rcu_lock_map;
  *
  * It is illegal to block while in an RCU read-side critical section.
  */
-#define rcu_read_lock() \
-	do { \
-		preempt_disable(); \
-		__acquire(RCU); \
-		rcu_read_acquire(); \
-	} while(0)
-
-/**
- * rcu_read_unlock - marks the end of an RCU read-side critical section.
- *
- * See rcu_read_lock() for more information.
- */
-#define rcu_read_unlock() \
-	do { \
-		rcu_read_release(); \
-		__release(RCU); \
-		preempt_enable(); \
-	} while(0)
+static inline void rcu_read_lock(void)
+{
+	__rcu_read_lock();
+	__acquire(RCU);
+	rcu_read_acquire();
+}
 
 /*
  * So where is rcu_write_lock()?  It does not exist, as there is no
@@ -202,6 +140,18 @@ extern struct lockdep_map rcu_lock_map;
  */
 
 /**
+ * rcu_read_unlock - marks the end of an RCU read-side critical section.
+ *
+ * See rcu_read_lock() for more information.
+ */
+static inline void rcu_read_unlock(void)
+{
+	rcu_read_release();
+	__release(RCU);
+	__rcu_read_unlock();
+}
+
+/**
  * rcu_read_lock_bh - mark the beginning of a softirq-only RCU critical section
  *
  * This is equivalent of rcu_read_lock(), but to be used when updates
@@ -212,36 +162,67 @@ extern struct lockdep_map rcu_lock_map;
  * can use just rcu_read_lock().
  *
  */
-#define rcu_read_lock_bh() \
-	do { \
-		local_bh_disable(); \
-		__acquire(RCU_BH); \
-		rcu_read_acquire(); \
-	} while(0)
+static inline void rcu_read_lock_bh(void)
+{
+	__rcu_read_lock_bh();
+	__acquire(RCU_BH);
+	rcu_read_acquire();
+}
 
 /*
  * rcu_read_unlock_bh - marks the end of a softirq-only RCU critical section
  *
  * See rcu_read_lock_bh() for more information.
  */
-#define rcu_read_unlock_bh() \
-	do { \
-		rcu_read_release(); \
-		__release(RCU_BH); \
-		local_bh_enable(); \
-	} while(0)
+static inline void rcu_read_unlock_bh(void)
+{
+	rcu_read_release();
+	__release(RCU_BH);
+	__rcu_read_unlock_bh();
+}
+
+/**
+ * rcu_read_lock_sched - mark the beginning of a RCU-classic critical section
+ *
+ * Should be used with either
+ * - synchronize_sched()
+ * or
+ * - call_rcu_sched() and rcu_barrier_sched()
+ * on the write-side to insure proper synchronization.
+ */
+static inline void rcu_read_lock_sched(void)
+{
+	preempt_disable();
+	__acquire(RCU_SCHED);
+	rcu_read_acquire();
+}
+
+/* Used by lockdep and tracing: cannot be traced, cannot call lockdep. */
+static inline notrace void rcu_read_lock_sched_notrace(void)
+{
+	preempt_disable_notrace();
+	__acquire(RCU_SCHED);
+}
 
 /*
- * Prevent the compiler from merging or refetching accesses.  The compiler
- * is also forbidden from reordering successive instances of ACCESS_ONCE(),
- * but only when the compiler is aware of some particular ordering.  One way
- * to make the compiler aware of ordering is to put the two invocations of
- * ACCESS_ONCE() in different C statements.
+ * rcu_read_unlock_sched - marks the end of a RCU-classic critical section
  *
- * This macro does absolutely -nothing- to prevent the CPU from reordering,
- * merging, or refetching absolutely anything at any time.
+ * See rcu_read_lock_sched for more information.
  */
-#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+static inline void rcu_read_unlock_sched(void)
+{
+	rcu_read_release();
+	__release(RCU_SCHED);
+	preempt_enable();
+}
+
+/* Used by lockdep and tracing: cannot be traced, cannot call lockdep. */
+static inline notrace void rcu_read_unlock_sched_notrace(void)
+{
+	__release(RCU_SCHED);
+	preempt_enable_notrace();
+}
+
 
 /**
  * rcu_dereference - fetch an RCU-protected pointer in an
@@ -272,42 +253,56 @@ extern struct lockdep_map rcu_lock_map;
  * code.
  */
 
-#define rcu_assign_pointer(p, v)	({ \
-						smp_wmb(); \
-						(p) = (v); \
-					})
+#define rcu_assign_pointer(p, v) \
+	({ \
+		if (!__builtin_constant_p(v) || \
+		    ((v) != NULL)) \
+			smp_wmb(); \
+		(p) = (v); \
+	})
+
+/* Infrastructure to implement the synchronize_() primitives. */
+
+struct rcu_synchronize {
+	struct rcu_head head;
+	struct completion completion;
+};
+
+extern void wakeme_after_rcu(struct rcu_head  *head);
 
 /**
- * synchronize_sched - block until all CPUs have exited any non-preemptive
- * kernel code sequences.
+ * call_rcu - Queue an RCU callback for invocation after a grace period.
+ * @head: structure to be used for queueing the RCU updates.
+ * @func: actual update function to be invoked after the grace period
  *
- * This means that all preempt_disable code sequences, including NMI and
- * hardware-interrupt handlers, in progress on entry will have completed
- * before this primitive returns.  However, this does not guarantee that
- * softirq handlers will have completed, since in some kernels, these
- * handlers can run in process context, and can block.
- *
- * This primitive provides the guarantees made by the (now removed)
- * synchronize_kernel() API.  In contrast, synchronize_rcu() only
- * guarantees that rcu_read_lock() sections will have completed.
- * In "classic RCU", these two guarantees happen to be one and
- * the same, but can differ in realtime RCU implementations.
+ * The update function will be invoked some time after a full grace
+ * period elapses, in other words after all currently executing RCU
+ * read-side critical sections have completed.  RCU read-side critical
+ * sections are delimited by rcu_read_lock() and rcu_read_unlock(),
+ * and may be nested.
  */
-#define synchronize_sched() synchronize_rcu()
+extern void call_rcu(struct rcu_head *head,
+			      void (*func)(struct rcu_head *head));
 
-extern void rcu_init(void);
-extern void rcu_check_callbacks(int cpu, int user);
-extern void rcu_restart_cpu(int cpu);
-extern long rcu_batches_completed(void);
-extern long rcu_batches_completed_bh(void);
+/**
+ * call_rcu_bh - Queue an RCU for invocation after a quicker grace period.
+ * @head: structure to be used for queueing the RCU updates.
+ * @func: actual update function to be invoked after the grace period
+ *
+ * The update function will be invoked some time after a full grace
+ * period elapses, in other words after all currently executing RCU
+ * read-side critical sections have completed. call_rcu_bh() assumes
+ * that the read-side critical sections end on completion of a softirq
+ * handler. This means that read-side critical sections in process
+ * context must not be interrupted by softirqs. This interface is to be
+ * used when most of the read-side critical sections are in softirq context.
+ * RCU read-side critical sections are delimited by :
+ *  - rcu_read_lock() and  rcu_read_unlock(), if in interrupt context.
+ *  OR
+ *  - rcu_read_lock_bh() and rcu_read_unlock_bh(), if in process context.
+ *  These may be nested.
+ */
+extern void call_rcu_bh(struct rcu_head *head,
+			void (*func)(struct rcu_head *head));
 
-/* Exported interfaces */
-extern void FASTCALL(call_rcu(struct rcu_head *head, 
-				void (*func)(struct rcu_head *head)));
-extern void FASTCALL(call_rcu_bh(struct rcu_head *head,
-				void (*func)(struct rcu_head *head)));
-extern void synchronize_rcu(void);
-extern void rcu_barrier(void);
-
-#endif /* __KERNEL__ */
 #endif /* __LINUX_RCUPDATE_H */

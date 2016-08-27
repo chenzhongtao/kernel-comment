@@ -9,7 +9,7 @@
  *	2 as published by the Free Software Foundation.
  *
  *  debugfs is for people to use instead of /proc or /sys.
- *  See Documentation/DocBook/kernel-api for more details.
+ *  See Documentation/DocBook/filesystems for more details.
  */
 
 #ifndef _DEBUGFS_H_
@@ -26,7 +26,14 @@ struct debugfs_blob_wrapper {
 	unsigned long size;
 };
 
+extern struct dentry *arch_debugfs_dir;
+
 #if defined(CONFIG_DEBUG_FS)
+
+/* declared over in file.c */
+extern const struct file_operations debugfs_file_operations;
+extern const struct inode_operations debugfs_link_operations;
+
 struct dentry *debugfs_create_file(const char *name, mode_t mode,
 				   struct dentry *parent, void *data,
 				   const struct file_operations *fops);
@@ -37,6 +44,7 @@ struct dentry *debugfs_create_symlink(const char *name, struct dentry *parent,
 				      const char *dest);
 
 void debugfs_remove(struct dentry *dentry);
+void debugfs_remove_recursive(struct dentry *dentry);
 
 struct dentry *debugfs_rename(struct dentry *old_dir, struct dentry *old_dentry,
                 struct dentry *new_dir, const char *new_name);
@@ -55,12 +63,17 @@ struct dentry *debugfs_create_x16(const char *name, mode_t mode,
 				  struct dentry *parent, u16 *value);
 struct dentry *debugfs_create_x32(const char *name, mode_t mode,
 				  struct dentry *parent, u32 *value);
+struct dentry *debugfs_create_size_t(const char *name, mode_t mode,
+				     struct dentry *parent, size_t *value);
 struct dentry *debugfs_create_bool(const char *name, mode_t mode,
 				  struct dentry *parent, u32 *value);
 
 struct dentry *debugfs_create_blob(const char *name, mode_t mode,
 				  struct dentry *parent,
 				  struct debugfs_blob_wrapper *blob);
+
+bool debugfs_initialized(void);
+
 #else
 
 #include <linux/err.h>
@@ -92,6 +105,9 @@ static inline struct dentry *debugfs_create_symlink(const char *name,
 }
 
 static inline void debugfs_remove(struct dentry *dentry)
+{ }
+
+static inline void debugfs_remove_recursive(struct dentry *dentry)
 { }
 
 static inline struct dentry *debugfs_rename(struct dentry *old_dir, struct dentry *old_dentry,
@@ -149,6 +165,13 @@ static inline struct dentry *debugfs_create_x32(const char *name, mode_t mode,
 	return ERR_PTR(-ENODEV);
 }
 
+static inline struct dentry *debugfs_create_size_t(const char *name, mode_t mode,
+				     struct dentry *parent,
+				     size_t *value)
+{
+	return ERR_PTR(-ENODEV);
+}
+
 static inline struct dentry *debugfs_create_bool(const char *name, mode_t mode,
 						 struct dentry *parent,
 						 u32 *value)
@@ -161,6 +184,11 @@ static inline struct dentry *debugfs_create_blob(const char *name, mode_t mode,
 				  struct debugfs_blob_wrapper *blob)
 {
 	return ERR_PTR(-ENODEV);
+}
+
+static inline bool debugfs_initialized(void)
+{
+	return false;
 }
 
 #endif

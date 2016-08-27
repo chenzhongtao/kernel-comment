@@ -114,7 +114,6 @@ static int pnp_device_probe(struct device *dev)
 	} else
 		goto fail;
 
-	dev_dbg(dev, "driver attached\n");
 	return error;
 
 fail:
@@ -134,6 +133,15 @@ static int pnp_device_remove(struct device *dev)
 	}
 	pnp_device_detach(pnp_dev);
 	return 0;
+}
+
+static void pnp_device_shutdown(struct device *dev)
+{
+	struct pnp_dev *pnp_dev = to_pnp_dev(dev);
+	struct pnp_driver *drv = pnp_dev->driver;
+
+	if (drv && drv->shutdown)
+		drv->shutdown(pnp_dev);
 }
 
 static int pnp_bus_match(struct device *dev, struct device_driver *drv)
@@ -161,14 +169,13 @@ static int pnp_bus_suspend(struct device *dev, pm_message_t state)
 			return error;
 	}
 
-	if (!(pnp_drv->flags & PNP_DRIVER_RES_DO_NOT_CHANGE) &&
-	    pnp_can_disable(pnp_dev)) {
+	if (pnp_can_disable(pnp_dev)) {
 		error = pnp_stop_dev(pnp_dev);
 		if (error)
 			return error;
 	}
 
-	if (pnp_dev->protocol && pnp_dev->protocol->suspend)
+	if (pnp_dev->protocol->suspend)
 		pnp_dev->protocol->suspend(pnp_dev, state);
 	return 0;
 }
@@ -182,17 +189,20 @@ static int pnp_bus_resume(struct device *dev)
 	if (!pnp_drv)
 		return 0;
 
-	if (pnp_dev->protocol && pnp_dev->protocol->resume)
+	if (pnp_dev->protocol->resume)
 		pnp_dev->protocol->resume(pnp_dev);
 
-	if (!(pnp_drv->flags & PNP_DRIVER_RES_DO_NOT_CHANGE)) {
+	if (pnp_can_write(pnp_dev)) {
 		error = pnp_start_dev(pnp_dev);
 		if (error)
 			return error;
 	}
 
-	if (pnp_drv->resume)
-		return pnp_drv->resume(pnp_dev);
+	if (pnp_drv->resume) {
+		error = pnp_drv->resume(pnp_dev);
+		if (error)
+			return error;
+	}
 
 	return 0;
 }
@@ -202,14 +212,14 @@ struct bus_type pnp_bus_type = {
 	.match   = pnp_bus_match,
 	.probe   = pnp_device_probe,
 	.remove  = pnp_device_remove,
+	.shutdown = pnp_device_shutdown,
 	.suspend = pnp_bus_suspend,
 	.resume  = pnp_bus_resume,
+	.dev_attrs = pnp_interface_attrs,
 };
 
 int pnp_register_driver(struct pnp_driver *drv)
 {
-	pnp_dbg("the driver '%s' has been registered", drv->name);
-
 	drv->driver.name = drv->name;
 	drv->driver.bus = &pnp_bus_type;
 
@@ -219,27 +229,40 @@ int pnp_register_driver(struct pnp_driver *drv)
 void pnp_unregister_driver(struct pnp_driver *drv)
 {
 	driver_unregister(&drv->driver);
-	pnp_dbg("the driver '%s' has been unregistered", drv->name);
 }
 
 /**
  * pnp_add_id - adds an EISA id to the specified device
- * @id: pointer to a pnp_id structure
  * @dev: pointer to the desired device
+ * @id: pointer to an EISA id string
  */
-int pnp_add_id(struct pnp_id *id, struct pnp_dev *dev)
+struct pnp_id *pnp_add_id(struct pnp_dev *dev, char *id)
 {
-	struct pnp_id *ptr;
+	struct pnp_id *dev_id, *ptr;
 
-	id->next = NULL;
+	dev_id = kzalloc(sizeof(struct pnp_id), GFP_KERNEL);
+	if (!dev_id)
+		return NULL;
+
+	dev_id->id[0] = id[0];
+	dev_id->id[1] = id[1];
+	dev_id->id[2] = id[2];
+	dev_id->id[3] = tolower(id[3]);
+	dev_id->id[4] = tolower(id[4]);
+	dev_id->id[5] = tolower(id[5]);
+	dev_id->id[6] = tolower(id[6]);
+	dev_id->id[7] = '\0';
+
+	dev_id->next = NULL;
 	ptr = dev->id;
 	while (ptr && ptr->next)
 		ptr = ptr->next;
 	if (ptr)
-		ptr->next = id;
+		ptr->next = dev_id;
 	else
-		dev->id = id;
-	return 0;
+		dev->id = dev_id;
+
+	return dev_id;
 }
 
 EXPORT_SYMBOL(pnp_register_driver);

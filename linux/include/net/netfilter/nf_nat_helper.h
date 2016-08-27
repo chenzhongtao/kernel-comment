@@ -24,9 +24,16 @@ extern int nf_nat_mangle_udp_packet(struct sk_buff *skb,
 extern int nf_nat_seq_adjust(struct sk_buff *skb,
 			     struct nf_conn *ct,
 			     enum ip_conntrack_info ctinfo);
+extern int (*nf_nat_seq_adjust_hook)(struct sk_buff *skb,
+				     struct nf_conn *ct,
+				     enum ip_conntrack_info ctinfo);
 
 /* Setup NAT on this expected conntrack so it follows master, but goes
  * to port ct->master->saved_proto. */
 extern void nf_nat_follow_master(struct nf_conn *ct,
 				 struct nf_conntrack_expect *this);
+
+extern s16 nf_nat_get_offset(const struct nf_conn *ct,
+			     enum ip_conntrack_dir dir,
+			     u32 seq);
 #endif

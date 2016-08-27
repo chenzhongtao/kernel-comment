@@ -22,8 +22,6 @@
  *
  *  History:
  *   0.1  04.01.2000  Created
- *
- *  $Id: usbdevice_fs.h,v 1.1 2000/01/06 18:40:41 tom Exp $
  */
 
 /*****************************************************************************/
@@ -77,8 +75,12 @@ struct usbdevfs_connectinfo {
 	unsigned char slow;
 };
 
-#define USBDEVFS_URB_SHORT_NOT_OK          1
-#define USBDEVFS_URB_ISO_ASAP              2
+#define USBDEVFS_URB_SHORT_NOT_OK	0x01
+#define USBDEVFS_URB_ISO_ASAP		0x02
+#define USBDEVFS_URB_BULK_CONTINUATION	0x04
+#define USBDEVFS_URB_NO_FSBR		0x20
+#define USBDEVFS_URB_ZERO_PACKET	0x40
+#define USBDEVFS_URB_NO_INTERRUPT	0x80
 
 #define USBDEVFS_URB_TYPE_ISO		   0
 #define USBDEVFS_URB_TYPE_INTERRUPT	   1
@@ -104,7 +106,7 @@ struct usbdevfs_urb {
 	int error_count;
 	unsigned int signr;	/* signal to be sent on completion,
 				  or 0 if none should be sent. */
-	void *usercontext;
+	void __user *usercontext;
 	struct usbdevfs_iso_packet_desc iso_frame_desc[0];
 };
 
@@ -174,4 +176,6 @@ struct usbdevfs_ioctl32 {
 #define USBDEVFS_CLEAR_HALT        _IOR('U', 21, unsigned int)
 #define USBDEVFS_DISCONNECT        _IO('U', 22)
 #define USBDEVFS_CONNECT           _IO('U', 23)
+#define USBDEVFS_CLAIM_PORT        _IOR('U', 24, unsigned int)
+#define USBDEVFS_RELEASE_PORT      _IOR('U', 25, unsigned int)
 #endif /* _LINUX_USBDEVICE_FS_H */

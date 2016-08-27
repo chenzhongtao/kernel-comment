@@ -8,10 +8,21 @@
 #include <linux/slab.h>
 #include <asm/dmi.h>
 
-static char * __init dmi_string(const struct dmi_header *dm, u8 s)
+/*
+ * DMI stands for "Desktop Management Interface".  It is part
+ * of and an antecedent to, SMBIOS, which stands for System
+ * Management BIOS.  See further: http://www.dmtf.org/standards
+ */
+static char dmi_empty_string[] = "        ";
+
+/*
+ * Catch too early calls to dmi_check_system():
+ */
+static int dmi_initialized;
+
+static const char * __init dmi_string_nosave(const struct dmi_header *dm, u8 s)
 {
 	const u8 *bp = ((u8 *) dm) + dm->length;
-	char *str = "";
 
 	if (s) {
 		s--;
@@ -21,13 +32,33 @@ static char * __init dmi_string(const struct dmi_header *dm, u8 s)
 		}
 
 		if (*bp != 0) {
-			str = dmi_alloc(strlen(bp) + 1);
-			if (str != NULL)
-				strcpy(str, bp);
-			else
-				printk(KERN_ERR "dmi_string: out of memory.\n");
+			size_t len = strlen(bp)+1;
+			size_t cmp_len = len > 8 ? 8 : len;
+
+			if (!memcmp(bp, dmi_empty_string, cmp_len))
+				return dmi_empty_string;
+			return bp;
 		}
 	}
+
+	return "";
+}
+
+static char * __init dmi_string(const struct dmi_header *dm, u8 s)
+{
+	const char *bp = dmi_string_nosave(dm, s);
+	char *str;
+	size_t len;
+
+	if (bp == dmi_empty_string)
+		return dmi_empty_string;
+
+	len = strlen(bp) + 1;
+	str = dmi_alloc(len);
+	if (str != NULL)
+		strcpy(str, bp);
+	else
+		printk(KERN_ERR "dmi_string: cannot allocate %Zu bytes.\n", len);
 
 	return str;
 }
@@ -36,17 +67,12 @@ static char * __init dmi_string(const struct dmi_header *dm, u8 s)
  *	We have to be cautious here. We have seen BIOSes with DMI pointers
  *	pointing to completely the wrong place for example
  */
-static int __init dmi_table(u32 base, int len, int num,
-			    void (*decode)(const struct dmi_header *))
+static void dmi_table(u8 *buf, int len, int num,
+		      void (*decode)(const struct dmi_header *, void *),
+		      void *private_data)
 {
-	u8 *buf, *data;
+	u8 *data = buf;
 	int i = 0;
-
-	buf = dmi_ioremap(base, len);
-	if (buf == NULL)
-		return -1;
-
-	data = buf;
 
 	/*
 	 *	Stop when we see all the items the table claimed to have
@@ -56,19 +82,36 @@ static int __init dmi_table(u32 base, int len, int num,
 		const struct dmi_header *dm = (const struct dmi_header *)data;
 
 		/*
-		 *  We want to know the total length (formated area and strings)
-		 *  before decoding to make sure we won't run off the table in
-		 *  dmi_decode or dmi_string
+		 *  We want to know the total length (formatted area and
+		 *  strings) before decoding to make sure we won't run off the
+		 *  table in dmi_decode or dmi_string
 		 */
 		data += dm->length;
 		while ((data - buf < len - 1) && (data[0] || data[1]))
 			data++;
 		if (data - buf < len - 1)
-			decode(dm);
+			decode(dm, private_data);
 		data += 2;
 		i++;
 	}
-	dmi_iounmap(buf, len);
+}
+
+static u32 dmi_base;
+static u16 dmi_len;
+static u16 dmi_num;
+
+static int __init dmi_walk_early(void (*decode)(const struct dmi_header *,
+		void *))
+{
+	u8 *buf;
+
+	buf = dmi_ioremap(dmi_base, dmi_len);
+	if (buf == NULL)
+		return -1;
+
+	dmi_table(buf, dmi_len, dmi_num, decode, NULL);
+
+	dmi_iounmap(buf, dmi_len);
 	return 0;
 }
 
@@ -150,10 +193,30 @@ static void __init dmi_save_type(const struct dmi_header *dm, int slot, int inde
 	dmi_ident[slot] = s;
 }
 
+static void __init dmi_save_one_device(int type, const char *name)
+{
+	struct dmi_device *dev;
+
+	/* No duplicate device */
+	if (dmi_find_device(type, name, NULL))
+		return;
+
+	dev = dmi_alloc(sizeof(*dev) + strlen(name) + 1);
+	if (!dev) {
+		printk(KERN_ERR "dmi_save_one_device: out of memory.\n");
+		return;
+	}
+
+	dev->type = type;
+	strcpy((char *)(dev + 1), name);
+	dev->name = (char *)(dev + 1);
+	dev->device_data = NULL;
+	list_add(&dev->list, &dmi_devices);
+}
+
 static void __init dmi_save_devices(const struct dmi_header *dm)
 {
 	int i, count = (dm->length - sizeof(struct dmi_header)) / 2;
-	struct dmi_device *dev;
 
 	for (i = 0; i < count; i++) {
 		const char *d = (char *)(dm + 1) + (i * 2);
@@ -162,16 +225,7 @@ static void __init dmi_save_devices(const struct dmi_header *dm)
 		if ((*d & 0x80) == 0)
 			continue;
 
-		dev = dmi_alloc(sizeof(*dev));
-		if (!dev) {
-			printk(KERN_ERR "dmi_save_devices: out of memory.\n");
-			break;
-		}
-
-		dev->type = *d++ & 0x7f;
-		dev->name = dmi_string(dm, *d);
-		dev->device_data = NULL;
-		list_add(&dev->list, &dmi_devices);
+		dmi_save_one_device(*d & 0x7f, dmi_string_nosave(dm, *(d + 1)));
 	}
 }
 
@@ -181,6 +235,11 @@ static void __init dmi_save_oem_strings_devices(const struct dmi_header *dm)
 	struct dmi_device *dev;
 
 	for (i = 1; i <= count; i++) {
+		char *devname = dmi_string(dm, i);
+
+		if (devname == dmi_empty_string)
+			continue;
+
 		dev = dmi_alloc(sizeof(*dev));
 		if (!dev) {
 			printk(KERN_ERR
@@ -189,7 +248,7 @@ static void __init dmi_save_oem_strings_devices(const struct dmi_header *dm)
 		}
 
 		dev->type = DMI_DEV_TYPE_OEM_STRING;
-		dev->name = dmi_string(dm, i);
+		dev->name = devname;
 		dev->device_data = NULL;
 
 		list_add(&dev->list, &dmi_devices);
@@ -219,7 +278,18 @@ static void __init dmi_save_ipmi_device(const struct dmi_header *dm)
 	dev->name = "IPMI controller";
 	dev->device_data = data;
 
-	list_add(&dev->list, &dmi_devices);
+	list_add_tail(&dev->list, &dmi_devices);
+}
+
+static void __init dmi_save_extended_devices(const struct dmi_header *dm)
+{
+	const u8 *d = (u8*) dm + 5;
+
+	/* Skip disabled device */
+	if ((*d & 0x80) == 0)
+		return;
+
+	dmi_save_one_device(*d & 0x7f, dmi_string_nosave(dm, *(d - 1)));
 }
 
 /*
@@ -227,7 +297,7 @@ static void __init dmi_save_ipmi_device(const struct dmi_header *dm)
  *	and machine entries. For 2.5 we should pull the smbus controller info
  *	out of here.
  */
-static void __init dmi_decode(const struct dmi_header *dm)
+static void __init dmi_decode(const struct dmi_header *dm, void *dummy)
 {
 	switch(dm->type) {
 	case 0:		/* BIOS Information */
@@ -264,6 +334,9 @@ static void __init dmi_decode(const struct dmi_header *dm)
 		break;
 	case 38:	/* IPMI Device Information */
 		dmi_save_ipmi_device(dm);
+		break;
+	case 41:	/* Onboard Devices Extended Information */
+		dmi_save_extended_devices(dm);
 	}
 }
 
@@ -273,9 +346,9 @@ static int __init dmi_present(const char __iomem *p)
 
 	memcpy_fromio(buf, p, 15);
 	if ((memcmp(buf, "_DMI_", 5) == 0) && dmi_checksum(buf)) {
-		u16 num = (buf[13] << 8) | buf[12];
-		u16 len = (buf[7] << 8) | buf[6];
-		u32 base = (buf[11] << 24) | (buf[10] << 16) |
+		dmi_num = (buf[13] << 8) | buf[12];
+		dmi_len = (buf[7] << 8) | buf[6];
+		dmi_base = (buf[11] << 24) | (buf[10] << 16) |
 			(buf[9] << 8) | buf[8];
 
 		/*
@@ -287,7 +360,7 @@ static int __init dmi_present(const char __iomem *p)
 			       buf[14] >> 4, buf[14] & 0xF);
 		else
 			printk(KERN_INFO "DMI present.\n");
-		if (dmi_table(base,len, num, dmi_decode) == 0)
+		if (dmi_walk_early(dmi_decode) == 0)
 			return 0;
 	}
 	return 1;
@@ -300,7 +373,7 @@ void __init dmi_scan_machine(void)
 
 	if (efi_enabled) {
 		if (efi.smbios == EFI_INVALID_TABLE_ADDR)
-			goto out;
+			goto error;
 
 		/* This is called as a core_initcall() because it isn't
 		 * needed during early boot.  This also means we can
@@ -308,13 +381,13 @@ void __init dmi_scan_machine(void)
 		 */
 		p = dmi_ioremap(efi.smbios, 32);
 		if (p == NULL)
-			goto out;
+			goto error;
 
 		rc = dmi_present(p + 0x10); /* offset of _DMI_ string */
 		dmi_iounmap(p, 32);
 		if (!rc) {
 			dmi_available = 1;
-			return;
+			goto out;
 		}
 	}
 	else {
@@ -325,17 +398,45 @@ void __init dmi_scan_machine(void)
 		 */
 		p = dmi_ioremap(0xF0000, 0x10000);
 		if (p == NULL)
-			goto out;
+			goto error;
 
 		for (q = p; q < p + 0x10000; q += 16) {
 			rc = dmi_present(q);
 			if (!rc) {
 				dmi_available = 1;
-				return;
+				dmi_iounmap(p, 0x10000);
+				goto out;
 			}
 		}
+		dmi_iounmap(p, 0x10000);
 	}
- out:	printk(KERN_INFO "DMI not present or invalid.\n");
+ error:
+	printk(KERN_INFO "DMI not present or invalid.\n");
+ out:
+	dmi_initialized = 1;
+}
+
+/**
+ *	dmi_matches - check if dmi_system_id structure matches system DMI data
+ *	@dmi: pointer to the dmi_system_id structure to check
+ */
+static bool dmi_matches(const struct dmi_system_id *dmi)
+{
+	int i;
+
+	WARN(!dmi_initialized, KERN_ERR "dmi check: not initialized yet.\n");
+
+	for (i = 0; i < ARRAY_SIZE(dmi->matches); i++) {
+		int s = dmi->matches[i].slot;
+		if (s == DMI_NONE)
+			continue;
+		if (dmi_ident[s]
+		    && strstr(dmi_ident[s], dmi->matches[i].substr))
+			continue;
+		/* No match */
+		return false;
+	}
+	return true;
 }
 
 /**
@@ -353,28 +454,43 @@ void __init dmi_scan_machine(void)
  */
 int dmi_check_system(const struct dmi_system_id *list)
 {
-	int i, count = 0;
-	const struct dmi_system_id *d = list;
+	int count = 0;
+	const struct dmi_system_id *d;
 
-	while (d->ident) {
-		for (i = 0; i < ARRAY_SIZE(d->matches); i++) {
-			int s = d->matches[i].slot;
-			if (s == DMI_NONE)
-				continue;
-			if (dmi_ident[s] && strstr(dmi_ident[s], d->matches[i].substr))
-				continue;
-			/* No match */
-			goto fail;
+	for (d = list; d->ident; d++)
+		if (dmi_matches(d)) {
+			count++;
+			if (d->callback && d->callback(d))
+				break;
 		}
-		count++;
-		if (d->callback && d->callback(d))
-			break;
-fail:		d++;
-	}
 
 	return count;
 }
 EXPORT_SYMBOL(dmi_check_system);
+
+/**
+ *	dmi_first_match - find dmi_system_id structure matching system DMI data
+ *	@list: array of dmi_system_id structures to match against
+ *		All non-null elements of the list must match
+ *		their slot's (field index's) data (i.e., each
+ *		list string must be a substring of the specified
+ *		DMI slot's string data) to be considered a
+ *		successful match.
+ *
+ *	Walk the blacklist table until the first match is found.  Return the
+ *	pointer to the matching entry or NULL if there's no match.
+ */
+const struct dmi_system_id *dmi_first_match(const struct dmi_system_id *list)
+{
+	const struct dmi_system_id *d;
+
+	for (d = list; d->ident; d++)
+		if (dmi_matches(d))
+			return d;
+
+	return NULL;
+}
+EXPORT_SYMBOL(dmi_first_match);
 
 /**
  *	dmi_get_system_info - return DMI data value
@@ -389,6 +505,17 @@ const char *dmi_get_system_info(int field)
 }
 EXPORT_SYMBOL(dmi_get_system_info);
 
+/**
+ * dmi_name_in_serial - Check if string is in the DMI product serial information
+ * @str: string to check for
+ */
+int dmi_name_in_serial(const char *str)
+{
+	int f = DMI_PRODUCT_SERIAL;
+	if (dmi_ident[f] && strstr(dmi_ident[f], str))
+		return 1;
+	return 0;
+}
 
 /**
  *	dmi_name_in_vendors - Check if string is anywhere in the DMI vendor information.
@@ -441,40 +568,117 @@ const struct dmi_device * dmi_find_device(int type, const char *name,
 EXPORT_SYMBOL(dmi_find_device);
 
 /**
- *	dmi_get_year - Return year of a DMI date
- *	@field:	data index (like dmi_get_system_info)
+ *	dmi_get_date - parse a DMI date
+ *	@field:	data index (see enum dmi_field)
+ *	@yearp: optional out parameter for the year
+ *	@monthp: optional out parameter for the month
+ *	@dayp: optional out parameter for the day
  *
- *	Returns -1 when the field doesn't exist. 0 when it is broken.
+ *	The date field is assumed to be in the form resembling
+ *	[mm[/dd]]/yy[yy] and the result is stored in the out
+ *	parameters any or all of which can be omitted.
+ *
+ *	If the field doesn't exist, all out parameters are set to zero
+ *	and false is returned.  Otherwise, true is returned with any
+ *	invalid part of date set to zero.
+ *
+ *	On return, year, month and day are guaranteed to be in the
+ *	range of [0,9999], [0,12] and [0,31] respectively.
  */
-int dmi_get_year(int field)
+bool dmi_get_date(int field, int *yearp, int *monthp, int *dayp)
 {
-	int year;
-	const char *s = dmi_get_system_info(field);
+	int year = 0, month = 0, day = 0;
+	bool exists;
+	const char *s, *y;
+	char *e;
 
-	if (!s)
-		return -1;
-	if (*s == '\0')
-		return 0;
-	s = strrchr(s, '/');
-	if (!s)
-		return 0;
+	s = dmi_get_system_info(field);
+	exists = s;
+	if (!exists)
+		goto out;
 
-	s += 1;
-	year = simple_strtoul(s, NULL, 0);
-	if (year && year < 100) {	/* 2-digit year */
+	/*
+	 * Determine year first.  We assume the date string resembles
+	 * mm/dd/yy[yy] but the original code extracted only the year
+	 * from the end.  Keep the behavior in the spirit of no
+	 * surprises.
+	 */
+	y = strrchr(s, '/');
+	if (!y)
+		goto out;
+
+	y++;
+	year = simple_strtoul(y, &e, 10);
+	if (y != e && year < 100) {	/* 2-digit year */
 		year += 1900;
 		if (year < 1996)	/* no dates < spec 1.0 */
 			year += 100;
 	}
+	if (year > 9999)		/* year should fit in %04d */
+		year = 0;
 
-	return year;
+	/* parse the mm and dd */
+	month = simple_strtoul(s, &e, 10);
+	if (s == e || *e != '/' || !month || month > 12) {
+		month = 0;
+		goto out;
+	}
+
+	s = e + 1;
+	day = simple_strtoul(s, &e, 10);
+	if (s == y || s == e || *e != '/' || day > 31)
+		day = 0;
+out:
+	if (yearp)
+		*yearp = year;
+	if (monthp)
+		*monthp = month;
+	if (dayp)
+		*dayp = day;
+	return exists;
 }
+EXPORT_SYMBOL(dmi_get_date);
 
 /**
- *	dmi_get_slot - return dmi_ident[slot]
- *	@slot:	index into dmi_ident[]
+ *	dmi_walk - Walk the DMI table and get called back for every record
+ *	@decode: Callback function
+ *	@private_data: Private data to be passed to the callback function
+ *
+ *	Returns -1 when the DMI table can't be reached, 0 on success.
  */
-char *dmi_get_slot(int slot)
+int dmi_walk(void (*decode)(const struct dmi_header *, void *),
+	     void *private_data)
 {
-	return(dmi_ident[slot]);
+	u8 *buf;
+
+	if (!dmi_available)
+		return -1;
+
+	buf = ioremap(dmi_base, dmi_len);
+	if (buf == NULL)
+		return -1;
+
+	dmi_table(buf, dmi_len, dmi_num, decode, private_data);
+
+	iounmap(buf);
+	return 0;
 }
+EXPORT_SYMBOL_GPL(dmi_walk);
+
+/**
+ * dmi_match - compare a string to the dmi field (if exists)
+ * @f: DMI field identifier
+ * @str: string to compare the DMI field to
+ *
+ * Returns true if the requested field equals to the str (including NULL).
+ */
+bool dmi_match(enum dmi_field f, const char *str)
+{
+	const char *info = dmi_get_system_info(f);
+
+	if (info == NULL || str == NULL)
+		return info == str;
+
+	return !strcmp(info, str);
+}
+EXPORT_SYMBOL_GPL(dmi_match);

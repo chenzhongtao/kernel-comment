@@ -16,11 +16,14 @@
 #include "qt1010.h"
 #include "tda1004x.h"
 #include "tda827x.h"
+#include <asm/unaligned.h>
 
 /* debug */
 static int dvb_usb_m920x_debug;
 module_param_named(debug,dvb_usb_m920x_debug, int, 0644);
 MODULE_PARM_DESC(debug, "set debugging level (1=rc (or-able))." DVB_USB_DEBUG_STATUS);
+
+DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
 
 static int m920x_set_filter(struct dvb_usb_device *d, int type, int idx, int pid);
 
@@ -137,7 +140,7 @@ static int m920x_rc_query(struct dvb_usb_device *d, u32 *event, int *state)
 		goto unlock;
 
 	for (i = 0; i < d->props.rc_key_map_size; i++)
-		if (d->props.rc_key_map[i].data == rc_state[1]) {
+		if (rc5_data(&d->props.rc_key_map[i]) == rc_state[1]) {
 			*event = d->props.rc_key_map[i].event;
 
 			switch(rc_state[0]) {
@@ -334,6 +337,8 @@ static int m920x_firmware_download(struct usb_device *udev, const struct firmwar
 	int i, pass, ret = 0;
 
 	buff = kmalloc(65536, GFP_KERNEL);
+	if (buff == NULL)
+		return -ENOMEM;
 
 	if ((ret = m920x_read(udev, M9206_FILTER, 0x0, 0x8000, read, 4)) != 0)
 		goto done;
@@ -345,13 +350,13 @@ static int m920x_firmware_download(struct usb_device *udev, const struct firmwar
 
 	for (pass = 0; pass < 2; pass++) {
 		for (i = 0; i + (sizeof(u16) * 3) < fw->size;) {
-			value = le16_to_cpu(*(u16 *)(fw->data + i));
+			value = get_unaligned_le16(fw->data + i);
 			i += sizeof(u16);
 
-			index = le16_to_cpu(*(u16 *)(fw->data + i));
+			index = get_unaligned_le16(fw->data + i);
 			i += sizeof(u16);
 
-			size = le16_to_cpu(*(u16 *)(fw->data + i));
+			size = get_unaligned_le16(fw->data + i);
 			i += sizeof(u16);
 
 			if (pass == 1) {
@@ -477,7 +482,7 @@ static struct qt1010_config m920x_qt1010_config = {
 /* Callbacks for DVB USB */
 static int m920x_mt352_frontend_attach(struct dvb_usb_adapter *adap)
 {
-	deb("%s\n",__FUNCTION__);
+	deb("%s\n",__func__);
 
 	if ((adap->fe = dvb_attach(mt352_attach,
 				   &m920x_mt352_config,
@@ -489,7 +494,7 @@ static int m920x_mt352_frontend_attach(struct dvb_usb_adapter *adap)
 
 static int m920x_tda10046_08_frontend_attach(struct dvb_usb_adapter *adap)
 {
-	deb("%s\n",__FUNCTION__);
+	deb("%s\n",__func__);
 
 	if ((adap->fe = dvb_attach(tda10046_attach,
 				   &m920x_tda10046_08_config,
@@ -501,7 +506,7 @@ static int m920x_tda10046_08_frontend_attach(struct dvb_usb_adapter *adap)
 
 static int m920x_tda10046_0b_frontend_attach(struct dvb_usb_adapter *adap)
 {
-	deb("%s\n",__FUNCTION__);
+	deb("%s\n",__func__);
 
 	if ((adap->fe = dvb_attach(tda10046_attach,
 				   &m920x_tda10046_0b_config,
@@ -513,7 +518,7 @@ static int m920x_tda10046_0b_frontend_attach(struct dvb_usb_adapter *adap)
 
 static int m920x_qt1010_tuner_attach(struct dvb_usb_adapter *adap)
 {
-	deb("%s\n",__FUNCTION__);
+	deb("%s\n",__func__);
 
 	if (dvb_attach(qt1010_attach, adap->fe, &adap->dev->i2c_adap, &m920x_qt1010_config) == NULL)
 		return -ENODEV;
@@ -523,7 +528,7 @@ static int m920x_qt1010_tuner_attach(struct dvb_usb_adapter *adap)
 
 static int m920x_tda8275_60_tuner_attach(struct dvb_usb_adapter *adap)
 {
-	deb("%s\n",__FUNCTION__);
+	deb("%s\n",__func__);
 
 	if (dvb_attach(tda827x_attach, adap->fe, 0x60, &adap->dev->i2c_adap, NULL) == NULL)
 		return -ENODEV;
@@ -533,7 +538,7 @@ static int m920x_tda8275_60_tuner_attach(struct dvb_usb_adapter *adap)
 
 static int m920x_tda8275_61_tuner_attach(struct dvb_usb_adapter *adap)
 {
-	deb("%s\n",__FUNCTION__);
+	deb("%s\n",__func__);
 
 	if (dvb_attach(tda827x_attach, adap->fe, 0x61, &adap->dev->i2c_adap, NULL) == NULL)
 		return -ENODEV;
@@ -559,42 +564,42 @@ static struct m920x_inits tvwalkertwin_rc_init [] = {
 
 /* ir keymaps */
 static struct dvb_usb_rc_key megasky_rc_keys [] = {
-	{ 0x0, 0x12, KEY_POWER },
-	{ 0x0, 0x1e, KEY_CYCLEWINDOWS }, /* min/max */
-	{ 0x0, 0x02, KEY_CHANNELUP },
-	{ 0x0, 0x05, KEY_CHANNELDOWN },
-	{ 0x0, 0x03, KEY_VOLUMEUP },
-	{ 0x0, 0x06, KEY_VOLUMEDOWN },
-	{ 0x0, 0x04, KEY_MUTE },
-	{ 0x0, 0x07, KEY_OK }, /* TS */
-	{ 0x0, 0x08, KEY_STOP },
-	{ 0x0, 0x09, KEY_MENU }, /* swap */
-	{ 0x0, 0x0a, KEY_REWIND },
-	{ 0x0, 0x1b, KEY_PAUSE },
-	{ 0x0, 0x1f, KEY_FASTFORWARD },
-	{ 0x0, 0x0c, KEY_RECORD },
-	{ 0x0, 0x0d, KEY_CAMERA }, /* screenshot */
-	{ 0x0, 0x0e, KEY_COFFEE }, /* "MTS" */
+	{ 0x0012, KEY_POWER },
+	{ 0x001e, KEY_CYCLEWINDOWS }, /* min/max */
+	{ 0x0002, KEY_CHANNELUP },
+	{ 0x0005, KEY_CHANNELDOWN },
+	{ 0x0003, KEY_VOLUMEUP },
+	{ 0x0006, KEY_VOLUMEDOWN },
+	{ 0x0004, KEY_MUTE },
+	{ 0x0007, KEY_OK }, /* TS */
+	{ 0x0008, KEY_STOP },
+	{ 0x0009, KEY_MENU }, /* swap */
+	{ 0x000a, KEY_REWIND },
+	{ 0x001b, KEY_PAUSE },
+	{ 0x001f, KEY_FASTFORWARD },
+	{ 0x000c, KEY_RECORD },
+	{ 0x000d, KEY_CAMERA }, /* screenshot */
+	{ 0x000e, KEY_COFFEE }, /* "MTS" */
 };
 
 static struct dvb_usb_rc_key tvwalkertwin_rc_keys [] = {
-	{ 0x0, 0x01, KEY_ZOOM }, /* Full Screen */
-	{ 0x0, 0x02, KEY_CAMERA }, /* snapshot */
-	{ 0x0, 0x03, KEY_MUTE },
-	{ 0x0, 0x04, KEY_REWIND },
-	{ 0x0, 0x05, KEY_PLAYPAUSE }, /* Play/Pause */
-	{ 0x0, 0x06, KEY_FASTFORWARD },
-	{ 0x0, 0x07, KEY_RECORD },
-	{ 0x0, 0x08, KEY_STOP },
-	{ 0x0, 0x09, KEY_TIME }, /* Timeshift */
-	{ 0x0, 0x0c, KEY_COFFEE }, /* Recall */
-	{ 0x0, 0x0e, KEY_CHANNELUP },
-	{ 0x0, 0x12, KEY_POWER },
-	{ 0x0, 0x15, KEY_MENU }, /* source */
-	{ 0x0, 0x18, KEY_CYCLEWINDOWS }, /* TWIN PIP */
-	{ 0x0, 0x1a, KEY_CHANNELDOWN },
-	{ 0x0, 0x1b, KEY_VOLUMEDOWN },
-	{ 0x0, 0x1e, KEY_VOLUMEUP },
+	{ 0x0001, KEY_ZOOM }, /* Full Screen */
+	{ 0x0002, KEY_CAMERA }, /* snapshot */
+	{ 0x0003, KEY_MUTE },
+	{ 0x0004, KEY_REWIND },
+	{ 0x0005, KEY_PLAYPAUSE }, /* Play/Pause */
+	{ 0x0006, KEY_FASTFORWARD },
+	{ 0x0007, KEY_RECORD },
+	{ 0x0008, KEY_STOP },
+	{ 0x0009, KEY_TIME }, /* Timeshift */
+	{ 0x000c, KEY_COFFEE }, /* Recall */
+	{ 0x000e, KEY_CHANNELUP },
+	{ 0x0012, KEY_POWER },
+	{ 0x0015, KEY_MENU }, /* source */
+	{ 0x0018, KEY_CYCLEWINDOWS }, /* TWIN PIP */
+	{ 0x001a, KEY_CHANNELDOWN },
+	{ 0x001b, KEY_VOLUMEDOWN },
+	{ 0x001e, KEY_VOLUMEUP },
 };
 
 /* DVB USB Driver stuff */
@@ -618,27 +623,31 @@ static int m920x_probe(struct usb_interface *intf,
 		 * multi-tuner device
 		 */
 
-		if ((ret = dvb_usb_device_init(intf, &megasky_properties,
-					       THIS_MODULE, &d)) == 0) {
+		ret = dvb_usb_device_init(intf, &megasky_properties,
+					  THIS_MODULE, &d, adapter_nr);
+		if (ret == 0) {
 			rc_init_seq = megasky_rc_init;
 			goto found;
 		}
 
-		if ((ret = dvb_usb_device_init(intf, &digivox_mini_ii_properties,
-					       THIS_MODULE, &d)) == 0) {
+		ret = dvb_usb_device_init(intf, &digivox_mini_ii_properties,
+					  THIS_MODULE, &d, adapter_nr);
+		if (ret == 0) {
 			/* No remote control, so no rc_init_seq */
 			goto found;
 		}
 
 		/* This configures both tuners on the TV Walker Twin */
-		if ((ret = dvb_usb_device_init(intf, &tvwalkertwin_properties,
-					       THIS_MODULE, &d)) == 0) {
+		ret = dvb_usb_device_init(intf, &tvwalkertwin_properties,
+					  THIS_MODULE, &d, adapter_nr);
+		if (ret == 0) {
 			rc_init_seq = tvwalkertwin_rc_init;
 			goto found;
 		}
 
-		if ((ret = dvb_usb_device_init(intf, &dposh_properties,
-					       THIS_MODULE, &d)) == 0) {
+		ret = dvb_usb_device_init(intf, &dposh_properties,
+					  THIS_MODULE, &d, adapter_nr);
+		if (ret == 0) {
 			/* Remote controller not supported yet. */
 			goto found;
 		}

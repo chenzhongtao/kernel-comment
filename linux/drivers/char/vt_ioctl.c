@@ -16,6 +16,8 @@
 #include <linux/tty.h>
 #include <linux/timer.h>
 #include <linux/kernel.h>
+#include <linux/compat.h>
+#include <linux/module.h>
 #include <linux/kd.h>
 #include <linux/vt.h>
 #include <linux/string.h>
@@ -25,6 +27,7 @@
 #include <linux/console.h>
 #include <linux/consolemap.h>
 #include <linux/signal.h>
+#include <linux/smp_lock.h>
 #include <linux/timex.h>
 
 #include <asm/io.h>
@@ -59,6 +62,133 @@ extern struct tty_driver *console_driver;
 #endif
 
 static void complete_change_console(struct vc_data *vc);
+
+/*
+ *	User space VT_EVENT handlers
+ */
+
+struct vt_event_wait {
+	struct list_head list;
+	struct vt_event event;
+	int done;
+};
+
+static LIST_HEAD(vt_events);
+static DEFINE_SPINLOCK(vt_event_lock);
+static DECLARE_WAIT_QUEUE_HEAD(vt_event_waitqueue);
+
+/**
+ *	vt_event_post
+ *	@event: the event that occurred
+ *	@old: old console
+ *	@new: new console
+ *
+ *	Post an VT event to interested VT handlers
+ */
+
+void vt_event_post(unsigned int event, unsigned int old, unsigned int new)
+{
+	struct list_head *pos, *head;
+	unsigned long flags;
+	int wake = 0;
+
+	spin_lock_irqsave(&vt_event_lock, flags);
+	head = &vt_events;
+
+	list_for_each(pos, head) {
+		struct vt_event_wait *ve = list_entry(pos,
+						struct vt_event_wait, list);
+		if (!(ve->event.event & event))
+			continue;
+		ve->event.event = event;
+		/* kernel view is consoles 0..n-1, user space view is
+		   console 1..n with 0 meaning current, so we must bias */
+		ve->event.oldev = old + 1;
+		ve->event.newev = new + 1;
+		wake = 1;
+		ve->done = 1;
+	}
+	spin_unlock_irqrestore(&vt_event_lock, flags);
+	if (wake)
+		wake_up_interruptible(&vt_event_waitqueue);
+}
+
+/**
+ *	vt_event_wait		-	wait for an event
+ *	@vw: our event
+ *
+ *	Waits for an event to occur which completes our vt_event_wait
+ *	structure. On return the structure has wv->done set to 1 for success
+ *	or 0 if some event such as a signal ended the wait.
+ */
+
+static void vt_event_wait(struct vt_event_wait *vw)
+{
+	unsigned long flags;
+	/* Prepare the event */
+	INIT_LIST_HEAD(&vw->list);
+	vw->done = 0;
+	/* Queue our event */
+	spin_lock_irqsave(&vt_event_lock, flags);
+	list_add(&vw->list, &vt_events);
+	spin_unlock_irqrestore(&vt_event_lock, flags);
+	/* Wait for it to pass */
+	wait_event_interruptible(vt_event_waitqueue, vw->done);
+	/* Dequeue it */
+	spin_lock_irqsave(&vt_event_lock, flags);
+	list_del(&vw->list);
+	spin_unlock_irqrestore(&vt_event_lock, flags);
+}
+
+/**
+ *	vt_event_wait_ioctl	-	event ioctl handler
+ *	@arg: argument to ioctl
+ *
+ *	Implement the VT_WAITEVENT ioctl using the VT event interface
+ */
+
+static int vt_event_wait_ioctl(struct vt_event __user *event)
+{
+	struct vt_event_wait vw;
+
+	if (copy_from_user(&vw.event, event, sizeof(struct vt_event)))
+		return -EFAULT;
+	/* Highest supported event for now */
+	if (vw.event.event & ~VT_MAX_EVENT)
+		return -EINVAL;
+
+	vt_event_wait(&vw);
+	/* If it occurred report it */
+	if (vw.done) {
+		if (copy_to_user(event, &vw.event, sizeof(struct vt_event)))
+			return -EFAULT;
+		return 0;
+	}
+	return -EINTR;
+}
+
+/**
+ *	vt_waitactive	-	active console wait
+ *	@event: event code
+ *	@n: new console
+ *
+ *	Helper for event waits. Used to implement the legacy
+ *	event waiting ioctls in terms of events
+ */
+
+int vt_waitactive(int n)
+{
+	struct vt_event_wait vw;
+	do {
+		if (n == fg_console + 1)
+			break;
+		vw.event.event = VT_EVENT_SWITCH;
+		vt_event_wait(&vw);
+		if (vw.done == 0)
+			return -EINTR;
+	} while (vw.event.newev != n);
+	return 0;
+}
 
 /*
  * these are the valid i/o ports we're allowed to change. they map all the
@@ -359,6 +489,8 @@ do_unimap_ioctl(int cmd, struct unimapdesc __user *user_ud, int perm, struct vc_
 	return 0;
 }
 
+
+
 /*
  * We handle the console-specific ioctl's here.  We allow the
  * capability to modify any console, not just the fg_console. 
@@ -366,18 +498,24 @@ do_unimap_ioctl(int cmd, struct unimapdesc __user *user_ud, int perm, struct vc_
 int vt_ioctl(struct tty_struct *tty, struct file * file,
 	     unsigned int cmd, unsigned long arg)
 {
-	struct vc_data *vc = (struct vc_data *)tty->driver_data;
+	struct vc_data *vc = tty->driver_data;
 	struct console_font_op op;	/* used in multiple places here */
 	struct kbd_struct * kbd;
 	unsigned int console;
 	unsigned char ucval;
 	void __user *up = (void __user *)arg;
 	int i, perm;
-	
+	int ret = 0;
+
 	console = vc->vc_num;
 
-	if (!vc_cons_allocated(console)) 	/* impossible? */
-		return -ENOIOCTLCMD;
+	lock_kernel();
+
+	if (!vc_cons_allocated(console)) { 	/* impossible? */
+		ret = -ENOIOCTLCMD;
+		goto out;
+	}
+
 
 	/*
 	 * To have permissions to do most of the vt ioctls, we either have
@@ -389,17 +527,23 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
  
 	kbd = kbd_table + console;
 	switch (cmd) {
+	case TIOCLINUX:
+		ret = tioclinux(tty, arg);
+		break;
 	case KIOCSOUND:
 		if (!perm)
-			return -EPERM;
+			goto eperm;
+		/* FIXME: This is an old broken API but we need to keep it
+		   supported and somehow separate the historic advertised
+		   tick rate from any real one */
 		if (arg)
 			arg = CLOCK_TICK_RATE / arg;
 		kd_mksound(arg, 0);
-		return 0;
+		break;
 
 	case KDMKTONE:
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 	{
 		unsigned int ticks, count;
 		
@@ -409,10 +553,13 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		 */
 		ticks = HZ * ((arg >> 16) & 0xffff) / 1000;
 		count = ticks ? (arg & 0xffff) : 0;
+		/* FIXME: This is an old broken API but we need to keep it
+		   supported and somehow separate the historic advertised
+		   tick rate from any real one */
 		if (count)
 			count = CLOCK_TICK_RATE / count;
 		kd_mksound(count, ticks);
-		return 0;
+		break;
 	}
 
 	case KDGKBTYPE:
@@ -435,14 +582,18 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		 * KDADDIO and KDDELIO may be able to add ports beyond what
 		 * we reject here, but to be safe...
 		 */
-		if (arg < GPFIRST || arg > GPLAST)
-			return -EINVAL;
-		return sys_ioperm(arg, 1, (cmd == KDADDIO)) ? -ENXIO : 0;
+		if (arg < GPFIRST || arg > GPLAST) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = sys_ioperm(arg, 1, (cmd == KDADDIO)) ? -ENXIO : 0;
+		break;
 
 	case KDENABIO:
 	case KDDISABIO:
-		return sys_ioperm(GPFIRST, GPNUM,
+		ret = sys_ioperm(GPFIRST, GPNUM,
 				  (cmd == KDENABIO)) ? -ENXIO : 0;
+		break;
 #endif
 
 	/* Linux m68k/i386 interface for setting the keyboard delay/repeat rate */
@@ -450,19 +601,20 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case KDKBDREP:
 	{
 		struct kbd_repeat kbrep;
-		int err;
 		
 		if (!capable(CAP_SYS_TTY_CONFIG))
-			return -EPERM;
+			goto eperm;
 
-		if (copy_from_user(&kbrep, up, sizeof(struct kbd_repeat)))
-			return -EFAULT;
-		err = kbd_rate(&kbrep);
-		if (err)
-			return err;
+		if (copy_from_user(&kbrep, up, sizeof(struct kbd_repeat))) {
+			ret =  -EFAULT;
+			break;
+		}
+		ret = kbd_rate(&kbrep);
+		if (ret)
+			break;
 		if (copy_to_user(up, &kbrep, sizeof(struct kbd_repeat)))
-			return -EFAULT;
-		return 0;
+			ret = -EFAULT;
+		break;
 	}
 
 	case KDSETMODE:
@@ -475,7 +627,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		 * need to restore their engine state. --BenH
 		 */
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 		switch (arg) {
 		case KD_GRAPHICS:
 			break;
@@ -485,13 +637,14 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		case KD_TEXT:
 			break;
 		default:
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
 		if (vc->vc_mode == (unsigned char) arg)
-			return 0;
+			break;
 		vc->vc_mode = (unsigned char) arg;
 		if (console != fg_console)
-			return 0;
+			break;
 		/*
 		 * explicitly blank/unblank the screen if switching modes
 		 */
@@ -501,7 +654,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		else
 			do_blank_screen(1);
 		release_console_sem();
-		return 0;
+		break;
 
 	case KDGETMODE:
 		ucval = vc->vc_mode;
@@ -513,11 +666,12 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		 * these work like a combination of mmap and KDENABIO.
 		 * this could be easily finished.
 		 */
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 
 	case KDSKBMODE:
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 		switch(arg) {
 		  case K_RAW:
 			kbd->kbdmode = VC_RAW;
@@ -534,10 +688,11 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 			compute_shiftstate();
 			break;
 		  default:
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
 		tty_ldisc_flush(tty);
-		return 0;
+		break;
 
 	case KDGKBMODE:
 		ucval = ((kbd->kbdmode == VC_RAW) ? K_RAW :
@@ -557,28 +712,32 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 			set_vc_kbd_mode(kbd, VC_META);
 			break;
 		  default:
-			return -EINVAL;
+			ret = -EINVAL;
 		}
-		return 0;
+		break;
 
 	case KDGKBMETA:
 		ucval = (vc_kbd_mode(kbd, VC_META) ? K_ESCPREFIX : K_METABIT);
 	setint:
-		return put_user(ucval, (int __user *)arg); 
+		ret = put_user(ucval, (int __user *)arg);
+		break;
 
 	case KDGETKEYCODE:
 	case KDSETKEYCODE:
 		if(!capable(CAP_SYS_TTY_CONFIG))
-			perm=0;
-		return do_kbkeycode_ioctl(cmd, up, perm);
+			perm = 0;
+		ret = do_kbkeycode_ioctl(cmd, up, perm);
+		break;
 
 	case KDGKBENT:
 	case KDSKBENT:
-		return do_kdsk_ioctl(cmd, up, perm, kbd);
+		ret = do_kdsk_ioctl(cmd, up, perm, kbd);
+		break;
 
 	case KDGKBSENT:
 	case KDSKBSENT:
-		return do_kdgkb_ioctl(cmd, up, perm);
+		ret = do_kdgkb_ioctl(cmd, up, perm);
+		break;
 
 	case KDGKBDIACR:
 	{
@@ -586,26 +745,31 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		struct kbdiacr diacr;
 		int i;
 
-		if (put_user(accent_table_size, &a->kb_cnt))
-			return -EFAULT;
+		if (put_user(accent_table_size, &a->kb_cnt)) {
+			ret = -EFAULT;
+			break;
+		}
 		for (i = 0; i < accent_table_size; i++) {
 			diacr.diacr = conv_uni_to_8bit(accent_table[i].diacr);
 			diacr.base = conv_uni_to_8bit(accent_table[i].base);
 			diacr.result = conv_uni_to_8bit(accent_table[i].result);
-			if (copy_to_user(a->kbdiacr + i, &diacr, sizeof(struct kbdiacr)))
-				return -EFAULT;
+			if (copy_to_user(a->kbdiacr + i, &diacr, sizeof(struct kbdiacr))) {
+				ret = -EFAULT;
+				break;
+			}
 		}
-		return 0;
+		break;
 	}
 	case KDGKBDIACRUC:
 	{
 		struct kbdiacrsuc __user *a = up;
 
 		if (put_user(accent_table_size, &a->kb_cnt))
-			return -EFAULT;
-		if (copy_to_user(a->kbdiacruc, accent_table, accent_table_size*sizeof(struct kbdiacruc)))
-			return -EFAULT;
-		return 0;
+			ret = -EFAULT;
+		else if (copy_to_user(a->kbdiacruc, accent_table,
+				accent_table_size*sizeof(struct kbdiacruc)))
+			ret = -EFAULT;
+		break;
 	}
 
 	case KDSKBDIACR:
@@ -616,20 +780,26 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		int i;
 
 		if (!perm)
-			return -EPERM;
-		if (get_user(ct,&a->kb_cnt))
-			return -EFAULT;
-		if (ct >= MAX_DIACR)
-			return -EINVAL;
+			goto eperm;
+		if (get_user(ct,&a->kb_cnt)) {
+			ret = -EFAULT;
+			break;
+		}
+		if (ct >= MAX_DIACR) {
+			ret = -EINVAL;
+			break;
+		}
 		accent_table_size = ct;
 		for (i = 0; i < ct; i++) {
-			if (copy_from_user(&diacr, a->kbdiacr + i, sizeof(struct kbdiacr)))
-				return -EFAULT;
+			if (copy_from_user(&diacr, a->kbdiacr + i, sizeof(struct kbdiacr))) {
+				ret = -EFAULT;
+				break;
+			}
 			accent_table[i].diacr = conv_8bit_to_uni(diacr.diacr);
 			accent_table[i].base = conv_8bit_to_uni(diacr.base);
 			accent_table[i].result = conv_8bit_to_uni(diacr.result);
 		}
-		return 0;
+		break;
 	}
 
 	case KDSKBDIACRUC:
@@ -638,15 +808,19 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		unsigned int ct;
 
 		if (!perm)
-			return -EPERM;
-		if (get_user(ct,&a->kb_cnt))
-			return -EFAULT;
-		if (ct >= MAX_DIACR)
-			return -EINVAL;
+			goto eperm;
+		if (get_user(ct,&a->kb_cnt)) {
+			ret = -EFAULT;
+			break;
+		}
+		if (ct >= MAX_DIACR) {
+			ret = -EINVAL;
+			break;
+		}
 		accent_table_size = ct;
 		if (copy_from_user(accent_table, a->kbdiacruc, ct*sizeof(struct kbdiacruc)))
-			return -EFAULT;
-		return 0;
+			ret = -EFAULT;
+		break;
 	}
 
 	/* the ioctls below read/set the flags usually shown in the leds */
@@ -657,26 +831,29 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 
 	case KDSKBLED:
 		if (!perm)
-			return -EPERM;
-		if (arg & ~0x77)
-			return -EINVAL;
+			goto eperm;
+		if (arg & ~0x77) {
+			ret = -EINVAL;
+			break;
+		}
 		kbd->ledflagstate = (arg & 7);
 		kbd->default_ledflagstate = ((arg >> 4) & 7);
 		set_leds();
-		return 0;
+		break;
 
 	/* the ioctls below only set the lights, not the functions */
 	/* for those, see KDGKBLED and KDSKBLED above */
 	case KDGETLED:
 		ucval = getledstate();
 	setchar:
-		return put_user(ucval, (char __user *)arg);
+		ret = put_user(ucval, (char __user *)arg);
+		break;
 
 	case KDSETLED:
 		if (!perm)
-		  return -EPERM;
+			goto eperm;
 		setledstate(kbd, arg);
-		return 0;
+		break;
 
 	/*
 	 * A process can indicate its willingness to accept signals
@@ -688,16 +865,17 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case KDSIGACCEPT:
 	{
 		if (!perm || !capable(CAP_KILL))
-		  return -EPERM;
+			goto eperm;
 		if (!valid_signal(arg) || arg < 1 || arg == SIGKILL)
-		  return -EINVAL;
-
-		spin_lock_irq(&vt_spawn_con.lock);
-		put_pid(vt_spawn_con.pid);
-		vt_spawn_con.pid = get_pid(task_pid(current));
-		vt_spawn_con.sig = arg;
-		spin_unlock_irq(&vt_spawn_con.lock);
-		return 0;
+			ret = -EINVAL;
+		else {
+			spin_lock_irq(&vt_spawn_con.lock);
+			put_pid(vt_spawn_con.pid);
+			vt_spawn_con.pid = get_pid(task_pid(current));
+			vt_spawn_con.sig = arg;
+			spin_unlock_irq(&vt_spawn_con.lock);
+		}
+		break;
 	}
 
 	case VT_SETMODE:
@@ -705,11 +883,15 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		struct vt_mode tmp;
 
 		if (!perm)
-			return -EPERM;
-		if (copy_from_user(&tmp, up, sizeof(struct vt_mode)))
-			return -EFAULT;
-		if (tmp.mode != VT_AUTO && tmp.mode != VT_PROCESS)
-			return -EINVAL;
+			goto eperm;
+		if (copy_from_user(&tmp, up, sizeof(struct vt_mode))) {
+			ret = -EFAULT;
+			goto out;
+		}
+		if (tmp.mode != VT_AUTO && tmp.mode != VT_PROCESS) {
+			ret = -EINVAL;
+			goto out;
+		}
 		acquire_console_sem();
 		vc->vt_mode = tmp;
 		/* the frsig is ignored, so we set it to 0 */
@@ -719,7 +901,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		/* no switch is required -- saw@shade.msu.ru */
 		vc->vt_newvt = -1;
 		release_console_sem();
-		return 0;
+		break;
 	}
 
 	case VT_GETMODE:
@@ -732,7 +914,9 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		release_console_sem();
 
 		rc = copy_to_user(up, &tmp, sizeof(struct vt_mode));
-		return rc ? -EFAULT : 0;
+		if (rc)
+			ret = -EFAULT;
+		break;
 	}
 
 	/*
@@ -746,12 +930,16 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		unsigned short state, mask;
 
 		if (put_user(fg_console + 1, &vtstat->v_active))
-			return -EFAULT;
-		state = 1;	/* /dev/tty0 is always open */
-		for (i = 0, mask = 2; i < MAX_NR_CONSOLES && mask; ++i, mask <<= 1)
-			if (VT_IS_IN_USE(i))
-				state |= mask;
-		return put_user(state, &vtstat->v_state);
+			ret = -EFAULT;
+		else {
+			state = 1;	/* /dev/tty0 is always open */
+			for (i = 0, mask = 2; i < MAX_NR_CONSOLES && mask;
+							++i, mask <<= 1)
+				if (VT_IS_IN_USE(i))
+					state |= mask;
+			ret = put_user(state, &vtstat->v_state);
+		}
+		break;
 	}
 
 	/*
@@ -771,27 +959,68 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	 */
 	case VT_ACTIVATE:
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 		if (arg == 0 || arg > MAX_NR_CONSOLES)
-			return -ENXIO;
-		arg--;
-		acquire_console_sem();
-		i = vc_allocate(arg);
-		release_console_sem();
-		if (i)
-			return i;
-		set_console(arg);
-		return 0;
+			ret =  -ENXIO;
+		else {
+			arg--;
+			acquire_console_sem();
+			ret = vc_allocate(arg);
+			release_console_sem();
+			if (ret)
+				break;
+			set_console(arg);
+		}
+		break;
+
+	case VT_SETACTIVATE:
+	{
+		struct vt_setactivate vsa;
+
+		if (!perm)
+			goto eperm;
+
+		if (copy_from_user(&vsa, (struct vt_setactivate __user *)arg,
+					sizeof(struct vt_setactivate))) {
+			ret = -EFAULT;
+			goto out;
+		}
+		if (vsa.console == 0 || vsa.console > MAX_NR_CONSOLES)
+			ret = -ENXIO;
+		else {
+			vsa.console--;
+			acquire_console_sem();
+			ret = vc_allocate(vsa.console);
+			if (ret == 0) {
+				struct vc_data *nvc;
+				/* This is safe providing we don't drop the
+				   console sem between vc_allocate and
+				   finishing referencing nvc */
+				nvc = vc_cons[vsa.console].d;
+				nvc->vt_mode = vsa.mode;
+				nvc->vt_mode.frsig = 0;
+				put_pid(nvc->vt_pid);
+				nvc->vt_pid = get_pid(task_pid(current));
+			}
+			release_console_sem();
+			if (ret)
+				break;
+			/* Commence switch and lock */
+			set_console(arg);
+		}
+	}
 
 	/*
 	 * wait until the specified VT has been activated
 	 */
 	case VT_WAITACTIVE:
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 		if (arg == 0 || arg > MAX_NR_CONSOLES)
-			return -ENXIO;
-		return vt_waitactive(arg-1);
+			ret = -ENXIO;
+		else
+			ret = vt_waitactive(arg);
+		break;
 
 	/*
 	 * If a vt is under process control, the kernel will not switch to it
@@ -805,10 +1034,12 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	 */
 	case VT_RELDISP:
 		if (!perm)
-			return -EPERM;
-		if (vc->vt_mode.mode != VT_PROCESS)
-			return -EINVAL;
+			goto eperm;
 
+		if (vc->vt_mode.mode != VT_PROCESS) {
+			ret = -EINVAL;
+			break;
+		}
 		/*
 		 * Switching-from response
 		 */
@@ -829,10 +1060,10 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				int newvt;
 				newvt = vc->vt_newvt;
 				vc->vt_newvt = -1;
-				i = vc_allocate(newvt);
-				if (i) {
+				ret = vc_allocate(newvt);
+				if (ret) {
 					release_console_sem();
-					return i;
+					break;
 				}
 				/*
 				 * When we actually do the console switch,
@@ -841,31 +1072,27 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				 */
 				complete_change_console(vc_cons[newvt].d);
 			}
-		}
-
-		/*
-		 * Switched-to response
-		 */
-		else
-		{
+		} else {
+			/*
+			 * Switched-to response
+			 */
 			/*
 			 * If it's just an ACK, ignore it
 			 */
-			if (arg != VT_ACKACQ) {
-				release_console_sem();
-				return -EINVAL;
-			}
+			if (arg != VT_ACKACQ)
+				ret = -EINVAL;
 		}
 		release_console_sem();
-
-		return 0;
+		break;
 
 	 /*
 	  * Disallocate memory associated to VT (but leave VT1)
 	  */
 	 case VT_DISALLOCATE:
-		if (arg > MAX_NR_CONSOLES)
-			return -ENXIO;
+		if (arg > MAX_NR_CONSOLES) {
+			ret = -ENXIO;
+			break;
+		}
 		if (arg == 0) {
 		    /* deallocate all unused consoles, but leave 0 */
 			acquire_console_sem();
@@ -877,14 +1104,14 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 			/* deallocate a single console, if possible */
 			arg--;
 			if (VT_BUSY(arg))
-				return -EBUSY;
-			if (arg) {			      /* leave 0 */
+				ret = -EBUSY;
+			else if (arg) {			      /* leave 0 */
 				acquire_console_sem();
 				vc_deallocate(arg);
 				release_console_sem();
 			}
 		}
-		return 0;
+		break;
 
 	case VT_RESIZE:
 	{
@@ -893,21 +1120,23 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 
 		ushort ll,cc;
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 		if (get_user(ll, &vtsizes->v_rows) ||
 		    get_user(cc, &vtsizes->v_cols))
-			return -EFAULT;
+			ret = -EFAULT;
+		else {
+			acquire_console_sem();
+			for (i = 0; i < MAX_NR_CONSOLES; i++) {
+				vc = vc_cons[i].d;
 
-		for (i = 0; i < MAX_NR_CONSOLES; i++) {
-			vc = vc_cons[i].d;
-
-			if (vc) {
-				vc->vc_resize_user = 1;
-				vc_lock_resize(vc_cons[i].d, cc, ll);
+				if (vc) {
+					vc->vc_resize_user = 1;
+					vc_resize(vc_cons[i].d, cc, ll);
+				}
 			}
+			release_console_sem();
 		}
-
-		return 0;
+		break;
 	}
 
 	case VT_RESIZEX:
@@ -915,10 +1144,13 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		struct vt_consize __user *vtconsize = up;
 		ushort ll,cc,vlin,clin,vcol,ccol;
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 		if (!access_ok(VERIFY_READ, vtconsize,
-				sizeof(struct vt_consize)))
-			return -EFAULT;
+				sizeof(struct vt_consize))) {
+			ret = -EFAULT;
+			break;
+		}
+		/* FIXME: Should check the copies properly */
 		__get_user(ll, &vtconsize->v_rows);
 		__get_user(cc, &vtconsize->v_cols);
 		__get_user(vlin, &vtconsize->v_vlin);
@@ -928,21 +1160,28 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		vlin = vlin ? vlin : vc->vc_scan_lines;
 		if (clin) {
 			if (ll) {
-				if (ll != vlin/clin)
-					return -EINVAL; /* Parameters don't add up */
+				if (ll != vlin/clin) {
+					/* Parameters don't add up */
+					ret = -EINVAL;
+					break;
+				}
 			} else 
 				ll = vlin/clin;
 		}
 		if (vcol && ccol) {
 			if (cc) {
-				if (cc != vcol/ccol)
-					return -EINVAL;
+				if (cc != vcol/ccol) {
+					ret = -EINVAL;
+					break;
+				}
 			} else
 				cc = vcol/ccol;
 		}
 
-		if (clin > 32)
-			return -EINVAL;
+		if (clin > 32) {
+			ret =  -EINVAL;
+			break;
+		}
 		    
 		for (i = 0; i < MAX_NR_CONSOLES; i++) {
 			if (!vc_cons[i].d)
@@ -956,19 +1195,20 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 			vc_resize(vc_cons[i].d, cc, ll);
 			release_console_sem();
 		}
-  		return 0;
+		break;
 	}
 
 	case PIO_FONT: {
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 		op.op = KD_FONT_OP_SET;
 		op.flags = KD_FONT_FLAG_OLD | KD_FONT_FLAG_DONT_RECALC;	/* Compatibility */
 		op.width = 8;
 		op.height = 0;
 		op.charcount = 256;
 		op.data = up;
-		return con_font_op(vc_cons[fg_console].d, &op);
+		ret = con_font_op(vc_cons[fg_console].d, &op);
+		break;
 	}
 
 	case GIO_FONT: {
@@ -978,149 +1218,128 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		op.height = 32;
 		op.charcount = 256;
 		op.data = up;
-		return con_font_op(vc_cons[fg_console].d, &op);
+		ret = con_font_op(vc_cons[fg_console].d, &op);
+		break;
 	}
 
 	case PIO_CMAP:
                 if (!perm)
-			return -EPERM;
-                return con_set_cmap(up);
+			ret = -EPERM;
+		else
+	                ret = con_set_cmap(up);
+		break;
 
 	case GIO_CMAP:
-                return con_get_cmap(up);
+                ret = con_get_cmap(up);
+		break;
 
 	case PIO_FONTX:
 	case GIO_FONTX:
-		return do_fontx_ioctl(cmd, up, perm, &op);
+		ret = do_fontx_ioctl(cmd, up, perm, &op);
+		break;
 
 	case PIO_FONTRESET:
 	{
 		if (!perm)
-			return -EPERM;
+			goto eperm;
 
 #ifdef BROKEN_GRAPHICS_PROGRAMS
 		/* With BROKEN_GRAPHICS_PROGRAMS defined, the default
 		   font is not saved. */
-		return -ENOSYS;
+		ret = -ENOSYS;
+		break;
 #else
 		{
 		op.op = KD_FONT_OP_SET_DEFAULT;
 		op.data = NULL;
-		i = con_font_op(vc_cons[fg_console].d, &op);
-		if (i)
-			return i;
+		ret = con_font_op(vc_cons[fg_console].d, &op);
+		if (ret)
+			break;
 		con_set_default_unimap(vc_cons[fg_console].d);
-		return 0;
+		break;
 		}
 #endif
 	}
 
 	case KDFONTOP: {
-		if (copy_from_user(&op, up, sizeof(op)))
-			return -EFAULT;
+		if (copy_from_user(&op, up, sizeof(op))) {
+			ret = -EFAULT;
+			break;
+		}
 		if (!perm && op.op != KD_FONT_OP_GET)
-			return -EPERM;
-		i = con_font_op(vc, &op);
-		if (i) return i;
+			goto eperm;
+		ret = con_font_op(vc, &op);
+		if (ret)
+			break;
 		if (copy_to_user(up, &op, sizeof(op)))
-			return -EFAULT;
-		return 0;
+			ret = -EFAULT;
+		break;
 	}
 
 	case PIO_SCRNMAP:
 		if (!perm)
-			return -EPERM;
-		return con_set_trans_old(up);
+			ret = -EPERM;
+		else
+			ret = con_set_trans_old(up);
+		break;
 
 	case GIO_SCRNMAP:
-		return con_get_trans_old(up);
+		ret = con_get_trans_old(up);
+		break;
 
 	case PIO_UNISCRNMAP:
 		if (!perm)
-			return -EPERM;
-		return con_set_trans_new(up);
+			ret = -EPERM;
+		else
+			ret = con_set_trans_new(up);
+		break;
 
 	case GIO_UNISCRNMAP:
-		return con_get_trans_new(up);
+		ret = con_get_trans_new(up);
+		break;
 
 	case PIO_UNIMAPCLR:
 	      { struct unimapinit ui;
 		if (!perm)
-			return -EPERM;
-		i = copy_from_user(&ui, up, sizeof(struct unimapinit));
-		if (i) return -EFAULT;
-		con_clear_unimap(vc, &ui);
-		return 0;
+			goto eperm;
+		ret = copy_from_user(&ui, up, sizeof(struct unimapinit));
+		if (!ret)
+			con_clear_unimap(vc, &ui);
+		break;
 	      }
 
 	case PIO_UNIMAP:
 	case GIO_UNIMAP:
-		return do_unimap_ioctl(cmd, up, perm, vc);
+		ret = do_unimap_ioctl(cmd, up, perm, vc);
+		break;
 
 	case VT_LOCKSWITCH:
 		if (!capable(CAP_SYS_TTY_CONFIG))
-		   return -EPERM;
+			goto eperm;
 		vt_dont_switch = 1;
-		return 0;
+		break;
 	case VT_UNLOCKSWITCH:
 		if (!capable(CAP_SYS_TTY_CONFIG))
-		   return -EPERM;
+			goto eperm;
 		vt_dont_switch = 0;
-		return 0;
+		break;
 	case VT_GETHIFONTMASK:
-		return put_user(vc->vc_hi_font_mask, (unsigned short __user *)arg);
+		ret = put_user(vc->vc_hi_font_mask,
+					(unsigned short __user *)arg);
+		break;
+	case VT_WAITEVENT:
+		ret = vt_event_wait_ioctl((struct vt_event __user *)arg);
+		break;
 	default:
-		return -ENOIOCTLCMD;
+		ret = -ENOIOCTLCMD;
 	}
+out:
+	unlock_kernel();
+	return ret;
+eperm:
+	ret = -EPERM;
+	goto out;
 }
-
-/*
- * Sometimes we want to wait until a particular VT has been activated. We
- * do it in a very simple manner. Everybody waits on a single queue and
- * get woken up at once. Those that are satisfied go on with their business,
- * while those not ready go back to sleep. Seems overkill to add a wait
- * to each vt just for this - usually this does nothing!
- */
-static DECLARE_WAIT_QUEUE_HEAD(vt_activate_queue);
-
-/*
- * Sleeps until a vt is activated, or the task is interrupted. Returns
- * 0 if activation, -EINTR if interrupted by a signal handler.
- */
-int vt_waitactive(int vt)
-{
-	int retval;
-	DECLARE_WAITQUEUE(wait, current);
-
-	add_wait_queue(&vt_activate_queue, &wait);
-	for (;;) {
-		retval = 0;
-
-		/*
-		 * Synchronize with redraw_screen(). By acquiring the console
-		 * semaphore we make sure that the console switch is completed
-		 * before we return. If we didn't wait for the semaphore, we
-		 * could return at a point where fg_console has already been
-		 * updated, but the console switch hasn't been completed.
-		 */
-		acquire_console_sem();
-		set_current_state(TASK_INTERRUPTIBLE);
-		if (vt == fg_console) {
-			release_console_sem();
-			break;
-		}
-		release_console_sem();
-		retval = -ERESTARTNOHAND;
-		if (signal_pending(current))
-			break;
-		schedule();
-	}
-	remove_wait_queue(&vt_activate_queue, &wait);
-	__set_current_state(TASK_RUNNING);
-	return retval;
-}
-
-#define vt_wake_waitactive() wake_up(&vt_activate_queue)
 
 void reset_vc(struct vc_data *vc)
 {
@@ -1160,12 +1379,216 @@ void vc_SAK(struct work_struct *work)
 	release_console_sem();
 }
 
+#ifdef CONFIG_COMPAT
+
+struct compat_consolefontdesc {
+	unsigned short charcount;       /* characters in font (256 or 512) */
+	unsigned short charheight;      /* scan lines per character (1-32) */
+	compat_caddr_t chardata;	/* font data in expanded form */
+};
+
+static inline int
+compat_fontx_ioctl(int cmd, struct compat_consolefontdesc __user *user_cfd,
+			 int perm, struct console_font_op *op)
+{
+	struct compat_consolefontdesc cfdarg;
+	int i;
+
+	if (copy_from_user(&cfdarg, user_cfd, sizeof(struct compat_consolefontdesc)))
+		return -EFAULT;
+
+	switch (cmd) {
+	case PIO_FONTX:
+		if (!perm)
+			return -EPERM;
+		op->op = KD_FONT_OP_SET;
+		op->flags = KD_FONT_FLAG_OLD;
+		op->width = 8;
+		op->height = cfdarg.charheight;
+		op->charcount = cfdarg.charcount;
+		op->data = compat_ptr(cfdarg.chardata);
+		return con_font_op(vc_cons[fg_console].d, op);
+	case GIO_FONTX:
+		op->op = KD_FONT_OP_GET;
+		op->flags = KD_FONT_FLAG_OLD;
+		op->width = 8;
+		op->height = cfdarg.charheight;
+		op->charcount = cfdarg.charcount;
+		op->data = compat_ptr(cfdarg.chardata);
+		i = con_font_op(vc_cons[fg_console].d, op);
+		if (i)
+			return i;
+		cfdarg.charheight = op->height;
+		cfdarg.charcount = op->charcount;
+		if (copy_to_user(user_cfd, &cfdarg, sizeof(struct compat_consolefontdesc)))
+			return -EFAULT;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+struct compat_console_font_op {
+	compat_uint_t op;        /* operation code KD_FONT_OP_* */
+	compat_uint_t flags;     /* KD_FONT_FLAG_* */
+	compat_uint_t width, height;     /* font size */
+	compat_uint_t charcount;
+	compat_caddr_t data;    /* font data with height fixed to 32 */
+};
+
+static inline int
+compat_kdfontop_ioctl(struct compat_console_font_op __user *fontop,
+			 int perm, struct console_font_op *op, struct vc_data *vc)
+{
+	int i;
+
+	if (copy_from_user(op, fontop, sizeof(struct compat_console_font_op)))
+		return -EFAULT;
+	if (!perm && op->op != KD_FONT_OP_GET)
+		return -EPERM;
+	op->data = compat_ptr(((struct compat_console_font_op *)op)->data);
+	op->flags |= KD_FONT_FLAG_OLD;
+	i = con_font_op(vc, op);
+	if (i)
+		return i;
+	((struct compat_console_font_op *)op)->data = (unsigned long)op->data;
+	if (copy_to_user(fontop, op, sizeof(struct compat_console_font_op)))
+		return -EFAULT;
+	return 0;
+}
+
+struct compat_unimapdesc {
+	unsigned short entry_ct;
+	compat_caddr_t entries;
+};
+
+static inline int
+compat_unimap_ioctl(unsigned int cmd, struct compat_unimapdesc __user *user_ud,
+			 int perm, struct vc_data *vc)
+{
+	struct compat_unimapdesc tmp;
+	struct unipair __user *tmp_entries;
+
+	if (copy_from_user(&tmp, user_ud, sizeof tmp))
+		return -EFAULT;
+	tmp_entries = compat_ptr(tmp.entries);
+	if (tmp_entries)
+		if (!access_ok(VERIFY_WRITE, tmp_entries,
+				tmp.entry_ct*sizeof(struct unipair)))
+			return -EFAULT;
+	switch (cmd) {
+	case PIO_UNIMAP:
+		if (!perm)
+			return -EPERM;
+		return con_set_unimap(vc, tmp.entry_ct, tmp_entries);
+	case GIO_UNIMAP:
+		if (!perm && fg_console != vc->vc_num)
+			return -EPERM;
+		return con_get_unimap(vc, tmp.entry_ct, &(user_ud->entry_ct), tmp_entries);
+	}
+	return 0;
+}
+
+long vt_compat_ioctl(struct tty_struct *tty, struct file * file,
+	     unsigned int cmd, unsigned long arg)
+{
+	struct vc_data *vc = tty->driver_data;
+	struct console_font_op op;	/* used in multiple places here */
+	struct kbd_struct *kbd;
+	unsigned int console;
+	void __user *up = (void __user *)arg;
+	int perm;
+	int ret = 0;
+
+	console = vc->vc_num;
+
+	lock_kernel();
+
+	if (!vc_cons_allocated(console)) { 	/* impossible? */
+		ret = -ENOIOCTLCMD;
+		goto out;
+	}
+
+	/*
+	 * To have permissions to do most of the vt ioctls, we either have
+	 * to be the owner of the tty, or have CAP_SYS_TTY_CONFIG.
+	 */
+	perm = 0;
+	if (current->signal->tty == tty || capable(CAP_SYS_TTY_CONFIG))
+		perm = 1;
+
+	kbd = kbd_table + console;
+	switch (cmd) {
+	/*
+	 * these need special handlers for incompatible data structures
+	 */
+	case PIO_FONTX:
+	case GIO_FONTX:
+		ret = compat_fontx_ioctl(cmd, up, perm, &op);
+		break;
+
+	case KDFONTOP:
+		ret = compat_kdfontop_ioctl(up, perm, &op, vc);
+		break;
+
+	case PIO_UNIMAP:
+	case GIO_UNIMAP:
+		ret = compat_unimap_ioctl(cmd, up, perm, vc);
+		break;
+
+	/*
+	 * all these treat 'arg' as an integer
+	 */
+	case KIOCSOUND:
+	case KDMKTONE:
+#ifdef CONFIG_X86
+	case KDADDIO:
+	case KDDELIO:
+#endif
+	case KDSETMODE:
+	case KDMAPDISP:
+	case KDUNMAPDISP:
+	case KDSKBMODE:
+	case KDSKBMETA:
+	case KDSKBLED:
+	case KDSETLED:
+	case KDSIGACCEPT:
+	case VT_ACTIVATE:
+	case VT_WAITACTIVE:
+	case VT_RELDISP:
+	case VT_DISALLOCATE:
+	case VT_RESIZE:
+	case VT_RESIZEX:
+		goto fallback;
+
+	/*
+	 * the rest has a compatible data structure behind arg,
+	 * but we have to convert it to a proper 64 bit pointer.
+	 */
+	default:
+		arg = (unsigned long)compat_ptr(arg);
+		goto fallback;
+	}
+out:
+	unlock_kernel();
+	return ret;
+
+fallback:
+	unlock_kernel();
+	return vt_ioctl(tty, file, cmd, arg);
+}
+
+
+#endif /* CONFIG_COMPAT */
+
+
 /*
- * Performs the back end of a vt switch
+ * Performs the back end of a vt switch. Called under the console
+ * semaphore.
  */
 static void complete_change_console(struct vc_data *vc)
 {
 	unsigned char old_vc_mode;
+	int old = fg_console;
 
 	last_console = fg_console;
 
@@ -1229,7 +1652,7 @@ static void complete_change_console(struct vc_data *vc)
 	/*
 	 * Wake anyone waiting for their VT to activate
 	 */
-	vt_wake_waitactive();
+	vt_event_post(VT_EVENT_SWITCH, old, vc->vc_num);
 	return;
 }
 
@@ -1302,3 +1725,58 @@ void change_console(struct vc_data *new_vc)
 
 	complete_change_console(new_vc);
 }
+
+/* Perform a kernel triggered VT switch for suspend/resume */
+
+static int disable_vt_switch;
+
+int vt_move_to_console(unsigned int vt, int alloc)
+{
+	int prev;
+
+	acquire_console_sem();
+	/* Graphics mode - up to X */
+	if (disable_vt_switch) {
+		release_console_sem();
+		return 0;
+	}
+	prev = fg_console;
+
+	if (alloc && vc_allocate(vt)) {
+		/* we can't have a free VC for now. Too bad,
+		 * we don't want to mess the screen for now. */
+		release_console_sem();
+		return -ENOSPC;
+	}
+
+	if (set_console(vt)) {
+		/*
+		 * We're unable to switch to the SUSPEND_CONSOLE.
+		 * Let the calling function know so it can decide
+		 * what to do.
+		 */
+		release_console_sem();
+		return -EIO;
+	}
+	release_console_sem();
+	if (vt_waitactive(vt + 1)) {
+		pr_debug("Suspend: Can't switch VCs.");
+		return -EINTR;
+	}
+	return prev;
+}
+
+/*
+ * Normally during a suspend, we allocate a new console and switch to it.
+ * When we resume, we switch back to the original console.  This switch
+ * can be slow, so on systems where the framebuffer can handle restoration
+ * of video registers anyways, there's little point in doing the console
+ * switch.  This function allows you to disable it by passing it '0'.
+ */
+void pm_set_vt_switch(int do_switch)
+{
+	acquire_console_sem();
+	disable_vt_switch = !do_switch;
+	release_console_sem();
+}
+EXPORT_SYMBOL(pm_set_vt_switch);

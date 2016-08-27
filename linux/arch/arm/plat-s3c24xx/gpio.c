@@ -26,12 +26,13 @@
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
+#include <mach/gpio-fns.h>
 #include <asm/irq.h>
-#include <asm/io.h>
 
-#include <asm/arch/regs-gpio.h>
+#include <mach/regs-gpio.h>
 
 void s3c2410_gpio_cfgpin(unsigned int pin, unsigned int function)
 {
@@ -122,6 +123,19 @@ void s3c2410_gpio_pullup(unsigned int pin, unsigned int to)
 
 EXPORT_SYMBOL(s3c2410_gpio_pullup);
 
+int s3c2410_gpio_getpull(unsigned int pin)
+{
+	void __iomem *base = S3C24XX_GPIO_BASE(pin);
+	unsigned long offs = S3C2410_GPIO_OFFSET(pin);
+
+	if (pin < S3C2410_GPIO_BANKB)
+		return -EINVAL;
+
+	return (__raw_readl(base + 0x08) & (1L << offs)) ? 1 : 0;
+}
+
+EXPORT_SYMBOL(s3c2410_gpio_getpull);
+
 void s3c2410_gpio_setpin(unsigned int pin, unsigned int to)
 {
 	void __iomem *base = S3C24XX_GPIO_BASE(pin);
@@ -170,19 +184,19 @@ EXPORT_SYMBOL(s3c2410_modify_misccr);
 
 int s3c2410_gpio_getirq(unsigned int pin)
 {
-	if (pin < S3C2410_GPF0 || pin > S3C2410_GPG15)
-		return -1;	/* not valid interrupts */
+	if (pin < S3C2410_GPF(0) || pin > S3C2410_GPG(15))
+		return -EINVAL;	/* not valid interrupts */
 
-	if (pin < S3C2410_GPG0 && pin > S3C2410_GPF7)
-		return -1;	/* not valid pin */
+	if (pin < S3C2410_GPG(0) && pin > S3C2410_GPF(7))
+		return -EINVAL;	/* not valid pin */
 
-	if (pin < S3C2410_GPF4)
-		return (pin - S3C2410_GPF0) + IRQ_EINT0;
+	if (pin < S3C2410_GPF(4))
+		return (pin - S3C2410_GPF(0)) + IRQ_EINT0;
 
-	if (pin < S3C2410_GPG0)
-		return (pin - S3C2410_GPF4) + IRQ_EINT4;
+	if (pin < S3C2410_GPG(0))
+		return (pin - S3C2410_GPF(4)) + IRQ_EINT4;
 
-	return (pin - S3C2410_GPG0) + IRQ_EINT8;
+	return (pin - S3C2410_GPG(0)) + IRQ_EINT8;
 }
 
 EXPORT_SYMBOL(s3c2410_gpio_getirq);

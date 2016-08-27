@@ -50,10 +50,6 @@ static int ncp_file_mmap_fault(struct vm_area_struct *area,
 	pos = vmf->pgoff << PAGE_SHIFT;
 
 	count = PAGE_SIZE;
-	if ((unsigned long)vmf->virtual_address + PAGE_SIZE > area->vm_end) {
-		WARN_ON(1); /* shouldn't happen? */
-		count = area->vm_end - (unsigned long)vmf->virtual_address;
-	}
 	/* what we can read in one go */
 	bufsize = NCP_SERVER(inode)->buffer_size;
 
@@ -99,7 +95,7 @@ static int ncp_file_mmap_fault(struct vm_area_struct *area,
 	return VM_FAULT_MAJOR;
 }
 
-static struct vm_operations_struct ncp_file_mmap =
+static const struct vm_operations_struct ncp_file_mmap =
 {
 	.fault = ncp_file_mmap_fault,
 };

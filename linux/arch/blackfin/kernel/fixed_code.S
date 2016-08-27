@@ -1,17 +1,24 @@
 /*
  * This file contains sequences of code that will be copied to a
- * fixed location, defined in <asm/atomic_seq.h>.  The interrupt
+ * fixed location, defined in <asm/fixed_code.h>.  The interrupt
  * handlers ensure that these sequences appear to be atomic when
  * executed from userspace.
  * These are aligned to 16 bytes, so that we have some space to replace
  * these sequences with something else (e.g. kernel traps if we ever do
  * BF561 SMP).
+ *
+ * Copyright 2007-2008 Analog Devices Inc.
+ *
+ * Licensed under the GPL-2 or later.
  */
+
 #include <linux/linkage.h>
+#include <linux/init.h>
 #include <linux/unistd.h>
 #include <asm/entry.h>
 
-.text
+__INIT
+
 ENTRY(_fixed_code_start)
 
 .align 16
@@ -101,9 +108,9 @@ ENDPROC (_atomic_ior32)
 
 .align 16
 	/*
-	 * Atomic ior, 32 bit.
+	 * Atomic and, 32 bit.
 	 * Inputs:	P0: memory address to use
-	 *		R0: value to ior
+	 *		R0: value to and
 	 * Outputs:	R0: new contents of the memory address.
 	 *		R1: previous contents of the memory address.
 	 */
@@ -112,13 +119,13 @@ ENTRY(_atomic_and32)
 	R0 = R1 & R0;
 	[P0] = R0;
 	rts;
-ENDPROC (_atomic_ior32)
+ENDPROC (_atomic_and32)
 
 .align 16
 	/*
-	 * Atomic ior, 32 bit.
+	 * Atomic xor, 32 bit.
 	 * Inputs:	P0: memory address to use
-	 *		R0: value to ior
+	 *		R0: value to xor
 	 * Outputs:	R0: new contents of the memory address.
 	 *		R1: previous contents of the memory address.
 	 */
@@ -127,7 +134,7 @@ ENTRY(_atomic_xor32)
 	R0 = R1 ^ R0;
 	[P0] = R0;
 	rts;
-ENDPROC (_atomic_ior32)
+ENDPROC (_atomic_xor32)
 
 .align 16
 	/*
@@ -144,3 +151,5 @@ ENTRY(_safe_user_instruction)
 ENDPROC(_safe_user_instruction)
 
 ENTRY(_fixed_code_end)
+
+__FINIT

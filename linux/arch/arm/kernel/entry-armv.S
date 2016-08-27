@@ -11,15 +11,17 @@
  *
  *  Low-level vector interface routines
  *
- *  Note:  there is a StrongARM bug in the STMIA rn, {regs}^ instruction that causes
- *  it to save wrong values...  Be aware!
+ *  Note:  there is a StrongARM bug in the STMIA rn, {regs}^ instruction
+ *  that causes it to save wrong values...  Be aware!
  */
 
 #include <asm/memory.h>
 #include <asm/glue.h>
 #include <asm/vfpmacros.h>
-#include <asm/arch/entry-macro.S>
+#include <mach/entry-macro.S>
 #include <asm/thread_notify.h>
+#include <asm/unwind.h>
+#include <asm/unistd.h>
 
 #include "entry-header.S"
 
@@ -33,7 +35,7 @@
 	@
 	@ routine called with r0 = irq number, r1 = struct pt_regs *
 	@
-	adrne	lr, 1b
+	adrne	lr, BSYM(1b)
 	bne	asm_do_IRQ
 
 #ifdef CONFIG_SMP
@@ -45,39 +47,51 @@
 	 */
 	test_for_ipi r0, r6, r5, lr
 	movne	r0, sp
-	adrne	lr, 1b
+	adrne	lr, BSYM(1b)
 	bne	do_IPI
 
 #ifdef CONFIG_LOCAL_TIMERS
 	test_for_ltirq r0, r6, r5, lr
 	movne	r0, sp
-	adrne	lr, 1b
+	adrne	lr, BSYM(1b)
 	bne	do_local_timer
 #endif
 #endif
 
 	.endm
 
+#ifdef CONFIG_KPROBES
+	.section	.kprobes.text,"ax",%progbits
+#else
+	.text
+#endif
+
 /*
  * Invalid mode handlers
  */
 	.macro	inv_entry, reason
 	sub	sp, sp, #S_FRAME_SIZE
-	stmib	sp, {r1 - lr}
+ ARM(	stmib	sp, {r1 - lr}		)
+ THUMB(	stmia	sp, {r0 - r12}		)
+ THUMB(	str	sp, [sp, #S_SP]		)
+ THUMB(	str	lr, [sp, #S_LR]		)
 	mov	r1, #\reason
 	.endm
 
 __pabt_invalid:
 	inv_entry BAD_PREFETCH
 	b	common_invalid
+ENDPROC(__pabt_invalid)
 
 __dabt_invalid:
 	inv_entry BAD_DATA
 	b	common_invalid
+ENDPROC(__dabt_invalid)
 
 __irq_invalid:
 	inv_entry BAD_IRQ
 	b	common_invalid
+ENDPROC(__irq_invalid)
 
 __und_invalid:
 	inv_entry BAD_UNDEFINSTR
@@ -101,6 +115,7 @@ common_invalid:
 
 	mov	r0, sp
 	b	bad_mode
+ENDPROC(__und_invalid)
 
 /*
  * SVC mode handlers
@@ -112,18 +127,27 @@ common_invalid:
 #define SPFIX(code...)
 #endif
 
-	.macro	svc_entry
-	sub	sp, sp, #S_FRAME_SIZE
+	.macro	svc_entry, stack_hole=0
+ UNWIND(.fnstart		)
+ UNWIND(.save {r0 - pc}		)
+	sub	sp, sp, #(S_FRAME_SIZE + \stack_hole - 4)
+#ifdef CONFIG_THUMB2_KERNEL
+ SPFIX(	str	r0, [sp]	)	@ temporarily saved
+ SPFIX(	mov	r0, sp		)
+ SPFIX(	tst	r0, #4		)	@ test original stack alignment
+ SPFIX(	ldr	r0, [sp]	)	@ restored
+#else
  SPFIX(	tst	sp, #4		)
- SPFIX(	bicne	sp, sp, #4	)
-	stmib	sp, {r1 - r12}
+#endif
+ SPFIX(	subeq	sp, sp, #4	)
+	stmia	sp, {r1 - r12}
 
 	ldmia	r0, {r1 - r3}
-	add	r5, sp, #S_SP		@ here for interlock avoidance
+	add	r5, sp, #S_SP - 4	@ here for interlock avoidance
 	mov	r4, #-1			@  ""  ""      ""       ""
-	add	r0, sp, #S_FRAME_SIZE   @  ""  ""      ""       ""
- SPFIX(	addne	r0, r0, #4	)
-	str	r1, [sp]		@ save the "real" r0 copied
+	add	r0, sp, #(S_FRAME_SIZE + \stack_hole - 4)
+ SPFIX(	addeq	r0, r0, #4	)
+	str	r1, [sp, #-4]!		@ save the "real" r0 copied
 					@ from the exception stack
 
 	mov	r1, lr
@@ -138,6 +162,8 @@ common_invalid:
 	@  r4 - orig_r0 (see pt_regs definition in ptrace.h)
 	@
 	stmia	r5, {r0 - r4}
+
+	asm_trace_hardirqs_off
 	.endm
 
 	.align	5
@@ -160,12 +186,12 @@ __dabt_svc:
 	@ The abort handler must return the aborted address in r0, and
 	@ the fault status register in r1.  r9 must be preserved.
 	@
-#ifdef MULTI_ABORT
+#ifdef MULTI_DABORT
 	ldr	r4, .LCprocfns
 	mov	lr, pc
-	ldr	pc, [r4]
+	ldr	pc, [r4, #PROCESSOR_DABT_FUNC]
 #else
-	bl	CPU_ABORT_HANDLER
+	bl	CPU_DABORT_HANDLER
 #endif
 
 	@
@@ -183,17 +209,15 @@ __dabt_svc:
 	@
 	@ restore SPSR and restart the instruction
 	@
-	ldr	r0, [sp, #S_PSR]
-	msr	spsr_cxsf, r0
-	ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+	ldr	r2, [sp, #S_PSR]
+	svc_exit r2				@ return from exception
+ UNWIND(.fnend		)
+ENDPROC(__dabt_svc)
 
 	.align	5
 __irq_svc:
 	svc_entry
 
-#ifdef CONFIG_TRACE_IRQFLAGS
-	bl	trace_hardirqs_off
-#endif
 #ifdef CONFIG_PREEMPT
 	get_thread_info tsk
 	ldr	r8, [tsk, #TI_PREEMPT]		@ get preempt count
@@ -203,46 +227,44 @@ __irq_svc:
 
 	irq_handler
 #ifdef CONFIG_PREEMPT
+	str	r8, [tsk, #TI_PREEMPT]		@ restore preempt count
 	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
+	teq	r8, #0				@ if preempt count != 0
+	movne	r0, #0				@ force flags to 0
 	tst	r0, #_TIF_NEED_RESCHED
 	blne	svc_preempt
-preempt_return:
-	ldr	r0, [tsk, #TI_PREEMPT]		@ read preempt value
-	str	r8, [tsk, #TI_PREEMPT]		@ restore preempt count
-	teq	r0, r7
-	strne	r0, [r0, -r0]			@ bug()
 #endif
-	ldr	r0, [sp, #S_PSR]		@ irqs are already disabled
-	msr	spsr_cxsf, r0
+	ldr	r4, [sp, #S_PSR]		@ irqs are already disabled
 #ifdef CONFIG_TRACE_IRQFLAGS
-	tst	r0, #PSR_I_BIT
+	tst	r4, #PSR_I_BIT
 	bleq	trace_hardirqs_on
 #endif
-	ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+	svc_exit r4				@ return from exception
+ UNWIND(.fnend		)
+ENDPROC(__irq_svc)
 
 	.ltorg
 
 #ifdef CONFIG_PREEMPT
 svc_preempt:
-	teq	r8, #0				@ was preempt count = 0
-	ldreq	r6, .LCirq_stat
-	movne	pc, lr				@ no
-	ldr	r0, [r6, #4]			@ local_irq_count
-	ldr	r1, [r6, #8]			@ local_bh_count
-	adds	r0, r0, r1
-	movne	pc, lr
-	mov	r7, #0				@ preempt_schedule_irq
-	str	r7, [tsk, #TI_PREEMPT]		@ expects preempt_count == 0
+	mov	r8, lr
 1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
 	ldr	r0, [tsk, #TI_FLAGS]		@ get new tasks TI_FLAGS
 	tst	r0, #_TIF_NEED_RESCHED
-	beq	preempt_return			@ go again
+	moveq	pc, r8				@ go again
 	b	1b
 #endif
 
 	.align	5
 __und_svc:
+#ifdef CONFIG_KPROBES
+	@ If a kprobe is about to simulate a "stmdb sp..." instruction,
+	@ it obviously needs free stack space which then will belong to
+	@ the saved context.
+	svc_entry 64
+#else
 	svc_entry
+#endif
 
 	@
 	@ call emulation code, which returns using r9 if it has emulated
@@ -251,8 +273,16 @@ __und_svc:
 	@
 	@  r0 - instruction
 	@
+#ifndef	CONFIG_THUMB2_KERNEL
 	ldr	r0, [r2, #-4]
-	adr	r9, 1f
+#else
+	ldrh	r0, [r2, #-2]			@ Thumb instruction at LR - 2
+	and	r9, r0, #0xf800
+	cmp	r9, #0xe800			@ 32-bit instruction if xx >= 0
+	ldrhhs	r9, [r2]			@ bottom 16 bits
+	orrhs	r0, r9, r0, lsl #16
+#endif
+	adr	r9, BSYM(1f)
 	bl	call_fpe
 
 	mov	r0, sp				@ struct pt_regs *regs
@@ -266,9 +296,10 @@ __und_svc:
 	@
 	@ restore SPSR and restart the instruction
 	@
-	ldr	lr, [sp, #S_PSR]		@ Get SVC cpsr
-	msr	spsr_cxsf, lr
-	ldmia	sp, {r0 - pc}^			@ Restore SVC registers
+	ldr	r2, [sp, #S_PSR]		@ Get SVC cpsr
+	svc_exit r2				@ return from exception
+ UNWIND(.fnend		)
+ENDPROC(__und_svc)
 
 	.align	5
 __pabt_svc:
@@ -280,16 +311,17 @@ __pabt_svc:
 	mrs	r9, cpsr
 	tst	r3, #PSR_I_BIT
 	biceq	r9, r9, #PSR_I_BIT
-	msr	cpsr_c, r9
 
-	@
-	@ set args, then call main handler
-	@
-	@  r0 - address of faulting instruction
-	@  r1 - pointer to registers on stack
-	@
-	mov	r0, r2				@ address (pc)
-	mov	r1, sp				@ regs
+	mov	r0, r2			@ pass address of aborted instruction.
+#ifdef MULTI_PABORT
+	ldr	r4, .LCprocfns
+	mov	lr, pc
+	ldr	pc, [r4, #PROCESSOR_PABT_FUNC]
+#else
+	bl	CPU_PABORT_HANDLER
+#endif
+	msr	cpsr_c, r9			@ Maybe enable interrupts
+	mov	r2, sp				@ regs
 	bl	do_PrefetchAbort		@ call abort handler
 
 	@
@@ -300,23 +332,20 @@ __pabt_svc:
 	@
 	@ restore SPSR and restart the instruction
 	@
-	ldr	r0, [sp, #S_PSR]
-	msr	spsr_cxsf, r0
-	ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+	ldr	r2, [sp, #S_PSR]
+	svc_exit r2				@ return from exception
+ UNWIND(.fnend		)
+ENDPROC(__pabt_svc)
 
 	.align	5
 .LCcralign:
 	.word	cr_alignment
-#ifdef MULTI_ABORT
+#ifdef MULTI_DABORT
 .LCprocfns:
 	.word	processor
 #endif
 .LCfp:
 	.word	fp_enter
-#ifdef CONFIG_PREEMPT
-.LCirq_stat:
-	.word	irq_stat
-#endif
 
 /*
  * User mode handlers
@@ -329,8 +358,11 @@ __pabt_svc:
 #endif
 
 	.macro	usr_entry
+ UNWIND(.fnstart	)
+ UNWIND(.cantunwind	)	@ don't unwind the user space
 	sub	sp, sp, #S_FRAME_SIZE
-	stmib	sp, {r1 - r12}
+ ARM(	stmib	sp, {r1 - r12}	)
+ THUMB(	stmia	sp, {r0 - r12}	)
 
 	ldmia	r0, {r1 - r3}
 	add	r0, sp, #S_PC		@ here for interlock avoidance
@@ -349,7 +381,8 @@ __pabt_svc:
 	@ Also, separately save sp_usr and lr_usr
 	@
 	stmia	r0, {r2 - r4}
-	stmdb	r0, {sp, lr}^
+ ARM(	stmdb	r0, {sp, lr}^			)
+ THUMB(	store_user_sp_lr r0, r1, S_SP - S_PC	)
 
 	@
 	@ Enable the alignment trap while in kernel mode
@@ -360,6 +393,8 @@ __pabt_svc:
 	@ Clear FP to mark the first stack frame
 	@
 	zero_fp
+
+	asm_trace_hardirqs_off
 	.endm
 
 	.macro	kuser_cmpxchg_check
@@ -391,12 +426,12 @@ __dabt_usr:
 	@ The abort handler must return the aborted address in r0, and
 	@ the fault status register in r1.
 	@
-#ifdef MULTI_ABORT
+#ifdef MULTI_DABORT
 	ldr	r4, .LCprocfns
 	mov	lr, pc
-	ldr	pc, [r4]
+	ldr	pc, [r4, #PROCESSOR_DABT_FUNC]
 #else
-	bl	CPU_ABORT_HANDLER
+	bl	CPU_DABORT_HANDLER
 #endif
 
 	@
@@ -404,17 +439,16 @@ __dabt_usr:
 	@
 	enable_irq
 	mov	r2, sp
-	adr	lr, ret_from_exception
+	adr	lr, BSYM(ret_from_exception)
 	b	do_DataAbort
+ UNWIND(.fnend		)
+ENDPROC(__dabt_usr)
 
 	.align	5
 __irq_usr:
 	usr_entry
 	kuser_cmpxchg_check
 
-#ifdef CONFIG_TRACE_IRQFLAGS
-	bl	trace_hardirqs_off
-#endif
 	get_thread_info tsk
 #ifdef CONFIG_PREEMPT
 	ldr	r8, [tsk, #TI_PREEMPT]		@ get preempt count
@@ -427,7 +461,9 @@ __irq_usr:
 	ldr	r0, [tsk, #TI_PREEMPT]
 	str	r8, [tsk, #TI_PREEMPT]
 	teq	r0, r7
-	strne	r0, [r0, -r0]
+ ARM(	strne	r0, [r0, -r0]	)
+ THUMB(	movne	r0, #0		)
+ THUMB(	strne	r0, [r0]	)
 #endif
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_on
@@ -435,16 +471,14 @@ __irq_usr:
 
 	mov	why, #0
 	b	ret_to_user
+ UNWIND(.fnend		)
+ENDPROC(__irq_usr)
 
 	.ltorg
 
 	.align	5
 __und_usr:
 	usr_entry
-
-	tst	r3, #PSR_T_BIT			@ Thumb mode?
-	bne	__und_usr_unknown		@ ignore FP
-	sub	r4, r2, #4
 
 	@
 	@ fall through to the emulation code, which returns using r9 if
@@ -453,9 +487,35 @@ __und_usr:
 	@
 	@  r0 - instruction
 	@
-	adr	r9, ret_from_exception
-	adr	lr, __und_usr_unknown
-1:	ldrt	r0, [r4]
+	adr	r9, BSYM(ret_from_exception)
+	adr	lr, BSYM(__und_usr_unknown)
+	tst	r3, #PSR_T_BIT			@ Thumb mode?
+	itet	eq				@ explicit IT needed for the 1f label
+	subeq	r4, r2, #4			@ ARM instr at LR - 4
+	subne	r4, r2, #2			@ Thumb instr at LR - 2
+1:	ldreqt	r0, [r4]
+#ifdef CONFIG_CPU_ENDIAN_BE8
+	reveq	r0, r0				@ little endian instruction
+#endif
+	beq	call_fpe
+	@ Thumb instruction
+#if __LINUX_ARM_ARCH__ >= 7
+2:
+ ARM(	ldrht	r5, [r4], #2	)
+ THUMB(	ldrht	r5, [r4]	)
+ THUMB(	add	r4, r4, #2	)
+	and	r0, r5, #0xf800			@ mask bits 111x x... .... ....
+	cmp	r0, #0xe800			@ 32bit instruction if xx != 0
+	blo	__und_usr_unknown
+3:	ldrht	r0, [r4]
+	add	r2, r2, #2			@ r2 is PC + 2, make it PC + 4
+	orr	r0, r0, r5, lsl #16
+#else
+	b	__und_usr_unknown
+#endif
+ UNWIND(.fnend		)
+ENDPROC(__und_usr)
+
 	@
 	@ fallthrough to call_fpe
 	@
@@ -464,10 +524,14 @@ __und_usr:
  * The out of line fixup for the ldrt above.
  */
 	.section .fixup, "ax"
-2:	mov	pc, r9
+4:	mov	pc, r9
 	.previous
 	.section __ex_table,"a"
-	.long	1b, 2b
+	.long	1b, 4b
+#if __LINUX_ARM_ARCH__ >= 7
+	.long	2b, 4b
+	.long	3b, 4b
+#endif
 	.previous
 
 /*
@@ -480,6 +544,13 @@ __und_usr:
  * co-processor instructions.  However, we have to watch out
  * for the ARM6/ARM7 SWI bug.
  *
+ * NEON is a special case that has to be handled here. Not all
+ * NEON instructions are co-processor instructions, so we have
+ * to make a special case of checking for them. Plus, there's
+ * five groups of them, so we have a table of mask/opcode pairs
+ * to check against, and if any match then we branch off into the
+ * NEON handler code.
+ *
  * Emulators may wish to make use of the following registers:
  *  r0  = instruction opcode.
  *  r2  = PC+4
@@ -487,8 +558,33 @@ __und_usr:
  *  r10 = this threads thread_info structure.
  *  lr  = unrecognised instruction return address
  */
+	@
+	@ Fall-through from Thumb-2 __und_usr
+	@
+#ifdef CONFIG_NEON
+	adr	r6, .LCneon_thumb_opcodes
+	b	2f
+#endif
 call_fpe:
+#ifdef CONFIG_NEON
+	adr	r6, .LCneon_arm_opcodes
+2:
+	ldr	r7, [r6], #4			@ mask value
+	cmp	r7, #0				@ end mask?
+	beq	1f
+	and	r8, r0, r7
+	ldr	r7, [r6], #4			@ opcode bits matching in mask
+	cmp	r8, r7				@ NEON instruction?
+	bne	2b
+	get_thread_info r10
+	mov	r7, #1
+	strb	r7, [r10, #TI_USED_CP + 10]	@ mark CP#10 as used
+	strb	r7, [r10, #TI_USED_CP + 11]	@ mark CP#11 as used
+	b	do_vfp				@ let VFP handler handle this
+1:
+#endif
 	tst	r0, #0x08000000			@ only CDP/CPRT/LDC/STC have bit 27
+	tstne	r0, #0x04000000			@ bit 26 set on both ARM and Thumb-2
 #if defined(CONFIG_CPU_ARM610) || defined(CONFIG_CPU_ARM710)
 	and	r8, r0, #0x0f000000		@ mask out op-code bits
 	teqne	r8, #0x0f000000			@ SWI (ARM6/7 bug)?
@@ -496,9 +592,11 @@ call_fpe:
 	moveq	pc, lr
 	get_thread_info r10			@ get current thread
 	and	r8, r0, #0x00000f00		@ mask out CP number
+ THUMB(	lsr	r8, r8, #8		)
 	mov	r7, #1
 	add	r6, r10, #TI_USED_CP
-	strb	r7, [r6, r8, lsr #8]		@ set appropriate used_cp[]
+ ARM(	strb	r7, [r6, r8, lsr #8]	)	@ set appropriate used_cp[]
+ THUMB(	strb	r7, [r6, r8]		)	@ set appropriate used_cp[]
 #ifdef CONFIG_IWMMXT
 	@ Test if we need to give access to iWMMXt coprocessors
 	ldr	r5, [r10, #TI_FLAGS]
@@ -506,36 +604,62 @@ call_fpe:
 	movcss	r7, r5, lsr #(TIF_USING_IWMMXT + 1)
 	bcs	iwmmxt_task_enable
 #endif
-	add	pc, pc, r8, lsr #6
-	mov	r0, r0
+ ARM(	add	pc, pc, r8, lsr #6	)
+ THUMB(	lsl	r8, r8, #2		)
+ THUMB(	add	pc, r8			)
+	nop
 
-	mov	pc, lr				@ CP#0
-	b	do_fpe				@ CP#1 (FPE)
-	b	do_fpe				@ CP#2 (FPE)
-	mov	pc, lr				@ CP#3
+	movw_pc	lr				@ CP#0
+	W(b)	do_fpe				@ CP#1 (FPE)
+	W(b)	do_fpe				@ CP#2 (FPE)
+	movw_pc	lr				@ CP#3
 #ifdef CONFIG_CRUNCH
 	b	crunch_task_enable		@ CP#4 (MaverickCrunch)
 	b	crunch_task_enable		@ CP#5 (MaverickCrunch)
 	b	crunch_task_enable		@ CP#6 (MaverickCrunch)
 #else
-	mov	pc, lr				@ CP#4
-	mov	pc, lr				@ CP#5
-	mov	pc, lr				@ CP#6
+	movw_pc	lr				@ CP#4
+	movw_pc	lr				@ CP#5
+	movw_pc	lr				@ CP#6
 #endif
-	mov	pc, lr				@ CP#7
-	mov	pc, lr				@ CP#8
-	mov	pc, lr				@ CP#9
+	movw_pc	lr				@ CP#7
+	movw_pc	lr				@ CP#8
+	movw_pc	lr				@ CP#9
 #ifdef CONFIG_VFP
-	b	do_vfp				@ CP#10 (VFP)
-	b	do_vfp				@ CP#11 (VFP)
+	W(b)	do_vfp				@ CP#10 (VFP)
+	W(b)	do_vfp				@ CP#11 (VFP)
 #else
-	mov	pc, lr				@ CP#10 (VFP)
-	mov	pc, lr				@ CP#11 (VFP)
+	movw_pc	lr				@ CP#10 (VFP)
+	movw_pc	lr				@ CP#11 (VFP)
 #endif
-	mov	pc, lr				@ CP#12
-	mov	pc, lr				@ CP#13
-	mov	pc, lr				@ CP#14 (Debug)
-	mov	pc, lr				@ CP#15 (Control)
+	movw_pc	lr				@ CP#12
+	movw_pc	lr				@ CP#13
+	movw_pc	lr				@ CP#14 (Debug)
+	movw_pc	lr				@ CP#15 (Control)
+
+#ifdef CONFIG_NEON
+	.align	6
+
+.LCneon_arm_opcodes:
+	.word	0xfe000000			@ mask
+	.word	0xf2000000			@ opcode
+
+	.word	0xff100000			@ mask
+	.word	0xf4000000			@ opcode
+
+	.word	0x00000000			@ mask
+	.word	0x00000000			@ opcode
+
+.LCneon_thumb_opcodes:
+	.word	0xef000000			@ mask
+	.word	0xef000000			@ opcode
+
+	.word	0xff100000			@ mask
+	.word	0xf9000000			@ opcode
+
+	.word	0x00000000			@ mask
+	.word	0x00000000			@ opcode
+#endif
 
 do_fpe:
 	enable_irq
@@ -555,31 +679,48 @@ do_fpe:
 	.data
 ENTRY(fp_enter)
 	.word	no_fp
-	.text
+	.previous
 
-no_fp:	mov	pc, lr
+ENTRY(no_fp)
+	mov	pc, lr
+ENDPROC(no_fp)
 
 __und_usr_unknown:
+	enable_irq
 	mov	r0, sp
-	adr	lr, ret_from_exception
+	adr	lr, BSYM(ret_from_exception)
 	b	do_undefinstr
+ENDPROC(__und_usr_unknown)
 
 	.align	5
 __pabt_usr:
 	usr_entry
 
+	mov	r0, r2			@ pass address of aborted instruction.
+#ifdef MULTI_PABORT
+	ldr	r4, .LCprocfns
+	mov	lr, pc
+	ldr	pc, [r4, #PROCESSOR_PABT_FUNC]
+#else
+	bl	CPU_PABORT_HANDLER
+#endif
 	enable_irq				@ Enable interrupts
-	mov	r0, r2				@ address (pc)
-	mov	r1, sp				@ regs
+	mov	r2, sp				@ regs
 	bl	do_PrefetchAbort		@ call abort handler
+ UNWIND(.fnend		)
 	/* fall through */
 /*
  * This is the return code to user mode for abort handlers
  */
 ENTRY(ret_from_exception)
+ UNWIND(.fnstart	)
+ UNWIND(.cantunwind	)
 	get_thread_info tsk
 	mov	why, #0
 	b	ret_to_user
+ UNWIND(.fnend		)
+ENDPROC(__pabt_usr)
+ENDPROC(ret_from_exception)
 
 /*
  * Register switch for ARMv3 and ARMv4 processors
@@ -587,18 +728,16 @@ ENTRY(ret_from_exception)
  * previous and next are guaranteed not to be the same.
  */
 ENTRY(__switch_to)
+ UNWIND(.fnstart	)
+ UNWIND(.cantunwind	)
 	add	ip, r1, #TI_CPU_SAVE
 	ldr	r3, [r2, #TI_TP_VALUE]
-	stmia	ip!, {r4 - sl, fp, sp, lr}	@ Store most regs on stack
+ ARM(	stmia	ip!, {r4 - sl, fp, sp, lr} )	@ Store most regs on stack
+ THUMB(	stmia	ip!, {r4 - sl, fp}	   )	@ Store most regs on stack
+ THUMB(	str	sp, [ip], #4		   )
+ THUMB(	str	lr, [ip], #4		   )
 #ifdef CONFIG_MMU
 	ldr	r6, [r2, #TI_CPU_DOMAIN]
-#endif
-#if __LINUX_ARM_ARCH__ >= 6
-#ifdef CONFIG_CPU_32v6K
-	clrex
-#else
-	strex	r5, r4, [ip]			@ Clear exclusive monitor
-#endif
 #endif
 #if defined(CONFIG_HAS_TLS_REG)
 	mcr	p15, 0, r3, c13, c0, 3		@ set TLS register
@@ -614,8 +753,14 @@ ENTRY(__switch_to)
 	ldr	r0, =thread_notify_head
 	mov	r1, #THREAD_NOTIFY_SWITCH
 	bl	atomic_notifier_call_chain
+ THUMB(	mov	ip, r4			   )
 	mov	r0, r5
-	ldmia	r4, {r4 - sl, fp, sp, pc}	@ Load all regs saved previously
+ ARM(	ldmia	r4, {r4 - sl, fp, sp, pc}  )	@ Load all regs saved previously
+ THUMB(	ldmia	ip!, {r4 - sl, fp}	   )	@ Load all regs saved previously
+ THUMB(	ldr	sp, [ip], #4		   )
+ THUMB(	ldr	pc, [ip]		   )
+ UNWIND(.fnend		)
+ENDPROC(__switch_to)
 
 	__INIT
 
@@ -648,6 +793,7 @@ ENTRY(__switch_to)
  * if your compiled code is not going to use the new instructions for other
  * purpose.
  */
+ THUMB(	.arm	)
 
 	.macro	usr_ret, reg
 #ifdef CONFIG_ARM_THUMB
@@ -694,10 +840,7 @@ __kuser_helper_start:
  */
 
 __kuser_memory_barrier:				@ 0xffff0fa0
-
-#if __LINUX_ARM_ARCH__ >= 6 && defined(CONFIG_SMP)
-	mcr	p15, 0, r0, c7, c10, 5	@ dmb
-#endif
+	smp_dmb
 	usr_ret	lr
 
 	.align	5
@@ -766,10 +909,10 @@ __kuser_cmpxchg:				@ 0xffff0fc0
 	 * A special ghost syscall is used for that (see traps.c).
 	 */
 	stmfd	sp!, {r7, lr}
-	mov	r7, #0xff00		@ 0xfff0 into r7 for EABI
-	orr	r7, r7, #0xf0
-	swi	#0x9ffff0
+	ldr	r7, =1f			@ it's 20 bits
+	swi	__ARM_NR_cmpxchg
 	ldmfd	sp!, {r7, pc}
+1:	.word	__ARM_NR_cmpxchg
 
 #elif __LINUX_ARM_ARCH__ < 6
 
@@ -899,6 +1042,7 @@ __kuser_helper_version:				@ 0xffff0ffc
 	.globl	__kuser_helper_end
 __kuser_helper_end:
 
+ THUMB(	.thumb	)
 
 /*
  * Vector stubs.
@@ -933,16 +1077,23 @@ vector_\name:
 	@ Prepare for SVC32 mode.  IRQs remain disabled.
 	@
 	mrs	r0, cpsr
-	eor	r0, r0, #(\mode ^ SVC_MODE)
+	eor	r0, r0, #(\mode ^ SVC_MODE | PSR_ISETSTATE)
 	msr	spsr_cxsf, r0
 
 	@
 	@ the branch table must immediately follow this code
 	@
 	and	lr, lr, #0x0f
+ THUMB(	adr	r0, 1f			)
+ THUMB(	ldr	lr, [r0, lr, lsl #2]	)
 	mov	r0, sp
-	ldr	lr, [pc, lr, lsl #2]
+ ARM(	ldr	lr, [pc, lr, lsl #2]	)
 	movs	pc, lr			@ branch to handler in SVC mode
+ENDPROC(vector_\name)
+
+	.align	2
+	@ handler addresses follow this label
+1:
 	.endm
 
 	.globl	__stubs_start
@@ -1080,14 +1231,16 @@ __stubs_end:
 
 	.globl	__vectors_start
 __vectors_start:
-	swi	SYS_ERROR0
-	b	vector_und + stubs_offset
-	ldr	pc, .LCvswi + stubs_offset
-	b	vector_pabt + stubs_offset
-	b	vector_dabt + stubs_offset
-	b	vector_addrexcptn + stubs_offset
-	b	vector_irq + stubs_offset
-	b	vector_fiq + stubs_offset
+ ARM(	swi	SYS_ERROR0	)
+ THUMB(	svc	#0		)
+ THUMB(	nop			)
+	W(b)	vector_und + stubs_offset
+	W(ldr)	pc, .LCvswi + stubs_offset
+	W(b)	vector_pabt + stubs_offset
+	W(b)	vector_dabt + stubs_offset
+	W(b)	vector_addrexcptn + stubs_offset
+	W(b)	vector_irq + stubs_offset
+	W(b)	vector_fiq + stubs_offset
 
 	.globl	__vectors_end
 __vectors_end:

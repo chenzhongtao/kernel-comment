@@ -10,6 +10,7 @@
  *    Copyright (C) 1995  Linus Torvalds
  */
 
+#include <linux/perf_event.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -19,19 +20,21 @@
 #include <linux/ptrace.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
+#include <linux/compat.h>
 #include <linux/smp.h>
 #include <linux/kdebug.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/console.h>
 #include <linux/module.h>
 #include <linux/hardirq.h>
 #include <linux/kprobes.h>
 #include <linux/uaccess.h>
-
+#include <linux/hugetlb.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/s390_ext.h>
+#include <asm/mmu_context.h>
+#include "../kernel/entry.h"
 
 #ifndef CONFIG_64BIT
 #define __FAIL_ADDR_MASK 0x7ffff000
@@ -48,8 +51,6 @@
 #ifdef CONFIG_SYSCTL
 extern int sysctl_userprocess_debug;
 #endif
-
-extern void die(const char *,struct pt_regs *,long);
 
 #ifdef CONFIG_KPROBES
 static inline int notify_page_fault(struct pt_regs *regs, long err)
@@ -200,29 +201,6 @@ static void do_low_address(struct pt_regs *regs, unsigned long error_code)
 	do_no_context(regs, error_code, 0);
 }
 
-/*
- * We ran out of memory, or some other thing happened to us that made
- * us unable to handle the page fault gracefully.
- */
-static int do_out_of_memory(struct pt_regs *regs, unsigned long error_code,
-			    unsigned long address)
-{
-	struct task_struct *tsk = current;
-	struct mm_struct *mm = tsk->mm;
-
-	up_read(&mm->mmap_sem);
-	if (is_global_init(tsk)) {
-		yield();
-		down_read(&mm->mmap_sem);
-		return 1;
-	}
-	printk("VM: killing process %s\n", tsk->comm);
-	if (regs->psw.mask & PSW_MASK_PSTATE)
-		do_group_exit(SIGKILL);
-	do_no_context(regs, error_code, address);
-	return 0;
-}
-
 static void do_sigbus(struct pt_regs *regs, unsigned long error_code,
 		      unsigned long address)
 {
@@ -244,11 +222,6 @@ static void do_sigbus(struct pt_regs *regs, unsigned long error_code,
 }
 
 #ifdef CONFIG_S390_EXEC_PROTECT
-extern long sys_sigreturn(struct pt_regs *regs);
-extern long sys_rt_sigreturn(struct pt_regs *regs);
-extern long sys32_sigreturn(struct pt_regs *regs);
-extern long sys32_rt_sigreturn(struct pt_regs *regs);
-
 static int signal_return(struct mm_struct *mm, struct pt_regs *regs,
 			 unsigned long address, unsigned long error_code)
 {
@@ -267,17 +240,17 @@ static int signal_return(struct mm_struct *mm, struct pt_regs *regs,
 	up_read(&mm->mmap_sem);
 	clear_tsk_thread_flag(current, TIF_SINGLE_STEP);
 #ifdef CONFIG_COMPAT
-	compat = test_tsk_thread_flag(current, TIF_31BIT);
+	compat = is_compat_task();
 	if (compat && instruction == 0x0a77)
-		sys32_sigreturn(regs);
+		sys32_sigreturn();
 	else if (compat && instruction == 0x0aad)
-		sys32_rt_sigreturn(regs);
+		sys32_rt_sigreturn();
 	else
 #endif
 	if (instruction == 0x0a77)
-		sys_sigreturn(regs);
+		sys_sigreturn();
 	else if (instruction == 0x0aad)
-		sys_rt_sigreturn(regs);
+		sys_rt_sigreturn();
 	else {
 		current->thread.prot_addr = address;
 		current->thread.trap_no = error_code;
@@ -333,7 +306,7 @@ do_exception(struct pt_regs *regs, unsigned long error_code, int write)
 	 * interrupts again and then search the VMAs
 	 */
 	local_irq_enable();
-
+	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, 0, regs, address);
 	down_read(&mm->mmap_sem);
 
 	si_code = SEGV_MAPERR;
@@ -372,17 +345,18 @@ good_area:
 			goto bad_area;
 	}
 
-survive:
+	if (is_vm_hugetlb_page(vma))
+		address &= HPAGE_MASK;
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	fault = handle_mm_fault(mm, vma, address, write);
+	fault = handle_mm_fault(mm, vma, address, write ? FAULT_FLAG_WRITE : 0);
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_OOM) {
-			if (do_out_of_memory(regs, error_code, address))
-				goto survive;
+			up_read(&mm->mmap_sem);
+			pagefault_out_of_memory();
 			return;
 		} else if (fault & VM_FAULT_SIGBUS) {
 			do_sigbus(regs, error_code, address);
@@ -390,11 +364,15 @@ survive:
 		}
 		BUG();
 	}
-	if (fault & VM_FAULT_MAJOR)
+	if (fault & VM_FAULT_MAJOR) {
 		tsk->maj_flt++;
-	else
+		perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MAJ, 1, 0,
+				     regs, address);
+	} else {
 		tsk->min_flt++;
-
+		perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1, 0,
+				     regs, address);
+	}
         up_read(&mm->mmap_sem);
 	/*
 	 * The instruction that caused the program check will
@@ -423,7 +401,7 @@ no_context:
 }
 
 void __kprobes do_protection_exception(struct pt_regs *regs,
-				       unsigned long error_code)
+				       long error_code)
 {
 	/* Protection exception is supressing, decrement psw address. */
 	regs->psw.addr -= (error_code >> 16);
@@ -439,10 +417,49 @@ void __kprobes do_protection_exception(struct pt_regs *regs,
 	do_exception(regs, 4, 1);
 }
 
-void __kprobes do_dat_exception(struct pt_regs *regs, unsigned long error_code)
+void __kprobes do_dat_exception(struct pt_regs *regs, long error_code)
 {
 	do_exception(regs, error_code & 0xff, 0);
 }
+
+#ifdef CONFIG_64BIT
+void __kprobes do_asce_exception(struct pt_regs *regs, unsigned long error_code)
+{
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	unsigned long address;
+	int space;
+
+	mm = current->mm;
+	address = S390_lowcore.trans_exc_code & __FAIL_ADDR_MASK;
+	space = check_space(current);
+
+	if (unlikely(space == 0 || in_atomic() || !mm))
+		goto no_context;
+
+	local_irq_enable();
+
+	down_read(&mm->mmap_sem);
+	vma = find_vma(mm, address);
+	up_read(&mm->mmap_sem);
+
+	if (vma) {
+		update_mm(mm, current);
+		return;
+	}
+
+	/* User mode accesses just cause a SIGSEGV */
+	if (regs->psw.mask & PSW_MASK_PSTATE) {
+		current->thread.prot_addr = address;
+		current->thread.trap_no = error_code;
+		do_sigsegv(regs, error_code, SEGV_MAPERR, address);
+		return;
+	}
+
+no_context:
+	do_no_context(regs, error_code, address);
+}
+#endif
 
 #ifdef CONFIG_PFAULT 
 /*

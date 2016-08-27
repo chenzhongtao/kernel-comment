@@ -250,8 +250,9 @@ static int des3_128_setkey(struct crypto_tfm *tfm, const u8 *key,
 	const u8 *temp_key = key;
 	u32 *flags = &tfm->crt_flags;
 
-	if (!(memcmp(key, &key[DES_KEY_SIZE], DES_KEY_SIZE))) {
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_SCHED;
+	if (!(memcmp(key, &key[DES_KEY_SIZE], DES_KEY_SIZE)) &&
+	    (*flags & CRYPTO_TFM_REQ_WEAK_KEY)) {
+		*flags |= CRYPTO_TFM_RES_WEAK_KEY;
 		return -EINVAL;
 	}
 	for (i = 0; i < 2; i++, temp_key += DES_KEY_SIZE) {
@@ -411,9 +412,9 @@ static int des3_192_setkey(struct crypto_tfm *tfm, const u8 *key,
 
 	if (!(memcmp(key, &key[DES_KEY_SIZE], DES_KEY_SIZE) &&
 	    memcmp(&key[DES_KEY_SIZE], &key[DES_KEY_SIZE * 2],
-		   DES_KEY_SIZE))) {
-
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_SCHED;
+		   DES_KEY_SIZE)) &&
+	    (*flags & CRYPTO_TFM_REQ_WEAK_KEY)) {
+		*flags |= CRYPTO_TFM_RES_WEAK_KEY;
 		return -EINVAL;
 	}
 	for (i = 0; i < 3; i++, temp_key += DES_KEY_SIZE) {
@@ -550,7 +551,7 @@ static struct crypto_alg cbc_des3_192_alg = {
 	}
 };
 
-static int init(void)
+static int des_s390_init(void)
 {
 	int ret = 0;
 
@@ -612,7 +613,7 @@ des_err:
 	goto out;
 }
 
-static void __exit fini(void)
+static void __exit des_s390_fini(void)
 {
 	crypto_unregister_alg(&cbc_des3_192_alg);
 	crypto_unregister_alg(&ecb_des3_192_alg);
@@ -625,8 +626,8 @@ static void __exit fini(void)
 	crypto_unregister_alg(&des_alg);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(des_s390_init);
+module_exit(des_s390_fini);
 
 MODULE_ALIAS("des");
 MODULE_ALIAS("des3_ede");

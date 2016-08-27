@@ -40,13 +40,13 @@ static inline void gfs2_buffer_copy_tail(struct buffer_head *to_bh,
 struct inode *gfs2_aspace_get(struct gfs2_sbd *sdp);
 void gfs2_aspace_put(struct inode *aspace);
 
-void gfs2_meta_inval(struct gfs2_glock *gl);
 void gfs2_meta_sync(struct gfs2_glock *gl);
 
 struct buffer_head *gfs2_meta_new(struct gfs2_glock *gl, u64 blkno);
 int gfs2_meta_read(struct gfs2_glock *gl, u64 blkno,
 		   int flags, struct buffer_head **bhp);
 int gfs2_meta_wait(struct gfs2_sbd *sdp, struct buffer_head *bh);
+struct buffer_head *gfs2_getbuf(struct gfs2_glock *gl, u64 blkno, int create);
 
 void gfs2_attach_bufdata(struct gfs2_glock *gl, struct buffer_head *bh,
 			 int meta);
@@ -56,7 +56,6 @@ void gfs2_remove_from_journal(struct buffer_head *bh, struct gfs2_trans *tr,
 
 void gfs2_meta_wipe(struct gfs2_inode *ip, u64 bstart, u32 blen);
 
-void gfs2_meta_cache_flush(struct gfs2_inode *ip);
 int gfs2_meta_indirect_buffer(struct gfs2_inode *ip, int height, u64 num,
 			      int new, struct buffer_head **bhp);
 

@@ -18,6 +18,7 @@
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/errno.h>
@@ -25,8 +26,8 @@
 #include <linux/device.h>
 #include <linux/mutex.h>
 
-#include <asm/dma.h>
-#include <asm/hardware.h>
+#include <mach/dma.h>
+#include <mach/hardware.h>
 
 #include "ucb1x00.h"
 
@@ -458,7 +459,7 @@ static int ucb1x00_detect_irq(struct ucb1x00 *ucb)
 	return probe_irq_off(mask);
 }
 
-static void ucb1x00_release(struct class_device *dev)
+static void ucb1x00_release(struct device *dev)
 {
 	struct ucb1x00 *ucb = classdev_to_ucb1x00(dev);
 	kfree(ucb);
@@ -466,7 +467,7 @@ static void ucb1x00_release(struct class_device *dev)
 
 static struct class ucb1x00_class = {
 	.name		= "ucb1x00",
-	.release	= ucb1x00_release,
+	.dev_release	= ucb1x00_release,
 };
 
 static int ucb1x00_probe(struct mcp *mcp)
@@ -490,9 +491,9 @@ static int ucb1x00_probe(struct mcp *mcp)
 		goto err_disable;
 
 
-	ucb->cdev.class = &ucb1x00_class;
-	ucb->cdev.dev = &mcp->attached_device;
-	strlcpy(ucb->cdev.class_id, "ucb1x00", sizeof(ucb->cdev.class_id));
+	ucb->dev.class = &ucb1x00_class;
+	ucb->dev.parent = &mcp->attached_device;
+	dev_set_name(&ucb->dev, "ucb1x00");
 
 	spin_lock_init(&ucb->lock);
 	spin_lock_init(&ucb->io_lock);
@@ -517,7 +518,7 @@ static int ucb1x00_probe(struct mcp *mcp)
 
 	mcp_set_drvdata(mcp, ucb);
 
-	ret = class_device_register(&ucb->cdev);
+	ret = device_register(&ucb->dev);
 	if (ret)
 		goto err_irq;
 
@@ -554,7 +555,7 @@ static void ucb1x00_remove(struct mcp *mcp)
 	mutex_unlock(&ucb1x00_mutex);
 
 	free_irq(ucb->irq, ucb);
-	class_device_unregister(&ucb->cdev);
+	device_unregister(&ucb->dev);
 }
 
 int ucb1x00_register_driver(struct ucb1x00_driver *drv)

@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/netmisc.c
  *
- *   Copyright (c) International Business Machines  Corp., 2002
+ *   Copyright (c) International Business Machines  Corp., 2002,2008
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   Error mapping routines from Samba libsmb/errormap.c
@@ -79,6 +79,7 @@ static const struct smb_to_posix_error mapping_table_ERRDOS[] = {
 	{ErrQuota, -EDQUOT},
 	{ErrNotALink, -ENOLINK},
 	{ERRnetlogonNotStarted, -ENOPROTOOPT},
+	{ERRsymlink, -EOPNOTSUPP},
 	{ErrTooManyLinks, -EMLINK},
 	{0, 0}
 };
@@ -132,58 +133,72 @@ static const struct smb_to_posix_error mapping_table_ERRHRD[] = {
 	{0, 0}
 };
 
-
-/* if the mount helper is missing we need to reverse the 1st slash
-   from '/' to backslash in order to format the UNC properly for
-   ip address parsing and for tree connect (unless the user
-   remembered to put the UNC name in properly). Fortunately we do
-   not have to call this twice (we check for IPv4 addresses
-   first, so it is already converted by the time we
-   try IPv6 addresses */
-static int canonicalize_unc(char *cp)
-{
-	int i;
-
-	for (i = 0; i <= 46 /* INET6_ADDRSTRLEN */ ; i++) {
-		if (cp[i] == 0)
-			break;
-		if (cp[i] == '\\')
-			break;
-		if (cp[i] == '/') {
-#ifdef CONFIG_CIFS_DEBUG2
-			cFYI(1, ("change slash to backslash in malformed UNC"));
-#endif
-			cp[i] = '\\';
-			return 1;
-		}
-	}
-	return 0;
-}
-
-/* Convert string containing dotted ip address to binary form */
-/* returns 0 if invalid address */
-
-int
-cifs_inet_pton(int address_family, char *cp, void *dst)
+/*
+ * Convert a string containing text IPv4 or IPv6 address to binary form.
+ *
+ * Returns 0 on failure.
+ */
+static int
+cifs_inet_pton(const int address_family, const char *cp, void *dst)
 {
 	int ret = 0;
 
 	/* calculate length by finding first slash or NULL */
-	if (address_family == AF_INET) {
+	if (address_family == AF_INET)
 		ret = in4_pton(cp, -1 /* len */, dst, '\\', NULL);
-		if (ret == 0) {
-			if (canonicalize_unc(cp))
-				ret = in4_pton(cp, -1, dst, '\\', NULL);
-		}
-	} else if (address_family == AF_INET6) {
+	else if (address_family == AF_INET6)
 		ret = in6_pton(cp, -1 /* len */, dst , '\\', NULL);
-	}
-#ifdef CONFIG_CIFS_DEBUG2
-	cFYI(1, ("address conversion returned %d for %s", ret, cp));
-#endif
+
+	cFYI(DBG2, ("address conversion returned %d for %s", ret, cp));
 	if (ret > 0)
 		ret = 1;
 	return ret;
+}
+
+/*
+ * Try to convert a string to an IPv4 address and then attempt to convert
+ * it to an IPv6 address if that fails. Set the family field if either
+ * succeeds. If it's an IPv6 address and it has a '%' sign in it, try to
+ * treat the part following it as a numeric sin6_scope_id.
+ *
+ * Returns 0 on failure.
+ */
+int
+cifs_convert_address(char *src, void *dst)
+{
+	int rc;
+	char *pct, *endp;
+	struct sockaddr_in *s4 = (struct sockaddr_in *) dst;
+	struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) dst;
+
+	/* IPv4 address */
+	if (cifs_inet_pton(AF_INET, src, &s4->sin_addr.s_addr)) {
+		s4->sin_family = AF_INET;
+		return 1;
+	}
+
+	/* temporarily terminate string */
+	pct = strchr(src, '%');
+	if (pct)
+		*pct = '\0';
+
+	rc = cifs_inet_pton(AF_INET6, src, &s6->sin6_addr.s6_addr);
+
+	/* repair temp termination (if any) and make pct point to scopeid */
+	if (pct)
+		*pct++ = '%';
+
+	if (!rc)
+		return rc;
+
+	s6->sin6_family = AF_INET6;
+	if (pct) {
+		s6->sin6_scope_id = (u32) simple_strtoul(pct, &endp, 0);
+		if (!*pct || *endp)
+			return 0;
+	}
+
+	return rc;
 }
 
 /*****************************************************************************
@@ -253,7 +268,8 @@ static const struct {
 	ERRDOS, 87, NT_STATUS_INVALID_PARAMETER_MIX}, {
 	ERRHRD, ERRgeneral, NT_STATUS_INVALID_QUOTA_LOWER}, {
 	ERRHRD, ERRgeneral, NT_STATUS_DISK_CORRUPT_ERROR}, {
-	ERRDOS, ERRbadfile, NT_STATUS_OBJECT_NAME_INVALID}, {	/* mapping changed since shell does lookup on * and expects file not found */
+	 /* mapping changed since shell does lookup on * expects FileNotFound */
+	ERRDOS, ERRbadfile, NT_STATUS_OBJECT_NAME_INVALID}, {
 	ERRDOS, ERRbadfile, NT_STATUS_OBJECT_NAME_NOT_FOUND}, {
 	ERRDOS, ERRalreadyexists, NT_STATUS_OBJECT_NAME_COLLISION}, {
 	ERRHRD, ERRgeneral, NT_STATUS_HANDLE_NOT_WAITABLE}, {
@@ -747,6 +763,7 @@ static const struct {
 	ERRDOS, ERRnoaccess, 0xc000028f}, {
 	ERRDOS, ERRnoaccess, 0xc0000290}, {
 	ERRDOS, ERRbadfunc, 0xc000029c}, {
+	ERRDOS, ERRsymlink, NT_STATUS_STOPPED_ON_SYMLINK}, {
 	ERRDOS, ERRinvlevel, 0x007c0001}, };
 
 /*****************************************************************************
@@ -820,7 +837,8 @@ map_smb_to_linux_error(struct smb_hdr *smb, int logErr)
 	/* old style errors */
 
 	/* DOS class smb error codes - map DOS */
-	if (smberrclass == ERRDOS) {  /* 1 byte field no need to byte reverse */
+	if (smberrclass == ERRDOS) {
+		/* 1 byte field no need to byte reverse */
 		for (i = 0;
 		     i <
 		     sizeof(mapping_table_ERRDOS) /
@@ -834,7 +852,8 @@ map_smb_to_linux_error(struct smb_hdr *smb, int logErr)
 			}
 			/* else try next error mapping one to see if match */
 		}
-	} else if (smberrclass == ERRSRV) {   /* server class of error codes */
+	} else if (smberrclass == ERRSRV) {
+		/* server class of error codes */
 		for (i = 0;
 		     i <
 		     sizeof(mapping_table_ERRSRV) /
@@ -882,12 +901,12 @@ smbCalcSize_LE(struct smb_hdr *ptr)
 
 #define NTFS_TIME_OFFSET ((u64)(369*365 + 89) * 24 * 3600 * 10000000)
 
-    /*
-     * Convert the NT UTC (based 1601-01-01, in hundred nanosecond units)
-     * into Unix UTC (based 1970-01-01, in seconds).
-     */
+/*
+ * Convert the NT UTC (based 1601-01-01, in hundred nanosecond units)
+ * into Unix UTC (based 1970-01-01, in seconds).
+ */
 struct timespec
-cifs_NTtimeToUnix(u64 ntutc)
+cifs_NTtimeToUnix(__le64 ntutc)
 {
 	struct timespec ts;
 	/* BB what about the timezone? BB */
@@ -895,7 +914,7 @@ cifs_NTtimeToUnix(u64 ntutc)
 	/* Subtract the NTFS time offset, then convert to 1s intervals. */
 	u64 t;
 
-	t = ntutc - NTFS_TIME_OFFSET;
+	t = le64_to_cpu(ntutc) - NTFS_TIME_OFFSET;
 	ts.tv_nsec = do_div(t, 10000000) * 100;
 	ts.tv_sec = t;
 	return ts;
@@ -912,18 +931,14 @@ cifs_UnixTimeToNT(struct timespec t)
 static int total_days_of_prev_months[] =
 {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
 
-
-__le64 cnvrtDosCifsTm(__u16 date, __u16 time)
-{
-	return cpu_to_le64(cifs_UnixTimeToNT(cnvrtDosUnixTm(date, time)));
-}
-
-struct timespec cnvrtDosUnixTm(__u16 date, __u16 time)
+struct timespec cnvrtDosUnixTm(__le16 le_date, __le16 le_time, int offset)
 {
 	struct timespec ts;
 	int sec, min, days, month, year;
-	SMB_TIME * st = (SMB_TIME *)&time;
-	SMB_DATE * sd = (SMB_DATE *)&date;
+	u16 date = le16_to_cpu(le_date);
+	u16 time = le16_to_cpu(le_time);
+	SMB_TIME *st = (SMB_TIME *)&time;
+	SMB_DATE *sd = (SMB_DATE *)&date;
 
 	cFYI(1, ("date %d time %d", date, time));
 
@@ -962,7 +977,7 @@ struct timespec cnvrtDosUnixTm(__u16 date, __u16 time)
 		days -= ((year & 0x03) == 0) && (month < 2 ? 1 : 0);
 	sec += 24 * 60 * 60 * days;
 
-	ts.tv_sec = sec;
+	ts.tv_sec = sec + offset;
 
 	/* cFYI(1,("sec after cnvrt dos to unix time %d",sec)); */
 

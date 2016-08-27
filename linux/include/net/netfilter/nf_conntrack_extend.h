@@ -7,17 +7,21 @@ enum nf_ct_ext_id
 {
 	NF_CT_EXT_HELPER,
 	NF_CT_EXT_NAT,
+	NF_CT_EXT_ACCT,
+	NF_CT_EXT_ECACHE,
 	NF_CT_EXT_NUM,
 };
 
 #define NF_CT_EXT_HELPER_TYPE struct nf_conn_help
 #define NF_CT_EXT_NAT_TYPE struct nf_conn_nat
+#define NF_CT_EXT_ACCT_TYPE struct nf_conn_counter
+#define NF_CT_EXT_ECACHE_TYPE struct nf_conntrack_ecache
 
 /* Extensions: optional stuff which isn't permanently in struct. */
 struct nf_ct_ext {
+	struct rcu_head rcu;
 	u8 offset[NF_CT_EXT_NUM];
 	u8 len;
-	u8 real_len;
 	char data[0];
 };
 
@@ -67,7 +71,7 @@ struct nf_ct_ext_type
 	void (*destroy)(struct nf_conn *ct);
 	/* Called when realloacted (can be NULL).
 	   Contents has already been moved. */
-	void (*move)(struct nf_conn *ct, void *old);
+	void (*move)(void *new, void *old);
 
 	enum nf_ct_ext_id id;
 

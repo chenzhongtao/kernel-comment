@@ -45,7 +45,6 @@ static irqreturn_t timer_interrupt(int irq, void *dummy);
 static struct irqaction timer_irq  = {
 	.handler = timer_interrupt,
 	.flags = IRQF_DISABLED,
-	.mask = CPU_MASK_NONE,
 	.name = "timer",
 };
 
@@ -63,6 +62,7 @@ static irqreturn_t timer_interrupt(int irq, void *dummy)
 	/* last time the cmos clock got updated */
 	static long last_rtc_update = 0;
 
+	profile_tick(CPU_PROFILING);
 	/*
 	 * Here we are in the timer irq handler. We just have irqs locally
 	 * disabled but we don't know if the timer_bh is running on the other
@@ -73,8 +73,6 @@ static irqreturn_t timer_interrupt(int irq, void *dummy)
 	write_seqlock(&xtime_lock);
 
 	do_timer(1);
-	update_process_times(user_mode(get_irq_regs()));
-	profile_tick(CPU_PROFILING);
 
 	/*
 	 * If we have an externally synchronized Linux clock, then update
@@ -99,6 +97,9 @@ static irqreturn_t timer_interrupt(int irq, void *dummy)
 #endif /* CONFIG_HEARTBEAT */
 
 	write_sequnlock(&xtime_lock);
+
+	update_process_times(user_mode(get_irq_regs()));
+
 	return IRQ_HANDLED;
 }
 

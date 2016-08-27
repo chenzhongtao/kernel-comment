@@ -76,6 +76,11 @@ static struct platform_device pcit_cmos_device = {
         .resource       = pcit_cmos_rsrc
 };
 
+static struct platform_device pcit_pcspeaker_pdev = {
+	.name		= "pcspkr",
+	.id		= -1,
+};
+
 static struct resource sni_io_resource = {
 	.start	= 0x00000000UL,
 	.end	= 0x03bfffffUL,
@@ -241,7 +246,7 @@ void __init sni_pcit_irq_init(void)
 
 	mips_cpu_irq_init();
 	for (i = SNI_PCIT_INT_START; i <= SNI_PCIT_INT_END; i++)
-		set_irq_chip(i, &pcit_irq_type);
+		set_irq_chip_and_handler(i, &pcit_irq_type, handle_level_irq);
 	*(volatile u32 *)SNI_PCIT_INT_REG = 0;
 	sni_hwint = sni_pcit_hwint;
 	change_c0_status(ST0_IM, IE_IRQ1);
@@ -254,7 +259,7 @@ void __init sni_pcit_cplus_irq_init(void)
 
 	mips_cpu_irq_init();
 	for (i = SNI_PCIT_INT_START; i <= SNI_PCIT_INT_END; i++)
-		set_irq_chip(i, &pcit_irq_type);
+		set_irq_chip_and_handler(i, &pcit_irq_type, handle_level_irq);
 	*(volatile u32 *)SNI_PCIT_INT_REG = 0x40000000;
 	sni_hwint = sni_pcit_hwint_cplus;
 	change_c0_status(ST0_IM, IE_IRQ0);
@@ -277,11 +282,13 @@ static int __init snirm_pcit_setup_devinit(void)
 	case SNI_BRD_PCI_TOWER:
 	        platform_device_register(&pcit_serial8250_device);
 	        platform_device_register(&pcit_cmos_device);
+		platform_device_register(&pcit_pcspeaker_pdev);
 	        break;
 
 	case SNI_BRD_PCI_TOWER_CPLUS:
 	        platform_device_register(&pcit_cplus_serial8250_device);
 	        platform_device_register(&pcit_cmos_device);
+		platform_device_register(&pcit_pcspeaker_pdev);
 	        break;
 	}
 	return 0;

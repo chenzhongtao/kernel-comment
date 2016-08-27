@@ -236,7 +236,7 @@ struct strip {
 	unsigned long tx_errors;	/* Planned stuff                */
 	unsigned long rx_dropped;	/* No memory for skb            */
 	unsigned long tx_dropped;	/* When MTU change              */
-	unsigned long rx_over_errors;	/* Frame bigger then STRIP buf. */
+	unsigned long rx_over_errors;	/* Frame bigger than STRIP buf. */
 
 	unsigned long pps_timer;	/* Timer to determine pps       */
 	unsigned long rx_pps_count;	/* Counter to determine pps     */
@@ -768,41 +768,17 @@ static __u8 *UnStuffData(__u8 * src, __u8 * end, __u8 * dst,
 /* General routines for STRIP						*/
 
 /*
- * get_baud returns the current baud rate, as one of the constants defined in
- * termbits.h
- * If the user has issued a baud rate override using the 'setserial' command
- * and the logical current rate is set to 38.4, then the true baud rate
- * currently in effect (57.6 or 115.2) is returned.
- */
-static unsigned int get_baud(struct tty_struct *tty)
-{
-	if (!tty || !tty->termios)
-		return (0);
-	if ((tty->termios->c_cflag & CBAUD) == B38400 && tty->driver_data) {
-		struct async_struct *info =
-		    (struct async_struct *) tty->driver_data;
-		if ((info->flags & ASYNC_SPD_MASK) == ASYNC_SPD_HI)
-			return (B57600);
-		if ((info->flags & ASYNC_SPD_MASK) == ASYNC_SPD_VHI)
-			return (B115200);
-	}
-	return (tty->termios->c_cflag & CBAUD);
-}
-
-/*
  * set_baud sets the baud rate to the rate defined by baudcode
- * Note: The rate B38400 should be avoided, because the user may have
- * issued a 'setserial' speed override to map that to a different speed.
- * We could achieve a true rate of 38400 if we needed to by cancelling
- * any user speed override that is in place, but that might annoy the
- * user, so it is simplest to just avoid using 38400.
  */
-static void set_baud(struct tty_struct *tty, unsigned int baudcode)
+static void set_baud(struct tty_struct *tty, speed_t baudrate)
 {
-	struct ktermios old_termios = *(tty->termios);
-	tty->termios->c_cflag &= ~CBAUD;	/* Clear the old baud setting */
-	tty->termios->c_cflag |= baudcode;	/* Set the new baud setting */
-	tty->driver->set_termios(tty, &old_termios);
+	struct ktermios old_termios;
+
+	mutex_lock(&tty->termios_mutex);
+	old_termios =*(tty->termios);
+	tty_encode_baud_rate(tty, baudrate, baudrate);
+	tty->ops->set_termios(tty, &old_termios);
+	mutex_unlock(&tty->termios_mutex);
 }
 
 /*
@@ -962,18 +938,19 @@ static char *time_delta(char buffer[], long time)
 /* get Nth element of the linked list */
 static struct strip *strip_get_idx(loff_t pos) 
 {
-	struct list_head *l;
+	struct strip *str;
 	int i = 0;
 
-	list_for_each_rcu(l, &strip_list) {
+	list_for_each_entry_rcu(str, &strip_list, list) {
 		if (pos == i)
-			return list_entry(l, struct strip, list);
+			return str;
 		++i;
 	}
 	return NULL;
 }
 
 static void *strip_seq_start(struct seq_file *seq, loff_t *pos)
+	__acquires(RCU)
 {
 	rcu_read_lock();
 	return *pos ? strip_get_idx(*pos - 1) : SEQ_START_TOKEN;
@@ -997,6 +974,7 @@ static void *strip_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static void strip_seq_stop(struct seq_file *seq, void *v)
+	__releases(RCU)
 {
 	rcu_read_unlock();
 }
@@ -1149,7 +1127,7 @@ static int strip_seq_show(struct seq_file *seq, void *v)
 }
 
 
-static struct seq_operations strip_seq_ops = {
+static const struct seq_operations strip_seq_ops = {
 	.start = strip_seq_start,
 	.next  = strip_seq_next,
 	.stop  = strip_seq_stop,
@@ -1217,7 +1195,7 @@ static void ResetRadio(struct strip *strip_info)
 	strip_info->watchdog_doreset = jiffies + 1 * HZ;
 
 	/* If the user has selected a baud rate above 38.4 see what magic we have to do */
-	if (strip_info->user_baud > B38400) {
+	if (strip_info->user_baud > 38400) {
 		/*
 		 * Subtle stuff: Pay attention :-)
 		 * If the serial port is currently at the user's selected (>38.4) rate,
@@ -1227,17 +1205,17 @@ static void ResetRadio(struct strip *strip_info)
 		 * issued the ATS304 command last time through, so this time we restore
 		 * the user's selected rate and issue the normal starmode reset string.
 		 */
-		if (strip_info->user_baud == get_baud(tty)) {
+		if (strip_info->user_baud == tty_get_baud_rate(tty)) {
 			static const char b0[] = "ate0q1s304=57600\r";
 			static const char b1[] = "ate0q1s304=115200\r";
 			static const StringDescriptor baudstring[2] =
 			    { {b0, sizeof(b0) - 1}
 			, {b1, sizeof(b1) - 1}
 			};
-			set_baud(tty, B19200);
-			if (strip_info->user_baud == B57600)
+			set_baud(tty, 19200);
+			if (strip_info->user_baud == 57600)
 				s = baudstring[0];
-			else if (strip_info->user_baud == B115200)
+			else if (strip_info->user_baud == 115200)
 				s = baudstring[1];
 			else
 				s = baudstring[1];	/* For now */
@@ -1245,7 +1223,7 @@ static void ResetRadio(struct strip *strip_info)
 			set_baud(tty, strip_info->user_baud);
 	}
 
-	tty->driver->write(tty, s.string, s.length);
+	tty->ops->write(tty, s.string, s.length);
 #ifdef EXT_COUNTERS
 	strip_info->tx_ebytes += s.length;
 #endif
@@ -1258,7 +1236,7 @@ static void ResetRadio(struct strip *strip_info)
 
 static void strip_write_some_more(struct tty_struct *tty)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/* First make sure we're connected. */
 	if (!strip_info || strip_info->magic != STRIP_MAGIC ||
@@ -1267,7 +1245,7 @@ static void strip_write_some_more(struct tty_struct *tty)
 
 	if (strip_info->tx_left > 0) {
 		int num_written =
-		    tty->driver->write(tty, strip_info->tx_head,
+		    tty->ops->write(tty, strip_info->tx_head,
 				      strip_info->tx_left);
 		strip_info->tx_left -= num_written;
 		strip_info->tx_head += num_written;
@@ -1276,7 +1254,7 @@ static void strip_write_some_more(struct tty_struct *tty)
 #endif
 	} else {		/* Else start transmission of another packet */
 
-		tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+		clear_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
 		strip_unlock(strip_info);
 	}
 }
@@ -1479,8 +1457,7 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 	 */
 	strip_info->tx_head = strip_info->tx_buff;
 	strip_info->tx_left = ptr - strip_info->tx_buff;
-	strip_info->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
-
+	set_bit(TTY_DO_WRITE_WAKEUP, &strip_info->tty->flags);
 	/*
 	 * 4. Debugging check to make sure we're not overflowing the buffer.
 	 */
@@ -1556,14 +1533,14 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 }
 
 /* Encapsulate a datagram and kick it into a TTY queue. */
-static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t strip_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct strip *strip_info = netdev_priv(dev);
 
 	if (!netif_running(dev)) {
 		printk(KERN_ERR "%s: xmit call when iface is down\n",
 		       dev->name);
-		return (1);
+		return NETDEV_TX_BUSY;
 	}
 
 	netif_stop_queue(dev);
@@ -1573,9 +1550,12 @@ static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (time_after(jiffies, strip_info->pps_timer + HZ)) {
 		unsigned long t = jiffies - strip_info->pps_timer;
-		unsigned long rx_pps_count = (strip_info->rx_pps_count * HZ * 8 + t / 2) / t;
-		unsigned long tx_pps_count = (strip_info->tx_pps_count * HZ * 8 + t / 2) / t;
-		unsigned long sx_pps_count = (strip_info->sx_pps_count * HZ * 8 + t / 2) / t;
+		unsigned long rx_pps_count =
+			DIV_ROUND_CLOSEST(strip_info->rx_pps_count*HZ*8, t);
+		unsigned long tx_pps_count =
+			DIV_ROUND_CLOSEST(strip_info->tx_pps_count*HZ*8, t);
+		unsigned long sx_pps_count =
+			DIV_ROUND_CLOSEST(strip_info->sx_pps_count*HZ*8, t);
 
 		strip_info->pps_timer = jiffies;
 		strip_info->rx_pps_count = 0;
@@ -1605,7 +1585,7 @@ static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (skb)
 		dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -2021,7 +2001,6 @@ static void deliver_packet(struct strip *strip_info, STRIP_Header * header,
 #ifdef EXT_COUNTERS
 		strip_info->rx_bytes += packetlen;
 #endif
-		skb->dev->last_rx = jiffies;
 		netif_rx(skb);
 	}
 }
@@ -2285,7 +2264,7 @@ static void process_message(struct strip *strip_info)
 static void strip_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 		  char *fp, int count)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 	const unsigned char *end = cp + count;
 
 	if (!strip_info || strip_info->magic != STRIP_MAGIC
@@ -2457,7 +2436,7 @@ static int strip_open_low(struct net_device *dev)
 	strip_info->working = FALSE;
 	strip_info->firmware_level = NoStructure;
 	strip_info->next_command = CompatibilityCommand;
-	strip_info->user_baud = get_baud(strip_info->tty);
+	strip_info->user_baud = tty_get_baud_rate(strip_info->tty);
 
 	printk(KERN_INFO "%s: Initializing Radio.\n",
 	       strip_info->dev->name);
@@ -2479,8 +2458,7 @@ static int strip_close_low(struct net_device *dev)
 
 	if (strip_info->tty == NULL)
 		return -EBUSY;
-	strip_info->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
-
+	clear_bit(TTY_DO_WRITE_WAKEUP, &strip_info->tty->flags);
 	netif_stop_queue(dev);
 
 	/*
@@ -2502,6 +2480,16 @@ static const struct header_ops strip_header_ops = {
 	.rebuild = strip_rebuild_header,
 };
 
+
+static const struct net_device_ops strip_netdev_ops = {
+	.ndo_open 	= strip_open_low,
+	.ndo_stop 	= strip_close_low,
+	.ndo_start_xmit = strip_xmit,
+	.ndo_set_mac_address = strip_set_mac_address,
+	.ndo_get_stats	= strip_get_stats,
+	.ndo_change_mtu = strip_change_mtu,
+};
+
 /*
  * This routine is called by DDI when the
  * (dynamically assigned) device is registered
@@ -2514,7 +2502,6 @@ static void strip_dev_setup(struct net_device *dev)
 	 */
 
 	dev->trans_start = 0;
-	dev->last_rx = 0;
 	dev->tx_queue_len = 30;	/* Drop after 30 frames queued */
 
 	dev->flags = 0;
@@ -2522,25 +2509,15 @@ static void strip_dev_setup(struct net_device *dev)
 	dev->type = ARPHRD_METRICOM;	/* dtang */
 	dev->hard_header_len = sizeof(STRIP_Header);
 	/*
-	 *  dev->priv             Already holds a pointer to our struct strip
+	 *  netdev_priv(dev) Already holds a pointer to our struct strip
 	 */
 
-	*(MetricomAddress *) & dev->broadcast = broadcast_address;
+	*(MetricomAddress *)dev->broadcast = broadcast_address;
 	dev->dev_addr[0] = 0;
 	dev->addr_len = sizeof(MetricomAddress);
 
-	/*
-	 * Pointers to interface service routines.
-	 */
-
-	dev->open = strip_open_low;
-	dev->stop = strip_close_low;
-	dev->hard_start_xmit = strip_xmit;
-	dev->header_ops = &strip_header_ops;
-
-	dev->set_mac_address = strip_set_mac_address;
-	dev->get_stats = strip_get_stats;
-	dev->change_mtu = strip_change_mtu;
+	dev->header_ops = &strip_header_ops,
+	dev->netdev_ops = &strip_netdev_ops;
 }
 
 /*
@@ -2622,7 +2599,7 @@ static struct strip *strip_alloc(void)
 
 static int strip_open(struct tty_struct *tty)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/*
 	 * First make sure we're not already connected.
@@ -2630,6 +2607,13 @@ static int strip_open(struct tty_struct *tty)
 
 	if (strip_info && strip_info->magic == STRIP_MAGIC)
 		return -EEXIST;
+
+	/*
+	 * We need a write method.
+	 */
+
+	if (tty->ops->write == NULL || tty->ops->set_termios == NULL)
+		return -EOPNOTSUPP;
 
 	/*
 	 * OK.  Find a free STRIP channel to use.
@@ -2652,8 +2636,7 @@ static int strip_open(struct tty_struct *tty)
 	tty->disc_data = strip_info;
 	tty->receive_room = 65536;
 
-	if (tty->driver->flush_buffer)
-		tty->driver->flush_buffer(tty);
+	tty_driver_flush_buffer(tty);
 
 	/*
 	 * Restore default settings
@@ -2687,7 +2670,7 @@ static int strip_open(struct tty_struct *tty)
 
 static void strip_close(struct tty_struct *tty)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/*
 	 * First make sure we're connected.
@@ -2713,7 +2696,7 @@ static void strip_close(struct tty_struct *tty)
 static int strip_ioctl(struct tty_struct *tty, struct file *file,
 		       unsigned int cmd, unsigned long arg)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/*
 	 * First make sure we're connected.
@@ -2746,7 +2729,7 @@ static int strip_ioctl(struct tty_struct *tty, struct file *file,
 /************************************************************************/
 /* Initialization							*/
 
-static struct tty_ldisc strip_ldisc = {
+static struct tty_ldisc_ops strip_ldisc = {
 	.magic = TTY_LDISC_MAGIC,
 	.name = "strip",
 	.owner = THIS_MODULE,

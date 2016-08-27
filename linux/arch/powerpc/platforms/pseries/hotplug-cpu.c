@@ -58,7 +58,7 @@ static void pseries_mach_cpu_die(void)
 {
 	local_irq_disable();
 	idle_task_exit();
-	xics_teardown_cpu(0);
+	xics_teardown_cpu();
 	unregister_slb_shadow(hard_smp_processor_id(), __pa(get_slb_shadow()));
 	rtas_stop_self();
 	/* Should never get here... */
@@ -94,7 +94,7 @@ static int pseries_cpu_disable(void)
 {
 	int cpu = smp_processor_id();
 
-	cpu_clear(cpu, cpu_online_map);
+	set_cpu_online(cpu, false);
 	vdso_data->processorCount--;
 
 	/*fix boot_cpuid here*/
@@ -116,7 +116,7 @@ static void pseries_cpu_die(unsigned int cpu)
 		cpu_status = query_cpu_stopped(pcpu);
 		if (cpu_status == 0 || cpu_status == -1)
 			break;
-		msleep(200);
+		cpu_relax();
 	}
 	if (cpu_status != 0) {
 		printk("Querying DEAD? cpu %i (%i) shows %i\n",
@@ -153,7 +153,7 @@ static int pseries_add_processor(struct device_node *np)
 	for (i = 0; i < nthreads; i++)
 		cpu_set(i, tmp);
 
-	lock_cpu_hotplug();
+	cpu_maps_update_begin();
 
 	BUG_ON(!cpus_subset(cpu_present_map, cpu_possible_map));
 
@@ -185,12 +185,12 @@ static int pseries_add_processor(struct device_node *np)
 
 	for_each_cpu_mask(cpu, tmp) {
 		BUG_ON(cpu_isset(cpu, cpu_present_map));
-		cpu_set(cpu, cpu_present_map);
+		set_cpu_present(cpu, true);
 		set_hard_smp_processor_id(cpu, *intserv++);
 	}
 	err = 0;
 out_unlock:
-	unlock_cpu_hotplug();
+	cpu_maps_update_done();
 	return err;
 }
 
@@ -211,13 +211,13 @@ static void pseries_remove_processor(struct device_node *np)
 
 	nthreads = len / sizeof(u32);
 
-	lock_cpu_hotplug();
+	cpu_maps_update_begin();
 	for (i = 0; i < nthreads; i++) {
 		for_each_present_cpu(cpu) {
 			if (get_hard_smp_processor_id(cpu) != intserv[i])
 				continue;
 			BUG_ON(cpu_online(cpu));
-			cpu_clear(cpu, cpu_present_map);
+			set_cpu_present(cpu, false);
 			set_hard_smp_processor_id(cpu, -1);
 			break;
 		}
@@ -225,7 +225,7 @@ static void pseries_remove_processor(struct device_node *np)
 			printk(KERN_WARNING "Could not find cpu to remove "
 			       "with physical id 0x%x\n", intserv[i]);
 	}
-	unlock_cpu_hotplug();
+	cpu_maps_update_done();
 }
 
 static int pseries_smp_notifier(struct notifier_block *nb,

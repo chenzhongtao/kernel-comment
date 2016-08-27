@@ -1,6 +1,6 @@
 /* Basic authentication token and access key management
  *
- * Copyright (C) 2004-2007 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2004-2008 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * This program is free software; you can redistribute it and/or
@@ -18,6 +18,7 @@
 #include <linux/workqueue.h>
 #include <linux/random.h>
 #include <linux/err.h>
+#include <linux/user_namespace.h>
 #include "internal.h"
 
 static struct kmem_cache	*key_jar;
@@ -26,6 +27,11 @@ DEFINE_SPINLOCK(key_serial_lock);
 
 struct rb_root	key_user_tree; /* tree of quota records indexed by UID */
 DEFINE_SPINLOCK(key_user_lock);
+
+unsigned int key_quota_root_maxkeys = 200;	/* root's key count quota */
+unsigned int key_quota_root_maxbytes = 20000;	/* root's key space quota */
+unsigned int key_quota_maxkeys = 200;		/* general key count quota */
+unsigned int key_quota_maxbytes = 20000;	/* general key space quota */
 
 static LIST_HEAD(key_types_list);
 static DECLARE_RWSEM(key_types_sem);
@@ -55,7 +61,7 @@ void __key_check(const struct key *key)
  * get the key quota record for a user, allocating a new record if one doesn't
  * already exist
  */
-struct key_user *key_user_lookup(uid_t uid)
+struct key_user *key_user_lookup(uid_t uid, struct user_namespace *user_ns)
 {
 	struct key_user *candidate = NULL, *user;
 	struct rb_node *parent = NULL;
@@ -73,6 +79,10 @@ struct key_user *key_user_lookup(uid_t uid)
 		if (uid < user->uid)
 			p = &(*p)->rb_left;
 		else if (uid > user->uid)
+			p = &(*p)->rb_right;
+		else if (user_ns < user->user_ns)
+			p = &(*p)->rb_left;
+		else if (user_ns > user->user_ns)
 			p = &(*p)->rb_right;
 		else
 			goto found;
@@ -101,6 +111,7 @@ struct key_user *key_user_lookup(uid_t uid)
 	atomic_set(&candidate->nkeys, 0);
 	atomic_set(&candidate->nikeys, 0);
 	candidate->uid = uid;
+	candidate->user_ns = get_user_ns(user_ns);
 	candidate->qnkeys = 0;
 	candidate->qnbytes = 0;
 	spin_lock_init(&candidate->lock);
@@ -131,41 +142,12 @@ void key_user_put(struct key_user *user)
 	if (atomic_dec_and_lock(&user->usage, &key_user_lock)) {
 		rb_erase(&user->node, &key_user_tree);
 		spin_unlock(&key_user_lock);
+		put_user_ns(user->user_ns);
 
 		kfree(user);
 	}
 
 } /* end key_user_put() */
-
-/*****************************************************************************/
-/*
- * insert a key with a fixed serial number
- */
-static void __init __key_insert_serial(struct key *key)
-{
-	struct rb_node *parent, **p;
-	struct key *xkey;
-
-	parent = NULL;
-	p = &key_serial_tree.rb_node;
-
-	while (*p) {
-		parent = *p;
-		xkey = rb_entry(parent, struct key, serial_node);
-
-		if (key->serial < xkey->serial)
-			p = &(*p)->rb_left;
-		else if (key->serial > xkey->serial)
-			p = &(*p)->rb_right;
-		else
-			BUG();
-	}
-
-	/* we've found a suitable hole - arrange for this key to occupy it */
-	rb_link_node(&key->serial_node, parent, p);
-	rb_insert_color(&key->serial_node, &key_serial_tree);
-
-} /* end __key_insert_serial() */
 
 /*****************************************************************************/
 /*
@@ -243,7 +225,7 @@ serial_exists:
  *   instantiate the key or discard it before returning
  */
 struct key *key_alloc(struct key_type *type, const char *desc,
-		      uid_t uid, gid_t gid, struct task_struct *ctx,
+		      uid_t uid, gid_t gid, const struct cred *cred,
 		      key_perm_t perm, unsigned long flags)
 {
 	struct key_user *user = NULL;
@@ -259,18 +241,23 @@ struct key *key_alloc(struct key_type *type, const char *desc,
 	quotalen = desclen + type->def_datalen;
 
 	/* get hold of the key tracking for this user */
-	user = key_user_lookup(uid);
+	user = key_user_lookup(uid, cred->user->user_ns);
 	if (!user)
 		goto no_memory_1;
 
 	/* check that the user's quota permits allocation of another key and
 	 * its description */
 	if (!(flags & KEY_ALLOC_NOT_IN_QUOTA)) {
+		unsigned maxkeys = (uid == 0) ?
+			key_quota_root_maxkeys : key_quota_maxkeys;
+		unsigned maxbytes = (uid == 0) ?
+			key_quota_root_maxbytes : key_quota_maxbytes;
+
 		spin_lock(&user->lock);
 		if (!(flags & KEY_ALLOC_QUOTA_OVERRUN)) {
-			if (user->qnkeys + 1 >= KEYQUOTA_MAX_KEYS ||
-			    user->qnbytes + quotalen >= KEYQUOTA_MAX_BYTES
-			    )
+			if (user->qnkeys + 1 >= maxkeys ||
+			    user->qnbytes + quotalen >= maxbytes ||
+			    user->qnbytes + quotalen < user->qnbytes)
 				goto no_quota;
 		}
 
@@ -314,7 +301,7 @@ struct key *key_alloc(struct key_type *type, const char *desc,
 #endif
 
 	/* let the security module know about the key */
-	ret = security_key_alloc(key, ctx, flags);
+	ret = security_key_alloc(key, cred, flags);
 	if (ret < 0)
 		goto security_error;
 
@@ -375,11 +362,14 @@ int key_payload_reserve(struct key *key, size_t datalen)
 
 	/* contemplate the quota adjustment */
 	if (delta != 0 && test_bit(KEY_FLAG_IN_QUOTA, &key->flags)) {
+		unsigned maxbytes = (key->user->uid == 0) ?
+			key_quota_root_maxbytes : key_quota_maxbytes;
+
 		spin_lock(&key->user->lock);
 
 		if (delta > 0 &&
-		    key->user->qnbytes + delta > KEYQUOTA_MAX_BYTES
-		    ) {
+		    (key->user->qnbytes + delta >= maxbytes ||
+		     key->user->qnbytes + delta < key->user->qnbytes)) {
 			ret = -EDQUOT;
 		}
 		else {
@@ -408,7 +398,7 @@ static int __key_instantiate_and_link(struct key *key,
 				      const void *data,
 				      size_t datalen,
 				      struct key *keyring,
-				      struct key *instkey)
+				      struct key *authkey)
 {
 	int ret, awaken;
 
@@ -438,8 +428,8 @@ static int __key_instantiate_and_link(struct key *key,
 				ret = __key_link(keyring, key);
 
 			/* disable the authorisation key */
-			if (instkey)
-				key_revoke(instkey);
+			if (authkey)
+				key_revoke(authkey);
 		}
 	}
 
@@ -461,14 +451,14 @@ int key_instantiate_and_link(struct key *key,
 			     const void *data,
 			     size_t datalen,
 			     struct key *keyring,
-			     struct key *instkey)
+			     struct key *authkey)
 {
 	int ret;
 
 	if (keyring)
 		down_write(&keyring->sem);
 
-	ret = __key_instantiate_and_link(key, data, datalen, keyring, instkey);
+	ret = __key_instantiate_and_link(key, data, datalen, keyring, authkey);
 
 	if (keyring)
 		up_write(&keyring->sem);
@@ -486,7 +476,7 @@ EXPORT_SYMBOL(key_instantiate_and_link);
 int key_negate_and_link(struct key *key,
 			unsigned timeout,
 			struct key *keyring,
-			struct key *instkey)
+			struct key *authkey)
 {
 	struct timespec now;
 	int ret, awaken;
@@ -510,6 +500,7 @@ int key_negate_and_link(struct key *key,
 		set_bit(KEY_FLAG_INSTANTIATED, &key->flags);
 		now = current_kernel_time();
 		key->expiry = now.tv_sec + timeout;
+		key_schedule_gc(key->expiry + key_gc_delay);
 
 		if (test_and_clear_bit(KEY_FLAG_USER_CONSTRUCT, &key->flags))
 			awaken = 1;
@@ -521,8 +512,8 @@ int key_negate_and_link(struct key *key,
 			ret = __key_link(keyring, key);
 
 		/* disable the authorisation key */
-		if (instkey)
-			key_revoke(instkey);
+		if (authkey)
+			key_revoke(authkey);
 	}
 
 	mutex_unlock(&key_construction_mutex);
@@ -652,10 +643,8 @@ struct key *key_lookup(key_serial_t id)
 	goto error;
 
  found:
-	/* pretend it doesn't exist if it's dead */
-	if (atomic_read(&key->usage) == 0 ||
-	    test_bit(KEY_FLAG_DEAD, &key->flags) ||
-	    key->type == &key_type_dead)
+	/* pretend it doesn't exist if it is awaiting deletion */
+	if (atomic_read(&key->usage) == 0)
 		goto not_found;
 
 	/* this races with key_put(), but that doesn't matter since key_put()
@@ -757,11 +746,12 @@ key_ref_t key_create_or_update(key_ref_t keyring_ref,
 			       const char *description,
 			       const void *payload,
 			       size_t plen,
+			       key_perm_t perm,
 			       unsigned long flags)
 {
+	const struct cred *cred = current_cred();
 	struct key_type *ktype;
 	struct key *keyring, *key = NULL;
-	key_perm_t perm;
 	key_ref_t key_ref;
 	int ret;
 
@@ -806,21 +796,23 @@ key_ref_t key_create_or_update(key_ref_t keyring_ref,
 			goto found_matching_key;
 	}
 
-	/* decide on the permissions we want */
-	perm = KEY_POS_VIEW | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR;
-	perm |= KEY_USR_VIEW | KEY_USR_SEARCH | KEY_USR_LINK | KEY_USR_SETATTR;
+	/* if the client doesn't provide, decide on the permissions we want */
+	if (perm == KEY_PERM_UNDEF) {
+		perm = KEY_POS_VIEW | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR;
+		perm |= KEY_USR_VIEW | KEY_USR_SEARCH | KEY_USR_LINK | KEY_USR_SETATTR;
 
-	if (ktype->read)
-		perm |= KEY_POS_READ | KEY_USR_READ;
+		if (ktype->read)
+			perm |= KEY_POS_READ | KEY_USR_READ;
 
-	if (ktype == &key_type_keyring || ktype->update)
-		perm |= KEY_USR_WRITE;
+		if (ktype == &key_type_keyring || ktype->update)
+			perm |= KEY_USR_WRITE;
+	}
 
 	/* allocate a new key */
-	key = key_alloc(ktype, description, current->fsuid, current->fsgid,
-			current, perm, flags);
+	key = key_alloc(ktype, description, cred->fsuid, cred->fsgid, cred,
+			perm, flags);
 	if (IS_ERR(key)) {
-		key_ref = ERR_PTR(PTR_ERR(key));
+		key_ref = ERR_CAST(key);
 		goto error_3;
 	}
 
@@ -897,6 +889,9 @@ EXPORT_SYMBOL(key_update);
  */
 void key_revoke(struct key *key)
 {
+	struct timespec now;
+	time_t time;
+
 	key_check(key);
 
 	/* make sure no one's trying to change or use the key when we mark it
@@ -908,6 +903,14 @@ void key_revoke(struct key *key)
 	if (!test_and_set_bit(KEY_FLAG_REVOKED, &key->flags) &&
 	    key->type->revoke)
 		key->type->revoke(key);
+
+	/* set the death time to no more than the expiry time */
+	now = current_kernel_time();
+	time = now.tv_sec;
+	if (key->revoked_at == 0 || key->revoked_at > time) {
+		key->revoked_at = time;
+		key_schedule_gc(key->revoked_at + key_gc_delay);
+	}
 
 	up_write(&key->sem);
 
@@ -965,8 +968,10 @@ void unregister_key_type(struct key_type *ktype)
 	for (_n = rb_first(&key_serial_tree); _n; _n = rb_next(_n)) {
 		key = rb_entry(_n, struct key, serial_node);
 
-		if (key->type == ktype)
+		if (key->type == ktype) {
 			key->type = &key_type_dead;
+			set_bit(KEY_FLAG_DEAD, &key->flags);
+		}
 	}
 
 	spin_unlock(&key_serial_lock);
@@ -990,6 +995,8 @@ void unregister_key_type(struct key_type *ktype)
 
 	spin_unlock(&key_serial_lock);
 	up_write(&key_types_sem);
+
+	key_schedule_gc(0);
 
 } /* end unregister_key_type() */
 
@@ -1017,18 +1024,5 @@ void __init key_init(void)
 
 	rb_insert_color(&root_key_user.node,
 			&key_user_tree);
-
-	/* record root's user standard keyrings */
-	key_check(&root_user_keyring);
-	key_check(&root_session_keyring);
-
-	__key_insert_serial(&root_user_keyring);
-	__key_insert_serial(&root_session_keyring);
-
-	keyring_publish_name(&root_user_keyring);
-	keyring_publish_name(&root_session_keyring);
-
-	/* link the two root keyrings together */
-	key_link(&root_session_keyring, &root_user_keyring);
 
 } /* end key_init() */

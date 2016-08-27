@@ -15,7 +15,7 @@
 #include <net/af_rxrpc.h>
 #include "ar-internal.h"
 
-const char *rxrpc_call_states[] = {
+const char *const rxrpc_call_states[] = {
 	[RXRPC_CALL_CLIENT_SEND_REQUEST]	= "ClSndReq",
 	[RXRPC_CALL_CLIENT_AWAIT_REPLY]		= "ClAwtRpl",
 	[RXRPC_CALL_CLIENT_RECV_REPLY]		= "ClRcvRpl",
@@ -96,7 +96,7 @@ static struct rxrpc_call *rxrpc_alloc_call(gfp_t gfp)
 }
 
 /*
- * allocate a new client call and attempt to to get a connection slot for it
+ * allocate a new client call and attempt to get a connection slot for it
  */
 static struct rxrpc_call *rxrpc_alloc_client_call(
 	struct rxrpc_sock *rx,

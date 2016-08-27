@@ -21,17 +21,12 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#undef DEBUG
 
 #include <asm/firmware.h>
 #include <asm/prom.h>
 #include <asm/udbg.h>
 
-#ifdef DEBUG
-#define DBG(fmt...) udbg_printf(fmt)
-#else
-#define DBG(fmt...)
-#endif
+#include "pseries.h"
 
 typedef struct {
     unsigned long val;
@@ -56,11 +51,10 @@ firmware_features_table[FIRMWARE_MAX_FEATURES] = {
 	{FW_FEATURE_VIO,		"hcall-vio"},
 	{FW_FEATURE_RDMA,		"hcall-rdma"},
 	{FW_FEATURE_LLAN,		"hcall-lLAN"},
-	{FW_FEATURE_BULK,		"hcall-bulk"},
+	{FW_FEATURE_BULK_REMOVE,	"hcall-bulk"},
 	{FW_FEATURE_XDABR,		"hcall-xdabr"},
 	{FW_FEATURE_MULTITCE,		"hcall-multi-tce"},
 	{FW_FEATURE_SPLPAR,		"hcall-splpar"},
-	{FW_FEATURE_BULK_REMOVE,	"hcall-bulk"},
 };
 
 /* Build up the firmware features bitmask using the contents of
@@ -72,7 +66,7 @@ void __init fw_feature_init(const char *hypertas, unsigned long len)
 	const char *s;
 	int i;
 
-	DBG(" -> fw_feature_init()\n");
+	pr_debug(" -> fw_feature_init()\n");
 
 	for (s = hypertas; s < hypertas + len; s += strlen(s) + 1) {
 		for (i = 0; i < FIRMWARE_MAX_FEATURES; i++) {
@@ -88,5 +82,5 @@ void __init fw_feature_init(const char *hypertas, unsigned long len)
 		}
 	}
 
-	DBG(" <- fw_feature_init()\n");
+	pr_debug(" <- fw_feature_init()\n");
 }

@@ -11,7 +11,6 @@
 #include <linux/delay.h>
 #include <linux/serio.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/input.h>
 #include <linux/libps2.h>
 #include <linux/proc_fs.h>
@@ -90,10 +89,8 @@ static ssize_t trackpoint_set_int_attr(struct psmouse *psmouse, void *data,
 	struct trackpoint_attr_data *attr = data;
 	unsigned char *field = (unsigned char *)((char *)tp + attr->field_offset);
 	unsigned long value;
-	char *rest;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 255)
+	if (strict_strtoul(buf, 10, &value) || value > 255)
 		return -EINVAL;
 
 	*field = value;
@@ -118,10 +115,8 @@ static ssize_t trackpoint_set_bit_attr(struct psmouse *psmouse, void *data,
 	struct trackpoint_attr_data *attr = data;
 	unsigned char *field = (unsigned char *)((char *)tp + attr->field_offset);
 	unsigned long value;
-	char *rest;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 1)
+	if (strict_strtoul(buf, 10, &value) || value > 1)
 		return -EINVAL;
 
 	if (attr->inverted)
@@ -287,7 +282,7 @@ static int trackpoint_reconnect(struct psmouse *psmouse)
 	return 0;
 }
 
-int trackpoint_detect(struct psmouse *psmouse, int set_properties)
+int trackpoint_detect(struct psmouse *psmouse, bool set_properties)
 {
 	struct trackpoint_data *priv;
 	struct ps2dev *ps2dev = &psmouse->ps2dev;

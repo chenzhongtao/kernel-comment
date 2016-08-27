@@ -36,7 +36,7 @@
 
 /* lock to memory controller's control array */
 static DEFINE_MUTEX(mem_ctls_mutex);
-static struct list_head mc_devices = LIST_HEAD_INIT(mc_devices);
+static LIST_HEAD(mc_devices);
 
 #ifdef CONFIG_EDAC_DEBUG
 
@@ -260,7 +260,7 @@ static int edac_mc_assert_error_check_and_clear(void)
  */
 static void edac_mc_workq_function(struct work_struct *work_req)
 {
-	struct delayed_work *d_work = (struct delayed_work *)work_req;
+	struct delayed_work *d_work = to_delayed_work(work_req);
 	struct mem_ctl_info *mci = to_edac_mem_ctl_work(d_work);
 
 	mutex_lock(&mem_ctls_mutex);
@@ -401,8 +401,8 @@ static int add_mc_to_global_list(struct mem_ctl_info *mci)
 
 fail0:
 	edac_printk(KERN_WARNING, EDAC_MC,
-		"%s (%s) %s %s already assigned %d\n", p->dev->bus_id,
-		dev_name(mci), p->mod_name, p->ctl_name, p->mc_idx);
+		"%s (%s) %s %s already assigned %d\n", dev_name(p->dev),
+		edac_dev_name(mci), p->mod_name, p->ctl_name, p->mc_idx);
 	return 1;
 
 fail1:
@@ -418,16 +418,14 @@ static void complete_mc_list_del(struct rcu_head *head)
 
 	mci = container_of(head, struct mem_ctl_info, rcu);
 	INIT_LIST_HEAD(&mci->link);
-	complete(&mci->complete);
 }
 
 static void del_mc_from_global_list(struct mem_ctl_info *mci)
 {
 	atomic_dec(&edac_handlers);
 	list_del_rcu(&mci->link);
-	init_completion(&mci->complete);
 	call_rcu(&mci->rcu, complete_mc_list_del);
-	wait_for_completion(&mci->complete);
+	rcu_barrier();
 }
 
 /**
@@ -517,7 +515,7 @@ int edac_mc_add_mc(struct mem_ctl_info *mci)
 
 	/* Report action taken */
 	edac_mc_printk(mci, KERN_INFO, "Giving out device to '%s' '%s':"
-		" DEV %s\n", mci->mod_name, mci->ctl_name, dev_name(mci));
+		" DEV %s\n", mci->mod_name, mci->ctl_name, edac_dev_name(mci));
 
 	mutex_unlock(&mem_ctls_mutex);
 	return 0;
@@ -565,7 +563,7 @@ struct mem_ctl_info *edac_mc_del_mc(struct device *dev)
 
 	edac_printk(KERN_INFO, EDAC_MC,
 		"Removed device %d for %s %s: DEV %s\n", mci->mc_idx,
-		mci->mod_name, mci->ctl_name, dev_name(mci));
+		mci->mod_name, mci->ctl_name, edac_dev_name(mci));
 
 	return mci;
 }
@@ -886,24 +884,3 @@ void edac_mc_handle_fbd_ce(struct mem_ctl_info *mci,
 	mci->csrows[csrow].channels[channel].ce_count++;
 }
 EXPORT_SYMBOL(edac_mc_handle_fbd_ce);
-
-/*
- * Iterate over all MC instances and check for ECC, et al, errors
- */
-void edac_check_mc_devices(void)
-{
-	struct list_head *item;
-	struct mem_ctl_info *mci;
-
-	debugf3("%s()\n", __func__);
-	mutex_lock(&mem_ctls_mutex);
-
-	list_for_each(item, &mc_devices) {
-		mci = list_entry(item, struct mem_ctl_info, link);
-
-		if (mci->edac_check != NULL)
-			mci->edac_check(mci);
-	}
-
-	mutex_unlock(&mem_ctls_mutex);
-}

@@ -8,12 +8,15 @@
  */
 #include <linux/mm.h>
 #include <linux/cpu.h>
+#include <linux/nmi.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
+#include <linux/lockdep.h>
 #include <linux/notifier.h>
 #include <linux/module.h>
+#include <linux/sysctl.h>
 
 #include <asm/irq_regs.h>
 
@@ -23,8 +26,23 @@ static DEFINE_PER_CPU(unsigned long, touch_timestamp);
 static DEFINE_PER_CPU(unsigned long, print_timestamp);
 static DEFINE_PER_CPU(struct task_struct *, watchdog_task);
 
-static int did_panic;
-int softlockup_thresh = 10;
+static int __read_mostly did_panic;
+int __read_mostly softlockup_thresh = 60;
+
+/*
+ * Should we panic (and reboot, if panic_timeout= is set) when a
+ * soft-lockup occurs:
+ */
+unsigned int __read_mostly softlockup_panic =
+				CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC_VALUE;
+
+static int __init softlockup_panic_setup(char *str)
+{
+	softlockup_panic = simple_strtoul(str, NULL, 0);
+
+	return 1;
+}
+__setup("softlockup_panic=", softlockup_panic_setup);
 
 static int
 softlock_panic(struct notifier_block *this, unsigned long event, void *ptr)
@@ -45,14 +63,19 @@ static struct notifier_block panic_block = {
  */
 static unsigned long get_timestamp(int this_cpu)
 {
-	return cpu_clock(this_cpu) >> 30;  /* 2^30 ~= 10^9 */
+	return cpu_clock(this_cpu) >> 30LL;  /* 2^30 ~= 10^9 */
 }
 
-void touch_softlockup_watchdog(void)
+static void __touch_softlockup_watchdog(void)
 {
 	int this_cpu = raw_smp_processor_id();
 
 	__raw_get_cpu_var(touch_timestamp) = get_timestamp(this_cpu);
+}
+
+void touch_softlockup_watchdog(void)
+{
+	__raw_get_cpu_var(touch_timestamp) = 0;
 }
 EXPORT_SYMBOL(touch_softlockup_watchdog);
 
@@ -66,6 +89,14 @@ void touch_all_softlockup_watchdogs(void)
 }
 EXPORT_SYMBOL(touch_all_softlockup_watchdogs);
 
+int proc_dosoftlockup_thresh(struct ctl_table *table, int write,
+			     void __user *buffer,
+			     size_t *lenp, loff_t *ppos)
+{
+	touch_all_softlockup_watchdogs();
+	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+}
+
 /*
  * This callback runs from the timer interrupt, and checks
  * whether the watchdog thread has hung or not:
@@ -78,33 +109,41 @@ void softlockup_tick(void)
 	struct pt_regs *regs = get_irq_regs();
 	unsigned long now;
 
+	/* Is detection switched off? */
+	if (!per_cpu(watchdog_task, this_cpu) || softlockup_thresh <= 0) {
+		/* Be sure we don't false trigger if switched back on */
+		if (touch_timestamp)
+			per_cpu(touch_timestamp, this_cpu) = 0;
+		return;
+	}
+
 	if (touch_timestamp == 0) {
-		touch_softlockup_watchdog();
+		__touch_softlockup_watchdog();
 		return;
 	}
 
 	print_timestamp = per_cpu(print_timestamp, this_cpu);
 
 	/* report at most once a second */
-	if ((print_timestamp >= touch_timestamp &&
-			print_timestamp < (touch_timestamp + 1)) ||
-			did_panic || !per_cpu(watchdog_task, this_cpu)) {
+	if (print_timestamp == touch_timestamp || did_panic)
 		return;
-	}
 
 	/* do not print during early bootup: */
 	if (unlikely(system_state != SYSTEM_RUNNING)) {
-		touch_softlockup_watchdog();
+		__touch_softlockup_watchdog();
 		return;
 	}
 
 	now = get_timestamp(this_cpu);
 
-	/* Wake up the high-prio watchdog task every second: */
-	if (now > (touch_timestamp + 1))
+	/*
+	 * Wake up the high-prio watchdog task twice per
+	 * threshold timespan.
+	 */
+	if (now > touch_timestamp + softlockup_thresh/2)
 		wake_up_process(per_cpu(watchdog_task, this_cpu));
 
-	/* Warn about unreasonable 10+ seconds delays: */
+	/* Warn about unreasonable delays: */
 	if (now <= (touch_timestamp + softlockup_thresh))
 		return;
 
@@ -114,11 +153,16 @@ void softlockup_tick(void)
 	printk(KERN_ERR "BUG: soft lockup - CPU#%d stuck for %lus! [%s:%d]\n",
 			this_cpu, now - touch_timestamp,
 			current->comm, task_pid_nr(current));
+	print_modules();
+	print_irqtrace_events(current);
 	if (regs)
 		show_regs(regs);
 	else
 		dump_stack();
 	spin_unlock(&print_lock);
+
+	if (softlockup_panic)
+		panic("softlockup: hung tasks");
 }
 
 /*
@@ -131,18 +175,24 @@ static int watchdog(void *__bind_cpu)
 	sched_setscheduler(current, SCHED_FIFO, &param);
 
 	/* initialize timestamp */
-	touch_softlockup_watchdog();
+	__touch_softlockup_watchdog();
 
+	set_current_state(TASK_INTERRUPTIBLE);
 	/*
 	 * Run briefly once per second to reset the softlockup timestamp.
-	 * If this gets delayed for more than 10 seconds then the
+	 * If this gets delayed for more than 60 seconds then the
 	 * debug-printout triggers in softlockup_tick().
 	 */
 	while (!kthread_should_stop()) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		touch_softlockup_watchdog();
+		__touch_softlockup_watchdog();
 		schedule();
+
+		if (kthread_should_stop())
+			break;
+
+		set_current_state(TASK_INTERRUPTIBLE);
 	}
+	__set_current_state(TASK_RUNNING);
 
 	return 0;
 }
@@ -180,7 +230,7 @@ cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
 			break;
 		/* Unbind so it can run.  Fall thru. */
 		kthread_bind(per_cpu(watchdog_task, hotcpu),
-			     any_online_cpu(cpu_online_map));
+			     cpumask_any(cpu_online_mask));
 	case CPU_DEAD:
 	case CPU_DEAD_FROZEN:
 		p = per_cpu(watchdog_task, hotcpu);
@@ -196,14 +246,33 @@ static struct notifier_block __cpuinitdata cpu_nfb = {
 	.notifier_call = cpu_callback
 };
 
-__init void spawn_softlockup_task(void)
+static int __initdata nosoftlockup;
+
+static int __init nosoftlockup_setup(char *str)
+{
+	nosoftlockup = 1;
+	return 1;
+}
+__setup("nosoftlockup", nosoftlockup_setup);
+
+static int __init spawn_softlockup_task(void)
 {
 	void *cpu = (void *)(long)smp_processor_id();
-	int err = cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
+	int err;
 
-	BUG_ON(err == NOTIFY_BAD);
+	if (nosoftlockup)
+		return 0;
+
+	err = cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
+	if (err == NOTIFY_BAD) {
+		BUG();
+		return 1;
+	}
 	cpu_callback(&cpu_nfb, CPU_ONLINE, cpu);
 	register_cpu_notifier(&cpu_nfb);
 
 	atomic_notifier_chain_register(&panic_notifier_list, &panic_block);
+
+	return 0;
 }
+early_initcall(spawn_softlockup_task);

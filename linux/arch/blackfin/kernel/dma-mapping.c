@@ -1,30 +1,9 @@
 /*
- * File:         arch/blackfin/kernel/dma-mapping.c
- * Based on:
- * Author:
+ * Dynamic DMA mapping support
  *
- * Created:
- * Description:  Dynamic DMA mapping support.
+ * Copyright 2005-2009 Analog Devices Inc.
  *
- * Modified:
- *               Copyright 2004-2006 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later
  */
 
 #include <linux/types.h>
@@ -59,7 +38,7 @@ void dma_alloc_init(unsigned long start, unsigned long end)
 	memset((void *)dma_base, 0, DMA_UNCACHED_REGION);
 	dma_initialized = 1;
 
-	printk(KERN_INFO "%s: dma_page @ 0x%p - %d pages at 0x%08lx\n", __FUNCTION__,
+	printk(KERN_INFO "%s: dma_page @ 0x%p - %d pages at 0x%08lx\n", __func__,
 	       dma_page, dma_pages, dma_base);
 }
 
@@ -100,7 +79,7 @@ static void __free_dma_pages(unsigned long addr, unsigned int pages)
 	int i;
 
 	if ((page + pages) > dma_pages) {
-		printk(KERN_ERR "%s: freeing outside range.\n", __FUNCTION__);
+		printk(KERN_ERR "%s: freeing outside range.\n", __func__);
 		BUG();
 	}
 

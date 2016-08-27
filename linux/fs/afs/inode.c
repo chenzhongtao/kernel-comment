@@ -8,7 +8,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * Authors: David Woodhouse <dwmw2@cambridge.redhat.com>
+ * Authors: David Woodhouse <dwmw2@infradead.org>
  *          David Howells <dhowells@redhat.com>
  *
  */
@@ -60,6 +60,11 @@ static int afs_inode_map_status(struct afs_vnode *vnode, struct key *key)
 		printk("kAFS: AFS vnode with undefined type\n");
 		return -EBADMSG;
 	}
+
+#ifdef CONFIG_AFS_FSCACHE
+	if (vnode->status.size != inode->i_size)
+		fscache_attr_changed(vnode->cache);
+#endif
 
 	inode->i_nlink		= vnode->status.nlink;
 	inode->i_uid		= vnode->status.owner;
@@ -149,15 +154,6 @@ struct inode *afs_iget(struct super_block *sb, struct key *key,
 		return inode;
 	}
 
-#ifdef AFS_CACHING_SUPPORT
-	/* set up caching before reading the status, as fetch-status reads the
-	 * first page of symlinks to see if they're really mntpts */
-	cachefs_acquire_cookie(vnode->volume->cache,
-			       NULL,
-			       vnode,
-			       &vnode->cache);
-#endif
-
 	if (!status) {
 		/* it's a remotely extant inode */
 		set_bit(AFS_VNODE_CB_BROKEN, &vnode->flags);
@@ -183,6 +179,15 @@ struct inode *afs_iget(struct super_block *sb, struct key *key,
 		}
 	}
 
+	/* set up caching before mapping the status, as map-status reads the
+	 * first page of symlinks to see if they're really mountpoints */
+	inode->i_size = vnode->status.size;
+#ifdef CONFIG_AFS_FSCACHE
+	vnode->cache = fscache_acquire_cookie(vnode->volume->cache,
+					      &afs_vnode_cache_index_def,
+					      vnode);
+#endif
+
 	ret = afs_inode_map_status(vnode, key);
 	if (ret < 0)
 		goto bad_inode;
@@ -196,10 +201,11 @@ struct inode *afs_iget(struct super_block *sb, struct key *key,
 
 	/* failure */
 bad_inode:
-	make_bad_inode(inode);
-	unlock_new_inode(inode);
-	iput(inode);
-
+#ifdef CONFIG_AFS_FSCACHE
+	fscache_relinquish_cookie(vnode->cache, 0);
+	vnode->cache = NULL;
+#endif
+	iget_failed(inode);
 	_leave(" = %d [bad]", ret);
 	return ERR_PTR(ret);
 }
@@ -301,7 +307,8 @@ int afs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 
 	inode = dentry->d_inode;
 
-	_enter("{ ino=%lu v=%lu }", inode->i_ino, inode->i_version);
+	_enter("{ ino=%lu v=%llu }", inode->i_ino,
+		(unsigned long long)inode->i_version);
 
 	generic_fillattr(inode, stat);
 	return 0;
@@ -342,8 +349,8 @@ void afs_clear_inode(struct inode *inode)
 	ASSERT(list_empty(&vnode->writebacks));
 	ASSERT(!vnode->cb_promised);
 
-#ifdef AFS_CACHING_SUPPORT
-	cachefs_relinquish_cookie(vnode->cache, 0);
+#ifdef CONFIG_AFS_FSCACHE
+	fscache_relinquish_cookie(vnode->cache, 0);
 	vnode->cache = NULL;
 #endif
 

@@ -1,10 +1,10 @@
 /* linux/drivers/mtd/nand/bf5xx_nand.c
  *
- * Copyright 2006-2007 Analog Devices Inc.
+ * Copyright 2006-2008 Analog Devices Inc.
  *	http://blackfin.uclinux.org/
  *	Bryan Wu <bryan.wu@analog.com>
  *
- * Blackfin BF5xx on-chip NAND flash controler driver
+ * Blackfin BF5xx on-chip NAND flash controller driver
  *
  * Derived from drivers/mtd/nand/s3c2410.c
  * Copyright (c) 2007 Ben Dooks <ben@simtec.co.uk>
@@ -74,7 +74,57 @@ static int hardware_ecc = 1;
 static int hardware_ecc;
 #endif
 
-static unsigned short bfin_nfc_pin_req[] = {P_NAND_CE, P_NAND_RB, 0};
+static const unsigned short bfin_nfc_pin_req[] =
+	{P_NAND_CE,
+	 P_NAND_RB,
+	 P_NAND_D0,
+	 P_NAND_D1,
+	 P_NAND_D2,
+	 P_NAND_D3,
+	 P_NAND_D4,
+	 P_NAND_D5,
+	 P_NAND_D6,
+	 P_NAND_D7,
+	 P_NAND_WE,
+	 P_NAND_RE,
+	 P_NAND_CLE,
+	 P_NAND_ALE,
+	 0};
+
+#ifdef CONFIG_MTD_NAND_BF5XX_BOOTROM_ECC
+static uint8_t bbt_pattern[] = { 0xff };
+
+static struct nand_bbt_descr bootrom_bbt = {
+	.options = 0,
+	.offs = 63,
+	.len = 1,
+	.pattern = bbt_pattern,
+};
+
+static struct nand_ecclayout bootrom_ecclayout = {
+	.eccbytes = 24,
+	.eccpos = {
+		0x8 * 0, 0x8 * 0 + 1, 0x8 * 0 + 2,
+		0x8 * 1, 0x8 * 1 + 1, 0x8 * 1 + 2,
+		0x8 * 2, 0x8 * 2 + 1, 0x8 * 2 + 2,
+		0x8 * 3, 0x8 * 3 + 1, 0x8 * 3 + 2,
+		0x8 * 4, 0x8 * 4 + 1, 0x8 * 4 + 2,
+		0x8 * 5, 0x8 * 5 + 1, 0x8 * 5 + 2,
+		0x8 * 6, 0x8 * 6 + 1, 0x8 * 6 + 2,
+		0x8 * 7, 0x8 * 7 + 1, 0x8 * 7 + 2
+	},
+	.oobfree = {
+		{ 0x8 * 0 + 3, 5 },
+		{ 0x8 * 1 + 3, 5 },
+		{ 0x8 * 2 + 3, 5 },
+		{ 0x8 * 3 + 3, 5 },
+		{ 0x8 * 4 + 3, 5 },
+		{ 0x8 * 5 + 3, 5 },
+		{ 0x8 * 6 + 3, 5 },
+		{ 0x8 * 7 + 3, 5 },
+	}
+};
+#endif
 
 /*
  * Data structures for bf5xx nand flash controller driver
@@ -258,7 +308,7 @@ static int bf5xx_nand_correct_data(struct mtd_info *mtd, u_char *dat,
 		dat += 256;
 		read_ecc += 8;
 		calc_ecc += 8;
-		ret = bf5xx_nand_correct_data_256(mtd, dat, read_ecc, calc_ecc);
+		ret |= bf5xx_nand_correct_data_256(mtd, dat, read_ecc, calc_ecc);
 	}
 
 	return ret;
@@ -278,28 +328,32 @@ static int bf5xx_nand_calculate_ecc(struct mtd_info *mtd,
 	u16 ecc0, ecc1;
 	u32 code[2];
 	u8 *p;
-	int bytes = 3, i;
 
 	/* first 4 bytes ECC code for 256 page size */
 	ecc0 = bfin_read_NFC_ECC0();
 	ecc1 = bfin_read_NFC_ECC1();
 
-	code[0] = (ecc0 & 0x3FF) | ((ecc1 & 0x3FF) << 11);
+	code[0] = (ecc0 & 0x7ff) | ((ecc1 & 0x7ff) << 11);
 
 	dev_dbg(info->device, "returning ecc 0x%08x\n", code[0]);
+
+	/* first 3 bytes in ecc_code for 256 page size */
+	p = (u8 *) code;
+	memcpy(ecc_code, p, 3);
 
 	/* second 4 bytes ECC code for 512 page size */
 	if (page_size == 512) {
 		ecc0 = bfin_read_NFC_ECC2();
 		ecc1 = bfin_read_NFC_ECC3();
-		code[1] = (ecc0 & 0x3FF) | ((ecc1 & 0x3FF) << 11);
-		bytes = 6;
+		code[1] = (ecc0 & 0x7ff) | ((ecc1 & 0x7ff) << 11);
+
+		/* second 3 bytes in ecc_code for second 256
+		 * bytes of 512 page size
+		 */
+		p = (u8 *) (code + 1);
+		memcpy((ecc_code + 3), p, 3);
 		dev_dbg(info->device, "returning ecc 0x%08x\n", code[1]);
 	}
-
-	p = (u8 *)code;
-	for (i = 0; i < bytes; i++)
-		ecc_code[i] = p[i];
 
 	return 0;
 }
@@ -404,7 +458,7 @@ static irqreturn_t bf5xx_nand_dma_irq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int bf5xx_nand_dma_rw(struct mtd_info *mtd,
+static void bf5xx_nand_dma_rw(struct mtd_info *mtd,
 				uint8_t *buf, int is_read)
 {
 	struct bf5xx_nand_info *info = mtd_to_nand_info(mtd);
@@ -442,11 +496,20 @@ static int bf5xx_nand_dma_rw(struct mtd_info *mtd,
 	/* setup DMA register with Blackfin DMA API */
 	set_dma_config(CH_NFC, 0x0);
 	set_dma_start_addr(CH_NFC, (unsigned long) buf);
+
+/* The DMAs have different size on BF52x and BF54x */
+#ifdef CONFIG_BF52x
+	set_dma_x_count(CH_NFC, (page_size >> 1));
+	set_dma_x_modify(CH_NFC, 2);
+	val = DI_EN | WDSIZE_16;
+#endif
+
+#ifdef CONFIG_BF54x
 	set_dma_x_count(CH_NFC, (page_size >> 2));
 	set_dma_x_modify(CH_NFC, 4);
-
-	/* setup write or read operation */
 	val = DI_EN | WDSIZE_32;
+#endif
+	/* setup write or read operation */
 	if (is_read)
 		val |= WNR;
 	set_dma_config(CH_NFC, val);
@@ -458,8 +521,6 @@ static int bf5xx_nand_dma_rw(struct mtd_info *mtd,
 	else
 		bfin_write_NFC_PGCTL(0x2);
 	wait_for_completion(&info->dma_completion);
-
-	return 0;
 }
 
 static void bf5xx_nand_dma_read_buf(struct mtd_info *mtd,
@@ -495,23 +556,15 @@ static void bf5xx_nand_dma_write_buf(struct mtd_info *mtd,
 /*
  * System initialization functions
  */
-
 static int bf5xx_nand_dma_init(struct bf5xx_nand_info *info)
 {
 	int ret;
-	unsigned short val;
 
 	/* Do not use dma */
 	if (!hardware_ecc)
 		return 0;
 
 	init_completion(&info->dma_completion);
-
-	/* Setup DMAC1 channel mux for NFC which shared with SDH */
-	val = bfin_read_DMAC1_PERIMUX();
-	val &= 0xFFFE;
-	bfin_write_DMAC1_PERIMUX(val);
-	SSYNC();
 
 	/* Request NFC DMA channel */
 	ret = request_dma(CH_NFC, "BF5XX NFC driver");
@@ -520,11 +573,24 @@ static int bf5xx_nand_dma_init(struct bf5xx_nand_info *info)
 		return ret;
 	}
 
-	set_dma_callback(CH_NFC, (void *) bf5xx_nand_dma_irq, (void *) info);
+#ifdef CONFIG_BF54x
+	/* Setup DMAC1 channel mux for NFC which shared with SDH */
+	bfin_write_DMAC1_PERIMUX(bfin_read_DMAC1_PERIMUX() & ~1);
+	SSYNC();
+#endif
+
+	set_dma_callback(CH_NFC, bf5xx_nand_dma_irq, info);
 
 	/* Turn off the DMA channel first */
 	disable_dma(CH_NFC);
 	return 0;
+}
+
+static void bf5xx_nand_dma_remove(struct bf5xx_nand_info *info)
+{
+	/* Free NFC DMA channel */
+	if (hardware_ecc)
+		free_dma(CH_NFC);
 }
 
 /*
@@ -561,12 +627,6 @@ static int bf5xx_nand_hw_init(struct bf5xx_nand_info *info)
 	bfin_write_NFC_IRQSTAT(val);
 	SSYNC();
 
-	if (peripheral_request_list(bfin_nfc_pin_req, DRV_NAME)) {
-		printk(KERN_ERR DRV_NAME
-		": Requesting Peripherals failed\n");
-		return -EFAULT;
-	}
-
 	/* DMA initialization  */
 	if (bf5xx_nand_dma_init(info))
 		err = -ENXIO;
@@ -577,7 +637,7 @@ static int bf5xx_nand_hw_init(struct bf5xx_nand_info *info)
 /*
  * Device management interface
  */
-static int bf5xx_nand_add_partition(struct bf5xx_nand_info *info)
+static int __devinit bf5xx_nand_add_partition(struct bf5xx_nand_info *info)
 {
 	struct mtd_info *mtd = &info->mtd;
 
@@ -591,7 +651,7 @@ static int bf5xx_nand_add_partition(struct bf5xx_nand_info *info)
 #endif
 }
 
-static int bf5xx_nand_remove(struct platform_device *pdev)
+static int __devexit bf5xx_nand_remove(struct platform_device *pdev)
 {
 	struct bf5xx_nand_info *info = to_nand_info(pdev);
 	struct mtd_info *mtd = NULL;
@@ -609,6 +669,7 @@ static int bf5xx_nand_remove(struct platform_device *pdev)
 	}
 
 	peripheral_free_list(bfin_nfc_pin_req);
+	bf5xx_nand_dma_remove(info);
 
 	/* free the common resources */
 	kfree(info);
@@ -624,7 +685,7 @@ static int bf5xx_nand_remove(struct platform_device *pdev)
  * it can allocate all necessary resources then calls the
  * nand layer to look for devices
  */
-static int bf5xx_nand_probe(struct platform_device *pdev)
+static int __devinit bf5xx_nand_probe(struct platform_device *pdev)
 {
 	struct bf5xx_nand_platform *plat = to_nand_plat(pdev);
 	struct bf5xx_nand_info *info = NULL;
@@ -636,14 +697,19 @@ static int bf5xx_nand_probe(struct platform_device *pdev)
 
 	if (!plat) {
 		dev_err(&pdev->dev, "no platform specific information\n");
-		goto exit_error;
+		return -EINVAL;
+	}
+
+	if (peripheral_request_list(bfin_nfc_pin_req, DRV_NAME)) {
+		dev_err(&pdev->dev, "requesting Peripherals failed\n");
+		return -EFAULT;
 	}
 
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (info == NULL) {
 		dev_err(&pdev->dev, "no memory for flash info\n");
 		err = -ENOMEM;
-		goto exit_error;
+		goto out_err_kzalloc;
 	}
 
 	platform_set_drvdata(pdev, info);
@@ -687,11 +753,16 @@ static int bf5xx_nand_probe(struct platform_device *pdev)
 
 	/* initialise the hardware */
 	err = bf5xx_nand_hw_init(info);
-	if (err != 0)
-		goto exit_error;
+	if (err)
+		goto out_err_hw_init;
 
 	/* setup hardware ECC data struct */
 	if (hardware_ecc) {
+#ifdef CONFIG_MTD_NAND_BF5XX_BOOTROM_ECC
+		chip->badblock_pattern = &bootrom_bbt;
+		chip->ecc.layout = &bootrom_ecclayout;
+#endif
+
 		if (plat->page_size == NFC_PG_SIZE_256) {
 			chip->ecc.bytes = 3;
 			chip->ecc.size = 256;
@@ -713,7 +784,7 @@ static int bf5xx_nand_probe(struct platform_device *pdev)
 	/* scan hardware nand chip and setup mtd info data struct */
 	if (nand_scan(mtd, 1)) {
 		err = -ENXIO;
-		goto exit_error;
+		goto out_err_nand_scan;
 	}
 
 	/* add NAND partition */
@@ -722,11 +793,14 @@ static int bf5xx_nand_probe(struct platform_device *pdev)
 	dev_dbg(&pdev->dev, "initialised ok\n");
 	return 0;
 
-exit_error:
-	bf5xx_nand_remove(pdev);
+out_err_nand_scan:
+	bf5xx_nand_dma_remove(info);
+out_err_hw_init:
+	platform_set_drvdata(pdev, NULL);
+	kfree(info);
+out_err_kzalloc:
+	peripheral_free_list(bfin_nfc_pin_req);
 
-	if (err == 0)
-		err = -EINVAL;
 	return err;
 }
 
@@ -744,9 +818,6 @@ static int bf5xx_nand_resume(struct platform_device *dev)
 {
 	struct bf5xx_nand_info *info = platform_get_drvdata(dev);
 
-	if (info)
-		bf5xx_nand_hw_init(info);
-
 	return 0;
 }
 
@@ -758,7 +829,7 @@ static int bf5xx_nand_resume(struct platform_device *dev)
 /* driver device registration */
 static struct platform_driver bf5xx_nand_driver = {
 	.probe		= bf5xx_nand_probe,
-	.remove		= bf5xx_nand_remove,
+	.remove		= __devexit_p(bf5xx_nand_remove),
 	.suspend	= bf5xx_nand_suspend,
 	.resume		= bf5xx_nand_resume,
 	.driver		= {
@@ -786,3 +857,4 @@ module_exit(bf5xx_nand_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR(DRV_AUTHOR);
 MODULE_DESCRIPTION(DRV_DESC);
+MODULE_ALIAS("platform:" DRV_NAME);

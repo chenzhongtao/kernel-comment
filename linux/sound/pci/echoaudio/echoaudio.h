@@ -189,6 +189,9 @@
 #define INDIGO			0x0090
 #define INDIGO_IO		0x00a0
 #define INDIGO_DJ		0x00b0
+#define DC8			0x00c0
+#define INDIGO_IOX		0x00d0
+#define INDIGO_DJX		0x00e0
 #define ECHO3G			0x0100
 
 
@@ -361,7 +364,7 @@ struct echoaudio {
 	spinlock_t lock;
 	struct snd_pcm_substream *substream[DSP_MAXPIPES];
 	int last_period[DSP_MAXPIPES];
-	struct semaphore mode_mutex;
+	struct mutex mode_mutex;
 	u16 num_digital_modes, digital_mode_list[6];
 	u16 num_clock_sources, clock_source_list[10];
 	atomic_t opencount;

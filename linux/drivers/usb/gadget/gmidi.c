@@ -24,7 +24,6 @@
 #include <linux/utsname.h>
 #include <linux/device.h>
 
-#include <sound/driver.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
@@ -35,6 +34,21 @@
 #include <linux/usb/midi.h>
 
 #include "gadget_chips.h"
+
+
+/*
+ * Kbuild is not very cooperative with respect to linking separately
+ * compiled library objects into one module.  So for now we won't use
+ * separate compilation ... ensuring init/exit sections work to shrink
+ * the runtime footprint, and giving us at least some parts of what
+ * a "gcc --combine ... part1.c part2.c part3.c ... " build would.
+ */
+#include "usbstring.c"
+#include "config.c"
+#include "epautoconf.c"
+
+/*-------------------------------------------------------------------------*/
+
 
 MODULE_AUTHOR("Ben Williamson");
 MODULE_LICENSE("GPL v2");
@@ -139,8 +153,6 @@ static void gmidi_transmit(struct gmidi_device* dev, struct usb_request* req);
 	dev_vdbg(&(d)->gadget->dev , fmt , ## args)
 #define ERROR(d, fmt, args...) \
 	dev_err(&(d)->gadget->dev , fmt , ## args)
-#define WARN(d, fmt, args...) \
-	dev_warn(&(d)->gadget->dev , fmt , ## args)
 #define INFO(d, fmt, args...) \
 	dev_info(&(d)->gadget->dev , fmt , ## args)
 
@@ -179,7 +191,7 @@ module_param(qlen, uint, S_IRUGO);
 #define GMIDI_MS_INTERFACE	1
 #define GMIDI_NUM_INTERFACES	2
 
-DECLARE_USB_AC_HEADER_DESCRIPTOR(1);
+DECLARE_UAC_AC_HEADER_DESCRIPTOR(1);
 DECLARE_USB_MIDI_OUT_JACK_DESCRIPTOR(1);
 DECLARE_USB_MS_ENDPOINT_DESCRIPTOR(1);
 
@@ -187,10 +199,10 @@ DECLARE_USB_MS_ENDPOINT_DESCRIPTOR(1);
 static struct usb_device_descriptor device_desc = {
 	.bLength =		USB_DT_DEVICE_SIZE,
 	.bDescriptorType =	USB_DT_DEVICE,
-	.bcdUSB =		__constant_cpu_to_le16(0x0200),
+	.bcdUSB =		cpu_to_le16(0x0200),
 	.bDeviceClass =		USB_CLASS_PER_INTERFACE,
-	.idVendor =		__constant_cpu_to_le16(DRIVER_VENDOR_NUM),
-	.idProduct =		__constant_cpu_to_le16(DRIVER_PRODUCT_NUM),
+	.idVendor =		cpu_to_le16(DRIVER_VENDOR_NUM),
+	.idProduct =		cpu_to_le16(DRIVER_PRODUCT_NUM),
 	.iManufacturer =	STRING_MANUFACTURER,
 	.iProduct =		STRING_PRODUCT,
 	.bNumConfigurations =	1,
@@ -210,7 +222,7 @@ static struct usb_config_descriptor config_desc = {
 	 * power properties of the device. Is it selfpowered?
 	 */
 	.bmAttributes =		USB_CONFIG_ATT_ONE,
-	.bMaxPower =		1,
+	.bMaxPower =		CONFIG_USB_GADGET_VBUS_DRAW / 2,
 };
 
 /* B.3.1  Standard AC Interface Descriptor */
@@ -225,12 +237,12 @@ static const struct usb_interface_descriptor ac_interface_desc = {
 };
 
 /* B.3.2  Class-Specific AC Interface Descriptor */
-static const struct usb_ac_header_descriptor_1 ac_header_desc = {
-	.bLength =		USB_DT_AC_HEADER_SIZE(1),
+static const struct uac_ac_header_descriptor_1 ac_header_desc = {
+	.bLength =		UAC_DT_AC_HEADER_SIZE(1),
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
 	.bDescriptorSubtype =	USB_MS_HEADER,
-	.bcdADC =		__constant_cpu_to_le16(0x0100),
-	.wTotalLength =		USB_DT_AC_HEADER_SIZE(1),
+	.bcdADC =		cpu_to_le16(0x0100),
+	.wTotalLength =		cpu_to_le16(UAC_DT_AC_HEADER_SIZE(1)),
 	.bInCollection =	1,
 	.baInterfaceNr = {
 		[0] =		GMIDI_MS_INTERFACE,
@@ -253,10 +265,10 @@ static const struct usb_ms_header_descriptor ms_header_desc = {
 	.bLength =		USB_DT_MS_HEADER_SIZE,
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
 	.bDescriptorSubtype =	USB_MS_HEADER,
-	.bcdMSC =		__constant_cpu_to_le16(0x0100),
-	.wTotalLength =		USB_DT_MS_HEADER_SIZE
+	.bcdMSC =		cpu_to_le16(0x0100),
+	.wTotalLength =		cpu_to_le16(USB_DT_MS_HEADER_SIZE
 				+ 2*USB_DT_MIDI_IN_SIZE
-				+ 2*USB_DT_MIDI_OUT_SIZE(1),
+				+ 2*USB_DT_MIDI_OUT_SIZE(1)),
 };
 
 #define JACK_IN_EMB	1
@@ -1087,10 +1099,9 @@ static int gmidi_register_card(struct gmidi_device *dev)
 		.dev_free = gmidi_snd_free,
 	};
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (!card) {
-		ERROR(dev, "snd_card_new failed\n");
-		err = -ENOMEM;
+	err = snd_card_create(index, id, THIS_MODULE, 0, &card);
+	if (err < 0) {
+		ERROR(dev, "snd_card_create failed\n");
 		goto fail;
 	}
 	dev->card = card;
@@ -1150,7 +1161,7 @@ fail:
 /*
  * Creates an output endpoint, and initializes output ports.
  */
-static int __devinit gmidi_bind(struct usb_gadget *gadget)
+static int __init gmidi_bind(struct usb_gadget *gadget)
 {
 	struct gmidi_device *dev;
 	struct usb_ep *in_ep, *out_ep;
@@ -1159,7 +1170,7 @@ static int __devinit gmidi_bind(struct usb_gadget *gadget)
 	/* support optional vendor/distro customization */
 	if (idVendor) {
 		if (!idProduct) {
-			printk(KERN_ERR "idVendor needs idProduct!\n");
+			pr_err("idVendor needs idProduct!\n");
 			return -ENODEV;
 		}
 		device_desc.idVendor = cpu_to_le16(idVendor);
@@ -1191,7 +1202,7 @@ static int __devinit gmidi_bind(struct usb_gadget *gadget)
 	in_ep = usb_ep_autoconfig(gadget, &bulk_in_desc);
 	if (!in_ep) {
 autoconf_fail:
-		printk(KERN_ERR "%s: can't autoconfigure on %s\n",
+		pr_err("%s: can't autoconfigure on %s\n",
 			shortname, gadget->name);
 		return -ENODEV;
 	}
@@ -1213,9 +1224,9 @@ autoconf_fail:
 		 * it SHOULD NOT have problems with bulk-capable hardware.
 		 * so warn about unrecognized controllers, don't panic.
 		 */
-		printk(KERN_WARNING "%s: controller '%s' not recognized\n",
+		pr_warning("%s: controller '%s' not recognized\n",
 			shortname, gadget->name);
-		device_desc.bcdDevice = __constant_cpu_to_le16(0x9999);
+		device_desc.bcdDevice = cpu_to_le16(0x9999);
 	}
 
 

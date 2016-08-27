@@ -49,28 +49,22 @@
 #include <asm/mmu.h>
 #include <asm/uaccess.h>
 #include <asm/smp.h>
-#include <asm/bootx.h>
 #include <asm/machdep.h>
 #include <asm/setup.h>
 
+#include "mmu_decl.h"
+
 extern void loadcam_entry(unsigned int index);
 unsigned int tlbcam_index;
-unsigned int num_tlbcam_entries;
-static unsigned long __cam0, __cam1, __cam2;
-extern unsigned long total_lowmem;
-extern unsigned long __max_low_memory;
-extern unsigned long __initial_memory_limit;
-#define MAX_LOW_MEM	CONFIG_LOWMEM_SIZE
+static unsigned long cam[CONFIG_LOWMEM_CAM_NUM];
 
 #define NUM_TLBCAMS	(16)
 
-struct tlbcam {
-   	u32	MAS0;
-	u32	MAS1;
-	u32	MAS2;
-	u32	MAS3;
-	u32	MAS7;
-} TLBCAM[NUM_TLBCAMS];
+#if defined(CONFIG_LOWMEM_CAM_NUM_BOOL) && (CONFIG_LOWMEM_CAM_NUM >= NUM_TLBCAMS)
+#error "LOWMEM_CAM_NUM must be less than NUM_TLBCAMS"
+#endif
+
+struct tlbcam TLBCAM[NUM_TLBCAMS];
 
 struct tlbcamrange {
    	unsigned long start;
@@ -83,7 +77,7 @@ extern unsigned int tlbcam_index;
 /*
  * Return PA for this VA if it is mapped by a CAM, or 0
  */
-unsigned long v_mapped_by_tlbcam(unsigned long va)
+phys_addr_t v_mapped_by_tlbcam(unsigned long va)
 {
 	int b;
 	for (b = 0; b < tlbcam_index; ++b)
@@ -95,7 +89,7 @@ unsigned long v_mapped_by_tlbcam(unsigned long va)
 /*
  * Return VA for a given PA or 0 if not mapped
  */
-unsigned long p_mapped_by_tlbcam(unsigned long pa)
+unsigned long p_mapped_by_tlbcam(phys_addr_t pa)
 {
 	int b;
 	for (b = 0; b < tlbcam_index; ++b)
@@ -117,7 +111,7 @@ void settlbcam(int index, unsigned long virt, phys_addr_t phys,
 	unsigned int tsize, lz;
 
 	asm ("cntlzw %0,%1" : "=r" (lz) : "r" (size));
-	tsize = (21 - lz) / 2;
+	tsize = 21 - lz;
 
 #ifdef CONFIG_SMP
 	if ((flags & _PAGE_NO_CACHE) == 0)
@@ -162,19 +156,19 @@ void invalidate_tlbcam_entry(int index)
 	loadcam_entry(index);
 }
 
-void __init cam_mapin_ram(unsigned long cam0, unsigned long cam1,
-		unsigned long cam2)
+unsigned long __init mmu_mapin_ram(void)
 {
-	settlbcam(0, KERNELBASE, PPC_MEMSTART, cam0, _PAGE_KERNEL, 0);
-	tlbcam_index++;
-	if (cam1) {
+	unsigned long virt = PAGE_OFFSET;
+	phys_addr_t phys = memstart_addr;
+
+	while (tlbcam_index < ARRAY_SIZE(cam) && cam[tlbcam_index]) {
+		settlbcam(tlbcam_index, virt, phys, cam[tlbcam_index], PAGE_KERNEL_X, 0);
+		virt += cam[tlbcam_index];
+		phys += cam[tlbcam_index];
 		tlbcam_index++;
-		settlbcam(1, KERNELBASE+cam0, PPC_MEMSTART+cam0, cam1, _PAGE_KERNEL, 0);
 	}
-	if (cam2) {
-		tlbcam_index++;
-		settlbcam(2, KERNELBASE+cam0+cam1, PPC_MEMSTART+cam0+cam1, cam2, _PAGE_KERNEL, 0);
-	}
+
+	return virt - PAGE_OFFSET;
 }
 
 /*
@@ -185,53 +179,46 @@ void __init MMU_init_hw(void)
 	flush_instruction_cache();
 }
 
-unsigned long __init mmu_mapin_ram(void)
-{
-	cam_mapin_ram(__cam0, __cam1, __cam2);
-
-	return __cam0 + __cam1 + __cam2;
-}
-
-
 void __init
 adjust_total_lowmem(void)
 {
-	unsigned long max_low_mem = MAX_LOW_MEM;
-	unsigned long cam_max = 0x10000000;
-	unsigned long ram;
+	phys_addr_t ram;
+	unsigned int max_cam = (mfspr(SPRN_TLB1CFG) >> 16) & 0xff;
+	char buf[ARRAY_SIZE(cam) * 5 + 1], *p = buf;
+	int i;
+	unsigned long virt = PAGE_OFFSET & 0xffffffffUL;
+	unsigned long phys = memstart_addr & 0xffffffffUL;
 
-	/* adjust CAM size to max_low_mem */
-	if (max_low_mem < cam_max)
-		cam_max = max_low_mem;
+	/* Convert (4^max) kB to (2^max) bytes */
+	max_cam = max_cam * 2 + 10;
 
-	/* adjust lowmem size to max_low_mem */
-	if (max_low_mem < total_lowmem)
-		ram = max_low_mem;
-	else
-		ram = total_lowmem;
+	/* adjust lowmem size to __max_low_memory */
+	ram = min((phys_addr_t)__max_low_memory, (phys_addr_t)total_lowmem);
 
 	/* Calculate CAM values */
-	__cam0 = 1UL << 2 * (__ilog2(ram) / 2);
-	if (__cam0 > cam_max)
-		__cam0 = cam_max;
-	ram -= __cam0;
-	if (ram) {
-		__cam1 = 1UL << 2 * (__ilog2(ram) / 2);
-		if (__cam1 > cam_max)
-			__cam1 = cam_max;
-		ram -= __cam1;
-	}
-	if (ram) {
-		__cam2 = 1UL << 2 * (__ilog2(ram) / 2);
-		if (__cam2 > cam_max)
-			__cam2 = cam_max;
-		ram -= __cam2;
-	}
+	__max_low_memory = 0;
+	for (i = 0; ram && i < ARRAY_SIZE(cam); i++) {
+		unsigned int camsize = __ilog2(ram) & ~1U;
+		unsigned int align = __ffs(virt | phys) & ~1U;
 
-	printk(KERN_INFO "Memory CAM mapping: CAM0=%ldMb, CAM1=%ldMb,"
-			" CAM2=%ldMb residual: %ldMb\n",
-			__cam0 >> 20, __cam1 >> 20, __cam2 >> 20,
-			(total_lowmem - __cam0 - __cam1 - __cam2) >> 20);
-	__max_low_memory = max_low_mem = __cam0 + __cam1 + __cam2;
-	__initial_memory_limit = __max_low_memory;
+		if (camsize > align)
+			camsize = align;
+		if (camsize > max_cam)
+			camsize = max_cam;
+
+		cam[i] = 1UL << camsize;
+		ram -= cam[i];
+		__max_low_memory += cam[i];
+		virt += cam[i];
+		phys += cam[i];
+
+		p += sprintf(p, "%lu/", cam[i] >> 20);
+	}
+	for (; i < ARRAY_SIZE(cam); i++)
+		p += sprintf(p, "0/");
+	p[-1] = '\0';
+
+	pr_info("Memory CAM mapping: %s Mb, residual: %dMb\n", buf,
+	        (unsigned int)((total_lowmem - __max_low_memory) >> 20));
+	__initial_memory_limit_addr = memstart_addr + __max_low_memory;
 }

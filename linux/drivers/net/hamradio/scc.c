@@ -184,7 +184,8 @@
 
 #include "z8530.h"
 
-static char banner[] __initdata = KERN_INFO "AX.25: Z8530 SCC driver version "VERSION".dl1bke\n";
+static const char banner[] __initdata = KERN_INFO \
+	"AX.25: Z8530 SCC driver version "VERSION".dl1bke\n";
 
 static void t_dwait(unsigned long);
 static void t_txdelay(unsigned long);
@@ -201,7 +202,6 @@ static void z8530_init(void);
 
 static void init_channel(struct scc_channel *scc);
 static void scc_key_trx (struct scc_channel *scc, char tx);
-static irqreturn_t scc_isr(int irq, void *dev_id);
 static void scc_init_timer(struct scc_channel *scc);
 
 static int scc_net_alloc(const char *name, struct scc_channel *scc);
@@ -209,7 +209,8 @@ static void scc_net_setup(struct net_device *dev);
 static int scc_net_open(struct net_device *dev);
 static int scc_net_close(struct net_device *dev);
 static void scc_net_rx(struct scc_channel *scc, struct sk_buff *skb);
-static int scc_net_tx(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t scc_net_tx(struct sk_buff *skb,
+			      struct net_device *dev);
 static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static int scc_net_set_mac_address(struct net_device *dev, void *addr);
 static struct net_device_stats * scc_net_get_stats(struct net_device *dev);
@@ -629,6 +630,7 @@ static void scc_isr_dispatch(struct scc_channel *scc, int vector)
 
 static irqreturn_t scc_isr(int irq, void *dev_id)
 {
+	int chip_irq = (long) dev_id;
 	unsigned char vector;	
 	struct scc_channel *scc;
 	struct scc_ctrl *ctrl;
@@ -665,7 +667,7 @@ static irqreturn_t scc_isr(int irq, void *dev_id)
 	ctrl = SCC_ctrl;
 	while (ctrl->chan_A)
 	{
-		if (ctrl->irq != irq)
+		if (ctrl->irq != chip_irq)
 		{
 			ctrl++;
 			continue;
@@ -1340,9 +1342,10 @@ static unsigned int scc_set_param(struct scc_channel *scc, unsigned int cmd, uns
 		case PARAM_RTS:	
 			if ( !(scc->wreg[R5] & RTS) )
 			{
-				if (arg != TX_OFF)
+				if (arg != TX_OFF) {
 					scc_key_trx(scc, TX_ON);
 					scc_start_tx_timer(scc, t_txdelay, scc->kiss.txdelay);
+				}
 			} else {
 				if (arg == TX_OFF)
 				{
@@ -1464,7 +1467,7 @@ static void z8530_init(void)
 	printk(KERN_INFO "Init Z8530 driver: %u channels, IRQ", Nchips*2);
 	
 	flag=" ";
-	for (k = 0; k < NR_IRQS; k++)
+	for (k = 0; k < nr_irqs; k++)
 		if (Ivec[k].used) 
 		{
 			printk("%s%d", flag, k);
@@ -1517,7 +1520,7 @@ static int scc_net_alloc(const char *name, struct scc_channel *scc)
 	if (!dev) 
 		return -ENOMEM;
 
-	dev->priv = scc;
+	dev->ml_priv = scc;
 	scc->dev = dev;
 	spin_lock_init(&scc->lock);
 	init_timer(&scc->tx_t);
@@ -1541,22 +1544,23 @@ static int scc_net_alloc(const char *name, struct scc_channel *scc)
 /* *			    Network driver methods		      * */
 /* ******************************************************************** */
 
+static const struct net_device_ops scc_netdev_ops = {
+	.ndo_open            = scc_net_open,
+	.ndo_stop	     = scc_net_close,
+	.ndo_start_xmit	     = scc_net_tx,
+	.ndo_set_mac_address = scc_net_set_mac_address,
+	.ndo_get_stats       = scc_net_get_stats,
+	.ndo_do_ioctl        = scc_net_ioctl,
+};
+
 /* ----> Initialize device <----- */
 
 static void scc_net_setup(struct net_device *dev)
 {
 	dev->tx_queue_len    = 16;	/* should be enough... */
 
-	dev->open            = scc_net_open;
-	dev->stop	     = scc_net_close;
-
-	dev->hard_start_xmit = scc_net_tx;
+	dev->netdev_ops	     = &scc_netdev_ops;
 	dev->header_ops      = &ax25_header_ops;
-
-	dev->set_mac_address = scc_net_set_mac_address;
-	dev->get_stats       = scc_net_get_stats;
-	dev->do_ioctl        = scc_net_ioctl;
-	dev->tx_timeout      = NULL;
 
 	memcpy(dev->broadcast, &ax25_bcast,  AX25_ADDR_LEN);
 	memcpy(dev->dev_addr,  &ax25_defaddr, AX25_ADDR_LEN);
@@ -1574,7 +1578,7 @@ static void scc_net_setup(struct net_device *dev)
 
 static int scc_net_open(struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 
  	if (!scc->init)
 		return -EINVAL;
@@ -1592,7 +1596,7 @@ static int scc_net_open(struct net_device *dev)
 
 static int scc_net_close(struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	unsigned long flags;
 
 	netif_stop_queue(dev);
@@ -1626,22 +1630,21 @@ static void scc_net_rx(struct scc_channel *scc, struct sk_buff *skb)
 	skb->protocol = ax25_type_trans(skb, scc->dev);
 	
 	netif_rx(skb);
-	scc->dev->last_rx = jiffies;
 	return;
 }
 
 /* ----> transmit frame <---- */
 
-static int scc_net_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t scc_net_tx(struct sk_buff *skb, struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	unsigned long flags;
 	char kisscmd;
 
 	if (skb->len > scc->stat.bufsize || skb->len < 2) {
 		scc->dev_stat.tx_dropped++;	/* bogus frame */
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 	
 	scc->dev_stat.tx_packets++;
@@ -1654,7 +1657,7 @@ static int scc_net_tx(struct sk_buff *skb, struct net_device *dev)
 	if (kisscmd) {
 		scc_set_param(scc, kisscmd, *skb->data);
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	spin_lock_irqsave(&scc->lock, flags);
@@ -1682,7 +1685,7 @@ static int scc_net_tx(struct sk_buff *skb, struct net_device *dev)
 			__scc_start_tx_timer(scc, t_dwait, 0);
 	}
 	spin_unlock_irqrestore(&scc->lock, flags);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* ----> ioctl functions <---- */
@@ -1704,7 +1707,7 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	struct scc_mem_config memcfg;
 	struct scc_hw_config hwcfg;
 	struct scc_calibrate cal;
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	int chan;
 	unsigned char device_name[IFNAMSIZ];
 	void __user *arg = ifr->ifr_data;
@@ -1727,12 +1730,14 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 			if (hwcfg.irq == 2) hwcfg.irq = 9;
 
-			if (hwcfg.irq < 0 || hwcfg.irq >= NR_IRQS)
+			if (hwcfg.irq < 0 || hwcfg.irq >= nr_irqs)
 				return -EINVAL;
 				
 			if (!Ivec[hwcfg.irq].used && hwcfg.irq)
 			{
-				if (request_irq(hwcfg.irq, scc_isr, IRQF_DISABLED, "AX.25 SCC", NULL))
+				if (request_irq(hwcfg.irq, scc_isr,
+						IRQF_DISABLED, "AX.25 SCC",
+						(void *)(long) hwcfg.irq))
 					printk(KERN_WARNING "z8530drv: warning, cannot get IRQ %d\n", hwcfg.irq);
 				else
 					Ivec[hwcfg.irq].used = 1;
@@ -1949,7 +1954,7 @@ static int scc_net_set_mac_address(struct net_device *dev, void *addr)
 
 static struct net_device_stats *scc_net_get_stats(struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	
 	scc->dev_stat.rx_errors = scc->stat.rxerrs + scc->stat.rx_over;
 	scc->dev_stat.tx_errors = scc->stat.txerrs + scc->stat.tx_under;
@@ -2071,7 +2076,7 @@ static int scc_net_seq_show(struct seq_file *seq, void *v)
         return 0;
 }
 
-static struct seq_operations scc_net_seq_ops = {
+static const struct seq_operations scc_net_seq_ops = {
 	.start  = scc_net_seq_start,
 	.next   = scc_net_seq_next,
 	.stop   = scc_net_seq_stop,
@@ -2145,7 +2150,7 @@ static void __exit scc_cleanup_driver(void)
 		}
 		
 	/* To unload the port must be closed so no real IRQ pending */
-	for (k=0; k < NR_IRQS ; k++)
+	for (k = 0; k < nr_irqs ; k++)
 		if (Ivec[k].used) free_irq(k, NULL);
 		
 	local_irq_enable();

@@ -64,8 +64,9 @@ int cifs_removexattr(struct dentry *direntry, const char *ea_name)
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 	if (ea_name == NULL) {
 		cFYI(1, ("Null xattr names not supported"));
@@ -118,8 +119,9 @@ int cifs_setxattr(struct dentry *direntry, const char *ea_name,
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 	/* return dos attributes as pseudo xattr */
 	/* return alt name if available as pseudo attr */
@@ -139,9 +141,9 @@ int cifs_setxattr(struct dentry *direntry, const char *ea_name,
 	} else if (strncmp(ea_name, CIFS_XATTR_USER_PREFIX, 5) == 0) {
 		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_XATTR)
 			goto set_ea_exit;
-		if (strncmp(ea_name, CIFS_XATTR_DOS_ATTRIB, 14) == 0) {
+		if (strncmp(ea_name, CIFS_XATTR_DOS_ATTRIB, 14) == 0)
 			cFYI(1, ("attempt to set cifs inode metadata"));
-		}
+
 		ea_name += 5; /* skip past user. prefix */
 		rc = CIFSSMBSetEA(xid, pTcon, full_path, ea_name, ea_value,
 			(__u16)value_size, cifs_sb->local_nls,
@@ -225,8 +227,9 @@ ssize_t cifs_getxattr(struct dentry *direntry, const char *ea_name,
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 	/* return dos attributes as pseudo xattr */
 	/* return alt name if available as pseudo attr */
@@ -262,9 +265,9 @@ ssize_t cifs_getxattr(struct dentry *direntry, const char *ea_name,
 				cifs_sb->mnt_cifs_flags &
 					CIFS_MOUNT_MAP_SPECIAL_CHR);
 #ifdef CONFIG_CIFS_EXPERIMENTAL
-		else if(cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL) {
+		else if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL) {
 			__u16 fid;
-			int oplock = FALSE;
+			int oplock = 0;
 			struct cifs_ntsd *pacl = NULL;
 			__u32 buflen = 0;
 			if (experimEnabled)
@@ -303,11 +306,10 @@ ssize_t cifs_getxattr(struct dentry *direntry, const char *ea_name,
 	} else if (strncmp(ea_name,
 		  CIFS_XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN) == 0) {
 		cFYI(1, ("Security xattr namespace not supported yet"));
-	} else {
+	} else
 		cFYI(1,
 		    ("illegal xattr request %s (only user namespace supported)",
 			ea_name));
-	}
 
 	/* We could add an additional check for streams ie
 	    if proc/fs/cifs/streamstoxattr is set then
@@ -352,8 +354,9 @@ ssize_t cifs_listxattr(struct dentry *direntry, char *data, size_t buf_size)
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 	/* return dos attributes as pseudo xattr */
 	/* return alt name if available as pseudo attr */

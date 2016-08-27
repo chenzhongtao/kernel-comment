@@ -28,14 +28,12 @@ void *module_alloc(unsigned long size)
 {
 	if (size == 0)
 		return NULL;
-	return vmalloc(size);
+	return vmalloc_exec(size);
 }
 
 void module_free(struct module *mod, void *module_region)
 {
 	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-	   table entries. */
 }
 
 int module_frob_arch_sections(Elf32_Ehdr *hdr,

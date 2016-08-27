@@ -21,7 +21,6 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/time.h>
@@ -90,9 +89,9 @@ static int __devinit snd_trident_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	if ((err = snd_trident_create(card, pci,
 				      pcm_channels[dev],
@@ -154,13 +153,6 @@ static int __devinit snd_trident_probe(struct pci_dev *pci,
 		snd_card_free(card);
 		return err;
 	}
-
-#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
-	if ((err = snd_trident_attach_synthesizer(trident)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
-#endif
 
 	snd_trident_create_gameport(trident);
 

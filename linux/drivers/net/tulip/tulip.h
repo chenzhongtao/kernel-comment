@@ -8,9 +8,9 @@
 	of the GNU General Public License, incorporated herein by reference.
 
 	Please refer to Documentation/DocBook/tulip-user.{pdf,ps,html}
-	for more information on this driver, or visit the project
-	Web page at http://sourceforge.net/projects/tulip/
+	for more information on this driver.
 
+	Please submit bugs to http://bugzilla.kernel.org/ .
 */
 
 #ifndef __NET_TULIP_H__
@@ -25,6 +25,7 @@
 #include <linux/pci.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/unaligned.h>
 
 
 
@@ -200,8 +201,38 @@ enum desc_status_bits {
 	DescStartPkt = 0x20000000,
 	DescEndRing  = 0x02000000,
 	DescUseLink  = 0x01000000,
-	RxDescFatalErr = 0x008000,
+
+	/*
+	 * Error summary flag is logical or of 'CRC Error', 'Collision Seen',
+	 * 'Frame Too Long', 'Runt' and 'Descriptor Error' flags generated
+	 * within tulip chip.
+	 */
+	RxDescErrorSummary = 0x8000,
+	RxDescCRCError = 0x0002,
+	RxDescCollisionSeen = 0x0040,
+
+	/*
+	 * 'Frame Too Long' flag is set if packet length including CRC exceeds
+	 * 1518.  However, a full sized VLAN tagged frame is 1522 bytes
+	 * including CRC.
+	 *
+	 * The tulip chip does not block oversized frames, and if this flag is
+	 * set on a receive descriptor it does not indicate the frame has been
+	 * truncated.  The receive descriptor also includes the actual length.
+	 * Therefore we can safety ignore this flag and check the length
+	 * ourselves.
+	 */
+	RxDescFrameTooLong = 0x0080,
+	RxDescRunt = 0x0800,
+	RxDescDescErr = 0x4000,
 	RxWholePkt   = 0x00000300,
+	/*
+	 * Top three bits of 14 bit frame length (status bits 27-29) should
+	 * never be set as that would make frame over 2047 bytes. The Receive
+	 * Watchdog flag (bit 4) may indicate the length is over 2048 and the
+	 * length field is invalid.
+	 */
+	RxLengthOver2047 = 0x38000010
 };
 
 
@@ -268,7 +299,12 @@ enum t21143_csr6_bits {
 #define RX_RING_SIZE	128
 #define MEDIA_MASK     31
 
-#define PKT_BUF_SZ		1536	/* Size of each temporary Rx buffer. */
+/* The receiver on the DC21143 rev 65 can fail to close the last
+ * receive descriptor in certain circumstances (see errata) when
+ * using MWI. This can only occur if the receive buffer ends on
+ * a cache line boundary, so the "+ 4" below ensures it doesn't.
+ */
+#define PKT_BUF_SZ	(1536 + 4)	/* Size of each temporary Rx buffer. */
 
 #define TULIP_MIN_CACHE_LINE	8	/* in units of 32-bit words */
 
@@ -299,11 +335,7 @@ enum t21143_csr6_bits {
 
 #define RUN_AT(x) (jiffies + (x))
 
-#if defined(__i386__)			/* AKA get_unaligned() */
-#define get_u16(ptr) (*(u16 *)(ptr))
-#else
-#define get_u16(ptr) (((u8*)(ptr))[0] + (((u8*)(ptr))[1]<<8))
-#endif
+#define get_u16(ptr) get_unaligned_le16((ptr))
 
 struct medialeaf {
 	u8 type;

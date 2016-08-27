@@ -73,11 +73,11 @@
 #define   USBLEGSUP_RWC		0x8f00	/* the R/WC bits */
 #define   USBLEGSUP_RO		0x5040	/* R/O and reserved bits */
 
-#define UHCI_PTR_BITS		__constant_cpu_to_le32(0x000F)
-#define UHCI_PTR_TERM		__constant_cpu_to_le32(0x0001)
-#define UHCI_PTR_QH		__constant_cpu_to_le32(0x0002)
-#define UHCI_PTR_DEPTH		__constant_cpu_to_le32(0x0004)
-#define UHCI_PTR_BREADTH	__constant_cpu_to_le32(0x0000)
+#define UHCI_PTR_BITS		cpu_to_le32(0x000F)
+#define UHCI_PTR_TERM		cpu_to_le32(0x0001)
+#define UHCI_PTR_QH		cpu_to_le32(0x0002)
+#define UHCI_PTR_DEPTH		cpu_to_le32(0x0004)
+#define UHCI_PTR_BREADTH	cpu_to_le32(0x0000)
 
 #define UHCI_NUMFRAMES		1024	/* in the frame list [array] */
 #define UHCI_MAX_SOF_NUMBER	2047	/* in an SOF packet */
@@ -400,8 +400,9 @@ struct uhci_hcd {
 	unsigned int scan_in_progress:1;	/* Schedule scan is running */
 	unsigned int need_rescan:1;		/* Redo the schedule scan */
 	unsigned int dead:1;			/* Controller has died */
-	unsigned int working_RD:1;		/* Suspended root hub doesn't
-						   need to be polled */
+	unsigned int RD_enable:1;		/* Suspended root hub with
+						   Resume-Detect interrupts
+						   enabled */
 	unsigned int is_initialized:1;		/* Data structure is usable */
 	unsigned int fsbr_is_on:1;		/* FSBR is turned on */
 	unsigned int fsbr_is_wanted:1;		/* Does any URB want FSBR? */

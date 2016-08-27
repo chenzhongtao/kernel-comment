@@ -20,6 +20,6 @@
 #define AC_CMD_ADDR(x) (x << 16)
 #define AC_CMD_DATA(x) (x & 0xffff)
 
-extern struct snd_soc_cpu_dai s3c2443_ac97_dai[];
+extern struct snd_soc_dai s3c2443_ac97_dai[];
 
 #endif /*S3C24XXAC97_H_*/

@@ -29,7 +29,6 @@
 #include <sysdev/fsl_soc.h>
 #include <sysdev/cpm2_pic.h>
 
-#include "pq2ads.h"
 #include "pq2.h"
 
 static void __init mpc8272_ads_pic_init(void)
@@ -96,6 +95,19 @@ static struct cpm_pin mpc8272_ads_pins[] = {
 	{1, 31, CPM_PIN_OUTPUT | CPM_PIN_PRIMARY},
 	{2, 16, CPM_PIN_INPUT | CPM_PIN_PRIMARY},
 	{2, 17, CPM_PIN_INPUT | CPM_PIN_PRIMARY},
+
+	/* I2C */
+	{3, 14, CPM_PIN_INPUT | CPM_PIN_SECONDARY | CPM_PIN_OPENDRAIN},
+	{3, 15, CPM_PIN_INPUT | CPM_PIN_SECONDARY | CPM_PIN_OPENDRAIN},
+
+	/* USB */
+	{2, 10, CPM_PIN_INPUT | CPM_PIN_PRIMARY},
+	{2, 11, CPM_PIN_INPUT | CPM_PIN_PRIMARY},
+	{2, 20, CPM_PIN_OUTPUT | CPM_PIN_PRIMARY},
+	{2, 24, CPM_PIN_INPUT | CPM_PIN_PRIMARY},
+	{3, 23, CPM_PIN_OUTPUT | CPM_PIN_PRIMARY},
+	{3, 24, CPM_PIN_OUTPUT | CPM_PIN_PRIMARY},
+	{3, 25, CPM_PIN_INPUT | CPM_PIN_PRIMARY},
 };
 
 static void __init init_ioports(void)
@@ -109,6 +121,8 @@ static void __init init_ioports(void)
 
 	cpm2_clk_setup(CPM_CLK_SCC1, CPM_BRG1, CPM_CLK_RX);
 	cpm2_clk_setup(CPM_CLK_SCC1, CPM_BRG1, CPM_CLK_TX);
+	cpm2_clk_setup(CPM_CLK_SCC3, CPM_CLK8, CPM_CLK_RX);
+	cpm2_clk_setup(CPM_CLK_SCC3, CPM_CLK8, CPM_CLK_TX);
 	cpm2_clk_setup(CPM_CLK_SCC4, CPM_BRG4, CPM_CLK_RX);
 	cpm2_clk_setup(CPM_CLK_SCC4, CPM_BRG4, CPM_CLK_TX);
 	cpm2_clk_setup(CPM_CLK_FCC1, CPM_CLK11, CPM_CLK_RX);
@@ -134,18 +148,27 @@ static void __init mpc8272_ads_setup_arch(void)
 	}
 
 	bcsr = of_iomap(np, 0);
+	of_node_put(np);
 	if (!bcsr) {
 		printk(KERN_ERR "Cannot map BCSR registers\n");
 		return;
 	}
 
-	of_node_put(np);
+#define BCSR1_FETHIEN		0x08000000
+#define BCSR1_FETH_RST		0x04000000
+#define BCSR1_RS232_EN1		0x02000000
+#define BCSR1_RS232_EN2		0x01000000
+#define BCSR3_USB_nEN		0x80000000
+#define BCSR3_FETHIEN2		0x10000000
+#define BCSR3_FETH2_RST		0x08000000
 
 	clrbits32(&bcsr[1], BCSR1_RS232_EN1 | BCSR1_RS232_EN2 | BCSR1_FETHIEN);
 	setbits32(&bcsr[1], BCSR1_FETH_RST);
 
 	clrbits32(&bcsr[3], BCSR3_FETHIEN2);
 	setbits32(&bcsr[3], BCSR3_FETH2_RST);
+
+	clrbits32(&bcsr[3], BCSR3_USB_nEN);
 
 	iounmap(bcsr);
 
@@ -165,14 +188,11 @@ static struct of_device_id __initdata of_bus_ids[] = {
 
 static int __init declare_of_platform_devices(void)
 {
-	if (!machine_is(mpc8272_ads))
-		return 0;
-
 	/* Publish the QE devices */
 	of_platform_bus_probe(NULL, of_bus_ids, NULL);
 	return 0;
 }
-device_initcall(declare_of_platform_devices);
+machine_device_initcall(mpc8272_ads, declare_of_platform_devices);
 
 /*
  * Called very early, device-tree isn't unflattened

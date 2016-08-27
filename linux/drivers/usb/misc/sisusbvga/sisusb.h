@@ -120,14 +120,9 @@ struct sisusb_usb_data {
 	int isopen;		/* !=0 if open */
 	int present;		/* !=0 if device is present on the bus */
 	int ready;		/* !=0 if device is ready for userland */
-#ifdef SISUSB_OLD_CONFIG_COMPAT
-	int ioctl32registered;
-#endif
 	int numobufs;		/* number of obufs = number of out urbs */
 	char *obuf[NUMOBUFS], *ibuf;	/* transfer buffers */
 	int obufsize, ibufsize;
-	dma_addr_t transfer_dma_out[NUMOBUFS];
-	dma_addr_t transfer_dma_in;
 	struct urb *sisurbout[NUMOBUFS];
 	struct urb *sisurbin;
 	unsigned char urbstatus[NUMOBUFS];

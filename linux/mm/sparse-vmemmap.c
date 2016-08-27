@@ -1,7 +1,7 @@
 /*
  * Virtual Memory Map support
  *
- * (C) 2007 sgi. Christoph Lameter <clameter@sgi.com>.
+ * (C) 2007 sgi. Christoph Lameter.
  *
  * Virtual memory maps allow VM primitives pfn_to_page, page_to_pfn,
  * virt_to_page, page_address() to be implemented as a base offset
@@ -48,8 +48,14 @@ void * __meminit vmemmap_alloc_block(unsigned long size, int node)
 {
 	/* If the main allocator is up use that, fallback to bootmem. */
 	if (slab_is_available()) {
-		struct page *page = alloc_pages_node(node,
+		struct page *page;
+
+		if (node_state(node, N_HIGH_MEMORY))
+			page = alloc_pages_node(node,
 				GFP_KERNEL | __GFP_ZERO, get_order(size));
+		else
+			page = alloc_pages(GFP_KERNEL | __GFP_ZERO,
+				get_order(size));
 		if (page)
 			return page_address(page);
 		return NULL;
@@ -64,7 +70,7 @@ void __meminit vmemmap_verify(pte_t *pte, int node,
 	unsigned long pfn = pte_pfn(*pte);
 	int actual_node = early_pfn_to_nid(pfn);
 
-	if (actual_node != node)
+	if (node_distance(actual_node, node) > LOCAL_DISTANCE)
 		printk(KERN_WARNING "[%lx-%lx] potential offnode "
 			"page_structs\n", start, end - 1);
 }
@@ -76,7 +82,7 @@ pte_t * __meminit vmemmap_pte_populate(pmd_t *pmd, unsigned long addr, int node)
 		pte_t entry;
 		void *p = vmemmap_alloc_block(PAGE_SIZE, node);
 		if (!p)
-			return 0;
+			return NULL;
 		entry = pfn_pte(__pa(p) >> PAGE_SHIFT, PAGE_KERNEL);
 		set_pte_at(&init_mm, addr, pte, entry);
 	}
@@ -89,7 +95,7 @@ pmd_t * __meminit vmemmap_pmd_populate(pud_t *pud, unsigned long addr, int node)
 	if (pmd_none(*pmd)) {
 		void *p = vmemmap_alloc_block(PAGE_SIZE, node);
 		if (!p)
-			return 0;
+			return NULL;
 		pmd_populate_kernel(&init_mm, pmd, p);
 	}
 	return pmd;
@@ -101,7 +107,7 @@ pud_t * __meminit vmemmap_pud_populate(pgd_t *pgd, unsigned long addr, int node)
 	if (pud_none(*pud)) {
 		void *p = vmemmap_alloc_block(PAGE_SIZE, node);
 		if (!p)
-			return 0;
+			return NULL;
 		pud_populate(&init_mm, pud, p);
 	}
 	return pud;
@@ -113,7 +119,7 @@ pgd_t * __meminit vmemmap_pgd_populate(unsigned long addr, int node)
 	if (pgd_none(*pgd)) {
 		void *p = vmemmap_alloc_block(PAGE_SIZE, node);
 		if (!p)
-			return 0;
+			return NULL;
 		pgd_populate(&init_mm, pgd, p);
 	}
 	return pgd;

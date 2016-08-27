@@ -38,7 +38,6 @@
 #include <linux/init.h>
 
 #include <linux/mm.h>
-#include <linux/utsname.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/sunrpc/clnt.h>
@@ -146,6 +145,12 @@ idtoname_request(struct cache_detail *cd, struct cache_head *ch, char **bpp,
 }
 
 static int
+idtoname_upcall(struct cache_detail *cd, struct cache_head *ch)
+{
+	return sunrpc_cache_pipe_upcall(cd, ch, idtoname_request);
+}
+
+static int
 idtoname_match(struct cache_head *ca, struct cache_head *cb)
 {
 	struct ent *a = container_of(ca, struct ent, h);
@@ -175,10 +180,10 @@ idtoname_show(struct seq_file *m, struct cache_detail *cd, struct cache_head *h)
 }
 
 static void
-warn_no_idmapd(struct cache_detail *detail)
+warn_no_idmapd(struct cache_detail *detail, int has_died)
 {
 	printk("nfsd: nfsv4 idmapping failing: has idmapd %s?\n",
-			detail->last_close? "died" : "not been started");
+			has_died ? "died" : "not been started");
 }
 
 
@@ -192,7 +197,7 @@ static struct cache_detail idtoname_cache = {
 	.hash_table	= idtoname_table,
 	.name		= "nfs4.idtoname",
 	.cache_put	= ent_put,
-	.cache_request	= idtoname_request,
+	.cache_upcall	= idtoname_upcall,
 	.cache_parse	= idtoname_parse,
 	.cache_show	= idtoname_show,
 	.warn_no_listener = warn_no_idmapd,
@@ -202,7 +207,7 @@ static struct cache_detail idtoname_cache = {
 	.alloc		= ent_alloc,
 };
 
-int
+static int
 idtoname_parse(struct cache_detail *cd, char *buf, int buflen)
 {
 	struct ent ent, *res;
@@ -255,13 +260,10 @@ idtoname_parse(struct cache_detail *cd, char *buf, int buflen)
 		goto out;
 	if (len == 0)
 		set_bit(CACHE_NEGATIVE, &ent.h.flags);
-	else {
-		if (error >= IDMAP_NAMESZ) {
-			error = -EINVAL;
-			goto out;
-		}
+	else if (len >= IDMAP_NAMESZ)
+		goto out;
+	else
 		memcpy(ent.name, buf1, sizeof(ent.name));
-	}
 	error = -ENOMEM;
 	res = idtoname_update(&ent, res);
 	if (res == NULL)
@@ -328,6 +330,12 @@ nametoid_request(struct cache_detail *cd, struct cache_head *ch, char **bpp,
 }
 
 static int
+nametoid_upcall(struct cache_detail *cd, struct cache_head *ch)
+{
+	return sunrpc_cache_pipe_upcall(cd, ch, nametoid_request);
+}
+
+static int
 nametoid_match(struct cache_head *ca, struct cache_head *cb)
 {
 	struct ent *a = container_of(ca, struct ent, h);
@@ -366,7 +374,7 @@ static struct cache_detail nametoid_cache = {
 	.hash_table	= nametoid_table,
 	.name		= "nfs4.nametoid",
 	.cache_put	= ent_put,
-	.cache_request	= nametoid_request,
+	.cache_upcall	= nametoid_upcall,
 	.cache_parse	= nametoid_parse,
 	.cache_show	= nametoid_show,
 	.warn_no_listener = warn_no_idmapd,
@@ -467,20 +475,25 @@ nametoid_update(struct ent *new, struct ent *old)
  * Exported API
  */
 
-void
+int
 nfsd_idmap_init(void)
 {
-	cache_register(&idtoname_cache);
-	cache_register(&nametoid_cache);
+	int rv;
+
+	rv = cache_register(&idtoname_cache);
+	if (rv)
+		return rv;
+	rv = cache_register(&nametoid_cache);
+	if (rv)
+		cache_unregister(&idtoname_cache);
+	return rv;
 }
 
 void
 nfsd_idmap_shutdown(void)
 {
-	if (cache_unregister(&idtoname_cache))
-		printk(KERN_ERR "nfsd: failed to unregister idtoname cache\n");
-	if (cache_unregister(&nametoid_cache))
-		printk(KERN_ERR "nfsd: failed to unregister nametoid cache\n");
+	cache_unregister(&idtoname_cache);
+	cache_unregister(&nametoid_cache);
 }
 
 /*

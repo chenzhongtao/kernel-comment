@@ -29,7 +29,7 @@ extern unsigned long icache_way_size, dcache_way_size;
 
 #include <asm/r4kcache.h>
 
-int rm7k_tcache_enabled;
+static int rm7k_tcache_enabled;
 
 /*
  * Writeback and invalidate the primary cache dcache before DMA.
@@ -86,7 +86,7 @@ static void rm7k_sc_inv(unsigned long addr, unsigned long size)
 /*
  * This function is executed in uncached address space.
  */
-static __init void __rm7k_sc_enable(void)
+static __cpuinit void __rm7k_sc_enable(void)
 {
 	int i;
 
@@ -107,7 +107,7 @@ static __init void __rm7k_sc_enable(void)
 	}
 }
 
-static __init void rm7k_sc_enable(void)
+static __cpuinit void rm7k_sc_enable(void)
 {
 	if (read_c0_config() & RM7K_CONF_SE)
 		return;
@@ -121,14 +121,14 @@ static void rm7k_sc_disable(void)
 	clear_c0_config(RM7K_CONF_SE);
 }
 
-struct bcache_ops rm7k_sc_ops = {
+static struct bcache_ops rm7k_sc_ops = {
 	.bc_enable = rm7k_sc_enable,
 	.bc_disable = rm7k_sc_disable,
 	.bc_wback_inv = rm7k_sc_wback_inv,
 	.bc_inv = rm7k_sc_inv
 };
 
-void __init rm7k_sc_init(void)
+void __cpuinit rm7k_sc_init(void)
 {
 	struct cpuinfo_mips *c = &current_cpu_data;
 	unsigned int config = read_c0_config();

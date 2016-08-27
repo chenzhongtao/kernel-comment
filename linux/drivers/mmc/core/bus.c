@@ -17,7 +17,6 @@
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
 
-#include "sysfs.h"
 #include "core.h"
 #include "sdio_cis.h"
 #include "bus.h"
@@ -43,7 +42,7 @@ static ssize_t mmc_type_show(struct device *dev,
 }
 
 static struct device_attribute mmc_dev_attrs[] = {
-	MMC_ATTR_RO(type),
+	__ATTR(type, S_IRUGO, mmc_type_show, NULL),
 	__ATTR_NULL,
 };
 
@@ -85,6 +84,14 @@ mmc_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
 	}
 
 	retval = add_uevent_var(env, "MMC_NAME=%s", mmc_card_name(card));
+	if (retval)
+		return retval;
+
+	/*
+	 * Request the mmc_block device.  Note: that this is a direct request
+	 * for the module it carries no information as to what is inserted.
+	 */
+	retval = add_uevent_var(env, "MODALIAS=mmc:block");
 
 	return retval;
 }
@@ -189,7 +196,7 @@ static void mmc_release_card(struct device *dev)
 /*
  * Allocate and initialise a new MMC card structure.
  */
-struct mmc_card *mmc_alloc_card(struct mmc_host *host)
+struct mmc_card *mmc_alloc_card(struct mmc_host *host, struct device_type *type)
 {
 	struct mmc_card *card;
 
@@ -204,6 +211,7 @@ struct mmc_card *mmc_alloc_card(struct mmc_host *host)
 	card->dev.parent = mmc_classdev(host);
 	card->dev.bus = &mmc_bus_type;
 	card->dev.release = mmc_release_card;
+	card->dev.type = type;
 
 	return card;
 }
@@ -216,8 +224,7 @@ int mmc_add_card(struct mmc_card *card)
 	int ret;
 	const char *type;
 
-	snprintf(card->dev.bus_id, sizeof(card->dev.bus_id),
-		 "%s:%04x", mmc_hostname(card->host), card->rca);
+	dev_set_name(&card->dev, "%s:%04x", mmc_hostname(card->host), card->rca);
 
 	switch (card->type) {
 	case MMC_TYPE_MMC:
@@ -248,23 +255,13 @@ int mmc_add_card(struct mmc_card *card)
 			type, card->rca);
 	}
 
-	card->dev.uevent_suppress = 1;
-
 	ret = device_add(&card->dev);
 	if (ret)
 		return ret;
 
-	if (card->host->bus_ops->sysfs_add) {
-		ret = card->host->bus_ops->sysfs_add(card->host, card);
-		if (ret) {
-			device_del(&card->dev);
-			return ret;
-		 }
-	}
-
-	card->dev.uevent_suppress = 0;
-
-	kobject_uevent(&card->dev.kobj, KOBJ_ADD);
+#ifdef CONFIG_DEBUG_FS
+	mmc_add_card_debugfs(card);
+#endif
 
 	mmc_card_set_present(card);
 
@@ -277,6 +274,10 @@ int mmc_add_card(struct mmc_card *card)
  */
 void mmc_remove_card(struct mmc_card *card)
 {
+#ifdef CONFIG_DEBUG_FS
+	mmc_remove_card_debugfs(card);
+#endif
+
 	if (mmc_card_present(card)) {
 		if (mmc_host_is_spi(card->host)) {
 			printk(KERN_INFO "%s: SPI card removed\n",
@@ -285,9 +286,6 @@ void mmc_remove_card(struct mmc_card *card)
 			printk(KERN_INFO "%s: card %04x removed\n",
 				mmc_hostname(card->host), card->rca);
 		}
-
-		if (card->host->bus_ops->sysfs_remove)
-			card->host->bus_ops->sysfs_remove(card->host, card);
 		device_del(&card->dev);
 	}
 

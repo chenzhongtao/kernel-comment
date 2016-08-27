@@ -34,7 +34,7 @@
 static int rtas_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 			    int len, u32 * val)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 	unsigned long addr = (offset & 0xff) | ((devfn & 0xff) << 8)
 	    | (((bus->number - hose->first_busno) & 0xff) << 16)
 	    | (hose->global_number << 24);
@@ -49,7 +49,7 @@ static int rtas_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 static int rtas_write_config(struct pci_bus *bus, unsigned int devfn,
 			     int offset, int len, u32 val)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 	unsigned long addr = (offset & 0xff) | ((devfn & 0xff) << 8)
 	    | (((bus->number - hose->first_busno) & 0xff) << 16)
 	    | (hose->global_number << 24);
@@ -179,6 +179,9 @@ static void efika_suspend_prepare(void __iomem *mbar)
 static void __init efika_setup_arch(void)
 {
 	rtas_initialize();
+
+	/* Map important registers from the internal memory map */
+	mpc52xx_map_common_devices();
 
 	efika_pcisetup();
 

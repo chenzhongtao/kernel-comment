@@ -41,6 +41,7 @@ found:
 }
 
 static void *x25_seq_route_start(struct seq_file *seq, loff_t *pos)
+	__acquires(x25_route_list_lock)
 {
 	loff_t l = *pos;
 
@@ -70,6 +71,7 @@ out:
 }
 
 static void x25_seq_route_stop(struct seq_file *seq, void *v)
+	__releases(x25_route_list_lock)
 {
 	read_unlock_bh(&x25_route_list_lock);
 }
@@ -105,6 +107,7 @@ found:
 }
 
 static void *x25_seq_socket_start(struct seq_file *seq, loff_t *pos)
+	__acquires(x25_list_lock)
 {
 	loff_t l = *pos;
 
@@ -127,6 +130,7 @@ out:
 }
 
 static void x25_seq_socket_stop(struct seq_file *seq, void *v)
+	__releases(x25_list_lock)
 {
 	read_unlock_bh(&x25_list_lock);
 }
@@ -159,8 +163,8 @@ static int x25_seq_socket_show(struct seq_file *seq, void *v)
 		   devname, x25->lci & 0x0FFF, x25->state, x25->vs, x25->vr,
 		   x25->va, x25_display_timer(s) / HZ, x25->t2  / HZ,
 		   x25->t21 / HZ, x25->t22 / HZ, x25->t23 / HZ,
-		   atomic_read(&s->sk_wmem_alloc),
-		   atomic_read(&s->sk_rmem_alloc),
+		   sk_wmem_alloc_get(s),
+		   sk_rmem_alloc_get(s),
 		   s->sk_socket ? SOCK_INODE(s->sk_socket)->i_ino : 0L);
 out:
 	return 0;
@@ -183,6 +187,7 @@ found:
 }
 
 static void *x25_seq_forward_start(struct seq_file *seq, loff_t *pos)
+	__acquires(x25_forward_list_lock)
 {
 	loff_t l = *pos;
 
@@ -213,6 +218,7 @@ out:
 }
 
 static void x25_seq_forward_stop(struct seq_file *seq, void *v)
+	__releases(x25_forward_list_lock)
 {
 	read_unlock_bh(&x25_forward_list_lock);
 }
@@ -287,7 +293,7 @@ static const struct file_operations x25_seq_route_fops = {
 	.release	= seq_release,
 };
 
-static struct file_operations x25_seq_forward_fops = {
+static const struct file_operations x25_seq_forward_fops = {
 	.owner		= THIS_MODULE,
 	.open		= x25_seq_forward_open,
 	.read		= seq_read,
@@ -306,20 +312,18 @@ int __init x25_proc_init(void)
 	if (!x25_proc_dir)
 		goto out;
 
-	p = create_proc_entry("route", S_IRUGO, x25_proc_dir);
+	p = proc_create("route", S_IRUGO, x25_proc_dir, &x25_seq_route_fops);
 	if (!p)
 		goto out_route;
-	p->proc_fops = &x25_seq_route_fops;
 
-	p = create_proc_entry("socket", S_IRUGO, x25_proc_dir);
+	p = proc_create("socket", S_IRUGO, x25_proc_dir, &x25_seq_socket_fops);
 	if (!p)
 		goto out_socket;
-	p->proc_fops = &x25_seq_socket_fops;
 
-	p = create_proc_entry("forward", S_IRUGO, x25_proc_dir);
+	p = proc_create("forward", S_IRUGO, x25_proc_dir,
+			&x25_seq_forward_fops);
 	if (!p)
 		goto out_forward;
-	p->proc_fops = &x25_seq_forward_fops;
 	rc = 0;
 
 out:

@@ -79,7 +79,7 @@ static int _tda10021_writereg (struct tda10021_state* state, u8 reg, u8 data)
 	if (ret != 1)
 		printk("DVB: TDA10021(%d): %s, writereg error "
 			"(reg == 0x%02x, val == 0x%02x, ret == %i)\n",
-			state->frontend.dvb->num, __FUNCTION__, reg, data, ret);
+			state->frontend.dvb->num, __func__, reg, data, ret);
 
 	msleep(10);
 	return (ret != 1) ? -EREMOTEIO : 0;
@@ -97,7 +97,7 @@ static u8 tda10021_readreg (struct tda10021_state* state, u8 reg)
 	// Don't print an error message if the id is read.
 	if (ret != 2 && reg != 0x1a)
 		printk("DVB: TDA10021: %s: readreg error (ret == %i)\n",
-				__FUNCTION__, ret);
+				__func__, ret);
 	return b1[0];
 }
 
@@ -176,7 +176,7 @@ static int tda10021_set_symbolrate (struct tda10021_state* state, u32 symbolrate
 	tmp =  ((symbolrate << 4) % FIN) << 8;
 	ratio = (ratio << 8) + tmp / FIN;
 	tmp = (tmp % FIN) << 8;
-	ratio = (ratio << 8) + (tmp + FIN/2) / FIN;
+	ratio = (ratio << 8) + DIV_ROUND_CLOSEST(tmp, FIN);
 
 	BDR = ratio;
 	BDRI = (((XIN << 5) / symbolrate) + 1) / 2;
@@ -413,7 +413,7 @@ struct dvb_frontend* tda10021_attach(const struct tda1002x_config* config,
 	u8 id;
 
 	/* allocate memory for the internal state */
-	state = kmalloc(sizeof(struct tda10021_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct tda10021_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */

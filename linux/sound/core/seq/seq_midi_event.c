@@ -19,7 +19,6 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -505,10 +504,10 @@ static int extra_decode_xrpn(struct snd_midi_event *dev, unsigned char *buf,
 	if (dev->nostat && count < 12)
 		return -ENOMEM;
 	cmd = MIDI_CMD_CONTROL|(ev->data.control.channel & 0x0f);
-	bytes[0] = ev->data.control.param & 0x007f;
-	bytes[1] = (ev->data.control.param & 0x3f80) >> 7;
-	bytes[2] = ev->data.control.value & 0x007f;
-	bytes[3] = (ev->data.control.value & 0x3f80) >> 7;
+	bytes[0] = (ev->data.control.param & 0x3f80) >> 7;
+	bytes[1] = ev->data.control.param & 0x007f;
+	bytes[2] = (ev->data.control.value & 0x3f80) >> 7;
+	bytes[3] = ev->data.control.value & 0x007f;
 	if (cmd != dev->lastcmd && !dev->nostat) {
 		if (count < 9)
 			return -ENOMEM;

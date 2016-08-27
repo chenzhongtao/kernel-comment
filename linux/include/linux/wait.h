@@ -26,8 +26,8 @@
 #include <asm/current.h>
 
 typedef struct __wait_queue wait_queue_t;
-typedef int (*wait_queue_func_t)(wait_queue_t *wait, unsigned mode, int sync, void *key);
-int default_wake_function(wait_queue_t *wait, unsigned mode, int sync, void *key);
+typedef int (*wait_queue_func_t)(wait_queue_t *wait, unsigned mode, int flags, void *key);
+int default_wake_function(wait_queue_t *wait, unsigned mode, int flags, void *key);
 
 struct __wait_queue {
 	unsigned int flags;
@@ -77,7 +77,14 @@ struct task_struct;
 #define __WAIT_BIT_KEY_INITIALIZER(word, bit)				\
 	{ .flags = word, .bit_nr = bit, }
 
-extern void init_waitqueue_head(wait_queue_head_t *q);
+extern void __init_waitqueue_head(wait_queue_head_t *q, struct lock_class_key *);
+
+#define init_waitqueue_head(q)				\
+	do {						\
+		static struct lock_class_key __key;	\
+							\
+		__init_waitqueue_head((q), &__key);	\
+	} while (0)
 
 #ifdef CONFIG_LOCKDEP
 # define __WAIT_QUEUE_HEAD_INIT_ONSTACK(name) \
@@ -108,18 +115,9 @@ static inline int waitqueue_active(wait_queue_head_t *q)
 	return !list_empty(&q->task_list);
 }
 
-/*
- * Used to distinguish between sync and async io wait context:
- * sync i/o typically specifies a NULL wait queue entry or a wait
- * queue entry bound to a task (current task) to wake up.
- * aio specifies a wait queue entry with an async notification
- * callback routine, not associated with any task.
- */
-#define is_sync_wait(wait)	(!(wait) || ((wait)->private))
-
-extern void FASTCALL(add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait));
-extern void FASTCALL(add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait));
-extern void FASTCALL(remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait));
+extern void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
+extern void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t *wait);
+extern void remove_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
 
 static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 {
@@ -141,25 +139,41 @@ static inline void __remove_wait_queue(wait_queue_head_t *head,
 	list_del(&old->task_list);
 }
 
-void FASTCALL(__wake_up(wait_queue_head_t *q, unsigned int mode, int nr, void *key));
-extern void FASTCALL(__wake_up_locked(wait_queue_head_t *q, unsigned int mode));
-extern void FASTCALL(__wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr));
-void FASTCALL(__wake_up_bit(wait_queue_head_t *, void *, int));
-int FASTCALL(__wait_on_bit(wait_queue_head_t *, struct wait_bit_queue *, int (*)(void *), unsigned));
-int FASTCALL(__wait_on_bit_lock(wait_queue_head_t *, struct wait_bit_queue *, int (*)(void *), unsigned));
-void FASTCALL(wake_up_bit(void *, int));
-int FASTCALL(out_of_line_wait_on_bit(void *, int, int (*)(void *), unsigned));
-int FASTCALL(out_of_line_wait_on_bit_lock(void *, int, int (*)(void *), unsigned));
-wait_queue_head_t *FASTCALL(bit_waitqueue(void *, int));
+void __wake_up(wait_queue_head_t *q, unsigned int mode, int nr, void *key);
+void __wake_up_locked_key(wait_queue_head_t *q, unsigned int mode, void *key);
+void __wake_up_sync_key(wait_queue_head_t *q, unsigned int mode, int nr,
+			void *key);
+void __wake_up_locked(wait_queue_head_t *q, unsigned int mode);
+void __wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr);
+void __wake_up_bit(wait_queue_head_t *, void *, int);
+int __wait_on_bit(wait_queue_head_t *, struct wait_bit_queue *, int (*)(void *), unsigned);
+int __wait_on_bit_lock(wait_queue_head_t *, struct wait_bit_queue *, int (*)(void *), unsigned);
+void wake_up_bit(void *, int);
+int out_of_line_wait_on_bit(void *, int, int (*)(void *), unsigned);
+int out_of_line_wait_on_bit_lock(void *, int, int (*)(void *), unsigned);
+wait_queue_head_t *bit_waitqueue(void *, int);
 
-#define wake_up(x)			__wake_up(x, TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 1, NULL)
-#define wake_up_nr(x, nr)		__wake_up(x, TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, nr, NULL)
-#define wake_up_all(x)			__wake_up(x, TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 0, NULL)
+#define wake_up(x)			__wake_up(x, TASK_NORMAL, 1, NULL)
+#define wake_up_nr(x, nr)		__wake_up(x, TASK_NORMAL, nr, NULL)
+#define wake_up_all(x)			__wake_up(x, TASK_NORMAL, 0, NULL)
+#define wake_up_locked(x)		__wake_up_locked((x), TASK_NORMAL)
+
 #define wake_up_interruptible(x)	__wake_up(x, TASK_INTERRUPTIBLE, 1, NULL)
 #define wake_up_interruptible_nr(x, nr)	__wake_up(x, TASK_INTERRUPTIBLE, nr, NULL)
 #define wake_up_interruptible_all(x)	__wake_up(x, TASK_INTERRUPTIBLE, 0, NULL)
-#define	wake_up_locked(x)		__wake_up_locked((x), TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE)
-#define wake_up_interruptible_sync(x)   __wake_up_sync((x),TASK_INTERRUPTIBLE, 1)
+#define wake_up_interruptible_sync(x)	__wake_up_sync((x), TASK_INTERRUPTIBLE, 1)
+
+/*
+ * Wakeup macros to be used to report events to the targets.
+ */
+#define wake_up_poll(x, m)				\
+	__wake_up(x, TASK_NORMAL, 1, (void *) (m))
+#define wake_up_locked_poll(x, m)				\
+	__wake_up_locked_key((x), TASK_NORMAL, (void *) (m))
+#define wake_up_interruptible_poll(x, m)			\
+	__wake_up(x, TASK_INTERRUPTIBLE, 1, (void *) (m))
+#define wake_up_interruptible_sync_poll(x, m)				\
+	__wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
 
 #define __wait_event(wq, condition) 					\
 do {									\
@@ -325,9 +339,38 @@ do {									\
 	for (;;) {							\
 		prepare_to_wait_exclusive(&wq, &__wait,			\
 					TASK_INTERRUPTIBLE);		\
+		if (condition) {					\
+			finish_wait(&wq, &__wait);			\
+			break;						\
+		}							\
+		if (!signal_pending(current)) {				\
+			schedule();					\
+			continue;					\
+		}							\
+		ret = -ERESTARTSYS;					\
+		abort_exclusive_wait(&wq, &__wait, 			\
+				TASK_INTERRUPTIBLE, NULL);		\
+		break;							\
+	}								\
+} while (0)
+
+#define wait_event_interruptible_exclusive(wq, condition)		\
+({									\
+	int __ret = 0;							\
+	if (!(condition))						\
+		__wait_event_interruptible_exclusive(wq, condition, __ret);\
+	__ret;								\
+})
+
+#define __wait_event_killable(wq, condition, ret)			\
+do {									\
+	DEFINE_WAIT(__wait);						\
+									\
+	for (;;) {							\
+		prepare_to_wait(&wq, &__wait, TASK_KILLABLE);		\
 		if (condition)						\
 			break;						\
-		if (!signal_pending(current)) {				\
+		if (!fatal_signal_pending(current)) {			\
 			schedule();					\
 			continue;					\
 		}							\
@@ -337,11 +380,26 @@ do {									\
 	finish_wait(&wq, &__wait);					\
 } while (0)
 
-#define wait_event_interruptible_exclusive(wq, condition)		\
+/**
+ * wait_event_killable - sleep until a condition gets true
+ * @wq: the waitqueue to wait on
+ * @condition: a C expression for the event to wait for
+ *
+ * The process is put to sleep (TASK_KILLABLE) until the
+ * @condition evaluates to true or a signal is received.
+ * The @condition is checked each time the waitqueue @wq is woken up.
+ *
+ * wake_up() has to be called after changing any variable that could
+ * change the result of the wait condition.
+ *
+ * The function will return -ERESTARTSYS if it was interrupted by a
+ * signal and 0 if @condition evaluated to true.
+ */
+#define wait_event_killable(wq, condition)				\
 ({									\
 	int __ret = 0;							\
 	if (!(condition))						\
-		__wait_event_interruptible_exclusive(wq, condition, __ret);\
+		__wait_event_killable(wq, condition, __ret);		\
 	__ret;								\
 })
 
@@ -379,20 +437,22 @@ extern long interruptible_sleep_on_timeout(wait_queue_head_t *q,
 /*
  * Waitqueues which are removed from the waitqueue_head at wakeup time
  */
-void FASTCALL(prepare_to_wait(wait_queue_head_t *q,
-				wait_queue_t *wait, int state));
-void FASTCALL(prepare_to_wait_exclusive(wait_queue_head_t *q,
-				wait_queue_t *wait, int state));
-void FASTCALL(finish_wait(wait_queue_head_t *q, wait_queue_t *wait));
+void prepare_to_wait(wait_queue_head_t *q, wait_queue_t *wait, int state);
+void prepare_to_wait_exclusive(wait_queue_head_t *q, wait_queue_t *wait, int state);
+void finish_wait(wait_queue_head_t *q, wait_queue_t *wait);
+void abort_exclusive_wait(wait_queue_head_t *q, wait_queue_t *wait,
+			unsigned int mode, void *key);
 int autoremove_wake_function(wait_queue_t *wait, unsigned mode, int sync, void *key);
 int wake_bit_function(wait_queue_t *wait, unsigned mode, int sync, void *key);
 
-#define DEFINE_WAIT(name)						\
+#define DEFINE_WAIT_FUNC(name, function)				\
 	wait_queue_t name = {						\
 		.private	= current,				\
-		.func		= autoremove_wake_function,		\
+		.func		= function,				\
 		.task_list	= LIST_HEAD_INIT((name).task_list),	\
 	}
+
+#define DEFINE_WAIT(name) DEFINE_WAIT_FUNC(name, autoremove_wake_function)
 
 #define DEFINE_WAIT_BIT(name, word, bit)				\
 	struct wait_bit_queue name = {					\

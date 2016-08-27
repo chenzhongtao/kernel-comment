@@ -18,6 +18,7 @@
 #include <asm/udbg.h>
 
 void (*udbg_putc)(char c);
+void (*udbg_flush)(void);
 int (*udbg_getc)(void);
 int (*udbg_getc_poll)(void);
 
@@ -54,8 +55,15 @@ void __init udbg_early_init(void)
 #elif defined(CONFIG_PPC_EARLY_DEBUG_44x)
 	/* PPC44x debug */
 	udbg_init_44x_as1();
+#elif defined(CONFIG_PPC_EARLY_DEBUG_40x)
+	/* PPC40x debug */
+	udbg_init_40x_realmode();
 #elif defined(CONFIG_PPC_EARLY_DEBUG_CPM)
 	udbg_init_cpm();
+#endif
+
+#ifdef CONFIG_PPC_EARLY_DEBUG
+	console_loglevel = 10;
 #endif
 }
 
@@ -69,6 +77,9 @@ void udbg_puts(const char *s)
 			while ((c = *s++) != '\0')
 				udbg_putc(c);
 		}
+
+		if (udbg_flush)
+			udbg_flush();
 	}
 #if 0
 	else {
@@ -90,6 +101,9 @@ int udbg_write(const char *s, int n)
 			udbg_putc(c);
 		}
 	}
+
+	if (udbg_flush)
+		udbg_flush();
 
 	return n - remain;
 }
@@ -147,8 +161,8 @@ static void udbg_console_write(struct console *con, const char *s,
 static struct console udbg_console = {
 	.name	= "udbg",
 	.write	= udbg_console_write,
-	.flags	= CON_PRINTBUFFER | CON_ENABLED | CON_BOOT,
-	.index	= -1,
+	.flags	= CON_PRINTBUFFER | CON_ENABLED | CON_BOOT | CON_ANYTIME,
+	.index	= 0,
 };
 
 static int early_console_initialized;

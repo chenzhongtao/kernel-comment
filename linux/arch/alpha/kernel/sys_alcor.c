@@ -89,8 +89,8 @@ alcor_end_irq(unsigned int irq)
 		alcor_enable_irq(irq);
 }
 
-static struct hw_interrupt_type alcor_irq_type = {
-	.typename	= "ALCOR",
+static struct irq_chip alcor_irq_type = {
+	.name		= "ALCOR",
 	.startup	= alcor_startup_irq,
 	.shutdown	= alcor_disable_irq,
 	.enable		= alcor_enable_irq,
@@ -259,7 +259,7 @@ alcor_init_pci(void)
 	if (dev && dev->devfn == PCI_DEVFN(6,0)) {
 		alpha_mv.sys.cia.gru_int_req_bits = XLT_GRU_INT_REQ_BITS; 
 		printk(KERN_INFO "%s: Detected AS500 or XLT motherboard.\n",
-		       __FUNCTION__);
+		       __func__);
 	}
 	pci_dev_put(dev);
 }

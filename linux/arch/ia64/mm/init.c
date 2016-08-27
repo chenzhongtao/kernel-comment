@@ -21,7 +21,6 @@
 #include <linux/bitops.h>
 #include <linux/kexec.h>
 
-#include <asm/a.out.h>
 #include <asm/dma.h>
 #include <asm/ia32.h>
 #include <asm/io.h>
@@ -36,6 +35,7 @@
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/mca.h>
+#include <asm/paravirt.h>
 
 DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
@@ -58,7 +58,6 @@ __ia64_sync_icache_dcache (pte_t pte)
 {
 	unsigned long addr;
 	struct page *page;
-	unsigned long order;
 
 	page = pte_page(pte);
 	addr = (unsigned long) page_address(page);
@@ -66,12 +65,7 @@ __ia64_sync_icache_dcache (pte_t pte)
 	if (test_bit(PG_arch_1, &page->flags))
 		return;				/* i-cache is already coherent with d-cache */
 
-	if (PageCompound(page)) {
-		order = compound_order(page);
-		flush_icache_range(addr, addr + (1UL << order << PAGE_SHIFT));
-	}
-	else
-		flush_icache_range(addr, addr + PAGE_SIZE);
+	flush_icache_range(addr, addr + (PAGE_SIZE << compound_order(page)));
 	set_bit(PG_arch_1, &page->flags);	/* mark page as clean */
 }
 
@@ -266,6 +260,7 @@ put_kernel_page (struct page *page, unsigned long address, pgprot_t pgprot)
 static void __init
 setup_gate (void)
 {
+	void *gate_section;
 	struct page *page;
 
 	/*
@@ -273,10 +268,11 @@ setup_gate (void)
 	 * headers etc. and once execute-only page to enable
 	 * privilege-promotion via "epc":
 	 */
-	page = virt_to_page(ia64_imva(__start_gate_section));
+	gate_section = paravirt_get_gate_section();
+	page = virt_to_page(ia64_imva(gate_section));
 	put_kernel_page(page, GATE_ADDR, PAGE_READONLY);
 #ifdef HAVE_BUGGY_SEGREL
-	page = virt_to_page(ia64_imva(__start_gate_section + PAGE_SIZE));
+	page = virt_to_page(ia64_imva(gate_section + PAGE_SIZE));
 	put_kernel_page(page, GATE_ADDR + PAGE_SIZE, PAGE_GATE);
 #else
 	put_kernel_page(page, GATE_ADDR + PERCPU_PAGE_SIZE, PAGE_GATE);
@@ -426,8 +422,7 @@ retry_pte:
 	return hole_next_pfn - pgdat->node_start_pfn;
 }
 
-int __init
-create_mem_map_page_table (u64 start, u64 end, void *arg)
+int __init create_mem_map_page_table(u64 start, u64 end, void *arg)
 {
 	unsigned long address, start_page, end_page;
 	struct page *map_start, *map_end;
@@ -473,7 +468,7 @@ struct memmap_init_callback_data {
 };
 
 static int __meminit
-virtual_memmap_init (u64 start, u64 end, void *arg)
+virtual_memmap_init(u64 start, u64 end, void *arg)
 {
 	struct memmap_init_callback_data *args;
 	struct page *map_start, *map_end;
@@ -535,8 +530,7 @@ ia64_pfn_valid (unsigned long pfn)
 }
 EXPORT_SYMBOL(ia64_pfn_valid);
 
-int __init
-find_largest_hole (u64 start, u64 end, void *arg)
+int __init find_largest_hole(u64 start, u64 end, void *arg)
 {
 	u64 *max_gap = arg;
 
@@ -552,13 +546,10 @@ find_largest_hole (u64 start, u64 end, void *arg)
 
 #endif /* CONFIG_VIRTUAL_MEM_MAP */
 
-int __init
-register_active_ranges(u64 start, u64 end, void *arg)
+int __init register_active_ranges(u64 start, u64 len, int nid)
 {
-	int nid = paddr_to_nid(__pa(start));
+	u64 end = start + len;
 
-	if (nid < 0)
-		nid = 0;
 #ifdef CONFIG_KEXEC
 	if (start > crashk_res.start && start < crashk_res.end)
 		start = crashk_res.end;
@@ -573,7 +564,7 @@ register_active_ranges(u64 start, u64 end, void *arg)
 }
 
 static int __init
-count_reserved_pages (u64 start, u64 end, void *arg)
+count_reserved_pages(u64 start, u64 end, void *arg)
 {
 	unsigned long num_reserved = 0;
 	unsigned long *count = arg;
@@ -586,7 +577,7 @@ count_reserved_pages (u64 start, u64 end, void *arg)
 }
 
 int
-find_max_min_low_pfn (unsigned long start, unsigned long end, void *arg)
+find_max_min_low_pfn (u64 start, u64 end, void *arg)
 {
 	unsigned long pfn_start, pfn_end;
 #ifdef CONFIG_FLATMEM
@@ -626,7 +617,6 @@ mem_init (void)
 	long reserved_pages, codesize, datasize, initsize;
 	pg_data_t *pgdat;
 	int i;
-	static struct kcore_list kcore_mem, kcore_vmem, kcore_kernel;
 
 	BUG_ON(PTRS_PER_PGD * sizeof(pgd_t) != PAGE_SIZE);
 	BUG_ON(PTRS_PER_PMD * sizeof(pmd_t) != PAGE_SIZE);
@@ -642,16 +632,11 @@ mem_init (void)
 #endif
 
 #ifdef CONFIG_FLATMEM
-	if (!mem_map)
-		BUG();
+	BUG_ON(!mem_map);
 	max_mapnr = max_low_pfn;
 #endif
 
 	high_memory = __va(max_low_pfn * PAGE_SIZE);
-
-	kclist_add(&kcore_mem, __va(0), max_low_pfn * PAGE_SIZE);
-	kclist_add(&kcore_vmem, (void *)VMALLOC_START, VMALLOC_END-VMALLOC_START);
-	kclist_add(&kcore_kernel, _stext, _end - _stext);
 
 	for_each_online_pgdat(pgdat)
 		if (pgdat->bdata->node_bootmem_map)
@@ -665,7 +650,7 @@ mem_init (void)
 	initsize =  (unsigned long) __init_end - (unsigned long) __init_begin;
 
 	printk(KERN_INFO "Memory: %luk/%luk available (%luk code, %luk reserved, "
-	       "%luk data, %luk init)\n", (unsigned long) nr_free_pages() << (PAGE_SHIFT - 10),
+	       "%luk data, %luk init)\n", nr_free_pages() << (PAGE_SHIFT - 10),
 	       num_physpages << (PAGE_SHIFT - 10), codesize >> 10,
 	       reserved_pages << (PAGE_SHIFT - 10), datasize >> 10, initsize >> 10);
 
@@ -676,8 +661,8 @@ mem_init (void)
 	 * code can tell them apart.
 	 */
 	for (i = 0; i < NR_syscalls; ++i) {
-		extern unsigned long fsyscall_table[NR_syscalls];
 		extern unsigned long sys_call_table[NR_syscalls];
+		unsigned long *fsyscall_table = paravirt_get_fsyscall_table();
 
 		if (!fsyscall_table[i] || nolwsys)
 			fsyscall_table[i] = sys_call_table[i] | 1;
@@ -690,15 +675,6 @@ mem_init (void)
 }
 
 #ifdef CONFIG_MEMORY_HOTPLUG
-void online_page(struct page *page)
-{
-	ClearPageReserved(page);
-	init_page_count(page);
-	__free_page(page);
-	totalram_pages++;
-	num_physpages++;
-}
-
 int arch_add_memory(int nid, u64 start, u64 size)
 {
 	pg_data_t *pgdat;
@@ -710,29 +686,37 @@ int arch_add_memory(int nid, u64 start, u64 size)
 	pgdat = NODE_DATA(nid);
 
 	zone = pgdat->node_zones + ZONE_NORMAL;
-	ret = __add_pages(zone, start_pfn, nr_pages);
+	ret = __add_pages(nid, zone, start_pfn, nr_pages);
 
 	if (ret)
 		printk("%s: Problem encountered in __add_pages() as ret=%d\n",
-		       __FUNCTION__,  ret);
+		       __func__,  ret);
 
 	return ret;
 }
-#ifdef CONFIG_MEMORY_HOTREMOVE
-int remove_memory(u64 start, u64 size)
-{
-	unsigned long start_pfn, end_pfn;
-	unsigned long timeout = 120 * HZ;
-	int ret;
-	start_pfn = start >> PAGE_SHIFT;
-	end_pfn = start_pfn + (size >> PAGE_SHIFT);
-	ret = offline_pages(start_pfn, end_pfn, timeout);
-	if (ret)
-		goto out;
-	/* we can free mem_map at this point */
-out:
-	return ret;
-}
-EXPORT_SYMBOL_GPL(remove_memory);
-#endif /* CONFIG_MEMORY_HOTREMOVE */
 #endif
+
+/*
+ * Even when CONFIG_IA32_SUPPORT is not enabled it is
+ * useful to have the Linux/x86 domain registered to
+ * avoid an attempted module load when emulators call
+ * personality(PER_LINUX32). This saves several milliseconds
+ * on each such call.
+ */
+static struct exec_domain ia32_exec_domain;
+
+static int __init
+per_linux32_init(void)
+{
+	ia32_exec_domain.name = "Linux/x86";
+	ia32_exec_domain.handler = NULL;
+	ia32_exec_domain.pers_low = PER_LINUX32;
+	ia32_exec_domain.pers_high = PER_LINUX32;
+	ia32_exec_domain.signal_map = default_exec_domain.signal_map;
+	ia32_exec_domain.signal_invmap = default_exec_domain.signal_invmap;
+	register_exec_domain(&ia32_exec_domain);
+
+	return 0;
+}
+
+__initcall(per_linux32_init);

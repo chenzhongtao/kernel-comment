@@ -14,28 +14,55 @@
 #include <asm/segment.h>
 #include <asm/io.h>
 #include <asm/smp.h>
-
-#include "pci.h"
+#include <asm/pci_x86.h>
 
 unsigned int pci_probe = PCI_PROBE_BIOS | PCI_PROBE_CONF1 | PCI_PROBE_CONF2 |
 				PCI_PROBE_MMCONF;
 
+unsigned int pci_early_dump_regs;
 static int pci_bf_sort;
 int pci_routeirq;
+int noioapicquirk;
+#ifdef CONFIG_X86_REROUTE_FOR_BROKEN_BOOT_IRQS
+int noioapicreroute = 0;
+#else
+int noioapicreroute = 1;
+#endif
 int pcibios_last_bus = -1;
 unsigned long pirq_table_addr;
 struct pci_bus *pci_root_bus;
 struct pci_raw_ops *raw_pci_ops;
+struct pci_raw_ops *raw_pci_ext_ops;
+
+int raw_pci_read(unsigned int domain, unsigned int bus, unsigned int devfn,
+						int reg, int len, u32 *val)
+{
+	if (domain == 0 && reg < 256 && raw_pci_ops)
+		return raw_pci_ops->read(domain, bus, devfn, reg, len, val);
+	if (raw_pci_ext_ops)
+		return raw_pci_ext_ops->read(domain, bus, devfn, reg, len, val);
+	return -EINVAL;
+}
+
+int raw_pci_write(unsigned int domain, unsigned int bus, unsigned int devfn,
+						int reg, int len, u32 val)
+{
+	if (domain == 0 && reg < 256 && raw_pci_ops)
+		return raw_pci_ops->write(domain, bus, devfn, reg, len, val);
+	if (raw_pci_ext_ops)
+		return raw_pci_ext_ops->write(domain, bus, devfn, reg, len, val);
+	return -EINVAL;
+}
 
 static int pci_read(struct pci_bus *bus, unsigned int devfn, int where, int size, u32 *value)
 {
-	return raw_pci_ops->read(pci_domain_nr(bus), bus->number,
+	return raw_pci_read(pci_domain_nr(bus), bus->number,
 				 devfn, where, size, value);
 }
 
 static int pci_write(struct pci_bus *bus, unsigned int devfn, int where, int size, u32 value)
 {
-	return raw_pci_ops->write(pci_domain_nr(bus), bus->number,
+	return raw_pci_write(pci_domain_nr(bus), bus->number,
 				  devfn, where, size, value);
 }
 
@@ -56,56 +83,62 @@ int pcibios_scanned;
  */
 DEFINE_SPINLOCK(pci_config_lock);
 
-/*
- * Several buggy motherboards address only 16 devices and mirror
- * them to next 16 IDs. We try to detect this `feature' on all
- * primary buses (those containing host bridges as they are
- * expected to be unique) and remove the ghost devices.
- */
-
-static void __devinit pcibios_fixup_ghosts(struct pci_bus *b)
+static int __devinit can_skip_ioresource_align(const struct dmi_system_id *d)
 {
-	struct list_head *ln, *mn;
-	struct pci_dev *d, *e;
-	int mirror = PCI_DEVFN(16,0);
-	int seen_host_bridge = 0;
-	int i;
+	pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
+	printk(KERN_INFO "PCI: %s detected, can skip ISA alignment\n", d->ident);
+	return 0;
+}
 
-	DBG("PCI: Scanning for ghost devices on bus %d\n", b->number);
-	list_for_each(ln, &b->devices) {
-		d = pci_dev_b(ln);
-		if ((d->class >> 8) == PCI_CLASS_BRIDGE_HOST)
-			seen_host_bridge++;
-		for (mn=ln->next; mn != &b->devices; mn=mn->next) {
-			e = pci_dev_b(mn);
-			if (e->devfn != d->devfn + mirror ||
-			    e->vendor != d->vendor ||
-			    e->device != d->device ||
-			    e->class != d->class)
-				continue;
-			for(i=0; i<PCI_NUM_RESOURCES; i++)
-				if (e->resource[i].start != d->resource[i].start ||
-				    e->resource[i].end != d->resource[i].end ||
-				    e->resource[i].flags != d->resource[i].flags)
-					continue;
-			break;
-		}
-		if (mn == &b->devices)
+static const struct dmi_system_id can_skip_pciprobe_dmi_table[] __devinitconst = {
+/*
+ * Systems where PCI IO resource ISA alignment can be skipped
+ * when the ISA enable bit in the bridge control is not set
+ */
+	{
+		.callback = can_skip_ioresource_align,
+		.ident = "IBM System x3800",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "x3800"),
+		},
+	},
+	{
+		.callback = can_skip_ioresource_align,
+		.ident = "IBM System x3850",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "x3850"),
+		},
+	},
+	{
+		.callback = can_skip_ioresource_align,
+		.ident = "IBM System x3950",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "x3950"),
+		},
+	},
+	{}
+};
+
+void __init dmi_check_skip_isa_align(void)
+{
+	dmi_check_system(can_skip_pciprobe_dmi_table);
+}
+
+static void __devinit pcibios_fixup_device_resources(struct pci_dev *dev)
+{
+	struct resource *rom_r = &dev->resource[PCI_ROM_RESOURCE];
+
+	if (pci_probe & PCI_NOASSIGN_ROMS) {
+		if (rom_r->parent)
 			return;
-	}
-	if (!seen_host_bridge)
-		return;
-	printk(KERN_WARNING "PCI: Ignoring ghost devices on bus %02x\n", b->number);
-
-	ln = &b->devices;
-	while (ln->next != &b->devices) {
-		d = pci_dev_b(ln->next);
-		if (d->devfn >= mirror) {
-			list_del(&d->global_list);
-			list_del(&d->bus_list);
-			kfree(d);
-		} else
-			ln = ln->next;
+		if (rom_r->start) {
+			/* we deal with BIOS assigned ROM later */
+			return;
+		}
+		rom_r->start = rom_r->end = rom_r->flags = 0;
 	}
 }
 
@@ -114,10 +147,16 @@ static void __devinit pcibios_fixup_ghosts(struct pci_bus *b)
  *  are examined.
  */
 
-void __devinit  pcibios_fixup_bus(struct pci_bus *b)
+void __devinit pcibios_fixup_bus(struct pci_bus *b)
 {
-	pcibios_fixup_ghosts(b);
+	struct pci_dev *dev;
+
+	/* root bus? */
+	if (!b->parent)
+		x86_pci_root_bus_res_quirks(b);
 	pci_read_bridge_bases(b);
+	list_for_each_entry(dev, &b->devices, bus_list)
+		pcibios_fixup_device_resources(dev);
 }
 
 /*
@@ -147,7 +186,7 @@ static int __devinit assign_all_busses(const struct dmi_system_id *d)
 }
 #endif
 
-static struct dmi_system_id __devinitdata pciprobe_dmi_table[] = {
+static const struct dmi_system_id __devinitconst pciprobe_dmi_table[] = {
 #ifdef __i386__
 /*
  * Laptops which need pci=assign-busses to see Cardbus cards
@@ -291,18 +330,18 @@ static struct dmi_system_id __devinitdata pciprobe_dmi_table[] = {
 	},
 	{
 		.callback = set_bf_sort,
-		.ident = "HP ProLiant DL385 G2",
+		.ident = "HP ProLiant DL360",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "HP"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL385 G2"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL360"),
 		},
 	},
 	{
 		.callback = set_bf_sort,
-		.ident = "HP ProLiant DL585 G2",
+		.ident = "HP ProLiant DL380",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "HP"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL585 G2"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL380"),
 		},
 	},
 #ifdef __i386__
@@ -334,12 +373,15 @@ static struct dmi_system_id __devinitdata pciprobe_dmi_table[] = {
 	{}
 };
 
+void __init dmi_check_pciprobe(void)
+{
+	dmi_check_system(pciprobe_dmi_table);
+}
+
 struct pci_bus * __devinit pcibios_scan_root(int busnum)
 {
 	struct pci_bus *bus = NULL;
 	struct pci_sysdata *sd;
-
-	dmi_check_system(pciprobe_dmi_table);
 
 	while ((bus = pci_find_next_bus(bus)) != NULL) {
 		if (bus->number == busnum) {
@@ -358,14 +400,19 @@ struct pci_bus * __devinit pcibios_scan_root(int busnum)
 		return NULL;
 	}
 
-	printk(KERN_DEBUG "PCI: Probing PCI hardware (bus %02x)\n", busnum);
+	sd->node = get_mp_bus_to_node(busnum);
 
-	return pci_scan_bus_parented(NULL, busnum, &pci_root_ops, sd);
+	printk(KERN_DEBUG "PCI: Probing PCI hardware (bus %02x)\n", busnum);
+	bus = pci_scan_bus_parented(NULL, busnum, &pci_root_ops, sd);
+	if (!bus)
+		kfree(sd);
+
+	return bus;
 }
 
 extern u8 pci_cache_line_size;
 
-static int __init pcibios_init(void)
+int __init pcibios_init(void)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 
@@ -389,14 +436,8 @@ static int __init pcibios_init(void)
 
 	if (pci_bf_sort >= pci_force_bf)
 		pci_sort_breadthfirst();
-#ifdef CONFIG_PCI_BIOS
-	if ((pci_probe & PCI_BIOS_SORT) && !(pci_probe & PCI_NO_SORT))
-		pcibios_sort();
-#endif
 	return 0;
 }
-
-subsys_initcall(pcibios_init);
 
 char * __devinit  pcibios_setup(char *str)
 {
@@ -416,9 +457,6 @@ char * __devinit  pcibios_setup(char *str)
 		return NULL;
 	} else if (!strcmp(str, "nobios")) {
 		pci_probe &= ~PCI_PROBE_BIOS;
-		return NULL;
-	} else if (!strcmp(str, "nosort")) {
-		pci_probe |= PCI_NO_SORT;
 		return NULL;
 	} else if (!strcmp(str, "biosirq")) {
 		pci_probe |= PCI_BIOS_IRQ_SCAN;
@@ -441,6 +479,10 @@ char * __devinit  pcibios_setup(char *str)
 #ifdef CONFIG_PCI_MMCONFIG
 	else if (!strcmp(str, "nommconf")) {
 		pci_probe &= ~PCI_PROBE_MMCONF;
+		return NULL;
+	}
+	else if (!strcmp(str, "check_enable_amd_mmconf")) {
+		pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
 		return NULL;
 	}
 #endif
@@ -467,14 +509,34 @@ char * __devinit  pcibios_setup(char *str)
 	else if (!strcmp(str, "rom")) {
 		pci_probe |= PCI_ASSIGN_ROMS;
 		return NULL;
+	} else if (!strcmp(str, "norom")) {
+		pci_probe |= PCI_NOASSIGN_ROMS;
+		return NULL;
 	} else if (!strcmp(str, "assign-busses")) {
 		pci_probe |= PCI_ASSIGN_ALL_BUSSES;
 		return NULL;
 	} else if (!strcmp(str, "use_crs")) {
 		pci_probe |= PCI_USE__CRS;
 		return NULL;
+	} else if (!strcmp(str, "earlydump")) {
+		pci_early_dump_regs = 1;
+		return NULL;
 	} else if (!strcmp(str, "routeirq")) {
 		pci_routeirq = 1;
+		return NULL;
+	} else if (!strcmp(str, "skip_isa_align")) {
+		pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
+		return NULL;
+	} else if (!strcmp(str, "noioapicquirk")) {
+		noioapicquirk = 1;
+		return NULL;
+	} else if (!strcmp(str, "ioapicreroute")) {
+		if (noioapicreroute != -1)
+			noioapicreroute = 0;
+		return NULL;
+	} else if (!strcmp(str, "noioapicreroute")) {
+		if (noioapicreroute != -1)
+			noioapicreroute = 1;
 		return NULL;
 	}
 	return str;
@@ -489,21 +551,29 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 {
 	int err;
 
-	if ((err = pcibios_enable_resources(dev, mask)) < 0)
+	if ((err = pci_enable_resources(dev, mask)) < 0)
 		return err;
 
-	if (!dev->msi_enabled)
+	if (!pci_dev_msi_enabled(dev))
 		return pcibios_enable_irq(dev);
 	return 0;
 }
 
 void pcibios_disable_device (struct pci_dev *dev)
 {
-	if (!dev->msi_enabled && pcibios_disable_irq)
+	if (!pci_dev_msi_enabled(dev) && pcibios_disable_irq)
 		pcibios_disable_irq(dev);
 }
 
-struct pci_bus *pci_scan_bus_with_sysdata(int busno)
+int pci_ext_cfg_avail(struct pci_dev *dev)
+{
+	if (raw_pci_ext_ops)
+		return 1;
+	else
+		return 0;
+}
+
+struct pci_bus * __devinit pci_scan_bus_on_node(int busno, struct pci_ops *ops, int node)
 {
 	struct pci_bus *bus = NULL;
 	struct pci_sysdata *sd;
@@ -518,10 +588,84 @@ struct pci_bus *pci_scan_bus_with_sysdata(int busno)
 		printk(KERN_ERR "PCI: OOM, skipping PCI bus %02x\n", busno);
 		return NULL;
 	}
-	sd->node = -1;
-	bus = pci_scan_bus(busno, &pci_root_ops, sd);
+	sd->node = node;
+	bus = pci_scan_bus(busno, ops, sd);
 	if (!bus)
 		kfree(sd);
 
 	return bus;
 }
+
+struct pci_bus * __devinit pci_scan_bus_with_sysdata(int busno)
+{
+	return pci_scan_bus_on_node(busno, &pci_root_ops, -1);
+}
+
+/*
+ * NUMA info for PCI busses
+ *
+ * Early arch code is responsible for filling in reasonable values here.
+ * A node id of "-1" means "use current node".  In other words, if a bus
+ * has a -1 node id, it's not tightly coupled to any particular chunk
+ * of memory (as is the case on some Nehalem systems).
+ */
+#ifdef CONFIG_NUMA
+
+#define BUS_NR 256
+
+#ifdef CONFIG_X86_64
+
+static int mp_bus_to_node[BUS_NR] = {
+	[0 ... BUS_NR - 1] = -1
+};
+
+void set_mp_bus_to_node(int busnum, int node)
+{
+	if (busnum >= 0 &&  busnum < BUS_NR)
+		mp_bus_to_node[busnum] = node;
+}
+
+int get_mp_bus_to_node(int busnum)
+{
+	int node = -1;
+
+	if (busnum < 0 || busnum > (BUS_NR - 1))
+		return node;
+
+	node = mp_bus_to_node[busnum];
+
+	/*
+	 * let numa_node_id to decide it later in dma_alloc_pages
+	 * if there is no ram on that node
+	 */
+	if (node != -1 && !node_online(node))
+		node = -1;
+
+	return node;
+}
+
+#else /* CONFIG_X86_32 */
+
+static int mp_bus_to_node[BUS_NR] = {
+	[0 ... BUS_NR - 1] = -1
+};
+
+void set_mp_bus_to_node(int busnum, int node)
+{
+	if (busnum >= 0 &&  busnum < BUS_NR)
+	mp_bus_to_node[busnum] = (unsigned char) node;
+}
+
+int get_mp_bus_to_node(int busnum)
+{
+	int node;
+
+	if (busnum < 0 || busnum > (BUS_NR - 1))
+		return 0;
+	node = mp_bus_to_node[busnum];
+	return node;
+}
+
+#endif /* CONFIG_X86_32 */
+
+#endif /* CONFIG_NUMA */

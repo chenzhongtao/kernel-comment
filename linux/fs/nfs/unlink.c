@@ -14,6 +14,9 @@
 #include <linux/sched.h>
 #include <linux/wait.h>
 
+#include "internal.h"
+#include "nfs4_fs.h"
+
 struct nfs_unlinkdata {
 	struct hlist_node list;
 	struct nfs_removeargs args;
@@ -69,24 +72,6 @@ static void nfs_dec_sillycount(struct inode *dir)
 }
 
 /**
- * nfs_async_unlink_init - Initialize the RPC info
- * task: rpc_task of the sillydelete
- */
-static void nfs_async_unlink_init(struct rpc_task *task, void *calldata)
-{
-	struct nfs_unlinkdata *data = calldata;
-	struct inode *dir = data->dir;
-	struct rpc_message msg = {
-		.rpc_argp = &data->args,
-		.rpc_resp = &data->res,
-		.rpc_cred = data->cred,
-	};
-
-	NFS_PROTO(dir)->unlink_setup(&msg, dir);
-	rpc_call_setup(task, &msg, 0);
-}
-
-/**
  * nfs_async_unlink_done - Sillydelete post-processing
  * @task: rpc_task of the sillydelete
  *
@@ -98,7 +83,7 @@ static void nfs_async_unlink_done(struct rpc_task *task, void *calldata)
 	struct inode *dir = data->dir;
 
 	if (!NFS_PROTO(dir)->unlink_done(task, dir))
-		rpc_restart_call(task);
+		nfs4_restart_rpc(task, NFS_SERVER(dir)->nfs_client);
 }
 
 /**
@@ -111,34 +96,65 @@ static void nfs_async_unlink_done(struct rpc_task *task, void *calldata)
 static void nfs_async_unlink_release(void *calldata)
 {
 	struct nfs_unlinkdata	*data = calldata;
+	struct super_block *sb = data->dir->i_sb;
 
 	nfs_dec_sillycount(data->dir);
 	nfs_free_unlinkdata(data);
+	nfs_sb_deactive(sb);
 }
 
+#if defined(CONFIG_NFS_V4_1)
+void nfs_unlink_prepare(struct rpc_task *task, void *calldata)
+{
+	struct nfs_unlinkdata *data = calldata;
+	struct nfs_server *server = NFS_SERVER(data->dir);
+
+	if (nfs4_setup_sequence(server->nfs_client, &data->args.seq_args,
+				&data->res.seq_res, 1, task))
+		return;
+	rpc_call_start(task);
+}
+#endif /* CONFIG_NFS_V4_1 */
+
 static const struct rpc_call_ops nfs_unlink_ops = {
-	.rpc_call_prepare = nfs_async_unlink_init,
 	.rpc_call_done = nfs_async_unlink_done,
 	.rpc_release = nfs_async_unlink_release,
+#if defined(CONFIG_NFS_V4_1)
+	.rpc_call_prepare = nfs_unlink_prepare,
+#endif /* CONFIG_NFS_V4_1 */
 };
 
 static int nfs_do_call_unlink(struct dentry *parent, struct inode *dir, struct nfs_unlinkdata *data)
 {
+	struct rpc_message msg = {
+		.rpc_argp = &data->args,
+		.rpc_resp = &data->res,
+		.rpc_cred = data->cred,
+	};
+	struct rpc_task_setup task_setup_data = {
+		.rpc_message = &msg,
+		.callback_ops = &nfs_unlink_ops,
+		.callback_data = data,
+		.workqueue = nfsiod_workqueue,
+		.flags = RPC_TASK_ASYNC,
+	};
 	struct rpc_task *task;
 	struct dentry *alias;
 
 	alias = d_lookup(parent, &data->args.name);
 	if (alias != NULL) {
 		int ret = 0;
+
 		/*
 		 * Hey, we raced with lookup... See if we need to transfer
 		 * the sillyrename information to the aliased dentry.
 		 */
 		nfs_free_dname(data);
 		spin_lock(&alias->d_lock);
-		if (!(alias->d_flags & DCACHE_NFSFS_RENAMED)) {
+		if (alias->d_inode != NULL &&
+		    !(alias->d_flags & DCACHE_NFSFS_RENAMED)) {
 			alias->d_fsdata = data;
-			alias->d_flags ^= DCACHE_NFSFS_RENAMED;
+			alias->d_flags |= DCACHE_NFSFS_RENAMED;
 			ret = 1;
 		}
 		spin_unlock(&alias->d_lock);
@@ -151,10 +167,14 @@ static int nfs_do_call_unlink(struct dentry *parent, struct inode *dir, struct n
 		nfs_dec_sillycount(dir);
 		return 0;
 	}
+	nfs_sb_active(dir->i_sb);
 	data->args.fh = NFS_FH(dir);
 	nfs_fattr_init(&data->res.dir_attr);
 
-	task = rpc_run_task(NFS_CLIENT(dir), RPC_TASK_ASYNC, &nfs_unlink_ops, data);
+	NFS_PROTO(dir)->unlink_setup(&msg, dir);
+
+	task_setup_data.rpc_client = NFS_CLIENT(dir);
+	task = rpc_run_task(&task_setup_data);
 	if (!IS_ERR(task))
 		rpc_put_task(task);
 	return 1;
@@ -233,11 +253,12 @@ nfs_async_unlink(struct inode *dir, struct dentry *dentry)
 	if (data == NULL)
 		goto out;
 
-	data->cred = rpcauth_lookupcred(NFS_CLIENT(dir)->cl_auth, 0);
+	data->cred = rpc_lookup_cred();
 	if (IS_ERR(data->cred)) {
 		status = PTR_ERR(data->cred);
 		goto out_free;
 	}
+	data->res.seq_res.sr_slotid = NFS4_MAX_SLOT_TABLE;
 
 	status = -EBUSY;
 	spin_lock(&dentry->d_lock);

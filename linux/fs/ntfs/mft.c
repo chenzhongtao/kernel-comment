@@ -384,13 +384,12 @@ unm_err_out:
  * it is dirty in the inode meta data rather than the data page cache of the
  * inode, and thus there are no data pages that need writing out.  Therefore, a
  * full mark_inode_dirty() is overkill.  A mark_inode_dirty_sync(), on the
- * other hand, is not sufficient, because I_DIRTY_DATASYNC needs to be set to
- * ensure ->write_inode is called from generic_osync_inode() and this needs to
- * happen or the file data would not necessarily hit the device synchronously,
- * even though the vfs inode has the O_SYNC flag set.  Also, I_DIRTY_DATASYNC
- * simply "feels" better than just I_DIRTY_SYNC, since the file data has not
- * actually hit the block device yet, which is not what I_DIRTY_SYNC on its own
- * would suggest.
+ * other hand, is not sufficient, because ->write_inode needs to be called even
+ * in case of fdatasync. This needs to happen or the file data would not
+ * necessarily hit the device synchronously, even though the vfs inode has the
+ * O_SYNC flag set.  Also, I_DIRTY_DATASYNC simply "feels" better than just
+ * I_DIRTY_SYNC, since the file data has not actually hit the block device yet,
+ * which is not what I_DIRTY_SYNC on its own would suggest.
  */
 void __mark_mft_record_dirty(ntfs_inode *ni)
 {
@@ -586,7 +585,7 @@ int ntfs_sync_mft_mirror(ntfs_volume *vol, const unsigned long mft_no,
 		for (i_bhs = 0; i_bhs < nr_bhs; i_bhs++) {
 			struct buffer_head *tbh = bhs[i_bhs];
 
-			if (unlikely(test_set_buffer_locked(tbh)))
+			if (!trylock_buffer(tbh))
 				BUG();
 			BUG_ON(!buffer_uptodate(tbh));
 			clear_buffer_dirty(tbh);
@@ -779,7 +778,7 @@ int write_mft_record_nolock(ntfs_inode *ni, MFT_RECORD *m, int sync)
 	for (i_bhs = 0; i_bhs < nr_bhs; i_bhs++) {
 		struct buffer_head *tbh = bhs[i_bhs];
 
-		if (unlikely(test_set_buffer_locked(tbh)))
+		if (!trylock_buffer(tbh))
 			BUG();
 		BUG_ON(!buffer_uptodate(tbh));
 		clear_buffer_dirty(tbh);
@@ -1191,7 +1190,7 @@ static int ntfs_mft_bitmap_find_and_alloc_free_rec_nolock(ntfs_volume *vol,
 		if (size) {
 			page = ntfs_map_page(mftbmp_mapping,
 					ofs >> PAGE_CACHE_SHIFT);
-			if (unlikely(IS_ERR(page))) {
+			if (IS_ERR(page)) {
 				ntfs_error(vol->sb, "Failed to read mft "
 						"bitmap, aborting.");
 				return PTR_ERR(page);
@@ -2118,7 +2117,7 @@ static int ntfs_mft_record_format(const ntfs_volume *vol, const s64 mft_no)
 	}
 	/* Read, map, and pin the page containing the mft record. */
 	page = ntfs_map_page(mft_vi->i_mapping, index);
-	if (unlikely(IS_ERR(page))) {
+	if (IS_ERR(page)) {
 		ntfs_error(vol->sb, "Failed to map page containing mft record "
 				"to format 0x%llx.", (long long)mft_no);
 		return PTR_ERR(page);
@@ -2519,7 +2518,7 @@ mft_rec_already_initialized:
 	ofs = (bit << vol->mft_record_size_bits) & ~PAGE_CACHE_MASK;
 	/* Read, map, and pin the page containing the mft record. */
 	page = ntfs_map_page(vol->mft_ino->i_mapping, index);
-	if (unlikely(IS_ERR(page))) {
+	if (IS_ERR(page)) {
 		ntfs_error(vol->sb, "Failed to map page containing allocated "
 				"mft record 0x%llx.", (long long)bit);
 		err = PTR_ERR(page);
@@ -2839,7 +2838,7 @@ int ntfs_extent_mft_record_free(ntfs_inode *ni, MFT_RECORD *m)
 	 */
 
 	/* Mark the mft record as not in use. */
-	m->flags &= const_cpu_to_le16(~const_le16_to_cpu(MFT_RECORD_IN_USE));
+	m->flags &= ~MFT_RECORD_IN_USE;
 
 	/* Increment the sequence number, skipping zero, if it is not zero. */
 	old_seq_no = m->sequence_number;

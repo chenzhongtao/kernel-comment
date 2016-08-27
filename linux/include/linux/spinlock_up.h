@@ -60,9 +60,12 @@ static inline void __raw_spin_unlock(raw_spinlock_t *lock)
 #define __raw_spin_is_locked(lock)	((void)(lock), 0)
 /* for sched.c and kernel_lock.c: */
 # define __raw_spin_lock(lock)		do { (void)(lock); } while (0)
+# define __raw_spin_lock_flags(lock, flags)	do { (void)(lock); } while (0)
 # define __raw_spin_unlock(lock)	do { (void)(lock); } while (0)
 # define __raw_spin_trylock(lock)	({ (void)(lock); 1; })
 #endif /* DEBUG_SPINLOCK */
+
+#define __raw_spin_is_contended(lock)	(((void)(lock), 0))
 
 #define __raw_read_can_lock(lock)	(((void)(lock), 1))
 #define __raw_write_can_lock(lock)	(((void)(lock), 1))

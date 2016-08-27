@@ -20,10 +20,12 @@
 #include <linux/efi.h>
 #include <linux/timex.h>
 #include <linux/clocksource.h>
+#include <linux/platform_device.h>
 
 #include <asm/machvec.h>
 #include <asm/delay.h>
 #include <asm/hw_irq.h>
+#include <asm/paravirt.h>
 #include <asm/ptrace.h>
 #include <asm/sal.h>
 #include <asm/sections.h>
@@ -31,7 +33,7 @@
 
 #include "fsyscall_gtod_data.h"
 
-static cycle_t itc_get_cycles(void);
+static cycle_t itc_get_cycles(struct clocksource *cs);
 
 struct fsyscall_gtod_data_t fsyscall_gtod_data = {
 	.lock = SEQLOCK_UNLOCKED,
@@ -48,16 +50,118 @@ EXPORT_SYMBOL(last_cli_ip);
 
 #endif
 
+#ifdef CONFIG_PARAVIRT
+/* We need to define a real function for sched_clock, to override the
+   weak default version */
+unsigned long long sched_clock(void)
+{
+        return paravirt_sched_clock();
+}
+#endif
+
+#ifdef CONFIG_PARAVIRT
+static void
+paravirt_clocksource_resume(void)
+{
+	if (pv_time_ops.clocksource_resume)
+		pv_time_ops.clocksource_resume();
+}
+#endif
+
 static struct clocksource clocksource_itc = {
-        .name           = "itc",
-        .rating         = 350,
-        .read           = itc_get_cycles,
-        .mask           = CLOCKSOURCE_MASK(64),
-        .mult           = 0, /*to be caluclated*/
-        .shift          = 16,
-        .flags          = CLOCK_SOURCE_IS_CONTINUOUS,
+	.name           = "itc",
+	.rating         = 350,
+	.read           = itc_get_cycles,
+	.mask           = CLOCKSOURCE_MASK(64),
+	.mult           = 0, /*to be calculated*/
+	.shift          = 16,
+	.flags          = CLOCK_SOURCE_IS_CONTINUOUS,
+#ifdef CONFIG_PARAVIRT
+	.resume		= paravirt_clocksource_resume,
+#endif
 };
 static struct clocksource *itc_clocksource;
+
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+
+#include <linux/kernel_stat.h>
+
+extern cputime_t cycle_to_cputime(u64 cyc);
+
+/*
+ * Called from the context switch with interrupts disabled, to charge all
+ * accumulated times to the current process, and to prepare accounting on
+ * the next process.
+ */
+void ia64_account_on_switch(struct task_struct *prev, struct task_struct *next)
+{
+	struct thread_info *pi = task_thread_info(prev);
+	struct thread_info *ni = task_thread_info(next);
+	cputime_t delta_stime, delta_utime;
+	__u64 now;
+
+	now = ia64_get_itc();
+
+	delta_stime = cycle_to_cputime(pi->ac_stime + (now - pi->ac_stamp));
+	if (idle_task(smp_processor_id()) != prev)
+		account_system_time(prev, 0, delta_stime, delta_stime);
+	else
+		account_idle_time(delta_stime);
+
+	if (pi->ac_utime) {
+		delta_utime = cycle_to_cputime(pi->ac_utime);
+		account_user_time(prev, delta_utime, delta_utime);
+	}
+
+	pi->ac_stamp = ni->ac_stamp = now;
+	ni->ac_stime = ni->ac_utime = 0;
+}
+
+/*
+ * Account time for a transition between system, hard irq or soft irq state.
+ * Note that this function is called with interrupts enabled.
+ */
+void account_system_vtime(struct task_struct *tsk)
+{
+	struct thread_info *ti = task_thread_info(tsk);
+	unsigned long flags;
+	cputime_t delta_stime;
+	__u64 now;
+
+	local_irq_save(flags);
+
+	now = ia64_get_itc();
+
+	delta_stime = cycle_to_cputime(ti->ac_stime + (now - ti->ac_stamp));
+	if (irq_count() || idle_task(smp_processor_id()) != tsk)
+		account_system_time(tsk, 0, delta_stime, delta_stime);
+	else
+		account_idle_time(delta_stime);
+	ti->ac_stime = 0;
+
+	ti->ac_stamp = now;
+
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL_GPL(account_system_vtime);
+
+/*
+ * Called from the timer interrupt handler to charge accumulated user time
+ * to the current process.  Must be called with interrupts disabled.
+ */
+void account_process_tick(struct task_struct *p, int user_tick)
+{
+	struct thread_info *ti = task_thread_info(p);
+	cputime_t delta_utime;
+
+	if (ti->ac_utime) {
+		delta_utime = cycle_to_cputime(ti->ac_utime);
+		account_user_time(p, delta_utime, delta_utime);
+		ti->ac_utime = 0;
+	}
+}
+
+#endif /* CONFIG_VIRT_CPU_ACCOUNTING */
 
 static irqreturn_t
 timer_interrupt (int irq, void *dev_id)
@@ -77,6 +181,9 @@ timer_interrupt (int irq, void *dev_id)
 		       ia64_get_itc(), new_itm);
 
 	profile_tick(CPU_PROFILING);
+
+	if (paravirt_do_steal_accounting(&new_itm))
+		goto skip_process_time_accounting;
 
 	while (1) {
 		update_process_times(user_mode(get_irq_regs()));
@@ -106,6 +213,8 @@ timer_interrupt (int irq, void *dev_id)
 		local_irq_enable();
 		local_irq_disable();
 	}
+
+skip_process_time_accounting:
 
 	do {
 		/*
@@ -256,6 +365,11 @@ ia64_init_itm (void)
 		 */
 		clocksource_itc.rating = 50;
 
+	paravirt_init_missing_ticks_accounting(smp_processor_id());
+
+	/* avoid softlock up message when cpu is unplug and plugged again. */
+	touch_softlockup_watchdog();
+
 	/* Setup the CPU local timer tick */
 	ia64_cpu_local_tick();
 
@@ -269,9 +383,9 @@ ia64_init_itm (void)
 	}
 }
 
-static cycle_t itc_get_cycles(void)
+static cycle_t itc_get_cycles(struct clocksource *cs)
 {
-	u64 lcycle, now, ret;
+	unsigned long lcycle, now, ret;
 
 	if (!itc_jitter_data.itc_jitter)
 		return get_cycles();
@@ -301,10 +415,20 @@ static struct irqaction timer_irqaction = {
 	.name =		"timer"
 };
 
-void __devinit ia64_disable_timer(void)
+static struct platform_device rtc_efi_dev = {
+	.name = "rtc-efi",
+	.id = -1,
+};
+
+static int __init rtc_init(void)
 {
-	ia64_set_itv(1 << 16);
+	if (platform_device_register(&rtc_efi_dev) < 0)
+		printk(KERN_ERR "unable to register rtc device...\n");
+
+	/* not necessarily an error */
+	return 0;
 }
+module_init(rtc_init);
 
 void __init
 time_init (void)
@@ -343,33 +467,6 @@ udelay (unsigned long usecs)
 	(*ia64_udelay)(usecs);
 }
 EXPORT_SYMBOL(udelay);
-
-static unsigned long long ia64_itc_printk_clock(void)
-{
-	if (ia64_get_kr(IA64_KR_PER_CPU_DATA))
-		return sched_clock();
-	return 0;
-}
-
-static unsigned long long ia64_default_printk_clock(void)
-{
-	return (unsigned long long)(jiffies_64 - INITIAL_JIFFIES) *
-		(1000000000/HZ);
-}
-
-unsigned long long (*ia64_printk_clock)(void) = &ia64_default_printk_clock;
-
-unsigned long long printk_clock(void)
-{
-	return ia64_printk_clock();
-}
-
-void __init
-ia64_setup_printk_clock(void)
-{
-	if (!(sal_platform_features & IA64_SAL_PLATFORM_FEATURE_ITC_DRIFT))
-		ia64_printk_clock = ia64_itc_printk_clock;
-}
 
 /* IA64 doesn't cache the timezone */
 void update_vsyscall_tz(void)

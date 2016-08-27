@@ -28,9 +28,9 @@
 #include <linux/completion.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include <linux/of_device.h>
+#include <linux/of_platform.h>
 
-#include <asm/of_device.h>
-#include <asm/of_platform.h>
 #include <asm/io.h>
 #include <asm/pmi.h>
 #include <asm/prom.h>
@@ -50,7 +50,7 @@ struct pmi_data {
 
 static struct pmi_data *data;
 
-static int pmi_irq_handler(int irq, void *dev_id)
+static irqreturn_t pmi_irq_handler(int irq, void *dev_id)
 {
 	u8 type;
 	int rc;

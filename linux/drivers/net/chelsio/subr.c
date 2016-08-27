@@ -284,31 +284,28 @@ static void mi1_mdio_init(adapter_t *adapter, const struct board_info *bi)
 /*
  * Elmer MI1 MDIO read/write operations.
  */
-static int mi1_mdio_read(adapter_t *adapter, int phy_addr, int mmd_addr,
-			 int reg_addr, unsigned int *valp)
+static int mi1_mdio_read(struct net_device *dev, int phy_addr, int mmd_addr,
+			 u16 reg_addr)
 {
+	struct adapter *adapter = dev->ml_priv;
 	u32 addr = V_MI1_REG_ADDR(reg_addr) | V_MI1_PHY_ADDR(phy_addr);
-
-	if (mmd_addr)
-		return -EINVAL;
+	unsigned int val;
 
 	spin_lock(&adapter->tpi_lock);
 	__t1_tpi_write(adapter, A_ELMER0_PORT0_MI1_ADDR, addr);
 	__t1_tpi_write(adapter,
 			A_ELMER0_PORT0_MI1_OP, MI1_OP_DIRECT_READ);
 	mi1_wait_until_ready(adapter, A_ELMER0_PORT0_MI1_OP);
-	__t1_tpi_read(adapter, A_ELMER0_PORT0_MI1_DATA, valp);
+	__t1_tpi_read(adapter, A_ELMER0_PORT0_MI1_DATA, &val);
 	spin_unlock(&adapter->tpi_lock);
-	return 0;
+	return val;
 }
 
-static int mi1_mdio_write(adapter_t *adapter, int phy_addr, int mmd_addr,
-			  int reg_addr, unsigned int val)
+static int mi1_mdio_write(struct net_device *dev, int phy_addr, int mmd_addr,
+			  u16 reg_addr, u16 val)
 {
+	struct adapter *adapter = dev->ml_priv;
 	u32 addr = V_MI1_REG_ADDR(reg_addr) | V_MI1_PHY_ADDR(phy_addr);
-
-	if (mmd_addr)
-		return -EINVAL;
 
 	spin_lock(&adapter->tpi_lock);
 	__t1_tpi_write(adapter, A_ELMER0_PORT0_MI1_ADDR, addr);
@@ -324,16 +321,19 @@ static int mi1_mdio_write(adapter_t *adapter, int phy_addr, int mmd_addr,
 static const struct mdio_ops mi1_mdio_ops = {
 	.init = mi1_mdio_init,
 	.read = mi1_mdio_read,
-	.write = mi1_mdio_write
+	.write = mi1_mdio_write,
+	.mode_support = MDIO_SUPPORTS_C22
 };
 #endif
 
 #endif
 
-static int mi1_mdio_ext_read(adapter_t *adapter, int phy_addr, int mmd_addr,
-			     int reg_addr, unsigned int *valp)
+static int mi1_mdio_ext_read(struct net_device *dev, int phy_addr, int mmd_addr,
+			     u16 reg_addr)
 {
+	struct adapter *adapter = dev->ml_priv;
 	u32 addr = V_MI1_REG_ADDR(mmd_addr) | V_MI1_PHY_ADDR(phy_addr);
+	unsigned int val;
 
 	spin_lock(&adapter->tpi_lock);
 
@@ -350,14 +350,15 @@ static int mi1_mdio_ext_read(adapter_t *adapter, int phy_addr, int mmd_addr,
 	mi1_wait_until_ready(adapter, A_ELMER0_PORT0_MI1_OP);
 
 	/* Read the data. */
-	__t1_tpi_read(adapter, A_ELMER0_PORT0_MI1_DATA, valp);
+	__t1_tpi_read(adapter, A_ELMER0_PORT0_MI1_DATA, &val);
 	spin_unlock(&adapter->tpi_lock);
-	return 0;
+	return val;
 }
 
-static int mi1_mdio_ext_write(adapter_t *adapter, int phy_addr, int mmd_addr,
-			      int reg_addr, unsigned int val)
+static int mi1_mdio_ext_write(struct net_device *dev, int phy_addr,
+			      int mmd_addr, u16 reg_addr, u16 val)
 {
+	struct adapter *adapter = dev->ml_priv;
 	u32 addr = V_MI1_REG_ADDR(mmd_addr) | V_MI1_PHY_ADDR(phy_addr);
 
 	spin_lock(&adapter->tpi_lock);
@@ -380,7 +381,8 @@ static int mi1_mdio_ext_write(adapter_t *adapter, int phy_addr, int mmd_addr,
 static const struct mdio_ops mi1_mdio_ext_ops = {
 	.init = mi1_mdio_init,
 	.read = mi1_mdio_ext_read,
-	.write = mi1_mdio_ext_write
+	.write = mi1_mdio_ext_write,
+	.mode_support = MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22
 };
 
 enum {
@@ -563,10 +565,11 @@ struct chelsio_vpd_t {
  * written to the Control register. The hardware device will set the flag to a
  * one when 4B have been transferred to the Data register.
  */
-int t1_seeprom_read(adapter_t *adapter, u32 addr, u32 *data)
+int t1_seeprom_read(adapter_t *adapter, u32 addr, __le32 *data)
 {
 	int i = EEPROM_MAX_POLL;
 	u16 val;
+	u32 v;
 
 	if (addr >= EEPROMSIZE || (addr & 3))
 		return -EINVAL;
@@ -582,8 +585,8 @@ int t1_seeprom_read(adapter_t *adapter, u32 addr, u32 *data)
 		       adapter->name, addr);
 		return -EIO;
 	}
-	pci_read_config_dword(adapter->pdev, A_PCICFG_VPD_DATA, data);
-	*data = le32_to_cpu(*data);
+	pci_read_config_dword(adapter->pdev, A_PCICFG_VPD_DATA, &v);
+	*data = cpu_to_le32(v);
 	return 0;
 }
 
@@ -593,7 +596,7 @@ static int t1_eeprom_vpd_get(adapter_t *adapter, struct chelsio_vpd_t *vpd)
 
 	for (addr = 0; !ret && addr < sizeof(*vpd); addr += sizeof(u32))
 		ret = t1_seeprom_read(adapter, addr,
-				      (u32 *)((u8 *)vpd + addr));
+				      (__le32 *)((u8 *)vpd + addr));
 
 	return ret;
 }
@@ -1132,8 +1135,8 @@ int __devinit t1_init_sw_modules(adapter_t *adapter,
 		struct cmac *mac;
 		int phy_addr = bi->mdio_phybaseaddr + i;
 
-		adapter->port[i].phy = bi->gphy->create(adapter, phy_addr,
-							bi->mdio_ops);
+		adapter->port[i].phy = bi->gphy->create(adapter->port[i].dev,
+							phy_addr, bi->mdio_ops);
 		if (!adapter->port[i].phy) {
 			CH_ERR("%s: PHY %d initialization failed\n",
 			       adapter->name, i);

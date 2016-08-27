@@ -15,33 +15,15 @@
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
 
-void update_mmu_cache(struct vm_area_struct * vma,
-		      unsigned long address, pte_t pte)
+void __update_tlb(struct vm_area_struct *vma, unsigned long address, pte_t pte)
 {
-	unsigned long flags;
-	unsigned long pteval;
-	unsigned long vpn;
+	unsigned long flags, pteval, vpn;
 
-	/* Ptrace may call this routine. */
+	/*
+	 * Handle debugger faulting in for debugee.
+	 */
 	if (vma && current->active_mm != vma->vm_mm)
 		return;
-
-#ifndef CONFIG_CACHE_OFF
-	{
-		unsigned long pfn = pte_pfn(pte);
-
-		if (pfn_valid(pfn)) {
-			struct page *page = pfn_to_page(pfn);
-
-			if (!test_bit(PG_mapped, &page->flags)) {
-				unsigned long phys = pte_val(pte) & PTE_PHYS_MASK;
-				__flush_wback_region((void *)P1SEGADDR(phys),
-						     PAGE_SIZE);
-				__set_bit(PG_mapped, &page->flags);
-			}
-		}
-	}
-#endif
 
 	local_irq_save(flags);
 
@@ -61,9 +43,12 @@ void update_mmu_cache(struct vm_area_struct * vma,
 	 */
 	ctrl_outl(pte.pte_high, MMU_PTEA);
 #else
-	if (cpu_data->flags & CPU_HAS_PTEA)
-		/* TODO: make this look less hacky */
-		ctrl_outl(((pteval >> 28) & 0xe) | (pteval & 0x1), MMU_PTEA);
+	if (cpu_data->flags & CPU_HAS_PTEA) {
+		/* The last 3 bits and the first one of pteval contains
+		 * the PTEA timing control and space attribute bits
+		 */
+		ctrl_outl(copy_ptea_attributes(pteval), MMU_PTEA);
+	}
 #endif
 
 	/* Set PTEL register */
@@ -79,7 +64,8 @@ void update_mmu_cache(struct vm_area_struct * vma,
 	local_irq_restore(flags);
 }
 
-void local_flush_tlb_one(unsigned long asid, unsigned long page)
+void __uses_jump_to_uncached local_flush_tlb_one(unsigned long asid,
+						 unsigned long page)
 {
 	unsigned long addr, data;
 
@@ -91,7 +77,7 @@ void local_flush_tlb_one(unsigned long asid, unsigned long page)
 	 */
 	addr = MMU_UTLB_ADDRESS_ARRAY | MMU_PAGE_ASSOC_BIT;
 	data = page | asid; /* VALID bit is off */
-	jump_to_P2();
+	jump_to_uncached();
 	ctrl_outl(data, addr);
-	back_to_P1();
+	back_to_cached();
 }

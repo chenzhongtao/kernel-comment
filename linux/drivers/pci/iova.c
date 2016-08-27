@@ -1,27 +1,37 @@
 /*
- * Copyright (c) 2006, Intel Corporation.
+ * Copyright © 2006-2009, Intel Corporation.
  *
- * This file is released under the GPLv2.
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
  *
- * Copyright (C) 2006 Anil S Keshavamurthy <anil.s.keshavamurthy@intel.com>
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
+ *
+ * Author: Anil S Keshavamurthy <anil.s.keshavamurthy@intel.com>
  */
 
-#include "iova.h"
+#include <linux/iova.h>
 
 void
-init_iova_domain(struct iova_domain *iovad)
+init_iova_domain(struct iova_domain *iovad, unsigned long pfn_32bit)
 {
-	spin_lock_init(&iovad->iova_alloc_lock);
 	spin_lock_init(&iovad->iova_rbtree_lock);
 	iovad->rbroot = RB_ROOT;
 	iovad->cached32_node = NULL;
-
+	iovad->dma_32bit_pfn = pfn_32bit;
 }
 
 static struct rb_node *
 __get_cached_rbnode(struct iova_domain *iovad, unsigned long *limit_pfn)
 {
-	if ((*limit_pfn != DMA_32BIT_PFN) ||
+	if ((*limit_pfn != iovad->dma_32bit_pfn) ||
 		(iovad->cached32_node == NULL))
 		return rb_last(&iovad->rbroot);
 	else {
@@ -37,7 +47,7 @@ static void
 __cached_rbnode_insert_update(struct iova_domain *iovad,
 	unsigned long limit_pfn, struct iova *new)
 {
-	if (limit_pfn != DMA_32BIT_PFN)
+	if (limit_pfn != iovad->dma_32bit_pfn)
 		return;
 	iovad->cached32_node = &new->node;
 }
@@ -72,10 +82,11 @@ iova_get_pad_size(int size, unsigned int limit_pfn)
 	return pad_size;
 }
 
-static int __alloc_iova_range(struct iova_domain *iovad, unsigned long size,
-		unsigned long limit_pfn, struct iova *new, bool size_aligned)
+static int __alloc_and_insert_iova_range(struct iova_domain *iovad,
+		unsigned long size, unsigned long limit_pfn,
+			struct iova *new, bool size_aligned)
 {
-	struct rb_node *curr = NULL;
+	struct rb_node *prev, *curr = NULL;
 	unsigned long flags;
 	unsigned long saved_pfn;
 	unsigned int pad_size = 0;
@@ -84,8 +95,10 @@ static int __alloc_iova_range(struct iova_domain *iovad, unsigned long size,
 	spin_lock_irqsave(&iovad->iova_rbtree_lock, flags);
 	saved_pfn = limit_pfn;
 	curr = __get_cached_rbnode(iovad, &limit_pfn);
+	prev = curr;
 	while (curr) {
 		struct iova *curr_iova = container_of(curr, struct iova, node);
+
 		if (limit_pfn < curr_iova->pfn_lo)
 			goto move_left;
 		else if (limit_pfn < curr_iova->pfn_hi)
@@ -99,6 +112,7 @@ static int __alloc_iova_range(struct iova_domain *iovad, unsigned long size,
 adjust_limit_pfn:
 		limit_pfn = curr_iova->pfn_lo - 1;
 move_left:
+		prev = curr;
 		curr = rb_prev(curr);
 	}
 
@@ -115,7 +129,41 @@ move_left:
 	new->pfn_lo = limit_pfn - (size + pad_size) + 1;
 	new->pfn_hi = new->pfn_lo + size - 1;
 
+	/* Insert the new_iova into domain rbtree by holding writer lock */
+	/* Add new node and rebalance tree. */
+	{
+		struct rb_node **entry, *parent = NULL;
+
+		/* If we have 'prev', it's a valid place to start the
+		   insertion. Otherwise, start from the root. */
+		if (prev)
+			entry = &prev;
+		else
+			entry = &iovad->rbroot.rb_node;
+
+		/* Figure out where to put new node */
+		while (*entry) {
+			struct iova *this = container_of(*entry,
+							struct iova, node);
+			parent = *entry;
+
+			if (new->pfn_lo < this->pfn_lo)
+				entry = &((*entry)->rb_left);
+			else if (new->pfn_lo > this->pfn_lo)
+				entry = &((*entry)->rb_right);
+			else
+				BUG(); /* this should not happen */
+		}
+
+		/* Add new node and rebalance tree. */
+		rb_link_node(&new->node, parent, entry);
+		rb_insert_color(&new->node, &iovad->rbroot);
+	}
+	__cached_rbnode_insert_update(iovad, saved_pfn, new);
+
 	spin_unlock_irqrestore(&iovad->iova_rbtree_lock, flags);
+
+
 	return 0;
 }
 
@@ -156,7 +204,6 @@ alloc_iova(struct iova_domain *iovad, unsigned long size,
 	unsigned long limit_pfn,
 	bool size_aligned)
 {
-	unsigned long flags;
 	struct iova *new_iova;
 	int ret;
 
@@ -170,23 +217,13 @@ alloc_iova(struct iova_domain *iovad, unsigned long size,
 	if (size_aligned)
 		size = __roundup_pow_of_two(size);
 
-	spin_lock_irqsave(&iovad->iova_alloc_lock, flags);
-	ret = __alloc_iova_range(iovad, size, limit_pfn, new_iova,
-			size_aligned);
+	ret = __alloc_and_insert_iova_range(iovad, size, limit_pfn,
+			new_iova, size_aligned);
 
 	if (ret) {
-		spin_unlock_irqrestore(&iovad->iova_alloc_lock, flags);
 		free_iova_mem(new_iova);
 		return NULL;
 	}
-
-	/* Insert the new_iova into domain rbtree by holding writer lock */
-	spin_lock(&iovad->iova_rbtree_lock);
-	iova_insert_rbtree(&iovad->rbroot, new_iova);
-	__cached_rbnode_insert_update(iovad, limit_pfn, new_iova);
-	spin_unlock(&iovad->iova_rbtree_lock);
-
-	spin_unlock_irqrestore(&iovad->iova_alloc_lock, flags);
 
 	return new_iova;
 }
@@ -340,8 +377,7 @@ reserve_iova(struct iova_domain *iovad,
 	struct iova *iova;
 	unsigned int overlap = 0;
 
-	spin_lock_irqsave(&iovad->iova_alloc_lock, flags);
-	spin_lock(&iovad->iova_rbtree_lock);
+	spin_lock_irqsave(&iovad->iova_rbtree_lock, flags);
 	for (node = rb_first(&iovad->rbroot); node; node = rb_next(node)) {
 		if (__is_range_overlap(node, pfn_lo, pfn_hi)) {
 			iova = container_of(node, struct iova, node);
@@ -361,8 +397,7 @@ reserve_iova(struct iova_domain *iovad,
 	iova = __insert_new_range(iovad, pfn_lo, pfn_hi);
 finish:
 
-	spin_unlock(&iovad->iova_rbtree_lock);
-	spin_unlock_irqrestore(&iovad->iova_alloc_lock, flags);
+	spin_unlock_irqrestore(&iovad->iova_rbtree_lock, flags);
 	return iova;
 }
 
@@ -379,8 +414,7 @@ copy_reserved_iova(struct iova_domain *from, struct iova_domain *to)
 	unsigned long flags;
 	struct rb_node *node;
 
-	spin_lock_irqsave(&from->iova_alloc_lock, flags);
-	spin_lock(&from->iova_rbtree_lock);
+	spin_lock_irqsave(&from->iova_rbtree_lock, flags);
 	for (node = rb_first(&from->rbroot); node; node = rb_next(node)) {
 		struct iova *iova = container_of(node, struct iova, node);
 		struct iova *new_iova;
@@ -389,6 +423,5 @@ copy_reserved_iova(struct iova_domain *from, struct iova_domain *to)
 			printk(KERN_ERR "Reserve iova range %lx@%lx failed\n",
 				iova->pfn_lo, iova->pfn_lo);
 	}
-	spin_unlock(&from->iova_rbtree_lock);
-	spin_unlock_irqrestore(&from->iova_alloc_lock, flags);
+	spin_unlock_irqrestore(&from->iova_rbtree_lock, flags);
 }

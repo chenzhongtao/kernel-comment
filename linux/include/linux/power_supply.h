@@ -39,12 +39,20 @@ enum {
 };
 
 enum {
+	POWER_SUPPLY_CHARGE_TYPE_UNKNOWN = 0,
+	POWER_SUPPLY_CHARGE_TYPE_NONE,
+	POWER_SUPPLY_CHARGE_TYPE_TRICKLE,
+	POWER_SUPPLY_CHARGE_TYPE_FAST,
+};
+
+enum {
 	POWER_SUPPLY_HEALTH_UNKNOWN = 0,
 	POWER_SUPPLY_HEALTH_GOOD,
 	POWER_SUPPLY_HEALTH_OVERHEAT,
 	POWER_SUPPLY_HEALTH_DEAD,
 	POWER_SUPPLY_HEALTH_OVERVOLTAGE,
 	POWER_SUPPLY_HEALTH_UNSPEC_FAILURE,
+	POWER_SUPPLY_HEALTH_COLD,
 };
 
 enum {
@@ -54,6 +62,7 @@ enum {
 	POWER_SUPPLY_TECHNOLOGY_LIPO,
 	POWER_SUPPLY_TECHNOLOGY_LiFe,
 	POWER_SUPPLY_TECHNOLOGY_NiCd,
+	POWER_SUPPLY_TECHNOLOGY_LiMn,
 };
 
 enum {
@@ -68,22 +77,28 @@ enum {
 enum power_supply_property {
 	/* Properties of type `int' */
 	POWER_SUPPLY_PROP_STATUS = 0,
+	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_VOLTAGE_MAX,
+	POWER_SUPPLY_PROP_VOLTAGE_MIN,
 	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_VOLTAGE_AVG,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_CURRENT_AVG,
+	POWER_SUPPLY_PROP_POWER_NOW,
+	POWER_SUPPLY_PROP_POWER_AVG,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_CHARGE_EMPTY_DESIGN,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_EMPTY,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CHARGE_AVG,
+	POWER_SUPPLY_PROP_CHARGE_COUNTER,
 	POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_EMPTY_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_FULL,
@@ -101,6 +116,7 @@ enum power_supply_property {
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
+	POWER_SUPPLY_PROP_SERIAL_NUMBER,
 };
 
 enum power_supply_type {
@@ -128,6 +144,7 @@ struct power_supply {
 			    enum power_supply_property psp,
 			    union power_supply_propval *val);
 	void (*external_power_changed)(struct power_supply *psy);
+	void (*set_charged)(struct power_supply *psy);
 
 	/* For APM emulation, think legacy userspace. */
 	int use_for_apm;
@@ -167,8 +184,16 @@ struct power_supply_info {
 	int use_for_apm;
 };
 
+extern struct power_supply *power_supply_get_by_name(char *name);
 extern void power_supply_changed(struct power_supply *psy);
 extern int power_supply_am_i_supplied(struct power_supply *psy);
+extern int power_supply_set_battery_charged(struct power_supply *psy);
+
+#if defined(CONFIG_POWER_SUPPLY) || defined(CONFIG_POWER_SUPPLY_MODULE)
+extern int power_supply_is_system_supplied(void);
+#else
+static inline int power_supply_is_system_supplied(void) { return -ENOSYS; }
+#endif
 
 extern int power_supply_register(struct device *parent,
 				 struct power_supply *psy);

@@ -23,7 +23,6 @@
  *
  */      
 
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -233,14 +232,10 @@ struct rme96 {
 };
 
 static struct pci_device_id snd_rme96_ids[] = {
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96_8,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PRO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PAD_OR_PST,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, }, 
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96), 0, },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8), 0, },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PRO), 0, },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PAD_OR_PST), 0, },
 	{ 0, }
 };
 
@@ -1560,7 +1555,8 @@ snd_rme96_create(struct rme96 *rme96)
 		return err;
 	rme96->port = pci_resource_start(rme96->pci, 0);
 
-	if ((rme96->iobase = ioremap_nocache(rme96->port, RME96_IO_SIZE)) == 0) {
+	rme96->iobase = ioremap_nocache(rme96->port, RME96_IO_SIZE);
+	if (!rme96->iobase) {
 		snd_printk(KERN_ERR "unable to remap memory region 0x%lx-0x%lx\n", rme96->port, rme96->port + RME96_IO_SIZE - 1);
 		return -ENOMEM;
 	}
@@ -2195,22 +2191,25 @@ snd_rme96_dac_volume_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_valu
 {
 	struct rme96 *rme96 = snd_kcontrol_chip(kcontrol);
         int change = 0;
+	unsigned int vol, maxvol;
 
-	if (!RME96_HAS_ANALOG_OUT(rme96)) {
+
+	if (!RME96_HAS_ANALOG_OUT(rme96))
 		return -EINVAL;
-	}
+	maxvol = RME96_185X_MAX_OUT(rme96);
 	spin_lock_irq(&rme96->lock);
-        if (u->value.integer.value[0] != rme96->vol[0]) {
-		rme96->vol[0] = u->value.integer.value[0];
-                change = 1;
-        }
-        if (u->value.integer.value[1] != rme96->vol[1]) {
-		rme96->vol[1] = u->value.integer.value[1];
-                change = 1;
-        }
-	if (change) {
-		snd_rme96_apply_dac_volume(rme96);
+	vol = u->value.integer.value[0];
+	if (vol != rme96->vol[0] && vol <= maxvol) {
+		rme96->vol[0] = vol;
+		change = 1;
 	}
+	vol = u->value.integer.value[1];
+	if (vol != rme96->vol[1] && vol <= maxvol) {
+		rme96->vol[1] = vol;
+		change = 1;
+	}
+	if (change)
+		snd_rme96_apply_dac_volume(rme96);
 	spin_unlock_irq(&rme96->lock);
 
         return change;
@@ -2345,9 +2344,10 @@ snd_rme96_probe(struct pci_dev *pci,
 		dev++;
 		return -ENOENT;
 	}
-	if ((card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-				 sizeof(struct rme96))) == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct rme96), &card);
+	if (err < 0)
+		return err;
 	card->private_free = snd_rme96_card_free;
 	rme96 = (struct rme96 *)card->private_data;	
 	rme96->card = card;

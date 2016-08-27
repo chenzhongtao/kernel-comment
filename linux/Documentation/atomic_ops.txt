@@ -186,7 +186,8 @@ If the atomic value v is not equal to u, this function adds a to v, and
 returns non zero. If v is equal to u then it returns zero. This is done as
 an atomic operation.
 
-atomic_add_unless requires explicit memory barriers around the operation.
+atomic_add_unless requires explicit memory barriers around the operation
+unless it fails (returns 0).
 
 atomic_inc_not_zero, equivalent to atomic_add_unless(v, 1, 0)
 
@@ -228,10 +229,10 @@ kernel.  It is the use of atomic counters to implement reference
 counting, and it works such that once the counter falls to zero it can
 be guaranteed that no other entity can be accessing the object:
 
-static void obj_list_add(struct obj *obj)
+static void obj_list_add(struct obj *obj, struct list_head *head)
 {
 	obj->active = 1;
-	list_add(&obj->list);
+	list_add(&obj->list, head);
 }
 
 static void obj_list_del(struct obj *obj)

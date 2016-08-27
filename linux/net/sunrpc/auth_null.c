@@ -8,7 +8,6 @@
 
 #include <linux/types.h>
 #include <linux/module.h>
-#include <linux/utsname.h>
 #include <linux/sunrpc/clnt.h>
 
 #ifdef RPC_DEBUG
@@ -104,9 +103,7 @@ nul_validate(struct rpc_task *task, __be32 *p)
 const struct rpc_authops authnull_ops = {
 	.owner		= THIS_MODULE,
 	.au_flavor	= RPC_AUTH_NULL,
-#ifdef RPC_DEBUG
 	.au_name	= "NULL",
-#endif
 	.create		= nul_create,
 	.destroy	= nul_destroy,
 	.lookup_cred	= nul_lookup_cred,
@@ -125,6 +122,7 @@ static
 const struct rpc_credops null_credops = {
 	.cr_name	= "AUTH_NULL",
 	.crdestroy	= nul_destroy_cred,
+	.crbind		= rpcauth_generic_bind_cred,
 	.crmatch	= nul_match,
 	.crmarshal	= nul_marshal,
 	.crrefresh	= nul_refresh,

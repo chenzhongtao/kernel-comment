@@ -45,7 +45,6 @@
 #include "xfs_rtalloc.h"
 #include "xfs_error.h"
 #include "xfs_rw.h"
-#include "xfs_acl.h"
 #include "xfs_attr.h"
 #include "xfs_buf_item.h"
 #include "xfs_utils.h"
@@ -57,133 +56,14 @@
 # define qdprintk(s, args...)	do { } while (0)
 #endif
 
-STATIC int	xfs_qm_scall_trunc_qfiles(xfs_mount_t *, uint);
-STATIC int	xfs_qm_scall_getquota(xfs_mount_t *, xfs_dqid_t, uint,
-					fs_disk_quota_t *);
-STATIC int	xfs_qm_scall_getqstat(xfs_mount_t *, fs_quota_stat_t *);
-STATIC int	xfs_qm_scall_setqlim(xfs_mount_t *, xfs_dqid_t, uint,
-					fs_disk_quota_t *);
-STATIC int	xfs_qm_scall_quotaon(xfs_mount_t *, uint);
-STATIC int	xfs_qm_scall_quotaoff(xfs_mount_t *, uint, boolean_t);
 STATIC int	xfs_qm_log_quotaoff(xfs_mount_t *, xfs_qoff_logitem_t **, uint);
 STATIC int	xfs_qm_log_quotaoff_end(xfs_mount_t *, xfs_qoff_logitem_t *,
 					uint);
-STATIC uint	xfs_qm_import_flags(uint);
 STATIC uint	xfs_qm_export_flags(uint);
-STATIC uint	xfs_qm_import_qtype_flags(uint);
 STATIC uint	xfs_qm_export_qtype_flags(uint);
 STATIC void	xfs_qm_export_dquot(xfs_mount_t *, xfs_disk_dquot_t *,
 					fs_disk_quota_t *);
 
-
-/*
- * The main distribution switch of all XFS quotactl system calls.
- */
-int
-xfs_qm_quotactl(
-	xfs_mount_t	*mp,
-	int		cmd,
-	int		id,
-	xfs_caddr_t	addr)
-{
-	int		error;
-
-	ASSERT(addr != NULL || cmd == Q_XQUOTASYNC);
-
-	/*
-	 * The following commands are valid even when quotaoff.
-	 */
-	switch (cmd) {
-	case Q_XQUOTARM:
-		/*
-		 * Truncate quota files. quota must be off.
-		 */
-		if (XFS_IS_QUOTA_ON(mp))
-			return XFS_ERROR(EINVAL);
-		if (mp->m_flags & XFS_MOUNT_RDONLY)
-			return XFS_ERROR(EROFS);
-		return (xfs_qm_scall_trunc_qfiles(mp,
-			       xfs_qm_import_qtype_flags(*(uint *)addr)));
-
-	case Q_XGETQSTAT:
-		/*
-		 * Get quota status information.
-		 */
-		return (xfs_qm_scall_getqstat(mp, (fs_quota_stat_t *)addr));
-
-	case Q_XQUOTAON:
-		/*
-		 * QUOTAON - enabling quota enforcement.
-		 * Quota accounting must be turned on at mount time.
-		 */
-		if (mp->m_flags & XFS_MOUNT_RDONLY)
-			return XFS_ERROR(EROFS);
-		return (xfs_qm_scall_quotaon(mp,
-					  xfs_qm_import_flags(*(uint *)addr)));
-
-	case Q_XQUOTAOFF:
-		if (mp->m_flags & XFS_MOUNT_RDONLY)
-			return XFS_ERROR(EROFS);
-		break;
-
-	case Q_XQUOTASYNC:
-		return (xfs_sync_inodes(mp, SYNC_DELWRI, NULL));
-
-	default:
-		break;
-	}
-
-	if (! XFS_IS_QUOTA_ON(mp))
-		return XFS_ERROR(ESRCH);
-
-	switch (cmd) {
-	case Q_XQUOTAOFF:
-		if (mp->m_flags & XFS_MOUNT_RDONLY)
-			return XFS_ERROR(EROFS);
-		error = xfs_qm_scall_quotaoff(mp,
-					    xfs_qm_import_flags(*(uint *)addr),
-					    B_FALSE);
-		break;
-
-	case Q_XGETQUOTA:
-		error = xfs_qm_scall_getquota(mp, (xfs_dqid_t)id, XFS_DQ_USER,
-					(fs_disk_quota_t *)addr);
-		break;
-	case Q_XGETGQUOTA:
-		error = xfs_qm_scall_getquota(mp, (xfs_dqid_t)id, XFS_DQ_GROUP,
-					(fs_disk_quota_t *)addr);
-		break;
-	case Q_XGETPQUOTA:
-		error = xfs_qm_scall_getquota(mp, (xfs_dqid_t)id, XFS_DQ_PROJ,
-					(fs_disk_quota_t *)addr);
-		break;
-
-	case Q_XSETQLIM:
-		if (mp->m_flags & XFS_MOUNT_RDONLY)
-			return XFS_ERROR(EROFS);
-		error = xfs_qm_scall_setqlim(mp, (xfs_dqid_t)id, XFS_DQ_USER,
-					     (fs_disk_quota_t *)addr);
-		break;
-	case Q_XSETGQLIM:
-		if (mp->m_flags & XFS_MOUNT_RDONLY)
-			return XFS_ERROR(EROFS);
-		error = xfs_qm_scall_setqlim(mp, (xfs_dqid_t)id, XFS_DQ_GROUP,
-					     (fs_disk_quota_t *)addr);
-		break;
-	case Q_XSETPQLIM:
-		if (mp->m_flags & XFS_MOUNT_RDONLY)
-			return XFS_ERROR(EROFS);
-		error = xfs_qm_scall_setqlim(mp, (xfs_dqid_t)id, XFS_DQ_PROJ,
-					     (fs_disk_quota_t *)addr);
-		break;
-
-	default:
-		error = XFS_ERROR(EINVAL);
-		break;
-	}
-
-	return (error);
-}
 
 /*
  * Turn off quota accounting and/or enforcement for all udquots and/or
@@ -193,21 +73,17 @@ xfs_qm_quotactl(
  * incore, and modifies the ondisk dquot directly. Therefore, for example,
  * it is an error to call this twice, without purging the cache.
  */
-STATIC int
+int
 xfs_qm_scall_quotaoff(
 	xfs_mount_t		*mp,
-	uint			flags,
-	boolean_t		force)
+	uint			flags)
 {
 	uint			dqtype;
-	unsigned long	s;
 	int			error;
 	uint			inactivate_flags;
 	xfs_qoff_logitem_t	*qoffstart;
 	int			nculprits;
 
-	if (!force && !capable(CAP_SYS_ADMIN))
-		return XFS_ERROR(EPERM);
 	/*
 	 * No file system can have quotas enabled on disk but not in core.
 	 * Note that quota utilities (like quotaoff) _expect_
@@ -237,9 +113,9 @@ xfs_qm_scall_quotaoff(
 	if ((flags & XFS_ALL_QUOTA_ACCT) == 0) {
 		mp->m_qflags &= ~(flags);
 
-		s = XFS_SB_LOCK(mp);
+		spin_lock(&mp->m_sb_lock);
 		mp->m_sb.sb_qflags = mp->m_qflags;
-		XFS_SB_UNLOCK(mp, s);
+		spin_unlock(&mp->m_sb_lock);
 		mutex_unlock(&(XFS_QI_QOFFLOCK(mp)));
 
 		/* XXX what to do if error ? Revert back to old vals incore ? */
@@ -280,9 +156,12 @@ xfs_qm_scall_quotaoff(
 
 	/*
 	 * Write the LI_QUOTAOFF log record, and do SB changes atomically,
-	 * and synchronously.
+	 * and synchronously. If we fail to write, we should abort the
+	 * operation as it cannot be recovered safely if we crash.
 	 */
-	xfs_qm_log_quotaoff(mp, &qoffstart, flags);
+	error = xfs_qm_log_quotaoff(mp, &qoffstart, flags);
+	if (error)
+		goto out_error;
 
 	/*
 	 * Next we clear the XFS_MOUNT_*DQ_ACTIVE bit(s) in the mount struct
@@ -338,7 +217,12 @@ xfs_qm_scall_quotaoff(
 	 * So, we have QUOTAOFF start and end logitems; the start
 	 * logitem won't get overwritten until the end logitem appears...
 	 */
-	xfs_qm_log_quotaoff_end(mp, qoffstart, flags);
+	error = xfs_qm_log_quotaoff_end(mp, qoffstart, flags);
+	if (error) {
+		/* We're screwed now. Shutdown is the only option. */
+		xfs_force_shutdown(mp, SHUTDOWN_CORRUPT_INCORE);
+		goto out_error;
+	}
 
 	/*
 	 * If quotas is completely disabled, close shop.
@@ -355,52 +239,50 @@ xfs_qm_scall_quotaoff(
 	 * if we don't need them anymore.
 	 */
 	if ((dqtype & XFS_QMOPT_UQUOTA) && XFS_QI_UQIP(mp)) {
-		XFS_PURGE_INODE(XFS_QI_UQIP(mp));
+		IRELE(XFS_QI_UQIP(mp));
 		XFS_QI_UQIP(mp) = NULL;
 	}
 	if ((dqtype & (XFS_QMOPT_GQUOTA|XFS_QMOPT_PQUOTA)) && XFS_QI_GQIP(mp)) {
-		XFS_PURGE_INODE(XFS_QI_GQIP(mp));
+		IRELE(XFS_QI_GQIP(mp));
 		XFS_QI_GQIP(mp) = NULL;
 	}
+out_error:
 	mutex_unlock(&(XFS_QI_QOFFLOCK(mp)));
 
 	return (error);
 }
 
-STATIC int
+int
 xfs_qm_scall_trunc_qfiles(
 	xfs_mount_t	*mp,
 	uint		flags)
 {
-	int		error;
+	int		error = 0, error2 = 0;
 	xfs_inode_t	*qip;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return XFS_ERROR(EPERM);
-	error = 0;
-	if (!XFS_SB_VERSION_HASQUOTA(&mp->m_sb) || flags == 0) {
+	if (!xfs_sb_version_hasquota(&mp->m_sb) || flags == 0) {
 		qdprintk("qtrunc flags=%x m_qflags=%x\n", flags, mp->m_qflags);
 		return XFS_ERROR(EINVAL);
 	}
 
 	if ((flags & XFS_DQ_USER) && mp->m_sb.sb_uquotino != NULLFSINO) {
 		error = xfs_iget(mp, NULL, mp->m_sb.sb_uquotino, 0, 0, &qip, 0);
-		if (! error) {
-			(void) xfs_truncate_file(mp, qip);
-			VN_RELE(XFS_ITOV(qip));
+		if (!error) {
+			error = xfs_truncate_file(mp, qip);
+			IRELE(qip);
 		}
 	}
 
 	if ((flags & (XFS_DQ_GROUP|XFS_DQ_PROJ)) &&
 	    mp->m_sb.sb_gquotino != NULLFSINO) {
-		error = xfs_iget(mp, NULL, mp->m_sb.sb_gquotino, 0, 0, &qip, 0);
-		if (! error) {
-			(void) xfs_truncate_file(mp, qip);
-			VN_RELE(XFS_ITOV(qip));
+		error2 = xfs_iget(mp, NULL, mp->m_sb.sb_gquotino, 0, 0, &qip, 0);
+		if (!error2) {
+			error2 = xfs_truncate_file(mp, qip);
+			IRELE(qip);
 		}
 	}
 
-	return (error);
+	return error ? error : error2;
 }
 
 
@@ -409,19 +291,15 @@ xfs_qm_scall_trunc_qfiles(
  * effect immediately.
  * (Switching on quota accounting must be done at mount time.)
  */
-STATIC int
+int
 xfs_qm_scall_quotaon(
 	xfs_mount_t	*mp,
 	uint		flags)
 {
 	int		error;
-	unsigned long	s;
 	uint		qf;
 	uint		accflags;
 	__int64_t	sbflags;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return XFS_ERROR(EPERM);
 
 	flags &= (XFS_ALL_QUOTA_ACCT | XFS_ALL_QUOTA_ENFD);
 	/*
@@ -468,10 +346,10 @@ xfs_qm_scall_quotaon(
 	 * Change sb_qflags on disk but not incore mp->qflags
 	 * if this is the root filesystem.
 	 */
-	s = XFS_SB_LOCK(mp);
+	spin_lock(&mp->m_sb_lock);
 	qf = mp->m_sb.sb_qflags;
 	mp->m_sb.sb_qflags = qf | flags;
-	XFS_SB_UNLOCK(mp, s);
+	spin_unlock(&mp->m_sb_lock);
 
 	/*
 	 * There's nothing to change if it's the same.
@@ -511,7 +389,7 @@ xfs_qm_scall_quotaon(
 /*
  * Return quota status information, such as uquota-off, enforcements, etc.
  */
-STATIC int
+int
 xfs_qm_scall_getqstat(
 	xfs_mount_t	*mp,
 	fs_quota_stat_t *out)
@@ -524,7 +402,7 @@ xfs_qm_scall_getqstat(
 	memset(out, 0, sizeof(fs_quota_stat_t));
 
 	out->qs_version = FS_QSTAT_VERSION;
-	if (! XFS_SB_VERSION_HASQUOTA(&mp->m_sb)) {
+	if (!xfs_sb_version_hasquota(&mp->m_sb)) {
 		out->qs_uquota.qfs_ino = NULLFSINO;
 		out->qs_gquota.qfs_ino = NULLFSINO;
 		return (0);
@@ -554,13 +432,13 @@ xfs_qm_scall_getqstat(
 		out->qs_uquota.qfs_nblks = uip->i_d.di_nblocks;
 		out->qs_uquota.qfs_nextents = uip->i_d.di_nextents;
 		if (tempuqip)
-			VN_RELE(XFS_ITOV(uip));
+			IRELE(uip);
 	}
 	if (gip) {
 		out->qs_gquota.qfs_nblks = gip->i_d.di_nblocks;
 		out->qs_gquota.qfs_nextents = gip->i_d.di_nextents;
 		if (tempgqip)
-			VN_RELE(XFS_ITOV(gip));
+			IRELE(gip);
 	}
 	if (mp->m_quotainfo) {
 		out->qs_incoredqs = XFS_QI_MPLNDQUOTS(mp);
@@ -576,7 +454,7 @@ xfs_qm_scall_getqstat(
 /*
  * Adjust quota limits, and start/stop timers accordingly.
  */
-STATIC int
+int
 xfs_qm_scall_setqlim(
 	xfs_mount_t		*mp,
 	xfs_dqid_t		id,
@@ -588,9 +466,6 @@ xfs_qm_scall_setqlim(
 	xfs_trans_t		*tp;
 	int			error;
 	xfs_qcnt_t		hard, soft;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return XFS_ERROR(EPERM);
 
 	if ((newlim->d_fieldmask &
 	    (FS_DQ_LIMIT_MASK|FS_DQ_TIMER_MASK|FS_DQ_WARNS_MASK)) == 0)
@@ -728,15 +603,15 @@ xfs_qm_scall_setqlim(
 	xfs_trans_log_dquot(tp, dqp);
 
 	xfs_dqtrace_entry(dqp, "Q_SETQLIM: COMMIT");
-	xfs_trans_commit(tp, 0);
+	error = xfs_trans_commit(tp, 0);
 	xfs_qm_dqprint(dqp);
 	xfs_qm_dqrele(dqp);
 	mutex_unlock(&(XFS_QI_QOFFLOCK(mp)));
 
-	return (0);
+	return error;
 }
 
-STATIC int
+int
 xfs_qm_scall_getquota(
 	xfs_mount_t	*mp,
 	xfs_dqid_t	id,
@@ -815,7 +690,6 @@ xfs_qm_log_quotaoff(
 {
 	xfs_trans_t	       *tp;
 	int			error;
-	unsigned long	s;
 	xfs_qoff_logitem_t     *qoffi=NULL;
 	uint			oldsbqflag=0;
 
@@ -832,10 +706,10 @@ xfs_qm_log_quotaoff(
 	qoffi = xfs_trans_get_qoff_item(tp, NULL, flags & XFS_ALL_QUOTA_ACCT);
 	xfs_trans_log_quotaoff_item(tp, qoffi);
 
-	s = XFS_SB_LOCK(mp);
+	spin_lock(&mp->m_sb_lock);
 	oldsbqflag = mp->m_sb.sb_qflags;
 	mp->m_sb.sb_qflags = (mp->m_qflags & ~(flags)) & XFS_MOUNT_QUOTA_ALL;
-	XFS_SB_UNLOCK(mp, s);
+	spin_unlock(&mp->m_sb_lock);
 
 	xfs_mod_sb(tp, XFS_SB_QFLAGS);
 
@@ -854,9 +728,9 @@ error0:
 		 * No one else is modifying sb_qflags, so this is OK.
 		 * We still hold the quotaofflock.
 		 */
-		s = XFS_SB_LOCK(mp);
+		spin_lock(&mp->m_sb_lock);
 		mp->m_sb.sb_qflags = oldsbqflag;
-		XFS_SB_UNLOCK(mp, s);
+		spin_unlock(&mp->m_sb_lock);
 	}
 	*qoffstartp = qoffi;
 	return (error);
@@ -930,30 +804,6 @@ xfs_qm_export_dquot(
 }
 
 STATIC uint
-xfs_qm_import_qtype_flags(
-	uint		uflags)
-{
-	uint		oflags = 0;
-
-	/*
-	 * Can't be more than one, or none.
-	 */
-	if (((uflags & (XFS_GROUP_QUOTA | XFS_USER_QUOTA)) ==
-			(XFS_GROUP_QUOTA | XFS_USER_QUOTA)) ||
-	    ((uflags & (XFS_GROUP_QUOTA | XFS_PROJ_QUOTA)) ==
-			(XFS_GROUP_QUOTA | XFS_PROJ_QUOTA)) ||
-	    ((uflags & (XFS_USER_QUOTA | XFS_PROJ_QUOTA)) ==
-			(XFS_USER_QUOTA | XFS_PROJ_QUOTA)) ||
-	    ((uflags & (XFS_GROUP_QUOTA|XFS_USER_QUOTA|XFS_PROJ_QUOTA)) == 0))
-		return (0);
-
-	oflags |= (uflags & XFS_USER_QUOTA) ? XFS_DQ_USER : 0;
-	oflags |= (uflags & XFS_PROJ_QUOTA) ? XFS_DQ_PROJ : 0;
-	oflags |= (uflags & XFS_GROUP_QUOTA) ? XFS_DQ_GROUP: 0;
-	return oflags;
-}
-
-STATIC uint
 xfs_qm_export_qtype_flags(
 	uint flags)
 {
@@ -972,26 +822,6 @@ xfs_qm_export_qtype_flags(
 		XFS_USER_QUOTA : (flags & XFS_DQ_PROJ) ?
 			XFS_PROJ_QUOTA : XFS_GROUP_QUOTA;
 }
-
-STATIC uint
-xfs_qm_import_flags(
-	uint uflags)
-{
-	uint flags = 0;
-
-	if (uflags & XFS_QUOTA_UDQ_ACCT)
-		flags |= XFS_UQUOTA_ACCT;
-	if (uflags & XFS_QUOTA_PDQ_ACCT)
-		flags |= XFS_PQUOTA_ACCT;
-	if (uflags & XFS_QUOTA_GDQ_ACCT)
-		flags |= XFS_GQUOTA_ACCT;
-	if (uflags & XFS_QUOTA_UDQ_ENFD)
-		flags |= XFS_UQUOTA_ENFD;
-	if (uflags & (XFS_QUOTA_PDQ_ENFD|XFS_QUOTA_GDQ_ENFD))
-		flags |= XFS_OQUOTA_ENFD;
-	return (flags);
-}
-
 
 STATIC uint
 xfs_qm_export_flags(
@@ -1016,102 +846,54 @@ xfs_qm_export_flags(
 }
 
 
+STATIC int
+xfs_dqrele_inode(
+	struct xfs_inode	*ip,
+	struct xfs_perag	*pag,
+	int			flags)
+{
+	int			error;
+
+	/* skip quota inodes */
+	if (ip == XFS_QI_UQIP(ip->i_mount) || ip == XFS_QI_GQIP(ip->i_mount)) {
+		ASSERT(ip->i_udquot == NULL);
+		ASSERT(ip->i_gdquot == NULL);
+		read_unlock(&pag->pag_ici_lock);
+		return 0;
+	}
+
+	error = xfs_sync_inode_valid(ip, pag);
+	if (error)
+		return error;
+
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	if ((flags & XFS_UQUOTA_ACCT) && ip->i_udquot) {
+		xfs_qm_dqrele(ip->i_udquot);
+		ip->i_udquot = NULL;
+	}
+	if (flags & (XFS_PQUOTA_ACCT|XFS_GQUOTA_ACCT) && ip->i_gdquot) {
+		xfs_qm_dqrele(ip->i_gdquot);
+		ip->i_gdquot = NULL;
+	}
+	xfs_iput(ip, XFS_ILOCK_EXCL);
+
+	return 0;
+}
+
+
 /*
  * Go thru all the inodes in the file system, releasing their dquots.
+ *
  * Note that the mount structure gets modified to indicate that quotas are off
- * AFTER this, in the case of quotaoff. This also gets called from
- * xfs_rootumount.
+ * AFTER this, in the case of quotaoff.
  */
 void
 xfs_qm_dqrele_all_inodes(
 	struct xfs_mount *mp,
 	uint		 flags)
 {
-	xfs_inode_t	*ip, *topino;
-	uint		ireclaims;
-	bhv_vnode_t	*vp;
-	boolean_t	vnode_refd;
-
 	ASSERT(mp->m_quotainfo);
-
-	XFS_MOUNT_ILOCK(mp);
-again:
-	ip = mp->m_inodes;
-	if (ip == NULL) {
-		XFS_MOUNT_IUNLOCK(mp);
-		return;
-	}
-	do {
-		/* Skip markers inserted by xfs_sync */
-		if (ip->i_mount == NULL) {
-			ip = ip->i_mnext;
-			continue;
-		}
-		/* Root inode, rbmip and rsumip have associated blocks */
-		if (ip == XFS_QI_UQIP(mp) || ip == XFS_QI_GQIP(mp)) {
-			ASSERT(ip->i_udquot == NULL);
-			ASSERT(ip->i_gdquot == NULL);
-			ip = ip->i_mnext;
-			continue;
-		}
-		vp = XFS_ITOV_NULL(ip);
-		if (!vp) {
-			ASSERT(ip->i_udquot == NULL);
-			ASSERT(ip->i_gdquot == NULL);
-			ip = ip->i_mnext;
-			continue;
-		}
-		vnode_refd = B_FALSE;
-		if (xfs_ilock_nowait(ip, XFS_ILOCK_EXCL) == 0) {
-			ireclaims = mp->m_ireclaims;
-			topino = mp->m_inodes;
-			vp = vn_grab(vp);
-			if (!vp)
-				goto again;
-
-			XFS_MOUNT_IUNLOCK(mp);
-			/* XXX restart limit ? */
-			xfs_ilock(ip, XFS_ILOCK_EXCL);
-			vnode_refd = B_TRUE;
-		} else {
-			ireclaims = mp->m_ireclaims;
-			topino = mp->m_inodes;
-			XFS_MOUNT_IUNLOCK(mp);
-		}
-
-		/*
-		 * We don't keep the mountlock across the dqrele() call,
-		 * since it can take a while..
-		 */
-		if ((flags & XFS_UQUOTA_ACCT) && ip->i_udquot) {
-			xfs_qm_dqrele(ip->i_udquot);
-			ip->i_udquot = NULL;
-		}
-		if (flags & (XFS_PQUOTA_ACCT|XFS_GQUOTA_ACCT) && ip->i_gdquot) {
-			xfs_qm_dqrele(ip->i_gdquot);
-			ip->i_gdquot = NULL;
-		}
-		xfs_iunlock(ip, XFS_ILOCK_EXCL);
-		/*
-		 * Wait until we've dropped the ilock and mountlock to
-		 * do the vn_rele. Or be condemned to an eternity in the
-		 * inactive code in hell.
-		 */
-		if (vnode_refd)
-			VN_RELE(vp);
-		XFS_MOUNT_ILOCK(mp);
-		/*
-		 * If an inode was inserted or removed, we gotta
-		 * start over again.
-		 */
-		if (topino != mp->m_inodes || mp->m_ireclaims != ireclaims) {
-			/* XXX use a sentinel */
-			goto again;
-		}
-		ip = ip->i_mnext;
-	} while (ip != mp->m_inodes);
-
-	XFS_MOUNT_IUNLOCK(mp);
+	xfs_inode_ag_iterator(mp, xfs_dqrele_inode, flags, XFS_ICI_NO_TAG);
 }
 
 /*------------------------------------------------------------------------*/
@@ -1126,7 +908,7 @@ xfs_dqhash_t *qmtest_udqtab;
 xfs_dqhash_t *qmtest_gdqtab;
 int	      qmtest_hashmask;
 int	      qmtest_nfails;
-mutex_t	      qcheck_lock;
+struct mutex  qcheck_lock;
 
 #define DQTEST_HASHVAL(mp, id) (((__psunsigned_t)(mp) + \
 				 (__psunsigned_t)(id)) & \
@@ -1361,12 +1143,6 @@ xfs_qm_internalqcheck_adjust(
 		return (error);
 	}
 
-	if (ip->i_d.di_mode == 0) {
-		xfs_iput_new(ip, lock_flags);
-		*res = BULKSTAT_RV_NOTHING;
-		return XFS_ERROR(ENOENT);
-	}
-
 	/*
 	 * This inode can have blocks after eof which can get released
 	 * when we send it to inactive. Since we don't check the dquot
@@ -1450,14 +1226,14 @@ xfs_qm_internalqcheck(
 		for (d = (xfs_dqtest_t *) h1->qh_next; d != NULL; ) {
 			xfs_dqtest_cmp(d);
 			e = (xfs_dqtest_t *) d->HL_NEXT;
-			kmem_free(d, sizeof(xfs_dqtest_t));
+			kmem_free(d);
 			d = e;
 		}
 		h1 = &qmtest_gdqtab[i];
 		for (d = (xfs_dqtest_t *) h1->qh_next; d != NULL; ) {
 			xfs_dqtest_cmp(d);
 			e = (xfs_dqtest_t *) d->HL_NEXT;
-			kmem_free(d, sizeof(xfs_dqtest_t));
+			kmem_free(d);
 			d = e;
 		}
 	}
@@ -1468,8 +1244,8 @@ xfs_qm_internalqcheck(
 	} else {
 		cmn_err(CE_DEBUG, "******** quotacheck successful! ********");
 	}
-	kmem_free(qmtest_udqtab, qmtest_hashmask * sizeof(xfs_dqhash_t));
-	kmem_free(qmtest_gdqtab, qmtest_hashmask * sizeof(xfs_dqhash_t));
+	kmem_free(qmtest_udqtab);
+	kmem_free(qmtest_gdqtab);
 	mutex_unlock(&qcheck_lock);
 	return (qmtest_nfails);
 }

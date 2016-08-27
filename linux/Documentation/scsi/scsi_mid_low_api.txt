@@ -1271,6 +1271,11 @@ of interest:
     hostdata[0]  - area reserved for LLD at end of struct Scsi_Host. Size
                    is set by the second argument (named 'xtr_bytes') to
                    scsi_host_alloc() or scsi_register().
+    vendor_id    - a unique value that identifies the vendor supplying
+                   the LLD for the Scsi_Host.  Used most often in validating
+                   vendor-specific message requests.  Value consists of an
+                   identifier type and a vendor-specific value.
+                   See scsi_netlink.h for a description of valid formats.
 
 The scsi_host structure is defined in include/scsi/scsi_host.h
 
@@ -1407,7 +1412,7 @@ Credits
 =======
 The following people have contributed to this document:
         Mike Anderson <andmike at us dot ibm dot com>
-        James Bottomley <James dot Bottomley at steeleye dot com> 
+        James Bottomley <James dot Bottomley at hansenpartnership dot com>
         Patrick Mansfield <patmans at us dot ibm dot com> 
         Christoph Hellwig <hch at infradead dot org>
         Doug Ledford <dledford at redhat dot com>

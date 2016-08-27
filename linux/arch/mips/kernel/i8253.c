@@ -7,6 +7,7 @@
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
+#include <linux/smp.h>
 #include <linux/spinlock.h>
 
 #include <asm/delay.h>
@@ -15,6 +16,7 @@
 #include <asm/time.h>
 
 DEFINE_SPINLOCK(i8253_lock);
+EXPORT_SYMBOL(i8253_lock);
 
 /*
  * Initialize the PIT timer.
@@ -24,9 +26,7 @@ DEFINE_SPINLOCK(i8253_lock);
 static void init_pit_timer(enum clock_event_mode mode,
 			   struct clock_event_device *evt)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&i8253_lock, flags);
+	spin_lock(&i8253_lock);
 
 	switch(mode) {
 	case CLOCK_EVT_MODE_PERIODIC:
@@ -55,7 +55,7 @@ static void init_pit_timer(enum clock_event_mode mode,
 		/* Nothing to do here */
 		break;
 	}
-	spin_unlock_irqrestore(&i8253_lock, flags);
+	spin_unlock(&i8253_lock);
 }
 
 /*
@@ -65,12 +65,10 @@ static void init_pit_timer(enum clock_event_mode mode,
  */
 static int pit_next_event(unsigned long delta, struct clock_event_device *evt)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&i8253_lock, flags);
+	spin_lock(&i8253_lock);
 	outb_p(delta & 0xff , PIT_CH0);	/* LSB */
 	outb(delta >> 8 , PIT_CH0);	/* MSB */
-	spin_unlock_irqrestore(&i8253_lock, flags);
+	spin_unlock(&i8253_lock);
 
 	return 0;
 }
@@ -83,7 +81,7 @@ static int pit_next_event(unsigned long delta, struct clock_event_device *evt)
  * registered. This mechanism replaces the previous #ifdef LOCAL_APIC -
  * !using_apic_timer decisions in do_timer_interrupt_hook()
  */
-struct clock_event_device pit_clockevent = {
+static struct clock_event_device pit_clockevent = {
 	.name		= "pit",
 	.features	= CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
 	.set_mode	= init_pit_timer,
@@ -100,8 +98,7 @@ static irqreturn_t timer_interrupt(int irq, void *dev_id)
 
 static struct irqaction irq0  = {
 	.handler = timer_interrupt,
-	.flags = IRQF_DISABLED | IRQF_NOBALANCING,
-	.mask = CPU_MASK_NONE,
+	.flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_TIMER,
 	.name = "timer"
 };
 
@@ -118,13 +115,12 @@ void __init setup_pit_timer(void)
 	 * Start pit with the boot cpu mask and make it global after the
 	 * IO_APIC has been initialized.
 	 */
-	cd->cpumask = cpumask_of_cpu(cpu);
+	cd->cpumask = cpumask_of(cpu);
 	clockevent_set_clock(cd, CLOCK_TICK_RATE);
 	cd->max_delta_ns = clockevent_delta2ns(0x7FFF, cd);
 	cd->min_delta_ns = clockevent_delta2ns(0xF, cd);
 	clockevents_register_device(cd);
 
-	irq0.mask = cpumask_of_cpu(cpu);
 	setup_irq(0, &irq0);
 }
 
@@ -133,7 +129,7 @@ void __init setup_pit_timer(void)
  * to just read by itself. So use jiffies to emulate a free
  * running counter:
  */
-static cycle_t pit_read(void)
+static cycle_t pit_read(struct clocksource *cs)
 {
 	unsigned long flags;
 	int count;

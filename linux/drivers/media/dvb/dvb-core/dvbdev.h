@@ -27,9 +27,16 @@
 #include <linux/poll.h>
 #include <linux/fs.h>
 #include <linux/list.h>
-#include <linux/smp_lock.h>
 
 #define DVB_MAJOR 212
+
+#if defined(CONFIG_DVB_MAX_ADAPTERS) && CONFIG_DVB_MAX_ADAPTERS > 0
+  #define DVB_MAX_ADAPTERS CONFIG_DVB_MAX_ADAPTERS
+#else
+  #define DVB_MAX_ADAPTERS 8
+#endif
+
+#define DVB_UNSET (-1)
 
 #define DVB_DEVICE_VIDEO      0
 #define DVB_DEVICE_AUDIO      1
@@ -41,6 +48,11 @@
 #define DVB_DEVICE_NET        7
 #define DVB_DEVICE_OSD        8
 
+#define DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr) \
+	static short adapter_nr[] = \
+		{[0 ... (DVB_MAX_ADAPTERS - 1)] = DVB_UNSET }; \
+	module_param_array(adapter_nr, short, NULL, 0444); \
+	MODULE_PARM_DESC(adapter_nr, "DVB adapter numbers")
 
 struct dvb_adapter {
 	int num;
@@ -53,14 +65,19 @@ struct dvb_adapter {
 	struct device *device;
 
 	struct module *module;
+
+	int mfe_shared;			/* indicates mutually exclusive frontends */
+	struct dvb_device *mfe_dvbdev;	/* frontend device in use */
+	struct mutex mfe_lock;		/* access lock for thread creation */
 };
 
 
 struct dvb_device {
 	struct list_head list_head;
-	struct file_operations *fops;
+	const struct file_operations *fops;
 	struct dvb_adapter *adapter;
 	int type;
+	int minor;
 	u32 id;
 
 	/* in theory, 'users' can vanish now,
@@ -78,7 +95,9 @@ struct dvb_device {
 };
 
 
-extern int dvb_register_adapter (struct dvb_adapter *adap, const char *name, struct module *module, struct device *device);
+extern int dvb_register_adapter(struct dvb_adapter *adap, const char *name,
+				struct module *module, struct device *device,
+				short *adapter_nums);
 extern int dvb_unregister_adapter (struct dvb_adapter *adap);
 
 extern int dvb_register_device (struct dvb_adapter *adap,
@@ -104,7 +123,7 @@ extern int dvb_usercopy(struct inode *inode, struct file *file,
 			    unsigned int cmd, void *arg));
 
 /** generic DVB attach function. */
-#ifdef CONFIG_DVB_CORE_ATTACH
+#ifdef CONFIG_MEDIA_ATTACH
 #define dvb_attach(FUNCTION, ARGS...) ({ \
 	void *__r = NULL; \
 	typeof(&FUNCTION) __a = symbol_request(FUNCTION); \

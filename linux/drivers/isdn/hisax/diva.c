@@ -382,7 +382,7 @@ MemwaitforXFW(struct IsdnCardState *cs, int hscx)
 {
 	int to = 50;
 
-	while ((!(MemReadHSCX(cs, hscx, HSCX_STAR) & 0x44) == 0x40) && to) {
+	while (((MemReadHSCX(cs, hscx, HSCX_STAR) & 0x44) != 0x40) && to) {
 		udelay(1);
 		to--;
 	}
@@ -1088,7 +1088,7 @@ static int __devinit setup_diva_isapnp(struct IsdnCard *card)
 				err = pnp_activate_dev(pnp_d);
 				if (err<0) {
 					printk(KERN_WARNING "%s: pnp_activate_dev ret(%d)\n",
-						__FUNCTION__, err);
+						__func__, err);
 					return(0);
 				}
 				card->para[1] = pnp_port_start(pnp_d, 0);

@@ -3,7 +3,7 @@
  *  Authors: Dave Boutcher <boutcher@us.ibm.com>
  *           Ryan Arnold <ryanarn@us.ibm.com>
  *           Colin Devilbiss <devilbis@us.ibm.com>
- *           Stephen Rothwell <sfr@au1.ibm.com>
+ *           Stephen Rothwell
  *
  * (C) Copyright 2000-2004 IBM Corporation
  *
@@ -69,7 +69,7 @@ MODULE_LICENSE("GPL");
 enum {
 	PARTITION_SHIFT = 3,
 	MAX_DISKNO = HVMAXARCHITECTEDVIRTUALDISKS,
-	MAX_DISK_NAME = sizeof(((struct gendisk *)0)->disk_name)
+	MAX_DISK_NAME = FIELD_SIZEOF(struct gendisk, disk_name)
 };
 
 static DEFINE_SPINLOCK(viodasd_spinlock);
@@ -130,15 +130,15 @@ struct viodasd_device {
 /*
  * External open entry point.
  */
-static int viodasd_open(struct inode *ino, struct file *fil)
+static int viodasd_open(struct block_device *bdev, fmode_t mode)
 {
-	struct viodasd_device *d = ino->i_bdev->bd_disk->private_data;
+	struct viodasd_device *d = bdev->bd_disk->private_data;
 	HvLpEvent_Rc hvrc;
 	struct viodasd_waitevent we;
 	u16 flags = 0;
 
 	if (d->read_only) {
-		if ((fil != NULL) && (fil->f_mode & FMODE_WRITE))
+		if (mode & FMODE_WRITE)
 			return -EROFS;
 		flags = vioblockflags_ro;
 	}
@@ -179,9 +179,9 @@ static int viodasd_open(struct inode *ino, struct file *fil)
 /*
  * External release entry point.
  */
-static int viodasd_release(struct inode *ino, struct file *fil)
+static int viodasd_release(struct gendisk *disk, fmode_t mode)
 {
-	struct viodasd_device *d = ino->i_bdev->bd_disk->private_data;
+	struct viodasd_device *d = disk->private_data;
 	HvLpEvent_Rc hvrc;
 
 	/* Send the event to OS/400.  We DON'T expect a response */
@@ -219,7 +219,7 @@ static int viodasd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 /*
  * Our file operations table
  */
-static struct block_device_operations viodasd_fops = {
+static const struct block_device_operations viodasd_fops = {
 	.owner = THIS_MODULE,
 	.open = viodasd_open,
 	.release = viodasd_release,
@@ -229,13 +229,10 @@ static struct block_device_operations viodasd_fops = {
 /*
  * End a request
  */
-static void viodasd_end_request(struct request *req, int uptodate,
+static void viodasd_end_request(struct request *req, int error,
 		int num_sectors)
 {
-	if (end_that_request_first(req, uptodate, num_sectors))
-		return;
-	add_disk_randomness(req->rq_disk);
-	end_that_request_last(req, uptodate);
+	__blk_end_request(req, error, num_sectors << 9);
 }
 
 /*
@@ -252,20 +249,17 @@ static int send_request(struct request *req)
 	struct HvLpEvent *hev;
 	struct scatterlist sg[VIOMAXBLOCKDMA];
 	int sgindex;
-	int statindex;
 	struct viodasd_device *d;
 	unsigned long flags;
 
-	start = (u64)req->sector << 9;
+	start = (u64)blk_rq_pos(req) << 9;
 
 	if (rq_data_dir(req) == READ) {
 		direction = DMA_FROM_DEVICE;
 		viocmd = viomajorsubtype_blockio | vioblockread;
-		statindex = 0;
 	} else {
 		direction = DMA_TO_DEVICE;
 		viocmd = viomajorsubtype_blockio | vioblockwrite;
-		statindex = 1;
 	}
 
         d = req->rq_disk->private_data;
@@ -367,19 +361,17 @@ static void do_viodasd_request(struct request_queue *q)
 	 * back later.
 	 */
 	while (num_req_outstanding < VIOMAXREQ) {
-		req = elv_next_request(q);
+		req = blk_fetch_request(q);
 		if (req == NULL)
 			return;
-		/* dequeue the current request from the queue */
-		blkdev_dequeue_request(req);
 		/* check that request contains a valid command */
 		if (!blk_fs_request(req)) {
-			viodasd_end_request(req, 0, req->hard_nr_sectors);
+			viodasd_end_request(req, -EIO, blk_rq_sectors(req));
 			continue;
 		}
 		/* Try sending the request */
 		if (send_request(req) != 0)
-			viodasd_end_request(req, 0, req->hard_nr_sectors);
+			viodasd_end_request(req, -EIO, blk_rq_sectors(req));
 	}
 }
 
@@ -424,15 +416,9 @@ retry:
 		goto retry;
 	}
 	if (we.max_disk > (MAX_DISKNO - 1)) {
-		static int warned;
-
-		if (warned == 0) {
-			warned++;
-			printk(VIOD_KERN_INFO
-				"Only examining the first %d "
-				"of %d disks connected\n",
-				MAX_DISKNO, we.max_disk + 1);
-		}
+		printk_once(VIOD_KERN_INFO
+			"Only examining the first %d of %d disks connected\n",
+			MAX_DISKNO, we.max_disk + 1);
 	}
 
 	/* Send the close event to OS/400.  We DON'T expect a response */
@@ -531,8 +517,7 @@ static int block_event_to_scatterlist(const struct vioblocklpevent *bevent,
 		numsg = VIOMAXBLOCKDMA;
 
 	*total_len = 0;
-	memset(sg, 0, sizeof(sg[0]) * VIOMAXBLOCKDMA);
-
+	sg_init_table(sg, VIOMAXBLOCKDMA);
 	for (i = 0; (i < numsg) && (rw_data->dma_info[i].len > 0); ++i) {
 		sg_dma_address(&sg[i]) = rw_data->dma_info[i].token;
 		sg_dma_len(&sg[i]) = rw_data->dma_info[i].len;
@@ -591,17 +576,17 @@ static int viodasd_handle_read_write(struct vioblocklpevent *bevent)
 	num_req_outstanding--;
 	spin_unlock_irqrestore(&viodasd_spinlock, irq_flags);
 
-	error = event->xRc != HvLpEvent_Rc_Good;
+	error = (event->xRc == HvLpEvent_Rc_Good) ? 0 : -EIO;
 	if (error) {
 		const struct vio_error_entry *err;
 		err = vio_lookup_rc(viodasd_err_table, bevent->sub_result);
 		printk(VIOD_KERN_WARNING "read/write error %d:0x%04x (%s)\n",
 				event->xRc, bevent->sub_result, err->msg);
-		num_sect = req->hard_nr_sectors;
+		num_sect = blk_rq_sectors(req);
 	}
 	qlock = req->q->queue_lock;
 	spin_lock_irqsave(qlock, irq_flags);
-	viodasd_end_request(req, !error, num_sect);
+	viodasd_end_request(req, error, num_sect);
 	spin_unlock_irqrestore(qlock, irq_flags);
 
 	/* Finally, try to get more requests off of this device's queue */

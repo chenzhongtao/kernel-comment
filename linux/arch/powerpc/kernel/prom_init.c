@@ -44,10 +44,7 @@
 #include <asm/sections.h>
 #include <asm/machdep.h>
 
-#ifdef CONFIG_LOGO_LINUX_CLUT224
 #include <linux/linux_logo.h>
-extern const struct linux_logo logo_linux_clut224;
-#endif
 
 /*
  * Properties whose value is longer than this get excluded from our
@@ -193,6 +190,8 @@ static int __initdata of_platform;
 
 static char __initdata prom_cmd_line[COMMAND_LINE_SIZE];
 
+static unsigned long __initdata prom_memory_limit;
+
 static unsigned long __initdata alloc_top;
 static unsigned long __initdata alloc_top_high;
 static unsigned long __initdata alloc_bottom;
@@ -204,8 +203,6 @@ static int __initdata mem_reserve_cnt;
 
 static cell_t __initdata regbuf[1024];
 
-
-#define MAX_CPU_THREADS 2
 
 /*
  * Error results ... some OF calls will return "-1" on error, some
@@ -557,9 +554,8 @@ unsigned long prom_memparse(const char *ptr, const char **retptr)
 static void __init early_cmdline_parse(void)
 {
 	struct prom_t *_prom = &RELOC(prom);
-#ifdef CONFIG_PPC64
 	const char *opt;
-#endif
+
 	char *p;
 	int l = 0;
 
@@ -587,6 +583,15 @@ static void __init early_cmdline_parse(void)
 			RELOC(prom_iommu_force_on) = 1;
 	}
 #endif
+	opt = strstr(RELOC(prom_cmd_line), RELOC("mem="));
+	if (opt) {
+		opt += 4;
+		RELOC(prom_memory_limit) = prom_memparse(opt, (const char **)&opt);
+#ifdef CONFIG_PPC64
+		/* Align to 16 MB == size of ppc64 large page */
+		RELOC(prom_memory_limit) = ALIGN(RELOC(prom_memory_limit), 0x1000000);
+#endif
+	}
 }
 
 #ifdef CONFIG_PPC_PSERIES
@@ -620,6 +625,7 @@ static void __init early_cmdline_parse(void)
 #define OV1_PPC_2_03		0x10	/* set if we support PowerPC 2.03 */
 #define OV1_PPC_2_04		0x08	/* set if we support PowerPC 2.04 */
 #define OV1_PPC_2_05		0x04	/* set if we support PowerPC 2.05 */
+#define OV1_PPC_2_06		0x02	/* set if we support PowerPC 2.06 */
 
 /* Option vector 2: Open Firmware options supported */
 #define OV2_REAL_MODE		0x20	/* set if we want OF in real mode */
@@ -642,6 +648,11 @@ static void __init early_cmdline_parse(void)
 #else
 #define OV5_MSI			0x00
 #endif /* CONFIG_PCI_MSI */
+#ifdef CONFIG_PPC_SMLPAR
+#define OV5_CMO			0x80	/* Cooperative Memory Overcommitment */
+#else
+#define OV5_CMO			0x00
+#endif
 
 /*
  * The architecture vector has an array of PVR mask/value pairs,
@@ -650,6 +661,8 @@ static void __init early_cmdline_parse(void)
 static unsigned char ibm_architecture_vec[] = {
 	W(0xfffe0000), W(0x003a0000),	/* POWER5/POWER5+ */
 	W(0xffff0000), W(0x003e0000),	/* POWER6 */
+	W(0xffff0000), W(0x003f0000),	/* POWER7 */
+	W(0xffffffff), W(0x0f000003),	/* all 2.06-compliant */
 	W(0xffffffff), W(0x0f000002),	/* all 2.05-compliant */
 	W(0xfffffffe), W(0x0f000001),	/* all 2.04-compliant and earlier */
 	5 - 1,				/* 5 option vectors */
@@ -658,7 +671,7 @@ static unsigned char ibm_architecture_vec[] = {
 	3 - 2,				/* length */
 	0,				/* don't ignore, don't halt */
 	OV1_PPC_2_00 | OV1_PPC_2_01 | OV1_PPC_2_02 | OV1_PPC_2_03 |
-	OV1_PPC_2_04 | OV1_PPC_2_05,
+	OV1_PPC_2_04 | OV1_PPC_2_05 | OV1_PPC_2_06,
 
 	/* option vector 2: Open Firmware options supported */
 	34 - 2,				/* length */
@@ -669,7 +682,7 @@ static unsigned char ibm_architecture_vec[] = {
 	W(0xffffffff),			/* virt_base */
 	W(0xffffffff),			/* virt_size */
 	W(0xffffffff),			/* load_base */
-	W(64),				/* 128MB min RMA */
+	W(64),				/* 64MB min RMA */
 	W(0xffffffff),			/* full client load */
 	0,				/* min RMA percentage of total RAM */
 	48,				/* max log_2(hash table size) */
@@ -684,10 +697,12 @@ static unsigned char ibm_architecture_vec[] = {
 	0,				/* don't halt */
 
 	/* option vector 5: PAPR/OF options */
-	3 - 2,				/* length */
+	5 - 2,				/* length */
 	0,				/* don't ignore, don't halt */
 	OV5_LPAR | OV5_SPLPAR | OV5_LARGE_PAGES | OV5_DRCONF_MEMORY |
 	OV5_DONATE_DEDICATE_CPU | OV5_MSI,
+	0,
+	OV5_CMO,
 };
 
 /* Old method - ELF header with PT_NOTE sections */
@@ -785,18 +800,21 @@ static void __init prom_send_capabilities(void)
 	root = call_prom("open", 1, 1, ADDR("/"));
 	if (root != 0) {
 		/* try calling the ibm,client-architecture-support method */
+		prom_printf("Calling ibm,client-architecture-support...");
 		if (call_prom_ret("call-method", 3, 2, &ret,
 				  ADDR("ibm,client-architecture-support"),
 				  root,
 				  ADDR(ibm_architecture_vec)) == 0) {
 			/* the call exists... */
 			if (ret)
-				prom_printf("WARNING: ibm,client-architecture"
+				prom_printf("\nWARNING: ibm,client-architecture"
 					    "-support call FAILED!\n");
 			call_prom("close", 1, 0, root);
+			prom_printf(" done\n");
 			return;
 		}
 		call_prom("close", 1, 0, root);
+		prom_printf(" not implemented\n");
 	}
 
 	/* no ibm,client-architecture-support call, try the old way */
@@ -1081,6 +1099,29 @@ static void __init prom_init_mem(void)
 	}
 
 	/*
+	 * If prom_memory_limit is set we reduce the upper limits *except* for
+	 * alloc_top_high. This must be the real top of RAM so we can put
+	 * TCE's up there.
+	 */
+
+	RELOC(alloc_top_high) = RELOC(ram_top);
+
+	if (RELOC(prom_memory_limit)) {
+		if (RELOC(prom_memory_limit) <= RELOC(alloc_bottom)) {
+			prom_printf("Ignoring mem=%x <= alloc_bottom.\n",
+				RELOC(prom_memory_limit));
+			RELOC(prom_memory_limit) = 0;
+		} else if (RELOC(prom_memory_limit) >= RELOC(ram_top)) {
+			prom_printf("Ignoring mem=%x >= ram_top.\n",
+				RELOC(prom_memory_limit));
+			RELOC(prom_memory_limit) = 0;
+		} else {
+			RELOC(ram_top) = RELOC(prom_memory_limit);
+			RELOC(rmo_top) = min(RELOC(rmo_top), RELOC(prom_memory_limit));
+		}
+	}
+
+	/*
 	 * Setup our top alloc point, that is top of RMO or top of
 	 * segment 0 when running non-LPAR.
 	 * Some RS64 machines have buggy firmware where claims up at
@@ -1095,6 +1136,7 @@ static void __init prom_init_mem(void)
 	RELOC(alloc_top_high) = RELOC(ram_top);
 
 	prom_printf("memory layout at init:\n");
+	prom_printf("  memory_limit : %x (16 MB aligned)\n", RELOC(prom_memory_limit));
 	prom_printf("  alloc_bottom : %x\n", RELOC(alloc_bottom));
 	prom_printf("  alloc_top    : %x\n", RELOC(alloc_top));
 	prom_printf("  alloc_top_hi : %x\n", RELOC(alloc_top_high));
@@ -1136,7 +1178,7 @@ static void __init prom_instantiate_rtas(void)
 		return;
 	}
 
-	prom_printf("instantiating rtas at 0x%x ...", base);
+	prom_printf("instantiating rtas at 0x%x...", base);
 
 	if (call_prom_ret("call-method", 3, 2, &entry,
 			  ADDR("instantiate-rtas"),
@@ -1263,7 +1305,7 @@ static void __init prom_initialize_tce_table(void)
 		/* Initialize the table to have a one-to-one mapping
 		 * over the allocated size.
 		 */
-		tce_entryp = (unsigned long *)base;
+		tce_entryp = (u64 *)base;
 		for (i = 0; i < (minsize >> 3) ;tce_entryp++, i++) {
 			tce_entry = (i << PAGE_SHIFT);
 			tce_entry |= 0x3;
@@ -1313,10 +1355,6 @@ static void __init prom_initialize_tce_table(void)
  *
  * -- Cort
  */
-extern void __secondary_hold(void);
-extern unsigned long __secondary_hold_spinloop;
-extern unsigned long __secondary_hold_acknowledge;
-
 /*
  * We want to reference the copy of __secondary_hold_* in the
  * 0 - 0x100 address range
@@ -1329,22 +1367,12 @@ static void __init prom_hold_cpus(void)
 	unsigned int reg;
 	phandle node;
 	char type[64];
-	int cpuid = 0;
-	unsigned int interrupt_server[MAX_CPU_THREADS];
-	unsigned int cpu_threads, hw_cpu_num;
-	int propsize;
 	struct prom_t *_prom = &RELOC(prom);
 	unsigned long *spinloop
 		= (void *) LOW_ADDR(__secondary_hold_spinloop);
 	unsigned long *acknowledge
 		= (void *) LOW_ADDR(__secondary_hold_acknowledge);
-#ifdef CONFIG_PPC64
-	/* __secondary_hold is actually a descriptor, not the text address */
-	unsigned long secondary_hold
-		= __pa(*PTRRELOC((unsigned long *)__secondary_hold));
-#else
 	unsigned long secondary_hold = LOW_ADDR(__secondary_hold);
-#endif
 
 	prom_debug("prom_hold_cpus: start...\n");
 	prom_debug("    1) spinloop       = 0x%x\n", (unsigned long)spinloop);
@@ -1376,7 +1404,6 @@ static void __init prom_hold_cpus(void)
 		reg = -1;
 		prom_getprop(node, "reg", &reg, sizeof(reg));
 
-		prom_debug("\ncpuid        = 0x%x\n", cpuid);
 		prom_debug("cpu hw idx   = 0x%x\n", reg);
 
 		/* Init the acknowledge var which will be reset by
@@ -1385,28 +1412,9 @@ static void __init prom_hold_cpus(void)
 		 */
 		*acknowledge = (unsigned long)-1;
 
-		propsize = prom_getprop(node, "ibm,ppc-interrupt-server#s",
-					&interrupt_server,
-					sizeof(interrupt_server));
-		if (propsize < 0) {
-			/* no property.  old hardware has no SMT */
-			cpu_threads = 1;
-			interrupt_server[0] = reg; /* fake it with phys id */
-		} else {
-			/* We have a threaded processor */
-			cpu_threads = propsize / sizeof(u32);
-			if (cpu_threads > MAX_CPU_THREADS) {
-				prom_printf("SMT: too many threads!\n"
-					    "SMT: found %x, max is %x\n",
-					    cpu_threads, MAX_CPU_THREADS);
-				cpu_threads = 1; /* ToDo: panic? */
-			}
-		}
-
-		hw_cpu_num = interrupt_server[0];
-		if (hw_cpu_num != _prom->cpu) {
+		if (reg != _prom->cpu) {
 			/* Primary Thread of non-boot cpu */
-			prom_printf("%x : starting cpu hw idx %x... ", cpuid, reg);
+			prom_printf("starting cpu hw idx %x... ", reg);
 			call_prom("start-cpu", 3, 0, node,
 				  secondary_hold, reg);
 
@@ -1421,16 +1429,9 @@ static void __init prom_hold_cpus(void)
 		}
 #ifdef CONFIG_SMP
 		else
-			prom_printf("%x : boot cpu     %x\n", cpuid, reg);
+			prom_printf("boot cpu hw idx %x\n", reg);
 #endif /* CONFIG_SMP */
-
-		/* Reserve cpu #s for secondary threads.   They start later. */
-		cpuid += cpu_threads;
 	}
-
-	if (cpuid > NR_CPUS)
-		prom_printf("WARNING: maximum CPUs (" __stringify(NR_CPUS)
-			    ") exceeded: ignoring extras\n");
 
 	prom_debug("prom_hold_cpus: end...\n");
 }
@@ -1585,7 +1586,7 @@ static int __init prom_find_machine_type(void)
 		return PLATFORM_GENERIC;
 	x = prom_getproplen(rtas, "ibm,hypertas-functions");
 	if (x != PROM_ERROR) {
-		prom_printf("Hypertas detected, assuming LPAR !\n");
+		prom_debug("Hypertas detected, assuming LPAR !\n");
 		return PLATFORM_PSERIES_LPAR;
 	}
 	return PLATFORM_PSERIES;
@@ -1634,7 +1635,7 @@ static void __init prom_check_displays(void)
 	};
 	const unsigned char *clut;
 
-	prom_printf("Looking for displays\n");
+	prom_debug("Looking for displays\n");
 	for (node = 0; prom_next_node(&node); ) {
 		memset(type, 0, sizeof(type));
 		prom_getprop(node, "device_type", type, sizeof(type));
@@ -1652,7 +1653,7 @@ static void __init prom_check_displays(void)
 		if (call_prom("package-to-path", 3, 1, node, path,
 			      PROM_SCRATCH_SIZE-10) == PROM_ERROR)
 			continue;
-		prom_printf("found display   : %s, opening ... ", path);
+		prom_printf("found display   : %s, opening... ", path);
 		
 		ih = call_prom("open", 1, 1, path);
 		if (ih == 0) {
@@ -2038,8 +2039,47 @@ static void __init fixup_device_tree_maple(void)
 	prom_setprop(isa, name, "ranges",
 			isa_ranges, sizeof(isa_ranges));
 }
+
+#define CPC925_MC_START		0xf8000000
+#define CPC925_MC_LENGTH	0x1000000
+/* The values for memory-controller don't have right number of cells */
+static void __init fixup_device_tree_maple_memory_controller(void)
+{
+	phandle mc;
+	u32 mc_reg[4];
+	char *name = "/hostbridge@f8000000";
+	struct prom_t *_prom = &RELOC(prom);
+	u32 ac, sc;
+
+	mc = call_prom("finddevice", 1, 1, ADDR(name));
+	if (!PHANDLE_VALID(mc))
+		return;
+
+	if (prom_getproplen(mc, "reg") != 8)
+		return;
+
+	prom_getprop(_prom->root, "#address-cells", &ac, sizeof(ac));
+	prom_getprop(_prom->root, "#size-cells", &sc, sizeof(sc));
+	if ((ac != 2) || (sc != 2))
+		return;
+
+	if (prom_getprop(mc, "reg", mc_reg, sizeof(mc_reg)) == PROM_ERROR)
+		return;
+
+	if (mc_reg[0] != CPC925_MC_START || mc_reg[1] != CPC925_MC_LENGTH)
+		return;
+
+	prom_printf("Fixing up bogus hostbridge on Maple...\n");
+
+	mc_reg[0] = 0x0;
+	mc_reg[1] = CPC925_MC_START;
+	mc_reg[2] = 0x0;
+	mc_reg[3] = CPC925_MC_LENGTH;
+	prom_setprop(mc, name, "reg", mc_reg, sizeof(mc_reg));
+}
 #else
 #define fixup_device_tree_maple()
+#define fixup_device_tree_maple_memory_controller()
 #endif
 
 #ifdef CONFIG_PPC_CHRP
@@ -2142,82 +2182,34 @@ static void __init fixup_device_tree_pmac(void)
 #endif
 
 #ifdef CONFIG_PPC_EFIKA
-/* The current fw of the Efika has a device tree needs quite a few
- * fixups to be compliant with the mpc52xx bindings. It's currently
- * unknown if it will ever be compliant (come on bPlan ...) so we do fixups.
- * NOTE that we (barely) tolerate it because the EFIKA was out before
- * the bindings were finished, for any new boards -> RTFM ! */
-
-struct subst_entry {
-	char *path;
-	char *property;
-	void *value;
-	int value_len;
-};
-
-static void __init fixup_device_tree_efika(void)
+/*
+ * The MPC5200 FEC driver requires an phy-handle property to tell it how
+ * to talk to the phy.  If the phy-handle property is missing, then this
+ * function is called to add the appropriate nodes and link it to the
+ * ethernet node.
+ */
+static void __init fixup_device_tree_efika_add_phy(void)
 {
-	/* Substitution table */
-	#define prop_cstr(x) x, sizeof(x)
-	int prop_sound_irq[3] = { 2, 2, 0 };
-	int prop_bcomm_irq[3*16] = { 3,0,0, 3,1,0, 3,2,0, 3,3,0,
-	                             3,4,0, 3,5,0, 3,6,0, 3,7,0,
-	                             3,8,0, 3,9,0, 3,10,0, 3,11,0,
-	                             3,12,0, 3,13,0, 3,14,0, 3,15,0 };
-	struct subst_entry efika_subst_table[] = {
-		{ "/",			"device_type",	prop_cstr("efika") },
-		{ "/builtin",		"device_type",	prop_cstr("soc") },
-		{ "/builtin/ata",	"compatible",	prop_cstr("mpc5200b-ata\0mpc5200-ata"), },
-		{ "/builtin/bestcomm",	"compatible",	prop_cstr("mpc5200b-bestcomm\0mpc5200-bestcomm") },
-		{ "/builtin/bestcomm",	"interrupts",	prop_bcomm_irq, sizeof(prop_bcomm_irq) },
-		{ "/builtin/ethernet",	"compatible",	prop_cstr("mpc5200b-fec\0mpc5200-fec") },
-		{ "/builtin/pic",	"compatible",	prop_cstr("mpc5200b-pic\0mpc5200-pic") },
-		{ "/builtin/serial",	"compatible",	prop_cstr("mpc5200b-psc-uart\0mpc5200-psc-uart") },
-		{ "/builtin/sound",	"compatible",	prop_cstr("mpc5200b-psc-ac97\0mpc5200-psc-ac97") },
-		{ "/builtin/sound",	"interrupts",	prop_sound_irq, sizeof(prop_sound_irq) },
-		{ "/builtin/sram",	"compatible",	prop_cstr("mpc5200b-sram\0mpc5200-sram") },
-		{ "/builtin/sram",	"device_type",	prop_cstr("sram") },
-		{}
-	};
-	#undef prop_cstr
-
-	/* Vars */
 	u32 node;
 	char prop[64];
-	int rv, i;
+	int rv;
 
-	/* Check if we're really running on a EFIKA */
-	node = call_prom("finddevice", 1, 1, ADDR("/"));
+	/* Check if /builtin/ethernet exists - bail if it doesn't */
+	node = call_prom("finddevice", 1, 1, ADDR("/builtin/ethernet"));
 	if (!PHANDLE_VALID(node))
 		return;
 
-	rv = prom_getprop(node, "model", prop, sizeof(prop));
-	if (rv == PROM_ERROR)
+	/* Check if the phy-handle property exists - bail if it does */
+	rv = prom_getprop(node, "phy-handle", prop, sizeof(prop));
+	if (!rv)
 		return;
-	if (strcmp(prop, "EFIKA5K2"))
-		return;
 
-	prom_printf("Applying EFIKA device tree fixups\n");
+	/*
+	 * At this point the ethernet device doesn't have a phy described.
+	 * Now we need to add the missing phy node and linkage
+	 */
 
-	/* Process substitution table */
-	for (i=0; efika_subst_table[i].path; i++) {
-		struct subst_entry *se = &efika_subst_table[i];
-
-		node = call_prom("finddevice", 1, 1, ADDR(se->path));
-		if (!PHANDLE_VALID(node)) {
-			prom_printf("fixup_device_tree_efika: ",
-				"skipped entry %x - not found\n", i);
-			continue;
-		}
-
-		rv = prom_setprop(node, se->path, se->property,
-					se->value, se->value_len );
-		if (rv == PROM_ERROR)
-			prom_printf("fixup_device_tree_efika: ",
-				"skipped entry %x - setprop error\n", i);
-	}
-
-	/* Make sure ethernet mdio bus node exists */
+	/* Check for an MDIO bus node - if missing then create one */
 	node = call_prom("finddevice", 1, 1, ADDR("/builtin/mdio"));
 	if (!PHANDLE_VALID(node)) {
 		prom_printf("Adding Ethernet MDIO node\n");
@@ -2226,8 +2218,8 @@ static void __init fixup_device_tree_efika(void)
 			" new-device"
 				" 1 encode-int s\" #address-cells\" property"
 				" 0 encode-int s\" #size-cells\" property"
-				" s\" mdio\" 2dup device-name device-type"
-				" s\" mpc5200b-fec-phy\" encode-string"
+				" s\" mdio\" device-name"
+				" s\" fsl,mpc5200b-mdio\" encode-string"
 				" s\" compatible\" property"
 				" 0xf0003000 0x400 reg"
 				" 0x2 encode-int"
@@ -2237,8 +2229,10 @@ static void __init fixup_device_tree_efika(void)
 			" finish-device");
 	};
 
-	/* Make sure ethernet phy device node exist */
-	node = call_prom("finddevice", 1, 1, ADDR("/builtin/mdio/ethernet-phy"));
+	/* Check for a PHY device node - if missing then create one and
+	 * give it's phandle to the ethernet node */
+	node = call_prom("finddevice", 1, 1,
+			 ADDR("/builtin/mdio/ethernet-phy"));
 	if (!PHANDLE_VALID(node)) {
 		prom_printf("Adding Ethernet PHY node\n");
 		call_prom("interpret", 1, 1,
@@ -2254,7 +2248,70 @@ static void __init fixup_device_tree_efika(void)
 				" s\" phy-handle\" property"
 			" device-end");
 	}
+}
 
+static void __init fixup_device_tree_efika(void)
+{
+	int sound_irq[3] = { 2, 2, 0 };
+	int bcomm_irq[3*16] = { 3,0,0, 3,1,0, 3,2,0, 3,3,0,
+				3,4,0, 3,5,0, 3,6,0, 3,7,0,
+				3,8,0, 3,9,0, 3,10,0, 3,11,0,
+				3,12,0, 3,13,0, 3,14,0, 3,15,0 };
+	u32 node;
+	char prop[64];
+	int rv, len;
+
+	/* Check if we're really running on a EFIKA */
+	node = call_prom("finddevice", 1, 1, ADDR("/"));
+	if (!PHANDLE_VALID(node))
+		return;
+
+	rv = prom_getprop(node, "model", prop, sizeof(prop));
+	if (rv == PROM_ERROR)
+		return;
+	if (strcmp(prop, "EFIKA5K2"))
+		return;
+
+	prom_printf("Applying EFIKA device tree fixups\n");
+
+	/* Claiming to be 'chrp' is death */
+	node = call_prom("finddevice", 1, 1, ADDR("/"));
+	rv = prom_getprop(node, "device_type", prop, sizeof(prop));
+	if (rv != PROM_ERROR && (strcmp(prop, "chrp") == 0))
+		prom_setprop(node, "/", "device_type", "efika", sizeof("efika"));
+
+	/* CODEGEN,description is exposed in /proc/cpuinfo so
+	   fix that too */
+	rv = prom_getprop(node, "CODEGEN,description", prop, sizeof(prop));
+	if (rv != PROM_ERROR && (strstr(prop, "CHRP")))
+		prom_setprop(node, "/", "CODEGEN,description",
+			     "Efika 5200B PowerPC System",
+			     sizeof("Efika 5200B PowerPC System"));
+
+	/* Fixup bestcomm interrupts property */
+	node = call_prom("finddevice", 1, 1, ADDR("/builtin/bestcomm"));
+	if (PHANDLE_VALID(node)) {
+		len = prom_getproplen(node, "interrupts");
+		if (len == 12) {
+			prom_printf("Fixing bestcomm interrupts property\n");
+			prom_setprop(node, "/builtin/bestcom", "interrupts",
+				     bcomm_irq, sizeof(bcomm_irq));
+		}
+	}
+
+	/* Fixup sound interrupts property */
+	node = call_prom("finddevice", 1, 1, ADDR("/builtin/sound"));
+	if (PHANDLE_VALID(node)) {
+		rv = prom_getprop(node, "interrupts", prop, sizeof(prop));
+		if (rv == PROM_ERROR) {
+			prom_printf("Adding sound interrupts property\n");
+			prom_setprop(node, "/builtin/sound", "interrupts",
+				     sound_irq, sizeof(sound_irq));
+		}
+	}
+
+	/* Make sure ethernet phy-handle property exists */
+	fixup_device_tree_efika_add_phy();
 }
 #else
 #define fixup_device_tree_efika()
@@ -2263,6 +2320,7 @@ static void __init fixup_device_tree_efika(void)
 static void __init fixup_device_tree(void)
 {
 	fixup_device_tree_maple();
+	fixup_device_tree_maple_memory_controller();
 	fixup_device_tree_chrp();
 	fixup_device_tree_pmac();
 	fixup_device_tree_efika();
@@ -2321,13 +2379,14 @@ static void __init prom_check_initrd(unsigned long r3, unsigned long r4)
 
 unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 			       unsigned long pp,
-			       unsigned long r6, unsigned long r7)
+			       unsigned long r6, unsigned long r7,
+			       unsigned long kbase)
 {	
 	struct prom_t *_prom;
 	unsigned long hdr;
-	unsigned long offset = reloc_offset();
 
 #ifdef CONFIG_PPC32
+	unsigned long offset = reloc_offset();
 	reloc_got2(offset);
 #endif
 
@@ -2355,15 +2414,19 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 */
 	prom_init_stdout();
 
+	prom_printf("Preparing to boot %s", RELOC(linux_banner));
+
 	/*
 	 * Get default machine type. At this point, we do not differentiate
 	 * between pSeries SMP and pSeries LPAR
 	 */
 	RELOC(of_platform) = prom_find_machine_type();
 
+#ifndef CONFIG_RELOCATABLE
 	/* Bail if this is a kdump kernel. */
 	if (PHYSICAL_START > 0)
 		prom_panic("Error: You can't boot a kdump kernel from OF!\n");
+#endif
 
 	/*
 	 * Check for an initrd
@@ -2383,7 +2446,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 * Copy the CPU hold code
 	 */
 	if (RELOC(of_platform) != PLATFORM_POWERMAC)
-		copy_and_flush(0, KERNELBASE + offset, 0x100, 0);
+		copy_and_flush(0, kbase, 0x100, 0);
 
 	/*
 	 * Do early parsing of command line
@@ -2428,6 +2491,10 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	/*
 	 * Fill in some infos for use by the kernel later on
 	 */
+	if (RELOC(prom_memory_limit))
+		prom_setprop(_prom->chosen, "/chosen", "linux,memory-limit",
+			     &RELOC(prom_memory_limit),
+			     sizeof(prom_memory_limit));
 #ifdef CONFIG_PPC64
 	if (RELOC(prom_iommu_off))
 		prom_setprop(_prom->chosen, "/chosen", "linux,iommu-off",
@@ -2455,7 +2522,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	/*
 	 * Now finally create the flattened device-tree
 	 */
-	prom_printf("copying OF device tree ...\n");
+	prom_printf("copying OF device tree...\n");
 	flatten_device_tree();
 
 	/*
@@ -2470,7 +2537,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 * Call OF "quiesce" method to shut down pending DMA's from
 	 * devices etc...
 	 */
-	prom_printf("Calling quiesce ...\n");
+	prom_printf("Calling quiesce...\n");
 	call_prom("quiesce", 0, 0);
 
 	/*
@@ -2486,7 +2553,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	reloc_got2(-offset);
 #endif
 
-	__start(hdr, KERNELBASE + offset, 0);
+	__start(hdr, kbase, 0);
 
 	return 0;
 }

@@ -109,7 +109,7 @@ static int tunnel46_rcv(struct sk_buff *skb)
 {
 	struct xfrm6_tunnel *handler;
 
-	if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
+	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 		goto drop;
 
 	for (handler = tunnel46_handlers; handler; handler = handler->next)
@@ -124,7 +124,7 @@ drop:
 }
 
 static void tunnel6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
-			int type, int code, int offset, __be32 info)
+			u8 type, u8 code, int offset, __be32 info)
 {
 	struct xfrm6_tunnel *handler;
 
@@ -133,13 +133,13 @@ static void tunnel6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			break;
 }
 
-static struct inet6_protocol tunnel6_protocol = {
+static const struct inet6_protocol tunnel6_protocol = {
 	.handler	= tunnel6_rcv,
 	.err_handler	= tunnel6_err,
 	.flags          = INET6_PROTO_NOPOLICY|INET6_PROTO_FINAL,
 };
 
-static struct inet6_protocol tunnel46_protocol = {
+static const struct inet6_protocol tunnel46_protocol = {
 	.handler	= tunnel46_rcv,
 	.err_handler	= tunnel6_err,
 	.flags          = INET6_PROTO_NOPOLICY|INET6_PROTO_FINAL,

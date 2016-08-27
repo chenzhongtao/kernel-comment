@@ -29,7 +29,6 @@
 #include <linux/personality.h>
 #include <linux/init.h>
 
-#include <asm/a.out.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 
@@ -189,13 +188,11 @@ out:
 static int
 load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
-	int som_exec_fileno;
 	int retval;
 	unsigned int size;
 	unsigned long som_entry;
 	struct som_hdr *som_ex;
 	struct som_exec_auxhdr *hpuxhdr;
-	struct files_struct *files;
 
 	/* Get the exec-header */
 	som_ex = (struct som_hdr *) bprm->buf;
@@ -221,21 +218,6 @@ load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			retval = -EIO;
 		goto out_free;
 	}
-
-	files = current->files; /* Refcounted so ok */
-	retval = unshare_files();
-	if (retval < 0)
-		goto out_free;
-	if (files == current->files) {
-		put_files_struct(files);
-		files = NULL;
-	}
-
-	retval = get_unused_fd();
-	if (retval < 0)
-		goto out_free;
-	get_file(bprm->file);
-	fd_install(som_exec_fileno = retval, bprm->file);
 
 	/* Flush all traces of the currently running executable */
 	retval = flush_old_exec(bprm);
@@ -266,7 +248,7 @@ load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	kfree(hpuxhdr);
 
 	set_binfmt(&som_format);
-	compute_creds(bprm);
+	install_exec_creds(bprm);
 	setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
 
 	create_som_tables(bprm);
@@ -285,8 +267,6 @@ load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	map_hpux_gateway_page(current,current->mm);
 
 	start_thread_som(regs, som_entry, bprm->p);
-	if (current->ptrace & PT_PTRACED)
-		send_sig(SIGTRAP, current, 0);
 	return 0;
 
 	/* error cleanup */
@@ -319,3 +299,5 @@ static void __exit exit_som_binfmt(void)
 
 core_initcall(init_som_binfmt);
 module_exit(exit_som_binfmt);
+
+MODULE_LICENSE("GPL");

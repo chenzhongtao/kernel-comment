@@ -22,7 +22,7 @@
  * aha1740_makecode may still need even more work
  * if it doesn't work for your devices, take a look.
  *
- * Reworked for new_eh and new locking by Alan Cox <alan@redhat.com>
+ * Reworked for new_eh and new locking by Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  * Converted to EISA and generic DMA APIs by Marc Zyngier
  * <maz@wild-wind.fr.eu.org>, 4/2003.
@@ -286,7 +286,7 @@ static irqreturn_t aha1740_intr_handle(int irq, void *dev_id)
 			   cdb when we come back */
 			if ( (adapstat & G2INTST_MASK) == G2INTST_CCBERROR ) {
 				memcpy(SCtmp->sense_buffer, ecbptr->sense, 
-				       sizeof(SCtmp->sense_buffer));
+				       SCSI_SENSE_BUFFERSIZE);
 				errstatus = aha1740_makecode(ecbptr->sense,ecbptr->status);
 			} else
 				errstatus = 0;
@@ -563,7 +563,6 @@ static struct scsi_host_template aha1740_template = {
 	.sg_tablesize     = AHA1740_SCATTER,
 	.cmd_per_lun      = AHA1740_CMDLUN,
 	.use_clustering   = ENABLE_CLUSTERING,
-	.use_sg_chaining  = ENABLE_SG_CHAINING,
 	.eh_abort_handler = aha1740_eh_abort_handler,
 };
 
@@ -647,7 +646,7 @@ static int aha1740_probe (struct device *dev)
 
 static __devexit int aha1740_remove (struct device *dev)
 {
-	struct Scsi_Host *shpnt = dev->driver_data;
+	struct Scsi_Host *shpnt = dev_get_drvdata(dev);
 	struct aha1740_hostdata *host = HOSTDATA (shpnt);
 
 	scsi_remove_host(shpnt);

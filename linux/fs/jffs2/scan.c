@@ -97,11 +97,12 @@ int jffs2_scan_medium(struct jffs2_sb_info *c)
 	size_t pointlen;
 
 	if (c->mtd->point) {
-		ret = c->mtd->point (c->mtd, 0, c->mtd->size, &pointlen, &flashbuf);
+		ret = c->mtd->point(c->mtd, 0, c->mtd->size, &pointlen,
+				    (void **)&flashbuf, NULL);
 		if (!ret && pointlen < c->mtd->size) {
 			/* Don't muck about if it won't let us point to the whole flash */
 			D1(printk(KERN_DEBUG "MTD point returned len too short: 0x%zx\n", pointlen));
-			c->mtd->unpoint(c->mtd, flashbuf, 0, pointlen);
+			c->mtd->unpoint(c->mtd, 0, pointlen);
 			flashbuf = NULL;
 		}
 		if (ret)
@@ -129,9 +130,9 @@ int jffs2_scan_medium(struct jffs2_sb_info *c)
 	if (jffs2_sum_active()) {
 		s = kzalloc(sizeof(struct jffs2_summary), GFP_KERNEL);
 		if (!s) {
-			kfree(flashbuf);
 			JFFS2_WARNING("Can't allocate memory for summary\n");
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto out;
 		}
 	}
 
@@ -195,7 +196,7 @@ int jffs2_scan_medium(struct jffs2_sb_info *c)
 				if (c->nextblock) {
 					ret = file_dirty(c, c->nextblock);
 					if (ret)
-						return ret;
+						goto out;
 					/* deleting summary information of the old nextblock */
 					jffs2_sum_reset_collected(c->summary);
 				}
@@ -206,7 +207,7 @@ int jffs2_scan_medium(struct jffs2_sb_info *c)
 			} else {
 				ret = file_dirty(c, jeb);
 				if (ret)
-					return ret;
+					goto out;
 			}
 			break;
 
@@ -267,7 +268,7 @@ int jffs2_scan_medium(struct jffs2_sb_info *c)
 		kfree(flashbuf);
 #ifndef __ECOS
 	else
-		c->mtd->unpoint(c->mtd, flashbuf, 0, c->mtd->size);
+		c->mtd->unpoint(c->mtd, 0, c->mtd->size);
 #endif
 	if (s)
 		kfree(s);
@@ -940,7 +941,7 @@ struct jffs2_inode_cache *jffs2_scan_make_ino_cache(struct jffs2_sb_info *c, uin
 	ic->nodes = (void *)ic;
 	jffs2_add_ino_cache(c, ic);
 	if (ino == 1)
-		ic->nlink = 1;
+		ic->pino_nlink = 1;
 	return ic;
 }
 

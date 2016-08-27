@@ -414,7 +414,6 @@ chipsfb_pci_init(struct pci_dev *dp, const struct pci_device_id *ent)
 	}
 
 	pci_set_drvdata(dp, p);
-	p->device = &dp->dev;
 
 	init_chips(p, addr);
 
@@ -459,7 +458,7 @@ static int chipsfb_pci_suspend(struct pci_dev *pdev, pm_message_t state)
 
 	if (state.event == pdev->dev.power.power_state.event)
 		return 0;
-	if (state.event != PM_EVENT_SUSPEND)
+	if (!(state.event & PM_EVENT_SLEEP))
 		goto done;
 
 	acquire_console_sem();

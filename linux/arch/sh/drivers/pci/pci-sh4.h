@@ -1,7 +1,9 @@
 #ifndef __PCI_SH4_H
 #define __PCI_SH4_H
 
-#if defined(CONFIG_CPU_SUBTYPE_SH7780) || defined(CONFIG_CPU_SUBTYPE_SH7785)
+#if defined(CONFIG_CPU_SUBTYPE_SH7780) || \
+    defined(CONFIG_CPU_SUBTYPE_SH7785) || \
+    defined(CONFIG_CPU_SUBTYPE_SH7763)
 #include "pci-sh7780.h"
 #else
 #include "pci-sh7751.h"
@@ -13,8 +15,6 @@
 #define PCI_PROBE_BIOS		1
 #define PCI_PROBE_CONF1		2
 #define PCI_PROBE_CONF2		4
-#define PCI_NO_SORT		0x100
-#define PCI_BIOS_SORT		0x200
 #define PCI_NO_CHECKS		0x400
 #define PCI_ASSIGN_ROMS		0x1000
 #define PCI_BIOS_IRQ_SCAN	0x2000
@@ -149,13 +149,10 @@
   #define SH4_PCIPDTR_PB0	  0x000000001	/* Port 0 Enable */
 #define SH4_PCIPDR		0x220		/* Port IO Data Register */
 
-/* Flags */
-#define SH4_PCIC_NO_RESET	0x0001
-
 /* arch/sh/kernel/drivers/pci/ops-sh4.c */
 extern struct pci_ops sh4_pci_ops;
-int sh4_pci_check_direct(void);
-int pci_fixup_pcic(void);
+int sh4_pci_check_direct(struct pci_channel *chan);
+int pci_fixup_pcic(struct pci_channel *chan);
 
 struct sh4_pci_address_space {
 	unsigned long base;
@@ -165,16 +162,18 @@ struct sh4_pci_address_space {
 struct sh4_pci_address_map {
 	struct sh4_pci_address_space window0;
 	struct sh4_pci_address_space window1;
-	unsigned long flags;
 };
 
-static inline void pci_write_reg(unsigned long val, unsigned long reg)
+static inline void pci_write_reg(struct pci_channel *chan,
+				 unsigned long val, unsigned long reg)
 {
-	outl(val, PCI_REG(reg));
+	ctrl_outl(val, chan->reg_base + reg);
 }
 
-static inline unsigned long pci_read_reg(unsigned long reg)
+static inline unsigned long pci_read_reg(struct pci_channel *chan,
+					 unsigned long reg)
 {
-	return inl(PCI_REG(reg));
+	return ctrl_inl(chan->reg_base + reg);
 }
+
 #endif /* __PCI_SH4_H */

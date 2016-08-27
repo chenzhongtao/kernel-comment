@@ -47,8 +47,7 @@ _GLOBAL(slb_allocate_realmode)
 	 * it to VSID 0, which is reserved as a bad VSID - one which
 	 * will never have any pages in it.  */
 
-	/* Check if hitting the linear mapping of the vmalloc/ioremap
-	 * kernel space
+	/* Check if hitting the linear mapping or some other kernel space
 	*/
 	bne	cr7,1f
 
@@ -62,19 +61,28 @@ BEGIN_FTR_SECTION
 END_FTR_SECTION_IFCLR(CPU_FTR_1T_SEGMENT)
 	b	slb_finish_load_1T
 
-1:	/* vmalloc/ioremap mapping encoding bits, the "li" instructions below
-	 * will be patched by the kernel at boot
+1:
+#ifdef CONFIG_SPARSEMEM_VMEMMAP
+	/* Check virtual memmap region. To be patches at kernel boot */
+	cmpldi	cr0,r9,0xf
+	bne	1f
+_GLOBAL(slb_miss_kernel_load_vmemmap)
+	li	r11,0
+	b	6f
+1:
+#endif /* CONFIG_SPARSEMEM_VMEMMAP */
+
+	/* vmalloc mapping gets the encoding from the PACA as the mapping
+	 * can be demoted from 64K -> 4K dynamically on some machines
 	 */
-BEGIN_FTR_SECTION
-	/* check whether this is in vmalloc or ioremap space */
 	clrldi	r11,r10,48
 	cmpldi	r11,(VMALLOC_SIZE >> 28) - 1
 	bgt	5f
 	lhz	r11,PACAVMALLOCSLLP(r13)
 	b	6f
 5:
-END_FTR_SECTION_IFCLR(CPU_FTR_CI_LARGE_PAGE)
-_GLOBAL(slb_miss_kernel_load_io)
+	/* IO mapping */
+	_GLOBAL(slb_miss_kernel_load_io)
 	li	r11,0
 6:
 BEGIN_FTR_SECTION
@@ -227,8 +235,9 @@ END_FW_FTR_SECTION_IFSET(FW_FEATURE_ISERIES)
 
 7:	ld	r10,PACASTABRR(r13)
 	addi	r10,r10,1
-	/* use a cpu feature mask if we ever change our slb size */
-	cmpldi	r10,SLB_NUM_ENTRIES
+	/* This gets soft patched on boot. */
+_GLOBAL(slb_compare_rr_to_size)
+	cmpldi	r10,0
 
 	blt+	4f
 	li	r10,SLB_NUM_BOLTED

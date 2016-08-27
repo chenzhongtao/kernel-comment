@@ -69,7 +69,7 @@ Driver Notes and Issues
 History
 -------------------------------------------------------------------------------
 Log: nmclan_cs.c,v
- * 2.5.75-ac1 2003/07/11 Alan Cox <alan@redhat.com>
+ * 2.5.75-ac1 2003/07/11 Alan Cox <alan@lxorguk.ukuu.org.uk>
  * Fixed hang on card eject as we probe it
  * Cleaned up to use new style locking.
  *
@@ -424,7 +424,8 @@ static void nmclan_reset(struct net_device *dev);
 static int mace_config(struct net_device *dev, struct ifmap *map);
 static int mace_open(struct net_device *dev);
 static int mace_close(struct net_device *dev);
-static int mace_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t mace_start_xmit(struct sk_buff *skb,
+					 struct net_device *dev);
 static void mace_tx_timeout(struct net_device *dev);
 static irqreturn_t mace_interrupt(int irq, void *dev_id);
 static struct net_device_stats *mace_get_stats(struct net_device *dev);
@@ -435,6 +436,19 @@ static const struct ethtool_ops netdev_ethtool_ops;
 
 
 static void nmclan_detach(struct pcmcia_device *p_dev);
+
+static const struct net_device_ops mace_netdev_ops = {
+	.ndo_open		= mace_open,
+	.ndo_stop		= mace_close,
+	.ndo_start_xmit		= mace_start_xmit,
+	.ndo_tx_timeout		= mace_tx_timeout,
+	.ndo_set_config		= mace_config,
+	.ndo_get_stats		= mace_get_stats,
+	.ndo_set_multicast_list	= set_multicast_list,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
 
 /* ----------------------------------------------------------------------------
 nmclan_attach
@@ -474,17 +488,9 @@ static int nmclan_probe(struct pcmcia_device *link)
 
     lp->tx_free_frames=AM2150_MAX_TX_FRAMES;
 
-    dev->hard_start_xmit = &mace_start_xmit;
-    dev->set_config = &mace_config;
-    dev->get_stats = &mace_get_stats;
-    dev->set_multicast_list = &set_multicast_list;
+    dev->netdev_ops = &mace_netdev_ops;
     SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
-    dev->open = &mace_open;
-    dev->stop = &mace_close;
-#ifdef HAVE_TX_TIMEOUT
-    dev->tx_timeout = mace_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
-#endif
 
     return nmclan_config(link);
 } /* nmclan_attach */
@@ -518,7 +524,7 @@ mace_read
 	assuming that during normal operation, the MACE is always in
 	bank 0.
 ---------------------------------------------------------------------------- */
-static int mace_read(mace_private *lp, kio_addr_t ioaddr, int reg)
+static int mace_read(mace_private *lp, unsigned int ioaddr, int reg)
 {
   int data = 0xFF;
   unsigned long flags;
@@ -545,7 +551,8 @@ mace_write
 	are assuming that during normal operation, the MACE is always in
 	bank 0.
 ---------------------------------------------------------------------------- */
-static void mace_write(mace_private *lp, kio_addr_t ioaddr, int reg, int data)
+static void mace_write(mace_private *lp, unsigned int ioaddr, int reg,
+		       int data)
 {
   unsigned long flags;
 
@@ -567,7 +574,7 @@ static void mace_write(mace_private *lp, kio_addr_t ioaddr, int reg, int data)
 mace_init
 	Resets the MACE chip.
 ---------------------------------------------------------------------------- */
-static int mace_init(mace_private *lp, kio_addr_t ioaddr, char *enet_addr)
+static int mace_init(mace_private *lp, unsigned int ioaddr, char *enet_addr)
 {
   int i;
   int ct = 0;
@@ -657,8 +664,7 @@ static int nmclan_config(struct pcmcia_device *link)
   tuple_t tuple;
   u_char buf[64];
   int i, last_ret, last_fn;
-  kio_addr_t ioaddr;
-  DECLARE_MAC_BUF(mac);
+  unsigned int ioaddr;
 
   DEBUG(0, "nmclan_config(0x%p)\n", link);
 
@@ -718,9 +724,9 @@ static int nmclan_config(struct pcmcia_device *link)
   strcpy(lp->node.dev_name, dev->name);
 
   printk(KERN_INFO "%s: nmclan: port %#3lx, irq %d, %s port,"
-	 " hw_addr %s\n",
+	 " hw_addr %pM\n",
 	 dev->name, dev->base_addr, dev->irq, if_names[dev->if_port],
-	 print_mac(mac, dev->dev_addr));
+	 dev->dev_addr);
   return 0;
 
 cs_failed:
@@ -839,7 +845,7 @@ mace_open
 ---------------------------------------------------------------------------- */
 static int mace_open(struct net_device *dev)
 {
-  kio_addr_t ioaddr = dev->base_addr;
+  unsigned int ioaddr = dev->base_addr;
   mace_private *lp = netdev_priv(dev);
   struct pcmcia_device *link = lp->p_dev;
 
@@ -862,7 +868,7 @@ mace_close
 ---------------------------------------------------------------------------- */
 static int mace_close(struct net_device *dev)
 {
-  kio_addr_t ioaddr = dev->base_addr;
+  unsigned int ioaddr = dev->base_addr;
   mace_private *lp = netdev_priv(dev);
   struct pcmcia_device *link = lp->p_dev;
 
@@ -924,7 +930,7 @@ static void mace_tx_timeout(struct net_device *dev)
   printk(KERN_NOTICE "%s: transmit timed out -- ", dev->name);
 #if RESET_ON_TIMEOUT
   printk("resetting card\n");
-  pcmcia_reset_card(link, NULL);
+  pcmcia_reset_card(link->socket);
 #else /* #if RESET_ON_TIMEOUT */
   printk("NOT resetting card\n");
 #endif /* #if RESET_ON_TIMEOUT */
@@ -932,10 +938,11 @@ static void mace_tx_timeout(struct net_device *dev)
   netif_wake_queue(dev);
 }
 
-static int mace_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t mace_start_xmit(struct sk_buff *skb,
+					 struct net_device *dev)
 {
   mace_private *lp = netdev_priv(dev);
-  kio_addr_t ioaddr = dev->base_addr;
+  unsigned int ioaddr = dev->base_addr;
 
   netif_stop_queue(dev);
 
@@ -985,7 +992,7 @@ static int mace_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
   dev_kfree_skb(skb);
 
-  return 0;
+  return NETDEV_TX_OK;
 } /* mace_start_xmit */
 
 /* ----------------------------------------------------------------------------
@@ -996,7 +1003,7 @@ static irqreturn_t mace_interrupt(int irq, void *dev_id)
 {
   struct net_device *dev = (struct net_device *) dev_id;
   mace_private *lp = netdev_priv(dev);
-  kio_addr_t ioaddr;
+  unsigned int ioaddr;
   int status;
   int IntrCnt = MACE_MAX_IR_ITERATIONS;
 
@@ -1140,7 +1147,7 @@ mace_rx
 static int mace_rx(struct net_device *dev, unsigned char RxCnt)
 {
   mace_private *lp = netdev_priv(dev);
-  kio_addr_t ioaddr = dev->base_addr;
+  unsigned int ioaddr = dev->base_addr;
   unsigned char rx_framecnt;
   unsigned short rx_status;
 
@@ -1192,7 +1199,6 @@ static int mace_rx(struct net_device *dev, unsigned char RxCnt)
 	
 	netif_rx(skb); /* Send the packet to the upper (protocol) layers. */
 
-	dev->last_rx = jiffies;
 	lp->linux_stats.rx_packets++;
 	lp->linux_stats.rx_bytes += pkt_len;
 	outb(0xFF, ioaddr + AM2150_RCV_NEXT); /* skip to next frame */
@@ -1302,7 +1308,7 @@ update_stats
 	card's SRAM fast enough.  If this happens, something is
 	seriously wrong with the hardware.
 ---------------------------------------------------------------------------- */
-static void update_stats(kio_addr_t ioaddr, struct net_device *dev)
+static void update_stats(unsigned int ioaddr, struct net_device *dev)
 {
   mace_private *lp = netdev_priv(dev);
 
@@ -1421,15 +1427,12 @@ static void BuildLAF(int *ladrf, int *adr)
   ladrf[byte] |= (1 << (hashcode & 7));
 
 #ifdef PCMCIA_DEBUG
-  if (pc_debug > 2) {
-    printk(KERN_DEBUG "    adr =");
-    for (i = 0; i < 6; i++)
-      printk(" %02X", adr[i]);
-    printk("\n" KERN_DEBUG "    hashcode = %d(decimal), ladrf[0:63]"
-	   " =", hashcode);
-    for (i = 0; i < 8; i++)
-      printk(" %02X", ladrf[i]);
-    printk("\n");
+  if (pc_debug > 2)
+    printk(KERN_DEBUG "    adr =%pM\n", adr);
+  printk(KERN_DEBUG "    hashcode = %d(decimal), ladrf[0:63] =", hashcode);
+  for (i = 0; i < 8; i++)
+    printk(KERN_CONT " %02X", ladrf[i]);
+  printk(KERN_CONT "\n");
   }
 #endif
 } /* BuildLAF */
@@ -1448,7 +1451,7 @@ static void restore_multicast_list(struct net_device *dev)
   mace_private *lp = netdev_priv(dev);
   int num_addrs = lp->multicast_num_addrs;
   int *ladrf = lp->multicast_ladrf;
-  kio_addr_t ioaddr = dev->base_addr;
+  unsigned int ioaddr = dev->base_addr;
   int i;
 
   DEBUG(2, "%s: restoring Rx mode to %d addresses.\n",
@@ -1540,7 +1543,7 @@ static void set_multicast_list(struct net_device *dev)
 
 static void restore_multicast_list(struct net_device *dev)
 {
-  kio_addr_t ioaddr = dev->base_addr;
+  unsigned int ioaddr = dev->base_addr;
   mace_private *lp = netdev_priv(dev);
 
   DEBUG(2, "%s: restoring Rx mode to %d addresses.\n", dev->name,

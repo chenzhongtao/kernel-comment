@@ -40,16 +40,8 @@
 #include <linux/linkage.h>
 
 #ifdef CONFIG_64BIT
-#define CMPIB           cmpib,*
-#define CMPB            cmpb,*
-#define COND(x)		*x
-
 	.level 2.0w
 #else
-#define CMPIB           cmpib,
-#define CMPB            cmpb,
-#define COND(x)		x
-
 	.level 2.0
 #endif
 
@@ -376,7 +368,7 @@
 	 * abstractions for the macros */
 	.macro		EXTR	reg1,start,length,reg2
 #ifdef CONFIG_64BIT
-	extrd,u		\reg1,32+\start,\length,\reg2
+	extrd,u		\reg1,32+(\start),\length,\reg2
 #else
 	extrw,u		\reg1,\start,\length,\reg2
 #endif
@@ -384,7 +376,7 @@
 
 	.macro		DEP	reg1,start,length,reg2
 #ifdef CONFIG_64BIT
-	depd		\reg1,32+\start,\length,\reg2
+	depd		\reg1,32+(\start),\length,\reg2
 #else
 	depw		\reg1,\start,\length,\reg2
 #endif
@@ -392,7 +384,7 @@
 
 	.macro		DEPI	val,start,length,reg
 #ifdef CONFIG_64BIT
-	depdi		\val,32+\start,\length,\reg
+	depdi		\val,32+(\start),\length,\reg
 #else
 	depwi		\val,\start,\length,\reg
 #endif
@@ -513,6 +505,18 @@
 	STREG		\pte,0(\ptep)
 	.endm
 
+	/* bitshift difference between a PFN (based on kernel's PAGE_SIZE)
+	 * to a CPU TLB 4k PFN (4k => 12 bits to shift) */
+	#define PAGE_ADD_SHIFT  (PAGE_SHIFT-12)
+
+	/* Drop prot bits and convert to page addr for iitlbt and idtlbt */
+	.macro		convert_for_tlb_insert20 pte
+	extrd,u		\pte,(63-ASM_PFN_PTE_SHIFT)+(63-58)+PAGE_ADD_SHIFT,\
+				64-PAGE_SHIFT-PAGE_ADD_SHIFT,\pte
+	depdi		_PAGE_SIZE_ENCODING_DEFAULT,63,\
+				(63-58)+PAGE_ADD_SHIFT,\pte
+	.endm
+
 	/* Convert the pte and prot to tlb insertion values.  How
 	 * this happens is quite subtle, read below */
 	.macro		make_insert_tlb	spc,pte,prot
@@ -549,11 +553,10 @@
 	 * on most of those machines only handles cache transactions.
 	 */
 	extrd,u,*=	\pte,_PAGE_NO_CACHE_BIT+32,1,%r0
-	depi		1,12,1,\prot
+	depdi		1,12,1,\prot
 
 	/* Drop prot bits and convert to page addr for iitlbt and idtlbt */
-	extrd,u		\pte,(63-ASM_PFN_PTE_SHIFT)+(63-58),64-PAGE_SHIFT,\pte
-	depdi		_PAGE_SIZE_ENCODING_DEFAULT,63,63-58,\pte
+	convert_for_tlb_insert20 \pte
 	.endm
 
 	/* Identical macro to make_insert_tlb above, except it
@@ -571,8 +574,8 @@
 
 	/* Get rid of prot bits and convert to page addr for iitlba */
 
-	depi		_PAGE_SIZE_ENCODING_DEFAULT,31,ASM_PFN_PTE_SHIFT,\pte
-	extru		\pte,24,25,\pte
+	depi		0,31,ASM_PFN_PTE_SHIFT,\pte
+	SHRREG		\pte,(ASM_PFN_PTE_SHIFT-(31-26)),\pte
 	.endm
 
 	/* This is for ILP32 PA2.0 only.  The TLB insertion needs
@@ -945,7 +948,7 @@ intr_check_sig:
 	/* As above */
 	mfctl   %cr30,%r1
 	LDREG	TI_FLAGS(%r1),%r19
-	ldi	(_TIF_SIGPENDING|_TIF_RESTORE_SIGMASK), %r20
+	ldi	(_TIF_SIGPENDING|_TIF_RESTORE_SIGMASK|_TIF_NOTIFY_RESUME), %r20
 	and,COND(<>)	%r19, %r20, %r0
 	b,n	intr_restore	/* skip past if we've nothing to do */
 
@@ -957,9 +960,9 @@ intr_check_sig:
 	 * Only do signals if we are returning to user space
 	 */
 	LDREG	PT_IASQ0(%r16), %r20
-	CMPIB=,n 0,%r20,intr_restore /* backward */
+	cmpib,COND(=),n 0,%r20,intr_restore /* backward */
 	LDREG	PT_IASQ1(%r16), %r20
-	CMPIB=,n 0,%r20,intr_restore /* backward */
+	cmpib,COND(=),n 0,%r20,intr_restore /* backward */
 
 	copy	%r0, %r25			/* long in_syscall = 0 */
 #ifdef CONFIG_64BIT
@@ -1013,10 +1016,10 @@ intr_do_resched:
 	 * we jump back to intr_restore.
 	 */
 	LDREG	PT_IASQ0(%r16), %r20
-	CMPIB=	0, %r20, intr_do_preempt
+	cmpib,COND(=)	0, %r20, intr_do_preempt
 	nop
 	LDREG	PT_IASQ1(%r16), %r20
-	CMPIB=	0, %r20, intr_do_preempt
+	cmpib,COND(=)	0, %r20, intr_do_preempt
 	nop
 
 #ifdef CONFIG_64BIT
@@ -1045,7 +1048,7 @@ intr_do_preempt:
 	/* current_thread_info()->preempt_count */
 	mfctl	%cr30, %r1
 	LDREG	TI_PRE_COUNT(%r1), %r19
-	CMPIB<>	0, %r19, intr_restore	/* if preempt_count > 0 */
+	cmpib,COND(<>)	0, %r19, intr_restore	/* if preempt_count > 0 */
 	nop				/* prev insn branched backwards */
 
 	/* check if we interrupted a critical path */
@@ -1064,7 +1067,7 @@ intr_do_preempt:
 	 */
 
 intr_extint:
-	CMPIB=,n 0,%r16,1f
+	cmpib,COND(=),n 0,%r16,1f
 
 	get_stack_use_cr30
 	b,n 2f
@@ -1099,7 +1102,7 @@ ENDPROC(syscall_exit_rfi)
 
 ENTRY(intr_save)		/* for os_hpmc */
 	mfsp    %sr7,%r16
-	CMPIB=,n 0,%r16,1f
+	cmpib,COND(=),n 0,%r16,1f
 	get_stack_use_cr30
 	b	2f
 	copy    %r8,%r26
@@ -1121,7 +1124,7 @@ ENTRY(intr_save)		/* for os_hpmc */
 	 *           adjust isr/ior below.
 	 */
 
-	CMPIB=,n        6,%r26,skip_save_ior
+	cmpib,COND(=),n        6,%r26,skip_save_ior
 
 
 	mfctl           %cr20, %r16 /* isr */
@@ -1252,10 +1255,9 @@ nadtlb_check_flush_20w:
 	depdi,z         7,7,3,prot
 	depdi           1,10,1,prot
 
-	/* Get rid of prot bits and convert to page addr for idtlbt */
+	/* Drop prot bits from pte and convert to page addr for idtlbt */
+	convert_for_tlb_insert20 pte
 
-	depdi		0,63,12,pte
-	extrd,u         pte,56,52,pte
 	idtlbt          pte,prot
 
 	rfir
@@ -1345,8 +1347,8 @@ nadtlb_check_flush_11:
 
 	/* Get rid of prot bits and convert to page addr for idtlba */
 
-	depi		0,31,12,pte
-	extru		pte,24,25,pte
+	depi		0,31,ASM_PFN_PTE_SHIFT,pte
+	SHRREG		pte,(ASM_PFN_PTE_SHIFT-(31-26)),pte
 
 	mfsp		%sr1,t0  /* Save sr1 so we can use it in tlb inserts */
 	mtsp		spc,%sr1
@@ -1411,10 +1413,9 @@ nadtlb_check_flush_20:
 	depdi,z         7,7,3,prot
 	depdi           1,10,1,prot
 
-	/* Get rid of prot bits and convert to page addr for idtlbt */
+	/* Drop prot bits from pte and convert to page addr for idtlbt */
+	convert_for_tlb_insert20 pte
 
-	depdi		0,63,12,pte
-	extrd,u         pte,56,32,pte
 	idtlbt          pte,prot
 
 	rfir
@@ -1450,11 +1451,11 @@ nadtlb_emulate:
 	bb,>=,n         %r9,26,nadtlb_nullify  /* m bit not set, just nullify */
 	BL		get_register,%r25
 	extrw,u         %r9,15,5,%r8           /* Get index register # */
-	CMPIB=,n        -1,%r1,nadtlb_fault    /* have to use slow path */
+	cmpib,COND(=),n        -1,%r1,nadtlb_fault    /* have to use slow path */
 	copy            %r1,%r24
 	BL		get_register,%r25
 	extrw,u         %r9,10,5,%r8           /* Get base register # */
-	CMPIB=,n        -1,%r1,nadtlb_fault    /* have to use slow path */
+	cmpib,COND(=),n        -1,%r1,nadtlb_fault    /* have to use slow path */
 	BL		set_register,%r25
 	add,l           %r1,%r24,%r1           /* doesn't affect c/b bits */
 
@@ -1486,7 +1487,7 @@ nadtlb_probe_check:
 	cmpb,<>,n       %r16,%r17,nadtlb_fault /* Must be probe,[rw]*/
 	BL              get_register,%r25      /* Find the target register */
 	extrw,u         %r9,31,5,%r8           /* Get target register */
-	CMPIB=,n        -1,%r1,nadtlb_fault    /* have to use slow path */
+	cmpib,COND(=),n        -1,%r1,nadtlb_fault    /* have to use slow path */
 	BL		set_register,%r25
 	copy            %r0,%r1                /* Write zero to target register */
 	b nadtlb_nullify                       /* Nullify return insn */
@@ -1570,12 +1571,12 @@ dbit_trap_20w:
 	L3_ptep		ptp,pte,t0,va,dbit_fault
 
 #ifdef CONFIG_SMP
-	CMPIB=,n        0,spc,dbit_nolock_20w
+	cmpib,COND(=),n        0,spc,dbit_nolock_20w
 	load32		PA(pa_dbit_lock),t0
 
 dbit_spin_20w:
 	LDCW		0(t0),t1
-	cmpib,=         0,t1,dbit_spin_20w
+	cmpib,COND(=)         0,t1,dbit_spin_20w
 	nop
 
 dbit_nolock_20w:
@@ -1586,7 +1587,7 @@ dbit_nolock_20w:
 		
 	idtlbt          pte,prot
 #ifdef CONFIG_SMP
-	CMPIB=,n        0,spc,dbit_nounlock_20w
+	cmpib,COND(=),n        0,spc,dbit_nounlock_20w
 	ldi             1,t1
 	stw             t1,0(t0)
 
@@ -1606,7 +1607,7 @@ dbit_trap_11:
 	L2_ptep		ptp,pte,t0,va,dbit_fault
 
 #ifdef CONFIG_SMP
-	CMPIB=,n        0,spc,dbit_nolock_11
+	cmpib,COND(=),n        0,spc,dbit_nolock_11
 	load32		PA(pa_dbit_lock),t0
 
 dbit_spin_11:
@@ -1628,7 +1629,7 @@ dbit_nolock_11:
 
 	mtsp            t1, %sr1     /* Restore sr1 */
 #ifdef CONFIG_SMP
-	CMPIB=,n        0,spc,dbit_nounlock_11
+	cmpib,COND(=),n        0,spc,dbit_nounlock_11
 	ldi             1,t1
 	stw             t1,0(t0)
 
@@ -1646,7 +1647,7 @@ dbit_trap_20:
 	L2_ptep		ptp,pte,t0,va,dbit_fault
 
 #ifdef CONFIG_SMP
-	CMPIB=,n        0,spc,dbit_nolock_20
+	cmpib,COND(=),n        0,spc,dbit_nolock_20
 	load32		PA(pa_dbit_lock),t0
 
 dbit_spin_20:
@@ -1665,7 +1666,7 @@ dbit_nolock_20:
         idtlbt          pte,prot
 
 #ifdef CONFIG_SMP
-	CMPIB=,n        0,spc,dbit_nounlock_20
+	cmpib,COND(=),n        0,spc,dbit_nounlock_20
 	ldi             1,t1
 	stw             t1,0(t0)
 
@@ -1994,7 +1995,7 @@ ENTRY(syscall_exit)
 
 	/* We can't use "CMPIB<> PER_HPUX" since "im5" field is sign extended */
 	ldo	  -PER_HPUX(%r19), %r19
-	CMPIB<>,n 0,%r19,1f
+	cmpib,COND(<>),n 0,%r19,1f
 
 	/* Save other hpux returns if personality is PER_HPUX */
 	STREG     %r22,TASK_PT_GR22(%r1)
@@ -2046,12 +2047,13 @@ syscall_do_signal:
 	b,n     syscall_check_sig
 
 syscall_restore:
-	/* Are we being ptraced? */
 	LDREG	TI_TASK-THREAD_SZ_ALGN-FRAME_SIZE(%r30),%r1
 
-	ldw	TASK_PTRACE(%r1), %r19
-	bb,<	%r19,31,syscall_restore_rfi
-	nop
+	/* Are we being ptraced? */
+	ldw	TASK_FLAGS(%r1),%r19
+	ldi	(_TIF_SINGLESTEP|_TIF_BLOCKSTEP),%r2
+	and,COND(=)	%r19,%r2,%r0
+	b,n	syscall_restore_rfi
 
 	ldo	TASK_PT_FR31(%r1),%r19		   /* reload fpregs */
 	rest_fp	%r19
@@ -2112,16 +2114,16 @@ syscall_restore_rfi:
 	ldi	0x0b,%r20			   /* Create new PSW */
 	depi	-1,13,1,%r20			   /* C, Q, D, and I bits */
 
-	/* The values of PA_SINGLESTEP_BIT and PA_BLOCKSTEP_BIT are
-	 * set in include/linux/ptrace.h and converted to PA bitmap
+	/* The values of SINGLESTEP_BIT and BLOCKSTEP_BIT are
+	 * set in thread_info.h and converted to PA bitmap
 	 * numbers in asm-offsets.c */
 
-	/* if ((%r19.PA_SINGLESTEP_BIT)) { %r20.27=1} */
-	extru,=	%r19,PA_SINGLESTEP_BIT,1,%r0
+	/* if ((%r19.SINGLESTEP_BIT)) { %r20.27=1} */
+	extru,=	%r19,TIF_SINGLESTEP_PA_BIT,1,%r0
 	depi	-1,27,1,%r20			   /* R bit */
 
-	/* if ((%r19.PA_BLOCKSTEP_BIT)) { %r20.7=1} */
-	extru,= %r19,PA_BLOCKSTEP_BIT,1,%r0
+	/* if ((%r19.BLOCKSTEP_BIT)) { %r20.7=1} */
+	extru,= %r19,TIF_BLOCKSTEP_PA_BIT,1,%r0
 	depi	-1,7,1,%r20			   /* T bit */
 
 	STREG	%r20,TASK_PT_PSW(%r1)
@@ -2182,6 +2184,33 @@ syscall_do_resched:
 	b	syscall_check_resched	/* if resched, we start over again */
 	nop
 ENDPROC(syscall_exit)
+
+
+#ifdef CONFIG_FUNCTION_TRACER
+	.import ftrace_function_trampoline,code
+ENTRY(_mcount)
+	copy	%r3, %arg2
+	b	ftrace_function_trampoline
+	nop
+ENDPROC(_mcount)
+
+ENTRY(return_to_handler)
+	load32	return_trampoline, %rp
+	copy	%ret0, %arg0
+	copy	%ret1, %arg1
+	b	ftrace_return_to_handler
+	nop
+return_trampoline:
+	copy	%ret0, %rp
+	copy	%r23, %ret0
+	copy	%r24, %ret1
+
+.globl ftrace_stub
+ftrace_stub:
+	bv	%r0(%rp)
+	nop
+ENDPROC(return_to_handler)
+#endif	/* CONFIG_FUNCTION_TRACER */
 
 
 get_register:

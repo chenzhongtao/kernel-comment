@@ -23,7 +23,6 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -34,7 +33,9 @@
 #include <linux/backlight.h>
 #include <linux/bug.h>
 #include <linux/kdebug.h>
+#include <linux/debugfs.h>
 
+#include <asm/emulated_ops.h>
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -53,8 +54,12 @@
 #include <asm/processor.h>
 #endif
 #include <asm/kexec.h>
+#include <asm/ppc-opcode.h>
+#ifdef CONFIG_FSL_BOOKE
+#include <asm/dbell.h>
+#endif
 
-#ifdef CONFIG_DEBUGGER
+#if defined(CONFIG_DEBUGGER) || defined(CONFIG_KEXEC)
 int (*__debugger)(struct pt_regs *regs);
 int (*__debugger_ipi)(struct pt_regs *regs);
 int (*__debugger_bpt)(struct pt_regs *regs);
@@ -334,18 +339,25 @@ static inline int check_io_access(struct pt_regs *regs)
 #define clear_single_step(regs)	((regs)->msr &= ~MSR_SE)
 #endif
 
-static int generic_machine_check_exception(struct pt_regs *regs)
+#if defined(CONFIG_4xx)
+int machine_check_4xx(struct pt_regs *regs)
 {
 	unsigned long reason = get_mc_reason(regs);
 
-#if defined(CONFIG_4xx) && !defined(CONFIG_440A)
 	if (reason & ESR_IMCP) {
 		printk("Instruction");
 		mtspr(SPRN_ESR, reason & ~ESR_IMCP);
 	} else
 		printk("Data");
 	printk(" machine check in kernel mode.\n");
-#elif defined(CONFIG_440A)
+
+	return 0;
+}
+
+int machine_check_440A(struct pt_regs *regs)
+{
+	unsigned long reason = get_mc_reason(regs);
+
 	printk("Machine check in kernel mode.\n");
 	if (reason & ESR_IMCP){
 		printk("Instruction Synchronous Machine Check exception\n");
@@ -375,7 +387,13 @@ static int generic_machine_check_exception(struct pt_regs *regs)
 		/* Clear MCSR */
 		mtspr(SPRN_MCSR, mcsr);
 	}
-#elif defined (CONFIG_E500)
+	return 0;
+}
+#elif defined(CONFIG_E500)
+int machine_check_e500(struct pt_regs *regs)
+{
+	unsigned long reason = get_mc_reason(regs);
+
 	printk("Machine check in kernel mode.\n");
 	printk("Caused by (from MCSR=%lx): ", reason);
 
@@ -403,7 +421,14 @@ static int generic_machine_check_exception(struct pt_regs *regs)
 		printk("Bus - Instruction Parity Error\n");
 	if (reason & MCSR_BUS_RPERR)
 		printk("Bus - Read Parity Error\n");
-#elif defined (CONFIG_E200)
+
+	return 0;
+}
+#elif defined(CONFIG_E200)
+int machine_check_e200(struct pt_regs *regs)
+{
+	unsigned long reason = get_mc_reason(regs);
+
 	printk("Machine check in kernel mode.\n");
 	printk("Caused by (from MCSR=%lx): ", reason);
 
@@ -421,7 +446,14 @@ static int generic_machine_check_exception(struct pt_regs *regs)
 		printk("Bus - Read Bus Error on data load\n");
 	if (reason & MCSR_BUS_WRERR)
 		printk("Bus - Write Bus Error on buffered store or cache line push\n");
-#else /* !CONFIG_4xx && !CONFIG_E500 && !CONFIG_E200 */
+
+	return 0;
+}
+#else
+int machine_check_generic(struct pt_regs *regs)
+{
+	unsigned long reason = get_mc_reason(regs);
+
 	printk("Machine check in kernel mode.\n");
 	printk("Caused by (from SRR1=%lx): ", reason);
 	switch (reason & 0x601F0000) {
@@ -451,22 +483,26 @@ static int generic_machine_check_exception(struct pt_regs *regs)
 	default:
 		printk("Unknown values in msr\n");
 	}
-#endif /* CONFIG_4xx */
-
 	return 0;
 }
+#endif /* everything else */
 
 void machine_check_exception(struct pt_regs *regs)
 {
 	int recover = 0;
 
-	/* See if any machine dependent calls */
+	/* See if any machine dependent calls. In theory, we would want
+	 * to call the CPU first, and call the ppc_md. one if the CPU
+	 * one returns a positive number. However there is existing code
+	 * that assumes the board gets a first chance, so let's keep it
+	 * that way for now and fix things later. --BenH.
+	 */
 	if (ppc_md.machine_check_exception)
 		recover = ppc_md.machine_check_exception(regs);
-	else
-		recover = generic_machine_check_exception(regs);
+	else if (cur_cpu_spec->machine_check)
+		recover = cur_cpu_spec->machine_check(regs);
 
-	if (recover)
+	if (recover > 0)
 		return;
 
 	if (user_mode(regs)) {
@@ -476,7 +512,12 @@ void machine_check_exception(struct pt_regs *regs)
 	}
 
 #if defined(CONFIG_8xx) && defined(CONFIG_PCI)
-	/* the qspan pci read routines can cause machine checks -- Cort */
+	/* the qspan pci read routines can cause machine checks -- Cort
+	 *
+	 * yuck !!! that totally needs to go away ! There are better ways
+	 * to deal with that than having a wart in the mcheck handler.
+	 * -- BenH
+	 */
 	bad_page_fault(regs, regs->dar, SIGBUS);
 	return;
 #endif
@@ -602,26 +643,6 @@ static void parse_fpe(struct pt_regs *regs)
  * bits is faster and easier.
  *
  */
-#define INST_MFSPR_PVR		0x7c1f42a6
-#define INST_MFSPR_PVR_MASK	0xfc1fffff
-
-#define INST_DCBA		0x7c0005ec
-#define INST_DCBA_MASK		0xfc0007fe
-
-#define INST_MCRXR		0x7c000400
-#define INST_MCRXR_MASK		0xfc0007fe
-
-#define INST_STRING		0x7c00042a
-#define INST_STRING_MASK	0xfc0007fe
-#define INST_STRING_GEN_MASK	0xfc00067e
-#define INST_LSWI		0x7c0004aa
-#define INST_LSWX		0x7c00042a
-#define INST_STSWI		0x7c0005aa
-#define INST_STSWX		0x7c00052a
-
-#define INST_POPCNTB		0x7c0000f4
-#define INST_POPCNTB_MASK	0xfc0007fe
-
 static int emulate_string_inst(struct pt_regs *regs, u32 instword)
 {
 	u8 rT = (instword >> 21) & 0x1f;
@@ -632,20 +653,20 @@ static int emulate_string_inst(struct pt_regs *regs, u32 instword)
 	int pos = 0;
 
 	/* Early out if we are an invalid form of lswx */
-	if ((instword & INST_STRING_MASK) == INST_LSWX)
+	if ((instword & PPC_INST_STRING_MASK) == PPC_INST_LSWX)
 		if ((rT == rA) || (rT == NB_RB))
 			return -EINVAL;
 
 	EA = (rA == 0) ? 0 : regs->gpr[rA];
 
-	switch (instword & INST_STRING_MASK) {
-		case INST_LSWX:
-		case INST_STSWX:
+	switch (instword & PPC_INST_STRING_MASK) {
+		case PPC_INST_LSWX:
+		case PPC_INST_STSWX:
 			EA += NB_RB;
 			num_bytes = regs->xer & 0x7f;
 			break;
-		case INST_LSWI:
-		case INST_STSWI:
+		case PPC_INST_LSWI:
+		case PPC_INST_STSWI:
 			num_bytes = (NB_RB == 0) ? 32 : NB_RB;
 			break;
 		default:
@@ -657,9 +678,9 @@ static int emulate_string_inst(struct pt_regs *regs, u32 instword)
 		u8 val;
 		u32 shift = 8 * (3 - (pos & 0x3));
 
-		switch ((instword & INST_STRING_MASK)) {
-			case INST_LSWX:
-			case INST_LSWI:
+		switch ((instword & PPC_INST_STRING_MASK)) {
+			case PPC_INST_LSWX:
+			case PPC_INST_LSWI:
 				if (get_user(val, (u8 __user *)EA))
 					return -EFAULT;
 				/* first time updating this reg,
@@ -668,8 +689,8 @@ static int emulate_string_inst(struct pt_regs *regs, u32 instword)
 					regs->gpr[rT] = 0;
 				regs->gpr[rT] |= val << shift;
 				break;
-			case INST_STSWI:
-			case INST_STSWX:
+			case PPC_INST_STSWI:
+			case PPC_INST_STSWX:
 				val = regs->gpr[rT] >> shift;
 				if (put_user(val, (u8 __user *)EA))
 					return -EFAULT;
@@ -707,6 +728,23 @@ static int emulate_popcntb_inst(struct pt_regs *regs, u32 instword)
 	return 0;
 }
 
+static int emulate_isel(struct pt_regs *regs, u32 instword)
+{
+	u8 rT = (instword >> 21) & 0x1f;
+	u8 rA = (instword >> 16) & 0x1f;
+	u8 rB = (instword >> 11) & 0x1f;
+	u8 BC = (instword >> 6) & 0x1f;
+	u8 bit;
+	unsigned long tmp;
+
+	tmp = (rA == 0) ? 0 : regs->gpr[rA];
+	bit = (regs->ccr >> (31 - BC)) & 0x1;
+
+	regs->gpr[rT] = bit ? tmp : regs->gpr[rB];
+
+	return 0;
+}
+
 static int emulate_instruction(struct pt_regs *regs)
 {
 	u32 instword;
@@ -720,33 +758,46 @@ static int emulate_instruction(struct pt_regs *regs)
 		return -EFAULT;
 
 	/* Emulate the mfspr rD, PVR. */
-	if ((instword & INST_MFSPR_PVR_MASK) == INST_MFSPR_PVR) {
+	if ((instword & PPC_INST_MFSPR_PVR_MASK) == PPC_INST_MFSPR_PVR) {
+		PPC_WARN_EMULATED(mfpvr);
 		rd = (instword >> 21) & 0x1f;
 		regs->gpr[rd] = mfspr(SPRN_PVR);
 		return 0;
 	}
 
 	/* Emulating the dcba insn is just a no-op.  */
-	if ((instword & INST_DCBA_MASK) == INST_DCBA)
+	if ((instword & PPC_INST_DCBA_MASK) == PPC_INST_DCBA) {
+		PPC_WARN_EMULATED(dcba);
 		return 0;
+	}
 
 	/* Emulate the mcrxr insn.  */
-	if ((instword & INST_MCRXR_MASK) == INST_MCRXR) {
+	if ((instword & PPC_INST_MCRXR_MASK) == PPC_INST_MCRXR) {
 		int shift = (instword >> 21) & 0x1c;
 		unsigned long msk = 0xf0000000UL >> shift;
 
+		PPC_WARN_EMULATED(mcrxr);
 		regs->ccr = (regs->ccr & ~msk) | ((regs->xer >> shift) & msk);
 		regs->xer &= ~0xf0000000UL;
 		return 0;
 	}
 
 	/* Emulate load/store string insn. */
-	if ((instword & INST_STRING_GEN_MASK) == INST_STRING)
+	if ((instword & PPC_INST_STRING_GEN_MASK) == PPC_INST_STRING) {
+		PPC_WARN_EMULATED(string);
 		return emulate_string_inst(regs, instword);
+	}
 
 	/* Emulate the popcntb (Population Count Bytes) instruction. */
-	if ((instword & INST_POPCNTB_MASK) == INST_POPCNTB) {
+	if ((instword & PPC_INST_POPCNTB_MASK) == PPC_INST_POPCNTB) {
+		PPC_WARN_EMULATED(popcntb);
 		return emulate_popcntb_inst(regs, instword);
+	}
+
+	/* Emulate isel (Integer Select) instruction */
+	if ((instword & PPC_INST_ISEL_MASK) == PPC_INST_ISEL) {
+		PPC_WARN_EMULATED(isel);
+		return emulate_isel(regs, instword);
 	}
 
 	return -EINVAL;
@@ -906,6 +957,20 @@ void altivec_unavailable_exception(struct pt_regs *regs)
 	die("Unrecoverable VMX/Altivec Unavailable Exception", regs, SIGABRT);
 }
 
+void vsx_unavailable_exception(struct pt_regs *regs)
+{
+	if (user_mode(regs)) {
+		/* A user program has executed an vsx instruction,
+		   but this kernel doesn't support vsx. */
+		_exception(SIGILL, regs, ILL_ILLOPC, regs->nip);
+		return;
+	}
+
+	printk(KERN_EMERG "Unrecoverable VSX Unavailable Exception "
+			"%lx at %lx\n", regs->trap, regs->nip);
+	die("Unrecoverable VSX Unavailable Exception", regs, SIGABRT);
+}
+
 void performance_monitor_exception(struct pt_regs *regs)
 {
 	perf_irq(regs);
@@ -929,6 +994,8 @@ void SoftwareEmulation(struct pt_regs *regs)
 
 #ifdef CONFIG_MATH_EMULATION
 	errcode = do_mathemu(regs);
+	if (errcode >= 0)
+		PPC_WARN_EMULATED(math);
 
 	switch (errcode) {
 	case 0:
@@ -950,6 +1017,9 @@ void SoftwareEmulation(struct pt_regs *regs)
 
 #elif defined(CONFIG_8XX_MINIMAL_FPEMU)
 	errcode = Soft_emulate_8xx(regs);
+	if (errcode >= 0)
+		PPC_WARN_EMULATED(8xx);
+
 	switch (errcode) {
 	case 0:
 		emulate_single_step(regs);
@@ -969,21 +1039,71 @@ void SoftwareEmulation(struct pt_regs *regs)
 
 #if defined(CONFIG_40x) || defined(CONFIG_BOOKE)
 
-void DebugException(struct pt_regs *regs, unsigned long debug_status)
+void __kprobes DebugException(struct pt_regs *regs, unsigned long debug_status)
 {
-	if (debug_status & DBSR_IC) {	/* instruction completion */
+	/* Hack alert: On BookE, Branch Taken stops on the branch itself, while
+	 * on server, it stops on the target of the branch. In order to simulate
+	 * the server behaviour, we thus restart right away with a single step
+	 * instead of stopping here when hitting a BT
+	 */
+	if (debug_status & DBSR_BT) {
 		regs->msr &= ~MSR_DE;
+
+		/* Disable BT */
+		mtspr(SPRN_DBCR0, mfspr(SPRN_DBCR0) & ~DBCR0_BT);
+		/* Clear the BT event */
+		mtspr(SPRN_DBSR, DBSR_BT);
+
+		/* Do the single step trick only when coming from userspace */
 		if (user_mode(regs)) {
-			current->thread.dbcr0 &= ~DBCR0_IC;
-		} else {
-			/* Disable instruction completion */
-			mtspr(SPRN_DBCR0, mfspr(SPRN_DBCR0) & ~DBCR0_IC);
-			/* Clear the instruction completion event */
-			mtspr(SPRN_DBSR, DBSR_IC);
-			if (debugger_sstep(regs))
-				return;
+			current->thread.dbcr0 &= ~DBCR0_BT;
+			current->thread.dbcr0 |= DBCR0_IDM | DBCR0_IC;
+			regs->msr |= MSR_DE;
+			return;
 		}
-		_exception(SIGTRAP, regs, TRAP_TRACE, 0);
+
+		if (notify_die(DIE_SSTEP, "block_step", regs, 5,
+			       5, SIGTRAP) == NOTIFY_STOP) {
+			return;
+		}
+		if (debugger_sstep(regs))
+			return;
+	} else if (debug_status & DBSR_IC) { 	/* Instruction complete */
+		regs->msr &= ~MSR_DE;
+
+		/* Disable instruction completion */
+		mtspr(SPRN_DBCR0, mfspr(SPRN_DBCR0) & ~DBCR0_IC);
+		/* Clear the instruction completion event */
+		mtspr(SPRN_DBSR, DBSR_IC);
+
+		if (notify_die(DIE_SSTEP, "single_step", regs, 5,
+			       5, SIGTRAP) == NOTIFY_STOP) {
+			return;
+		}
+
+		if (debugger_sstep(regs))
+			return;
+
+		if (user_mode(regs))
+			current->thread.dbcr0 &= ~(DBCR0_IC);
+
+		_exception(SIGTRAP, regs, TRAP_TRACE, regs->nip);
+	} else if (debug_status & (DBSR_DAC1R | DBSR_DAC1W)) {
+		regs->msr &= ~MSR_DE;
+
+		if (user_mode(regs)) {
+			current->thread.dbcr0 &= ~(DBSR_DAC1R | DBSR_DAC1W |
+								DBCR0_IDM);
+		} else {
+			/* Disable DAC interupts */
+			mtspr(SPRN_DBCR0, mfspr(SPRN_DBCR0) & ~(DBSR_DAC1R |
+						DBSR_DAC1W | DBCR0_IDM));
+
+			/* Clear the DAC event */
+			mtspr(SPRN_DBSR, (DBSR_DAC1R | DBSR_DAC1W));
+		}
+		/* Setup and send the trap to the handler */
+		do_dabr(regs, mfspr(SPRN_DAC1), debug_status);
 	}
 }
 #endif /* CONFIG_4xx || CONFIG_BOOKE */
@@ -1009,6 +1129,7 @@ void altivec_assist_exception(struct pt_regs *regs)
 
 	flush_altivec_to_thread(current);
 
+	PPC_WARN_EMULATED(altivec);
 	err = emulate_altivec(regs);
 	if (err == 0) {
 		regs->nip += 4;		/* skip emulated instruction */
@@ -1030,7 +1151,40 @@ void altivec_assist_exception(struct pt_regs *regs)
 }
 #endif /* CONFIG_ALTIVEC */
 
+#ifdef CONFIG_VSX
+void vsx_assist_exception(struct pt_regs *regs)
+{
+	if (!user_mode(regs)) {
+		printk(KERN_EMERG "VSX assist exception in kernel mode"
+		       " at %lx\n", regs->nip);
+		die("Kernel VSX assist exception", regs, SIGILL);
+	}
+
+	flush_vsx_to_thread(current);
+	printk(KERN_INFO "VSX assist not supported at %lx\n", regs->nip);
+	_exception(SIGILL, regs, ILL_ILLOPC, regs->nip);
+}
+#endif /* CONFIG_VSX */
+
 #ifdef CONFIG_FSL_BOOKE
+
+void doorbell_exception(struct pt_regs *regs)
+{
+#ifdef CONFIG_SMP
+	int cpu = smp_processor_id();
+	int msg;
+
+	if (num_online_cpus() < 2)
+		return;
+
+	for (msg = 0; msg < 4; msg++)
+		if (test_and_clear_bit(msg, &dbell_smp_message[cpu]))
+			smp_message_recv(msg);
+#else
+	printk(KERN_WARNING "Received doorbell on non-smp system\n");
+#endif
+}
+
 void CacheLockingException(struct pt_regs *regs, unsigned long address,
 			   unsigned long error_code)
 {
@@ -1047,36 +1201,84 @@ void CacheLockingException(struct pt_regs *regs, unsigned long address,
 #ifdef CONFIG_SPE
 void SPEFloatingPointException(struct pt_regs *regs)
 {
+	extern int do_spe_mathemu(struct pt_regs *regs);
 	unsigned long spefscr;
 	int fpexc_mode;
 	int code = 0;
+	int err;
+
+	preempt_disable();
+	if (regs->msr & MSR_SPE)
+		giveup_spe(current);
+	preempt_enable();
 
 	spefscr = current->thread.spefscr;
 	fpexc_mode = current->thread.fpexc_mode;
 
-	/* Hardware does not neccessarily set sticky
-	 * underflow/overflow/invalid flags */
 	if ((spefscr & SPEFSCR_FOVF) && (fpexc_mode & PR_FP_EXC_OVF)) {
 		code = FPE_FLTOVF;
-		spefscr |= SPEFSCR_FOVFS;
 	}
 	else if ((spefscr & SPEFSCR_FUNF) && (fpexc_mode & PR_FP_EXC_UND)) {
 		code = FPE_FLTUND;
-		spefscr |= SPEFSCR_FUNFS;
 	}
 	else if ((spefscr & SPEFSCR_FDBZ) && (fpexc_mode & PR_FP_EXC_DIV))
 		code = FPE_FLTDIV;
 	else if ((spefscr & SPEFSCR_FINV) && (fpexc_mode & PR_FP_EXC_INV)) {
 		code = FPE_FLTINV;
-		spefscr |= SPEFSCR_FINVS;
 	}
 	else if ((spefscr & (SPEFSCR_FG | SPEFSCR_FX)) && (fpexc_mode & PR_FP_EXC_RES))
 		code = FPE_FLTRES;
 
-	current->thread.spefscr = spefscr;
+	err = do_spe_mathemu(regs);
+	if (err == 0) {
+		regs->nip += 4;		/* skip emulated instruction */
+		emulate_single_step(regs);
+		return;
+	}
 
-	_exception(SIGFPE, regs, code, regs->nip);
+	if (err == -EFAULT) {
+		/* got an error reading the instruction */
+		_exception(SIGSEGV, regs, SEGV_ACCERR, regs->nip);
+	} else if (err == -EINVAL) {
+		/* didn't recognize the instruction */
+		printk(KERN_ERR "unrecognized spe instruction "
+		       "in %s at %lx\n", current->comm, regs->nip);
+	} else {
+		_exception(SIGFPE, regs, code, regs->nip);
+	}
+
 	return;
+}
+
+void SPEFloatingPointRoundException(struct pt_regs *regs)
+{
+	extern int speround_handler(struct pt_regs *regs);
+	int err;
+
+	preempt_disable();
+	if (regs->msr & MSR_SPE)
+		giveup_spe(current);
+	preempt_enable();
+
+	regs->nip -= 4;
+	err = speround_handler(regs);
+	if (err == 0) {
+		regs->nip += 4;		/* skip emulated instruction */
+		emulate_single_step(regs);
+		return;
+	}
+
+	if (err == -EFAULT) {
+		/* got an error reading the instruction */
+		_exception(SIGSEGV, regs, SEGV_ACCERR, regs->nip);
+	} else if (err == -EINVAL) {
+		/* didn't recognize the instruction */
+		printk(KERN_ERR "unrecognized spe instruction "
+		       "in %s at %lx\n", current->comm, regs->nip);
+	} else {
+		_exception(SIGFPE, regs, 0, regs->nip);
+		return;
+	}
 }
 #endif
 
@@ -1126,3 +1328,79 @@ void kernel_bad_stack(struct pt_regs *regs)
 void __init trap_init(void)
 {
 }
+
+
+#ifdef CONFIG_PPC_EMULATED_STATS
+
+#define WARN_EMULATED_SETUP(type)	.type = { .name = #type }
+
+struct ppc_emulated ppc_emulated = {
+#ifdef CONFIG_ALTIVEC
+	WARN_EMULATED_SETUP(altivec),
+#endif
+	WARN_EMULATED_SETUP(dcba),
+	WARN_EMULATED_SETUP(dcbz),
+	WARN_EMULATED_SETUP(fp_pair),
+	WARN_EMULATED_SETUP(isel),
+	WARN_EMULATED_SETUP(mcrxr),
+	WARN_EMULATED_SETUP(mfpvr),
+	WARN_EMULATED_SETUP(multiple),
+	WARN_EMULATED_SETUP(popcntb),
+	WARN_EMULATED_SETUP(spe),
+	WARN_EMULATED_SETUP(string),
+	WARN_EMULATED_SETUP(unaligned),
+#ifdef CONFIG_MATH_EMULATION
+	WARN_EMULATED_SETUP(math),
+#elif defined(CONFIG_8XX_MINIMAL_FPEMU)
+	WARN_EMULATED_SETUP(8xx),
+#endif
+#ifdef CONFIG_VSX
+	WARN_EMULATED_SETUP(vsx),
+#endif
+};
+
+u32 ppc_warn_emulated;
+
+void ppc_warn_emulated_print(const char *type)
+{
+	if (printk_ratelimit())
+		pr_warning("%s used emulated %s instruction\n", current->comm,
+			   type);
+}
+
+static int __init ppc_warn_emulated_init(void)
+{
+	struct dentry *dir, *d;
+	unsigned int i;
+	struct ppc_emulated_entry *entries = (void *)&ppc_emulated;
+
+	if (!powerpc_debugfs_root)
+		return -ENODEV;
+
+	dir = debugfs_create_dir("emulated_instructions",
+				 powerpc_debugfs_root);
+	if (!dir)
+		return -ENOMEM;
+
+	d = debugfs_create_u32("do_warn", S_IRUGO | S_IWUSR, dir,
+			       &ppc_warn_emulated);
+	if (!d)
+		goto fail;
+
+	for (i = 0; i < sizeof(ppc_emulated)/sizeof(*entries); i++) {
+		d = debugfs_create_u32(entries[i].name, S_IRUGO | S_IWUSR, dir,
+				       (u32 *)&entries[i].val.counter);
+		if (!d)
+			goto fail;
+	}
+
+	return 0;
+
+fail:
+	debugfs_remove_recursive(dir);
+	return -ENOMEM;
+}
+
+device_initcall(ppc_warn_emulated_init);
+
+#endif /* CONFIG_PPC_EMULATED_STATS */
