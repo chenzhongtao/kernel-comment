@@ -29,7 +29,13 @@
  *	Once the reference is obtained we can drop the spinlock.
  */
 
+/**
+ * 文件系统类型链表头指针。
+ */
 static struct file_system_type *file_systems;
+/**
+ * 保护file_systems的读写锁。
+ */
 static DEFINE_RWLOCK(file_systems_lock);
 
 /* WARNING: This can be used only if we _already_ own a reference */
@@ -43,6 +49,10 @@ void put_filesystem(struct file_system_type *fs)
 	module_put(fs->owner);
 }
 
+static struct file_system_type **find_filesystem(const char *name, unsigned len)
+/**
+ * 查找指定类型的文件系统。
+ */
 static struct file_system_type **find_filesystem(const char *name, unsigned len)
 {
 	struct file_system_type **p;
@@ -65,7 +75,10 @@ static struct file_system_type **find_filesystem(const char *name, unsigned len)
  *	structures and must not be freed until the file system has been
  *	unregistered.
  */
- 
+
+/**
+ * 注册文件系统，将相应的file_system_type加入到链表中。
+ */
 int register_filesystem(struct file_system_type * fs)
 {
 	int res = 0;
@@ -98,7 +111,9 @@ EXPORT_SYMBOL(register_filesystem);
  *	Once this function has returned the &struct file_system_type structure
  *	may be freed or reused.
  */
- 
+/**
+ * 当文件系统是被模块装载进内核时，可以用该函数卸载它。
+ */
 int unregister_filesystem(struct file_system_type * fs)
 {
 	struct file_system_type ** tmp;
@@ -257,11 +272,13 @@ static struct file_system_type *__get_fs_type(const char *name, int len)
 {
 	struct file_system_type *fs;
 
+	/* 获取文件系统读锁 */
 	read_lock(&file_systems_lock);
+	/* 根据名称查找文件系统 */
 	fs = *(find_filesystem(name, len));
-	if (fs && !try_module_get(fs->owner))
+	if (fs && !try_module_get(fs->owner)) /* 文件系统存在，但是模块正在卸载中 */
 		fs = NULL;
-	read_unlock(&file_systems_lock);
+	read_unlock(&file_systems_lock);/* 释放文件系统锁 */
 	return fs;
 }
 
@@ -272,6 +289,7 @@ struct file_system_type *get_fs_type(const char *name)
 	int len = dot ? dot - name : strlen(name);
 
 	fs = __get_fs_type(name, len);
+	/* 没有匹配的文件系统 */
 	if (!fs && (request_module("%.*s", len, name) == 0))
 		fs = __get_fs_type(name, len);
 

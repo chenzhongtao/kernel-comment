@@ -65,3 +65,4 @@ cscope.*
 
 *.orig
 *.rej
+*iml

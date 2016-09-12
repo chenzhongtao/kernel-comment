@@ -1253,16 +1253,35 @@ static inline int blk_integrity_rq(struct request *rq)
 #endif /* CONFIG_BLK_DEV_INTEGRITY */
 
 struct block_device_operations {
+	/**
+	 * 打开块设备文件
+	 */
 	int (*open) (struct block_device *, fmode_t);
+	/**
+	 * 关闭对块设备文件的最后一个引用
+	 */
 	int (*release) (struct gendisk *, fmode_t);
 	int (*locked_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
+	/**
+	 * 在块设备文件上发出ioctl()系统调用（使用大内核锁）
+	 * 大多数请求都由块设备层处理，块设备的ioctl都十分短小。
+	 */
 	int (*ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
+	/**
+	 * 在块设备文件上发出ioctl()系统调用（不使用大内核锁）
+	 */
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	int (*direct_access) (struct block_device *, sector_t,
 						void **, unsigned long *);
+	/**
+	 * 检测可移动介质是否已经发生变化（例如软盘），返回值为非0值表示更换了。
+	 */
 	int (*media_changed) (struct gendisk *);
 	unsigned long long (*set_capacity) (struct gendisk *,
 						unsigned long long);
+	/**
+	 * 检查块设备是否持有有效数据。
+	 */
 	int (*revalidate_disk) (struct gendisk *);
 	int (*getgeo)(struct block_device *, struct hd_geometry *);
 	struct module *owner;

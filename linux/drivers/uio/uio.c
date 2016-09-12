@@ -28,13 +28,13 @@
 
 struct uio_device {
 	struct module		*owner;
-	struct device		*dev;
-	int			minor;
-	atomic_t		event;
-	struct fasync_struct	*async_queue;
-	wait_queue_head_t	wait;
+	struct device		*dev; //在__uio_register_device中初始化
+	int			minor; // 次设备id号，uio_get_minor
+	atomic_t		event; //中断事件计数
+	struct fasync_struct	*async_queue; //该设备上的异步等待队列 关于 异步通知 参见LDD3第六章
+	wait_queue_head_t	wait; //该设备上的等待队列，在注册设备时(__uio_register_device)初始化
 	int			vma_count;
-	struct uio_info		*info;
+	struct uio_info		*info; // 指向用户注册的uio_info，在__uio_register_device中被赋值的
 	struct kobject		*map_dir;
 	struct kobject		*portio_dir;
 };
