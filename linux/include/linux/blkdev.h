@@ -1254,33 +1254,33 @@ static inline int blk_integrity_rq(struct request *rq)
 
 struct block_device_operations {
 	/**
-	 * ´ò¿ª¿éÉè±¸ÎÄ¼ş
+	 * æ‰“å¼€å—è®¾å¤‡æ–‡ä»¶
 	 */
 	int (*open) (struct block_device *, fmode_t);
 	/**
-	 * ¹Ø±Õ¶Ô¿éÉè±¸ÎÄ¼şµÄ×îºóÒ»¸öÒıÓÃ
+	 * å…³é—­å¯¹å—è®¾å¤‡æ–‡ä»¶çš„æœ€åä¸€ä¸ªå¼•ç”¨
 	 */
 	int (*release) (struct gendisk *, fmode_t);
 	int (*locked_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	/**
-	 * ÔÚ¿éÉè±¸ÎÄ¼şÉÏ·¢³öioctl()ÏµÍ³µ÷ÓÃ£¨Ê¹ÓÃ´óÄÚºËËø£©
-	 * ´ó¶àÊıÇëÇó¶¼ÓÉ¿éÉè±¸²ã´¦Àí£¬¿éÉè±¸µÄioctl¶¼Ê®·Ö¶ÌĞ¡¡£
+	 * åœ¨å—è®¾å¤‡æ–‡ä»¶ä¸Šå‘å‡ºioctl()ç³»ç»Ÿè°ƒç”¨ï¼ˆä½¿ç”¨å¤§å†…æ ¸é”ï¼‰
+	 * å¤§å¤šæ•°è¯·æ±‚éƒ½ç”±å—è®¾å¤‡å±‚å¤„ç†ï¼Œå—è®¾å¤‡çš„ioctléƒ½ååˆ†çŸ­å°ã€‚
 	 */
 	int (*ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	/**
-	 * ÔÚ¿éÉè±¸ÎÄ¼şÉÏ·¢³öioctl()ÏµÍ³µ÷ÓÃ£¨²»Ê¹ÓÃ´óÄÚºËËø£©
+	 * åœ¨å—è®¾å¤‡æ–‡ä»¶ä¸Šå‘å‡ºioctl()ç³»ç»Ÿè°ƒç”¨ï¼ˆä¸ä½¿ç”¨å¤§å†…æ ¸é”ï¼‰
 	 */
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	int (*direct_access) (struct block_device *, sector_t,
 						void **, unsigned long *);
 	/**
-	 * ¼ì²â¿ÉÒÆ¶¯½éÖÊÊÇ·ñÒÑ¾­·¢Éú±ä»¯£¨ÀıÈçÈíÅÌ£©£¬·µ»ØÖµÎª·Ç0Öµ±íÊ¾¸ü»»ÁË¡£
+	 * æ£€æµ‹å¯ç§»åŠ¨ä»‹è´¨æ˜¯å¦å·²ç»å‘ç”Ÿå˜åŒ–ï¼ˆä¾‹å¦‚è½¯ç›˜ï¼‰ï¼Œè¿”å›å€¼ä¸ºé0å€¼è¡¨ç¤ºæ›´æ¢äº†ã€‚
 	 */
 	int (*media_changed) (struct gendisk *);
 	unsigned long long (*set_capacity) (struct gendisk *,
 						unsigned long long);
 	/**
-	 * ¼ì²é¿éÉè±¸ÊÇ·ñ³ÖÓĞÓĞĞ§Êı¾İ¡£
+	 * æ£€æŸ¥å—è®¾å¤‡æ˜¯å¦æŒæœ‰æœ‰æ•ˆæ•°æ®ã€‚
 	 */
 	int (*revalidate_disk) (struct gendisk *);
 	int (*getgeo)(struct block_device *, struct hd_geometry *);

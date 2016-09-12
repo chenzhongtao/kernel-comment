@@ -952,21 +952,21 @@ int zfLnxCencSendMsg(struct sock *netlink_sk, u_int8_t *msg, int len)
 	}
 	old_tail = skb->tail;
 
-	/*ÌîÐ´Êý¾Ý±¨Ïà¹ØÐÅÏ¢*/
+	/*å¡«å†™æ•°æ®æŠ¥ç›¸å…³ä¿¡æ¯*/
 	nlh = NLMSG_PUT(skb, 0, 0, WAI_K_MSG, size-sizeof(*nlh));
 	pos = NLMSG_DATA(nlh);
 	memset(pos, 0, len);
 
-	/*´«Êäµ½ÓÃ»§¿Õ¼äµÄÊý¾Ý*/
+	/*ä¼ è¾“åˆ°ç”¨æˆ·ç©ºé—´çš„æ•°æ®*/
 	memcpy(pos, msg,  len);
-	/*¼ÆËã¾­¹ý×Ö½Ú¶ÔÆäºóµÄÊý¾ÝÊµ¼Ê³¤¶È*/
+	/*è®¡ç®—ç»è¿‡å­—èŠ‚å¯¹å…¶åŽçš„æ•°æ®å®žé™…é•¿åº¦*/
 	nlh->nlmsg_len = skb->tail - old_tail;
 	NETLINK_CB(skb).dst_group = COMMTYPE_GROUP;
 	netlink_broadcast(netlink_sk, skb, 0, COMMTYPE_GROUP, GFP_ATOMIC);
 	ret = 0;
 out:
 	return ret;
-nlmsg_failure: /*NLMSG_PUT Ê§°Ü£¬Ôò³·ÏúÌ×½Ó×Ö»º´æ*/
+nlmsg_failure: /*NLMSG_PUT å¤±è´¥ï¼Œåˆ™æ’¤é”€å¥—æŽ¥å­—ç¼“å­˜*/
 	kfree_skb(skb);
 	goto out;
 

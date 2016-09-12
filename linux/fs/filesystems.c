@@ -30,11 +30,11 @@
  */
 
 /**
- * ÎÄ¼şÏµÍ³ÀàĞÍÁ´±íÍ·Ö¸Õë¡£
+ * æ–‡ä»¶ç³»ç»Ÿç±»å‹é“¾è¡¨å¤´æŒ‡é’ˆã€‚
  */
 static struct file_system_type *file_systems;
 /**
- * ±£»¤file_systemsµÄ¶ÁĞ´Ëø¡£
+ * ä¿æŠ¤file_systemsçš„è¯»å†™é”ã€‚
  */
 static DEFINE_RWLOCK(file_systems_lock);
 
@@ -51,7 +51,7 @@ void put_filesystem(struct file_system_type *fs)
 
 static struct file_system_type **find_filesystem(const char *name, unsigned len)
 /**
- * ²éÕÒÖ¸¶¨ÀàĞÍµÄÎÄ¼şÏµÍ³¡£
+ * æŸ¥æ‰¾æŒ‡å®šç±»å‹çš„æ–‡ä»¶ç³»ç»Ÿã€‚
  */
 static struct file_system_type **find_filesystem(const char *name, unsigned len)
 {
@@ -77,7 +77,7 @@ static struct file_system_type **find_filesystem(const char *name, unsigned len)
  */
 
 /**
- * ×¢²áÎÄ¼şÏµÍ³£¬½«ÏàÓ¦µÄfile_system_type¼ÓÈëµ½Á´±íÖĞ¡£
+ * æ³¨å†Œæ–‡ä»¶ç³»ç»Ÿï¼Œå°†ç›¸åº”çš„file_system_typeåŠ å…¥åˆ°é“¾è¡¨ä¸­ã€‚
  */
 int register_filesystem(struct file_system_type * fs)
 {
@@ -112,7 +112,7 @@ EXPORT_SYMBOL(register_filesystem);
  *	may be freed or reused.
  */
 /**
- * µ±ÎÄ¼şÏµÍ³ÊÇ±»Ä£¿é×°ÔØ½øÄÚºËÊ±£¬¿ÉÒÔÓÃ¸Ãº¯ÊıĞ¶ÔØËü¡£
+ * å½“æ–‡ä»¶ç³»ç»Ÿæ˜¯è¢«æ¨¡å—è£…è½½è¿›å†…æ ¸æ—¶ï¼Œå¯ä»¥ç”¨è¯¥å‡½æ•°å¸è½½å®ƒã€‚
  */
 int unregister_filesystem(struct file_system_type * fs)
 {
@@ -272,13 +272,13 @@ static struct file_system_type *__get_fs_type(const char *name, int len)
 {
 	struct file_system_type *fs;
 
-	/* »ñÈ¡ÎÄ¼şÏµÍ³¶ÁËø */
+	/* è·å–æ–‡ä»¶ç³»ç»Ÿè¯»é” */
 	read_lock(&file_systems_lock);
-	/* ¸ù¾İÃû³Æ²éÕÒÎÄ¼şÏµÍ³ */
+	/* æ ¹æ®åç§°æŸ¥æ‰¾æ–‡ä»¶ç³»ç»Ÿ */
 	fs = *(find_filesystem(name, len));
-	if (fs && !try_module_get(fs->owner)) /* ÎÄ¼şÏµÍ³´æÔÚ£¬µ«ÊÇÄ£¿éÕıÔÚĞ¶ÔØÖĞ */
+	if (fs && !try_module_get(fs->owner)) /* æ–‡ä»¶ç³»ç»Ÿå­˜åœ¨ï¼Œä½†æ˜¯æ¨¡å—æ­£åœ¨å¸è½½ä¸­ */
 		fs = NULL;
-	read_unlock(&file_systems_lock);/* ÊÍ·ÅÎÄ¼şÏµÍ³Ëø */
+	read_unlock(&file_systems_lock);/* é‡Šæ”¾æ–‡ä»¶ç³»ç»Ÿé” */
 	return fs;
 }
 
@@ -289,7 +289,7 @@ struct file_system_type *get_fs_type(const char *name)
 	int len = dot ? dot - name : strlen(name);
 
 	fs = __get_fs_type(name, len);
-	/* Ã»ÓĞÆ¥ÅäµÄÎÄ¼şÏµÍ³ */
+	/* æ²¡æœ‰åŒ¹é…çš„æ–‡ä»¶ç³»ç»Ÿ */
 	if (!fs && (request_module("%.*s", len, name) == 0))
 		fs = __get_fs_type(name, len);
 

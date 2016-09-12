@@ -28,13 +28,13 @@
 
 struct uio_device {
 	struct module		*owner;
-	struct device		*dev; //ÔÚ__uio_register_deviceÖĞ³õÊ¼»¯
-	int			minor; // ´ÎÉè±¸idºÅ£¬uio_get_minor
-	atomic_t		event; //ÖĞ¶ÏÊÂ¼ş¼ÆÊı
-	struct fasync_struct	*async_queue; //¸ÃÉè±¸ÉÏµÄÒì²½µÈ´ı¶ÓÁĞ ¹ØÓÚ Òì²½Í¨Öª ²Î¼ûLDD3µÚÁùÕÂ
-	wait_queue_head_t	wait; //¸ÃÉè±¸ÉÏµÄµÈ´ı¶ÓÁĞ£¬ÔÚ×¢²áÉè±¸Ê±(__uio_register_device)³õÊ¼»¯
+	struct device		*dev; //åœ¨__uio_register_deviceä¸­åˆå§‹åŒ–
+	int			minor; // æ¬¡è®¾å¤‡idå·ï¼Œuio_get_minor
+	atomic_t		event; //ä¸­æ–­äº‹ä»¶è®¡æ•°
+	struct fasync_struct	*async_queue; //è¯¥è®¾å¤‡ä¸Šçš„å¼‚æ­¥ç­‰å¾…é˜Ÿåˆ— å…³äº å¼‚æ­¥é€šçŸ¥ å‚è§LDD3ç¬¬å…­ç« 
+	wait_queue_head_t	wait; //è¯¥è®¾å¤‡ä¸Šçš„ç­‰å¾…é˜Ÿåˆ—ï¼Œåœ¨æ³¨å†Œè®¾å¤‡æ—¶(__uio_register_device)åˆå§‹åŒ–
 	int			vma_count;
-	struct uio_info		*info; // Ö¸ÏòÓÃ»§×¢²áµÄuio_info£¬ÔÚ__uio_register_deviceÖĞ±»¸³ÖµµÄ
+	struct uio_info		*info; // æŒ‡å‘ç”¨æˆ·æ³¨å†Œçš„uio_infoï¼Œåœ¨__uio_register_deviceä¸­è¢«èµ‹å€¼çš„
 	struct kobject		*map_dir;
 	struct kobject		*portio_dir;
 };

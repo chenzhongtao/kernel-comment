@@ -30,9 +30,9 @@ struct uio_map;
  * @map:		for use by the UIO core only.
  */
 struct uio_mem {
-	const char		*name; // ÄÚ´æÓ³ÉäµÄÃû×Ö
-	unsigned long		addr; // ÄÚ´æ¿éµÄµØÖ·
-	unsigned long		size; //addrËùÖ¸ÏòµÄÄÚ´æ¿éµÄ´óĞ¡
+	const char		*name; // å†…å­˜æ˜ å°„çš„åå­—
+	unsigned long		addr; // å†…å­˜å—çš„åœ°å€
+	unsigned long		size; //addræ‰€æŒ‡å‘çš„å†…å­˜å—çš„å¤§å°
 	int			memtype;  //UIO_MEM_PHYS,UIO_MEM_LOGICAL(kmalloc()),UIO_MEM_VIRTUAL( virtual memory)
 	void __iomem		*internal_addr; // If you have to access this memory region from within your kernel module,
 	                                    // you will want to map it internally by using something like ioremap().
@@ -80,19 +80,19 @@ struct uio_device;
  * @irqcontrol:		disable/enable irqs when 0/1 is written to /dev/uioX
  */
 struct uio_info {
-	struct uio_device	*uio_dev; // ÔÚ__uio_register_deviceÖĞ³õÊ¼»¯
-	const char		*name;        // µ÷ÓÃ__uio_register_deviceÖ®Ç°±ØĞë³õÊ¼»¯
-	const char		*version; //µ÷ÓÃ__uio_register_deviceÖ®Ç°±ØĞë³õÊ¼»¯
+	struct uio_device	*uio_dev; // åœ¨__uio_register_deviceä¸­åˆå§‹åŒ–
+	const char		*name;        // è°ƒç”¨__uio_register_deviceä¹‹å‰å¿…é¡»åˆå§‹åŒ–
+	const char		*version; //è°ƒç”¨__uio_register_deviceä¹‹å‰å¿…é¡»åˆå§‹åŒ–
 	struct uio_mem		mem[MAX_UIO_MAPS];
 	struct uio_port		port[MAX_UIO_PORT_REGIONS];
-	long			irq;  //·ÖÅä¸øuioÉè±¸µÄÖĞ¶ÏºÅ£¬µ÷ÓÃ__uio_register_deviceÖ®Ç°±ØĞë³õÊ¼»¯
-	unsigned long		irq_flags;  // µ÷ÓÃ__uio_register_deviceÖ®Ç°±ØĞë³õÊ¼»¯
+	long			irq;  //åˆ†é…ç»™uioè®¾å¤‡çš„ä¸­æ–­å·ï¼Œè°ƒç”¨__uio_register_deviceä¹‹å‰å¿…é¡»åˆå§‹åŒ–
+	unsigned long		irq_flags;  // è°ƒç”¨__uio_register_deviceä¹‹å‰å¿…é¡»åˆå§‹åŒ–
 	void			*priv;
-	irqreturn_t (*handler)(int irq, struct uio_info *dev_info); //uio_interruptÖĞµ÷ÓÃ£¬ÓÃÓÚÖĞ¶Ï´¦Àí
-	int (*mmap)(struct uio_info *info, struct vm_area_struct *vma); //ÔÚuio_mmapÖĞ±»µ÷ÓÃ£¬Ö´ĞĞÉè±¸´ò¿ªÌØ¶¨²Ù×÷
-	int (*open)(struct uio_info *info, struct inode *inode); //ÔÚuio_openÖĞ±»µ÷ÓÃ£¬Ö´ĞĞÉè±¸´ò¿ªÌØ¶¨²Ù×÷
-	int (*release)(struct uio_info *info, struct inode *inode); //ÔÚuio_deviceÖĞ±»µ÷ÓÃ£¬Ö´ĞĞÉè±¸´ò¿ªÌØ¶¨²Ù×÷
-	int (*irqcontrol)(struct uio_info *info, s32 irq_on); //ÔÚuio_write·½·¨ÖĞ±»µ÷ÓÃ£¬Ö´ĞĞÓÃ»§Çı¶¯µÄÌØ¶¨²Ù×÷¡£
+	irqreturn_t (*handler)(int irq, struct uio_info *dev_info); //uio_interruptä¸­è°ƒç”¨ï¼Œç”¨äºä¸­æ–­å¤„ç†
+	int (*mmap)(struct uio_info *info, struct vm_area_struct *vma); //åœ¨uio_mmapä¸­è¢«è°ƒç”¨ï¼Œæ‰§è¡Œè®¾å¤‡æ‰“å¼€ç‰¹å®šæ“ä½œ
+	int (*open)(struct uio_info *info, struct inode *inode); //åœ¨uio_openä¸­è¢«è°ƒç”¨ï¼Œæ‰§è¡Œè®¾å¤‡æ‰“å¼€ç‰¹å®šæ“ä½œ
+	int (*release)(struct uio_info *info, struct inode *inode); //åœ¨uio_deviceä¸­è¢«è°ƒç”¨ï¼Œæ‰§è¡Œè®¾å¤‡æ‰“å¼€ç‰¹å®šæ“ä½œ
+	int (*irqcontrol)(struct uio_info *info, s32 irq_on); //åœ¨uio_writeæ–¹æ³•ä¸­è¢«è°ƒç”¨ï¼Œæ‰§è¡Œç”¨æˆ·é©±åŠ¨çš„ç‰¹å®šæ“ä½œã€‚
 };
 
 extern int __must_check
