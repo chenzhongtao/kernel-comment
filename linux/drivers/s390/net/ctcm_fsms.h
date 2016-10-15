@@ -1,6 +1,4 @@
 /*
- * drivers/s390/net/ctcm_fsms.h
- *
  * Copyright IBM Corp. 2001, 2007
  * Authors: 	Fritz Elfert (felfert@millenux.com)
  * 		Peter Tiedemann (ptiedem@de.ibm.com)
@@ -39,7 +37,6 @@
 #include <asm/idals.h>
 
 #include "fsm.h"
-#include "cu3088.h"
 #include "ctcm_main.h"
 
 /*

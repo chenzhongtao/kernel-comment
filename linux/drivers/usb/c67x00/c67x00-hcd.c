@@ -34,7 +34,7 @@
 
 static __u8 c67x00_hub_des[] = {
 	0x09,			/*  __u8  bLength; */
-	0x29,			/*  __u8  bDescriptorType; Hub-descriptor */
+	USB_DT_HUB,		/*  __u8  bDescriptorType; Hub-descriptor */
 	0x02,			/*  __u8  bNbrPorts; */
 	0x00,			/* __u16  wHubCharacteristics; */
 	0x00,			/*   (per-port OC, no power switching) */
@@ -264,14 +264,13 @@ static void c67x00_hcd_irq(struct c67x00_sie *sie, u16 int_status, u16 msg)
 	if (unlikely(hcd->state == HC_STATE_HALT))
 		return;
 
-	if (!test_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags))
+	if (!HCD_HW_ACCESSIBLE(hcd))
 		return;
 
 	/* Handle Start of frame events */
 	if (int_status & SOFEOP_FLG(sie->sie_num)) {
 		c67x00_ll_usb_clear_status(sie, SOF_EOP_IRQ_FLG);
 		c67x00_sched_kick(c67x00);
-		set_bit(HCD_FLAG_SAW_IRQ, &hcd->flags);
 	}
 }
 
@@ -282,7 +281,7 @@ static int c67x00_hcd_start(struct usb_hcd *hcd)
 {
 	hcd->uses_new_polling = 1;
 	hcd->state = HC_STATE_RUNNING;
-	hcd->poll_rh = 1;
+	set_bit(HCD_FLAG_POLL_RH, &hcd->flags);
 
 	return 0;
 }
@@ -384,6 +383,8 @@ int c67x00_hcd_probe(struct c67x00_sie *sie)
 			__func__, retval);
 		goto err2;
 	}
+
+	device_wakeup_enable(hcd->self.controller);
 
 	spin_lock_irqsave(&sie->lock, flags);
 	sie->private_data = c67x00;

@@ -9,6 +9,7 @@
  *
  */
 
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/netfilter.h>
@@ -21,13 +22,14 @@ int xfrm4_extract_input(struct xfrm_state *x, struct sk_buff *skb)
 	return xfrm4_extract_header(skb);
 }
 
-static inline int xfrm4_rcv_encap_finish(struct sk_buff *skb)
+static inline int xfrm4_rcv_encap_finish(struct net *net, struct sock *sk,
+					 struct sk_buff *skb)
 {
-	if (skb_dst(skb) == NULL) {
+	if (!skb_dst(skb)) {
 		const struct iphdr *iph = ip_hdr(skb);
 
-		if (ip_route_input(skb, iph->daddr, iph->saddr, iph->tos,
-				   skb->dev))
+		if (ip_route_input_noref(skb, iph->daddr, iph->saddr,
+					 iph->tos, skb->dev))
 			goto drop;
 	}
 	return dst_input(skb);
@@ -35,15 +37,6 @@ drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
 }
-
-int xfrm4_rcv_encap(struct sk_buff *skb, int nexthdr, __be32 spi,
-		    int encap_type)
-{
-	XFRM_SPI_SKB_CB(skb)->family = AF_INET;
-	XFRM_SPI_SKB_CB(skb)->daddroff = offsetof(struct iphdr, daddr);
-	return xfrm_input(skb, nexthdr, spi, encap_type);
-}
-EXPORT_SYMBOL(xfrm4_rcv_encap);
 
 int xfrm4_transport_finish(struct sk_buff *skb, int async)
 {
@@ -60,7 +53,8 @@ int xfrm4_transport_finish(struct sk_buff *skb, int async)
 	iph->tot_len = htons(skb->len);
 	ip_send_check(iph);
 
-	NF_HOOK(PF_INET, NF_INET_PRE_ROUTING, skb, skb->dev, NULL,
+	NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING,
+		dev_net(skb->dev), NULL, skb, skb->dev, NULL,
 		xfrm4_rcv_encap_finish);
 	return 0;
 }
@@ -131,7 +125,7 @@ int xfrm4_udp_encap_rcv(struct sock *sk, struct sk_buff *skb)
 	 * header and optional ESP marker bytes) and then modify the
 	 * protocol to ESP, and then call into the transform receiver.
 	 */
-	if (skb_cloned(skb) && pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+	if (skb_unclone(skb, GFP_ATOMIC))
 		goto drop;
 
 	/* Now we can update and verify the packet length... */
@@ -162,5 +156,4 @@ int xfrm4_rcv(struct sk_buff *skb)
 {
 	return xfrm4_rcv_spi(skb, ip_hdr(skb)->protocol, 0);
 }
-
 EXPORT_SYMBOL(xfrm4_rcv);

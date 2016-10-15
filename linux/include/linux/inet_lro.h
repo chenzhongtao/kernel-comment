@@ -50,7 +50,6 @@ struct net_lro_desc {
 	struct skb_frag_struct *next_frag;
 	struct iphdr *iph;
 	struct tcphdr *tcph;
-	struct vlan_group *vgrp;
 	__wsum  data_csum;
 	__be32 tcp_rcv_tsecr;
 	__be32 tcp_rcv_tsval;
@@ -60,7 +59,6 @@ struct net_lro_desc {
 	u16 ip_tot_len;
 	u16 tcp_saw_tstamp; 		/* timestamps enabled */
 	__be16 tcp_window;
-	u16 vlan_tag;
 	int pkt_aggr_cnt;		/* counts aggregated packets */
 	int vlan_packet;
 	int mss;
@@ -135,50 +133,10 @@ struct net_lro_mgr {
 void lro_receive_skb(struct net_lro_mgr *lro_mgr,
 		     struct sk_buff *skb,
 		     void *priv);
-
-/*
- * Processes a SKB with VLAN HW acceleration support
- */
-
-void lro_vlan_hwaccel_receive_skb(struct net_lro_mgr *lro_mgr,
-				  struct sk_buff *skb,
-				  struct vlan_group *vgrp,
-				  u16 vlan_tag,
-				  void *priv);
-
-/*
- * Processes a fragment list
- *
- * This functions aggregate fragments and generate SKBs do pass
- * the packets to the stack.
- *
- * @lro_mgr: LRO manager to use
- * @frags: Fragment to be processed. Must contain entire header in first
- *         element.
- * @len: Length of received data
- * @true_size: Actual size of memory the fragment is consuming
- * @priv: Private data that may be used by driver functions
- *        (for example get_tcp_ip_hdr)
- */
-
-void lro_receive_frags(struct net_lro_mgr *lro_mgr,
-		       struct skb_frag_struct *frags,
-		       int len, int true_size, void *priv, __wsum sum);
-
-void lro_vlan_hwaccel_receive_frags(struct net_lro_mgr *lro_mgr,
-				    struct skb_frag_struct *frags,
-				    int len, int true_size,
-				    struct vlan_group *vgrp,
-				    u16 vlan_tag,
-				    void *priv, __wsum sum);
-
 /*
  * Forward all aggregated SKBs held by lro_mgr to network stack
  */
 
 void lro_flush_all(struct net_lro_mgr *lro_mgr);
-
-void lro_flush_pkt(struct net_lro_mgr *lro_mgr,
-		   struct iphdr *iph, struct tcphdr *tcph);
 
 #endif

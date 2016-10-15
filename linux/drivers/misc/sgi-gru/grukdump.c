@@ -44,7 +44,8 @@ static int gru_user_copy_handle(void __user **dp, void *s)
 
 static int gru_dump_context_data(void *grubase,
 			struct gru_context_configuration_handle *cch,
-			void __user *ubuf, int ctxnum, int dsrcnt)
+			void __user *ubuf, int ctxnum, int dsrcnt,
+			int flush_cbrs)
 {
 	void *cb, *cbe, *tfh, *gseg;
 	int i, scr;
@@ -55,6 +56,8 @@ static int gru_dump_context_data(void *grubase,
 	tfh = grubase + GRU_TFH_BASE;
 
 	for_each_cbr_in_allocation_map(i, &cch->cbr_allocation_map, scr) {
+		if (flush_cbrs)
+			gru_flush_cache(cb);
 		if (gru_user_copy_handle(&ubuf, cb))
 			goto fail;
 		if (gru_user_copy_handle(&ubuf, tfh + i * GRU_HANDLE_STRIDE))
@@ -75,11 +78,10 @@ static int gru_dump_tfm(struct gru_state *gru,
 		void __user *ubuf, void __user *ubufend)
 {
 	struct gru_tlb_fault_map *tfm;
-	int i, ret, bytes;
+	int i;
 
-	bytes = GRU_NUM_TFM * GRU_CACHE_LINE_BYTES;
-	if (bytes > ubufend - ubuf)
-		ret = -EFBIG;
+	if (GRU_NUM_TFM * GRU_CACHE_LINE_BYTES > ubufend - ubuf)
+		return -EFBIG;
 
 	for (i = 0; i < GRU_NUM_TFM; i++) {
 		tfm = get_tfm(gru->gs_gru_base_vaddr, i);
@@ -96,11 +98,10 @@ static int gru_dump_tgh(struct gru_state *gru,
 		void __user *ubuf, void __user *ubufend)
 {
 	struct gru_tlb_global_handle *tgh;
-	int i, ret, bytes;
+	int i;
 
-	bytes = GRU_NUM_TGH * GRU_CACHE_LINE_BYTES;
-	if (bytes > ubufend - ubuf)
-		ret = -EFBIG;
+	if (GRU_NUM_TGH * GRU_CACHE_LINE_BYTES > ubufend - ubuf)
+		return -EFBIG;
 
 	for (i = 0; i < GRU_NUM_TGH; i++) {
 		tgh = get_tgh(gru->gs_gru_base_vaddr, i);
@@ -115,7 +116,7 @@ fail:
 
 static int gru_dump_context(struct gru_state *gru, int ctxnum,
 		void __user *ubuf, void __user *ubufend, char data_opt,
-		char lock_cch)
+		char lock_cch, char flush_cbrs)
 {
 	struct gru_dump_context_header hdr;
 	struct gru_dump_context_header __user *uhdr = ubuf;
@@ -136,8 +137,11 @@ static int gru_dump_context(struct gru_state *gru, int ctxnum,
 
 	ubuf += sizeof(hdr);
 	ubufcch = ubuf;
-	if (gru_user_copy_handle(&ubuf, cch))
-		goto fail;
+	if (gru_user_copy_handle(&ubuf, cch)) {
+		if (cch_locked)
+			unlock_cch_handle(cch);
+		return -EFAULT;
+	}
 	if (cch_locked)
 		ubufcch->delresp = 0;
 	bytes = sizeof(hdr) + GRU_CACHE_LINE_BYTES;
@@ -159,8 +163,7 @@ static int gru_dump_context(struct gru_state *gru, int ctxnum,
 			ret = -EFBIG;
 		else
 			ret = gru_dump_context_data(grubase, cch, ubuf, ctxnum,
-							dsrcnt);
-
+							dsrcnt, flush_cbrs);
 	}
 	if (cch_locked)
 		unlock_cch_handle(cch);
@@ -173,14 +176,10 @@ static int gru_dump_context(struct gru_state *gru, int ctxnum,
 	hdr.cbrcnt = cbrcnt;
 	hdr.dsrcnt = dsrcnt;
 	hdr.cch_locked = cch_locked;
-	if (!ret && copy_to_user((void __user *)uhdr, &hdr, sizeof(hdr)))
-		ret = -EFAULT;
+	if (copy_to_user(uhdr, &hdr, sizeof(hdr)))
+		return -EFAULT;
 
-	return ret ? ret : bytes;
-
-fail:
-	unlock_cch_handle(cch);
-	return -EFAULT;
+	return bytes;
 }
 
 int gru_dump_chiplet_request(unsigned long arg)
@@ -195,7 +194,7 @@ int gru_dump_chiplet_request(unsigned long arg)
 		return -EFAULT;
 
 	/* Currently, only dump by gid is implemented */
-	if (req.gid >= gru_max_gids || req.gid < 0)
+	if (req.gid >= gru_max_gids)
 		return -EINVAL;
 
 	gru = GID_TO_GRU(req.gid);
@@ -215,7 +214,8 @@ int gru_dump_chiplet_request(unsigned long arg)
 	for (ctxnum = 0; ctxnum < GRU_NUM_CCH; ctxnum++) {
 		if (req.ctxnum == ctxnum || req.ctxnum < 0) {
 			ret = gru_dump_context(gru, ctxnum, ubuf, ubufend,
-						req.data_opt, req.lock_cch);
+						req.data_opt, req.lock_cch,
+						req.flush_cbrs);
 			if (ret < 0)
 				goto fail;
 			ubuf += ret;

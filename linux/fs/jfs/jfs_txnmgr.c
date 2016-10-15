@@ -136,7 +136,6 @@ static inline void TXN_SLEEP_DROP_LOCK(wait_queue_head_t * event)
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	TXN_UNLOCK();
 	io_schedule();
-	__set_current_state(TASK_RUNNING);
 	remove_wait_queue(event, &wait);
 }
 
@@ -636,7 +635,7 @@ struct tlock *txLock(tid_t tid, struct inode *ip, struct metapage * mp,
 	 * the inode of the page and available to all anonymous
 	 * transactions until txCommit() time at which point
 	 * they are transferred to the transaction tlock list of
-	 * the commiting transaction of the inode)
+	 * the committing transaction of the inode)
 	 */
 	if (xtid == 0) {
 		tlck->tid = tid;
@@ -1143,7 +1142,6 @@ int txCommit(tid_t tid,		/* transaction identifier */
 	struct jfs_log *log;
 	struct tblock *tblk;
 	struct lrd *lrd;
-	int lsn;
 	struct inode *ip;
 	struct jfs_inode_info *jfs_ip;
 	int k, n;
@@ -1279,7 +1277,7 @@ int txCommit(tid_t tid,		/* transaction identifier */
 	 * lazy commit thread finishes processing
 	 */
 	if (tblk->xflag & COMMIT_DELETE) {
-		atomic_inc(&tblk->u.ip->i_count);
+		ihold(tblk->u.ip);
 		/*
 		 * Avoid a rare deadlock
 		 *
@@ -1292,7 +1290,7 @@ int txCommit(tid_t tid,		/* transaction identifier */
 		 */
 		/*
 		 * I believe this code is no longer needed.  Splitting I_LOCK
-		 * into two bits, I_LOCK and I_SYNC should prevent this
+		 * into two bits, I_NEW and I_SYNC should prevent this
 		 * deadlock as well.  But since I don't have a JFS testload
 		 * to verify this, only a trivial s/I_LOCK/I_SYNC/ was done.
 		 * Joern
@@ -1310,7 +1308,7 @@ int txCommit(tid_t tid,		/* transaction identifier */
 	 */
 	lrd->type = cpu_to_le16(LOG_COMMIT);
 	lrd->length = 0;
-	lsn = lmLog(log, tblk, lrd, NULL);
+	lmLog(log, tblk, lrd, NULL);
 
 	lmGroupCommit(log, tblk);
 
@@ -2685,7 +2683,7 @@ void txAbort(tid_t tid, int dirty)
 	 * mark filesystem dirty
 	 */
 	if (dirty)
-		jfs_error(tblk->sb, "txAbort");
+		jfs_error(tblk->sb, "\n");
 
 	return;
 }
@@ -2801,7 +2799,7 @@ int jfs_lazycommit(void *arg)
 
 		if (freezing(current)) {
 			LAZY_UNLOCK(flags);
-			refrigerator();
+			try_to_freeze();
 		} else {
 			DECLARE_WAITQUEUE(wq, current);
 
@@ -2809,7 +2807,6 @@ int jfs_lazycommit(void *arg)
 			set_current_state(TASK_INTERRUPTIBLE);
 			LAZY_UNLOCK(flags);
 			schedule();
-			__set_current_state(TASK_RUNNING);
 			remove_wait_queue(&jfs_commit_thread_wait, &wq);
 		}
 	} while (!kthread_should_stop());
@@ -2935,7 +2932,6 @@ int jfs_sync(void *arg)
 {
 	struct inode *ip;
 	struct jfs_inode_info *jfs_ip;
-	int rc;
 	tid_t tid;
 
 	do {
@@ -2961,7 +2957,7 @@ int jfs_sync(void *arg)
 				 */
 				TXN_UNLOCK();
 				tid = txBegin(ip->i_sb, COMMIT_INODE);
-				rc = txCommit(tid, 1, &ip, 0);
+				txCommit(tid, 1, &ip, 0);
 				txEnd(tid);
 				mutex_unlock(&jfs_ip->commit_mutex);
 
@@ -2979,12 +2975,9 @@ int jfs_sync(void *arg)
 				 * put back on the anon_list.
 				 */
 
-				/* Take off anon_list */
-				list_del(&jfs_ip->anon_inode_list);
-
-				/* Put on anon_list2 */
-				list_add(&jfs_ip->anon_inode_list,
-					 &TxAnchor.anon_list2);
+				/* Move from anon_list to anon_list2 */
+				list_move(&jfs_ip->anon_inode_list,
+					  &TxAnchor.anon_list2);
 
 				TXN_UNLOCK();
 				iput(ip);
@@ -2996,12 +2989,11 @@ int jfs_sync(void *arg)
 
 		if (freezing(current)) {
 			TXN_UNLOCK();
-			refrigerator();
+			try_to_freeze();
 		} else {
 			set_current_state(TASK_INTERRUPTIBLE);
 			TXN_UNLOCK();
 			schedule();
-			__set_current_state(TASK_RUNNING);
 		}
 	} while (!kthread_should_stop());
 

@@ -21,6 +21,7 @@
 #include <linux/fs.h>
 #include <linux/xattr.h>
 #include <linux/posix_acl_xattr.h>
+#include <linux/slab.h>
 #include <linux/quotaops.h>
 #include <linux/security.h>
 #include "jfs_incore.h"
@@ -85,46 +86,25 @@ struct ea_buffer {
 #define EA_MALLOC	0x0008
 
 
+static int is_known_namespace(const char *name)
+{
+	if (strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN) &&
+	    strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN) &&
+	    strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN) &&
+	    strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN))
+		return false;
+
+	return true;
+}
+
 /*
  * These three routines are used to recognize on-disk extended attributes
  * that are in a recognized namespace.  If the attribute is not recognized,
  * "os2." is prepended to the name
  */
-static inline int is_os2_xattr(struct jfs_ea *ea)
+static int is_os2_xattr(struct jfs_ea *ea)
 {
-	/*
-	 * Check for "system."
-	 */
-	if ((ea->namelen >= XATTR_SYSTEM_PREFIX_LEN) &&
-	    !strncmp(ea->name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return false;
-	/*
-	 * Check for "user."
-	 */
-	if ((ea->namelen >= XATTR_USER_PREFIX_LEN) &&
-	    !strncmp(ea->name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN))
-		return false;
-	/*
-	 * Check for "security."
-	 */
-	if ((ea->namelen >= XATTR_SECURITY_PREFIX_LEN) &&
-	    !strncmp(ea->name, XATTR_SECURITY_PREFIX,
-		     XATTR_SECURITY_PREFIX_LEN))
-		return false;
-	/*
-	 * Check for "trusted."
-	 */
-	if ((ea->namelen >= XATTR_TRUSTED_PREFIX_LEN) &&
-	    !strncmp(ea->name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN))
-		return false;
-	/*
-	 * Add any other valid namespace prefixes here
-	 */
-
-	/*
-	 * We assume it's OS/2's flat namespace
-	 */
-	return true;
+	return !is_known_namespace(ea->name);
 }
 
 static inline int name_size(struct jfs_ea *ea)
@@ -260,14 +240,14 @@ static int ea_write(struct inode *ip, struct jfs_ea_list *ealist, int size,
 	nblocks = (size + (sb->s_blocksize - 1)) >> sb->s_blocksize_bits;
 
 	/* Allocate new blocks to quota. */
-	if (vfs_dq_alloc_block(ip, nblocks)) {
-		return -EDQUOT;
-	}
+	rc = dquot_alloc_block(ip, nblocks);
+	if (rc)
+		return rc;
 
 	rc = dbAlloc(ip, INOHINT(ip), nblocks, &blkno);
 	if (rc) {
 		/*Rollback quota allocation. */
-		vfs_dq_free_block(ip, nblocks);
+		dquot_free_block(ip, nblocks);
 		return rc;
 	}
 
@@ -332,7 +312,7 @@ static int ea_write(struct inode *ip, struct jfs_ea_list *ealist, int size,
 
       failed:
 	/* Rollback quota allocation. */
-	vfs_dq_free_block(ip, nblocks);
+	dquot_free_block(ip, nblocks);
 
 	dbFree(ip, blkno, nblocks);
 	return rc;
@@ -402,7 +382,7 @@ static int ea_read(struct inode *ip, struct jfs_ea_list *ealist)
 
 	nbytes = sizeDXD(&ji->ea);
 	if (!nbytes) {
-		jfs_error(sb, "ea_read: nbytes is 0");
+		jfs_error(sb, "nbytes is 0\n");
 		return -EIO;
 	}
 
@@ -502,7 +482,7 @@ static int ea_get(struct inode *inode, struct ea_buffer *ea_buf, int min_size)
 		current_blocks = 0;
 	} else {
 		if (!(ji->ea.flag & DXD_EXTENT)) {
-			jfs_error(sb, "ea_get: invalid ea.flag)");
+			jfs_error(sb, "invalid ea.flag\n");
 			return -EIO;
 		}
 		current_blocks = (ea_size + sb->s_blocksize - 1) >>
@@ -538,7 +518,8 @@ static int ea_get(struct inode *inode, struct ea_buffer *ea_buf, int min_size)
 
 	if (blocks_needed > current_blocks) {
 		/* Allocate new blocks to quota. */
-		if (vfs_dq_alloc_block(inode, blocks_needed))
+		rc = dquot_alloc_block(inode, blocks_needed);
+		if (rc)
 			return -EDQUOT;
 
 		quota_allocation = blocks_needed;
@@ -602,7 +583,7 @@ static int ea_get(struct inode *inode, struct ea_buffer *ea_buf, int min_size)
       clean_up:
 	/* Rollback quota allocation */
 	if (quota_allocation)
-		vfs_dq_free_block(inode, quota_allocation);
+		dquot_free_block(inode, quota_allocation);
 
 	return (rc);
 }
@@ -677,7 +658,7 @@ static int ea_put(tid_t tid, struct inode *inode, struct ea_buffer *ea_buf,
 
 	/* If old blocks exist, they must be removed from quota allocation. */
 	if (old_blocks)
-		vfs_dq_free_block(inode, old_blocks);
+		dquot_free_block(inode, old_blocks);
 
 	inode->i_ctime = CURRENT_TIME;
 
@@ -685,90 +666,29 @@ static int ea_put(tid_t tid, struct inode *inode, struct ea_buffer *ea_buf,
 }
 
 /*
- * can_set_system_xattr
- *
- * This code is specific to the system.* namespace.  It contains policy
- * which doesn't belong in the main xattr codepath.
- */
-static int can_set_system_xattr(struct inode *inode, const char *name,
-				const void *value, size_t value_len)
-{
-#ifdef CONFIG_JFS_POSIX_ACL
-	struct posix_acl *acl;
-	int rc;
-
-	if (!is_owner_or_cap(inode))
-		return -EPERM;
-
-	/*
-	 * POSIX_ACL_XATTR_ACCESS is tied to i_mode
-	 */
-	if (strcmp(name, POSIX_ACL_XATTR_ACCESS) == 0) {
-		acl = posix_acl_from_xattr(value, value_len);
-		if (IS_ERR(acl)) {
-			rc = PTR_ERR(acl);
-			printk(KERN_ERR "posix_acl_from_xattr returned %d\n",
-			       rc);
-			return rc;
-		}
-		if (acl) {
-			mode_t mode = inode->i_mode;
-			rc = posix_acl_equiv_mode(acl, &mode);
-			posix_acl_release(acl);
-			if (rc < 0) {
-				printk(KERN_ERR
-				       "posix_acl_equiv_mode returned %d\n",
-				       rc);
-				return rc;
-			}
-			inode->i_mode = mode;
-			mark_inode_dirty(inode);
-		}
-		/*
-		 * We're changing the ACL.  Get rid of the cached one
-		 */
-		forget_cached_acl(inode, ACL_TYPE_ACCESS);
-
-		return 0;
-	} else if (strcmp(name, POSIX_ACL_XATTR_DEFAULT) == 0) {
-		acl = posix_acl_from_xattr(value, value_len);
-		if (IS_ERR(acl)) {
-			rc = PTR_ERR(acl);
-			printk(KERN_ERR "posix_acl_from_xattr returned %d\n",
-			       rc);
-			return rc;
-		}
-		posix_acl_release(acl);
-
-		/*
-		 * We're changing the default ACL.  Get rid of the cached one
-		 */
-		forget_cached_acl(inode, ACL_TYPE_DEFAULT);
-
-		return 0;
-	}
-#endif			/* CONFIG_JFS_POSIX_ACL */
-	return -EOPNOTSUPP;
-}
-
-/*
  * Most of the permission checking is done by xattr_permission in the vfs.
- * The local file system is responsible for handling the system.* namespace.
  * We also need to verify that this is a namespace that we recognize.
  */
 static int can_set_xattr(struct inode *inode, const char *name,
 			 const void *value, size_t value_len)
 {
-	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return can_set_system_xattr(inode, name, value, value_len);
+	if (!strncmp(name, XATTR_OS2_PREFIX, XATTR_OS2_PREFIX_LEN)) {
+		/*
+		 * This makes sure that we aren't trying to set an
+		 * attribute in a different namespace by prefixing it
+		 * with "os2."
+		 */
+		if (is_known_namespace(name + XATTR_OS2_PREFIX_LEN))
+			return -EOPNOTSUPP;
+		return 0;
+	}
 
 	/*
 	 * Don't allow setting an attribute in an unknown namespace.
 	 */
 	if (strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN) &&
 	    strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN) &&
-	    strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN) &&
-	    strncmp(name, XATTR_OS2_PREFIX, XATTR_OS2_PREFIX_LEN))
+	    strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN))
 		return -EOPNOTSUPP;
 
 	return 0;
@@ -871,6 +791,19 @@ int __jfs_setxattr(tid_t tid, struct inode *inode, const char *name,
 			/* Completely new ea list */
 			xattr_size = sizeof (struct jfs_ea_list);
 
+		/*
+		 * The size of EA value is limitted by on-disk format up to
+		 *  __le16, there would be an overflow if the size is equal
+		 * to XATTR_SIZE_MAX (65536).  In order to avoid this issue,
+		 * we can pre-checkup the value size against USHRT_MAX, and
+		 * return -E2BIG in this case, which is consistent with the
+		 * VFS setxattr interface.
+		 */
+		if (value_len >= USHRT_MAX) {
+			rc = -E2BIG;
+			goto release;
+		}
+
 		ea = (struct jfs_ea *) ((char *) ealist + xattr_size);
 		ea->flag = 0;
 		ea->namelen = namelen;
@@ -885,7 +818,7 @@ int __jfs_setxattr(tid_t tid, struct inode *inode, const char *name,
 	/* DEBUG - If we did this right, these number match */
 	if (xattr_size != new_size) {
 		printk(KERN_ERR
-		       "jfs_xsetattr: xattr_size = %d, new_size = %d\n",
+		       "__jfs_setxattr: xattr_size = %d, new_size = %d\n",
 		       xattr_size, new_size);
 
 		rc = -EINVAL;
@@ -916,10 +849,18 @@ int __jfs_setxattr(tid_t tid, struct inode *inode, const char *name,
 int jfs_setxattr(struct dentry *dentry, const char *name, const void *value,
 		 size_t value_len, int flags)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	struct jfs_inode_info *ji = JFS_IP(inode);
 	int rc;
 	tid_t tid;
+
+	/*
+	 * If this is a request for a synthetic attribute in the system.*
+	 * namespace use the generic infrastructure to resolve a handler
+	 * for it via sb->s_xattr.
+	 */
+	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
+		return generic_setxattr(dentry, name, value, value_len, flags);
 
 	if ((rc = can_set_xattr(inode, name, value, value_len)))
 		return rc;
@@ -931,7 +872,7 @@ int jfs_setxattr(struct dentry *dentry, const char *name, const void *value,
 
 	tid = txBegin(inode->i_sb, 0);
 	mutex_lock(&ji->commit_mutex);
-	rc = __jfs_setxattr(tid, dentry->d_inode, name, value, value_len,
+	rc = __jfs_setxattr(tid, d_inode(dentry), name, value, value_len,
 			    flags);
 	if (!rc)
 		rc = txCommit(tid, 1, &inode, 0);
@@ -950,18 +891,7 @@ ssize_t __jfs_getxattr(struct inode *inode, const char *name, void *data,
 	int xattr_size;
 	ssize_t size;
 	int namelen = strlen(name);
-	char *os2name = NULL;
 	char *value;
-
-	if (strncmp(name, XATTR_OS2_PREFIX, XATTR_OS2_PREFIX_LEN) == 0) {
-		os2name = kmalloc(namelen - XATTR_OS2_PREFIX_LEN + 1,
-				  GFP_KERNEL);
-		if (!os2name)
-			return -ENOMEM;
-		strcpy(os2name, name + XATTR_OS2_PREFIX_LEN);
-		name = os2name;
-		namelen -= XATTR_OS2_PREFIX_LEN;
-	}
 
 	down_read(&JFS_IP(inode)->xattr_sem);
 
@@ -1000,8 +930,6 @@ ssize_t __jfs_getxattr(struct inode *inode, const char *name, void *data,
       out:
 	up_read(&JFS_IP(inode)->xattr_sem);
 
-	kfree(os2name);
-
 	return size;
 }
 
@@ -1010,7 +938,28 @@ ssize_t jfs_getxattr(struct dentry *dentry, const char *name, void *data,
 {
 	int err;
 
-	err = __jfs_getxattr(dentry->d_inode, name, data, buf_size);
+	/*
+	 * If this is a request for a synthetic attribute in the system.*
+	 * namespace use the generic infrastructure to resolve a handler
+	 * for it via sb->s_xattr.
+	 */
+	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
+		return generic_getxattr(dentry, name, data, buf_size);
+
+	if (strncmp(name, XATTR_OS2_PREFIX, XATTR_OS2_PREFIX_LEN) == 0) {
+		/*
+		 * skip past "os2." prefix
+		 */
+		name += XATTR_OS2_PREFIX_LEN;
+		/*
+		 * Don't allow retrieving properly prefixed attributes
+		 * by prepending them with "os2."
+		 */
+		if (is_known_namespace(name))
+			return -EOPNOTSUPP;
+	}
+
+	err = __jfs_getxattr(d_inode(dentry), name, data, buf_size);
 
 	return err;
 }
@@ -1027,7 +976,7 @@ static inline int can_list(struct jfs_ea *ea)
 
 ssize_t jfs_listxattr(struct dentry * dentry, char *data, size_t buf_size)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	char *buffer;
 	ssize_t size = 0;
 	int xattr_size;
@@ -1080,17 +1029,25 @@ ssize_t jfs_listxattr(struct dentry * dentry, char *data, size_t buf_size)
 
 int jfs_removexattr(struct dentry *dentry, const char *name)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	struct jfs_inode_info *ji = JFS_IP(inode);
 	int rc;
 	tid_t tid;
+
+	/*
+	 * If this is a request for a synthetic attribute in the system.*
+	 * namespace use the generic infrastructure to resolve a handler
+	 * for it via sb->s_xattr.
+	 */
+	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
+		return generic_removexattr(dentry, name);
 
 	if ((rc = can_set_xattr(inode, name, NULL, 0)))
 		return rc;
 
 	tid = txBegin(inode->i_sb, 0);
 	mutex_lock(&ji->commit_mutex);
-	rc = __jfs_setxattr(tid, dentry->d_inode, name, NULL, 0, XATTR_REPLACE);
+	rc = __jfs_setxattr(tid, d_inode(dentry), name, NULL, 0, XATTR_REPLACE);
 	if (!rc)
 		rc = txCommit(tid, 1, &inode, 0);
 	txEnd(tid);
@@ -1099,37 +1056,51 @@ int jfs_removexattr(struct dentry *dentry, const char *name)
 	return rc;
 }
 
+/*
+ * List of handlers for synthetic system.* attributes.  All real ondisk
+ * attributes are handled directly.
+ */
+const struct xattr_handler *jfs_xattr_handlers[] = {
+#ifdef CONFIG_JFS_POSIX_ACL
+	&posix_acl_access_xattr_handler,
+	&posix_acl_default_xattr_handler,
+#endif
+	NULL,
+};
+
+
 #ifdef CONFIG_JFS_SECURITY
-int jfs_init_security(tid_t tid, struct inode *inode, struct inode *dir)
+static int jfs_initxattrs(struct inode *inode, const struct xattr *xattr_array,
+			  void *fs_info)
 {
-	int rc;
-	size_t len;
-	void *value;
-	char *suffix;
+	const struct xattr *xattr;
+	tid_t *tid = fs_info;
 	char *name;
+	int err = 0;
 
-	rc = security_inode_init_security(inode, dir, &suffix, &value, &len);
-	if (rc) {
-		if (rc == -EOPNOTSUPP)
-			return 0;
-		return rc;
+	for (xattr = xattr_array; xattr->name != NULL; xattr++) {
+		name = kmalloc(XATTR_SECURITY_PREFIX_LEN +
+			       strlen(xattr->name) + 1, GFP_NOFS);
+		if (!name) {
+			err = -ENOMEM;
+			break;
+		}
+		strcpy(name, XATTR_SECURITY_PREFIX);
+		strcpy(name + XATTR_SECURITY_PREFIX_LEN, xattr->name);
+
+		err = __jfs_setxattr(*tid, inode, name,
+				     xattr->value, xattr->value_len, 0);
+		kfree(name);
+		if (err < 0)
+			break;
 	}
-	name = kmalloc(XATTR_SECURITY_PREFIX_LEN + 1 + strlen(suffix),
-		       GFP_NOFS);
-	if (!name) {
-		rc = -ENOMEM;
-		goto kmalloc_failed;
-	}
-	strcpy(name, XATTR_SECURITY_PREFIX);
-	strcpy(name + XATTR_SECURITY_PREFIX_LEN, suffix);
+	return err;
+}
 
-	rc = __jfs_setxattr(tid, inode, name, value, len, 0);
-
-	kfree(name);
-kmalloc_failed:
-	kfree(suffix);
-	kfree(value);
-
-	return rc;
+int jfs_init_security(tid_t tid, struct inode *inode, struct inode *dir,
+		      const struct qstr *qstr)
+{
+	return security_inode_init_security(inode, dir, qstr,
+					    &jfs_initxattrs, &tid);
 }
 #endif

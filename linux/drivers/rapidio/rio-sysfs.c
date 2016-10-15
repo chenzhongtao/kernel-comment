@@ -14,6 +14,7 @@
 #include <linux/rio.h>
 #include <linux/rio_drv.h>
 #include <linux/stat.h>
+#include <linux/capability.h>
 
 #include "rio.h"
 
@@ -26,6 +27,7 @@ field##_show(struct device *dev, struct device_attribute *attr, char *buf)			\
 									\
 	return sprintf(buf, format_string, rdev->field);		\
 }									\
+static DEVICE_ATTR_RO(field);
 
 rio_config_attr(did, "0x%04x\n");
 rio_config_attr(vid, "0x%04x\n");
@@ -33,15 +35,14 @@ rio_config_attr(device_rev, "0x%08x\n");
 rio_config_attr(asm_did, "0x%04x\n");
 rio_config_attr(asm_vid, "0x%04x\n");
 rio_config_attr(asm_rev, "0x%04x\n");
+rio_config_attr(destid, "0x%04x\n");
+rio_config_attr(hopcount, "0x%02x\n");
 
 static ssize_t routes_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rio_dev *rdev = to_rio_dev(dev);
 	char *str = buf;
 	int i;
-
-	if (!rdev->rswitch)
-		goto out;
 
 	for (i = 0; i < RIO_MAX_ROUTE_ENTRIES(rdev->net->hport->sys_size);
 			i++) {
@@ -52,23 +53,76 @@ static ssize_t routes_show(struct device *dev, struct device_attribute *attr, ch
 			    rdev->rswitch->route_table[i]);
 	}
 
-      out:
 	return (str - buf);
 }
+static DEVICE_ATTR_RO(routes);
 
-struct device_attribute rio_dev_attrs[] = {
-	__ATTR_RO(did),
-	__ATTR_RO(vid),
-	__ATTR_RO(device_rev),
-	__ATTR_RO(asm_did),
-	__ATTR_RO(asm_vid),
-	__ATTR_RO(asm_rev),
-	__ATTR_RO(routes),
-	__ATTR_NULL,
+static ssize_t lprev_show(struct device *dev,
+			  struct device_attribute *attr, char *buf)
+{
+	struct rio_dev *rdev = to_rio_dev(dev);
+
+	return sprintf(buf, "%s\n",
+			(rdev->prev) ? rio_name(rdev->prev) : "root");
+}
+static DEVICE_ATTR_RO(lprev);
+
+static ssize_t lnext_show(struct device *dev,
+			  struct device_attribute *attr, char *buf)
+{
+	struct rio_dev *rdev = to_rio_dev(dev);
+	char *str = buf;
+	int i;
+
+	if (rdev->pef & RIO_PEF_SWITCH) {
+		for (i = 0; i < RIO_GET_TOTAL_PORTS(rdev->swpinfo); i++) {
+			if (rdev->rswitch->nextdev[i])
+				str += sprintf(str, "%s\n",
+					rio_name(rdev->rswitch->nextdev[i]));
+			else
+				str += sprintf(str, "null\n");
+		}
+	}
+
+	return str - buf;
+}
+static DEVICE_ATTR_RO(lnext);
+
+static ssize_t modalias_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct rio_dev *rdev = to_rio_dev(dev);
+
+	return sprintf(buf, "rapidio:v%04Xd%04Xav%04Xad%04X\n",
+		       rdev->vid, rdev->did, rdev->asm_vid, rdev->asm_did);
+}
+static DEVICE_ATTR_RO(modalias);
+
+static struct attribute *rio_dev_attrs[] = {
+	&dev_attr_did.attr,
+	&dev_attr_vid.attr,
+	&dev_attr_device_rev.attr,
+	&dev_attr_asm_did.attr,
+	&dev_attr_asm_vid.attr,
+	&dev_attr_asm_rev.attr,
+	&dev_attr_lprev.attr,
+	&dev_attr_destid.attr,
+	&dev_attr_modalias.attr,
+	NULL,
+};
+
+static const struct attribute_group rio_dev_group = {
+	.attrs = rio_dev_attrs,
+};
+
+const struct attribute_group *rio_dev_groups[] = {
+	&rio_dev_group,
+	NULL,
 };
 
 static ssize_t
-rio_read_config(struct kobject *kobj, struct bin_attribute *bin_attr,
+rio_read_config(struct file *filp, struct kobject *kobj,
+		struct bin_attribute *bin_attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct rio_dev *dev =
@@ -79,9 +133,9 @@ rio_read_config(struct kobject *kobj, struct bin_attribute *bin_attr,
 
 	/* Several chips lock up trying to read undefined config space */
 	if (capable(CAP_SYS_ADMIN))
-		size = 0x200000;
+		size = RIO_MAINT_SPACE_SZ;
 
-	if (off > size)
+	if (off >= size)
 		return 0;
 	if (off + count > size) {
 		size -= off;
@@ -139,7 +193,8 @@ rio_read_config(struct kobject *kobj, struct bin_attribute *bin_attr,
 }
 
 static ssize_t
-rio_write_config(struct kobject *kobj, struct bin_attribute *bin_attr,
+rio_write_config(struct file *filp, struct kobject *kobj,
+		 struct bin_attribute *bin_attr,
 		 char *buf, loff_t off, size_t count)
 {
 	struct rio_dev *dev =
@@ -148,10 +203,10 @@ rio_write_config(struct kobject *kobj, struct bin_attribute *bin_attr,
 	loff_t init_off = off;
 	u8 *data = (u8 *) buf;
 
-	if (off > 0x200000)
+	if (off >= RIO_MAINT_SPACE_SZ)
 		return 0;
-	if (off + count > 0x200000) {
-		size = 0x200000 - off;
+	if (off + count > RIO_MAINT_SPACE_SZ) {
+		size = RIO_MAINT_SPACE_SZ - off;
 		count = size;
 	}
 
@@ -201,7 +256,7 @@ static struct bin_attribute rio_config_attr = {
 		 .name = "config",
 		 .mode = S_IRUGO | S_IWUSR,
 		 },
-	.size = 0x200000,
+	.size = RIO_MAINT_SPACE_SZ,
 	.read = rio_read_config,
 	.write = rio_write_config,
 };
@@ -216,7 +271,17 @@ int rio_create_sysfs_dev_files(struct rio_dev *rdev)
 {
 	int err = 0;
 
-	err = sysfs_create_bin_file(&rdev->dev.kobj, &rio_config_attr);
+	err = device_create_bin_file(&rdev->dev, &rio_config_attr);
+
+	if (!err && (rdev->pef & RIO_PEF_SWITCH)) {
+		err |= device_create_file(&rdev->dev, &dev_attr_routes);
+		err |= device_create_file(&rdev->dev, &dev_attr_lnext);
+		err |= device_create_file(&rdev->dev, &dev_attr_hopcount);
+	}
+
+	if (err)
+		pr_warning("RIO: Failed to create attribute file(s) for %s\n",
+			   rio_name(rdev));
 
 	return err;
 }
@@ -229,5 +294,90 @@ int rio_create_sysfs_dev_files(struct rio_dev *rdev)
  */
 void rio_remove_sysfs_dev_files(struct rio_dev *rdev)
 {
-	sysfs_remove_bin_file(&rdev->dev.kobj, &rio_config_attr);
+	device_remove_bin_file(&rdev->dev, &rio_config_attr);
+	if (rdev->pef & RIO_PEF_SWITCH) {
+		device_remove_file(&rdev->dev, &dev_attr_routes);
+		device_remove_file(&rdev->dev, &dev_attr_lnext);
+		device_remove_file(&rdev->dev, &dev_attr_hopcount);
+	}
 }
+
+static ssize_t bus_scan_store(struct bus_type *bus, const char *buf,
+				size_t count)
+{
+	long val;
+	int rc;
+
+	if (kstrtol(buf, 0, &val) < 0)
+		return -EINVAL;
+
+	if (val == RIO_MPORT_ANY) {
+		rc = rio_init_mports();
+		goto exit;
+	}
+
+	if (val < 0 || val >= RIO_MAX_MPORTS)
+		return -EINVAL;
+
+	rc = rio_mport_scan((int)val);
+exit:
+	if (!rc)
+		rc = count;
+
+	return rc;
+}
+static BUS_ATTR(scan, (S_IWUSR|S_IWGRP), NULL, bus_scan_store);
+
+static struct attribute *rio_bus_attrs[] = {
+	&bus_attr_scan.attr,
+	NULL,
+};
+
+static const struct attribute_group rio_bus_group = {
+	.attrs = rio_bus_attrs,
+};
+
+const struct attribute_group *rio_bus_groups[] = {
+	&rio_bus_group,
+	NULL,
+};
+
+static ssize_t
+port_destid_show(struct device *dev, struct device_attribute *attr,
+		 char *buf)
+{
+	struct rio_mport *mport = to_rio_mport(dev);
+
+	if (mport)
+		return sprintf(buf, "0x%04x\n", mport->host_deviceid);
+	else
+		return -ENODEV;
+}
+static DEVICE_ATTR_RO(port_destid);
+
+static ssize_t sys_size_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct rio_mport *mport = to_rio_mport(dev);
+
+	if (mport)
+		return sprintf(buf, "%u\n", mport->sys_size);
+	else
+		return -ENODEV;
+}
+static DEVICE_ATTR_RO(sys_size);
+
+static struct attribute *rio_mport_attrs[] = {
+	&dev_attr_port_destid.attr,
+	&dev_attr_sys_size.attr,
+	NULL,
+};
+
+static const struct attribute_group rio_mport_group = {
+	.attrs = rio_mport_attrs,
+};
+
+const struct attribute_group *rio_mport_groups[] = {
+	&rio_mport_group,
+	NULL,
+};

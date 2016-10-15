@@ -19,9 +19,9 @@
 #include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/poll.h>
-#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
 #include <asm/sn/io.h>
 #include <asm/sn/sn_sal.h>
 #include <asm/sn/module.h>
@@ -34,6 +34,7 @@
 #define SCDRV_BUFSZ	2048
 #define SCDRV_TIMEOUT	1000
 
+static DEFINE_MUTEX(scdrv_mutex);
 static irqreturn_t
 scdrv_interrupt(int irq, void *subch_data)
 {
@@ -105,18 +106,17 @@ scdrv_open(struct inode *inode, struct file *file)
 	file->private_data = sd;
 
 	/* hook this subchannel up to the system controller interrupt */
-	lock_kernel();
+	mutex_lock(&scdrv_mutex);
 	rv = request_irq(SGI_UART_VECTOR, scdrv_interrupt,
-			 IRQF_SHARED | IRQF_DISABLED,
-			 SYSCTL_BASENAME, sd);
+			 IRQF_SHARED, SYSCTL_BASENAME, sd);
 	if (rv) {
 		ia64_sn_irtr_close(sd->sd_nasid, sd->sd_subch);
 		kfree(sd);
 		printk("%s: irq request failed (%d)\n", __func__, rv);
-		unlock_kernel();
+		mutex_unlock(&scdrv_mutex);
 		return -EBUSY;
 	}
-	unlock_kernel();
+	mutex_unlock(&scdrv_mutex);
 	return 0;
 }
 
@@ -198,7 +198,7 @@ scdrv_read(struct file *file, char __user *buf, size_t count, loff_t *f_pos)
 		add_wait_queue(&sd->sd_rq, &wait);
 		spin_unlock_irqrestore(&sd->sd_rlock, flags);
 
-		schedule_timeout(SCDRV_TIMEOUT);
+		schedule_timeout(msecs_to_jiffies(SCDRV_TIMEOUT));
 
 		remove_wait_queue(&sd->sd_rq, &wait);
 		if (signal_pending(current)) {
@@ -294,7 +294,7 @@ scdrv_write(struct file *file, const char __user *buf,
 		add_wait_queue(&sd->sd_wq, &wait);
 		spin_unlock_irqrestore(&sd->sd_wlock, flags);
 
-		schedule_timeout(SCDRV_TIMEOUT);
+		schedule_timeout(msecs_to_jiffies(SCDRV_TIMEOUT));
 
 		remove_wait_queue(&sd->sd_wq, &wait);
 		if (signal_pending(current)) {
@@ -357,6 +357,7 @@ static const struct file_operations scdrv_fops = {
 	.poll =		scdrv_poll,
 	.open =		scdrv_open,
 	.release =	scdrv_release,
+	.llseek =	noop_llseek,
 };
 
 static struct class *snsc_class;
@@ -460,5 +461,4 @@ scdrv_init(void)
 	}
 	return 0;
 }
-
-module_init(scdrv_init);
+device_initcall(scdrv_init);

@@ -13,7 +13,7 @@ regulators (where voltage output is controllable) and current sinks (where
 current limit is controllable).
 
 (C) 2008  Wolfson Microelectronics PLC.
-Author: Liam Girdwood <lg@opensource.wolfsonmicro.com>
+Author: Liam Girdwood <lrg@slimlogic.co.uk>
 
 
 Nomenclature
@@ -35,16 +35,16 @@ Some terms used in this document:-
   o Consumer     - Electronic device that is supplied power by a regulator.
                    Consumers can be classified into two types:-
 
-                   Static: consumer does not change it's supply voltage or
-                   current limit. It only needs to enable or disable it's
-                   power supply. It's supply voltage is set by the hardware,
+                   Static: consumer does not change its supply voltage or
+                   current limit. It only needs to enable or disable its
+                   power supply. Its supply voltage is set by the hardware,
                    bootloader, firmware or kernel board initialisation code.
 
-                   Dynamic: consumer needs to change it's supply voltage or
+                   Dynamic: consumer needs to change its supply voltage or
                    current limit to meet operation demands.
 
 
-  o Power Domain - Electronic circuit that is supplied it's input power by the
+  o Power Domain - Electronic circuit that is supplied its input power by the
                    output power of a regulator, switch or by another power
                    domain.
 
@@ -156,7 +156,7 @@ relevant to non SoC devices and is split into the following four interfaces:-
       This interface is for machine specific code and allows the creation of
       voltage/current domains (with constraints) for each regulator. It can
       provide regulator constraints that will prevent device damage through
-      overvoltage or over current caused by buggy client drivers. It also
+      overvoltage or overcurrent caused by buggy client drivers. It also
       allows the creation of a regulator tree whereby some regulators are
       supplied by others (similar to a clock tree).
 

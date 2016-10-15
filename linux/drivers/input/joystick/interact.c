@@ -33,7 +33,6 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
 #include <linux/jiffies.h>
@@ -270,18 +269,14 @@ static int interact_connect(struct gameport *gameport, struct gameport_driver *d
 	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
 	for (i = 0; (t = interact_type[interact->type].abs[i]) >= 0; i++) {
-		set_bit(t, input_dev->absbit);
-		if (i < interact_type[interact->type].b8) {
-			input_dev->absmin[t] = 0;
-			input_dev->absmax[t] = 255;
-		} else {
-			input_dev->absmin[t] = -1;
-			input_dev->absmax[t] = 1;
-		}
+		if (i < interact_type[interact->type].b8)
+			input_set_abs_params(input_dev, t, 0, 255, 0, 0);
+		else
+			input_set_abs_params(input_dev, t, -1, 1, 0, 0);
 	}
 
 	for (i = 0; (t = interact_type[interact->type].btn[i]) >= 0; i++)
-		set_bit(t, input_dev->keybit);
+		__set_bit(t, input_dev->keybit);
 
 	err = input_register_device(interact->dev);
 	if (err)
@@ -315,15 +310,4 @@ static struct gameport_driver interact_drv = {
 	.disconnect	= interact_disconnect,
 };
 
-static int __init interact_init(void)
-{
-	return gameport_register_driver(&interact_drv);
-}
-
-static void __exit interact_exit(void)
-{
-	gameport_unregister_driver(&interact_drv);
-}
-
-module_init(interact_init);
-module_exit(interact_exit);
+module_gameport_driver(interact_drv);

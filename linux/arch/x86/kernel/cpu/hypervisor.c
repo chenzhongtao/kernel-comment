@@ -21,37 +21,67 @@
  *
  */
 
+#include <linux/module.h>
 #include <asm/processor.h>
-#include <asm/vmware.h>
 #include <asm/hypervisor.h>
 
-static inline void __cpuinit
-detect_hypervisor_vendor(struct cpuinfo_x86 *c)
+static const __initconst struct hypervisor_x86 * const hypervisors[] =
 {
-	if (vmware_platform())
-		c->x86_hyper_vendor = X86_HYPER_VENDOR_VMWARE;
-	else
-		c->x86_hyper_vendor = X86_HYPER_VENDOR_NONE;
-}
+#ifdef CONFIG_XEN
+	&x86_hyper_xen,
+#endif
+	&x86_hyper_vmware,
+	&x86_hyper_ms_hyperv,
+#ifdef CONFIG_KVM_GUEST
+	&x86_hyper_kvm,
+#endif
+};
 
-static inline void __cpuinit
-hypervisor_set_feature_bits(struct cpuinfo_x86 *c)
+const struct hypervisor_x86 *x86_hyper;
+EXPORT_SYMBOL(x86_hyper);
+
+static inline void __init
+detect_hypervisor_vendor(void)
 {
-	if (boot_cpu_data.x86_hyper_vendor == X86_HYPER_VENDOR_VMWARE) {
-		vmware_set_feature_bits(c);
-		return;
+	const struct hypervisor_x86 *h, * const *p;
+	uint32_t pri, max_pri = 0;
+
+	for (p = hypervisors; p < hypervisors + ARRAY_SIZE(hypervisors); p++) {
+		h = *p;
+		pri = h->detect();
+		if (pri != 0 && pri > max_pri) {
+			max_pri = pri;
+			x86_hyper = h;
+		}
 	}
+
+	if (max_pri)
+		printk(KERN_INFO "Hypervisor detected: %s\n", x86_hyper->name);
 }
 
-void __cpuinit init_hypervisor(struct cpuinfo_x86 *c)
+void init_hypervisor(struct cpuinfo_x86 *c)
 {
-	detect_hypervisor_vendor(c);
-	hypervisor_set_feature_bits(c);
+	if (x86_hyper && x86_hyper->set_cpu_features)
+		x86_hyper->set_cpu_features(c);
 }
 
 void __init init_hypervisor_platform(void)
 {
+
+	detect_hypervisor_vendor();
+
+	if (!x86_hyper)
+		return;
+
 	init_hypervisor(&boot_cpu_data);
-	if (boot_cpu_data.x86_hyper_vendor == X86_HYPER_VENDOR_VMWARE)
-		vmware_platform_setup();
+
+	if (x86_hyper->init_platform)
+		x86_hyper->init_platform();
+}
+
+bool __init hypervisor_x2apic_available(void)
+{
+	return x86_hyper                   &&
+	       x86_hyper->x2apic_available &&
+	       x86_hyper->x2apic_available();
 }

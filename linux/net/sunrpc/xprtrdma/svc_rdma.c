@@ -38,13 +38,15 @@
  *
  * Author: Tom Tucker <tom@opengridcomputing.com>
  */
-#include <linux/module.h>
-#include <linux/init.h>
+
+#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/sysctl.h>
+#include <linux/workqueue.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/sched.h>
 #include <linux/sunrpc/svc_rdma.h>
+#include "xprt_rdma.h"
 
 #define RPCDBG_FACILITY	RPCDBG_SVCXPRT
 
@@ -73,13 +75,15 @@ atomic_t rdma_stat_sq_prod;
 struct kmem_cache *svc_rdma_map_cachep;
 struct kmem_cache *svc_rdma_ctxt_cachep;
 
+struct workqueue_struct *svc_rdma_wq;
+
 /*
  * This function implements reading and resetting an atomic_t stat
  * variable through read/write to a proc file. Any write to the file
  * resets the associated statistic to zero. Any read returns it's
  * current value.
  */
-static int read_reset_stat(ctl_table *table, int write,
+static int read_reset_stat(struct ctl_table *table, int write,
 			   void __user *buffer, size_t *lenp,
 			   loff_t *ppos)
 {
@@ -114,14 +118,13 @@ static int read_reset_stat(ctl_table *table, int write,
 }
 
 static struct ctl_table_header *svcrdma_table_header;
-static ctl_table svcrdma_parm_table[] = {
+static struct ctl_table svcrdma_parm_table[] = {
 	{
 		.procname	= "max_requests",
 		.data		= &svcrdma_max_requests,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_max_requests,
 		.extra2		= &max_max_requests
 	},
@@ -130,8 +133,7 @@ static ctl_table svcrdma_parm_table[] = {
 		.data		= &svcrdma_max_req_size,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_max_inline,
 		.extra2		= &max_max_inline
 	},
@@ -140,8 +142,7 @@ static ctl_table svcrdma_parm_table[] = {
 		.data		= &svcrdma_ord,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_ord,
 		.extra2		= &max_ord,
 	},
@@ -151,100 +152,96 @@ static ctl_table svcrdma_parm_table[] = {
 		.data		= &rdma_stat_read,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_recv",
 		.data		= &rdma_stat_recv,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_write",
 		.data		= &rdma_stat_write,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_sq_starve",
 		.data		= &rdma_stat_sq_starve,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_rq_starve",
 		.data		= &rdma_stat_rq_starve,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_rq_poll",
 		.data		= &rdma_stat_rq_poll,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_rq_prod",
 		.data		= &rdma_stat_rq_prod,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_sq_poll",
 		.data		= &rdma_stat_sq_poll,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
 	{
 		.procname	= "rdma_stat_sq_prod",
 		.data		= &rdma_stat_sq_prod,
 		.maxlen		= sizeof(atomic_t),
 		.mode		= 0644,
-		.proc_handler	= &read_reset_stat,
+		.proc_handler	= read_reset_stat,
 	},
-	{
-		.ctl_name = 0,
-	},
+	{ },
 };
 
-static ctl_table svcrdma_table[] = {
+static struct ctl_table svcrdma_table[] = {
 	{
 		.procname	= "svc_rdma",
 		.mode		= 0555,
 		.child		= svcrdma_parm_table
 	},
-	{
-		.ctl_name = 0,
-	},
+	{ },
 };
 
-static ctl_table svcrdma_root_table[] = {
+static struct ctl_table svcrdma_root_table[] = {
 	{
-		.ctl_name	= CTL_SUNRPC,
 		.procname	= "sunrpc",
 		.mode		= 0555,
 		.child		= svcrdma_table
 	},
-	{
-		.ctl_name = 0,
-	},
+	{ },
 };
 
 void svc_rdma_cleanup(void)
 {
 	dprintk("SVCRDMA Module Removed, deregister RPC RDMA transport\n");
-	flush_scheduled_work();
+	destroy_workqueue(svc_rdma_wq);
 	if (svcrdma_table_header) {
 		unregister_sysctl_table(svcrdma_table_header);
 		svcrdma_table_header = NULL;
 	}
+#if defined(CONFIG_SUNRPC_BACKCHANNEL)
+	svc_unreg_xprt_class(&svc_rdma_bc_class);
+#endif
 	svc_unreg_xprt_class(&svc_rdma_class);
 	kmem_cache_destroy(svc_rdma_map_cachep);
 	kmem_cache_destroy(svc_rdma_ctxt_cachep);
@@ -258,6 +255,11 @@ int svc_rdma_init(void)
 	dprintk("\tsq_depth         : %d\n",
 		svcrdma_max_requests * RPCRDMA_SQ_DEPTH_MULT);
 	dprintk("\tmax_inline       : %d\n", svcrdma_max_req_size);
+
+	svc_rdma_wq = alloc_workqueue("svc_rdma", 0, 0);
+	if (!svc_rdma_wq)
+		return -ENOMEM;
+
 	if (!svcrdma_table_header)
 		svcrdma_table_header =
 			register_sysctl_table(svcrdma_root_table);
@@ -287,15 +289,14 @@ int svc_rdma_init(void)
 
 	/* Register RDMA with the SVC transport switch */
 	svc_reg_xprt_class(&svc_rdma_class);
+#if defined(CONFIG_SUNRPC_BACKCHANNEL)
+	svc_reg_xprt_class(&svc_rdma_bc_class);
+#endif
 	return 0;
  err1:
 	kmem_cache_destroy(svc_rdma_map_cachep);
  err0:
 	unregister_sysctl_table(svcrdma_table_header);
+	destroy_workqueue(svc_rdma_wq);
 	return -ENOMEM;
 }
-MODULE_AUTHOR("Tom Tucker <tom@opengridcomputing.com>");
-MODULE_DESCRIPTION("SVC RDMA Transport");
-MODULE_LICENSE("Dual BSD/GPL");
-module_init(svc_rdma_init);
-module_exit(svc_rdma_cleanup);

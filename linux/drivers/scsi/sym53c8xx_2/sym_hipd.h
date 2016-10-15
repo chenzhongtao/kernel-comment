@@ -54,7 +54,7 @@
  *
  *    SYM_OPT_LIMIT_COMMAND_REORDERING
  *        When this option is set, the driver tries to limit tagged 
- *        command reordering to some reasonnable value.
+ *        command reordering to some reasonable value.
  *        (set for Linux)
  */
 #if 0
@@ -581,7 +581,7 @@ struct sym_pmc {
 #define sym_lp(tp, lun) (!lun) ? (tp)->lun0p : NULL
 #else
 #define sym_lp(tp, lun) \
-	(!lun) ? (tp)->lun0p : (tp)->lunmp ? (tp)->lunmp[(lun)] : NULL
+	(!lun) ? (tp)->lun0p : (tp)->lunmp ? (tp)->lunmp[((u8)lun)] : NULL
 #endif
 
 /*

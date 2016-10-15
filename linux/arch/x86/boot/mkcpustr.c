@@ -15,6 +15,9 @@
 
 #include <stdio.h>
 
+#include "../include/asm/required-features.h"
+#include "../include/asm/disabled-features.h"
+#include "../include/asm/cpufeature.h"
 #include "../kernel/cpu/capflags.c"
 
 int main(void)
@@ -22,7 +25,7 @@ int main(void)
 	int i, j;
 	const char *str;
 
-	printf("static const char x86_cap_strs[] = \n");
+	printf("static const char x86_cap_strs[] =\n");
 
 	for (i = 0; i < NCAPINTS; i++) {
 		for (j = 0; j < 32; j++) {

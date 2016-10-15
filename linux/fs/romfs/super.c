@@ -1,18 +1,18 @@
 /* Block- or MTD-based romfs
  *
- * Copyright ? 2007 Red Hat, Inc. All Rights Reserved.
+ * Copyright © 2007 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * Derived from: ROMFS file system, Linux implementation
  *
- * Copyright ? 1997-1999  Janos Farkas <chexum@shadow.banki.hu>
+ * Copyright © 1997-1999  Janos Farkas <chexum@shadow.banki.hu>
  *
  * Using parts of the minix filesystem
- * Copyright ? 1991, 1992  Linus Torvalds
+ * Copyright © 1991, 1992  Linus Torvalds
  *
  * and parts of the affs filesystem additionally
- * Copyright ? 1993  Ray Burr
- * Copyright ? 1996  Hans-Joachim Widmaier
+ * Copyright © 1993  Ray Burr
+ * Copyright © 1996  Hans-Joachim Widmaier
  *
  * Changes
  *					Changed for 2.1.19 modules
@@ -55,6 +55,8 @@
  * as published by the Free Software Foundation; either version
  * 2 of the Licence, or (at your option) any later version.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/string.h>
@@ -145,19 +147,18 @@ static const struct address_space_operations romfs_aops = {
 /*
  * read the entries from a directory
  */
-static int romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
+static int romfs_readdir(struct file *file, struct dir_context *ctx)
 {
-	struct inode *i = filp->f_dentry->d_inode;
+	struct inode *i = file_inode(file);
 	struct romfs_inode ri;
 	unsigned long offset, maxoff;
 	int j, ino, nextfh;
-	int stored = 0;
 	char fsname[ROMFS_MAXFN];	/* XXX dynamic? */
 	int ret;
 
 	maxoff = romfs_maxsize(i->i_sb);
 
-	offset = filp->f_pos;
+	offset = ctx->pos;
 	if (!offset) {
 		offset = i->i_ino & ROMFH_MASK;
 		ret = romfs_dev_read(i->i_sb, offset, &ri, ROMFH_SIZE);
@@ -170,10 +171,10 @@ static int romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	for (;;) {
 		if (!offset || offset >= maxoff) {
 			offset = maxoff;
-			filp->f_pos = offset;
+			ctx->pos = offset;
 			goto out;
 		}
-		filp->f_pos = offset;
+		ctx->pos = offset;
 
 		/* Fetch inode info */
 		ret = romfs_dev_read(i->i_sb, offset, &ri, ROMFH_SIZE);
@@ -194,23 +195,21 @@ static int romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		nextfh = be32_to_cpu(ri.next);
 		if ((nextfh & ROMFH_TYPE) == ROMFH_HRD)
 			ino = be32_to_cpu(ri.spec);
-		if (filldir(dirent, fsname, j, offset, ino,
-			    romfs_dtype_table[nextfh & ROMFH_TYPE]) < 0)
+		if (!dir_emit(ctx, fsname, j, ino,
+			    romfs_dtype_table[nextfh & ROMFH_TYPE]))
 			goto out;
 
-		stored++;
 		offset = nextfh & ROMFH_MASK;
 	}
-
 out:
-	return stored;
+	return 0;
 }
 
 /*
  * look up an entry in a directory
  */
 static struct dentry *romfs_lookup(struct inode *dir, struct dentry *dentry,
-				   struct nameidata *nd)
+				   unsigned int flags)
 {
 	unsigned long offset, maxoff;
 	struct inode *inode;
@@ -281,7 +280,8 @@ error:
 
 static const struct file_operations romfs_dir_operations = {
 	.read		= generic_read_dir,
-	.readdir	= romfs_readdir,
+	.iterate	= romfs_readdir,
+	.llseek		= default_llseek,
 };
 
 static const struct inode_operations romfs_dir_inode_operations = {
@@ -336,7 +336,7 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 	inode->i_metasize = (ROMFH_SIZE + nlen + 1 + ROMFH_PAD) & ROMFH_MASK;
 	inode->i_dataoffset = pos + inode->i_metasize;
 
-	i->i_nlink = 1;		/* Hard to decide.. */
+	set_nlink(i, 1);		/* Hard to decide.. */
 	i->i_size = be32_to_cpu(ri.size);
 	i->i_mtime.tv_sec = i->i_atime.tv_sec = i->i_ctime.tv_sec = 0;
 	i->i_mtime.tv_nsec = i->i_atime.tv_nsec = i->i_ctime.tv_nsec = 0;
@@ -355,9 +355,6 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 	case ROMFH_REG:
 		i->i_fop = &romfs_ro_fops;
 		i->i_data.a_ops = &romfs_aops;
-		if (i->i_sb->s_mtd)
-			i->i_data.backing_dev_info =
-				i->i_sb->s_mtd->backing_dev_info;
 		if (nextfh & ROMFH_EXEC)
 			mode |= S_IXUGO;
 		break;
@@ -382,7 +379,7 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 eio:
 	ret = -EIO;
 error:
-	printk(KERN_ERR "ROMFS: read error for inode 0x%lx\n", pos);
+	pr_err("read error for inode 0x%lx\n", pos);
 	return ERR_PTR(ret);
 }
 
@@ -392,6 +389,7 @@ error:
 static struct inode *romfs_alloc_inode(struct super_block *sb)
 {
 	struct romfs_inode_info *inode;
+
 	inode = kmem_cache_alloc(romfs_inode_cachep, GFP_KERNEL);
 	return inode ? &inode->vfs_inode : NULL;
 }
@@ -399,9 +397,16 @@ static struct inode *romfs_alloc_inode(struct super_block *sb)
 /*
  * return a spent inode to the slab cache
  */
+static void romfs_i_callback(struct rcu_head *head)
+{
+	struct inode *inode = container_of(head, struct inode, i_rcu);
+
+	kmem_cache_free(romfs_inode_cachep, ROMFS_I(inode));
+}
+
 static void romfs_destroy_inode(struct inode *inode)
 {
-	kmem_cache_free(romfs_inode_cachep, ROMFS_I(inode));
+	call_rcu(&inode->i_rcu, romfs_i_callback);
 }
 
 /*
@@ -428,6 +433,7 @@ static int romfs_statfs(struct dentry *dentry, struct kstatfs *buf)
  */
 static int romfs_remount(struct super_block *sb, int *flags, char *data)
 {
+	sync_filesystem(sb);
 	*flags |= MS_RDONLY;
 	return 0;
 }
@@ -502,15 +508,13 @@ static int romfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (rsb->word0 != ROMSB_WORD0 || rsb->word1 != ROMSB_WORD1 ||
 	    img_size < ROMFH_SIZE) {
 		if (!silent)
-			printk(KERN_WARNING "VFS:"
-			       " Can't find a romfs filesystem on dev %s.\n",
+			pr_warn("VFS: Can't find a romfs filesystem on dev %s.\n",
 			       sb->s_id);
 		goto error_rsb_inval;
 	}
 
 	if (romfs_checksum(rsb, min_t(size_t, img_size, 512))) {
-		printk(KERN_ERR "ROMFS: bad initial checksum on dev %s.\n",
-		       sb->s_id);
+		pr_err("bad initial checksum on dev %s.\n", sb->s_id);
 		goto error_rsb_inval;
 	}
 
@@ -518,8 +522,8 @@ static int romfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	len = strnlen(rsb->name, ROMFS_MAXFN);
 	if (!silent)
-		printk(KERN_NOTICE "ROMFS: Mounting image '%*.*s' through %s\n",
-		       (unsigned) len, (unsigned) len, rsb->name, storage);
+		pr_notice("Mounting image '%*.*s' through %s\n",
+			  (unsigned) len, (unsigned) len, rsb->name, storage);
 
 	kfree(rsb);
 	rsb = NULL;
@@ -529,41 +533,37 @@ static int romfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	root = romfs_iget(sb, pos);
 	if (IS_ERR(root))
-		goto error;
+		return PTR_ERR(root);
 
-	sb->s_root = d_alloc_root(root);
+	sb->s_root = d_make_root(root);
 	if (!sb->s_root)
-		goto error_i;
+		return -ENOMEM;
 
 	return 0;
 
-error_i:
-	iput(root);
-error:
-	return -EINVAL;
 error_rsb_inval:
 	ret = -EINVAL;
 error_rsb:
+	kfree(rsb);
 	return ret;
 }
 
 /*
  * get a superblock for mounting
  */
-static int romfs_get_sb(struct file_system_type *fs_type,
+static struct dentry *romfs_mount(struct file_system_type *fs_type,
 			int flags, const char *dev_name,
-			void *data, struct vfsmount *mnt)
+			void *data)
 {
-	int ret = -EINVAL;
+	struct dentry *ret = ERR_PTR(-EINVAL);
 
 #ifdef CONFIG_ROMFS_ON_MTD
-	ret = get_sb_mtd(fs_type, flags, dev_name, data, romfs_fill_super,
-			 mnt);
+	ret = mount_mtd(fs_type, flags, dev_name, data, romfs_fill_super);
 #endif
 #ifdef CONFIG_ROMFS_ON_BLOCK
-	if (ret == -EINVAL)
-		ret = get_sb_bdev(fs_type, flags, dev_name, data,
-				  romfs_fill_super, mnt);
+	if (ret == ERR_PTR(-EINVAL))
+		ret = mount_bdev(fs_type, flags, dev_name, data,
+				  romfs_fill_super);
 #endif
 	return ret;
 }
@@ -590,10 +590,11 @@ static void romfs_kill_sb(struct super_block *sb)
 static struct file_system_type romfs_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "romfs",
-	.get_sb		= romfs_get_sb,
+	.mount		= romfs_mount,
 	.kill_sb	= romfs_kill_sb,
 	.fs_flags	= FS_REQUIRES_DEV,
 };
+MODULE_ALIAS_FS("romfs");
 
 /*
  * inode storage initialiser
@@ -612,7 +613,7 @@ static int __init init_romfs_fs(void)
 {
 	int ret;
 
-	printk(KERN_INFO "ROMFS MTD (C) 2007 Red Hat, Inc.\n");
+	pr_info("ROMFS MTD (C) 2007 Red Hat, Inc.\n");
 
 	romfs_inode_cachep =
 		kmem_cache_create("romfs_i",
@@ -621,14 +622,12 @@ static int __init init_romfs_fs(void)
 				  romfs_i_init_once);
 
 	if (!romfs_inode_cachep) {
-		printk(KERN_ERR
-		       "ROMFS error: Failed to initialise inode cache\n");
+		pr_err("Failed to initialise inode cache\n");
 		return -ENOMEM;
 	}
-    /*注册文件系统*/
 	ret = register_filesystem(&romfs_fs_type);
 	if (ret) {
-		printk(KERN_ERR "ROMFS error: Failed to register filesystem\n");
+		pr_err("Failed to register filesystem\n");
 		goto error_register;
 	}
 	return 0;
@@ -644,6 +643,11 @@ error_register:
 static void __exit exit_romfs_fs(void)
 {
 	unregister_filesystem(&romfs_fs_type);
+	/*
+	 * Make sure all delayed rcu free inodes are flushed before we
+	 * destroy cache.
+	 */
+	rcu_barrier();
 	kmem_cache_destroy(romfs_inode_cachep);
 }
 

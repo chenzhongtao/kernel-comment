@@ -75,7 +75,7 @@ int button_add_callback (void (*callback) (void), int count)
  * with -EINVAL. If there is more than one entry with the same address,
  * because it searches the list from end to beginning, it will unregister the
  * last one to be registered first (FILO- First In Last Out).
- * Note that this is not neccessarily true if the entries are not submitted
+ * Note that this is not necessarily true if the entries are not submitted
  * at the same time, because another driver could have unregistered a callback
  * between the submissions creating a gap earlier in the list, which would
  * be filled first at submission time.
@@ -93,9 +93,9 @@ int button_del_callback (void (*callback) (void))
 			button_callback_list [lp].count = 0;
 			callback_count--;
 			return 0;
-		};
+		}
 		lp--;
-	};
+	}
 	return -EINVAL;
 }
 
@@ -168,7 +168,10 @@ static irqreturn_t button_handler (int irq, void *dev_id)
 static int button_read (struct file *filp, char __user *buffer,
 			size_t count, loff_t *ppos)
 {
-	interruptible_sleep_on (&button_wait_queue);
+	DEFINE_WAIT(wait);
+	prepare_to_wait(&button_wait_queue, &wait, TASK_INTERRUPTIBLE);
+	schedule();
+	finish_wait(&button_wait_queue, &wait);
 	return (copy_to_user (buffer, &button_output_buffer, bcount))
 		 ? -EFAULT : bcount;
 }
@@ -182,6 +185,7 @@ static int button_read (struct file *filp, char __user *buffer,
 static const struct file_operations button_fops = {
 	.owner		= THIS_MODULE,
 	.read		= button_read,
+	.llseek		= noop_llseek,
 };
 
 /* 
@@ -219,7 +223,7 @@ static int __init nwbutton_init(void)
 		return -EBUSY;
 	}
 
-	if (request_irq (IRQ_NETWINDER_BUTTON, button_handler, IRQF_DISABLED,
+	if (request_irq (IRQ_NETWINDER_BUTTON, button_handler, 0,
 			"nwbutton", NULL)) {
 		printk (KERN_WARNING "nwbutton: IRQ %d is not free.\n",
 				IRQ_NETWINDER_BUTTON);

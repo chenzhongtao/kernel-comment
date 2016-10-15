@@ -11,30 +11,26 @@
 
 #include <linux/clockchips.h>
 #include <linux/interrupt.h>
+#include <linux/i8253.h>
 #include <linux/time.h>
-#include <linux/mca.h>
+#include <linux/export.h>
 
 #include <asm/vsyscall.h>
 #include <asm/x86_init.h>
 #include <asm/i8259.h>
-#include <asm/i8253.h>
 #include <asm/timer.h>
 #include <asm/hpet.h>
 #include <asm/time.h>
 
-#if defined(CONFIG_X86_32) && defined(CONFIG_X86_IO_APIC)
-int timer_ack;
-#endif
-
 #ifdef CONFIG_X86_64
-volatile unsigned long __jiffies __section_jiffies = INITIAL_JIFFIES;
+__visible volatile unsigned long jiffies __cacheline_aligned = INITIAL_JIFFIES;
 #endif
 
 unsigned long profile_pc(struct pt_regs *regs)
 {
 	unsigned long pc = instruction_pointer(regs);
 
-	if (!user_mode_vm(regs) && in_lock_functions(pc)) {
+	if (!user_mode(regs) && in_lock_functions(pc)) {
 #ifdef CONFIG_FRAME_POINTER
 		return *(unsigned long *)(regs->bp + sizeof(long));
 #else
@@ -60,40 +56,20 @@ EXPORT_SYMBOL(profile_pc);
  */
 static irqreturn_t timer_interrupt(int irq, void *dev_id)
 {
-	/* Keep nmi watchdog up to date */
-	inc_irq_stat(irq0_irqs);
-
-	/* Optimized out for !IO_APIC and x86_64 */
-	if (timer_ack) {
-		/*
-		 * Subtle, when I/O APICs are used we have to ack timer IRQ
-		 * manually to deassert NMI lines for the watchdog if run
-		 * on an 82489DX-based system.
-		 */
-		spin_lock(&i8259A_lock);
-		outb(0x0c, PIC_MASTER_OCW3);
-		/* Ack the IRQ; AEOI will end it automatically. */
-		inb(PIC_MASTER_POLL);
-		spin_unlock(&i8259A_lock);
-	}
-
 	global_clock_event->event_handler(global_clock_event);
-
-	/* MCA bus quirk: Acknowledge irq0 by setting bit 7 in port 0x61 */
-	if (MCA_bus)
-		outb_p(inb_p(0x61)| 0x80, 0x61);
-
 	return IRQ_HANDLED;
 }
 
 static struct irqaction irq0  = {
 	.handler = timer_interrupt,
-	.flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,
+	.flags = IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,
 	.name = "timer"
 };
 
 void __init setup_default_timer_irq(void)
 {
+	if (!nr_legacy_irqs())
+		return;
 	setup_irq(0, &irq0);
 }
 

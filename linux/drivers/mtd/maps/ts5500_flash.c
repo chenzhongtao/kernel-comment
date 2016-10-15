@@ -89,12 +89,11 @@ static int __init init_ts5500_map(void)
 	}
 
 	mymtd->owner = THIS_MODULE;
-	add_mtd_partitions(mymtd, ts5500_partitions, NUM_PARTITIONS);
+	mtd_device_register(mymtd, ts5500_partitions, NUM_PARTITIONS);
 
 	return 0;
 
 err1:
-	map_destroy(mymtd);
 	iounmap(ts5500_map.virt);
 err2:
 	return rc;
@@ -103,7 +102,7 @@ err2:
 static void __exit cleanup_ts5500_map(void)
 {
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 
@@ -118,5 +117,5 @@ module_exit(cleanup_ts5500_map);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Sean Young <sean@mess.org>");
-MODULE_DESCRIPTION("MTD map driver for Techology Systems TS-5500 board");
+MODULE_DESCRIPTION("MTD map driver for Technology Systems TS-5500 board");
 

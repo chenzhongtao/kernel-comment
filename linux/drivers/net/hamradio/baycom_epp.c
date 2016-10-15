@@ -69,7 +69,7 @@ static const char paranoia_str[] = KERN_ERR
 
 static const char bc_drvname[] = "baycom_epp";
 static const char bc_drvinfo[] = KERN_INFO "baycom_epp: (C) 1998-2000 Thomas Sailer, HB9JNX/AE4WA\n"
-"baycom_epp: version 0.7 compiled " __TIME__ " " __DATE__ "\n";
+"baycom_epp: version 0.7\n";
 
 /* --------------------------------------------------------------------- */
 
@@ -449,7 +449,7 @@ static int transmit(struct baycom_state *bc, int cnt, unsigned char stat)
 			if ((--bc->hdlctx.slotcnt) > 0)
 				return 0;
 			bc->hdlctx.slotcnt = bc->ch_params.slottime;
-			if ((random32() % 256) > bc->ch_params.ppersist)
+			if ((prandom_u32() % 256) > bc->ch_params.ppersist)
 				return 0;
 		}
 	}
@@ -596,16 +596,16 @@ static int receive(struct net_device *dev, int cnt)
 					if (!(notbitstream & (0x1fc << j)))
 						state = 0;
 
-					/* not flag received */
-					else if (!(bitstream & (0x1fe << j)) != (0x0fc << j)) {
+					/* flag received */
+					else if ((bitstream & (0x1fe << j)) == (0x0fc << j)) {
 						if (state)
 							do_rxpacket(dev);
 						bc->hdlcrx.bufcnt = 0;
 						bc->hdlcrx.bufptr = bc->hdlcrx.buf;
 						state = 1;
 						numbits = 7-j;
-						}
 					}
+				}
 
 				/* stuffed bit */
 				else if (unlikely((bitstream & (0x1f8 << j)) == (0xf8 << j))) {
@@ -638,7 +638,7 @@ static int receive(struct net_device *dev, int cnt)
 #define GETTICK(x)                                                \
 ({                                                                \
 	if (cpu_has_tsc)                                          \
-		rdtscl(x);                                        \
+		x = (unsigned int)rdtsc();		  \
 })
 #else /* __i386__ */
 #define GETTICK(x)
@@ -771,6 +771,9 @@ static void epp_bh(struct work_struct *work)
 static int baycom_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct baycom_state *bc = netdev_priv(dev);
+
+	if (skb->protocol == htons(ETH_P_IP))
+		return ax25_ip_xmit(skb);
 
 	if (skb->data[0] != 0) {
 		do_kiss_params(bc, skb->data, skb->len);
@@ -1162,7 +1165,7 @@ static void baycom_probe(struct net_device *dev)
 /*
  * command line settable parameters
  */
-static const char *mode[NR_PORTS] = { "", };
+static char *mode[NR_PORTS] = { "", };
 static int iobase[NR_PORTS] = { 0x378, };
 
 module_param_array(mode, charp, NULL, 0);
@@ -1206,7 +1209,7 @@ static int __init init_baycomepp(void)
 		struct net_device *dev;
 		
 		dev = alloc_netdev(sizeof(struct baycom_state), "bce%d",
-				   baycom_epp_dev_setup);
+				   NET_NAME_UNKNOWN, baycom_epp_dev_setup);
 
 		if (!dev) {
 			printk(KERN_WARNING "bce%d : out of memory\n", i);

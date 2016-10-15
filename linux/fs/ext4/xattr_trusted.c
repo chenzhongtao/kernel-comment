@@ -5,7 +5,6 @@
  * Copyright (C) 2003 by Andreas Gruenbacher, <a.gruenbacher@computer.org>
  */
 
-#include <linux/module.h>
 #include <linux/string.h>
 #include <linux/capability.h>
 #include <linux/fs.h>
@@ -14,7 +13,8 @@
 #include "xattr.h"
 
 static size_t
-ext4_xattr_trusted_list(struct inode *inode, char *list, size_t list_size,
+ext4_xattr_trusted_list(const struct xattr_handler *handler,
+			struct dentry *dentry, char *list, size_t list_size,
 			const char *name, size_t name_len)
 {
 	const size_t prefix_len = XATTR_TRUSTED_PREFIX_LEN;
@@ -32,26 +32,28 @@ ext4_xattr_trusted_list(struct inode *inode, char *list, size_t list_size,
 }
 
 static int
-ext4_xattr_trusted_get(struct inode *inode, const char *name,
-		       void *buffer, size_t size)
+ext4_xattr_trusted_get(const struct xattr_handler *handler,
+		       struct dentry *dentry, const char *name, void *buffer,
+		       size_t size)
 {
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
-	return ext4_xattr_get(inode, EXT4_XATTR_INDEX_TRUSTED, name,
-			      buffer, size);
+	return ext4_xattr_get(d_inode(dentry), EXT4_XATTR_INDEX_TRUSTED,
+			      name, buffer, size);
 }
 
 static int
-ext4_xattr_trusted_set(struct inode *inode, const char *name,
+ext4_xattr_trusted_set(const struct xattr_handler *handler,
+		       struct dentry *dentry, const char *name,
 		       const void *value, size_t size, int flags)
 {
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
-	return ext4_xattr_set(inode, EXT4_XATTR_INDEX_TRUSTED, name,
-			      value, size, flags);
+	return ext4_xattr_set(d_inode(dentry), EXT4_XATTR_INDEX_TRUSTED,
+			      name, value, size, flags);
 }
 
-struct xattr_handler ext4_xattr_trusted_handler = {
+const struct xattr_handler ext4_xattr_trusted_handler = {
 	.prefix	= XATTR_TRUSTED_PREFIX,
 	.list	= ext4_xattr_trusted_list,
 	.get	= ext4_xattr_trusted_get,

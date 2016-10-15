@@ -170,7 +170,7 @@ static unsigned char atakbd_keycode[0x72] = {	/* American layout */
 	[93]	 = KEY_KPASTERISK,
 	[94]	 = KEY_KPPLUS,
 	[95]	 = KEY_HELP,
-	[96]	 = KEY_BACKSLASH,	/* FIXME: '<' */
+	[96]	 = KEY_102ND,
 	[97]	 = KEY_KPASTERISK,	/* FIXME */
 	[98]	 = KEY_KPSLASH,
 	[99]	 = KEY_KPLEFTPAREN,
@@ -223,8 +223,9 @@ static int __init atakbd_init(void)
 		return -ENODEV;
 
 	// need to init core driver if not already done so
-	if (atari_keyb_init())
-		return -ENODEV;
+	error = atari_keyb_init();
+	if (error)
+		return error;
 
 	atakbd_dev = input_allocate_device();
 	if (!atakbd_dev)

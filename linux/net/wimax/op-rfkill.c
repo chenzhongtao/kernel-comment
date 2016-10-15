@@ -43,7 +43,7 @@
  *   wimax_rfkill()             Kernel calling wimax_rfkill()
  *     __wimax_rf_toggle_radio()
  *
- * wimax_rfkill_set_radio_block()  RF-Kill subsytem calling
+ * wimax_rfkill_set_radio_block()  RF-Kill subsystem calling
  *   __wimax_rf_toggle_radio()
  *
  * __wimax_rf_toggle_radio()
@@ -65,6 +65,7 @@
 #include <linux/wimax.h>
 #include <linux/security.h>
 #include <linux/rfkill.h>
+#include <linux/export.h>
 #include "wimax-internal.h"
 
 #define D_SUBMODULE op_rfkill
@@ -107,8 +108,8 @@ void wimax_report_rfkill_hw(struct wimax_dev *wimax_dev,
 
 	if (state != wimax_dev->rf_hw) {
 		wimax_dev->rf_hw = state;
-		if (wimax_dev->rf_hw == WIMAX_RF_ON
-		    && wimax_dev->rf_sw == WIMAX_RF_ON)
+		if (wimax_dev->rf_hw == WIMAX_RF_ON &&
+		    wimax_dev->rf_sw == WIMAX_RF_ON)
 			wimax_state = WIMAX_ST_READY;
 		else
 			wimax_state = WIMAX_ST_RADIO_OFF;
@@ -134,8 +135,7 @@ EXPORT_SYMBOL_GPL(wimax_report_rfkill_hw);
  * @state: New state of the RF kill switch. %WIMAX_RF_ON radio on,
  *     %WIMAX_RF_OFF radio off.
  *
- * Reports changes in the software RF switch state to the the WiMAX
- * stack.
+ * Reports changes in the software RF switch state to the WiMAX stack.
  *
  * The main use is during initialization, so the driver can query the
  * device for its current software radio kill switch state and feed it
@@ -163,8 +163,8 @@ void wimax_report_rfkill_sw(struct wimax_dev *wimax_dev,
 
 	if (state != wimax_dev->rf_sw) {
 		wimax_dev->rf_sw = state;
-		if (wimax_dev->rf_hw == WIMAX_RF_ON
-		    && wimax_dev->rf_sw == WIMAX_RF_ON)
+		if (wimax_dev->rf_hw == WIMAX_RF_ON &&
+		    wimax_dev->rf_sw == WIMAX_RF_ON)
 			wimax_state = WIMAX_ST_READY;
 		else
 			wimax_state = WIMAX_ST_RADIO_OFF;
@@ -305,8 +305,15 @@ int wimax_rfkill(struct wimax_dev *wimax_dev, enum wimax_rf_state state)
 	d_fnstart(3, dev, "(wimax_dev %p state %u)\n", wimax_dev, state);
 	mutex_lock(&wimax_dev->mutex);
 	result = wimax_dev_is_ready(wimax_dev);
-	if (result < 0)
+	if (result < 0) {
+		/* While initializing, < 1.4.3 wimax-tools versions use
+		 * this call to check if the device is a valid WiMAX
+		 * device; so we allow it to proceed always,
+		 * considering the radios are all off. */
+		if (result == -ENOMEDIUM && state == WIMAX_RF_QUERY)
+			result = WIMAX_RF_OFF << 1 | WIMAX_RF_OFF;
 		goto error_not_ready;
+	}
 	switch (state) {
 	case WIMAX_RF_ON:
 	case WIMAX_RF_OFF:
@@ -355,6 +362,7 @@ int wimax_rfkill_add(struct wimax_dev *wimax_dev)
 
 	wimax_dev->rfkill = rfkill;
 
+	rfkill_init_sw_state(rfkill, 1);
 	result = rfkill_register(wimax_dev->rfkill);
 	if (result < 0)
 		goto error_rfkill_register;
@@ -402,18 +410,6 @@ void wimax_rfkill_rm(struct wimax_dev *wimax_dev)
  * just query).
  */
 
-static const
-struct nla_policy wimax_gnl_rfkill_policy[WIMAX_GNL_ATTR_MAX + 1] = {
-	[WIMAX_GNL_RFKILL_IFIDX] = {
-		.type = NLA_U32,
-	},
-	[WIMAX_GNL_RFKILL_STATE] = {
-		.type = NLA_U32		/* enum wimax_rf_state */
-	},
-};
-
-
-static
 int wimax_gnl_doit_rfkill(struct sk_buff *skb, struct genl_info *info)
 {
 	int result, ifindex;
@@ -424,8 +420,7 @@ int wimax_gnl_doit_rfkill(struct sk_buff *skb, struct genl_info *info)
 	d_fnstart(3, NULL, "(skb %p info %p)\n", skb, info);
 	result = -ENODEV;
 	if (info->attrs[WIMAX_GNL_RFKILL_IFIDX] == NULL) {
-		printk(KERN_ERR "WIMAX_GNL_OP_RFKILL: can't find IFIDX "
-			"attribute\n");
+		pr_err("WIMAX_GNL_OP_RFKILL: can't find IFIDX attribute\n");
 		goto error_no_wimax_dev;
 	}
 	ifindex = nla_get_u32(info->attrs[WIMAX_GNL_RFKILL_IFIDX]);
@@ -449,13 +444,3 @@ error_no_wimax_dev:
 	d_fnend(3, NULL, "(skb %p info %p) = %d\n", skb, info, result);
 	return result;
 }
-
-
-struct genl_ops wimax_gnl_rfkill = {
-	.cmd = WIMAX_GNL_OP_RFKILL,
-	.flags = GENL_ADMIN_PERM,
-	.policy = wimax_gnl_rfkill_policy,
-	.doit = wimax_gnl_doit_rfkill,
-	.dumpit = NULL,
-};
-

@@ -36,12 +36,11 @@ struct iscsi_sw_tcp_send {
 };
 
 struct iscsi_sw_tcp_conn {
-	struct iscsi_conn	*iscsi_conn;
 	struct socket		*sock;
 
 	struct iscsi_sw_tcp_send out;
 	/* old values for socket callbacks */
-	void			(*old_data_ready)(struct sock *, int);
+	void			(*old_data_ready)(struct sock *);
 	void			(*old_state_change)(struct sock *);
 	void			(*old_write_space)(struct sock *);
 
@@ -54,6 +53,10 @@ struct iscsi_sw_tcp_conn {
 	uint32_t		discontiguous_hdr_cnt;
 
 	ssize_t (*sendpage)(struct socket *, struct page *, int, size_t, int);
+};
+
+struct iscsi_sw_tcp_host {
+	struct iscsi_session	*session;
 };
 
 struct iscsi_sw_tcp_hdrbuf {

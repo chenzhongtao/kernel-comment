@@ -18,21 +18,14 @@
 #ifndef	__XFS_ERROR_H__
 #define	__XFS_ERROR_H__
 
-#ifdef DEBUG
-#define	XFS_ERROR_NTRAP	10
-extern int	xfs_etrap[XFS_ERROR_NTRAP];
-extern int	xfs_error_trap(int);
-#define	XFS_ERROR(e)	xfs_error_trap(e)
-#else
-#define	XFS_ERROR(e)	(e)
-#endif
-
 struct xfs_mount;
 
-extern void xfs_error_report(char *tag, int level, struct xfs_mount *mp,
-				char *fname, int linenum, inst_t *ra);
-extern void xfs_corruption_error(char *tag, int level, struct xfs_mount *mp,
-				void *p, char *fname, int linenum, inst_t *ra);
+extern void xfs_error_report(const char *tag, int level, struct xfs_mount *mp,
+			const char *filename, int linenum, void *ra);
+extern void xfs_corruption_error(const char *tag, int level,
+			struct xfs_mount *mp, void *p, const char *filename,
+			int linenum, void *ra);
+extern void xfs_verifier_error(struct xfs_buf *bp);
 
 #define	XFS_ERROR_REPORT(e, lvl, mp)	\
 	xfs_error_report(e, lvl, mp, __FILE__, __LINE__, __return_address)
@@ -47,26 +40,26 @@ extern void xfs_corruption_error(char *tag, int level, struct xfs_mount *mp,
 /*
  * Macros to set EFSCORRUPTED & return/branch.
  */
-#define	XFS_WANT_CORRUPTED_GOTO(x,l)	\
+#define	XFS_WANT_CORRUPTED_GOTO(mp, x, l)	\
 	{ \
 		int fs_is_ok = (x); \
 		ASSERT(fs_is_ok); \
 		if (unlikely(!fs_is_ok)) { \
 			XFS_ERROR_REPORT("XFS_WANT_CORRUPTED_GOTO", \
-					 XFS_ERRLEVEL_LOW, NULL); \
-			error = XFS_ERROR(EFSCORRUPTED); \
+					 XFS_ERRLEVEL_LOW, mp); \
+			error = -EFSCORRUPTED; \
 			goto l; \
 		} \
 	}
 
-#define	XFS_WANT_CORRUPTED_RETURN(x)	\
+#define	XFS_WANT_CORRUPTED_RETURN(mp, x)	\
 	{ \
 		int fs_is_ok = (x); \
 		ASSERT(fs_is_ok); \
 		if (unlikely(!fs_is_ok)) { \
 			XFS_ERROR_REPORT("XFS_WANT_CORRUPTED_RETURN", \
-					 XFS_ERRLEVEL_LOW, NULL); \
-			return XFS_ERROR(EFSCORRUPTED); \
+					 XFS_ERRLEVEL_LOW, mp); \
+			return -EFSCORRUPTED; \
 		} \
 	}
 
@@ -126,16 +119,17 @@ extern void xfs_corruption_error(char *tag, int level, struct xfs_mount *mp,
 #define	XFS_RANDOM_BMAPIFORMAT				XFS_RANDOM_DEFAULT
 
 #ifdef DEBUG
+extern int xfs_error_test_active;
 extern int xfs_error_test(int, int *, char *, int, char *, unsigned long);
 
 #define	XFS_NUM_INJECT_ERROR				10
 #define XFS_TEST_ERROR(expr, mp, tag, rf)		\
-	((expr) || \
+	((expr) || (xfs_error_test_active && \
 	 xfs_error_test((tag), (mp)->m_fixedfsid, "expr", __LINE__, __FILE__, \
-			(rf)))
+			(rf))))
 
-extern int xfs_errortag_add(int error_tag, xfs_mount_t *mp);
-extern int xfs_errortag_clearall(xfs_mount_t *mp, int loud);
+extern int xfs_errortag_add(int error_tag, struct xfs_mount *mp);
+extern int xfs_errortag_clearall(struct xfs_mount *mp, int loud);
 #else
 #define XFS_TEST_ERROR(expr, mp, tag, rf)	(expr)
 #define xfs_errortag_add(tag, mp)		(ENOSYS)
@@ -143,10 +137,8 @@ extern int xfs_errortag_clearall(xfs_mount_t *mp, int loud);
 #endif /* DEBUG */
 
 /*
- * XFS panic tags -- allow a call to xfs_cmn_err() be turned into
- *			a panic by setting xfs_panic_mask in a
- *			sysctl.  update xfs_max[XFS_PARAM] if
- *			more are added.
+ * XFS panic tags -- allow a call to xfs_alert_tag() be turned into
+ *			a panic by setting xfs_panic_mask in a sysctl.
  */
 #define		XFS_NO_PTAG			0
 #define		XFS_PTAG_IFLUSH			0x00000001
@@ -157,24 +149,5 @@ extern int xfs_errortag_clearall(xfs_mount_t *mp, int loud);
 #define		XFS_PTAG_SHUTDOWN_IOERROR	0x00000020
 #define		XFS_PTAG_SHUTDOWN_LOGERROR	0x00000040
 #define		XFS_PTAG_FSBLOCK_ZERO		0x00000080
-
-struct xfs_mount;
-
-extern void xfs_fs_vcmn_err(int level, struct xfs_mount *mp,
-		char *fmt, va_list ap)
-	__attribute__ ((format (printf, 3, 0)));
-extern void xfs_cmn_err(int panic_tag, int level, struct xfs_mount *mp,
-			char *fmt, ...)
-	__attribute__ ((format (printf, 4, 5)));
-extern void xfs_fs_cmn_err(int level, struct xfs_mount *mp, char *fmt, ...)
-	__attribute__ ((format (printf, 3, 4)));
-
-extern void xfs_hex_dump(void *p, int length);
-
-#define xfs_fs_repair_cmn_err(level, mp, fmt, args...) \
-	xfs_fs_cmn_err(level, mp, fmt "  Unmount and run xfs_repair.", ## args)
-
-#define xfs_fs_mount_cmn_err(f, fmt, args...) \
-	((f & XFS_MFSI_QUIET)? (void)0 : cmn_err(CE_WARN, "XFS: " fmt, ## args))
 
 #endif	/* __XFS_ERROR_H__ */

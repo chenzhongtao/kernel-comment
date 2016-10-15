@@ -19,16 +19,12 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * along with GNU CC; see the file COPYING.  If not, see
+ * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *   La Monte H.P. Yarroll <piggy@acm.org>
@@ -39,9 +35,6 @@
  *   Xingang Guo           <xingang.guo@intel.com>
  *   Sridhar Samudrala     <samudrala@us.ibm.com>
  *   Daisy Chang           <daisyc@us.ibm.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
 
 #ifndef __sctp_constants_h__
@@ -49,7 +42,6 @@
 
 #include <linux/sctp.h>
 #include <linux/ipv6.h> /* For ipv6hdr. */
-#include <net/sctp/user.h>
 #include <net/tcp_states.h>  /* For TCP states used in sctp_sock_state_t */
 
 /* Value used for stream negotiation. */
@@ -61,7 +53,6 @@ enum { SCTP_DEFAULT_INSTREAMS = SCTP_MAX_STREAM };
  * symbols.  CIDs are dense through SCTP_CID_BASE_MAX.
  */
 #define SCTP_CID_BASE_MAX		SCTP_CID_SHUTDOWN_COMPLETE
-#define SCTP_CID_MAX			SCTP_CID_ASCONF_ACK
 
 #define SCTP_NUM_BASE_CHUNK_TYPES	(SCTP_CID_BASE_MAX + 1)
 
@@ -85,9 +76,6 @@ typedef enum {
 	SCTP_EVENT_T_PRIMITIVE
 
 } sctp_event_t;
-
-#define SCTP_EVENT_T_MAX SCTP_EVENT_T_PRIMITIVE
-#define SCTP_EVENT_T_NUM (SCTP_EVENT_T_MAX + 1)
 
 /* As a convenience for the state machine, we append SCTP_EVENT_* and
  * SCTP_ULP_* to the list of possible chunks.
@@ -154,16 +142,12 @@ SCTP_SUBTYPE_CONSTRUCTOR(OTHER,		sctp_event_other_t,	other)
 SCTP_SUBTYPE_CONSTRUCTOR(PRIMITIVE,	sctp_event_primitive_t,	primitive)
 
 
-#define sctp_chunk_is_control(a) (a->chunk_hdr->type != SCTP_CID_DATA)
 #define sctp_chunk_is_data(a) (a->chunk_hdr->type == SCTP_CID_DATA)
 
 /* Calculate the actual data size in a data chunk */
 #define SCTP_DATA_SNDSIZE(c) ((int)((unsigned long)(c->chunk_end)\
 		       		- (unsigned long)(c->chunk_hdr)\
 				- sizeof(sctp_data_chunk_t)))
-
-#define SCTP_MAX_ERROR_CAUSE  SCTP_ERROR_NONEXIST_IP
-#define SCTP_NUM_ERROR_CAUSE  10
 
 /* Internal error codes */
 typedef enum {
@@ -195,15 +179,14 @@ typedef enum {
 /* SCTP state defines for internal state machine */
 typedef enum {
 
-	SCTP_STATE_EMPTY		= 0,
-	SCTP_STATE_CLOSED		= 1,
-	SCTP_STATE_COOKIE_WAIT		= 2,
-	SCTP_STATE_COOKIE_ECHOED	= 3,
-	SCTP_STATE_ESTABLISHED		= 4,
-	SCTP_STATE_SHUTDOWN_PENDING	= 5,
-	SCTP_STATE_SHUTDOWN_SENT	= 6,
-	SCTP_STATE_SHUTDOWN_RECEIVED	= 7,
-	SCTP_STATE_SHUTDOWN_ACK_SENT	= 8,
+	SCTP_STATE_CLOSED		= 0,
+	SCTP_STATE_COOKIE_WAIT		= 1,
+	SCTP_STATE_COOKIE_ECHOED	= 2,
+	SCTP_STATE_ESTABLISHED		= 3,
+	SCTP_STATE_SHUTDOWN_PENDING	= 4,
+	SCTP_STATE_SHUTDOWN_SENT	= 5,
+	SCTP_STATE_SHUTDOWN_RECEIVED	= 6,
+	SCTP_STATE_SHUTDOWN_ACK_SENT	= 7,
 
 } sctp_state_t;
 
@@ -266,7 +249,6 @@ enum { SCTP_ARBITRARY_COOKIE_ECHO_LEN = 200 };
 #define SCTP_TSN_MAP_INITIAL BITS_PER_LONG
 #define SCTP_TSN_MAP_INCREMENT SCTP_TSN_MAP_INITIAL
 #define SCTP_TSN_MAP_SIZE 4096
-#define SCTP_TSN_MAX_GAP  65535
 
 /* We will not record more than this many duplicate TSNs between two
  * SACKs.  The minimum PMTU is 576.  Remove all the headers and there
@@ -301,21 +283,19 @@ enum { SCTP_MAX_GABS = 16 };
 
 #define SCTP_CLOCK_GRANULARITY	1	/* 1 jiffy */
 
-#define SCTP_DEF_MAX_INIT 6
-#define SCTP_DEF_MAX_SEND 10
-
 #define SCTP_DEFAULT_COOKIE_LIFE	(60 * 1000) /* 60 seconds */
 
 #define SCTP_DEFAULT_MINWINDOW	1500	/* default minimum rwnd size */
 #define SCTP_DEFAULT_MAXWINDOW	65535	/* default rwnd size */
+#define SCTP_DEFAULT_RWND_SHIFT  4	/* by default, update on 1/16 of
+					 * rcvbuf, which is 1/8 of initial
+					 * window
+					 */
 #define SCTP_DEFAULT_MAXSEGMENT 1500	/* MTU size, this is the limit
                                          * to which we will raise the P-MTU.
 					 */
 #define SCTP_DEFAULT_MINSEGMENT 512	/* MTU size ... if no mtu disc */
-#define SCTP_HOW_MANY_SECRETS 2		/* How many secrets I keep */
-#define SCTP_HOW_LONG_COOKIE_LIVE 3600	/* How many seconds the current
-					 * secret will live?
-					 */
+
 #define SCTP_SECRET_SIZE 32		/* Number of octets in a 256 bits. */
 
 #define SCTP_SIGNATURE_SIZE 20	        /* size of a SLA-1 signature */
@@ -324,14 +304,6 @@ enum { SCTP_MAX_GABS = 16 };
 				 * functions simpler to write.
 				 */
 
-#if defined (CONFIG_SCTP_HMAC_MD5)
-#define SCTP_COOKIE_HMAC_ALG "hmac(md5)"
-#elif defined (CONFIG_SCTP_HMAC_SHA1)
-#define SCTP_COOKIE_HMAC_ALG "hmac(sha1)"
-#else
-#define SCTP_COOKIE_HMAC_ALG NULL
-#endif
-
 /* These return values describe the success or failure of a number of
  * routines which form the lower interface to SCTP_outqueue.
  */
@@ -339,13 +311,14 @@ typedef enum {
 	SCTP_XMIT_OK,
 	SCTP_XMIT_PMTU_FULL,
 	SCTP_XMIT_RWND_FULL,
-	SCTP_XMIT_NAGLE_DELAY,
+	SCTP_XMIT_DELAY,
 } sctp_xmit_t;
 
 /* These are the commands for manipulating transports.  */
 typedef enum {
 	SCTP_TRANSPORT_UP,
 	SCTP_TRANSPORT_DOWN,
+	SCTP_TRANSPORT_PF,
 } sctp_transport_cmd_t;
 
 /* These are the address scopes defined mainly for IPv4 addresses

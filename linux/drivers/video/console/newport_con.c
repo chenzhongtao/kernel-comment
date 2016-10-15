@@ -6,7 +6,7 @@
  * 
  * This driver is based on sgicons.c and cons_newport.
  * 
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1997 Miguel de Icaza (miguel@nuclecu.unam.mx)
  */
 #include <linux/init.h>
@@ -22,16 +22,14 @@
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
+#include <asm/gio_device.h>
+
 #include <video/newport.h>
 
 #include <linux/linux_logo.h>
 #include <linux/font.h>
-
-
-extern unsigned long sgi_gfxaddr;
 
 #define FONT_DATA ((unsigned char *)font_vga_8x16.data)
 
@@ -299,17 +297,11 @@ static void newport_exit(void)
 		newport_set_def_font(i, NULL);
 }
 
-/* Can't be __init, take_over_console may call it later */
+/* Can't be __init, do_take_over_console may call it later */
 static const char *newport_startup(void)
 {
 	int i;
 
-	if (!sgi_gfxaddr)
-		return NULL;
-
-	if (!npregs)
-		npregs = (struct newport_regs *)/* ioremap cannot fail */
-			ioremap(sgi_gfxaddr, sizeof(struct newport_regs));
 	npregs->cset.config = NPORT_CFG_GD0;
 
 	if (newport_wait(npregs))
@@ -335,9 +327,16 @@ out_unmap:
 
 static void newport_init(struct vc_data *vc, int init)
 {
-	vc->vc_cols = newport_xsize / 8;
-	vc->vc_rows = newport_ysize / 16;
+	int cols, rows;
+
+	cols = newport_xsize / 8;
+	rows = newport_ysize / 16;
 	vc->vc_can_do_color = 1;
+	if (init) {
+		vc->vc_cols = cols;
+		vc->vc_rows = rows;
+	} else
+		vc_resize(vc, cols, rows);
 }
 
 static void newport_deinit(struct vc_data *c)
@@ -688,7 +687,7 @@ static int newport_scroll(struct vc_data *vc, int t, int b, int dir,
 static void newport_bmove(struct vc_data *vc, int sy, int sx, int dy,
 			  int dx, int h, int w)
 {
-	short xs, ys, xe, ye, xoffs, yoffs, tmp;
+	short xs, ys, xe, ye, xoffs, yoffs;
 
 	xs = sx << 3;
 	xe = ((sx + w) << 3) - 1;
@@ -702,9 +701,7 @@ static void newport_bmove(struct vc_data *vc, int sy, int sx, int dy,
 	yoffs = (dy - sy) << 4;
 	if (xoffs > 0) {
 		/* move to the right, exchange starting points */
-		tmp = xe;
-		xe = xs;
-		xs = tmp;
+		swap(xe, xs);
 	}
 	newport_wait(npregs);
 	npregs->set.drawmode0 = (NPORT_DMODE0_S2S | NPORT_DMODE0_BLOCK |
@@ -743,26 +740,61 @@ const struct consw newport_con = {
 	.con_save_screen  = DUMMY
 };
 
-#ifdef MODULE
-static int __init newport_console_init(void)
+static int newport_probe(struct gio_device *dev,
+			 const struct gio_device_id *id)
 {
-	if (!sgi_gfxaddr)
-		return 0;
+	unsigned long newport_addr;
+	int err;
 
-	if (!npregs)
-		npregs = (struct newport_regs *)/* ioremap cannot fail */
-			ioremap(sgi_gfxaddr, sizeof(struct newport_regs));
+	if (!dev->resource.start)
+		return -EINVAL;
 
-	return take_over_console(&newport_con, 0, MAX_NR_CONSOLES - 1, 1);
+	if (npregs)
+		return -EBUSY; /* we only support one Newport as console */
+
+	newport_addr = dev->resource.start + 0xF0000;
+	if (!request_mem_region(newport_addr, 0x10000, "Newport"))
+		return -ENODEV;
+
+	npregs = (struct newport_regs *)/* ioremap cannot fail */
+		ioremap(newport_addr, sizeof(struct newport_regs));
+	console_lock();
+	err = do_take_over_console(&newport_con, 0, MAX_NR_CONSOLES - 1, 1);
+	console_unlock();
+	return err;
 }
-module_init(newport_console_init);
 
-static void __exit newport_console_exit(void)
+static void newport_remove(struct gio_device *dev)
 {
 	give_up_console(&newport_con);
 	iounmap((void *)npregs);
 }
+
+static struct gio_device_id newport_ids[] = {
+	{ .id = 0x7e },
+	{ .id = 0xff }
+};
+
+MODULE_ALIAS("gio:7e");
+
+static struct gio_driver newport_driver = {
+	.name = "newport",
+	.id_table = newport_ids,
+	.probe = newport_probe,
+	.remove = newport_remove,
+};
+
+int __init newport_console_init(void)
+{
+	return gio_register_driver(&newport_driver);
+}
+
+void __exit newport_console_exit(void)
+{
+	gio_unregister_driver(&newport_driver);
+}
+
+module_init(newport_console_init);
 module_exit(newport_console_exit);
-#endif
 
 MODULE_LICENSE("GPL");

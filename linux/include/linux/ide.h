@@ -14,20 +14,14 @@
 #include <linux/interrupt.h>
 #include <linux/bitops.h>
 #include <linux/bio.h>
-#include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/completion.h>
 #include <linux/pm.h>
-#ifdef CONFIG_BLK_DEV_IDEACPI
-#include <acpi/acpi.h>
-#endif
-#include <asm/byteorder.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/mutex.h>
-
+#include <linux/mutex.h>
 /* for request_sense */
 #include <linux/cdrom.h>
+#include <asm/byteorder.h>
+#include <asm/io.h>
 
 #if defined(CONFIG_CRIS) || defined(CONFIG_FRV) || defined(CONFIG_MN10300)
 # define SUPPORT_VLB_SYNC 0
@@ -42,6 +36,21 @@
 #define ERROR_MAX	8	/* Max read/write errors per sector */
 #define ERROR_RESET	3	/* Reset controller every 4th retry */
 #define ERROR_RECAL	1	/* Recalibrate every 2nd retry */
+
+struct device;
+
+/* IDE-specific values for req->cmd_type */
+enum ata_cmd_type_bits {
+	REQ_TYPE_ATA_TASKFILE = REQ_TYPE_DRV_PRIV + 1,
+	REQ_TYPE_ATA_PC,
+	REQ_TYPE_ATA_SENSE,	/* sense request */
+	REQ_TYPE_ATA_PM_SUSPEND,/* suspend request */
+	REQ_TYPE_ATA_PM_RESUME,	/* resume request */
+};
+
+#define ata_pm_request(rq)	\
+	((rq)->cmd_type == REQ_TYPE_ATA_PM_SUSPEND || \
+	 (rq)->cmd_type == REQ_TYPE_ATA_PM_RESUME)
 
 /* Error codes returned in rq->errors to the higher part of the driver. */
 enum {
@@ -125,8 +134,8 @@ struct ide_io_ports {
  * Timeouts for various operations:
  */
 enum {
-	/* spec allows up to 20ms */
-	WAIT_DRQ	= HZ / 10,	/* 100ms */
+	/* spec allows up to 20ms, but CF cards and SSD drives need more */
+	WAIT_DRQ	= 1 * HZ,	/* 1s */
 	/* some laptops are very slow */
 	WAIT_READY	= 5 * HZ,	/* 5s */
 	/* should be less than 3ms (?), if all ATAPI CD is closed at boot */
@@ -362,7 +371,7 @@ struct ide_drive_s;
 struct ide_disk_ops {
 	int		(*check)(struct ide_drive_s *, const char *);
 	int		(*get_capacity)(struct ide_drive_s *);
-	u64		(*set_capacity)(struct ide_drive_s *, u64);
+	void		(*unlock_native_capacity)(struct ide_drive_s *);
 	void		(*setup)(struct ide_drive_s *);
 	void		(*flush)(struct ide_drive_s *);
 	int		(*init_media)(struct ide_drive_s *, struct gendisk *);
@@ -458,7 +467,7 @@ enum {
 	IDE_DFLAG_DOORLOCKING		= (1 << 15),
 	/* disallow DMA */
 	IDE_DFLAG_NODMA			= (1 << 16),
-	/* powermanagment told us not to do anything, so sleep nicely */
+	/* powermanagement told us not to do anything, so sleep nicely */
 	IDE_DFLAG_BLOCKED		= (1 << 17),
 	/* sleeping & sleep field valid */
 	IDE_DFLAG_SLEEPING		= (1 << 18),
@@ -515,7 +524,9 @@ struct ide_drive_s {
         u8	init_speed;	/* transfer rate set at boot */
         u8	current_speed;	/* current transfer rate set */
 	u8	desired_speed;	/* desired transfer rate set */
-        u8	dn;		/* now wide spread use */
+	u8	pio_mode;	/* for ->set_pio_mode _only_ */
+	u8	dma_mode;	/* for ->set_dma_mode _only_ */
+	u8	dn;		/* now wide spread use */
 	u8	acoustic;	/* acoustic management */
 	u8	media;		/* disk, cdrom, tape, floppy, ... */
 	u8	ready_stat;	/* min status value for drive ready */
@@ -622,8 +633,8 @@ extern const struct ide_tp_ops default_tp_ops;
  */
 struct ide_port_ops {
 	void	(*init_dev)(ide_drive_t *);
-	void	(*set_pio_mode)(ide_drive_t *, const u8);
-	void	(*set_dma_mode)(ide_drive_t *, const u8);
+	void	(*set_pio_mode)(struct hwif_s *, ide_drive_t *);
+	void	(*set_dma_mode)(struct hwif_s *, ide_drive_t *);
 	int	(*reset_poll)(ide_drive_t *);
 	void	(*pre_reset)(ide_drive_t *);
 	void	(*resetproc)(ide_drive_t *);
@@ -918,7 +929,7 @@ __IDE_PROC_DEVSET(_name, _min, _max, NULL, NULL)
 
 typedef struct {
 	const char	*name;
-	mode_t		mode;
+	umode_t		mode;
 	const struct file_operations *proc_fops;
 } ide_proc_entry_t;
 
@@ -1167,6 +1178,7 @@ extern void ide_stall_queue(ide_drive_t *drive, unsigned long timeout);
 extern void ide_timer_expiry(unsigned long);
 extern irqreturn_t ide_intr(int irq, void *dev_id);
 extern void do_ide_request(struct request_queue *);
+extern void ide_requeue_and_plug(ide_drive_t *drive, struct request *rq);
 
 void ide_init_disk(struct gendisk *, ide_drive_t *);
 
@@ -1314,6 +1326,19 @@ struct ide_port_info {
 	u8			mwdma_mask;
 	u8			udma_mask;
 };
+
+/*
+ * State information carried for REQ_TYPE_ATA_PM_SUSPEND and REQ_TYPE_ATA_PM_RESUME
+ * requests.
+ */
+struct ide_pm_state {
+	/* PM state machine step value, currently driver specific */
+	int	pm_step;
+	/* requested PM state value (S1, S2, S3, S4, ...) */
+	u32	pm_state;
+	void*	data;		/* for driver use */
+};
+
 
 int ide_pci_init_one(struct pci_dev *, const struct ide_port_info *, void *);
 int ide_pci_init_two(struct pci_dev *, struct pci_dev *,
@@ -1494,7 +1519,6 @@ int ide_timing_compute(ide_drive_t *, u8, struct ide_timing *, int, int);
 #ifdef CONFIG_IDE_XFER_MODE
 int ide_scan_pio_blacklist(char *);
 const char *ide_xfer_verbose(u8);
-u8 ide_get_best_pio_mode(ide_drive_t *, u8, u8);
 int ide_pio_need_iordy(ide_drive_t *, const u8);
 int ide_set_pio_mode(ide_drive_t *, u8);
 int ide_set_dma_mode(ide_drive_t *, u8);
@@ -1512,7 +1536,7 @@ static inline void ide_set_max_pio(ide_drive_t *drive)
 
 char *ide_media_string(ide_drive_t *);
 
-extern struct device_attribute ide_dev_attrs[];
+extern const struct attribute_group *ide_dev_groups[];
 extern struct bus_type ide_bus_type;
 extern struct class *ide_port_class;
 
@@ -1552,5 +1576,6 @@ static inline void ide_set_drivedata(ide_drive_t *drive, void *data)
 
 #define ide_host_for_each_port(i, port, host) \
 	for ((i) = 0; ((port) = (host)->ports[i]) || (i) < MAX_HOST_PORTS; (i)++)
+
 
 #endif /* _IDE_H */

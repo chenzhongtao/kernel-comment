@@ -161,7 +161,7 @@
  *
  * 2003/02/12 - Christoph Hellwig <hch@infradead.org>
  *
- * Cleaned up host template defintion
+ * Cleaned up host template definition
  * Removed now obsolete wd7000.h
  */
 
@@ -171,7 +171,6 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/ioport.h>
 #include <linux/proc_fs.h>
@@ -180,7 +179,6 @@
 #include <linux/stat.h>
 #include <linux/io.h>
 
-#include <asm/system.h>
 #include <asm/dma.h>
 
 #include <scsi/scsi.h>
@@ -838,7 +836,7 @@ static inline Scb *alloc_scbs(struct Scsi_Host *host, int needed)
 		}
 	}
 
-	/* Take the lock, then check we didnt get beaten, if so try again */
+	/* Take the lock, then check we didn't get beaten, if so try again */
 	spin_lock_irqsave(&scbpool_lock, flags);
 	if (freescbs < needed) {
 		spin_unlock_irqrestore(&scbpool_lock, flags);
@@ -1083,7 +1081,7 @@ static irqreturn_t wd7000_intr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int wd7000_queuecommand(struct scsi_cmnd *SCpnt,
+static int wd7000_queuecommand_lck(struct scsi_cmnd *SCpnt,
 		void (*done)(struct scsi_cmnd *))
 {
 	Scb *scb;
@@ -1139,6 +1137,8 @@ static int wd7000_queuecommand(struct scsi_cmnd *SCpnt,
 
 	return 0;
 }
+
+static DEF_SCSI_QCMD(wd7000_queuecommand)
 
 static int wd7000_diagnostics(Adapter * host, int code)
 {
@@ -1252,7 +1252,7 @@ static int wd7000_init(Adapter * host)
 		return 0;
 
 
-	if (request_irq(host->irq, wd7000_intr, IRQF_DISABLED, "wd7000", host)) {
+	if (request_irq(host->irq, wd7000_intr, 0, "wd7000", host)) {
 		printk("wd7000_init: can't get IRQ %d.\n", host->irq);
 		return (0);
 	}
@@ -1295,10 +1295,7 @@ static void wd7000_revision(Adapter * host)
 }
 
 
-#undef SPRINTF
-#define SPRINTF(args...) { if (pos < (buffer + length)) pos += sprintf (pos, ## args); }
-
-static int wd7000_set_info(char *buffer, int length, struct Scsi_Host *host)
+static int wd7000_set_info(struct Scsi_Host *host, char *buffer, int length)
 {
 	dprintk("Buffer = <%.*s>, length = %d\n", length, buffer, length);
 
@@ -1310,75 +1307,58 @@ static int wd7000_set_info(char *buffer, int length, struct Scsi_Host *host)
 }
 
 
-static int wd7000_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset, int length,  int inout)
+static int wd7000_show_info(struct seq_file *m, struct Scsi_Host *host)
 {
 	Adapter *adapter = (Adapter *)host->hostdata;
 	unsigned long flags;
-	char *pos = buffer;
 #ifdef WD7000_DEBUG
 	Mailbox *ogmbs, *icmbs;
 	short count;
 #endif
 
-	/*
-	 * Has data been written to the file ?
-	 */
-	if (inout)
-		return (wd7000_set_info(buffer, length, host));
-
 	spin_lock_irqsave(host->host_lock, flags);
-	SPRINTF("Host scsi%d: Western Digital WD-7000 (rev %d.%d)\n", host->host_no, adapter->rev1, adapter->rev2);
-	SPRINTF("  IO base:      0x%x\n", adapter->iobase);
-	SPRINTF("  IRQ:          %d\n", adapter->irq);
-	SPRINTF("  DMA channel:  %d\n", adapter->dma);
-	SPRINTF("  Interrupts:   %d\n", adapter->int_counter);
-	SPRINTF("  BUS_ON time:  %d nanoseconds\n", adapter->bus_on * 125);
-	SPRINTF("  BUS_OFF time: %d nanoseconds\n", adapter->bus_off * 125);
+	seq_printf(m, "Host scsi%d: Western Digital WD-7000 (rev %d.%d)\n", host->host_no, adapter->rev1, adapter->rev2);
+	seq_printf(m, "  IO base:      0x%x\n", adapter->iobase);
+	seq_printf(m, "  IRQ:          %d\n", adapter->irq);
+	seq_printf(m, "  DMA channel:  %d\n", adapter->dma);
+	seq_printf(m, "  Interrupts:   %d\n", adapter->int_counter);
+	seq_printf(m, "  BUS_ON time:  %d nanoseconds\n", adapter->bus_on * 125);
+	seq_printf(m, "  BUS_OFF time: %d nanoseconds\n", adapter->bus_off * 125);
 
 #ifdef WD7000_DEBUG
 	ogmbs = adapter->mb.ogmb;
 	icmbs = adapter->mb.icmb;
 
-	SPRINTF("\nControl port value: 0x%x\n", adapter->control);
-	SPRINTF("Incoming mailbox:\n");
-	SPRINTF("  size: %d\n", ICMB_CNT);
-	SPRINTF("  queued messages: ");
+	seq_printf(m, "\nControl port value: 0x%x\n", adapter->control);
+	seq_puts(m, "Incoming mailbox:\n");
+	seq_printf(m, "  size: %d\n", ICMB_CNT);
+	seq_puts(m, "  queued messages: ");
 
 	for (i = count = 0; i < ICMB_CNT; i++)
 		if (icmbs[i].status) {
 			count++;
-			SPRINTF("0x%x ", i);
+			seq_printf(m, "0x%x ", i);
 		}
 
-	SPRINTF(count ? "\n" : "none\n");
+	seq_puts(m, count ? "\n" : "none\n");
 
-	SPRINTF("Outgoing mailbox:\n");
-	SPRINTF("  size: %d\n", OGMB_CNT);
-	SPRINTF("  next message: 0x%x\n", adapter->next_ogmb);
-	SPRINTF("  queued messages: ");
+	seq_puts(m, "Outgoing mailbox:\n");
+	seq_printf(m, "  size: %d\n", OGMB_CNT);
+	seq_printf(m, "  next message: 0x%x\n", adapter->next_ogmb);
+	seq_puts(m, "  queued messages: ");
 
 	for (i = count = 0; i < OGMB_CNT; i++)
 		if (ogmbs[i].status) {
 			count++;
-			SPRINTF("0x%x ", i);
+			seq_printf(m, "0x%x ", i);
 		}
 
-	SPRINTF(count ? "\n" : "none\n");
+	seq_puts(m, count ? "\n" : "none\n");
 #endif
 
 	spin_unlock_irqrestore(host->host_lock, flags);
 
-	/*
-	 * Calculate start of next buffer, and return value.
-	 */
-	*start = buffer + offset;
-
-	if ((pos - buffer) < offset)
-		return (0);
-	else if ((pos - buffer - offset) < length)
-		return (pos - buffer - offset);
-	else
-		return (length);
+	return 0;
 }
 
 
@@ -1413,7 +1393,8 @@ static __init int wd7000_detect(struct scsi_host_template *tpnt)
 	for (i = 0; i < NUM_CONFIGS; biosptr[i++] = -1);
 
 	tpnt->proc_name = "wd7000";
-	tpnt->proc_info = &wd7000_proc_info;
+	tpnt->show_info = &wd7000_show_info;
+	tpnt->write_info = wd7000_set_info;
 
 	/*
 	 * Set up SCB free list, which is shared by all adapters
@@ -1588,7 +1569,7 @@ static int wd7000_host_reset(struct scsi_cmnd *SCpnt)
 {
 	Adapter *host = (Adapter *) SCpnt->device->host->hostdata;
 
-	spin_unlock_irq(SCpnt->device->host->host_lock);
+	spin_lock_irq(SCpnt->device->host->host_lock);
 
 	if (wd7000_adapter_reset(host) < 0) {
 		spin_unlock_irq(SCpnt->device->host->host_lock);
@@ -1658,7 +1639,8 @@ MODULE_LICENSE("GPL");
 
 static struct scsi_host_template driver_template = {
 	.proc_name		= "wd7000",
-	.proc_info		= wd7000_proc_info,
+	.show_info		= wd7000_show_info,
+	.write_info		= wd7000_set_info,
 	.name			= "Western Digital WD-7000",
 	.detect			= wd7000_detect,
 	.release		= wd7000_release,
@@ -1668,7 +1650,6 @@ static struct scsi_host_template driver_template = {
 	.can_queue		= WD7000_Q,
 	.this_id		= 7,
 	.sg_tablesize		= WD7000_SG,
-	.cmd_per_lun		= 1,
 	.unchecked_isa_dma	= 1,
 	.use_clustering		= ENABLE_CLUSTERING,
 };

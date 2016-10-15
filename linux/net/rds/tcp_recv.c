@@ -31,6 +31,7 @@
  *
  */
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <net/tcp.h>
 
 #include "rds.h"
@@ -38,7 +39,7 @@
 
 static struct kmem_cache *rds_tcp_incoming_slab;
 
-void rds_tcp_inc_purge(struct rds_incoming *inc)
+static void rds_tcp_inc_purge(struct rds_incoming *inc)
 {
 	struct rds_tcp_incoming *tinc;
 	tinc = container_of(inc, struct rds_tcp_incoming, ti_inc);
@@ -58,49 +59,30 @@ void rds_tcp_inc_free(struct rds_incoming *inc)
 /*
  * this is pretty lame, but, whatever.
  */
-int rds_tcp_inc_copy_to_user(struct rds_incoming *inc, struct iovec *first_iov,
-			     size_t size)
+int rds_tcp_inc_copy_to_user(struct rds_incoming *inc, struct iov_iter *to)
 {
 	struct rds_tcp_incoming *tinc;
-	struct iovec *iov, tmp;
 	struct sk_buff *skb;
-	unsigned long to_copy, skb_off;
 	int ret = 0;
 
-	if (size == 0)
+	if (!iov_iter_count(to))
 		goto out;
 
 	tinc = container_of(inc, struct rds_tcp_incoming, ti_inc);
-	iov = first_iov;
-	tmp = *iov;
 
 	skb_queue_walk(&tinc->ti_skb_list, skb) {
-		skb_off = 0;
-		while (skb_off < skb->len) {
-			while (tmp.iov_len == 0) {
-				iov++;
-				tmp = *iov;
-			}
-
-			to_copy = min(tmp.iov_len, size);
+		unsigned long to_copy, skb_off;
+		for (skb_off = 0; skb_off < skb->len; skb_off += to_copy) {
+			to_copy = iov_iter_count(to);
 			to_copy = min(to_copy, skb->len - skb_off);
 
-			rdsdebug("ret %d size %zu skb %p skb_off %lu "
-				 "skblen %d iov_base %p iov_len %zu cpy %lu\n",
-				 ret, size, skb, skb_off, skb->len,
-				 tmp.iov_base, tmp.iov_len, to_copy);
+			if (skb_copy_datagram_iter(skb, skb_off, to, to_copy))
+				return -EFAULT;
 
-			/* modifies tmp as it copies */
-			if (skb_copy_datagram_iovec(skb, skb_off, &tmp,
-						    to_copy)) {
-				ret = -EFAULT;
-				goto out;
-			}
-
-			size -= to_copy;
+			rds_stats_add(s_copy_to_user, to_copy);
 			ret += to_copy;
-			skb_off += to_copy;
-			if (size == 0)
+
+			if (!iov_iter_count(to))
 				goto out;
 		}
 	}
@@ -167,7 +149,6 @@ static void rds_tcp_cong_recv(struct rds_connection *conn,
 struct rds_tcp_desc_arg {
 	struct rds_connection *conn;
 	gfp_t gfp;
-	enum km_type km;
 };
 
 static int rds_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,
@@ -188,10 +169,10 @@ static int rds_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,
 	 * processing.
 	 */
 	while (left) {
-		if (tinc == NULL) {
+		if (!tinc) {
 			tinc = kmem_cache_alloc(rds_tcp_incoming_slab,
 					        arg->gfp);
-			if (tinc == NULL) {
+			if (!tinc) {
 				desc->error = -ENOMEM;
 				goto out;
 			}
@@ -227,14 +208,21 @@ static int rds_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,
 
 		if (left && tc->t_tinc_data_rem) {
 			clone = skb_clone(skb, arg->gfp);
-			if (clone == NULL) {
+			if (!clone) {
 				desc->error = -ENOMEM;
 				goto out;
 			}
 
 			to_copy = min(tc->t_tinc_data_rem, left);
-			pskb_pull(clone, offset);
-			pskb_trim(clone, to_copy);
+			if (!pskb_pull(clone, offset) ||
+			    pskb_trim(clone, to_copy)) {
+				pr_warn("rds_tcp_data_recv: pull/trim failed "
+					"left %zu data_rem %zu skb_len %d\n",
+					left, tc->t_tinc_data_rem, skb->len);
+				kfree_skb(clone);
+				desc->error = -ENOMEM;
+				goto out;
+			}
 			skb_queue_tail(&tinc->ti_skb_list, clone);
 
 			rdsdebug("skb %p data %p len %d off %u to_copy %zu -> "
@@ -253,7 +241,7 @@ static int rds_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,
 			else
 				rds_recv_incoming(conn, conn->c_faddr,
 						  conn->c_laddr, &tinc->ti_inc,
-						  arg->gfp, arg->km);
+						  arg->gfp);
 
 			tc->t_tinc_hdr_rem = sizeof(struct rds_header);
 			tc->t_tinc_data_rem = 0;
@@ -270,7 +258,7 @@ out:
 }
 
 /* the caller has to hold the sock lock */
-int rds_tcp_read_sock(struct rds_connection *conn, gfp_t gfp, enum km_type km)
+static int rds_tcp_read_sock(struct rds_connection *conn, gfp_t gfp)
 {
 	struct rds_tcp_connection *tc = conn->c_transport_data;
 	struct socket *sock = tc->t_sock;
@@ -280,7 +268,6 @@ int rds_tcp_read_sock(struct rds_connection *conn, gfp_t gfp, enum km_type km)
 	/* It's like glib in the kernel! */
 	arg.conn = conn;
 	arg.gfp = gfp;
-	arg.km = km;
 	desc.arg.data = &arg;
 	desc.error = 0;
 	desc.count = 1; /* give more than one skb per call */
@@ -308,23 +295,23 @@ int rds_tcp_recv(struct rds_connection *conn)
 	rdsdebug("recv worker conn %p tc %p sock %p\n", conn, tc, sock);
 
 	lock_sock(sock->sk);
-	ret = rds_tcp_read_sock(conn, GFP_KERNEL, KM_USER0);
+	ret = rds_tcp_read_sock(conn, GFP_KERNEL);
 	release_sock(sock->sk);
 
 	return ret;
 }
 
-void rds_tcp_data_ready(struct sock *sk, int bytes)
+void rds_tcp_data_ready(struct sock *sk)
 {
-	void (*ready)(struct sock *sk, int bytes);
+	void (*ready)(struct sock *sk);
 	struct rds_connection *conn;
 	struct rds_tcp_connection *tc;
 
-	rdsdebug("data ready sk %p bytes %d\n", sk, bytes);
+	rdsdebug("data ready sk %p\n", sk);
 
 	read_lock(&sk->sk_callback_lock);
 	conn = sk->sk_user_data;
-	if (conn == NULL) { /* check for teardown race */
+	if (!conn) { /* check for teardown race */
 		ready = sk->sk_data_ready;
 		goto out;
 	}
@@ -333,19 +320,19 @@ void rds_tcp_data_ready(struct sock *sk, int bytes)
 	ready = tc->t_orig_data_ready;
 	rds_tcp_stats_inc(s_tcp_data_ready_calls);
 
-	if (rds_tcp_read_sock(conn, GFP_ATOMIC, KM_SOFTIRQ0) == -ENOMEM)
+	if (rds_tcp_read_sock(conn, GFP_ATOMIC) == -ENOMEM)
 		queue_delayed_work(rds_wq, &conn->c_recv_w, 0);
 out:
 	read_unlock(&sk->sk_callback_lock);
-	ready(sk, bytes);
+	ready(sk);
 }
 
-int __init rds_tcp_recv_init(void)
+int rds_tcp_recv_init(void)
 {
 	rds_tcp_incoming_slab = kmem_cache_create("rds_tcp_incoming",
 					sizeof(struct rds_tcp_incoming),
 					0, 0, NULL);
-	if (rds_tcp_incoming_slab == NULL)
+	if (!rds_tcp_incoming_slab)
 		return -ENOMEM;
 	return 0;
 }

@@ -13,12 +13,10 @@
 #include <linux/namei.h>
 #include <linux/quotaops.h>
 #include <linux/buffer_head.h>
-#include <linux/module.h>
 #include <linux/swap.h>
 #include <linux/pagemap.h>
-#include <linux/version.h>
 #include <linux/blkdev.h>
-#include <linux/mutex.h>
+#include <linux/slab.h>
 #include "ext4.h"
 
 struct ext4_system_zone {
@@ -29,16 +27,15 @@ struct ext4_system_zone {
 
 static struct kmem_cache *ext4_system_zone_cachep;
 
-int __init init_ext4_system_zone(void)
+int __init ext4_init_system_zone(void)
 {
-	ext4_system_zone_cachep = KMEM_CACHE(ext4_system_zone,
-					     SLAB_RECLAIM_ACCOUNT);
+	ext4_system_zone_cachep = KMEM_CACHE(ext4_system_zone, 0);
 	if (ext4_system_zone_cachep == NULL)
 		return -ENOMEM;
 	return 0;
 }
 
-void exit_ext4_system_zone(void)
+void ext4_exit_system_zone(void)
 {
 	kmem_cache_destroy(ext4_system_zone_cachep);
 }
@@ -72,9 +69,9 @@ static int add_system_zone(struct ext4_sb_info *sbi,
 		else if (start_blk >= (entry->start_blk + entry->count))
 			n = &(*n)->rb_right;
 		else {
-			if (start_blk + count > (entry->start_blk + 
+			if (start_blk + count > (entry->start_blk +
 						 entry->count))
-				entry->count = (start_blk + count - 
+				entry->count = (start_blk + count -
 						entry->start_blk);
 			new_node = *n;
 			new_entry = rb_entry(new_node, struct ext4_system_zone,
@@ -160,7 +157,7 @@ int ext4_setup_system_zone(struct super_block *sb)
 		if (ext4_bg_has_super(sb, i) &&
 		    ((i < 5) || ((i % flex_size) == 0)))
 			add_system_zone(sbi, ext4_group_first_block_no(sb, i),
-					sbi->s_gdb_count + 1);
+					ext4_bg_num_gdb(sb, i) + 1);
 		gdp = ext4_get_group_desc(sb, i, NULL);
 		ret = add_system_zone(sbi, ext4_block_bitmap(sb, gdp), 1);
 		if (ret)
@@ -182,38 +179,13 @@ int ext4_setup_system_zone(struct super_block *sb)
 /* Called when the filesystem is unmounted */
 void ext4_release_system_zone(struct super_block *sb)
 {
-	struct rb_node	*n = EXT4_SB(sb)->system_blks.rb_node;
-	struct rb_node	*parent;
-	struct ext4_system_zone	*entry;
+	struct ext4_system_zone	*entry, *n;
 
-	while (n) {
-		/* Do the node's children first */
-		if (n->rb_left) {
-			n = n->rb_left;
-			continue;
-		}
-		if (n->rb_right) {
-			n = n->rb_right;
-			continue;
-		}
-		/*
-		 * The node has no children; free it, and then zero
-		 * out parent's link to it.  Finally go to the
-		 * beginning of the loop and try to free the parent
-		 * node.
-		 */
-		parent = rb_parent(n);
-		entry = rb_entry(n, struct ext4_system_zone, node);
+	rbtree_postorder_for_each_entry_safe(entry, n,
+			&EXT4_SB(sb)->system_blks, node)
 		kmem_cache_free(ext4_system_zone_cachep, entry);
-		if (!parent)
-			EXT4_SB(sb)->system_blks.rb_node = NULL;
-		else if (parent->rb_left == n)
-			parent->rb_left = NULL;
-		else if (parent->rb_right == n)
-			parent->rb_right = NULL;
-		n = parent;
-	}
-	EXT4_SB(sb)->system_blks.rb_node = NULL;
+
+	EXT4_SB(sb)->system_blks = RB_ROOT;
 }
 
 /*
@@ -228,17 +200,43 @@ int ext4_data_block_valid(struct ext4_sb_info *sbi, ext4_fsblk_t start_blk,
 	struct rb_node *n = sbi->system_blks.rb_node;
 
 	if ((start_blk <= le32_to_cpu(sbi->s_es->s_first_data_block)) ||
-	    (start_blk + count > ext4_blocks_count(sbi->s_es)))
+	    (start_blk + count < start_blk) ||
+	    (start_blk + count > ext4_blocks_count(sbi->s_es))) {
+		sbi->s_es->s_last_error_block = cpu_to_le64(start_blk);
 		return 0;
+	}
 	while (n) {
 		entry = rb_entry(n, struct ext4_system_zone, node);
 		if (start_blk + count - 1 < entry->start_blk)
 			n = n->rb_left;
 		else if (start_blk >= (entry->start_blk + entry->count))
 			n = n->rb_right;
-		else
+		else {
+			sbi->s_es->s_last_error_block = cpu_to_le64(start_blk);
 			return 0;
+		}
 	}
 	return 1;
+}
+
+int ext4_check_blockref(const char *function, unsigned int line,
+			struct inode *inode, __le32 *p, unsigned int max)
+{
+	struct ext4_super_block *es = EXT4_SB(inode->i_sb)->s_es;
+	__le32 *bref = p;
+	unsigned int blk;
+
+	while (bref < p+max) {
+		blk = le32_to_cpu(*bref++);
+		if (blk &&
+		    unlikely(!ext4_data_block_valid(EXT4_SB(inode->i_sb),
+						    blk, 1))) {
+			es->s_last_error_block = cpu_to_le64(blk);
+			ext4_error_inode(inode, function, line, blk,
+					 "invalid block");
+			return -EFSCORRUPTED;
+		}
+	}
+	return 0;
 }
 

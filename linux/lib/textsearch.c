@@ -13,7 +13,7 @@
  *
  * INTRODUCTION
  *
- *   The textsearch infrastructure provides text searching facitilies for
+ *   The textsearch infrastructure provides text searching facilities for
  *   both linear and non-linear data. Individual search algorithms are
  *   implemented in modules and chosen by the user.
  *
@@ -43,7 +43,7 @@
  *       to the algorithm to store persistent variables.
  *   (4) Core eventually resets the search offset and forwards the find()
  *       request to the algorithm.
- *   (5) Algorithm calls get_next_block() provided by the user continously
+ *   (5) Algorithm calls get_next_block() provided by the user continuously
  *       to fetch the data to be searched in block by block.
  *   (6) Algorithm invokes finish() after the last call to get_next_block
  *       to clean up any leftovers from get_next_block. (Optional)
@@ -58,15 +58,15 @@
  *   the pattern to look for and flags. As a flag, you can set TS_IGNORECASE
  *   to perform case insensitive matching. But it might slow down
  *   performance of algorithm, so you should use it at own your risk.
- *   The returned configuration may then be used for an arbitary
+ *   The returned configuration may then be used for an arbitrary
  *   amount of times and even in parallel as long as a separate struct
  *   ts_state variable is provided to every instance.
  *
  *   The actual search is performed by either calling textsearch_find_-
  *   continuous() for linear data or by providing an own get_next_block()
  *   implementation and calling textsearch_find(). Both functions return
- *   the position of the first occurrence of the patern or UINT_MAX if
- *   no match was found. Subsequent occurences can be found by calling
+ *   the position of the first occurrence of the pattern or UINT_MAX if
+ *   no match was found. Subsequent occurrences can be found by calling
  *   textsearch_next() regardless of the linearity of the data.
  *
  *   Once you're done using a configuration it must be given back via
@@ -103,6 +103,7 @@
 #include <linux/rcupdate.h>
 #include <linux/err.h>
 #include <linux/textsearch.h>
+#include <linux/slab.h>
 
 static LIST_HEAD(ts_ops);
 static DEFINE_SPINLOCK(ts_mod_lock);
@@ -158,6 +159,7 @@ errout:
 	spin_unlock(&ts_mod_lock);
 	return err;
 }
+EXPORT_SYMBOL(textsearch_register);
 
 /**
  * textsearch_unregister - unregister a textsearch module
@@ -189,6 +191,7 @@ out:
 	spin_unlock(&ts_mod_lock);
 	return err;
 }
+EXPORT_SYMBOL(textsearch_unregister);
 
 struct ts_linear_state
 {
@@ -235,6 +238,7 @@ unsigned int textsearch_find_continuous(struct ts_config *conf,
 
 	return textsearch_find(conf, state);
 }
+EXPORT_SYMBOL(textsearch_find_continuous);
 
 /**
  * textsearch_prepare - Prepare a search
@@ -245,9 +249,7 @@ unsigned int textsearch_find_continuous(struct ts_config *conf,
  * @flags: search flags
  *
  * Looks up the search algorithm module and creates a new textsearch
- * configuration for the specified pattern. Upon completion all
- * necessary refcnts are held and the configuration must be put back
- * using textsearch_put() after usage.
+ * configuration for the specified pattern.
  *
  * Note: The format of the pattern may not be compatible between
  *       the various search algorithms.
@@ -297,6 +299,7 @@ errout:
 		
 	return ERR_PTR(err);
 }
+EXPORT_SYMBOL(textsearch_prepare);
 
 /**
  * textsearch_destroy - destroy a search configuration
@@ -315,9 +318,4 @@ void textsearch_destroy(struct ts_config *conf)
 
 	kfree(conf);
 }
-
-EXPORT_SYMBOL(textsearch_register);
-EXPORT_SYMBOL(textsearch_unregister);
-EXPORT_SYMBOL(textsearch_prepare);
-EXPORT_SYMBOL(textsearch_find_continuous);
 EXPORT_SYMBOL(textsearch_destroy);

@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Panasas Inc.  All rights reserved.
  *
  * Authors:
- *   Boaz Harrosh <bharrosh@panasas.com>
+ *   Boaz Harrosh <ooo@electrozaur.com>
  *   Benny Halevy <bhalevy@panasas.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -35,6 +35,11 @@ struct osd_attr {
 	u32 attr_id;
 	u16 len;		/* byte count of operand */
 	void *val_ptr;		/* in network order */
+};
+
+struct osd_sg_entry {
+	u64 offset;
+	u64 len;
 };
 
 #endif /* ndef __OSD_TYPES_H__ */

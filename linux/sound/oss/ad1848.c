@@ -45,12 +45,11 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/stddef.h>
+#include <linux/slab.h>
 #include <linux/isapnp.h>
 #include <linux/pnp.h>
 #include <linux/spinlock.h>
 
-#define DEB(x)
-#define DEB1(x)
 #include "sound_config.h"
 
 #include "ad1848.h"
@@ -118,9 +117,9 @@ ad1848_port_info;
 static struct address_info cfg;
 static int nr_ad1848_devs;
 
-static int deskpro_xl;
-static int deskpro_m;
-static int soundpro;
+static bool deskpro_xl;
+static bool deskpro_m;
+static bool soundpro;
 
 static volatile signed char irq2dev[17] = {
 	-1, -1, -1, -1, -1, -1, -1, -1,
@@ -176,7 +175,7 @@ static struct {
 #ifdef CONFIG_PNP
 static int isapnp	= 1;
 static int isapnpjump;
-static int reverse;
+static bool reverse;
 
 static int audio_activated;
 #else
@@ -457,7 +456,7 @@ static int ad1848_set_recmask(ad1848_info * devc, int mask)
 	return mask;
 }
 
-static void change_bits(ad1848_info * devc, unsigned char *regval,
+static void oss_change_bits(ad1848_info *devc, unsigned char *regval,
 			unsigned char *muteval, int dev, int chn, int newval)
 {
 	unsigned char mask;
@@ -515,10 +514,10 @@ static void ad1848_mixer_set_channel(ad1848_info *devc, int dev, int value, int 
 
 	if (muteregoffs != regoffs) {
 		muteval = ad_read(devc, muteregoffs);
-		change_bits(devc, &val, &muteval, dev, channel, value);
+		oss_change_bits(devc, &val, &muteval, dev, channel, value);
 	}
 	else
-		change_bits(devc, &val, &val, dev, channel, value);
+		oss_change_bits(devc, &val, &val, dev, channel, value);
 
 	spin_lock_irqsave(&devc->lock,flags);
 	ad_write(devc, regoffs, val);
@@ -715,7 +714,7 @@ static int ad1848_mixer_ioctl(int dev, unsigned int cmd, void __user *arg)
 				
 				default:
 					if (get_user(val, (int __user *)arg))
-					return -EFAULT;
+						return -EFAULT;
 					val = ad1848_mixer_set(devc, cmd & 0xff, val);
 					break;
 			} 
@@ -1014,8 +1013,6 @@ static void ad1848_close(int dev)
 	unsigned long   flags;
 	ad1848_info    *devc = (ad1848_info *) audio_devs[dev]->devc;
 	ad1848_port_info *portc = (ad1848_port_info *) audio_devs[dev]->portc;
-
-	DEB(printk("ad1848_close(void)\n"));
 
 	devc->intr_active = 0;
 	ad1848_halt(dev);
@@ -2863,7 +2860,8 @@ static struct {
 	{NULL}
 };
 
-static struct isapnp_device_id id_table[] __devinitdata = {
+#ifdef MODULE
+static struct isapnp_device_id id_table[] = {
 	{	ISAPNP_VENDOR('C','M','I'), ISAPNP_DEVICE(0x0001),
 		ISAPNP_VENDOR('@','@','@'), ISAPNP_FUNCTION(0x0001), 0 },
         {       ISAPNP_ANY_ID, ISAPNP_ANY_ID,
@@ -2880,6 +2878,7 @@ static struct isapnp_device_id id_table[] __devinitdata = {
 };
 
 MODULE_DEVICE_TABLE(isapnp, id_table);
+#endif
 
 static struct pnp_dev *activate_dev(char *devname, char *resname, struct pnp_dev *dev)
 {

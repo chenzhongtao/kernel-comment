@@ -11,10 +11,6 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
  * The full GNU General Public License is included in this distribution in the
  * file called COPYING.
  */
@@ -27,6 +23,7 @@
 
 #define IOAT_PCI_DEVICE_ID_OFFSET		0x02
 #define IOAT_PCI_DMAUNCERRSTS_OFFSET		0x148
+#define IOAT_PCI_CHANERR_INT_OFFSET		0x180
 #define IOAT_PCI_CHANERRMASK_INT_OFFSET		0x184
 
 /* MMIO Device Registers */
@@ -59,7 +56,7 @@
 #define IOAT_PERPORTOFFSET_OFFSET		0x0A	/* 16-bit */
 
 #define IOAT_INTRDELAY_OFFSET			0x0C	/* 16-bit */
-#define IOAT_INTRDELAY_INT_DELAY_MASK		0x3FFF	/* Interrupt Delay Time */
+#define IOAT_INTRDELAY_MASK			0x3FFF	/* Interrupt Delay Time */
 #define IOAT_INTRDELAY_COALESE_SUPPORT		0x8000	/* Interrupt Coalescing Supported */
 
 #define IOAT_DEVICE_STATUS_OFFSET		0x0E	/* 16-bit */
@@ -78,6 +75,8 @@
 #define IOAT_CAP_APIC				0x00000080
 #define IOAT_CAP_XOR				0x00000100
 #define IOAT_CAP_PQ				0x00000200
+#define IOAT_CAP_DWBES				0x00002000
+#define IOAT_CAP_RAID16SS			0x00020000
 
 #define IOAT_CHANNEL_MMIO_SIZE			0x80	/* Each Channel MMIO space is this size */
 
@@ -92,6 +91,8 @@
 #define IOAT_CHANCTRL_ERR_COMPLETION_EN		0x0004
 #define IOAT_CHANCTRL_INT_REARM			0x0001
 #define IOAT_CHANCTRL_RUN			(IOAT_CHANCTRL_INT_REARM |\
+						 IOAT_CHANCTRL_ERR_INT_EN |\
+						 IOAT_CHANCTRL_ERR_COMPLETION_EN |\
 						 IOAT_CHANCTRL_ANY_ERR_ABORT_EN)
 
 #define IOAT_DMA_COMP_OFFSET			0x02	/* 16-bit DMA channel compatibility */

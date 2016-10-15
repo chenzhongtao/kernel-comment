@@ -3,7 +3,7 @@
  *
  * Interface to the FSF support functions.
  *
- * Copyright IBM Corporation 2002, 2009
+ * Copyright IBM Corp. 2002, 2010
  */
 
 #ifndef FSF_H
@@ -11,6 +11,7 @@
 
 #include <linux/pfn.h>
 #include <linux/scatterlist.h>
+#include <scsi/libfc.h>
 
 #define FSF_QTCB_CURRENT_VERSION		0x00000001
 
@@ -35,13 +36,6 @@
 #define FSF_CONFIG_COMMAND			0x00000003
 #define FSF_PORT_COMMAND			0x00000004
 
-/* FSF control file upload/download operations' subtype and options */
-#define FSF_CFDC_OPERATION_SUBTYPE		0x00020001
-#define FSF_CFDC_OPTION_NORMAL_MODE		0x00000000
-#define FSF_CFDC_OPTION_FORCE			0x00000001
-#define FSF_CFDC_OPTION_FULL_ACCESS		0x00000002
-#define FSF_CFDC_OPTION_RESTRICTED_ACCESS	0x00000004
-
 /* FSF protocol states */
 #define FSF_PROT_GOOD				0x00000001
 #define FSF_PROT_QTCB_VERSION_ERROR		0x00000010
@@ -63,7 +57,6 @@
 #define FSF_HANDLE_MISMATCH			0x00000005
 #define FSF_SERVICE_CLASS_NOT_SUPPORTED		0x00000006
 #define FSF_FCPLUN_NOT_VALID			0x00000009
-#define FSF_ACCESS_DENIED			0x00000010
 #define FSF_LUN_SHARING_VIOLATION               0x00000012
 #define FSF_FCP_COMMAND_DOES_NOT_EXIST		0x00000022
 #define FSF_DIRECTION_INDICATOR_NOT_VALID	0x00000030
@@ -79,11 +72,15 @@
 #define FSF_REQUEST_SIZE_TOO_LARGE		0x00000061
 #define FSF_RESPONSE_SIZE_TOO_LARGE		0x00000062
 #define FSF_SBAL_MISMATCH			0x00000063
+#define FSF_INCONSISTENT_PROT_DATA		0x00000070
+#define FSF_INVALID_PROT_PARM			0x00000071
+#define FSF_BLOCK_GUARD_CHECK_FAILURE		0x00000081
+#define FSF_APP_TAG_CHECK_FAILURE		0x00000082
+#define FSF_REF_TAG_CHECK_FAILURE		0x00000083
 #define FSF_ADAPTER_STATUS_AVAILABLE		0x000000AD
 #define FSF_UNKNOWN_COMMAND			0x000000E2
 #define FSF_UNKNOWN_OP_SUBTYPE                  0x000000E3
 #define FSF_INVALID_COMMAND_OPTION              0x000000E5
-/* #define FSF_ERROR                             0x000000FF  */
 
 #define FSF_PROT_STATUS_QUAL_SIZE		16
 #define FSF_STATUS_QUALIFIER_SIZE		16
@@ -125,7 +122,6 @@
 #define FSF_STATUS_READ_LINK_DOWN		0x00000005
 #define FSF_STATUS_READ_LINK_UP          	0x00000006
 #define FSF_STATUS_READ_NOTIFICATION_LOST	0x00000009
-#define FSF_STATUS_READ_CFDC_UPDATED		0x0000000A
 #define FSF_STATUS_READ_FEATURE_UPDATE_ALERT	0x0000000C
 
 /* status subtypes for link down */
@@ -135,7 +131,6 @@
 
 /* status subtypes for unsolicited status notification lost */
 #define FSF_STATUS_READ_SUB_INCOMING_ELS	0x00000001
-#define FSF_STATUS_READ_SUB_ACT_UPDATED		0x00000020
 
 /* topologie that is detected by the adapter */
 #define FSF_TOPO_P2P				0x00000001
@@ -146,44 +141,34 @@
 #define FSF_DATADIR_WRITE			0x00000001
 #define FSF_DATADIR_READ			0x00000002
 #define FSF_DATADIR_CMND			0x00000004
+#define FSF_DATADIR_DIF_WRITE_INSERT		0x00000009
+#define FSF_DATADIR_DIF_READ_STRIP		0x0000000a
+#define FSF_DATADIR_DIF_WRITE_CONVERT		0x0000000b
+#define FSF_DATADIR_DIF_READ_CONVERT		0X0000000c
+
+/* data protection control flags */
+#define FSF_APP_TAG_CHECK_ENABLE		0x10
 
 /* fc service class */
 #define FSF_CLASS_3				0x00000003
-
-/* SBAL chaining */
-#define FSF_MAX_SBALS_PER_REQ			36
 
 /* logging space behind QTCB */
 #define FSF_QTCB_LOG_SIZE			1024
 
 /* channel features */
-#define FSF_FEATURE_CFDC			0x00000002
-#define FSF_FEATURE_LUN_SHARING			0x00000004
 #define FSF_FEATURE_NOTIFICATION_LOST		0x00000008
 #define FSF_FEATURE_HBAAPI_MANAGEMENT           0x00000010
 #define FSF_FEATURE_ELS_CT_CHAINED_SBALS	0x00000020
 #define FSF_FEATURE_UPDATE_ALERT		0x00000100
 #define FSF_FEATURE_MEASUREMENT_DATA		0x00000200
+#define FSF_FEATURE_DIF_PROT_TYPE1		0x00010000
+#define FSF_FEATURE_DIX_PROT_TCPIP		0x00020000
 
 /* host connection features */
 #define FSF_FEATURE_NPIV_MODE			0x00000001
 
 /* option */
 #define FSF_OPEN_LUN_SUPPRESS_BOXING		0x00000001
-
-/* open LUN access flags*/
-#define FSF_UNIT_ACCESS_EXCLUSIVE		0x02000000
-#define FSF_UNIT_ACCESS_OUTBOUND_TRANSFER	0x10000000
-
-/* FSF interface for CFDC */
-#define ZFCP_CFDC_MAX_SIZE		127 * 1024
-#define ZFCP_CFDC_PAGES 		PFN_UP(ZFCP_CFDC_MAX_SIZE)
-
-struct zfcp_fsf_cfdc {
-	struct scatterlist sg[ZFCP_CFDC_PAGES];
-	u32 command;
-	u32 option;
-};
 
 struct fsf_queue_designator {
 	u8  cssid;
@@ -228,7 +213,8 @@ struct fsf_status_read_buffer {
 	u32 length;
 	u32 res1;
 	struct fsf_queue_designator queue_designator;
-	u32 d_id;
+	u8 res2;
+	u8 d_id[3];
 	u32 class;
 	u64 fcp_lun;
 	u8  res3[24];
@@ -309,22 +295,7 @@ struct fsf_qtcb_header {
 	u8  res4[16];
 } __attribute__ ((packed));
 
-struct fsf_nport_serv_param {
-	u8  common_serv_param[16];
-	u64 wwpn;
-	u64 wwnn;
-	u8  class1_serv_param[16];
-	u8  class2_serv_param[16];
-	u8  class3_serv_param[16];
-	u8  class4_serv_param[16];
-	u8  vendor_version_level[16];
-} __attribute__ ((packed));
-
 #define FSF_PLOGI_MIN_LEN	112
-struct fsf_plogi {
-	u32    code;
-	struct fsf_nport_serv_param serv_param;
-} __attribute__ ((packed));
 
 #define FSF_FCP_CMND_SIZE	288
 #define FSF_FCP_RSP_SIZE	128
@@ -332,9 +303,14 @@ struct fsf_plogi {
 struct fsf_qtcb_bottom_io {
 	u32 data_direction;
 	u32 service_class;
-	u8  res1[8];
+	u8  res1;
+	u8  data_prot_flags;
+	u16 app_tag_value;
+	u32 ref_tag_value;
 	u32 fcp_cmnd_length;
-	u8  res2[12];
+	u32 data_block_length;
+	u32 prot_data_length;
+	u8  res2[4];
 	u8  fcp_cmnd[FSF_FCP_CMND_SIZE];
 	u8  fcp_rsp[FSF_FCP_RSP_SIZE];
 	u8  res3[64];
@@ -342,8 +318,8 @@ struct fsf_qtcb_bottom_io {
 
 struct fsf_qtcb_bottom_support {
 	u32 operation_subtype;
-	u8  res1[12];
-	u32 d_id;
+	u8  res1[13];
+	u8 d_id[3];
 	u32 option;
 	u64 fcp_lun;
 	u64 res2;
@@ -360,6 +336,8 @@ struct fsf_qtcb_bottom_support {
 	u8  els[256];
 } __attribute__ ((packed));
 
+#define ZFCP_FSF_TIMER_INT_MASK	0x3FFF
+
 struct fsf_qtcb_bottom_config {
 	u32 lic_version;
 	u32 feature_selection;
@@ -372,18 +350,18 @@ struct fsf_qtcb_bottom_config {
 	u32 fc_topology;
 	u32 fc_link_speed;
 	u32 adapter_type;
-	u32 peer_d_id;
-	u8 res1[2];
+	u8 res0;
+	u8 peer_d_id[3];
+	u16 status_read_buf_num;
 	u16 timer_interval;
-	u8 res2[8];
-	u32 s_id;
-	struct fsf_nport_serv_param nport_serv_param;
-	u8 reserved_nport_serv_param[16];
+	u8 res2[9];
+	u8 s_id[3];
+	u8 nport_serv_param[128];
 	u8 res3[8];
 	u32 adapter_ports;
 	u32 hardware_version;
 	u8 serial_number[32];
-	struct fsf_nport_serv_param plogi_payload;
+	u8 plogi_payload[112];
 	struct fsf_statistics_info stat_info;
 	u8 res4[112];
 } __attribute__ ((packed));
@@ -449,5 +427,23 @@ struct zfcp_blk_drv_data {
 	u64 channel_lat;
 	u64 fabric_lat;
 } __attribute__ ((packed));
+
+/**
+ * struct zfcp_fsf_ct_els - zfcp data for ct or els request
+ * @req: scatter-gather list for request
+ * @resp: scatter-gather list for response
+ * @handler: handler function (called for response to the request)
+ * @handler_data: data passed to handler function
+ * @port: Optional pointer to port for zfcp internal ELS (only test link ADISC)
+ * @status: used to pass error status to calling function
+ */
+struct zfcp_fsf_ct_els {
+	struct scatterlist *req;
+	struct scatterlist *resp;
+	void (*handler)(void *);
+	void *handler_data;
+	struct zfcp_port *port;
+	int status;
+};
 
 #endif				/* FSF_H */

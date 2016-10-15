@@ -8,8 +8,7 @@
  *  May 1999. AV. Fixed the bogosity with FAT32 (read "FAT28"). Fscking lusers.
  */
 
-#include <linux/fs.h>
-#include <linux/buffer_head.h>
+#include <linux/slab.h>
 #include "fat.h"
 
 /* this must be > 0. */
@@ -150,6 +149,13 @@ static void fat_cache_add(struct inode *inode, struct fat_cache_id *new)
 			spin_unlock(&MSDOS_I(inode)->cache_lru_lock);
 
 			tmp = fat_cache_alloc(inode);
+			if (!tmp) {
+				spin_lock(&MSDOS_I(inode)->cache_lru_lock);
+				MSDOS_I(inode)->nr_caches--;
+				spin_unlock(&MSDOS_I(inode)->cache_lru_lock);
+				return;
+			}
+
 			spin_lock(&MSDOS_I(inode)->cache_lru_lock);
 			cache = fat_cache_merge(inode, new);
 			if (cache != NULL) {
@@ -182,7 +188,8 @@ static void __fat_cache_inval_inode(struct inode *inode)
 	struct fat_cache *cache;
 
 	while (!list_empty(&i->cache_lru)) {
-		cache = list_entry(i->cache_lru.next, struct fat_cache, cache_list);
+		cache = list_entry(i->cache_lru.next,
+				   struct fat_cache, cache_list);
 		list_del_init(&cache->cache_list);
 		i->nr_caches--;
 		fat_cache_free(cache);
@@ -241,9 +248,10 @@ int fat_get_cluster(struct inode *inode, int cluster, int *fclus, int *dclus)
 	while (*fclus < cluster) {
 		/* prevent the infinite loop of cluster chain */
 		if (*fclus > limit) {
-			fat_fs_error(sb, "%s: detected the cluster chain loop"
-				     " (i_pos %lld)", __func__,
-				     MSDOS_I(inode)->i_pos);
+			fat_fs_error_ratelimit(sb,
+					"%s: detected the cluster chain loop"
+					" (i_pos %lld)", __func__,
+					MSDOS_I(inode)->i_pos);
 			nr = -EIO;
 			goto out;
 		}
@@ -252,9 +260,10 @@ int fat_get_cluster(struct inode *inode, int cluster, int *fclus, int *dclus)
 		if (nr < 0)
 			goto out;
 		else if (nr == FAT_ENT_FREE) {
-			fat_fs_error(sb, "%s: invalid cluster chain"
-				     " (i_pos %lld)", __func__,
-				     MSDOS_I(inode)->i_pos);
+			fat_fs_error_ratelimit(sb,
+				       "%s: invalid cluster chain (i_pos %lld)",
+				       __func__,
+				       MSDOS_I(inode)->i_pos);
 			nr = -EIO;
 			goto out;
 		} else if (nr == FAT_ENT_EOF) {

@@ -21,6 +21,7 @@
  * objects.
  */
 
+#include <linux/file.h>
 #include <linux/mm.h>
 #include <linux/workqueue.h>
 #include <linux/notifier.h>
@@ -30,6 +31,7 @@
 #include <linux/fs.h>
 #include <linux/oprofile.h>
 #include <linux/sched.h>
+#include <linux/gfp.h>
 
 #include "oprofile_stats.h"
 #include "event_buffer.h"
@@ -140,15 +142,12 @@ static struct notifier_block module_load_nb = {
 	.notifier_call = module_load_notify,
 };
 
-
-static void end_sync(void)
+static void free_all_tasks(void)
 {
-	end_cpu_work();
 	/* make sure we don't leak task structs */
 	process_task_mortuary();
 	process_task_mortuary();
 }
-
 
 int sync_start(void)
 {
@@ -156,8 +155,6 @@ int sync_start(void)
 
 	if (!zalloc_cpumask_var(&marked_cpus, GFP_KERNEL))
 		return -ENOMEM;
-
-	start_cpu_work();
 
 	err = task_handoff_register(&task_free_nb);
 	if (err)
@@ -172,6 +169,8 @@ int sync_start(void)
 	if (err)
 		goto out4;
 
+	start_cpu_work();
+
 out:
 	return err;
 out4:
@@ -180,8 +179,8 @@ out3:
 	profile_event_unregister(PROFILE_TASK_EXIT, &task_exit_nb);
 out2:
 	task_handoff_unregister(&task_free_nb);
+	free_all_tasks();
 out1:
-	end_sync();
 	free_cpumask_var(marked_cpus);
 	goto out;
 }
@@ -189,11 +188,16 @@ out1:
 
 void sync_stop(void)
 {
+	end_cpu_work();
 	unregister_module_notifier(&module_load_nb);
 	profile_event_unregister(PROFILE_MUNMAP, &munmap_nb);
 	profile_event_unregister(PROFILE_TASK_EXIT, &task_exit_nb);
 	task_handoff_unregister(&task_free_nb);
-	end_sync();
+	barrier();			/* do all of the above first */
+
+	flush_cpu_work();
+
+	free_all_tasks();
 	free_cpumask_var(marked_cpus);
 }
 
@@ -213,7 +217,7 @@ static inline unsigned long fast_get_dcookie(struct path *path)
 }
 
 
-/* Look up the dcookie for the task's first VM_EXECUTABLE mapping,
+/* Look up the dcookie for the task's mm->exe_file,
  * which corresponds loosely to "application name". This is
  * not strictly necessary but allows oprofile to associate
  * shared-library samples with particular applications
@@ -221,21 +225,18 @@ static inline unsigned long fast_get_dcookie(struct path *path)
 static unsigned long get_exec_dcookie(struct mm_struct *mm)
 {
 	unsigned long cookie = NO_COOKIE;
-	struct vm_area_struct *vma;
+	struct file *exe_file;
 
 	if (!mm)
-		goto out;
+		goto done;
 
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		if (!vma->vm_file)
-			continue;
-		if (!(vma->vm_flags & VM_EXECUTABLE))
-			continue;
-		cookie = fast_get_dcookie(&vma->vm_file->f_path);
-		break;
-	}
+	exe_file = get_mm_exe_file(mm);
+	if (!exe_file)
+		goto done;
 
-out:
+	cookie = fast_get_dcookie(&exe_file->f_path);
+	fput(exe_file);
+done:
 	return cookie;
 }
 
@@ -244,6 +245,8 @@ out:
  * pair that can then be added to the global event buffer. We make
  * sure to do this lookup before a mm->mmap modification happens so
  * we don't lose track.
+ *
+ * The caller must ensure the mm is not nil (ie: not a kernel thread).
  */
 static unsigned long
 lookup_dcookie(struct mm_struct *mm, unsigned long addr, off_t *offset)
@@ -251,6 +254,7 @@ lookup_dcookie(struct mm_struct *mm, unsigned long addr, off_t *offset)
 	unsigned long cookie = NO_COOKIE;
 	struct vm_area_struct *vma;
 
+	down_read(&mm->mmap_sem);
 	for (vma = find_vma(mm, addr); vma; vma = vma->vm_next) {
 
 		if (addr < vma->vm_start || addr >= vma->vm_end)
@@ -270,6 +274,7 @@ lookup_dcookie(struct mm_struct *mm, unsigned long addr, off_t *offset)
 
 	if (!vma)
 		cookie = INVALID_COOKIE;
+	up_read(&mm->mmap_sem);
 
 	return cookie;
 }
@@ -410,19 +415,8 @@ static void release_mm(struct mm_struct *mm)
 {
 	if (!mm)
 		return;
-	up_read(&mm->mmap_sem);
 	mmput(mm);
 }
-
-
-static struct mm_struct *take_tasks_mm(struct task_struct *task)
-{
-	struct mm_struct *mm = get_task_mm(task);
-	if (mm)
-		down_read(&mm->mmap_sem);
-	return mm;
-}
-
 
 static inline int is_code(unsigned long val)
 {
@@ -540,7 +534,7 @@ void sync_buffer(int cpu)
 				new = (struct task_struct *)val;
 				oldmm = mm;
 				release_mm(oldmm);
-				mm = take_tasks_mm(new);
+				mm = get_task_mm(new);
 				if (mm != oldmm)
 					cookie = get_exec_dcookie(mm);
 				add_user_ctx_switch(new, cookie);

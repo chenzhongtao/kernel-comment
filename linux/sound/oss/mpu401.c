@@ -19,6 +19,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
@@ -315,6 +316,7 @@ static int mpu_input_scanner(struct mpu_config *devc, unsigned char midic)
 				case 0xf6:
 					/* printk( "tune_request\n"); */
 					devc->m_state = ST_INIT;
+					break;
 
 					/*
 					 *    Real time messages
@@ -566,7 +568,6 @@ static int mpu401_out(int dev, unsigned char midi_byte)
 static int mpu401_command(int dev, mpu_command_rec * cmd)
 {
 	int i, timeout, ok;
-	int ret = 0;
 	unsigned long   flags;
 	struct mpu_config *devc;
 
@@ -643,7 +644,6 @@ retry:
 			}
 		}
 	}
-	ret = 0;
 	cmd->data[0] = 0;
 
 	if (cmd->nr_returns)
@@ -665,7 +665,7 @@ retry:
 		}
 	}
 	spin_unlock_irqrestore(&devc->lock,flags);
-	return ret;
+	return 0;
 }
 
 static int mpu_cmd(int dev, int cmd, int data)
@@ -770,7 +770,7 @@ static int mpu_synth_ioctl(int dev, unsigned int cmd, void __user *arg)
 
 	midi_dev = synth_devs[dev]->midi_dev;
 
-	if (midi_dev < 0 || midi_dev > num_midis || midi_devs[midi_dev] == NULL)
+	if (midi_dev < 0 || midi_dev >= num_midis || midi_devs[midi_dev] == NULL)
 		return -ENXIO;
 
 	devc = &dev_conf[midi_dev];
@@ -973,7 +973,6 @@ int attach_mpu401(struct address_info *hw_config, struct module *owner)
 	devc->m_busy = 0;
 	devc->m_state = ST_INIT;
 	devc->shared_irq = hw_config->always_detect;
-	devc->irq = hw_config->irq;
 	spin_lock_init(&devc->lock);
 
 	if (devc->irq < 0)

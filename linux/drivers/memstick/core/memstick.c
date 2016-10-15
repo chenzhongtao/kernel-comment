@@ -16,6 +16,8 @@
 #include <linux/idr.h>
 #include <linux/fs.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
+#include <linux/module.h>
 
 #define DRIVER_NAME "memstick"
 
@@ -151,24 +153,24 @@ static ssize_t name##_show(struct device *dev, struct device_attribute *attr, \
 	struct memstick_dev *card = container_of(dev, struct memstick_dev,    \
 						 dev);                        \
 	return sprintf(buf, format, card->id.name);                           \
-}
+}                                                                             \
+static DEVICE_ATTR_RO(name);
 
 MEMSTICK_ATTR(type, "%02X");
 MEMSTICK_ATTR(category, "%02X");
 MEMSTICK_ATTR(class, "%02X");
 
-#define MEMSTICK_ATTR_RO(name) __ATTR(name, S_IRUGO, name##_show, NULL)
-
-static struct device_attribute memstick_dev_attrs[] = {
-	MEMSTICK_ATTR_RO(type),
-	MEMSTICK_ATTR_RO(category),
-	MEMSTICK_ATTR_RO(class),
-	__ATTR_NULL
+static struct attribute *memstick_dev_attrs[] = {
+	&dev_attr_type.attr,
+	&dev_attr_category.attr,
+	&dev_attr_class.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(memstick_dev);
 
 static struct bus_type memstick_bus_type = {
 	.name           = "memstick",
-	.dev_attrs      = memstick_dev_attrs,
+	.dev_groups	= memstick_dev_groups,
 	.match          = memstick_bus_match,
 	.uevent         = memstick_uevent,
 	.probe          = memstick_device_probe,
@@ -251,7 +253,7 @@ void memstick_new_req(struct memstick_host *host)
 {
 	if (host->card) {
 		host->retries = cmd_retries;
-		INIT_COMPLETION(host->card->mrq_complete);
+		reinit_completion(&host->card->mrq_complete);
 		host->request(host);
 	}
 }
@@ -464,6 +466,7 @@ static void memstick_check(struct work_struct *work)
 		if (!host->card) {
 			host->card = card;
 			if (device_register(&card->dev)) {
+				put_device(&card->dev);
 				kfree(host->card);
 				host->card = NULL;
 			}
@@ -509,13 +512,16 @@ int memstick_add_host(struct memstick_host *host)
 {
 	int rc;
 
-	if (!idr_pre_get(&memstick_host_idr, GFP_KERNEL))
-		return -ENOMEM;
-
+	idr_preload(GFP_KERNEL);
 	spin_lock(&memstick_host_lock);
-	rc = idr_get_new(&memstick_host_idr, host, &host->id);
+
+	rc = idr_alloc(&memstick_host_idr, host, 0, 0, GFP_NOWAIT);
+	if (rc >= 0)
+		host->id = rc;
+
 	spin_unlock(&memstick_host_lock);
-	if (rc)
+	idr_preload_end();
+	if (rc < 0)
 		return rc;
 
 	dev_set_name(&host->dev, "memstick%u", host->id);
@@ -615,7 +621,7 @@ static int __init memstick_init(void)
 {
 	int rc;
 
-	workqueue = create_freezeable_workqueue("kmemstick");
+	workqueue = create_freezable_workqueue("kmemstick");
 	if (!workqueue)
 		return -ENOMEM;
 

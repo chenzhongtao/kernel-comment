@@ -23,21 +23,22 @@
 #include <linux/delay.h>
 #include <linux/rslib.h>
 #include <linux/moduleparam.h>
-#include <asm/io.h>
+#include <linux/slab.h>
+#include <linux/io.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nand.h>
 #include <linux/mtd/doc2000.h>
-#include <linux/mtd/compatmac.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/inftl.h>
+#include <linux/module.h>
 
 /* Where to look for the devices? */
 #ifndef CONFIG_MTD_NAND_DISKONCHIP_PROBE_ADDRESS
 #define CONFIG_MTD_NAND_DISKONCHIP_PROBE_ADDRESS 0
 #endif
 
-static unsigned long __initdata doc_locations[] = {
+static unsigned long doc_locations[] __initdata = {
 #if defined (__alpha__) || defined(__i386__) || defined(__x86_64__)
 #ifdef CONFIG_MTD_NAND_DISKONCHIP_PROBE_HIGH
 	0xfffc8000, 0xfffca000, 0xfffcc000, 0xfffce000,
@@ -45,15 +46,13 @@ static unsigned long __initdata doc_locations[] = {
 	0xfffd8000, 0xfffda000, 0xfffdc000, 0xfffde000,
 	0xfffe0000, 0xfffe2000, 0xfffe4000, 0xfffe6000,
 	0xfffe8000, 0xfffea000, 0xfffec000, 0xfffee000,
-#else /*  CONFIG_MTD_DOCPROBE_HIGH */
+#else
 	0xc8000, 0xca000, 0xcc000, 0xce000,
 	0xd0000, 0xd2000, 0xd4000, 0xd6000,
 	0xd8000, 0xda000, 0xdc000, 0xde000,
 	0xe0000, 0xe2000, 0xe4000, 0xe6000,
 	0xe8000, 0xea000, 0xec000, 0xee000,
-#endif /*  CONFIG_MTD_DOCPROBE_HIGH */
-#else
-#warning Unknown architecture for DiskOnChip. No default probe locations defined
+#endif
 #endif
 	0xffffffff };
 
@@ -70,6 +69,9 @@ struct doc_priv {
 	int mh0_page;
 	int mh1_page;
 	struct mtd_info *nextdoc;
+
+	/* Handle the last stage of initialization (BBT scan, partitioning) */
+	int (*late_init)(struct mtd_info *mtd);
 };
 
 /* This is the syndrome computed by the HW ecc generator upon reading an empty
@@ -132,12 +134,12 @@ static struct rs_control *rs_decoder;
 
 /*
  * The HW decoder in the DoC ASIC's provides us a error syndrome,
- * which we must convert to a standard syndrom usable by the generic
+ * which we must convert to a standard syndrome usable by the generic
  * Reed-Solomon library code.
  *
  * Fabrice Bellard figured this out in the old docecc code. I added
  * some comments, improved a minor bit and converted it to make use
- * of the generic Reed-Solomon libary. tglx
+ * of the generic Reed-Solomon library. tglx
  */
 static int doc_ecc_decode(struct rs_control *rs, uint8_t *data, uint8_t *ecc)
 {
@@ -145,6 +147,7 @@ static int doc_ecc_decode(struct rs_control *rs, uint8_t *data, uint8_t *ecc)
 	uint8_t parity;
 	uint16_t ds[4], s[5], tmp, errval[8], syn[4];
 
+	memset(syn, 0, sizeof(syn));
 	/* Convert the ecc bytes into words */
 	ds[0] = ((ecc[4] & 0xff) >> 0) | ((ecc[5] & 0x03) << 8);
 	ds[1] = ((ecc[5] & 0xfc) >> 2) | ((ecc[2] & 0x0f) << 6);
@@ -152,7 +155,7 @@ static int doc_ecc_decode(struct rs_control *rs, uint8_t *data, uint8_t *ecc)
 	ds[3] = ((ecc[3] & 0xc0) >> 6) | ((ecc[0] & 0xff) << 2);
 	parity = ecc[1];
 
-	/* Initialize the syndrom buffer */
+	/* Initialize the syndrome buffer */
 	for (i = 0; i < NROOTS; i++)
 		s[i] = ds[0];
 	/*
@@ -168,9 +171,9 @@ static int doc_ecc_decode(struct rs_control *rs, uint8_t *data, uint8_t *ecc)
 			s[i] ^= rs->alpha_to[rs_modnn(rs, tmp + (FCR + i) * j)];
 	}
 
-	/* Calc s[i] = s[i] / alpha^(v + i) */
+	/* Calc syn[i] = s[i] / alpha^(v + i) */
 	for (i = 0; i < NROOTS; i++) {
-		if (syn[i])
+		if (s[i])
 			syn[i] = rs_modnn(rs, rs->index_of[s[i]] + (NN - FCR - i));
 	}
 	/* Call the decoder library */
@@ -374,19 +377,6 @@ static void doc2000_readbuf_dword(struct mtd_info *mtd, u_char *buf, int len)
 	}
 }
 
-static int doc2000_verifybuf(struct mtd_info *mtd, const u_char *buf, int len)
-{
-	struct nand_chip *this = mtd->priv;
-	struct doc_priv *doc = this->priv;
-	void __iomem *docptr = doc->virtadr;
-	int i;
-
-	for (i = 0; i < len; i++)
-		if (buf[i] != ReadDOC(docptr, 2k_CDSN_IO))
-			return -EFAULT;
-	return 0;
-}
-
 static uint16_t __init doc200x_ident_chip(struct mtd_info *mtd, int nr)
 {
 	struct nand_chip *this = mtd->priv;
@@ -399,7 +389,7 @@ static uint16_t __init doc200x_ident_chip(struct mtd_info *mtd, int nr)
 	doc200x_hwcontrol(mtd, 0, NAND_CTRL_ALE | NAND_CTRL_CHANGE);
 	doc200x_hwcontrol(mtd, NAND_CMD_NONE, NAND_NCE | NAND_CTRL_CHANGE);
 
-	/* We cant' use dev_ready here, but at least we wait for the
+	/* We can't use dev_ready here, but at least we wait for the
 	 * command to complete
 	 */
 	udelay(50);
@@ -524,26 +514,6 @@ static void doc2001_readbuf(struct mtd_info *mtd, u_char *buf, int len)
 	buf[i] = ReadDOC(docptr, LastDataRead);
 }
 
-static int doc2001_verifybuf(struct mtd_info *mtd, const u_char *buf, int len)
-{
-	struct nand_chip *this = mtd->priv;
-	struct doc_priv *doc = this->priv;
-	void __iomem *docptr = doc->virtadr;
-	int i;
-
-	/* Start read pipeline */
-	ReadDOC(docptr, ReadPipeInit);
-
-	for (i = 0; i < len - 1; i++)
-		if (buf[i] != ReadDOC(docptr, Mil_CDSN_IO)) {
-			ReadDOC(docptr, LastDataRead);
-			return i;
-		}
-	if (buf[i] != ReadDOC(docptr, LastDataRead))
-		return i;
-	return 0;
-}
-
 static u_char doc2001plus_read_byte(struct mtd_info *mtd)
 {
 	struct nand_chip *this = mtd->priv;
@@ -606,33 +576,6 @@ static void doc2001plus_readbuf(struct mtd_info *mtd, u_char *buf, int len)
 		printk("%02x ", buf[len - 1]);
 	if (debug)
 		printk("\n");
-}
-
-static int doc2001plus_verifybuf(struct mtd_info *mtd, const u_char *buf, int len)
-{
-	struct nand_chip *this = mtd->priv;
-	struct doc_priv *doc = this->priv;
-	void __iomem *docptr = doc->virtadr;
-	int i;
-
-	if (debug)
-		printk("verifybuf of %d bytes: ", len);
-
-	/* Start read pipeline */
-	ReadDOC(docptr, Mplus_ReadPipeInit);
-	ReadDOC(docptr, Mplus_ReadPipeInit);
-
-	for (i = 0; i < len - 2; i++)
-		if (buf[i] != ReadDOC(docptr, Mil_CDSN_IO)) {
-			ReadDOC(docptr, Mplus_LastDataRead);
-			ReadDOC(docptr, Mplus_LastDataRead);
-			return i;
-		}
-	if (buf[len - 2] != ReadDOC(docptr, Mplus_LastDataRead))
-		return len - 2;
-	if (buf[len - 1] != ReadDOC(docptr, Mplus_LastDataRead))
-		return len - 1;
-	return 0;
 }
 
 static void doc2001plus_select_chip(struct mtd_info *mtd, int chip)
@@ -758,7 +701,8 @@ static void doc2001plus_command(struct mtd_info *mtd, unsigned command, int colu
 		/* Serially input address */
 		if (column != -1) {
 			/* Adjust columns for 16 bit buswidth */
-			if (this->options & NAND_BUSWIDTH_16)
+			if (this->options & NAND_BUSWIDTH_16 &&
+					!nand_opcode_8bits(command))
 				column >>= 1;
 			WriteDOC(column, docptr, Mplus_FlashAddress);
 		}
@@ -985,7 +929,7 @@ static int doc200x_correct_data(struct mtd_info *mtd, u_char *dat,
 		dummy = ReadDOC(docptr, ECCConf);
 	}
 
-	/* Error occured ? */
+	/* Error occurred ? */
 	if (dummy & 0x80) {
 		for (i = 0; i < 6; i++) {
 			if (DoC_is_MillenniumPlus(doc))
@@ -1030,7 +974,7 @@ static int doc200x_correct_data(struct mtd_info *mtd, u_char *dat,
 		WriteDOC(DOC_ECC_DIS, docptr, Mplus_ECCConf);
 	else
 		WriteDOC(DOC_ECC_DIS, docptr, ECCConf);
-	if (no_ecc_failures && (ret == -EBADMSG)) {
+	if (no_ecc_failures && mtd_is_eccerr(ret)) {
 		printk(KERN_ERR "suppressing ECC failure\n");
 		ret = 0;
 	}
@@ -1056,7 +1000,7 @@ static struct nand_ecclayout doc200x_oobinfo = {
 };
 
 /* Find the (I)NFTL Media Header, and optionally also the mirror media header.
-   On sucessful return, buf will contain a copy of the media header for
+   On successful return, buf will contain a copy of the media header for
    further processing.  id is the string to scan for, and will presumably be
    either "ANAND" or "BNAND".  If findmirror=1, also look for the mirror media
    header.  The page #s of the found media headers are placed in mh0_page and
@@ -1070,7 +1014,7 @@ static int __init find_media_headers(struct mtd_info *mtd, u_char *buf, const ch
 	size_t retlen;
 
 	for (offs = 0; offs < mtd->size; offs += mtd->erasesize) {
-		ret = mtd->read(mtd, offs, mtd->writesize, &retlen, buf);
+		ret = mtd_read(mtd, offs, mtd->writesize, &retlen, buf);
 		if (retlen != mtd->writesize)
 			continue;
 		if (ret) {
@@ -1095,7 +1039,7 @@ static int __init find_media_headers(struct mtd_info *mtd, u_char *buf, const ch
 	/* Only one mediaheader was found.  We want buf to contain a
 	   mediaheader on return, so we'll have to re-read the one we found. */
 	offs = doc->mh0_page << this->page_shift;
-	ret = mtd->read(mtd, offs, mtd->writesize, &retlen, buf);
+	ret = mtd_read(mtd, offs, mtd->writesize, &retlen, buf);
 	if (retlen != mtd->writesize) {
 		/* Insanity.  Give up. */
 		printk(KERN_ERR "Read DiskOnChip Media Header once, but can't reread it???\n");
@@ -1118,7 +1062,6 @@ static inline int __init nftl_partscan(struct mtd_info *mtd, struct mtd_partitio
 
 	buf = kmalloc(mtd->writesize, GFP_KERNEL);
 	if (!buf) {
-		printk(KERN_ERR "DiskOnChip mediaheader kmalloc failed!\n");
 		return 0;
 	}
 	if (!(numheaders = find_media_headers(mtd, buf, "ANAND", 1)))
@@ -1159,7 +1102,7 @@ static inline int __init nftl_partscan(struct mtd_info *mtd, struct mtd_partitio
 	/* NOTE: The lines below modify internal variables of the NAND and MTD
 	   layers; variables with have already been configured by nand_scan.
 	   Unfortunately, we didn't know before this point what these values
-	   should be.  Thus, this code is somewhat dependant on the exact
+	   should be.  Thus, this code is somewhat dependent on the exact
 	   implementation of the NAND layer.  */
 	if (mh->UnitSizeFactor != 0xff) {
 		this->bbt_erase_shift += (0xff - mh->UnitSizeFactor);
@@ -1226,7 +1169,6 @@ static inline int __init inftl_partscan(struct mtd_info *mtd, struct mtd_partiti
 
 	buf = kmalloc(mtd->writesize, GFP_KERNEL);
 	if (!buf) {
-		printk(KERN_ERR "DiskOnChip mediaheader kmalloc failed!\n");
 		return 0;
 	}
 
@@ -1355,16 +1297,11 @@ static int __init nftl_scan_bbt(struct mtd_info *mtd)
 		this->bbt_md = NULL;
 	}
 
-	/* It's safe to set bd=NULL below because NAND_BBT_CREATE is not set.
-	   At least as nand_bbt.c is currently written. */
-	if ((ret = nand_scan_bbt(mtd, NULL)))
+	ret = this->scan_bbt(mtd);
+	if (ret)
 		return ret;
-	add_mtd_device(mtd);
-#ifdef CONFIG_MTD_PARTITIONS
-	if (!no_autopart)
-		add_mtd_partitions(mtd, parts, numparts);
-#endif
-	return 0;
+
+	return mtd_device_register(mtd, parts, no_autopart ? 0 : numparts);
 }
 
 static int __init inftl_scan_bbt(struct mtd_info *mtd)
@@ -1407,10 +1344,10 @@ static int __init inftl_scan_bbt(struct mtd_info *mtd)
 		this->bbt_md->pattern = "TBB_SYSM";
 	}
 
-	/* It's safe to set bd=NULL below because NAND_BBT_CREATE is not set.
-	   At least as nand_bbt.c is currently written. */
-	if ((ret = nand_scan_bbt(mtd, NULL)))
+	ret = this->scan_bbt(mtd);
+	if (ret)
 		return ret;
+
 	memset((char *)parts, 0, sizeof(parts));
 	numparts = inftl_partscan(mtd, parts);
 	/* At least for now, require the INFTL Media Header.  We could probably
@@ -1418,12 +1355,7 @@ static int __init inftl_scan_bbt(struct mtd_info *mtd)
 	   autopartitioning, but I want to give it more thought. */
 	if (!numparts)
 		return -EIO;
-	add_mtd_device(mtd);
-#ifdef CONFIG_MTD_PARTITIONS
-	if (!no_autopart)
-		add_mtd_partitions(mtd, parts, numparts);
-#endif
-	return 0;
+	return mtd_device_register(mtd, parts, no_autopart ? 0 : numparts);
 }
 
 static inline int __init doc2000_init(struct mtd_info *mtd)
@@ -1434,8 +1366,7 @@ static inline int __init doc2000_init(struct mtd_info *mtd)
 	this->read_byte = doc2000_read_byte;
 	this->write_buf = doc2000_writebuf;
 	this->read_buf = doc2000_readbuf;
-	this->verify_buf = doc2000_verifybuf;
-	this->scan_bbt = nftl_scan_bbt;
+	doc->late_init = nftl_scan_bbt;
 
 	doc->CDSNControl = CDSN_CTRL_FLASH_IO | CDSN_CTRL_ECC_IO;
 	doc2000_count_chips(mtd);
@@ -1451,7 +1382,6 @@ static inline int __init doc2001_init(struct mtd_info *mtd)
 	this->read_byte = doc2001_read_byte;
 	this->write_buf = doc2001_writebuf;
 	this->read_buf = doc2001_readbuf;
-	this->verify_buf = doc2001_verifybuf;
 
 	ReadDOC(doc->virtadr, ChipID);
 	ReadDOC(doc->virtadr, ChipID);
@@ -1463,13 +1393,13 @@ static inline int __init doc2001_init(struct mtd_info *mtd)
 		   can have multiple chips. */
 		doc2000_count_chips(mtd);
 		mtd->name = "DiskOnChip 2000 (INFTL Model)";
-		this->scan_bbt = inftl_scan_bbt;
+		doc->late_init = inftl_scan_bbt;
 		return (4 * doc->chips_per_floor);
 	} else {
 		/* Bog-standard Millennium */
 		doc->chips_per_floor = 1;
 		mtd->name = "DiskOnChip Millennium";
-		this->scan_bbt = nftl_scan_bbt;
+		doc->late_init = nftl_scan_bbt;
 		return 1;
 	}
 }
@@ -1482,8 +1412,7 @@ static inline int __init doc2001plus_init(struct mtd_info *mtd)
 	this->read_byte = doc2001plus_read_byte;
 	this->write_buf = doc2001plus_writebuf;
 	this->read_buf = doc2001plus_readbuf;
-	this->verify_buf = doc2001plus_verifybuf;
-	this->scan_bbt = inftl_scan_bbt;
+	doc->late_init = inftl_scan_bbt;
 	this->cmd_ctrl = NULL;
 	this->select_chip = doc2001plus_select_chip;
 	this->cmdfunc = doc2001plus_command;
@@ -1507,10 +1436,13 @@ static int __init doc_probe(unsigned long physadr)
 	int reg, len, numchips;
 	int ret = 0;
 
+	if (!request_mem_region(physadr, DOC_IOREMAP_LEN, "DiskOnChip"))
+		return -EBUSY;
 	virtadr = ioremap(physadr, DOC_IOREMAP_LEN);
 	if (!virtadr) {
 		printk(KERN_ERR "Diskonchip ioremap failed: 0x%x bytes at 0x%lx\n", DOC_IOREMAP_LEN, physadr);
-		return -EIO;
+		ret = -EIO;
+		goto error_ioremap;
 	}
 
 	/* It's not possible to cleanly detect the DiskOnChip - the
@@ -1628,7 +1560,6 @@ static int __init doc_probe(unsigned long physadr)
 	    sizeof(struct nand_chip) + sizeof(struct doc_priv) + (2 * sizeof(struct nand_bbt_descr));
 	mtd = kzalloc(len, GFP_KERNEL);
 	if (!mtd) {
-		printk(KERN_ERR "DiskOnChip kmalloc (%d bytes) failed!\n", len);
 		ret = -ENOMEM;
 		goto fail;
 	}
@@ -1655,7 +1586,10 @@ static int __init doc_probe(unsigned long physadr)
 	nand->ecc.mode		= NAND_ECC_HW_SYNDROME;
 	nand->ecc.size		= 512;
 	nand->ecc.bytes		= 6;
-	nand->options		= NAND_USE_FLASH_BBT;
+	nand->ecc.strength	= 2;
+	nand->bbt_options	= NAND_BBT_USE_FLASH;
+	/* Skip the automatic BBT scan so we can run it manually */
+	nand->options		|= NAND_SKIP_BBTSCAN;
 
 	doc->physadr		= physadr;
 	doc->virtadr		= virtadr;
@@ -1673,13 +1607,13 @@ static int __init doc_probe(unsigned long physadr)
 	else
 		numchips = doc2001_init(mtd);
 
-	if ((ret = nand_scan(mtd, numchips))) {
+	if ((ret = nand_scan(mtd, numchips)) || (ret = doc->late_init(mtd))) {
 		/* DBB note: i believe nand_release is necessary here, as
 		   buffers may have been allocated in nand_base.  Check with
 		   Thomas. FIX ME! */
-		/* nand_release will call del_mtd_device, but we haven't yet
-		   added it.  This is handled without incident by
-		   del_mtd_device, as far as I can tell. */
+		/* nand_release will call mtd_device_unregister, but we
+		   haven't yet added it.  This is handled without incident by
+		   mtd_device_unregister, as far as I can tell. */
 		nand_release(mtd);
 		kfree(mtd);
 		goto fail;
@@ -1695,6 +1629,10 @@ static int __init doc_probe(unsigned long physadr)
 	WriteDOC(save_control, virtadr, DOCControl);
  fail:
 	iounmap(virtadr);
+
+error_ioremap:
+	release_mem_region(physadr, DOC_IOREMAP_LEN);
+
 	return ret;
 }
 
@@ -1711,6 +1649,7 @@ static void release_nanddoc(void)
 		nextmtd = doc->nextdoc;
 		nand_release(mtd);
 		iounmap(doc->virtadr);
+		release_mem_region(doc->physadr, DOC_IOREMAP_LEN);
 		kfree(mtd);
 	}
 }

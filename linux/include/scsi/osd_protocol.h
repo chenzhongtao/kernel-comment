@@ -4,7 +4,7 @@
  * Copyright (C) 2008 Panasas Inc.  All rights reserved.
  *
  * Authors:
- *   Boaz Harrosh <bharrosh@panasas.com>
+ *   Boaz Harrosh <ooo@electrozaur.com>
  *   Benny Halevy <bhalevy@panasas.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -17,6 +17,7 @@
 #define __OSD_PROTOCOL_H__
 
 #include <linux/types.h>
+#include <linux/kernel.h>
 #include <asm/unaligned.h>
 #include <scsi/scsi.h>
 
@@ -106,7 +107,7 @@ enum osd_attributes_mode {
  *		int exponent: 04;
  *	}
  */
-typedef __be32 __bitwise osd_cdb_offset;
+typedef __be32 osd_cdb_offset;
 
 enum {
 	OSD_OFFSET_UNUSED = 0xFFFFFFFF,
@@ -262,16 +263,16 @@ static inline struct osd_cdb_head *osd_cdb_head(struct osd_cdb *ocdb)
  * Ex name = FORMAT_OSD we have OSD_ACT_FORMAT_OSD && OSDv1_ACT_FORMAT_OSD
  */
 #define OSD_ACT___(Name, Num) \
-	OSD_ACT_##Name = __constant_cpu_to_be16(0x8880 + Num), \
-	OSDv1_ACT_##Name = __constant_cpu_to_be16(0x8800 + Num),
+	OSD_ACT_##Name = cpu_to_be16(0x8880 + Num), \
+	OSDv1_ACT_##Name = cpu_to_be16(0x8800 + Num),
 
 /* V2 only actions */
 #define OSD_ACT_V2(Name, Num) \
-	OSD_ACT_##Name = __constant_cpu_to_be16(0x8880 + Num),
+	OSD_ACT_##Name = cpu_to_be16(0x8880 + Num),
 
 #define OSD_ACT_V1_V2(Name, Num1, Num2) \
-	OSD_ACT_##Name = __constant_cpu_to_be16(Num2), \
-	OSDv1_ACT_##Name = __constant_cpu_to_be16(Num1),
+	OSD_ACT_##Name = cpu_to_be16(Num2), \
+	OSDv1_ACT_##Name = cpu_to_be16(Num1),
 
 enum osd_service_actions {
 	OSD_ACT_V2(OBJECT_STRUCTURE_CHECK,	0x00)
@@ -495,7 +496,7 @@ struct osd_timestamp {
  */
 
 struct osd_key_identifier {
-	u8 id[7]; /* if you know why 7 please email bharrosh@panasas.com */
+	u8 id[7]; /* if you know why 7 please email ooo@electrozaur.com */
 } __packed;
 
 /* for osd_capability.format */
@@ -629,5 +630,47 @@ static inline void osd_sec_set_caps(struct osd_capability_head *cap,
 	 */
 	put_unaligned_le16(bit_mask, &cap->permissions_bit_mask);
 }
+
+/* osd2r05a sec 5.3: CDB continuation segment formats */
+enum osd_continuation_segment_format {
+	CDB_CONTINUATION_FORMAT_V2 = 0x01,
+};
+
+struct osd_continuation_segment_header {
+	u8	format;
+	u8	reserved1;
+	__be16	service_action;
+	__be32	reserved2;
+	u8	integrity_check[OSDv2_CRYPTO_KEYID_SIZE];
+} __packed;
+
+/* osd2r05a sec 5.4.1: CDB continuation descriptors */
+enum osd_continuation_descriptor_type {
+	NO_MORE_DESCRIPTORS = 0x0000,
+	SCATTER_GATHER_LIST = 0x0001,
+	QUERY_LIST = 0x0002,
+	USER_OBJECT = 0x0003,
+	COPY_USER_OBJECT_SOURCE = 0x0101,
+	EXTENSION_CAPABILITIES = 0xFFEE
+};
+
+struct osd_continuation_descriptor_header {
+	__be16	type;
+	u8	reserved;
+	u8	pad_length;
+	__be32	length;
+} __packed;
+
+
+/* osd2r05a sec 5.4.2: Scatter/gather list */
+struct osd_sg_list_entry {
+	__be64 offset;
+	__be64 len;
+};
+
+struct osd_sg_continuation_descriptor {
+	struct osd_continuation_descriptor_header hdr;
+	struct osd_sg_list_entry entries[];
+};
 
 #endif /* ndef __OSD_PROTOCOL_H__ */

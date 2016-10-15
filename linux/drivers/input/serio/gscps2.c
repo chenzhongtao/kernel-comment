@@ -6,7 +6,7 @@
  * Copyright (c) 2002 Thibaut Varene <varenet@parisc-linux.org>
  *
  * Pieces of code based on linux-2.4's hp_mouse.c & hp_keyb.c
- * 	Copyright (c) 1999 Alex deVries <alex@onefishtwo.ca>
+ *	Copyright (c) 1999 Alex deVries <alex@onefishtwo.ca>
  *	Copyright (c) 1999-2000 Philipp Rumpf <prumpf@tux.org>
  *	Copyright (c) 2000 Xavier Debacker <debackex@esiee.fr>
  *	Copyright (c) 2000-2001 Thomas Marteau <marteaut@esiee.fr>
@@ -24,13 +24,13 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/serio.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
-#include <linux/pci_ids.h>
 
 #include <asm/irq.h>
 #include <asm/io.h>
@@ -39,7 +39,6 @@
 MODULE_AUTHOR("Laurent Canet <canetl@esiee.fr>, Thibaut Varene <varenet@parisc-linux.org>, Helge Deller <deller@gmx.de>");
 MODULE_DESCRIPTION("HP GSC PS2 port driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(parisc, gscps2_device_tbl);
 
 #define PFX "gscps2.c: "
 
@@ -326,7 +325,7 @@ static void gscps2_close(struct serio *port)
  * @return: success/error report
  */
 
-static int __init gscps2_probe(struct parisc_device *dev)
+static int gscps2_probe(struct parisc_device *dev)
 {
 	struct gscps2port *ps2port;
 	struct serio *serio;
@@ -357,7 +356,7 @@ static int __init gscps2_probe(struct parisc_device *dev)
 	gscps2_reset(ps2port);
 	ps2port->id = readb(ps2port->addr + GSC_ID) & 0x0f;
 
-	snprintf(serio->name, sizeof(serio->name), "GSC PS/2 %s",
+	snprintf(serio->name, sizeof(serio->name), "gsc-ps2-%s",
 		 (ps2port->id == GSC_ID_KEYBOARD) ? "keyboard" : "mouse");
 	strlcpy(serio->phys, dev_name(&dev->dev), sizeof(serio->phys));
 	serio->id.type		= SERIO_8042;
@@ -413,7 +412,7 @@ fail_nomem:
  * @return: success/error report
  */
 
-static int __devexit gscps2_remove(struct parisc_device *dev)
+static int gscps2_remove(struct parisc_device *dev)
 {
 	struct gscps2port *ps2port = dev_get_drvdata(&dev->dev);
 
@@ -438,6 +437,7 @@ static struct parisc_device_id gscps2_device_tbl[] = {
 #endif
 	{ 0, }	/* 0 terminated list */
 };
+MODULE_DEVICE_TABLE(parisc, gscps2_device_tbl);
 
 static struct parisc_driver parisc_ps2_driver = {
 	.name		= "gsc_ps2",

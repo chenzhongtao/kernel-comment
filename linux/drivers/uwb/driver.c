@@ -61,7 +61,7 @@
 
 
 /**
- * If a beacon dissapears for longer than this, then we consider the
+ * If a beacon disappears for longer than this, then we consider the
  * device who was represented by that beacon to be gone.
  *
  * ECMA-368[17.2.3, last para] establishes that a device must not
@@ -74,13 +74,16 @@
 unsigned long beacon_timeout_ms = 500;
 
 static
-ssize_t beacon_timeout_ms_show(struct class *class, char *buf)
+ssize_t beacon_timeout_ms_show(struct class *class,
+				struct class_attribute *attr,
+				char *buf)
 {
 	return scnprintf(buf, PAGE_SIZE, "%lu\n", beacon_timeout_ms);
 }
 
 static
 ssize_t beacon_timeout_ms_store(struct class *class,
+				struct class_attribute *attr,
 				const char *buf, size_t size)
 {
 	unsigned long bt;
@@ -118,9 +121,19 @@ static int __init uwb_subsys_init(void)
 	result = class_register(&uwb_rc_class);
 	if (result < 0)
 		goto error_uwb_rc_class_register;
+
+	/* Register the UWB bus */
+	result = bus_register(&uwb_bus_type);
+	if (result) {
+		pr_err("%s - registering bus driver failed\n", __func__);
+		goto exit_bus;
+	}
+
 	uwb_dbg_init();
 	return 0;
 
+exit_bus:
+	class_unregister(&uwb_rc_class);
 error_uwb_rc_class_register:
 	uwb_est_destroy();
 error_est_init:
@@ -131,6 +144,7 @@ module_init(uwb_subsys_init);
 static void __exit uwb_subsys_exit(void)
 {
 	uwb_dbg_exit();
+	bus_unregister(&uwb_bus_type);
 	class_unregister(&uwb_rc_class);
 	uwb_est_destroy();
 	return;

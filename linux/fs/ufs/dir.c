@@ -31,7 +31,7 @@
  * len <= UFS_MAXNAMLEN and de != NULL are guaranteed by caller.
  */
 static inline int ufs_match(struct super_block *sb, int len,
-		const char * const name, struct ufs_dir_entry * de)
+		const unsigned char *name, struct ufs_dir_entry *de)
 {
 	if (len != ufs_get_de_namlen(sb, de))
 		return 0;
@@ -65,18 +65,13 @@ static inline void ufs_put_page(struct page *page)
 	page_cache_release(page);
 }
 
-static inline unsigned long ufs_dir_pages(struct inode *inode)
-{
-	return (inode->i_size+PAGE_CACHE_SIZE-1)>>PAGE_CACHE_SHIFT;
-}
-
-ino_t ufs_inode_by_name(struct inode *dir, struct dentry *dentry)
+ino_t ufs_inode_by_name(struct inode *dir, const struct qstr *qstr)
 {
 	ino_t res = 0;
 	struct ufs_dir_entry *de;
 	struct page *page;
 	
-	de = ufs_find_entry(dir, dentry, &page);
+	de = ufs_find_entry(dir, qstr, &page);
 	if (de) {
 		res = fs32_to_cpu(dir->i_sb, de->d_ino);
 		ufs_put_page(page);
@@ -87,7 +82,8 @@ ino_t ufs_inode_by_name(struct inode *dir, struct dentry *dentry)
 
 /* Releases the page */
 void ufs_set_link(struct inode *dir, struct ufs_dir_entry *de,
-		  struct page *page, struct inode *inode)
+		  struct page *page, struct inode *inode,
+		  bool update_times)
 {
 	loff_t pos = page_offset(page) +
 			(char *) de - (char *) page_address(page);
@@ -95,8 +91,7 @@ void ufs_set_link(struct inode *dir, struct ufs_dir_entry *de,
 	int err;
 
 	lock_page(page);
-	err = __ufs_write_begin(NULL, page->mapping, pos, len,
-				AOP_FLAG_UNINTERRUPTIBLE, &page, NULL);
+	err = ufs_prepare_chunk(page, pos, len);
 	BUG_ON(err);
 
 	de->d_ino = cpu_to_fs32(dir->i_sb, inode->i_ino);
@@ -104,7 +99,8 @@ void ufs_set_link(struct inode *dir, struct ufs_dir_entry *de,
 
 	err = ufs_commit_chunk(page, pos, len);
 	ufs_put_page(page);
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
+	if (update_times)
+		dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
 	mark_inode_dirty(dir);
 }
 
@@ -249,15 +245,15 @@ struct ufs_dir_entry *ufs_dotdot(struct inode *dir, struct page **p)
  * (as a parameter - res_dir). Page is returned mapped and unlocked.
  * Entry is guaranteed to be valid.
  */
-struct ufs_dir_entry *ufs_find_entry(struct inode *dir, struct dentry *dentry,
+struct ufs_dir_entry *ufs_find_entry(struct inode *dir, const struct qstr *qstr,
 				     struct page **res_page)
 {
 	struct super_block *sb = dir->i_sb;
-	const char *name = dentry->d_name.name;
-	int namelen = dentry->d_name.len;
+	const unsigned char *name = qstr->name;
+	int namelen = qstr->len;
 	unsigned reclen = UFS_DIR_REC_LEN(namelen);
 	unsigned long start, n;
-	unsigned long npages = ufs_dir_pages(dir);
+	unsigned long npages = dir_pages(dir);
 	struct page *page = NULL;
 	struct ufs_inode_info *ui = UFS_I(dir);
 	struct ufs_dir_entry *de;
@@ -312,8 +308,8 @@ found:
  */
 int ufs_add_link(struct dentry *dentry, struct inode *inode)
 {
-	struct inode *dir = dentry->d_parent->d_inode;
-	const char *name = dentry->d_name.name;
+	struct inode *dir = d_inode(dentry->d_parent);
+	const unsigned char *name = dentry->d_name.name;
 	int namelen = dentry->d_name.len;
 	struct super_block *sb = dir->i_sb;
 	unsigned reclen = UFS_DIR_REC_LEN(namelen);
@@ -321,7 +317,7 @@ int ufs_add_link(struct dentry *dentry, struct inode *inode)
 	unsigned short rec_len, name_len;
 	struct page *page = NULL;
 	struct ufs_dir_entry *de;
-	unsigned long npages = ufs_dir_pages(dir);
+	unsigned long npages = dir_pages(dir);
 	unsigned long n;
 	char *kaddr;
 	loff_t pos;
@@ -381,8 +377,7 @@ int ufs_add_link(struct dentry *dentry, struct inode *inode)
 got_it:
 	pos = page_offset(page) +
 			(char*)de - (char*)page_address(page);
-	err = __ufs_write_begin(NULL, page->mapping, pos, rec_len,
-				AOP_FLAG_UNINTERRUPTIBLE, &page, NULL);
+	err = ufs_prepare_chunk(page, pos, rec_len);
 	if (err)
 		goto out_unlock;
 	if (de->d_ino) {
@@ -432,16 +427,16 @@ ufs_validate_entry(struct super_block *sb, char *base,
  * This is blatantly stolen from ext2fs
  */
 static int
-ufs_readdir(struct file *filp, void *dirent, filldir_t filldir)
+ufs_readdir(struct file *file, struct dir_context *ctx)
 {
-	loff_t pos = filp->f_pos;
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	loff_t pos = ctx->pos;
+	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
 	unsigned int offset = pos & ~PAGE_CACHE_MASK;
 	unsigned long n = pos >> PAGE_CACHE_SHIFT;
-	unsigned long npages = ufs_dir_pages(inode);
+	unsigned long npages = dir_pages(inode);
 	unsigned chunk_mask = ~(UFS_SB(sb)->s_uspi->s_dirblksize - 1);
-	int need_revalidate = filp->f_version != inode->i_version;
+	int need_revalidate = file->f_version != inode->i_version;
 	unsigned flags = UFS_SB(sb)->s_flags;
 
 	UFSD("BEGIN\n");
@@ -459,16 +454,16 @@ ufs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 			ufs_error(sb, __func__,
 				  "bad page in #%lu",
 				  inode->i_ino);
-			filp->f_pos += PAGE_CACHE_SIZE - offset;
+			ctx->pos += PAGE_CACHE_SIZE - offset;
 			return -EIO;
 		}
 		kaddr = page_address(page);
 		if (unlikely(need_revalidate)) {
 			if (offset) {
 				offset = ufs_validate_entry(sb, kaddr, offset, chunk_mask);
-				filp->f_pos = (n<<PAGE_CACHE_SHIFT) + offset;
+				ctx->pos = (n<<PAGE_CACHE_SHIFT) + offset;
 			}
-			filp->f_version = inode->i_version;
+			file->f_version = inode->i_version;
 			need_revalidate = 0;
 		}
 		de = (struct ufs_dir_entry *)(kaddr+offset);
@@ -481,10 +476,7 @@ ufs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				return -EIO;
 			}
 			if (de->d_ino) {
-				int over;
 				unsigned char d_type = DT_UNKNOWN;
-
-				offset = (char *)de - kaddr;
 
 				UFSD("filldir(%s,%u)\n", de->d_name,
 				      fs32_to_cpu(sb, de->d_ino));
@@ -493,16 +485,15 @@ ufs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				if ((flags & UFS_DE_MASK) == UFS_DE_44BSD)
 					d_type = de->d_u.d_44.d_type;
 
-				over = filldir(dirent, de->d_name,
+				if (!dir_emit(ctx, de->d_name,
 					       ufs_get_de_namlen(sb, de),
-						(n<<PAGE_CACHE_SHIFT) | offset,
-					       fs32_to_cpu(sb, de->d_ino), d_type);
-				if (over) {
+					       fs32_to_cpu(sb, de->d_ino),
+					       d_type)) {
 					ufs_put_page(page);
 					return 0;
 				}
 			}
-			filp->f_pos += fs16_to_cpu(sb, de->d_reclen);
+			ctx->pos += fs16_to_cpu(sb, de->d_reclen);
 		}
 		ufs_put_page(page);
 	}
@@ -518,7 +509,6 @@ int ufs_delete_entry(struct inode *inode, struct ufs_dir_entry *dir,
 		     struct page * page)
 {
 	struct super_block *sb = inode->i_sb;
-	struct address_space *mapping = page->mapping;
 	char *kaddr = page_address(page);
 	unsigned from = ((char*)dir - kaddr) & ~(UFS_SB(sb)->s_uspi->s_dirblksize - 1);
 	unsigned to = ((char*)dir - kaddr) + fs16_to_cpu(sb, dir->d_reclen);
@@ -549,8 +539,7 @@ int ufs_delete_entry(struct inode *inode, struct ufs_dir_entry *dir,
 
 	pos = page_offset(page) + from;
 	lock_page(page);
-	err = __ufs_write_begin(NULL, mapping, pos, to - from,
-				AOP_FLAG_UNINTERRUPTIBLE, &page, NULL);
+	err = ufs_prepare_chunk(page, pos, to - from);
 	BUG_ON(err);
 	if (pde)
 		pde->d_reclen = cpu_to_fs16(sb, to - from);
@@ -577,8 +566,7 @@ int ufs_make_empty(struct inode * inode, struct inode *dir)
 	if (!page)
 		return -ENOMEM;
 
-	err = __ufs_write_begin(NULL, mapping, 0, chunk_size,
-				AOP_FLAG_UNINTERRUPTIBLE, &page, NULL);
+	err = ufs_prepare_chunk(page, 0, chunk_size);
 	if (err) {
 		unlock_page(page);
 		goto fail;
@@ -617,7 +605,7 @@ int ufs_empty_dir(struct inode * inode)
 {
 	struct super_block *sb = inode->i_sb;
 	struct page *page = NULL;
-	unsigned long i, npages = ufs_dir_pages(inode);
+	unsigned long i, npages = dir_pages(inode);
 
 	for (i = 0; i < npages; i++) {
 		char *kaddr;
@@ -665,7 +653,7 @@ not_empty:
 
 const struct file_operations ufs_dir_operations = {
 	.read		= generic_read_dir,
-	.readdir	= ufs_readdir,
-	.fsync		= simple_fsync,
+	.iterate	= ufs_readdir,
+	.fsync		= generic_file_fsync,
 	.llseek		= generic_file_llseek,
 };

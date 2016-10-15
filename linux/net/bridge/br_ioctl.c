@@ -15,23 +15,25 @@
 #include <linux/kernel.h>
 #include <linux/if_bridge.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 #include <linux/times.h>
 #include <net/net_namespace.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
 
-/* called with RTNL */
 static int get_bridge_ifindices(struct net *net, int *indices, int num)
 {
 	struct net_device *dev;
 	int i = 0;
 
-	for_each_netdev(net, dev) {
+	rcu_read_lock();
+	for_each_netdev_rcu(net, dev) {
 		if (i >= num)
 			break;
 		if (dev->priv_flags & IFF_EBRIDGE)
 			indices[i++] = dev->ifindex;
 	}
+	rcu_read_unlock();
 
 	return i;
 }
@@ -81,15 +83,17 @@ static int get_fdb_entries(struct net_bridge *br, void __user *userbuf,
 	return num;
 }
 
+/* called with RTNL */
 static int add_del_if(struct net_bridge *br, int ifindex, int isadd)
 {
+	struct net *net = dev_net(br->dev);
 	struct net_device *dev;
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
-	dev = dev_get_by_index(dev_net(br->dev), ifindex);
+	dev = __dev_get_by_index(net, ifindex);
 	if (dev == NULL)
 		return -EINVAL;
 
@@ -98,14 +102,13 @@ static int add_del_if(struct net_bridge *br, int ifindex, int isadd)
 	else
 		ret = br_del_if(br, dev);
 
-	dev_put(dev);
 	return ret;
 }
 
 /*
  * Legacy ioctl's through SIOCDEVPRIVATE
  * This interface is deprecated because it was too difficult to
- * to do the translation for 32/64bit ioctl compatability.
+ * to do the translation for 32/64bit ioctl compatibility.
  */
 static int old_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
@@ -177,50 +180,28 @@ static int old_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	}
 
 	case BRCTL_SET_BRIDGE_FORWARD_DELAY:
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
-		spin_lock_bh(&br->lock);
-		br->bridge_forward_delay = clock_t_to_jiffies(args[1]);
-		if (br_is_root_bridge(br))
-			br->forward_delay = br->bridge_forward_delay;
-		spin_unlock_bh(&br->lock);
-		return 0;
+		return br_set_forward_delay(br, args[1]);
 
 	case BRCTL_SET_BRIDGE_HELLO_TIME:
-	{
-		unsigned long t = clock_t_to_jiffies(args[1]);
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
-		if (t < HZ)
-			return -EINVAL;
-
-		spin_lock_bh(&br->lock);
-		br->bridge_hello_time = t;
-		if (br_is_root_bridge(br))
-			br->hello_time = br->bridge_hello_time;
-		spin_unlock_bh(&br->lock);
-		return 0;
-	}
+		return br_set_hello_time(br, args[1]);
 
 	case BRCTL_SET_BRIDGE_MAX_AGE:
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
-		spin_lock_bh(&br->lock);
-		br->bridge_max_age = clock_t_to_jiffies(args[1]);
-		if (br_is_root_bridge(br))
-			br->max_age = br->bridge_max_age;
-		spin_unlock_bh(&br->lock);
-		return 0;
+		return br_set_max_age(br, args[1]);
 
 	case BRCTL_SET_AGEING_TIME:
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
-		br->ageing_time = clock_t_to_jiffies(args[1]);
-		return 0;
+		return br_set_ageing_time(br, args[1]);
 
 	case BRCTL_GET_PORT_INFO:
 	{
@@ -256,37 +237,32 @@ static int old_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	}
 
 	case BRCTL_SET_BRIDGE_STP_STATE:
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
 		br_stp_set_enabled(br, args[1]);
 		return 0;
 
 	case BRCTL_SET_BRIDGE_PRIORITY:
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
-		spin_lock_bh(&br->lock);
 		br_stp_set_bridge_priority(br, args[1]);
-		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_PORT_PRIORITY:
 	{
 		struct net_bridge_port *p;
-		int ret = 0;
+		int ret;
 
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
-
-		if (args[2] >= (1<<(16-BR_PORT_BITS)))
-			return -ERANGE;
 
 		spin_lock_bh(&br->lock);
 		if ((p = br_get_port(br, args[1])) == NULL)
 			ret = -EINVAL;
 		else
-			br_stp_set_port_priority(p, args[2]);
+			ret = br_stp_set_port_priority(p, args[2]);
 		spin_unlock_bh(&br->lock);
 		return ret;
 	}
@@ -294,15 +270,17 @@ static int old_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	case BRCTL_SET_PATH_COST:
 	{
 		struct net_bridge_port *p;
-		int ret = 0;
+		int ret;
 
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
+		spin_lock_bh(&br->lock);
 		if ((p = br_get_port(br, args[1])) == NULL)
 			ret = -EINVAL;
 		else
-			br_stp_set_path_cost(p, args[2]);
+			ret = br_stp_set_path_cost(p, args[2]);
+		spin_unlock_bh(&br->lock);
 
 		return ret;
 	}
@@ -351,7 +329,7 @@ static int old_deviceless(struct net *net, void __user *uarg)
 	{
 		char buf[IFNAMSIZ];
 
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
 		if (copy_from_user(buf, (void __user *)args[1], IFNAMSIZ))
@@ -381,7 +359,7 @@ int br_ioctl_deviceless_stub(struct net *net, unsigned int cmd, void __user *uar
 	{
 		char buf[IFNAMSIZ];
 
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 
 		if (copy_from_user(buf, uarg, IFNAMSIZ))
@@ -401,7 +379,7 @@ int br_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
 	struct net_bridge *br = netdev_priv(dev);
 
-	switch(cmd) {
+	switch (cmd) {
 	case SIOCDEVPRIVATE:
 		return old_dev_ioctl(dev, rq, cmd);
 
@@ -411,6 +389,6 @@ int br_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 	}
 
-	pr_debug("Bridge does not support ioctl 0x%x\n", cmd);
+	br_debug(br, "Bridge does not support ioctl 0x%x\n", cmd);
 	return -EOPNOTSUPP;
 }

@@ -1,11 +1,10 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/init.h>
 #include <asm/processor.h>
 #include <asm/msr.h>
 #include "cpu.h"
 
-static void __cpuinit early_init_transmeta(struct cpuinfo_x86 *c)
+static void early_init_transmeta(struct cpuinfo_x86 *c)
 {
 	u32 xlvl;
 
@@ -17,7 +16,7 @@ static void __cpuinit early_init_transmeta(struct cpuinfo_x86 *c)
 	}
 }
 
-static void __cpuinit init_transmeta(struct cpuinfo_x86 *c)
+static void init_transmeta(struct cpuinfo_x86 *c)
 {
 	unsigned int cap_mask, uk, max, dummy;
 	unsigned int cms_rev1, cms_rev2;
@@ -26,7 +25,7 @@ static void __cpuinit init_transmeta(struct cpuinfo_x86 *c)
 
 	early_init_transmeta(c);
 
-	display_cacheinfo(c);
+	cpu_detect_cache_sizes(c);
 
 	/* Print CMS and CPU revision */
 	max = cpuid_eax(0x80860000);
@@ -98,7 +97,7 @@ static void __cpuinit init_transmeta(struct cpuinfo_x86 *c)
 #endif
 }
 
-static const struct cpu_dev __cpuinitconst transmeta_cpu_dev = {
+static const struct cpu_dev transmeta_cpu_dev = {
 	.c_vendor	= "Transmeta",
 	.c_ident	= { "GenuineTMx86", "TransmetaCPU" },
 	.c_early_init	= early_init_transmeta,

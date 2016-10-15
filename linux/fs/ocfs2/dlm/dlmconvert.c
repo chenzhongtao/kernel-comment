@@ -28,7 +28,6 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/init.h>
 #include <linux/sysctl.h>
@@ -124,13 +123,12 @@ static enum dlm_status __dlmconvert_master(struct dlm_ctxt *dlm,
 					   int *kick_thread)
 {
 	enum dlm_status status = DLM_NORMAL;
-	struct list_head *iter;
 	struct dlm_lock *tmplock=NULL;
 
 	assert_spin_locked(&res->spinlock);
 
-	mlog_entry("type=%d, convert_type=%d, new convert_type=%d\n",
-		   lock->ml.type, lock->ml.convert_type, type);
+	mlog(0, "type=%d, convert_type=%d, new convert_type=%d\n",
+	     lock->ml.type, lock->ml.convert_type, type);
 
 	spin_lock(&lock->spinlock);
 
@@ -186,16 +184,14 @@ static enum dlm_status __dlmconvert_master(struct dlm_ctxt *dlm,
 
 	/* upconvert from here on */
 	status = DLM_NORMAL;
-	list_for_each(iter, &res->granted) {
-		tmplock = list_entry(iter, struct dlm_lock, list);
+	list_for_each_entry(tmplock, &res->granted, list) {
 		if (tmplock == lock)
 			continue;
 		if (!dlm_lock_compatible(tmplock->ml.type, type))
 			goto switch_queues;
 	}
 
-	list_for_each(iter, &res->converting) {
-		tmplock = list_entry(iter, struct dlm_lock, list);
+	list_for_each_entry(tmplock, &res->converting, list) {
 		if (!dlm_lock_compatible(tmplock->ml.type, type))
 			goto switch_queues;
 		/* existing conversion requests take precedence */
@@ -291,6 +287,19 @@ enum dlm_status dlmconvert_remote(struct dlm_ctxt *dlm,
 		status = DLM_DENIED;
 		goto bail;
 	}
+
+	if (lock->ml.type == type && lock->ml.convert_type == LKM_IVMODE) {
+		mlog(0, "last convert request returned DLM_RECOVERING, but "
+		     "owner has already queued and sent ast to me. res %.*s, "
+		     "(cookie=%u:%llu, type=%d, conv=%d)\n",
+		     res->lockname.len, res->lockname.name,
+		     dlm_get_lock_cookie_node(be64_to_cpu(lock->ml.cookie)),
+		     dlm_get_lock_cookie_seq(be64_to_cpu(lock->ml.cookie)),
+		     lock->ml.type, lock->ml.convert_type);
+		status = DLM_NORMAL;
+		goto bail;
+	}
+
 	res->state |= DLM_LOCK_RES_IN_PROGRESS;
 	/* move lock to local convert queue */
 	/* do not alter lock refcount.  switching lists. */
@@ -319,13 +328,22 @@ enum dlm_status dlmconvert_remote(struct dlm_ctxt *dlm,
 
 	spin_lock(&res->spinlock);
 	res->state &= ~DLM_LOCK_RES_IN_PROGRESS;
-	lock->convert_pending = 0;
-	/* if it failed, move it back to granted queue */
+	/* if it failed, move it back to granted queue.
+	 * if master returns DLM_NORMAL and then down before sending ast,
+	 * it may have already been moved to granted queue, reset to
+	 * DLM_RECOVERING and retry convert */
 	if (status != DLM_NORMAL) {
 		if (status != DLM_NOTQUEUED)
 			dlm_error(status);
 		dlm_revert_pending_convert(res, lock);
+	} else if (!lock->convert_pending) {
+		mlog(0, "%s: res %.*s, owner died and lock has been moved back "
+				"to granted list, retry convert.\n",
+				dlm->name, res->lockname.len, res->lockname.name);
+		status = DLM_RECOVERING;
 	}
+
+	lock->convert_pending = 0;
 bail:
 	spin_unlock(&res->spinlock);
 
@@ -354,7 +372,7 @@ static enum dlm_status dlm_send_remote_convert_request(struct dlm_ctxt *dlm,
 	struct kvec vec[2];
 	size_t veclen = 1;
 
-	mlog_entry("%.*s\n", res->lockname.len, res->lockname.name);
+	mlog(0, "%.*s\n", res->lockname.len, res->lockname.name);
 
 	memset(&convert, 0, sizeof(struct dlm_convert_lock));
 	convert.node_idx = dlm->node_num;
@@ -391,12 +409,14 @@ static enum dlm_status dlm_send_remote_convert_request(struct dlm_ctxt *dlm,
 		} else if (ret != DLM_NORMAL && ret != DLM_NOTQUEUED)
 			dlm_error(ret);
 	} else {
-		mlog_errno(tmpret);
+		mlog(ML_ERROR, "Error %d when sending message %u (key 0x%x) to "
+		     "node %u\n", tmpret, DLM_CONVERT_LOCK_MSG, dlm->key,
+		     res->owner);
 		if (dlm_is_host_down(tmpret)) {
 			/* instead of logging the same network error over
 			 * and over, sleep here and wait for the heartbeat
 			 * to notice the node is dead.  times out after 5s. */
-			dlm_wait_for_node_death(dlm, res->owner, 
+			dlm_wait_for_node_death(dlm, res->owner,
 						DLM_NODE_DEATH_WAIT_MAX);
 			ret = DLM_RECOVERING;
 			mlog(0, "node %u died so returning DLM_RECOVERING "
@@ -423,8 +443,8 @@ int dlm_convert_lock_handler(struct o2net_msg *msg, u32 len, void *data,
 	struct dlm_ctxt *dlm = data;
 	struct dlm_convert_lock *cnv = (struct dlm_convert_lock *)msg->buf;
 	struct dlm_lock_resource *res = NULL;
-	struct list_head *iter;
 	struct dlm_lock *lock = NULL;
+	struct dlm_lock *tmp_lock;
 	struct dlm_lockstatus *lksb;
 	enum dlm_status status = DLM_NORMAL;
 	u32 flags;
@@ -470,14 +490,13 @@ int dlm_convert_lock_handler(struct o2net_msg *msg, u32 len, void *data,
 		dlm_error(status);
 		goto leave;
 	}
-	list_for_each(iter, &res->granted) {
-		lock = list_entry(iter, struct dlm_lock, list);
-		if (lock->ml.cookie == cnv->cookie &&
-		    lock->ml.node == cnv->node_idx) {
+	list_for_each_entry(tmp_lock, &res->granted, list) {
+		if (tmp_lock->ml.cookie == cnv->cookie &&
+		    tmp_lock->ml.node == cnv->node_idx) {
+			lock = tmp_lock;
 			dlm_lock_get(lock);
 			break;
 		}
-		lock = NULL;
 	}
 	spin_unlock(&res->spinlock);
 	if (!lock) {

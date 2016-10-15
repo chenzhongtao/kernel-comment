@@ -123,10 +123,6 @@ static inline int translate_mode(struct file *file)
 #include "sound_calls.h"
 #include "dev_table.h"
 
-#ifndef DEB
-#define DEB(x)
-#endif
-
 #ifndef DDB
 #define DDB(x) do {} while (0)
 #endif
@@ -141,5 +137,7 @@ static inline int translate_mode(struct file *file)
 
 #define TIMER_ARMED	121234
 #define TIMER_NOT_ARMED	1
+
+#define MAX_MEM_BLOCKS 1024
 
 #endif

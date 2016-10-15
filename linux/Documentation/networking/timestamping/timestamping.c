@@ -41,9 +41,9 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 
-#include "asm/types.h"
-#include "linux/net_tstamp.h"
-#include "linux/errqueue.h"
+#include <asm/types.h>
+#include <linux/net_tstamp.h>
+#include <linux/errqueue.h>
 
 #ifndef SO_TIMESTAMPING
 # define SO_TIMESTAMPING         37
@@ -76,7 +76,6 @@ static void usage(const char *error)
 	       "  SOF_TIMESTAMPING_RX_HARDWARE - hardware time stamping of incoming packets\n"
 	       "  SOF_TIMESTAMPING_RX_SOFTWARE - software fallback for incoming packets\n"
 	       "  SOF_TIMESTAMPING_SOFTWARE - request reporting of software time stamps\n"
-	       "  SOF_TIMESTAMPING_SYS_HARDWARE - request reporting of transformed HW time stamps\n"
 	       "  SOF_TIMESTAMPING_RAW_HARDWARE - request reporting of raw HW time stamps\n"
 	       "  SIOCGSTAMP - check last socket time stamp\n"
 	       "  SIOCGSTAMPNS - more accurate socket time stamp\n");
@@ -164,7 +163,7 @@ static void printpacket(struct msghdr *msg, int res,
 
 	gettimeofday(&now, 0);
 
-	printf("%ld.%06ld: received %s data, %d bytes from %s, %d bytes control messages\n",
+	printf("%ld.%06ld: received %s data, %d bytes from %s, %zu bytes control messages\n",
 	       (long)now.tv_sec, (long)now.tv_usec,
 	       (recvmsg_flags & MSG_ERRQUEUE) ? "error" : "regular",
 	       res,
@@ -173,7 +172,7 @@ static void printpacket(struct msghdr *msg, int res,
 	for (cmsg = CMSG_FIRSTHDR(msg);
 	     cmsg;
 	     cmsg = CMSG_NXTHDR(msg, cmsg)) {
-		printf("   cmsg len %d: ", cmsg->cmsg_len);
+		printf("   cmsg len %zu: ", cmsg->cmsg_len);
 		switch (cmsg->cmsg_level) {
 		case SOL_SOCKET:
 			printf("SOL_SOCKET ");
@@ -202,9 +201,7 @@ static void printpacket(struct msghdr *msg, int res,
 				       (long)stamp->tv_sec,
 				       (long)stamp->tv_nsec);
 				stamp++;
-				printf("HW transformed %ld.%09ld ",
-				       (long)stamp->tv_sec,
-				       (long)stamp->tv_nsec);
+				/* skip deprecated HW transformed */
 				stamp++;
 				printf("HW raw %ld.%09ld",
 				       (long)stamp->tv_sec,
@@ -361,8 +358,6 @@ int main(int argc, char **argv)
 			so_timestamping_flags |= SOF_TIMESTAMPING_RX_SOFTWARE;
 		else if (!strcasecmp(argv[i], "SOF_TIMESTAMPING_SOFTWARE"))
 			so_timestamping_flags |= SOF_TIMESTAMPING_SOFTWARE;
-		else if (!strcasecmp(argv[i], "SOF_TIMESTAMPING_SYS_HARDWARE"))
-			so_timestamping_flags |= SOF_TIMESTAMPING_SYS_HARDWARE;
 		else if (!strcasecmp(argv[i], "SOF_TIMESTAMPING_RAW_HARDWARE"))
 			so_timestamping_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
 		else
@@ -370,7 +365,7 @@ int main(int argc, char **argv)
 	}
 
 	sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (socket < 0)
+	if (sock < 0)
 		bail("socket");
 
 	memset(&device, 0, sizeof(device));

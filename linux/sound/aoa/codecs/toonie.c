@@ -11,6 +11,7 @@
  */
 #include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 MODULE_AUTHOR("Johannes Berg <johannes@sipsolutions.net>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("toonie codec driver for snd-aoa");
@@ -91,7 +92,7 @@ static int toonie_init_codec(struct aoa_codec *codec)
 	if (toonie->codec.connected != 1)
 		return -ENOTCONN;
 
-	if (aoa_snd_device_new(SNDRV_DEV_LOWLEVEL, toonie, &ops)) {
+	if (aoa_snd_device_new(SNDRV_DEV_CODEC, toonie, &ops)) {
 		printk(KERN_ERR PFX "failed to create toonie snd device!\n");
 		return -ENODEV;
 	}

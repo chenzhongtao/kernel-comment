@@ -7,12 +7,7 @@
 #define _ASM_X86_SUSPEND_64_H
 
 #include <asm/desc.h>
-#include <asm/i387.h>
-
-static inline int arch_prepare_suspend(void)
-{
-	return 0;
-}
+#include <asm/fpu/api.h>
 
 /*
  * Image of the saved processor state, used by the low level ACPI suspend to
@@ -27,10 +22,11 @@ struct saved_context {
 	u16 ds, es, fs, gs, ss;
 	unsigned long gs_base, gs_kernel_base, fs_base;
 	unsigned long cr0, cr2, cr3, cr4, cr8;
+	u64 misc_enable;
+	bool misc_enable_saved;
 	unsigned long efer;
-	u16 gdt_pad;
-	u16 gdt_limit;
-	unsigned long gdt_base;
+	u16 gdt_pad; /* Unused */
+	struct desc_ptr gdt_desc;
 	u16 idt_pad;
 	u16 idt_limit;
 	unsigned long idt_base;

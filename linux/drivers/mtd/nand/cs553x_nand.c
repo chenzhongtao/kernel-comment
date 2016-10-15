@@ -197,19 +197,14 @@ static int __init cs553x_init_one(int cs, int mmio, unsigned long adr)
 	}
 
 	/* Allocate memory for MTD device structure and private data */
-	new_mtd = kmalloc(sizeof(struct mtd_info) + sizeof(struct nand_chip), GFP_KERNEL);
+	new_mtd = kzalloc(sizeof(struct mtd_info) + sizeof(struct nand_chip), GFP_KERNEL);
 	if (!new_mtd) {
-		printk(KERN_WARNING "Unable to allocate CS553X NAND MTD device structure.\n");
 		err = -ENOMEM;
 		goto out;
 	}
 
 	/* Get pointer to private data */
 	this = (struct nand_chip *)(&new_mtd[1]);
-
-	/* Initialize structures */
-	memset(new_mtd, 0, sizeof(struct mtd_info));
-	memset(this, 0, sizeof(struct nand_chip));
 
 	/* Link the private data with the MTD structure */
 	new_mtd->priv = this;
@@ -237,21 +232,28 @@ static int __init cs553x_init_one(int cs, int mmio, unsigned long adr)
 	this->ecc.hwctl  = cs_enable_hwecc;
 	this->ecc.calculate = cs_calculate_ecc;
 	this->ecc.correct  = nand_correct_data;
+	this->ecc.strength = 1;
 
 	/* Enable the following for a flash based bad block table */
-	this->options = NAND_USE_FLASH_BBT | NAND_NO_AUTOINCR;
+	this->bbt_options = NAND_BBT_USE_FLASH;
 
-	/* Scan to find existance of the device */
-	if (nand_scan(new_mtd, 1)) {
-		err = -ENXIO;
+	new_mtd->name = kasprintf(GFP_KERNEL, "cs553x_nand_cs%d", cs);
+	if (!new_mtd->name) {
+		err = -ENOMEM;
 		goto out_ior;
 	}
 
-	new_mtd->name = kasprintf(GFP_KERNEL, "cs553x_nand_cs%d", cs);
+	/* Scan to find existence of the device */
+	if (nand_scan(new_mtd, 1)) {
+		err = -ENXIO;
+		goto out_free;
+	}
 
 	cs553x_mtd[cs] = new_mtd;
 	goto out;
 
+out_free:
+	kfree(new_mtd->name);
 out_ior:
 	iounmap(this->IO_ADDR_R);
 out_mtd:
@@ -277,22 +279,11 @@ static int is_geode(void)
 	return 0;
 }
 
-
-#ifdef CONFIG_MTD_PARTITIONS
-static const char *part_probes[] = { "cmdlinepart", NULL };
-#endif
-
-
 static int __init cs553x_init(void)
 {
 	int err = -ENXIO;
 	int i;
 	uint64_t val;
-
-#ifdef CONFIG_MTD_PARTITIONS
-	int mtd_parts_nb = 0;
-	struct mtd_partition *mtd_parts = NULL;
-#endif
 
 	/* If the CPU isn't a Geode GX or LX, abort */
 	if (!is_geode())
@@ -322,19 +313,9 @@ static int __init cs553x_init(void)
 	   do mtdconcat etc. if we want to. */
 	for (i = 0; i < NR_CS553X_CONTROLLERS; i++) {
 		if (cs553x_mtd[i]) {
-
 			/* If any devices registered, return success. Else the last error. */
-#ifdef CONFIG_MTD_PARTITIONS
-			mtd_parts_nb = parse_mtd_partitions(cs553x_mtd[i], part_probes, &mtd_parts, 0);
-			if (mtd_parts_nb > 0) {
-				printk(KERN_NOTICE "Using command line partition definition\n");
-				add_mtd_partitions(cs553x_mtd[i], mtd_parts, mtd_parts_nb);
-			} else {
-				add_mtd_device(cs553x_mtd[i]);
-			}
-#else
-			add_mtd_device(cs553x_mtd[i]);
-#endif
+			mtd_device_parse_register(cs553x_mtd[i], NULL, NULL,
+						  NULL, 0);
 			err = 0;
 		}
 	}

@@ -13,10 +13,9 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
-
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
 #include <linux/kernel.h>
 
@@ -61,13 +60,6 @@ static struct list_head xt_osf_fingers[2];
 static const struct nla_policy xt_osf_policy[OSF_ATTR_MAX + 1] = {
 	[OSF_ATTR_FINGER]	= { .len = sizeof(struct xt_osf_user_finger) },
 };
-
-static void xt_osf_finger_free_rcu(struct rcu_head *rcu_head)
-{
-	struct xt_osf_finger *f = container_of(rcu_head, struct xt_osf_finger, rcu_head);
-
-	kfree(f);
-}
 
 static int xt_osf_add_callback(struct sock *ctnl, struct sk_buff *skb,
 			       const struct nlmsghdr *nlh,
@@ -133,7 +125,7 @@ static int xt_osf_remove_callback(struct sock *ctnl, struct sk_buff *skb,
 		 * We are protected by nfnl mutex.
 		 */
 		list_del_rcu(&sf->finger_entry);
-		call_rcu(&sf->rcu_head, xt_osf_finger_free_rcu);
+		kfree_rcu(sf, rcu_head);
 
 		err = 0;
 		break;
@@ -193,8 +185,8 @@ static inline int xt_osf_ttl(const struct sk_buff *skb, const struct xt_osf_info
 	return ip->ttl == f_ttl;
 }
 
-static bool xt_osf_match_packet(const struct sk_buff *skb,
-		const struct xt_match_param *p)
+static bool
+xt_osf_match_packet(const struct sk_buff *skb, struct xt_action_param *p)
 {
 	const struct xt_osf_info *info = p->matchinfo;
 	const struct iphdr *ip = ip_hdr(skb);
@@ -208,6 +200,7 @@ static bool xt_osf_match_packet(const struct sk_buff *skb,
 	unsigned char opts[MAX_IPOPTLEN];
 	const struct xt_osf_finger *kf;
 	const struct xt_osf_user_finger *f;
+	struct net *net = p->net;
 
 	if (!info)
 		return false;
@@ -232,6 +225,8 @@ static bool xt_osf_match_packet(const struct sk_buff *skb,
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(kf, &xt_osf_fingers[df], finger_entry) {
+		int foptsize, optnum;
+
 		f = &kf->finger;
 
 		if (!(info->flags & XT_OSF_LOG) && strcmp(info->genre, f->genre))
@@ -240,116 +235,116 @@ static bool xt_osf_match_packet(const struct sk_buff *skb,
 		optp = _optp;
 		fmatch = FMATCH_WRONG;
 
-		if (totlen == f->ss && xt_osf_ttl(skb, info, f->ttl)) {
-			int foptsize, optnum;
+		if (totlen != f->ss || !xt_osf_ttl(skb, info, f->ttl))
+			continue;
 
-			/*
-			 * Should not happen if userspace parser was written correctly.
-			 */
-			if (f->wss.wc >= OSF_WSS_MAX)
-				continue;
+		/*
+		 * Should not happen if userspace parser was written correctly.
+		 */
+		if (f->wss.wc >= OSF_WSS_MAX)
+			continue;
 
-			/* Check options */
+		/* Check options */
 
-			foptsize = 0;
-			for (optnum = 0; optnum < f->opt_num; ++optnum)
-				foptsize += f->opt[optnum].length;
+		foptsize = 0;
+		for (optnum = 0; optnum < f->opt_num; ++optnum)
+			foptsize += f->opt[optnum].length;
 
-			if (foptsize > MAX_IPOPTLEN ||
-				optsize > MAX_IPOPTLEN ||
-				optsize != foptsize)
-				continue;
+		if (foptsize > MAX_IPOPTLEN ||
+		    optsize > MAX_IPOPTLEN ||
+		    optsize != foptsize)
+			continue;
 
-			check_WSS = f->wss.wc;
+		check_WSS = f->wss.wc;
 
-			for (optnum = 0; optnum < f->opt_num; ++optnum) {
-				if (f->opt[optnum].kind == (*optp)) {
-					__u32 len = f->opt[optnum].length;
-					const __u8 *optend = optp + len;
-					int loop_cont = 0;
+		for (optnum = 0; optnum < f->opt_num; ++optnum) {
+			if (f->opt[optnum].kind == (*optp)) {
+				__u32 len = f->opt[optnum].length;
+				const __u8 *optend = optp + len;
+				int loop_cont = 0;
 
-					fmatch = FMATCH_OK;
+				fmatch = FMATCH_OK;
 
-					switch (*optp) {
-					case OSFOPT_MSS:
-						mss = optp[3];
-						mss <<= 8;
-						mss |= optp[2];
+				switch (*optp) {
+				case OSFOPT_MSS:
+					mss = optp[3];
+					mss <<= 8;
+					mss |= optp[2];
 
-						mss = ntohs(mss);
-						break;
-					case OSFOPT_TS:
-						loop_cont = 1;
-						break;
-					}
-
-					optp = optend;
-				} else
-					fmatch = FMATCH_OPT_WRONG;
-
-				if (fmatch != FMATCH_OK)
+					mss = ntohs((__force __be16)mss);
 					break;
-			}
-
-			if (fmatch != FMATCH_OPT_WRONG) {
-				fmatch = FMATCH_WRONG;
-
-				switch (check_WSS) {
-				case OSF_WSS_PLAIN:
-					if (f->wss.val == 0 || window == f->wss.val)
-						fmatch = FMATCH_OK;
-					break;
-				case OSF_WSS_MSS:
-					/*
-					 * Some smart modems decrease mangle MSS to 
-					 * SMART_MSS_2, so we check standard, decreased
-					 * and the one provided in the fingerprint MSS
-					 * values.
-					 */
-#define SMART_MSS_1	1460
-#define SMART_MSS_2	1448
-					if (window == f->wss.val * mss ||
-					    window == f->wss.val * SMART_MSS_1 ||
-					    window == f->wss.val * SMART_MSS_2)
-						fmatch = FMATCH_OK;
-					break;
-				case OSF_WSS_MTU:
-					if (window == f->wss.val * (mss + 40) ||
-					    window == f->wss.val * (SMART_MSS_1 + 40) ||
-					    window == f->wss.val * (SMART_MSS_2 + 40))
-						fmatch = FMATCH_OK;
-					break;
-				case OSF_WSS_MODULO:
-					if ((window % f->wss.val) == 0)
-						fmatch = FMATCH_OK;
+				case OSFOPT_TS:
+					loop_cont = 1;
 					break;
 				}
-			}
+
+				optp = optend;
+			} else
+				fmatch = FMATCH_OPT_WRONG;
 
 			if (fmatch != FMATCH_OK)
-				continue;
-
-			fcount++;
-
-			if (info->flags & XT_OSF_LOG)
-				nf_log_packet(p->family, p->hooknum, skb,
-					p->in, p->out, NULL,
-					"%s [%s:%s] : %pi4:%d -> %pi4:%d hops=%d\n",
-					f->genre, f->version, f->subtype,
-					&ip->saddr, ntohs(tcp->source),
-					&ip->daddr, ntohs(tcp->dest),
-					f->ttl - ip->ttl);
-
-			if ((info->flags & XT_OSF_LOG) &&
-			    info->loglevel == XT_OSF_LOGLEVEL_FIRST)
 				break;
 		}
+
+		if (fmatch != FMATCH_OPT_WRONG) {
+			fmatch = FMATCH_WRONG;
+
+			switch (check_WSS) {
+			case OSF_WSS_PLAIN:
+				if (f->wss.val == 0 || window == f->wss.val)
+					fmatch = FMATCH_OK;
+				break;
+			case OSF_WSS_MSS:
+				/*
+				 * Some smart modems decrease mangle MSS to
+				 * SMART_MSS_2, so we check standard, decreased
+				 * and the one provided in the fingerprint MSS
+				 * values.
+				 */
+#define SMART_MSS_1	1460
+#define SMART_MSS_2	1448
+				if (window == f->wss.val * mss ||
+				    window == f->wss.val * SMART_MSS_1 ||
+				    window == f->wss.val * SMART_MSS_2)
+					fmatch = FMATCH_OK;
+				break;
+			case OSF_WSS_MTU:
+				if (window == f->wss.val * (mss + 40) ||
+				    window == f->wss.val * (SMART_MSS_1 + 40) ||
+				    window == f->wss.val * (SMART_MSS_2 + 40))
+					fmatch = FMATCH_OK;
+				break;
+			case OSF_WSS_MODULO:
+				if ((window % f->wss.val) == 0)
+					fmatch = FMATCH_OK;
+				break;
+			}
+		}
+
+		if (fmatch != FMATCH_OK)
+			continue;
+
+		fcount++;
+
+		if (info->flags & XT_OSF_LOG)
+			nf_log_packet(net, p->family, p->hooknum, skb,
+				      p->in, p->out, NULL,
+				      "%s [%s:%s] : %pI4:%d -> %pI4:%d hops=%d\n",
+				      f->genre, f->version, f->subtype,
+				      &ip->saddr, ntohs(tcp->source),
+				      &ip->daddr, ntohs(tcp->dest),
+				      f->ttl - ip->ttl);
+
+		if ((info->flags & XT_OSF_LOG) &&
+		    info->loglevel == XT_OSF_LOGLEVEL_FIRST)
+			break;
 	}
 	rcu_read_unlock();
 
 	if (!fcount && (info->flags & XT_OSF_LOG))
-		nf_log_packet(p->family, p->hooknum, skb, p->in, p->out, NULL,
-			"Remote OS is not known: %pi4:%u -> %pi4:%u\n",
+		nf_log_packet(net, p->family, p->hooknum, skb, p->in,
+			      p->out, NULL,
+			"Remote OS is not known: %pI4:%u -> %pI4:%u\n",
 				&ip->saddr, ntohs(tcp->source),
 				&ip->daddr, ntohs(tcp->dest));
 
@@ -382,14 +377,14 @@ static int __init xt_osf_init(void)
 
 	err = nfnetlink_subsys_register(&xt_osf_nfnetlink);
 	if (err < 0) {
-		printk(KERN_ERR "Failed (%d) to register OSF nsfnetlink helper.\n", err);
+		pr_err("Failed to register OSF nsfnetlink helper (%d)\n", err);
 		goto err_out_exit;
 	}
 
 	err = xt_register_match(&xt_osf_match);
 	if (err) {
-		printk(KERN_ERR "Failed (%d) to register OS fingerprint "
-				"matching module.\n", err);
+		pr_err("Failed to register OS fingerprint "
+		       "matching module (%d)\n", err);
 		goto err_out_remove;
 	}
 
@@ -414,7 +409,7 @@ static void __exit xt_osf_fini(void)
 
 		list_for_each_entry_rcu(f, &xt_osf_fingers[i], finger_entry) {
 			list_del_rcu(&f->finger_entry);
-			call_rcu(&f->rcu_head, xt_osf_finger_free_rcu);
+			kfree_rcu(f, rcu_head);
 		}
 	}
 	rcu_read_unlock();
@@ -428,4 +423,6 @@ module_exit(xt_osf_fini);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Evgeniy Polyakov <zbr@ioremap.net>");
 MODULE_DESCRIPTION("Passive OS fingerprint matching.");
+MODULE_ALIAS("ipt_osf");
+MODULE_ALIAS("ip6t_osf");
 MODULE_ALIAS_NFNL_SUBSYS(NFNL_SUBSYS_OSF);

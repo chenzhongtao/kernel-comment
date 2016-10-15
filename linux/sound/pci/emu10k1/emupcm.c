@@ -44,7 +44,8 @@ static void snd_emu10k1_pcm_interrupt(struct snd_emu10k1 *emu,
 	if (epcm->substream == NULL)
 		return;
 #if 0
-	printk(KERN_DEBUG "IRQ: position = 0x%x, period = 0x%x, size = 0x%x\n",
+	dev_dbg(emu->card->dev,
+		"IRQ: position = 0x%x, period = 0x%x, size = 0x%x\n",
 			epcm->substream->runtime->hw->pointer(emu, epcm->substream),
 			snd_pcm_lib_period_bytes(epcm->substream),
 			snd_pcm_lib_buffer_bytes(epcm->substream));
@@ -147,7 +148,7 @@ static int snd_emu10k1_pcm_channel_alloc(struct snd_emu10k1_pcm * epcm, int voic
 					      &epcm->extra);
 		if (err < 0) {
 			/*
-			printk(KERN_DEBUG "pcm_channel_alloc: "
+			dev_dbg(emu->card->dev, "pcm_channel_alloc: "
 			       "failed extra: voices=%d, frame=%d\n",
 			       voices, frame);
 			*/
@@ -332,7 +333,7 @@ static void snd_emu10k1_pcm_init_voice(struct snd_emu10k1 *emu,
 		evoice->epcm->ccca_start_addr = start_addr + ccis;
 		if (extra) {
 			start_addr += ccis;
-			end_addr += ccis;
+			end_addr += ccis + emu->delay_pcm_irq;
 		}
 		if (stereo && !extra) {
 			snd_emu10k1_ptr_write(emu, CPF, voice, CPF_STEREO_MASK);
@@ -360,7 +361,9 @@ static void snd_emu10k1_pcm_init_voice(struct snd_emu10k1 *emu,
 	/* Assumption that PT is already 0 so no harm overwriting */
 	snd_emu10k1_ptr_write(emu, PTRX, voice, (send_amount[0] << 8) | send_amount[1]);
 	snd_emu10k1_ptr_write(emu, DSL, voice, end_addr | (send_amount[3] << 24));
-	snd_emu10k1_ptr_write(emu, PSST, voice, start_addr | (send_amount[2] << 24));
+	snd_emu10k1_ptr_write(emu, PSST, voice,
+			(start_addr + (extra ? emu->delay_pcm_irq : 0)) |
+			(send_amount[2] << 24));
 	if (emu->card_capabilities->emu_model)
 		pitch_target = PITCH_48000; /* Disable interpolators on emu1010 card */
 	else 
@@ -377,7 +380,7 @@ static void snd_emu10k1_pcm_init_voice(struct snd_emu10k1 *emu,
 	snd_emu10k1_ptr_write(emu, Z1, voice, 0);
 	snd_emu10k1_ptr_write(emu, Z2, voice, 0);
 	/* invalidate maps */
-	silent_page = ((unsigned int)emu->silent_page.addr << 1) | MAP_PTI_MASK;
+	silent_page = ((unsigned int)emu->silent_page.addr << emu->address_mode) | (emu->address_mode ? MAP_PTI_MASK1 : MAP_PTI_MASK0);
 	snd_emu10k1_ptr_write(emu, MAPA, voice, silent_page);
 	snd_emu10k1_ptr_write(emu, MAPB, voice, silent_page);
 	/* modulation envelope */
@@ -732,6 +735,23 @@ static void snd_emu10k1_playback_stop_voice(struct snd_emu10k1 *emu, struct snd_
 	snd_emu10k1_ptr_write(emu, IP, voice, 0);
 }
 
+static inline void snd_emu10k1_playback_mangle_extra(struct snd_emu10k1 *emu,
+		struct snd_emu10k1_pcm *epcm,
+		struct snd_pcm_substream *substream,
+		struct snd_pcm_runtime *runtime)
+{
+	unsigned int ptr, period_pos;
+
+	/* try to sychronize the current position for the interrupt
+	   source voice */
+	period_pos = runtime->status->hw_ptr - runtime->hw_ptr_interrupt;
+	period_pos %= runtime->period_size;
+	ptr = snd_emu10k1_ptr_read(emu, CCCA, epcm->extra->number);
+	ptr &= ~0x00ffffff;
+	ptr |= epcm->ccca_start_addr + period_pos;
+	snd_emu10k1_ptr_write(emu, CCCA, epcm->extra->number, ptr);
+}
+
 static int snd_emu10k1_playback_trigger(struct snd_pcm_substream *substream,
 				        int cmd)
 {
@@ -742,7 +762,8 @@ static int snd_emu10k1_playback_trigger(struct snd_pcm_substream *substream,
 	int result = 0;
 
 	/*
-	printk(KERN_DEBUG "trigger - emu10k1 = 0x%x, cmd = %i, pointer = %i\n",
+	dev_dbg(emu->card->dev,
+		"trigger - emu10k1 = 0x%x, cmd = %i, pointer = %i\n",
 	       (int)emu, cmd, substream->ops->pointer(substream))
 	*/
 	spin_lock(&emu->reg_lock);
@@ -753,6 +774,8 @@ static int snd_emu10k1_playback_trigger(struct snd_pcm_substream *substream,
 		/* follow thru */
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 	case SNDRV_PCM_TRIGGER_RESUME:
+		if (cmd == SNDRV_PCM_TRIGGER_PAUSE_RELEASE)
+			snd_emu10k1_playback_mangle_extra(emu, epcm, substream, runtime);
 		mix = &emu->pcm_mixer[substream->number];
 		snd_emu10k1_playback_prepare_voice(emu, epcm->voices[0], 1, 0, mix);
 		snd_emu10k1_playback_prepare_voice(emu, epcm->voices[1], 0, 0, mix);
@@ -794,7 +817,7 @@ static int snd_emu10k1_capture_trigger(struct snd_pcm_substream *substream,
 		outl(epcm->capture_ipr, emu->port + IPR);
 		snd_emu10k1_intr_enable(emu, epcm->capture_inte);
 		/*
-		printk(KERN_DEBUG "adccr = 0x%x, adcbs = 0x%x\n",
+		dev_dbg(emu->card->dev, "adccr = 0x%x, adcbs = 0x%x\n",
 		       epcm->adccr, epcm->adcbs);
 		*/
 		switch (epcm->type) {
@@ -805,7 +828,10 @@ static int snd_emu10k1_capture_trigger(struct snd_pcm_substream *substream,
 			if (emu->audigy) {
 				snd_emu10k1_ptr_write(emu, A_FXWC1, 0, epcm->capture_cr_val);
 				snd_emu10k1_ptr_write(emu, A_FXWC2, 0, epcm->capture_cr_val2);
-				snd_printdd("cr_val=0x%x, cr_val2=0x%x\n", epcm->capture_cr_val, epcm->capture_cr_val2);
+				dev_dbg(emu->card->dev,
+					"cr_val=0x%x, cr_val2=0x%x\n",
+					epcm->capture_cr_val,
+					epcm->capture_cr_val2);
 			} else
 				snd_emu10k1_ptr_write(emu, FXWC, 0, epcm->capture_cr_val);
 			break;
@@ -868,9 +894,10 @@ static snd_pcm_uframes_t snd_emu10k1_playback_pointer(struct snd_pcm_substream *
 	}
 #endif
 	/*
-	printk(KERN_DEBUG
-	       "ptr = 0x%x, buffer_size = 0x%x, period_size = 0x%x\n",
-	       ptr, runtime->buffer_size, runtime->period_size);
+	dev_dbg(emu->card->dev,
+	       "ptr = 0x%lx, buffer_size = 0x%lx, period_size = 0x%lx\n",
+	       (long)ptr, (long)runtime->buffer_size,
+	       (long)runtime->period_size);
 	*/
 	return ptr;
 }
@@ -1105,7 +1132,7 @@ static int snd_emu10k1_playback_open(struct snd_pcm_substream *substream)
 	struct snd_emu10k1_pcm *epcm;
 	struct snd_emu10k1_pcm_mixer *mix;
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	int i, err;
+	int i, err, sample_rate;
 
 	epcm = kzalloc(sizeof(*epcm), GFP_KERNEL);
 	if (epcm == NULL)
@@ -1121,6 +1148,15 @@ static int snd_emu10k1_playback_open(struct snd_pcm_substream *substream)
 		return err;
 	}
 	if ((err = snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 256, UINT_MAX)) < 0) {
+		kfree(epcm);
+		return err;
+	}
+	if (emu->card_capabilities->emu_model && emu->emu1010.internal_clock == 0)
+		sample_rate = 44100;
+	else
+		sample_rate = 48000;
+	err = snd_pcm_hw_rule_noresample(runtime, sample_rate);
+	if (err < 0) {
 		kfree(epcm);
 		return err;
 	}
@@ -1283,7 +1319,7 @@ static int snd_emu10k1_capture_efx_open(struct snd_pcm_substream *substream)
 			runtime->hw.channels_min =
 				runtime->hw.channels_max = 16;
 			break;
-		};
+		}
 #endif
 #if 0
 		/* For 96kHz */
@@ -1364,14 +1400,11 @@ static struct snd_pcm_ops snd_emu10k1_efx_playback_ops = {
 	.page =			snd_pcm_sgbuf_ops_page,
 };
 
-int __devinit snd_emu10k1_pcm(struct snd_emu10k1 * emu, int device, struct snd_pcm ** rpcm)
+int snd_emu10k1_pcm(struct snd_emu10k1 *emu, int device)
 {
 	struct snd_pcm *pcm;
 	struct snd_pcm_substream *substream;
 	int err;
-
-	if (rpcm)
-		*rpcm = NULL;
 
 	if ((err = snd_pcm_new(emu->card, "emu10k1", device, 32, 1, &pcm)) < 0)
 		return err;
@@ -1393,20 +1426,14 @@ int __devinit snd_emu10k1_pcm(struct snd_emu10k1 * emu, int device, struct snd_p
 	for (substream = pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream; substream; substream = substream->next)
 		snd_pcm_lib_preallocate_pages(substream, SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(emu->pci), 64*1024, 64*1024);
 
-	if (rpcm)
-		*rpcm = pcm;
-
 	return 0;
 }
 
-int __devinit snd_emu10k1_pcm_multi(struct snd_emu10k1 * emu, int device, struct snd_pcm ** rpcm)
+int snd_emu10k1_pcm_multi(struct snd_emu10k1 *emu, int device)
 {
 	struct snd_pcm *pcm;
 	struct snd_pcm_substream *substream;
 	int err;
-
-	if (rpcm)
-		*rpcm = NULL;
 
 	if ((err = snd_pcm_new(emu->card, "emu10k1", device, 1, 0, &pcm)) < 0)
 		return err;
@@ -1424,9 +1451,6 @@ int __devinit snd_emu10k1_pcm_multi(struct snd_emu10k1 * emu, int device, struct
 		if ((err = snd_pcm_lib_preallocate_pages(substream, SNDRV_DMA_TYPE_DEV_SG, snd_dma_pci_data(emu->pci), 64*1024, 64*1024)) < 0)
 			return err;
 
-	if (rpcm)
-		*rpcm = pcm;
-
 	return 0;
 }
 
@@ -1442,13 +1466,10 @@ static struct snd_pcm_ops snd_emu10k1_capture_mic_ops = {
 	.pointer =		snd_emu10k1_capture_pointer,
 };
 
-int __devinit snd_emu10k1_pcm_mic(struct snd_emu10k1 * emu, int device, struct snd_pcm ** rpcm)
+int snd_emu10k1_pcm_mic(struct snd_emu10k1 *emu, int device)
 {
 	struct snd_pcm *pcm;
 	int err;
-
-	if (rpcm)
-		*rpcm = NULL;
 
 	if ((err = snd_pcm_new(emu->card, "emu10k1 mic", device, 0, 1, &pcm)) < 0)
 		return err;
@@ -1463,8 +1484,6 @@ int __devinit snd_emu10k1_pcm_mic(struct snd_emu10k1 * emu, int device, struct s
 
 	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(emu->pci), 64*1024, 64*1024);
 
-	if (rpcm)
-		*rpcm = pcm;
 	return 0;
 }
 
@@ -1561,7 +1580,8 @@ static void snd_emu10k1_fx8010_playback_tram_poke1(unsigned short *dst_left,
 						   unsigned int tram_shift)
 {
 	/*
-	printk(KERN_DEBUG "tram_poke1: dst_left = 0x%p, dst_right = 0x%p, "
+	dev_dbg(emu->card->dev,
+		"tram_poke1: dst_left = 0x%p, dst_right = 0x%p, "
 	       "src = 0x%p, count = 0x%x\n",
 	       dst_left, dst_right, src, count);
 	*/
@@ -1642,7 +1662,7 @@ static int snd_emu10k1_fx8010_playback_prepare(struct snd_pcm_substream *substre
 	unsigned int i;
 	
 	/*
-	printk(KERN_DEBUG "prepare: etram_pages = 0x%p, dma_area = 0x%x, "
+	dev_dbg(emu->card->dev, "prepare: etram_pages = 0x%p, dma_area = 0x%x, "
 	       "buffer_size = 0x%x (0x%x)\n",
 	       emu->fx8010.etram_pages, runtime->dma_area,
 	       runtime->buffer_size, runtime->buffer_size << 2);
@@ -1783,14 +1803,11 @@ static struct snd_pcm_ops snd_emu10k1_fx8010_playback_ops = {
 	.ack =			snd_emu10k1_fx8010_playback_transfer,
 };
 
-int __devinit snd_emu10k1_pcm_efx(struct snd_emu10k1 * emu, int device, struct snd_pcm ** rpcm)
+int snd_emu10k1_pcm_efx(struct snd_emu10k1 *emu, int device)
 {
 	struct snd_pcm *pcm;
 	struct snd_kcontrol *kctl;
 	int err;
-
-	if (rpcm)
-		*rpcm = NULL;
 
 	if ((err = snd_pcm_new(emu->card, "emu10k1 efx", device, 8, 1, &pcm)) < 0)
 		return err;
@@ -1803,8 +1820,6 @@ int __devinit snd_emu10k1_pcm_efx(struct snd_emu10k1 * emu, int device, struct s
 	pcm->info_flags = 0;
 	strcpy(pcm->name, "Multichannel Capture/PT Playback");
 	emu->pcm_efx = pcm;
-	if (rpcm)
-		*rpcm = pcm;
 
 	/* EFX capture - record the "FXBUS2" channels, by default we connect the EXTINs 
 	 * to these

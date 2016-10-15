@@ -29,15 +29,16 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
 #include <linux/input.h>
-#include <linux/version.h>
 #include <linux/videodev2.h>
 #include <linux/mutex.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
-#include <media/rds.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-event.h>
+#include <media/v4l2-device.h>
 #include <asm/unaligned.h>
 
 
@@ -53,10 +54,10 @@
 #define DEVICEID_PN		0xf000	/* bits 15..12: Part Number */
 #define DEVICEID_MFGID		0x0fff	/* bits 11..00: Manufacturer ID */
 
-#define CHIPID			1	/* Chip ID */
-#define CHIPID_REV		0xfc00	/* bits 15..10: Chip Version */
-#define CHIPID_DEV		0x0200	/* bits 09..09: Device */
-#define CHIPID_FIRMWARE		0x01ff	/* bits 08..00: Firmware Version */
+#define SI_CHIPID		1	/* Chip ID */
+#define SI_CHIPID_REV		0xfc00	/* bits 15..10: Chip Version */
+#define SI_CHIPID_DEV		0x0200	/* bits 09..09: Device */
+#define SI_CHIPID_FIRMWARE	0x01ff	/* bits 08..00: Firmware Version */
 
 #define POWERCFG		2	/* Power Configuration */
 #define POWERCFG_DSMUTE		0x8000	/* bits 15..15: Softmute Disable */
@@ -86,7 +87,7 @@
 
 #define SYSCONFIG2		5	/* System Configuration 2 */
 #define SYSCONFIG2_SEEKTH	0xff00	/* bits 15..08: RSSI Seek Threshold */
-#define SYSCONFIG2_BAND		0x0080	/* bits 07..06: Band Select */
+#define SYSCONFIG2_BAND		0x00c0	/* bits 07..06: Band Select */
 #define SYSCONFIG2_SPACE	0x0030	/* bits 05..04: Channel Spacing */
 #define SYSCONFIG2_VOLUME	0x000f	/* bits 03..00: Volume */
 
@@ -143,10 +144,10 @@
  * si470x_device - private data
  */
 struct si470x_device {
-	struct video_device *videodev;
-
-	/* driver management */
-	unsigned int users;
+	struct v4l2_device v4l2_dev;
+	struct video_device videodev;
+	struct v4l2_ctrl_handler hdl;
+	int band;
 
 	/* Silabs internal registers (0..15) */
 	unsigned short registers[RADIO_REGISTER_NUM];
@@ -159,10 +160,14 @@ struct si470x_device {
 	unsigned int rd_index;
 	unsigned int wr_index;
 
-#if defined(CONFIG_USB_SI470X) || defined(CONFIG_USB_SI470X_MODULE)
+	struct completion completion;
+	bool status_rssi_auto_update;	/* Does RSSI get updated automatic? */
+
+#if IS_ENABLED(CONFIG_USB_SI470X)
 	/* reference to USB and video device */
 	struct usb_device *usbdev;
 	struct usb_interface *intf;
+	char *usb_buf;
 
 	/* Interrupt endpoint handling */
 	char *int_in_buffer;
@@ -173,13 +178,9 @@ struct si470x_device {
 	/* scratch page */
 	unsigned char software_version;
 	unsigned char hardware_version;
-
-	/* driver management */
-	unsigned char disconnected;
-	struct mutex disconnect_lock;
 #endif
 
-#if defined(CONFIG_I2C_SI470X) || defined(CONFIG_I2C_SI470X_MODULE)
+#if IS_ENABLED(CONFIG_I2C_SI470X)
 	struct i2c_client *client;
 #endif
 };
@@ -190,7 +191,7 @@ struct si470x_device {
  * Firmware Versions
  **************************************************************************/
 
-#define RADIO_FW_VERSION	15
+#define RADIO_FW_VERSION	12
 
 
 
@@ -212,14 +213,15 @@ struct si470x_device {
 /**************************************************************************
  * Common Functions
  **************************************************************************/
-extern const struct v4l2_file_operations si470x_fops;
 extern struct video_device si470x_viddev_template;
+extern const struct v4l2_ctrl_ops si470x_ctrl_ops;
 int si470x_get_register(struct si470x_device *radio, int regnr);
 int si470x_set_register(struct si470x_device *radio, int regnr);
 int si470x_disconnect_check(struct si470x_device *radio);
 int si470x_set_freq(struct si470x_device *radio, unsigned int freq);
 int si470x_start(struct si470x_device *radio);
 int si470x_stop(struct si470x_device *radio);
-int si470x_rds_on(struct si470x_device *radio);
+int si470x_fops_open(struct file *file);
+int si470x_fops_release(struct file *file);
 int si470x_vidioc_querycap(struct file *file, void *priv,
 		struct v4l2_capability *capability);

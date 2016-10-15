@@ -6,22 +6,33 @@ klibcdirs:;
 PHONY += klibcdirs
 
 
-# Gzip
-suffix_$(CONFIG_INITRAMFS_COMPRESSION_GZIP)   = .gz
-
 # Bzip2
-suffix_$(CONFIG_INITRAMFS_COMPRESSION_BZIP2)  = .bz2
+suffix_$(CONFIG_RD_BZIP2)  = .bz2
 
 # Lzma
-suffix_$(CONFIG_INITRAMFS_COMPRESSION_LZMA)   = .lzma
+suffix_$(CONFIG_RD_LZMA)   = .lzma
+
+# XZ
+suffix_$(CONFIG_RD_XZ)     = .xz
+
+# Lzo
+suffix_$(CONFIG_RD_LZO)    = .lzo
+
+# Lz4
+suffix_$(CONFIG_RD_LZ4)    = .lz4
+
+# Gzip
+suffix_$(CONFIG_RD_GZIP)   = .gz
+
+AFLAGS_initramfs_data.o += -DINITRAMFS_IMAGE="usr/initramfs_data.cpio$(suffix_y)"
 
 # Generate builtin.o based on initramfs_data.o
-obj-$(CONFIG_BLK_DEV_INITRD) := initramfs_data$(suffix_y).o
+obj-$(CONFIG_BLK_DEV_INITRD) := initramfs_data.o
 
 # initramfs_data.o contains the compressed initramfs_data.cpio image.
 # The image is included using .incbin, a dependency which is not
 # tracked automatically.
-$(obj)/initramfs_data$(suffix_y).o: $(obj)/initramfs_data.cpio$(suffix_y) FORCE
+$(obj)/initramfs_data.o: $(obj)/initramfs_data.cpio$(suffix_y) FORCE
 
 #####
 # Generate the initramfs cpio archive
@@ -45,7 +56,10 @@ endif
 quiet_cmd_initfs = GEN     $@
       cmd_initfs = $(initramfs) -o $@ $(ramfs-args) $(ramfs-input)
 
-targets := initramfs_data.cpio.gz initramfs_data.cpio.bz2 initramfs_data.cpio.lzma initramfs_data.cpio
+targets := initramfs_data.cpio.gz initramfs_data.cpio.bz2 \
+	initramfs_data.cpio.lzma initramfs_data.cpio.xz \
+	initramfs_data.cpio.lzo initramfs_data.cpio.lz4 \
+	initramfs_data.cpio
 # do not try to update files included in initramfs
 $(deps_initramfs): ;
 
@@ -58,4 +72,3 @@ $(deps_initramfs): klibcdirs
 $(obj)/initramfs_data.cpio$(suffix_y): $(obj)/gen_init_cpio $(deps_initramfs) klibcdirs
 	$(Q)$(initramfs) -l $(ramfs-input) > $(obj)/.initramfs_data.cpio.d
 	$(call if_changed,initfs)
-

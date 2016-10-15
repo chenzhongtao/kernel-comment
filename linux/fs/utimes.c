@@ -53,6 +53,7 @@ static int utimes_common(struct path *path, struct timespec *times)
 	int error;
 	struct iattr newattrs;
 	struct inode *inode = path->dentry->d_inode;
+	struct inode *delegated_inode = NULL;
 
 	error = mnt_want_write(path->mnt);
 	if (error)
@@ -95,15 +96,21 @@ static int utimes_common(struct path *path, struct timespec *times)
                 if (IS_IMMUTABLE(inode))
 			goto mnt_drop_write_and_out;
 
-		if (!is_owner_or_cap(inode)) {
+		if (!inode_owner_or_capable(inode)) {
 			error = inode_permission(inode, MAY_WRITE);
 			if (error)
 				goto mnt_drop_write_and_out;
 		}
 	}
+retry_deleg:
 	mutex_lock(&inode->i_mutex);
-	error = notify_change(path->dentry, &newattrs);
+	error = notify_change(path->dentry, &newattrs, &delegated_inode);
 	mutex_unlock(&inode->i_mutex);
+	if (delegated_inode) {
+		error = break_deleg_wait(&delegated_inode);
+		if (!error)
+			goto retry_deleg;
+	}
 
 mnt_drop_write_and_out:
 	mnt_drop_write(path->mnt);
@@ -126,7 +133,8 @@ out:
  * must be owner or have write permission.
  * Else, update from *times, must be owner or super user.
  */
-long do_utimes(int dfd, char __user *filename, struct timespec *times, int flags)
+long do_utimes(int dfd, const char __user *filename, struct timespec *times,
+	       int flags)
 {
 	int error = -EINVAL;
 
@@ -139,38 +147,42 @@ long do_utimes(int dfd, char __user *filename, struct timespec *times, int flags
 		goto out;
 
 	if (filename == NULL && dfd != AT_FDCWD) {
-		struct file *file;
+		struct fd f;
 
 		if (flags & AT_SYMLINK_NOFOLLOW)
 			goto out;
 
-		file = fget(dfd);
+		f = fdget(dfd);
 		error = -EBADF;
-		if (!file)
+		if (!f.file)
 			goto out;
 
-		error = utimes_common(&file->f_path, times);
-		fput(file);
+		error = utimes_common(&f.file->f_path, times);
+		fdput(f);
 	} else {
 		struct path path;
 		int lookup_flags = 0;
 
 		if (!(flags & AT_SYMLINK_NOFOLLOW))
 			lookup_flags |= LOOKUP_FOLLOW;
-
+retry:
 		error = user_path_at(dfd, filename, lookup_flags, &path);
 		if (error)
 			goto out;
 
 		error = utimes_common(&path, times);
 		path_put(&path);
+		if (retry_estale(error, lookup_flags)) {
+			lookup_flags |= LOOKUP_REVAL;
+			goto retry;
+		}
 	}
 
 out:
 	return error;
 }
 
-SYSCALL_DEFINE4(utimensat, int, dfd, char __user *, filename,
+SYSCALL_DEFINE4(utimensat, int, dfd, const char __user *, filename,
 		struct timespec __user *, utimes, int, flags)
 {
 	struct timespec tstimes[2];
@@ -188,7 +200,7 @@ SYSCALL_DEFINE4(utimensat, int, dfd, char __user *, filename,
 	return do_utimes(dfd, filename, utimes ? tstimes : NULL, flags);
 }
 
-SYSCALL_DEFINE3(futimesat, int, dfd, char __user *, filename,
+SYSCALL_DEFINE3(futimesat, int, dfd, const char __user *, filename,
 		struct timeval __user *, utimes)
 {
 	struct timeval times[2];

@@ -29,27 +29,8 @@
 #ifndef __DPC_H__
 #define __DPC_H__
 
-#include "ttype.h"
 #include "device.h"
-#include "wcmd.h"
 
-/*---------------------  Export Definitions -------------------------*/
+bool vnt_receive_frame(struct vnt_private *priv, struct vnt_rx_desc *curr_rd);
 
-/*---------------------  Export Classes  ----------------------------*/
-
-/*---------------------  Export Variables  --------------------------*/
-
-/*---------------------  Export Functions  --------------------------*/
-
-BOOL
-device_receive_frame (
-    IN  PSDevice pDevice,
-    IN  PSRxDesc pCurrRD
-    );
-
-VOID	MngWorkItem(PVOID Context);
-
-#endif // __RXTX_H__
-
-
-
+#endif /* __RXTX_H__ */

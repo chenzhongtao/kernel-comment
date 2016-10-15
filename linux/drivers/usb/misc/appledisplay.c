@@ -24,11 +24,12 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 #include <linux/backlight.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #define APPLE_VENDOR_ID		0x05AC
 
@@ -57,10 +58,12 @@
 	.bInterfaceProtocol = 0x00
 
 /* table of devices that work with this driver */
-static struct usb_device_id appledisplay_table [] = {
+static const struct usb_device_id appledisplay_table[] = {
 	{ APPLEDISPLAY_DEVICE(0x9218) },
 	{ APPLEDISPLAY_DEVICE(0x9219) },
+	{ APPLEDISPLAY_DEVICE(0x921c) },
 	{ APPLEDISPLAY_DEVICE(0x921d) },
+	{ APPLEDISPLAY_DEVICE(0x9236) },
 
 	/* Terminating entry */
 	{ }
@@ -72,12 +75,13 @@ struct appledisplay {
 	struct usb_device *udev;	/* usb device */
 	struct urb *urb;		/* usb request block */
 	struct backlight_device *bd;	/* backlight device */
-	char *urbdata;			/* interrupt URB data buffer */
-	char *msgdata;			/* control message data buffer */
+	u8 *urbdata;			/* interrupt URB data buffer */
+	u8 *msgdata;			/* control message data buffer */
 
 	struct delayed_work work;
 	int button_pressed;
 	spinlock_t lock;
+	struct mutex sysfslock;		/* concurrent read and write */
 };
 
 static atomic_t count_displays = ATOMIC_INIT(0);
@@ -86,6 +90,7 @@ static struct workqueue_struct *wq;
 static void appledisplay_complete(struct urb *urb)
 {
 	struct appledisplay *pdata = urb->context;
+	struct device *dev = &pdata->udev->dev;
 	unsigned long flags;
 	int status = urb->status;
 	int retval;
@@ -95,18 +100,18 @@ static void appledisplay_complete(struct urb *urb)
 		/* success */
 		break;
 	case -EOVERFLOW:
-		printk(KERN_ERR "appletouch: OVERFLOW with data "
-			"length %d, actual length is %d\n",
+		dev_err(dev,
+			"OVERFLOW with data length %d, actual length is %d\n",
 			ACD_URB_BUFFER_LEN, pdata->urb->actual_length);
 	case -ECONNRESET:
 	case -ENOENT:
 	case -ESHUTDOWN:
 		/* This urb is terminated, clean up */
-		dbg("%s - urb shuttingdown with status: %d",
+		dev_dbg(dev, "%s - urb shuttingdown with status: %d\n",
 			__func__, status);
 		return;
 	default:
-		dbg("%s - nonzero urb status received: %d",
+		dev_dbg(dev, "%s - nonzero urb status received: %d\n",
 			__func__, status);
 		goto exit;
 	}
@@ -130,8 +135,7 @@ static void appledisplay_complete(struct urb *urb)
 exit:
 	retval = usb_submit_urb(pdata->urb, GFP_ATOMIC);
 	if (retval) {
-		dev_err(&pdata->udev->dev,
-			"%s - usb_submit_urb failed with result %d\n",
+		dev_err(dev, "%s - usb_submit_urb failed with result %d\n",
 			__func__, retval);
 	}
 }
@@ -141,6 +145,7 @@ static int appledisplay_bl_update_status(struct backlight_device *bd)
 	struct appledisplay *pdata = bl_get_data(bd);
 	int retval;
 
+	mutex_lock(&pdata->sysfslock);
 	pdata->msgdata[0] = 0x10;
 	pdata->msgdata[1] = bd->props.brightness;
 
@@ -153,15 +158,17 @@ static int appledisplay_bl_update_status(struct backlight_device *bd)
 		0,
 		pdata->msgdata, 2,
 		ACD_USB_TIMEOUT);
-
+	mutex_unlock(&pdata->sysfslock);
+	
 	return retval;
 }
 
 static int appledisplay_bl_get_brightness(struct backlight_device *bd)
 {
 	struct appledisplay *pdata = bl_get_data(bd);
-	int retval;
+	int retval, brightness;
 
+	mutex_lock(&pdata->sysfslock);
 	retval = usb_control_msg(
 		pdata->udev,
 		usb_rcvctrlpipe(pdata->udev, 0),
@@ -171,14 +178,16 @@ static int appledisplay_bl_get_brightness(struct backlight_device *bd)
 		0,
 		pdata->msgdata, 2,
 		ACD_USB_TIMEOUT);
+	brightness = pdata->msgdata[1];
+	mutex_unlock(&pdata->sysfslock);
 
 	if (retval < 0)
 		return retval;
 	else
-		return pdata->msgdata[1];
+		return brightness;
 }
 
-static struct backlight_ops appledisplay_bl_data = {
+static const struct backlight_ops appledisplay_bl_data = {
 	.get_brightness	= appledisplay_bl_get_brightness,
 	.update_status	= appledisplay_bl_update_status,
 };
@@ -201,6 +210,7 @@ static void appledisplay_work(struct work_struct *work)
 static int appledisplay_probe(struct usb_interface *iface,
 	const struct usb_device_id *id)
 {
+	struct backlight_properties props;
 	struct appledisplay *pdata;
 	struct usb_device *udev = interface_to_usbdev(iface);
 	struct usb_host_interface *iface_desc;
@@ -237,6 +247,7 @@ static int appledisplay_probe(struct usb_interface *iface,
 
 	spin_lock_init(&pdata->lock);
 	INIT_DELAYED_WORK(&pdata->work, appledisplay_work);
+	mutex_init(&pdata->sysfslock);
 
 	/* Allocate buffer for control messages */
 	pdata->msgdata = kmalloc(ACD_MSG_BUFFER_LEN, GFP_KERNEL);
@@ -256,7 +267,7 @@ static int appledisplay_probe(struct usb_interface *iface,
 	}
 
 	/* Allocate buffer for interrupt data */
-	pdata->urbdata = usb_buffer_alloc(pdata->udev, ACD_URB_BUFFER_LEN,
+	pdata->urbdata = usb_alloc_coherent(pdata->udev, ACD_URB_BUFFER_LEN,
 		GFP_KERNEL, &pdata->urb->transfer_dma);
 	if (!pdata->urbdata) {
 		retval = -ENOMEM;
@@ -278,14 +289,16 @@ static int appledisplay_probe(struct usb_interface *iface,
 	/* Register backlight device */
 	snprintf(bl_name, sizeof(bl_name), "appledisplay%d",
 		atomic_inc_return(&count_displays) - 1);
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_RAW;
+	props.max_brightness = 0xff;
 	pdata->bd = backlight_device_register(bl_name, NULL, pdata,
-						&appledisplay_bl_data);
+					      &appledisplay_bl_data, &props);
 	if (IS_ERR(pdata->bd)) {
 		dev_err(&iface->dev, "Backlight registration failed\n");
+		retval = PTR_ERR(pdata->bd);
 		goto error;
 	}
-
-	pdata->bd->props.max_brightness = 0xff;
 
 	/* Try to get brightness */
 	brightness = appledisplay_bl_get_brightness(pdata->bd);
@@ -312,11 +325,11 @@ error:
 		if (pdata->urb) {
 			usb_kill_urb(pdata->urb);
 			if (pdata->urbdata)
-				usb_buffer_free(pdata->udev, ACD_URB_BUFFER_LEN,
+				usb_free_coherent(pdata->udev, ACD_URB_BUFFER_LEN,
 					pdata->urbdata, pdata->urb->transfer_dma);
 			usb_free_urb(pdata->urb);
 		}
-		if (pdata->bd && !IS_ERR(pdata->bd))
+		if (!IS_ERR(pdata->bd))
 			backlight_device_unregister(pdata->bd);
 		kfree(pdata->msgdata);
 	}
@@ -333,7 +346,7 @@ static void appledisplay_disconnect(struct usb_interface *iface)
 		usb_kill_urb(pdata->urb);
 		cancel_delayed_work(&pdata->work);
 		backlight_device_unregister(pdata->bd);
-		usb_buffer_free(pdata->udev, ACD_URB_BUFFER_LEN,
+		usb_free_coherent(pdata->udev, ACD_URB_BUFFER_LEN,
 			pdata->urbdata, pdata->urb->transfer_dma);
 		usb_free_urb(pdata->urb);
 		kfree(pdata->msgdata);

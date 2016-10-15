@@ -22,16 +22,12 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * along with GNU CC; see the file COPYING.  If not, see
+ * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -41,10 +37,9 @@
  *    Daisy Chang	    <daisyc@us.ibm.com>
  *    Ardelle Fan	    <ardelle.fan@intel.com>
  *    Sridhar Samudrala	    <sri@us.ibm.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/skbuff.h>
 #include <net/sctp/sctp.h>
@@ -57,7 +52,8 @@ other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_STATE_NUM_STATES];
 static const sctp_sm_table_entry_t
 timeout_event_table[SCTP_NUM_TIMEOUT_TYPES][SCTP_STATE_NUM_STATES];
 
-static const sctp_sm_table_entry_t *sctp_chunk_event_lookup(sctp_cid_t cid,
+static const sctp_sm_table_entry_t *sctp_chunk_event_lookup(struct net *net,
+							    sctp_cid_t cid,
 							    sctp_state_t state);
 
 
@@ -66,38 +62,37 @@ static const sctp_sm_table_entry_t bug = {
 	.name = "sctp_sf_bug"
 };
 
-#define DO_LOOKUP(_max, _type, _table) \
-	if ((event_subtype._type > (_max))) { \
-		printk(KERN_WARNING \
-		       "sctp table %p possible attack:" \
-		       " event %d exceeds max %d\n", \
-		       _table, event_subtype._type, _max); \
-		return &bug; \
-	} \
-	return &_table[event_subtype._type][(int)state];
+#define DO_LOOKUP(_max, _type, _table)					\
+({									\
+	const sctp_sm_table_entry_t *rtn;				\
+									\
+	if ((event_subtype._type > (_max))) {				\
+		pr_warn("table %p possible attack: event %d exceeds max %d\n", \
+			_table, event_subtype._type, _max);		\
+		rtn = &bug;						\
+	} else								\
+		rtn = &_table[event_subtype._type][(int)state];		\
+									\
+	rtn;								\
+})
 
-const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
+const sctp_sm_table_entry_t *sctp_sm_lookup_event(struct net *net,
+						  sctp_event_t event_type,
 						  sctp_state_t state,
 						  sctp_subtype_t event_subtype)
 {
 	switch (event_type) {
 	case SCTP_EVENT_T_CHUNK:
-		return sctp_chunk_event_lookup(event_subtype.chunk, state);
-		break;
+		return sctp_chunk_event_lookup(net, event_subtype.chunk, state);
 	case SCTP_EVENT_T_TIMEOUT:
-		DO_LOOKUP(SCTP_EVENT_TIMEOUT_MAX, timeout,
-			  timeout_event_table);
-		break;
-
+		return DO_LOOKUP(SCTP_EVENT_TIMEOUT_MAX, timeout,
+				 timeout_event_table);
 	case SCTP_EVENT_T_OTHER:
-		DO_LOOKUP(SCTP_EVENT_OTHER_MAX, other, other_event_table);
-		break;
-
+		return DO_LOOKUP(SCTP_EVENT_OTHER_MAX, other,
+				 other_event_table);
 	case SCTP_EVENT_T_PRIMITIVE:
-		DO_LOOKUP(SCTP_EVENT_PRIMITIVE_MAX, primitive,
-			  primitive_event_table);
-		break;
-
+		return DO_LOOKUP(SCTP_EVENT_PRIMITIVE_MAX, primitive,
+				 primitive_event_table);
 	default:
 		/* Yikes!  We got an illegal event type.  */
 		return &bug;
@@ -107,8 +102,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 #define TYPE_SCTP_FUNC(func) {.fn = func, .name = #func}
 
 #define TYPE_SCTP_DATA { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -128,8 +121,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_DATA */
 
 #define TYPE_SCTP_INIT { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_do_5_1B_init), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -149,8 +140,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_INIT */
 
 #define TYPE_SCTP_INIT_ACK { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_do_5_2_3_initack), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -170,8 +159,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_INIT_ACK */
 
 #define TYPE_SCTP_SACK { \
-	/*  SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -191,8 +178,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_SACK */
 
 #define TYPE_SCTP_HEARTBEAT { \
-	/*  SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -213,8 +198,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_HEARTBEAT */
 
 #define TYPE_SCTP_HEARTBEAT_ACK { \
-	/*  SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -234,8 +217,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_HEARTBEAT_ACK */
 
 #define TYPE_SCTP_ABORT { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_pdiscard), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -255,8 +236,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_ABORT */
 
 #define TYPE_SCTP_SHUTDOWN { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -276,8 +255,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_SHUTDOWN */
 
 #define TYPE_SCTP_SHUTDOWN_ACK { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -297,8 +274,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_SHUTDOWN_ACK */
 
 #define TYPE_SCTP_ERROR { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -318,8 +293,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_ERROR */
 
 #define TYPE_SCTP_COOKIE_ECHO { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_do_5_1D_ce), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -339,8 +312,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_COOKIE_ECHO */
 
 #define TYPE_SCTP_COOKIE_ACK { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_discard_chunk), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -360,8 +331,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_COOKIE_ACK */
 
 #define TYPE_SCTP_ECN_ECNE { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_discard_chunk), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -381,8 +350,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_ECN_ECNE */
 
 #define TYPE_SCTP_ECN_CWR { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_discard_chunk), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -402,8 +369,6 @@ const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t event_type,
 } /* TYPE_SCTP_ECN_CWR */
 
 #define TYPE_SCTP_SHUTDOWN_COMPLETE { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_discard_chunk), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -446,8 +411,6 @@ static const sctp_sm_table_entry_t chunk_event_table[SCTP_NUM_BASE_CHUNK_TYPES][
 }; /* state_fn_t chunk_event_table[][] */
 
 #define TYPE_SCTP_ASCONF { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_discard_chunk), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -467,8 +430,6 @@ static const sctp_sm_table_entry_t chunk_event_table[SCTP_NUM_BASE_CHUNK_TYPES][
 } /* TYPE_SCTP_ASCONF */
 
 #define TYPE_SCTP_ASCONF_ACK { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_discard_chunk), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -496,8 +457,6 @@ static const sctp_sm_table_entry_t addip_chunk_event_table[SCTP_NUM_ADDIP_CHUNK_
 }; /*state_fn_t addip_chunk_event_table[][] */
 
 #define TYPE_SCTP_FWD_TSN { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -524,8 +483,6 @@ static const sctp_sm_table_entry_t prsctp_chunk_event_table[SCTP_NUM_PRSCTP_CHUN
 }; /*state_fn_t prsctp_chunk_event_table[][] */
 
 #define TYPE_SCTP_AUTH { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ootb), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -553,8 +510,6 @@ static const sctp_sm_table_entry_t auth_chunk_event_table[SCTP_NUM_AUTH_CHUNK_TY
 
 static const sctp_sm_table_entry_t
 chunk_event_table_unknown[SCTP_STATE_NUM_STATES] = {
-	/* SCTP_STATE_EMPTY */
-	TYPE_SCTP_FUNC(sctp_sf_ootb),
 	/* SCTP_STATE_CLOSED */
 	TYPE_SCTP_FUNC(sctp_sf_ootb),
 	/* SCTP_STATE_COOKIE_WAIT */
@@ -575,8 +530,6 @@ chunk_event_table_unknown[SCTP_STATE_NUM_STATES] = {
 
 
 #define TYPE_SCTP_PRIMITIVE_ASSOCIATE  { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_do_prm_asoc), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -596,8 +549,6 @@ chunk_event_table_unknown[SCTP_STATE_NUM_STATES] = {
 } /* TYPE_SCTP_PRIMITIVE_ASSOCIATE */
 
 #define TYPE_SCTP_PRIMITIVE_SHUTDOWN  { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_error_closed), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -617,8 +568,6 @@ chunk_event_table_unknown[SCTP_STATE_NUM_STATES] = {
 } /* TYPE_SCTP_PRIMITIVE_SHUTDOWN */
 
 #define TYPE_SCTP_PRIMITIVE_ABORT  { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_error_closed), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -638,8 +587,6 @@ chunk_event_table_unknown[SCTP_STATE_NUM_STATES] = {
 } /* TYPE_SCTP_PRIMITIVE_ABORT */
 
 #define TYPE_SCTP_PRIMITIVE_SEND  { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_error_closed), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -659,8 +606,6 @@ chunk_event_table_unknown[SCTP_STATE_NUM_STATES] = {
 } /* TYPE_SCTP_PRIMITIVE_SEND */
 
 #define TYPE_SCTP_PRIMITIVE_REQUESTHEARTBEAT  { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_error_closed), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -680,8 +625,6 @@ chunk_event_table_unknown[SCTP_STATE_NUM_STATES] = {
 } /* TYPE_SCTP_PRIMITIVE_REQUESTHEARTBEAT */
 
 #define TYPE_SCTP_PRIMITIVE_ASCONF { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_error_closed), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -713,8 +656,6 @@ static const sctp_sm_table_entry_t primitive_event_table[SCTP_NUM_PRIMITIVE_TYPE
 };
 
 #define TYPE_SCTP_OTHER_NO_PENDING_TSN  { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ignore_other), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -722,7 +663,7 @@ static const sctp_sm_table_entry_t primitive_event_table[SCTP_NUM_PRIMITIVE_TYPE
 	/* SCTP_STATE_COOKIE_ECHOED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ignore_other), \
 	/* SCTP_STATE_ESTABLISHED */ \
-	TYPE_SCTP_FUNC(sctp_sf_ignore_other), \
+	TYPE_SCTP_FUNC(sctp_sf_do_no_pending_tsn), \
 	/* SCTP_STATE_SHUTDOWN_PENDING */ \
 	TYPE_SCTP_FUNC(sctp_sf_do_9_2_start_shutdown), \
 	/* SCTP_STATE_SHUTDOWN_SENT */ \
@@ -734,8 +675,6 @@ static const sctp_sm_table_entry_t primitive_event_table[SCTP_NUM_PRIMITIVE_TYPE
 }
 
 #define TYPE_SCTP_OTHER_ICMP_PROTO_UNREACH  { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_ignore_other), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -760,8 +699,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 };
 
 #define TYPE_SCTP_EVENT_TIMEOUT_NONE { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -781,8 +718,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_T1_COOKIE { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -802,8 +737,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_T1_INIT { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -823,8 +756,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_T2_SHUTDOWN { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -844,8 +775,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_T3_RTX { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -865,8 +794,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_T4_RTO { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -886,8 +813,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -897,7 +822,7 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 	/* SCTP_STATE_ESTABLISHED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_SHUTDOWN_PENDING */ \
-	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
+	TYPE_SCTP_FUNC(sctp_sf_t5_timer_expire), \
 	/* SCTP_STATE_SHUTDOWN_SENT */ \
 	TYPE_SCTP_FUNC(sctp_sf_t5_timer_expire), \
 	/* SCTP_STATE_SHUTDOWN_RECEIVED */ \
@@ -907,8 +832,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_HEARTBEAT { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -928,8 +851,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_SACK { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_bug), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -949,8 +870,6 @@ static const sctp_sm_table_entry_t other_event_table[SCTP_NUM_OTHER_TYPES][SCTP_
 }
 
 #define TYPE_SCTP_EVENT_TIMEOUT_AUTOCLOSE { \
-	/* SCTP_STATE_EMPTY */ \
-	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_CLOSED */ \
 	TYPE_SCTP_FUNC(sctp_sf_timer_ignore), \
 	/* SCTP_STATE_COOKIE_WAIT */ \
@@ -982,7 +901,8 @@ static const sctp_sm_table_entry_t timeout_event_table[SCTP_NUM_TIMEOUT_TYPES][S
 	TYPE_SCTP_EVENT_TIMEOUT_AUTOCLOSE,
 };
 
-static const sctp_sm_table_entry_t *sctp_chunk_event_lookup(sctp_cid_t cid,
+static const sctp_sm_table_entry_t *sctp_chunk_event_lookup(struct net *net,
+							    sctp_cid_t cid,
 							    sctp_state_t state)
 {
 	if (state > SCTP_STATE_MAX)
@@ -991,12 +911,12 @@ static const sctp_sm_table_entry_t *sctp_chunk_event_lookup(sctp_cid_t cid,
 	if (cid <= SCTP_CID_BASE_MAX)
 		return &chunk_event_table[cid][state];
 
-	if (sctp_prsctp_enable) {
+	if (net->sctp.prsctp_enable) {
 		if (cid == SCTP_CID_FWD_TSN)
 			return &prsctp_chunk_event_table[0][state];
 	}
 
-	if (sctp_addip_enable) {
+	if (net->sctp.addip_enable) {
 		if (cid == SCTP_CID_ASCONF)
 			return &addip_chunk_event_table[0][state];
 
@@ -1004,7 +924,7 @@ static const sctp_sm_table_entry_t *sctp_chunk_event_lookup(sctp_cid_t cid,
 			return &addip_chunk_event_table[1][state];
 	}
 
-	if (sctp_auth_enable) {
+	if (net->sctp.auth_enable) {
 		if (cid == SCTP_CID_AUTH)
 			return &auth_chunk_event_table[0][state];
 	}

@@ -14,6 +14,8 @@
 #ifndef __DM9000_PLATFORM_DATA
 #define __DM9000_PLATFORM_DATA __FILE__
 
+#include <linux/if_ether.h>
+
 /* IO control flags */
 
 #define DM9000_PLATF_8BITONLY	(0x0001)
@@ -23,11 +25,11 @@
 #define DM9000_PLATF_NO_EEPROM	(0x0010)
 #define DM9000_PLATF_SIMPLE_PHY (0x0020)  /* Use NSR to find LinkStatus */
 
-/* platfrom data for platfrom device structure's platfrom_data field */
+/* platform data for platform device structure's platform_data field */
 
 struct dm9000_plat_data {
 	unsigned int	flags;
-	unsigned char	dev_addr[6];
+	unsigned char	dev_addr[ETH_ALEN];
 
 	/* allow replacement IO routines */
 

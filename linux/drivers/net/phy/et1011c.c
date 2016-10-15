@@ -17,7 +17,6 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/unistd.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -88,7 +87,7 @@ static int et1011c_read_status(struct phy_device *phydev)
 	return ret;
 }
 
-static struct phy_driver et1011c_driver = {
+static struct phy_driver et1011c_driver[] = { {
 	.phy_id		= 0x0282f014,
 	.name		= "ET1011C",
 	.phy_id_mask	= 0xfffffff0,
@@ -97,17 +96,13 @@ static struct phy_driver et1011c_driver = {
 	.config_aneg	= et1011c_config_aneg,
 	.read_status	= et1011c_read_status,
 	.driver 	= { .owner = THIS_MODULE,},
+} };
+
+module_phy_driver(et1011c_driver);
+
+static struct mdio_device_id __maybe_unused et1011c_tbl[] = {
+	{ 0x0282f014, 0xfffffff0 },
+	{ }
 };
 
-static int __init et1011c_init(void)
-{
-	return phy_driver_register(&et1011c_driver);
-}
-
-static void __exit et1011c_exit(void)
-{
-	phy_driver_unregister(&et1011c_driver);
-}
-
-module_init(et1011c_init);
-module_exit(et1011c_exit);
+MODULE_DEVICE_TABLE(mdio, et1011c_tbl);

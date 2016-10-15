@@ -33,7 +33,6 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/gameport.h>
-#include <linux/init.h>
 #include <linux/jiffies.h>
 
 #define DRIVER_DESC	"Logitech ADI joystick family driver"
@@ -452,7 +451,7 @@ static void adi_init_center(struct adi *adi)
 	for (i = 0; i < adi->axes10 + adi->axes8 + (adi->hats + (adi->pad != -1)) * 2; i++) {
 
 		t = adi->abs[i];
-		x = adi->dev->abs[t];
+		x = input_abs_get_val(adi->dev, t);
 
 		if (t == ABS_THROTTLE || t == ABS_RUDDER || adi->id == ADI_ID_WGPE)
 			x = i < adi->axes10 ? 512 : 128;
@@ -536,8 +535,7 @@ static int adi_connect(struct gameport *gameport, struct gameport_driver *drv)
 		}
 	}
  fail2:	for (i = 0; i < 2; i++)
-		if (port->adi[i].dev)
-			input_free_device(port->adi[i].dev);
+		input_free_device(port->adi[i].dev);
 	gameport_close(gameport);
  fail1:	gameport_set_drvdata(gameport, NULL);
 	kfree(port);
@@ -557,10 +555,6 @@ static void adi_disconnect(struct gameport *gameport)
 	kfree(port);
 }
 
-/*
- * The gameport device structure.
- */
-
 static struct gameport_driver adi_drv = {
 	.driver		= {
 		.name	= "adi",
@@ -570,15 +564,4 @@ static struct gameport_driver adi_drv = {
 	.disconnect	= adi_disconnect,
 };
 
-static int __init adi_init(void)
-{
-	return gameport_register_driver(&adi_drv);
-}
-
-static void __exit adi_exit(void)
-{
-	gameport_unregister_driver(&adi_drv);
-}
-
-module_init(adi_init);
-module_exit(adi_exit);
+module_gameport_driver(adi_drv);

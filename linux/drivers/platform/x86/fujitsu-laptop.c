@@ -1,7 +1,7 @@
 /*-*-linux-c-*-*/
 
 /*
-  Copyright (C) 2007,2008 Jonathan Woithe <jwoithe@physics.adelaide.edu.au>
+  Copyright (C) 2007,2008 Jonathan Woithe <jwoithe@just42.net>
   Copyright (C) 2008 Peter Gruber <nokos@gmx.net>
   Copyright (C) 2008 Tony Vroon <tony@linx.net>
   Based on earlier work:
@@ -56,19 +56,23 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/acpi.h>
 #include <linux/dmi.h>
 #include <linux/backlight.h>
+#include <linux/fb.h>
 #include <linux/input.h>
 #include <linux/kfifo.h>
-#include <linux/video_output.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #if defined(CONFIG_LEDS_CLASS) || defined(CONFIG_LEDS_CLASS_MODULE)
 #include <linux/leds.h>
 #endif
+#include <acpi/video.h>
 
 #define FUJITSU_DRIVER_VERSION "0.6.0"
 
@@ -127,15 +131,14 @@
 #define FUJLAPTOP_DBG_INFO	  0x0004
 #define FUJLAPTOP_DBG_TRACE	  0x0008
 
-#define dbg_printk(a_dbg_level, format, arg...) \
+#ifdef CONFIG_FUJITSU_LAPTOP_DEBUG
+#define vdbg_printk(a_dbg_level, format, arg...) \
 	do { if (dbg_level & a_dbg_level) \
 		printk(FUJLAPTOP_DEBUG "%s: " format, __func__ , ## arg); \
 	} while (0)
-#ifdef CONFIG_FUJITSU_LAPTOP_DEBUG
-#define vdbg_printk(a_dbg_level, format, arg...) \
-	dbg_printk(a_dbg_level, format, ## arg)
 #else
-#define vdbg_printk(a_dbg_level, format, arg...)
+#define vdbg_printk(a_dbg_level, format, arg...) \
+	do { } while (0)
 #endif
 
 /* Device controlling the backlight and associated keys */
@@ -164,7 +167,7 @@ struct fujitsu_hotkey_t {
 	struct input_dev *input;
 	char phys[32];
 	struct platform_device *pf_device;
-	struct kfifo *fifo;
+	struct kfifo fifo;
 	spinlock_t fifo_lock;
 	int rfkill_supported;
 	int rfkill_state;
@@ -181,7 +184,7 @@ static enum led_brightness logolamp_get(struct led_classdev *cdev);
 static void logolamp_set(struct led_classdev *cdev,
 			       enum led_brightness brightness);
 
-struct led_classdev logolamp_led = {
+static struct led_classdev logolamp_led = {
  .name = "fujitsu::logolamp",
  .brightness_get = logolamp_get,
  .brightness_set = logolamp_set
@@ -191,7 +194,7 @@ static enum led_brightness kblamps_get(struct led_classdev *cdev);
 static void kblamps_set(struct led_classdev *cdev,
 			       enum led_brightness brightness);
 
-struct led_classdev kblamps_led = {
+static struct led_classdev kblamps_led = {
  .name = "fujitsu::kblamps",
  .brightness_get = kblamps_get,
  .brightness_set = kblamps_set
@@ -216,8 +219,7 @@ static int call_fext_func(int cmd, int arg0, int arg1, int arg2)
 	{ .type = ACPI_TYPE_INTEGER }
 	};
 	struct acpi_object_list arg_list = { 4, &params[0] };
-	struct acpi_buffer output;
-	union acpi_object out_obj;
+	unsigned long long value;
 	acpi_handle handle = NULL;
 
 	status = acpi_get_handle(fujitsu_hotkey->acpi_handle, "FUNC", &handle);
@@ -232,10 +234,7 @@ static int call_fext_func(int cmd, int arg0, int arg1, int arg2)
 	params[2].integer.value = arg1;
 	params[3].integer.value = arg2;
 
-	output.length = sizeof(out_obj);
-	output.pointer = &out_obj;
-
-	status = acpi_evaluate_object(handle, NULL, &arg_list, &output);
+	status = acpi_evaluate_integer(handle, NULL, &arg_list, &value);
 	if (ACPI_FAILURE(status)) {
 		vdbg_printk(FUJLAPTOP_DBG_WARN,
 			"FUNC 0x%x (args 0x%x, 0x%x, 0x%x) call failed\n",
@@ -243,18 +242,10 @@ static int call_fext_func(int cmd, int arg0, int arg1, int arg2)
 		return -ENODEV;
 	}
 
-	if (out_obj.type != ACPI_TYPE_INTEGER) {
-		vdbg_printk(FUJLAPTOP_DBG_WARN,
-			"FUNC 0x%x (args 0x%x, 0x%x, 0x%x) did not "
-			"return an integer\n",
-			cmd, arg0, arg1, arg2);
-		return -ENODEV;
-	}
-
 	vdbg_printk(FUJLAPTOP_DBG_TRACE,
 		"FUNC 0x%x (args 0x%x, 0x%x, 0x%x) returned 0x%x\n",
-			cmd, arg0, arg1, arg2, (int)out_obj.integer.value);
-	return out_obj.integer.value;
+			cmd, arg0, arg1, arg2, (int)value);
+	return value;
 }
 
 #if defined(CONFIG_LEDS_CLASS) || defined(CONFIG_LEDS_CLASS_MODULE)
@@ -314,8 +305,6 @@ static enum led_brightness kblamps_get(struct led_classdev *cdev)
 static int set_lcd_level(int level)
 {
 	acpi_status status = AE_OK;
-	union acpi_object arg0 = { ACPI_TYPE_INTEGER };
-	struct acpi_object_list arg_list = { 1, &arg0 };
 	acpi_handle handle = NULL;
 
 	vdbg_printk(FUJLAPTOP_DBG_TRACE, "set lcd level via SBLL [%d]\n",
@@ -330,9 +319,8 @@ static int set_lcd_level(int level)
 		return -ENODEV;
 	}
 
-	arg0.integer.value = level;
 
-	status = acpi_evaluate_object(handle, NULL, &arg_list, NULL);
+	status = acpi_execute_simple_method(handle, NULL, level);
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
 
@@ -342,8 +330,6 @@ static int set_lcd_level(int level)
 static int set_lcd_level_alt(int level)
 {
 	acpi_status status = AE_OK;
-	union acpi_object arg0 = { ACPI_TYPE_INTEGER };
-	struct acpi_object_list arg_list = { 1, &arg0 };
 	acpi_handle handle = NULL;
 
 	vdbg_printk(FUJLAPTOP_DBG_TRACE, "set lcd level via SBL2 [%d]\n",
@@ -358,9 +344,7 @@ static int set_lcd_level_alt(int level)
 		return -ENODEV;
 	}
 
-	arg0.integer.value = level;
-
-	status = acpi_evaluate_object(handle, NULL, &arg_list, NULL);
+	status = acpi_execute_simple_method(handle, NULL, level);
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
 
@@ -376,8 +360,8 @@ static int get_lcd_level(void)
 
 	status =
 	    acpi_evaluate_integer(fujitsu->acpi_handle, "GBLL", NULL, &state);
-	if (status < 0)
-		return status;
+	if (ACPI_FAILURE(status))
+		return 0;
 
 	fujitsu->brightness_level = state & 0x0fffffff;
 
@@ -398,8 +382,8 @@ static int get_max_brightness(void)
 
 	status =
 	    acpi_evaluate_integer(fujitsu->acpi_handle, "RBLL", NULL, &state);
-	if (status < 0)
-		return status;
+	if (ACPI_FAILURE(status))
+		return -1;
 
 	fujitsu->max_brightness = state;
 
@@ -416,7 +400,7 @@ static int bl_get_brightness(struct backlight_device *b)
 static int bl_update_status(struct backlight_device *b)
 {
 	int ret;
-	if (b->props.power == 4)
+	if (b->props.power == FB_BLANK_POWERDOWN)
 		ret = call_fext_func(FUNC_BACKLIGHT, 0x1, 0x4, 0x3);
 	else
 		ret = call_fext_func(FUNC_BACKLIGHT, 0x1, 0x4, 0x0);
@@ -436,7 +420,7 @@ static int bl_update_status(struct backlight_device *b)
 	return ret;
 }
 
-static struct backlight_ops fujitsubl_ops = {
+static const struct backlight_ops fujitsubl_ops = {
 	.get_brightness = bl_get_brightness,
 	.update_status = bl_update_status,
 };
@@ -577,18 +561,15 @@ static struct attribute_group fujitsupf_attribute_group = {
 static struct platform_driver fujitsupf_driver = {
 	.driver = {
 		   .name = "fujitsu-laptop",
-		   .owner = THIS_MODULE,
 		   }
 };
 
-static void dmi_check_cb_common(const struct dmi_system_id *id)
+static void __init dmi_check_cb_common(const struct dmi_system_id *id)
 {
-	acpi_handle handle;
-	printk(KERN_INFO "fujitsu-laptop: Identified laptop model '%s'.\n",
-	       id->ident);
+	pr_info("Identified laptop model '%s'\n", id->ident);
 	if (use_alt_lcd_levels == -1) {
-		if (ACPI_SUCCESS(acpi_get_handle(NULL,
-				"\\_SB.PCI0.LPCB.FJEX.SBL2", &handle)))
+		if (acpi_has_method(NULL,
+				"\\_SB.PCI0.LPCB.FJEX.SBL2"))
 			use_alt_lcd_levels = 1;
 		else
 			use_alt_lcd_levels = 0;
@@ -597,32 +578,32 @@ static void dmi_check_cb_common(const struct dmi_system_id *id)
 	}
 }
 
-static int dmi_check_cb_s6410(const struct dmi_system_id *id)
+static int __init dmi_check_cb_s6410(const struct dmi_system_id *id)
 {
 	dmi_check_cb_common(id);
 	fujitsu->keycode1 = KEY_SCREENLOCK;	/* "Lock" */
 	fujitsu->keycode2 = KEY_HELP;	/* "Mobility Center" */
-	return 0;
+	return 1;
 }
 
-static int dmi_check_cb_s6420(const struct dmi_system_id *id)
+static int __init dmi_check_cb_s6420(const struct dmi_system_id *id)
 {
 	dmi_check_cb_common(id);
 	fujitsu->keycode1 = KEY_SCREENLOCK;	/* "Lock" */
 	fujitsu->keycode2 = KEY_HELP;	/* "Mobility Center" */
-	return 0;
+	return 1;
 }
 
-static int dmi_check_cb_p8010(const struct dmi_system_id *id)
+static int __init dmi_check_cb_p8010(const struct dmi_system_id *id)
 {
 	dmi_check_cb_common(id);
 	fujitsu->keycode1 = KEY_HELP;	/* "Support" */
 	fujitsu->keycode3 = KEY_SWITCHVIDEOMODE;	/* "Presentation" */
 	fujitsu->keycode4 = KEY_WWW;	/* "Internet" */
-	return 0;
+	return 1;
 }
 
-static struct dmi_system_id fujitsu_dmi_table[] = {
+static const struct dmi_system_id fujitsu_dmi_table[] __initconst = {
 	{
 	 .ident = "Fujitsu Siemens S6410",
 	 .matches = {
@@ -651,8 +632,6 @@ static struct dmi_system_id fujitsu_dmi_table[] = {
 
 static int acpi_fujitsu_add(struct acpi_device *device)
 {
-	acpi_handle handle;
-	int result = 0;
 	int state = 0;
 	struct input_dev *input;
 	int error;
@@ -688,25 +667,24 @@ static int acpi_fujitsu_add(struct acpi_device *device)
 	if (error)
 		goto err_free_input_dev;
 
-	result = acpi_bus_get_power(fujitsu->acpi_handle, &state);
-	if (result) {
-		printk(KERN_ERR "Error reading power state\n");
+	error = acpi_bus_update_power(fujitsu->acpi_handle, &state);
+	if (error) {
+		pr_err("Error reading power state\n");
 		goto err_unregister_input_dev;
 	}
 
-	printk(KERN_INFO "ACPI: %s [%s] (%s)\n",
+	pr_info("ACPI: %s [%s] (%s)\n",
 	       acpi_device_name(device), acpi_device_bid(device),
 	       !device->power.state ? "on" : "off");
 
 	fujitsu->dev = device;
 
-	if (ACPI_SUCCESS
-	    (acpi_get_handle(device->handle, METHOD_NAME__INI, &handle))) {
+	if (acpi_has_method(device->handle, METHOD_NAME__INI)) {
 		vdbg_printk(FUJLAPTOP_DBG_INFO, "Invoking _INI\n");
 		if (ACPI_FAILURE
 		    (acpi_evaluate_object
 		     (device->handle, METHOD_NAME__INI, NULL, NULL)))
-			printk(KERN_ERR "_INI Method failed\n");
+			pr_err("_INI Method failed\n");
 	}
 
 	/* do config (detect defaults) */
@@ -720,24 +698,23 @@ static int acpi_fujitsu_add(struct acpi_device *device)
 		fujitsu->max_brightness = FUJITSU_LCD_N_LEVELS;
 	get_lcd_level();
 
-	return result;
+	return 0;
 
 err_unregister_input_dev:
 	input_unregister_device(input);
+	input = NULL;
 err_free_input_dev:
 	input_free_device(input);
 err_stop:
-	return result;
+	return error;
 }
 
-static int acpi_fujitsu_remove(struct acpi_device *device, int type)
+static int acpi_fujitsu_remove(struct acpi_device *device)
 {
 	struct fujitsu_t *fujitsu = acpi_driver_data(device);
 	struct input_dev *input = fujitsu->input;
 
 	input_unregister_device(input);
-
-	input_free_device(input);
 
 	fujitsu->acpi_handle = NULL;
 
@@ -772,8 +749,6 @@ static void acpi_fujitsu_notify(struct acpi_device *device, u32 event)
 				else
 					set_lcd_level(newb);
 			}
-			acpi_bus_generate_proc_event(fujitsu->dev,
-				ACPI_VIDEO_NOTIFY_INC_BRIGHTNESS, 0);
 			keycode = KEY_BRIGHTNESSUP;
 		} else if (oldb > newb) {
 			if (disable_brightness_adjust != 1) {
@@ -782,8 +757,6 @@ static void acpi_fujitsu_notify(struct acpi_device *device, u32 event)
 				else
 					set_lcd_level(newb);
 			}
-			acpi_bus_generate_proc_event(fujitsu->dev,
-				ACPI_VIDEO_NOTIFY_DEC_BRIGHTNESS, 0);
 			keycode = KEY_BRIGHTNESSDOWN;
 		}
 		break;
@@ -806,7 +779,6 @@ static void acpi_fujitsu_notify(struct acpi_device *device, u32 event)
 
 static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 {
-	acpi_handle handle;
 	int result = 0;
 	int state = 0;
 	struct input_dev *input;
@@ -824,12 +796,10 @@ static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 
 	/* kfifo */
 	spin_lock_init(&fujitsu_hotkey->fifo_lock);
-	fujitsu_hotkey->fifo =
-	    kfifo_alloc(RINGBUFFERSIZE * sizeof(int), GFP_KERNEL,
-			&fujitsu_hotkey->fifo_lock);
-	if (IS_ERR(fujitsu_hotkey->fifo)) {
-		printk(KERN_ERR "kfifo_alloc failed\n");
-		error = PTR_ERR(fujitsu_hotkey->fifo);
+	error = kfifo_alloc(&fujitsu_hotkey->fifo, RINGBUFFERSIZE * sizeof(int),
+			GFP_KERNEL);
+	if (error) {
+		pr_err("kfifo_alloc failed\n");
 		goto err_stop;
 	}
 
@@ -859,25 +829,24 @@ static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 	if (error)
 		goto err_free_input_dev;
 
-	result = acpi_bus_get_power(fujitsu_hotkey->acpi_handle, &state);
-	if (result) {
-		printk(KERN_ERR "Error reading power state\n");
+	error = acpi_bus_update_power(fujitsu_hotkey->acpi_handle, &state);
+	if (error) {
+		pr_err("Error reading power state\n");
 		goto err_unregister_input_dev;
 	}
 
-	printk(KERN_INFO "ACPI: %s [%s] (%s)\n",
-	       acpi_device_name(device), acpi_device_bid(device),
-	       !device->power.state ? "on" : "off");
+	pr_info("ACPI: %s [%s] (%s)\n",
+		acpi_device_name(device), acpi_device_bid(device),
+		!device->power.state ? "on" : "off");
 
 	fujitsu_hotkey->dev = device;
 
-	if (ACPI_SUCCESS
-	    (acpi_get_handle(device->handle, METHOD_NAME__INI, &handle))) {
+	if (acpi_has_method(device->handle, METHOD_NAME__INI)) {
 		vdbg_printk(FUJLAPTOP_DBG_INFO, "Invoking _INI\n");
 		if (ACPI_FAILURE
 		    (acpi_evaluate_object
 		     (device->handle, METHOD_NAME__INI, NULL, NULL)))
-			printk(KERN_ERR "_INI Method failed\n");
+			pr_err("_INI Method failed\n");
 	}
 
 	i = 0;
@@ -899,8 +868,7 @@ static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 			call_fext_func(FUNC_RFKILL, 0x4, 0x0, 0x0);
 
 	/* Suspect this is a keymap of the application panel, print it */
-	printk(KERN_INFO "fujitsu-laptop: BTNI: [0x%x]\n",
-		call_fext_func(FUNC_BUTTONS, 0x0, 0x0, 0x0));
+	pr_info("BTNI: [0x%x]\n", call_fext_func(FUNC_BUTTONS, 0x0, 0x0, 0x0));
 
 #if defined(CONFIG_LEDS_CLASS) || defined(CONFIG_LEDS_CLASS_MODULE)
 	if (call_fext_func(FUNC_LEDS, 0x0, 0x0, 0x0) & LOGOLAMP_POWERON) {
@@ -909,8 +877,8 @@ static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 		if (result == 0) {
 			fujitsu_hotkey->logolamp_registered = 1;
 		} else {
-			printk(KERN_ERR "fujitsu-laptop: Could not register "
-			"LED handler for logo lamp, error %i\n", result);
+			pr_err("Could not register LED handler for logo lamp, error %i\n",
+			       result);
 		}
 	}
 
@@ -921,8 +889,8 @@ static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 		if (result == 0) {
 			fujitsu_hotkey->kblamps_registered = 1;
 		} else {
-			printk(KERN_ERR "fujitsu-laptop: Could not register "
-			"LED handler for keyboard lamps, error %i\n", result);
+			pr_err("Could not register LED handler for keyboard lamps, error %i\n",
+			       result);
 		}
 	}
 #endif
@@ -931,15 +899,16 @@ static int acpi_fujitsu_hotkey_add(struct acpi_device *device)
 
 err_unregister_input_dev:
 	input_unregister_device(input);
+	input = NULL;
 err_free_input_dev:
 	input_free_device(input);
 err_free_fifo:
-	kfifo_free(fujitsu_hotkey->fifo);
+	kfifo_free(&fujitsu_hotkey->fifo);
 err_stop:
-	return result;
+	return error;
 }
 
-static int acpi_fujitsu_hotkey_remove(struct acpi_device *device, int type)
+static int acpi_fujitsu_hotkey_remove(struct acpi_device *device)
 {
 	struct fujitsu_hotkey_t *fujitsu_hotkey = acpi_driver_data(device);
 	struct input_dev *input = fujitsu_hotkey->input;
@@ -954,9 +923,7 @@ static int acpi_fujitsu_hotkey_remove(struct acpi_device *device, int type)
 
 	input_unregister_device(input);
 
-	input_free_device(input);
-
-	kfifo_free(fujitsu_hotkey->fifo);
+	kfifo_free(&fujitsu_hotkey->fifo);
 
 	fujitsu_hotkey->acpi_handle = NULL;
 
@@ -1008,9 +975,10 @@ static void acpi_fujitsu_hotkey_notify(struct acpi_device *device, u32 event)
 				vdbg_printk(FUJLAPTOP_DBG_TRACE,
 					"Push keycode into ringbuffer [%d]\n",
 					keycode);
-				status = kfifo_put(fujitsu_hotkey->fifo,
+				status = kfifo_in_locked(&fujitsu_hotkey->fifo,
 						   (unsigned char *)&keycode,
-						   sizeof(keycode));
+						   sizeof(keycode),
+						   &fujitsu_hotkey->fifo_lock);
 				if (status != sizeof(keycode)) {
 					vdbg_printk(FUJLAPTOP_DBG_WARN,
 					    "Could not push keycode [0x%x]\n",
@@ -1021,11 +989,12 @@ static void acpi_fujitsu_hotkey_notify(struct acpi_device *device, u32 event)
 				}
 			} else if (keycode == 0) {
 				while ((status =
-					kfifo_get
-					(fujitsu_hotkey->fifo, (unsigned char *)
-					 &keycode_r,
-					 sizeof
-					 (keycode_r))) == sizeof(keycode_r)) {
+					kfifo_out_locked(
+					 &fujitsu_hotkey->fifo,
+					 (unsigned char *) &keycode_r,
+					 sizeof(keycode_r),
+					 &fujitsu_hotkey->fifo_lock))
+					 == sizeof(keycode_r)) {
 					input_report_key(input, keycode_r, 0);
 					input_sync(input);
 					vdbg_printk(FUJLAPTOP_DBG_TRACE,
@@ -1082,6 +1051,13 @@ static struct acpi_driver acpi_fujitsu_hotkey_driver = {
 		},
 };
 
+static const struct acpi_device_id fujitsu_ids[] __used = {
+	{ACPI_FUJITSU_HID, 0},
+	{ACPI_FUJITSU_HOTKEY_HID, 0},
+	{"", 0}
+};
+MODULE_DEVICE_TABLE(acpi, fujitsu_ids);
+
 static int __init fujitsu_init(void)
 {
 	int ret, result, max_brightness;
@@ -1089,10 +1065,9 @@ static int __init fujitsu_init(void)
 	if (acpi_disabled)
 		return -ENODEV;
 
-	fujitsu = kmalloc(sizeof(struct fujitsu_t), GFP_KERNEL);
+	fujitsu = kzalloc(sizeof(struct fujitsu_t), GFP_KERNEL);
 	if (!fujitsu)
 		return -ENOMEM;
-	memset(fujitsu, 0, sizeof(struct fujitsu_t));
 	fujitsu->keycode1 = KEY_PROG1;
 	fujitsu->keycode2 = KEY_PROG2;
 	fujitsu->keycode3 = KEY_PROG3;
@@ -1125,17 +1100,22 @@ static int __init fujitsu_init(void)
 
 	/* Register backlight stuff */
 
-	if (!acpi_video_backlight_support()) {
-		fujitsu->bl_device =
-			backlight_device_register("fujitsu-laptop", NULL, NULL,
-						  &fujitsubl_ops);
+	if (acpi_video_get_backlight_type() == acpi_backlight_vendor) {
+		struct backlight_properties props;
+
+		memset(&props, 0, sizeof(struct backlight_properties));
+		max_brightness = fujitsu->max_brightness;
+		props.type = BACKLIGHT_PLATFORM;
+		props.max_brightness = max_brightness - 1;
+		fujitsu->bl_device = backlight_device_register("fujitsu-laptop",
+							       NULL, NULL,
+							       &fujitsubl_ops,
+							       &props);
 		if (IS_ERR(fujitsu->bl_device)) {
 			ret = PTR_ERR(fujitsu->bl_device);
 			fujitsu->bl_device = NULL;
 			goto fail_sysfs_group;
 		}
-		max_brightness = fujitsu->max_brightness;
-		fujitsu->bl_device->props.max_brightness = max_brightness - 1;
 		fujitsu->bl_device->props.brightness = fujitsu->brightness_level;
 	}
 
@@ -1145,12 +1125,11 @@ static int __init fujitsu_init(void)
 
 	/* Register hotkey driver */
 
-	fujitsu_hotkey = kmalloc(sizeof(struct fujitsu_hotkey_t), GFP_KERNEL);
+	fujitsu_hotkey = kzalloc(sizeof(struct fujitsu_hotkey_t), GFP_KERNEL);
 	if (!fujitsu_hotkey) {
 		ret = -ENOMEM;
 		goto fail_hotkey;
 	}
-	memset(fujitsu_hotkey, 0, sizeof(struct fujitsu_hotkey_t));
 
 	result = acpi_bus_register_driver(&acpi_fujitsu_hotkey_driver);
 	if (result < 0) {
@@ -1159,16 +1138,14 @@ static int __init fujitsu_init(void)
 	}
 
 	/* Sync backlight power status (needs FUJ02E3 device, hence deferred) */
-
-	if (!acpi_video_backlight_support()) {
+	if (acpi_video_get_backlight_type() == acpi_backlight_vendor) {
 		if (call_fext_func(FUNC_BACKLIGHT, 0x2, 0x4, 0x0) == 3)
-			fujitsu->bl_device->props.power = 4;
+			fujitsu->bl_device->props.power = FB_BLANK_POWERDOWN;
 		else
-			fujitsu->bl_device->props.power = 0;
+			fujitsu->bl_device->props.power = FB_BLANK_UNBLANK;
 	}
 
-	printk(KERN_INFO "fujitsu-laptop: driver " FUJITSU_DRIVER_VERSION
-	       " successfully loaded.\n");
+	pr_info("driver " FUJITSU_DRIVER_VERSION " successfully loaded\n");
 
 	return 0;
 
@@ -1177,8 +1154,7 @@ fail_hotkey1:
 fail_hotkey:
 	platform_driver_unregister(&fujitsupf_driver);
 fail_backlight:
-	if (fujitsu->bl_device)
-		backlight_device_unregister(fujitsu->bl_device);
+	backlight_device_unregister(fujitsu->bl_device);
 fail_sysfs_group:
 	sysfs_remove_group(&fujitsu->pf_device->dev.kobj,
 			   &fujitsupf_attribute_group);
@@ -1202,8 +1178,7 @@ static void __exit fujitsu_cleanup(void)
 
 	platform_driver_unregister(&fujitsupf_driver);
 
-	if (fujitsu->bl_device)
-		backlight_device_unregister(fujitsu->bl_device);
+	backlight_device_unregister(fujitsu->bl_device);
 
 	sysfs_remove_group(&fujitsu->pf_device->dev.kobj,
 			   &fujitsupf_attribute_group);
@@ -1214,7 +1189,7 @@ static void __exit fujitsu_cleanup(void)
 
 	kfree(fujitsu);
 
-	printk(KERN_INFO "fujitsu-laptop: driver unloaded.\n");
+	pr_info("driver unloaded\n");
 }
 
 module_init(fujitsu_init);
@@ -1238,12 +1213,3 @@ MODULE_LICENSE("GPL");
 MODULE_ALIAS("dmi:*:svnFUJITSUSIEMENS:*:pvr:rvnFUJITSU:rnFJNB1D3:*:cvrS6410:*");
 MODULE_ALIAS("dmi:*:svnFUJITSUSIEMENS:*:pvr:rvnFUJITSU:rnFJNB1E6:*:cvrS6420:*");
 MODULE_ALIAS("dmi:*:svnFUJITSU:*:pvr:rvnFUJITSU:rnFJNB19C:*:cvrS7020:*");
-
-static struct pnp_device_id pnp_ids[] = {
-	{.id = "FUJ02bf"},
-	{.id = "FUJ02B1"},
-	{.id = "FUJ02E3"},
-	{.id = ""}
-};
-
-MODULE_DEVICE_TABLE(pnp, pnp_ids);

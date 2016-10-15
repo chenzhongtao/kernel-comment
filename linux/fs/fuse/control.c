@@ -23,7 +23,7 @@ static struct fuse_conn *fuse_ctl_file_conn_get(struct file *file)
 {
 	struct fuse_conn *fc;
 	mutex_lock(&fuse_mutex);
-	fc = file->f_path.dentry->d_inode->i_private;
+	fc = file_inode(file)->i_private;
 	if (fc)
 		fc = fuse_conn_get(fc);
 	mutex_unlock(&fuse_mutex);
@@ -75,19 +75,13 @@ static ssize_t fuse_conn_limit_write(struct file *file, const char __user *buf,
 				     unsigned global_limit)
 {
 	unsigned long t;
-	char tmp[32];
 	unsigned limit = (1 << 16) - 1;
 	int err;
 
-	if (*ppos || count >= sizeof(tmp) - 1)
+	if (*ppos)
 		return -EINVAL;
 
-	if (copy_from_user(tmp, buf, count))
-		return -EINVAL;
-
-	tmp[count] = '\0';
-
-	err = strict_strtoul(tmp, 0, &t);
+	err = kstrtoul_from_user(buf, count, 0, &t);
 	if (err)
 		return err;
 
@@ -123,7 +117,7 @@ static ssize_t fuse_conn_max_background_write(struct file *file,
 					      const char __user *buf,
 					      size_t count, loff_t *ppos)
 {
-	unsigned val;
+	unsigned uninitialized_var(val);
 	ssize_t ret;
 
 	ret = fuse_conn_limit_write(file, buf, count, ppos, &val,
@@ -160,7 +154,7 @@ static ssize_t fuse_conn_congestion_threshold_write(struct file *file,
 						    const char __user *buf,
 						    size_t count, loff_t *ppos)
 {
-	unsigned val;
+	unsigned uninitialized_var(val);
 	ssize_t ret;
 
 	ret = fuse_conn_limit_write(file, buf, count, ppos, &val,
@@ -179,23 +173,27 @@ static ssize_t fuse_conn_congestion_threshold_write(struct file *file,
 static const struct file_operations fuse_ctl_abort_ops = {
 	.open = nonseekable_open,
 	.write = fuse_conn_abort_write,
+	.llseek = no_llseek,
 };
 
 static const struct file_operations fuse_ctl_waiting_ops = {
 	.open = nonseekable_open,
 	.read = fuse_conn_waiting_read,
+	.llseek = no_llseek,
 };
 
 static const struct file_operations fuse_conn_max_background_ops = {
 	.open = nonseekable_open,
 	.read = fuse_conn_max_background_read,
 	.write = fuse_conn_max_background_write,
+	.llseek = no_llseek,
 };
 
 static const struct file_operations fuse_conn_congestion_threshold_ops = {
 	.open = nonseekable_open,
 	.read = fuse_conn_congestion_threshold_read,
 	.write = fuse_conn_congestion_threshold_write,
+	.llseek = no_llseek,
 };
 
 static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
@@ -218,6 +216,7 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 	if (!inode)
 		return NULL;
 
+	inode->i_ino = get_next_ino();
 	inode->i_mode = mode;
 	inode->i_uid = fc->user_id;
 	inode->i_gid = fc->group_id;
@@ -226,7 +225,7 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 	if (iop)
 		inode->i_op = iop;
 	inode->i_fop = fop;
-	inode->i_nlink = nlink;
+	set_nlink(inode, nlink);
 	inode->i_private = fc;
 	d_add(dentry, inode);
 	return dentry;
@@ -245,7 +244,7 @@ int fuse_ctl_add_conn(struct fuse_conn *fc)
 		return 0;
 
 	parent = fuse_control_sb->s_root;
-	inc_nlink(parent->d_inode);
+	inc_nlink(d_inode(parent));
 	sprintf(name, "%u", fc->dev);
 	parent = fuse_ctl_add_dentry(parent, fc, name, S_IFDIR | 0500, 2,
 				     &simple_dir_inode_operations,
@@ -284,11 +283,11 @@ void fuse_ctl_remove_conn(struct fuse_conn *fc)
 
 	for (i = fc->ctl_ndents - 1; i >= 0; i--) {
 		struct dentry *dentry = fc->ctl_dentry[i];
-		dentry->d_inode->i_private = NULL;
+		d_inode(dentry)->i_private = NULL;
 		d_drop(dentry);
 		dput(dentry);
 	}
-	drop_nlink(fuse_control_sb->s_root->d_inode);
+	drop_nlink(d_inode(fuse_control_sb->s_root));
 }
 
 static int fuse_ctl_fill_super(struct super_block *sb, void *data, int silent)
@@ -317,12 +316,10 @@ static int fuse_ctl_fill_super(struct super_block *sb, void *data, int silent)
 	return 0;
 }
 
-static int fuse_ctl_get_sb(struct file_system_type *fs_type, int flags,
-			const char *dev_name, void *raw_data,
-			struct vfsmount *mnt)
+static struct dentry *fuse_ctl_mount(struct file_system_type *fs_type,
+			int flags, const char *dev_name, void *raw_data)
 {
-	return get_sb_single(fs_type, flags, raw_data,
-				fuse_ctl_fill_super, mnt);
+	return mount_single(fs_type, flags, raw_data, fuse_ctl_fill_super);
 }
 
 static void fuse_ctl_kill_sb(struct super_block *sb)
@@ -341,16 +338,17 @@ static void fuse_ctl_kill_sb(struct super_block *sb)
 static struct file_system_type fuse_ctl_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "fusectl",
-	.get_sb		= fuse_ctl_get_sb,
+	.mount		= fuse_ctl_mount,
 	.kill_sb	= fuse_ctl_kill_sb,
 };
+MODULE_ALIAS_FS("fusectl");
 
 int __init fuse_ctl_init(void)
 {
 	return register_filesystem(&fuse_ctl_fs_type);
 }
 
-void fuse_ctl_cleanup(void)
+void __exit fuse_ctl_cleanup(void)
 {
 	unregister_filesystem(&fuse_ctl_fs_type);
 }

@@ -29,20 +29,20 @@
 void jfs_set_inode_flags(struct inode *inode)
 {
 	unsigned int flags = JFS_IP(inode)->mode2;
-
-	inode->i_flags &= ~(S_IMMUTABLE | S_APPEND |
-		S_NOATIME | S_DIRSYNC | S_SYNC);
+	unsigned int new_fl = 0;
 
 	if (flags & JFS_IMMUTABLE_FL)
-		inode->i_flags |= S_IMMUTABLE;
+		new_fl |= S_IMMUTABLE;
 	if (flags & JFS_APPEND_FL)
-		inode->i_flags |= S_APPEND;
+		new_fl |= S_APPEND;
 	if (flags & JFS_NOATIME_FL)
-		inode->i_flags |= S_NOATIME;
+		new_fl |= S_NOATIME;
 	if (flags & JFS_DIRSYNC_FL)
-		inode->i_flags |= S_DIRSYNC;
+		new_fl |= S_DIRSYNC;
 	if (flags & JFS_SYNC_FL)
-		inode->i_flags |= S_SYNC;
+		new_fl |= S_SYNC;
+	inode_set_flags(inode, new_fl, S_IMMUTABLE | S_APPEND | S_NOATIME |
+			S_DIRSYNC | S_SYNC);
 }
 
 void jfs_get_inode_flags(struct jfs_inode_info *jfs_ip)
@@ -95,17 +95,10 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 
 	if (insert_inode_locked(inode) < 0) {
 		rc = -EINVAL;
-		goto fail_unlock;
+		goto fail_put;
 	}
 
-	inode->i_uid = current_fsuid();
-	if (parent->i_mode & S_ISGID) {
-		inode->i_gid = parent->i_gid;
-		if (S_ISDIR(mode))
-			mode |= S_ISGID;
-	} else
-		inode->i_gid = current_fsgid();
-
+	inode_init_owner(inode, parent, mode);
 	/*
 	 * New inodes need to save sane values on disk when
 	 * uid & gid mount options are used
@@ -116,12 +109,13 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 	/*
 	 * Allocate inode to quota.
 	 */
-	if (vfs_dq_alloc_inode(inode)) {
-		rc = -EDQUOT;
+	rc = dquot_initialize(inode);
+	if (rc)
 		goto fail_drop;
-	}
+	rc = dquot_alloc_inode(inode);
+	if (rc)
+		goto fail_drop;
 
-	inode->i_mode = mode;
 	/* inherit flags from parent */
 	jfs_inode->mode2 = JFS_IP(parent)->mode2 & JFS_FL_INHERIT;
 
@@ -134,7 +128,7 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 		if (S_ISLNK(mode))
 			jfs_inode->mode2 &= ~(JFS_IMMUTABLE_FL|JFS_APPEND_FL);
 	}
-	jfs_inode->mode2 |= mode;
+	jfs_inode->mode2 |= inode->i_mode;
 
 	inode->i_blocks = 0;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
@@ -162,10 +156,9 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 	return inode;
 
 fail_drop:
-	vfs_dq_drop(inode);
+	dquot_drop(inode);
 	inode->i_flags |= S_NOQUOTA;
-fail_unlock:
-	inode->i_nlink = 0;
+	clear_nlink(inode);
 	unlock_new_inode(inode);
 fail_put:
 	iput(inode);

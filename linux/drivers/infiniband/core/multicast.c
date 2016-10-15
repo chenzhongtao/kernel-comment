@@ -34,6 +34,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
+#include <linux/export.h>
+#include <linux/slab.h>
 #include <linux/bitops.h>
 #include <linux/random.h>
 
@@ -41,7 +43,7 @@
 #include "sa.h"
 
 static void mcast_add_one(struct ib_device *device);
-static void mcast_remove_one(struct ib_device *device);
+static void mcast_remove_one(struct ib_device *device, void *client_data);
 
 static struct ib_client mcast_client = {
 	.name   = "ib_multicast",
@@ -104,7 +106,6 @@ struct mcast_group {
 	atomic_t		refcount;
 	enum mcast_group_state	state;
 	struct ib_sa_query	*query;
-	int			query_id;
 	u16			pkey_index;
 	u8			leave_state;
 	int			retries;
@@ -337,11 +338,7 @@ static int send_join(struct mcast_group *group, struct mcast_member *member)
 				       member->multicast.comp_mask,
 				       3000, GFP_KERNEL, join_handler, group,
 				       &group->query);
-	if (ret >= 0) {
-		group->query_id = ret;
-		ret = 0;
-	}
-	return ret;
+	return (ret > 0) ? 0 : ret;
 }
 
 static int send_leave(struct mcast_group *group, u8 leave_state)
@@ -361,11 +358,7 @@ static int send_leave(struct mcast_group *group, u8 leave_state)
 				       IB_SA_MCMEMBER_REC_JOIN_STATE,
 				       3000, GFP_KERNEL, leave_handler,
 				       group, &group->query);
-	if (ret >= 0) {
-		group->query_id = ret;
-		ret = 0;
-	}
-	return ret;
+	return (ret > 0) ? 0 : ret;
 }
 
 static void join_group(struct mcast_group *group, struct mcast_member *member,
@@ -523,17 +516,22 @@ static void join_handler(int status, struct ib_sa_mcmember_rec *rec,
 	if (status)
 		process_join_error(group, status);
 	else {
+		int mgids_changed, is_mgid0;
 		ib_find_pkey(group->port->dev->device, group->port->port_num,
 			     be16_to_cpu(rec->pkey), &pkey_index);
 
 		spin_lock_irq(&group->port->lock);
-		group->rec = *rec;
 		if (group->state == MCAST_BUSY &&
 		    group->pkey_index == MCAST_INVALID_PKEY_INDEX)
 			group->pkey_index = pkey_index;
-		if (!memcmp(&mgid0, &group->rec.mgid, sizeof mgid0)) {
+		mgids_changed = memcmp(&rec->mgid, &group->rec.mgid,
+				       sizeof(group->rec.mgid));
+		group->rec = *rec;
+		if (mgids_changed) {
 			rb_erase(&group->node, &group->port->table);
-			mcast_insert(group->port, group, 1);
+			is_mgid0 = !memcmp(&mgid0, &group->rec.mgid,
+					   sizeof(mgid0));
+			mcast_insert(group->port, group, is_mgid0);
 		}
 		spin_unlock_irq(&group->port->lock);
 	}
@@ -722,7 +720,8 @@ int ib_init_ah_from_mcmember(struct ib_device *device, u8 port_num,
 	u16 gid_index;
 	u8 p;
 
-	ret = ib_find_cached_gid(device, &rec->port_gid, &p, &gid_index);
+	ret = ib_find_cached_gid(device, &rec->port_gid,
+				 NULL, &p, &gid_index);
 	if (ret)
 		return ret;
 
@@ -773,6 +772,9 @@ static void mcast_event_handler(struct ib_event_handler *handler,
 	int index;
 
 	dev = container_of(handler, struct mcast_device, event_handler);
+	if (!rdma_cap_ib_mcast(dev->device, event->element.port_num))
+		return;
+
 	index = event->element.port_num - dev->start_port;
 
 	switch (event->event) {
@@ -795,23 +797,19 @@ static void mcast_add_one(struct ib_device *device)
 	struct mcast_device *dev;
 	struct mcast_port *port;
 	int i;
-
-	if (rdma_node_get_transport(device->node_type) != RDMA_TRANSPORT_IB)
-		return;
+	int count = 0;
 
 	dev = kmalloc(sizeof *dev + device->phys_port_cnt * sizeof *port,
 		      GFP_KERNEL);
 	if (!dev)
 		return;
 
-	if (device->node_type == RDMA_NODE_IB_SWITCH)
-		dev->start_port = dev->end_port = 0;
-	else {
-		dev->start_port = 1;
-		dev->end_port = device->phys_port_cnt;
-	}
+	dev->start_port = rdma_start_port(device);
+	dev->end_port = rdma_end_port(device);
 
 	for (i = 0; i <= dev->end_port - dev->start_port; i++) {
+		if (!rdma_cap_ib_mcast(device, dev->start_port + i))
+			continue;
 		port = &dev->port[i];
 		port->dev = dev;
 		port->port_num = dev->start_port + i;
@@ -819,6 +817,12 @@ static void mcast_add_one(struct ib_device *device)
 		port->table = RB_ROOT;
 		init_completion(&port->comp);
 		atomic_set(&port->refcount, 1);
+		++count;
+	}
+
+	if (!count) {
+		kfree(dev);
+		return;
 	}
 
 	dev->device = device;
@@ -828,13 +832,12 @@ static void mcast_add_one(struct ib_device *device)
 	ib_register_event_handler(&dev->event_handler);
 }
 
-static void mcast_remove_one(struct ib_device *device)
+static void mcast_remove_one(struct ib_device *device, void *client_data)
 {
-	struct mcast_device *dev;
+	struct mcast_device *dev = client_data;
 	struct mcast_port *port;
 	int i;
 
-	dev = ib_get_client_data(device, &mcast_client);
 	if (!dev)
 		return;
 
@@ -842,9 +845,11 @@ static void mcast_remove_one(struct ib_device *device)
 	flush_workqueue(mcast_wq);
 
 	for (i = 0; i <= dev->end_port - dev->start_port; i++) {
-		port = &dev->port[i];
-		deref_port(port);
-		wait_for_completion(&port->comp);
+		if (rdma_cap_ib_mcast(device, dev->start_port + i)) {
+			port = &dev->port[i];
+			deref_port(port);
+			wait_for_completion(&port->comp);
+		}
 	}
 
 	kfree(dev);

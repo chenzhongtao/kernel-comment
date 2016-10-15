@@ -21,15 +21,17 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
-#define MLOG_MASK_PREFIX ML_INODE
 #include <cluster/masklog.h>
 
 #include "ocfs2.h"
 #include "alloc.h"
 #include "dlmglue.h"
 #include "file.h"
+#include "inode.h"
+#include "journal.h"
 #include "ocfs2_fs.h"
 
 #include "xattr.h"
@@ -49,10 +51,6 @@ static struct posix_acl *ocfs2_acl_from_xattr(const void *value, size_t size)
 		return ERR_PTR(-EINVAL);
 
 	count = size / sizeof(struct posix_acl_entry);
-	if (count < 0)
-		return ERR_PTR(-EINVAL);
-	if (count == 0)
-		return NULL;
 
 	acl = posix_acl_alloc(count, GFP_NOFS);
 	if (!acl)
@@ -63,7 +61,20 @@ static struct posix_acl *ocfs2_acl_from_xattr(const void *value, size_t size)
 
 		acl->a_entries[n].e_tag  = le16_to_cpu(entry->e_tag);
 		acl->a_entries[n].e_perm = le16_to_cpu(entry->e_perm);
-		acl->a_entries[n].e_id   = le32_to_cpu(entry->e_id);
+		switch(acl->a_entries[n].e_tag) {
+		case ACL_USER:
+			acl->a_entries[n].e_uid =
+				make_kuid(&init_user_ns,
+					  le32_to_cpu(entry->e_id));
+			break;
+		case ACL_GROUP:
+			acl->a_entries[n].e_gid =
+				make_kgid(&init_user_ns,
+					  le32_to_cpu(entry->e_id));
+			break;
+		default:
+			break;
+		}
 		value += sizeof(struct posix_acl_entry);
 
 	}
@@ -89,7 +100,21 @@ static void *ocfs2_acl_to_xattr(const struct posix_acl *acl, size_t *size)
 	for (n = 0; n < acl->a_count; n++, entry++) {
 		entry->e_tag  = cpu_to_le16(acl->a_entries[n].e_tag);
 		entry->e_perm = cpu_to_le16(acl->a_entries[n].e_perm);
-		entry->e_id   = cpu_to_le32(acl->a_entries[n].e_id);
+		switch(acl->a_entries[n].e_tag) {
+		case ACL_USER:
+			entry->e_id = cpu_to_le32(
+				from_kuid(&init_user_ns,
+					  acl->a_entries[n].e_uid));
+			break;
+		case ACL_GROUP:
+			entry->e_id = cpu_to_le32(
+				from_kgid(&init_user_ns,
+					  acl->a_entries[n].e_gid));
+			break;
+		default:
+			entry->e_id = cpu_to_le32(ACL_UNDEFINED_ID);
+			break;
+		}
 	}
 	return ocfs2_acl;
 }
@@ -98,14 +123,10 @@ static struct posix_acl *ocfs2_get_acl_nolock(struct inode *inode,
 					      int type,
 					      struct buffer_head *di_bh)
 {
-	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
 	int name_index;
 	char *value = NULL;
 	struct posix_acl *acl;
 	int retval;
-
-	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
-		return NULL;
 
 	switch (type) {
 	case ACL_TYPE_ACCESS:
@@ -139,40 +160,68 @@ static struct posix_acl *ocfs2_get_acl_nolock(struct inode *inode,
 	return acl;
 }
 
-
 /*
- * Get posix acl.
+ * Helper function to set i_mode in memory and disk. Some call paths
+ * will not have di_bh or a journal handle to pass, in which case it
+ * will create it's own.
  */
-static struct posix_acl *ocfs2_get_acl(struct inode *inode, int type)
+static int ocfs2_acl_set_mode(struct inode *inode, struct buffer_head *di_bh,
+			      handle_t *handle, umode_t new_mode)
 {
-	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
-	struct buffer_head *di_bh = NULL;
-	struct posix_acl *acl;
-	int ret;
+	int ret, commit_handle = 0;
+	struct ocfs2_dinode *di;
 
-	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
-		return NULL;
+	if (di_bh == NULL) {
+		ret = ocfs2_read_inode_block(inode, &di_bh);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+	} else
+		get_bh(di_bh);
 
-	ret = ocfs2_inode_lock(inode, &di_bh, 0);
-	if (ret < 0) {
-		mlog_errno(ret);
-		acl = ERR_PTR(ret);
-		return acl;
+	if (handle == NULL) {
+		handle = ocfs2_start_trans(OCFS2_SB(inode->i_sb),
+					   OCFS2_INODE_UPDATE_CREDITS);
+		if (IS_ERR(handle)) {
+			ret = PTR_ERR(handle);
+			mlog_errno(ret);
+			goto out_brelse;
+		}
+
+		commit_handle = 1;
 	}
 
-	acl = ocfs2_get_acl_nolock(inode, type, di_bh);
+	di = (struct ocfs2_dinode *)di_bh->b_data;
+	ret = ocfs2_journal_access_di(handle, INODE_CACHE(inode), di_bh,
+				      OCFS2_JOURNAL_ACCESS_WRITE);
+	if (ret) {
+		mlog_errno(ret);
+		goto out_commit;
+	}
 
-	ocfs2_inode_unlock(inode, 0);
+	inode->i_mode = new_mode;
+	inode->i_ctime = CURRENT_TIME;
+	di->i_mode = cpu_to_le16(inode->i_mode);
+	di->i_ctime = cpu_to_le64(inode->i_ctime.tv_sec);
+	di->i_ctime_nsec = cpu_to_le32(inode->i_ctime.tv_nsec);
+	ocfs2_update_inode_fsync_trans(handle, inode, 0);
 
+	ocfs2_journal_dirty(handle, di_bh);
+
+out_commit:
+	if (commit_handle)
+		ocfs2_commit_trans(OCFS2_SB(inode->i_sb), handle);
+out_brelse:
 	brelse(di_bh);
-
-	return acl;
+out:
+	return ret;
 }
 
 /*
  * Set the access or default ACL of an inode.
  */
-static int ocfs2_set_acl(handle_t *handle,
+int ocfs2_set_acl(handle_t *handle,
 			 struct inode *inode,
 			 struct buffer_head *di_bh,
 			 int type,
@@ -192,15 +241,18 @@ static int ocfs2_set_acl(handle_t *handle,
 	case ACL_TYPE_ACCESS:
 		name_index = OCFS2_XATTR_INDEX_POSIX_ACL_ACCESS;
 		if (acl) {
-			mode_t mode = inode->i_mode;
+			umode_t mode = inode->i_mode;
 			ret = posix_acl_equiv_mode(acl, &mode);
 			if (ret < 0)
 				return ret;
-			else {
-				inode->i_mode = mode;
-				if (ret == 0)
-					acl = NULL;
-			}
+
+			if (ret == 0)
+				acl = NULL;
+
+			ret = ocfs2_acl_set_mode(inode, di_bh,
+						 handle, mode);
+			if (ret)
+				return ret;
 		}
 		break;
 	case ACL_TYPE_DEFAULT:
@@ -230,25 +282,51 @@ static int ocfs2_set_acl(handle_t *handle,
 	return ret;
 }
 
-int ocfs2_check_acl(struct inode *inode, int mask)
+int ocfs2_iop_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
-	struct posix_acl *acl = ocfs2_get_acl(inode, ACL_TYPE_ACCESS);
+	struct buffer_head *bh = NULL;
+	int status = 0;
 
-	if (IS_ERR(acl))
-		return PTR_ERR(acl);
-	if (acl) {
-		int ret = posix_acl_permission(inode, acl, mask);
-		posix_acl_release(acl);
-		return ret;
+	status = ocfs2_inode_lock(inode, &bh, 1);
+	if (status < 0) {
+		if (status != -ENOENT)
+			mlog_errno(status);
+		return status;
 	}
-
-	return -EAGAIN;
+	status = ocfs2_set_acl(NULL, inode, bh, type, acl, NULL, NULL);
+	ocfs2_inode_unlock(inode, 1);
+	brelse(bh);
+	return status;
 }
 
-int ocfs2_acl_chmod(struct inode *inode)
+struct posix_acl *ocfs2_iop_get_acl(struct inode *inode, int type)
+{
+	struct ocfs2_super *osb;
+	struct buffer_head *di_bh = NULL;
+	struct posix_acl *acl;
+	int ret;
+
+	osb = OCFS2_SB(inode->i_sb);
+	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
+		return NULL;
+	ret = ocfs2_inode_lock(inode, &di_bh, 0);
+	if (ret < 0) {
+		if (ret != -ENOENT)
+			mlog_errno(ret);
+		return ERR_PTR(ret);
+	}
+
+	acl = ocfs2_get_acl_nolock(inode, type, di_bh);
+
+	ocfs2_inode_unlock(inode, 0);
+	brelse(di_bh);
+	return acl;
+}
+
+int ocfs2_acl_chmod(struct inode *inode, struct buffer_head *bh)
 {
 	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
-	struct posix_acl *acl, *clone;
+	struct posix_acl *acl;
 	int ret;
 
 	if (S_ISLNK(inode->i_mode))
@@ -257,18 +335,15 @@ int ocfs2_acl_chmod(struct inode *inode)
 	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
 		return 0;
 
-	acl = ocfs2_get_acl(inode, ACL_TYPE_ACCESS);
+	acl = ocfs2_get_acl_nolock(inode, ACL_TYPE_ACCESS, bh);
 	if (IS_ERR(acl) || !acl)
 		return PTR_ERR(acl);
-	clone = posix_acl_clone(acl, GFP_KERNEL);
+	ret = __posix_acl_chmod(&acl, GFP_KERNEL, inode->i_mode);
+	if (ret)
+		return ret;
+	ret = ocfs2_set_acl(NULL, inode, NULL, ACL_TYPE_ACCESS,
+			    acl, NULL, NULL);
 	posix_acl_release(acl);
-	if (!clone)
-		return -ENOMEM;
-	ret = posix_acl_chmod_masq(clone, inode->i_mode);
-	if (!ret)
-		ret = ocfs2_set_acl(NULL, inode, NULL, ACL_TYPE_ACCESS,
-				    clone, NULL, NULL);
-	posix_acl_release(clone);
 	return ret;
 }
 
@@ -286,7 +361,8 @@ int ocfs2_init_acl(handle_t *handle,
 {
 	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
 	struct posix_acl *acl = NULL;
-	int ret = 0;
+	int ret = 0, ret2;
+	umode_t mode;
 
 	if (!S_ISLNK(inode->i_mode)) {
 		if (osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL) {
@@ -295,13 +371,16 @@ int ocfs2_init_acl(handle_t *handle,
 			if (IS_ERR(acl))
 				return PTR_ERR(acl);
 		}
-		if (!acl)
-			inode->i_mode &= ~current_umask();
+		if (!acl) {
+			mode = inode->i_mode & ~current_umask();
+			ret = ocfs2_acl_set_mode(inode, di_bh, handle, mode);
+			if (ret) {
+				mlog_errno(ret);
+				goto cleanup;
+			}
+		}
 	}
 	if ((osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL) && acl) {
-		struct posix_acl *clone;
-		mode_t mode;
-
 		if (S_ISDIR(inode->i_mode)) {
 			ret = ocfs2_set_acl(handle, inode, di_bh,
 					    ACL_TYPE_DEFAULT, acl,
@@ -309,171 +388,24 @@ int ocfs2_init_acl(handle_t *handle,
 			if (ret)
 				goto cleanup;
 		}
-		clone = posix_acl_clone(acl, GFP_NOFS);
-		ret = -ENOMEM;
-		if (!clone)
-			goto cleanup;
-
 		mode = inode->i_mode;
-		ret = posix_acl_create_masq(clone, &mode);
-		if (ret >= 0) {
-			inode->i_mode = mode;
-			if (ret > 0) {
-				ret = ocfs2_set_acl(handle, inode,
-						    di_bh, ACL_TYPE_ACCESS,
-						    clone, meta_ac, data_ac);
-			}
+		ret = __posix_acl_create(&acl, GFP_NOFS, &mode);
+		if (ret < 0)
+			return ret;
+
+		ret2 = ocfs2_acl_set_mode(inode, di_bh, handle, mode);
+		if (ret2) {
+			mlog_errno(ret2);
+			ret = ret2;
+			goto cleanup;
 		}
-		posix_acl_release(clone);
+		if (ret > 0) {
+			ret = ocfs2_set_acl(handle, inode,
+					    di_bh, ACL_TYPE_ACCESS,
+					    acl, meta_ac, data_ac);
+		}
 	}
 cleanup:
 	posix_acl_release(acl);
 	return ret;
 }
-
-static size_t ocfs2_xattr_list_acl_access(struct inode *inode,
-					  char *list,
-					  size_t list_len,
-					  const char *name,
-					  size_t name_len)
-{
-	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
-	const size_t size = sizeof(POSIX_ACL_XATTR_ACCESS);
-
-	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
-		return 0;
-
-	if (list && size <= list_len)
-		memcpy(list, POSIX_ACL_XATTR_ACCESS, size);
-	return size;
-}
-
-static size_t ocfs2_xattr_list_acl_default(struct inode *inode,
-					   char *list,
-					   size_t list_len,
-					   const char *name,
-					   size_t name_len)
-{
-	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
-	const size_t size = sizeof(POSIX_ACL_XATTR_DEFAULT);
-
-	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
-		return 0;
-
-	if (list && size <= list_len)
-		memcpy(list, POSIX_ACL_XATTR_DEFAULT, size);
-	return size;
-}
-
-static int ocfs2_xattr_get_acl(struct inode *inode,
-			       int type,
-			       void *buffer,
-			       size_t size)
-{
-	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
-	struct posix_acl *acl;
-	int ret;
-
-	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
-		return -EOPNOTSUPP;
-
-	acl = ocfs2_get_acl(inode, type);
-	if (IS_ERR(acl))
-		return PTR_ERR(acl);
-	if (acl == NULL)
-		return -ENODATA;
-	ret = posix_acl_to_xattr(acl, buffer, size);
-	posix_acl_release(acl);
-
-	return ret;
-}
-
-static int ocfs2_xattr_get_acl_access(struct inode *inode,
-				      const char *name,
-				      void *buffer,
-				      size_t size)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ocfs2_xattr_get_acl(inode, ACL_TYPE_ACCESS, buffer, size);
-}
-
-static int ocfs2_xattr_get_acl_default(struct inode *inode,
-				       const char *name,
-				       void *buffer,
-				       size_t size)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ocfs2_xattr_get_acl(inode, ACL_TYPE_DEFAULT, buffer, size);
-}
-
-static int ocfs2_xattr_set_acl(struct inode *inode,
-			       int type,
-			       const void *value,
-			       size_t size)
-{
-	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
-	struct posix_acl *acl;
-	int ret = 0;
-
-	if (!(osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL))
-		return -EOPNOTSUPP;
-
-	if (!is_owner_or_cap(inode))
-		return -EPERM;
-
-	if (value) {
-		acl = posix_acl_from_xattr(value, size);
-		if (IS_ERR(acl))
-			return PTR_ERR(acl);
-		else if (acl) {
-			ret = posix_acl_valid(acl);
-			if (ret)
-				goto cleanup;
-		}
-	} else
-		acl = NULL;
-
-	ret = ocfs2_set_acl(NULL, inode, NULL, type, acl, NULL, NULL);
-
-cleanup:
-	posix_acl_release(acl);
-	return ret;
-}
-
-static int ocfs2_xattr_set_acl_access(struct inode *inode,
-				      const char *name,
-				      const void *value,
-				      size_t size,
-				      int flags)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ocfs2_xattr_set_acl(inode, ACL_TYPE_ACCESS, value, size);
-}
-
-static int ocfs2_xattr_set_acl_default(struct inode *inode,
-				       const char *name,
-				       const void *value,
-				       size_t size,
-				       int flags)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ocfs2_xattr_set_acl(inode, ACL_TYPE_DEFAULT, value, size);
-}
-
-struct xattr_handler ocfs2_xattr_acl_access_handler = {
-	.prefix	= POSIX_ACL_XATTR_ACCESS,
-	.list	= ocfs2_xattr_list_acl_access,
-	.get	= ocfs2_xattr_get_acl_access,
-	.set	= ocfs2_xattr_set_acl_access,
-};
-
-struct xattr_handler ocfs2_xattr_acl_default_handler = {
-	.prefix	= POSIX_ACL_XATTR_DEFAULT,
-	.list	= ocfs2_xattr_list_acl_default,
-	.get	= ocfs2_xattr_get_acl_default,
-	.set	= ocfs2_xattr_set_acl_default,
-};

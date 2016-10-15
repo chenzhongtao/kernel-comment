@@ -32,6 +32,7 @@
 #include <linux/uaccess.h>
 #include <linux/io.h>
 #include <linux/spinlock.h>
+#include <linux/slab.h>
 
 #define TIMEOUT_MIN		1
 #define TIMEOUT_MAX		2
@@ -44,8 +45,8 @@ MODULE_PARM_DESC(timeout,
 		"Timeout value. Limited to be 1 or 2 seconds. (default="
 		__MODULE_STRING(TIMEOUT_DEFAULT) ")");
 
-static int nowayout = WATCHDOG_NOWAYOUT;
-module_param(nowayout, int, 0);
+static bool nowayout = WATCHDOG_NOWAYOUT;
+module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
 		__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
 
@@ -202,7 +203,7 @@ static int at32_wdt_get_status(void)
 	return status;
 }
 
-static struct watchdog_info at32_wdt_info = {
+static const struct watchdog_info at32_wdt_info = {
 	.identity	= "at32ap700x watchdog",
 	.options	= WDIOF_SETTIMEOUT |
 			  WDIOF_KEEPALIVEPING |
@@ -320,13 +321,12 @@ static int __init at32_wdt_probe(struct platform_device *pdev)
 		return -ENXIO;
 	}
 
-	wdt = kzalloc(sizeof(struct wdt_at32ap700x), GFP_KERNEL);
-	if (!wdt) {
-		dev_dbg(&pdev->dev, "no memory for wdt structure\n");
+	wdt = devm_kzalloc(&pdev->dev, sizeof(struct wdt_at32ap700x),
+			GFP_KERNEL);
+	if (!wdt)
 		return -ENOMEM;
-	}
 
-	wdt->regs = ioremap(regs->start, regs->end - regs->start + 1);
+	wdt->regs = devm_ioremap(&pdev->dev, regs->start, resource_size(regs));
 	if (!wdt->regs) {
 		ret = -ENOMEM;
 		dev_dbg(&pdev->dev, "could not map I/O memory\n");
@@ -341,13 +341,17 @@ static int __init at32_wdt_probe(struct platform_device *pdev)
 		dev_info(&pdev->dev, "CPU must be reset with external "
 				"reset or POR due to silicon errata.\n");
 		ret = -EIO;
-		goto err_iounmap;
+		goto err_free;
 	} else {
 		wdt->users = 0;
 	}
-	wdt->miscdev.minor = WATCHDOG_MINOR;
-	wdt->miscdev.name = "watchdog";
-	wdt->miscdev.fops = &at32_wdt_fops;
+
+	wdt->miscdev.minor	= WATCHDOG_MINOR;
+	wdt->miscdev.name	= "watchdog";
+	wdt->miscdev.fops	= &at32_wdt_fops;
+	wdt->miscdev.parent	= &pdev->dev;
+
+	platform_set_drvdata(pdev, wdt);
 
 	if (at32_wdt_settimeout(timeout)) {
 		at32_wdt_settimeout(TIMEOUT_DEFAULT);
@@ -359,21 +363,16 @@ static int __init at32_wdt_probe(struct platform_device *pdev)
 	ret = misc_register(&wdt->miscdev);
 	if (ret) {
 		dev_dbg(&pdev->dev, "failed to register wdt miscdev\n");
-		goto err_iounmap;
+		goto err_free;
 	}
 
-	platform_set_drvdata(pdev, wdt);
-	wdt->miscdev.parent = &pdev->dev;
 	dev_info(&pdev->dev,
 		"AT32AP700X WDT at 0x%p, timeout %d sec (nowayout=%d)\n",
 		wdt->regs, wdt->timeout, nowayout);
 
 	return 0;
 
-err_iounmap:
-	iounmap(wdt->regs);
 err_free:
-	kfree(wdt);
 	wdt = NULL;
 	return ret;
 }
@@ -386,10 +385,7 @@ static int __exit at32_wdt_remove(struct platform_device *pdev)
 			at32_wdt_stop();
 
 		misc_deregister(&wdt->miscdev);
-		iounmap(wdt->regs);
-		kfree(wdt);
 		wdt = NULL;
-		platform_set_drvdata(pdev, NULL);
 	}
 	return 0;
 }
@@ -426,24 +422,12 @@ static struct platform_driver at32_wdt_driver = {
 	.resume		= at32_wdt_resume,
 	.driver		= {
 		.name	= "at32_wdt",
-		.owner	= THIS_MODULE,
 	},
 	.shutdown	= at32_wdt_shutdown,
 };
 
-static int __init at32_wdt_init(void)
-{
-	return platform_driver_probe(&at32_wdt_driver, at32_wdt_probe);
-}
-module_init(at32_wdt_init);
+module_platform_driver_probe(at32_wdt_driver, at32_wdt_probe);
 
-static void __exit at32_wdt_exit(void)
-{
-	platform_driver_unregister(&at32_wdt_driver);
-}
-module_exit(at32_wdt_exit);
-
-MODULE_AUTHOR("Hans-Christian Egtvedt <hcegtvedt@atmel.com>");
+MODULE_AUTHOR("Hans-Christian Egtvedt <egtvedt@samfundet.no>");
 MODULE_DESCRIPTION("Watchdog driver for Atmel AT32AP700X");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

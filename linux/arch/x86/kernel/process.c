@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -7,60 +9,86 @@
 #include <linux/sched.h>
 #include <linux/module.h>
 #include <linux/pm.h>
-#include <linux/clockchips.h>
+#include <linux/tick.h>
 #include <linux/random.h>
+#include <linux/user-return-notifier.h>
+#include <linux/dmi.h>
+#include <linux/utsname.h>
+#include <linux/stackprotector.h>
+#include <linux/tick.h>
+#include <linux/cpuidle.h>
 #include <trace/events/power.h>
-#include <asm/system.h>
+#include <linux/hw_breakpoint.h>
+#include <asm/cpu.h>
 #include <asm/apic.h>
 #include <asm/syscalls.h>
 #include <asm/idle.h>
 #include <asm/uaccess.h>
-#include <asm/i387.h>
-#include <asm/ds.h>
+#include <asm/mwait.h>
+#include <asm/fpu/internal.h>
+#include <asm/debugreg.h>
+#include <asm/nmi.h>
+#include <asm/tlbflush.h>
+#include <asm/mce.h>
+#include <asm/vm86.h>
 
-unsigned long idle_halt;
-EXPORT_SYMBOL(idle_halt);
-unsigned long idle_nomwait;
-EXPORT_SYMBOL(idle_nomwait);
+/*
+ * per-CPU TSS segments. Threads are completely 'soft' on Linux,
+ * no more per-task TSS's. The TSS size is kept cacheline-aligned
+ * so they are allowed to end up in the .data..cacheline_aligned
+ * section. Since TSS's are completely CPU-local, we want them
+ * on exact cacheline boundaries, to eliminate cacheline ping-pong.
+ */
+__visible DEFINE_PER_CPU_SHARED_ALIGNED(struct tss_struct, cpu_tss) = {
+	.x86_tss = {
+		.sp0 = TOP_OF_INIT_STACK,
+#ifdef CONFIG_X86_32
+		.ss0 = __KERNEL_DS,
+		.ss1 = __KERNEL_CS,
+		.io_bitmap_base	= INVALID_IO_BITMAP_OFFSET,
+#endif
+	 },
+#ifdef CONFIG_X86_32
+	 /*
+	  * Note that the .io_bitmap member must be extra-big. This is because
+	  * the CPU will access an additional byte beyond the end of the IO
+	  * permission bitmap. The extra byte must be all 1 bits, and must
+	  * be within the limit.
+	  */
+	.io_bitmap		= { [0 ... IO_BITMAP_LONGS] = ~0 },
+#endif
+};
+EXPORT_PER_CPU_SYMBOL(cpu_tss);
 
-struct kmem_cache *task_xstate_cachep;
+#ifdef CONFIG_X86_64
+static DEFINE_PER_CPU(unsigned char, is_idle);
+static ATOMIC_NOTIFIER_HEAD(idle_notifier);
 
+void idle_notifier_register(struct notifier_block *n)
+{
+	atomic_notifier_chain_register(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_register);
+
+void idle_notifier_unregister(struct notifier_block *n)
+{
+	atomic_notifier_chain_unregister(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_unregister);
+#endif
+
+/*
+ * this gets called so that we can store lazy state into memory and copy the
+ * current task into the new thread.
+ */
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
-	*dst = *src;
-	if (src->thread.xstate) {
-		dst->thread.xstate = kmem_cache_alloc(task_xstate_cachep,
-						      GFP_KERNEL);
-		if (!dst->thread.xstate)
-			return -ENOMEM;
-		WARN_ON((unsigned long)dst->thread.xstate & 15);
-		memcpy(dst->thread.xstate, src->thread.xstate, xstate_size);
-	}
-	return 0;
-}
+	memcpy(dst, src, arch_task_struct_size);
+#ifdef CONFIG_VM86
+	dst->thread.vm86 = NULL;
+#endif
 
-void free_thread_xstate(struct task_struct *tsk)
-{
-	if (tsk->thread.xstate) {
-		kmem_cache_free(task_xstate_cachep, tsk->thread.xstate);
-		tsk->thread.xstate = NULL;
-	}
-
-	WARN(tsk->thread.ds_ctx, "leaking DS context\n");
-}
-
-void free_thread_info(struct thread_info *ti)
-{
-	free_thread_xstate(ti->task);
-	free_pages((unsigned long)ti, get_order(THREAD_SIZE));
-}
-
-void arch_task_cache_init(void)
-{
-        task_xstate_cachep =
-        	kmem_cache_create("task_xstate", xstate_size,
-				  __alignof__(union thread_xstate),
-				  SLAB_PANIC | SLAB_NOTRACK, NULL);
+	return fpu__copy(&dst->thread.fpu, &src->thread.fpu);
 }
 
 /*
@@ -71,9 +99,10 @@ void exit_thread(void)
 	struct task_struct *me = current;
 	struct thread_struct *t = &me->thread;
 	unsigned long *bp = t->io_bitmap_ptr;
+	struct fpu *fpu = &t->fpu;
 
 	if (bp) {
-		struct tss_struct *tss = &per_cpu(init_tss, get_cpu());
+		struct tss_struct *tss = &per_cpu(cpu_tss, get_cpu());
 
 		t->io_bitmap_ptr = NULL;
 		clear_thread_flag(TIF_IO_BITMAP);
@@ -85,44 +114,25 @@ void exit_thread(void)
 		put_cpu();
 		kfree(bp);
 	}
+
+	free_vm86(t);
+
+	fpu__drop(fpu);
 }
 
 void flush_thread(void)
 {
 	struct task_struct *tsk = current;
 
-#ifdef CONFIG_X86_64
-	if (test_tsk_thread_flag(tsk, TIF_ABI_PENDING)) {
-		clear_tsk_thread_flag(tsk, TIF_ABI_PENDING);
-		if (test_tsk_thread_flag(tsk, TIF_IA32)) {
-			clear_tsk_thread_flag(tsk, TIF_IA32);
-		} else {
-			set_tsk_thread_flag(tsk, TIF_IA32);
-			current_thread_info()->status |= TS_COMPAT;
-		}
-	}
-#endif
-
-	clear_tsk_thread_flag(tsk, TIF_DEBUG);
-
-	tsk->thread.debugreg0 = 0;
-	tsk->thread.debugreg1 = 0;
-	tsk->thread.debugreg2 = 0;
-	tsk->thread.debugreg3 = 0;
-	tsk->thread.debugreg6 = 0;
-	tsk->thread.debugreg7 = 0;
+	flush_ptrace_hw_breakpoint(tsk);
 	memset(tsk->thread.tls_array, 0, sizeof(tsk->thread.tls_array));
-	/*
-	 * Forget coprocessor state..
-	 */
-	tsk->fpu_counter = 0;
-	clear_fpu(tsk);
-	clear_used_math();
+
+	fpu__clear(&tsk->thread.fpu);
 }
 
 static void hard_disable_TSC(void)
 {
-	write_cr4(read_cr4() | X86_CR4_TSD);
+	cr4_set_bits(X86_CR4_TSD);
 }
 
 void disable_TSC(void)
@@ -139,7 +149,7 @@ void disable_TSC(void)
 
 static void hard_enable_TSC(void)
 {
-	write_cr4(read_cr4() & ~X86_CR4_TSD);
+	cr4_clear_bits(X86_CR4_TSD);
 }
 
 static void enable_TSC(void)
@@ -186,20 +196,15 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p,
 	prev = &prev_p->thread;
 	next = &next_p->thread;
 
-	if (test_tsk_thread_flag(next_p, TIF_DS_AREA_MSR) ||
-	    test_tsk_thread_flag(prev_p, TIF_DS_AREA_MSR))
-		ds_switch_to(prev_p, next_p);
-	else if (next->debugctlmsr != prev->debugctlmsr)
-		update_debugctlmsr(next->debugctlmsr);
+	if (test_tsk_thread_flag(prev_p, TIF_BLOCKSTEP) ^
+	    test_tsk_thread_flag(next_p, TIF_BLOCKSTEP)) {
+		unsigned long debugctl = get_debugctlmsr();
 
-	if (test_tsk_thread_flag(next_p, TIF_DEBUG)) {
-		set_debugreg(next->debugreg0, 0);
-		set_debugreg(next->debugreg1, 1);
-		set_debugreg(next->debugreg2, 2);
-		set_debugreg(next->debugreg3, 3);
-		/* no 4 and 5 */
-		set_debugreg(next->debugreg6, 6);
-		set_debugreg(next->debugreg7, 7);
+		debugctl &= ~DEBUGCTLMSR_BTF;
+		if (test_tsk_thread_flag(next_p, TIF_BLOCKSTEP))
+			debugctl |= DEBUGCTLMSR_BTF;
+
+		update_debugctlmsr(debugctl);
 	}
 
 	if (test_tsk_thread_flag(prev_p, TIF_NOTSC) ^
@@ -224,101 +229,95 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p,
 		 */
 		memset(tss->io_bitmap, 0xff, prev->io_bitmap_max);
 	}
+	propagate_user_return_notify(prev_p, next_p);
 }
-
-int sys_fork(struct pt_regs *regs)
-{
-	return do_fork(SIGCHLD, regs->sp, regs, 0, NULL, NULL);
-}
-
-/*
- * This is trivial, and on the face of it looks like it
- * could equally well be done in user mode.
- *
- * Not so, for quite unobvious reasons - register pressure.
- * In user mode vfork() cannot have a stack frame, and if
- * done by calling the "clone()" system call directly, you
- * do not have enough call-clobbered registers to hold all
- * the information you need.
- */
-int sys_vfork(struct pt_regs *regs)
-{
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->sp, regs, 0,
-		       NULL, NULL);
-}
-
 
 /*
  * Idle related variables and functions
  */
-unsigned long boot_option_idle_override = 0;
+unsigned long boot_option_idle_override = IDLE_NO_OVERRIDE;
 EXPORT_SYMBOL(boot_option_idle_override);
 
-/*
- * Powermanagement idle function, if any..
- */
-void (*pm_idle)(void);
-EXPORT_SYMBOL(pm_idle);
+static void (*x86_idle)(void);
 
-#ifdef CONFIG_X86_32
-/*
- * This halt magic was a workaround for ancient floppy DMA
- * wreckage. It should be safe to remove.
- */
-static int hlt_counter;
-void disable_hlt(void)
+#ifndef CONFIG_SMP
+static inline void play_dead(void)
 {
-	hlt_counter++;
-}
-EXPORT_SYMBOL(disable_hlt);
-
-void enable_hlt(void)
-{
-	hlt_counter--;
-}
-EXPORT_SYMBOL(enable_hlt);
-
-static inline int hlt_use_halt(void)
-{
-	return (!hlt_counter && boot_cpu_data.hlt_works_ok);
-}
-#else
-static inline int hlt_use_halt(void)
-{
-	return 1;
+	BUG();
 }
 #endif
 
+#ifdef CONFIG_X86_64
+void enter_idle(void)
+{
+	this_cpu_write(is_idle, 1);
+	atomic_notifier_call_chain(&idle_notifier, IDLE_START, NULL);
+}
+
+static void __exit_idle(void)
+{
+	if (x86_test_and_clear_bit_percpu(0, is_idle) == 0)
+		return;
+	atomic_notifier_call_chain(&idle_notifier, IDLE_END, NULL);
+}
+
+/* Called from interrupts to signify idle end */
+void exit_idle(void)
+{
+	/* idle loop has pid 0 */
+	if (current->pid)
+		return;
+	__exit_idle();
+}
+#endif
+
+void arch_cpu_idle_enter(void)
+{
+	local_touch_nmi();
+	enter_idle();
+}
+
+void arch_cpu_idle_exit(void)
+{
+	__exit_idle();
+}
+
+void arch_cpu_idle_dead(void)
+{
+	play_dead();
+}
+
 /*
- * We use this if we don't have any better
- * idle routine..
+ * Called from the generic idle code.
+ */
+void arch_cpu_idle(void)
+{
+	x86_idle();
+}
+
+/*
+ * We use this if we don't have any better idle routine..
  */
 void default_idle(void)
 {
-	if (hlt_use_halt()) {
-		trace_power_start(POWER_CSTATE, 1);
-		current_thread_info()->status &= ~TS_POLLING;
-		/*
-		 * TS_POLLING-cleared state must be visible before we
-		 * test NEED_RESCHED:
-		 */
-		smp_mb();
-
-		if (!need_resched())
-			safe_halt();	/* enables interrupts racelessly */
-		else
-			local_irq_enable();
-		current_thread_info()->status |= TS_POLLING;
-	} else {
-		local_irq_enable();
-		/* loop is done by the caller */
-		cpu_relax();
-	}
+	trace_cpu_idle_rcuidle(1, smp_processor_id());
+	safe_halt();
+	trace_cpu_idle_rcuidle(PWR_EVENT_EXIT, smp_processor_id());
 }
 #ifdef CONFIG_APM_MODULE
 EXPORT_SYMBOL(default_idle);
 #endif
 
+#ifdef CONFIG_XEN
+bool xen_set_default_idle(void)
+{
+	bool ret = !!x86_idle;
+
+	x86_idle = default_idle;
+
+	return ret;
+}
+#endif
 void stop_this_cpu(void *dummy)
 {
 	local_irq_disable();
@@ -327,193 +326,53 @@ void stop_this_cpu(void *dummy)
 	 */
 	set_cpu_online(smp_processor_id(), false);
 	disable_local_APIC();
+	mcheck_cpu_clear(this_cpu_ptr(&cpu_info));
 
-	for (;;) {
-		if (hlt_works(smp_processor_id()))
-			halt();
-	}
+	for (;;)
+		halt();
 }
 
-static void do_nothing(void *unused)
+bool amd_e400_c1e_detected;
+EXPORT_SYMBOL(amd_e400_c1e_detected);
+
+static cpumask_var_t amd_e400_c1e_mask;
+
+void amd_e400_remove_cpu(int cpu)
 {
+	if (amd_e400_c1e_mask != NULL)
+		cpumask_clear_cpu(cpu, amd_e400_c1e_mask);
 }
 
 /*
- * cpu_idle_wait - Used to ensure that all the CPUs discard old value of
- * pm_idle and update to new pm_idle value. Required while changing pm_idle
- * handler on SMP systems.
- *
- * Caller must have changed pm_idle to the new value before the call. Old
- * pm_idle value will not be used by any CPU after the return of this function.
- */
-void cpu_idle_wait(void)
-{
-	smp_mb();
-	/* kick all the CPUs so that they exit out of pm_idle */
-	smp_call_function(do_nothing, NULL, 1);
-}
-EXPORT_SYMBOL_GPL(cpu_idle_wait);
-
-/*
- * This uses new MONITOR/MWAIT instructions on P4 processors with PNI,
- * which can obviate IPI to trigger checking of need_resched.
- * We execute MONITOR against need_resched and enter optimized wait state
- * through MWAIT. Whenever someone changes need_resched, we would be woken
- * up from MWAIT (without an IPI).
- *
- * New with Core Duo processors, MWAIT can take some hints based on CPU
- * capability.
- */
-void mwait_idle_with_hints(unsigned long ax, unsigned long cx)
-{
-	trace_power_start(POWER_CSTATE, (ax>>4)+1);
-	if (!need_resched()) {
-		if (cpu_has(&current_cpu_data, X86_FEATURE_CLFLUSH_MONITOR))
-			clflush((void *)&current_thread_info()->flags);
-
-		__monitor((void *)&current_thread_info()->flags, 0, 0);
-		smp_mb();
-		if (!need_resched())
-			__mwait(ax, cx);
-	}
-}
-
-/* Default MONITOR/MWAIT with no hints, used for default C1 state */
-static void mwait_idle(void)
-{
-	if (!need_resched()) {
-		trace_power_start(POWER_CSTATE, 1);
-		if (cpu_has(&current_cpu_data, X86_FEATURE_CLFLUSH_MONITOR))
-			clflush((void *)&current_thread_info()->flags);
-
-		__monitor((void *)&current_thread_info()->flags, 0, 0);
-		smp_mb();
-		if (!need_resched())
-			__sti_mwait(0, 0);
-		else
-			local_irq_enable();
-	} else
-		local_irq_enable();
-}
-
-/*
- * On SMP it's slightly faster (but much more power-consuming!)
- * to poll the ->work.need_resched flag instead of waiting for the
- * cross-CPU IPI to arrive. Use this option with caution.
- */
-static void poll_idle(void)
-{
-	trace_power_start(POWER_CSTATE, 0);
-	local_irq_enable();
-	while (!need_resched())
-		cpu_relax();
-	trace_power_end(0);
-}
-
-/*
- * mwait selection logic:
- *
- * It depends on the CPU. For AMD CPUs that support MWAIT this is
- * wrong. Family 0x10 and 0x11 CPUs will enter C1 on HLT. Powersavings
- * then depend on a clock divisor and current Pstate of the core. If
- * all cores of a processor are in halt state (C1) the processor can
- * enter the C1E (C1 enhanced) state. If mwait is used this will never
- * happen.
- *
- * idle=mwait overrides this decision and forces the usage of mwait.
- */
-static int __cpuinitdata force_mwait;
-
-#define MWAIT_INFO			0x05
-#define MWAIT_ECX_EXTENDED_INFO		0x01
-#define MWAIT_EDX_C1			0xf0
-
-static int __cpuinit mwait_usable(const struct cpuinfo_x86 *c)
-{
-	u32 eax, ebx, ecx, edx;
-
-	if (force_mwait)
-		return 1;
-
-	if (c->cpuid_level < MWAIT_INFO)
-		return 0;
-
-	cpuid(MWAIT_INFO, &eax, &ebx, &ecx, &edx);
-	/* Check, whether EDX has extended info about MWAIT */
-	if (!(ecx & MWAIT_ECX_EXTENDED_INFO))
-		return 1;
-
-	/*
-	 * edx enumeratios MONITOR/MWAIT extensions. Check, whether
-	 * C1  supports MWAIT
-	 */
-	return (edx & MWAIT_EDX_C1);
-}
-
-/*
- * Check for AMD CPUs, which have potentially C1E support
- */
-static int __cpuinit check_c1e_idle(const struct cpuinfo_x86 *c)
-{
-	if (c->x86_vendor != X86_VENDOR_AMD)
-		return 0;
-
-	if (c->x86 < 0x0F)
-		return 0;
-
-	/* Family 0x0f models < rev F do not have C1E */
-	if (c->x86 == 0x0f && c->x86_model < 0x40)
-		return 0;
-
-	return 1;
-}
-
-static cpumask_var_t c1e_mask;
-static int c1e_detected;
-
-void c1e_remove_cpu(int cpu)
-{
-	if (c1e_mask != NULL)
-		cpumask_clear_cpu(cpu, c1e_mask);
-}
-
-/*
- * C1E aware idle routine. We check for C1E active in the interrupt
+ * AMD Erratum 400 aware idle routine. We check for C1E active in the interrupt
  * pending message MSR. If we detect C1E, then we handle it the same
  * way as C3 power states (local apic timer and TSC stop)
  */
-static void c1e_idle(void)
+static void amd_e400_idle(void)
 {
-	if (need_resched())
-		return;
-
-	if (!c1e_detected) {
+	if (!amd_e400_c1e_detected) {
 		u32 lo, hi;
 
 		rdmsr(MSR_K8_INT_PENDING_MSG, lo, hi);
+
 		if (lo & K8_INTP_C1E_ACTIVE_MASK) {
-			c1e_detected = 1;
+			amd_e400_c1e_detected = true;
 			if (!boot_cpu_has(X86_FEATURE_NONSTOP_TSC))
 				mark_tsc_unstable("TSC halt in AMD C1E");
-			printk(KERN_INFO "System has AMD C1E enabled\n");
-			set_cpu_cap(&boot_cpu_data, X86_FEATURE_AMDC1E);
+			pr_info("System has AMD C1E enabled\n");
 		}
 	}
 
-	if (c1e_detected) {
+	if (amd_e400_c1e_detected) {
 		int cpu = smp_processor_id();
 
-		if (!cpumask_test_cpu(cpu, c1e_mask)) {
-			cpumask_set_cpu(cpu, c1e_mask);
-			/*
-			 * Force broadcast so ACPI can not interfere.
-			 */
-			clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_FORCE,
-					   &cpu);
-			printk(KERN_INFO "Switch to broadcast mode on CPU%d\n",
-			       cpu);
+		if (!cpumask_test_cpu(cpu, amd_e400_c1e_mask)) {
+			cpumask_set_cpu(cpu, amd_e400_c1e_mask);
+			/* Force broadcast so ACPI can not interfere. */
+			tick_broadcast_force();
+			pr_info("Switch to broadcast mode on CPU%d\n", cpu);
 		}
-		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER, &cpu);
+		tick_broadcast_enter();
 
 		default_idle();
 
@@ -521,42 +380,86 @@ static void c1e_idle(void)
 		 * The switch back from broadcast mode needs to be
 		 * called with interrupts disabled.
 		 */
-		 local_irq_disable();
-		 clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT, &cpu);
-		 local_irq_enable();
+		local_irq_disable();
+		tick_broadcast_exit();
+		local_irq_enable();
 	} else
 		default_idle();
 }
 
-void __cpuinit select_idle_routine(const struct cpuinfo_x86 *c)
+/*
+ * Intel Core2 and older machines prefer MWAIT over HALT for C1.
+ * We can't rely on cpuidle installing MWAIT, because it will not load
+ * on systems that support only C1 -- so the boot default must be MWAIT.
+ *
+ * Some AMD machines are the opposite, they depend on using HALT.
+ *
+ * So for default C1, which is used during boot until cpuidle loads,
+ * use MWAIT-C1 on Intel HW that has it, else use HALT.
+ */
+static int prefer_mwait_c1_over_halt(const struct cpuinfo_x86 *c)
 {
-#ifdef CONFIG_SMP
-	if (pm_idle == poll_idle && smp_num_siblings > 1) {
-		printk(KERN_WARNING "WARNING: polling idle and HT enabled,"
-			" performance may degrade.\n");
-	}
-#endif
-	if (pm_idle)
-		return;
+	if (c->x86_vendor != X86_VENDOR_INTEL)
+		return 0;
 
-	if (cpu_has(c, X86_FEATURE_MWAIT) && mwait_usable(c)) {
-		/*
-		 * One CPU supports mwait => All CPUs supports mwait
-		 */
-		printk(KERN_INFO "using mwait in idle threads.\n");
-		pm_idle = mwait_idle;
-	} else if (check_c1e_idle(c)) {
-		printk(KERN_INFO "using C1E aware idle routine\n");
-		pm_idle = c1e_idle;
-	} else
-		pm_idle = default_idle;
+	if (!cpu_has(c, X86_FEATURE_MWAIT))
+		return 0;
+
+	return 1;
 }
 
-void __init init_c1e_mask(void)
+/*
+ * MONITOR/MWAIT with no hints, used for default C1 state. This invokes MWAIT
+ * with interrupts enabled and no flags, which is backwards compatible with the
+ * original MWAIT implementation.
+ */
+static void mwait_idle(void)
 {
-	/* If we're using c1e_idle, we need to allocate c1e_mask. */
-	if (pm_idle == c1e_idle)
-		zalloc_cpumask_var(&c1e_mask, GFP_KERNEL);
+	if (!current_set_polling_and_test()) {
+		trace_cpu_idle_rcuidle(1, smp_processor_id());
+		if (this_cpu_has(X86_BUG_CLFLUSH_MONITOR)) {
+			smp_mb(); /* quirk */
+			clflush((void *)&current_thread_info()->flags);
+			smp_mb(); /* quirk */
+		}
+
+		__monitor((void *)&current_thread_info()->flags, 0, 0);
+		if (!need_resched())
+			__sti_mwait(0, 0);
+		else
+			local_irq_enable();
+		trace_cpu_idle_rcuidle(PWR_EVENT_EXIT, smp_processor_id());
+	} else {
+		local_irq_enable();
+	}
+	__current_clr_polling();
+}
+
+void select_idle_routine(const struct cpuinfo_x86 *c)
+{
+#ifdef CONFIG_SMP
+	if (boot_option_idle_override == IDLE_POLL && smp_num_siblings > 1)
+		pr_warn_once("WARNING: polling idle and HT enabled, performance may degrade\n");
+#endif
+	if (x86_idle || boot_option_idle_override == IDLE_POLL)
+		return;
+
+	if (cpu_has_bug(c, X86_BUG_AMD_APIC_C1E)) {
+		/* E400: APIC timer interrupt does not wake up CPU from C1e */
+		pr_info("using AMD E400 aware idle routine\n");
+		x86_idle = amd_e400_idle;
+	} else if (prefer_mwait_c1_over_halt(c)) {
+		pr_info("using mwait in idle threads\n");
+		x86_idle = mwait_idle;
+	} else
+		x86_idle = default_idle;
+}
+
+void __init init_amd_e400_c1e_mask(void)
+{
+	/* If we're using amd_e400_idle, we need to allocate amd_e400_c1e_mask. */
+	if (x86_idle == amd_e400_idle)
+		zalloc_cpumask_var(&amd_e400_c1e_mask, GFP_KERNEL);
 }
 
 static int __init idle_setup(char *str)
@@ -565,11 +468,10 @@ static int __init idle_setup(char *str)
 		return -EINVAL;
 
 	if (!strcmp(str, "poll")) {
-		printk("using polling idle threads.\n");
-		pm_idle = poll_idle;
-	} else if (!strcmp(str, "mwait"))
-		force_mwait = 1;
-	else if (!strcmp(str, "halt")) {
+		pr_info("using polling idle threads\n");
+		boot_option_idle_override = IDLE_POLL;
+		cpu_idle_poll_ctrl(true);
+	} else if (!strcmp(str, "halt")) {
 		/*
 		 * When the boot option of idle=halt is added, halt is
 		 * forced to be used for CPU idle. In such case CPU C2/C3
@@ -577,9 +479,8 @@ static int __init idle_setup(char *str)
 		 * To continue to load the CPU idle driver, don't touch
 		 * the boot_option_idle_override.
 		 */
-		pm_idle = default_idle;
-		idle_halt = 1;
-		return 0;
+		x86_idle = default_idle;
+		boot_option_idle_override = IDLE_HALT;
 	} else if (!strcmp(str, "nomwait")) {
 		/*
 		 * If the boot option of "idle=nomwait" is added,
@@ -587,12 +488,10 @@ static int __init idle_setup(char *str)
 		 * states. In such case it won't touch the variable
 		 * of boot_option_idle_override.
 		 */
-		idle_nomwait = 1;
-		return 0;
+		boot_option_idle_override = IDLE_NOMWAIT;
 	} else
 		return -1;
 
-	boot_option_idle_override = 1;
 	return 0;
 }
 early_param("idle", idle_setup);
@@ -610,3 +509,58 @@ unsigned long arch_randomize_brk(struct mm_struct *mm)
 	return randomize_range(mm->brk, range_end, 0) ? : mm->brk;
 }
 
+/*
+ * Called from fs/proc with a reference on @p to find the function
+ * which called into schedule(). This needs to be done carefully
+ * because the task might wake up and we might look at a stack
+ * changing under us.
+ */
+unsigned long get_wchan(struct task_struct *p)
+{
+	unsigned long start, bottom, top, sp, fp, ip;
+	int count = 0;
+
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+
+	start = (unsigned long)task_stack_page(p);
+	if (!start)
+		return 0;
+
+	/*
+	 * Layout of the stack page:
+	 *
+	 * ----------- topmax = start + THREAD_SIZE - sizeof(unsigned long)
+	 * PADDING
+	 * ----------- top = topmax - TOP_OF_KERNEL_STACK_PADDING
+	 * stack
+	 * ----------- bottom = start + sizeof(thread_info)
+	 * thread_info
+	 * ----------- start
+	 *
+	 * The tasks stack pointer points at the location where the
+	 * framepointer is stored. The data on the stack is:
+	 * ... IP FP ... IP FP
+	 *
+	 * We need to read FP and IP, so we need to adjust the upper
+	 * bound by another unsigned long.
+	 */
+	top = start + THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING;
+	top -= 2 * sizeof(unsigned long);
+	bottom = start + sizeof(struct thread_info);
+
+	sp = READ_ONCE(p->thread.sp);
+	if (sp < bottom || sp > top)
+		return 0;
+
+	fp = READ_ONCE_NOCHECK(*(unsigned long *)sp);
+	do {
+		if (fp < bottom || fp > top)
+			return 0;
+		ip = READ_ONCE_NOCHECK(*(unsigned long *)(fp + sizeof(unsigned long)));
+		if (!in_sched_functions(ip))
+			return ip;
+		fp = READ_ONCE_NOCHECK(*(unsigned long *)fp);
+	} while (count++ < 16 && p->state != TASK_RUNNING);
+	return 0;
+}

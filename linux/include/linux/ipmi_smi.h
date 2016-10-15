@@ -36,10 +36,10 @@
 
 #include <linux/ipmi_msgdefs.h>
 #include <linux/proc_fs.h>
-#include <linux/module.h>
-#include <linux/device.h>
 #include <linux/platform_device.h>
-#include <linux/ipmi_smi.h>
+#include <linux/ipmi.h>
+
+struct device;
 
 /* This files describes the interface for IPMI system management interface
    drivers to bind into the IPMI message handler. */
@@ -87,27 +87,45 @@ struct ipmi_smi_handlers {
 	int (*start_processing)(void       *send_info,
 				ipmi_smi_t new_intf);
 
+	/*
+	 * Get the detailed private info of the low level interface and store
+	 * it into the structure of ipmi_smi_data. For example: the
+	 * ACPI device handle will be returned for the pnp_acpi IPMI device.
+	 */
+	int (*get_smi_info)(void *send_info, struct ipmi_smi_info *data);
+
 	/* Called to enqueue an SMI message to be sent.  This
 	   operation is not allowed to fail.  If an error occurs, it
 	   should report back the error in a received message.  It may
 	   do this in the current call context, since no write locks
-	   are held when this is run.  If the priority is > 0, the
-	   message will go into a high-priority queue and be sent
-	   first.  Otherwise, it goes into a normal-priority queue. */
+	   are held when this is run.  Message are delivered one at
+	   a time by the message handler, a new message will not be
+	   delivered until the previous message is returned. */
 	void (*sender)(void                *send_info,
-		       struct ipmi_smi_msg *msg,
-		       int                 priority);
+		       struct ipmi_smi_msg *msg);
 
 	/* Called by the upper layer to request that we try to get
 	   events from the BMC we are attached to. */
 	void (*request_events)(void *send_info);
+
+	/* Called by the upper layer when some user requires that the
+	   interface watch for events, received messages, watchdog
+	   pretimeouts, or not.  Used by the SMI to know if it should
+	   watch for these.  This may be NULL if the SMI does not
+	   implement it. */
+	void (*set_need_watch)(void *send_info, bool enable);
+
+	/*
+	 * Called when flushing all pending messages.
+	 */
+	void (*flush_messages)(void *send_info);
 
 	/* Called when the interface should go into "run to
 	   completion" mode.  If this call sets the value to true, the
 	   interface should make sure that all messages are flushed
 	   out and that none are pending, and any new requests are run
 	   to completion immediately. */
-	void (*set_run_to_completion)(void *send_info, int run_to_completion);
+	void (*set_run_to_completion)(void *send_info, bool run_to_completion);
 
 	/* Called to poll for work to do.  This is so upper layers can
 	   poll for operations during things like crash dumps. */
@@ -118,7 +136,7 @@ struct ipmi_smi_handlers {
 	   setting.  The message handler does the mode handling.  Note
 	   that this is called from interrupt context, so it cannot
 	   block. */
-	void (*set_maintenance_mode)(void *send_info, int enable);
+	void (*set_maintenance_mode)(void *send_info, bool enable);
 
 	/* Tell the handler that we are using it/not using it.  The
 	   message handler get the modules that this handler belongs
@@ -194,11 +212,10 @@ static inline int ipmi_demangle_device_id(const unsigned char *data,
    upper layer until the start_processing() function in the handlers
    is called, and the lower layer must get the interface from that
    call. */
-int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
+int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
 		      void                     *send_info,
 		      struct ipmi_device_id    *device_id,
 		      struct device            *dev,
-		      const char               *sysfs_name,
 		      unsigned char            slave_addr);
 
 /*
@@ -209,7 +226,7 @@ int ipmi_unregister_smi(ipmi_smi_t intf);
 
 /*
  * The lower layer reports received messages through this interface.
- * The data_size should be zero if this is an asyncronous message.  If
+ * The data_size should be zero if this is an asynchronous message.  If
  * the lower layer gets an error sending a message, it should format
  * an error response in the message response.
  */
@@ -229,7 +246,7 @@ static inline void ipmi_free_smi_msg(struct ipmi_smi_msg *msg)
    directory for this interface.  Note that the entry will
    automatically be dstroyed when the interface is destroyed. */
 int ipmi_smi_add_proc_entry(ipmi_smi_t smi, char *name,
-			    read_proc_t *read_proc,
+			    const struct file_operations *proc_ops,
 			    void *data);
 
 #endif /* __LINUX_IPMI_SMI_H */

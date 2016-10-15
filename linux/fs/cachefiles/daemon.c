@@ -21,6 +21,7 @@
 #include <linux/mount.h>
 #include <linux/statfs.h>
 #include <linux/ctype.h>
+#include <linux/string.h>
 #include <linux/fs_struct.h>
 #include "internal.h"
 
@@ -54,6 +55,7 @@ const struct file_operations cachefiles_daemon_fops = {
 	.read		= cachefiles_daemon_read,
 	.write		= cachefiles_daemon_write,
 	.poll		= cachefiles_daemon_poll,
+	.llseek		= noop_llseek,
 };
 
 struct cachefiles_daemon_cmd {
@@ -257,8 +259,7 @@ static ssize_t cachefiles_daemon_write(struct file *file,
 		if (args == data)
 			goto error;
 		*args = '\0';
-		for (args++; isspace(*args); args++)
-			continue;
+		args = skip_spaces(++args);
 	}
 
 	/* run the appropriate command handler */
@@ -314,8 +315,7 @@ static unsigned int cachefiles_daemon_poll(struct file *file,
 static int cachefiles_daemon_range_error(struct cachefiles_cache *cache,
 					 char *args)
 {
-	kerror("Free space limits must be in range"
-	       " 0%%<=stop<cull<run<100%%");
+	pr_err("Free space limits must be in range 0%%<=stop<cull<run<100%%\n");
 
 	return -EINVAL;
 }
@@ -475,12 +475,12 @@ static int cachefiles_daemon_dir(struct cachefiles_cache *cache, char *args)
 	_enter(",%s", args);
 
 	if (!*args) {
-		kerror("Empty directory specified");
+		pr_err("Empty directory specified\n");
 		return -EINVAL;
 	}
 
 	if (cache->rootdirname) {
-		kerror("Second cache directory specified");
+		pr_err("Second cache directory specified\n");
 		return -EEXIST;
 	}
 
@@ -503,12 +503,12 @@ static int cachefiles_daemon_secctx(struct cachefiles_cache *cache, char *args)
 	_enter(",%s", args);
 
 	if (!*args) {
-		kerror("Empty security context specified");
+		pr_err("Empty security context specified\n");
 		return -EINVAL;
 	}
 
 	if (cache->secctx) {
-		kerror("Second security context specified");
+		pr_err("Second security context specified\n");
 		return -EINVAL;
 	}
 
@@ -531,7 +531,7 @@ static int cachefiles_daemon_tag(struct cachefiles_cache *cache, char *args)
 	_enter(",%s", args);
 
 	if (!*args) {
-		kerror("Empty tag specified");
+		pr_err("Empty tag specified\n");
 		return -EINVAL;
 	}
 
@@ -552,8 +552,7 @@ static int cachefiles_daemon_tag(struct cachefiles_cache *cache, char *args)
  */
 static int cachefiles_daemon_cull(struct cachefiles_cache *cache, char *args)
 {
-	struct fs_struct *fs;
-	struct dentry *dir;
+	struct path path;
 	const struct cred *saved_cred;
 	int ret;
 
@@ -563,39 +562,36 @@ static int cachefiles_daemon_cull(struct cachefiles_cache *cache, char *args)
 		goto inval;
 
 	if (!test_bit(CACHEFILES_READY, &cache->flags)) {
-		kerror("cull applied to unready cache");
+		pr_err("cull applied to unready cache\n");
 		return -EIO;
 	}
 
 	if (test_bit(CACHEFILES_DEAD, &cache->flags)) {
-		kerror("cull applied to dead cache");
+		pr_err("cull applied to dead cache\n");
 		return -EIO;
 	}
 
 	/* extract the directory dentry from the cwd */
-	fs = current->fs;
-	read_lock(&fs->lock);
-	dir = dget(fs->pwd.dentry);
-	read_unlock(&fs->lock);
+	get_fs_pwd(current->fs, &path);
 
-	if (!S_ISDIR(dir->d_inode->i_mode))
+	if (!d_can_lookup(path.dentry))
 		goto notdir;
 
 	cachefiles_begin_secure(cache, &saved_cred);
-	ret = cachefiles_cull(cache, dir, args);
+	ret = cachefiles_cull(cache, path.dentry, args);
 	cachefiles_end_secure(cache, saved_cred);
 
-	dput(dir);
+	path_put(&path);
 	_leave(" = %d", ret);
 	return ret;
 
 notdir:
-	dput(dir);
-	kerror("cull command requires dirfd to be a directory");
+	path_put(&path);
+	pr_err("cull command requires dirfd to be a directory\n");
 	return -ENOTDIR;
 
 inval:
-	kerror("cull command requires dirfd and filename");
+	pr_err("cull command requires dirfd and filename\n");
 	return -EINVAL;
 }
 
@@ -618,7 +614,7 @@ static int cachefiles_daemon_debug(struct cachefiles_cache *cache, char *args)
 	return 0;
 
 inval:
-	kerror("debug command requires mask");
+	pr_err("debug command requires mask\n");
 	return -EINVAL;
 }
 
@@ -628,8 +624,7 @@ inval:
  */
 static int cachefiles_daemon_inuse(struct cachefiles_cache *cache, char *args)
 {
-	struct fs_struct *fs;
-	struct dentry *dir;
+	struct path path;
 	const struct cred *saved_cred;
 	int ret;
 
@@ -639,39 +634,36 @@ static int cachefiles_daemon_inuse(struct cachefiles_cache *cache, char *args)
 		goto inval;
 
 	if (!test_bit(CACHEFILES_READY, &cache->flags)) {
-		kerror("inuse applied to unready cache");
+		pr_err("inuse applied to unready cache\n");
 		return -EIO;
 	}
 
 	if (test_bit(CACHEFILES_DEAD, &cache->flags)) {
-		kerror("inuse applied to dead cache");
+		pr_err("inuse applied to dead cache\n");
 		return -EIO;
 	}
 
 	/* extract the directory dentry from the cwd */
-	fs = current->fs;
-	read_lock(&fs->lock);
-	dir = dget(fs->pwd.dentry);
-	read_unlock(&fs->lock);
+	get_fs_pwd(current->fs, &path);
 
-	if (!S_ISDIR(dir->d_inode->i_mode))
+	if (!d_can_lookup(path.dentry))
 		goto notdir;
 
 	cachefiles_begin_secure(cache, &saved_cred);
-	ret = cachefiles_check_in_use(cache, dir, args);
+	ret = cachefiles_check_in_use(cache, path.dentry, args);
 	cachefiles_end_secure(cache, saved_cred);
 
-	dput(dir);
+	path_put(&path);
 	//_leave(" = %d", ret);
 	return ret;
 
 notdir:
-	dput(dir);
-	kerror("inuse command requires dirfd to be a directory");
+	path_put(&path);
+	pr_err("inuse command requires dirfd to be a directory\n");
 	return -ENOTDIR;
 
 inval:
-	kerror("inuse command requires dirfd and filename");
+	pr_err("inuse command requires dirfd and filename\n");
 	return -EINVAL;
 }
 
@@ -683,6 +675,10 @@ int cachefiles_has_space(struct cachefiles_cache *cache,
 			 unsigned fnr, unsigned bnr)
 {
 	struct kstatfs stats;
+	struct path path = {
+		.mnt	= cache->mnt,
+		.dentry	= cache->mnt->mnt_root,
+	};
 	int ret;
 
 	//_enter("{%llu,%llu,%llu,%llu,%llu,%llu},%u,%u",
@@ -697,7 +693,7 @@ int cachefiles_has_space(struct cachefiles_cache *cache,
 	/* find out how many pages of blockdev are available */
 	memset(&stats, 0, sizeof(stats));
 
-	ret = vfs_statfs(cache->mnt->mnt_root, &stats);
+	ret = vfs_statfs(&path, &stats);
 	if (ret < 0) {
 		if (ret == -EIO)
 			cachefiles_io_error(cache, "statfs failed");

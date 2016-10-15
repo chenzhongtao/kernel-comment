@@ -20,6 +20,7 @@
  *
  */
 
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -475,7 +476,7 @@ xpnet_dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (skb->data[0] == 0xff) {
 		/* we are being asked to broadcast to all partitions */
-		for_each_bit(dest_partid, xpnet_broadcast_partitions,
+		for_each_set_bit(dest_partid, xpnet_broadcast_partitions,
 			     xp_max_npartitions) {
 
 			xpnet_send(skb, queued_msg, start_addr, end_addr,
@@ -494,13 +495,13 @@ xpnet_dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 	}
 
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += skb->len;
+
 	if (atomic_dec_return(&queued_msg->use_count) == 0) {
 		dev_kfree_skb(skb);
 		kfree(queued_msg);
 	}
-
-	dev->stats.tx_packets++;
-	dev->stats.tx_bytes += skb->len;
 
 	return NETDEV_TX_OK;
 }
@@ -543,7 +544,8 @@ xpnet_init(void)
 	 * use ether_setup() to init the majority of our device
 	 * structure and then override the necessary pieces.
 	 */
-	xpnet_device = alloc_netdev(0, XPNET_DEVICE_NAME, ether_setup);
+	xpnet_device = alloc_netdev(0, XPNET_DEVICE_NAME, NET_NAME_UNKNOWN,
+				    ether_setup);
 	if (xpnet_device == NULL) {
 		kfree(xpnet_broadcast_partitions);
 		return -ENOMEM;
@@ -575,7 +577,7 @@ xpnet_init(void)
 	 * report an error if the data is not retrievable and the
 	 * packet will be dropped.
 	 */
-	xpnet_device->features = NETIF_F_NO_CSUM;
+	xpnet_device->features = NETIF_F_HW_CSUM;
 
 	result = register_netdev(xpnet_device);
 	if (result != 0) {

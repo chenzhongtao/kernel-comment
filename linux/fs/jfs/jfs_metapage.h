@@ -48,7 +48,6 @@ struct metapage {
 
 /* metapage flag */
 #define META_locked	0
-#define META_free	1
 #define META_dirty	2
 #define META_sync	3
 #define META_discard	4
@@ -75,7 +74,7 @@ extern void grab_metapage(struct metapage *);
 extern void force_metapage(struct metapage *);
 
 /*
- * hold_metapage and put_metapage are used in conjuction.  The page lock
+ * hold_metapage and put_metapage are used in conjunction.  The page lock
  * is not dropped between the two, so no other threads can get or release
  * the metapage
  */

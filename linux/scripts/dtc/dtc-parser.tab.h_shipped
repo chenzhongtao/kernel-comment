@@ -1,14 +1,13 @@
-/* A Bison parser, made by GNU Bison 2.3.  */
+/* A Bison parser, made by GNU Bison 3.0.2.  */
 
-/* Skeleton interface for Bison's Yacc-like parsers in C
+/* Bison interface for Yacc-like parsers in C
 
-   Copyright (C) 1984, 1989, 1990, 2000, 2001, 2002, 2003, 2004, 2005, 2006
-   Free Software Foundation, Inc.
+   Copyright (C) 1984, 1989-1990, 2000-2013 Free Software Foundation, Inc.
 
-   This program is free software; you can redistribute it and/or modify
+   This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2, or (at your option)
-   any later version.
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -16,9 +15,7 @@
    GNU General Public License for more details.
 
    You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor,
-   Boston, MA 02110-1301, USA.  */
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 /* As a special exception, you may create a larger work that contains
    part or all of the Bison parser skeleton and distribute that work
@@ -33,81 +30,92 @@
    This special exception was added by the Free Software Foundation in
    version 2.2 of Bison.  */
 
-/* Tokens.  */
+#ifndef YY_YY_DTC_PARSER_TAB_H_INCLUDED
+# define YY_YY_DTC_PARSER_TAB_H_INCLUDED
+/* Debug traces.  */
+#ifndef YYDEBUG
+# define YYDEBUG 0
+#endif
+#if YYDEBUG
+extern int yydebug;
+#endif
+
+/* Token type.  */
 #ifndef YYTOKENTYPE
 # define YYTOKENTYPE
-   /* Put the tokens into the symbol table, so that GDB and other debuggers
-      know about them.  */
-   enum yytokentype {
-     DT_V1 = 258,
-     DT_MEMRESERVE = 259,
-     DT_PROPNODENAME = 260,
-     DT_LITERAL = 261,
-     DT_LEGACYLITERAL = 262,
-     DT_BASE = 263,
-     DT_BYTE = 264,
-     DT_STRING = 265,
-     DT_LABEL = 266,
-     DT_REF = 267,
-     DT_INCBIN = 268
-   };
+  enum yytokentype
+  {
+    DT_V1 = 258,
+    DT_MEMRESERVE = 259,
+    DT_LSHIFT = 260,
+    DT_RSHIFT = 261,
+    DT_LE = 262,
+    DT_GE = 263,
+    DT_EQ = 264,
+    DT_NE = 265,
+    DT_AND = 266,
+    DT_OR = 267,
+    DT_BITS = 268,
+    DT_DEL_PROP = 269,
+    DT_DEL_NODE = 270,
+    DT_PROPNODENAME = 271,
+    DT_LITERAL = 272,
+    DT_CHAR_LITERAL = 273,
+    DT_BYTE = 274,
+    DT_STRING = 275,
+    DT_LABEL = 276,
+    DT_REF = 277,
+    DT_INCBIN = 278
+  };
 #endif
-/* Tokens.  */
-#define DT_V1 258
-#define DT_MEMRESERVE 259
-#define DT_PROPNODENAME 260
-#define DT_LITERAL 261
-#define DT_LEGACYLITERAL 262
-#define DT_BASE 263
-#define DT_BYTE 264
-#define DT_STRING 265
-#define DT_LABEL 266
-#define DT_REF 267
-#define DT_INCBIN 268
 
-
-
-
+/* Value type.  */
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
-typedef union YYSTYPE
-#line 37 "dtc-parser.y"
+typedef union YYSTYPE YYSTYPE;
+union YYSTYPE
 {
+#line 38 "dtc-parser.y" /* yacc.c:1909  */
+
 	char *propnodename;
-	char *literal;
 	char *labelref;
-	unsigned int cbase;
 	uint8_t byte;
 	struct data data;
 
-	uint64_t addr;
-	cell_t cell;
+	struct {
+		struct data	data;
+		int		bits;
+	} array;
+
 	struct property *prop;
 	struct property *proplist;
 	struct node *node;
 	struct node *nodelist;
 	struct reserve_info *re;
-}
-/* Line 1489 of yacc.c.  */
-#line 92 "dtc-parser.tab.h"
-	YYSTYPE;
-# define yystype YYSTYPE /* obsolescent; will be withdrawn */
-# define YYSTYPE_IS_DECLARED 1
+	uint64_t integer;
+
+#line 97 "dtc-parser.tab.h" /* yacc.c:1909  */
+};
 # define YYSTYPE_IS_TRIVIAL 1
+# define YYSTYPE_IS_DECLARED 1
 #endif
 
-extern YYSTYPE yylval;
-
+/* Location type.  */
 #if ! defined YYLTYPE && ! defined YYLTYPE_IS_DECLARED
-typedef struct YYLTYPE
+typedef struct YYLTYPE YYLTYPE;
+struct YYLTYPE
 {
   int first_line;
   int first_column;
   int last_line;
   int last_column;
-} YYLTYPE;
-# define yyltype YYLTYPE /* obsolescent; will be withdrawn */
+};
 # define YYLTYPE_IS_DECLARED 1
 # define YYLTYPE_IS_TRIVIAL 1
 #endif
 
+
+extern YYSTYPE yylval;
 extern YYLTYPE yylloc;
+int yyparse (void);
+
+#endif /* !YY_YY_DTC_PARSER_TAB_H_INCLUDED  */

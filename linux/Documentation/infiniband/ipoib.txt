@@ -24,6 +24,9 @@ Partitions and P_Keys
   The P_Key for any interface is given by the "pkey" file, and the
   main interface for a subinterface is in "parent."
 
+  Child interface create/delete can also be done using IPoIB's
+  rtnl_link_ops, where childs created using either way behave the same.
+
 Datagram vs Connected modes
 
   The IPoIB driver supports two modes of operation: datagram and
@@ -36,11 +39,11 @@ Datagram vs Connected modes
   fabric with a 2K MTU, the IPoIB MTU will be 2048 - 4 = 2044 bytes.
 
   In connected mode, the IB RC (Reliable Connected) transport is used.
-  Connected mode is to takes advantage of the connected nature of the
-  IB transport and allows an MTU up to the maximal IP packet size of
-  64K, which reduces the number of IP packets needed for handling
-  large UDP datagrams, TCP segments, etc and increases the performance
-  for large messages.
+  Connected mode takes advantage of the connected nature of the IB
+  transport and allows an MTU up to the maximal IP packet size of 64K,
+  which reduces the number of IP packets needed for handling large UDP
+  datagrams, TCP segments, etc and increases the performance for large
+  messages.
 
   In connected mode, the interface's UD QP is still used for multicast
   and communication with peers that don't support connected mode. In

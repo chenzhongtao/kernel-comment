@@ -2,8 +2,10 @@
  * IDE ioctls handling.
  */
 
+#include <linux/export.h>
 #include <linux/hdreg.h>
 #include <linux/ide.h>
+#include <linux/slab.h>
 
 static const struct ide_ioctl_devset ide_ioctl_settings[] = {
 { HDIO_GET_32BIT,	 HDIO_SET_32BIT,	&ide_devset_io_32bit  },
@@ -123,7 +125,7 @@ static int ide_cmd_ioctl(ide_drive_t *drive, unsigned long arg)
 	if (NULL == (void *) arg) {
 		struct request *rq;
 
-		rq = blk_get_request(drive->queue, READ, __GFP_WAIT);
+		rq = blk_get_request(drive->queue, READ, __GFP_RECLAIM);
 		rq->cmd_type = REQ_TYPE_ATA_TASKFILE;
 		err = blk_execute_rq(drive->queue, NULL, rq, 0);
 		blk_put_request(rq);
@@ -139,8 +141,8 @@ static int ide_cmd_ioctl(ide_drive_t *drive, unsigned long arg)
 	if (args[0] == ATA_CMD_SMART) {
 		tf->nsect = args[3];
 		tf->lbal  = args[1];
-		tf->lbam  = 0x4f;
-		tf->lbah  = 0xc2;
+		tf->lbam  = ATA_SMART_LBAM_PASS;
+		tf->lbah  = ATA_SMART_LBAH_PASS;
 		cmd.valid.out.tf = IDE_VALID_OUT_TF;
 		cmd.valid.in.tf  = IDE_VALID_NSECT;
 	} else {
@@ -219,8 +221,8 @@ static int generic_drive_reset(ide_drive_t *drive)
 	struct request *rq;
 	int ret = 0;
 
-	rq = blk_get_request(drive->queue, READ, __GFP_WAIT);
-	rq->cmd_type = REQ_TYPE_SPECIAL;
+	rq = blk_get_request(drive->queue, READ, __GFP_RECLAIM);
+	rq->cmd_type = REQ_TYPE_DRV_PRIV;
 	rq->cmd_len = 1;
 	rq->cmd[0] = REQ_DRIVE_RESET;
 	if (blk_execute_rq(drive->queue, NULL, rq, 1))

@@ -30,9 +30,11 @@
  * SOFTWARE.
  *
  */
+#include <linux/module.h>
 #include <rdma/rdma_cm.h>
 
 #include "rdma_transport.h"
+#include "ib.h"
 
 static struct rdma_cm_id *rds_rdma_listen_id;
 
@@ -44,8 +46,8 @@ int rds_rdma_cm_event_handler(struct rdma_cm_id *cm_id,
 	struct rds_transport *trans;
 	int ret = 0;
 
-	rdsdebug("conn %p id %p handling event %u\n", conn, cm_id,
-		 event->event);
+	rdsdebug("conn %p id %p handling event %u (%s)\n", conn, cm_id,
+		 event->event, rdma_event_msg(event->event));
 
 	if (cm_id->device->node_type == RDMA_NODE_RNIC)
 		trans = &rds_iw_transport;
@@ -81,8 +83,18 @@ int rds_rdma_cm_event_handler(struct rdma_cm_id *cm_id,
 		break;
 
 	case RDMA_CM_EVENT_ROUTE_RESOLVED:
-		/* XXX worry about racing with listen acceptance */
-		ret = trans->cm_initiate_connect(cm_id);
+		/* Connection could have been dropped so make sure the
+		 * cm_id is valid before proceeding
+		 */
+		if (conn) {
+			struct rds_ib_connection *ibic;
+
+			ibic = conn->c_transport_data;
+			if (ibic && ibic->i_cm_id == cm_id)
+				ret = trans->cm_initiate_connect(cm_id);
+			else
+				rds_conn_drop(conn);
+		}
 		break;
 
 	case RDMA_CM_EVENT_ESTABLISHED:
@@ -101,7 +113,7 @@ int rds_rdma_cm_event_handler(struct rdma_cm_id *cm_id,
 		break;
 
 	case RDMA_CM_EVENT_DISCONNECTED:
-		printk(KERN_WARNING "RDS/RDMA: DISCONNECT event - dropping connection "
+		rdsdebug("DISCONNECT event - dropping connection "
 			"%pI4->%pI4\n", &conn->c_laddr,
 			 &conn->c_faddr);
 		rds_conn_drop(conn);
@@ -109,8 +121,8 @@ int rds_rdma_cm_event_handler(struct rdma_cm_id *cm_id,
 
 	default:
 		/* things like device disconnect? */
-		printk(KERN_ERR "unknown event %u\n", event->event);
-		BUG();
+		printk(KERN_ERR "RDS: unknown event %u (%s)!\n",
+		       event->event, rdma_event_msg(event->event));
 		break;
 	}
 
@@ -118,26 +130,28 @@ out:
 	if (conn)
 		mutex_unlock(&conn->c_cm_lock);
 
-	rdsdebug("id %p event %u handling ret %d\n", cm_id, event->event, ret);
+	rdsdebug("id %p event %u (%s) handling ret %d\n", cm_id, event->event,
+		 rdma_event_msg(event->event), ret);
 
 	return ret;
 }
 
-static int __init rds_rdma_listen_init(void)
+static int rds_rdma_listen_init(void)
 {
 	struct sockaddr_in sin;
 	struct rdma_cm_id *cm_id;
 	int ret;
 
-	cm_id = rdma_create_id(rds_rdma_cm_event_handler, NULL, RDMA_PS_TCP);
+	cm_id = rdma_create_id(&init_net, rds_rdma_cm_event_handler, NULL,
+			       RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(cm_id)) {
 		ret = PTR_ERR(cm_id);
 		printk(KERN_ERR "RDS/RDMA: failed to setup listener, "
 		       "rdma_create_id() returned %d\n", ret);
-		goto out;
+		return ret;
 	}
 
-	sin.sin_family = AF_INET,
+	sin.sin_family = AF_INET;
 	sin.sin_addr.s_addr = (__force u32)htonl(INADDR_ANY);
 	sin.sin_port = (__force u16)htons(RDS_PORT);
 
@@ -178,7 +192,7 @@ static void rds_rdma_listen_stop(void)
 	}
 }
 
-int __init rds_rdma_init(void)
+static int rds_rdma_init(void)
 {
 	int ret;
 
@@ -205,7 +219,7 @@ out:
 }
 module_init(rds_rdma_init);
 
-void rds_rdma_exit(void)
+static void rds_rdma_exit(void)
 {
 	/* stop listening first to ensure no new connections are attempted */
 	rds_rdma_listen_stop();

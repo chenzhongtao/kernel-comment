@@ -1,4 +1,3 @@
-
 /******************************************************************************
  *
  * Module Name: exnames - interpreter/scanner name load/execute
@@ -6,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2015, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -53,8 +52,7 @@ ACPI_MODULE_NAME("exnames")
 /* Local prototypes */
 static char *acpi_ex_allocate_name_string(u32 prefix_count, u32 num_name_segs);
 
-static acpi_status
-acpi_ex_name_segment(u8 ** in_aml_address, char *name_string);
+static acpi_status acpi_ex_name_segment(u8 **in_aml_address, char *name_string);
 
 /*******************************************************************************
  *
@@ -64,7 +62,7 @@ acpi_ex_name_segment(u8 ** in_aml_address, char *name_string);
  *                                    (-1)==root,  0==none
  *              num_name_segs       - count of 4-character name segments
  *
- * RETURN:      A pointer to the allocated string segment.  This segment must
+ * RETURN:      A pointer to the allocated string segment. This segment must
  *              be deleted by the caller.
  *
  * DESCRIPTION: Allocate a buffer for a name string. Ensure allocated name
@@ -102,7 +100,7 @@ static char *acpi_ex_allocate_name_string(u32 prefix_count, u32 num_name_segs)
 	name_string = ACPI_ALLOCATE(size_needed);
 	if (!name_string) {
 		ACPI_ERROR((AE_INFO,
-			    "Could not allocate size %d", size_needed));
+			    "Could not allocate size %u", size_needed));
 		return_PTR(NULL);
 	}
 
@@ -178,7 +176,8 @@ static acpi_status acpi_ex_name_segment(u8 ** in_aml_address, char *name_string)
 
 	ACPI_DEBUG_PRINT((ACPI_DB_LOAD, "Bytes from stream:\n"));
 
-	for (index = 0; (index < ACPI_NAME_SIZE)
+	for (index = 0;
+	     (index < ACPI_NAME_SIZE)
 	     && (acpi_ut_valid_acpi_char(*aml_address, 0)); index++) {
 		char_buf[index] = *aml_address++;
 		ACPI_DEBUG_PRINT((ACPI_DB_LOAD, "%c\n", char_buf[index]));
@@ -193,7 +192,7 @@ static acpi_status acpi_ex_name_segment(u8 ** in_aml_address, char *name_string)
 		char_buf[4] = '\0';
 
 		if (name_string) {
-			ACPI_STRCAT(name_string, char_buf);
+			strcat(name_string, char_buf);
 			ACPI_DEBUG_PRINT((ACPI_DB_NAMES,
 					  "Appended to - %s\n", name_string));
 		} else {
@@ -216,7 +215,7 @@ static acpi_status acpi_ex_name_segment(u8 ** in_aml_address, char *name_string)
 		 */
 		status = AE_AML_BAD_NAME;
 		ACPI_ERROR((AE_INFO,
-			    "Bad character %02x in name, at %p",
+			    "Bad character 0x%02x in name, at %p",
 			    *aml_address, aml_address));
 	}
 

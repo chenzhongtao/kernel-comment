@@ -5,7 +5,7 @@
  * NetLabel system manages static and dynamic label mappings for network
  * protocols such as CIPSO and RIPSO.
  *
- * Author: Paul Moore <paul.moore@hp.com>
+ * Author: Paul Moore <paul@paul-moore.com>
  *
  */
 
@@ -23,8 +23,7 @@
  * the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program;  if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ * along with this program;  if not, see <http://www.gnu.org/licenses/>.
  *
  */
 
@@ -35,6 +34,7 @@
 #include <linux/audit.h>
 #include <linux/tty.h>
 #include <linux/security.h>
+#include <linux/gfp.h>
 #include <net/sock.h>
 #include <net/netlink.h>
 #include <net/genetlink.h>
@@ -71,11 +71,7 @@ int __init netlbl_netlink_init(void)
 	if (ret_val != 0)
 		return ret_val;
 
-	ret_val = netlbl_unlabel_genl_init();
-	if (ret_val != 0)
-		return ret_val;
-
-	return 0;
+	return netlbl_unlabel_genl_init();
 }
 
 /*
@@ -108,7 +104,7 @@ struct audit_buffer *netlbl_audit_start_common(int type,
 		return NULL;
 
 	audit_log_format(audit_buf, "netlabel: auid=%u ses=%u",
-			 audit_info->loginuid,
+			 from_kuid(&init_user_ns, audit_info->loginuid),
 			 audit_info->sessionid);
 
 	if (audit_info->secid != 0 &&

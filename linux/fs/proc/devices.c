@@ -9,14 +9,14 @@ static int devinfo_show(struct seq_file *f, void *v)
 
 	if (i < CHRDEV_MAJOR_HASH_SIZE) {
 		if (i == 0)
-			seq_printf(f, "Character devices:\n");
+			seq_puts(f, "Character devices:\n");
 		chrdev_show(f, i);
 	}
 #ifdef CONFIG_BLOCK
 	else {
 		i -= CHRDEV_MAJOR_HASH_SIZE;
 		if (i == 0)
-			seq_printf(f, "\nBlock devices:\n");
+			seq_puts(f, "\nBlock devices:\n");
 		blkdev_show(f, i);
 	}
 #endif
@@ -67,4 +67,4 @@ static int __init proc_devices_init(void)
 	proc_create("devices", 0, NULL, &proc_devinfo_operations);
 	return 0;
 }
-module_init(proc_devices_init);
+fs_initcall(proc_devices_init);

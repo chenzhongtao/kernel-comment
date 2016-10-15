@@ -20,6 +20,8 @@
 
 #include <linux/ata.h>
 #include <linux/blkdev.h>
+#include <linux/slab.h>
+#include <linux/module.h>
 
 #include <asm/lv1call.h>
 #include <asm/ps3stor.h>
@@ -92,27 +94,26 @@ static void ps3disk_scatter_gather(struct ps3_storage_device *dev,
 {
 	unsigned int offset = 0;
 	struct req_iterator iter;
-	struct bio_vec *bvec;
+	struct bio_vec bvec;
 	unsigned int i = 0;
 	size_t size;
 	void *buf;
 
 	rq_for_each_segment(bvec, req, iter) {
 		unsigned long flags;
-		dev_dbg(&dev->sbd.core,
-			"%s:%u: bio %u: %u segs %u sectors from %lu\n",
-			__func__, __LINE__, i, bio_segments(iter.bio),
-			bio_sectors(iter.bio), iter.bio->bi_sector);
+		dev_dbg(&dev->sbd.core, "%s:%u: bio %u: %u sectors from %lu\n",
+			__func__, __LINE__, i, bio_sectors(iter.bio),
+			iter.bio->bi_iter.bi_sector);
 
-		size = bvec->bv_len;
-		buf = bvec_kmap_irq(bvec, &flags);
+		size = bvec.bv_len;
+		buf = bvec_kmap_irq(&bvec, &flags);
 		if (gather)
 			memcpy(dev->bounce_buf+offset, buf, size);
 		else
 			memcpy(buf, dev->bounce_buf+offset, size);
 		offset += size;
-		flush_kernel_dcache_page(bvec->bv_page);
-		bvec_kunmap_irq(bvec, &flags);
+		flush_kernel_dcache_page(bvec.bv_page);
+		bvec_kunmap_irq(buf, &flags);
 		i++;
 	}
 }
@@ -128,7 +129,7 @@ static int ps3disk_submit_request_sg(struct ps3_storage_device *dev,
 
 #ifdef DEBUG
 	unsigned int n = 0;
-	struct bio_vec *bv;
+	struct bio_vec bv;
 	struct req_iterator iter;
 
 	rq_for_each_segment(bv, req, iter)
@@ -195,12 +196,11 @@ static void ps3disk_do_request(struct ps3_storage_device *dev,
 	dev_dbg(&dev->sbd.core, "%s:%u\n", __func__, __LINE__);
 
 	while ((req = blk_fetch_request(q))) {
-		if (blk_fs_request(req)) {
-			if (ps3disk_submit_request_sg(dev, req))
-				break;
-		} else if (req->cmd_type == REQ_TYPE_LINUX_BLOCK &&
-			   req->cmd[0] == REQ_LB_OP_FLUSH) {
+		if (req->cmd_flags & REQ_FLUSH) {
 			if (ps3disk_submit_flush_request(dev, req))
+				break;
+		} else if (req->cmd_type == REQ_TYPE_FS) {
+			if (ps3disk_submit_request_sg(dev, req))
 				break;
 		} else {
 			blk_dump_rq_flags(req, DEVICE_NAME " bad request");
@@ -256,8 +256,7 @@ static irqreturn_t ps3disk_interrupt(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
-	if (req->cmd_type == REQ_TYPE_LINUX_BLOCK &&
-	    req->cmd[0] == REQ_LB_OP_FLUSH) {
+	if (req->cmd_flags & REQ_FLUSH) {
 		read = 0;
 		op = "flush";
 	} else {
@@ -397,21 +396,11 @@ static int ps3disk_identify(struct ps3_storage_device *dev)
 	return 0;
 }
 
-static void ps3disk_prepare_flush(struct request_queue *q, struct request *req)
-{
-	struct ps3_storage_device *dev = q->queuedata;
-
-	dev_dbg(&dev->sbd.core, "%s:%u\n", __func__, __LINE__);
-
-	req->cmd_type = REQ_TYPE_LINUX_BLOCK;
-	req->cmd[0] = REQ_LB_OP_FLUSH;
-}
-
 static unsigned long ps3disk_mask;
 
 static DEFINE_MUTEX(ps3disk_mask_mutex);
 
-static int __devinit ps3disk_probe(struct ps3_system_bus_device *_dev)
+static int ps3disk_probe(struct ps3_system_bus_device *_dev)
 {
 	struct ps3_storage_device *dev = to_ps3_storage_device(&_dev->core);
 	struct ps3disk_private *priv;
@@ -474,16 +463,14 @@ static int __devinit ps3disk_probe(struct ps3_system_bus_device *_dev)
 
 	blk_queue_bounce_limit(queue, BLK_BOUNCE_HIGH);
 
-	blk_queue_max_sectors(queue, dev->bounce_size >> 9);
+	blk_queue_max_hw_sectors(queue, dev->bounce_size >> 9);
 	blk_queue_segment_boundary(queue, -1UL);
 	blk_queue_dma_alignment(queue, dev->blk_size-1);
 	blk_queue_logical_block_size(queue, dev->blk_size);
 
-	blk_queue_ordered(queue, QUEUE_ORDERED_DRAIN_FLUSH,
-			  ps3disk_prepare_flush);
+	blk_queue_flush(queue, REQ_FLUSH);
 
-	blk_queue_max_phys_segments(queue, -1);
-	blk_queue_max_hw_segments(queue, -1);
+	blk_queue_max_segments(queue, -1);
 	blk_queue_max_segment_size(queue, dev->bounce_size);
 
 	gendisk = alloc_disk(PS3DISK_MINORS);

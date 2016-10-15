@@ -6,7 +6,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2015, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,6 +42,8 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 
+#define EXPORT_ACPI_INTERFACES
+
 #include <acpi/acpi.h>
 #include "accommon.h"
 #include "acnamesp.h"
@@ -51,53 +53,9 @@ ACPI_MODULE_NAME("nsxfobj")
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_get_id
- *
- * PARAMETERS:  Handle          - Handle of object whose id is desired
- *              ret_id          - Where the id will be placed
- *
- * RETURN:      Status
- *
- * DESCRIPTION: This routine returns the owner id associated with a handle
- *
- ******************************************************************************/
-acpi_status acpi_get_id(acpi_handle handle, acpi_owner_id * ret_id)
-{
-	struct acpi_namespace_node *node;
-	acpi_status status;
-
-	/* Parameter Validation */
-
-	if (!ret_id) {
-		return (AE_BAD_PARAMETER);
-	}
-
-	status = acpi_ut_acquire_mutex(ACPI_MTX_NAMESPACE);
-	if (ACPI_FAILURE(status)) {
-		return (status);
-	}
-
-	/* Convert and validate the handle */
-
-	node = acpi_ns_map_handle_to_node(handle);
-	if (!node) {
-		(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
-		return (AE_BAD_PARAMETER);
-	}
-
-	*ret_id = node->owner_id;
-
-	status = acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
-	return (status);
-}
-
-ACPI_EXPORT_SYMBOL(acpi_get_id)
-
-/*******************************************************************************
- *
  * FUNCTION:    acpi_get_type
  *
- * PARAMETERS:  Handle          - Handle of object whose type is desired
+ * PARAMETERS:  handle          - Handle of object whose type is desired
  *              ret_type        - Where the type will be placed
  *
  * RETURN:      Status
@@ -132,7 +90,7 @@ acpi_status acpi_get_type(acpi_handle handle, acpi_object_type * ret_type)
 
 	/* Convert and validate the handle */
 
-	node = acpi_ns_map_handle_to_node(handle);
+	node = acpi_ns_validate_handle(handle);
 	if (!node) {
 		(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 		return (AE_BAD_PARAMETER);
@@ -150,7 +108,7 @@ ACPI_EXPORT_SYMBOL(acpi_get_type)
  *
  * FUNCTION:    acpi_get_parent
  *
- * PARAMETERS:  Handle          - Handle of object whose parent is desired
+ * PARAMETERS:  handle          - Handle of object whose parent is desired
  *              ret_handle      - Where the parent handle will be placed
  *
  * RETURN:      Status
@@ -182,7 +140,7 @@ acpi_status acpi_get_parent(acpi_handle handle, acpi_handle * ret_handle)
 
 	/* Convert and validate the handle */
 
-	node = acpi_ns_map_handle_to_node(handle);
+	node = acpi_ns_validate_handle(handle);
 	if (!node) {
 		status = AE_BAD_PARAMETER;
 		goto unlock_and_exit;
@@ -190,8 +148,8 @@ acpi_status acpi_get_parent(acpi_handle handle, acpi_handle * ret_handle)
 
 	/* Get the parent entry */
 
-	parent_node = acpi_ns_get_parent_node(node);
-	*ret_handle = acpi_ns_convert_entry_to_handle(parent_node);
+	parent_node = node->parent;
+	*ret_handle = ACPI_CAST_PTR(acpi_handle, parent_node);
 
 	/* Return exception if parent is null */
 
@@ -199,7 +157,7 @@ acpi_status acpi_get_parent(acpi_handle handle, acpi_handle * ret_handle)
 		status = AE_NULL_ENTRY;
 	}
 
-      unlock_and_exit:
+unlock_and_exit:
 
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 	return (status);
@@ -211,16 +169,16 @@ ACPI_EXPORT_SYMBOL(acpi_get_parent)
  *
  * FUNCTION:    acpi_get_next_object
  *
- * PARAMETERS:  Type            - Type of object to be searched for
- *              Parent          - Parent object whose children we are getting
+ * PARAMETERS:  type            - Type of object to be searched for
+ *              parent          - Parent object whose children we are getting
  *              last_child      - Previous child that was found.
  *                                The NEXT child will be returned
  *              ret_handle      - Where handle to the next object is placed
  *
  * RETURN:      Status
  *
- * DESCRIPTION: Return the next peer object within the namespace.  If Handle is
- *              valid, Scope is ignored.  Otherwise, the first object within
+ * DESCRIPTION: Return the next peer object within the namespace. If Handle is
+ *              valid, Scope is ignored. Otherwise, the first object within
  *              Scope is returned.
  *
  ******************************************************************************/
@@ -251,7 +209,7 @@ acpi_get_next_object(acpi_object_type type,
 
 		/* Start search at the beginning of the specified scope */
 
-		parent_node = acpi_ns_map_handle_to_node(parent);
+		parent_node = acpi_ns_validate_handle(parent);
 		if (!parent_node) {
 			status = AE_BAD_PARAMETER;
 			goto unlock_and_exit;
@@ -260,7 +218,7 @@ acpi_get_next_object(acpi_object_type type,
 		/* Non-null handle, ignore the parent */
 		/* Convert and validate the handle */
 
-		child_node = acpi_ns_map_handle_to_node(child);
+		child_node = acpi_ns_validate_handle(child);
 		if (!child_node) {
 			status = AE_BAD_PARAMETER;
 			goto unlock_and_exit;
@@ -276,10 +234,10 @@ acpi_get_next_object(acpi_object_type type,
 	}
 
 	if (ret_handle) {
-		*ret_handle = acpi_ns_convert_entry_to_handle(node);
+		*ret_handle = ACPI_CAST_PTR(acpi_handle, node);
 	}
 
-      unlock_and_exit:
+unlock_and_exit:
 
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 	return (status);

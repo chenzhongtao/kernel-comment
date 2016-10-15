@@ -9,6 +9,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/fb.h>
 #include <linux/vt_kern.h>
@@ -21,12 +22,12 @@
  * Rotation 90 degrees
  */
 
-static inline void cw_update_attr(u8 *dst, u8 *src, int attribute,
+static void cw_update_attr(u8 *dst, u8 *src, int attribute,
 				  struct vc_data *vc)
 {
 	int i, j, offset = (vc->vc_font.height < 10) ? 1 : 2;
 	int width = (vc->vc_font.height + 7) >> 3;
-	u8 c, t = 0, msk = ~(0xff >> offset);
+	u8 c, msk = ~(0xff >> offset);
 
 	for (i = 0; i < vc->vc_font.width; i++) {
 		for (j = 0; j < width; j++) {
@@ -39,7 +40,6 @@ static inline void cw_update_attr(u8 *dst, u8 *src, int attribute,
 				c = ~c;
 			src++;
 			*dst++ = c;
-			t = c;
 		}
 	}
 }
@@ -180,9 +180,8 @@ static void cw_clear_margins(struct vc_data *vc, struct fb_info *info,
 	unsigned int bh = info->var.xres - (vc->vc_rows*ch);
 	unsigned int rs = info->var.yres - rw;
 	struct fb_fillrect region;
-	int bgshift = (vc->vc_hi_font_mask) ? 13 : 12;
 
-	region.color = attr_bgcol_ec(bgshift,vc,info);
+	region.color = 0;
 	region.rop = ROP_COPY;
 
 	if (rw && !bottom_only) {

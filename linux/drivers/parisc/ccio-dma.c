@@ -44,6 +44,7 @@
 #include <linux/seq_file.h>
 #include <linux/scatterlist.h>
 #include <linux/iommu-helper.h>
+#include <linux/export.h>
 
 #include <asm/byteorder.h>
 #include <asm/cache.h>		/* for L1_CACHE_BYTES */
@@ -650,7 +651,7 @@ ccio_clear_io_tlb(struct ioc *ioc, dma_addr_t iovp, size_t byte_cnt)
  * Mark the I/O Pdir entries invalid and blow away the corresponding I/O
  * TLB entries.
  *
- * FIXME: at some threshhold it might be "cheaper" to just blow
+ * FIXME: at some threshold it might be "cheaper" to just blow
  *        away the entire I/O TLB instead of individual entries.
  *
  * FIXME: Uturn has 256 TLB entries. We don't need to purge every
@@ -703,8 +704,6 @@ ccio_mark_invalid(struct ioc *ioc, dma_addr_t iova, size_t byte_cnt)
  * ccio_dma_supported - Verify the IOMMU supports the DMA address range.
  * @dev: The PCI device.
  * @mask: A bit mask describing the DMA address range of the device.
- *
- * This function implements the pci_dma_supported function.
  */
 static int 
 ccio_dma_supported(struct device *dev, u64 mask)
@@ -915,7 +914,7 @@ ccio_map_sg(struct device *dev, struct scatterlist *sglist, int nents,
 	/* Fast path single entry scatterlists. */
 	if (nents == 1) {
 		sg_dma_address(sglist) = ccio_map_single(dev,
-				(void *)sg_virt_addr(sglist), sglist->length,
+				sg_virt(sglist), sglist->length,
 				direction);
 		sg_dma_len(sglist) = sglist->length;
 		return 1;
@@ -982,8 +981,8 @@ ccio_unmap_sg(struct device *dev, struct scatterlist *sglist, int nents,
 	BUG_ON(!dev);
 	ioc = GET_IOC(dev);
 
-	DBG_RUN_SG("%s() START %d entries,  %08lx,%x\n",
-		__func__, nents, sg_virt_addr(sglist), sglist->length);
+	DBG_RUN_SG("%s() START %d entries, %p,%x\n",
+		__func__, nents, sg_virt(sglist), sglist->length);
 
 #ifdef CCIO_COLLECT_STATS
 	ioc->usg_calls++;
@@ -1020,7 +1019,6 @@ static struct hppa_dma_ops ccio_ops = {
 #ifdef CONFIG_PROC_FS
 static int ccio_proc_info(struct seq_file *m, void *p)
 {
-	int len = 0;
 	struct ioc *ioc = ioc_list;
 
 	while (ioc != NULL) {
@@ -1030,22 +1028,22 @@ static int ccio_proc_info(struct seq_file *m, void *p)
 		int j;
 #endif
 
-		len += seq_printf(m, "%s\n", ioc->name);
+		seq_printf(m, "%s\n", ioc->name);
 		
-		len += seq_printf(m, "Cujo 2.0 bug    : %s\n",
-				  (ioc->cujo20_bug ? "yes" : "no"));
+		seq_printf(m, "Cujo 2.0 bug    : %s\n",
+			   (ioc->cujo20_bug ? "yes" : "no"));
 		
-		len += seq_printf(m, "IO PDIR size    : %d bytes (%d entries)\n",
-			       total_pages * 8, total_pages);
+		seq_printf(m, "IO PDIR size    : %d bytes (%d entries)\n",
+			   total_pages * 8, total_pages);
 
 #ifdef CCIO_COLLECT_STATS
-		len += seq_printf(m, "IO PDIR entries : %ld free  %ld used (%d%%)\n",
-				  total_pages - ioc->used_pages, ioc->used_pages,
-				  (int)(ioc->used_pages * 100 / total_pages));
+		seq_printf(m, "IO PDIR entries : %ld free  %ld used (%d%%)\n",
+			   total_pages - ioc->used_pages, ioc->used_pages,
+			   (int)(ioc->used_pages * 100 / total_pages));
 #endif
 
-		len += seq_printf(m, "Resource bitmap : %d bytes (%d pages)\n", 
-				  ioc->res_size, total_pages);
+		seq_printf(m, "Resource bitmap : %d bytes (%d pages)\n",
+			   ioc->res_size, total_pages);
 
 #ifdef CCIO_COLLECT_STATS
 		min = max = ioc->avg_search[0];
@@ -1057,26 +1055,26 @@ static int ccio_proc_info(struct seq_file *m, void *p)
 				min = ioc->avg_search[j];
 		}
 		avg /= CCIO_SEARCH_SAMPLE;
-		len += seq_printf(m, "  Bitmap search : %ld/%ld/%ld (min/avg/max CPU Cycles)\n",
-				  min, avg, max);
+		seq_printf(m, "  Bitmap search : %ld/%ld/%ld (min/avg/max CPU Cycles)\n",
+			   min, avg, max);
 
-		len += seq_printf(m, "pci_map_single(): %8ld calls  %8ld pages (avg %d/1000)\n",
-				  ioc->msingle_calls, ioc->msingle_pages,
-				  (int)((ioc->msingle_pages * 1000)/ioc->msingle_calls));
+		seq_printf(m, "pci_map_single(): %8ld calls  %8ld pages (avg %d/1000)\n",
+			   ioc->msingle_calls, ioc->msingle_pages,
+			   (int)((ioc->msingle_pages * 1000)/ioc->msingle_calls));
 
 		/* KLUGE - unmap_sg calls unmap_single for each mapped page */
 		min = ioc->usingle_calls - ioc->usg_calls;
 		max = ioc->usingle_pages - ioc->usg_pages;
-		len += seq_printf(m, "pci_unmap_single: %8ld calls  %8ld pages (avg %d/1000)\n",
-				  min, max, (int)((max * 1000)/min));
+		seq_printf(m, "pci_unmap_single: %8ld calls  %8ld pages (avg %d/1000)\n",
+			   min, max, (int)((max * 1000)/min));
  
-		len += seq_printf(m, "pci_map_sg()    : %8ld calls  %8ld pages (avg %d/1000)\n",
-				  ioc->msg_calls, ioc->msg_pages,
-				  (int)((ioc->msg_pages * 1000)/ioc->msg_calls));
+		seq_printf(m, "pci_map_sg()    : %8ld calls  %8ld pages (avg %d/1000)\n",
+			   ioc->msg_calls, ioc->msg_pages,
+			   (int)((ioc->msg_pages * 1000)/ioc->msg_calls));
 
-		len += seq_printf(m, "pci_unmap_sg()  : %8ld calls  %8ld pages (avg %d/1000)\n\n\n",
-				  ioc->usg_calls, ioc->usg_pages,
-				  (int)((ioc->usg_pages * 1000)/ioc->usg_calls));
+		seq_printf(m, "pci_unmap_sg()  : %8ld calls  %8ld pages (avg %d/1000)\n\n\n",
+			   ioc->usg_calls, ioc->usg_pages,
+			   (int)((ioc->usg_pages * 1000)/ioc->usg_calls));
 #endif	/* CCIO_COLLECT_STATS */
 
 		ioc = ioc->next;
@@ -1100,20 +1098,12 @@ static const struct file_operations ccio_proc_info_fops = {
 
 static int ccio_proc_bitmap_info(struct seq_file *m, void *p)
 {
-	int len = 0;
 	struct ioc *ioc = ioc_list;
 
 	while (ioc != NULL) {
-		u32 *res_ptr = (u32 *)ioc->res_map;
-		int j;
-
-		for (j = 0; j < (ioc->res_size / sizeof(u32)); j++) {
-			if ((j & 7) == 0)
-				len += seq_puts(m, "\n   ");
-			len += seq_printf(m, "%08x", *res_ptr);
-			res_ptr++;
-		}
-		len += seq_puts(m, "\n\n");
+		seq_hex_dump(m, "   ", DUMP_PREFIX_NONE, 32, 4, ioc->res_map,
+			     ioc->res_size, false);
+		seq_putc(m, '\n');
 		ioc = ioc->next;
 		break; /* XXX - remove me */
 	}
@@ -1241,10 +1231,10 @@ static struct parisc_driver ccio_driver = {
 };
 
 /**
- * ccio_ioc_init - Initalize the I/O Controller
+ * ccio_ioc_init - Initialize the I/O Controller
  * @ioc: The I/O Controller.
  *
- * Initalize the I/O Controller which includes setting up the
+ * Initialize the I/O Controller which includes setting up the
  * I/O Page Directory, the resource map, and initalizing the
  * U2/Uturn chip into virtual mode.
  */

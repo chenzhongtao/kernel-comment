@@ -103,8 +103,7 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 		goto err0;
 	}
 
-	if (!request_mem_region(mem->start, mem->end - mem->start + 1,
-				pdev->name)) {
+	if (!request_mem_region(mem->start, resource_size(mem), pdev->name)) {
 		dev_err(dev, "request_mem_region failed\n");
 		retval = -EBUSY;
 		goto err0;
@@ -126,7 +125,7 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 
 	if (!dma_declare_coherent_memory(dev, mem->start,
 					 mem->start - mem->parent->start,
-					 (mem->end - mem->start) + 1,
+					 resource_size(mem),
 					 DMA_MEMORY_MAP |
 					 DMA_MEMORY_EXCLUSIVE)) {
 		dev_err(dev, "cannot declare coherent memory\n");
@@ -149,7 +148,7 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 	}
 
 	hcd->rsrc_start = res->start;
-	hcd->rsrc_len = res->end - res->start + 1;
+	hcd->rsrc_len = resource_size(res);
 
 	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len,	pdev->name)) {
 		dev_err(dev, "request_mem_region failed\n");
@@ -166,9 +165,10 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 
 	ohci_hcd_init(hcd_to_ohci(hcd));
 
-	retval = usb_add_hcd(hcd, irq, IRQF_DISABLED | IRQF_SHARED);
+	retval = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (retval)
-		goto err4;
+		goto err5;
+	device_wakeup_enable(hcd->self.controller);
 
 	/* enable power and unmask interrupts */
 
@@ -176,6 +176,8 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 	sm501_modify_reg(dev->parent, SM501_IRQ_MASK, 1 << 6, 0);
 
 	return 0;
+err5:
+	iounmap(hcd->regs);
 err4:
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
 err3:
@@ -183,7 +185,7 @@ err3:
 err2:
 	dma_release_declared_memory(dev);
 err1:
-	release_mem_region(mem->start, mem->end - mem->start + 1);
+	release_mem_region(mem->start, resource_size(mem));
 err0:
 	return retval;
 }
@@ -199,14 +201,13 @@ static int ohci_hcd_sm501_drv_remove(struct platform_device *pdev)
 	dma_release_declared_memory(&pdev->dev);
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	if (mem)
-		release_mem_region(mem->start, mem->end - mem->start + 1);
+		release_mem_region(mem->start, resource_size(mem));
 
 	/* mask interrupts and disable power */
 
 	sm501_modify_reg(pdev->dev.parent, SM501_IRQ_MASK, 0, 1 << 6);
 	sm501_unit_power(pdev->dev.parent, SM501_GATE_USB_HOST, 0);
 
-	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
 
@@ -216,15 +217,21 @@ static int ohci_hcd_sm501_drv_remove(struct platform_device *pdev)
 static int ohci_sm501_suspend(struct platform_device *pdev, pm_message_t msg)
 {
 	struct device *dev = &pdev->dev;
-	struct ohci_hcd	*ohci = hcd_to_ohci(platform_get_drvdata(pdev));
+	struct usb_hcd  *hcd = platform_get_drvdata(pdev);
+	struct ohci_hcd	*ohci = hcd_to_ohci(hcd);
+	bool do_wakeup = device_may_wakeup(dev);
+	int ret;
 
 	if (time_before(jiffies, ohci->next_statechange))
 		msleep(5);
 	ohci->next_statechange = jiffies;
 
+	ret = ohci_suspend(hcd, do_wakeup);
+	if (ret)
+		return ret;
+
 	sm501_unit_power(dev->parent, SM501_GATE_USB_HOST, 0);
-	ohci_to_hcd(ohci)->state = HC_STATE_SUSPENDED;
-	return 0;
+	return ret;
 }
 
 static int ohci_sm501_resume(struct platform_device *pdev)
@@ -238,7 +245,7 @@ static int ohci_sm501_resume(struct platform_device *pdev)
 	ohci->next_statechange = jiffies;
 
 	sm501_unit_power(dev->parent, SM501_GATE_USB_HOST, 1);
-	ohci_finish_controller_resume(hcd);
+	ohci_resume(hcd, false);
 	return 0;
 }
 #else
@@ -258,7 +265,6 @@ static struct platform_driver ohci_hcd_sm501_driver = {
 	.suspend	= ohci_sm501_suspend,
 	.resume		= ohci_sm501_resume,
 	.driver		= {
-		.owner	= THIS_MODULE,
 		.name	= "sm501-usb",
 	},
 };

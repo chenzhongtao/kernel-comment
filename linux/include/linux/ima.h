@@ -13,18 +13,13 @@
 #include <linux/fs.h>
 struct linux_binprm;
 
-#define IMA_COUNT_UPDATE 1
-#define IMA_COUNT_LEAVE 0
-
 #ifdef CONFIG_IMA
 extern int ima_bprm_check(struct linux_binprm *bprm);
-extern int ima_inode_alloc(struct inode *inode);
-extern void ima_inode_free(struct inode *inode);
-extern int ima_path_check(struct path *path, int mask, int update_counts);
+extern int ima_file_check(struct file *file, int mask, int opened);
 extern void ima_file_free(struct file *file);
 extern int ima_file_mmap(struct file *file, unsigned long prot);
-extern void ima_counts_get(struct file *file);
-extern void ima_counts_put(struct path *path, int mask);
+extern int ima_module_check(struct file *file);
+extern int ima_fw_from_file(struct file *file, char *buf, size_t size);
 
 #else
 static inline int ima_bprm_check(struct linux_binprm *bprm)
@@ -32,17 +27,7 @@ static inline int ima_bprm_check(struct linux_binprm *bprm)
 	return 0;
 }
 
-static inline int ima_inode_alloc(struct inode *inode)
-{
-	return 0;
-}
-
-static inline void ima_inode_free(struct inode *inode)
-{
-	return;
-}
-
-static inline int ima_path_check(struct path *path, int mask, int update_counts)
+static inline int ima_file_check(struct file *file, int mask, int opened)
 {
 	return 0;
 }
@@ -57,14 +42,41 @@ static inline int ima_file_mmap(struct file *file, unsigned long prot)
 	return 0;
 }
 
-static inline void ima_counts_get(struct file *file)
+static inline int ima_module_check(struct file *file)
+{
+	return 0;
+}
+
+static inline int ima_fw_from_file(struct file *file, char *buf, size_t size)
+{
+	return 0;
+}
+
+#endif /* CONFIG_IMA */
+
+#ifdef CONFIG_IMA_APPRAISE
+extern void ima_inode_post_setattr(struct dentry *dentry);
+extern int ima_inode_setxattr(struct dentry *dentry, const char *xattr_name,
+		       const void *xattr_value, size_t xattr_value_len);
+extern int ima_inode_removexattr(struct dentry *dentry, const char *xattr_name);
+#else
+static inline void ima_inode_post_setattr(struct dentry *dentry)
 {
 	return;
 }
 
-static inline void ima_counts_put(struct path *path, int mask)
+static inline int ima_inode_setxattr(struct dentry *dentry,
+				     const char *xattr_name,
+				     const void *xattr_value,
+				     size_t xattr_value_len)
 {
-	return;
+	return 0;
 }
-#endif /* CONFIG_IMA_H */
+
+static inline int ima_inode_removexattr(struct dentry *dentry,
+					const char *xattr_name)
+{
+	return 0;
+}
+#endif /* CONFIG_IMA_APPRAISE */
 #endif /* _LINUX_IMA_H */

@@ -2,7 +2,7 @@
  * sca3000.c -- support VTI sca3000 series accelerometers
  *              via SPI
  *
- * Copyright (c) 2007 Jonathan Cameron <jic23@cam.ac.uk>
+ * Copyright (c) 2007 Jonathan Cameron <jic23@kernel.org>
  *
  * Partly based upon tle62x0.c
  *
@@ -38,6 +38,9 @@
  * Can probably alleviate this by reading the interrupt register on start, but
  * that is really just brushing the problem under the carpet.
  */
+#ifndef _SCA3000
+#define _SCA3000
+
 #define SCA3000_WRITE_REG(a) (((a) << 2) | 0x02)
 #define SCA3000_READ_REG(a) ((a) << 2)
 
@@ -65,7 +68,8 @@
 
 #define SCA3000_RING_BUF_ENABLE			0x80
 #define SCA3000_RING_BUF_8BIT			0x40
-/* Free fall detection triggers an interrupt if the acceleration
+/*
+ * Free fall detection triggers an interrupt if the acceleration
  * is below a threshold for equivalent of 25cm drop
  */
 #define SCA3000_FREE_FALL_DETECT		0x10
@@ -73,8 +77,9 @@
 #define SCA3000_MEAS_MODE_OP_1			0x01
 #define SCA3000_MEAS_MODE_OP_2			0x02
 
-/* In motion detection mode the accelerations are band pass filtered
- * (aprox 1 - 25Hz) and then a programmable theshold used to trigger
+/*
+ * In motion detection mode the accelerations are band pass filtered
+ * (approx 1 - 25Hz) and then a programmable threshold used to trigger
  * and interrupt.
  */
 #define SCA3000_MEAS_MODE_MOT_DET		0x03
@@ -91,7 +96,7 @@
 #define SCA3000_INT_STATUS_X_TRIGGER		0x02
 #define SCA3000_INT_STATUS_Z_TRIGGER		0x01
 
-/* Used to allow accesss to multiplexed registers */
+/* Used to allow access to multiplexed registers */
 #define SCA3000_REG_ADDR_CTRL_SEL		0x18
 /* Only available for SCA3000-D03 and SCA3000-D01 */
 #define SCA3000_REG_CTRL_SEL_I2C_DISABLE	0x01
@@ -99,8 +104,10 @@
 #define SCA3000_REG_CTRL_SEL_MD_Y_TH		0x03
 #define SCA3000_REG_CTRL_SEL_MD_X_TH		0x04
 #define SCA3000_REG_CTRL_SEL_MD_Z_TH		0x05
-/* BE VERY CAREFUL WITH THIS, IF 3 BITS ARE NOT SET the device
-   will not function */
+/*
+ * BE VERY CAREFUL WITH THIS, IF 3 BITS ARE NOT SET the device
+ * will not function
+ */
 #define SCA3000_REG_CTRL_SEL_OUT_CTRL		0x0B
 #define SCA3000_OUT_CTRL_PROT_MASK		0xE0
 #define SCA3000_OUT_CTRL_BUF_X_EN		0x10
@@ -109,8 +116,9 @@
 #define SCA3000_OUT_CTRL_BUF_DIV_4		0x02
 #define SCA3000_OUT_CTRL_BUF_DIV_2		0x01
 
-/* Control which motion detector interrupts are on.
- * For now only OR combinations are supported.x
+/*
+ * Control which motion detector interrupts are on.
+ * For now only OR combinations are supported.
  */
 #define SCA3000_MD_CTRL_PROT_MASK		0xC0
 #define SCA3000_MD_CTRL_OR_Y			0x01
@@ -121,7 +129,8 @@
 #define SCA3000_MD_CTRL_AND_X			0x10
 #define SAC3000_MD_CTRL_AND_Z			0x20
 
-/* Some control registers of complex access methods requiring this register to
+/*
+ * Some control registers of complex access methods requiring this register to
  * be used to remove a lock.
  */
 #define SCA3000_REG_ADDR_UNLOCK			0x1e
@@ -136,10 +145,11 @@
 #define SCA3000_INT_MASK_ACTIVE_HIGH		0x01
 #define SCA3000_INT_MASK_ACTIVE_LOW		0x00
 
-/* Values of mulipexed registers (write to ctrl_data after select) */
+/* Values of multiplexed registers (write to ctrl_data after select) */
 #define SCA3000_REG_ADDR_CTRL_DATA		0x22
 
-/* Measurment modes available on some sca3000 series chips. Code assumes others
+/*
+ * Measurement modes available on some sca3000 series chips. Code assumes others
  * may become available in the future.
  *
  * Bypass - Bypass the low-pass filter in the signal channel so as to increase
@@ -158,35 +168,33 @@
 
 /**
  * struct sca3000_state - device instance state information
- * @us: 	 		the associated spi device
- * @info: 	  		chip variant information
- * @indio_dev: 	 		device information used by the IIO core
- * @interrupt_handler_ws: 	event interrupt handler for all events
- * @last_timestamp: 		the timestamp of the last event
- * @mo_det_use_count: 		reference counter for the motion detection unit
- * @lock: 		 	lock used to protect elements of sca3000_state
- * 	 			and the underlying device state.
- * @bpse: 		 	number of bits per scan element
- * @tx: 		 	dma-able transmit buffer
- * @rx: 		 	dma-able receive buffer
+ * @us:			the associated spi device
+ * @info:			chip variant information
+ * @interrupt_handler_ws:	event interrupt handler for all events
+ * @last_timestamp:		the timestamp of the last event
+ * @mo_det_use_count:		reference counter for the motion detection unit
+ * @lock:			lock used to protect elements of sca3000_state
+ *				and the underlying device state.
+ * @bpse:			number of bits per scan element
+ * @tx:			dma-able transmit buffer
+ * @rx:			dma-able receive buffer
  **/
 struct sca3000_state {
 	struct spi_device		*us;
 	const struct sca3000_chip_info	*info;
-	struct iio_dev			*indio_dev;
 	struct work_struct		interrupt_handler_ws;
 	s64				last_timestamp;
 	int				mo_det_use_count;
 	struct mutex			lock;
 	int				bpse;
-	u8				*tx;
-	/* not used during a ring buffer read */
-	u8				*rx;
+	/* Can these share a cacheline ? */
+	u8				rx[2] ____cacheline_aligned;
+	u8				tx[6] ____cacheline_aligned;
 };
 
 /**
- * struct sca3000_chip_info - model dependant parameters
- * @name: 			model identification
+ * struct sca3000_chip_info - model dependent parameters
+ * @scale:			scale * 10^-6
  * @temp_output:		some devices have temperature sensors.
  * @measurement_mode_freq:	normal mode sampling frequency
  * @option_mode_1:		first optional mode. Not all models have one
@@ -198,29 +206,20 @@ struct sca3000_state {
  * sca3000 variant.
  **/
 struct sca3000_chip_info {
-	const char		*name;
+	unsigned int		scale;
 	bool			temp_output;
 	int			measurement_mode_freq;
 	int			option_mode_1;
 	int			option_mode_1_freq;
 	int			option_mode_2;
 	int			option_mode_2_freq;
+	int			mot_det_mult_xz[6];
+	int			mot_det_mult_y[7];
 };
 
-/**
- * sca3000_read_data() read a series of values from the device
- * @dev:		device
- * @reg_address_high:	start address (decremented read)
- * @rx:			pointer where recieved data is placed. Callee
- *			responsible for freeing this.
- * @len:		number of bytes to read
- *
- * The main lock must be held.
- **/
-int sca3000_read_data(struct sca3000_state *st,
-		      u8 reg_address_high,
-		      u8 **rx_p,
-		      int len);
+int sca3000_read_data_short(struct sca3000_state *st,
+			    u8 reg_address_high,
+			    int len);
 
 /**
  * sca3000_write_reg() write a single register
@@ -231,30 +230,7 @@ int sca3000_read_data(struct sca3000_state *st,
  **/
 int sca3000_write_reg(struct sca3000_state *st, u8 address, u8 val);
 
-/* Conversion function for use with the ring buffer when in 11bit mode */
-static inline int sca3000_11bit_convert(uint8_t msb, uint8_t lsb)
-{
-	int16_t val;
-
-	val = ((lsb >> 3) & 0x1C) | (msb << 5);
-	val |= (val & (1 << 12)) ? 0xE000 : 0;
-
-	return val;
-};
-
-static inline int sca3000_13bit_convert(uint8_t msb, uint8_t lsb)
-{
-	s16 val;
-
-	val = ((lsb >> 3) & 0x1F) | (msb << 5);
-	/* sign fill */
-	val |= (val & (1 << 12)) ? 0xE000 : 0;
-
-	return val;
-};
-
-
-#ifdef CONFIG_IIO_RING_BUFFER
+#ifdef CONFIG_IIO_BUFFER
 /**
  * sca3000_register_ring_funcs() setup the ring state change functions
  **/
@@ -281,18 +257,22 @@ void sca3000_unconfigure_ring(struct iio_dev *indio_dev);
  * sca3000_ring_int_process() handles ring related event pushing and escalation
  * @val:	the event code
  **/
-void sca3000_ring_int_process(u8 val, struct iio_ring_buffer *ring);
+void sca3000_ring_int_process(u8 val, struct iio_buffer *ring);
 
 #else
-static inline void sca3000_register_ring_funcs(struct iio_dev *indio_dev) {};
+static inline void sca3000_register_ring_funcs(struct iio_dev *indio_dev)
+{
+}
 
 static inline
 int sca3000_register_ring_access_and_init(struct iio_dev *indio_dev)
 {
 	return 0;
-};
+}
 
-static inline void sca3000_ring_int_process(u8 val, void *ring) {};
+static inline void sca3000_ring_int_process(u8 val, void *ring)
+{
+}
 
 #endif
-
+#endif /* _SCA3000 */

@@ -3,6 +3,13 @@
  *
  * Copyright (c) 2006 Herbert Xu <herbert@gondor.apana.org.au>
  *
+ * Added AEAD support to cryptd.
+ *    Authors: Tadeusz Struk (tadeusz.struk@intel.com)
+ *             Adrian Hoban <adrian.hoban@intel.com>
+ *             Gabriele Paoloni <gabriele.paoloni@intel.com>
+ *             Aidan O'Mahony (aidan.o.mahony@intel.com)
+ *    Copyright (c) 2010, Intel Corporation.
+ *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
  * Software Foundation; either version 2 of the License, or (at your option)
@@ -12,6 +19,7 @@
 
 #include <crypto/algapi.h>
 #include <crypto/internal/hash.h>
+#include <crypto/internal/aead.h>
 #include <crypto/cryptd.h>
 #include <crypto/crypto_wq.h>
 #include <linux/err.h>
@@ -31,7 +39,7 @@ struct cryptd_cpu_queue {
 };
 
 struct cryptd_queue {
-	struct cryptd_cpu_queue *cpu_queue;
+	struct cryptd_cpu_queue __percpu *cpu_queue;
 };
 
 struct cryptd_instance_ctx {
@@ -41,6 +49,11 @@ struct cryptd_instance_ctx {
 
 struct hashd_instance_ctx {
 	struct crypto_shash_spawn spawn;
+	struct cryptd_queue *queue;
+};
+
+struct aead_instance_ctx {
+	struct crypto_aead_spawn aead_spawn;
 	struct cryptd_queue *queue;
 };
 
@@ -59,6 +72,14 @@ struct cryptd_hash_ctx {
 struct cryptd_hash_request_ctx {
 	crypto_completion_t complete;
 	struct shash_desc desc;
+};
+
+struct cryptd_aead_ctx {
+	struct crypto_aead *child;
+};
+
+struct cryptd_aead_request_ctx {
+	crypto_completion_t complete;
 };
 
 static void cryptd_queue_worker(struct work_struct *work);
@@ -99,7 +120,7 @@ static int cryptd_enqueue_request(struct cryptd_queue *queue,
 	struct cryptd_cpu_queue *cpu_queue;
 
 	cpu = get_cpu();
-	cpu_queue = per_cpu_ptr(queue->cpu_queue, cpu);
+	cpu_queue = this_cpu_ptr(queue->cpu_queue);
 	err = crypto_enqueue_request(&cpu_queue->queue, request);
 	queue_work_on(cpu, kcrypto_wq, &cpu_queue->work);
 	put_cpu();
@@ -116,13 +137,18 @@ static void cryptd_queue_worker(struct work_struct *work)
 	struct crypto_async_request *req, *backlog;
 
 	cpu_queue = container_of(work, struct cryptd_cpu_queue, work);
-	/* Only handle one request at a time to avoid hogging crypto
-	 * workqueue. preempt_disable/enable is used to prevent
-	 * being preempted by cryptd_enqueue_request() */
+	/*
+	 * Only handle one request at a time to avoid hogging crypto workqueue.
+	 * preempt_disable/enable is used to prevent being preempted by
+	 * cryptd_enqueue_request(). local_bh_disable/enable is used to prevent
+	 * cryptd_enqueue_request() being accessed from software interrupts.
+	 */
+	local_bh_disable();
 	preempt_disable();
 	backlog = crypto_get_backlog(&cpu_queue->queue);
 	req = crypto_dequeue_request(&cpu_queue->queue);
 	preempt_enable();
+	local_bh_enable();
 
 	if (!req)
 		return;
@@ -140,6 +166,19 @@ static inline struct cryptd_queue *cryptd_get_queue(struct crypto_tfm *tfm)
 	struct crypto_instance *inst = crypto_tfm_alg_instance(tfm);
 	struct cryptd_instance_ctx *ictx = crypto_instance_ctx(inst);
 	return ictx->queue;
+}
+
+static inline void cryptd_check_internal(struct rtattr **tb, u32 *type,
+					 u32 *mask)
+{
+	struct crypto_attr_type *algt;
+
+	algt = crypto_get_attr_type(tb);
+	if (IS_ERR(algt))
+		return;
+
+	*type |= algt->type & CRYPTO_ALG_INTERNAL;
+	*mask |= algt->mask & CRYPTO_ALG_INTERNAL;
 }
 
 static int cryptd_blkcipher_setkey(struct crypto_ablkcipher *parent,
@@ -207,7 +246,7 @@ static void cryptd_blkcipher_decrypt(struct crypto_async_request *req, int err)
 }
 
 static int cryptd_blkcipher_enqueue(struct ablkcipher_request *req,
-				    crypto_completion_t complete)
+				    crypto_completion_t compl)
 {
 	struct cryptd_blkcipher_request_ctx *rctx = ablkcipher_request_ctx(req);
 	struct crypto_ablkcipher *tfm = crypto_ablkcipher_reqtfm(req);
@@ -215,7 +254,7 @@ static int cryptd_blkcipher_enqueue(struct ablkcipher_request *req,
 
 	queue = cryptd_get_queue(crypto_ablkcipher_tfm(tfm));
 	rctx->complete = req->base.complete;
-	req->base.complete = complete;
+	req->base.complete = compl;
 
 	return cryptd_enqueue_request(queue, &req->base);
 }
@@ -255,6 +294,23 @@ static void cryptd_blkcipher_exit_tfm(struct crypto_tfm *tfm)
 	crypto_free_blkcipher(ctx->child);
 }
 
+static int cryptd_init_instance(struct crypto_instance *inst,
+				struct crypto_alg *alg)
+{
+	if (snprintf(inst->alg.cra_driver_name, CRYPTO_MAX_ALG_NAME,
+		     "cryptd(%s)",
+		     alg->cra_driver_name) >= CRYPTO_MAX_ALG_NAME)
+		return -ENAMETOOLONG;
+
+	memcpy(inst->alg.cra_name, alg->cra_name, CRYPTO_MAX_ALG_NAME);
+
+	inst->alg.cra_priority = alg->cra_priority + 50;
+	inst->alg.cra_blocksize = alg->cra_blocksize;
+	inst->alg.cra_alignmask = alg->cra_alignmask;
+
+	return 0;
+}
+
 static void *cryptd_alloc_instance(struct crypto_alg *alg, unsigned int head,
 				   unsigned int tail)
 {
@@ -268,16 +324,9 @@ static void *cryptd_alloc_instance(struct crypto_alg *alg, unsigned int head,
 
 	inst = (void *)(p + head);
 
-	err = -ENAMETOOLONG;
-	if (snprintf(inst->alg.cra_driver_name, CRYPTO_MAX_ALG_NAME,
-		     "cryptd(%s)", alg->cra_driver_name) >= CRYPTO_MAX_ALG_NAME)
+	err = cryptd_init_instance(inst, alg);
+	if (err)
 		goto out_free_inst;
-
-	memcpy(inst->alg.cra_name, alg->cra_name, CRYPTO_MAX_ALG_NAME);
-
-	inst->alg.cra_priority = alg->cra_priority + 50;
-	inst->alg.cra_blocksize = alg->cra_blocksize;
-	inst->alg.cra_alignmask = alg->cra_alignmask;
 
 out:
 	return p;
@@ -295,10 +344,13 @@ static int cryptd_create_blkcipher(struct crypto_template *tmpl,
 	struct cryptd_instance_ctx *ctx;
 	struct crypto_instance *inst;
 	struct crypto_alg *alg;
+	u32 type = CRYPTO_ALG_TYPE_BLKCIPHER;
+	u32 mask = CRYPTO_ALG_TYPE_MASK;
 	int err;
 
-	alg = crypto_get_attr_alg(tb, CRYPTO_ALG_TYPE_BLKCIPHER,
-				  CRYPTO_ALG_TYPE_MASK);
+	cryptd_check_internal(tb, &type, &mask);
+
+	alg = crypto_get_attr_alg(tb, type, mask);
 	if (IS_ERR(alg))
 		return PTR_ERR(alg);
 
@@ -315,7 +367,10 @@ static int cryptd_create_blkcipher(struct crypto_template *tmpl,
 	if (err)
 		goto out_free_inst;
 
-	inst->alg.cra_flags = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC;
+	type = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC;
+	if (alg->cra_flags & CRYPTO_ALG_INTERNAL)
+		type |= CRYPTO_ALG_INTERNAL;
+	inst->alg.cra_flags = type;
 	inst->alg.cra_type = &crypto_ablkcipher_type;
 
 	inst->alg.cra_ablkcipher.ivsize = alg->cra_blkcipher.ivsize;
@@ -388,7 +443,7 @@ static int cryptd_hash_setkey(struct crypto_ahash *parent,
 }
 
 static int cryptd_hash_enqueue(struct ahash_request *req,
-				crypto_completion_t complete)
+				crypto_completion_t compl)
 {
 	struct cryptd_hash_request_ctx *rctx = ahash_request_ctx(req);
 	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
@@ -396,7 +451,7 @@ static int cryptd_hash_enqueue(struct ahash_request *req,
 		cryptd_get_queue(crypto_ahash_tfm(tfm));
 
 	rctx->complete = req->base.complete;
-	req->base.complete = complete;
+	req->base.complete = compl;
 
 	return cryptd_enqueue_request(queue, &req->base);
 }
@@ -539,9 +594,14 @@ static int cryptd_hash_export(struct ahash_request *req, void *out)
 
 static int cryptd_hash_import(struct ahash_request *req, const void *in)
 {
-	struct cryptd_hash_request_ctx *rctx = ahash_request_ctx(req);
+	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
+	struct cryptd_hash_ctx *ctx = crypto_ahash_ctx(tfm);
+	struct shash_desc *desc = cryptd_shash_desc(req);
 
-	return crypto_shash_import(&rctx->desc, in);
+	desc->tfm = ctx->child;
+	desc->flags = req->base.flags;
+
+	return crypto_shash_import(desc, in);
 }
 
 static int cryptd_create_hash(struct crypto_template *tmpl, struct rtattr **tb,
@@ -551,9 +611,13 @@ static int cryptd_create_hash(struct crypto_template *tmpl, struct rtattr **tb,
 	struct ahash_instance *inst;
 	struct shash_alg *salg;
 	struct crypto_alg *alg;
+	u32 type = 0;
+	u32 mask = 0;
 	int err;
 
-	salg = shash_attr_alg(tb[1], 0, 0);
+	cryptd_check_internal(tb, &type, &mask);
+
+	salg = shash_attr_alg(tb[1], type, mask);
 	if (IS_ERR(salg))
 		return PTR_ERR(salg);
 
@@ -572,7 +636,10 @@ static int cryptd_create_hash(struct crypto_template *tmpl, struct rtattr **tb,
 	if (err)
 		goto out_free_inst;
 
-	inst->alg.halg.base.cra_flags = CRYPTO_ALG_ASYNC;
+	type = CRYPTO_ALG_ASYNC;
+	if (alg->cra_flags & CRYPTO_ALG_INTERNAL)
+		type |= CRYPTO_ALG_INTERNAL;
+	inst->alg.halg.base.cra_flags = type;
 
 	inst->alg.halg.digestsize = salg->digestsize;
 	inst->alg.halg.base.cra_ctxsize = sizeof(struct cryptd_hash_ctx);
@@ -601,6 +668,171 @@ out_put_alg:
 	return err;
 }
 
+static int cryptd_aead_setkey(struct crypto_aead *parent,
+			      const u8 *key, unsigned int keylen)
+{
+	struct cryptd_aead_ctx *ctx = crypto_aead_ctx(parent);
+	struct crypto_aead *child = ctx->child;
+
+	return crypto_aead_setkey(child, key, keylen);
+}
+
+static int cryptd_aead_setauthsize(struct crypto_aead *parent,
+				   unsigned int authsize)
+{
+	struct cryptd_aead_ctx *ctx = crypto_aead_ctx(parent);
+	struct crypto_aead *child = ctx->child;
+
+	return crypto_aead_setauthsize(child, authsize);
+}
+
+static void cryptd_aead_crypt(struct aead_request *req,
+			struct crypto_aead *child,
+			int err,
+			int (*crypt)(struct aead_request *req))
+{
+	struct cryptd_aead_request_ctx *rctx;
+	crypto_completion_t compl;
+
+	rctx = aead_request_ctx(req);
+	compl = rctx->complete;
+
+	if (unlikely(err == -EINPROGRESS))
+		goto out;
+	aead_request_set_tfm(req, child);
+	err = crypt( req );
+out:
+	local_bh_disable();
+	compl(&req->base, err);
+	local_bh_enable();
+}
+
+static void cryptd_aead_encrypt(struct crypto_async_request *areq, int err)
+{
+	struct cryptd_aead_ctx *ctx = crypto_tfm_ctx(areq->tfm);
+	struct crypto_aead *child = ctx->child;
+	struct aead_request *req;
+
+	req = container_of(areq, struct aead_request, base);
+	cryptd_aead_crypt(req, child, err, crypto_aead_alg(child)->encrypt);
+}
+
+static void cryptd_aead_decrypt(struct crypto_async_request *areq, int err)
+{
+	struct cryptd_aead_ctx *ctx = crypto_tfm_ctx(areq->tfm);
+	struct crypto_aead *child = ctx->child;
+	struct aead_request *req;
+
+	req = container_of(areq, struct aead_request, base);
+	cryptd_aead_crypt(req, child, err, crypto_aead_alg(child)->decrypt);
+}
+
+static int cryptd_aead_enqueue(struct aead_request *req,
+				    crypto_completion_t compl)
+{
+	struct cryptd_aead_request_ctx *rctx = aead_request_ctx(req);
+	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
+	struct cryptd_queue *queue = cryptd_get_queue(crypto_aead_tfm(tfm));
+
+	rctx->complete = req->base.complete;
+	req->base.complete = compl;
+	return cryptd_enqueue_request(queue, &req->base);
+}
+
+static int cryptd_aead_encrypt_enqueue(struct aead_request *req)
+{
+	return cryptd_aead_enqueue(req, cryptd_aead_encrypt );
+}
+
+static int cryptd_aead_decrypt_enqueue(struct aead_request *req)
+{
+	return cryptd_aead_enqueue(req, cryptd_aead_decrypt );
+}
+
+static int cryptd_aead_init_tfm(struct crypto_aead *tfm)
+{
+	struct aead_instance *inst = aead_alg_instance(tfm);
+	struct aead_instance_ctx *ictx = aead_instance_ctx(inst);
+	struct crypto_aead_spawn *spawn = &ictx->aead_spawn;
+	struct cryptd_aead_ctx *ctx = crypto_aead_ctx(tfm);
+	struct crypto_aead *cipher;
+
+	cipher = crypto_spawn_aead(spawn);
+	if (IS_ERR(cipher))
+		return PTR_ERR(cipher);
+
+	ctx->child = cipher;
+	crypto_aead_set_reqsize(
+		tfm, max((unsigned)sizeof(struct cryptd_aead_request_ctx),
+			 crypto_aead_reqsize(cipher)));
+	return 0;
+}
+
+static void cryptd_aead_exit_tfm(struct crypto_aead *tfm)
+{
+	struct cryptd_aead_ctx *ctx = crypto_aead_ctx(tfm);
+	crypto_free_aead(ctx->child);
+}
+
+static int cryptd_create_aead(struct crypto_template *tmpl,
+		              struct rtattr **tb,
+			      struct cryptd_queue *queue)
+{
+	struct aead_instance_ctx *ctx;
+	struct aead_instance *inst;
+	struct aead_alg *alg;
+	const char *name;
+	u32 type = 0;
+	u32 mask = CRYPTO_ALG_ASYNC;
+	int err;
+
+	cryptd_check_internal(tb, &type, &mask);
+
+	name = crypto_attr_alg_name(tb[1]);
+	if (IS_ERR(name))
+		return PTR_ERR(name);
+
+	inst = kzalloc(sizeof(*inst) + sizeof(*ctx), GFP_KERNEL);
+	if (!inst)
+		return -ENOMEM;
+
+	ctx = aead_instance_ctx(inst);
+	ctx->queue = queue;
+
+	crypto_set_aead_spawn(&ctx->aead_spawn, aead_crypto_instance(inst));
+	err = crypto_grab_aead(&ctx->aead_spawn, name, type, mask);
+	if (err)
+		goto out_free_inst;
+
+	alg = crypto_spawn_aead_alg(&ctx->aead_spawn);
+	err = cryptd_init_instance(aead_crypto_instance(inst), &alg->base);
+	if (err)
+		goto out_drop_aead;
+
+	inst->alg.base.cra_flags = CRYPTO_ALG_ASYNC |
+				   (alg->base.cra_flags & CRYPTO_ALG_INTERNAL);
+	inst->alg.base.cra_ctxsize = sizeof(struct cryptd_aead_ctx);
+
+	inst->alg.ivsize = crypto_aead_alg_ivsize(alg);
+	inst->alg.maxauthsize = crypto_aead_alg_maxauthsize(alg);
+
+	inst->alg.init = cryptd_aead_init_tfm;
+	inst->alg.exit = cryptd_aead_exit_tfm;
+	inst->alg.setkey = cryptd_aead_setkey;
+	inst->alg.setauthsize = cryptd_aead_setauthsize;
+	inst->alg.encrypt = cryptd_aead_encrypt_enqueue;
+	inst->alg.decrypt = cryptd_aead_decrypt_enqueue;
+
+	err = aead_register_instance(tmpl, inst);
+	if (err) {
+out_drop_aead:
+		crypto_drop_aead(&ctx->aead_spawn);
+out_free_inst:
+		kfree(inst);
+	}
+	return err;
+}
+
 static struct cryptd_queue queue;
 
 static int cryptd_create(struct crypto_template *tmpl, struct rtattr **tb)
@@ -616,6 +848,8 @@ static int cryptd_create(struct crypto_template *tmpl, struct rtattr **tb)
 		return cryptd_create_blkcipher(tmpl, tb, &queue);
 	case CRYPTO_ALG_TYPE_DIGEST:
 		return cryptd_create_hash(tmpl, tb, &queue);
+	case CRYPTO_ALG_TYPE_AEAD:
+		return cryptd_create_aead(tmpl, tb, &queue);
 	}
 
 	return -EINVAL;
@@ -625,16 +859,21 @@ static void cryptd_free(struct crypto_instance *inst)
 {
 	struct cryptd_instance_ctx *ctx = crypto_instance_ctx(inst);
 	struct hashd_instance_ctx *hctx = crypto_instance_ctx(inst);
+	struct aead_instance_ctx *aead_ctx = crypto_instance_ctx(inst);
 
 	switch (inst->alg.cra_flags & CRYPTO_ALG_TYPE_MASK) {
 	case CRYPTO_ALG_TYPE_AHASH:
 		crypto_drop_shash(&hctx->spawn);
 		kfree(ahash_instance(inst));
 		return;
+	case CRYPTO_ALG_TYPE_AEAD:
+		crypto_drop_aead(&aead_ctx->aead_spawn);
+		kfree(aead_instance(inst));
+		return;
+	default:
+		crypto_drop_spawn(&ctx->spawn);
+		kfree(inst);
 	}
-
-	crypto_drop_spawn(&ctx->spawn);
-	kfree(inst);
 }
 
 static struct crypto_template cryptd_tmpl = {
@@ -711,11 +950,52 @@ struct crypto_shash *cryptd_ahash_child(struct cryptd_ahash *tfm)
 }
 EXPORT_SYMBOL_GPL(cryptd_ahash_child);
 
+struct shash_desc *cryptd_shash_desc(struct ahash_request *req)
+{
+	struct cryptd_hash_request_ctx *rctx = ahash_request_ctx(req);
+	return &rctx->desc;
+}
+EXPORT_SYMBOL_GPL(cryptd_shash_desc);
+
 void cryptd_free_ahash(struct cryptd_ahash *tfm)
 {
 	crypto_free_ahash(&tfm->base);
 }
 EXPORT_SYMBOL_GPL(cryptd_free_ahash);
+
+struct cryptd_aead *cryptd_alloc_aead(const char *alg_name,
+						  u32 type, u32 mask)
+{
+	char cryptd_alg_name[CRYPTO_MAX_ALG_NAME];
+	struct crypto_aead *tfm;
+
+	if (snprintf(cryptd_alg_name, CRYPTO_MAX_ALG_NAME,
+		     "cryptd(%s)", alg_name) >= CRYPTO_MAX_ALG_NAME)
+		return ERR_PTR(-EINVAL);
+	tfm = crypto_alloc_aead(cryptd_alg_name, type, mask);
+	if (IS_ERR(tfm))
+		return ERR_CAST(tfm);
+	if (tfm->base.__crt_alg->cra_module != THIS_MODULE) {
+		crypto_free_aead(tfm);
+		return ERR_PTR(-EINVAL);
+	}
+	return __cryptd_aead_cast(tfm);
+}
+EXPORT_SYMBOL_GPL(cryptd_alloc_aead);
+
+struct crypto_aead *cryptd_aead_child(struct cryptd_aead *tfm)
+{
+	struct cryptd_aead_ctx *ctx;
+	ctx = crypto_aead_ctx(&tfm->base);
+	return ctx->child;
+}
+EXPORT_SYMBOL_GPL(cryptd_aead_child);
+
+void cryptd_free_aead(struct cryptd_aead *tfm)
+{
+	crypto_free_aead(&tfm->base);
+}
+EXPORT_SYMBOL_GPL(cryptd_free_aead);
 
 static int __init cryptd_init(void)
 {
@@ -738,8 +1018,9 @@ static void __exit cryptd_exit(void)
 	crypto_unregister_template(&cryptd_tmpl);
 }
 
-module_init(cryptd_init);
+subsys_initcall(cryptd_init);
 module_exit(cryptd_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Software async crypto daemon");
+MODULE_ALIAS_CRYPTO("cryptd");

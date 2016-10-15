@@ -68,7 +68,7 @@ struct entry {
 	 * Number of timeout events:
 	 */
 	unsigned long		count;
-	unsigned int		timer_flag;
+	u32			flags;
 
 	/*
 	 * We save the command-line string to preserve
@@ -81,12 +81,12 @@ struct entry {
 /*
  * Spinlock protecting the tables - not taken during lookup:
  */
-static DEFINE_SPINLOCK(table_lock);
+static DEFINE_RAW_SPINLOCK(table_lock);
 
 /*
  * Per-CPU lookup locks for fast hash lookup:
  */
-static DEFINE_PER_CPU(spinlock_t, lookup_lock);
+static DEFINE_PER_CPU(raw_spinlock_t, tstats_lookup_lock);
 
 /*
  * Mutex to serialize state changes with show-stats activities:
@@ -188,7 +188,7 @@ static struct entry *tstat_lookup(struct entry *entry, char *comm)
 	prev = NULL;
 	curr = *head;
 
-	spin_lock(&table_lock);
+	raw_spin_lock(&table_lock);
 	/*
 	 * Make sure we have not raced with another CPU:
 	 */
@@ -215,7 +215,7 @@ static struct entry *tstat_lookup(struct entry *entry, char *comm)
 			*head = curr;
 	}
  out_unlock:
-	spin_unlock(&table_lock);
+	raw_spin_unlock(&table_lock);
 
 	return curr;
 }
@@ -227,33 +227,33 @@ static struct entry *tstat_lookup(struct entry *entry, char *comm)
  * @startf:	pointer to the function which did the timer setup
  * @timerf:	pointer to the timer callback function of the timer
  * @comm:	name of the process which set up the timer
+ * @tflags:	The flags field of the timer
  *
  * When the timer is already registered, then the event counter is
  * incremented. Otherwise the timer is registered in a free slot.
  */
 void timer_stats_update_stats(void *timer, pid_t pid, void *startf,
-			      void *timerf, char *comm,
-			      unsigned int timer_flag)
+			      void *timerf, char *comm, u32 tflags)
 {
 	/*
-	 * It doesnt matter which lock we take:
+	 * It doesn't matter which lock we take:
 	 */
-	spinlock_t *lock;
+	raw_spinlock_t *lock;
 	struct entry *entry, input;
 	unsigned long flags;
 
 	if (likely(!timer_stats_active))
 		return;
 
-	lock = &per_cpu(lookup_lock, raw_smp_processor_id());
+	lock = &per_cpu(tstats_lookup_lock, raw_smp_processor_id());
 
 	input.timer = timer;
 	input.start_func = startf;
 	input.expire_func = timerf;
 	input.pid = pid;
-	input.timer_flag = timer_flag;
+	input.flags = tflags;
 
-	spin_lock_irqsave(lock, flags);
+	raw_spin_lock_irqsave(lock, flags);
 	if (!timer_stats_active)
 		goto out_unlock;
 
@@ -264,7 +264,7 @@ void timer_stats_update_stats(void *timer, pid_t pid, void *startf,
 		atomic_inc(&overflow_count);
 
  out_unlock:
-	spin_unlock_irqrestore(lock, flags);
+	raw_spin_unlock_irqrestore(lock, flags);
 }
 
 static void print_name_offset(struct seq_file *m, unsigned long addr)
@@ -298,15 +298,15 @@ static int tstats_show(struct seq_file *m, void *v)
 	period = ktime_to_timespec(time);
 	ms = period.tv_nsec / 1000000;
 
-	seq_puts(m, "Timer Stats Version: v0.2\n");
+	seq_puts(m, "Timer Stats Version: v0.3\n");
 	seq_printf(m, "Sample period: %ld.%03ld s\n", period.tv_sec, ms);
 	if (atomic_read(&overflow_count))
-		seq_printf(m, "Overflow: %d entries\n",
-			atomic_read(&overflow_count));
+		seq_printf(m, "Overflow: %d entries\n", atomic_read(&overflow_count));
+	seq_printf(m, "Collection: %s\n", timer_stats_active ? "active" : "inactive");
 
 	for (i = 0; i < nr_entries; i++) {
 		entry = entries + i;
- 		if (entry->timer_flag & TIMER_STATS_FLAG_DEFERRABLE) {
+		if (entry->flags & TIMER_DEFERRABLE) {
 			seq_printf(m, "%4luD, %5d %-16s ",
 				entry->count, entry->pid, entry->comm);
 		} else {
@@ -348,9 +348,11 @@ static void sync_access(void)
 	int cpu;
 
 	for_each_online_cpu(cpu) {
-		spin_lock_irqsave(&per_cpu(lookup_lock, cpu), flags);
+		raw_spinlock_t *lock = &per_cpu(tstats_lookup_lock, cpu);
+
+		raw_spin_lock_irqsave(lock, flags);
 		/* nothing */
-		spin_unlock_irqrestore(&per_cpu(lookup_lock, cpu), flags);
+		raw_spin_unlock_irqrestore(lock, flags);
 	}
 }
 
@@ -408,7 +410,7 @@ void __init init_timer_stats(void)
 	int cpu;
 
 	for_each_possible_cpu(cpu)
-		spin_lock_init(&per_cpu(lookup_lock, cpu));
+		raw_spin_lock_init(&per_cpu(tstats_lookup_lock, cpu));
 }
 
 static int __init init_tstats_procfs(void)

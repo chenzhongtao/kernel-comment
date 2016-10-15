@@ -103,24 +103,16 @@ static int sharpsl_nand_calculate_ecc(struct mtd_info *mtd, const u_char * dat, 
 	return readb(sharpsl->io + ECCCNTR) != 0;
 }
 
-#ifdef CONFIG_MTD_PARTITIONS
-static const char *part_probes[] = { "cmdlinepart", NULL };
-#endif
-
 /*
  * Main initialization routine
  */
-static int __devinit sharpsl_nand_probe(struct platform_device *pdev)
+static int sharpsl_nand_probe(struct platform_device *pdev)
 {
 	struct nand_chip *this;
-#ifdef CONFIG_MTD_PARTITIONS
-	struct mtd_partition *sharpsl_partition_info;
-	int nr_partitions;
-#endif
 	struct resource *r;
 	int err = 0;
 	struct sharpsl_nand *sharpsl;
-	struct sharpsl_nand_platform_data *data = pdev->dev.platform_data;
+	struct sharpsl_nand_platform_data *data = dev_get_platdata(&pdev->dev);
 
 	if (!data) {
 		dev_err(&pdev->dev, "no platform data!\n");
@@ -129,10 +121,8 @@ static int __devinit sharpsl_nand_probe(struct platform_device *pdev)
 
 	/* Allocate memory for MTD device structure and private data */
 	sharpsl = kzalloc(sizeof(struct sharpsl_nand), GFP_KERNEL);
-	if (!sharpsl) {
-		printk("Unable to allocate SharpSL NAND MTD device structure.\n");
+	if (!sharpsl)
 		return -ENOMEM;
-	}
 
 	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!r) {
@@ -144,7 +134,7 @@ static int __devinit sharpsl_nand_probe(struct platform_device *pdev)
 	/* map physical address */
 	sharpsl->io = ioremap(r->start, resource_size(r));
 	if (!sharpsl->io) {
-		printk("ioremap to access Sharp SL NAND chip failed\n");
+		dev_err(&pdev->dev, "ioremap to access Sharp SL NAND chip failed\n");
 		err = -EIO;
 		goto err_ioremap;
 	}
@@ -154,7 +144,7 @@ static int __devinit sharpsl_nand_probe(struct platform_device *pdev)
 
 	/* Link the private data with the MTD structure */
 	sharpsl->mtd.priv = this;
-	sharpsl->mtd.owner = THIS_MODULE;
+	sharpsl->mtd.dev.parent = &pdev->dev;
 
 	platform_set_drvdata(pdev, sharpsl);
 
@@ -175,6 +165,7 @@ static int __devinit sharpsl_nand_probe(struct platform_device *pdev)
 	this->ecc.mode = NAND_ECC_HW;
 	this->ecc.size = 256;
 	this->ecc.bytes = 3;
+	this->ecc.strength = 1;
 	this->badblock_pattern = data->badblock_pattern;
 	this->ecc.layout = data->ecc_layout;
 	this->ecc.hwctl = sharpsl_nand_enable_hwecc;
@@ -188,18 +179,9 @@ static int __devinit sharpsl_nand_probe(struct platform_device *pdev)
 
 	/* Register the partitions */
 	sharpsl->mtd.name = "sharpsl-nand";
-#ifdef CONFIG_MTD_PARTITIONS
-	nr_partitions = parse_mtd_partitions(&sharpsl->mtd, part_probes, &sharpsl_partition_info, 0);
-	if (nr_partitions <= 0) {
-		nr_partitions = data->nr_partitions;
-		sharpsl_partition_info = data->partitions;
-	}
 
-	if (nr_partitions > 0)
-		err = add_mtd_partitions(&sharpsl->mtd, sharpsl_partition_info, nr_partitions);
-	else
-#endif
-	err = add_mtd_device(&sharpsl->mtd);
+	err = mtd_device_parse_register(&sharpsl->mtd, NULL, NULL,
+					data->partitions, data->nr_partitions);
 	if (err)
 		goto err_add;
 
@@ -210,7 +192,6 @@ err_add:
 	nand_release(&sharpsl->mtd);
 
 err_scan:
-	platform_set_drvdata(pdev, NULL);
 	iounmap(sharpsl->io);
 err_ioremap:
 err_get_res:
@@ -221,14 +202,12 @@ err_get_res:
 /*
  * Clean up routine
  */
-static int __devexit sharpsl_nand_remove(struct platform_device *pdev)
+static int sharpsl_nand_remove(struct platform_device *pdev)
 {
 	struct sharpsl_nand *sharpsl = platform_get_drvdata(pdev);
 
 	/* Release resources, unregister device */
 	nand_release(&sharpsl->mtd);
-
-	platform_set_drvdata(pdev, NULL);
 
 	iounmap(sharpsl->io);
 
@@ -241,23 +220,12 @@ static int __devexit sharpsl_nand_remove(struct platform_device *pdev)
 static struct platform_driver sharpsl_nand_driver = {
 	.driver = {
 		.name	= "sharpsl-nand",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= sharpsl_nand_probe,
-	.remove		= __devexit_p(sharpsl_nand_remove),
+	.remove		= sharpsl_nand_remove,
 };
 
-static int __init sharpsl_nand_init(void)
-{
-	return platform_driver_register(&sharpsl_nand_driver);
-}
-module_init(sharpsl_nand_init);
-
-static void __exit sharpsl_nand_exit(void)
-{
-	platform_driver_unregister(&sharpsl_nand_driver);
-}
-module_exit(sharpsl_nand_exit);
+module_platform_driver(sharpsl_nand_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Richard Purdie <rpurdie@rpsys.net>");

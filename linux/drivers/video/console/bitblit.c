@@ -11,6 +11,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/fb.h>
 #include <linux/vt_kern.h>
@@ -21,7 +22,7 @@
 /*
  * Accelerated handlers.
  */
-static inline void update_attr(u8 *dst, u8 *src, int attribute,
+static void update_attr(u8 *dst, u8 *src, int attribute,
 			       struct vc_data *vc)
 {
 	int i, offset = (vc->vc_font.height < 10) ? 1 : 2;
@@ -161,7 +162,7 @@ static void bit_putcs(struct vc_data *vc, struct fb_info *info,
 	image.depth = 1;
 
 	if (attribute) {
-		buf = kmalloc(cellsize, GFP_KERNEL);
+		buf = kmalloc(cellsize, GFP_ATOMIC);
 		if (!buf)
 			return;
 	}
@@ -204,7 +205,6 @@ static void bit_putcs(struct vc_data *vc, struct fb_info *info,
 static void bit_clear_margins(struct vc_data *vc, struct fb_info *info,
 			      int bottom_only)
 {
-	int bgshift = (vc->vc_hi_font_mask) ? 13 : 12;
 	unsigned int cw = vc->vc_font.width;
 	unsigned int ch = vc->vc_font.height;
 	unsigned int rw = info->var.xres - (vc->vc_cols*cw);
@@ -213,7 +213,7 @@ static void bit_clear_margins(struct vc_data *vc, struct fb_info *info,
 	unsigned int bs = info->var.yres - bh;
 	struct fb_fillrect region;
 
-	region.color = attr_bgcol_ec(bgshift, vc, info);
+	region.color = 0;
 	region.rop = ROP_COPY;
 
 	if (rw && !bottom_only) {

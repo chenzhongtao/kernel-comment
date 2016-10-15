@@ -4,7 +4,7 @@
  * but are connected to the PCI bus by a PLX9052.
  *
  * Current maintainers are:
- * 	Pavel Roskin <proski AT gnu.org>
+ *	Pavel Roskin <proski AT gnu.org>
  * and	David Gibson <hermes AT gibson.dropbear.id.au>
  *
  * (C) Copyright David Gibson, IBM Corp. 2001-2003.
@@ -102,14 +102,14 @@
 #define PLX_RESET_TIME	(500)	/* milliseconds */
 
 #define PLX_INTCSR		0x4c /* Interrupt Control & Status Register */
-#define PLX_INTCSR_INTEN	(1<<6) /* Interrupt Enable bit */
+#define PLX_INTCSR_INTEN	(1 << 6) /* Interrupt Enable bit */
 
 /*
  * Do a soft reset of the card using the Configuration Option Register
  */
 static int orinoco_plx_cor_reset(struct orinoco_private *priv)
 {
-	hermes_t *hw = &priv->hw;
+	struct hermes *hw = &priv->hw;
 	struct orinoco_pci_card *card = priv->card;
 	unsigned long timeout;
 	u16 reg;
@@ -121,7 +121,7 @@ static int orinoco_plx_cor_reset(struct orinoco_private *priv)
 	mdelay(1);
 
 	/* Just in case, wait more until the card is no longer busy */
-	timeout = jiffies + (PLX_RESET_TIME * HZ / 1000);
+	timeout = jiffies + msecs_to_jiffies(PLX_RESET_TIME);
 	reg = hermes_read_regn(hw, CMD);
 	while (time_before(jiffies, timeout) && (reg & HERMES_CMD_BUSY)) {
 		mdelay(1);
@@ -259,21 +259,22 @@ static int orinoco_plx_init_one(struct pci_dev *pdev,
 		goto fail;
 	}
 
-	err = orinoco_if_add(priv, 0, 0);
+	err = orinoco_if_add(priv, 0, 0, NULL);
 	if (err) {
 		printk(KERN_ERR PFX "orinoco_if_add() failed\n");
-		goto fail;
+		goto fail_wiphy;
 	}
 
 	pci_set_drvdata(pdev, priv);
 
 	return 0;
 
+ fail_wiphy:
+	wiphy_unregister(priv_to_wiphy(priv));
  fail:
 	free_irq(pdev->irq, priv);
 
  fail_irq:
-	pci_set_drvdata(pdev, NULL);
 	free_orinocodev(priv);
 
  fail_alloc:
@@ -294,14 +295,14 @@ static int orinoco_plx_init_one(struct pci_dev *pdev,
 	return err;
 }
 
-static void __devexit orinoco_plx_remove_one(struct pci_dev *pdev)
+static void orinoco_plx_remove_one(struct pci_dev *pdev)
 {
 	struct orinoco_private *priv = pci_get_drvdata(pdev);
 	struct orinoco_pci_card *card = priv->card;
 
 	orinoco_if_del(priv);
+	wiphy_unregister(priv_to_wiphy(priv));
 	free_irq(pdev->irq, priv);
-	pci_set_drvdata(pdev, NULL);
 	free_orinocodev(priv);
 	pci_iounmap(pdev, priv->hw.iobase);
 	pci_iounmap(pdev, card->attr_io);
@@ -310,7 +311,7 @@ static void __devexit orinoco_plx_remove_one(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 }
 
-static struct pci_device_id orinoco_plx_id_table[] = {
+static const struct pci_device_id orinoco_plx_id_table[] = {
 	{0x111a, 0x1023, PCI_ANY_ID, PCI_ANY_ID,},	/* Siemens SpeedStream SS1023 */
 	{0x1385, 0x4100, PCI_ANY_ID, PCI_ANY_ID,},	/* Netgear MA301 */
 	{0x15e8, 0x0130, PCI_ANY_ID, PCI_ANY_ID,},	/* Correga  - does this work? */
@@ -334,7 +335,7 @@ static struct pci_driver orinoco_plx_driver = {
 	.name		= DRIVER_NAME,
 	.id_table	= orinoco_plx_id_table,
 	.probe		= orinoco_plx_init_one,
-	.remove		= __devexit_p(orinoco_plx_remove_one),
+	.remove		= orinoco_plx_remove_one,
 	.suspend	= orinoco_pci_suspend,
 	.resume		= orinoco_pci_resume,
 };

@@ -38,11 +38,11 @@ static int devm_irq_match(struct device *dev, void *res, void *data)
  *
  *	Except for the extra @dev argument, this function takes the
  *	same arguments and performs the same function as
- *	request_irq().  IRQs requested with this function will be
+ *	request_threaded_irq().  IRQs requested with this function will be
  *	automatically freed on driver detach.
  *
  *	If an IRQ allocated with this function needs to be freed
- *	separately, dev_free_irq() must be used.
+ *	separately, devm_free_irq() must be used.
  */
 int devm_request_threaded_irq(struct device *dev, unsigned int irq,
 			      irq_handler_t handler, irq_handler_t thread_fn,
@@ -73,6 +73,51 @@ int devm_request_threaded_irq(struct device *dev, unsigned int irq,
 EXPORT_SYMBOL(devm_request_threaded_irq);
 
 /**
+ *	devm_request_any_context_irq - allocate an interrupt line for a managed device
+ *	@dev: device to request interrupt for
+ *	@irq: Interrupt line to allocate
+ *	@handler: Function to be called when the IRQ occurs
+ *	@thread_fn: function to be called in a threaded interrupt context. NULL
+ *		    for devices which handle everything in @handler
+ *	@irqflags: Interrupt type flags
+ *	@devname: An ascii name for the claiming device
+ *	@dev_id: A cookie passed back to the handler function
+ *
+ *	Except for the extra @dev argument, this function takes the
+ *	same arguments and performs the same function as
+ *	request_any_context_irq().  IRQs requested with this function will be
+ *	automatically freed on driver detach.
+ *
+ *	If an IRQ allocated with this function needs to be freed
+ *	separately, devm_free_irq() must be used.
+ */
+int devm_request_any_context_irq(struct device *dev, unsigned int irq,
+			      irq_handler_t handler, unsigned long irqflags,
+			      const char *devname, void *dev_id)
+{
+	struct irq_devres *dr;
+	int rc;
+
+	dr = devres_alloc(devm_irq_release, sizeof(struct irq_devres),
+			  GFP_KERNEL);
+	if (!dr)
+		return -ENOMEM;
+
+	rc = request_any_context_irq(irq, handler, irqflags, devname, dev_id);
+	if (rc < 0) {
+		devres_free(dr);
+		return rc;
+	}
+
+	dr->irq = irq;
+	dr->dev_id = dev_id;
+	devres_add(dev, dr);
+
+	return rc;
+}
+EXPORT_SYMBOL(devm_request_any_context_irq);
+
+/**
  *	devm_free_irq - free an interrupt
  *	@dev: device to free interrupt for
  *	@irq: Interrupt line to free
@@ -81,14 +126,14 @@ EXPORT_SYMBOL(devm_request_threaded_irq);
  *	Except for the extra @dev argument, this function takes the
  *	same arguments and performs the same function as free_irq().
  *	This function instead of free_irq() should be used to manually
- *	free IRQs allocated with dev_request_irq().
+ *	free IRQs allocated with devm_request_irq().
  */
 void devm_free_irq(struct device *dev, unsigned int irq, void *dev_id)
 {
 	struct irq_devres match_data = { irq, dev_id };
 
-	free_irq(irq, dev_id);
 	WARN_ON(devres_destroy(dev, devm_irq_release, devm_irq_match,
 			       &match_data));
+	free_irq(irq, dev_id);
 }
 EXPORT_SYMBOL(devm_free_irq);

@@ -1,9 +1,7 @@
 /*
- *  drivers/s390/cio/blacklist.c
  *   S/390 common I/O routines -- blacklisting of specific devices
  *
- *    Copyright (C) 1999-2002 IBM Deutschland Entwicklung GmbH,
- *			      IBM Corporation
+ *    Copyright IBM Corp. 1999, 2013
  *    Author(s): Ingo Adlung (adlung@de.ibm.com)
  *		 Cornelia Huck (cornelia.huck@de.ibm.com)
  *		 Arnd Bergmann (arndb@de.ibm.com)
@@ -14,14 +12,14 @@
 
 #include <linux/init.h>
 #include <linux/vmalloc.h>
-#include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/ctype.h>
 #include <linux/device.h>
 
-#include <asm/cio.h>
 #include <asm/uaccess.h>
+#include <asm/cio.h>
+#include <asm/ipl.h>
 
 #include "blacklist.h"
 #include "cio.h"
@@ -80,17 +78,15 @@ static int pure_hex(char **cp, unsigned int *val, int min_digit,
 		    int max_digit, int max_val)
 {
 	int diff;
-	unsigned int value;
 
 	diff = 0;
 	*val = 0;
 
-	while (isxdigit(**cp) && (diff <= max_digit)) {
+	while (diff <= max_digit) {
+		int value = hex_to_bin(**cp);
 
-		if (isdigit(**cp))
-			value = **cp - '0';
-		else
-			value = tolower(**cp) - 'a' + 10;
+		if (value < 0)
+			break;
 		*val = *val * 16 + value;
 		(*cp)++;
 		diff++;
@@ -177,6 +173,29 @@ static int blacklist_parse_parameters(char *str, range_action action,
 			to_cssid = __MAX_CSSID;
 			to_ssid = __MAX_SSID;
 			to = __MAX_SUBCHANNEL;
+		} else if (strcmp(parm, "ipldev") == 0) {
+			if (ipl_info.type == IPL_TYPE_CCW) {
+				from_cssid = 0;
+				from_ssid = ipl_info.data.ccw.dev_id.ssid;
+				from = ipl_info.data.ccw.dev_id.devno;
+			} else if (ipl_info.type == IPL_TYPE_FCP ||
+				   ipl_info.type == IPL_TYPE_FCP_DUMP) {
+				from_cssid = 0;
+				from_ssid = ipl_info.data.fcp.dev_id.ssid;
+				from = ipl_info.data.fcp.dev_id.devno;
+			} else {
+				continue;
+			}
+			to_cssid = from_cssid;
+			to_ssid = from_ssid;
+			to = from;
+		} else if (strcmp(parm, "condev") == 0) {
+			if (console_devno == -1)
+				continue;
+
+			from_cssid = to_cssid = 0;
+			from_ssid = to_ssid = 0;
+			from = to = console_devno;
 		} else {
 			rc = parse_busid(strsep(&parm, "-"), &from_cssid,
 					 &from_ssid, &from, msgtrigger);
@@ -241,16 +260,16 @@ static int blacklist_parse_proc_parameters(char *buf)
 
 	parm = strsep(&buf, " ");
 
-	if (strcmp("free", parm) == 0)
+	if (strcmp("free", parm) == 0) {
 		rc = blacklist_parse_parameters(buf, free, 0);
-	else if (strcmp("add", parm) == 0)
+		css_schedule_eval_all_unreg(0);
+	} else if (strcmp("add", parm) == 0)
 		rc = blacklist_parse_parameters(buf, add, 0);
 	else if (strcmp("purge", parm) == 0)
 		return ccw_purge_blacklisted();
 	else
 		return -EINVAL;
 
-	css_schedule_reprobe();
 
 	return rc;
 }
@@ -311,18 +330,20 @@ cio_ignore_proc_seq_show(struct seq_file *s, void *it)
 	if (!iter->in_range) {
 		/* First device in range. */
 		if ((iter->devno == __MAX_SUBCHANNEL) ||
-		    !is_blacklisted(iter->ssid, iter->devno + 1))
+		    !is_blacklisted(iter->ssid, iter->devno + 1)) {
 			/* Singular device. */
-			return seq_printf(s, "0.%x.%04x\n",
-					  iter->ssid, iter->devno);
+			seq_printf(s, "0.%x.%04x\n", iter->ssid, iter->devno);
+			return 0;
+		}
 		iter->in_range = 1;
-		return seq_printf(s, "0.%x.%04x-", iter->ssid, iter->devno);
+		seq_printf(s, "0.%x.%04x-", iter->ssid, iter->devno);
+		return 0;
 	}
 	if ((iter->devno == __MAX_SUBCHANNEL) ||
 	    !is_blacklisted(iter->ssid, iter->devno + 1)) {
 		/* Last device in range. */
 		iter->in_range = 0;
-		return seq_printf(s, "0.%x.%04x\n", iter->ssid, iter->devno);
+		seq_printf(s, "0.%x.%04x\n", iter->ssid, iter->devno);
 	}
 	return 0;
 }
@@ -338,10 +359,9 @@ cio_ignore_write(struct file *file, const char __user *user_buf,
 		return -EINVAL;
 	if (user_len > 65536)
 		user_len = 65536;
-	buf = vmalloc (user_len + 1); /* maybe better use the stack? */
+	buf = vzalloc(user_len + 1); /* maybe better use the stack? */
 	if (buf == NULL)
 		return -ENOMEM;
-	memset(buf, 0, user_len + 1);
 
 	if (strncpy_from_user (buf, user_buf, user_len) < 0) {
 		rc = -EFAULT;

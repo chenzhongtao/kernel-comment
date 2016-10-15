@@ -20,8 +20,10 @@
 #include <linux/log2.h>
 #include <linux/bitops.h>
 #include <linux/jiffies.h>
+#include <linux/of.h>
+#include <linux/acpi.h>
 #include <linux/i2c.h>
-#include <linux/i2c/at24.h>
+#include <linux/platform_data/at24.h>
 
 /*
  * I2C EEPROMs from most vendors are inexpensive and mostly interchangeable.
@@ -54,7 +56,8 @@
 struct at24_data {
 	struct at24_platform_data chip;
 	struct memory_accessor macc;
-	bool use_smbus;
+	int use_smbus;
+	int use_smbus_write;
 
 	/*
 	 * Lock protects against activities from other Linux tasks,
@@ -128,6 +131,12 @@ static const struct i2c_device_id at24_ids[] = {
 	{ /* END OF LIST */ }
 };
 MODULE_DEVICE_TABLE(i2c, at24_ids);
+
+static const struct acpi_device_id at24_acpi_ids[] = {
+	{ "INT3499", AT24_DEVICE_MAGIC(8192 / 8, 0) },
+	{ }
+};
+MODULE_DEVICE_TABLE(acpi, at24_acpi_ids);
 
 /*-------------------------------------------------------------------------*/
 
@@ -220,8 +229,8 @@ static ssize_t at24_eeprom_read(struct at24_data *at24, char *buf,
 	do {
 		read_time = jiffies;
 		if (at24->use_smbus) {
-			status = i2c_smbus_read_i2c_block_data(client, offset,
-					count, buf);
+			status = i2c_smbus_read_i2c_block_data_or_emulated(client, offset,
+									   count, buf);
 		} else {
 			status = i2c_transfer(client->adapter, msg, 2);
 			if (status == 2)
@@ -274,7 +283,8 @@ static ssize_t at24_read(struct at24_data *at24,
 	return retval;
 }
 
-static ssize_t at24_bin_read(struct kobject *kobj, struct bin_attribute *attr,
+static ssize_t at24_bin_read(struct file *filp, struct kobject *kobj,
+		struct bin_attribute *attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct at24_data *at24;
@@ -297,7 +307,7 @@ static ssize_t at24_eeprom_write(struct at24_data *at24, const char *buf,
 {
 	struct i2c_client *client;
 	struct i2c_msg msg;
-	ssize_t status;
+	ssize_t status = 0;
 	unsigned long timeout, write_time;
 	unsigned next_page;
 
@@ -338,9 +348,18 @@ static ssize_t at24_eeprom_write(struct at24_data *at24, const char *buf,
 	timeout = jiffies + msecs_to_jiffies(write_timeout);
 	do {
 		write_time = jiffies;
-		if (at24->use_smbus) {
-			status = i2c_smbus_write_i2c_block_data(client,
-					offset, count, buf);
+		if (at24->use_smbus_write) {
+			switch (at24->use_smbus_write) {
+			case I2C_SMBUS_I2C_BLOCK_DATA:
+				status = i2c_smbus_write_i2c_block_data(client,
+						offset, count, buf);
+				break;
+			case I2C_SMBUS_BYTE_DATA:
+				status = i2c_smbus_write_byte_data(client,
+						offset, buf[0]);
+				break;
+			}
+
 			if (status == 0)
 				status = count;
 		} else {
@@ -395,7 +414,8 @@ static ssize_t at24_write(struct at24_data *at24, const char *buf, loff_t off,
 	return retval;
 }
 
-static ssize_t at24_bin_write(struct kobject *kobj, struct bin_attribute *attr,
+static ssize_t at24_bin_write(struct file *filp, struct kobject *kobj,
+		struct bin_attribute *attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct at24_data *at24;
@@ -430,24 +450,53 @@ static ssize_t at24_macc_write(struct memory_accessor *macc, const char *buf,
 
 /*-------------------------------------------------------------------------*/
 
+#ifdef CONFIG_OF
+static void at24_get_ofdata(struct i2c_client *client,
+		struct at24_platform_data *chip)
+{
+	const __be32 *val;
+	struct device_node *node = client->dev.of_node;
+
+	if (node) {
+		if (of_get_property(node, "read-only", NULL))
+			chip->flags |= AT24_FLAG_READONLY;
+		val = of_get_property(node, "pagesize", NULL);
+		if (val)
+			chip->page_size = be32_to_cpup(val);
+	}
+}
+#else
+static void at24_get_ofdata(struct i2c_client *client,
+		struct at24_platform_data *chip)
+{ }
+#endif /* CONFIG_OF */
+
 static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct at24_platform_data chip;
+	kernel_ulong_t magic = 0;
 	bool writable;
-	bool use_smbus = false;
+	int use_smbus = 0;
+	int use_smbus_write = 0;
 	struct at24_data *at24;
 	int err;
 	unsigned i, num_addresses;
-	kernel_ulong_t magic;
 
 	if (client->dev.platform_data) {
 		chip = *(struct at24_platform_data *)client->dev.platform_data;
 	} else {
-		if (!id->driver_data) {
-			err = -ENODEV;
-			goto err_out;
+		if (id) {
+			magic = id->driver_data;
+		} else {
+			const struct acpi_device_id *aid;
+
+			aid = acpi_match_device(at24_acpi_ids, &client->dev);
+			if (aid)
+				magic = aid->driver_data;
 		}
-		magic = id->driver_data;
+		if (!magic)
+			return -ENODEV;
+
 		chip.byte_len = BIT(magic & AT24_BITMASK(AT24_SIZE_BYTELEN));
 		magic >>= AT24_SIZE_BYTELEN;
 		chip.flags = magic & AT24_BITMASK(AT24_SIZE_FLAGS);
@@ -458,6 +507,9 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		 */
 		chip.page_size = 1;
 
+		/* update chipdata if OF is present */
+		at24_get_ofdata(client, &chip);
+
 		chip.setup = NULL;
 		chip.context = NULL;
 	}
@@ -465,22 +517,43 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	if (!is_power_of_2(chip.byte_len))
 		dev_warn(&client->dev,
 			"byte_len looks suspicious (no power of 2)!\n");
+	if (!chip.page_size) {
+		dev_err(&client->dev, "page_size must not be 0!\n");
+		return -EINVAL;
+	}
 	if (!is_power_of_2(chip.page_size))
 		dev_warn(&client->dev,
 			"page_size looks suspicious (no power of 2)!\n");
 
 	/* Use I2C operations unless we're stuck with SMBus extensions. */
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
-		if (chip.flags & AT24_FLAG_ADDR16) {
-			err = -EPFNOSUPPORT;
-			goto err_out;
-		}
-		if (!i2c_check_functionality(client->adapter,
+		if (chip.flags & AT24_FLAG_ADDR16)
+			return -EPFNOSUPPORT;
+
+		if (i2c_check_functionality(client->adapter,
 				I2C_FUNC_SMBUS_READ_I2C_BLOCK)) {
-			err = -EPFNOSUPPORT;
-			goto err_out;
+			use_smbus = I2C_SMBUS_I2C_BLOCK_DATA;
+		} else if (i2c_check_functionality(client->adapter,
+				I2C_FUNC_SMBUS_READ_WORD_DATA)) {
+			use_smbus = I2C_SMBUS_WORD_DATA;
+		} else if (i2c_check_functionality(client->adapter,
+				I2C_FUNC_SMBUS_READ_BYTE_DATA)) {
+			use_smbus = I2C_SMBUS_BYTE_DATA;
+		} else {
+			return -EPFNOSUPPORT;
 		}
-		use_smbus = true;
+	}
+
+	/* Use I2C operations unless we're stuck with SMBus extensions. */
+	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
+		if (i2c_check_functionality(client->adapter,
+				I2C_FUNC_SMBUS_WRITE_I2C_BLOCK)) {
+			use_smbus_write = I2C_SMBUS_I2C_BLOCK_DATA;
+		} else if (i2c_check_functionality(client->adapter,
+				I2C_FUNC_SMBUS_WRITE_BYTE_DATA)) {
+			use_smbus_write = I2C_SMBUS_BYTE_DATA;
+			chip.page_size = 1;
+		}
 	}
 
 	if (chip.flags & AT24_FLAG_TAKE8ADDR)
@@ -489,15 +562,14 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		num_addresses =	DIV_ROUND_UP(chip.byte_len,
 			(chip.flags & AT24_FLAG_ADDR16) ? 65536 : 256);
 
-	at24 = kzalloc(sizeof(struct at24_data) +
+	at24 = devm_kzalloc(&client->dev, sizeof(struct at24_data) +
 		num_addresses * sizeof(struct i2c_client *), GFP_KERNEL);
-	if (!at24) {
-		err = -ENOMEM;
-		goto err_out;
-	}
+	if (!at24)
+		return -ENOMEM;
 
 	mutex_init(&at24->lock);
 	at24->use_smbus = use_smbus;
+	at24->use_smbus_write = use_smbus_write;
 	at24->chip = chip;
 	at24->num_addresses = num_addresses;
 
@@ -505,6 +577,7 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	 * Export the EEPROM bytes through sysfs, since that's convenient.
 	 * By default, only root should see the data (maybe passwords etc)
 	 */
+	sysfs_bin_attr_init(&at24->bin);
 	at24->bin.attr.name = "eeprom";
 	at24->bin.attr.mode = chip.flags & AT24_FLAG_IRUGO ? S_IRUGO : S_IRUSR;
 	at24->bin.read = at24_bin_read;
@@ -514,8 +587,7 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	writable = !(chip.flags & AT24_FLAG_READONLY);
 	if (writable) {
-		if (!use_smbus || i2c_check_functionality(client->adapter,
-				I2C_FUNC_SMBUS_WRITE_I2C_BLOCK)) {
+		if (!use_smbus || use_smbus_write) {
 
 			unsigned write_max = chip.page_size;
 
@@ -531,11 +603,10 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			at24->write_max = write_max;
 
 			/* buffer (data + address at the beginning) */
-			at24->writebuf = kmalloc(write_max + 2, GFP_KERNEL);
-			if (!at24->writebuf) {
-				err = -ENOMEM;
-				goto err_struct;
-			}
+			at24->writebuf = devm_kzalloc(&client->dev,
+				write_max + 2, GFP_KERNEL);
+			if (!at24->writebuf)
+				return -ENOMEM;
 		} else {
 			dev_warn(&client->dev,
 				"cannot write due to controller restrictions.");
@@ -562,14 +633,15 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	i2c_set_clientdata(client, at24);
 
-	dev_info(&client->dev, "%zu byte %s EEPROM %s\n",
+	dev_info(&client->dev, "%zu byte %s EEPROM, %s, %u bytes/write\n",
 		at24->bin.size, client->name,
-		writable ? "(writable)" : "(read-only)");
-	dev_dbg(&client->dev,
-		"page_size %d, num_addresses %d, write_max %d%s\n",
-		chip.page_size, num_addresses,
-		at24->write_max,
-		use_smbus ? ", use_smbus" : "");
+		writable ? "writable" : "read-only", at24->write_max);
+	if (use_smbus == I2C_SMBUS_WORD_DATA ||
+	    use_smbus == I2C_SMBUS_BYTE_DATA) {
+		dev_notice(&client->dev, "Falling back to %s reads, "
+			   "performance will suffer\n", use_smbus ==
+			   I2C_SMBUS_WORD_DATA ? "word" : "byte");
+	}
 
 	/* export data to kernel code */
 	if (chip.setup)
@@ -582,15 +654,10 @@ err_clients:
 		if (at24->client[i])
 			i2c_unregister_device(at24->client[i]);
 
-	kfree(at24->writebuf);
-err_struct:
-	kfree(at24);
-err_out:
-	dev_dbg(&client->dev, "probe error %d\n", err);
 	return err;
 }
 
-static int __devexit at24_remove(struct i2c_client *client)
+static int at24_remove(struct i2c_client *client)
 {
 	struct at24_data *at24;
 	int i;
@@ -601,9 +668,6 @@ static int __devexit at24_remove(struct i2c_client *client)
 	for (i = 1; i < at24->num_addresses; i++)
 		i2c_unregister_device(at24->client[i]);
 
-	kfree(at24->writebuf);
-	kfree(at24);
-	i2c_set_clientdata(client, NULL);
 	return 0;
 }
 
@@ -612,15 +676,20 @@ static int __devexit at24_remove(struct i2c_client *client)
 static struct i2c_driver at24_driver = {
 	.driver = {
 		.name = "at24",
-		.owner = THIS_MODULE,
+		.acpi_match_table = ACPI_PTR(at24_acpi_ids),
 	},
 	.probe = at24_probe,
-	.remove = __devexit_p(at24_remove),
+	.remove = at24_remove,
 	.id_table = at24_ids,
 };
 
 static int __init at24_init(void)
 {
+	if (!io_limit) {
+		pr_err("at24: io_limit must not be 0!\n");
+		return -EINVAL;
+	}
+
 	io_limit = rounddown_pow_of_two(io_limit);
 	return i2c_add_driver(&at24_driver);
 }

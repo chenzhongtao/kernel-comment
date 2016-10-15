@@ -1,14 +1,10 @@
 00-INDEX
 	- This file
-
-cache-lock.txt
-	- HOWTO for blackfin cache locking.
-
-cachefeatures.txt
-	- Supported cache features.
-
-Filesystems
-	- Requirements for mounting the root file system.
-
-bfin-gpio-note.txt
+Makefile
+	- Makefile for gptimers example file.
+bfin-gpio-notes.txt
 	- Notes in developing/using bfin-gpio driver.
+bfin-spi-notes.txt
+	- Notes for using bfin spi bus driver.
+gptimers-example.c
+	- gptimers example

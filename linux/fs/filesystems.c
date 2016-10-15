@@ -10,10 +10,10 @@
 #include <linux/fs.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
-#include <linux/slab.h>
 #include <linux/kmod.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 
 /*
@@ -29,13 +29,7 @@
  *	Once the reference is obtained we can drop the spinlock.
  */
 
-/**
- * 文件系统类型链表头指针。
- */
 static struct file_system_type *file_systems;
-/**
- * 保护file_systems的读写锁。
- */
 static DEFINE_RWLOCK(file_systems_lock);
 
 /* WARNING: This can be used only if we _already_ own a reference */
@@ -49,10 +43,6 @@ void put_filesystem(struct file_system_type *fs)
 	module_put(fs->owner);
 }
 
-static struct file_system_type **find_filesystem(const char *name, unsigned len)
-/**
- * 查找指定类型的文件系统。
- */
 static struct file_system_type **find_filesystem(const char *name, unsigned len)
 {
 	struct file_system_type **p;
@@ -75,10 +65,7 @@ static struct file_system_type **find_filesystem(const char *name, unsigned len)
  *	structures and must not be freed until the file system has been
  *	unregistered.
  */
-
-/**
- * 注册文件系统，将相应的file_system_type加入到链表中。
- */
+ 
 int register_filesystem(struct file_system_type * fs)
 {
 	int res = 0;
@@ -87,7 +74,6 @@ int register_filesystem(struct file_system_type * fs)
 	BUG_ON(strchr(fs->name, '.'));
 	if (fs->next)
 		return -EBUSY;
-	INIT_LIST_HEAD(&fs->fs_supers);
 	write_lock(&file_systems_lock);
 	p = find_filesystem(fs->name, strlen(fs->name));
 	if (*p)
@@ -111,9 +97,7 @@ EXPORT_SYMBOL(register_filesystem);
  *	Once this function has returned the &struct file_system_type structure
  *	may be freed or reused.
  */
-/**
- * 当文件系统是被模块装载进内核时，可以用该函数卸载它。
- */
+ 
 int unregister_filesystem(struct file_system_type * fs)
 {
 	struct file_system_type ** tmp;
@@ -125,20 +109,23 @@ int unregister_filesystem(struct file_system_type * fs)
 			*tmp = fs->next;
 			fs->next = NULL;
 			write_unlock(&file_systems_lock);
+			synchronize_rcu();
 			return 0;
 		}
 		tmp = &(*tmp)->next;
 	}
 	write_unlock(&file_systems_lock);
+
 	return -EINVAL;
 }
 
 EXPORT_SYMBOL(unregister_filesystem);
 
+#ifdef CONFIG_SYSFS_SYSCALL
 static int fs_index(const char __user * __name)
 {
 	struct file_system_type * tmp;
-	char * name;
+	struct filename *name;
 	int err, index;
 
 	name = getname(__name);
@@ -149,7 +136,7 @@ static int fs_index(const char __user * __name)
 	err = -EINVAL;
 	read_lock(&file_systems_lock);
 	for (tmp=file_systems, index=0 ; tmp ; tmp=tmp->next, index++) {
-		if (strcmp(tmp->name,name) == 0) {
+		if (strcmp(tmp->name, name->name) == 0) {
 			err = index;
 			break;
 		}
@@ -213,6 +200,7 @@ SYSCALL_DEFINE3(sysfs, int, option, unsigned long, arg1, unsigned long, arg2)
 	}
 	return retval;
 }
+#endif
 
 int __init get_filesystem_list(char *buf)
 {
@@ -272,13 +260,11 @@ static struct file_system_type *__get_fs_type(const char *name, int len)
 {
 	struct file_system_type *fs;
 
-	/* 获取文件系统读锁 */
 	read_lock(&file_systems_lock);
-	/* 根据名称查找文件系统 */
 	fs = *(find_filesystem(name, len));
-	if (fs && !try_module_get(fs->owner)) /* 文件系统存在，但是模块正在卸载中 */
+	if (fs && !try_module_get(fs->owner))
 		fs = NULL;
-	read_unlock(&file_systems_lock);/* 释放文件系统锁 */
+	read_unlock(&file_systems_lock);
 	return fs;
 }
 
@@ -289,8 +275,7 @@ struct file_system_type *get_fs_type(const char *name)
 	int len = dot ? dot - name : strlen(name);
 
 	fs = __get_fs_type(name, len);
-	/* 没有匹配的文件系统 */
-	if (!fs && (request_module("%.*s", len, name) == 0))
+	if (!fs && (request_module("fs-%.*s", len, name) == 0))
 		fs = __get_fs_type(name, len);
 
 	if (dot && fs && !(fs->fs_flags & FS_HAS_SUBTYPE)) {

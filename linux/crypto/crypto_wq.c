@@ -12,6 +12,7 @@
  */
 
 #include <linux/workqueue.h>
+#include <linux/module.h>
 #include <crypto/algapi.h>
 #include <crypto/crypto_wq.h>
 
@@ -20,7 +21,8 @@ EXPORT_SYMBOL_GPL(kcrypto_wq);
 
 static int __init crypto_wq_init(void)
 {
-	kcrypto_wq = create_workqueue("crypto");
+	kcrypto_wq = alloc_workqueue("crypto",
+				     WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE, 1);
 	if (unlikely(!kcrypto_wq))
 		return -ENOMEM;
 	return 0;
@@ -31,7 +33,7 @@ static void __exit crypto_wq_exit(void)
 	destroy_workqueue(kcrypto_wq);
 }
 
-module_init(crypto_wq_init);
+subsys_initcall(crypto_wq_init);
 module_exit(crypto_wq_exit);
 
 MODULE_LICENSE("GPL");

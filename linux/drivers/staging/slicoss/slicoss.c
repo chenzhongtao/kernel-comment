@@ -47,13 +47,12 @@
  *      Oasis cards (single and dual port PCI-x Gigabit) copper and fiber
  *      Kalahari cards (dual and quad port PCI-e Gigabit) copper and fiber
  *
- * The driver was acutally tested on Oasis and Kalahari cards.
+ * The driver was actually tested on Oasis and Kalahari cards.
  *
  *
  * NOTE: This is the standard, non-accelerated version of Alacritech's
  *       IS-NIC driver.
  */
-
 
 #define KLUDGE_FOR_4GB_BOUNDARY         1
 #define DEBUG_MICROCODE                 1
@@ -62,6 +61,7 @@
 #define SLIC_OFFLOAD_IP_CHECKSUM		1
 #define STATS_TIMER_INTERVAL			2
 #define PING_TIMER_INTERVAL			    1
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -76,14 +76,13 @@
 #include <linux/bitops.h>
 #include <linux/io.h>
 #include <linux/netdevice.h>
+#include <linux/crc32.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
-#include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 
 #include <linux/firmware.h>
 #include <linux/types.h>
@@ -97,84 +96,15 @@
 #include "slichw.h"
 #include "slic.h"
 
-static struct net_device_stats *slic_get_stats(struct net_device *dev);
-static int slic_entry_open(struct net_device *dev);
-static int slic_entry_halt(struct net_device *dev);
-static int slic_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
-static int slic_xmit_start(struct sk_buff *skb, struct net_device *dev);
-static void slic_xmit_fail(struct adapter *adapter, struct sk_buff *skb,
-			   void *cmd, u32 skbtype, u32 status);
-static void slic_config_pci(struct pci_dev *pcidev);
-static struct sk_buff *slic_rcvqueue_getnext(struct adapter *adapter);
-static int slic_mac_set_address(struct net_device *dev, void *ptr);
-static void slic_link_event_handler(struct adapter *adapter);
-static void slic_upr_request_complete(struct adapter *adapter, u32 isr);
-static int slic_rspqueue_init(struct adapter *adapter);
-static void slic_rspqueue_free(struct adapter *adapter);
-static struct slic_rspbuf *slic_rspqueue_getnext(struct adapter *adapter);
-static int slic_cmdq_init(struct adapter *adapter);
-static void slic_cmdq_free(struct adapter *adapter);
-static void slic_cmdq_reset(struct adapter *adapter);
-static void slic_cmdq_addcmdpage(struct adapter *adapter, u32 *page);
-static void slic_cmdq_getdone(struct adapter *adapter);
-static void slic_cmdq_putdone_irq(struct adapter *adapter,
-				  struct slic_hostcmd *cmd);
-static struct slic_hostcmd *slic_cmdq_getfree(struct adapter *adapter);
-static int slic_rcvqueue_init(struct adapter *adapter);
-static int slic_rcvqueue_fill(struct adapter *adapter);
-static u32 slic_rcvqueue_reinsert(struct adapter *adapter, struct sk_buff *skb);
-static void slic_rcvqueue_free(struct adapter *adapter);
-static void slic_adapter_set_hwaddr(struct adapter *adapter);
-static int slic_card_init(struct sliccard *card, struct adapter *adapter);
-static void slic_intagg_set(struct adapter *adapter, u32 value);
-static int slic_card_download(struct adapter *adapter);
-static u32 slic_card_locate(struct adapter *adapter);
-static int slic_if_init(struct adapter *adapter);
-static int slic_adapter_allocresources(struct adapter *adapter);
-static void slic_adapter_freeresources(struct adapter *adapter);
-static void slic_link_config(struct adapter *adapter, u32 linkspeed,
-			     u32 linkduplex);
-static void slic_unmap_mmio_space(struct adapter *adapter);
-static void slic_card_cleanup(struct sliccard *card);
-static void slic_soft_reset(struct adapter *adapter);
-static bool slic_mac_filter(struct adapter *adapter,
-			    struct ether_header *ether_frame);
-static void slic_mac_address_config(struct adapter *adapter);
-static void slic_mac_config(struct adapter *adapter);
-static void slic_mcast_set_mask(struct adapter *adapter);
-static void slic_config_set(struct adapter *adapter, bool linkchange);
-static void slic_config_clear(struct adapter *adapter);
-static void slic_config_get(struct adapter *adapter, u32 config,
-			    u32 configh);
-static void slic_timer_load_check(ulong context);
-static void slic_assert_fail(void);
-static ushort slic_eeprom_cksum(char *m, int len);
-static void slic_upr_start(struct adapter *adapter);
-static void slic_link_upr_complete(struct adapter *adapter, u32 Isr);
-static int  slic_upr_request(struct adapter *adapter, u32 upr_request,
-			     u32 upr_data, u32 upr_data_h, u32 upr_buffer,
-			     u32 upr_buffer_h);
-static void slic_mcast_set_list(struct net_device *dev);
-
-
 static uint slic_first_init = 1;
-static char *slic_banner = "Alacritech SLIC Technology(tm) Server "\
-		"and Storage Accelerator (Non-Accelerated)";
+static char *slic_banner = "Alacritech SLIC Technology(tm) Server and Storage Accelerator (Non-Accelerated)";
 
 static char *slic_proc_version = "2.0.351  2006/07/14 12:26:00";
-static char *slic_product_name = "SLIC Technology(tm) Server "\
-		"and Storage Accelerator (Non-Accelerated)";
-static char *slic_vendor = "Alacritech, Inc.";
-
-static int slic_debug = 1;
-static int debug = -1;
-static struct net_device *head_netdevice;
 
 static struct base_driver slic_global = { {}, 0, 0, 0, 1, NULL, NULL };
 static int intagg_delay = 100;
 static u32 dynamic_intagg;
 static unsigned int rcv_count;
-static struct dentry *slic_debugfs;
 
 #define DRV_NAME          "slicoss"
 #define DRV_VERSION       "2.0.1"
@@ -194,63 +124,13 @@ MODULE_PARM_DESC(dynamic_intagg, "Dynamic Interrupt Aggregation Setting");
 module_param(intagg_delay, int, 0);
 MODULE_PARM_DESC(intagg_delay, "uSec Interrupt Aggregation Delay");
 
-static struct pci_device_id slic_pci_tbl[] __devinitdata = {
-	{PCI_VENDOR_ID_ALACRITECH,
-	 SLIC_1GB_DEVICE_ID,
-	 PCI_ANY_ID, PCI_ANY_ID,},
-	{PCI_VENDOR_ID_ALACRITECH,
-	 SLIC_2GB_DEVICE_ID,
-	 PCI_ANY_ID, PCI_ANY_ID,},
-	{0,}
+static const struct pci_device_id slic_pci_tbl[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_ALACRITECH, SLIC_1GB_DEVICE_ID) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_ALACRITECH, SLIC_2GB_DEVICE_ID) },
+	{ 0 }
 };
 
 MODULE_DEVICE_TABLE(pci, slic_pci_tbl);
-
-#ifdef ASSERT
-#undef ASSERT
-#endif
-
-#ifndef ASSERT
-#define ASSERT(a) do {							\
-	if (!(a)) {							\
-		printk(KERN_ERR "slicoss ASSERT() Failure: function %s"	\
-			"line %d\n", __func__, __LINE__);		\
-		slic_assert_fail();					\
-	}								\
-} while (0)
-#endif
-
-
-#define SLIC_GET_SLIC_HANDLE(_adapter, _pslic_handle)                   \
-{                                                                       \
-    spin_lock_irqsave(&_adapter->handle_lock.lock,                      \
-			_adapter->handle_lock.flags);                   \
-    _pslic_handle  =  _adapter->pfree_slic_handles;                     \
-    if (_pslic_handle) {                                                \
-	ASSERT(_pslic_handle->type == SLIC_HANDLE_FREE);                \
-	_adapter->pfree_slic_handles = _pslic_handle->next;             \
-    }                                                                   \
-    spin_unlock_irqrestore(&_adapter->handle_lock.lock,                 \
-			_adapter->handle_lock.flags);                   \
-}
-
-#define SLIC_FREE_SLIC_HANDLE(_adapter, _pslic_handle)                  \
-{                                                                       \
-    _pslic_handle->type = SLIC_HANDLE_FREE;                             \
-    spin_lock_irqsave(&_adapter->handle_lock.lock,                      \
-			_adapter->handle_lock.flags);                   \
-    _pslic_handle->next = _adapter->pfree_slic_handles;                 \
-    _adapter->pfree_slic_handles = _pslic_handle;                       \
-    spin_unlock_irqrestore(&_adapter->handle_lock.lock,                 \
-			_adapter->handle_lock.flags);                   \
-}
-
-static void slic_debug_init(void);
-static void slic_debug_cleanup(void);
-static void slic_debug_adapter_create(struct adapter *adapter);
-static void slic_debug_adapter_destroy(struct adapter *adapter);
-static void slic_debug_card_create(struct sliccard *card);
-static void slic_debug_card_destroy(struct sliccard *card);
 
 static inline void slic_reg32_write(void __iomem *reg, u32 value, bool flush)
 {
@@ -263,1084 +143,14 @@ static inline void slic_reg64_write(struct adapter *adapter, void __iomem *reg,
 				    u32 value, void __iomem *regh, u32 paddrh,
 				    bool flush)
 {
-	spin_lock_irqsave(&adapter->bit64reglock.lock,
-				adapter->bit64reglock.flags);
-	if (paddrh != adapter->curaddrupper) {
-		adapter->curaddrupper = paddrh;
-		writel(paddrh, regh);
-	}
+	unsigned long flags;
+
+	spin_lock_irqsave(&adapter->bit64reglock, flags);
+	writel(paddrh, regh);
 	writel(value, reg);
 	if (flush)
 		mb();
-	spin_unlock_irqrestore(&adapter->bit64reglock.lock,
-				adapter->bit64reglock.flags);
-}
-
-static void slic_init_driver(void)
-{
-	if (slic_first_init) {
-		slic_first_init = 0;
-		spin_lock_init(&slic_global.driver_lock.lock);
-		slic_debug_init();
-	}
-}
-
-static void slic_init_adapter(struct net_device *netdev,
-			      struct pci_dev *pcidev,
-			      const struct pci_device_id *pci_tbl_entry,
-			      void __iomem *memaddr, int chip_idx)
-{
-	ushort index;
-	struct slic_handle *pslic_handle;
-	struct adapter *adapter = (struct adapter *)netdev_priv(netdev);
-
-/*	adapter->pcidev = pcidev;*/
-	adapter->vendid = pci_tbl_entry->vendor;
-	adapter->devid = pci_tbl_entry->device;
-	adapter->subsysid = pci_tbl_entry->subdevice;
-	adapter->busnumber = pcidev->bus->number;
-	adapter->slotnumber = ((pcidev->devfn >> 3) & 0x1F);
-	adapter->functionnumber = (pcidev->devfn & 0x7);
-	adapter->memorylength = pci_resource_len(pcidev, 0);
-	adapter->slic_regs = (__iomem struct slic_regs *)memaddr;
-	adapter->irq = pcidev->irq;
-/*	adapter->netdev = netdev;*/
-	adapter->next_netdevice = head_netdevice;
-	head_netdevice = netdev;
-	adapter->chipid = chip_idx;
-	adapter->port = 0;	/*adapter->functionnumber;*/
-	adapter->cardindex = adapter->port;
-	adapter->memorybase = memaddr;
-	spin_lock_init(&adapter->upr_lock.lock);
-	spin_lock_init(&adapter->bit64reglock.lock);
-	spin_lock_init(&adapter->adapter_lock.lock);
-	spin_lock_init(&adapter->reset_lock.lock);
-	spin_lock_init(&adapter->handle_lock.lock);
-
-	adapter->card_size = 1;
-	/*
-	  Initialize slic_handle array
-	*/
-	ASSERT(SLIC_CMDQ_MAXCMDS <= 0xFFFF);
-	/*
-	 Start with 1.  0 is an invalid host handle.
-	*/
-	for (index = 1, pslic_handle = &adapter->slic_handles[1];
-	     index < SLIC_CMDQ_MAXCMDS; index++, pslic_handle++) {
-
-		pslic_handle->token.handle_index = index;
-		pslic_handle->type = SLIC_HANDLE_FREE;
-		pslic_handle->next = adapter->pfree_slic_handles;
-		adapter->pfree_slic_handles = pslic_handle;
-	}
-	adapter->pshmem = (struct slic_shmem *)
-					pci_alloc_consistent(adapter->pcidev,
-					sizeof(struct slic_shmem),
-					&adapter->
-					phys_shmem);
-	ASSERT(adapter->pshmem);
-
-	memset(adapter->pshmem, 0, sizeof(struct slic_shmem));
-
-	return;
-}
-
-static const struct net_device_ops slic_netdev_ops = {
-	.ndo_open		= slic_entry_open,
-	.ndo_stop		= slic_entry_halt,
-	.ndo_start_xmit		= slic_xmit_start,
-	.ndo_do_ioctl		= slic_ioctl,
-	.ndo_set_mac_address	= slic_mac_set_address,
-	.ndo_get_stats		= slic_get_stats,
-	.ndo_set_multicast_list	= slic_mcast_set_list,
-	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_set_mac_address	= eth_mac_addr,
-	.ndo_change_mtu		= eth_change_mtu,
-};
-
-static int __devinit slic_entry_probe(struct pci_dev *pcidev,
-			       const struct pci_device_id *pci_tbl_entry)
-{
-	static int cards_found;
-	static int did_version;
-	int err = -ENODEV;
-	struct net_device *netdev;
-	struct adapter *adapter;
-	void __iomem *memmapped_ioaddr = NULL;
-	u32 status = 0;
-	ulong mmio_start = 0;
-	ulong mmio_len = 0;
-	struct sliccard *card = NULL;
-
-	slic_global.dynamic_intagg = dynamic_intagg;
-
-	err = pci_enable_device(pcidev);
-
-	if (err)
-		return err;
-
-	if (slic_debug > 0 && did_version++ == 0) {
-		printk(KERN_DEBUG "%s\n", slic_banner);
-		printk(KERN_DEBUG "%s\n", slic_proc_version);
-	}
-
-	err = pci_set_dma_mask(pcidev, DMA_BIT_MASK(64));
-	if (err) {
-		err = pci_set_dma_mask(pcidev, DMA_BIT_MASK(32));
-		if (err)
-			goto err_out_disable_pci;
-	}
-
-	err = pci_request_regions(pcidev, DRV_NAME);
-	if (err)
-		goto err_out_disable_pci;
-
-	pci_set_master(pcidev);
-
-	netdev = alloc_etherdev(sizeof(struct adapter));
-	if (!netdev) {
-		err = -ENOMEM;
-		goto err_out_exit_slic_probe;
-	}
-
-	SET_NETDEV_DEV(netdev, &pcidev->dev);
-
-	pci_set_drvdata(pcidev, netdev);
-	adapter = netdev_priv(netdev);
-	adapter->netdev = netdev;
-	adapter->pcidev = pcidev;
-
-	mmio_start = pci_resource_start(pcidev, 0);
-	mmio_len = pci_resource_len(pcidev, 0);
-
-
-/*	memmapped_ioaddr =  (u32)ioremap_nocache(mmio_start, mmio_len);*/
-	memmapped_ioaddr = ioremap(mmio_start, mmio_len);
-	if (!memmapped_ioaddr) {
-		dev_err(&pcidev->dev, "cannot remap MMIO region %lx @ %lx\n",
-			mmio_len, mmio_start);
-		goto err_out_free_netdev;
-	}
-
-	slic_config_pci(pcidev);
-
-	slic_init_driver();
-
-	slic_init_adapter(netdev,
-			  pcidev, pci_tbl_entry, memmapped_ioaddr, cards_found);
-
-	status = slic_card_locate(adapter);
-	if (status) {
-		dev_err(&pcidev->dev, "cannot locate card\n");
-		goto err_out_free_mmio_region;
-	}
-
-	card = adapter->card;
-
-	if (!adapter->allocated) {
-		card->adapters_allocated++;
-		adapter->allocated = 1;
-	}
-
-	status = slic_card_init(card, adapter);
-
-	if (status != STATUS_SUCCESS) {
-		card->state = CARD_FAIL;
-		adapter->state = ADAPT_FAIL;
-		adapter->linkstate = LINK_DOWN;
-		dev_err(&pcidev->dev, "FAILED status[%x]\n", status);
-	} else {
-		slic_adapter_set_hwaddr(adapter);
-	}
-
-	netdev->base_addr = (unsigned long)adapter->memorybase;
-	netdev->irq = adapter->irq;
-	netdev->netdev_ops = &slic_netdev_ops;
-
-	slic_debug_adapter_create(adapter);
-
-	strcpy(netdev->name, "eth%d");
-	err = register_netdev(netdev);
-	if (err) {
-		dev_err(&pcidev->dev, "Cannot register net device, aborting.\n");
-		goto err_out_unmap;
-	}
-
-	cards_found++;
-
-	return status;
-
-err_out_unmap:
-	iounmap(memmapped_ioaddr);
-err_out_free_mmio_region:
-	release_mem_region(mmio_start, mmio_len);
-err_out_free_netdev:
-	free_netdev(netdev);
-err_out_exit_slic_probe:
-	pci_release_regions(pcidev);
-err_out_disable_pci:
-	pci_disable_device(pcidev);
-	return err;
-}
-
-static int slic_entry_open(struct net_device *dev)
-{
-	struct adapter *adapter = (struct adapter *) netdev_priv(dev);
-	struct sliccard *card = adapter->card;
-	u32 locked = 0;
-	int status;
-
-	ASSERT(adapter);
-	ASSERT(card);
-
-	netif_stop_queue(adapter->netdev);
-
-	spin_lock_irqsave(&slic_global.driver_lock.lock,
-				slic_global.driver_lock.flags);
-	locked = 1;
-	if (!adapter->activated) {
-		card->adapters_activated++;
-		slic_global.num_slic_ports_active++;
-		adapter->activated = 1;
-	}
-	status = slic_if_init(adapter);
-
-	if (status != STATUS_SUCCESS) {
-		if (adapter->activated) {
-			card->adapters_activated--;
-			slic_global.num_slic_ports_active--;
-			adapter->activated = 0;
-		}
-		if (locked) {
-			spin_unlock_irqrestore(&slic_global.driver_lock.lock,
-						slic_global.driver_lock.flags);
-			locked = 0;
-		}
-		return status;
-	}
-	if (!card->master)
-		card->master = adapter;
-
-	if (locked) {
-		spin_unlock_irqrestore(&slic_global.driver_lock.lock,
-					slic_global.driver_lock.flags);
-		locked = 0;
-	}
-
-	return STATUS_SUCCESS;
-}
-
-static void __devexit slic_entry_remove(struct pci_dev *pcidev)
-{
-	struct net_device *dev = pci_get_drvdata(pcidev);
-	u32 mmio_start = 0;
-	uint mmio_len = 0;
-	struct adapter *adapter = (struct adapter *) netdev_priv(dev);
-	struct sliccard *card;
-	struct mcast_address *mcaddr, *mlist;
-
-	ASSERT(adapter);
-	slic_adapter_freeresources(adapter);
-	slic_unmap_mmio_space(adapter);
-	unregister_netdev(dev);
-
-	mmio_start = pci_resource_start(pcidev, 0);
-	mmio_len = pci_resource_len(pcidev, 0);
-
-	release_mem_region(mmio_start, mmio_len);
-
-	iounmap((void __iomem *)dev->base_addr);
-	/* free multicast addresses */
-	mlist = adapter->mcastaddrs;
-	while (mlist) {
-		mcaddr = mlist;
-		mlist = mlist->next;
-		kfree(mcaddr);
-	}
-	ASSERT(adapter->card);
-	card = adapter->card;
-	ASSERT(card->adapters_allocated);
-	card->adapters_allocated--;
-	adapter->allocated = 0;
-	if (!card->adapters_allocated) {
-		struct sliccard *curr_card = slic_global.slic_card;
-		if (curr_card == card) {
-			slic_global.slic_card = card->next;
-		} else {
-			while (curr_card->next != card)
-				curr_card = curr_card->next;
-			ASSERT(curr_card);
-			curr_card->next = card->next;
-		}
-		ASSERT(slic_global.num_slic_cards);
-		slic_global.num_slic_cards--;
-		slic_card_cleanup(card);
-	}
-	kfree(dev);
-	pci_release_regions(pcidev);
-}
-
-static int slic_entry_halt(struct net_device *dev)
-{
-	struct adapter *adapter = (struct adapter *)netdev_priv(dev);
-	struct sliccard *card = adapter->card;
-	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
-
-	spin_lock_irqsave(&slic_global.driver_lock.lock,
-				slic_global.driver_lock.flags);
-	ASSERT(card);
-	netif_stop_queue(adapter->netdev);
-	adapter->state = ADAPT_DOWN;
-	adapter->linkstate = LINK_DOWN;
-	adapter->upr_list = NULL;
-	adapter->upr_busy = 0;
-	adapter->devflags_prev = 0;
-	ASSERT(card->adapter[adapter->cardindex] == adapter);
-	slic_reg32_write(&slic_regs->slic_icr, ICR_INT_OFF, FLUSH);
-	adapter->all_reg_writes++;
-	adapter->icr_reg_writes++;
-	slic_config_clear(adapter);
-	if (adapter->activated) {
-		card->adapters_activated--;
-		slic_global.num_slic_ports_active--;
-		adapter->activated = 0;
-	}
-#ifdef AUTOMATIC_RESET
-	slic_reg32_write(&slic_regs->slic_reset_iface, 0, FLUSH);
-#endif
-	/*
-	 *  Reset the adapter's cmd queues
-	 */
-	slic_cmdq_reset(adapter);
-
-#ifdef AUTOMATIC_RESET
-	if (!card->adapters_activated)
-		slic_card_init(card, adapter);
-#endif
-
-	spin_unlock_irqrestore(&slic_global.driver_lock.lock,
-				slic_global.driver_lock.flags);
-	return STATUS_SUCCESS;
-}
-
-static int slic_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
-{
-	struct adapter *adapter = (struct adapter *)netdev_priv(dev);
-	struct ethtool_cmd edata;
-	struct ethtool_cmd ecmd;
-	u32 data[7];
-	u32 intagg;
-
-	ASSERT(rq);
-	switch (cmd) {
-	case SIOCSLICSETINTAGG:
-		if (copy_from_user(data, rq->ifr_data, 28))
-			return -EFAULT;
-		intagg = data[0];
-		dev_err(&dev->dev, "%s: set interrupt aggregation to %d\n",
-			__func__, intagg);
-		slic_intagg_set(adapter, intagg);
-		return 0;
-
-#ifdef SLIC_TRACE_DUMP_ENABLED
-	case SIOCSLICTRACEDUMP:
-		{
-			u32 value;
-			DBG_IOCTL("slic_ioctl  SIOCSLIC_TRACE_DUMP\n");
-
-			if (copy_from_user(data, rq->ifr_data, 28)) {
-				PRINT_ERROR
-				    ("slic: copy_from_user FAILED getting \
-				     initial simba param\n");
-				return -EFAULT;
-			}
-
-			value = data[0];
-			if (tracemon_request == SLIC_DUMP_DONE) {
-				PRINT_ERROR
-				    ("ATK Diagnostic Trace Dump Requested\n");
-				tracemon_request = SLIC_DUMP_REQUESTED;
-				tracemon_request_type = value;
-				tracemon_timestamp = jiffies;
-			} else if ((tracemon_request == SLIC_DUMP_REQUESTED) ||
-				   (tracemon_request ==
-				    SLIC_DUMP_IN_PROGRESS)) {
-				PRINT_ERROR
-				    ("ATK Diagnostic Trace Dump Requested but \
-				     already in progress... ignore\n");
-			} else {
-				PRINT_ERROR
-				    ("ATK Diagnostic Trace Dump Requested\n");
-				tracemon_request = SLIC_DUMP_REQUESTED;
-				tracemon_request_type = value;
-				tracemon_timestamp = jiffies;
-			}
-			return 0;
-		}
-#endif
-	case SIOCETHTOOL:
-		ASSERT(adapter);
-		if (copy_from_user(&ecmd, rq->ifr_data, sizeof(ecmd)))
-			return -EFAULT;
-
-		if (ecmd.cmd == ETHTOOL_GSET) {
-			edata.supported = (SUPPORTED_10baseT_Half |
-					   SUPPORTED_10baseT_Full |
-					   SUPPORTED_100baseT_Half |
-					   SUPPORTED_100baseT_Full |
-					   SUPPORTED_Autoneg | SUPPORTED_MII);
-			edata.port = PORT_MII;
-			edata.transceiver = XCVR_INTERNAL;
-			edata.phy_address = 0;
-			if (adapter->linkspeed == LINK_100MB)
-				edata.speed = SPEED_100;
-			else if (adapter->linkspeed == LINK_10MB)
-				edata.speed = SPEED_10;
-			else
-				edata.speed = 0;
-
-			if (adapter->linkduplex == LINK_FULLD)
-				edata.duplex = DUPLEX_FULL;
-			else
-				edata.duplex = DUPLEX_HALF;
-
-			edata.autoneg = AUTONEG_ENABLE;
-			edata.maxtxpkt = 1;
-			edata.maxrxpkt = 1;
-			if (copy_to_user(rq->ifr_data, &edata, sizeof(edata)))
-				return -EFAULT;
-
-		} else if (ecmd.cmd == ETHTOOL_SSET) {
-			if (!capable(CAP_NET_ADMIN))
-				return -EPERM;
-
-			if (adapter->linkspeed == LINK_100MB)
-				edata.speed = SPEED_100;
-			else if (adapter->linkspeed == LINK_10MB)
-				edata.speed = SPEED_10;
-			else
-				edata.speed = 0;
-
-			if (adapter->linkduplex == LINK_FULLD)
-				edata.duplex = DUPLEX_FULL;
-			else
-				edata.duplex = DUPLEX_HALF;
-
-			edata.autoneg = AUTONEG_ENABLE;
-			edata.maxtxpkt = 1;
-			edata.maxrxpkt = 1;
-			if ((ecmd.speed != edata.speed) ||
-			    (ecmd.duplex != edata.duplex)) {
-				u32 speed;
-				u32 duplex;
-
-				if (ecmd.speed == SPEED_10)
-					speed = 0;
-				else
-					speed = PCR_SPEED_100;
-				if (ecmd.duplex == DUPLEX_FULL)
-					duplex = PCR_DUPLEX_FULL;
-				else
-					duplex = 0;
-				slic_link_config(adapter, speed, duplex);
-				slic_link_event_handler(adapter);
-			}
-		}
-		return 0;
-	default:
-		return -EOPNOTSUPP;
-	}
-}
-
-#define  XMIT_FAIL_LINK_STATE               1
-#define  XMIT_FAIL_ZERO_LENGTH              2
-#define  XMIT_FAIL_HOSTCMD_FAIL             3
-
-static void slic_xmit_build_request(struct adapter *adapter,
-			     struct slic_hostcmd *hcmd, struct sk_buff *skb)
-{
-	struct slic_host64_cmd *ihcmd;
-	ulong phys_addr;
-
-	ihcmd = &hcmd->cmd64;
-
-	ihcmd->flags = (adapter->port << IHFLG_IFSHFT);
-	ihcmd->command = IHCMD_XMT_REQ;
-	ihcmd->u.slic_buffers.totlen = skb->len;
-	phys_addr = pci_map_single(adapter->pcidev, skb->data, skb->len,
-			PCI_DMA_TODEVICE);
-	ihcmd->u.slic_buffers.bufs[0].paddrl = SLIC_GET_ADDR_LOW(phys_addr);
-	ihcmd->u.slic_buffers.bufs[0].paddrh = SLIC_GET_ADDR_HIGH(phys_addr);
-	ihcmd->u.slic_buffers.bufs[0].length = skb->len;
-#if defined(CONFIG_X86_64)
-	hcmd->cmdsize = (u32) ((((u64)&ihcmd->u.slic_buffers.bufs[1] -
-				     (u64) hcmd) + 31) >> 5);
-#elif defined(CONFIG_X86)
-	hcmd->cmdsize = ((((u32) &ihcmd->u.slic_buffers.bufs[1] -
-			   (u32) hcmd) + 31) >> 5);
-#else
-	Stop Compilation;
-#endif
-}
-
-#define NORMAL_ETHFRAME     0
-
-static int slic_xmit_start(struct sk_buff *skb, struct net_device *dev)
-{
-	struct sliccard *card;
-	struct adapter *adapter = (struct adapter *)netdev_priv(dev);
-	struct slic_hostcmd *hcmd = NULL;
-	u32 status = 0;
-	u32 skbtype = NORMAL_ETHFRAME;
-	void *offloadcmd = NULL;
-
-	card = adapter->card;
-	ASSERT(card);
-	if ((adapter->linkstate != LINK_UP) ||
-	    (adapter->state != ADAPT_UP) || (card->state != CARD_UP)) {
-		status = XMIT_FAIL_LINK_STATE;
-		goto xmit_fail;
-
-	} else if (skb->len == 0) {
-		status = XMIT_FAIL_ZERO_LENGTH;
-		goto xmit_fail;
-	}
-
-	if (skbtype == NORMAL_ETHFRAME) {
-		hcmd = slic_cmdq_getfree(adapter);
-		if (!hcmd) {
-			adapter->xmitq_full = 1;
-			status = XMIT_FAIL_HOSTCMD_FAIL;
-			goto xmit_fail;
-		}
-		ASSERT(hcmd->pslic_handle);
-		ASSERT(hcmd->cmd64.hosthandle ==
-		       hcmd->pslic_handle->token.handle_token);
-		hcmd->skb = skb;
-		hcmd->busy = 1;
-		hcmd->type = SLIC_CMD_DUMB;
-		if (skbtype == NORMAL_ETHFRAME)
-			slic_xmit_build_request(adapter, hcmd, skb);
-	}
-	adapter->stats.tx_packets++;
-	adapter->stats.tx_bytes += skb->len;
-
-#ifdef DEBUG_DUMP
-	if (adapter->kill_card) {
-		struct slic_host64_cmd ihcmd;
-
-		ihcmd = &hcmd->cmd64;
-
-		ihcmd->flags |= 0x40;
-		adapter->kill_card = 0;	/* only do this once */
-	}
-#endif
-	if (hcmd->paddrh == 0) {
-		slic_reg32_write(&adapter->slic_regs->slic_cbar,
-				 (hcmd->paddrl | hcmd->cmdsize), DONT_FLUSH);
-	} else {
-		slic_reg64_write(adapter, &adapter->slic_regs->slic_cbar64,
-				 (hcmd->paddrl | hcmd->cmdsize),
-				 &adapter->slic_regs->slic_addr_upper,
-				 hcmd->paddrh, DONT_FLUSH);
-	}
-xmit_done:
-	return NETDEV_TX_OK;
-xmit_fail:
-	slic_xmit_fail(adapter, skb, offloadcmd, skbtype, status);
-	goto xmit_done;
-}
-
-static void slic_xmit_fail(struct adapter *adapter,
-		    struct sk_buff *skb,
-		    void *cmd, u32 skbtype, u32 status)
-{
-	if (adapter->xmitq_full)
-		netif_stop_queue(adapter->netdev);
-	if ((cmd == NULL) && (status <= XMIT_FAIL_HOSTCMD_FAIL)) {
-		switch (status) {
-		case XMIT_FAIL_LINK_STATE:
-			dev_err(&adapter->netdev->dev,
-				"reject xmit skb[%p: %x] linkstate[%s] "
-				"adapter[%s:%d] card[%s:%d]\n",
-				skb, skb->pkt_type,
-				SLIC_LINKSTATE(adapter->linkstate),
-				SLIC_ADAPTER_STATE(adapter->state),
-				adapter->state,
-				SLIC_CARD_STATE(adapter->card->state),
-				adapter->card->state);
-			break;
-		case XMIT_FAIL_ZERO_LENGTH:
-			dev_err(&adapter->netdev->dev,
-				"xmit_start skb->len == 0 skb[%p] type[%x]\n",
-				skb, skb->pkt_type);
-			break;
-		case XMIT_FAIL_HOSTCMD_FAIL:
-			dev_err(&adapter->netdev->dev,
-				"xmit_start skb[%p] type[%x] No host commands "
-				"available\n", skb, skb->pkt_type);
-			break;
-		default:
-			ASSERT(0);
-		}
-	}
-	dev_kfree_skb(skb);
-	adapter->stats.tx_dropped++;
-}
-
-static void slic_rcv_handle_error(struct adapter *adapter,
-					struct slic_rcvbuf *rcvbuf)
-{
-	struct slic_hddr_wds *hdr = (struct slic_hddr_wds *)rcvbuf->data;
-
-	if (adapter->devid != SLIC_1GB_DEVICE_ID) {
-		if (hdr->frame_status14 & VRHSTAT_802OE)
-			adapter->if_events.oflow802++;
-		if (hdr->frame_status14 & VRHSTAT_TPOFLO)
-			adapter->if_events.Tprtoflow++;
-		if (hdr->frame_status_b14 & VRHSTATB_802UE)
-			adapter->if_events.uflow802++;
-		if (hdr->frame_status_b14 & VRHSTATB_RCVE) {
-			adapter->if_events.rcvearly++;
-			adapter->stats.rx_fifo_errors++;
-		}
-		if (hdr->frame_status_b14 & VRHSTATB_BUFF) {
-			adapter->if_events.Bufov++;
-			adapter->stats.rx_over_errors++;
-		}
-		if (hdr->frame_status_b14 & VRHSTATB_CARRE) {
-			adapter->if_events.Carre++;
-			adapter->stats.tx_carrier_errors++;
-		}
-		if (hdr->frame_status_b14 & VRHSTATB_LONGE)
-			adapter->if_events.Longe++;
-		if (hdr->frame_status_b14 & VRHSTATB_PREA)
-			adapter->if_events.Invp++;
-		if (hdr->frame_status_b14 & VRHSTATB_CRC) {
-			adapter->if_events.Crc++;
-			adapter->stats.rx_crc_errors++;
-		}
-		if (hdr->frame_status_b14 & VRHSTATB_DRBL)
-			adapter->if_events.Drbl++;
-		if (hdr->frame_status_b14 & VRHSTATB_CODE)
-			adapter->if_events.Code++;
-		if (hdr->frame_status_b14 & VRHSTATB_TPCSUM)
-			adapter->if_events.TpCsum++;
-		if (hdr->frame_status_b14 & VRHSTATB_TPHLEN)
-			adapter->if_events.TpHlen++;
-		if (hdr->frame_status_b14 & VRHSTATB_IPCSUM)
-			adapter->if_events.IpCsum++;
-		if (hdr->frame_status_b14 & VRHSTATB_IPLERR)
-			adapter->if_events.IpLen++;
-		if (hdr->frame_status_b14 & VRHSTATB_IPHERR)
-			adapter->if_events.IpHlen++;
-	} else {
-		if (hdr->frame_statusGB & VGBSTAT_XPERR) {
-			u32 xerr = hdr->frame_statusGB >> VGBSTAT_XERRSHFT;
-
-			if (xerr == VGBSTAT_XCSERR)
-				adapter->if_events.TpCsum++;
-			if (xerr == VGBSTAT_XUFLOW)
-				adapter->if_events.Tprtoflow++;
-			if (xerr == VGBSTAT_XHLEN)
-				adapter->if_events.TpHlen++;
-		}
-		if (hdr->frame_statusGB & VGBSTAT_NETERR) {
-			u32 nerr =
-			    (hdr->
-			     frame_statusGB >> VGBSTAT_NERRSHFT) &
-			    VGBSTAT_NERRMSK;
-			if (nerr == VGBSTAT_NCSERR)
-				adapter->if_events.IpCsum++;
-			if (nerr == VGBSTAT_NUFLOW)
-				adapter->if_events.IpLen++;
-			if (nerr == VGBSTAT_NHLEN)
-				adapter->if_events.IpHlen++;
-		}
-		if (hdr->frame_statusGB & VGBSTAT_LNKERR) {
-			u32 lerr = hdr->frame_statusGB & VGBSTAT_LERRMSK;
-
-			if (lerr == VGBSTAT_LDEARLY)
-				adapter->if_events.rcvearly++;
-			if (lerr == VGBSTAT_LBOFLO)
-				adapter->if_events.Bufov++;
-			if (lerr == VGBSTAT_LCODERR)
-				adapter->if_events.Code++;
-			if (lerr == VGBSTAT_LDBLNBL)
-				adapter->if_events.Drbl++;
-			if (lerr == VGBSTAT_LCRCERR)
-				adapter->if_events.Crc++;
-			if (lerr == VGBSTAT_LOFLO)
-				adapter->if_events.oflow802++;
-			if (lerr == VGBSTAT_LUFLO)
-				adapter->if_events.uflow802++;
-		}
-	}
-	return;
-}
-
-#define TCP_OFFLOAD_FRAME_PUSHFLAG  0x10000000
-#define M_FAST_PATH                 0x0040
-
-static void slic_rcv_handler(struct adapter *adapter)
-{
-	struct sk_buff *skb;
-	struct slic_rcvbuf *rcvbuf;
-	u32 frames = 0;
-
-	while ((skb = slic_rcvqueue_getnext(adapter))) {
-		u32 rx_bytes;
-
-		ASSERT(skb->head);
-		rcvbuf = (struct slic_rcvbuf *)skb->head;
-		adapter->card->events++;
-		if (rcvbuf->status & IRHDDR_ERR) {
-			adapter->rx_errors++;
-			slic_rcv_handle_error(adapter, rcvbuf);
-			slic_rcvqueue_reinsert(adapter, skb);
-			continue;
-		}
-
-		if (!slic_mac_filter(adapter, (struct ether_header *)
-					rcvbuf->data)) {
-			slic_rcvqueue_reinsert(adapter, skb);
-			continue;
-		}
-		skb_pull(skb, SLIC_RCVBUF_HEADSIZE);
-		rx_bytes = (rcvbuf->length & IRHDDR_FLEN_MSK);
-		skb_put(skb, rx_bytes);
-		adapter->stats.rx_packets++;
-		adapter->stats.rx_bytes += rx_bytes;
-#if SLIC_OFFLOAD_IP_CHECKSUM
-		skb->ip_summed = CHECKSUM_UNNECESSARY;
-#endif
-
-		skb->dev = adapter->netdev;
-		skb->protocol = eth_type_trans(skb, skb->dev);
-		netif_rx(skb);
-
-		++frames;
-#if SLIC_INTERRUPT_PROCESS_LIMIT
-		if (frames >= SLIC_RCVQ_MAX_PROCESS_ISR) {
-			adapter->rcv_interrupt_yields++;
-			break;
-		}
-#endif
-	}
-	adapter->max_isr_rcvs = max(adapter->max_isr_rcvs, frames);
-}
-
-static void slic_xmit_complete(struct adapter *adapter)
-{
-	struct slic_hostcmd *hcmd;
-	struct slic_rspbuf *rspbuf;
-	u32 frames = 0;
-	struct slic_handle_word slic_handle_word;
-
-	do {
-		rspbuf = slic_rspqueue_getnext(adapter);
-		if (!rspbuf)
-			break;
-		adapter->xmit_completes++;
-		adapter->card->events++;
-		/*
-		 Get the complete host command buffer
-		*/
-		slic_handle_word.handle_token = rspbuf->hosthandle;
-		ASSERT(slic_handle_word.handle_index);
-		ASSERT(slic_handle_word.handle_index <= SLIC_CMDQ_MAXCMDS);
-		hcmd =
-		    (struct slic_hostcmd *)
-			adapter->slic_handles[slic_handle_word.handle_index].
-									address;
-/*      hcmd = (struct slic_hostcmd *) rspbuf->hosthandle; */
-		ASSERT(hcmd);
-		ASSERT(hcmd->pslic_handle ==
-		       &adapter->slic_handles[slic_handle_word.handle_index]);
-		if (hcmd->type == SLIC_CMD_DUMB) {
-			if (hcmd->skb)
-				dev_kfree_skb_irq(hcmd->skb);
-			slic_cmdq_putdone_irq(adapter, hcmd);
-		}
-		rspbuf->status = 0;
-		rspbuf->hosthandle = 0;
-		frames++;
-	} while (1);
-	adapter->max_isr_xmits = max(adapter->max_isr_xmits, frames);
-}
-
-static irqreturn_t slic_interrupt(int irq, void *dev_id)
-{
-	struct net_device *dev = (struct net_device *)dev_id;
-	struct adapter *adapter = (struct adapter *)netdev_priv(dev);
-	u32 isr;
-
-	if ((adapter->pshmem) && (adapter->pshmem->isr)) {
-		slic_reg32_write(&adapter->slic_regs->slic_icr,
-				 ICR_INT_MASK, FLUSH);
-		isr = adapter->isrcopy = adapter->pshmem->isr;
-		adapter->pshmem->isr = 0;
-		adapter->num_isrs++;
-		switch (adapter->card->state) {
-		case CARD_UP:
-			if (isr & ~ISR_IO) {
-				if (isr & ISR_ERR) {
-					adapter->error_interrupts++;
-					if (isr & ISR_RMISS) {
-						int count;
-						int pre_count;
-						int errors;
-
-						struct slic_rcvqueue *rcvq =
-						    &adapter->rcvqueue;
-
-						adapter->
-						    error_rmiss_interrupts++;
-						if (!rcvq->errors)
-							rcv_count = rcvq->count;
-						pre_count = rcvq->count;
-						errors = rcvq->errors;
-
-						while (rcvq->count <
-						       SLIC_RCVQ_FILLTHRESH) {
-							count =
-							    slic_rcvqueue_fill
-							    (adapter);
-							if (!count)
-								break;
-						}
-					} else if (isr & ISR_XDROP) {
-						dev_err(&dev->dev,
-							"isr & ISR_ERR [%x] "
-							"ISR_XDROP \n", isr);
-					} else {
-						dev_err(&dev->dev,
-							"isr & ISR_ERR [%x]\n",
-							isr);
-					}
-				}
-
-				if (isr & ISR_LEVENT) {
-					adapter->linkevent_interrupts++;
-					slic_link_event_handler(adapter);
-				}
-
-				if ((isr & ISR_UPC) ||
-				    (isr & ISR_UPCERR) || (isr & ISR_UPCBSY)) {
-					adapter->upr_interrupts++;
-					slic_upr_request_complete(adapter, isr);
-				}
-			}
-
-			if (isr & ISR_RCV) {
-				adapter->rcv_interrupts++;
-				slic_rcv_handler(adapter);
-			}
-
-			if (isr & ISR_CMD) {
-				adapter->xmit_interrupts++;
-				slic_xmit_complete(adapter);
-			}
-			break;
-
-		case CARD_DOWN:
-			if ((isr & ISR_UPC) ||
-			    (isr & ISR_UPCERR) || (isr & ISR_UPCBSY)) {
-				adapter->upr_interrupts++;
-				slic_upr_request_complete(adapter, isr);
-			}
-			break;
-
-		default:
-			break;
-		}
-
-		adapter->isrcopy = 0;
-		adapter->all_reg_writes += 2;
-		adapter->isr_reg_writes++;
-		slic_reg32_write(&adapter->slic_regs->slic_isr, 0, FLUSH);
-	} else {
-		adapter->false_interrupts++;
-	}
-	return IRQ_HANDLED;
-}
-
-/*
- * slic_link_event_handler -
- *
- * Initiate a link configuration sequence.  The link configuration begins
- * by issuing a READ_LINK_STATUS command to the Utility Processor on the
- * SLIC.  Since the command finishes asynchronously, the slic_upr_comlete
- * routine will follow it up witha UP configuration write command, which
- * will also complete asynchronously.
- *
- */
-static void slic_link_event_handler(struct adapter *adapter)
-{
-	int status;
-	struct slic_shmem *pshmem;
-
-	if (adapter->state != ADAPT_UP) {
-		/* Adapter is not operational.  Ignore.  */
-		return;
-	}
-
-	pshmem = (struct slic_shmem *)adapter->phys_shmem;
-
-#if defined(CONFIG_X86_64)
-	status = slic_upr_request(adapter,
-				  SLIC_UPR_RLSR,
-				  SLIC_GET_ADDR_LOW(&pshmem->linkstatus),
-				  SLIC_GET_ADDR_HIGH(&pshmem->linkstatus),
-				  0, 0);
-#elif defined(CONFIG_X86)
-	status = slic_upr_request(adapter, SLIC_UPR_RLSR,
-		(u32) &pshmem->linkstatus,	/* no 4GB wrap guaranteed */
-				  0, 0, 0);
-#else
-	Stop compilation;
-#endif
-	ASSERT((status == STATUS_SUCCESS) || (status == STATUS_PENDING));
-}
-
-static void slic_init_cleanup(struct adapter *adapter)
-{
-	if (adapter->intrregistered) {
-		adapter->intrregistered = 0;
-		free_irq(adapter->netdev->irq, adapter->netdev);
-
-	}
-	if (adapter->pshmem) {
-		pci_free_consistent(adapter->pcidev,
-				    sizeof(struct slic_shmem),
-				    adapter->pshmem, adapter->phys_shmem);
-		adapter->pshmem = NULL;
-		adapter->phys_shmem = (dma_addr_t) NULL;
-	}
-
-	if (adapter->pingtimerset) {
-		adapter->pingtimerset = 0;
-		del_timer(&adapter->pingtimer);
-	}
-
-	slic_rspqueue_free(adapter);
-	slic_cmdq_free(adapter);
-	slic_rcvqueue_free(adapter);
-}
-
-static struct net_device_stats *slic_get_stats(struct net_device *dev)
-{
-	struct adapter *adapter = (struct adapter *)netdev_priv(dev);
-	struct net_device_stats *stats;
-
-	ASSERT(adapter);
-	stats = &adapter->stats;
-	stats->collisions = adapter->slic_stats.iface.xmit_collisions;
-	stats->rx_errors = adapter->slic_stats.iface.rcv_errors;
-	stats->tx_errors = adapter->slic_stats.iface.xmt_errors;
-	stats->rx_missed_errors = adapter->slic_stats.iface.rcv_discards;
-	stats->tx_heartbeat_errors = 0;
-	stats->tx_aborted_errors = 0;
-	stats->tx_window_errors = 0;
-	stats->tx_fifo_errors = 0;
-	stats->rx_frame_errors = 0;
-	stats->rx_length_errors = 0;
-	return &adapter->stats;
-}
-
-/*
- *  Allocate a mcast_address structure to hold the multicast address.
- *  Link it in.
- */
-static int slic_mcast_add_list(struct adapter *adapter, char *address)
-{
-	struct mcast_address *mcaddr, *mlist;
-	bool equaladdr;
-
-	/* Check to see if it already exists */
-	mlist = adapter->mcastaddrs;
-	while (mlist) {
-		ETHER_EQ_ADDR(mlist->address, address, equaladdr);
-		if (equaladdr)
-			return STATUS_SUCCESS;
-		mlist = mlist->next;
-	}
-
-	/* Doesn't already exist.  Allocate a structure to hold it */
-	mcaddr = kmalloc(sizeof(struct mcast_address), GFP_ATOMIC);
-	if (mcaddr == NULL)
-		return 1;
-
-	memcpy(mcaddr->address, address, 6);
-
-	mcaddr->next = adapter->mcastaddrs;
-	adapter->mcastaddrs = mcaddr;
-
-	return STATUS_SUCCESS;
-}
-
-/*
- * Functions to obtain the CRC corresponding to the destination mac address.
- * This is a standard ethernet CRC in that it is a 32-bit, reflected CRC using
- * the polynomial:
- *   x^32 + x^26 + x^23 + x^22 + x^16 + x^12 + x^11 + x^10 + x^8 + x^7 + x^5 +
- *   x^4 + x^2 + x^1.
- *
- * After the CRC for the 6 bytes is generated (but before the value is
- * complemented),
- * we must then transpose the value and return bits 30-23.
- *
- */
-static u32 slic_crc_table[256];	/* Table of CRCs for all possible byte values */
-static u32 slic_crc_init;	/* Is table initialized */
-
-/*
- *  Contruct the CRC32 table
- */
-static void slic_mcast_init_crc32(void)
-{
-	u32 c;		/*  CRC shit reg                 */
-	u32 e = 0;		/*  Poly X-or pattern            */
-	int i;			/*  counter                      */
-	int k;			/*  byte being shifted into crc  */
-
-	static int p[] = { 0, 1, 2, 4, 5, 7, 8, 10, 11, 12, 16, 22, 23, 26 };
-
-	for (i = 0; i < ARRAY_SIZE(p); i++)
-		e |= 1L << (31 - p[i]);
-
-	for (i = 1; i < 256; i++) {
-		c = i;
-		for (k = 8; k; k--)
-			c = c & 1 ? (c >> 1) ^ e : c >> 1;
-		slic_crc_table[i] = c;
-	}
-}
-
-/*
- *  Return the MAC hast as described above.
- */
-static unsigned char slic_mcast_get_mac_hash(char *macaddr)
-{
-	u32 crc;
-	char *p;
-	int i;
-	unsigned char machash = 0;
-
-	if (!slic_crc_init) {
-		slic_mcast_init_crc32();
-		slic_crc_init = 1;
-	}
-
-	crc = 0xFFFFFFFF;	/* Preload shift register, per crc-32 spec */
-	for (i = 0, p = macaddr; i < 6; ++p, ++i)
-		crc = (crc >> 8) ^ slic_crc_table[(crc ^ *p) & 0xFF];
-
-	/* Return bits 1-8, transposed */
-	for (i = 1; i < 9; i++)
-		machash |= (((crc >> i) & 1) << (8 - i));
-
-	return machash;
+	spin_unlock_irqrestore(&adapter->bit64reglock, flags);
 }
 
 static void slic_mcast_set_bit(struct adapter *adapter, char *address)
@@ -1348,61 +158,20 @@ static void slic_mcast_set_bit(struct adapter *adapter, char *address)
 	unsigned char crcpoly;
 
 	/* Get the CRC polynomial for the mac address */
-	crcpoly = slic_mcast_get_mac_hash(address);
+	/*
+	 * we use bits 1-8 (lsb), bitwise reversed,
+	 * msb (= lsb bit 0 before bitrev) is automatically discarded
+	 */
+	crcpoly = ether_crc(ETH_ALEN, address) >> 23;
 
-	/* We only have space on the SLIC for 64 entries.  Lop
+	/*
+	 * We only have space on the SLIC for 64 entries.  Lop
 	 * off the top two bits. (2^6 = 64)
 	 */
 	crcpoly &= 0x3F;
 
 	/* OR in the new bit into our 64 bit mask. */
-	adapter->mcastmask |= (u64) 1 << crcpoly;
-}
-
-static void slic_mcast_set_list(struct net_device *dev)
-{
-	struct adapter *adapter = (struct adapter *)netdev_priv(dev);
-	int status = STATUS_SUCCESS;
-	int i;
-	char *addresses;
-	struct dev_mc_list *mc_list = dev->mc_list;
-	int mc_count = dev->mc_count;
-
-	ASSERT(adapter);
-
-	for (i = 1; i <= mc_count; i++) {
-		addresses = (char *) &mc_list->dmi_addr;
-		if (mc_list->dmi_addrlen == 6) {
-			status = slic_mcast_add_list(adapter, addresses);
-			if (status != STATUS_SUCCESS)
-				break;
-		} else {
-			status = -EINVAL;
-			break;
-		}
-		slic_mcast_set_bit(adapter, addresses);
-		mc_list = mc_list->next;
-	}
-
-	if (adapter->devflags_prev != dev->flags) {
-		adapter->macopts = MAC_DIRECTED;
-		if (dev->flags) {
-			if (dev->flags & IFF_BROADCAST)
-				adapter->macopts |= MAC_BCAST;
-			if (dev->flags & IFF_PROMISC)
-				adapter->macopts |= MAC_PROMISC;
-			if (dev->flags & IFF_ALLMULTI)
-				adapter->macopts |= MAC_ALLMCAST;
-			if (dev->flags & IFF_MULTICAST)
-				adapter->macopts |= MAC_MCAST;
-		}
-		adapter->devflags_prev = dev->flags;
-		slic_config_set(adapter, true);
-	} else {
-		if (status == STATUS_SUCCESS)
-			slic_mcast_set_mask(adapter);
-	}
-	return;
+	adapter->mcastmask |= (u64)1 << crcpoly;
 }
 
 static void slic_mcast_set_mask(struct adapter *adapter)
@@ -1410,7 +179,8 @@ static void slic_mcast_set_mask(struct adapter *adapter)
 	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
 
 	if (adapter->macopts & (MAC_ALLMCAST | MAC_PROMISC)) {
-		/* Turn on all multicast addresses. We have to do this for
+		/*
+		 * Turn on all multicast addresses. We have to do this for
 		 * promiscuous mode as well as ALLMCAST mode.  It saves the
 		 * Microcode from having to keep state about the MAC
 		 * configuration.
@@ -1419,7 +189,8 @@ static void slic_mcast_set_mask(struct adapter *adapter)
 		slic_reg32_write(&slic_regs->slic_mcasthigh, 0xFFFFFFFF,
 				 FLUSH);
 	} else {
-		/* Commit our multicast mast to the SLIC by writing to the
+		/*
+		 * Commit our multicast mast to the SLIC by writing to the
 		 * multicast address mask registers
 		 */
 		slic_reg32_write(&slic_regs->slic_mcastlow,
@@ -1434,131 +205,11 @@ static void slic_timer_ping(ulong dev)
 	struct adapter *adapter;
 	struct sliccard *card;
 
-	ASSERT(dev);
 	adapter = netdev_priv((struct net_device *)dev);
-	ASSERT(adapter);
 	card = adapter->card;
-	ASSERT(card);
 
 	adapter->pingtimer.expires = jiffies + (PING_TIMER_INTERVAL * HZ);
 	add_timer(&adapter->pingtimer);
-}
-
-/*
- *  slic_if_init
- *
- *  Perform initialization of our slic interface.
- *
- */
-static int slic_if_init(struct adapter *adapter)
-{
-	struct sliccard *card = adapter->card;
-	struct net_device *dev = adapter->netdev;
-	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
-	struct slic_shmem *pshmem;
-	int status = 0;
-
-	ASSERT(card);
-
-	/* adapter should be down at this point */
-	if (adapter->state != ADAPT_DOWN) {
-		dev_err(&dev->dev, "%s: adapter->state != ADAPT_DOWN\n",
-			__func__);
-		return -EIO;
-	}
-	ASSERT(adapter->linkstate == LINK_DOWN);
-
-	adapter->devflags_prev = dev->flags;
-	adapter->macopts = MAC_DIRECTED;
-	if (dev->flags) {
-		if (dev->flags & IFF_BROADCAST)
-			adapter->macopts |= MAC_BCAST;
-		if (dev->flags & IFF_PROMISC)
-			adapter->macopts |= MAC_PROMISC;
-		if (dev->flags & IFF_ALLMULTI)
-			adapter->macopts |= MAC_ALLMCAST;
-		if (dev->flags & IFF_MULTICAST)
-			adapter->macopts |= MAC_MCAST;
-	}
-	status = slic_adapter_allocresources(adapter);
-	if (status != STATUS_SUCCESS) {
-		dev_err(&dev->dev,
-			"%s: slic_adapter_allocresources FAILED %x\n",
-			__func__, status);
-		slic_adapter_freeresources(adapter);
-		return status;
-	}
-
-	if (!adapter->queues_initialized) {
-		if (slic_rspqueue_init(adapter))
-			return -ENOMEM;
-		if (slic_cmdq_init(adapter))
-			return -ENOMEM;
-		if (slic_rcvqueue_init(adapter))
-			return -ENOMEM;
-		adapter->queues_initialized = 1;
-	}
-
-	slic_reg32_write(&slic_regs->slic_icr, ICR_INT_OFF, FLUSH);
-	mdelay(1);
-
-	if (!adapter->isp_initialized) {
-		pshmem = (struct slic_shmem *)adapter->phys_shmem;
-
-		spin_lock_irqsave(&adapter->bit64reglock.lock,
-					adapter->bit64reglock.flags);
-
-#if defined(CONFIG_X86_64)
-		slic_reg32_write(&slic_regs->slic_addr_upper,
-				 SLIC_GET_ADDR_HIGH(&pshmem->isr), DONT_FLUSH);
-		slic_reg32_write(&slic_regs->slic_isp,
-				 SLIC_GET_ADDR_LOW(&pshmem->isr), FLUSH);
-#elif defined(CONFIG_X86)
-		slic_reg32_write(&slic_regs->slic_addr_upper, 0, DONT_FLUSH);
-		slic_reg32_write(&slic_regs->slic_isp, (u32)&pshmem->isr, FLUSH);
-#else
-		Stop Compilations
-#endif
-		spin_unlock_irqrestore(&adapter->bit64reglock.lock,
-					adapter->bit64reglock.flags);
-		adapter->isp_initialized = 1;
-	}
-
-	adapter->state = ADAPT_UP;
-	if (!card->loadtimerset) {
-		init_timer(&card->loadtimer);
-		card->loadtimer.expires =
-		    jiffies + (SLIC_LOADTIMER_PERIOD * HZ);
-		card->loadtimer.data = (ulong) card;
-		card->loadtimer.function = &slic_timer_load_check;
-		add_timer(&card->loadtimer);
-
-		card->loadtimerset = 1;
-	}
-
-	if (!adapter->pingtimerset) {
-		init_timer(&adapter->pingtimer);
-		adapter->pingtimer.expires =
-		    jiffies + (PING_TIMER_INTERVAL * HZ);
-		adapter->pingtimer.data = (ulong) dev;
-		adapter->pingtimer.function = &slic_timer_ping;
-		add_timer(&adapter->pingtimer);
-		adapter->pingtimerset = 1;
-		adapter->card->pingstatus = ISR_PINGMASK;
-	}
-
-	/*
-	 *    clear any pending events, then enable interrupts
-	 */
-	adapter->isrcopy = 0;
-	adapter->pshmem->isr = 0;
-	slic_reg32_write(&slic_regs->slic_isr, 0, FLUSH);
-	slic_reg32_write(&slic_regs->slic_icr, ICR_INT_ON, FLUSH);
-
-	slic_link_config(adapter, LINK_AUTOSPEED, LINK_AUTOD);
-	slic_link_event_handler(adapter);
-
-	return STATUS_SUCCESS;
 }
 
 static void slic_unmap_mmio_space(struct adapter *adapter)
@@ -1566,64 +217,6 @@ static void slic_unmap_mmio_space(struct adapter *adapter)
 	if (adapter->slic_regs)
 		iounmap(adapter->slic_regs);
 	adapter->slic_regs = NULL;
-}
-
-static int slic_adapter_allocresources(struct adapter *adapter)
-{
-	if (!adapter->intrregistered) {
-		int retval;
-
-		spin_unlock_irqrestore(&slic_global.driver_lock.lock,
-					slic_global.driver_lock.flags);
-
-		retval = request_irq(adapter->netdev->irq,
-				     &slic_interrupt,
-				     IRQF_SHARED,
-				     adapter->netdev->name, adapter->netdev);
-
-		spin_lock_irqsave(&slic_global.driver_lock.lock,
-					slic_global.driver_lock.flags);
-
-		if (retval) {
-			dev_err(&adapter->netdev->dev,
-				"request_irq (%s) FAILED [%x]\n",
-				adapter->netdev->name, retval);
-			return retval;
-		}
-		adapter->intrregistered = 1;
-	}
-	return STATUS_SUCCESS;
-}
-
-static void slic_config_pci(struct pci_dev *pcidev)
-{
-	u16 pci_command;
-	u16 new_command;
-
-	pci_read_config_word(pcidev, PCI_COMMAND, &pci_command);
-
-	new_command = pci_command | PCI_COMMAND_MASTER
-	    | PCI_COMMAND_MEMORY
-	    | PCI_COMMAND_INVALIDATE
-	    | PCI_COMMAND_PARITY | PCI_COMMAND_SERR | PCI_COMMAND_FAST_BACK;
-	if (pci_command != new_command)
-		pci_write_config_word(pcidev, PCI_COMMAND, new_command);
-}
-
-static void slic_adapter_freeresources(struct adapter *adapter)
-{
-	slic_init_cleanup(adapter);
-	memset(&adapter->stats, 0, sizeof(struct net_device_stats));
-	adapter->error_interrupts = 0;
-	adapter->rcv_interrupts = 0;
-	adapter->xmit_interrupts = 0;
-	adapter->linkevent_interrupts = 0;
-	adapter->upr_interrupts = 0;
-	adapter->num_isrs = 0;
-	adapter->xmit_completes = 0;
-	adapter->rcv_broadcasts = 0;
-	adapter->rcv_multicasts = 0;
-	adapter->rcv_unicasts = 0;
 }
 
 /*
@@ -1645,9 +238,6 @@ static void slic_link_config(struct adapter *adapter,
 	if (adapter->state != ADAPT_UP)
 		return;
 
-	ASSERT((adapter->devid == SLIC_1GB_DEVICE_ID)
-	       || (adapter->devid == SLIC_2GB_DEVICE_ID));
-
 	if (linkspeed > LINK_1000MB)
 		linkspeed = LINK_AUTOSPEED;
 	if (linkduplex > LINK_AUTOD)
@@ -1657,7 +247,8 @@ static void slic_link_config(struct adapter *adapter,
 
 	if ((linkspeed == LINK_AUTOSPEED) || (linkspeed == LINK_1000MB)) {
 		if (adapter->flags & ADAPT_FLAGS_FIBERMEDIA) {
-			/*  We've got a fiber gigabit interface, and register
+			/*
+			 * We've got a fiber gigabit interface, and register
 			 *  4 is different in fiber mode than in copper mode
 			 */
 
@@ -1675,16 +266,22 @@ static void slic_link_config(struct adapter *adapter,
 				      PCR_AUTONEG_RST));
 				slic_reg32_write(wphy, phy_config, FLUSH);
 			} else {	/* forced 1000 Mb FD*/
-				/* power down phy to break link
-				   this may not work) */
+				/*
+				 * power down phy to break link
+				 * this may not work)
+				 */
 				phy_config = (MIICR_REG_PCR | PCR_POWERDOWN);
 				slic_reg32_write(wphy, phy_config, FLUSH);
-				/* wait, Marvell says 1 sec,
-				   try to get away with 10 ms  */
+				/*
+				 * wait, Marvell says 1 sec,
+				 * try to get away with 10 ms
+				 */
 				mdelay(10);
 
-				/* disable auto-neg, set speed/duplex,
-				   soft reset phy, powerup */
+				/*
+				 * disable auto-neg, set speed/duplex,
+				 * soft reset phy, powerup
+				 */
 				phy_config =
 				    (MIICR_REG_PCR |
 				     (PCR_RESET | PCR_SPEED_1000 |
@@ -1693,7 +290,8 @@ static void slic_link_config(struct adapter *adapter,
 			}
 		} else {	/* copper gigabit */
 
-			/* Auto-Negotiate or 1000 Mb must be auto negotiated
+			/*
+			 * Auto-Negotiate or 1000 Mb must be auto negotiated
 			 * We've got a copper gigabit interface, and
 			 * register 4 is different in copper mode than
 			 * in fiber mode
@@ -1705,8 +303,10 @@ static void slic_link_config(struct adapter *adapter,
 				     (PAR_ADV100FD | PAR_ADV100HD | PAR_ADV10FD
 				      | PAR_ADV10HD));
 			} else {
-			/* linkspeed == LINK_1000MB -
-			   don't advertise 10/100 Mb modes  */
+			/*
+			 * linkspeed == LINK_1000MB -
+			 * don't advertise 10/100 Mb modes
+			 */
 				phy_advreg = MIICR_REG_4;
 			}
 			/* enable PAUSE frames  */
@@ -1719,8 +319,10 @@ static void slic_link_config(struct adapter *adapter,
 			slic_reg32_write(wphy, phy_gctlreg, FLUSH);
 
 			if (adapter->subsysid != SLIC_1GB_CICADA_SUBSYS_ID) {
-				/* if a Marvell PHY
-				   enable auto crossover */
+				/*
+				 * if a Marvell PHY
+				 * enable auto crossover
+				 */
 				phy_config =
 				    (MIICR_REG_16 | (MRV_REG16_XOVERON));
 				slic_reg32_write(wphy, phy_config, FLUSH);
@@ -1751,8 +353,10 @@ static void slic_link_config(struct adapter *adapter,
 			duplex = PCR_DUPLEX_FULL;
 
 		if (adapter->subsysid != SLIC_1GB_CICADA_SUBSYS_ID) {
-			/* if a Marvell PHY
-			   disable auto crossover  */
+			/*
+			 * if a Marvell PHY
+			 * disable auto crossover
+			 */
 			phy_config = (MIICR_REG_16 | (MRV_REG16_XOVEROFF));
 			slic_reg32_write(wphy, phy_config, FLUSH);
 		}
@@ -1765,9 +369,11 @@ static void slic_link_config(struct adapter *adapter,
 		mdelay(10);
 
 		if (adapter->subsysid != SLIC_1GB_CICADA_SUBSYS_ID) {
-			/* if a Marvell PHY
-			   disable auto-neg, set speed,
-			   soft reset phy, powerup */
+			/*
+			 * if a Marvell PHY
+			 * disable auto-neg, set speed,
+			 * soft reset phy, powerup
+			 */
 			phy_config =
 			    (MIICR_REG_PCR | (PCR_RESET | speed | duplex));
 			slic_reg32_write(wphy, phy_config, FLUSH);
@@ -1777,18 +383,6 @@ static void slic_link_config(struct adapter *adapter,
 			slic_reg32_write(wphy, phy_config, FLUSH);
 		}
 	}
-}
-
-static void slic_card_cleanup(struct sliccard *card)
-{
-	if (card->loadtimerset) {
-		card->loadtimerset = 0;
-		del_timer(&card->loadtimer);
-	}
-
-	slic_debug_card_destroy(card);
-
-	kfree(card);
 }
 
 static int slic_card_download_gbrcv(struct adapter *adapter)
@@ -1810,14 +404,13 @@ static int slic_card_download_gbrcv(struct adapter *adapter)
 		file = "slicoss/gbrcvucode.sys";
 		break;
 	default:
-		ASSERT(0);
-		break;
+		return -ENOENT;
 	}
 
 	ret = request_firmware(&fw, file, &adapter->pcidev->dev);
 	if (ret) {
 		dev_err(&adapter->pcidev->dev,
-			"SLICOSS: Failed to load firmware %s\n", file);
+			"Failed to load firmware %s\n", file);
 		return ret;
 	}
 
@@ -1825,15 +418,16 @@ static int slic_card_download_gbrcv(struct adapter *adapter)
 	index += 4;
 	switch (adapter->devid) {
 	case SLIC_2GB_DEVICE_ID:
-		if (rcvucodelen != OasisRcvUCodeLen)
+		if (rcvucodelen != OasisRcvUCodeLen) {
+			release_firmware(fw);
 			return -EINVAL;
+		}
 		break;
 	case SLIC_1GB_DEVICE_ID:
-		if (rcvucodelen != GBRcvUCodeLen)
+		if (rcvucodelen != GBRcvUCodeLen) {
+			release_firmware(fw);
 			return -EINVAL;
-		break;
-	default:
-		ASSERT(0);
+		}
 		break;
 	}
 	/* start download */
@@ -1861,6 +455,9 @@ static int slic_card_download_gbrcv(struct adapter *adapter)
 	return 0;
 }
 
+MODULE_FIRMWARE("slicoss/oasisrcvucode.sys");
+MODULE_FIRMWARE("slicoss/gbrcvucode.sys");
+
 static int slic_card_download(struct adapter *adapter)
 {
 	const struct firmware *fw;
@@ -1886,18 +483,16 @@ static int slic_card_download(struct adapter *adapter)
 		file = "slicoss/gbdownload.sys";
 		break;
 	default:
-		ASSERT(0);
-		break;
+		return -ENOENT;
 	}
 	ret = request_firmware(&fw, file, &adapter->pcidev->dev);
 	if (ret) {
 		dev_err(&adapter->pcidev->dev,
-			"SLICOSS: Failed to load firmware %s\n", file);
+			"Failed to load firmware %s\n", file);
 		return ret;
 	}
 	numsects = *(u32 *)(fw->data + index);
 	index += 4;
-	ASSERT(numsects <= 3);
 	for (i = 0; i < numsects; i++) {
 		sectsize[i] = *(u32 *)(fw->data + index);
 		index += 4;
@@ -1918,12 +513,14 @@ static int slic_card_download(struct adapter *adapter)
 			slic_reg32_write(&slic_regs->slic_wcs,
 					 baseaddress + codeaddr, FLUSH);
 			/* Write out instruction to low addr */
-			slic_reg32_write(&slic_regs->slic_wcs, instruction, FLUSH);
+			slic_reg32_write(&slic_regs->slic_wcs,
+					instruction, FLUSH);
 			instruction = *(u32 *)(fw->data + index);
 			index += 4;
 
 			/* Write out instruction to high addr */
-			slic_reg32_write(&slic_regs->slic_wcs, instruction, FLUSH);
+			slic_reg32_write(&slic_regs->slic_wcs,
+					instruction, FLUSH);
 			instruction = *(u32 *)(fw->data + index);
 			index += 4;
 		}
@@ -1953,11 +550,13 @@ static int slic_card_download(struct adapter *adapter)
 			index += 4;
 
 			/* Check SRAM location zero. If it is non-zero. Abort.*/
-/*			failure = readl((u32 __iomem *)&slic_regs->slic_reset);
-			if (failure) {
-				release_firmware(fw);
-				return -EIO;
-			}*/
+		     /*
+		      * failure = readl((u32 __iomem *)&slic_regs->slic_reset);
+		      * if (failure) {
+		      *	release_firmware(fw);
+		      *	return -EIO;
+		      * }
+		      */
 		}
 	}
 	release_firmware(fw);
@@ -1965,12 +564,17 @@ static int slic_card_download(struct adapter *adapter)
 	mdelay(10);
 	slic_reg32_write(&slic_regs->slic_wcs, SLIC_WCS_START, FLUSH);
 
-	/* stall for 20 ms, long enough for ucode to init card
-	   and reach mainloop */
+	/*
+	 * stall for 20 ms, long enough for ucode to init card
+	 * and reach mainloop
+	 */
 	mdelay(20);
 
-	return STATUS_SUCCESS;
+	return 0;
 }
+
+MODULE_FIRMWARE("slicoss/oasisdownload.sys");
+MODULE_FIRMWARE("slicoss/gbdownload.sys");
 
 static void slic_adapter_set_hwaddr(struct adapter *adapter)
 {
@@ -1980,15 +584,12 @@ static void slic_adapter_set_hwaddr(struct adapter *adapter)
 		memcpy(adapter->macaddr,
 		       card->config.MacInfo[adapter->functionnumber].macaddrA,
 		       sizeof(struct slic_config_mac));
-		if (!(adapter->currmacaddr[0] || adapter->currmacaddr[1] ||
-		      adapter->currmacaddr[2] || adapter->currmacaddr[3] ||
-		      adapter->currmacaddr[4] || adapter->currmacaddr[5])) {
-			memcpy(adapter->currmacaddr, adapter->macaddr, 6);
-		}
-		if (adapter->netdev) {
+		if (is_zero_ether_addr(adapter->currmacaddr))
+			memcpy(adapter->currmacaddr, adapter->macaddr,
+			       ETH_ALEN);
+		if (adapter->netdev)
 			memcpy(adapter->netdev->dev_addr, adapter->currmacaddr,
-			       6);
-		}
+			       ETH_ALEN);
 	}
 }
 
@@ -1996,317 +597,6 @@ static void slic_intagg_set(struct adapter *adapter, u32 value)
 {
 	slic_reg32_write(&adapter->slic_regs->slic_intagg, value, FLUSH);
 	adapter->card->loadlevel_current = value;
-}
-
-static int slic_card_init(struct sliccard *card, struct adapter *adapter)
-{
-	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
-	struct slic_eeprom *peeprom;
-	struct oslic_eeprom *pOeeprom;
-	dma_addr_t phys_config;
-	u32 phys_configh;
-	u32 phys_configl;
-	u32 i = 0;
-	struct slic_shmem *pshmem;
-	int status;
-	uint macaddrs = card->card_size;
-	ushort eecodesize;
-	ushort dramsize;
-	ushort ee_chksum;
-	ushort calc_chksum;
-	struct slic_config_mac *pmac;
-	unsigned char fruformat;
-	unsigned char oemfruformat;
-	struct atk_fru *patkfru;
-	union oemfru *poemfru;
-
-	/* Reset everything except PCI configuration space */
-	slic_soft_reset(adapter);
-
-	/* Download the microcode */
-	status = slic_card_download(adapter);
-
-	if (status != STATUS_SUCCESS) {
-		dev_err(&adapter->pcidev->dev,
-			"download failed bus %d slot %d\n",
-			adapter->busnumber, adapter->slotnumber);
-		return status;
-	}
-
-	if (!card->config_set) {
-		peeprom = pci_alloc_consistent(adapter->pcidev,
-					       sizeof(struct slic_eeprom),
-					       &phys_config);
-
-		phys_configl = SLIC_GET_ADDR_LOW(phys_config);
-		phys_configh = SLIC_GET_ADDR_HIGH(phys_config);
-
-		if (!peeprom) {
-			dev_err(&adapter->pcidev->dev,
-				"eeprom read failed to get memory "
-				"bus %d slot %d\n", adapter->busnumber,
-				adapter->slotnumber);
-			return -ENOMEM;
-		} else {
-			memset(peeprom, 0, sizeof(struct slic_eeprom));
-		}
-		slic_reg32_write(&slic_regs->slic_icr, ICR_INT_OFF, FLUSH);
-		mdelay(1);
-		pshmem = (struct slic_shmem *)adapter->phys_shmem;
-
-		spin_lock_irqsave(&adapter->bit64reglock.lock,
-					adapter->bit64reglock.flags);
-		slic_reg32_write(&slic_regs->slic_addr_upper, 0, DONT_FLUSH);
-		slic_reg32_write(&slic_regs->slic_isp,
-				 SLIC_GET_ADDR_LOW(&pshmem->isr), FLUSH);
-		spin_unlock_irqrestore(&adapter->bit64reglock.lock,
-					adapter->bit64reglock.flags);
-
-		slic_config_get(adapter, phys_configl, phys_configh);
-
-		for (;;) {
-			if (adapter->pshmem->isr) {
-				if (adapter->pshmem->isr & ISR_UPC) {
-					adapter->pshmem->isr = 0;
-					slic_reg64_write(adapter,
-						&slic_regs->slic_isp, 0,
-						&slic_regs->slic_addr_upper,
-						0, FLUSH);
-					slic_reg32_write(&slic_regs->slic_isr,
-							 0, FLUSH);
-
-					slic_upr_request_complete(adapter, 0);
-					break;
-				} else {
-					adapter->pshmem->isr = 0;
-					slic_reg32_write(&slic_regs->slic_isr,
-							 0, FLUSH);
-				}
-			} else {
-				mdelay(1);
-				i++;
-				if (i > 5000) {
-					dev_err(&adapter->pcidev->dev,
-						"%d config data fetch timed out!\n",
-						adapter->port);
-					slic_reg64_write(adapter,
-						&slic_regs->slic_isp, 0,
-						&slic_regs->slic_addr_upper,
-						0, FLUSH);
-					return -EINVAL;
-				}
-			}
-		}
-
-		switch (adapter->devid) {
-		/* Oasis card */
-		case SLIC_2GB_DEVICE_ID:
-			/* extract EEPROM data and pointers to EEPROM data */
-			pOeeprom = (struct oslic_eeprom *) peeprom;
-			eecodesize = pOeeprom->EecodeSize;
-			dramsize = pOeeprom->DramSize;
-			pmac = pOeeprom->MacInfo;
-			fruformat = pOeeprom->FruFormat;
-			patkfru = &pOeeprom->AtkFru;
-			oemfruformat = pOeeprom->OemFruFormat;
-			poemfru = &pOeeprom->OemFru;
-			macaddrs = 2;
-			/* Minor kludge for Oasis card
-			     get 2 MAC addresses from the
-			     EEPROM to ensure that function 1
-			     gets the Port 1 MAC address */
-			break;
-		default:
-			/* extract EEPROM data and pointers to EEPROM data */
-			eecodesize = peeprom->EecodeSize;
-			dramsize = peeprom->DramSize;
-			pmac = peeprom->u2.mac.MacInfo;
-			fruformat = peeprom->FruFormat;
-			patkfru = &peeprom->AtkFru;
-			oemfruformat = peeprom->OemFruFormat;
-			poemfru = &peeprom->OemFru;
-			break;
-		}
-
-		card->config.EepromValid = false;
-
-		/*  see if the EEPROM is valid by checking it's checksum */
-		if ((eecodesize <= MAX_EECODE_SIZE) &&
-		    (eecodesize >= MIN_EECODE_SIZE)) {
-
-			ee_chksum =
-			    *(u16 *) ((char *) peeprom + (eecodesize - 2));
-			/*
-			    calculate the EEPROM checksum
-			*/
-			calc_chksum =
-			    ~slic_eeprom_cksum((char *) peeprom,
-					       (eecodesize - 2));
-			/*
-			    if the ucdoe chksum flag bit worked,
-			    we wouldn't need this shit
-			*/
-			if (ee_chksum == calc_chksum)
-				card->config.EepromValid = true;
-		}
-		/*  copy in the DRAM size */
-		card->config.DramSize = dramsize;
-
-		/*  copy in the MAC address(es) */
-		for (i = 0; i < macaddrs; i++) {
-			memcpy(&card->config.MacInfo[i],
-			       &pmac[i], sizeof(struct slic_config_mac));
-		}
-
-		/*  copy the Alacritech FRU information */
-		card->config.FruFormat = fruformat;
-		memcpy(&card->config.AtkFru, patkfru,
-						sizeof(struct atk_fru));
-
-		pci_free_consistent(adapter->pcidev,
-				    sizeof(struct slic_eeprom),
-				    peeprom, phys_config);
-
-		if ((!card->config.EepromValid) &&
-		    (adapter->reg_params.fail_on_bad_eeprom)) {
-			slic_reg64_write(adapter, &slic_regs->slic_isp, 0,
-					 &slic_regs->slic_addr_upper,
-					 0, FLUSH);
-			dev_err(&adapter->pcidev->dev,
-				"unsupported CONFIGURATION EEPROM invalid\n");
-			return -EINVAL;
-		}
-
-		card->config_set = 1;
-	}
-
-	if (slic_card_download_gbrcv(adapter)) {
-		dev_err(&adapter->pcidev->dev,
-			"unable to download GB receive microcode\n");
-		return -EINVAL;
-	}
-
-	if (slic_global.dynamic_intagg)
-		slic_intagg_set(adapter, 0);
-	else
-		slic_intagg_set(adapter, intagg_delay);
-
-	/*
-	 *  Initialize ping status to "ok"
-	 */
-	card->pingstatus = ISR_PINGMASK;
-
-	/*
-	 * Lastly, mark our card state as up and return success
-	 */
-	card->state = CARD_UP;
-	card->reset_in_progress = 0;
-
-	return STATUS_SUCCESS;
-}
-
-static u32 slic_card_locate(struct adapter *adapter)
-{
-	struct sliccard *card = slic_global.slic_card;
-	struct physcard *physcard = slic_global.phys_card;
-	ushort card_hostid;
-	u16 __iomem *hostid_reg;
-	uint i;
-	uint rdhostid_offset = 0;
-
-	switch (adapter->devid) {
-	case SLIC_2GB_DEVICE_ID:
-		rdhostid_offset = SLIC_RDHOSTID_2GB;
-		break;
-	case SLIC_1GB_DEVICE_ID:
-		rdhostid_offset = SLIC_RDHOSTID_1GB;
-		break;
-	default:
-		ASSERT(0);
-		break;
-	}
-
-	hostid_reg =
-	    (u16 __iomem *) (((u8 __iomem *) (adapter->slic_regs)) +
-	    rdhostid_offset);
-
-	/* read the 16 bit hostid from SRAM */
-	card_hostid = (ushort) readw(hostid_reg);
-
-	/* Initialize a new card structure if need be */
-	if (card_hostid == SLIC_HOSTID_DEFAULT) {
-		card = kzalloc(sizeof(struct sliccard), GFP_KERNEL);
-		if (card == NULL)
-			return -ENOMEM;
-
-		card->next = slic_global.slic_card;
-		slic_global.slic_card = card;
-		card->busnumber = adapter->busnumber;
-		card->slotnumber = adapter->slotnumber;
-
-		/* Find an available cardnum */
-		for (i = 0; i < SLIC_MAX_CARDS; i++) {
-			if (slic_global.cardnuminuse[i] == 0) {
-				slic_global.cardnuminuse[i] = 1;
-				card->cardnum = i;
-				break;
-			}
-		}
-		slic_global.num_slic_cards++;
-
-		slic_debug_card_create(card);
-	} else {
-		/* Card exists, find the card this adapter belongs to */
-		while (card) {
-			if (card->cardnum == card_hostid)
-				break;
-			card = card->next;
-		}
-	}
-
-	ASSERT(card);
-	if (!card)
-		return STATUS_FAILURE;
-	/* Put the adapter in the card's adapter list */
-	ASSERT(card->adapter[adapter->port] == NULL);
-	if (!card->adapter[adapter->port]) {
-		card->adapter[adapter->port] = adapter;
-		adapter->card = card;
-	}
-
-	card->card_size = 1;	/* one port per *logical* card */
-
-	while (physcard) {
-		for (i = 0; i < SLIC_MAX_PORTS; i++) {
-			if (!physcard->adapter[i])
-				continue;
-			else
-				break;
-		}
-		ASSERT(i != SLIC_MAX_PORTS);
-		if (physcard->adapter[i]->slotnumber == adapter->slotnumber)
-			break;
-		physcard = physcard->next;
-	}
-	if (!physcard) {
-		/* no structure allocated for this physical card yet */
-		physcard = kzalloc(sizeof(struct physcard), GFP_ATOMIC);
-		ASSERT(physcard);
-
-		physcard->next = slic_global.phys_card;
-		slic_global.phys_card = physcard;
-		physcard->adapters_allocd = 1;
-	} else {
-		physcard->adapters_allocd++;
-	}
-	/* Note - this is ZERO relative */
-	adapter->physport = physcard->adapters_allocd - 1;
-
-	ASSERT(physcard->adapter[adapter->physport] == NULL);
-	physcard->adapter[adapter->physport] = adapter;
-	adapter->physcard = physcard;
-
-	return 0;
 }
 
 static void slic_soft_reset(struct adapter *adapter)
@@ -2319,6 +609,63 @@ static void slic_soft_reset(struct adapter *adapter)
 	slic_reg32_write(&adapter->slic_regs->slic_reset, SLIC_RESET_MAGIC,
 			 FLUSH);
 	mdelay(1);
+}
+
+static void slic_mac_address_config(struct adapter *adapter)
+{
+	u32 value;
+	u32 value2;
+	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
+
+	value = ntohl(*(__be32 *)&adapter->currmacaddr[2]);
+	slic_reg32_write(&slic_regs->slic_wraddral, value, FLUSH);
+	slic_reg32_write(&slic_regs->slic_wraddrbl, value, FLUSH);
+
+	value2 = (u32)((adapter->currmacaddr[0] << 8 |
+			     adapter->currmacaddr[1]) & 0xFFFF);
+
+	slic_reg32_write(&slic_regs->slic_wraddrah, value2, FLUSH);
+	slic_reg32_write(&slic_regs->slic_wraddrbh, value2, FLUSH);
+
+	/*
+	 * Write our multicast mask out to the card.  This is done
+	 * here in addition to the slic_mcast_addr_set routine
+	 * because ALL_MCAST may have been enabled or disabled
+	 */
+	slic_mcast_set_mask(adapter);
+}
+
+static void slic_mac_config(struct adapter *adapter)
+{
+	u32 value;
+	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
+
+	/* Setup GMAC gaps */
+	if (adapter->linkspeed == LINK_1000MB) {
+		value = ((GMCR_GAPBB_1000 << GMCR_GAPBB_SHIFT) |
+			 (GMCR_GAPR1_1000 << GMCR_GAPR1_SHIFT) |
+			 (GMCR_GAPR2_1000 << GMCR_GAPR2_SHIFT));
+	} else {
+		value = ((GMCR_GAPBB_100 << GMCR_GAPBB_SHIFT) |
+			 (GMCR_GAPR1_100 << GMCR_GAPR1_SHIFT) |
+			 (GMCR_GAPR2_100 << GMCR_GAPR2_SHIFT));
+	}
+
+	/* enable GMII */
+	if (adapter->linkspeed == LINK_1000MB)
+		value |= GMCR_GBIT;
+
+	/* enable fullduplex */
+	if ((adapter->linkduplex == LINK_FULLD)
+	    || (adapter->macopts & MAC_LOOPBACK)) {
+		value |= GMCR_FULLD;
+	}
+
+	/* write mac config */
+	slic_reg32_write(&slic_regs->slic_wmcfg, value, FLUSH);
+
+	/* setup mac addresses */
+	slic_mac_address_config(adapter);
 }
 
 static void slic_config_set(struct adapter *adapter, bool linkchange)
@@ -2402,117 +749,47 @@ static void slic_config_clear(struct adapter *adapter)
 	slic_reg32_write(&slic_regs->slic_wphy, phy_config, FLUSH);
 }
 
-static void slic_config_get(struct adapter *adapter, u32 config,
-							u32 config_h)
-{
-	int status;
-
-	status = slic_upr_request(adapter,
-				  SLIC_UPR_RCONFIG,
-				  (u32) config, (u32) config_h, 0, 0);
-	ASSERT(status == 0);
-}
-
-static void slic_mac_address_config(struct adapter *adapter)
-{
-	u32 value;
-	u32 value2;
-	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
-
-	value = *(u32 *) &adapter->currmacaddr[2];
-	value = ntohl(value);
-	slic_reg32_write(&slic_regs->slic_wraddral, value, FLUSH);
-	slic_reg32_write(&slic_regs->slic_wraddrbl, value, FLUSH);
-
-	value2 = (u32) ((adapter->currmacaddr[0] << 8 |
-			     adapter->currmacaddr[1]) & 0xFFFF);
-
-	slic_reg32_write(&slic_regs->slic_wraddrah, value2, FLUSH);
-	slic_reg32_write(&slic_regs->slic_wraddrbh, value2, FLUSH);
-
-	/* Write our multicast mask out to the card.  This is done */
-	/* here in addition to the slic_mcast_addr_set routine     */
-	/* because ALL_MCAST may have been enabled or disabled     */
-	slic_mcast_set_mask(adapter);
-}
-
-static void slic_mac_config(struct adapter *adapter)
-{
-	u32 value;
-	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
-
-	/* Setup GMAC gaps */
-	if (adapter->linkspeed == LINK_1000MB) {
-		value = ((GMCR_GAPBB_1000 << GMCR_GAPBB_SHIFT) |
-			 (GMCR_GAPR1_1000 << GMCR_GAPR1_SHIFT) |
-			 (GMCR_GAPR2_1000 << GMCR_GAPR2_SHIFT));
-	} else {
-		value = ((GMCR_GAPBB_100 << GMCR_GAPBB_SHIFT) |
-			 (GMCR_GAPR1_100 << GMCR_GAPR1_SHIFT) |
-			 (GMCR_GAPR2_100 << GMCR_GAPR2_SHIFT));
-	}
-
-	/* enable GMII */
-	if (adapter->linkspeed == LINK_1000MB)
-		value |= GMCR_GBIT;
-
-	/* enable fullduplex */
-	if ((adapter->linkduplex == LINK_FULLD)
-	    || (adapter->macopts & MAC_LOOPBACK)) {
-		value |= GMCR_FULLD;
-	}
-
-	/* write mac config */
-	slic_reg32_write(&slic_regs->slic_wmcfg, value, FLUSH);
-
-	/* setup mac addresses */
-	slic_mac_address_config(adapter);
-}
-
 static bool slic_mac_filter(struct adapter *adapter,
 			struct ether_header *ether_frame)
 {
+	struct net_device *netdev = adapter->netdev;
 	u32 opts = adapter->macopts;
-	u32 *dhost4 = (u32 *)&ether_frame->ether_dhost[0];
-	u16 *dhost2 = (u16 *)&ether_frame->ether_dhost[4];
-	bool equaladdr;
 
 	if (opts & MAC_PROMISC)
 		return true;
 
-	if ((*dhost4 == 0xFFFFFFFF) && (*dhost2 == 0xFFFF)) {
+	if (is_broadcast_ether_addr(ether_frame->ether_dhost)) {
 		if (opts & MAC_BCAST) {
 			adapter->rcv_broadcasts++;
 			return true;
-		} else {
-			return false;
 		}
+
+		return false;
 	}
 
-	if (ether_frame->ether_dhost[0] & 0x01) {
+	if (is_multicast_ether_addr(ether_frame->ether_dhost)) {
 		if (opts & MAC_ALLMCAST) {
 			adapter->rcv_multicasts++;
-			adapter->stats.multicast++;
+			netdev->stats.multicast++;
 			return true;
 		}
 		if (opts & MAC_MCAST) {
 			struct mcast_address *mcaddr = adapter->mcastaddrs;
 
 			while (mcaddr) {
-				ETHER_EQ_ADDR(mcaddr->address,
-					      ether_frame->ether_dhost,
-					      equaladdr);
-				if (equaladdr) {
+				if (ether_addr_equal(mcaddr->address,
+						     ether_frame->ether_dhost)) {
 					adapter->rcv_multicasts++;
-					adapter->stats.multicast++;
+					netdev->stats.multicast++;
 					return true;
 				}
 				mcaddr = mcaddr->next;
 			}
-			return false;
-		} else {
+
 			return false;
 		}
+
+		return false;
 	}
 	if (opts & MAC_DIRECTED) {
 		adapter->rcv_unicasts++;
@@ -2524,13 +801,16 @@ static bool slic_mac_filter(struct adapter *adapter,
 
 static int slic_mac_set_address(struct net_device *dev, void *ptr)
 {
-	struct adapter *adapter = (struct adapter *)netdev_priv(dev);
+	struct adapter *adapter = netdev_priv(dev);
 	struct sockaddr *addr = ptr;
 
 	if (netif_running(dev))
 		return -EBUSY;
 	if (!adapter)
 		return -EBUSY;
+
+	if (!is_valid_ether_addr(addr->sa_data))
+		return -EINVAL;
 
 	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
 	memcpy(adapter->currmacaddr, addr->sa_data, dev->addr_len);
@@ -2547,10 +827,9 @@ static void slic_timer_load_check(ulong cardaddr)
 	u32 load = card->events;
 	u32 level = 0;
 
-	intagg = &adapter->slic_regs->slic_intagg;
-
 	if ((adapter) && (adapter->state == ADAPT_UP) &&
 	    (card->state == CARD_UP) && (slic_global.dynamic_intagg)) {
+		intagg = &adapter->slic_regs->slic_intagg;
 		if (adapter->devid == SLIC_1GB_DEVICE_ID) {
 			if (adapter->linkspeed == LINK_1000MB)
 				level = 100;
@@ -2596,17 +875,6 @@ static void slic_timer_load_check(ulong cardaddr)
 	add_timer(&card->loadtimer);
 }
 
-static void slic_assert_fail(void)
-{
-	u32 cpuid;
-	u32 curr_pid;
-	cpuid = smp_processor_id();
-	curr_pid = current->pid;
-
-	printk(KERN_ERR "%s CPU # %d ---- PID # %d\n",
-	       __func__, cpuid, curr_pid);
-}
-
 static int slic_upr_queue_request(struct adapter *adapter,
 			   u32 upr_request,
 			   u32 upr_data,
@@ -2636,7 +904,53 @@ static int slic_upr_queue_request(struct adapter *adapter,
 	} else {
 		adapter->upr_list = upr;
 	}
-	return STATUS_SUCCESS;
+	return 0;
+}
+
+static void slic_upr_start(struct adapter *adapter)
+{
+	struct slic_upr *upr;
+	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
+/*
+ *  char * ptr1;
+ *  char * ptr2;
+ *  uint cmdoffset;
+ */
+	upr = adapter->upr_list;
+	if (!upr)
+		return;
+	if (adapter->upr_busy)
+		return;
+	adapter->upr_busy = 1;
+
+	switch (upr->upr_request) {
+	case SLIC_UPR_STATS:
+		if (upr->upr_data_h == 0) {
+			slic_reg32_write(&slic_regs->slic_stats, upr->upr_data,
+					 FLUSH);
+		} else {
+			slic_reg64_write(adapter, &slic_regs->slic_stats64,
+					 upr->upr_data,
+					 &slic_regs->slic_addr_upper,
+					 upr->upr_data_h, FLUSH);
+		}
+		break;
+
+	case SLIC_UPR_RLSR:
+		slic_reg64_write(adapter, &slic_regs->slic_rlsr, upr->upr_data,
+				 &slic_regs->slic_addr_upper, upr->upr_data_h,
+				 FLUSH);
+		break;
+
+	case SLIC_UPR_RCONFIG:
+		slic_reg64_write(adapter, &slic_regs->slic_rconfig,
+				 upr->upr_data, &slic_regs->slic_addr_upper,
+				 upr->upr_data_h, FLUSH);
+		break;
+	case SLIC_UPR_PING:
+		slic_reg32_write(&slic_regs->slic_ping, 1, FLUSH);
+		break;
+	}
 }
 
 static int slic_upr_request(struct adapter *adapter,
@@ -2645,46 +959,115 @@ static int slic_upr_request(struct adapter *adapter,
 		     u32 upr_data_h,
 		     u32 upr_buffer, u32 upr_buffer_h)
 {
-	int status;
+	unsigned long flags;
+	int rc;
 
-	spin_lock_irqsave(&adapter->upr_lock.lock, adapter->upr_lock.flags);
-	status = slic_upr_queue_request(adapter,
+	spin_lock_irqsave(&adapter->upr_lock, flags);
+	rc = slic_upr_queue_request(adapter,
 					upr_request,
 					upr_data,
 					upr_data_h, upr_buffer, upr_buffer_h);
-	if (status != STATUS_SUCCESS) {
-		spin_unlock_irqrestore(&adapter->upr_lock.lock,
-					adapter->upr_lock.flags);
-		return status;
-	}
+	if (rc)
+		goto err_unlock_irq;
+
 	slic_upr_start(adapter);
-	spin_unlock_irqrestore(&adapter->upr_lock.lock,
-				adapter->upr_lock.flags);
-	return STATUS_PENDING;
+err_unlock_irq:
+	spin_unlock_irqrestore(&adapter->upr_lock, flags);
+	return rc;
+}
+
+static void slic_link_upr_complete(struct adapter *adapter, u32 isr)
+{
+	u32 linkstatus = adapter->pshmem->linkstatus;
+	uint linkup;
+	unsigned char linkspeed;
+	unsigned char linkduplex;
+
+	if ((isr & ISR_UPCERR) || (isr & ISR_UPCBSY)) {
+		struct slic_shmem *pshmem;
+
+		pshmem = (struct slic_shmem *)(unsigned long)
+			 adapter->phys_shmem;
+#if BITS_PER_LONG == 64
+		slic_upr_queue_request(adapter,
+				       SLIC_UPR_RLSR,
+				       SLIC_GET_ADDR_LOW(&pshmem->linkstatus),
+				       SLIC_GET_ADDR_HIGH(&pshmem->linkstatus),
+				       0, 0);
+#else
+		slic_upr_queue_request(adapter,
+				       SLIC_UPR_RLSR,
+				       (u32)&pshmem->linkstatus,
+				       SLIC_GET_ADDR_HIGH(pshmem), 0, 0);
+#endif
+		return;
+	}
+	if (adapter->state != ADAPT_UP)
+		return;
+
+	linkup = linkstatus & GIG_LINKUP ? LINK_UP : LINK_DOWN;
+	if (linkstatus & GIG_SPEED_1000)
+		linkspeed = LINK_1000MB;
+	else if (linkstatus & GIG_SPEED_100)
+		linkspeed = LINK_100MB;
+	else
+		linkspeed = LINK_10MB;
+
+	if (linkstatus & GIG_FULLDUPLEX)
+		linkduplex = LINK_FULLD;
+	else
+		linkduplex = LINK_HALFD;
+
+	if ((adapter->linkstate == LINK_DOWN) && (linkup == LINK_DOWN))
+		return;
+
+	/* link up event, but nothing has changed */
+	if ((adapter->linkstate == LINK_UP) &&
+	    (linkup == LINK_UP) &&
+	    (adapter->linkspeed == linkspeed) &&
+	    (adapter->linkduplex == linkduplex))
+		return;
+
+	/* link has changed at this point */
+
+	/* link has gone from up to down */
+	if (linkup == LINK_DOWN) {
+		adapter->linkstate = LINK_DOWN;
+		return;
+	}
+
+	/* link has gone from down to up */
+	adapter->linkspeed = linkspeed;
+	adapter->linkduplex = linkduplex;
+
+	if (adapter->linkstate != LINK_UP) {
+		/* setup the mac */
+		slic_config_set(adapter, true);
+		adapter->linkstate = LINK_UP;
+		netif_start_queue(adapter->netdev);
+	}
 }
 
 static void slic_upr_request_complete(struct adapter *adapter, u32 isr)
 {
 	struct sliccard *card = adapter->card;
 	struct slic_upr *upr;
+	unsigned long flags;
 
-	spin_lock_irqsave(&adapter->upr_lock.lock, adapter->upr_lock.flags);
+	spin_lock_irqsave(&adapter->upr_lock, flags);
 	upr = adapter->upr_list;
 	if (!upr) {
-		ASSERT(0);
-		spin_unlock_irqrestore(&adapter->upr_lock.lock,
-					adapter->upr_lock.flags);
+		spin_unlock_irqrestore(&adapter->upr_lock, flags);
 		return;
 	}
 	adapter->upr_list = upr->next;
 	upr->next = NULL;
 	adapter->upr_busy = 0;
-	ASSERT(adapter->port == upr->adapter);
 	switch (upr->upr_request) {
 	case SLIC_UPR_STATS:
 		{
 			struct slic_stats *slicstats =
-			    (struct slic_stats *) &adapter->pshmem->inicstats;
+			    (struct slic_stats *)&adapter->pshmem->inicstats;
 			struct slic_stats *newstats = slicstats;
 			struct slic_stats  *old = &adapter->inicstats_prev;
 			struct slicnet_stats *stst = &adapter->slic_stats;
@@ -2761,301 +1144,41 @@ static void slic_upr_request_complete(struct adapter *adapter, u32 isr)
 		break;
 	case SLIC_UPR_RCONFIG:
 		break;
-	case SLIC_UPR_RPHY:
-		ASSERT(0);
-		break;
-	case SLIC_UPR_ENLB:
-		ASSERT(0);
-		break;
-	case SLIC_UPR_ENCT:
-		ASSERT(0);
-		break;
-	case SLIC_UPR_PDWN:
-		ASSERT(0);
-		break;
 	case SLIC_UPR_PING:
 		card->pingstatus |= (isr & ISR_PINGDSMASK);
 		break;
-	default:
-		ASSERT(0);
 	}
 	kfree(upr);
 	slic_upr_start(adapter);
-	spin_unlock_irqrestore(&adapter->upr_lock.lock,
-				adapter->upr_lock.flags);
+	spin_unlock_irqrestore(&adapter->upr_lock, flags);
 }
 
-static void slic_upr_start(struct adapter *adapter)
+static int slic_config_get(struct adapter *adapter, u32 config, u32 config_h)
 {
-	struct slic_upr *upr;
-	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
-/*
-    char * ptr1;
-    char * ptr2;
-    uint cmdoffset;
-*/
-	upr = adapter->upr_list;
-	if (!upr)
-		return;
-	if (adapter->upr_busy)
-		return;
-	adapter->upr_busy = 1;
-
-	switch (upr->upr_request) {
-	case SLIC_UPR_STATS:
-		if (upr->upr_data_h == 0) {
-			slic_reg32_write(&slic_regs->slic_stats, upr->upr_data,
-					 FLUSH);
-		} else {
-			slic_reg64_write(adapter, &slic_regs->slic_stats64,
-					 upr->upr_data,
-					 &slic_regs->slic_addr_upper,
-					 upr->upr_data_h, FLUSH);
-		}
-		break;
-
-	case SLIC_UPR_RLSR:
-		slic_reg64_write(adapter, &slic_regs->slic_rlsr, upr->upr_data,
-				 &slic_regs->slic_addr_upper, upr->upr_data_h,
-				 FLUSH);
-		break;
-
-	case SLIC_UPR_RCONFIG:
-		slic_reg64_write(adapter, &slic_regs->slic_rconfig,
-				 upr->upr_data, &slic_regs->slic_addr_upper,
-				 upr->upr_data_h, FLUSH);
-		break;
-	case SLIC_UPR_PING:
-		slic_reg32_write(&slic_regs->slic_ping, 1, FLUSH);
-		break;
-	default:
-		ASSERT(0);
-	}
-}
-
-static void slic_link_upr_complete(struct adapter *adapter, u32 isr)
-{
-	u32 linkstatus = adapter->pshmem->linkstatus;
-	uint linkup;
-	unsigned char linkspeed;
-	unsigned char linkduplex;
-
-	if ((isr & ISR_UPCERR) || (isr & ISR_UPCBSY)) {
-		struct slic_shmem *pshmem;
-
-		pshmem = (struct slic_shmem *)adapter->phys_shmem;
-#if defined(CONFIG_X86_64)
-		slic_upr_queue_request(adapter,
-				       SLIC_UPR_RLSR,
-				       SLIC_GET_ADDR_LOW(&pshmem->linkstatus),
-				       SLIC_GET_ADDR_HIGH(&pshmem->linkstatus),
-				       0, 0);
-#elif defined(CONFIG_X86)
-		slic_upr_queue_request(adapter,
-				       SLIC_UPR_RLSR,
-				       (u32) &pshmem->linkstatus,
-				       SLIC_GET_ADDR_HIGH(pshmem), 0, 0);
-#else
-		Stop Compilation;
-#endif
-		return;
-	}
-	if (adapter->state != ADAPT_UP)
-		return;
-
-	ASSERT((adapter->devid == SLIC_1GB_DEVICE_ID)
-	       || (adapter->devid == SLIC_2GB_DEVICE_ID));
-
-	linkup = linkstatus & GIG_LINKUP ? LINK_UP : LINK_DOWN;
-	if (linkstatus & GIG_SPEED_1000)
-		linkspeed = LINK_1000MB;
-	else if (linkstatus & GIG_SPEED_100)
-		linkspeed = LINK_100MB;
-	else
-		linkspeed = LINK_10MB;
-
-	if (linkstatus & GIG_FULLDUPLEX)
-		linkduplex = LINK_FULLD;
-	else
-		linkduplex = LINK_HALFD;
-
-	if ((adapter->linkstate == LINK_DOWN) && (linkup == LINK_DOWN))
-		return;
-
-	/* link up event, but nothing has changed */
-	if ((adapter->linkstate == LINK_UP) &&
-	    (linkup == LINK_UP) &&
-	    (adapter->linkspeed == linkspeed) &&
-	    (adapter->linkduplex == linkduplex))
-		return;
-
-	/* link has changed at this point */
-
-	/* link has gone from up to down */
-	if (linkup == LINK_DOWN) {
-		adapter->linkstate = LINK_DOWN;
-		return;
-	}
-
-	/* link has gone from down to up */
-	adapter->linkspeed = linkspeed;
-	adapter->linkduplex = linkduplex;
-
-	if (adapter->linkstate != LINK_UP) {
-		/* setup the mac */
-		slic_config_set(adapter, true);
-		adapter->linkstate = LINK_UP;
-		netif_start_queue(adapter->netdev);
-	}
+	return slic_upr_request(adapter, SLIC_UPR_RCONFIG, config, config_h,
+				0, 0);
 }
 
 /*
- *  this is here to checksum the eeprom, there is some ucode bug
- *  which prevens us from using the ucode result.
- *  remove this once ucode is fixed.
+ * Compute a checksum of the EEPROM according to RFC 1071.
  */
-static ushort slic_eeprom_cksum(char *m, int len)
+static u16 slic_eeprom_cksum(void *eeprom, unsigned len)
 {
-#define ADDCARRY(x)  (x > 65535 ? x -= 65535 : x)
-#define REDUCE {l_util.l = sum; sum = l_util.s[0] + l_util.s[1]; ADDCARRY(sum);\
-		}
+	u16 *wp = eeprom;
+	u32 checksum = 0;
 
-	u16 *w;
-	u32 sum = 0;
-	u32 byte_swapped = 0;
-	u32 w_int;
-
-	union {
-		char c[2];
-		ushort s;
-	} s_util;
-
-	union {
-		ushort s[2];
-		int l;
-	} l_util;
-
-	l_util.l = 0;
-	s_util.s = 0;
-
-	w = (u16 *)m;
-#ifdef CONFIG_X86_64
-	w_int = (u32) ((ulong) w & 0x00000000FFFFFFFF);
-#else
-	w_int = (u32) (w);
-#endif
-	if ((1 & w_int) && (len > 0)) {
-		REDUCE;
-		sum <<= 8;
-		s_util.c[0] = *(unsigned char *)w;
-		w = (u16 *)((char *)w + 1);
-		len--;
-		byte_swapped = 1;
+	while (len > 1) {
+		checksum += *(wp++);
+		len -= 2;
 	}
 
-	/* Unroll the loop to make overhead from branches &c small. */
-	while ((len -= 32) >= 0) {
-		sum += w[0];
-		sum += w[1];
-		sum += w[2];
-		sum += w[3];
-		sum += w[4];
-		sum += w[5];
-		sum += w[6];
-		sum += w[7];
-		sum += w[8];
-		sum += w[9];
-		sum += w[10];
-		sum += w[11];
-		sum += w[12];
-		sum += w[13];
-		sum += w[14];
-		sum += w[15];
-		w = (u16 *)((ulong) w + 16);	/* verify */
-	}
-	len += 32;
-	while ((len -= 8) >= 0) {
-		sum += w[0];
-		sum += w[1];
-		sum += w[2];
-		sum += w[3];
-		w = (u16 *)((ulong) w + 4);	/* verify */
-	}
-	len += 8;
-	if (len != 0 || byte_swapped != 0) {
-		REDUCE;
-		while ((len -= 2) >= 0)
-			sum += *w++;	/* verify */
-		if (byte_swapped) {
-			REDUCE;
-			sum <<= 8;
-			byte_swapped = 0;
-			if (len == -1) {
-				s_util.c[1] = *(char *) w;
-				sum += s_util.s;
-				len = 0;
-			} else {
-				len = -1;
-			}
+	if (len > 0)
+		checksum += *(u8 *)wp;
 
-		} else if (len == -1) {
-			s_util.c[0] = *(char *) w;
-		}
+	while (checksum >> 16)
+		checksum = (checksum & 0xFFFF) + ((checksum >> 16) & 0xFFFF);
 
-		if (len == -1) {
-			s_util.c[1] = 0;
-			sum += s_util.s;
-		}
-	}
-	REDUCE;
-	return (ushort) sum;
-}
-
-static int slic_rspqueue_init(struct adapter *adapter)
-{
-	int i;
-	struct slic_rspqueue *rspq = &adapter->rspqueue;
-	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
-	u32 paddrh = 0;
-
-	ASSERT(adapter->state == ADAPT_DOWN);
-	memset(rspq, 0, sizeof(struct slic_rspqueue));
-
-	rspq->num_pages = SLIC_RSPQ_PAGES_GB;
-
-	for (i = 0; i < rspq->num_pages; i++) {
-		rspq->vaddr[i] = pci_alloc_consistent(adapter->pcidev,
-						      PAGE_SIZE,
-						      &rspq->paddr[i]);
-		if (!rspq->vaddr[i]) {
-			dev_err(&adapter->pcidev->dev,
-				"pci_alloc_consistent failed\n");
-			slic_rspqueue_free(adapter);
-			return STATUS_FAILURE;
-		}
-#ifndef CONFIG_X86_64
-		ASSERT(((u32) rspq->vaddr[i] & 0xFFFFF000) ==
-		       (u32) rspq->vaddr[i]);
-		ASSERT(((u32) rspq->paddr[i] & 0xFFFFF000) ==
-		       (u32) rspq->paddr[i]);
-#endif
-		memset(rspq->vaddr[i], 0, PAGE_SIZE);
-
-		if (paddrh == 0) {
-			slic_reg32_write(&slic_regs->slic_rbar,
-				(rspq->paddr[i] | SLIC_RSPQ_BUFSINPAGE),
-				DONT_FLUSH);
-		} else {
-			slic_reg64_write(adapter, &slic_regs->slic_rbar64,
-				(rspq->paddr[i] | SLIC_RSPQ_BUFSINPAGE),
-				&slic_regs->slic_addr_upper,
-				paddrh, DONT_FLUSH);
-		}
-	}
-	rspq->offset = 0;
-	rspq->pageindex = 0;
-	rspq->rspbuf = (struct slic_rspbuf *)rspq->vaddr[0];
-	return STATUS_SUCCESS;
+	return ~checksum;
 }
 
 static void slic_rspqueue_free(struct adapter *adapter)
@@ -3076,6 +1199,45 @@ static void slic_rspqueue_free(struct adapter *adapter)
 	rspq->rspbuf = NULL;
 }
 
+static int slic_rspqueue_init(struct adapter *adapter)
+{
+	int i;
+	struct slic_rspqueue *rspq = &adapter->rspqueue;
+	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
+	u32 paddrh = 0;
+
+	memset(rspq, 0, sizeof(struct slic_rspqueue));
+
+	rspq->num_pages = SLIC_RSPQ_PAGES_GB;
+
+	for (i = 0; i < rspq->num_pages; i++) {
+		rspq->vaddr[i] = pci_zalloc_consistent(adapter->pcidev,
+						       PAGE_SIZE,
+						       &rspq->paddr[i]);
+		if (!rspq->vaddr[i]) {
+			dev_err(&adapter->pcidev->dev,
+				"pci_alloc_consistent failed\n");
+			slic_rspqueue_free(adapter);
+			return -ENOMEM;
+		}
+
+		if (paddrh == 0) {
+			slic_reg32_write(&slic_regs->slic_rbar,
+				(rspq->paddr[i] | SLIC_RSPQ_BUFSINPAGE),
+				DONT_FLUSH);
+		} else {
+			slic_reg64_write(adapter, &slic_regs->slic_rbar64,
+				(rspq->paddr[i] | SLIC_RSPQ_BUFSINPAGE),
+				&slic_regs->slic_addr_upper,
+				paddrh, DONT_FLUSH);
+		}
+	}
+	rspq->offset = 0;
+	rspq->pageindex = 0;
+	rspq->rspbuf = (struct slic_rspbuf *)rspq->vaddr[0];
+	return 0;
+}
+
 static struct slic_rspbuf *slic_rspqueue_getnext(struct adapter *adapter)
 {
 	struct slic_rspqueue *rspq = &adapter->rspqueue;
@@ -3085,41 +1247,19 @@ static struct slic_rspbuf *slic_rspqueue_getnext(struct adapter *adapter)
 		return NULL;
 
 	buf = rspq->rspbuf;
-#ifndef CONFIG_X86_64
-	ASSERT((buf->status & 0xFFFFFFE0) == 0);
-#endif
-	ASSERT(buf->hosthandle);
 	if (++rspq->offset < SLIC_RSPQ_BUFSINPAGE) {
 		rspq->rspbuf++;
-#ifndef CONFIG_X86_64
-		ASSERT(((u32) rspq->rspbuf & 0xFFFFFFE0) ==
-		       (u32) rspq->rspbuf);
-#endif
 	} else {
-		ASSERT(rspq->offset == SLIC_RSPQ_BUFSINPAGE);
 		slic_reg64_write(adapter, &adapter->slic_regs->slic_rbar64,
 			(rspq->paddr[rspq->pageindex] | SLIC_RSPQ_BUFSINPAGE),
 			&adapter->slic_regs->slic_addr_upper, 0, DONT_FLUSH);
-		rspq->pageindex = (++rspq->pageindex) % rspq->num_pages;
+		rspq->pageindex = (rspq->pageindex + 1) % rspq->num_pages;
 		rspq->offset = 0;
 		rspq->rspbuf = (struct slic_rspbuf *)
 						rspq->vaddr[rspq->pageindex];
-#ifndef CONFIG_X86_64
-		ASSERT(((u32) rspq->rspbuf & 0xFFFFF000) ==
-		       (u32) rspq->rspbuf);
-#endif
 	}
-#ifndef CONFIG_X86_64
-	ASSERT(((u32) buf & 0xFFFFFFE0) == (u32) buf);
-#endif
+
 	return buf;
-}
-
-static void slic_cmdqmem_init(struct adapter *adapter)
-{
-	struct slic_cmdqmem *cmdqmem = &adapter->cmdqmem;
-
-	memset(cmdqmem, 0, sizeof(struct slic_cmdqmem));
 }
 
 static void slic_cmdqmem_free(struct adapter *adapter)
@@ -3131,7 +1271,7 @@ static void slic_cmdqmem_free(struct adapter *adapter)
 		if (cmdqmem->pages[i]) {
 			pci_free_consistent(adapter->pcidev,
 					    PAGE_SIZE,
-					    (void *) cmdqmem->pages[i],
+					    (void *)cmdqmem->pages[i],
 					    cmdqmem->dma_pages[i]);
 		}
 	}
@@ -3150,42 +1290,10 @@ static u32 *slic_cmdqmem_addpage(struct adapter *adapter)
 					&cmdqmem->dma_pages[cmdqmem->pagecnt]);
 	if (!pageaddr)
 		return NULL;
-#ifndef CONFIG_X86_64
-	ASSERT(((u32) pageaddr & 0xFFFFF000) == (u32) pageaddr);
-#endif
+
 	cmdqmem->pages[cmdqmem->pagecnt] = pageaddr;
 	cmdqmem->pagecnt++;
 	return pageaddr;
-}
-
-static int slic_cmdq_init(struct adapter *adapter)
-{
-	int i;
-	u32 *pageaddr;
-
-	ASSERT(adapter->state == ADAPT_DOWN);
-	memset(&adapter->cmdq_all, 0, sizeof(struct slic_cmdqueue));
-	memset(&adapter->cmdq_free, 0, sizeof(struct slic_cmdqueue));
-	memset(&adapter->cmdq_done, 0, sizeof(struct slic_cmdqueue));
-	spin_lock_init(&adapter->cmdq_all.lock.lock);
-	spin_lock_init(&adapter->cmdq_free.lock.lock);
-	spin_lock_init(&adapter->cmdq_done.lock.lock);
-	slic_cmdqmem_init(adapter);
-	adapter->slic_handle_ix = 1;
-	for (i = 0; i < SLIC_CMDQ_INITPAGES; i++) {
-		pageaddr = slic_cmdqmem_addpage(adapter);
-#ifndef CONFIG_X86_64
-		ASSERT(((u32) pageaddr & 0xFFFFF000) == (u32) pageaddr);
-#endif
-		if (!pageaddr) {
-			slic_cmdq_free(adapter);
-			return STATUS_FAILURE;
-		}
-		slic_cmdq_addcmdpage(adapter, pageaddr);
-	}
-	adapter->slic_handle_ix = 1;
-
-	return STATUS_SUCCESS;
 }
 
 static void slic_cmdq_free(struct adapter *adapter)
@@ -3211,23 +1319,111 @@ static void slic_cmdq_free(struct adapter *adapter)
 	slic_cmdqmem_free(adapter);
 }
 
+static void slic_cmdq_addcmdpage(struct adapter *adapter, u32 *page)
+{
+	struct slic_hostcmd *cmd;
+	struct slic_hostcmd *prev;
+	struct slic_hostcmd *tail;
+	struct slic_cmdqueue *cmdq;
+	int cmdcnt;
+	void *cmdaddr;
+	ulong phys_addr;
+	u32 phys_addrl;
+	u32 phys_addrh;
+	struct slic_handle *pslic_handle;
+	unsigned long flags;
+
+	cmdaddr = page;
+	cmd = cmdaddr;
+	cmdcnt = 0;
+
+	phys_addr = virt_to_bus((void *)page);
+	phys_addrl = SLIC_GET_ADDR_LOW(phys_addr);
+	phys_addrh = SLIC_GET_ADDR_HIGH(phys_addr);
+
+	prev = NULL;
+	tail = cmd;
+	while ((cmdcnt < SLIC_CMDQ_CMDSINPAGE) &&
+	       (adapter->slic_handle_ix < 256)) {
+		/* Allocate and initialize a SLIC_HANDLE for this command */
+		spin_lock_irqsave(&adapter->handle_lock, flags);
+		pslic_handle  =  adapter->pfree_slic_handles;
+		adapter->pfree_slic_handles = pslic_handle->next;
+		spin_unlock_irqrestore(&adapter->handle_lock, flags);
+		pslic_handle->type = SLIC_HANDLE_CMD;
+		pslic_handle->address = (void *)cmd;
+		pslic_handle->offset = (ushort)adapter->slic_handle_ix++;
+		pslic_handle->other_handle = NULL;
+		pslic_handle->next = NULL;
+
+		cmd->pslic_handle = pslic_handle;
+		cmd->cmd64.hosthandle = pslic_handle->token.handle_token;
+		cmd->busy = false;
+		cmd->paddrl = phys_addrl;
+		cmd->paddrh = phys_addrh;
+		cmd->next_all = prev;
+		cmd->next = prev;
+		prev = cmd;
+		phys_addrl += SLIC_HOSTCMD_SIZE;
+		cmdaddr += SLIC_HOSTCMD_SIZE;
+
+		cmd = cmdaddr;
+		cmdcnt++;
+	}
+
+	cmdq = &adapter->cmdq_all;
+	cmdq->count += cmdcnt;	/*  SLIC_CMDQ_CMDSINPAGE;   mooktodo */
+	tail->next_all = cmdq->head;
+	cmdq->head = prev;
+	cmdq = &adapter->cmdq_free;
+	spin_lock_irqsave(&cmdq->lock, flags);
+	cmdq->count += cmdcnt;	/*  SLIC_CMDQ_CMDSINPAGE;   mooktodo */
+	tail->next = cmdq->head;
+	cmdq->head = prev;
+	spin_unlock_irqrestore(&cmdq->lock, flags);
+}
+
+static int slic_cmdq_init(struct adapter *adapter)
+{
+	int i;
+	u32 *pageaddr;
+
+	memset(&adapter->cmdq_all, 0, sizeof(struct slic_cmdqueue));
+	memset(&adapter->cmdq_free, 0, sizeof(struct slic_cmdqueue));
+	memset(&adapter->cmdq_done, 0, sizeof(struct slic_cmdqueue));
+	spin_lock_init(&adapter->cmdq_all.lock);
+	spin_lock_init(&adapter->cmdq_free.lock);
+	spin_lock_init(&adapter->cmdq_done.lock);
+	memset(&adapter->cmdqmem, 0, sizeof(struct slic_cmdqmem));
+	adapter->slic_handle_ix = 1;
+	for (i = 0; i < SLIC_CMDQ_INITPAGES; i++) {
+		pageaddr = slic_cmdqmem_addpage(adapter);
+		if (!pageaddr) {
+			slic_cmdq_free(adapter);
+			return -ENOMEM;
+		}
+		slic_cmdq_addcmdpage(adapter, pageaddr);
+	}
+	adapter->slic_handle_ix = 1;
+
+	return 0;
+}
+
 static void slic_cmdq_reset(struct adapter *adapter)
 {
 	struct slic_hostcmd *hcmd;
 	struct sk_buff *skb;
 	u32 outstanding;
+	unsigned long flags;
 
-	spin_lock_irqsave(&adapter->cmdq_free.lock.lock,
-			adapter->cmdq_free.lock.flags);
-	spin_lock_irqsave(&adapter->cmdq_done.lock.lock,
-			adapter->cmdq_done.lock.flags);
+	spin_lock_irqsave(&adapter->cmdq_free.lock, flags);
+	spin_lock(&adapter->cmdq_done.lock);
 	outstanding = adapter->cmdq_all.count - adapter->cmdq_done.count;
 	outstanding -= adapter->cmdq_free.count;
 	hcmd = adapter->cmdq_all.head;
 	while (hcmd) {
 		if (hcmd->busy) {
 			skb = hcmd->skb;
-			ASSERT(skb);
 			hcmd->busy = 0;
 			hcmd->skb = NULL;
 			dev_kfree_skb_irq(skb);
@@ -3252,90 +1448,40 @@ static void slic_cmdq_reset(struct adapter *adapter)
 			"free_count %d != all count %d\n",
 			adapter->cmdq_free.count, adapter->cmdq_all.count);
 	}
-	spin_unlock_irqrestore(&adapter->cmdq_done.lock.lock,
-				adapter->cmdq_done.lock.flags);
-	spin_unlock_irqrestore(&adapter->cmdq_free.lock.lock,
-				adapter->cmdq_free.lock.flags);
+	spin_unlock(&adapter->cmdq_done.lock);
+	spin_unlock_irqrestore(&adapter->cmdq_free.lock, flags);
 }
 
-static void slic_cmdq_addcmdpage(struct adapter *adapter, u32 *page)
+static void slic_cmdq_getdone(struct adapter *adapter)
 {
-	struct slic_hostcmd *cmd;
-	struct slic_hostcmd *prev;
-	struct slic_hostcmd *tail;
-	struct slic_cmdqueue *cmdq;
-	int cmdcnt;
-	void *cmdaddr;
-	ulong phys_addr;
-	u32 phys_addrl;
-	u32 phys_addrh;
-	struct slic_handle *pslic_handle;
+	struct slic_cmdqueue *done_cmdq = &adapter->cmdq_done;
+	struct slic_cmdqueue *free_cmdq = &adapter->cmdq_free;
+	unsigned long flags;
 
-	cmdaddr = page;
-	cmd = (struct slic_hostcmd *)cmdaddr;
-	cmdcnt = 0;
+	spin_lock_irqsave(&done_cmdq->lock, flags);
 
-	phys_addr = virt_to_bus((void *)page);
-	phys_addrl = SLIC_GET_ADDR_LOW(phys_addr);
-	phys_addrh = SLIC_GET_ADDR_HIGH(phys_addr);
-
-	prev = NULL;
-	tail = cmd;
-	while ((cmdcnt < SLIC_CMDQ_CMDSINPAGE) &&
-	       (adapter->slic_handle_ix < 256)) {
-		/* Allocate and initialize a SLIC_HANDLE for this command */
-		SLIC_GET_SLIC_HANDLE(adapter, pslic_handle);
-		if (pslic_handle == NULL)
-			ASSERT(0);
-		ASSERT(pslic_handle ==
-		       &adapter->slic_handles[pslic_handle->token.
-					      handle_index]);
-		pslic_handle->type = SLIC_HANDLE_CMD;
-		pslic_handle->address = (void *) cmd;
-		pslic_handle->offset = (ushort) adapter->slic_handle_ix++;
-		pslic_handle->other_handle = NULL;
-		pslic_handle->next = NULL;
-
-		cmd->pslic_handle = pslic_handle;
-		cmd->cmd64.hosthandle = pslic_handle->token.handle_token;
-		cmd->busy = false;
-		cmd->paddrl = phys_addrl;
-		cmd->paddrh = phys_addrh;
-		cmd->next_all = prev;
-		cmd->next = prev;
-		prev = cmd;
-		phys_addrl += SLIC_HOSTCMD_SIZE;
-		cmdaddr += SLIC_HOSTCMD_SIZE;
-
-		cmd = (struct slic_hostcmd *)cmdaddr;
-		cmdcnt++;
-	}
-
-	cmdq = &adapter->cmdq_all;
-	cmdq->count += cmdcnt;	/*  SLIC_CMDQ_CMDSINPAGE;   mooktodo */
-	tail->next_all = cmdq->head;
-	cmdq->head = prev;
-	cmdq = &adapter->cmdq_free;
-	spin_lock_irqsave(&cmdq->lock.lock, cmdq->lock.flags);
-	cmdq->count += cmdcnt;	/*  SLIC_CMDQ_CMDSINPAGE;   mooktodo */
-	tail->next = cmdq->head;
-	cmdq->head = prev;
-	spin_unlock_irqrestore(&cmdq->lock.lock, cmdq->lock.flags);
+	free_cmdq->head = done_cmdq->head;
+	free_cmdq->count = done_cmdq->count;
+	done_cmdq->head = NULL;
+	done_cmdq->tail = NULL;
+	done_cmdq->count = 0;
+	spin_unlock_irqrestore(&done_cmdq->lock, flags);
 }
 
 static struct slic_hostcmd *slic_cmdq_getfree(struct adapter *adapter)
 {
 	struct slic_cmdqueue *cmdq = &adapter->cmdq_free;
 	struct slic_hostcmd *cmd = NULL;
+	unsigned long flags;
 
 lock_and_retry:
-	spin_lock_irqsave(&cmdq->lock.lock, cmdq->lock.flags);
+	spin_lock_irqsave(&cmdq->lock, flags);
 retry:
 	cmd = cmdq->head;
 	if (cmd) {
 		cmdq->head = cmd->next;
 		cmdq->count--;
-		spin_unlock_irqrestore(&cmdq->lock.lock, cmdq->lock.flags);
+		spin_unlock_irqrestore(&cmdq->lock, flags);
 	} else {
 		slic_cmdq_getdone(adapter);
 		cmd = cmdq->head;
@@ -3344,8 +1490,7 @@ retry:
 		} else {
 			u32 *pageaddr;
 
-			spin_unlock_irqrestore(&cmdq->lock.lock,
-						cmdq->lock.flags);
+			spin_unlock_irqrestore(&cmdq->lock, flags);
 			pageaddr = slic_cmdqmem_addpage(adapter);
 			if (pageaddr) {
 				slic_cmdq_addcmdpage(adapter, pageaddr);
@@ -3356,108 +1501,19 @@ retry:
 	return cmd;
 }
 
-static void slic_cmdq_getdone(struct adapter *adapter)
-{
-	struct slic_cmdqueue *done_cmdq = &adapter->cmdq_done;
-	struct slic_cmdqueue *free_cmdq = &adapter->cmdq_free;
-
-	ASSERT(free_cmdq->head == NULL);
-	spin_lock_irqsave(&done_cmdq->lock.lock, done_cmdq->lock.flags);
-
-	free_cmdq->head = done_cmdq->head;
-	free_cmdq->count = done_cmdq->count;
-	done_cmdq->head = NULL;
-	done_cmdq->tail = NULL;
-	done_cmdq->count = 0;
-	spin_unlock_irqrestore(&done_cmdq->lock.lock, done_cmdq->lock.flags);
-}
-
 static void slic_cmdq_putdone_irq(struct adapter *adapter,
 				struct slic_hostcmd *cmd)
 {
 	struct slic_cmdqueue *cmdq = &adapter->cmdq_done;
 
-	spin_lock(&cmdq->lock.lock);
+	spin_lock(&cmdq->lock);
 	cmd->busy = 0;
 	cmd->next = cmdq->head;
 	cmdq->head = cmd;
 	cmdq->count++;
 	if ((adapter->xmitq_full) && (cmdq->count > 10))
 		netif_wake_queue(adapter->netdev);
-	spin_unlock(&cmdq->lock.lock);
-}
-
-static int slic_rcvqueue_init(struct adapter *adapter)
-{
-	int i, count;
-	struct slic_rcvqueue *rcvq = &adapter->rcvqueue;
-
-	ASSERT(adapter->state == ADAPT_DOWN);
-	rcvq->tail = NULL;
-	rcvq->head = NULL;
-	rcvq->size = SLIC_RCVQ_ENTRIES;
-	rcvq->errors = 0;
-	rcvq->count = 0;
-	i = (SLIC_RCVQ_ENTRIES / SLIC_RCVQ_FILLENTRIES);
-	count = 0;
-	while (i) {
-		count += slic_rcvqueue_fill(adapter);
-		i--;
-	}
-	if (rcvq->count < SLIC_RCVQ_MINENTRIES) {
-		slic_rcvqueue_free(adapter);
-		return STATUS_FAILURE;
-	}
-	return STATUS_SUCCESS;
-}
-
-static void slic_rcvqueue_free(struct adapter *adapter)
-{
-	struct slic_rcvqueue *rcvq = &adapter->rcvqueue;
-	struct sk_buff *skb;
-
-	while (rcvq->head) {
-		skb = rcvq->head;
-		rcvq->head = rcvq->head->next;
-		dev_kfree_skb(skb);
-	}
-	rcvq->tail = NULL;
-	rcvq->head = NULL;
-	rcvq->count = 0;
-}
-
-static struct sk_buff *slic_rcvqueue_getnext(struct adapter *adapter)
-{
-	struct slic_rcvqueue *rcvq = &adapter->rcvqueue;
-	struct sk_buff *skb;
-	struct slic_rcvbuf *rcvbuf;
-	int count;
-
-	if (rcvq->count) {
-		skb = rcvq->head;
-		rcvbuf = (struct slic_rcvbuf *)skb->head;
-		ASSERT(rcvbuf);
-
-		if (rcvbuf->status & IRHDDR_SVALID) {
-			rcvq->head = rcvq->head->next;
-			skb->next = NULL;
-			rcvq->count--;
-		} else {
-			skb = NULL;
-		}
-	} else {
-		dev_err(&adapter->netdev->dev,
-			"RcvQ Empty!! rcvq[%p] count[%x]\n", rcvq, rcvq->count);
-		skb = NULL;
-	}
-	while (rcvq->count < SLIC_RCVQ_FILLTHRESH) {
-		count = slic_rcvqueue_fill(adapter);
-		if (!count)
-			break;
-	}
-	if (skb)
-		rcvq->errors = 0;
-	return skb;
+	spin_unlock(&cmdq->lock);
 }
 
 static int slic_rcvqueue_fill(struct adapter *adapter)
@@ -3477,10 +1533,11 @@ retry_rcvqfill:
 #endif
 		skb = alloc_skb(SLIC_RCVQ_RCVBUFSIZE, GFP_ATOMIC);
 		if (skb) {
-			paddr = (void *)pci_map_single(adapter->pcidev,
-							  skb->data,
-							  SLIC_RCVQ_RCVBUFSIZE,
-							  PCI_DMA_FROMDEVICE);
+			paddr = (void *)(unsigned long)
+				pci_map_single(adapter->pcidev,
+					       skb->data,
+					       SLIC_RCVQ_RCVBUFSIZE,
+					       PCI_DMA_FROMDEVICE);
 			paddrl = SLIC_GET_ADDR_LOW(paddr);
 			paddrh = SLIC_GET_ADDR_HIGH(paddr);
 
@@ -3493,14 +1550,18 @@ retry_rcvqfill:
 				dev_err(dev, "%s: LOW 32bits PHYSICAL ADDRESS == 0\n",
 					__func__);
 				dev_err(dev, "skb[%p] PROBLEM\n", skb);
-				dev_err(dev, "         skbdata[%p]\n", skb->data);
+				dev_err(dev, "         skbdata[%p]\n",
+						skb->data);
 				dev_err(dev, "         skblen[%x]\n", skb->len);
 				dev_err(dev, "         paddr[%p]\n", paddr);
 				dev_err(dev, "         paddrl[%x]\n", paddrl);
 				dev_err(dev, "         paddrh[%x]\n", paddrh);
-				dev_err(dev, "         rcvq->head[%p]\n", rcvq->head);
-				dev_err(dev, "         rcvq->tail[%p]\n", rcvq->tail);
-				dev_err(dev, "         rcvq->count[%x]\n", rcvq->count);
+				dev_err(dev, "         rcvq->head[%p]\n",
+						rcvq->head);
+				dev_err(dev, "         rcvq->tail[%p]\n",
+						rcvq->tail);
+				dev_err(dev, "         rcvq->count[%x]\n",
+						rcvq->count);
 				dev_err(dev, "SKIP THIS SKB!!!!!!!!\n");
 				goto retry_rcvqfill;
 			}
@@ -3509,14 +1570,18 @@ retry_rcvqfill:
 				dev_err(dev, "%s: LOW 32bits PHYSICAL ADDRESS == 0\n",
 					__func__);
 				dev_err(dev, "skb[%p] PROBLEM\n", skb);
-				dev_err(dev, "         skbdata[%p]\n", skb->data);
+				dev_err(dev, "         skbdata[%p]\n",
+						skb->data);
 				dev_err(dev, "         skblen[%x]\n", skb->len);
 				dev_err(dev, "         paddr[%p]\n", paddr);
 				dev_err(dev, "         paddrl[%x]\n", paddrl);
 				dev_err(dev, "         paddrh[%x]\n", paddrh);
-				dev_err(dev, "         rcvq->head[%p]\n", rcvq->head);
-				dev_err(dev, "         rcvq->tail[%p]\n", rcvq->tail);
-				dev_err(dev, "         rcvq->count[%x]\n", rcvq->count);
+				dev_err(dev, "         rcvq->head[%p]\n",
+						rcvq->head);
+				dev_err(dev, "         rcvq->tail[%p]\n",
+						rcvq->tail);
+				dev_err(dev, "         rcvq->count[%x]\n",
+						rcvq->count);
 				dev_err(dev, "GIVE TO CARD ANYWAY\n");
 			}
 #endif
@@ -3547,6 +1612,77 @@ retry_rcvqfill:
 	return i;
 }
 
+static void slic_rcvqueue_free(struct adapter *adapter)
+{
+	struct slic_rcvqueue *rcvq = &adapter->rcvqueue;
+	struct sk_buff *skb;
+
+	while (rcvq->head) {
+		skb = rcvq->head;
+		rcvq->head = rcvq->head->next;
+		dev_kfree_skb(skb);
+	}
+	rcvq->tail = NULL;
+	rcvq->head = NULL;
+	rcvq->count = 0;
+}
+
+static int slic_rcvqueue_init(struct adapter *adapter)
+{
+	int i, count;
+	struct slic_rcvqueue *rcvq = &adapter->rcvqueue;
+
+	rcvq->tail = NULL;
+	rcvq->head = NULL;
+	rcvq->size = SLIC_RCVQ_ENTRIES;
+	rcvq->errors = 0;
+	rcvq->count = 0;
+	i = SLIC_RCVQ_ENTRIES / SLIC_RCVQ_FILLENTRIES;
+	count = 0;
+	while (i) {
+		count += slic_rcvqueue_fill(adapter);
+		i--;
+	}
+	if (rcvq->count < SLIC_RCVQ_MINENTRIES) {
+		slic_rcvqueue_free(adapter);
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+static struct sk_buff *slic_rcvqueue_getnext(struct adapter *adapter)
+{
+	struct slic_rcvqueue *rcvq = &adapter->rcvqueue;
+	struct sk_buff *skb;
+	struct slic_rcvbuf *rcvbuf;
+	int count;
+
+	if (rcvq->count) {
+		skb = rcvq->head;
+		rcvbuf = (struct slic_rcvbuf *)skb->head;
+
+		if (rcvbuf->status & IRHDDR_SVALID) {
+			rcvq->head = rcvq->head->next;
+			skb->next = NULL;
+			rcvq->count--;
+		} else {
+			skb = NULL;
+		}
+	} else {
+		dev_err(&adapter->netdev->dev,
+			"RcvQ Empty!! rcvq[%p] count[%x]\n", rcvq, rcvq->count);
+		skb = NULL;
+	}
+	while (rcvq->count < SLIC_RCVQ_FILLTHRESH) {
+		count = slic_rcvqueue_fill(adapter);
+		if (!count)
+			break;
+	}
+	if (skb)
+		rcvq->errors = 0;
+	return skb;
+}
+
 static u32 slic_rcvqueue_reinsert(struct adapter *adapter, struct sk_buff *skb)
 {
 	struct slic_rcvqueue *rcvq = &adapter->rcvqueue;
@@ -3556,10 +1692,9 @@ static u32 slic_rcvqueue_reinsert(struct adapter *adapter, struct sk_buff *skb)
 	struct slic_rcvbuf *rcvbuf = (struct slic_rcvbuf *)skb->head;
 	struct device *dev;
 
-	ASSERT(skb->len == SLIC_RCVBUF_HEADSIZE);
-
-	paddr = (void *)pci_map_single(adapter->pcidev, skb->head,
-				  SLIC_RCVQ_RCVBUFSIZE, PCI_DMA_FROMDEVICE);
+	paddr = (void *)(unsigned long)
+		pci_map_single(adapter->pcidev, skb->head,
+			       SLIC_RCVQ_RCVBUFSIZE, PCI_DMA_FROMDEVICE);
 	rcvbuf->status = 0;
 	skb->next = NULL;
 
@@ -3597,469 +1732,1469 @@ static u32 slic_rcvqueue_reinsert(struct adapter *adapter, struct sk_buff *skb)
 	return rcvq->count;
 }
 
-static int slic_debug_card_show(struct seq_file *seq, void *v)
+/*
+ * slic_link_event_handler -
+ *
+ * Initiate a link configuration sequence.  The link configuration begins
+ * by issuing a READ_LINK_STATUS command to the Utility Processor on the
+ * SLIC.  Since the command finishes asynchronously, the slic_upr_comlete
+ * routine will follow it up witha UP configuration write command, which
+ * will also complete asynchronously.
+ *
+ */
+static int slic_link_event_handler(struct adapter *adapter)
 {
-#ifdef MOOKTODO
-	int i;
-	struct sliccard *card = seq->private;
-	struct slic_config *config = &card->config;
-	unsigned char *fru = (unsigned char *)(&card->config.atk_fru);
-	unsigned char *oemfru = (unsigned char *)(&card->config.OemFru);
-#endif
+	int status;
+	struct slic_shmem *pshmem;
 
-	seq_printf(seq, "driver_version           : %s\n", slic_proc_version);
-	seq_printf(seq, "Microcode versions:           \n");
-	seq_printf(seq, "    Gigabit (gb)         : %s %s\n",
-		    MOJAVE_UCODE_VERS_STRING, MOJAVE_UCODE_VERS_DATE);
-	seq_printf(seq, "    Gigabit Receiver     : %s %s\n",
-		    GB_RCVUCODE_VERS_STRING, GB_RCVUCODE_VERS_DATE);
-	seq_printf(seq, "Vendor                   : %s\n", slic_vendor);
-	seq_printf(seq, "Product Name             : %s\n", slic_product_name);
-#ifdef MOOKTODO
-	seq_printf(seq, "VendorId                 : %4.4X\n",
-		    config->VendorId);
-	seq_printf(seq, "DeviceId                 : %4.4X\n",
-		    config->DeviceId);
-	seq_printf(seq, "RevisionId               : %2.2x\n",
-		    config->RevisionId);
-	seq_printf(seq, "Bus    #                 : %d\n", card->busnumber);
-	seq_printf(seq, "Device #                 : %d\n", card->slotnumber);
-	seq_printf(seq, "Interfaces               : %d\n", card->card_size);
-	seq_printf(seq, "     Initialized         : %d\n",
-		    card->adapters_activated);
-	seq_printf(seq, "     Allocated           : %d\n",
-		    card->adapters_allocated);
-	ASSERT(card->card_size <= SLIC_NBR_MACS);
-	for (i = 0; i < card->card_size; i++) {
-		seq_printf(seq,
-			   "     MAC%d : %2.2X %2.2X %2.2X %2.2X %2.2X %2.2X\n",
-			   i, config->macinfo[i].macaddrA[0],
-			   config->macinfo[i].macaddrA[1],
-			   config->macinfo[i].macaddrA[2],
-			   config->macinfo[i].macaddrA[3],
-			   config->macinfo[i].macaddrA[4],
-			   config->macinfo[i].macaddrA[5]);
+	if (adapter->state != ADAPT_UP) {
+		/* Adapter is not operational.  Ignore.  */
+		return -ENODEV;
 	}
-	seq_printf(seq, "     IF  Init State Duplex/Speed irq\n");
-	seq_printf(seq, "     -------------------------------\n");
-	for (i = 0; i < card->adapters_allocated; i++) {
-		struct adapter *adapter;
 
-		adapter = card->adapter[i];
-		if (adapter) {
-			seq_printf(seq,
-				    "     %d   %d   %s  %s  %s    0x%X\n",
-				    adapter->physport, adapter->state,
-				    SLIC_LINKSTATE(adapter->linkstate),
-				    SLIC_DUPLEX(adapter->linkduplex),
-				    SLIC_SPEED(adapter->linkspeed),
-				    (uint) adapter->irq);
+	pshmem = (struct slic_shmem *)(unsigned long)adapter->phys_shmem;
+
+#if BITS_PER_LONG == 64
+	status = slic_upr_request(adapter,
+				  SLIC_UPR_RLSR,
+				  SLIC_GET_ADDR_LOW(&pshmem->linkstatus),
+				  SLIC_GET_ADDR_HIGH(&pshmem->linkstatus),
+				  0, 0);
+#else
+	status = slic_upr_request(adapter, SLIC_UPR_RLSR,
+		(u32)&pshmem->linkstatus,	/* no 4GB wrap guaranteed */
+				  0, 0, 0);
+#endif
+	return status;
+}
+
+static void slic_init_cleanup(struct adapter *adapter)
+{
+	if (adapter->intrregistered) {
+		adapter->intrregistered = 0;
+		free_irq(adapter->netdev->irq, adapter->netdev);
+
+	}
+	if (adapter->pshmem) {
+		pci_free_consistent(adapter->pcidev,
+				    sizeof(struct slic_shmem),
+				    adapter->pshmem, adapter->phys_shmem);
+		adapter->pshmem = NULL;
+		adapter->phys_shmem = (dma_addr_t)(unsigned long)NULL;
+	}
+
+	if (adapter->pingtimerset) {
+		adapter->pingtimerset = 0;
+		del_timer(&adapter->pingtimer);
+	}
+
+	slic_rspqueue_free(adapter);
+	slic_cmdq_free(adapter);
+	slic_rcvqueue_free(adapter);
+}
+
+/*
+ *  Allocate a mcast_address structure to hold the multicast address.
+ *  Link it in.
+ */
+static int slic_mcast_add_list(struct adapter *adapter, char *address)
+{
+	struct mcast_address *mcaddr, *mlist;
+
+	/* Check to see if it already exists */
+	mlist = adapter->mcastaddrs;
+	while (mlist) {
+		if (ether_addr_equal(mlist->address, address))
+			return 0;
+		mlist = mlist->next;
+	}
+
+	/* Doesn't already exist.  Allocate a structure to hold it */
+	mcaddr = kmalloc(sizeof(struct mcast_address), GFP_ATOMIC);
+	if (mcaddr == NULL)
+		return 1;
+
+	ether_addr_copy(mcaddr->address, address);
+
+	mcaddr->next = adapter->mcastaddrs;
+	adapter->mcastaddrs = mcaddr;
+
+	return 0;
+}
+
+static void slic_mcast_set_list(struct net_device *dev)
+{
+	struct adapter *adapter = netdev_priv(dev);
+	int status = 0;
+	char *addresses;
+	struct netdev_hw_addr *ha;
+
+	netdev_for_each_mc_addr(ha, dev) {
+		addresses = (char *)&ha->addr;
+		status = slic_mcast_add_list(adapter, addresses);
+		if (status != 0)
+			break;
+		slic_mcast_set_bit(adapter, addresses);
+	}
+
+	if (adapter->devflags_prev != dev->flags) {
+		adapter->macopts = MAC_DIRECTED;
+		if (dev->flags) {
+			if (dev->flags & IFF_BROADCAST)
+				adapter->macopts |= MAC_BCAST;
+			if (dev->flags & IFF_PROMISC)
+				adapter->macopts |= MAC_PROMISC;
+			if (dev->flags & IFF_ALLMULTI)
+				adapter->macopts |= MAC_ALLMCAST;
+			if (dev->flags & IFF_MULTICAST)
+				adapter->macopts |= MAC_MCAST;
+		}
+		adapter->devflags_prev = dev->flags;
+		slic_config_set(adapter, true);
+	} else {
+		if (status == 0)
+			slic_mcast_set_mask(adapter);
+	}
+}
+
+#define  XMIT_FAIL_LINK_STATE               1
+#define  XMIT_FAIL_ZERO_LENGTH              2
+#define  XMIT_FAIL_HOSTCMD_FAIL             3
+
+static void slic_xmit_build_request(struct adapter *adapter,
+			     struct slic_hostcmd *hcmd, struct sk_buff *skb)
+{
+	struct slic_host64_cmd *ihcmd;
+	ulong phys_addr;
+
+	ihcmd = &hcmd->cmd64;
+
+	ihcmd->flags = adapter->port << IHFLG_IFSHFT;
+	ihcmd->command = IHCMD_XMT_REQ;
+	ihcmd->u.slic_buffers.totlen = skb->len;
+	phys_addr = pci_map_single(adapter->pcidev, skb->data, skb->len,
+			PCI_DMA_TODEVICE);
+	ihcmd->u.slic_buffers.bufs[0].paddrl = SLIC_GET_ADDR_LOW(phys_addr);
+	ihcmd->u.slic_buffers.bufs[0].paddrh = SLIC_GET_ADDR_HIGH(phys_addr);
+	ihcmd->u.slic_buffers.bufs[0].length = skb->len;
+#if BITS_PER_LONG == 64
+	hcmd->cmdsize = (u32)((((u64)&ihcmd->u.slic_buffers.bufs[1] -
+				     (u64)hcmd) + 31) >> 5);
+#else
+	hcmd->cmdsize = (((u32)&ihcmd->u.slic_buffers.bufs[1] -
+				       (u32)hcmd) + 31) >> 5;
+#endif
+}
+
+static void slic_xmit_fail(struct adapter *adapter,
+		    struct sk_buff *skb,
+		    void *cmd, u32 skbtype, u32 status)
+{
+	if (adapter->xmitq_full)
+		netif_stop_queue(adapter->netdev);
+	if ((cmd == NULL) && (status <= XMIT_FAIL_HOSTCMD_FAIL)) {
+		switch (status) {
+		case XMIT_FAIL_LINK_STATE:
+			dev_err(&adapter->netdev->dev,
+				"reject xmit skb[%p: %x] linkstate[%s] adapter[%s:%d] card[%s:%d]\n",
+				skb, skb->pkt_type,
+				SLIC_LINKSTATE(adapter->linkstate),
+				SLIC_ADAPTER_STATE(adapter->state),
+				adapter->state,
+				SLIC_CARD_STATE(adapter->card->state),
+				adapter->card->state);
+			break;
+		case XMIT_FAIL_ZERO_LENGTH:
+			dev_err(&adapter->netdev->dev,
+				"xmit_start skb->len == 0 skb[%p] type[%x]\n",
+				skb, skb->pkt_type);
+			break;
+		case XMIT_FAIL_HOSTCMD_FAIL:
+			dev_err(&adapter->netdev->dev,
+				"xmit_start skb[%p] type[%x] No host commands available\n",
+				skb, skb->pkt_type);
+			break;
 		}
 	}
-	seq_printf(seq, "Generation #             : %4.4X\n", card->gennumber);
-	seq_printf(seq, "RcvQ max entries         : %4.4X\n",
-		    SLIC_RCVQ_ENTRIES);
-	seq_printf(seq, "Ping Status              : %8.8X\n",
-		    card->pingstatus);
-	seq_printf(seq, "Minimum grant            : %2.2x\n",
-		    config->MinGrant);
-	seq_printf(seq, "Maximum Latency          : %2.2x\n", config->MaxLat);
-	seq_printf(seq, "PciStatus                : %4.4x\n",
-		    config->Pcistatus);
-	seq_printf(seq, "Debug Device Id          : %4.4x\n",
-		    config->DbgDevId);
-	seq_printf(seq, "DRAM ROM Function        : %4.4x\n",
-		    config->DramRomFn);
-	seq_printf(seq, "Network interface Pin 1  : %2.2x\n",
-		    config->NetIntPin1);
-	seq_printf(seq, "Network interface Pin 2  : %2.2x\n",
-		    config->NetIntPin1);
-	seq_printf(seq, "Network interface Pin 3  : %2.2x\n",
-		    config->NetIntPin1);
-	seq_printf(seq, "PM capabilities          : %4.4X\n",
-		    config->PMECapab);
-	seq_printf(seq, "Network Clock Controls   : %4.4X\n",
-		    config->NwClkCtrls);
+	dev_kfree_skb(skb);
+	adapter->netdev->stats.tx_dropped++;
+}
 
-	switch (config->FruFormat) {
-	case ATK_FRU_FORMAT:
-		{
-			seq_printf(seq,
-			    "Vendor                   : Alacritech, Inc.\n");
-			seq_printf(seq,
-			    "Assembly #               : %c%c%c%c%c%c\n",
-				    fru[0], fru[1], fru[2], fru[3], fru[4],
-				    fru[5]);
-			seq_printf(seq,
-				    "Revision #               : %c%c\n",
-				    fru[6], fru[7]);
+static void slic_rcv_handle_error(struct adapter *adapter,
+					struct slic_rcvbuf *rcvbuf)
+{
+	struct slic_hddr_wds *hdr = (struct slic_hddr_wds *)rcvbuf->data;
+	struct net_device *netdev = adapter->netdev;
 
-			if (config->OEMFruFormat == VENDOR4_FRU_FORMAT) {
-				seq_printf(seq,
-					    "Serial   #               : "
-					    "%c%c%c%c%c%c%c%c%c%c%c%c\n",
-					    fru[8], fru[9], fru[10],
-					    fru[11], fru[12], fru[13],
-					    fru[16], fru[17], fru[18],
-					    fru[19], fru[20], fru[21]);
+	if (adapter->devid != SLIC_1GB_DEVICE_ID) {
+		if (hdr->frame_status14 & VRHSTAT_802OE)
+			adapter->if_events.oflow802++;
+		if (hdr->frame_status14 & VRHSTAT_TPOFLO)
+			adapter->if_events.Tprtoflow++;
+		if (hdr->frame_status_b14 & VRHSTATB_802UE)
+			adapter->if_events.uflow802++;
+		if (hdr->frame_status_b14 & VRHSTATB_RCVE) {
+			adapter->if_events.rcvearly++;
+			netdev->stats.rx_fifo_errors++;
+		}
+		if (hdr->frame_status_b14 & VRHSTATB_BUFF) {
+			adapter->if_events.Bufov++;
+			netdev->stats.rx_over_errors++;
+		}
+		if (hdr->frame_status_b14 & VRHSTATB_CARRE) {
+			adapter->if_events.Carre++;
+			netdev->stats.tx_carrier_errors++;
+		}
+		if (hdr->frame_status_b14 & VRHSTATB_LONGE)
+			adapter->if_events.Longe++;
+		if (hdr->frame_status_b14 & VRHSTATB_PREA)
+			adapter->if_events.Invp++;
+		if (hdr->frame_status_b14 & VRHSTATB_CRC) {
+			adapter->if_events.Crc++;
+			netdev->stats.rx_crc_errors++;
+		}
+		if (hdr->frame_status_b14 & VRHSTATB_DRBL)
+			adapter->if_events.Drbl++;
+		if (hdr->frame_status_b14 & VRHSTATB_CODE)
+			adapter->if_events.Code++;
+		if (hdr->frame_status_b14 & VRHSTATB_TPCSUM)
+			adapter->if_events.TpCsum++;
+		if (hdr->frame_status_b14 & VRHSTATB_TPHLEN)
+			adapter->if_events.TpHlen++;
+		if (hdr->frame_status_b14 & VRHSTATB_IPCSUM)
+			adapter->if_events.IpCsum++;
+		if (hdr->frame_status_b14 & VRHSTATB_IPLERR)
+			adapter->if_events.IpLen++;
+		if (hdr->frame_status_b14 & VRHSTATB_IPHERR)
+			adapter->if_events.IpHlen++;
+	} else {
+		if (hdr->frame_statusGB & VGBSTAT_XPERR) {
+			u32 xerr = hdr->frame_statusGB >> VGBSTAT_XERRSHFT;
+
+			if (xerr == VGBSTAT_XCSERR)
+				adapter->if_events.TpCsum++;
+			if (xerr == VGBSTAT_XUFLOW)
+				adapter->if_events.Tprtoflow++;
+			if (xerr == VGBSTAT_XHLEN)
+				adapter->if_events.TpHlen++;
+		}
+		if (hdr->frame_statusGB & VGBSTAT_NETERR) {
+			u32 nerr =
+			    (hdr->
+			     frame_statusGB >> VGBSTAT_NERRSHFT) &
+			    VGBSTAT_NERRMSK;
+			if (nerr == VGBSTAT_NCSERR)
+				adapter->if_events.IpCsum++;
+			if (nerr == VGBSTAT_NUFLOW)
+				adapter->if_events.IpLen++;
+			if (nerr == VGBSTAT_NHLEN)
+				adapter->if_events.IpHlen++;
+		}
+		if (hdr->frame_statusGB & VGBSTAT_LNKERR) {
+			u32 lerr = hdr->frame_statusGB & VGBSTAT_LERRMSK;
+
+			if (lerr == VGBSTAT_LDEARLY)
+				adapter->if_events.rcvearly++;
+			if (lerr == VGBSTAT_LBOFLO)
+				adapter->if_events.Bufov++;
+			if (lerr == VGBSTAT_LCODERR)
+				adapter->if_events.Code++;
+			if (lerr == VGBSTAT_LDBLNBL)
+				adapter->if_events.Drbl++;
+			if (lerr == VGBSTAT_LCRCERR)
+				adapter->if_events.Crc++;
+			if (lerr == VGBSTAT_LOFLO)
+				adapter->if_events.oflow802++;
+			if (lerr == VGBSTAT_LUFLO)
+				adapter->if_events.uflow802++;
+		}
+	}
+}
+
+#define TCP_OFFLOAD_FRAME_PUSHFLAG  0x10000000
+#define M_FAST_PATH                 0x0040
+
+static void slic_rcv_handler(struct adapter *adapter)
+{
+	struct net_device *netdev = adapter->netdev;
+	struct sk_buff *skb;
+	struct slic_rcvbuf *rcvbuf;
+	u32 frames = 0;
+
+	while ((skb = slic_rcvqueue_getnext(adapter))) {
+		u32 rx_bytes;
+
+		rcvbuf = (struct slic_rcvbuf *)skb->head;
+		adapter->card->events++;
+		if (rcvbuf->status & IRHDDR_ERR) {
+			adapter->rx_errors++;
+			slic_rcv_handle_error(adapter, rcvbuf);
+			slic_rcvqueue_reinsert(adapter, skb);
+			continue;
+		}
+
+		if (!slic_mac_filter(adapter, (struct ether_header *)
+					rcvbuf->data)) {
+			slic_rcvqueue_reinsert(adapter, skb);
+			continue;
+		}
+		skb_pull(skb, SLIC_RCVBUF_HEADSIZE);
+		rx_bytes = (rcvbuf->length & IRHDDR_FLEN_MSK);
+		skb_put(skb, rx_bytes);
+		netdev->stats.rx_packets++;
+		netdev->stats.rx_bytes += rx_bytes;
+#if SLIC_OFFLOAD_IP_CHECKSUM
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+#endif
+
+		skb->dev = adapter->netdev;
+		skb->protocol = eth_type_trans(skb, skb->dev);
+		netif_rx(skb);
+
+		++frames;
+#if SLIC_INTERRUPT_PROCESS_LIMIT
+		if (frames >= SLIC_RCVQ_MAX_PROCESS_ISR) {
+			adapter->rcv_interrupt_yields++;
+			break;
+		}
+#endif
+	}
+	adapter->max_isr_rcvs = max(adapter->max_isr_rcvs, frames);
+}
+
+static void slic_xmit_complete(struct adapter *adapter)
+{
+	struct slic_hostcmd *hcmd;
+	struct slic_rspbuf *rspbuf;
+	u32 frames = 0;
+	struct slic_handle_word slic_handle_word;
+
+	do {
+		rspbuf = slic_rspqueue_getnext(adapter);
+		if (!rspbuf)
+			break;
+		adapter->xmit_completes++;
+		adapter->card->events++;
+		/*
+		 * Get the complete host command buffer
+		 */
+		slic_handle_word.handle_token = rspbuf->hosthandle;
+		hcmd =
+			adapter->slic_handles[slic_handle_word.handle_index].
+									address;
+/*      hcmd = (struct slic_hostcmd *) rspbuf->hosthandle; */
+		if (hcmd->type == SLIC_CMD_DUMB) {
+			if (hcmd->skb)
+				dev_kfree_skb_irq(hcmd->skb);
+			slic_cmdq_putdone_irq(adapter, hcmd);
+		}
+		rspbuf->status = 0;
+		rspbuf->hosthandle = 0;
+		frames++;
+	} while (1);
+	adapter->max_isr_xmits = max(adapter->max_isr_xmits, frames);
+}
+
+static void slic_interrupt_card_up(u32 isr, struct adapter *adapter,
+			struct net_device *dev)
+{
+	if (isr & ~ISR_IO) {
+		if (isr & ISR_ERR) {
+			adapter->error_interrupts++;
+			if (isr & ISR_RMISS) {
+				int count;
+				int pre_count;
+				int errors;
+
+				struct slic_rcvqueue *rcvq =
+					&adapter->rcvqueue;
+
+				adapter->error_rmiss_interrupts++;
+
+				if (!rcvq->errors)
+					rcv_count = rcvq->count;
+				pre_count = rcvq->count;
+				errors = rcvq->errors;
+
+				while (rcvq->count < SLIC_RCVQ_FILLTHRESH) {
+					count = slic_rcvqueue_fill(adapter);
+					if (!count)
+						break;
+				}
+			} else if (isr & ISR_XDROP) {
+				dev_err(&dev->dev,
+						"isr & ISR_ERR [%x] ISR_XDROP\n",
+						isr);
 			} else {
-				seq_printf(seq,
-					    "Serial   #               : "
-					    "%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
-					    fru[8], fru[9], fru[10],
-					    fru[11], fru[12], fru[13],
-					    fru[14], fru[15], fru[16],
-					    fru[17], fru[18], fru[19],
-					    fru[20], fru[21]);
+				dev_err(&dev->dev,
+						"isr & ISR_ERR [%x]\n",
+						isr);
+			}
+		}
+
+		if (isr & ISR_LEVENT) {
+			adapter->linkevent_interrupts++;
+			if (slic_link_event_handler(adapter))
+				adapter->linkevent_interrupts--;
+		}
+
+		if ((isr & ISR_UPC) || (isr & ISR_UPCERR) ||
+		    (isr & ISR_UPCBSY)) {
+			adapter->upr_interrupts++;
+			slic_upr_request_complete(adapter, isr);
+		}
+	}
+
+	if (isr & ISR_RCV) {
+		adapter->rcv_interrupts++;
+		slic_rcv_handler(adapter);
+	}
+
+	if (isr & ISR_CMD) {
+		adapter->xmit_interrupts++;
+		slic_xmit_complete(adapter);
+	}
+}
+
+static irqreturn_t slic_interrupt(int irq, void *dev_id)
+{
+	struct net_device *dev = dev_id;
+	struct adapter *adapter = netdev_priv(dev);
+	u32 isr;
+
+	if ((adapter->pshmem) && (adapter->pshmem->isr)) {
+		slic_reg32_write(&adapter->slic_regs->slic_icr,
+				 ICR_INT_MASK, FLUSH);
+		isr = adapter->isrcopy = adapter->pshmem->isr;
+		adapter->pshmem->isr = 0;
+		adapter->num_isrs++;
+		switch (adapter->card->state) {
+		case CARD_UP:
+			slic_interrupt_card_up(isr, adapter, dev);
+			break;
+
+		case CARD_DOWN:
+			if ((isr & ISR_UPC) ||
+			    (isr & ISR_UPCERR) || (isr & ISR_UPCBSY)) {
+				adapter->upr_interrupts++;
+				slic_upr_request_complete(adapter, isr);
 			}
 			break;
 		}
 
-	default:
-		{
-			seq_printf(seq,
-			    "Vendor                   : Alacritech, Inc.\n");
-			seq_printf(seq,
-			    "Serial   #               : Empty FRU\n");
-			break;
-		}
+		adapter->isrcopy = 0;
+		adapter->all_reg_writes += 2;
+		adapter->isr_reg_writes++;
+		slic_reg32_write(&adapter->slic_regs->slic_isr, 0, FLUSH);
+	} else {
+		adapter->false_interrupts++;
+	}
+	return IRQ_HANDLED;
+}
+
+#define NORMAL_ETHFRAME     0
+
+static netdev_tx_t slic_xmit_start(struct sk_buff *skb, struct net_device *dev)
+{
+	struct sliccard *card;
+	struct adapter *adapter = netdev_priv(dev);
+	struct slic_hostcmd *hcmd = NULL;
+	u32 status = 0;
+	void *offloadcmd = NULL;
+
+	card = adapter->card;
+	if ((adapter->linkstate != LINK_UP) ||
+	    (adapter->state != ADAPT_UP) || (card->state != CARD_UP)) {
+		status = XMIT_FAIL_LINK_STATE;
+		goto xmit_fail;
+
+	} else if (skb->len == 0) {
+		status = XMIT_FAIL_ZERO_LENGTH;
+		goto xmit_fail;
 	}
 
-	switch (config->OEMFruFormat) {
-	case VENDOR1_FRU_FORMAT:
-		{
-			seq_printf(seq, "FRU Information:\n");
-			seq_printf(seq, "    Commodity #          : %c\n",
-				    oemfru[0]);
-			seq_printf(seq,
-				    "    Assembly #           : %c%c%c%c\n",
-				    oemfru[1], oemfru[2], oemfru[3], oemfru[4]);
-			seq_printf(seq,
-				    "    Revision #           : %c%c\n",
-				    oemfru[5], oemfru[6]);
-			seq_printf(seq,
-				    "    Supplier #           : %c%c\n",
-				    oemfru[7], oemfru[8]);
-			seq_printf(seq,
-				    "    Date                 : %c%c\n",
-				    oemfru[9], oemfru[10]);
-			seq_sprintf(seq,
-				    "    Sequence #           : %c%c%c\n",
-				    oemfru[11], oemfru[12], oemfru[13]);
-			break;
-		}
+	hcmd = slic_cmdq_getfree(adapter);
+	if (!hcmd) {
+		adapter->xmitq_full = 1;
+		status = XMIT_FAIL_HOSTCMD_FAIL;
+		goto xmit_fail;
+	}
+	hcmd->skb = skb;
+	hcmd->busy = 1;
+	hcmd->type = SLIC_CMD_DUMB;
+	slic_xmit_build_request(adapter, hcmd, skb);
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += skb->len;
 
-	case VENDOR2_FRU_FORMAT:
-		{
-			seq_printf(seq, "FRU Information:\n");
-			seq_printf(seq,
-				    "    Part     #           : "
-				    "%c%c%c%c%c%c%c%c\n",
-				    oemfru[0], oemfru[1], oemfru[2],
-				    oemfru[3], oemfru[4], oemfru[5],
-				    oemfru[6], oemfru[7]);
-			seq_printf(seq,
-				    "    Supplier #           : %c%c%c%c%c\n",
-				    oemfru[8], oemfru[9], oemfru[10],
-				    oemfru[11], oemfru[12]);
-			seq_printf(seq,
-				    "    Date                 : %c%c%c\n",
-				    oemfru[13], oemfru[14], oemfru[15]);
-			seq_sprintf(seq,
-				    "    Sequence #           : %c%c%c%c\n",
-				    oemfru[16], oemfru[17], oemfru[18],
-				    oemfru[19]);
-			break;
-		}
+#ifdef DEBUG_DUMP
+	if (adapter->kill_card) {
+		struct slic_host64_cmd ihcmd;
 
-	case VENDOR3_FRU_FORMAT:
-		{
-			seq_printf(seq, "FRU Information:\n");
-		}
+		ihcmd = &hcmd->cmd64;
 
-	case VENDOR4_FRU_FORMAT:
-		{
-			seq_printf(seq, "FRU Information:\n");
-			seq_printf(seq,
-				    "    FRU Number           : "
-				    "%c%c%c%c%c%c%c%c\n",
-				    oemfru[0], oemfru[1], oemfru[2],
-				    oemfru[3], oemfru[4], oemfru[5],
-				    oemfru[6], oemfru[7]);
-			seq_sprintf(seq,
-				    "    Part Number          : "
-				    "%c%c%c%c%c%c%c%c\n",
-				    oemfru[8], oemfru[9], oemfru[10],
-				    oemfru[11], oemfru[12], oemfru[13],
-				    oemfru[14], oemfru[15]);
-			seq_printf(seq,
-				    "    EC Level             : "
-				    "%c%c%c%c%c%c%c%c\n",
-				    oemfru[16], oemfru[17], oemfru[18],
-				    oemfru[19], oemfru[20], oemfru[21],
-				    oemfru[22], oemfru[23]);
-			break;
-		}
-
-	default:
-		break;
+		ihcmd->flags |= 0x40;
+		adapter->kill_card = 0;	/* only do this once */
 	}
 #endif
-
-	return 0;
-}
-
-static int slic_debug_adapter_show(struct seq_file *seq, void *v)
-{
-	struct adapter *adapter = seq->private;
-
-	if ((adapter->netdev) && (adapter->netdev->name)) {
-		seq_printf(seq, "info: interface          : %s\n",
-			    adapter->netdev->name);
+	if (hcmd->paddrh == 0) {
+		slic_reg32_write(&adapter->slic_regs->slic_cbar,
+				 (hcmd->paddrl | hcmd->cmdsize), DONT_FLUSH);
+	} else {
+		slic_reg64_write(adapter, &adapter->slic_regs->slic_cbar64,
+				 (hcmd->paddrl | hcmd->cmdsize),
+				 &adapter->slic_regs->slic_addr_upper,
+				 hcmd->paddrh, DONT_FLUSH);
 	}
-	seq_printf(seq, "info: status             : %s\n",
-		SLIC_LINKSTATE(adapter->linkstate));
-	seq_printf(seq, "info: port               : %d\n",
-		adapter->physport);
-	seq_printf(seq, "info: speed              : %s\n",
-		SLIC_SPEED(adapter->linkspeed));
-	seq_printf(seq, "info: duplex             : %s\n",
-		SLIC_DUPLEX(adapter->linkduplex));
-	seq_printf(seq, "info: irq                : 0x%X\n",
-		(uint) adapter->irq);
-	seq_printf(seq, "info: Interrupt Agg Delay: %d usec\n",
-		adapter->card->loadlevel_current);
-	seq_printf(seq, "info: RcvQ max entries   : %4.4X\n",
-		SLIC_RCVQ_ENTRIES);
-	seq_printf(seq, "info: RcvQ current       : %4.4X\n",
-		    adapter->rcvqueue.count);
-	seq_printf(seq, "rx stats: packets                  : %8.8lX\n",
-		    adapter->stats.rx_packets);
-	seq_printf(seq, "rx stats: bytes                    : %8.8lX\n",
-		    adapter->stats.rx_bytes);
-	seq_printf(seq, "rx stats: broadcasts               : %8.8X\n",
-		    adapter->rcv_broadcasts);
-	seq_printf(seq, "rx stats: multicasts               : %8.8X\n",
-		    adapter->rcv_multicasts);
-	seq_printf(seq, "rx stats: unicasts                 : %8.8X\n",
-		    adapter->rcv_unicasts);
-	seq_printf(seq, "rx stats: errors                   : %8.8X\n",
-		    (u32) adapter->slic_stats.iface.rcv_errors);
-	seq_printf(seq, "rx stats: Missed errors            : %8.8X\n",
-		    (u32) adapter->slic_stats.iface.rcv_discards);
-	seq_printf(seq, "rx stats: drops                    : %8.8X\n",
-			(u32) adapter->rcv_drops);
-	seq_printf(seq, "tx stats: packets                  : %8.8lX\n",
-			adapter->stats.tx_packets);
-	seq_printf(seq, "tx stats: bytes                    : %8.8lX\n",
-			adapter->stats.tx_bytes);
-	seq_printf(seq, "tx stats: errors                   : %8.8X\n",
-			(u32) adapter->slic_stats.iface.xmt_errors);
-	seq_printf(seq, "rx stats: multicasts               : %8.8lX\n",
-			adapter->stats.multicast);
-	seq_printf(seq, "tx stats: collision errors         : %8.8X\n",
-			(u32) adapter->slic_stats.iface.xmit_collisions);
-	seq_printf(seq, "perf: Max rcv frames/isr           : %8.8X\n",
-			adapter->max_isr_rcvs);
-	seq_printf(seq, "perf: Rcv interrupt yields         : %8.8X\n",
-			adapter->rcv_interrupt_yields);
-	seq_printf(seq, "perf: Max xmit complete/isr        : %8.8X\n",
-			adapter->max_isr_xmits);
-	seq_printf(seq, "perf: error interrupts             : %8.8X\n",
-			adapter->error_interrupts);
-	seq_printf(seq, "perf: error rmiss interrupts       : %8.8X\n",
-			adapter->error_rmiss_interrupts);
-	seq_printf(seq, "perf: rcv interrupts               : %8.8X\n",
-			adapter->rcv_interrupts);
-	seq_printf(seq, "perf: xmit interrupts              : %8.8X\n",
-			adapter->xmit_interrupts);
-	seq_printf(seq, "perf: link event interrupts        : %8.8X\n",
-			adapter->linkevent_interrupts);
-	seq_printf(seq, "perf: UPR interrupts               : %8.8X\n",
-			adapter->upr_interrupts);
-	seq_printf(seq, "perf: interrupt count              : %8.8X\n",
-			adapter->num_isrs);
-	seq_printf(seq, "perf: false interrupts             : %8.8X\n",
-			adapter->false_interrupts);
-	seq_printf(seq, "perf: All register writes          : %8.8X\n",
-			adapter->all_reg_writes);
-	seq_printf(seq, "perf: ICR register writes          : %8.8X\n",
-			adapter->icr_reg_writes);
-	seq_printf(seq, "perf: ISR register writes          : %8.8X\n",
-			adapter->isr_reg_writes);
-	seq_printf(seq, "ifevents: overflow 802 errors      : %8.8X\n",
-			adapter->if_events.oflow802);
-	seq_printf(seq, "ifevents: transport overflow errors: %8.8X\n",
-			adapter->if_events.Tprtoflow);
-	seq_printf(seq, "ifevents: underflow errors         : %8.8X\n",
-			adapter->if_events.uflow802);
-	seq_printf(seq, "ifevents: receive early            : %8.8X\n",
-			adapter->if_events.rcvearly);
-	seq_printf(seq, "ifevents: buffer overflows         : %8.8X\n",
-			adapter->if_events.Bufov);
-	seq_printf(seq, "ifevents: carrier errors           : %8.8X\n",
-			adapter->if_events.Carre);
-	seq_printf(seq, "ifevents: Long                     : %8.8X\n",
-			adapter->if_events.Longe);
-	seq_printf(seq, "ifevents: invalid preambles        : %8.8X\n",
-			adapter->if_events.Invp);
-	seq_printf(seq, "ifevents: CRC errors               : %8.8X\n",
-			adapter->if_events.Crc);
-	seq_printf(seq, "ifevents: dribble nibbles          : %8.8X\n",
-			adapter->if_events.Drbl);
-	seq_printf(seq, "ifevents: Code violations          : %8.8X\n",
-			adapter->if_events.Code);
-	seq_printf(seq, "ifevents: TCP checksum errors      : %8.8X\n",
-			adapter->if_events.TpCsum);
-	seq_printf(seq, "ifevents: TCP header short errors  : %8.8X\n",
-			adapter->if_events.TpHlen);
-	seq_printf(seq, "ifevents: IP checksum errors       : %8.8X\n",
-			adapter->if_events.IpCsum);
-	seq_printf(seq, "ifevents: IP frame incompletes     : %8.8X\n",
-			adapter->if_events.IpLen);
-	seq_printf(seq, "ifevents: IP headers shorts        : %8.8X\n",
-			adapter->if_events.IpHlen);
+xmit_done:
+	return NETDEV_TX_OK;
+xmit_fail:
+	slic_xmit_fail(adapter, skb, offloadcmd, NORMAL_ETHFRAME, status);
+	goto xmit_done;
+}
 
+static void slic_adapter_freeresources(struct adapter *adapter)
+{
+	slic_init_cleanup(adapter);
+	adapter->error_interrupts = 0;
+	adapter->rcv_interrupts = 0;
+	adapter->xmit_interrupts = 0;
+	adapter->linkevent_interrupts = 0;
+	adapter->upr_interrupts = 0;
+	adapter->num_isrs = 0;
+	adapter->xmit_completes = 0;
+	adapter->rcv_broadcasts = 0;
+	adapter->rcv_multicasts = 0;
+	adapter->rcv_unicasts = 0;
+}
+
+static int slic_adapter_allocresources(struct adapter *adapter,
+				       unsigned long *flags)
+{
+	if (!adapter->intrregistered) {
+		int retval;
+
+		spin_unlock_irqrestore(&slic_global.driver_lock, *flags);
+
+		retval = request_irq(adapter->netdev->irq,
+				     &slic_interrupt,
+				     IRQF_SHARED,
+				     adapter->netdev->name, adapter->netdev);
+
+		spin_lock_irqsave(&slic_global.driver_lock, *flags);
+
+		if (retval) {
+			dev_err(&adapter->netdev->dev,
+				"request_irq (%s) FAILED [%x]\n",
+				adapter->netdev->name, retval);
+			return retval;
+		}
+		adapter->intrregistered = 1;
+	}
 	return 0;
 }
-static int slic_debug_adapter_open(struct inode *inode, struct file *file)
+
+/*
+ *  slic_if_init
+ *
+ *  Perform initialization of our slic interface.
+ *
+ */
+static int slic_if_init(struct adapter *adapter, unsigned long *flags)
 {
-	return single_open(file, slic_debug_adapter_show, inode->i_private);
-}
-
-static int slic_debug_card_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, slic_debug_card_show, inode->i_private);
-}
-
-static const struct file_operations slic_debug_adapter_fops = {
-	.owner		= THIS_MODULE,
-	.open		= slic_debug_adapter_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
-static const struct file_operations slic_debug_card_fops = {
-	.owner		= THIS_MODULE,
-	.open		= slic_debug_card_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
-static void slic_debug_adapter_create(struct adapter *adapter)
-{
-	struct dentry *d;
-	char    name[7];
 	struct sliccard *card = adapter->card;
+	struct net_device *dev = adapter->netdev;
+	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
+	struct slic_shmem *pshmem;
+	int rc;
 
-	if (!card->debugfs_dir)
-		return;
+	/* adapter should be down at this point */
+	if (adapter->state != ADAPT_DOWN) {
+		dev_err(&dev->dev, "%s: adapter->state != ADAPT_DOWN\n",
+			__func__);
+		rc = -EIO;
+		goto err;
+	}
 
-	sprintf(name, "port%d", adapter->port);
-	d = debugfs_create_file(name, S_IRUGO,
-				card->debugfs_dir, adapter,
-				&slic_debug_adapter_fops);
-	if (!d || IS_ERR(d))
-		pr_info(PFX "%s: debugfs create failed\n", name);
+	adapter->devflags_prev = dev->flags;
+	adapter->macopts = MAC_DIRECTED;
+	if (dev->flags) {
+		if (dev->flags & IFF_BROADCAST)
+			adapter->macopts |= MAC_BCAST;
+		if (dev->flags & IFF_PROMISC)
+			adapter->macopts |= MAC_PROMISC;
+		if (dev->flags & IFF_ALLMULTI)
+			adapter->macopts |= MAC_ALLMCAST;
+		if (dev->flags & IFF_MULTICAST)
+			adapter->macopts |= MAC_MCAST;
+	}
+	rc = slic_adapter_allocresources(adapter, flags);
+	if (rc) {
+		dev_err(&dev->dev, "slic_adapter_allocresources FAILED %x\n",
+			rc);
+		slic_adapter_freeresources(adapter);
+		goto err;
+	}
+
+	if (!adapter->queues_initialized) {
+		rc = slic_rspqueue_init(adapter);
+		if (rc)
+			goto err;
+		rc = slic_cmdq_init(adapter);
+		if (rc)
+			goto err;
+		rc = slic_rcvqueue_init(adapter);
+		if (rc)
+			goto err;
+		adapter->queues_initialized = 1;
+	}
+
+	slic_reg32_write(&slic_regs->slic_icr, ICR_INT_OFF, FLUSH);
+	mdelay(1);
+
+	if (!adapter->isp_initialized) {
+		unsigned long flags;
+
+		pshmem = (struct slic_shmem *)(unsigned long)
+			 adapter->phys_shmem;
+
+		spin_lock_irqsave(&adapter->bit64reglock, flags);
+
+#if BITS_PER_LONG == 64
+		slic_reg32_write(&slic_regs->slic_addr_upper,
+				 SLIC_GET_ADDR_HIGH(&pshmem->isr), DONT_FLUSH);
+		slic_reg32_write(&slic_regs->slic_isp,
+				 SLIC_GET_ADDR_LOW(&pshmem->isr), FLUSH);
+#else
+		slic_reg32_write(&slic_regs->slic_addr_upper, 0, DONT_FLUSH);
+		slic_reg32_write(&slic_regs->slic_isp, (u32)&pshmem->isr,
+				FLUSH);
+#endif
+		spin_unlock_irqrestore(&adapter->bit64reglock, flags);
+		adapter->isp_initialized = 1;
+	}
+
+	adapter->state = ADAPT_UP;
+	if (!card->loadtimerset) {
+		setup_timer(&card->loadtimer, &slic_timer_load_check,
+			    (ulong)card);
+		card->loadtimer.expires =
+		    jiffies + (SLIC_LOADTIMER_PERIOD * HZ);
+		add_timer(&card->loadtimer);
+
+		card->loadtimerset = 1;
+	}
+
+	if (!adapter->pingtimerset) {
+		setup_timer(&adapter->pingtimer, &slic_timer_ping, (ulong)dev);
+		adapter->pingtimer.expires =
+		    jiffies + (PING_TIMER_INTERVAL * HZ);
+		add_timer(&adapter->pingtimer);
+		adapter->pingtimerset = 1;
+		adapter->card->pingstatus = ISR_PINGMASK;
+	}
+
+	/*
+	 *    clear any pending events, then enable interrupts
+	 */
+	adapter->isrcopy = 0;
+	adapter->pshmem->isr = 0;
+	slic_reg32_write(&slic_regs->slic_isr, 0, FLUSH);
+	slic_reg32_write(&slic_regs->slic_icr, ICR_INT_ON, FLUSH);
+
+	slic_link_config(adapter, LINK_AUTOSPEED, LINK_AUTOD);
+	rc = slic_link_event_handler(adapter);
+	if (rc) {
+		/* disable interrupts then clear pending events */
+		slic_reg32_write(&slic_regs->slic_icr, ICR_INT_OFF, FLUSH);
+		slic_reg32_write(&slic_regs->slic_isr, 0, FLUSH);
+		if (adapter->pingtimerset) {
+			del_timer(&adapter->pingtimer);
+			adapter->pingtimerset = 0;
+		}
+		if (card->loadtimerset) {
+			del_timer(&card->loadtimer);
+			card->loadtimerset = 0;
+		}
+		adapter->state = ADAPT_DOWN;
+		slic_adapter_freeresources(adapter);
+	}
+
+err:
+	return rc;
+}
+
+static int slic_entry_open(struct net_device *dev)
+{
+	struct adapter *adapter = netdev_priv(dev);
+	struct sliccard *card = adapter->card;
+	unsigned long flags;
+	int status;
+
+	netif_stop_queue(adapter->netdev);
+
+	spin_lock_irqsave(&slic_global.driver_lock, flags);
+	if (!adapter->activated) {
+		card->adapters_activated++;
+		slic_global.num_slic_ports_active++;
+		adapter->activated = 1;
+	}
+	status = slic_if_init(adapter, &flags);
+
+	if (status != 0) {
+		if (adapter->activated) {
+			card->adapters_activated--;
+			slic_global.num_slic_ports_active--;
+			adapter->activated = 0;
+		}
+		goto spin_unlock;
+	}
+	if (!card->master)
+		card->master = adapter;
+
+spin_unlock:
+	spin_unlock_irqrestore(&slic_global.driver_lock, flags);
+	return status;
+}
+
+static void slic_card_cleanup(struct sliccard *card)
+{
+	if (card->loadtimerset) {
+		card->loadtimerset = 0;
+		del_timer_sync(&card->loadtimer);
+	}
+
+	kfree(card);
+}
+
+static void slic_entry_remove(struct pci_dev *pcidev)
+{
+	struct net_device *dev = pci_get_drvdata(pcidev);
+	struct adapter *adapter = netdev_priv(dev);
+	struct sliccard *card;
+	struct mcast_address *mcaddr, *mlist;
+
+	unregister_netdev(dev);
+
+	slic_adapter_freeresources(adapter);
+	slic_unmap_mmio_space(adapter);
+
+	/* free multicast addresses */
+	mlist = adapter->mcastaddrs;
+	while (mlist) {
+		mcaddr = mlist;
+		mlist = mlist->next;
+		kfree(mcaddr);
+	}
+	card = adapter->card;
+	card->adapters_allocated--;
+	adapter->allocated = 0;
+	if (!card->adapters_allocated) {
+		struct sliccard *curr_card = slic_global.slic_card;
+
+		if (curr_card == card) {
+			slic_global.slic_card = card->next;
+		} else {
+			while (curr_card->next != card)
+				curr_card = curr_card->next;
+			curr_card->next = card->next;
+		}
+		slic_global.num_slic_cards--;
+		slic_card_cleanup(card);
+	}
+	free_netdev(dev);
+	pci_release_regions(pcidev);
+	pci_disable_device(pcidev);
+}
+
+static int slic_entry_halt(struct net_device *dev)
+{
+	struct adapter *adapter = netdev_priv(dev);
+	struct sliccard *card = adapter->card;
+	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
+	unsigned long flags;
+
+	spin_lock_irqsave(&slic_global.driver_lock, flags);
+	netif_stop_queue(adapter->netdev);
+	adapter->state = ADAPT_DOWN;
+	adapter->linkstate = LINK_DOWN;
+	adapter->upr_list = NULL;
+	adapter->upr_busy = 0;
+	adapter->devflags_prev = 0;
+	slic_reg32_write(&slic_regs->slic_icr, ICR_INT_OFF, FLUSH);
+	adapter->all_reg_writes++;
+	adapter->icr_reg_writes++;
+	slic_config_clear(adapter);
+	if (adapter->activated) {
+		card->adapters_activated--;
+		slic_global.num_slic_ports_active--;
+		adapter->activated = 0;
+	}
+#ifdef AUTOMATIC_RESET
+	slic_reg32_write(&slic_regs->slic_reset_iface, 0, FLUSH);
+#endif
+	/*
+	 *  Reset the adapter's cmd queues
+	 */
+	slic_cmdq_reset(adapter);
+
+#ifdef AUTOMATIC_RESET
+	if (!card->adapters_activated)
+		slic_card_init(card, adapter);
+#endif
+
+	spin_unlock_irqrestore(&slic_global.driver_lock, flags);
+	return 0;
+}
+
+static struct net_device_stats *slic_get_stats(struct net_device *dev)
+{
+	struct adapter *adapter = netdev_priv(dev);
+
+	dev->stats.collisions = adapter->slic_stats.iface.xmit_collisions;
+	dev->stats.rx_errors = adapter->slic_stats.iface.rcv_errors;
+	dev->stats.tx_errors = adapter->slic_stats.iface.xmt_errors;
+	dev->stats.rx_missed_errors = adapter->slic_stats.iface.rcv_discards;
+	dev->stats.tx_heartbeat_errors = 0;
+	dev->stats.tx_aborted_errors = 0;
+	dev->stats.tx_window_errors = 0;
+	dev->stats.tx_fifo_errors = 0;
+	dev->stats.rx_frame_errors = 0;
+	dev->stats.rx_length_errors = 0;
+
+	return &dev->stats;
+}
+
+static int slic_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+{
+	struct adapter *adapter = netdev_priv(dev);
+	struct ethtool_cmd edata;
+	struct ethtool_cmd ecmd;
+	u32 data[7];
+	u32 intagg;
+
+	switch (cmd) {
+	case SIOCSLICSETINTAGG:
+		if (copy_from_user(data, rq->ifr_data, 28))
+			return -EFAULT;
+		intagg = data[0];
+		dev_err(&dev->dev, "set interrupt aggregation to %d\n",
+			intagg);
+		slic_intagg_set(adapter, intagg);
+		return 0;
+
+	case SIOCETHTOOL:
+		if (copy_from_user(&ecmd, rq->ifr_data, sizeof(ecmd)))
+			return -EFAULT;
+
+		if (ecmd.cmd == ETHTOOL_GSET) {
+			memset(&edata, 0, sizeof(edata));
+			edata.supported = (SUPPORTED_10baseT_Half |
+					   SUPPORTED_10baseT_Full |
+					   SUPPORTED_100baseT_Half |
+					   SUPPORTED_100baseT_Full |
+					   SUPPORTED_Autoneg | SUPPORTED_MII);
+			edata.port = PORT_MII;
+			edata.transceiver = XCVR_INTERNAL;
+			edata.phy_address = 0;
+			if (adapter->linkspeed == LINK_100MB)
+				edata.speed = SPEED_100;
+			else if (adapter->linkspeed == LINK_10MB)
+				edata.speed = SPEED_10;
+			else
+				edata.speed = 0;
+
+			if (adapter->linkduplex == LINK_FULLD)
+				edata.duplex = DUPLEX_FULL;
+			else
+				edata.duplex = DUPLEX_HALF;
+
+			edata.autoneg = AUTONEG_ENABLE;
+			edata.maxtxpkt = 1;
+			edata.maxrxpkt = 1;
+			if (copy_to_user(rq->ifr_data, &edata, sizeof(edata)))
+				return -EFAULT;
+
+		} else if (ecmd.cmd == ETHTOOL_SSET) {
+			if (!capable(CAP_NET_ADMIN))
+				return -EPERM;
+
+			if (adapter->linkspeed == LINK_100MB)
+				edata.speed = SPEED_100;
+			else if (adapter->linkspeed == LINK_10MB)
+				edata.speed = SPEED_10;
+			else
+				edata.speed = 0;
+
+			if (adapter->linkduplex == LINK_FULLD)
+				edata.duplex = DUPLEX_FULL;
+			else
+				edata.duplex = DUPLEX_HALF;
+
+			edata.autoneg = AUTONEG_ENABLE;
+			edata.maxtxpkt = 1;
+			edata.maxrxpkt = 1;
+			if ((ecmd.speed != edata.speed) ||
+			    (ecmd.duplex != edata.duplex)) {
+				u32 speed;
+				u32 duplex;
+
+				if (ecmd.speed == SPEED_10)
+					speed = 0;
+				else
+					speed = PCR_SPEED_100;
+				if (ecmd.duplex == DUPLEX_FULL)
+					duplex = PCR_DUPLEX_FULL;
+				else
+					duplex = 0;
+				slic_link_config(adapter, speed, duplex);
+				if (slic_link_event_handler(adapter))
+					return -EFAULT;
+			}
+		}
+		return 0;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static void slic_config_pci(struct pci_dev *pcidev)
+{
+	u16 pci_command;
+	u16 new_command;
+
+	pci_read_config_word(pcidev, PCI_COMMAND, &pci_command);
+
+	new_command = pci_command | PCI_COMMAND_MASTER
+	    | PCI_COMMAND_MEMORY
+	    | PCI_COMMAND_INVALIDATE
+	    | PCI_COMMAND_PARITY | PCI_COMMAND_SERR | PCI_COMMAND_FAST_BACK;
+	if (pci_command != new_command)
+		pci_write_config_word(pcidev, PCI_COMMAND, new_command);
+}
+
+static int slic_card_init(struct sliccard *card, struct adapter *adapter)
+{
+	__iomem struct slic_regs *slic_regs = adapter->slic_regs;
+	struct slic_eeprom *peeprom;
+	struct oslic_eeprom *pOeeprom;
+	dma_addr_t phys_config;
+	u32 phys_configh;
+	u32 phys_configl;
+	u32 i = 0;
+	struct slic_shmem *pshmem;
+	int status;
+	uint macaddrs = card->card_size;
+	ushort eecodesize;
+	ushort dramsize;
+	ushort ee_chksum;
+	ushort calc_chksum;
+	struct slic_config_mac *pmac;
+	unsigned char fruformat;
+	unsigned char oemfruformat;
+	struct atk_fru *patkfru;
+	union oemfru *poemfru;
+	unsigned long flags;
+
+	/* Reset everything except PCI configuration space */
+	slic_soft_reset(adapter);
+
+	/* Download the microcode */
+	status = slic_card_download(adapter);
+	if (status)
+		return status;
+
+	if (!card->config_set) {
+		peeprom = pci_alloc_consistent(adapter->pcidev,
+					       sizeof(struct slic_eeprom),
+					       &phys_config);
+
+		phys_configl = SLIC_GET_ADDR_LOW(phys_config);
+		phys_configh = SLIC_GET_ADDR_HIGH(phys_config);
+
+		if (!peeprom) {
+			dev_err(&adapter->pcidev->dev,
+				"Failed to allocate DMA memory for EEPROM.\n");
+			return -ENOMEM;
+		}
+
+		memset(peeprom, 0, sizeof(struct slic_eeprom));
+
+		slic_reg32_write(&slic_regs->slic_icr, ICR_INT_OFF, FLUSH);
+		mdelay(1);
+		pshmem = (struct slic_shmem *)(unsigned long)
+			 adapter->phys_shmem;
+
+		spin_lock_irqsave(&adapter->bit64reglock, flags);
+		slic_reg32_write(&slic_regs->slic_addr_upper,
+				 SLIC_GET_ADDR_HIGH(&pshmem->isr), DONT_FLUSH);
+		slic_reg32_write(&slic_regs->slic_isp,
+				 SLIC_GET_ADDR_LOW(&pshmem->isr), FLUSH);
+		spin_unlock_irqrestore(&adapter->bit64reglock, flags);
+
+		status = slic_config_get(adapter, phys_configl, phys_configh);
+		if (status) {
+			dev_err(&adapter->pcidev->dev,
+				"Failed to fetch config data from device.\n");
+			goto card_init_err;
+		}
+
+		for (;;) {
+			if (adapter->pshmem->isr) {
+				if (adapter->pshmem->isr & ISR_UPC) {
+					adapter->pshmem->isr = 0;
+					slic_reg64_write(adapter,
+						&slic_regs->slic_isp, 0,
+						&slic_regs->slic_addr_upper,
+						0, FLUSH);
+					slic_reg32_write(&slic_regs->slic_isr,
+							 0, FLUSH);
+
+					slic_upr_request_complete(adapter, 0);
+					break;
+				}
+
+				adapter->pshmem->isr = 0;
+				slic_reg32_write(&slic_regs->slic_isr,
+						 0, FLUSH);
+			} else {
+				mdelay(1);
+				i++;
+				if (i > 5000) {
+					dev_err(&adapter->pcidev->dev,
+						"Fetch of config data timed out.\n");
+					slic_reg64_write(adapter,
+						&slic_regs->slic_isp, 0,
+						&slic_regs->slic_addr_upper,
+						0, FLUSH);
+					status = -EINVAL;
+					goto card_init_err;
+				}
+			}
+		}
+
+		switch (adapter->devid) {
+		/* Oasis card */
+		case SLIC_2GB_DEVICE_ID:
+			/* extract EEPROM data and pointers to EEPROM data */
+			pOeeprom = (struct oslic_eeprom *)peeprom;
+			eecodesize = pOeeprom->EecodeSize;
+			dramsize = pOeeprom->DramSize;
+			pmac = pOeeprom->MacInfo;
+			fruformat = pOeeprom->FruFormat;
+			patkfru = &pOeeprom->AtkFru;
+			oemfruformat = pOeeprom->OemFruFormat;
+			poemfru = &pOeeprom->OemFru;
+			macaddrs = 2;
+			/*
+			 * Minor kludge for Oasis card
+			 * get 2 MAC addresses from the
+			 * EEPROM to ensure that function 1
+			 * gets the Port 1 MAC address
+			 */
+			break;
+		default:
+			/* extract EEPROM data and pointers to EEPROM data */
+			eecodesize = peeprom->EecodeSize;
+			dramsize = peeprom->DramSize;
+			pmac = peeprom->u2.mac.MacInfo;
+			fruformat = peeprom->FruFormat;
+			patkfru = &peeprom->AtkFru;
+			oemfruformat = peeprom->OemFruFormat;
+			poemfru = &peeprom->OemFru;
+			break;
+		}
+
+		card->config.EepromValid = false;
+
+		/*  see if the EEPROM is valid by checking it's checksum */
+		if ((eecodesize <= MAX_EECODE_SIZE) &&
+		    (eecodesize >= MIN_EECODE_SIZE)) {
+
+			ee_chksum =
+			    *(u16 *)((char *)peeprom + (eecodesize - 2));
+			/*
+			 *  calculate the EEPROM checksum
+			 */
+			calc_chksum = slic_eeprom_cksum(peeprom,
+							eecodesize - 2);
+			/*
+			 *  if the ucdoe chksum flag bit worked,
+			 *  we wouldn't need this
+			 */
+			if (ee_chksum == calc_chksum)
+				card->config.EepromValid = true;
+		}
+		/*  copy in the DRAM size */
+		card->config.DramSize = dramsize;
+
+		/*  copy in the MAC address(es) */
+		for (i = 0; i < macaddrs; i++) {
+			memcpy(&card->config.MacInfo[i],
+			       &pmac[i], sizeof(struct slic_config_mac));
+		}
+
+		/*  copy the Alacritech FRU information */
+		card->config.FruFormat = fruformat;
+		memcpy(&card->config.AtkFru, patkfru,
+						sizeof(struct atk_fru));
+
+		pci_free_consistent(adapter->pcidev,
+				    sizeof(struct slic_eeprom),
+				    peeprom, phys_config);
+
+		if (!card->config.EepromValid) {
+			slic_reg64_write(adapter, &slic_regs->slic_isp, 0,
+					 &slic_regs->slic_addr_upper,
+					 0, FLUSH);
+			dev_err(&adapter->pcidev->dev, "EEPROM invalid.\n");
+			return -EINVAL;
+		}
+
+		card->config_set = 1;
+	}
+
+	status = slic_card_download_gbrcv(adapter);
+	if (status)
+		return status;
+
+	if (slic_global.dynamic_intagg)
+		slic_intagg_set(adapter, 0);
 	else
-		adapter->debugfs_entry = d;
+		slic_intagg_set(adapter, intagg_delay);
+
+	/*
+	 *  Initialize ping status to "ok"
+	 */
+	card->pingstatus = ISR_PINGMASK;
+
+	/*
+	 * Lastly, mark our card state as up and return success
+	 */
+	card->state = CARD_UP;
+	card->reset_in_progress = 0;
+
+	return 0;
+
+card_init_err:
+	pci_free_consistent(adapter->pcidev, sizeof(struct slic_eeprom),
+			    peeprom, phys_config);
+	return status;
 }
 
-static void slic_debug_adapter_destroy(struct adapter *adapter)
+static void slic_init_driver(void)
 {
-	if (adapter->debugfs_entry) {
-		debugfs_remove(adapter->debugfs_entry);
-		adapter->debugfs_entry = NULL;
+	if (slic_first_init) {
+		slic_first_init = 0;
+		spin_lock_init(&slic_global.driver_lock);
 	}
 }
 
-static void slic_debug_card_create(struct sliccard *card)
+static void slic_init_adapter(struct net_device *netdev,
+			      struct pci_dev *pcidev,
+			      const struct pci_device_id *pci_tbl_entry,
+			      void __iomem *memaddr, int chip_idx)
 {
-	struct dentry *d;
-	char    name[IFNAMSIZ];
+	ushort index;
+	struct slic_handle *pslic_handle;
+	struct adapter *adapter = netdev_priv(netdev);
 
-	snprintf(name, sizeof(name), "slic%d", card->cardnum);
-	d = debugfs_create_dir(name, slic_debugfs);
-	if (!d || IS_ERR(d))
-		pr_info(PFX "%s: debugfs create dir failed\n",
-				name);
-	else {
-		card->debugfs_dir = d;
-		d = debugfs_create_file("cardinfo", S_IRUGO,
-				slic_debugfs, card,
-				&slic_debug_card_fops);
-		if (!d || IS_ERR(d))
-			pr_info(PFX "%s: debugfs create failed\n",
-					name);
-		else
-			card->debugfs_cardinfo = d;
+/*	adapter->pcidev = pcidev;*/
+	adapter->vendid = pci_tbl_entry->vendor;
+	adapter->devid = pci_tbl_entry->device;
+	adapter->subsysid = pci_tbl_entry->subdevice;
+	adapter->busnumber = pcidev->bus->number;
+	adapter->slotnumber = ((pcidev->devfn >> 3) & 0x1F);
+	adapter->functionnumber = (pcidev->devfn & 0x7);
+	adapter->slic_regs = memaddr;
+	adapter->irq = pcidev->irq;
+/*	adapter->netdev = netdev;*/
+	adapter->chipid = chip_idx;
+	adapter->port = 0;	/*adapter->functionnumber;*/
+	adapter->cardindex = adapter->port;
+	spin_lock_init(&adapter->upr_lock);
+	spin_lock_init(&adapter->bit64reglock);
+	spin_lock_init(&adapter->adapter_lock);
+	spin_lock_init(&adapter->reset_lock);
+	spin_lock_init(&adapter->handle_lock);
+
+	adapter->card_size = 1;
+	/*
+	 * Initialize slic_handle array
+	 */
+	/*
+	 * Start with 1.  0 is an invalid host handle.
+	 */
+	for (index = 1, pslic_handle = &adapter->slic_handles[1];
+	     index < SLIC_CMDQ_MAXCMDS; index++, pslic_handle++) {
+
+		pslic_handle->token.handle_index = index;
+		pslic_handle->type = SLIC_HANDLE_FREE;
+		pslic_handle->next = adapter->pfree_slic_handles;
+		adapter->pfree_slic_handles = pslic_handle;
 	}
+	adapter->pshmem = (struct slic_shmem *)
+					pci_alloc_consistent(adapter->pcidev,
+					sizeof(struct slic_shmem),
+					&adapter->
+					phys_shmem);
+	if (adapter->pshmem)
+		memset(adapter->pshmem, 0, sizeof(struct slic_shmem));
 }
 
-static void slic_debug_card_destroy(struct sliccard *card)
+static const struct net_device_ops slic_netdev_ops = {
+	.ndo_open		= slic_entry_open,
+	.ndo_stop		= slic_entry_halt,
+	.ndo_start_xmit		= slic_xmit_start,
+	.ndo_do_ioctl		= slic_ioctl,
+	.ndo_set_mac_address	= slic_mac_set_address,
+	.ndo_get_stats		= slic_get_stats,
+	.ndo_set_rx_mode	= slic_mcast_set_list,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+};
+
+static u32 slic_card_locate(struct adapter *adapter)
 {
-	int i;
+	struct sliccard *card = slic_global.slic_card;
+	struct physcard *physcard = slic_global.phys_card;
+	ushort card_hostid;
+	u16 __iomem *hostid_reg;
+	uint i;
+	uint rdhostid_offset = 0;
 
-	for (i = 0; i < card->card_size; i++) {
-		struct adapter *adapter;
+	switch (adapter->devid) {
+	case SLIC_2GB_DEVICE_ID:
+		rdhostid_offset = SLIC_RDHOSTID_2GB;
+		break;
+	case SLIC_1GB_DEVICE_ID:
+		rdhostid_offset = SLIC_RDHOSTID_1GB;
+		break;
+	default:
+		return -ENODEV;
+	}
 
-		adapter = card->adapter[i];
-		if (adapter)
-			slic_debug_adapter_destroy(adapter);
+	hostid_reg =
+	    (u16 __iomem *)(((u8 __iomem *)(adapter->slic_regs)) +
+	    rdhostid_offset);
+
+	/* read the 16 bit hostid from SRAM */
+	card_hostid = (ushort)readw(hostid_reg);
+
+	/* Initialize a new card structure if need be */
+	if (card_hostid == SLIC_HOSTID_DEFAULT) {
+		card = kzalloc(sizeof(struct sliccard), GFP_KERNEL);
+		if (card == NULL)
+			return -ENOMEM;
+
+		card->next = slic_global.slic_card;
+		slic_global.slic_card = card;
+		card->busnumber = adapter->busnumber;
+		card->slotnumber = adapter->slotnumber;
+
+		/* Find an available cardnum */
+		for (i = 0; i < SLIC_MAX_CARDS; i++) {
+			if (slic_global.cardnuminuse[i] == 0) {
+				slic_global.cardnuminuse[i] = 1;
+				card->cardnum = i;
+				break;
+			}
+		}
+		slic_global.num_slic_cards++;
+	} else {
+		/* Card exists, find the card this adapter belongs to */
+		while (card) {
+			if (card->cardnum == card_hostid)
+				break;
+			card = card->next;
+		}
 	}
-	if (card->debugfs_cardinfo) {
-		debugfs_remove(card->debugfs_cardinfo);
-		card->debugfs_cardinfo = NULL;
+
+	if (!card)
+		return -ENXIO;
+	/* Put the adapter in the card's adapter list */
+	if (!card->adapter[adapter->port]) {
+		card->adapter[adapter->port] = adapter;
+		adapter->card = card;
 	}
-	if (card->debugfs_dir) {
-		debugfs_remove(card->debugfs_dir);
-		card->debugfs_dir = NULL;
+
+	card->card_size = 1;	/* one port per *logical* card */
+
+	while (physcard) {
+		for (i = 0; i < SLIC_MAX_PORTS; i++) {
+			if (physcard->adapter[i])
+				break;
+		}
+		if (i == SLIC_MAX_PORTS)
+			break;
+
+		if (physcard->adapter[i]->slotnumber == adapter->slotnumber)
+			break;
+		physcard = physcard->next;
 	}
+	if (!physcard) {
+		/* no structure allocated for this physical card yet */
+		physcard = kzalloc(sizeof(struct physcard), GFP_ATOMIC);
+		if (!physcard) {
+			if (card_hostid == SLIC_HOSTID_DEFAULT)
+				kfree(card);
+			return -ENOMEM;
+		}
+
+		physcard->next = slic_global.phys_card;
+		slic_global.phys_card = physcard;
+		physcard->adapters_allocd = 1;
+	} else {
+		physcard->adapters_allocd++;
+	}
+	/* Note - this is ZERO relative */
+	adapter->physport = physcard->adapters_allocd - 1;
+
+	physcard->adapter[adapter->physport] = adapter;
+	adapter->physcard = physcard;
+
+	return 0;
 }
 
-static void slic_debug_init(void)
+static int slic_entry_probe(struct pci_dev *pcidev,
+			       const struct pci_device_id *pci_tbl_entry)
 {
-	struct dentry *ent;
+	static int cards_found;
+	static int did_version;
+	int err = -ENODEV;
+	struct net_device *netdev;
+	struct adapter *adapter;
+	void __iomem *memmapped_ioaddr = NULL;
+	ulong mmio_start = 0;
+	ulong mmio_len = 0;
+	struct sliccard *card = NULL;
+	int pci_using_dac = 0;
 
-	ent = debugfs_create_dir("slic", NULL);
-	if (!ent || IS_ERR(ent)) {
-		pr_info(PFX "debugfs create directory failed\n");
-		return;
+	slic_global.dynamic_intagg = dynamic_intagg;
+
+	err = pci_enable_device(pcidev);
+
+	if (err)
+		return err;
+
+	if (did_version++ == 0) {
+		dev_info(&pcidev->dev, "%s\n", slic_banner);
+		dev_info(&pcidev->dev, "%s\n", slic_proc_version);
 	}
 
-	slic_debugfs = ent;
-}
-
-static void slic_debug_cleanup(void)
-{
-	if (slic_debugfs) {
-		debugfs_remove(slic_debugfs);
-		slic_debugfs = NULL;
+	if (!pci_set_dma_mask(pcidev, DMA_BIT_MASK(64))) {
+		pci_using_dac = 1;
+		err = pci_set_consistent_dma_mask(pcidev, DMA_BIT_MASK(64));
+		if (err) {
+			dev_err(&pcidev->dev, "unable to obtain 64-bit DMA for consistent allocations\n");
+			goto err_out_disable_pci;
+		}
+	} else {
+		err = pci_set_dma_mask(pcidev, DMA_BIT_MASK(32));
+		if (err) {
+			dev_err(&pcidev->dev, "no usable DMA configuration\n");
+			goto err_out_disable_pci;
+		}
+		pci_using_dac = 0;
+		pci_set_consistent_dma_mask(pcidev, DMA_BIT_MASK(32));
 	}
-}
 
-/******************************************************************************/
-/****************   MODULE INITIATION / TERMINATION FUNCTIONS   ***************/
-/******************************************************************************/
+	err = pci_request_regions(pcidev, DRV_NAME);
+	if (err) {
+		dev_err(&pcidev->dev, "can't obtain PCI resources\n");
+		goto err_out_disable_pci;
+	}
+
+	pci_set_master(pcidev);
+
+	netdev = alloc_etherdev(sizeof(struct adapter));
+	if (!netdev) {
+		err = -ENOMEM;
+		goto err_out_exit_slic_probe;
+	}
+
+	SET_NETDEV_DEV(netdev, &pcidev->dev);
+
+	pci_set_drvdata(pcidev, netdev);
+	adapter = netdev_priv(netdev);
+	adapter->netdev = netdev;
+	adapter->pcidev = pcidev;
+	if (pci_using_dac)
+		netdev->features |= NETIF_F_HIGHDMA;
+
+	mmio_start = pci_resource_start(pcidev, 0);
+	mmio_len = pci_resource_len(pcidev, 0);
+
+/*	memmapped_ioaddr =  (u32)ioremap_nocache(mmio_start, mmio_len);*/
+	memmapped_ioaddr = ioremap(mmio_start, mmio_len);
+	if (!memmapped_ioaddr) {
+		dev_err(&pcidev->dev, "cannot remap MMIO region %lx @ %lx\n",
+			mmio_len, mmio_start);
+		err = -ENOMEM;
+		goto err_out_free_netdev;
+	}
+
+	slic_config_pci(pcidev);
+
+	slic_init_driver();
+
+	slic_init_adapter(netdev,
+			  pcidev, pci_tbl_entry, memmapped_ioaddr, cards_found);
+
+	err = slic_card_locate(adapter);
+	if (err) {
+		dev_err(&pcidev->dev, "cannot locate card\n");
+		goto err_out_unmap;
+	}
+
+	card = adapter->card;
+
+	if (!adapter->allocated) {
+		card->adapters_allocated++;
+		adapter->allocated = 1;
+	}
+
+	err = slic_card_init(card, adapter);
+	if (err)
+		goto err_out_unmap;
+
+	slic_adapter_set_hwaddr(adapter);
+
+	netdev->base_addr = (unsigned long)memmapped_ioaddr;
+	netdev->irq = adapter->irq;
+	netdev->netdev_ops = &slic_netdev_ops;
+
+	strcpy(netdev->name, "eth%d");
+	err = register_netdev(netdev);
+	if (err) {
+		dev_err(&pcidev->dev, "Cannot register net device, aborting.\n");
+		goto err_out_unmap;
+	}
+
+	cards_found++;
+
+	return 0;
+
+err_out_unmap:
+	iounmap(memmapped_ioaddr);
+err_out_free_netdev:
+	free_netdev(netdev);
+err_out_exit_slic_probe:
+	pci_release_regions(pcidev);
+err_out_disable_pci:
+	pci_disable_device(pcidev);
+	return err;
+}
 
 static struct pci_driver slic_driver = {
 	.name = DRV_NAME,
 	.id_table = slic_pci_tbl,
 	.probe = slic_entry_probe,
-	.remove = __devexit_p(slic_entry_remove),
+	.remove = slic_entry_remove,
 };
 
 static int __init slic_module_init(void)
 {
 	slic_init_driver();
-
-	if (debug >= 0 && slic_debug != debug)
-		printk(KERN_DEBUG KBUILD_MODNAME ": debug level is %d.\n",
-		       debug);
-	if (debug >= 0)
-		slic_debug = debug;
 
 	return pci_register_driver(&slic_driver);
 }
@@ -4067,7 +3202,6 @@ static int __init slic_module_init(void)
 static void __exit slic_module_cleanup(void)
 {
 	pci_unregister_driver(&slic_driver);
-	slic_debug_cleanup();
 }
 
 module_init(slic_module_init);

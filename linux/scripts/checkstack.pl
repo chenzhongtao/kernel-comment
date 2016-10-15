@@ -12,14 +12,16 @@
 #	sh64 port by Paul Mundt
 #	Random bits by Matt Mackall <mpm@selenic.com>
 #	M68k port by Geert Uytterhoeven and Andreas Schwab
-#	AVR32 port by Haavard Skinnemoen <hskinnemoen@atmel.com>
-#	PARISC port by Kyle McMartin <kyle@parisc-linux.org>
+#	AVR32 port by Haavard Skinnemoen (Atmel)
+#	AArch64, PARISC ports by Kyle McMartin
 #	sparc port by Martin Habets <errandir_news@mph.eclipse.co.uk>
 #
 #	Usage:
 #	objdump -d vmlinux | scripts/checkstack.pl [arch]
 #
 #	TODO :	Port to all architectures (one regex per arch)
+
+use strict;
 
 # check for arch
 #
@@ -32,7 +34,7 @@
 # $1 (first bracket) matches the dynamic amount of the stack growth
 #
 # use anything else and feel the pain ;)
-my (@stack, $re, $dre, $x, $xs);
+my (@stack, $re, $dre, $x, $xs, $funcre);
 {
 	my $arch = shift;
 	if ($arch eq "") {
@@ -42,21 +44,23 @@ my (@stack, $re, $dre, $x, $xs);
 
 	$x	= "[0-9a-f]";	# hex character
 	$xs	= "[0-9a-f ]";	# hex character or space
-	if ($arch eq 'arm') {
+	$funcre = qr/^$x* <(.*)>:$/;
+	if ($arch eq 'aarch64') {
+		#ffffffc0006325cc:       a9bb7bfd        stp     x29, x30, [sp,#-80]!
+		$re = qr/^.*stp.*sp,\#-([0-9]{1,8})\]\!/o;
+	} elsif ($arch eq 'arm') {
 		#c0008ffc:	e24dd064	sub	sp, sp, #100	; 0x64
 		$re = qr/.*sub.*sp, sp, #(([0-9]{2}|[3-9])[0-9]{2})/o;
 	} elsif ($arch eq 'avr32') {
 		#8000008a:       20 1d           sub sp,4
 		#80000ca8:       fa cd 05 b0     sub sp,sp,1456
 		$re = qr/^.*sub.*sp.*,([0-9]{1,8})/o;
-	} elsif ($arch =~ /^i[3456]86$/) {
+	} elsif ($arch =~ /^x86(_64)?$/ || $arch =~ /^i[3456]86$/) {
 		#c0105234:       81 ec ac 05 00 00       sub    $0x5ac,%esp
-		$re = qr/^.*[as][du][db]    \$(0x$x{1,8}),\%esp$/o;
-		$dre = qr/^.*[as][du][db]    (%.*),\%esp$/o;
-	} elsif ($arch eq 'x86_64') {
-		#    2f60:	48 81 ec e8 05 00 00 	sub    $0x5e8,%rsp
-		$re = qr/^.*[as][du][db]    \$(0x$x{1,8}),\%rsp$/o;
-		$dre = qr/^.*[as][du][db]    (\%.*),\%rsp$/o;
+		# or
+		#    2f60:    48 81 ec e8 05 00 00       sub    $0x5e8,%rsp
+		$re = qr/^.*[as][du][db]    \$(0x$x{1,8}),\%(e|r)sp$/o;
+		$dre = qr/^.*[as][du][db]    (%.*),\%(e|r)sp$/o;
 	} elsif ($arch eq 'ia64') {
 		#e0000000044011fc:       01 0f fc 8c     adds r12=-384,r12
 		$re = qr/.*adds.*r12=-(([0-9]{2}|[3-9])[0-9]{2}),r12/o;
@@ -64,6 +68,10 @@ my (@stack, $re, $dre, $x, $xs);
 		#    2b6c:       4e56 fb70       linkw %fp,#-1168
 		#  1df770:       defc ffe4       addaw #-28,%sp
 		$re = qr/.*(?:linkw %fp,|addaw )#-([0-9]{1,4})(?:,%sp)?$/o;
+	} elsif ($arch eq 'metag') {
+		#400026fc:       40 00 00 82     ADD       A0StP,A0StP,#0x8
+		$re = qr/.*ADD.*A0StP,A0StP,\#(0x$x{1,8})/o;
+		$funcre = qr/^$x* <[^\$](.*)>:$/;
 	} elsif ($arch eq 'mips64') {
 		#8800402c:       67bdfff0        daddiu  sp,sp,-16
 		$re = qr/.*daddiu.*sp,sp,-(([0-9]{2}|[3-9])[0-9]{2})/o;
@@ -104,19 +112,10 @@ my (@stack, $re, $dre, $x, $xs);
 	}
 }
 
-sub bysize($) {
-	my ($asize, $bsize);
-	($asize = $a) =~ s/.*:	*(.*)$/$1/;
-	($bsize = $b) =~ s/.*:	*(.*)$/$1/;
-	$bsize <=> $asize
-}
-
 #
 # main()
 #
-my $funcre = qr/^$x* <(.*)>:$/;
-my $func;
-my $file, $lastslash;
+my ($func, $file, $lastslash);
 
 while (my $line = <STDIN>) {
 	if ($line =~ m/$funcre/) {
@@ -173,4 +172,5 @@ while (my $line = <STDIN>) {
 	}
 }
 
-print sort bysize @stack;
+# Sort output by size (last field)
+print sort { ($b =~ /:\t*(\d+)$/)[0] <=> ($a =~ /:\t*(\d+)$/)[0] } @stack;

@@ -30,16 +30,13 @@
 #ifndef __KEY_H__
 #define __KEY_H__
 
-#include "ttype.h"
-#include "tether.h"
-#include "80211mgr.h"
+#include <net/mac80211.h>
 
 /*---------------------  Export Definitions -------------------------*/
 #define MAX_GROUP_KEY       4
 #define MAX_KEY_TABLE       11
 #define MAX_KEY_LEN         32
 #define AES_KEY_LEN         16
-
 
 #define AUTHENTICATOR_KEY   0x10000000
 #define USE_KEYRSC          0x20000000
@@ -54,131 +51,19 @@
 #define KEY_CTL_CCMP        0x03
 #define KEY_CTL_INVALID     0xFF
 
+#define VNT_KEY_DEFAULTKEY	0x1
+#define VNT_KEY_GROUP_ADDRESS	0x2
+#define VNT_KEY_ALLGROUP	0x4
+#define VNT_KEY_GROUP		0x40
+#define VNT_KEY_PAIRWISE	0x00
+#define VNT_KEY_ONFLY		0x8000
+#define VNT_KEY_ONFLY_ALL	0x4000
 
-typedef struct tagSKeyItem
-{
-    BOOL        bKeyValid;
-    ULONG       uKeyLength;
-    BYTE        abyKey[MAX_KEY_LEN];
-    QWORD       KeyRSC;
-    DWORD       dwTSC47_16;
-    WORD        wTSC15_0;
-    BYTE        byCipherSuite;
-    BYTE        byReserved0;
-    DWORD       dwKeyIndex;
-    PVOID       pvKeyTable;
-} SKeyItem, *PSKeyItem; //64
+struct vnt_private;
 
-typedef struct tagSKeyTable
-{
-    BYTE        abyBSSID[U_ETHER_ADDR_LEN];  //6
-    BYTE        byReserved0[2];              //8
-    SKeyItem    PairwiseKey;
-    SKeyItem    GroupKey[MAX_GROUP_KEY]; //64*5 = 320, 320+8=328
-    DWORD       dwGTKeyIndex;            // GroupTransmitKey Index
-    BOOL        bInUse;
-    //2006-1116-01,<Modify> by NomadZhao
-    //WORD      wKeyCtl;
-    //BOOL      bSoftWEP;
-    BOOL        bSoftWEP;
-    WORD        wKeyCtl;      // for address of wKeyCtl at align 4
+int vnt_key_init_table(struct vnt_private *);
 
-    BYTE        byReserved1[6];
-} SKeyTable, *PSKeyTable; //348
+int vnt_set_keys(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
+		 struct ieee80211_vif *vif, struct ieee80211_key_conf *key);
 
-typedef struct tagSKeyManagement
-{
-    SKeyTable   KeyTable[MAX_KEY_TABLE];
-} SKeyManagement, * PSKeyManagement;
-
-/*---------------------  Export Types  ------------------------------*/
-
-/*---------------------  Export Macros ------------------------------*/
-
-/*---------------------  Export Classes  ----------------------------*/
-
-/*---------------------  Export Variables  --------------------------*/
-
-/*---------------------  Export Functions  --------------------------*/
-
-VOID KeyvInitTable(PSKeyManagement pTable, DWORD_PTR dwIoBase);
-
-BOOL KeybGetKey(
-    IN  PSKeyManagement pTable,
-    IN  PBYTE           pbyBSSID,
-    IN  DWORD           dwKeyIndex,
-    OUT PSKeyItem       *pKey
-    );
-
-BOOL KeybSetKey(
-    PSKeyManagement pTable,
-    PBYTE           pbyBSSID,
-    DWORD           dwKeyIndex,
-    ULONG           uKeyLength,
-    PQWORD          pKeyRSC,
-    PBYTE           pbyKey,
-    BYTE            byKeyDecMode,
-    DWORD_PTR       dwIoBase,
-    BYTE            byLocalID
-    );
-
-BOOL KeybSetDefaultKey(
-    PSKeyManagement pTable,
-    DWORD           dwKeyIndex,
-    ULONG           uKeyLength,
-    PQWORD          pKeyRSC,
-    PBYTE           pbyKey,
-    BYTE            byKeyDecMode,
-    DWORD_PTR       dwIoBase,
-    BYTE            byLocalID
-    );
-
-BOOL KeybRemoveKey(
-    PSKeyManagement pTable,
-    PBYTE           pbyBSSID,
-    DWORD           dwKeyIndex,
-    DWORD_PTR       dwIoBase
-    );
-
-BOOL KeybGetTransmitKey(
-    IN  PSKeyManagement pTable,
-    IN  PBYTE           pbyBSSID,
-    IN  DWORD           dwKeyType,
-    OUT PSKeyItem       *pKey
-    );
-
-BOOL KeybCheckPairewiseKey(
-    IN  PSKeyManagement pTable,
-    OUT PSKeyItem       *pKey
-    );
-
-BOOL KeybRemoveAllKey(
-    PSKeyManagement pTable,
-    PBYTE           pbyBSSID,
-    DWORD_PTR       dwIoBase
-    );
-
-VOID KeyvRemoveWEPKey(
-    PSKeyManagement pTable,
-    DWORD           dwKeyIndex,
-    DWORD_PTR       dwIoBase
-    );
-
-VOID KeyvRemoveAllWEPKey(
-    PSKeyManagement pTable,
-    DWORD_PTR       dwIoBase
-    );
-
-BOOL KeybSetAllGroupKey (
-    PSKeyManagement pTable,
-    DWORD           dwKeyIndex,
-    ULONG           uKeyLength,
-    PQWORD          pKeyRSC,
-    PBYTE           pbyKey,
-    BYTE            byKeyDecMode,
-    DWORD_PTR       dwIoBase,
-    BYTE            byLocalID
-    );
-
-#endif // __KEY_H__
-
+#endif /* __KEY_H__ */

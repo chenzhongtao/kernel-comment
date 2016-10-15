@@ -41,7 +41,7 @@ static ssize_t version_show(struct kobject *kobj, struct kobj_attribute *attr,
 	return snprintf(buf, PAGE_SIZE, "%u\n", O2NM_API_VERSION);
 }
 static struct kobj_attribute attr_version =
-	__ATTR(interface_revision, S_IFREG | S_IRUGO, version_show, NULL);
+	__ATTR(interface_revision, S_IRUGO, version_show, NULL);
 
 static struct attribute *o2cb_attrs[] = {
 	&attr_version.attr,
@@ -57,7 +57,6 @@ static struct kset *o2cb_kset;
 void o2cb_sys_shutdown(void)
 {
 	mlog_sys_shutdown();
-	sysfs_remove_link(NULL, "o2cb");
 	kset_unregister(o2cb_kset);
 }
 
@@ -68,14 +67,6 @@ int o2cb_sys_init(void)
 	o2cb_kset = kset_create_and_add("o2cb", NULL, fs_kobj);
 	if (!o2cb_kset)
 		return -ENOMEM;
-
-	/*
-	 * Create this symlink for backwards compatibility with old
-	 * versions of ocfs2-tools which look for things in /sys/o2cb.
-	 */
-	ret = sysfs_create_link(NULL, &o2cb_kset->kobj, "o2cb");
-	if (ret)
-		goto error;
 
 	ret = sysfs_create_group(&o2cb_kset->kobj, &o2cb_attr_group);
 	if (ret)

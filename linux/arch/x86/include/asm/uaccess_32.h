@@ -6,7 +6,6 @@
  */
 #include <linux/errno.h>
 #include <linux/thread_info.h>
-#include <linux/prefetch.h>
 #include <linux/string.h>
 #include <asm/asm.h>
 #include <asm/page.h>
@@ -60,6 +59,10 @@ __copy_to_user_inatomic(void __user *to, const void *from, unsigned long n)
 			__put_user_size(*(u32 *)from, (u32 __user *)to,
 					4, ret, 4);
 			return ret;
+		case 8:
+			__put_user_size(*(u64 *)from, (u64 __user *)to,
+					8, ret, 8);
+			return ret;
 		}
 	}
 	return __copy_to_user_ll(to, from, n);
@@ -71,7 +74,8 @@ __copy_to_user_inatomic(void __user *to, const void *from, unsigned long n)
  * @from: Source address, in kernel space.
  * @n:    Number of bytes to copy.
  *
- * Context: User context only.  This function may sleep.
+ * Context: User context only. This function may sleep if pagefaults are
+ *          enabled.
  *
  * Copy data from kernel space to user space.  Caller must check
  * the specified block with access_ok() before calling this function.
@@ -118,7 +122,8 @@ __copy_from_user_inatomic(void *to, const void __user *from, unsigned long n)
  * @from: Source address, in user space.
  * @n:    Number of bytes to copy.
  *
- * Context: User context only.  This function may sleep.
+ * Context: User context only. This function may sleep if pagefaults are
+ *          enabled.
  *
  * Copy data from user space to kernel space.  Caller must check
  * the specified block with access_ok() before calling this function.
@@ -184,35 +189,5 @@ __copy_from_user_inatomic_nocache(void *to, const void __user *from,
 {
        return __copy_from_user_ll_nocache_nozero(to, from, n);
 }
-
-unsigned long __must_check copy_to_user(void __user *to,
-					const void *from, unsigned long n);
-unsigned long __must_check copy_from_user(void *to,
-					  const void __user *from,
-					  unsigned long n);
-long __must_check strncpy_from_user(char *dst, const char __user *src,
-				    long count);
-long __must_check __strncpy_from_user(char *dst,
-				      const char __user *src, long count);
-
-/**
- * strlen_user: - Get the size of a string in user space.
- * @str: The string to measure.
- *
- * Context: User context only.  This function may sleep.
- *
- * Get the size of a NUL-terminated string in user space.
- *
- * Returns the size of the string INCLUDING the terminating NUL.
- * On exception, returns 0.
- *
- * If there is a limit on the length of a valid string, you may wish to
- * consider using strnlen_user() instead.
- */
-#define strlen_user(str) strnlen_user(str, LONG_MAX)
-
-long strnlen_user(const char __user *str, long n);
-unsigned long __must_check clear_user(void __user *mem, unsigned long len);
-unsigned long __must_check __clear_user(void __user *mem, unsigned long len);
 
 #endif /* _ASM_X86_UACCESS_32_H */

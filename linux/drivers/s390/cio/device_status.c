@@ -1,8 +1,5 @@
 /*
- * drivers/s390/cio/device_status.c
- *
- *    Copyright (C) 2002 IBM Deutschland Entwicklung GmbH,
- *			 IBM Corporation
+ *    Copyright IBM Corp. 2002
  *    Author(s): Cornelia Huck (cornelia.huck@de.ibm.com)
  *		 Martin Schwidefsky (schwidefsky@de.ibm.com)
  *
@@ -335,9 +332,6 @@ ccw_device_do_sense(struct ccw_device *cdev, struct irb *irb)
 	sense_ccw->cda = (__u32) __pa(cdev->private->irb.ecw);
 	sense_ccw->count = SENSE_MAX_COUNT;
 	sense_ccw->flags = CCW_FLAG_SLI;
-
-	/* Reset internal retry indication. */
-	cdev->private->flags.intretry = 0;
 
 	rc = cio_start(sch, sense_ccw, 0xff);
 	if (rc == -ENODEV || rc == -EACCES)

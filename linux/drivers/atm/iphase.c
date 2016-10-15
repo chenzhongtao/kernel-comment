@@ -53,10 +53,11 @@
 #include <linux/delay.h>  
 #include <linux/uio.h>  
 #include <linux/init.h>  
+#include <linux/interrupt.h>
 #include <linux/wait.h>
-#include <asm/system.h>  
+#include <linux/slab.h>
 #include <asm/io.h>  
-#include <asm/atomic.h>  
+#include <linux/atomic.h>
 #include <asm/uaccess.h>  
 #include <asm/string.h>  
 #include <asm/byteorder.h>  
@@ -111,7 +112,8 @@ static void ia_enque_head_rtn_q (IARTN_Q *que, IARTN_Q * data)
 
 static int ia_enque_rtn_q (IARTN_Q *que, struct desc_tbl_t data) {
    IARTN_Q *entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
-   if (!entry) return -1;
+   if (!entry)
+      return -ENOMEM;
    entry->data = data;
    entry->next = NULL;
    if (que->next == NULL) 
@@ -219,7 +221,7 @@ static u16 get_desc (IADEV *dev, struct ia_vcc *iavcc) {
   while (!desc_num || (dev->desc_tbl[desc_num -1]).timestamp) {
      dev->ffL.tcq_rd += 2;
      if (dev->ffL.tcq_rd > dev->ffL.tcq_ed) 
-     dev->ffL.tcq_rd = dev->ffL.tcq_st;
+	dev->ffL.tcq_rd = dev->ffL.tcq_st;
      if (dev->ffL.tcq_rd == dev->host_tcq_wr) 
         return 0xFFFF; 
      desc_num = *(u_short *)(dev->seg_ram + dev->ffL.tcq_rd);
@@ -557,7 +559,7 @@ static int ia_cbr_setup (IADEV *dev, struct atm_vcc *vcc) {
           memcpy((caddr_t)&cbrVC,(caddr_t)TstSchedTbl,sizeof(cbrVC));
        } /* while */
        // Move this VCI number into this location of the CBR Sched table.
-       memcpy((caddr_t)TstSchedTbl, (caddr_t)&vcIndex,sizeof(TstSchedTbl));
+       memcpy((caddr_t)TstSchedTbl, (caddr_t)&vcIndex, sizeof(*TstSchedTbl));
        dev->CbrRemEntries--;
        toBeAssigned--;
    } /* while */ 
@@ -612,7 +614,6 @@ static int ia_que_tx (IADEV *iadev) {
    struct sk_buff *skb;
    int num_desc;
    struct atm_vcc *vcc;
-   struct ia_vcc *iavcc;
    num_desc = ia_avail_descs(iadev);
 
    while (num_desc && (skb = skb_dequeue(&iadev->tx_backlog))) {
@@ -626,7 +627,6 @@ static int ia_que_tx (IADEV *iadev) {
          printk("Free the SKB on closed vci %d \n", vcc->vci);
          break;
       }
-      iavcc = INPH_IA_VCC(vcc);
       if (ia_pkt_tx (vcc, skb)) {
          skb_queue_head(&iadev->tx_backlog, skb);
       }
@@ -818,129 +818,152 @@ static void ia_hw_type(IADEV *iadev) {
 
 }
 
-static void IaFrontEndIntr(IADEV *iadev) {
-  volatile IA_SUNI *suni;
-  volatile ia_mb25_t *mb25;
-  volatile suni_pm7345_t *suni_pm7345;
-  u32 intr_status;
-  u_int frmr_intr;
-
-  if(iadev->phy_type & FE_25MBIT_PHY) {
-     mb25 = (ia_mb25_t*)iadev->phy;
-     iadev->carrier_detect =  Boolean(mb25->mb25_intr_status & MB25_IS_GSB);
-  } else if (iadev->phy_type & FE_DS3_PHY) {
-     suni_pm7345 = (suni_pm7345_t *)iadev->phy;
-     /* clear FRMR interrupts */
-     frmr_intr   = suni_pm7345->suni_ds3_frm_intr_stat; 
-     iadev->carrier_detect =  
-           Boolean(!(suni_pm7345->suni_ds3_frm_stat & SUNI_DS3_LOSV));
-  } else if (iadev->phy_type & FE_E3_PHY ) {
-     suni_pm7345 = (suni_pm7345_t *)iadev->phy;
-     frmr_intr   = suni_pm7345->suni_e3_frm_maint_intr_ind;
-     iadev->carrier_detect =
-           Boolean(!(suni_pm7345->suni_e3_frm_fram_intr_ind_stat&SUNI_E3_LOS));
-  }
-  else { 
-     suni = (IA_SUNI *)iadev->phy;
-     intr_status = suni->suni_rsop_status & 0xff;
-     iadev->carrier_detect = Boolean(!(suni->suni_rsop_status & SUNI_LOSV));
-  }
-  if (iadev->carrier_detect)
-    printk("IA: SUNI carrier detected\n");
-  else
-    printk("IA: SUNI carrier lost signal\n"); 
-  return;
+static u32 ia_phy_read32(struct iadev_priv *ia, unsigned int reg)
+{
+	return readl(ia->phy + (reg >> 2));
 }
 
-static void ia_mb25_init (IADEV *iadev)
+static void ia_phy_write32(struct iadev_priv *ia, unsigned int reg, u32 val)
 {
-   volatile ia_mb25_t  *mb25 = (ia_mb25_t*)iadev->phy;
+	writel(val, ia->phy + (reg >> 2));
+}
+
+static void ia_frontend_intr(struct iadev_priv *iadev)
+{
+	u32 status;
+
+	if (iadev->phy_type & FE_25MBIT_PHY) {
+		status = ia_phy_read32(iadev, MB25_INTR_STATUS);
+		iadev->carrier_detect = (status & MB25_IS_GSB) ? 1 : 0;
+	} else if (iadev->phy_type & FE_DS3_PHY) {
+		ia_phy_read32(iadev, SUNI_DS3_FRM_INTR_STAT);
+		status = ia_phy_read32(iadev, SUNI_DS3_FRM_STAT);
+		iadev->carrier_detect = (status & SUNI_DS3_LOSV) ? 0 : 1;
+	} else if (iadev->phy_type & FE_E3_PHY) {
+		ia_phy_read32(iadev, SUNI_E3_FRM_MAINT_INTR_IND);
+		status = ia_phy_read32(iadev, SUNI_E3_FRM_FRAM_INTR_IND_STAT);
+		iadev->carrier_detect = (status & SUNI_E3_LOS) ? 0 : 1;
+	} else {
+		status = ia_phy_read32(iadev, SUNI_RSOP_STATUS);
+		iadev->carrier_detect = (status & SUNI_LOSV) ? 0 : 1;
+	}
+
+	printk(KERN_INFO "IA: SUNI carrier %s\n",
+		iadev->carrier_detect ? "detected" : "lost signal");
+}
+
+static void ia_mb25_init(struct iadev_priv *iadev)
+{
 #if 0
    mb25->mb25_master_ctrl = MB25_MC_DRIC | MB25_MC_DREC | MB25_MC_ENABLED;
 #endif
-   mb25->mb25_master_ctrl = MB25_MC_DRIC | MB25_MC_DREC;
-   mb25->mb25_diag_control = 0;
-   /*
-    * Initialize carrier detect state
-    */
-   iadev->carrier_detect =  Boolean(mb25->mb25_intr_status & MB25_IS_GSB);
-   return;
-}                   
+	ia_phy_write32(iadev, MB25_MASTER_CTRL, MB25_MC_DRIC | MB25_MC_DREC);
+	ia_phy_write32(iadev, MB25_DIAG_CONTROL, 0);
 
-static void ia_suni_pm7345_init (IADEV *iadev)
+	iadev->carrier_detect =
+		(ia_phy_read32(iadev, MB25_INTR_STATUS) & MB25_IS_GSB) ? 1 : 0;
+}
+
+struct ia_reg {
+	u16 reg;
+	u16 val;
+};
+
+static void ia_phy_write(struct iadev_priv *iadev,
+			 const struct ia_reg *regs, int len)
 {
-   volatile suni_pm7345_t *suni_pm7345 = (suni_pm7345_t *)iadev->phy;
-   if (iadev->phy_type & FE_DS3_PHY)
-   {
-      iadev->carrier_detect = 
-          Boolean(!(suni_pm7345->suni_ds3_frm_stat & SUNI_DS3_LOSV)); 
-      suni_pm7345->suni_ds3_frm_intr_enbl = 0x17;
-      suni_pm7345->suni_ds3_frm_cfg = 1;
-      suni_pm7345->suni_ds3_tran_cfg = 1;
-      suni_pm7345->suni_config = 0;
-      suni_pm7345->suni_splr_cfg = 0;
-      suni_pm7345->suni_splt_cfg = 0;
-   }
-   else 
-   {
-      iadev->carrier_detect = 
-          Boolean(!(suni_pm7345->suni_e3_frm_fram_intr_ind_stat & SUNI_E3_LOS));
-      suni_pm7345->suni_e3_frm_fram_options = 0x4;
-      suni_pm7345->suni_e3_frm_maint_options = 0x20;
-      suni_pm7345->suni_e3_frm_fram_intr_enbl = 0x1d;
-      suni_pm7345->suni_e3_frm_maint_intr_enbl = 0x30;
-      suni_pm7345->suni_e3_tran_stat_diag_options = 0x0;
-      suni_pm7345->suni_e3_tran_fram_options = 0x1;
-      suni_pm7345->suni_config = SUNI_PM7345_E3ENBL;
-      suni_pm7345->suni_splr_cfg = 0x41;
-      suni_pm7345->suni_splt_cfg = 0x41;
-   } 
-   /*
-    * Enable RSOP loss of signal interrupt.
-    */
-   suni_pm7345->suni_intr_enbl = 0x28;
- 
-   /*
-    * Clear error counters
-    */
-   suni_pm7345->suni_id_reset = 0;
+	while (len--) {
+		ia_phy_write32(iadev, regs->reg, regs->val);
+		regs++;
+	}
+}
 
-   /*
-    * Clear "PMCTST" in master test register.
-    */
-   suni_pm7345->suni_master_test = 0;
+static void ia_suni_pm7345_init_ds3(struct iadev_priv *iadev)
+{
+	static const struct ia_reg suni_ds3_init [] = {
+		{ SUNI_DS3_FRM_INTR_ENBL,	0x17 },
+		{ SUNI_DS3_FRM_CFG,		0x01 },
+		{ SUNI_DS3_TRAN_CFG,		0x01 },
+		{ SUNI_CONFIG,			0 },
+		{ SUNI_SPLR_CFG,		0 },
+		{ SUNI_SPLT_CFG,		0 }
+	};
+	u32 status;
 
-   suni_pm7345->suni_rxcp_ctrl = 0x2c;
-   suni_pm7345->suni_rxcp_fctrl = 0x81;
- 
-   suni_pm7345->suni_rxcp_idle_pat_h1 =
-   	suni_pm7345->suni_rxcp_idle_pat_h2 =
-   	suni_pm7345->suni_rxcp_idle_pat_h3 = 0;
-   suni_pm7345->suni_rxcp_idle_pat_h4 = 1;
- 
-   suni_pm7345->suni_rxcp_idle_mask_h1 = 0xff;
-   suni_pm7345->suni_rxcp_idle_mask_h2 = 0xff;
-   suni_pm7345->suni_rxcp_idle_mask_h3 = 0xff;
-   suni_pm7345->suni_rxcp_idle_mask_h4 = 0xfe;
- 
-   suni_pm7345->suni_rxcp_cell_pat_h1 =
-   	suni_pm7345->suni_rxcp_cell_pat_h2 =
-   	suni_pm7345->suni_rxcp_cell_pat_h3 = 0;
-   suni_pm7345->suni_rxcp_cell_pat_h4 = 1;
- 
-   suni_pm7345->suni_rxcp_cell_mask_h1 =
-   	suni_pm7345->suni_rxcp_cell_mask_h2 =
-   	suni_pm7345->suni_rxcp_cell_mask_h3 =
-   	suni_pm7345->suni_rxcp_cell_mask_h4 = 0xff;
- 
-   suni_pm7345->suni_txcp_ctrl = 0xa4;
-   suni_pm7345->suni_txcp_intr_en_sts = 0x10;
-   suni_pm7345->suni_txcp_idle_pat_h5 = 0x55;
- 
-   suni_pm7345->suni_config &= ~(SUNI_PM7345_LLB |
-                                 SUNI_PM7345_CLB |
-                                 SUNI_PM7345_DLB |
-                                  SUNI_PM7345_PLB);
+	status = ia_phy_read32(iadev, SUNI_DS3_FRM_STAT);
+	iadev->carrier_detect = (status & SUNI_DS3_LOSV) ? 0 : 1;
+
+	ia_phy_write(iadev, suni_ds3_init, ARRAY_SIZE(suni_ds3_init));
+}
+
+static void ia_suni_pm7345_init_e3(struct iadev_priv *iadev)
+{
+	static const struct ia_reg suni_e3_init [] = {
+		{ SUNI_E3_FRM_FRAM_OPTIONS,		0x04 },
+		{ SUNI_E3_FRM_MAINT_OPTIONS,		0x20 },
+		{ SUNI_E3_FRM_FRAM_INTR_ENBL,		0x1d },
+		{ SUNI_E3_FRM_MAINT_INTR_ENBL,		0x30 },
+		{ SUNI_E3_TRAN_STAT_DIAG_OPTIONS,	0 },
+		{ SUNI_E3_TRAN_FRAM_OPTIONS,		0x01 },
+		{ SUNI_CONFIG,				SUNI_PM7345_E3ENBL },
+		{ SUNI_SPLR_CFG,			0x41 },
+		{ SUNI_SPLT_CFG,			0x41 }
+	};
+	u32 status;
+
+	status = ia_phy_read32(iadev, SUNI_E3_FRM_FRAM_INTR_IND_STAT);
+	iadev->carrier_detect = (status & SUNI_E3_LOS) ? 0 : 1;
+	ia_phy_write(iadev, suni_e3_init, ARRAY_SIZE(suni_e3_init));
+}
+
+static void ia_suni_pm7345_init(struct iadev_priv *iadev)
+{
+	static const struct ia_reg suni_init [] = {
+		/* Enable RSOP loss of signal interrupt. */
+		{ SUNI_INTR_ENBL,		0x28 },
+		/* Clear error counters. */
+		{ SUNI_ID_RESET,		0 },
+		/* Clear "PMCTST" in master test register. */
+		{ SUNI_MASTER_TEST,		0 },
+
+		{ SUNI_RXCP_CTRL,		0x2c },
+		{ SUNI_RXCP_FCTRL,		0x81 },
+
+		{ SUNI_RXCP_IDLE_PAT_H1,	0 },
+		{ SUNI_RXCP_IDLE_PAT_H2,	0 },
+		{ SUNI_RXCP_IDLE_PAT_H3,	0 },
+		{ SUNI_RXCP_IDLE_PAT_H4,	0x01 },
+
+		{ SUNI_RXCP_IDLE_MASK_H1,	0xff },
+		{ SUNI_RXCP_IDLE_MASK_H2,	0xff },
+		{ SUNI_RXCP_IDLE_MASK_H3,	0xff },
+		{ SUNI_RXCP_IDLE_MASK_H4,	0xfe },
+
+		{ SUNI_RXCP_CELL_PAT_H1,	0 },
+		{ SUNI_RXCP_CELL_PAT_H2,	0 },
+		{ SUNI_RXCP_CELL_PAT_H3,	0 },
+		{ SUNI_RXCP_CELL_PAT_H4,	0x01 },
+
+		{ SUNI_RXCP_CELL_MASK_H1,	0xff },
+		{ SUNI_RXCP_CELL_MASK_H2,	0xff },
+		{ SUNI_RXCP_CELL_MASK_H3,	0xff },
+		{ SUNI_RXCP_CELL_MASK_H4,	0xff },
+
+		{ SUNI_TXCP_CTRL,		0xa4 },
+		{ SUNI_TXCP_INTR_EN_STS,	0x10 },
+		{ SUNI_TXCP_IDLE_PAT_H5,	0x55 }
+	};
+
+	if (iadev->phy_type & FE_DS3_PHY)
+		ia_suni_pm7345_init_ds3(iadev);
+	else
+		ia_suni_pm7345_init_e3(iadev);
+
+	ia_phy_write(iadev, suni_init, ARRAY_SIZE(suni_init));
+
+	ia_phy_write32(iadev, SUNI_CONFIG, ia_phy_read32(iadev, SUNI_CONFIG) &
+		~(SUNI_PM7345_LLB | SUNI_PM7345_CLB |
+		  SUNI_PM7345_DLB | SUNI_PM7345_PLB));
 #ifdef __SNMP__
    suni_pm7345->suni_rxcp_intr_en_sts |= SUNI_OOCDE;
 #endif /* __SNMP__ */
@@ -1024,7 +1047,7 @@ static void desc_dbg(IADEV *iadev) {
 } 
   
   
-/*----------------------------- Recieving side stuff --------------------------*/  
+/*----------------------------- Receiving side stuff --------------------------*/  
  
 static void rx_excp_rcvd(struct atm_dev *dev)  
 {  
@@ -1132,7 +1155,7 @@ static int rx_pkt(struct atm_dev *dev)
                     IF_ERR(printk(" cause: packet time out\n");)
                 }
                 else {
-                    IF_ERR(printk(" cause: buffer over flow\n");)
+                    IF_ERR(printk(" cause: buffer overflow\n");)
                 }
 		goto out_free_desc;
 	}  
@@ -1153,7 +1176,7 @@ static int rx_pkt(struct atm_dev *dev)
         if (!(skb = atm_alloc_charge(vcc, len, GFP_ATOMIC))) {
            if (vcc->vci < 32)
               printk("Drop control packets\n");
-	      goto out_free_desc;
+	   goto out_free_desc;
         }
 	skb_put(skb,len);  
         // pwang_test
@@ -1163,8 +1186,8 @@ static int rx_pkt(struct atm_dev *dev)
 
 	/* Build the DLE structure */  
 	wr_ptr = iadev->rx_dle_q.write;  
-	wr_ptr->sys_pkt_addr = pci_map_single(iadev->pci, skb->data,
-		len, PCI_DMA_FROMDEVICE);
+	wr_ptr->sys_pkt_addr = dma_map_single(&iadev->pci->dev, skb->data,
+					      len, DMA_FROM_DEVICE);
 	wr_ptr->local_pkt_addr = buf_addr;  
 	wr_ptr->bytes = len;	/* We don't know this do we ?? */  
 	wr_ptr->mode = DMA_INT_ENABLE;  
@@ -1194,7 +1217,7 @@ static void rx_intr(struct atm_dev *dev)
   if (status & RX_PKT_RCVD)  
   {  
 	/* do something */  
-	/* Basically recvd an interrupt for receving a packet.  
+	/* Basically recvd an interrupt for receiving a packet.  
 	A descriptor would have been written to the packet complete   
 	queue. Get all the descriptors and set up dma to move the   
 	packets till the packet complete queue is empty..  
@@ -1284,8 +1307,8 @@ static void rx_dle_intr(struct atm_dev *dev)
           u_short length;
           struct ia_vcc *ia_vcc;
 
-	  pci_unmap_single(iadev->pci, iadev->rx_dle_q.write->sys_pkt_addr,
-	  	len, PCI_DMA_FROMDEVICE);
+	  dma_unmap_single(&iadev->pci->dev, iadev->rx_dle_q.write->sys_pkt_addr,
+			   len, DMA_FROM_DEVICE);
           /* no VCC related housekeeping done as yet. lets see */  
           vcc = ATM_SKB(skb)->vcc;
 	  if (!vcc) {
@@ -1297,8 +1320,8 @@ static void rx_dle_intr(struct atm_dev *dev)
           if (ia_vcc == NULL)
           {
              atomic_inc(&vcc->stats->rx_err);
+             atm_return(vcc, skb->truesize);
              dev_kfree_skb_any(skb);
-             atm_return(vcc, atm_guess_pdu2truesize(len));
              goto INCR_DLE;
            }
           // get real pkt length  pwang_test
@@ -1311,8 +1334,8 @@ static void rx_dle_intr(struct atm_dev *dev)
              atomic_inc(&vcc->stats->rx_err);
              IF_ERR(printk("rx_dle_intr: Bad  AAL5 trailer %d (skb len %d)", 
                                                             length, skb->len);)
+             atm_return(vcc, skb->truesize);
              dev_kfree_skb_any(skb);
-             atm_return(vcc, atm_guess_pdu2truesize(len));
              goto INCR_DLE;
           }
           skb_trim(skb, length);
@@ -1408,8 +1431,8 @@ static int rx_init(struct atm_dev *dev)
   //    spin_lock_init(&iadev->rx_lock); 
   
 	/* Allocate 4k bytes - more aligned than needed (4k boundary) */
-	dle_addr = pci_alloc_consistent(iadev->pci, DLE_TOTAL_SIZE,
-					&iadev->rx_dle_dma);  
+	dle_addr = dma_alloc_coherent(&iadev->pci->dev, DLE_TOTAL_SIZE,
+				      &iadev->rx_dle_dma, GFP_KERNEL);
 	if (!dle_addr)  {  
 		printk(KERN_ERR DEV_LABEL "can't allocate DLEs\n");
 		goto err_out;
@@ -1427,10 +1450,10 @@ static int rx_init(struct atm_dev *dev)
 	       iadev->dma + IPHASE5575_RX_LIST_ADDR);  
 	IF_INIT(printk("Tx Dle list addr: 0x%p value: 0x%0x\n",
                       iadev->dma+IPHASE5575_TX_LIST_ADDR,
-                      *(u32*)(iadev->dma+IPHASE5575_TX_LIST_ADDR));  
+                      readl(iadev->dma + IPHASE5575_TX_LIST_ADDR));
 	printk("Rx Dle list addr: 0x%p value: 0x%0x\n",
                       iadev->dma+IPHASE5575_RX_LIST_ADDR,
-                      *(u32*)(iadev->dma+IPHASE5575_RX_LIST_ADDR));)  
+                      readl(iadev->dma + IPHASE5575_RX_LIST_ADDR));)
   
 	writew(0xffff, iadev->reass_reg+REASS_MASK_REG);  
 	writew(0, iadev->reass_reg+MODE_REG);  
@@ -1609,8 +1632,8 @@ static int rx_init(struct atm_dev *dev)
 	return 0;  
 
 err_free_dle:
-	pci_free_consistent(iadev->pci, DLE_TOTAL_SIZE, iadev->rx_dle_q.start,
-			    iadev->rx_dle_dma);  
+	dma_free_coherent(&iadev->pci->dev, DLE_TOTAL_SIZE, iadev->rx_dle_q.start,
+			  iadev->rx_dle_dma);
 err_out:
 	return -ENOMEM;
 }  
@@ -1680,8 +1703,8 @@ static void tx_dle_intr(struct atm_dev *dev)
 
 	    /* Revenge of the 2 dle (skb + trailer) used in ia_pkt_tx() */
 	    if (!((dle - iadev->tx_dle_q.start)%(2*sizeof(struct dle)))) {
-		pci_unmap_single(iadev->pci, dle->sys_pkt_addr, skb->len,
-				 PCI_DMA_TODEVICE);
+		dma_unmap_single(&iadev->pci->dev, dle->sys_pkt_addr, skb->len,
+				 DMA_TO_DEVICE);
 	    }
             vcc = ATM_SKB(skb)->vcc;
             if (!vcc) {
@@ -1854,7 +1877,7 @@ static int open_tx(struct atm_vcc *vcc)
                     return -EINVAL; 
                 }
                 if (vcc->qos.txtp.max_pcr > iadev->LineRate) {
-                   IF_CBR(printk("PCR is not availble\n");)
+                   IF_CBR(printk("PCR is not available\n");)
                    return -1;
                 }
                 vc->type = CBR;
@@ -1895,8 +1918,8 @@ static int tx_init(struct atm_dev *dev)
                                 readw(iadev->seg_reg+SEG_MASK_REG));)  
 
 	/* Allocate 4k (boundary aligned) bytes */
-	dle_addr = pci_alloc_consistent(iadev->pci, DLE_TOTAL_SIZE,
-					&iadev->tx_dle_dma);  
+	dle_addr = dma_alloc_coherent(&iadev->pci->dev, DLE_TOTAL_SIZE,
+				      &iadev->tx_dle_dma, GFP_KERNEL);
 	if (!dle_addr)  {
 		printk(KERN_ERR DEV_LABEL "can't allocate DLEs\n");
 		goto err_out;
@@ -1967,8 +1990,10 @@ static int tx_init(struct atm_dev *dev)
 		goto err_free_tx_bufs;
             }
 	    iadev->tx_buf[i].cpcs = cpcs;
-	    iadev->tx_buf[i].dma_addr = pci_map_single(iadev->pci,
-		cpcs, sizeof(*cpcs), PCI_DMA_TODEVICE);
+	    iadev->tx_buf[i].dma_addr = dma_map_single(&iadev->pci->dev,
+						       cpcs,
+						       sizeof(*cpcs),
+						       DMA_TO_DEVICE);
         }
         iadev->desc_tbl = kmalloc(iadev->num_tx_desc *
                                    sizeof(struct desc_tbl_t), GFP_KERNEL);
@@ -2062,7 +2087,7 @@ static int tx_init(struct atm_dev *dev)
 		- UBR Table size is 4K  
 		- UBR wait queue is 4K  
 	   since the table and wait queues are contiguous, all the bytes   
-	   can be initialized by one memeset.  
+	   can be initialized by one memeset.
 	*/  
         
         vcsize_sel = 0;
@@ -2088,7 +2113,7 @@ static int tx_init(struct atm_dev *dev)
 		- ABR Table size is 2K  
 		- ABR wait queue is 2K  
 	   since the table and wait queues are contiguous, all the bytes   
-	   can be intialized by one memeset.  
+	   can be initialized by one memeset.
 	*/  
         i = ABR_SCHED_TABLE * iadev->memSize;
         writew((i >> 11) & 0xffff, iadev->seg_reg+ABR_SBPTR_BASE);
@@ -2176,14 +2201,14 @@ err_free_tx_bufs:
 	while (--i >= 0) {
 		struct cpcs_trailer_desc *desc = iadev->tx_buf + i;
 
-		pci_unmap_single(iadev->pci, desc->dma_addr,
-			sizeof(*desc->cpcs), PCI_DMA_TODEVICE);
+		dma_unmap_single(&iadev->pci->dev, desc->dma_addr,
+				 sizeof(*desc->cpcs), DMA_TO_DEVICE);
 		kfree(desc->cpcs);
 	}
 	kfree(iadev->tx_buf);
 err_free_dle:
-	pci_free_consistent(iadev->pci, DLE_TOTAL_SIZE, iadev->tx_dle_q.start,
-			    iadev->tx_dle_dma);  
+	dma_free_coherent(&iadev->pci->dev, DLE_TOTAL_SIZE, iadev->tx_dle_q.start,
+			  iadev->tx_dle_dma);
 err_out:
 	return -ENOMEM;
 }   
@@ -2210,7 +2235,7 @@ static irqreturn_t ia_int(int irq, void *dev_id)
 	if (status & STAT_DLERINT)  
 	{  
 	   /* Clear this bit by writing a 1 to it. */  
-	   *(u_int *)(iadev->reg+IPHASE5575_BUS_STATUS_REG) = STAT_DLERINT;
+	   writel(STAT_DLERINT, iadev->reg + IPHASE5575_BUS_STATUS_REG);
 	   rx_dle_intr(dev);  
 	}  
 	if (status & STAT_SEGINT)  
@@ -2221,13 +2246,13 @@ static irqreturn_t ia_int(int irq, void *dev_id)
 	}  
 	if (status & STAT_DLETINT)  
 	{  
-	   *(u_int *)(iadev->reg+IPHASE5575_BUS_STATUS_REG) = STAT_DLETINT;  
+	   writel(STAT_DLETINT, iadev->reg + IPHASE5575_BUS_STATUS_REG);
 	   tx_dle_intr(dev);  
 	}  
 	if (status & (STAT_FEINT | STAT_ERRINT | STAT_MARKINT))  
 	{  
            if (status & STAT_FEINT) 
-               IaFrontEndIntr(iadev);
+               ia_frontend_intr(iadev);
 	}  
    }
    return IRQ_RETVAL(handled);
@@ -2277,7 +2302,7 @@ static int reset_sar(struct atm_dev *dev)
 }  
 	  
 	  
-static int __devinit ia_init(struct atm_dev *dev)
+static int ia_init(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
 	unsigned long real_base;
@@ -2340,7 +2365,7 @@ static int __devinit ia_init(struct atm_dev *dev)
 	{  
 		printk(DEV_LABEL " (itf %d): can't set up page mapping\n",  
 			    dev->number);  
-		return error;  
+		return -ENOMEM;
 	}  
 	IF_INIT(printk(DEV_LABEL " (itf %d): rev.%d,base=%p,irq=%d\n",  
 			dev->number, iadev->pci->revision, base, iadev->irq);)
@@ -2454,23 +2479,23 @@ static void ia_free_tx(IADEV *iadev)
 	for (i = 0; i < iadev->num_tx_desc; i++) {
 		struct cpcs_trailer_desc *desc = iadev->tx_buf + i;
 
-		pci_unmap_single(iadev->pci, desc->dma_addr,
-			sizeof(*desc->cpcs), PCI_DMA_TODEVICE);
+		dma_unmap_single(&iadev->pci->dev, desc->dma_addr,
+				 sizeof(*desc->cpcs), DMA_TO_DEVICE);
 		kfree(desc->cpcs);
 	}
 	kfree(iadev->tx_buf);
-	pci_free_consistent(iadev->pci, DLE_TOTAL_SIZE, iadev->tx_dle_q.start,
-			    iadev->tx_dle_dma);  
+	dma_free_coherent(&iadev->pci->dev, DLE_TOTAL_SIZE, iadev->tx_dle_q.start,
+			  iadev->tx_dle_dma);
 }
 
 static void ia_free_rx(IADEV *iadev)
 {
 	kfree(iadev->rx_open);
-	pci_free_consistent(iadev->pci, DLE_TOTAL_SIZE, iadev->rx_dle_q.start,
-			  iadev->rx_dle_dma);  
+	dma_free_coherent(&iadev->pci->dev, DLE_TOTAL_SIZE, iadev->rx_dle_q.start,
+			  iadev->rx_dle_dma);
 }
 
-static int __devinit ia_start(struct atm_dev *dev)
+static int ia_start(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
 	int error;  
@@ -2558,7 +2583,7 @@ static int __devinit ia_start(struct atm_dev *dev)
 				goto err_free_rx;
 		}
 		/* Get iadev->carrier_detect status */
-		IaFrontEndIntr(iadev);
+		ia_frontend_intr(iadev);
 	}
 	return 0;
 
@@ -2594,7 +2619,7 @@ static void ia_close(struct atm_vcc *vcc)
         if (vcc->qos.txtp.traffic_class != ATM_NONE) {
            iadev->close_pending++;
 	   prepare_to_wait(&iadev->timeout_wait, &wait, TASK_UNINTERRUPTIBLE);
-	   schedule_timeout(50);
+	   schedule_timeout(msecs_to_jiffies(500));
 	   finish_wait(&iadev->timeout_wait, &wait);
            spin_lock_irqsave(&iadev->tx_lock, flags); 
            while((skb = skb_dequeue(&iadev->tx_backlog))) {
@@ -2659,7 +2684,6 @@ static void ia_close(struct atm_vcc *vcc)
   
 static int ia_open(struct atm_vcc *vcc)
 {  
-	IADEV *iadev;  
 	struct ia_vcc *ia_vcc;  
 	int error;  
 	if (!test_bit(ATM_VF_PARTIAL,&vcc->flags))  
@@ -2667,7 +2691,6 @@ static int ia_open(struct atm_vcc *vcc)
 		IF_EVENT(printk("ia: not partially allocated resources\n");)  
 		vcc->dev_data = NULL;
 	}  
-	iadev = INPH_IA_DEV(vcc->dev);  
 	if (vcc->vci != ATM_VPI_UNSPEC && vcc->vpi != ATM_VCI_UNSPEC)  
 	{  
 		IF_EVENT(printk("iphase open: unspec part\n");)  
@@ -2831,7 +2854,7 @@ static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
 
          case 0xb:
 	    if (!capable(CAP_NET_ADMIN)) return -EPERM;
-            IaFrontEndIntr(iadev);
+            ia_frontend_intr(iadev);
             break;
          case 0xa:
 	    if (!capable(CAP_NET_ADMIN)) return -EPERM;
@@ -2989,8 +3012,8 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
 	/* Build the DLE structure */  
 	wr_ptr = iadev->tx_dle_q.write;  
 	memset((caddr_t)wr_ptr, 0, sizeof(*wr_ptr));  
-	wr_ptr->sys_pkt_addr = pci_map_single(iadev->pci, skb->data,
-		skb->len, PCI_DMA_TODEVICE);
+	wr_ptr->sys_pkt_addr = dma_map_single(&iadev->pci->dev, skb->data,
+					      skb->len, DMA_TO_DEVICE);
 	wr_ptr->local_pkt_addr = (buf_desc_ptr->buf_start_hi << 16) | 
                                                   buf_desc_ptr->buf_start_lo;  
 	/* wr_ptr->bytes = swap_byte_order(total_len); didn't seem to affect?? */
@@ -3051,11 +3074,9 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
 static int ia_send(struct atm_vcc *vcc, struct sk_buff *skb)
 {
         IADEV *iadev; 
-        struct ia_vcc *iavcc;
         unsigned long flags;
 
         iadev = INPH_IA_DEV(vcc->dev);
-        iavcc = INPH_IA_VCC(vcc); 
         if ((!skb)||(skb->len>(iadev->tx_buf_sz-sizeof(struct cpcs_trailer))))
         {
             if (!skb)
@@ -3150,12 +3171,10 @@ static const struct atmdev_ops ops = {
 	.owner		= THIS_MODULE,
 };  
 	  
-static int __devinit ia_init_one(struct pci_dev *pdev,
-				 const struct pci_device_id *ent)
+static int ia_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {  
 	struct atm_dev *dev;  
 	IADEV *iadev;  
-        unsigned long flags;
 	int ret;
 
 	iadev = kzalloc(sizeof(*iadev), GFP_KERNEL);
@@ -3172,7 +3191,7 @@ static int __devinit ia_init_one(struct pci_dev *pdev,
 		ret = -ENODEV;
 		goto err_out_free_iadev;
 	}
-	dev = atm_dev_register(DEV_LABEL, &ops, -1, NULL);
+	dev = atm_dev_register(DEV_LABEL, &pdev->dev, &ops, -1, NULL);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto err_out_disable_dev;
@@ -3187,19 +3206,14 @@ static int __devinit ia_init_one(struct pci_dev *pdev,
 	ia_dev[iadev_count] = iadev;
 	_ia_dev[iadev_count] = dev;
 	iadev_count++;
-	spin_lock_init(&iadev->misc_lock);
-	/* First fixes first. I don't want to think about this now. */
-	spin_lock_irqsave(&iadev->misc_lock, flags); 
 	if (ia_init(dev) || ia_start(dev)) {  
 		IF_INIT(printk("IA register failed!\n");)
 		iadev_count--;
 		ia_dev[iadev_count] = NULL;
 		_ia_dev[iadev_count] = NULL;
-		spin_unlock_irqrestore(&iadev->misc_lock, flags); 
 		ret = -EINVAL;
 		goto err_out_deregister_dev;
 	}
-	spin_unlock_irqrestore(&iadev->misc_lock, flags); 
 	IF_EVENT(printk("iadev_count = %d\n", iadev_count);)
 
 	iadev->next_board = ia_boards;  
@@ -3217,7 +3231,7 @@ err_out:
 	return ret;
 }
 
-static void __devexit ia_remove_one(struct pci_dev *pdev)
+static void ia_remove_one(struct pci_dev *pdev)
 {
 	struct atm_dev *dev = pci_get_drvdata(pdev);
 	IADEV *iadev = INPH_IA_DEV(dev);
@@ -3258,7 +3272,7 @@ static struct pci_driver ia_driver = {
 	.name =         DEV_LABEL,
 	.id_table =     ia_pci_tbl,
 	.probe =        ia_init_one,
-	.remove =       __devexit_p(ia_remove_one),
+	.remove =       ia_remove_one,
 };
 
 static int __init ia_module_init(void)

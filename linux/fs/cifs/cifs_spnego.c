@@ -20,6 +20,7 @@
  */
 
 #include <linux/list.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <keys/user-type.h>
 #include <linux/key-type.h>
@@ -30,19 +31,18 @@
 
 /* create a new cifs key */
 static int
-cifs_spnego_key_instantiate(struct key *key, const void *data, size_t datalen)
+cifs_spnego_key_instantiate(struct key *key, struct key_preparsed_payload *prep)
 {
 	char *payload;
 	int ret;
 
 	ret = -ENOMEM;
-	payload = kmalloc(datalen, GFP_KERNEL);
+	payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
 	if (!payload)
 		goto error;
 
 	/* attach the data */
-	memcpy(payload, data, datalen);
-	key->payload.data = payload;
+	key->payload.data[0] = payload;
 	ret = 0;
 
 error:
@@ -52,7 +52,7 @@ error:
 static void
 cifs_spnego_key_destroy(struct key *key)
 {
-	kfree(key->payload.data);
+	kfree(key->payload.data[0]);
 }
 
 
@@ -62,7 +62,6 @@ cifs_spnego_key_destroy(struct key *key)
 struct key_type cifs_spnego_key_type = {
 	.name		= "cifs.spnego",
 	.instantiate	= cifs_spnego_key_instantiate,
-	.match		= user_match,
 	.destroy	= cifs_spnego_key_destroy,
 	.describe	= user_describe,
 };
@@ -83,6 +82,9 @@ struct key_type cifs_spnego_key_type = {
 /* strlen of ";uid=0x" */
 #define UID_KEY_LEN		7
 
+/* strlen of ";creduid=0x" */
+#define CREDUID_KEY_LEN		11
+
 /* strlen of ";user=" */
 #define USER_KEY_LEN		6
 
@@ -91,9 +93,11 @@ struct key_type cifs_spnego_key_type = {
 
 /* get a key struct with a SPNEGO security blob, suitable for session setup */
 struct key *
-cifs_get_spnego_key(struct cifsSesInfo *sesInfo)
+cifs_get_spnego_key(struct cifs_ses *sesInfo)
 {
 	struct TCP_Server_Info *server = sesInfo->server;
+	struct sockaddr_in *sa = (struct sockaddr_in *) &server->dstaddr;
+	struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *) &server->dstaddr;
 	char *description, *dp;
 	size_t desc_len;
 	struct key *spnego_key;
@@ -106,8 +110,11 @@ cifs_get_spnego_key(struct cifsSesInfo *sesInfo)
 		   IP_KEY_LEN + INET6_ADDRSTRLEN +
 		   MAX_MECH_STR_LEN +
 		   UID_KEY_LEN + (sizeof(uid_t) * 2) +
-		   USER_KEY_LEN + strlen(sesInfo->userName) +
+		   CREDUID_KEY_LEN + (sizeof(uid_t) * 2) +
 		   PID_KEY_LEN + (sizeof(pid_t) * 2) + 1;
+
+	if (sesInfo->user_name)
+		desc_len += USER_KEY_LEN + strlen(sesInfo->user_name);
 
 	spnego_key = ERR_PTR(-ENOMEM);
 	description = kzalloc(desc_len, GFP_KERNEL);
@@ -122,38 +129,45 @@ cifs_get_spnego_key(struct cifsSesInfo *sesInfo)
 	dp = description + strlen(description);
 
 	/* add the server address */
-	if (server->addr.sockAddr.sin_family == AF_INET)
-		sprintf(dp, "ip4=%pI4", &server->addr.sockAddr.sin_addr);
-	else if (server->addr.sockAddr.sin_family == AF_INET6)
-		sprintf(dp, "ip6=%pI6", &server->addr.sockAddr6.sin6_addr);
+	if (server->dstaddr.ss_family == AF_INET)
+		sprintf(dp, "ip4=%pI4", &sa->sin_addr);
+	else if (server->dstaddr.ss_family == AF_INET6)
+		sprintf(dp, "ip6=%pI6", &sa6->sin6_addr);
 	else
 		goto out;
 
 	dp = description + strlen(description);
 
 	/* for now, only sec=krb5 and sec=mskrb5 are valid */
-	if (server->secType == Kerberos)
+	if (server->sec_kerberos)
 		sprintf(dp, ";sec=krb5");
-	else if (server->secType == MSKerberos)
+	else if (server->sec_mskerberos)
 		sprintf(dp, ";sec=mskrb5");
 	else
 		goto out;
 
 	dp = description + strlen(description);
-	sprintf(dp, ";uid=0x%x", sesInfo->linux_uid);
+	sprintf(dp, ";uid=0x%x",
+		from_kuid_munged(&init_user_ns, sesInfo->linux_uid));
 
 	dp = description + strlen(description);
-	sprintf(dp, ";user=%s", sesInfo->userName);
+	sprintf(dp, ";creduid=0x%x",
+		from_kuid_munged(&init_user_ns, sesInfo->cred_uid));
+
+	if (sesInfo->user_name) {
+		dp = description + strlen(description);
+		sprintf(dp, ";user=%s", sesInfo->user_name);
+	}
 
 	dp = description + strlen(description);
 	sprintf(dp, ";pid=0x%x", current->pid);
 
-	cFYI(1, ("key description = %s", description));
+	cifs_dbg(FYI, "key description = %s\n", description);
 	spnego_key = request_key(&cifs_spnego_key_type, description, "");
 
 #ifdef CONFIG_CIFS_DEBUG2
 	if (cifsFYI && !IS_ERR(spnego_key)) {
-		struct cifs_spnego_msg *msg = spnego_key->payload.data;
+		struct cifs_spnego_msg *msg = spnego_key->payload.data[0];
 		cifs_dump_mem("SPNEGO reply blob:", msg->data, min(1024U,
 				msg->secblob_len + msg->sesskey_len));
 	}

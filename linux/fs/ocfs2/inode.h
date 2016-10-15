@@ -43,33 +43,45 @@ struct ocfs2_inode_info
 	/* protects extended attribute changes on this inode */
 	struct rw_semaphore		ip_xattr_sem;
 
+	/* Number of outstanding AIO's which are not page aligned */
+	struct mutex			ip_unaligned_aio;
+
 	/* These fields are protected by ip_lock */
 	spinlock_t			ip_lock;
 	u32				ip_open_count;
-	u32				ip_clusters;
 	struct list_head		ip_io_markers;
+	u32				ip_clusters;
 
+	u16				ip_dyn_features;
 	struct mutex			ip_io_mutex;
-
 	u32				ip_flags; /* see below */
 	u32				ip_attr; /* inode attributes */
-	u16				ip_dyn_features;
 
 	/* protected by recovery_lock. */
 	struct inode			*ip_next_orphan;
 
-	u32				ip_dir_start_lookup;
-
 	struct ocfs2_caching_info	ip_metadata_cache;
-
 	struct ocfs2_extent_map		ip_extent_map;
-
 	struct inode			vfs_inode;
 	struct jbd2_inode		ip_jinode;
+
+	u32				ip_dir_start_lookup;
 
 	/* Only valid if the inode is the dir. */
 	u32				ip_last_used_slot;
 	u64				ip_last_used_group;
+	u32				ip_dir_lock_gen;
+
+	struct ocfs2_alloc_reservation	ip_la_data_resv;
+
+	/*
+	 * Transactions that contain inode's metadata needed to complete
+	 * fsync and fdatasync, respectively.
+	 */
+	tid_t i_sync_tid;
+	tid_t i_datasync_tid;
+
+	struct dquot *i_dquot[MAXQUOTAS];
 };
 
 /*
@@ -81,8 +93,6 @@ struct ocfs2_inode_info
 #define OCFS2_INODE_BITMAP		0x00000004
 /* This inode has been wiped from disk */
 #define OCFS2_INODE_DELETED		0x00000008
-/* Another node is deleting, so our delete is a nop */
-#define OCFS2_INODE_SKIP_DELETE		0x00000010
 /* Has the inode been orphaned on another node?
  *
  * This hints to ocfs2_drop_inode that it should clear i_nlink before
@@ -97,9 +107,13 @@ struct ocfs2_inode_info
  * rely on ocfs2_delete_inode to sort things out under the proper
  * cluster locks.
  */
-#define OCFS2_INODE_MAYBE_ORPHANED	0x00000020
+#define OCFS2_INODE_MAYBE_ORPHANED	0x00000010
 /* Does someone have the file open O_DIRECT */
-#define OCFS2_INODE_OPEN_DIRECT		0x00000040
+#define OCFS2_INODE_OPEN_DIRECT		0x00000020
+/* Tell the inode wipe code it's not in orphan dir */
+#define OCFS2_INODE_SKIP_ORPHAN_DIR     0x00000040
+/* Entry in orphan dir with 'dio-' prefix */
+#define OCFS2_INODE_DIO_ORPHAN_ENTRY	0x00000080
 
 static inline struct ocfs2_inode_info *OCFS2_I(struct inode *inode)
 {
@@ -119,9 +133,8 @@ static inline struct ocfs2_caching_info *INODE_CACHE(struct inode *inode)
 	return &OCFS2_I(inode)->ip_metadata_cache;
 }
 
-void ocfs2_clear_inode(struct inode *inode);
-void ocfs2_delete_inode(struct inode *inode);
-void ocfs2_drop_inode(struct inode *inode);
+void ocfs2_evict_inode(struct inode *inode);
+int ocfs2_drop_inode(struct inode *inode);
 
 /* Flags for ocfs2_iget() */
 #define OCFS2_FI_FLAG_SYSFILE		0x1
@@ -143,8 +156,6 @@ void ocfs2_refresh_inode(struct inode *inode,
 int ocfs2_mark_inode_dirty(handle_t *handle,
 			   struct inode *inode,
 			   struct buffer_head *bh);
-int ocfs2_aio_read(struct file *file, struct kiocb *req, struct iocb *iocb);
-int ocfs2_aio_write(struct file *file, struct kiocb *req, struct iocb *iocb);
 struct buffer_head *ocfs2_bread(struct inode *inode,
 				int block, int *err, int reada);
 
@@ -155,7 +166,7 @@ static inline blkcnt_t ocfs2_inode_sector_count(struct inode *inode)
 {
 	int c_to_s_bits = OCFS2_SB(inode->i_sb)->s_clustersize_bits - 9;
 
-	return (blkcnt_t)(OCFS2_I(inode)->ip_clusters << c_to_s_bits);
+	return (blkcnt_t)OCFS2_I(inode)->ip_clusters << c_to_s_bits;
 }
 
 /* Validate that a bh contains a valid inode */

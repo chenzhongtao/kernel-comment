@@ -21,8 +21,6 @@
 #include "dtc.h"
 #include "srcpos.h"
 
-#include "version_gen.h"
-
 /*
  * Command line options
  */
@@ -30,30 +28,7 @@ int quiet;		/* Level of quietness */
 int reservenum;		/* Number of memory reservation slots */
 int minsize;		/* Minimum blob size */
 int padsize;		/* Additional padding to blob */
-
-char *join_path(const char *path, const char *name)
-{
-	int lenp = strlen(path);
-	int lenn = strlen(name);
-	int len;
-	int needslash = 1;
-	char *str;
-
-	len = lenp + lenn + 2;
-	if ((lenp > 0) && (path[lenp-1] == '/')) {
-		needslash = 0;
-		len--;
-	}
-
-	str = xmalloc(len);
-	memcpy(str, path, lenp);
-	if (needslash) {
-		str[lenp] = '/';
-		lenp++;
-	}
-	memcpy(str+lenp, name, lenn+1);
-	return str;
-}
+int phandle_format = PHANDLE_BOTH;	/* Use linux,phandle or phandle properties */
 
 static void fill_fullpaths(struct node *tree, const char *prefix)
 {
@@ -72,42 +47,62 @@ static void fill_fullpaths(struct node *tree, const char *prefix)
 		fill_fullpaths(child, tree->fullpath);
 }
 
-static void  __attribute__ ((noreturn)) usage(void)
-{
-	fprintf(stderr, "Usage:\n");
-	fprintf(stderr, "\tdtc [options] <input file>\n");
-	fprintf(stderr, "\nOptions:\n");
-	fprintf(stderr, "\t-h\n");
-	fprintf(stderr, "\t\tThis help text\n");
-	fprintf(stderr, "\t-q\n");
-	fprintf(stderr, "\t\tQuiet: -q suppress warnings, -qq errors, -qqq all\n");
-	fprintf(stderr, "\t-I <input format>\n");
-	fprintf(stderr, "\t\tInput formats are:\n");
-	fprintf(stderr, "\t\t\tdts - device tree source text\n");
-	fprintf(stderr, "\t\t\tdtb - device tree blob\n");
-	fprintf(stderr, "\t\t\tfs - /proc/device-tree style directory\n");
-	fprintf(stderr, "\t-o <output file>\n");
-	fprintf(stderr, "\t-O <output format>\n");
-	fprintf(stderr, "\t\tOutput formats are:\n");
-	fprintf(stderr, "\t\t\tdts - device tree source text\n");
-	fprintf(stderr, "\t\t\tdtb - device tree blob\n");
-	fprintf(stderr, "\t\t\tasm - assembler source\n");
-	fprintf(stderr, "\t-V <output version>\n");
-	fprintf(stderr, "\t\tBlob version to produce, defaults to %d (relevant for dtb\n\t\tand asm output only)\n", DEFAULT_FDT_VERSION);
-	fprintf(stderr, "\t-R <number>\n");
-	fprintf(stderr, "\t\tMake space for <number> reserve map entries (relevant for \n\t\tdtb and asm output only)\n");
-	fprintf(stderr, "\t-S <bytes>\n");
-	fprintf(stderr, "\t\tMake the blob at least <bytes> long (extra space)\n");
-	fprintf(stderr, "\t-p <bytes>\n");
-	fprintf(stderr, "\t\tAdd padding to the blob of <bytes> long (extra space)\n");
-	fprintf(stderr, "\t-b <number>\n");
-	fprintf(stderr, "\t\tSet the physical boot cpu\n");
-	fprintf(stderr, "\t-f\n");
-	fprintf(stderr, "\t\tForce - try to produce output even if the input tree has errors\n");
-	fprintf(stderr, "\t-v\n");
-	fprintf(stderr, "\t\tPrint DTC version and exit\n");
-	exit(3);
-}
+/* Usage related data. */
+#define FDT_VERSION(version)	_FDT_VERSION(version)
+#define _FDT_VERSION(version)	#version
+static const char usage_synopsis[] = "dtc [options] <input file>";
+static const char usage_short_opts[] = "qI:O:o:V:d:R:S:p:fb:i:H:sW:E:hv";
+static struct option const usage_long_opts[] = {
+	{"quiet",            no_argument, NULL, 'q'},
+	{"in-format",         a_argument, NULL, 'I'},
+	{"out",               a_argument, NULL, 'o'},
+	{"out-format",        a_argument, NULL, 'O'},
+	{"out-version",       a_argument, NULL, 'V'},
+	{"out-dependency",    a_argument, NULL, 'd'},
+	{"reserve",           a_argument, NULL, 'R'},
+	{"space",             a_argument, NULL, 'S'},
+	{"pad",               a_argument, NULL, 'p'},
+	{"boot-cpu",          a_argument, NULL, 'b'},
+	{"force",            no_argument, NULL, 'f'},
+	{"include",           a_argument, NULL, 'i'},
+	{"sort",             no_argument, NULL, 's'},
+	{"phandle",           a_argument, NULL, 'H'},
+	{"warning",           a_argument, NULL, 'W'},
+	{"error",             a_argument, NULL, 'E'},
+	{"help",             no_argument, NULL, 'h'},
+	{"version",          no_argument, NULL, 'v'},
+	{NULL,               no_argument, NULL, 0x0},
+};
+static const char * const usage_opts_help[] = {
+	"\n\tQuiet: -q suppress warnings, -qq errors, -qqq all",
+	"\n\tInput formats are:\n"
+	 "\t\tdts - device tree source text\n"
+	 "\t\tdtb - device tree blob\n"
+	 "\t\tfs  - /proc/device-tree style directory",
+	"\n\tOutput file",
+	"\n\tOutput formats are:\n"
+	 "\t\tdts - device tree source text\n"
+	 "\t\tdtb - device tree blob\n"
+	 "\t\tasm - assembler source",
+	"\n\tBlob version to produce, defaults to "FDT_VERSION(DEFAULT_FDT_VERSION)" (for dtb and asm output)",
+	"\n\tOutput dependency file",
+	"\n\tMake space for <number> reserve map entries (for dtb and asm output)",
+	"\n\tMake the blob at least <bytes> long (extra space)",
+	"\n\tAdd padding to the blob of <bytes> long (extra space)",
+	"\n\tSet the physical boot cpu",
+	"\n\tTry to produce output even if the input tree has errors",
+	"\n\tAdd a path to search for include files",
+	"\n\tSort nodes and properties before outputting (useful for comparing trees)",
+	"\n\tValid phandle formats are:\n"
+	 "\t\tlegacy - \"linux,phandle\" properties only\n"
+	 "\t\tepapr  - \"phandle\" properties only\n"
+	 "\t\tboth   - Both \"linux,phandle\" and \"phandle\" properties",
+	"\n\tEnable/disable warnings (prefix with \"no-\")",
+	"\n\tEnable/disable errors (prefix with \"no-\")",
+	"\n\tPrint this help and exit",
+	"\n\tPrint version and exit",
+	NULL,
+};
 
 int main(int argc, char *argv[])
 {
@@ -115,7 +110,8 @@ int main(int argc, char *argv[])
 	const char *inform = "dts";
 	const char *outform = "dts";
 	const char *outname = "-";
-	int force = 0, check = 0;
+	const char *depname = NULL;
+	bool force = false, sort = false;
 	const char *arg;
 	int opt;
 	FILE *outf = NULL;
@@ -127,7 +123,7 @@ int main(int argc, char *argv[])
 	minsize    = 0;
 	padsize    = 0;
 
-	while ((opt = getopt(argc, argv, "hI:O:o:V:R:S:p:fcqb:v")) != EOF) {
+	while ((opt = util_getopt_long()) != EOF) {
 		switch (opt) {
 		case 'I':
 			inform = optarg;
@@ -141,6 +137,9 @@ int main(int argc, char *argv[])
 		case 'V':
 			outversion = strtol(optarg, NULL, 0);
 			break;
+		case 'd':
+			depname = optarg;
+			break;
 		case 'R':
 			reservenum = strtol(optarg, NULL, 0);
 			break;
@@ -151,10 +150,7 @@ int main(int argc, char *argv[])
 			padsize = strtol(optarg, NULL, 0);
 			break;
 		case 'f':
-			force = 1;
-			break;
-		case 'c':
-			check = 1;
+			force = true;
 			break;
 		case 'q':
 			quiet++;
@@ -162,17 +158,44 @@ int main(int argc, char *argv[])
 		case 'b':
 			cmdline_boot_cpuid = strtoll(optarg, NULL, 0);
 			break;
+		case 'i':
+			srcfile_add_search_path(optarg);
+			break;
 		case 'v':
-			printf("Version: %s\n", DTC_VERSION);
-			exit(0);
+			util_version();
+		case 'H':
+			if (streq(optarg, "legacy"))
+				phandle_format = PHANDLE_LEGACY;
+			else if (streq(optarg, "epapr"))
+				phandle_format = PHANDLE_EPAPR;
+			else if (streq(optarg, "both"))
+				phandle_format = PHANDLE_BOTH;
+			else
+				die("Invalid argument \"%s\" to -H option\n",
+				    optarg);
+			break;
+
+		case 's':
+			sort = true;
+			break;
+
+		case 'W':
+			parse_checks_option(true, false, optarg);
+			break;
+
+		case 'E':
+			parse_checks_option(false, true, optarg);
+			break;
+
 		case 'h':
+			usage(NULL);
 		default:
-			usage();
+			usage("unknown option");
 		}
 	}
 
 	if (argc > (optind+1))
-		usage();
+		usage("missing files");
 	else if (argc < (optind+1))
 		arg = "-";
 	else
@@ -182,8 +205,13 @@ int main(int argc, char *argv[])
 	if (minsize && padsize)
 		die("Can't set both -p and -S\n");
 
-	fprintf(stderr, "DTC: %s->%s  on file \"%s\"\n",
-		inform, outform, arg);
+	if (depname) {
+		depfile = fopen(depname, "w");
+		if (!depfile)
+			die("Couldn't open dependency file %s: %s\n", depname,
+			    strerror(errno));
+		fprintf(depfile, "%s:", outname);
+	}
 
 	if (streq(inform, "dts"))
 		bi = dt_from_source(arg);
@@ -194,17 +222,24 @@ int main(int argc, char *argv[])
 	else
 		die("Unknown input format \"%s\"\n", inform);
 
+	if (depfile) {
+		fputc('\n', depfile);
+		fclose(depfile);
+	}
+
 	if (cmdline_boot_cpuid != -1)
 		bi->boot_cpuid_phys = cmdline_boot_cpuid;
 
 	fill_fullpaths(bi->dt, "");
 	process_checks(force, bi);
 
+	if (sort)
+		sort_tree(bi);
 
 	if (streq(outname, "-")) {
 		outf = stdout;
 	} else {
-		outf = fopen(outname, "w");
+		outf = fopen(outname, "wb");
 		if (! outf)
 			die("Couldn't open output file %s: %s\n",
 			    outname, strerror(errno));

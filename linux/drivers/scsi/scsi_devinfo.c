@@ -6,6 +6,7 @@
 #include <linux/moduleparam.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_devinfo.h>
@@ -168,11 +169,11 @@ static struct {
 	{"Generic", "USB SD Reader", "1.00", BLIST_FORCELUN | BLIST_INQUIRY_36},
 	{"Generic", "USB Storage-SMC", "0180", BLIST_FORCELUN | BLIST_INQUIRY_36},
 	{"Generic", "USB Storage-SMC", "0207", BLIST_FORCELUN | BLIST_INQUIRY_36},
-	{"HITACHI", "DF400", "*", BLIST_SPARSELUN},
-	{"HITACHI", "DF500", "*", BLIST_SPARSELUN},
-	{"HITACHI", "DF600", "*", BLIST_SPARSELUN},
-	{"HITACHI", "DISK-SUBSYSTEM", "*", BLIST_ATTACH_PQ3 | BLIST_SPARSELUN | BLIST_LARGELUN},
-	{"HITACHI", "OPEN-E", "*", BLIST_ATTACH_PQ3 | BLIST_SPARSELUN | BLIST_LARGELUN},
+	{"HITACHI", "DF400", "*", BLIST_REPORTLUN2},
+	{"HITACHI", "DF500", "*", BLIST_REPORTLUN2},
+	{"HITACHI", "DISK-SUBSYSTEM", "*", BLIST_REPORTLUN2},
+	{"HITACHI", "HUS1530", "*", BLIST_NO_DIF},
+	{"HITACHI", "OPEN-", "*", BLIST_REPORTLUN2},
 	{"HITACHI", "OP-C-", "*", BLIST_SPARSELUN | BLIST_LARGELUN},
 	{"HITACHI", "3380-", "*", BLIST_SPARSELUN | BLIST_LARGELUN},
 	{"HITACHI", "3390-", "*", BLIST_SPARSELUN | BLIST_LARGELUN},
@@ -197,17 +198,21 @@ static struct {
 	{"IBM", "ProFibre 4000R", "*", BLIST_SPARSELUN | BLIST_LARGELUN},
 	{"IBM", "2105", NULL, BLIST_RETRY_HWERROR},
 	{"iomega", "jaz 1GB", "J.86", BLIST_NOTQ | BLIST_NOLUN},
+	{"IOMEGA", "ZIP", NULL, BLIST_NOTQ | BLIST_NOLUN},
 	{"IOMEGA", "Io20S         *F", NULL, BLIST_KEY},
 	{"INSITE", "Floptical   F*8I", NULL, BLIST_KEY},
 	{"INSITE", "I325VM", NULL, BLIST_KEY},
+	{"Intel", "Multi-Flex", NULL, BLIST_NO_RSOC},
 	{"iRiver", "iFP Mass Driver", NULL, BLIST_NOT_LOCKABLE | BLIST_INQUIRY_36},
 	{"LASOUND", "CDX7405", "3.10", BLIST_MAX5LUN | BLIST_SINGLELUN},
+	{"Marvell", "Console", NULL, BLIST_SKIP_VPD_PAGES},
 	{"MATSHITA", "PD-1", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
 	{"MATSHITA", "DMC-LC5", NULL, BLIST_NOT_LOCKABLE | BLIST_INQUIRY_36},
 	{"MATSHITA", "DMC-LC40", NULL, BLIST_NOT_LOCKABLE | BLIST_INQUIRY_36},
 	{"Medion", "Flash XL  MMC/SD", "2.6D", BLIST_FORCELUN},
 	{"MegaRAID", "LD", NULL, BLIST_FORCELUN},
 	{"MICROP", "4110", NULL, BLIST_NOTQ},
+	{"MSFT", "Virtual HD", NULL, BLIST_NO_RSOC},
 	{"MYLEX", "DACARMRB", "*", BLIST_REPORTLUN2},
 	{"nCipher", "Fastness Crypto", NULL, BLIST_FORCELUN},
 	{"NAKAMICH", "MJ-4.8S", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
@@ -220,12 +225,17 @@ static struct {
 	{"PIONEER", "CD-ROM DRM-602X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
 	{"PIONEER", "CD-ROM DRM-604X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
 	{"PIONEER", "CD-ROM DRM-624X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
+	{"Promise", "VTrak E610f", NULL, BLIST_SPARSELUN | BLIST_NO_RSOC},
 	{"Promise", "", NULL, BLIST_SPARSELUN},
+	{"QEMU", "QEMU CD-ROM", NULL, BLIST_SKIP_VPD_PAGES},
+	{"QNAP", "iSCSI Storage", NULL, BLIST_MAX_1024},
+	{"SYNOLOGY", "iSCSI Storage", NULL, BLIST_MAX_1024},
 	{"QUANTUM", "XP34301", "1071", BLIST_NOTQ},
 	{"REGAL", "CDC-4X", NULL, BLIST_MAX5LUN | BLIST_SINGLELUN},
 	{"SanDisk", "ImageMate CF-SD1", NULL, BLIST_FORCELUN},
 	{"SEAGATE", "ST34555N", "0930", BLIST_NOTQ},	/* Chokes on tagged INQUIRY */
 	{"SEAGATE", "ST3390N", "9546", BLIST_NOTQ},
+	{"SEAGATE", "ST900MM0006", NULL, BLIST_SKIP_VPD_PAGES},
 	{"SGI", "RAID3", "*", BLIST_SPARSELUN},
 	{"SGI", "RAID5", "*", BLIST_SPARSELUN},
 	{"SGI", "TP9100", "*", BLIST_REPORTLUN2},
@@ -243,6 +253,7 @@ static struct {
 	{"Tornado-", "F4", "*", BLIST_NOREPORTLUN},
 	{"TOSHIBA", "CDROM", NULL, BLIST_ISROM},
 	{"TOSHIBA", "CD-ROM", NULL, BLIST_ISROM},
+	{"Traxdata", "CDR4120", NULL, BLIST_NOLUN},	/* locks up */
 	{"USB2.0", "SMARTMEDIA/XD", NULL, BLIST_FORCELUN | BLIST_INQUIRY_36},
 	{"WangDAT", "Model 2600", "01.7", BLIST_SELECT_NO_ATN},
 	{"WangDAT", "Model 3200", "02.2", BLIST_SELECT_NO_ATN},
@@ -382,6 +393,112 @@ int scsi_dev_info_list_add_keyed(int compatible, char *vendor, char *model,
 EXPORT_SYMBOL(scsi_dev_info_list_add_keyed);
 
 /**
+ * scsi_dev_info_list_find - find a matching dev_info list entry.
+ * @vendor:	vendor string
+ * @model:	model (product) string
+ * @key:	specify list to use
+ *
+ * Description:
+ *	Finds the first dev_info entry matching @vendor, @model
+ * 	in list specified by @key.
+ *
+ * Returns: pointer to matching entry, or ERR_PTR on failure.
+ **/
+static struct scsi_dev_info_list *scsi_dev_info_list_find(const char *vendor,
+		const char *model, int key)
+{
+	struct scsi_dev_info_list *devinfo;
+	struct scsi_dev_info_list_table *devinfo_table =
+		scsi_devinfo_lookup_by_key(key);
+	size_t vmax, mmax;
+	const char *vskip, *mskip;
+
+	if (IS_ERR(devinfo_table))
+		return (struct scsi_dev_info_list *) devinfo_table;
+
+	/* Prepare for "compatible" matches */
+
+	/*
+	 * XXX why skip leading spaces? If an odd INQUIRY
+	 * value, that should have been part of the
+	 * scsi_static_device_list[] entry, such as "  FOO"
+	 * rather than "FOO". Since this code is already
+	 * here, and we don't know what device it is
+	 * trying to work with, leave it as-is.
+	 */
+	vmax = sizeof(devinfo->vendor);
+	vskip = vendor;
+	while (vmax > 0 && *vskip == ' ') {
+		vmax--;
+		vskip++;
+	}
+	/* Also skip trailing spaces */
+	while (vmax > 0 && vskip[vmax - 1] == ' ')
+		--vmax;
+
+	mmax = sizeof(devinfo->model);
+	mskip = model;
+	while (mmax > 0 && *mskip == ' ') {
+		mmax--;
+		mskip++;
+	}
+	while (mmax > 0 && mskip[mmax - 1] == ' ')
+		--mmax;
+
+	list_for_each_entry(devinfo, &devinfo_table->scsi_dev_info_list,
+			    dev_info_list) {
+		if (devinfo->compatible) {
+			/*
+			 * Behave like the older version of get_device_flags.
+			 */
+			if (memcmp(devinfo->vendor, vskip, vmax) ||
+					(vmax < sizeof(devinfo->vendor) &&
+						devinfo->vendor[vmax]))
+				continue;
+			if (memcmp(devinfo->model, mskip, mmax) ||
+					(mmax < sizeof(devinfo->model) &&
+						devinfo->model[mmax]))
+				continue;
+			return devinfo;
+		} else {
+			if (!memcmp(devinfo->vendor, vendor,
+				     sizeof(devinfo->vendor)) &&
+			     !memcmp(devinfo->model, model,
+				      sizeof(devinfo->model)))
+				return devinfo;
+		}
+	}
+
+	return ERR_PTR(-ENOENT);
+}
+
+/**
+ * scsi_dev_info_list_del_keyed - remove one dev_info list entry.
+ * @vendor:	vendor string
+ * @model:	model (product) string
+ * @key:	specify list to use
+ *
+ * Description:
+ *	Remove and destroy one dev_info entry for @vendor, @model
+ *	in list specified by @key.
+ *
+ * Returns: 0 OK, -error on failure.
+ **/
+int scsi_dev_info_list_del_keyed(char *vendor, char *model, int key)
+{
+	struct scsi_dev_info_list *found;
+
+	found = scsi_dev_info_list_find(vendor, model, key);
+	if (IS_ERR(found))
+		return PTR_ERR(found);
+
+	list_del(&found->dev_info_list);
+	kfree(found);
+	return 0;
+}
+EXPORT_SYMBOL(scsi_dev_info_list_del_keyed);
+
+/**
  * scsi_dev_info_list_add_str - parse dev_list and add to the scsi_dev_info_list.
  * @dev_list:	string of device flags to add
  *
@@ -454,7 +571,7 @@ int scsi_get_device_flags(struct scsi_device *sdev,
 
 
 /**
- * get_device_flags_keyed - get device specific flags from the dynamic device list.
+ * scsi_get_device_flags_keyed - get device specific flags from the dynamic device list
  * @sdev:       &scsi_device to get flags for
  * @vendor:	vendor name
  * @model:	model name
@@ -472,64 +589,16 @@ int scsi_get_device_flags_keyed(struct scsi_device *sdev,
 				int key)
 {
 	struct scsi_dev_info_list *devinfo;
-	struct scsi_dev_info_list_table *devinfo_table;
+	int err;
 
-	devinfo_table = scsi_devinfo_lookup_by_key(key);
+	devinfo = scsi_dev_info_list_find(vendor, model, key);
+	if (!IS_ERR(devinfo))
+		return devinfo->flags;
 
-	if (IS_ERR(devinfo_table))
-		return PTR_ERR(devinfo_table);
+	err = PTR_ERR(devinfo);
+	if (err != -ENOENT)
+		return err;
 
-	list_for_each_entry(devinfo, &devinfo_table->scsi_dev_info_list,
-			    dev_info_list) {
-		if (devinfo->compatible) {
-			/*
-			 * Behave like the older version of get_device_flags.
-			 */
-			size_t max;
-			/*
-			 * XXX why skip leading spaces? If an odd INQUIRY
-			 * value, that should have been part of the
-			 * scsi_static_device_list[] entry, such as "  FOO"
-			 * rather than "FOO". Since this code is already
-			 * here, and we don't know what device it is
-			 * trying to work with, leave it as-is.
-			 */
-			max = 8;	/* max length of vendor */
-			while ((max > 0) && *vendor == ' ') {
-				max--;
-				vendor++;
-			}
-			/*
-			 * XXX removing the following strlen() would be
-			 * good, using it means that for a an entry not in
-			 * the list, we scan every byte of every vendor
-			 * listed in scsi_static_device_list[], and never match
-			 * a single one (and still have to compare at
-			 * least the first byte of each vendor).
-			 */
-			if (memcmp(devinfo->vendor, vendor,
-				    min(max, strlen(devinfo->vendor))))
-				continue;
-			/*
-			 * Skip spaces again.
-			 */
-			max = 16;	/* max length of model */
-			while ((max > 0) && *model == ' ') {
-				max--;
-				model++;
-			}
-			if (memcmp(devinfo->model, model,
-				   min(max, strlen(devinfo->model))))
-				continue;
-			return devinfo->flags;
-		} else {
-			if (!memcmp(devinfo->vendor, vendor,
-				     sizeof(devinfo->vendor)) &&
-			     !memcmp(devinfo->model, model,
-				      sizeof(devinfo->model)))
-				return devinfo->flags;
-		}
-	}
 	/* nothing found, return nothing */
 	if (key != SCSI_DEVINFO_GLOBAL)
 		return 0;
@@ -685,7 +754,7 @@ MODULE_PARM_DESC(default_dev_flags,
 		 "scsi default device flag integer value");
 
 /**
- * scsi_dev_info_list_delete - called from scsi.c:exit_scsi to remove the scsi_dev_info_list.
+ * scsi_exit_devinfo - remove /proc/scsi/device_info & the scsi_dev_info_list
  **/
 void scsi_exit_devinfo(void)
 {

@@ -28,15 +28,17 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/proc_fs.h>
 #include <linux/workqueue.h>
 #include <linux/pci.h>
 #include <linux/pci_hotplug.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
 #include <linux/debugfs.h>
 #include "cpqphp.h"
 
+static DEFINE_MUTEX(cpqphp_mutex);
 static int show_ctrl (struct controller *ctrl, char *buf)
 {
 	char *out = buf;
@@ -77,7 +79,7 @@ static int show_ctrl (struct controller *ctrl, char *buf)
 
 static int show_dev (struct controller *ctrl, char *buf)
 {
-	char * out = buf;
+	char *out = buf;
 	int index;
 	struct pci_resource *res;
 	struct pci_func *new_slot;
@@ -146,7 +148,7 @@ static int open(struct inode *inode, struct file *file)
 	struct ctrl_dbg *dbg;
 	int retval = -ENOMEM;
 
-	lock_kernel();
+	mutex_lock(&cpqphp_mutex);
 	dbg = kmalloc(sizeof(*dbg), GFP_KERNEL);
 	if (!dbg)
 		goto exit;
@@ -159,32 +161,14 @@ static int open(struct inode *inode, struct file *file)
 	file->private_data = dbg;
 	retval = 0;
 exit:
-	unlock_kernel();
+	mutex_unlock(&cpqphp_mutex);
 	return retval;
 }
 
 static loff_t lseek(struct file *file, loff_t off, int whence)
 {
-	struct ctrl_dbg *dbg;
-	loff_t new = -1;
-
-	lock_kernel();
-	dbg = file->private_data;
-
-	switch (whence) {
-	case 0:
-		new = off;
-		break;
-	case 1:
-		new = file->f_pos + off;
-		break;
-	}
-	if (new < 0 || new > dbg->size) {
-		unlock_kernel();
-		return -EINVAL;
-	}
-	unlock_kernel();
-	return (file->f_pos = new);
+	struct ctrl_dbg *dbg = file->private_data;
+	return fixed_size_llseek(file, off, whence, dbg->size);
 }
 
 static ssize_t read(struct file *file, char __user *buf,
@@ -232,8 +216,7 @@ void cpqhp_create_debugfs_files(struct controller *ctrl)
 
 void cpqhp_remove_debugfs_files(struct controller *ctrl)
 {
-	if (ctrl->dentry)
-		debugfs_remove(ctrl->dentry);
+	debugfs_remove(ctrl->dentry);
 	ctrl->dentry = NULL;
 }
 

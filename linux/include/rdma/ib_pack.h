@@ -34,9 +34,12 @@
 #define IB_PACK_H
 
 #include <rdma/ib_verbs.h>
+#include <uapi/linux/if_ether.h>
 
 enum {
 	IB_LRH_BYTES  = 8,
+	IB_ETH_BYTES  = 14,
+	IB_VLAN_BYTES = 4,
 	IB_GRH_BYTES  = 40,
 	IB_BTH_BYTES  = 12,
 	IB_DETH_BYTES = 8
@@ -73,6 +76,8 @@ enum {
 	IB_OPCODE_UC                                = 0x20,
 	IB_OPCODE_RD                                = 0x40,
 	IB_OPCODE_UD                                = 0x60,
+	/* per IBTA 1.3 vol 1 Table 38, A10.3.2 */
+	IB_OPCODE_CNP                               = 0x80,
 
 	/* operations -- just used to define real constants */
 	IB_OPCODE_SEND_FIRST                        = 0x00,
@@ -210,14 +215,32 @@ struct ib_unpacked_deth {
 	__be32       source_qpn;
 };
 
+struct ib_unpacked_eth {
+	u8	dmac_h[4];
+	u8	dmac_l[2];
+	u8	smac_h[2];
+	u8	smac_l[4];
+	__be16	type;
+};
+
+struct ib_unpacked_vlan {
+	__be16  tag;
+	__be16  type;
+};
+
 struct ib_ud_header {
+	int                     lrh_present;
 	struct ib_unpacked_lrh  lrh;
-	int                     grh_present;
-	struct ib_unpacked_grh  grh;
-	struct ib_unpacked_bth  bth;
+	int			eth_present;
+	struct ib_unpacked_eth	eth;
+	int                     vlan_present;
+	struct ib_unpacked_vlan vlan;
+	int			grh_present;
+	struct ib_unpacked_grh	grh;
+	struct ib_unpacked_bth	bth;
 	struct ib_unpacked_deth deth;
-	int            		immediate_present;
-	__be32         		immediate_data;
+	int			immediate_present;
+	__be32			immediate_data;
 };
 
 void ib_pack(const struct ib_field        *desc,
@@ -230,8 +253,12 @@ void ib_unpack(const struct ib_field        *desc,
 	       void                         *buf,
 	       void                         *structure);
 
-void ib_ud_header_init(int     		   payload_bytes,
-		       int    		   grh_present,
+void ib_ud_header_init(int		    payload_bytes,
+		       int		    lrh_present,
+		       int		    eth_present,
+		       int		    vlan_present,
+		       int		    grh_present,
+		       int		    immediate_present,
 		       struct ib_ud_header *header);
 
 int ib_ud_header_pack(struct ib_ud_header *header,

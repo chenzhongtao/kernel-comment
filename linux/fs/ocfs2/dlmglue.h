@@ -84,6 +84,7 @@ enum {
 	OI_LS_PARENT,
 	OI_LS_RENAME1,
 	OI_LS_RENAME2,
+	OI_LS_REFLINK_TARGET,
 };
 
 int ocfs2_dlm_init(struct ocfs2_super *osb);
@@ -156,7 +157,8 @@ int ocfs2_refcount_lock(struct ocfs2_refcount_tree *ref_tree, int ex);
 void ocfs2_refcount_unlock(struct ocfs2_refcount_tree *ref_tree, int ex);
 
 
-void ocfs2_mark_lockres_freeing(struct ocfs2_lock_res *lockres);
+void ocfs2_mark_lockres_freeing(struct ocfs2_super *osb,
+				struct ocfs2_lock_res *lockres);
 void ocfs2_simple_drop_lockres(struct ocfs2_super *osb,
 			       struct ocfs2_lock_res *lockres);
 

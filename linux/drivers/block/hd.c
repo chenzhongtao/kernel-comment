@@ -34,7 +34,6 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/genhd.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
@@ -45,7 +44,6 @@
 #define HD_IRQ 14
 
 #define REALLY_SLOW_IO
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 
@@ -156,7 +154,7 @@ else \
 
 #if (HD_DELAY > 0)
 
-#include <asm/i8253.h>
+#include <linux/i8253.h>
 
 unsigned long last_req;
 
@@ -165,12 +163,12 @@ unsigned long read_timer(void)
 	unsigned long t, flags;
 	int i;
 
-	spin_lock_irqsave(&i8253_lock, flags);
+	raw_spin_lock_irqsave(&i8253_lock, flags);
 	t = jiffies * 11932;
 	outb_p(0, 0x43);
 	i = inb_p(0x40);
 	i |= inb(0x40) << 8;
-	spin_unlock_irqrestore(&i8253_lock, flags);
+	raw_spin_unlock_irqrestore(&i8253_lock, flags);
 	return(t - i);
 }
 #endif
@@ -466,11 +464,11 @@ static void read_intr(void)
 
 ok_to_read:
 	req = hd_req;
-	insw(HD_DATA, req->buffer, 256);
+	insw(HD_DATA, bio_data(req->bio), 256);
 #ifdef DEBUG
 	printk("%s: read: sector %ld, remaining = %u, buffer=%p\n",
 	       req->rq_disk->disk_name, blk_rq_pos(req) + 1,
-	       blk_rq_sectors(req) - 1, req->buffer+512);
+	       blk_rq_sectors(req) - 1, bio_data(req->bio)+512);
 #endif
 	if (hd_end_request(0, 512)) {
 		SET_HANDLER(&read_intr);
@@ -507,7 +505,7 @@ static void write_intr(void)
 ok_to_write:
 	if (hd_end_request(0, 512)) {
 		SET_HANDLER(&write_intr);
-		outsw(HD_DATA, req->buffer, 256);
+		outsw(HD_DATA, bio_data(req->bio), 256);
 		return;
 	}
 
@@ -626,9 +624,9 @@ repeat:
 	printk("%s: %sing: CHS=%d/%d/%d, sectors=%d, buffer=%p\n",
 		req->rq_disk->disk_name,
 		req_data_dir(req) == READ ? "read" : "writ",
-		cyl, head, sec, nsect, req->buffer);
+		cyl, head, sec, nsect, bio_data(req->bio));
 #endif
-	if (blk_fs_request(req)) {
+	if (req->cmd_type == REQ_TYPE_FS) {
 		switch (rq_data_dir(req)) {
 		case READ:
 			hd_out(disk, nsect, sec, head, cyl, ATA_CMD_PIO_READ,
@@ -645,7 +643,7 @@ repeat:
 				bad_rw_intr();
 				goto repeat;
 			}
-			outsw(HD_DATA, req->buffer, 256);
+			outsw(HD_DATA, bio_data(req->bio), 256);
 			break;
 		default:
 			printk("unknown hd-command\n");
@@ -696,16 +694,6 @@ static const struct block_device_operations hd_fops = {
 	.getgeo =	hd_getgeo,
 };
 
-/*
- * This is the hard disk IRQ description. The IRQF_DISABLED in sa_flags
- * means we run the IRQ-handler with interrupts disabled:  this is bad for
- * interrupt latency, but anything else has led to problems on some
- * machines.
- *
- * We enable interrupts in some of the routines after making sure it's
- * safe.
- */
-
 static int __init hd_init(void)
 {
 	int drive;
@@ -719,7 +707,7 @@ static int __init hd_init(void)
 		return -ENOMEM;
 	}
 
-	blk_queue_max_sectors(hd_queue, 255);
+	blk_queue_max_hw_sectors(hd_queue, 255);
 	init_timer(&device_timer);
 	device_timer.function = hd_times_out;
 	blk_queue_logical_block_size(hd_queue, 512);
@@ -734,7 +722,7 @@ static int __init hd_init(void)
 		 * the BIOS or CMOS.  This doesn't work all that well,
 		 * since this assumes that this is a primary or secondary
 		 * drive, and if we're using this legacy driver, it's
-		 * probably an auxilliary controller added to recover
+		 * probably an auxiliary controller added to recover
 		 * legacy data off an ST-506 drive.  Either way, it's
 		 * definitely safest to have the user explicitly specify
 		 * the information.
@@ -763,7 +751,7 @@ static int __init hd_init(void)
 			p->cyl, p->head, p->sect);
 	}
 
-	if (request_irq(HD_IRQ, hd_interrupt, IRQF_DISABLED, "hd", NULL)) {
+	if (request_irq(HD_IRQ, hd_interrupt, 0, "hd", NULL)) {
 		printk("hd: unable to get IRQ%d for the hard disk driver\n",
 			HD_IRQ);
 		goto out1;

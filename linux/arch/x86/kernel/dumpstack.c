@@ -18,7 +18,6 @@
 
 #include <asm/stacktrace.h>
 
-#include "dumpstack.h"
 
 int panic_on_unrecovered_nmi;
 int panic_on_io_nmi;
@@ -26,10 +25,17 @@ unsigned int code_bytes = 64;
 int kstack_depth_to_print = 3 * STACKSLOTS_PER_LINE;
 static int die_counter;
 
-void printk_address(unsigned long address, int reliable)
+static void printk_stack_address(unsigned long address, int reliable,
+		void *data)
 {
-	printk(" [<%p>] %s%pS\n", (void *) address,
-			reliable ? "" : "? ", (void *) address);
+	printk("%s [<%p>] %s%pB\n",
+		(char *)data, (void *)address, reliable ? "" : "? ",
+		(void *)address);
+}
+
+void printk_address(unsigned long address)
+{
+	pr_cont(" [<%p>] %pS\n", (void *)address, (void *)address);
 }
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
@@ -38,12 +44,15 @@ print_ftrace_graph_addr(unsigned long addr, void *data,
 			const struct stacktrace_ops *ops,
 			struct thread_info *tinfo, int *graph)
 {
-	struct task_struct *task = tinfo->task;
+	struct task_struct *task;
 	unsigned long ret_addr;
-	int index = task->curr_ret_stack;
+	int index;
 
 	if (addr != (unsigned long)return_to_handler)
 		return;
+
+	task = tinfo->task;
+	index = task->curr_ret_stack;
 
 	if (!task->ret_stack || index < *graph)
 		return;
@@ -109,20 +118,32 @@ print_context_stack(struct thread_info *tinfo,
 	}
 	return bp;
 }
+EXPORT_SYMBOL_GPL(print_context_stack);
 
-
-static void
-print_trace_warning_symbol(void *data, char *msg, unsigned long symbol)
+unsigned long
+print_context_stack_bp(struct thread_info *tinfo,
+		       unsigned long *stack, unsigned long bp,
+		       const struct stacktrace_ops *ops, void *data,
+		       unsigned long *end, int *graph)
 {
-	printk(data);
-	print_symbol(msg, symbol);
-	printk("\n");
-}
+	struct stack_frame *frame = (struct stack_frame *)bp;
+	unsigned long *ret_addr = &frame->return_address;
 
-static void print_trace_warning(void *data, char *msg)
-{
-	printk("%s%s\n", (char *)data, msg);
+	while (valid_stack_ptr(tinfo, ret_addr, sizeof(*ret_addr), end)) {
+		unsigned long addr = *ret_addr;
+
+		if (!__kernel_text_address(addr))
+			break;
+
+		ops->address(data, addr, 1);
+		frame = frame->next_frame;
+		ret_addr = &frame->return_address;
+		print_ftrace_graph_addr(addr, data, ops, tinfo, graph);
+	}
+
+	return (unsigned long)frame;
 }
+EXPORT_SYMBOL_GPL(print_context_stack_bp);
 
 static int print_trace_stack(void *data, char *name)
 {
@@ -136,15 +157,13 @@ static int print_trace_stack(void *data, char *name)
 static void print_trace_address(void *data, unsigned long addr, int reliable)
 {
 	touch_nmi_watchdog();
-	printk(data);
-	printk_address(addr, reliable);
+	printk_stack_address(addr, reliable, data);
 }
 
 static const struct stacktrace_ops print_trace_ops = {
-	.warning = print_trace_warning,
-	.warning_symbol = print_trace_warning_symbol,
-	.stack = print_trace_stack,
-	.address = print_trace_address,
+	.stack			= print_trace_stack,
+	.address		= print_trace_address,
+	.walk_stack		= print_context_stack,
 };
 
 void
@@ -163,55 +182,40 @@ void show_trace(struct task_struct *task, struct pt_regs *regs,
 
 void show_stack(struct task_struct *task, unsigned long *sp)
 {
-	show_stack_log_lvl(task, NULL, sp, 0, "");
-}
-
-/*
- * The architecture-independent dump_stack generator
- */
-void dump_stack(void)
-{
 	unsigned long bp = 0;
 	unsigned long stack;
 
-#ifdef CONFIG_FRAME_POINTER
-	if (!bp)
-		get_bp(bp);
-#endif
+	/*
+	 * Stack frames below this one aren't interesting.  Don't show them
+	 * if we're printing for %current.
+	 */
+	if (!sp && (!task || task == current)) {
+		sp = &stack;
+		bp = stack_frame(current, NULL);
+	}
 
-	printk("Pid: %d, comm: %.20s %s %s %.*s\n",
-		current->pid, current->comm, print_tainted(),
-		init_utsname()->release,
-		(int)strcspn(init_utsname()->version, " "),
-		init_utsname()->version);
-	show_trace(NULL, NULL, &stack, bp);
+	show_stack_log_lvl(task, NULL, sp, bp, "");
 }
-EXPORT_SYMBOL(dump_stack);
 
-static raw_spinlock_t die_lock = __RAW_SPIN_LOCK_UNLOCKED;
+static arch_spinlock_t die_lock = __ARCH_SPIN_LOCK_UNLOCKED;
 static int die_owner = -1;
 static unsigned int die_nest_count;
 
-unsigned __kprobes long oops_begin(void)
+unsigned long oops_begin(void)
 {
 	int cpu;
 	unsigned long flags;
-
-	/* notify the hw-branch tracer so it may disable tracing and
-	   add the last trace to the trace buffer -
-	   the earlier this happens, the more useful the trace. */
-	trace_hw_branch_oops();
 
 	oops_enter();
 
 	/* racy, but better than risking deadlock. */
 	raw_local_irq_save(flags);
 	cpu = smp_processor_id();
-	if (!__raw_spin_trylock(&die_lock)) {
+	if (!arch_spin_trylock(&die_lock)) {
 		if (cpu == die_owner)
 			/* nested oops. should stop eventually */;
 		else
-			__raw_spin_lock(&die_lock);
+			arch_spin_lock(&die_lock);
 	}
 	die_nest_count++;
 	die_owner = cpu;
@@ -219,19 +223,21 @@ unsigned __kprobes long oops_begin(void)
 	bust_spinlocks(1);
 	return flags;
 }
+EXPORT_SYMBOL_GPL(oops_begin);
+NOKPROBE_SYMBOL(oops_begin);
 
-void __kprobes oops_end(unsigned long flags, struct pt_regs *regs, int signr)
+void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 {
 	if (regs && kexec_should_crash(current))
 		crash_kexec(regs);
 
 	bust_spinlocks(0);
 	die_owner = -1;
-	add_taint(TAINT_DIE);
+	add_taint(TAINT_DIE, LOCKDEP_NOW_UNRELIABLE);
 	die_nest_count--;
 	if (!die_nest_count)
 		/* Nest count reaches zero, release the lock. */
-		__raw_spin_unlock(&die_lock);
+		arch_spin_unlock(&die_lock);
 	raw_local_irq_restore(flags);
 	oops_exit();
 
@@ -243,14 +249,16 @@ void __kprobes oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 		panic("Fatal exception");
 	do_exit(signr);
 }
+NOKPROBE_SYMBOL(oops_end);
 
-int __kprobes __die(const char *str, struct pt_regs *regs, long err)
+int __die(const char *str, struct pt_regs *regs, long err)
 {
 #ifdef CONFIG_X86_32
 	unsigned short ss;
 	unsigned long sp;
 #endif
-	printk(KERN_EMERG "%s: %04lx [#%d] ", str, err & 0xffff, ++die_counter);
+	printk(KERN_DEFAULT
+	       "%s: %04lx [#%d] ", str, err & 0xffff, ++die_counter);
 #ifdef CONFIG_PREEMPT
 	printk("PREEMPT ");
 #endif
@@ -258,21 +266,25 @@ int __kprobes __die(const char *str, struct pt_regs *regs, long err)
 	printk("SMP ");
 #endif
 #ifdef CONFIG_DEBUG_PAGEALLOC
-	printk("DEBUG_PAGEALLOC");
+	printk("DEBUG_PAGEALLOC ");
+#endif
+#ifdef CONFIG_KASAN
+	printk("KASAN");
 #endif
 	printk("\n");
-	sysfs_printk_last_file();
 	if (notify_die(DIE_OOPS, str, regs, err,
-			current->thread.trap_no, SIGSEGV) == NOTIFY_STOP)
+			current->thread.trap_nr, SIGSEGV) == NOTIFY_STOP)
 		return 1;
 
-	show_registers(regs);
+	print_modules();
+	show_regs(regs);
 #ifdef CONFIG_X86_32
-	sp = (unsigned long) (&regs->sp);
-	savesegment(ss, ss);
 	if (user_mode(regs)) {
 		sp = regs->sp;
 		ss = regs->ss & 0xffff;
+	} else {
+		sp = kernel_stack_pointer(regs);
+		savesegment(ss, ss);
 	}
 	printk(KERN_EMERG "EIP: [<%08lx>] ", regs->ip);
 	print_symbol("%s", regs->ip);
@@ -280,11 +292,12 @@ int __kprobes __die(const char *str, struct pt_regs *regs, long err)
 #else
 	/* Executive summary in case the oops scrolled away */
 	printk(KERN_ALERT "RIP ");
-	printk_address(regs->ip, 1);
+	printk_address(regs->ip);
 	printk(" RSP <%016lx>\n", regs->sp);
 #endif
 	return 0;
 }
+NOKPROBE_SYMBOL(__die);
 
 /*
  * This is gone through when something in the kernel has done something bad
@@ -295,7 +308,7 @@ void die(const char *str, struct pt_regs *regs, long err)
 	unsigned long flags = oops_begin();
 	int sig = SIGSEGV;
 
-	if (!user_mode_vm(regs))
+	if (!user_mode(regs))
 		report_bug(regs->ip, regs);
 
 	if (__die(str, regs, err))
@@ -303,53 +316,35 @@ void die(const char *str, struct pt_regs *regs, long err)
 	oops_end(flags, regs, sig);
 }
 
-void notrace __kprobes
-die_nmi(char *str, struct pt_regs *regs, int do_panic)
-{
-	unsigned long flags;
-
-	if (notify_die(DIE_NMIWATCHDOG, str, regs, 0, 2, SIGINT) == NOTIFY_STOP)
-		return;
-
-	/*
-	 * We are in trouble anyway, lets at least try
-	 * to get a message out.
-	 */
-	flags = oops_begin();
-	printk(KERN_EMERG "%s", str);
-	printk(" on CPU%d, ip %08lx, registers:\n",
-		smp_processor_id(), regs->ip);
-	show_registers(regs);
-	oops_end(flags, regs, 0);
-	if (do_panic || panic_on_oops)
-		panic("Non maskable interrupt");
-	nmi_exit();
-	local_irq_enable();
-	do_exit(SIGBUS);
-}
-
-static int __init oops_setup(char *s)
-{
-	if (!s)
-		return -EINVAL;
-	if (!strcmp(s, "panic"))
-		panic_on_oops = 1;
-	return 0;
-}
-early_param("oops", oops_setup);
-
 static int __init kstack_setup(char *s)
 {
+	ssize_t ret;
+	unsigned long val;
+
 	if (!s)
 		return -EINVAL;
-	kstack_depth_to_print = simple_strtoul(s, NULL, 0);
+
+	ret = kstrtoul(s, 0, &val);
+	if (ret)
+		return ret;
+	kstack_depth_to_print = val;
 	return 0;
 }
 early_param("kstack", kstack_setup);
 
 static int __init code_bytes_setup(char *s)
 {
-	code_bytes = simple_strtoul(s, NULL, 0);
+	ssize_t ret;
+	unsigned long val;
+
+	if (!s)
+		return -EINVAL;
+
+	ret = kstrtoul(s, 0, &val);
+	if (ret)
+		return ret;
+
+	code_bytes = val;
 	if (code_bytes > 8192)
 		code_bytes = 8192;
 

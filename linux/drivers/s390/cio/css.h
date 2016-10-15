@@ -11,6 +11,8 @@
 #include <asm/chpid.h>
 #include <asm/schid.h>
 
+#include "cio.h"
+
 /*
  * path grouping stuff
  */
@@ -61,7 +63,6 @@ struct subchannel;
 struct chp_link;
 /**
  * struct css_driver - device driver for subchannels
- * @owner: owning module
  * @subchannel_type: subchannel type supported by this driver
  * @drv: embedded device driver structure
  * @irq: called on interrupts
@@ -76,10 +77,8 @@ struct chp_link;
  * @thaw: undo work done in @freeze
  * @restore: callback for restoring after hibernation
  * @settle: wait for asynchronous work to finish
- * @name: name of the device driver
  */
 struct css_driver {
-	struct module *owner;
 	struct css_device_id *subchannel_type;
 	struct device_driver drv;
 	void (*irq)(struct subchannel *);
@@ -93,22 +92,17 @@ struct css_driver {
 	int (*freeze)(struct subchannel *);
 	int (*thaw) (struct subchannel *);
 	int (*restore)(struct subchannel *);
-	void (*settle)(void);
-	const char *name;
+	int (*settle)(void);
 };
 
 #define to_cssdriver(n) container_of(n, struct css_driver, drv)
-
-/*
- * all css_drivers have the css_bus_type
- */
-extern struct bus_type css_bus_type;
 
 extern int css_driver_register(struct css_driver *);
 extern void css_driver_unregister(struct css_driver *);
 
 extern void css_sch_device_unregister(struct subchannel *);
-extern int css_probe_device(struct subchannel_id);
+extern int css_register_subchannel(struct subchannel *);
+extern struct subchannel *css_alloc_subchannel(struct subchannel_id);
 extern struct subchannel *get_subchannel_by_schid(struct subchannel_id);
 extern int css_init_done;
 extern int max_ssid;
@@ -116,11 +110,7 @@ int for_each_subchannel_staged(int (*fn_known)(struct subchannel *, void *),
 			       int (*fn_unknown)(struct subchannel_id,
 			       void *), void *data);
 extern int for_each_subchannel(int(*fn)(struct subchannel_id, void *), void *);
-extern void css_reiterate_subchannels(void);
 void css_update_ssd_info(struct subchannel *sch);
-
-#define __MAX_SUBCHANNEL 65535
-#define __MAX_SSID 3
 
 struct channel_subsystem {
 	u8 cssid;
@@ -138,17 +128,19 @@ struct channel_subsystem {
 };
 #define to_css(dev) container_of(dev, struct channel_subsystem, device)
 
-extern struct bus_type css_bus_type;
 extern struct channel_subsystem *channel_subsystems[];
 
 /* Helper functions to build lists for the slow path. */
 void css_schedule_eval(struct subchannel_id schid);
 void css_schedule_eval_all(void);
+void css_schedule_eval_all_unreg(unsigned long delay);
+int css_complete_work(void);
 
 int sch_is_pseudo_sch(struct subchannel *);
 struct schib;
 int css_sch_is_valid(struct schib *);
 
-extern struct workqueue_struct *slow_path_wq;
+extern struct workqueue_struct *cio_work_q;
 void css_wait_for_slow_path(void);
+void css_sched_sch_todo(struct subchannel *sch, enum sch_todo todo);
 #endif

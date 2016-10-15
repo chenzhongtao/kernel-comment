@@ -33,17 +33,16 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/device.h>
 #include <linux/cpu.h>
 #include <linux/notifier.h>
 #include <linux/uaccess.h>
+#include <linux/gfp.h>
 
 #include <asm/processor.h>
 #include <asm/msr.h>
-#include <asm/system.h>
 
 static struct class *cpuid_class;
 
@@ -86,7 +85,7 @@ static ssize_t cpuid_read(struct file *file, char __user *buf,
 {
 	char __user *tmp = buf;
 	struct cpuid_regs cmd;
-	int cpu = iminor(file->f_path.dentry->d_inode);
+	int cpu = iminor(file_inode(file));
 	u64 pos = *ppos;
 	ssize_t bytes = 0;
 	int err = 0;
@@ -116,21 +115,16 @@ static int cpuid_open(struct inode *inode, struct file *file)
 {
 	unsigned int cpu;
 	struct cpuinfo_x86 *c;
-	int ret = 0;
 
-	lock_kernel();
+	cpu = iminor(file_inode(file));
+	if (cpu >= nr_cpu_ids || !cpu_online(cpu))
+		return -ENXIO;	/* No such CPU */
 
-	cpu = iminor(file->f_path.dentry->d_inode);
-	if (cpu >= nr_cpu_ids || !cpu_online(cpu)) {
-		ret = -ENXIO;	/* No such CPU */
-		goto out;
-	}
 	c = &cpu_data(cpu);
 	if (c->cpuid_level < 0)
-		ret = -EIO;	/* CPUID not supported */
-out:
-	unlock_kernel();
-	return ret;
+		return -EIO;	/* CPUID not supported */
+
+	return 0;
 }
 
 /*
@@ -143,13 +137,13 @@ static const struct file_operations cpuid_fops = {
 	.open = cpuid_open,
 };
 
-static __cpuinit int cpuid_device_create(int cpu)
+static int cpuid_device_create(int cpu)
 {
 	struct device *dev;
 
 	dev = device_create(cpuid_class, NULL, MKDEV(CPUID_MAJOR, cpu), NULL,
 			    "cpu%d", cpu);
-	return IS_ERR(dev) ? PTR_ERR(dev) : 0;
+	return PTR_ERR_OR_ZERO(dev);
 }
 
 static void cpuid_device_destroy(int cpu)
@@ -157,9 +151,8 @@ static void cpuid_device_destroy(int cpu)
 	device_destroy(cpuid_class, MKDEV(CPUID_MAJOR, cpu));
 }
 
-static int __cpuinit cpuid_class_cpu_callback(struct notifier_block *nfb,
-					      unsigned long action,
-					      void *hcpu)
+static int cpuid_class_cpu_callback(struct notifier_block *nfb,
+				    unsigned long action, void *hcpu)
 {
 	unsigned int cpu = (unsigned long)hcpu;
 	int err = 0;
@@ -174,15 +167,15 @@ static int __cpuinit cpuid_class_cpu_callback(struct notifier_block *nfb,
 		cpuid_device_destroy(cpu);
 		break;
 	}
-	return err ? NOTIFY_BAD : NOTIFY_OK;
+	return notifier_from_errno(err);
 }
 
-static struct notifier_block __refdata cpuid_class_cpu_notifier =
+static struct notifier_block cpuid_class_cpu_notifier =
 {
 	.notifier_call = cpuid_class_cpu_callback,
 };
 
-static char *cpuid_devnode(struct device *dev, mode_t *mode)
+static char *cpuid_devnode(struct device *dev, umode_t *mode)
 {
 	return kasprintf(GFP_KERNEL, "cpu/%u/cpuid", MINOR(dev->devt));
 }
@@ -192,7 +185,8 @@ static int __init cpuid_init(void)
 	int i, err = 0;
 	i = 0;
 
-	if (register_chrdev(CPUID_MAJOR, "cpu/cpuid", &cpuid_fops)) {
+	if (__register_chrdev(CPUID_MAJOR, 0, NR_CPUS,
+			      "cpu/cpuid", &cpuid_fops)) {
 		printk(KERN_ERR "cpuid: unable to get major %d for cpuid\n",
 		       CPUID_MAJOR);
 		err = -EBUSY;
@@ -204,12 +198,15 @@ static int __init cpuid_init(void)
 		goto out_chrdev;
 	}
 	cpuid_class->devnode = cpuid_devnode;
+
+	cpu_notifier_register_begin();
 	for_each_online_cpu(i) {
 		err = cpuid_device_create(i);
 		if (err != 0)
 			goto out_class;
 	}
-	register_hotcpu_notifier(&cpuid_class_cpu_notifier);
+	__register_hotcpu_notifier(&cpuid_class_cpu_notifier);
+	cpu_notifier_register_done();
 
 	err = 0;
 	goto out;
@@ -219,9 +216,10 @@ out_class:
 	for_each_online_cpu(i) {
 		cpuid_device_destroy(i);
 	}
+	cpu_notifier_register_done();
 	class_destroy(cpuid_class);
 out_chrdev:
-	unregister_chrdev(CPUID_MAJOR, "cpu/cpuid");
+	__unregister_chrdev(CPUID_MAJOR, 0, NR_CPUS, "cpu/cpuid");
 out:
 	return err;
 }
@@ -230,11 +228,13 @@ static void __exit cpuid_exit(void)
 {
 	int cpu = 0;
 
+	cpu_notifier_register_begin();
 	for_each_online_cpu(cpu)
 		cpuid_device_destroy(cpu);
 	class_destroy(cpuid_class);
-	unregister_chrdev(CPUID_MAJOR, "cpu/cpuid");
-	unregister_hotcpu_notifier(&cpuid_class_cpu_notifier);
+	__unregister_chrdev(CPUID_MAJOR, 0, NR_CPUS, "cpu/cpuid");
+	__unregister_hotcpu_notifier(&cpuid_class_cpu_notifier);
+	cpu_notifier_register_done();
 }
 
 module_init(cpuid_init);

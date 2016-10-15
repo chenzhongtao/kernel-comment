@@ -91,7 +91,7 @@ ECC 1   rp15  rp14  rp13  rp12  rp11  rp10  rp09  rp08
 ECC 2   cp5   cp4   cp3   cp2   cp1   cp0      1     1
 
 I detected after writing this that ST application note AN1823
-(http://www.st.com/stonline/books/pdf/docs/10123.pdf) gives a much
+(http://www.st.com/stonline/) gives a much
 nicer picture.(but they use line parity as term where I use row parity)
 Oh well, I'm graphically challenged, so suffer with me for a moment :-)
 And I could not reuse the ST picture anyway for copyright reasons.
@@ -543,7 +543,7 @@ THe code within the for loop was changed to:
     }
 
 As you can see tmppar is used to accumulate the parity within a for
-iteration. In the last 3 statements is is added to par and, if needed,
+iteration. In the last 3 statements is added to par and, if needed,
 to rp12 and rp14.
 
 While making the changes I also found that I could exploit that tmppar

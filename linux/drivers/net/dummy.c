@@ -36,40 +36,102 @@
 #include <linux/moduleparam.h>
 #include <linux/rtnetlink.h>
 #include <net/rtnetlink.h>
+#include <linux/u64_stats_sync.h>
+
+#define DRV_NAME	"dummy"
+#define DRV_VERSION	"1.0"
 
 static int numdummies = 1;
-
-static int dummy_set_address(struct net_device *dev, void *p)
-{
-	struct sockaddr *sa = p;
-
-	if (!is_valid_ether_addr(sa->sa_data))
-		return -EADDRNOTAVAIL;
-
-	memcpy(dev->dev_addr, sa->sa_data, ETH_ALEN);
-	return 0;
-}
 
 /* fake multicast ability */
 static void set_multicast_list(struct net_device *dev)
 {
 }
 
+struct pcpu_dstats {
+	u64			tx_packets;
+	u64			tx_bytes;
+	struct u64_stats_sync	syncp;
+};
+
+static struct rtnl_link_stats64 *dummy_get_stats64(struct net_device *dev,
+						   struct rtnl_link_stats64 *stats)
+{
+	int i;
+
+	for_each_possible_cpu(i) {
+		const struct pcpu_dstats *dstats;
+		u64 tbytes, tpackets;
+		unsigned int start;
+
+		dstats = per_cpu_ptr(dev->dstats, i);
+		do {
+			start = u64_stats_fetch_begin_irq(&dstats->syncp);
+			tbytes = dstats->tx_bytes;
+			tpackets = dstats->tx_packets;
+		} while (u64_stats_fetch_retry_irq(&dstats->syncp, start));
+		stats->tx_bytes += tbytes;
+		stats->tx_packets += tpackets;
+	}
+	return stats;
+}
 
 static netdev_tx_t dummy_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	dev->stats.tx_packets++;
-	dev->stats.tx_bytes += skb->len;
+	struct pcpu_dstats *dstats = this_cpu_ptr(dev->dstats);
+
+	u64_stats_update_begin(&dstats->syncp);
+	dstats->tx_packets++;
+	dstats->tx_bytes += skb->len;
+	u64_stats_update_end(&dstats->syncp);
 
 	dev_kfree_skb(skb);
 	return NETDEV_TX_OK;
 }
 
+static int dummy_dev_init(struct net_device *dev)
+{
+	dev->dstats = netdev_alloc_pcpu_stats(struct pcpu_dstats);
+	if (!dev->dstats)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void dummy_dev_uninit(struct net_device *dev)
+{
+	free_percpu(dev->dstats);
+}
+
+static int dummy_change_carrier(struct net_device *dev, bool new_carrier)
+{
+	if (new_carrier)
+		netif_carrier_on(dev);
+	else
+		netif_carrier_off(dev);
+	return 0;
+}
+
 static const struct net_device_ops dummy_netdev_ops = {
+	.ndo_init		= dummy_dev_init,
+	.ndo_uninit		= dummy_dev_uninit,
 	.ndo_start_xmit		= dummy_xmit,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_set_multicast_list = set_multicast_list,
-	.ndo_set_mac_address	= dummy_set_address,
+	.ndo_set_rx_mode	= set_multicast_list,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_get_stats64	= dummy_get_stats64,
+	.ndo_change_carrier	= dummy_change_carrier,
+};
+
+static void dummy_get_drvinfo(struct net_device *dev,
+			      struct ethtool_drvinfo *info)
+{
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+}
+
+static const struct ethtool_ops dummy_ethtool_ops = {
+	.get_drvinfo            = dummy_get_drvinfo,
 };
 
 static void dummy_setup(struct net_device *dev)
@@ -78,14 +140,22 @@ static void dummy_setup(struct net_device *dev)
 
 	/* Initialize the device structure. */
 	dev->netdev_ops = &dummy_netdev_ops;
+	dev->ethtool_ops = &dummy_ethtool_ops;
 	dev->destructor = free_netdev;
 
 	/* Fill in device structure with ethernet-generic values. */
-	dev->tx_queue_len = 0;
 	dev->flags |= IFF_NOARP;
 	dev->flags &= ~IFF_MULTICAST;
-	random_ether_addr(dev->dev_addr);
+	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE | IFF_NO_QUEUE;
+	dev->features	|= NETIF_F_SG | NETIF_F_FRAGLIST;
+	dev->features	|= NETIF_F_ALL_TSO | NETIF_F_UFO;
+	dev->features	|= NETIF_F_HW_CSUM | NETIF_F_HIGHDMA | NETIF_F_LLTX;
+	dev->features	|= NETIF_F_GSO_ENCAP_ALL;
+	dev->hw_features |= dev->features;
+	dev->hw_enc_features |= dev->features;
+	eth_hw_addr_random(dev);
 }
+
 static int dummy_validate(struct nlattr *tb[], struct nlattr *data[])
 {
 	if (tb[IFLA_ADDRESS]) {
@@ -98,7 +168,7 @@ static int dummy_validate(struct nlattr *tb[], struct nlattr *data[])
 }
 
 static struct rtnl_link_ops dummy_link_ops __read_mostly = {
-	.kind		= "dummy",
+	.kind		= DRV_NAME,
 	.setup		= dummy_setup,
 	.validate	= dummy_validate,
 };
@@ -112,13 +182,9 @@ static int __init dummy_init_one(void)
 	struct net_device *dev_dummy;
 	int err;
 
-	dev_dummy = alloc_netdev(0, "dummy%d", dummy_setup);
+	dev_dummy = alloc_netdev(0, "dummy%d", NET_NAME_UNKNOWN, dummy_setup);
 	if (!dev_dummy)
 		return -ENOMEM;
-
-	err = dev_alloc_name(dev_dummy, dev_dummy->name);
-	if (err < 0)
-		goto err;
 
 	dev_dummy->rtnl_link_ops = &dummy_link_ops;
 	err = register_netdevice(dev_dummy);
@@ -137,11 +203,17 @@ static int __init dummy_init_module(void)
 
 	rtnl_lock();
 	err = __rtnl_link_register(&dummy_link_ops);
+	if (err < 0)
+		goto out;
 
-	for (i = 0; i < numdummies && !err; i++)
+	for (i = 0; i < numdummies && !err; i++) {
 		err = dummy_init_one();
+		cond_resched();
+	}
 	if (err < 0)
 		__rtnl_link_unregister(&dummy_link_ops);
+
+out:
 	rtnl_unlock();
 
 	return err;
@@ -155,4 +227,5 @@ static void __exit dummy_cleanup_module(void)
 module_init(dummy_init_module);
 module_exit(dummy_cleanup_module);
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_RTNL_LINK("dummy");
+MODULE_ALIAS_RTNL_LINK(DRV_NAME);
+MODULE_VERSION(DRV_VERSION);

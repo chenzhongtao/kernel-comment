@@ -21,16 +21,12 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * along with GNU CC; see the file COPYING.  If not, see
+ * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email addresses:
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -42,9 +38,6 @@
  *    Daisy Chang <daisyc@us.ibm.com>
  *    Ardelle Fan <ardelle.fan@intel.com>
  *    Kevin Gao <kevin.gao@intel.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
 
 #include <linux/types.h>
@@ -77,7 +70,8 @@ typedef struct {
 	int action;
 } sctp_sm_command_t;
 
-typedef sctp_disposition_t (sctp_state_fn_t) (const struct sctp_endpoint *,
+typedef sctp_disposition_t (sctp_state_fn_t) (struct net *,
+					      const struct sctp_endpoint *,
 					      const struct sctp_association *,
 					      const sctp_subtype_t type,
 					      void *arg,
@@ -165,6 +159,7 @@ sctp_state_fn_t sctp_sf_do_prm_requestheartbeat;
 sctp_state_fn_t sctp_sf_do_prm_asconf;
 
 /* Prototypes for other event state functions.  */
+sctp_state_fn_t sctp_sf_do_no_pending_tsn;
 sctp_state_fn_t sctp_sf_do_9_2_start_shutdown;
 sctp_state_fn_t sctp_sf_do_9_2_shutdown_ack;
 sctp_state_fn_t sctp_sf_ignore_other;
@@ -177,7 +172,8 @@ sctp_state_fn_t sctp_sf_autoclose_timer_expire;
 
 /* Prototypes for utility support functions.  */
 __u8 sctp_get_chunk_type(struct sctp_chunk *chunk);
-const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t,
+const sctp_sm_table_entry_t *sctp_sm_lookup_event(struct net *,
+					    sctp_event_t,
 					    sctp_state_t,
 					    sctp_subtype_t);
 int sctp_chunk_iif(const struct sctp_chunk *);
@@ -223,7 +219,7 @@ struct sctp_chunk *sctp_make_abort_no_data(const struct sctp_association *,
 				      const struct sctp_chunk *,
 				      __u32 tsn);
 struct sctp_chunk *sctp_make_abort_user(const struct sctp_association *,
-					const struct msghdr *, size_t msg_len);
+					struct msghdr *, size_t msg_len);
 struct sctp_chunk *sctp_make_abort_violation(const struct sctp_association *,
 				   const struct sctp_chunk *,
 				   const __u8 *,
@@ -231,10 +227,10 @@ struct sctp_chunk *sctp_make_abort_violation(const struct sctp_association *,
 struct sctp_chunk *sctp_make_violation_paramlen(const struct sctp_association *,
 				   const struct sctp_chunk *,
 				   struct sctp_paramhdr *);
+struct sctp_chunk *sctp_make_violation_max_retrans(const struct sctp_association *,
+						   const struct sctp_chunk *);
 struct sctp_chunk *sctp_make_heartbeat(const struct sctp_association *,
-				  const struct sctp_transport *,
-				  const void *payload,
-				  const size_t paylen);
+				  const struct sctp_transport *);
 struct sctp_chunk *sctp_make_heartbeat_ack(const struct sctp_association *,
 				      const struct sctp_chunk *,
 				      const void *payload,
@@ -243,7 +239,8 @@ struct sctp_chunk *sctp_make_op_error(const struct sctp_association *,
 				 const struct sctp_chunk *chunk,
 				 __be16 cause_code,
 				 const void *payload,
-				 size_t paylen);
+				 size_t paylen,
+				 size_t reserve_tail);
 
 struct sctp_chunk *sctp_make_asconf_update_ip(struct sctp_association *,
 					      union sctp_addr *,
@@ -251,9 +248,9 @@ struct sctp_chunk *sctp_make_asconf_update_ip(struct sctp_association *,
 					      int, __be16);
 struct sctp_chunk *sctp_make_asconf_set_prim(struct sctp_association *asoc,
 					     union sctp_addr *addr);
-int sctp_verify_asconf(const struct sctp_association *asoc,
-		       struct sctp_paramhdr *param_hdr, void *chunk_end,
-		       struct sctp_paramhdr **errp);
+bool sctp_verify_asconf(const struct sctp_association *asoc,
+			struct sctp_chunk *chunk, bool addr_param_needed,
+			struct sctp_paramhdr **errp);
 struct sctp_chunk *sctp_process_asconf(struct sctp_association *asoc,
 				       struct sctp_chunk *asconf);
 int sctp_process_asconf_ack(struct sctp_association *asoc,
@@ -268,7 +265,7 @@ void sctp_chunk_assign_ssn(struct sctp_chunk *);
 
 /* Prototypes for statetable processing. */
 
-int sctp_do_sm(sctp_event_t event_type, sctp_subtype_t subtype,
+int sctp_do_sm(struct net *net, sctp_event_t event_type, sctp_subtype_t subtype,
 	       sctp_state_t state,
                struct sctp_endpoint *,
                struct sctp_association *asoc,
@@ -278,6 +275,7 @@ int sctp_do_sm(sctp_event_t event_type, sctp_subtype_t subtype,
 /* 2nd level prototypes */
 void sctp_generate_t3_rtx_event(unsigned long peer);
 void sctp_generate_heartbeat_event(unsigned long peer);
+void sctp_generate_proto_unreach_event(unsigned long peer);
 
 void sctp_ootb_pkt_free(struct sctp_packet *);
 
@@ -343,12 +341,12 @@ enum {
 
 static inline int TSN_lt(__u32 s, __u32 t)
 {
-	return (((s) - (t)) & TSN_SIGN_BIT);
+	return ((s) - (t)) & TSN_SIGN_BIT;
 }
 
 static inline int TSN_lte(__u32 s, __u32 t)
 {
-	return (((s) == (t)) || (((s) - (t)) & TSN_SIGN_BIT));
+	return ((s) == (t)) || (((s) - (t)) & TSN_SIGN_BIT);
 }
 
 /* Compare two SSNs */
@@ -367,12 +365,12 @@ enum {
 
 static inline int SSN_lt(__u16 s, __u16 t)
 {
-	return (((s) - (t)) & SSN_SIGN_BIT);
+	return ((s) - (t)) & SSN_SIGN_BIT;
 }
 
 static inline int SSN_lte(__u16 s, __u16 t)
 {
-	return (((s) == (t)) || (((s) - (t)) & SSN_SIGN_BIT));
+	return ((s) == (t)) || (((s) - (t)) & SSN_SIGN_BIT);
 }
 
 /*
@@ -386,7 +384,7 @@ enum {
 
 static inline int ADDIP_SERIAL_gte(__u16 s, __u16 t)
 {
-	return (((s) == (t)) || (((t) - (s)) & ADDIP_SERIAL_SIGN_BIT));
+	return ((s) == (t)) || (((t) - (s)) & ADDIP_SERIAL_SIGN_BIT);
 }
 
 /* Check VTAG of the packet matches the sender's own tag. */
@@ -436,7 +434,7 @@ sctp_vtag_verify_either(const struct sctp_chunk *chunk,
 	 */
         if ((!sctp_test_T_bit(chunk) &&
              (ntohl(chunk->sctp_hdr->vtag) == asoc->c.my_vtag)) ||
-	    (sctp_test_T_bit(chunk) &&
+	    (sctp_test_T_bit(chunk) && asoc->c.peer_vtag &&
 	     (ntohl(chunk->sctp_hdr->vtag) == asoc->c.peer_vtag))) {
                 return 1;
 	}

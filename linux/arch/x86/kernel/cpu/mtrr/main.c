@@ -35,6 +35,7 @@
 
 #include <linux/types.h> /* FIXME: kvm_para.h needs this */
 
+#include <linux/stop_machine.h>
 #include <linux/kvm_para.h>
 #include <linux/uaccess.h>
 #include <linux/module.h>
@@ -44,15 +45,26 @@
 #include <linux/cpu.h>
 #include <linux/pci.h>
 #include <linux/smp.h>
+#include <linux/syscore_ops.h>
 
 #include <asm/processor.h>
 #include <asm/e820.h>
 #include <asm/mtrr.h>
 #include <asm/msr.h>
+#include <asm/pat.h>
 
 #include "mtrr.h"
 
+/* arch_phys_wc_add returns an MTRR register index plus this offset. */
+#define MTRR_TO_PHYS_WC_OFFSET 1000
+
 u32 num_var_ranges;
+static bool __mtrr_enabled;
+
+static bool mtrr_enabled(void)
+{
+	return __mtrr_enabled;
+}
 
 unsigned int mtrr_usage_table[MTRR_MAX_VAR_RANGES];
 static DEFINE_MUTEX(mtrr_mutex);
@@ -60,14 +72,14 @@ static DEFINE_MUTEX(mtrr_mutex);
 u64 size_or_mask, size_and_mask;
 static bool mtrr_aps_delayed_init;
 
-static struct mtrr_ops *mtrr_ops[X86_VENDOR_NUM];
+static const struct mtrr_ops *mtrr_ops[X86_VENDOR_NUM];
 
-struct mtrr_ops *mtrr_if;
+const struct mtrr_ops *mtrr_if;
 
 static void set_mtrr(unsigned int reg, unsigned long base,
 		     unsigned long size, mtrr_type type);
 
-void set_mtrr_ops(struct mtrr_ops *ops)
+void set_mtrr_ops(const struct mtrr_ops *ops)
 {
 	if (ops->vendor && ops->vendor < X86_VENDOR_NUM)
 		mtrr_ops[ops->vendor] = ops;
@@ -77,7 +89,6 @@ void set_mtrr_ops(struct mtrr_ops *ops)
 static int have_wrcomb(void)
 {
 	struct pci_dev *dev;
-	u8 rev;
 
 	dev = pci_get_class(PCI_CLASS_BRIDGE_HOST << 8, NULL);
 	if (dev != NULL) {
@@ -87,13 +98,11 @@ static int have_wrcomb(void)
 		 * chipsets to be tagged
 		 */
 		if (dev->vendor == PCI_VENDOR_ID_SERVERWORKS &&
-		    dev->device == PCI_DEVICE_ID_SERVERWORKS_LE) {
-			pci_read_config_byte(dev, PCI_CLASS_REVISION, &rev);
-			if (rev <= 5) {
-				pr_info("mtrr: Serverworks LE rev < 6 detected. Write-combining disabled.\n");
-				pci_dev_put(dev);
-				return 0;
-			}
+		    dev->device == PCI_DEVICE_ID_SERVERWORKS_LE &&
+		    dev->revision <= 5) {
+			pr_info("mtrr: Serverworks LE rev < 6 detected. Write-combining disabled.\n");
+			pci_dev_put(dev);
+			return 0;
 		}
 		/*
 		 * Intel 450NX errata # 23. Non ascending cacheline evictions to
@@ -135,8 +144,6 @@ static void __init init_table(void)
 }
 
 struct set_mtrr_data {
-	atomic_t	count;
-	atomic_t	gate;
 	unsigned long	smp_base;
 	unsigned long	smp_size;
 	unsigned int	smp_reg;
@@ -144,40 +151,36 @@ struct set_mtrr_data {
 };
 
 /**
- * ipi_handler - Synchronisation handler. Executed by "other" CPUs.
+ * mtrr_rendezvous_handler - Work done in the synchronization handler. Executed
+ * by all the CPUs.
+ * @info: pointer to mtrr configuration data
  *
  * Returns nothing.
  */
-static void ipi_handler(void *info)
+static int mtrr_rendezvous_handler(void *info)
 {
-#ifdef CONFIG_SMP
 	struct set_mtrr_data *data = info;
-	unsigned long flags;
 
-	local_irq_save(flags);
-
-	atomic_dec(&data->count);
-	while (!atomic_read(&data->gate))
-		cpu_relax();
-
-	/*  The master has cleared me to execute  */
+	/*
+	 * We use this same function to initialize the mtrrs during boot,
+	 * resume, runtime cpu online and on an explicit request to set a
+	 * specific MTRR.
+	 *
+	 * During boot or suspend, the state of the boot cpu's mtrrs has been
+	 * saved, and we want to replicate that across all the cpus that come
+	 * online (either at the end of boot or resume or during a runtime cpu
+	 * online). If we're doing that, @reg is set to something special and on
+	 * all the cpu's we do mtrr_if->set_all() (On the logical cpu that
+	 * started the boot/resume sequence, this might be a duplicate
+	 * set_all()).
+	 */
 	if (data->smp_reg != ~0U) {
 		mtrr_if->set(data->smp_reg, data->smp_base,
 			     data->smp_size, data->smp_type);
-	} else if (mtrr_aps_delayed_init) {
-		/*
-		 * Initialize the MTRRs inaddition to the synchronisation.
-		 */
+	} else if (mtrr_aps_delayed_init || !cpu_online(smp_processor_id())) {
 		mtrr_if->set_all();
 	}
-
-	atomic_dec(&data->count);
-	while (atomic_read(&data->gate))
-		cpu_relax();
-
-	atomic_dec(&data->count);
-	local_irq_restore(flags);
-#endif
+	return 0;
 }
 
 static inline int types_compatible(mtrr_type type1, mtrr_type type2)
@@ -197,7 +200,7 @@ static inline int types_compatible(mtrr_type type1, mtrr_type type2)
  *
  * This is kinda tricky, but fortunately, Intel spelled it out for us cleanly:
  *
- * 1. Send IPI to do the following:
+ * 1. Queue work to do the following on all processors:
  * 2. Disable Interrupts
  * 3. Wait for all procs to do so
  * 4. Enter no-fill cache mode
@@ -213,17 +216,11 @@ static inline int types_compatible(mtrr_type type1, mtrr_type type2)
  * 14. Wait for buddies to catch up
  * 15. Enable interrupts.
  *
- * What does that mean for us? Well, first we set data.count to the number
- * of CPUs. As each CPU disables interrupts, it'll decrement it once. We wait
- * until it hits 0 and proceed. We set the data.gate flag and reset data.count.
- * Meanwhile, they are waiting for that flag to be set. Once it's set, each
- * CPU goes through the transition of updating MTRRs.
- * The CPU vendors may each do it differently,
- * so we call mtrr_if->set() callback and let them take care of it.
- * When they're done, they again decrement data->count and wait for data.gate
- * to be reset.
- * When we finish, we wait for data.count to hit 0 and toggle the data.gate flag
- * Everyone then enables interrupts and we all continue on.
+ * What does that mean for us? Well, stop_machine() will ensure that
+ * the rendezvous handler is started on each CPU. And in lockstep they
+ * do the state transition of disabling interrupts, updating MTRR's
+ * (the CPU vendors may each do it differently, so we call mtrr_if->set()
+ * callback and let them take care of it.) and enabling interrupts.
  *
  * Note that the mechanism is the same for UP systems, too; all the SMP stuff
  * becomes nops.
@@ -231,63 +228,26 @@ static inline int types_compatible(mtrr_type type1, mtrr_type type2)
 static void
 set_mtrr(unsigned int reg, unsigned long base, unsigned long size, mtrr_type type)
 {
-	struct set_mtrr_data data;
-	unsigned long flags;
+	struct set_mtrr_data data = { .smp_reg = reg,
+				      .smp_base = base,
+				      .smp_size = size,
+				      .smp_type = type
+				    };
 
-	data.smp_reg = reg;
-	data.smp_base = base;
-	data.smp_size = size;
-	data.smp_type = type;
-	atomic_set(&data.count, num_booting_cpus() - 1);
+	stop_machine(mtrr_rendezvous_handler, &data, cpu_online_mask);
+}
 
-	/* Make sure data.count is visible before unleashing other CPUs */
-	smp_wmb();
-	atomic_set(&data.gate, 0);
+static void set_mtrr_from_inactive_cpu(unsigned int reg, unsigned long base,
+				      unsigned long size, mtrr_type type)
+{
+	struct set_mtrr_data data = { .smp_reg = reg,
+				      .smp_base = base,
+				      .smp_size = size,
+				      .smp_type = type
+				    };
 
-	/* Start the ball rolling on other CPUs */
-	if (smp_call_function(ipi_handler, &data, 0) != 0)
-		panic("mtrr: timed out waiting for other CPUs\n");
-
-	local_irq_save(flags);
-
-	while (atomic_read(&data.count))
-		cpu_relax();
-
-	/* Ok, reset count and toggle gate */
-	atomic_set(&data.count, num_booting_cpus() - 1);
-	smp_wmb();
-	atomic_set(&data.gate, 1);
-
-	/* Do our MTRR business */
-
-	/*
-	 * HACK!
-	 * We use this same function to initialize the mtrrs on boot.
-	 * The state of the boot cpu's mtrrs has been saved, and we want
-	 * to replicate across all the APs.
-	 * If we're doing that @reg is set to something special...
-	 */
-	if (reg != ~0U)
-		mtrr_if->set(reg, base, size, type);
-	else if (!mtrr_aps_delayed_init)
-		mtrr_if->set_all();
-
-	/* Wait for the others */
-	while (atomic_read(&data.count))
-		cpu_relax();
-
-	atomic_set(&data.count, num_booting_cpus() - 1);
-	smp_wmb();
-	atomic_set(&data.gate, 0);
-
-	/*
-	 * Wait here for everyone to have seen the gate change
-	 * So we're the last ones to touch 'data'
-	 */
-	while (atomic_read(&data.count))
-		cpu_relax();
-
-	local_irq_restore(flags);
+	stop_machine_from_inactive_cpu(mtrr_rendezvous_handler, &data,
+				       cpu_callout_mask);
 }
 
 /**
@@ -332,7 +292,7 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 	int i, replace, error;
 	mtrr_type ltype;
 
-	if (!mtrr_if)
+	if (!mtrr_enabled())
 		return -ENXIO;
 
 	error = mtrr_if->validate_add_page(base, size, type);
@@ -355,7 +315,8 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 		return -EINVAL;
 	}
 
-	if (base & size_or_mask || size & size_or_mask) {
+	if ((base | (base + size - 1)) >>
+	    (boot_cpu_data.x86_phys_bits - PAGE_SHIFT)) {
 		pr_warning("mtrr: base or size exceeds the MTRR width\n");
 		return -EINVAL;
 	}
@@ -480,12 +441,13 @@ static int mtrr_check(unsigned long base, unsigned long size)
 int mtrr_add(unsigned long base, unsigned long size, unsigned int type,
 	     bool increment)
 {
+	if (!mtrr_enabled())
+		return -ENODEV;
 	if (mtrr_check(base, size))
 		return -EINVAL;
 	return mtrr_add_page(base >> PAGE_SHIFT, size >> PAGE_SHIFT, type,
 			     increment);
 }
-EXPORT_SYMBOL(mtrr_add);
 
 /**
  * mtrr_del_page - delete a memory type region
@@ -508,8 +470,8 @@ int mtrr_del_page(int reg, unsigned long base, unsigned long size)
 	unsigned long lbase, lsize;
 	int error = -EINVAL;
 
-	if (!mtrr_if)
-		return -ENXIO;
+	if (!mtrr_enabled())
+		return -ENODEV;
 
 	max = num_var_ranges;
 	/* No CPU hotplug when we change MTRR entries */
@@ -568,11 +530,82 @@ int mtrr_del_page(int reg, unsigned long base, unsigned long size)
  */
 int mtrr_del(int reg, unsigned long base, unsigned long size)
 {
+	if (!mtrr_enabled())
+		return -ENODEV;
 	if (mtrr_check(base, size))
 		return -EINVAL;
 	return mtrr_del_page(reg, base >> PAGE_SHIFT, size >> PAGE_SHIFT);
 }
-EXPORT_SYMBOL(mtrr_del);
+
+/**
+ * arch_phys_wc_add - add a WC MTRR and handle errors if PAT is unavailable
+ * @base: Physical base address
+ * @size: Size of region
+ *
+ * If PAT is available, this does nothing.  If PAT is unavailable, it
+ * attempts to add a WC MTRR covering size bytes starting at base and
+ * logs an error if this fails.
+ *
+ * The called should provide a power of two size on an equivalent
+ * power of two boundary.
+ *
+ * Drivers must store the return value to pass to mtrr_del_wc_if_needed,
+ * but drivers should not try to interpret that return value.
+ */
+int arch_phys_wc_add(unsigned long base, unsigned long size)
+{
+	int ret;
+
+	if (pat_enabled() || !mtrr_enabled())
+		return 0;  /* Success!  (We don't need to do anything.) */
+
+	ret = mtrr_add(base, size, MTRR_TYPE_WRCOMB, true);
+	if (ret < 0) {
+		pr_warn("Failed to add WC MTRR for [%p-%p]; performance may suffer.",
+			(void *)base, (void *)(base + size - 1));
+		return ret;
+	}
+	return ret + MTRR_TO_PHYS_WC_OFFSET;
+}
+EXPORT_SYMBOL(arch_phys_wc_add);
+
+/*
+ * arch_phys_wc_del - undoes arch_phys_wc_add
+ * @handle: Return value from arch_phys_wc_add
+ *
+ * This cleans up after mtrr_add_wc_if_needed.
+ *
+ * The API guarantees that mtrr_del_wc_if_needed(error code) and
+ * mtrr_del_wc_if_needed(0) do nothing.
+ */
+void arch_phys_wc_del(int handle)
+{
+	if (handle >= 1) {
+		WARN_ON(handle < MTRR_TO_PHYS_WC_OFFSET);
+		mtrr_del(handle - MTRR_TO_PHYS_WC_OFFSET, 0, 0);
+	}
+}
+EXPORT_SYMBOL(arch_phys_wc_del);
+
+/*
+ * arch_phys_wc_index - translates arch_phys_wc_add's return value
+ * @handle: Return value from arch_phys_wc_add
+ *
+ * This will turn the return value from arch_phys_wc_add into an mtrr
+ * index suitable for debugging.
+ *
+ * Note: There is no legitimate use for this function, except possibly
+ * in printk line.  Alas there is an illegitimate use in some ancient
+ * drm ioctls.
+ */
+int arch_phys_wc_index(int handle)
+{
+	if (handle < MTRR_TO_PHYS_WC_OFFSET)
+		return -1;
+	else
+		return handle - MTRR_TO_PHYS_WC_OFFSET;
+}
+EXPORT_SYMBOL_GPL(arch_phys_wc_index);
 
 /*
  * HACK ALERT!
@@ -599,7 +632,7 @@ struct mtrr_value {
 
 static struct mtrr_value mtrr_value[MTRR_MAX_VAR_RANGES];
 
-static int mtrr_save(struct sys_device *sysdev, pm_message_t state)
+static int mtrr_save(void)
 {
 	int i;
 
@@ -611,7 +644,7 @@ static int mtrr_save(struct sys_device *sysdev, pm_message_t state)
 	return 0;
 }
 
-static int mtrr_restore(struct sys_device *sysdev)
+static void mtrr_restore(void)
 {
 	int i;
 
@@ -622,18 +655,18 @@ static int mtrr_restore(struct sys_device *sysdev)
 				    mtrr_value[i].ltype);
 		}
 	}
-	return 0;
 }
 
 
 
-static struct sysdev_driver mtrr_sysdev_driver = {
+static struct syscore_ops mtrr_syscore_ops = {
 	.suspend	= mtrr_save,
 	.resume		= mtrr_restore,
 };
 
 int __initdata changed_by_mtrr_cleanup;
 
+#define SIZE_OR_MASK_BITS(n)  (~((1ULL << ((n) - PAGE_SHIFT)) - 1))
 /**
  * mtrr_bp_init - initialize mtrrs on the boot CPU
  *
@@ -651,13 +684,13 @@ void __init mtrr_bp_init(void)
 
 	if (cpu_has_mtrr) {
 		mtrr_if = &generic_mtrr_ops;
-		size_or_mask = 0xff000000;			/* 36 bits */
+		size_or_mask = SIZE_OR_MASK_BITS(36);
 		size_and_mask = 0x00f00000;
 		phys_addr = 36;
 
 		/*
 		 * This is an AMD specific MSR, but we assume(hope?) that
-		 * Intel will implement it to when they extend the address
+		 * Intel will implement it too when they extend the address
 		 * bus of the Xeon.
 		 */
 		if (cpuid_eax(0x80000000) >= 0x80000008) {
@@ -670,7 +703,7 @@ void __init mtrr_bp_init(void)
 			     boot_cpu_data.x86_mask == 0x4))
 				phys_addr = 36;
 
-			size_or_mask = ~((1ULL << (phys_addr - PAGE_SHIFT)) - 1);
+			size_or_mask = SIZE_OR_MASK_BITS(phys_addr);
 			size_and_mask = ~size_or_mask & 0xfffff00000ULL;
 		} else if (boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR &&
 			   boot_cpu_data.x86 == 6) {
@@ -678,31 +711,31 @@ void __init mtrr_bp_init(void)
 			 * VIA C* family have Intel style MTRRs,
 			 * but don't support PAE
 			 */
-			size_or_mask = 0xfff00000;		/* 32 bits */
+			size_or_mask = SIZE_OR_MASK_BITS(32);
 			size_and_mask = 0;
 			phys_addr = 32;
 		}
 	} else {
 		switch (boot_cpu_data.x86_vendor) {
 		case X86_VENDOR_AMD:
-			if (cpu_has_k6_mtrr) {
+			if (cpu_feature_enabled(X86_FEATURE_K6_MTRR)) {
 				/* Pre-Athlon (K6) AMD CPU MTRRs */
 				mtrr_if = mtrr_ops[X86_VENDOR_AMD];
-				size_or_mask = 0xfff00000;	/* 32 bits */
+				size_or_mask = SIZE_OR_MASK_BITS(32);
 				size_and_mask = 0;
 			}
 			break;
 		case X86_VENDOR_CENTAUR:
-			if (cpu_has_centaur_mcr) {
+			if (cpu_feature_enabled(X86_FEATURE_CENTAUR_MCR)) {
 				mtrr_if = mtrr_ops[X86_VENDOR_CENTAUR];
-				size_or_mask = 0xfff00000;	/* 32 bits */
+				size_or_mask = SIZE_OR_MASK_BITS(32);
 				size_and_mask = 0;
 			}
 			break;
 		case X86_VENDOR_CYRIX:
-			if (cpu_has_cyrix_arr) {
+			if (cpu_feature_enabled(X86_FEATURE_CYRIX_ARR)) {
 				mtrr_if = mtrr_ops[X86_VENDOR_CYRIX];
-				size_or_mask = 0xfff00000;	/* 32 bits */
+				size_or_mask = SIZE_OR_MASK_BITS(32);
 				size_and_mask = 0;
 			}
 			break;
@@ -712,10 +745,15 @@ void __init mtrr_bp_init(void)
 	}
 
 	if (mtrr_if) {
+		__mtrr_enabled = true;
 		set_num_var_ranges();
 		init_table();
 		if (use_intel()) {
-			get_mtrr_state();
+			/* BIOS may override */
+			__mtrr_enabled = get_mtrr_state();
+
+			if (mtrr_enabled())
+				mtrr_bp_pat_init();
 
 			if (mtrr_cleanup(phys_addr)) {
 				changed_by_mtrr_cleanup = 1;
@@ -723,10 +761,24 @@ void __init mtrr_bp_init(void)
 			}
 		}
 	}
+
+	if (!mtrr_enabled()) {
+		pr_info("MTRR: Disabled\n");
+
+		/*
+		 * PAT initialization relies on MTRR's rendezvous handler.
+		 * Skip PAT init until the handler can initialize both
+		 * features independently.
+		 */
+		pat_disable("MTRRs disabled, skipping PAT initialization too.");
+	}
 }
 
 void mtrr_ap_init(void)
 {
+	if (!mtrr_enabled())
+		return;
+
 	if (!use_intel() || mtrr_aps_delayed_init)
 		return;
 	/*
@@ -742,19 +794,29 @@ void mtrr_ap_init(void)
 	 *   2. cpu hotadd time. We let mtrr_add/del_page hold cpuhotplug
 	 *      lock to prevent mtrr entry changes
 	 */
-	set_mtrr(~0U, 0, 0, 0);
+	set_mtrr_from_inactive_cpu(~0U, 0, 0, 0);
 }
 
 /**
- * Save current fixed-range MTRR state of the BSP
+ * Save current fixed-range MTRR state of the first cpu in cpu_online_mask.
  */
 void mtrr_save_state(void)
 {
-	smp_call_function_single(0, mtrr_save_fixed_ranges, NULL, 1);
+	int first_cpu;
+
+	if (!mtrr_enabled())
+		return;
+
+	get_online_cpus();
+	first_cpu = cpumask_first(cpu_online_mask);
+	smp_call_function_single(first_cpu, mtrr_save_fixed_ranges, NULL, 1);
+	put_online_cpus();
 }
 
 void set_mtrr_aps_delayed_init(void)
 {
+	if (!mtrr_enabled())
+		return;
 	if (!use_intel())
 		return;
 
@@ -762,11 +824,19 @@ void set_mtrr_aps_delayed_init(void)
 }
 
 /*
- * MTRR initialization for all AP's
+ * Delayed MTRR initialization for all AP's
  */
 void mtrr_aps_init(void)
 {
-	if (!use_intel())
+	if (!use_intel() || !mtrr_enabled())
+		return;
+
+	/*
+	 * Check if someone has requested the delay of AP MTRR initialization,
+	 * by doing set_mtrr_aps_delayed_init(), prior to this point. If not,
+	 * then we are done.
+	 */
+	if (!mtrr_aps_delayed_init)
 		return;
 
 	set_mtrr(~0U, 0, 0, 0);
@@ -775,7 +845,7 @@ void mtrr_aps_init(void)
 
 void mtrr_bp_restore(void)
 {
-	if (!use_intel())
+	if (!use_intel() || !mtrr_enabled())
 		return;
 
 	mtrr_if->set_all();
@@ -783,7 +853,7 @@ void mtrr_bp_restore(void)
 
 static int __init mtrr_init_finialize(void)
 {
-	if (!mtrr_if)
+	if (!mtrr_enabled())
 		return 0;
 
 	if (use_intel()) {
@@ -800,7 +870,7 @@ static int __init mtrr_init_finialize(void)
 	 * TBD: is there any system with such CPU which supports
 	 * suspend/resume? If no, we should remove the code.
 	 */
-	sysdev_driver_register(&cpu_sysdev_class, &mtrr_sysdev_driver);
+	register_syscore_ops(&mtrr_syscore_ops);
 
 	return 0;
 }

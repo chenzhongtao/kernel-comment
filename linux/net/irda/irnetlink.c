@@ -15,6 +15,7 @@
 
 #include <linux/socket.h>
 #include <linux/irda.h>
+#include <linux/gfp.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
 #include <net/irda/irda.h>
@@ -40,7 +41,7 @@ static struct net_device * ifname_to_netdev(struct net *net, struct genl_info *i
 
 	ifname = nla_data(info->attrs[IRDA_NL_ATTR_IFNAME]);
 
-	IRDA_DEBUG(5, "%s(): Looking for %s\n", __func__, ifname);
+	pr_debug("%s(): Looking for %s\n", __func__, ifname);
 
 	return dev_get_by_name(net, ifname);
 }
@@ -56,7 +57,7 @@ static int irda_nl_set_mode(struct sk_buff *skb, struct genl_info *info)
 
 	mode = nla_get_u32(info->attrs[IRDA_NL_ATTR_MODE]);
 
-	IRDA_DEBUG(5, "%s(): Switching to mode: %d\n", __func__, mode);
+	pr_debug("%s(): Switching to mode: %d\n", __func__, mode);
 
 	dev = ifname_to_netdev(&init_net, info);
 	if (!dev)
@@ -99,7 +100,7 @@ static int irda_nl_get_mode(struct sk_buff *skb, struct genl_info *info)
 		goto err_out;
 	}
 
-	hdr = genlmsg_put(msg, info->snd_pid, info->snd_seq,
+	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
 			  &irda_nl_family, 0,  IRDA_NL_CMD_GET_MODE);
 	if (hdr == NULL) {
 		ret = -EMSGSIZE;
@@ -124,13 +125,13 @@ static int irda_nl_get_mode(struct sk_buff *skb, struct genl_info *info)
 	return ret;
 }
 
-static struct nla_policy irda_nl_policy[IRDA_NL_ATTR_MAX + 1] = {
+static const struct nla_policy irda_nl_policy[IRDA_NL_ATTR_MAX + 1] = {
 	[IRDA_NL_ATTR_IFNAME] = { .type = NLA_NUL_STRING,
 				  .len = IFNAMSIZ-1 },
 	[IRDA_NL_ATTR_MODE] = { .type = NLA_U32 },
 };
 
-static struct genl_ops irda_nl_ops[] = {
+static const struct genl_ops irda_nl_ops[] = {
 	{
 		.cmd = IRDA_NL_CMD_SET_MODE,
 		.doit = irda_nl_set_mode,
@@ -148,8 +149,7 @@ static struct genl_ops irda_nl_ops[] = {
 
 int irda_nl_register(void)
 {
-	return genl_register_family_with_ops(&irda_nl_family,
-		irda_nl_ops, ARRAY_SIZE(irda_nl_ops));
+	return genl_register_family_with_ops(&irda_nl_family, irda_nl_ops);
 }
 
 void irda_nl_unregister(void)

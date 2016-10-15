@@ -13,6 +13,7 @@
 #include <net/datalink.h>
 #include <linux/ipx.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 
 struct ipx_address {
 	__be32  net;
@@ -26,9 +27,9 @@ struct ipx_address {
 #define IPX_MAX_PPROP_HOPS 8
 
 struct ipxhdr {
-	__be16			ipx_checksum __attribute__ ((packed));
+	__be16			ipx_checksum __packed;
 #define IPX_NO_CHECKSUM	cpu_to_be16(0xFFFF)
-	__be16			ipx_pktsize __attribute__ ((packed));
+	__be16			ipx_pktsize __packed;
 	__u8			ipx_tctrl;
 	__u8			ipx_type;
 #define IPX_TYPE_UNKNOWN	0x00
@@ -37,9 +38,12 @@ struct ipxhdr {
 #define IPX_TYPE_SPX		0x05	/* SPX protocol */
 #define IPX_TYPE_NCP		0x11	/* $lots for docs on this (SPIT) */
 #define IPX_TYPE_PPROP		0x14	/* complicated flood fill brdcast */
-	struct ipx_address	ipx_dest __attribute__ ((packed));
-	struct ipx_address	ipx_source __attribute__ ((packed));
+	struct ipx_address	ipx_dest __packed;
+	struct ipx_address	ipx_source __packed;
 };
+
+/* From af_ipx.c */
+extern int sysctl_ipx_pprop_broadcasting;
 
 static __inline__ struct ipxhdr *ipx_hdr(struct sk_buff *skb)
 {
@@ -79,7 +83,6 @@ struct ipx_route {
 	atomic_t		refcnt;
 };
 
-#ifdef __KERNEL__
 struct ipx_cb {
 	u8	ipx_tctrl;
 	__be32	ipx_dest_net;
@@ -115,7 +118,6 @@ static inline struct ipx_sock *ipx_sk(struct sock *sk)
 }
 
 #define IPX_SKB_CB(__skb) ((struct ipx_cb *)&((__skb)->cb[0]))
-#endif
 
 #define IPX_MIN_EPHEMERAL_SOCKET	0x4000
 #define IPX_MAX_EPHEMERAL_SOCKET	0x7fff
@@ -124,23 +126,34 @@ extern struct list_head ipx_routes;
 extern rwlock_t ipx_routes_lock;
 
 extern struct list_head ipx_interfaces;
-extern struct ipx_interface *ipx_interfaces_head(void);
+struct ipx_interface *ipx_interfaces_head(void);
 extern spinlock_t ipx_interfaces_lock;
 
 extern struct ipx_interface *ipx_primary_net;
 
-extern int ipx_proc_init(void);
-extern void ipx_proc_exit(void);
+int ipx_proc_init(void);
+void ipx_proc_exit(void);
 
-extern const char *ipx_frame_name(__be16);
-extern const char *ipx_device_name(struct ipx_interface *intrfc);
+const char *ipx_frame_name(__be16);
+const char *ipx_device_name(struct ipx_interface *intrfc);
 
 static __inline__ void ipxitf_hold(struct ipx_interface *intrfc)
 {
 	atomic_inc(&intrfc->refcnt);
 }
 
-extern void ipxitf_down(struct ipx_interface *intrfc);
+void ipxitf_down(struct ipx_interface *intrfc);
+struct ipx_interface *ipxitf_find_using_net(__be32 net);
+int ipxitf_send(struct ipx_interface *intrfc, struct sk_buff *skb, char *node);
+__be16 ipx_cksum(struct ipxhdr *packet, int length);
+int ipxrtr_add_route(__be32 network, struct ipx_interface *intrfc,
+		     unsigned char *node);
+void ipxrtr_del_routes(struct ipx_interface *intrfc);
+int ipxrtr_route_packet(struct sock *sk, struct sockaddr_ipx *usipx,
+			struct msghdr *msg, size_t len, int noblock);
+int ipxrtr_route_skb(struct sk_buff *skb);
+struct ipx_route *ipxrtr_lookup(__be32 net);
+int ipxrtr_ioctl(unsigned int cmd, void __user *arg);
 
 static __inline__ void ipxitf_put(struct ipx_interface *intrfc)
 {

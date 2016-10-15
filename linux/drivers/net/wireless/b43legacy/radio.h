@@ -4,7 +4,7 @@
 
   Copyright (c) 2005 Martin Langer <martin-langer@gmx.de>,
 		     Stefano Brivio <stefano.brivio@polimi.it>
-		     Michael Buesch <mbuesch@freenet.de>
+		     Michael Buesch <m@bues.ch>
 		     Danny van Dyk <kugelfang@gentoo.org>
 		     Andreas Jaggi <andreas.jaggi@waterwave.ch>
 
@@ -92,7 +92,6 @@ void b43legacy_nrssi_hw_write(struct b43legacy_wldev *dev, u16 offset, s16 val);
 void b43legacy_nrssi_hw_update(struct b43legacy_wldev *dev, u16 val);
 void b43legacy_nrssi_mem_update(struct b43legacy_wldev *dev);
 
-void b43legacy_radio_set_tx_iq(struct b43legacy_wldev *dev);
 u16 b43legacy_radio_calibrationvalue(struct b43legacy_wldev *dev);
 
 #endif /* B43legacy_RADIO_H_ */

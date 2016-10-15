@@ -28,7 +28,7 @@
 #ifndef NSC_IRCC_H
 #define NSC_IRCC_H
 
-#include <linux/time.h>
+#include <linux/ktime.h>
 
 #include <linux/spinlock.h>
 #include <linux/pm.h>
@@ -135,7 +135,7 @@
 #define LSR_TXRDY       0x20 /* Transmitter ready */
 #define LSR_TXEMP       0x40 /* Transmitter empty */
 
-#define ASCR            0x07 /* Auxillary Status and Control Register */
+#define ASCR            0x07 /* Auxiliary Status and Control Register */
 #define ASCR_RXF_TOUT   0x01 /* Rx FIFO timeout */
 #define ASCR_FEND_INF   0x02 /* Frame end bytes in rx FIFO */
 #define ASCR_S_EOT      0x04 /* Set end of transmission */
@@ -263,8 +263,7 @@ struct nsc_ircc_cb {
 
 	__u8 ier;                  /* Interrupt enable register */
 
-	struct timeval stamp;
-	struct timeval now;
+	ktime_t stamp;
 
 	spinlock_t lock;           /* For serializing operations */
 	

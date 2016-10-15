@@ -30,70 +30,16 @@
 #ifndef __USBPIPE_H__
 #define __USBPIPE_H__
 
-#include "ttype.h"
 #include "device.h"
 
-/*---------------------  Export Definitions -------------------------*/
+int vnt_control_out(struct vnt_private *, u8, u16, u16, u16, u8 *);
+int vnt_control_in(struct vnt_private *, u8, u16, u16, u16,  u8 *);
 
-/*---------------------  Export Classes  ----------------------------*/
+void vnt_control_out_u8(struct vnt_private *, u8, u8, u8);
+void vnt_control_in_u8(struct vnt_private *, u8, u8, u8 *);
 
-/*---------------------  Export Variables  --------------------------*/
+int vnt_start_interrupt_urb(struct vnt_private *);
+int vnt_submit_rx_urb(struct vnt_private *, struct vnt_rcb *);
+int vnt_tx_context(struct vnt_private *, struct vnt_usb_send_context *);
 
-/*---------------------  Export Functions  --------------------------*/
-
-NTSTATUS
-PIPEnsControlOut(
-    IN PSDevice     pDevice,
-    IN BYTE         byRequest,
-    IN WORD         wValue,
-    IN WORD         wIndex,
-    IN WORD         wLength,
-    IN PBYTE        pbyBuffer
-    );
-
-
-
-NTSTATUS
-PIPEnsControlOutAsyn(
-    IN PSDevice     pDevice,
-    IN BYTE         byRequest,
-    IN WORD         wValue,
-    IN WORD         wIndex,
-    IN WORD         wLength,
-    IN PBYTE        pbyBuffer
-    );
-
-NTSTATUS
-PIPEnsControlIn(
-    IN PSDevice     pDevice,
-    IN BYTE         byRequest,
-    IN WORD         wValue,
-    IN WORD         wIndex,
-    IN WORD         wLength,
-    IN OUT  PBYTE   pbyBuffer
-    );
-
-
-
-
-NTSTATUS
-PIPEnsInterruptRead(
-    IN PSDevice pDevice
-    );
-
-NTSTATUS
-PIPEnsBulkInUsbRead(
-    IN PSDevice pDevice,
-    IN PRCB     pRCB
-    );
-
-NTSTATUS
-PIPEnsSendBulkOut(
-    IN  PSDevice pDevice,
-    IN  PUSB_SEND_CONTEXT pContext
-    );
-
-#endif // __USBPIPE_H__
-
-
-
+#endif /* __USBPIPE_H__ */

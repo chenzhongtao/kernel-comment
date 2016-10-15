@@ -29,7 +29,6 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 #include <linux/serio.h>
@@ -115,6 +114,7 @@ struct iforce {
 #endif
 #ifdef CONFIG_JOYSTICK_IFORCE_USB
 	struct usb_device *usbdev;	/* USB transfer */
+	struct usb_interface *intf;
 	struct urb *irq, *out, *ctrl;
 	struct usb_ctrlrequest cr;
 #endif
@@ -150,11 +150,9 @@ void iforce_serial_xmit(struct iforce *iforce);
 
 /* iforce-usb.c */
 void iforce_usb_xmit(struct iforce *iforce);
-void iforce_usb_delete(struct iforce *iforce);
 
 /* iforce-main.c */
 int iforce_init_device(struct iforce *iforce);
-void iforce_delete_device(struct iforce *iforce);
 
 /* iforce-packets.c */
 int iforce_control_playback(struct iforce*, u16 id, unsigned int);

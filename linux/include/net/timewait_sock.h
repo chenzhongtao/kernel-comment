@@ -12,6 +12,7 @@
 #define _TIMEWAIT_SOCK_H
 
 #include <linux/slab.h>
+#include <linux/bug.h>
 #include <net/sock.h>
 
 struct timewait_sock_ops {
@@ -32,9 +33,6 @@ static inline int twsk_unique(struct sock *sk, struct sock *sktw, void *twp)
 
 static inline void twsk_destructor(struct sock *sk)
 {
-	BUG_ON(sk == NULL);
-	BUG_ON(sk->sk_prot == NULL);
-	BUG_ON(sk->sk_prot->twsk_prot == NULL);
 	if (sk->sk_prot->twsk_prot->twsk_destructor != NULL)
 		sk->sk_prot->twsk_prot->twsk_destructor(sk);
 }

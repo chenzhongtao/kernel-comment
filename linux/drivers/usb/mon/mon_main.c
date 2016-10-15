@@ -9,11 +9,13 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/usb.h>
+#include <linux/usb/hcd.h>
+#include <linux/slab.h>
 #include <linux/notifier.h>
 #include <linux/mutex.h>
 
 #include "usb_mon.h"
-#include "../core/hcd.h"
+
 
 static void mon_stop(struct mon_bus *mbus);
 static void mon_dissolve(struct mon_bus *mbus, struct usb_bus *ubus);
@@ -88,14 +90,14 @@ static void mon_bus_submit(struct mon_bus *mbus, struct urb *urb)
 		r->rnf_submit(r->r_data, urb);
 	}
 	spin_unlock_irqrestore(&mbus->lock, flags);
-	return;
 }
 
 static void mon_submit(struct usb_bus *ubus, struct urb *urb)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = ubus->mon_bus) != NULL)
+	mbus = ubus->mon_bus;
+	if (mbus != NULL)
 		mon_bus_submit(mbus, urb);
 	mon_bus_submit(&mon_bus0, urb);
 }
@@ -115,14 +117,14 @@ static void mon_bus_submit_error(struct mon_bus *mbus, struct urb *urb, int erro
 		r->rnf_error(r->r_data, urb, error);
 	}
 	spin_unlock_irqrestore(&mbus->lock, flags);
-	return;
 }
 
 static void mon_submit_error(struct usb_bus *ubus, struct urb *urb, int error)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = ubus->mon_bus) != NULL)
+	mbus = ubus->mon_bus;
+	if (mbus != NULL)
 		mon_bus_submit_error(mbus, urb, error);
 	mon_bus_submit_error(&mon_bus0, urb, error);
 }
@@ -148,7 +150,8 @@ static void mon_complete(struct usb_bus *ubus, struct urb *urb, int status)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = ubus->mon_bus) != NULL)
+	mbus = ubus->mon_bus;
+	if (mbus != NULL)
 		mon_bus_complete(mbus, urb, status);
 	mon_bus_complete(&mon_bus0, urb, status);
 }
@@ -280,7 +283,8 @@ static void mon_bus_init(struct usb_bus *ubus)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = kzalloc(sizeof(struct mon_bus), GFP_KERNEL)) == NULL)
+	mbus = kzalloc(sizeof(struct mon_bus), GFP_KERNEL);
+	if (mbus == NULL)
 		goto err_alloc;
 	kref_init(&mbus->ref);
 	spin_lock_init(&mbus->lock);

@@ -32,6 +32,7 @@
 #include <linux/types.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
+#include <linux/if_ether.h>
 
 #include <net/irda/irttp.h>
 
@@ -161,7 +162,7 @@ struct irlan_provider_cb {
 	int access_type;     /* Access type */
 	__u16 send_arb_val;
 
-	__u8 mac_address[6]; /* Generated MAC address for peer device */
+	__u8 mac_address[ETH_ALEN]; /* Generated MAC address for peer device */
 };
 
 /*
@@ -171,7 +172,6 @@ struct irlan_cb {
 	int    magic;
 	struct list_head  dev_list;
 	struct net_device *dev;        /* Ethernet device structure*/
-	struct net_device_stats stats;
 
 	__u32 saddr;               /* Source device address */
 	__u32 daddr;               /* Destination device address */

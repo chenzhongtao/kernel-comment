@@ -17,7 +17,6 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/unistd.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -112,7 +111,7 @@ static int qs6612_config_intr(struct phy_device *phydev)
 
 }
 
-static struct phy_driver qs6612_driver = {
+static struct phy_driver qs6612_driver[] = { {
 	.phy_id		= 0x00181440,
 	.name		= "QS6612",
 	.phy_id_mask	= 0xfffffff0,
@@ -124,17 +123,13 @@ static struct phy_driver qs6612_driver = {
 	.ack_interrupt	= qs6612_ack_interrupt,
 	.config_intr	= qs6612_config_intr,
 	.driver 	= { .owner = THIS_MODULE,},
+} };
+
+module_phy_driver(qs6612_driver);
+
+static struct mdio_device_id __maybe_unused qs6612_tbl[] = {
+	{ 0x00181440, 0xfffffff0 },
+	{ }
 };
 
-static int __init qs6612_init(void)
-{
-	return phy_driver_register(&qs6612_driver);
-}
-
-static void __exit qs6612_exit(void)
-{
-	phy_driver_unregister(&qs6612_driver);
-}
-
-module_init(qs6612_init);
-module_exit(qs6612_exit);
+MODULE_DEVICE_TABLE(mdio, qs6612_tbl);

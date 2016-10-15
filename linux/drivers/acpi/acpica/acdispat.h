@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2015, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,7 +48,7 @@
 #define NAMEOF_ARG_NTE      "__A0"
 
 /*
- * dsopcode - support for late evaluation
+ * dsargs - execution of dynamic arguments for static objects
  */
 acpi_status
 acpi_ds_get_buffer_field_arguments(union acpi_operand_object *obj_desc);
@@ -62,6 +62,20 @@ acpi_status acpi_ds_get_buffer_arguments(union acpi_operand_object *obj_desc);
 
 acpi_status acpi_ds_get_package_arguments(union acpi_operand_object *obj_desc);
 
+/*
+ * dscontrol - support for execution control opcodes
+ */
+acpi_status
+acpi_ds_exec_begin_control_op(struct acpi_walk_state *walk_state,
+			      union acpi_parse_object *op);
+
+acpi_status
+acpi_ds_exec_end_control_op(struct acpi_walk_state *walk_state,
+			    union acpi_parse_object *op);
+
+/*
+ * dsopcode - support for late operand evaluation
+ */
 acpi_status
 acpi_ds_eval_buffer_field_operands(struct acpi_walk_state *walk_state,
 				   union acpi_parse_object *op);
@@ -84,17 +98,6 @@ acpi_ds_eval_bank_field_operands(struct acpi_walk_state *walk_state,
 				 union acpi_parse_object *op);
 
 acpi_status acpi_ds_initialize_region(acpi_handle obj_handle);
-
-/*
- * dsctrl - Parser/Interpreter interface, control stack routines
- */
-acpi_status
-acpi_ds_exec_begin_control_op(struct acpi_walk_state *walk_state,
-			      union acpi_parse_object *op);
-
-acpi_status
-acpi_ds_exec_end_control_op(struct acpi_walk_state *walk_state,
-			    union acpi_parse_object *op);
 
 /*
  * dsexec - Parser/Interpreter interface, method execution callbacks
@@ -136,22 +139,26 @@ acpi_ds_init_field_objects(union acpi_parse_object *op,
 			   struct acpi_walk_state *walk_state);
 
 /*
- * dsload - Parser/Interpreter interface, namespace load callbacks
+ * dsload - Parser/Interpreter interface
  */
+acpi_status
+acpi_ds_init_callbacks(struct acpi_walk_state *walk_state, u32 pass_number);
+
+/* dsload - pass 1 namespace load callbacks */
+
 acpi_status
 acpi_ds_load1_begin_op(struct acpi_walk_state *walk_state,
 		       union acpi_parse_object **out_op);
 
 acpi_status acpi_ds_load1_end_op(struct acpi_walk_state *walk_state);
 
+/* dsload - pass 2 namespace load callbacks */
+
 acpi_status
 acpi_ds_load2_begin_op(struct acpi_walk_state *walk_state,
 		       union acpi_parse_object **out_op);
 
 acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state);
-
-acpi_status
-acpi_ds_init_callbacks(struct acpi_walk_state *walk_state, u32 pass_number);
 
 /*
  * dsmthdat - method data (locals/args)
@@ -194,7 +201,9 @@ void acpi_ds_method_data_init(struct acpi_walk_state *walk_state);
 /*
  * dsmethod - Parser/Interpreter interface - control method parsing
  */
-acpi_status acpi_ds_parse_method(struct acpi_namespace_node *node);
+acpi_status
+acpi_ds_auto_serialize_method(struct acpi_namespace_node *node,
+			      union acpi_operand_object *obj_desc);
 
 acpi_status
 acpi_ds_call_control_method(struct acpi_thread_state *thread,
@@ -303,10 +312,13 @@ acpi_ds_obj_stack_push(void *object, struct acpi_walk_state *walk_state);
 acpi_status
 acpi_ds_obj_stack_pop(u32 pop_count, struct acpi_walk_state *walk_state);
 
-struct acpi_walk_state *acpi_ds_create_walk_state(acpi_owner_id owner_id, union acpi_parse_object
-						  *origin, union acpi_operand_object
-						  *mth_desc, struct acpi_thread_state
-						  *thread);
+struct acpi_walk_state * acpi_ds_create_walk_state(acpi_owner_id owner_id,
+						   union acpi_parse_object
+						   *origin,
+						   union acpi_operand_object
+						   *mth_desc,
+						   struct acpi_thread_state
+						   *thread);
 
 acpi_status
 acpi_ds_init_aml_walk(struct acpi_walk_state *walk_state,
@@ -341,5 +353,13 @@ acpi_ds_result_pop(union acpi_operand_object **object,
 acpi_status
 acpi_ds_result_push(union acpi_operand_object *object,
 		    struct acpi_walk_state *walk_state);
+
+/*
+ * dsdebug - parser debugging routines
+ */
+void
+acpi_ds_dump_method_stack(acpi_status status,
+			  struct acpi_walk_state *walk_state,
+			  union acpi_parse_object *op);
 
 #endif				/* _ACDISPAT_H_ */

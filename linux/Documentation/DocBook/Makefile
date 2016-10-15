@@ -6,15 +6,18 @@
 # To add a new book the only step required is to add the book to the
 # list of DOCBOOKS.
 
-DOCBOOKS := z8530book.xml mcabook.xml device-drivers.xml \
+DOCBOOKS := z8530book.xml device-drivers.xml \
 	    kernel-hacking.xml kernel-locking.xml deviceiobook.xml \
-	    procfs-guide.xml writing_usb_driver.xml networking.xml \
+	    writing_usb_driver.xml networking.xml \
 	    kernel-api.xml filesystems.xml lsm.xml usb.xml kgdb.xml \
 	    gadget.xml libata.xml mtdnand.xml librs.xml rapidio.xml \
 	    genericirq.xml s390-drivers.xml uio-howto.xml scsi.xml \
-	    mac80211.xml debugobjects.xml sh.xml regulator.xml \
+	    80211.xml debugobjects.xml sh.xml regulator.xml \
 	    alsa-driver-api.xml writing-an-alsa-driver.xml \
-	    tracepoint.xml media.xml
+	    tracepoint.xml gpu.xml media_api.xml w1.xml \
+	    writing_musb_glue_layer.xml crypto-API.xml iio.xml
+
+include Documentation/DocBook/media/Makefile
 
 ###
 # The build process is as follows (targets):
@@ -32,8 +35,9 @@ PS_METHOD	= $(prefer-db2x)
 
 ###
 # The targets that may be used.
-PHONY += xmldocs sgmldocs psdocs pdfdocs htmldocs mandocs installmandocs cleandocs media
+PHONY += xmldocs sgmldocs psdocs pdfdocs htmldocs mandocs installmandocs cleandocs
 
+targets += $(DOCBOOKS)
 BOOKS := $(addprefix $(obj)/,$(DOCBOOKS))
 xmldocs: $(BOOKS)
 sgmldocs: xmldocs
@@ -45,27 +49,35 @@ PDF := $(patsubst %.xml, %.pdf, $(BOOKS))
 pdfdocs: $(PDF)
 
 HTML := $(sort $(patsubst %.xml, %.html, $(BOOKS)))
-htmldocs: media $(HTML)
+htmldocs: $(HTML)
 	$(call build_main_index)
+	$(call build_images)
+	$(call install_media_images)
 
 MAN := $(patsubst %.xml, %.9, $(BOOKS))
 mandocs: $(MAN)
-
-media:
-	mkdir -p $(srctree)/Documentation/DocBook/media/
-	cp $(srctree)/Documentation/DocBook/dvb/*.png $(srctree)/Documentation/DocBook/v4l/*.gif $(srctree)/Documentation/DocBook/media/
+	find $(obj)/man -name '*.9' | xargs gzip -nf
 
 installmandocs: mandocs
 	mkdir -p /usr/local/man/man9/
-	install Documentation/DocBook/man/*.9.gz /usr/local/man/man9/
+	find $(obj)/man -name '*.9.gz' -printf '%h %f\n' | \
+		sort -k 2 -k 1 | uniq -f 1 | sed -e 's: :/:' | \
+		xargs install -m 644 -t /usr/local/man/man9/
 
 ###
 #External programs used
-KERNELDOC = $(srctree)/scripts/kernel-doc
-DOCPROC   = $(objtree)/scripts/basic/docproc
+KERNELDOCXMLREF = $(srctree)/scripts/kernel-doc-xml-ref
+KERNELDOC       = $(srctree)/scripts/kernel-doc
+DOCPROC         = $(objtree)/scripts/docproc
+CHECK_LC_CTYPE = $(objtree)/scripts/check-lc_ctype
 
-XMLTOFLAGS = -m $(srctree)/Documentation/DocBook/stylesheet.xsl
-#XMLTOFLAGS += --skip-validation
+# Use a fixed encoding - UTF-8 if the C library has support built-in
+# or ASCII if not
+LC_CTYPE := $(call try-run, LC_CTYPE=C.UTF-8 $(CHECK_LC_CTYPE),C.UTF-8,C)
+export LC_CTYPE
+
+XMLTOFLAGS = -m $(srctree)/$(src)/stylesheet.xsl
+XMLTOFLAGS += --skip-validation
 
 ###
 # DOCPROC is used for two purposes:
@@ -86,31 +98,8 @@ define rule_docproc
         ) > $(dir $@).$(notdir $@).cmd
 endef
 
-%.xml: %.tmpl FORCE
+%.xml: %.tmpl $(KERNELDOC) $(DOCPROC) $(KERNELDOCXMLREF) FORCE
 	$(call if_changed_rule,docproc)
-
-###
-#Read in all saved dependency files 
-cmd_files := $(wildcard $(foreach f,$(BOOKS),$(dir $(f)).$(notdir $(f)).cmd))
-
-ifneq ($(cmd_files),)
-  include $(cmd_files)
-endif
-
-###
-# Changes in kernel-doc force a rebuild of all documentation
-$(BOOKS): $(KERNELDOC)
-
-###
-# procfs guide uses a .c file as example code.
-# This requires an explicit dependency
-C-procfs-example = procfs_example.xml
-C-procfs-example2 = $(addprefix $(obj)/,$(C-procfs-example))
-$(obj)/procfs-guide.xml: $(C-procfs-example2)
-
-# List of programs to build
-##oops, this is a kernel module::hostprogs-y := procfs_example
-obj-m += procfs_example.o
 
 # Tell kbuild to always build the programs
 always := $(hostprogs-y)
@@ -149,18 +138,31 @@ quiet_cmd_db2pdf = PDF     $@
 
 
 index = index.html
-main_idx = Documentation/DocBook/$(index)
-build_main_index = rm -rf $(main_idx) && \
+main_idx = $(obj)/$(index)
+build_main_index = rm -rf $(main_idx); \
 		   echo '<h1>Linux Kernel HTML Documentation</h1>' >> $(main_idx) && \
 		   echo '<h2>Kernel Version: $(KERNELVERSION)</h2>' >> $(main_idx) && \
 		   cat $(HTML) >> $(main_idx)
 
 quiet_cmd_db2html = HTML    $@
-      cmd_db2html = xmlto xhtml $(XMLTOFLAGS) -o $(patsubst %.html,%,$@) $< && \
+      cmd_db2html = xmlto html $(XMLTOFLAGS) -o $(patsubst %.html,%,$@) $< && \
 		echo '<a HREF="$(patsubst %.html,%,$(notdir $@))/index.html"> \
-        $(patsubst %.html,%,$(notdir $@))</a><p>' > $@
+		$(patsubst %.html,%,$(notdir $@))</a><p>' > $@
 
-%.html:	%.xml
+###
+# Rules to create an aux XML and .db, and use them to re-process the DocBook XML
+# to fill internal hyperlinks
+       gen_aux_xml = :
+ quiet_gen_aux_xml = echo '  XMLREF  $@'
+silent_gen_aux_xml = :
+%.aux.xml: %.xml
+	@$($(quiet)gen_aux_xml)
+	@rm -rf $@
+	@(cat $< | egrep "^<refentry id" | egrep -o "\".*\"" | cut -f 2 -d \" > $<.db)
+	@$(KERNELDOCXMLREF) -db $<.db $< > $@
+.PRECIOUS: %.aux.xml
+
+%.html:	%.aux.xml
 	@(which xmlto > /dev/null 2>&1) || \
 	 (echo "*** You need to install xmlto ***"; \
 	  exit 1)
@@ -170,12 +172,12 @@ quiet_cmd_db2html = HTML    $@
             cp $(PNG-$(basename $(notdir $@))) $(patsubst %.html,%,$@); fi
 
 quiet_cmd_db2man = MAN     $@
-      cmd_db2man = if grep -q refentry $<; then xmlto man $(XMLTOFLAGS) -o $(obj)/man $< ; gzip -f $(obj)/man/*.9; fi
+      cmd_db2man = if grep -q refentry $<; then xmlto man $(XMLTOFLAGS) -o $(obj)/man/$(*F) $< ; fi
 %.9 : %.xml
 	@(which xmlto > /dev/null 2>&1) || \
 	 (echo "*** You need to install xmlto ***"; \
 	  exit 1)
-	$(Q)mkdir -p $(obj)/man
+	$(Q)mkdir -p $(obj)/man/$(*F)
 	$(call cmd,db2man)
 	@touch $@
 
@@ -229,20 +231,23 @@ dochelp:
 ###
 # Temporary files left by various tools
 clean-files := $(DOCBOOKS) \
-	$(patsubst %.xml, %.dvi,  $(DOCBOOKS)) \
-	$(patsubst %.xml, %.aux,  $(DOCBOOKS)) \
-	$(patsubst %.xml, %.tex,  $(DOCBOOKS)) \
-	$(patsubst %.xml, %.log,  $(DOCBOOKS)) \
-	$(patsubst %.xml, %.out,  $(DOCBOOKS)) \
-	$(patsubst %.xml, %.ps,   $(DOCBOOKS)) \
-	$(patsubst %.xml, %.pdf,  $(DOCBOOKS)) \
-	$(patsubst %.xml, %.html, $(DOCBOOKS)) \
-	$(patsubst %.xml, %.9,    $(DOCBOOKS)) \
-	$(C-procfs-example) $(index)
+	$(patsubst %.xml, %.dvi,     $(DOCBOOKS)) \
+	$(patsubst %.xml, %.aux,     $(DOCBOOKS)) \
+	$(patsubst %.xml, %.tex,     $(DOCBOOKS)) \
+	$(patsubst %.xml, %.log,     $(DOCBOOKS)) \
+	$(patsubst %.xml, %.out,     $(DOCBOOKS)) \
+	$(patsubst %.xml, %.ps,      $(DOCBOOKS)) \
+	$(patsubst %.xml, %.pdf,     $(DOCBOOKS)) \
+	$(patsubst %.xml, %.html,    $(DOCBOOKS)) \
+	$(patsubst %.xml, %.9,       $(DOCBOOKS)) \
+	$(patsubst %.xml, %.aux.xml, $(DOCBOOKS)) \
+	$(patsubst %.xml, %.xml.db,  $(DOCBOOKS)) \
+	$(patsubst %.xml, %.xml,     $(DOCBOOKS)) \
+	$(index)
 
 clean-dirs := $(patsubst %.xml,%,$(DOCBOOKS)) man
 
-cleandocs:
+cleandocs: cleanmediadocs
 	$(Q)rm -f $(call objectify, $(clean-files))
 	$(Q)rm -rf $(call objectify, $(clean-dirs))
 

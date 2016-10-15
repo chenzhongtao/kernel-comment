@@ -98,6 +98,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
+#include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
@@ -114,7 +115,6 @@
 
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/system.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -1615,7 +1615,7 @@ struct ncb {
 	spinlock_t	smp_lock;	/* Lock for SMP threading       */
 
 	/*----------------------------------------------------------------
-	**	Chip and controller indentification.
+	**	Chip and controller identification.
 	**----------------------------------------------------------------
 	*/
 	int		unit;		/* Unit number			*/
@@ -2678,7 +2678,7 @@ static	struct script script0 __initdata = {
 }/*-------------------------< RESEL_TAG >-------------------*/,{
 	/*
 	**	Read IDENTIFY + SIMPLE + TAG using a single MOVE.
-	**	Agressive optimization, is'nt it?
+	**	Aggressive optimization, is'nt it?
 	**	No need to test the SIMPLE TAG message, since the 
 	**	driver only supports conformant devices for tags. ;-)
 	*/
@@ -6495,7 +6495,7 @@ static void ncr_int_ma (struct ncb *np)
 	**	we force a SIR_NEGO_PROTO interrupt (it is a hack that avoids 
 	**	bloat for such a should_not_happen situation).
 	**	In all other situation, we reset the BUS.
-	**	Are these assumptions reasonnable ? (Wait and see ...)
+	**	Are these assumptions reasonable ? (Wait and see ...)
 	*/
 unexpected_phase:
 	dsp -= 8;
@@ -6633,7 +6633,7 @@ static void ncr_sir_to_redo(struct ncb *np, int num, struct ccb *cp)
 		**	patch requested size into sense command
 		*/
 		cp->sensecmd[0]		= 0x03;
-		cp->sensecmd[1]		= cmd->device->lun << 5;
+		cp->sensecmd[1]		= (cmd->device->lun & 0x7) << 5;
 		cp->sensecmd[4]		= sizeof(cp->sense_buf);
 
 		/*
@@ -7997,10 +7997,7 @@ static int ncr53c8xx_slave_configure(struct scsi_device *device)
 	if (depth_to_use > MAX_TAGS)
 		depth_to_use = MAX_TAGS;
 
-	scsi_adjust_queue_depth(device,
-				(device->tagged_supported ?
-				 MSG_SIMPLE_TAG : 0),
-				depth_to_use);
+	scsi_change_queue_depth(device, depth_to_use);
 
 	/*
 	**	Since the queue depth is not tunable under Linux,
@@ -8028,7 +8025,7 @@ static int ncr53c8xx_slave_configure(struct scsi_device *device)
 	return 0;
 }
 
-static int ncr53c8xx_queue_command (struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
+static int ncr53c8xx_queue_command_lck (struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *))
 {
      struct ncb *np = ((struct host_data *) cmd->device->host->hostdata)->ncb;
      unsigned long flags;
@@ -8066,6 +8063,8 @@ printk("ncr53c8xx : command successfully queued\n");
 
      return sts;
 }
+
+static DEF_SCSI_QCMD(ncr53c8xx_queue_command)
 
 irqreturn_t ncr53c8xx_intr(int irq, void *dev_id)
 {
@@ -8144,7 +8143,7 @@ static int ncr53c8xx_abort(struct scsi_cmnd *cmd)
 	unsigned long flags;
 	struct scsi_cmnd *done_list;
 
-	printk("ncr53c8xx_abort: command pid %lu\n", cmd->serial_number);
+	printk("ncr53c8xx_abort\n");
 
 	NCR_LOCK_NCB(np, flags);
 

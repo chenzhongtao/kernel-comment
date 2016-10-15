@@ -58,9 +58,7 @@
 #include <linux/mutex.h>
 #include <linux/kref.h>
 #include <linux/workqueue.h>
-/* FIXME: Yes, I know: BAD--it's not my fault the USB HC iface is not
- *        public */
-#include <linux/../../drivers/usb/core/hcd.h>
+#include <linux/usb/hcd.h>
 #include <linux/uwb.h>
 #include <linux/usb/wusb.h>
 
@@ -71,6 +69,8 @@
  * zone 0.
  */
 #define WUSB_CHANNEL_STOP_DELAY_MS 8
+#define WUSB_RETRY_COUNT_MAX 15
+#define WUSB_RETRY_COUNT_INFINITE 0
 
 /**
  * Wireless USB device
@@ -97,6 +97,7 @@ struct wusb_dev {
 	struct kref refcnt;
 	struct wusbhc *wusbhc;
 	struct list_head cack_node;	/* Connect-Ack list */
+	struct list_head rekey_node;	/* GTK rekey list */
 	u8 port_idx;
 	u8 addr;
 	u8 beacon_type:4;
@@ -107,8 +108,6 @@ struct wusb_dev {
 	struct usb_wireless_cap_descriptor *wusb_cap_descr;
 	struct uwb_mas_bm availability;
 	struct work_struct devconnect_acked_work;
-	struct urb *set_gtk_urb;
-	struct usb_ctrlrequest *set_gtk_req;
 	struct usb_device *usb_dev;
 };
 
@@ -134,7 +133,7 @@ static inline void wusb_dev_put(struct wusb_dev *wusb_dev)
 }
 
 /**
- * Wireless USB Host Controlller root hub "fake" ports
+ * Wireless USB Host Controller root hub "fake" ports
  * (state and device information)
  *
  * Wireless USB is wireless, so there are no ports; but we
@@ -165,7 +164,7 @@ struct wusb_port {
  * functions/operations that only deal with general Wireless USB HC
  * issues use this data type to refer to the host.
  *
- * @usb_hcd 	   Instantiation of a USB host controller
+ * @usb_hcd	   Instantiation of a USB host controller
  *                 (initialized by upper layer [HWA=HC or WHCI].
  *
  * @dev		   Device that implements this; initialized by the
@@ -197,8 +196,8 @@ struct wusb_port {
  * @ports_max	   Number of simultaneous device connections (fake
  *                 ports) this HC will take. Read-only.
  *
- * @port      	   Array of port status for each fake root port. Guaranteed to
- *                 always be the same lenght during device existence
+ * @port	   Array of port status for each fake root port. Guaranteed to
+ *                 always be the same length during device existence
  *                 [this allows for some unlocked but referenced reading].
  *
  * @mmcies_max	   Max number of Information Elements this HC can send
@@ -233,7 +232,7 @@ struct wusb_port {
  *
  *    Most of the times when you need to use it, it will be non-NULL,
  *    so there is no real need to check for it (wusb_dev will
- *    dissapear before usb_dev).
+ *    disappear before usb_dev).
  *
  *  - The following fields need to be filled out before calling
  *    wusbhc_create(): ports_max, mmcies_max, mmcie_{add,rm}.
@@ -253,6 +252,10 @@ struct wusbhc {
 
 	unsigned trust_timeout;			/* in jiffies */
 	struct wusb_ckhdid chid;
+	uint8_t phy_rate;
+	uint8_t dnts_num_slots;
+	uint8_t dnts_interval;
+	uint8_t retry_count;
 	struct wuie_host_info *wuie_host_info;
 
 	struct mutex mutex;			/* locks everything else */
@@ -292,8 +295,10 @@ struct wusbhc {
 	} __attribute__((packed)) gtk;
 	u8 gtk_index;
 	u32 gtk_tkid;
-	struct work_struct gtk_rekey_done_work;
-	int pending_set_gtks;
+
+	/* workqueue for WUSB security related tasks. */
+	struct workqueue_struct *wq_security;
+	struct work_struct gtk_rekey_work;
 
 	struct usb_encryption_descriptor *ccm1_etd;
 };
@@ -327,7 +332,8 @@ void wusbhc_pal_unregister(struct wusbhc *wusbhc);
  * This is a safe assumption as @usb_dev->bus is referenced all the
  * time during the @usb_dev life cycle.
  */
-static inline struct usb_hcd *usb_hcd_get_by_usb_dev(struct usb_device *usb_dev)
+static inline
+struct usb_hcd *usb_hcd_get_by_usb_dev(struct usb_device *usb_dev)
 {
 	struct usb_hcd *usb_hcd;
 	usb_hcd = container_of(usb_dev->bus, struct usb_hcd, self);
@@ -400,8 +406,6 @@ extern void wusbhc_rh_destroy(struct wusbhc *);
 
 extern int wusbhc_rh_status_data(struct usb_hcd *, char *);
 extern int wusbhc_rh_control(struct usb_hcd *, u16, u16, u16, char *, u16);
-extern int wusbhc_rh_suspend(struct usb_hcd *);
-extern int wusbhc_rh_resume(struct usb_hcd *);
 extern int wusbhc_rh_start_port_reset(struct usb_hcd *, unsigned);
 
 /* MMC handling */

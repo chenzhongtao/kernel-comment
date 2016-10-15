@@ -6,19 +6,17 @@
  * Copyright (c) 2006 Rafael J. Wysocki <rjw@sisk.pl>
  */
 
+#include <linux/gfp.h>
 #include <linux/suspend.h>
 #include <linux/bootmem.h>
 
-#include <asm/system.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/mmzone.h>
+#include <asm/sections.h>
 
 /* Defined in hibernate_asm_32.S */
 extern int restore_image(void);
-
-/* References to section boundaries */
-extern const void __nosave_begin, __nosave_end;
 
 /* Pointer to the temporary resume page tables */
 pgd_t *resume_pg_dir;
@@ -128,8 +126,6 @@ static int resume_physical_mapping_init(pgd_t *pgd_base)
 			}
 		}
 	}
-
-	resume_map_numa_kva(pgd_base);
 
 	return 0;
 }

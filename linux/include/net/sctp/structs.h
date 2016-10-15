@@ -19,16 +19,12 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * along with GNU CC; see the file COPYING.  If not, see
+ * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email addresses:
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *    Randall Stewart	    <randall@sctp.chicago.il.us>
@@ -46,21 +42,18 @@
  *    Ryan Layer	    <rmlayer@us.ibm.com>
  *    Anup Pemmaiah	    <pemmaiah@cc.usu.edu>
  *    Kevin Gao             <kevin.gao@intel.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
 
 #ifndef __sctp_structs_h__
 #define __sctp_structs_h__
 
-#include <linux/time.h>		/* We get struct timespec.    */
+#include <linux/ktime.h>
 #include <linux/socket.h>	/* linux/in.h needs this!!    */
 #include <linux/in.h>		/* We get struct sockaddr_in. */
 #include <linux/in6.h>		/* We get struct in6_addr     */
 #include <linux/ipv6.h>
 #include <asm/param.h>		/* We get MAXHOSTNAMELEN.     */
-#include <asm/atomic.h>		/* This gets us atomic counters.  */
+#include <linux/atomic.h>		/* This gets us atomic counters.  */
 #include <linux/skbuff.h>	/* We need sk_buff_head. */
 #include <linux/workqueue.h>	/* We need tq_struct.	 */
 #include <linux/sctp.h>		/* We need sctp* header structs.  */
@@ -102,6 +95,7 @@ struct sctp_bind_bucket {
 	unsigned short	fastreuse;
 	struct hlist_node	node;
 	struct hlist_head	owner;
+	struct net	*net;
 };
 
 struct sctp_bind_hashbucket {
@@ -118,136 +112,32 @@ struct sctp_hashbucket {
 
 /* The SCTP globals structure. */
 extern struct sctp_globals {
-	/* RFC2960 Section 14. Suggested SCTP Protocol Parameter Values
-	 *
-	 * The following protocol parameters are RECOMMENDED:
-	 *
-	 * RTO.Initial		    - 3	 seconds
-	 * RTO.Min		    - 1	 second
-	 * RTO.Max		   -  60 seconds
-	 * RTO.Alpha		    - 1/8  (3 when converted to right shifts.)
-	 * RTO.Beta		    - 1/4  (2 when converted to right shifts.)
-	 */
-	unsigned int rto_initial;
-	unsigned int rto_min;
-	unsigned int rto_max;
-
-	/* Note: rto_alpha and rto_beta are really defined as inverse
-	 * powers of two to facilitate integer operations.
-	 */
-	int rto_alpha;
-	int rto_beta;
-
-	/* Max.Burst		    - 4 */
-	int max_burst;
-
-	/* Whether Cookie Preservative is enabled(1) or not(0) */
-	int cookie_preserve_enable;
-
-	/* Valid.Cookie.Life	    - 60  seconds  */
-	unsigned int valid_cookie_life;
-
-	/* Delayed SACK timeout  200ms default*/
-	unsigned int sack_timeout;
-
-	/* HB.interval		    - 30 seconds  */
-	unsigned int hb_interval;
-
-	/* Association.Max.Retrans  - 10 attempts
-	 * Path.Max.Retrans	    - 5	 attempts (per destination address)
-	 * Max.Init.Retransmits	    - 8	 attempts
-	 */
-	int max_retrans_association;
-	int max_retrans_path;
-	int max_retrans_init;
-
-	/*
-	 * Policy for preforming sctp/socket accounting
-	 * 0   - do socket level accounting, all assocs share sk_sndbuf
-	 * 1   - do sctp accounting, each asoc may use sk_sndbuf bytes
-	 */
-	int sndbuf_policy;
-
-	/*
-	 * Policy for preforming sctp/socket accounting
-	 * 0   - do socket level accounting, all assocs share sk_rcvbuf
-	 * 1   - do sctp accounting, each asoc may use sk_rcvbuf bytes
-	 */
-	int rcvbuf_policy;
-
-	/* The following variables are implementation specific.	 */
-
-	/* Default initialization values to be applied to new associations. */
-	__u16 max_instreams;
-	__u16 max_outstreams;
-
 	/* This is a list of groups of functions for each address
 	 * family that we support.
 	 */
 	struct list_head address_families;
 
 	/* This is the hash of all endpoints. */
-	int ep_hashsize;
 	struct sctp_hashbucket *ep_hashtable;
-
 	/* This is the hash of all associations. */
-	int assoc_hashsize;
 	struct sctp_hashbucket *assoc_hashtable;
-
 	/* This is the sctp port control hash.	*/
-	int port_hashsize;
 	struct sctp_bind_hashbucket *port_hashtable;
 
-	/* This is the global local address list.
-	 * We actively maintain this complete list of addresses on
-	 * the system by catching address add/delete events.
-	 *
-	 * It is a list of sctp_sockaddr_entry.
-	 */
-	struct list_head local_addr_list;
+	/* Sizes of above hashtables. */
+	int ep_hashsize;
+	int assoc_hashsize;
+	int port_hashsize;
 
-	/* Lock that protects the local_addr_list writers */
-	spinlock_t addr_list_lock;
-	
-	/* Flag to indicate if addip is enabled. */
-	int addip_enable;
-	int addip_noauth_enable;
-
-	/* Flag to indicate if PR-SCTP is enabled. */
-	int prsctp_enable;
-
-	/* Flag to idicate if SCTP-AUTH is enabled */
-	int auth_enable;
-
-	/*
-	 * Policy to control SCTP IPv4 address scoping
-	 * 0   - Disable IPv4 address scoping
-	 * 1   - Enable IPv4 address scoping
-	 * 2   - Selectively allow only IPv4 private addresses
-	 * 3   - Selectively allow only IPv4 link local address
-	 */
-	int ipv4_scope_policy;
+	/* Default initialization values to be applied to new associations. */
+	__u16 max_instreams;
+	__u16 max_outstreams;
 
 	/* Flag to indicate whether computing and verifying checksum
 	 * is disabled. */
-        int checksum_disable;
+        bool checksum_disable;
 } sctp_globals;
 
-#define sctp_rto_initial		(sctp_globals.rto_initial)
-#define sctp_rto_min			(sctp_globals.rto_min)
-#define sctp_rto_max			(sctp_globals.rto_max)
-#define sctp_rto_alpha			(sctp_globals.rto_alpha)
-#define sctp_rto_beta			(sctp_globals.rto_beta)
-#define sctp_max_burst			(sctp_globals.max_burst)
-#define sctp_valid_cookie_life		(sctp_globals.valid_cookie_life)
-#define sctp_cookie_preserve_enable	(sctp_globals.cookie_preserve_enable)
-#define sctp_max_retrans_association	(sctp_globals.max_retrans_association)
-#define sctp_sndbuf_policy	 	(sctp_globals.sndbuf_policy)
-#define sctp_rcvbuf_policy	 	(sctp_globals.rcvbuf_policy)
-#define sctp_max_retrans_path		(sctp_globals.max_retrans_path)
-#define sctp_max_retrans_init		(sctp_globals.max_retrans_init)
-#define sctp_sack_timeout		(sctp_globals.sack_timeout)
-#define sctp_hb_interval		(sctp_globals.hb_interval)
 #define sctp_max_instreams		(sctp_globals.max_instreams)
 #define sctp_max_outstreams		(sctp_globals.max_outstreams)
 #define sctp_address_families		(sctp_globals.address_families)
@@ -256,16 +146,7 @@ extern struct sctp_globals {
 #define sctp_assoc_hashsize		(sctp_globals.assoc_hashsize)
 #define sctp_assoc_hashtable		(sctp_globals.assoc_hashtable)
 #define sctp_port_hashsize		(sctp_globals.port_hashsize)
-#define sctp_port_rover			(sctp_globals.port_rover)
-#define sctp_port_alloc_lock		(sctp_globals.port_alloc_lock)
 #define sctp_port_hashtable		(sctp_globals.port_hashtable)
-#define sctp_local_addr_list		(sctp_globals.local_addr_list)
-#define sctp_local_addr_lock		(sctp_globals.addr_list_lock)
-#define sctp_scope_policy		(sctp_globals.ipv4_scope_policy)
-#define sctp_addip_enable		(sctp_globals.addip_enable)
-#define sctp_addip_noauth		(sctp_globals.addip_noauth_enable)
-#define sctp_prsctp_enable		(sctp_globals.prsctp_enable)
-#define sctp_auth_enable		(sctp_globals.auth_enable)
 #define sctp_checksum_disable		(sctp_globals.checksum_disable)
 
 /* SCTP Socket type: UDP or TCP style. */
@@ -287,6 +168,7 @@ struct sctp_sock {
 
 	/* Access to HMAC transform. */
 	struct crypto_hash *hmac;
+	char *sctp_hmac_alg;
 
 	/* What is our base endpointer? */
 	struct sctp_endpoint *ep;
@@ -325,7 +207,9 @@ struct sctp_sock {
 	struct sctp_paddrparams paddrparam;
 	struct sctp_event_subscribe subscribe;
 	struct sctp_assocparams assocparams;
+
 	int user_frag;
+
 	__u32 autoclose;
 	__u8 nodelay;
 	__u8 disable_fragments;
@@ -333,10 +217,18 @@ struct sctp_sock {
 	__u8 frag_interleave;
 	__u32 adaptation_ind;
 	__u32 pd_point;
+	__u8 recvrcvinfo;
+	__u8 recvnxtinfo;
 
 	atomic_t pd_mode;
 	/* Receive to here while partial delivery is in effect. */
 	struct sk_buff_head pd_lobby;
+
+	/* These must be the last fields, as they will skipped on copies,
+	 * like on accept and peeloff operations
+	 */
+	struct list_head auto_asconf_list;
+	int do_auto_asconf;
 };
 
 static inline struct sctp_sock *sctp_sk(const struct sock *sk)
@@ -349,7 +241,7 @@ static inline struct sock *sctp_opt2sk(const struct sctp_sock *sp)
        return (struct sock *)sp;
 }
 
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 struct sctp6_sock {
        struct sctp_sock  sctp;
        struct ipv6_pinfo inet6;
@@ -391,7 +283,7 @@ struct sctp_cookie {
 	__u32 peer_ttag;
 
 	/* When does this cookie expire? */
-	struct timeval expiration;
+	ktime_t expiration;
 
 	/* Number of inbound/outbound streams which are set
 	 * and negotiated during the INIT process.
@@ -418,7 +310,7 @@ struct sctp_cookie {
 	__u32 adaptation_ind;
 
 	__u8 auth_random[sizeof(sctp_paramhdr_t) + SCTP_AUTH_RANDOM_LENGTH];
-	__u8 auth_hmacs[SCTP_AUTH_NUM_HMACS + 2];
+	__u8 auth_hmacs[SCTP_AUTH_NUM_HMACS * sizeof(__u16) + 2];
 	__u8 auth_chunks[sizeof(sctp_paramhdr_t) + SCTP_AUTH_MAX_CHUNKS];
 
 	/* This is a shim for my peer's INIT packet, followed by
@@ -437,7 +329,7 @@ struct sctp_signed_cookie {
 	__u8 signature[SCTP_SECRET_SIZE];
 	__u32 __pad;		/* force sctp_cookie alignment to 64 bits */
 	struct sctp_cookie c;
-} __attribute__((packed));
+} __packed;
 
 /* This is another convenience type to allocate memory for address
  * params for the maximum size and pass such structures around
@@ -482,7 +374,7 @@ typedef struct sctp_sender_hb_info {
 	union sctp_addr daddr;
 	unsigned long sent_at;
 	__u64 hb_nonce;
-} __attribute__((packed)) sctp_sender_hb_info_t;
+} __packed sctp_sender_hb_info_t;
 
 /*
  *  RFC 2960 1.3.2 Sequenced Delivery within Streams
@@ -506,7 +398,6 @@ struct sctp_stream {
 struct sctp_ssnmap {
 	struct sctp_stream in;
 	struct sctp_stream out;
-	int malloced;
 };
 
 struct sctp_ssnmap *sctp_ssnmap_new(__u16 in, __u16 out,
@@ -560,19 +451,15 @@ struct sctp_af {
 					 int optname,
 					 char __user *optval,
 					 int __user *optlen);
-	struct dst_entry *(*get_dst)	(struct sctp_association *asoc,
-					 union sctp_addr *daddr,
-					 union sctp_addr *saddr);
+	void		(*get_dst)	(struct sctp_transport *t,
+					 union sctp_addr *saddr,
+					 struct flowi *fl,
+					 struct sock *sk);
 	void		(*get_saddr)	(struct sctp_sock *sk,
-					 struct sctp_association *asoc,
-					 struct dst_entry *dst,
-					 union sctp_addr *daddr,
-					 union sctp_addr *saddr);
+					 struct sctp_transport *t,
+					 struct flowi *fl);
 	void		(*copy_addrlist) (struct list_head *,
 					  struct net_device *);
-	void		(*dst_saddr)	(union sctp_addr *saddr,
-					 struct dst_entry *dst,
-					 __be16 port);
 	int		(*cmp_addr)	(const union sctp_addr *addr1,
 					 const union sctp_addr *addr2);
 	void		(*addr_copy)	(union sctp_addr *dst,
@@ -581,10 +468,6 @@ struct sctp_af {
 					 struct sk_buff *skb,
 					 int saddr);
 	void		(*from_sk)	(union sctp_addr *,
-					 struct sock *sk);
-	void		(*to_sk_saddr)	(union sctp_addr *,
-					 struct sock *sk);
-	void		(*to_sk_daddr)	(union sctp_addr *,
 					 struct sock *sk);
 	void		(*from_addr_param) (union sctp_addr *,
 					    union sctp_addr_param *,
@@ -626,7 +509,9 @@ struct sctp_pf {
 	int  (*supported_addrs)(const struct sctp_sock *, __be16 *);
 	struct sock *(*create_accept_sk) (struct sock *sk,
 					  struct sctp_association *asoc);
-	void (*addr_v4map) (struct sctp_sock *, union sctp_addr *);
+	int (*addr_to_user)(struct sctp_sock *sk, union sctp_addr *addr);
+	void (*to_sk_saddr)(union sctp_addr *, struct sock *sk);
+	void (*to_sk_daddr)(union sctp_addr *, struct sock *sk);
 	struct sctp_af *af;
 };
 
@@ -637,22 +522,20 @@ struct sctp_pf {
 struct sctp_datamsg {
 	/* Chunks waiting to be submitted to lower layer. */
 	struct list_head chunks;
-	/* Chunks that have been transmitted. */
-	size_t msg_size;
 	/* Reference counting. */
 	atomic_t refcnt;
 	/* When is this message no longer interesting to the peer? */
 	unsigned long expires_at;
 	/* Did the messenge fail to send? */
 	int send_error;
-	char send_failed;
-	/* Control whether chunks from this message can be abandoned. */
-	char can_abandon;
+	u8 send_failed:1,
+	   can_abandon:1,   /* can chunks from this message can be abandoned. */
+	   can_delay;	    /* should this message be Nagle delayed */
 };
 
 struct sctp_datamsg *sctp_datamsg_from_user(struct sctp_association *,
 					    struct sctp_sndrcvinfo *,
-					    struct msghdr *, int len);
+					    struct iov_iter *);
 void sctp_datamsg_free(struct sctp_datamsg *);
 void sctp_datamsg_put(struct sctp_datamsg *);
 void sctp_chunk_fail(struct sctp_chunk *, int error);
@@ -768,8 +651,8 @@ struct sctp_chunk {
 
 void sctp_chunk_hold(struct sctp_chunk *);
 void sctp_chunk_put(struct sctp_chunk *);
-int sctp_user_addto_chunk(struct sctp_chunk *chunk, int off, int len,
-			  struct iovec *data);
+int sctp_user_addto_chunk(struct sctp_chunk *chunk, int len,
+			  struct iov_iter *from);
 void sctp_chunk_free(struct sctp_chunk *);
 void  *sctp_addto_chunk(struct sctp_chunk *, int len, const void *data);
 struct sctp_chunk *sctp_chunkify(struct sk_buff *,
@@ -793,6 +676,8 @@ struct sctp_sockaddr_entry {
 	__u8 state;
 	__u8 valid;
 };
+
+#define SCTP_ADDRESS_TICK_DELAY	500
 
 typedef struct sctp_chunk *(sctp_packet_phandler_t)(struct sctp_association *);
 
@@ -826,8 +711,7 @@ struct sctp_packet {
 	    has_sack:1,		/* This packet contains a SACK chunk. */
 	    has_auth:1,		/* This packet contains an AUTH chunk */
 	    has_data:1,		/* This packet contains at least 1 DATA chunk */
-	    ipfragok:1,		/* So let ip fragment this packet */
-	    malloced:1;		/* Is it malloced? */
+	    ipfragok:1;		/* So let ip fragment this packet */
 };
 
 struct sctp_packet *sctp_packet_init(struct sctp_packet *,
@@ -843,7 +727,7 @@ void sctp_packet_free(struct sctp_packet *);
 
 static inline int sctp_packet_empty(struct sctp_packet *packet)
 {
-	return (packet->size == packet->overhead);
+	return packet->size == packet->overhead;
 }
 
 /* This represents a remote transport address.
@@ -872,7 +756,32 @@ struct sctp_transport {
 
 	/* Reference counting. */
 	atomic_t refcnt;
-	int	 dead;
+	__u32	 dead:1,
+		/* RTO-Pending : A flag used to track if one of the DATA
+		 *		chunks sent to this address is currently being
+		 *		used to compute a RTT. If this flag is 0,
+		 *		the next DATA chunk sent to this destination
+		 *		should be used to compute a RTT and this flag
+		 *		should be set. Every time the RTT
+		 *		calculation completes (i.e. the DATA chunk
+		 *		is SACK'd) clear this flag.
+		 */
+		 rto_pending:1,
+
+		/*
+		 * hb_sent : a flag that signals that we have a pending
+		 * heartbeat.
+		 */
+		hb_sent:1,
+
+		/* Is the Path MTU update pending on this tranport */
+		pmtu_pending:1,
+
+		/* Has this transport moved the ctsn since we last sacked */
+		sack_generation:1;
+	u32 dst_cookie;
+
+	struct flowi fl;
 
 	/* This is the peer's IP address and port. */
 	union sctp_addr ipaddr;
@@ -902,22 +811,6 @@ struct sctp_transport {
 	/* SRTT	       : The current smoothed round trip time.	*/
 	__u32 srtt;
 
-	/* RTO-Pending : A flag used to track if one of the DATA
-	 *		chunks sent to this address is currently being
-	 *		used to compute a RTT. If this flag is 0,
-	 *		the next DATA chunk sent to this destination
-	 *		should be used to compute a RTT and this flag
-	 *		should be set. Every time the RTT
-	 *		calculation completes (i.e. the DATA chunk
-	 *		is SACK'd) clear this flag.
-	 * hb_sent : a flag that signals that we have a pending heartbeat.
-	 */
-	__u8 rto_pending;
-	__u8 hb_sent;
-
-	/* Flag to track the current fast recovery state */
-	__u8 fast_recovery;
-
 	/*
 	 * These are the congestion stats.
 	 */
@@ -935,19 +828,12 @@ struct sctp_transport {
 	/* Data that has been sent, but not acknowledged. */
 	__u32 flight_size;
 
-	/* TSN marking the fast recovery exit point */
-	__u32 fast_recovery_exit;
+	__u32 burst_limited;	/* Holds old cwnd when max.burst is applied */
 
 	/* Destination */
 	struct dst_entry *dst;
 	/* Source address. */
 	union sctp_addr saddr;
-
-	/* When was the last time(in jiffies) that a data packet was sent on
-	 * this transport?  This is used to adjust the cwnd when the transport
-	 * becomes inactive.
-	 */
-	unsigned long last_time_used;
 
 	/* Heartbeat interval: The endpoint sends out a Heartbeat chunk to
 	 * the destination address every heartbeat interval.
@@ -958,10 +844,10 @@ struct sctp_transport {
 	unsigned long sackdelay;
 	__u32 sackfreq;
 
-	/* When was the last time (in jiffies) that we heard from this
-	 * transport?  We use this to pick new active and retran paths.
+	/* When was the last time that we heard from this transport? We use
+	 * this to pick new active and retran paths.
 	 */
-	unsigned long last_time_heard;
+	ktime_t last_time_heard;
 
 	/* Last time(in jiffies) when cwnd is reduced due to the congestion
 	 * indication based on ECNE chunk.
@@ -970,13 +856,15 @@ struct sctp_transport {
 
 	/* This is the max_retrans value for the transport and will
 	 * be initialized from the assocs value.  This can be changed
-	 * using SCTP_SET_PEER_ADDR_PARAMS socket option.
+	 * using the SCTP_SET_PEER_ADDR_PARAMS socket option.
 	 */
 	__u16 pathmaxrxt;
 
-	/* is the Path MTU update pending on this tranport */
-	__u8 pmtu_pending;
-
+	/* This is the partially failed retrans value for the transport
+	 * and will be initialized from the assocs value.  This can be changed
+	 * using the SCTP_PEER_ADDR_THLDS socket option
+	 */
+	int pf_retrans;
 	/* PMTU	      : The current known path MTU.  */
 	__u32 pathmtu;
 
@@ -987,7 +875,7 @@ struct sctp_transport {
 	int init_sent_count;
 
 	/* state       : The current state of this destination,
-	 *             : i.e. SCTP_ACTIVE, SCTP_INACTIVE, SCTP_UNKOWN.
+	 *             : i.e. SCTP_ACTIVE, SCTP_INACTIVE, SCTP_UNKNOWN.
 	 */
 	int state;
 
@@ -1007,6 +895,9 @@ struct sctp_transport {
 	/* Heartbeat timer is per destination. */
 	struct timer_list hb_timer;
 
+	/* Timer to handle ICMP proto unreachable envets */
+	struct timer_list proto_unreach_timer;
+
 	/* Since we're using per-destination retransmission timers
 	 * (see above), we're also using per-destination "transmitted"
 	 * queues.  This probably ought to be a private struct
@@ -1019,8 +910,6 @@ struct sctp_transport {
 
 	/* This is the list of transports that have chunks to send.  */
 	struct list_head send_ready;
-
-	int malloced; /* Is this structure kfree()able? */
 
 	/* State information saved for SFR_CACC algorithm. The key
 	 * idea in SFR_CACC is to maintain state at the sender on a
@@ -1053,25 +942,30 @@ struct sctp_transport {
 
 	/* 64-bit random number sent with heartbeat. */
 	__u64 hb_nonce;
+
+	struct rcu_head rcu;
 };
 
-struct sctp_transport *sctp_transport_new(const union sctp_addr *,
+struct sctp_transport *sctp_transport_new(struct net *, const union sctp_addr *,
 					  gfp_t);
 void sctp_transport_set_owner(struct sctp_transport *,
 			      struct sctp_association *);
 void sctp_transport_route(struct sctp_transport *, union sctp_addr *,
 			  struct sctp_sock *);
-void sctp_transport_pmtu(struct sctp_transport *);
+void sctp_transport_pmtu(struct sctp_transport *, struct sock *sk);
 void sctp_transport_free(struct sctp_transport *);
-void sctp_transport_reset_timers(struct sctp_transport *, int);
+void sctp_transport_reset_timers(struct sctp_transport *);
 void sctp_transport_hold(struct sctp_transport *);
 void sctp_transport_put(struct sctp_transport *);
 void sctp_transport_update_rto(struct sctp_transport *, __u32);
 void sctp_transport_raise_cwnd(struct sctp_transport *, __u32, __u32);
 void sctp_transport_lower_cwnd(struct sctp_transport *, sctp_lower_cwnd_t);
+void sctp_transport_burst_limited(struct sctp_transport *);
+void sctp_transport_burst_reset(struct sctp_transport *);
 unsigned long sctp_transport_timeout(struct sctp_transport *);
 void sctp_transport_reset(struct sctp_transport *);
-void sctp_transport_update_pmtu(struct sctp_transport *, u32);
+void sctp_transport_update_pmtu(struct sock *, struct sctp_transport *, u32);
+void sctp_transport_immediate_rtx(struct sctp_transport *);
 
 
 /* This is the structure we use to queue packets as they come into
@@ -1091,8 +985,6 @@ struct sctp_inq {
 	 * messages.
 	 */
 	struct work_struct immediate;
-
-	int malloced;	     /* Is this structure kfree()able?	*/
 };
 
 void sctp_inq_init(struct sctp_inq *);
@@ -1127,10 +1019,10 @@ struct sctp_outq {
 	/* Data pending that has never been transmitted.  */
 	struct list_head out_chunk_list;
 
-	unsigned out_qlen;	/* Total length of queued data chunks. */
+	unsigned int out_qlen;	/* Total length of queued data chunks. */
 
 	/* Error of send failed, may used in SCTP_SEND_FAILED event. */
-	unsigned error;
+	unsigned int error;
 
 	/* These are control chunks we want to send.  */
 	struct list_head control_chunk_list;
@@ -1158,19 +1050,13 @@ struct sctp_outq {
 
 	/* Corked? */
 	char cork;
-
-	/* Is this structure empty?  */
-	char empty;
-
-	/* Are we kfree()able? */
-	char malloced;
 };
 
 void sctp_outq_init(struct sctp_association *, struct sctp_outq *);
 void sctp_outq_teardown(struct sctp_outq *);
 void sctp_outq_free(struct sctp_outq*);
 int sctp_outq_tail(struct sctp_outq *, struct sctp_chunk *chunk);
-int sctp_outq_sack(struct sctp_outq *, struct sctp_sackhdr *);
+int sctp_outq_sack(struct sctp_outq *, struct sctp_chunk *);
 int sctp_outq_is_empty(const struct sctp_outq *);
 void sctp_outq_restart(struct sctp_outq *);
 
@@ -1201,13 +1087,11 @@ struct sctp_bind_addr {
 	 *	peer(s) in INIT and INIT ACK chunks.
 	 */
 	struct list_head address_list;
-
-	int malloced;	     /* Are we kfree()able?  */
 };
 
 void sctp_bind_addr_init(struct sctp_bind_addr *, __u16 port);
 void sctp_bind_addr_free(struct sctp_bind_addr *);
-int sctp_bind_addr_copy(struct sctp_bind_addr *dest,
+int sctp_bind_addr_copy(struct net *net, struct sctp_bind_addr *dest,
 			const struct sctp_bind_addr *src,
 			sctp_scope_t scope, gfp_t gfp,
 			int flags);
@@ -1234,9 +1118,9 @@ int sctp_raw_to_bind_addrs(struct sctp_bind_addr *bp, __u8 *raw, int len,
 			   __u16 port, gfp_t gfp);
 
 sctp_scope_t sctp_scope(const union sctp_addr *);
-int sctp_in_scope(const union sctp_addr *addr, const sctp_scope_t scope);
+int sctp_in_scope(struct net *net, const union sctp_addr *addr, const sctp_scope_t scope);
 int sctp_is_any(struct sock *sk, const union sctp_addr *addr);
-int sctp_addr_is_valid(const union sctp_addr *addr);
+int sctp_is_ep_boundall(struct sock *sk);
 
 
 /* What type of endpoint?  */
@@ -1272,11 +1156,9 @@ struct sctp_ep_common {
 	/* Some fields to help us manage this object.
 	 *   refcnt   - Reference count access to this object.
 	 *   dead     - Do not attempt to use this object.
-	 *   malloced - Do we need to kfree this object?
 	 */
 	atomic_t    refcnt;
-	char	    dead;
-	char	    malloced;
+	bool	    dead;
 
 	/* What socket does this endpoint belong to?  */
 	struct sock *sk;
@@ -1334,10 +1216,7 @@ struct sctp_endpoint {
 	 *	      Discussion in [RFC1750] can be helpful in
 	 *	      selection of the key.
 	 */
-	__u8 secret_key[SCTP_HOW_MANY_SECRETS][SCTP_SECRET_SIZE];
-	int current_key;
-	int last_key;
-	int key_changed_at;
+	__u8 secret_key[SCTP_SECRET_SIZE];
 
  	/* digest:  This is a digest of the sctp cookie.  This field is
  	 * 	    only used on the receive path when we try to validate
@@ -1367,6 +1246,7 @@ struct sctp_endpoint {
 	/* SCTP-AUTH: endpoint shared keys */
 	struct list_head endpoint_shared_keys;
 	__u16 active_key_id;
+	__u8  auth_enable;
 };
 
 /* Recover the outter endpoint structure. */
@@ -1391,14 +1271,15 @@ struct sctp_association *sctp_endpoint_lookup_assoc(
 int sctp_endpoint_is_peeled_off(struct sctp_endpoint *,
 				const union sctp_addr *);
 struct sctp_endpoint *sctp_endpoint_is_match(struct sctp_endpoint *,
-					const union sctp_addr *);
-int sctp_has_association(const union sctp_addr *laddr,
+					struct net *, const union sctp_addr *);
+int sctp_has_association(struct net *net, const union sctp_addr *laddr,
 			 const union sctp_addr *paddr);
 
-int sctp_verify_init(const struct sctp_association *asoc, sctp_cid_t,
-		     sctp_init_chunk_t *peer_init, struct sctp_chunk *chunk,
-		     struct sctp_chunk **err_chunk);
-int sctp_process_init(struct sctp_association *, sctp_cid_t cid,
+int sctp_verify_init(struct net *net, const struct sctp_endpoint *ep,
+		     const struct sctp_association *asoc,
+		     sctp_cid_t, sctp_init_chunk_t *peer_init,
+		     struct sctp_chunk *chunk, struct sctp_chunk **err_chunk);
+int sctp_process_init(struct sctp_association *, struct sctp_chunk *chunk,
 		      const union sctp_addr *peer,
 		      sctp_init_chunk_t *init, gfp_t gfp);
 __u32 sctp_generate_tag(const struct sctp_endpoint *);
@@ -1410,6 +1291,40 @@ struct sctp_inithdr_host {
 	__u16 num_outbound_streams;
 	__u16 num_inbound_streams;
 	__u32 initial_tsn;
+};
+
+/* SCTP_GET_ASSOC_STATS counters */
+struct sctp_priv_assoc_stats {
+	/* Maximum observed rto in the association during subsequent
+	 * observations. Value is set to 0 if no RTO measurement took place
+	 * The transport where the max_rto was observed is returned in
+	 * obs_rto_ipaddr
+	 */
+	struct sockaddr_storage obs_rto_ipaddr;
+	__u64 max_obs_rto;
+	/* Total In and Out SACKs received and sent */
+	__u64 isacks;
+	__u64 osacks;
+	/* Total In and Out packets received and sent */
+	__u64 opackets;
+	__u64 ipackets;
+	/* Total retransmitted chunks */
+	__u64 rtxchunks;
+	/* TSN received > next expected */
+	__u64 outofseqtsns;
+	/* Duplicate Chunks received */
+	__u64 idupchunks;
+	/* Gap Ack Blocks received */
+	__u64 gapcnt;
+	/* Unordered data chunks sent and received */
+	__u64 ouodchunks;
+	__u64 iuodchunks;
+	/* Ordered data chunks sent and received */
+	__u64 oodchunks;
+	__u64 iodchunks;
+	/* Control chunks sent and received */
+	__u64 octrlchunks;
+	__u64 ictrlchunks;
 };
 
 /* RFC2960
@@ -1448,12 +1363,6 @@ struct sctp_association {
 
 	/* This is all information about our peer.  */
 	struct {
-		/* rwnd
-		 *
-		 * Peer Rwnd   : Current calculated value of the peer's rwnd.
-		 */
-		__u32 rwnd;
-
 		/* transport_addr_list
 		 *
 		 * Peer	       : A list of SCTP transport addresses that the
@@ -1470,6 +1379,12 @@ struct sctp_association {
 		 * It is a list of SCTP_transport's.
 		 */
 		struct list_head transport_addr_list;
+
+		/* rwnd
+		 *
+		 * Peer Rwnd   : Current calculated value of the peer's rwnd.
+		 */
+		__u32 rwnd;
 
 		/* transport_count
 		 *
@@ -1553,38 +1468,40 @@ struct sctp_association {
 		 */
 		struct sctp_tsnmap tsn_map;
 
-		/* Ack State   : This flag indicates if the next received
+		/* This mask is used to disable sending the ASCONF chunk
+		 * with specified parameter to peer.
+		 */
+		__be16 addip_disabled_mask;
+
+		/* These are capabilities which our peer advertised.  */
+		__u8	ecn_capable:1,      /* Can peer do ECN? */
+			ipv4_address:1,     /* Peer understands IPv4 addresses? */
+			ipv6_address:1,     /* Peer understands IPv6 addresses? */
+			hostname_address:1, /* Peer understands DNS addresses? */
+			asconf_capable:1,   /* Does peer support ADDIP? */
+			prsctp_capable:1,   /* Can peer do PR-SCTP? */
+			auth_capable:1;     /* Is peer doing SCTP-AUTH? */
+
+		/* sack_needed : This flag indicates if the next received
 		 *             : packet is to be responded to with a
-		 *             : SACK. This is initializedto 0.  When a packet
-		 *             : is received it is incremented. If this value
+		 *             : SACK. This is initialized to 0.  When a packet
+		 *             : is received sack_cnt is incremented. If this value
 		 *             : reaches 2 or more, a SACK is sent and the
 		 *             : value is reset to 0. Note: This is used only
 		 *             : when no DATA chunks are received out of
 		 *             : order.  When DATA chunks are out of order,
 		 *             : SACK's are not delayed (see Section 6).
 		 */
-		__u8    sack_needed;     /* Do we need to sack the peer? */
+		__u8    sack_needed:1,     /* Do we need to sack the peer? */
+			sack_generation:1,
+			zero_window_announced:1;
 		__u32	sack_cnt;
-
-		/* These are capabilities which our peer advertised.  */
-		__u8	ecn_capable:1,	    /* Can peer do ECN? */
-			ipv4_address:1,	    /* Peer understands IPv4 addresses? */
-			ipv6_address:1,	    /* Peer understands IPv6 addresses? */
-			hostname_address:1, /* Peer understands DNS addresses? */
-			asconf_capable:1,   /* Does peer support ADDIP? */
-			prsctp_capable:1,   /* Can peer do PR-SCTP? */
-			auth_capable:1;	    /* Is peer doing SCTP-AUTH? */
 
 		__u32   adaptation_ind;	 /* Adaptation Code point. */
 
-		/* This mask is used to disable sending the ASCONF chunk
-		 * with specified parameter to peer.
-		 */
-		__be16 addip_disabled_mask;
-
 		struct sctp_inithdr_host i;
-		int cookie_len;
 		void *cookie;
+		int cookie_len;
 
 		/* ADDIP Section 4.2 Upon reception of an ASCONF Chunk.
 		 * C1) ... "Peer-Serial-Number'. This value MUST be initialized to the
@@ -1616,13 +1533,13 @@ struct sctp_association {
 	 */
 	sctp_state_t state;
 
-	/* The cookie life I award for any cookie.  */
-	struct timeval cookie_life;
-
 	/* Overall     : The overall association error count.
 	 * Error Count : [Clear this any time I get something.]
 	 */
 	int overall_error_count;
+
+	/* The cookie life I award for any cookie.  */
+	ktime_t cookie_life;
 
 	/* These are the association's initial, max, and min RTO values.
 	 * These values will be initialized by system defaults, but can
@@ -1640,6 +1557,12 @@ struct sctp_association {
 	 * modified by the SCTP_ASSOCINFO socket option.
 	 */
 	int max_retrans;
+
+	/* This is the partially failed retrans value for the transport
+	 * and will be initialized from the assocs value.  This can be
+	 * changed using the SCTP_PEER_ADDR_THLDS socket option
+	 */
+	int pf_retrans;
 
 	/* Maximum number of times the endpoint will retransmit INIT  */
 	__u16 max_init_attempts;
@@ -1672,10 +1595,9 @@ struct sctp_association {
 	/* Flags controlling Heartbeat, SACK delay, and Path MTU Discovery. */
 	__u32 param_flags;
 
+	__u32 sackfreq;
 	/* SACK delay timeout */
 	unsigned long sackdelay;
-	__u32 sackfreq;
-
 
 	unsigned long timeouts[SCTP_NUM_TIMEOUT_TYPES];
 	struct timer_list timers[SCTP_NUM_TIMEOUT_TYPES];
@@ -1683,11 +1605,11 @@ struct sctp_association {
 	/* Transport to which SHUTDOWN chunk was last sent.  */
 	struct sctp_transport *shutdown_last_sent_to;
 
-	/* How many times have we resent a SHUTDOWN */
-	int shutdown_retries;
-
 	/* Transport to which INIT chunk was last sent.  */
 	struct sctp_transport *init_last_sent_to;
+
+	/* How many times have we resent a SHUTDOWN */
+	int shutdown_retries;
 
 	/* Next TSN    : The next TSN number to be assigned to a new
 	 *	       : DATA chunk.  This is sent in the INIT or INIT
@@ -1714,6 +1636,12 @@ struct sctp_association {
 
 	/* Highest TSN that is acknowledged by incoming SACKs. */
 	__u32 highest_sacked;
+
+	/* TSN marking the fast recovery exit point */
+	__u32 fast_recovery_exit;
+
+	/* Flag to track the current fast recovery state */
+	__u8 fast_recovery;
 
 	/* The number of unacknowledged data chunks.  Reported through
 	 * the SCTP_STATUS sockopt.
@@ -1799,12 +1727,6 @@ struct sctp_association {
 
 	/* How many duplicated TSNs have we seen?  */
 	int numduptsns;
-
-	/* Number of seconds of idle time before an association is closed.
-	 * In the association context, this is really used as a boolean
-	 * since the real timeout is stored in the timeouts array
-	 */
-	__u32 autoclose;
 
 	/* These are to support
 	 * "SCTP Extensions for Dynamic Reconfiguration of IP Addresses
@@ -1893,6 +1815,9 @@ struct sctp_association {
 	 * after reaching 4294967295.
 	 */
 	__u32 addip_serial;
+	int src_out_of_asoc_ok;
+	union sctp_addr *asconf_addr_del_pending;
+	struct sctp_transport *new_transport;
 
 	/* SCTP AUTH: list of the endpoint shared keys.  These
 	 * keys are provided out of band by the user applicaton
@@ -1914,6 +1839,8 @@ struct sctp_association {
 
 	__u8 need_ecne:1,	/* Need to send an ECNE Chunk? */
 	     temp:1;		/* Is it a temporary association? */
+
+	struct sctp_priv_assoc_stats stats;
 };
 
 
@@ -1963,6 +1890,7 @@ void sctp_assoc_control_transport(struct sctp_association *,
 				  sctp_transport_cmd_t, sctp_sn_error_t);
 struct sctp_transport *sctp_assoc_lookup_tsn(struct sctp_association *, __u32);
 struct sctp_transport *sctp_assoc_is_match(struct sctp_association *,
+					   struct net *,
 					   const union sctp_addr *,
 					   const union sctp_addr *);
 void sctp_assoc_migrate(struct sctp_association *, struct sock *);
@@ -1971,9 +1899,9 @@ void sctp_assoc_update(struct sctp_association *old,
 
 __u32 sctp_association_get_next_tsn(struct sctp_association *);
 
-void sctp_assoc_sync_pmtu(struct sctp_association *);
-void sctp_assoc_rwnd_increase(struct sctp_association *, unsigned);
-void sctp_assoc_rwnd_decrease(struct sctp_association *, unsigned);
+void sctp_assoc_sync_pmtu(struct sock *, struct sctp_association *);
+void sctp_assoc_rwnd_increase(struct sctp_association *, unsigned int);
+void sctp_assoc_rwnd_decrease(struct sctp_association *, unsigned int);
 void sctp_assoc_set_primary(struct sctp_association *,
 			    struct sctp_transport *);
 void sctp_assoc_del_nonprimary_peers(struct sctp_association *,
@@ -1988,7 +1916,7 @@ void sctp_assoc_clean_asconf_ack_cache(const struct sctp_association *asoc);
 struct sctp_chunk *sctp_assoc_lookup_asconf_ack(
 					const struct sctp_association *asoc,
 					__be32 serial);
-
+void sctp_asconf_queue_teardown(struct sctp_association *asoc);
 
 int sctp_cmp_addr_exact(const union sctp_addr *ss1,
 			const union sctp_addr *ss2);
@@ -1997,7 +1925,8 @@ struct sctp_chunk *sctp_get_ecne_prepend(struct sctp_association *asoc);
 /* A convenience structure to parse out SCTP specific CMSGs. */
 typedef struct sctp_cmsgs {
 	struct sctp_initmsg *init;
-	struct sctp_sndrcvinfo *info;
+	struct sctp_sndrcvinfo *srinfo;
+	struct sctp_sndinfo *sinfo;
 } sctp_cmsgs_t;
 
 /* Structure for tracking memory objects */

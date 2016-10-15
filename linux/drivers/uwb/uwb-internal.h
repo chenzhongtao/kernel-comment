@@ -28,7 +28,6 @@
 #ifndef __UWB_INTERNAL_H__
 #define __UWB_INTERNAL_H__
 
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/uwb.h>
@@ -56,7 +55,8 @@ static inline struct uwb_rc *__uwb_rc_get(struct uwb_rc *rc)
 
 static inline void __uwb_rc_put(struct uwb_rc *rc)
 {
-	uwb_dev_put(&rc->uwb_dev);
+	if (rc)
+		uwb_dev_put(&rc->uwb_dev);
 }
 
 extern int uwb_rc_reset(struct uwb_rc *rc);
@@ -172,7 +172,8 @@ struct uwb_rsv_alloc_info {
 	int interval;
 };
 
-int uwb_rsv_find_best_allocation(struct uwb_rsv *rsv, struct uwb_mas_bm *available, 
+int uwb_rsv_find_best_allocation(struct uwb_rsv *rsv,
+				 struct uwb_mas_bm *available,
 				 struct uwb_mas_bm *result);
 void uwb_rsv_handle_drp_avail_change(struct uwb_rc *rc);
 /*
@@ -313,6 +314,7 @@ int uwb_radio_force_channel(struct uwb_rc *rc, int channel);
 
 /* -- UWB Sysfs representation */
 extern struct class uwb_rc_class;
+extern struct bus_type uwb_bus_type;
 extern struct device_attribute dev_attr_mac_address;
 extern struct device_attribute dev_attr_beacon;
 extern struct device_attribute dev_attr_scan;
@@ -366,12 +368,12 @@ struct dentry *uwb_dbg_create_pal_dir(struct uwb_pal *pal);
 
 static inline void uwb_dev_lock(struct uwb_dev *uwb_dev)
 {
-	down(&uwb_dev->dev.sem);
+	device_lock(&uwb_dev->dev);
 }
 
 static inline void uwb_dev_unlock(struct uwb_dev *uwb_dev)
 {
-	up(&uwb_dev->dev.sem);
+	device_unlock(&uwb_dev->dev);
 }
 
 #endif /* #ifndef __UWB_INTERNAL_H__ */

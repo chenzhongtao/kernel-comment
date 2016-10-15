@@ -1,30 +1,16 @@
 /*
- * linux/fs/nfsd/nfs3proc.c
- *
  * Process version 3 NFS requests.
  *
  * Copyright (C) 1996, 1997, 1998 Olaf Kirch <okir@monad.swb.de>
  */
 
-#include <linux/linkage.h>
-#include <linux/time.h>
-#include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/ext2_fs.h>
-#include <linux/stat.h>
-#include <linux/fcntl.h>
-#include <linux/net.h>
-#include <linux/in.h>
-#include <linux/unistd.h>
-#include <linux/slab.h>
-#include <linux/major.h>
 #include <linux/magic.h>
 
-#include <linux/sunrpc/svc.h>
-#include <linux/nfsd/nfsd.h>
-#include <linux/nfsd/cache.h>
-#include <linux/nfsd/xdr3.h>
-#include <linux/nfs3.h>
+#include "cache.h"
+#include "xdr3.h"
+#include "vfs.h"
 
 #define NFSDDBG_FACILITY		NFSDDBG_PROC
 
@@ -57,7 +43,6 @@ static __be32
 nfsd3_proc_getattr(struct svc_rqst *rqstp, struct nfsd_fhandle  *argp,
 					   struct nfsd3_attrstat *resp)
 {
-	int	err;
 	__be32	nfserr;
 
 	dprintk("nfsd: GETATTR(3)  %s\n",
@@ -69,9 +54,7 @@ nfsd3_proc_getattr(struct svc_rqst *rqstp, struct nfsd_fhandle  *argp,
 	if (nfserr)
 		RETURN_STATUS(nfserr);
 
-	err = vfs_getattr(resp->fh.fh_export->ex_path.mnt,
-			  resp->fh.fh_dentry, &resp->stat);
-	nfserr = nfserrno(err);
+	nfserr = fh_getattr(&resp->fh, &resp->stat);
 
 	RETURN_STATUS(nfserr);
 }
@@ -165,29 +148,25 @@ nfsd3_proc_read(struct svc_rqst *rqstp, struct nfsd3_readargs *argp,
 	__be32	nfserr;
 	u32	max_blocksize = svc_max_payload(rqstp);
 
-	dprintk("nfsd: READ(3) %s %lu bytes at %lu\n",
+	dprintk("nfsd: READ(3) %s %lu bytes at %Lu\n",
 				SVCFH_fmt(&argp->fh),
 				(unsigned long) argp->count,
-				(unsigned long) argp->offset);
+				(unsigned long long) argp->offset);
 
 	/* Obtain buffer pointer for payload.
 	 * 1 (status) + 22 (post_op_attr) + 1 (count) + 1 (eof)
 	 * + 1 (xdr opaque byte count) = 26
 	 */
-
-	resp->count = argp->count;
-	if (max_blocksize < resp->count)
-		resp->count = max_blocksize;
-
+	resp->count = min(argp->count, max_blocksize);
 	svc_reserve_auth(rqstp, ((1 + NFS3_POST_OP_ATTR_WORDS + 3)<<2) + resp->count +4);
 
 	fh_copy(&resp->fh, &argp->fh);
-	nfserr = nfsd_read(rqstp, &resp->fh, NULL,
+	nfserr = nfsd_read(rqstp, &resp->fh,
 				  argp->offset,
 			   	  rqstp->rq_vec, argp->vlen,
 				  &resp->count);
 	if (nfserr == 0) {
-		struct inode	*inode = resp->fh.fh_dentry->d_inode;
+		struct inode	*inode = d_inode(resp->fh.fh_dentry);
 
 		resp->eof = (argp->offset + resp->count) >= inode->i_size;
 	}
@@ -205,10 +184,10 @@ nfsd3_proc_write(struct svc_rqst *rqstp, struct nfsd3_writeargs *argp,
 	__be32	nfserr;
 	unsigned long cnt = argp->len;
 
-	dprintk("nfsd: WRITE(3)    %s %d bytes at %ld%s\n",
+	dprintk("nfsd: WRITE(3)    %s %d bytes at %Lu%s\n",
 				SVCFH_fmt(&argp->fh),
 				argp->len,
-				(unsigned long) argp->offset,
+				(unsigned long long) argp->offset,
 				argp->stable? " stable" : "");
 
 	fh_copy(&resp->fh, &argp->fh);
@@ -244,11 +223,6 @@ nfsd3_proc_create(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 	newfhp = fh_init(&resp->fh, NFS3_FHSIZE);
 	attr   = &argp->attrs;
 
-	/* Get the directory inode */
-	nfserr = fh_verify(rqstp, dirfhp, S_IFDIR, NFSD_MAY_CREATE);
-	if (nfserr)
-		RETURN_STATUS(nfserr);
-
 	/* Unfudge the mode bits */
 	attr->ia_mode &= ~S_IFMT;
 	if (!(attr->ia_valid & ATTR_MODE)) { 
@@ -259,9 +233,9 @@ nfsd3_proc_create(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 	}
 
 	/* Now create the file and set attributes */
-	nfserr = nfsd_create_v3(rqstp, dirfhp, argp->name, argp->len,
+	nfserr = do_nfsd_create(rqstp, dirfhp, argp->name, argp->len,
 				attr, newfhp,
-				argp->createmode, argp->verf, NULL, NULL);
+				argp->createmode, (u32 *)argp->verf, NULL, NULL);
 
 	RETURN_STATUS(nfserr);
 }
@@ -285,7 +259,7 @@ nfsd3_proc_mkdir(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 	fh_init(&resp->fh, NFS3_FHSIZE);
 	nfserr = nfsd_create(rqstp, &resp->dirfh, argp->name, argp->len,
 				    &argp->attrs, S_IFDIR, 0, &resp->fh);
-
+	fh_unlock(&resp->dirfh);
 	RETURN_STATUS(nfserr);
 }
 
@@ -303,8 +277,7 @@ nfsd3_proc_symlink(struct svc_rqst *rqstp, struct nfsd3_symlinkargs *argp,
 	fh_copy(&resp->dirfh, &argp->ffh);
 	fh_init(&resp->fh, NFS3_FHSIZE);
 	nfserr = nfsd_symlink(rqstp, &resp->dirfh, argp->fname, argp->flen,
-						   argp->tname, argp->tlen,
-						   &resp->fh, &argp->attrs);
+						   argp->tname, &resp->fh);
 	RETURN_STATUS(nfserr);
 }
 
@@ -341,7 +314,7 @@ nfsd3_proc_mknod(struct svc_rqst *rqstp, struct nfsd3_mknodargs *argp,
 	type = nfs3_ftypes[argp->ftype];
 	nfserr = nfsd_create(rqstp, &resp->dirfh, argp->name, argp->len,
 				    &argp->attrs, type, rdev, &resp->fh);
-
+	fh_unlock(&resp->dirfh);
 	RETURN_STATUS(nfserr);
 }
 
@@ -362,6 +335,7 @@ nfsd3_proc_remove(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 	/* Unlink. -S_IFDIR means file must not be a directory */
 	fh_copy(&resp->fh, &argp->fh);
 	nfserr = nfsd_unlink(rqstp, &resp->fh, -S_IFDIR, argp->name, argp->len);
+	fh_unlock(&resp->fh);
 	RETURN_STATUS(nfserr);
 }
 
@@ -381,6 +355,7 @@ nfsd3_proc_rmdir(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 
 	fh_copy(&resp->fh, &argp->fh);
 	nfserr = nfsd_unlink(rqstp, &resp->fh, S_IFDIR, argp->name, argp->len);
+	fh_unlock(&resp->fh);
 	RETURN_STATUS(nfserr);
 }
 
@@ -472,7 +447,7 @@ nfsd3_proc_readdirplus(struct svc_rqst *rqstp, struct nfsd3_readdirargs *argp,
 	__be32	nfserr;
 	int	count = 0;
 	loff_t	offset;
-	int	i;
+	struct page **p;
 	caddr_t	page_addr = NULL;
 
 	dprintk("nfsd: READDIR+(3) %s %d bytes at %d\n",
@@ -491,13 +466,21 @@ nfsd3_proc_readdirplus(struct svc_rqst *rqstp, struct nfsd3_readdirargs *argp,
 	resp->buflen = resp->count;
 	resp->rqstp = rqstp;
 	offset = argp->cookie;
+
+	nfserr = fh_verify(rqstp, &resp->fh, S_IFDIR, NFSD_MAY_NOP);
+	if (nfserr)
+		RETURN_STATUS(nfserr);
+
+	if (resp->fh.fh_export->ex_flags & NFSEXP_NOREADDIRPLUS)
+		RETURN_STATUS(nfserr_notsupp);
+
 	nfserr = nfsd_readdir(rqstp, &resp->fh,
 				     &offset,
 				     &resp->common,
 				     nfs3svc_encode_entry_plus);
 	memcpy(resp->verf, argp->verf, 8);
-	for (i=1; i<rqstp->rq_resused ; i++) {
-		page_addr = page_address(rqstp->rq_respages[i]);
+	for (p = rqstp->rq_respages + 1; p < rqstp->rq_next_page; p++) {
+		page_addr = page_address(*p);
 
 		if (((caddr_t)resp->buffer >= page_addr) &&
 		    ((caddr_t)resp->buffer < page_addr + PAGE_SIZE)) {
@@ -568,7 +551,7 @@ nfsd3_proc_fsinfo(struct svc_rqst * rqstp, struct nfsd_fhandle    *argp,
 	 * different read/write sizes for file systems known to have
 	 * problems with large blocks */
 	if (nfserr == 0) {
-		struct super_block *sb = argp->fh.fh_dentry->d_inode->i_sb;
+		struct super_block *sb = d_inode(argp->fh.fh_dentry)->i_sb;
 
 		/* Note that we don't care for remote fs's here */
 		if (sb->s_magic == MSDOS_SUPER_MAGIC) {
@@ -604,7 +587,7 @@ nfsd3_proc_pathconf(struct svc_rqst * rqstp, struct nfsd_fhandle      *argp,
 	nfserr = fh_verify(rqstp, &argp->fh, 0, NFSD_MAY_NOP);
 
 	if (nfserr == 0) {
-		struct super_block *sb = argp->fh.fh_dentry->d_inode->i_sb;
+		struct super_block *sb = d_inode(argp->fh.fh_dentry)->i_sb;
 
 		/* Note that we don't care for remote fs's here */
 		switch (sb->s_magic) {

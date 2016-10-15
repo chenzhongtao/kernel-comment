@@ -18,8 +18,8 @@
  */
 
 #include <linux/usb.h>
+#include <linux/usb/hcd.h>
 #include "usb.h"
-#include "hcd.h"
 
 static inline const char *plural(int n)
 {
@@ -46,6 +46,9 @@ int usb_choose_configuration(struct usb_device *udev)
 	int num_configs;
 	int insufficient_power = 0;
 	struct usb_host_config *c, *best;
+
+	if (usb_device_is_owned(udev))
+		return 0;
 
 	best = NULL;
 	c = udev->config;
@@ -97,7 +100,7 @@ int usb_choose_configuration(struct usb_device *udev)
 		 */
 
 		/* Rule out configs that draw too much bus current */
-		if (c->desc.bMaxPower * 2 > udev->bus_mA) {
+		if (usb_get_max_power(udev, c) > udev->bus_mA) {
 			insufficient_power++;
 			continue;
 		}
@@ -105,8 +108,10 @@ int usb_choose_configuration(struct usb_device *udev)
 		/* When the first config's first interface is one of Microsoft's
 		 * pet nonstandard Ethernet-over-USB protocols, ignore it unless
 		 * this kernel has enabled the necessary host side driver.
+		 * But: Don't ignore it if it's the only config.
 		 */
-		if (i == 0 && desc && (is_rndis(desc) || is_activesync(desc))) {
+		if (i == 0 && num_configs > 1 && desc &&
+				(is_rndis(desc) || is_activesync(desc))) {
 #if !defined(CONFIG_USB_NET_RNDIS_HOST) && !defined(CONFIG_USB_NET_RNDIS_HOST_MODULE)
 			continue;
 #else
@@ -120,7 +125,7 @@ int usb_choose_configuration(struct usb_device *udev)
 		 * than a vendor-specific driver. */
 		else if (udev->descriptor.bDeviceClass !=
 						USB_CLASS_VENDOR_SPEC &&
-				(!desc || desc->bInterfaceClass !=
+				(desc && desc->bInterfaceClass !=
 						USB_CLASS_VENDOR_SPEC)) {
 			best = c;
 			break;
@@ -139,7 +144,7 @@ int usb_choose_configuration(struct usb_device *udev)
 
 	if (best) {
 		i = best->desc.bConfigurationValue;
-		dev_info(&udev->dev,
+		dev_dbg(&udev->dev,
 			"configuration #%d chosen from %d choice%s\n",
 			i, num_configs, plural(num_configs));
 	} else {
@@ -150,6 +155,7 @@ int usb_choose_configuration(struct usb_device *udev)
 	}
 	return i;
 }
+EXPORT_SYMBOL_GPL(usb_choose_configuration);
 
 static int generic_probe(struct usb_device *udev)
 {
@@ -158,15 +164,13 @@ static int generic_probe(struct usb_device *udev)
 	/* Choose and set the configuration.  This registers the interfaces
 	 * with the driver core and lets interface drivers bind to them.
 	 */
-	if (usb_device_is_owned(udev))
-		;		/* Don't configure if the device is owned */
-	else if (udev->authorized == 0)
+	if (udev->authorized == 0)
 		dev_err(&udev->dev, "Device is not authorized for usage\n");
 	else {
 		c = usb_choose_configuration(udev);
 		if (c >= 0) {
 			err = usb_set_configuration(udev, c);
-			if (err) {
+			if (err && err != -ENODEV) {
 				dev_err(&udev->dev, "can't set config #%d, error %d\n",
 					c, err);
 				/* This need not be fatal.  The user can try to

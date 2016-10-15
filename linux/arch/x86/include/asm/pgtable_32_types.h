@@ -26,7 +26,7 @@
  */
 #define VMALLOC_OFFSET	(8 * 1024 * 1024)
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 extern bool __vmalloc_start_set; /* set once high_memory is set */
 #endif
 
@@ -37,7 +37,7 @@ extern bool __vmalloc_start_set; /* set once high_memory is set */
 #define LAST_PKMAP 1024
 #endif
 
-#define PKMAP_BASE ((FIXADDR_BOOT_START - PAGE_SIZE * (LAST_PKMAP + 1))	\
+#define PKMAP_BASE ((FIXADDR_START - PAGE_SIZE * (LAST_PKMAP + 1))	\
 		    & PMD_MASK)
 
 #ifdef CONFIG_HIGHMEM

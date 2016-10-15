@@ -20,6 +20,7 @@
  */
 
 #include <linux/time.h>
+#include <linux/gcd.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/timer.h>
@@ -27,22 +28,6 @@
 /*
  *  Timer functions
  */
-
-/* Greatest common divisor */
-static unsigned long gcd(unsigned long a, unsigned long b)
-{
-	unsigned long r;
-	if (a < b) {
-		r = a;
-		a = b;
-		b = r;
-	}
-	while ((r = a % b) != 0) {
-		a = b;
-		b = r;
-	}
-	return b;
-}
 
 void snd_pcm_timer_resolution_change(struct snd_pcm_substream *substream)
 {
@@ -68,7 +53,9 @@ void snd_pcm_timer_resolution_change(struct snd_pcm_substream *substream)
 		post *= 2;
 	}
 	if (rate == 0) {
-		snd_printk(KERN_ERR "pcm timer resolution out of range (rate = %u, period_size = %lu)\n", runtime->rate, runtime->period_size);
+		pcm_err(substream->pcm,
+			"pcm timer resolution out of range (rate = %u, period_size = %lu)\n",
+			runtime->rate, runtime->period_size);
 		runtime->timer_resolution = -1;
 		return;
 	}

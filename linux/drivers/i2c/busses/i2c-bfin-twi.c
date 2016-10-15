@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/i2c.h>
+#include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/timer.h>
@@ -19,12 +20,12 @@
 #include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/delay.h>
+#include <linux/i2c/bfin_twi.h>
 
-#include <asm/blackfin.h>
-#include <asm/portmux.h>
 #include <asm/irq.h>
-
-#define POLL_TIMEOUT       (2 * HZ)
+#include <asm/portmux.h>
+#include <asm/bfin_twi.h>
 
 /* SMBus mode*/
 #define TWI_I2C_MODE_STANDARD		1
@@ -32,94 +33,45 @@
 #define TWI_I2C_MODE_COMBINED		3
 #define TWI_I2C_MODE_REPEAT		4
 
-struct bfin_twi_iface {
-	int			irq;
-	spinlock_t		lock;
-	char			read_write;
-	u8			command;
-	u8			*transPtr;
-	int			readNum;
-	int			writeNum;
-	int			cur_mode;
-	int			manual_stop;
-	int			result;
-	int			timeout_count;
-	struct timer_list	timeout_timer;
-	struct i2c_adapter	adap;
-	struct completion	complete;
-	struct i2c_msg 		*pmsg;
-	int			msg_num;
-	int			cur_msg;
-	u16			saved_clkdiv;
-	u16			saved_control;
-	void __iomem		*regs_base;
-};
-
-
-#define DEFINE_TWI_REG(reg, off) \
-static inline u16 read_##reg(struct bfin_twi_iface *iface) \
-	{ return bfin_read16(iface->regs_base + (off)); } \
-static inline void write_##reg(struct bfin_twi_iface *iface, u16 v) \
-	{ bfin_write16(iface->regs_base + (off), v); }
-
-DEFINE_TWI_REG(CLKDIV, 0x00)
-DEFINE_TWI_REG(CONTROL, 0x04)
-DEFINE_TWI_REG(SLAVE_CTL, 0x08)
-DEFINE_TWI_REG(SLAVE_STAT, 0x0C)
-DEFINE_TWI_REG(SLAVE_ADDR, 0x10)
-DEFINE_TWI_REG(MASTER_CTL, 0x14)
-DEFINE_TWI_REG(MASTER_STAT, 0x18)
-DEFINE_TWI_REG(MASTER_ADDR, 0x1C)
-DEFINE_TWI_REG(INT_STAT, 0x20)
-DEFINE_TWI_REG(INT_MASK, 0x24)
-DEFINE_TWI_REG(FIFO_CTL, 0x28)
-DEFINE_TWI_REG(FIFO_STAT, 0x2C)
-DEFINE_TWI_REG(XMT_DATA8, 0x80)
-DEFINE_TWI_REG(XMT_DATA16, 0x84)
-DEFINE_TWI_REG(RCV_DATA8, 0x88)
-DEFINE_TWI_REG(RCV_DATA16, 0x8C)
-
-static const u16 pin_req[2][3] = {
-	{P_TWI0_SCL, P_TWI0_SDA, 0},
-	{P_TWI1_SCL, P_TWI1_SDA, 0},
-};
-
-static void bfin_twi_handle_interrupt(struct bfin_twi_iface *iface)
+static void bfin_twi_handle_interrupt(struct bfin_twi_iface *iface,
+					unsigned short twi_int_status)
 {
-	unsigned short twi_int_status = read_INT_STAT(iface);
 	unsigned short mast_stat = read_MASTER_STAT(iface);
 
 	if (twi_int_status & XMTSERV) {
+		if (iface->writeNum <= 0) {
+			/* start receive immediately after complete sending in
+			 * combine mode.
+			 */
+			if (iface->cur_mode == TWI_I2C_MODE_COMBINED)
+				write_MASTER_CTL(iface,
+					read_MASTER_CTL(iface) | MDIR);
+			else if (iface->manual_stop)
+				write_MASTER_CTL(iface,
+					read_MASTER_CTL(iface) | STOP);
+			else if (iface->cur_mode == TWI_I2C_MODE_REPEAT &&
+				iface->cur_msg + 1 < iface->msg_num) {
+				if (iface->pmsg[iface->cur_msg + 1].flags &
+					I2C_M_RD)
+					write_MASTER_CTL(iface,
+						read_MASTER_CTL(iface) |
+						MDIR);
+				else
+					write_MASTER_CTL(iface,
+						read_MASTER_CTL(iface) &
+						~MDIR);
+			}
+		}
 		/* Transmit next data */
-		if (iface->writeNum > 0) {
+		while (iface->writeNum > 0 &&
+			(read_FIFO_STAT(iface) & XMTSTAT) != XMT_FULL) {
 			write_XMT_DATA8(iface, *(iface->transPtr++));
 			iface->writeNum--;
 		}
-		/* start receive immediately after complete sending in
-		 * combine mode.
-		 */
-		else if (iface->cur_mode == TWI_I2C_MODE_COMBINED)
-			write_MASTER_CTL(iface,
-				read_MASTER_CTL(iface) | MDIR | RSTART);
-		else if (iface->manual_stop)
-			write_MASTER_CTL(iface,
-				read_MASTER_CTL(iface) | STOP);
-		else if (iface->cur_mode == TWI_I2C_MODE_REPEAT &&
-		         iface->cur_msg + 1 < iface->msg_num) {
-			if (iface->pmsg[iface->cur_msg + 1].flags & I2C_M_RD)
-				write_MASTER_CTL(iface,
-					read_MASTER_CTL(iface) | RSTART | MDIR);
-			else
-				write_MASTER_CTL(iface,
-					(read_MASTER_CTL(iface) | RSTART) & ~MDIR);
-		}
-		SSYNC();
-		/* Clear status */
-		write_INT_STAT(iface, XMTSERV);
-		SSYNC();
 	}
 	if (twi_int_status & RCVSERV) {
-		if (iface->readNum > 0) {
+		while (iface->readNum > 0 &&
+			(read_FIFO_STAT(iface) & RCVSTAT)) {
 			/* Receive next data */
 			*(iface->transPtr) = read_RCV_DATA8(iface);
 			if (iface->cur_mode == TWI_I2C_MODE_COMBINED) {
@@ -135,57 +87,85 @@ static void bfin_twi_handle_interrupt(struct bfin_twi_iface *iface)
 			}
 			iface->transPtr++;
 			iface->readNum--;
-		} else if (iface->manual_stop) {
-			write_MASTER_CTL(iface,
-				read_MASTER_CTL(iface) | STOP);
-			SSYNC();
-		} else if (iface->cur_mode == TWI_I2C_MODE_REPEAT &&
-		           iface->cur_msg + 1 < iface->msg_num) {
-			if (iface->pmsg[iface->cur_msg + 1].flags & I2C_M_RD)
-				write_MASTER_CTL(iface,
-					read_MASTER_CTL(iface) | RSTART | MDIR);
-			else
-				write_MASTER_CTL(iface,
-					(read_MASTER_CTL(iface) | RSTART) & ~MDIR);
-			SSYNC();
 		}
-		/* Clear interrupt source */
-		write_INT_STAT(iface, RCVSERV);
-		SSYNC();
+
+		if (iface->readNum == 0) {
+			if (iface->manual_stop) {
+				/* Temporary workaround to avoid possible bus stall -
+				 * Flush FIFO before issuing the STOP condition
+				 */
+				read_RCV_DATA16(iface);
+				write_MASTER_CTL(iface,
+					read_MASTER_CTL(iface) | STOP);
+			} else if (iface->cur_mode == TWI_I2C_MODE_REPEAT &&
+					iface->cur_msg + 1 < iface->msg_num) {
+				if (iface->pmsg[iface->cur_msg + 1].flags & I2C_M_RD)
+					write_MASTER_CTL(iface,
+						read_MASTER_CTL(iface) | MDIR);
+				else
+					write_MASTER_CTL(iface,
+						read_MASTER_CTL(iface) & ~MDIR);
+			}
+		}
 	}
 	if (twi_int_status & MERR) {
-		write_INT_STAT(iface, MERR);
 		write_INT_MASK(iface, 0);
 		write_MASTER_STAT(iface, 0x3e);
 		write_MASTER_CTL(iface, 0);
-		SSYNC();
 		iface->result = -EIO;
-		/* if both err and complete int stats are set, return proper
-		 * results.
+
+		if (mast_stat & LOSTARB)
+			dev_dbg(&iface->adap.dev, "Lost Arbitration\n");
+		if (mast_stat & ANAK)
+			dev_dbg(&iface->adap.dev, "Address Not Acknowledged\n");
+		if (mast_stat & DNAK)
+			dev_dbg(&iface->adap.dev, "Data Not Acknowledged\n");
+		if (mast_stat & BUFRDERR)
+			dev_dbg(&iface->adap.dev, "Buffer Read Error\n");
+		if (mast_stat & BUFWRERR)
+			dev_dbg(&iface->adap.dev, "Buffer Write Error\n");
+
+		/* Faulty slave devices, may drive SDA low after a transfer
+		 * finishes. To release the bus this code generates up to 9
+		 * extra clocks until SDA is released.
 		 */
-		if (twi_int_status & MCOMP) {
-			write_INT_STAT(iface, MCOMP);
-			write_INT_MASK(iface, 0);
+
+		if (read_MASTER_STAT(iface) & SDASEN) {
+			int cnt = 9;
+			do {
+				write_MASTER_CTL(iface, SCLOVR);
+				udelay(6);
+				write_MASTER_CTL(iface, 0);
+				udelay(6);
+			} while ((read_MASTER_STAT(iface) & SDASEN) && cnt--);
+
+			write_MASTER_CTL(iface, SDAOVR | SCLOVR);
+			udelay(6);
+			write_MASTER_CTL(iface, SDAOVR);
+			udelay(6);
 			write_MASTER_CTL(iface, 0);
-			SSYNC();
-			/* If it is a quick transfer, only address bug no data,
-			 * not an err, return 1.
-			 */
-			if (iface->writeNum == 0 && (mast_stat & BUFRDERR))
-				iface->result = 1;
-			/* If address not acknowledged return -1,
-			 * else return 0.
-			 */
-			else if (!(mast_stat & ANAK))
-				iface->result = 0;
 		}
+
+		/* If it is a quick transfer, only address without data,
+		 * not an err, return 1.
+		 */
+		if (iface->cur_mode == TWI_I2C_MODE_STANDARD &&
+			iface->transPtr == NULL &&
+			(twi_int_status & MCOMP) && (mast_stat & DNAK))
+			iface->result = 1;
+
 		complete(&iface->complete);
 		return;
 	}
 	if (twi_int_status & MCOMP) {
-		write_INT_STAT(iface, MCOMP);
-		SSYNC();
-		if (iface->cur_mode == TWI_I2C_MODE_COMBINED) {
+		if (twi_int_status & (XMTSERV | RCVSERV) &&
+			(read_MASTER_CTL(iface) & MEN) == 0 &&
+			(iface->cur_mode == TWI_I2C_MODE_REPEAT ||
+			iface->cur_mode == TWI_I2C_MODE_COMBINED)) {
+			iface->result = -1;
+			write_INT_MASK(iface, 0);
+			write_MASTER_CTL(iface, 0);
+		} else if (iface->cur_mode == TWI_I2C_MODE_COMBINED) {
 			if (iface->readNum == 0) {
 				/* set the read number to 1 and ask for manual
 				 * stop in block combine mode
@@ -206,9 +186,8 @@ static void bfin_twi_handle_interrupt(struct bfin_twi_iface *iface)
 			/* remove restart bit and enable master receive */
 			write_MASTER_CTL(iface,
 				read_MASTER_CTL(iface) & ~RSTART);
-			SSYNC();
 		} else if (iface->cur_mode == TWI_I2C_MODE_REPEAT &&
-				iface->cur_msg+1 < iface->msg_num) {
+				iface->cur_msg + 1 < iface->msg_num) {
 			iface->cur_msg++;
 			iface->transPtr = iface->pmsg[iface->cur_msg].buf;
 			iface->writeNum = iface->readNum =
@@ -225,32 +204,31 @@ static void bfin_twi_handle_interrupt(struct bfin_twi_iface *iface)
 					write_XMT_DATA8(iface,
 						*(iface->transPtr++));
 					iface->writeNum--;
-					SSYNC();
 				}
 			}
 
-			if (iface->pmsg[iface->cur_msg].len <= 255)
-					write_MASTER_CTL(iface,
+			if (iface->pmsg[iface->cur_msg].len <= 255) {
+				write_MASTER_CTL(iface,
 					(read_MASTER_CTL(iface) &
 					(~(0xff << 6))) |
-				(iface->pmsg[iface->cur_msg].len << 6));
-			else {
+					(iface->pmsg[iface->cur_msg].len << 6));
+				iface->manual_stop = 0;
+			} else {
 				write_MASTER_CTL(iface,
 					(read_MASTER_CTL(iface) |
 					(0xff << 6)));
 				iface->manual_stop = 1;
 			}
-			/* remove restart bit and enable master receive */
-			write_MASTER_CTL(iface,
-				read_MASTER_CTL(iface) & ~RSTART);
-			SSYNC();
+			/* remove restart bit before last message */
+			if (iface->cur_msg + 1 == iface->msg_num)
+				write_MASTER_CTL(iface,
+					read_MASTER_CTL(iface) & ~RSTART);
 		} else {
 			iface->result = 1;
 			write_INT_MASK(iface, 0);
 			write_MASTER_CTL(iface, 0);
-			SSYNC();
-			complete(&iface->complete);
 		}
+		complete(&iface->complete);
 	}
 }
 
@@ -259,38 +237,25 @@ static irqreturn_t bfin_twi_interrupt_entry(int irq, void *dev_id)
 {
 	struct bfin_twi_iface *iface = dev_id;
 	unsigned long flags;
+	unsigned short twi_int_status;
 
 	spin_lock_irqsave(&iface->lock, flags);
-	del_timer(&iface->timeout_timer);
-	bfin_twi_handle_interrupt(iface);
+	while (1) {
+		twi_int_status = read_INT_STAT(iface);
+		if (!twi_int_status)
+			break;
+		/* Clear interrupt status */
+		write_INT_STAT(iface, twi_int_status);
+		bfin_twi_handle_interrupt(iface, twi_int_status);
+	}
 	spin_unlock_irqrestore(&iface->lock, flags);
 	return IRQ_HANDLED;
 }
 
-static void bfin_twi_timeout(unsigned long data)
-{
-	struct bfin_twi_iface *iface = (struct bfin_twi_iface *)data;
-	unsigned long flags;
-
-	spin_lock_irqsave(&iface->lock, flags);
-	bfin_twi_handle_interrupt(iface);
-	if (iface->result == 0) {
-		iface->timeout_count--;
-		if (iface->timeout_count > 0) {
-			iface->timeout_timer.expires = jiffies + POLL_TIMEOUT;
-			add_timer(&iface->timeout_timer);
-		} else {
-			iface->result = -1;
-			complete(&iface->complete);
-		}
-	}
-	spin_unlock_irqrestore(&iface->lock, flags);
-}
-
 /*
- * Generic i2c master transfer entrypoint
+ * One i2c master transfer
  */
-static int bfin_twi_master_xfer(struct i2c_adapter *adap,
+static int bfin_twi_do_master_xfer(struct i2c_adapter *adap,
 				struct i2c_msg *msgs, int num)
 {
 	struct bfin_twi_iface *iface = adap->algo_data;
@@ -300,8 +265,8 @@ static int bfin_twi_master_xfer(struct i2c_adapter *adap,
 	if (!(read_CONTROL(iface) & TWI_ENA))
 		return -ENXIO;
 
-	while (read_MASTER_STAT(iface) & BUSBUSY)
-		yield();
+	if (read_MASTER_STAT(iface) & BUSBUSY)
+		return -EAGAIN;
 
 	iface->pmsg = msgs;
 	iface->msg_num = num;
@@ -313,12 +278,12 @@ static int bfin_twi_master_xfer(struct i2c_adapter *adap,
 		return -EINVAL;
 	}
 
-	iface->cur_mode = TWI_I2C_MODE_REPEAT;
+	if (iface->msg_num > 1)
+		iface->cur_mode = TWI_I2C_MODE_REPEAT;
 	iface->manual_stop = 0;
 	iface->transPtr = pmsg->buf;
 	iface->writeNum = iface->readNum = pmsg->len;
 	iface->result = 0;
-	iface->timeout_count = 10;
 	init_completion(&(iface->complete));
 	/* Set Transmit device address */
 	write_MASTER_ADDR(iface, pmsg->addr);
@@ -327,9 +292,7 @@ static int bfin_twi_master_xfer(struct i2c_adapter *adap,
 	 *  discarded before start a new operation.
 	 */
 	write_FIFO_CTL(iface, 0x3);
-	SSYNC();
 	write_FIFO_CTL(iface, 0);
-	SSYNC();
 
 	if (pmsg->flags & I2C_M_RD)
 		iface->read_write = I2C_SMBUS_READ;
@@ -339,7 +302,6 @@ static int bfin_twi_master_xfer(struct i2c_adapter *adap,
 		if (iface->writeNum > 0) {
 			write_XMT_DATA8(iface, *(iface->transPtr++));
 			iface->writeNum--;
-			SSYNC();
 		}
 	}
 
@@ -348,7 +310,6 @@ static int bfin_twi_master_xfer(struct i2c_adapter *adap,
 
 	/* Interrupt mask . Enable XMT, RCV interrupt */
 	write_INT_MASK(iface, MCOMP | MERR | RCVSERV | XMTSERV);
-	SSYNC();
 
 	if (pmsg->len <= 255)
 		write_MASTER_CTL(iface, pmsg->len << 6);
@@ -357,30 +318,41 @@ static int bfin_twi_master_xfer(struct i2c_adapter *adap,
 		iface->manual_stop = 1;
 	}
 
-	iface->timeout_timer.expires = jiffies + POLL_TIMEOUT;
-	add_timer(&iface->timeout_timer);
-
 	/* Master enable */
 	write_MASTER_CTL(iface, read_MASTER_CTL(iface) | MEN |
+		(iface->msg_num > 1 ? RSTART : 0) |
 		((iface->read_write == I2C_SMBUS_READ) ? MDIR : 0) |
 		((CONFIG_I2C_BLACKFIN_TWI_CLK_KHZ > 100) ? FAST : 0));
-	SSYNC();
 
-	wait_for_completion(&iface->complete);
+	while (!iface->result) {
+		if (!wait_for_completion_timeout(&iface->complete,
+			adap->timeout)) {
+			iface->result = -1;
+			dev_err(&adap->dev, "master transfer timeout\n");
+		}
+	}
 
-	rc = iface->result;
-
-	if (rc == 1)
-		return num;
+	if (iface->result == 1)
+		rc = iface->cur_msg + 1;
 	else
-		return rc;
+		rc = iface->result;
+
+	return rc;
 }
 
 /*
- * SMBus type transfer entrypoint
+ * Generic i2c master transfer entrypoint
  */
+static int bfin_twi_master_xfer(struct i2c_adapter *adap,
+				struct i2c_msg *msgs, int num)
+{
+	return bfin_twi_do_master_xfer(adap, msgs, num);
+}
 
-int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
+/*
+ * One I2C SMBus transfer
+ */
+int bfin_twi_do_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 			unsigned short flags, char read_write,
 			u8 command, int size, union i2c_smbus_data *data)
 {
@@ -390,8 +362,8 @@ int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 	if (!(read_CONTROL(iface) & TWI_ENA))
 		return -ENXIO;
 
-	while (read_MASTER_STAT(iface) & BUSBUSY)
-		yield();
+	if (read_MASTER_STAT(iface) & BUSBUSY)
+		return -EAGAIN;
 
 	iface->writeNum = 0;
 	iface->readNum = 0;
@@ -468,14 +440,12 @@ int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 	iface->manual_stop = 0;
 	iface->read_write = read_write;
 	iface->command = command;
-	iface->timeout_count = 10;
 	init_completion(&(iface->complete));
 
 	/* FIFO Initiation. Data in FIFO should be discarded before
 	 * start a new operation.
 	 */
 	write_FIFO_CTL(iface, 0x3);
-	SSYNC();
 	write_FIFO_CTL(iface, 0);
 
 	/* clear int stat */
@@ -483,10 +453,6 @@ int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 
 	/* Set Transmit device address */
 	write_MASTER_ADDR(iface, addr);
-	SSYNC();
-
-	iface->timeout_timer.expires = jiffies + POLL_TIMEOUT;
-	add_timer(&iface->timeout_timer);
 
 	switch (iface->cur_mode) {
 	case TWI_I2C_MODE_STANDARDSUB:
@@ -494,7 +460,6 @@ int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 		write_INT_MASK(iface, MCOMP | MERR |
 			((iface->read_write == I2C_SMBUS_READ) ?
 			RCVSERV : XMTSERV));
-		SSYNC();
 
 		if (iface->writeNum + 1 <= 255)
 			write_MASTER_CTL(iface, (iface->writeNum + 1) << 6);
@@ -509,14 +474,13 @@ int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 	case TWI_I2C_MODE_COMBINED:
 		write_XMT_DATA8(iface, iface->command);
 		write_INT_MASK(iface, MCOMP | MERR | RCVSERV | XMTSERV);
-		SSYNC();
 
 		if (iface->writeNum > 0)
 			write_MASTER_CTL(iface, (iface->writeNum + 1) << 6);
 		else
 			write_MASTER_CTL(iface, 0x1 << 6);
 		/* Master enable */
-		write_MASTER_CTL(iface, read_MASTER_CTL(iface) | MEN |
+		write_MASTER_CTL(iface, read_MASTER_CTL(iface) | MEN | RSTART |
 			((CONFIG_I2C_BLACKFIN_TWI_CLK_KHZ>100) ? FAST : 0));
 		break;
 	default:
@@ -549,16 +513,13 @@ int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 				else if (iface->readNum > 255) {
 					write_MASTER_CTL(iface, 0xff << 6);
 					iface->manual_stop = 1;
-				} else {
-					del_timer(&iface->timeout_timer);
+				} else
 					break;
-				}
 			}
 		}
 		write_INT_MASK(iface, MCOMP | MERR |
 			((iface->read_write == I2C_SMBUS_READ) ?
 			RCVSERV : XMTSERV));
-		SSYNC();
 
 		/* Master enable */
 		write_MASTER_CTL(iface, read_MASTER_CTL(iface) | MEN |
@@ -566,13 +527,29 @@ int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 			((CONFIG_I2C_BLACKFIN_TWI_CLK_KHZ > 100) ? FAST : 0));
 		break;
 	}
-	SSYNC();
 
-	wait_for_completion(&iface->complete);
+	while (!iface->result) {
+		if (!wait_for_completion_timeout(&iface->complete,
+			adap->timeout)) {
+			iface->result = -1;
+			dev_err(&adap->dev, "smbus transfer timeout\n");
+		}
+	}
 
 	rc = (iface->result >= 0) ? 0 : -1;
 
 	return rc;
+}
+
+/*
+ * Generic I2C SMBus transfer entrypoint
+ */
+int bfin_twi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
+			unsigned short flags, char read_write,
+			u8 command, int size, union i2c_smbus_data *data)
+{
+	return bfin_twi_do_smbus_xfer(adap, addr, flags,
+			read_write, command, size, data);
 }
 
 /*
@@ -592,9 +569,10 @@ static struct i2c_algorithm bfin_twi_algorithm = {
 	.functionality = bfin_twi_functionality,
 };
 
-static int i2c_bfin_twi_suspend(struct platform_device *pdev, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int i2c_bfin_twi_suspend(struct device *dev)
 {
-	struct bfin_twi_iface *iface = platform_get_drvdata(pdev);
+	struct bfin_twi_iface *iface = dev_get_drvdata(dev);
 
 	iface->saved_clkdiv = read_CLKDIV(iface);
 	iface->saved_control = read_CONTROL(iface);
@@ -607,14 +585,14 @@ static int i2c_bfin_twi_suspend(struct platform_device *pdev, pm_message_t state
 	return 0;
 }
 
-static int i2c_bfin_twi_resume(struct platform_device *pdev)
+static int i2c_bfin_twi_resume(struct device *dev)
 {
-	struct bfin_twi_iface *iface = platform_get_drvdata(pdev);
+	struct bfin_twi_iface *iface = dev_get_drvdata(dev);
 
 	int rc = request_irq(iface->irq, bfin_twi_interrupt_entry,
-		IRQF_DISABLED, pdev->name, iface);
+		0, to_platform_device(dev)->name, iface);
 	if (rc) {
-		dev_err(&pdev->dev, "Can't get IRQ %d !\n", iface->irq);
+		dev_err(dev, "Can't get IRQ %d !\n", iface->irq);
 		return -ENODEV;
 	}
 
@@ -627,6 +605,13 @@ static int i2c_bfin_twi_resume(struct platform_device *pdev)
 	return 0;
 }
 
+static SIMPLE_DEV_PM_OPS(i2c_bfin_twi_pm,
+			 i2c_bfin_twi_suspend, i2c_bfin_twi_resume);
+#define I2C_BFIN_TWI_PM_OPS	(&i2c_bfin_twi_pm)
+#else
+#define I2C_BFIN_TWI_PM_OPS	NULL
+#endif
+
 static int i2c_bfin_twi_probe(struct platform_device *pdev)
 {
 	struct bfin_twi_iface *iface;
@@ -635,103 +620,85 @@ static int i2c_bfin_twi_probe(struct platform_device *pdev)
 	int rc;
 	unsigned int clkhilow;
 
-	iface = kzalloc(sizeof(struct bfin_twi_iface), GFP_KERNEL);
+	iface = devm_kzalloc(&pdev->dev, sizeof(struct bfin_twi_iface),
+			GFP_KERNEL);
 	if (!iface) {
 		dev_err(&pdev->dev, "Cannot allocate memory\n");
-		rc = -ENOMEM;
-		goto out_error_nomem;
+		return -ENOMEM;
 	}
 
 	spin_lock_init(&(iface->lock));
 
 	/* Find and map our resources */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (res == NULL) {
-		dev_err(&pdev->dev, "Cannot get IORESOURCE_MEM\n");
-		rc = -ENOENT;
-		goto out_error_get_res;
-	}
-
-	iface->regs_base = ioremap(res->start, resource_size(res));
-	if (iface->regs_base == NULL) {
+	iface->regs_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(iface->regs_base)) {
 		dev_err(&pdev->dev, "Cannot map IO\n");
-		rc = -ENXIO;
-		goto out_error_ioremap;
+		return PTR_ERR(iface->regs_base);
 	}
 
 	iface->irq = platform_get_irq(pdev, 0);
 	if (iface->irq < 0) {
 		dev_err(&pdev->dev, "No IRQ specified\n");
-		rc = -ENOENT;
-		goto out_error_no_irq;
+		return -ENOENT;
 	}
-
-	init_timer(&(iface->timeout_timer));
-	iface->timeout_timer.function = bfin_twi_timeout;
-	iface->timeout_timer.data = (unsigned long)iface;
 
 	p_adap = &iface->adap;
 	p_adap->nr = pdev->id;
 	strlcpy(p_adap->name, pdev->name, sizeof(p_adap->name));
 	p_adap->algo = &bfin_twi_algorithm;
 	p_adap->algo_data = iface;
-	p_adap->class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
+	p_adap->class = I2C_CLASS_DEPRECATED;
 	p_adap->dev.parent = &pdev->dev;
+	p_adap->timeout = 5 * HZ;
+	p_adap->retries = 3;
 
-	rc = peripheral_request_list(pin_req[pdev->id], "i2c-bfin-twi");
+	rc = peripheral_request_list(
+			dev_get_platdata(&pdev->dev),
+			"i2c-bfin-twi");
 	if (rc) {
 		dev_err(&pdev->dev, "Can't setup pin mux!\n");
-		goto out_error_pin_mux;
+		return -EBUSY;
 	}
 
-	rc = request_irq(iface->irq, bfin_twi_interrupt_entry,
-		IRQF_DISABLED, pdev->name, iface);
+	rc = devm_request_irq(&pdev->dev, iface->irq, bfin_twi_interrupt_entry,
+		0, pdev->name, iface);
 	if (rc) {
 		dev_err(&pdev->dev, "Can't get IRQ %d !\n", iface->irq);
 		rc = -ENODEV;
-		goto out_error_req_irq;
+		goto out_error;
 	}
 
 	/* Set TWI internal clock as 10MHz */
-	write_CONTROL(iface, ((get_sclk() / 1024 / 1024 + 5) / 10) & 0x7F);
+	write_CONTROL(iface, ((get_sclk() / 1000 / 1000 + 5) / 10) & 0x7F);
 
 	/*
 	 * We will not end up with a CLKDIV=0 because no one will specify
-	 * 20kHz SCL or less in Kconfig now. (5 * 1024 / 20 = 0x100)
+	 * 20kHz SCL or less in Kconfig now. (5 * 1000 / 20 = 250)
 	 */
-	clkhilow = 5 * 1024 / CONFIG_I2C_BLACKFIN_TWI_CLK_KHZ;
+	clkhilow = ((10 * 1000 / CONFIG_I2C_BLACKFIN_TWI_CLK_KHZ) + 1) / 2;
 
 	/* Set Twi interface clock as specified */
 	write_CLKDIV(iface, (clkhilow << 8) | clkhilow);
 
 	/* Enable TWI */
 	write_CONTROL(iface, read_CONTROL(iface) | TWI_ENA);
-	SSYNC();
 
 	rc = i2c_add_numbered_adapter(p_adap);
 	if (rc < 0) {
 		dev_err(&pdev->dev, "Can't add i2c adapter!\n");
-		goto out_error_add_adapter;
+		goto out_error;
 	}
 
 	platform_set_drvdata(pdev, iface);
 
-	dev_info(&pdev->dev, "Blackfin BF5xx on-chip I2C TWI Contoller, "
+	dev_info(&pdev->dev, "Blackfin BF5xx on-chip I2C TWI Controller, "
 		"regs_base@%p\n", iface->regs_base);
 
 	return 0;
 
-out_error_add_adapter:
-	free_irq(iface->irq, iface);
-out_error_req_irq:
-out_error_no_irq:
-	peripheral_free_list(pin_req[pdev->id]);
-out_error_pin_mux:
-	iounmap(iface->regs_base);
-out_error_ioremap:
-out_error_get_res:
-	kfree(iface);
-out_error_nomem:
+out_error:
+	peripheral_free_list(dev_get_platdata(&pdev->dev));
 	return rc;
 }
 
@@ -739,13 +706,8 @@ static int i2c_bfin_twi_remove(struct platform_device *pdev)
 {
 	struct bfin_twi_iface *iface = platform_get_drvdata(pdev);
 
-	platform_set_drvdata(pdev, NULL);
-
 	i2c_del_adapter(&(iface->adap));
-	free_irq(iface->irq, iface);
-	peripheral_free_list(pin_req[pdev->id]);
-	iounmap(iface->regs_base);
-	kfree(iface);
+	peripheral_free_list(dev_get_platdata(&pdev->dev));
 
 	return 0;
 }
@@ -753,11 +715,9 @@ static int i2c_bfin_twi_remove(struct platform_device *pdev)
 static struct platform_driver i2c_bfin_twi_driver = {
 	.probe		= i2c_bfin_twi_probe,
 	.remove		= i2c_bfin_twi_remove,
-	.suspend	= i2c_bfin_twi_suspend,
-	.resume		= i2c_bfin_twi_resume,
 	.driver		= {
 		.name	= "i2c-bfin-twi",
-		.owner	= THIS_MODULE,
+		.pm	= I2C_BFIN_TWI_PM_OPS,
 	},
 };
 
@@ -771,10 +731,10 @@ static void __exit i2c_bfin_twi_exit(void)
 	platform_driver_unregister(&i2c_bfin_twi_driver);
 }
 
-module_init(i2c_bfin_twi_init);
+subsys_initcall(i2c_bfin_twi_init);
 module_exit(i2c_bfin_twi_exit);
 
 MODULE_AUTHOR("Bryan Wu, Sonic Zhang");
-MODULE_DESCRIPTION("Blackfin BF5xx on-chip I2C TWI Contoller Driver");
+MODULE_DESCRIPTION("Blackfin BF5xx on-chip I2C TWI Controller Driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:i2c-bfin-twi");

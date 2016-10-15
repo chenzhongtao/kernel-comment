@@ -13,7 +13,7 @@
  *
  ********************************************************************
  *
- * Copyright (C) 1999 RG Studio s.c., http://www.rgstudio.com.pl/
+ * Copyright (C) 1999 RG Studio s.c.
  * Written by Krzysztof Halasa <khc@rgstudio.com.pl>
  *
  * Portions (C) SBE Inc., used by permission.
@@ -29,13 +29,13 @@
 
 /*  descriptor block used for chained dma transfers */
 struct plx_dma_desc {
-	volatile uint32_t pci_start_addr;
-	volatile uint32_t local_start_addr;
+	__le32 pci_start_addr;
+	__le32 local_start_addr;
 	/* transfer_size is in bytes, only first 23 bits of register are used */
-	volatile uint32_t transfer_size;
+	__le32 transfer_size;
 	/* address of next descriptor (quad word aligned), plus some
 	 * additional bits (see PLX_DMA0_DESCRIPTOR_REG) */
-	volatile uint32_t next;
+	__le32 next;
 };
 
 /**********************************************************************
@@ -380,9 +380,9 @@ enum bigend_bits {
 #define MBX_ADDR_SPACE_360 0x80	/* wanXL100s/200/400 */
 #define MBX_ADDR_MASK_360 (MBX_ADDR_SPACE_360-1)
 
-static inline int plx9080_abort_dma(void *iobase, unsigned int channel)
+static inline int plx9080_abort_dma(void __iomem *iobase, unsigned int channel)
 {
-	void *dma_cs_addr;
+	void __iomem *dma_cs_addr;
 	uint8_t dma_status;
 	const int timeout = 10000;
 	unsigned int i;
@@ -402,12 +402,9 @@ static inline int plx9080_abort_dma(void *iobase, unsigned int channel)
 		udelay(1);
 		dma_status = readb(dma_cs_addr);
 	}
-	if (i == timeout) {
-		printk
-		    ("plx9080: cancel() timed out waiting for dma %i done clear\n",
-		     channel);
+	if (i == timeout)
 		return -ETIMEDOUT;
-	}
+
 	/*  disable and abort channel */
 	writeb(PLX_DMA_ABORT_BIT, dma_cs_addr);
 	/*  wait for dma done bit */
@@ -416,12 +413,8 @@ static inline int plx9080_abort_dma(void *iobase, unsigned int channel)
 		udelay(1);
 		dma_status = readb(dma_cs_addr);
 	}
-	if (i == timeout) {
-		printk
-		    ("plx9080: cancel() timed out waiting for dma %i done set\n",
-		     channel);
+	if (i == timeout)
 		return -ETIMEDOUT;
-	}
 
 	return 0;
 }

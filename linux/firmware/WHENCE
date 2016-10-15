@@ -89,18 +89,6 @@ Licence: Allegedly GPLv2+, but no source visible. Marked:
   Copyright (C) 2001 Qlogic Corporation (www.qlogic.com)
 
 --------------------------------------------------------------------------
-Driver: smctr -- SMC ISA/MCA Token Ring adapter
-
-File: tr_smctr.bin
-Info: MCT.BIN v6.3C1 03/01/95
-
-Original licence info:
-
- * This firmware is licensed to you strictly for use in conjunction
- * with the use of SMC TokenRing adapters. There is no waranty
- * expressed or implied about its fitness for any purpose.
-
---------------------------------------------------------------------------
 
 Driver: kaweth -- USB KLSI KL5USB101-based Ethernet device
 
@@ -282,16 +270,6 @@ Debug loader claims the following behaviour:
 	Port 4 LED flashes when the EXTERNAL RAM DOWNLOAD request occurs
 
 Converted from Intel HEX files, used in our binary representation of ihex.
-
---------------------------------------------------------------------------
-
-Driver: ip2 -- Computone IntelliPort Plus serial device
-
-File: intelliport2.bin
-
-Licence: Unknown
-
-Found in hex form in kernel source.
 
 --------------------------------------------------------------------------
 
@@ -567,32 +545,6 @@ Found in hex form in kernel source.
 
 --------------------------------------------------------------------------
 
-Driver: 3C359 - 3Com 3C359 Token Link Velocity XL adapter
-
-File: 3com/3C359.bin
-
-Licence:
-/*
- * The firmware this driver downloads into the tokenring card is a
- * separate program and is not GPL'd source code, even though the Linux
- * side driver and the routine that loads this data into the card are.
- *
- * This firmware is licensed to you strictly for use in conjunction
- * with the use of 3Com 3C359 TokenRing adapters. There is no
- * waranty expressed or implied about its fitness for any purpose.
- */
-/* 3c359_microcode.mac: 3Com 3C359 Tokenring microcode.
- *
- * Notes:
- *  - Loaded from xl_init upon adapter initialization.
- *
- * Available from 3Com as part of their standard 3C359 driver.
- */
-
-Found in hex form in kernel source.
-
---------------------------------------------------------------------------
-
 Driver: PCMCIA_PCNET - NE2000 compatible PCMCIA adapter
 
 File: cis/LA-PCM.cis
@@ -601,6 +553,7 @@ File: cis/LA-PCM.cis
       cis/NE2K.cis
       cis/tamarack.cis
       cis/PE-200.cis
+      cis/PE520.cis
 
 Licence: GPL
 
@@ -678,14 +631,15 @@ Found in hex form in kernel source.
 
 Driver: bnx2x: Broadcom Everest
 
-File: bnx2x-e1-4.8.53.0.fw.ihex
-File: bnx2x-e1h-4.8.53.0.fw.ihex
+File: bnx2x/bnx2x-e1-6.2.9.0.fw
+File: bnx2x/bnx2x-e1h-6.2.9.0.fw
+File: bnx2x/bnx2x-e2-6.2.9.0.fw
 
 License:
-  Copyright (c) 2007-2009 Broadcom Corporation
+  Copyright (c) 2007-2011 Broadcom Corporation
 
   This file contains firmware data derived from proprietary unpublished
-  source code, Copyright (c) 2007-2009 Broadcom Corporation.
+  source code, Copyright (c) 2007-2011 Broadcom Corporation.
 
   Permission is hereby granted for the distribution of this firmware data
   in hexadecimal or equivalent format, provided this copyright notice is
@@ -698,15 +652,16 @@ Found in hex form in kernel source.
 
 Driver: BNX2 - Broadcom NetXtremeII
 
-File: bnx2/bnx2-mips-06-4.6.16.fw
-File: bnx2/bnx2-rv2p-06-4.6.16.fw
-File: bnx2/bnx2-mips-09-4.6.17.fw
-File: bnx2/bnx2-rv2p-09-4.6.15.fw
+File: bnx2/bnx2-mips-06-6.2.1.fw
+File: bnx2/bnx2-rv2p-06-6.0.15.fw
+File: bnx2/bnx2-mips-09-6.2.1a.fw
+File: bnx2/bnx2-rv2p-09-6.0.17.fw
+File: bnx2/bnx2-rv2p-09ax-6.0.17.fw
 
 Licence:
 
  This file contains firmware data derived from proprietary unpublished
- source code, Copyright (c) 2004 - 2009 Broadcom Corporation.
+ source code, Copyright (c) 2004 - 2010 Broadcom Corporation.
 
  Permission is hereby granted for the distribution of this firmware data
  in hexadecimal or equivalent format, provided this copyright notice is
@@ -853,6 +808,46 @@ Licence:
  * LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Found in hex form in kernel source.
+
+--------------------------------------------------------------------------
+
+Driver: ib_qib - QLogic Infiniband
+
+File: qlogic/sd7220.fw
+
+Licence:
+
+ * Copyright (c) 2007, 2008 QLogic Corporation. All rights reserved.
+ *
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
+ *
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
+ *
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
+ *
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
 
 Found in hex form in kernel source.
 

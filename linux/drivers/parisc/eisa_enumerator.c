@@ -357,7 +357,7 @@ static int parse_slot_config(int slot,
 		}
 		if (flags & HPEE_FUNCTION_INFO_CFG_FREE_FORM) {
 			/* I have no idea how to handle this */
-			printk("function %d have free-form confgiuration, skipping ",
+			printk("function %d have free-form configuration, skipping ",
 				num_func);
 			pos = p0 + function_len;
 			continue;
@@ -460,7 +460,7 @@ static int init_slot(int slot, struct eeprom_eisa_slot_info *es)
 			       slot, id_string);
 			
 			print_eisa_id(id_string, es->eisa_slot_id);
-			printk(" expected %s \n", id_string);
+			printk(" expected %s\n", id_string);
 		
 			return -1;	
 			

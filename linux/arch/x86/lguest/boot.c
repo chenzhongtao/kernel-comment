@@ -7,8 +7,7 @@
  * kernel and insert a module (lg.ko) which allows us to run other Linux
  * kernels the same way we'd run processes.  We call the first kernel the Host,
  * and the others the Guests.  The program which sets up and configures Guests
- * (such as the example in Documentation/lguest/lguest.c) is called the
- * Launcher.
+ * (such as the example in tools/lguest/lguest.c) is called the Launcher.
  *
  * Secondly, we only run specially modified Guests, not normal kernels: setting
  * CONFIG_LGUEST_GUEST to "y" compiles this file into the kernel so it knows
@@ -56,6 +55,10 @@
 #include <linux/lguest_launcher.h>
 #include <linux/virtio_console.h>
 #include <linux/pm.h>
+#include <linux/export.h>
+#include <linux/pci.h>
+#include <linux/virtio_pci.h>
+#include <asm/acpi.h>
 #include <asm/apic.h>
 #include <asm/lguest.h>
 #include <asm/paravirt.h>
@@ -67,11 +70,15 @@
 #include <asm/e820.h>
 #include <asm/mce.h>
 #include <asm/io.h>
-#include <asm/i387.h>
+#include <asm/fpu/api.h>
 #include <asm/stackprotector.h>
 #include <asm/reboot.h>		/* for struct machine_ops */
+#include <asm/kvm_para.h>
+#include <asm/pci_x86.h>
+#include <asm/pci-direct.h>
 
-/*G:010 Welcome to the Guest!
+/*G:010
+ * Welcome to the Guest!
  *
  * The Guest in our tale is a simple creature: identical to the Host but
  * behaving in simplified but equivalent ways.  In particular, the Guest is the
@@ -80,11 +87,10 @@
 
 struct lguest_data lguest_data = {
 	.hcall_status = { [0 ... LHCALL_RING_SIZE-1] = 0xFF },
-	.noirq_start = (u32)lguest_noirq_start,
-	.noirq_end = (u32)lguest_noirq_end,
+	.noirq_iret = (u32)lguest_noirq_iret,
 	.kernel_address = PAGE_OFFSET,
 	.blocked_interrupts = { 1 }, /* Block timer interrupts */
-	.syscall_vec = SYSCALL_VECTOR,
+	.syscall_vec = IA32_SYSCALL_VECTOR,
 };
 
 /*G:037
@@ -115,7 +121,7 @@ static void async_hcall(unsigned long call, unsigned long arg1,
 	local_irq_save(flags);
 	if (lguest_data.hcall_status[next_call] != 0xFF) {
 		/* Table full, so do normal hcall which will flush table. */
-		kvm_hypercall4(call, arg1, arg2, arg3, arg4);
+		hcall(call, arg1, arg2, arg3, arg4);
 	} else {
 		lguest_data.hcalls[next_call].arg0 = call;
 		lguest_data.hcalls[next_call].arg1 = arg1;
@@ -145,64 +151,71 @@ static void async_hcall(unsigned long call, unsigned long arg1,
  * So, when we're in lazy mode, we call async_hcall() to store the call for
  * future processing:
  */
-static void lazy_hcall1(unsigned long call,
-		       unsigned long arg1)
+static void lazy_hcall1(unsigned long call, unsigned long arg1)
 {
 	if (paravirt_get_lazy_mode() == PARAVIRT_LAZY_NONE)
-		kvm_hypercall1(call, arg1);
+		hcall(call, arg1, 0, 0, 0);
 	else
 		async_hcall(call, arg1, 0, 0, 0);
 }
 
 /* You can imagine what lazy_hcall2, 3 and 4 look like. :*/
 static void lazy_hcall2(unsigned long call,
-		       unsigned long arg1,
-		       unsigned long arg2)
+			unsigned long arg1,
+			unsigned long arg2)
 {
 	if (paravirt_get_lazy_mode() == PARAVIRT_LAZY_NONE)
-		kvm_hypercall2(call, arg1, arg2);
+		hcall(call, arg1, arg2, 0, 0);
 	else
 		async_hcall(call, arg1, arg2, 0, 0);
 }
 
 static void lazy_hcall3(unsigned long call,
-		       unsigned long arg1,
-		       unsigned long arg2,
-		       unsigned long arg3)
+			unsigned long arg1,
+			unsigned long arg2,
+			unsigned long arg3)
 {
 	if (paravirt_get_lazy_mode() == PARAVIRT_LAZY_NONE)
-		kvm_hypercall3(call, arg1, arg2, arg3);
+		hcall(call, arg1, arg2, arg3, 0);
 	else
 		async_hcall(call, arg1, arg2, arg3, 0);
 }
 
 #ifdef CONFIG_X86_PAE
 static void lazy_hcall4(unsigned long call,
-		       unsigned long arg1,
-		       unsigned long arg2,
-		       unsigned long arg3,
-		       unsigned long arg4)
+			unsigned long arg1,
+			unsigned long arg2,
+			unsigned long arg3,
+			unsigned long arg4)
 {
 	if (paravirt_get_lazy_mode() == PARAVIRT_LAZY_NONE)
-		kvm_hypercall4(call, arg1, arg2, arg3, arg4);
+		hcall(call, arg1, arg2, arg3, arg4);
 	else
 		async_hcall(call, arg1, arg2, arg3, arg4);
 }
 #endif
 
 /*G:036
- * When lazy mode is turned off reset the per-cpu lazy mode variable and then
- * issue the do-nothing hypercall to flush any stored calls.
-:*/
+ * When lazy mode is turned off, we issue the do-nothing hypercall to
+ * flush any stored calls, and call the generic helper to reset the
+ * per-cpu lazy mode variable.
+ */
 static void lguest_leave_lazy_mmu_mode(void)
 {
-	kvm_hypercall0(LHCALL_FLUSH_ASYNC);
+	hcall(LHCALL_FLUSH_ASYNC, 0, 0, 0, 0);
 	paravirt_leave_lazy_mmu();
 }
 
+/*
+ * We also catch the end of context switch; we enter lazy mode for much of
+ * that too, so again we need to flush here.
+ *
+ * (Technically, this is lazy CPU mode, and normally we're in lazy MMU
+ * mode, but unlike Xen, lguest doesn't care about the difference).
+ */
 static void lguest_end_context_switch(struct task_struct *next)
 {
-	kvm_hypercall0(LHCALL_FLUSH_ASYNC);
+	hcall(LHCALL_FLUSH_ASYNC, 0, 0, 0, 0);
 	paravirt_end_context_switch(next);
 }
 
@@ -224,13 +237,13 @@ static void lguest_end_context_switch(struct task_struct *next)
  * flags word contains all kind of stuff, but in practice Linux only cares
  * about the interrupt flag.  Our "save_flags()" just returns that.
  */
-static unsigned long save_fl(void)
+asmlinkage __visible unsigned long lguest_save_fl(void)
 {
 	return lguest_data.irq_enabled;
 }
 
 /* Interrupts go off... */
-static void irq_disable(void)
+asmlinkage __visible void lguest_irq_disable(void)
 {
 	lguest_data.irq_enabled = 0;
 }
@@ -244,11 +257,11 @@ static void irq_disable(void)
  * PV_CALLEE_SAVE_REGS_THUNK(), which pushes %eax onto the stack, calls the
  * C function, then restores it.
  */
-PV_CALLEE_SAVE_REGS_THUNK(save_fl);
-PV_CALLEE_SAVE_REGS_THUNK(irq_disable);
+PV_CALLEE_SAVE_REGS_THUNK(lguest_save_fl);
+PV_CALLEE_SAVE_REGS_THUNK(lguest_irq_disable);
 /*:*/
 
-/* These are in i386_head.S */
+/* These are in head_32.S */
 extern void lg_irq_enable(void);
 extern void lg_restore_fl(unsigned long flags);
 
@@ -286,7 +299,7 @@ static void lguest_write_idt_entry(gate_desc *dt,
 	/* Keep the local copy up to date. */
 	native_write_idt_entry(dt, entrynum, g);
 	/* Tell Host about this new entry. */
-	kvm_hypercall3(LHCALL_LOAD_IDT_ENTRY, entrynum, desc[0], desc[1]);
+	hcall(LHCALL_LOAD_IDT_ENTRY, entrynum, desc[0], desc[1], 0);
 }
 
 /*
@@ -300,7 +313,7 @@ static void lguest_load_idt(const struct desc_ptr *desc)
 	struct desc_struct *idt = (void *)desc->address;
 
 	for (i = 0; i < (desc->size+1)/8; i++)
-		kvm_hypercall3(LHCALL_LOAD_IDT_ENTRY, i, idt[i].a, idt[i].b);
+		hcall(LHCALL_LOAD_IDT_ENTRY, i, idt[i].a, idt[i].b, 0);
 }
 
 /*
@@ -321,27 +334,30 @@ static void lguest_load_gdt(const struct desc_ptr *desc)
 	struct desc_struct *gdt = (void *)desc->address;
 
 	for (i = 0; i < (desc->size+1)/8; i++)
-		kvm_hypercall3(LHCALL_LOAD_GDT_ENTRY, i, gdt[i].a, gdt[i].b);
+		hcall(LHCALL_LOAD_GDT_ENTRY, i, gdt[i].a, gdt[i].b, 0);
 }
 
 /*
- * For a single GDT entry which changes, we do the lazy thing: alter our GDT,
- * then tell the Host to reload the entire thing.  This operation is so rare
- * that this naive implementation is reasonable.
+ * For a single GDT entry which changes, we simply change our copy and
+ * then tell the host about it.
  */
 static void lguest_write_gdt_entry(struct desc_struct *dt, int entrynum,
 				   const void *desc, int type)
 {
 	native_write_gdt_entry(dt, entrynum, desc, type);
 	/* Tell Host about this new entry. */
-	kvm_hypercall3(LHCALL_LOAD_GDT_ENTRY, entrynum,
-		       dt[entrynum].a, dt[entrynum].b);
+	hcall(LHCALL_LOAD_GDT_ENTRY, entrynum,
+	      dt[entrynum].a, dt[entrynum].b, 0);
 }
 
 /*
- * OK, I lied.  There are three "thread local storage" GDT entries which change
+ * There are three "thread local storage" GDT entries which change
  * on every context switch (these three entries are how glibc implements
- * __thread variables).  So we have a hypercall specifically for this case.
+ * __thread variables).  As an optimization, we have a hypercall
+ * specifically for this case.
+ *
+ * Wouldn't it be nicer to have a general LOAD_GDT_ENTRIES hypercall
+ * which took a range of entries?
  */
 static void lguest_load_tls(struct thread_struct *t, unsigned int cpu)
 {
@@ -389,13 +405,13 @@ static void lguest_load_tr_desc(void)
  * giant ball of hair.  Its entry in the current Intel manual runs to 28 pages.
  *
  * This instruction even it has its own Wikipedia entry.  The Wikipedia entry
- * has been translated into 5 languages.  I am not making this up!
+ * has been translated into 6 languages.  I am not making this up!
  *
  * We could get funky here and identify ourselves as "GenuineLguest", but
  * instead we just use the real "cpuid" instruction.  Then I pretty much turned
  * off feature bits until the Guest booted.  (Don't say that: you'll damage
  * lguest sales!)  Shut up, inner voice!  (Hey, just pointing out that this is
- * hardly future proof.)  Noone's listening!  They don't like you anyway,
+ * hardly future proof.)  No one's listening!  They don't like you anyway,
  * parenthetic weirdo!
  *
  * Replacing the cpuid so we can turn features off is great for the kernel, but
@@ -444,6 +460,15 @@ static void lguest_cpuid(unsigned int *ax, unsigned int *bx,
 		*ax &= 0xFFFFF0FF;
 		*ax |= 0x00000500;
 		break;
+
+	/*
+	 * This is used to detect if we're running under KVM.  We might be,
+	 * but that's a Host matter, not us.  So say we're not.
+	 */
+	case KVM_CPUID_SIGNATURE:
+		*bx = *cx = *dx = 0;
+		break;
+
 	/*
 	 * 0x80000000 returns the highest Extended Function, so we futureproof
 	 * like we do above by limiting it to known fields.
@@ -456,7 +481,7 @@ static void lguest_cpuid(unsigned int *ax, unsigned int *bx,
 	/*
 	 * PAE systems can mark pages as non-executable.  Linux calls this the
 	 * NX bit.  Intel calls it XD (eXecute Disable), AMD EVP (Enhanced
-	 * Virus Protection).  We just switch turn if off here, since we don't
+	 * Virus Protection).  We just switch it off here, since we don't
 	 * support it.
 	 */
 	case 0x80000001:
@@ -518,23 +543,26 @@ static unsigned long lguest_read_cr2(void)
 
 /* See lguest_set_pte() below. */
 static bool cr3_changed = false;
+static unsigned long current_cr3;
 
 /*
  * cr3 is the current toplevel pagetable page: the principle is the same as
- * cr0.  Keep a local copy, and tell the Host when it changes.  The only
- * difference is that our local copy is in lguest_data because the Host needs
- * to set it upon our initial hypercall.
+ * cr0.  Keep a local copy, and tell the Host when it changes.
  */
 static void lguest_write_cr3(unsigned long cr3)
 {
-	lguest_data.pgdir = cr3;
 	lazy_hcall1(LHCALL_NEW_PGTABLE, cr3);
-	cr3_changed = true;
+	current_cr3 = cr3;
+
+	/* These two page tables are simple, linear, and used during boot */
+	if (cr3 != __pa_symbol(swapper_pg_dir) &&
+	    cr3 != __pa_symbol(initial_page_table))
+		cr3_changed = true;
 }
 
 static unsigned long lguest_read_cr3(void)
 {
-	return lguest_data.pgdir;
+	return current_cr3;
 }
 
 /* cr4 is used to enable and disable PGE, but we don't care. */
@@ -636,7 +664,7 @@ static void lguest_write_cr4(unsigned long val)
 
 /*
  * The Guest calls this after it has set a second-level entry (pte), ie. to map
- * a page into a process' address space.  Wetell the Host the toplevel and
+ * a page into a process' address space.  We tell the Host the toplevel and
  * address this corresponds to.  The Guest uses one pagetable per process, so
  * we need to tell the Host which one we're changing (mm->pgd).
  */
@@ -701,9 +729,9 @@ static void lguest_set_pmd(pmd_t *pmdp, pmd_t pmdval)
  * to forget all of them.  Fortunately, this is very rare.
  *
  * ... except in early boot when the kernel sets up the initial pagetables,
- * which makes booting astonishingly slow: 1.83 seconds!  So we don't even tell
- * the Host anything changed until we've done the first page table switch,
- * which brings boot back to 0.25 seconds.
+ * which makes booting astonishingly slow: 48 seconds!  So we don't even tell
+ * the Host anything changed until we've done the first real page table switch,
+ * which brings boot back to 4.3 seconds.
  */
 static void lguest_set_pte(pte_t *ptep, pte_t pteval)
 {
@@ -753,7 +781,7 @@ static void lguest_pmd_clear(pmd_t *pmdp)
 static void lguest_flush_tlb_single(unsigned long addr)
 {
 	/* Simply set it to zero: if it was not, it will fault back in. */
-	lazy_hcall3(LHCALL_SET_PTE, lguest_data.pgdir, addr, 0);
+	lazy_hcall3(LHCALL_SET_PTE, current_cr3, addr, 0);
 }
 
 /*
@@ -789,39 +817,84 @@ static void lguest_flush_tlb_kernel(void)
  * simple as setting a bit.  We don't actually "ack" interrupts as such, we
  * just mask and unmask them.  I wonder if we should be cleverer?
  */
-static void disable_lguest_irq(unsigned int irq)
+static void disable_lguest_irq(struct irq_data *data)
 {
-	set_bit(irq, lguest_data.blocked_interrupts);
+	set_bit(data->irq, lguest_data.blocked_interrupts);
 }
 
-static void enable_lguest_irq(unsigned int irq)
+static void enable_lguest_irq(struct irq_data *data)
 {
-	clear_bit(irq, lguest_data.blocked_interrupts);
+	clear_bit(data->irq, lguest_data.blocked_interrupts);
 }
 
 /* This structure describes the lguest IRQ controller. */
 static struct irq_chip lguest_irq_controller = {
 	.name		= "lguest",
-	.mask		= disable_lguest_irq,
-	.mask_ack	= disable_lguest_irq,
-	.unmask		= enable_lguest_irq,
+	.irq_mask	= disable_lguest_irq,
+	.irq_mask_ack	= disable_lguest_irq,
+	.irq_unmask	= enable_lguest_irq,
 };
 
 /*
+ * Interrupt descriptors are allocated as-needed, but low-numbered ones are
+ * reserved by the generic x86 code.  So we ignore irq_alloc_desc_at if it
+ * tells us the irq is already used: other errors (ie. ENOMEM) we take
+ * seriously.
+ */
+static int lguest_setup_irq(unsigned int irq)
+{
+	struct irq_desc *desc;
+	int err;
+
+	/* Returns -ve error or vector number. */
+	err = irq_alloc_desc_at(irq, 0);
+	if (err < 0 && err != -EEXIST)
+		return err;
+
+	/*
+	 * Tell the Linux infrastructure that the interrupt is
+	 * controlled by our level-based lguest interrupt controller.
+	 */
+	irq_set_chip_and_handler_name(irq, &lguest_irq_controller,
+				      handle_level_irq, "level");
+
+	/* Some systems map "vectors" to interrupts weirdly.  Not us! */
+	desc = irq_to_desc(irq);
+	__this_cpu_write(vector_irq[FIRST_EXTERNAL_VECTOR + irq], desc);
+	return 0;
+}
+
+static int lguest_enable_irq(struct pci_dev *dev)
+{
+	int err;
+	u8 line = 0;
+
+	/* We literally use the PCI interrupt line as the irq number. */
+	pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &line);
+	err = lguest_setup_irq(line);
+	if (!err)
+		dev->irq = line;
+	return err;
+}
+
+/* We don't do hotplug PCI, so this shouldn't be called. */
+static void lguest_disable_irq(struct pci_dev *dev)
+{
+	WARN_ON(1);
+}
+
+/*
  * This sets up the Interrupt Descriptor Table (IDT) entry for each hardware
- * interrupt (except 128, which is used for system calls), and then tells the
- * Linux infrastructure that each interrupt is controlled by our level-based
- * lguest interrupt controller.
+ * interrupt (except 128, which is used for system calls).
  */
 static void __init lguest_init_IRQ(void)
 {
 	unsigned int i;
 
-	for (i = FIRST_EXTERNAL_VECTOR; i < NR_VECTORS; i++) {
-		/* Some systems map "vectors" to interrupts weirdly.  Not us! */
-		__get_cpu_var(vector_irq)[i] = i - FIRST_EXTERNAL_VECTOR;
-		if (i != SYSCALL_VECTOR)
-			set_intr_gate(i, interrupt[i - FIRST_EXTERNAL_VECTOR]);
+	for (i = FIRST_EXTERNAL_VECTOR; i < FIRST_SYSTEM_VECTOR; i++) {
+		if (i != IA32_SYSCALL_VECTOR)
+			set_intr_gate(i, irq_entries_start +
+					8 * (i - FIRST_EXTERNAL_VECTOR));
 	}
 
 	/*
@@ -832,29 +905,14 @@ static void __init lguest_init_IRQ(void)
 }
 
 /*
- * With CONFIG_SPARSE_IRQ, interrupt descriptors are allocated as-needed, so
- * rather than set them in lguest_init_IRQ we are called here every time an
- * lguest device needs an interrupt.
- *
- * FIXME: irq_to_desc_alloc_node() can fail due to lack of memory, we should
- * pass that up!
- */
-void lguest_setup_irq(unsigned int irq)
-{
-	irq_to_desc_alloc_node(irq, 0);
-	set_irq_chip_and_handler_name(irq, &lguest_irq_controller,
-				      handle_level_irq, "level");
-}
-
-/*
  * Time.
  *
  * It would be far better for everyone if the Guest had its own clock, but
  * until then the Host gives us the time on every interrupt.
  */
-static unsigned long lguest_get_wallclock(void)
+static void lguest_get_wallclock(struct timespec *now)
 {
-	return lguest_data.time.tv_sec;
+	*now = lguest_data.time;
 }
 
 /*
@@ -908,8 +966,6 @@ static struct clocksource lguest_clock = {
 	.rating		= 200,
 	.read		= lguest_clock_read,
 	.mask		= CLOCKSOURCE_MASK(64),
-	.mult		= 1 << 22,
-	.shift		= 22,
 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
 };
 
@@ -931,27 +987,15 @@ static int lguest_clockevent_set_next_event(unsigned long delta,
 	}
 
 	/* Please wake us this far in the future. */
-	kvm_hypercall1(LHCALL_SET_CLOCKEVENT, delta);
+	hcall(LHCALL_SET_CLOCKEVENT, delta, 0, 0, 0);
 	return 0;
 }
 
-static void lguest_clockevent_set_mode(enum clock_event_mode mode,
-                                      struct clock_event_device *evt)
+static int lguest_clockevent_shutdown(struct clock_event_device *evt)
 {
-	switch (mode) {
-	case CLOCK_EVT_MODE_UNUSED:
-	case CLOCK_EVT_MODE_SHUTDOWN:
-		/* A 0 argument shuts the clock down. */
-		kvm_hypercall0(LHCALL_SET_CLOCKEVENT);
-		break;
-	case CLOCK_EVT_MODE_ONESHOT:
-		/* This is what we expect. */
-		break;
-	case CLOCK_EVT_MODE_PERIODIC:
-		BUG();
-	case CLOCK_EVT_MODE_RESUME:
-		break;
-	}
+	/* A 0 argument shuts the clock down. */
+	hcall(LHCALL_SET_CLOCKEVENT, 0, 0, 0, 0);
+	return 0;
 }
 
 /* This describes our primitive timer chip. */
@@ -959,7 +1003,7 @@ static struct clock_event_device lguest_clockevent = {
 	.name                   = "lguest",
 	.features               = CLOCK_EVT_FEAT_ONESHOT,
 	.set_next_event         = lguest_clockevent_set_next_event,
-	.set_mode               = lguest_clockevent_set_mode,
+	.set_state_shutdown	= lguest_clockevent_shutdown,
 	.rating                 = INT_MAX,
 	.mult                   = 1,
 	.shift                  = 0,
@@ -971,7 +1015,7 @@ static struct clock_event_device lguest_clockevent = {
  * This is the Guest timer interrupt handler (hardware interrupt 0).  We just
  * call the clockevent infrastructure and it does whatever needs doing.
  */
-static void lguest_time_irq(unsigned int irq, struct irq_desc *desc)
+static void lguest_time_irq(struct irq_desc *desc)
 {
 	unsigned long flags;
 
@@ -990,9 +1034,11 @@ static void lguest_time_irq(unsigned int irq, struct irq_desc *desc)
 static void lguest_time_init(void)
 {
 	/* Set up the timer interrupt (0) to go to our simple timer routine */
-	set_irq_handler(0, lguest_time_irq);
+	if (lguest_setup_irq(0) != 0)
+		panic("Could not set up timer irq");
+	irq_set_handler(0, lguest_time_irq);
 
-	clocksource_register(&lguest_clock);
+	clocksource_register_hz(&lguest_clock, NSEC_PER_SEC);
 
 	/* We can't set cpumask in the initializer: damn C limitations!  Set it
 	 * here and register our timer device. */
@@ -1000,7 +1046,7 @@ static void lguest_time_init(void)
 	clockevents_register_device(&lguest_clockevent);
 
 	/* Finally, we unblock the timer interrupt. */
-	enable_lguest_irq(0);
+	clear_bit(0, lguest_data.blocked_interrupts);
 }
 
 /*
@@ -1025,9 +1071,16 @@ static void lguest_load_sp0(struct tss_struct *tss,
 {
 	lazy_hcall3(LHCALL_SET_STACK, __KERNEL_DS | 0x1, thread->sp0,
 		   THREAD_SIZE / PAGE_SIZE);
+	tss->x86_tss.sp0 = thread->sp0;
 }
 
 /* Let's just say, I wouldn't do debugging under a Guest. */
+static unsigned long lguest_get_debugreg(int regno)
+{
+	/* FIXME: Implement */
+	return 0;
+}
+
 static void lguest_set_debugreg(int regno, unsigned long value)
 {
 	/* FIXME: Implement */
@@ -1100,7 +1153,7 @@ static void set_lguest_basic_apic_ops(void)
 /* STOP!  Until an interrupt comes in. */
 static void lguest_safe_halt(void)
 {
-	kvm_hypercall0(LHCALL_HALT);
+	hcall(LHCALL_HALT, 0, 0, 0, 0);
 }
 
 /*
@@ -1112,8 +1165,8 @@ static void lguest_safe_halt(void)
  */
 static void lguest_power_off(void)
 {
-	kvm_hypercall2(LHCALL_SHUTDOWN, __pa("Power down"),
-					LGUEST_SHUTDOWN_POWEROFF);
+	hcall(LHCALL_SHUTDOWN, __pa("Power down"),
+	      LGUEST_SHUTDOWN_POWEROFF, 0, 0);
 }
 
 /*
@@ -1123,7 +1176,7 @@ static void lguest_power_off(void)
  */
 static int lguest_panic(struct notifier_block *nb, unsigned long l, void *p)
 {
-	kvm_hypercall2(LHCALL_SHUTDOWN, __pa(p), LGUEST_SHUTDOWN_POWEROFF);
+	hcall(LHCALL_SHUTDOWN, __pa(p), LGUEST_SHUTDOWN_POWEROFF, 0, 0);
 	/* The hcall won't return, but to keep gcc happy, we're "done". */
 	return NOTIFY_DONE;
 }
@@ -1136,7 +1189,7 @@ static struct notifier_block paniced = {
 static __init char *lguest_memory_setup(void)
 {
 	/*
-	 *The Linux bootloader header contains an "e820" memory map: the
+	 * The Linux bootloader header contains an "e820" memory map: the
 	 * Launcher populated the first entry with our memory limit.
 	 */
 	e820_add_region(boot_params.e820_map[0].addr,
@@ -1147,25 +1200,136 @@ static __init char *lguest_memory_setup(void)
 	return "LGUEST";
 }
 
+/* Offset within PCI config space of BAR access capability. */
+static int console_cfg_offset = 0;
+static int console_access_cap;
+
+/* Set up so that we access off in bar0 (on bus 0, device 1, function 0) */
+static void set_cfg_window(u32 cfg_offset, u32 off)
+{
+	write_pci_config_byte(0, 1, 0,
+			      cfg_offset + offsetof(struct virtio_pci_cap, bar),
+			      0);
+	write_pci_config(0, 1, 0,
+			 cfg_offset + offsetof(struct virtio_pci_cap, length),
+			 4);
+	write_pci_config(0, 1, 0,
+			 cfg_offset + offsetof(struct virtio_pci_cap, offset),
+			 off);
+}
+
+static void write_bar_via_cfg(u32 cfg_offset, u32 off, u32 val)
+{
+	/*
+	 * We could set this up once, then leave it; nothing else in the *
+	 * kernel should touch these registers.  But if it went wrong, that
+	 * would be a horrible bug to find.
+	 */
+	set_cfg_window(cfg_offset, off);
+	write_pci_config(0, 1, 0,
+			 cfg_offset + sizeof(struct virtio_pci_cap), val);
+}
+
+static void probe_pci_console(void)
+{
+	u8 cap, common_cap = 0, device_cap = 0;
+	/* Offset within BAR0 */
+	u32 device_offset;
+	u32 device_len;
+
+	/* Avoid recursive printk into here. */
+	console_cfg_offset = -1;
+
+	if (!early_pci_allowed()) {
+		printk(KERN_ERR "lguest: early PCI access not allowed!\n");
+		return;
+	}
+
+	/* We expect a console PCI device at BUS0, slot 1. */
+	if (read_pci_config(0, 1, 0, 0) != 0x10431AF4) {
+		printk(KERN_ERR "lguest: PCI device is %#x!\n",
+		       read_pci_config(0, 1, 0, 0));
+		return;
+	}
+
+	/* Find the capabilities we need (must be in bar0) */
+	cap = read_pci_config_byte(0, 1, 0, PCI_CAPABILITY_LIST);
+	while (cap) {
+		u8 vndr = read_pci_config_byte(0, 1, 0, cap);
+		if (vndr == PCI_CAP_ID_VNDR) {
+			u8 type, bar;
+			u32 offset, length;
+
+			type = read_pci_config_byte(0, 1, 0,
+			    cap + offsetof(struct virtio_pci_cap, cfg_type));
+			bar = read_pci_config_byte(0, 1, 0,
+			    cap + offsetof(struct virtio_pci_cap, bar));
+			offset = read_pci_config(0, 1, 0,
+			    cap + offsetof(struct virtio_pci_cap, offset));
+			length = read_pci_config(0, 1, 0,
+			    cap + offsetof(struct virtio_pci_cap, length));
+
+			switch (type) {
+			case VIRTIO_PCI_CAP_DEVICE_CFG:
+				if (bar == 0) {
+					device_cap = cap;
+					device_offset = offset;
+					device_len = length;
+				}
+				break;
+			case VIRTIO_PCI_CAP_PCI_CFG:
+				console_access_cap = cap;
+				break;
+			}
+		}
+		cap = read_pci_config_byte(0, 1, 0, cap + PCI_CAP_LIST_NEXT);
+	}
+	if (!device_cap || !console_access_cap) {
+		printk(KERN_ERR "lguest: No caps (%u/%u/%u) in console!\n",
+		       common_cap, device_cap, console_access_cap);
+		return;
+	}
+
+	/*
+	 * Note that we can't check features, until we've set the DRIVER
+	 * status bit.  We don't want to do that until we have a real driver,
+	 * so we just check that the device-specific config has room for
+	 * emerg_wr.  If it doesn't support VIRTIO_CONSOLE_F_EMERG_WRITE
+	 * it should ignore the access.
+	 */
+	if (device_len < (offsetof(struct virtio_console_config, emerg_wr)
+			  + sizeof(u32))) {
+		printk(KERN_ERR "lguest: console missing emerg_wr field\n");
+		return;
+	}
+
+	console_cfg_offset = device_offset;
+	printk(KERN_INFO "lguest: Console via virtio-pci emerg_wr\n");
+}
+
 /*
  * We will eventually use the virtio console device to produce console output,
- * but before that is set up we use LHCALL_NOTIFY on normal memory to produce
- * console output.
+ * but before that is set up we use the virtio PCI console's backdoor mmio
+ * access and the "emergency" write facility (which is legal even before the
+ * device is configured).
  */
 static __init int early_put_chars(u32 vtermno, const char *buf, int count)
 {
-	char scratch[17];
-	unsigned int len = count;
+	/* If we couldn't find PCI console, forget it. */
+	if (console_cfg_offset < 0)
+		return count;
 
-	/* We use a nul-terminated string, so we make a copy.  Icky, huh? */
-	if (len > sizeof(scratch) - 1)
-		len = sizeof(scratch) - 1;
-	scratch[len] = '\0';
-	memcpy(scratch, buf, len);
-	kvm_hypercall1(LHCALL_NOTIFY, __pa(scratch));
+	if (unlikely(!console_cfg_offset)) {
+		probe_pci_console();
+		if (console_cfg_offset < 0)
+			return count;
+	}
 
-	/* This routine returns the number of bytes actually written. */
-	return len;
+	write_bar_via_cfg(console_access_cap,
+			  console_cfg_offset
+			  + offsetof(struct virtio_console_config, emerg_wr),
+			  buf[0]);
+	return 1;
 }
 
 /*
@@ -1174,7 +1338,7 @@ static __init int early_put_chars(u32 vtermno, const char *buf, int count)
  */
 static void lguest_restart(char *reason)
 {
-	kvm_hypercall2(LHCALL_SHUTDOWN, __pa(reason), LGUEST_SHUTDOWN_RESTART);
+	hcall(LHCALL_SHUTDOWN, __pa(reason), LGUEST_SHUTDOWN_RESTART, 0, 0);
 }
 
 /*G:050
@@ -1198,7 +1362,7 @@ static void lguest_restart(char *reason)
  * fit comfortably.
  *
  * First we need assembly templates of each of the patchable Guest operations,
- * and these are in i386_head.S.
+ * and these are in head_32.S.
  */
 
 /*G:060 We construct a table from the assembler templates: */
@@ -1250,6 +1414,7 @@ __init void lguest_init(void)
 	pv_info.kernel_rpl = 1;
 	/* Everyone except Xen runs with this set. */
 	pv_info.shared_kernel_pmd = 1;
+	pv_info.features = 0;
 
 	/*
 	 * We set up all the lguest overrides for sensitive operations.  These
@@ -1257,9 +1422,9 @@ __init void lguest_init(void)
 	 */
 
 	/* Interrupt-related operations */
-	pv_irq_ops.save_fl = PV_CALLEE_SAVE(save_fl);
+	pv_irq_ops.save_fl = PV_CALLEE_SAVE(lguest_save_fl);
 	pv_irq_ops.restore_fl = __PV_IS_CALLEE_SAVE(lg_restore_fl);
-	pv_irq_ops.irq_disable = PV_CALLEE_SAVE(irq_disable);
+	pv_irq_ops.irq_disable = PV_CALLEE_SAVE(lguest_irq_disable);
 	pv_irq_ops.irq_enable = __PV_IS_CALLEE_SAVE(lg_irq_enable);
 	pv_irq_ops.safe_halt = lguest_safe_halt;
 
@@ -1275,6 +1440,7 @@ __init void lguest_init(void)
 	pv_cpu_ops.load_tr_desc = lguest_load_tr_desc;
 	pv_cpu_ops.set_ldt = lguest_set_ldt;
 	pv_cpu_ops.load_tls = lguest_load_tls;
+	pv_cpu_ops.get_debugreg = lguest_get_debugreg;
 	pv_cpu_ops.set_debugreg = lguest_set_debugreg;
 	pv_cpu_ops.clts = lguest_clts;
 	pv_cpu_ops.read_cr0 = lguest_read_cr0;
@@ -1305,6 +1471,7 @@ __init void lguest_init(void)
 	pv_mmu_ops.read_cr3 = lguest_read_cr3;
 	pv_mmu_ops.lazy_mode.enter = paravirt_enter_lazy_mmu;
 	pv_mmu_ops.lazy_mode.leave = lguest_leave_lazy_mmu_mode;
+	pv_mmu_ops.lazy_mode.flush = paravirt_flush_lazy_mmu;
 	pv_mmu_ops.pte_update = lguest_pte_update;
 	pv_mmu_ops.pte_update_defer = lguest_pte_update;
 
@@ -1347,9 +1514,6 @@ __init void lguest_init(void)
 	 */
 	switch_to_new_gdt(0);
 
-	/* We actually boot with all memory mapped, but let's say 128MB. */
-	max_pfn_mapped = (128*1024*1024) >> PAGE_SHIFT;
-
 	/*
 	 * The Host<->Guest Switcher lives at the top of our address space, and
 	 * the Host told us how big it is when we made LGUEST_INIT hypercall:
@@ -1367,14 +1531,6 @@ __init void lguest_init(void)
 	atomic_notifier_chain_register(&panic_notifier_list, &paniced);
 
 	/*
-	 * The IDE code spends about 3 seconds probing for disks: if we reserve
-	 * all the I/O ports up front it can't get them and so doesn't probe.
-	 * Other device drivers are similar (but less severe).  This cuts the
-	 * kernel boot time on my machine from 4.1 seconds to 0.45 seconds.
-	 */
-	paravirt_disable_iospace();
-
-	/*
 	 * This is messy CPU setup stuff which the native boot code does before
 	 * start_kernel, so we have to do, too:
 	 */
@@ -1383,15 +1539,14 @@ __init void lguest_init(void)
 	new_cpu_data.x86_capability[0] = cpuid_edx(1);
 
 	/* Math is always hard! */
-	new_cpu_data.hard_math = 1;
+	set_cpu_cap(&new_cpu_data, X86_FEATURE_FPU);
 
 	/* We don't have features.  We have puppies!  Puppies! */
 #ifdef CONFIG_X86_MCE
-	mce_disabled = 1;
+	mca_cfg.disabled = true;
 #endif
 #ifdef CONFIG_ACPI
 	acpi_disabled = 1;
-	acpi_ht = 0;
 #endif
 
 	/*
@@ -1403,6 +1558,13 @@ __init void lguest_init(void)
 
 	/* Register our very early console. */
 	virtio_cons_early_init(early_put_chars);
+
+	/* Don't let ACPI try to control our PCI interrupts. */
+	disable_acpi();
+
+	/* We control them ourselves, by overriding these two hooks. */
+	pcibios_enable_irq = lguest_enable_irq;
+	pcibios_disable_irq = lguest_disable_irq;
 
 	/*
 	 * Last of all, we set the power management poweroff hook to point to

@@ -18,58 +18,33 @@
 #include <linux/percpu.h>
 #include <linux/profile.h>
 #include <linux/sched.h>
-#include <linux/tick.h>
 
 #include "tick-internal.h"
-
-/**
- * tick_program_event internal worker function
- */
-int tick_dev_program_event(struct clock_event_device *dev, ktime_t expires,
-			   int force)
-{
-	ktime_t now = ktime_get();
-	int i;
-
-	for (i = 0;;) {
-		int ret = clockevents_program_event(dev, expires, now);
-
-		if (!ret || !force)
-			return ret;
-
-		/*
-		 * We tried 2 times to program the device with the given
-		 * min_delta_ns. If that's not working then we double it
-		 * and emit a warning.
-		 */
-		if (++i > 2) {
-			/* Increase the min. delta and try again */
-			if (!dev->min_delta_ns)
-				dev->min_delta_ns = 5000;
-			else
-				dev->min_delta_ns += dev->min_delta_ns >> 1;
-
-			printk(KERN_WARNING
-			       "CE: %s increasing min_delta_ns to %lu nsec\n",
-			       dev->name ? dev->name : "?",
-			       dev->min_delta_ns << 1);
-
-			i = 0;
-		}
-
-		now = ktime_get();
-		expires = ktime_add_ns(now, dev->min_delta_ns);
-	}
-}
 
 /**
  * tick_program_event
  */
 int tick_program_event(ktime_t expires, int force)
 {
-	struct clock_event_device *dev = __get_cpu_var(tick_cpu_device).evtdev;
+	struct clock_event_device *dev = __this_cpu_read(tick_cpu_device.evtdev);
 
-	return tick_dev_program_event(dev, expires, force);
+	if (unlikely(expires.tv64 == KTIME_MAX)) {
+		/*
+		 * We don't need the clock event device any more, stop it.
+		 */
+		clockevents_switch_state(dev, CLOCK_EVT_STATE_ONESHOT_STOPPED);
+		return 0;
+	}
+
+	if (unlikely(clockevent_state_oneshot_stopped(dev))) {
+		/*
+		 * We need the clock event again, configure it in ONESHOT mode
+		 * before using it.
+		 */
+		clockevents_switch_state(dev, CLOCK_EVT_STATE_ONESHOT);
+	}
+
+	return clockevents_program_event(dev, expires, force);
 }
 
 /**
@@ -77,11 +52,10 @@ int tick_program_event(ktime_t expires, int force)
  */
 void tick_resume_oneshot(void)
 {
-	struct tick_device *td = &__get_cpu_var(tick_cpu_device);
-	struct clock_event_device *dev = td->evtdev;
+	struct clock_event_device *dev = __this_cpu_read(tick_cpu_device.evtdev);
 
-	clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
-	tick_program_event(ktime_get(), 1);
+	clockevents_switch_state(dev, CLOCK_EVT_STATE_ONESHOT);
+	clockevents_program_event(dev, ktime_get(), true);
 }
 
 /**
@@ -92,8 +66,8 @@ void tick_setup_oneshot(struct clock_event_device *newdev,
 			ktime_t next_event)
 {
 	newdev->event_handler = handler;
-	clockevents_set_mode(newdev, CLOCK_EVT_MODE_ONESHOT);
-	tick_dev_program_event(newdev, next_event, 1);
+	clockevents_switch_state(newdev, CLOCK_EVT_STATE_ONESHOT);
+	clockevents_program_event(newdev, next_event, true);
 }
 
 /**
@@ -101,7 +75,7 @@ void tick_setup_oneshot(struct clock_event_device *newdev,
  */
 int tick_switch_to_oneshot(void (*handler)(struct clock_event_device *))
 {
-	struct tick_device *td = &__get_cpu_var(tick_cpu_device);
+	struct tick_device *td = this_cpu_ptr(&tick_cpu_device);
 	struct clock_event_device *dev = td->evtdev;
 
 	if (!dev || !(dev->features & CLOCK_EVT_FEAT_ONESHOT) ||
@@ -123,7 +97,7 @@ int tick_switch_to_oneshot(void (*handler)(struct clock_event_device *))
 
 	td->mode = TICKDEV_MODE_ONESHOT;
 	dev->event_handler = handler;
-	clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
+	clockevents_switch_state(dev, CLOCK_EVT_STATE_ONESHOT);
 	tick_broadcast_switch_to_oneshot();
 	return 0;
 }
@@ -139,7 +113,7 @@ int tick_oneshot_mode_active(void)
 	int ret;
 
 	local_irq_save(flags);
-	ret = __get_cpu_var(tick_cpu_device).mode == TICKDEV_MODE_ONESHOT;
+	ret = __this_cpu_read(tick_cpu_device.mode) == TICKDEV_MODE_ONESHOT;
 	local_irq_restore(flags);
 
 	return ret;

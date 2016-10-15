@@ -25,12 +25,11 @@
 
 #include <linux/errno.h>
 #include <linux/fs.h>
-#include <linux/ncp_fs.h>
 #include <linux/time.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/stat.h>
-#include "ncplib_kernel.h"
-
+#include "ncp_fs.h"
 
 /* these magic numbers must appear in the symlink file -- this makes it a bit
    more resilient against the magic attributes being set on random files. */
@@ -109,11 +108,11 @@ int ncp_symlink(struct inode *dir, struct dentry *dentry, const char *symname) {
 	char *rawlink;
 	int length, err, i, outlen;
 	int kludge;
-	int mode;
+	umode_t mode;
 	__le32 attr;
 	unsigned int hdr;
 
-	DPRINTK("ncp_symlink(dir=%p,dentry=%p,symname=%s)\n",dir,dentry,symname);
+	ncp_dbg(1, "dir=%p, dentry=%p, symname=%s\n", dir, dentry, symname);
 
 	if (ncp_is_nfs_extras(NCP_SERVER(dir), NCP_FINFO(dir)->volNumber))
 		kludge = 0;
@@ -157,7 +156,7 @@ int ncp_symlink(struct inode *dir, struct dentry *dentry, const char *symname) {
 		goto failfree;
 	}
 
-	inode=dentry->d_inode;
+	inode=d_inode(dentry);
 
 	if (ncp_make_open(inode, O_WRONLY))
 		goto failfree;

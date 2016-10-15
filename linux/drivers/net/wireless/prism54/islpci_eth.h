@@ -11,8 +11,7 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  along with this program; if not, see <http://www.gnu.org/licenses/>.
  *
  */
 
@@ -34,13 +33,13 @@ struct rfmon_header {
 	__le16 unk3;
 	u8 rssi;
 	u8 padding[3];
-} __attribute__ ((packed));
+} __packed;
 
 struct rx_annex_header {
 	u8 addr1[ETH_ALEN];
 	u8 addr2[ETH_ALEN];
 	struct rfmon_header rfmon;
-} __attribute__ ((packed));
+} __packed;
 
 /* wlan-ng (and hopefully others) AVS header, version one.  Fields in
  * network byte order. */

@@ -11,6 +11,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include "internal.h"
@@ -129,7 +130,6 @@ static int afs_vlocation_access_vl_by_id(struct afs_vlocation *vl,
 					/* second+ BUSY - sleep a little bit */
 					set_current_state(TASK_UNINTERRUPTIBLE);
 					schedule_timeout(1);
-					__set_current_state(TASK_RUNNING);
 				}
 				continue;
 			}
@@ -307,7 +307,8 @@ static int afs_vlocation_fill_in_record(struct afs_vlocation *vl,
 	/* see if we have an in-cache copy (will set vl->valid if there is) */
 #ifdef CONFIG_AFS_FSCACHE
 	vl->cache = fscache_acquire_cookie(vl->cell->cache,
-					   &afs_vlocation_cache_index_def, vl);
+					   &afs_vlocation_cache_index_def, vl,
+					   true);
 #endif
 
 	if (vl->valid) {
@@ -506,8 +507,8 @@ void afs_put_vlocation(struct afs_vlocation *vl)
 		_debug("buried");
 		list_move_tail(&vl->grave, &afs_vlocation_graveyard);
 		vl->time_of_death = get_seconds();
-		schedule_delayed_work(&afs_vlocation_reap,
-				      afs_vlocation_timeout * HZ);
+		queue_delayed_work(afs_wq, &afs_vlocation_reap,
+				   afs_vlocation_timeout * HZ);
 
 		/* suspend updates on this record */
 		if (!list_empty(&vl->update)) {
@@ -560,12 +561,7 @@ static void afs_vlocation_reaper(struct work_struct *work)
 		if (expiry > now) {
 			delay = (expiry - now) * HZ;
 			_debug("delay %lu", delay);
-			if (!schedule_delayed_work(&afs_vlocation_reap,
-						   delay)) {
-				cancel_delayed_work(&afs_vlocation_reap);
-				schedule_delayed_work(&afs_vlocation_reap,
-						      delay);
-			}
+			mod_delayed_work(afs_wq, &afs_vlocation_reap, delay);
 			break;
 		}
 
@@ -613,13 +609,10 @@ void afs_vlocation_purge(void)
 	spin_lock(&afs_vlocation_updates_lock);
 	list_del_init(&afs_vlocation_updates);
 	spin_unlock(&afs_vlocation_updates_lock);
-	cancel_delayed_work(&afs_vlocation_update);
-	queue_delayed_work(afs_vlocation_update_worker,
-			   &afs_vlocation_update, 0);
+	mod_delayed_work(afs_vlocation_update_worker, &afs_vlocation_update, 0);
 	destroy_workqueue(afs_vlocation_update_worker);
 
-	cancel_delayed_work(&afs_vlocation_reap);
-	schedule_delayed_work(&afs_vlocation_reap, 0);
+	mod_delayed_work(afs_wq, &afs_vlocation_reap, 0);
 }
 
 /*

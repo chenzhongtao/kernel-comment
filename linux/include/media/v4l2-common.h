@@ -35,7 +35,7 @@
 	printk(level "%s %d-%04x: " fmt, name, i2c_adapter_id(adapter), addr , ## arg)
 
 #define v4l_client_printk(level, client, fmt, arg...)			    \
-	v4l_printk(level, (client)->driver->driver.name, (client)->adapter, \
+	v4l_printk(level, (client)->dev.driver->name, (client)->adapter, \
 		   (client)->addr, fmt , ## arg)
 
 #define v4l_err(client, fmt, arg...) \
@@ -80,48 +80,9 @@
 
 /* ------------------------------------------------------------------------- */
 
-/* Priority helper functions */
+/* Control helper function */
 
-struct v4l2_prio_state {
-	atomic_t prios[4];
-};
-int v4l2_prio_init(struct v4l2_prio_state *global);
-int v4l2_prio_change(struct v4l2_prio_state *global, enum v4l2_priority *local,
-		     enum v4l2_priority new);
-int v4l2_prio_open(struct v4l2_prio_state *global, enum v4l2_priority *local);
-int v4l2_prio_close(struct v4l2_prio_state *global, enum v4l2_priority *local);
-enum v4l2_priority v4l2_prio_max(struct v4l2_prio_state *global);
-int v4l2_prio_check(struct v4l2_prio_state *global, enum v4l2_priority *local);
-
-/* ------------------------------------------------------------------------- */
-
-/* Control helper functions */
-
-int v4l2_ctrl_check(struct v4l2_ext_control *ctrl, struct v4l2_queryctrl *qctrl,
-		const char **menu_items);
-const char *v4l2_ctrl_get_name(u32 id);
-const char **v4l2_ctrl_get_menu(u32 id);
 int v4l2_ctrl_query_fill(struct v4l2_queryctrl *qctrl, s32 min, s32 max, s32 step, s32 def);
-int v4l2_ctrl_query_menu(struct v4l2_querymenu *qmenu,
-		struct v4l2_queryctrl *qctrl, const char **menu_items);
-#define V4L2_CTRL_MENU_IDS_END (0xffffffff)
-int v4l2_ctrl_query_menu_valid_items(struct v4l2_querymenu *qmenu, const u32 *ids);
-
-/* Note: ctrl_classes points to an array of u32 pointers. Each u32 array is a
-   0-terminated array of control IDs. Each array must be sorted low to high
-   and belong to the same control class. The array of u32 pointers must also
-   be sorted, from low class IDs to high class IDs. */
-u32 v4l2_ctrl_next(const u32 * const *ctrl_classes, u32 id);
-
-/* ------------------------------------------------------------------------- */
-
-/* Register/chip ident helper function */
-
-struct i2c_client; /* forward reference */
-int v4l2_chip_match_i2c_client(struct i2c_client *c, const struct v4l2_dbg_match *match);
-int v4l2_chip_ident_i2c_client(struct i2c_client *c, struct v4l2_dbg_chip_ident *chip,
-		u32 ident, u32 revision);
-int v4l2_chip_match_host(const struct v4l2_dbg_match *match);
 
 /* ------------------------------------------------------------------------- */
 
@@ -137,33 +98,18 @@ struct v4l2_subdev_ops;
 
 
 /* Load an i2c module and return an initialized v4l2_subdev struct.
-   Only call request_module if module_name != NULL.
    The client_type argument is the name of the chip that's on the adapter. */
-struct v4l2_subdev *v4l2_i2c_new_subdev_cfg(struct v4l2_device *v4l2_dev,
-		struct i2c_adapter *adapter,
-		const char *module_name, const char *client_type,
-		int irq, void *platform_data,
+struct v4l2_subdev *v4l2_i2c_new_subdev(struct v4l2_device *v4l2_dev,
+		struct i2c_adapter *adapter, const char *client_type,
 		u8 addr, const unsigned short *probe_addrs);
-
-/* Load an i2c module and return an initialized v4l2_subdev struct.
-   Only call request_module if module_name != NULL.
-   The client_type argument is the name of the chip that's on the adapter. */
-static inline struct v4l2_subdev *v4l2_i2c_new_subdev(struct v4l2_device *v4l2_dev,
-		struct i2c_adapter *adapter,
-		const char *module_name, const char *client_type,
-		u8 addr, const unsigned short *probe_addrs)
-{
-	return v4l2_i2c_new_subdev_cfg(v4l2_dev, adapter, module_name,
-				client_type, 0, NULL, addr, probe_addrs);
-}
 
 struct i2c_board_info;
 
 struct v4l2_subdev *v4l2_i2c_new_subdev_board(struct v4l2_device *v4l2_dev,
-		struct i2c_adapter *adapter, const char *module_name,
-		struct i2c_board_info *info, const unsigned short *probe_addrs);
+		struct i2c_adapter *adapter, struct i2c_board_info *info,
+		const unsigned short *probe_addrs);
 
-/* Initialize an v4l2_subdev with data from an i2c_client struct */
+/* Initialize a v4l2_subdev with data from an i2c_client struct */
 void v4l2_i2c_subdev_init(struct v4l2_subdev *sd, struct i2c_client *client,
 		const struct v4l2_subdev_ops *ops);
 /* Return i2c client address of v4l2_subdev. */
@@ -181,6 +127,25 @@ enum v4l2_i2c_tuner_type {
 /* Return a list of I2C tuner addresses to probe. Use only if the tuner
    addresses are unknown. */
 const unsigned short *v4l2_i2c_tuner_addrs(enum v4l2_i2c_tuner_type type);
+
+/* ------------------------------------------------------------------------- */
+
+/* SPI Helper functions */
+#if defined(CONFIG_SPI)
+
+#include <linux/spi/spi.h>
+
+struct spi_device;
+
+/* Load an spi module and return an initialized v4l2_subdev struct.
+   The client_type argument is the name of the chip that's on the adapter. */
+struct v4l2_subdev *v4l2_spi_new_subdev(struct v4l2_device *v4l2_dev,
+		struct spi_master *master, struct spi_board_info *info);
+
+/* Initialize a v4l2_subdev with data from an spi_device struct */
+void v4l2_spi_subdev_init(struct v4l2_subdev *sd, struct spi_device *spi,
+		const struct v4l2_subdev_ops *ops);
+#endif
 
 /* ------------------------------------------------------------------------- */
 
@@ -212,5 +177,16 @@ void v4l_bound_align_image(unsigned int *w, unsigned int wmin,
 			   unsigned int *h, unsigned int hmin,
 			   unsigned int hmax, unsigned int halign,
 			   unsigned int salign);
+
+struct v4l2_discrete_probe {
+	const struct v4l2_frmsize_discrete	*sizes;
+	int					num_sizes;
+};
+
+const struct v4l2_frmsize_discrete *v4l2_find_nearest_format(
+		const struct v4l2_discrete_probe *probe,
+		s32 width, s32 height);
+
+void v4l2_get_timestamp(struct timeval *tv);
 
 #endif /* V4L2_COMMON_H_ */

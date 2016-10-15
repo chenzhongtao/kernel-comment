@@ -32,7 +32,9 @@
  */
 #include <linux/kernel.h>
 #include <linux/in.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/ratelimit.h>
 
 #include "rds.h"
 #include "iw.h"
@@ -156,9 +158,11 @@ static void rds_iw_qp_event_handler(struct ib_event *event, void *data)
 	case IB_EVENT_QP_REQ_ERR:
 	case IB_EVENT_QP_FATAL:
 	default:
-		rds_iw_conn_error(conn, "RDS/IW: Fatal QP Event %u - connection %pI4->%pI4...reconnecting\n",
+		rdsdebug("Fatal QP Event %u "
+			"- connection %pI4->%pI4, reconnecting\n",
 			event->event, &conn->c_laddr,
 			&conn->c_faddr);
+		rds_conn_drop(conn);
 		break;
 	}
 }
@@ -175,10 +179,11 @@ static int rds_iw_init_qp_attrs(struct ib_qp_init_attr *attr,
 		void *context)
 {
 	struct ib_device *dev = rds_iwdev->dev;
+	struct ib_cq_init_attr cq_attr = {};
 	unsigned int send_size, recv_size;
 	int ret;
 
-	/* The offset of 1 is to accomodate the additional ACK WR. */
+	/* The offset of 1 is to accommodate the additional ACK WR. */
 	send_size = min_t(unsigned int, rds_iwdev->max_wrs, rds_iw_sysctl_max_send_wr + 1);
 	recv_size = min_t(unsigned int, rds_iwdev->max_wrs, rds_iw_sysctl_max_recv_wr + 1);
 	rds_iw_ring_resize(send_ring, send_size - 1);
@@ -194,9 +199,10 @@ static int rds_iw_init_qp_attrs(struct ib_qp_init_attr *attr,
 	attr->sq_sig_type = IB_SIGNAL_REQ_WR;
 	attr->qp_type = IB_QPT_RC;
 
+	cq_attr.cqe = send_size;
 	attr->send_cq = ib_create_cq(dev, send_cq_handler,
 				     rds_iw_cq_event_handler,
-				     context, send_size, 0);
+				     context, &cq_attr);
 	if (IS_ERR(attr->send_cq)) {
 		ret = PTR_ERR(attr->send_cq);
 		attr->send_cq = NULL;
@@ -204,9 +210,10 @@ static int rds_iw_init_qp_attrs(struct ib_qp_init_attr *attr,
 		goto out;
 	}
 
+	cq_attr.cqe = recv_size;
 	attr->recv_cq = ib_create_cq(dev, recv_cq_handler,
 				     rds_iw_cq_event_handler,
-				     context, recv_size, 0);
+				     context, &cq_attr);
 	if (IS_ERR(attr->recv_cq)) {
 		ret = PTR_ERR(attr->recv_cq);
 		attr->recv_cq = NULL;
@@ -254,9 +261,8 @@ static int rds_iw_setup_qp(struct rds_connection *conn)
 	 * the rds_iwdev at all.
 	 */
 	rds_iwdev = ib_get_client_data(dev, &rds_iw_client);
-	if (rds_iwdev == NULL) {
-		if (printk_ratelimit())
-			printk(KERN_NOTICE "RDS/IW: No client_data for device %s\n",
+	if (!rds_iwdev) {
+		printk_ratelimited(KERN_NOTICE "RDS/IW: No client_data for device %s\n",
 					dev->name);
 		return -EOPNOTSUPP;
 	}
@@ -289,7 +295,7 @@ static int rds_iw_setup_qp(struct rds_connection *conn)
 					   ic->i_send_ring.w_nr *
 						sizeof(struct rds_header),
 					   &ic->i_send_hdrs_dma, GFP_KERNEL);
-	if (ic->i_send_hdrs == NULL) {
+	if (!ic->i_send_hdrs) {
 		ret = -ENOMEM;
 		rdsdebug("ib_dma_alloc_coherent send failed\n");
 		goto out;
@@ -299,7 +305,7 @@ static int rds_iw_setup_qp(struct rds_connection *conn)
 					   ic->i_recv_ring.w_nr *
 						sizeof(struct rds_header),
 					   &ic->i_recv_hdrs_dma, GFP_KERNEL);
-	if (ic->i_recv_hdrs == NULL) {
+	if (!ic->i_recv_hdrs) {
 		ret = -ENOMEM;
 		rdsdebug("ib_dma_alloc_coherent recv failed\n");
 		goto out;
@@ -307,14 +313,14 @@ static int rds_iw_setup_qp(struct rds_connection *conn)
 
 	ic->i_ack = ib_dma_alloc_coherent(dev, sizeof(struct rds_header),
 				       &ic->i_ack_dma, GFP_KERNEL);
-	if (ic->i_ack == NULL) {
+	if (!ic->i_ack) {
 		ret = -ENOMEM;
 		rdsdebug("ib_dma_alloc_coherent ack failed\n");
 		goto out;
 	}
 
 	ic->i_sends = vmalloc(ic->i_send_ring.w_nr * sizeof(struct rds_iw_send_work));
-	if (ic->i_sends == NULL) {
+	if (!ic->i_sends) {
 		ret = -ENOMEM;
 		rdsdebug("send allocation failed\n");
 		goto out;
@@ -322,7 +328,7 @@ static int rds_iw_setup_qp(struct rds_connection *conn)
 	rds_iw_send_init_ring(ic);
 
 	ic->i_recvs = vmalloc(ic->i_recv_ring.w_nr * sizeof(struct rds_iw_recv_work));
-	if (ic->i_recvs == NULL) {
+	if (!ic->i_recvs) {
 		ret = -ENOMEM;
 		rdsdebug("recv allocation failed\n");
 		goto out;
@@ -362,13 +368,12 @@ static u32 rds_iw_protocol_compatible(const struct rds_iw_connect_private *dp)
 		version = RDS_PROTOCOL_3_0;
 		while ((common >>= 1) != 0)
 			version++;
-	} else if (printk_ratelimit()) {
-		printk(KERN_NOTICE "RDS: Connection from %pI4 using "
+	}
+	printk_ratelimited(KERN_NOTICE "RDS: Connection from %pI4 using "
 			"incompatible protocol version %u.%u\n",
 			&dp->dp_saddr,
 			dp->dp_protocol_major,
 			dp->dp_protocol_minor);
-	}
 	return version;
 }
 
@@ -393,8 +398,9 @@ int rds_iw_cm_handle_connect(struct rdma_cm_id *cm_id,
 		 &dp->dp_saddr, &dp->dp_daddr,
 		 RDS_PROTOCOL_MAJOR(version), RDS_PROTOCOL_MINOR(version));
 
-	conn = rds_conn_create(dp->dp_daddr, dp->dp_saddr, &rds_iw_transport,
-			       GFP_KERNEL);
+	/* RDS/IW is not currently netns aware, thus init_net */
+	conn = rds_conn_create(&init_net, dp->dp_daddr, dp->dp_saddr,
+			       &rds_iw_transport, GFP_KERNEL);
 	if (IS_ERR(conn)) {
 		rdsdebug("rds_conn_create failed (%ld)\n", PTR_ERR(conn));
 		conn = NULL;
@@ -449,6 +455,7 @@ int rds_iw_cm_handle_connect(struct rdma_cm_id *cm_id,
 	err = rds_iw_setup_qp(conn);
 	if (err) {
 		rds_iw_conn_error(conn, "rds_iw_setup_qp failed (%d)\n", err);
+		mutex_unlock(&conn->c_cm_lock);
 		goto out;
 	}
 
@@ -517,8 +524,8 @@ int rds_iw_conn_connect(struct rds_connection *conn)
 
 	/* XXX I wonder what affect the port space has */
 	/* delegate cm event handler to rdma_transport */
-	ic->i_cm_id = rdma_create_id(rds_rdma_cm_event_handler, conn,
-				     RDMA_PS_TCP);
+	ic->i_cm_id = rdma_create_id(&init_net, rds_rdma_cm_event_handler, conn,
+				     RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(ic->i_cm_id)) {
 		ret = PTR_ERR(ic->i_cm_id);
 		ic->i_cm_id = NULL;
@@ -587,8 +594,8 @@ void rds_iw_conn_shutdown(struct rds_connection *conn)
 			/* Actually this may happen quite frequently, when
 			 * an outgoing connect raced with an incoming connect.
 			 */
-			rdsdebug("rds_iw_conn_shutdown: failed to disconnect,"
-				   " cm: %p err %d\n", ic->i_cm_id, err);
+			rdsdebug("failed to disconnect, cm: %p err %d\n",
+				 ic->i_cm_id, err);
 		}
 
 		if (ic->i_cm_id->qp) {
@@ -691,11 +698,13 @@ int rds_iw_conn_alloc(struct rds_connection *conn, gfp_t gfp)
 	unsigned long flags;
 
 	/* XXX too lazy? */
-	ic = kzalloc(sizeof(struct rds_iw_connection), GFP_KERNEL);
-	if (ic == NULL)
+	ic = kzalloc(sizeof(struct rds_iw_connection), gfp);
+	if (!ic)
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&ic->iw_node);
+	tasklet_init(&ic->i_recv_tasklet, rds_iw_recv_tasklet_fn,
+		     (unsigned long) ic);
 	mutex_init(&ic->i_recv_mutex);
 #ifndef KERNEL_HAS_ATOMIC64
 	spin_lock_init(&ic->i_ack_lock);

@@ -30,6 +30,7 @@
  */
 
 #include <linux/if_arp.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/datalink.h>
 #include <net/psnap.h>
@@ -38,6 +39,8 @@
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/export.h>
+#include <linux/etherdevice.h>
 
 int sysctl_aarp_expiry_time = AARP_EXPIRY_TIME;
 int sysctl_aarp_tick_time = AARP_TICK_TIME;
@@ -65,7 +68,7 @@ struct aarp_entry {
 	unsigned long		expires_at;
 	struct atalk_addr	target_addr;
 	struct net_device	*dev;
-	char			hwaddr[6];
+	char			hwaddr[ETH_ALEN];
 	unsigned short		xmit_count;
 	struct aarp_entry	*next;
 };
@@ -132,13 +135,13 @@ static void __aarp_send_query(struct aarp_entry *a)
 	eah->pa_len	 = AARP_PA_ALEN;
 	eah->function	 = htons(AARP_REQUEST);
 
-	memcpy(eah->hw_src, dev->dev_addr, ETH_ALEN);
+	ether_addr_copy(eah->hw_src, dev->dev_addr);
 
 	eah->pa_src_zero = 0;
 	eah->pa_src_net	 = sat->s_net;
 	eah->pa_src_node = sat->s_node;
 
-	memset(eah->hw_dst, '\0', ETH_ALEN);
+	eth_zero_addr(eah->hw_dst);
 
 	eah->pa_dst_zero = 0;
 	eah->pa_dst_net	 = a->target_addr.s_net;
@@ -179,16 +182,16 @@ static void aarp_send_reply(struct net_device *dev, struct atalk_addr *us,
 	eah->pa_len	 = AARP_PA_ALEN;
 	eah->function	 = htons(AARP_REPLY);
 
-	memcpy(eah->hw_src, dev->dev_addr, ETH_ALEN);
+	ether_addr_copy(eah->hw_src, dev->dev_addr);
 
 	eah->pa_src_zero = 0;
 	eah->pa_src_net	 = us->s_net;
 	eah->pa_src_node = us->s_node;
 
 	if (!sha)
-		memset(eah->hw_dst, '\0', ETH_ALEN);
+		eth_zero_addr(eah->hw_dst);
 	else
-		memcpy(eah->hw_dst, sha, ETH_ALEN);
+		ether_addr_copy(eah->hw_dst, sha);
 
 	eah->pa_dst_zero = 0;
 	eah->pa_dst_net	 = them->s_net;
@@ -230,13 +233,13 @@ static void aarp_send_probe(struct net_device *dev, struct atalk_addr *us)
 	eah->pa_len	 = AARP_PA_ALEN;
 	eah->function	 = htons(AARP_PROBE);
 
-	memcpy(eah->hw_src, dev->dev_addr, ETH_ALEN);
+	ether_addr_copy(eah->hw_src, dev->dev_addr);
 
 	eah->pa_src_zero = 0;
 	eah->pa_src_net	 = us->s_net;
 	eah->pa_src_node = us->s_node;
 
-	memset(eah->hw_dst, '\0', ETH_ALEN);
+	eth_zero_addr(eah->hw_dst);
 
 	eah->pa_dst_zero = 0;
 	eah->pa_dst_net	 = us->s_net;
@@ -330,7 +333,7 @@ static void aarp_expire_timeout(unsigned long unused)
 static int aarp_device_event(struct notifier_block *this, unsigned long event,
 			     void *ptr)
 {
-	struct net_device *dev = ptr;
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	int ct;
 
 	if (!net_eq(dev_net(dev), &init_net))
@@ -778,87 +781,87 @@ static int aarp_rcv(struct sk_buff *skb, struct net_device *dev,
 	}
 
 	switch (function) {
-		case AARP_REPLY:
-			if (!unresolved_count)	/* Speed up */
-				break;
-
-			/* Find the entry.  */
-			a = __aarp_find_entry(unresolved[hash], dev, &sa);
-			if (!a || dev != a->dev)
-				break;
-
-			/* We can fill one in - this is good. */
-			memcpy(a->hwaddr, ea->hw_src, ETH_ALEN);
-			__aarp_resolved(&unresolved[hash], a, hash);
-			if (!unresolved_count)
-				mod_timer(&aarp_timer,
-					  jiffies + sysctl_aarp_expiry_time);
+	case AARP_REPLY:
+		if (!unresolved_count)	/* Speed up */
 			break;
 
-		case AARP_REQUEST:
-		case AARP_PROBE:
+		/* Find the entry.  */
+		a = __aarp_find_entry(unresolved[hash], dev, &sa);
+		if (!a || dev != a->dev)
+			break;
+
+		/* We can fill one in - this is good. */
+		ether_addr_copy(a->hwaddr, ea->hw_src);
+		__aarp_resolved(&unresolved[hash], a, hash);
+		if (!unresolved_count)
+			mod_timer(&aarp_timer,
+				  jiffies + sysctl_aarp_expiry_time);
+		break;
+
+	case AARP_REQUEST:
+	case AARP_PROBE:
+
+		/*
+		 * If it is my address set ma to my address and reply.
+		 * We can treat probe and request the same.  Probe
+		 * simply means we shouldn't cache the querying host,
+		 * as in a probe they are proposing an address not
+		 * using one.
+		 *
+		 * Support for proxy-AARP added. We check if the
+		 * address is one of our proxies before we toss the
+		 * packet out.
+		 */
+
+		sa.s_node = ea->pa_dst_node;
+		sa.s_net  = ea->pa_dst_net;
+
+		/* See if we have a matching proxy. */
+		ma = __aarp_proxy_find(dev, &sa);
+		if (!ma)
+			ma = &ifa->address;
+		else { /* We need to make a copy of the entry. */
+			da.s_node = sa.s_node;
+			da.s_net = sa.s_net;
+			ma = &da;
+		}
+
+		if (function == AARP_PROBE) {
+			/*
+			 * A probe implies someone trying to get an
+			 * address. So as a precaution flush any
+			 * entries we have for this address.
+			 */
+			a = __aarp_find_entry(resolved[sa.s_node %
+						       (AARP_HASH_SIZE - 1)],
+					      skb->dev, &sa);
 
 			/*
-			 * If it is my address set ma to my address and reply.
-			 * We can treat probe and request the same.  Probe
-			 * simply means we shouldn't cache the querying host,
-			 * as in a probe they are proposing an address not
-			 * using one.
-			 *
-			 * Support for proxy-AARP added. We check if the
-			 * address is one of our proxies before we toss the
-			 * packet out.
+			 * Make it expire next tick - that avoids us
+			 * getting into a probe/flush/learn/probe/
+			 * flush/learn cycle during probing of a slow
+			 * to respond host addr.
 			 */
-
-			sa.s_node = ea->pa_dst_node;
-			sa.s_net  = ea->pa_dst_net;
-
-			/* See if we have a matching proxy. */
-			ma = __aarp_proxy_find(dev, &sa);
-			if (!ma)
-				ma = &ifa->address;
-			else { /* We need to make a copy of the entry. */
-				da.s_node = sa.s_node;
-				da.s_net = da.s_net;
-				ma = &da;
+			if (a) {
+				a->expires_at = jiffies - 1;
+				mod_timer(&aarp_timer, jiffies +
+					  sysctl_aarp_tick_time);
 			}
+		}
 
-			if (function == AARP_PROBE) {
-				/*
-				 * A probe implies someone trying to get an
-				 * address. So as a precaution flush any
-				 * entries we have for this address.
-				 */
-				a = __aarp_find_entry(resolved[sa.s_node %
-							  (AARP_HASH_SIZE - 1)],
-						      skb->dev, &sa);
-
-				/*
-				 * Make it expire next tick - that avoids us
-				 * getting into a probe/flush/learn/probe/
-				 * flush/learn cycle during probing of a slow
-				 * to respond host addr.
-				 */
-				if (a) {
-					a->expires_at = jiffies - 1;
-					mod_timer(&aarp_timer, jiffies +
-							sysctl_aarp_tick_time);
-				}
-			}
-
-			if (sa.s_node != ma->s_node)
-				break;
-
-			if (sa.s_net && ma->s_net && sa.s_net != ma->s_net)
-				break;
-
-			sa.s_node = ea->pa_src_node;
-			sa.s_net = ea->pa_src_net;
-
-			/* aarp_my_address has found the address to use for us.
-			*/
-			aarp_send_reply(dev, ma, &sa, ea->hw_src);
+		if (sa.s_node != ma->s_node)
 			break;
+
+		if (sa.s_net && ma->s_net && sa.s_net != ma->s_net)
+			break;
+
+		sa.s_node = ea->pa_src_node;
+		sa.s_net = ea->pa_src_net;
+
+		/* aarp_my_address has found the address to use for us.
+		 */
+		aarp_send_reply(dev, ma, &sa, ea->hw_src);
+		break;
 	}
 
 unlock:
@@ -923,7 +926,7 @@ static struct aarp_entry *iter_next(struct aarp_iter_state *iter, loff_t *pos)
 	struct aarp_entry *entry;
 
  rescan:
-	while(ct < AARP_HASH_SIZE) {
+	while (ct < AARP_HASH_SIZE) {
 		for (entry = table[ct]; entry; entry = entry->next) {
 			if (!pos || ++off == *pos) {
 				iter->table = table;
@@ -992,7 +995,7 @@ static const char *dt2str(unsigned long ticks)
 {
 	static char buf[32];
 
-	sprintf(buf, "%ld.%02ld", ticks / HZ, ((ticks % HZ) * 100 ) / HZ);
+	sprintf(buf, "%ld.%02ld", ticks / HZ, ((ticks % HZ) * 100) / HZ);
 
 	return buf;
 }

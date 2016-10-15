@@ -32,6 +32,11 @@
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/netfilter.h>
+#include <net/netfilter/nf_conntrack.h>
+#include <net/netfilter/nf_conntrack_expect.h>
+#include <net/netfilter/nf_nat.h>
+#include <net/netfilter/nf_nat_helper.h>
+#include <linux/gfp.h>
 #include <net/protocol.h>
 #include <net/tcp.h>
 #include <asm/unaligned.h>
@@ -39,16 +44,17 @@
 #include <net/ip_vs.h>
 
 
-#define SERVER_STRING "227 Entering Passive Mode ("
-#define CLIENT_STRING "PORT "
+#define SERVER_STRING "227 "
+#define CLIENT_STRING "PORT"
 
 
 /*
  * List of ports (up to IP_VS_APP_MAX_PORTS) to be handled by helper
  * First port is set to the default port.
  */
+static unsigned int ports_count = 1;
 static unsigned short ports[IP_VS_APP_MAX_PORTS] = {21, 0};
-module_param_array(ports, ushort, NULL, 0);
+module_param_array(ports, ushort, &ports_count, 0444);
 MODULE_PARM_DESC(ports, "Ports to monitor for FTP control commands");
 
 
@@ -59,6 +65,8 @@ static int ip_vs_ftp_pasv;
 static int
 ip_vs_ftp_init_conn(struct ip_vs_app *app, struct ip_vs_conn *cp)
 {
+	/* We use connection tracking for the command connection */
+	cp->flags |= IP_VS_CONN_F_NFCT;
 	return 0;
 }
 
@@ -72,41 +80,63 @@ ip_vs_ftp_done_conn(struct ip_vs_app *app, struct ip_vs_conn *cp)
 
 /*
  * Get <addr,port> from the string "xxx.xxx.xxx.xxx,ppp,ppp", started
- * with the "pattern" and terminated with the "term" character.
+ * with the "pattern", ignoring before "skip" and terminated with
+ * the "term" character.
  * <addr,port> is in network order.
  */
 static int ip_vs_ftp_get_addrport(char *data, char *data_limit,
-				  const char *pattern, size_t plen, char term,
+				  const char *pattern, size_t plen,
+				  char skip, char term,
 				  __be32 *addr, __be16 *port,
 				  char **start, char **end)
 {
+	char *s, c;
 	unsigned char p[6];
 	int i = 0;
 
 	if (data_limit - data < plen) {
 		/* check if there is partial match */
-		if (strnicmp(data, pattern, data_limit - data) == 0)
+		if (strncasecmp(data, pattern, data_limit - data) == 0)
 			return -1;
 		else
 			return 0;
 	}
 
-	if (strnicmp(data, pattern, plen) != 0) {
+	if (strncasecmp(data, pattern, plen) != 0) {
 		return 0;
 	}
-	*start = data + plen;
+	s = data + plen;
+	if (skip) {
+		int found = 0;
 
-	for (data = *start; *data != term; data++) {
+		for (;; s++) {
+			if (s == data_limit)
+				return -1;
+			if (!found) {
+				if (*s == skip)
+					found = 1;
+			} else if (*s != skip) {
+				break;
+			}
+		}
+	}
+
+	for (data = s; ; data++) {
 		if (data == data_limit)
 			return -1;
+		if (*data == term)
+			break;
 	}
 	*end = data;
 
 	memset(p, 0, sizeof(p));
-	for (data = *start; data != *end; data++) {
-		if (*data >= '0' && *data <= '9') {
-			p[i] = p[i]*10 + *data - '0';
-		} else if (*data == ',' && i < 5) {
+	for (data = s; ; data++) {
+		c = *data;
+		if (c == term)
+			break;
+		if (c >= '0' && c <= '9') {
+			p[i] = p[i]*10 + c - '0';
+		} else if (c == ',' && i < 5) {
 			i++;
 		} else {
 			/* unexpected character */
@@ -117,11 +147,11 @@ static int ip_vs_ftp_get_addrport(char *data, char *data_limit,
 	if (i != 5)
 		return -1;
 
-	*addr = get_unaligned((__be32 *)p);
-	*port = get_unaligned((__be16 *)(p + 4));
+	*start = s;
+	*addr = get_unaligned((__be32 *) p);
+	*port = get_unaligned((__be16 *) (p + 4));
 	return 1;
 }
-
 
 /*
  * Look at outgoing ftp packets to catch the response to a PASV command
@@ -147,8 +177,12 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 	__be16 port;
 	struct ip_vs_conn *n_cp;
 	char buf[24];		/* xxx.xxx.xxx.xxx,ppp,ppp\000 */
-	unsigned buf_len;
-	int ret;
+	unsigned int buf_len;
+	int ret = 0;
+	enum ip_conntrack_info ctinfo;
+	struct nf_conn *ct;
+
+	*diff = 0;
 
 #ifdef CONFIG_IP_VS_IPV6
 	/* This application helper doesn't work with IPv6 yet,
@@ -157,8 +191,6 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 	if (cp->af == AF_INET6)
 		return 1;
 #endif
-
-	*diff = 0;
 
 	/* Only useful for established sessions */
 	if (cp->state != IP_VS_TCP_S_ESTABLISHED)
@@ -176,7 +208,8 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 
 		if (ip_vs_ftp_get_addrport(data, data_limit,
 					   SERVER_STRING,
-					   sizeof(SERVER_STRING)-1, ')',
+					   sizeof(SERVER_STRING)-1,
+					   '(', ')',
 					   &from.ip, &port,
 					   &start, &end) != 1)
 			return 1;
@@ -187,15 +220,23 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 		/*
 		 * Now update or create an connection entry for it
 		 */
-		n_cp = ip_vs_conn_out_get(AF_INET, iph->protocol, &from, port,
-					  &cp->caddr, 0);
+		{
+			struct ip_vs_conn_param p;
+			ip_vs_conn_fill_param(cp->ipvs, AF_INET,
+					      iph->protocol, &from, port,
+					      &cp->caddr, 0, &p);
+			n_cp = ip_vs_conn_out_get(&p);
+		}
 		if (!n_cp) {
-			n_cp = ip_vs_conn_new(AF_INET, IPPROTO_TCP,
-					      &cp->caddr, 0,
-					      &cp->vaddr, port,
-					      &from, port,
-					      IP_VS_CONN_F_NO_CPORT,
-					      cp->dest);
+			struct ip_vs_conn_param p;
+			ip_vs_conn_fill_param(cp->ipvs,
+					      AF_INET, IPPROTO_TCP, &cp->caddr,
+					      0, &cp->vaddr, port, &p);
+			/* As above, this is ipv4 only */
+			n_cp = ip_vs_conn_new(&p, AF_INET, &from, port,
+					      IP_VS_CONN_F_NO_CPORT |
+					      IP_VS_CONN_F_NFCT,
+					      cp->dest, skb->mark);
 			if (!n_cp)
 				return 0;
 
@@ -208,23 +249,44 @@ static int ip_vs_ftp_out(struct ip_vs_app *app, struct ip_vs_conn *cp,
 		 */
 		from.ip = n_cp->vaddr.ip;
 		port = n_cp->vport;
-		sprintf(buf, "%d,%d,%d,%d,%d,%d", NIPQUAD(from.ip),
-			(ntohs(port)>>8)&255, ntohs(port)&255);
+		snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u,%u",
+			 ((unsigned char *)&from.ip)[0],
+			 ((unsigned char *)&from.ip)[1],
+			 ((unsigned char *)&from.ip)[2],
+			 ((unsigned char *)&from.ip)[3],
+			 ntohs(port) >> 8,
+			 ntohs(port) & 0xFF);
+
 		buf_len = strlen(buf);
 
-		/*
-		 * Calculate required delta-offset to keep TCP happy
-		 */
-		*diff = buf_len - (end-start);
-
-		if (*diff == 0) {
-			/* simply replace it with new passive address */
-			memcpy(start, buf, buf_len);
-			ret = 1;
-		} else {
-			ret = !ip_vs_skb_replace(skb, GFP_ATOMIC, start,
-					  end-start, buf, buf_len);
+		ct = nf_ct_get(skb, &ctinfo);
+		if (ct && !nf_ct_is_untracked(ct) && nfct_nat(ct)) {
+			/* If mangling fails this function will return 0
+			 * which will cause the packet to be dropped.
+			 * Mangling can only fail under memory pressure,
+			 * hopefully it will succeed on the retransmitted
+			 * packet.
+			 */
+			rcu_read_lock();
+			ret = nf_nat_mangle_tcp_packet(skb, ct, ctinfo,
+						       iph->ihl * 4,
+						       start-data, end-start,
+						       buf, buf_len);
+			rcu_read_unlock();
+			if (ret) {
+				ip_vs_nfct_expect_related(skb, ct, n_cp,
+							  IPPROTO_TCP, 0, 0);
+				if (skb->ip_summed == CHECKSUM_COMPLETE)
+					skb->ip_summed = CHECKSUM_UNNECESSARY;
+				/* csum is updated */
+				ret = 1;
+			}
 		}
+
+		/*
+		 * Not setting 'diff' is intentional, otherwise the sequence
+		 * would be adjusted twice.
+		 */
 
 		cp->app_data = NULL;
 		ip_vs_tcp_conn_listen(n_cp);
@@ -257,6 +319,9 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 	__be16 port;
 	struct ip_vs_conn *n_cp;
 
+	/* no diff required for incoming packets */
+	*diff = 0;
+
 #ifdef CONFIG_IP_VS_IPV6
 	/* This application helper doesn't work with IPv6 yet,
 	 * so turn this into a no-op for IPv6 packets
@@ -264,9 +329,6 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 	if (cp->af == AF_INET6)
 		return 1;
 #endif
-
-	/* no diff required for incoming packets */
-	*diff = 0;
 
 	/* Only useful for established sessions */
 	if (cp->state != IP_VS_TCP_S_ESTABLISHED)
@@ -289,7 +351,7 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 	data_limit = skb_tail_pointer(skb);
 
 	while (data <= data_limit - 6) {
-		if (strnicmp(data, "PASV\r\n", 6) == 0) {
+		if (strncasecmp(data, "PASV\r\n", 6) == 0) {
 			/* Passive mode on */
 			IP_VS_DBG(7, "got PASV at %td of %td\n",
 				  data - data_start,
@@ -309,7 +371,7 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 	 */
 	if (ip_vs_ftp_get_addrport(data_start, data_limit,
 				   CLIENT_STRING, sizeof(CLIENT_STRING)-1,
-				   '\r', &to.ip, &port,
+				   ' ', '\r', &to.ip, &port,
 				   &start, &end) != 1)
 		return 1;
 
@@ -325,21 +387,24 @@ static int ip_vs_ftp_in(struct ip_vs_app *app, struct ip_vs_conn *cp,
 		  ip_vs_proto_name(iph->protocol),
 		  &to.ip, ntohs(port), &cp->vaddr.ip, 0);
 
-	n_cp = ip_vs_conn_in_get(AF_INET, iph->protocol,
-				 &to, port,
-				 &cp->vaddr, htons(ntohs(cp->vport)-1));
-	if (!n_cp) {
-		n_cp = ip_vs_conn_new(AF_INET, IPPROTO_TCP,
-				      &to, port,
-				      &cp->vaddr, htons(ntohs(cp->vport)-1),
-				      &cp->daddr, htons(ntohs(cp->dport)-1),
-				      0,
-				      cp->dest);
-		if (!n_cp)
-			return 0;
+	{
+		struct ip_vs_conn_param p;
+		ip_vs_conn_fill_param(cp->ipvs, AF_INET,
+				      iph->protocol, &to, port, &cp->vaddr,
+				      htons(ntohs(cp->vport)-1), &p);
+		n_cp = ip_vs_conn_in_get(&p);
+		if (!n_cp) {
+			/* This is ipv4 only */
+			n_cp = ip_vs_conn_new(&p, AF_INET, &cp->daddr,
+					      htons(ntohs(cp->dport)-1),
+					      IP_VS_CONN_F_NFCT, cp->dest,
+					      skb->mark);
+			if (!n_cp)
+				return 0;
 
-		/* add its controller */
-		ip_vs_control_add(n_cp, cp);
+			/* add its controller */
+			ip_vs_control_add(n_cp, cp);
+		}
 	}
 
 	/*
@@ -366,42 +431,71 @@ static struct ip_vs_app ip_vs_ftp = {
 	.pkt_in =	ip_vs_ftp_in,
 };
 
-
 /*
- *	ip_vs_ftp initialization
+ *	per netns ip_vs_ftp initialization
  */
-static int __init ip_vs_ftp_init(void)
+static int __net_init __ip_vs_ftp_init(struct net *net)
 {
 	int i, ret;
-	struct ip_vs_app *app = &ip_vs_ftp;
+	struct ip_vs_app *app;
+	struct netns_ipvs *ipvs = net_ipvs(net);
 
-	ret = register_ip_vs_app(app);
-	if (ret)
-		return ret;
+	if (!ipvs)
+		return -ENOENT;
 
-	for (i=0; i<IP_VS_APP_MAX_PORTS; i++) {
+	app = register_ip_vs_app(ipvs, &ip_vs_ftp);
+	if (IS_ERR(app))
+		return PTR_ERR(app);
+
+	for (i = 0; i < ports_count; i++) {
 		if (!ports[i])
 			continue;
-		ret = register_ip_vs_app_inc(app, app->protocol, ports[i]);
+		ret = register_ip_vs_app_inc(ipvs, app, app->protocol, ports[i]);
 		if (ret)
-			break;
+			goto err_unreg;
 		pr_info("%s: loaded support on port[%d] = %d\n",
 			app->name, i, ports[i]);
 	}
+	return 0;
 
-	if (ret)
-		unregister_ip_vs_app(app);
-
+err_unreg:
+	unregister_ip_vs_app(ipvs, &ip_vs_ftp);
 	return ret;
 }
+/*
+ *	netns exit
+ */
+static void __ip_vs_ftp_exit(struct net *net)
+{
+	struct netns_ipvs *ipvs = net_ipvs(net);
 
+	if (!ipvs)
+		return;
+
+	unregister_ip_vs_app(ipvs, &ip_vs_ftp);
+}
+
+static struct pernet_operations ip_vs_ftp_ops = {
+	.init = __ip_vs_ftp_init,
+	.exit = __ip_vs_ftp_exit,
+};
+
+static int __init ip_vs_ftp_init(void)
+{
+	int rv;
+
+	rv = register_pernet_subsys(&ip_vs_ftp_ops);
+	/* rcu_barrier() is called by netns on error */
+	return rv;
+}
 
 /*
  *	ip_vs_ftp finish.
  */
 static void __exit ip_vs_ftp_exit(void)
 {
-	unregister_ip_vs_app(&ip_vs_ftp);
+	unregister_pernet_subsys(&ip_vs_ftp_ops);
+	/* rcu_barrier() is called by netns */
 }
 
 

@@ -48,7 +48,6 @@
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/if.h>
-#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
@@ -111,7 +110,7 @@ static int calc_crc_ccitt(const unsigned char *buf, int cnt)
 	for (; cnt > 0; cnt--)
 		crc = (crc >> 8) ^ crc_ccitt_table[(crc ^ *buf++) & 0xff];
 	crc ^= 0xffff;
-	return (crc & 0xffff);
+	return crc & 0xffff;
 }
 #endif
 
@@ -390,7 +389,7 @@ void hdlcdrv_arbitrate(struct net_device *dev, struct hdlcdrv_state *s)
 	if ((--s->hdlctx.slotcnt) > 0)
 		return;
 	s->hdlctx.slotcnt = s->ch_params.slottime;
-	if ((random32() % 256) > s->ch_params.ppersist)
+	if ((prandom_u32() % 256) > s->ch_params.ppersist)
 		return;
 	start_tx(dev, s);
 }
@@ -404,6 +403,9 @@ static netdev_tx_t hdlcdrv_send_packet(struct sk_buff *skb,
 				       struct net_device *dev)
 {
 	struct hdlcdrv_state *sm = netdev_priv(dev);
+
+	if (skb->protocol == htons(ETH_P_IP))
+		return ax25_ip_xmit(skb);
 
 	if (skb->data[0] != 0) {
 		do_kiss_params(sm, skb->data, skb->len);
@@ -572,6 +574,8 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	case HDLCDRVCTL_CALIBRATE:
 		if(!capable(CAP_SYS_RAWIO))
 			return -EPERM;
+		if (bi.data.calibrate > INT_MAX / s->par.bitrate)
+			return -EINVAL;
 		s->hdlctx.calibrate = bi.data.calibrate * s->par.bitrate / 16;
 		return 0;
 
@@ -698,7 +702,7 @@ struct net_device *hdlcdrv_register(const struct hdlcdrv_ops *ops,
 	if (privsize < sizeof(struct hdlcdrv_state))
 		privsize = sizeof(struct hdlcdrv_state);
 
-	dev = alloc_netdev(privsize, ifname, hdlcdrv_setup);
+	dev = alloc_netdev(privsize, ifname, NET_NAME_UNKNOWN, hdlcdrv_setup);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -750,7 +754,7 @@ EXPORT_SYMBOL(hdlcdrv_unregister);
 static int __init hdlcdrv_init_driver(void)
 {
 	printk(KERN_INFO "hdlcdrv: (C) 1996-2000 Thomas Sailer HB9JNX/AE4WA\n");
-	printk(KERN_INFO "hdlcdrv: version 0.8 compiled " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "hdlcdrv: version 0.8\n");
 	return 0;
 }
 

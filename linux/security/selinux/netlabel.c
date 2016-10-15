@@ -4,7 +4,7 @@
  * This file provides the necessary glue to tie NetLabel into the SELinux
  * subsystem.
  *
- * Author: Paul Moore <paul.moore@hp.com>
+ * Author: Paul Moore <paul@paul-moore.com>
  *
  */
 
@@ -29,6 +29,7 @@
 
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
+#include <linux/gfp.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <net/sock.h>
@@ -100,6 +101,32 @@ static struct netlbl_lsm_secattr *selinux_netlbl_sock_genattr(struct sock *sk)
 }
 
 /**
+ * selinux_netlbl_sock_getattr - Get the cached NetLabel secattr
+ * @sk: the socket
+ * @sid: the SID
+ *
+ * Query the socket's cached secattr and if the SID matches the cached value
+ * return the cache, otherwise return NULL.
+ *
+ */
+static struct netlbl_lsm_secattr *selinux_netlbl_sock_getattr(
+							const struct sock *sk,
+							u32 sid)
+{
+	struct sk_security_struct *sksec = sk->sk_security;
+	struct netlbl_lsm_secattr *secattr = sksec->nlbl_secattr;
+
+	if (secattr == NULL)
+		return NULL;
+
+	if ((secattr->flags & NETLBL_SECATTR_SECID) &&
+	    (secattr->attr.secid == sid))
+		return secattr;
+
+	return NULL;
+}
+
+/**
  * selinux_netlbl_cache_invalidate - Invalidate the NetLabel cache
  *
  * Description:
@@ -131,31 +158,31 @@ void selinux_netlbl_err(struct sk_buff *skb, int error, int gateway)
 
 /**
  * selinux_netlbl_sk_security_free - Free the NetLabel fields
- * @sssec: the sk_security_struct
+ * @sksec: the sk_security_struct
  *
  * Description:
  * Free all of the memory in the NetLabel fields of a sk_security_struct.
  *
  */
-void selinux_netlbl_sk_security_free(struct sk_security_struct *ssec)
+void selinux_netlbl_sk_security_free(struct sk_security_struct *sksec)
 {
-	if (ssec->nlbl_secattr != NULL)
-		netlbl_secattr_free(ssec->nlbl_secattr);
+	if (sksec->nlbl_secattr != NULL)
+		netlbl_secattr_free(sksec->nlbl_secattr);
 }
 
 /**
  * selinux_netlbl_sk_security_reset - Reset the NetLabel fields
- * @ssec: the sk_security_struct
+ * @sksec: the sk_security_struct
  * @family: the socket family
  *
  * Description:
  * Called when the NetLabel state of a sk_security_struct needs to be reset.
- * The caller is responsibile for all the NetLabel sk_security_struct locking.
+ * The caller is responsible for all the NetLabel sk_security_struct locking.
  *
  */
-void selinux_netlbl_sk_security_reset(struct sk_security_struct *ssec)
+void selinux_netlbl_sk_security_reset(struct sk_security_struct *sksec)
 {
-	ssec->nlbl_state = NLBL_UNSET;
+	sksec->nlbl_state = NLBL_UNSET;
 }
 
 /**
@@ -204,7 +231,7 @@ int selinux_netlbl_skbuff_getsid(struct sk_buff *skb,
  *
  * Description
  * Call the NetLabel mechanism to set the label of a packet using @sid.
- * Returns zero on auccess, negative values on failure.
+ * Returns zero on success, negative values on failure.
  *
  */
 int selinux_netlbl_skbuff_setsid(struct sk_buff *skb,
@@ -218,12 +245,12 @@ int selinux_netlbl_skbuff_setsid(struct sk_buff *skb,
 
 	/* if this is a locally generated packet check to see if it is already
 	 * being labeled by it's parent socket, if it is just exit */
-	sk = skb->sk;
+	sk = skb_to_full_sk(skb);
 	if (sk != NULL) {
 		struct sk_security_struct *sksec = sk->sk_security;
 		if (sksec->nlbl_state != NLBL_REQSKB)
 			return 0;
-		secattr = sksec->nlbl_secattr;
+		secattr = selinux_netlbl_sock_getattr(sk, sid);
 	}
 	if (secattr == NULL) {
 		secattr = &secattr_storage;
@@ -409,6 +436,9 @@ int selinux_netlbl_socket_setsockopt(struct socket *sock,
 	     sksec->nlbl_state == NLBL_CONNLABELED)) {
 		netlbl_secattr_init(&secattr);
 		lock_sock(sk);
+		/* call the netlabel function directly as we want to see the
+		 * on-the-wire label that is assigned via the socket's options
+		 * and not the cached netlabel/lsm attributes */
 		rc = netlbl_sock_getattr(sk, &secattr);
 		release_sock(sk);
 		if (rc == 0)
@@ -441,8 +471,7 @@ int selinux_netlbl_socket_connect(struct sock *sk, struct sockaddr *addr)
 	    sksec->nlbl_state != NLBL_CONNLABELED)
 		return 0;
 
-	local_bh_disable();
-	bh_lock_sock_nested(sk);
+	lock_sock(sk);
 
 	/* connected sockets are allowed to disconnect when the address family
 	 * is set to AF_UNSPEC, if that is what is happening we want to reset
@@ -463,7 +492,6 @@ int selinux_netlbl_socket_connect(struct sock *sk, struct sockaddr *addr)
 		sksec->nlbl_state = NLBL_CONNLABELED;
 
 socket_connect_return:
-	bh_unlock_sock(sk);
-	local_bh_enable();
+	release_sock(sk);
 	return rc;
 }

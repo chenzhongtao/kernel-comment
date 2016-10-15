@@ -2,32 +2,35 @@
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/of_address.h>
+#include <linux/of_iommu.h>
+#include <linux/dma-mapping.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 
 #include <asm/errno.h>
+#include "of_private.h"
 
 /**
- * of_match_device - Tell if an of_device structure has a matching
- * of_match structure
+ * of_match_device - Tell if a struct device matches an of_device_id list
  * @ids: array of of device match structures to search in
  * @dev: the of device structure to match against
  *
- * Used by a driver to check whether an of_device present in the
+ * Used by a driver to check whether an platform_device present in the
  * system is in its list of supported devices.
  */
 const struct of_device_id *of_match_device(const struct of_device_id *matches,
-					const struct of_device *dev)
+					   const struct device *dev)
 {
-	if (!dev->node)
+	if ((!matches) || (!dev->of_node))
 		return NULL;
-	return of_match_node(matches, dev->node);
+	return of_match_node(matches, dev->of_node);
 }
 EXPORT_SYMBOL(of_match_device);
 
-struct of_device *of_dev_get(struct of_device *dev)
+struct platform_device *of_dev_get(struct platform_device *dev)
 {
 	struct device *tmp;
 
@@ -35,108 +38,159 @@ struct of_device *of_dev_get(struct of_device *dev)
 		return NULL;
 	tmp = get_device(&dev->dev);
 	if (tmp)
-		return to_of_device(tmp);
+		return to_platform_device(tmp);
 	else
 		return NULL;
 }
 EXPORT_SYMBOL(of_dev_get);
 
-void of_dev_put(struct of_device *dev)
+void of_dev_put(struct platform_device *dev)
 {
 	if (dev)
 		put_device(&dev->dev);
 }
 EXPORT_SYMBOL(of_dev_put);
 
-static ssize_t devspec_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
+int of_device_add(struct platform_device *ofdev)
 {
-	struct of_device *ofdev;
+	BUG_ON(ofdev->dev.of_node == NULL);
 
-	ofdev = to_of_device(dev);
-	return sprintf(buf, "%s\n", ofdev->node->full_name);
-}
+	/* name and id have to be set so that the platform bus doesn't get
+	 * confused on matching */
+	ofdev->name = dev_name(&ofdev->dev);
+	ofdev->id = -1;
 
-static ssize_t name_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	struct of_device *ofdev;
-
-	ofdev = to_of_device(dev);
-	return sprintf(buf, "%s\n", ofdev->node->name);
-}
-
-static ssize_t modalias_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	struct of_device *ofdev = to_of_device(dev);
-	ssize_t len = 0;
-
-	len = of_device_get_modalias(ofdev, buf, PAGE_SIZE - 2);
-	buf[len] = '\n';
-	buf[len+1] = 0;
-	return len+1;
-}
-
-struct device_attribute of_platform_device_attrs[] = {
-	__ATTR_RO(devspec),
-	__ATTR_RO(name),
-	__ATTR_RO(modalias),
-	__ATTR_NULL
-};
-
-/**
- * of_release_dev - free an of device structure when all users of it are finished.
- * @dev: device that's been disconnected
- *
- * Will be called only by the device core when all users of this of device are
- * done.
- */
-void of_release_dev(struct device *dev)
-{
-	struct of_device *ofdev;
-
-	ofdev = to_of_device(dev);
-	of_node_put(ofdev->node);
-	kfree(ofdev);
-}
-EXPORT_SYMBOL(of_release_dev);
-
-int of_device_register(struct of_device *ofdev)
-{
-	BUG_ON(ofdev->node == NULL);
-
-	device_initialize(&ofdev->dev);
-
-	/* device_add will assume that this device is on the same node as
-	 * the parent. If there is no parent defined, set the node
-	 * explicitly */
-	if (!ofdev->dev.parent)
-		set_dev_node(&ofdev->dev, of_node_to_nid(ofdev->node));
+	/*
+	 * If this device has not binding numa node in devicetree, that is
+	 * of_node_to_nid returns NUMA_NO_NODE. device_add will assume that this
+	 * device is on the same node as the parent.
+	 */
+	set_dev_node(&ofdev->dev, of_node_to_nid(ofdev->dev.of_node));
 
 	return device_add(&ofdev->dev);
 }
+
+/**
+ * of_dma_configure - Setup DMA configuration
+ * @dev:	Device to apply DMA configuration
+ * @np:		Pointer to OF node having DMA configuration
+ *
+ * Try to get devices's DMA configuration from DT and update it
+ * accordingly.
+ *
+ * If platform code needs to use its own special DMA configuration, it
+ * can use a platform bus notifier and handle BUS_NOTIFY_ADD_DEVICE events
+ * to fix up DMA configuration.
+ */
+void of_dma_configure(struct device *dev, struct device_node *np)
+{
+	u64 dma_addr, paddr, size;
+	int ret;
+	bool coherent;
+	unsigned long offset;
+	struct iommu_ops *iommu;
+
+	/*
+	 * Set default coherent_dma_mask to 32 bit.  Drivers are expected to
+	 * setup the correct supported mask.
+	 */
+	if (!dev->coherent_dma_mask)
+		dev->coherent_dma_mask = DMA_BIT_MASK(32);
+
+	/*
+	 * Set it to coherent_dma_mask by default if the architecture
+	 * code has not set it.
+	 */
+	if (!dev->dma_mask)
+		dev->dma_mask = &dev->coherent_dma_mask;
+
+	ret = of_dma_get_range(np, &dma_addr, &paddr, &size);
+	if (ret < 0) {
+		dma_addr = offset = 0;
+		size = dev->coherent_dma_mask + 1;
+	} else {
+		offset = PFN_DOWN(paddr - dma_addr);
+
+		/*
+		 * Add a work around to treat the size as mask + 1 in case
+		 * it is defined in DT as a mask.
+		 */
+		if (size & 1) {
+			dev_warn(dev, "Invalid size 0x%llx for dma-range\n",
+				 size);
+			size = size + 1;
+		}
+
+		if (!size) {
+			dev_err(dev, "Adjusted size 0x%llx invalid\n", size);
+			return;
+		}
+		dev_dbg(dev, "dma_pfn_offset(%#08lx)\n", offset);
+	}
+
+	dev->dma_pfn_offset = offset;
+
+	/*
+	 * Limit coherent and dma mask based on size and default mask
+	 * set by the driver.
+	 */
+	dev->coherent_dma_mask = min(dev->coherent_dma_mask,
+				     DMA_BIT_MASK(ilog2(dma_addr + size)));
+	*dev->dma_mask = min((*dev->dma_mask),
+			     DMA_BIT_MASK(ilog2(dma_addr + size)));
+
+	coherent = of_dma_is_coherent(np);
+	dev_dbg(dev, "device is%sdma coherent\n",
+		coherent ? " " : " not ");
+
+	iommu = of_iommu_configure(dev, np);
+	dev_dbg(dev, "device is%sbehind an iommu\n",
+		iommu ? " " : " not ");
+
+	arch_setup_dma_ops(dev, dma_addr, size, iommu, coherent);
+}
+EXPORT_SYMBOL_GPL(of_dma_configure);
+
+int of_device_register(struct platform_device *pdev)
+{
+	device_initialize(&pdev->dev);
+	return of_device_add(pdev);
+}
 EXPORT_SYMBOL(of_device_register);
 
-void of_device_unregister(struct of_device *ofdev)
+void of_device_unregister(struct platform_device *ofdev)
 {
 	device_unregister(&ofdev->dev);
 }
 EXPORT_SYMBOL(of_device_unregister);
 
-ssize_t of_device_get_modalias(struct of_device *ofdev,
-				char *str, ssize_t len)
+const void *of_device_get_match_data(const struct device *dev)
+{
+	const struct of_device_id *match;
+
+	match = of_match_device(dev->driver->of_match_table, dev);
+	if (!match)
+		return NULL;
+
+	return match->data;
+}
+EXPORT_SYMBOL(of_device_get_match_data);
+
+ssize_t of_device_get_modalias(struct device *dev, char *str, ssize_t len)
 {
 	const char *compat;
 	int cplen, i;
 	ssize_t tsize, csize, repend;
 
+	if ((!dev) || (!dev->of_node))
+		return -ENODEV;
+
 	/* Name & Type */
-	csize = snprintf(str, len, "of:N%sT%s",
-				ofdev->node->name, ofdev->node->type);
+	csize = snprintf(str, len, "of:N%sT%s", dev->of_node->name,
+			 dev->of_node->type);
 
 	/* Get compatible property if any */
-	compat = of_get_property(ofdev->node, "compatible", &cplen);
+	compat = of_get_property(dev->of_node, "compatible", &cplen);
 	if (!compat)
 		return csize;
 
@@ -170,4 +224,66 @@ ssize_t of_device_get_modalias(struct of_device *ofdev,
 	}
 
 	return tsize;
+}
+
+/**
+ * of_device_uevent - Display OF related uevent information
+ */
+void of_device_uevent(struct device *dev, struct kobj_uevent_env *env)
+{
+	const char *compat;
+	struct alias_prop *app;
+	int seen = 0, cplen, sl;
+
+	if ((!dev) || (!dev->of_node))
+		return;
+
+	add_uevent_var(env, "OF_NAME=%s", dev->of_node->name);
+	add_uevent_var(env, "OF_FULLNAME=%s", dev->of_node->full_name);
+	if (dev->of_node->type && strcmp("<NULL>", dev->of_node->type) != 0)
+		add_uevent_var(env, "OF_TYPE=%s", dev->of_node->type);
+
+	/* Since the compatible field can contain pretty much anything
+	 * it's not really legal to split it out with commas. We split it
+	 * up using a number of environment variables instead. */
+	compat = of_get_property(dev->of_node, "compatible", &cplen);
+	while (compat && *compat && cplen > 0) {
+		add_uevent_var(env, "OF_COMPATIBLE_%d=%s", seen, compat);
+		sl = strlen(compat) + 1;
+		compat += sl;
+		cplen -= sl;
+		seen++;
+	}
+	add_uevent_var(env, "OF_COMPATIBLE_N=%d", seen);
+
+	seen = 0;
+	mutex_lock(&of_mutex);
+	list_for_each_entry(app, &aliases_lookup, link) {
+		if (dev->of_node == app->np) {
+			add_uevent_var(env, "OF_ALIAS_%d=%s", seen,
+				       app->alias);
+			seen++;
+		}
+	}
+	mutex_unlock(&of_mutex);
+}
+
+int of_device_uevent_modalias(struct device *dev, struct kobj_uevent_env *env)
+{
+	int sl;
+
+	if ((!dev) || (!dev->of_node))
+		return -ENODEV;
+
+	/* Devicetree modalias is tricky, we add it in 2 steps */
+	if (add_uevent_var(env, "MODALIAS="))
+		return -ENOMEM;
+
+	sl = of_device_get_modalias(dev, &env->buf[env->buflen-1],
+				    sizeof(env->buf) - env->buflen);
+	if (sl >= (sizeof(env->buf) - env->buflen))
+		return -ENOMEM;
+	env->buflen += sl;
+
+	return 0;
 }

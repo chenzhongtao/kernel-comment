@@ -60,13 +60,13 @@ do {								\
 	u32 t = lo & ((1 << n) - 1);				\
 	lo = (lo >> n) | ((hi & ((1 << n) - 1)) << (32 - n));	\
 	hi = (hi >> n) | (t << (24-n));				\
-} while(0)
+} while (0)
 
 /* Rotate right one 64 bit number as a 56 bit number */
 #define ror56_64(k, n)						\
 do {								\
 	k = (k >> n) | ((k & ((1 << n) - 1)) << (56 - n));	\
-} while(0)
+} while (0)
 
 /*
  * Sboxes for Feistel network derived from
@@ -110,7 +110,7 @@ static const __be32 sbox0[256] = {
 };
 
 #undef Z
-#define Z(x) cpu_to_be32((x << 27) | (x >> 5))
+#define Z(x) cpu_to_be32(((x & 0x1f) << 27) | (x >> 5))
 static const __be32 sbox1[256] = {
 	Z(0x77), Z(0x14), Z(0xa6), Z(0xfe), Z(0xb2), Z(0x5e), Z(0x8c), Z(0x3e),
 	Z(0x67), Z(0x6c), Z(0xa1), Z(0x0d), Z(0xc2), Z(0xa2), Z(0xc1), Z(0x85),
@@ -228,7 +228,7 @@ do {									\
 	union lc4 { __be32 l; u8 c[4]; } u;				\
 	u.l = sched ^ R;						\
 	L ^= sbox0[u.c[0]] ^ sbox1[u.c[1]] ^ sbox2[u.c[2]] ^ sbox3[u.c[3]]; \
-} while(0)
+} while (0)
 
 /*
  * encryptor
@@ -396,7 +396,6 @@ static struct crypto_alg fcrypt_alg = {
 	.cra_ctxsize		=	sizeof(struct fcrypt_ctx),
 	.cra_module		=	THIS_MODULE,
 	.cra_alignmask		=	3,
-	.cra_list		=	LIST_HEAD_INIT(fcrypt_alg.cra_list),
 	.cra_u			=	{ .cipher = {
 	.cia_min_keysize	=	8,
 	.cia_max_keysize	=	8,
@@ -421,3 +420,4 @@ module_exit(fcrypt_mod_fini);
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("FCrypt Cipher Algorithm");
 MODULE_AUTHOR("David Howells <dhowells@redhat.com>");
+MODULE_ALIAS_CRYPTO("fcrypt");

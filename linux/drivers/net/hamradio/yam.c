@@ -30,7 +30,7 @@
  *   0.1 F1OAT 07.06.98  Add timer polling routine for channel arbitration
  *   0.2 F6FBB 08.06.98  Added delay after FPGA programming
  *   0.3 F6FBB 29.07.98  Delayed PTT implementation for dupmode=2
- *   0.4 F6FBB 30.07.98  Added TxTail, Slottime and Persistance
+ *   0.4 F6FBB 30.07.98  Added TxTail, Slottime and Persistence
  *   0.5 F6FBB 01.08.98  Shared IRQs, /proc/net and network statistics
  *   0.6 F6FBB 25.08.98  Added 1200Bds format
  *   0.7 F6FBB 12.09.98  Added to the kernel configuration
@@ -52,7 +52,6 @@
 #include <linux/bitops.h>
 #include <linux/random.h>
 #include <asm/io.h>
-#include <asm/system.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/firmware.h>
@@ -77,7 +76,7 @@
 /* --------------------------------------------------------------------- */
 
 static const char yam_drvname[] = "yam";
-static const char yam_drvinfo[] __initdata = KERN_INFO \
+static const char yam_drvinfo[] __initconst = KERN_INFO \
 	"YAM driver version 0.8 by F1OAT/F6FBB\n";
 
 /* --------------------------------------------------------------------- */
@@ -396,14 +395,13 @@ static unsigned char *add_mcs(unsigned char *bits, int bitrate,
 	while (p) {
 		if (p->bitrate == bitrate) {
 			memcpy(p->bits, bits, YAM_FPGA_SIZE);
-			return p->bits;
+			goto out;
 		}
 		p = p->next;
 	}
 
 	/* Allocate a new mcs */
 	if ((p = kmalloc(sizeof(struct yam_mcs), GFP_KERNEL)) == NULL) {
-		printk(KERN_WARNING "YAM: no memory to allocate mcs\n");
 		release_firmware(fw);
 		return NULL;
 	}
@@ -411,7 +409,7 @@ static unsigned char *add_mcs(unsigned char *bits, int bitrate,
 	p->bitrate = bitrate;
 	p->next = yam_data;
 	yam_data = p;
-
+ out:
 	release_firmware(fw);
 	return p->bits;
 }
@@ -599,6 +597,9 @@ static netdev_tx_t yam_send_packet(struct sk_buff *skb,
 {
 	struct yam_port *yp = netdev_priv(dev);
 
+	if (skb->protocol == htons(ETH_P_IP))
+		return ax25_ip_xmit(skb);
+
 	skb_queue_tail(&yp->send_queue, skb);
 	dev->trans_start = jiffies;
 	return NETDEV_TX_OK;
@@ -640,7 +641,7 @@ static void yam_arbitrate(struct net_device *dev)
 	yp->slotcnt = yp->slot / 10;
 
 	/* is random > persist ? */
-	if ((random32() % 256) > yp->pers)
+	if ((prandom_u32() % 256) > yp->pers)
 		return;
 
 	yam_start_tx(dev, yp);
@@ -868,7 +869,7 @@ static int yam_open(struct net_device *dev)
 
 	printk(KERN_INFO "Trying %s at iobase 0x%lx irq %u\n", dev->name, dev->base_addr, dev->irq);
 
-	if (!dev || !yp->bitrate)
+	if (!yp->bitrate)
 		return -ENXIO;
 	if (!dev->base_addr || dev->base_addr > 0x1000 - YAM_EXTENT ||
 		dev->irq < 2 || dev->irq > 15) {
@@ -890,7 +891,7 @@ static int yam_open(struct net_device *dev)
 		goto out_release_base;
 	}
 	outb(0, IER(dev->base_addr));
-	if (request_irq(dev->irq, yam_interrupt, IRQF_DISABLED | IRQF_SHARED, dev->name, dev)) {
+	if (request_irq(dev->irq, yam_interrupt, IRQF_SHARED, dev->name, dev)) {
 		printk(KERN_ERR "%s: irq %d busy\n", dev->name, dev->irq);
 		ret = -EBUSY;
 		goto out_release_base;
@@ -977,7 +978,6 @@ static int yam_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 			return -EINVAL;		/* Cannot change this parameter when up */
 		if ((ym = kmalloc(sizeof(struct yamdrv_ioctl_mcs), GFP_KERNEL)) == NULL)
 			return -ENOBUFS;
-		ym->bitrate = 9600;
 		if (copy_from_user(ym, ifr->ifr_data, sizeof(struct yamdrv_ioctl_mcs))) {
 			kfree(ym);
 			return -EFAULT;
@@ -1060,6 +1060,7 @@ static int yam_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case SIOCYAMGCFG:
+		memset(&yi, 0, sizeof(yi));
 		yi.cfg.mask = 0xffffffff;
 		yi.cfg.iobase = yp->iobase;
 		yi.cfg.irq = yp->irq;
@@ -1149,10 +1150,9 @@ static int __init yam_init_driver(void)
 		sprintf(name, "yam%d", i);
 		
 		dev = alloc_netdev(sizeof(struct yam_port), name,
-				   yam_setup);
+				   NET_NAME_UNKNOWN, yam_setup);
 		if (!dev) {
-			printk(KERN_ERR "yam: cannot allocate net device %s\n",
-			       dev->name);
+			pr_err("yam: cannot allocate net device\n");
 			err = -ENOMEM;
 			goto error;
 		}
@@ -1170,7 +1170,7 @@ static int __init yam_init_driver(void)
 	yam_timer.expires = jiffies + HZ / 100;
 	add_timer(&yam_timer);
 
-	proc_net_fops_create(&init_net, "yam", S_IRUGO, &yam_info_fops);
+	proc_create("yam", S_IRUGO, init_net.proc_net, &yam_info_fops);
 	return 0;
  error:
 	while (--i >= 0) {
@@ -1187,7 +1187,7 @@ static void __exit yam_cleanup_driver(void)
 	struct yam_mcs *p;
 	int i;
 
-	del_timer(&yam_timer);
+	del_timer_sync(&yam_timer);
 	for (i = 0; i < NR_PORTS; i++) {
 		struct net_device *dev = yam_devs[i];
 		if (dev) {
@@ -1202,7 +1202,7 @@ static void __exit yam_cleanup_driver(void)
 		kfree(p);
 	}
 
-	proc_net_remove(&init_net, "yam");
+	remove_proc_entry("yam", init_net.proc_net);
 }
 
 /* --------------------------------------------------------------------- */
