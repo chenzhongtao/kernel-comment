@@ -66,6 +66,7 @@
 #define CMDR_SIZE (16 * 4096)
 #define DATA_SIZE (257 * 4096)
 
+/* 0x0000000000111000 1118208*/
 #define TCMU_RING_SIZE (CMDR_SIZE + DATA_SIZE)
 
 static struct device *tcmu_root_device;
@@ -88,6 +89,7 @@ struct tcmu_dev {
 
 	struct uio_info uio_info;
 
+	/* 共享内存的起始地址 */
 	struct tcmu_mailbox *mb_addr;
 	size_t dev_size;
 	u32 cmdr_size;
@@ -114,6 +116,7 @@ struct tcmu_dev {
 
 #define TCMU_DEV(_se_dev) container_of(_se_dev, struct tcmu_dev, se_dev)
 
+// 128
 #define CMDR_OFF sizeof(struct tcmu_mailbox)
 
 struct tcmu_cmd {
@@ -670,6 +673,8 @@ static void tcmu_device_timedout(unsigned long data)
 	 */
 }
 
+
+/* host_id=0x2a */
 static int tcmu_attach_hba(struct se_hba *hba, u32 host_id)
 {
 	struct tcmu_hba *tcmu_hba;
@@ -865,7 +870,8 @@ static int tcmu_configure_device(struct se_device *dev)
 	char *str;
 
 	info = &udev->uio_info;
-
+    
+	/* cat /sys/class/uio/uio0/name tcm-user/42/vol2/libtcmu//vol2*/
 	size = snprintf(NULL, 0, "tcm-user/%u/%s/%s", hba->host_id, udev->name,
 			udev->dev_config);
 	size += 1; /* for \0 */
@@ -887,8 +893,11 @@ static int tcmu_configure_device(struct se_device *dev)
 	}
 
 	/* mailbox fits in first part of CMDR space */
+	/* 16 * 4096 -128 */
 	udev->cmdr_size = CMDR_SIZE - CMDR_OFF;
+	/* 16 * 4096 */
 	udev->data_off = CMDR_SIZE;
+	/* 257 * 4096 */
 	udev->data_size = TCMU_RING_SIZE - CMDR_SIZE;
 
 	mb = udev->mb_addr;
@@ -899,8 +908,10 @@ static int tcmu_configure_device(struct se_device *dev)
 	WARN_ON(!PAGE_ALIGNED(udev->data_off));
 	WARN_ON(udev->data_size % PAGE_SIZE);
 
+	/* /sys/class/uio/uio0/version */
 	info->version = __stringify(TCMU_MAILBOX_VERSION);
 
+	/* /sys/class/uio/uio0/maps/map0/name */
 	info->mem[0].name = "tcm-user command & data buffer";
 	info->mem[0].addr = (phys_addr_t) udev->mb_addr;
 	info->mem[0].size = TCMU_RING_SIZE;
