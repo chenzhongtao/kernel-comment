@@ -39,17 +39,22 @@ static struct file_system_type *file_systems;
 static DEFINE_RWLOCK(file_systems_lock);
 
 /* WARNING: This can be used only if we _already_ own a reference */
+/**
+ * 文件系统使用次数减1
+ */
 void get_filesystem(struct file_system_type *fs)
 {
 	__module_get(fs->owner);
 }
 
+/**
+ * 文件系统使用次数加1
+ */
 void put_filesystem(struct file_system_type *fs)
 {
 	module_put(fs->owner);
 }
 
-static struct file_system_type **find_filesystem(const char *name, unsigned len)
 /**
  * 查找指定类型的文件系统。
  */
@@ -78,6 +83,7 @@ static struct file_system_type **find_filesystem(const char *name, unsigned len)
 
 /**
  * 注册文件系统，将相应的file_system_type加入到链表中。
+ * 所有的文件系统,都存在于file_systems链表中
  */
 int register_filesystem(struct file_system_type * fs)
 {
@@ -90,6 +96,7 @@ int register_filesystem(struct file_system_type * fs)
 	INIT_LIST_HEAD(&fs->fs_supers);
 	write_lock(&file_systems_lock);
 	p = find_filesystem(fs->name, strlen(fs->name));
+	/*找到该文件系统，返回EBUSY ，不能注册已存在的系统*/
 	if (*p)
 		res = -EBUSY;
 	else
@@ -268,6 +275,7 @@ static int __init proc_filesystems_init(void)
 module_init(proc_filesystems_init);
 #endif
 
+/* 根据文件系统名获取文件系统指针 */
 static struct file_system_type *__get_fs_type(const char *name, int len)
 {
 	struct file_system_type *fs;
@@ -282,6 +290,7 @@ static struct file_system_type *__get_fs_type(const char *name, int len)
 	return fs;
 }
 
+/* 根据文件系统名获取文件系统指针 */
 struct file_system_type *get_fs_type(const char *name)
 {
 	struct file_system_type *fs;

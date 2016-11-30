@@ -47,6 +47,7 @@ struct bug_entry {
 #endif
 
 #ifndef HAVE_ARCH_BUG_ON
+/*提供断言并输出信息,需要linux 内核开启General setup->Configure standard kernel features->BUG() support*/
 #define BUG_ON(condition) do { if (unlikely(condition)) BUG(); } while(0)
 #endif
 

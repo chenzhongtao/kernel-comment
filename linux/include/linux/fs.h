@@ -943,10 +943,15 @@ struct inode {
 	struct hlist_node	i_hash;
 	/**
 	 * 通过此字段将队列链入不同状态的链表中。
+	 * 根据inode的使用状态存在于以下三个链表中的某个链表中:
+     *  1. 未用的: inode_unused 链表
+     *  2. 正在使用的: inode_in_use 链表
+     *  3. 脏的: super block中的s_dirty 链表
 	 */
 	struct list_head	i_list;		/* backing dev IO list */
 	/**
 	 * 通过此字段将其链入到超级块的inode链表中。
+	 * inode所在文件系统的super block的 s_inodes 链表中
 	 */
 	struct list_head	i_sb_list;
 	/**
@@ -1761,7 +1766,7 @@ extern spinlock_t sb_lock;
  */
 struct super_block {
 	/**
-	 * 指向超级块链表的指针
+	 * 指向超级块链表的指针 系统将所有文件系统的超级块组成链表  所有的super_block都存在于 super-blocks 链表中
 	 */
 	struct list_head	s_list;		/* Keep this first */
 	/**
@@ -1865,6 +1870,8 @@ struct super_block {
 	struct mtd_info		*s_mtd;
 	/**
 	 * 相同文件类型的超级块对象链表。
+	 * 对于特定的文件系统, 该文件系统的所有的super block 都存在于file_sytem_type中的fs_supers链表
+	 * 中.而所有的文件系统,都存在于file_systems链表中.这是通过调用register_filesystem接口来注册文件系统的.
 	 */
 	struct list_head	s_instances;
 	/**
@@ -2493,6 +2500,7 @@ struct file_system_type {
 	int fs_flags;
 	/**
 	 * 函数指针，当安装此类型的文件系统时，就由VFS调用此例程从设备上将此文件系统的superblock读入内存中
+     * vfs_kern_mount 函数调用
 	 */
 	int (*get_sb) (struct file_system_type *, int,
 		       const char *, void *, struct vfsmount *);

@@ -15,7 +15,7 @@
  *  Added kerneld support: Jacques Gelinas and Bjorn Ekwall
  *  Added change_root: Werner Almesberger & Hans Lermen, Feb '96
  *  Added options to /proc/mounts:
- *    Torbjörn Lindh (torbjorn.lindh@gopta.se), April 14, 1996.
+ *    Torbj?rn Lindh (torbjorn.lindh@gopta.se), April 14, 1996.
  *  Added devfs support: Richard Gooch <rgooch@atnf.csiro.au>, 13-JAN-1998
  *  Heavily rewritten for 'one fs - one tree' dcache architecture. AV, Mar 2000
  */
@@ -409,19 +409,25 @@ void sync_supers(void)
 {
 	struct super_block *sb;
 
+	/* 获取超级块链表的自旋锁 */
 	spin_lock(&sb_lock);
 restart:
+	/* 遍历所有超级块 */
 	list_for_each_entry(sb, &super_blocks, s_list) {
+		/* 该超级块是脏的 */
 		if (sb->s_op->write_super && sb->s_dirt) {
+			/* 操作次数计数 */
 			sb->s_count++;
 			spin_unlock(&sb_lock);
 
+			/* 防止umount文件系统 */
 			down_read(&sb->s_umount);
 			if (sb->s_root && sb->s_dirt)
 				sb->s_op->write_super(sb);
 			up_read(&sb->s_umount);
 
 			spin_lock(&sb_lock);
+			/* 该文件系统已经被移除，说明全局链表已经有变化，重新开始 */
 			if (__put_super_and_need_restart(sb))
 				goto restart;
 		}
@@ -565,6 +571,10 @@ out:
  *
  *	Alters the mount options of a mounted file system.
  */
+/**
+ * 如果do_unmount函数认为用户要卸载要文件系统，且用户并不要求真正把它卸载下来，
+ * 就会调用do_remount_sb，它重新安装根文件系统为只读并终止。
+ */
 int do_remount_sb(struct super_block *sb, int flags, void *data, int force)
 {
 	int retval;
@@ -648,11 +658,16 @@ void emergency_remount(void)
  * Unnamed block devices are dummy devices used by virtual
  * filesystems which don't use real block-devices.  -- jrs
  */
-
+/**
+ * 用于为特殊文件系统分配次设备号。
+ */
 static DEFINE_IDA(unnamed_dev_ida);
 static DEFINE_SPINLOCK(unnamed_dev_lock);/* protects the above */
 static int unnamed_dev_start = 0; /* don't bother trying below it */
 
+/**
+ * 初始化特殊文件系统的超级。
+ */
 int set_anon_super(struct super_block *s, void *data)
 {
 	int dev;
@@ -686,6 +701,9 @@ int set_anon_super(struct super_block *s, void *data)
 
 EXPORT_SYMBOL(set_anon_super);
 
+/**
+ * 移除特殊文件系统的超级块。
+ */
 void kill_anon_super(struct super_block *sb)
 {
 	int slot = MINOR(sb->s_dev);
@@ -767,6 +785,9 @@ static int test_bdev_super(struct super_block *s, void *data)
 	return (void *)s->s_bdev == data;
 }
 
+/**
+ * 一般磁盘文件的get_sb函数。
+ */
 int get_sb_bdev(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data,
 	int (*fill_super)(struct super_block *, void *, int),
@@ -780,6 +801,9 @@ int get_sb_bdev(struct file_system_type *fs_type,
 	if (!(flags & MS_RDONLY))
 		mode |= FMODE_WRITE;
 
+	/**
+	 * 打开块设备。获得块设备描述符的指针。
+	 */
 	bdev = open_bdev_exclusive(dev_name, mode, fs_type);
 	if (IS_ERR(bdev))
 		return PTR_ERR(bdev);
@@ -795,13 +819,20 @@ int get_sb_bdev(struct file_system_type *fs_type,
 		error = -EBUSY;
 		goto error_bdev;
 	}
+	/**
+	 * 搜索文件系统的超级块对象链表。如果找到一个与块设备相关的超级块，则返回它的地址，
+	 * 否则分配并初始化一个新对象并插入到文件系统链表和超级块全局链表中。
+	 */
 	s = sget(fs_type, test_bdev_super, set_bdev_super, bdev);
 	mutex_unlock(&bdev->bd_fsfreeze_mutex);
 	if (IS_ERR(s))
 		goto error_s;
 
+    /* 不是新的超级块，说明文件系统已经安装。 */
 	if (s->s_root) {
+	    /* 与以前的装载有冲突 */
 		if ((flags ^ s->s_flags) & MS_RDONLY) {
+		    /* 关闭设备并返回 */
 			deactivate_locked_super(s);
 			error = -EBUSY;
 			goto error_bdev;
@@ -811,10 +842,16 @@ int get_sb_bdev(struct file_system_type *fs_type,
 	} else {
 		char b[BDEVNAME_SIZE];
 
+		/**
+		 * 复制安装标志。及其他文件系统相关的值。
+		 */
 		s->s_flags = flags;
 		s->s_mode = mode;
 		strlcpy(s->s_id, bdevname(bdev, b), sizeof(s->s_id));
 		sb_set_blocksize(s, block_size(bdev));
+		/**
+		 * 每个文件系统传入的fill_super不一样，调用它来访问磁盘上的超级块信息，并填充超级块对象的其他字段。
+		 */
 		error = fill_super(s, data, flags & MS_SILENT ? 1 : 0);
 		if (error) {
 			deactivate_locked_super(s);
@@ -852,12 +889,19 @@ void kill_block_super(struct super_block *sb)
 EXPORT_SYMBOL(kill_block_super);
 #endif
 
+/**
+ * 特殊文件系统的get_sb方法，如初始根文件系统。
+ */
 int get_sb_nodev(struct file_system_type *fs_type,
 	int flags, void *data,
 	int (*fill_super)(struct super_block *, void *, int),
 	struct vfsmount *mnt)
 {
 	int error;
+	/**
+	 * 分配新的超级块。
+	 * set_anon_super会初始化特殊文件系统的超级块。
+	 */
 	struct super_block *s = sget(fs_type, NULL, set_anon_super, NULL);
 
 	if (IS_ERR(s))
@@ -865,6 +909,10 @@ int get_sb_nodev(struct file_system_type *fs_type,
 
 	s->s_flags = flags;
 
+	/**
+	 * 调用fill_super填充超级块。
+	 * 对初始根文件系统来说，调用ramfs_fill_super。它分配索引节点对象和对应的目录项对象，并填充超级块字段值。
+	 */
 	error = fill_super(s, data, flags & MS_SILENT ? 1 : 0);
 	if (error) {
 		deactivate_locked_super(s);
@@ -909,6 +957,16 @@ int get_sb_single(struct file_system_type *fs_type,
 
 EXPORT_SYMBOL(get_sb_single);
 
+/**
+ * 被do_new_mount调用.
+ * 参数有:文件系统类型.安装标志及块设备名.
+ * 这处理实际的安装操作并返回一个新安装文件系统描述符的地址. 
+ * type : 文件系统类型
+ * flags: 参数 
+ * name : 设备名
+ * data : 与文件系统相关的数据结构的指针，可能为空。
+ */
+ */
 struct vfsmount *
 vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void *data)
 {
@@ -916,11 +974,18 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	char *secdata = NULL;
 	int error;
 
+	/**
+	 * 错误的文件系统类型。
+	 */
 	if (!type)
 		return ERR_PTR(-ENODEV);
 
 	error = -ENOMEM;
+	/**
+	 * 分配一个新的已安装文件系统的描述符
+	 */
 	mnt = alloc_vfsmnt(name);
+	/* 内存不足 */
 	if (!mnt)
 		goto out;
 
@@ -934,6 +999,10 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 			goto out_free_secdata;
 	}
 
+	/**
+	 * 调用文件系统的get_sb分配并初始化一个新的超级块。
+	 * 例如ext2的get_sb方法是ext2_get_sb。
+	 */
 	error = type->get_sb(type, flags, name, data, mnt);
 	if (error < 0)
 		goto out_free_secdata;
@@ -994,15 +1063,26 @@ static struct vfsmount *fs_set_subtype(struct vfsmount *mnt, const char *fstype)
 	return ERR_PTR(err);
 }
 
+/**
+ * 进行一个新的挂载 
+ * fstype : 文件系统类型名
+ * flags: 参数 
+ * name : 设备名
+ * data : 与文件系统相关的数据结构的指针，可能为空。
+ */
 struct vfsmount *
 do_kern_mount(const char *fstype, int flags, const char *name, void *data)
 {
+	/* 查找文件系统，必要时加载对应的模块 */
 	struct file_system_type *type = get_fs_type(fstype);
 	struct vfsmount *mnt;
+	/* 没有对应的文件系统 */
 	if (!type)
 		return ERR_PTR(-ENODEV);
+	/* 读取文件系统超级块 */
 	mnt = vfs_kern_mount(type, flags, name, data);
 	if (!IS_ERR(mnt) && (type->fs_flags & FS_HAS_SUBTYPE) &&
+	    /* 处理子文件系统 */
 	    !mnt->mnt_sb->s_subtype)
 		mnt = fs_set_subtype(mnt, fstype);
 	put_filesystem(type);

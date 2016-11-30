@@ -6,6 +6,11 @@
   See the file COPYING.
 */
 
+/**
+ * dir.c  主要提供对于目录inode索引节点的维护
+ */
+
+
 #include "fuse_i.h"
 
 #include <linux/pagemap.h>

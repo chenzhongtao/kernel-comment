@@ -6,6 +6,11 @@
   See the file COPYING.
 */
 
+/**
+ * file.c   主要提供对于文件inode索引节点的维护
+ */
+
+
 #include "fuse_i.h"
 
 #include <linux/pagemap.h>
@@ -910,13 +915,18 @@ static ssize_t fuse_perform_write(struct file *file,
 	return res > 0 ? res : err;
 }
 
+/**
+ * fuse异步写入操作
+ */
 static ssize_t fuse_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 				   unsigned long nr_segs, loff_t pos)
 {
 	struct file *file = iocb->ki_filp;
+    /* 指向文件地址空间的对象。 */ 
 	struct address_space *mapping = file->f_mapping;
 	size_t count = 0;
 	ssize_t written = 0;
+	/* 指向拥有该对象的索引结点的指针 */
 	struct inode *inode = mapping->host;
 	ssize_t err;
 	struct iov_iter i;

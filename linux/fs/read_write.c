@@ -278,19 +278,25 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
 
+     /*如果标志中不允许所请求的访问,则返回*/
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
+    /*如果没有相关的操作，则返回*/ 
 	if (!file->f_op || (!file->f_op->read && !file->f_op->aio_read))
 		return -EINVAL;
+    /*检查参数*/ 
 	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
 		return -EFAULT;
-
+    
+    /*对要访问的文件部分检查是否有冲突的强制锁*/  
 	ret = rw_verify_area(READ, file, pos, count);
 	if (ret >= 0) {
 		count = ret;
+        /*下面的方法返回实际传送的字节数，文件指针被适当的修改*/  
 		if (file->f_op->read)
 			ret = file->f_op->read(file, buf, count, pos);
 		else
+            /*通用读取例程*/ 
 			ret = do_sync_read(file, buf, count, pos);
 		if (ret > 0) {
 			fsnotify_access(file->f_path.dentry);
@@ -359,27 +365,34 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 
 EXPORT_SYMBOL(vfs_write);
 
+/*获取文件访问指针*/
 static inline loff_t file_pos_read(struct file *file)
 {
 	return file->f_pos;
 }
 
+/*位置指针移动*/
 static inline void file_pos_write(struct file *file, loff_t pos)
 {
 	file->f_pos = pos;
 }
 
+/*sys_read()*/
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
 	int fput_needed;
 
+    /*从fd中获取相应文件对象地址*/ 
 	file = fget_light(fd, &fput_needed);
 	if (file) {
+        /*获取文件访问指针*/
 		loff_t pos = file_pos_read(file);
 		ret = vfs_read(file, buf, count, &pos);
+        /*位置指针移动*/
 		file_pos_write(file, pos);
+        /*释放文件对象*/
 		fput_light(file, fput_needed);
 	}
 

@@ -17,18 +17,22 @@
 
 #ifndef __ASSEMBLY__
 
+/* 指针是否落在最后一页时返回1, 通常x为负的错误码 */
 #define IS_ERR_VALUE(x) unlikely((x) >= (unsigned long)-MAX_ERRNO)
 
+/* 将错误号转化为指针，由于错误号在-1000~0间，返回的指针会落在最后一页  */
 static inline void *ERR_PTR(long error)
 {
 	return (void *) error;
 }
 
+/* 将指针转化为错误号  */
 static inline long PTR_ERR(const void *ptr)
 {
 	return (long) ptr;
 }
 
+/* 判断返回的指针是错误信息还是实际地址，即指针是否落在最后一页 */
 static inline long IS_ERR(const void *ptr)
 {
 	return IS_ERR_VALUE((unsigned long)ptr);

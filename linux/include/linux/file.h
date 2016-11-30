@@ -26,6 +26,7 @@ extern struct file *alloc_file(struct vfsmount *, struct dentry *dentry,
 
 static inline void fput_light(struct file *file, int fput_needed)
 {
+	/* 判断是否需要回收 */
 	if (unlikely(fput_needed))
 		fput(file);
 }

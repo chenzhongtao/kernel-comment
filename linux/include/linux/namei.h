@@ -15,16 +15,41 @@ struct open_intent {
 
 enum { MAX_NESTED_LINKS = 8 };
 
+/**
+ * 路径查找的结果
+ */
 struct nameidata {
+	/**
+	 * 查找到的PATH对象。
+	 */
 	struct path	path;
+
+	/**
+	 * 路径名的最后一个分量。当指定LOOKUP_PARENT时使用。
+	 */
 	struct qstr	last;
 	struct path	root;
+	/**
+	 * 查找标志。
+	 */
 	unsigned int	flags;
+	/**
+	 * 路径名最后一个分量的类型。如LAST_NORM
+	 */
 	int		last_type;
+	/**
+	 * 符号链接查找的嵌套深度。
+	 */
 	unsigned	depth;
+	/**
+	 * 嵌套关联路径名数组。
+	 */
 	char *saved_names[MAX_NESTED_LINKS + 1];
 
 	/* Intent data */
+	/**
+	 * 指定如何访问文件。
+	 */
 	union {
 		struct open_intent open;
 	} intent;
@@ -32,6 +57,13 @@ struct nameidata {
 
 /*
  * Type of the last component on LOOKUP_PARENT
+ */
+/**
+ * LAST_NORM:	最后一个分量是普通文件名
+ * LAST_ROOT:	最后一个分量是"/"
+ * LAST_DOT:	最后一个分量是"."
+ * LAST_DOTDOT:	最后一个分量是".."
+ * LAST_BIND:	最后一个分量是链接到特殊文件系统的符号链接
  */
 enum {LAST_NORM, LAST_ROOT, LAST_DOT, LAST_DOTDOT, LAST_BIND};
 
@@ -44,15 +76,33 @@ enum {LAST_NORM, LAST_ROOT, LAST_DOT, LAST_DOTDOT, LAST_BIND};
  *  - locked when lookup done with dcache_lock held
  *  - dentry cache is untrusted; force a real lookup
  */
+/**
+ * 如果最后一个分量是符号链接，则解释它。
+ */
 #define LOOKUP_FOLLOW		 1
+/**
+ * 最后一个分量必须是目录。
+ */
 #define LOOKUP_DIRECTORY	 2
+/**
+ * 在路径名中还有文件名要检查。
+ */
 #define LOOKUP_CONTINUE		 4
+/**
+ * 查找最后一个分量所在的目录
+ */
 #define LOOKUP_PARENT		16
 #define LOOKUP_REVAL		64
 /*
  * Intent data
  */
+/**
+ * 试图打开一个文件
+ */
 #define LOOKUP_OPEN		0x0100
+/**
+ * 试图创建一个文件
+ */
 #define LOOKUP_CREATE		0x0200
 #define LOOKUP_EXCL		0x0400
 #define LOOKUP_RENAME_TARGET	0x0800

@@ -804,6 +804,9 @@ static inline int __get_file_write_access(struct inode *inode,
 	return error;
 }
 
+/**
+ * 打开一个目录项
+ */
 static struct file *__dentry_open(struct dentry *dentry, struct vfsmount *mnt,
 					int flags, struct file *f,
 					int (*open)(struct inode *, struct file *),
@@ -828,7 +831,13 @@ static struct file *__dentry_open(struct dentry *dentry, struct vfsmount *mnt,
 	f->f_path.dentry = dentry;
 	f->f_path.mnt = mnt;
 	f->f_pos = 0;
+	/**
+	 * 将f_op设置为相应索引结点对象i_fop字段的内容。为进一步的文件操作建立起对应的方法。
+	 */
 	f->f_op = fops_get(inode->i_fop);
+	/**
+	 * file_move将文件对象插入到文件系统超级块的s_files字段所指向的打开文件链表
+	 */
 	file_move(f, &inode->i_sb->s_files);
 
 	error = security_dentry_open(f, cred);
@@ -845,9 +854,15 @@ static struct file *__dentry_open(struct dentry *dentry, struct vfsmount *mnt,
 
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 
+	/**
+	 * 初始化预读的数据结构
+	 */
 	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
 
 	/* NB: we're sure to have correct a_ops only after f_op->open */
+	/**
+	 * 如果O_DIRECT被设置，就检查直接IO操作是否可以作用于文件
+	 */
 	if (f->f_flags & O_DIRECT) {
 		if (!f->f_mapping->a_ops ||
 		    ((!f->f_mapping->a_ops->direct_IO) &&
@@ -1028,41 +1043,59 @@ void fd_install(unsigned int fd, struct file *file)
 
 EXPORT_SYMBOL(fd_install);
 
+/**
+ * open系统调用
+ *	filename:要打开的文件名
+ *	flags:访问模式
+ *	mode:创建文件需要的许可权限。
+ */
 long do_sys_open(int dfd, const char __user *filename, int flags, int mode)
 {
+	/* 从用户态读取文件名 */
 	char *tmp = getname(filename);
 	int fd = PTR_ERR(tmp);
 
 	if (!IS_ERR(tmp)) {
+		/* 查找一个可用的描述符 */
 		fd = get_unused_fd_flags(flags);
+		/* 文件描述符有效 */
 		if (fd >= 0) {
+		    /* 查找文件的inode，并打开它 */
 			struct file *f = do_filp_open(dfd, tmp, flags, mode, 0);
 			if (IS_ERR(f)) {
+			    /* 失败后返还文件描述符 */
 				put_unused_fd(fd);
 				fd = PTR_ERR(f);
 			} else {
+				/* 用于fsnotify通知 */
 				fsnotify_open(f->f_path.dentry);
+				/* 将文件句柄与文件关联起来 */
 				fd_install(fd, f);
 			}
 		}
+		/* 释放文件名 */
 		putname(tmp);
 	}
 	return fd;
 }
 
+/*sys_open*/ 
 SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, int, mode)
 {
 	long ret;
 
+    /* 如果是64位系统，则强制启用大文件标志 */
 	if (force_o_largefile())
 		flags |= O_LARGEFILE;
 
+	/* 打开文件 */
 	ret = do_sys_open(AT_FDCWD, filename, flags, mode);
 	/* avoid REGPARM breakage on x86: */
 	asmlinkage_protect(3, ret, filename, flags, mode);
 	return ret;
 }
 
+/* 直接用open打开目录，用返回值作为openat的第一个参数的值 */
 SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
 		int, mode)
 {
@@ -1107,7 +1140,13 @@ int filp_close(struct file *filp, fl_owner_t id)
 		retval = filp->f_op->flush(filp, id);
 
 	dnotify_flush(filp, id);
+	/**
+	 * 释放文件上的强制锁。
+	 */
 	locks_remove_posix(filp, id);
+	/**
+	 * 释放文件对象。
+	 */
 	fput(filp);
 	return retval;
 }
@@ -1130,10 +1169,16 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	fdt = files_fdtable(files);
 	if (fd >= fdt->max_fds)
 		goto out_unlock;
+	/**
+	 * 获得文件对象，如果为空，则返回错误码。
+	 */
 	filp = fdt->fd[fd];
 	if (!filp)
 		goto out_unlock;
 	rcu_assign_pointer(fdt->fd[fd], NULL);
+	/**
+	 * 释放文件描述符，清除open_fds和close_on_exec中相应的位。
+	 */
 	FD_CLR(fd, fdt->close_on_exec);
 	__put_unused_fd(files, fd);
 	spin_unlock(&files->file_lock);

@@ -197,6 +197,11 @@ enum fuse_req_state {
 /**
  * A request to the client
  */
+/**
+ * 每次执行系统调用时会生成一个struct fuse_req, 这些fuse_req依据state被组织在不同的队列中，
+ * struct fuse_conn维护了这些队列
+ * fuse中每个请求用一个fuse_req的结构表示，该结构中包含fuse请求的输入输出参数，请求对象的inode、file等
+ */
 struct fuse_req {
 	/** This can be on either pending processing or io lists in
 	    fuse_conn */
@@ -304,6 +309,10 @@ struct fuse_req {
  * destroyed, when the client device is closed and the filesystem is
  * unmounted.
  */
+/**
+ * fuse_conn代表一个fuse连接，当用户文件系统被挂载时生成该结构，当文件系统被卸载时释放该结构，其主要用于管理各个请求队
+ * 列，内核会为所有挂载的文件系统维护一个fuse_conn的链表（fuse文件系统可能会被挂载多次）
+ */
 struct fuse_conn {
 	/** Lock protecting accessess to  members of this structure */
 	spinlock_t lock;
@@ -381,6 +390,11 @@ struct fuse_conn {
 
 	/** Connection established, cleared on umount, connection
 	    abort and device release */
+	/**
+	 * connected字段用于表示连接的状态，成功挂载后为1，当文件系统被卸载，连接被中断或是设备驱动被释放后，该字段为0，
+	 * 此时这个connection（挂载的文件系统）不能提供正常服务。在fuse_request_send中会检查该字段，只有连接正常fuse文件
+	 * 系统才会发送请求。
+	 */
 	unsigned connected;
 
 	/** Connection failed (version mismatch).  Cannot race with

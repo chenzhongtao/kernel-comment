@@ -587,6 +587,7 @@ static int __init cuse_init(void)
 
 	cuse_class->dev_attrs = cuse_class_dev_attrs;
 
+    /* 注册cuse字符设备 生成/dev/cuse */
 	rc = misc_register(&cuse_miscdev);
 	if (rc) {
 		class_destroy(cuse_class);

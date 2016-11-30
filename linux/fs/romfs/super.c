@@ -557,6 +557,7 @@ static int romfs_get_sb(struct file_system_type *fs_type,
 	int ret = -EINVAL;
 
 #ifdef CONFIG_ROMFS_ON_MTD
+    /*MTD(memory technology device内存技术设备) */
 	ret = get_sb_mtd(fs_type, flags, dev_name, data, romfs_fill_super,
 			 mnt);
 #endif

@@ -642,6 +642,12 @@ static inline int __queue_kicked_iocb(struct kiocb *iocb)
  * simplifies the coding of individual aio operations as
  * it avoids various potential races.
  */
+/**
+ * 它实际上调用ki_retry方法为相应的的异步IO操作启动数据传输。
+ * 如果ki_retry返回-EIOCBRETRY则表示异步IO操作已提交但是还没有完全成功。
+ * 稍后在这个kiocb上，aio_run_iocb函数会被再次调用
+ * 否则调用aio_complete为异步操作在aio环境中的环中追加完成事件。
+ */
 static ssize_t aio_run_iocb(struct kiocb *iocb)
 {
 	struct kioctx	*ctx = iocb->ki_ctx;

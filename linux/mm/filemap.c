@@ -115,12 +115,24 @@
  * sure the page is locked and that nobody else uses it - or that usage
  * is safe.  The caller must hold the mapping's tree_lock.
  */
+/**
+ * 从页高速缓存中删除页描述符
+ */
 void __remove_from_page_cache(struct page *page)
 {
 	struct address_space *mapping = page->mapping;
 
+	/**
+	 * radix_tree_delete根据页索引从根节点开始遍历树，并执行删除操作
+	 */
 	radix_tree_delete(&mapping->page_tree, page->index);
+	/**
+	 * 设置mapping字段
+	 */
 	page->mapping = NULL;
+	/**
+	 * 把所缓存页的nrpages值减1.
+	 */
 	mapping->nrpages--;
 	__dec_zone_page_state(page, NR_FILE_PAGES);
 	if (PageSwapBacked(page))
@@ -140,14 +152,26 @@ void __remove_from_page_cache(struct page *page)
 	}
 }
 
+/**
+ * 从页高速缓存中删除页描述符
+ */
 void remove_from_page_cache(struct page *page)
 {
 	struct address_space *mapping = page->mapping;
 
 	BUG_ON(!PageLocked(page));
 
+	/**
+	 * 获取自旋并关中断。
+	 */
 	spin_lock_irq(&mapping->tree_lock);
+	/**
+	 * __remove_from_page_cache真正从树中删除节点。
+	 */
 	__remove_from_page_cache(page);
+	/**
+	 * 释放锁并关中断。
+	 */
 	spin_unlock_irq(&mapping->tree_lock);
 	mem_cgroup_uncharge_cache_page(page);
 }
@@ -209,6 +233,7 @@ static int sync_page_killable(void *word)
  * these two operations is that if a dirty page/buffer is encountered, it must
  * be waited upon, and not just skipped over.
  */
+/* 回写文件节点的数据到磁盘 */
 int __filemap_fdatawrite_range(struct address_space *mapping, loff_t start,
 				loff_t end, int sync_mode)
 {
@@ -338,6 +363,7 @@ EXPORT_SYMBOL(filemap_fdatawait_range);
  * Walk the list of under-writeback pages of the given address space
  * and wait for all of them.
  */
+/* 等待所有未决的写操作完成 */
 int filemap_fdatawait(struct address_space *mapping)
 {
 	loff_t i_size = i_size_read(mapping->host);
@@ -350,11 +376,14 @@ int filemap_fdatawait(struct address_space *mapping)
 }
 EXPORT_SYMBOL(filemap_fdatawait);
 
+/* 回写文件 */
 int filemap_write_and_wait(struct address_space *mapping)
 {
 	int err = 0;
 
+	/* 文件长度不为0 */
 	if (mapping->nrpages) {
+		/* 回写数据 */
 		err = filemap_fdatawrite(mapping);
 		/*
 		 * Even if the above returned error, the pages may be
@@ -363,6 +392,7 @@ int filemap_write_and_wait(struct address_space *mapping)
 		 * thing (e.g. bug) happened, so we avoid waiting for it.
 		 */
 		if (err != -EIO) {
+			/* 等待回写完成 */
 			int err2 = filemap_fdatawait(mapping);
 			if (!err)
 				err = err2;
@@ -414,6 +444,10 @@ EXPORT_SYMBOL(filemap_write_and_wait_range);
  * This function is used to add a page to the pagecache. It must be locked.
  * This function does not add the page to the LRU.  The caller must do that.
  */
+/**
+ * 把一个新页的描述符插入到页高速缓存。
+ * 它接收的参数有：页描述符的地址page、address_space对象的地址mapping、表示在地址空间内的页索引的值offset和为基数分配新结点时所使用的内存分配标志gfp_mask
+ */
 int add_to_page_cache_locked(struct page *page, struct address_space *mapping,
 		pgoff_t offset, gfp_t gfp_mask)
 {
@@ -426,12 +460,21 @@ int add_to_page_cache_locked(struct page *page, struct address_space *mapping,
 	if (error)
 		goto out;
 
+    /**
+     * 调用radix_tree_preload，它禁用内核抢占。并把一些空的radix_tree_node结构赋给每CPU变量radix_tree_preloads。
+     * radix_tree_node结构的分配由slab分配高速缓存radix_tree_node_cachep完成
+     * 如果radix_tree_node_cachep预分配不成功，add_to_page_cache就终止并返回错误。
+     */
 	error = radix_tree_preload(gfp_mask & ~__GFP_HIGHMEM);
 	if (error == 0) {
 		page_cache_get(page);
 		page->mapping = mapping;
 		page->index = offset;
 
+		/**
+		 * 获取tree_lock自旋锁
+		 * radix_tree_preload已经禁止了内核抢占。
+		 */
 		spin_lock_irq(&mapping->tree_lock);
 		error = radix_tree_insert(&mapping->page_tree, offset, page);
 		if (likely(!error)) {
@@ -634,6 +677,9 @@ void __lock_page_nosync(struct page *page)
  * Is there a pagecache struct page at the given (mapping, offset) tuple?
  * If yes, increment its refcount and return it; if no, return NULL.
  */
+/**
+ * 在页高速缓存的基树中查找页
+ */
 struct page *find_get_page(struct address_space *mapping, pgoff_t offset)
 {
 	void **pagep;
@@ -677,6 +723,9 @@ EXPORT_SYMBOL(find_get_page);
  *
  * Returns zero if the page was not present. find_lock_page() may sleep.
  */
+/**
+ * 与find_get_page相似，但是它还会调用lock_page设置页的PG_locked标志
+ */
 struct page *find_lock_page(struct address_space *mapping, pgoff_t offset)
 {
 	struct page *page;
@@ -713,6 +762,9 @@ EXPORT_SYMBOL(find_lock_page);
  *
  * find_or_create_page() returns the desired page's address, or zero on
  * memory exhaustion.
+ */
+/**
+ * 执行find_lock_page，如果找不到所请求的页，就分配一个新页并把它插入到页高速缓存。
  */
 struct page *find_or_create_page(struct address_space *mapping,
 		pgoff_t index, gfp_t gfp_mask)
@@ -759,6 +811,13 @@ EXPORT_SYMBOL(find_or_create_page);
  * indexes.  There may be holes in the indices due to not-present pages.
  *
  * find_get_pages() returns the number of pages which were found.
+ */
+/**
+ * 与find_get_page相似，但是它在高速缓存中查找一组具有相邻索引的页。
+ * mapping:		在mapping的基树中查找
+ * start:		地址空间中相对于搜索起始位置的偏移量。
+ * nr_pages:	所检索到页的最大数量
+ * pages:		存放检索到的页。
  */
 unsigned find_get_pages(struct address_space *mapping, pgoff_t start,
 			    unsigned int nr_pages, struct page **pages)
@@ -869,6 +928,10 @@ EXPORT_SYMBOL(find_get_pages_contig);
  *
  * Like find_get_pages, except we only return pages which are tagged with
  * @tag.   We update @index to index the next page for the traversal.
+ */
+/**
+ * 与find_get_pages类似，但是返回的只是那些用tag参数标记的页。
+ * 这个函数对于快速找到一个索引节点的所有脏页是非常关键的。
  */
 unsigned find_get_pages_tag(struct address_space *mapping, pgoff_t *index,
 			int tag, unsigned int nr_pages, struct page **pages)
@@ -996,12 +1059,21 @@ static void do_generic_file_read(struct file *filp, loff_t *ppos,
 	unsigned int prev_offset;
 	int error;
 
+    /**
+     * 从文件指针*ppos导出第一个请求字节所在页的逻辑号,即地址空间中的页索引,并存放在index变量中
+     */
 	index = *ppos >> PAGE_CACHE_SHIFT;
 	prev_index = ra->prev_pos >> PAGE_CACHE_SHIFT;
 	prev_offset = ra->prev_pos & (PAGE_CACHE_SIZE-1);
 	last_index = (*ppos + desc->count + PAGE_CACHE_SIZE-1) >> PAGE_CACHE_SHIFT;
+	/**
+	 * 也把第一个请求字节在页内的偏移量存放在offset局部变量中.
+	 */
 	offset = *ppos & ~PAGE_CACHE_MASK;
 
+    /**
+     * 本循环读入包含请求字节的所有页.要读的字节数存放在desc->count中.
+     */
 	for (;;) {
 		struct page *page;
 		pgoff_t end_index;
@@ -1010,6 +1082,9 @@ static void do_generic_file_read(struct file *filp, loff_t *ppos,
 
 		cond_resched();
 find_page:
+		/**
+		 * find_get_page查找页高速缓存以找到包含所请求数据的页描述符.
+		 */
 		page = find_get_page(mapping, index);
 		if (!page) {
 			page_cache_sync_readahead(mapping,
@@ -1067,12 +1142,20 @@ page_ok:
 		 * virtual addresses, take care about potential aliasing
 		 * before reading the page on the kernel side.
 		 */
+		/**
+		 * 运行到此,表示页已经位于高速缓存中,并且是最新的.
+		 * 或者说已经正确的读到高速缓存中了.
+		 */
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
 
 		/*
 		 * When a sequential read accesses a page several times,
 		 * only mark it as accessed the first time.
+		 */
+		/**
+		 * mark_page_accessed标记PG_referenced或PG_active,从而表示该页正被访问并且不应该被换出.
+		 * 如果同一文件在do_generic_file_read的后续执行中要读几次,那么这个过程只需要被调用一次.
 		 */
 		if (prev_index != index || offset != prev_offset)
 			mark_page_accessed(page);
@@ -1088,17 +1171,33 @@ page_ok:
 		 * "pos" here (the actor routine has to update the user buffer
 		 * pointers and the remaining count).
 		 */
+		/**
+		 * actor是传递进来的参数,它一般是file_read_actor函数.
+		 * 该函数的作用是把页中的数据复制到用户态缓冲区中.
+		 */
 		ret = actor(desc, page, offset, nr);
+		/**
+		 * 更新局部变量.
+		 * 一般情况下,是index加一,offset清0(页中最后一个字节已经被复制到用户态缓冲区)
+		 * 否则index不变,offset的值加上ret.
+		 */
 		offset += ret;
 		index += offset >> PAGE_CACHE_SHIFT;
 		offset &= ~PAGE_CACHE_MASK;
 		prev_offset = offset;
 
+		/**
+		 * 减少页描述符的引用计数器.
+		 */
 		page_cache_release(page);
+		/**
+		 * desc->count != 0表示还有数据要读,那就继续循环处理
+		 */
 		if (ret == nr && desc->count)
 			continue;
 		goto out;
 
+/* 页面虽然在缓存中，但是不是最新的 */
 page_not_up_to_date:
 		/* Get exclusive access to the page ... */
 		error = lock_page_killable(page);
@@ -1114,6 +1213,10 @@ page_not_up_to_date_locked:
 		}
 
 		/* Did somebody else fill it already? */
+		/**
+		 * 函数运行到此,说明页已经被锁定,并且在高速缓存中.
+		 * 再次检查PG_uptodate,如果该标志置位,调用unlock_page并跳过读操作(呵呵,这种事情最好不过了,有人代劳了)
+		 */
 		if (PageUptodate(page)) {
 			unlock_page(page);
 			goto page_ok;
@@ -1121,6 +1224,9 @@ page_not_up_to_date_locked:
 
 readpage:
 		/* Start the actual read. The read will unlock the page. */
+		/**
+		 * 这才是开始真正的IO操作.它会激活磁盘到页之间的IO数据传输.
+		 */
 		error = mapping->a_ops->readpage(filp, page);
 
 		if (unlikely(error)) {
@@ -1131,6 +1237,9 @@ readpage:
 			goto readpage_error;
 		}
 
+		/**
+		 * 如果PG_uptodate没有被置位,则调用lock_page,等待页被有效读入.
+		 */
 		if (!PageUptodate(page)) {
 			error = lock_page_killable(page);
 			if (unlikely(error))
@@ -1170,6 +1279,7 @@ no_cached_page:
 			desc->error = -ENOMEM;
 			goto out;
 		}
+		/* 将页面添加到lru缓存中 */
 		error = add_to_page_cache_lru(page, mapping,
 						index, GFP_KERNEL);
 		if (error) {
@@ -1179,6 +1289,9 @@ no_cached_page:
 			desc->error = error;
 			goto out;
 		}
+		/**
+		 * 开始读文件数据.
+		 */
 		goto readpage;
 	}
 
@@ -1191,6 +1304,9 @@ out:
 	file_accessed(filp);
 }
 
+/**
+ * 将页中的数据复制到用户态缓冲区.
+ */
 int file_read_actor(read_descriptor_t *desc, struct page *page,
 			unsigned long offset, unsigned long size)
 {
@@ -1214,8 +1330,17 @@ int file_read_actor(read_descriptor_t *desc, struct page *page,
 	}
 
 	/* Do it the slow way */
+	/**
+	 * kmap为处于高端内存中的页建立永久的内核映射.
+	 */
 	kaddr = kmap(page);
+	/**
+	 * 复制页中的数据到用户态空间.
+	 */
 	left = __copy_to_user(desc->arg.buf, kaddr + offset, size);
+	/**
+	 * 释放页的永久内核映射
+	 */
 	kunmap(page);
 
 	if (left) {
@@ -1223,6 +1348,9 @@ int file_read_actor(read_descriptor_t *desc, struct page *page,
 		desc->error = -EFAULT;
 	}
 success:
+	/**
+	 * 更新desc的字段.
+	 */
 	desc->count = count - size;
 	desc->written += size;
 	desc->arg.buf += size;
@@ -1278,6 +1406,9 @@ EXPORT_SYMBOL(generic_segment_checks);
  * This is the "read()" routine for all filesystems
  * that can use the page cache directly.
  */
+/**
+ * 异步IO读取函数
+ */
 ssize_t
 generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 		unsigned long nr_segs, loff_t pos)
@@ -1289,11 +1420,13 @@ generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	loff_t *ppos = &iocb->ki_pos;
 
 	count = 0;
+	/* 确认参数有效 */
 	retval = generic_segment_checks(iov, &nr_segs, &count, VERIFY_WRITE);
 	if (retval)
 		return retval;
 
 	/* coalesce the iovecs and go direct-to-BIO for O_DIRECT */
+	/* 处理直接IO */
 	if (filp->f_flags & O_DIRECT) {
 		loff_t size;
 		struct address_space *mapping;
@@ -1495,6 +1628,9 @@ static void do_async_mmap_readahead(struct vm_area_struct *vma,
  * it in the page cache, and handles the special cases reasonably without
  * having a lot of duplicated code.
  */
+/**
+ * 文件映射缺页处理
+ */
 int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	int error;
@@ -1514,7 +1650,13 @@ int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	/*
 	 * Do we have something in the page cache already?
 	 */
+	/**
+	 * 调用find_get_page在页高速缓存内寻找由address_space对象和文件偏移量标识的页。
+	 */
 	page = find_get_page(mapping, offset);
+    /**
+     * 在页高速缓存中没有找到对应的页。
+     */
 	if (likely(page)) {
 		/*
 		 * We found the page, so try async readahead before
@@ -1567,6 +1709,11 @@ no_cached_page:
 	 * We're only likely to ever get here if MADV_RANDOM is in
 	 * effect.
 	 */
+	/**
+	 * 在页高速缓存中没有找到页，则调用page_cache_read。
+	 * 该函数检查请求页是否在页高速缓存中，如果不在，则分配一个新页框，把它追加到页调整缓存。
+	 * 执行mapping->a_ops->readpage方法，安排一个IO操作从磁盘读入该页内容。
+	 */
 	error = page_cache_read(file, offset);
 
 	/*
@@ -1586,6 +1733,9 @@ no_cached_page:
 		return VM_FAULT_OOM;
 	return VM_FAULT_SIGBUS;
 
+/**
+ * 页不是最新的。
+ */
 page_not_uptodate:
 	/*
 	 * Umm, take care of errors if the page isn't up-to-date.
@@ -1594,6 +1744,7 @@ page_not_uptodate:
 	 * and we need to check for errors.
 	 */
 	ClearPageError(page);
+	/* 读取页面内容到内存中 */
 	error = mapping->a_ops->readpage(file, page);
 	if (!error) {
 		wait_on_page_locked(page);
@@ -1623,7 +1774,13 @@ int generic_file_mmap(struct file * file, struct vm_area_struct * vma)
 
 	if (!mapping->a_ops->readpage)
 		return -ENOEXEC;
+	/**
+	 * 将当前时间赋给i_atime字段，并将索引节点标记为脏
+	 */
 	file_accessed(file);
+	/**
+	 * 定义线程区的映射方法。
+	 */
 	vma->vm_ops = &generic_file_vm_ops;
 	vma->vm_flags |= VM_CAN_NONLINEAR;
 	return 0;
@@ -1660,11 +1817,22 @@ static struct page *__read_cache_page(struct address_space *mapping,
 	struct page *page;
 	int err;
 repeat:
+	/**
+	 * find_get_page检查页是否已经在页高速缓存中。
+	 */
 	page = find_get_page(mapping, index);
+	/* 页不在高速缓存中 */
 	if (!page) {
+        /**
+         * 分配一个新页框。
+         */
 		page = page_cache_alloc_cold(mapping);
 		if (!page)
 			return ERR_PTR(-ENOMEM);
+		/**
+		 * 在页高速缓存中插入相应的页描述符。
+		 * 并把页插入管理区的非活动LRU链表中。
+		 */
 		err = add_to_page_cache_lru(page, mapping, index, GFP_KERNEL);
 		if (unlikely(err)) {
 			page_cache_release(page);
@@ -1697,6 +1865,13 @@ repeat:
  *
  * If the page does not get brought uptodate, return -EIO.
  */
+/**
+ * 确保高速缓存中包括最新版本的指定页。
+ * mapping:   页所属的address_space
+ * index:	  所请求页的偏移量的值
+ * filter:    从磁盘读取页数据的回调函数
+ * data:      传递给filter函数的指针，通常为NULL
+ */
 struct page *read_cache_page_async(struct address_space *mapping,
 				pgoff_t index,
 				int (*filler)(void *,struct page*),
@@ -1709,9 +1884,15 @@ retry:
 	page = __read_cache_page(mapping, index, filler, data);
 	if (IS_ERR(page))
 		return page;
+	/**
+	 * 查看页是否为最新。PG_uptodate为0表示页不是最新的。
+	 */
 	if (PageUptodate(page))
 		goto out;
 
+	/**
+	 * 页不是最新的，调用filter从磁盘读取页，并设置PG_uptodate标志。
+	 */
 	lock_page(page);
 	if (!page->mapping) {
 		unlock_page(page);
@@ -1978,9 +2159,17 @@ inline int generic_write_checks(struct file *file, loff_t *pos, size_t *count, i
 
 	if (!isblk) {
 		/* FIXME: this is for backwards compatibility with 2.4 */
+		/**
+		 * 如果不是块设备(即普通文件)
+		 * 并且指定了O_APPEND，就将ppos设为文件尾。从而将新数据追加到文件的后面。
+		 */
 		if (file->f_flags & O_APPEND)
                         *pos = i_size_read(inode);
 
+		/**
+		 * 对文件大小进行检查。
+		 * 此处是检查其限制值不能超过ulimit的限制。
+		 */
 		if (limit != RLIM_INFINITY) {
 			if (*pos >= limit) {
 				send_sig(SIGXFSZ, current, 0);
@@ -1994,6 +2183,9 @@ inline int generic_write_checks(struct file *file, loff_t *pos, size_t *count, i
 
 	/*
 	 * LFS rule
+	 */
+	/**
+	 * 如果文件没有O_LARGEFILE标志，那么就不能超过2G。
 	 */
 	if (unlikely(*pos + *count > MAX_NON_LFS &&
 				!(file->f_flags & O_LARGEFILE))) {
@@ -2011,6 +2203,9 @@ inline int generic_write_checks(struct file *file, loff_t *pos, size_t *count, i
 	 * If we have written data it becomes a short write.  If we have
 	 * exceeded without writing data we send a signal and return EFBIG.
 	 * Linus frestrict idea will clean these up nicely..
+	 */
+	/**
+	 * 不能把一个普通文件增大到超过文件系统的上限。
 	 */
 	if (likely(!isblk)) {
 		if (unlikely(*pos >= inode->i_sb->s_maxbytes)) {
@@ -2229,6 +2424,9 @@ again:
 			break;
 		copied = status;
 
+		/**
+		 * 增加一个抢占点。
+		 */
 		cond_resched();
 
 		iov_iter_advance(i, copied);
@@ -2312,6 +2510,10 @@ ssize_t __generic_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	struct address_space * mapping = file->f_mapping;
 	size_t ocount;		/* original count */
 	size_t count;		/* after file limit checks */
+	/**
+	 * 确定待写文件索引节点对象的inode。
+	 * 如果文件是一个块设备文件，这就是一个bdev特殊文件系统的索引节点。
+	 */
 	struct inode 	*inode = mapping->host;
 	loff_t		pos;
 	ssize_t		written;
@@ -2328,9 +2530,16 @@ ssize_t __generic_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	vfs_check_frozen(inode->i_sb, SB_FREEZE_WRITE);
 
 	/* We can write back this queue in page reclaim */
+	/**
+	 * 将文件的backing_dev_info设置为current->backing_dev_info
+	 * 这样，即使相应请求队列是拥塞的，这个设置也会允许当前进程写回由file->f_mapping拥有的脏页。
+	 */
 	current->backing_dev_info = mapping->backing_dev_info;
 	written = 0;
 
+	/**
+	 * 一些常规检查。
+	 */
 	err = generic_write_checks(file, &pos, &count, S_ISBLK(inode->i_mode));
 	if (err)
 		goto out;

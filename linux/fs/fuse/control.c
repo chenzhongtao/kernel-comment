@@ -6,6 +6,11 @@
   See the file COPYING.
 */
 
+/**
+ * control.c  提供对于dentry的维护及其它
+ */
+
+
 #include "fuse_i.h"
 
 #include <linux/init.h>
@@ -345,11 +350,17 @@ static struct file_system_type fuse_ctl_fs_type = {
 	.kill_sb	= fuse_ctl_kill_sb,
 };
 
+/**
+ * 注册fuse控制文件系统 fusectl
+ */
 int __init fuse_ctl_init(void)
 {
 	return register_filesystem(&fuse_ctl_fs_type);
 }
 
+/**
+ * 注销fuse控制文件系统
+ */
 void fuse_ctl_cleanup(void)
 {
 	unregister_filesystem(&fuse_ctl_fs_type);

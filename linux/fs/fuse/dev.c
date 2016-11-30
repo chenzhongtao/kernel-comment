@@ -6,6 +6,10 @@
   See the file COPYING.
 */
 
+/**
+ * dev.c  fuse 的(虚拟)设备驱动
+ */
+
 #include "fuse_i.h"
 
 #include <linux/init.h>
@@ -385,6 +389,11 @@ __acquires(&fc->lock)
 	}
 }
 
+/**
+ * 将代表本次请求的fuse_req结构的状态标志设置为FUSE_REQ_PENDING，将请求加到fuse_conn的pending链表中，并调用
+ * request_wait_answer等待请求完成（等待队列被唤醒后，需要检查请求状态是否为FUSE_REQ_FINISHED）。当本次请求
+ * 被响应后，结果已经被存放在局部变量outarg中，fuse进行相应的处理即可向上层返回结果。
+ */
 void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->isreply = 1;
@@ -1239,6 +1248,9 @@ static struct miscdevice fuse_miscdevice = {
 	.fops = &fuse_dev_operations,
 };
 
+/**
+ * 创建fuse_req高速缓存，加载fuse设备驱动，用于用户空间与内核空间交换信息
+ */
 int __init fuse_dev_init(void)
 {
 	int err = -ENOMEM;
@@ -1247,7 +1259,8 @@ int __init fuse_dev_init(void)
 					    0, 0, NULL);
 	if (!fuse_req_cachep)
 		goto out;
-
+    
+	/* 注册fuse字符设备 生成/dev/fuse*/
 	err = misc_register(&fuse_miscdevice);
 	if (err)
 		goto out_cache_clean;
@@ -1260,6 +1273,9 @@ int __init fuse_dev_init(void)
 	return err;
 }
 
+/**
+ * 注销fuse设备驱动程序，释放fuse_req高速缓存
+ */
 void fuse_dev_cleanup(void)
 {
 	misc_deregister(&fuse_miscdevice);

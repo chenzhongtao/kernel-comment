@@ -42,15 +42,42 @@ struct backing_dev_info directly_mappable_cdev_bdi = {
 		BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP),
 };
 
+/**
+ * kobj_map包含一个散列表，它有255个表项。并由0-255范围的主设备号进行索引。
+ * 散列表存放probe类型的对象。每个对象都拥有一个已经注册的主设备号和次设备号。
+ * cdev_map是字符设备的kobject映射域。
+ */
 static struct kobj_map *cdev_map;
 
 static DEFINE_MUTEX(chrdevs_lock);
 
+
+/**
+ * 为了记录已经分配哪些字符设备号，内核使用散列表chrdevs，表的大小不超过设备号范围。
+ * 两个不同的设备号范围可能共享同一个主设备号，但是范围不能重叠。
+ * chrdevs包含255个表项，由于散列函数屏蔽了主设备号的高四位，因此需要将设备进行散列。
+ * 冲突链表的每一项是一个char_device_struct
+ */
 static struct char_device_struct {
+	/**
+	 * 冲突链表中下一个元素的指针
+	 */
 	struct char_device_struct *next;
+	/**
+	 * 设备号范围内的主设备号
+	 */
 	unsigned int major;
+	/**
+	 * 设备号范围内的初始次设备号
+	 */
 	unsigned int baseminor;
+	/**
+	 * 设备号范围的大小
+	 */
 	int minorct;
+	/**
+	 * 处理设备号范围内的设备驱动程序的名称
+	 */
 	char name[64];
 	struct cdev *cdev;		/* will die */
 } *chrdevs[CHRDEV_MAJOR_HASH_SIZE];
@@ -88,6 +115,9 @@ void chrdev_show(struct seq_file *f, off_t offset)
  *
  * Returns a -ve errno on failure.
  */
+/**
+ * 为字符设备驱动程序分配一个范围内的设备号。所有新的驱动程序都使用而且应当使用这种方法而不是register_chrdev
+ */
 static struct char_device_struct *
 __register_chrdev_region(unsigned int major, unsigned int baseminor,
 			   int minorct, const char *name)
@@ -95,7 +125,9 @@ __register_chrdev_region(unsigned int major, unsigned int baseminor,
 	struct char_device_struct *cd, **cp;
 	int ret = 0;
 	int i;
-
+	/**
+	 * 分配一个新结构并用0填充
+	 */
 	cd = kzalloc(sizeof(struct char_device_struct), GFP_KERNEL);
 	if (cd == NULL)
 		return ERR_PTR(-ENOMEM);
@@ -103,6 +135,10 @@ __register_chrdev_region(unsigned int major, unsigned int baseminor,
 	mutex_lock(&chrdevs_lock);
 
 	/* temporary */
+	/**
+	 * 主设备号为0，那么请求动态分配一个设备号
+	 * 从末尾项开始继续向前寻找一个尚未使用的主设备号对应的空冲突链表，没有找到就返回错误
+	 */
 	if (major == 0) {
 		for (i = ARRAY_SIZE(chrdevs)-1; i > 0; i--) {
 			if (chrdevs[i] == NULL)
@@ -117,13 +153,22 @@ __register_chrdev_region(unsigned int major, unsigned int baseminor,
 		ret = major;
 	}
 
+	/**
+	 * 初始化char_device_struct结构中的初始设备号、范围大小、驱动程序名称
+	 */
 	cd->major = major;
 	cd->baseminor = baseminor;
 	cd->minorct = minorct;
 	strlcpy(cd->name, name, sizeof(cd->name));
 
+	/**
+	 * 执行散列函数计算与主设备号对应的散列表索引
+	 */
 	i = major_to_index(major);
 
+	/**
+	 * 遍历冲突链表，为新的结构寻找正确的位置
+	 */
 	for (cp = &chrdevs[i]; *cp; cp = &(*cp)->next)
 		if ((*cp)->major > major ||
 		    ((*cp)->major == major &&
@@ -132,6 +177,9 @@ __register_chrdev_region(unsigned int major, unsigned int baseminor,
 			break;
 
 	/* Check for overlapping minor ranges.  */
+	/**
+	 * 如果找到与请求的设备号范围重叠的范围，则返回错误
+	 */
 	if (*cp && (*cp)->major == major) {
 		int old_min = (*cp)->baseminor;
 		int old_max = (*cp)->baseminor + (*cp)->minorct - 1;
@@ -190,6 +238,10 @@ __unregister_chrdev_region(unsigned major, unsigned baseminor, int minorct)
  *
  * Return value is zero on success, a negative error code on failure.
  */
+/**
+ * register_chrdev_region接收三个参数：初始设备号，设备号范围大小，驱动名称
+ * 为字符设备分配设备号。新驱动都应当使用这个方法。
+ */
 int register_chrdev_region(dev_t from, unsigned count, const char *name)
 {
 	struct char_device_struct *cd;
@@ -225,6 +277,10 @@ fail:
  * Allocates a range of char device numbers.  The major number will be
  * chosen dynamically, and returned (along with the first minor number)
  * in @dev.  Returns zero or a negative error code.
+ */
+/**
+ * alloc_chrdev_region与register_chrdev_region类似，但是它可以动态的分配一个主设备号。
+ * 它接收的参数为设备号范围内的初始次设备号，范围的大小及驱动程序的名称。
  */
 int alloc_chrdev_region(dev_t *dev, unsigned baseminor, unsigned count,
 			const char *name)
@@ -274,10 +330,12 @@ int __register_chrdev(unsigned int major, unsigned int baseminor,
 	if (!cdev)
 		goto out2;
 
+	/* 初始化cdev结构 */
 	cdev->owner = fops->owner;
 	cdev->ops = fops;
 	kobject_set_name(&cdev->kobj, "%s", name);
 		
+	/* 将设备添加到设备驱动模型中 */
 	err = cdev_add(cdev, MKDEV(cd->major, baseminor), count);
 	if (err)
 		goto out;
@@ -300,6 +358,9 @@ out2:
  * This function will unregister a range of @count device numbers,
  * starting with @from.  The caller should normally be the one who
  * allocated those numbers in the first place...
+ */
+/**
+ * 与register_chrdev设备对应的移除函数。
  */
 void unregister_chrdev_region(dev_t from, unsigned count)
 {
@@ -363,6 +424,11 @@ void cdev_put(struct cdev *p)
 /*
  * Called every time a character special file is opened
  */
+/**
+ * 字符设备的打开方法。open调用触发dentry_open，dentry_open调用def_chr_fops表中的open字段即本方法。
+ * inode-索引结点的地址
+ * filp-打开的文件指针
+ */
 static int chrdev_open(struct inode *inode, struct file *filp)
 {
 	struct cdev *p;
@@ -370,20 +436,35 @@ static int chrdev_open(struct inode *inode, struct file *filp)
 	int ret = 0;
 
 	spin_lock(&cdev_lock);
+	/**
+	 * 检查inode->i_cdev,如果不为空，表示inode结构已经被访问，则增加cdev的引用计数
+	 */
 	p = inode->i_cdev;
 	if (!p) {
 		struct kobject *kobj;
 		int idx;
 		spin_unlock(&cdev_lock);
+		/**
+		 * 调用kobj_lookup搜索包括该设备号在内的范围。
+		 */
 		kobj = kobj_lookup(cdev_map, inode->i_rdev, &idx);
+		/**
+		 * 该范围不存在，直接返回错误
+		 */
 		if (!kobj)
 			return -ENXIO;
+		/**
+		 * 范围存在，计算与该范围相对应的cdev描述符的地址。
+		 */
 		new = container_of(kobj, struct cdev, kobj);
 		spin_lock(&cdev_lock);
 		/* Check i_cdev again in case somebody beat us to it while
 		   we dropped the lock. */
 		p = inode->i_cdev;
 		if (!p) {
+			/**
+			 * inode没有被访问过，将找到的cdev描述符地址作为inode->i_cdev
+			 */
 			inode->i_cdev = p = new;
 			list_add(&inode->i_devices, &p->list);
 			new = NULL;
@@ -397,11 +478,20 @@ static int chrdev_open(struct inode *inode, struct file *filp)
 		return ret;
 
 	ret = -ENXIO;
+    /**
+     * 初始化文件操作指针
+     */
 	filp->f_op = fops_get(p->ops);
 	if (!filp->f_op)
 		goto out_cdev_put;
 
+	/**
+	 * 定义了open方法，就执行它。
+	 */
 	if (filp->f_op->open) {
+		/**
+		 * 如果设备驱动程序处理一个以上的设备号，则本函数一般会再次设置file的f_op
+		 */
 		ret = filp->f_op->open(inode,filp);
 		if (ret)
 			goto out_cdev_put;
@@ -411,6 +501,9 @@ static int chrdev_open(struct inode *inode, struct file *filp)
 
  out_cdev_put:
 	cdev_put(p);
+	/**
+	 * 成功完成了所有任务，返回0或者filp->f_op->open的结果
+	 */
 	return ret;
 }
 
@@ -477,6 +570,12 @@ static int exact_lock(dev_t dev, void *data)
  * cdev_add() adds the device represented by @p to the system, making it
  * live immediately.  A negative error code is returned on failure.
  */
+/**
+ * 在设备驱动程序模型中注册一个cdev描述符。
+ * 它初始化cdev描述符中的dev和count字段，然后调用kobj_map函数。
+ * kobj_map依次建立设备驱动程序模型的数据结构，把设备号范围复制到设备驱动程序的描述符中。
+ * count经常为1，但是也有特殊情况。如SCSI磁带驱动程序，它通常每个物理设备的多个次设备号允许用户空间选择不同的操作模式(如密度)
+ */
 int cdev_add(struct cdev *p, dev_t dev, unsigned count)
 {
 	p->dev = dev;
@@ -495,6 +594,9 @@ static void cdev_unmap(dev_t dev, unsigned count)
  *
  * cdev_del() removes @p from the system, possibly freeing the structure
  * itself.
+ */
+/**
+ * 从系统中移除一个字符设备。
  */
 void cdev_del(struct cdev *p)
 {
@@ -529,6 +631,9 @@ static struct kobj_type ktype_cdev_dynamic = {
  *
  * Allocates and returns a cdev structure, or NULL on failure.
  */
+/**
+ * 动态分配cdev描述符，并初始化内嵌的kobject数据结构。
+ */
 struct cdev *cdev_alloc(void)
 {
 	struct cdev *p = kzalloc(sizeof(struct cdev), GFP_KERNEL);
@@ -546,6 +651,9 @@ struct cdev *cdev_alloc(void)
  *
  * Initializes @cdev, remembering @fops, making it ready to add to the
  * system with cdev_add().
+ */
+/**
+ * 初始化cdev描述符。当cdev描述符是嵌入在其他结构中时，这是有用的方法。
  */
 void cdev_init(struct cdev *cdev, const struct file_operations *fops)
 {

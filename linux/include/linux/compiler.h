@@ -80,6 +80,10 @@ struct ftrace_branch_data {
     && !defined(DISABLE_BRANCH_PROFILING) && !defined(__CHECKER__)
 void ftrace_likely_update(struct ftrace_branch_data *f, int val, int expect);
 
+/**
+ *  GCC内建函数  __builtin_expect(exp,c) 其第一个参数 exp 为一个整型表达式，这个内建函数的返回值也是这个 exp ，而 c 为一个编译期常量。
+ * 这个函数的语义是：你期望 exp 表达式的值等于常量 c ，从而 GCC 为你优化程序，将符合这个条件的分支放在合适的地方
+ */
 #define likely_notrace(x)	__builtin_expect(!!(x), 1)
 #define unlikely_notrace(x)	__builtin_expect(!!(x), 0)
 
@@ -103,9 +107,16 @@ void ftrace_likely_update(struct ftrace_branch_data *f, int val, int expect);
  * value is always the same.  This idea is taken from a similar patch
  * written by Daniel Walker.
  */
+/**
+ * __builtin_constant_p 是编译器gcc内置函数，用于判断一个值是否为编译时常量，如果是常数，函数返回1 ，否则返回0。此内置函数的典型用法是在宏中用于手动编译时优化
+ * 引入了 likely 和 unlikely ，目的是增加条件分支预测的准确性，cpu 会提前装载后面的指令，遇到条件转移指令时会提前预测并装载某个分 支的指令。
+ * unlikely 表示你可以确认该条件是极少发生的，相反 likely 表示该条件多数情况下会发生。编译器会产生相应的代码来优化 cpu 执行效率。
+ */
+/*通常认为x为1，不会改变x的值  */
 # ifndef likely
 #  define likely(x)	(__builtin_constant_p(x) ? !!(x) : __branch_check__(x, 1))
 # endif
+/*通常认为x为0，不会改变x的值  */
 # ifndef unlikely
 #  define unlikely(x)	(__builtin_constant_p(x) ? !!(x) : __branch_check__(x, 0))
 # endif

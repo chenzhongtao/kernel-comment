@@ -409,6 +409,9 @@ EXPORT_SYMBOL(zero_fill_bio);
  *   Put a reference to a &struct bio, either one you have gotten with
  *   bio_alloc, bio_get or bio_clone. The last put of a bio will free it.
  **/
+/**
+ * bio_put函数减少bio中引用计数器（bi_cnt）的值，如果该值等于0，则释放bio结构以及相关的bio_vec结构
+ */
 void bio_put(struct bio *bio)
 {
 	BIO_BUG_ON(!atomic_read(&bio->bi_cnt));
@@ -1407,6 +1410,9 @@ void bio_check_pages_dirty(struct bio *bio)
  *   bio unless they own it and thus know that it has an end_io
  *   function.
  **/
+/**
+ * BIO上的IO操作完成时所执行回调函数，只有该bio上有数据传输就会调用此函数
+ */
 void bio_endio(struct bio *bio, int error)
 {
 	if (error)
@@ -1414,7 +1420,7 @@ void bio_endio(struct bio *bio, int error)
 	else if (!test_bit(BIO_UPTODATE, &bio->bi_flags))
 		error = -EIO;
 
-	if (bio->bi_end_io)
+	if (bio->bi_end_io)/* 回调bio的函数，做一些后继处理，如弹性缓冲区处理 */
 		bio->bi_end_io(bio, error);
 }
 EXPORT_SYMBOL(bio_endio);

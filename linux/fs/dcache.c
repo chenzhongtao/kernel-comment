@@ -38,11 +38,20 @@
 int sysctl_vfs_cache_pressure __read_mostly = 100;
 EXPORT_SYMBOL_GPL(sysctl_vfs_cache_pressure);
 
+/**
+ * 该锁保护目录项高速缓存数据结构免受多处理器系统上的同时访问。
+ */
  __cacheline_aligned_in_smp DEFINE_SPINLOCK(dcache_lock);
 __cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);
 
+/**
+ * 保护目录项高速缓存的锁。
+ */
 EXPORT_SYMBOL(dcache_lock);
 
+/**
+ * 用于分配dentry的slab分配器。
+ */
 static struct kmem_cache *dentry_cache __read_mostly;
 
 #define DNAME_INLINE_LEN (sizeof(struct dentry)-offsetof(struct dentry,d_iname))
@@ -60,6 +69,9 @@ static struct kmem_cache *dentry_cache __read_mostly;
 
 static unsigned int d_hash_mask __read_mostly;
 static unsigned int d_hash_shift __read_mostly;
+/**
+ * 目录项的散列表。它是一个指针数组，每个指针是一个具有相同散列值的dentry链表
+ */
 static struct hlist_head *dentry_hashtable __read_mostly;
 
 /* Statistics gathering. */
@@ -212,6 +224,9 @@ static struct dentry *d_kill(struct dentry *dentry)
  * no dcache lock, please.
  */
 
+/**
+ * 递减目录项缓存的引用计数
+ */
 void dput(struct dentry *dentry)
 {
 	if (!dentry)
@@ -220,9 +235,11 @@ void dput(struct dentry *dentry)
 repeat:
 	if (atomic_read(&dentry->d_count) == 1)
 		might_sleep();
+	/* 递减引用计数，如果引用计数不为1，则直接退出 */
 	if (!atomic_dec_and_lock(&dentry->d_count, &dcache_lock))
 		return;
 
+	/* 获取目录项的锁 */
 	spin_lock(&dentry->d_lock);
 	if (atomic_read(&dentry->d_count)) {
 		spin_unlock(&dentry->d_lock);
@@ -240,7 +257,9 @@ repeat:
 	/* Unreachable? Get rid of it */
  	if (d_unhashed(dentry))
 		goto kill_it;
+	/* 目前没有在lru链表中 */
   	if (list_empty(&dentry->d_lru)) {
+		/* 添加到未用lru链表中 */
   		dentry->d_flags |= DCACHE_REFERENCED;
 		dentry_lru_add(dentry);
   	}
@@ -249,6 +268,7 @@ repeat:
 	return;
 
 unhash_it:
+	/* 将缓存对象从散列表中移除 */
 	__d_drop(dentry);
 kill_it:
 	/* if dentry was on the d_lru list delete it from there */
@@ -417,11 +437,17 @@ restart:
  * quadratic behavior of shrink_dcache_parent(), but is also expected
  * to be beneficial in reducing dentry cache fragmentation.
  */
+/**
+ * 释放某个未用目录项高速缓存。
+ */
 static void prune_one_dentry(struct dentry * dentry)
 	__releases(dentry->d_lock)
 	__releases(dcache_lock)
 	__acquires(dcache_lock)
 {
+    /**
+     * 从目录项散列表中删除目录项对象。
+     */
 	__d_drop(dentry);
 	dentry = d_kill(dentry);
 
@@ -889,13 +915,35 @@ void shrink_dcache_parent(struct dentry * parent)
  *
  * In this case we return -1 to tell the caller that we baled.
  */
+/**
+ * 目录项高速缓存的shrinker函数。
+ * 它搜索高速缓存中的未用目录项对象，即没有被任何进程引用的目录项对象，然后将它们释放。
+ * 由于目录项高速缓存对象是通过slab分配器分配的，因此本函数可能导致一些slab变成空闲的，这样某些页框就可以被cache_reap回收。
+ * 另外，目录项高速缓存起索引节点高速缓存控制器的作用，因此，当一个目录项对象被释放时，存放相应索引节点对象的页也变成未用状态。
+ *		nr:			待回收的页框数。
+ *		gfp_mask:	GFP掩码。
+ */
 static int shrink_dcache_memory(int nr, gfp_t gfp_mask)
 {
+	/**
+	 * nr为0表示上层调用函数只需要知道可被释放的内存数量，不用进行真正的内存回收。
+	 */
 	if (nr) {
+		/**
+		 * 如果触发内存回收时，内存分配标志有__GFP_FS，就不进行目录项缓存回收。因为释放目录项可能会触发基于磁盘文件系统的操作。
+		 */
 		if (!(gfp_mask & __GFP_FS))
 			return -1;
+		/**
+		 * 进行有效的目录项页框回收。
+		 */
 		prune_dcache(nr);
 	}
+
+	/**
+	 * 返回值是未用目录项数 * sysctl_vfs_cache_pressure / 100
+	 * sysctl_vfs_cache_pressure的默认值是100。
+	 */
 	return (dentry_stat.nr_unused / 100) * sysctl_vfs_cache_pressure;
 }
 
@@ -914,6 +962,7 @@ static struct shrinker dcache_shrinker = {
  * copied and the copy passed in may be reused after this call.
  */
  
+/* 分配一个新的目录项缓存，并初始化它的字段 */
 struct dentry *d_alloc(struct dentry * parent, const struct qstr *name)
 {
 	struct dentry *dentry;
@@ -1002,7 +1051,10 @@ static void __d_instantiate(struct dentry *dentry, struct inode *inode)
  * (or otherwise set) by the caller to indicate that it is now
  * in use by the dcache.
  */
- 
+
+/**
+ * 将dentry实例与inode关联起来。
+ */
 void d_instantiate(struct dentry *entry, struct inode * inode)
 {
 	BUG_ON(!list_empty(&entry->d_alias));
@@ -1343,6 +1395,10 @@ err_out:
  * directory using the seqlockt_t rename_lock.
  */
 
+/**
+ * 在散列表中查找给定的父目录项对象和文件名。
+ * 这里采用的锁是顺序锁,__d_lookup与它类似，但是没有锁保护
+ */
 struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 {
 	struct dentry * dentry = NULL;
@@ -1357,11 +1413,15 @@ struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 	return dentry;
 }
 
+/**
+ * __d_lookup在目录项高速缓存中搜索分量的目录项对象.
+ */
 struct dentry * __d_lookup(struct dentry * parent, struct qstr * name)
 {
 	unsigned int len = name->len;
 	unsigned int hash = name->hash;
 	const unsigned char *str = name->name;
+	/* 通过parent的地址和hash(hash是name的哈希值)进行 */
 	struct hlist_head *head = d_hash(parent,hash);
 	struct dentry *found = NULL;
 	struct hlist_node *node;
@@ -1369,11 +1429,14 @@ struct dentry * __d_lookup(struct dentry * parent, struct qstr * name)
 
 	rcu_read_lock();
 	
+	/* 扫描head对应的碰撞溢出表  */
 	hlist_for_each_entry_rcu(dentry, node, head, d_hash) {
 		struct qstr *qstr;
 
+		/* name的hash值不相符，则放弃该dentry */
 		if (dentry->d_name.hash != hash)
 			continue;
+		/* 父目录不一样，则放弃该dentry */
 		if (dentry->d_parent != parent)
 			continue;
 
@@ -1395,18 +1458,24 @@ struct dentry * __d_lookup(struct dentry * parent, struct qstr * name)
 		 * It is safe to compare names since d_move() cannot
 		 * change the qstr (protected by d_lock).
 		 */
+		/* 当确保了父目录和文件名的哈希值与目标dentry的一致性后，接下来就只用匹配文件名了  */
 		qstr = &dentry->d_name;
+		/* 如果父目录文件系统定义了比较文件名的方法，则调用之 */
 		if (parent->d_op && parent->d_op->d_compare) {
 			if (parent->d_op->d_compare(parent, qstr, name))
 				goto next;
+		/* 如果没定义  */
 		} else {
+			/* 先确定长度是否相等 */
 			if (qstr->len != len)
 				goto next;
+			/* 再比较内存 */
 			if (memcmp(qstr->name, str, len))
 				goto next;
 		}
 
 		atomic_inc(&dentry->d_count);
+		/* 这里表明找到了目标dentry */
 		found = dentry;
 		spin_unlock(&dentry->d_lock);
 		break;
@@ -1503,7 +1572,10 @@ out:
  * Turn the dentry into a negative dentry if possible, otherwise
  * remove it from the hash queues so it can be deleted later
  */
- 
+
+/**
+ * 在确认dentry对象仍然包含在全局散列表中以后，调用__d_drop将其移除。
+ */
 void d_delete(struct dentry * dentry)
 {
 	int isdir = 0;

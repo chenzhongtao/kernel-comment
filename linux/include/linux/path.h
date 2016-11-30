@@ -3,7 +3,8 @@
 
 struct dentry;
 struct vfsmount;
-
+ 
+/* path由 文件系统安装点 和 目录项组成 */
 struct path {
 	struct vfsmount *mnt;
 	struct dentry *dentry;

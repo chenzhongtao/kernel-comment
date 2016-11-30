@@ -6,6 +6,11 @@
   See the file COPYING.
 */
 
+/**
+ * inode.c  主要完成fuse文件驱动模块的注册，提供对supper block的维护函数以及其它(驱动的组织开始文件)
+ */
+
+
 #include "fuse_i.h"
 
 #include <linux/pagemap.h>
@@ -1097,6 +1102,9 @@ static struct file_system_type fuseblk_fs_type = {
 	.fs_flags	= FS_REQUIRES_DEV | FS_HAS_SUBTYPE,
 };
 
+/**
+ * 注册fuseblk文件系统
+ */
 static inline int register_fuseblk(void)
 {
 	return register_filesystem(&fuseblk_fs_type);
@@ -1124,10 +1132,14 @@ static void fuse_inode_init_once(void *foo)
 	inode_init_once(inode);
 }
 
+/**
+ * 注册fuse文件系统，创建fuse_inode高速缓存。
+ */
 static int __init fuse_fs_init(void)
 {
 	int err;
 
+	/* 注册fuse文件系统*/
 	err = register_filesystem(&fuse_fs_type);
 	if (err)
 		goto out;
@@ -1154,6 +1166,9 @@ static int __init fuse_fs_init(void)
 	return err;
 }
 
+/**
+ * 注销fuse文件系统，释放fuse_inode高速缓存
+ */
 static void fuse_fs_cleanup(void)
 {
 	unregister_filesystem(&fuse_fs_type);
@@ -1164,6 +1179,9 @@ static void fuse_fs_cleanup(void)
 static struct kobject *fuse_kobj;
 static struct kobject *connections_kobj;
 
+/**
+ * 在/sys/fs目录下增加fuse节点，在fuse节点下增加connections节点
+ */
 static int fuse_sysfs_init(void)
 {
 	int err;
@@ -1188,12 +1206,18 @@ static int fuse_sysfs_init(void)
 	return err;
 }
 
+/**
+ * 移除fuse、connections节点
+ */
 static void fuse_sysfs_cleanup(void)
 {
 	kobject_put(connections_kobj);
 	kobject_put(fuse_kobj);
 }
 
+/**
+ * fuse 初始化函数
+ */
 static int __init fuse_init(void)
 {
 	int res;
@@ -1202,18 +1226,22 @@ static int __init fuse_init(void)
 	       FUSE_KERNEL_VERSION, FUSE_KERNEL_MINOR_VERSION);
 
 	INIT_LIST_HEAD(&fuse_conn_list);
+	/* 注册fuse文件系统，创建fuse_inode高速缓存。*/
 	res = fuse_fs_init();
 	if (res)
 		goto err;
 
+	/* 创建fuse_req高速缓存，加载fuse设备驱动，用于用户空间与内核空间交换信息 */
 	res = fuse_dev_init();
 	if (res)
 		goto err_fs_cleanup;
 
+	/* 在/sys/fs目录下增加fuse节点，在fuse节点下增加connections节点 */
 	res = fuse_sysfs_init();
 	if (res)
 		goto err_dev_cleanup;
 
+	/* 注册fuse控制文件系统 fusectl */
 	res = fuse_ctl_init();
 	if (res)
 		goto err_sysfs_cleanup;
@@ -1233,6 +1261,9 @@ static int __init fuse_init(void)
 	return res;
 }
 
+/**
+ * fuse内核模块被卸载时，执行对应的清理工作
+ */
 static void __exit fuse_exit(void)
 {
 	printk(KERN_DEBUG "fuse exit\n");

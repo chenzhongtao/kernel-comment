@@ -323,6 +323,7 @@ EXPORT_SYMBOL(fget);
  * and a flag is returned to be passed to the corresponding fput_light().
  * There must not be a cloning between an fget_light/fput_light pair.
  */
+ /*从fd中获取相应文件对象地址*/ 
 struct file *fget_light(unsigned int fd, int *fput_needed)
 {
 	struct file *file;
@@ -336,6 +337,7 @@ struct file *fget_light(unsigned int fd, int *fput_needed)
 		file = fcheck_files(files, fd);
 		if (file) {
 			if (atomic_long_inc_not_zero(&file->f_count))
+				/* 需要回收 */
 				*fput_needed = 1;
 			else
 				/* Didn't get the reference, someone's freed */

@@ -86,11 +86,29 @@ full_name_hash(const unsigned char *name, unsigned int len)
 #define DNAME_INLINE_LEN_MIN 40 /* 128 bytes */
 #endif
 
+/**
+ * 目录项对象描述符。它存放在名为dentry_cache的slab分配器高速缓存中。
+ */
 struct dentry {
+	/**
+	 * 目录项对象引用计数器
+	 */
 	atomic_t d_count;
+	/**
+	 * 目录项高速缓存标志:空闲状态，未使用状态，正在使用状态，负状态(如孤儿节点)
+	 */
 	unsigned int d_flags;		/* protected by d_lock */
+	/**
+	 * 保护该结构的自旋锁
+	 */
 	spinlock_t d_lock;		/* per dentry lock */
+	/**
+	 * 挂载的次数
+	 */
 	int d_mounted;
+	/**
+	 * 与文件名关联的索引结点
+	 */
 	struct inode *d_inode;		/* Where the name belongs to - NULL is
 					 * negative */
 	/*
@@ -98,22 +116,55 @@ struct dentry {
 	 * so they all fit in a cache line.
 	 */
 	struct hlist_node d_hash;	/* lookup hash list */
+	/**
+	 * 父目录的目录项对象
+	 */
 	struct dentry *d_parent;	/* parent directory */
+	/**
+	 * 文件名
+	 */
 	struct qstr d_name;
 
+	/**
+	 * 用于未使用目录项链表的指针
+	 * 添加到 dentry->d_sb->s_dentry_lru
+	 */
 	struct list_head d_lru;		/* LRU list */
 	/*
 	 * d_child and d_rcu can share memory
 	 */
 	union {
+		/**
+    	 * 对于目录而言，用于同一父目录中的目录项链表的指针
+    	 * 加到父目录的 d_subdirs
+    	 */
 		struct list_head d_child;	/* child of parent list */
 	 	struct rcu_head d_rcu;
 	} d_u;
+	/**
+	 * 子目录项链表的头
+	 */
 	struct list_head d_subdirs;	/* our children */
+	/**
+	 * 用于与同一索引结点相关的目录项链表的指针
+	 * 添加到inode->i_dentry
+	 */
 	struct list_head d_alias;	/* inode alias list */
+	/**
+	 * 由d_revalidate调用
+	 */
 	unsigned long d_time;		/* used by d_revalidate */
+	/**
+	 * 目录项方法
+	 */
 	const struct dentry_operations *d_op;
+	/**
+	 * 文件的超级块对象
+	 */
 	struct super_block *d_sb;	/* The root of the dentry tree */
+	/**
+	 * 依赖于文件系统的数据
+	 */
 	void *d_fsdata;			/* fs-specific data */
 
 	unsigned char d_iname[DNAME_INLINE_LEN_MIN];	/* small names */
@@ -131,12 +182,38 @@ enum dentry_d_lock_class
 	DENTRY_D_LOCK_NESTED
 };
 
+/**
+ * 目录项对象的操作方法
+ */
 struct dentry_operations {
+	/**
+	 * 在把目录项对象转换为一个文件路径名之前，判定该目录项对象是否仍然有效
+	 * VFS缺省是什么都不做。而网络文件系统可以指定自己的函数
+	 */
 	int (*d_revalidate)(struct dentry *, struct nameidata *);
+	/**
+	 * 生成一个散列值，这是用于目录项散列表的，特定于具体文件系统的散列函数。
+	 * dentry参数标识包含路径分量的目录。
+	 * 参数name指向一个结构，该结构包含要查找的路径分量及由散列函数生成的散列值
+	 */
 	int (*d_hash) (struct dentry *, struct qstr *);
+	/**
+	 * 比较两个文件名，name1应该属于dir所指的目录
+	 * 缺省的vfs是常用的字符串匹配函数。
+	 * 不过，每个文件系统可以用自己的方式实现这一方法，例如：ms_dos文件系统不区分大写和小写
+	 */
 	int (*d_compare) (struct dentry *, struct qstr *, struct qstr *);
+	/**
+	 * 当对目录项对象的最后一个引用被删除时(d_count==0)，调用该方法，缺省的vfs什么都不做
+	 */
 	int (*d_delete)(struct dentry *);
+	/**
+	 * 当要释放一个目录项对象时（放入slab分配器），调用该方法，缺省vfs什么都不做
+	 */
 	void (*d_release)(struct dentry *);
+	/**
+	 * 当目录项变成负状态时，调用本方法。缺省vfs调用iput释放索引结点对象
+	 */
 	void (*d_iput)(struct dentry *, struct inode *);
 	char *(*d_dname)(struct dentry *, char *, int);
 };
@@ -165,6 +242,7 @@ d_iput:		no		no		no       yes
 					 * renamed" and has to be
 					 * deleted on the last dput()
 					 */
+/* 没有连接到超级块的dentry树 */
 #define	DCACHE_DISCONNECTED 0x0004
      /* This dentry is possibly not currently connected to the dcache tree,
       * in which case its parent will either be itself, or will have this
@@ -178,7 +256,8 @@ d_iput:		no		no		no       yes
       */
 
 #define DCACHE_REFERENCED	0x0008  /* Recently used, don't discard. */
-#define DCACHE_UNHASHED		0x0010	
+/* dentry没有添加到哈希表中 */
+#define DCACHE_UNHASHED		0x0010
 
 #define DCACHE_INOTIFY_PARENT_WATCHED	0x0020 /* Parent inode is watched by inotify */
 
@@ -213,6 +292,7 @@ static inline void __d_drop(struct dentry *dentry)
 	}
 }
 
+/* 将目录项缓存从哈希表中移除 */
 static inline void d_drop(struct dentry *dentry)
 {
 	spin_lock(&dcache_lock);
@@ -270,7 +350,8 @@ extern void d_rehash(struct dentry *);
  * This adds the entry to the hash queues and initializes @inode.
  * The entry was actually filled in earlier during d_alloc().
  */
- 
+
+/* 将缓存项与inode关联起来，同时将它添加到全局散列表中 */
 static inline void d_add(struct dentry *entry, struct inode *inode)
 {
 	d_instantiate(entry, inode);
@@ -329,7 +410,10 @@ extern char *dentry_path(struct dentry *, char *, int);
  *	needs and they take necessary precautions) you should hold dcache_lock
  *	and call dget_locked() instead of dget().
  */
- 
+
+/**
+ * 添加目录项缓存结构的引用计数
+ */
 static inline struct dentry *dget(struct dentry *dentry)
 {
 	if (dentry) {
@@ -370,6 +454,7 @@ static inline struct dentry *dget_parent(struct dentry *dentry)
 
 extern void dput(struct dentry *);
 
+/* 返回目录项是否已挂载 */
 static inline int d_mountpoint(struct dentry *dentry)
 {
 	return dentry->d_mounted;
