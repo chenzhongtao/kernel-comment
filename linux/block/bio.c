@@ -1676,14 +1676,18 @@ void bio_check_pages_dirty(struct bio *bio)
 	}
 }
 
+// rw READ=0 and WRITE=1
 void generic_start_io_acct(int rw, unsigned long sectors,
 			   struct hd_struct *part)
 {
 	int cpu = part_stat_lock();
-
+    //增加time_in_queue和io_ticks
 	part_round_stats(cpu, part);
+    //读或写io次数加一
 	part_stat_inc(cpu, part, ios[rw]);
+    //增加读或写扇区数
 	part_stat_add(cpu, part, sectors[rw], sectors);
+    //增加读或写队列数
 	part_inc_in_flight(part, rw);
 
 	part_stat_unlock();
@@ -1695,9 +1699,11 @@ void generic_end_io_acct(int rw, struct hd_struct *part,
 {
 	unsigned long duration = jiffies - start_time;
 	int cpu = part_stat_lock();
-
+    // 增加读或写请求服务时间
 	part_stat_add(cpu, part, ticks[rw], duration);
+    //增加time_in_queue和io_ticks
 	part_round_stats(cpu, part);
+    //减少读或写队列数
 	part_dec_in_flight(part, rw);
 
 	part_stat_unlock();
