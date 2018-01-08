@@ -288,6 +288,7 @@ xfs_file_read_iter(
 	struct kiocb		*iocb,
 	struct iov_iter		*to)
 {
+    // dump_stack(); 调试
 	struct file		*file = iocb->ki_filp;
 	struct inode		*inode = file->f_mapping->host;
 	struct xfs_inode	*ip = XFS_I(inode);
@@ -373,8 +374,24 @@ xfs_file_read_iter(
 	}
 
 	trace_xfs_file_read(ip, size, pos, ioflags);
-
+    printk (KERN_NOTICE "generic_file_read_iter (%ld %ld %p)\n", ret, to->iov->iov_len,(char __user *)to->iov->iov_base);
+    // 读完地址会被修改
+    unsigned __user char * buf = (unsigned __user char*)to->iov->iov_base;
 	ret = generic_file_read_iter(iocb, to);
+    printk (KERN_NOTICE "generic_file_read_iter (%ld %ld %p)\n", ret, to->iov->iov_len,(char __user *)to->iov->iov_base);
+    int i=0;
+    for( i = 0; i < ret ; i = i + 512) {
+            if(buf[i] == 0xab) && buf[i+1] == 0x5a && buf[i+2] == 0xca && buf[i+3] == 0x7c) {
+                    //printk (KERN_NOTICE "file:%s error1001 offset:%d length:%d i:%d tryTimes:%d", offset, len(buf), i, tryTimes)
+                    printk (KERN_NOTICE "generic_file_read_iter error1001 (%ld %ld %p %d)\n", ret, to->iov->iov_len,buf,i);
+                    dump_stack();
+                    break;
+                    
+    
+            }
+            //printk (KERN_NOTICE "data (%x %x %x %x)\n", *(buf+i),*(buf+i+1),*(buf+i+2),*(buf+i+3));
+    }
+
 	if (ret > 0)
 		XFS_STATS_ADD(mp, xs_read_bytes, ret);
 
